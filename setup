@@ -8,7 +8,6 @@ set -euo pipefail
 
 WK_ROOT="$(cd "$(dirname "$0")" && pwd)"
 . "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
 
 STAGE=all
 export WK_DRY_RUN=""
@@ -63,8 +62,8 @@ run_stage() {
 }
 
 OS="$(wk_os)"
-CORES_DESC=$(describe_cores)
-MEM_MB=$(host_mem_mb)
+CORES_DESC=$(wk_py wk.resources --os "$(wk_os)" describe-cores)
+MEM_MB=$(wk_py wk.resources --os "$(wk_os)" host-mem-mb)
 info "wk-tools setup on $OS ($CORES_DESC, $MEM_MB MB)"
 
 _sudo_keepalive_pid=""   # `wk key sudo`'s 30-second window closes in the gaps between setup's privileged steps

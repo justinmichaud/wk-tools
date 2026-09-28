@@ -1,7 +1,6 @@
-"""lib/wk/lock.py: the same lock lib/common.sh's hold_lock takes -- one
-holder at a time, a dead holder broken, a live one waited for by the clock
-and given up on with the same words -- so a bash and a Python taker of one
-resource exclude each other.
+"""lib/wk/lock.py, the one lock (CLAUDE.md rule 4): one holder at a time, a
+lock that dies with its holder, a live holder waited for by the clock and
+given up on, and reporting commands that take none.
 
 Run: python3 tests/run.py -k tests.test_wk_lock
 """
@@ -9,13 +8,14 @@ import ast
 import io
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
 from unittest import mock
 
-from tests.support import REPO, bash
+from tests.support import REPO, run, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import machine, store  # noqa: E402
@@ -99,7 +99,7 @@ class TestOnTheFake(LockTest):
         self.assertEqual([p for p in self.fake.files if p != self.path], [])
         self.assertEqual(self.clock.slept, [])
 
-    def test_a_live_holder_is_waited_for_and_given_up_on_with_the_words_bash_uses(self):
+    def test_a_live_holder_is_waited_for_and_given_up_on(self):
         self.fake.dirs.add(os.path.dirname(self.path))
         self.fake.files[self.path] = DEAD
         self.fake.pids.add(4242)
@@ -165,11 +165,9 @@ class TestOnTheFake(LockTest):
         self.lock.hold("r")
         self.assertEqual(self.fake.files[self.path], self.lock.payload)
 
-    def test_holder_pid_reads_a_directory_lock_payload(self):
+    def test_holder_pid_of_a_directory_is_none(self):
         self.fake.dirs.add(self.path)
         self.assertIsNone(self.lock.holder_pid("r"))
-        self.fake.files[self.path + "/payload"] = DEAD
-        self.assertEqual(self.lock.holder_pid("r"), 4242)
 
     def test_a_breaker_left_by_a_dead_process_is_removed_and_a_live_one_is_waited_out(self):
         breaker = self.path + ".breaking"
@@ -244,33 +242,92 @@ class TestOnTheFake(LockTest):
         self.assertEqual(self.fake.files[self.path], DEAD)
 
 
-class TestAgainstBash(LockTest):
-    def setUp(self):
-        super().setUp()
-        self.lock = Lock(self.store, machine.Local(), FakeClock())
-        self.bash_env = {"WK_LOCK_DIR": self.store.lock_dir(), "HOME": self.tmp}
+HOLDER = """
+import os, sys, time
+sys.path.insert(0, %r)
+from wk.clock import Clock
+from wk.lock import Lock
+from wk.machine import Local
+from wk.store import Store
+lock = Lock(Store(os.environ), Local(), Clock())
+lock.hold(sys.argv[1], int(sys.argv[2]))
+mode = sys.argv[3]
+if mode == "count":
+    n = int(open(sys.argv[4]).read())
+    time.sleep(0.2)
+    open(sys.argv[4], "w").write(str(n + 1))
+elif mode == "hold":
+    print("held", flush=True)
+    time.sleep(60)
+elif mode == "exit":
+    sys.exit(7)
+""" % str(REPO / "lib")
 
-    def test_bash_reads_the_python_holder_and_is_excluded_by_it(self):
-        self.lock.hold("r")
-        self.assertEqual(os.readlink(self.path), self.lock.payload)
-        cp = bash('. "$WK_ROOT/lib/common.sh"; lock_holder_pid "$(_lock_path r)"; echo; hold_lock r -w 0',
-                  env=self.bash_env)
-        self.assertEqual(cp.stdout.strip(), str(os.getpid()), cp.stderr)
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("could not take the r lock within 0s -- pid %d still holds it" % os.getpid(), cp.stderr)
-        self.lock.release_all()
+
+class TestRealProcesses(LockTest):
+    """Takers in separate processes on this host, every lock under a scratch WK_LOCK_DIR."""
+
+    def spawn(self, resource, mode, *rest, timeout=20):
+        env = dict(os.environ, WK_LOCK_DIR=self.store.lock_dir(), HOME=self.tmp)
+        return subprocess.Popen([sys.executable, "-c", HOLDER, resource, str(timeout), mode] + list(rest),
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def test_a_lock_dies_with_its_holder(self):
+        p = self.spawn("r", "hold")
+        self.assertEqual(p.stdout.readline().strip(), "held")
+        self.assertTrue(self.path.startswith(self.store.lock_dir() + os.sep))
+        self.assertEqual(Lock(self.store, machine.Local(), FakeClock()).holder_pid("r"), p.pid)
+        p.kill()
+        p.communicate()
+        clock = FakeClock()
+        lock = Lock(self.store, machine.Local(), clock)
+        lock.hold("r", timeout=0)
+        self.assertEqual(os.readlink(self.path), lock.payload)
+        self.assertEqual(clock.slept, [])
+        lock.release_all()
+
+    def test_a_live_holder_in_another_process_keeps_the_lock(self):
+        p = self.spawn("r", "hold")
+        self.addCleanup(p.communicate)
+        self.addCleanup(p.kill)
+        self.assertEqual(p.stdout.readline().strip(), "held")
+        lock = Lock(self.store, machine.Local(), FakeClock())
+        err = self.stderr(lambda: self.assertRaises(Refused, lock.hold, "r", timeout=0))
+        self.assertIn("could not take the r lock within 0s -- pid %d still holds it" % p.pid, err)
+        self.assertEqual(lock.holding, [])
+
+    def test_takers_of_one_lock_one_at_a_time_past_a_dead_holder(self):
+        os.makedirs(self.store.lock_dir())
+        os.symlink(DEAD.replace("4242", "4194304"), self.path)
+        counter = os.path.join(self.tmp, "n")
+        with open(counter, "w") as f:
+            f.write("0")
+        takers = [self.spawn("r", "count", counter, timeout=60) for _ in range(4)]
+        for t in takers:
+            out, err = t.communicate(timeout=60)
+            self.assertEqual(t.returncode, 0, err)
+        with open(counter) as f:
+            self.assertEqual(f.read(), "4")
+        self.assertEqual(os.listdir(self.store.lock_dir()), [])
+
+    def test_a_holder_that_exits_releases_the_lock_and_keeps_its_status(self):
+        p = self.spawn("r", "exit")
+        p.communicate(timeout=20)
+        self.assertEqual(p.returncode, 7)
         self.assertFalse(os.path.lexists(self.path))
 
-    def test_python_reads_a_bash_holder_and_breaks_it_once_dead(self):
-        cp = bash('. "$WK_ROOT/lib/common.sh"; hold_lock r; _WK_LOCK_HELD=""; echo $$', env=self.bash_env)
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        dead = int(cp.stdout.strip())
-        self.assertRegex(os.readlink(self.path), PAYLOAD)
-        self.assertEqual(self.lock.holder_pid("r"), dead)
-        self.lock.hold("r")
-        self.assertEqual(os.readlink(self.path), self.lock.payload)
-        self.assertEqual(sorted(os.listdir(self.store.lock_dir())), [os.path.basename(self.path)])
-        self.lock.release_all()
+
+class TestReportingCommandsTakeNoLock(unittest.TestCase):
+    """CLAUDE.md rule 6: a reporting command takes no lock."""
+
+    def test_status_and_ls_take_no_lock(self):
+        # --no-fleet: a bare `wk status` walks the fleet over ssh, which is not what this asks.
+        with scratch_dir(prefix="wk-test-lock-") as d:
+            lockdir = d / "locks"
+            run("status", "--no-fleet", env={"WK_LOCK_DIR": str(lockdir)}, timeout=60)
+            run("ls", env={"WK_LOCK_DIR": str(lockdir)}, timeout=60)
+            left = list(lockdir.glob("*")) if lockdir.exists() else []
+            self.assertEqual(left, [], "'wk status'/'wk ls' left a lock behind: %s" % left)
 
 
 if __name__ == "__main__":

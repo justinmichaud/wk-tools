@@ -151,11 +151,6 @@ def merge(records):
     return merger.doc
 
 
-def read_doc(path):
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        return merge(records_from_lines(fh))
-
-
 GOOD = ("ok", "present", "running", "host mode", "up", "bench", "open", "complete")
 BUSY = ("creating", "starting", "building", "fixing", "no", "empty", "held", "silent", "base", "role")
 BAD = ("unhealthy", "incomplete", "died", "unanswered", "failed", "oom", "stalled", "broken",
@@ -379,18 +374,17 @@ def render_task(wr, t, colour):
         wr.out.append("      " + paint("log:  %s" % t["log"], "dim", colour))
 
 
-def column_widths(machines):
+def column_widths(m):
     w = [len(h) for h in COLUMNS]
-    for m in machines:
-        for g in m["methods"]:
-            for ws in g["workspaces"]:
-                for i, c in enumerate(ws_cells(ws)):
-                    w[i] = max(w[i], len(c))
+    for g in m["methods"]:
+        for ws in g["workspaces"]:
+            for i, c in enumerate(ws_cells(ws)):
+                w[i] = max(w[i], len(c))
     return w
 
 
-def render_machine_block(m, colour, widths=None):
-    w = widths if widths is not None else column_widths([m])
+def render_machine_block(m, colour):
+    w = column_widths(m)
     wr = Writer(colour)
     out = wr.out
     wr.heading(m["name"], "this machine" if m.get("self") else "")
@@ -579,19 +573,6 @@ def self_line(doc, colour):
     if not f:
         return None
     return self_line_text(name, f.get("role", "?"), f.get("mode", "?"), colour)
-
-
-def render_text(doc, colour):
-    out = []
-    lead = self_line(doc, colour)
-    if lead:
-        out.append(lead)
-    w = column_widths(doc["machines"])
-    for m in doc["machines"]:
-        out.extend(render_machine_block(m, colour, w))
-    out.extend(render_fleet_and_bridges(doc, colour))
-    out.append("")
-    return "\n".join(out)
 
 
 def render_text_stream(records, out, colour):
@@ -808,7 +789,7 @@ function subText(s) {
   return out;
 }
 // How a machine is reached and where it was declared -- calculated, never
-// stored (lib/reach.sh), and shown faint: it is what somebody wants when
+// stored (lib/wk/reach.py), and shown faint: it is what somebody wants when
 // something above it is wrong.
 function meta(o) {
   const rows = [];
@@ -864,7 +845,7 @@ function tiles(m) {
     }
     const hue = loadHue(c.load, c.cores), pct = (parseFloat(c.load) / parseInt(c.cores,10)) * 100;
     // A remote target's free memory has no total beside it (t_mem_mb there
-    // is MemAvailable, not a size, targets/remote.sh) -- print one only when
+    // is MemAvailable, not a size, lib/wk/targets.py's Remote) -- print one only when
     // there is one.
     const free = c.mem_mb ? `${GB(c.free_mb)} free of ${GB(c.mem_mb)}` : `${GB(c.free_mb)} free`;
     t.push(tile(label,

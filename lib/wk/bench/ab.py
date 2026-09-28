@@ -21,7 +21,7 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 RELEASE_OF = re.compile(r"^(wpe-|webkitglib/)([0-9]+\.[0-9]+)$")
 ROUNDS, PLAN = "5", "speedometer3"
-SLOTS = 'for s in /var/wk/slots/*/slot.json; do [ -f "$s" ] && basename "$(dirname "$s")"; done 2>/dev/null; true'
+SLOTS = 'for s in %s/*/slot.json; do [ -f "$s" ] && basename "$(dirname "$s")"; done 2>/dev/null; true' % board.SLOTS_DIR
 USAGE = ("usage: wk bench ab <pr-spec|branch|sha> --devices <a,b> [--release X.Y] [--builder B] [--bits N] [--base <sha>]\n"
          "           [--build-on <a[,b]>] [--plan P]... [--rounds N] [--count N] [--timeout S] [--detach]\n"
          "       wk bench ab --systems A,B --devices <board> [--slot S] [--plan P]... [--rounds N]\n"
@@ -41,12 +41,12 @@ def legs_per_plan(rounds, systems):
     return 2 + rounds * (4 if systems else 2)
 
 
-def leg_seconds(bench_dir, device, plan, count):
+def leg_seconds(store, device, plan, count):
     """Every measured leg of `plan` on `device` in this store, as seconds at `count` iterations: a leg at another
     count scales by the ratio, and one at the plan's own default count stands only for that default."""
     out = []
-    for t in record.tasks(bench_dir):
-        for r in record.task_runs(os.path.join(bench_dir, t)):
+    for taskdir in record.homes(store).values():
+        for r in record.task_runs(taskdir):
             e = r["env"]
             if e.get("machine") != device or e.get("plan") != plan or r["state"] != "ok" or "wall_time_s" not in e:
                 continue
@@ -81,7 +81,7 @@ def duration(seconds):
 class Device:
     def __init__(self, name, profile, p):
         self.name, self.profile, self.p = name, profile, p
-        self.lanes, self.mode, self.slots = [], "unreachable", []
+        self.arm_ws, self.mode, self.slots = [], "unreachable", []
 
     @property
     def pgo(self):
@@ -105,10 +105,9 @@ class AB:
         self.boards, self.bench, self.pool, self.popen = boards or self.board_state, bench or self.board_ab, pool, popen
         self.lock = Lock(self.store, self.here, clock)
         self.wk = os.path.join(self.root, "wk")
-        self.bench_dir = self.store.bench_dir()
         self.systems = bool(self.o.get("systems"))
         self.task = self.o.get("task") or ""
-        self.taskdir = os.path.join(self.bench_dir, self.task) if self.task else ""
+        self.taskdir = record.homes(self.store).get(self.task, "") if self.task else ""
         self.me = progress.machine_name(self.env, self.here)
         self.devices, self.arms, self.pr, self._base_branch = [], [], {}, None
         self.head = self.base = self.head_desc = self.base_how = self.branch = ""
@@ -126,8 +125,8 @@ class AB:
         self.max_rounds, self.detect = board_ab.stopping(o, self.rounds)
         if o.get("detach") and act.dry_run():
             die("--detach and --dry-run: a dry run has nothing to detach")
-        if self.task and not os.path.isfile(os.path.join(self.taskdir, "task.json")):
-            die("no such task '%s' (%s has no task.json); 'wk bench ls' lists the tasks" % (self.task, self.taskdir))
+        if self.task and not self.taskdir:
+            die("no such task '%s' in this machine's store; 'wk bench ls' lists the tasks" % self.task)
         if o.get("bits") not in (None, "", "32", "64"):
             die("--bits takes 32 or 64 (got '%s')" % o["bits"])
         if self.systems:
@@ -318,52 +317,52 @@ class AB:
                     "    The machines here: %s" % (m, " ".join(known) or "none"))
         return (names + names)[:2] if names else ["", ""]
 
-    def resolve_lanes(self):
+    def resolve_arm_ws(self):
         on = self.build_on()
         pr_slot = "pr" + self.pr["n"] if self.pr.get("n") else "pr"
         self.arms = [("", "base"), ("", pr_slot)]
         for d in self.devices:
-            lane = images.image_ws(d.profile, self.env)
+            ws = images.image_ws(d.profile, self.env)
             for named in on:
                 try:
-                    where = images.ws_machine(named, "" if named else self.reg.ws_target(lane), self.me)
+                    where = images.ws_machine(named, "" if named else self.reg.ws_target(ws), self.me)
                 except LookupError as e:
                     die(str(e))
                 target = named if named and named != self.me else ""
-                d.lanes.append((lane, "%s@%s" % (d.profile, named) if named else d.profile, where, target))
+                d.arm_ws.append((ws, "%s@%s" % (d.profile, named) if named else d.profile, where, target))
 
-    def holds(self, spec, lane, *rest):
-        return sched.wk_yes(self.here, [self.wk, "sysimage", "holds", spec, "--workspace", lane] + list(rest))
+    def holds(self, spec, ws, *rest):
+        return sched.wk_yes(self.here, [self.wk, "sysimage", "holds", spec, "--workspace", ws] + list(rest))
 
     def wk_step(self, sid, on, needs, holds, done, words, target=""):
         self.logged.add(sid)
         return sched.wk_step(self.here, self.wk, lambda s: os.path.join(self.taskdir, sched.log_name(s)), sid, on, needs, holds,
-                             done, words, target)
+                             done, words, target, env=["WK_TASK_HELD=" + self.task] if self.task else [])
 
-    def pgo_steps(self, d, lane, spec, on, target, commit, slot, need):
-        return pgo.steps(self.wk_step, self.holds, d.name, lane, spec, on, target, commit, slot, (need,))
+    def pgo_steps(self, d, ws, spec, on, target, commit, slot, need):
+        return pgo.steps(self.wk_step, self.holds, d.name, ws, spec, on, target, commit, slot, (need,))
 
     def build_steps(self, d, imaged):
         out = []
         for a, (_, slot) in enumerate(self.arms):
             commit = self.head if a else self.base
-            lane, spec, on, target = d.lanes[a]
-            key, res = "%s@%s" % (lane, on), images.build_resource(on)
+            ws, spec, on, target = d.arm_ws[a]
+            key, res = "%s@%s" % (ws, on), images.build_resource(on)
             built = ("toolchain:" if d.sdk else "image:") + key
             if key not in imaged:
                 imaged.add(key)
-                out.append(self.wk_step("image:" + key, on, (), (res,), self.holds(spec, lane),
-                                        ["sysimage", "build", spec, "--workspace", lane]))
+                out.append(self.wk_step("image:" + key, on, (), (res,), self.holds(spec, ws),
+                                        ["sysimage", "build", spec, "--workspace", ws]))
                 if d.sdk:   # the nativesdk stack does not fit the webkit stage's booking, so the SDK is machine-sized and its own step
-                    out.append(self.wk_step("toolchain:" + key, on, ("image:" + key,), (res,), self.holds(spec, lane, "--toolchain"),
-                                            ["sysimage", "build", spec, "--workspace", lane, "--stage", "toolchain"]))
+                    out.append(self.wk_step("toolchain:" + key, on, ("image:" + key,), (res,), self.holds(spec, ws, "--toolchain"),
+                                            ["sysimage", "build", spec, "--workspace", ws, "--stage", "toolchain"]))
             if d.pgo:
-                out += self.pgo_steps(d, lane, spec, on, target, commit, slot, built)
+                out += self.pgo_steps(d, ws, spec, on, target, commit, slot, built)
             else:
-                out.append(self.wk_step("slot:%s:%s" % (lane, slot), on, (built,), (res,), self.holds(spec, lane, "--slot", slot, "--commit", commit),
-                                        ["sysimage", "webkit", spec, "--workspace", lane, "--commit", commit, "--slot", slot]))
-            out.append(self.wk_step("deploy:%s:%s" % (d.name, slot), on, ("slot:%s:%s" % (lane, slot),), ("device:" + d.name,), None,
-                                    ["bench", "deploy", lane, d.name, "--slot", slot], target))
+                out.append(self.wk_step("slot:%s:%s" % (ws, slot), on, (built,), (res,), self.holds(spec, ws, "--slot", slot, "--commit", commit),
+                                        ["sysimage", "webkit", spec, "--workspace", ws, "--commit", commit, "--slot", slot]))
+            out.append(self.wk_step("deploy:%s:%s" % (d.name, slot), on, ("slot:%s:%s" % (ws, slot),), ("device:" + d.name,), None,
+                                    ["bench", "deploy", ws, d.name, "--slot", slot], target))
         return out
 
     def steps(self):
@@ -388,7 +387,7 @@ class AB:
         a, b = self.arms
         if self.systems:
             return d.name, dict(o, ab_systems="%s,%s" % (a[0], b[0]), slot=a[1])
-        return d.lanes[0][0], dict(o, ab="%s,%s" % (a[1], b[1]))
+        return d.arm_ws[0][0], dict(o, ab="%s,%s" % (a[1], b[1]))
 
     def bench_command(self, d, plan):
         ws, o = self.bench_options(d)
@@ -416,12 +415,14 @@ class AB:
         return 0
 
     def board_state(self, name):
-        """(mode, slots): what the board answers it is running now, and the slots its bench system holds."""
+        """(mode, slots): what the board answers it is running now, and the slots its bench system holds.
+        A config problem (an unresolvable name, a malformed conf) is refused by name, not folded into
+        'unreachable' -- only the ssh round trip to a board already probed as reachable is that."""
+        s = board.for_board(self.root, self.reg, "", self.clock, name)
+        mode = s.driver.probe()
+        if not mode.startswith("bench "):
+            return mode, []
         try:
-            s = board.for_board(self.root, self.reg, "", self.clock, name)
-            mode = s.driver.probe()
-            if not mode.startswith("bench "):
-                return mode, []
             return mode, s.bench().run(["sh", "-c", SLOTS]).out.replace("\r", "").split()
         except Refused:
             return "unreachable", []
@@ -432,7 +433,7 @@ class AB:
         for d in self.devices:
             for plan in self.plans:
                 legs = legs_per_plan(self.rounds, self.systems)
-                seen = leg_seconds(self.bench_dir, d.name, plan, self.o.get("count") or "")
+                seen = leg_seconds(self.store, d.name, plan, self.o.get("count") or "")
                 out[(d.name, plan)] = (legs, legs * statistics.median(seen) if seen else None, len(seen))
         return out
 
@@ -485,8 +486,8 @@ class AB:
         for d in self.devices:
             log("  %s: %s" % (d.name, "board %s" % d.mode if self.systems else "image %s" % d.profile))
             if not self.systems:
-                for (_, slot), (lane, _, on, _) in zip(self.arms, d.lanes):
-                    log("        lane %-7s %s on %s" % (slot, lane, on))
+                for (_, slot), (ws, _, on, _) in zip(self.arms, d.arm_ws):
+                    log("        slot %-7s %s on %s" % (slot, ws, on))
                 log("        board      %s%s" % (d.mode, "  (slots there: %s)" % (" ".join(d.slots) or "none") if d.booted()
                                                   else "  <-- not booted into %s" % d.profile))
                 log("        build      %s" % ("profile-guided: each slot is instrument, collect on %s, rebuild -- so %s has to be in this "
@@ -517,7 +518,7 @@ class AB:
         stamp = self.clock.stamp()
         self.task = ("%s-%s-systems" % (stamp, self.devices[0].name) if self.systems
                      else "%s-%s-pr%s" % (stamp, self.pr["remote"], self.pr["n"]) if self.pr.get("n") else "%s-%s" % (stamp, self.head[:12]))
-        self.taskdir = os.path.join(self.bench_dir, self.task)
+        self.taskdir = record.home_for(self.store, "", self.task)
         if os.path.exists(self.taskdir):
             die("task %s already exists (%s); a task is one request, made once" % (self.task, self.taskdir))
         self.lock.hold("bench-task-" + self.task, timeout=5)
@@ -532,7 +533,8 @@ class AB:
             devices = ",".join("%s=%s" % (d.name, d.profile) for d in self.devices)
         record.task_write(self.taskdir, ["task=" + self.task, "requested=" + self.clock.iso(), "devices=" + devices, "plans=" + ",".join(self.plans),
                                          "rounds=%d" % self.rounds, "slots=" + ",".join(dict.fromkeys(s for _, s in self.arms))] + subj
-                          + ["%s=%s" % (k, self.o[k]) for k in ("count", "timeout") if self.o.get(k)], [" ".join(["wk"] + self.argv()[1:])])
+                          + ["%s=%s" % (k, self.o[k]) for k in ("count", "timeout") if self.o.get(k)]
+                          + ["restart=%s --task %s" % (" ".join(["wk"] + self.argv()[1:]), self.task)], [" ".join(["wk"] + self.argv()[1:])])
 
     def resolve(self):
         self.check()
@@ -540,7 +542,7 @@ class AB:
             self.resolve_head()
             self.resolve_devices(self.release())
             self.resolve_base()
-            self.resolve_lanes()
+            self.resolve_arm_ws()
         else:
             board.require_board(self.root, self.env, self.o["devices"])
             self.devices.append(Device(self.o["devices"], "", images.FIELDS))
@@ -611,15 +613,15 @@ class AB:
         return 0
 
     def verify(self):
-        """Both slots are what the A/B names after the builds, asked of the machine holding each lane."""
+        """Both slots are what the A/B names after the builds, asked of the machine holding each arm's workspace."""
         if self.systems:
             return
         for d in self.devices:
             for a, (_, slot) in enumerate(self.arms):
-                lane, spec = d.lanes[a][:2]
-                if not self.holds(spec, lane, "--slot", slot, "--commit", self.head if a else self.base)():
+                ws, spec = d.arm_ws[a][:2]
+                if not self.holds(spec, ws, "--slot", slot, "--commit", self.head if a else self.base)():
                     die("%s does not hold slot '%s' at %s after the builds (wk sysimage ls), so what ran was not the pair\n"
-                        "    this A/B names. Do not take the report as it stands." % (lane, slot, (self.head if a else self.base)[:12]))
+                        "    this A/B names. Do not take the report as it stands." % (ws, slot, (self.head if a else self.base)[:12]))
 
 
 def kill(reg, clock, task):
@@ -634,15 +636,15 @@ def kill(reg, clock, task):
     if not job.kill(None, task, t, "cancelled", reg.machine, clock, reg.env):
         die("pid %s outlived a TERM and a KILL (ps -p %s); the record says cancelled, the process does not" % (t.field("pid"), t.field("pid")))
     info("cancelled. The rounds it recorded stay in %s ('wk bench report %s');\n    re-running with --task %s takes up what is left."
-         % (os.path.join(reg.store.bench_dir(), task), task, task))
+         % (record.homes(reg.store).get(task) or "this machine's store", task, task))
     return 0
 
 
 def machine_kind(root, env, name):
     try:
-        return (fleet.Fleet(root, env).load(name) or {}).get("KIND", "")
-    except fleet.ConfError:
-        return ""
+        return (fleet.Fleet(root, env).load(name) or {}).get("kind", "")
+    except fleet.ConfError as e:
+        die(str(e))
 
 
 def run(root, reg, clock, spec, o, kill_it=False):

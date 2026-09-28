@@ -3,7 +3,6 @@ media, armed by one byte of the bench medium's partition table, whose image
 parks that medium and reboots unless claimed -- as systemd units on yocto and
 as BusyBox init scripts on buildroot, from one string."""
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -13,54 +12,45 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "lib"))
 
-from wk.boot.driver import disk_of  # noqa: E402
+from wk.boot.cli import load_conf  # noqa: E402
+from wk.boot.driver import disk_of, part, partno  # noqa: E402
 from wk.boot.pi import PiMbr  # noqa: E402
-from wk.machine import Result  # noqa: E402
+from wk.machine import Fake, Result  # noqa: E402
+from wk.reach import Reach  # noqa: E402
 
 
-def bash(script, env=None):
-    e = dict(os.environ)
-    e.update(env or {})
-    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=e)
+ENV = {"WK_ROOT": str(REPO), "WK_MACHINES_DIR": str(REPO / "machines")}
 
 
-LOAD = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/image/profiles.sh"
-. "{REPO}/boot/machines.sh"
-. "{REPO}/boot/disk.sh"
-'''
+def rpi4():
+    return load_conf(REPO, "rpi4", ENV)
 
 
 class TestDiskOfPart(unittest.TestCase):
     def test_partition_to_disk_for_every_transport(self):
-        """disk_of_part inverts disk_part for sd, mmc and nvme names"""
-        cp = bash(LOAD + '''
-for pair in "/dev/sda2 /dev/sda" "/dev/mmcblk0p2 /dev/mmcblk0" "/dev/nvme0n1p2 /dev/nvme0n1" "/dev/sdb1 /dev/sdb"; do
-    set -- $pair
-    got=$(disk_of_part "$1"); [ "$got" = "$2" ] || { echo "disk_of_part $1 = $got, want $2"; exit 1; }
-    back=$(disk_part "$got" "${1##*[!0-9]}"); [ "$back" = "$1" ] || { echo "disk_part $got = $back, want $1"; exit 1; }
-done
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        """disk_of inverts part for sd, mmc and nvme names"""
+        for p, disk in (("/dev/sda2", "/dev/sda"), ("/dev/mmcblk0p2", "/dev/mmcblk0"),
+                        ("/dev/nvme0n1p2", "/dev/nvme0n1"), ("/dev/sdb1", "/dev/sdb")):
+            with self.subTest(part=p):
+                self.assertEqual(disk_of(p), disk)
+                self.assertEqual(part(disk, partno(p)), p)
 
 
 class TestRpi4Arrangement(unittest.TestCase):
     def test_rpi4_bench_medium_is_the_usb_drive_and_the_rescue_is_the_sd(self):
-        """rpi4.conf: NODE_DEVICE is the USB drive, NODE_ROOT is on the SD
+        """rpi4.conf: device is the USB drive, root is on the SD
         card. The driver is pi-tryboot (tests/test_pi_tryboot.py): the
         bootloader will not MSD-boot the drive there, so pi-mbr's arrangement
         is exercised here with the conf's media and the driver loaded directly."""
-        cp = bash(LOAD + 'machine_load rpi4; echo "$NODE_DRIVER $NODE_DEVICE $NODE_ROOT"')
-        self.assertEqual(cp.stdout.strip(), "pi-tryboot /dev/sda /dev/mmcblk0p2", cp.stdout + cp.stderr)
+        c = rpi4()
+        self.assertEqual((c["driver"], c["device"], c["root"]), ("pi-tryboot", "/dev/sda", "/dev/mmcblk0p2"))
 
     def test_media_and_reprovision_name_the_media_from_the_conf(self):
         """media and reprovision name each medium from the conf, whichever way round it is declared"""
         for dev, root, bench, rescue in (("/dev/sda", "/dev/mmcblk0p2", "USB stick", "SD card"),
                                           ("/dev/mmcblk0", "/dev/sda2", "SD card", "USB stick")):
             with self.subTest(dev=dev):
-                conf = {"NODE_NAME": "rpi4", "NODE_DEVICE": dev, "NODE_ROOT": root, "NODE_PROFILE": "p"}
+                conf = {"name": "rpi4", "device": dev, "root": root, "profile": "p"}
                 d = PiMbr(REPO, conf, None, mode="bench x-1")
                 self.assertIn(f"booted from its {bench}", d.media())
                 self.assertIn(f"the {rescue} is the rescue", d.media())
@@ -70,9 +60,7 @@ class TestRpi4Arrangement(unittest.TestCase):
 
 class TestSelfDisarm(unittest.TestCase):
     def _disarm(self):
-        cp = bash(LOAD + 'machine_load rpi4; load_driver pi-mbr; b_self_disarm_sh')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout
+        return PiMbr(REPO, rpi4(), None).self_disarm_sh()
 
     def test_disarm_is_posix_sh_without_util_linux(self):
         """parses under sh -n, reads /proc and /sys only, no findmnt or lsblk, no single quote"""
@@ -118,23 +106,14 @@ class TestSelfDisarm(unittest.TestCase):
 
 class TestWithoutTailnet(unittest.TestCase):
     def test_without_tailscale_says_nothing_for_a_board_on_the_tailnet_by_role_name(self):
-        """reach_without_tailnet is silent when NODE_SSH or NODE_BENCH_SSH is a node"""
-        for peers in ("rpi4-rescue\t100.1.1.1\tup\n", "rpi4-bench\t100.1.1.2\tup\n"):
-            cp = bash(f'''
-. "{REPO}/lib/common.sh"; . "{REPO}/lib/reach.sh"
-wk_tailscale_peers() {{ printf '%s' "$PEERS"; }}
-reach_without_tailnet rpi4
-''', env={"PEERS": peers, "WK_ROOT": str(REPO)})
-            self.assertEqual(cp.returncode, 0, cp.stderr)
-            self.assertEqual(cp.stdout, "", f"said {cp.stdout!r} with peers {peers!r}")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        """without_tailnet is silent when ssh or bench_ssh is a node"""
+        for peers in ([("rpi4-rescue", "100.1.1.1", "up")], [("rpi4-bench", "100.1.1.2", "up")]):
+            with self.subTest(peers=peers):
+                self.assertEqual(Reach(Fake(), ENV, peers=peers).without_tailnet("rpi4"), "")
 
 
 class TestBootPartFollowsTheMedium(unittest.TestCase):
-    """the boot partition is on the medium the board resolves (the disk model's own_or_declared), not NODE_DEVICE's
+    """the boot partition is on the medium the board resolves (the disk model's own_or_declared), not device's
     name: with another USB disk enumerating first, the stick is sdb."""
 
     def test_boot_part_uses_the_resolved_disk(self):
@@ -142,5 +121,9 @@ class TestBootPartFollowsTheMedium(unittest.TestCase):
             def call(self, fn, *args, **kw):
                 lsblk = '{"blockdevices": [{"name": "/dev/sdb", "type": "disk", "rm": true, "tran": "usb"}]}'
                 return Result(0, lsblk) if fn == "m_ssh" else Result(1)
-        d = PiMbr(REPO, {"NODE_NAME": "rpi4", "NODE_DEVICE": "/dev/sda"}, Ch())
+        d = PiMbr(REPO, {"name": "rpi4", "device": "/dev/sda"}, Ch())
         self.assertEqual(d.boot_part(), "/dev/sdb1")
+
+
+if __name__ == "__main__":
+    unittest.main()

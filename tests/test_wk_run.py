@@ -81,8 +81,8 @@ class TestFindsBinaryOnEveryPort(unittest.TestCase):
                 cfg = buildconf.resolve(name, os_name, kind, {})
                 with mock.patch.object(RUN.targets, "Registry", return_value=reg), \
                         mock.patch.object(RUN, "exec_into"), \
-                        mock.patch.dict(os.environ, {"WK_NAME": "ws"}):
-                    RUN.main(["--config", name, "--", "x.js"])
+                        mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_CONFIG": name}):
+                    RUN.main(["--", "x.js"])
                 call_args = target.exec_argv.call_args[0]
                 cmd = call_args[1][2]
                 self.assertIn('export %s="%s' % (cfg.run_var(), cfg.run_dir("/src/WebKit")), cmd)
@@ -109,9 +109,24 @@ class TestLldbGetsAPty(unittest.TestCase):
         reg.load.return_value = target
         with mock.patch.object(RUN.targets, "Registry", return_value=reg), \
                 mock.patch.object(RUN, "exec_into"), \
-                mock.patch.dict(os.environ, {"WK_NAME": "ws"}):
-            RUN.main(["--config", "gtk-release"] + argv)
+                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_CONFIG": "gtk-release"}):
+            RUN.main(argv)
         return target.exec_argv.call_args
+
+    def test_a_dry_run_prints_the_command_and_runs_nothing(self):
+        """`wk run --dry-run`: the exec goes through act, which prints it and ends the run"""
+        target = self._target()
+        target.exec_argv.return_value = (["ssh", "box", "bash -lc 'jsc x.js'"], None)
+        reg = mock.Mock()
+        reg.load.return_value = target
+        err = io.StringIO()
+        with mock.patch.object(RUN.targets, "Registry", return_value=reg), \
+                mock.patch("os.execvp", side_effect=AssertionError("ran it")), \
+                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_CONFIG": "gtk-release", "WK_DRY_RUN": "1"}), \
+                contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+            RUN.main(["--", "x.js"])
+        self.assertEqual(cm.exception.code, 0)
+        self.assertIn("would run: ssh box 'bash -lc '\"'\"'jsc x.js'\"'\"''", err.getvalue())
 
     def test_direct_lldb_asks_for_a_tty(self):
         target = self._target()

@@ -115,7 +115,7 @@ class _Login(WkTest):
 
     def setUp(self):
         super().setUp()
-        # wk_secrets_dir (lib/store.sh) reads WK_HOST_SECRETS on a macOS host
+        # Store.secrets_dir reads WK_HOST_SECRETS on a macOS host
         # and $WK_STORE/secrets everywhere else; one directory under both names.
         self.store = self.tmp / "store"
         self.secrets = self.store / "secrets"
@@ -565,7 +565,7 @@ class TestNothingElseLearnedTheShape(unittest.TestCase):
         self.assertIn('"CLAUDE_CONFIG_DIR=" + d, "CLAUDE_SECURESTORAGE_CONFIG_DIR=" + d, "claude"', self.KEY)
 
     def test_no_other_file_names_the_keychain_item(self):
-        for f in ("cmd/ai", "lib/wk/wall.py", "lib/store.sh", "targets/vm.sh",
+        for f in ("cmd/ai", "lib/wk/wall.py", "lib/wk/secrets.py", "lib/wk/targets.py", "lib/wk/guest.py",
                   "container/firstrun.sh", "shell/bashrc"):
             with self.subTest(script=f):
                 self.assertNotIn("find-generic-password", (REPO / f).read_text())

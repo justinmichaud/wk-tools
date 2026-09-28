@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk machine setup|rm|tailnet|status|ls|probe [<name>] -- the machines in machines/: set one up, remove it, list them, find one
-# wk: where=host name=none group=hosts takes=2 destructive setup,rm dryrun setup,rm,tailnet opts --kind=,--json,--segment=,--vantage=,--no-ssh,--timeout=
+# wk: where=host name=none group=hosts takes=2 verbs=setup,rm,tailnet,status,ls,probe destructive setup,rm dryrun setup,rm,tailnet opts --kind=,--json,--segment=,--vantage=,--no-ssh,--timeout=
 # wk: readonly ls,probe,status
 # wk: sub setup needs=ssh,git opts=--kind=,--at=,--no-tailnet,--disk=,--image=,--rebuild
 # wk: sub rm needs=ssh opts=--at=
@@ -17,7 +17,7 @@
 #            there needs root, and nothing is changed until the probe passes.
 #            A peer: checks its own wk answers. The first setup of a name with
 #            no machines/<name>.conf needs --kind and writes the conf; after
-#            that the conf's KIND is the answer. It asks once, with the sizes,
+#            that the conf's kind is the answer. It asks once, with the sizes,
 #            before removing an older wk-tools checkout or a redundant mirror.
 #            A bridge: renders its role from the conf, copies it to the phone
 #            with bridge/'s scripts and applies it (bridge/provision.sh), joins
@@ -74,7 +74,7 @@ USAGE = "usage: wk machine setup|rm|tailnet <name> | status|probe [<name>] | ls;
 
 def main(argv):
     args = decl.Args(decl.Decl(__file__), argv)
-    verb, rest = (args.positionals[0], args.positionals[1:]) if args.positionals else ("", [])
+    verb, rest = args.positionals[0], args.positionals[1:]
     m = machine_cmd.Machines(ROOT)
     as_json = args.flag("--json")
     at = args.value("--at")

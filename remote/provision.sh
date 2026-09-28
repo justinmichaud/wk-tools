@@ -36,28 +36,28 @@ write_file "$HOME/.wk-remote" 0644 <<EOF
 # no store, no VM and no hardware of yours), so \`wk\` reads this to know it is
 # the far end of a target -- and refuses the commands that only make sense on
 # a workstation. Which target it is the far end of comes from machines/*.conf
-# (WK_REMOTE_HOSTNAME), the one place a machine's kind is read.
+# (hostname=), the one place a machine's kind is read.
 root=$ROOT
 inputs=${WK_REMOTE_INPUTS:-}
 EOF
 
-# No key rests on a shared build machine: other people are root here, so the deploy key is reached through an ssh-agent forwarded from the workstation that drives a push, and this leaves nothing private on disk. The ssh config names the fork aliases with no IdentityFile, so ssh offers whatever the forwarded agent holds and nothing when none is (a build, or an agent session, forwards none -- only an explicit push does). ~/.ssh/config is often shared over NFS, so a checkout points at this file with core.sshCommand.
+# Other people are root here, so no key rests on disk: a push forwards the workstation's agent, and the aliases name no IdentityFile. ~/.ssh/config is often shared over NFS, so a checkout points at this file with core.sshCommand.
 ensure_dir "$ROOT/secrets" 0700
 write_file "$ROOT/ssh/config" 0600 <<EOF
 # Written by remote/provision.sh. One ssh alias per fork, because GitHub takes
 # one deploy key per repository and both forks live on github.com -- so the key
 # is selected by alias, never by hostname. No IdentityFile: the key is a
 # forwarded agent's, never a file here.
-$(WK_ROOT="$TOOLS" bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_ssh_alias_blocks ""' _ "$TOOLS")
+$(PYTHONPATH="$TOOLS/lib" WK_ROOT="$TOOLS" python3 -m wk.secrets alias-blocks "")
 EOF
-rm -rf "$ROOT/push-keys" 2>/dev/null || true   # a box provisioned when it held keys at rest: take them away
+rm -rf "$ROOT/push-keys" || die "could not remove $ROOT/push-keys, so deploy keys are still at rest on this machine"
 
-# An include, so the identity is declared once for every machine (dotfiles/gitconfig) and the settings that keep `git status` in a WebKit checkout fast reach a build box too, an editor over ssh asking on every keystroke. --replace-all, because git reads every include.path it finds.
+# An include, so dotfiles/gitconfig's identity and settings are declared once; --replace-all, because git reads every include.path it finds.
 git config --global --replace-all include.path "$TOOLS/dotfiles/gitconfig"
 changed "gitconfig includes $TOOLS/dotfiles/gitconfig"
 [ -f "$HOME/.gitignore" ] || printf '.DS_Store\n.cache\ncompile_commands.json\n' > "$HOME/.gitignore"
 
-for _id in name email; do   # the include is not the last word: git takes a key's last value, so a [user] section below it in ~/.gitconfig wins and every commit from this box carries it -- one machine here had `user.name = no`. Only *this account's* file is touched, /etc/gitconfig being reported instead
+for _id in name email; do   # git takes a key's last value, so a [user] section below the include wins; only this account's file is touched, /etc/gitconfig is reported
     _want=$(git config --file "$TOOLS/dotfiles/gitconfig" --get "user.$_id" || true)
     [ -n "$_want" ] || continue
     _have=$(git config --get "user.$_id" || true)

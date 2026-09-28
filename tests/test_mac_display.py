@@ -217,7 +217,7 @@ class WkmacDisplayMode(WkmacHandles):
 
     def test_it_leaves_another_panels_rows_alone(self):
         """The declared mode is the built-in panel's. A row for a monitor that
-        was once attached governs a configuration this lane refuses anyway, and
+        was once attached governs a configuration the Mac bench path refuses anyway, and
         rewriting it would be this tool changing something it was not asked to."""
         config = self._config()
         self.mode(FakeCG([PANEL]), declare=(1280, 832), config=config)
@@ -433,10 +433,15 @@ class TheScreenTheReadingWasTakenOn(WkTest):
         self.assertFault("not org.webkit.MiniBrowser", frontmost="com.apple.Terminal")
 
     def test_a_machine_without_pyobjc_is_refused(self):
-        self.assertFault("pyobjc", frontmost="?")
+        """No `frontmost` sentinel travels through a stored reading: the
+        machine that cannot import AppKit refuses immediately."""
+        with mock.patch.dict(sys.modules, {"AppKit": None}):
+            with self.assertRaises(SystemExit) as cm:
+                BROWSER.frontmost_bundle()
+        self.assertIn("pyobjc", str(cm.exception))
 
     def test_brightness_is_recorded_and_not_judged(self):
-        """`wkmac.py brightness --set 0` verifies its own read-back; a second
+        """`wk/mac.py brightness --set 0` verifies its own read-back; a second
         judgement here could drift from that one."""
         cp = self.check(brightness=0.9, displays=[dict(PANEL, brightness=0.9)])
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
@@ -523,15 +528,49 @@ class TheScreenTheReadingWasTakenOn(WkTest):
         self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("is not the external panel", cp.stderr)
 
-    def test_the_display_list_is_read_through_the_wkmac_subcommand(self):
-        """lib/wkmac.py is the old path, a link to lib/wk/mac.py for its bash and bench callers."""
-        self.assertEqual(str(REPO / "lib" / "wkmac.py"), BROWSER.WKMAC)
-        self.assertEqual((REPO / "lib" / "wkmac.py").resolve(), REPO / "lib" / "wk" / "mac.py")
+    def test_the_display_list_is_read_through_wk_mac(self):
+        self.assertEqual(str(REPO / "lib" / "wk" / "mac.py"), BROWSER.WKMAC)
 
     @unittest.skipIf(platform.system() == "Darwin",
                      "this machine is a Mac: CoreGraphics loads here")
     def test_a_display_list_nothing_could_answer_reads_as_none(self):
         self.assertIsNone(BROWSER.display_list())
+
+
+class TakeReadingNeverLeavesTheBrowserRunning(WkTest):
+    """`take_reading()` starts MiniBrowser before it can know whether pyobjc is
+    here to ask what is frontmost. `frontmost_bundle()` used to raise
+    (`SystemExit`, no pyobjc) after `launch()` and before `browser.terminate()`,
+    so a bench machine without pyobjc was left with MiniBrowser running."""
+
+    def args(self, timeout=0):
+        return argparse.Namespace(build_directory="/nonexistent", timeout=timeout)
+
+    def test_no_pyobjc_refuses_before_the_browser_is_ever_launched(self):
+        with mock.patch.dict(sys.modules, {"AppKit": None}), \
+             mock.patch.object(BROWSER, "accelerator_clients", return_value=(None, {})), \
+             mock.patch.object(BROWSER, "launch") as launch:
+            with self.assertRaises(SystemExit) as cm:
+                BROWSER.take_reading(self.args())
+        launch.assert_not_called()
+        self.assertIn("pyobjc", str(cm.exception))
+
+    def test_a_refusal_after_launch_still_terminates_the_browser(self):
+        """Belt and suspenders for any other exit path between `launch()` and
+        the old bare `browser.terminate()`: the browser is torn down in a
+        `finally`, not only on the path that raises nothing."""
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        with mock.patch.dict(sys.modules, {"AppKit": mock.MagicMock()}), \
+             mock.patch.object(BROWSER, "accelerator_clients", return_value=(None, {})), \
+             mock.patch.object(BROWSER, "launch", return_value=proc), \
+             mock.patch.object(BROWSER, "frontmost_bundle", side_effect=SystemExit(BROWSER.PYOBJC_MISSING)), \
+             mock.patch.object(BROWSER, "display_list", return_value=None):
+            with self.assertRaises(SystemExit):
+                BROWSER.take_reading(self.args())
+        proc.terminate.assert_called_once()
+        proc.wait.assert_called_once()
+
 
 class TheDisplayRuleAskedOnItsOwn(WkTest):
     """`--displays-only` is the same rule with no browser launched, so a leg's
@@ -583,7 +622,7 @@ class AmbientLightControl(WkTest):
     setting, and power is thermal headroom. DisplayServices does expose the
     control -- `DisplayServicesEnableAmbientLightCompensation` to set it and
     `DisplayServicesAmbientLightCompensationEnabled` to read it, both listed by
-    `dyld_info -exports` on tolken (26.6.2, `Mac16,12`) -- so the lane holds it
+    `dyld_info -exports` on tolken (26.6.2, `Mac16,12`) -- so the bench path holds it
     off and the gate below refuses only a panel that will not let go."""
 
     def check(self, auto, **overrides):

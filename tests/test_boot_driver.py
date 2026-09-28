@@ -1,6 +1,5 @@
 """The boot-driver core (lib/wk/boot): every Pi driver against a FakeBoard holding its media, a firmware one-shot
-and a clock -- machine.conformance[<kind>] over one test body, boot.arming_exact, the on-board files, and the
-bash shims agreeing with the classes they stand for.
+and a clock -- machine.conformance[<kind>] over one test body, boot.arming_exact and the on-board files.
 
 Run: python3 tests/run.py --unit -k test_boot_driver
 """
@@ -9,7 +8,7 @@ import subprocess
 import sys
 import unittest
 
-from tests.support import REPO, bash
+from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 
@@ -30,8 +29,8 @@ SLOTS_OF = {"pi-sd": (5, 7), "pi-tryboot": (1, 3), "rpi5-usb": (1, 3), "pi-mbr":
 
 def conf_for(kind):
     conf = fleet.Fleet(REPO, {"HOME": "/nonexistent"}).load(BOARDS[kind])
-    conf = {k: v for k, v in conf.items() if k.startswith("NODE_")}
-    conf.update(NODE_NAME=BOARDS[kind], NODE_DRIVER=kind)
+    conf = {k: v for k, v in conf.items() if k != "kind"}
+    conf.update(name=BOARDS[kind], driver=kind)
     return conf
 
 
@@ -42,8 +41,8 @@ def board(kind, ids=("sys-a",)):
     conf = conf_for(kind)
     fake = FakeBoard(conf)
     cls = DRIVERS[kind]
-    fake.rescue("rescue-1" if conf["NODE_ROLE"] == "bench-device" else "")
-    disk = conf["NODE_DEVICE"]
+    fake.rescue("rescue-1" if conf["role"] == "bench-device" else "")
+    disk = conf["device"]
     for n, ident in zip(SLOTS_OF[kind], ids):
         fake.write_system(part(disk, n), ident, failsafe=cls.failsafe)
     return fake, cls(REPO, conf, fake)
@@ -62,7 +61,7 @@ def quiet(fn, *args):
 def arm_and_boot(d, fake, want=""):
     d.probe()
     p, ident = d.select_system(want)
-    d.record_write(ident, "prof", fake.conf["NODE_DEVICE"], d.order_image)
+    d.record_write(ident, "prof", fake.conf["device"], d.order_image)
     d.arm(p, d.order_image)
     d.reboot(armed=True)
     return p, ident
@@ -83,18 +82,6 @@ class Conformance:
         self.assertEqual(cls.disarms, cls.disarm is not Driver.disarm)
         self.assertEqual(cls.disarms, cls.disarm_note is not Driver.disarm_note)
         self.assertIs(driver_class(self.kind), cls)
-
-    def test_the_shim_defines_exactly_the_functions_the_class_has(self):
-        """a caller asks `command -v b_disarm` / `b_self_disarm_sh`."""
-        cls = DRIVERS[self.kind]
-        text = (REPO / "boot" / ("%s.sh" % self.kind)).read_text()
-        defined = set(re.findall(r"(?m)^(\w+)\(\)", text))
-        want = set()
-        if cls.disarms:
-            want |= {"b_disarm", "b_disarm_note"}
-        if cls.failsafe:
-            want.add("b_self_disarm_sh")
-        self.assertEqual(defined, want)
 
     def test_the_production_transport_is_machines_and_no_bash(self):
         """machine.conformance[<kind>] over wk.machine.Fake: the driver as `wk boot` builds it reaches its machine
@@ -149,7 +136,7 @@ class Conformance:
         fake.stuck = True
         got, err = quiet(d.arm, p, d.order_image)
         self.assertIs(got, act.Refused, err)
-        self.assertIn(fake.conf["NODE_NAME"], err)
+        self.assertIn(fake.conf["name"], err)
 
     def test_the_record_is_written_on_the_host_and_spent_by_the_boot(self):
         fake, d = board(self.kind)
@@ -174,7 +161,7 @@ class Conformance:
                 for verb in ("media", "evidence", "reprovision"):
                     got, err = quiet(getattr(d, verb))
                     self.assertIsInstance(got, str, "%s %s: %s" % (verb, mode, err))
-                self.assertTrue(d.reprovision().startswith("wk sysimage build " + fake.conf["NODE_PROFILE"]))
+                self.assertTrue(d.reprovision().startswith("wk sysimage build " + fake.conf["profile"]))
 
     def test_the_failsafe_is_on_board_shell_outside_the_arming(self):
         """boot.arming_exact: a failsafe lives outside the script it guards."""
@@ -232,12 +219,12 @@ class TestArmingExact(unittest.TestCase):
                 self.assertIs(got, act.Refused)
                 self.assertIn("same@second", err)
                 self.assertIn("@<slot>", err)
-                second = part(fake.conf["NODE_DEVICE"], SLOTS_OF[kind][1])
+                second = part(fake.conf["device"], SLOTS_OF[kind][1])
                 slot = d.slot(second)
                 self.assertEqual(d.select_system("same@" + slot), (second, "same"))
                 self.assertEqual(d.select_system("@" + slot), (second, "same"))
                 arm_and_boot(d, fake, "same@" + slot)
-                self.assertEqual(fake.running, part(fake.conf["NODE_DEVICE"], SLOTS_OF[kind][1] + 1))
+                self.assertEqual(fake.running, part(fake.conf["device"], SLOTS_OF[kind][1] + 1))
 
     def test_the_leg_is_verified_after_the_last_arm(self):
         """a first arming that took and a second that did not: the readback is of the second."""
@@ -270,7 +257,7 @@ class TestChannel(unittest.TestCase):
         via.answer(("tailscale",), out=self.PEERS % online)
         via.answer(("hostname", "-s"), out=host + "\n")
         via.answer(("ssh",), out="ok\n")
-        conf = {"NODE_NAME": "rpi5", "NODE_SSH": "rpi5", "NODE_BENCH_SSH": "rpi5-bench", "NODE_ROLE": role}
+        conf = {"name": "rpi5", "ssh": "rpi5", "bench_ssh": "rpi5-bench", "role": role}
         return Channel(REPO, conf, channel, env=env or {}, via=via), via
 
     def sent(self, via):
@@ -335,34 +322,6 @@ class TestOnboard(unittest.TestCase):
         with self.assertRaises(ValueError):
             Onboard(REPO, "boot-id.sh", WK_DEV="/dev/sda; reboot")
         self.assertTrue(Onboard(REPO, "part-absent.sh", WK_DEV="/dev/sda1").text().startswith("WK_DEV=/dev/sda1; "))
-
-
-class TestShims(unittest.TestCase):
-    """boot/machines.sh and boot/<driver>.sh reach the classes over this shell's NODE_*."""
-
-    LOAD = '. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/boot/machines.sh"; machine_load %s; load_driver "$NODE_DRIVER"\n'
-
-    def sh(self, machine, script):
-        return bash(self.LOAD % machine + script, env={"WK_MACHINES_DIR": str(REPO / "machines")})
-
-    def test_the_facts_are_the_classes(self):
-        for kind, machine in BOARDS.items():
-            if kind == "pi-mbr":
-                continue
-            cls = DRIVERS[kind]
-            cp = self.sh(machine, 'echo "$BOOT_ARMING|$B_ARM_FROM_BENCH|$BOOT_ORDER_IMAGE|$BOOT_ORDER_NORMAL|$NODE_RECORD"')
-            with self.subTest(kind=kind):
-                self.assertEqual(cp.stdout.strip(), "%s|%s|%s|%s|/var/lib/wk/boot/armed" % (
-                    cls.arming, "yes" if cls.arm_from_bench else "no", cls.order_image, cls.order_normal), cp.stderr)
-
-    def test_a_shell_override_of_the_conf_reaches_the_driver(self):
-        cp = self.sh("rpi4", 'NODE_DEVICE=/dev/sdb; b_media')
-        self.assertIn("/dev/sdb holds the bench system(s)", cp.stdout, cp.stderr)
-
-    def test_system_kind_and_the_probe_script(self):
-        cp = self.sh("rpi3", 'b_system_kind /dev/mmcblk0p2; b_system_kind /dev/mmcblk0p4; b_system_kind /dev/sda2; '
-                             'printf "%s" "$_b_probe_sh" | head -1')
-        self.assertEqual(cp.stdout.split(), ["base", "bench", "unknown", "cat", "/etc/wk-image", "2>/dev/null"], cp.stderr)
 
 
 if __name__ == "__main__":

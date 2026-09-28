@@ -8,11 +8,11 @@ import shlex
 import subprocess
 import sys
 
-from wk import act, buildconf, job, record as progress
+from wk import act, buildconf, job, record as progress, screen
 from wk.act import Refused, die, info, log, warn
 from wk.bench import record, seed, systems
 from wk.lock import Lock
-from wk.quiet import lib_argv
+from wk.machine import replace_file
 from wk.resources import Resources
 
 # gpu by default: guessing gpu fails as an easy refusal, guessing cpu as a MotionMark score off llvmpipe.
@@ -23,8 +23,7 @@ PID_MATCH = "*run-benchmark* *cli.js*"
 STALL_SECONDS, ABORT_SECONDS = "900", "5400"
 MAX_LOAD = 4
 SCORE = re.compile(r"^(Score|Total|.*Score:)", re.I)
-QUIET = "lib/quiet.sh"
-AB_ONLY = ("rounds", "task", "exclude_subtests", "no_warmup_profile", "jit_tiers")
+AB_ONLY = ("rounds", "exclude_subtests", "no_warmup_profile", "jit_tiers")
 
 
 def bench_class(plan):
@@ -99,8 +98,7 @@ def merge_jsc_logs(out, logs):
             "    accept --dump-json-results runs the whole suite and reports only in its own text format.")
     if missing:
         warn("no results in %s" % ", ".join(missing))
-    with open(out, "w") as f:
-        json.dump(merged, f, indent=2)
+    replace_file(out, json.dumps(merged, indent=2))
 
 
 def one_minute_load(res):
@@ -137,7 +135,6 @@ class Run:
         self.env.setdefault("WK_STALL_SECONDS", STALL_SECONDS)
         self.env.setdefault("WK_ABORT_SECONDS", ABORT_SECONDS)
         self.here, self.ws, self.target = reg.machine, system.ws, system.target
-        self.bench_dir = reg.store.bench_dir()
         self.recs = self.records(clock)
         self.lock = Lock(reg.store, self.here, clock)
         self.task, self.dry_fails = None, 0
@@ -162,7 +159,7 @@ class Run:
                 die("--cores '%s' is not a valid Linux cpu list (e.g. 0-3, 2,3, 0-1,4, 7)" % leg.cores)
             if s.cores_refusal():
                 die("--cores: " + s.cores_refusal())
-        name = o.get("config") or self.env.get("WK_CONFIG") or "wpe-release"
+        name = o.get("config") or "wpe-release"
         try:
             leg.cfg = buildconf.resolve(name, self.target.os(), self.target.kind, self.target.env)
         except LookupError:
@@ -229,7 +226,7 @@ class Run:
         def read(path):
             r = self.target.exec(self.ws, ["cat", "%s/Tools/Scripts/%s" % (self.system.src(), path)])
             return r.out.replace("\r", "") if r.ok else None
-        seeder = seed.Seeder(self.here, self.lock, os.path.join(self.reg.store.artifact_dir(), "bench"))
+        seeder = seed.Seeder(self.here, self.lock, os.path.join(self.reg.store.artifact_dir(), "bench"), self.reg.store.mirror())
         leg.payload = seeder.seed(leg.plan, seed.plan_json(read, leg.plan))
         if leg.runner != "jsc":
             return
@@ -242,23 +239,25 @@ class Run:
 
     def begin(self, leg):
         """The task (task.json, under its lock) and its run directory, the env.json the report reads, and the progress record."""
-        stamp = self.clock.stamp()
-        leg.id, leg.task = "%s-%s-%s" % (stamp, leg.plan, self.ws), "%s-%s" % (stamp, self.ws)
+        stamp, given = self.clock.stamp(), leg.o.get("task") or ""
+        leg.id, leg.task = "%s-%s-%s" % (stamp, leg.plan, self.ws), given or "%s-%s" % (stamp, self.ws)
         leg.rel = "%s/runs/%s" % (leg.task, leg.id)
-        leg.out = os.path.join(self.bench_dir, leg.rel)
+        taskdir = record.homes(self.reg.store)[given] if given else record.home_for(self.reg.store, self.ws, leg.task)
+        leg.out = os.path.join(taskdir, "runs", leg.id)
         steps = ["deploy %s to the %s '%s'" % (leg.cfg.name, self.system.kind, self.ws),
                  "run %s (%s, %s iteration(s))" % (leg.plan, leg.runner, leg.count or "default"), "collect into %s" % leg.out]
         if act.dry_run():
             return steps
-        taskdir = os.path.join(self.bench_dir, leg.task)
-        if os.path.exists(taskdir):
+        if not given and os.path.exists(taskdir):
             die("task %s already exists (%s); a task is one request, made once" % (leg.task, taskdir))
         self.lock.hold("bench-task-" + leg.task, timeout=5)
         count = ["count=" + leg.count] if leg.count else []
-        record.task_write(taskdir, ["task=" + leg.task, "requested=" + self.clock.iso(), "subject.kind=workspace",
-                                    "subject.spec=" + self.ws, "devices=%s=%s" % (self.system.kind, leg.cfg.name),
-                                    "plans=" + leg.plan, "rounds=1", "slots=" + self.ws] + count,
-                          ["wk bench run %s %s --config %s%s" % (self.ws, leg.plan, leg.cfg.name, " --count " + leg.count if leg.count else "")])
+        command = "wk bench run %s %s --config %s%s" % (self.ws, leg.plan, leg.cfg.name, " --count " + leg.count if leg.count else "")
+        if not given:
+            record.task_write(taskdir, ["task=" + leg.task, "requested=" + self.clock.iso(), "subject.kind=workspace",
+                                        "subject.spec=" + self.ws, "devices=%s=%s" % (self.system.kind, leg.cfg.name),
+                                        "plans=" + leg.plan, "rounds=1", "slots=" + self.ws, "restart=%s --task %s" % (command, leg.task)] + count,
+                              [command])
         os.makedirs(leg.out, exist_ok=True)
         record.write_env(os.path.join(leg.out, "env.json"), [
             "plan=" + leg.plan, "workspace=" + self.ws, "config=" + leg.cfg.name, "browser=" + leg.browser, "task=" + leg.task,
@@ -340,15 +339,17 @@ class Run:
         args += ["--"] + extra if extra else []
         info("running %s in '%s' (%s, %s)" % (leg.plan, self.ws, leg.cfg.name, leg.browser))
         log("  results: %s" % leg.out)
-        path, watch = os.path.join(leg.out, "run.log"), os.path.join(leg.out, "screen-watch")
+        path = os.path.join(leg.out, "run.log")
         # For as long as the browser is up: a dialog that draws mid-run covers every leg after it.
-        self.here.act_run(lib_argv(self.root, QUIET, "screen_watch_start", watch))
+        watch = screen.Watch(self.here, self.root, self.clock, self.env)
+        if not act.dry_run():
+            watch.start()
         rc = s.run(leg, self.script(leg, s.run_env(leg), src, [shlex.quote(a) for a in args]), self.watched, path)
-        drew = self.here.run(lib_argv(self.root, QUIET, "screen_watch_stop", watch))
-        if not drew.ok:
+        drew = watch.stop()
+        if drew:
             warn("the machine did not stay quiet under this run -- something drew over the\n"
                  "  browser, or a process that must not run came back while it measured:")
-            sys.stderr.write("".join("    %s\n" % l for l in drew.out.splitlines()))
+            sys.stderr.write("".join("    %s\n" % l for l in drew))
             if not self.env.get("WK_FORCE"):
                 rc = rc or 1
             else:
@@ -427,6 +428,23 @@ def _run_class(system):
     return mac.HostRun if isinstance(system, mac.MacHostSystem) else Run
 
 
+def nothing_left(reg, plan, task):
+    """A one-run task restarted with --task: whether it already holds its run ok. An A/B restarts through its own command."""
+    d = record.homes(reg.store).get(task)
+    if not d:
+        die("no such task '%s' in this machine's store; 'wk bench ls' lists the tasks" % task)
+    doc = record.task_doc(d)
+    if len(record.task_arms(doc)[0]) != 1:
+        die("task %s is an A/B; restart it with its own command:\n    %s" % (task, doc.get("restart") or doc.get("commands", ["?"])[-1]))
+    if plan not in doc.get("plans", []):
+        die("task %s measures %s, not %s" % (task, ", ".join(doc.get("plans", [])), plan))
+    st = record.task_state(d, False)
+    if st["ok"] < st["planned"]:
+        return False
+    info("task %s already holds its run ok (%s); nothing is left to run" % (task, st["summary"]))
+    return True
+
+
 def run(root, reg, words, o, kill, clock, popen=subprocess.Popen):
     """`wk bench run <ws> <plan>`: the dispatcher resolved the workspace (WK_NAME) and dropped it from `words`."""
     ws, plan = reg.env.get("WK_NAME", ""), (words[0] if words else "")
@@ -446,13 +464,15 @@ def run(root, reg, words, o, kill, clock, popen=subprocess.Popen):
         from wk.bench import board
         return board.request(root, reg, "run", ["machine=" + o["system"], "workspace=" + ws, "plan=" + plan, "slot=" + (o.get("slot") or ""),
                                                 "count=" + (o.get("count") or "")], "wk bench run %s %s --system %s" % (ws, plan, o["system"]))
+    if o.get("task") and not kill and nothing_left(reg, plan, o["task"]):
+        return 0
     system = systems.for_workspace(root, reg, ws, clock, o.get("system") or "")
     if o.get("collect") and system.kind != "board":
         die("--collect takes a PGO profile from a board's instrumented slot: --system <board> --slot <name>-instr")
     r = _run_class(system)(root, reg, system, clock, reg.env, popen)
     if kill:
         return r.stop()
-    if not act.dry_run():
-        os.makedirs(r.bench_dir, exist_ok=True)
+    if o.get("task") and not act.dry_run():
+        r.lock.hold("bench-task-" + o["task"], timeout=5)
     return r.go(plan, o)
 

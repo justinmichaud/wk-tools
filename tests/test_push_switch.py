@@ -9,14 +9,15 @@ import importlib.machinery
 import importlib.util
 import io
 import os
+import shlex
 import subprocess
 import types
 from unittest import mock
 
 from tests.killpoints import converges
-from tests.support import REPO, WkTest, bash
+from tests.support import REPO, WkTest, bash, run
 from tests.test_wk_secrets import SOCK, SecretsTest, World
-from wk import act, guest, shell, targets
+from wk import act, guest, targets
 from wk.act import Refused
 from wk.clock import FakeClock
 from wk.machine import Result
@@ -92,7 +93,10 @@ class Fleet(targets.Registry):
         return self.boxes[name]
 
     def machines(self):
-        return [n for n in self.boxes if n != "container"]
+        return [n for n in self.boxes if n not in ("container", "vm")]
+
+    def vm_listed(self):
+        return "vm" in self.boxes
 
 
 class PushTest(SecretsTest):
@@ -256,7 +260,7 @@ class TestOff(PushTest):
 
     def test_it_reads_the_files_back_too(self):
         self.on()
-        self.w.react(["sh", "-c", "rm -f %s" % shell.sh_quote(self.tmp + "/store/push-bugzilla-api-key")], lambda a, f: Result(0))
+        self.w.react(["sh", "-c", "rm -f %s" % shlex.quote(self.tmp + "/store/push-bugzilla-api-key")], lambda a, f: Result(0))
         rc, _, err = self.push("off")
         self.assertEqual(1, rc)
         self.assertIn("the Bugzilla API key is still at", err)
@@ -479,9 +483,10 @@ class TestAskingAnotherMachine(PushTest):
         self.assertIn("unknown target 'nosuch'", err)
 
     def test_an_unknown_word_is_the_usage(self):
-        rc, _, err = self.main("maybe")
-        self.assertEqual(1, rc)
-        self.assertIn("usage: wk push on|off|status", err)
+        """refused by the dispatcher, before anything runs"""
+        cp = run("push", "maybe")
+        self.assertEqual(2, cp.returncode, cp.stdout)
+        self.assertIn("usage: wk push on|off|status", cp.stdout)
 
 
 class TestCrashOnlyAndDryRun(PushTest):
@@ -555,8 +560,8 @@ class TestTheStatusRowIsCredentialsNotThePosition(WkTest):
         return status.push_record(store, "testmachine", list(self.FORKS), in_vm)
 
     def test_the_forks_are_the_stores_table(self):
-        cp = bash('. lib/common.sh; . lib/store.sh; wk_push_forks | awk \'NF {print $1}\'')
-        self.assertEqual(tuple(cp.stdout.split()), self.FORKS)
+        from wk import secrets
+        self.assertEqual(tuple(f[0] for f in secrets.forks()), self.FORKS)
 
     def test_the_row_is_named_for_the_credentials_it_read(self):
         row = self._row(keys=("fork", "forkwpe"))
@@ -587,3 +592,70 @@ class TestTheStatusRowIsCredentialsNotThePosition(WkTest):
 
     def test_the_podman_vm_reports_no_row_at_all(self):
         self.assertIsNone(self._row(keys=("fork", "forkwpe"), in_vm=True))
+
+
+class TestEveryTargetThisMachineHoldsIsAsked(PushTest):
+    """`on` hands the keys to every workspace on this machine, the macOS guests too (their agent is on this host,
+    forwarded per guest), so a claude session in a guest is ended like one in a container."""
+
+    def setUp(self):
+        super().setUp()
+        self.w.seed()
+        self.guests = Box(self.w, self.w.env, name="vm", sock="/Users/admin/.wk-ssh-agent.sock")
+        self.boxes["vm"] = self.guests
+        self.box.claude = {"ctr": []}
+        self.guests.claude = {"mac-rel": ["4242"]}
+
+    def test_a_session_in_a_guest_is_found_on_a_mac(self):
+        sessions = PUSH.Push(Fleet(self.w, self.boxes), self.w.sec(macos=True), self.clock).agent_sessions()
+        self.assertEqual([(self.guests, "mac-rel", ["4242"])], sessions)
+
+    def test_on_ends_it_in_the_guest_before_the_keys_load(self):
+        os.environ["WK_YES"] = "1"
+        rc, _, err = self.push("on", macos=True)
+        self.assertEqual(0, rc, err)
+        self.assertIn("ending the claude session(s) in 'mac-rel' (pid 4242)", err)
+        self.assertEqual([], self.guests.claude["mac-rel"])
+
+    def test_a_machine_with_no_guests_asks_only_its_containers(self):
+        del self.boxes["vm"]
+        self.assertEqual([], PUSH.Push(Fleet(self.w, self.boxes), self.w.sec(macos=True), self.clock).agent_sessions())
+
+
+class TestThePodmanMachineIsHalfTheSwitch(PushTest):
+    """In a macOS host's podman machine -- where a forwarded `wk ai claude` throws it -- the guests' agent on the host
+    is out of reach, so `off` there empties its own half and names the host's rather than saying push is off."""
+
+    def setUp(self):
+        super().setUp()
+        self.w.seed()
+        self.w.env["WK_IN_VM"] = "1"
+
+    def test_off_empties_its_half_and_says_the_host_is_not_reached(self):
+        rc, _, err = self.push("off")
+        self.assertEqual(PUSH.UNASKED, rc, err)
+        self.assertIn("not reached from here", err)
+        self.assertIn("On the host:  wk push off", err)
+        self.assertEqual(set(), self.w.agents[SOCK])
+
+    def test_status_names_the_half_it_cannot_read(self):
+        _, out, _ = self.push("status")
+        self.assertIn("guests     not read from the podman machine", out)
+
+    def test_on_a_mac_itself_the_same_variable_is_not_the_vm(self):
+        """tests and forwarded commands set WK_IN_VM on the host too; the podman machine is the one that is not macOS."""
+        rc, _, err = self.push("off", macos=True)
+        self.assertEqual(0, rc, err)
+
+
+class TestTheScanReadsPsWhereThereIsNoProc(WkTest):
+    """A macOS guest has no /proc: its `ps` names the executable, and only Claude Code's is a session."""
+
+    def test_only_claude_codes_executable_is_a_session(self):
+        ps = ("#!/bin/sh\necho '12 /Users/admin/.local/bin/claude'\necho '13 /Users/admin/.local/share/claude/versions/2.1.270'\n"
+              "echo '14 /Applications/Claude.app/Contents/MacOS/Claude'\necho '15 node'\necho '16 claude'\n")
+        (self.tmp / "ps").write_text(ps)
+        (self.tmp / "ps").chmod(0o755)
+        scan = PUSH.AGENT_PID_SCAN.replace("[ -d /proc/self ]", "false")
+        cp = subprocess.run(["sh", "-c", scan], env={"PATH": "%s:/usr/bin:/bin" % self.tmp}, capture_output=True, text=True)
+        self.assertEqual(["12", "13", "16"], cp.stdout.split(), cp.stderr)

@@ -7,10 +7,12 @@ Run: python3 tests/run.py -k tests.test_wk_machine
 """
 import io
 import os
+import shlex
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -245,6 +247,33 @@ class TestLocal(MachineTest, LockEffectsConformance, CopyConformance):
         r, _ = self.stderr(lambda: self.m.act_run(["true"]))
         self.assertTrue(r.ok)
 
+    def test_a_streamed_effect_reaches_stderr_while_it_runs(self):
+        """`unit machine.streams_long_effects`: the child waits for its own output to be seen, so a capture that prints at the end never lets it finish."""
+        log, flag, done = self.path("log"), self.path("flag"), threading.Event()
+        script = ('echo out; echo err >&2; i=0; while [ ! -e "$1" ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done; test -e "$1"')
+
+        def watch():
+            while not done.is_set():
+                with open(log) as f:
+                    seen = f.read()
+                if "out\n" in seen and "err\n" in seen:
+                    open(flag, "w").close()
+                    return
+                done.wait(0.02)
+        saved, fd = os.dup(2), os.open(log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+        watcher = threading.Thread(target=watch)
+        try:
+            os.dup2(fd, 2)
+            watcher.start()
+            r = self.m.act_run(["sh", "-c", script, "sh", flag], stream=True)
+        finally:
+            os.dup2(saved, 2)
+            os.close(saved)
+            os.close(fd)
+            done.set()
+            watcher.join()
+        self.assertEqual((r.rc, r.out, r.err), (0, "", ""), "the output was held until the command ended")
+
 
 class TestFake(MachineTest, LockEffectsConformance, CopyConformance):
     def setUp(self):
@@ -335,12 +364,50 @@ class TestFake(MachineTest, LockEffectsConformance, CopyConformance):
         self.m.write("/b", "2")
         self.assertEqual(self.m.applied, 3)
 
+    def test_a_streamed_run_prints_its_answer_and_returns_only_the_status(self):
+        self.m.answer(["wkdev-create"], rc=2, out="pulling\n", err="failed\n")
+        r, err = self.stderr(lambda: self.m.act_run(["wkdev-create", "--name", "x"], stream=True))
+        self.assertEqual((r.rc, r.out, r.err, err), (2, "", "", "pulling\nfailed\n"))
+        self.assertEqual(self.m.streamed, [("wkdev-create", "--name", "x")])
+        self.assertEqual(self.m.effects, [("run", ("wkdev-create", "--name", "x"))])
+
     def test_a_dry_act_run_is_not_an_effect_a_kill_can_land_on(self):
         os.environ["WK_DRY_RUN"] = "1"
         self.m.stop_after = 0
         _, err = self.stderr(lambda: self.m.act_run(["rm", "-rf", "/d"]))
         self.assertIn("would run on box", err)
         self.assertEqual(self.m.applied, 0)
+
+
+class TestHave(MachineTest):
+    def test_here_a_tool_is_one_on_path(self):
+        self.assertTrue(machine.Local().have("sh"))
+        self.assertFalse(machine.Local().have("wk-no-such-tool"))
+
+    def test_over_ssh_it_is_one_quoted_command_v_and_a_fake_answers_it_by_the_probe(self):
+        via = machine.Fake("here")
+        m = machine.Ssh("box.example", via=via)
+        via.answer(m.argv(shlex.join(machine.HAVE + ("x y",))))
+        self.assertTrue(m.have("x y"))
+        self.assertFalse(m.have("z"))
+        fake = machine.Fake()
+        fake.answer(machine.HAVE + ("xz",))
+        self.assertEqual((fake.have("xz"), fake.have("kpartx")), (True, False))
+
+
+class TestReplaceFile(unittest.TestCase):
+    def test_the_mode_is_the_umasks_unless_named(self):
+        d = tempfile.mkdtemp(prefix="wk-test-replace-")
+        self.addCleanup(subprocess.run, ["rm", "-rf", d])
+        p = os.path.join(d, "f")
+        old = os.umask(0o022)
+        try:
+            machine.replace_file(p, "a")
+            self.assertEqual(os.stat(p).st_mode & 0o777, 0o644)
+            machine.replace_file(p, b"b", mode=0o600)
+        finally:
+            os.umask(old)
+        self.assertEqual((os.stat(p).st_mode & 0o777, Path(p).read_text()), (0o600, "b"))
 
 
 class TestSsh(MachineTest):
@@ -364,6 +431,30 @@ class TestSsh(MachineTest):
         self.assertEqual(seen[0][-1], "ls -1 '/tmp/a b'")
         self.assertIn("kill -0 42", seen[2][-1])
         self.assertIn("nohup sleep 9 > /tmp/log", seen[3][-1])
+
+    def test_an_effect_over_ssh_is_an_effect_on_the_machine_that_drives_it(self):
+        """`unit machine.ssh_effects_are_effects`: a kill point on `via` lands inside a remote flow, and never on a read."""
+        via = machine.Fake("here")
+        via.answer(["ssh"])
+        m = machine.Ssh("box.example", timeout=3, via=via)
+        via.stop_after = 0
+        self.assertTrue(m.run(["true"]).ok)
+        with self.assertRaises(machine.Killed):
+            m.act_run(["rm", "-rf", "/d"])
+        via.stop_after = None
+        m.act_run(["tart", "clone", "a", "b"], stream=True)
+        self.assertEqual(via.applied, 1)
+        self.assertEqual(via.effects[-1], ("run", tuple(m.argv("tart clone a b"))))
+        self.assertEqual(via.streamed, [tuple(m.argv("tart clone a b"))])
+
+    def test_an_effect_over_ssh_refuses_before_a_destructive_command_asked(self):
+        os.environ["WK_DESTRUCTIVE"] = "1"
+        via = machine.Fake("here")
+        via.answer(["ssh"])
+        from wk.act import Refused
+        with self.assertRaises(Refused):
+            self.stderr(lambda: machine.Ssh("box.example", via=via).act_run(["rm", "-rf", "/d"]))
+        self.assertEqual(via.effects, [])
 
     def test_run_tty_allocates_a_pty_and_honours_cwd(self):
         m = machine.Ssh("box.example", timeout=3)

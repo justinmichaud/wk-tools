@@ -1,26 +1,21 @@
 #!/usr/bin/env python3
-"""Will the firmware find everything it needs in this boot filesystem?
-Once the bootloader has executed start4.elf, BOOT_ORDER is spent: a second stage that cannot find the kernel its config.txt names halts a Pi 4 with an LED pattern rather than retrying or moving to the next device. So this asks a resolver that models the firmware's name resolution, not os.path.exists."""
+"""Will the firmware find everything it needs in this boot filesystem? Once start4.elf runs, BOOT_ORDER is spent: a
+missing kernel halts a Pi 4 rather than trying the next device."""
 
 import argparse
 import os
 import sys
 
 
-def _inside(root, wanted):
-    path = os.path.realpath(os.path.join(root, wanted))
+def resolve(root, filename):
+    path = os.path.realpath(os.path.join(root, filename.lstrip("/").replace("\\", "/")))
     if path != root and not path.startswith(root + os.sep):
         return None
     return path if os.path.isfile(path) else None
 
 
-def resolve(root, filename):
-    wanted = filename.lstrip("/").replace("\\", "/")
-    return _inside(root, wanted)
-
-
 def parse_config(text):
-    """The assignments a Pi 4 acts on: everything outside `[all]` is skipped, `[tryboot]` above all, its os_prefix belonging to a boot path this is not checking."""
+    """The assignments a Pi 4 acts on: only `[all]`'s; `[tryboot]`'s belong to a boot path this is not checking."""
     config = {}
     live = True
     for raw in text.splitlines():
@@ -49,7 +44,7 @@ def wanted_files(config, model_dtb):
     if "kernel" in config:
         kernels = [prefix + config["kernel"]]
     else:
-        # Unnamed, so the firmware picks among these by what is present and any of them answers the question. kernel_2712.img is the Pi 5's, the only name meta-raspberrypi's raspberrypi5.conf puts on a correct image for that board.
+        # The firmware takes whichever is present; kernel_2712.img is the only name meta-raspberrypi gives a Pi 5's.
         kernels = [prefix + k for k in
                    ("kernel8.img", "kernel_2712.img",
                     "kernel7l.img", "kernel7.img", "kernel.img")]
@@ -74,10 +69,7 @@ def main():
     ap.add_argument("--dtb", default="bcm2711-rpi-4-b.dtb",
                     help="the device tree the target board will ask for")
     ap.add_argument("--resolve", metavar="NAME",
-                    help="instead of checking the tree, print what this one "
-                         "request maps to, relative to the root, and nothing at "
-                         "all if it maps to no file. For asking the resolver a "
-                         "direct question -- wk selftest does exactly that.")
+                    help="print the file this name resolves to, relative to the root, or nothing")
     args = ap.parse_args()
 
     root = os.path.realpath(args.root)

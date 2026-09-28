@@ -21,6 +21,7 @@ Run: python3 -m unittest tests.test_key_shared -v
 """
 import os
 import subprocess
+import sys
 import unittest
 
 import threading
@@ -34,6 +35,9 @@ from tests.test_credcheck import FakeGitHub
 from tests.test_key import (SSH_IS_THE_FORKS_KEY, SECURITY_HAS_NOTHING,
                             provision_credentials)
 from tests.test_claude_login import FAKE_CLAUDE, SECRET, login, record
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk.secrets import FORKS  # noqa: E402
 
 KEY = REPO / "cmd" / "key"
 PROVISION = REPO / "remote" / "provision.sh"
@@ -101,8 +105,8 @@ class _Shared(WkTest):
             wk.write_text(PEER_WK)
             wk.chmod(0o755)
             (reg / f"{name}.conf").write_text(
-                f"KIND={'peer' if peer else 'build'}\nWK_REMOTE_HOST=fake-{name}\nWK_REMOTE_ROOT={root}\n"
-                + ("WK_REMOTE_PEER=1\n" if peer else ""))
+                f"kind={'peer' if peer else 'build'}\nhost=fake-{name}\nroot={root}\n"
+                + ("peer=1\n" if peer else ""))
         return {"WK_TEST_PEER_LOG": str(log)}
 
 
@@ -269,10 +273,7 @@ class _Fleet(_Shared):
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        self.forks = subprocess.run(
-            ["bash", "-c", '. "$1/lib/common.sh"; . "$1/lib/store.sh"; '
-                           'wk_push_forks | awk "NF {print \\$2}"', "_", str(REPO)],
-            capture_output=True, text=True, cwd=str(REPO)).stdout.split()
+        self.forks = [r[1] for r in FORKS]
         FakeGitHub.reset(repos=list(self.forks),
                          pulls=dict.fromkeys(self.forks, 422))
         self.gh_log = self.tmp / "gh.log"
@@ -807,17 +808,16 @@ class TestABuildMachineHoldsNoKey(unittest.TestCase):
     fork alias. On a shared build machine that config names no IdentityFile --
     the key is a forwarded agent's -- and no push-keys directory is made."""
 
-    def _config(self, tmp):
+    def _config(self):
         """The ssh config remote/provision.sh writes, produced the same way it
         does: the alias blocks with an empty dir (the agent-forward form)."""
-        return subprocess.run(
-            ["bash", "-c",
-             '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_ssh_alias_blocks ""',
-             "_", str(REPO)],
-            capture_output=True, text=True, cwd=str(REPO)).stdout
+        cp = subprocess.run(["python3", "-m", "wk.secrets", "alias-blocks", ""], capture_output=True, text=True,
+                            cwd=str(REPO), env={**os.environ, "PYTHONPATH": str(REPO / "lib"), "WK_ROOT": str(REPO)})
+        self.assertEqual(0, cp.returncode, cp.stderr)
+        return cp.stdout
 
     def test_the_config_names_no_identity_file(self):
-        cfg = self._config(None)
+        cfg = self._config()
         self.assertIn("Host github-webkit", cfg)
         self.assertIn("HostName github.com", cfg)
         self.assertNotIn("IdentityFile", cfg)
@@ -827,7 +827,7 @@ class TestABuildMachineHoldsNoKey(unittest.TestCase):
         text = PROVISION.read_text()
         self.assertNotIn('ensure_dir "$ROOT/push-keys"', text)
         self.assertIn('rm -rf "$ROOT/push-keys"', text)
-        self.assertIn('wk_ssh_alias_blocks ""', text)
+        self.assertIn('python3 -m wk.secrets alias-blocks ""', text)
 
 
 if __name__ == "__main__":

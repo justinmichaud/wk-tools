@@ -1,13 +1,10 @@
-"""The disks a machine offers for writing: `lsblk -J` run on it and parsed here, and what its card helper says about
-each one. The machine is reached over a boot Channel: its `m_ssh` for reads, its `card_priv` for the helper."""
+"""The disks a machine offers for writing: its `lsblk -J` (over the boot Channel's `m_ssh`) and its card helper's word on each."""
 
 import json
-import os
-import sys
 from collections import namedtuple
 
 from wk import act
-from wk.boot.driver import CARD_PRIV, Channel, disk_of, part, partno
+from wk.boot.driver import CARD_PRIV
 from wk.kv import kv
 
 LSBLK = "lsblk -J -p -o NAME,SIZE,TRAN,RM,TYPE,MODEL,LABEL"
@@ -58,7 +55,7 @@ def line(d):
 class Disks:
     def __init__(self, ch, conf):
         self.ch, self.conf = ch, conf
-        self.name, self.device = conf.get("NODE_NAME", ""), conf.get("NODE_DEVICE", "")
+        self.name, self.device = conf.get("name", ""), conf.get("device", "")
         self._disks = self._can = None
         self._whose = {}
 
@@ -72,7 +69,6 @@ class Disks:
         return self._disks
 
     def can_identify(self):
-        """A helper older than `whose` answers it with its usage line."""
         if self._can is None:
             r = self.card("whose")
             self._can = "usage: wk-card-priv" not in r.out + r.err
@@ -89,7 +85,7 @@ class Disks:
         return self._whose[dev]
 
     def resolve_own(self):
-        """NODE_DEVICE's transport less disks marked for another machine, so a blank medium needs no marker; "" if not one."""
+        """device's transport less disks marked for another machine, so a blank medium needs no marker; "" if not one."""
         want = tran_of_name(self.device)
         same = [d.name for d in self.candidates() if d.tran == want] if want else []
         if len(same) < 2:
@@ -161,40 +157,3 @@ class Disks:
             act.die("%s will not write %s:\n%s\n    Disks there:\n%s" % (
                 self.name, dev, "\n".join("    " + s for s in said.splitlines()), self.listing()))
         act.debug(said)
-
-
-def _disks(env, root):
-    conf = {k: v for k, v in env.items() if k.startswith("NODE_")}
-    return Disks(Channel(root, conf, env.get("MODE_CHANNEL") or "none", env=env), conf)
-
-
-def _say(text):
-    if text:
-        print(text)
-    return 0
-
-
-VERBS = {
-    "tran": lambda d, a: _say(tran_of_name(a[0])),
-    "own-or-declared": lambda d, a: _say(d().own_or_declared()),
-    "list": lambda d, a: _say(d().listing()),
-    "part": lambda d, a: _say(part(a[0], a[1])),
-    "disk-of": lambda d, a: _say(disk_of(a[0])),
-    "partno": lambda d, a: _say(partno(a[0])),
-}
-
-
-def main(argv, env=None):
-    env = os.environ if env is None else env
-    if not argv or argv[0] not in VERBS:
-        sys.stderr.write("usage: python3 -m wk.sysimage.disk {%s} [args]\n" % "|".join(VERBS))
-        return 2
-    root = env.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-    try:
-        return VERBS[argv[0]](lambda: _disks(env, root), argv[1:]) or 0
-    except act.Refused as e:
-        return e.status
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))

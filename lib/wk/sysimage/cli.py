@@ -1,10 +1,11 @@
-"""`wk sysimage`'s verbs -- ls, holds, path, write, --list, build and webkit's dispatch on the builder, and the rm
+"""`wk sysimage`'s verbs -- ls, holds, path, disks, write, --list, build and webkit's dispatch on the builder, and the rm
 and flash tombstones -- and the questions the dispatcher asks before it routes one. A 2.52+ yocto profile's PGO
-cycle is lib/wk/pgo.py, and `disks` lib/sysimage-arms.sh."""
+cycle is lib/wk/pgo.py."""
 
 import re
 
-from wk import act, build, fleet, images, pgo, record, shell
+from wk import act, build, fleet, images, pgo, record
+from wk.kv import ConfError
 from wk.sysimage import buildroot, disk, pmos, task, write as writemod
 from wk.sysimage import ls as lsmod
 from wk.sysimage import guestbase, macvolume
@@ -15,7 +16,7 @@ UNKNOWN = "unknown profile '%s'.\n    'wk sysimage --list' has every configurati
 BUILDERS = ("yocto", "buildroot", "pmos", "fetch", "mac-volume", "guest")
 
 
-def lane(argv, env=None):
+def wsname(argv, env=None):
     return images.ws_arg(list(argv[1:]), env) if argv else ""
 
 
@@ -23,12 +24,12 @@ def where(argv, env=None):
     """`ls` walks from here and answers another's walk from the store; a verb naming an image workspace runs there."""
     if argv[:1] in (["ls"], ["list"]):
         return "store" if "--continued" in argv[1:] else "local"
-    return "workspace" if lane(argv, env) else "host"
+    return "workspace" if wsname(argv, env) else "host"
 
 
 def wstarget(argv, reg):
     m = images.spec_machine(argv[1]) if len(argv) > 1 else ""
-    if not m or not lane(argv, reg.env):
+    if not m or not wsname(argv, reg.env):
         return ""
     return images.spec_target(m, record.machine_name(reg.env), reg.default())
 
@@ -49,22 +50,25 @@ class Sysimage:
             target = self.reg.load(self.reg.ws_target(ws))
             return build.busy_reason(target, build.records_of(target, self.clock, self.machine), ws) is not None
         except (LookupError, OSError):
-            return False
+            return None
 
     def profile(self, spec):
         name = images.spec_profile(spec)
         try:
             return images.load(name, self.env)
-        except images.Tombstone as e:
+        except (images.Tombstone, ConfError) as e:
             act.die(str(e))
-        except (LookupError, images.ConfError):
+        except LookupError:
             act.die(UNKNOWN % name)
 
     def builder_outputs(self, p):
         return lsmod.builder_outputs(self.reg, self.clock, p)
 
     def image_path(self, ws, p=None):
-        host = self.builder_outputs(p) if p is not None else None
+        try:
+            host = self.builder_outputs(p) if p is not None else None
+        except lsmod.Unknown as e:
+            act.die("cannot tell whether %s is built: %s" % (p["IMG_PROFILE"], e))
         found = host if host is not None else (lsmod.outputs(self.machine, self.reg.store, ws) if ws else [])
         return found[0] if found else None
 
@@ -95,9 +99,7 @@ class Sysimage:
             return buildroot.Buildroot(self.reg, p, spec, self.clock).build(rest)
         if p["IMG_BUILDER"] == "yocto":
             return yocto.Yocto(self.reg, p, spec, self.clock).build(rest)
-        if p["IMG_BUILDER"] == "pmos":
-            return pmos.Pmos(self.reg, p, spec, self.clock).build(rest)
-        return shell.sysimage_arms(self.reg.root, p["IMG_BUILDER"], spec, *rest)
+        return pmos.Pmos(self.reg, p, spec, self.clock).build(rest)
 
     def webkit(self, spec, rest):
         if not spec:
@@ -149,8 +151,8 @@ class Sysimage:
         if toolchain:
             if slot is not None or commit or config:
                 act.die("usage: wk sysimage holds %s --toolchain\n"
-                        "    --toolchain asks whether the lane has the cross SDK the webkit stage builds\n"
-                        "    against, which is one question about the lane and takes nothing else." % name)
+                        "    --toolchain asks whether the image workspace has the cross SDK the webkit stage builds\n"
+                        "    against, which is one question about the workspace and takes nothing else." % name)
             if not p["YOC_TARGET"]:
                 act.die("%s is built by %s, which has no cross toolchain\n"
                         "    of its own to ask about -- only a yocto profile installs one (YOC_TARGET)."
@@ -205,6 +207,23 @@ class Sysimage:
                     "beside it. Drop --rescue, or drop the @-suffix.")
         w = writemod.Write(images.root(self.env), self.env, self.machine, self.reg.store)
         return w.run(src, spec, grow, profile, "rescue" if rescue else "bench", mach or "")
+
+    def disks(self, name):
+        fl = fleet.Fleet(images.root(self.env), self.env)
+        if not name:
+            act.die("usage: wk sysimage disks <machine>\n    machines:\n%s" % writemod.machine_list(fl))
+        conf = writemod.load_machine(fl, name)
+        if not conf:
+            act.die("unknown machine '%s'" % name)
+        w = writemod.Write(images.root(self.env), self.env, self.machine, self.reg.store)
+        w.attach(conf)
+        if not w.ssh("true").ok:
+            act.die("%s is not reachable over ssh" % name)
+        act.log("removable disks attached to %s:" % name)
+        print(w.disks.listing())
+        act.log("\n  write one with:  wk sysimage write --from <path> --disk %s:<device>\n  ('wk sysimage ls' prints the paths)\n"
+                "  a machine's own system disk is never listed and never writable." % name)
+        return 0
 
     @staticmethod
     def rm():

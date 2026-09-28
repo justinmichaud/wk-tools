@@ -1,23 +1,25 @@
-"""The bench record, a task directory -- task.json, runs/<run>/{env,result}.json -- whose state is recomputed from its runs
-on every read ("running" is its lock, which the caller reads), and `wk bench ls`'s listing of every one in the fleet."""
+"""The bench record, a task directory -- task.json, runs/<run>/{env,result}.json -- whose state is recomputed from its runs on every read ("running" is its lock, which the caller reads), where each lives, and `wk bench ls`'s listing of every one in the fleet."""
 
 import json
 import os
 import re
 import sys
+import zipfile
 
 from wk import fleetwalk
 from wk.kv import kv_file
+from wk.machine import Local, replace_file
 
 # The axes a report groups variance by, filled in for every subfield a writer left alone, so an older record and an uncontrolled one read alike.
 DEFAULT_CONFIGURATION = {"aslr": "unset", "path_len": 0, "shared_cache": None, "env_pad_bytes": 0}
 
 
 def load(path):
+    """{} where the file is absent -- an older run, or one still writing it; anything else (corrupt JSON, a permission error) raises, so it is not misreported as merely missing."""
     try:
         with open(path) as f:
             return json.load(f)
-    except Exception:
+    except FileNotFoundError:
         return {}
 
 
@@ -56,8 +58,7 @@ def write_env(path, fields, bool_fields=(), update=False):
     cfg = doc.setdefault("configuration", {})
     for key, value in DEFAULT_CONFIGURATION.items():
         cfg.setdefault(key, value)
-    with open(path, "w") as f:
-        json.dump(doc, f, indent=2)
+    replace_file(path, json.dumps(doc, indent=2))
 
 
 def _list_field(value):
@@ -82,12 +83,7 @@ def task_write(taskdir, fields, commands):
     if not doc["devices"] or not doc["plans"] or not doc["slots"]:
         sys.exit("task-write: devices, plans and slots each need at least one entry")
     os.makedirs(os.path.join(taskdir, "runs"), exist_ok=True)
-    out = os.path.join(taskdir, "task.json")
-    tmp = out + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(doc, f, indent=2, sort_keys=True)
-        f.write("\n")
-    os.replace(tmp, out)
+    replace_file(os.path.join(taskdir, "task.json"), json.dumps(doc, indent=2, sort_keys=True) + "\n")
 
 
 def task_doc(taskdir):
@@ -98,7 +94,7 @@ def task_doc(taskdir):
 
 
 def not_a_measurement(env):
-    """Why a run's reading measures no machine, or "": a rehearsal (a driver whose B_MEASURES is no) proves the path only."""
+    """Why a run's reading measures no machine, or "": a rehearsal (a driver whose `measures` fact is no) proves the path only."""
     if env.get("measures") is False:
         return "%s is a rehearsal, and its reading is not a measurement of any machine" % (env.get("machine") or "the machine it ran on")
     return ""
@@ -258,28 +254,91 @@ def task_state(taskdir, running):
             "stage": status.get("stage", ""), "summary": summary}
 
 
-def status_lines(st):
-    out = ["%s=%s" % (key, st[key]) for key in ("state", "planned", "ended", "ok", "failed", "usable", "summary")]
-    out.append("subject=%s" % subject_line(st["doc"]))
-    out.append("current=%s" % (st["current"]["id"] if st["current"] else ""))
+def tasks(bench_dir, machine=None):
+    m = machine or Local()
+    return sorted(d for d in m.listdir(bench_dir) if m.exists(os.path.join(bench_dir, d, "task.json"))) if m.isdir(bench_dir) else []
+
+
+# What a task delivers: its request, each run's json (env, result, the PGO reading), the warmup round's evidence and profiles; then its report.
+MEASURED = ("task.json", "runs/*/*.json", "warmup/*")
+EXPORTED = MEASURED + ("report-*.html",)
+LIVE = MEASURED + ("status", "runs/*/run.log")
+EXPORT_RECORD = "exported"
+
+
+def guarded(path):
+    path = path.rstrip("/")
+    return os.path.dirname(os.path.dirname(path)), os.path.join(os.path.basename(os.path.dirname(path)), os.path.basename(path))
+
+
+def gather(machine, taskdir, patterns=MEASURED):
+    return machine.read_tree(*guarded(taskdir), patterns)
+
+
+def _held(name, measured, zip_path):
+    try:
+        z = zipfile.ZipFile(zip_path)
+    except (OSError, zipfile.BadZipFile):
+        return False
+    members = set(z.namelist())
+    return all(name + "/" + rel in members and z.read(name + "/" + rel) == data for rel, data in measured.items())
+
+
+def unexported(machine, bench, default_dir):
+    """[(task, why)] under `bench` on `machine` that no zip here holds byte for byte: the recorded one, or <default_dir>/<task>.zip."""
+    try:
+        names = tasks(bench, machine)
+    except OSError as e:
+        return [(bench, "unreadable, so whether it was exported cannot be known (%s)" % e)]
+    out = []
+    for t in names:
+        d = os.path.join(bench, t)
+        try:
+            recorded = machine.read(os.path.join(d, EXPORT_RECORD)).strip() if machine.exists(os.path.join(d, EXPORT_RECORD)) else ""
+            measured = gather(machine, d)
+            if not any(_held(t, measured, z) for z in dict.fromkeys(p for p in (recorded, os.path.join(default_dir, t + ".zip")) if p)):
+                out.append((t, "no export readable here holds it as it is now"))
+        except OSError as e:
+            out.append((t, "unreadable, so whether it was exported cannot be known (%s)" % e))
     return out
 
 
-def tasks(bench_dir):
-    if not os.path.isdir(bench_dir):
-        return []
-    return sorted(d for d in os.listdir(bench_dir) if os.path.isfile(os.path.join(bench_dir, d, "task.json")))
+def _ws_root(store):
+    return os.path.join(store.record_dir(), "ws")
 
 
-def running_tasks(bench_dir, lock_path, alive):
-    return {t for t in tasks(bench_dir) if alive(lock_path("bench-task-" + t))}
+def home_for(store, ws, task):
+    """A new task's directory: its workspace's where this store (record_dir, not the podman VM's root) holds it, else bench/."""
+    wsdir = os.path.join(_ws_root(store), ws) if ws else ""
+    return os.path.join(wsdir, "bench", task) if wsdir and os.path.isdir(wsdir) else os.path.join(store.bench_dir(), task)
 
 
-def ls_rows(bench_dir, running=(), where=""):
-    """One store's rows: each task, its state, its directory and each run's; `where` names the machine holding the store."""
+def task_roots(machine, root):
+    ws = os.path.join(root, "ws")
+    dirs = [os.path.join(ws, w, "bench") for w in (sorted(machine.listdir(ws)) if machine.isdir(ws) else [])]
+    return [d for d in dirs if machine.isdir(d)] + [os.path.join(root, "bench")]
+
+
+def homes_at(machine, root):
+    out = {}
+    for d in task_roots(machine, root):
+        for t in tasks(d, machine):
+            out.setdefault(t, os.path.join(d, t))
+    return dict(sorted(out.items()))
+
+
+def homes(store):
+    return homes_at(Local(), store.record_dir())
+
+
+def running_tasks(found, lock_path, alive):
+    return {t for t in found if alive(lock_path("bench-task-" + t))}
+
+
+def ls_rows(found, running=(), where=""):
+    """One store's rows (`found` is its homes()): each task, its state, its directory and each run's; `where` names the machine holding the store."""
     out = []
-    for name in tasks(bench_dir):
-        taskdir = os.path.join(bench_dir, name)
+    for name, taskdir in found.items():
         st = task_state(taskdir, name in running)
         out.append("%s  %s%s" % (name, subject_line(st["doc"]), "  [%s]" % where if where else ""))
         out.append("    %s  %s" % (st["state"], st["summary"]))
@@ -301,12 +360,12 @@ def ls_rows(bench_dir, running=(), where=""):
 class Listing:
     """This machine's store, then every target whose machine answers for a store of its own, through its own wk."""
 
-    def __init__(self, reg, bench_dir, lock_path, alive, label, warn):
-        self.reg, self.bench_dir, self.label, self.warn = reg, bench_dir, label, warn
-        self.lock_path, self.alive = lock_path, alive
+    def __init__(self, reg, store, alive, label, warn):
+        self.reg, self.store, self.label, self.warn, self.alive = reg, store, label, warn, alive
 
     def store_rows(self):
-        return ls_rows(self.bench_dir, running_tasks(self.bench_dir, self.lock_path, self.alive), self.label)
+        found = homes(self.store)
+        return ls_rows(found, running_tasks(found, self.store.lock_path, self.alive), self.label)
 
     def _label(self, target, name):
         return name if target.kind == "remote" and not getattr(target, "is_local", True) else self.label

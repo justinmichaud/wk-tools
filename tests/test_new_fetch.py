@@ -14,9 +14,9 @@ the store, or a container:
              fetch_script        the one fetch a workspace's checkout does,
                                  which is `git fetch --all` as git has that
                                  checkout configured
-  lib/store  wk_wiring_script    that configuration: where a fetch of each
+  wk.git     wiring_script       that configuration: where a fetch of each
                                  remote reads from, and which refs it asks for
-             base_verify         what a snapshot has to be before `wk new`
+  wk.store   Bases.verify        what a snapshot has to be before `wk new`
                                  overlays a workspace on it
   wk.workspace checkout_script   the fast-forward creation does, and the
                                  report of where the checkout ended up (the
@@ -38,14 +38,8 @@ from tests.support import REPO, bash, scratch_dir
 sys.path.insert(0, str(REPO / "lib"))
 from wk import git, secrets, sync, targets, workspace  # noqa: E402
 from wk.clock import Clock  # noqa: E402
-
-# The stand-in origin below carries `main` and nothing else, so the branch list
-# is pinned to it: which branches this checkout's image configurations add to a
-# real mirror is tests/test_mirror_path.py's question, and the wiring's shape is
-# this file's.
-PIN = 'export WK_MIRROR_BRANCHES=main\n'
-
-STORE_FUNCS = f'set -euo pipefail\ncd "{REPO}"\n{PIN}. lib/common.sh\n. lib/store.sh\n'
+from wk.machine import Local  # noqa: E402
+from wk.store import Bases, Store  # noqa: E402
 
 
 def _forks():
@@ -112,7 +106,7 @@ class MirrorFixture(unittest.TestCase):
 
     def clone_snapshot(self, dest):
         """What the publish's `git clone <mirror> <tree>` leaves behind,
-        with origin pointed at the upstream the way wk_wiring_script does."""
+        with origin pointed at the upstream the way git.wiring_script does."""
         _git("clone", "-q", str(self.mirror), str(dest), cwd=self.tmp)
         _git("remote", "set-url", "origin", str(self.upstream), cwd=dest)
         return dest
@@ -327,7 +321,7 @@ class TestWsFetchScript(WorkspaceFixture):
 
 class TestWiringWithNoMirror(MirrorFixture):
     """A checkout on a machine that keeps no mirror -- a build box cloning from
-    the reference its admins refresh (targets/remote.sh, t_mirror_dir) -- is
+    the reference its admins refresh (Remote.mirror_dir) -- is
     wired to the upstreams themselves, and still never asks origin for more
     than the branches this tooling carries."""
 
@@ -526,11 +520,11 @@ class TestTheStaleRewritesTheWiringClearsFirst(MirrorFixture):
 
 
 class TestWhatFirstRunSaysAboutTheMirror(unittest.TestCase):
-    """container/firstrun.sh wires the checkout from the store's own functions,
-    reached through `_store_fn`. A lookup that fails and an answer of "no
-    mirror on this target" wire the same remotes to github.com, so the log has
-    to tell them apart: the first is a fault with a name, the second is what a
-    machine keeping no mirror looks like."""
+    """container/firstrun.sh wires the checkout from `python3 -m wk.git
+    wiring-script` and the mirror the target hands it in WK_MIRROR. A wiring
+    that fails and an answer of "no mirror on this target" both leave fetches
+    reading github.com, so the log has to tell them apart: the first is a fault
+    with a name, the second is what a machine keeping no mirror looks like."""
 
     # The wiring half of the block, taken from the file and run: the half below
     # it is `git-webkit setup`, which needs the injector.
@@ -543,36 +537,31 @@ set -u
 SRC=%s
 log()  { printf '[firstrun] %%s\\n' "$*"; }
 warn() { printf '[firstrun] warning: %%s\\n' "$*"; }
-_store_fn() {
-    case "$1" in
-        mirror_in_container) %s ;;
-        wk_wiring_script)    printf 'true\\n' ;;
-    esac
-}
+_git_py() { %s; }
 """
 
-    def _run(self, mirror_body):
-        self.assertIn("_store_fn wk_wiring_script", self.BLOCK)
+    def _run(self, wiring_body, mirror=""):
+        self.assertIn("_git_py wiring-script", self.BLOCK)
         with scratch_dir(prefix="wk-firstrun-") as d:
             (d / ".git").mkdir()
-            cp = bash(self.HARNESS % (repr(str(d)), mirror_body)
-                      + self.BLOCK + "\nfi\n")
+            cp = bash(self.HARNESS % (repr(str(d)), wiring_body)
+                      + self.BLOCK + "\nfi\n", env={"WK_MIRROR": mirror} if mirror else None)
             self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
             return cp.stdout + cp.stderr
 
-    def test_a_lookup_that_failed_is_a_warning_that_names_it(self):
+    def test_a_wiring_that_failed_is_a_warning_that_names_it(self):
         out = self._run("return 1")
-        self.assertIn("mirror_in_container failed", out)
-        self.assertIn("fetches read github.com", out)
+        self.assertIn("wk.git wiring-script failed", out)
+        self.assertIn("could not wire the checkout's remotes", out)
 
     def test_no_mirror_on_the_target_is_stated_and_is_not_a_warning(self):
-        out = self._run("printf ''")
+        out = self._run("printf 'true\\n'")
         self.assertIn("no mirror on this target", out)
         self.assertNotIn("warning", out)
         self.assertIn("fetches read github.com", out)
 
     def test_a_mirror_is_named_in_the_line_that_says_what_was_wired(self):
-        out = self._run("printf /mirror/WebKit.git")
+        out = self._run("printf 'true\\n'", mirror="/mirror/WebKit.git")
         self.assertIn("fetches read /mirror/WebKit.git", out)
         self.assertNotIn("warning", out)
 
@@ -626,41 +615,34 @@ class StoreFixture(MirrorFixture):
         (d / "sha").write_text(self.head(tree) + "\n")
         return d
 
-    def store_fn(self, call):
-        return bash(STORE_FUNCS + call, env={"WK_STORE": str(self.store)})
+    def bases(self):
+        return Bases(Store({"WK_STORE": str(self.store)}), Local())
 
 
 class TestBaseVerify(StoreFixture):
-    """lib/store.sh's base_verify, which `wk new` asks before overlaying a
-    workspace on a snapshot and current_base asks before offering one."""
+    """Bases.verify, which `wk new` asks before overlaying a workspace on a
+    snapshot and Bases.current asks before offering one."""
 
     def test_a_snapshot_on_its_branch_verifies(self):
         self.publish("20260101T000000Z")
-        cp = self.store_fn("base_verify 20260101T000000Z")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout, "", "nothing is said about a good one")
+        self.assertEqual(self.bases().verify("20260101T000000Z"), "", "nothing is said about a good one")
 
     def test_a_detached_snapshot_is_refused_and_names_wk_sync(self):
         self.publish("20260101T000000Z", detached=True)
-        cp = self.store_fn("base_verify 20260101T000000Z")
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("is not on branch main", cp.stdout)
-        self.assertIn("wk sync", cp.stdout)
+        why = self.bases().verify("20260101T000000Z")
+        self.assertIn("is not on branch main", why)
+        self.assertIn("wk sync", why)
 
     def test_a_snapshot_that_records_no_branch_is_refused(self):
         """Published before a snapshot recorded one: whether its HEAD is that
         branch cannot be known, so it is not handed out."""
         self.publish("20260101T000000Z", branch_file=None)
-        cp = self.store_fn("base_verify 20260101T000000Z")
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("does not record the branch", cp.stdout)
+        self.assertIn("does not record the branch", self.bases().verify("20260101T000000Z"))
 
     def test_a_branch_that_tracks_nothing_is_refused(self):
         d = self.publish("20260101T000000Z")
         _git("branch", "--unset-upstream", cwd=d / "WebKit")
-        cp = self.store_fn("base_verify 20260101T000000Z")
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("tracking origin/main", cp.stdout)
+        self.assertIn("tracking origin/main", self.bases().verify("20260101T000000Z"))
 
     def test_current_base_skips_one_it_would_refuse(self):
         """`wk new` takes the newest publishable snapshot, and a detached one
@@ -668,15 +650,11 @@ class TestBaseVerify(StoreFixture):
         with nothing but bad ones answers with nothing at all."""
         self.publish("20260101T000000Z")
         self.publish("20260102T000000Z", detached=True)
-        cp = self.store_fn("current_base")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "20260101T000000Z")
+        self.assertEqual(self.bases().current(), "20260101T000000Z")
 
     def test_a_store_of_only_detached_snapshots_offers_none(self):
         self.publish("20260102T000000Z", detached=True)
-        cp = self.store_fn("current_base")
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertEqual(cp.stdout.strip(), "")
+        self.assertEqual(self.bases().current(), "")
 
 
 class TestNewCheckoutScript(WorkspaceFixture):
@@ -741,7 +719,7 @@ class TestTheAliasIsResolvedByTheResolver(MirrorFixture):
 
     ssh reads the per-user config from the passwd entry rather than $HOME, so
     these drive it through the `-F` file `core.sshCommand` names, which is
-    how a build box is wired (wk_wiring_script).
+    how a build box is wired (git.wiring_script).
     """
 
     def aliases(self):

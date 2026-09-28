@@ -23,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, WkTest, bash, clean_env
+from tests.support import REPO, WkTest, clean_env
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import notify  # noqa: E402
@@ -105,6 +105,13 @@ class TestItPublishesOrSaysWhyNot(_Ntfy):
         self.assertEqual(6, code)
         self.assertIn("could not reach", why)
         self.assertEqual([], FakeNtfy.published)
+
+    def test_an_address_that_is_no_https_url_is_refused_naming_the_variable(self):
+        """Not reported as an unreachable server: nothing was asked, and the remedy is the setting."""
+        with self.at("ntfy.example"), self.assertRaises(SystemExit) as cm:
+            notify.publish(TOPIC, "the plant is waiting")
+        self.assertIn("WK_NTFY_API=ntfy.example", str(cm.exception))
+        self.assertIn("Unset WK_NTFY_API", str(cm.exception))
 
     def test_a_publish_that_landed_has_exactly_one_exit_code(self):
         """The guessable-name verdict belongs to `check`, which is not a publish."""
@@ -252,11 +259,9 @@ class TestTheCredentialIsDeclaredWhereARebuildLooks(unittest.TestCase):
 
     def test_it_is_not_in_a_directory_a_workspace_can_read(self):
         """The secrets directory is mounted read-only into every container, so a topic in there could be forged from one."""
-        cp = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
-                  'printf "%s\\n%s\\n%s\\n" "$(wk_ntfy_topic_path)" "$(wk_secrets_dir)" "$(wk_agent_rw_dir)"',
-                  env={"WK_STORE": "/scratch/store", "WK_HOST_SECRETS": "/scratch/store/secrets"})
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        topic, secrets, agent_rw = cp.stdout.split()
+        from wk.store import Store
+        store = Store(clean_env({"WK_STORE": "/scratch/store", "WK_HOST_SECRETS": "/scratch/store/secrets"}))
+        topic, secrets, agent_rw = store.ntfy_topic_path(), store.secrets_dir(), store.agent_rw_dir()
         self.assertEqual("/scratch/store/notify/ntfy-topic", topic)
         for mounted in (secrets, agent_rw):
             self.assertFalse(topic.startswith(mounted + "/"), topic)

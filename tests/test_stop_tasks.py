@@ -1,5 +1,5 @@
 """`wk stop --tasks` ends what is still running, through the kill command each
-record names (lib/task.sh) -- so nothing here knows how to end a build, a
+record names (lib/wk/record.py) -- so nothing here knows how to end a build, a
 creation or an agent session, and a kind that grows a new way of stopping is
 stopped the new way without this command changing.
 
@@ -19,7 +19,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, bash
+from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import record  # noqa: E402
@@ -53,17 +53,11 @@ class TestStopTasks(WkTest):
     def make_task(self, kind, name, kill, pid=None, ended=None):
         log = self.tmp / (name + ".log")
         log.write_text("")
-        script = ['. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/task.sh"',
-                  'dir=$(task_begin %s here %s %s %s step-one)'
-                  % (kind, name, shlex.quote(kill), shlex.quote(str(log)))]
-        if pid is not None:
-            script.append('task_pid "$dir" %d' % pid)
+        t = record.Records(env=self.env).begin(kind, "here", name, kill, str(log), ["step-one"],
+                                               pid=os.getpid() if pid is None else pid)
         if ended is not None:
-            script.append('task_end "$dir" %s' % ended)
-        script.append('printf "%s" "$dir"')
-        cp = bash("\n".join(script), env=self.env)
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        return Path(cp.stdout.strip())
+            t.end(ended)
+        return t.path
 
     def a_live_task(self, kind="build", name="ws1"):
         """(pid, the flag its kill command touches) -- the flag is how a test

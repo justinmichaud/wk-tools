@@ -9,16 +9,24 @@ and from the files themselves, so a new command is covered the day it lands.
 Run: python3 -m unittest tests.test_cli_shape -v
 """
 TIER = "lint"
+import itertools
 import re
 import shlex
 import subprocess
+import sys
 import unittest
 
 from tests.support import REPO, WK, WkTest, bash, run
 
+sys.path.insert(0, str(REPO / "lib"))
+from wk import decl as D  # noqa: E402
+
 # The dispatcher's own flags: taken out of argv before any command sees them.
 GLOBAL_OPTS = {"--force", "--quiet", "--dry-run", "-n", "--yes", "-y",
                "-h", "--help", "--explain"}
+
+# An option a declaration hands to the dispatcher: `config=--config` is read there, never by the command.
+DISPATCHER_READS = {"--config": {"--config"}}
 
 CMD_FILES = sorted(p for p in (REPO / "cmd").iterdir() if p.is_file())
 
@@ -47,7 +55,7 @@ def declared_opts(path):
     """Every option named in the file's declarations: the command's `opts`,
     and each `sub`/`flag` line's `opts=`."""
     opts = set()
-    for line in path.read_text().splitlines()[:15]:
+    for line in itertools.takewhile(lambda l: l.startswith("#"), path.read_text().splitlines()):
         if not line.startswith("# wk:"):
             continue
         toks = line[5:].split()
@@ -75,6 +83,13 @@ def literal_opts(text):
 def arms_file(path):
     """lib/<cmd>-arms.sh: the bash a Python command hands its not yet ported verbs to, verbatim."""
     return REPO / "lib" / (path.name + "-arms.sh")
+
+
+def package_opts(path):
+    """Option literals in lib/wk/<cmd>/, the package a command hands a verb's declared options on to."""
+    pkg = REPO / "lib" / "wk" / path.name
+    texts = (f.read_text() for f in pkg.glob("*.py")) if pkg.is_dir() else ()
+    return {o for t in texts for o in re.findall(r'"(--[a-z][a-z-]*)"', t)}
 
 
 def code_opts(path):
@@ -115,11 +130,20 @@ class TestArgumentsAreRefusedOnce(WkTest):
                 self.assertIn("usage: wk", cp.stdout)
 
     def test_an_argument_past_what_it_takes_is_refused(self):
+        """A command with verbs is given its first verb that takes a fixed count, and counted as that verb."""
         for cmd, d in declarations().items():
-            if d["takes"] == "*" or d["passthrough"] == "tail":
+            first = []
+            decl = D.Decl(REPO / "cmd" / cmd)
+            if decl.verbs:
+                first = [v for v in decl.verbs.split(",")
+                         if decl.takes_for([v]) != "*" and decl.passthrough_for([v]) not in ("tail", "all")][:1]
+                if not first:
+                    continue
+                d = dict(d, name=decl.name_for(first), takes=decl.takes_for(first), passthrough="")
+            if d["takes"] == "*" or d["passthrough"] in ("tail", "all"):
                 continue
             n = name_slot(d["name"]) + int(d["takes"]) + 1
-            args = [f"zz{i}" for i in range(1, n + 1)]
+            args = first + [f"zz{i}" for i in range(len(first) + 1, n + 1)]
             with self.subTest(cmd=cmd, args=args):
                 cp = run(cmd, *args)
                 self.assertEqual(cp.returncode, 2, cp.stdout)
@@ -130,8 +154,9 @@ class TestArgumentsAreRefusedOnce(WkTest):
         is an option the dispatcher refuses before the command sees it."""
         for path in CMD_FILES:
             with self.subTest(cmd=path.name):
-                declared = declared_opts(path)
+                declared = declared_opts(path) - DISPATCHER_READS.get(D.Decl(path).config, set())
                 code = code_opts(path) - GLOBAL_OPTS
+                code |= declared & package_opts(path)
                 self.assertEqual(
                     declared, code,
                     f"cmd/{path.name}: declared but not read: "
@@ -168,8 +193,13 @@ class TestTheGlobalFlagsBelongToTheDispatcher(WkTest):
         for cmd, d in declarations().items():
             if d["readonly"] != "-" or d["dryrun"] == "yes":
                 continue
+            decl = D.Decl(REPO / "cmd" / cmd)
+            verb = [v for v in decl.verbs.split(",") if not decl.honours_dryrun([v]) and not decl.is_readonly(v)][:1] \
+                if decl.verbs else []
+            if decl.verbs and not verb:
+                continue
             with self.subTest(cmd=cmd):
-                cp = run(cmd, "--dry-run")
+                cp = run(cmd, *verb, "--dry-run")
                 self.assertEqual(cp.returncode, 2, cp.stdout)
                 self.assertIn("has no dry run yet", cp.stdout)
 

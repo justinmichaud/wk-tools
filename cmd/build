@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk build <workspace> <config> -- build WebKit or JSC
-# wk: where=workspace name=required takes=1 values=--list ready=yes group=workspaces dryrun passthrough
+# wk: where=workspace name=required takes=1 config=arg ready=yes group=workspaces dryrun passthrough
 # wk: opts --list,--no-defaults,--detach,--kill,--babysit,--_babysit,--branch=,--mem-budget=,--mem-floor=,--cmake=,--env=,--cmakeargs=,--sysroot=
 # wk: flag --list where=local name=none takes=0
 # wk: flag --kill takes=0 opts=--kill
@@ -14,7 +14,7 @@
 # through to the build untouched.
 #
 #   --list                 print the available configs (wk build --list) and exit
-#   --no-defaults          skip this target's WK_BUILD_ARGS conf default
+#   --no-defaults          skip this target's build_args conf default
 #   --detach                hand the build to the machine that runs it, and return
 #                           once it has started; a foreground build is cancelled if
 #                           its terminal or its ssh goes away (the driver takes the HUP)
@@ -55,9 +55,7 @@ def parse(argv):
          "babysit_driver": a.flag("--_babysit"), "branch": a.value("--branch"),
          "mem_budget": a.value("--mem-budget"), "mem_floor": a.value("--mem-floor"),
          "cmakeargs": a.value("--cmakeargs"), "sysroot": a.value("--sysroot"),
-         "cmake": a.values("--cmake"), "env": a.values("--env"), "pass": a.positionals[1:] + a.tail}
-    if a.positionals:
-        o["config"] = a.positionals[0]
+         "cmake": a.values("--cmake"), "env": a.values("--env"), "pass": a.tail, "config": os.environ.get("WK_CONFIG")}
     return o
 
 

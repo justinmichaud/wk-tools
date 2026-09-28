@@ -1,18 +1,16 @@
 """lib/wk/record.py against a scratch record directory and a fake clock:
-the record's shape on disk, what the verdict says under each condition,
-and that a bash reader (lib/task.sh) reads what the Python writer wrote.
+the record's shape on disk and what the verdict says under each condition.
 
 Run: python3 tests/run.py -k tests.test_wk_record
 """
 import os
-import subprocess
 import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, bash
+from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.clock import FakeClock  # noqa: E402
@@ -151,14 +149,6 @@ class TestTheVerdict(RecordTest):
         self.assertEqual(t.verdict("capped"), "unanswered")
         self.assertTrue(t.running())
 
-    def test_the_jobs_own_exit_file_is_read_and_never_copied(self):
-        t = self.begin()
-        exit_file = self.tmp / "exit"
-        exit_file.write_text("3\n")
-        t.set("exit_file", str(exit_file))
-        self.assertEqual(t.verdict(), "failed")
-        self.assertFalse((t.path / "exit").exists())
-
 
 class TestAStopAskedFor(RecordTest):
     def test_the_status_a_stop_caused_reads_as_the_stop(self):
@@ -250,35 +240,6 @@ class TestFindHoldersAndWait(RecordTest):
         self.assertEqual(st, "crashed")
 
 
-class TestBashReadsWhatPythonWrote(RecordTest):
-    def test_the_bash_library_agrees_on_fields_steps_and_verdict(self):
-        t = self.begin()
-        t.step(2)
-        cp = bash('''
-. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; . "$WK_ROOT/lib/task.sh"
-d="%s"
-printf '%%s|%%s\\n' "$(task_field "$d" kind)" "$(task_verdict "$d")"
-task_end "$d" 0
-''' % t.path, env={"WK_STORE": str(self.tmp / "store"), "XDG_STATE_HOME": str(self.tmp / "state")})
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "build|running")
-        self.assertEqual(t.verdict(), "ok")
-
-    def test_python_reads_what_the_bash_library_wrote(self):
-        cp = bash('''
-. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; . "$WK_ROOT/lib/task.sh"
-d=$(task_begin --holds device:rpi3 build here ws "wk build ws --kill" "%s" configure compile)
-task_step_named "$d" compile
-printf '%%s' "$d"
-''' % self.log, env={"WK_STORE": str(self.tmp / "store"), "XDG_STATE_HOME": str(self.tmp / "state")})
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        t = record.Task(cp.stdout.strip(), clock=self.clock)
-        self.assertEqual(t.field("holds"), "device:rpi3")
-        self.assertEqual(t.steps(), [(1, "done"), (2, "running")])
-        self.assertEqual(t.verdict(), "died")   # the bash subshell that begun it is gone
-        self.assertEqual(self.records.holders("device:rpi3"), [])
-
-
 class TestHoldFollowsHolder(RecordTest):
     """`unit record.hold_follows_holder`: a hold is released only when its holder is provably gone, an unreadable
     holder keeps it, and no child process inherits one."""
@@ -322,21 +283,17 @@ class TestHoldFollowsHolder(RecordTest):
         self.assertEqual(self.holders(), [t.id])
 
     def test_a_hold_names_the_pid_that_took_it(self):
-        """`unit record.hold_names_its_taker`: one path, whichever language takes the hold, and the pid on the
-        record before the claim is the taker's -- for a bash caller its own shell, not the Python it ran."""
+        """`unit record.hold_names_its_taker`: the pid on the record before the claim is the taker's."""
         t = self.held(1001)
         self.assertEqual(t.field("pid"), "1001")
-        cp = bash('''. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/task.sh"
-d=$(task_begin --holds device:rpi3 bench here rpi3 "k" /l one)
-printf '%s %s' "$$" "$(task_field "$d" pid)"''', env={"WK_STORE": str(self.tmp / "store")})
-        shell, pid = cp.stdout.split()
-        self.assertEqual(shell, pid, cp.stderr)
+        t = self.records.begin("bench", "here", "rpi3", "k", "/l", ["one"], holds="device:rpi3")
+        self.assertEqual(t.field("pid"), str(os.getpid()))
 
     def test_a_workspace_pid_cannot_hold(self):
         with self.assertRaises(ValueError):
             self.begin(where="target", holds="device:rpi3")
 
-    def test_a_target_record_a_bash_driver_wrote_keeps_its_hold_until_it_ends(self):
+    def test_a_target_record_given_a_hold_keeps_it_until_it_ends(self):
         t = self.begin(where="target")
         t.set("holds", "device:rpi3")
         t.pid(77)

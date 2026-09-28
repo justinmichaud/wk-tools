@@ -1,6 +1,6 @@
 """Commands, drivers and checkers exercised on a host with no workspace, no
-podman machine and no ssh: each runs a real `wk` command or a lifted shell
-function against this tree and a scratch directory.
+podman machine and no ssh: each runs a real `wk` command or a library call
+against this tree and a scratch directory.
 
 Run: python3 -m unittest tests.test_host_only -v
 """
@@ -8,10 +8,15 @@ import os
 import platform
 import re
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, bash, fake_workspace, run
+from tests.support import REPO, WkTest, fake_workspace, run, stub_path
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import fleet, targets  # noqa: E402
+from wk.boot.driver import Driver  # noqa: E402
 
 
 def _have(prog):
@@ -22,53 +27,12 @@ def _have(prog):
 class TestHostState(WkTest):
     def test_no_host_marker_on_the_host(self):
         """a host carries no ~/.wk-workspace marker"""
-        cp = bash(f'. "{REPO}/lib/common.sh"; . "{REPO}/lib/target.sh"; in_workspace')
-        if cp.returncode == 0:
+        if targets.Registry(REPO).in_workspace():
             self.skipTest("this machine is a workspace")
         self.assertFalse(
             (Path.home() / ".wk-workspace").exists(),
             f"{Path.home()}/.wk-workspace exists on a host",
         )
-
-
-class TestDrivers(WkTest):
-    def test_start_stop_with_a_driver_loaded(self):
-        """`wk start` / `wk stop` with a driver loaded"""
-        for t in ("container", "vm", "remote"):
-            with self.subTest(target=t):
-                cp = bash(f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"; . "{REPO}/lib/resources.sh"
-. "{REPO}/lib/store.sh";  . "{REPO}/lib/target.sh"
-load_target "{t}"
-''')
-                self.assertEqual(cp.returncode, 0, f"targets/{t}.sh: {cp.stdout + cp.stderr}")
-
-        with fake_workspace() as ws:
-            cp = bash(
-                f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"; . "{REPO}/lib/resources.sh"
-. "{REPO}/lib/store.sh";  . "{REPO}/lib/target.sh"
-load_target local
-''',
-                env=ws.env(),
-            )
-        self.assertEqual(cp.returncode, 0, f"targets/local.sh with a marker: {cp.stdout + cp.stderr}")
-
-    def test_loading_a_second_target_does_not_leak_overrides(self):
-        """loading a second target does not leave the first driver's overrides live"""
-        cp = bash(f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"; . "{REPO}/lib/resources.sh"
-. "{REPO}/lib/store.sh";  . "{REPO}/lib/target.sh"
-load_target container
-first=$(type t_exec)
-load_target remote
-second=$(type t_exec)
-[ "$first" != "$second" ] || {{ echo "t_exec is the same after loading two drivers"; exit 1; }}
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
 
 class TestCommandsWithoutAMachine(WkTest):
@@ -79,20 +43,13 @@ class TestCommandsWithoutAMachine(WkTest):
         self.assertIn("jsc-release", cp.stdout)
         self.assertIn("mac-release", cp.stdout)
 
-    def test_wk_build_list_with_podman_stopped(self):
-        """`wk build --list` with podman stopped"""
-        from tests.support import podman_vm_running
-
-        try:
-            subprocess.run(["podman", "--version"], capture_output=True, timeout=5)
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            self.skipTest("no podman on this machine")
-        if podman_vm_running(os.environ.get("WK_MACHINE", "wk")):
-            self.skipTest("the podman machine is already running")
-        cp = run("build", "--list")
-        self.assertEqual(cp.returncode, 0)
-        # It must not have started the machine.
-        self.assertFalse(podman_vm_running(os.environ.get("WK_MACHINE", "wk")))
+    def test_wk_build_list_starts_no_podman_machine(self):
+        """`wk build --list` answers without asking podman to start anything"""
+        asked = self.tmp / "podman-asked"
+        with stub_path({"podman": 'echo "$*" >> %s\nexit 125\n' % asked}) as binp:
+            cp = run("build", "--list", env={"PATH": f"{binp}:{os.environ['PATH']}"})
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertNotIn("start", asked.read_text() if asked.exists() else "")
 
     def test_sudo_status_never_prompts(self):
         """`wk key sudo status` answers without ever prompting"""
@@ -313,32 +270,19 @@ print("RESULT", r)
         )
 
 
-class TestSystemKind(WkTest):
+class TestSystemKind(unittest.TestCase):
     def test_base_image_is_never_mistaken_for_a_bench_system(self):
         """a base image is never mistaken for a bench system"""
-        script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/image.sh" 2>/dev/null || true
-. "{REPO}/image/profiles.sh"
-. "{REPO}/boot/machines.sh"
-bad=""
-machine_load rpi4 || {{ echo "no rpi4 machine conf"; exit 1; }}
-# rpi4: the bench system on the USB drive, the rescue on the SD card (machines/rpi4.conf)
-for pair in "/dev/sda2 bench" "/dev/mmcblk0p2 base" " unknown"; do
-    set -- $pair
-    got=$(b_system_kind "${{2:+$1}}")
-    [ "$got" = "${{2:-$1}}" ] || bad="$bad rpi4:${{1:-none}}=$got"
-done
-machine_load rpi3 || {{ echo "no rpi3 machine conf"; exit 1; }}
-got=$(b_system_kind /dev/mmcblk0p2)
-[ "$got" = base ] || bad="$bad rpi3-rescue=$got"
-got=$(b_system_kind /dev/mmcblk0p4)
-[ "$got" = bench ] || bad="$bad rpi3-bench=$got"
-[ -z "$bad" ] || {{ echo "$bad"; exit 1; }}
-'''
-        cp = bash(script)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        def kind(machine, rootdev):
+            conf = fleet.Fleet(REPO, {"HOME": "/nonexistent"}).load(machine)
+            return Driver(REPO, conf, None).system_kind(rootdev)
+        # rpi4: the bench system on the USB drive, the rescue on the SD card (machines/rpi4.conf)
+        self.assertEqual(kind("rpi4", "/dev/sda2"), "bench")
+        self.assertEqual(kind("rpi4", "/dev/mmcblk0p2"), "base")
+        self.assertEqual(kind("rpi4", ""), "unknown")
+        # rpi3: one medium, so both prefixes match and the rescue's root is asked first
+        self.assertEqual(kind("rpi3", "/dev/mmcblk0p2"), "base")
+        self.assertEqual(kind("rpi3", "/dev/mmcblk0p4"), "bench")
 
 
 class TestHandsOnArmingAndBench(WkTest):

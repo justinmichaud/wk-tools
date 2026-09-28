@@ -185,7 +185,7 @@ class TestTheArithmetic(WkTest):
 
 
 class TestTheHeadlineScore(WkTest):
-    """One number per run, out of the three shapes the Mac lane records. Two of
+    """One number per run, out of the three shapes the Mac bench path records. Two of
     the three never write their overall score into the file at all: they declare
     it as the geometric mean of their first-level children's Scores, and a
     stopping rule that reads nothing from them can never fire."""
@@ -302,7 +302,7 @@ class TestARunIsADirectory(WkTest):
             (d / "result.json").write_text("not json at all")
             cp = wkd("ab-precision", "--a", str(d), "--b", str(d))
             self.assertNotEqual(cp.returncode, 0)
-            self.assertIn("not JSON", cp.stdout + cp.stderr)
+            self.assertIn("not valid JSON", cp.stdout + cp.stderr)
 
     def test_a_result_json_carrying_no_suite_is_reported_as_such(self):
         with scratch_dir() as tmp:

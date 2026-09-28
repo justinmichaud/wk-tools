@@ -4,7 +4,7 @@
 Unit tests build two synthetic run directories -- a result.json and an
 env.json in each -- and call the report on them in-process, the way `wk bench
 report` does. The text and html outputs are checked to agree. No workspace,
-no podman VM. `live bench.compare` is the integration class at the end.
+no podman VM. `live bench.compare` is tests/test_bench_container_run.py's, against a workspace of its own.
 
 Run: python3 -m unittest tests.test_bench_report -v
 """
@@ -13,11 +13,10 @@ import io
 import json
 import re
 import statistics
-import subprocess
 import sys
 import unittest
 
-from tests.support import REPO, WkTest, bench_ls_runs, requires_podman_vm, run, scratch_dir
+from tests.support import REPO, WkTest, run, scratch_dir
 from tests.test_ab_precision import (
     JETSTREAM3_CHILDREN, JETSTREAM3_HEADLINE, MOTIONMARK_CHILDREN, MOTIONMARK_HEADLINE,
     SPEEDOMETER3_HEADLINE, aggregate_doc, fields, speedometer_doc,
@@ -25,8 +24,6 @@ from tests.test_ab_precision import (
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.bench import record, report  # noqa: E402
-
-WKDATA = REPO / "lib" / "wkdata.py"
 
 # The text table's name column is as wide as its widest name, so a name is
 # whatever precedes the metric word.
@@ -61,11 +58,6 @@ def precision(a, b):
     return in_process(report.precision, str(a), str(b), 0.3)
 
 
-def wkdata(*args, timeout=30):
-    return subprocess.run(["python3", str(WKDATA), *args], cwd=str(REPO),
-                          capture_output=True, text=True, timeout=timeout)
-
-
 def report_means(stdout):
     """{(subtest, metric): (A mean, B mean)} out of the text table."""
     out = {}
@@ -76,14 +68,24 @@ def report_means(stdout):
     return out
 
 
-def cli_env_record(path, *fields):
-    """`wkdata env-record`, the writer the bash run arms call."""
-    cp = wkdata("env-record", str(path), *fields)
-    assert cp.returncode == 0, cp.stdout + cp.stderr
-
-
 def env_record(path, *fields):
     record.write_env(str(path), [f for f in fields if f != "--update"], update="--update" in fields)
+
+
+class TestRecordLoadTellsMissingFromCorrupt(WkTest):
+    """A missing file is a legitimate, silent {} (an older run predating a
+    field); a corrupt one is a different fact and is not folded into it."""
+
+    def test_a_missing_file_reads_as_empty(self):
+        with scratch_dir() as tmp:
+            self.assertEqual({}, record.load(str(tmp / "nosuch.json")))
+
+    def test_a_corrupt_file_is_not_reported_as_merely_missing(self):
+        with scratch_dir() as tmp:
+            path = tmp / "env.json"
+            path.write_text("not json at all")
+            with self.assertRaises(ValueError):
+                record.load(str(path))
 
 
 class TestReportWalkerAndStats(WkTest):
@@ -315,7 +317,7 @@ class TestReportWalkerAndStats(WkTest):
         older env.json and one written today read the same way."""
         with scratch_dir() as tmp:
             f = tmp / "env.json"
-            cli_env_record(f, "plan=jetstream3")
+            env_record(f, "plan=jetstream3")
             doc = json.loads(f.read_text())
             self.assertEqual(
                 doc["configuration"],
@@ -327,42 +329,19 @@ class TestReportWalkerAndStats(WkTest):
         without a second write discarding the axes recorded before it."""
         with scratch_dir() as tmp:
             f = tmp / "env.json"
-            cli_env_record(f, "plan=jetstream3", "config=jsc-release")
-            cli_env_record(f, "--update", "wall_time_s=42")
+            env_record(f, "plan=jetstream3", "config=jsc-release")
+            env_record(f, "--update", "wall_time_s=42")
             doc = json.loads(f.read_text())
             self.assertEqual(doc["plan"], "jetstream3")
             self.assertEqual(doc["config"], "jsc-release")
             self.assertEqual(doc["wall_time_s"], "42")
 
-    def test_env_record_fields_are_read_on_either_side_of_a_flag(self):
-        """`--update` before the fields is how every caller in cmd/bench
-        writes wall_time_s, and argparse fills an nargs='*' positional from
-        one unbroken run of words -- so both orders are read, or the four
-        call sites that spell it the first way write nothing."""
-        with scratch_dir() as tmp:
-            for args in (("--update", "wall_time_s=42"),
-                         ("wall_time_s=42", "--update")):
-                f = tmp / "env.json"
-                f.unlink(missing_ok=True)
-                cli_env_record(f, "plan=jetstream3")
-                cli_env_record(f, *args)
-                doc = json.loads(f.read_text())
-                self.assertEqual(doc["wall_time_s"], "42", args)
-                self.assertEqual(doc["plan"], "jetstream3", args)
-
-    def test_a_subcommand_without_fields_still_refuses_a_stray_word(self):
-        """the leftovers are fields only where the subcommand takes fields;
-        anywhere else they are the typo they look like"""
-        cp = wkdata("get", "/dev/null", "plan", "junk")
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("unrecognized arguments: junk", cp.stdout + cp.stderr)
-
     def test_env_record_refuses_a_field_that_is_not_key_value(self):
-        """a mistyped flag arrives as a leftover, and is refused as one"""
+        """a mistyped field is refused as one, not written silently"""
         with scratch_dir() as tmp:
-            cp = wkdata("env-record", str(tmp / "env.json"), "--nosuch")
-            self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("not a key=value: --nosuch", cp.stdout + cp.stderr)
+            r = in_process(record.write_env, str(tmp / "env.json"), ["--nosuch"])
+            self.assertEqual(1, r.returncode)
+            self.assertIn("not a key=value: --nosuch", r.stderr)
 
 
 class TestTheHeadlineRow(WkTest):
@@ -535,86 +514,6 @@ class TestSpreadWithinAndBetweenRuns(WkTest):
             out = tmp / "r.html"
             self.assertEqual(rep(a, a, html=str(out)).returncode, 0)
             self.assertIn("run-to-run sd=7.0711", out.read_text())
-
-
-@requires_podman_vm()
-class TestBenchReportIntegration(WkTest):
-    """`live bench.compare`: `wk bench report` end to end, against whatever local container
-    workspace already has a jsc-release build -- building one here would be
-    tens of minutes (CLAUDE.md forbids driving a build from this suite
-    anyway), so this reuses one rather than creating and building a fresh
-    `wk new` workspace."""
-
-    def _existing_jsc_workspace(self):
-        # `wk ls` can legitimately take a long time -- it is not local-only,
-        # and this fleet has workspaces backed by a remote machine (target
-        # "moose:container") that `wk ls` reaches to refresh state. A slow
-        # or unreachable remote is not this test's problem to wait out, so a
-        # timeout here is a skip, not a failure.
-        try:
-            cp = run("ls", timeout=45)
-        except subprocess.TimeoutExpired:
-            return None, "'wk ls' did not answer within 45s"
-        if cp.returncode != 0:
-            return None, f"'wk ls' failed: {cp.stdout}"
-
-        # Only target == "container" exactly: the local podman-VM backend. A "moose:container" workspace is
-        # someone's real remote checkout, tens of GB, driven over the
-        # tailnet -- not something this test probes or touches.
-        candidates = []
-        for line in cp.stdout.splitlines():
-            parts = line.split()
-            if len(parts) < 2 or parts[0] == "NAME":
-                continue
-            if parts[1] == "container":
-                candidates.append(parts[0])
-        if not candidates:
-            return None, "no local (target=container) workspace in 'wk ls'"
-
-        for name in candidates:
-            try:
-                probe = run(
-                    "bench", "run", name, "sunspider1.0.2", "--config", "jsc-release", "--count", "1", timeout=120
-                )
-            except subprocess.TimeoutExpired:
-                continue
-            if probe.returncode == 0:
-                return name, None
-        return None, f"no jsc-release build ready to bench in: {', '.join(candidates)}"
-
-    def test_two_runs_and_a_report(self):
-        import time
-
-        ws, reason = self._existing_jsc_workspace()
-        if ws is None:
-            self.skipTest(reason)
-
-        t0 = time.time()
-        run_a = run("bench", "run", ws, "sunspider1.0.2", "--config", "jsc-release", "--count", "2", timeout=300)
-        self.assertEqual(run_a.returncode, 0, f"first run failed: {run_a.stdout}")
-        run_b = run("bench", "run", ws, "sunspider1.0.2", "--config", "jsc-release", "--count", "2", timeout=300)
-        self.assertEqual(run_b.returncode, 0, f"second run failed: {run_b.stdout}")
-        bench_s = time.time() - t0
-
-        # Each `wk bench` invocation is a task of one run; `wk bench ls`
-        # prints every run's directory, which is what report takes.
-        ls = run("bench", "ls")
-        run_ids = bench_ls_runs(ls.stdout)
-        self.assertGreaterEqual(len(run_ids), 2, f"'wk bench ls' does not show two runs: {ls.stdout}")
-        a_id, b_id = run_ids[-2], run_ids[-1]
-
-        with scratch_dir() as tmp:
-            html_out = tmp / "report.html"
-            cp = run("bench", "report", a_id, b_id, "--html", str(html_out), timeout=60)
-            self.assertEqual(cp.returncode, 0, f"'wk bench report' failed: {cp.stdout}")
-            self.assertTrue(html_out.exists(), "no html report was written")
-            html = html_out.read_text()
-            self.assertTrue(
-                re.search(r"[a-zA-Z]", html),
-                "the html report names no subtests at all",
-            )
-
-        print(f"[timing] two sunspider runs + report: {bench_s:.1f}s (workspace: {ws})")
 
 
 class TestPrecisionCarriesTheNoiseFloor(WkTest):

@@ -176,10 +176,10 @@ class TestSetup(MachineTest):
         rc, err = self.quiet(w.machines().setup, "box", "build")
         self.assertEqual(rc, 0, err)
         conf = w.fake.files[str(w.fleet / "box.conf")]
-        self.assertIn("KIND=build\n", conf)
+        self.assertIn("kind=build\n", conf)
 
     def test_after_that_the_conf_is_the_answer(self):
-        w = self.world(conf="KIND=peer\nWK_TARGET_KIND=remote\nWK_REMOTE_PEER=1\n")
+        w = self.world(conf="kind=peer\ndriver=remote\npeer=1\n")
         rc, err = self.quiet(w.machines().setup, "box", "build")
         self.assertEqual(rc, 1)
         self.assertEqual(w.fake.effects, [])
@@ -193,7 +193,7 @@ class TestSetup(MachineTest):
 
     def test_the_machine_is_probed_once_for_the_whole_setup(self):
         """`machine.probed_once_per_invocation`: every question setup asks of the driver is the one probe's answer."""
-        w = self.world(conf="KIND=build\nWK_TARGET_KIND=remote\n")
+        w = self.world(conf="kind=build\ndriver=remote\n")
         self.quiet(w.machines().setup, "box")
         probes = [r for r in self.runs(w) if r[:2] == ("sh", "-c") and r[2] == targets.PROBE_SCRIPT]
         self.assertEqual(len(probes), 1)
@@ -201,13 +201,20 @@ class TestSetup(MachineTest):
 
     def test_an_unreachable_machine_is_refused_by_ssh_word(self):
         """`machine.unreachable_is_named`: the refusal carries what ssh said, not a guess that it is off."""
-        w = self.world(conf="KIND=build\nWK_TARGET_KIND=remote\n", answers=False)
+        w = self.world(conf="kind=build\ndriver=remote\n", answers=False)
         rc, err = self.quiet(w.machines().setup, "box")
         self.assertEqual(rc, 1)
         self.assertIn("connect to host box port 22: Connection refused", err)
 
+    def test_a_key_no_target_reads_is_refused_before_anything_is_asked(self):
+        w = self.world(conf="kind=build\nhots=box\n")
+        rc, err = self.quiet(w.machines().setup, "box")
+        self.assertEqual(rc, 1)
+        self.assertIn("hots is not a key a build machine's conf takes", err)
+        self.assertEqual(self.runs(w), [])
+
     def test_provisioning_is_handed_the_inputs_hash(self):
-        w = self.world(conf="KIND=build\nWK_TARGET_KIND=remote\n")
+        w = self.world(conf="kind=build\ndriver=remote\n")
         self.quiet(w.machines().setup, "box")
         prov = [r for r in self.runs(w) if r[0] == "env" and r[-1].endswith("remote/provision.sh")]
         self.assertEqual(len(prov), 1)
@@ -215,7 +222,7 @@ class TestSetup(MachineTest):
         self.assertIn("WK_REMOTE_ROOT=%s/wk" % HOME, prov[0])
 
     def test_an_old_checkout_is_asked_about_once_and_removed(self):
-        w = self.world(conf="KIND=build\nWK_TARGET_KIND=remote\n", old_tools=(HOME + "/Development/wk-tools",))
+        w = self.world(conf="kind=build\ndriver=remote\n", old_tools=(HOME + "/Development/wk-tools",))
         with mock.patch.object(act, "confirm", return_value=True) as asked:
             rc, err = self.quiet(w.machines().setup, "box")
         self.assertEqual(rc, 0, err)
@@ -224,7 +231,7 @@ class TestSetup(MachineTest):
         self.assertIn(("rm", "-rf", HOME + "/Development/wk-tools"), self.runs(w))
 
     def test_a_declined_cleanup_leaves_it_and_provisions_anyway(self):
-        w = self.world(conf="KIND=build\nWK_TARGET_KIND=remote\n", old_tools=(HOME + "/wk-tools",))
+        w = self.world(conf="kind=build\ndriver=remote\n", old_tools=(HOME + "/wk-tools",))
         with mock.patch.object(act, "confirm", return_value=False):
             rc, err = self.quiet(w.machines().setup, "box")
         self.assertEqual(rc, 0, err)
@@ -260,7 +267,7 @@ class TestSetup(MachineTest):
         self.assertIn(("write", str(dry.fleet / "box.conf")), dry.fake.effects)
 
     def test_a_peer_is_asked_for_its_own_wk_and_not_provisioned(self):
-        w = self.world(conf="KIND=peer\nWK_TARGET_KIND=remote\nWK_REMOTE_PEER=1\nWK_REMOTE_TOOLS=Development/wk-tools\n")
+        w = self.world(conf="kind=peer\ndriver=remote\npeer=1\ntools=Development/wk-tools\n")
         rc, err = self.quiet(w.machines().setup, "box")
         self.assertEqual(rc, 0, err)
         self.assertIn(("sh", "-c", "test -x %s/Development/wk-tools/wk" % HOME), self.runs(w))
@@ -268,7 +275,7 @@ class TestSetup(MachineTest):
 
 
 class TestRm(MachineTest):
-    CONF = "KIND=build\nWK_TARGET_KIND=remote\n"
+    CONF = "kind=build\ndriver=remote\n"
 
     def test_a_machine_with_workspaces_is_refused_by_name(self):
         w = self.world(conf=self.CONF, ws=("big",))
@@ -308,7 +315,7 @@ class TestRm(MachineTest):
 
 
 class TestBoardSetup(MachineTest):
-    CONF = "KIND=board\nNODE_SSH=box\nNODE_DRIVER=pi-sd\n"
+    CONF = "kind=board\nssh=box\ndriver=pi-sd\n"
 
     def test_it_installs_the_card_helper(self):
         w = self.world(conf=self.CONF)
@@ -357,7 +364,7 @@ class TestBoardSetup(MachineTest):
 
 
 class TestBoardRm(MachineTest):
-    CONF = "KIND=board\nNODE_SSH=box\nNODE_DRIVER=pi-sd\n"
+    CONF = "kind=board\nssh=box\ndriver=pi-sd\n"
 
     def test_it_removes_the_card_helper_and_the_conf(self):
         w = self.world(conf=self.CONF)
@@ -376,7 +383,7 @@ class TestBoardRm(MachineTest):
 
 
 class TestMacSetup(MachineTest):
-    CONF = "KIND=mac\nNODE_SSH=box\n"
+    CONF = "kind=mac\nssh=box\n"
 
     def test_it_pushes_the_tree_and_stops_at_the_sudo_with_no_terminal(self):
         w = self.world(conf=self.CONF)
@@ -400,7 +407,7 @@ class TestBridgeDispatch(MachineTest):
 
     def bridge_world(self):
         w = self.world()
-        (w.fleet / "phone.conf").write_text("KIND=bridge\nBR_DEVICE=pinephone\nBR_SEGMENT=10.9.0.0/24\nBR_ROUTER=10.9.0.1\n")
+        (w.fleet / "phone.conf").write_text("kind=bridge\ndevice=pinephone\nsegment=10.9.0.0/24\nrouter=10.9.0.1\n")
         return w
 
     def test_a_bridge_setup_is_the_bridge_roles_with_its_flags(self):
@@ -418,13 +425,13 @@ class TestBridgeDispatch(MachineTest):
         tn.assert_called_once_with("phone", at=None)
 
     def test_tailnet_is_refused_for_anything_but_a_bridge(self):
-        w = self.world(conf="KIND=build\nWK_TARGET_KIND=remote\n")
+        w = self.world(conf="kind=build\ndriver=remote\n")
         rc, err = self.quiet(w.machines().tailnet, "box")
         self.assertEqual(rc, 1)
         self.assertIn("not a bridge", err)
 
     def test_the_bridge_flags_are_refused_for_a_build_machine(self):
-        w = self.world(conf="KIND=build\nWK_TARGET_KIND=remote\n")
+        w = self.world(conf="kind=build\ndriver=remote\n")
         rc, err = self.quiet(lambda: w.machines().setup("box", at="10.0.0.9"))
         self.assertEqual(rc, 1)
         self.assertIn("are a bridge's", err)
@@ -440,7 +447,7 @@ class TestBridgeDispatch(MachineTest):
             self.quiet(lambda: w.machines().status())
         status.assert_called_once_with("phone", at="10.0.0.9")
         ls.assert_called_once_with()
-        w = self.world(conf="KIND=build\nWK_TARGET_KIND=remote\n")
+        w = self.world(conf="kind=build\ndriver=remote\n")
         rc, err = self.quiet(w.machines().status, "box")
         self.assertEqual(rc, 1)
         self.assertIn("not a bridge", err)
@@ -449,7 +456,7 @@ class TestBridgeDispatch(MachineTest):
 class TestProbeAndLs(MachineTest):
     def test_a_machine_that_does_not_answer_is_named_with_why(self):
         """`machine.unreachable_is_named`: probe says unreachable and ssh's own word, and exits 1."""
-        w = self.world(conf="KIND=build\nWK_TARGET_KIND=remote\n", answers=False)
+        w = self.world(conf="kind=build\ndriver=remote\n", answers=False)
         w.fake.answer(["tailscale"], rc=1)
         w.fake.answer(["ssh", "-G"], rc=1)
         out = io.StringIO()
@@ -474,8 +481,8 @@ class TestProbeAndLs(MachineTest):
         self.assertEqual(len(out.getvalue().strip().splitlines()), 1)
 
     def test_ls_reads_the_tailnet_once(self):
-        w = self.world(conf="KIND=build\nWK_TARGET_KIND=remote\n")
-        (w.fleet / "other.conf").write_text("KIND=peer\nWK_TARGET_KIND=remote\n")
+        w = self.world(conf="kind=build\ndriver=remote\n")
+        (w.fleet / "other.conf").write_text("kind=peer\ndriver=remote\n")
         w.fake.answer(["tailscale", "status", "--json"], out=json.dumps({"Peer": {"k": {"DNSName": "box.ts.net.", "TailscaleIPs": ["100.64.0.9"], "Online": True}}}))
         out = io.StringIO()
         self.quiet(w.machines().ls, False, out)

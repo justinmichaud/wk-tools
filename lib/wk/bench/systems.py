@@ -110,7 +110,7 @@ class System:
 
 
 class ContainerSystem(System):
-    """run-benchmark in the container; its /bench is this store's bench directory, so what `run` leaves is already collected."""
+    """run-benchmark in the container, into the task in its workspace's directory (mounted at /var/lib/wk/ws/<ws>): nothing to collect."""
 
     kind = "container"
     bench_host = "container"
@@ -153,7 +153,7 @@ class ContainerSystem(System):
         return [build + "/bin/MiniBrowser", build + "/bin/WPEWebProcess"]
 
     def run_dir(self, leg):
-        return "/bench/" + leg.rel
+        return os.path.join("/var/lib/wk/ws", self.ws, os.path.relpath(leg.out, self.target.store.ws_dir(self.ws)))
 
     def payload_dir(self, leg):
         return "/cache/bench/" + os.path.basename(leg.payload) if leg.payload else ""
@@ -168,7 +168,7 @@ class ContainerSystem(System):
         """The build is the workspace's own, and the payload is on the store's /cache/bench mount."""
 
     def collect(self, leg):
-        """/bench is the store's bench directory, bind-mounted: the result is where the record is."""
+        """The run directory is the workspace's own, bind-mounted: the result is where the record is."""
 
     def doctor(self, gpu):
         return self.here.run(["env", "WK_NAME=" + self.ws, os.path.join(self.root, "cmd", "doctor")] + (["--gpu"] if gpu else []))
@@ -320,7 +320,7 @@ class GuestSystem(System):
 
 
 SYSTEMS = {"container": ContainerSystem, "vm": GuestSystem}
-NAMED_SYSTEMS = {}   # a `--system <machine>` override, keyed by that machine's NODE_DRIVER
+NAMED_SYSTEMS = {}   # a `--system <machine>` override, keyed by that machine's driver
 
 
 def _named_systems():
@@ -337,15 +337,15 @@ def for_workspace(root, reg, ws, clock, system_name=""):
         die(str(e))
     if system_name:
         conf = fleet.Fleet(root, reg.env).load(system_name)
-        if conf and conf.get("KIND") == "board":
+        if conf and conf.get("kind") == "board":
             from wk.bench import board
             return board.for_board(root, reg, ws, clock, system_name, target=target)
-        if not conf or conf.get("KIND") != "mac":
+        if not conf or conf.get("kind") != "mac":
             die("--system '%s' names no Mac or board in machines/ (wk boot --list)" % system_name)
-        cls = _named_systems().get(conf.get("NODE_DRIVER", ""))
+        cls = _named_systems().get(conf.get("driver", ""))
         if cls is None:
             die("--system '%s' is driven by '%s', which 'wk bench run' does not measure directly.\n"
-                "    Its own lane runs from the install itself:  wk bench staged" % (system_name, conf.get("NODE_DRIVER", "")))
+                "    Its own bench path runs from the install itself:  wk bench staged" % (system_name, conf.get("driver", "")))
         return cls(root, reg, target, ws, clock, system_name, conf)
     cls = SYSTEMS.get(target.kind)
     if cls is None:

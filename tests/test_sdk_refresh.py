@@ -139,6 +139,26 @@ class TestSdkRefresh(unittest.TestCase):
             self.assertNotEqual(0, cp.returncode)
             self.assertIn("not an SDK checkout", cp.stderr)
 
+    def test_a_refresh_that_changes_nothing_says_nothing_about_the_patches(self):
+        """Every refresh resets and re-patches, so the patcher's lines would read as changes on a machine already set up:
+        they are printed when the tree ends up different from how it started, and when the patcher fails."""
+        with scratch_dir() as d:
+            upstream = make_upstream(d / "upstream")
+            git("clone", "-q", str(upstream), str(d / "checkout"), cwd=d)
+            patcher = d / "patcher.sh"
+            patcher.write_text('#!/bin/sh\necho patched > "$1/f"\necho "added --x" >&2\n')
+            first = refresh(d / "checkout", patcher=patcher)
+            again = refresh(d / "checkout", patcher=patcher)
+            self.assertIn("added --x", first.stdout + first.stderr)
+            self.assertEqual((0, ""), (again.returncode, again.stdout + again.stderr))
+            commit_more(upstream, "two")
+            moved = refresh(d / "checkout", patcher=patcher)
+            self.assertIn("added --x", moved.stdout + moved.stderr)
+            patcher.write_text('#!/bin/sh\necho patched > "$1/f"\necho "verify failed: x" >&2\nexit 1\n')
+            failed = refresh(d / "checkout", patcher=patcher)
+            self.assertNotEqual(0, failed.returncode)
+            self.assertIn("verify failed: x", failed.stdout + failed.stderr)
+
     def test_not_a_checkout_at_all_refuses_by_name(self):
         with scratch_dir() as d:
             cp = refresh(d)

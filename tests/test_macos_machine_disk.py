@@ -23,10 +23,9 @@ STAGE = REPO / "host" / "macos" / "machine.sh"
 PODMAN_STUB = """#!/bin/sh
 printf '%s\\n' "$*" >> "$WK_TEST_PODMAN_LOG"
 case "$*" in
-    *"--format {{.Resources.CPUs}}"*)     echo "$WK_TEST_CPUS" ;;
-    *"--format {{.Resources.Memory}}"*)   echo "$WK_TEST_MEM" ;;
-    *"--format {{.Resources.DiskSize}}"*) echo "$WK_TEST_DISK" ;;
-    *"--format {{.State}}"*)              echo stopped ;;
+    "machine inspect wk")
+        printf '[{"State":"stopped","Resources":{"CPUs":%s,"Memory":%s,"DiskSize":%s}}]\\n' \\
+            "$WK_TEST_CPUS" "$WK_TEST_MEM" "$WK_TEST_DISK" ;;
     *"df -Pk /var"*)
         # Bigger once the grow has been asked for, which is what `changed` reports on.
         if grep -q growpart "$WK_TEST_PODMAN_LOG"; then
@@ -42,7 +41,7 @@ exit 0
 def reconcile_block():
     """From `_cur_cpus=` to the end of the `if` that sets the resources."""
     text = STAGE.read_text()
-    start = text.index("_cur_cpus=$(podman machine inspect")
+    start = text.index("wk_eval wk.targets podman-vm _cur_cpus=")
     end = text.index("\nfi\n", text.index("podman machine set", start)) + 4
     return text[start:end]
 
@@ -56,7 +55,7 @@ class TestTheDiskIsGrownToTheDeclaredSize(WkTest):
             cp = subprocess.run(
                 ["bash", "-c",
                  f'. "{REPO}/lib/common.sh"\n'
-                 f'WK_MACHINE=wk; _cores={cpus}; _mem={mem}; _disk={want_disk}\n'
+                 f'WK_MACHINE=wk; export WK_MACHINE; _cores={cpus}; _mem={mem}; _disk={want_disk}\n'
                  + ("WK_DRY_RUN=1\n" if dry else "")
                  + 'WK_RESERVE_CORES=1; WK_RESERVE_MB=1024\n'
                  # The stage continues past this block; its last line here is a
@@ -124,14 +123,14 @@ class TestTheDiskIsGrownToTheDeclaredSize(WkTest):
         self.assertIn("dry run", cp.stdout + cp.stderr)
 
 
-class TestTheDeclaredSizeFitsThreeLanes(unittest.TestCase):
+class TestTheDeclaredSizeFitsThreeImageWorkspaces(unittest.TestCase):
     def test_the_default_holds_the_fleet_this_repo_builds(self):
-        """A yocto lane measured 84 GB of build tree beside a shared sstate and
+        """A yocto image workspace measured 84 GB of build tree beside a shared sstate and
         download cache; rpi3, rpi4 and rpi5 at once is about 450 GB."""
         m = re.search(r'^_disk="\$\{WK_DISK_GB:-(\d+)\}"', STAGE.read_text(), re.M)
         self.assertIsNotNone(m, "host/macos/machine.sh declares no disk size")
         self.assertGreaterEqual(int(m.group(1)), 450,
-                                "the podman machine is too small for three yocto lanes")
+                                "the podman machine is too small for three yocto image workspaces")
 
 
 if __name__ == "__main__":

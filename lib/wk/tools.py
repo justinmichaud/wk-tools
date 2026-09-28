@@ -1,11 +1,10 @@
-"""A machine is given this checkout's commit: a bundle of HEAD (3.8 MB in 0.9s) by the far Machine's `copy_in`."""
+"""A machine is given this checkout's commit: a bundle of HEAD (3.8 MB in 0.9s), `git clean`ed without -x so ignored files survive."""
 
 import os
 import sys
 import tempfile
 
 from wk import act
-from wk.machine import Local, Ssh
 
 BUNDLE = ".git/wk-tools-push.bundle"
 
@@ -29,7 +28,6 @@ if ! { [ -d "$d/.git" ] && git -C "$d" rev-parse --git-dir >/dev/null 2>&1; }; t
 fi
 '''
 
-# `git clean` without -x, so ignored files survive.
 CONVERGE = r'''set -e
 d=$1
 git -C "$d" fetch -q "$d/%s" HEAD
@@ -111,20 +109,3 @@ def push(root, here, far, dest, env):
         return True
     act.warn("wk-tools at %s did not end at %s (it answers '%s')" % (dest, sha, got or "nothing"))
     return False
-
-
-def main(argv, env=None):
-    env = os.environ if env is None else env
-    root = env.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    here = Local()
-    if argv[:1] == ["push"] and len(argv) >= 3:
-        far = Ssh(argv[2], opts=argv[3:], timeout=int(env.get("WK_SSH_TIMEOUT") or 10), via=here)
-        return 0 if push(root, here, far, argv[1], env) else 1
-    act.die("usage: python3 -m wk.tools push <dest> <ssh destination> [ssh option]...")
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except act.Refused as e:
-        sys.exit(e.status)

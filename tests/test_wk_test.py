@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.killpoints import converges
-from tests.support import REPO
+from tests.support import REPO, as_dispatched
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import record, targets  # noqa: E402
@@ -156,7 +156,7 @@ class TestTest(unittest.TestCase):
         w = w or self.w
         os.environ["WK_NAME"] = "ws"
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = CMD.main(list(argv), w.reg, w.clock, w.popen)
+            rc = CMD.main(as_dispatched("test", argv, os.environ), w.reg, w.clock, w.popen)
         return rc, err.getvalue()
 
     def refused(self, w=None, *argv, status=None):
@@ -164,7 +164,7 @@ class TestTest(unittest.TestCase):
         os.environ["WK_NAME"] = "ws"
         with self.assertRaises(Refused) as cm:
             with contextlib.redirect_stderr(io.StringIO()) as err:
-                CMD.main(list(argv), w.reg, w.clock, w.popen)
+                CMD.main(as_dispatched("test", argv, os.environ), w.reg, w.clock, w.popen)
         if status is not None:
             self.assertEqual(cm.exception.status, status, err.getvalue())
         return err.getvalue()
@@ -183,8 +183,7 @@ class TestDryRun(TestTest):
 
     def test_the_layout_suite_dry_run_names_software_rendering(self):
         os.environ["WK_DRY_RUN"] = "1"
-        os.environ["WK_CONFIG"] = "gtk-release"
-        rc, err = self.run_(None, "--layout")
+        rc, err = self.run_(None, "--layout", "--config", "gtk-release")
         self.assertEqual(rc, 0, err)
         self.assertIn("suite:     layout (gtk-release)", err)
         self.assertIn("run-webkit-tests", err)
@@ -286,8 +285,7 @@ class TestTheRecordARunWrites(TestTest):
         self.assertEqual(self.w.recs().list()[0].field("exit"), "stalled")
 
     def test_the_layout_suite_runs_with_software_rendering_by_default(self):
-        os.environ["WK_CONFIG"] = "gtk-release"
-        rc, err = self.run_(None, "--layout")
+        rc, err = self.run_(None, "--layout", "--config", "gtk-release")
         self.assertEqual(rc, 0, err)
         (w,) = [e for e in self.w.effects if e[0] == "watch"]
         line = " ".join(w[1])
@@ -295,9 +293,8 @@ class TestTheRecordARunWrites(TestTest):
         self.assertIn("run-webkit-tests", line)
 
     def test_a_missing_layout_path_is_refused_before_the_suite_runs(self):
-        os.environ["WK_CONFIG"] = "gtk-release"
         self.w.answer(["exec", "ws", "sh", "-c"], out="fast/gone.html\n")
-        err = self.refused(None, "--layout", "fast/gone.html", status=1)
+        err = self.refused(None, "--layout", "--config", "gtk-release", "fast/gone.html", status=1)
         self.assertIn("no such test in 'ws'", err)
         self.assertIn("fast/gone.html", err)
         self.assertEqual(self.w.recs().list(), [])

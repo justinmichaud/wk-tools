@@ -1,200 +1,131 @@
-"""`wk bench report`, exercised end to end against a real container
-benchmark run -- the maintainer's explicit ask: "test the html report
-generation in a container benchmark run." tests/test_bench_report.py
-already covers the report machinery itself (synthetic result.json
-fixtures, plus a lighter integration test that reuses whatever local
-workspace already has a jsc-release build). This one does the whole
-lane for real and keeps the record of having done so: a fresh
-`wk new`, a `wk build ... jsc-release` from scratch, two real
-`wk bench` runs, and a `wk bench report --html` on them.
+"""A container benchmark from nothing, the way a person takes one: a fresh `wk new` of the test's own, a
+jsc-release build, two runs of the shortest plan a JavaScript shell drives (one JetStream3 subtest; a plan with no
+cli.js, SunSpider's, is a browser's), the second pinned, then the two-run and the task report from this host, the
+export, and `wk rm` -- refused while a task is unexported, allowed once both are.
 
-This is an hour-class test -- a JSC-only release build takes tens of
-minutes inside the podman VM -- so it is gated on two things: the podman
-VM being up (requires_podman_vm, same as every other container-touching
-test) and WK_TEST_SLOW=1, so the default suite does not eat an hour on
-every run.
+Every step goes through ./wk, which forwards the build and the runs into the podman machine. Gated on
+WK_TEST_SLOW=1 as well as the container target: the build is minutes with a warm ccache, tens of them cold. The
+preflight's cpu governor is unknown in the podman machine, so the runs are --force'd, which they record.
 
-CLAUDE.md ("Never build, test, or benchmark WebKit here") is not being
-worked around: every step below runs `./wk`, which is what forwards the
-actual build and benchmark work into the podman VM. Nothing here builds
-WebKit on the host.
-
-Run: WK_TEST_SLOW=1 python3 -m unittest tests.test_bench_container_run -v
+Run: WK_TEST_SLOW=1 python3 tests/run.py --live -k TestBenchContainerRun
 """
 import json
 import os
+import sys
 import time
 import unittest
+import zipfile
 
 from tests.support import (
+    REPO,
     WkTest,
-    bash,
     bench_ls_runs,
-    podman_vm_ssh,
+    container_side,
     rand_suffix,
-    requires_podman_vm,
+    requires_container_target,
     run,
     scratch_dir,
 )
 
-PLAN = "sunspider1.0.2"
-CONFIG = "jsc-release"
+sys.path.insert(0, str(REPO / "lib"))
+from wk import screen  # noqa: E402
+from wk.clock import Clock  # noqa: E402
+from wk.machine import Fake, Local, lib_argv  # noqa: E402
+
+PLAN, SUBTEST, CONFIG = "jetstream3", "richards", "jsc-release"
 
 
-def _read_store_json(run_id, name):
-    """<name> (env.json or result.json) out of a saved run, read off the
-    podman VM's own store -- not the host's, since $WK_STORE for a
-    container workspace lives in the VM (lib/store.sh, store_is_local),
-    and `wk bench` itself forwards there rather than writing anything
-    the host can read directly."""
-    cp = podman_vm_ssh(f"cat /var/lib/wk/bench/{run_id}/{name}")
-    assert cp.returncode == 0, f"could not read {name} for run {run_id}: {cp.stderr}"
-    return json.loads(cp.stdout)
+def _read(path):
+    """A file in the container target's store."""
+    cp = container_side("cat %s" % path)
+    assert cp.returncode == 0, "could not read %s: %s" % (path, cp.stderr)
+    return cp.stdout
 
 
-def _subtest_names(result_doc):
-    """Every subtest name in a saved result.json, dug out the same way
-    `wk bench report`'s own walker does: one top-level suite key (e.g.
-    "SunSpider-1.0.2"), a "tests" dict keyed by subtest name."""
-    names = set()
-    for suite in result_doc.values():
-        tests = suite.get("tests", {}) if isinstance(suite, dict) else {}
-        names.update(tests.keys())
-    return names
-
-
-@requires_podman_vm()
-@unittest.skipUnless(
-    os.environ.get("WK_TEST_SLOW") == "1",
-    "hour-class test (a from-scratch jsc-release build); set WK_TEST_SLOW=1 to run it",
-)
+@requires_container_target()
+@unittest.skipUnless(os.environ.get("WK_TEST_SLOW") == "1", "a jsc-release build; set WK_TEST_SLOW=1 to run it")
 class TestBenchContainerRun(WkTest):
-    """New workspace -> jsc-release build -> two sunspider runs -> one
-    html+text report, all driven through ./wk against the real podman VM.
-    `wk rm` always runs, even on failure, so a broken run does not leave a
-    workspace (and its build tree) behind."""
+    def bench(self, ws, *extra):
+        cp = run("bench", "run", ws, PLAN, "--config", CONFIG, "--count", "2", "--subtests", SUBTEST, "--force", *extra,
+                 timeout=900)
+        self.assertEqual(cp.returncode, 0, "wk bench run failed:\n%s" % cp.stdout)
+        return cp
 
-    def test_new_build_bench_report(self):
-        ws = f"wk-test-bench-{rand_suffix()}"
-        timings = {}
+    def test_new_build_bench_report_export_rm(self):
+        ws = "wk-test-bench-%s" % rand_suffix()
         try:
-            t0 = time.time()
-            cp = run("new", ws, timeout=300)
-            self.assertEqual(cp.returncode, 0, f"'wk new {ws}' failed:\n{cp.stdout}")
-            cp = run("status", ws, "--wait", "--timeout", "600", timeout=660)
-            self.assertEqual(
-                cp.returncode, 0,
-                f"workspace '{ws}' was not ready (status={cp.returncode}):\n{cp.stdout}",
-            )
-            timings["new"] = time.time() - t0
+            self.assertEqual(0, run("new", ws, timeout=900).returncode)
+            run("status", ws, "--wait", "--timeout", "600", timeout=660)
+            self.assertEqual(0, run("build", ws, CONFIG, "--detach", timeout=120).returncode)
+            cp = run("status", ws, "--wait", "--timeout", "1500", timeout=1560)
+            self.assertEqual(0, cp.returncode, "the %s build did not succeed:\n%s\n%s" % (CONFIG, cp.stdout, run("logs", ws).stdout))
 
-            t0 = time.time()
-            cp = run("build", ws, CONFIG, "--detach", timeout=120)
-            self.assertEqual(cp.returncode, 0, f"'wk build {ws} {CONFIG} --detach' failed:\n{cp.stdout}")
-            # A cold jsc-release build in the VM is tens of minutes; poll
-            # with `wk status --wait` (it blocks while busy, one report at
-            # the end) rather than a hand-rolled sleep loop.
-            cp = run("status", ws, "--wait", "--timeout", "3600", timeout=3660)
-            if cp.returncode != 0:
-                logs = run("logs", ws, timeout=60)
-                self.fail(
-                    f"'{CONFIG}' build did not succeed (status={cp.returncode}):\n"
-                    f"--- wk status {ws} --wait ---\n{cp.stdout}\n"
-                    f"--- wk logs {ws} ---\n{logs.stdout}"
-                )
-            timings["build"] = time.time() - t0
-
-            run_ids = []
-            for i in (1, 2):
-                t0 = time.time()
-                cp = run("bench", "run", ws, PLAN, "--config", CONFIG, "--count", "2", timeout=300)
-                self.assertEqual(cp.returncode, 0, f"bench run {i} failed:\n{cp.stdout}")
-                timings[f"run{i}"] = time.time() - t0
-
-                ls = run("bench", "ls", timeout=30)
-                ids = bench_ls_runs(ls.stdout)
-                self.assertTrue(ids, f"'wk bench ls' is empty after run {i}:\n{ls.stdout}")
-                # Store-relative (<task>/runs/<run>): the same id whether the
-                # store is the host's or the podman VM's.
-                run_ids.append(ids[-1].split("/bench/", 1)[1])
-            a_id, b_id = run_ids
-            self.assertNotEqual(a_id, b_id, f"the two bench runs recorded the same id: {ls.stdout}")
-
-            # The subtests the report is supposed to name, read straight off
-            # the saved runs rather than hard-coded -- so this checks the
-            # report against its own input, not a guess at what sunspider's
-            # subtest list happens to be today.
-            a_doc = _read_store_json(a_id, "result.json")
-            b_doc = _read_store_json(b_id, "result.json")
-            subtests = _subtest_names(a_doc) | _subtest_names(b_doc)
-            self.assertTrue(subtests, f"no subtests found in either run's result.json ({a_id}, {b_id})")
+            self.bench(ws)
+            self.bench(ws, "--cores", "0")
+            a, b = bench_ls_runs(run("bench", "ls", timeout=120).stdout)[-2:]
+            self.assertIn("/ws/%s/bench/" % ws, a, "a container's task lives under its workspace's own directory")
+            env = json.loads(_read(b + "/env.json"))
+            self.assertEqual(env["cores"], {"set": "0", "pinned": True})
+            self.assertIn(SUBTEST, _read(a + "/result.json"))
+            tasks = [p.split("/bench/", 1)[1].split("/runs/")[0] for p in (a, b)]
 
             with scratch_dir() as tmp:
-                html_out = tmp / "report.html"
-                t0 = time.time()
-                cp = run("bench", "report", a_id, b_id, "--html", str(html_out), "--text", timeout=60)
-                self.assertEqual(cp.returncode, 0, f"'wk bench report' failed:\n{cp.stdout}")
-                timings["report"] = time.time() - t0
+                cp = run("bench", "report", a, b, "--html", str(tmp / "r.html"), timeout=120)
+                self.assertEqual(0, cp.returncode, "the two-run report from this host:\n%s" % cp.stdout)
+                self.assertIn("<svg", (tmp / "r.html").read_text())
+                cp = run("bench", "report", tasks[0], timeout=120)
+                self.assertEqual(0, cp.returncode, "the task report from this host:\n%s" % cp.stdout)
+                self.assertIn("complete", cp.stdout)
 
-                self.assertTrue(html_out.exists(), "no html report was written")
-                html = html_out.read_text()
-
-                for name in sorted(subtests):
-                    self.assertIn(name, html, f"subtest '{name}' missing from the html report")
-                self.assertIn(">Score<", html + "".join(f"<td>{n}</td>" for n in [])
-                              or html, "Score column missing from the html report")
-                self.assertTrue(
-                    "Score" in html, "no 'Score' column found in the html report"
-                )
-                self.assertTrue(
-                    "Time" in html, "no 'Time' column found in the html report"
-                )
-                self.assertEqual(
-                    html.count("<svg"), len(subtests),
-                    f"expected one <svg> per subtest ({len(subtests)}), found {html.count('<svg')}",
-                )
-
-                # Copy the report out to a stable path so it survives the
-                # scratch dir's cleanup, for a human to open afterwards.
-                kept = "/tmp/wk-test-bench-container-run-report.html"
-                kept_path_written = _copy_report(html_out, kept)
-
-            print(f"[timing] {ws}: " + ", ".join(f"{k}={v:.1f}s" for k, v in timings.items()))
-            print(f"[subtests] {sorted(subtests)}")
-            print(f"[report] copied to {kept_path_written}")
+                cp = run("rm", ws, env={"WK_YES": "1"}, timeout=300)
+                self.assertNotEqual(0, cp.returncode, "an unexported task was destroyed:\n%s" % cp.stdout)
+                self.assertIn("wk bench export %s" % tasks[0], cp.stdout)
+                for t in tasks:
+                    cp = run("bench", "export", t, "--to", str(tmp), "--yes", timeout=300)
+                    self.assertEqual(0, cp.returncode, cp.stdout)
+                    names = zipfile.ZipFile(str(tmp / (t + ".zip"))).namelist()
+                    self.assertIn(t + "/report.txt", names)
+                    self.assertIn(t + "/task.json", names)
+                    self.assertTrue([n for n in names if n.endswith("/result.json")], names)
+                cp = run("rm", ws, env={"WK_YES": "1"}, timeout=300)
+                self.assertEqual(0, cp.returncode, "both tasks are exported, and the removal was refused:\n%s" % cp.stdout)
         finally:
-            cp = run("rm", ws, env={"WK_YES": "1"}, timeout=180)
-            if cp.returncode != 0:
-                print(f"[cleanup] 'wk rm {ws}' failed:\n{cp.stdout}")
+            if ws in run("ls", timeout=120).stdout:
+                run("rm", ws, "--force", env={"WK_YES": "1"}, timeout=300)
 
 
-def _copy_report(src_path, dest):
-    import shutil
-    shutil.copyfile(str(src_path), dest)
-    return dest
+class TestTheWatchIsInertInAContainer(unittest.TestCase):
+    """The pipeline brackets every browser run with lib/wk/screen.py's Watch
+    (tests/test_bench_pipeline.py); where there is no window server it must record nothing."""
+
+    def watch(self, system):
+        """Run against a real ps and window probe this would fail on the
+        maintainer's own desktop -- open windows and daemons this host never
+        paused are exactly what a container has none of, so both are answered
+        the way one does; the must-not-run table is bench/mac-quiet-desktop.sh's own."""
+        m = Fake()
+        m.answer(["uname", "-s"], out=system + "\n")
+        m.answer(lib_argv(REPO, screen.WINDOWS, "wk_window_probe"), out="windows=?\n")
+        m.react(lib_argv(REPO, screen.DESKTOP, "wk_quiet_desktop_stopped"), lambda argv, f: Local().run(argv))
+        m.react(lib_argv(REPO, screen.DESKTOP, "wk_quiet_desktop_unstoppable"), lambda argv, f: Local().run(argv))
+        m.answer(["ps"], out="")
+        w = screen.Watch(m, REPO, Clock(), {"WK_SCREEN_WATCH_SECONDS": "0.05"})
+        w.start()
+        time.sleep(0.3)
+        return w.stop(), [e[1][0] for e in m.effects]
+
+    def test_a_container_is_never_asked(self):
+        """Every container run goes through the same line, and the watcher records nothing rather than refuse."""
+        seen, ran = self.watch("Linux")
+        self.assertEqual([], seen)
+        self.assertEqual(["uname"], ran)
+
+    def test_a_mac_whose_window_server_cannot_be_asked_says_so(self):
+        """The probe answers `?` there: not "nothing is there", so it is a finding of its own."""
+        seen, ran = self.watch("Darwin")
+        self.assertEqual([screen.UNASKED], [l.split("\t", 1)[1] for l in seen])
+        self.assertIn("ps", ran, "the watch never looked")
 
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class TestTheWatchIsInertInAContainer(WkTest):
-    """The pipeline brackets every browser run with lib/quiet.sh's screen watch
-    (tests/test_bench_pipeline.py); where there is no window server it must record nothing."""
-
-    def test_it_is_inert_where_there_is_no_window_server(self):
-        """Every container run goes through the same line; the probe answers
-        `?` there and the watcher must record nothing rather than refuse.
-        Run against a real ps and window probe this would fail on the
-        maintainer's own desktop -- open windows and daemons this host never
-        paused are exactly what a container has none of, so both are stubbed
-        to answer the way a container actually does."""
-        cp = bash('. "$WK_ROOT/lib/quiet.sh"\n'
-                  'wk_window_probe() { printf "windows=?\\n"; }\n'
-                  'ps() { :; }\n'
-                  'rec=$(mktemp)\n'
-                  'WK_SCREEN_WATCH_SECONDS=1 screen_watch_start "$rec"\n'
-                  'sleep 3\n'
-                  'if screen_watch_stop "$rec" >/dev/null; then echo CLEAN; else echo CAUGHT; fi\n'
-                  'rm -f "$rec"\n', timeout=60)
-        self.assertIn("CLEAN", cp.stdout, cp.stdout + cp.stderr)

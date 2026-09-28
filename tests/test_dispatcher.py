@@ -158,8 +158,8 @@ class TestDelegationReadsTheRegistry(WkTest):
     def setUp(self):
         super().setUp()
         (self.tmp / "hosts").mkdir()
-        (self.tmp / "hosts" / "peer.conf").write_text("KIND=peer\nWK_REMOTE_PEER=1\nWK_REMOTE_TOOLS=/opt/wk-tools\n")
-        (self.tmp / "hosts" / "me.conf").write_text("KIND=build\nWK_REMOTE_LOCAL=1\nWK_REMOTE_ROOT=%s\n" % (self.tmp / "rr"))
+        (self.tmp / "hosts" / "peer.conf").write_text("kind=peer\npeer=1\ntools=/opt/wk-tools\n")
+        (self.tmp / "hosts" / "me.conf").write_text("kind=build\nlocal=1\nroot=%s\n" % (self.tmp / "rr"))
         env = {"HOME": str(self.tmp), "XDG_STATE_HOME": str(self.tmp / "state"), "WK_STORE": str(self.tmp / "store"),
                "WK_MACHINES_DIR": str(self.tmp / "hosts"), "WK_IN_VM": "1", "PATH": os.environ.get("PATH", "")}
         self.fake = Fake("host")
@@ -515,10 +515,10 @@ class TestWhereTheNameSitsInArgv(WkTest):
 
     def _name(self, cmd, *args):
         """The workspace name the dispatcher reads out of argv, from the same
-        declaration answers `main` uses (name_for, takes_for, name_slot,
-        argv_name); `none` is the caller's decision, as it is there."""
-        args = list(args)
+        declaration answers `main` uses (verb_first, name_for, takes_for,
+        name_slot, argv_name); `none` is the caller's decision, as it is there."""
         d = D.Decl(REPO / "cmd" / cmd)
+        args = dispatch.Invocation(cmd, d, list(args)).verb_first()
         name_decl = d.name_for(args)
         if name_decl.split("@")[0] == "none":
             return "NONE"
@@ -544,6 +544,16 @@ class TestWhereTheNameSitsInArgv(WkTest):
         that stopped every workspace on the machine."""
         self.assertEqual(self._name("stop", "typo"), "typo")
         self.assertEqual(self._name("build", "myws", "jsc-release"), "myws")
+
+    def test_a_required_name_needs_none_of_the_commands_own_positionals_after_it(self):
+        """From a host a required name is the slot-th positional, even with fewer of the command's own after it than it
+        takes: `wk bench run <ws> --kill` names no plan, and was refused with the usage line (measured 2026-09-27). An
+        optional name still needs them all, or `wk pr <ref>` reads its ref as a name."""
+        d = D.Decl(REPO / "cmd" / "bench")
+        args = dispatch.Invocation("bench", d, ["run", "myws", "--kill"]).verb_first()
+        name_decl = d.name_for(args)
+        self.assertEqual("myws", dispatch.name_in_argv(name_decl.split("@")[0], D.name_slot(name_decl), d.takes_for(args), args))
+        self.assertIsNone(dispatch.name_in_argv("optional", 1, "1", ["1234"]), "an optional name still needs them all")
 
     def test_a_command_that_takes_no_name_has_none_in_its_argv(self):
         """name=none means the positionals are all the command's: `wk sysimage
@@ -692,7 +702,7 @@ class TestNothingBootsTheMachineToRefuse(WkTest):
     STOPPED_PODMAN = '''#!/bin/sh
 echo "podman $*" >> "$WK_TEST_PODMAN_WITNESS"
 case "$*" in
-    "machine inspect wk --format {{.State}}") echo stopped ;;
+    "machine inspect wk") echo '[{"Name": "wk", "State": "stopped"}]' ;;
 esac
 exit 0
 '''

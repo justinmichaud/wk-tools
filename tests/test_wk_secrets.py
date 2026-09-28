@@ -23,7 +23,7 @@ from unittest import mock
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, guest, secrets, shell  # noqa: E402
+from wk import act, guest, secrets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
@@ -305,7 +305,7 @@ class TestTheInjectorsFiles(SecretsTest):
         path = self.tmp + "/a dir/push-github-pat"
         self.assertTrue(self.w.sec().cred_write(path, "github-pat"))
         self.assertEqual("ghp-held\n", self.w.files[path])
-        self.assertIn(["sh", "-c", "umask 077 && cat > %s" % shell.sh_quote(path)], [list(a) for a in self.w.argvs()])
+        self.assertIn(["sh", "-c", "umask 077 && cat > %s" % shlex.quote(path)], [list(a) for a in self.w.argvs()])
         for argv in self.w.argvs():
             self.assertNotIn("ghp-held", " ".join(argv))
 
@@ -350,6 +350,15 @@ class TestTheInjectorsFiles(SecretsTest):
             self.assertEqual("ghp-held\n", self.w.files[self.tmp + "/store/read-github-pat"])
             self.w.sec(macos=False).pat_deliver()
         self.assertEqual([1], called, "a Linux host has no guests' injector")
+
+    def test_a_machine_that_cannot_see_the_held_token_leaves_the_injectors_alone(self):
+        """The podman machine never mounts the held credentials, so a converge asked there (`wk start <ws>`, forwarded)
+        read no token and removed the injector's: every read in every workspace was unauthenticated until ./setup."""
+        read = self.tmp + "/store/read-github-pat"
+        self.w._set_file(read, "ghp-held\n")
+        _, err = quiet(self.w.sec().pat_converge_machine)
+        self.assertEqual("ghp-held\n", self.w.files[read])
+        self.assertNotIn(("act", ("sh", "-c", "rm -f %s" % read)), self.w.effects)
 
     def test_a_machine_that_did_not_take_the_read_token_is_warned_about(self):
         self.w.seed()

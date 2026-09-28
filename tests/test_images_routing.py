@@ -130,7 +130,7 @@ class TestTheRoutingHooks(WkTest):
     def test_the_declarations_say_both_are_routed(self):
         """The dispatcher refuses what a command does not declare, so the
         routing is the declaration and not a convention: a deploy, a board
-        run and a collection name their lane."""
+        run and a collection name their image workspace."""
         self.assertIn("sub run,deploy name=required@2", (REPO / "cmd" / "bench").read_text())
 
 
@@ -141,9 +141,6 @@ class TestADeployRunsWhereItsWorkspaceIs(WkTest):
     workstation for it: the podman machine is a tailnet node of its own
     (host/macos/machine.sh), so the half that can read the store is the half
     that can reach the board."""
-
-    def test_nothing_refuses_a_workspace_for_being_in_the_podman_machine(self):
-        self.assertNotIn("image_lane_readable", (REPO / "lib" / "image.sh").read_text())
 
     def test_a_deploy_is_forwarded_like_any_other_workspace_command(self):
         """`forward=no` would keep it on the host half, which can reach the

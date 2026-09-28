@@ -1,24 +1,23 @@
 """The disk model (lib/wk/sysimage/disk.py), parsed from captured `lsblk -J` outputs and a card helper faked at the
-Channel. No real disk is read; `_image_wants_wifi` is tests/test_wifi_seed.py's TestImageWantsWifi.
+Channel. No real disk is read; `wants_wifi` is tests/test_wifi_seed.py's TestImageWantsWifi.
 
 Run: python3 tests/run.py --unit -k test_disk_logic
 """
 import contextlib
 import io
-import os
 import shlex
 import sys
 import unittest
-from unittest import mock
+from types import SimpleNamespace
 
-from tests.support import REPO, bash
+from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act  # noqa: E402
 from wk.boot.driver import CARD_PRIV, Channel  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
-from wk.sysimage import disk  # noqa: E402
+from wk.sysimage import cli, disk  # noqa: E402
 
 # util-linux 2.38 (Debian 12, a Pi 5 host on NVMe): a USB reader with a written card, an unwritten USB stick, the
 # NVMe it runs from, a zram swap disk and a loop device.
@@ -87,7 +86,7 @@ class Writer:
 
 
 def disks(w=None, name="rpi5", device="/dev/sda"):
-    return disk.Disks(w or Writer(), {"NODE_NAME": name, "NODE_DEVICE": device})
+    return disk.Disks(w or Writer(), {"name": name, "device": device})
 
 
 def quietly(fn, *args):
@@ -203,10 +202,10 @@ class TestListing(unittest.TestCase):
 
 class TestChannel(unittest.TestCase):
     def test_reads_and_the_helper_go_over_ssh_to_the_conf_machine(self):
-        """lsblk under `sh -c` and the card helper under `sudo -n`, both on NODE_SSH, and no bash in between."""
+        """lsblk under `sh -c` and the card helper under `sudo -n`, both on ssh, and no bash in between."""
         m = Fake()
         m.react(("ssh",), lambda argv, f: Result(0, LSBLK_234 if "lsblk" in argv[-1] else "marker: none\n"))
-        conf = {"NODE_NAME": "rpi4", "NODE_SSH": "rpi4", "NODE_DEVICE": "/dev/sdc"}
+        conf = {"name": "rpi4", "ssh": "rpi4", "device": "/dev/sdc"}
         d = disk.Disks(Channel(REPO, conf, "host", env={}, via=m), conf)
         self.assertEqual(d.for_machine("rpi4"), "")
         sent = [e[1] for e in m.effects if e[1][0] == "ssh"]
@@ -215,36 +214,52 @@ class TestChannel(unittest.TestCase):
         self.assertFalse([e for e in m.effects if e[1][0] in ("bash", "env")])
 
 
-class TestShims(unittest.TestCase):
-    """boot/disk.sh's functions are one line each over `python3 -m wk.sysimage.disk`."""
+class TestTheDisksVerb(unittest.TestCase):
+    """`wk sysimage disks <machine>` (lib/wk/sysimage/cli.py's Sysimage.disks): the listing, read over the
+    machine's own conf and channel."""
 
-    def test_a_disk_spec_names_its_machine(self):
-        self.assertEqual(disk.parse_spec("rpi5:/dev/sd a"), ("rpi5", "/dev/sd a"))
-        e, err = quietly(disk.parse_spec, ":x")
-        self.assertIsInstance(e, act.Refused)
-        self.assertIn("--disk needs a machine", err)
+    def verb(self, name, reachable=True):
+        m = Fake()
 
-    def test_the_shims_answer_through_the_verbs(self):
-        cp = bash(f'. "{REPO}/lib/common.sh"; . "{REPO}/boot/disk.sh"; disk_tran_of_name /dev/mmcblk1; '
-                  'disk_part /dev/mmcblk0 2; disk_of_part /dev/sda2; disk_partno /dev/nvme0n1p3')
-        self.assertEqual(cp.stdout.split(), ["mmc", "/dev/mmcblk0p2", "/dev/sda", "3"], cp.stderr)
+        def answer(argv, f):
+            if argv[-1] == "sh -c true":
+                return Result(0 if reachable else 255, "", "" if reachable else "ssh: connect: no route")
+            return Result(0, LSBLK_234 if "lsblk" in argv[-1] else "marker: none\n")
+        m.react(("ssh",), answer)
+        env = {"WK_ROOT": str(REPO), "WK_MACHINES_DIR": str(REPO / "machines")}
+        s = cli.Sysimage(SimpleNamespace(env=env, machine=m, store=None), clock=None)
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            try:
+                rc = s.disks(name)
+            except act.Refused as e:
+                rc = e
+        return rc, out.getvalue(), err.getvalue(), m
 
-    def test_main_names_its_verbs(self):
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertEqual(disk.main(["nope"], env={}), 2)
-        self.assertIn("own-or-declared", err.getvalue())
+    def test_it_lists_the_disks_attached_to_the_machine_the_conf_names(self):
+        rc, out, err, m = self.verb("rpi4")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("/dev/sdc 14.9G usb 1 disk Card Reader", out)
+        self.assertIn("--disk rpi4:<device>", err)
+        hosts = {e[1][-2] for e in m.effects if e[1][0] == "ssh"}
+        self.assertEqual(hosts, {"rpi4-rescue"}, m.effects)
 
-    def test_a_verb_answers_on_stdout(self):
-        with mock.patch.object(disk, "_disks", lambda env, root: disks()), \
-                contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(disk.main(["own-or-declared"], env={}), 0)
-        self.assertEqual(out.getvalue(), "/dev/sda\n")
+    def test_no_machine_names_the_machines(self):
+        rc, _, err, _ = self.verb("")
+        self.assertIsInstance(rc, act.Refused)
+        self.assertIn("usage: wk sysimage disks <machine>", err)
+        self.assertIn("rpi4", err)
 
-    def test_the_writer_is_this_process_node_and_channel(self):
-        env = {"NODE_NAME": "rpi5", "NODE_DEVICE": "/dev/sda", "MODE_CHANNEL": "bench", "HOME": "/x"}
-        d = disk._disks(env, str(REPO))
-        self.assertEqual((d.name, d.device, d.ch.channel), ("rpi5", "/dev/sda", "bench"))
-        self.assertNotIn("HOME", d.ch.conf)
+    def test_an_unknown_machine_is_refused(self):
+        rc, _, err, m = self.verb("nosuch")
+        self.assertIsInstance(rc, act.Refused)
+        self.assertIn("unknown machine 'nosuch'", err)
+        self.assertEqual(m.effects, [])
+
+    def test_an_unreachable_machine_is_refused_before_any_listing(self):
+        rc, out, err, _ = self.verb("rpi4", reachable=False)
+        self.assertIsInstance(rc, act.Refused)
+        self.assertIn("rpi4 is not reachable over ssh", err)
+        self.assertEqual(out, "")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Structured-data operations the bash half of `wk bench` still calls: a Mac A/B's legs, and the record, report and stopping rule of lib/wk/bench as a CLI. Stdlib only, for whatever python3 a macOS host or a bare-metal board has."""
+"""Structured-data reads for `wk bench`, stdlib only, for whatever python3 a macOS host or a bare-metal board has: a job's legs against its plan, and the A/B stopping rule as a CLI."""
 
 import argparse
 import json
@@ -9,24 +9,18 @@ import sys
 
 
 def _bench():
-    """lib/wk/bench, imported on use: lib/wk/bench/mac.py hands this file to a Mac's `python3 -c` for ab-legs, with no lib/ beside it."""
+    # lib/wk/bench, imported on use: bench/mac.py's Remote.py hands this file alone to a Mac's `python3 -c` for `ab-legs`, where __file__ does not even exist, so nothing above this line may import wk.*; only `ab-precision`, always run as a file, needs it.
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from wk.bench import record, report
-    return record, report
+    from wk.bench import report
+    return report
 
 
 def _load(path):
     try:
         with open(path) as f:
             return json.load(f)
-    except Exception:
+    except FileNotFoundError:
         return {}
-
-
-def cmd_get(args):
-    record = _bench()[0]
-    value = record.get_nested(record.load(args.file), args.key)
-    print(value if value is not None else args.default)
 
 
 def _state_lines(path):
@@ -71,7 +65,6 @@ def cmd_ab_legs(args):
         print("started %s, %s" % (began, ("ran %s" % span) if ended else ("running %s so far" % span)))
 
     stamp = state.get("job_stamp") or job.get("stamp") or ""
-    # The warmup's rows are dropped from the map once it completes, so a leg the map does not name is a warmup leg.
     named = {}
     try:
         with open(os.path.join(root, "ab", stamp, "runs.tsv")) as f:
@@ -121,43 +114,13 @@ def cmd_ab_legs(args):
         print("warmup captures: none in %s" % warmup)
 
 
-def cmd_env_record(args):
-    _bench()[0].write_env(args.out, args.fields, args.bool_fields, args.update)
-
-
-def cmd_task_write(args):
-    _bench()[0].task_write(args.dir, args.fields, args.commands)
-
-
-def cmd_task_status(args):
-    record = _bench()[0]
-    print("\n".join(record.status_lines(record.task_state(args.dir, args.running))))
-
-
 def cmd_ab_precision(args):
-    _bench()[1].precision(args.a, args.b, args.target)
+    _bench().precision(args.a, args.b, args.target)
 
 
 def main(argv):
     parser = argparse.ArgumentParser(prog="wkdata.py", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
-
-    p = sub.add_parser("get", help="print one dotted field out of a JSON file")
-    p.add_argument("file")
-    p.add_argument("key")
-    p.add_argument("--default", default="")
-    p.set_defaults(func=cmd_get)
-
-    p = sub.add_parser("task-write", help="write a task's task.json")
-    p.add_argument("dir")
-    p.add_argument("fields", nargs="*", metavar="key=value")
-    p.add_argument("--command", dest="commands", action="append", default=[], metavar="CMD")
-    p.set_defaults(func=cmd_task_write)
-
-    p = sub.add_parser("task-status", help="a task's state, recomputed from its runs, as key=value lines")
-    p.add_argument("dir")
-    p.add_argument("--running", action="store_true", help="the task's lock is held")
-    p.set_defaults(func=cmd_task_status)
 
     p = sub.add_parser("ab-precision", help="how fine a difference the rounds so far resolve, and whether that meets --target")
     p.add_argument("--a", required=True, help="comma-separated run directories for arm A")
@@ -165,25 +128,11 @@ def main(argv):
     p.add_argument("--target", type=float, default=0.3, help="the effect the A/B has to be able to detect, in percent (default 0.3)")
     p.set_defaults(func=cmd_ab_precision)
 
-    p = sub.add_parser("env-record", help="write a run's env.json")
-    p.add_argument("out")
-    p.add_argument("fields", nargs="*", metavar="key=value")
-    p.add_argument("--bool", dest="bool_fields", action="append", default=[], metavar="key=value")
-    p.add_argument("--update", action="store_true",
-                    help="merge onto the existing file instead of overwriting it (e.g. wall_time_s, after the run)")
-    p.set_defaults(func=cmd_env_record)
-
     p = sub.add_parser("ab-legs", help="every leg an A/B has run so far, against what its job planned")
     p.add_argument("root", help="the bench root holding job.json, autorun.state, ab/ and results/")
     p.set_defaults(func=cmd_ab_legs)
 
-    # argparse fills `nargs="*"` from one unbroken run of words, so a field after `--update` is a leftover: a field where the subcommand takes fields, an error elsewhere.
-    args, extra = parser.parse_known_args(argv)
-    if extra:
-        if hasattr(args, "fields"):
-            args.fields = list(args.fields) + extra
-        else:
-            parser.error("unrecognized arguments: %s" % " ".join(extra))
+    args = parser.parse_args(argv)
     args.func(args)
     return 0
 

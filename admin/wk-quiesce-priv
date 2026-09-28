@@ -8,6 +8,7 @@
 
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+SYS=/sys
 
 [ "$(id -u)" -eq 0 ] || { echo "wk-quiesce-priv: must run as root" >&2; exit 1; }
 
@@ -57,30 +58,68 @@ macos_status() {
     printf 'lowpower:  %s\n' "$(pmset -g | awk '/lowpowermode/ {print $2}')"
 }
 
-linux_on() {
-    for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-        [ -w "$g" ] && echo performance > "$g" || true
+# Every write is read back: a value the kernel refused or rewrote fails the step.
+put_sys() { # <file> <value>
+    local f="$1" v="$2"
+    [ -e "$f" ] || return 0
+    { printf '%s\n' "$v" > "$f"; } 2>/dev/null \
+        || { echo "wk-quiesce-priv: writing '$v' to $f failed" >&2; return 1; }
+    [ "$(cat "$f")" = "$v" ] \
+        || { echo "wk-quiesce-priv: $f reads '$(cat "$f")' after writing '$v'" >&2; return 1; }
+}
+
+put_sysctl() { # <key> <value>
+    local k="$1" v="$2"
+    sysctl -q -w "$k=$v" 2>/dev/null \
+        || { echo "wk-quiesce-priv: sysctl -w $k=$v failed" >&2; return 1; }
+    [ "$(sysctl -n "$k")" = "$v" ] \
+        || { echo "wk-quiesce-priv: $k reads '$(sysctl -n "$k")' after writing '$v'" >&2; return 1; }
+}
+
+# cppc_cpufreq has no separate boost step of its own: a platform whose every CPU's
+# ACPI _CPC advertises the same highest and nominal performance cannot boost (moose,
+# cppc_cpufreq, acpi_cppc highest_perf == nominal_perf == 300, boost reads 0
+# unquiesced), and writing cpufreq/boost there may be EINVAL rather than merely
+# ignored. Read at call time, never cached; any other driver keeps today's write.
+can_boost() {
+    local drv="" cpu hi nom
+    [ -r "$SYS/devices/system/cpu/cpu0/cpufreq/scaling_driver" ] \
+        && drv=$(cat "$SYS/devices/system/cpu/cpu0/cpufreq/scaling_driver")
+    [ "$drv" = cppc_cpufreq ] || return 0
+    for cpu in "$SYS"/devices/system/cpu/cpu[0-9]*/acpi_cppc; do
+        [ -d "$cpu" ] || continue
+        hi=$(cat "$cpu/highest_perf" 2>/dev/null) || continue
+        nom=$(cat "$cpu/nominal_perf" 2>/dev/null) || continue
+        [ "$hi" -gt "$nom" ] 2>/dev/null && return 0
     done
-    [ -w /sys/devices/system/cpu/intel_pstate/no_turbo ] && \
-        echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo || true
-    [ -w /sys/devices/system/cpu/cpufreq/boost ] && \
-        echo 0 > /sys/devices/system/cpu/cpufreq/boost || true
-    sysctl -q -w kernel.perf_event_paranoid=-1 || true
-    sysctl -q -w kernel.randomize_va_space=0 || true
+    return 1
+}
+
+# Every step is attempted, so `off` restores all it can; any failure fails the verb.
+tune() { # <governor> <no_turbo> <boost> <perf_event_paranoid> <randomize_va_space>
+    local g rc=0
+    for g in "$SYS"/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        put_sys "$g" "$1" || rc=1
+    done
+    put_sys "$SYS/devices/system/cpu/intel_pstate/no_turbo" "$2" || rc=1
+    if can_boost; then
+        put_sys "$SYS/devices/system/cpu/cpufreq/boost" "$3" || rc=1
+    elif [ -e "$SYS/devices/system/cpu/cpufreq/boost" ]; then
+        echo "wk-quiesce-priv: boost left alone: the platform has none (acpi_cppc highest_perf == nominal_perf)"
+    fi
+    put_sysctl kernel.perf_event_paranoid "$4" || rc=1
+    put_sysctl kernel.randomize_va_space "$5" || rc=1
+    return "$rc"
+}
+
+linux_on() {
+    tune performance 1 0 -1 0 || { echo "wk-quiesce-priv: not quiesced: the steps above failed" >&2; exit 1; }
     systemctl stop packagekit.service >/dev/null 2>&1 || true
     echo "quiesced: performance governor, turbo off, perf unrestricted, ASLR off"
 }
 
 linux_off() {
-    for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-        [ -w "$g" ] && echo schedutil > "$g" || true
-    done
-    [ -w /sys/devices/system/cpu/intel_pstate/no_turbo ] && \
-        echo 0 > /sys/devices/system/cpu/intel_pstate/no_turbo || true
-    [ -w /sys/devices/system/cpu/cpufreq/boost ] && \
-        echo 1 > /sys/devices/system/cpu/cpufreq/boost || true
-    sysctl -q -w kernel.perf_event_paranoid=2 || true
-    sysctl -q -w kernel.randomize_va_space=2 || true
+    tune schedutil 0 1 2 2 || { echo "wk-quiesce-priv: not restored: the steps above failed" >&2; exit 1; }
     echo "restored: schedutil governor, turbo on, perf restricted, ASLR on"
 }
 
@@ -247,6 +286,11 @@ greeter_type() {
     return 1
 }
 
+# gdm.service is the unit; Debian's gdm3.service is an alias of it.
+stop_gdm() {
+    systemctl stop gdm || { echo "wk-quiesce-priv: could not stop gdm; journalctl -u gdm" >&2; exit 1; }
+}
+
 # `systemctl stop` on gdm returns before logind finishes, and claiming the seat that
 # early races gdm's Xorg wrapper into a crash loop.
 wait_seat0_quiet() {
@@ -356,8 +400,8 @@ session_on() {
             echo "wk-quiesce-priv: unknown session mode $mode" >&2; exit 1 ;;
     esac
 
-    if systemctl is-active --quiet gdm3 2>/dev/null || systemctl is-active --quiet gdm 2>/dev/null; then
-        systemctl stop gdm3 2>/dev/null || systemctl stop gdm 2>/dev/null || true
+    if systemctl is-active --quiet gdm 2>/dev/null; then
+        stop_gdm
         wait_seat0_quiet \
             || echo "wk-quiesce-priv: warning: seat0 still had a session after stopping gdm" >&2
         echo "stopped the display manager"
@@ -449,7 +493,7 @@ session_gdm() {
         rm -f "$_r/wayland-0" "$_r/wayland-0.lock"
     fi
     rm -f "$WK_SESSION_MODE_FILE"
-    systemctl stop gdm3 2>/dev/null || systemctl stop gdm 2>/dev/null || true
+    stop_gdm
     wait_seat0_quiet \
         || echo "wk-quiesce-priv: warning: seat0 still had a session after stopping gdm" >&2
 
@@ -466,7 +510,7 @@ session_gdm() {
     gdm_prefer_wayland \
         || echo "wk-quiesce-priv: warning: could not set gdm's display server to wayland" >&2
 
-    systemctl start gdm3 2>/dev/null || systemctl start gdm 2>/dev/null \
+    systemctl start gdm \
         || { echo "wk-quiesce-priv: gdm did not start; journalctl -u gdm" >&2; exit 1; }
 
     if [ -n "$hide" ]; then
@@ -490,7 +534,7 @@ session_gdm() {
 session_stop() {
     local user uid runtime
     systemctl stop "$WK_SESSION_UNIT" 2>/dev/null || true
-    systemctl stop gdm3 2>/dev/null || systemctl stop gdm 2>/dev/null || true
+    stop_gdm
 
     if user=$(session_user); then
         uid=$(id -u "$user")
@@ -515,8 +559,7 @@ session_status() {
     local unit_state dm_state
     unit_state=$(systemctl is-active "$WK_SESSION_UNIT" 2>/dev/null | head -1 || true)
     [ -n "$unit_state" ] || unit_state=unknown
-    dm_state=$(systemctl is-active gdm3 2>/dev/null | head -1 || true)
-    [ -n "$dm_state" ] || dm_state=$(systemctl is-active gdm 2>/dev/null | head -1 || true)
+    dm_state=$(systemctl is-active gdm 2>/dev/null | head -1 || true)
     [ -n "$dm_state" ] || dm_state=unknown
 
     printf 'session:   %s\n' "$unit_state"

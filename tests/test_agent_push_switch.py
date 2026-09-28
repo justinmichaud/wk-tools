@@ -6,8 +6,8 @@ off -- and it has to be thrown for *every* target, because every one of them
 can push:
 
     container   links the live /secrets mount
-    macOS guest holds a copy the host wrote on start (targets/vm.sh's
-                _write_deploy_keys), which `wk push off` converges
+    macOS guest holds a copy the host wrote on start (lib/wk/guest.py's
+                write_deploy_keys), which `wk push off` converges
     build box   keeps its own keys under its own wk root, so the switch is
                 thrown there, by name
 
@@ -83,7 +83,7 @@ class _AiRun(WkTest):
         claude = home / ".local" / "bin" / "claude"
         claude.write_text("#!/bin/sh\n" + FAKE_CLAUDE)
         claude.chmod(0o755)
-        # What t_src resolves to on a build box; cmd/ai's probe cds into it.
+        # What Remote.src resolves to on a build box; cmd/ai's probe cds into it.
         (self.tmp / "rroot" / "ws" / "probe-ws" / "WebKit").mkdir(parents=True,
                                                                   exist_ok=True)
         log = self.tmp / "wk.log"

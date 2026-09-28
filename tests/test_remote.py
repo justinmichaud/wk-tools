@@ -1,5 +1,5 @@
-"""cmd/selftest's `remote` section: a configured machine name resolves as a
-target, and `wk status`/`wk ls` reach it. Each docstring is the
+"""A configured machine name resolves as a target, and `wk status`/`wk ls`
+reach it. Each docstring is the
 phrase of the behaviour it checks.
 
 Every test that touches a real machine over ssh is gated on that specific
@@ -15,10 +15,13 @@ import os
 import sys
 import unittest
 
-from tests.support import (REAL_MACHINES, REPO, WkTest, bash, stub_path,
+from unittest import mock
+
+from tests.support import (REAL_MACHINES, REPO, WkTest, stub_path,
                            requires_machine)
 
 sys.path.insert(0, str(REPO / "lib"))
+from wk import sudo, targets  # noqa: E402
 
 
 class TestUnregisteredWorkspaceResolves(WkTest):
@@ -26,8 +29,8 @@ class TestUnregisteredWorkspaceResolves(WkTest):
 
     def test_unregistered_remote_workspace_resolves(self):
         """ws_target finds a remote workspace the registry misses"""
-        # A registry holding only the fake conf (WK_MACHINES_DIR,
-        # lib/target.sh), so the walk cannot reach the real fleet.
+        # A registry holding only the fake conf (WK_MACHINES_DIR), so the walk
+        # cannot reach the real fleet.
         registry = self.tmp / "hosts"
         registry.mkdir()
         root = self.tmp / "root"
@@ -36,25 +39,17 @@ class TestUnregisteredWorkspaceResolves(WkTest):
         store = self.tmp / "store"
         store.mkdir()
         # WK_REMOTE_LOCAL drives the remote driver without ssh; the store is
-        # a different directory from the root, so only t_info -- not the
+        # a different directory from the root, so only Remote.info -- not the
         # host-side directory test -- can find the workspace.
         (registry / "fakebox.conf").write_text(
-            "KIND=build\nWK_TARGET_KIND=remote\n"
-            "WK_REMOTE_LOCAL=1\n"
-            f"WK_REMOTE_ROOT={root}\n"
-            f"WK_REMOTE_STORE={store}\n"
+            "kind=build\ndriver=remote\n"
+            "local=1\n"
+            f"root={root}\n"
+            f"store={store}\n"
         )
-        cp = bash('''
-set -euo pipefail
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/target.sh"
-t=$(ws_target tws)
-[ "$t" = fakebox ] || { echo "ws_target said '$t'"; exit 1; }
-''', env={
-            "WK_MACHINES_DIR": str(registry),
-            "XDG_STATE_HOME": str(self.tmp / "state"),
-        })
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        reg = targets.Registry(REPO, env=dict(os.environ, WK_MACHINES_DIR=str(registry),
+                                              XDG_STATE_HOME=str(self.tmp / "state")))
+        self.assertEqual(reg.ws_target("tws"), "fakebox")
 
 
 class TestMachineAnswers(WkTest):
@@ -62,8 +57,8 @@ class TestMachineAnswers(WkTest):
     down from one with no wk-tools, and lets no ssh error text through"""
 
     def _registry(self, conf):
-        """A registry holding exactly one fake machine (WK_MACHINES_DIR,
-        lib/target.sh), so nothing here can reach the real fleet."""
+        """A registry holding exactly one fake machine (WK_MACHINES_DIR), so
+        nothing here can reach the real fleet."""
         registry = self.tmp / "hosts"
         registry.mkdir(exist_ok=True)
         (registry / "fakebox.conf").write_text(conf)
@@ -73,15 +68,13 @@ class TestMachineAnswers(WkTest):
         # ssh answers as it does for a name nothing resolves; no network is asked.
         ssh = ('echo "ssh: Could not resolve hostname wk-test-unreachable.invalid:'
                ' nodename nor servname provided, or not known" >&2; exit 255')
-        with stub_path({"ssh": ssh}) as binp:
-            return bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target fakebox
-machine_answers fakebox && echo "rc=0" || echo "rc=$?"
-''', env={"WK_MACHINES_DIR": str(self._registry(conf)),
-            "XDG_STATE_HOME": str(self.tmp / "state"), "WK_SSH_TIMEOUT": "3",
-            "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}"})
+        with stub_path({"ssh": ssh}) as binp, \
+                mock.patch.dict(os.environ, {"PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}"}), \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(out):
+            env = dict(os.environ, WK_MACHINES_DIR=str(self._registry(conf)),
+                       XDG_STATE_HOME=str(self.tmp / "state"), WK_SSH_TIMEOUT="3")
+            answered = sudo.machine_answers(targets.Registry(REPO, env=env).load("fakebox"), "fakebox")
+        return answered, out.getvalue()
 
     def test_an_unreachable_machine_is_reported_as_unreachable(self):
         """an ssh destination nothing resolves is 'unreachable', not 'no
@@ -89,10 +82,9 @@ machine_answers fakebox && echo "rc=0" || echo "rc=$?"
         measurement, not a guess at 'off'"""
         # An .invalid name fails resolution at once, so this needs no route to
         # anything and cannot hang on a real machine's timeout.
-        cp = self._machine_answers(
-            "KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_HOST=wk-test-unreachable.invalid\n")
-        out = cp.stdout + cp.stderr
-        self.assertIn("rc=1", out, out)
+        answered, out = self._machine_answers(
+            "kind=build\ndriver=remote\nhost=wk-test-unreachable.invalid\n")
+        self.assertFalse(answered, out)
         self.assertRegex(out, r"(?m)^fakebox\s+unreachable over ssh: \S", out)
         self.assertNotIn("no wk-tools", out)
         self.assertNotIn("not on the tailnet", out, "a guess where ssh's own reason belongs")
@@ -101,9 +93,8 @@ machine_answers fakebox && echo "rc=0" || echo "rc=$?"
 
     def test_the_machine_itself_is_not_a_far_side(self):
         """the machine this runs on has no far side to answer for it"""
-        cp = self._machine_answers("KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_LOCAL=1\n")
-        out = cp.stdout + cp.stderr
-        self.assertIn("rc=1", out, out)
+        answered, out = self._machine_answers("kind=build\ndriver=remote\nlocal=1\n")
+        self.assertFalse(answered, out)
         self.assertRegex(out, r"(?m)^fakebox\s+not a machine of its own", out)
 
     def test_push_and_sudo_share_the_one_fan_out_line(self):
@@ -116,21 +107,9 @@ machine_answers fakebox && echo "rc=0" || echo "rc=$?"
 
 
 def _configured_remote_machines():
-    """Every machine conf in machines/ whose kind resolves to `remote`
-    -- pure logic, no ssh, mirrors target_kind()'s own resolution."""
-    cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/target.sh"
-for n in $(target_known); do
-    echo "$n:$(target_kind "$n" 2>/dev/null || echo '?')"
-done
-''', env={"WK_MACHINES_DIR": str(REAL_MACHINES)})
-    out = {}
-    for line in cp.stdout.splitlines():
-        if ":" in line:
-            n, k = line.split(":", 1)
-            out[n] = k
-    return out
+    """{name: kind} for every target conf in machines/ -- pure logic, no ssh."""
+    reg = targets.Registry(REPO, env=dict(os.environ, WK_MACHINES_DIR=str(REAL_MACHINES)))
+    return {n: reg.kind(n) for n in reg.known()}
 
 
 class TestRemoteConfsResolve(WkTest):
@@ -139,25 +118,16 @@ class TestRemoteConfsResolve(WkTest):
         machines = _configured_remote_machines()
         if not machines:
             self.skipTest(f"no machines configured in {REAL_MACHINES}")
-        bad = [n for n, k in machines.items() if k in ("", "?")]
+        bad = [n for n, k in machines.items() if not k]
         self.assertEqual(bad, [], f"configured but unresolvable: {bad}")
 
 
-def _t_info_reaches(name):
-    """Mirrors cmd/selftest's chk_remote_reachable: load the driver for
-    `name` and ask t_info about a workspace that does not exist. t_info
-    itself never fails (an unreachable machine is a *word* it prints, not a
-    nonzero exit) -- what this actually catches is load_target or the probe
-    dying outright, which is the same thing the shell version caught."""
-    cp = bash(f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/resources.sh"
-. "{REPO}/lib/store.sh"
-. "{REPO}/lib/target.sh"
-( load_target "{name}"; t_info selftest-nonexistent >/dev/null 2>&1 )
-''', env={"WK_MACHINES_DIR": str(REAL_MACHINES)}, timeout=30)
-    return cp
+def _info_reaches(name):
+    """Load the driver for `name` and ask it about a workspace that does not
+    exist: `info` answers "unreachable" rather than raising, so what this
+    catches is the load or the probe dying outright."""
+    reg = targets.Registry(REPO, env=dict(os.environ, WK_MACHINES_DIR=str(REAL_MACHINES)))
+    return reg.load(name).info("selftest-nonexistent")
 
 
 class TestRemoteReachable(WkTest):
@@ -166,20 +136,17 @@ class TestRemoteReachable(WkTest):
     @requires_machine("buildbox4")
     def test_buildbox4_reachable(self):
         """`wk status`/`wk ls` list what is on a configured machine"""
-        cp = _t_info_reaches("buildbox4")
-        self.assertEqual(cp.returncode, 0, f"buildbox4: {cp.stdout + cp.stderr}")
+        self.assertEqual(_info_reaches("buildbox4"), "absent")
 
     @requires_machine("devbox-arm64-2")
     def test_devbox_arm64_2_reachable(self):
         """`wk status`/`wk ls` list what is on a configured machine"""
-        cp = _t_info_reaches("devbox-arm64-2")
-        self.assertEqual(cp.returncode, 0, f"devbox-arm64-2: {cp.stdout + cp.stderr}")
+        self.assertEqual(_info_reaches("devbox-arm64-2"), "absent")
 
     @requires_machine("moose")
     def test_moose_reachable(self):
         """`wk status`/`wk ls` list what is on a configured machine"""
-        cp = _t_info_reaches("moose")
-        self.assertEqual(cp.returncode, 0, f"moose: {cp.stdout + cp.stderr}")
+        self.assertEqual(_info_reaches("moose"), "absent")
 
 
 class TestTheMirrorOnTheBox(WkTest):
@@ -192,20 +159,21 @@ class TestTheMirrorOnTheBox(WkTest):
         self.registry = self.tmp / "hosts"
         self.registry.mkdir()
         (self.registry / "fakebox.conf").write_text(
-            "KIND=build\nWK_TARGET_KIND=remote\n"
-            "WK_REMOTE_LOCAL=1\n"
-            f"WK_REMOTE_ROOT={self.tmp / 'wk'}\n"
-            f"WK_REMOTE_STORE={self.tmp / 'store'}\n"
+            "kind=build\ndriver=remote\n"
+            "local=1\n"
+            f"root={self.tmp / 'wk'}\n"
+            f"store={self.tmp / 'store'}\n"
         )
 
     def _script(self):
         """The shell Remote._mirror_update sends, to a fake machine: the driver is real, only the far side is not."""
         from wk import targets
-        from wk.machine import Fake
+        from wk.machine import Fake, Result
         env = dict(os.environ, WK_MACHINES_DIR=str(self.registry), XDG_STATE_HOME=str(self.tmp / "state"))
         t = targets.Registry(REPO, env).load("fakebox")
         t.machine = Fake("fakebox")
-        t.machine.answer(["sh", "-c"], out="")
+        probe = "/far\nLinux\n4\n0.1 0 0\n===MEM===\nMemAvailable: 1024 kB\n===IONICE===\nno\n"
+        t.machine.react(["sh", "-c"], lambda argv, f: Result(0, probe if argv[-1] == targets.PROBE_SCRIPT else ""))
         with contextlib.redirect_stderr(io.StringIO()):
             t._mirror_update(str(self.tmp / "wk"))
         return "\n".join(e[1][2] for e in t.machine.effects if e[0] == "run" and e[1][:2] == ("sh", "-c"))
@@ -227,7 +195,7 @@ class TestTheMirrorOnTheBox(WkTest):
 
     def test_it_names_no_url_of_its_own(self):
         """A second spelling of an upstream's URL is a mirror that carries
-        something else than wk_remotes says (lib/store.sh)."""
+        something else than git.REMOTES says."""
         import inspect
         from wk import targets
         body = inspect.getsource(targets.Remote._mirror_update)

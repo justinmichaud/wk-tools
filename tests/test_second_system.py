@@ -3,8 +3,8 @@ keeps its rescue on partitions 1-2 and its bench system on 3-4 of the same SD
 card. The card helper (admin/wk-card-priv) splits a whole-card image into
 partitions 3 and 4, addresses only those under @second, whether the card is
 in a reader or is the disk the rescue itself runs from, and arms the second
-system with one os_prefix line in the rescue's config.txt; boot/pi-sd.sh is
-the driver that asks for all of it.
+system with one os_prefix line in the rescue's config.txt; lib/wk/boot/pi.py's
+PiSd is the driver that asks for all of it.
 
 Helper functions are lifted out of admin/wk-card-priv with sed (the idiom
 tests/test_card_edits.py uses) and run against files and directories standing
@@ -638,8 +638,8 @@ class TestUnitsForABusyBoxInit(WkTest):
 class TestPiSdDriver(unittest.TestCase):
     """lib/wk/boot/pi.py's PiSd: arming through the helper's @second/@third verbs on the rescue, against a FakeBoard."""
 
-    CONF = {"NODE_NAME": "rpi3", "NODE_DRIVER": "pi-sd", "NODE_DEVICE": "/dev/mmcblk0", "NODE_ROOT": "/dev/mmcblk0p2",
-            "NODE_ROLE": "bench-device", "NODE_PROFILE": "webkit-2.52-yocto-rpi3-32"}
+    CONF = {"name": "rpi3", "driver": "pi-sd", "device": "/dev/mmcblk0", "root": "/dev/mmcblk0p2",
+            "role": "bench-device", "profile": "webkit-2.52-yocto-rpi3-32"}
 
     def board(self, *boots):
         import sys

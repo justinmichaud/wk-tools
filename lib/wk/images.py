@@ -1,12 +1,10 @@
-"""Image profiles (image/configs/<name>.conf) and what is named after one: its image
-workspace `<builder>-<profile>[-<arm>]`, the slots and PGO collections under it."""
+"""Image profiles (image/configs/<name>.conf), their workspaces `<builder>-<profile>[-<arm>]`, slots and PGO."""
 
 import os
 import re
-import shlex
-import sys
 
-from wk import act
+from wk import act, kv
+from wk.kv import ConfError
 from wk.store import Store
 
 FIELDS = {
@@ -25,11 +23,11 @@ FIELDS = {
     "PMO_BRIDGE": "", "PMO_BUILD_HOST": "", "PMO_WIFI_BANDS": "",
     "PMO_KERNEL_APORT": "", "PMO_KCONFIG": "",
 }
+MARKER = "/etc/wk-image"
 WS_BUILDERS = ("yocto", "buildroot")
 PGO_FROM = (2, 52)   # upstream's cmake USE_PGO_PROFILE, 310954@main
 PGO_SUBDIR = "wk-pgo"
 INSTR_SUFFIX = "-instr"
-KEY = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 BLURB = re.compile(r"^# \S+ -- (.*)$")
 SLOT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
@@ -73,10 +71,6 @@ TOMBSTONES = dict(
     + [(n, _PERF_LINUX) for n in ("perf-linux-rpi3", "perf-linux-rpi4", "perf-linux-rpi5")])
 
 
-class ConfError(ValueError):
-    pass
-
-
 class Tombstone(LookupError):
     pass
 
@@ -84,6 +78,11 @@ class Tombstone(LookupError):
 def root(env=None):
     env = os.environ if env is None else env
     return env.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def marker(env=None):
+    env = os.environ if env is None else env
+    return env.get("WK_IMAGE_MARKER") or MARKER
 
 
 def config_dir(env=None):
@@ -101,34 +100,12 @@ def names(env=None):
         return []
 
 
+def _field(key):
+    return None if key in FIELDS else "%s is not a profile field" % key
+
+
 def parse(path):
-    with open(path, errors="replace") as f:
-        lines = f.read().splitlines()
-    out, i = {}, 0
-    while i < len(lines):
-        line, i = lines[i], i + 1
-        if not line.strip() or line.strip().startswith("#"):
-            continue
-        m = KEY.match(line)
-        if not m:
-            raise ConfError("%s:%d: not a KEY=value line: %s" % (path, i, line.strip()))
-        key, raw = m.groups()
-        while True:
-            try:
-                words = shlex.split(raw, comments=True)
-                break
-            except ValueError:
-                if i >= len(lines):
-                    raise ConfError("%s: %s's quote is never closed" % (path, key))
-                raw, i = raw + "\n" + lines[i], i + 1
-        if "$" in raw or "`" in raw:
-            raise ConfError("%s: %s is not a literal" % (path, key))
-        if len(words) > 1:
-            raise ConfError("%s: %s is more than one word; quote it" % (path, key))
-        if key not in FIELDS:
-            raise ConfError("%s: %s is not a profile field" % (path, key))
-        out[key] = words[0] if words else ""
-    return out
+    return kv.conf_file(path, _field)
 
 
 def load(name, env=None):
@@ -149,10 +126,6 @@ def quiet_load(name, env=None):
         return load(name, env)
     except (LookupError, ConfError):
         return None
-
-
-def shell_text(profile):
-    return "".join("%s=%s\n" % (k, shlex.quote(v)) for k, v in profile.items())
 
 
 def blurb(name, env=None):
@@ -203,8 +176,10 @@ def image_ws(spec, env=None):
     profile = spec_profile(spec)
     try:
         builder = load(profile, env)["IMG_BUILDER"]
-    except (LookupError, ConfError):
+    except LookupError:
         return ""
+    except ConfError as e:
+        act.die(str(e))
     return "%s-%s" % (builder, profile) if builder in WS_BUILDERS else ""
 
 
@@ -300,55 +275,3 @@ def check_slot_name(slot):
     if not SLOT.match(slot or ""):
         act.die("""slot '%s' is not usable: letters, digits, '_', '.' and '-',
     not starting with '-' or '.'. It names a directory here and on the board.""" % slot)
-
-
-def _say(text):
-    sys.stdout.write(text)
-    return 0
-
-
-def _flag(ok):
-    return 0 if ok else 1
-
-
-def _load_verb(name):
-    try:
-        return _say(shell_text(load(name)))
-    except Tombstone as e:
-        act.err(str(e))
-        return 1
-    except ConfError as e:
-        act.err(str(e))
-        return 2
-    except LookupError:
-        return 3
-
-
-def _maybe(value):
-    return 1 if value is None else _say(value)
-
-
-VERBS = {   # verb: (least, most) arguments, most None for any
-    "load": ((1, 1), _load_verb),
-    "names": ((0, 0), lambda: _say("".join(n + "\n" for n in names()))),
-    "origin-branches": ((0, 0), lambda: _say("".join(b + "\n" for b in origin_branches()))),
-    "slot-dir": ((2, 2), lambda w, s: _maybe(slot_dir(w, s))),
-    "toolchain-holds": ((2, 2), lambda w, t: _flag(toolchain_holds(w, t))),
-    "build-subject": ((5, 5), lambda *a: _say(build_subject(*a))),
-}
-
-
-def main(argv):
-    verb, args = (argv[0], argv[1:]) if argv else ("", [])
-    (least, most), fn = VERBS.get(verb, ((0, 0), None))
-    if fn is None or len(args) < least or (most is not None and len(args) > most):
-        sys.stderr.write("usage: python3 -m wk.images %s\n" % "|".join(VERBS))
-        return 2
-    try:
-        return fn(*args)
-    except act.Refused as e:
-        return e.status
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))

@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 #
 # wk selftest [--lint] [--unit] [--live] [-v] [<pattern>] -- run the test suite in tests/
 # wk: where=local name=none group=hosts needs python3 takes=1 opts --lint,--unit,--live,--quick,-v
@@ -15,44 +15,54 @@
 #   -v            one line per test
 #   <pattern>     only tests whose name matches (unittest -k)
 
-set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-. "$WK_ROOT/lib/common.sh"
+import os
+import subprocess
+import sys
 
-LIVE="" ARGS=()
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --quick) die "--quick is gone: 'wk selftest' with no tier named runs lint then unit and makes no workspace" ;;
-        --live)  LIVE=1; ARGS+=("$1"); shift ;;
-        --lint|--unit|-v) ARGS+=("$1"); shift ;;
-        *)       ARGS+=(-k "$1"); shift ;;
-    esac
-done
+ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, ROOT)
 
-cd "$WK_ROOT"
+from wk import act, decl  # noqa: E402
+from wk.clock import Clock  # noqa: E402
+from wk.lock import Lock  # noqa: E402
+from wk.machine import here  # noqa: E402
+from wk.store import Store  # noqa: E402
 
-_builds_on_the_books() {   # the suite's own reading, asked here rather than spelled a second time
-    python3 -c 'from tests.support import builds_on_the_books
-print("\n".join(builds_on_the_books()))' 2>/dev/null
-}
 
-if [ -n "$LIVE" ]; then
-    BUSY=$(_builds_on_the_books)
-    [ -z "$BUSY" ] || barrier "a build is on this machine's books:
-$(printf '%s\n' "$BUSY" | sed 's/^/      /')
-    A live run makes workspaces and builds in them, and a live run and a
-    build starve each other. Wait for it ('wk status' follows it), or run
-    the tiers that need no machine:
-        wk selftest"
-    lock_alive selftest && die "a live 'wk selftest' is already running here (pid $(lock_holder_pid "$(_lock_path selftest)")).
-    Two of them take the same podman machine, and the loaded one fails
-    wall-clock assertions that pass alone. Wait for it, or run the tiers
-    that need no machine:
-        wk selftest"
-    hold_lock selftest -w 0
-fi
+def refuse_live_beside(lock):
+    """A live run makes workspaces and builds in them: it and a build starve each other, and two take one podman machine."""
+    from tests.support import builds_on_the_books
+    busy = builds_on_the_books()
+    if busy:
+        act.barrier("a build is on this machine's books:\n%s\n    A live run makes workspaces and builds in them, and a live "
+                    "run and a\n    build starve each other. Wait for it ('wk status' follows it), or run\n    the tiers that "
+                    "need no machine:\n        wk selftest" % "".join("      %s\n" % b for b in busy).rstrip("\n"))
+    pid = lock.holder_pid("selftest")
+    if pid is not None and lock.machine.alive(pid):
+        act.die("a live 'wk selftest' is already running here (pid %d).\n    Two of them take the same podman machine, and "
+                "the loaded one fails\n    wall-clock assertions that pass alone. Wait for it, or run the tiers\n    that "
+                "need no machine:\n        wk selftest" % pid)
+    lock.hold("selftest", 0)
 
-# Not exec'd: the EXIT trap that drops the lock has to outlive the run (lib/lockrun.sh).
-rc=0
-python3 tests/run.py ${ARGS[@]+"${ARGS[@]}"} || rc=$?
-exit "$rc"
+
+def main(argv):
+    args = decl.Args(decl.Decl(__file__), argv)
+    if args.flag("--quick"):
+        act.die("--quick is gone: 'wk selftest' with no tier named runs lint then unit and makes no workspace")
+    given = {"--lint": args.flag("--lint"), "--unit": args.flag("--unit"), "--live": args.flag("--live"), "-v": args.flag("-v")}
+    run = [f for f, on in given.items() if on]
+    for p in args.positionals:
+        run += ["-k", p]
+    if args.flag("--live"):
+        refuse_live_beside(Lock(Store(), here(), Clock()))
+    return subprocess.call([sys.executable, os.path.join(ROOT, "tests", "run.py")] + run, cwd=ROOT)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except act.Refused as e:
+        sys.exit(e.status)
+    except KeyboardInterrupt:
+        sys.exit(130)

@@ -95,7 +95,7 @@ class World:
                     "XDG_CONFIG_HOME": str(self.tmp / "config"), "WK_MACHINES_DIR": str(self.tmp / "machines")}
         (self.tmp / "machines").mkdir(parents=True, exist_ok=True)
         for name in self.boards_:
-            (self.tmp / "machines" / (name + ".conf")).write_text("KIND=board\nNODE_SSH=%s-rescue\n" % name)
+            (self.tmp / "machines" / (name + ".conf")).write_text("kind=board\nssh=%s-rescue\n" % name)
         self.fake, self.clock = Fake("here"), FakeClock()
         self.reg = Reg(self.env, self.fake)
         self.mirror = self.reg.store.mirror()
@@ -199,6 +199,32 @@ class ABTest(unittest.TestCase):
         rc, err = self.quiet(w.ab(spec, **kw).go)
         self.assertIsInstance(rc, Refused, err)
         return err
+
+
+class TestBoardStateNamesAConfigProblem(ABTest):
+    """A config problem (an unresolvable board name) is refused by name; only
+    the ssh round trip to a board already probed as reachable is folded into
+    'unreachable'."""
+
+    def test_a_board_machines_does_not_name_is_refused_not_called_unreachable(self):
+        w = self.world()
+        a = w.ab(devices="ghost")
+        rc, err = self.quiet(a.board_state, "ghost")
+        self.assertIsInstance(rc, Refused, err)
+        self.assertIn("ghost", err)
+        self.assertIn("names no board", err)
+
+
+class TestMachineKindNamesAMalformedConf(ABTest):
+    """A conf that does not parse is refused by name, not read as `kind=""`
+    and quietly sent down the board (not-a-Mac) path."""
+
+    def test_a_malformed_conf_is_refused_not_treated_as_not_a_mac(self):
+        w = self.world()
+        (Path(w.env["WK_MACHINES_DIR"]) / "broken.conf").write_text("not a keyvalue line\n")
+        rc, err = self.quiet(ab.machine_kind, REPO, w.env, "broken")
+        self.assertIsInstance(rc, Refused, err)
+        self.assertIn("not a KEY=value line", err)
 
 
 class TestTheRefusals(ABTest):
@@ -306,13 +332,13 @@ class TestTheImages(ABTest):
 class TestTheGraph(ABTest):
     """`unit ab.plan_and_pairing`, the plan half: what each step needs and holds, and so what runs at once."""
 
-    lane = "buildroot-" + R38
+    ws = "buildroot-" + R38
 
     def test_the_steps_declare_what_they_need_and_what_they_hold(self):
         _, s = self.graph(self.world())
-        image = "image:%s@tolken" % self.lane
+        image = "image:%s@tolken" % self.ws
         self.assertEqual(s[image].holds, ("machine:tolken",))
-        self.assertEqual(s["slot:%s:base" % self.lane].needs, (image,))
+        self.assertEqual(s["slot:%s:base" % self.ws].needs, (image,))
         self.assertEqual(s["deploy:rpi3:base"].holds, ("device:rpi3",))
         self.assertEqual(s["bench:rpi3:speedometer3"].needs, ("deploy:rpi3:base", "deploy:rpi3:pr"))
         self.assertEqual(s["report"].needs, ("bench:rpi3:speedometer3",))
@@ -326,30 +352,30 @@ class TestTheGraph(ABTest):
     def test_the_second_arm_builds_while_the_first_is_on_the_board(self):
         _, s = self.graph(self.world())
         waves = [{x.id for x in wave} for wave in sched.waves(list(s.values()))]
-        self.assertTrue([w for w in waves if {"deploy:rpi3:base", "slot:%s:pr" % self.lane} <= w], waves)
+        self.assertTrue([w for w in waves if {"deploy:rpi3:base", "slot:%s:pr" % self.ws} <= w], waves)
 
-    def test_a_buildroot_lane_has_no_toolchain_step(self):
+    def test_a_buildroot_image_has_no_toolchain_step(self):
         _, s = self.graph(self.world())
         self.assertFalse([k for k in s if k.startswith("toolchain:")])
 
-    def test_a_yocto_lane_builds_its_cross_toolchain_first(self):
+    def test_a_yocto_image_builds_its_cross_toolchain_first(self):
         _, s = self.graph(self.world(boards=Y52), release="2.52", builder="yocto", devices="rpi5-64")
-        lane = "yocto-webkit-2.52-yocto-rpi5-64@tolken"
-        self.assertEqual(s["toolchain:" + lane].needs, ("image:" + lane,))
-        self.assertIn("--stage toolchain", s["toolchain:" + lane].command)
+        ws = "yocto-webkit-2.52-yocto-rpi5-64@tolken"
+        self.assertEqual(s["toolchain:" + ws].needs, ("image:" + ws,))
+        self.assertIn("--stage toolchain", s["toolchain:" + ws].command)
         for arm in ("base", "pr"):
-            self.assertEqual(s["instr:yocto-webkit-2.52-yocto-rpi5-64:" + arm].needs, ("toolchain:" + lane,))
+            self.assertEqual(s["instr:yocto-webkit-2.52-yocto-rpi5-64:" + arm].needs, ("toolchain:" + ws,))
 
     def test_a_profile_guided_arm_is_the_cycles_phases_not_one_build(self):
         """So one arm's collection on the board and the other arm's instrumented build run at once."""
         _, s = self.graph(self.world(boards=Y52), release="2.52", builder="yocto", devices="rpi5-64")
-        lane = "yocto-webkit-2.52-yocto-rpi5-64"
-        self.assertEqual(s["instr:%s:base" % lane].holds, ("machine:tolken",))
+        ws = "yocto-webkit-2.52-yocto-rpi5-64"
+        self.assertEqual(s["instr:%s:base" % ws].holds, ("machine:tolken",))
         self.assertEqual(s["collect:rpi5:base:speedometer3"].holds, ("device:rpi5",))
         self.assertIn("--collect", s["collect:rpi5:base:jetstream3"].command)
-        self.assertEqual(s["mix:%s:base" % lane].needs, tuple("collect:rpi5:base:" + p for p in pgo.BENCHMARKS))
+        self.assertEqual(s["mix:%s:base" % ws].needs, tuple("collect:rpi5:base:" + p for p in pgo.BENCHMARKS))
         waves = [{x.id for x in wave} for wave in sched.waves(list(s.values()))]
-        self.assertTrue([w for w in waves if {"deploy:rpi5:base-instr", "instr:%s:pr" % lane} <= w], waves)
+        self.assertTrue([w for w in waves if {"deploy:rpi5:base-instr", "instr:%s:pr" % ws} <= w], waves)
 
     def test_two_boards_on_one_machine_build_in_turn(self):
         w = self.world(boards={"rpi4": "webkit-2.52-yocto-rpi4-64", "rpi5": "webkit-2.52-yocto-rpi5-64"})
@@ -358,12 +384,12 @@ class TestTheGraph(ABTest):
             self.assertLessEqual(len([x for x in wave if x.id.split(":")[0] in BUILDS]), 1, wave)
 
     def test_build_on_puts_each_arm_on_its_own_machine(self):
-        """Two machines are what makes the two arms build at once; each arm's deploy is sent to the machine holding its lane."""
+        """Two machines are what makes the two arms build at once; each arm's deploy is sent to the machine holding its image workspace."""
         _, s = self.graph(self.world(boards=Y52), release="2.52", builder="yocto", devices="rpi5-64", build_on="one,two")
-        lane = "yocto-webkit-2.52-yocto-rpi5-64"
-        self.assertEqual((s["instr:%s:base" % lane].holds, s["instr:%s:pr" % lane].holds), (("machine:one",), ("machine:two",)))
+        ws = "yocto-webkit-2.52-yocto-rpi5-64"
+        self.assertEqual((s["instr:%s:base" % ws].holds, s["instr:%s:pr" % ws].holds), (("machine:one",), ("machine:two",)))
         first = {x.id for x in sched.waves(list(s.values()))[0]}
-        self.assertEqual(first, {"image:%s@one" % lane, "image:%s@two" % lane})
+        self.assertEqual(first, {"image:%s@one" % ws, "image:%s@two" % ws})
         self.assertTrue(s["deploy:rpi5:pr"].command.startswith("WK_TARGET=two "))
 
     def test_one_machine_named_for_both_arms_builds_them_in_turn(self):
@@ -427,6 +453,9 @@ class TestARun(ABTest):
         self.assertEqual(t.field("exit"), "0")
         doc = record.task_doc(os.path.join(w.reg.store.bench_dir(), name))
         self.assertEqual((doc["slots"], doc["rounds"], doc["subject"]["head"]), (["base", "pr"], 5, HEAD))
+        self.assertEqual(doc["restart"], doc["commands"][0] + " --task " + name, "a restart is the request itself, into this task")
+        stepped = [e[1] for e in w.fake.effects if e[0] == "run" and e[1][:2] == ("sh", "-c") and "bench" in e[1]]
+        self.assertTrue(stepped and all("WK_TASK_HELD=" + name in argv for argv in stepped), "a step is told the A/B holds its task")
 
     def test_a_step_already_done_is_not_run_again(self):
         w = self.world()
@@ -511,8 +540,8 @@ class TestTheCost(ABTest):
         w = self.world()
         self.leg(w, "t1", "r", 100, count="2")
         self.leg(w, "t2", "r", 999)
-        self.assertEqual(ab.leg_seconds(w.reg.store.bench_dir(), "rpi3", "speedometer3", "4"), [200.0])
-        self.assertEqual(ab.leg_seconds(w.reg.store.bench_dir(), "rpi3", "speedometer3", ""), [999.0])
+        self.assertEqual(ab.leg_seconds(w.reg.store, "rpi3", "speedometer3", "4"), [200.0])
+        self.assertEqual(ab.leg_seconds(w.reg.store, "rpi3", "speedometer3", ""), [999.0])
 
     def test_nothing_measured_is_an_unknown_cost(self):
         a, _ = self.graph(self.world())

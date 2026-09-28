@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""read|present|write|fingerprint one credential file. Every open is O_NOFOLLOW and the fd is
-checked regular/ours/st_nlink==1: agent-rw is mounted read-write into every container, where a workspace could otherwise aim a credential at push-keys."""
+"""One credential file, opened O_NOFOLLOW and checked regular, ours and singly linked: agent-rw is mounted
+read-write into every container, where a workspace could otherwise aim a credential at push-keys."""
 
+import argparse
 import hashlib
 import os
 import stat
@@ -33,11 +34,7 @@ def _check(fd, verb, path):
 def _open_read(verb, path):
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NOCTTY)
-    except FileNotFoundError:
-        return None
-    except NotADirectoryError:
-        return None
-    except PermissionError:
+    except (FileNotFoundError, NotADirectoryError, PermissionError):
         return None
     except OSError as exc:
         _refuse(verb, path, "opening it failed: %s" % exc.strerror)
@@ -75,8 +72,7 @@ def write(path):
                      0o600)
     except OSError as exc:
         _refuse("write", path, "opening it failed: %s" % exc.strerror)
-    # Before the truncate, so a refusal leaves what is there exactly as it was.
-    _check(fd, "write", path)
+    _check(fd, "write", path)   # before the truncate, so a refusal leaves the file as it was
     with os.fdopen(fd, "wb") as f:
         os.ftruncate(f.fileno(), 0)
         f.write(data)
@@ -85,8 +81,7 @@ def write(path):
 
 
 def fingerprint(path):
-    # Stripped, because one machine's copy was written by `wk key set --paste`, which ends it in a newline.
-    fd = _open_read("read", path)
+    fd = _open_read("read", path)   # stripped: `wk key set --paste` ends a value in a newline
     if fd is None:
         return 0
     with os.fdopen(fd, "rb") as f:
@@ -101,12 +96,13 @@ VERBS = {"read": read, "present": present, "write": write,
 
 
 def main(argv):
-    if len(argv) != 3 or argv[1] not in VERBS:
-        sys.stderr.write(
-            "usage: secretfile.py read|present|write|fingerprint <path>\n")
-        return 2
-    return VERBS[argv[1]](argv[2])
+    p = argparse.ArgumentParser(prog="secretfile.py")
+    p.add_argument("verb", choices=VERBS, help="read: to stdout; present: exit 0 when non-empty; write: stdin to it; "
+                                               "fingerprint: 12 hex of its sha256")
+    p.add_argument("path")
+    a = p.parse_args(argv)
+    return VERBS[a.verb](a.path)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv))
+    raise SystemExit(main(sys.argv[1:]))

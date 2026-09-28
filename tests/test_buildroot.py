@@ -3,14 +3,14 @@ container workspace) and lib/wk/sysimage/buildroot_target.py (runs inside it). S
 docs/PLAN.md for what this exists to close out.
 
 Four things are checked by the classes down to TestDerivedDefconfigs,
-matching the four real defects found while writing this lane:
+matching the four real defects found while writing this builder:
 
   dry run    `wk sysimage build <profile> --dry-run` has to name the actual
              workspace, defconfig and cache paths -- not a host path that
              would resolve to nothing once handed to a process running
              inside the container (BR2_DL_DIR/BR2_CCACHE_DIR arrive as
              environment variables the container already sets, the same
-             way DL_DIR/SSTATE_DIR do for the Yocto lane; buildroot.py only
+             way DL_DIR/SSTATE_DIR do for the Yocto builder; buildroot.py only
              ever *displays* the host-side path these are mounted from).
 
   freshness  the image stage's completion line has to be evidence, not an
@@ -45,6 +45,8 @@ points -- is tests/test_sysimage_task.py's.
 
 Run: python3 -m unittest tests.test_buildroot -v
 """
+import contextlib
+import io
 import subprocess
 import sys
 import tempfile
@@ -53,6 +55,7 @@ import unittest
 from tests.support import REPO, WkTest, run_here
 
 sys.path.insert(0, str(REPO / "lib"))
+from wk.act import Refused  # noqa: E402
 from wk.sysimage import buildroot, buildroot_target  # noqa: E402
 
 BUILDROOT_PY = REPO / "lib" / "wk" / "sysimage" / "buildroot.py"
@@ -81,10 +84,10 @@ class TestDryRun(WkTest):
                 self.assertIn(f"buildroot-{profile}", out, out)
                 self.assertRegex(out, r"(?m)^\s*defconfig\s+\S+cog_defconfig", out)
                 # BR2_DL_DIR/BR2_CCACHE_DIR: the store-reserved host path
-                # (lib/store.sh's store_init), not the "downloads" spelling
-                # that never matched what store_init actually creates, and
-                # not a bare directory with nothing saying it is the
-                # container's own BR2_DL_DIR.
+                # (Container.store_init, lib/wk/targets.py), not a "downloads"
+                # spelling store_init does not create, and not a bare
+                # directory with nothing saying it is the container's own
+                # BR2_DL_DIR.
                 self.assertIn(f"{store}/cache/buildroot/dl", out, out)
                 self.assertIn("BR2_DL_DIR", out, out)
                 self.assertIn(f"{store}/cache/buildroot/ccache", out, out)
@@ -114,10 +117,25 @@ class TestDryRun(WkTest):
         br.name = PROFILES[0]
         br.p = {"BR_TREE_URL": "u", "BR_TREE_BRANCH": "b", "BR_TREE_COMMIT": "c", "BR_DEFCONFIG": "d_defconfig",
                 "BR_EXTERNAL": "1", "BR_IMAGE": "sdcard.img", "BR_OVERLAY_TAILSCALE": "arm", "BR_KERNEL_RELEASE": "6.1"}
-        argv = br.image_argv("/opt/wk-tools", 8, True, "/cache/buildroot/dl/k.tar")
+        argv = br.image_argv("/opt/wk-tools", 8, True, "/cache/buildroot/dl/k.tar", "bcm2711-rpi-4-b")
         self.assertEqual(argv[:3], ["python3", "/opt/wk-tools/lib/wk/sysimage/buildroot_target.py", "image"])
         a = buildroot_target.parse(argv[2:])
-        self.assertEqual((a.overlay_wifi, a.overlay_arch, a.kernel_tar, a.external, a.jobs), ("1", "arm", "/cache/buildroot/dl/k.tar", "1", "8"))
+        self.assertEqual((a.overlay_wifi, a.overlay_arch, a.kernel_tar, a.kernel_dts, a.external, a.jobs),
+                         ("1", "arm", "/cache/buildroot/dl/k.tar", "bcm2711-rpi-4-b", "1", "8"))
+
+    def test_kernel_dts_reads_the_board_s_own_dtb(self):
+        """machines/rpi4.conf's dtb= (also what tryboot stages) is the device tree name for a pinned-kernel
+        profile's board -- not one this repository would derive from a buildroot kernel build."""
+        br = buildroot.Buildroot.__new__(buildroot.Buildroot)
+        br.name, br.env, br.p = "wpewebkit-2.38-buildroot-rpi4-32", {"WK_ROOT": str(REPO)}, {"IMG_MACHINE": "rpi4"}
+        self.assertEqual(br.kernel_dts(), "bcm2711-rpi-4-b")
+
+    def test_kernel_dts_refuses_a_board_with_no_dtb(self):
+        br = buildroot.Buildroot.__new__(buildroot.Buildroot)
+        br.name, br.env, br.p = "x", {"WK_ROOT": str(REPO)}, {"IMG_MACHINE": "no-such-board"}
+        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(Refused):
+            br.kernel_dts()
+        self.assertIn("no-such-board.conf names no dtb=", err.getvalue())
 
 
 # --------------------------------------------------------------------------- #
@@ -271,13 +289,18 @@ class TestDerivedDefconfigs(unittest.TestCase):
                     f"{cfg.name} has no iptables, which tailscaled drives when "
                     "nftables is not usable")
                 frag = settings.get("BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES", "").strip('"')
-                self.assertIn(
-                    "linux-fleet.fragment", frag,
-                    f"{cfg.name} builds a kernel without the fleet fragment, so "
-                    "it has no TUN device and tailscaled cannot create tailscale0")
-                name = frag.replace("$(BR2_EXTERNAL_WK_PATH)/", "")
-                self.assertTrue((EXTERNAL_DIR / name).is_file(),
-                                f"{cfg.name} names a fragment that is not here: {frag}")
+                if settings.get("BR2_LINUX_KERNEL") == "y":
+                    self.assertIn(
+                        "linux-fleet.fragment", frag,
+                        f"{cfg.name} builds a kernel without the fleet fragment, so "
+                        "it has no TUN device and tailscaled cannot create tailscale0")
+                    name = frag.replace("$(BR2_EXTERNAL_WK_PATH)/", "")
+                    self.assertTrue((EXTERNAL_DIR / name).is_file(),
+                                    f"{cfg.name} names a fragment that is not here: {frag}")
+                else:
+                    # A pinned-kernel profile (image/configs' own BR_KERNEL_DEB_URL) builds no kernel here,
+                    # so there is no in-tree build for the fragment to apply to.
+                    self.assertEqual(frag, "", f"{cfg.name} builds no kernel but names a fragment file for one")
 
     def test_a_release_pinned_defconfig_pins_exactly_one_release(self):
         """The WPE package version is the whole point of a release-pinned

@@ -154,7 +154,7 @@ class _Rules(unittest.TestCase):
         args = ["python3", str(CREDCHECK), "check", name, "--repos", repos]
         if path is not None:
             args += ["--path", str(path)]
-            # What wk_cred_check does: the value always arrives on stdin, read
+            # What Secrets.check_value does: the value always arrives on stdin, read
             # the one way; the path is context for the rules that need it.
             if value is None and Path(path).exists():
                 value = Path(path).read_text()
@@ -241,7 +241,7 @@ class TestTheBugzillaKey(_Bugzilla):
         self.assertIn("while push is on", detail)
 
     def test_it_is_judged_as_a_pair_by_one_request(self):
-        """`wk_cred_check` (lib/store.sh) supplies the login as evidence, from
+        """Secrets.check_value (lib/wk/secrets.py) supplies the login as evidence, from
         the mirror; the rule sends the pair to `valid_login` and nothing else."""
         self.bz_check(BZ_KEY)
         self.assertEqual(1, len(FakeBugzilla.seen), FakeBugzilla.seen)
@@ -1244,6 +1244,34 @@ class TestOneTableForEveryCredential(_Rules):
                             input="x", capture_output=True, text=True)
         self.assertEqual(2, cp.returncode)
         self.assertIn("no rule for", cp.stderr)
+
+
+class TestTheModelsPiIsPointedAt(unittest.TestCase):
+    """`wk ai pi` writes the models /v1/model/info names for the key (measured on ai.igalia.com 2026-09-27:
+    /v1/models lists the same names and no mode, and an access group like 'standard' is not a callable model)."""
+
+    def test_chat_models_are_kept_in_order_and_an_embedding_model_is_not(self):
+        doc = {"data": [{"model_name": "gpt-oss-120b", "model_info": {"mode": None}},
+                        {"model_name": "qwen3-embedding-8b", "model_info": {"mode": "embedding"}},
+                        {"model_name": "glm-5p3-flash", "model_info": {"mode": "chat"}},
+                        {"model_info": {"mode": "chat"}}]}
+        self.assertEqual(["gpt-oss-120b", "glm-5p3-flash"], credcheck.chat_model_ids(doc))
+
+    def test_an_answer_with_no_rows_names_no_model(self):
+        self.assertEqual([], credcheck.chat_model_ids({}))
+
+    def test_the_first_model_a_completion_reaches_is_the_one_named(self):
+        from unittest import mock
+        asked = []
+
+        def http(method, url, token, body=None, headers=()):
+            model = json.loads(body)["model"]
+            asked.append(model)
+            return (404 if model == "listed-not-deployed" else 200), {}, b"{}"
+        with mock.patch.object(credcheck, "_http", side_effect=http):
+            self.assertEqual("m2", credcheck.litellm_callable("k", ["listed-not-deployed", "m2", "m3"]))
+            self.assertIsNone(credcheck.litellm_callable("k", ["listed-not-deployed"]))
+        self.assertEqual(["listed-not-deployed", "m2", "listed-not-deployed"], asked)
 
 
 if __name__ == "__main__":

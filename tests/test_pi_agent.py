@@ -7,7 +7,7 @@ puts one secret per name in the store, container/firstrun.sh links every name
 into the workspace, and shell/bashrc exports each into the variable its agent
 reads.
 
-wk_agent_secrets (lib/store.sh) is the one table saying what those names are,
+AGENT_SECRETS (lib/wk/secrets.py) is the one table saying what those names are,
 and most of what is tested here is that every reader agrees with it: a row with
 no link and no exported variable is a secret nothing can use.
 
@@ -30,9 +30,12 @@ from tests.support import REPO, WkTest, bash, run
 from tests.test_wk_key import KeyTest
 from tests.test_wk_secrets import KEY_SH
 
+sys.path.insert(0, str(REPO / "lib"))
+from wk.machine import Local  # noqa: E402
+from wk.secrets import Secrets  # noqa: E402
+
 AI = (REPO / "cmd" / "ai").read_text()
 KEY = (REPO / "cmd" / "key").read_text()
-STORE = (REPO / "lib" / "store.sh").read_text()
 FIRSTRUN = (REPO / "container" / "firstrun.sh").read_text()
 RC = REPO / "shell" / "bashrc"
 
@@ -51,7 +54,7 @@ PLACEHOLDER = "placeholder-value-for-this-test"
 # to look at it stores that shape. Still not a token.
 CLAUDE_SHAPED = "sk-ant-oat01-" + PLACEHOLDER
 
-TOUCHED = ("lib/store.sh", "container/firstrun.sh", "shell/bashrc")
+TOUCHED = ("container/firstrun.sh", "shell/bashrc")
 
 
 def secret_table():
@@ -118,7 +121,7 @@ class TestTheTable(unittest.TestCase):
 
 
 class TestTheStoreIsByName(WkTest):
-    """One pair of functions for every name, so no command has an idea of its
+    """One reader (lib/wk/secrets.py) and one writer (lib/wk/key/) for every name, so no command has an idea of its
     own about where a secret lives or how it is written."""
 
     def _store(self):
@@ -127,14 +130,16 @@ class TestTheStoreIsByName(WkTest):
         (d / "agent-rw").mkdir(parents=True)
         return d
 
+    def _env(self, store):
+        return {"WK_IN_VM": "1", "WK_STORE": str(store), "HOME": str(self.tmp)}
+
+    def _sec(self, store):
+        return Secrets(REPO, self._env(store), Local())
+
     def _sh(self, script, store):
-        return bash(f'''
-. "$WK_ROOT/lib/common.sh"
-WK_IN_VM=1
-WK_STORE={store}
-. "$WK_ROOT/lib/store.sh"
-{KEY_SH}{script}
-''')
+        cp = bash(KEY_SH + script, env=self._env(store))
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        return cp
 
     def test_each_name_has_its_own_file_in_the_store(self):
         """And which of the two directories is the row's kind: the read-only
@@ -143,27 +148,18 @@ WK_STORE={store}
         store = self._store()
         for row in TABLE:
             with self.subTest(name=row[0]):
-                cp = self._sh(f'wk_agent_secret_path {row[0]}', store)
-                self.assertEqual(str(store_path(store, row)), cp.stdout.strip(),
-                                 cp.stderr)
+                self.assertEqual(str(store_path(store, row)), self._sec(store).cred_path(row[0]))
 
     def test_an_unknown_name_has_no_path_and_is_not_invented(self):
-        cp = self._sh('if wk_agent_secret_path nope; then echo "invented"; else echo "rc=1"; fi',
-                      self._store())
-        self.assertIn("rc=1", cp.stdout, cp.stdout + cp.stderr)
-        self.assertNotIn("secrets/nope", cp.stdout)
+        self.assertIsNone(self._sec(self._store()).cred_path("nope"))
 
     def test_stored_then_read_back_per_name(self):
         store = self._store()
         for row in TABLE:
             name = row[0]
-            reader = "wk_cred_read" if row[4] == "file" else "wk_agent_secret"
             with self.subTest(name=name):
-                cp = self._sh(
-                    f'printf "%s\\n" {name}-{PLACEHOLDER} | key_store {name}\n'
-                    f'printf "[%s]\\n" "$({reader} {name})"', store)
-                self.assertIn(f"[{name}-{PLACEHOLDER}]", cp.stdout,
-                              cp.stdout + cp.stderr)
+                self._sh(f'printf "%s\\n" {name}-{PLACEHOLDER} | key_store {name}', store)
+                self.assertEqual(f"{name}-{PLACEHOLDER}\n", self._sec(store).cred_read(name))
                 mode = store_path(store, row).stat().st_mode & 0o777
                 self.assertEqual(0o600, mode, oct(mode))
 
@@ -173,76 +169,55 @@ WK_STORE={store}
         store = self._store()
         for row in TABLE:
             with self.subTest(name=row[0]):
-                cp = self._sh(
-                    f'if wk_agent_secret_present {row[0]}; then echo yes; else echo no; fi\n'
-                    f'printf "%s\\n" x | key_store {row[0]}\n'
-                    f'if wk_agent_secret_present {row[0]}; then echo yes; else echo no; fi',
-                    store)
-                self.assertEqual(["no", "yes"], cp.stdout.split(), cp.stderr)
+                self.assertIs(False, self._sec(store).cred_stored(row[0]))
+                self._sh(f'printf "%s\\n" x | key_store {row[0]}', store)
+                self.assertIs(True, self._sec(store).cred_stored(row[0]))
 
     def test_a_file_row_is_read_whole_and_not_by_its_first_line(self):
         """A credentials file is a document its tool parses. Truncating it to
         the first line would hand a workspace half a JSON object."""
         store = self._store()
         row = FILE_ROWS[0]
-        cp = self._sh(
-            f'printf "one\\ntwo\\n" | key_store {row[0]}\n'
-            f'printf "bytes=[%s]\\n" "$(wk_cred_read {row[0]})"', store)
-        self.assertIn("bytes=[one\ntwo]", cp.stdout, cp.stdout + cp.stderr)
+        self._sh(f'printf "one\\ntwo\\n" | key_store {row[0]}', store)
+        self.assertEqual("one\ntwo\n", self._sec(store).cred_read(row[0]))
 
     def test_the_writable_directory_is_beside_the_secrets_one_never_inside(self):
         """The secrets directory is mounted read-only into every workspace and
         has to stay unwritable; this one is the single thing a workspace may
-        write, so it is a sibling -- the same shape wk_push_held_dir has."""
-        cp = self._sh('printf "%s %s\\n" "$(wk_secrets_dir)" "$(wk_agent_rw_dir)"',
-                      self._store())
-        secrets, rw = cp.stdout.split()
+        write, so it is a sibling -- the same shape the push-keys directory has."""
+        sec = self._sec(self._store())
+        secrets, rw = sec.secrets_dir(), sec.store.agent_rw_dir()
         self.assertNotIn(secrets + "/", rw + "/")
         self.assertEqual(str(Path(secrets).parent), str(Path(rw).parent))
 
     def test_absent_reads_as_nothing_and_is_not_an_error(self):
-        cp = self._sh('printf "[%s]\\n" "$(wk_agent_secret litellm)"; echo "rc=$?"',
-                      self._store())
-        self.assertIn("[]", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("rc=0", cp.stdout, cp.stdout + cp.stderr)
+        self.assertEqual("", self._sec(self._store()).cred_read("litellm"))
 
     def test_clearing_withdraws_one_and_leaves_the_others(self):
         store = self._store()
-        cp = self._sh(
-            f'printf "%s\\n" a-{PLACEHOLDER} | key_store claude\n'
-            f'printf "%s\\n" b-{PLACEHOLDER} | key_store litellm\n'
-            'key_clear litellm\n'
-            'printf "claude=[%s] litellm=[%s]\\n" "$(wk_agent_secret claude)" "$(wk_agent_secret litellm)"',
-
-            store)
-        self.assertIn(f"claude=[a-{PLACEHOLDER}] litellm=[]", cp.stdout,
-                      cp.stdout + cp.stderr)
+        self._sh(f'printf "%s\\n" a-{PLACEHOLDER} | key_store claude\n'
+                 f'printf "%s\\n" b-{PLACEHOLDER} | key_store litellm\n'
+                 'key_clear litellm\n', store)
+        sec = self._sec(store)
+        self.assertEqual((f"a-{PLACEHOLDER}\n", ""), (sec.cred_read("claude"), sec.cred_read("litellm")))
 
     def test_a_driver_moving_wk_store_does_not_move_them(self):
-        """There is one set per *machine*. targets/vm.sh points $WK_STORE at
+        """There is one set per *machine*. The vm target points $WK_STORE at
         its own state directory, so resolving a secret against $WK_STORE would
         send `wk start` looking somewhere `wk key set` never writes.
 
-        Two spellings of one directory (wk_secrets_dir, lib/store.sh): on a
-        macOS host it is this device's own path (WK_HOST_SECRETS), never
-        $WK_STORE; where the store is this machine's own it is the store
-        recorded before the override. `is_macos` is the one predicate that
-        chooses between them, so stubbing it puts both arms under test on
-        whichever platform this runs on."""
-        for macos, want in ((0, "path=/the/machine/store/secrets/litellm-key"),
-                            (1, "path=/this/device/secrets/litellm-key")):
-            with self.subTest(macos=macos):
-                cp = bash('''
-. "$WK_ROOT/lib/common.sh"
-WK_STORE=/the/machine/store
-. "$WK_ROOT/lib/store.sh"
-is_macos() { return %d; }
-WK_STORE_DEFAULT=/the/machine/store
-WK_STORE=/some/drivers/own/state
-printf "path=%%s\\n" "$(wk_agent_secret_path litellm)"
-''' % (0 if macos else 1),
-                          env={"WK_HOST_SECRETS": "/this/device/secrets"})
-                self.assertIn(want, cp.stdout, cp.stdout + cp.stderr)
+        Two spellings of one directory (Store.secrets_dir): on a macOS host it
+        is this device's own path (WK_HOST_SECRETS), never $WK_STORE; where the
+        store is this machine's own it is the store recorded before the
+        override (WK_STORE_DEFAULT). The platform is stubbed, so both arms run
+        on whichever one this is."""
+        env = {"WK_HOST_SECRETS": "/this/device/secrets", "WK_STORE_DEFAULT": "/the/machine/store",
+               "WK_STORE": "/some/drivers/own/state", "HOME": str(self.tmp)}
+        for system, want in (("Linux", "/the/machine/store/secrets/litellm-key"),
+                             ("Darwin", "/this/device/secrets/litellm-key")):
+            with self.subTest(system=system):
+                with mock.patch("wk.store.os.uname", return_value=mock.Mock(sysname=system)):
+                    self.assertEqual(want, Secrets(REPO, env, Local(), macos=system == "Darwin").cred_path("litellm"))
 
 
 class TestWkKeySet(WkTest):
@@ -403,7 +378,7 @@ class TestTheShellExportsEveryName(WkTest):
     SHELLS = {
         "editor terminal pane": ("zsh", ["-i", "-c"]),
         "login zsh": ("zsh", ["-l", "-c"]),
-        "bash -lc (every t_exec)": ("bash", ["-lc"]),
+        "bash -lc (every Target.exec)": ("bash", ["-lc"]),
         "non-interactive bash": ("bash", ["-c"]),
     }
 
@@ -462,7 +437,7 @@ class TestTheShellExportsEveryName(WkTest):
         self.assertEqual("", got.get("LITELLM_API_KEY"))
 
     def test_the_rc_reads_the_same_pairs_the_table_declares(self):
-        """The rc cannot source lib/store.sh -- a workspace has no store, and
+        """The rc cannot ask lib/wk/secrets.py -- a workspace has no store, and
         this runs in every shell without forking -- so the pairs are literal
         here and held to the table by this test."""
         text = RC.read_text()
@@ -482,13 +457,10 @@ class TestTheShellExportsEveryName(WkTest):
 
 class TestPiIsAnAgentThisCommandKnows(unittest.TestCase):
     def test_an_unknown_agent_still_is_refused(self):
-        """cmd/ai directly, not through `wk`: the dispatcher resolves the
-        workspace name first (name=required@2), so a test going that way is
-        refused for the name and never reaches the agent word."""
-        cp = bash('"$WK_ROOT/cmd/ai" not-an-agent ws')
-        self.assertNotEqual(0, cp.returncode)
-        self.assertIn("unknown agent", cp.stderr)
-        self.assertIn("claude, pi", cp.stderr)
+        """the dispatcher refuses the agent word (verbs=claude,pi) before it resolves the name"""
+        cp = run("ai", "not-an-agent", "ws")
+        self.assertEqual(2, cp.returncode, cp.stdout)
+        self.assertIn("unknown verb: not-an-agent (one of claude, pi)", cp.stdout)
 
     def test_the_research_is_written_down_where_the_branch_is(self):
         """What pi needs is not re-derivable from the code that uses it: the
@@ -538,7 +510,7 @@ class TestPiEnsure(unittest.TestCase):
         self.addCleanup(env.stop)
         self.fake = Fake()
         self.fake.answer([os.path.join(AI.ROOT, "wk"), "push"], rc=1)
-        self.fake.answer(["bash", "-c"], rc=1)   # wk_agent_secret_present litellm: none stored
+        self.fake.answer(["bash", "-c"], rc=1)   # Target.agent_secret_present litellm: none stored
         self.env = {"WK_NAME": "ws", "WK_TARGET": "container"}
         self.target = SimTarget(self.fake, self.env)
         self.reg = SimRegistry(self.env, self.fake, self.target)
@@ -605,11 +577,18 @@ class TestPiEnsure(unittest.TestCase):
         self.assertEqual(1, status, err)
         self.assertIn("npm could not install @earendil-works/pi-coding-agent in 'ws'", err)
 
-    def test_it_writes_the_models_file_when_a_key_is_stored(self):
+    def models_written(self, served):
+        import credcheck
         self.fake.answer(["python3"])
         scripts = []
         self.target.answers["> ~/.pi/agent/models.json"] = lambda argv: scripts.append(argv[-1]) or self.Result(0)
-        status, err = self.pi()
+        with mock.patch.object(credcheck, "litellm_models", side_effect=served) as asked, \
+                mock.patch.object(credcheck, "litellm_callable", side_effect=lambda key, ids: (ids[1:] or [None])[0]):
+            status, err = self.pi()
+        return status, err, scripts, asked
+
+    def test_it_writes_the_models_file_when_a_key_is_stored(self):
+        status, err, scripts, _ = self.models_written(lambda key: ["glm-5p3-flash", "gpt-oss-120b"])
         self.assertEqual(0, status, err)
         write = scripts[0]
         words = shlex.split(write)
@@ -618,9 +597,26 @@ class TestPiEnsure(unittest.TestCase):
         self.assertEqual(LITELLM_ENDPOINT, provider["baseUrl"])
         self.assertEqual("openai-completions", provider["api"])
         self.assertEqual("$LITELLM_API_KEY", provider["apiKey"])
+        self.assertEqual([{"id": "gpt-oss-120b"}, {"id": "glm-5p3-flash"}], provider["models"],
+                         "the models the endpoint serves this key, one that answered first; never a placeholder")
         self.assertIn("umask 077", write)
         self.assertIn("wrote ~/.pi/agent/models.json", err)
-        self.assertIn("wk enter ws --", err)
+
+    def test_an_endpoint_where_no_model_answers_writes_nothing_and_names_the_check(self):
+        status, err, scripts, _ = self.models_written(lambda key: ["m-404"])
+        self.assertEqual(1, status, err)
+        self.assertEqual([], scripts)
+        self.assertIn("wk key check litellm", err)
+
+    def test_an_endpoint_that_does_not_answer_writes_nothing(self):
+        import credcheck
+
+        def down(key):
+            raise credcheck.Unreachable("URLError: refused")
+        status, err, scripts, _ = self.models_written(down)
+        self.assertEqual(1, status, err)
+        self.assertEqual([], scripts)
+        self.assertIn("URLError: refused", err)
 
     def test_with_no_key_it_says_which_command_stores_one(self):
         status, err = self.pi()

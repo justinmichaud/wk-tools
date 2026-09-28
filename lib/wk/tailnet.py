@@ -1,22 +1,21 @@
 """What the fleet asks of the tailnet's API, and the one auth key a machine joins nodes with; `Api.transport` is the
-seam every request crosses. Exit: 0 done, 1 no auth key, 2 no such node / no such key, 3 online, 4 no credential,
+seam every request crosses. Exit: 0 done, 1 no auth key, 2 no such node / no such key / a usage error, 3 online, 4 no credential,
 5 refused, 6 unreachable."""
 
+import argparse
 import base64
 import io
 import json
 import os
 import sys
-import urllib.error
-import urllib.request
 
 import credcheck
+from credcheck import Unreachable
 from wk import act, images
 from wk.machine import Local, Result
 
 API = "https://api.tailscale.com/api/v2"
 KEY_DAYS = 90        # tailscale's own ceiling for an auth key
-USAGE = "usage: python3 -m wk.tailnet check | authkey"
 
 
 class Failed(Exception):
@@ -25,19 +24,9 @@ class Failed(Exception):
         self.code = code
 
 
-class Unreachable(Exception):
-    pass
-
-
 def urllib_transport(method, url, headers, data):
-    req = urllib.request.Request(url, method=method, data=data, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return r.status, r.read()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read()
-    except (urllib.error.URLError, OSError) as e:
-        raise Unreachable(str(e))
+    status, _headers, raw = credcheck.http(method, url, headers.items(), data, timeout=30)
+    return status, raw
 
 
 def secret(value, path):
@@ -125,10 +114,13 @@ class Fleet:
         self.transport = transport
 
     def api(self):
-        try:
-            key = secret(self.sec.cred_read("tailnet-api"), self.sec.cred_path("tailnet-api"))
-        except Failed:
+        value = self.sec.cred_read("tailnet-api")
+        if not (value or "").strip():
             return None
+        try:
+            key = secret(value, self.sec.cred_path("tailnet-api"))
+        except Failed as e:
+            act.die("%s -- store the API access key: wk key set tailnet-api --replace" % e, e.code)
         return Api(key, self.env.get("WK_TAILNET_API") or API, self.transport)
 
     def api_present(self):
@@ -211,16 +203,18 @@ def check(api, out):
 
 
 def main(argv, env=None, out=None, transport=urllib_transport):
+    p = argparse.ArgumentParser(prog="python3 -m wk.tailnet")
+    p.add_argument("verb", choices=("check", "authkey"),
+                   help="check: the API credential at $WK_TS_API_SECRET_FILE works; authkey: the path of a usable auth key")
+    verb = p.parse_args(argv).verb
     env = os.environ if env is None else env
     out = out or sys.stdout
-    if argv == ["authkey"]:
+    if verb == "authkey":
         path = Fleet(images.root(env), env, transport=transport).authkey()
         out.write(path)
         return 0 if path else 1
     path = env.get("WK_TS_API_SECRET_FILE", "")
     try:
-        if argv != ["check"]:
-            raise Failed(1, USAGE)
         try:
             value = Local().read(path) if path else ""
         except OSError:

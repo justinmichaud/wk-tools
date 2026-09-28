@@ -21,8 +21,8 @@ from tests.test_mac_volume import BENCH_GROUP, FakeGuest, FakeMac, conf_for
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, sched, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import ab, mac  # noqa: E402
-from wk.boot.mac import DRIVERS, HELPER  # noqa: E402
+from wk.bench import ab, mac, record  # noqa: E402
+from wk.boot.mac import DRIVERS, HELPER, Channel  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
@@ -275,12 +275,12 @@ class TestOnlyTheDeclaredDisplay(WkTest):
 class TestThePinnedDisplayIsConfig(WkTest):
     def test_mbp_declares_the_bench_installs_measured_mode(self):
         """1280x832 at scale 2 is exactly the 2560x1664 panel: no frame is rendered larger and downsampled."""
-        self.assertEqual(conf_for("mac-volume")["NODE_DISPLAY"], "builtin 1280x832")
+        self.assertEqual(conf_for("mac-volume")["display"], "builtin 1280x832")
 
     def test_a_machine_that_declares_no_display_refuses_the_plant(self):
         with world() as m:
             ready(m)
-            m.d.conf["NODE_DISPLAY"] = ""
+            m.d.conf["display"] = ""
             m.create_task("20260908T000000Z")
             got, err = said(m.plant)
         self.assertIs(got, Refused)
@@ -428,11 +428,9 @@ class TestThePlant(WkTest):
     def test_the_task_it_writes_is_one_wk_status_can_read(self):
         with world() as m:
             self.plant(m)
-            import subprocess
-            cp = subprocess.run(["python3", str(REPO / "lib" / "wkdata.py"), "task-status", m.taskdir],
-                                capture_output=True, text=True, timeout=30)
-        self.assertIn("subject=sid-a vs sid-b", cp.stdout, cp.stderr)
-        self.assertIn("mbp", cp.stdout)
+            st = record.task_state(m.taskdir, False)
+        self.assertEqual(record.subject_line(st["doc"]).split(" · ")[0], "sid-a vs sid-b")
+        self.assertIn("mbp", record.subject_line(st["doc"]))
 
     def test_an_arm_that_is_not_staged_is_refused_before_anything_lands(self):
         with world(systems="sid-a,sid-x") as m:
@@ -809,23 +807,9 @@ class TestTheDriverAnswersFromAnotherMachine(WkTest):
     """Every board's driver probes over the tailnet from anywhere; this one
     reports `unknown from here` only if it refuses to try."""
 
-    PRE = """. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/boot/machines.sh"
-NODE_NAME=mbp
-NODE_SSH=fakemac
-NODE_VOLUME="WK Bench"
-NODE_DISPLAY="builtin 1470x956"
-NODE_BENCH_SSH=fakemac-bench
-. "$WK_ROOT/boot/mac-volume.sh"
-"""
-
-    def _driver(self, script, env=None):
-        return bash(self.PRE + script, env=env)
-
     def test_it_is_probeable_off_the_mac(self):
-        cp = self._driver('if b_probeable; then echo YES; else echo NO; fi')
-        self.assertEqual(cp.stdout.strip(), "YES", cp.stdout + cp.stderr)
+        conf = {"name": "mbp", "ssh": "fakemac", "bench_ssh": "fakemac-bench", "volume": "WK Bench"}
+        self.assertTrue(DRIVERS["mac-volume"](REPO, conf, Channel(conf, {}, via=Fake("here"))).probeable())
 
     def test_nothing_about_the_mac_is_stored_between_reads(self):
         """Every fact above is recomputed; the only file the driver keeps is

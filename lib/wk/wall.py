@@ -6,7 +6,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 
-from wk import buildconf, secrets
+from wk import buildconf, reach, secrets
 from wk.act import die
 from wk.doctor import MISS, miss, note, ok
 
@@ -182,7 +182,7 @@ class Wall:
             path = ("/agent-rw/" if row[4] == "file" else "/secrets/") + row[1]
             if self.inside("test -r %s && echo yes" % path) == "yes":
                 rows.append(miss("%s is readable in '%s' and the delivery table gives %s to no %s target" % (path, self.ws, row[0], self.target.kind),
-                                 "what a workspace mounts holds only what it is given (secrets_publish_view, lib/store.sh)"))
+                                 "what a workspace mounts holds only what it is given (Secrets.publish_view, lib/wk/secrets.py)"))
             else:
                 kept.append(row[0])
         if kept:
@@ -193,7 +193,7 @@ class Wall:
         sock = self.target.agent_sock()
         if not sock:
             return [miss("the '%s' target names no ssh-agent socket, so a push from in here would use a credential wk does not control"
-                         % self.target.name, "targets/%s.sh, t_agent_sock" % self.target.kind)]
+                         % self.target.name, "lib/wk/targets.py, %s.agent_sock" % type(self.target).__name__)]
         # An empty agent prints "The agent has no identities." on stdout.
         ident = self.inside("command -v ssh-add >/dev/null 2>&1 "
                             "&& (SSH_AUTH_SOCK=%s ssh-add -l 2>/dev/null | grep -v 'has no identities' | grep -c . || true) "
@@ -212,8 +212,7 @@ class Wall:
 
     def push_here(self):
         alias = next((r[2] for r in secrets.forks()), "")
-        sock = next((l.split()[1] for l in self.machine.run(["ssh", "-G", alias]).out.splitlines()
-                     if l.split()[:1] == ["identityagent"] and len(l.split()) > 1), "")
+        sock = reach.ssh_g(self.machine, alias).get("identityagent", "")
         ident = 0
         if sock:
             r = self.machine.run(["env", "SSH_AUTH_SOCK=" + sock, "ssh-add", "-l"])
@@ -379,7 +378,7 @@ class Wall:
             rows.append(ok("/opt/wk-tools is read-only"))
         else:
             self.inside("rm -f /opt/wk-tools/.wk-write-probe")
-            rows.append(miss("/opt/wk-tools is writable from inside the workspace", "it is mounted read-only (targets/container.sh)"))
+            rows.append(miss("/opt/wk-tools is writable from inside the workspace", "it is mounted read-only (lib/wk/targets.py's Container)"))
         return rows
 
     def from_host(self):

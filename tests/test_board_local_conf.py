@@ -108,10 +108,10 @@ class TestTheRpi5NeedsTheD0Overlay(unittest.TestCase):
                           if l.strip() and not l.strip().startswith("#")])
 
     def test_the_machine_conf_names_the_tree_the_firmware_loads(self):
-        """NODE_DTB is what boot-check verifies resolves on the card, so a
+        """dtb is what boot-check verifies resolves on the card, so a
         name the firmware never requests passes a card that cannot boot."""
         conf = (REPO / "machines" / "rpi5.conf").read_text()
-        m = re.search(r"^NODE_DTB=(\S+)", conf, re.M)
+        m = re.search(r"^dtb=(\S+)", conf, re.M)
         self.assertIsNotNone(m)
         self.assertEqual("bcm2712-rpi-5-b.dtb", m.group(1))
 

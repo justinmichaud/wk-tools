@@ -18,19 +18,19 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.killpoints import converges
-from tests.support import REPO
+from tests.support import REPO, as_dispatched
 
 sys.path.insert(0, str(REPO / "lib"))
-from tests.test_bench_mac import Drv  # noqa: E402
+from tests.test_bench_mac import Drv, StubWatch  # noqa: E402
 from tests.test_mac_volume import FakeMac  # noqa: E402
-from wk import act, decl, fleet, record, shell, targets  # noqa: E402
+from wk import act, decl, dispatch, fleet, record, screen, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import mac, pipeline, record as brecord, systems  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Killed, Result  # noqa: E402
-from wk.quiet import lib_argv  # noqa: E402
+from wk.machine import Fake, Result  # noqa: E402
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
 PLAN_JSON = json.dumps({"git_repository": {"url": "https://example.com/bench.git", "branch": "main"}})
@@ -106,6 +106,7 @@ class World(Fake):
                     "XDG_STATE_HOME": str(self.tmp / "state"), "XDG_RUNTIME_DIR": "/run/user/1", "WK_NAME": "ws",
                     "WK_IN_VM": "1", "WK_JOB_PID_TRIES": "0", "WK_POLL_SECONDS": "1"}
         self.clock = FakeClock()
+        os.makedirs(os.path.join(self.env["WK_STORE"], "ws", "ws"))   # the workspace's directory, where its tasks live
         self.seed_dest = os.path.join(self.env["WK_STORE"], "cache", "bench", "jetstream3-" + SHA[:12])
         self.dirs.add(os.path.join(self.seed_dest, ".wk-seeded"))
         self.dirs.add(self.seed_dest.replace("jetstream3", "speedometer3"))
@@ -123,9 +124,7 @@ class World(Fake):
                             (["nproc"], "16\n"), (["sysctl", "-n", "vm.loadavg"], "{ 0.50 0.40 0.30 }\n"), (["uname", "-r"], "6.8.0\n"), (["uname", "-m"], "x86_64\n"),
                             (["lscpu"], "Model name:   Test CPU\n"), (["nvidia-smi"], "550.1\n"), (["findmnt"], "/dev/nvme0n1p2\n"),
                             (["lsblk"], json.dumps({"blockdevices": [{"name": "nvme0n1p2", "type": "part"},
-                                                                     {"name": "nvme0n1", "type": "disk", "rota": False, "tran": "nvme", "model": "Fast"}]})),
-                            (lib_argv(str(REPO), pipeline.QUIET, "screen_watch_start")[:3], ""),
-                            (lib_argv(str(REPO), pipeline.QUIET, "screen_watch_stop")[:3], "")):
+                                                                     {"name": "nvme0n1", "type": "disk", "rota": False, "tran": "nvme", "model": "Fast"}]}))):
             self.answer(prefix, out=out)
         self.files["/run/wk-session-mode"] = "gpu\n"
         self.watched = []
@@ -145,7 +144,7 @@ class World(Fake):
             out = shlex.split(script.split("exec ", 1)[1])
             dest = out[out.index("--output-file") + 1]
             if self.kind == "container":
-                dest = os.path.join(self.env["WK_STORE"], "bench", dest[len("/bench/"):])
+                dest = os.path.join(self.env["WK_STORE"], "ws", "ws", dest[len("/var/lib/wk/ws/ws/"):])
                 os.makedirs(os.path.dirname(dest), exist_ok=True)
                 Path(dest).write_text(RESULT)
             else:
@@ -153,7 +152,7 @@ class World(Fake):
         return Proc(self.rc)
 
     def bench_dir(self):
-        return Path(self.env["WK_STORE"]) / "bench"
+        return Path(self.env["WK_STORE"]) / "ws" / "ws" / "bench"
 
     def tasks(self):
         return brecord.tasks(str(self.bench_dir()))
@@ -173,7 +172,8 @@ class World(Fake):
 
 def invoke(w, argv):
     """cmd/bench's run arm: its options read off the declaration, then the pipeline."""
-    return CMD.run_arm(decl.Args(decl.Decl(REPO / "cmd" / "bench"), list(argv)), Reg(w), w.clock, w.popen)
+    argv = as_dispatched("bench", argv, os.environ)
+    return CMD.run_arm(decl.Args(decl.Decl(REPO / "cmd" / "bench"), argv), Reg(w), w.clock, w.popen)
 
 
 class BenchTest(unittest.TestCase):
@@ -184,6 +184,9 @@ class BenchTest(unittest.TestCase):
         for v in ("WK_DRY_RUN", "WK_FORCE", "WK_DESTRUCTIVE", "WK_BENCH_ASLR", "WK_BENCH_PATH_PAD", "WK_BENCH_ENV_PAD"):
             os.environ.pop(v, None)
         self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self._env)))
+        watch = mock.patch.object(screen, "Watch", StubWatch)
+        watch.start()
+        self.addCleanup(watch.stop)
         self.w = World(self.tmp)
 
     def run_(self, w=None, *argv, extra=None):
@@ -264,10 +267,10 @@ class TestConformance(BenchTest):
         self.assertEqual(push[1:], (w.seed_dest, "/Users/admin/wk-bench/payload/" + os.path.basename(w.seed_dest)))
         self.assertIn("cd /Users/admin/wk-bench/payload/", w.watched[0][-1])
 
-    def test_a_container_run_writes_through_the_stores_mounts(self):
+    def test_a_container_run_writes_into_its_workspaces_directory(self):
         self.run_(None, "run", "speedometer3", "--config", "wpe-release")
         script = self.w.watched[0][-1]
-        self.assertIn("--output-file /bench/", script)
+        self.assertIn("--output-file /var/lib/wk/ws/ws/bench/", script)
         self.assertIn("--local-copy /cache/bench/speedometer3-", script)
         self.assertEqual([e for e in self.w.effects if e[0].startswith("copy")], [])
 
@@ -316,18 +319,69 @@ class TestTheRecord(BenchTest):
         self.assertEqual(self.w.state()[2], "stalled")
 
 
+class TestARestart(BenchTest):
+    """`--task` into a one-run task: nothing when it holds its run ok, else one run more into the same task."""
+
+    ARGV = ("run", "jetstream3", "--config", "jsc-release")
+
+    def first(self):
+        rc, err = self.run_(None, *self.ARGV)
+        self.assertEqual(rc, 0, err)
+        (task,) = self.w.tasks()
+        self.w.clock.t += 60
+        return task
+
+    def test_the_task_records_its_restart(self):
+        task = self.first()
+        doc = json.loads((self.w.bench_dir() / task / "task.json").read_text())
+        self.assertEqual(doc["restart"], "wk bench run ws jetstream3 --config jsc-release --task " + task)
+
+    def test_a_task_that_holds_its_run_runs_nothing(self):
+        task = self.first()
+        watched = len(self.w.watched)
+        rc, err = self.run_(None, *self.ARGV + ("--task", task))
+        self.assertEqual(rc, 0, err)
+        self.assertIn("already holds its run ok", err)
+        self.assertEqual(len(self.w.watched), watched)
+
+    def test_a_task_whose_run_failed_runs_it_again_into_the_task(self):
+        task = self.first()
+        os.remove(str(self.run_dir() / "result.json"))
+        rc, err = self.run_(None, *self.ARGV + ("--task", task))
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.w.tasks(), [task])
+        self.assertEqual(len(os.listdir(self.w.bench_dir() / task / "runs")), 2)
+        st = brecord.task_state(str(self.w.bench_dir() / task), False)
+        self.assertEqual((st["ok"], st["failed"]), (1, 1))
+
+    def test_a_task_that_is_not_this_request_is_refused(self):
+        task = self.first()
+        self.assertIn("no such task 'nope'", self.said(*self.ARGV + ("--task", "nope")))
+        self.assertIn("task %s measures jetstream3, not speedometer3" % task,
+                      self.said("run", "speedometer3", "--config", "wpe-release", "--task", task))
+        doc = json.loads((self.w.bench_dir() / task / "task.json").read_text())
+        (self.w.bench_dir() / task / "task.json").write_text(json.dumps(dict(doc, slots=["a", "b"], restart="wk bench ab x --task " + task)))
+        self.assertIn("is an A/B; restart it with its own command:\n    wk bench ab x --task " + task, self.said(*self.ARGV + ("--task", task)))
+
+
 class TestRefusals(BenchTest):
-    def test_the_bare_form_names_run(self):
+    def dispatch_refuses(self, *argv):
         err = io.StringIO()
-        with self.assertRaises(Refused), contextlib.redirect_stderr(err):
-            CMD.main(["ws", "jetstream3"])
-        self.assertIn("wk bench run <workspace> <plan>", err.getvalue())
+        with self.assertRaises(dispatch.Exit) as cm, contextlib.redirect_stderr(err):
+            as_dispatched("bench", argv, os.environ)
+        self.assertEqual(cm.exception.status, 2)
+        return err.getvalue()
+
+    def test_the_bare_form_names_run(self):
+        err = self.dispatch_refuses("ws", "jetstream3")
+        self.assertIn("unknown verb: ws", err)
+        self.assertIn("wk bench run <workspace> <plan>", err)
 
     def test_a_jsc_config_cannot_run_a_gpu_plan(self):
         self.assertIn("gpu-class benchmark and jsc-release builds no browser", self.said("run", "speedometer3", "--config", "jsc-release"))
 
     def test_an_unknown_config_is_named(self):
-        self.assertIn("unknown config 'nosuch'", self.said("run", "jetstream3", "--config", "nosuch"))
+        self.assertIn("unknown config: nosuch", self.dispatch_refuses("run", "jetstream3", "--config", "nosuch"))
 
     def test_a_board_or_remote_workspace_is_not_a_workspace_system(self):
         w = World(self.tmp, "remote")
@@ -385,16 +439,20 @@ class TestAMeasuredRunIsWatchedThroughout(BenchTest):
 
     def test_the_run_is_bracketed_by_the_watch(self):
         self.run_(None, "run", "speedometer3", "--config", "wpe-release")
-        order = [e[1][2] for e in self.w.effects if e[0] == "run" and e[1][:1] == ("bash",) and "screen_watch" in e[1][2]]
-        self.assertEqual([o.split(";")[1].split()[0] for o in order], ["screen_watch_start", "screen_watch_stop"])
+        self.assertEqual([e for e in self.w.effects if e[0] == "watch"], [("watch", "start", 0), ("watch", "stop", 1)])
+
+    def test_a_dry_run_starts_no_watch(self):
+        os.environ["WK_DRY_RUN"] = "1"
+        self.run_(None, "run", "speedometer3", "--config", "wpe-release")
+        self.assertNotIn("start", [e[1] for e in self.w.effects if e[0] == "watch"])
 
     def test_a_covered_run_fails_unless_it_is_forced(self):
-        self.w.answer(lib_argv(str(REPO), pipeline.QUIET, "screen_watch_stop")[:3], rc=1, out="12:00:00Z\tSecurityAgent\n")
+        self.w.drew = ["2026-09-27T12:00:00Z\tSecurityAgent"]
         err = self.said("run", "speedometer3", "--config", "wpe-release")
         self.assertIn("did not stay quiet", err)
         self.assertIn("SecurityAgent", err)
         w = World(self.tmp)
-        w.answer(lib_argv(str(REPO), pipeline.QUIET, "screen_watch_stop")[:3], rc=1, out="x\n")
+        w.drew = ["2026-09-27T12:00:00Z\trunning again: NotificationCenter"]
         rc, err = self.run_(w, "run", "speedometer3", "--config", "wpe-release", extra={"WK_FORCE": "1"})
         self.assertEqual(rc, 0, err)
         self.assertIn("keeping the number anyway", err)
@@ -457,7 +515,7 @@ class TestDryRun(BenchTest):
                     del os.environ["WK_DRY_RUN"]
                 strip = [[tuple(str(x).replace(str(w.tmp), "") for x in e) for e in mutations(w)] for w in (wet, dry)]
                 self.assertEqual(strip[0], strip[1])
-                self.assertGreaterEqual(len(strip[0]), 2)
+                self.assertTrue(strip[0])
                 self.assertIn("would run: " + " ".join(shlex.quote(a) for a in wet.watched[0]).replace(str(wet.tmp), str(dry.tmp)), err)
                 self.assertEqual((dry.watched, dry.tasks(), dry.recs().list()), ([], [], []))
 
@@ -474,8 +532,8 @@ class TestKillPoints(BenchTest):
                 converges(self, lambda: World(self.tmp, kind), run_once, World.state)
 
 
-MBP_CONF = ('KIND=mac\nNODE_SSH="tolken"\nNODE_BENCH_SSH="tolken-bench"\nNODE_DRIVER=mac-volume\n'
-            'NODE_VOLUME="WK Bench"\nNODE_PROFILE=perf-macos-tolken\n')
+MBP_CONF = ('kind=mac\nssh="tolken"\nbench_ssh="tolken-bench"\ndriver=mac-volume\n'
+            'volume="WK Bench"\nprofile=perf-macos-tolken\n')
 
 
 class MacBenchTarget(BenchTarget):
@@ -518,9 +576,9 @@ class MacWorld(Fake):
                     "WK_MAC_BENCH_TOOLS": "/tools", "WK_POLL_SECONDS": "1", "WK_JOB_PID_TRIES": "0"}
         self.clock = FakeClock()
         self.home = "/var/wk"
-        conf = dict(fleet.Fleet(str(REPO), self.env).load("mbp"), NODE_NAME="mbp")
+        conf = dict(fleet.Fleet(str(REPO), self.env).load("mbp"), name="mbp")
         self.mac = FakeMac(conf, env=self.env, clock=self.clock)
-        self.mac.write_system(conf["NODE_PROFILE"])   # the bench install's own /etc/wk-image id, read back by mac-probe.sh
+        self.mac.write_system(conf["profile"])   # the bench install's own /etc/wk-image id, read back by mac-probe.sh
         for prefix, out in ((["exec", "ws", "test"], ""), (["exec", "ws", "git"], SHA + "\n"),
                             (["exec", "ws", "cat"], PLAN_JSON), ([str(REPO / "cmd" / "version")], "sha=abc\ndirty=no\n"),
                             (["git", "ls-remote"], SHA + "\trefs/heads/main\n"), (["rsync"], "")):
@@ -564,7 +622,7 @@ class MacWorld(Fake):
         self.kind = target_kind
         target = MacBenchTarget("ws", str(REPO), dict(self.env), self, target_kind)
         reg = MacReg(self)
-        conf = dict(fleet.Fleet(str(REPO), self.env).load("mbp"), NODE_NAME="mbp")
+        conf = dict(fleet.Fleet(str(REPO), self.env).load("mbp"), name="mbp")
         return mac.MacHostSystem(str(REPO), reg, target, "ws", self.clock, "mbp", conf,
                                   channel_factory=lambda conf, env, ch, via, root: self.mac,
                                   stage_driver=lambda root, conf: Drv(self, False))

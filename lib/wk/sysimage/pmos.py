@@ -2,31 +2,31 @@
 Linux-only, needs root (loop devices, chroots, kpartx), and never starts qemu on aarch64. The build itself is
 lib/wk/sysimage/pmos_build.py, run on the build host from the copy of lib/wk this pushes there."""
 
-import hashlib
 import os
 import re
 import shlex
 
-from wk import act, images, job, reach
+from wk import act, fleet, images, job, reach
 from wk.act import die, info, log, warn
+from wk.kv import kv
 from wk.machine import Ssh
 from wk.rubble import row
+from wk.slot import sha256_file
 from wk.sysimage import pmos_build, task
-from wk.sysimage.ls import human_bytes
+from wk.sysimage.ls import Unknown, human_bytes
 
 RUNNING_PATTERN = "wk[.]sysimage[.]pmos_build"   # bracketed: pgrep -f would otherwise match the ssh line carrying this very check
 KEEPALIVE_OPTS = ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4"]   # the build host roams on WiFi
 BUILD_USAGE = "usage: wk sysimage build %s [--dry-run|--detach|--resume]"
-HASH_BLOCK = 1 << 20
 PROVISION = "wk machine setup %s --disk <machine>:<device>"
 
 
 def ssh_machine(fl, env, via, host):
-    """The ssh destination for a fleet name (its NODE_SSH, if it has one) or a raw hostname passed through."""
+    """The ssh destination for a fleet name (its ssh, if it has one) or a raw hostname passed through."""
     conf = fl.load(host)
-    dest = (conf or {}).get("NODE_SSH") or host
+    dest = (conf or {}).get("ssh") or host
     opts = list(KEEPALIVE_OPTS)
-    if (conf or {}).get("NODE_ROLE") == "bench-device":
+    if (conf or {}).get("role") == "bench-device":
         opts += ["-l", "root"] + reach.UNPINNED
     return Ssh(dest, opts=opts, timeout=int(env.get("WK_SSH_TIMEOUT") or 10), via=via)
 
@@ -34,7 +34,7 @@ def ssh_machine(fl, env, via, host):
 def host_for(p, env):
     h = env.get("WK_PMOS_HOST") or (p or {}).get("PMO_BUILD_HOST", "")
     if not h:
-        die("this pmos profile sets no PMO_BUILD_HOST (image/profiles.sh)")
+        die("this pmos profile sets no PMO_BUILD_HOST (image/configs/<profile>.conf)")
     return h
 
 
@@ -75,14 +75,6 @@ def newest_out(machine, env, profile_name):
     return None
 
 
-def file_sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(HASH_BLOCK), b""):
-            h.update(block)
-    return h.hexdigest()
-
-
 def fetch_out(machine, env, id_, dest, here=None):
     """The hash is the one the build host computed: the only check that works from a Mac, with no sfdisk."""
     here = here or machine.via
@@ -92,7 +84,7 @@ def fetch_out(machine, env, id_, dest, here=None):
         die("the build on %s left no result block at %s.\n    It did not get as far as producing an image. "
             "The log is at %s/build.log\n    on that machine."
             % (machine.name, out, out))
-    there = next((l.split("=", 1)[1] for l in result.out.splitlines() if l.startswith("raw_sha256=")), "")
+    there = kv(result.out).get("raw_sha256", "")
     info("copying %s off %s" % (id_, machine.name))
     try:
         machine.copy_out(out + "/disk.wic.xz", dest + ".xz")
@@ -102,10 +94,26 @@ def fetch_out(machine, env, id_, dest, here=None):
         die("could not decompress %s.xz" % dest)
     if act.dry_run():
         return dest
-    got = file_sha256(dest)
+    got = sha256_file(dest)
     if there != got:
         die("the image does not survive the trip:\n    on %s: %s\n    here:            %s" % (machine.name, there, got))
     return dest
+
+
+def finished_image(machine, env, name):
+    """The newest finished build's own image, at the path `fetch_out` and 'write --from' read it from."""
+    id_ = newest_out(machine, env, name)
+    if not id_:
+        return []
+    path = out_dir(root_dir(machine, env), id_) + "/disk.wic.xz"
+    return [path] if sh(machine, "test -f %s" % shlex.quote(path)).ok else []
+
+
+def outputs(reg, p):
+    machine = ssh_machine(fleet.Fleet(images.root(reg.env), reg.env), reg.env, reg.machine, host_for(p, reg.env))
+    if not sh(machine, "true").ok:
+        raise Unknown("%s, the build host, does not answer over ssh" % machine.name)
+    return finished_image(machine, reg.env, p["IMG_PROFILE"])
 
 
 def build_hosts(env):
@@ -225,7 +233,7 @@ class Pmos:
         missing = []
 
         def need(prog, pkg):
-            if not sh(machine, "command -v %s >/dev/null 2>&1" % shlex.quote(prog)).ok:
+            if not machine.have(prog):
                 missing.append(pkg)
         need("kpartx", "multipath-tools")
         need("xz", "xz-utils")
@@ -299,7 +307,7 @@ class Pmos:
         return freqs
 
     def build(self, rest):
-        o = task.options(rest, ("--dry-run", "--detach", "--resume"), (), BUILD_USAGE % self.name)
+        o = task.options(rest, ("--detach", "--resume"), (), BUILD_USAGE % self.name)
         p = self.p
         if act.dry_run():
             return self.dry_run()

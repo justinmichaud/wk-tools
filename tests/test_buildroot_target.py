@@ -13,7 +13,7 @@ from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Fake, Result, isolated_module  # noqa: E402
 from wk.sysimage import buildroot_target as bt  # noqa: E402
 
 TOOLS = "/opt/wk-tools"
@@ -25,7 +25,7 @@ TCF = OUT + "/host/share/buildroot/toolchainfile.cmake"
 ENV = {"BR2_DL_DIR": "/cache/buildroot/dl", "BR2_CCACHE_DIR": "/cache/buildroot/ccache", "WK_MIRROR": "/mirror/WebKit.git"}
 SHA = "ab" * 32
 COMMIT = "c" * 40
-DEFCONFIG = 'BR2_LINUX_KERNEL_INTREE_DTS_NAME="bcm2710-rpi-3-b"\nBR2_ROOTFS_POST_IMAGE_SCRIPT="board/raspberrypi3/post-image.sh"\n'
+DEFCONFIG = 'BR2_ROOTFS_POST_IMAGE_SCRIPT="board/raspberrypi3/post-image.sh"\n'
 EXT = "BR2_EXTERNAL=%s/image/buildroot/external" % TOOLS
 
 
@@ -108,6 +108,10 @@ class TestArguments(unittest.TestCase):
 
     def test_a_pinned_kernel_names_its_release(self):
         self.assertEqual(self.refused(["image", "--name", NAME, "--tree-url", "u", "--defconfig", "d", "--kernel-tar", "/k.tar"]), 2)
+
+    def test_a_pinned_kernel_names_its_device_tree(self):
+        self.assertEqual(self.refused(["image", "--name", NAME, "--tree-url", "u", "--defconfig", "d", "--kernel-tar", "/k.tar",
+                                       "--kernel-release", "6.1"]), 2)
 
 
 class TestTheImage(unittest.TestCase):
@@ -242,8 +246,8 @@ class TestPinnedKernel(unittest.TestCase):
                                                            f.dirs.add(stage + "/lib/modules/6.1"), Result(0))[-1])
         return w
 
-    def args(self):
-        return image_args("--kernel-tar", self.KT, "--kernel-release", "6.1")
+    def args(self, dts="bcm2710-rpi-3-b"):
+        return image_args("--kernel-tar", self.KT, "--kernel-release", "6.1", "--kernel-dts", dts)
 
     def test_the_modules_are_an_overlay_and_the_boot_files_a_hook_ahead_of_the_board_s(self):
         w = self.world()
@@ -260,12 +264,17 @@ class TestPinnedKernel(unittest.TestCase):
         _, err = quiet(w.build(self.args()).run)
         self.assertIn("not at", err)
 
-    def test_a_kernel_without_the_board_s_device_tree_is_refused(self):
+    def test_a_kernel_without_the_named_device_tree_is_refused(self):
         w = self.world()
-        w.react(["make"], lambda a, f: (f.files.__setitem__(WORK + "/.config", 'BR2_LINUX_KERNEL_INTREE_DTS_NAME="other"\n')
-                                        if a[-1].endswith("_defconfig") else None, Result(0))[-1])
-        _, err = quiet(w.build(self.args()).run)
+        _, err = quiet(w.build(self.args(dts="other")).run)
         self.assertIn("other.dtb", err)
+
+    def test_no_br2_linux_kernel_line_reaches_the_config(self):
+        """This defconfig builds no kernel: DEFCONFIG (the fake `.config` a real one would produce) carries
+        no BR2_LINUX_KERNEL, and post_image reads the device tree name from --kernel-dts, never from it."""
+        w = self.world()
+        quiet(w.build(self.args()).run)
+        self.assertNotIn("BR2_LINUX_KERNEL", w.files[WORK + "/.config"])
 
 
 class SlotWorld(World):
@@ -278,6 +287,13 @@ class SlotWorld(World):
         self.react(["tar", "-C", root, "-xf"], lambda a, f: ([f._set_file(root + p, "") for p in (
             "/usr/lib/libWPEWebKit-1.1.so.0.2.9", "/usr/lib/wpe-webkit-1.1/injected-bundle/libWPEInjectedBundle.so",
             "/usr/libexec/wpe-webkit-1.1/WPEWebProcess")], Result(0))[-1])
+        self.slot_json = '{"build_id": "b1d"}'
+        self.react(["python3"], self._manifest)
+
+    def _manifest(self, argv, f):
+        if "manifest" in argv:
+            f._set_file(next(a for a in argv if a.endswith("/slot.json")), f.slot_json)
+        return Result(0)
 
 
 class TestTheSlot(unittest.TestCase):
@@ -287,10 +303,22 @@ class TestTheSlot(unittest.TestCase):
         self.assertIsNone(err, out)
         self.assertIn("stage 'webkit-base' done", out)
         self.assertIn("WPEWEBKIT_OVERRIDE_SRCDIR = /src/WebKit", w.files[WORK + "/local.mk"])
-        manifest = w.ran("python3", TOOLS + "/lib/wkslot.py", "manifest")[0]
+        manifest = w.ran(*isolated_module(TOOLS + "/lib", "wk.slot"), "manifest")[0]
         self.assertIn(OUT + "/host/bin/arm-buildroot-linux-gnueabihf-readelf", manifest)
         self.assertIn("exec_dir=usr/libexec/wpe-webkit-1.1", manifest)
         self.assertEqual(w.files[OUT + "/wk-slots/base/files.txt"], "./usr/lib/libWPEWebKit-1.1.so.0.2.9\n")
+
+    def test_the_build_id_reported_is_the_one_the_manifest_recorded(self):
+        out, err = quiet(SlotWorld().build(webkit_args()).run)
+        self.assertIsNone(err, out)
+        self.assertIn("build-id b1d", out)
+
+    def test_a_manifest_that_records_no_build_id_is_refused(self):
+        w = SlotWorld()
+        w.slot_json = '{"build_id": ""}'
+        out, err = quiet(w.build(webkit_args()).run)
+        self.assertIn("records no build_id", err or "")
+        self.assertNotIn("stage 'webkit-base' done", out)
 
     def test_uncommitted_changes_are_refused(self):
         w = SlotWorld()

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk profile [<workspace>] [flags] [file.js] -- profile a jsc or browser run
-# wk: where=workspace name=required values=--list ready=yes group=workspaces takes=* passthrough dryrun
+# wk: where=workspace name=required values=--list config=--config ready=yes group=workspaces takes=* passthrough dryrun
 # wk: opts --mode=,--config=,--browser,--process=,--attach=,--jit-dump,--markers,--top=,--fetch,--env=,--list
 # wk: flag --list where=local name=none
 #
@@ -33,8 +33,8 @@
 #   --mode <m>        which profiler runs (default sampling); native picks
 #                     instruments on the Apple ports and samply everywhere
 #                     else; `wk profile --list` lists the rest
-#   --config <c>      which build to profile (default: the last build's, else the platform's);
-#                     `wk build --list` lists every name
+#   --config <c>      which build to profile (default: the last build's, else the
+#                     platform's; the list is below)
 #   --browser [url]   profile MiniBrowser on that page instead of the jsc shell
 #   --process <p>     which of MiniBrowser's processes: ui | web (default) |
 #                     network | gpu. Refused on the Apple ports, where the
@@ -65,22 +65,20 @@ import time
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import buildconf, decl, shell, targets  # noqa: E402
+from wk import buildconf, decl, targets  # noqa: E402
 from wk.act import Refused, die, dry_run, info, log, warn  # noqa: E402
 from wk.ldpath import prelude  # noqa: E402
-from wk.machine import Local, is_linux  # noqa: E402
+from wk.machine import HAVE, Local, is_linux  # noqa: E402
 from wk.store import Store  # noqa: E402
+from wk.sudo import QUIESCE_PRIV as PRIV  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
 
 MODES = ("sampling", "bytecode", "samply", "instruments", "heaptrack", "massif")
-PRIV = "/usr/local/libexec/wk-quiesce-priv"
 
 
 def parse(argv):
     args = decl.Args(decl.Decl(__file__), argv)
     o = {"mode": args.value("--mode") or "sampling", "process": "web", "extra_env": args.values("--env")}
-    if args.value("--config") is not None:
-        o["config"] = args.value("--config")
     if args.value("--process") is not None:
         o["process"] = args.value("--process")
         o["process_explicit"] = True
@@ -196,7 +194,7 @@ def main(argv, reg=None):
             "    at, and without --browser there is no MiniBrowser to name one of.")
     reg = reg or targets.Registry(ROOT)
 
-    config = o.get("config") or os.environ.get("WK_CONFIG") or reg.default_config(name)
+    config = os.environ.get("WK_CONFIG") or reg.default_config(name)
     try:
         tname = reg.ws_target(name)
         target = reg.load(tname)
@@ -339,8 +337,7 @@ def main(argv, reg=None):
                 "    Build it first:  wk build %s %s" % (os.path.basename(bin_path), bin_path, name, config))
 
     if needs and not dry_run():
-        # `command` is a builtin and exec is not a shell: ask through sh.
-        if not target.exec(name, ["sh", "-c", "command -v %s >/dev/null 2>&1" % shlex.quote(needs)]).ok:
+        if not target.exec(name, list(HAVE) + [needs]).ok:
             die("%s is not installed in '%s'.\n"
                 "    It is provisioning, not a per-run step -- see the provisioning half of\n"
                 "    docs/Urgent/HANDOFF-profile.md. Until that lands:\n"

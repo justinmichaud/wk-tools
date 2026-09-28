@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+# `ProxyCommand <this> <ws>`: lib/wk/targets.py's Container.ssh_transport.
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
+
+from wk import act, targets  # noqa: E402
+from wk.workspace import require_name  # noqa: E402
+
+if len(sys.argv) != 2:
+    sys.exit("usage: ssh-transport <workspace>   (as an ssh ProxyCommand)")
+try:
+    require_name(sys.argv[1])
+    targets.Registry(ROOT).load("container").ssh_transport(sys.argv[1])
+except act.Refused as e:
+    sys.exit(e.status)

@@ -1,10 +1,9 @@
-"""WK_* override audit -- lib/, boot/ and targets/ files owned by this
-agent (see the wk-overrides audit: every WK_* read with a default is
+"""WK_* override audit -- lib/ and boot/ (every WK_* read with a default is
 documented where the user meets it and covered by a test, or removed).
 
 Each test below either (a) drives a real override end to end through the
 function that reads it, with no hardware and no real machine touched -- a
-fake `lsappinfo`/PATH stub, a stubbed driver function, a scratch file -- or
+PATH stub, a Fake machine, a scratch file -- or
 (b) is a cheap regression guard on a source-level fact (two files must not
 disagree on one name's default). Vars this agent decided to REMOVE
 (WK_IMAGE_ARMHF, WK_DETACH_POLL_SECONDS, WK_SWEEP_TIMEOUT, WK_RPI3_SSH,
@@ -16,17 +15,27 @@ Run: python3 -m unittest tests.test_wk_overrides_lib -v
 import os
 import sys
 import unittest
-from pathlib import Path
+from unittest import mock
 
-from tests.support import REPO, WkTest, fake_workspace, stub_path
+from tests.support import REPO, WkTest, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import resources  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from wk import git, reach, resources, screen, targets  # noqa: E402
+from wk.boot.mac import GuestChannel  # noqa: E402
+from wk.clock import Clock  # noqa: E402
+from wk.lock import Lock  # noqa: E402
+from wk.machine import Fake, Local, lib_argv  # noqa: E402
+from wk.store import Store  # noqa: E402
 
 
 def _src(*parts):
     return (REPO.joinpath(*parts)).read_text()
+
+
+def _readers(name):
+    """Every file under lib/, cmd/ and boot/ that names `name`."""
+    return [str(f.relative_to(REPO)) for top in ("lib", "cmd", "boot") for f in (REPO / top).rglob("*")
+            if f.is_file() and name in f.read_text(errors="ignore")]
 
 
 class TestRemovedOverridesStayRemoved(unittest.TestCase):
@@ -37,10 +46,10 @@ class TestRemovedOverridesStayRemoved(unittest.TestCase):
         self.assertNotIn("WK_IMAGE_ARMHF", _src("lib", "wk", "buildconf.py"))
 
     def test_wk_detach_poll_seconds_removed(self):
-        self.assertNotIn("WK_DETACH_POLL_SECONDS", _src("lib", "detach.sh"))
+        self.assertEqual(_readers("WK_DETACH_POLL_SECONDS"), [])
 
     def test_wk_sweep_timeout_removed(self):
-        self.assertNotIn("WK_SWEEP_TIMEOUT", _src("lib", "reach.sh"))
+        self.assertEqual(_readers("WK_SWEEP_TIMEOUT"), [])
 
     def test_fleet_conf_ssh_names_not_overridable(self):
         """machines/*.conf: a fleet device is renamed by editing the
@@ -60,10 +69,8 @@ class TestSharedTimingDefaultsAgree(unittest.TestCase):
     WK_STALL_SECONDS and WK_HEARTBEAT_SECONDS in lib/wk/job.py alone, and no bash file restates them."""
 
     def test_stall_and_heartbeat_seconds_have_one_default(self):
-        for rel in ("detach.sh", "watchdog.sh"):
-            text = _src("lib", rel)
-            self.assertNotIn("WK_STALL_SECONDS:-", text, rel)
-            self.assertNotIn("WK_HEARTBEAT_SECONDS:-", text, rel)
+        self.assertEqual(_readers("WK_STALL_SECONDS:-"), [])
+        self.assertEqual(_readers("WK_HEARTBEAT_SECONDS:-"), [])
         job = _src("lib", "wk", "job.py")
         self.assertEqual(2, job.count('"WK_STALL_SECONDS", 300'))
         self.assertEqual(2, job.count('"WK_HEARTBEAT_SECONDS", 300'))
@@ -103,19 +110,6 @@ echo PASS
 ''')
         self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
 
-    def test_wk_image_marker_overrides_the_marker_file(self):
-        marker = self.tmp / "wk-image"
-        cp = self.bash(
-            '''
-. "$WK_ROOT/lib/common.sh"
-printf 'id=bench-2026-01\\nprofile=webkit-2.52\\n' > "$WK_IMAGE_MARKER"
-[ "$(wk_image_id)" = "bench-2026-01" ] || { echo "id: $(wk_image_id)"; exit 1; }
-echo PASS
-''',
-            env={"WK_IMAGE_MARKER": str(marker)},
-        )
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
-
     def test_wk_session_mode_file_overrides_the_marker_file(self):
         sys.path.insert(0, str(REPO / "lib"))
         from wk import session
@@ -127,24 +121,16 @@ echo PASS
 
     def test_wk_lock_dir_override_is_where_locks_actually_go(self):
         lockdir = self.tmp / "locks"
-        cp = self.bash(
-            '''
-. "$WK_ROOT/lib/common.sh"
-[ "$(wk_lock_dir)" = "$WK_LOCK_DIR" ] || exit 1
-hold_lock testresource
-# -L, not -e: the lock is a symlink whose *target* is a payload string
-# (pid=... tok=...), not a real path, so -e (which follows the link) is
-# always false for one of these.
-[ -L "$(wk_lock_dir)/testresource@"*.lock ] || { echo "no lock file in $(wk_lock_dir)"; exit 1; }
-echo PASS
-''',
-            env={"WK_LOCK_DIR": str(lockdir)},
-        )
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
+        lock = Lock(Store({"HOME": str(self.tmp), "WK_LOCK_DIR": str(lockdir)}), Local(), Clock())
+        lock.hold("testresource", 0)
+        try:
+            self.assertEqual([p.name.split("@")[0] for p in lockdir.iterdir()], ["testresource"])
+        finally:
+            lock.release_all()
 
 
-class TestQuietLib(WkTest):
-    """`screen_blocker` names what is covering the window, from the window
+class TestScreenBlocker(unittest.TestCase):
+    """`screen.blocker` (lib/wk/screen.py) names what is covering the window, from the window
     server's own list rather than from a list of application names: a pane
     nobody has met yet is caught the first time it draws. WK_SCREEN_EXPECTED is
     the other half -- what wk itself put there."""
@@ -158,13 +144,15 @@ class TestQuietLib(WkTest):
     CLEAN = "Notification Center:21:1417x805;Terminal:0:863x499;"
 
     def _blocker(self, reading, expected=None):
-        exp = f'WK_SCREEN_EXPECTED={expected!r}\n' if expected else ""
-        return self.bash(f'''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/quiet.sh"
-{exp}wk_window_probe() {{ printf 'windows=%s\\n' {reading!r}; }}
-printf '[%s]\\n' "$(screen_blocker)"
-''').stdout.strip()
+        """The window server answers `reading`; bench/mac-window-probe.sh's own filter judges it, for real."""
+        m = Fake()
+        m.answer(lib_argv(REPO, screen.WINDOWS, "wk_window_probe"), out="windows=%s\n" % reading)
+        m.react(lib_argv(REPO, screen.WINDOWS, "wk_window_unexpected"), lambda argv, f: Local().run(argv))
+        env = {k: v for k, v in os.environ.items() if k != "WK_SCREEN_EXPECTED"}
+        if expected:
+            env["WK_SCREEN_EXPECTED"] = expected
+        with mock.patch.dict(os.environ, env, clear=True):
+            return "[%s]" % screen.blocker(m, REPO)
 
     def test_a_pane_over_the_window_is_named(self):
         self.assertEqual("[Setup Assistant]", self._blocker(self.PANE))
@@ -190,38 +178,15 @@ printf '[%s]\\n' "$(screen_blocker)"
 
 class TestReachLib(WkTest):
     def test_wk_tailscale_timeout_bounds_a_wedged_cli(self):
-        """Mirrors tests/test_host_only.py's own check of this override, for the
-        function this agent's audit entry covers (wk_tailscale_peers)."""
-        with stub_path({"tailscale": "#!/bin/sh\nsleep 30\n"}) as binp:
-            cp = self.bash(
-                '''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/reach.sh"
-t0=$(date +%s)
-WK_TAILSCALE_TIMEOUT=1 wk_tailscale_peers >/dev/null 2>&1 || true
-d=$(( $(date +%s) - t0 ))
-[ "$d" -le 8 ] || { echo "a wedged tailscale CLI held the walk ${d}s"; exit 1; }
-echo PASS
-''',
-                env={"PATH": f"{binp}:{os.environ['PATH']}"},
-                timeout=20,
-            )
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
+        """A wedged tailscale CLI costs the walk WK_TAILSCALE_TIMEOUT, not its own hang (Reach.peers): the stub outlasts the
+        runner's budget."""
+        with stub_path({"tailscale": "#!/bin/sh\nsleep 600\n"}) as binp, \
+                mock.patch.dict(os.environ, {"PATH": f"{binp}:{os.environ['PATH']}"}):
+            peers = reach.Reach(Local(), {"WK_TAILSCALE_TIMEOUT": "1", "WK_ROOT": str(REPO)}).peers()
+        self.assertEqual(peers, [])
 
 
 class TestResourcesLib(WkTest):
-    def test_wk_mb_per_job_sizes_by_mem_directly(self):
-        cp = self.bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-WK_AVAIL_MB=5000
-WK_CGROUP_CORES=100
-WK_MB_PER_JOB=1000
-[ "$(build_jobs)" = 5 ] || { echo "got $(build_jobs)"; exit 1; }
-echo PASS
-''')
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
-
     def test_wk_cgroup_mb_clamps_available_memory(self):
         fake = Fake()
         fake.files["/proc/meminfo"] = "MemAvailable:   20480000 kB\n"
@@ -242,113 +207,52 @@ echo PASS
         self.assertEqual((0, 111), (r.reserve_cores(), r.reserve_mb()))
 
 
-class TestStoreLib(WkTest):
+class TestStoreLib(unittest.TestCase):
     def test_wk_ccache_maxsize_renders_into_the_conf(self):
-        cp = self.bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-WK_CCACHE_MAXSIZE=12G
-[ "$(ccache_conf_render)" = "max_size = 12G" ] || { echo "got: $(ccache_conf_render)"; exit 1; }
-echo PASS
-''')
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
+        t = targets.Registry(REPO, env={"HOME": "/nonexistent", "WK_CCACHE_MAXSIZE": "12G"}, machine=Fake()).load("container")
+        self.assertEqual(t.ccache_conf(), "max_size = 12G\n")
 
     def test_wk_mirror_branches_replaces_the_derived_list(self):
-        cp = self.bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-case " $(wk_mirror_branches) " in *" main "*) ;; *) echo "default: $(wk_mirror_branches)"; exit 1 ;; esac
-WK_MIRROR_BRANCHES="main release/1.0"
-[ "$(wk_mirror_branches)" = "main release/1.0" ] || { echo "override: $(wk_mirror_branches)"; exit 1; }
-echo PASS
-''')
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("main", git.mirror_branches({"HOME": "/nonexistent"}))
+        self.assertEqual(git.mirror_branches({"WK_MIRROR_BRANCHES": "main release/1.0"}), ["main", "release/1.0"])
+
+
+class _Walk(targets.Registry):
+    def all(self):
+        return ["container", "vm", "buildbox1"]
 
 
 class TestTargetLib(WkTest):
     def test_wk_no_delegate_stops_a_fleet_walk_asking_a_remote_target(self):
-        cp = self.bash(
-            '''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/target.sh"
-target_all() { printf 'container\\nvm\\nbuildbox1\\n'; }
-target_kind() { [ "$1" = buildbox1 ] && echo remote || echo "$1"; }
-load_target() { :; }
-
-unset WK_NO_DELEGATE WK_TARGET
-out_all=$(walk_targets)
-want_all=$(printf 'container\\nvm\\nbuildbox1\\n')
-[ "$out_all" = "$want_all" ] || { echo "unfiltered: got [$out_all]"; exit 1; }
-
-WK_NO_DELEGATE=1
-out_nd=$(walk_targets)
-want_nd=$(printf 'container\\nvm\\n')
-[ "$out_nd" = "$want_nd" ] || { echo "delegate: got [$out_nd]"; exit 1; }
-echo PASS
-''',
-            env={"WK_MARKER": str(self.tmp / "no-such-marker")},
-        )
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
+        env = {"HOME": str(self.tmp), "WK_MARKER": str(self.tmp / "no-such-marker")}
+        self.assertEqual(_Walk(REPO, env=env, machine=Fake()).walk(), ["container", "vm", "buildbox1"])
+        self.assertEqual(_Walk(REPO, env=dict(env, WK_NO_DELEGATE="1"), machine=Fake()).walk(), ["container", "vm"])
 
     def test_wk_remote_marker_overrides_the_remote_host_marker(self):
-        cp = self.bash(
-            '''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/target.sh"
-in_remote_host && { echo "should be false before the marker exists"; exit 1; }
-printf 'target=devbox\\nroot=/home/x/wk\\n' > "$WK_REMOTE_MARKER"
-in_remote_host || { echo "should be true once the marker exists"; exit 1; }
-[ "$(wk_remote_field target)" = devbox ] || { echo "field: $(wk_remote_field target)"; exit 1; }
-echo PASS
-''',
-            env={"WK_REMOTE_MARKER": str(self.tmp / "remote-marker")},
-        )
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
+        marker = self.tmp / "remote-marker"
+        reg = targets.Registry(REPO, env={"HOME": str(self.tmp), "WK_REMOTE_MARKER": str(marker)}, machine=Fake())
+        self.assertFalse(reg.in_remote_host(), "should be false before the marker exists")
+        marker.write_text("target=devbox\nroot=/home/x/wk\n")
+        self.assertTrue(reg.in_remote_host(), "should be true once the marker exists")
+        self.assertEqual(reg.remote_marker_field("target"), "devbox")
 
 
-class TestBootMacGuest(WkTest):
+class TestBootMacGuest(unittest.TestCase):
     def test_wk_bench_guest_overrides_the_guest_workspace_name(self):
-        cp = self.bash(
-            '''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/boot/mac-guest.sh"
-[ "$NODE_GUEST" = my-custom-guest ] || { echo "got $NODE_GUEST"; exit 1; }
-echo PASS
-''',
-            env={"WK_BENCH_GUEST": "my-custom-guest"},
-        )
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
+        self.assertEqual(GuestChannel(REPO, {}, env={"WK_BENCH_GUEST": "my-custom-guest"}).ws, "my-custom-guest")
 
 
-class TestTargetsContainer(WkTest):
+class TestTargetsContainer(unittest.TestCase):
     def test_wk_container_user_overrides_the_workspace_owner(self):
-        cp = self.bash(
-            '''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/targets/container.sh"
-[ "$WKDEV_CONTAINER_USER" = customuser ] || { echo "got $WKDEV_CONTAINER_USER"; exit 1; }
-echo PASS
-''',
-            env={"WK_CONTAINER_USER": "customuser"},
-        )
-        self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
+        t = targets.Registry(REPO, env={"HOME": "/nonexistent", "WK_CONTAINER_USER": "customuser"}, machine=Fake()).load("container")
+        self.assertEqual(t.user(), "customuser")
 
 
 class TestTargetsLocal(WkTest):
     def test_wk_local_store_overrides_the_bind_mounted_store(self):
-        with fake_workspace() as ws:
-            store = self.tmp / "customstore"
-            env = ws.env({"WK_LOCAL_STORE": str(store)})
-            cp = self.bash(
-                '''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/target.sh"
-. "$WK_ROOT/targets/local.sh"
-echo "$WK_STORE"
-''',
-                env=env,
-            )
-        self.assertEqual(cp.stdout.strip(), str(store), cp.stdout + cp.stderr)
+        store = self.tmp / "customstore"
+        t = targets.LocalWorkspace("local", str(REPO), {"HOME": str(self.tmp), "WK_LOCAL_STORE": str(store)}, Fake())
+        self.assertEqual(t.store.root(), str(store))
 
 
 class TestTheGuestOverrides(unittest.TestCase):
@@ -366,7 +270,6 @@ class TestTheGuestOverrides(unittest.TestCase):
         self.result = Result
 
     def vm(self, **env):
-        from unittest import mock
         from wk import targets
         e = {"HOME": "/h", "WK_STORE": "/st", "WK_VM_STORE": "/vs", "XDG_STATE_HOME": "/h/st", **env}
         vm = targets.Registry(str(REPO), env=e, machine=self.fake).load("vm")

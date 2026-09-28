@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Can this macOS install present an accelerated, unthrottled browser? Asked of
 the build about to be measured, through OSXMiniDriver's own launch path.
-README.md, "The Mac lane", says what each reading proves."""
+README.md, "The Mac as a bench machine", says what each reading proves."""
 import argparse
 import http.server
 import json
@@ -48,7 +48,7 @@ MIN_RAF = 30.0
 
 BUNDLE = "org.webkit.MiniBrowser"
 WKMAC = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                      os.pardir, "lib", "wkmac.py"))
+                                      os.pardir, "lib", "wk", "mac.py"))
 
 
 def display_list():
@@ -76,11 +76,22 @@ def builtin_display(displays):
     return of_kind(displays, "builtin")
 
 
-def frontmost_bundle():
+PYOBJC_MISSING = ("mac-browser-check: no pyobjc here, so nothing can ask which application is "
+                  "frontmost -- an unfocused window is rAF-throttled and a benchmark behind one "
+                  "measures the throttle. bench/mac-pyobjc.sh installs it (wk_pyobjc_install); "
+                  "./setup or 'wk vm start <name>' runs that already")
+
+
+def require_pyobjc():
     try:
-        from AppKit import NSWorkspace
+        import AppKit  # noqa: F401
     except ImportError:
-        return "?"
+        sys.exit(PYOBJC_MISSING)
+
+
+def frontmost_bundle():
+    require_pyobjc()
+    from AppKit import NSWorkspace
     app = NSWorkspace.sharedWorkspace().frontmostApplication()
     ident = app.bundleIdentifier() if app else None
     return str(ident) if ident else None
@@ -222,11 +233,7 @@ def faults(reading, clients, device, min_raf, expect):
                      "the throttle")
     found += display_faults(reading.get("displays"), expect, topology=expect is not None)
     frontmost = reading.get("frontmost")
-    if frontmost == "?":
-        found.append("nothing here could say which application was frontmost -- AppKit did "
-                     "not import, and the bench account needs pyobjc: an unfocused window "
-                     "is rAF-throttled and a benchmark behind one measures the throttle")
-    elif frontmost != BUNDLE:
+    if frontmost != BUNDLE:
         found.append(f"the frontmost application was {frontmost}, not {BUNDLE}: the window "
                      "about to be measured is behind something, and a window that is not "
                      "frontmost is rAF-throttled")
@@ -254,6 +261,7 @@ def report(reading, clients):
 
 
 def take_reading(args):
+    require_pyobjc()   # before launch(): raising after it started would leave it running
     reading = {}
     server = serve(reading)
     port = server.server_address[1]
@@ -261,28 +269,28 @@ def take_reading(args):
     device, before = accelerator_clients()
     stale = set(webkit_gpu_holders(before))
     browser = launch(args.build_directory, f"http://127.0.0.1:{port}/")
-
-    deadline = time.time() + args.timeout
-    clients_seen = {}
-    while time.time() < deadline and not reading:
-        device_now, clients = accelerator_clients()
-        device = device_now or device
-        clients_seen.update({pid: name for pid, name in webkit_gpu_holders(clients).items()
-                             if pid not in stale})
-        if browser.poll() is not None:
-            break
-        time.sleep(0.5)
-
-    reading["frontmost"] = frontmost_bundle()
-    reading["displays"] = display_list()
-    builtin = builtin_display(reading["displays"])
-    reading["brightness"] = builtin.get("brightness") if builtin else None
-
-    browser.terminate()
     try:
-        browser.wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        browser.kill()
+        deadline = time.time() + args.timeout
+        clients_seen = {}
+        while time.time() < deadline and not reading:
+            device_now, clients = accelerator_clients()
+            device = device_now or device
+            clients_seen.update({pid: name for pid, name in webkit_gpu_holders(clients).items()
+                                 if pid not in stale})
+            if browser.poll() is not None:
+                break
+            time.sleep(0.5)
+
+        reading["frontmost"] = frontmost_bundle()
+        reading["displays"] = display_list()
+        builtin = builtin_display(reading["displays"])
+        reading["brightness"] = builtin.get("brightness") if builtin else None
+    finally:
+        browser.terminate()
+        try:
+            browser.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            browser.kill()
 
     reading["accelerator"] = device
     reading["webkit_gpu_clients"] = {str(k): v for k, v in clients_seen.items()}
@@ -307,7 +315,7 @@ def main():
     parser.add_argument("--expect-display", metavar="SPEC",
                         help="the display this reading must be taken on, as "
                              "'<kind> <w>x<h>', kind being builtin or external "
-                             "(machines/<node>.conf's NODE_DISPLAY, or whatever "
+                             "(machines/<node>.conf's display, or whatever "
                              "the machine's driver derives it from). "
                              "Display identity is what makes two runs "
                              "comparable; without it the display is recorded and "

@@ -17,8 +17,7 @@ if [ -f "$_ssh_conf" ] && grep -qxF "$_ssh_include" "$_ssh_conf" && [ -z "$(_ssh
     unchanged "ssh config"
 else
     if [ -f "$_ssh_conf" ] && [ -n "$(_ssh_body)" ]; then
-        # shellcheck disable=SC1091
-        _ssh_fleet="$( . "$WK_ROOT/boot/machines.sh"; machine_list | awk '{print $1}' )"
+        _ssh_fleet="$(wk_fleet list --kind board --kind mac --kind guest)"
 
         [ -e "$_ssh_conf.wk-backup" ] || cp -p "$_ssh_conf" "$_ssh_conf.wk-backup"
 

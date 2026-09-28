@@ -18,7 +18,7 @@ import time
 import unittest
 from unittest import mock
 
-from tests.support import REPO
+from tests.support import REPO, run
 from tests.test_doctor_wall import _Wall
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -238,7 +238,7 @@ class TestItVerifiesTheWall(_Host):
         self.assertEqual(["--continue", "two words"], shlex.split(self.line())[-2:])
 
     def test_no_bwrap_refuses_the_session(self):
-        self.set("command -v bwrap", Result(1, "", ""))
+        self.set("bwrap", Result(1, "", ""))   # Machine.have's probe ends in the tool
         status, err = self.ai("claude", force=True)
         self.assertEqual(1, status, err)
         self.assertIn("the commit wall needs bwrap in the workspace image, and 'demo' has none", err)
@@ -338,10 +338,11 @@ class TestThePushSwitch(_Host):
 
     def test_a_switch_that_would_not_go_off_refuses(self):
         self.fake.answer([WK, "push", "status"], rc=0)
-        self.fake.answer([WK, "push", "off"], rc=1)
+        self.fake.answer([WK, "push", "off"], rc=3, err="error: this is the podman machine.\n    On the host: wk push off\n")
         status, err = self.ai("claude")
         self.assertEqual(1, status, err)
-        self.assertIn("refusing to run: could not hold back the push keys ('wk push status')", err)
+        self.assertIn("refusing to run: could not hold back the push keys ('wk push status'); it said:\n"
+                      "    error: this is the podman machine.\n        On the host: wk push off", err)
         self.assertEqual([], self.handed)
 
     def test_an_unmeasured_switch_refuses(self):
@@ -363,13 +364,14 @@ class TestWhatIsWkTheAgentNever(_Flow):
         self.reg = SimRegistry(self.env, self.fake, SimTarget(self.fake, self.env))
 
     def test_each_refusal(self):
-        for argv, said in (((), "usage: wk ai claude|pi <workspace>"),
-                           (("gpt",), "unknown agent 'gpt'. This checkout knows: claude, pi")):
+        """the dispatcher's, before the command runs"""
+        for argv, said in (((), "'wk ai' needs one of: claude, pi"),
+                           (("gpt", "demo"), "unknown verb: gpt (one of claude, pi)")):
             with self.subTest(argv=argv):
-                status, err = self.ai(*argv)
-                self.assertEqual(1, status, err)
-                self.assertIn(said, err)
-        self.assertEqual([], self.fake.effects)
+                cp = run("ai", *argv)
+                self.assertEqual(2, cp.returncode, cp.stdout)
+                self.assertIn(said, cp.stdout)
+                self.assertIn("usage: wk ai claude|pi <workspace>", cp.stdout)
 
     def test_an_invalid_name_is_refused(self):
         self.env["WK_NAME"] = "-x"

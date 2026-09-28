@@ -3,8 +3,9 @@
 import json
 import os
 import re
+import shlex
 
-from wk import act
+from wk import act, git
 
 PLANS = "webkitpy/benchmark_runner/data/plans"
 SEED_WAIT = 3600
@@ -39,9 +40,15 @@ def plan_spec(text):
     return None
 
 
+def is_webkit(url):
+    return url.lower().rstrip("/").removesuffix(".git") == dict(git.REMOTES)["origin"].lower().removesuffix(".git")
+
+
 class Seeder:
-    def __init__(self, machine, lock, seed_dir):
-        self.machine, self.lock, self.seed_dir = machine, lock, seed_dir
+    """`mirror`: this machine's WebKit mirror, which a payload inside WebKit itself is read out of."""
+
+    def __init__(self, machine, lock, seed_dir, mirror=None):
+        self.machine, self.lock, self.seed_dir, self.mirror = machine, lock, seed_dir, mirror
 
     def seed(self, plan, text):
         spec = plan_spec(text)
@@ -51,8 +58,16 @@ class Seeder:
         kind, url, ref, subdir = spec
         if kind != "git":
             return ""
-        r = self.machine.run(["git", "ls-remote", url, ref])
-        sha = (r.out.split() or [ref])[0] if r.ok else ref
+        if self.mirror and is_webkit(url):
+            r = self.machine.run(["git", "--git-dir=" + self.mirror, "rev-parse", "--verify", "-q", ref + "^{commit}"])
+            sha = r.out.strip()
+            if not r.ok or not sha:
+                act.die("%s is pinned to WebKit %s, which this machine's mirror (%s) does not hold.\n"
+                        "    Refresh the mirror, then run it again:  wk sync --mirror" % (plan, ref[:12], self.mirror))
+            url = self.mirror
+        else:
+            r = self.machine.run(["git", "ls-remote", url, ref])
+            sha = (r.out.split() or [ref])[0] if r.ok else ref
         dest = os.path.join(self.seed_dir, "%s-%s" % (plan, sha[:12]))
         self.machine.mkdir(self.seed_dir)
         with self.lock.held("bench-seed-%s" % os.path.basename(dest), timeout=SEED_WAIT):
@@ -72,11 +87,17 @@ class Seeder:
         m.remove(tmp)
         m.mkdir(tmp)
         repo = os.path.join(tmp, "repo")
-        if not m.act_run(["git", "clone", "-q", url, repo]).ok:
+        if url == self.mirror:
+            m.mkdir(repo)
+            line = "git --git-dir=%s archive %s %s | tar -x -C %s" % (shlex.quote(url), sha, shlex.quote(subdir), shlex.quote(repo))
+            if not m.act_run(["bash", "-c", "set -o pipefail; " + line]).ok:
+                m.remove(tmp)
+                act.die("could not read %s of WebKit %s out of %s" % (subdir, sha[:12], url))
+        elif not m.act_run(["git", "clone", "-q", url, repo]).ok:
             m.remove(tmp)
             act.warn("could not clone %s; run-benchmark will fetch the payload itself" % url)
             return ""
-        if not m.act_run(["git", "-C", repo, "checkout", "-q", sha]).ok:
+        elif not m.act_run(["git", "-C", repo, "checkout", "-q", sha]).ok:
             m.act_run(["git", "-C", repo, "checkout", "-q", ref])
         payload = repo if subdir == "." else os.path.join(repo, subdir)
         # No .git in a pinned payload: a clone carries fsmonitor's Unix domain socket, which no copy tool can reproduce.

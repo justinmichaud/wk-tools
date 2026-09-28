@@ -26,11 +26,11 @@ class TestQuietSiblings(unittest.TestCase):
 
     def _machine(self, name, net="wifi", bridge="", bench=True):
         (self.dir / f"{name}.conf").write_text(
-            f'NODE_SSH="{name}-rescue"\n'
-            + (f'NODE_BENCH_SSH="{name}-bench"\n' if bench else "")
-            + f'NODE_NET={net}\nNODE_BRIDGE="{bridge}"\n'
-            'KIND=board\nNODE_DRIVER=pi-sd\nNODE_DEVICE=/dev/mmcblk0\nNODE_ROOT=/dev/mmcblk0p2\n'
-            f'NODE_NOTE="{name}, a test fixture"\n'
+            f'ssh="{name}-rescue"\n'
+            + (f'bench_ssh="{name}-bench"\n' if bench else "")
+            + f'net={net}\nbridge="{bridge}"\n'
+            'kind=board\ndriver=pi-sd\ndevice=/dev/mmcblk0\nroot=/dev/mmcblk0p2\n'
+            f'note="{name}, a test fixture"\n'
         )
 
     def _run(self, me, peers):

@@ -77,9 +77,6 @@ class Session:
         m = MODE.search(self._wayland_info())
         return "%sx%s @ %sHz" % m.groups() if m else ""
 
-    def have(self, tool):
-        return self.m.run(["sh", "-c", 'command -v "$1"', "sh", tool]).ok
-
     def active(self, unit):
         return self.m.run(["systemctl", "is-active", "--quiet", unit]).ok
 
@@ -111,7 +108,7 @@ class Session:
         return next(("/dev/dri/" + n for n in names if CARD.match(n) and self.driver(n) == "ast"), None)
 
     def _sessions(self, on_seat0):
-        if not self.have("loginctl"):
+        if not self.m.have("loginctl"):
             return []
         rows = [line.split() for line in self.m.run(["loginctl", "list-sessions", "--no-legend"]).out.splitlines()]
         return [r[0] for r in rows if r and on_seat0(r)]
@@ -163,7 +160,7 @@ class Session:
             log("  leaving it alone; run 'wk session off' first if you want a clean")
             log("  benchmark compositor instead of a full desktop")
             return 0
-        if not self.have("wayland-info"):
+        if not self.m.have("wayland-info"):
             die("wayland-info missing -- a session nobody can verify is real is not started; "
                 "./setup --stage tools installs wayland-utils")
 
@@ -274,7 +271,7 @@ class Session:
         if priv.get("seat-hide:"):
             rows.append(("seat-hide", priv["seat-hide:"] + " (hidden from seat0)"))
         if live:
-            known = self.have("wayland-info")
+            known = self.m.have("wayland-info")
             rows.append(("outputs", " ".join(self.outputs()) if known else "unknown (wayland-utils missing)"))
             # MotionMark scores scale with surface size, so runs on different display modes are not comparable.
             shown = self.display_mode() if known else "unknown (wayland-utils missing)"

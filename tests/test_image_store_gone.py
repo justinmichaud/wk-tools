@@ -10,7 +10,7 @@ is none, and in this test; `wk sysimage rm` is a tombstone naming `wk rm`; `wk b
 rather than looked up, and a named --system is checked against it;
 a profile is derived from both a yocto and a buildroot workspace path; each
 builder's outputs (lib/wk/sysimage/ls.py) are what it leaves in a workspace
-laid out the way targets/container.sh mounts one.
+laid out the way the container target (lib/wk/targets.py) mounts one.
 
 Run: python3 -m unittest tests.test_image_store_gone -v
 """
@@ -31,9 +31,9 @@ from wk.store import Store  # noqa: E402
 from wk import act  # noqa: E402
 from wk.sysimage import cli, ls  # noqa: E402
 
-# The functions the image store used to be built from (lib/image.sh) --
-# every one of them either has no reason to exist without a catalogue to
-# read, or (image_dir/image_disk/image_manifest/...) named a path inside one.
+# The image store's functions, kept as tombstones: each has no reason to
+# exist without a catalogue to read, or (image_dir/image_manifest/...) names
+# a path inside one.
 _RETIRED_FUNCTIONS = (
     "image_dir",
     "image_manifest",
@@ -69,9 +69,9 @@ class TestNoStoreFunctionDefinitionRemains(unittest.TestCase):
         self.assertEqual(bad, [], "retired function(s) still defined:\n" + "\n".join(bad))
 
 
-# Where the store's callers used to live -- the directories `wk selftest`
-# treats as shell code, minus tests/ and docs/, which is where the tolerated
-# hits below (owed work outside this change's file list) actually live.
+# The directories `wk selftest` treats as shell code, minus tests/ and docs/,
+# which is where the tolerated hits below (owed work outside this change's
+# file list) actually live.
 _SCAN_DIRS = ("cmd", "lib", "boot", "bench", "image", "container", "host")
 
 
@@ -178,7 +178,7 @@ class TestSysimageRmIsATombstone(unittest.TestCase):
 # `boot-read /dev/sda 1` rather than naming /dev/sda1.
 #
 # rpi5-usb enumerates two candidate partitions (1 and 3: an A/B pair --
-# boot/rpi5-usb.sh), but a board with one system written holds it only on the
+# lib/wk/boot/pi.py's Rpi5Usb), but a board with one system written holds it only on the
 # first; the second is bare and answers with nothing, the same as no system at
 # all. Answering with the id on *both* would be a medium someone wrote the
 # same image to twice, not the fresh single-system board this fixture models,
@@ -191,21 +191,21 @@ case "$*" in
 esac
 '''
 
-_FAKE_NODE_CONF = '''NODE_SSH={ssh}
-KIND=board
-NODE_DRIVER=rpi5-usb
-NODE_DEVICE=/dev/sda
-NODE_ROOT=/dev/nvme0n1p2
-NODE_PROFILE=webkit-2.52-yocto-rpi5-64
-NODE_MAC=02:00:00:00:00:01
-NODE_BRIDGE=""
-NODE_ROLE=workstation
-NODE_OS=any
-NODE_VOLUME=""
-NODE_DTB=bcm2712-rpi-5-b.dtb
-NODE_BENCH_SSH=""
-NODE_NET=wifi
-NODE_NOTE="fake bench board"
+_FAKE_NODE_CONF = '''ssh={ssh}
+kind=board
+driver=rpi5-usb
+device=/dev/sda
+root=/dev/nvme0n1p2
+profile=webkit-2.52-yocto-rpi5-64
+mac=02:00:00:00:00:01
+bridge=""
+role=workstation
+os=any
+volume=""
+dtb=bcm2712-rpi-5-b.dtb
+bench_ssh=""
+net=wifi
+note="fake bench board"
 '''
 
 
@@ -247,10 +247,10 @@ class TestBootArmDefaultsToDeviceImage(WkTest):
 
 
 class TestProfileFromWorkspacePath(unittest.TestCase):
-    """A profile is derived from a lane's name for both builders that leave images inside one, by matching the
+    """A profile is derived from an image workspace's name for both builders that leave images inside one, by matching the
     configurations this checkout defines (lib/wk/images.py), and the write derives it the same way from a full path."""
 
-    def test_a_lane_names_its_profile(self):
+    def test_an_image_workspace_names_its_profile(self):
         self.assertEqual(images.ws_profile("yocto-webkit-2.52-yocto-rpi5-64"), "webkit-2.52-yocto-rpi5-64")
         self.assertEqual(images.ws_profile("buildroot-webkit-2.52-buildroot-rpi5-64"), "webkit-2.52-buildroot-rpi5-64")
         self.assertIsNone(images.ws_profile("jsc-release"))

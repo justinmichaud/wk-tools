@@ -5,6 +5,7 @@ import argparse
 import atexit
 import os
 import shutil
+import signal
 import sys
 import tempfile
 import time
@@ -80,6 +81,7 @@ def shim_machine_tools():
         p = Path(d) / tool
         p.write_text((SSH_SHIM % (real_ssh, tool)) if tool == "ssh" else (SHIM % tool))
         p.chmod(0o755)
+    os.environ["WK_TEST_SHIMS"] = d
     os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
 
 
@@ -95,6 +97,15 @@ def select(tests_dir, tiers, patterns):
     return picked
 
 
+def hang_after(budget):
+    """When a test is stopped where it is: past its budget it already fails, and the margin lets a slow skip finish."""
+    return 2 * budget + 5
+
+
+class OverBudget(AssertionError):
+    """Raised inside a test that outlived hang_after, so a wait nothing else bounds fails rather than hangs the run."""
+
+
 class Result(unittest.TextTestResult):
     def __init__(self, *args, **kw):
         super().__init__(*args, **kw)
@@ -107,8 +118,15 @@ class Result(unittest.TextTestResult):
         self._passed = False
         super().startTest(test)
         self._started = time.monotonic()
+        stop = hang_after(budget_for(test))
+
+        def over(signum, frame):
+            raise OverBudget("over budget: %s was stopped after %gs" % (test.id(), stop))
+        signal.signal(signal.SIGALRM, over)
+        signal.setitimer(signal.ITIMER_REAL, stop)
 
     def stopTest(self, test):
+        signal.setitimer(signal.ITIMER_REAL, 0)
         took = time.monotonic() - self._started
         self.timings.append((took, test.id()))
         budget = budget_for(test)

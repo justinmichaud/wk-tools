@@ -9,7 +9,7 @@ WK_TMP="${TMPDIR:-/tmp}"
 PIDFILE="$WK_TMP/.wk-bridge.pid"
 BRIDGE=/opt/wk-tools/container/proxy/bridge.py
 
-# An ssh session -- an editor's terminal -- is the one way into a workspace that cannot inherit this environment, since sshd builds a session's from scratch; it is handed what is set here, and the proxy the container was created with, as sshd's SetEnv (targets/container.sh). SetEnv has no quoting, so a value with whitespace in it would end the option early and take every later assignment with it.
+# An ssh session -- an editor's terminal -- is the one way into a workspace that cannot inherit this environment, since sshd builds a session's from scratch; it is handed what is set here, and the proxy the container was created with, as sshd's SetEnv (lib/wk/targets.py's Container). SetEnv has no quoting, so a value with whitespace in it would end the option early and take every later assignment with it.
 WK_SSH_SETENV=""
 carry() {   # <name>
     local v="${!1-}"

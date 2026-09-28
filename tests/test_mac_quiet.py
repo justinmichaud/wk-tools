@@ -8,13 +8,21 @@ needs sudo (the functions themselves never call sudo -- that only happens
 in do_provision's caller, which this suite does not run).
 """
 
+import contextlib
+import io
 import re
 import shlex
 import subprocess
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 
-from tests.support import bash, func_body
+from tests.support import bash
+from wk import screen
+from wk.clock import FakeClock
+from wk.machine import Fake, Result, lib_argv
+from wk.quiet import Quiesce
 
 REPO = Path(__file__).resolve().parent.parent
 QUIET_HOSTS = REPO / "bench" / "mac-quiet-hosts.sh"
@@ -384,13 +392,20 @@ class TestWhatIsStoppedIsWhatIsJudged(unittest.TestCase):
 
     def test_the_findings_renderer_still_changes_nothing(self):
         """`wk quiesce status` renders the same findings, and a reporting
-        command mutates nothing."""
-        text = (REPO / "lib" / "quiet.sh").read_text()
-        self.assertNotIn("wk_quiet_daemons_pause", text)
-        self.assertNotIn("kill -", text)
-        for line in text.splitlines():          # it may read with sudo; it may not write
-            if "sudo" in line:
-                self.assertIn("defaults read", line, line.strip())
+        command mutates nothing: it may read with sudo; it may not write."""
+        m = Fake("mac")
+        m.answer([], out="")
+        m._set_file("/etc/wk-image", "id=perf-macos-tolken\n")
+        with tempfile.TemporaryDirectory() as store, contextlib.redirect_stderr(io.StringIO()), \
+                contextlib.redirect_stdout(io.StringIO()):
+            Quiesce(REPO, m, FakeClock(), {"WK_STORE": store, "HOME": store}, macos=True).status()
+        ran = [e[1] for e in m.effects if e[0] in ("run", "run_tty")]
+        self.assertTrue(any("wk_quiet_daemons_findings" in " ".join(a) for a in ran), ran)
+        self.assertEqual([e for e in m.effects if e[0] not in ("run", "run_tty")], [])
+        for argv in ran:
+            self.assertNotIn("wk_quiet_daemons_pause", " ".join(argv))
+            if argv[:1] == ("sudo",):
+                self.assertIn("defaults read", " ".join(argv), argv)
 
     def test_nothing_reaches_for_launchd_any_more(self):
         """Two mechanisms is how the enforced set and the judged set drifted
@@ -440,7 +455,7 @@ class TestASweepCanNameABenchInstall(unittest.TestCase):
 class TestBothLegPathsWatchTheScreen(unittest.TestCase):
     """The preflight reads the screen at an instant and a leg is minutes: a
     banner that draws after it covers the browser for the rest of the run and
-    nothing downstream can tell. `screen_watch_start`/`_stop` is how this tree
+    nothing downstream can tell. `wk.screen.Watch` is how this tree
     catches that -- and a staged leg, which is the one every A/B runs, did not
     have it while the workspace leg did."""
 
@@ -450,7 +465,8 @@ class TestBothLegPathsWatchTheScreen(unittest.TestCase):
         """The staged leg is the pipeline's browser run (lib/wk/bench/mac.py), not a second one."""
         text = (REPO / "lib" / "wk" / "bench" / "mac.py").read_text()
         self.assertIn("class StagedRun(pipeline.Run):", text)
-        self.assertNotIn("screen_watch", text[:text.index("class PgoCollect")], "a PGO collection is watched; a leg is the pipeline's")
+        self.assertNotIn("screen.Watch", text[:text.index("class PgoCollect")], "a PGO collection is watched; a leg is the pipeline's")
+        self.assertEqual(1, self.PIPELINE.read_text().count("screen.Watch("))
         # The host side's browser leg is the install's `wk bench staged` over ssh, never a run-benchmark of its own.
         host = text[text.index("class HostRun(pipeline.Run):"):]
         host = host[:host.index("\ndef ")]
@@ -475,19 +491,18 @@ class TestTheWatchSeesAPausedAgentComeBack(unittest.TestCase):
     banner never becomes the frontmost *application*, so the window probe and
     the browser check both pass with one on the screen."""
 
-    QUIET = REPO / "lib" / "quiet.sh"
+    def _mac(self, ps_output):
+        """A Fake Mac whose must-not-run table is the real one and whose `ps` is the test's, so every state is reachable."""
+        m = Fake("mac")
+        for fn in ("wk_quiet_desktop_stopped", "wk_quiet_desktop_unstoppable"):
+            m.react(lib_argv(str(REPO), screen.DESKTOP, fn),
+                    lambda argv, fake: Result(0, subprocess.run(argv, capture_output=True, text=True).stdout))
+        m.answer(["ps"], out=ps_output)
+        m.answer(lib_argv(str(REPO), screen.WINDOWS, "wk_window_probe"), out="windows=?\n")
+        return m
 
     def _restarted(self, ps_output):
-        """`_watch_restarted` against a `ps` of the test's own, so every state
-        is reachable without a Mac."""
-        body = func_body(self.QUIET.read_text(), "_watch_restarted")
-        stub = ('is_macos() { return 0; }\n'
-                'ps() { printf "%s" "$WK_TEST_PS"; }\n')
-        cp = bash(". %r\n%s\n_watch_restarted() {%s}\n_watch_restarted\n"
-                  % (str(REPO / "bench" / "mac-quiet-desktop.sh"), stub, body),
-                  env={"PATH": "/usr/bin:/bin", "WK_TEST_PS": ps_output})
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        return sorted(x for x in cp.stdout.strip().split(",") if x)
+        return screen.restarted(self._mac(ps_output), REPO)
 
     def test_a_machine_where_they_are_all_stopped_records_nothing(self):
         self.assertEqual([], self._restarted(
@@ -513,15 +528,68 @@ class TestTheWatchSeesAPausedAgentComeBack(unittest.TestCase):
         self.assertEqual([], self._restarted("S   MiniBrowser\nS   bash\n"))
 
     def test_the_watch_records_it_where_the_leg_reads_it(self):
-        """One record, so one `screen_watch_stop` fails the leg for either
-        reason rather than a second watch nothing reads."""
-        text = self.QUIET.read_text()
-        start = func_body(text, "screen_watch_start")
-        self.assertIn("_watch_restarted", start)
-        self.assertIn('>> "$record"', start.split("_watch_restarted")[1])
+        """One record, so one `stop()` fails the leg for either reason rather
+        than a second watch nothing reads."""
+        m, sampled = self._mac(""), threading.Event()
+
+        def ps(argv, fake):
+            sampled.set()
+            return Result(0, "S   /usr/sbin/usernoted\n")
+        m.react(["ps"], ps)
+        m.answer(["uname", "-s"], out="Darwin\n")
+        watch = screen.Watch(m, REPO, FakeClock(), {"WK_SCREEN_WATCH_SECONDS": "0.01"})
+        watch.start()
+        self.assertTrue(sampled.wait(30))
+        self.assertIn("%s\trunning again: usernoted" % FakeClock().iso(), watch.stop())
+
+    def test_off_a_mac_the_watch_asks_nothing(self):
+        m = Fake("linux")
+        m.answer(["uname", "-s"], out="Linux\n")
+        watch = screen.Watch(m, REPO, FakeClock(), {"WK_SCREEN_WATCH_SECONDS": "0.01"})
+        watch.start()
+        self.assertEqual([], watch.stop())
+        self.assertEqual([["uname", "-s"]], [list(e[1]) for e in m.effects if e[0] == "run"])
+
+    def _watched(self, m):
+        m.answer(["uname", "-s"], out="Darwin\n")
+        watch = screen.Watch(m, REPO, FakeClock(), {"WK_SCREEN_WATCH_SECONDS": "0.01"})
+        watch.start()
+        return [l.split("\t", 1)[1] for l in watch.stop()]
+
+    def test_a_screen_that_could_not_be_asked_is_a_finding_once(self):
+        """A missing probe or no compiler is no evidence the screen was clear."""
+        self.assertEqual([screen.UNASKED], self._watched(self._mac("")))
+
+    def test_a_watch_that_fails_is_a_finding(self):
+        m = self._mac("")
+        m.react(["ps"], lambda argv, fake: (_ for _ in ()).throw(OSError("ps went away")))
+        seen = self._watched(m)
+        self.assertIn("the screen watch stopped: OSError: ps went away", seen)
+
+    def test_a_watch_that_hangs_does_not_hold_the_run(self):
+        m, stuck = self._mac(""), threading.Event()
+        m.react(["ps"], lambda argv, fake: stuck.wait(30) and Result(0, ""))
+        m.answer(["uname", "-s"], out="Darwin\n")
+        watch = screen.Watch(m, REPO, FakeClock(), {"WK_SCREEN_WATCH_SECONDS": "0.01"})
+        watch.start()
+        seen = [l.split("\t", 1)[1] for l in watch.stop(wait=0.2)]
+        stuck.set()
+        self.assertIn("the screen watch did not answer within 0.2s of the run ending", seen)
+
+    def test_every_reading_is_asked_under_a_ceiling(self):
+        m = self._mac("")
+        asked = []
+        orig = m.run
+        m.run = lambda argv, input=None, timeout=None: asked.append(timeout) or orig(argv, input=input, timeout=timeout)
+        self._watched(m)
+        self.assertTrue(asked)
+        self.assertNotIn(None, asked)
 
     def test_it_costs_one_process_per_sample_and_not_forty(self):
-        """It samples beside the thing being measured."""
-        body = func_body(self.QUIET.read_text(), "_watch_restarted")
-        self.assertEqual(1, body.count("ps -A"))
-        self.assertNotIn("pgrep", body)
+        """It samples beside the thing being measured: one `ps` for every name on the table, no `pgrep` each."""
+        m = self._mac("")
+        screen.restarted(m, REPO)
+        ran = [e[1] for e in m.effects if e[0] == "run"]
+        self.assertEqual(1, sum(1 for a in ran if a[:1] == ("ps",)))
+        self.assertFalse([a for a in ran if a[:1] == ("pgrep",)])
+        self.assertEqual(3, len(ran))

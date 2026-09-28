@@ -1,6 +1,5 @@
 """The task record: one directory per long-running command under
-<record dir>/task/, one file per field, the same directory lib/task.sh
-writes. Liveness is asked of the process table at read time, never stored."""
+<record dir>/task/, one file per field. Liveness is asked of the process table at read time, never stored."""
 
 import os
 import re
@@ -33,7 +32,7 @@ def record_dir(env=None):
 
 
 def host_name(machine=None):
-    """`hostname -s` lowercased as ssh aliases, confs and lock paths spell it (bash: wk_host_name), or ""."""
+    """`hostname -s` lowercased as ssh aliases, confs and lock paths spell it, or ""."""
     return (machine or here()).run(["hostname", "-s"]).out.strip().lower()
 
 
@@ -179,17 +178,11 @@ class Task:
         self.set("finished", self.clock.iso())
         self.set("exit", status)
 
-    def job_exit(self):
-        f = self.field("exit_file")
-        if not f or not os.path.isfile(f) or os.path.getsize(f) == 0:
-            return ""
-        return re.sub(r"[^0-9]", "", Path(f).read_text())
-
     def alive(self, cap=None):
-        if (self.path / "exit").is_file() or self.job_exit():
+        if (self.path / "exit").is_file():
             return False
         pid = self.field("pid")
-        if not pid:
+        if not pid.isdigit():
             return False
         if self.field("where") == "target":
             if self.ask_target is None:
@@ -199,7 +192,7 @@ class Task:
 
     def holder_gone(self):
         """True only where the process that took this record's claim is provably gone."""
-        if (self.path / "exit").is_file() or self.job_exit():
+        if (self.path / "exit").is_file():
             return True
         pid = self.raw("pid")
         if self.field("where") != "here" or not isinstance(pid, str) or not pid.isdigit():
@@ -209,7 +202,7 @@ class Task:
     def verdict(self, how="pid", stall_seconds=None, ask_seconds=None):
         if how not in ("pid", "capped"):
             raise ValueError("the pid is asked for as long as it takes or capped, not '%s'" % how)
-        rc = self.field("exit") if (self.path / "exit").is_file() else self.job_exit()
+        rc = self.field("exit") if (self.path / "exit").is_file() else ""
         if rc:
             if rc == "0":
                 return "ok"
@@ -442,92 +435,6 @@ def hold(records, fleet, machine, kind, name, kill, log, plan, pid, env):
     return records.begin(kind, "here", name, kill, log, plan, holds=res, pid=pid)
 
 
-def _begin_args(args):
-    """[--holds R] [--pid P] [--argv A] and the positionals, the shape lib/task.sh's task_begin takes."""
-    kw = {}
-    while args and args[0] in ("--holds", "--pid", "--argv"):
-        kw[args[0][2:]] = args[1]
-        args = args[2:]
-    if "pid" in kw:
-        kw["pid"] = int(kw["pid"])
-    if "argv" in kw:
-        kw["argv"] = [kw["argv"]]
-    return kw, args
-
-
-def _out(text):
-    if text:
-        sys.stdout.write(str(text))
-
-
-def main(argv, env=None):
-    """The record for a bash caller (lib/task.sh): `python3 -m wk.record <verb> ...`."""
-    from wk.shell import caller_shell
-    env = os.environ if env is None else env
-    shell_ = caller_shell(env)
-    records = Records(env=env, ask_target=shell_.ask if shell_ else None)
-    verb, a = argv[0], argv[1:]
-    task = (lambda: records._task(a[0])) if a else None
-    try:
-        if verb == "field":
-            v = task().field(a[1])
-            _out(v + "\n" if v else "")
-        elif verb == "begin":
-            kw, pos = _begin_args(a)
-            _out(records.begin(*pos[:5], plan=pos[5:], **kw).path)
-        elif verb == "pid":
-            task().pid(a[1], a[2] if len(a) > 2 else None)
-        elif verb == "set":
-            task().set(a[1], a[2])
-        elif verb == "step-state":
-            task().step_state(a[1], a[2])
-        elif verb == "step-event":
-            task().step_event(a[1], a[2])
-        elif verb == "step":
-            task().step(int(a[1]))
-        elif verb == "step-named":
-            task().step_named(a[1])
-        elif verb == "step-now":
-            _out(task().step_now())
-        elif verb == "stage":
-            _out("".join(s + "\n" for s in task().stage()))
-        elif verb == "end":
-            if not a or not os.path.isdir(a[0]):
-                act.die("task_end: '%s' is no task record -- the caller holds none to end (an unset YOCTO_TASK/PGO_TASK "
-                        "reads like this)" % (a[0] if a else ""))
-            task().end(a[1])
-        elif verb == "alive":
-            return 0 if task().alive(None) else 1
-        elif verb == "verdict":
-            _out(task().verdict(a[1] if len(a) > 1 else "pid"))
-        elif verb == "find":
-            t = records.find(a[0], a[1])
-            _out(t.path if t else "")
-        elif verb == "list":
-            _out("".join("%s\n" % t.path for t in records.list()))
-        elif verb == "first-error":
-            _out("".join(l + "\n" for l in first_error(a[0])))
-        elif verb == "log-age":
-            age = log_age(a[0], records.clock) if os.path.isfile(a[0]) else None
-            if age is None:
-                return 1
-            sys.stdout.write("%d" % age)
-        elif verb == "hold":
-            kw, pos = _begin_args(a)
-            root = env.get("WK_ROOT") or str(Path(__file__).resolve().parents[2])
-            t = hold(records, lambda r: fleet_holders(r, records, fleet_stores(root, env, records.machine)),
-                     pos[0], pos[1], pos[2], pos[3], pos[4], pos[5:], kw.get("pid"), env)
-            _out(t.path if t else "")
-        else:
-            act.die("wk.record: no verb '%s'" % verb, 2)
-    except (ValueError, RuntimeError) as e:
-        act.err("%s: %s" % (verb, e))
-        return 1
-    except act.Refused as e:
-        return e.status
-    return 0
-
-
 def _rmtree(path):
     path = Path(path)
     if not path.exists():
@@ -538,7 +445,3 @@ def _rmtree(path):
         else:
             p.unlink()
     path.rmdir()
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))

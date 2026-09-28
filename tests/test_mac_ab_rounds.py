@@ -62,7 +62,7 @@ class TestTheStoppingRule(WkTest):
             a.check()
 
             class Dev:
-                name, lanes = "rpi5", [("ws", "")]
+                name, arm_ws = "rpi5", [("ws", "")]
             _, o = a.bench_options(Dev())
             self.assertEqual((o["max_rounds"], o["detect"]), ("9", "0.5"))
             self.assertIn("--max-rounds 9 --detect 0.5", a.bench_command(Dev(), "speedometer3"))
@@ -72,13 +72,14 @@ class Rounds:
     """board_ab.AB's round loop alone: each leg answers `legs`, and `resolves` says after which round the rounds so far
     resolve the target."""
 
-    def __init__(self, rounds, max_rounds, detect, resolves_at=None, lost=()):
+    def __init__(self, rounds, max_rounds, detect, resolves_at=None, lost=(), recorded=()):
         self.ab = board_ab.AB.__new__(board_ab.AB)
         self.ab.rounds, self.ab.max_rounds, self.ab.detect = rounds, max_rounds, detect
         self.ab.systems, self.ab.labels = False, ("a", "b")
         self.asked, self.legs = [], []
         self.ab.arm_leg = lambda arm, o: self.legs.append(int(o["round"])) or int(o["round"]) not in lost
         self.ab.resolved = lambda: self.asked.append(max(self.legs)) or (resolves_at is not None and max(self.legs) >= resolves_at)
+        self.ab.byround = lambda: {rnd: {x: {"state": "ok"} for x in arms} for rnd, arms in recorded}
 
     def run(self):
         with contextlib.redirect_stderr(io.StringIO()) as err:
@@ -107,6 +108,12 @@ class TestTheRoundsStopWhenTheyResolve(WkTest):
         _, _, rounds, err = Rounds(2, 4, 0.3).run()
         self.assertEqual(rounds, [1, 2, 3, 4])
         self.assertIn("--max-rounds 4 reached", err)
+
+    def test_a_restart_takes_up_after_the_rounds_the_task_already_holds(self):
+        """Round 2 has one arm only, so it is run again; 1 and 3 have both and count as kept."""
+        kept, lost, rounds, err = Rounds(4, 4, 0.0, recorded=((1, "ab"), (2, "a"), (3, "ab"))).run()
+        self.assertEqual((kept, lost, rounds), (4, 0, [2, 4]))
+        self.assertIn("round 1/4 -- recorded already", err)
 
     def test_lost_rounds_still_end_it_early(self):
         kept, lost, rounds, _ = Rounds(2, 40, 0.3, lost=(3, 4, 5)).run()
@@ -151,7 +158,8 @@ def volume(root, legs):
         (d / "env.json").write_text(json.dumps({"plan": plan, "workspace": "wk-bench", "wall_time_s": "60"}))
         rows.append("\t".join((rnd, arm, sid, rid, clean, plan)))
     runs = root / "ab" / STAMP / "runs.tsv"
-    runs.parent.mkdir(parents=True)
+    (runs.parent / "warmup").mkdir(parents=True)
+    (runs.parent / "warmup" / ("%s-A.json.gz" % legs[0][5])).write_bytes(b"profile")
     runs.write_text("\n".join(rows) + "\n")
     return runs
 
@@ -231,7 +239,7 @@ def planted(legs=(), state=None, **o):
             rid = key.split()[-1]
             buf = io.BytesIO()
             with tarfile.open(fileobj=buf, mode="w") as t:
-                t.add(str(vol / "results" / rid), arcname=rid)
+                t.add(str(vol / "ab" / STAMP / rid if rid == "warmup" else vol / "results" / rid), arcname=rid)
             return Result(0, base64.b64encode(buf.getvalue()).decode() + "\n")
         m.fake.answer(r"^tar ", packed)
 
@@ -262,6 +270,11 @@ class TestTheCollectRecordsOntoTheTask(WkTest):
         self.assertEqual(sorted(recorded), ["a1", "a2", "b1", "b2"])
         self.assertEqual(recorded["a1"]["ab"], {"round": "1", "arm": "a", "staged": "sid-a"})
         self.assertEqual((recorded["b2"]["machine"], recorded["b2"]["plan"]), ("mbp", "speedometer3"))
+
+    def test_the_warmup_rounds_captures_land_on_the_task(self):
+        with planted(ab_legs(QUIET[:2], QUIET[:2])) as m:
+            _, _, err, _ = self.collect(m)
+            self.assertEqual(os.listdir(os.path.join(m.taskdir, "warmup")), ["speedometer3-A.json.gz"], err)
 
     def test_the_warmup_round_and_a_contaminated_leg_are_not_recorded(self):
         legs = ab_legs(QUIET[:2], QUIET[:2])

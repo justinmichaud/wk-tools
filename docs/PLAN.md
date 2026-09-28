@@ -186,8 +186,7 @@ exist.
      wait takes. Done when `wk status` reads records through it (step 2).
    - *`Machine`*: the one seam, its fake, and the local, container, remote
      and vm implementations, landing with the first command that needs each
-     (steps 2 and 3); the bridge is deleted with the last bash caller of
-     `lib/target.sh`.
+     (steps 2 and 3).
 2. **The seam and the drivers.** `Machine` and its fake are in. The
    registry and the read side of every driver are Python
    (`lib/wk/targets.py`): container, guest and workspace-local whole, and
@@ -196,38 +195,21 @@ exist.
    smallest callers: `ls`, `version`, `logs`, `start`, `stop`, `disk`,
    `status` (the walk in `lib/wk/status.py`, the renderer in
    `lib/wk/statusview.py`) and `doctor` (`lib/wk/doctor.py`: rows of state,
-   what and remedy, one renderer). What still bridges to bash through
-   `lib/wk/shell.py`, each a named helper: every driver's tooling push
-   (`t_sync_tools`); the guest's
-   start and stop (`targets/vm.sh`); the boot drivers' probe and the reach
-   probes; the credential verdicts (`wk_cred_check`,
-   `peer_cred_verdict`), the privileged-helper table, `wk_remote_probe`,
-   `wk_remote_findings`, `remote_provision_stale`, `vm_base_findings` and
-   the store paths `lib/store.sh` names; in `lib/wk/status.py`,
-   `current_base` and `unreferenced_bases` (this host's envelope is
-   `Resources` now). Done when `lib/target.sh` and `targets/*.sh` are gone
-   and no bash file parses JSON.
+   what and remedy, one renderer). Every driver, the tooling push, the
+   guest's start and stop, the boot and reach probes, the credential
+   verdicts and the store paths are Python; this host's envelope is
+   `Resources`.
 3. **Workspaces.** `new`, `rm`, `build`, `run`, `test`, `enter`, `scp`,
    `sync`, `pr`, `remotes`, `verify`, `ai`, `zed`, `gui`, `profile`. Done
-   when `lib/store.sh`'s workspace half is gone and each has a kill-point
-   test. **Where `new` and `rm` stand** (uncommitted on `python-core`; the
-   full suite has not run over them yet -- run it first, in the background,
-   with nothing editing):
+   when each has a kill-point test. **Where each stands:**
    - *Landed.* `cmd/new` and `cmd/rm` are Python entry points over the flows
      in `lib/wk/workspace.py`, with the lock in `lib/wk/lock.py`, the alias in
-     `lib/wk/sshalias.py`, each driver's write side and `mirror_dir` in
-     `lib/wk/targets.py` and the bash they still reach in `lib/wk/shell.py`;
-     `tests/test_wk_workspace.py` holds every refusal, `killpoints[new]`,
-     `killpoints[rm]` and dry-run-equals-wet-run. Of the drivers' bash write
-     side only `targets/vm.sh`'s `t_create`/`t_destroy` remain, for `wk vm`
-     until step 5.
+     `lib/wk/sshalias.py`, and each driver's write side and `mirror_dir` in
+     `lib/wk/targets.py`; `tests/test_wk_workspace.py` holds every refusal,
+     `killpoints[new]`, `killpoints[rm]` and dry-run-equals-wet-run.
    - *Owed.* The live check, one pattern per run: `wk selftest --live
      crash_only`, `wk selftest --live container_workspace`, `wk selftest
-     --live lifecycle`. `t_needs_base` and `t_created` stay in
-     the bash drivers while `ws_state`, asked by the dispatcher's own
-     `wait_ready` and by `cmd/gc`, asks them, and
-     `tests/test_owed_new.py`'s and `tests/test_state.py`'s `ws_state` tests
-     stay with them.
+     --live lifecycle`.
    - *`enter`/`scp`/`zed`.* All three are Python entry points over
      `lib/wk/targets.py`: `enter` runs a command through `Target.exec` or
      execs into `Target.enter_argv`'s shell; `scp` moves bytes through
@@ -235,20 +217,16 @@ exist.
      container, the one `Machine` copy (`copy_in`/`copy_out`/`copy_tree_in`/
      `copy_tree_out` on `Local`/`Ssh`/`Fake`) for a guest or a build machine;
      `zed` reaches a workspace through `ssh_host`/`ssh_prepare`/`ssh_user`/
-     `ssh_proxy`, one hop further for a peer's own `--route`. The bash `t_pull`,
-     `t_push`, `t_push_dir`, `t_path_kind`, `t_ssh_prepare`, `t_ssh_user` and
-     `t_ssh_proxy` are gone with their last caller, and so is `t_pull_dir`;
-     `targets/vm.sh`'s own `t_enter`/`t_ssh_host` for
-     `cmd/vm` (every other driver's copy is gone; `cmd/profile` is Python
-     now and calls `Target.pull_dir` directly).
+     `ssh_proxy`, one hop further for a peer's own `--route`; `cmd/profile`
+     calls `Target.pull_dir` directly.
      `tests/test_enter.py`, `tests/test_scp.py` and `tests/test_zed.py` hold
      the refusals; `tests/test_wk_targets.py` holds each driver's argv;
      `tests/test_wk_machine.py` holds the copy conformance. Owed: the live
      checks (`enter.shell`, `zed.peer`) against a real container, guest and
      peer.
    - *`pr`.* `cmd/pr` is a Python entry point: `rebase` and `open` run over
-     `Target.exec`/`src`/`mirror_dir` (now on the base `Target` and on
-     `LocalWorkspace` too, matching `targets/*.sh`), and `pr_open_target`/
+     `Target.exec`/`src`/`mirror_dir` (on the base `Target` and on
+     `LocalWorkspace`), and `pr_open_target`/
      `pr_open_gh_args` are module-level functions `tests/test_pr_workflow.py`
      and `tests/test_pr_upstream.py` import directly rather than lifting bash.
      The plain `wk pr <ws> <spec>` checkout is `pr.checkout`, over
@@ -274,56 +252,36 @@ exist.
      [<ws>] --fix`, the wiring read back in every fetch.
      `tests/test_sync.py` holds `sync.scopes`, the wiring report and fix,
      `killpoints[sync]`, `dispatch.where[sync]` and dry-run-equals-wet-run.
-     Owed: the live check (`sync.fleet`); the tooling push, the mirror
-     refresh request, `newest_complete_base` and the wiring scripts stay
-     bash behind `lib/wk/shell.py`; `status.py` calls `Target.workspaces`
-     now, and the one remaining inline copy of its union is `cmd/ls`.
+     Owed: the live check (`sync.fleet`); `status.py` calls
+     `Target.workspaces`, and the one remaining inline copy of its union is
+     `cmd/ls`.
    - *`build`.* `cmd/build` is a Python entry point over `lib/wk/build.py`
-     (front, driver, `--detach`, `--kill`, the babysitter -- `build/babysit.sh`
-     is gone), `lib/wk/job.py` (the watched run, the announced
-     pid, the one job stop) and `lib/wk/buildconf.py` (the configs as data;
-     `build/configs.sh` is its shim for the bash callers, plus the cross
-     configs `image/` reads); each driver's `ccache_dir`, `build_argv`,
+     (front, driver, `--detach`, `--kill`, the babysitter), `lib/wk/job.py`
+     (the watched run, the announced pid, the one job stop) and
+     `lib/wk/buildconf.py` (the configs as data, the cross configs
+     included); each driver's `ccache_dir`, `build_argv`,
      `build_size` and `task_put` are in `lib/wk/targets.py`, the budget in
      `lib/wk/resources.py`'s `Budget`. `tests/test_wk_build.py` holds every
      refusal, `killpoints[build]`, `progress_shape[build]` and
-     dry-run-equals-wet-run; `tests/test_buildconf.py` the configs and the
-     shim. Owed: the live checks (`build.config[<config>]`,
-     `build.babysit_e2e`); `Budget` repeats `lib/resources.sh`'s
-     `build_jobs`/`build_admit`/`builds_running`, `build.busy_reason` repeats
-     `lib/target.sh`'s `ws_busy_reason`, and `job.py` repeats
-     `lib/watchdog.sh`'s `run_watched`/`job_stop` and its `TOOLS`/
-     `build_processes` repeat `lib/detach.sh`'s `_build_ps`, which
-     `lib/watchdog.sh`'s `_stall_report` still uses, until `sysimage`
-     and `image/` call the Python ones (`test` now does). `configs.sh` keeps
-     only the four accessors `cmd/bench` and `bench/mac-ab.sh` still call
-     (`config_build_dir`, `config_jsc_path`, `config_run_var`,
-     `config_run_dir`); `run` and `gui` are ported, so the accessors that
-     read the browser/process/test-runner fields (`config_browser_path`,
-     `config_browser_url_flag`, `config_jsc_only`,
-     `config_web/network/gpu_process_name`, `config_test_runner_name`,
-     `config_web_process_pause_env`, `config_browser_env`) are gone (`test`
-     and `profile` resolve a config through `buildconf.resolve` directly).
+     dry-run-equals-wet-run; `tests/test_buildconf.py` the configs. Owed:
+     the live checks (`build.config[<config>]`, `build.babysit_e2e`). Every
+     caller resolves a config through `buildconf.resolve`.
    - *`run`/`gui`.* Both are Python entry points that resolve a config
      straight through `lib/wk/buildconf.py`'s `Config` (no `config_load`
      call at all) and exec into `Target.exec_argv`'s result with
      `os.execvp`, the same replace-this-process pattern as `enter`/`zed` --
      every branch of both is a tail call into the target, so neither reads
      a `Result` or an exit status. `Registry.default_config` (from the
-     workspace's own `build` task record, `lib/wk/record.py`) replaces
-     `lib/target.sh`'s `default_config` for both; `Target.lldb_opts`
-     (Container's two `-O` flags) and `shell.py`'s `lldb_prelude`/
-     `lldb_pin_opts`/`session_mode`/`bmc_drm_device` bridge what stays
-     bash. `wk gui` refuses a `kind == "remote"` target (`unit
+     workspace's own `build` task record, `lib/wk/record.py`) is the default
+     config for both, and `Target.lldb_opts` carries Container's two `-O`
+     flags. `wk gui` refuses a `kind == "remote"` target (`unit
      gui.refuses_remote`).
      `tests/test_run_until_crash.py` passes unmodified against the port;
      `tests/test_wk_run.py` holds `run.finds_binary[<port>]` and `--lldb`'s
      tty request on every target, `tests/test_wk_gui.py` holds
      `gui.refuses_remote`, the jsc-only/no-browser/macOS-container
      refusals and the fullscreen-flag table. Owed: the live checks
-     (`run.lldb_tty`, `session.modes[moose]`); `Registry.default_config`
-     repeats `lib/target.sh`'s `default_config` until `bench` calls the
-     Python one (`test` and `profile` now do).
+     (`run.lldb_tty`, `session.modes[moose]`).
    - *`test`/`profile`.* Both are Python entry points. `cmd/test` runs the
      JSC and layout suites over `lib/wk/job.py` (`watch`, `PidWatch`,
      `kill`, `stop`) and `lib/wk/resources.py`'s `Budget`, its record
@@ -331,7 +289,7 @@ exist.
      default a build's carries; `cmd/profile` is argv/refusal construction
      and direct `Target.exec`/`exec_tty` calls with no task record at all.
      Both resolve a config straight
-     through `lib/wk/buildconf.py`, no `build/configs.sh`. The one new
+     through `lib/wk/buildconf.py`. The one new
      primitive either needed: `Machine.run_tty`/`Target.exec_tty`,
      blocking with this process's own stdio inherited (a real pty for
      lldb/samply/xctrace) but returning control here afterward, unlike
@@ -342,9 +300,7 @@ exist.
      `killpoints[test]`; `tests/test_wk_profile.py` the host-side
      `perf_event_paranoid` gate and `--fetch`; `tests/test_layout_paths.py`
      and `tests/test_profile_debug.py` exercise the ported behaviour
-     directly. `lib/arch.sh`'s `arch_wrapper`/`arch_label` are gone
-     (only `cmd/test` called them; `buildconf.ARCH`/`arch_label` replace
-     both). Owed: the live checks (`test.suite[<target>]`,
+     directly; `buildconf.ARCH`/`arch_label` name the arch. Owed: the live checks (`test.suite[<target>]`,
      `profile.modes[<mode>]`); no unit test yet for `--lldb`'s tty request
      (needs `Machine.run_tty`, landed, but not yet driven from `cmd/test`'s
      own suite).
@@ -360,22 +316,12 @@ exist.
      Also fixed: `is_linux`/`is_macos` live once in `lib/wk/machine.py`,
      the session socket in `targets.session_socket_present`, the loader-path
      prelude in `lib/wk/ldpath.py`, the Zed CLI in `targets.zed_cli`, and
-     `cmd/zed --tools` resolves its target once. Still open:
-     `lib/wk/sshalias.py`'s `alias_set`/`alias_remove` and
-     `lib/wk/store.py`'s `artifact_dir` copy `lib/target.sh`'s
-     `ssh_alias_set`/`ssh_alias_remove` and `lib/store.sh`'s
-     `wk_artifact_dir` verbatim; the bash pair stays for `cmd/vm` until step
-     5, `wk_artifact_dir` for `lib/bench.sh`/`lib/profiler.sh`.
-     Fixed: the three "is this pid alive in the target" answers
-     (`shell.target_pid_alive`'s bash `t_exec kill -0` round trip,
-     `record.of_target`'s own closure, `cmd/stop`'s and `cmd/status`'s bash
-     ask) are one now, `Target.pid_alive` (`lib/wk/targets.py`), which
-     `record.of_target` and `workspace.py` (through it) and `cmd/stop`/
-     `cmd/status` all ask; `shell.target_pid_alive` is gone.
-4. **Credentials.** `key`, `push`, `sudo`, `backup`, `skills`. Done when
-   `lib/store.sh`'s credential half is gone; its mirror, base, wiring and PR
-   half goes in step 5.4, and the guest's push-agent half with
-   `targets/vm.sh` in step 5.33.
+     `cmd/zed --tools` resolves its target once. `lib/wk/sshalias.py` is the
+     one alias writer and `lib/wk/store.py`'s `artifact_dir` the one artifact
+     path. "Is this pid alive in the target" is one answer,
+     `Target.pid_alive` (`lib/wk/targets.py`), which `record.of_target`,
+     `workspace.py`, `cmd/stop` and `cmd/status` all ask.
+4. **Credentials.** `key`, `push`, `sudo`, `backup`, `skills`.
    - *Landed.* `cmd/key` (`lib/wk/key/`: `cli.Key`, one mixin per concern -- `creds`, `deploy`, `login`,
      `election`, `check` -- over `common`'s verdict line, `GitHub` seam and `Fleet`) and `cmd/push` are Python
      over `lib/wk/secrets.py`'s `Secrets`. `wk sudo` and `wk
@@ -388,71 +334,42 @@ exist.
      `test_push_switch.py`, `test_wk_sudo.py` and `test_backup.py` hold the
      flows, `killpoints[key]`, `killpoints[push]` and dry-run-equals-wet-run.
      The fork and agent-secret tables are `secrets.FORKS` and
-     `secrets.AGENT_SECRETS`, the one copy; `wk_push_forks`,
-     `wk_agent_secrets` and `wk_cred_read` are one-line shims over
-     `python3 -m wk.secrets`, and `container/firstrun.sh` asks it directly.
-     `wk doctor`'s credential rows and the peers' login rows are `Key`'s own
-     (`stored_verdict`, `cred_verdict_of`); `peer_cred_verdict`,
-     `wk_cred_store`/`wk_cred_clear`, `wk_cred_settable` and
-     `wk_hook_levels`/`wk_wiring_check_script` are gone. `-h` prints each
-     subverb's destructive override under the command's line.
+     `secrets.AGENT_SECRETS`, the one copy, and `container/firstrun.sh` asks
+     `python3 -m wk.secrets` directly. `wk doctor`'s credential rows and the
+     peers' login rows are `Key`'s own (`stored_verdict`, `cred_verdict_of`).
+     `Secrets.agent_secret_remedy` (`lib/wk/secrets.py`) is the one remedy,
+     over `cred_stored`/`cred_verdict` and `lib/credcheck.py`;
+     `tests/test_wk_secrets.py`'s `TestAStoredCredentialIsReadTheOneWay`
+     holds the read against a `Fake` refusing as `lib/secretfile.py` would.
+     `-h` prints each subverb's destructive override under the command's line.
    - *Owed.* The live checks (`key.election[<peer>]`, `push.from_remote`,
-     `backup.roundtrip`, `sudo.require[<machine>]`). `lib/store.sh`'s
-     credential half is still bash for its bash callers: `store_init`'s
-     publish (`host/linux/machine.sh`), `push_agent_cred_sync`/`push_agent_exec`
-     (`host/linux/sdk.sh`, `host/macos/vmtools.sh`),
-     `push_agent_pat_converge_machine` (`targets/container.sh`), `wk_notify`
-     (`bench/mac-ab.sh`), and `wk_cred_present` with the `wk_agent_secret*`
-     family (`lib/wk/guest.py`'s `write_agent_secrets`, `wk_notify` itself);
-     each twins a `Secrets`/`Key` method and goes with its caller.
-     `agent_secret_store_remedy` (`lib/target.sh`) is gone: `Secrets.agent_secret_remedy`
-     (`lib/wk/secrets.py`) is the one implementation, over `cred_stored`/`cred_verdict`
-     and the already-Python `lib/credcheck.py`, and `Target.agent_secret_remedy`
-     (`lib/wk/targets.py`) its only caller. `lib/wk/targets.py`'s `_agent_secret`/`_forks`
-     and `lib/wk/status.py`'s push-record read now ask `wk.secrets` directly;
-     `shell.agent_secrets`/`shell.push_forks`/`shell.agent_secret_store_remedy` are gone.
-     `wk_push_forks`/`wk_agent_secrets` (`lib/store.sh`) stay: `host/linux/machine.sh`
-     and `lib/store.sh`'s own `wk_github_user` still call them, so the
-     shim goes with 5.4/5.33's callers, not before. `wk_cred_check`/`wk_cred_verdict`/
-     `wk_cred_detail` (`lib/store.sh`) are gone: `agent_secret_store_remedy` was their
-     last caller, and `test_credcheck.py`'s direct bash exercise of them is
-     `tests/test_wk_secrets.py`'s `TestAStoredCredentialIsReadTheOneWay`, over
-     `Secrets.cred_verdict`/`cred_stored` and a `Fake` reacting as `lib/secretfile.py`
-     would to a refused read.
-     `lib/wk/key/creds.py` is 198 lines: `cred_print` moved to `wk.key.common` as a
-     plain function over `verdict`/`detail`, the only call sites it had.
+     `backup.roundtrip`, `sudo.require[<machine>]`).
 5. **Fleet and bench.** `sysimage`, `boot`, `pi`, `bench`, `ab`, `quiesce`,
    `session`, `bridge`, `vm`, `find`, `remote`, `gc`, `completion`, as the one
-   pipeline over one `machines/` directory. Done when `lib/target.sh`,
-   `targets/*.sh` and every `lib/*.sh` but `common.sh` are gone, no bash file
-   in `cmd/` remains but `selftest`, and `bench/`, `boot/`, `image/`,
-   `bridge/`, `vm/` and `remote/` hold only what runs on a board, a phone, a
-   bench install or in a target.
+   pipeline over one `machines/` directory. Done when `lib/common.sh` is the
+   one bash library, every command is Python, and `bench/`, `boot/`,
+   `image/`, `bridge/`, `vm/` and `remote/` hold only what runs on a board, a
+   phone, a bench install or in a target.
 
-   **Sizes today** (lines of bash, 2026-09-23):
+   **Sizes today** (non-blank lines, 2026-09-27): 10,114 of shell and 38,919 of Python
+   outside `tests/` (68,352); 31 commands, all Python.
 
-   | command | lines | | library / tree | lines |
-   | --- | --- | --- | --- | --- |
-   | `cmd/pi` | 1,550 | | `targets/vm.sh` | 1,578 |
-   | `cmd/bench` | 1,496 | | `lib/store.sh` (non-credential half) | ~850 |
-   | `cmd/bridge` | 1,234 | | `lib/target.sh` | 670 |
-   | `cmd/sysimage` | 1,107 | | `targets/remote.sh`, `container.sh`, `local.sh` | 691 |
-   | `cmd/ab` | 600 | | `lib/{task,resources,watchdog,image,bench,reach,quiet,detach,profiler,par,sched}.sh` | 1,867 |
-   | `cmd/boot` | 408 | | `boot/` (disk 735, machines 487, mac-volume 338, pi-tryboot 156, pi-mbr 154, mac-guest 140, rpi-eeprom 134, pi-sd 99, rpi5-usb 92) | 2,335 |
-   | `cmd/session` | 365 | | `image/` host halves (yocto 573, pmos 395, buildroot 275, pgo 237, profiles 189, fetch 30) | 1,699 |
-   | `cmd/find` | 364 | | `image/` in-target halves (yocto-build 573, pmos-build 358, buildroot-build 240, buildroot-webkit 115) + overlays | ~1,470 |
-   | `cmd/gc` | 310 | | `bench/` (mac-ab 1,238, autorun 707, mac-lane 646, mac-bench-volume 604, quiet-desktop 485, mac-tailnet 389, the rest ~500) | ~4,800 |
-   | `cmd/remote` | 268 | | `bridge/` (provision.sh 664, bin 656, init.d 109, devices 24) | 1,453 |
-   | `cmd/vm` | 186 | | `vm/` 244, `remote/` 312, `build/mac-pgo.sh` 176 | 732 |
-   | `cmd/quiesce` | 132 | | | |
-   | `cmd/completion` | 127 | | | |
-   | **commands** | **8,147** | | **libraries and trees** | **~17,900** |
+   | tree | shell | Python |
+   | --- | --- | --- |
+   | `admin/` (the three helpers and their installer) | 2,079 | 0 |
+   | `container/` | 2,174 | 1,857 |
+   | `host/` (the setup stages) | 2,122 | 0 |
+   | `bench/` | 989 | 316 |
+   | `bridge/` | 638 | 0 |
+   | `claude/` | 365 | 610 |
+   | `shell/`, `setup` | 470 | 0 |
+   | `lib/` (`common.sh`) | 358 | 31,264 |
+   | `build/`, `boot/`, `image/`, `remote/`, `vm/` | 919 | 245 |
+   | `cmd/` | 0 | 4,593 |
 
-   Python already in this scope: `lib/wkdata.py` 1,554, `lib/wkmac.py` 395,
-   `lib/sched.py` 359, `lib/wkpgo.py` 266, `lib/wknotify.py` 174, `lib/wkslot.py`
-   168, `lib/tailnet.py` 125, `bench/wk_board_driver.py` 418,
-   `bench/mac-browser-check.py` 372. Each moves under `lib/wk/` with the
-   sub-step that owns its caller. Its CLI goes when the last bash caller goes.
+   Python in this scope outside `lib/wk/`: `lib/wkdata.py` 1,554 and
+   `bench/mac-browser-check.py` 372; `sched`, `pgo`, `notify`, `tailnet` and
+   the board driver live under `lib/wk/`.
 
    **Target shape.**
 
@@ -464,8 +381,8 @@ exist.
    | `sysimage` | `build`, `write`, `ls`, `disks`, `rm` | `sysimage`, `image/*`, `vm base` (the guest base is a builder), `bench mac-volume` (the bench volume is a builder) |
    | `quiesce` | `on [--seat=kiosk\|desktop] [--bmc]`, `off`, `status` | `quiesce`, `session` (see 5.9) |
    | `gc` | kept, in Python | every kind of rubble is named by the module that makes it |
-   | `completion` | generated by the dispatcher from the declarations | `cmd/completion` |
-   | `notify` | already a tombstone; `lib/wk/notify.py` is the library call | `wk_notify` (lib/store.sh), `lib/wknotify.py` |
+   | `completion` | generated by the dispatcher from the declarations | the `completion` command |
+   | `notify` | a tombstone; `lib/wk/notify.py` is the library call | the bash `wk_notify` and the notify CLI |
 
    Commands after step 5: `new rm build run test enter scp sync pr ai zed gui
    profile status ls logs stop start doctor key push machine bench boot
@@ -477,7 +394,7 @@ exist.
    named by the name the CLI takes. `KIND` is one of `build`, `peer`,
    `board`, `mac`, `guest` or `bridge`. The other keys are today's, unchanged
    (`NODE_*`, `WK_REMOTE_*`, `WK_TARGET_*`, `BR_*`), so the phone-side
-   `bridge/provision.sh` and the bash readers still left read the same names.
+   `bridge/provision.sh` reads the same names.
    A machine-local overlay lives in `~/.config/wk/machines/`, which replaces
    `~/.config/wk/bridges/`. A bench role that is also a peer names the peer:
    `mbp.conf` sets `NODE_SSH=tolken` and keeps no copy of `tolken.conf`'s
@@ -493,14 +410,11 @@ exist.
    - leaves `python3 tests/run.py --unit` and `--lint` green.
 
    A bash library still sourced by an unported caller becomes a *shim*, one
-   line per function calling the Python (the `build/configs.sh` precedent). It
-   is never a second implementation, and 5.39 deletes every shim.
-   `lib/wk/shell.py` and `tests/support.py` are shared: a sub-step edits
-   only the functions it names, by exact match. Two sub-steps that share a
-   bash command file never run at once.
+   line per function calling the Python. It is never a second
+   implementation, and 5.39 deletes every shim. `tests/support.py` is
+   shared: a sub-step edits only the functions it names, by exact match.
 
-   **The sequence.** "Owns" lists files disjoint from every sub-step that can
-   run beside this one. ∥ marks what can run concurrently.
+   **The sequence.** ∥ marks what could run concurrently.
 
    *Group 0, serial*
 
@@ -513,16 +427,6 @@ exist.
      still reads `inputs=`); `targets.py`'s `Remote.is_local` follows suit,
      since it was the marker's other reader of that line. README's spec half
      names `machines/` alone. Owed: none.
-   - Owns: `machines/`, `lib/wk/fleet.py`, `lib/wk/targets.py`'s
-     `Registry.registry_dir`/`known`/`kind`, `boot/machines.sh`'s
-     `machines_dir`/`machine_list`/`machine_load`, `lib/target.sh`'s
-     `target_registry_*`, `cmd/bridge`'s `bridge_conf`/`bridge_names`,
-     `tests/test_fleet_walk.py`, `tests/test_tailnet_name.py`.
-   - Moves the 11 confs out of `boot/machines`, `targets/hosts` and
-     `bridge/hosts`; their bash readers read `machines/` through `fleet.py`
-     (`python3 -m wk.fleet load <name>` prints the assignments).
-   - Adds `lint.one_machine_dir`: no `case` names a machine, and no path
-     names the three old directories.
    - Closes: `unit machine_cmd.shared_home`, meaning each machine resolves
      its own target by hostname with no ssh.
    - Decision: `KIND` plus the old keys verbatim, one file per CLI name.
@@ -531,22 +435,9 @@ exist.
    *Group 1, all ∥ after 5.1*
 
    5.2 **The bash libraries become shims.** *Landed* (`record.py`,
-     `job.py`, `resources.py` and `lock.py` hold the one copy; `lib/par.sh`
-     stays until its callers are ported; `shell.CallerShell` re-sources a
-     bash caller's dumped shell state, `record.py` and `job.py` calling it
-     there now; `machine.far_side_start` is the one far-side start line,
-     `Ssh.spawn` and `job.remote_line` both calling it).
-   - Owns: `lib/task.sh`, `lib/watchdog.sh`, `lib/detach.sh`,
-     `lib/resources.sh`, `lib/par.sh`, `lib/lockrun.sh`, `lib/wk/record.py`,
-     `lib/wk/job.py`, `lib/wk/resources.py`, `tests/test_stall_report.py`,
-     `tests/test_task*.py`.
-   - Ports `task_begin`…`device_hold` into `record.Task` holds;
-     `run_watched`, `job_*` and `_build_ps` into `job.py`;
-     `build_admit`/`build_jobs` into `Budget`; `detach_run`/`detach_remote`
-     into one `job.detach`; `par_*` into `concurrent.futures` in the callers'
-     ports. About 870 lines become shims.
-   - This clears PLAN's standing duplicates (`Budget`, `job.py` versus
-     `lib/watchdog.sh`).
+     `job.py`, `resources.py` and `lock.py` hold the one copy;
+     `machine.far_side_start` is the one far-side start line, `Ssh.spawn`
+     and `job.remote_line` both calling it).
    - Closes: `unit record.hold_names_its_taker`, a hold naming its taker on
      one path.
    - Decision: `device_hold` becomes a hold named `device:<machine>` on the
@@ -554,76 +445,37 @@ exist.
 
    5.3 **The dispatcher's last bash asks, and the tooling push.** *Landed*
      (`Target.state`/`wait_ready` through the machine, `lib/wk/tools.py` the one
-     push, `Registry.local_workspaces()`; `shell.gh_authenticated` asks `gh`
-     directly and the dispatcher's `needs=tart` branch went with `cmd/vm`;
-     `Target.wk_cmd` builds every far wk's command line, the podman-machine
-     hop's and a machine's alike, and `lib/target.sh`'s `vm_wk_cmd` is gone;
-     `delegate_run` execs `ssh` over the `Remote`'s own machine, so the
-     dispatcher's own `t_wk`/`t_wk_tty` ask is gone (`targets/remote.sh`'s stay, for `_peer_fetch`/`_peer_route`,
-     whose `_remote_wk_cmd` is a one-line shim onto `python3 -m wk.targets wk-cmd`, the new verb calling
-     `Target.wk_cmd` directly);
-     `dispatch.json_merge_list` is plain `json`; `lib/common.sh`'s
-     `gh_authenticated` and `json_merge_list` are gone, no caller left.
-     5.13 landed and deleted `boot/machines.sh`'s `machine_prepare`, so
-     `lib/tools.sh`'s bash `tools_push` shim had no caller left either --
-     gone, with the dead source-guard line in `boot/machines.sh`; there is no
-     bash `ws_busy_reason`: `image/buildroot.sh` does not exist (another
-     sub-step ports `image/buildroot-build.sh` into `lib/wk/sysimage/`
-     directly). Owed: none.
-   - Owns: `lib/wk/dispatch.py`, `lib/target.sh`'s `ws_*`/`wait_ready`/
-     `ws_exists_on`/`t_sync_tools`, `lib/tools.sh`, `lib/wk/targets.py`'s
-     `sync_tools`, `tests/test_owed_new.py`, `tests/test_state.py`.
-   - `ws_state`/`wait_ready` become `Target.state` plus one
-     `clock.wait_until`. The tooling push (a git bundle over the one
-     `Machine` copy) replaces `t_sync_tools` in remote, container and vm and
-     `shell.sync_tools`. About 450 lines.
+     push, `Registry.local_workspaces()`; `doctor.gh_authenticated` asks
+     `gh` directly; `Target.wk_cmd` builds every far wk's command line, the
+     podman-machine hop's and a machine's alike; `delegate_run` execs `ssh`
+     over the `Remote`'s own machine; `dispatch.json_merge_list` is plain
+     `json`). Owed: none.
    - Closes: `unit killpoints[new]` over the real drivers,
      `unit machine.dead_creation_refused_at_once`.
    - Decision: one push for every kind. The guest gets the same bundle; its
      `_push_tools` goes.
 
-   5.4 **The rest of `lib/store.sh`.** *Landed* (`lib/wk/git.py`, `lib/wk/pr.py`,
-     `store.Bases`; `lib/store.sh` is shims plus the credential functions).
-     `targets.py` (outside `Vm`), `build.py` and `doctor.py` call `wk.git`
-     directly, `shell.py`'s four forwards are gone, `cmd/ls` uses
-     `store.Bases`, and `test_new_fetch.py`/`test_hook_levels.py` import the
-     Python instead of shelling to the bash shims. `tests/test_pr_workflow.py`
+   5.4 **The store, the mirror and the PR fetch.** *Landed* (`lib/wk/git.py`,
+     `lib/wk/pr.py`, `store.Bases`). `targets.py`, `build.py` and `doctor.py`
+     call `wk.git` directly and `cmd/ls` uses `store.Bases`.
+     `tests/test_pr_workflow.py`
      holds `killpoints[pr]` (checkout onto a fork's branch, `pr_rebase`'s
      fetch and rebase, and `pr_open`'s push and `gh pr create`, each killed
      after any effect and rerun converging) and dry-run-equals-wet-run for
      the plain checkout; `cmd/pr` declares `dryrun` for that form only --
      `rebase` and `open` mutate through plain `Target.exec`, not `act_exec`,
-     so their own sub declarations turn it back off. Owed: the store path
-     helpers (`wk_mirror`, `wk_ws_dir`, `mirror_init`) are still bash;
-     `lib/store.sh`'s `wk_hook_levels` and `wk_wiring_check_script` lost
-     their last caller when the tests moved to the Python and are dead, but
-     `lib/store.sh` is outside this pass.
-   - Starts after step 4 lands.
-   - Owns: `lib/store.sh`, `lib/wk/store.py`, `lib/wk/sync.py`, `cmd/pr`,
-     `tests/test_sync.py`, `tests/test_pr_*.py`, `tests/test_owed_gc.py`
-     (base selection).
-   - Ports mirror init/refresh, the `base_*` family, `current_base`,
-     `newest_complete_base`, `unreferenced_bases`, the wiring and
-     check scripts, and the PR fetch (`pr_parse_spec`, `wk_pr_checkout`).
-     About 850 lines; split at the mirror/PR seam if it runs over.
+     so their own sub declarations turn it back off. Owed: none.
    - Closes: `unit new.refuses_without_mirror`, `unit
      cli.refspecs` (the owed module).
    - Decision: the wiring runs as git argv lists through `Target.exec`, not
      as script text sent into the target.
 
    5.5 **Image profiles as data, and each image's workspace.** *Landed*
-     (`lib/wk/images.py`). `image/pgo.sh`'s `image_pgo_machine` now reads a
-     profile's own `IMG_MACHINE` (two arms of one board, or the `-oc` profile,
-     share the fleet machine their stock profile names), and `rpi5-setup.sh`
-     no longer writes `arm_freq`/`v3d_freq`/`over_voltage_delta` -- the `-oc`
-     profile's `config.txt.append` is the one place that sets them. Owed:
-     none.
-   - Owns: `lib/image.sh`, `image/profiles.sh`, `image/configs/`,
-     `lib/wk/images.py`, `tests/test_lane_routing.py`,
-     `tests/test_multilib_image.py`.
-   - Ports the profile loader and derivations, `image_spec_*`, `image_lane_*`
-     and slot paths. About 470 lines; the bash becomes a shim for
-     `cmd/sysimage`, `cmd/pi` and `image/*.sh`.
+     (`lib/wk/images.py`). A PGO run reads a profile's own `IMG_MACHINE`
+     (two arms of one board, or the `-oc` profile, share the fleet machine
+     their stock profile names), and the `-oc` profile's `config.txt.append`
+     is the one place that sets `arm_freq`/`v3d_freq`/`over_voltage_delta`.
+     Owed: none.
    - Closes: `lint.profiles_are_data`, `unit sysimage.oc_profile_in_image`,
      and the "lane" half of `lint.vocabulary`.
    - Decision: "lane" is retired. It is the image's workspace
@@ -631,20 +483,8 @@ exist.
 
    5.6 **`wk machine` for build and peer machines; reach.** *Landed*
      (`cmd/machine`, `lib/wk/machine_cmd/`, `lib/wk/reach.py`; `wk remote` and
-     `wk find` are tombstones). Owed: none -- `boot/machines.sh`'s
-     `fleet_tailnet` is gone (5.11 deleted it) and `shell.py` carries no
-     `remote_*`/reach forward any more (`git grep` finds none): every caller
-     already imports `wk.reach`/`wk.machine_cmd` directly.
-   - Owns: `cmd/machine` (new), `cmd/remote`, `cmd/find` (both become
-     tombstones), `lib/reach.sh`, `lib/wk/reach.py`, `remote/deps.sh`
-     (becomes a data table), `targets/remote.sh`'s `remote_provision_*`,
-     the reach calls in `lib/wk/status.py`, `tests/test_remote*.py` (after
-     step 4 releases `test_remote.py`), `tests/test_rm_remote.py`.
-   - `setup`/`rm` build and peer machines; `ls`; `probe <name>`, and `probe`
-     with no name sweeps (nmap plus the neighbour table, from each vantage).
-     About 800 lines.
-   - Bridge: `remote/probe.sh` and `remote/provision.sh` still run on the
-     box.
+     `wk find` are tombstones; every caller imports `wk.reach`/
+     `wk.machine_cmd` directly). Owed: none.
    - Closes: `unit killpoints[machine setup]`, `killpoints[machine rm]`,
      `unit machine.probed_once_per_invocation`,
      `unit machine.unreachable_is_named`, `live machine_cmd.setup[<box>]`.
@@ -653,30 +493,14 @@ exist.
      guesses a kind.
 
    5.7 **The boot-driver core.** *Landed* (`lib/wk/boot/`, the on-board
-     shell in `boot/onboard/`, `boot/pi-mbr.sh` kept as a shim pending the
-     user). The transport is `driver.Channel` over `Machine`s (`Ssh` to NODE_SSH
+     shell in `boot/onboard/`). The transport is `driver.Channel` over `Machine`s (`Ssh` to NODE_SSH
      or the bench system's found address, the driving machine itself when
      standing on it), the card and boot helpers through the same machine under
      `sudo -n` only where the answering system is not root; `wk.boot.open_driver`
      gives each driver its own (the Macs' `mac.Channel`, the guest's over the vm
-     target), and `FakeBoard` is that Channel over two fake `Machine`s. Owed:
-     `boot/machines.sh`'s `m_ssh`/`i_ssh`/`r_ssh`/`image_addr` and their opts
-     still twin `Channel` for `cmd/pi`, `cmd/ab`, `bench/mac-ab.sh` and
-     `lib/sysimage-arms.sh` until those are ported (5.22, 5.29); `PiMbr.dev`
-     imports `wk.sysimage.disk` (boot importing sysimage) until 5.39 decides
-     pi-mbr. `part`/`disk_of`/`partno` have one implementation, in `driver.py`,
-     which `wk.sysimage.disk` imports. The `b_*` shims nothing sources any more,
-     and their `python3 -m wk.boot` verbs, are gone.
-   - Owns: `boot/machines.sh`, `boot/pi-sd.sh`, `boot/pi-tryboot.sh`,
-     `boot/rpi5-usb.sh`, `boot/pi-mbr.sh` (deleted), `lib/wk/boot/`
-     (`driver.py`, `pi.py`, `fake.py`), `boot/onboard/` (new),
-     `tests/test_pi_tryboot.py`, `tests/test_pi_mbr.py`,
-     `tests/test_boot_armed.py`, `tests/test_boot_select.py`.
-   - The `b_*` interface becomes a class: probe, boot_id, arm, disarm,
-     evidence, media, reprovision, diag. `FakeBoard` holds media, a firmware
-     one-shot and a clock. About 830 lines.
-   - Bridge: `boot/machines.sh` becomes a shim for `cmd/sysimage`, `cmd/pi`
-     and `bench/mac-*`.
+     target), and `FakeBoard` is that Channel over two fake `Machine`s.
+     `part`/`disk_of`/`partno` have one implementation, in `driver.py`, which
+     `wk.sysimage.disk` imports. Owed: none.
    - Closes: `unit machine.conformance[pi-sd|pi-tryboot|rpi5-usb]`,
      `unit boot.arming_exact`.
    - Decision: every driver's on-board shell (`b_self_disarm_sh`, tryboot
@@ -686,18 +510,11 @@ exist.
      decisions).
 
    5.8 **Completion in the dispatcher.** *Landed* (`lib/wk/completion.py` generates
-     the script from the declarations; `cmd/completion` is gone; the dispatcher's
-     hidden `--list-workspaces` callback is gone too, the generated script's
-     workspace slot instead calling `python3 -m wk.completion --list-workspaces`
-     directly, the checkout root baked in at generation time).
-   - Owns: `cmd/completion` (deleted), `lib/wk/dispatch.py`'s `completion`
-     builtin, `shell/bashrc`, `tests/test_completion.py`.
-   - Generates the script from `decl.all_commands`: the flags come from the
-     declarations, not from `-h` text. About 130 lines.
+     the script from the declarations; its workspace slot calls
+     `python3 -m wk.completion --list-workspaces`, the checkout root baked in
+     at generation time).
    - Closes: `unit dispatch.help_previews_and_lists_values` for the flag
      lists.
-   - Can run alongside 5.3 only if 5.3's edits to `dispatch.py` are in, so
-     start it after 5.3 or give 5.3 the whole file.
    - Decision: workspace names come from `Registry.local_workspaces()`, which
      never reaches a machine. The hidden `--list-workspaces`/`--flags` verbs
      are gone.
@@ -707,39 +524,17 @@ exist.
      `killpoints[quiesce]`, `killpoints[session]` and dry-run-equals-wet-run
      in `tests/test_quiesce.py` and `tests/test_session.py`; the live bodies
      read only, their mutating half owed. The merge waits for the user.
-   - Owns: `cmd/quiesce`, `cmd/session` (becomes a tombstone),
-     `lib/quiet.sh`, `bench/mac-quiet-desktop.sh` (becomes
-     `bench/quiet/macos.tsv`), `bench/mac-quiet-hosts.sh` (becomes a table),
-     `lib/wk/quiet.py`, `tests/test_quiesce.py`, `tests/test_mac_quiet*.py`,
-     `tests/test_quiet_siblings.py`.
-   - `on`/`off`/`status` go through `admin/wk-quiesce-priv`, which is
-     unchanged; the seat (kiosk cage, gdm, off, `--bmc`) comes from
-     `machines/<name>.conf` `SEAT_*` keys, never from a machine name. About
-     620 lines plus the table.
    - Closes: `unit killpoints[quiesce]`, `live quiesce.readback[<m>]`,
      `live quiesce.classified[<m>]`, `live session.modes[moose]`,
      `live doctor.bench_readiness[mbp]` (doctor reads `quiet.status`).
-   - Decision (yours): merge into one command, as recommended, or keep two.
-     The plan's merge table does not list them.
 
    5.10 **The bench record and report; `cmd/bench` goes Python.** *Landed*
-     (`lib/wk/bench/`, the unported arms verbatim in `lib/bench-arms.sh`).
-     `lib/wk/status.py` imports `wk.bench.record` directly and `wkdata.py`'s
-     `task_state`/`_subject_line` shims are gone (`git grep` finds no other
-     caller). Owed: the bash `plan_json` goes with 5.21/5.22; the report does
-     not yet label an instrumented leg's time (env.json's `profile` field
-     means two things).
-   - Owns: `cmd/bench` (Python entry point), `lib/bench.sh`,
-     `lib/wk/bench/record.py`, `lib/wk/bench/report.py` (from `wkdata.py`'s
-     report, precision and warmup code), `lib/bench-arms.sh` (the unported
-     arms, verbatim, reached through `shell.py`),
-     `tests/test_bench_report.py`, `tests/test_bench_task.py`,
-     `tests/test_ab_precision.py`, `tests/test_reporting_words.py`.
-   - Ports `ls` (fleet, delegated like status), `report` (text, html,
-     compare, precision) and `seed`. About 450 lines.
+     (`lib/wk/bench/`; `lib/wk/status.py` imports `wk.bench.record`
+     directly). Owed: the report does not yet label an instrumented leg's
+     time (env.json's `profile` field means two things).
    - Closes: `unit bench.one_record[container]`, `unit
      bench.report_and_cost` (the report half), `unit bench.seed_from_mirror`,
-     `live bench.compare`.
+     `live bench.compare` (`tests/test_bench_container_run.py`).
    - Decision: the task directory stays where it is (`task.json`,
      `runs/<run>/`). `record.py` takes the directory as a parameter, so step
      6's move into the workspace is one line.
@@ -748,45 +543,24 @@ exist.
 
    5.11 **`wk boot`.** *Landed* (`cmd/boot` over `lib/wk/boot/cli.py`; `--boot-order` and the pinned
      recovery.bin path in `lib/wk/boot/eeprom.py`; `wk status`'s fleet probe is `python3 -m wk.boot.cli
-     fleet-probe`; `wk pi boot-order`/`helper` and `wk boot --prepare` are tombstones; `boot/rpi-eeprom.sh`,
-     `fleet_tailnet` and `machine_quiet_siblings` are gone). `--boot-order` takes the order by name, and
+     fleet-probe`; `wk pi boot-order`/`helper` and `wk boot --prepare` are tombstones). `--boot-order` takes the order by name, and
      `--revert` is `local`. The recovery.bin staging goes through the driver Channel's `Machine`, and an arming
      record with no boot id reads as unknown, never by clocks. Owed: the live bodies of `boot[rpi3|rpi4|rpi5]` read
      `--status` only, since the live tier reboots nothing, so the arming halves of those rows, `boot[rpi4].kms`,
-     `boot[rpi4].armhf` and `boot.firstboot[<b>]` need a person at the boards; `cmd/boot` still asks
-     `cli.in_workspace` rather than `Registry.in_workspace`.
-   - Needs 5.7 and 5.6 (`status.py`). ∥ 5.12. Serial on `cmd/pi` with 5.13.
-   - Owns: `cmd/boot` (Python), `boot/rpi-eeprom.sh`, `cmd/pi`'s
-     `boot-order`/`helper` arms, `lib/wk/status.py`'s `FLEET_PROBE`,
-     `lib/wk/statusview.py`'s armed fields, `tests/test_boot_priv.py`,
-     `tests/test_pi.py` (the boot-order and helper classes).
-   - arm, `--status`, `--keep`, `--back`, `--disarm`, `--diag`,
-     `--boot-order`, through `admin/wk-boot-priv` (unchanged). About 750
-     lines.
+     `boot[rpi4].armhf` and `boot.firstboot[<b>]` need a person at the boards.
    - Closes: `unit killpoints[boot]`, `unit status.armed_transition`,
      `unit status.web_mirrors_text`; marks live `boot[rpi3|rpi4|rpi5]`,
      `boot[rpi4].kms`, `boot[rpi4].armhf`, `boot.firstboot[<b>]`.
    - Decision: `--prepare` leaves `boot`. Putting the tree and helpers on a
      machine is `machine setup mbp`.
 
-   5.12 **Mac boot drivers.** *Landed* (`lib/wk/boot/mac.py`; `lib/wkmac.py` is a symlink to
-     `lib/wk/mac.py`, which `bench/mac-ab.sh` pipes to the Mac's `python3 -`).
-     A failed `--disarm` now refuses instead of clearing the record. The bench
-     record no longer reads `B_MEASURES`/`check_measurement` from bash: no
-     bash ever did (`git grep B_MEASURES` finds only the driver's `facts()`
-     and its tests); `lib/wk/bench/mac.py`'s `MacVolumeSystem` already asks
-     `driver_class(...).measures` directly, in Python, and writes it into
-     `env.json` (`bool_facts()`'s `measures=`). `targets/vm.sh` is a 65-line
-     read contract with no `1280x800` of its own any more; the duplicate was
-     `lib/wk/guest.py`'s `DISPLAY` against a `"1280x800"` literal in
-     `lib/wk/targets.py`'s `Vm.create()`; `Vm` and `lib/wk/boot/mac.py` both
-     take `guest.DISPLAY` now. Owed: the bash transport overrides go with 5.29.
-   - Needs 5.7. ∥ 5.11.
-   - Owns: `boot/mac-volume.sh`, `boot/mac-guest.sh`,
-     `lib/wk/boot/mac.py`, `lib/wkmac.py` (moves to `lib/wk/mac.py`),
-     `tests/test_mac_display.py`, `tests/test_macos_machine_*.py`.
-   - About 480 lines. `b_bench_put`/`b_manage_*` become the driver's copy
-     and exec through `Ssh`.
+   5.12 **Mac boot drivers.** *Landed* (`lib/wk/boot/mac.py`, over
+     `lib/wk/mac.py`, which runs on the Mac as `python3 -`). A failed
+     `--disarm` refuses instead of clearing the record.
+     `lib/wk/bench/mac.py`'s `MacVolumeSystem` asks
+     `driver_class(...).measures` and writes it into `env.json`
+     (`bool_facts()`'s `measures=`). `Vm` and `lib/wk/boot/mac.py` both take
+     `guest.DISPLAY`. Owed: none.
    - Closes: `unit machine.conformance[mac-volume|mac-guest]`; marks live
      `boot.arm[mbp]`.
    - Decision: keep `mac-guest`, since the rehearsal row needs it. It
@@ -795,33 +569,23 @@ exist.
 
    5.13 **`machine setup` and `rm` for a board; `machine setup mbp`.** *Landed*
      (`lib/wk/machine_cmd/`'s `setup_board`/`rm_board`/`setup_mac`, over the
-     generic `Machines.answers()`/`board_machine()`; `cmd/pi`'s `setup` arm and
-     `boot/machines.sh`'s `machine_prepare` are gone; `wk boot <mac> --prepare`
-     is a tombstone naming `wk machine setup <mac>`, and `boot/mac-volume.sh`'s
-     `b_manage_prepare` calls it). `setup <board>` checks the tailnet name
+     generic `Machines.answers()`/`board_machine()`; `wk boot <mac> --prepare`
+     is a tombstone naming `wk machine setup <mac>`). `setup <board>` checks the tailnet name
      answers and installs `admin/wk-card-priv`/`boot/check-boot-files.py` at
      `/usr/local/libexec/`; `rm <board>` removes them and the conf, asking once
-     each. `setup <mac>` ports `machine_prepare` verbatim: pushes this tree
+     each. `setup <mac>` pushes this tree
      through the one `tools.push` (lib/wk/tools.py), then runs
      `./setup --stage quiesce` from a terminal, refusing (not merely warning)
      when there is none. Every one of these prints what it would do under
      `--dry-run` rather than refusing, even when the unit tier's ssh shim
      reports the machine unreachable -- real unreachability still refuses
      outside `--dry-run`.
-   - Needs 5.6 and 5.7; after 5.11 on `cmd/pi`.
-   - Owns: `cmd/pi`'s `setup` arm (deleted), `boot/machines.sh`'s
-     `machine_prepare` (deleted), `lib/wk/machine_cmd/`'s board/mac branches
-     and kind dispatch, `cmd/boot`'s `--prepare` handling, `tests/test_pi.py`
-     (setup), `tests/test_machine_prepare.py`, `tests/test_machine_cmd.py`
-     (`TestBoardSetup`, `TestBoardRm`, `TestMacSetup`).
-   - About 230 lines (cmd/pi shrank by ~400; machine_cmd.py grew by ~130).
    - Closes: `unit killpoints[machine setup]` for a board
      (`TestBoardSetup.test_a_setup_killed_after_any_effect_and_rerun_converges`).
      Owed: `lint.no_addresses` -- `NODE_MAC` still lives in the board confs and
-     in `lib/wk/reach.py`/`boot/machines.sh`'s `image_addr` (both belong to
-     other sub-steps' file ownership; closing it needs one pass across those
-     plus every bench-kind conf, since `TestConfFieldSets` holds one field set
-     per kind); marks live `pi.setup[<board>]` (needs a board in hand).
+     in `lib/wk/reach.py` (closing it needs one pass across those plus every
+     bench-kind conf, since `TestConfFieldSets` holds one field set per
+     kind); marks live `pi.setup[<board>]` (needs a board in hand).
    - Decision: `setup <board>` checks that the tailnet name answers, installs
      this checkout's card helper and writes `KIND=board`. A board never gets
      tailscale any other way. `setup mbp` never fakes reachability: an
@@ -829,25 +593,16 @@ exist.
      kind `wk machine setup` takes.
 
    5.14 **sysimage read side; `cmd/sysimage` goes Python.** *Landed*
-     (`lib/wk/sysimage/`; the unported arms in `lib/sysimage-arms.sh`; `rm`
-     stays a tombstone). Bench's and sysimage's `Listing` share one fleet walk
-     (`lib/wk/fleetwalk.py`; each `Listing` keeps its own `store_rows` and
-     row-label rule); `common.sh`'s `human_bytes` is gone, no bash caller left
-     (`ls.human_bytes` is the one copy); `cmd/sysimage`'s `# wk:` line takes
-     `outside`, so the dispatcher refuses `wk sysimage` inside any workspace
-     and the hand-rolled `in_workspace()` check in its `main()` is gone.
+     (`lib/wk/sysimage/`; `rm` is a tombstone). Bench's and sysimage's
+     `Listing` share one fleet walk (`lib/wk/fleetwalk.py`; each `Listing`
+     keeps its own `store_rows` and row-label rule); `ls.human_bytes` is the
+     one byte formatter; `cmd/sysimage`'s `# wk:` line takes `outside`, so
+     the dispatcher refuses `wk sysimage` inside any workspace.
      `ls` also lists the mac-volume and guest builders (5.32, 5.34), through
      `ls.host_profiles`/`ls.builder_outputs` -- the one `builder_outputs`
      `cli.Sysimage` delegates to -- shown only once found, since neither has a
      workspace to anchor a placeholder row at. Owed: `live sysimage.build[vm]`
      has no body.
-   - Needs 5.5. Owns `cmd/sysimage` for 5.14–5.20, in turn.
-   - Owns: `cmd/sysimage`, `lib/wk/sysimage/{cli,ls}.py`, `lib/wkslot.py`
-     (moves to `lib/wk/slot.py`), `lib/sysimage-arms.sh` (the unported
-     arms), `tests/test_sysimage_routing.py`,
-     `tests/test_image_store_gone.py`, `tests/test_slots.py`.
-   - `ls` (delegated across the fleet), `holds`, `path`, `rm`. About 350
-     lines.
    - Closes: `unit sysimage.builders_conform` (the read half); marks live
      `sysimage.build[vm]` (reaching the host).
    - Decision: an image is found as `Builder.outputs(ws)` per builder kind,
@@ -856,13 +611,7 @@ exist.
    5.15 **sysimage disks.** *Landed* (`lib/wk/sysimage/disk.py`; sysimage imports boot,
      never the reverse). Only `lsblk -J` is parsed: `admin/wk-card-priv` is
      Linux-only, so no writer is a Mac and a `diskutil` parse would have no
-     caller. Owed: `lib/wk/boot/pi.py` reaches the model through the bash shim
-     until 5.39.
-   - Needs 5.14.
-   - Owns: `boot/disk.sh`'s model half (`disk_parse` through
-     `disk_refuse_unless_safe`, `disk_resolve_own`, `disk_for_machine`),
-     `lib/wk/sysimage/disk.py`, `tests/test_disk_logic.py`.
-   - About 350 lines.
+     caller. Owed: none.
    - Closes: `unit sysimage.write_refusals`.
    - Decision: `lsblk -J`/`diskutil -plist` run on the writer through
      `Machine`, and the parse runs here in Python.
@@ -874,17 +623,7 @@ exist.
      a stale node's retirement go through `wk.tailnet.Fleet` in process (so
      does `mactailnet.py`'s key). Owed: `lint.one_wifi_reader`
      (`lib/wk/sysimage/pmos_build.py` and `lib/wk/sysimage/macvolume.py` read
-     WiFi themselves); the presence checks `shell.tailnet_key_present`/
-     `tailnet_api_present` are still bash, until `wk.tailnet` answers them.
-   - Needs 5.15 and 5.7 (`boot/onboard`).
-   - Owns: the rest of `boot/disk.sh`, `cmd_write*`, `stage_units`,
-     `_tailnet_*_preflight`, `lib/wk/sysimage/write.py`,
-     `boot/check-boot-files.py`, `tests/test_card_edits.py`,
-     `tests/test_owed_image_write.py`, `tests/test_wifi_seed.py`,
-     `tests/test_board_config_append.py`.
-   - Stream, verify, card edits through `admin/wk-card-priv` (unchanged),
-     seeding, first-boot units. About 800 lines. `flash` becomes a
-     tombstone.
+     WiFi themselves).
    - Closes: `unit sysimage.write_identity`, `unit killpoints[sysimage
      write]`, `lint.one_wifi_reader`; marks live `sysimage.write[<b>]`,
      `sysimage.card_verbs[rpi5]`.
@@ -900,33 +639,19 @@ exist.
      (`image/buildroot/overlay/etc/init.d/`); the memory guard stays `build/guard.sh`, reached as one
      `bash -c` line. `wk build`'s far argv goes through `task.in_workspace`, closing `lint.build_wall`.
      Nothing of the in-workspace half has run in a workspace yet. Owed: a live image and slot build
-     (hours, past the runner's per-test budget); `unit profiles.a_pinned_kernel_builds_none` stays owed --
-     the pinned-kernel defconfig still builds a kernel, and `post_image` reads the DTS name from it.
-   - Needs 5.14 and 5.2.
-   - Owns: `image/buildroot.sh`, `image/buildroot-build.sh`,
-     `image/buildroot-webkit.sh`, `image/fetch.sh`, `image/buildroot/*.sh`,
-     `lib/wk/sysimage/{task,buildroot}.py`.
-   - `build`/`webkit` become a task through `lib/wk/build.py`'s detach and
-     `job.py`. About 700 lines.
+     (hours, past the runner's per-test budget).
    - Closes: `unit sysimage.task_states`, `unit killpoints[sysimage build]`,
      `lint.build_wall`, `unit record.progress_shape[sysimage]`.
-   - Decision: one detach and one watchdog, `build.py`'s. Neither `yocto.sh`'s
-     nor `pmos.sh`'s survives.
+   - Decision: one detach and one watchdog, `build.py`'s.
 
    5.18 **yocto, host half.** *Landed* (`lib/wk/sysimage/yocto.py`, a `task.Stage` with
      no deadline on its record; `job.watch_pid` gives up on silence only when told to, and on a
-     wedge of `WEDGE_BEATS` heartbeats naming one bitbake task). The cross configs moved here out
-     of `build/configs.sh`; a yocto stage now refuses a held workspace lock instead of waiting an
-     hour. `Yocto` and `Buildroot` are `task.ContainerBuilder`s: the target refusal, the
+     wedge of `WEDGE_BEATS` heartbeats naming one bitbake task). The cross configs live here; a
+     yocto stage refuses a held workspace lock instead of waiting an hour. `Yocto` and `Buildroot` are `task.ContainerBuilder`s: the target refusal, the
      digest-tagged host image and the workspace it makes are one implementation, and each subclass
-     is its data and its stages. Owed: `image/yocto.sh` is two shims for `image/pgo.sh` until 5.26; `live
-     sysimage.sstate_reuse` has no body -- a second image build is minutes to hours, past the
+     is its data and its stages. Owed: `live sysimage.sstate_reuse` has no body -- a second image build is minutes to hours, past the
      runner's per-test budget; `WEDGE_BEATS` (4 h) is a guess no wedged run has been measured
      against; `WK_YOCTO_BASE` is not in `wk sysimage -h`.
-   - Needs 5.17.
-   - Owns: `image/yocto.sh`, `lib/wk/sysimage/yocto.py`,
-     `tests/test_yocto_stage.py`.
-   - Stage index, cooker stop and wedge detection. About 570 lines.
    - Closes: marks live `sysimage.sstate_reuse`.
    - Decision: "silent" and "wedged" are `job.stall_report` verdicts over the
      same heartbeat, not a second yocto rule.
@@ -936,10 +661,6 @@ exist.
      line). Nothing of it has run in a workspace yet. Owed: `live sysimage.pseudo_reproducer` has
      no body -- it needs a pseudo built at scarthgap's pin (e11ae91), which nothing builds, so
      whether to build one for the test or drop the bump at the next poky move is the user's call.
-   - Needs 5.18.
-   - Owns: `image/yocto-build.sh`, `image/yocto/port-target.py`,
-     `lib/wk/sysimage/yocto_target.py`.
-   - Runs in the workspace as `python3 /opt/wk-tools/...`. About 570 lines.
    - Closes: marks live `sysimage.pseudo_reproducer`.
    - Decision: port it; the container has python3. Bitbake is reached as
      `bash -c '. oe-init-build-env && bitbake …'`, one line.
@@ -956,18 +677,12 @@ exist.
      reader. The image comes off through `Machine.copy_out`, is decompressed
      by `xz -d` here and hashed in blocks. `wk gc`'s pmos rows are built from
      `cache_probe`'s `{work, out}` numbers, and `purge_work` asks nothing: gc's
-     one question covers it. The avahi-daemon enablement is gone (there is no
-     mDNS); `image/pmos.sh` is gone. Owed: no live check (needs an aarch64
+     one question covers it; there is no mDNS. Owed: no live check (needs an aarch64
      Linux build host and a phone); `test_owed_pmos.py` covers the reporting,
      refusals, host resolution, the copy and the rubble rows against the Fake,
      and `pmos_build.py`'s pure parts, not `Build.run` or the `iw scan` band
      check -- pmbootstrap, loop devices and sudo have no fake to run against;
      `lint.one_wifi_reader` stays owed for `pmos_build.py`'s netplan read.
-   - Needs 5.17. ∥ 5.18.
-   - Owns: `lib/wk/sysimage/pmos.py`, `lib/wk/sysimage/pmos_build.py`,
-     `tests/test_owed_pmos.py`.
-   - About 750 lines; the remote half goes Python too, since the aarch64
-     build host has python3.
    - Closes: the `test_owed_pmos` rows.
    - Decision: pmos stays. It exists only for the bridge phones, which
      5.37 needs.
@@ -976,16 +691,7 @@ exist.
 
    5.21 **The `System` interface and the workspace run.** *Landed*
      (`lib/wk/bench/systems.py`: container and guest; `pipeline.py`: `wk bench
-     run`). Owed: the bash `plan_json`/`seed_payload` and `bench_task_new`
-     stay for `cmd/pi`, `cmd/ab` and `build/mac-pgo.sh` until 5.22.
-   - Needs 5.10 and 5.2.
-   - Owns: `lib/wk/bench/{pipeline,systems}.py`, `cmd/bench`'s run arm
-     (`cmd_run`, `preflight`, `run_jsc`, cores and aslr), `lib/profiler.sh`,
-     `tests/test_bench_cores.py`, `tests/test_bench_container_run.py`,
-     `tests/test_bench_channel_ssh.py`.
-   - `System`: boot, deploy, run, collect; the container and guest systems.
-     `bench run <ws> <plan>`; bare `bench <ws> <plan>` refuses, naming
-     `run`. About 650 lines.
+     run`). Owed: none.
    - Closes: `unit bench.pipeline_conformance[container|guest]`,
      `unit bench.pins_cores`, `unit killpoints[bench]`,
      `unit record.progress_shape[bench]`,
@@ -996,20 +702,10 @@ exist.
 
    5.22 **Board deploy.** *Landed* (`lib/wk/bench/board.py`'s `BoardSystem`, reached as `wk bench
      deploy <ws> <board> [--slot <name>]` through `lib/wk/bench/cli.py`'s `Bench.deploy` and `cmd/bench`'s
-     `deploy` sub; `cmd/pi`'s `deploy` verb and `pi_deploy_slot` are gone, `deploy` a tombstone naming `wk
-     bench deploy`). `<ws>` is the lane itself now, not a `<profile>[@<machine>]` spec: the dispatcher's
-     ordinary `where=workspace` routing (the same `run` already uses) finds the machine holding it and
-     forwards there, so cmd/pi's own `_pi_spec`/`_pi_lane`/`--wsname`/`--wstarget` machinery is gone with
-     it. The bash `plan_json`/`seed_payload`/`bench_task_new` (lib/bench.sh) stay for `cmd/pi`'s `bench`
-     arm, `cmd/ab` and `build/mac-pgo.sh`, none of which this touches. Owed: `machine_armed_barrier`
-     (the check that a deploy is not landing in the system a `wk boot` arming is about to leave) is not
-     ported -- `lib/wk/boot/driver.py`'s `Channel`/`driver_class` reach it, as `lib/wk/sysimage/write.py`
-     and `lib/wk/bench/mac.py` already do, but wiring and testing it is real design work this step's
-     Decision does not cover; `tests/test_boot_armed.py`'s `test_wk_bench_deploy_calls_it` records this
-     as `owed`. Marking live `bench.routed_deploy` needs a board in hand, so it stays unwritten.
-   - Needs 5.21, 5.14 and 5.13 (`cmd/pi`).
-   - Owns: `cmd/pi`'s `deploy`, `pi_deploy_slot`, `lib/wk/bench/board.py`.
-   - About 250 lines.
+     `deploy` sub; `wk pi deploy` is a tombstone naming `wk bench deploy`). `<ws>` is the image's
+     workspace, not a `<profile>[@<machine>]` spec: the dispatcher's ordinary `where=workspace`
+     routing finds the machine holding it and forwards there. Owed: `live bench.routed_deploy`
+     needs a board in hand, so it stays unwritten.
    - Closes: marks live `bench.routed_deploy` (needs a board in hand).
    - Decision: deploy is `Machine.copy_tree_in`, then the slot's sha
      manifest read back. There is no rsync path.
@@ -1017,27 +713,16 @@ exist.
    5.23 **Board run.** *Landed* (`lib/wk/bench/board.py`: `BoardSystem`'s `boot`/`checks`/`deploy`/`run`/`evidence`
      and `BoardRun`, reached as `wk bench run <ws> <plan> --system <board> [--slot]` through `systems.for_workspace`
      and `pipeline._run_class`; the driver moved to `lib/wk/bench/board_driver.py`; the board's shell is
-     `boot/onboard/bench-*.sh`; `Machine.forward` on `Ssh` and `Fake`; `pipeline.Run` gained `records()`/`put()` so a
-     board run's record and device claim are this machine's). The armed barrier is `BoardSystem.barrier`, asked by
-     deploy and run through the boot driver; a deploy now lands on the bench system (the boot driver's `i_ssh`
-     machine, as `wk pi deploy` did, not NODE_SSH) and claims the board as `wk pi deploy` did. In a workspace, deploy
-     and a `--system` run are the broker's `stage`/`run` verbs, now `wk bench deploy`/`wk bench run` on the host
-     (`boot/cli.py`'s `broker_request`, shared with `wk boot`). `wk pi bench` for one slot is a tombstone; its
-     `--ab`, `--ab-systems` and `--pgo` arms run each leg as `python3 -m wk.bench.board leg`, and
-     `bench_runner_tree` is a one-line shim over `board.runner_tree`. `wkslot env/expect/verified/get`, `wkdata
-     cores-wrap/bench-class` and `bench_configuration_args` lost their last caller and are gone. Owed: `live
+     `boot/onboard/bench-*.sh`; `Machine.forward` on `Ssh` and `Fake`; `pipeline.Run`'s `records()`/`put()` make a
+     board run's record and device claim this machine's). The armed barrier is `BoardSystem.barrier`, asked by
+     deploy and run through the boot driver; a deploy lands on the bench system (the boot driver's `i_ssh`
+     machine, not NODE_SSH) and claims the board. In a workspace, deploy and a `--system` run are the broker's
+     `stage`/`run` verbs, `wk bench deploy`/`wk bench run` on the host (`boot/cli.py`'s `broker_request`, shared
+     with `wk boot`). `wk pi bench` is a tombstone. Owed: `live
      bench.leg_completes[<b>]` needs a person at a board (a leg pins the clock, kills browsers and starts a
      compositor, which the live tier may not); `live bench.evidence[<b>]` has its read-only body
-     (`TestARealBoardAnswersWhatALegRecords`, not yet run against a board); an A/B leg now re-prepares the board
-     (probe, clock, session) per leg, where the bash prepared once -- 5.24 decides; the A/B's own sysid probe and
-     subtest exclusions stay bash until 5.24; whether the podman VM a Mac forwards a container lane into can reach a
+     (`TestARealBoardAnswersWhatALegRecords`, not yet run against a board); whether the podman VM a Mac forwards a container lane into can reach a
      board over the tailnet is the ACL question, unchanged and yours.
-   - Needs 5.22 and 5.11.
-   - Owns: `cmd/pi`'s `pi_bench_once`, session and weston, tunnel,
-     `pi_bench_record`, `pi_leg_prepare`, `bench/wk_board_driver.py`,
-     `lib/wk/machine.py`'s new `forward`, `tests/test_pi_channel.py`,
-     `tests/test_pi_agent.py`, `tests/test_bench_warmup.py`.
-   - About 700 lines.
    - Closes: `unit bench.pipeline_conformance[board]`,
      `unit bench.failed_leg_keeps_evidence`,
      `unit record.progress_shape[board run]`; marks live
@@ -1046,7 +731,7 @@ exist.
      `Machine.forward(port)`, a context manager on `Ssh` and `Fake`. The
      ACL question stays yours; this is the one place it changes.
 
-   5.24 **Two-arm A/B on one board; `cmd/pi` is gone.** *Landed* (`lib/wk/bench/board_ab.py`, reached as `wk bench run
+   5.24 **Two-arm A/B on one board.** *Landed* (`lib/wk/bench/board_ab.py`, reached as `wk bench run
      <ws> <plan> --system <board> --ab A,B | --ab-systems A,B [--slot] [--rounds] [--task] [--timeout] [--exclude-subtests]
      [--no-warmup-profile] [--jit-tiers]` through `pipeline.run`; each leg is a `BoardRun` named `<ws>-leg` under the A/B's
      own record, which holds the board and is what `--kill` stops). The system boot per leg is `AB.boot`, over `wk boot`'s
@@ -1055,47 +740,30 @@ exist.
      the board and brings the session up once per (system id, boot id) and re-reads the probe, facts, display and slot
      every leg; `BoardRun.pin` resolves the runner tree and payload once per A/B; a slot A/B's task records
      `devices=<board>=<profile>`. The width rule and `bench/subtest-exclusions.conf` are read in Python. `--pgo` is `wk
-     bench run ... --slot <s>-instr --collect` (`BoardRun.collection`, reading build/pgo.sh's facts). `wk pi` is a
-     dispatcher tombstone naming each verb's replacement; `cmd/pi`, `bench_runner_tree`, `board.main` (the `leg`/`runner`
-     CLI), `wkdata`'s `subtests`/`warmup-check`/`cores-valid`, `image_lane_arg`/`image_lane_here`/`image_spec_target` and
-     `images.refuse_elsewhere` lost their last caller and are gone; so did the `pi-bench-<board>` lock, the device claim
-     being the one lock. Owed: `image/pgo.sh`'s collect step (5.26) and `cmd/ab` (5.25) still name `wk pi` -- each already
-     reached a tombstone at its `wk pi deploy` since 5.22; `killpoints[bench]` over a whole A/B is not written (a single
+     bench run ... --slot <s>-instr --collect` (`BoardRun.collection`, reading `lib/wk/pgo.py`'s facts). `wk pi` is a
+     dispatcher tombstone naming each verb's replacement, and the device claim is the one lock. Owed:
+     `killpoints[bench]` over a whole A/B is not written (a single
      leg's is); `live boot[rpi3]`'s `--ab-systems` run needs a person at the board; an A/B or a collection typed in a
      workspace is refused, since the broker has no verb for either.
-   - Needs 5.23.
-   - Owns: `pi_bench_ab`, `pi_bench_ab_systems`, `pi_warmup_round`,
-     `pi_system_boot`, `bench/subtest-exclusions.conf` (read by Python),
-     `tests/test_pi_ab_systems.py`.
-   - About 400 lines; `cmd/pi` becomes a tombstone.
    - Closes: `unit boot.two_system_lane_on_fake` (renamed
      `boot.two_systems_on_fake`).
    - Decision: `--ab` slots and `--ab-systems` are one arm type, (system,
      slot); a slot-only A/B holds the system fixed.
 
-   5.25 **`bench ab` across the fleet; `cmd/ab` is gone.** *Landed* (`lib/wk/bench/ab.py`, reached as `wk bench ab
+   5.25 **`bench ab` across the fleet.** *Landed* (`lib/wk/bench/ab.py`, reached as `wk bench ab
      <pr-spec|branch|sha> --devices <a,b> ...`, `wk bench ab --systems A,B --devices <board> [--slot S]` and `wk bench ab
      <task> --kill` through `lib/wk/bench/cli.py`'s `Bench.ab`; `cmd/bench`'s `flag --kill takes=0` line, which refused
-     every name=none subverb's `--kill`, is now the `sub ab` line; `wk ab` is a dispatcher tombstone). The scheduler is
+     every name=none subverb's `--kill`, is the `sub ab` line; `wk ab` is a dispatcher tombstone). The scheduler is
      `lib/wk/sched.py`, run in-process on an injected executor: each build, deploy and collection step is the `wk` command
      a person types, run through `Machine.act_run` with its output streamed to one log per resource, each board's rounds are
      `board_ab.run` in this process recording into the A/B's task, and the report is `report.task_report`. The kill is
      `job.kill` over the record's process tree. A plan states its cost before it runs: each board's legs times the median
      measured leg of that plan there (`leg_seconds`, scaled by `--count`). The report's pairing is
      `lib/wk/bench/record.py`'s `paired`, which drops a round an arm did not finish or whose arms ran on two payload pins
-     (runner commit, benchmark copy). `lib/sched.py`, `lib/common.sh`'s `match_any`, `lib/store.sh`'s `pr_*`/`*_refname`/
-     `mirror_fetch_*` shims and `wk.pr`'s CLI, `bench_task_attach`, `task_stamp` (and `wk.record stamp`),
-     `image_config_file` (and `wk.images conf-path`) lost their last caller and are gone. Owed: `lib/sched.sh` is a shim
-     over `python3 -m wk.sched` for `image/pgo.sh`, whose own cycle (`image_pgo_steps`) still names `wk pi deploy` and `wk
-     pi bench --pgo` -- 5.26 moves it onto `ab.py`'s `pgo_steps`; the in-process board A/B steps log to this process's
+     (runner commit, benchmark copy). Owed: the in-process board A/B steps log to this process's
      stderr rather than a per-board file, so two boards' rounds interleave there; `--systems` takes one board, since a
      system id names one board's image; an A/B across real boards (`live bench.leg_completes[<b>]`) needs a person at
      them.
-   - Needs 5.24 and 5.14.
-   - Owns: `cmd/ab`, `lib/sched.sh`, `lib/sched.py` (moves to
-     `lib/wk/sched.py`), `lib/wk/bench/ab.py`, `tests/test_ab_*.py`,
-     `tests/test_sched.py`.
-   - About 630 lines.
    - Closes: `unit ab.plan_and_pairing`, `unit killpoints[bench ab]`,
      `unit bench.report_and_cost` (the cost half).
    - Decision: the scheduler runs in-process, and each step is a callable
@@ -1107,22 +775,11 @@ exist.
      profile: `--config` is one phase as one yocto stage, no `--config` the whole graph under one `pgo` record in this
      process, `--stop` its kill, the dry run the rendered graph; and the mixer and gate, `python3 -m wk.pgo mix|check`).
      A collection is `wk bench run <lane> <plan> --system <board> --slot <s>-instr --collect`. `sched.wk_step`/`wk_yes`
-     are the one `wk`-command step and done question both graphs build from. `image/pgo.sh`, `image/yocto.sh`,
-     `lib/sched.sh`, `wk.sched`'s records CLI, `yocto.main`/`pgo_facts`, `sysimage-arms.sh`'s `yocto-pgo` arm, and the
-     `image_pgo_*`/`image_lane_*`/`image_spec_*`/`image_build_resource`/`image_holds_predicate`/`image_check_slot_name`/
-     `image_pgo_wanted` shims with their `wk.images` verbs lost their last caller and are gone. Owed: `build/pgo.sh` is a
-     one-line-per-value shim over `python3 -m wk.pgo fact` and `lib/wkpgo.py` one over `wk.pgo.main`, both for
-     `build/mac-pgo.sh` until 5.29 ports it; `tests/test_mac_pgo.py`'s `test_the_two_lanes_take_the_list_from_the_one_place`
-     still reads `image/pgo.sh` (5.29's file); `unit pgo.no_local_patch` stays owed, since upstream's OSXMiniDriver still
+     are the one `wk`-command step and done question both graphs build from. Owed: `unit pgo.no_local_patch` stays owed, since upstream's OSXMiniDriver still
      names no profile directories and webkitpy's `locate_binary_xcrun` still runs `/usr/bin/xcrun` off macOS, so
      `build/pgo-run-benchmark.py` and the blunting stay; `live bench.pgo_collection[<b>]` is marked on its read-only half
      (the newest collection passes the gate with every leg's run), while recording each plan's cost and what the
      collecting browser rendered and JITted with is not written, and taking a collection needs a person at the board.
-   - Needs 5.25 and 5.18.
-   - Owns: `image/pgo.sh`, `build/pgo.sh`, `lib/wkpgo.py` (moves to
-     `lib/wk/pgo.py`), `tests/test_board_pgo.py`,
-     `tests/test_pgo_harness.py`.
-   - About 250 lines.
    - Closes: `unit pgo.no_local_patch`; marks live
      `bench.pgo_collection[<b>]`.
    - Decision: a collection is `bench run --collect` against an instrumented
@@ -1132,21 +789,14 @@ exist.
    5.27 **Mac stage and staged run.** *Landed* (`lib/wk/bench/mac.py`: `Stage`,
      `MacVolumeSystem`, `StagedRun`, `Gates` as `wk bench staged --gates`; a
      guest's run records as `rehearsal`). A staged dry run whose checks fail
-     now exits 1. Owed: `bench/mac-lane.sh`, `bench/mac-ab.sh` and
-     `bench/mac-bench-autorun.sh` call the Python (5.28-5.31); `PUT_SKIP`
-     repeats `BENCH_PUT_SKIP` until `mac-ab.sh` is ported.
-   - Needs 5.21 and 5.12. ∥ 5.22–5.26.
-   - Owns: `cmd/bench`'s `stage`/`staged` arms, `bench/mac-browser-check.py`,
-     `bench/mac-window-probe.sh`, `bench/mac-raiser.sh`,
-     `lib/wk/bench/mac.py`, `tests/test_mac_gates.py`.
-   - About 700 lines.
+     exits 1. Owed: none.
    - Closes: `unit bench.pipeline_conformance[mac-volume]`,
      `unit bench.one_record[mac-volume]`,
      `unit bench.preflight_asks_every_gate`, `unit dispatch.where[bench]`.
    - Decision: `staged` is `bench run` on the bench install, which resolves
      itself as the system in bench mode.
 
-   5.28 **`bench mac`.** *Landed* (`bench/mac-lane.sh` deleted; `wk bench run <ws> <plan> --system
+   5.28 **`bench mac`.** *Landed* (`wk bench run <ws> <plan> --system
      mbp` is the pipeline run the decision below asked for, in `lib/wk/bench/mac.py`'s
      `MacHostSystem`/`HostRun`, registered in `systems.py`'s `_named_systems()` under the machine's
      `NODE_DRIVER` and reached through `pipeline.run()`'s new `system_name` argument and
@@ -1163,22 +813,14 @@ exist.
      `unit record.progress_shape[bench]`, `unit dispatch.dry_run_is_the_recorder[bench]` and
      `unit killpoints[bench]` (bounded to the effects before the machine reboots -- `Boot.arm()`
      refuses to re-arm an already-armed machine by design, so a kill after that point is a person's
-     call, not a rerun's, on real hardware or fake). `tests/test_wk_overrides_misc.py`'s
-     `TestMacLaneOverrides` (bash-lifted coverage of the deleted script) is gone with it, and
-     `tests/test_mac_pgo.py`'s `test_both_mac_lanes_default_to_it` now checks the one lane left
-     (`bench/mac-ab.sh`). Owed: `live bench[mbp]` and `live bench.first_run_after_stage[mbp]` close
+     call, not a rerun's, on real hardware or fake). Owed: `live bench[mbp]` and `live bench.first_run_after_stage[mbp]` close
      only their read-only half (`tests/test_owed_bench.py`'s `TestBenchReachesTheRealMbp`, gated
      `requires_machine("tolken")`) -- staging a real build, rebooting mbp into bench mode, running a
      plan and comparing against a container run needs a decision about which workspace and plan to
      spend that machine's time on, left to whoever runs the live tier next; `MacHostSystem.after()`
      cannot bless the machine back to host mode from its own benchmark install (only the host
      install carries the boot helper -- measured against 5.12's own driver, not theorised), so a
-     real run stops there and names the two-click remedy, same as arming always has. 5.27's own
-     "Owed" line still names `bench/mac-lane.sh` as a caller for 5.29-5.31 to update; it is gone,
-     and those steps call `wk bench run --system mbp` or the granular commands directly instead.
-   - Needs 5.27.
-   - Owns: `bench/mac-lane.sh`, `tests/test_owed_bench.py` (the mac class).
-   - About 650 lines; the lane's state directory becomes the task record.
+     real run stops there and names the two-click remedy, same as arming does.
    - Closes: marks live `bench[mbp]`, `bench.first_run_after_stage[mbp]`.
    - Decision: `bench mac` is the pipeline run with `--system mbp`, not a
      verb of its own. `mac` stays only as a tombstone.
@@ -1186,29 +828,17 @@ exist.
    5.29 **Mac A/B, front half.** *Landed* (`lib/wk/bench/mac.py`'s `MacAB`, reached as `wk bench ab --devices <mac>
      --systems <staged-a>,<staged-b>` or `--patch <ref|diff> --workspace <ws> [--base <ref>]` through `ab.run`, which hands
      a `KIND=mac|guest` machine to it; `ab.check_plan` is the plan refusals both share, `board_ab.pair` the arms', and each
-     side refuses the other's options). Preflight, build-and-stage in the guest (the patch now travels inside the guest
-     script: the manager's `/tmp` was never the guest's), reclaim, the plant (task record first, tree verified by digest,
-     screensaver, Do Not Disturb, samply, tailnet payload, job, state, LaunchAgent) and the restart with its wait for which
-     install came up are Python over the driver's channel (`boot/onboard/mac-sh.sh`), the drivers' new `manager()`/
-     `manager_tools()` and the fake clock. `bench/mac-ab.sh` keeps only the back half (`--progress`, `--status`,
-     `--collect`) and one-line shims over `python3 -m wk.bench.mac` for `--preflight`, the firmware and the provisioned
-     reads; any front-half flag is refused naming `wk bench ab`. `build/mac-pgo.sh` keeps its two build phases (they are
-     build-in-target.sh's `_xc_settings`/`guard_run`) and asks `PgoCollect` for the collection, the evidence and the
-     instrumented directory's name; `build/pgo.sh`, `lib/wkpgo.py`, `wk.pgo fact`, `lib/bench.sh`'s `BENCH_PUT_SKIP`/
-     `bench_put_excludes`/`plan_json`/`seed_payload`, `wk.bench.seed`'s CLI, `boot/machines.sh`'s `mac_ssh`/
-     `machine_tools_*`, and the mac shims' `b_bench_put*`/`b_manage*`/`b_restart_detail` with their verbs lost their last
-     caller and are gone; `PUT_SKIP` is the one list. The preflight no longer runs `wk machine setup` itself (a read-only
-     check does not provision); it names it. `WK_MAC_SSH`/`--host`, `--tools` and `--agent-home` are gone. Owed: the
-     back half's `mac()` is still `r_ssh` with the drivers' `image_addr`/`i_ssh_opts`/guest `m_ssh` overrides, and its
-     notify moved into `MacAB.notify` over `wk_notify` (5.30 moves both); the live rows close only their read-only
+     side refuses the other's options). Preflight, build-and-stage in the guest (the patch travels inside the guest
+     script), reclaim, the plant (task record first, tree verified by digest, screensaver, Do Not Disturb, samply,
+     tailnet payload, job, state, LaunchAgent) and the restart with its wait for which install came up are Python over
+     the driver's channel, the drivers' `manager()`/`manager_tools()` and the fake clock. `build/mac-pgo.sh` keeps its
+     two build phases (they are build-in-target.sh's `_xc_settings`/`guard_run`) and asks `PgoCollect` for the
+     collection, the evidence and the instrumented directory's name; `PUT_SKIP` is the one list. The preflight names
+     `wk machine setup` rather than running it (a read-only check does not provision). Owed: the live rows close only their read-only
      halves (`tests/test_mac_ab_driver.py`'s `TestTheLiveRows`: each machine's preflight) -- building, staging and
      measuring a real pair on mbp and the rehearsal on benchvm spend hours of those machines, a decision for whoever
      runs the live tier; the plant's display count (`display_verdict`) and each leg's (`bench/mac-browser-check.py`)
-     are still two readers, as they were in bash.
-   - Needs 5.28 and 5.25.
-   - Owns: `bench/mac-ab.sh` (build, stage, plant, go), `build/mac-pgo.sh`,
-     `tests/test_mac_ab_driver.py`, `tests/test_mac_pgo.py`.
-   - About 650 lines.
+     are two readers.
    - Closes: marks live `ab.pgo_pair[mbp]`, `bench.rehearsal[benchvm]`.
    - Decision: the Mac A/B is `bench ab` whose arms are staged ids. It
      shares 5.25's plan, pairing and refusals.
@@ -1223,25 +853,11 @@ exist.
      and `wk bench run --ab`; a board's default is 0, a Mac's `mac.DETECT`. Every on-Mac command is a named
      `bench/onboard/mac-*.sh` taking `KEY=value` (`mac.OnMac`; `boot/mac.py`'s `Script.where`), and a tree file runs by
      `mac-py.sh` as a parameter, since a guest's channel carries no stdin. `lib/wk/notify.py` is the one sd_notify and
-     `send` (the credential rule calls it in-process). `bench/mac-ab.sh`, `bench/mac-ab-summary.sh`,
-     `boot/onboard/mac-sh.sh`, `lib/wknotify.py`, `lib/store.sh`'s `wk_notify`, `boot/machines.sh`'s `i_ssh`/
-     `i_ssh_opts`/`image_addr`/`r_ssh`, `lib/reach.sh`'s `reach_enumerate` with `wk.reach enumerate`, `lib/bench.sh`'s
-     `SEED_DIR`, `bench/mac-tailnet.sh`'s `collect` arm with `wk.sysimage.mactailnet collect`, the Mac drivers' bash
-     shims but `b_disarm`/`b_disarm_note` and `wk.boot.mac`'s CLI, `wk.bench.mac`'s preflight/firmware/provisioned
-     verbs, and `tests/test_pi_channel.py` lost their last caller and are gone. Owed: `boot/machines.sh`'s `m_ssh`/
-     `m_here`/`m_ssh_opts` and `lib/reach.sh`'s `reach_offline` stay for `lib/sysimage-arms.sh`'s `m_reachable`
-     (`wk sysimage disks`); `lib/store.sh`'s `wk_cred_read` and `lib/bench.sh`'s `bench_task_dir`/`bench_task_new`
-     have only tests left calling them; `load_driver` has no caller outside tests; CLAUDE.md still names
-     `reach_enumerate` where it now means `lib/wk/reach.py`'s `find_mac` (yours to edit);
-     `tests/test_host_units.py`'s `test_one_sd_notify_in_the_tree` reads `git ls-files`, so it goes green once
-     `lib/wk/notify.py` is committed; the live rows close only their read-only halves (`tests/test_mac_ab_rounds.py`'s
+     `send` (the credential rule calls it in-process). Owed: `tests/test_host_units.py`'s
+     `test_one_sd_notify_in_the_tree` reads `git ls-files`, so it goes green once `lib/wk/notify.py` is
+     committed; the live rows close only their read-only halves (`tests/test_mac_ab_rounds.py`'s
      `TestTheLiveRows`: mbp's steps and its legs) -- resolving a PR-sized delta on mbp and a warmup profile on every
      system spend hours of each machine, a decision for whoever runs the live tier.
-   - Needs 5.29. ∥ 5.31.
-   - Owns: the rest of `bench/mac-ab.sh`, `bench/mac-ab-summary.sh`,
-     `lib/wknotify.py` (moves to `lib/wk/notify.py`),
-     `tests/test_mac_ab_rounds.py`.
-   - About 700 lines.
    - Closes: marks live `ab.resolution[mbp]`,
      `bench.warmup_profile[<s>]`.
    - Decision: stopping at `--detect` is `report.precision` asked between
@@ -1253,43 +869,25 @@ exist.
      a logged command (a leg, the quiesce, the convergence, the browser check, the summary) streams into the run's log
      through `run_tty`, and the watchdog is a thread reading the log's mtime. The convergence calls
      `python3 -m wk.sysimage.macvolume stage-payload /` and `python3 -m wk.sysimage.mactailnet install / <vol>`
-     directly, so `bench/mac-bench-autorun.sh`, `bench/mac-bench-payload.sh` and `mac-tailnet.sh`'s `install` arm are
-     gone; the tree the autorun runs from is its `wk-tools`, so the job's `wk_tools` field has no reader. The job's
-     outcome is the stopping rule's (`resolved-at-round-N`, `hit-max-rounds`, `rounds-done`, `all-failed-round-N`),
-     no longer overwritten with `ran`. `tests/test_mac_autorun.py` runs it against the Fake and the fake clock: each
+     directly; the tree the autorun runs from is its `wk-tools`. The job's outcome is the stopping rule's
+     (`resolved-at-round-N`, `hit-max-rounds`, `rounds-done`, `all-failed-round-N`). `tests/test_mac_autorun.py` runs it against the Fake and the fake clock: each
      phase, each refusal, the drift refusal after the quiesce, the settle, the hold, the watchdog, the hand-back, a run
-     killed after any effect finishing on the next boot, and the dry run. Owed: `tests/test_mac_ab_rounds.py` (5.30's)
-     still lifts functions out of the deleted script, and its autorun classes are covered here and go with it;
-     `mac-tailnet.sh`'s `collect` arm has no caller; nothing has run on the Mac: a planted job measured end to end
+     killed after any effect finishing on the next boot, and the dry run. Owed: nothing has run on the Mac: a planted job measured end to end
      spends hours of mbp, a decision for whoever runs the live tier.
-   - Needs 5.29.
-   - Owns: `bench/mac-bench-autorun.sh`, `lib/wk/bench/autorun.py`,
-     `tests/test_mac_autorun.py`.
-   - About 700 lines.
    - Decision: port it, because firstboot guarantees python3 before the
      LaunchAgent can fire. `mac-bench-firstboot.sh` stays shell.
 
    5.32 **The Mac volume as a `sysimage` builder.** *Landed* (`lib/wk/sysimage/macvolume.py`,
      `mactailnet.py`; `wk sysimage build perf-macos-tolken [--create|...|--all]`, and `wk bench mac-volume`
-     is a tombstone). The pin moved into `mactailnet.py`; `WK_BENCH_NO_PKG` and `WK_BENCH_PASSWORD` are gone.
-     The join stays shell in `bench/mac-tailnet.sh`: the first boot joins before the install has a python3.
-     Owed: `bench/mac-tailnet.sh`'s `collect`/`install` and `bench/mac-bench-payload.sh` are shims for
-     `mac-ab.sh` and the autorun (5.29, 5.31); `bench/mac-pyobjc.sh` stays shell, since `targets/vm.sh` and
-     `vm/provision-base.sh` pipe it into a guest with no tree; `holds`, `path` and now `ls` (5.14) reach the
+     is a tombstone). The pin lives in `mactailnet.py`. The join stays shell in `bench/mac-tailnet.sh`: the
+     first boot joins before the install has a python3; `bench/mac-pyobjc.sh` stays shell, since
+     `vm/provision-base.sh` pipes it into a guest with no tree. Owed: `holds`, `path` and `ls` (5.14) reach the
      volume's marker through `cli.Sysimage.builder_outputs`/`ls.builder_outputs`, shown only once installed
      since a builder with no workspace has nothing to anchor a placeholder row at (`test_every_builder_
-     a_profile_names_has_outputs` now closes for mac-volume and guest, and stays owed for pmos and fetch
-     only); the WiFi read is still the keychain's (`lint.one_wifi_reader`: the card helper is Linux-only
-     and gates usb/mmc disks, so taking the Mac's read is a decision for you); `mac-ab.sh` and `cmd/bench`
-     still name `wk bench mac-volume` (the autorun and `cmd/quiesce` now say `wk sysimage build
-     perf-macos-tolken`), and `cmd/bench` still declares `--install,--all` destructive; the Go cache moves
-     to the state directory on a Mac host. Nothing has run on the Mac.
-   - Needs 5.17 and 5.12. ∥ Group 3.
-   - Owns: `bench/mac-bench-volume.sh`, `bench/mac-tailnet.sh`,
-     `bench/mac-tailnet-pin.inc`, `bench/mac-bench-payload.sh`,
-     `bench/mac-pyobjc.sh`, `lib/wk/sysimage/macvolume.py`,
-     `tests/test_mac_tailnet.py`.
-   - About 1,100 lines; split at the tailnet seam.
+     a_profile_names_has_outputs` now closes for every builder, including pmos and fetch); the WiFi read
+     is still the keychain's (`lint.one_wifi_reader`: the card helper is Linux-only
+     and gates usb/mmc disks, so taking the Mac's read is a decision for you); the Go cache moves to the
+     state directory on a Mac host. Nothing has run on the Mac.
    - Closes: `unit sysimage.builders_conform[mac-volume]`; marks live
      `sysimage.mac_volume_provision`.
    - Decision: the install's `/etc/wk-image` marker is the builder's done
@@ -1298,44 +896,25 @@ exist.
    *Group 4, ∥ Group 3*
 
    5.33 **Guest start and stop, and the host daemons.** *Landed* (`lib/wk/guest.py`:
-     `Host` and `Guest`; `Vm.write_marker` is the one marker writer). Owed: the
-     guest's shell rc, lldbinit, checkout, Claude CLI and desktop steps still
-     run from `targets/vm.sh` through `shell.guest_step` (5.34); the bash
-     `push_agent_*` family is held only by `test_push_agent.py`'s bash classes.
-   - Needs step 4 and 5.3.
-   - Owns: `targets/vm.sh`'s `t_start`/`t_stop`/`_boot`, proxy, inject,
-     agent forwarding, `vm_push_*`, `lib/wk/targets.py`'s `Vm` write side,
-     `lib/wk/shell.py`'s `guest_*`/`vm_push_*`,
-     `tests/test_push_vm.py`, `tests/test_vm_clock.py`.
-   - About 800 lines.
+     `Host` and `Guest`; `Vm.write_marker` is the one marker writer). Owed: none.
    - Closes: `unit record.one_lock_per_resource[guest start]`; marks live
      `vm.egress[<c>]`, `vm.shared_mirror`.
    - Decision: the proxy, inject and agent daemons are `Machine.spawn`ed
      with pidfiles, which are locks, not state. The same code serves every
      guest.
 
-   5.34 **Guest create and destroy, and the base as a builder; `cmd/vm` is
-   gone.** *Landed* (`lib/wk/sysimage/guestbase.py`, the `guest` builder of
+   5.34 **Guest create and destroy, and the base as a builder.** *Landed* (`lib/wk/sysimage/guestbase.py`, the `guest` builder of
      `image/configs/macos-guest-base.conf`; every converge step, the admission, the
      desktop and load findings and `wk doctor <guest>`'s rows in `lib/wk/guest.py`;
-     `Vm.start` writes the alias; `vm` is a dispatcher tombstone; the bash
-     `ssh_alias_*`, `tools_committed`, `wk_push_key` and the test-only `push_agent_*`
-     are gone). Owed: `targets/vm.sh` is the read contract its unported bash callers
-     load (`ws_on_target`, `cmd/gc`, `cmd/boot`, `shell.target_pid_alive`) until
-     5.39; `vm/desktop.sh`, `vm/provision-base.sh` and `bench/mac-pyobjc.sh` still
+     `Vm.start` writes the alias; `vm` is a dispatcher tombstone). Owed:
+     `vm/desktop.sh`, `vm/provision-base.sh` and `bench/mac-pyobjc.sh` still
      name `wk vm` in their messages, since editing a base input re-stales every
      base -- fold it into the next rebuild; `holds`, `path` and now `sysimage ls`
      (5.14) reach the sealed base's marker through `cli.Sysimage.builder_outputs`/
      `ls.builder_outputs` and `guestbase.Base.outputs`, shown only once sealed
      since a builder with no workspace has nothing to anchor a placeholder row
-     at (`test_every_builder_a_profile_names_has_outputs` now stays owed only for
-     pmos and fetch); `live vm.base_matches_pin` fails on the one Mac until its
+     at; `live vm.base_matches_pin` fails on the one Mac until its
      base is rebuilt (sealed before an input change on this branch).
-   - Needs 5.33 and 5.17.
-   - Owns: the rest of `targets/vm.sh`, `cmd/vm` (becomes a tombstone),
-     `vm/*.sh`, `vm/desktop-unblock.py`, `lib/wk/sysimage/guestbase.py`,
-     `tests/test_vm_base.py`, `tests/test_vm_desktop.py`.
-   - About 800 lines.
    - Closes: `unit vm.base_rm_asks_twice`, `unit killpoints[vm base]`,
      `unit sysimage.builders_conform[guest]`; marks live
      `vm.base_matches_pin`, `vm.desktop`.
@@ -1350,18 +929,10 @@ exist.
      no judging, no ANSI; `lib/wk/status.py`'s bridge probing
      (`BRIDGE_PROBE`, `bridge_record`) reads the same facts through
      `bridge.judge`; `lib/wk/fleet.py`'s bridge kind fills the `BR_*`
-     defaults `cmd/bridge`'s bash used to). Owed: `cmd/bridge`'s
-     `resolve_ssh` is a one-line shim onto `wk.bridge resolve` for
-     `setup`/`tailnet`/`rm` (unported, 5.36); `BR_VIA`/`_ssh_via` (never
-     set) are pre-existing dead code this step did not touch, since
-     `rsh`/`_reaches` still read them for the unported arms; `live
-     bridge.segment[<bridge>]` waits on 5.37 (hardware); `wk.reach`'s sweep
+     defaults). Owed: `live bridge.segment[<bridge>]` waits on a person at
+     the phone; `wk.reach`'s sweep
      needs ip(8) and nmap, so a macOS host finds a phone off the tailnet only
      by `--at`.
-   - Owns: `cmd/bridge`'s `ls`/`status`/`battery`/discovery,
-     `lib/wk/status.py`'s `BRIDGE_PROBE`, `lib/wk/fleet.py`'s bridge kind,
-     `tests/test_bridge.py` (read classes).
-   - About 400 lines.
    - Closes: `unit bridge.segment_down_vs_off`.
    - Decision: the phone prints raw facts and the judging moves to
      Python, which trims `wk-bridge-healthcheck`.
@@ -1373,52 +944,33 @@ exist.
      `machine_cmd`'s kind dispatch, the tailnet join and the policy done from
      here; `bridge/provision.sh` is a 184-line busybox apply of `base` and
      `role`; `lib/wk/tailnet.py` with `Api.transport` as its one seam, every
-     importer repointed; `cmd/bridge`'s `setup`/`tailnet`/`rm` are
-     tombstones, `rsh`/`_reaches`/`resolve_priv`/`bridge_bootstrap_root`/
-     `BR_VIA` are gone, and `provision` keeps one-line shims for `cmd_setup`
-     and `route_approved`). Owed: `live bridge.setup[moose-bmc]` is marked and
-     has not run; the device note and kill-switch text still come from
-     `bridge/devices.sh` through bash (5.37 makes it a table); the phone's
-     output arrives when each phase ends, not as it runs; `rm` logs the node
-     out and does not retire it through `wk.tailnet`. The auth key's
-     mint-or-reuse rule is `wk.tailnet.Fleet` (bash keeps a one-line
-     `wk_tailscale_authkey` shim for `host/macos/machine.sh`); owed:
-     `sysimage/write.py` and `sysimage/mactailnet.py` call `Fleet` directly,
-     and `shell.tailnet_authkey`/`tailnet_retire`, forwarders onto it, go.
-   - Needs 5.35.
-   - Owns: `cmd/bridge`'s `setup`/`tailnet`/`rm`, `bridge/provision.sh`,
-     `lib/wk/bridge.py`, `lib/tailnet.py` (moves to `lib/wk/tailnet.py`).
-   - About 700 lines, `provision.sh` shrinking from 664 to about 150.
+     importer repointed). Owed: `live bridge.setup[moose-bmc]` is marked and
+     has not run; the phone's output arrives when each phase ends, not as it
+     runs; `rm` logs the node out and does not retire it through
+     `wk.tailnet`. The auth key's mint-or-reuse rule is `wk.tailnet.Fleet`
+     (bash asks it through `wk_tailscale_authkey` in `lib/common.sh`).
    - Closes: `unit killpoints[machine setup]` for a bridge; marks live
      `bridge.setup[moose-bmc]`.
    - Decision: the host renders nftables, dnsmasq and the init scripts from
      the conf, and the phone only applies them. The phone has no python3.
 
-   5.37 **Bridge provision; `cmd/bridge` is gone.** *Landed*
+   5.37 **Bridge provision.** *Landed*
      (`lib/wk/bridge/provision.py`: `wk machine setup <bridge> --disk
      <machine>:<device> [--image <path>|--rebuild]` asks once, gets the
      newest `PMO_BRIDGE` build off its host (building it if none, or on
      `--rebuild`), hands it to `wk sysimage write --disk` as the one writer,
      prints the hands-on steps and waits up to 15 minutes for the phone (names
-     every tick, a sweep once a minute) before `Role.apply`; the Jumpdrive
-     card, the head-hash disk detection, the `pause` prompts and the
-     route-approval loop are gone, and `BR_CARD` with them.
+     every tick, a sweep once a minute) before `Role.apply`.
      `bridge/devices.tsv` is the device table (`wk.bridge.devices`); `wk
-     machine status [<bridge>]` is the old `ls`/`status`, `wk doctor`'s
-     battery row reads `Bridge.battery` in process, `bridge` is a dispatcher
-     tombstone, and the shims only it called (`image_fetch_base`,
-     `pmos_host`/`newest_out`/`fetch_out`, `image_profile_list`,
-     `disk_candidates`) and their Python CLI verbs are gone). Owed: `live
+     machine status [<bridge>]` lists and reports bridges, `wk doctor`'s
+     battery row reads `Bridge.battery` in process, and `bridge` is a
+     dispatcher tombstone). Owed: `live
      bridge.segment[<bridge>]` is marked (health check and cable only) and
      has not run; the rest of that row -- the eMMC route end to end, a board
      getting its reserved address, the netwatch ladder, the dock at 480, the
      camera -- needs a person at the phone; the copied image lives under the
      store's artifact directory, under a per-bridge lock, and
      `bridge.provision.rubble` names one a kill left and `wk gc` takes it.
-   - Needs 5.36, 5.16 and 5.20.
-   - Owns: `cmd/bridge`'s `provision`, `bridge/devices.sh` (becomes a data
-     table).
-   - About 450 lines.
    - Closes: marks live `bridge.segment[<b>]`.
    - Decision: a card goes to `sysimage write --disk` only. Jumpdrive
      auto-detection is a second write path and goes.
@@ -1431,11 +983,7 @@ exist.
      `sysimage/guestbase.py`; the podman images, ccache, runner trees, build
      outputs, board slots and remote mirrors are `gc.py`'s own). One question
      covers every row, the VM's half included (`wk gc --rows` there), and
-     `wk disk` renders the same rows. `gc_creation_records`,
-     `image_build_locations`, `image_cache_dir`, `ws_create_log`,
-     `_ws_task_lib`, `mirror_is_here`, `wk_base_dir`, the `unpinned`/
-     `unreferenced` shims, `pmos_prune`/`pmos_purge_work` and the
-     `WK_TART_CACHE_GB`/`TART_HOME` bash defaults are gone. Owed: the VM's half
+     `wk disk` renders the same rows. Owed: the VM's half
      runs through `Container.wk`, not an effect, so no kill point lands inside
      it; half-made workspaces are found only on targets whose store this
      process reads, not on a build machine; no live test runs gc against the
@@ -1444,73 +992,56 @@ exist.
      counts the golden base and tart's cache as storage in its own rows; a
      failed `podman images` is a `why=` row; the VM's half gets `--yes` in its
      argv rather than an environment poke.
-   - Needs 5.4, 5.14, 5.20, 5.27 and 5.34.
-   - Owns: `cmd/gc`, `lib/wk/gc.py`, `tests/test_gc_tart_cache.py`,
-     `tests/test_owed_gc.py`.
-   - About 310 lines.
    - Closes: `unit gc.reclaims_or_names[<kind>]` for every listed kind,
      `unit killpoints[gc]`.
    - Decision: each module that makes rubble exports `rubble()` rows (what,
      size, the flag that takes it). gc and `disk` render one list.
 
-   5.39 **The deletion.** *In progress.* Landed: the session mode, its warning and
-     the BMC's `ast` node are `lib/wk/session.py`'s (`Session.mode`/`mode_warn`/`bmc_drm_device`,
-     `session.here`); the lldb prelude and pin are `lib/wk/ldpath.py`'s; the workspace
-     architectures, the armhf image and the GPU rule are `lib/wk/buildconf.py`'s (`arch_canon`,
-     `arch_has_gpu`, `IMAGE_ARMHF`) and `lib/arch.sh` is gone; the store question is
-     `Store.is_local`, the tailnet presence checks `tailnet.Fleet.key_present`/`api_present`, the
-     peers `Registry.peer_workstations`, the stopped containers `cmd/start`/`cmd/stop` ask through
-     `Container.podman()`, and `Doctor.paths`/`Doctor.in_vm` are Python. `wk bench seed`'s readiness
-     wait is `Target.wait_ready` (`lib/wk/bench/cli.py`, no more `load_target`/`wait_ready` bridge),
-     and the SDK's local pull and upstream tags are `Container.sdk_local`/`sdk_upstream`
-     (`lib/wk/targets.py`; `lib/wk/status.py`'s `t_sdk_local`/`t_sdk_upstream` bridge is gone, and so
-     are `targets/container.sh`'s bash bodies). Their bridges in
-     `lib/wk/shell.py` (`session_mode*`, `bmc_drm_device`, `lldb_prelude`, `in_machine`,
-     `local_state_paths`, `peer_workstations`, `store_is_local`, `tailnet_*_present`, `arch_*`,
-     `agent_secret_stored`) and the bash they reached in `lib/common.sh` are gone. `lint.layering`'s
-     row is deleted (no test held it); step 2's done condition (no bash file parses JSON) is
-     `tests/test_static_rules.py`'s `test_no_bash_file_parses_json`, `owed` until `jq` leaves
-     `bridge/bin/wk-bridge-healthcheck`, `bridge/bin/wk-bridge-netwatch`, `bridge/provision.sh`,
-     `claude/hooks/webkit-jsc-skill-reminder.sh` and `claude/install.sh`, and inline `import json`
-     leaves `bench/mac-quiet-desktop.sh`, `admin/wk-card-priv`, `host/macos/machine.sh`,
-     `targets/vm.sh` and `targets/remote.sh`.
-     Owed, in order: `lib/target.sh` and `targets/*.sh` (their remaining bash callers:
-     `container/ssh-transport.sh`'s `t_ssh_exec`, `container/firstrun.sh`'s `_store_fn`,
-     `lib/store.sh`'s `secrets_publish`, `lib/sysimage-arms.sh`'s `disks`, and `shell.LIBS`),
-     with `lib/wk/targets.py`'s, `record.py`'s and `job.py`'s `main` and `shell.CallerShell`;
-     every shim of 5.2-5.38 (`build/configs.sh`, `image/profiles.sh`, `lib/image.sh`,
-     `lib/bench*.sh`, `lib/{task,watchdog,detach,resources,par,lockrun,quiet,profiler,reach,broker}.sh`,
-     `boot/*.sh`, the callerless half of `lib/store.sh`) and the tests that lift them; the
-     conf-key rename; `lint.one_machine_name_reader`, `lint.vocabulary`; the "Sizes today" and
-     "What stays shell" tables.
-   - Needs everything above.
-   - Deletes `lib/target.sh`, `targets/*.sh`, every shim, every step-5
-     `shell.py` bridge, and `lib/{arch,broker,tools}.sh` if nothing is
-     left. Renames the conf keys to plain lowercase, since no bash reads
-     them.
+   5.39 **The deletion.** *Landed.* No step-5 shim and no bash driver remains:
+     `lib/common.sh` is the one bash library. What ran through the shims is Python: `wk sysimage
+     disks` (`Sysimage.disks`), `wk bench --list` (`Bench.plans`), samply (`lib/wk/samply.py`),
+     the container's ssh transport (`container/ssh-transport`, `Container.ssh_transport`),
+     `cmd/selftest`, the broker's fleet and reach, the store a setup stage lays out
+     (`python3 -m wk.targets store-init`) and the injector's read token (`python3 -m wk.secrets
+     pat-converge`). `lib/wk/lock.py` is the one lock, and `wk_machine_name` asks
+     `record.machine_name`, so `record.host_name` is the one
+     reader of this host's name (`lint.one_machine_name_reader`, bash included). A timed-out
+     `Local.run` kills the command's whole session. The setup stages read the store's paths and
+     the envelope from Python (`eval "$(wk_py wk.store paths)"`, `wk_py wk.resources --os <os> <verb>`,
+     `wk_py` in `lib/common.sh`); the Mac screen watch is `lib/wk/screen.py` (`blocker`, `restarted`,
+     the `Watch` thread) over the window probe and the quiet table; `sysimage.write` reads a bench
+     machine's conf through `boot.cli.load_conf`, the one reader. Step 2's done condition
+     (`test_no_bash_file_parses_json`) passes: no bash file uses `jq` or inline `python3 -c ... import json`
+     except `bridge/bin/wk-bridge-netwatch`, named there by its own narrow
+     exemption (busybox ash, no python3, judging tailscale's own JSON with no host in the loop).
+     The tart locator is `wk.targets tart` (`tart_path`), asked through `wk_py` by every shell
+     reader and directly by `Vm.tart` in Python; the privileged-helper table stays in
+     `lib/common.sh`, asked by `doctor.Bash`, since `./setup` and `admin/install.sh` read it
+     before any Python runs.
+     `machines/*.conf` keys are lowercase (`fleet.parse_text` refuses an old uppercase one, naming its
+     new spelling), and a target conf reaches its `WK_*` variables through the one table
+     `targets.CONF_ENV` (one build config's own `cmake_<config>`/`build_args_<config>` included).
    - Closes: `lint.one_machine_name_reader`, `lint.vocabulary`, the `hostname`
      row, and step 2's done condition.
-   - Decision taken: the `lint.layering` row is deleted rather than landed,
-     since README does not yet define the layers.
 
    **What stays shell** (it runs on a board, a phone, a bench install or in a
    target, before or without python3). Lint counts it by directory:
 
    | where | what | today | after step 5 |
    | --- | --- | --- | --- |
-   | a board's first boot | `boot/onboard/`: self-disarm, self-return watchdog, rescue marker, tryboot staging | ~150, inside drivers | ~150 |
+   | a board's first boot | `boot/onboard/`: self-disarm, self-return watchdog, rescue marker, tryboot staging | 141 | ~150 |
    | the Mac bench install before python3 | `bench/mac-bench-firstboot.sh` | 279 | ~180 |
-   | the bridge phone (busybox ash, no python3) | `bridge/init.d/*`, `bridge/bin/*`, the apply script | 1,453 | ~600 |
+   | the bridge phone (busybox ash, no python3) | `bridge/init.d/*`, `bridge/bin/*` | 642 | ~600 |
    | a build target | `build/guard.sh` (exec wrapper) | 54 | 54 |
-   | **step-5 share** | | | **~1,000** |
+   | **step-5 share** | | **1,116** | **~1,000** |
 
    The rest of the tree's on-target shell stays outside step 5, and neither
    part fits the 1k budget alone:
-   - `container/` is 1,198 lines, of which `firstrun.sh` 311 and
+   - `container/`'s scripts are 947 lines, of which `firstrun.sh` 298 and
      `sdk-patches/apply.sh` 480 are portable, since a container has
      python3.
    - `build/build-in-target.sh` and `mem-watchdog.sh` are 225.
-   - The three privileged helpers are 2,281, with `wk-card-priv` also on
+   - The three privileged helpers are 1,994, with `wk-card-priv` also on
      every rescue.
 
    The budget holds either by porting `container/`'s two large scripts to
@@ -1522,12 +1053,36 @@ exist.
    (5.31).
 
    Decisions for the user this step adds: `session` into `quiesce` (5.9);
-   deleting `boot/pi-mbr.sh` (5.7, already listed); the on-target budget
-   above.
+   deleting the `pi-mbr` boot driver (5.7, already listed); the on-target
+   budget above.
 
 6. **Results.** A task's results live in its workspace, the task restarts
    from where it stopped, and the deliverables export as one archive
    (README, "results").
+
+   Landed: `record.home_for` puts a new task in `ws/<name>/bench/` where this
+   store holds the workspace (a `wk bench run` task, a board run, a board
+   A/B), else in `bench/` (`wk bench ab` across boards, a Mac A/B);
+   `record.homes` finds both, for `ls`, `report`, `status` and the cost
+   estimate. A container writes its run through its own
+   `/var/lib/wk/ws/<ws>` mount, and the store-wide `/bench` mount is gone.
+   The report heads with the commit each arm measured against the task's,
+   and a verdict per check (preflight, warmup, PGO reading), and an
+   incomplete task names its `restart` command, which `wk bench ab` and a
+   board A/B record. A board A/B restarted with `--task` skips the rounds the
+   task holds with both arms. A staged Mac run carries its build's
+   `wk-profile-check.json`, and a Mac A/B's collect copies the warmup
+   captures, and a board run of a PGO slot carries the reading its image
+   workspace's collection took. A restart with `--task` takes the task's
+   lock unless the A/B driving it holds it (`WK_TASK_HELD`), and a one-run
+   `wk bench run --task` runs again only when the task lacks its run ok.
+   `wk bench export <task> [--to <dir>]` finds the task in this store or in
+   a target's store of its own (the podman VM's, a build box's), reads it
+   through `Machine.read_tree`, which refuses a link, and builds the zip here, recording where it
+   went in the task (`unit test_bench_results`, `killpoints[bench export]`).
+   `wk rm` refuses a workspace holding a task no readable export holds as it
+   is now, and `--force` crosses it (`unit test_rm_results`); `wk doctor`
+   names each workspace's `bench/` as backed-up beside the store's.
 7. Delete this file.
 
 ## Owed
@@ -1651,6 +1206,8 @@ decides is a row; one still open is listed under "Decisions for the user".
 | rpi4's 2.52 system brings up KMS on every boot, or the run names why not | 5 | `live boot[rpi4].kms` |
 | rpi4's 32-bit buildroot system reaches userspace, read at a serial console | 5 | `live boot[rpi4].armhf` |
 | rpi5's tuning has two owners: stability in `./setup`, the overclock as an `oc` image profile, never the EEPROM; the 26.04 paths re-checked | 5 | `unit sysimage.oc_profile_in_image` |
+| rpi5's workstation tuning is restorable: `wk key backup` holds what `rpi5-setup.sh` cannot re-make (the NUMA kernel build, the ssh key shipped beside the script); the 26.04 re-check covers `/boot/firmware/config.txt` and `cmdline.txt` under A/B boot, the root fstab label and its `discard`, the GNOME 50 indexer names and default swap | 5 | `unit key.backup_rpi5_tuning` |
+| A board is re-flashed from nothing by the machine holding its card reader, with no other provisioned machine | 5 | `live sysimage.reflash[rpi5]` |
 | `wk machine setup <board>` takes a board from a blank card to an answering tailnet name in `pi-hosts` and back, `wk machine probe` finds it when on, and a workspace reaches only that address, on port 22 | 5 | `live pi.setup[<board>]` |
 | `wk machine setup <box>` leaves a build box in one shape (zsh, or a named warning), and a cleanup accepted at the prompt is removed | 5 | `live machine_cmd.setup[<box>]` |
 | Two machines sharing one home each resolve their own target by hostname with no ssh, provisioning one never clobbers the other, and builds key dirs and locks per machine | 5 | `unit machine_cmd.shared_home` |
@@ -1662,13 +1219,14 @@ decides is a row; one still open is listed under "Decisions for the user".
 | A task's deliverables export as one archive | 6 | `unit results.export_archive` |
 | A long effect (`wkdev-create`, `sdk-refresh`, `tart clone`) streams to the task log as it runs, so the silence watchdog and a followed log see it; `Machine.run` captures and prints only after it ends | 3 | `unit machine.streams_long_effects` |
 | An effect run over ssh counts as an effect on the machine that drives it, so a kill point can land inside a remote flow (`Ssh.act_run` runs through `via.run` today) | 3 | `unit machine.ssh_effects_are_effects` |
-| A hold names the pid that took it: the bash record (`lib/task.sh`) writes the pid after the plan, the Python one before `holds` | 3 | `unit record.hold_names_its_taker` |
+| A hold names the pid that took it: the record carries the taker's pid before `holds` | 3 | `unit record.hold_names_its_taker` |
 | `Target.state` reads the workspace directory through the machine, not `os.path`, so the real drivers run in a Fake world and `killpoints[new]` runs over them rather than a stand-in | 3 | `unit killpoints[new]` |
-| `hostname` is read in one place: the bash readers in `lib/common.sh` (`wk_host_name`), `lib/target.sh`, `lib/resources.sh`, `cmd/bench`, `cmd/key`, `cmd/sudo`, `cmd/find` and `cmd/sysimage` go with their commands' ports (`cmd/zed` is Python already) | 3, 5 | `lint.one_machine_name_reader` |
 | The `--web` status page renders `armed_by`, `armed_at`, `armed_desync` and `disagree` as the text renderer does | 5 | `unit status.web_mirrors_text` |
 
 ### Decisions for the user
 
+- Step 6: `wk rm` takes a workspace's tasks with it. The interim behaviour: it refuses a workspace holding a task no export holds as it is now (the zip the task records, or `~/Downloads/<task>.zip`, compared json by json), naming `wk bench export <task>`, and `--force` crosses it; whether that stays, becomes a line in rm's one question, or goes. A container mounts its whole workspace directory, so the workspace can read and write its own tasks' results (the store-wide `/bench` mount it replaces exposed every task).
+- Step 6: `wk bench ab` across boards and a Mac A/B keep their task in the store's `bench/`, since neither has one workspace (the arms' image workspaces may be on other machines); whether each should instead live in one of them.
 - README gets a section defining the `home`/`lab`/`wk`/`field`/`stock` layers, or the layering goes (5.39 deletes the `lint.layering` row; a later step can re-add it once README defines the layers).
 - Taken overnight on 2026-09-25, each reversible: PyYAML stays in `lib/wk/sysimage/pmos_build.py` (netplan's own dependency on the build host; the stdlib has no YAML reader); the bridge phones' images no longer install avahi and nothing here uses mDNS; `lint.one_wifi_reader` stays owed because the Mac reads its WiFi credential from the System keychain and the pmos build host from netplan, and routing both through `admin/wk-card-priv` would widen a privileged helper; `wk machine setup <board|mbp> --dry-run` on an unreachable machine prints the plan and exits 0 rather than refusing (a wet run still refuses), so the unit tier's ssh shim does not fail dry runs.
 - The word "target": a device configuration or the execution target; one workspace per (perf task, device) rather than per profile, deletable once its results are in.
@@ -1679,7 +1237,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 - Speedometer 3's `wakeLock` NotAllowedError under MiniBrowser: confirm Safari's path, or accept.
 - rpi3: refuse a board with foreign processes, or clear them; Speedometer 2.1 as its plan, or swap/zram for 3.
 - The 2.38 buildroot rpi4 image: pin a newer rpi-firmware so it boots a rev 1.4/1.5 board without tryboot, or keep tryboot.
-- Delete `boot/pi-mbr.sh` (no machine declares it), or keep it for a firmware-bootable SSD.
+- Delete the `pi-mbr` boot driver (`lib/wk/boot/pi.py`'s `PiMbr`; no machine declares it), or keep it for a firmware-bootable SSD.
 - Tailnet ACL: boards reach a workstation's benchmark server directly, or keep the ssh tunnel; the `tag:wk` grant `wk pi setup` prints as a manual step.
 - `wk pi helper` onto a workstation holding a card reader: a wk-driven path, or none.
 - A rescue whose root reference is orphaned: a `wk` verb, or the helper's one-liner.

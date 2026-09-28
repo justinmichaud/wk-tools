@@ -1,6 +1,6 @@
 # The socket the unit binds in %t/wk is what workspaces mount at /run/wk.
 
-. "$WK_ROOT/lib/store.sh"
+wk_eval wk.store paths
 . "$WK_ROOT/host/units.sh"
 
 _unit_journal=""

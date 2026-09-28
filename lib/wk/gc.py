@@ -172,7 +172,7 @@ class Gc:
     def board_rows(self):
         rows, rch = [], None
         for name, conf in self.boards():
-            dest = conf.get("NODE_BENCH_SSH") or conf.get("NODE_SSH") or name
+            dest = conf.get("bench_ssh") or conf.get("ssh") or name
             rch = rch or self.reach()
             why = rch.offline(dest)
             m = None if why else self.board_machine(dest)

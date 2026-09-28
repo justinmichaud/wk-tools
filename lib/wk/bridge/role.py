@@ -3,6 +3,7 @@ bridge/'s scripts, bridge/provision.sh applies it on the phone, and the tailnet 
 this end's again. `setup --disk` writes the phone's system first (wk.bridge.provision)."""
 
 import os
+import shlex
 import sys
 
 from wk import act, tailnet
@@ -12,8 +13,7 @@ from wk.bridge import plan as plans
 from wk.bridge import provision
 from wk.bridge.plan import AUTHKEY, LIB
 from wk.clock import Clock
-from wk.machine import Machine, Ssh
-from wk.shell import sh_quote
+from wk.machine import HAVE, Machine, Ssh
 
 SHIP = "rm -rf %s && mkdir -p %s && base64 -d | tar xzf - -C %s" % (LIB, LIB, LIB)
 # A password reader flushes the input pending when it starts, so the password reaches the ssh after a pause.
@@ -89,7 +89,7 @@ class Role:
         except LookupError as e:
             die(str(e))
         path = self.b.fleet.path(name)
-        for key in ("BR_DEVICE", "BR_SEGMENT", "BR_ROUTER"):
+        for key in ("device", "segment", "router"):
             if not bc.conf.get(key):
                 die("%s sets no %s" % (path, key))
         known = devices(self.root)
@@ -156,8 +156,8 @@ class Role:
             die("--rebuild and --image contradict each other: one builds a new image, the other names a file")
         c = bc.conf
         info("%s -- %s, %s via %s" % (name, note, bc.segment, bc.iface))
-        log("  tailnet:  %s, %s, advertising %s" % (bc.hostname(), c["BR_TAG"], bc.segment))
-        log("  egress:   %s, camera: %s, battery cap %s%%" % (bc.egress, bc.camera, c["BR_BATTERY_LIMIT"]))
+        log("  tailnet:  %s, %s, advertising %s" % (bc.hostname(), c["tag"], bc.segment))
+        log("  egress:   %s, camera: %s, battery cap %s%%" % (bc.egress, bc.camera, c["battery_limit"]))
         if not disk:
             act.nothing_to_ask()
             return self.apply(bc, kill, self.connect(bc, at), no_tailnet)
@@ -178,7 +178,7 @@ class Role:
 
     def apply(self, bc, kill, there, no_tailnet):
         dest, phone, prefix = there
-        if not phone.run(["sh", "-c", "command -v apk"], timeout=15).ok:
+        if not phone.run(list(HAVE) + ["apk"], timeout=15).ok:
             die("%s is not running postmarketOS (no apk); the bridge role is pmOS-only. Reflash the phone first -- 'wk help'." % dest)
         warn("power the phone from a wall charger, never from the machine it exists to rescue.")
         warn("kill switches: WiFi on. %s" % kill)
@@ -196,8 +196,8 @@ class Role:
         self.act(phone, prefix + ["sh", LIB + "/provision.sh", "role"], "provisioning failed on %s; re-run it" % dest, timeout=600)
         joined = self.join(bc, phone, prefix, no_tailnet)
         if joined:
-            src = ", ".join('"%s"' % s.strip() for s in bc.conf.get("BR_REACHED_BY", "").split(",") if s.strip())
-            sys.stderr.write(POLICY % {"tag": bc.conf["BR_TAG"], "segment": bc.segment, "src": src})
+            src = ", ".join('"%s"' % s.strip() for s in bc.conf.get("reached_by", "").split(",") if s.strip())
+            sys.stderr.write(POLICY % {"tag": bc.conf["tag"], "segment": bc.segment, "src": src})
         info("health check")
         report = judge(kv(phone.run(prefix + [HEALTHCHECK], timeout=30).out), bc)
         render(report, sys.stdout)
@@ -216,7 +216,7 @@ class Role:
         """True once the node is on the tailnet, tagged and advertising the segment."""
         self.clock.wait_until(lambda: self.tailscale_up(phone, prefix), TAILSCALED_WAIT, 1)
         ts = self.b.ts_status(phone, prefix)
-        seg, tag = bc.segment, bc.conf["BR_TAG"]
+        seg, tag = bc.segment, bc.conf["tag"]
         if ts.get("BackendState") == "Running" and (ts.get("Self") or {}).get("Tags"):
             info("already on the tailnet, tags %s" % ",".join(ts["Self"]["Tags"]))
             if not phone.act_run(prefix + ["tailscale", "set", "--advertise-routes=" + seg, "--accept-dns=false", "--ssh=true"]).ok:
@@ -263,7 +263,7 @@ class Role:
     def deprovision(self, bc):
         paths = [p for p in plans.every_path(bc.name, bc.conf) if p != SSHD_DROPIN]
         services = sorted(os.listdir(os.path.join(self.root, "bridge", "init.d")))
-        return DEPROVISION % {"services": " ".join(services), "paths": sh_quote(*paths), "lib": LIB, "sshd": SSHD_DROPIN}
+        return DEPROVISION % {"services": " ".join(services), "paths": shlex.join(paths), "lib": LIB, "sshd": SSHD_DROPIN}
 
     def rm(self, name, at=None):
         bc, _note, _kill = self.conf(name)

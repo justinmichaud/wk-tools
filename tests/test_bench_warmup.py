@@ -10,9 +10,12 @@ carries a profile.
 
 Unit tests only: the probe's raw board output is a fixture, so no board.
 
-Run: python3 -m unittest tests.test_bench_warmup -v
+Run: python3 tests/run.py -k test_bench_warmup
 """
+import contextlib
+import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -25,20 +28,14 @@ from tests.support import REPO, WkTest
 from tests.test_slots import load_driver
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk.bench import board, report  # noqa: E402
-
-WKDATA = REPO / "lib" / "wkdata.py"
-
+from wk import samply  # noqa: E402
+from wk.bench import board, record, report  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 def tmpdir(case):
     d = Path(tempfile.mkdtemp(prefix="wk-warmup-"))
     case.addCleanup(shutil.rmtree, d, True)
     return d
-
-
-def wkdata(*args):
-    return subprocess.run(["python3", str(WKDATA), *args], cwd=str(REPO),
-                          capture_output=True, text=True, timeout=30)
 
 
 def warmup_check(a, b, same_width=False):
@@ -331,11 +328,8 @@ class TestWarmupNeverEntersTheStatistics(WkTest):
         return d
 
     def test_a_warmup_run_is_not_counted_as_a_round(self):
-        cp = wkdata("task-status", str(self.task()))
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        fields = dict(l.split("=", 1) for l in cp.stdout.splitlines() if "=" in l)
-        self.assertEqual(fields["ended"], "2")
-        self.assertEqual(fields["usable"], "1")
+        st = record.task_state(str(self.task()), False)
+        self.assertEqual((st["ended"], st["usable"]), (2, 1))
 
 
 class TestSubtestExclusions(WkTest):
@@ -427,22 +421,12 @@ class TestScoreAgainstItsOwnSubtests(WkTest):
 
 
 class TestProfilerChoice(WkTest):
-    """lib/profiler.sh: samply where upstream publishes one, sysprof where it does not."""
+    """samply.resolve (lib/wk/samply.py): samply where upstream publishes one, sysprof where it does not."""
 
-    def resolve(self, machine, sysprof):
-        return subprocess.run(
-            ["bash", "-c",
-             '. "$1/lib/profiler.sh"; profiler_resolve "$2" "$3"',
-             "_", str(REPO), machine, sysprof],
-            capture_output=True, text=True, timeout=15)
-
-    def test_aarch64_uses_samply(self):
-        cp = self.resolve("aarch64", "no")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.split()[0], "samply")
-
-    def test_x86_64_uses_samply(self):
-        self.assertEqual(self.resolve("x86_64", "no").stdout.split()[0], "samply")
+    def test_aarch64_and_x86_64_use_samply(self):
+        for arch in ("aarch64", "x86_64"):
+            with self.subTest(arch=arch):
+                self.assertEqual(samply.resolve(arch, False)[0], "samply")
 
     def test_the_arch_asked_about_is_the_userspace_not_the_kernel(self):
         """A lib32 image reports aarch64 from `uname -m` and has no 64-bit loader, so the
@@ -453,16 +437,51 @@ class TestProfilerChoice(WkTest):
         self.assertIn("elf_arch(", stage)
 
     def test_armv7_falls_to_the_image_sysprof(self):
-        cp = self.resolve("armv7l", "yes")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.split()[0], "sysprof")
+        self.assertEqual(samply.resolve("armv7l", True)[0], "sysprof")
 
     def test_armv7_without_sysprof_refuses_and_names_both_remedies(self):
-        cp = self.resolve("armv7l", "no")
-        self.assertEqual(cp.returncode, 1)
-        self.assertIn("sysprof-cli", cp.stdout)
-        self.assertIn("samply", cp.stdout)
+        tool, why = samply.resolve("armv7l", False)
+        self.assertIsNone(tool)
+        self.assertIn("sysprof-cli", why)
+        self.assertIn("samply", why)
 
+
+class TestSamplyFetchUnderADryRun(unittest.TestCase):
+    """samply.fetch (lib/wk/samply.py) fetches through task.fetch_pinned, whose curl is
+    an act_run and so a no-op under --dry-run. `wk bench run --dry-run`'s warmup-profiler
+    step (lib/wk/bench/board.py profiler_stage) then unpacks and installs what curl never
+    really downloaded -- if that unpack and install are plain `run`s, they fail for real
+    against a missing file, fetch() returns "", and board.py raises the barrier "samply
+    for X could not be fetched" on every dry run. A real run is unchanged: fetch_pinned's
+    curl, the unpack and the install all still run for real."""
+
+    def setUp(self):
+        os.environ["WK_DRY_RUN"] = "1"
+        self.addCleanup(os.environ.pop, "WK_DRY_RUN", None)
+
+    def fetch(self):
+        m = Fake("here")
+        binary = os.path.join(samply.store_dir("/cache", samply.triple("x86_64")), "samply")
+        m.answer(["test", "-x", binary], rc=1)
+        m.answer(["mktemp", "-d"], out="/tmp/samply-fake\n")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            found = samply.fetch(m, "/cache", "x86_64")
+        return found, binary, err.getvalue()
+
+    def test_it_carries_on_and_returns_what_it_would_install(self):
+        found, binary, err = self.fetch()
+        self.assertEqual(binary, found, "a dry run must not send board.py's profiler_stage "
+                         "into the 'could not be fetched' barrier")
+        self.assertIn("would run", err)
+        self.assertIn("curl", err)
+
+    def test_it_never_tries_to_unpack_what_curl_never_really_fetched(self):
+        """No answer is registered for `tar` or `install`: a real `machine.run` reaching
+        either would fail with 'no answer registered', which is exactly the bug -- an
+        unpack of a file that was never really downloaded."""
+        found, _, err = self.fetch()
+        self.assertTrue(found)
+        self.assertNotIn("would not unpack", err)
 
 
 class TestTheJitTierProbeIsOptIn(unittest.TestCase):

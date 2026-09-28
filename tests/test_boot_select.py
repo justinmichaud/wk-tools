@@ -6,21 +6,21 @@ Run: python3 tests/run.py --unit -k test_boot_select
 """
 import contextlib
 import io
-import re
 import sys
 import unittest
 
-from tests.support import REPO, bash, real_confs
+from tests.support import REPO, real_confs
 
 sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act  # noqa: E402
+from wk.boot.cli import load_conf  # noqa: E402
 from wk.boot.driver import RECORD, Driver  # noqa: E402
 from wk.boot.pi import DRIVERS, PiTryboot, Rpi5Usb  # noqa: E402
 from wk.machine import Result  # noqa: E402
 
 ONBOARD = REPO / "boot" / "onboard"
-CONF = {"NODE_NAME": "b", "NODE_DEVICE": "/dev/sda", "NODE_ROOT": "/dev/mmcblk0p2", "NODE_ROLE": "workstation"}
+CONF = {"name": "b", "device": "/dev/sda", "root": "/dev/mmcblk0p2", "role": "workstation"}
 
 
 class Channel:
@@ -48,7 +48,7 @@ def refused(fn, *args):
 
 
 def listing(*systems):
-    d = PiTryboot(REPO, dict(CONF, NODE_NAME="rpi4"), Channel())
+    d = PiTryboot(REPO, dict(CONF, name="rpi4"), Channel())
     d.systems = lambda: list(systems) if systems != (None,) else None
     return d
 
@@ -87,7 +87,7 @@ class TestMediumRead(unittest.TestCase):
     def test_a_bench_device_mounts_the_medium_itself(self):
         """its medium is often the disk it runs from, which the card helper refuses by design."""
         ch = Channel({"r_sudo": Result(0, "id-1\n")})
-        d = PiTryboot(REPO, dict(CONF, NODE_ROLE="bench-device"), ch)
+        d = PiTryboot(REPO, dict(CONF, role="bench-device"), ch)
         self.assertEqual(d.medium_read("/dev/mmcblk0p1", "wk-image.id"), "id-1\n")
         self.assertEqual(ch.calls[0][:2], ("r_sudo", "medium-read.sh"))
         self.assertEqual(ch.calls[0][2], {"WK_PART": "/dev/mmcblk0p1", "WK_NAME": "wk-image.id"})
@@ -187,7 +187,7 @@ class TestRpi5SelectsBetweenTwoSystems(unittest.TestCase):
 
 
 class TestEveryMachineConfLoads(unittest.TestCase):
-    """A conf `machine_load` cannot load is a machine that silently leaves the fleet."""
+    """A conf `load_conf` cannot load is a machine that silently leaves the fleet."""
 
     CONFS = real_confs("board", "mac", "guest")
 
@@ -195,17 +195,8 @@ class TestEveryMachineConfLoads(unittest.TestCase):
         self.assertTrue(self.CONFS, "no machine confs found")
         for conf in self.CONFS:
             with self.subTest(machine=conf.stem):
-                cp = bash(f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n. "{REPO}/boot/machines.sh"\nmachine_load {conf.stem}\n',
-                          env={"WK_MACHINES_DIR": str(REPO / "machines")})
-                self.assertEqual(cp.returncode, 0, f"machine_load {conf.stem} failed: {cp.stdout}{cp.stderr}")
-
-    def test_no_conf_invents_a_field_prefix(self):
-        """the loader defaults every field it knows, so a misspelled one reads as never set."""
-        for conf in self.CONFS:
-            with self.subTest(machine=conf.stem):
-                stray = [l for l in conf.read_text().splitlines()
-                         if re.match(r"[A-Z][A-Z0-9_]*=", l) and not l.startswith(("NODE_", "KIND="))]
-                self.assertEqual(stray, [], f"{conf.name} assigns fields outside NODE_")
+                got = load_conf(REPO, conf.stem, {"WK_MACHINES_DIR": str(REPO / "machines")})
+                self.assertEqual((got or {}).get("name"), conf.stem, f"load_conf {conf.stem} failed")
 
 
 class TestTheArmingRecordNeedsNoPrivilege(unittest.TestCase):

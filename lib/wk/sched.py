@@ -220,8 +220,9 @@ def summary(sched):
             + ["not run: %s: %s" % (s.id, s.command) for s in sched.skipped + sched.left])
 
 
-def wk_step(machine, wk, log_of, sid, on, needs, holds, done, words, target=""):
-    argv = (["env", "WK_TARGET=" + target] if target else []) + [wk] + list(words)
+def wk_step(machine, wk, log_of, sid, on, needs, holds, done, words, target="", env=()):
+    pairs = (["WK_TARGET=" + target] if target else []) + list(env)
+    argv = (["env"] + pairs if pairs else []) + [wk] + list(words)
     s = Step(sid, on, needs, holds, done, command=("WK_TARGET=%s " % target if target else "") + " ".join(["wk"] + list(words)))
     s.run = lambda: machine.act_run(["sh", "-c", LOGGED, "sh", log_of(s)] + argv).rc
     return s

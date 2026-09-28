@@ -456,8 +456,11 @@ v_grow() {
     local dev root; gate "${1:-}"; dev=$GATED_DEV; root=$(part "$dev" "$ROOTP")
     # A logical pair fills its zone, and growing to the disk's end eats its neighbour.
     [ "$ROOTP" -gt 4 ] || printf ', +\n' | sfdisk -N "$ROOTP" --no-reread --force "$dev" >/dev/null
-    partx -u "$dev" 2>/dev/null || partprobe "$dev" 2>/dev/null || true
-    e2fsck -fy "$root" >/dev/null 2>&1 || true
+    partx -u --nr "$ROOTP" "$dev" || fail "partx -u could not tell the kernel $root's new size"
+    # e2fsck exits 1 for errors it corrected; 4 and 8 leave the filesystem unfit to resize.
+    local rc=0
+    e2fsck -fy "$root" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -le 1 ] || fail "e2fsck -fy $root failed (exit $rc), so $root is not resized"
     resize2fs "$root" >/dev/null 2>&1 || fail "could not resize $root"
     say "$root grown to fill $dev"
 }
@@ -532,7 +535,8 @@ v_verify() {
 
 v_eject() {
     local dev; gate "${1:-}"; dev=$GATED_DEV
-    sync; blockdev --flushbufs "$dev" 2>/dev/null || true
+    sync
+    blockdev --flushbufs "$dev" || fail "blockdev --flushbufs $dev failed, so $dev is not flushed; do not pull it"
     say "$dev flushed"
 }
 

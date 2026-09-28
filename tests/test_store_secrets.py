@@ -1,7 +1,7 @@
 """The secrets directory is this device's own, and nothing crosses into the
 podman machine to reach it.
 
-The directory is this host's (wk_secrets_dir, lib/store.sh) and the machine
+The directory is this host's (Store.secrets_dir, lib/wk/store.py) and the machine
 mounts it read-only, so `wk key set`, `wk key ensure` and `wk push` are all
 answered here: storing a token or throwing the push switch needs no virtual
 machine running.
@@ -12,7 +12,9 @@ succeed, and the witness must never appear.
 
 Run: python3 -m unittest tests.test_store_secrets -v
 """
+import contextlib
 import inspect
+import io
 import os
 import subprocess
 import sys
@@ -23,6 +25,8 @@ from tests.test_wk_secrets import KEY_SH
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import guest  # noqa: E402
+from wk.machine import Local  # noqa: E402
+from wk.secrets import Secrets  # noqa: E402
 
 # Not a token, and deliberately nothing like one.
 PLACEHOLDER = "placeholder-value-for-this-test"
@@ -39,7 +43,7 @@ exit 1
 class _Here(WkTest):
     """A scratch secrets directory, a scratch store, and the witness.
 
-    wk_secrets_dir (lib/store.sh) reads WK_HOST_SECRETS on a macOS host and
+    Store.secrets_dir reads WK_HOST_SECRETS on a macOS host and
     $WK_STORE/secrets everywhere else, so the two names below are one
     directory and every assertion holds on either platform."""
 
@@ -84,32 +88,35 @@ class _Here(WkTest):
 
     def sh(self, script, env=None):
         with stub_path({"podman": FAKE_PODMAN}) as binp:
-            cp = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n' + KEY_SH + script,
-                      env=self.env({**(env or {}),
-                                    "PATH": f"{binp}:{os.environ['PATH']}"}))
+            cp = bash(KEY_SH + script, env=self.env({**(env or {}), "PATH": f"{binp}:{os.environ['PATH']}"}))
         return cp
+
+    def sec(self):
+        return Secrets(REPO, self.env(), Local())
+
+    def call(self, method, name):
+        """(answer, stderr) of one Secrets reader; lib/secretfile.py's refusal arrives on stderr."""
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            got = getattr(self.sec(), method)(name)
+        return got, err.getvalue()
 
 
 class TestTheStoreFunctionsReadAndWriteHere(_Here):
     def test_store_read_and_clear_round_trip(self):
-        cp = self.sh(
-            f'printf "%s\\n" {PLACEHOLDER} | key_store claude\n'
-            'printf "stored=[%s]\\n" "$(wk_agent_secret claude)"\n'
-            'key_clear claude\n'
-            'printf "cleared=[%s]\\n" "$(wk_agent_secret claude)"\n')
+        cp = self.sh(f'printf "%s\\n" {PLACEHOLDER} | key_store claude')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn(f"stored=[{PLACEHOLDER}]", cp.stdout)
-        self.assertIn("cleared=[]", cp.stdout)
+        self.assertEqual(PLACEHOLDER + "\n", self.sec().cred_read("claude"))
+        cp = self.sh('key_clear claude')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual("", self.sec().cred_read("claude"))
         self.assertFalse(self.witness.exists(), cp.stderr)
 
     def test_the_path_is_the_host_directory_and_not_the_store(self):
-        cp = self.sh('printf "path=%s\\n" "$(wk_agent_secret_path claude)"\n'
-                     'printf "keys=%s\\n" "$(wk_secrets_dir)"\n'
-                     'printf "held=%s\\n" "$(wk_push_held_dir)"\n')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn(f"path={self.secrets}/claude-token", cp.stdout)
-        self.assertIn(f"keys={self.secrets}", cp.stdout)
-        self.assertIn(f"held={self.secrets.parent}/push-keys", cp.stdout)
+        sec = self.sec()
+        self.assertEqual(f"{self.secrets}/claude-token", sec.cred_path("claude"))
+        self.assertEqual(str(self.secrets), sec.secrets_dir())
+        self.assertEqual(f"{self.secrets.parent}/push-keys", sec.held_dir())
 
     def test_a_deploy_key_is_read_from_here_too(self):
         """From the directory nothing mounts, which is where every private half
@@ -117,9 +124,7 @@ class TestTheStoreFunctionsReadAndWriteHere(_Here):
         held = self.secrets.parent / "push-keys"
         held.mkdir(parents=True)
         (held / "build_key_fork").write_text(f"{PLACEHOLDER}-fork\n")
-        from wk.machine import Local
-        from wk.secrets import Secrets
-        sec = Secrets(REPO, self.env(), Local())
+        sec = self.sec()
         self.assertEqual(f"{PLACEHOLDER}-fork\n", sec.read(sec.push_key_path("fork")))
 
     def test_the_github_token_is_beside_the_private_halves(self):
@@ -128,12 +133,9 @@ class TestTheStoreFunctionsReadAndWriteHere(_Here):
         held = self.secrets.parent / "push-keys"
         held.mkdir(parents=True)
         (held / "github-pat").write_text(f"{PLACEHOLDER}-pat\n")
-        cp = self.sh('printf "path=%s\\nvalue=[%s]\\n" '
-                     '"$(wk_github_pat_path)" "$(wk_cred_read github-pat)"')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn(f"path={held}/github-pat", cp.stdout)
-        self.assertIn(f"value=[{PLACEHOLDER}-pat]", cp.stdout)
-        self.assertFalse(self.witness.exists(), cp.stderr)
+        sec = self.sec()
+        self.assertEqual(f"{held}/github-pat", sec.github_pat_path())
+        self.assertEqual(f"{PLACEHOLDER}-pat\n", sec.cred_read("github-pat"))
 
 
 class TestKeyEnsureRunsHere(_Here):
@@ -240,84 +242,72 @@ class TestNothingButAFileIsReadOrWrittenThroughAgentRw(_Here):
         self.token.write_text(self.REAL + "\n")
         self.cred = self.agent_rw / ".credentials.json"
 
-    def path(self):
-        cp = self.sh(f'wk_agent_secret_path {self.NAME}')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.strip()
-
     def entry_points(self):
-        """One shell line per reader and writer of one of these paths, each
-        run on its own so a refusal in one cannot be mistaken for another's."""
-        return {
-            "wk_cred_read":
-                f'wk_cred_read {self.NAME}',
-            "wk_agent_secret":
-                f'wk_agent_secret {self.NAME}',
-            "wk_agent_secret_present":
-                f'wk_agent_secret_present {self.NAME}',
-            "key_store":
-                f'printf "%s\\n" replacement | key_store {self.NAME}',
-        }
+        """Each reader and writer of one of these paths, as (succeeded, stdout, stderr), each run on its own so
+        a refusal in one cannot be mistaken for another's. A refused read answers None."""
+        def reader(method):
+            got, err = self.call(method, self.NAME)
+            return got is not None, "" if got is None else str(got), err
+
+        def key_store():
+            cp = self.sh(f'printf "%s\\n" replacement | key_store {self.NAME}')
+            return cp.returncode == 0, cp.stdout, cp.stderr
+        return {"cred_read": lambda: reader("cred_read"), "cred_stored": lambda: reader("cred_stored"),
+                "key_store": key_store}
 
     def test_the_row_really_does_live_in_the_writable_directory(self):
         """Otherwise everything below is testing the wrong path."""
-        self.assertEqual(str(self.cred), self.path())
+        self.assertEqual(str(self.cred), self.sec().cred_path(self.NAME))
 
     def test_a_symlink_out_of_it_is_refused_by_every_entry_point(self):
         self.cred.symlink_to(self.token)
-        for name, script in self.entry_points().items():
+        for name, run in self.entry_points().items():
             with self.subTest(entry=name):
-                cp = self.sh(script)
-                self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-                self.assertNotIn(self.REAL, cp.stdout + cp.stderr)
-                self.assertIn("not a file", cp.stderr)
-                self.assertIn(str(self.cred), cp.stderr)
+                ok, out, err = run()
+                self.assertFalse(ok, out + err)
+                self.assertNotIn(self.REAL, out + err)
+                self.assertIn("not a file", err)
+                self.assertIn(str(self.cred), err)
         self.assertEqual(self.REAL + "\n", self.token.read_text(),
                          "the write went through the link to the token")
 
     def test_an_absolute_symlink_is_refused_the_same_way(self):
         self.cred.symlink_to(str(self.token))
-        cp = self.sh(self.entry_points()["wk_cred_read"])
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertNotIn(self.REAL, cp.stdout)
+        ok, out, err = self.entry_points()["cred_read"]()
+        self.assertFalse(ok, out + err)
+        self.assertNotIn(self.REAL, out)
 
     def test_a_hard_link_to_the_token_is_refused_by_every_entry_point(self):
         """O_NOFOLLOW cannot see this one: it is the same inode under a second
         name, and only st_nlink says so."""
-        import os
         os.link(self.token, self.cred)
-        for name, script in self.entry_points().items():
+        for name, run in self.entry_points().items():
             with self.subTest(entry=name):
-                cp = self.sh(script)
-                self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-                self.assertNotIn(self.REAL, cp.stdout + cp.stderr)
-                self.assertIn("hard links", cp.stderr)
+                ok, out, err = run()
+                self.assertFalse(ok, out + err)
+                self.assertNotIn(self.REAL, out + err)
+                self.assertIn("hard links", err)
         self.assertEqual(self.REAL + "\n", self.token.read_text())
 
     def test_a_directory_in_its_place_is_refused(self):
         self.cred.mkdir()
-        cp = self.sh(self.entry_points()["wk_agent_secret_present"])
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("not a regular file", cp.stderr)
+        got, err = self.call("cred_stored", self.NAME)
+        self.assertIsNone(got, err)
+        self.assertIn("not a regular file", err)
 
     def test_a_plain_file_reads_writes_and_reports_present(self):
         """The refusal is about what a workspace could put there, and the
         ordinary path is untouched: the credential still round-trips."""
         doc = "{-a-: 1}"
-        cp = self.sh(f'printf "%s" "{doc}" | key_store {self.NAME}\n'
-                     f'if wk_agent_secret_present {self.NAME}; then echo present; fi\n'
-                     f'printf "bytes=[%s]\\n" "$(wk_cred_read {self.NAME})"')
+        cp = self.sh(f'printf "%s" "{doc}" | key_store {self.NAME}')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("present", cp.stdout)
-        self.assertIn(f"bytes=[{doc}]", cp.stdout)
+        self.assertIs(True, self.call("cred_stored", self.NAME)[0])
+        self.assertEqual(doc + "\n", self.call("cred_read", self.NAME)[0])
         self.assertEqual(0o600, self.cred.stat().st_mode & 0o777)
 
     def test_a_missing_one_is_absent_and_not_a_refusal(self):
-        cp = self.sh(f'if wk_agent_secret_present {self.NAME}; then echo yes; else echo no; fi\n'
-                     f'printf "bytes=[%s]\\n" "$(wk_cred_read {self.NAME})"')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("no", cp.stdout)
-        self.assertIn("bytes=[]", cp.stdout)
+        self.assertIs(False, self.call("cred_stored", self.NAME)[0])
+        self.assertEqual("", self.call("cred_read", self.NAME)[0])
 
     def test_a_refused_path_stops_a_guests_start_rather_than_arriving_empty(self):
         """lib/wk/guest.py copies a value row into a guest, so a path its reader
@@ -344,16 +334,15 @@ class TestNoForwardingIsLeftInTheSource(unittest.TestCase):
     def test_the_library_hops_for_the_agent_and_for_nothing_else(self):
         """The credentials are read here. The ssh-agent and the injector are on
         the machine that runs the workspaces -- there is nowhere else they
-        could be -- so push_agent_exec is the one place that reaches it, and
+        could be -- so Secrets.agent_argv is the one place that reaches it, and
         the secrets reader is not."""
-        text = (REPO / "lib" / "store.sh").read_text()
-        self.assertEqual(1, text.count("podman machine ssh"))
-        exec_fn = text[text.index("push_agent_exec() {"):]
-        exec_fn = exec_fn[:exec_fn.index("\n}\n")]
-        self.assertIn("podman machine ssh", exec_fn)
-        reader = text[text.index("_wk_secret_read() {"):]
-        reader = reader[:reader.index("\n}\n")]
-        self.assertNotIn("podman", reader)
+        text = (REPO / "lib" / "wk" / "secrets.py").read_text()
+        hop = '"podman", "machine", "ssh"'
+        self.assertEqual(1, text.count(hop))
+        self.assertIn(hop, inspect.getsource(Secrets.agent_argv))
+        for reader in (Secrets.read, Secrets.cred_read, Secrets.cred_stored):
+            with self.subTest(reader=reader.__name__):
+                self.assertNotIn("podman", inspect.getsource(reader))
 
     def test_the_dispatcher_no_longer_forwards_push(self):
         decls = subprocess.run([str(REPO / "wk"), "--declarations"],
@@ -367,15 +356,15 @@ class TestNoForwardingIsLeftInTheSource(unittest.TestCase):
         self.fail("push is not declared")
 
     def test_the_secrets_directory_has_one_definition(self):
-        """Two spellings of one directory, both from wk_secrets_dir: a command
+        """Two spellings of one directory, both from Store.secrets_dir: a command
         that spelled `$WK_STORE/secrets` itself would be right in the VM and
         wrong on the host that mounts it there."""
-        text = (REPO / "lib" / "store.sh").read_text()
-        self.assertEqual(1, text.count("wk_secrets_dir() {"))
+        text = (REPO / "lib" / "wk" / "store.py").read_text()
+        self.assertEqual(1, text.count("def secrets_dir(self):"))
         for f in ("cmd/key", "cmd/push"):
             with self.subTest(script=f):
                 body = (REPO / f).read_text()
-                # The mount source in targets/container.sh is the container's
+                # The container's mount source (lib/wk/targets.py) is its own
                 # view and stays store-relative; these read the files.
                 self.assertNotIn('$WK_STORE/secrets', body)
                 self.assertNotIn('$WK_STORE/push-keys', body)

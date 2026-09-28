@@ -2,6 +2,7 @@
 macOS put on it by startosinstall with a provisioning package, and provisioned from inside it. It is built when
 the install carries /etc/wk-image, the marker a board's image carries. Every step acts on the Mac it runs on."""
 
+import argparse
 import json
 import os
 import plistlib
@@ -13,14 +14,16 @@ from xml.parsers.expat import ExpatError
 from wk import act, fleet, images
 from wk.act import Refused, die, info, log, warn
 from wk.clock import Clock
-from wk.quiet import DESKTOP, HOSTS, Quiesce, lib_argv
+from wk.images import MARKER
+from wk.kv import kv
+from wk.machine import lib_argv
+from wk.quiet import DESKTOP, HOSTS, Quiesce
 from wk.store import Store
 from wk.sysimage import task
 from wk.sysimage.mactailnet import Tailnet
 
 NEED_GB = 120   # the room the host install keeps: both installs share the container, and a full one stops both
 BENCH_PASSWORD = "benchbench"   # public, so anyone at the console has passwordless sudo: the install holds no user data
-MARKER = "/etc/wk-image"
 FIRSTBOOT = "/Library/LaunchDaemons/com.wk.bench-firstboot.plist"
 FIRSTBOOT_LOG = "/var/log/wk-bench-firstboot.log"
 PAYLOAD_DIR = "usr/local/share/wk-bench"
@@ -116,7 +119,7 @@ class MacVolume:
         self.clock = clock or Clock()
         self.root = str(root or images.root(env))
         self.name, self.machine = profile["IMG_PROFILE"], profile["IMG_MACHINE"]
-        self.volume = (fleet.Fleet(self.root, env).load(self.machine) or {}).get("NODE_VOLUME", "")
+        self.volume = (fleet.Fleet(self.root, env).load(self.machine) or {}).get("volume", "")
         self.tailnet = Tailnet(machine, env, self.root)
         self.need_gb = int(env.get("WK_BENCH_NEED_GB") or NEED_GB)
 
@@ -140,7 +143,7 @@ class MacVolume:
     def tty(self, argv, what):
         """A command whose prompt and progress are the person's to see."""
         if act.dry_run():
-            log("would run: %s" % " ".join(shlex.quote(a) for a in argv))
+            log("would run: %s" % shlex.join(argv))
             return
         if not self.m.run_tty(argv).ok:
             die(what)
@@ -168,21 +171,18 @@ class MacVolume:
         return [self.s + MARKER] if self.installed() and self.m.exists(self.s + MARKER) else []
 
     def marker_id(self, path):
-        for line in self.m.read(path).splitlines():
-            if line.startswith("id="):
-                return line[3:]
-        return "?"
+        return kv(self.m.read(path)).get("id", "?")
 
     def build(self, rest):
-        o = task.options(rest, ACTIONS + ("--dry-run",), ("--version",), USAGE % self.name)
+        o = task.options(rest, ACTIONS, ("--version",), USAGE % self.name)
         actions = [a for a in ACTIONS if o.get(a)]
         if len(actions) > 1:
             die("one action at a time (got %s)" % " and ".join(actions))
         if self.m.run(["uname", "-s"]).out.strip() != "Darwin":
             die("%s is built on the Mac itself -- it acts on the machine's own disk.\n"
-                "    From another machine, the lane that drives it is:  wk bench mac <ws>" % self.name)
+                "    From another machine, the bench run that drives it is:  wk bench run <ws> <plan> --system %s" % (self.name, self.machine))
         if not self.volume:
-            die("machines/%s.conf declares no NODE_VOLUME, so there is no volume to build %s on" % (self.machine, self.name))
+            die("machines/%s.conf declares no volume, so there is no volume to build %s on" % (self.machine, self.name))
         if act.dry_run():
             info("--dry-run: nothing on this machine will be changed")
         version = o.get("--version") or ""
@@ -523,11 +523,11 @@ def main(argv, env=None, machine=None):
     """`stage-payload <root>`: the bench install converging itself, as root (lib/wk/bench/autorun.py)."""
     from wk.machine import here
     env = os.environ if env is None else env
+    parser = argparse.ArgumentParser(prog="python3 -m wk.sysimage.macvolume")
+    parser.add_subparsers(dest="verb", required=True).add_parser("stage-payload").add_argument("root")
+    root = parser.parse_args(argv).root
     try:
-        if argv[:1] == ["stage-payload"] and len(argv) == 2:
-            stage_payload(machine or here(), images.root(env), argv[1], False, env)
-        else:
-            die("usage: python3 -m wk.sysimage.macvolume stage-payload <root>", 2)
+        stage_payload(machine or here(), images.root(env), root, False, env)
     except Refused as e:
         return e.status
     return 0

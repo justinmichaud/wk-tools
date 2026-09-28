@@ -75,11 +75,11 @@ class TestHardwareSection(unittest.TestCase):
     def test_names_every_fleet_device_and_its_driver(self):
         out = run("help", "hardware").stdout
         self.assertTrue(out.startswith("## Hardware"), out[:200])
-        confs = [c for c in sorted((REPO / "machines").glob("*.conf")) if "\nNODE_DRIVER=" in c.read_text()]
+        confs = [c for c in sorted((REPO / "machines").glob("*.conf")) if re.search(r"^kind=(board|mac|guest)$", c.read_text(), re.M)]
         self.assertTrue(confs)
         for conf in confs:
             name = conf.stem
-            driver = re.search(r"^NODE_DRIVER=(\S+)", conf.read_text(), re.M).group(1)
+            driver = re.search(r"^driver=(\S+)", conf.read_text(), re.M).group(1)
             with self.subTest(machine=name):
                 self.assertIn(f"**{name}", out, f"{name} has no paragraph in the hardware section")
                 self.assertIn(f"`{driver}`", out, f"{name}'s driver {driver} is not named")

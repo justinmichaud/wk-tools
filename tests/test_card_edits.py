@@ -613,7 +613,7 @@ class TestNothingIsEditedOnTheDrivingMachine(unittest.TestCase):
         "_card_root_spec", "_root_line", "disk_write_dd", "disk_verify_dd",
     )
     TOOLS = ("mtype", "mcopy", "mtools", "debugfs", "sfdisk", "e2fsck", "resize2fs")
-    PATHS = (WRITE, REPO / "lib" / "image.sh", REPO / "boot" / "disk.sh")
+    PATHS = (WRITE, REPO / "lib" / "wk" / "sysimage" / "disk.py", REPO / "lib" / "wk" / "images.py")
 
     def _code(self, path):
         """The file with its comment lines dropped: a tool named in prose is
@@ -670,7 +670,7 @@ class TestDryRunIsTheSameSteps(unittest.TestCase):
             for name, *args in self.STEPS:
                 with self.subTest(step=name):
                     w = write.Write(REPO, {}, Fake(), None)
-                    w.conf, w.ch = {"NODE_NAME": "testmach"}, self.Refuse()
+                    w.conf, w.ch = {"name": "testmach"}, self.Refuse()
                     with contextlib.redirect_stderr(io.StringIO()) as err:
                         getattr(w, name)(*args)
                     self.assertRegex(err.getvalue(), r"(?m)^\s*would ")
@@ -970,6 +970,56 @@ class TestRescueHelper(CardEditTest):
         self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
         self.assertIn("--stage quiesce", cp.stderr)
         self.assertFalse((self.root / "usr").exists(), "nothing is written on a refusal")
+
+
+class TestGrowAndEjectReportTheirFailures(CardEditTest):
+    """A failed step exits non-zero naming the step: e2fsck's uncorrected (4) and operational (8)
+    exits, a partition table the kernel was not told about, and a flush that did not happen."""
+
+    def tools(self, **rc):
+        """Every tool v_grow and v_eject run, exiting with the status `rc` names (0 otherwise)."""
+        return {t: "exit %d\n" % rc.get(t, 0) for t in ("sfdisk", "partx", "e2fsck", "resize2fs", "blockdev", "sync")}
+
+    def grow(self, **rc):
+        with stub_path(self.tools(**rc)) as binp:
+            return self.run_helper(_lift(CARD_PRIV, "v_grow") + "\nv_grow /dev/sdX\n", path=binp)
+
+    def eject(self, **rc):
+        with stub_path(self.tools(**rc)) as binp:
+            return self.run_helper(_lift(CARD_PRIV, "v_eject") + "\nv_eject /dev/sdX\n", path=binp)
+
+    def test_a_clean_or_corrected_filesystem_is_grown(self):
+        for code in (0, 1):
+            with self.subTest(e2fsck=code):
+                cp = self.grow(e2fsck=code)
+                self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+                self.assertIn("grown to fill /dev/sdX", cp.stdout)
+
+    def test_an_uncorrected_or_failed_check_is_a_failure_naming_e2fsck(self):
+        for code in (4, 8):
+            with self.subTest(e2fsck=code):
+                cp = self.grow(e2fsck=code)
+                self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
+                self.assertIn("e2fsck", cp.stderr)
+                self.assertIn("exit %d" % code, cp.stderr)
+                self.assertNotIn("grown", cp.stdout)
+
+    def test_a_table_the_kernel_was_not_told_about_is_a_failure_naming_partx(self):
+        cp = self.grow(partx=1)
+        self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("partx", cp.stderr)
+        self.assertNotIn("grown", cp.stdout)
+
+    def test_a_flushed_card_says_so(self):
+        cp = self.eject()
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("/dev/sdX flushed", cp.stdout)
+
+    def test_a_failed_flush_is_a_failure_and_never_claims_flushed(self):
+        cp = self.eject(blockdev=1)
+        self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("blockdev --flushbufs", cp.stderr)
+        self.assertNotIn("flushed", cp.stdout)
 
 
 if __name__ == "__main__":

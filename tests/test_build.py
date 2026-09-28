@@ -1,31 +1,29 @@
 """`wk build`: help/list surface, the reproducible `running:` command line,
-per-target WK_BUILD_ARGS defaults (and --no-defaults), and lib/resources.sh's
+per-target build_args defaults (and --no-defaults), and lib/wk/resources.py's
 readings. The configs themselves are tests/test_buildconf.py's. Each docstring is the phrase of the behaviour it
 checks.
 
 Nothing here builds WebKit or touches real hardware: --dry-run, a
-FakeWorkspace (an empty directory standing in for a checkout), and direct
-calls into lib/resources.sh cover the logic without it.
+FakeWorkspace (an empty directory standing in for a checkout), and
+lib/wk/resources.py against a fake machine cover the logic without it.
 
 Run: python3 -m unittest tests.test_build -v
 """
 import contextlib
 import io
-import os
 import platform
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import (FLEET_ENV, REAL_MACHINES, REPO, WkTest, bash, fake_workspace,
-                           podman_vm_ssh, requires_podman_vm, run, stub_path)
+from tests.support import (FLEET_ENV, REAL_MACHINES, REPO, WkTest, fake_workspace,
+                           container_side, requires_container_target, run)
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import fleet, resources  # noqa: E402
+from wk import buildconf, fleet, resources, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
@@ -48,7 +46,7 @@ class TestHelpAndList(WkTest):
         # The header's whole point for this defect: it says what --list and
         # --dry-run actually do, not just that they exist.
         self.assertIn("running:", cp.stdout)
-        self.assertIn("WK_BUILD_ARGS", cp.stdout)
+        self.assertIn("build_args", cp.stdout)
 
 
 class TestDryRunRunningLine(WkTest):
@@ -86,8 +84,8 @@ class TestDryRunRunningLine(WkTest):
 
 
 class TestTargetBuildArgsDefaults(unittest.TestCase):
-    """Item 2: a target's conf can set WK_BUILD_ARGS, the same mechanism
-    WK_TARGET_CMAKE already uses (machines/<name>.conf, load_target).
+    """Item 2: a target's conf can set build_args (WK_BUILD_ARGS), the same mechanism
+    cmake (WK_TARGET_CMAKE) already uses (machines/<name>.conf, load_target).
     Exercised at the two points that actually implement it, rather than
     through a full `wk new --target <remote>` (which needs a real machine):
     load_target's conf read here, buildconf.build_env's use of it in
@@ -95,53 +93,33 @@ class TestTargetBuildArgsDefaults(unittest.TestCase):
     """
 
     def test_load_target_reads_WK_BUILD_ARGS_from_conf(self):
-        """load_target sources a target's WK_BUILD_ARGS the same way as WK_TARGET_CMAKE"""
+        """Registry.load carries a target's build_args into WK_BUILD_ARGS the same way as cmake"""
         name = "wk-test-build-args-probe"
-        # A registry of this one machine (WK_MACHINES_DIR, lib/target.sh):
-        # the conf load_target reads is the behaviour under test, and the real
-        # machines/ is left alone.
+        # A registry of this one machine (WK_MACHINES_DIR): the real machines/ is left alone.
         registry = Path(tempfile.mkdtemp(prefix="wk-test-registry-"))
         self.addCleanup(shutil.rmtree, registry, True)
         (registry / f"{name}.conf").write_text(
-            'KIND=build\nWK_TARGET_KIND=remote\n'
-            'WK_REMOTE_HOST=nonexistent.invalid\n'
-            'WK_BUILD_ARGS="--no-fatal-warnings --extra-flag"\n'
+            'kind=build\ndriver=remote\n'
+            'host=nonexistent.invalid\n'
+            'build_args="--no-fatal-warnings --extra-flag"\n'
         )
-        cp = bash(f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/resources.sh"
-. "{REPO}/lib/store.sh"
-. "{REPO}/lib/target.sh"
-load_target "{name}"
-echo "WK_BUILD_ARGS=[$WK_BUILD_ARGS]"
-''', env={"WK_MACHINES_DIR": str(registry)})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("WK_BUILD_ARGS=[--no-fatal-warnings --extra-flag]", cp.stdout)
+        t = targets.Registry(REPO, dict(FLEET_ENV, WK_MACHINES_DIR=str(registry)), Fake()).load(name)
+        self.assertEqual("--no-fatal-warnings --extra-flag", t.env["WK_BUILD_ARGS"])
 
 
 class TestStaleLoadAverage(unittest.TestCase):
     """Item 3(b): a killed build's dead compilers keep the 1-minute load
-    average elevated for up to a minute. build_jobs treats a high load
+    average elevated for up to a minute. Budget.jobs treats a high load
     average as stale (and halves it) only when the memory envelope already
     looks idle -- the signature of a kill, not of a second build genuinely
     running (which would also be holding memory)."""
 
-    def _jobs(self, script_env):
-        env = "\n".join(f'{k}={v}' for k, v in script_env.items())
-        cp = bash(f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/resources.sh"
-{env}
-build_jobs polite
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return int(cp.stdout.strip())
+    def _jobs(self, cores, avail_mb, load):
+        return resources.Budget(Fake(), {}).jobs(cores, avail_mb, 1536, load=load)
 
     def test_stale_load_with_idle_memory_is_discounted(self):
         """high load + memory-idle machine -- not clamped to the load's face value"""
-        stale = self._jobs({"WK_CGROUP_CORES": 10, "WK_AVAIL_MB": 100000, "WK_LOAD": 9})
+        stale = self._jobs(10, 100000, 9)
         # Without the fix this would be 1 (10 cores - 9 load, still under the
         # half-a-box cap); the memory envelope says the machine is idle, so
         # the stale load is halved instead of trusted outright.
@@ -149,66 +127,25 @@ build_jobs polite
 
     def test_genuine_load_with_matching_memory_use_still_throttles(self):
         """high load + memory actually in use -- the load is trusted, not discounted"""
-        busy = self._jobs({"WK_CGROUP_CORES": 20, "WK_AVAIL_MB": 23040, "WK_LOAD": 18})
+        busy = self._jobs(20, 23040, 18)
         self.assertEqual(busy, 2, "a genuinely busy machine's load was discounted")
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-# The one round trip _remote_probe_cmd (targets/remote.sh) makes, answered as
-# the Linux build machine every conf in machines/ describes.
-FAKE_SSH_PROBE = r'''#!/bin/sh
-cat <<'EOF'
-/home/builder
-Linux
-80
-0.00 0.00 0.00 1/1 1
-===MEM===
-MemTotal:       131072000 kB
-MemAvailable:    65536000 kB
-===IONICE===
-yes
-EOF
-'''
 
 
 class TestARealHostConfReachesTheBuildFlags(WkTest):
     """The two machine-decided defaults, read the way a build reads them: a
-    conf in machines/, loaded by load_target, then config_load. The
-    per-config tests above set the variables directly; this is the path that
-    proves a conf's field actually arrives -- buildbox4 is the machine whose
-    fields differ from every other's.
+    conf in machines/, loaded by the registry, then resolved by buildconf.
+    The per-config tests in tests/test_buildconf.py set the variables
+    directly; this is the path that proves a conf's field actually arrives --
+    buildbox4 is the machine whose fields differ from every other's.
 
-    A remote target's platform is a reading of the machine and not a field of
-    its conf (t_os, one ssh round trip), so `ssh` here is a stub that answers
-    it: the conf, load_target and config_load are the real ones, and an audit
-    of what this repo ships does not wait on a shared box being up."""
+    A remote target's platform is a reading of the machine, not a field of
+    its conf; every conf in machines/ is a Linux build machine, so the
+    platform is given as linux and nothing waits on a shared box being up."""
 
     def _cmake(self, target, config="jsc-release"):
-        script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/resources.sh"
-. "{REPO}/lib/store.sh"
-. "{REPO}/lib/target.sh"
-load_target {target} >/dev/null 2>&1
-. "{REPO}/build/configs.sh"
-config_load {config} "$(t_os)"
-echo "KIND=$CFG_KIND"
-echo "CMAKE=$CFG_CMAKE"
-'''
-        with stub_path({"ssh": FAKE_SSH_PROBE}) as binp:
-            cp = bash(script, env={
-                "WK_MACHINES_DIR": str(REAL_MACHINES),
-                "XDG_STATE_HOME": str(self.tmp / "state"),
-                "PATH": f"{binp}:{os.environ['PATH']}",
-            })
-        assert cp.returncode == 0, cp.stdout + cp.stderr
-        out = dict(l.split("=", 1) for l in cp.stdout.strip().splitlines()
-                   if l.startswith(("KIND=", "CMAKE=")))
-        return out["KIND"], out["CMAKE"]
+        env = dict(FLEET_ENV, WK_MACHINES_DIR=str(REAL_MACHINES), XDG_STATE_HOME=str(self.tmp / "state"))
+        t = targets.Registry(REPO, env, Fake()).load(target)
+        return t.kind, buildconf.resolve(config, "linux", t.kind, t.env).cmake
 
     def test_buildbox4s_conf_turns_libcxx_off_and_libbacktrace_with_it(self):
         """Both come from that machine being a `remote` target with no libc++
@@ -232,14 +169,6 @@ echo "CMAKE=$CFG_CMAKE"
 
 
 # `sysctl -n <name>`: every reading lib/wk/resources.py takes on a Mac.
-FAKE_SYSCTL = r"""#!/bin/sh
-case "$2" in
-hw.ncpu)                  echo 12 ;;
-hw.memsize)               echo 17179869184 ;;
-vm.loadavg)               echo '{ 3.41 2.20 1.90 }' ;;
-*) exit 1 ;;
-esac
-"""
 SYSCTL = {"hw.ncpu": "12\n", "hw.memsize": "17179869184\n", "vm.loadavg": "{ 3.41 2.20 1.90 }\n"}
 
 
@@ -250,10 +179,8 @@ class TestAReadingTheMachineWillNotGive(WkTest):
     fed into arithmetic instead, an empty one is an error several frames away
     from the sysctl or /proc file that was missing.
 
-    Which spelling reads the machine is $(wk_os)'s answer in the bash shim, so
-    the macOS arm is driven through it here by defining wk_os -- not is_macos,
-    which tests/test_machine_mounts.py defines to drive a macOS *stage* on Linux.
-    The refusals are read against a fake machine on either platform."""
+    Which spelling reads the machine is the platform's, so each arm is driven
+    against a fake machine on either platform."""
 
     def res(self, os_name, sysctl=None, files=None, env=None, nproc=None):
         m = Fake()
@@ -270,26 +197,16 @@ class TestAReadingTheMachineWillNotGive(WkTest):
         self.assertNotIn("Traceback", err.getvalue())
         return err.getvalue()
 
-    def test_each_reading_comes_from_the_kernel_the_shim_names(self):
-        """The macOS arms, driven through wk_os: 16 GiB is 16384 MB, and a
-        load average of 3.41 is three cores already spoken for."""
-        with stub_path({"sysctl": FAKE_SYSCTL}) as binp:
-            cp = bash(f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n. "{REPO}/lib/resources.sh"\n'
-                      'wk_os() { echo macos; }\nprintf "%s %s %s\\n" "$(host_cores)" "$(host_mem_mb)" "$(host_load)"',
-                      env={"PATH": f"{binp}:{os.environ['PATH']}"})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual("12 16384 3", cp.stdout.strip())
+    def test_each_reading_comes_from_the_kernel_the_platform_names(self):
+        """The macOS arms: 16 GiB is 16384 MB, and a load average of 3.41 is
+        three cores already spoken for."""
+        r = self.res("macos", SYSCTL)
+        self.assertEqual((12, 16384, 3), (r.host_cores(), r.host_mem_mb(), r.host_load()))
 
-    @unittest.skipUnless(platform.system() == "Linux", "reads this machine's real nproc and /proc")
     def test_the_linux_arms_answer_from_proc_and_nproc(self):
-        cp = bash(f'. "{REPO}/lib/common.sh"\n. "{REPO}/lib/resources.sh"\n'
-                  'printf "%s %s %s\\n" "$(host_cores)" "$(host_mem_mb)" "$(host_load)"')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        cores, mem, load = cp.stdout.split()
-        self.assertEqual(cores, subprocess.run(["nproc"], capture_output=True,
-                                               text=True, check=True).stdout.strip())
-        self.assertGreater(int(mem), 0)
-        self.assertRegex(load, r"^[0-9]+$")
+        r = self.res("linux", nproc="8\n", files={"/proc/meminfo": "MemTotal:       16777216 kB\n",
+                                                   "/proc/loadavg": "2.70 1.00 0.50 1/100 42\n"})
+        self.assertEqual((8, 16384, 2), (r.host_cores(), r.host_mem_mb(), r.host_load()))
 
     def test_a_core_count_that_did_not_come_back_refuses_and_names_it(self):
         self.assertIn("the core count (nproc)", self.refusal(self.res("linux").host_cores))
@@ -305,7 +222,8 @@ class TestAReadingTheMachineWillNotGive(WkTest):
         env = {"WK_CGROUP_CORES": "12", "WK_AVAIL_MB": "100000", "WK_MB_PER_JOB": "1000"}
         r = self.res("macos", SYSCTL, env=env)
         # 12 cores, load 3.41 -> 3 spoken for, and never more than half a box.
-        self.assertEqual(6, resources.build_jobs(r, resources.Budget(r.machine, env), [], polite=True))
+        self.assertEqual(6, resources.Budget(r.machine, env).jobs(r.cores(), r.avail_mem_mb(), r.mb_per_job(),
+                                                                  load=r.load()))
 
     def test_free_memory_on_a_mac_is_the_total_less_the_reserve(self):
         self.assertEqual(12288, self.res("macos", SYSCTL, env={"WK_RESERVE_MB": "4096"}).avail_mem_mb())
@@ -330,29 +248,29 @@ class TestAReadingTheMachineWillNotGive(WkTest):
 
 
 class TestSdkImageCarriesLibbacktrace(unittest.TestCase):
-    """USE_LIBBACKTRACE=ON is the container/vm/local default (_cfg_use_
-    libbacktrace, build/configs.sh) on the assumption that the external
-    wkdev SDK image (targets/container.sh, WK_SDK_REPO) carries the library --
+    """USE_LIBBACKTRACE=ON is the container/vm/local default (LIBBACKTRACE,
+    lib/wk/buildconf.py) on the assumption that the external wkdev SDK
+    image (targets.SDK_REPO) carries the library --
     not recorded anywhere in this repo, so checked directly against whatever
-    image is already pulled onto the podman VM this repo drives. Read-only:
+    image the container target already has. Read-only:
     it inspects an already-pulled image, it never creates a workspace."""
 
-    @requires_podman_vm()
+    @requires_container_target()
     def test_sdk_image_has_libbacktrace(self):
-        img_cp = podman_vm_ssh(
+        img_cp = container_side(
             "podman images --format '{{.Repository}}:{{.Tag}}' "
             "| grep '^ghcr.io/igalia/wkdev-sdk:' | head -1"
         )
         img = img_cp.stdout.strip()
         if not img:
-            self.skipTest("no ghcr.io/igalia/wkdev-sdk image pulled on the podman VM")
-        cp = podman_vm_ssh(
+            self.skipTest("no ghcr.io/igalia/wkdev-sdk image pulled for the container target")
+        cp = container_side(
             f"podman run --rm {img} sh -c "
             "'pkg-config --exists libbacktrace || test -f /usr/include/backtrace.h'"
         )
         self.assertEqual(cp.returncode, 0,
             f"the wkdev SDK image ({img}) carries no libbacktrace -- "
-            f"USE_LIBBACKTRACE=ON (build/configs.sh, container/vm/local kinds) "
+            f"USE_LIBBACKTRACE=ON (lib/wk/buildconf.py, container/vm/local kinds) "
             f"would fail to configure: {cp.stdout}{cp.stderr}")
 
 
@@ -401,3 +319,7 @@ class TestJobCountNeverReachesACompilerLine(unittest.TestCase):
         }
         self.assertEqual(set(lines), allowed,
             f"build-in-target.sh's uses of the job count changed: {lines}")
+
+
+if __name__ == "__main__":
+    unittest.main()

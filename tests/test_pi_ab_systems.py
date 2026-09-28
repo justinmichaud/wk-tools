@@ -77,8 +77,26 @@ class TestTheLegsSystem(SystemBootTest):
     def test_a_board_that_arms_only_from_its_rescue_goes_back_to_it_first(self):
         ab = self.ab()
         self.assertTrue(self.boot(ab, "sys-b"), self.err)
-        self.assertEqual(self.landed, [self.w.board.conf["NODE_ROOT"], SYS_B])
+        self.assertEqual(self.landed, [self.w.board.conf["root"], SYS_B])
         self.assertEqual(self.armings(), 1)
+
+    def test_a_failed_back_transition_is_retried_not_ignored(self):
+        """A `back()` refusal used to be followed by `answered()` as if it had
+        landed; now it is warned about and retried like any other failed transition."""
+        ab = self.ab()
+        real_transition, calls = ab.transition, []
+
+        def flaky(verb, want=""):
+            if verb == "back":
+                calls.append(1)
+                if len(calls) == 1:
+                    return False
+            return real_transition(verb, want)
+        ab.transition = flaky
+        self.assertTrue(self.boot(ab, "sys-b"), self.err)
+        self.assertIn("could not send", self.err)
+        self.assertEqual(self.landed, [self.w.board.conf["root"], SYS_B])
+        self.assertEqual(2, len(calls))
 
     def test_the_rescue_is_armed_from_directly(self):
         ab = self.ab(running="/dev/mmcblk0p2")

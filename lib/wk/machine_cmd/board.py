@@ -5,15 +5,15 @@ import sys
 
 from wk import act
 from wk.act import die, info, log, warn
+from wk.sudo import CARD_PRIV
 
-# admin/wk-card-priv's own destination convention.
-CARD_HELPER_FILES = (("admin/wk-card-priv", "/usr/local/libexec/wk-card-priv"),
+CARD_HELPER_FILES = (("admin/wk-card-priv", CARD_PRIV),
                       ("boot/check-boot-files.py", "/usr/local/libexec/wk-check-boot-files.py"))
 
 
 class BoardMachines:
     def setup_board(self, name, conf):
-        dest = conf.get("NODE_SSH") or name
+        dest = conf.get("ssh") or name
         ok, why = self.answers(name, conf)
         if not ok:
             if not act.dry_run():
@@ -34,7 +34,7 @@ class BoardMachines:
         return 0
 
     def rm_board(self, name, conf, path):
-        dest = conf.get("NODE_SSH") or name
+        dest = conf.get("ssh") or name
         ok, why = self.answers(name, conf)
         if not ok:
             warn("cannot reach %s (%s) -- the card helper stays on it." % (dest, why))

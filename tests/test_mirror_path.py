@@ -1,4 +1,4 @@
-"""Where a checkout fetches from, per target: t_mirror_dir (lib/target.sh).
+"""Where a checkout fetches from, per target: Target.mirror_dir (lib/wk/targets.py).
 
 A fetch in a workspace is either local -- against a bare mirror that already
 carries every upstream -- or four fetches of four upstreams over that
@@ -13,8 +13,8 @@ So each driver names its own mirror once and every command asks the driver.
 This holds each of the four to naming one, and holds the commands to asking
 rather than spelling it again.
 
-Hermetic: the drivers are sourced and asked, the way tests/test_target_os.py
-asks each of them for t_os. No container, guest, machine or network.
+Hermetic: the drivers are made over a fake machine and asked. No container,
+guest, machine or network.
 
 Run: python3 -m unittest tests.test_mirror_path -v
 """
@@ -27,64 +27,51 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, repo_files, WkTest, bash, fake_workspace, stub_path
+from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, git, images, pr, sync, targets  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from wk.machine import Fake, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 
 DRIVERS = ("container", "vm", "remote", "local")
 
-# uname is the only evidence a workspace has about which kind it is
-# (targets/local.sh), so both of that driver's arms are reachable from here.
-UNAME = '''#!/bin/sh
-case "$1" in
-  -s) echo %s ;;
-  -m) echo arm64 ;;
-  *)  echo %s ;;
-esac
-'''
+
+def _probe(argv, fake):
+    """A build box that answers the probe (home, uname, cores) and names no shared reference checkout in its MOTD."""
+    return Result(0, "" if "motd" in argv[-1] else "/home/box\nLinux\n4\n0.1 0 0\n===MEM===\nMemAvailable: 1024 kB\n===IONICE===\nno\n")
 
 
-def _ask(target, env=None, body="t_mirror_dir demo"):
-    cp = bash(f'''
-set -euo pipefail
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target {target} >/dev/null 2>&1
-{body}
-''', env=env)
-    assert cp.returncode == 0, cp.stdout + cp.stderr
-    return cp.stdout.strip()
+def _driver(kind, env=None, system="Darwin"):
+    """`kind` made over a fake machine on a host whose `uname -s` is `system`; the answer is asked inside the stub,
+    since LocalWorkspace reads uname when asked (it is the only evidence a workspace has about its kind)."""
+    fake = Fake("here")
+    fake.react(["sh", "-c"], _probe)
+    env = dict({"HOME": "/nonexistent", "WK_STORE": "/the/store", "XDG_STATE_HOME": "/state",
+                "WK_MARKER": "/nonexistent/marker"}, **(env or {}))
+    with mock.patch("wk.targets.os.uname", return_value=mock.Mock(sysname=system)), \
+         mock.patch("wk.store.os.uname", return_value=mock.Mock(sysname=system)):
+        return targets.Registry(REPO, env, fake).load(kind).mirror_dir()
 
 
 class TestEveryDriverNamesOne(WkTest):
     def setUp(self):
         super().setUp()
-        # A build box driven without ssh (WK_REMOTE_LOCAL, targets/remote.sh),
-        # and a workspace that is not one (a marker naming a checkout).
+        # A build box driven without ssh (WK_REMOTE_LOCAL), in a registry of its own.
         self.registry = self.tmp / "hosts"
         self.registry.mkdir()
-        self.root = self.tmp / "remote-root"
         (self.registry / "fakebox.conf").write_text(
-            "KIND=build\nWK_TARGET_KIND=remote\n"
-            "WK_REMOTE_LOCAL=1\n"
-            f"WK_REMOTE_ROOT={self.root}\n"
-            f"WK_REMOTE_STORE={self.tmp / 'remote-store'}\n"
-        )
+            "kind=build\ndriver=remote\nlocal=1\n"
+            f"root={self.tmp / 'remote-root'}\n"
+            f"store={self.tmp / 'remote-store'}\n")
 
     def _mirror(self, target):
         if target == "remote":
-            return _ask("fakebox", env={"WK_MACHINES_DIR": str(self.registry),
-                                        "XDG_STATE_HOME": str(self.tmp / "state")})
+            return _driver("fakebox", {"WK_MACHINES_DIR": str(self.registry)})
         if target == "local":
-            with fake_workspace() as ws:
-                return _ask("local", env=ws.env())
-        return _ask(target)
+            return _driver("local", system="Linux")
+        return _driver(target)
 
     def test_each_of_the_four_names_a_mirror(self):
         """The default is empty -- a driver that has one says so, and one that
@@ -97,10 +84,7 @@ class TestEveryDriverNamesOne(WkTest):
     def test_the_default_is_no_mirror_rather_than_somebody_elses_path(self):
         """Inheriting a path would give a new driver a mirror it does not have,
         and a fetch against a directory that is not there."""
-        cp = bash('set -euo pipefail\n. "$WK_ROOT/lib/common.sh"\n'
-                  '. "$WK_ROOT/lib/target.sh"\nt_mirror_dir demo\n')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "")
+        self.assertEqual("", targets.Target("demo", str(REPO), {}, Fake("here")).mirror_dir())
 
     def test_the_three_machines_name_three_different_mirrors(self):
         """A container's is this machine's, bind-mounted at its own path; a
@@ -109,13 +93,8 @@ class TestEveryDriverNamesOne(WkTest):
         got = {t: self._mirror(t) for t in ("container", "vm", "remote")}
         self.assertEqual(len(set(got.values())), 3, got)
 
-    def test_a_containers_mirror_is_the_one_its_driver_named_in_the_environment(self):
-        """The alternates of a `--shared` snapshot are the machine's own path,
-        so the container is handed that path and mounts the mirror there --
-        which only the machine's driver knows (the flags it is created with are
-        tests/test_wk_targets.py's)."""
-        self.assertEqual(_ask("container", env={"WK_MIRROR": "/some/store/git/WebKit.git"}),
-                         "/some/store/git/WebKit.git")
+    def test_a_build_boxs_is_under_its_own_root(self):
+        self.assertEqual(str(self.tmp / "remote-root" / "mirror"), self._mirror("remote"))
 
     def test_a_guests_mirror_is_the_hosts_on_the_share_the_guest_mounts(self):
         """macOS automounts every tart share under one directory, so the path
@@ -128,28 +107,16 @@ class TestEveryDriverNamesOne(WkTest):
 
 
 class TestAWorkspaceAnswersForTheKindItIs(WkTest):
-    """targets/local.sh runs in both kinds of workspace and each has its
-    mirror somewhere else, so it answers from the same evidence t_os does."""
-
-    def _in_workspace(self, uname_s):
-        with fake_workspace() as ws, \
-             stub_path({"uname": UNAME % (uname_s, uname_s)}) as binp:
-            return _ask("local", env=ws.env({
-                "PATH": f"{binp}:{os.environ['PATH']}",
-            })), str(ws.ws_dir / "WebKit")
+    """LocalWorkspace runs in both kinds of workspace and each has its
+    mirror somewhere else, so it answers from `uname -s`."""
 
     def test_in_a_container_it_is_the_path_the_container_driver_named(self):
-        with fake_workspace() as ws, \
-             stub_path({"uname": UNAME % ("Linux", "Linux")}) as binp:
-            got = _ask("local", env=ws.env({
-                "PATH": f"{binp}:{os.environ['PATH']}",
-                "WK_MIRROR": "/some/store/git/WebKit.git",
-            }))
-        self.assertEqual(got, "/some/store/git/WebKit.git")
+        """The container is created with WK_MIRROR set to its driver's answer (tests/test_wk_targets.py)."""
+        self.assertEqual("/some/store/git/WebKit.git",
+                         _driver("local", {"WK_MIRROR": "/some/store/git/WebKit.git"}, system="Linux"))
 
     def test_in_a_guest_it_is_the_share_the_vm_driver_names(self):
-        got, _ = self._in_workspace("Darwin")
-        self.assertEqual(got, _ask("vm"))
+        self.assertEqual(_driver("vm"), _driver("local"))
 
 
 class MirrorFixture(WkTest):
@@ -317,7 +284,7 @@ class TestABranchIsTakenFromTheMirrorFirst(MirrorFixture):
 
     def test_a_target_with_no_mirror_asks_origin_and_nothing_else(self):
         step = self._step("main", "")
-        self.assertEqual(step.strip(), "git fetch -q origin 'main'")
+        self.assertEqual(step.strip(), "git fetch -q origin main")
 
     def test_both_callers_use_it(self):
         text = (REPO / "lib" / "wk" / "build.py").read_text()
@@ -327,8 +294,8 @@ class TestABranchIsTakenFromTheMirrorFirst(MirrorFixture):
 
 class TestWhatTheMirrorCarries(WkTest):
     """mirror_branches (lib/wk/git.py) is what origin is narrowed to, and
-    the narrowing is the point: WebKit/WebKit advertises 924 heads. A lane
-    reads its release branch from the mirror and from nowhere else
+    the narrowing is the point: WebKit/WebKit advertises 924 heads. An image
+    workspace reads its release branch from the mirror and from nowhere else
     (lib/wk/sysimage/yocto.py), so the list is main plus the branch of every image
     configuration this checkout defines on origin -- derived from the
     configurations, never a second list to keep in step with them."""
@@ -364,23 +331,17 @@ class TestWhatTheMirrorCarries(WkTest):
         self.assertEqual(self._branches(env={"WK_MIRROR_BRANCHES": "main only/this"}),
                          ["main", "only/this"])
 
-    def test_the_bash_name_is_the_same_list(self):
-        cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; wk_mirror_branches',
-                  env={"WK_MIRROR_BRANCHES": ""})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.split(), self._branches())
-
 
 class TestTheCommandsAskTheDriver(unittest.TestCase):
-    """Every command that fetches a workspace's mirror reads t_mirror_dir;
+    """Every command that fetches a workspace's mirror asks Target.mirror_dir;
     only the drivers name a path. One path spelled into several commands is
     fixed in one of them and wrong in the rest."""
 
     # lib/wk/git.py takes the mirror directory as an argument from those
     # callers and never resolves one itself, and `wk pr` fetches the one ref
     # from the upstream rather than through any mirror -- so neither has a
-    # t_mirror_dir call to make, and both are still held to spelling no path.
-    SPELLS_NO_PATH = ("lib/store.sh", "lib/wk/git.py", "lib/wk/pr.py", "cmd/pr", "lib/wk/workspace.py",
+    # mirror_dir call to make, and both are still held to spelling no path.
+    SPELLS_NO_PATH = ("lib/wk/store.py", "lib/wk/git.py", "lib/wk/pr.py", "cmd/pr", "lib/wk/workspace.py",
                       "lib/wk/sync.py", "lib/wk/build.py")
 
     def test_no_command_spells_a_mirror_path_of_its_own(self):
@@ -407,60 +368,46 @@ class TestTheCommandsAskTheDriver(unittest.TestCase):
     def test_each_mirror_path_is_spelled_in_exactly_one_place(self):
         """A driver *answers* for a mirror; it does not spell one. Two of the
         four share each answer -- the driver that mounts the mirror in, and
-        targets/local.sh answering from inside a workspace of that kind -- so
-        both paths live in lib/target.sh and every driver calls them."""
-        target_sh = (REPO / "lib" / "target.sh").read_text()
-        for func in ("mirror_in_container", "mirror_in_guest", "guest_share_dir"):
-            with self.subTest(func=func):
-                self.assertRegex(target_sh, rf"(?m)^{func}\(\)\s*\{{")
-        for rel in ("targets/local.sh", "targets/container.sh"):
-            with self.subTest(file=rel):
-                self.assertNotIn("/mirror/WebKit.git", (REPO / rel).read_text(),
-                                 f"{rel} spells the container mirror instead of asking")
-                self.assertIn("mirror_in_container", (REPO / rel).read_text())
-        for rel in ("targets/local.sh", "targets/vm.sh"):
-            with self.subTest(file=rel):
-                self.assertIn("mirror_in_guest", (REPO / rel).read_text(),
-                              f"{rel} spells the guest mirror itself")
-                self.assertNotIn("My Shared Files", (REPO / rel).read_text(),
-                                 f"{rel} spells the automount directory itself")
+        LocalWorkspace answering from inside a workspace of that kind -- so
+        the guest's is one constant and the container's is Store.mirror."""
+        text = (REPO / "lib" / "wk" / "targets.py").read_text()
+        self.assertEqual(1, text.count("/mirror/WebKit.git"), "the guest mirror is spelled twice")
+        self.assertEqual((targets.GUEST_MIRROR, targets.GUEST_MIRROR), (_driver("vm"), _driver("local")))
+        mine = Store({"HOME": "/nonexistent", "WK_STORE": "/the/store", "WK_IN_VM": "1"}).mirror()
+        self.assertEqual(mine, _driver("container", {"WK_IN_VM": "1"}))
 
     def test_only_a_driver_names_a_path(self):
-        named = sorted(
-            f.relative_to(REPO).as_posix() for f in repo_files()
-            if f.suffix not in (".py", ".pyc")
-            and "t_mirror_dir() {" in f.read_text(errors="replace"))
-        self.assertEqual(named, ["lib/target.sh", "targets/container.sh",
-                                 "targets/local.sh", "targets/remote.sh",
-                                 "targets/vm.sh"], named)
+        named = sorted(n for n, c in vars(targets).items() if isinstance(c, type) and "mirror_dir" in vars(c))
+        self.assertEqual(["Container", "LocalWorkspace", "Remote", "Target", "Vm"], named)
+        others = [p.relative_to(REPO).as_posix() for p in sorted((REPO / "lib" / "wk").rglob("*.py"))
+                  if p.name != "targets.py" and "def mirror_dir(" in p.read_text()]
+        self.assertEqual([], others)
 
 
 class TestOneMirrorPerMachine(WkTest):
-    """wk_mirror (lib/store.sh): a machine keeps one mirror,
+    """Store.mirror (lib/wk/store.py): a machine keeps one mirror,
     written where `wk sync` runs. On a macOS host that is the host's own state
     directory, which the podman VM mounts read-only at its store's git/ and
     every tart guest mounts as a share; in the VM the same bytes are read
     under $WK_STORE and never written. Elsewhere the store is the machine's
     own and the mirror sits in it."""
 
-    def _ask(self, body, macos, in_vm=False):
-        env = {"WK_STORE": "/var/lib/wk", "XDG_STATE_HOME": str(self.tmp / "state")}
+    def _ask(self, macos, in_vm=False):
+        env = {"WK_STORE": "/var/lib/wk", "XDG_STATE_HOME": str(self.tmp / "state"), "HOME": str(self.tmp)}
         if in_vm:
             env["WK_IN_VM"] = "1"
-        cp = bash(f'set -euo pipefail\n. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
-                  f'is_macos() {{ return {0 if macos else 1}; }}\n{body}\n', env=env)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.strip()
+        with mock.patch("wk.store.os.uname", return_value=mock.Mock(sysname="Darwin" if macos else "Linux")):
+            return Store(env).mirror()
 
     def test_a_macos_host_keeps_it_in_its_own_state_directory(self):
-        self.assertEqual(self._ask("wk_mirror", macos=True),
+        self.assertEqual(self._ask(macos=True),
                          f"{self.tmp}/state/wk/git/WebKit.git")
 
     def test_the_podman_vm_reads_the_hosts_under_its_store(self):
-        self.assertEqual(self._ask("wk_mirror", macos=True, in_vm=True), "/var/lib/wk/git/WebKit.git")
+        self.assertEqual(self._ask(macos=True, in_vm=True), "/var/lib/wk/git/WebKit.git")
 
     def test_a_linux_machine_keeps_it_in_its_store(self):
-        self.assertEqual(self._ask("wk_mirror", macos=False), "/var/lib/wk/git/WebKit.git")
+        self.assertEqual(self._ask(macos=False), "/var/lib/wk/git/WebKit.git")
 
     def test_nothing_fetches_into_the_mirror_from_the_podman_vm(self):
         """A pull request head is fetched into the mirror (`wk ab`), and the

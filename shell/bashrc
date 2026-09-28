@@ -154,7 +154,7 @@ if [ -s "$HISTFILE" ]; then
 fi
 unset _wk_hb_dir _wk_f
 
-# The prompt runs before every command, so nothing forks unless it must and nothing may block -- no ssh, no podman, no `wk status`. What this machine is comes from local evidence only, most-specific marker first: ~/.wk-workspace, which means this machine *is* a workspace and names it (lib/target.sh); ~/.wk-remote, the far end of a remote target, a shared build box; /etc/wk-image, a system wk built and booted for measuring, the same marker `wk boot --status` reads.
+# The prompt runs before every command, so nothing forks unless it must and nothing may block -- no ssh, no podman, no `wk status`. What this machine is comes from local evidence only, most-specific marker first: ~/.wk-workspace, which means this machine *is* a workspace and names it (lib/wk/targets.py's LocalWorkspace); ~/.wk-remote, the far end of a remote target, a shared build box; /etc/wk-image, a system wk built and booted for measuring, the same marker `wk boot --status` reads.
 _wk_ps_role=host
 _wk_ps_name=$( { hostname -s 2>/dev/null || echo '?'; } | tr '[:upper:]' '[:lower:]' )
 _wk_ps_ws=""
@@ -169,7 +169,7 @@ elif [ -f /etc/wk-image ]; then
   _wk_ps_role=bench
 fi
 
-_wk_ps_tasks=""   # the store targets/local.sh uses, and only a workspace has one
+_wk_ps_tasks=""   # the store a workspace's own records live in, and only a workspace has one
 [ "$_wk_ps_role" = ws ] && \
   _wk_ps_tasks="${WK_LOCAL_STORE:-${XDG_STATE_HOME:-$HOME/.local/state}/wk}/task"
 
@@ -282,7 +282,7 @@ unset WK_TOOLS_DIR
 alias clear="clear && printf '\033[3J'"   # scroll-back-clearing clear
 
 # --- 6b. The agents' credentials ---------------------------------------------
-# A workspace the host has given a credential starts able to use it: no /login, no browser, and no login Keychain -- which a macOS guest reached over ssh does not have unlocked anyway. Each file holds the raw value and nothing else, so a container can point it at the read-only /secrets mount and pick up a rotation without being rebuilt. The pairs are spelled out rather than read from wk_agent_secrets, this rc running on machines with no store and no wk library; tests/test_pi_agent.py holds the two lists to each other.
+# A workspace the host has given a credential starts able to use it: no /login, no browser, and no login Keychain -- which a macOS guest reached over ssh does not have unlocked anyway. Each file holds the raw value and nothing else, so a container can point it at the read-only /secrets mount and pick up a rotation without being rebuilt. The pairs are spelled out rather than read from lib/wk/secrets.py's AGENT_SECRETS, this rc running on machines with no store and no wk library; tests/test_pi_agent.py holds the two lists to each other.
 for _wk_sec in .wk-agent-token:CLAUDE_CODE_OAUTH_TOKEN .wk-litellm-key:LITELLM_API_KEY; do
   _wk_sec_file="$HOME/${_wk_sec%%:*}"
   _wk_sec_var="${_wk_sec#*:}"
@@ -296,7 +296,7 @@ for _wk_sec in .wk-agent-token:CLAUDE_CODE_OAUTH_TOKEN .wk-litellm-key:LITELLM_A
 done
 unset _wk_sec _wk_sec_file _wk_sec_var _wk_sec_val
 
-# The claude.ai login credential is a file the CLI rewrites in place, so it is not exported: the CLI is pointed at the directory every container on this machine shares (wk_agent_rw_dir), which also holds its `.storage-write` lock. A directory and not a symlink into it, the CLI writing through a temp file and a rename. Set only where a mount put one, or a workstation's own `claude` would look for a Keychain item under a name nothing wrote.
+# The claude.ai login credential is a file the CLI rewrites in place, so it is not exported: the CLI is pointed at the directory every container on this machine shares (Store.agent_rw_dir, lib/wk/store.py), which also holds its `.storage-write` lock. A directory and not a symlink into it, the CLI writing through a temp file and a rename. Set only where a mount put one, or a workstation's own `claude` would look for a Keychain item under a name nothing wrote.
 if [ -d /agent-rw ]; then
   export CLAUDE_SECURESTORAGE_CONFIG_DIR=/agent-rw
 fi

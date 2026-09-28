@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk ai claude|pi <workspace> [agent options] -- run a coding agent inside a workspace
-# wk: where=workspace name=required@2 ready=yes group=workspaces passthrough=tail
+# wk: where=workspace name=required@2 ready=yes group=workspaces passthrough=all verbs=claude,pi
 #
 # The workspace name comes first; everything after it is the agent's, verbatim.
 #
@@ -57,12 +57,12 @@ sys.path.insert(0, os.path.join(ROOT, "lib"))
 from wk import wall  # noqa: E402
 from wk.act import Refused, barrier, debug, die, info, log, warn  # noqa: E402
 from wk.doctor import Report  # noqa: E402
-from wk.machine import Local  # noqa: E402
-from wk.secrets import Secrets  # noqa: E402
+from wk.kv import kv  # noqa: E402
+from wk.machine import HAVE, Local  # noqa: E402
+from wk.secrets import Secrets, first_line  # noqa: E402
 from wk.targets import Registry, show  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
 
-AGENTS = ("claude", "pi")
 NOT_INTACT = ("the sandbox around '%s' is not intact (see above), and relaxed\n"
               "    permissions are only defensible while it is.")
 # A shared box's `claude` on PATH can be an npm install under too old a node.
@@ -114,12 +114,12 @@ def pi_node_ok(version):
     return True
 
 
-def pi_models(endpoint):
+def pi_models(endpoint, ids):
     return json.dumps({"providers": {"litellm": {
         "baseUrl": endpoint,
         "api": "openai-completions",
         "apiKey": "$LITELLM_API_KEY",
-        "models": [{"id": "REPLACE-WITH-A-MODEL-THIS-ENDPOINT-SERVES"}],
+        "models": [{"id": i} for i in ids],
     }}}, indent=2)
 
 
@@ -170,7 +170,7 @@ class Ai:
 
     def push_switch(self, verb):
         argv = [os.path.join(self.root, "wk"), "push", verb] + (["--target", self.push_target] if self.push_target else [])
-        return (self.machine.run(argv) if verb == "status" else self.machine.act_run(argv)).rc
+        return self.machine.run(argv) if verb == "status" else self.machine.act_run(argv)
 
     def push_status_line(self):
         return "wk push status" + (" --target %s" % self.push_target if self.push_target else "")
@@ -179,7 +179,7 @@ class Ai:
         """In a workspace the measurement stands in for the switch, beside the sandbox probes (`checks`)."""
         if self.reg.in_workspace():
             return
-        st = self.push_switch("status")
+        st = self.push_switch("status").rc
         push_on = wall.push_verdict(st)
         if push_on == 0:
             return
@@ -188,15 +188,18 @@ class Ai:
                 "publish is\n    unknown. Run that command and fix what it names." % (self.push_status_line(), st, self.name))
         self.push_was_on = True
         warn("git push is ON -- turning it off while the agent runs in '%s'" % self.name)
-        if self.push_switch("off") != 0:
-            die("refusing to run: could not hold back the push keys ('%s')" % self.push_status_line())
+        off = self.push_switch("off")
+        if not off.ok:
+            said = (off.out + off.err).strip()
+            die("refusing to run: could not hold back the push keys ('%s')%s"
+                % (self.push_status_line(), "; it said:\n    " + said.replace("\n", "\n    ") if said else ""))
 
     def restore_push(self, terminal):
         if not self.push_was_on:
             return
         if not terminal:
             log("git push stays off (headless session; 'wk push on' when you want it back)")
-        elif self.push_switch("on") == 0:
+        elif self.push_switch("on").ok:
             info("git push turned back on")
         else:
             warn("could not turn git push back on -- 'wk push on'")
@@ -270,7 +273,7 @@ class Ai:
 
     def wall_available(self):
         """A builtin needs `sh -c`: a target's exec hands argv to an exec, not a shell (measured)."""
-        return self.exec(["sh", "-c", "command -v bwrap >/dev/null 2>&1"]).ok
+        return self.exec(list(HAVE) + ["bwrap"]).ok
 
     def workspace_config(self):
         """Onboarding, the trust dialog and the remote-control dialog, answered before a session waits on one."""
@@ -288,18 +291,17 @@ class Ai:
         r = self.exec(["bash", "-lc", PI_PROBE])
         if not r.ok:
             die("could not reach the checkout in '%s'" % self.name)
-        return dict(line.partition("=")[::2] for line in r.out.replace("\r", "").splitlines() if "=" in line)
+        return kv(r.out)
 
     def pi_ensure(self):
         name, probe = self.name, self.pi_probe()
         node, npm = probe.get("node", ""), probe.get("npm", "")
         if not npm or not pi_node_ok(node):
             die("'%s' has no node runtime pi can use: node %s, npm %s.\n    %s needs node >= %s and npm to install itself.\n"
-                "    This repository owns no Containerfile for the workspace image -- it is\n    ghcr.io/igalia/wkdev-sdk, "
-                "pulled pre-built -- so a runtime it lacks is\n    installed the way the workspace's other tools are: add a "
-                "pinned node\n    release to container/firstrun.sh beside the samply and helix installs\n    (fetch, checksum, "
-                "unpack into ~/.local), then 'wk rm %s' and 'wk new'.\n    On a build box or a macOS guest, install node >= %s "
-                "into your own\n    ~/.local there." % (name, node or "absent", npm or "absent", PI_PKG, PI_NODE_MIN, name, PI_NODE_MIN))
+                "    A container workspace gets Ubuntu's nodejs and npm from container/firstrun.sh:\n"
+                "    'sudo apt-get install nodejs npm' in there, or 'wk rm %s' and 'wk new'.\n"
+                "    On a build box or a macOS guest, install node >= %s into your own\n    ~/.local there."
+                % (name, node or "absent", npm or "absent", PI_PKG, PI_NODE_MIN, name, PI_NODE_MIN))
         if not probe.get("pi"):
             info("installing pi in '%s' (npm, into your own ~/.local)" % name)
             r = self.exec(["bash", "-lc", PI_INSTALL + shlex.quote(PI_PKG)])
@@ -317,20 +319,29 @@ class Ai:
         return probe["pi"]
 
     def pi_models(self):
-        name = self.name
-        if not Secrets(self.root, self.env, self.machine).cred_stored("litellm"):
+        name, sec = self.name, Secrets(self.root, self.env, self.machine)
+        if not sec.cred_stored("litellm"):
             log("no LiteLLM key on this machine ('wk key set litellm') and no")
             log("~/.pi/agent/models.json in '%s', so pi will ask you to /login" % name)
             return
         import credcheck
         endpoint = credcheck.LITELLM_ENDPOINT
-        write = "mkdir -p ~/.pi/agent && umask 077 && printf '%%s\\n' %s > ~/.pi/agent/models.json" % shlex.quote(pi_models(endpoint))
+        key = first_line(sec.cred_read("litellm"))
+        try:
+            ids = credcheck.litellm_models(key)
+            first = credcheck.litellm_callable(key, ids)
+        except credcheck.Unreachable as e:
+            die("could not ask %s which models the LiteLLM key may call (%s), so there is\n    no model to point pi at. "
+                "'wk key check litellm' asks again." % (endpoint, e))
+        if not first:
+            die("%s answers a completion from none of the %d chat model(s) it lists for the\n    stored LiteLLM key, so pi would "
+                "have nothing to call. 'wk key check litellm' says\n    what the endpoint makes of the key." % (endpoint, len(ids)))
+        ids = [first] + [i for i in ids if i != first]
+        write = "mkdir -p ~/.pi/agent && umask 077 && printf '%%s\\n' %s > ~/.pi/agent/models.json" % shlex.quote(pi_models(endpoint, ids))
         if not self.exec(["bash", "-c", write]).ok:
             die("could not write ~/.pi/agent/models.json in '%s'. By hand:\n        wk enter %s\n"
                 "        mkdir -p ~/.pi/agent && cat > ~/.pi/agent/models.json" % (name, name))
-        info("wrote ~/.pi/agent/models.json in '%s' ($LITELLM_API_KEY, %s)" % (name, endpoint))
-        log("  set the model id this endpoint serves:")
-        log("    wk enter %s -- ${EDITOR:-vi} ~/.pi/agent/models.json" % name)
+        info("wrote ~/.pi/agent/models.json in '%s' ($LITELLM_API_KEY, %s; %d model(s), %s first)" % (name, endpoint, len(ids), ids[0]))
 
     def remote_control(self):
         """A person's Claude session, not the babysitter's `-p`; a set token wins over the login and Remote Control refuses it."""
@@ -362,7 +373,7 @@ class Ai:
                 else:
                     info("starting %s in '%s' (%s; the workspace is the boundary)" % (self.agent, name, agent_bin))
                 words = prefix + [agent_bin] + mode + self.remote_control() + args
-                line = "cd %s && exec %s" % (shlex.quote(t.src(name)), " ".join(shlex.quote(w) for w in words))
+                line = "cd %s && exec %s" % (shlex.quote(t.src(name)), shlex.join(words))
                 # The babysitter's fix loop runs this under nohup with -p, where a terminal of its own would be demanded.
                 argv, cwd = t.exec_argv(name, ["env", "WK_AGENT=" + self.agent, "WK_WORKSPACE=" + name, "bash", "-lc", line],
                                         on_a_terminal())
@@ -395,11 +406,7 @@ class Ai:
 
 def main(argv, env=None, reg=None):
     env = os.environ if env is None else env
-    agent = argv[0] if argv else ""
-    if not agent:
-        die("usage: wk ai claude|pi <workspace> [agent options]; see wk ai -h")
-    if agent not in AGENTS:
-        die("unknown agent '%s'. This checkout knows: %s" % (agent, ", ".join(AGENTS)))
+    agent = argv[0]
     name = env.get("WK_NAME", "")
     require_name(name)
     reg = reg or Registry(ROOT, env, Local())

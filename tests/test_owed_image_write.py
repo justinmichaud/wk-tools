@@ -32,7 +32,7 @@ class TestASecondSystemKeepsTheRescuesIdentity(unittest.TestCase):
     def test_no_identity_is_generated_at_all(self):
         """The second system's partitions take their PARTUUIDs from the rescue already on the card."""
         w = write.Write(REPO, {}, Fake(), None, rand=lambda: self.fail("an identity was generated"))
-        w.conf, w.ch = {"NODE_NAME": "rpi3"}, None
+        w.conf, w.ch = {"name": "rpi3"}, None
         with contextlib.redirect_stderr(io.StringIO()) as err:
             w.unique_identity("/dev/sdX@second")
         self.assertIn("keeps the rescue disk's identity", err.getvalue())

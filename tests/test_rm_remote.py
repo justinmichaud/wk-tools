@@ -26,13 +26,13 @@ echo "Host key verification failed." >&2
 exit 255
 """
 
-_MACHINE_CONF = "KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_HOST={host}\n"
+_MACHINE_CONF = "kind=build\ndriver=remote\nhost={host}\n"
 
 _LOCAL_CONF = (
-    "KIND=build\nWK_TARGET_KIND=remote\n"
-    "WK_REMOTE_LOCAL=1\n"
-    "WK_REMOTE_ROOT={root}\n"
-    "WK_REMOTE_STORE={store}\n"
+    "kind=build\ndriver=remote\n"
+    "local=1\n"
+    "root={root}\n"
+    "store={store}\n"
 )
 
 
@@ -43,7 +43,7 @@ class TestAnUnreachableMachineKeepsItsRecord(WkTest):
         self.registry.mkdir()
         (self.registry / "fakebox.conf").write_text(_MACHINE_CONF.format(host="fakebox.invalid"))
         self.state = self.tmp / "state"
-        # The record `wk new --target fakebox` leaves here (WK_STORE, targets/remote.sh).
+        # The record `wk new --target fakebox` leaves here (its per-target store, Remote in lib/wk/targets.py).
         self.record = self.state / "wk" / "remote" / "fakebox" / "ws" / "fakews"
         self.record.mkdir(parents=True)
 

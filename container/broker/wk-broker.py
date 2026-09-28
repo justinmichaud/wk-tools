@@ -15,11 +15,13 @@ import time
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "lib"))
+from wk import act as wkact, fleet as wkfleet, images as wkimages, kv as wkkv, reach as wkreach, targets as wktargets  # noqa: E402
+from wk.boot import cli as bootcli  # noqa: E402
+from wk.machine import Local, replace_file  # noqa: E402
 from wk.notify import sd_notify  # noqa: E402
+from wk.store import Store  # noqa: E402
 
-WK_ROOT = os.environ.get(
-    "WK_ROOT", os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-)
+WK_ROOT = wkimages.root()
 
 # Which plans a workspace may spend an hour of a physical board on, unattended.
 ALLOWED_PLANS = {
@@ -54,84 +56,32 @@ class Refused(Exception):
         self.remedy = remedy
 
 
-_TIMED_OUT = object()                  # not the same answer as "no answer"
-
-
-def _bash(script, *args):
-    # Every fleet fact is derived from evidence by shell in this repo already.
-    cmd = ["bash", "-c", script, "wk-broker", *args]
-    env = _clean_env()
-    try:
-        out = subprocess.run(
-            cmd, cwd=WK_ROOT, env=env, capture_output=True, timeout=30
-        )
-    except subprocess.TimeoutExpired:
-        return _TIMED_OUT
-    return out.stdout.decode("utf-8", "replace")
-
-
-_MACHINES_SH = f'''
-set -euo pipefail
-WK_ROOT={json.dumps(WK_ROOT)}
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/boot/machines.sh"
-machine_declare
-'''
-
-# Two fragments under two ceilings, so a wedged tailscaled cannot also swallow the mDNS/ssh answer.
-_REACH_TAILNET_SH = f'''
-set -euo pipefail
-WK_ROOT={json.dumps(WK_ROOT)}
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/reach.sh"
-reach_tailnet "$1" || true
-'''
-
-_REACH_OTHER_SH = f'''
-set -euo pipefail
-WK_ROOT={json.dumps(WK_ROOT)}
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/reach.sh"
-reach_without_tailnet "$1" || true
-'''
-
-
 def fleet():
+    """machines/*.conf's bench machines, read the way `wk boot` reads them (lib/wk/boot/cli.py)."""
+    env = _clean_env()
     out = {}
-    declared = _bash(_MACHINES_SH)
-    if declared is _TIMED_OUT:
-        raise Refused(
-            "the fleet's own declarations could not be read in time "
-            "(machines/*.conf, through boot/machines.sh)",
-            "something is wrong on the workstation, not with the request -- "
-            "run 'wk boot --list' there",
-        )
-    for line in declared.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 5:
-            continue
-        name, role, mach_os, profile, note = parts[:5]
-        out[name] = {
-            "name": name,
-            "role": role or "workstation",
-            "os": mach_os or "any",
-            "profile": profile,
-            "note": note,
-        }
+    try:
+        names = wkfleet.Fleet(WK_ROOT, env).names(wkfleet.BENCH_KINDS)
+    except wkact.Refused:
+        raise Refused("a conf under machines/ does not parse (this broker's log names it)",
+                      "fix it on the workstation -- 'wk boot --list' there says which")
+    for name in names:
+        c = bootcli.load_conf(WK_ROOT, name, env)
+        if c:
+            out[name] = {"name": name, "role": c["role"], "os": c["os"],
+                         "profile": c.get("profile", ""), "note": c["note"]}
     return out
 
 
 def reach(machine):
-    ts = _bash(_REACH_TAILNET_SH, machine)
-    if ts is not _TIMED_OUT and ts.strip():
-        return f"tailnet: {ts.strip()}"
-    other = _bash(_REACH_OTHER_SH, machine)
-    if other is not _TIMED_OUT and other.strip():
-        return f"not on the tailnet: {other.strip()}"
-    slow = [n for n, v in (("tailscale", ts), ("ssh/mDNS", other)) if v is _TIMED_OUT]
-    if slow:
-        return "no route derived, and " + " and ".join(slow) + " did not answer in time"
-    return "no route derived (neither the tailnet nor ssh nor mDNS answered)"
+    r = wkreach.Reach(env=_clean_env())
+    ts = r.tailnet(machine)
+    if ts:
+        return f"tailnet: {ts}"
+    other = r.without_tailnet(machine)
+    if other:
+        return f"not on the tailnet: {other}"
+    return "no route derived (neither the tailnet nor ssh answered)"
 
 
 def host_os():
@@ -166,7 +116,7 @@ def want_bench_device(args):           # the central refusal every mutating verb
             sorted(k for k, v in machines.items() if v["role"] == "bench-device")
         ) or "(none)"
         raise Refused(
-            f"'{name}' is declared NODE_ROLE={m['role']}, not bench-device. This broker "
+            f"'{name}' is declared role={m['role']}, not bench-device. This broker "
             f"acts on bench devices only: a workspace that can reboot a workstation is "
             f"the sandbox escape it exists to prevent.",
             f"bench devices here: {benches}. To act on '{name}', run 'wk boot {name}' "
@@ -174,7 +124,7 @@ def want_bench_device(args):           # the central refusal every mutating verb
         )
     if m["os"] not in ("any", host_os()):
         raise Refused(
-            f"'{name}' is driven from a {m['os']} host only (NODE_OS in "
+            f"'{name}' is driven from a {m['os']} host only (os in "
             f"machines/{name}.conf), and this broker runs on {host_os()}",
             f"run the request against the broker on the {m['os']} workstation",
         )
@@ -225,37 +175,17 @@ def want_count(args):
     return str(n)
 
 
-def state_dir():
-    # `wk_state_dir` in lib/common.sh. Never $WK_STORE: on macOS that names the podman VM's store, a path this machine cannot even create.
-    return os.path.join(
-        os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")), "wk"
-    )
-
-
 def requests_dir():
-    return os.path.join(state_dir(), "broker")
+    return os.path.join(Store().state_dir(), "broker")
 
 
-def status_write(path, **fields):      # one key=value per line, read with kv_field (lib/common.sh)
-    tmp = f"{path}.tmp.{os.getpid()}"
+def status_write(path, **fields):
     fields.setdefault("updated", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
-    with open(tmp, "w") as f:
-        for k, v in fields.items():
-            f.write(f"{k}={v}\n")
-    os.replace(tmp, path)
+    replace_file(path, "".join(f"{k}={v}\n" for k, v in fields.items()))
 
 
 def status_read(path):
-    out = {}
-    try:
-        with open(path) as f:
-            for line in f:
-                k, _, v = line.strip().partition("=")
-                if k:
-                    out[k] = v
-    except OSError:
-        pass
-    return out
+    return wkkv.kv_file(path)
 
 
 def alive(pid):
@@ -348,7 +278,7 @@ def build_run(args):
     plan = want_plan(args)
     ws = want_name(
         "workspace", args.get("workspace"),
-        "name the workspace the run is recorded for (the lane whose slot is on the board)",
+        "name the workspace the run is recorded for (the image workspace whose slot is on the board)",
     )
     argv = [os.path.join(WK_ROOT, "wk"), "bench", "run", ws, plan, "--system", m["name"]]
     slot = want_slot(args)
@@ -405,7 +335,6 @@ class Broker:
             k for k, v in sorted(machines.items())
             if v["role"] == "bench-device" and v["os"] in ("any", host_os())
         ]
-        # Each of these can end in a tailscale query and an mDNS lookup, so they run concurrently rather than in a comprehension.
         where = await asyncio.gather(*(asyncio.to_thread(reach, n) for n in names))
         benches = {
             n: {
@@ -417,7 +346,7 @@ class Broker:
             for n, r in zip(names, where)
         }
         refused = {
-            k: f"NODE_ROLE={v['role']}"
+            k: f"role={v['role']}"
             for k, v in sorted(machines.items())
             if v["role"] != "bench-device"
         }
@@ -624,23 +553,12 @@ async def publish_into_machine(machine, local_sock):
     # On macOS the containers mount the podman guest's runtime directory, so the socket is carried in over a remote unix-socket forward the Mac dials itself; the guest's sshd will not replace an existing one, so remove it.
     while True:
         try:
-            def q(fmt):
-                return subprocess.run(
-                    ["podman", "machine", "inspect", machine, "--format", fmt],
-                    capture_output=True, timeout=30,
-                ).stdout.decode().strip()
-
-            port, key, user = q("{{.SSHConfig.Port}}"), q("{{.SSHConfig.IdentityPath}}"), q("{{.SSHConfig.RemoteUsername}}")
-            if not port or not key:
+            rec = wktargets.podman_vm(Local(), machine, timeout=30)
+            if rec is None:
                 raise OSError(f"podman machine '{machine}' is not there")
-            base = [
-                "ssh", "-q", "-p", port, "-i", key,
-                "-o", "StrictHostKeyChecking=no",  # a rekeyed loopback VM port
-                "-o", "UserKnownHostsFile=/dev/null",
-                "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=3",
-                "-o", "ExitOnForwardFailure=yes",
-                f"{user or 'core'}@localhost",
-            ]
+            opts, dest = wktargets.podman_vm_route(rec)
+            base = ["ssh", "-q", *opts, "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=3",
+                    "-o", "ExitOnForwardFailure=yes", dest]
             rt = subprocess.run(
                 base + ["printf %s \"$XDG_RUNTIME_DIR\""], capture_output=True, timeout=30
             ).stdout.decode().strip()
@@ -664,7 +582,7 @@ def socket_path():
     rt = os.environ.get("XDG_RUNTIME_DIR")
     if rt:
         return os.path.join(rt, "wk", "broker.sock")
-    return os.path.join(state_dir(), "broker.sock")   # macOS: no runtime dir
+    return os.path.join(Store().state_dir(), "broker.sock")   # macOS: no runtime dir
 
 
 async def main():

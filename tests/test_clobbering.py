@@ -1,24 +1,33 @@
 """Un-managed clobbering is detected, not silently trusted (CLAUDE.md rule
 5: when the record and the machine disagree, the machine wins and the
-command says so). Both tests here drive the *real* driver code
-(targets/container.sh's t_info/t_created, targets/vm.sh's t_info/t_created)
-against a stub `podman`/`tart` on PATH -- not a stub of t_info itself, which
-would only prove the contract lib/target.sh's ws_state already tests
-(tests/test_state.py's TestWsStateWords) -- so what is new here is that the
-*driver's own* translation of "the environment is gone" into `absent` is
-exercised for real, for the one case a person can actually produce by hand:
-`podman rm`/`tart delete` on a workspace whose creation had already
-finished.
+command says so). Both tests drive the real drivers in lib/wk/targets.py on
+the real local machine against a stub `podman`/`tart` on PATH, so the
+driver's own translation of "the environment is gone" into `broken` is
+exercised for the one case a person can produce by hand: `podman rm` /
+`tart delete` on a workspace whose creation had already finished.
 
 Run: python3 -m unittest tests.test_clobbering -v
 """
 import os
+import sys
 import unittest
+from unittest import mock
 
-from tests.support import REPO, WkTest, bash, rand_suffix, stub_path, temp_store
+from tests.support import REPO, WkTest, rand_suffix, stub_path, temp_store
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import targets  # noqa: E402
+from wk.store import Store  # noqa: E402
 
 
-class TestPodmanRmByHand(WkTest):
+class Clobbered(WkTest):
+    def state(self, kind, env, binp, name):
+        with mock.patch.dict(os.environ, {"PATH": "%s:%s" % (binp, os.environ["PATH"])}):
+            env = dict(env, HOME=str(self.tmp), PATH=os.environ["PATH"])
+            return targets.Registry(REPO, env=env).load(kind).state(name)
+
+
+class TestPodmanRmByHand(Clobbered):
     def test_a_container_removed_by_hand_reads_broken(self):
         # `inspect` failing is exactly what `podman rm <container>` leaves
         # behind: the workspace directory and its finished-creation marker
@@ -28,54 +37,26 @@ class TestPodmanRmByHand(WkTest):
             name = f"demo-{rand_suffix()}"
             ws = store["path"] / "ws" / name
             (ws / "home").mkdir(parents=True)
-            (ws / "home" / ".wk-ready").write_text("")
+            (ws / "home" / targets.READY_MARKER).write_text("")
             (ws / "base-id").write_text("deadbeef\n")
-
-            script = f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/store.sh"
-. "{REPO}/lib/target.sh"
-. "{REPO}/lib/detach.sh"
-load_target container >/dev/null 2>&1
-echo "state:$(ws_state {name})"
-'''
-            env = {"WK_STORE": str(store["path"]), "PATH": f"{binp}:{os.environ['PATH']}"}
-            cp = bash(script, env=env)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn(
-                "state:broken", cp.stdout,
-                f"a hand-removed container should read 'broken' (rule 5): {cp.stdout}",
-            )
+            st = self.state("container", {"WK_STORE": store["WK_STORE"], "WK_IN_VM": "1"}, binp, name)
+            self.assertEqual(st, "broken", "a hand-removed container should read 'broken' (rule 5)")
 
 
-class TestTartDeleteByHand(WkTest):
+class TestTartDeleteByHand(Clobbered):
     def test_a_guest_deleted_by_hand_reads_broken(self):
         # `tart list --format json` returning nothing for this VM is exactly
         # what `tart delete wk-<name>` leaves behind: the host-side
-        # workspace directory and its ready marker survive, the guest does
-        # not.
+        # workspace directory and its ready marker survive, the guest does not.
         fake_tart = 'case "$1" in list) echo "[]" ;; *) exit 1 ;; esac\n'
-        with temp_store() as store, stub_path({"tart": fake_tart}) as binp:
+        with temp_store() as store, stub_path({"tart": fake_tart}) as binp, \
+                mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True):
             name = f"demo-{rand_suffix()}"
             ws = store["path"] / "ws" / name
             ws.mkdir(parents=True)
-            (ws / ".wk-ready").write_text("")
-
-            script = f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/store.sh"
-. "{REPO}/lib/target.sh"
-. "{REPO}/lib/detach.sh"
-load_target vm >/dev/null 2>&1
-echo "state:$(ws_state {name})"
-'''
-            env = {"WK_VM_STORE": str(store["path"]), "PATH": f"{binp}:{os.environ['PATH']}"}
-            cp = bash(script, env=env)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn(
-                "state:broken", cp.stdout,
-                f"a hand-deleted guest should read 'broken' (rule 5): {cp.stdout}",
-            )
+            (ws / targets.READY_MARKER).write_text("")
+            st = self.state("vm", {"WK_VM_STORE": store["WK_STORE"]}, binp, name)
+            self.assertEqual(st, "broken", "a hand-deleted guest should read 'broken' (rule 5)")
 
 
 if __name__ == "__main__":

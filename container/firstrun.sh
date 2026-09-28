@@ -43,22 +43,13 @@ else
     log "         from here cannot resolve one -- 'wk push on' (or 'off') writes it"
 fi
 
-# stderr is kept: a lookup that failed and an answer of "nothing" are different faults, and one of them reads as the other in silence.
-_store_fn() { bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; . "$1/lib/target.sh"
-                       "$2" "${3:-}" "${4:-}"' _ "$WK_TOOLS" "$@"; }
+_git_py() { PYTHONPATH="$WK_TOOLS/lib" WK_ROOT="$WK_TOOLS" python3 -m wk.git "$@"; }
 
 if [ -d "$SRC/.git" ]; then             # an old snapshot's remotes are stale
-    if _mirror=$(_store_fn mirror_in_container); then
-        [ -n "$_mirror" ] \
-            || log "no mirror on this target, so every fetch in here reads github.com"
-    else
-        _mirror=""
-        warn "mirror_in_container failed, so where this machine keeps its mirror is not
-         known here and the wiring below reads github.com. 'wk sync' in the
-         workspace says what the checkout ended up with; '--fix' re-asserts it."
-    fi
-    _wiring=$(_store_fn wk_wiring_script "$SRC" "$_mirror") \
-        || { _wiring=""; warn "wk_wiring_script failed, so it wired nothing"; }
+    _mirror="${WK_MIRROR:-}"
+    [ -n "$_mirror" ] || log "no mirror on this target, so every fetch in here reads github.com"
+    _wiring=$(_git_py wiring-script "$SRC" "$_mirror") \
+        || { _wiring=""; warn "wk.git wiring-script failed, so it wired nothing"; }
     if [ -n "$_wiring" ] && sh -c "$_wiring"; then
         log "remotes: origin=WebKit/WebKit (push refused), forks added; fetches read ${_mirror:-github.com}"
     else
@@ -66,7 +57,7 @@ if [ -d "$SRC/.git" ]; then             # an old snapshot's remotes are stale
     fi
 
     # Through ensure-bridge.sh: it puts the egress proxy, the injector's CA and GITHUB_COM_* in the environment, and git-webkit needs all three.
-    _setup=$(_store_fn wk_gitwebkit_setup_script "$SRC") || _setup=""
+    _setup=$(_git_py gitwebkit-setup-script "$SRC") || _setup=""
     if [ -n "$_setup" ] \
         && _out=$("$WK_TOOLS/container/proxy/ensure-bridge.sh" sh -c "$_setup" </dev/null); then
         log "git-webkit: $_out"
@@ -76,8 +67,7 @@ if [ -d "$SRC/.git" ]; then             # an old snapshot's remotes are stale
     fi
 fi
 
-_claude=$(_store_fn wk_claude_cli_script) || _claude=""
-if [ -n "$_claude" ] && _out=$("$WK_TOOLS/container/proxy/ensure-bridge.sh" sh -c "$_claude" </dev/null); then
+if _out=$("$WK_TOOLS/container/proxy/ensure-bridge.sh" sh "$WK_TOOLS/container/claude-cli.sh" </dev/null); then
     log "Claude CLI: $_out"
 else
     log "claude install failed -- check egress; run the installer by hand"
@@ -129,7 +119,7 @@ if [ -n "${http_proxy:-}" ] && [ -n "${https_proxy:-}" ]; then
         warn "not writing $APT_PROXY_CONF: a proxy address here carries a quote or a
          semicolon ('$http_proxy', '$https_proxy'), which is apt.conf's own syntax --
          apt would read the rest of the line as further directives. Every apt step
-         below fails until the value targets/container.sh passes is fixed." ;;
+         below fails until the value lib/wk/targets.py's Container passes is fixed." ;;
     *)
         apt_proxy_conf | sudo tee "$APT_PROXY_CONF" >/dev/null
         log "apt goes through the workspace proxy ($http_proxy, $APT_PROXY_CONF)" ;;
@@ -137,7 +127,7 @@ if [ -n "${http_proxy:-}" ] && [ -n "${https_proxy:-}" ]; then
 else
     warn "http_proxy/https_proxy are not set in this workspace, so apt has no way
          out and every apt step below fails. The container is started without the
-         proxy environment targets/container.sh gives it: 'wk rm' and 'wk new'."
+         proxy environment lib/wk/targets.py's Container gives it: 'wk rm' and 'wk new'."
 fi
 
 _install_profilers() {                  # wrapped: not load-bearing
@@ -154,24 +144,21 @@ _install_profilers() {                  # wrapped: not load-bearing
         log "samply already present"
         return 0
     fi
-    # One version and one set of checksums for the fleet: lib/profiler.sh.
-    . "$WK_TOOLS/lib/profiler.sh"
-    local sarch sum tmp got  # samply ships no .deb
-    sarch=$(samply_triple "$(uname -m)")
-    if [ -z "$sarch" ]; then
+    local release ver sarch sum url tmp got  # samply ships no .deb
+    if ! release=$(PYTHONPATH="$WK_TOOLS/lib" python3 -m wk.samply release "$(uname -m)"); then
         warn "samply: no linux/$(uname -m) release published upstream (github.com/mstange/samply), skipping"
         return 0
     fi
-    sum=$(samply_sha256 "$sarch")
+    read -r ver sarch sum url <<< "$release"
     tmp=$(mktemp -d)
-    if curl -fsSL -o "$tmp/samply.tar.xz" "$(samply_url "$sarch")"; then
+    if curl -fsSL -o "$tmp/samply.tar.xz" "$url"; then
         got=$(sha256sum "$tmp/samply.tar.xz" | awk '{print $1}')
         if [ "$got" = "$sum" ] \
            && tar -xJf "$tmp/samply.tar.xz" -C "$tmp" \
            && sudo install -m 0755 "$tmp/samply-${sarch}/samply" /usr/local/bin/samply; then
-            log "samply $SAMPLY_VER installed (github.com/mstange/samply, sha256 verified)"
+            log "samply $ver installed (github.com/mstange/samply, sha256 verified)"
         else
-            warn "samply $SAMPLY_VER download did not verify (expected sha256 $sum) -- not installed"
+            warn "samply $ver download did not verify (expected sha256 $sum) -- not installed"
         fi
     else
         warn "samply download failed -- check egress. 'wk profile --mode samply' will refuse by name."
@@ -274,6 +261,14 @@ if ! command -v lazygit >/dev/null 2>&1; then
     log "installing lazygit"
     _install_lazygit || warn "lazygit install failed -- continuing without it"
 fi
+if ! command -v npm >/dev/null 2>&1; then
+    if sudo apt-get install -y --no-install-recommends nodejs npm >/dev/null 2>&1; then
+        log "node $(node -v) and npm installed (Ubuntu's archive), for 'wk ai pi' to install pi with"
+    else
+        warn "apt install of nodejs/npm failed -- check egress. 'wk ai pi' refuses by name until
+         sudo apt-get install nodejs npm"
+    fi
+fi
 
 {                                       # WebKit's helpers are in the checkout
     echo "command script import $SRC/Tools/lldb/lldb_webkit.py"
@@ -291,7 +286,7 @@ grep -qF 'wk-tools/shell/bashrc' "$HOME/.bashrc" 2>/dev/null || \
     '# wk: login shells read this, interactive non-login shells read .bashrc.' \
     '[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"' > "$HOME/.bash_profile"
 
-# The marker lib/target.sh reads. arch= is recorded because the kernel is the
+# The marker lib/wk/targets.py's Local reads. arch= is recorded because the kernel is the
 # host's: `uname -m` in an armhf container answers aarch64.
 if [ -n "${WK_WORKSPACE:-}" ]; then
     cat > "$HOME/.wk-workspace" <<EOF

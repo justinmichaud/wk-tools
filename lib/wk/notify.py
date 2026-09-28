@@ -5,8 +5,6 @@ import os
 import re
 import secrets
 import socket
-import urllib.error
-import urllib.request
 
 TIMEOUT = 5
 TOPIC = re.compile(r"^[-_A-Za-z0-9]{1,64}$")
@@ -15,7 +13,8 @@ MINT_BYTES = 16   # twice GUESSABLE in hex, so `check` can never call a minted t
 
 
 def api():
-    return os.environ.get("WK_NTFY_API", "https://ntfy.sh")
+    import credcheck
+    return credcheck.api_base("WK_NTFY_API", "https://ntfy.sh")
 
 
 def sd_notify(state):
@@ -29,28 +28,14 @@ def sd_notify(state):
         sock.sendall(state.encode())
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """A reserved topic name (`docs`, `app`) answers 302 to the ntfy web site, which followed would read as 200."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-_OPENER = urllib.request.build_opener(_NoRedirect)
-
-
 def _http(method, url, body=None):
-    req = urllib.request.Request(url, method=method, data=body)
-    req.add_header("User-Agent", "wk-notify")
-    if body is not None:
-        req.add_header("Content-Type", "application/json")
+    """A reserved topic name (`docs`, `app`) answers 302 to the ntfy web site, which followed would read as 200."""
+    import credcheck
     try:
-        with _OPENER.open(req, timeout=TIMEOUT) as r:
-            return r.status, r.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8", "replace")
-    except Exception as e:
-        return None, "%s: %s" % (e.__class__.__name__, e)
+        status, _headers, raw = credcheck.http(method, url, body=body, timeout=TIMEOUT, follow=False)
+    except credcheck.Unreachable as e:
+        return None, str(e)
+    return status, raw.decode("utf-8", "replace")
 
 
 def mint():

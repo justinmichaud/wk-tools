@@ -84,11 +84,9 @@ for l in $leases; do
 done
 f leases_ping "$pinged"
 
+# One raw blob, not jq-extracted fields: this phone has no python3, and lib/wk/bridge.judge() parses it.
 st=$(tailscale status --json --peers=false 2>/dev/null) || st=""
-f ts_backend "$(printf '%s' "$st" | jq -r '.BackendState // "none"' 2>/dev/null)"
-f ts_online "$(printf '%s' "$st" | jq -r '.Self.Online // false' 2>/dev/null)"
-f ts_tags "$(printf '%s' "$st" | jq -rc '.Self.Tags // "none"' 2>/dev/null)"
-f ts_routes "$(printf '%s' "$st" | jq -rc '.Self.PrimaryRoutes // "none"' 2>/dev/null)"
+f ts_status_json "$(printf '%s' "$st" | tr '\n' ' ')"
 
 svc() {
     local n

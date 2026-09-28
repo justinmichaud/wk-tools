@@ -1,5 +1,4 @@
-"""The build configs as data (lib/wk/buildconf.py), and build/configs.sh's
-shim that hands the same fields to the bash commands still reading them.
+"""The build configs as data (lib/wk/buildconf.py).
 
 `build.config_is_data`: `--cmakeargs` is refused (tests/test_wk_build.py), an
 ASan config builds instrumented into its own dir, a profile-guided config
@@ -12,7 +11,7 @@ import io
 import sys
 import unittest
 
-from tests.support import REPO, bash
+from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import buildconf  # noqa: E402
@@ -201,7 +200,7 @@ class TestLibcxxDefault(unittest.TestCase):
 
     def test_anything_else_is_refused_and_names_the_conf(self):
         err = refused(self, lambda: cfg("jsc-release", env={"WK_TARGET_LIBCXX": "yes", "WK_TARGET": "moose"}))
-        self.assertIn("WK_TARGET_LIBCXX='yes'", err)
+        self.assertIn("libcxx='yes'", err)
         self.assertIn("moose.conf", err)
 
     def test_absent_for_apple_configs(self):
@@ -239,43 +238,22 @@ class TestCcacheIsBlindToTheJobCount(unittest.TestCase):
         self._only_job_and_nice_move(cfg("jsc-debug"))
 
 
-class TestTheBashShim(unittest.TestCase):
-    """build/configs.sh's config_load hands a bash caller exactly the Python fields."""
+class TestMbPerJob(unittest.TestCase):
+    """The memory a compile job is charged: the config's figure, unless WK_MB_PER_JOB names one."""
 
-    def _bash(self, name, os, kind="container", env=None):
-        # Only cmd/bench still calls bash accessors, and only these four.
-        return bash('. "%s/build/configs.sh"\nconfig_load %s %s %s || echo UNKNOWN\n'
-                    'printf "%%s|" "$CFG_BUILDSYS" "$CFG_PORT" "$CFG_ARGS" "$CFG_CMAKE" "$CFG_PGO" "$(config_build_dir /s)" '
-                    '"$(config_jsc_path /s)" "$(config_run_dir /s)" "$(config_run_var)" "$WK_MB_PER_JOB"\n'
-                    % (REPO, name, os, kind), env=env)
-
-    def test_every_config_on_both_platforms_matches(self):
-        for os in ("linux", "macos"):
-            for name in buildconf.names():
-                if os == "linux" and name in XCODE_CONFIGS + ("mac-release-pgo",):
-                    continue
-                c = cfg(name, os)
-                cp = self._bash(name, os)
-                want = "|".join([c.buildsys, c.port, c.args, c.cmake, "1" if c.pgo else "", c.build_dir("/s"), c.jsc_path("/s"),
-                                 c.run_dir("/s"), c.run_var(), str(c.mb_per_job())]) + "|"
-                with self.subTest(config=name, os=os):
-                    self.assertEqual(cp.returncode, 0, cp.stderr)
-                    self.assertEqual(cp.stdout.replace("\n", ""), want)
-
-    def test_an_unknown_name_returns_1_for_the_caller_to_name(self):
-        cp = self._bash("nope", "linux")
-        self.assertIn("UNKNOWN", cp.stdout)
-
-    def test_a_refusal_ends_the_caller_with_its_reason(self):
-        cp = self._bash("mac-release", "linux")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertNotIn("UNKNOWN", cp.stdout)
-        self.assertIn("Xcode", cp.stderr)
+    def test_the_config_decides_by_its_build_system(self):
+        self.assertEqual(buildconf.mb_per_job(cfg("mac-release", "macos", "vm"), {}), 3072)
+        self.assertEqual(buildconf.mb_per_job(cfg("jsc-release"), {}), 1536)
 
     def test_an_explicit_mb_per_job_is_kept(self):
-        cp = bash('. "%s/lib/resources.sh"\n. "%s/build/configs.sh"\nconfig_load mac-release macos vm\necho "$WK_MB_PER_JOB"\n'
-                  % (REPO, REPO), env={"WK_MB_PER_JOB": "999"})
-        self.assertEqual(cp.stdout.strip(), "999", cp.stderr)
+        self.assertEqual(buildconf.mb_per_job(cfg("mac-release", "macos", "vm"), {"WK_MB_PER_JOB": "999"}), 999)
+
+    def test_a_full_port_gets_the_xcode_figure(self):
+        """gtk-debug killed its own watchdog twice on a container target, at 1536MB/job (peak
+        14507MB/9) and again at 2048MB/job (peak 16600MB/8, one WebCore unified-sources TU alone
+        costing multiple GB) -- measured 2026-09-28. A full port's JSBindings unified sources cost
+        as much per job as an Apple full build's, so it gets that figure instead of jsc-only's."""
+        self.assertEqual(buildconf.mb_per_job(cfg("gtk-debug"), {}), 3072)
 
 
 if __name__ == "__main__":

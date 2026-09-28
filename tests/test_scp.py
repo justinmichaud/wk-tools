@@ -356,7 +356,7 @@ class DriverCopyTest(unittest.TestCase):
         self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
 
     def conf(self, name, text):
-        kind = "" if "KIND=build" in text else "KIND=%s\n" % ("peer" if "WK_REMOTE_PEER=1" in text else "build")
+        kind = "" if "kind=build" in text else "kind=%s\n" % ("peer" if "peer=1" in text else "build")
         (self.tmp / "hosts" / (name + ".conf")).write_text(kind + text)
 
 
@@ -382,7 +382,7 @@ class TestContainerCopy(DriverCopyTest):
         self.t.push_dir("demo", "/tmp/tree", "/src/WebKit/tree")
         clear, cp = self.fake.effects[-2][1], self.fake.effects[-1][1]
         self.assertEqual(clear[:5], ("podman", "exec", "--user", "dev", "wk-demo"))
-        self.assertIn("rm -rf '/src/WebKit/tree' && mkdir -p '/src/WebKit/tree'", clear[-1])
+        self.assertIn("rm -rf /src/WebKit/tree && mkdir -p /src/WebKit/tree", clear[-1])
         self.assertEqual(cp, ("podman", "cp", "/tmp/tree/.", "wk-demo:/src/WebKit/tree"))
 
     def test_pull_dir_clears_the_destination_here_first(self):
@@ -410,11 +410,10 @@ class TestVmCopy(DriverCopyTest):
         super().setUp()
         del self.env["WK_IN_VM"]
         self.env["WK_VM_STORE"] = str(self.tmp / "vmstore")
-        bin_dir = self.tmp / "bin"
-        bin_dir.mkdir()
-        (bin_dir / "tart").write_text("#!/bin/sh\nexit 0\n")
-        (bin_dir / "tart").chmod(0o755)
-        self.env["PATH"] = "%s:%s" % (bin_dir, os.environ.get("PATH", ""))
+        (self.tmp / "bin").mkdir()
+        (self.tmp / "bin" / "tart").write_text("")
+        (self.tmp / "bin" / "tart").chmod(0o755)
+        self.env["PATH"] = str(self.tmp / "bin")
         from unittest import mock
         from wk.store import Store
         p = mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True)
@@ -462,7 +461,7 @@ class TestRemoteCopy(DriverCopyTest):
         super().setUp()
         del self.env["WK_IN_VM"]
         self.env["XDG_STATE_HOME"] = str(self.tmp / "state")
-        self.conf("box", "WK_REMOTE_HOST=box.example\nWK_REMOTE_ROOT=/home/u/wk\n")
+        self.conf("box", "host=box.example\nroot=/home/u/wk\n")
         self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
         self.t = self.reg.load("box")
 
@@ -497,7 +496,7 @@ class TestRemoteLocalCopy(DriverCopyTest):
         del self.env["WK_IN_VM"]
         self.env["XDG_STATE_HOME"] = str(self.tmp / "state")
         self.box = self.tmp / "box"
-        self.conf("fakebox", "KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_LOCAL=1\nWK_REMOTE_ROOT=%s\n" % self.box)
+        self.conf("fakebox", "kind=build\ndriver=remote\nlocal=1\nroot=%s\n" % self.box)
         self.reg = targets.Registry(REPO, env=self.env, machine=Local())
         self.t = self.reg.load("fakebox")
 

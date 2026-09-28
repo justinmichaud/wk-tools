@@ -15,6 +15,7 @@ import urllib.parse
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "lib"))
+from wk.machine import replace_file  # noqa: E402
 from wk.notify import sd_notify  # noqa: E402
 
 GITHUB = "api.github.com"
@@ -229,13 +230,8 @@ def ensure_certs(d, ca_out):
                 out.write(f.read())
 
     os.makedirs(os.path.dirname(ca_out), mode=0o700, exist_ok=True)
-    tmp = ca_out + ".new"
     with open(ca_crt, "rb") as f:
-        data = f.read()
-    with open(tmp, "wb") as f:
-        f.write(data)
-    os.chmod(tmp, 0o644)
-    os.replace(tmp, ca_out)
+        replace_file(ca_out, f.read(), mode=0o644)
     return chain
 
 

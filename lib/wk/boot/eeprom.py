@@ -11,6 +11,7 @@ from wk import act
 from wk.clock import Clock
 from wk.kv import kv
 from wk.machine import Local, Result
+from wk.slot import sha256_file
 from wk.store import Store
 
 COMMIT = "86759b04b22173e10186139ac3ae4debcd0d7252"
@@ -42,18 +43,10 @@ def reorder(current, name):
     return "\n".join(lines + ["BOOT_ORDER=" + want])
 
 
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(1 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
-
-
 class BootOrder:
     def __init__(self, d, env=None, here=None, clock=None):
         self.d, self.env, self.here, self.clock = d, os.environ if env is None else env, here or Local(), clock or Clock()
-        self.name, self.host = d.c("NODE_NAME"), d.c("NODE_SSH") or d.c("NODE_NAME")
+        self.name, self.host = d.c("name"), d.c("ssh") or d.c("name")
 
     def eeprom(self, do, sudo=False, mutates=False, input=None, **params):
         return self.d.ch.call("r_sudo" if sudo else "r_ssh", self.d.ob("eeprom.sh", WK_DO=do, **params), input=input, mutates=mutates)
@@ -160,13 +153,13 @@ class BootOrder:
         self.here.mkdir(cache)
         for name, path, sha in PINS:
             f = os.path.join(cache, name)
-            if os.path.isfile(f) and sha256(f) == sha:
+            if os.path.isfile(f) and sha256_file(f) == sha:
                 continue
             url = "https://raw.githubusercontent.com/raspberrypi/rpi-eeprom/%s/%s" % (COMMIT, path)
             act.info("fetching %s from rpi-eeprom@%s" % (name, COMMIT[:7]))
             if not self.here.act_run(["curl", "-fL", "--retry", "5", "-o", f, url]).ok:
                 act.die("could not fetch %s" % url)
-            if sha256(f) != sha:
+            if sha256_file(f) != sha:
                 self.here.remove(f)
                 act.die("checksum mismatch on %s (removed)\n    expected %s\n    Re-run; if it mismatches again the pin in "
                         "lib/wk/boot/eeprom.py\n    is stale." % (f, sha))
@@ -198,7 +191,7 @@ class BootOrder:
             if not self.here.act_run(["python3", os.path.join(cache, "rpi-eeprom-config"), "--config", os.path.join(work, "boot.conf"),
                                       "--out", upd, os.path.join(cache, IMAGE)]).ok:
                 act.die("rpi-eeprom-config could not apply that configuration to %s" % IMAGE)
-            bootfs, upd_sha = self.bootfs(), sha256(upd)
+            bootfs, upd_sha = self.bootfs(), sha256_file(upd)
             sig = "%s\nts: %d\ntarget-soc: 2711\n" % (upd_sha, int(self.clock.now()))
             act.info("staging the EEPROM update in %s on %s" % (bootfs, self.host))
             self.copy(board, [upd], bootfs)

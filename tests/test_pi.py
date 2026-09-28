@@ -11,7 +11,7 @@ VERBS = {
     ("bench", "rpi3", "speedometer3", "--ab", "a,b"): "wk bench run <ws> <plan> --system <board> --ab A,B | --ab-systems A,B",
     ("bench", "rpi3", "speedometer3", "--slot", "a"): "wk bench run <ws> <plan> --system <board> --slot <name>",
     ("bench", "rpi3", "speedometer3", "--pgo", "p"): "--slot <name>-instr --collect",
-    ("deploy", "lane", "rpi3"): "wk bench deploy <ws> <board> --slot <name>",
+    ("deploy", "ws", "rpi3"): "wk bench deploy <ws> <board> --slot <name>",
     ("boot-order", "rpi4", "sd-first"): "wk boot <board> --boot-order",
     ("setup", "rpi3"): "wk machine setup <board>",
     ("helper", "rpi3"): "wk machine setup <board>",

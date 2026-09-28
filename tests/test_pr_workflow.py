@@ -29,8 +29,6 @@ from unittest import mock
 from tests.killpoints import converges
 from tests.support import REPO, fake_workspace, rand_suffix, run, scratch_dir, stub_path
 
-PRELUDE = f'set -euo pipefail\ncd "{REPO}"\n. lib/common.sh\n. lib/store.sh\n'
-
 CMD_PR = REPO / "cmd" / "pr"
 
 
@@ -44,7 +42,7 @@ def _load_cmd_pr():
     return m
 
 
-# The real git.REMOTES and wk_push_forks: pr_open_target never fetches or pushes over them (it
+# The real git.REMOTES and wk.secrets.forks: pr_open_target never fetches or pushes over them (it
 # only reads remote *names* and URLs already configured in the test's own local-path repo).
 CMD_PR_MODULE = _load_cmd_pr()
 
@@ -505,7 +503,7 @@ class TestPrOpenTarget(unittest.TestCase):
     def _tracked_branch(self, project, remote_name, fork_remote, branch, user="testuser"):
         """A working checkout with <branch> checked out tracking
         <remote_name>/main (an 'upstream' repo whose basename is <project>
-        -- 'WebKit' or 'WPEWebKit', the same suffix wk_push_forks matches),
+        -- 'WebKit' or 'WPEWebKit', the same suffix wk.secrets.forks matches),
         plus a <fork_remote> remote pointing at a github fork. Mirrors how
         `wk pr rebase` leaves a branch tracking origin/main or wpe/main."""
         upstream = self.tmp / project

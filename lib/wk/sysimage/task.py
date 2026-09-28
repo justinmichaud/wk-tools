@@ -7,7 +7,8 @@ import re
 import subprocess
 import sys
 
-from wk import act, build, images, job
+from wk import act, build, decl, images, job
+from wk.machine import isolated_module
 from wk.act import Refused, die, info, log, warn
 from wk.buildconf import DISK_GB
 from wk.lock import Lock
@@ -34,19 +35,31 @@ def sha256(machine, path):
     return words[0] if words else ""
 
 
+def fetch_pinned(machine, url, dest, sha):
+    """`url` kept at `dest` on `machine` only once its sha256 is `sha`, resumed from `dest`.part; "" or why it is not."""
+    if machine.exists(dest) and sha256(machine, dest) == sha:
+        return ""
+    part = dest + ".part"
+    info("fetching %s" % os.path.basename(url))
+    r = machine.act_run(["curl", "-fsSL", "--retry", "5", "-C", "-", "-o", part, url])
+    if not r.ok:
+        return "could not fetch %s\n    %s" % (url, r.err.strip())
+    if act.dry_run():
+        return ""
+    got = sha256(machine, part)
+    if got != sha:
+        machine.act_run(["rm", "-f", part])
+        return "%s does not match its pin (sha256 %s, expected %s); if a re-run mismatches too, the pin is stale" % (url, got, sha)
+    return "" if machine.act_run(["mv", part, dest]).ok else "could not keep %s" % dest
+
+
 def fetch_base(machine, url, sha, env):
     cache = cache_dir(env)
     dest = os.path.join(cache, os.path.basename(url))
-    if machine.exists(dest) and sha256(machine, dest) == sha:
-        act.debug("base image already fetched: %s" % dest)
-        return dest
     machine.mkdir(cache)
-    info("fetching base image %s" % os.path.basename(url))
-    r = machine.act_run(["curl", "-fsSL", "--retry", "5", "-C", "-", "-o", dest, url])
-    if not r.ok:
-        die("could not fetch %s\n    %s" % (url, r.err.strip()))
-    if sha256(machine, dest) != sha:
-        die("checksum mismatch on %s\n    expected %s\n    Delete it and re-run; if it mismatches again the spec's pin is stale." % (dest, sha))
+    why = fetch_pinned(machine, url, dest, sha)
+    if why:
+        die(why)
     return dest
 
 
@@ -54,11 +67,17 @@ class Fetch:
     def __init__(self, machine, profile, env):
         self.machine, self.p, self.env = machine, profile, env
 
+    def path(self):
+        return os.path.join(cache_dir(self.env), os.path.basename(self.p["FET_URL"]))
+
+    def outputs(self):
+        return [self.path()] if self.machine.exists(self.path()) else []
+
     def build(self, rest):
         p = self.p
-        options(rest, ("--dry-run",), (), "usage: wk sysimage build %s [--dry-run]" % p["IMG_PROFILE"])
+        options(rest, (), (), "usage: wk sysimage build %s [--dry-run]" % p["IMG_PROFILE"])
         if act.dry_run():
-            cached = self.machine.exists(os.path.join(cache_dir(self.env), os.path.basename(p["FET_URL"])))
+            cached = self.machine.exists(self.path())
             log("would fetch image %s" % p["IMG_PROFILE"])
             log("  from        %s" % p["FET_URL"])
             log("              %s" % ("cached" if cached else "not cached -- would download"))
@@ -84,27 +103,23 @@ def off_wall(path):
 
 def in_workspace(tools, label, argv):
     """`argv` run in a workspace through `main stage`: off the wall, declared a wk build, its pid announced."""
-    return ["env", "PYTHONPATH=%s/lib" % tools, "python3", "-m", "wk.sysimage.task", "stage", label, "--"] + list(argv)
+    return isolated_module(tools + "/lib", "wk.sysimage.task") + ["stage", label, "--"] + list(argv)
+
+
+class _Declared:
+    def __init__(self, flags, valued):
+        self.opts = ",".join(list(flags) + [v + "=" for v in valued])
+
+    def opts_for(self, argv):
+        return self.opts
 
 
 def options(rest, flags, valued, usage):
-    got, i = {}, 0
-    while i < len(rest):
-        a = rest[i]
-        i += 1
-        key, eq, val = a.partition("=")
-        if key in valued:
-            if not eq:
-                if i >= len(rest):
-                    die("%s; %s needs a value" % (usage, key))
-                val, i = rest[i], i + 1
-            got[key] = val
-        elif a in flags:
-            got[a] = True
-        else:
-            die("%s; unknown option: %s" % (usage, a))
-    if got.pop("--dry-run", None):
-        os.environ["WK_DRY_RUN"] = "1"
+    args = decl.Args(_Declared(flags, valued), list(rest))
+    if args.positionals:
+        die("%s; %s is not an option of this build" % (usage, args.positionals[0]))
+    got = {o: True for o in flags if args.flag(o)}
+    got.update((o, args.value(o)) for o in valued if args.value(o) is not None)
     return got
 
 
@@ -222,7 +237,6 @@ class Stage:
                "\n".join("    " + l for l in tail), self.log))
 
     def stop(self):
-        """TERM to the job's process tree in the workspace, KILL after WK_KILL_WAIT; reported once it is gone."""
         rc = job.stop(self.target, self.recs, self.ws, self.kind, self.here, self.clock, self.env)
         if rc == 1:
             die("the %s build in '%s' outlived a TERM and a KILL.\n    Look at it:  wk enter %s" % (self.kind, self.ws, self.ws))

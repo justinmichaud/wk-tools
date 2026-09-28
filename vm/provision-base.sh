@@ -19,7 +19,7 @@ NEED_FREE_GB=60
 
 _free_gb() { df -g /System/Volumes/Data | awk 'NR==2 {print $4}'; }
 
-_store=$(python3 "$WK_TOOLS_DIR/lib/wkmac.py" physical-store 2>/dev/null)
+_store=$(python3 "$WK_TOOLS_DIR/lib/wk/mac.py" physical-store 2>/dev/null)
 if [ -n "$_store" ]; then
     _out=$(sudo diskutil apfs resizeContainer "$_store" 0 2>&1) || true
 fi

@@ -1,5 +1,5 @@
 """The macOS perf build: `mac-release-pgo`, the config every macOS number is
-taken from (build/configs.sh, build/mac-pgo.sh, lib/wk/bench/mac.py's PgoCollect,
+taken from (lib/wk/buildconf.py, build/mac-pgo.sh, lib/wk/bench/mac.py's PgoCollect,
 build/pgo-run-benchmark.py).
 
 Three phases with a benchmark run between them, so the shape of each phase --
@@ -7,7 +7,7 @@ and the fact that the instrumented one never lands in the measured one's
 products directory -- is what these tests pin; the collection itself runs
 against a Fake machine.
 
-Run: python3 -m unittest tests.test_mac_pgo -v
+Run: python3 tests/run.py -k test_mac_pgo
 """
 import contextlib
 import io
@@ -17,30 +17,20 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, WkTest, bash, run, scratch_dir
+from tests.support import REPO, WkTest, run, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import pgo  # noqa: E402
+from tests.test_bench_mac import StubWatch  # noqa: E402
+from wk import buildconf, pgo, screen as wkscreen  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import mac, seed  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Fake, Result, isolated_module  # noqa: E402
 
 CONFIG = "mac-release-pgo"
 
 
-def config_fields(config, os_name, kind="vm"):
-    cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/build/configs.sh"
-WK_TARGET_KIND={kind}
-config_load {config} {os_name} {kind}
-echo "BUILDSYS=$CFG_BUILDSYS"
-echo "VARIANT=$CFG_VARIANT"
-echo "PGO=$CFG_PGO"
-echo "ARGS=$CFG_ARGS"
-echo "DIR=$(config_build_dir /src/WebKit)"
-''')
-    return cp
+def config(name, os_name="macos"):
+    return buildconf.resolve(name, os_name, "vm", {})
 
 
 def pgo_dry_run(tmp):
@@ -72,25 +62,21 @@ class TestTheConfig(WkTest):
         self.assertIn(CONFIG, cp.stdout + cp.stderr)
 
     def test_it_is_an_xcode_config_that_asks_for_a_profile(self):
-        f = dict(l.split("=", 1) for l in config_fields(CONFIG, "macos").stdout.strip().splitlines())
-        self.assertEqual(f["BUILDSYS"], "xcode")
-        self.assertEqual(f["PGO"], "1")
-        self.assertEqual(f["ARGS"], "--release")
+        c = config(CONFIG)
+        self.assertEqual((c.buildsys, c.pgo, c.args), ("xcode", True, "--release"))
 
     def test_its_products_never_share_a_directory_with_the_plain_release(self):
         """A profile-guided build and an ordinary one are different binaries;
         one tree holding both is a number nobody can attribute."""
-        pgo = dict(l.split("=", 1) for l in config_fields(CONFIG, "macos").stdout.strip().splitlines())
-        plain = dict(l.split("=", 1) for l in config_fields("mac-release", "macos").stdout.strip().splitlines())
-        asan = dict(l.split("=", 1) for l in config_fields("mac-release-asan", "macos").stdout.strip().splitlines())
-        self.assertNotEqual(pgo["DIR"], plain["DIR"])
-        self.assertNotEqual(pgo["DIR"], asan["DIR"])
-        self.assertTrue(pgo["DIR"].endswith("Release-pgo"), pgo["DIR"])
+        pgo_dir = config(CONFIG).build_dir()
+        self.assertNotEqual(pgo_dir, config("mac-release").build_dir())
+        self.assertNotEqual(pgo_dir, config("mac-release-asan").build_dir())
+        self.assertTrue(pgo_dir.endswith("Release-pgo"), pgo_dir)
 
     def test_a_linux_workspace_is_told_it_cannot_build_it(self):
-        cp = config_fields(CONFIG, "linux")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("Xcode", cp.stdout + cp.stderr)
+        with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
+            config(CONFIG, "linux")
+        self.assertIn("Xcode", err.getvalue())
 
 
 class TestTheThreePhases(WkTest):
@@ -168,27 +154,29 @@ class TestTheThreePhases(WkTest):
         self.assertEqual(len(order), 3)
 
 
-def fake_guest(check_rc=0, watch_rc=0, profile_rc=0, blocker="", console="admin", pyobjc=0, screen=0, browser_rc=0):
-    """The guest a collection runs in, every gate passing unless told otherwise."""
+def fake_guest(check_rc=0, drew=(), profile_rc=0, blocker="", console="admin", pyobjc=0, screen=0, browser_rc=0):
+    """The guest a collection runs in, every gate passing unless told otherwise; `drew` is what the watch saw."""
     m = Fake("guest")
+    m.drew = list(drew)
     m.answer(["stat", "-f"], out=console + "\n")
     m.answer(["id", "-un"], out="admin\n")
     m.answer(["/usr/bin/python3", "-c"], rc=screen)
     m.answer(["/usr/bin/python3", str(REPO / mac.CHECK)], rc=browser_rc)
     m.answer(["env", "WK_WEBKIT_SCRIPTS=/src/Tools/Scripts"], rc=check_rc)
-    m.answer(["env", "PYTHONPATH=" + str(REPO / "lib")], rc=profile_rc)
+    m.answer(["/usr/bin/python3", "-I"], rc=profile_rc)
 
     def lib(argv, fake):
         fn = argv[2].split(";")[1].split()[0]
-        return {"wk_pyobjc_have": Result(pyobjc), "screen_blocker": Result(0, blocker),
-                "screen_watch_stop": Result(watch_rc, "a Software Update pane\n" if watch_rc else "")}.get(fn, Result(0))
+        return {"wk_pyobjc_have": Result(pyobjc), "wk_window_probe": Result(0, "windows=MiniBrowser:Speedometer\n"),
+                "wk_window_unexpected": Result(0, blocker)}.get(fn, Result(0))
     m.react(["bash", "-c"], lib)
     return m
 
 
 def collect(m, pins=(("speedometer3", "/seed/s"), ("jetstream3", "/seed/j"), ("motionmark", "/seed/m"))):
     c = mac.PgoCollect(REPO, m, {"HOME": "/Users/admin"}, "/src")
-    with mock.patch.object(mac.PgoCollect, "pins", lambda self: list(pins)), mock.patch.dict(os.environ), \
+    with mock.patch.object(mac.PgoCollect, "pins", lambda self: list(pins)), mock.patch.object(wkscreen, "Watch", StubWatch), \
+            mock.patch.dict(os.environ), \
             contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()):
         os.environ.pop("WK_DRY_RUN", None)
         try:
@@ -202,13 +190,15 @@ def order(m):
     out = []
     for e in m.effects:
         argv = e[1] if e[0] in ("run", "run_tty") else ()
-        if argv[:2] == ("bash", "-c") and "; " in argv[2]:
+        if e[0] == "watch":
+            out.append("watch_" + e[1])
+        elif argv[:2] == ("bash", "-c") and "; " in argv[2]:
             out.append(argv[2].split(";")[1].split()[0])
         elif len(argv) > 1 and argv[1].endswith("mac-browser-check.py"):
             out.append("browser-check")
         elif e[0] == "run_tty":
             out.append("collect")
-        elif argv[:1] == ("env",) and "wk.pgo" in argv:
+        elif "-I" in argv and "wk.pgo" in argv:
             out.append("profile-check")
     return out
 
@@ -220,8 +210,8 @@ class TestTheCollection(WkTest):
         m = fake_guest()
         rc, err = collect(m)
         self.assertEqual(rc, 0, err)
-        self.assertEqual(["wk_pyobjc_have", "screen_blocker", "mac_raiser_on", "browser-check", "screen_watch_start", "collect",
-                          "screen_watch_stop", "mac_raiser_off", "profile-check"],
+        self.assertEqual(["wk_pyobjc_have", "wk_window_probe", "wk_window_unexpected", "mac_raiser_on", "browser-check", "watch_start",
+                          "collect", "watch_stop", "mac_raiser_off", "profile-check"],
                          [s for s in order(m)])
 
     def test_the_browser_is_checked_against_the_instrumented_build_and_no_display(self):
@@ -240,9 +230,9 @@ class TestTheCollection(WkTest):
         self.assertEqual(order(m)[-1], "mac_raiser_off")
 
     def test_something_drawn_over_the_collection_refuses_it(self):
-        rc, err = collect(fake_guest(watch_rc=1))
+        rc, err = collect(fake_guest(drew=["2026-09-27T12:00:00Z\tSoftware Update"]))
         self.assertIs(rc, Refused)
-        self.assertIn("a Software Update pane", err)
+        self.assertIn("Software Update", err)
 
     def test_a_profile_not_to_build_against_stops_the_build(self):
         self.assertIs(collect(fake_guest(profile_rc=1))[0], Refused)
@@ -288,7 +278,7 @@ class TestItRefusesAThrottledCollection(WkTest):
     there would look exactly like a good one."""
 
     def test_it_names_every_reason_rather_than_the_first(self):
-        faults = mac.PgoCollect(REPO, fake_guest(console="root", screen=1, blocker="Setup Assistant"), {}, "/src").faults()
+        faults = mac.PgoCollect(REPO, fake_guest(console="root", screen=1, blocker="Setup Assistant:Welcome"), {}, "/src").faults()
         self.assertEqual(len(faults), 3, faults)
         self.assertIn("nowhere to draw", faults[0])
         self.assertIn("no main screen", faults[1])
@@ -308,7 +298,7 @@ class TestItRefusesAThrottledCollection(WkTest):
 
 class TestItIsThePolicyAndNotAnOption(WkTest):
     """Every macOS number this repo quotes comes from a profile-guided build,
-    so the lane defaults to it rather than offering it."""
+    so the Mac A/B defaults to it rather than offering it."""
 
     def test_the_mac_ab_defaults_to_it(self):
         self.assertEqual(mac.AB_CONFIG, CONFIG)
@@ -330,18 +320,30 @@ class TestItIsThePolicyAndNotAnOption(WkTest):
         self.assertEqual(cp.stdout.strip(), "/x/Release-pgo-instr")
 
 
+    @unittest.skipUnless(os.path.exists("/usr/bin/python3"), "the collection's python is the Mac's /usr/bin/python3")
+    def test_the_collection_runs_wk_tools_whatever_the_working_directory_holds(self):
+        """The build sources this in the checkout, whose files an agent writes; a wk/ there must not be imported."""
+        self.assertIn(isolated_module("$_pgo_tools/lib", "wk.bench.mac", "/usr/bin/python3")[3],
+                      (REPO / "build" / "mac-pgo.sh").read_text(), "the snippet is lib/wk/machine.py's ISOLATED")
+        with scratch_dir() as tmp:
+            (tmp / "wk").mkdir()
+            (tmp / "wk" / "__init__.py").write_text("raise SystemExit('the checkout was imported')\n")
+            cp = subprocess.run(["bash", "-c", '. "$0"; _pgo_py pgo-instr /x/Release-pgo', str(REPO / "build" / "mac-pgo.sh")],
+                                cwd=str(tmp), capture_output=True, text=True, timeout=30, env=dict(os.environ, PYTHONPATH=str(tmp)))
+        self.assertEqual((0, "/x/Release-pgo-instr"), (cp.returncode, cp.stdout.strip()), cp.stderr)
+
+
 def run_py(*args):
     return subprocess.run(["python3", "-m", "wk.bench.mac"] + list(args), capture_output=True, text=True, timeout=30,
                           env=dict(os.environ, PYTHONPATH=str(REPO / "lib")))
 
 
 class TestTheProfileReachesTheMachineThatRunsIt(WkTest):
-    """A dSYM is a product on this lane: the machine that profiles is the
+    """A dSYM is a product on the Mac: the machine that profiles is the
     benchmark install, which never had the build tree."""
 
-    def test_the_stage_no_longer_drops_them(self):
-        text = (REPO / "lib" / "bench-arms.sh").read_text()
-        self.assertNotIn("--exclude '*.dSYM'", text)
+    def test_the_stage_carries_them(self):
+        self.assertFalse([p for p in mac.PRODUCT_SKIP if "dSYM" in p], mac.PRODUCT_SKIP)
 
     def test_only_the_perf_build_makes_any(self):
         self.assertIn("DEBUG_INFORMATION_FORMAT=dwarf-with-dsym",

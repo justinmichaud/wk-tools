@@ -104,7 +104,7 @@ class TestTheWriteSideRecordsIt(unittest.TestCase):
         self.assertEqual(defs, [REPO / "lib" / "wk" / "machine_cmd" / "deps.py", REPO / "lib" / "wk" / "sysimage" / "guestbase.py"])
 
     def test_doctor_reports_the_machine_through_that_one_function(self):
-        """One row per machine, from remote_provision_stale's answer alone: a
+        """One row per machine, from machine_cmd.deps.stale's answer alone: a
         reason is a miss naming the setup, none is the ok row."""
         from tests.test_doctor import MISS, OK, build_doctor
         asked = []

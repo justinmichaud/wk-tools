@@ -4,11 +4,15 @@ renderer prints the rows and counts the misses."""
 
 import os
 import re
+import shlex
+import shutil
+import subprocess
 
-from wk import bridge, fleet, git, record, secrets, shell, targets
+from wk import bridge, fleet, git, record, secrets, targets
+from wk.bench import record as bench_record
 from wk.key.cli import Key
 from wk.kv import kv
-from wk.machine import Local
+from wk.machine import Local, lib_argv
 from wk.machine_cmd import deps as machine_deps
 from wk.status import machine_confs
 from wk.store import Store
@@ -150,7 +154,7 @@ def fleet_logins_section(peers, verdict_of):
 # -- git identity, wherever a git.* blob came from
 
 def git_fields(machine):
-    if not machine.run(["which", "git"]).ok:
+    if not machine.have("git"):
         return ""
     return "".join("git.%s=%s\n" % (k, machine.run(["git", "config", "--get", c]).out.strip()) for k, c in GIT_KEYS)
 
@@ -261,10 +265,38 @@ def mac_battery_line(out):
     return "%s, %s%% -- no OS limit exists" % ("plugged in" if "'AC Power'" in lines[0] else "on battery", m.group(1))
 
 
-class Doctor:
-    """This machine's checks; `sh` answers what the bash library still holds (lib/wk/shell.py)."""
+def gh_authenticated(env=None):
+    """`gh auth status` exits 0 for a configured account whose token has expired, so the api call is the one that means anything."""
+    env = os.environ if env is None else env
+    exe = shutil.which("gh", path=env.get("PATH") or "")
+    return bool(exe) and subprocess.run([exe, "api", "user"], stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL, env=env).returncode == 0
 
-    def __init__(self, root, env=None, machine=None, macos=None, sh=shell, mc=machine_deps, keys=None):
+
+class Bash:
+    """What a Doctor asks outside Python: gh's token, and lib/common.sh's table of the privileged helpers, which ./setup installs."""
+
+    @staticmethod
+    def gh_authenticated(root, env=None):
+        return gh_authenticated(env)
+
+    @staticmethod
+    def priv_helpers(root, env=None):
+        fn = ('_ph() { wk_priv_helpers | while read -r n w what; do if [ -n "$n" ]; then '
+              'printf \'%s\\t%s\\t%s\\t%s\\t%s\\n\' "$n" "$w" "$what" "$(wk_priv_path "$n")" "$(wk_priv_sudoers "$n")"; fi; done; }; _ph')
+        out = subprocess.run(lib_argv(root, "lib/common.sh", fn), stdout=subprocess.PIPE, text=True, env=env).stdout
+        return [tuple(line.split("\t")) for line in out.splitlines() if line.count("\t") == 4]
+
+    @staticmethod
+    def priv_answers(root, path, env=None):
+        return subprocess.run(lib_argv(root, "lib/common.sh", "wk_priv_answers", path), stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, env=env).returncode == 0
+
+
+class Doctor:
+    """This machine's checks; `sh` answers what is asked outside Python (Bash)."""
+
+    def __init__(self, root, env=None, machine=None, macos=None, sh=Bash, mc=machine_deps, keys=None):
         self.root = root
         self.env = os.environ if env is None else env
         self.machine = machine or Local()
@@ -278,9 +310,6 @@ class Doctor:
         self.container = self.reg.load("container")
         self._paths = None
         self._keys = keys
-
-    def have(self, name):
-        return self.machine.run(["which", name]).ok
 
     def hostname(self):
         return record.host_name(self.machine)
@@ -344,20 +373,20 @@ class Doctor:
     def host_tools(self):
         if self.macos:
             yield check("Xcode command line tools", "xcode-select --install", self.machine.run(["xcode-select", "-p"]).ok)
-            yield check("podman", "install the official pkg from podman.io", self.have("podman"))
+            yield check("podman", "install the official pkg from podman.io", self.machine.have("podman"))
             yield check("zed", "https://zed.dev/download", targets.zed_cli(self.machine) is not None)
             yield check("tailscale", "https://tailscale.com/download/macos",
-                        self.have("tailscale") or self.machine.isdir("/Applications/Tailscale.app"))
+                        self.machine.have("tailscale") or self.machine.isdir("/Applications/Tailscale.app"))
         else:
             for tool, what in (("podman", "podman"), ("zsh", "zsh"), ("cage", "cage (benchmark kiosk)"), ("wlr-randr", "wlr-randr (session off)")):
-                yield check(what, "./setup --stage tools", self.have(tool))
-        if self.have("nmap"):
+                yield check(what, "./setup --stage tools", self.machine.have(tool))
+        if self.machine.have("nmap"):
             yield ok("nmap (wk machine probe)")
         else:
             yield unk("nmap absent -- only 'wk machine probe' needs it", "nmap.org, the .dmg" if self.macos else "./setup  (host/linux/apt.txt)")
-        yield check("jq (claude hook)", "./setup --stage tools", self.have("jq"))
-        yield check("gh", "install gh, then: gh auth login", self.have("gh"))
-        if self.have("gh"):
+        yield check("jq (claude hook)", "./setup --stage tools", self.machine.have("jq"))
+        yield check("gh", "install gh, then: gh auth login", self.machine.have("gh"))
+        if self.machine.have("gh"):
             yield check("gh authenticated", "gh auth login   (then: wk key deploy)", self.sh.gh_authenticated(self.root, env=self.env))
 
     def root_access(self):
@@ -374,7 +403,7 @@ class Doctor:
                     linked(os.path.join(self.home, ".claude", "CLAUDE.md"), os.path.join(self.root, "claude", "CLAUDE-host.md")))
         yield check("shell rc sources shell/bashrc", "./setup --stage dotfiles",
                     any("wk-tools/shell/bashrc" in self.read(os.path.join(self.home, rc)) for rc in (".zshrc", ".bashrc")))
-        if self.have("git"):
+        if self.machine.have("git"):
             have, want = kv(git_fields(self.machine)), self.want()
             for v in ("name", "email"):
                 yield check("git user.%s is the repo's" % v, "./setup --stage dotfiles", have.get("git." + v, "") == want.get(v, ""))
@@ -387,7 +416,7 @@ class Doctor:
             disp += " (podman VM)"
             if self.podman_state() != "running":
                 return unk("%s -- not visible while the podman machine is stopped" % disp, "%s: %s" % (kind, how))
-            present = self.in_vm("test -e %s" % shell.sh_quote(path)) is not None
+            present = self.in_vm("test -e %s" % shlex.quote(path)) is not None
         else:
             present = self.machine.exists(path)
         if present:
@@ -396,8 +425,9 @@ class Doctor:
 
     def machine_local(self):
         store, p = self.store, self.paths()
-        yield self.local_state(store.bench_dir(), "backed-up",
-                               "benchmark runs and their provenance -- not regenerable at any price; a rerun is a different measurement")
+        for d in bench_record.task_roots(self.machine, store.record_dir()):
+            yield self.local_state(d, "backed-up", "benchmark runs and their provenance -- not regenerable at any price; a rerun is a "
+                                   "different measurement" + ("" if d == store.bench_dir() else "; wk bench export <task> copies one out"))
         yield self.local_state(store.mirror(), "regenerable",
                                "wk sync clones WebKit into it again (the one copy here; the podman VM and every tart guest read it)")
         yield self.local_state(store.secrets_dir(), "regenerable", "wk key deploy makes new deploy keys (revoke the old ones on GitHub)")
@@ -426,7 +456,7 @@ class Doctor:
                                "hand-written machine confs for this device only, their keys over machines/<name>.conf's")
         if self.machine.isdir(machines.old_local_dir()):
             yield miss("%s -- no longer read: machine-local confs live in %s" % (machines.old_local_dir(), machines.local_dir()),
-                       "mkdir -p %s && mv %s/*.conf %s/ && rmdir %s" % tuple(shell.sh_quote(d) for d in (
+                       "mkdir -p %s && mv %s/*.conf %s/ && rmdir %s" % tuple(shlex.quote(d) for d in (
                            machines.local_dir(), machines.old_local_dir(), machines.local_dir(), machines.old_local_dir())))
         yield self.local_state(os.path.join(store.state_dir(), "ssh", "zed_ed25519"), "regenerable",
                                "wk zed makes a new one and re-authorises it in the workspace")
@@ -436,7 +466,7 @@ class Doctor:
                                    "on its rescue; lost, it rejoins under a new name")
         else:
             rpi5 = dict(machine_confs(self.root, self.env)).get("rpi5")
-            if rpi5 and rpi5.get("NODE_SSH") == self.machine_name():
+            if rpi5 and rpi5.get("ssh") == self.machine_name():
                 yield self.local_state(os.path.join(self.root, "host", "linux", "rpi5", "rpi5.conf"), "backed-up",
                                        "site WiFi identity (gitignored: repo is public); rpi5.conf.example documents the shape")
             yield self.local_state("/var/lib/tailscale", "re-authable",
@@ -451,7 +481,7 @@ class Doctor:
             yield ok("/var/lib/tailscale (podman VM) (re-authable) -- on the tailnet at %s; ./setup --stage machine re-joins it "
                      "and the node name survives via the admin console" % ip)
         else:
-            yield miss("/var/lib/tailscale (podman VM) -- the machine holds this workstation's lanes and reaches no board without it",
+            yield miss("/var/lib/tailscale (podman VM) -- the machine holds this workstation's image workspaces and reaches no board without it",
                        "./setup --stage machine, which needs a live tailnet auth key: wk key set tailnet")
 
     def machine_name(self):

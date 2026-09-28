@@ -3,25 +3,25 @@
 Reads the command's declaration (decl.py), refuses what it does not declare,
 resolves the workspace name and the machine holding it, and runs the command
 there: here, forwarded into the podman VM on a macOS host, or handed to the
-machine's own wk. The targets are asked through one Registry (wk.targets);
-what a driver has not ported still reaches into the bash library through shell.py.
+machine's own wk. The targets are asked through one Registry (wk.targets).
 """
 
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from wk import completion as C
 from wk import decl as D
-from wk import act, clock, record, shell, sshalias
+from wk import act, buildconf, clock, images, record, sshalias, targets
+from wk.act import info, log, warn
 from wk.machine import Local, is_macos
 from wk.store import Store
-from wk.targets import Registry
 
-ROOT = Path(os.environ.get("WK_ROOT") or Path(__file__).resolve().parents[2])
+ROOT = Path(images.root())
 MACHINE = Store().podman_machine()
 _registry = None
 TOMBSTONES = {
@@ -46,37 +46,10 @@ class Exit(Exception):
         self.status = status
 
 
-def _tty(fd):
-    try:
-        return os.isatty(fd)
-    except OSError:
-        return False
-
-
-def _colour(code):
-    return code if _tty(2) else ""
-
-
-def log(msg):
-    if not os.environ.get("WK_QUIET"):
-        sys.stderr.write(msg + "\n")
-
-
-def info(msg):
-    if not os.environ.get("WK_QUIET"):
-        sys.stderr.write("%s==>%s %s\n" % (_colour("\033[32m"), _colour("\033[0m"), msg))
-
-
-def warn(msg):
-    sys.stderr.write("%swarning:%s %s\n" % (_colour("\033[33m"), _colour("\033[0m"), msg))
-
-
 def die(msg, status=1):
-    sys.stderr.write("%serror:%s %s\n" % (_colour("\033[31m"), _colour("\033[0m"), msg))
+    act.err(msg)
     raise Exit(status)
 
-
-# -- markers: the file that says this machine is a workspace, or a build machine
 
 def in_workspace():
     return registry().in_workspace()
@@ -140,6 +113,13 @@ def argv_name(slot, takes, args):
     return positional(slot, args)
 
 
+def name_in_argv(base, slot, takes, args):
+    a = argv_name(slot, takes, args)
+    if a is None and base == "required" and not in_workspace() and not cwd_workspace():
+        a = positional(slot, args)
+    return a
+
+
 def args_before_name(slot, args):
     out, i = [], 0
     for a in args:
@@ -167,11 +147,44 @@ def argv_split(opts, args):
     return out
 
 
+def first_positional(d, args):
+    """The index of the first word that is neither an option nor a declared option's value, or None."""
+    valued, i = d.valued_opts(), 0
+    while i < len(args) and args[i] != "--":
+        if args[i].startswith("-") and len(args[i]) > 1:
+            i += 2 if args[i] in valued else 1
+            continue
+        return i
+    return None
+
+
+def tail_from(d, args, inside):
+    """Where a `passthrough=all` invocation's tail starts in argv as typed: from there on every
+    word, `-h` and `--force` included, is the other program's."""
+    valued, words, i = d.valued_opts(), [], 0
+    while i < len(args) and args[i] != "--":
+        a = args[i]
+        i += 1
+        if a.startswith("-") and len(a) > 1:
+            i += 1 if a in valued else 0
+            continue
+        words.append(a)
+        probe = words if D.in_list(words[0], d.verbs) or not d.default else [d.default] + words
+        takes = d.takes_for(probe)
+        if d.passthrough_for(probe) != "all" or takes == "*":
+            return len(args)
+        slot = D.name_slot(d.name_for(probe))
+        if len(probe) >= slot - (1 if inside and slot else 0) + int(takes):
+            return i
+    return len(args)
+
+
 class Invocation:
     def __init__(self, cmd, decl, args):
         self.cmd = cmd
         self.decl = decl
         self.args = list(args)
+        self.typed = list(args)
         self.globals_text = ""
 
     def usage_die(self, why=None):
@@ -223,22 +236,100 @@ class Invocation:
                     self.usage_die("unknown option: %s" % a)
                 continue
             out.append(a)
-            if n == 0 and in_workspace() and a == wk_self():
+            if n == (1 if d.verbs and D.in_list(args[0], d.verbs) else 0) and in_workspace() and a == wk_self():
                 continue   # the name in here: refused further down, by name
             n += 1
             if takes == "*":
                 continue
             if n > maximum:
-                if passthrough == "tail":
+                if passthrough in ("tail", "all"):
                     out.extend(args[i:])
                     return out
                 if in_workspace() and name_decl.split("@")[0] != "none":
                     self.usage_die("unexpected argument: %s (this is workspace '%s', so there is no "
                                    "workspace argument in here)" % (a, wk_self()))
                 self.usage_die("unexpected argument: %s" % a)
-            if passthrough == "tail" and n == maximum:
+            if passthrough in ("tail", "all") and n == maximum:
                 out.extend(args[i:])
                 return out
+        return out
+
+    def gone_check(self):
+        """A retired flag anywhere, or a retired verb where the verb goes, is refused naming its replacement."""
+        d, args = self.decl, self.args
+        pos = first_positional(d, args)
+        for i, a in enumerate(args):
+            if a == "--":
+                break
+            if a in d.gone and (a.startswith("-") or i == pos):
+                die("'wk %s %s' is gone: wk %s %s" % (self.cmd, a, self.cmd, d.gone[a]))
+
+    def default_takes_a_word(self):
+        d = self.decl
+        takes = d.takes_for([d.default])
+        return takes == "*" or D.name_slot(d.name_for([d.default])) + int(takes) > 1
+
+    def verb_first(self):
+        """A declared verb is moved to argv[0]. No word, or one that is no verb where the default verb
+        takes an argument, is the default verb's; any other word is refused. No word and no default is
+        verb_given's to refuse."""
+        d, args = self.decl, self.args
+        if not d.verbs:
+            return args
+        pos = first_positional(d, args)
+        if pos is not None and D.in_list(args[pos], d.verbs):
+            return [args[pos]] + args[:pos] + args[pos + 1:]
+        if d.default and (pos is None or self.default_takes_a_word()):
+            return [d.default] + args
+        if pos is None:
+            return args
+        self.usage_die("unknown verb: %s (one of %s)" % (args[pos], d.verbs.replace(",", ", ")))
+
+    def refuse_inherited_config(self, inherited):
+        """An exported WK_CONFIG is never an invocation's answer: one that argv does not name too is refused."""
+        d, args = self.decl, self.args
+        if not inherited or not d.config:
+            return
+        pos = [a for a in args[:args.index("--") if "--" in args else len(args)] if not a.startswith("-")]
+        if d.config == "--config":
+            if not D.in_list("--config=", d.opts_for(args)):
+                return
+            given = ([a[len("--config="):] for a in args if a.startswith("--config=")] or [None])[-1]
+            remedy = "--config %s" % inherited
+        else:
+            if d.takes_for(args) == "0":
+                return
+            k = 0 if in_workspace() or (len(pos) == 1 and cwd_workspace()) else D.name_slot(d.name_for(args))
+            given = pos[k] if len(pos) > k else None
+            remedy = "wk %s%s %s" % (self.cmd, "" if k == 0 else " <workspace>", inherited)
+        if given != inherited:
+            self.usage_die("WK_CONFIG=%s is set in this environment, and wk takes a build config only from\n"
+                           "    its arguments: unset it, or name the config:  %s" % (inherited, remedy))
+
+    def verb_given(self):
+        """After the options are checked: a verb, unless a flag that takes no positional stands for one (`--list`)."""
+        d, args = self.decl, self.args
+        if d.verbs and not (args and D.in_list(args[0], d.verbs)) and not d.flag_stands_for_verb(args):
+            self.usage_die("'wk %s' needs one of: %s" % (self.cmd, d.verbs.replace(",", ", ")))
+
+    def take_config(self, args, env=None):
+        """The declared build config lifted out of argv into WK_CONFIG; one buildconf does not name is refused."""
+        how, out, given = self.decl.config, [], None
+        positional = how == "arg" and self.decl.takes_for(args) != "0"
+        for i, a in enumerate(args):
+            if a == "--":
+                out.extend(args[i:])
+                break
+            if how == "--config" and a.startswith("--config="):
+                given = a[len("--config="):]
+            elif positional and given is None and not a.startswith("-"):
+                given = a
+            else:
+                out.append(a)
+        if given is not None:
+            if given not in buildconf.names():
+                self.usage_die("unknown config: %s -- 'wk build --list' names every one" % given)
+            (os.environ if env is None else env)["WK_CONFIG"] = given
         return out
 
     # -- questions the command answers for itself
@@ -270,38 +361,27 @@ class Invocation:
         missing = []
         for n in needs.split(","):
             if n == "gh-auth":
-                ok = shell.gh_authenticated(str(ROOT), env=_quiet_env())
+                from wk.doctor import gh_authenticated
+                ok = gh_authenticated()
                 if not ok:
                     missing.append("gh-auth    gh cannot reach the GitHub API (not logged in, or the token expired): gh auth login")
             elif n == "tailnet":
                 ok = subprocess.call(["tailscale", "status"], stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL) == 0 if _which("tailscale") else False
+                                     stderr=subprocess.DEVNULL) == 0 if shutil.which("tailscale") else False
                 if not ok:
                     missing.append("tailnet    this machine is not on the tailnet: tailscale up")
             elif n == "quiesce-helper":
-                helper = "/usr/local/libexec/wk-quiesce-priv"
-                ok = os.access(helper, os.X_OK) and subprocess.call(
-                    ["sudo", "-n", helper, "status"], stdout=subprocess.DEVNULL,
+                from wk.sudo import QUIESCE_PRIV
+                ok = os.access(QUIESCE_PRIV, os.X_OK) and subprocess.call(
+                    ["sudo", "-n", QUIESCE_PRIV, "status"], stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL) == 0
                 if not ok:
                     missing.append("quiesce-helper    the privileged quiesce/session helper is not set up: ./setup --stage quiesce")
-            elif not _which(n):
+            elif not shutil.which(n):
                 missing.append("%s    not installed here" % n)
         if missing:
             die("'wk %s' cannot start here:%s\n    wk doctor says how to get each of these."
                 % (self.cmd, "".join("\n    " + m for m in missing)))
-
-
-def _which(name):
-    for d in os.environ.get("PATH", "").split(os.pathsep):
-        p = os.path.join(d, name)
-        if os.path.isfile(p) and os.access(p, os.X_OK):
-            return p
-    return None
-
-
-def _quiet_env():
-    return dict(os.environ)
 
 
 # -- help
@@ -407,8 +487,8 @@ def explain(cmd, d):
     elif d.dryrun == "yes":
         out.write("  changes things: yes -- wk %s ... --dry-run prints what it would run and runs none of it\n" % cmd)
     elif d.dryrun:
-        out.write("  changes things: yes -- %s honour --dry-run; the rest have no dry run yet (docs/PLAN.md)\n"
-                  % d.dryrun.replace(",", ", "))
+        out.write("  changes things: yes -- wk %s %s ... --dry-run prints what it would run and runs none of it;\n"
+                  "    the rest have no dry run yet (docs/PLAN.md)\n" % (cmd, d.dryrun.replace(",", "|")))
     else:
         out.write("  changes things: yes -- and has no dry run yet (docs/PLAN.md)\n")
     if not d.is_readonly():
@@ -421,8 +501,14 @@ def explain(cmd, d):
     for verbs, spec in d.sub + d.flag:
         if "where" in spec:
             out.write("    %s: %s\n" % (verbs.replace(",", ", "), where_prose(d, spec["where"])))
+    if d.verbs:
+        out.write("  verbs: %s%s\n" % (d.verbs.replace(",", ", "), "; with none, or another first word: %s" % d.default
+                                       if d.default else ""))
     out.write("\nwhat it does (from %s):\n" % os.path.relpath(str(d.path), str(ROOT)))
     out.write(d.leading_comment() + "\n")
+    if d.config:
+        out.write("\nvalid values (%s):\n" % ("--config" if d.config == "--config" else "<config>"))
+        out.write("".join(("  " + l).rstrip() + "\n" for l in buildconf.LIST_TEXT.splitlines()))
     if d.values:
         out.write("\nvalid values (wk %s %s):\n" % (cmd, d.values))
         out.flush()
@@ -436,7 +522,7 @@ def help_doc(topic):
     path = ROOT / "README.md"
     text = path.read_text()
     if not topic:
-        if _tty(1) and _which("less"):
+        if os.isatty(1) and shutil.which("less"):
             os.execvp("less", ["less", str(path)])
         sys.stdout.write(text)
         raise Exit(0)
@@ -466,26 +552,27 @@ def help_doc(topic):
 
 # -- machines
 
+def podman_vm():
+    return targets.podman_vm(Local(), MACHINE) if shutil.which("podman") else None
+
+
 def machine_running():
-    if not _which("podman"):
-        return False
-    cp = subprocess.run(["podman", "machine", "inspect", MACHINE, "--format", "{{.State}}"],
-                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    return cp.stdout.strip() == "running"
+    rec = podman_vm()
+    return bool(rec) and rec.get("State") == "running"
 
 
 def forward_to_vm(inv, cmd, args):
-    if not _which("podman"):
+    if not shutil.which("podman"):
         die("podman is required; install the official pkg from podman.io")
-    if subprocess.call(["podman", "machine", "inspect", MACHINE],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
+    rec = podman_vm()
+    if rec is None:
         die("podman machine '%s' does not exist -- run ./setup first" % MACHINE)
-    if not machine_running():
+    if rec.get("State") != "running":
         if inv.decl.is_readonly(args[0] if args else ""):
             warn("the podman machine '%s' is stopped, so its store cannot be read" % MACHINE)
             log("  'wk start' to bring it up -- 'wk %s' will not start it" % cmd)
             raise Exit(0)
-        if not (_tty(0) and _tty(1)):
+        if not (os.isatty(0) and os.isatty(1)):
             die("the podman machine '%s' is stopped, and 'wk %s' needs it.\n"
                 "    Nothing here starts it without a terminal asking:  wk start" % (MACHINE, cmd))
         info("starting podman machine '%s'" % MACHINE)
@@ -493,17 +580,9 @@ def forward_to_vm(inv, cmd, args):
     line = registry().load("container").wk_cmd([cmd, *args], os.environ)
     sys.stdout.flush()
     sys.stderr.flush()
-    if _tty(0) and _tty(1):
-        fields = {}
-        for key in ("Port", "IdentityPath", "RemoteUsername"):
-            cp = subprocess.run(["podman", "machine", "inspect", MACHINE, "--format",
-                                 "{{.SSHConfig.%s}}" % key], stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, text=True)
-            fields[key] = cp.stdout.strip()
-        if all(fields.values()):
-            os.execvp("ssh", ["ssh", "-t", "-p", fields["Port"], "-i", fields["IdentityPath"],
-                              "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-                              "-o", "LogLevel=ERROR", "%s@127.0.0.1" % fields["RemoteUsername"], line])
+    if os.isatty(0) and os.isatty(1):
+        opts, dest = targets.podman_vm_route(rec)
+        os.execvp("ssh", ["ssh", "-t", *opts, dest, line])
     os.execvp("podman", ["podman", "machine", "ssh", MACHINE, "--", line])
 
 
@@ -518,7 +597,7 @@ def registry():
     """This invocation's one Registry: every target is loaded, and every machine probed, at most once."""
     global _registry
     if _registry is None:
-        _registry = Registry(ROOT)
+        _registry = targets.Registry(ROOT)
     return _registry
 
 
@@ -542,10 +621,9 @@ def delegate_run(target, cmd, args):
             "    run it:  wk machine setup %s" % (cmd, machine, machine))
     os.environ["WK_ROW_LABEL"] = machine
     line = target.wk_cmd([cmd, *args], os.environ)
-    tty = ["-t"] if (_tty(0) and _tty(1)) else []
     sys.stdout.flush()
     sys.stderr.flush()
-    os.execvp("ssh", ["ssh", *tty, *target.machine.opts, target.machine.dest, line])
+    os.execvp("ssh", target.machine.argv(line, tty=os.isatty(0) and os.isatty(1)))
 
 
 def json_merge_list(key, paths):
@@ -609,7 +687,7 @@ def bare_report(inv, cmd, args):
         else:
             rc = forward_status(inv, cmd, args, env=env)
         worst = max(worst, rc)
-    elif _which("podman"):
+    elif shutil.which("podman"):
         warn("the podman machine '%s' is stopped, so container workspaces are not included" % MACHINE)
         log("  'wk start' to bring it up")
     if ls_json:
@@ -653,7 +731,11 @@ def main(argv):
         die(str(e))
 
     rest, globals_text, seen_dashdash = [], "", False
-    for a in args:
+    tail = tail_from(d, args, in_workspace()) if d.passthrough == "all" else len(args)
+    for i, a in enumerate(args):
+        if i >= tail:
+            rest.extend(args[i:])
+            break
         if not seen_dashdash:
             if a in ("-h", "--help", "--explain"):
                 explain(cmd, d)
@@ -664,12 +746,14 @@ def main(argv):
             if a == "--":
                 seen_dashdash = True
         rest.append(a)
-    args = rest
-    inv = Invocation(cmd, d, args)
+    inv = Invocation(cmd, d, rest)
     inv.globals_text = globals_text
+    inv.gone_check()
+    args = inv.args = inv.verb_first()
 
-    # WK_NAME is this invocation's answer, never an inherited one.
+    # WK_NAME and WK_CONFIG are this invocation's answers, never inherited ones.
     os.environ.pop("WK_NAME", None)
+    inherited_config = os.environ.pop("WK_CONFIG", None)
 
     where = inv.where()
     sub = args[0] if args else ""
@@ -693,6 +777,8 @@ def main(argv):
 
     args = inv.argv_check()
     inv.args = args
+    inv.verb_given()
+    inv.refuse_inherited_config(inherited_config)
     sub = args[0] if args else ""
     if os.environ.get("WK_DRY_RUN") and not d.honours_dryrun(args) and not d.is_readonly(sub):
         inv.usage_die("'wk %s' has no dry run yet: not every change it makes goes through\n"
@@ -727,14 +813,15 @@ def main(argv):
             forward_to_vm(inv, cmd, args)
 
     if where != "workspace":
+        args = inv.take_config(args)
         os.execv(str(impl), [str(impl), *argv_split(d.opts_for(args), args)])
 
     if delegate is not None:
-        delegate_run(delegate, cmd, args)
+        delegate_run(delegate, cmd, inv.typed)
 
     name = ""
     if not in_workspace() and name_decl.split("@")[0] == "required":
-        if argv_name(slot, takes, args) is None and not cwd_workspace():
+        if name_in_argv("required", slot, takes, args) is None and not cwd_workspace():
             inv.usage_die()
     if in_workspace():
         os.environ.setdefault("WK_TARGET", "local")
@@ -756,6 +843,11 @@ def main(argv):
             os.execv(str(ROOT / "cmd" / "zed"), [str(ROOT / "cmd" / "zed"), name])
         if d.post == "ssh-alias-remove":
             name = positional(1, args) or ""
+            from wk import workspace
+            try:
+                workspace.refuse_unsaved_before_forward(registry(), positionals(args))
+            except act.Refused as e:
+                raise Exit(e.status)
             rc = forward_status(inv, cmd, args)
             if rc != 0:
                 raise Exit(rc)
@@ -764,7 +856,7 @@ def main(argv):
             raise Exit(0)
         if d.bare == "merged" and not positionals(args):
             bare_report(inv, cmd, args)
-        if d.is_readonly(sub) and not _which("podman"):
+        if d.is_readonly(sub) and not shutil.which("podman"):
             warn("podman is not installed, so there are no container workspaces to read")
             log("  './setup' installs it; 'WK_TARGET=vm wk ls' lists the macOS guests, which do not need it")
             raise Exit(0)
@@ -774,7 +866,7 @@ def main(argv):
     if base == "derived":
         name = name or derived
     elif base in ("required", "optional") and not name:
-        a = argv_name(slot, takes, args)
+        a = name_in_argv(base, slot, takes, args)
         if a is not None:
             name = a
             args = without_positional(slot, args)
@@ -787,6 +879,7 @@ def main(argv):
             os.environ["WK_TARGET"] = resolved
         if asks or d.ready:
             ask_target(inv, resolved, name, asks, d.ready)
+    args = inv.take_config(args)
     os.execv(str(impl), [str(impl), *argv_split(d.opts_for(args), args)])
 
 
@@ -818,7 +911,7 @@ def resolve_target(inv, name_decl, slot, takes, derived):
             return t
         name = derived
     elif slot > 0:
-        name = argv_name(slot, takes, args) or cwd_workspace() or ""
+        name = name_in_argv(name_decl.split("@")[0], slot, takes, args) or cwd_workspace() or ""
     if name:
         try:
             return registry().ws_target(name)
@@ -832,7 +925,7 @@ def entry():
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # `wk help | head` ends quietly, as a shell tool does
     try:
         main(sys.argv[1:])
-    except Exit as e:
+    except (Exit, act.Refused) as e:
         sys.exit(e.status)
     except KeyboardInterrupt:
         sys.exit(130)

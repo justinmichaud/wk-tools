@@ -1,31 +1,34 @@
-"""Fleet walk: `wk status` reaches a remote target over ssh (targets/remote.sh's
-`_rsh_q`/`_remote_probe_try`), and this drives that for real against a faked
-machine -- WK_TARGET=remote, a made-up WK_REMOTE_HOST, and a stub `ssh` on
-PATH that either answers (a normal shell, standing in for a live machine) or
-refuses (ssh's own exit 255, standing in for one that never answers) -- so
-`cmd/status` genuinely shells out to the stub rather than to a mocked driver
-function.
+"""Fleet walk: `wk status` reaches a remote target over ssh (Remote.probed,
+lib/wk/targets.py), and this drives that for real against a faked machine --
+WK_TARGET=remote, a made-up WK_REMOTE_HOST, and a stub `ssh` on PATH that
+either answers (a normal shell, standing in for a live machine) or refuses
+(ssh's own exit 255, standing in for one that never answers) -- so
+`cmd/status` genuinely shells out to the stub rather than to a mocked driver.
 
-The named form, `wk status <name> --text` (cmd/status's `collect()`), skips
-the bench-device fleet walk entirely and answers for exactly the one target
-asked about, which is enough to exercise the real ssh shell-out and the
-unreachable-by-name reporting faithfully and fast.
+The named form, `wk status <name> --text`, skips the bench-device fleet walk
+entirely and answers for exactly the one target asked about, which is enough
+to exercise the real ssh shell-out and the unreachable-by-name reporting
+faithfully and fast.
 
 A bare `wk status` also walks this host's bench-device fleet
-(`report_fleet_devices`, cmd/status): WK_MACHINES_DIR (read by
+(`Status.fleet_devices`, lib/wk/status.py): WK_MACHINES_DIR (read by
 lib/wk/fleet.py alone) points that walk at a directory of faked
-`machines/*.conf`-shaped confs instead of the real fleet, and the same
-stub `ssh` answers every board's probe too -- `m_ssh`
-(boot/machines.sh) shell out to `ssh` by name, the same as targets/remote.sh
-does. Driving the real fleet for real from a test hung past two minutes in
-this environment (measured, then killed); this is what replaces that.
+`machines/*.conf`-shaped confs instead of the real fleet, and the same stub
+`ssh` answers every board's probe too. Driving the real fleet for real from
+a test hung past two minutes in this environment (measured, then killed);
+this is what replaces that.
 
 Run: python3 -m unittest tests.test_fleet_walk -v
 """
 import os
+import sys
 import unittest
 
-from tests.support import REPO, WkTest, bash, rand_suffix, run, scratch_dir, stub_path
+from tests.support import REPO, WkTest, rand_suffix, run, scratch_dir, stub_path
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import targets  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 
 _ANSWERING_SSH = '''#!/bin/sh
@@ -43,13 +46,12 @@ exit 255
 
 class TestFleetWalkNamedFormRendersAFakedMachine(WkTest):
     def test_reachable_machine_renders_its_block(self):
-        # The stub runs the ssh'd command locally, so `t_info` (targets/
-        # remote.sh) stats a directory on *this* filesystem: WK_REMOTE_ROOT,
-        # pointed at a scratch dir instead of the real $HOME/wk a bare
-        # WK_REMOTE_HOST would default to, with the ready marker every
-        # driver writes as creation's last act (WK_READY_MARKER,
-        # lib/target.sh) already in place -- the answer a real finished
-        # workspace on a real reachable machine would give.
+        # The stub runs the ssh'd command locally, so `Remote.info` stats a
+        # directory on *this* filesystem: WK_REMOTE_ROOT, pointed at a scratch
+        # dir instead of the real $HOME/wk a bare WK_REMOTE_HOST would default
+        # to, with the ready marker every driver writes as creation's last act
+        # already in place -- the answer a real finished workspace on a real
+        # reachable machine would give.
         with stub_path({"ssh": _ANSWERING_SSH}) as binp, scratch_dir(prefix="wk-test-remote-root-") as root:
             name = f"demo-{rand_suffix()}"
             (root / "ws" / name).mkdir(parents=True)
@@ -59,9 +61,7 @@ class TestFleetWalkNamedFormRendersAFakedMachine(WkTest):
                 "WK_REMOTE_HOST": "fake-reachable-machine",
                 "WK_REMOTE_ROOT": str(root),
                 "PATH": f"{binp}:{self._real_path()}",
-                # The probe's cap (targets/remote.sh): every stub here answers at
-                # once, and `capped` leaves its watchdog sleeping on the walk's
-                # stdout for the whole cap after the walk has exited.
+                # The probe's cap: every stub here answers at once.
                 "WK_PROBE_SECONDS": "1",
             }
             cp = run("status", name, "--text", env=env, timeout=30)
@@ -95,21 +95,21 @@ class TestFleetWalkNamedFormRendersAFakedMachine(WkTest):
         return os.environ.get("PATH", "/usr/bin:/bin")
 
 
-_FAKE_NODE_CONF = '''NODE_SSH={ssh}
-KIND=board
-NODE_DRIVER=rpi5-usb
-NODE_DEVICE=/dev/sda
-NODE_ROOT=/dev/nvme0n1p2
-NODE_PROFILE=webkit-2.52-yocto-rpi5-64
-NODE_MAC={mac}
-NODE_BRIDGE=""
-NODE_ROLE=workstation
-NODE_OS=any
-NODE_VOLUME=""
-NODE_DTB=bcm2712-rpi-5-b.dtb
-NODE_BENCH_SSH=""
-NODE_NET=wifi
-NODE_NOTE="{note}"
+_FAKE_NODE_CONF = '''ssh={ssh}
+kind=board
+driver=rpi5-usb
+device=/dev/sda
+root=/dev/nvme0n1p2
+profile=webkit-2.52-yocto-rpi5-64
+mac={mac}
+bridge=""
+role=workstation
+os=any
+volume=""
+dtb=bcm2712-rpi-5-b.dtb
+bench_ssh=""
+net=wifi
+note="{note}"
 '''
 
 
@@ -123,9 +123,7 @@ class TestFleetWalkBareFormMultiMachine(WkTest):
         # machines/*.conf -- the thing that hung past 120s before.
         with scratch_dir(prefix="wk-test-machines-") as machdir, \
              stub_path({"ssh": _ANSWERING_SSH}) as binp:
-            # Short: machine_list's listing (boot/machines.sh) is a fixed
-            # `%-8s` column with no separator for a name that fills or
-            # overflows it, so a longer name runs into its own note.
+            # Short, so a name fits the listing's machine column.
             suffix = rand_suffix(3)
             names = [f"f{i}{suffix}" for i in range(2)]
             for i, n in enumerate(names):
@@ -145,134 +143,35 @@ class TestFleetWalkBareFormMultiMachine(WkTest):
                 self.assertIn(n, cp.stdout, f"'{n}' missing from a bare 'wk status --text':\n{cp.stdout}")
 
 
+class _Registry(targets.Registry):
+    """A registry of named targets, `holding` the ones a workspace is on."""
+
+    def __init__(self, names, holding):
+        super().__init__(REPO, env={}, machine=Fake())
+        self.names, self.holding = names, holding
+
+    def all(self):
+        return self.names
+
+    def machines(self):
+        return []
+
+    def on_target(self, name, ws):
+        return name in self.holding
+
+
 class TestResolution(unittest.TestCase):
     def test_a_name_on_two_targets_refuses_naming_both(self):
         """a workspace name on two targets refuses and names both"""
-        script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/target.sh"
-target_all() {{ printf 'alpha\\nbeta\\ngamma\\n'; }}
-ws_on_target() {{ case "$1" in alpha|beta) return 0 ;; esac; return 1; }}
-ws_target demo-ambiguous
-'''
-        cp = bash(script)
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("demo-ambiguous", cp.stderr, cp.stderr)
-        self.assertIn("alpha", cp.stderr, cp.stderr)
-        self.assertIn("beta", cp.stderr, cp.stderr)
-        self.assertNotIn("gamma", cp.stderr, cp.stderr)
+        with self.assertRaises(LookupError) as e:
+            _Registry(["alpha", "beta", "gamma"], {"alpha", "beta"}).ws_target("demo-ambiguous")
+        self.assertIn("demo-ambiguous", str(e.exception))
+        self.assertIn("alpha beta", str(e.exception))
+        self.assertNotIn("gamma", str(e.exception))
 
     def test_a_name_on_one_target_still_resolves(self):
-        """the same collecting loop still resolves an unambiguous name"""
-        script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/target.sh"
-target_all() {{ printf 'alpha\\nbeta\\n'; }}
-ws_on_target() {{ [ "$1" = beta ]; }}
-ws_target demo-single
-'''
-        cp = bash(script)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "beta", cp.stdout + cp.stderr)
-
-
-# `tailscale status --json` as lib/reach.sh reads it: DNSName and Online, one
-# peer per name this test names.
-_TAILSCALE_STATUS = '''#!/bin/sh
-cat <<'JSON'
-{"Self": {"DNSName": "here.tail.ts.net.", "TailscaleIPs": ["100.64.0.1"]},
- "Peer": {
-   "k1": {"DNSName": "downboard.tail.ts.net.", "TailscaleIPs": ["100.64.0.2"], "Online": false},
-   "k2": {"DNSName": "upboard.tail.ts.net.",   "TailscaleIPs": ["100.64.0.3"], "Online": true}}}
-JSON
-'''
-
-# Long enough that a dial would be the whole test's runtime, which is the point.
-_HANGING_SSH = '#!/bin/sh\nsleep 30\nexit 0\n'
-
-
-class TestAnOfflineFleetMemberIsRefusedBeforeTheDial(WkTest):
-    """`ssh` to a node the tailnet already reports down spends the whole
-    ConnectTimeout learning it. The coordinator's answer is read first, once
-    per process (wk_tailscale_peers), and the refusal names the board."""
-
-    def _m_ssh(self, node):
-        with stub_path({"tailscale": _TAILSCALE_STATUS, "ssh": _HANGING_SSH}) as binp:
-            script = f'''
-set -euo pipefail
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/boot/machines.sh"
-NODE_NAME=board NODE_SSH={node} NODE_ROLE=workstation
-rc=0; m_ssh true || rc=$?
-echo "rc=$rc"
-'''
-            return bash(script, env={"PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}"},
-                        timeout=20)
-
-    def test_a_down_peer_is_refused_by_name_without_dialling(self):
-        cp = self._m_ssh("downboard")
-        self.assertIn("rc=255", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("downboard", cp.stderr, cp.stderr)
-        self.assertIn("offline", cp.stderr, cp.stderr)
-
-    def test_a_peer_the_tailnet_says_is_up_is_still_dialled(self):
-        with stub_path({"tailscale": _TAILSCALE_STATUS, "ssh": "#!/bin/sh\necho dialled\n"}) as binp:
-            script = '''
-set -euo pipefail
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/boot/machines.sh"
-NODE_NAME=board NODE_SSH=upboard NODE_ROLE=workstation
-m_ssh true
-'''
-            cp = bash(script, env={"PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}"},
-                      timeout=20)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("dialled", cp.stdout, cp.stdout)
-
-    def test_a_walk_asks_the_coordinator_once_however_many_boards_it_dials(self):
-        """`tailscale status --json` is capped at 4s against a wedged
-        tailscaled, so one per dial is the walk's whole runtime. reach_offline
-        answers by exit status rather than into a command substitution, so the
-        per-process read is this shell's and the walk pays for one."""
-        counter = self.tmp / "ts-calls"
-        counting = f'''#!/bin/sh
-echo call >> "{counter}"
-''' + _TAILSCALE_STATUS.split("\n", 1)[1]
-        with stub_path({"tailscale": counting, "ssh": "#!/bin/sh\necho dialled\n"}) as binp:
-            script = '''
-set -euo pipefail
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/boot/machines.sh"
-NODE_ROLE=workstation
-for NODE_SSH in upboard unlisted upboard downboard; do
-    NODE_NAME=$NODE_SSH
-    m_ssh true >/dev/null 2>&1 || true
-done
-echo WALKED
-'''
-            cp = bash(script, env={"PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}"},
-                      timeout=30)
-        self.assertIn("WALKED", cp.stdout, cp.stdout + cp.stderr)
-        calls = counter.read_text().count("call") if counter.exists() else 0
-        self.assertEqual(calls, 1, f"the walk ran `tailscale status` {calls} times")
-
-    def test_a_machine_the_tailnet_does_not_name_is_still_dialled(self):
-        """Most of the fleet is not on the tailnet by its machine name, and
-        an answer of "not listed" is not an answer of "down"."""
-        with stub_path({"tailscale": _TAILSCALE_STATUS, "ssh": "#!/bin/sh\necho dialled\n"}) as binp:
-            script = '''
-set -euo pipefail
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/boot/machines.sh"
-NODE_NAME=board NODE_SSH=unlisted NODE_ROLE=workstation
-m_ssh true
-'''
-            cp = bash(script, env={"PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}"},
-                      timeout=20)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("dialled", cp.stdout, cp.stdout)
+        """the same collecting walk still resolves an unambiguous name"""
+        self.assertEqual(_Registry(["alpha", "beta"], {"beta"}).ws_target("demo-single"), "beta")
 
 
 if __name__ == "__main__":

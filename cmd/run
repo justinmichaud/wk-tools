@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 #
 # wk run <workspace> [options] [-- jsc-args] -- run jsc from a workspace build
-# wk: where=workspace name=required ready=yes group=workspaces opts --config=,--lldb,--until-crash,--max= passthrough
+# wk: where=workspace name=required ready=yes group=workspaces config=--config dryrun opts --config=,--lldb,--until-crash,--max= passthrough
 #
 # Runs the jsc binary a build produced, from the workspace's own build tree on
 # its target. Everything after `--` goes to jsc verbatim.
 #
 #   --config <config>   the build config to run (default: the last build's,
-#                       else the platform's; wk build --list prints every name)
+#                       else the platform's; the list is below)
 #   --lldb              run jsc under lldb instead of directly; under
 #                       --until-crash each iteration runs under lldb, and a
 #                       crash leaves you at its prompt
@@ -19,12 +19,13 @@
 #                       reaching it without a crash exits 0)
 
 import os
+import shlex
 import sys
 
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import buildconf, decl, shell, targets  # noqa: E402
+from wk import buildconf, decl, targets  # noqa: E402
 from wk.act import Refused, die, exec_into  # noqa: E402
 from wk.ldpath import LLDB_PRELUDE, prelude  # noqa: E402
 
@@ -92,7 +93,7 @@ def parse(argv):
     if not max_raw.isdigit():
         die("--max needs a positive integer iteration count (got '%s')\n"
             "    example:  wk run %s --until-crash --max 50 -- ..." % (max_raw, os.environ.get("WK_NAME", "")))
-    return {"config": args.value("--config"), "lldb": args.flag("--lldb"),
+    return {"lldb": args.flag("--lldb"),
             "until_crash": args.flag("--until-crash"), "max": int(max_raw), "tail": args.tail}
 
 
@@ -106,7 +107,7 @@ def main(argv):
     except LookupError as e:
         die(str(e))
 
-    config = opts["config"] or os.environ.get("WK_CONFIG") or reg.default_config(name)
+    config = os.environ.get("WK_CONFIG") or reg.default_config(name)
     try:
         cfg = buildconf.resolve(config, target.os(), target.kind, target.env)
     except LookupError:
@@ -116,21 +117,21 @@ def main(argv):
     jsc = cfg.jsc_path(src)
     var = cfg.run_var()
     pre = prelude(var, cfg.run_dir(src))
-    tail_q = shell.sh_quote(*opts["tail"])
+    tail_q = shlex.join(opts["tail"])
 
     if opts["until_crash"]:
         home = target.home()
         if opts["lldb"]:
             cmd = LLDB_UNTIL_CRASH.format(
-                lldb_prelude=LLDB_PRELUDE, prelude=pre, logdir_q=shell.sh_quote(home + "/until-crash"),
+                lldb_prelude=LLDB_PRELUDE, prelude=pre, logdir_q=shlex.quote(home + "/until-crash"),
                 max=opts["max"], lldb_opts=target.lldb_opts(),
-                runfile_q=shell.sh_quote(target.tools(name) + "/container/lldb/until-crash-run-file"),
-                jsc_q=shell.sh_quote(jsc), tail_q=tail_q)
+                runfile_q=shlex.quote(target.tools(name) + "/container/lldb/until-crash-run-file"),
+                jsc_q=shlex.quote(jsc), tail_q=tail_q)
             argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=True)
         else:
             cmd = PLAIN_UNTIL_CRASH.format(
-                prelude=pre, logdir_q=shell.sh_quote(home + "/until-crash"), core_dir_q=shell.sh_quote(home + "/wk-cores"),
-                max=opts["max"], jsc_invoke="%s --validateOptions=1 %s" % (shell.sh_quote(jsc), tail_q), tail_q=tail_q)
+                prelude=pre, logdir_q=shlex.quote(home + "/until-crash"), core_dir_q=shlex.quote(home + "/wk-cores"),
+                max=opts["max"], jsc_invoke="%s --validateOptions=1 %s" % (shlex.quote(jsc), tail_q), tail_q=tail_q)
             argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=False)
         exec_into(argv_, cwd)
         return
@@ -138,10 +139,10 @@ def main(argv):
     if opts["lldb"]:
         cmd = DIRECT_LLDB.format(
             lldb_prelude=LLDB_PRELUDE, prelude=pre, lldb_opts=target.lldb_opts(),
-            runfile_q=shell.sh_quote(target.tools(name) + "/container/lldb/run-file"), jsc_q=shell.sh_quote(jsc), tail_q=tail_q)
+            runfile_q=shlex.quote(target.tools(name) + "/container/lldb/run-file"), jsc_q=shlex.quote(jsc), tail_q=tail_q)
         argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=True)
     else:
-        cmd = DIRECT_PLAIN.format(prelude=pre, jsc_q=shell.sh_quote(jsc), tail_q=tail_q)
+        cmd = DIRECT_PLAIN.format(prelude=pre, jsc_q=shlex.quote(jsc), tail_q=tail_q)
         argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=False)
     exec_into(argv_, cwd)
 

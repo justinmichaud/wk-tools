@@ -17,7 +17,7 @@ class PiSd(Driver):
     disarms = True
 
     def boot_part(self):
-        return part(self.c("NODE_DEVICE"), 3)
+        return part(self.c("device"), 3)
 
     def slot(self, p):
         n = partno(p)
@@ -25,7 +25,7 @@ class PiSd(Driver):
             return "second"
         if n == "7":
             return "third"
-        act.die("'%s' is not a bench system's boot partition on %s" % (p, self.c("NODE_DEVICE")))
+        act.die("'%s' is not a bench system's boot partition on %s" % (p, self.c("device")))
 
     def state(self, addr):
         r = self.card("second-state", addr)
@@ -35,52 +35,52 @@ class PiSd(Driver):
         if not p:
             act.die("arming needs the selected boot partition (select_system, wk boot)")
         slot = self.slot(p)
-        addr = "%s@%s" % (self.c("NODE_DEVICE"), slot)
+        addr = "%s@%s" % (self.c("device"), slot)
         state = self.state(addr)
         if state is None:
             act.die("could not read %s's arming on %s.\n    Arming this board is an edit of its rescue's boot partition, made by the\n"
-                    "    card helper on the rescue, so the rescue has to be up and carry the helper." % (self.c("NODE_DEVICE"), self.c("NODE_NAME")))
+                    "    card helper on the rescue, so the rescue has to be up and carry the helper." % (self.c("device"), self.c("name")))
         if "present=yes" not in state:
             act.die("%s on %s holds no bench system at %s.\n    Write one first:  wk sysimage write --from <path> --disk <reader>:%s"
-                    % (self.c("NODE_DEVICE"), self.c("NODE_NAME"), slot, addr))
+                    % (self.c("device"), self.c("name"), slot, addr))
         if "armed_prefix=%s" % slot in state:
-            act.debug("%s is already armed for %s" % (self.c("NODE_NAME"), slot))
+            act.debug("%s is already armed for %s" % (self.c("name"), slot))
             return 0
         if not self.card("second-arm", addr, mutates=True).ok:
-            act.die("could not arm the %s system on %s" % (slot, self.c("NODE_NAME")))
+            act.die("could not arm the %s system on %s" % (slot, self.c("name")))
         if "armed_prefix=%s" % slot not in (self.state(addr) or ""):
             act.die("%s on %s is not armed for the %s system after being told to, so the board would\n"
-                    "    boot another system and measure it under this one's name." % (self.c("NODE_DEVICE"), self.c("NODE_NAME"), slot))
+                    "    boot another system and measure it under this one's name." % (self.c("device"), self.c("name"), slot))
         return 0
 
     def disarm(self):
-        addr = self.c("NODE_DEVICE") + "@second"
+        addr = self.c("device") + "@second"
         state = self.state(addr)
         if not state or "armed=yes" not in state:
             return 0
         if not self.card("second-disarm", addr, mutates=True).ok:
-            act.die("could not disarm the bench system on %s" % self.c("NODE_NAME"))
+            act.die("could not disarm the bench system on %s" % self.c("name"))
         return 0
 
     def disarm_note(self):
         return ("  the rescue's config.txt is back on %s, so the firmware boots the\n"
-                "  rescue's kernel again. 'wk boot %s' arms the bench system once more." % (self.c("NODE_DEVICE"), self.c("NODE_NAME")))
+                "  rescue's kernel again. 'wk boot %s' arms the bench system once more." % (self.c("device"), self.c("name")))
 
     def evidence(self):
-        state = self.state(self.c("NODE_DEVICE") + "@second")
+        state = self.state(self.c("device") + "@second")
         if state is None:
             return "arming=unreadable (the rescue did not answer)"
-        lines = ["lane=one SD card, rescue on partitions 1-2, bench system(s) beside it (os_prefix arming)"]
+        lines = ["arrangement=one SD card, rescue on partitions 1-2, bench system(s) beside it (os_prefix arming)"]
         lines += [l[len("wk-card-priv: "):] for l in state.splitlines() if l.startswith("wk-card-priv: armed=")]
         lines += ["system=%s (on %s)" % (i, p) for p, i in (self.systems() or [])]
         return "\n".join(lines)
 
     def media(self):
         return ("SD card %s holds every system: rescue on p1-p2, bench system(s) beside it -- p3-p4, or pairs 5-6 and 7-8 "
-                "in an extended p3 (wk boot %s --system <id> arms one for one boot)" % (self.c("NODE_DEVICE"), self.c("NODE_NAME")))
+                "in an extended p3 (wk boot %s --system <id> arms one for one boot)" % (self.c("device"), self.c("name")))
 
     def reprovision(self):
-        dev, name, prof = self.c("NODE_DEVICE"), self.c("NODE_NAME"), self.c("NODE_PROFILE")
+        dev, name, prof = self.c("device"), self.c("name"), self.c("profile")
         return ("wk sysimage build %s\n    in a workspace; hours\n"
                 "wk sysimage write --from <path> --disk <reader>:%s --rescue --profile %s\n"
                 "    no --grow: the rest of the card is where the bench system goes\n"
@@ -104,7 +104,7 @@ class PiTryboot(Driver):
     disarms = True
 
     def sd(self):
-        return part(disk_of(self.c("NODE_ROOT")), 1)
+        return part(disk_of(self.c("root")), 1)
 
     def failsafe_params(self):
         """This board does not consume the tryboot flag, so the boot that spends the staging removes it."""
@@ -116,15 +116,15 @@ class PiTryboot(Driver):
     def arm(self, p, order=""):
         if not p:
             act.die("arming needs the selected boot partition (select_system, wk boot)")
-        if not self.tryboot("stage", mutates=True, WK_SRC=p, WK_DTB=self.c("NODE_DTB")).ok:
+        if not self.tryboot("stage", mutates=True, WK_SRC=p, WK_DTB=self.c("dtb")).ok:
             act.die("could not stage the tryboot files on %s.\n    Arming copies the selected system's kernel out of %s's boot\n"
                     "    partition onto the SD, so the board has to answer -- as its rescue or as a\n"
-                    "    bench system, either will do -- and both media have to be readable there." % (self.c("NODE_NAME"), self.c("NODE_DEVICE")))
+                    "    bench system, either will do -- and both media have to be readable there." % (self.c("name"), self.c("device")))
         want = kv((self.medium_read(p, "cmdline.txt") or "").replace(" ", "\n")).get("root", "")
         staged = kv(self.tryboot("staged-root").out).get("root", "")
         if not want or staged != want:
             act.die("the staging on %s's SD boots root=%s, not the selected system's root=%s (on %s),\n"
-                    "    so the board would measure another system under this one's name." % (self.c("NODE_NAME"), staged or "?", want or "?", p))
+                    "    so the board would measure another system under this one's name." % (self.c("name"), staged or "?", want or "?", p))
         return 0
 
     def reboot(self, armed=False):
@@ -149,7 +149,7 @@ class PiTryboot(Driver):
     def evidence(self):
         staged = self.tryboot("staged").out.replace("\r", "").strip().split("\n")[0]
         source = self.tryboot("source").out.replace("\r", "").strip().split("\n")[0]
-        lines = ["lane=kernel from the SD via tryboot (one boot, firmware-reverting); bench root on %s" % self.c("NODE_DEVICE"),
+        lines = ["arrangement=kernel from the SD via tryboot (one boot, firmware-reverting); bench root on %s" % self.c("device"),
                  "boot_source=" + self.SOURCES.get(source, "unreadable (the board did not answer the probe)"),
                  "tryboot_staged=" + (staged or "unreadable")]
         lines += ["system=%s (on %s)" % (i, p) for p, i in (self.systems() or [])]
@@ -157,10 +157,10 @@ class PiTryboot(Driver):
 
     def media(self):
         return ("%s holds the bench system(s): root on 1-2 and, when written, a second on 3-4; the armed kernel is "
-                "tryboot-staged onto the SD, which also carries the rescue" % self.c("NODE_DEVICE"))
+                "tryboot-staged onto the SD, which also carries the rescue" % self.c("device"))
 
     def reprovision(self):
-        dev, name, prof = self.c("NODE_DEVICE"), self.c("NODE_NAME"), self.c("NODE_PROFILE")
+        dev, name, prof = self.c("device"), self.c("name"), self.c("profile")
         return ("wk sysimage build %s\n    in a workspace; hours\n"
                 "wk sysimage write --from <path> --disk <reader>:%s --rescue --profile %s\n"
                 "    the SD card -- the system this board falls back to, and the firmware's boot medium\n"
@@ -172,7 +172,7 @@ class PiTryboot(Driver):
                 "    optional: a second system beside the first (partitions 3-4), for an\n"
                 "    A/B across images; 'wk boot %s --system <id>' picks one\n"
                 "wk boot %s\n    one shot; the firmware reverts by itself"
-                % (prof, disk_of(self.c("NODE_ROOT")), prof, name, name, dev, name, dev, name, name))
+                % (prof, disk_of(self.c("root")), prof, name, name, dev, name, dev, name, name))
 
 
 class Rpi5Usb(Driver):
@@ -197,7 +197,7 @@ class Rpi5Usb(Driver):
         self.select_pair(n)
         r = self.ch.call("boot_priv", "order", order, mutates=True)
         if not r.ok:
-            act.die("the firmware mailbox call failed on %s" % self.c("NODE_NAME"))
+            act.die("the firmware mailbox call failed on %s" % self.c("name"))
         words = r.out.split()
         if words[1:2] != ["0x80000000"]:
             act.die("the firmware refused the boot order (%s, wanted 0x80000000)\n    reply: %s"
@@ -206,7 +206,7 @@ class Rpi5Usb(Driver):
         return 0
 
     def select_pair(self, pair):
-        dev, name = self.c("NODE_DEVICE"), self.c("NODE_NAME")
+        dev, name = self.c("device"), self.c("name")
         if not self.ch.call("disk_unmount", dev, mutates=True).ok:
             raise act.Refused(1)
         if not self.card("autoboot", dev, pair, mutates=True).ok:
@@ -223,11 +223,11 @@ class Rpi5Usb(Driver):
         return self.run("eeprom-order.sh").out.rstrip("\n")
 
     def media(self):
-        dev, mode = self.c("NODE_DEVICE"), self.mode
+        dev, mode = self.c("device"), self.mode
         if mode.startswith("bench"):
             return "booted from its USB stick (system %s); NVMe untouched" % mode[6:]
         if mode.startswith("base"):
-            return "booted %s -- a wk system on the medium that is never armed (%s)" % (self.c("NODE_ROOT") or "its base medium", mode[5:])
+            return "booted %s -- a wk system on the medium that is never armed (%s)" % (self.c("root") or "its base medium", mode[5:])
         if mode != "host":
             return "USB stick %s: state unknown (board unreachable)" % dev
         order = kv(self.evidence()).get("eeprom_boot_order", "")
@@ -235,7 +235,7 @@ class Rpi5Usb(Driver):
             dev, self.device_image() or "no wk system (wk sysimage write puts one there)", " (eeprom %s)" % order if order else "")
 
     def reprovision(self):
-        dev, name, prof = self.c("NODE_DEVICE"), self.c("NODE_NAME"), self.c("NODE_PROFILE")
+        dev, name, prof = self.c("device"), self.c("name"), self.c("profile")
         return ("wk sysimage build %s\n    in a workspace; hours\n"
                 "wk sysimage write --from <path> --disk %s:%s\n"
                 "wk sysimage write --from <path> --disk %s:%s@second\n"
@@ -261,7 +261,7 @@ class PiMbr(Driver):
         if not got:
             act.die("cannot tell which disk on %s is its bench medium.\n    Its conf says %s, and the board does not agree or could not be\n"
                     "    asked. Refusing to write a partition type byte to a disk chosen by name:\n"
-                    "    on this board that byte decides whether it comes back at all." % (self.c("NODE_NAME"), self.c("NODE_DEVICE") or "nothing"))
+                    "    on this board that byte decides whether it comes back at all." % (self.c("name"), self.c("device") or "nothing"))
         return got
 
     @staticmethod
@@ -269,7 +269,7 @@ class PiMbr(Driver):
         return {"/dev/mm": "SD card", "/dev/sd": "USB stick"}.get(dev[:7], dev)
 
     def rescue_disk(self):
-        return disk_of(self.c("NODE_ROOT"))
+        return disk_of(self.c("root"))
 
     def boot_part(self):
         return part(self.dev(), 1)
@@ -283,16 +283,16 @@ class PiMbr(Driver):
 
     def set_type(self, hexbyte):
         if not self.sudo("pimbr-set-type.sh", mutates=True, WK_DEV=self.dev(), WK_OCT="%03o" % int(hexbyte, 16)).ok:
-            act.die("could not write %s's partition type on %s" % (self.c("NODE_DEVICE"), self.c("NODE_NAME")))
+            act.die("could not write %s's partition type on %s" % (self.c("device"), self.c("name")))
         got = self.type()
         if got != hexbyte:
             act.die("%s's partition type on %s still reads\n    0x%s after writing 0x%s. This byte is what decides whether the board's\n"
                     "    firmware boots the %s or steps over it to the rescue, so a write\n    that did not take is not something to continue past.\n\n"
                     "    The board has not been rebooted; it is still in whatever role it was in."
-                    % (self.c("NODE_DEVICE"), self.c("NODE_NAME"), got or "unreadable", hexbyte, self.word(self.c("NODE_DEVICE"))))
+                    % (self.c("device"), self.c("name"), got or "unreadable", hexbyte, self.word(self.c("device"))))
 
     def arm(self, p, order=""):
-        dev, name = self.c("NODE_DEVICE"), self.c("NODE_NAME")
+        dev, name = self.c("device"), self.c("name")
         state = self.state()
         if state is None:
             act.die("could not read %s's partition table on %s.\n    Arming this machine means writing one byte of it, so the bench medium has to be\n"
@@ -314,13 +314,13 @@ class PiMbr(Driver):
 
     def disarm_note(self):
         return ("  %s's partition 1 is typed 0x%s, so the firmware finds no\n  boot filesystem there and %s boots its rescue on %s. "
-                "'wk boot %s' puts it back." % (self.c("NODE_DEVICE"), self.DISARMED, self.c("NODE_NAME"), self.rescue_disk(), self.c("NODE_NAME")))
+                "'wk boot %s' puts it back." % (self.c("device"), self.DISARMED, self.c("name"), self.rescue_disk(), self.c("name")))
 
     def evidence(self):
         return "%s\nbench_medium=%s" % (self.run("eeprom-order.sh").out.rstrip("\n"), self.state() or "unreadable")
 
     def media(self):
-        dev, mode = self.c("NODE_DEVICE"), self.mode
+        dev, mode = self.c("device"), self.mode
         bench, rescue = self.word(dev), self.word(self.rescue_disk())
         if mode.startswith("bench"):
             return "booted from its %s (system %s); the %s is the rescue" % (bench, mode[6:], rescue)
@@ -333,13 +333,13 @@ class PiMbr(Driver):
         return "%s; the %s is the rescue" % (held, rescue)
 
     def reprovision(self):
-        dev, name, rescue = self.c("NODE_DEVICE"), self.c("NODE_NAME"), self.rescue_disk()
+        dev, name, rescue = self.c("device"), self.c("name"), self.rescue_disk()
         return ("wk sysimage build %s\n    in a workspace; hours\n"
                 "wk sysimage write <id> --disk <reader>:%s --rescue\n    the %s -- the system this board falls back to\n"
                 "wk boot %s --boot-order %s\n    the %s first, the rescue behind it\n"
                 "wk sysimage write <id> --disk %s:%s\n    the %s -- the system it is measured on\n"
                 "wk boot %s\n    one shot; it reverts by itself"
-                % (self.c("NODE_PROFILE"), rescue, self.word(rescue), name, "sd-first" if dev.startswith("/dev/mm") else "usb-first",
+                % (self.c("profile"), rescue, self.word(rescue), name, "sd-first" if dev.startswith("/dev/mm") else "usb-first",
                    self.word(dev), name, dev, self.word(dev), name))
 
 

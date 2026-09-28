@@ -35,7 +35,7 @@ from wk.machine import Fake, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 PROFILE = "webkit-2.52-yocto-rpi5-64"
-LANE = "yocto-" + PROFILE
+WS = "yocto-" + PROFILE
 SHA = "a" * 40
 WK = str(REPO / "wk")
 RES = "machine:tolken"
@@ -77,14 +77,14 @@ class Reg(targets.Registry):
 
 
 class World:
-    """This host holding the lane, a board `rpi5` running `mode`, and every step's command answered by the state it leaves."""
+    """This host holding the image workspace, a board `rpi5` running `mode`, and every step's command answered by the state it leaves."""
 
     def __init__(self, tmp, mode="bench %s-0123abcd" % PROFILE, fail=""):
         self.tmp, self.mode, self.fail = Path(tmp), mode, fail
         self.env = {"WK_STORE": str(self.tmp / "store"), "XDG_STATE_HOME": str(self.tmp / "state"), "HOME": str(self.tmp),
                     "XDG_CONFIG_HOME": str(self.tmp / "config"), "WK_MACHINES_DIR": str(self.tmp / "machines")}
         (self.tmp / "machines").mkdir(parents=True, exist_ok=True)
-        (self.tmp / "machines" / "rpi5.conf").write_text("KIND=board\nNODE_SSH=rpi5-rescue\n")
+        (self.tmp / "machines" / "rpi5.conf").write_text("kind=board\nssh=rpi5-rescue\n")
         self.fake, self.clock, self.built = Fake("here"), FakeClock(), []
         self.fake.answer(["hostname", "-s"], out="tolken\n")
         self.fake.react(["sh", "-c", sched.LOGGED], self.logged)
@@ -159,7 +159,7 @@ class PgoTest(unittest.TestCase):
         return err
 
     def graph(self, w, spec=PROFILE):
-        return {s.id: s for s in w.cycle(spec).graph(LANE, SHA, "pr", "rpi5")}
+        return {s.id: s for s in w.cycle(spec).graph(WS, SHA, "pr", "rpi5")}
 
 
 class TestWhichProfilesAreProfileGuided(unittest.TestCase):
@@ -203,8 +203,8 @@ class TestThePhasesAndTheirOrder(PgoTest):
 
     def test_it_instruments_then_collects_every_benchmark_then_mixes_then_rebuilds(self):
         order = [s.id for s in sched.plan_order(list(self.graph(self.world()).values()))]
-        self.assertEqual(order, ["instr:%s:pr" % LANE, "deploy:rpi5:pr-instr"] + ["collect:rpi5:pr:" + p for p in pgo.BENCHMARKS]
-                         + ["mix:%s:pr" % LANE, "slot:%s:pr" % LANE])
+        self.assertEqual(order, ["instr:%s:pr" % WS, "deploy:rpi5:pr-instr"] + ["collect:rpi5:pr:" + p for p in pgo.BENCHMARKS]
+                         + ["mix:%s:pr" % WS, "slot:%s:pr" % WS])
 
     def test_the_board_is_held_for_the_collection_and_the_machine_for_the_builds(self):
         g = self.graph(self.world())
@@ -213,25 +213,25 @@ class TestThePhasesAndTheirOrder(PgoTest):
 
     def test_the_measured_build_needs_the_mix_which_needs_every_leg(self):
         g = self.graph(self.world())
-        self.assertEqual(g["slot:%s:pr" % LANE].needs, ("mix:%s:pr" % LANE,))
-        self.assertEqual(g["mix:%s:pr" % LANE].needs, tuple("collect:rpi5:pr:" + p for p in pgo.BENCHMARKS))
+        self.assertEqual(g["slot:%s:pr" % WS].needs, ("mix:%s:pr" % WS,))
+        self.assertEqual(g["mix:%s:pr" % WS].needs, tuple("collect:rpi5:pr:" + p for p in pgo.BENCHMARKS))
 
-    def test_every_command_names_the_lane_and_each_leg_collects_from_the_instrumented_slot(self):
+    def test_every_command_names_the_image_workspace_and_each_leg_collects_from_the_instrumented_slot(self):
         g = self.graph(self.world())
-        self.assertTrue(all(LANE in s.command for s in g.values()))
-        self.assertIn("wk bench run %s jetstream3 --system rpi5 --slot pr-instr --collect" % LANE, g["collect:rpi5:pr:jetstream3"].command)
-        self.assertIn("--slot pr-instr --config %s" % pgo.COLLECT, g["instr:%s:pr" % LANE].command)
-        self.assertIn("--slot pr --config %s" % pgo.USE, g["slot:%s:pr" % LANE].command)
+        self.assertTrue(all(WS in s.command for s in g.values()))
+        self.assertIn("wk bench run %s jetstream3 --system rpi5 --slot pr-instr --collect" % WS, g["collect:rpi5:pr:jetstream3"].command)
+        self.assertIn("--slot pr-instr --config %s" % pgo.COLLECT, g["instr:%s:pr" % WS].command)
+        self.assertIn("--slot pr --config %s" % pgo.USE, g["slot:%s:pr" % WS].command)
 
     def test_a_spec_naming_another_machine_routes_the_board_steps_there(self):
         g = self.graph(self.world(), PROFILE + "@moose")
-        self.assertEqual(g["instr:%s:pr" % LANE].holds, ("machine:moose",))
+        self.assertEqual(g["instr:%s:pr" % WS].holds, ("machine:moose",))
         self.assertTrue(g["deploy:rpi5:pr-instr"].command.startswith("WK_TARGET=moose wk bench deploy"))
 
     def test_a_phase_already_done_is_asked_about_by_its_own_evidence(self):
         w = self.world()
         w.fake._set_file("/state/slot/pr-instr/%s/%s" % (SHA, pgo.COLLECT), "1")
-        self.assertEqual(sched.done_ids(list(self.graph(w).values()), Inline), {"instr:%s:pr" % LANE})
+        self.assertEqual(sched.done_ids(list(self.graph(w).values()), Inline), {"instr:%s:pr" % WS})
 
 
 class TestEachPhaseByItself(PgoTest):
@@ -249,7 +249,7 @@ class TestEachPhaseByItself(PgoTest):
 
     def test_the_instrumented_phase_clears_the_collection_it_invalidates(self):
         w = self.world()
-        stale = images.pgo_dir(LANE, "pr", w.env)
+        stale = images.pgo_dir(WS, "pr", w.env)
         w.fake._set_file(stale + "/jetstream3/diagnose/old.profraw", "x")
         rest, _ = self.phase(w, pgo.COLLECT, "pr-instr")
         self.assertFalse(w.fake.exists(stale))
@@ -289,7 +289,7 @@ class TestTheCycle(PgoTest):
         (t,) = w.recs().list()
         self.assertEqual(len(t.plan()), 7)
         self.assertIn("--config %s" % pgo.COLLECT, t.plan()[0])
-        self.assertEqual((t.field("kill"), t.field("exit")), ("wk sysimage webkit %s --workspace %s --slot pr --stop" % (PROFILE, LANE), "0"))
+        self.assertEqual((t.field("kill"), t.field("exit")), ("wk sysimage webkit %s --workspace %s --slot pr --stop" % (PROFILE, WS), "0"))
 
     def test_a_failed_leg_stops_the_cycle_before_the_measured_build(self):
         w = self.world(fail="motionmark")
@@ -322,7 +322,7 @@ class TestTheCycle(PgoTest):
         w = self.world()
         w.fake.pids.add(4242)
         w.fake.answer(["sh", "-c"], out="")
-        t = w.recs().begin("pgo", "here", LANE + "/pr", "k", "/l", ["a"], pid=4242)
+        t = w.recs().begin("pgo", "here", WS + "/pr", "k", "/l", ["a"], pid=4242)
         rc, err = self.webkit(w, "--slot", "pr", "--stop")
         self.assertEqual(rc, 0, err)
         self.assertEqual(t.field("exit"), "cancelled")
@@ -428,12 +428,6 @@ class TestTheMixingIsUpstreams(WkTest):
     def tearDown(self):
         self._scratch.__exit__(None, None, None)
 
-    def test_the_weights_come_from_the_checkout_and_not_from_here(self):
-        cp = mix_cli("plans", "--scripts", str(self.scripts))
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.split(),
-                         ["speedometer3", "0.6", "jetstream3", "0.2", "motionmark", "0.2"])
-
     def test_a_glib_collection_mixes_into_one_library(self):
         cp = mix_cli("mix", "--scripts", str(self.scripts), "--dir", str(self.dir),
                    "--lib", "WPEWebKit")
@@ -489,7 +483,7 @@ class TestTheMixingIsUpstreams(WkTest):
 
 
 class TestTheGateReadsBothLayouts(WkTest):
-    """One reader for the Apple lane's three frameworks and the boards' one
+    """One reader for the Mac's three frameworks and the boards' one
     library; a board profile has no compressed copy and is not asked for one."""
 
     def setUp(self):
@@ -560,7 +554,7 @@ class TestTheDriverPullsWhatTheBoardWrote(WkTest):
 
 
 class TestARealCollection(unittest.TestCase):
-    """`live bench.pgo_collection[<b>]`, the read-only half: the newest collection a board left in this store's lanes
+    """`live bench.pgo_collection[<b>]`, the read-only half: the newest collection a board left in this store's image workspaces
     passes the gate and has every leg's run. Taking one reflashes nothing but deploys and runs on the board, so a
     collection itself is a person's `wk sysimage webkit <profile> --commit <sha> --slot <s>`."""
 

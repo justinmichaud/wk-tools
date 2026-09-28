@@ -94,10 +94,10 @@ class TestCompletionGenerator(unittest.TestCase):
         self.assertIn("completion", C.commands(REPO, TOMBSTONES))
 
     def test_a_values_list_answered_by_a_store_is_not_asked_at_tab(self):
-        """bench's values= list runs on its store, so completion never asks it; build's runs here"""
+        """bench's values= list runs on its store, so completion never asks it; profile's runs here"""
         cmds = {d.name: d for d in D.all_commands(REPO)}
         self.assertEqual(C.values_cmd(cmds["bench"]), "")
-        self.assertEqual(C.values_cmd(cmds["build"]), "--list")
+        self.assertEqual(C.values_cmd(cmds["profile"]), "--list")
 
     def test_workspace_listing_never_touches_a_machine(self):
         """`local_workspaces` reads local state only: a probe of a machine (podman,
@@ -244,10 +244,30 @@ printf '%s\\n' "${{COMPREPLY[@]}}"
         self.assertIn("demo-ws", reply)
 
     def test_the_argument_after_the_workspace_offers_the_declared_values(self):
-        """`wk build ws <TAB>` offers the configs `wk build --list` prints"""
+        """`wk build ws <TAB>` offers the configs lib/wk/buildconf.py names"""
         reply = self._complete([str(WK), "build", "somews", ""], 3)
         self.assertIn("jsc-release", reply)
         self.assertNotIn("available", reply)
+
+    def _store(self):
+        tmp = tempfile.mkdtemp(prefix="wk-completion-test-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        os.makedirs(os.path.join(tmp, "ws", "demo-ws"))
+        return {"WK_STORE": tmp}
+
+    def test_the_workspace_place_is_the_verbs(self):
+        """`wk bench <TAB>` is a verb; `wk bench run <TAB>` is run's workspace"""
+        env = self._store()
+        first = self._complete([str(WK), "bench", ""], 2, env=env)
+        self.assertIn("run", first)
+        self.assertNotIn("demo-ws", first)
+        self.assertIn("demo-ws", self._complete([str(WK), "bench", "run", ""], 3, env=env))
+
+    def test_a_default_verb_that_takes_a_workspace_offers_it_first(self):
+        """`wk pr <TAB>` is a verb or, for the default checkout, the workspace"""
+        reply = self._complete([str(WK), "pr", ""], 2, env=self._store())
+        self.assertIn("rebase", reply)
+        self.assertIn("demo-ws", reply)
 
     def test_a_subverb_completes(self):
         """`wk key <TAB>` offers key's declared subverbs"""

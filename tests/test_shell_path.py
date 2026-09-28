@@ -53,7 +53,7 @@ class TestBinDir(WkTest):
                 continue
             (root / entry.name).symlink_to(entry)
         (root / "machines" / "overlaybox.conf").write_text(
-            "KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_HOST=overlaybox\nWK_REMOTE_ROOT=/tmp/x\n")
+            "kind=build\ndriver=remote\nhost=overlaybox\nroot=/tmp/x\n")
 
         env = {"HOME": str(self.tmp), "PATH": "/usr/bin:/bin"}
         # Known only to the overlay: resolved there, unknown in the real tree.

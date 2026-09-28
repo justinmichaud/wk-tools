@@ -15,7 +15,7 @@ from tests.support import REPO, WkTest, fake_workspace
 sys.path.insert(0, str(REPO / "lib"))
 from wk import buildconf  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from wk.machine import HAVE, Fake  # noqa: E402
 from wk.sudo import Sudo  # noqa: E402
 
 
@@ -89,7 +89,7 @@ class TestSudoRequiresVisudo(unittest.TestCase):
             Sudo(f, {}).setup()
         self.assertIn("visudo", buf.getvalue())
         self.assertIn("sudo", buf.getvalue())
-        self.assertEqual(f.effects, [("run", ("which", "visudo"))])
+        self.assertEqual(f.effects, [("run", HAVE + ("visudo",))])
 
 
 if __name__ == "__main__":

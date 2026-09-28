@@ -1,7 +1,7 @@
 # Host packages, Ubuntu 26.04. Stock archive only -- no third-party repos.
 # Anything a build needs lives in the workspace image, not here.
 
-# Containers, driven by targets/container.sh (wk new/build/test/... with a
+# Containers, driven by lib/wk/targets.py's Container (wk new/build/test/... with a
 # container workspace). Rootless: uidmap provides newuidmap/newgidmap,
 # without which no user namespace can be mapped and --userns keep-id cannot
 # work.
@@ -18,8 +18,8 @@ zsh
 git
 git-lfs
 
-# jq: cmd/key and claude/hooks/webkit-jsc-skill-reminder.sh parse JSON with
-# it. curl: ./setup --stage tools installs tailscale/zed/claude with it.
+# jq: cmd/key parses JSON with it. curl: ./setup --stage tools installs
+# tailscale/zed/claude with it.
 # python3: the egress proxy (container/proxy/wk-proxy.py) and every
 # JSON/table reader in this repo (stdlib only, no pip).
 jq
@@ -71,7 +71,7 @@ wayland-utils
 mesa-vulkan-drivers
 wlr-randr
 
-# The card writer's media (boot/disk.sh): udisksctl powers a written card off
+# The card writer's media (lib/wk/sysimage/disk.py): udisksctl powers a written card off
 # so it is safe to pull.
 udisks2
 

@@ -1,5 +1,5 @@
 
-. "$WK_ROOT/lib/store.sh"
+wk_eval wk.store paths
 
 _label=com.wk.broker
 _agents="$HOME/Library/LaunchAgents"

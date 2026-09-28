@@ -1,40 +1,24 @@
 """The bench system is reached as root whatever the machine is in host mode.
 
-Two channels, two questions. `m_ssh` talks to the machine in *host* mode,
-where NODE_ROLE is the right question: a bench-device's host mode is its
-rescue, driven as root; a workstation's is a person. The bench channel
-(lib/wk/boot/driver.py's Channel) talks to the *bench system*, which is a wk image either way -- the driving key is in
-root's authorized_keys (disk_install_fleet) and it boots with a fresh host
-key every time it is written.
+Two channels, two questions (lib/wk/boot/driver.py's Channel). `m_ssh` talks to the machine in *host* mode, where
+role is the right question: a bench-device's host mode is its rescue, driven as root; a workstation's is a
+person. The bench channel talks to the *bench system*, which is a wk image either way: the driving key is in root's
+authorized_keys and it boots with a fresh host key every time it is written.
 
-Asking the role on the bench channel left every board whose host mode is a
-workstation unreachable once it was in bench mode: `jmichaud@rpi5-bench`
-answers "Permission denied (publickey,password)" where `root@rpi5-bench`
-gives a shell, so `wk boot --keep`, a deploy and a board run could
-not reach the system they exist to drive (rpi5, 2026-09-04).
-
-Run: python3 -m unittest tests.test_bench_channel_ssh -v
+Run: python3 tests/run.py -k test_bench_channel_ssh
 """
-import subprocess
 import sys
 import unittest
 
-from tests.support import REPO, bash
+from tests.support import REPO
 
-MACHINES = REPO / "boot" / "machines.sh"
-
-
-def lift(*funcs):
-    out = []
-    for f in funcs:
-        body = subprocess.run(["sed", "-n", f"/^{f}()/,/^}}/p", str(MACHINES)],
-                              capture_output=True, text=True).stdout
-        assert body.strip(), f"could not lift {f}"
-        out.append(body)
-    return "\n".join(out)
+sys.path.insert(0, str(REPO / "lib"))
+from wk.boot.driver import Channel  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 
-STUB = '_unpinned_host_key_opts() { printf "%s" "-o StrictHostKeyChecking=no"; }\n'
+def channel(role, name="bench", env=None, via=None):
+    return Channel(REPO, {"name": "b", "ssh": "b", "role": role}, name, env=env or {}, via=via or Fake())
 
 
 class TestTheBenchChannelIsAlwaysRoot(unittest.TestCase):
@@ -42,11 +26,7 @@ class TestTheBenchChannelIsAlwaysRoot(unittest.TestCase):
     leg reach it."""
 
     def _machine(self, role):
-        sys.path.insert(0, str(REPO / "lib"))
-        from wk.boot.driver import Channel
-        from wk.machine import Fake
-        return Channel(REPO, {"NODE_NAME": "b", "NODE_SSH": "b", "NODE_ROLE": role}, "bench", env={"WK_IMAGE_HOST": "192.0.2.9"},
-                       via=Fake()).machine("i_ssh")
+        return channel(role, env={"WK_IMAGE_HOST": "192.0.2.9"}).machine("i_ssh")
 
     def test_it_is_root_whatever_the_host_role(self):
         """rpi5's host mode is a workstation; the system it boots for a measurement is not."""
@@ -63,33 +43,26 @@ class TestTheBenchChannelIsAlwaysRoot(unittest.TestCase):
 
 
 class TestTheHostChannelStillAsksTheRole(unittest.TestCase):
-    def _opts(self, role):
-        return bash(lift("m_ssh_opts") + STUB + f'NODE_ROLE={role}\nm_ssh_opts')
-
     def test_a_bench_device_in_host_mode_is_root(self):
-        self.assertIn("-l root", self._opts("bench-device").stdout)
+        self.assertEqual(channel("bench-device", "host").opts("m_ssh")[:2], ["-l", "root"])
 
     def test_a_workstation_in_host_mode_is_the_driving_user(self):
-        """wk takes no passwordless root on a workstation beyond its named
-        helpers, so this must not ask for one."""
-        self.assertEqual("", self._opts("workstation").stdout.strip())
+        """wk takes no passwordless root on a workstation beyond its named helpers, so this must not ask for one."""
+        self.assertEqual(channel("workstation", "host").opts("m_ssh"), [])
 
 
 class TestPrivilegeFollowsTheChannel(unittest.TestCase):
     """lib/wk/boot/driver.py's Channel asks which channel answered, not what the machine is in host mode: a bench
     system is a wk image driven as root and carries only the card helper."""
 
-    def _argv(self, channel, role, fn="card_priv", *args):
-        sys.path.insert(0, str(REPO / "lib"))
-        from wk.boot.driver import Channel
-        from wk.machine import Fake
+    def _argv(self, name, role, fn="card_priv", *args):
         via = Fake()
         via.answer(("ssh",))
-        Channel(REPO, {"NODE_NAME": "b", "NODE_SSH": "b", "NODE_ROLE": role}, channel, env={}, via=via).call(fn, *args)
+        channel(role, name, via=via).call(fn, *args)
         return [e[1][-1] for e in via.effects if e[1][0] == "ssh"]
 
-    def _root(self, channel, role):
-        return "USER" if self._argv(channel, role, "card_priv", "status")[-1].startswith("sudo -n ") else "ROOT"
+    def _root(self, name, role):
+        return "USER" if self._argv(name, role, "card_priv", "status")[-1].startswith("sudo -n ") else "ROOT"
 
     def test_a_bench_system_is_root_whatever_the_host_role(self):
         for role in ("bench-device", "workstation", ""):

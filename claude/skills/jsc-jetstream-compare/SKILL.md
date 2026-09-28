@@ -487,7 +487,7 @@ far lower, which is expected, not a regression.
      subtests that succeeded in all cells/rounds.
   3. Compare with `python3 Tools/Scripts/compare-results ...` (invoke via `python3`; the script's
      `#!/usr/bin/env python3 -u` shebang fails on Linux).
-  A reusable implementation is in this repo: `container/bench/js3-run-loop.sh`.
+  A reusable implementation is in this skill's directory: `js3-run-loop.sh`.
 - **Skip tests that can't run headless on 32-bit, excluded equally from both cells.** Large/SIMD wasm
   tests crash (`tfjs-wasm`, `tfjs-wasm-simd`, `argon2-wasm`, `argon2-wasm-simd`, `8bitbench-wasm`);
   `gcc-loops-wasm`, `HashSet-wasm`, `quicksort-wasm`, `richards-wasm`, `tsf-wasm` run fine.

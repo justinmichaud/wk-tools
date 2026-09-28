@@ -23,7 +23,7 @@ from unittest import mock
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, shell  # noqa: E402
+from wk import act  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 from wk.sysimage import write  # noqa: E402
 
@@ -39,7 +39,7 @@ class Store:
 
 def resolved(spec, answer=None, local=False):
     """(path or None, stderr): one yocto and one buildroot workspace with an image, a yocto one with none, and the
-    lane's own answer to `wk sysimage path` for a configuration this machine's scan does not find."""
+    image workspace's own answer to `wk sysimage path` for a configuration this machine's scan does not find."""
     m = Fake()
     for path in (YOCTO, BUILDROOT):
         m._set_file(path, "image")
@@ -84,25 +84,25 @@ class TestAPathIsStillAPath(unittest.TestCase):
             self.assertEqual(resolved(spec)[0], spec)
 
 
-class TestAConfigurationTheLaneHoldsAndThisMachineCannotRead(unittest.TestCase):
+class TestAConfigurationAnImageWorkspaceHoldsAndThisMachineCannotRead(unittest.TestCase):
     """`write` runs on the host holding the card reader, and on a macOS
-    workstation the lane is in the podman VM, whose store this side cannot
+    workstation the image workspace is in the podman VM, whose store this side cannot
     read: `--from <configuration>` refused with "no workspace here has built
     it yet" while `wk sysimage ls` was printing that very image, and the only
     spelling that worked was the `--from vm:<path> --profile <name>` pair
-    (measured 2026-09-17). So the lane is asked for the path in its own
+    (measured 2026-09-17). So its machine is asked for the path in its own
     spelling -- `wk sysimage path`, routed like `holds` -- and `vm:` says
     whose filesystem it is on."""
 
-    LANE = "/var/lib/wk/ws/yocto-webkit-2.52-yocto-rpi5-64/build/i.wic.xz"
+    IMAGE = "/var/lib/wk/ws/yocto-webkit-2.52-yocto-rpi5-64/build/i.wic.xz"
 
-    def test_the_lanes_answer_is_read_as_the_vms_own_path(self):
-        self.assertEqual(resolved("webkit-2.52-yocto-rpi5-64", (0, self.LANE + "\r\n"))[0], "vm:" + self.LANE)
+    def test_the_image_workspaces_answer_is_read_as_the_vms_own_path(self):
+        self.assertEqual(resolved("webkit-2.52-yocto-rpi5-64", (0, self.IMAGE + "\r\n"))[0], "vm:" + self.IMAGE)
 
     def test_a_store_this_machine_can_read_needs_no_prefix(self):
-        self.assertEqual(resolved("webkit-2.52-yocto-rpi5-64", (0, self.LANE), local=True)[0], self.LANE)
+        self.assertEqual(resolved("webkit-2.52-yocto-rpi5-64", (0, self.IMAGE), local=True)[0], self.IMAGE)
 
-    def test_a_lane_that_holds_no_image_is_refused_naming_the_build(self):
+    def test_an_image_workspace_that_holds_no_image_is_refused_naming_the_build(self):
         path, err = resolved("webkit-2.52-yocto-rpi5-64", (1, ""))
         self.assertIsNone(path)
         self.assertIn("wk sysimage build webkit-2.52-yocto-rpi5-64", err)

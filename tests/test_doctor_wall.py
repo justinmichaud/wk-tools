@@ -16,7 +16,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
-import time
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -24,7 +24,7 @@ from unittest import mock
 from tests.support import REPO, WkTest, bash, clean_env
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import doctor, secrets, shell, targets, wall  # noqa: E402
+from wk import doctor, secrets, targets, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
@@ -296,7 +296,7 @@ class TestSecretsView(_Wall):
 
     def test_reading_one_from_inside_fails(self):
         self.set("test -r /secrets/claude-token", "yes")
-        self.assertFails(self.check("secrets_view"), "/secrets/claude-token is readable in 'demo'", "secrets_publish_view")
+        self.assertFails(self.check("secrets_view"), "/secrets/claude-token is readable in 'demo'", "Secrets.publish_view")
 
 
 class TestAgentIdentities(_Wall):
@@ -520,13 +520,14 @@ class TestTheContainersHostSide(_Wall):
 
 
 class TestTheChecksRunAtOnce(unittest.TestCase):
-    def test_the_wall_clock_is_the_slowest_and_the_order_is_kept(self):
-        def slow(n):
-            return lambda: (time.sleep(0.3), [doctor.ok(n)])[1]
-        started = time.monotonic()
-        out = wall.run_at_once([(str(i), slow(str(i))) for i in range(6)])
-        self.assertLess(time.monotonic() - started, 1.2)
-        self.assertEqual([str(i) for i in range(6)], [name for name, _ in out])
+    def test_every_check_runs_at_once_and_the_order_is_kept(self):
+        """Each check answers only once all six are running: checks run in turn break the barrier and read as unmeasured."""
+        met = threading.Barrier(6, timeout=10)
+
+        def meets(n):
+            return lambda: (met.wait(), [doctor.ok(n)])[1]
+        out = wall.run_at_once([(str(i), meets(str(i))) for i in range(6)])
+        self.assertEqual([(str(i), [doctor.ok(str(i))]) for i in range(6)], out)
 
     def test_a_check_that_dies_is_unmeasured_not_passed(self):
         def dies():

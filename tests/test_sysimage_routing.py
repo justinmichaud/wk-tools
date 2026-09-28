@@ -1,18 +1,18 @@
-"""`wk sysimage` runs where the lane is.
+"""`wk sysimage` runs where the image workspace is.
 
-A yocto or buildroot profile is built in a lane -- the workspace
+A yocto or buildroot profile is built in its image workspace --
 `yocto-<profile>` or `buildroot-<profile>` -- so `build` and `webkit` are
 workspace commands whose name is not a positional but the command's own
 answer to `wk sysimage --wsname <args>` (`name=derived`, the dispatcher).
 The dispatcher then routes them the way it routes every other workspace
-command: into the podman VM for a container lane on macOS, over
-`delegate_run` for a lane on another machine. A pmos or fetch profile has no
-lane and stays `where=host`.
+command: into the podman VM for a container image workspace on macOS, over
+`delegate_run` for an image workspace on another machine. A pmos or fetch profile has no
+image workspace and stays `where=host`.
 
 Covers: the two hooks' answers for every profile this checkout defines; the
 dispatcher's reading of `name=derived` (no positional of its own, nothing
 stripped from argv, no "no such workspace" refusal, the name vocabulary it
-refuses outside); a lane on another machine delegated to that machine with
+refuses outside); an image workspace on another machine delegated to that machine with
 its arguments intact. `wk sysimage ls`'s fleet walk is tests/test_sysimage_ls.py.
 
 Run: python3 -m unittest tests.test_sysimage_routing -v
@@ -36,7 +36,7 @@ SYSIMAGE = REPO / "cmd" / "sysimage"
 
 def _profiles():
     """Every configuration this checkout defines, with the builder its conf
-    declares (empty for a built-in of image/profiles.sh, which has none)."""
+    declares (empty for a conf that declares none)."""
     out = subprocess.run([str(REPO / "wk"), "sysimage", "--list"],
                          capture_output=True, text=True, cwd=str(REPO)).stdout
     names = [l.strip() for l in out.splitlines() if l.strip() and not l.startswith(" ")]
@@ -55,12 +55,12 @@ def _hook(*args):
     return cp.stdout.strip(), cp
 
 
-class TestTheLaneAnswer(unittest.TestCase):
+class TestTheImageWorkspaceAnswer(unittest.TestCase):
     """`wk sysimage --wsname` and `--where`: the two questions the dispatcher
     asks cmd/sysimage before it routes a build."""
 
     def test_every_profile_answers_for_its_builder(self):
-        """a yocto or buildroot profile names its lane; nothing else does"""
+        """a yocto or buildroot profile names its image workspace; nothing else does"""
         for profile, builder in _profiles():
             want = f"{builder}-{profile}" if builder in ("yocto", "buildroot") else ""
             for sub in ("build", "webkit"):
@@ -68,22 +68,22 @@ class TestTheLaneAnswer(unittest.TestCase):
                 self.assertEqual(cp.returncode, 0, cp.stderr)
                 self.assertEqual(got, want, f"--wsname {sub} {profile}")
 
-    def test_a_lane_is_a_workspace_and_anything_else_is_this_host(self):
-        """`--where` answers workspace for a lane, host for a build with none"""
+    def test_an_image_workspace_is_a_workspace_and_anything_else_is_this_host(self):
+        """`--where` answers workspace for an image workspace, host for a build with none"""
         for profile, builder in _profiles():
             want = "workspace" if builder in ("yocto", "buildroot") else "host"
             got, cp = _hook("--where", "build", profile)
             self.assertEqual(cp.returncode, 0, cp.stderr)
             self.assertEqual(got, want, f"--where build {profile}")
 
-    def test_the_workspace_option_names_the_lane_instead(self):
-        """--workspace <name> is the lane the build follows"""
+    def test_the_workspace_option_names_the_image_workspace_instead(self):
+        """--workspace <name> is the image workspace the build follows"""
         profile = self._a_yocto_profile()
-        for args in (["--workspace", "otherlane"], ["--workspace=otherlane"]):
+        for args in (["--workspace", "otherws"], ["--workspace=otherws"]):
             got, _ = _hook("--wsname", "build", profile, *args)
-            self.assertEqual(got, "otherlane", args)
+            self.assertEqual(got, "otherws", args)
 
-    def test_no_profile_and_no_such_profile_name_no_lane(self):
+    def test_no_profile_and_no_such_profile_name_no_image_workspace(self):
         """a question these arguments cannot answer is answered with nothing"""
         for args in (["build"], ["build", "nosuchprofile-" + rand_suffix()],
                      ["webkit"], ["write", "--from", "/tmp/x"]):
@@ -96,6 +96,29 @@ class TestTheLaneAnswer(unittest.TestCase):
             if builder == "yocto":
                 return profile
         self.skipTest("this checkout defines no yocto profile")
+
+
+class TestTheDeclaredBuildOptions(unittest.TestCase):
+    """build and webkit take the options cmd/sysimage declares, and the dispatcher refuses any other"""
+
+    def check(self, *args):
+        inv = dispatch.Invocation("sysimage", D.Decl(REPO / "cmd" / "sysimage"), list(args))
+        with mock.patch.object(dispatch, "in_workspace", lambda: False), \
+                mock.patch("sys.stderr", new_callable=lambda: open(os.devnull, "w")):
+            return inv.argv_check()
+
+    def test_an_undeclared_option_is_refused_before_the_builder_runs(self):
+        for sub in ("build", "webkit"):
+            with self.assertRaises(dispatch.Exit) as cm:
+                self.check(sub, "p", "--bogus")
+            self.assertEqual(cm.exception.status, 2, sub)
+
+    def test_a_declared_option_passes_one_word_per_value(self):
+        self.assertEqual(self.check("build", "p", "--stage", "webkit", "--detach"), ["build", "p", "--stage=webkit", "--detach"])
+
+    def test_a_tail_after_dashdash_is_refused(self):
+        with self.assertRaises(dispatch.Exit):
+            self.check("build", "p", "--", "--stage", "image")
 
 
 class TestTheDispatcherReadsDerived(unittest.TestCase):
@@ -147,18 +170,19 @@ class TestTheDispatcherReadsDerived(unittest.TestCase):
         self.assertEqual(self._resolve(wstarget="", derived="", args=["build", "demo"]), "container")
 
     def test_a_target_the_command_names_outright_wins(self):
-        """A lane spec that names its machine is not located: that machine
-        holds the lane whether or not another one holds its name."""
+        """A spec that names its machine is not located: that machine
+        holds the image workspace whether or not another one holds its name."""
         self.assertEqual(self._resolve(wstarget="moose", derived="yocto-demo", args=["build", "demo@moose"]),
                          "moose")
 
 
-class TestALaneOnAnotherMachine(WkTest):
+class TestAnImageWorkspaceOnAnotherMachine(WkTest):
     """Where the build ends up. `fakebox` is a machine conf and a stubbed
-    ssh, so a lane on it is driven there and nothing is built anywhere."""
+    ssh, so an image workspace on it is driven there and nothing is built anywhere."""
 
     SSH_STUB = """#!/bin/sh
 printf '%s\\n' "$*" >> "$WK_TEST_SSH_LOG"
+case "$*" in *===MEM===*) printf '/home/u\\nLinux\\n4\\n0.1 0 0\\n===MEM===\\nMemAvailable: 1024 kB\\n===IONICE===\\nno\\n' ;; esac
 exit 0
 """
 
@@ -167,53 +191,53 @@ exit 0
         self.profile = next((p for p, b in _profiles() if b == "yocto"), "")
         if not self.profile:
             self.skipTest("this checkout defines no yocto profile")
-        self.lane = "nolane-" + rand_suffix()
+        self.ws = "noimage-" + rand_suffix()
         self.log = self.tmp / "ssh.log"
         self.log.write_text("")
         registry = self.tmp / "hosts"
         registry.mkdir()
         (registry / "fakebox.conf").write_text(
-            "KIND=build\nWK_TARGET_KIND=remote\n"
-            "WK_REMOTE_HOST=fakebox\n"
-            f"WK_REMOTE_ROOT={self.tmp}/box\n")
+            "kind=build\ndriver=remote\n"
+            "host=fakebox\n"
+            f"root={self.tmp}/box\n")
         (self.tmp / "here").mkdir()
         self.env = {"WK_MACHINES_DIR": str(registry),
                     "WK_STORE": str(self.tmp / "here"),
                     "WK_TEST_SSH_LOG": str(self.log)}
 
     def test_the_build_is_delegated_with_its_arguments_intact(self):
-        """a lane on another machine: `wk sysimage build` runs over there"""
+        """an image workspace on another machine: `wk sysimage build` runs over there"""
         with stub_path({"ssh": self.SSH_STUB}) as binp:
             env = dict(self.env, PATH=f"{binp}:{os.environ['PATH']}",
                        WK_TARGET="fakebox")
             cp = run("sysimage", "build", self.profile,
-                     "--workspace", self.lane, "--detach", env=env)
+                     "--workspace", self.ws, "--detach", env=env)
         sent = self.log.read_text()
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn(
-            f"sysimage build {self.profile} --workspace {self.lane} --detach",
+            f"sysimage build {self.profile} --workspace {self.ws} --detach",
             sent)
 
     def test_the_spec_names_the_machine_with_no_target_set(self):
-        """`<profile>@<machine>`: the machine a new lane goes on, said in the
-        argument rather than in WK_TARGET. Nothing here holds this lane, so
+        """`<profile>@<machine>`: the machine a new image workspace goes on, said in the
+        argument rather than in WK_TARGET. Nothing here holds this image workspace, so
         without the machine half there would be nothing to route by."""
         with stub_path({"ssh": self.SSH_STUB}) as binp:
             env = dict(self.env, PATH=f"{binp}:{os.environ['PATH']}")
             self.assertNotIn("WK_TARGET", env)
             cp = run("sysimage", "build", f"{self.profile}@fakebox",
-                     "--workspace", self.lane, "--detach", env=env)
+                     "--workspace", self.ws, "--detach", env=env)
         sent = self.log.read_text()
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn(f"sysimage build {self.profile}@fakebox", sent,
                       f"not delegated to fakebox: {sent!r}")
 
-    def test_a_lane_that_does_not_exist_yet_is_not_refused(self):
-        """the build creates its lane, so the dispatcher does not refuse it"""
+    def test_an_image_workspace_that_does_not_exist_yet_is_not_refused(self):
+        """the build creates its image workspace, so the dispatcher does not refuse it"""
         # `vm` is a target the yocto builder itself refuses, so this runs the
         # whole dispatcher and stops one line into the command.
         with stub_path({"tart": "exit 0\n"}) as binp:
-            cp = run("sysimage", "build", self.profile, "--workspace", self.lane,
+            cp = run("sysimage", "build", self.profile, "--workspace", self.ws,
                      env=dict(self.env, WK_TARGET="vm",
                               PATH=f"{binp}:{os.environ['PATH']}"))
         out = cp.stdout + cp.stderr
@@ -222,8 +246,8 @@ exit 0
         self.assertIn("target 'vm' is a vm one", out)
 
 
-class TestTheLaneSpec(unittest.TestCase):
-    """`<profile>@<machine>`: which machine a lane is on, for one that nothing
+class TestTheImageWorkspaceSpec(unittest.TestCase):
+    """`<profile>@<machine>`: which machine an image workspace is on, for one that nothing
     holds yet or that a second machine is to hold beside another's. The machine
     half never reaches the builder -- it is the dispatcher's target answer
     (`--wstarget`), and what is built is the profile."""
@@ -236,9 +260,9 @@ class TestTheLaneSpec(unittest.TestCase):
         spec = "webkit-2.52-yocto-rpi5-64"
         self.assertEqual((images.spec_profile(spec), images.spec_machine(spec)), (spec, ""))
 
-    def test_the_lane_name_is_the_same_either_way(self):
+    def test_the_image_workspace_name_is_the_same_either_way(self):
         """The workspace is named for the profile, so a machine half does not
-        make a second lane of one profile on one machine."""
+        make a second image workspace of one profile on one machine."""
         plain = _hook("--wsname", "build", "webkit-2.52-yocto-rpi5-64")[0]
         spec = _hook("--wsname", "build", "webkit-2.52-yocto-rpi5-64@moose")[0]
         self.assertEqual(plain, "yocto-webkit-2.52-yocto-rpi5-64", plain)
@@ -249,22 +273,22 @@ class TestTheLaneSpec(unittest.TestCase):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(out, "moose", cp.stdout + cp.stderr)
 
-    def test_no_machine_named_leaves_the_lane_to_be_located(self):
-        """Empty: the dispatcher then resolves the lane by where it exists."""
+    def test_no_machine_named_leaves_the_image_workspace_to_be_located(self):
+        """Empty: the dispatcher then resolves the image workspace by where it exists."""
         out, cp = _hook("--wstarget", "build", "webkit-2.52-yocto-rpi5-64")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(out, "", f"named a target with no machine in the spec: {out!r}")
 
-    def test_a_profile_with_no_lane_names_no_target(self):
-        """A pmos or fetch profile is built by the host and has no lane, so
+    def test_a_profile_with_no_image_workspace_names_no_target(self):
+        """A pmos or fetch profile is built by the host and has no image workspace, so
         there is no machine to answer for even if one is typed."""
         out, cp = _hook("--wstarget", "build", "bridge-pinephone@moose")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(out, "", f"a lane-less profile answered a target: {out!r}")
+        self.assertEqual(out, "", f"a workspace-less profile answered a target: {out!r}")
 
 
-class TestTheProfileBehindALane(unittest.TestCase):
-    """`images.ws_profile`: a lane is named <builder>-<profile>
+class TestTheProfileBehindAnImageWorkspace(unittest.TestCase):
+    """`images.ws_profile`: an image workspace is named <builder>-<profile>
     and may carry an arm's suffix of its own, so the profile is recovered by
     matching the configurations this checkout defines rather than by stripping
     a prefix."""
@@ -272,14 +296,14 @@ class TestTheProfileBehindALane(unittest.TestCase):
     def _profile_of(self, ws):
         return images.ws_profile(ws) or "REFUSED"
 
-    def test_a_plain_lane_names_its_profile(self):
+    def test_a_plain_image_workspace_names_its_profile(self):
         self.assertEqual(self._profile_of("yocto-webkit-2.52-yocto-rpi5-64"),
                          "webkit-2.52-yocto-rpi5-64")
         self.assertEqual(self._profile_of("buildroot-wpewebkit-2.38-buildroot-rpi3-32"),
                          "wpewebkit-2.38-buildroot-rpi3-32")
 
-    def test_a_suffixed_lane_names_the_same_profile(self):
-        """Two lanes of one profile -- one per arm of an A/B -- are one
+    def test_a_suffixed_image_workspace_names_the_same_profile(self):
+        """Two image workspaces of one profile -- one per arm of an A/B -- are one
         profile's images to `ls` and to `write --from`."""
         for suffix in ("base", "pr1725", "arm-2"):
             with self.subTest(suffix=suffix):
@@ -289,17 +313,17 @@ class TestTheProfileBehindALane(unittest.TestCase):
 
     def test_the_longest_configuration_wins(self):
         """`webkit-2.52-yocto-rpi4-32` and `-rpi4-64` are both configurations;
-        a shorter one that is a prefix of the lane must not claim it."""
+        a shorter one that is a prefix of the image workspace must not claim it."""
         every = [n for n, _ in _profiles()]
         self.assertIn("webkit-2.52-yocto-rpi4-64", every)
         self.assertEqual(self._profile_of("yocto-webkit-2.52-yocto-rpi4-64"),
                          "webkit-2.52-yocto-rpi4-64")
 
-    def test_a_workspace_that_is_no_lane_is_refused(self):
+    def test_a_workspace_that_is_no_image_workspace_is_refused(self):
         for ws in ("wk-test-abc", "yocto-not-a-configuration", "buildroot-nope"):
             with self.subTest(ws=ws):
                 self.assertEqual(self._profile_of(ws), "REFUSED",
-                                 f"{ws} was read as a lane")
+                                 f"{ws} was read as an image workspace")
 
 
 if __name__ == "__main__":

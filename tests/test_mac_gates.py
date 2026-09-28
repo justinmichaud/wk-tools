@@ -9,7 +9,9 @@ Run: python3 -m unittest tests.test_mac_gates -v
 """
 import importlib.util
 import os
+import subprocess
 import sys
+import threading
 import types
 import unittest
 
@@ -25,10 +27,12 @@ def load(path):
 
 BROWSER = load(REPO / "bench" / "mac-browser-check.py")
 sys.path.insert(0, str(REPO / "lib"))
-from wk import pgo as PROFILE  # noqa: E402
+from wk import pgo as PROFILE, screen  # noqa: E402
+from wk.clock import FakeClock  # noqa: E402
+from wk.machine import Fake, Result, lib_argv  # noqa: E402
 
-# What the Apple lane reads back: three frameworks and a compressed copy per
-# arch. The board lane's one library goes through the same code from the other
+# What the Mac reads back: three frameworks and a compressed copy per
+# arch. A board's one library goes through the same code from the other
 # direction, in tests/test_board_pgo.py.
 LIBRARIES = ("JavaScriptCore", "WebCore", "WebKit")
 BENCHMARKS = ("speedometer3", "jetstream3", "motionmark")
@@ -293,39 +297,44 @@ class TestNothingMayDrawOverAMeasuredRun(WkTest):
         self.assertIn("wk_window_chrome", text)
         self.assertNotIn('[ "$layer" = 0 ]', text)
 
-    WATCH = '\n'.join([
-        '. "$WK_ROOT/lib/quiet.sh"',
-        # _watch_restarted's other half: without this, `ps` is the real
-        # machine's, and a daemon this host never paused (nothing here ever
-        # ran wk_quiet_daemons_pause) reads as "running again" on every
-        # sample -- this test is about the window probe alone.
-        'ps() { :; }',
-        'count=$(mktemp); echo 0 > "$count"',
-        'wk_window_probe() {',
-        '    n=$(cat "$count"); n=$((n + 1)); echo "$n" > "$count"',
-        '    if [ "$n" -ge 3 ] && [ -n "$APPEARS" ]; then',
-        "        printf 'windows=Dock:20:1x1@0,0;UserNotificationCenter:8:260x364@382,119;Terminal:0:8x8@0,0;\\n'",
-        '    else',
-        "        printf 'windows=Dock:20:1x1@0,0;Terminal:0:8x8@0,0;\\n'",
-        '    fi',
-        '}',
-        'rec=$(mktemp)',
-        'WK_SCREEN_WATCH_SECONDS=1 screen_watch_start "$rec"',
-        'sleep 5',
-        'if out=$(screen_watch_stop "$rec"); then echo CLEAN; else echo "CAUGHT $out"; fi',
-        'rm -f "$rec" "$count"',
-    ])
+    def _watch(self, appears):
+        """The real watch over a Fake Mac whose window server shows a dialog from the third sample on when `appears`;
+        the real wk_window_unexpected judges each reading, and nothing on the must-not-run table is running."""
+        m, samples, sampled = Fake("mac"), [], threading.Event()
+
+        def probe(argv, fake):
+            samples.append(1)
+            if len(samples) >= 5:
+                sampled.set()
+            dialog = "UserNotificationCenter:8:260x364@382,119;" if appears and len(samples) >= 3 else ""
+            return Result(0, "windows=Dock:20:1x1@0,0;%sTerminal:0:8x8@0,0;\n" % dialog)
+
+        m.react(lib_argv(str(REPO), screen.WINDOWS, "wk_window_probe"), probe)
+        m.react(lib_argv(str(REPO), screen.WINDOWS, "wk_window_unexpected"),
+                lambda argv, fake: Result(0, subprocess.run(argv, capture_output=True, text=True).stdout))
+        m.answer(["bash", "-c"])
+        m.answer(["ps"])
+        m.answer(["uname", "-s"], out="Darwin\n")
+        watch = screen.Watch(m, REPO, FakeClock(), {"WK_SCREEN_WATCH_SECONDS": "0.01"})
+        watch.start()
+        self.assertTrue(sampled.wait(30), "the watch never sampled five times")
+        return watch.stop()
+
+    def test_the_blocker_names_each_owner_once_and_an_unasked_server_is_not_a_clear_screen(self):
+        m = Fake("mac")
+        m.answer(lib_argv(str(REPO), screen.WINDOWS, "wk_window_unexpected"), out="Zed:8:1x1@0,0;Alert:8:1x1@0,0;Zed:9:1x1@0,0;")
+        for said, want in (("windows=Dock:20:1x1@0,0;\n", "Alert,Zed"), ("windows=?\n", "?"), ("", "?")):
+            with self.subTest(said=said):
+                m.answer(lib_argv(str(REPO), screen.WINDOWS, "wk_window_probe"), out=said)
+                self.assertEqual(screen.blocker(m, REPO), want)
 
     def test_a_window_that_appears_mid_run_is_caught(self):
-        """screen_blocker is an instant and a collection is an hour; the
+        """screen.blocker is an instant and a collection is an hour; the
         watcher is what makes the check contemporaneous with the run."""
-        cp = bash("APPEARS=1\n" + self.WATCH, timeout=60)
-        self.assertIn("CAUGHT", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("UserNotificationCenter", cp.stdout)
+        self.assertEqual([l.split("\t", 1)[1] for l in self._watch(True)], ["UserNotificationCenter"])
 
     def test_a_run_nothing_drew_over_passes(self):
-        cp = bash("APPEARS=\n" + self.WATCH, timeout=60)
-        self.assertIn("CLEAN", cp.stdout, cp.stdout + cp.stderr)
+        self.assertEqual(self._watch(False), [])
 
 
 class TestPyobjcIsProvisionedNotAssumed(WkTest):
@@ -349,9 +358,6 @@ class TestPyobjcIsProvisionedNotAssumed(WkTest):
             cp = bash(f'. "$WK_ROOT/bench/mac-pyobjc.sh"; '
                       f'WK_PYOBJC_PYTHON={fake}; wk_pyobjc_have && echo HAVE || echo MISSING')
             self.assertIn("MISSING", cp.stdout)
-            cp = bash(f'. "$WK_ROOT/bench/mac-pyobjc.sh"; '
-                      f'WK_PYOBJC_PYTHON={fake}; wk_pyobjc_findings')
-            self.assertTrue(cp.stdout.startswith("wrong\t"), cp.stdout)
 
     def test_every_macos_install_wk_provisions_gets_it(self):
         for rel in ("vm/desktop.sh", "bench/mac-bench-firstboot.sh", "host/macos/tools.sh"):

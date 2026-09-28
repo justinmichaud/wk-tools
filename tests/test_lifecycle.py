@@ -1,19 +1,18 @@
 """Lifecycle-command tests: `wk enter` across a target (defect 1), the
 per-workspace `wk stop`/`wk start` (defect 2), `wk rm`'s multiple-name form
 (defect 3), a real `wk new` leaving no workspace->target registry entry
-behind (there is no registry any more -- lib/target.sh derives it), and the
+behind (Registry.ws_target derives it from the stores), and the
 static --explain/-h checks that need no workspace at all.
 
 Run: python3 -m unittest tests.test_lifecycle -v
-Run just the static checks (no podman VM needed): they self-select, since
-the one integration test class self-skips without a running `wk` podman
-machine (see requires_podman_vm in tests/support.py).
+The one integration test class is live, gated on the container target
+(requires_container_target in tests/support.py).
 """
 import os
 import unittest
 from pathlib import Path
 
-from tests.support import WkTest, rand_suffix, requires_podman_vm, run, stub_path
+from tests.support import WkTest, rand_suffix, requires_container_target, run, stub_path
 
 
 # A machine that is up with nothing stopped in it, and a peer that refuses
@@ -21,7 +20,7 @@ from tests.support import WkTest, rand_suffix, requires_podman_vm, run, stub_pat
 # `wk status` still has an unreachable machine to report.
 STUB_PODMAN = """#!/bin/sh
 case "$1 $2" in
-  "machine inspect") echo running ;;
+  "machine inspect") echo '[{"Name": "wk", "State": "running"}]' ;;
   "machine ssh") ;;
   *) ;;
 esac
@@ -46,9 +45,7 @@ class TestStartExitsOnItsOwnResult(WkTest):
                 "WK_MACHINES_DIR": str(self.tmp / "machines"),
                 "WK_TARGET": "remote",
                 "WK_REMOTE_HOST": "fake-unreachable-machine",
-                # The probe's cap (targets/remote.sh): the stub refuses at once, and
-                # `capped` leaves its watchdog sleeping on the walk's stdout for the
-                # whole cap after the walk has exited.
+                # The remote probe's cap (Remote.probed in lib/wk/targets.py).
                 "WK_PROBE_SECONDS": "1"}
 
     def setUp(self):
@@ -134,7 +131,7 @@ class TestExplainStatic(unittest.TestCase):
         self.assertIn("no such workspace", cp.stdout)
 
 
-@requires_podman_vm()
+@requires_container_target()
 class TestContainerLifecycle(WkTest):
     """One real container workspace, exercised end to end:
     wk new -> wk stop <ws> -> wk ls (not running) -> wk start <ws> ->
@@ -165,10 +162,9 @@ class TestContainerLifecycle(WkTest):
         self.assertEqual(cp.returncode, 0, f"wk new failed: {cp.stdout}")
 
         # No registry: which target a workspace lives on is derived from the
-        # store (or, mid-creation, the status file), never recorded in a
-        # per-workspace file (lib/target.sh, ws_target). This machine may
-        # still carry the directory itself, as rubble from before this --
-        # 'wk gc' is the migration off it (cmd/gc) -- so what is asserted is
+        # store (or, mid-creation, the status file) by Registry.ws_target, never
+        # recorded in a per-workspace file. This machine may still carry the
+        # directory itself as rubble 'wk gc' reclaims, so what is asserted is
         # narrower: no file *for this workspace* appears in it.
         state_dir = Path(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))) / "wk"
         registry_entry = state_dir / "targets" / self.name

@@ -4,11 +4,11 @@ all valid values for params"). CLOSED_SETS pins the values found by reading
 each parser once; a new case arm added without a matching help entry makes
 this fail, since the value will not appear in a stale header.
 
-A closed set that lives in one list in the code -- build configs, image
-profiles, fleet machines -- is not copied into a header at all: the command
-declares `values=<flag>` and the dispatcher runs it, so `wk build -h` prints
-today's configs and cannot fall out of step with config_list. That mechanism
-is checked here too.
+A closed set that lives in one list in the code -- image profiles, fleet
+machines, profiler modes -- is not copied into a header at all: the command
+declares `values=<flag>` and the dispatcher runs it, so `wk boot -h` prints
+today's machines and cannot fall out of step with them. That mechanism is
+checked here too; build configs are `config=`'s (tests/test_dispatch_help_values.py).
 
 Open-ended sets (a workspace name, a free-text path, a git ref, a benchmark
 plan from `Tools/Scripts/run-benchmark --list`) are deliberately not
@@ -19,10 +19,14 @@ Run: python3 -m unittest tests.test_help_values -v
 """
 TIER = "lint"
 import subprocess
+import sys
 from pathlib import Path
 import unittest
 
-from tests.support import REPO, bash, scratch_dir, temp_store
+from tests.support import REPO, run_here, scratch_dir, temp_store
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk.store import Store  # noqa: E402
 
 # {cmd: {flag_or_positional_name: [valid, values, ...]}}
 # Only sets that are genuinely closed -- read directly out of each command's
@@ -45,7 +49,6 @@ def help_text(cmd):
 
 # {cmd: flag} -- a closed set the dispatcher enumerates into `-h` itself.
 DECLARED_VALUES = {
-    "build": "--list",
     "boot": "--list",
     "sysimage": "--list",
     "profile": "--list",
@@ -112,7 +115,7 @@ class TestBenchListPlans(unittest.TestCase):
     """`wk bench --list` (docs/defects): the plan set is not a list in this
     repo -- it lives in the WebKit tree -- so it is not a DECLARED_VALUES
     entry above: running it for real asks podman about this machine's store
-    (`where=store`), which the tests must never do, unlike build/boot/
+    (`where=store`), which the tests must never do, unlike boot/profile/
     sysimage's --list, answered entirely out of this repo with `where=host`
     or `where=local`. Its declaration is checked directly, and its read of
     the store against a fake mirror this test builds -- the one read `wk
@@ -151,18 +154,13 @@ class TestBenchListPlans(unittest.TestCase):
             subprocess.run(["git", "-C", str(src), "add", "-A"], check=True)
             subprocess.run(["git", "-C", str(src), "commit", "-q", "-m", "plans"], check=True)
 
-            # Where this machine keeps its mirror is the store lib's answer
-            # (a macOS host's is under its state directory, not the store).
-            env = {"WK_STORE": store["WK_STORE"], "XDG_STATE_HOME": str(store["path"] / "state")}
-            mirror = Path(bash(". lib/common.sh; . lib/store.sh; wk_mirror", env=env).stdout.strip())
+            env = {"WK_STORE": store["WK_STORE"], "WK_IN_VM": "1"}
+            mirror = Path(Store(env).mirror())
             mirror.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(["git", "clone", "-q", "--bare", str(src), str(mirror)], check=True)
 
-            cp = bash(
-                ". lib/common.sh; . lib/store.sh; . lib/bench.sh; bench_plan_list",
-                env=env,
-            )
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            cp = run_here("bench", "--list", env=env)
+            self.assertEqual(cp.returncode, 0, cp.stdout)
             self.assertEqual(sorted(cp.stdout.split()),
                               ["jetstream2.2", "speedometer3.1"])
 

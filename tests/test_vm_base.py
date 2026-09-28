@@ -178,6 +178,7 @@ class TestTheBaseIsBuiltOnce(BaseTest):
         self.assertEqual(320, self.w.disk)
         self.assertIn(("pull", guestbase.IMAGE), self.tart_acts())
         self.assertIn(("clone", guestbase.IMAGE), self.tart_acts())
+        self.assertEqual([a[1] for a in self.w.streamed], ["pull", "clone"], "the tens-of-GB pull and the clone stream to the log")
         self.assertIn("inputs=%s\n" % guestbase.inputs_hash(str(REPO), self.w.env), self.marker())
         self.assertIn("image=%s\n" % guestbase.IMAGE, self.marker())
         self.assertIn("golden base 'wk-base' is ready", err)
@@ -432,7 +433,7 @@ class TestAGuestIsAdmittedOnlyWhereItFits(BaseTest):
 
     def test_a_running_podman_machine_is_one_of_the_two_and_is_named(self):
         self.w.state = "running"
-        self.w.answer(["podman", "machine", "inspect"], out="running\n")
+        self.w.answer(["podman", "machine", "inspect"], out=json.dumps([{"State": "running", "Resources": {"Memory": 8192}}]))
         rc, err = self.admit()
         self.assertEqual(1, rc)
         self.assertIn("2 VM(s) are already running", err)
@@ -444,8 +445,8 @@ class TestAGuestIsAdmittedOnlyWhereItFits(BaseTest):
         self.assertEqual(0, self.admit()[0])
 
     def test_an_idle_podman_machine_is_stopped_and_a_busy_one_is_not(self):
-        self.w.answer(["podman", "machine", "inspect", "wk", "--format", "{{.State}}"], out="running\n")
-        self.w.answer(["podman", "machine", "inspect", "wk", "--format", "{{.Resources.Memory}}"], out="16384\n")
+        state = ["podman", "machine", "inspect", "wk"]
+        self.w.answer(state, out=json.dumps([{"State": "running", "Resources": {"Memory": 16384}}]))
         self.w.answer(["podman", "machine", "ssh"], out="3\n")
         rc, err = self.admit(mine=12000)
         self.assertEqual(1, rc)
@@ -454,8 +455,7 @@ class TestAGuestIsAdmittedOnlyWhereItFits(BaseTest):
         self.w.answer(["podman", "machine", "ssh"], rc=255)
         self.assertEqual(1, self.admit(mine=12000)[0], "an unreadable answer is busy")
         self.w.answer(["podman", "machine", "ssh"], out="0\n")
-        state = ["podman", "machine", "inspect", "wk", "--format", "{{.State}}"]
-        self.w.react(["podman", "machine", "stop"], lambda a, f: (f.answer(state, out="stopped\n"), Result(0))[1])
+        self.w.react(["podman", "machine", "stop"], lambda a, f: (f.answer(state, out=json.dumps([{"State": "stopped"}])), Result(0))[1])
         rc, err = self.admit(mine=12000)
         self.assertEqual(0, rc, err)
         self.assertIn("stopping the idle podman machine", err)
@@ -473,8 +473,8 @@ class TestWhatTheBaseCarries(unittest.TestCase):
 
     def test_provisioning_makes_no_checkout_mirror_or_tool(self):
         text = PROVISION.read_text()
-        for word in ("git clone", "mirror_refresh_script", "wk_wiring_script", "wk_gitwebkit_setup_script",
-                     "claude.ai/install.sh", "wk_claude_cli_script", "include.path", "shell-rc.sh", ".claude",
+        for word in ("git clone", "mirror_refresh_script", "wiring-script", "gitwebkit-setup-script",
+                     "claude.ai/install.sh", "claude-cli.sh", "include.path", "shell-rc.sh", ".claude",
                      "WK_VM_MIRROR", "github.com", "wk-seed", "rsync"):
             with self.subTest(word=word):
                 self.assertNotIn(word, text)
@@ -484,8 +484,8 @@ class TestWhatTheBaseCarries(unittest.TestCase):
         assert_guest_start_converges(self, '_install_claude_cli "$name" "$ip"')
 
     def test_one_installer_script_for_container_and_guest(self):
-        self.assertIn("wk_claude_cli_script", (REPO / "container" / "firstrun.sh").read_text())
-        self.assertIn("wk_claude_cli_script", inspect.getsource(guest.Guest.install_claude_cli))
+        self.assertIn("container/claude-cli.sh", (REPO / "container" / "firstrun.sh").read_text())
+        self.assertIn("container/claude-cli.sh", inspect.getsource(guest.Guest.install_claude_cli))
         for rel in ("container/firstrun.sh", "lib/wk/guest.py", "vm/provision-base.sh"):
             self.assertNotIn("claude.ai/install.sh", (REPO / rel).read_text(), rel)
 

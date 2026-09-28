@@ -45,8 +45,6 @@ class Creds:
     def check_value(self, name, value, *extra):
         return self.sec.check_value(name, value, *extra)
 
-    # -- one credential on this machine
-
     def path(self, name):
         return self.sec.cred_path(name)
 
@@ -119,9 +117,6 @@ class Creds:
         if not self.sec.switch_cred_converge(self.sec.machine_sock(), target, name):
             warn("the injector on this machine is still writing with the %s stored\n    before this one, so 'git-webkit pr' in a "
                  "workspace spends that: 'wk push off'\n    then 'wk push on' hands it the one stored here." % name)
-
-    def have(self, cmd):
-        return self.machine.run(["sh", "-c", "command -v %s >/dev/null" % cmd], input="").ok
 
     def set(self, name, replace=False, paste=False, value=None):
         """`wk key set`: 0 when what is stored can do its job."""

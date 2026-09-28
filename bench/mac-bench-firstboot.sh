@@ -105,7 +105,6 @@ fi
 # `systemsetup -setremotelogin on` wants Full Disk Access, which a fresh-install LaunchDaemon cannot ask for; Remote Login is a launchd override, so set that instead.
 launchctl enable system/com.openssh.sshd 2>/dev/null || true
 launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || true
-systemsetup -setremotelogin on >/dev/null 2>&1 || true
 if launchctl print-disabled system 2>/dev/null | grep -q '"com.openssh.sshd" => enabled'; then
     say "remote login on"
 else
@@ -130,14 +129,17 @@ if [ -r "$PAYLOAD/wifi.conf" ]; then
     if [ -n "${WIFI_SSID:-}" ]; then
         dev=$(networksetup -listallhardwareports 2>/dev/null \
                 | awk '/Hardware Port: Wi-Fi/{getline; print $2; exit}') || dev=""
-        dev="${dev:-en0}"
-        networksetup -setairportpower "$dev" on >/dev/null 2>&1 || true
-        networksetup -setairportnetwork "$dev" "$WIFI_SSID" "${WIFI_PSK:-}" >/dev/null 2>&1 || true
-        for _t in 1 2 3 4 5 6 7 8 9 10; do  # verified by an address: this exits 0 even on "Could not find network"
-            ip=$(ipconfig getifaddr "$dev" 2>/dev/null) && [ -n "$ip" ] && break
-            sleep 3
-        done
-        if [ -n "${ip:-}" ]; then
+        if [ -n "$dev" ]; then
+            networksetup -setairportpower "$dev" on >/dev/null 2>&1 || true
+            networksetup -setairportnetwork "$dev" "$WIFI_SSID" "${WIFI_PSK:-}" >/dev/null 2>&1 || true
+            for _t in 1 2 3 4 5 6 7 8 9 10; do  # verified by an address: this exits 0 even on "Could not find network"
+                ip=$(ipconfig getifaddr "$dev" 2>/dev/null) && [ -n "$ip" ] && break
+                sleep 3
+            done
+        fi
+        if [ -z "$dev" ]; then
+            say "WARNING: no Wi-Fi hardware port on this Mac, so '$WIFI_SSID' was not joined"
+        elif [ -n "${ip:-}" ]; then
             say "network: $dev joined '$WIFI_SSID' as $ip"
         else
             say "WARNING: could not join '$WIFI_SSID' -- this machine will be unreachable"

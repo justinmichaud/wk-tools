@@ -17,7 +17,7 @@ from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Fake, Result, isolated_module  # noqa: E402
 from wk.sysimage import yocto_target as yt  # noqa: E402
 
 TARGET = "rpi4-64bits-mesa"
@@ -117,7 +117,7 @@ class TestTheEnvironment(unittest.TestCase):
         for name in ("DL_DIR", "SSTATE_DIR", "GIT_CONFIG_COUNT", "GIT_CONFIG_VALUE_1"):
             self.assertIn(name, words)
 
-    def test_the_helper_keeps_the_lane_s_workdir_when_the_commit_moves(self):
+    def test_the_helper_keeps_the_image_workspaces_workdir_when_the_commit_moves(self):
         self.assertEqual(self.env()["WEBKIT_CROSS_WIPE_ON_CHANGE"], "0")
 
     def test_a_utf8_locale_is_en_us_when_there_is_one_and_c_otherwise(self):
@@ -385,11 +385,7 @@ class TestTheStages(unittest.TestCase):
         self.assertFalse([a for a in w.ran("env") if "build-webkit" in " ".join(a)])
 
     def test_a_slot_is_built_with_the_branch_s_flags_and_ours_after_and_described(self):
-        w = World()
-        sdk = WORK + "/build/toolchain"
-        for f in (sdk + "/.toolchain_path_configured", sdk + "/environment-setup-cortexa72",
-                  SRC + "/WebKitBuild/WPE/Release_%s/bin/MiniBrowser" % TARGET):
-            w._set_file(f, "")
+        w = self.slot_world()
         rc, out, err = self.run_stage(w, "--stage", "webkit", "--commit", "c" * 40, "--slot", "pr", "--profile", "p",
                                       "--webkit-jobs", "6", "--cross-config", "wpe-cross-pgo-collect", "--cross-cc", "clang",
                                       "--cross-cxx", "clang++", "--cross-cmake=-DENABLE_LLVM_PROFILE_GENERATION=ON")
@@ -400,9 +396,31 @@ class TestTheStages(unittest.TestCase):
         self.assertIn("--makeargs=-j6", bw)
         self.assertEqual(bw[-1], "--cmakeargs=-DENABLE_X=OFF -DUSE_Y=ON %s -DENABLE_LLVM_PROFILE_GENERATION=ON" % yt.WEBKIT_CMAKE)
         self.assertIn(("env", "CC=clang", "CXX=clang++"), [tuple(bw[6:9])])
-        (manifest,) = w.ran("python3", TOOLS + "/lib/wkslot.py", "manifest")
+        (manifest,) = w.ran(*isolated_module(TOOLS + "/lib", "wk.slot"), "manifest")
         self.assertIn("build_config=wpe-cross-pgo-collect", manifest)
         self.assertIn("slot=pr", manifest)
+        self.assertIn("build-id b1d", out)
+
+    def test_a_slot_whose_manifest_records_no_build_id_is_refused(self):
+        w = self.slot_world('{"slot": "pr"}')
+        rc, out, err = self.run_stage(w, "--stage", "webkit", "--commit", "c" * 40, "--slot", "pr", "--profile", "p")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("records no build_id", err)
+        self.assertNotIn("slot ready", out)
+
+    def slot_world(self, slot_json='{"build_id": "b1d"}'):
+        w = World()
+        sdk = WORK + "/build/toolchain"
+        for f in (sdk + "/.toolchain_path_configured", sdk + "/environment-setup-cortexa72",
+                  SRC + "/WebKitBuild/WPE/Release_%s/bin/MiniBrowser" % TARGET):
+            w._set_file(f, "")
+
+        def manifest(argv, f):
+            if "manifest" in argv:
+                f._set_file(next(a for a in argv if a.endswith("/slot.json")), slot_json)
+            return Result(0)
+        w.react(["python3"], manifest)
+        return w
 
     def test_the_mix_runs_in_the_cross_environment_and_checks_after_it_merges(self):
         w = World()
@@ -411,7 +429,7 @@ class TestTheStages(unittest.TestCase):
         self.assertEqual(rc, 0, out + err)
         runs = [a for a in w.ran("bash", "-c") if "--cross-toolchain-run-cmd" in a]
         self.assertEqual([a[a.index("wk.pgo") + 1] for a in runs], ["mix", "check"])
-        self.assertTrue(all("PYTHONPATH=%s/lib" % TOOLS in a for a in runs), runs)
+        self.assertTrue(all(isolated_module(TOOLS + "/lib", "wk.pgo") == list(a[a.index("wk.pgo") - 5:a.index("wk.pgo") + 1]) for a in runs), runs)
 
     def test_the_mix_needs_its_collection(self):
         w = World()

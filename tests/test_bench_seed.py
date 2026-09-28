@@ -171,6 +171,56 @@ class TestWhatCannotBeSeeded(WkTest):
         self.assertFalse(any(p.startswith(SEEDS + "/") for p in m.files))
 
 
+MIRROR = "/store/git/WebKit.git"
+SUNSPIDER = json.dumps({"github_source": "https://github.com/WebKit/WebKit/tree/%s/PerformanceTests/SunSpider" % SHA})
+
+
+def mirror_fake(has_sha=True):
+    m = fake()
+    m.answer(["git", "--git-dir=" + MIRROR, "rev-parse"], rc=0 if has_sha else 128, out=SHA + "\n" if has_sha else "")
+
+    def archive(argv, f):
+        repo = argv[-1].rsplit(" -C ", 1)[1].strip("'")
+        f._set_file(repo + "/PerformanceTests/SunSpider/sunspider.html", "<html>")
+        return Result(0)
+    m.react(["bash", "-c"], archive)
+    return m
+
+
+def mirror_seeder(m):
+    store = Store({"WK_LOCK_DIR": "/locks"})
+    return seed.Seeder(m, Lock(store, m, FakeClock()), SEEDS, mirror=MIRROR)
+
+
+class TestWebKitsOwnPayloadComesFromTheMirror(WkTest):
+    """A plan whose payload is a directory of WebKit itself is read out of the machine's WebKit mirror: a clone of
+    WebKit from GitHub was 13 GB and 29 minutes to seed SunSpider (measured 2026-09-27)."""
+
+    def test_it_is_archived_out_of_the_mirror_and_nothing_is_cloned(self):
+        m = mirror_fake()
+        with in_process_ok():
+            dest = mirror_seeder(m).seed("sunspider", SUNSPIDER)
+        self.assertEqual(dest, "%s/sunspider-%s" % (SEEDS, SHA[:12]))
+        self.assertIn(dest + "/sunspider.html", m.files)
+        self.assertEqual([], ran(m, "clone") + ran(m, "ls-remote"))
+        self.assertIn("git --git-dir=%s archive %s PerformanceTests/SunSpider" % (MIRROR, SHA), ran(m, "bash")[0][1][-1])
+        self.assertIn("url=%s\n" % MIRROR, m.files[dest + "/.wk-seeded/origin"])
+
+    def test_a_commit_the_mirror_lacks_is_refused_naming_the_mirror_refresh(self):
+        m = mirror_fake(has_sha=False)
+        with in_process_ok() as said, self.assertRaises(Refused):
+            mirror_seeder(m).seed("sunspider", SUNSPIDER)
+        self.assertIn("wk sync --mirror", said.getvalue())
+        self.assertEqual([], ran(m, "clone"))
+        self.assertFalse(any(p.startswith(SEEDS + "/") for p in m.files))
+
+    def test_another_repository_is_still_cloned(self):
+        m = mirror_fake()
+        with in_process_ok():
+            mirror_seeder(m).seed("jetstream3", PLAN)
+        self.assertEqual(1, len(ran(m, "clone")))
+
+
 class TestThePlanIsRead(WkTest):
     """A plan file may hold only another plan's name; the chain is followed, and bounded."""
 

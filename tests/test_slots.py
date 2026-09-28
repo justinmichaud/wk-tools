@@ -1,4 +1,4 @@
-"""WebKit slots: the manifest (lib/wk/slot.py, run by bash as lib/wkslot.py), the running-binary check the
+"""WebKit slots: the manifest (lib/wk/slot.py), the running-binary check the
 wk-board run-benchmark driver makes (lib/wk/bench/board_driver.py), and the
 `wk sysimage webkit` refusals that need no workspace or board.
 
@@ -19,18 +19,19 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from tests.support import (REPO, WkTest, bash, podman_vm_ssh, run_here,
-                           requires_podman_vm, run)
+from tests.support import (REPO, WkTest, bash, container_side, container_store, run_here,
+                           requires_container_target, run)
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import slot as wkslot_lib  # noqa: E402
+from wk.machine import isolated_module  # noqa: E402
 
-WKSLOT = REPO / "lib" / "wkslot.py"
 BUILD_ID = "3dca0e504a7438009c3eadf6113833fcc6297428"
 
 
 def wkslot(*args, **kw):
-    return subprocess.run([sys.executable, str(WKSLOT), *args], capture_output=True, text=True, **kw)
+    return subprocess.run(isolated_module(REPO / "lib", "wk.slot", sys.executable) + list(args),
+                          capture_output=True, text=True, **kw)
 
 
 def linker_takes_build_id():
@@ -256,19 +257,19 @@ class TestSysimageLs(WkTest):
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertNotIn("command not found", cp.stdout)
 
-    @requires_podman_vm()
+    @requires_container_target()
     @unittest.skipUnless(sys.platform == "darwin",
                          "only a macOS workstation keeps the store off this machine")
     def test_a_store_this_machine_cannot_read_is_asked_of_the_machine_holding_it(self):
         """An image put in the VM's store, and a WK_STORE on this side that
         does not exist: the row can only have come from asking the VM. An
-        empty answer would prove nothing -- the VM holds no lane most days."""
+        empty answer would prove nothing -- the VM holds no image workspace most days."""
         ws = "yocto-webkit-2.52-yocto-rpi5-64"
-        img = ("/var/lib/wk/ws/%s/build/CrossToolChains/rpi5-64bits-mesa"
-               "/build/image/webkit-dev-ci-tools.wic.xz" % ws)
-        made = podman_vm_ssh("mkdir -p %s && : > %s" % (os.path.dirname(img), img))
+        img = ("%s/ws/%s/build/CrossToolChains/rpi5-64bits-mesa"
+               "/build/image/webkit-dev-ci-tools.wic.xz" % (container_store(), ws))
+        made = container_side("mkdir -p %s && : > %s" % (os.path.dirname(img), img))
         self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
-        self.addCleanup(podman_vm_ssh, "rm -rf /var/lib/wk/ws/%s" % ws)
+        self.addCleanup(container_side, "rm -rf %s/ws/%s" % (container_store(), ws))
         cp = run("sysimage", "ls", env={"WK_STORE": "/nonexistent-store"}, timeout=300)
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn(ws, cp.stdout,

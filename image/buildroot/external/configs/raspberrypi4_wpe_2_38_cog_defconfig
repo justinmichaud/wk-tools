@@ -17,30 +17,9 @@ BR2_ROOTFS_POST_IMAGE_SCRIPT="board/raspberrypi4/post-image.sh"
 # vc4-kms-v3d-pi4), and only the 76 MB of GPU memory a KMS system needs: the
 # firmware composits nothing here, the kernel's vc4/v3d do.
 BR2_ROOTFS_POST_SCRIPT_ARGS="--tvmode-720 --gpu_mem_1024=76 --add-vc4-kms-v3d-overlay --silent"
-BR2_LINUX_KERNEL=y
-BR2_LINUX_KERNEL_CUSTOM_GIT=y
-BR2_LINUX_KERNEL_CUSTOM_REPO_URL="https://github.com/raspberrypi/linux"
-BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="rpi-5.15.y"
-# The tree's own 32-bit Pi 4 config (what RPi OS ships as kernel7l), not the
-# fork's rpi34-linux-5.15.config: that one is a Pi 2/3 config in truth --
-# measured on hardware 2026-08-31, it hangs a Pi 4 before init, and it lacks
-# the 2711's SD controller (MMC_SDHCI_IPROC), PCIe root (PCIE_BRCMSTB, where
-# the USB controller lives), XHCI, LPAE and HIGHMEM, so it could mount no
-# root on this board even if it ran. The kernel *tree* stays the
-# release-pinned rpi-5.15.y above; only the config is the board's.
-BR2_LINUX_KERNEL_USE_DEFCONFIG=y
-BR2_LINUX_KERNEL_DEFCONFIG="bcm2711"
-# Plus what a fleet bench system needs to be reached over the tailnet (a TUN
-# device, netfilter), which that config has none of; see the fragment.
-BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_WK_PATH)/board/linux-fleet.fragment"
-# Gzip (the default), not LZ4: the LZ4 zImage of this same tree and config
-# hangs this board before the console is up, while RPi OS's gzip build of
-# the same config (kernel7l, 5.15.84) boots it in 90 s -- measured
-# 2026-08-31, both via the same tryboot staging. Compression is the one
-# variable left between the two.
-BR2_LINUX_KERNEL_DTS_SUPPORT=y
-BR2_LINUX_KERNEL_INTREE_DTS_NAME="bcm2711-rpi-4-b"
-BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+# No BR2_LINUX_KERNEL: BR_KERNEL_DEB_URL (image/configs/wpewebkit-2.38-buildroot-rpi4-32.conf) pins the
+# running kernel from Raspberry Pi OS's own package, so buildroot builds none. Its device tree name comes
+# from machines/rpi4.conf's dtb= (buildroot.py's kernel_dts), not a second, buildroot-derived one.
 BR2_PACKAGE_BUSYBOX_SHOW_OTHERS=y
 BR2_PACKAGE_IFUPDOWN=y
 BR2_PACKAGE_NTP=y

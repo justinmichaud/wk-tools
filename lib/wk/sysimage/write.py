@@ -5,14 +5,13 @@ import base64
 import os
 import re
 import shlex
-import sys
 import tempfile
 
 from wk import act, fleet, images, reach, record, tailnet
-from wk.boot import driver_class
+from wk.boot import cli as bootcli, driver_class
 from wk.boot.driver import Channel, disk_of, part
-from wk.kv import kv
-from wk.machine import is_macos
+from wk.kv import ConfError, kv
+from wk.machine import HAVE, is_macos
 from wk.store import Store
 from wk.sysimage import disk
 from wk.sysimage import ls as lsmod
@@ -135,34 +134,24 @@ def config_add(root, p):
 
 
 def load_machine(fl, name):
-    """A bench machine's NODE_*, as boot/machines.sh's machine_load reads it; None when it is not one."""
-    try:
-        conf = fl.load(name) if name else None
-    except fleet.ConfError:
-        return None
-    if not conf or conf["KIND"] not in fleet.BENCH_KINDS or not (conf.get("NODE_DRIVER") and conf.get("NODE_NOTE")):
-        return None
-    out = {"NODE_ROLE": "workstation", "NODE_OS": "any"}
-    out.update({k: v for k, v in conf.items() if k.startswith("NODE_")})
-    out["NODE_NAME"] = name
-    return out
+    """A bench machine's conf, the one reader `wk boot` uses; None when it is not one."""
+    return bootcli.load_conf(fl.root, name, fl.env) if name else None
 
 
 def machine_list(fl):
-    return "\n".join("      %-8s%s" % (n, c["NODE_NOTE"]) for n in fl.names(fleet.BENCH_KINDS)
-                     for c in [load_machine(fl, n)] if c)
+    return "\n".join("      " + line for line in bootcli.listing(fl.root, fl.env).splitlines())
 
 
 def wants_wifi(fl, name):
-    """A board wk writes a card for that has no cable: NODE_DEVICE too, since a Mac reaches the bench over WiFi."""
+    """A board wk writes a card for that has no cable: device too, since a Mac reaches the bench over WiFi."""
     conf = load_machine(fl, name)
-    return bool(conf and conf.get("NODE_DEVICE") and conf.get("NODE_NET") == "wifi")
+    return bool(conf and conf.get("device") and conf.get("net") == "wifi")
 
 
 def tailnet_name(fl, name, role):
-    """A bench system joins as NODE_BENCH_SSH, a rescue as NODE_SSH: a second join under an existing name comes up renamed."""
+    """A bench system joins as bench_ssh, a rescue as ssh: a second join under an existing name comes up renamed."""
     conf = load_machine(fl, name) or {}
-    return conf.get("NODE_SSH" if role == "rescue" else "NODE_BENCH_SSH", "")
+    return conf.get("ssh" if role == "rescue" else "bench_ssh", "")
 
 
 def unit(root, name, **lines):
@@ -233,7 +222,7 @@ class Write:
 
     def attach(self, conf):
         self.conf = conf
-        cls = driver_class(conf["NODE_DRIVER"])
+        cls = driver_class(conf["driver"])
         self.ch = Channel(self.root, conf, "none", env=self.env, via=self.machine)
         self.drv = cls(self.root, conf, self.ch)
         self.disks = disk.Disks(self.ch, conf)
@@ -266,11 +255,11 @@ class Write:
             r = self.machine.run([os.path.join(self.root, "wk"), "sysimage", "path", spec])
             path = r.out.replace("\r", "").strip() if r.ok else ""
             if path:
-                # The lane answers in its own spelling; on a macOS workstation that is the podman VM's filesystem.
+                # The image workspace's machine answers in its own spelling; on a macOS workstation that is the podman VM's filesystem.
                 path = path if Store(self.env).is_local() else "vm:" + path
                 act.info("'%s' is a configuration; its image is at %s" % (spec, path))
                 return path
-            act.die("'%s' is a configuration this checkout defines, and the lane that would\n    build it holds no image:\n"
+            act.die("'%s' is a configuration this checkout defines, and the image workspace that\n    would build it holds no image:\n"
                     "        wk sysimage build %s\n    'wk sysimage ls' lists every image this fleet has built, with its path."
                     % (spec, spec))
         built = sorted({images.ws_profile(i.ws, self.env) for i in lsmod.scan(self.machine, self.store) if i.path} - {None})
@@ -299,10 +288,12 @@ class Write:
             return "", {}
         try:
             return name, images.load(name, self.env)
-        except (LookupError, images.ConfError) as e:
+        except ConfError as e:
+            act.die(str(e))
+        except LookupError as e:
             act.warn("this write cannot tell which machine the card is for, so there is no\n  firmware check and no "
                      "tailnet name to seed. Pass --profile with a\n  configuration this checkout defines.")
-            if isinstance(e, (images.ConfError, images.Tombstone)):
+            if isinstance(e, images.Tombstone):
                 act.log(self.indent(str(e)))
             return name, {}
 
@@ -320,7 +311,7 @@ class Write:
         """No --force: a board with no uplink is unreachable, which is worse than refusing."""
         if not wants_wifi(self.fleet, img_machine):
             return
-        name = self.c("NODE_NAME")
+        name = self.c("name")
         r = self.card("wifi-host", mutates=False)
         if not r.ok:
             act.die("could not tell whether %s is on WiFi:\n%s\n    A board with no uplink is unreachable, which is worse "
@@ -347,12 +338,12 @@ class Write:
         hit = collides(name, peers)
         if not hit:
             return
-        if role == "rescue" and hit.startswith("exact:") and img_machine == self.c("NODE_NAME") and name == self.c("NODE_SSH"):
+        if role == "rescue" and hit.startswith("exact:") and img_machine == self.c("name") and name == self.c("ssh"):
             act.barrier("'%s' is %s's running rescue -- the system this card replaces.\n    The card joins under that name "
                         "only if the old node is gone by its first\n    boot: after this write, remove '%s' from the tailnet "
                         "admin console\n    (https://login.tailscale.com/admin/machines -> %s -> Remove) before\n    rebooting; "
                         "a card that boots while the node exists joins renamed '%s-1'\n    and nothing here can find it."
-                        % (name, self.c("NODE_NAME"), name, name, name))
+                        % (name, self.c("name"), name, name, name))
             return
         if not tailnet.Fleet(self.root, self.env, self.machine).api_present():
             if self.step("retire the stale tailnet node '%s' -- which the real write\n              refuses to do without a "
@@ -377,7 +368,7 @@ class Write:
         act.log(self.indent(self.said(r), "    "))
 
     def unmount(self, dev):
-        if self.step("unmount whatever is mounted from %s on %s" % (dev, self.c("NODE_NAME"))):
+        if self.step("unmount whatever is mounted from %s on %s" % (dev, self.c("name"))):
             return
         if not self.ch.call("disk_unmount", dev, mutates=True).ok:
             raise act.Refused(1)
@@ -387,7 +378,7 @@ class Write:
         as the node the old one was."""
         if self.step("keep %s's bench tailnet identity aside, if it holds one" % dev):
             return False
-        name = self.c("NODE_NAME")
+        name = self.c("name")
         if "tailnet-keep=yes" not in self.card("status", mutates=False).out:
             act.warn("%s's card helper cannot keep a node's tailnet identity across a rewrite,\n  so the new system joins "
                      "fresh; a stale node of the same name on the tailnet\n  refuses the write. The helper is the rescue "
@@ -417,11 +408,11 @@ class Write:
                 % (name, dev, out or "nothing"))
 
     def stream(self, dev, reader, filt):
-        name = self.c("NODE_NAME")
+        name = self.c("name")
         if self.step("stream the image onto %s on %s, and read it back to verify" % (dev, name)):
             return {}
         tool = filt.split()[0]
-        if filt != "cat" and not self.ssh("command -v %s >/dev/null" % shlex.quote(tool)).ok:
+        if filt != "cat" and not self.ssh(shlex.join(HAVE + (tool,))).ok:
             act.die("%s has no %s, and the image being sent to it is compressed\n    with it -- the card machine is what "
                     "decompresses the stream, so this end\n    never has to have the tool for a format it is only passing "
                     "through.\n    Remedy: install %s on %s (apt spells xz 'xz-utils')." % (name, tool, tool, name))
@@ -453,7 +444,7 @@ class Write:
         lines = self.card("verify", dev, rep["stream_bytes"], mutates=False).out.replace("\r", "").split()
         got = lines[-1] if lines else ""
         if not got:
-            act.die("could not read %s back on %s" % (dev, self.c("NODE_NAME")))
+            act.die("could not read %s back on %s" % (dev, self.c("name")))
         if got != rep["stream_sha"]:
             act.die("%s does not match the image that was streamed to it\n    image: %s\n    disk:  %s"
                     % (dev, rep["stream_sha"], got))
@@ -545,7 +536,7 @@ class Write:
             act.die("%s's card helper predates BusyBox init scripts, so this image got\n    neither its self-disarm nor its "
                     "self-return: a board booted into it would not\n    hand itself back. The image is written. Update the "
                     "helper (on a workstation,\n    ./setup --stage quiesce from a terminal there; on a rescue, rebuild the\n"
-                    "    rescue image) and write the card again." % self.c("NODE_NAME"))
+                    "    rescue image) and write the card again." % self.c("name"))
         if "neither systemd nor /etc/init.d" in out:
             act.warn("this image has neither systemd nor a BusyBox init, so the self-return\n  watchdog and the self-disarm "
                      "were NOT installed. The card carries its identity\n  marker and the driving key and nothing else: a "
@@ -564,7 +555,7 @@ class Write:
             act.warn("%s's boot files were NOT checked: %s's card helper has no boot-file\n  checker beside it. If the "
                      "firmware cannot find a kernel it halts, and that costs\n  a trip to the board. The checker is "
                      "installed with the helper (./setup --stage\n  quiesce on a workstation; a rebuilt rescue image "
-                     "carries it)." % (dev, self.c("NODE_NAME")))
+                     "carries it)." % (dev, self.c("name")))
             return
         act.die("%s is missing files a %s needs to reach its kernel:\n\n%s\n\n    Firmware that cannot find a kernel halts. "
                 "It does not move on to the next\n    BOOT_ORDER entry and it does not come back, so booting this card would "
@@ -580,7 +571,7 @@ class Write:
     def old_helper(self, out, verb, what):
         if OLD_HELPER in out:
             act.die("%s's card helper is older than this checkout: it has no\n    '%s' verb, so %s.\n    %s"
-                    % (self.c("NODE_NAME"), verb, what, UPDATE % self.c("NODE_NAME")))
+                    % (self.c("name"), verb, what, UPDATE % self.c("name")))
 
     def seed_role(self, dev, role):
         """The only difference between a rescue and a bench system: every unit checks `ConditionPathExists=!/etc/wk/rescue`."""
@@ -636,7 +627,7 @@ class Write:
         if no in out:
             return False
         act.die("%s's card helper did not say whether %s %s\n    (it said: %s). Refusing to guess."
-                % (self.c("NODE_NAME"), dev, what, out or "nothing"))
+                % (self.c("name"), dev, what, out or "nothing"))
 
     def seed_tailnet(self, dev, name):
         """Onto the card just written, never baked into the image: wk-tailnet-join deletes it once spent."""
@@ -656,7 +647,7 @@ class Write:
 
     def seed_wifi(self, dev, img_machine):
         """The card takes its credential from the disk machine's own WiFi connection, read by the card helper as root."""
-        name = self.c("NODE_NAME")
+        name = self.c("name")
         if self.step("seed %s's own WiFi credential on %s, for a board with no cable" % (name, dev)):
             return
         if not wants_wifi(self.fleet, img_machine):
@@ -669,10 +660,10 @@ class Write:
                     "would boot with\n    no way to reach a network at all." % (dev, img_machine))
 
     def eject(self, dev):
-        name = self.c("NODE_NAME")
+        name = self.c("name")
         if self.step("flush and power off %s" % dev):
             return
-        if not self.ssh("command -v udisksctl >/dev/null").ok:
+        if not self.ssh(shlex.join(HAVE + ("udisksctl",))).ok:
             act.warn("%s has no udisksctl, so %s is left powered on. The write is\n  complete and the card is synced -- it is "
                      "safe to pull. To have the card\n  powered off instead, install udisks2 on %s ('./setup' does, on a "
                      "wk host)." % (name, dev, name))
@@ -726,7 +717,7 @@ class Write:
         self.unmount(dev)
         self.disks.refuse_unless_safe(dev)
         # A rewritten bench system keeps its own tailnet node; never a rescue, whose identity is on the medium replaced.
-        kept = role != "rescue" and fleet_edit and (disk.is_second(dev) or base(dev) == self.c("NODE_DEVICE")) \
+        kept = role != "rescue" and fleet_edit and (disk.is_second(dev) or base(dev) == self.c("device")) \
             and self.tailnet_save(dev)
         if kept:
             act.log("  '%s' on the tailnet is this system's own node, kept across the rewrite" % tailnet)
@@ -770,9 +761,9 @@ class Write:
         if fleet_edit:
             self.put_units(dev, stage_units(self.root, p.get("IMG_WATCHDOG", ""), self.self_disarm(img_machine), profile))
             if img_machine and img_machine == disk_machine:
-                if not self.c("NODE_DTB"):
-                    act.die("'%s' (machines/%s.conf) sets no NODE_DTB" % (disk_machine, disk_machine))
-                self.check_boot_files(dev, disk_machine, self.c("NODE_DTB"))
+                if not self.c("dtb"):
+                    act.die("'%s' (machines/%s.conf) sets no dtb" % (disk_machine, disk_machine))
+                self.check_boot_files(dev, disk_machine, self.c("dtb"))
             elif img_machine:
                 act.log("  (not checking %s's boot files: this is %s's image, so this card goes elsewhere)"
                         % (disk_machine, img_machine))
@@ -800,7 +791,7 @@ class Write:
         return 0
 
     def dry_preamble(self, src, dev, name, fleet_edit, p, img_machine):
-        disk_machine = self.c("NODE_NAME")
+        disk_machine = self.c("name")
         if wants_wifi(self.fleet, img_machine):
             wifi = ("%s is on WiFi -- the card brings up WiFi on every boot, from its credential" % disk_machine
                     if "wifi-host: yes" in self.said(self.card("wifi-host", mutates=False))
@@ -817,30 +808,30 @@ class Write:
                     "auth key present -- the card joins as this board on first boot"
                     if tailnet.Fleet(self.root, self.env, self.machine).key_present()
                     else "NO auth key -- the real write refuses here (wk key set tailnet)", wifi))
-        if dev == self.c("NODE_DEVICE"):
+        if dev == self.c("device"):
             act.log("  note      %s is configured to boot from this disk (wk boot %s)" % (disk_machine, disk_machine))
         act.log("then, in order:")
 
     def after(self, dev, disk_machine):
-        if base(dev) == self.c("NODE_DEVICE"):
+        if base(dev) == self.c("device"):
             # A medium-armed machine's arming is firmware the image brings its own copy of, so it would boot it next.
             if self.drv.arming == "medium":
                 self.drv.disarm()
                 act.debug("%s's %s was left disarmed" % (disk_machine, dev))
             act.log("  %s is configured to boot from this disk, but writing it\n  did not arm anything. To boot it -- once, "
                     "reverting by itself:\n      wk boot %s" % (disk_machine, disk_machine))
-        elif self.c("NODE_ROOT") and dev == disk_of(self.c("NODE_ROOT")):
+        elif self.c("root") and dev == disk_of(self.c("root")):
             act.log("  this is %s's rescue medium: it boots whenever %s is\n  disarmed. To boot it now:  wk boot %s --disarm "
                     "  then power-cycle the board\n  (if this write was forced past the running rescue's name, remove that "
                     "node\n  from the admin console between the two)." % (
-                        disk_machine, self.c("NODE_DEVICE") or "the bench medium", disk_machine))
+                        disk_machine, self.c("device") or "the bench medium", disk_machine))
         else:
             act.log("  nothing boots this yet. Move it to the board it is for, or point a\n  machine at it; 'wk boot "
                     "<machine>' is the one-shot.")
 
     def image_driver(self, name):
         conf = load_machine(self.fleet, name)
-        return driver_class(conf["NODE_DRIVER"])(self.root, conf, None) if conf else None
+        return driver_class(conf["driver"])(self.root, conf, None) if conf else None
 
     def self_disarm(self, name):
         d = self.image_driver(name)
@@ -864,15 +855,3 @@ class Write:
 def b64(text):
     """The helper checks a value against a character set before decoding it."""
     return base64.b64encode(text.encode()).decode()
-
-
-def main(argv, env=None):
-    env = os.environ if env is None else env
-    if argv[:1] != ["wants-wifi"] or len(argv) != 2:
-        sys.stderr.write("usage: python3 -m wk.sysimage.write wants-wifi <machine>\n")
-        return 2
-    return 0 if wants_wifi(fleet.Fleet(images.root(env), env), argv[1]) else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))

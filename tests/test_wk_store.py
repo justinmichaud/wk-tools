@@ -1,7 +1,7 @@
-"""lib/wk/store.py agrees with lib/store.sh on every path, under every
-environment the two are read in: a Linux machine, a macOS host, the podman
-VM, and a test's scratch store; and its Bases say which snapshot a workspace
-may be made from, over a fake machine.
+"""lib/wk/store.py: the paths a setup stage evals from `python3 -m wk.store paths`
+are Store's, under every environment they are read in: a Linux machine, a macOS
+host, the podman VM, and a test's scratch store; and its Bases say which
+snapshot a workspace may be made from, over a fake machine.
 
 Run: python3 tests/run.py -k tests.test_wk_store
 """
@@ -9,6 +9,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from tests.support import REPO, bash
 
@@ -18,29 +19,60 @@ from wk.machine import Fake, Result  # noqa: E402
 from wk.store import Bases, Store  # noqa: E402
 
 PAIRS = (
-    ("root", "printf %s \"$WK_STORE\""),
-    ("record_dir", "wk_record_dir"),
-    ("mirror", "wk_mirror"),
-    ("secrets_dir", "wk_secrets_dir"),
-    ("agent_rw_dir", "wk_agent_rw_dir"),
-    ("bench_dir", "wk_bench_dir"),
-    ("artifact_dir", "wk_artifact_dir"),
-    ("machine_store", "wk_machine_store"),
+    ("WK_STORE", lambda s: s.root()),
+    ("secrets_dir", lambda s: s.secrets_dir()),
+    ("agent_rw_dir", lambda s: s.agent_rw_dir()),
+    ("push_held_dir", lambda s: s.push_held_dir()),
+    ("mirror_dir", lambda s: os.path.dirname(s.mirror())),
 )
 
 
-class TestAgreesWithBash(unittest.TestCase):
+
+class TestAStageAsksPython(unittest.TestCase):
+    """lib/common.sh's wk_eval and wk_py, what every setup stage reads the store and the envelope through."""
+
+    def test_a_failed_answer_ends_the_stage(self):
+        cp = bash('set -e\n. "$WK_ROOT/lib/common.sh"\nwk_eval wk.store no-such-verb\necho REACHED\n')
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertNotIn("REACHED", cp.stdout)
+        self.assertIn("wk.store no-such-verb failed", cp.stderr)
+
+    def test_the_stages_store_reaches_python(self):
+        """A stage that evals a non-default store asks about that store, not the default one."""
+        cp = bash('. "$WK_ROOT/lib/common.sh"\nWK_STORE=/tmp/wk-elsewhere\nwk_py wk.resources --os linux headless-marker\n',
+                  env={"WK_STORE": ""})
+        self.assertEqual(cp.stdout, "/tmp/wk-elsewhere/.headless", cp.stderr)
+
+
+class TestStoreInitSaysWhatItChanged(unittest.TestCase):
+    """`python3 -m wk.targets store-init` prints a line per path it made or changed, so the setup stage can count it."""
+
+    def run_init(self, tmp):
+        env = {"WK_STORE": tmp + "/store", "WK_HOST_SECRETS": tmp + "/secrets", "XDG_STATE_HOME": tmp + "/state",
+               "HOME": tmp, "WK_MACHINES_DIR": tmp + "/machines", "XDG_CONFIG_HOME": tmp + "/config"}
+        cp = bash('PYTHONPATH="$WK_ROOT/lib" python3 -m wk.targets store-init', env=env)
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        return cp.stdout.splitlines()
+
+    def test_a_first_run_names_what_it_made_and_a_second_names_nothing(self):
+        tmp = tempfile.mkdtemp(prefix="wk-test-store-init-")
+        self.addCleanup(lambda: os.system("rm -rf '%s'" % tmp))
+        first = self.run_init(tmp)
+        self.assertIn(tmp + "/store/cache/ccache/ccache.conf", first)
+        self.assertEqual([], self.run_init(tmp))
+
+class TestTheStagesReadTheStore(unittest.TestCase):
     def envs(self):
-        tmp = tempfile.mkdtemp(prefix="wk-test-store-")
-        self.addCleanup(lambda: os.system("rm -rf %s" % tmp))
-        base = {"HOME": tmp, "XDG_STATE_HOME": tmp + "/state", "WK_HOST_SECRETS": tmp + "/hostsecrets"}
+        tmp = tempfile.mkdtemp(prefix="wk-test-store- x")
+        self.addCleanup(lambda: os.system("rm -rf '%s'" % tmp))
+        base = {"HOME": tmp, "XDG_STATE_HOME": tmp + "/state", "WK_HOST_SECRETS": tmp + "/host secrets"}
         yield "scratch store", dict(base, WK_STORE=tmp + "/store")
         yield "in the podman VM", dict(base, WK_IN_VM="1", WK_STORE="/var/lib/wk")
         yield "the default store", dict(base)
 
     def bash_paths(self, env):
-        script = ". \"$WK_ROOT/lib/common.sh\"; . \"$WK_ROOT/lib/store.sh\"\n" + "".join(
-            "printf '%%s\\n' \"$(%s)\"\n" % fn for _, fn in PAIRS)
+        script = '. "$WK_ROOT/lib/common.sh"; eval "$(wk_py wk.store paths)"\n' + "".join(
+            "printf '%%s\\n' \"$%s\"\n" % name for name, _ in PAIRS)
         cp = bash(script, env=env)
         self.assertEqual(cp.returncode, 0, cp.stderr)
         return dict(zip((name for name, _ in PAIRS), cp.stdout.splitlines()))
@@ -53,9 +85,14 @@ class TestAgreesWithBash(unittest.TestCase):
             full.update(env)
             store = Store(full)
             theirs = self.bash_paths(env)
-            for name, _ in PAIRS:
+            for name, path in PAIRS:
                 with self.subTest(env=label, path=name):
-                    self.assertEqual(getattr(store, name)(), theirs[name])
+                    self.assertEqual(path(store), theirs[name])
+
+    def test_any_other_verb_is_refused_with_the_usage(self):
+        cp = bash('. "$WK_ROOT/lib/common.sh"; wk_py wk.store mirror')
+        self.assertEqual(cp.returncode, 2)
+        self.assertIn("usage: python3 -m wk.store [-h] {paths}", cp.stderr)
 
     def test_workspace_paths(self):
         tmp = tempfile.mkdtemp(prefix="wk-test-store-")
@@ -70,14 +107,30 @@ class TestAgreesWithBash(unittest.TestCase):
         self.assertEqual(s.base_path("main-1"), os.path.join(tmp, "base", "main-1", "WebKit"))
         self.assertEqual(s.secrets_view_dir("container"), os.path.join(s.secrets_dir(), "view", "container"))
 
-    def test_a_lock_path_is_the_one_bash_takes(self):
-        tmp = tempfile.mkdtemp(prefix="wk-test-store-")
-        self.addCleanup(lambda: os.system("rm -rf %s" % tmp))
-        env = {"HOME": tmp, "WK_LOCK_DIR": tmp + "/locks"}
-        cp = bash('. "$WK_ROOT/lib/common.sh"; _lock_path ws-a', env=env)
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertEqual(Store(dict(os.environ, **env)).lock_path("ws-a"), cp.stdout.strip())
-        self.assertEqual(cp.stdout.strip(), tmp + "/locks/ws-a@%s.lock" % (record.host_name() or "local"))
+    def test_a_lock_path_is_per_resource_and_per_host(self):
+        store = Store({"HOME": "/h", "WK_LOCK_DIR": "/l"})
+        self.assertEqual("/l/ws-a@%s.lock" % (record.host_name() or "local"), store.lock_path("ws-a"))
+
+
+class TestRecords(unittest.TestCase):
+    """Task records, bench runs and artifacts live in the store, except on a macOS host whose store is the podman
+    VM's: there they are this host's own, under its state directory."""
+
+    def paths(self, env, system):
+        with mock.patch("wk.store.os.uname", return_value=mock.Mock(sysname=system)):
+            s = Store(dict({"HOME": "/h", "XDG_STATE_HOME": "/state"}, **env))
+            return s.record_dir(), s.bench_dir(), s.artifact_dir()
+
+    def test_a_named_store_holds_them(self):
+        for system in ("Linux", "Darwin"):
+            with self.subTest(system=system):
+                self.assertEqual(("/s", "/s/bench", "/s/cache"), self.paths({"WK_STORE": "/s"}, system))
+
+    def test_a_macos_hosts_default_store_leaves_them_on_the_host(self):
+        self.assertEqual(("/state/wk", "/state/wk/bench", "/state/wk/cache"), self.paths({}, "Darwin"))
+
+    def test_in_the_podman_vm_they_are_the_stores(self):
+        self.assertEqual(("/var/lib/wk", "/var/lib/wk/bench", "/var/lib/wk/cache"), self.paths({"WK_IN_VM": "1"}, "Darwin"))
 
 
 
@@ -142,16 +195,6 @@ class TestBases(unittest.TestCase):
         self.assertEqual((self.bases.workspaces(), self.bases.pin("a"), self.bases.pin("b")), (["a", "b"], "20260101", None))
         self.assertEqual(self.bases.unpinned(), ["b"])
 
-    def test_the_bash_names_answer_from_the_same_store(self):
-        tmp = tempfile.mkdtemp(prefix="wk-test-store-")
-        self.addCleanup(lambda: os.system("rm -rf %s" % tmp))
-        os.makedirs(tmp + "/ws/a")
-        os.makedirs(tmp + "/base/1/WebKit")
-        cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; WK_STORE=%s\n'
-                  'list_workspaces; base_verify 1 || echo refused' % tmp)
-        self.assertEqual(cp.stdout.splitlines()[:1], ["a"], cp.stderr)
-        self.assertIn("never finished publishing", cp.stdout)
-        self.assertEqual(cp.stdout.splitlines()[-1], "refused")
 
 if __name__ == "__main__":
     unittest.main()

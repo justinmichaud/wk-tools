@@ -6,24 +6,24 @@ import sys
 
 from wk import act, fleet, images, reach, record as wkrecord
 from wk.boot import drivers, open_driver
-from wk.kv import kv
+from wk.kv import ConfError, kv, kv_file
 from wk.machine import Local, is_macos
 
-CONF_DEFAULTS = {"NODE_ROLE": "workstation", "NODE_OS": "any"}
+CONF_DEFAULTS = {"role": "workstation", "os": "any"}
 BROKER_SOCKET = "/run/wk/broker.sock"
 BROKER_VERBS = {"arm": "arm", "status": "status", "keep": "keep", "back": "release", "disarm": "disarm"}
 
 
 def load_conf(root, name, env):
-    """machines/<name>.conf of a board, a Mac or a guest, with NODE_NAME; None when it is none of those or declares no driver."""
+    """machines/<name>.conf of a board, a Mac or a guest, with name; None when it is none of those or declares no driver."""
     try:
         conf = fleet.Fleet(root, env).load(name)
-    except fleet.ConfError:
+    except ConfError as e:
+        act.die(str(e), 2)
+    if not conf or conf["kind"] not in fleet.BENCH_KINDS or not (conf.get("driver") and conf.get("note")):
         return None
-    if not conf or conf["KIND"] not in fleet.BENCH_KINDS or not (conf.get("NODE_DRIVER") and conf.get("NODE_NOTE")):
-        return None
-    out = {k: v for k, v in conf.items() if k.startswith("NODE_")}
-    out.update({k: v for k, v in CONF_DEFAULTS.items() if not out.get(k)}, NODE_NAME=name)
+    out = {k: v for k, v in conf.items() if k != "kind"}
+    out.update({k: v for k, v in CONF_DEFAULTS.items() if not out.get(k)}, name=name)
     return out
 
 
@@ -32,15 +32,15 @@ def listing(root, env):
     for n in fleet.Fleet(root, env).names(fleet.BENCH_KINDS):
         conf = load_conf(root, n, env)
         if conf:
-            rows.append("%-8s%s" % (n, conf["NODE_NOTE"]))
+            rows.append("%-8s%s" % (n, conf["note"]))
     return "\n".join(rows)
 
 
 def driver_for(root, conf):
-    cls = drivers().get(conf["NODE_DRIVER"])
+    cls = drivers().get(conf["driver"])
     if cls is None:
-        act.die("no boot driver '%s' (machines/%s.conf's NODE_DRIVER; lib/wk/boot has %s)"
-                % (conf["NODE_DRIVER"], conf["NODE_NAME"], ", ".join(sorted(drivers()))))
+        act.die("no boot driver '%s' (machines/%s.conf's driver; lib/wk/boot has %s)"
+                % (conf["driver"], conf["name"], ", ".join(sorted(drivers()))))
     return open_driver(root, conf)
 
 
@@ -49,7 +49,7 @@ class Boot:
         self.root, self.conf, self.d = str(root), conf, d
         self.env = os.environ if env is None else env
         self.peers = peers
-        self.name = conf["NODE_NAME"]
+        self.name = conf["name"]
         self.rec = {}
         self.booted = self.boot_id = ""
         self.spent = None
@@ -82,13 +82,13 @@ class Boot:
         if self.d.probeable():
             return
         here = "macos" if is_macos() else "linux"
-        os_ = self.c("NODE_OS")
+        os_ = self.c("os")
         if os_ != "any" and os_ != here:
             act.die("%s is driven from a %s host only (os=%s in\n    machines/%s.conf) and this is a %s host -- run this over there."
                     % (self.name, os_, os_, self.name, here))
         act.die("the '%s' driver cannot reach %s from here, so nothing about it\n    can be read. This host is the one machines/%s.conf\n"
                 "    names (os=%s), so what is missing is on this host rather than the machine:\n    'wk doctor' names it -- a machine "
-                "driven as a local guest needs tart and the\n    guest itself." % (self.c("NODE_DRIVER"), self.name, self.name, os_))
+                "driven as a local guest needs tart and the\n    guest itself." % (self.c("driver"), self.name, self.name, os_))
 
     # -- status
 
@@ -101,10 +101,10 @@ class Boot:
         quiet = total = 0
         for n in fleet.Fleet(self.root, self.env).names(fleet.BENCH_KINDS):
             conf = load_conf(self.root, n, self.env) if n != self.name else None
-            if not conf or conf.get("NODE_NET", "") != self.c("NODE_NET") or conf.get("NODE_BRIDGE", "") != self.c("NODE_BRIDGE"):
+            if not conf or conf.get("net", "") != self.c("net") or conf.get("bridge", "") != self.c("bridge"):
                 continue
             total += 1
-            names = [x.lower() for x in (conf.get("NODE_SSH"), conf.get("NODE_BENCH_SSH")) if x]
+            names = [x.lower() for x in (conf.get("ssh"), conf.get("bench_ssh")) if x]
             quiet += not any(x in up for x in names)
         return quiet, total
 
@@ -116,9 +116,9 @@ class Boot:
             self.evidence()
             if image:
                 act.log("  the record says it was armed for system %s" % image)
-            elif self.c("NODE_BRIDGE"):
+            elif self.c("bridge"):
                 act.log("  no arming record could be read either -- but this machine is behind\n  %s, so rule the segment out before "
-                        "the board:\n      wk machine status %s" % (self.c("NODE_BRIDGE"), self.c("NODE_BRIDGE")))
+                        "the board:\n      wk machine status %s" % (self.c("bridge"), self.c("bridge")))
             else:
                 act.log("  no arming record could be read either, so this is a plain outage\n"
                         "  or the machine is in a bench system that answers somewhere else.")
@@ -126,7 +126,7 @@ class Boot:
                 if total and quiet == total:
                     act.log("  but every other %s device is quiet as well (%d of %d),\n  so rule the network out before the board -- "
                             "one of them may be a\n  machine nobody has touched, which no board fault explains."
-                            % (self.c("NODE_NET") or "fleet", total, total))
+                            % (self.c("net") or "fleet", total, total))
             return 3
         if mode.startswith("bench"):
             act.log("%s: bench mode -- system %s (booted %s)" % (name, mode[6:], self.booted))
@@ -138,12 +138,12 @@ class Boot:
                 act.log("  a plain reboot returns it to host mode: wk boot %s --back" % name)
             return 0
         if mode.startswith("base"):
-            act.log("%s: base image -- system %s on %s (booted %s)" % (name, mode[5:], self.c("NODE_ROOT"), self.booted))
+            act.log("%s: base image -- system %s on %s (booted %s)" % (name, mode[5:], self.c("root"), self.booted))
             self.evidence()
             act.log("  this is the fallback helper, not a bench system. To measure something,\n"
-                    "  arm a system on %s:  wk boot %s --system <id>" % (self.c("NODE_DEVICE"), name))
+                    "  arm a system on %s:  wk boot %s --system <id>" % (self.c("device"), name))
             return 0
-        act.log("%s: %s, host mode (booted %s)" % (name, self.c("NODE_ROLE"), self.booted))
+        act.log("%s: %s, host mode (booted %s)" % (name, self.c("role"), self.booted))
         self.evidence()
         if not image:
             return 0
@@ -231,7 +231,7 @@ class Boot:
         return 0
 
     def record_write(self, image, device, order):
-        rc = self.d.record_write(image, self.c("NODE_PROFILE"), device, order)
+        rc = self.d.record_write(image, self.c("profile"), device, order)
         if rc:
             act.die("could not write the arming record on %s" % self.name, rc)
 
@@ -244,18 +244,18 @@ class Boot:
                     "first:\n        wk boot %s --back" % (name, mode[6:], name))
         part = ""
         if arming == "command":
-            image = want or self.c("NODE_VOLUME")
+            image = want or self.c("volume")
             if not image:
-                act.die("%s has no benchmark volume configured (NODE_VOLUME)" % name)
+                act.die("%s has no benchmark volume configured (volume)" % name)
         elif arming == "guest":
-            image = want or self.d.facts().get("NODE_GUEST", "")
+            image = want or self.d.facts().get("guest", "")
             if not image:
-                act.die("%s has no guest configured (NODE_GUEST)" % name)
+                act.die("%s has no guest configured" % name)
         else:
             part, image = self.d.select_system(want)
         watchdog = ""
         if arming in ("one-shot", "medium"):
-            watchdog = (images.quiet_load(self.c("NODE_PROFILE"), self.env) or {}).get("IMG_WATCHDOG", "")
+            watchdog = (images.quiet_load(self.c("profile"), self.env) or {}).get("IMG_WATCHDOG", "")
         if act.dry_run():
             act.log(self.arm_plan(image, watchdog) + "\ndry run -- nothing was armed.")
             return 0
@@ -267,13 +267,13 @@ class Boot:
                     "to hand back afterwards." % name)
             return 0
         if arming == "one-shot":
-            self.record_write(image, self.c("NODE_DEVICE"), self.d.order_image)
+            self.record_write(image, self.c("device"), self.d.order_image)
             self.d.arm(part, self.d.order_image)
         elif arming == "command":
             self.d.arm(part, "")
-            self.record_write(image, self.c("NODE_VOLUME"), "")
+            self.record_write(image, self.c("volume"), "")
         else:
-            self.record_write(image, self.c("NODE_DEVICE"), "")
+            self.record_write(image, self.c("device"), "")
             self.d.arm(part, "")
         self.reboot(True)
         act.info("%s is rebooting into system %s" % (name, image))
@@ -295,26 +295,26 @@ class Boot:
                            "  then         start the guest and wait for its marker. Nothing reboots this\n"
                            "               machine -- the rehearsal is a VM, which is the whole point."
                            % (image, d.ch.state() or "unknown"))
-        record_at = d.facts()["NODE_RECORD"]
+        record_at = d.facts()["record"]
         if arming == "command":
             attached = "(attached)" if d.volume_present() else "(NOT attached -- arming would refuse)"
             return head + ("  volume       %s %s\n  boot order   the firmware's own boot-volume, through the privileged helper\n"
                            "  record       %s\n  then         prove the way back, tell the firmware, read it back, and reboot.\n"
                            "               Now: %s" % (image, attached, record_at, d.firmware_default()))
-        order = ("untouched; the arming is %s's own boot partition" % self.c("NODE_DEVICE") if arming == "medium"
+        order = ("untouched; the arming is %s's own boot partition" % self.c("device") if arming == "medium"
                  else "%s (one-shot; the normal order %s is untouched)" % (d.order_image, d.order_normal))
         return head + ("  system       %s (verified present on %s)\n  boot order   %s\n  record       %s on %s\n"
                        "  then         reboot, and the image's watchdog returns it in\n               %ss unless claimed"
-                       % (image, self.c("NODE_DEVICE"), order, record_at, name, watchdog or "?"))
+                       % (image, self.c("device"), order, record_at, name, watchdog or "?"))
 
 
 def fleet_probe(root, name, env):
     """What `wk status` shows of one fleet machine, as one JSON object; {} for a name that is not one."""
     conf = load_conf(root, name, env)
-    if not conf or conf["NODE_DRIVER"] not in drivers():
+    if not conf or conf["driver"] not in drivers():
         return {}
     d = open_driver(root, conf, env=env)
-    out = dict(role=conf["NODE_ROLE"], probeable="yes", mode="", bridge=conf.get("NODE_BRIDGE", ""), armed="", armed_by="",
+    out = dict(role=conf["role"], probeable="yes", mode="", bridge=conf.get("bridge", ""), armed="", armed_by="",
                armed_at="", armed_boot="", boot_id="")
     try:
         if d.probeable():
@@ -329,8 +329,8 @@ def fleet_probe(root, name, env):
         out["media"] = d.media()
     except act.Refused:
         out.setdefault("media", "unknown")
-    if not conf.get("NODE_PROFILE"):
-        out["reprovision"] = "missing NODE_PROFILE in machines/%s.conf -- nothing to compose a recipe from" % name
+    if not conf.get("profile"):
+        out["reprovision"] = "missing profile in machines/%s.conf -- nothing to compose a recipe from" % name
     else:
         try:
             out["reprovision"] = d.reprovision()
@@ -343,7 +343,7 @@ def fleet_probe(root, name, env):
 
 def broker(root, name, action, system, env, machine=None):
     """A sandboxed `wk boot` is a request over the one socket a workspace sees; only the action word and the machine cross it."""
-    from wk.targets import read_conf, workspace_marker_path
+    from wk.targets import workspace_marker_path
     if action == "diag":
         act.die("'wk boot %s --diag' mounts that machine's boot partition on the\n    workstation to read the system's own account of its last "
                 "boot. That is a\n    disk read, not a mode transition, and it is not in the request broker's\n    vocabulary -- a workspace "
@@ -351,7 +351,7 @@ def broker(root, name, action, system, env, machine=None):
     if action not in BROKER_VERBS:
         act.die("'wk boot' acts on a host and its hardware, and this is workspace '%s'.\n    The request broker does not serve "
                 "--%s -- what it does serve, it will say:\n    wk-broker-client.py capabilities\n    Run it on the workstation:  wk boot %s"
-                % (read_conf(workspace_marker_path(env)).get("name", ""), action, name))
+                % (kv_file(workspace_marker_path(env)).get("name", ""), action, name))
     words = ["machine=" + name] + (["system=" + system] if system and action == "arm" else [])
     words += ["dry_run=1"] if act.dry_run() and action != "status" else []
     return broker_request(root, BROKER_VERBS[action], words, env, machine or Local(), "wk boot %s" % name)
@@ -384,7 +384,7 @@ def hold(root, name, action, env):
 def main(argv, env=None):
     """python3 -m wk.boot.cli fleet-probe <name>: `wk status`'s view of one machine, run under its ceiling."""
     env = os.environ if env is None else env
-    root = env.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    root = images.root(env)
     if len(argv) != 2 or argv[0] != "fleet-probe":
         print("usage: python3 -m wk.boot.cli fleet-probe <machine>", file=sys.stderr)
         return 2

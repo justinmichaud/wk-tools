@@ -3,8 +3,8 @@
 Most of this tree reports through lib/common.sh's info/warn/die, and every
 `wk <cmd>` has sourced it before anything else runs. What has not is a library
 sourced *inside a build target*: there is no dispatcher in there, so the words
-are whatever the shell finds. Measured 2026-09-06 in a macOS guest, sourcing
-lib/quiet.sh alone left both `info` and `warn` undefined, so the raiser a PGO
+are whatever the shell finds. Measured 2026-09-06 in a macOS guest, a library
+sourced alone left both `info` and `warn` undefined, so the raiser a PGO
 collection starts ends the build at its first line under `set -e`; on Linux the
 same line is worse than undefined, because `info` is a texinfo reader that runs.
 
@@ -20,11 +20,11 @@ import unittest
 from tests.support import REPO, WkTest, bash
 
 # Sourced where no cmd/* has run: build/build-in-target.sh pulls in guard.sh and
-# (for a PGO config) mac-pgo.sh, whose collection sources lib/quiet.sh, which sources the
-# window probe, the quiet-desktop table and the raiser.
-IN_TARGET = ("lib/quiet.sh", "lib/profiler.sh", "bench/mac-raiser.sh",
+# (for a PGO config) the collection, which runs the window probe, the quiet-desktop
+# table and the raiser each through a bare `bash -c` (wk.machine.lib_argv).
+IN_TARGET = ("bench/mac-raiser.sh",
              "bench/mac-quiet-desktop.sh", "bench/mac-window-probe.sh",
-             "build/configs.sh", "build/guard.sh")
+             "build/guard.sh")
 
 WORDS = ("info", "warn", "log", "die", "debug", "changed", "unchanged")
 CALLS = re.compile(r"^\s*(%s) " % "|".join(WORDS), re.M)
@@ -56,8 +56,8 @@ class TestALibraryASourcedTargetUsesCanReport(WkTest):
 
     def test_the_raiser_the_pgo_collection_calls_can_say_what_it_did(self):
         """The one that bit: mac_raiser_on reports every step, and a PGO
-        collection sources it through lib/quiet.sh with nothing else loaded."""
-        cp = self._words_after_sourcing("lib/quiet.sh")
+        collection sources bench/mac-raiser.sh with nothing else loaded."""
+        cp = self._words_after_sourcing("bench/mac-raiser.sh")
         self.assertEqual(cp.returncode, 0, cp.stderr)
         self.assertIn("info=function", cp.stdout)
         self.assertIn("warn=function", cp.stdout)

@@ -4,7 +4,7 @@
     tools (`stat -c`, `numfmt`) are not on $PATH; it self-skips elsewhere by
     name rather than faking a platform it is not on.
 
-The mac class closes here too: `wk bench mac` (bench/mac-lane.sh) is retired,
+The mac class closes here too: `wk bench mac` is retired,
 and the trip it drove by hand is `wk bench run --system mbp`, the pipeline's
 own (lib/wk/bench/mac.py's `MacHostSystem`/`HostRun`) -- real everywhere,
 with no macOS gate, no state file and no fork of a script that no longer
@@ -38,7 +38,7 @@ def _is_macos():
 class TestBenchMacIsATombstone(unittest.TestCase):
     """`wk bench mac` drove one bench system's whole trip by hand; the tombstone in
     `lib/wk/bench/cli.py` names the pipeline invocation that now runs it, `wk bench run --system
-    mbp`, rather than a sequence of commands to re-derive from the retired `bench/mac-lane.sh`."""
+    mbp`, rather than a sequence of commands to re-derive."""
 
     def refused(self):
         err = io.StringIO()

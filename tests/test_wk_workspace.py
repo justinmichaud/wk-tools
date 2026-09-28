@@ -771,7 +771,7 @@ class TestFreshen(WorkspaceTest):
         self.assertEqual(self.runs(head=WK), [(WK, "sync", "ws")])
         self.assertIn("'ws' is on main at abc1234, up to date with origin/main", err)
         probe = [a for a in self.runs(head="exec")][0]
-        self.assertIn("'/mirror/of/container'", probe[-1])
+        self.assertIn("[ -d /mirror/of/container ]", probe[-1])
 
     def test_no_mirror_names_wk_sync_and_still_reads_the_checkout(self):
         self.w.probe = "no"

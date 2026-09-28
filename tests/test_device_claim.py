@@ -10,11 +10,11 @@ live by construction, and liveness is asked of the process table at read time.
 that same read as a read-only CLI surface, and `record.fleet_holders` asks the
 podman machine's store and every peer workstation through its own wk.
 `record.hold` is the barrier the commands that touch a board take first (`wk
-bench run --system`, `wk bench deploy`, `wk boot`, lib/task.sh's device_hold): it
+bench run --system`, `wk bench deploy`, `wk boot`): it
 names the machine, the task and the command that stops it, and `--force`
 crosses it and records that it did.
 
-No board, no ssh, no hardware: the fleet is fakes, and the bash half writes
+No board, no ssh, no hardware: the fleet is fakes, and the records are written
 into a scratch $WK_STORE.
 
 Run: python3 tests/run.py -k tests.test_device_claim
@@ -22,7 +22,6 @@ Run: python3 tests/run.py -k tests.test_device_claim
 import contextlib
 import io
 import os
-import shlex
 import subprocess
 import sys
 import time
@@ -30,14 +29,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, WkTest, bash, clean_env
+from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, record  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
-PRELUDE = '. "%s/lib/common.sh"\n. "%s/lib/task.sh"\n' % (REPO, REPO)
 ROW = ("bench-rpi5-x-20260915T000000Z-9", "moose", "bench rpi5/speedometer3", "kill 4242")
 
 
@@ -59,12 +57,6 @@ class ClaimTest(WkTest):
         (self.tmp / "no-machines").mkdir()
         self.env = {"WK_STORE": str(self.store), "WK_MACHINES_DIR": str(self.tmp / "no-machines")}
 
-    def sh(self, body, env=None, check=True):
-        cp = bash(PRELUDE + body, env=dict(self.env, **(env or {})))
-        if check:
-            self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        return cp
-
     def spawn(self):
         """A pid this test is not the parent of, so `kill -0` reads it as
         running rather than as an unreaped zombie (tests/test_stop_tasks.py)."""
@@ -74,20 +66,21 @@ class ClaimTest(WkTest):
         self.addCleanup(lambda: alive(pid) and os.kill(pid, 9))
         return pid
 
+    def records(self):
+        return record.Records(env={"WK_STORE": str(self.store)})
+
     def holder(self, machine="rpi5", kind="bench", name="rpi5/speedometer3", pid=None, ended=None):
-        """A live task record holding <machine>, written through lib/task.sh."""
+        """A live task record holding <machine>."""
         if pid is None:
             pid = self.spawn()
-        body = ['d=$(task_begin --holds device:%s %s here %s "kill %d" "" "one step")'
-                % (machine, kind, shlex.quote(name), pid),
-                'task_pid "$d" %d' % pid]
+        t = self.records().begin(kind, "here", name, "kill %d" % pid, "", ["one step"],
+                                 holds="device:%s" % machine, pid=pid)
         if ended is not None:
-            body.append('task_end "$d" %s' % ended)
-        body.append('printf "%s" "$d"')
-        return Path(self.sh("\n".join(body)).stdout.strip()), pid
+            t.end(ended)
+        return t.path, pid
 
     def rows(self, resource="device:rpi5"):
-        return record.Records(env={"WK_STORE": str(self.store)}).holders(resource)
+        return self.records().holders(resource)
 
     def tasks(self):
         d = self.store / "task"
@@ -100,15 +93,8 @@ class TestTheRecordDeclaresWhatItHolds(ClaimTest):
         self.assertEqual("device:rpi5", (d / "holds").read_text().strip())
 
     def test_a_record_that_claims_nothing_has_no_holds_field(self):
-        d = Path(self.sh('task_begin build here ws1 "wk build ws1 --kill" /l compile').stdout.strip())
-        self.assertFalse((d / "holds").exists())
-
-    def test_a_hold_taken_from_bash_names_the_shell_that_took_it(self):
-        """The one path: lib/task.sh's task_begin is lib/wk/record.py's begin,
-        and the pid it records is the caller's, not the Python it ran."""
-        out = self.sh('d=$(task_begin --holds device:rpi5 bench here x "k" "" one)\n'
-                      'printf "%s %s" "$$" "$(task_field "$d" pid)"').stdout.split()
-        self.assertEqual(out[0], out[1])
+        t = self.records().begin("build", "here", "ws1", "wk build ws1 --kill", "/l", ["compile"])
+        self.assertFalse((t.path / "holds").exists())
 
     def test_a_live_holder_is_one_row_naming_the_machine_and_its_kill(self):
         _, pid = self.holder()
@@ -137,12 +123,6 @@ class TestTheRecordDeclaresWhatItHolds(ClaimTest):
             if not alive(pid):
                 break
             time.sleep(0.1)
-        self.assertEqual([], self.rows())
-
-    def test_the_record_is_released_when_its_command_ends(self):
-        d, _ = self.holder()
-        self.sh('WK_DEVICE_TASK=%s device_release' % shlex.quote(str(d)))
-        self.assertTrue((d / "exit").exists())
         self.assertEqual([], self.rows())
 
 
@@ -298,30 +278,6 @@ class TestTheBarrier(unittest.TestCase):
         self.assertIsInstance(e, act.Refused)
 
 
-class TestTheShimTakesIt(ClaimTest):
-    """lib/task.sh's device_hold over the Python: the claim, exported to what
-    the driver runs, released when the command ends."""
-
-    HOLD = 'device_hold rpi5 bench rpi5/jetstream3 "kill $$" "" "jetstream3 on rpi5"'
-
-    def test_a_free_board_is_taken_and_exported(self):
-        cp = self.sh(self.HOLD + '\nprintf "%s|%s|%s" "$WK_DEVICE_TASK" "$WK_DEVICE_HELD" "$$"')
-        task, held, shell = cp.stdout.split("|")
-        self.assertEqual("device:rpi5", held)
-        self.assertEqual("device:rpi5", (Path(task) / "holds").read_text().strip())
-        self.assertEqual(shell, (Path(task) / "pid").read_text().strip())
-        self.assertTrue((Path(task) / "exit").exists(), "the claim outlived the command that took it")
-
-    def test_a_held_board_ends_the_caller(self):
-        _, pid = self.holder()
-        cp = self.sh(self.HOLD + '\necho SURVIVED', check=False)
-        out = cp.stdout + cp.stderr
-        self.assertNotEqual(0, cp.returncode, out)
-        self.assertNotIn("SURVIVED", out)
-        self.assertIn("kill %d" % pid, out)
-        self.assertEqual(1, len(self.tasks()))
-
-
 class TestStatusHolds(ClaimTest):
     """`wk status --holds <resource>`: the read-only CLI surface the asking
     machine calls over its own wk. It answers about this store alone -- the
@@ -350,13 +306,13 @@ class TestStatusHolds(ClaimTest):
         self.assertTrue(any("readonly" in l for l in decl), decl)
 
 
-MACHINE_CONF = '''KIND=board
-NODE_SSH=fakeboard
-NODE_DRIVER=no-such-driver
-NODE_DEVICE=/dev/null
-NODE_PROFILE=webkit-2.52-yocto-rpi5-64
-NODE_ROLE=bench-device
-NODE_NOTE="a board that is not there, for a refusal that needs no hardware"
+MACHINE_CONF = '''kind=board
+ssh=fakeboard
+driver=no-such-driver
+device=/dev/null
+profile=webkit-2.52-yocto-rpi5-64
+role=bench-device
+note="a board that is not there, for a refusal that needs no hardware"
 '''
 
 
@@ -383,8 +339,8 @@ class TestTheCommandsTakeIt(ClaimTest):
         self.assertIn("bench fakeboard/speedometer3", out)
         self.assertIn("kill %d" % pid, out)
 
-    def test_bench_deploy_takes_it_where_the_lane_is(self):
-        """A deploy is routed to the machine holding the lane (the dispatcher's
+    def test_bench_deploy_takes_it_where_the_image_workspace_is(self):
+        """A deploy is routed to the machine holding the image workspace (the dispatcher's
         `where=workspace`), so the claim is taken there and not here -- which is
         why that machine's store is one fleet_holders asks. Driven in-process
         (lib/wk/bench/cli.py's Bench.deploy), the refusal the routing would

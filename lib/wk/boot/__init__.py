@@ -12,5 +12,5 @@ def driver_class(name):
 
 
 def open_driver(root, conf, env=None, via=None, channel="none", mode="", name=None):
-    cls = driver_class(conf.get("NODE_DRIVER", "") if name is None else name)
+    cls = driver_class(conf.get("driver", "") if name is None else name)
     return cls(root, conf, cls.transport(root, conf, channel, env=env, via=via), mode=mode)

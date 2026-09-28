@@ -18,6 +18,7 @@ import unittest
 from tests.support import REPO
 from tests.test_push_switch import PUSH, Fleet, PushTest
 from tests.test_wk_secrets import SOCK
+from wk.machine import Result  # noqa: E402
 
 PROXY = REPO / "container" / "proxy" / "wk-proxy.py"
 
@@ -76,7 +77,7 @@ class TestPushOnEndsAnyRunningAgent(PushTest):
         self.box.claude = {"a": [], "b": ["4242"]}
 
     def sessions(self):
-        return PUSH.Push(Fleet(self.w, self.boxes), self.w.sec(), self.clock).agent_sessions()
+        return [ws for _, ws, _ in PUSH.Push(Fleet(self.w, self.boxes), self.w.sec(), self.clock).agent_sessions()]
 
     def test_names_the_workspaces_with_a_claude_process(self):
         self.assertEqual(["b"], self.sessions())
@@ -110,6 +111,36 @@ class TestPushOnEndsAnyRunningAgent(PushTest):
         self.assertEqual(1, rc)
         self.assertIn("push stays off", err)
         self.assertEqual(set(), self.w.agents[SOCK])
+
+    def unaskable(self, state):
+        self.box.exec = lambda ws, argv, tty=False, timeout=None: Result(125, "", "exec failed")
+        self.box.info = lambda ws: state
+
+    def test_a_running_workspace_whose_scan_fails_refuses_on_naming_it(self):
+        self.unaskable("running")
+        os.environ["WK_YES"] = "1"
+        rc, _, err = self.push("on")
+        self.assertEqual(1, rc)
+        self.assertIn("could not ask a b whether a claude session runs in it", err)
+        self.assertEqual(set(), self.w.agents[SOCK])
+
+    def test_force_crosses_it_and_says_so(self):
+        self.unaskable("running")
+        os.environ.update(WK_YES="1", WK_FORCE="1")
+        rc, _, err = self.push("on")
+        self.assertEqual(0, rc, err)
+        self.assertIn("FORCED past a barrier: could not ask a b", err)
+
+    def test_a_stopped_workspace_that_cannot_be_asked_runs_nothing(self):
+        self.unaskable("exited")
+        self.assertEqual([], self.sessions())
+
+    def test_only_a_pid_reaches_kill(self):
+        self.box.claude = {"b": ["4242", "1;reboot", "$(id)"]}
+        os.environ["WK_YES"] = "1"
+        self.push("on")
+        acts = [e[1] for e in self.w.acts() if e[0] == "act"]
+        self.assertIn(("exec", "b", "sh", "-c", "kill 4242 2>/dev/null; exit 0"), acts)
 
 
 if __name__ == "__main__":

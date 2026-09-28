@@ -8,6 +8,7 @@ import os
 from wk import act, guest, job, tools
 from wk.act import debug, die, info, log, warn
 from wk.clock import Clock
+from wk.kv import kv
 from wk.store import Store
 from wk.sysimage import task
 
@@ -63,7 +64,7 @@ class Base:
             text = self.machine.read(self.marker())
         except OSError:
             return ""
-        return next((l.split("=", 1)[1] for l in text.splitlines() if l.startswith(key + "=")), "")
+        return kv(text).get(key, "")
 
     def stale(self):
         rec = self.field("inputs")
@@ -87,7 +88,7 @@ class Base:
         return "ok\tgolden base '%s' matches its provisioning inputs\t\n" % self.name
 
     def build(self, rest):
-        got = task.options(rest, ("--dry-run",) + MODES, (), USAGE % guest.BASE_PROFILE)
+        got = task.options(rest, MODES, (), USAGE % guest.BASE_PROFILE)
         if len(got) > 1:
             die("%s -- one of them" % (USAGE % guest.BASE_PROFILE))
         if not Store(self.env).macos_host:
@@ -148,10 +149,12 @@ class Base:
         words = self.machine.run(["du", "-sh", path]).out.split()
         return words[0] if words else "?"
 
-    def tart_or_die(self, args, what=None):
-        r = self.machine.act_run([self.vm.tart_or_die()] + args)
+    def tart_or_die(self, args, what=None, stream=False):
+        argv = [self.vm.tart_or_die()] + args
+        r = self.machine.act_run(argv, stream=True) if stream else self.machine.act_run(argv)
         if not r.ok:
-            die("tart %s failed (exit %d): %s" % (what or args[0], r.rc, (r.err or r.out).strip()), r.rc or 1)
+            die("tart %s failed (exit %d): %s" % (what or args[0], r.rc, (r.err or r.out).strip() or "what it said is above"),
+                r.rc or 1)
         return r
 
     def cached(self):
@@ -177,10 +180,10 @@ class Base:
         self.machine.remove(self.marker())
         if not self.cached():
             info("pulling %s -- tens of GB, once only" % image(self.env))
-            self.tart_or_die(["pull", image(self.env)])
+            self.tart_or_die(["pull", image(self.env)], stream=True)
         info("creating the golden base VM '%s'" % self.name)
         cpus, mem = self.sizing()
-        self.tart_or_die(["clone", image(self.env), self.name])
+        self.tart_or_die(["clone", image(self.env), self.name], stream=True)
         self.tart_or_die(["set", self.name, "--cpu", cpus, "--memory", mem])
         self.provision()
 
@@ -292,11 +295,7 @@ class Base:
     def login_settled(self, g):
         """ssh answers before the login has drawn anything, so a read straight after boot reads clear whatever is coming."""
         settle = int(self.env.get("WK_VM_LOGIN_SETTLE") or LOGIN_SETTLE)
-        for _ in range(0, settle, 3):
-            if guest.setup_assistant(g) == "up":
-                return False
-            self.clock.sleep(3)
-        return True
+        return not self.clock.wait_until(lambda: guest.setup_assistant(g) == "up", settle, 3)
 
     def check_screen(self, g, ip):
         reading = guest.window_reading(self.root, self.machine, g)

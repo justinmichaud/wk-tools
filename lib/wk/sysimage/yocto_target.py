@@ -13,8 +13,9 @@ import sys
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+from wk import slot  # noqa: E402
 from wk.clock import Clock  # noqa: E402
-from wk.machine import here  # noqa: E402
+from wk.machine import here, isolated_module  # noqa: E402
 
 TOOLS = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 STAGES = ("layers", "fetch", "image", "toolchain", "webkit", "pgo-mix")
@@ -192,7 +193,7 @@ class Build:
             d = self.env.get(name)
             if not d:
                 fail("DL_DIR/SSTATE_DIR are not set in this workspace. They come from the container's\n    store-backed "
-                     "cache mount (targets/container.sh); without them the caches would die with it.")
+                     "cache mount (lib/wk/targets.py's Container); without them the caches would die with it.")
             self.m.mkdir(d)
 
     def refresh_git_index(self, d):
@@ -209,10 +210,10 @@ class Build:
         self.git(d, "update-index", "--really-refresh")
 
     def checkout_slot_commit(self):
-        """Forced and cleaned: a killed webkit stage leaves the checkout mid-checkout. `-fd`, never `-fdx`: WebKitBuild holds the lane."""
+        """Forced and cleaned: a killed webkit stage leaves the checkout mid-checkout. `-fd`, never `-fdx`: WebKitBuild holds the image workspace's slots."""
         c, mirror = self.a.commit, self.env.get("WK_MIRROR")
         if not mirror:
-            fail("WK_MIRROR names the mirror this container mounts (targets/container.sh), and it is not set")
+            fail("WK_MIRROR names the mirror this container mounts (lib/wk/targets.py's Container), and it is not set")
         if not self.m.run(["git", "-C", self.src, "cat-file", "-e", c + "^{commit}"]).ok \
                 and not self.git(self.src, "fetch", "--quiet", mirror, c).ok:
             fail("%s is not in this machine's mirror; 'wk bench ab' and 'wk pr' fetch a PR head into it first" % c)
@@ -328,7 +329,7 @@ class Build:
         if self.m.exists(os.path.join(d, ".toolchain_path_configured")):
             setup = next((os.path.join(d, n) for n in self.m.listdir(d) if n.startswith("environment-setup-")), "")
         if not setup:
-            fail("this lane has no cross toolchain installed, so cross-building WebKit here\n    would bitbake the whole nativesdk "
+            fail("this image workspace has no cross toolchain installed, so cross-building WebKit here\n    would bitbake the whole nativesdk "
                  "stack under a budget sized for one\n    WebKit compile. Build it as its own stage first, which books the "
                  "whole machine:\n\n        wk sysimage build <profile> --stage toolchain\n\n    What is looked for is "
                  "%s/.toolchain_path_configured\n    and an environment-setup script beside it." % d)
@@ -340,7 +341,7 @@ class Build:
 
     def copies_aside(self):
         """The helper takes a file at build/image as proof the image is current, so it is moved aside, not deleted:
-        a killed stage must leave the lane its last image."""
+        a killed stage must leave the image workspace its last image."""
         prev = self.image_dir + ".previous"
         self.m.remove(prev)
         if self.m.isdir(self.image_dir):
@@ -427,11 +428,14 @@ class Build:
         fields = dict(slot=a.slot, profile=a.profile, commit=a.commit, target=a.target, build_config=a.cross_config,
                       browser="minibrowser", lib_dir="lib", exec_dir="bin", bundle_dir="lib", jobs=str(jobs),
                       built_at=self.clock.iso(), wk_tools=rev.out.strip() if rev.ok else "unknown")
-        slot_py = os.path.join(self.tools, "lib", "wkslot.py")
-        if not self.m.act_run(["python3", slot_py, "manifest", root, os.path.join(slotdir, "slot.json")]
+        sj = os.path.join(slotdir, "slot.json")
+        if not self.m.act_run(isolated_module(os.path.join(self.tools, "lib"), "wk.slot") + ["manifest", root, sj]
                               + ["%s=%s" % kv for kv in sorted(fields.items())]).ok:
             fail("could not describe the build as a slot; a cross build with no build-id\n    note cannot be told apart on the board")
-        bid = self.m.run(["python3", slot_py, "get", os.path.join(slotdir, "slot.json"), "build_id"]).out.strip()
+        try:
+            bid = slot.recorded_build_id(self.m, sj)
+        except ValueError as e:
+            fail(str(e))
         say("slot ready: %s (build-id %s)" % (slotdir, bid))
 
     def pgo_mix(self):
@@ -442,7 +446,7 @@ class Build:
             fail("no collection at %s; a board's PGO collection puts one there" % a.pgo_dir)
         self.init_workdir()
         say("mixing %s profiles from %s at WebKit's own weights" % (a.pgo_lib, a.pgo_dir))
-        pgo = ["env", "PYTHONPATH=" + os.path.join(self.tools, "lib"), "python3", "-m", "wk.pgo"]
+        pgo = isolated_module(os.path.join(self.tools, "lib"), "wk.pgo")
         common = ["--scripts", os.path.join(self.src, "Tools", "Scripts"), "--dir", a.pgo_dir, "--lib", a.pgo_lib]
         self.helper_run("mix the collected profiles", ["--cross-toolchain-run-cmd"] + pgo + ["mix"] + common)
         self.helper_run("read the mixed profile back", ["--cross-toolchain-run-cmd"] + pgo + ["check"] + common

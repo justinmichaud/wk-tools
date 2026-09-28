@@ -52,7 +52,7 @@ class TestVerifyMounts(WkTest):
         return bash(f'''
 set -uo pipefail
 . "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
+eval "$(wk_py wk.store paths)"
 WK_MACHINE=wk
 WANT_TOOLS={tools} WANT_SECRETS={secrets}
 WANT_RW_MOUNT={rw_mount} WANT_RW_WRITABLE={rw_writable}

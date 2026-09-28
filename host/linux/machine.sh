@@ -1,11 +1,16 @@
-. "$WK_ROOT/lib/store.sh"
+wk_eval wk.store paths
+wk_eval wk.resources --os "$(wk_os)" defaults
 
 _uid=$(id -u)
 _gid=$(id -g)
 _user=$(id -un)
 
 info "store: $WK_STORE"
-store_init
+_init=$(wk_py wk.targets store-init) || die "laying out the store failed (above)"
+while IFS= read -r _p; do [ -z "$_p" ] || changed "store: $_p"; done <<EOF
+$_init
+EOF
+unset _init _p
 
 if [ -f "$WK_STORE/pi-hosts" ]; then
     unchanged "pi allowlist"
@@ -16,7 +21,7 @@ else
     changed "created $WK_STORE/pi-hosts"
 fi
 
-_hm=$(headless_marker)
+_hm=$(wk_py wk.resources --os "$(wk_os)" headless-marker)
 if [ -f "$_hm" ]; then
     warn "$_hm exists on a workstation"
     warn "  it would cut the host reserve from ${WK_RESERVE_MB}MB to ${WK_HEADLESS_RESERVE_MB}MB"
@@ -109,11 +114,12 @@ fi
 
 # One deploy key per fork: GitHub refuses the same key on a second repository.
 _missing_keys=""
+_forks=$(wk_py wk.secrets forks)
 while read -r _remote _repo _alias; do
     [ -n "$_remote" ] || continue
-    [ -f "$(wk_push_held_dir)/build_key_$_remote" ] || _missing_keys="$_missing_keys $_repo"
+    [ -f "$push_held_dir/build_key_$_remote" ] || _missing_keys="$_missing_keys $_repo"
 done <<EOF
-$(wk_push_forks)
+$_forks
 EOF
 
 if [ -z "$_missing_keys" ]; then

@@ -3,12 +3,13 @@
 import os
 import sys
 
-from wk import act, status
+from wk import act, images, status
 from wk.act import die, info, log, warn
-from wk.machine import TIMED_OUT, is_macos
+from wk.machine import TIMED_OUT, is_macos, lib_argv
 from wk.store import Store
+from wk.sudo import QUIESCE_PRIV
 
-PRIV = "/usr/local/libexec/wk-quiesce-priv"
+PRIV = QUIESCE_PRIV
 DESKTOP = "bench/mac-quiet-desktop.sh"
 HOSTS = "bench/mac-quiet-hosts.sh"
 RAISER = "bench/mac-raiser.sh"
@@ -19,10 +20,6 @@ SETUP = "./setup --stage quiesce"
 RENDER = '_wk_render() { render_findings <<<"$1"; }; _wk_render'
 
 
-def lib_argv(root, rel, fn, *args):
-    return ["bash", "-c", '. "$0"; %s "$@"' % fn, os.path.join(root, rel), *args]
-
-
 def said(r):
     sys.stdout.write(r.out)
     sys.stderr.write(r.err)
@@ -30,7 +27,7 @@ def said(r):
 
 
 def bench_mode(machine, env):
-    return machine.exists(env.get("WK_IMAGE_MARKER") or "/etc/wk-image")
+    return machine.exists(images.marker(env))
 
 
 class Quiesce:

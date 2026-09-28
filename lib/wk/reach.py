@@ -1,6 +1,7 @@
 """How a machine is reached, computed and never written down: the tailnet, then `ssh -G`, then a sweep for its hardware
 address. One `Reach` reads the tailnet once, under a ceiling: a wedged tailscaled has no timeout of its own."""
 
+import argparse
 import ipaddress
 import json
 import os
@@ -8,7 +9,7 @@ import re
 import sys
 import threading
 
-from wk import fleet
+from wk import fleet, images
 from wk.kv import kv
 from wk.machine import Local, Ssh
 
@@ -40,10 +41,6 @@ def parse_peers(text):
     return rows
 
 
-def peer_rows(text):
-    return [tuple((line.split("\t") + ["", ""])[:3]) for line in text.splitlines() if line.strip()]
-
-
 def parse_neigh(text, cidr):
     net = ipaddress.ip_network(cidr, strict=False)
     out = []
@@ -73,6 +70,16 @@ def parse_segments(text):
     return out
 
 
+def ssh_g(machine, name):
+    """`ssh -G <name>`: {option: its first value}, the keys lowercase as ssh prints them; {} when ssh refuses."""
+    r = machine.run(["ssh", "-G", name])
+    g = {}
+    for line in r.out.splitlines() if r.ok else ():
+        k, _, v = line.partition(" ")
+        g.setdefault(k, v.strip())
+    return g
+
+
 def ssh_timeout(env):
     return int(env.get("WK_SSH_TIMEOUT") or 10)
 
@@ -81,8 +88,7 @@ class Reach:
     def __init__(self, machine=None, env=None, fleet_=None, peers=None):
         self.machine = machine or Local()
         self.env = os.environ if env is None else env
-        self.fleet = fleet_ or fleet.Fleet(self.env.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__)))), self.env)
+        self.fleet = fleet_ or fleet.Fleet(images.root(self.env), self.env)
         self._peers = peers
         self._lock = threading.Lock()
 
@@ -122,24 +128,18 @@ class Reach:
     def names(self, m):
         c = self.conf(m)
         out = []
-        for n in (c.get("NODE_SSH") or m, c.get("NODE_BENCH_SSH"), c.get("BR_SSH")):
+        for n in (c.get("ssh") or m, c.get("bench_ssh"), c.get("ssh")):
             if n and n not in out:
                 out.append(n)
         return out
 
     def fleet_line(self, m):
-        if self.conf(m).get("KIND") not in fleet.BENCH_KINDS:
+        if self.conf(m).get("kind") not in fleet.BENCH_KINDS:
             return ""
         return "; ".join("%s %s" % (n, self.tailnet(n) or "not a node") for n in self.names(m))
 
     def ssh_path(self, name):
-        r = self.machine.run(["ssh", "-G", name])
-        if not r.ok:
-            return ""
-        g = {}
-        for line in r.out.splitlines():
-            k, _, v = line.partition(" ")
-            g.setdefault(k, v.strip())
+        g = ssh_g(self.machine, name)
         host = g.get("hostname", "")
         if not host:
             return ""
@@ -179,11 +179,10 @@ class Reach:
         dialled = path.split("@")[-1].split(":")[0].split("  ")[0]
         if path and dialled != m:   # `ssh -G` answers with the name itself when no HostName is written down
             return path
-        mac = self.conf(m).get("NODE_MAC", "")
+        mac = self.conf(m).get("mac", "")
         if not mac:
             return ""
         return self.find_mac(mac) or "not on the tailnet -- wk machine probe %s sweeps for it" % m
-
 
 
 IDENTIFY = """cat /etc/wk-image 2>/dev/null
@@ -215,14 +214,14 @@ class Survey:
         out = [("local", seg, "local") for seg in self.r.segments_local()]
         for b in self.bridges():
             c = self.r.conf(b)
-            if c.get("BR_SEGMENT"):
-                out.append((c.get("BR_SSH") or b, c["BR_SEGMENT"], b))
+            if c.get("segment"):
+                out.append((c.get("ssh") or b, c["segment"], b))
         return [v for v in out if not self.vantage or v[0] == self.vantage]
 
     def fleet_macs(self):
         out = {}
         for m in self.r.fleet.names(fleet.BENCH_KINDS):
-            mac = self.r.conf(m).get("NODE_MAC", "").lower()
+            mac = self.r.conf(m).get("mac", "").lower()
             if mac:
                 out[mac] = m
         return out
@@ -230,7 +229,7 @@ class Survey:
     def leases(self):
         out = {}
         for b in self.bridges():
-            for lease in self.r.conf(b).get("BR_LEASES", "").split():
+            for lease in self.r.conf(b).get("leases", "").split():
                 f = lease.split(",")
                 if len(f) >= 3:
                     out.setdefault(f[0].lower(), (f[1], f[2], b))
@@ -271,7 +270,7 @@ class Survey:
         machine = macs.get(mac, "")
         lease = leases.get(mac)
         bridge = addrs.get(ip, "")
-        declared = bridge or (self.r.conf(machine).get("NODE_SSH", "") if machine else "")
+        declared = bridge or (self.r.conf(machine).get("ssh", "") if machine else "")
         seen = self.identify(ip, declared)
         peer = ""
         for n in (machine, lease[1] if lease else "", bridge, seen.get("host", "")):
@@ -302,24 +301,12 @@ class Survey:
         return {"seen": len(hits), "swept": swept, "blind": len(vantages) - swept, "vantages": vantages, "hits": hits}
 
 
-def main(argv, env=None, stdin=None, out=None):
-    """lib/reach.sh's entry: `tailnet`, `offline` and `without-tailnet` take the shell's one tailnet read on stdin."""
-    env = os.environ if env is None else env
-    out = out or sys.stdout
-    verb, args = (argv[0], argv[1:]) if argv else ("", [])
-    peers = peer_rows((stdin or sys.stdin).read()) if verb in ("tailnet", "offline", "without-tailnet") else None
-    r = Reach(env=env, peers=peers)
-    if verb == "peers" and not args:
-        out.write("".join("\t".join(p) + "\n" for p in r.peers()))
-    elif verb == "tailnet" and len(args) == 1:
-        out.write(r.tailnet(args[0]))
-    elif verb == "offline" and len(args) == 1:
-        out.write(r.offline(args[0]))
-    elif verb == "without-tailnet" and len(args) == 1:
-        out.write(r.without_tailnet(args[0]))
-    else:
-        sys.stderr.write("usage: python3 -m wk.reach peers | tailnet|offline|without-tailnet <name> (peers on stdin)\n")
-        return 2
+def main(argv):
+    p = argparse.ArgumentParser(prog="python3 -m wk.reach")
+    p.add_argument("verb", choices=("unpinned",),
+                   help="the ssh options for a host whose key is regenerated on every write, for a setup stage")
+    p.parse_args(argv)
+    print(" ".join(UNPINNED))
     return 0
 
 

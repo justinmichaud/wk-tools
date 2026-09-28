@@ -23,7 +23,7 @@ from tests.support import REPO, WkTest, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import sshalias, targets  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import HAVE, Fake, Result  # noqa: E402
 
 
 def _load_cmd_zed():
@@ -57,13 +57,13 @@ class DriverTest(unittest.TestCase):
         self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
 
     def conf(self, name, text):
-        kind = "KIND=%s\n" % ("peer" if "WK_REMOTE_PEER=1" in text else "build")
+        kind = "kind=%s\n" % ("peer" if "peer=1" in text else "build")
         (self.tmp / "hosts" / (name + ".conf")).write_text(kind + text)
 
 
 class TestContainerAlias(DriverTest):
     """A container workspace is reached through its generated `Host
-    wk-<name>` alias: the default `ssh_host` (lib/target.sh's `wk-$1`) and
+    wk-<name>` alias: the default `ssh_host` (Target.ssh_host's `wk-<name>`) and
     `ssh_prepare` writing it, with a ProxyCommand into the podman transport."""
 
     def setUp(self):
@@ -83,7 +83,7 @@ class TestContainerAlias(DriverTest):
         self.t.ssh_prepare("demo")
         text = self.fake.read(sshalias.alias_path(self.env))
         self.assertIn("Host wk-demo", text)
-        self.assertIn("ProxyCommand %s demo" % os.path.join(str(REPO), "container", "ssh-transport.sh"), text)
+        self.assertIn("ProxyCommand %s demo" % os.path.join(str(REPO), "container", "ssh-transport"), text)
         self.assertIn("IdentityFile", text)
         self.assertIn(targets.zed_key_path(self.env), text)
 
@@ -137,7 +137,7 @@ class TestToolsTargetResolvedOnce(TestContainerAlias):
 class SshFake(Fake):
     """This host, as a `Remote` driver over ssh sees it: every far-side call
     is one `ssh <opts> <dest> <command>` run here, answered by what the
-    command contains -- for the probe script and for `t_wk zed ... --route`."""
+    command contains -- for the probe script and for `wk zed ... --route`."""
 
     def __init__(self):
         super().__init__("host")
@@ -170,18 +170,18 @@ yes
 class TestPeerAlias(DriverTest):
     """A peer workstation's own workspace is reached through one more hop: the
     alias `ssh_prepare` writes carries a ProxyCommand that ssh's to the peer
-    and runs the route `t_wk zed <name> --route` (its own answer) gave."""
+    and runs the route `wk zed <name> --route` (its own answer) gave."""
 
     def setUp(self):
         super().setUp()
         self.fake = SshFake()
         self.env["XDG_STATE_HOME"] = str(self.tmp / "state")
         del self.env["WK_IN_VM"]
-        self.conf("peer", "WK_REMOTE_HOST=peer.example\nWK_REMOTE_PEER=1\n")
+        self.conf("peer", "host=peer.example\npeer=1\n")
         self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
         self.t = self.reg.load("peer")
         self.fake.answer_remote("uname -s", out=PROBE)
-        self.fake.answer_remote("zed demo --route", out="user=dev\nsrc=/src/WebKit\nproxy=/opt/wk-tools/container/ssh-transport.sh demo\n")
+        self.fake.answer_remote("zed demo --route", out="user=dev\nsrc=/src/WebKit\nproxy=/opt/wk-tools/container/ssh-transport demo\n")
         self.fake.answer(["chmod"], out="")
 
     def test_ssh_host_is_the_alias_for_a_named_workspace(self):
@@ -196,7 +196,7 @@ class TestPeerAlias(DriverTest):
         self.assertIn("Host wk-demo", text)
         self.assertIn("HostName wk-demo.peer.invalid", text)
         self.assertIn("User dev", text)
-        self.assertIn("ProxyCommand ssh peer.example /opt/wk-tools/container/ssh-transport.sh demo", text)
+        self.assertIn("ProxyCommand ssh peer.example /opt/wk-tools/container/ssh-transport demo", text)
 
 
 class TestBrokenRefusesNamingTheRepair(unittest.TestCase):
@@ -243,7 +243,7 @@ class TestBrokenRefusesNamingTheRepair(unittest.TestCase):
 
 
 class TestZedRoute(WkTest):
-    """`wk zed <ws> --route` is what a peer's own `t_wk` calls to build the
+    """`wk zed <ws> --route` is what a peer's own `Remote.wk` calls to build the
     alias above; it never touches Zed itself (no `zed` on PATH is needed),
     and a workspace nothing here holds is refused like any other."""
 
@@ -264,18 +264,16 @@ class TestZedCli(unittest.TestCase):
 
     def test_a_zed_on_path_wins(self):
         fake = Fake()
-        fake.answer(["which", "zed"], out="/usr/local/bin/zed\n")
-        self.assertEqual(targets.zed_cli(fake), "/usr/local/bin/zed")
+        fake.answer(HAVE + ("zed",))
+        self.assertEqual(targets.zed_cli(fake), "zed")
 
     def test_a_drag_installed_bundle_with_no_path_symlink_is_found(self):
         fake = Fake()
-        fake.answer(["which", "zed"], rc=1)
         fake.answer(["test", "-x", "/Applications/Zed.app/Contents/MacOS/cli"], rc=0)
         self.assertEqual(targets.zed_cli(fake), "/Applications/Zed.app/Contents/MacOS/cli")
 
     def test_neither_is_not_installed(self):
         fake = Fake()
-        fake.answer(["which", "zed"], rc=1)
         fake.answer(["test", "-x", "/Applications/Zed.app/Contents/MacOS/cli"], rc=1)
         self.assertIsNone(targets.zed_cli(fake))
 

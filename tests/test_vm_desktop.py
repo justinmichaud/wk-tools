@@ -362,7 +362,7 @@ class TestWhatIsResidentInThere(unittest.TestCase):
     def test_nothing_wk_runs_in_a_guest_leaves_a_shell_behind(self):
         """No ControlPersist master holds a session open, and `wk enter` execs its ssh rather than backgrounding it."""
         vm = targets.Vm("vm", str(REPO), {}, Fake())
-        self.assertNotIn("ControlPersist", " ".join(vm._guest_ssh_opts()))
+        self.assertNotIn("ControlPersist", " ".join(vm.guest_at("192.0.2.9").opts))
         self.assertIn("exec_into(argv, cwd)", (REPO / "cmd" / "enter").read_text())
 
 

@@ -192,8 +192,8 @@ class TestNoTreeHashMachinery(unittest.TestCase):
 
     def test_cmd_versions_own_sha256_machinery_is_gone(self):
         """cmd/version no longer names a SHA256 program at all -- not the
-        bare `sha256sum`/`shasum` commands, which lib/image.sh and
-        the macOS host scripts still use for unrelated integrity checks
+        bare `sha256sum`/`shasum` commands, which the macOS host scripts
+        use for unrelated integrity checks
         (a downloaded image, a written card, an SDK patch), but the two
         names cmd/version itself defined to pick one."""
         text = (REPO / "cmd" / "version").read_text()

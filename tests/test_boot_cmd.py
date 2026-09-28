@@ -230,10 +230,10 @@ class TestBackAndDisarm(unittest.TestCase):
         """The byte on the medium is the arming, so there is something to park with no record."""
         fake, d, b = pi("pi-mbr")
         d.probe()
-        d.arm(part(fake.conf["NODE_DEVICE"], 1))
+        d.arm(part(fake.conf["device"], 1))
         rc, err = run(b.disarm)
         self.assertEqual(rc, 0, err)
-        self.assertEqual(fake.mbr[fake.conf["NODE_DEVICE"]], "83")
+        self.assertEqual(fake.mbr[fake.conf["device"]], "83")
 
     def test_a_one_shot_board_with_no_record_has_nothing_to_disarm(self):
         fake, d, b = pi("rpi5-usb")
@@ -276,9 +276,9 @@ class TestKillpoints(unittest.TestCase):
         def make():
             conf = conf_for(kind)
             fake = KillBoard(conf)
-            fake.rescue("rescue-1" if conf["NODE_ROLE"] == "bench-device" else "")
+            fake.rescue("rescue-1" if conf["role"] == "bench-device" else "")
             for n, ident in zip(SLOTS_OF[kind], ("sys-a",)):
-                fake.write_system(part(conf["NODE_DEVICE"], n), ident, failsafe=drivers()[kind].failsafe)
+                fake.write_system(part(conf["device"], n), ident, failsafe=drivers()[kind].failsafe)
             if start:
                 run(getattr(self.boot(fake), start))
             fake.applied = 0
@@ -286,7 +286,7 @@ class TestKillpoints(unittest.TestCase):
         return make
 
     def boot(self, fake):
-        return boot_over(fake, drivers()[fake.conf["NODE_DRIVER"]](REPO, fake.conf, fake))
+        return boot_over(fake, drivers()[fake.conf["driver"]](REPO, fake.conf, fake))
 
     def state(self, w):
         f = w.fake
@@ -487,6 +487,14 @@ class TestTheRecoveryPath(EepromTest):
 
 
 class TestFleetProbe(unittest.TestCase):
+    def test_a_conf_that_does_not_parse_is_refused_by_its_line_not_taken_for_no_bench_machine(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "x.conf"), "w") as f:
+                f.write("kind=board\nnot a line\n")
+            with self.assertRaises(act.Refused), contextlib.redirect_stderr(io.StringIO()) as err:
+                cli.load_conf(REPO, "x", {"HOME": "/nonexistent", "WK_MACHINES_DIR": d})
+        self.assertIn("x.conf:2:", err.getvalue())
+
     def test_a_name_that_is_no_bench_machine_is_empty(self):
         self.assertEqual(cli.fleet_probe(REPO, "no-such-machine", {"WK_MACHINES_DIR": str(REPO / "machines")}), {})
 
@@ -513,8 +521,9 @@ class TestStatusArmedTransition(unittest.TestCase):
                   reprovision="", tailnet="", direct="", armed_by="tolken", armed_at="2026-01-01T00:00:00Z")
 
     def text(self, rec):
-        doc = statusview.merge([rec])
-        return statusview.render_text(doc, False)
+        buf = io.StringIO()
+        statusview.render_text_stream(iter([rec]), buf, False)
+        return buf.getvalue()
 
     def test_the_line_names_the_system_who_and_when(self):
         rec = status.fleet_record("rpi5", {}, dict(self.FIELDS, armed_boot="a", boot_id="a"), 4,
@@ -608,7 +617,7 @@ class TestBroker(unittest.TestCase):
 
     def test_an_unserved_action_is_refused_without_a_probe(self):
         here = self.world()
-        with mock.patch("wk.targets.read_conf", return_value={"name": "ws"}):
+        with mock.patch("wk.boot.cli.kv_file", return_value={"name": "ws"}):
             rc, err = run(cli.broker, str(REPO), "rpi4", "boot-order", "", {"WK_BROKER_SOCKET": "/s"}, here)
         self.assertEqual(rc, (act.Refused, 1), err)
         self.assertEqual(here.effects, [])

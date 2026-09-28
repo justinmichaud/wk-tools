@@ -4,12 +4,12 @@ iteration's output; `--lldb` combined with it drops into the debugger at the
 crash instead of exiting with it.
 
 Nothing here builds or runs real WebKit: a FakeWorkspace stands in for a
-checkout, and a planted shell script at the path `config_jsc_path` resolves
-for jsc-release stands in for the jsc binary (targets/local.sh makes
-WK_TARGET=local inside a fake workspace, so `t_exec` runs it right here).
-Where that path is, is asked of build/configs.sh rather than spelled again
-here: jsc-release is the JSCOnly port on Linux and an Apple Xcode build on
-macOS, and they lay their products out differently.
+checkout, and a planted shell script at the path `Config.jsc_path` resolves
+for jsc-release stands in for the jsc binary (WK_TARGET=local inside a fake
+workspace, so the loop runs right here). Where that path is, is asked of
+lib/wk/buildconf.py rather than spelled again here: jsc-release is the
+JSCOnly port on Linux and an Apple Xcode build on macOS, and they lay their
+products out differently.
 
 Run: python3 -m unittest tests.test_run_until_crash -v
 """
@@ -17,30 +17,25 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, bash, fake_workspace
+from tests.support import REPO, WkTest, fake_workspace
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import buildconf  # noqa: E402
 
 
 def _jsc_layout(src):
     """Where jsc-release puts its binary and its libraries under `src`, from
-    build/configs.sh itself -- the same two functions `wk run` calls."""
-    cp = bash(f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/build/configs.sh"
-config_load jsc-release "$(uname -s | grep -q Darwin && echo macos || echo linux)" local
-config_jsc_path {src}
-config_run_dir {src}
-''')
-    assert cp.returncode == 0, cp.stdout + cp.stderr
-    jsc, run_dir = cp.stdout.split()
-    return Path(jsc), Path(run_dir)
+    lib/wk/buildconf.py itself -- the same resolve `wk run` calls."""
+    cfg = buildconf.resolve("jsc-release", "macos" if sys.platform == "darwin" else "linux", "local", {})
+    return Path(cfg.jsc_path(str(src))), Path(cfg.run_dir(str(src)))
 
 
 def _plant_fake_jsc(ws, script_body):
-    """A fake jsc at the path config_jsc_path resolves for jsc-release,
+    """A fake jsc at the path Config.jsc_path resolves for jsc-release,
     relative to the FakeWorkspace's checkout."""
     src = ws.ws_dir / "WebKit"
     jsc, run_dir = _jsc_layout(src)

@@ -18,7 +18,14 @@ is nothing useful to fall back to. Retry once the network is back." >&2
 git fetch --quiet --prune origin || _refuse
 git remote set-head origin -a >/dev/null 2>&1 || _refuse
 
+_tree() { { git rev-parse HEAD; git diff HEAD; git status --porcelain --untracked-files=all; } | cksum; }
+_before=$(_tree)
 git reset --hard --quiet "$(git symbolic-ref --short refs/remotes/origin/HEAD)"
 git clean -qfd
 
-bash "${WK_SDK_PATCHER:-$(dirname "$0")/sdk-patches/apply.sh}" "$SDK"
+_rc=0
+_said=$(bash "${WK_SDK_PATCHER:-$(dirname "$0")/sdk-patches/apply.sh}" "$SDK" 2>&1) || _rc=$?
+if [ "$_rc" -ne 0 ] || [ "$(_tree)" != "$_before" ]; then
+    [ -z "$_said" ] || printf '%s\n' "$_said" >&2
+fi
+exit "$_rc"

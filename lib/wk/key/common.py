@@ -14,10 +14,6 @@ SAME_AS_HERE = "the one this machine holds"
 LOGIN_FILES = (".credentials.json", ".claude.json")
 STATES = {"ok": "ok", "wide": "wide", "unverified": "?", "absent": "none"}
 RANKS = {"ok": 3, "wide": 2}
-TOMBSTONES = {"register": "wk key deploy",
-              "share": "wk key setup   (it elects the credential the fleet holds rather than pushing this machine's)",
-              "claude": "wk key set claude   (the account login beside it is 'wk key set claude-login')",
-              "tailnet": "wk key set tailnet", "tailnet-api": "wk key set tailnet-api"}
 
 
 def verdict(line):

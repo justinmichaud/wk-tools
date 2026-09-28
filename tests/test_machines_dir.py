@@ -7,6 +7,8 @@ overlay, its refusals, and machine_cmd.shared_home.
 Run: python3 tests/run.py --lint --unit -k test_machines_dir
 """
 TIER = "lint"
+import contextlib
+import io
 import os
 import re
 import shutil
@@ -16,10 +18,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import FLEET_ENV, REAL_MACHINES, REPO, bash
+from tests.support import FLEET_ENV, REAL_MACHINES, REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import fleet, targets  # noqa: E402
+from wk import act, fleet, targets  # noqa: E402
+from wk.boot.cli import load_conf  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
 OLD = [re.compile(p) for p in (r"boot/machines(?!\.sh)\b", "targets/" + "hosts", "bridge/" + "hosts",
@@ -105,71 +108,134 @@ class FleetTest(unittest.TestCase):
 
 class TestTheReader(FleetTest):
     def test_values_are_one_literal_word_with_quotes_and_comments_dropped(self):
-        self.conf("b", '# b -- a board\nKIND=board\nNODE_DISPLAY="builtin 1280x832"   # a note\nNODE_MAC=\n')
-        self.assertEqual(self.fleet.load("b"), {"KIND": "board", "NODE_DISPLAY": "builtin 1280x832", "NODE_MAC": ""})
+        self.conf("b", '# b -- a board\nkind=board\ndisplay="builtin 1280x832"   # a note\nmac=\n')
+        self.assertEqual(self.fleet.load("b"), {"kind": "board", "display": "builtin 1280x832", "mac": ""})
 
     def test_an_expansion_is_refused_since_a_default_belongs_in_code(self):
-        self.conf("m", 'KIND=mac\nNODE_VOLUME="${WK_BENCH_VOLUME:-WK Bench}"\n')
+        self.conf("m", 'kind=mac\nvolume="${WK_BENCH_VOLUME:-WK Bench}"\n')
         with self.assertRaises(fleet.ConfError) as cm:
             self.fleet.load("m")
-        self.assertIn("NODE_VOLUME is not a literal", str(cm.exception))
+        self.assertIn("volume is not a literal", str(cm.exception))
 
-    def test_a_conf_without_a_known_kind_is_refused_and_left_out_of_every_listing(self):
-        self.conf("k", "WK_REMOTE_HOST=k\n")
-        self.conf("ok", "KIND=build\n")
-        with self.assertRaises(fleet.ConfError):
-            self.fleet.load("k")
-        self.assertEqual(self.fleet.names(), ["ok"])
+    def test_an_uppercase_key_is_refused_naming_the_file_the_key_and_its_new_spelling(self):
+        for old, new in (("KIND=board", "kind"), ("NODE_BENCH_SSH=x", "bench_ssh"), ("BR_LAN_MAC=x", "lan_mac"),
+                         ("WK_REMOTE_HOST=x", "host"), ("WK_TARGET_CMAKE=x", "cmake"),
+                         ("WK_TARGET_KIND=remote", "driver"), ("WK_BUILD_ARGS=x", "build_args")):
+            with self.subTest(key=old):
+                self.conf("old", "kind=build\n" + old + "\n")
+                with self.assertRaises(fleet.ConfError) as cm:
+                    self.fleet.load("old")
+                msg = str(cm.exception)
+                self.assertIn(str(self.dir / "old.conf") + ":2:", msg)
+                self.assertIn("%s is spelled %s now" % (old.split("=")[0], new), msg)
+
+    def test_a_conf_that_does_not_parse_refuses_every_listing_by_name(self):
+        """A listing that skipped it would hide a machine for as long as nobody asked for it by name."""
+        for text in ("host=k\n", "kind=board\nNODE_SSH=k\n"):
+            with self.subTest(conf=text):
+                self.conf("k", text)
+                self.conf("ok", "kind=build\n")
+                with self.assertRaises(fleet.ConfError):
+                    self.fleet.load("k")
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err), self.assertRaises(act.Refused) as cm:
+                    self.fleet.names()
+                self.assertEqual(cm.exception.status, 2)
+                self.assertIn(str(self.dir / "k.conf"), err.getvalue())
+
+    def test_fleet_list_exits_2_with_the_rename(self):
+        self.conf("k", "kind=board\nNODE_SSH=k\n")
+        cp = subprocess.run([sys.executable, "-m", "wk.fleet", "list"], capture_output=True, text=True,
+                            env=dict(os.environ, PYTHONPATH=str(REPO / "lib"), WK_MACHINES_DIR=str(self.dir),
+                                     XDG_CONFIG_HOME=str(self.dir / "cfg")))
+        self.assertEqual(cp.returncode, 2, cp.stdout + cp.stderr)
+        self.assertIn("NODE_SSH is spelled ssh now", cp.stderr)
 
     def test_a_listing_names_only_the_kinds_asked_for(self):
         for n, k in (("a", "build"), ("b", "peer"), ("c", "board"), ("d", "bridge")):
-            self.conf(n, "KIND=%s\n" % k)
+            self.conf(n, "kind=%s\n" % k)
         self.assertEqual(self.fleet.names(fleet.TARGET_KINDS), ["a", "b"])
         self.assertEqual(self.fleet.names(("bridge",)), ["d"])
         self.assertIsNone(self.fleet.load("nosuch"))
 
     def test_the_overlay_sets_keys_over_the_shared_conf_and_can_declare_its_own(self):
-        self.conf("br", "KIND=bridge\nBR_SEGMENT=10.0.0.0/24\nBR_CARD=x\n")
-        self.conf("br", "BR_CARD=rpi5:/dev/sdb\n", self.local)
-        self.conf("mine", "KIND=bridge\nBR_SEGMENT=10.1.0.0/24\n", self.local)
+        self.conf("br", "kind=bridge\nsegment=10.0.0.0/24\ncard=x\n")
+        self.conf("br", "card=rpi5:/dev/sdb\n", self.local)
+        self.conf("mine", "kind=bridge\nsegment=10.1.0.0/24\n", self.local)
         loaded = self.fleet.load("br")
-        self.assertEqual({k: loaded[k] for k in ("KIND", "BR_SEGMENT", "BR_CARD")},
-                         {"KIND": "bridge", "BR_SEGMENT": "10.0.0.0/24", "BR_CARD": "rpi5:/dev/sdb"})
+        self.assertEqual({k: loaded[k] for k in ("kind", "segment", "card")},
+                         {"kind": "bridge", "segment": "10.0.0.0/24", "card": "rpi5:/dev/sdb"})
         self.assertEqual(self.fleet.names(("bridge",)), ["br", "mine"])
         self.assertEqual(self.fleet.path("br"), str(self.dir / "br.conf"))
         self.assertEqual(self.fleet.path("mine"), str(self.local / "mine.conf"))
 
     def test_wk_bench_volume_names_a_macs_bench_volume(self):
-        self.conf("mac", 'KIND=mac\nNODE_VOLUME="WK Bench"\n')
-        self.conf("pi", 'KIND=board\nNODE_VOLUME=""\n')
+        self.conf("mac", 'kind=mac\nvolume="WK Bench"\n')
+        self.conf("pi", 'kind=board\nvolume=""\n')
         env = dict(self.env, WK_BENCH_VOLUME="Other")
-        self.assertEqual(fleet.Fleet(REPO, env).load("mac")["NODE_VOLUME"], "Other")
-        self.assertEqual(fleet.Fleet(REPO, env).load("pi")["NODE_VOLUME"], "")
-        self.assertEqual(self.fleet.load("mac")["NODE_VOLUME"], "WK Bench")
+        self.assertEqual(fleet.Fleet(REPO, env).load("mac")["volume"], "Other")
+        self.assertEqual(fleet.Fleet(REPO, env).load("pi")["volume"], "")
+        self.assertEqual(self.fleet.load("mac")["volume"], "WK Bench")
 
     def test_every_shipped_conf_loads(self):
         real = fleet.Fleet(REPO, FLEET_ENV)
         for p in sorted(REAL_MACHINES.glob("*.conf")):
             with self.subTest(conf=p.name):
-                self.assertIn(real.load(p.stem)["KIND"], fleet.KINDS)
+                self.assertIn(real.load(p.stem)["kind"], fleet.KINDS)
 
 
-class TestTheShellReaders(FleetTest):
-    def test_load_prints_assignments_a_shell_evaluates_and_refuses_another_kind(self):
-        self.conf("b", "KIND=board\nNODE_NOTE=\"it's a board\"\nNODE_DRIVER=pi-sd\n")
-        cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/boot/machines.sh"\n'
-                  'machine_load b && printf "%s|%s|%s\\n" "$NODE_NOTE" "$NODE_DRIVER" "${KIND:-}"\n'
-                  'wk_fleet load b --kind bridge || echo "rc=$?"', env=self.env)
-        self.assertIn("it's a board|pi-sd|\n", cp.stdout, cp.stderr)
-        self.assertIn("rc=1", cp.stdout)
+class TestTheReadersOverIt(FleetTest):
+    def test_a_bench_machines_conf_is_its_node_fields_and_another_kind_is_none(self):
+        self.conf("b", "kind=board\nnote=\"it's a board\"\ndriver=pi-sd\n")
+        self.conf("br", "kind=bridge\nsegment=10.0.0.0/24\n")
+        got = load_conf(REPO, "b", self.env)
+        self.assertEqual({k: got.get(k) for k in ("note", "driver", "name", "kind")},
+                         {"note": "it's a board", "driver": "pi-sd", "name": "b", "kind": None})
+        self.assertIsNone(load_conf(REPO, "br", self.env))
 
     def test_the_target_registry_is_the_build_machines_and_peers(self):
-        self.conf("box", "KIND=build\nWK_REMOTE_HOST=box\n")
-        self.conf("pe", "KIND=peer\nWK_REMOTE_PEER=1\n")
-        self.conf("pi", "KIND=board\nNODE_DRIVER=pi-sd\nNODE_NOTE=n\n")
-        cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/target.sh"\n'
-                  'target_known | tr "\\n" " "; target_kind pi || echo "pi-not-a-target"', env=self.env)
-        self.assertEqual(cp.stdout, "box pe pi-not-a-target\n", cp.stderr)
+        self.conf("box", "kind=build\nhost=box\n")
+        self.conf("pe", "kind=peer\npeer=1\n")
+        self.conf("pi", "kind=board\ndriver=pi-sd\nnote=n\n")
+        reg = targets.Registry(REPO, env=self.env, machine=Fake())
+        self.assertEqual(reg.known(), ["box", "pe"])
+        self.assertIsNone(reg.kind("pi"))
+
+    def test_a_target_confs_keys_set_their_wk_variables_over_the_environment(self):
+        self.conf("box", "kind=build\ndriver=remote\nhost=box.example\nroot=\ncmake=-DX=1\nbuild_args=--y\n")
+        env = dict(self.env, WK_REMOTE_HOST="from-env", WK_REMOTE_ROOT="/env/root", WK_REMOTE_TOOLS="/env/tools")
+        t = targets.Registry(REPO, env=env, machine=Fake()).load("box")
+        self.assertEqual({k: t.env.get(k) for k in ("WK_TARGET_KIND", "WK_REMOTE_HOST", "WK_REMOTE_ROOT", "WK_REMOTE_TOOLS",
+                                                    "WK_TARGET_CMAKE", "WK_BUILD_ARGS")},
+                         {"WK_TARGET_KIND": "remote", "WK_REMOTE_HOST": "box.example", "WK_REMOTE_ROOT": "",
+                          "WK_REMOTE_TOOLS": "/env/tools", "WK_TARGET_CMAKE": "-DX=1", "WK_BUILD_ARGS": "--y"})
+
+    def test_a_key_no_target_reads_is_refused_naming_it(self):
+        self.conf("box", "kind=build\nhots=box.example\n")
+        with self.assertRaises(LookupError) as cm:
+            targets.Registry(REPO, env=self.env, machine=Fake()).load("box")
+        self.assertIn("box.conf: hots is not a key a build machine's conf takes", str(cm.exception))
+
+    def test_one_configs_own_flags_are_a_key_of_their_own(self):
+        self.conf("box", "kind=build\ncmake_wpe_release=-DONE=1\nbuild_args_jsc_release=--one\n")
+        env = targets.Registry(REPO, env=self.env, machine=Fake()).load("box").env
+        self.assertEqual((env["WK_TARGET_CMAKE_wpe_release"], env["WK_BUILD_ARGS_jsc_release"]), ("-DONE=1", "--one"))
+
+    def test_a_config_that_does_not_exist_is_refused(self):
+        self.conf("box", "kind=build\ncmake_no_such_config=-DX=1\n")
+        with self.assertRaises(LookupError) as cm:
+            targets.Registry(REPO, env=self.env, machine=Fake()).load("box")
+        self.assertIn("cmake_no_such_config is not a key", str(cm.exception))
+
+    def test_every_old_spelling_the_parser_suggests_is_one_the_loader_takes_or_refuses_by_name(self):
+        for old in ("WK_REMOTE_HOST", "WK_TARGET_CMAKE_wpe_release", "WK_BUILD_ARGS_jsc_release", "WK_REMOTE_MAX_JOBS"):
+            with self.subTest(key=old):
+                new = fleet.renamed(old)
+                self.conf("box", "kind=build\n%s=x\n" % new)
+                try:
+                    targets.Registry(REPO, env=self.env, machine=Fake()).load("box")
+                except LookupError as e:
+                    self.assertIn("%s is not read:" % new, str(e))
 
 
 class TestSharedHome(FleetTest):
@@ -178,8 +244,8 @@ class TestSharedHome(FleetTest):
 
     def setUp(self):
         super().setUp()
-        self.conf("boxa", "KIND=build\nWK_REMOTE_HOSTNAME=\n")
-        self.conf("boxb", "KIND=build\nWK_REMOTE_HOSTNAME=bbox-2\n")
+        self.conf("boxa", "kind=build\nhostname=\n")
+        self.conf("boxb", "kind=build\nhostname=bbox-2\n")
         home = self.tmp / "home"
         home.mkdir()
         (home / ".wk-remote").write_text("target=boxb\nroot=%s/wk\n" % home)
@@ -201,21 +267,7 @@ class TestSharedHome(FleetTest):
         reg, _ = self.registry("stranger")
         with self.assertRaises(LookupError) as cm:
             reg.default()
-        self.assertIn("WK_REMOTE_HOSTNAME=stranger", str(cm.exception))
-
-    def test_the_shell_default_target_agrees(self):
-        stub = self.tmp / "bin"
-        stub.mkdir()
-        for host, want in (("BBOX-2", "boxb\n"), ("stranger", "")):
-            with self.subTest(host=host):
-                (stub / "hostname").write_text("#!/bin/sh\necho %s\n" % host)
-                (stub / "hostname").chmod(0o755)
-                env = dict(self.env, PATH="%s:%s" % (stub, os.environ["PATH"]),
-                           WK_REMOTE_MARKER=str(self.tmp / "home" / ".wk-remote"))
-                cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/target.sh"; default_target', env=env)
-                self.assertEqual(cp.stdout, want, cp.stderr)
-                if not want:
-                    self.assertIn("WK_REMOTE_HOSTNAME=stranger", cp.stderr)
+        self.assertIn("hostname=stranger", str(cm.exception))
 
 
 if __name__ == "__main__":

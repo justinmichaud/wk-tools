@@ -1,11 +1,12 @@
 """The upstreams, and the scripts wiring a checkout or a mirror to them; a fork row is lib/wk/secrets.py's FORKS."""
 
+import argparse
 import os
 import re
 import sys
+from shlex import quote as q
 
 from wk import images, secrets
-from wk.shell import sh_quote as q
 
 REMOTES = (
     ("origin", "https://github.com/WebKit/WebKit.git"),
@@ -63,7 +64,6 @@ def _word(w):
     return w if BARE.match(w) else q(w)
 
 
-# One script, not an exec per step: a guest and a build box take it down one ssh session beside other steps, and firstrun runs it as text.
 def render(src, steps):
     lines = ["set -e", "cd " + q(src)]
     for step in steps:
@@ -145,7 +145,6 @@ else
     Tools/Scripts/git-webkit setup --defaults </dev/null >&2 || { echo setup=failed; exit 1; }
     state=ok
 fi
-# Re-asserted for a checkout set up before, whose hook `setup` baked without the levels. Unquoted to split into flags.
 Tools/Scripts/git-webkit install-hooks $WK_HOOK_LEVELS </dev/null >&2 || { echo setup=hooks-failed; exit 1; }
 echo "setup=$state"
 '''
@@ -155,7 +154,6 @@ def gitwebkit_setup_script(src, forks):
     return "cd %s || exit 2\nWK_HOOK_LEVELS=%s\n%s" % (q(src), q(hook_levels(forks)), GITWEBKIT_SETUP)
 
 
-# `git config remote.<r>.url`, not `git remote get-url`, which applies the mirror rewrite; it is also the value git-webkit reads.
 def wiring_check_script(src, mirror, forks, branches, skip_env="", remotes=REMOTES):
     out = ['cd %s || exit 2' % q(src), 'bad=0',
            'u=$(git config --get remote.origin.url 2>/dev/null || echo "")',
@@ -252,19 +250,18 @@ def origin_branch_fetch_step(branch, mirror):
 
 
 def main(argv):
-    verb, a = (argv[0] if argv else ""), argv[1:]
-    branches = mirror_branches()
-    verbs = {
-        "remotes": ((0, 0), lambda: "".join("%-8s %s\n" % r for r in REMOTES)),
-        "mirror-branches": ((0, 0), lambda: " ".join(branches) + "\n"),
-        "mirror-refresh-script": ((1, 1), lambda: mirror_refresh_script(a[0], branches)),
-        "wiring-script": ((2, 5), lambda: wiring_script(a[0], a[1], secrets.FORKS, branches, *a[2:5])),
-        "gitwebkit-setup-script": ((1, 1), lambda: gitwebkit_setup_script(a[0], secrets.FORKS)),
-    }
-    if verb not in verbs or not verbs[verb][0][0] <= len(a) <= verbs[verb][0][1]:
-        sys.stderr.write("usage: python3 -m wk.git %s\n" % "|".join(sorted(verbs)))
-        return 2
-    sys.stdout.write(verbs[verb][1]())
+    """The scripts a workspace's first run (container/firstrun.sh) runs."""
+    parser = argparse.ArgumentParser(prog="python3 -m wk.git")
+    sub = parser.add_subparsers(dest="verb", required=True)
+    w = sub.add_parser("wiring-script")
+    w.add_argument("src")
+    w.add_argument("mirror")
+    sub.add_parser("gitwebkit-setup-script").add_argument("src")
+    a = parser.parse_args(argv)
+    if a.verb == "wiring-script":
+        sys.stdout.write(wiring_script(a.src, a.mirror, secrets.FORKS, mirror_branches()))
+    else:
+        sys.stdout.write(gitwebkit_setup_script(a.src, secrets.FORKS))
     return 0
 
 

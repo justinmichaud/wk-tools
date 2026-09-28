@@ -20,17 +20,19 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.killpoints import converges
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import decl, shell, targets  # noqa: E402
+from wk import decl, samply as wksamply, screen, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import cli, mac, record as brecord, report  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake  # noqa: E402
-from wk.quiet import PRIV, lib_argv  # noqa: E402
+from wk.machine import lib_argv  # noqa: E402
+from wk.quiet import PRIV  # noqa: E402
 
 BENCH = REPO / "cmd" / "bench"
 CMD_LOADER = importlib.machinery.SourceFileLoader("cmd_bench_mac", str(BENCH))
@@ -39,10 +41,33 @@ CMD_LOADER.exec_module(CMD)
 SHA = "0123456789abcdef0123456789abcdef01234567"
 RESULT = json.dumps({"Speedometer-3": {"metrics": {"Score": {"current": [30.0, 31.0]}}}})
 MARKERS = {"mbp": "id=perf-macos-tolken-2026-09\nprofile=perf-macos-tolken\n", "benchvm": "id=perf-macos-benchvm\n"}
-CONFS = {"mbp": 'KIND=mac\nNODE_SSH="tolken"\nNODE_DRIVER=mac-volume\nNODE_PROFILE=perf-macos-tolken\n'
-                'NODE_VOLUME="WK Bench"\nNODE_DISPLAY="builtin 1280x832"\n',
-         "benchvm": "KIND=guest\nNODE_DRIVER=mac-guest\nNODE_PROFILE=perf-macos-benchvm\n"}
+CONFS = {"mbp": 'kind=mac\nssh="tolken"\ndriver=mac-volume\nprofile=perf-macos-tolken\n'
+                'volume="WK Bench"\ndisplay="builtin 1280x832"\n',
+         "benchvm": "kind=guest\ndriver=mac-guest\nprofile=perf-macos-benchvm\n"}
 STAGE_ID = "20260901T000000Z-mac-release"
+PROBE = lib_argv(str(REPO), screen.WINDOWS, "wk_window_probe")
+UNEXPECTED = lib_argv(str(REPO), screen.WINDOWS, "wk_window_unexpected")
+
+
+def on_screen(fake, uninvited="", reading="MiniBrowser:Speedometer"):
+    """The window server reads `reading` ("?" when it was not asked) and `uninvited` is what of it wk did not put there."""
+    fake.answer(PROBE, out="windows=%s\n" % reading)
+    fake.answer(UNEXPECTED, out=uninvited)
+
+
+class StubWatch:
+    """wk.screen.Watch without its thread: start and stop land in the machine's effects with how many benchmarks it had
+    launched by then, and stop() returns its `drew`."""
+
+    def __init__(self, machine, root, clock, env=None):
+        self.m = machine
+
+    def start(self):
+        self.m.effects.append(("watch", "start", len(getattr(self.m, "watched", []))))
+
+    def stop(self):
+        self.m.effects.append(("watch", "stop", len(getattr(self.m, "watched", []))))
+        return list(getattr(self.m, "drew", []))
 
 
 def args(*argv):
@@ -105,6 +130,7 @@ class World(Fake):
             self.answer(["pgrep", "-x", quiet], rc=1)
         self.answer(["pgrep", "-n"], rc=1)
         self.answer(["tmutil"], err="No destinations configured\n")
+        on_screen(self)
 
     def act_run(self, argv, **kw):
         self.effects.append(("act", tuple(argv)))
@@ -134,6 +160,9 @@ class MacTest(unittest.TestCase):
         for v in ("WK_DRY_RUN", "WK_FORCE", "WK_DESTRUCTIVE", "WK_BENCH_ASLR", "WK_BENCH_PATH_PAD", "WK_BENCH_ENV_PAD"):
             os.environ.pop(v, None)
         self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved)))
+        watch = mock.patch.object(screen, "Watch", StubWatch)
+        watch.start()
+        self.addCleanup(watch.stop)
         self.w = World(self.tmp)
 
     def staged(self, *argv, w=None, dry=False):
@@ -176,9 +205,7 @@ class TestConformance(MacTest):
 
     def test_the_run_is_bracketed_by_the_screen_watch(self):
         self.staged()
-        order = [e[1][2].split(";")[1].split()[0] for e in self.w.effects
-                 if e[0] == "run" and e[1][:1] == ("bash",) and "screen_watch" in e[1][2]]
-        self.assertEqual(order, ["screen_watch_start", "screen_watch_stop"])
+        self.assertEqual([e for e in self.w.effects if e[0] == "watch"], [("watch", "start", 0), ("watch", "stop", 1)])
 
 
 class TestTheRecord(MacTest):
@@ -196,8 +223,18 @@ class TestTheRecord(MacTest):
         rundir = os.path.join(self.w.home, "results", self.w.results()[0])
         self.assertEqual(brecord.run_state(rundir, env), "ok")
 
+    def test_the_staged_builds_pgo_reading_goes_with_the_run(self):
+        self.w._set_file(os.path.join(self.w.build, "wk-profile-check.json"), '{"missing": []}')
+        self.staged()
+        rundir = Path(self.w.home, "results", self.w.results()[0])
+        self.assertEqual((rundir / "profile-check.json").read_text(), '{"missing": []}')
+
+    def test_a_build_with_no_reading_carries_none(self):
+        self.staged()
+        self.assertFalse(Path(self.w.home, "results", self.w.results()[0], "profile-check.json").exists())
+
     def test_a_rehearsal_is_refused_as_a_measurement(self):
-        """A mac-guest (B_MEASURES=no) proves every phase, and its reading is recorded as no measurement."""
+        """A mac-guest (its `measures` fact is no) proves every phase, and its reading is recorded as no measurement."""
         w = World(self.tmp, "benchvm")
         rc, err = self.staged(w=w)
         self.assertEqual(rc, 0, err)
@@ -262,11 +299,11 @@ class TestTheLegsOwnGates(MacTest):
         return err.getvalue()
 
     def test_a_covered_screen_refuses_and_force_records_it(self):
-        self.w.answer(lib_argv(str(REPO), mac.QUIET, "screen_blocker")[:3], out="UserNotificationCenter\n")
+        on_screen(self.w, "UserNotificationCenter:Notification;UserNotificationCenter:Banner")
         self.assertIn("1 preflight check(s) failed", self.said(self.w))
         self.assertEqual(self.w.results(), [])
         w = World(self.tmp)
-        w.answer(lib_argv(str(REPO), mac.QUIET, "screen_blocker")[:3], out="UserNotificationCenter\n")
+        on_screen(w, "UserNotificationCenter:Notification")
         w.env["WK_FORCE"] = "1"
         rc, err = self.staged(w=w)
         self.assertEqual(rc, 0, err)
@@ -304,13 +341,19 @@ class TestTheLegsOwnGates(MacTest):
 class TestTheProfile(MacTest):
     """--profile: samply waits for the web process and records it for the length of the run."""
 
-    def capture(self, samply="/samply\n", web="321\n"):
+    CACHE = "/cache"
+
+    def samply(self, cache=CACHE):
+        return wksamply.store_dir(cache, wksamply.triple("arm64", "Darwin")) + "/samply"
+
+    def capture(self, cached=True, web="321\n"):
+        """samply is already in the cache, or it is not and no fetch can start."""
         w = World(self.tmp)
-        w.answer(shell.argv(str(REPO), '. "%s/lib/profiler.sh"; samply_fetch' % REPO, "arm64", "Darwin")[:3], out=samply)
+        w.answer(["test", "-x", self.samply()], rc=0 if cached else 1)
         w.answer(["pgrep", "-n", "-f", mac.WEB_PROCESS], rc=0 if web else 1, out=web)
         rundir = self.tmp / ("run-%d" % len(os.listdir(self.tmp)))
         rundir.mkdir()
-        c = mac.Capture(str(REPO), w, w.clock, "/tmp/p.json", str(rundir))
+        c = mac.Capture(self.CACHE, w, w.clock, "/tmp/p.json", str(rundir))
         with contextlib.redirect_stderr(io.StringIO()):
             c.run()
         return w, c
@@ -318,18 +361,18 @@ class TestTheProfile(MacTest):
     def test_the_web_process_is_recorded(self):
         w, c = self.capture()
         self.assertTrue(c.taken)
-        self.assertIn(("act", ("sudo", "-n", "/samply", "record", "--save-only", "--profile-name", "wk-warmup", "-o", "/tmp/p.json",
+        self.assertIn(("act", ("sudo", "-n", self.samply(), "record", "--save-only", "--profile-name", "wk-warmup", "-o", "/tmp/p.json",
                                "-p", "321")), w.effects)
 
     def test_no_samply_or_no_web_process_takes_nothing(self):
-        for samply, web in (("", "321\n"), ("/samply\n", "")):
-            with self.subTest(samply=samply, web=web):
-                w, c = self.capture(samply, web)
+        for cached, web in ((False, "321\n"), (True, "")):
+            with self.subTest(cached=cached, web=web):
+                w, c = self.capture(cached, web)
                 self.assertFalse(c.taken)
                 self.assertFalse([e for e in w.effects if e[0] == "act"])
 
     def test_a_staged_run_records_where_its_profile_is(self):
-        self.w.answer(shell.argv(str(REPO), '. "%s/lib/profiler.sh"; samply_fetch' % REPO, "arm64", "Darwin")[:3], out="/samply\n")
+        self.w.answer(["test", "-x", self.samply(self.w.reg.store.artifact_dir())])
         self.w.answer(["pgrep", "-n", "-f", mac.WEB_PROCESS], out="321\n")
         rc, err = self.staged("--profile", "/tmp/p.json")
         self.assertEqual(rc, 0, err)
@@ -368,7 +411,7 @@ class TestPreflightAsksEveryGate(MacTest):
                                       ("brightness", ["python3"], 0, "0.85\n"),
                                       ("display mode", ["/py"], 1, "2 displays are online\n"),
                                       ("staged dry run", [os.path.join(str(REPO), "wk"), "bench", "staged"], 1, ""),
-                                      ("window in front", lib_argv(str(REPO), mac.QUIET, "screen_blocker")[:3], 0, "?\n"),
+                                      ("window in front", PROBE, 0, "windows=?\n"),
                                       ("no other machine running", ["pgrep", "-x", mac.VM_PROCESS], 0, "501\n")):
             with self.subTest(gate=gate):
                 w = World(self.tmp)
@@ -464,10 +507,10 @@ class Drv:
         return 0
 
     def c(self, key):
-        return {"NODE_VOLUME": "WK Bench"}.get(key, "")
+        return {"volume": "WK Bench"}.get(key, "")
 
     def facts(self):
-        return {"BOOT_ARMING": "command"}
+        return {"arming": "command"}
 
 
 class StageWorld(World):

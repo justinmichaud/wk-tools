@@ -22,7 +22,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO
+from tests.support import REPO, as_dispatched
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import targets  # noqa: E402
@@ -97,13 +97,13 @@ class ProfileTest(unittest.TestCase):
 
     def run_(self, *argv):
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = CMD.main(list(argv), self.w.reg)
+            rc = CMD.main(as_dispatched("profile", argv, os.environ), self.w.reg)
         return rc, err.getvalue()
 
     def refused(self, *argv):
         with self.assertRaises(Refused) as cm:
             with contextlib.redirect_stderr(io.StringIO()) as err:
-                CMD.main(list(argv), self.w.reg)
+                CMD.main(as_dispatched("profile", argv, os.environ), self.w.reg)
         return cm.exception, err.getvalue()
 
 
@@ -143,7 +143,7 @@ class TestPerfEventParanoidGate(ProfileTest):
         self._paranoid(2)
         with mock.patch.object(CMD, "is_linux", return_value=True), \
              mock.patch("os.access", return_value=True), \
-             mock.patch("subprocess.run") as run:
+             mock.patch.object(CMD.Local, "act_run") as run:
             e, err = self.refused("--config", "gtk-release", "--mode", "samply", "--", "x.js")
         self.assertTrue(run.called)
         self.assertEqual(e.status, 1)

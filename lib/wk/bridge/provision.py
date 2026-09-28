@@ -91,7 +91,7 @@ class Write:
         """A wk command with this terminal, so its own progress and refusals reach the person as they happen."""
         argv = [self.wk] + list(args)
         if act.dry_run():
-            log("would run: %s" % " ".join(shlex.quote(a) for a in argv))
+            log("would run: %s" % shlex.join(argv))
             return True
         return self.r.here.run_tty(argv).ok
 

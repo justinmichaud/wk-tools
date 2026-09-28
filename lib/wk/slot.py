@@ -9,7 +9,8 @@ import subprocess
 import sys
 
 
-def _sha256(path):
+def sha256_file(path):
+    """hashlib.file_digest is 3.11; a Mac runs 3.9."""
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -41,11 +42,10 @@ def cmd_manifest(args):
             full = os.path.join(dirpath, name)
             if os.path.islink(full) or not os.path.isfile(full):
                 continue
-            files[os.path.relpath(full, root)] = _sha256(full)
+            files[os.path.relpath(full, root)] = sha256_file(full)
     if not files:
         sys.exit("manifest: nothing under %s" % root)
     doc["files"] = files
-    # The library that is the WebKit: what a board run checks in the running process.
     libs = sorted(rel for rel in files
                   if os.path.dirname(rel) == doc.get("lib_dir", "usr/lib")
                   and os.path.basename(rel).startswith("libWPEWebKit-")
@@ -64,6 +64,16 @@ def cmd_manifest(args):
 def load(path):
     with open(path) as f:
         return json.load(f)
+
+
+def recorded_build_id(machine, path):
+    try:
+        bid = json.loads(machine.read(path)).get("build_id")
+    except (OSError, ValueError) as e:
+        raise ValueError("cannot read %s: %s" % (path, e))
+    if not bid:
+        raise ValueError("%s records no build_id" % path)
+    return bid
 
 
 def cmd_sums(args):

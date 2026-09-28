@@ -16,7 +16,7 @@ class Login:
     def login_run(self, name, d=None):
         """The shared directory is the CLI's config home, so the account record remote control reads lands beside the credential."""
         d = d or self.sec.store.agent_rw_dir()
-        if not self.have("claude"):
+        if not self.machine.have("claude"):
             warn(self.cred_line(name, "skipped", "the Claude CLI makes this login and is not on PATH -- install it, then: wk key set " + name))
             return False
         if not self.tty():
@@ -88,7 +88,7 @@ class Login:
         if verdict(self.cred_verdict_of(m, LOGIN)) in ("ok", "wide", "unverified"):
             unchanged("%s: holds a claude.ai login of its own" % m)
             return True
-        if not self.have("claude"):
+        if not self.machine.have("claude"):
             warn("%s: has no usable claude.ai login, and the Claude CLI that makes one is not on PATH here" % m)
             return False
         if not self.tty():

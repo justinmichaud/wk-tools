@@ -1,8 +1,6 @@
 """The `wk status` walk: one job per target, then the fleet's devices and
 bridges, each returning the records wk.statusview draws and the worst exit
-code it found. Every fact is read as the walk runs; nothing is stored. The
-boot drivers and the reach probes are still bash and are asked through
-lib/target.sh's libraries."""
+code it found. Every fact is read as the walk runs; nothing is stored."""
 
 import calendar
 import json
@@ -18,11 +16,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import secretfile
-from wk import bridge, fleet, reach, record, secrets, shell, statusview, targets
+import shlex
+from wk import bridge, fleet, images, reach, record, secrets, statusview, targets
 from wk.bench import record as bench_record
 from wk.clock import Clock
 from wk.lock import holder_pid
-from wk.machine import TIMED_OUT, Local
+from wk.machine import TIMED_OUT, Local, Ssh
 from wk.act import Refused
 from wk.resources import Resources
 from wk.kv import ANSI, kv, kv_file
@@ -277,8 +276,8 @@ def disk_record(store, machine, in_vm, reclaimable):
         r.set("total_mb", u.total // 1048576)
         r.set("free_mb", u.free // 1048576)
         r.set("used_pct", math.ceil(u.used * 100 / (u.used + u.free)) if u.used + u.free else 0)
-    except OSError:
-        pass
+    except OSError as e:
+        r.warn("cannot measure the disk under %s: %s" % (root, e))
     try:
         snapshots = len(os.listdir(store.base_dir()))
     except OSError:
@@ -379,7 +378,7 @@ def lock_records(store, machine, alive):
         try:
             line = os.readlink(path)
         except OSError:
-            line = kv_file(os.path.join(path, "payload")) and open(os.path.join(path, "payload")).read() or ""
+            line = ""
         pid = holder_pid(path)
         r = Rec("lock", machine=machine, resource=f[:-len(".lock")])
         r.opt("pid", str(pid) if pid else "")
@@ -429,18 +428,7 @@ def capacity_here(name, where, res):
         cores, mem, free = str(res.host_cores()), str(res.host_mem_mb()), str(res.avail_mem_mb())
     except Refused:
         cores = mem = free = ""
-    return capacity_record(name, where, cores, mem, free, host_load())
-
-
-def host_load():
-    try:
-        with open("/proc/loadavg") as f:
-            return f.read().split()[0]
-    except OSError:
-        pass
-    r = Local().run(["sysctl", "-n", "vm.loadavg"])
-    parts = r.out.split()
-    return parts[1] if r.ok and len(parts) > 1 else ""
+    return capacity_record(name, where, cores, mem, free, "%.2f" % os.getloadavg()[0])
 
 
 def quiesce_dir(store):
@@ -459,17 +447,18 @@ def quiesce_record(qdir, machine):
 
 def bench_records(store, machine, alive):
     """Every running benchmark task, else the newest, its state recomputed from its runs (lib/wk/bench/record.py)."""
-    bdir = store.bench_dir()
-    if not os.path.isdir(bdir):
-        return []
-    tasks = sorted(t for t in os.listdir(bdir) if os.path.isfile(os.path.join(bdir, t, "task.json")))
+    found = bench_record.homes(store)
+    tasks = list(found)
     running = [t for t in tasks if alive(holder_pid(store.lock_path("bench-task-" + t)))]
     out = []
     for t in running or tasks[-1:]:
-        path = os.path.join(bdir, t)
+        path = found[t]
         try:
             st = bench_record.task_state(path, t in running)
-        except Exception:
+        except (Exception, SystemExit) as e:
+            r = Rec("bench", machine=machine, task=t, path=path, state="broken")
+            r.warn("task %s cannot be read (%s): %s" % (t, path, e))
+            out.append(r.done())
             continue
         r = Rec("bench", machine=machine, task=t, path=path, state=st["state"], summary=st["summary"],
                 subject=bench_record.subject_line(st["doc"]))
@@ -496,7 +485,7 @@ def fleet_probe(root, name, cap, env=None):
 
 def armed_desync(fields, clock):
     """The record still claims an arm the machine has moved past: a boot id mismatch is cmd/boot's own
-    'spent' test (boot/machines.sh's record_read has no shared library form to call instead), and an arm
+    'spent' test, and an arm
     that has sat unconsumed past ARM_STALE_SECONDS is stale on its own reading; an unreadable stamp is no
     evidence the arm is current."""
     if fields.get("armed_boot") and fields.get("boot_id") and fields["armed_boot"] != fields["boot_id"]:
@@ -515,7 +504,7 @@ def fleet_record(name, conf, fields, cap, reach=None, clock=None):
     """`fields` is fleet_probe's answer; `reach` answers (tailnet, direct) for a board the probe never described."""
     r = Rec("fleet", machine=name)
     if fields is None or "error" in fields:
-        r.set("role", conf.get("NODE_ROLE") or "workstation")
+        r.set("role", conf.get("role") or "workstation")
         r.set("mode", "no answer within %ss" % cap if fields is None else "probe failed: %s" % fields["error"])
         r.set("conf", "machines/%s.conf" % name)
         tailnet, direct = reach(name) if reach else ("", "")
@@ -546,13 +535,13 @@ def self_role(root, machine):
         conf = fleet.Fleet(root).load(machine) or {}
     except fleet.ConfError:
         conf = {}
-    return conf.get("NODE_ROLE") or "workstation"
+    return conf.get("role") or "workstation"
 
 
 def self_mode_word(env):
-    """host/bench, from the marker every booted bench image writes (lib/common.sh's wk_image_id); its
+    """host/bench, from the marker every booted bench image writes; its
     absence is the host install, the same default lib/common.sh assumes."""
-    fields = kv_file(env.get("WK_IMAGE_MARKER") or "/etc/wk-image")
+    fields = kv_file(images.marker(env))
     return "bench %s" % fields["id"] if fields.get("id") else "host"
 
 
@@ -566,12 +555,12 @@ def self_fleet_record(root, env, machine):
 
 
 def machine_confs(root, env):
-    """(name, conf) for every bench machine with a driver and a note, as boot/machines.sh's machine_list lists them."""
+    """(name, conf) for every bench machine with a driver and a note, as `wk boot --list` lists them."""
     f = fleet.Fleet(root, env)
     out = []
     for n in f.names(fleet.BENCH_KINDS):
         conf = f.load(n)
-        if conf.get("NODE_DRIVER") and conf.get("NODE_NOTE"):
+        if conf.get("driver") and conf.get("note"):
             out.append((n, conf))
     return out
 
@@ -593,8 +582,7 @@ def bridge_role_sum(root):
 
 
 def bridge_ssh(name, script, as_root, connect_timeout, cap):
-    argv = ["ssh", "-o", "BatchMode=yes"] + (["-l", "root"] if as_root else []) + ["-o", "ConnectTimeout=%s" % connect_timeout, name, script]
-    r = Local().run(argv, input="", timeout=cap)
+    r = Local().run(Ssh(name, ["-l", "root"] if as_root else [], connect_timeout).argv(script), input="", timeout=cap)
     return r.out if r.ok else ""
 
 
@@ -633,19 +621,23 @@ def bridge_record(name, conf, want, fields, reach):
 
 
 def wait_until_idle(poll, timeout, interval, clock, label, info, warn):
-    """Polls while `poll` says busy (2); `timeout` seconds of elapsed time, not of sleeps, ends the wait without a verdict."""
+    """Polls while `poll` says busy (2); once it has, another answer ends the wait only when the next poll repeats it,
+    since one walk whose probe failed reads 4 of a build still running. `timeout` seconds of elapsed time, not of
+    sleeps, ends the wait without a verdict."""
     start = clock.monotonic()
-    said = False
+    said, pending = False, None
     while True:
         rc = poll()
-        if rc != 2:
+        if rc != 2 and (not said or rc == pending):
             return rc
+        pending = None if rc == 2 else rc
         if not said:
             info("waiting for%s to finish (wk status says busy)" % (" '%s'" % label if label else ""))
             said = True
         elapsed = int(clock.monotonic() - start)
         if timeout > 0 and elapsed >= timeout:
-            warn("still busy after %ds -- the work continues; this only stopped waiting" % elapsed)
+            if rc == 2:
+                warn("still busy after %ds -- the work continues; this only stopped waiting" % elapsed)
             return rc
         clock.sleep(interval)
 
@@ -859,7 +851,7 @@ class Walk:
         r.opt("branch", target.branch(ws))
         probe = {}
         if st == "present":
-            script = WS_PROBE.replace("@SRC@", shell.sh_quote(target.src(ws))).replace("@BASE@", targets.UPSTREAM_LINE_BODY)
+            script = WS_PROBE.replace("@SRC@", shlex.quote(target.src(ws))).replace("@BASE@", targets.UPSTREAM_LINE_BODY)
             probe = kv(target.exec(ws, ["sh", "-c", script]).out)
             origin = probe.get("origin", "")
             if origin and origin != UPSTREAM_ORIGIN:
@@ -989,7 +981,7 @@ class Walk:
     # -- the fleet
 
     def fleet_devices(self):
-        if self.reg.in_workspace() or not os.path.isfile(os.path.join(self.root, "boot", "machines.sh")):
+        if self.reg.in_workspace():
             return [], 0
         cap = int(self.env.get("WK_FLEET_TIMEOUT", "4")) * 5
         # This machine's own role and mode already lead every record (self_fleet_record); probing it
@@ -1008,7 +1000,7 @@ class Walk:
         f = fleet.Fleet(self.root, self.env)
         names = f.names(("bridge",))
         want = bridge_role_sum(self.root)
-        connect = self.env.get("WK_FLEET_TIMEOUT", "4")
+        connect = int(self.env.get("WK_FLEET_TIMEOUT") or 4)
         cap = float(self.env.get("WK_BRIDGE_TIMEOUT", "20"))
 
         def one(name):

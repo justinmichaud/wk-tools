@@ -78,8 +78,8 @@ class TestTheGraphIsChecked(unittest.TestCase):
         self.refused([step("a", "b"), step("b", "a")])
 
     def test_needs_and_holds_are_lists(self):
-        s = step("c", "a,b", "lane:x device:d")
-        self.assertEqual((s.needs, s.holds), (("a", "b"), ("lane:x", "device:d")))
+        s = step("c", "a,b", "machine:x device:d")
+        self.assertEqual((s.needs, s.holds), (("a", "b"), ("machine:x", "device:d")))
 
 
 class TestWhatRunsAtOnce(unittest.TestCase):
@@ -93,11 +93,11 @@ class TestWhatRunsAtOnce(unittest.TestCase):
         self.assertEqual(self.waves([step("a"), step("b", "a")]), [["a"], ["b"]])
 
     def test_one_resource_is_one_step_at_a_time(self):
-        self.assertEqual(self.waves([step("a", holds="lane:x"), step("b", holds="lane:x")]), [["a"], ["b"]])
+        self.assertEqual(self.waves([step("a", holds="machine:x"), step("b", holds="machine:x")]), [["a"], ["b"]])
 
-    def test_a_board_and_a_lane_interleave(self):
-        """While one arm is deployed to the board the other arm is still building in the lane."""
-        graph = [step("build-a", holds="lane:x"), step("build-b", holds="lane:x"), step("deploy-a", "build-a", "device:d")]
+    def test_a_board_and_a_build_interleave(self):
+        """While one arm is deployed to the board the other arm is still building on the machine."""
+        graph = [step("build-a", holds="machine:x"), step("build-b", holds="machine:x"), step("deploy-a", "build-a", "device:d")]
         self.assertEqual(self.waves(graph), [["build-a"], ["build-b", "deploy-a"]])
 
     def test_a_step_already_done_is_in_no_wave(self):
@@ -153,7 +153,7 @@ class TestTheScheduler(unittest.TestCase):
 
     def test_a_held_resource_keeps_two_steps_apart(self):
         runs = FakeRuns()
-        _, rc = self.run_all(steps(runs, ("a", "", "lane:x"), ("b", "", "lane:x")))
+        _, rc = self.run_all(steps(runs, ("a", "", "machine:x"), ("b", "", "machine:x")))
         self.assertEqual((rc, runs.overlapped("a", "b"), sorted(runs.started)), (0, False, ["a", "b"]))
 
     def test_a_step_that_answers_done_is_never_run(self):

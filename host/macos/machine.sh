@@ -1,7 +1,8 @@
 # TODO: measure a machine created without --rootful before dropping the flag.
-. "$WK_ROOT/lib/store.sh"
+wk_eval wk.store paths
+wk_eval wk.resources --os "$(wk_os)" defaults
 
-WK_MACHINE="${WK_MACHINE:-wk}"
+WK_MACHINE="${WK_MACHINE:-wk}"; export WK_MACHINE   # wk.targets podman-vm reads it from the environment
 
 # applehv permits exactly one running VM, so a leftover machine blocks `wk`.
 _others=$(podman machine list --format json 2>/dev/null \
@@ -29,20 +30,20 @@ for _m in $_others; do
 done
 unset _others _m _img _sz
 
-_cores=$(envelope_cores)
-_mem=$(envelope_mem_mb)
-_disk="${WK_DISK_GB:-500}"   # sparse, so it costs what is written; three yocto lanes want ~450 GB (README, "One lane per profile")
+_cores=$(wk_py wk.resources --os "$(wk_os)" envelope-cores)
+_mem=$(wk_py wk.resources --os "$(wk_os)" envelope-mem-mb)
+_disk="${WK_DISK_GB:-500}"   # sparse, so it costs what is written; three yocto image workspaces want ~450 GB
 
 # TODO: upstream -- podman 5.4 does not canonicalise a --volume target against
 # the machine OS (ostree, hence /var), and a non-canonical one yields a .mount
 # unit that fails at boot: the machine then runs without the mount, silently.
-ensure_dir "$(wk_secrets_dir)" 0700
-ensure_dir "$(wk_agent_rw_dir)" 0700
-mirror_init
-_secrets_mount="$(wk_secrets_dir):$WK_STORE/secrets:ro"
+ensure_dir "$secrets_dir" 0700
+ensure_dir "$agent_rw_dir" 0700
+ensure_dir "$mirror_dir"
+_secrets_mount="$secrets_dir:$WK_STORE/secrets:ro"
 _tools_mount="$WK_ROOT:/var/opt/wk-tools:ro"
-_agent_rw_mount="$(wk_agent_rw_dir):$WK_STORE/agent-rw:rw"
-_mirror_mount="$(dirname "$(wk_mirror)"):$WK_STORE/git:ro"
+_agent_rw_mount="$agent_rw_dir:$WK_STORE/agent-rw:rw"
+_mirror_mount="$mirror_dir:$WK_STORE/git:ro"
 
 # `podman machine inspect` does not expose Mounts (podman 5.4); read the config.
 _cfg="$HOME/.config/containers/podman/machine/applehv/$WK_MACHINE.json"
@@ -85,7 +86,9 @@ PY
 }
 
 _report_losses() {
-    if [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}')" != running ]; then
+    local _state
+    _state=$(wk_py wk.targets podman-vm State) || die "could not read podman machine '$WK_MACHINE' state"
+    if [ "$_state" != running ]; then
         if [ -n "${WK_DRY_RUN:-}" ]; then
             log "    (not read: '$WK_MACHINE' is stopped and a dry run does not start it)"
             return 0
@@ -103,13 +106,13 @@ _report_losses() {
 }
 
 _absent_targets() {
-    [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" = running ] \
+    [ "$(wk_py wk.targets podman-vm State 2>/dev/null)" = running ] \
         || return 0
     local spec target
     for spec in "$_secrets_mount" "$_tools_mount" "$_agent_rw_mount" "$_mirror_mount"; do
         target=${spec%:*}; target=${target##*:}
         podman machine ssh "$WK_MACHINE" -- \
-            "findmnt -no TARGET $(sh_quote "$target")" </dev/null >/dev/null 2>&1 \
+            "findmnt -no TARGET $(printf %q "$target")" </dev/null >/dev/null 2>&1 \
             || printf '%s\n' "$target"
     done
 }
@@ -178,7 +181,7 @@ $(_mount_rows | sed 's/^/    has /')
 }
 
 _read_mounts
-if podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
+if wk_py wk.targets podman-vm State >/dev/null 2>&1; then
     if [ "$_verdict" != differs ] && [ "$_verdict" != absent ]; then
         _check_mounts
     else
@@ -220,7 +223,7 @@ if podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
     fi
 fi
 
-if ! podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
+if ! wk_py wk.targets podman-vm State >/dev/null 2>&1; then
     if [ -n "${WK_DRY_RUN:-}" ]; then
         warn "dry run: podman machine '$WK_MACHINE' would be created (${_cores} cpus,
     ${_mem} MiB, ${_disk} GiB) with these mounts and no others:"
@@ -252,9 +255,7 @@ fi
 
 _check_mounts after-init
 
-_cur_cpus=$(podman machine inspect "$WK_MACHINE" --format '{{.Resources.CPUs}}' 2>/dev/null || echo "")
-_cur_mem=$(podman machine inspect "$WK_MACHINE" --format '{{.Resources.Memory}}' 2>/dev/null || echo "")
-_cur_disk=$(podman machine inspect "$WK_MACHINE" --format '{{.Resources.DiskSize}}' 2>/dev/null || echo "")
+wk_eval wk.targets podman-vm _cur_cpus=Resources.CPUs _cur_mem=Resources.Memory _cur_disk=Resources.DiskSize
 
 # podman grows a disk and will not shrink one, so a smaller figure is reported rather than applied: the workspaces are on it.
 _grow_disk=""
@@ -292,7 +293,8 @@ elif [ -n "${WK_DRY_RUN:-}" ]; then
     warn "dry run: machine resources would become ${_cores} cpus, ${_mem} MiB${_grow_disk:+, ${_disk} GiB}"
 else
     _was_running=""
-    [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}')" = running ] && _was_running=1
+    _state=$(wk_py wk.targets podman-vm State) || die "could not read podman machine '$WK_MACHINE' state"
+    [ "$_state" = running ] && _was_running=1
     [ -n "$_was_running" ] && podman machine stop "$WK_MACHINE" >/dev/null
     podman machine set "$WK_MACHINE" --cpus "$_cores" --memory "$_mem" \
         ${_grow_disk:+--disk-size "$_disk"}
@@ -301,7 +303,7 @@ else
     _grow_guest_fs
 fi
 
-# The machine holds this workstation's lanes, and a lane's bytes are deployed to a board over the tailnet -- so the half that can read the store has to be the half that can reach the board, or neither can. gvproxy answers a 100.x address itself (ping replies in 0.13ms and a connection to port 22 is accepted) and delivers nothing, so the machine joins as a node of its own. Its workspaces do not: they run --network none and reach the world only through the egress proxy's socket (targets/container.sh).
+# The machine holds this workstation's image workspaces, and their slots are deployed to a board over the tailnet -- so the half that can read the store has to be the half that can reach the board, or neither can. gvproxy answers a 100.x address itself (ping replies in 0.13ms and a connection to port 22 is accepted) and delivers nothing, so the machine joins as a node of its own. Its workspaces do not: they run --network none and reach the world only through the egress proxy's socket (lib/wk/targets.py's Container).
 _ts() { podman machine ssh "$WK_MACHINE" -- "$@"; }   # `sudo` inside: tailscaled's socket is root's
 _ts_node="$(wk_machine_name)-vm"
 # WK_PI_TAG: the tailscale tag every node in the fleet -- a board, this machine -- advertises when it joins (default tag:wk).
@@ -315,11 +317,11 @@ me = s.get("Self") or {}
 print("%s %s" % (s.get("BackendState", "?"), (me.get("TailscaleIPs") or ["-"])[0]))
 ' 2>/dev/null; }
 
-if [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" != running ]; then
+if [ "$(wk_py wk.targets podman-vm State 2>/dev/null)" != running ]; then
     warn "podman machine '$WK_MACHINE' is not running, so its tailnet identity was not checked"
 elif ! _ts command -v tailscale >/dev/null 2>&1; then
     warn "podman machine '$WK_MACHINE' has no tailscale, so it cannot reach a board.
-  Its image used to ship one; without it a lane on this workstation cannot be deployed."
+  Its image used to ship one; without it an image workspace on this workstation cannot be deployed."
 else
     read -r _ts_backend _ts_ip <<EOF
 $(_ts_state)
@@ -329,8 +331,8 @@ EOF
     elif [ -n "${WK_DRY_RUN:-}" ]; then
         warn "dry run: would bring the podman machine onto the tailnet as $_ts_node ($_ts_tag)"
     elif ! _ts_key=$(wk_tailscale_authkey); then
-        warn "no tailnet auth key, so the podman machine stays off the tailnet and a lane
-  here cannot be deployed to a board:  wk key set tailnet   (tagged $_ts_tag)"
+        warn "no tailnet auth key, so the podman machine stays off the tailnet and an image
+  workspace here cannot be deployed to a board:  wk key set tailnet   (tagged $_ts_tag)"
     else
         # Into a 0600 file in the guest, never argv: /proc makes `--authkey=tskey-...` world readable.
         _ts 'sudo install -m 0600 /dev/null /var/lib/tailscale/wk-authkey' < /dev/null \
@@ -340,7 +342,9 @@ EOF
         _ts sudo tailscale up --auth-key="file:/var/lib/tailscale/wk-authkey" \
                 --advertise-tags="$_ts_tag" --hostname="$_ts_node" --accept-dns=false \
             >/dev/null 2>&1 || _ts_rc=$?
-        _ts sudo rm -f /var/lib/tailscale/wk-authkey >/dev/null 2>&1 || true
+        _ts sudo rm -f /var/lib/tailscale/wk-authkey </dev/null \
+            || die "could not remove the auth key from '$WK_MACHINE':
+  podman machine ssh $WK_MACHINE -- sudo rm -f /var/lib/tailscale/wk-authkey"
         read -r _ts_backend _ts_ip <<EOF
 $(_ts_state)
 EOF
@@ -359,6 +363,6 @@ unset _ts_node _ts_tag _ts_key _ts_backend _ts_ip _ts_rc
 unset -f _ts _ts_state
 
 unset _cores _mem _disk _mounts _verdict _absent _cfg _secrets_mount _tools_mount \
-      _agent_rw_mount _mirror_mount _cur_cpus _cur_mem _cur_disk _grow_disk _was_running
+      _agent_rw_mount _mirror_mount _cur_cpus _cur_mem _cur_disk _grow_disk _was_running _state
 unset -f _grow_guest_fs
 unset -f _mount_state _absent_targets _read_mounts _mount_rows _check_mounts _report_losses

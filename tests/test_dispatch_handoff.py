@@ -3,11 +3,10 @@ resolved to.
 
 `resolve_target` walks every target that could hold a workspace name -- the
 environments on this machine, then every machine of its own over ssh
-(ws_locate, lib/target.sh) -- and `wk` does it once per invocation. The
-answer is then handed on in WK_TARGET, which `ws_target` reads before it
-asks anybody, so the `ws_target "$WK_NAME"` in the command that runs
-(cmd/enter, cmd/build, cmd/logs, ...) is answered by that one walk instead
-of starting a second.
+(Registry.locate, lib/wk/targets.py) -- and `wk` does it once per invocation.
+The answer is then handed on in WK_TARGET, which `Registry.ws_target` reads
+before it asks anybody, so the command that runs (cmd/enter, cmd/build,
+cmd/logs, ...) is answered by that one walk instead of starting a second.
 
 Only for the command that runs *here*: a command forwarded into the podman
 VM or delegated to the machine that owns the workspace is resolved over
@@ -41,22 +40,32 @@ from tests.test_dispatch_speed import _LOCAL_CONF, _MACHINE_CONF, _WITNESS_SSH
 # appends to grows when a target is asked anything, so its size either side
 # of this command's own `ws_target` says whether that call did a walk of its
 # own or was answered from what it was handed.
-_PROBE = '''#!/usr/bin/env bash
+_PROBE = '''#!/usr/bin/env python3
 #
 # wk probe <workspace> -- print what the dispatcher handed over
 # wk: where=workspace name=required group=other readonly opts --target=
 #
 # A test probe (tests/test_dispatch_handoff.py), never installed.
-set -euo pipefail
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/target.sh"
-printf 'WK_NAME=%s\\n' "${WK_NAME:-unset}"
-printf 'WK_TARGET=%s\\n' "${WK_TARGET:-unset}"
-_w="${WK_TEST_WITNESS:-/dev/null}"
-_before=$( (wc -c < "$_w") 2>/dev/null || echo 0)
-printf 'ws_target=%s\\n' "$(ws_target "${WK_NAME:-}")"
-_after=$( (wc -c < "$_w") 2>/dev/null || echo 0)
-if [ "$_before" = "$_after" ]; then printf 'walked=no\\n'; else printf 'walked=yes\\n'; fi
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "lib"))
+from wk import targets
+
+
+def witnessed():
+    try:
+        return os.path.getsize(os.environ.get("WK_TEST_WITNESS") or os.devnull)
+    except OSError:
+        return 0
+
+
+print("WK_NAME=%s" % os.environ.get("WK_NAME", "unset"))
+print("WK_TARGET=%s" % os.environ.get("WK_TARGET", "unset"))
+before = witnessed()
+print("ws_target=%s" % targets.Registry(ROOT).ws_target(os.environ.get("WK_NAME", "")))
+print("walked=%s" % ("no" if witnessed() == before else "yes"))
 '''
 
 # Every target driver reaches its environments through one of these; each
@@ -138,7 +147,7 @@ class TestTheResolvedTargetIsHandedOn(WkTest):
         self.assertEqual(f.get("WK_TARGET"), "fakelocal", cp.stdout)
 
     def test_the_command_does_not_walk_a_second_time(self):
-        """`ws_target "$WK_NAME"` in the command asks nothing"""
+        """`Registry.ws_target(WK_NAME)` in the command asks nothing"""
         cp, f = self._probe("probe", "handoff-ws")
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertEqual(f.get("ws_target"), "fakelocal", cp.stdout)
@@ -155,7 +164,7 @@ class TestTheResolvedTargetIsHandedOn(WkTest):
         self.assertEqual(cp.returncode, 0, cp.stdout)
         asked = self.witness.read_text() if self.witness.exists() else ""
         self.assertNotIn(
-            "ssh", asked,
+            "asked", asked.splitlines(),
             f"a machine of its own was asked over ssh:\n{asked}\n{cp.stdout}")
 
     def test_an_explicit_target_is_what_the_command_gets(self):

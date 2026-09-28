@@ -1,11 +1,13 @@
 """The credentials: where this machine keeps them, the agent and injector files `wk push` switches, and
 /secrets, what every workspace here reads."""
 
+import argparse
 import os
+import shlex
 import sys
 
-from wk import act, shell
-from wk.act import die, warn
+from wk import act
+from wk.act import debug, die, warn
 from wk.machine import Local
 from wk.store import Store
 
@@ -217,13 +219,13 @@ class Secrets:
         value = first_line(self.cred_read(name))
         if not value:
             return False
-        return self._act("umask 077 && cat > %s" % shell.sh_quote(path), input=value + "\n").ok
+        return self._act("umask 077 && cat > %s" % shlex.quote(path), input=value + "\n").ok
 
     def cred_clear(self, path):
-        return self._act("rm -f %s" % shell.sh_quote(path)).ok
+        return self._act("rm -f %s" % shlex.quote(path)).ok
 
     def cred_present(self, path):
-        return self._ask("test -s %s && echo yes" % shell.sh_quote(path)).out.strip() == "yes"
+        return self._ask("test -s %s && echo yes" % shlex.quote(path)).out.strip() == "yes"
 
     def cred_sync(self, path, name):
         if first_line(self.cred_read(name)):
@@ -237,6 +239,10 @@ class Secrets:
         return self.cred_sync(path, name)
 
     def pat_converge_machine(self):
+        if not self.machine.isdir(self.held_dir()):
+            debug("the held credentials are not on this machine (%s; the podman machine never mounts them), so the read "
+                  "token is left to the host that has them" % self.held_dir())
+            return
         if not self.cred_sync(self.machine_read_pat(), "github-pat"):
             warn("the injector in the podman machine did not take the read token; './setup' converges it")
 
@@ -372,18 +378,16 @@ def rows(table):
 
 
 def main(argv):
-    if argv in (["forks"], ["agent-secrets"]):
-        sys.stdout.write(rows(FORKS if argv[0] == "forks" else AGENT_SECRETS))
-        return 0
-    if len(argv) == 2 and argv[0] == "cred-read":
-        value = Secrets(os.environ["WK_ROOT"]).cred_read(argv[1])
-        sys.stdout.write(value or "")
-        return 1 if value is None else 0
-    if not argv or argv[0] != "alias-blocks" or not 2 <= len(argv) <= 5:
-        sys.stderr.write("usage: python3 -m wk.secrets forks|agent-secrets|cred-read <name>|alias-blocks <dir> [<prefix> [<sock> [<proxy>]]]\n")
-        return 2
-    a = argv[1:] + [""] * (4 - len(argv[1:]))
-    sys.stdout.write(alias_blocks(FORKS, a[0], a[1] or "build_key_", a[2], a[3]))
+    parser = argparse.ArgumentParser(prog="python3 -m wk.secrets")
+    sub = parser.add_subparsers(dest="verb", required=True)
+    for verb in ("forks", "agent-secrets", "pat-converge"):
+        sub.add_parser(verb)
+    sub.add_parser("alias-blocks").add_argument("dir")
+    a = parser.parse_args(argv)
+    if a.verb == "pat-converge":
+        s = Secrets(os.environ["WK_ROOT"])
+        return 0 if s.cred_sync(s.machine_read_pat(), "github-pat") else 1
+    sys.stdout.write(alias_blocks(FORKS, a.dir) if a.verb == "alias-blocks" else rows(FORKS if a.verb == "forks" else AGENT_SECRETS))
     return 0
 
 

@@ -1,6 +1,6 @@
 """cmd/key: the keys are this machine's own, and every subverb acts here.
 
-The secrets directory is this device's (wk_secrets_dir, lib/store.sh); on macOS
+The secrets directory is this device's (Store.secrets_dir, lib/wk/store.py); on macOS
 the podman machine reads it as a read-only mount rather than holding it, so
 `wk key ensure`, `wk key pub` and `wk key fingerprints` are ssh-keygen and a
 file on this side, with no `podman machine ssh` in the path and nothing that
@@ -16,7 +16,7 @@ import subprocess
 import sys
 import unittest
 
-from tests.support import REPO, WkTest, bash, stub_path
+from tests.support import REPO, WkTest, as_dispatched, bash, run, stub_path
 from tests.test_credcheck import FINE, login
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -34,7 +34,7 @@ class _KeyRun(WkTest):
     """cmd/key against a scratch secrets directory, with the trap on PATH."""
 
     def key(self, *args, env=None, stubs=None, input=None):
-        # wk_secrets_dir (lib/store.sh) reads WK_HOST_SECRETS on a macOS host
+        # Store.secrets_dir (lib/wk/store.py) reads WK_HOST_SECRETS on a macOS host
         # and $WK_STORE/secrets everywhere else. Pointing both at one directory
         # is what a real machine looks like, and is what makes these tests read
         # the directory the command actually wrote on either platform.
@@ -627,35 +627,33 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
         self.assertEqual(10, len(rows), cp.stdout)
 
 
-class TestTheOldNamesSayWhatReplacedThem(_KeyRun):
-    """Four ways in became two, and a tombstone names the one that is left
-    rather than printing a usage line."""
+class TestTheOldNamesSayWhatReplacedThem(WkTest):
+    """Four ways in became two, and a tombstone (a `gone` line) names the one
+    that is left rather than printing a usage line -- the dispatcher's, before
+    `needs` asks for a GitHub login nobody could read it past."""
 
     def test_each_one_names_its_replacement(self):
         for old, want in (("register", "wk key deploy"),
+                          ("share", "wk key setup"),
                           ("claude", "wk key set claude"),
                           ("tailnet", "wk key set tailnet"),
                           ("tailnet-api", "wk key set tailnet-api")):
             with self.subTest(old=old):
-                cp, _ = self.key(old)
-                self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
-                self.assertIn(want, cp.stderr)
-                self.assertIn("wk key setup", cp.stderr)
+                cp = run("key", old, env={"PATH": "/usr/bin:/bin"})
+                self.assertEqual(1, cp.returncode, cp.stdout)
+                self.assertIn("'wk key %s' is gone: %s" % (old, want), cp.stdout)
 
     def test_the_claude_one_names_both_of_claudes_credentials(self):
         """Which of the two `wk key claude` meant was never in the name."""
-        cp, _ = self.key("claude")
-        self.assertIn("claude-login", cp.stderr)
+        self.assertIn("claude-login", run("key", "claude").stdout)
 
-    def test_a_tombstone_needs_no_github_login(self):
-        """A refusal that first demands `gh auth login` is a refusal nobody
-        can read; the declaration clears `needs` for these too."""
-        decl = [l for l in KEY.read_text().splitlines()
-                if l.startswith("# wk: sub ")][0]
-        cleared = decl.split("needs=")[0].split()[3].split(",")
-        for old in ("register", "claude", "tailnet", "tailnet-api"):
-            with self.subTest(old=old):
-                self.assertIn(old, cleared)
+    def test_a_retired_verb_is_not_one_it_offers(self):
+        cp = run("key", "zz-no-such-verb")
+        self.assertNotIn("register", cp.stdout)
+
+    def test_a_retired_word_is_still_a_verbs_argument(self):
+        """`wk key set claude` is the replacement, not the tombstone"""
+        self.assertEqual(as_dispatched("key", ["set", "claude"], {}), ["set", "claude"])
 
 
 class TestTheTailnetKeyScope(WkTest):
@@ -729,12 +727,11 @@ class TestABareKeyChangesNothing(_KeyRun):
     revocation `--rotate` starts with -- asks first, defaulting to No."""
 
     def test_it_prints_the_report_and_nothing_else(self):
-        bare, _ = self.key()
+        self.assertEqual(as_dispatched("key", [], {}), ["check"])
         check, _ = self.key("check")
-        self.assertIn("credentials:", bare.stdout)
-        self.assertEqual(check.stdout, bare.stdout)
+        self.assertIn("credentials:", check.stdout)
         for word in ("sharing to", "registering", "minted"):
-            self.assertNotIn(word, bare.stdout + bare.stderr)
+            self.assertNotIn(word, check.stdout + check.stderr)
 
     def arm(self, verb):
         return inspect.getsource(getattr(cli.Key, verb))
@@ -770,7 +767,7 @@ class TestAnAuthKeyIsMintedNotOnlyHanded(WkTest):
     The API endpoint is the suite's dead one (WK_TAILNET_API, tests/support.py),
     so nothing here reaches a real tailnet or makes a real key."""
 
-    LIB = '. "%s/lib/common.sh"\n. "%s/lib/store.sh"\n' % (REPO, REPO)
+    LIB = '. "%s/lib/common.sh"\n' % REPO
 
     def _env(self, authkey=None, api=None):
         env = {"WK_TS_AUTHKEY": str(authkey or self.tmp / "no-such-key")}

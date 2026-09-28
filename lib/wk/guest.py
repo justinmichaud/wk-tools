@@ -9,7 +9,7 @@ import signal
 import sys
 import time
 
-from wk import act, git, secrets, shell, tools
+from wk import act, git, secrets, tools
 from wk.act import Refused, debug, die, info, log, warn
 from wk.clock import Clock
 from wk.lock import Lock
@@ -431,10 +431,7 @@ class Guest:
         return r.ok
 
     def install_claude_cli(self):
-        script = self.host.machine.run(shell.argv(self.host.root, "wk_claude_cli_script"))
-        if not script.ok:
-            return False
-        r = self.m.act_run(["sh", "-s"], input=script.out)
+        r = self.m.act_run(["sh", "-s"], input=tree(self.host.root, "container/claude-cli.sh"))
         if r.ok and "claude=installed" in r.out:
             info("Claude CLI installed in %s" % self.ws)
         return r.ok

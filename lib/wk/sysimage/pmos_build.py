@@ -101,9 +101,6 @@ class Build:
                 self.clock.sleep((n + 1) * 5)
         die(why)
 
-    def has(self, prog):
-        return self.m.run(["sh", "-c", 'command -v "$1" >/dev/null', "sh", prog]).ok
-
     def size(self, path):
         return self.m.run(["stat", "-c", "%s", path]).out.strip()
 
@@ -115,8 +112,8 @@ class Build:
         if u.machine != "aarch64":
             die("this host is %s and the phones are aarch64.\n    pmbootstrap would emulate the whole build with qemu -- hours instead of\n"
                 "    minutes -- so this refuses. Build on an aarch64 machine." % u.machine)
-        missing = [t for t in ("git", "xz") if not self.has(t)]
-        missing += ["%s(%s)" % t for t in (("kpartx", "multipath-tools"), ("losetup", "util-linux")) if not self.has(t[0])]
+        missing = [t for t in ("git", "xz") if not self.m.have(t)]
+        missing += ["%s(%s)" % t for t in (("kpartx", "multipath-tools"), ("losetup", "util-linux")) if not self.m.have(t[0])]
         missing += [pkg for mod, pkg in (("ensurepip", "python3-venv"), ("yaml", "python3-yaml"))
                     if not self.m.run(["python3", "-c", "import " + mod]).ok]
         if missing:

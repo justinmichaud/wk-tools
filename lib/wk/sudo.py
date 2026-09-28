@@ -9,9 +9,11 @@ from wk.act import die, log
 
 DROPIN_FMT = "/etc/sudoers.d/zz-%s-passwd"
 DEFAULT_TIMEOUT_MIN = "0.5"
+QUIESCE_PRIV = "/usr/local/libexec/wk-quiesce-priv"
+CARD_PRIV = "/usr/local/libexec/wk-card-priv"
+BOOT_PRIV = "/usr/local/libexec/wk-boot-priv"
 # A drop-in that out-ranks one of these three sudoers-allowlisted helpers costs 'wk quiesce'/'wk session' a password too.
-PRIV_HELPERS = ("/usr/local/libexec/wk-quiesce-priv", "/usr/local/libexec/wk-card-priv",
-                "/usr/local/libexec/wk-boot-priv")
+PRIV_HELPERS = (QUIESCE_PRIV, CARD_PRIV, BOOT_PRIV)
 
 _RULE_LINE = re.compile(r'^\s*\(.*\)')
 _BLANKET = re.compile(r'(^|\s)(NO)?PASSWD:\s*ALL\s*$|\)\s*ALL\s*$')
@@ -137,7 +139,7 @@ class Sudo:
                     % (timeout, timeout_secs(timeout), self.timeout_desc))
 
     def _visudo_resolve(self):
-        if not self.machine.run(["which", "visudo"]).ok:
+        if not self.machine.have("visudo"):
             die("visudo is required (part of the sudo package) but not on PATH -- "
                 "refusing to write a sudoers file that cannot be validated")
 

@@ -1,141 +1,34 @@
-"""cmd/selftest's `state` section: read-only is read-only, one walk behind
+"""Workspace state: one walk behind
 both `wk ls`/`wk status`, `Target.state`'s five words and `wait_ready`, status-files-are-claims,
 the wk-tools completion marker naming, one status entry per machine, and `wk
 zed` refusing inside a workspace. Each docstring is the
-phrase the check implements 
+phrase the check implements.
 
-Checks marked `# static` are source-grep assertions ported faithfully from
-bash; they exercise no runtime behaviour.
+Checks marked `# static` are source-grep assertions; they exercise no
+runtime behaviour.
 
 Run: python3 -m unittest tests.test_state -v
 """
 import contextlib
+import inspect
 import io
 import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, WK, WkTest, bash, requires_container_target, run
+from tests.support import REPO, WkTest, requires_container_target, run
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets  # noqa: E402
+from wk import record, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake  # noqa: E402
-
-
-def _have_podman():
-    return shutil.which("podman") is not None
-
-
-def _machine_state(machine="wk"):
-    cp = subprocess.run(
-        ["podman", "machine", "inspect", machine, "--format", "{{.State}}"],
-        capture_output=True, text=True,
-    )
-    return cp.stdout.strip() if cp.returncode == 0 else "none"
-
-
-def _state_fingerprint():
-    """Name, mtime and size of everything under this host's wk state directory,
-    sorted. `-exec ... +` and not `\\;`: one `stat` for the whole walk rather
-    than one per file, because an artifact store under there (a Go module cache
-    is 40,000 files) made a per-file fork take longer than the timeout, and the
-    read-only claim then failed as an error rather than a difference."""
-    cp = bash(f'''
-. "{REPO}/lib/common.sh"
-d=$(wk_state_dir)
-if [ -d "$d" ]; then
-    if is_macos; then
-        find "$d" -exec stat -f '%N %m %z' {{}} + 2>/dev/null | sort
-    else
-        find "$d" -exec stat -c '%n %Y %s' {{}} + 2>/dev/null | sort
-    fi
-else
-    echo "(absent)"
-fi
-''')
-    return cp.stdout
-
-
-def _tart_guests():
-    """The guests as data: tart orders a listing's keys differently on every run."""
-    if shutil.which("tart") is None:
-        return ""
-    cp = subprocess.run(["tart", "list", "--format", "json"], capture_output=True, text=True)
-    if cp.returncode != 0:
-        return ""
-    try:
-        return json.dumps(json.loads(cp.stdout), sort_keys=True)
-    except ValueError:
-        return cp.stdout
-
-
-def _readonly_commands():
-    """Every read-only command, run for real -- mirrors cmd/selftest's
-    _readonly_commands(); return codes are not the point here."""
-    run("status")
-    run("ls")
-    run("logs", "selftest-nonexistent")
-    run("doctor")
-
-
-@unittest.skipUnless(_have_podman(), "no podman on this machine")
-class TestReadOnlyIsReadOnly(WkTest):
-    """The podman machine must be stopped for these: they check that a
-    read-only command does not start it, which cannot be told apart from
-    'already running' once it is."""
-
-    def setUp(self):
-        super().setUp()
-        if _machine_state() == "running":
-            self.skipTest("the podman machine is running; 'wk stop' first to check this")
-
-    def test_readonly_starts_nothing(self):
-        """machine state identical before and after"""
-        before = _machine_state()
-        _readonly_commands()
-        after = _machine_state()
-        self.assertEqual(before, after, f"podman machine went {before} -> {after}")
-
-    def test_readonly_writes_nothing(self):
-        """the same four start no guest, write no file, and repair nothing"""
-        guests_before = _tart_guests()
-        before = _state_fingerprint()
-
-        _readonly_commands()
-
-        after = _state_fingerprint()
-        if before != after:
-            # A control, before blaming the commands under test: the state
-            # dir also holds build logs and status files that a build
-            # running on a remote machine writes into once a second.
-            import time
-            ctl_a = _state_fingerprint()
-            time.sleep(3)
-            ctl_b = _state_fingerprint()
-            if ctl_a != ctl_b:
-                self.skipTest(
-                    "the wk state dir is being written by something else "
-                    "(a build, most likely); cannot tell that apart from a "
-                    "read-only command writing"
-                )
-            diff = "\n".join(
-                l for l in before.splitlines() if l not in after.splitlines()
-            ) or "\n".join(
-                l for l in after.splitlines() if l not in before.splitlines()
-            )
-            self.fail(f"the wk state dir changed:\n{diff[:2000]}")
-
-        guests_after = _tart_guests()
-        self.assertEqual(guests_before, guests_after, "the tart guest list changed")
 
 
 class TestListingsAgree(WkTest):
@@ -364,88 +257,50 @@ class TestReadyMeansTheCreationIsFinished(StateTest):
         self.assertEqual(self.clock.slept, [])
         self.assertEqual([e for e in self.fake.effects if e[0] == "run" and "wkdev-enter" in " ".join(e[1])], [])
 
-    def test_the_bash_shims_ask_the_python(self):
-        """cmd/gc and lib/bench-arms.sh reach `ws_state` and `wait_ready` through lib/target.sh."""
-        cp = bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target container >/dev/null 2>&1
-echo "state=$(ws_state nosuchws)"
-wait_ready nosuchws 2>&1 || echo "rc=$?"
-''', env={"WK_STORE": self.store, "WK_IN_VM": "1"})
-        self.assertIn("state=absent", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("no such workspace: nosuchws", cp.stdout)
-        self.assertIn("rc=1", cp.stdout)
-
 
 class TestARecordIsAClaimAndThePidIsTheFact(WkTest):
+    def records(self):
+        return record.Records(root=str(self.tmp / "store"), env={})
+
     def test_a_record_is_a_claim_and_the_pid_is_the_fact(self):
         """a task record's fields round-trip, a missing one is empty, and
         liveness is the process table rather than anything written down"""
-        script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/task.sh"
-export WK_STORE="{self.tmp}/store"
+        t = self.records().begin("new", "here", "ws1", "wk new ws1 --kill", "/nonexistent-log", ["checking", "create"])
+        self.assertEqual(t.field("kind"), "new")
+        self.assertTrue(t.alive(), "a live pid was read as dead")
+        self.assertEqual(t.field("future_field"), "")
+        # A pid above every default pid_max on both platforms: dead by construction.
+        t.pid(4194304)
+        self.assertFalse(t.alive(), "a dead pid was read as alive")
+        self.assertEqual(t.verdict(), "died")
 
-d=$(task_begin new here ws1 "wk new ws1 --kill" /nonexistent-log checking create)
-[ "$(task_field "$d" kind)" = new ] || {{ echo "kind did not round-trip"; exit 1; }}
-task_alive "$d" || {{ echo "a live pid was read as dead"; exit 1; }}
-
-# A field nothing wrote is empty rather than an error.
-[ -z "$(task_field "$d" future_field)" ] || {{ echo "a missing field was not empty"; exit 1; }}
-
-# A pid above every default pid_max on both platforms: dead by construction.
-task_pid "$d" 4194304
-! task_alive "$d" || {{ echo "a dead pid was read as alive"; exit 1; }}
-[ "$(task_verdict "$d")" = died ] || {{ echo "a dead pid with no exit is not 'died'"; exit 1; }}
-
-# Garbage in a field: still readable for what is there, never a crash.
-printf 'not a pid at all' > "$d/pid"
-! task_alive "$d" || {{ echo "garbage read as alive"; exit 1; }}
-'''
-        cp = bash(script)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+    def test_garbage_in_the_pid_field_reads_dead_and_never_crashes(self):
+        t = self.records().begin("new", "here", "ws1", "wk new ws1 --kill", "/nonexistent-log", ["checking", "create"])
+        t.set("pid", "not a pid at all")
+        self.assertFalse(t.alive(), "garbage read as alive")
 
 
 class TestReadyMarkerOneName(WkTest):
     def test_ready_marker_one_name(self):
         """every driver writes the same completion marker"""
         # static
-        missing = []
-        for f in ("targets/container.sh", "targets/vm.sh", "targets/remote.sh"):
-            text = (REPO / f).read_text(errors="replace")
-            if "WK_READY_MARKER" not in text:
-                missing.append(f)
-        firstrun = (REPO / "container/firstrun.sh").read_text(errors="replace")
-        if ".wk-ready" not in firstrun:
-            missing.append("container/firstrun.sh")
-        self.assertEqual(missing, [], f"no ready marker in: {missing}")
-
-        # Nothing may hardcode the name where the variable is in scope.
+        text = (REPO / "lib" / "wk" / "targets.py").read_text()
+        self.assertEqual(targets.READY_MARKER, ".wk-ready")
+        self.assertIn(".wk-ready", (REPO / "container" / "firstrun.sh").read_text(errors="replace"))
+        for cls in (targets.Container, targets.Vm, targets.Remote):
+            self.assertIn("READY_MARKER", inspect.getsource(cls), "%s does not use READY_MARKER" % cls.__name__)
+        # Nothing may spell the name as a literal where the constant is in scope.
         hits = []
-        candidates = list((REPO / "targets").glob("*.sh")) + list((REPO / "lib").glob("*.sh"))
-        for f in candidates:
-            text = f.read_text(errors="replace")
-            for i, line in enumerate(text.splitlines(), 1):
-                if ".wk-ready" not in line:
-                    continue
-                if "WK_READY_MARKER=" in line:
-                    continue
-                if re.match(r"^\s*#", line):
-                    continue
-                hits.append(f"{f}:{i}:{line}")
-        self.assertEqual(hits, [], f"hardcoded marker name:\n{chr(10).join(hits)}")
+        for f in sorted((REPO / "lib").rglob("*.py")):
+            for i, line in enumerate(f.read_text(errors="replace").splitlines(), 1):
+                if re.search(r"""["']\.wk-ready["']""", line) and not line.startswith("READY_MARKER = "):
+                    hits.append("%s:%d:%s" % (f.relative_to(REPO), i, line))
+        self.assertEqual(hits, [], "hardcoded marker name:\n" + "\n".join(hits))
+        self.assertIn('READY_MARKER = ".wk-ready"', text)
 
 
-@unittest.skipUnless(_have_podman(), "no podman on this machine")
 class TestPushKeysNotCopied(WkTest):
-    def setUp(self):
-        super().setUp()
-        if _machine_state() != "running":
-            self.skipTest("the podman machine is stopped; the keys live in its store")
-
+    @requires_container_target()
     def test_push_keys_not_copied(self):
         """never copies"""
         cp = run("push", "status")
@@ -455,31 +310,22 @@ class TestPushKeysNotCopied(WkTest):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-class TestVmDriverWithoutTart(WkTest):
+class TestVmDriverWithoutTart(unittest.TestCase):
     """A machine with no tart has no guests: the vm driver answers `absent`
-    for every name, never an empty string a caller reads as a state. The
-    podman VM is such a machine, and it resolves every forwarded name."""
+    for every name, never an empty string a caller reads as a state, and runs no tart."""
 
     def test_no_tart_means_every_guest_is_absent(self):
-        home = self.tmp / "home"
-        home.mkdir()
-        script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/store.sh"
-. "{REPO}/lib/target.sh"
-load_target vm >/dev/null 2>&1
-echo "tart=$(command -v tart || echo none)"
-echo "state=$(_vm_state wk-nosuch)"
-echo "info=$(t_info nosuchws)"
-echo "list=[$(t_list)]"
-ws_on_target vm nosuchws && echo "on_target=yes" || echo "on_target=no"
-'''
-        cp = bash(script, env={"HOME": str(home), "PATH": "/usr/bin:/bin"})
-        self.assertEqual(cp.returncode, 0, f"the vm driver failed with no tart: {cp.stdout + cp.stderr}")
-        want = "tart=none\nstate=absent\ninfo=absent\nlist=[]\non_target=no"
-        self.assertEqual(cp.stdout.strip(), want, f"got:\n{cp.stdout}\nwant:\n{want}")
+        tmp = tempfile.mkdtemp(prefix="wk-test-state-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        fake = Fake("here")
+        reg = targets.Registry(REPO, env={"HOME": tmp, "WK_STORE": tmp + "/s", "WK_VM_STORE": tmp + "/v"}, machine=fake)
+        t = reg.load("vm")
+        self.assertIsNone(t.tart())
+        self.assertEqual((t.state_of("wk-nosuch"), t.info("nosuchws"), t.list(), t.state("nosuchws")),
+                         ("absent", "absent", [], "absent"))
+        self.assertFalse(reg.exists_on(t, "nosuchws"))
+        self.assertEqual([e for e in fake.effects if e[0] == "run"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()

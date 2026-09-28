@@ -1,11 +1,12 @@
 """What resolving a workspace name costs: the walk that decides which target
-holds it (`ws_locate`, lib/target.sh) and the dispatcher that asks for it.
+holds it (`Registry.locate`, lib/wk/targets.py) and the dispatcher that asks
+for it.
 
-Three properties, each measured rather than asserted about the source:
+Three properties, each shown by what the stub machines record rather than asserted about the source:
 
   * the machines are asked **at once**, not one connect after another -- one
     machine that will not answer costs the walk its own timeout, never
-    everybody's (lib/par.sh);
+    everybody's;
   * a name **this machine's own environments answer to** costs no ssh at all,
     so the fleet is never in the path of `wk enter <a container workspace>`;
   * a machine that did not answer is **named**, so an answer with a machine
@@ -15,23 +16,31 @@ Plus the dispatcher's side of the same cost: `resolve_target` is called once
 per invocation, not once per question that needs its answer.
 
 Every fake machine here is a conf in a WK_MACHINES_DIR of this test's own
-(lib/target.sh) with a stub `ssh` on PATH, so the real driver code shells out
-for real and no test reaches the maintainer's fleet.
+with a stub `ssh` on PATH, so the real driver code shells out for real and
+no test reaches the maintainer's fleet.
 
 Run: python3 -m unittest tests.test_dispatch_speed -v
 """
 import os
 import subprocess
-import time
+import sys
 import unittest
 
-from tests.support import REPO, WkTest, bash, run, stub_path
+from tests.support import REPO, WkTest, clean_env, run, stub_path
 
-# A machine that is off: ssh takes its connect timeout and then reports its
-# own "could not connect" (255). The sleep is what makes serial and parallel
-# tell each other apart.
-_SLOW_DOWN_SSH = '''#!/bin/sh
-sleep 3
+# A machine that is off: ssh reports its own "could not connect" (255).
+_DOWN_SSH = '''#!/bin/sh
+exit 255
+'''
+
+# A machine that answers only once every machine of the round has been asked, or after `alone` has passed: ssh -G,
+# which only resolves config, answers at once.
+_BARRIER_SSH = '''#!/bin/sh
+case " $* " in *" -G "*) exit 0 ;; esac
+echo asked >> "$WK_TEST_SSH_LOG"
+alone=0
+while [ "$(grep -c asked "$WK_TEST_SSH_LOG")" -lt 2 ] && [ $alone -lt 100 ]; do sleep 0.05; alone=$((alone + 1)); done
+echo answered >> "$WK_TEST_SSH_LOG"
 exit 255
 '''
 
@@ -44,55 +53,46 @@ for last; do :; done
 exec bash -c "$last"
 '''
 
-_MACHINE_CONF = "KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_HOST={host}\n"
+_MACHINE_CONF = "kind=build\ndriver=remote\nhost={host}\n"
 
 _LOCAL_CONF = (
-    "KIND=build\nWK_TARGET_KIND=remote\n"
-    "WK_REMOTE_LOCAL=1\n"
-    "WK_REMOTE_ROOT={root}\n"
-    "WK_REMOTE_STORE={store}\n"
+    "kind=build\ndriver=remote\n"
+    "local=1\n"
+    "root={root}\n"
+    "store={store}\n"
 )
+
+# One Registry question in a process of its own, so the stub ssh on PATH is what the driver runs.
+_ASK = ("import sys; sys.path.insert(0, sys.argv[1]); from wk import targets\n"
+        "a = getattr(targets.Registry(sys.argv[2]), sys.argv[3])(sys.argv[4])\n"
+        "print(a if isinstance(a, str) else ' '.join(a))\n")
+
+
+def ask(fn, ws, env, timeout=120):
+    return subprocess.run([sys.executable, "-c", _ASK, str(REPO / "lib"), str(REPO), fn, ws],
+                          env=clean_env(env), capture_output=True, text=True, timeout=timeout)
 
 
 class TestTheFleetIsAskedAtOnce(WkTest):
     """the machines a name could be on are asked in one round, not in turn"""
 
-    def _locate(self, machines, binp, name="no-such-workspace"):
-        registry = self.tmp / f"hosts-{len(machines)}"
+    def test_two_machines_are_asked_before_either_answers(self):
+        """Each stub ssh waits for the other to be asked before it answers, so a walk that asks in turn leaves the first
+        waiting alone: it then answers anyway, after `alone`, and the order in the log shows the turn."""
+        registry, log = self.tmp / "hosts", self.tmp / "asked"
         registry.mkdir()
-        for m in machines:
+        for m in ("fakea", "fakeb"):
             (registry / f"{m}.conf").write_text(_MACHINE_CONF.format(host=f"{m}.invalid"))
-        started = time.monotonic()
-        cp = bash(
-            'set -euo pipefail\n'
-            '. "$WK_ROOT/lib/common.sh"\n'
-            '. "$WK_ROOT/lib/target.sh"\n'
-            f'ws_locate {name}\n',
-            env={
+        with stub_path({"ssh": _BARRIER_SSH}) as binp:
+            cp = ask("locate", "no-such-workspace", {
                 "WK_MACHINES_DIR": str(registry),
                 "XDG_STATE_HOME": str(self.tmp / "state"),
+                "WK_TEST_SSH_LOG": str(log),
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
-            },
-            timeout=120,
-        )
-        return time.monotonic() - started, cp
-
-    def test_two_machines_cost_what_one_costs(self):
-        with stub_path({"ssh": _SLOW_DOWN_SSH}) as binp:
-            one, cp1 = self._locate(["fakea"], binp)
-            self.assertEqual(cp1.returncode, 0, cp1.stdout + cp1.stderr)
-            two, cp2 = self._locate(["fakea", "fakeb"], binp)
-            self.assertEqual(cp2.returncode, 0, cp2.stdout + cp2.stderr)
-        # Serial would be 2x. The margin is the process startup the second
-        # conf adds, not a second machine's worth of ssh.
-        self.assertLess(
-            two, one + 1.5,
-            f"asking two machines took {two:.1f}s where one took {one:.1f}s -- "
-            "that is one connect after another, not one round",
-        )
-        # And the round itself is bounded by one machine's ssh, not by the
-        # fleet's size: the stub sleeps 3s per connect.
-        self.assertLess(two, 12.0, f"one round of probes took {two:.1f}s")
+            })
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(log.read_text().split(), ["asked", "asked", "answered", "answered"],
+                         "one connect after another, not one round")
 
 
 class TestALocalNameNeverReachesTheFleet(WkTest):
@@ -114,19 +114,12 @@ class TestALocalNameNeverReachesTheFleet(WkTest):
             _MACHINE_CONF.format(host="fakemachine.invalid"))
         witness = self.tmp / "ssh-witness"
         with stub_path({"ssh": _WITNESS_SSH}) as binp:
-            cp = bash(
-                'set -euo pipefail\n'
-                '. "$WK_ROOT/lib/common.sh"\n'
-                '. "$WK_ROOT/lib/target.sh"\n'
-                'ws_target here-ws\n',
-                env={
-                    "WK_MACHINES_DIR": str(registry),
-                    "XDG_STATE_HOME": str(self.tmp / "state"),
-                    "WK_TEST_SSH_WITNESS": str(witness),
-                    "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
-                },
-                timeout=60,
-            )
+            cp = ask("ws_target", "here-ws", {
+                "WK_MACHINES_DIR": str(registry),
+                "XDG_STATE_HOME": str(self.tmp / "state"),
+                "WK_TEST_SSH_WITNESS": str(witness),
+                "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+            }, timeout=60)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.strip(), "fakelocal", cp.stdout + cp.stderr)
         self.assertFalse(
@@ -144,29 +137,22 @@ class TestAMachineThatDidNotAnswerIsNamed(WkTest):
         registry.mkdir()
         (registry / "fakedown.conf").write_text(
             _MACHINE_CONF.format(host="fakedown.invalid"))
-        with stub_path({"ssh": _SLOW_DOWN_SSH}) as binp:
-            cp = bash(
-                'set -euo pipefail\n'
-                '. "$WK_ROOT/lib/common.sh"\n'
-                '. "$WK_ROOT/lib/target.sh"\n'
-                'ws_target no-such-workspace\n',
-                env={
-                    "WK_MACHINES_DIR": str(registry),
-                    "XDG_STATE_HOME": str(self.tmp / "state"),
-                    "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
-                },
-                timeout=120,
-            )
+        with stub_path({"ssh": _DOWN_SSH}) as binp:
+            cp = ask("ws_target", "no-such-workspace", {
+                "WK_MACHINES_DIR": str(registry),
+                "XDG_STATE_HOME": str(self.tmp / "state"),
+                "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+            })
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("could not ask", cp.stderr, cp.stderr)
         self.assertIn("fakedown", cp.stderr, cp.stderr)
         # And it still answers: a machine that is off does not stop a name
-        # from resolving to the default (default_target, lib/target.sh).
+        # from resolving to the default (Registry.default).
         self.assertEqual(cp.stdout.strip(), "container", cp.stdout + cp.stderr)
 
 
 class TestTheListingWalksTheSameWay(WkTest):
-    """`wk ls` reads a target's workspaces through the same parallel batch"""
+    """`wk ls` reads a target's workspaces through the same walk"""
 
     def test_every_workspace_on_a_local_target_is_listed(self):
         registry = self.tmp / "hosts"
@@ -202,18 +188,6 @@ class TestTheDispatcherResolvesOnce(unittest.TestCase):
             "call walks every target that could hold the name, so a second one doubles "
             "what `wk enter` costs. Reuse `resolved`.",
         )
-
-
-class TestTouchedFilesParse(unittest.TestCase):
-    """every file the walk lives in is syntactically valid bash"""
-
-    def test_bash_n(self):
-        for rel in ("lib/target.sh", "lib/par.sh", "lib/common.sh",
-                    "lib/reach.sh"):
-            with self.subTest(file=rel):
-                cp = subprocess.run(["bash", "-n", str(REPO / rel)],
-                                    capture_output=True, text=True)
-                self.assertEqual(cp.returncode, 0, cp.stderr)
 
 
 if __name__ == "__main__":

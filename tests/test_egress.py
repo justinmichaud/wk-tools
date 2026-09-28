@@ -27,7 +27,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from tests.support import (assert_guest_start_converges, func_body,
+from tests.support import (assert_guest_start_converges,
                            REPO, WkTest)
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -1330,16 +1330,17 @@ class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
         on a Linux workstation, where there is no Keychain at all. The way in
         an editor takes is the sshd, which the wrapper starts for the same
         reason."""
-        text = (REPO / "targets" / "container.sh").read_text()
-        for fn in ("t_exec", "t_spawn", "t_ssh_sshd_cmd"):
-            with self.subTest(fn=fn):
-                self.assertRegex(func_body(text, fn),
-                                 r"_wrap_cmd|ensure-bridge\.sh")
+        # Inside the podman VM: on a macOS host exec_argv hands the call to the VM's own wk.
+        c = wk_targets.Container("c", REPO, {"WK_CONTAINER_USER": "dev", "WK_IN_VM": "1"}, Fake("here"))
+        bridge = "/opt/wk-tools/container/proxy/ensure-bridge.sh"
+        for tty in (False, True):
+            with self.subTest(exec_tty=tty):
+                argv, _ = c.exec_argv("a", ["true"], tty)
+                self.assertEqual([bridge, "true"], argv[-2:])
+        self.assertIn("exec %s " % bridge, c.sshd_cmd("dev"))
 
     def test_enter_argv_goes_through_the_bridge_too(self):
-        """`wk enter` execs `Container.enter_argv` directly now (targets/container.sh's
-        own t_enter has no caller left): the same property this class checks in bash
-        for the other ways in must hold for the one Python already owns."""
+        """`wk enter` execs `Container.enter_argv`: the same property as the other ways in."""
         c = wk_targets.Container("c", REPO, {"WK_CONTAINER_USER": "dev"}, Fake("here"))
         argv, _ = c.enter_argv("a")
         self.assertIn("/opt/wk-tools/container/proxy/ensure-bridge.sh", argv)
@@ -1470,7 +1471,7 @@ class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
 
     def test_no_real_token_is_anywhere_in_the_tree(self):
         """The placeholder is the only thing that may be written down: the
-        token itself is in wk_push_held_dir on one machine."""
+        token itself is in Store.push_held_dir on one machine."""
         for f in (REPO / "container" / "proxy" / "ensure-bridge.sh",
                   REPO / "lib" / "wk" / "guest.py",
                   REPO / "container" / "proxy" / "github-inject.py"):
@@ -1500,7 +1501,7 @@ LEGACY = (
 
 
 def _wire(home, times=1):
-    """Run the guest's shell wiring, as targets/vm.sh streams it in on every
+    """Run the guest's shell wiring, as lib/wk/guest.py streams it in on every
     start. More than once to prove a second start changes nothing."""
     for _ in range(times):
         cp = subprocess.run(
@@ -1595,14 +1596,7 @@ class TestTheEditorsTerminalGetsTheSameEnvironment(unittest.TestCase):
                             'for a in "$@"; do printf "ARG=[%s]\\n" "$a"; done\n')
             for f in (wrapper, sshd):
                 f.chmod(0o755)
-            body = func_body((REPO / "targets" / "container.sh").read_text(),
-                             "t_ssh_sshd_cmd")
-            cp = subprocess.run(
-                ["bash", "-c", "_ctr_user() { echo tester; }\n"
-                 "t_ssh_sshd_cmd() {%s}\nt_ssh_sshd_cmd ws" % body],
-                capture_output=True, text=True, timeout=60)
-            self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-            cmd = (cp.stdout
+            cmd = (wk_targets.Container("c", REPO, {}, Fake("here")).sshd_cmd("tester")
                    .replace("mkdir -p /run/sshd && ", "")
                    .replace("/opt/wk-tools/container/proxy/ensure-bridge.sh",
                             str(wrapper))
@@ -1626,7 +1620,7 @@ class TestGuestProxyEnvironment(WkTest):
     SHELLS = {
         "editor terminal pane": ("zsh", ["-i", "-c"]),
         "login zsh (the guest's own window)": ("zsh", ["-l", "-c"]),
-        "bash -lc (every t_exec)": ("bash", ["-lc"]),
+        "bash -lc (every Target.exec)": ("bash", ["-lc"]),
         "interactive bash": ("bash", ["-i", "-c"]),
     }
 

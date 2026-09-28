@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk test <workspace> [flags] [paths...] -- run the JSC or layout test suites
-# wk: where=workspace name=required ready=yes group=workspaces takes=* passthrough dryrun
+# wk: where=workspace name=required ready=yes group=workspaces takes=* passthrough dryrun config=--config
 # wk: opts --config=,--layout,--gpu,--lldb,--kill
 #
 # The same reportability as `wk build`: a watchdog that detects a silent run, a
@@ -13,7 +13,7 @@
 # with a real seat, pass --gpu.
 #
 #   --config <config>   the build config to test (default: the last build's,
-#                        else the platform's); `wk build --list` lists every name
+#                        else the platform's; the list is below)
 #   --layout             run the layout-test suite instead of the JSC suite
 #   --gpu                use the real GPU for layout tests (Linux only)
 #   --lldb [web|ui]      debug one layout test: "web" (default) attaches to the
@@ -30,7 +30,7 @@ ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.absp
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
 from wk import buildconf, decl, job, record, session, targets  # noqa: E402
-from wk.ldpath import LLDB_PIN_OPTS, LLDB_PRELUDE  # noqa: E402
+from wk.ldpath import LLDB_PIN_OPTS, lldb_waiting  # noqa: E402
 from wk.act import Refused, die, dry_run, info, log, warn  # noqa: E402
 from wk.build import records_of, size_for  # noqa: E402
 from wk.clock import Clock  # noqa: E402
@@ -44,8 +44,6 @@ _FAILURE = re.compile(r"FAIL|crash|timed out", re.I)
 def parse(argv):
     args = decl.Args(decl.Decl(__file__), argv)
     o = {"suite": "layout" if args.flag("--layout") else "jsc"}
-    if args.value("--config") is not None:
-        o["config"] = args.value("--config")
     if args.flag("--gpu"):
         o["gpu"] = True
     if args.flag("--kill"):
@@ -67,7 +65,7 @@ def missing_layout_paths(runner, src, paths):
     if not paths:
         return []
     q_src = shlex.quote(src)
-    script = ("for t in " + " ".join(shlex.quote(p) for p in paths) + "; do\n"
+    script = ("for t in " + shlex.join(paths) + "; do\n"
               "  p=${t%%\\?*}\n"
               '  [ -e ' + q_src + '/LayoutTests/"$p" ] || [ -e ' + q_src + '/"$p" ] || printf "%s\\n" "$t"\n'
               "done\n")
@@ -122,7 +120,7 @@ def main(argv, reg=None, clock=None, popen=None):
                 "    Look at it:  wk enter %s  and then  pgrep -af run-" % (name, name))
         return 0
 
-    config = opts.get("config") or os.environ.get("WK_CONFIG") or reg.default_config(name)
+    config = os.environ.get("WK_CONFIG") or reg.default_config(name)
     try:
         cfg = buildconf.resolve(config, target.os(), target.kind, target.env)
     except LookupError:
@@ -213,10 +211,7 @@ def main(argv, reg=None, clock=None, popen=None):
         info("debugging %s (%s) in '%s', lldb waiting for %s" % (" ".join(opts["pass"]), config, name, attach))
         log("  it attaches as that process starts; 'continue' runs the test")
         log("  test output: /tmp/wk-test-lldb.log (in the workspace)")
-        script = ("%s\n( sleep 2; %s >/tmp/wk-test-lldb.log 2>&1 ) &\nexec \"$LLDB\" %s -o %s"
-                  % (LLDB_PRELUDE, cmd, LLDB_PIN_OPTS,
-                     shlex.quote("process attach --name %s --waitfor" % attach)))
-        target.exec_tty(name, ["bash", "-lc", script])
+        target.exec_tty(name, ["bash", "-lc", lldb_waiting(cmd, "/tmp/wk-test-lldb.log", attach)])
         return 0
 
     ws_dir = target.store.ws_dir(name)

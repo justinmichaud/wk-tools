@@ -29,8 +29,6 @@ FUNC_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{\s*(#.*)?$')
 # would surprise a caller under `set -e`; a function that ends in an `&&`
 # chain and is not a predicate gets `return 0` instead of a place here.
 DELIBERATE_PREDICATES = {
-    ("lib/common.sh", "lock_alive"),
-    ("lib/store.sh", "store_is_local"),
     ("admin/wk-card-priv", "_slot_present"),
     ("container/proxy/ensure-bridge.sh", "bridge_alive"),
 }
@@ -39,7 +37,7 @@ DELIBERATE_PREDICATES = {
 # Every directory holding shell in this tree. Audit 3's SCRIPT_ROOTS is
 # narrower on purpose: it asks a question only a standalone script can answer.
 SHELL_ROOTS = ("admin", "bench", "boot", "bridge", "build", "cmd", "container",
-               "host", "image", "lib", "targets", "vm")
+               "host", "image", "lib", "vm")
 SHELL_SHEBANG_LINE = re.compile(r'^#!.*\b(bash|sh|dash|ksh)\b')
 
 # --- an assignment whose value comes out of a command that reports absence --------------------------
@@ -214,8 +212,8 @@ def _open_quote(text, quote=None):
 def _statements(body):
     """One entry per statement: continuations joined, a quoted span that runs
     across lines kept whole, a heredoc body skipped. A shell script this tree
-    *prints* (boot/pi-mbr.sh's `b_self_disarm_sh`, `printf` of a whole
-    self-disarm hook) is one argument, not code at this level."""
+    *prints* (a `printf` of a whole self-disarm hook) is one argument, not
+    code at this level."""
     out, buf, heredoc = [], "", None
     for raw in body:
         if heredoc is not None:
@@ -434,12 +432,6 @@ class TestTrailingAndChainAudit(unittest.TestCase):
             '    sleep 10',
             'done']), "")
 
-    def test_lock_alive_is_a_deliberate_predicate(self):
-        # A concrete example that the pattern is not automatically a bug:
-        # `lock_alive` is read only as `if lock_alive "$r"; then ...`.
-        text = (REPO / "lib" / "common.sh").read_text()
-        self.assertRegex(text, r"lock_alive\(\) \{ # <resource>\n\s*local pid\n\s*pid=")
-
 
 SHELL_DASH_S_RE = re.compile(r'\b(bash|sh)\s+-s\b')
 
@@ -449,8 +441,6 @@ def _heredoc_script_roots():
         if p.is_file():
             yield p
     for p in sorted((REPO / "lib").glob("*.sh")):
-        yield p
-    for p in sorted((REPO / "targets").glob("*.sh")):
         yield p
 
 
@@ -463,8 +453,7 @@ def find_remote_script_heredocs():
     A heredoc that hands a remote `cat` literal *file content* (no `-s`
     shell on the line) is not this: `set -u` means nothing to a config file.
     That is why the trigger is `bash -s`/`sh -s` themselves, not the wrapper
-    names alone -- `targets/vm.sh`'s `_write_deploy_keys` calls `_ssh` to
-    write `~/.ssh/config` this way and is correctly not one of these.
+    names alone.
     """
     found = []
     for path in _heredoc_script_roots():
@@ -522,13 +511,13 @@ class TestRemoteScriptHeredocsSetDashU(unittest.TestCase):
 #
 # A file with no shell shebang is read only via `.` (a library) in this tree
 # (verified by hand for every file below); that is what "non-sourced" means
-# here, and it excludes lib/*.sh, targets/*.sh, boot/*.sh and most of host/*
+# here, and it excludes lib/*.sh and most of host/*
 # without naming any of them. What is left are scripts that run standalone
 # (as `wk`'s dispatcher, a LaunchDaemon/LaunchAgent, or someone's `bash
 # foo.sh`) or are fed to a remote shell -- and those set -euo pipefail unless
 # named below, with the one reason each that earns the exception.
 SCRIPT_ROOTS = (
-    "cmd", "lib", "targets", "vm", "boot", "build", "host", "bench",
+    "cmd", "lib", "vm", "boot", "build", "host", "bench",
     "container/bin", "container/proxy", "admin",
 )
 SHELL_SHEBANG_RE = re.compile(r'^#!.*\b(bash|sh|dash|ksh)\b')
@@ -564,7 +553,7 @@ def _is_shell_script(path):
 
 
 # A file fed whole to a remote shell (`_ssh ... 'bash -s' < "$WK_ROOT/vm/
-# desktop-probe.sh"`, targets/vm.sh) runs as a script exactly like one with
+# desktop-probe.sh"`) runs as a script exactly like one with
 # its own shebang -- the shebang is simply irrelevant when the caller already
 # named the interpreter -- so it is a candidate too, found the same way
 # audit 1 above finds a heredoc's `bash -s`/`sh -s`.
@@ -573,7 +562,7 @@ REMOTE_FED_SCRIPT_RE = re.compile(r'(?:bash|sh)\s+-s[\'"]?\s*<\s*"\$WK_ROOT/([^"
 
 def _remote_fed_script_paths():
     paths = set()
-    for root in ("cmd", "lib", "targets"):
+    for root in ("cmd", "lib"):
         base = REPO / root
         if not base.exists():
             continue

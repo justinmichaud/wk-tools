@@ -1,8 +1,8 @@
-"""A command's declaration: the `# wk:` lines in the first 15 lines of
-cmd/<name> and the `# wk <name> ... -- <summary>` synopsis. Keys: where=,
-name= (with @N for the slot), takes=, ready=yes, group=, lifecycle, readonly,
-destructive, dryrun, opts, passthrough[=tail], broker, outside, forward=no,
-here, bare=merged, post=, values=, needs; `sub`/`flag` lines override per subverb or flag."""
+"""A command's declaration: the `# wk:` lines in the first 15 lines of cmd/<name> and the
+`# wk <name> ... -- <summary>` synopsis. Keys: where=, name= (with @N for the slot), takes=,
+ready=yes, group=, lifecycle, readonly, destructive, dryrun, opts, passthrough[=tail|=all], broker,
+outside, forward=no, here, bare=merged, post=, values=, config=, verbs=, default=, needs;
+`sub`/`flag` lines override per subverb or flag; a `gone <word> <replacement>` line retires a flag or verb."""
 
 import re
 from pathlib import Path
@@ -10,8 +10,9 @@ from pathlib import Path
 WHERE_VALUES = ("host", "store", "local", "workspace", "dynamic")
 NAME_VALUES = ("required", "optional", "none", "derived")
 FLAGS = ("lifecycle", "readonly", "destructive", "broker", "needs", "opts",
-         "passthrough", "dryrun", "passthrough=tail", "forward=no", "here",
+         "passthrough", "dryrun", "passthrough=tail", "passthrough=all", "forward=no", "here",
          "outside", "bare=merged")
+CONFIG_VALUES = ("--config", "arg")
 LIST_KEYS = ("needs", "opts", "readonly", "destructive", "dryrun", "broker")
 
 
@@ -47,12 +48,16 @@ class Decl:
         self.here = False
         self.takes = "0"
         self.values = ""
+        self.config = ""
+        self.verbs = ""
+        self.default = ""
         self.destructive = ""
         self.opts = ""
         self.passthrough = ""
         self.dryrun = ""
         self.sub = []    # (verbs, {key: value})
         self.flag = []   # (flags, {key: value})
+        self.gone = {}
         self.synopsis = ""
         self._load()
 
@@ -70,10 +75,16 @@ class Decl:
             if body.startswith("sub "):
                 self.sub.append(self._override(body[4:]))
                 continue
+            if body.startswith("gone "):
+                word, _, replacement = body[5:].strip().partition(" ")
+                self.gone[word] = replacement.strip()
+                continue
             if body.startswith("flag "):
                 self.flag.append(self._override(body[5:]))
                 continue
             self._tokens(body.split())
+        if self.default and not in_list(self.default, self.verbs):
+            raise DeclError("%s: default=%s is not one of verbs=%s" % (self.name, self.default, self.verbs))
 
     def _override(self, text):
         words = text.split()
@@ -87,7 +98,7 @@ class Decl:
         pending = ""
         for tok in tokens:
             key, eq, value = tok.partition("=")
-            if key in ("where", "name", "takes", "ready", "group", "values", "post") and eq:
+            if key in ("where", "name", "takes", "ready", "group", "values", "post", "config", "verbs", "default") and eq:
                 pending = ""
                 if key == "where":
                     if value not in WHERE_VALUES:
@@ -109,6 +120,15 @@ class Decl:
                     self.values = value
                 elif key == "post":
                     self.post = value
+                elif key == "config":
+                    if value not in CONFIG_VALUES:
+                        raise DeclError("%s: config=%s is not one of %s"
+                                        % (self.name, value, "|".join(CONFIG_VALUES)))
+                    self.config = value
+                elif key == "verbs":
+                    self.verbs = value
+                elif key == "default":
+                    self.default = value
             elif tok in FLAGS:
                 pending = ""
                 if tok == "lifecycle":
@@ -131,8 +151,8 @@ class Decl:
                 elif tok == "dryrun":
                     self.dryrun = "yes"
                     pending = "dryrun"
-                elif tok == "passthrough=tail":
-                    self.passthrough = "tail"
+                elif tok in ("passthrough=tail", "passthrough=all"):
+                    self.passthrough = tok.split("=")[1]
                 elif tok == "forward=no":
                     self.forward = False
                 elif tok == "here":
@@ -210,6 +230,14 @@ class Decl:
 
     def honours_dryrun(self, args):
         return self._in_argv_list(self._answer("dryrun", self.dryrun, args), args)
+
+    def flag_stands_for_verb(self, args):
+        """A `flag` line in argv that takes no positional (`--list`) is the invocation's verb."""
+        return self._flag_override("takes", args) == "0"
+
+    def valued_opts(self):
+        specs = [self.opts] + [spec.get("opts") or "" for _, spec in self.sub + self.flag]
+        return {x[:-1] for spec in specs for x in spec.split(",") if x.endswith("=")}
 
     def synopsis_line(self):
         return self.synopsis.split(" -- ")[0]

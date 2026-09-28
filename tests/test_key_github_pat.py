@@ -1,7 +1,7 @@
 """`wk key set github-pat` -- the one credential that never enters a workspace.
 
 It lives beside the private deploy-key halves in the directory nothing mounts
-(wk_push_held_dir, lib/store.sh); the only thing that ever reads it is the
+(Store.push_held_dir, lib/wk/store.py); the only thing that ever reads it is the
 credential injector on the machine that runs the workspaces, and `wk push`
 is what hands it over and takes it away.
 
@@ -36,17 +36,15 @@ FORKS = {"justinmichaud/WebKit": "WebKit/WebKit",
          "justinmichaud/WPEWebKit": "WebPlatformForEmbedded/WPEWebKit"}
 
 
-def _wait_for_echo_off(fd, timeout=5.0):
+def _wait_for_echo_off(fd):
     """The prompt is printed before `read -rs` turns the terminal's echo off,
     so a paste written the instant it appears is echoed by the tty itself --
     which is the very thing these tests assert against. Wait for the flag the
     command sets rather than for a length of time."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not termios.tcgetattr(fd)[3] & termios.ECHO:
-            return
+    while termios.tcgetattr(fd)[3] & termios.ECHO:
         time.sleep(0.005)
-    raise AssertionError("`read -rs` never turned the terminal's echo off")
+
+
 PODMAN_TRAP = '#!/bin/sh\necho "podman was called" >&2\nexit 1\n'
 TOKEN = "ghp_thisisnotarealtoken0123456789"
 
@@ -54,11 +52,11 @@ TOKEN = "ghp_thisisnotarealtoken0123456789"
 class _PatRun(WkTest):
     def setUp(self):
         super().setUp()
-        # A store this process can write is a machine `push_agent_exec` runs
-        # on directly (store_is_local, lib/store.sh), which is what makes the
-        # read token's delivery observable here without a podman machine.
+        # A store this process can write is a machine Secrets.agent_argv runs
+        # on directly (Store.is_local), which is what makes the read token's
+        # delivery observable here without a podman machine.
         #
-        # wk_secrets_dir (lib/store.sh) reads WK_HOST_SECRETS on a macOS host
+        # Store.secrets_dir reads WK_HOST_SECRETS on a macOS host
         # and $WK_STORE/secrets everywhere else; one directory under both names
         # is what a real machine looks like, and is what makes these tests read
         # the path the command actually wrote on either platform.
@@ -459,10 +457,14 @@ class TestTheMachineTakesTheTokenOnEveryStart(unittest.TestCase):
     """A token that arrives while the podman machine is down cannot be
     delivered into it; both paths that bring the machine up converge the
     injector's copy through the one function, as `wk start` does for the
-    guests' (targets/vm.sh)."""
+    guests' (lib/wk/guest.py)."""
 
     def test_both_start_paths_converge_through_the_one_function(self):
+        from unittest import mock
+        from wk import secrets, targets
+        from wk.machine import Fake
         self.assertIn("Secrets(ROOT).pat_converge_machine()", (REPO / "cmd" / "start").read_text())
-        self.assertIn("push_agent_pat_converge_machine", (REPO / "targets" / "container.sh").read_text())
-        body = (REPO / "lib" / "store.sh").read_text()
-        self.assertEqual(1, body.count("push_agent_pat_converge_machine() {"))
+        c = targets.Container("container", str(REPO), {"HOME": "/nonexistent", "WK_STORE": "/nonexistent/store"}, Fake("here"))
+        with mock.patch.object(secrets.Secrets, "pat_converge_machine") as converge:
+            c.start("demo")
+        self.assertEqual(1, converge.call_count, "'wk start <container workspace>' does not converge the read token")

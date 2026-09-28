@@ -3,6 +3,7 @@
 
 Run: python3 tests/run.py -k tests.test_status
 """
+import contextlib
 import inspect
 import io
 import json
@@ -15,11 +16,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, WkTest, bash
+from tests.support import REPO, WkTest, bash, clean_env
 from tests.test_wk_targets import LINUX_PROBE, SshFake
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import fleet, status, statusview, targets  # noqa: E402
+from wk import fleet, record, status, statusview, targets  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 from wk.resources import Resources  # noqa: E402
@@ -30,13 +31,16 @@ from wk.store import Store  # noqa: E402
 def render(records, mode="text"):
     """The renderer on synthetic records, in process: what a person or an
     agent reading `wk status` sees, with no machine required."""
+    records = list(records)
     doc = statusview.merge(records)
     if mode == "json":
         out = json.dumps(doc, indent=2) + "\n"
     elif mode == "html":
         out = statusview.write_page(doc, os.path.join(tempfile.mkdtemp(prefix="wk-status-page-"), "status.html")) + "\n"
     else:
-        out = statusview.render_text(doc, False) + "\n"
+        buf = io.StringIO()
+        statusview.render_text_stream(iter(records), buf, False)
+        out = buf.getvalue()
     return types.SimpleNamespace(stdout=out, stderr="", returncode=0)
 
 
@@ -115,10 +119,10 @@ class TestReprovisionLine(unittest.TestCase):
 
     def test_a_device_missing_mach_profile_renders_the_missing_field_not_a_guess(self):
         recs = [{"kind": "fleet", "machine": "newdevice", "role": "bench-device", "mode": "unreachable", "media": "unknown",
-                 "reprovision": "missing NODE_PROFILE in machines/newdevice.conf -- nothing to compose a recipe from"},
+                 "reprovision": "missing profile in machines/newdevice.conf -- nothing to compose a recipe from"},
                 {"kind": "exit", "code": 0}]
         out = render(recs, "text").stdout
-        self.assertIn("missing NODE_PROFILE in machines/newdevice.conf", out)
+        self.assertIn("missing profile in machines/newdevice.conf", out)
         self.assertNotIn("wk sysimage build newdevice", out)
 
     def test_the_by_role_sample_command_differs_per_role(self):
@@ -136,7 +140,7 @@ class TestReprovisionLine(unittest.TestCase):
 class TestFleetDeviceRecord(unittest.TestCase):
     """The probe's fields become one record; a probe that did not answer in its ceiling says so by name."""
 
-    CONF = {"NODE_ROLE": "bench-device", "NODE_DRIVER": "rpi5-usb", "NODE_NOTE": "a board"}
+    CONF = {"role": "bench-device", "driver": "rpi5-usb", "note": "a board"}
 
     def test_a_probe_past_its_ceiling_is_named_with_the_ceiling(self):
         rec = status.fleet_record("rpi4", self.CONF, None, 0, reach=lambda m: ("rpi4 not a node", ""))
@@ -215,12 +219,14 @@ class TestBridgeRecord(unittest.TestCase):
     (no non-interactive root), told apart here from one that ran and found something wrong."""
 
     CONF = dict({k: v("phone") if callable(v) else v for k, v in fleet.BRIDGE_DEFAULTS.items()},
-                BR_DEVICE="pinephone", BR_SEGMENT="10.99.1.0/24", BR_NOTE="a phone")
+                device="pinephone", segment="10.99.1.0/24", note="a phone")
     HEALTHY = {
         "facts": "yes", "wifi_iface": "wlan0", "wifi_addr": "192.168.1.5/24", "wifi_power_save": "off",
         "seg_iface_exists": "yes", "seg_carrier": "1", "seg_addr": "10.99.1.1/24", "seg_usb_speed": "480",
         "leases_file_nonempty": "yes", "leases_ping": "",
-        "ts_backend": "Running", "ts_online": "true", "ts_tags": '["tag:bridge"]', "ts_routes": '["10.99.1.0/24"]',
+        # The one blob wk-bridge-healthcheck hands judge(): raw `tailscale status --json`.
+        "ts_status_json": json.dumps({"BackendState": "Running",
+                                       "Self": {"Online": True, "Tags": ["tag:bridge"], "PrimaryRoutes": ["10.99.1.0/24"]}}),
         "svc_wk-bridge-dhcp": "running", "svc_wk-bridge-nftables": "running", "svc_wk-bridge-netwatch": "running",
         "svc_wk-bridge-usb-host": "running", "svc_sshd": "running", "svc_chrony": "running", "svc_nm": "running",
         "svc_tailscale": "running", "nft_table": "yes", "ip_forward": "1",
@@ -249,7 +255,9 @@ class TestBridgeRecord(unittest.TestCase):
     def test_a_health_check_that_needs_root_is_told_apart_from_an_unhealthy_one(self):
         rec = self._rec({"reachable": "yes", "role": "yes", "sum": "999"})
         self.assertEqual((rec["state"], rec["role_insync"]), ("role installed", False))
-        rec = self._rec(dict(self.HEALTHY, reachable="yes", role="yes", sum="123", ts_routes="none"))
+        rec = self._rec(dict(self.HEALTHY, reachable="yes", role="yes", sum="123",
+                              ts_status_json=json.dumps({"BackendState": "Running",
+                                                          "Self": {"Online": True, "Tags": ["tag:bridge"], "PrimaryRoutes": []}})))
         self.assertEqual(rec["state"], "unhealthy")
         self.assertIn("no approved subnet route", rec["health"])
 
@@ -274,7 +282,7 @@ class TestSelfRoleAndMode(unittest.TestCase):
 
     def test_a_declared_role_is_read_from_its_own_conf(self):
         (self.tmp / "machines").mkdir(parents=True)
-        (self.tmp / "machines" / "here.conf").write_text("KIND=board\nNODE_ROLE=bench-device\n")
+        (self.tmp / "machines" / "here.conf").write_text("kind=board\nrole=bench-device\n")
         self.assertEqual(status.self_role(str(self.tmp), "here"), "bench-device")
 
     def test_no_marker_file_reads_host(self):
@@ -320,7 +328,7 @@ class TestWalkLeadsWithSelf(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="wk-test-fleetself-"))
         try:
             (tmp / "boot" / "machines").mkdir(parents=True)
-            (tmp / "boot" / "machines" / "here.conf").write_text("NODE_DRIVER=x\nNODE_NOTE=this machine\n")
+            (tmp / "boot" / "machines" / "here.conf").write_text("driver=x\nnote=this machine\n")
             (tmp / "boot" / "machines.sh").write_text("")
             env = {"WK_ROW_LABEL": "here"}
             w = status.Walk(str(tmp), env=env, fleet=True, devices=True)
@@ -400,7 +408,7 @@ class TestWaitAndTimeout(unittest.TestCase):
         return rc, polls, said, clock
 
     def test_two_is_the_only_state_worth_waiting_through(self):
-        for answers, want in (([0], 0), ([1], 1), ([3], 3), ([4], 4), ([2, 2, 0], 0), ([2, 3], 3)):
+        for answers, want in (([0], 0), ([1], 1), ([3], 3), ([4], 4), ([2, 2, 0, 0], 0), ([2, 3, 3], 3)):
             rc, polls, said, _ = self._wait(answers, 0)
             self.assertEqual(rc, want, answers)
             self.assertEqual(len(polls), len(answers))
@@ -414,8 +422,55 @@ class TestWaitAndTimeout(unittest.TestCase):
         self.assertIn("still busy after 11s -- the work continues; this only stopped waiting", said[-1])
 
     def test_the_interval_is_the_sleep_between_polls(self):
-        _, _, _, clock = self._wait([2, 2, 0], 0, interval=7)
-        self.assertEqual(clock.slept, [7, 7])
+        _, _, _, clock = self._wait([2, 2, 0, 0], 0, interval=7)
+        self.assertEqual(clock.slept, [7, 7, 7])
+
+    def test_one_poll_that_could_not_ask_does_not_end_the_wait(self):
+        """A healthy detached build: one walk whose probe timed out read 4, the wait took it for a verdict, and the
+        walk after it said busy -- exit 2 after 181s of a 3300s wait. After busy, a verdict holds only when the
+        next poll repeats it."""
+        rc, polls, said, _ = self._wait([2, 2, 4, 2, 2, 0, 0], timeout=3300)
+        self.assertEqual((0, 7), (rc, len(polls)))
+        self.assertFalse([s for s in said if "still busy" in s])
+
+    def test_a_verdict_that_persists_ends_the_wait(self):
+        rc, polls, _, _ = self._wait([2, 4, 4], timeout=3300)
+        self.assertEqual((4, 3), (rc, len(polls)))
+
+
+def load_status_cmd():
+    import importlib.machinery
+    import importlib.util
+    path = str(REPO / "cmd" / "status")
+    loader = importlib.machinery.SourceFileLoader("wk_cmd_status", path)
+    m = importlib.util.module_from_spec(importlib.util.spec_from_file_location("wk_cmd_status", path, loader=loader))
+    loader.exec_module(m)
+    return m
+
+
+class TestTheWaitDecidesTheExit(unittest.TestCase):
+    """The walk after a wait shows the state; one whose probe failed must not turn a confirmed idle into another code."""
+
+    def test_the_exit_is_the_waits_verdict_not_the_walk_after_it(self):
+        cmd = load_status_cmd()
+        walks = []
+
+        class FlakyWalk:
+            def __init__(self, *a, **kw):
+                walks.append(self)
+                self.worst = 4
+
+            def worst_only(self):
+                return self.worst
+
+            def records(self, markers=True):
+                return iter(())
+
+        with mock.patch.object(cmd, "Walk", FlakyWalk), mock.patch.object(cmd, "wait_until_idle", return_value=0), \
+                mock.patch.dict(os.environ, {"WK_NAME": "ws"}), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, cmd.main(["--wait", "--records"]))
+            self.assertEqual(4, cmd.main(["--records"]), "without --wait the walk decides")
+        self.assertEqual(2, len(walks))
 
 
 class TestToolsFact(unittest.TestCase):
@@ -459,24 +514,10 @@ class TestToolsFact(unittest.TestCase):
 class TestPushStatusAll(WkTest):
     """`wk push status --all` prints one line per machine, this one included."""
 
-    def _this_machine(self):
-        return bash(". lib/common.sh; wk_machine_name", timeout=30).stdout.strip()
-
-    def _configured_machines(self):
-        cp = bash("""
-            . lib/common.sh
-            . lib/store.sh
-            . lib/target.sh
-            for t in $(target_all 2>/dev/null); do
-                case "$t" in container|vm|local) continue ;; esac
-                echo "$t"
-            done
-            """, timeout=30)
-        return [l for l in cp.stdout.splitlines() if l.strip()]
-
     def test_one_line_per_machine_including_this_one(self):
-        here = self._this_machine()
-        expected = set(self._configured_machines()) | {here}
+        env = clean_env()
+        here = record.machine_name(env)
+        expected = set(targets.Registry(REPO, env=env).machines()) | {here}
         try:
             cp = self.run_wk("push", "status", "--all", timeout=180)
         except subprocess.TimeoutExpired:
@@ -489,7 +530,7 @@ class TestPushStatusAll(WkTest):
 
 
 class TaskTest(WkTest):
-    """Records written by lib/task.sh into a scratch store, read by the Python collector."""
+    """Records written by Records.begin into a scratch store, read by the collector."""
 
     def setUp(self):
         super().setUp()
@@ -497,10 +538,9 @@ class TaskTest(WkTest):
         self.answers = {}
         self.clock = FakeClock()
 
-    def sh(self, body):
-        cp = bash('. "%s/lib/common.sh"\n. "%s/lib/task.sh"\n%s' % (REPO, REPO, body), env={"WK_STORE": self.store})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.strip()
+    def begin(self, where, name, kill, log, *plan, kind="build", abort=None):
+        env = {"WK_STORE": self.store, **({"WK_ABORT_SECONDS": str(abort)} if abort else {})}
+        return Records(self.store, clock=self.clock, env=env).begin(kind, where, name, kill, log, list(plan))
 
     def records(self):
         return Records(self.store, clock=self.clock, ask_target=lambda n, pid, cap: self.answers.get(n),
@@ -516,8 +556,8 @@ class TestTasksOfOneWorkspace(TaskTest):
 
     def setUp(self):
         super().setUp()
-        self.sh('task_begin build here ws1 "wk build ws1 --kill" /nolog compile >/dev/null\n'
-                'task_begin test here ws2 "^C where it runs" /nolog jsc >/dev/null')
+        self.begin("here", "ws1", "wk build ws1 --kill", "/nolog", "compile")
+        self.begin("here", "ws2", "^C where it runs", "/nolog", "jsc", kind="test")
 
     def names(self, only=None):
         return sorted(r["name"] for r in self.reported(only)[0])
@@ -533,12 +573,12 @@ class TestTasksOfOneWorkspace(TaskTest):
         for word, reported in (("0", False), ("cancelled", False), ("stopped", False), ("refused", False),
                                ("3", True), ("stalled", True)):
             with self.subTest(word=word):
-                self.sh('task_begin build here ws1 "wk build ws1 --kill" /nolog compile >/dev/null\n'
-                        'task_end "$(task_find build ws1)" %s' % word)
+                self.begin("here", "ws1", "wk build ws1 --kill", "/nolog", "compile")
+                self.records().find("build", "ws1").end(word)
                 self.assertEqual(self.names("ws1"), ["ws1"] if reported else [])
 
     def test_a_task_whose_pid_is_in_a_workspace_is_asked_of_it_and_no_answer_reads_unanswered(self):
-        self.sh('d=$(task_begin build target ws3 "wk build ws3 --kill" /nolog compile)\ntask_pid "$d" 4242')
+        self.begin("target", "ws3", "wk build ws3 --kill", "/nolog", "compile").pid(4242)
         for answer, state, code in ((True, "running", 2), (False, "died", 4), (None, "unanswered", 4)):
             with self.subTest(answer=answer):
                 self.answers["ws3"] = answer
@@ -546,13 +586,15 @@ class TestTasksOfOneWorkspace(TaskTest):
                 self.assertEqual((recs[0]["state"], worst), (state, code))
 
     def test_a_task_is_reported_on_the_machine_its_pid_is_on(self):
-        self.sh('d=$(task_begin build target ws4 "wk build ws4 --kill" /nolog compile)\ntask_pid "$d" 4242 farbox')
+        self.begin("target", "ws4", "wk build ws4 --kill", "/nolog", "compile").pid(4242, "farbox")
         self.answers["ws4"] = True
         self.assertEqual(self.reported("ws4")[0][0]["machine"], "farbox")
 
     def test_the_record_carries_its_subject_plan_steps_and_kill(self):
-        self.sh('d=$(task_begin yocto here ws5 "wk sysimage build p --stop" /nolog layers fetch image)\n'
-                'task_pid "$d" %d\ntask_step "$d" 2\ntask_set "$d" subject "slot base at 6f7bb97"' % os.getpid())
+        t = self.begin("here", "ws5", "wk sysimage build p --stop", "/nolog", "layers", "fetch", "image", kind="yocto")
+        t.pid(os.getpid())
+        t.step(2)
+        t.set("subject", "slot base at 6f7bb97")
         rec = self.reported("ws5")[0][0]
         self.assertEqual((rec["task_kind"], rec["subject"], rec["kill"]), ("yocto", "slot base at 6f7bb97", "wk sysimage build p --stop"))
         self.assertEqual((rec["plan"], rec["steps"]), (["layers", "fetch", "image"], ["done", "running", "pending"]))
@@ -570,8 +612,10 @@ class TestTaskVerdictsBecomeExitCodes(TaskTest):
         log = self.tmp / "build.log"
         log.write_text("[9/4200] cc\n")
         os.utime(log, (self.clock.now() - (log_age or 0), self.clock.now() - (log_age or 0)))
-        self.sh('d=$(WK_ABORT_SECONDS=%d task_begin build here ws1 "wk build ws1 --kill" "%s" compile)\n'
-                'task_pid "$d" %s\n%s' % (abort, log, pid or os.getpid(), 'task_end "$d" %s' % end if end is not None else ""))
+        t = self.begin("here", "ws1", "wk build ws1 --kill", str(log), "compile", abort=abort)
+        t.pid(pid or os.getpid())
+        if end is not None:
+            t.end(end)
         recs, worst = self.reported("ws1")
         return recs[0], worst, "\n".join(n["text"] for n in recs[0].get("notes", []))
 
@@ -630,6 +674,21 @@ class TestHealthRecords(unittest.TestCase):
         self.assertTrue(int(rec["total_mb"]) > 0 and 0 <= int(rec["used_pct"]) <= 100)
         self.assertEqual(rec["notes"][0]["text"], "wk gc would reclaim 2 snapshot(s)")
         self.assertIsNone(status.disk_record(Store({"WK_STORE": "/nonexistent"}), "here", False, 0))
+
+    def test_a_disk_that_cannot_be_measured_says_so_rather_than_leaving_the_sizes_out(self):
+        with mock.patch("shutil.disk_usage", side_effect=PermissionError(13, "Permission denied")):
+            rec = status.disk_record(self.store, "here", False, 0)
+        self.assertNotIn("free_mb", rec)
+        self.assertIn("cannot measure the disk under %s: [Errno 13] Permission denied" % (self.tmp / "store"),
+                      [n["text"] for n in rec["notes"] if n["level"] == "warn"])
+
+    def test_a_bench_task_that_cannot_be_read_is_a_row_rather_than_left_out(self):
+        task = self.tmp / "store" / "bench" / "20260101T000000Z-t"
+        task.mkdir(parents=True)
+        (task / "task.json").write_text("{not json")
+        (rec,) = status.bench_records(self.store, "here", lambda pid: False)
+        self.assertEqual((rec["kind"], rec["task"], rec["state"]), ("bench", "20260101T000000Z-t", "broken"))
+        self.assertIn(str(task), rec["notes"][0]["text"])
 
     def test_the_push_row_counts_keys_and_never_reports_a_switch_position(self):
         held = self.tmp / "store" / "push-keys"
@@ -714,7 +773,7 @@ class TestTheWalkProbesAMachineOnce(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-walk-"))
         (self.tmp / "hosts").mkdir()
-        (self.tmp / "hosts" / "box.conf").write_text("KIND=build\nWK_REMOTE_HOST=box.example\nWK_REMOTE_ROOT=/home/u/wk\n")
+        (self.tmp / "hosts" / "box.conf").write_text("kind=build\nhost=box.example\nroot=/home/u/wk\n")
         self.env = {"HOME": str(self.tmp), "XDG_STATE_HOME": str(self.tmp / "state"), "WK_STORE": str(self.tmp / "store"),
                     "WK_MACHINES_DIR": str(self.tmp / "hosts"), "WK_TARGET": "box", "WK_IN_VM": "1",
                     "PATH": os.environ.get("PATH", "")}
@@ -859,7 +918,8 @@ class TestFleetIsOne(unittest.TestCase):
 
 class TestOwedStatusRules(unittest.TestCase):
     def test_leads_with_role_and_mode(self):
-        out = render([machine_rec("m", self=True), {"kind": "fleet", "machine": "m", "role": "workstation", "mode": "host mode", "media": ""}]).stdout
+        out = render([{"kind": "fleet", "machine": "m", "self": True, "role": "workstation", "mode": "host mode", "media": ""},
+                      machine_rec("m", self=True)]).stdout
         self.assertRegex(out.strip().splitlines()[0], r"workstation.*host mode")
 
     def test_armed_transition(self):
@@ -875,7 +935,7 @@ class TestOwedStatusRules(unittest.TestCase):
 
 
 class TestTheSelfLineIsSpacedOneWay(unittest.TestCase):
-    def test_the_stream_and_the_batch_lead_the_same_way(self):
+    def test_the_stream_leads_with_the_self_line_and_then_its_block(self):
         recs = [{"kind": "fleet", "machine": "here", "self": True, "role": "workstation", "mode": "host"},
                 {"kind": "machine", "name": "here", "self": True}, {"kind": "exit", "code": 0}]
         merger = statusview.Merger()
@@ -883,7 +943,9 @@ class TestTheSelfLineIsSpacedOneWay(unittest.TestCase):
             merger.feed(r)
         out = io.StringIO()
         statusview.render_text_stream(iter(recs), out, False)
-        self.assertEqual(out.getvalue().split("\n")[:3], statusview.render_text(merger.doc, False).split("\n")[:3])
+        lines = out.getvalue().split("\n")
+        self.assertEqual(lines[0], statusview.self_line(merger.doc, False))
+        self.assertEqual(lines[1:3], statusview.render_machine_block(merger.doc["machines"][0], False)[:2])
 
 
 if __name__ == "__main__":

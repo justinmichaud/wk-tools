@@ -9,13 +9,14 @@ Run: python3 -m unittest tests.test_ls_halves -v
 """
 import contextlib
 import io
+import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, temp_store
+from tests.support import REPO, fake_workspace, temp_store
 from tests.test_options import run_impl
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -34,7 +35,7 @@ class TestTheEmptyNoteIsDecidedOnce(unittest.TestCase):
             # podman is installed.
             binp = store["path"] / "bin"
             binp.mkdir(parents=True, exist_ok=True)
-            (binp / "podman").write_text("#!/bin/sh\nexit 0\n")
+            (binp / "podman").write_text("#!/bin/sh\n[ \"$1 $2\" = 'machine inspect' ] && echo '[{\"Name\": \"wk\", \"State\": \"stopped\"}]'\nexit 0\n")
             (binp / "podman").chmod(0o755)
             return run_impl("ls", *flags, env={
                 "WK_STORE": store["WK_STORE"],
@@ -91,6 +92,19 @@ class TestTheEmptyNoteIsDecidedOnce(unittest.TestCase):
         first, second = self._halves(["NAME", "a-workspace"])
         self.assertEqual(first, ["--more-follows"])
         self.assertEqual(second, ["--continued"])
+
+
+class TestInsideAWorkspace(unittest.TestCase):
+    """`unit ls.in_workspace_marks_not_applicable`: the host holds a workspace's base and its overlay layer, so from
+    inside, BASE and CHANGES say not applicable rather than unknown."""
+
+    def test_base_and_changes_are_not_applicable(self):
+        with fake_workspace() as ws:
+            table = run_impl("ls", env=ws.env()).stdout.splitlines()
+            doc = json.loads(run_impl("ls", "--json", env=ws.env(), split=True).stdout)
+        self.assertEqual(table[1].split(), ["selftest-ws", "local", "running", "n/a", "-", "native", "n/a"])
+        (row,) = doc["workspaces"]
+        self.assertEqual((row["base"], row["changes"]), ("n/a", "n/a"))
 
 
 if __name__ == "__main__":

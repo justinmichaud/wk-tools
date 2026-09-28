@@ -1,7 +1,7 @@
 """The headless marker: one formula, `${WK_STORE:-/var/lib/wk}/.headless`
 (lib/wk/resources.py), which a temp WK_STORE exercises directly and which
 degrades to the fixed path when WK_STORE is unset. host/linux/machine.sh reads
-it through lib/resources.sh's headless_marker.
+it through `wk_py wk.resources headless-marker`.
 """
 
 import sys
@@ -16,7 +16,7 @@ from wk.machine import Fake  # noqa: E402
 
 class HeadlessMarkerTest(unittest.TestCase):
     def _marker(self, env=None):
-        cp = bash(f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n. "{REPO}/lib/resources.sh"\nheadless_marker\n', env=env)
+        cp = bash(f'set -euo pipefail\n. "{REPO}/lib/common.sh"\nwk_py wk.resources --os linux headless-marker\n', env=env)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         return cp.stdout.strip()
 

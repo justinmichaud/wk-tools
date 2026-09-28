@@ -1,16 +1,14 @@
 """lib/wk/images.py: the profile loader, and every name derived from a profile --
-the spec, the image workspace, its slots and collections -- plus the bash shims
-lib/image.sh and image/profiles.sh keep for their unported callers.
+the spec, the image workspace, its slots and collections.
 
 Run: python3 -m unittest tests.test_images -v
 """
 import contextlib
 import io
-import re
 import sys
 import unittest
 
-from tests.support import REPO, WkTest, bash
+from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act  # noqa: E402
@@ -21,7 +19,6 @@ WS = "yocto-" + PROFILE
 BUILDROOT_PROFILE = "wpewebkit-2.38-buildroot-rpi3-32"
 BUILDROOT_WS = "buildroot-" + BUILDROOT_PROFILE
 STORE = {"WK_STORE": "/store", "WK_ROOT": str(REPO)}
-SHIM_FILES = (REPO / "lib" / "image.sh", REPO / "image" / "profiles.sh")
 
 
 class ScratchRoot(WkTest):
@@ -77,11 +74,15 @@ class TestTheLoader(ScratchRoot):
                 with self.assertRaises(images.ConfError):
                     images.load("p", self.env)
 
-    def test_the_shell_text_evals_back_to_the_same_values(self):
-        self.conf("p", 'FET_NOTE="the phone\'s eMMC"\nCFG_NEEDS="a\n  b"\n')
-        text = images.shell_text(images.load("p", self.env))
-        cp = bash(text + 'printf "%s|%s" "$FET_NOTE" "$CFG_NEEDS"')
-        self.assertEqual(cp.stdout, "the phone's eMMC|a\n  b")
+
+class TestABrokenProfileIsNoWorkspaceQuestion(ScratchRoot):
+    def test_a_conf_that_does_not_parse_is_refused_rather_than_read_as_building_on_the_host(self):
+        self.conf("p", "IMG_BUILDER=yocto\nIMG_NOPE=1\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(act.Refused):
+            images.image_ws("p", self.env)
+        self.assertIn("p.conf:2: IMG_NOPE is not a profile field", err.getvalue())
+        self.assertEqual(images.image_ws("nosuch", self.env), "")
 
 
 class TestTheListing(ScratchRoot):
@@ -218,30 +219,6 @@ class TestNames(unittest.TestCase):
                          % (WS, "a" * 12))
         self.assertEqual(images.build_subject(WS, "pgo-mix", "base", "", ""), "mixing slot base's collection in " + WS)
         self.assertEqual(images.build_subject(WS, "", "", "", ""), "build stage of " + WS)
-
-
-class TestTheShims(WkTest):
-    """Each bash function is one call of one verb, and every verb has a caller."""
-
-    def shims(self):
-        text = "\n".join(p.read_text() for p in SHIM_FILES)
-        return dict(re.findall(r"(?m)^(image_\w+)\(\)\s*\{.*?_wk_images ([a-z-]+)", text))
-
-    def test_every_shim_names_a_verb_and_every_verb_has_a_shim(self):
-        verbs = set(self.shims().values())
-        self.assertEqual(verbs - set(images.VERBS), set())
-        self.assertEqual(set(images.VERBS) - verbs, set())
-
-    def test_the_loader_shim_sets_the_fields_and_returns_or_exits_as_die_did(self):
-        lib = '. "%s/image/profiles.sh"\n' % REPO
-        cp = bash(lib + "image_profile_load %s && echo \"$IMG_BUILDER $IMG_WATCHDOG\"" % PROFILE)
-        self.assertEqual(cp.stdout.strip(), "yocto 300", cp.stderr)
-        cp = bash(lib + "image_profile_load nosuch || echo unknown")
-        self.assertEqual(cp.stdout.strip(), "unknown", cp.stderr)
-        cp = bash(lib + "image_profile_load rpi5-perf; echo reached")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertNotIn("reached", cp.stdout)
-        self.assertIn("webkit-2.52-yocto-rpi5-64", cp.stderr)
 
 
 if __name__ == "__main__":

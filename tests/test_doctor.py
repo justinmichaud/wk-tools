@@ -23,9 +23,9 @@ from tests.support import NO_REGISTRY, REPO, WkTest, clean_env, stub_path
 from tests.test_credcheck import FakeAnthropic, FakeLiteLLM, RECORD, login
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import doctor, fleet, shell  # noqa: E402
+from wk import doctor, fleet  # noqa: E402
 from wk.key.cli import Key  # noqa: E402
-from wk.machine import Fake, Local, Result  # noqa: E402
+from wk.machine import HAVE, Fake, Local, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 OK, MISS, UNK = doctor.OK, doctor.MISS, doctor.UNK
@@ -36,7 +36,11 @@ WANT = {v: subprocess.run(["git", "config", "--file", str(GITCONFIG), "--get", "
                           capture_output=True, text=True).stdout.strip() for v in ("name", "email")}
 assert WANT["name"] and WANT["email"], "dotfiles/gitconfig no longer declares [user]"
 
-INSPECT = ("podman", "machine", "inspect", "wk", "--format", "{{.State}}")
+INSPECT = ("podman", "machine", "inspect", "wk")
+
+
+def machine_in(state):
+    return json.dumps([{"Name": "wk", "State": state}])
 
 
 def boom(*a, **kw):
@@ -44,12 +48,10 @@ def boom(*a, **kw):
 
 
 def stub_shell(**over):
-    """Every question a Doctor asks the bash library, answered with nothing unless the test says otherwise."""
+    """Every question a Doctor asks outside Python (doctor.Bash), answered with nothing unless the test says otherwise."""
     base = dict(gh_authenticated=lambda root, env=None: False,
-                mirror_branches=lambda root, env=None: [],
                 priv_helpers=lambda root, env=None: [],
-                priv_answers=lambda root, path, env=None: False,
-                vm_base_findings=lambda root, env=None: "")
+                priv_answers=lambda root, path, env=None: False)
     base.update(over)
     return types.SimpleNamespace(**base)
 
@@ -83,7 +85,7 @@ def build_doctor(**over):
     d = tempfile.mkdtemp(prefix="wk-test-doctor-machines-")
     for n in ("farbox", "box", "old", "fresh"):
         with open(os.path.join(d, n + ".conf"), "w") as f:
-            f.write("KIND=build\nWK_TARGET_KIND=remote\n")
+            f.write("kind=build\ndriver=remote\n")
     return fake_doctor(False, env={"WK_MACHINES_DIR": d, "XDG_STATE_HOME": os.path.join(d, "state")}, mc=stub_mc(**over))
 
 
@@ -120,12 +122,11 @@ class TestHostToolsZed(unittest.TestCase):
 
     def test_zed_on_path_is_ok(self):
         fake = Fake()
-        fake.answer(["which", "zed"], out="/usr/local/bin/zed\n")
+        fake.answer(HAVE + ("zed",))
         self.assertEqual(self._zed_row(fake)[0], OK)
 
     def test_a_drag_installed_bundle_with_no_path_symlink_is_ok(self):
         fake = Fake()
-        fake.answer(["which", "zed"], rc=1)
         fake.answer(["test", "-x", "/Applications/Zed.app/Contents/MacOS/cli"], rc=0)
         self.assertEqual(self._zed_row(fake)[0], OK)
 
@@ -133,7 +134,6 @@ class TestHostToolsZed(unittest.TestCase):
         """The bundle folder existing is not enough: the same binary `cmd/zed` execs has to answer."""
         fake = Fake()
         fake.dirs.add("/Applications/Zed.app")
-        fake.answer(["which", "zed"], rc=1)
         fake.answer(["test", "-x", "/Applications/Zed.app/Contents/MacOS/cli"], rc=1)
         self.assertEqual(self._zed_row(fake)[0], MISS)
 
@@ -229,7 +229,7 @@ class TestProbeStoreGit(unittest.TestCase):
 
     def test_git_present_and_configured_is_reported(self):
         fake = Fake()
-        fake.answer(["which", "git"], 0, "/usr/bin/git\n")
+        fake.answer(HAVE + ("git",))
         for key, value in (("user.name", WANT["name"]), ("user.email", WANT["email"]), ("core.fsmonitor", "true"), ("feature.manyFiles", "true")):
             fake.answer(["git", "config", "--get", key], 0, value + "\n")
         out = self._probe(fake)
@@ -321,7 +321,7 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
 
     def test_a_stopped_machine_is_unknown_and_nothing_is_started(self):
         fake = Fake()
-        fake.answer(INSPECT, 0, "stopped\n")
+        fake.answer(INSPECT, 0, machine_in("stopped"))
         doc = fake_doctor(True, machine=fake, sh=stub_shell())
         rows = list(doc.workspaces_store()) + list(doc.machine_local())
         self.assertIn((UNK, "podman machine 'wk' is stopped", "wk start, then re-run wk doctor for the store checks"), rows)
@@ -337,7 +337,7 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
 
     def test_a_running_machine_is_asked_for_the_probe_and_its_git_identity(self):
         fake = Fake()
-        fake.answer(INSPECT, 0, "running\n")
+        fake.answer(INSPECT, 0, machine_in("running"))
         asked = []
 
         fake.react(("podman", "machine", "ssh", "wk", "--"), lambda a, f: asked.append(a[5]) or Result(0, FULL_STORE_BLOB))
@@ -348,7 +348,7 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
 
     def test_a_machine_whose_tooling_answers_nothing_is_unknown(self):
         fake = Fake()
-        fake.answer(INSPECT, 0, "running\n")
+        fake.answer(INSPECT, 0, machine_in("running"))
         rows = list(fake_doctor(True, machine=fake).workspaces_store())
         self.assertEqual((UNK, "store inside the VM", "/opt/wk-tools missing in the VM? run ./setup --stage sdk"), rows[-1])
 
@@ -540,7 +540,7 @@ class TestAMachineThatDoesNotAnswer(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d)
         for n in ("phone-a", "phone-b"):
             with open(os.path.join(d, n + ".conf"), "w") as f:
-                f.write("KIND=bridge\nBR_DEVICE=pinephone\nBR_SEGMENT=10.9.0.0/24\nBR_ROUTER=10.9.0.1\n")
+                f.write("kind=bridge\ndevice=pinephone\nsegment=10.9.0.0/24\nrouter=10.9.0.1\n")
         fake = Fake()
         fake.react(["ssh"], lambda argv, fk: Result(255, "", "No route to host") if "phone-a" in " ".join(argv)
                    else Result(0, "percent=87\nstatus=Charging\nlimit=80\ncurrent=80\n"))
@@ -566,7 +566,7 @@ class TestPrivilegedHelpers(unittest.TestCase):
     on the platform each applies to."""
 
     def setUp(self):
-        self.helpers = shell.priv_helpers(str(REPO), env=clean_env())
+        self.helpers = doctor.Bash.priv_helpers(str(REPO), env=clean_env())
 
     def test_the_table_names_all_three(self):
         self.assertEqual(["wk-quiesce-priv", "wk-card-priv", "wk-boot-priv"], [h[0] for h in self.helpers])
@@ -619,7 +619,7 @@ class ACachedCredentialIsNotAGrant(WkTest):
                                 'for a in "$@"; do [ "$a" = -l ] && { cat <<EOF\n'
                                 + listing + '\nEOF\nexit 0; }; done\n'
                                 'exit %d\n' % (0 if run_succeeds else 1)}) as binp:
-            return shell.priv_answers(str(REPO), self.HELPER, env=clean_env({"PATH": "%s:%s" % (binp, os.environ["PATH"])}))
+            return doctor.Bash.priv_answers(str(REPO), self.HELPER, env=clean_env({"PATH": "%s:%s" % (binp, os.environ["PATH"])}))
 
     def test_a_listing_without_the_path_is_no_grant_even_though_it_runs(self):
         listing = ("User justinmichaud may run the following commands on Tolken:\n"
@@ -634,7 +634,7 @@ class ACachedCredentialIsNotAGrant(WkTest):
         self.assertTrue(self._answers(listing))
 
     def test_a_blanket_all_is_not_a_grant(self):
-        """`(ALL) ALL` lets the helper run with a password, which is exactly what an unattended lane cannot do."""
+        """`(ALL) ALL` lets the helper run with a password, which is exactly what an unattended bench run cannot do."""
         self.assertFalse(self._answers("    (ALL) ALL"))
 
     def test_the_path_must_match_exactly(self):
@@ -657,13 +657,23 @@ class TestTheMachineOverlay(unittest.TestCase):
         self.assertTrue(any(r[1].startswith("~/.config/wk/machines (absent)") and r[2].startswith("backed-up") for r in rows), rows)
         self.assertEqual([], [r for r in rows if "bridges" in r[1]])
 
+    def test_tasks_kept_in_a_workspace_are_backed_up_beside_bench(self):
+        fake = Fake()
+        doc = fake_doctor(False, machine=fake)
+        root = doc.store.record_dir()
+        fake.dirs.update({root + "/ws", root + "/ws/w", root + "/ws/w/bench", root + "/ws/bare"})
+        rows = [" ".join(r[1:]) for r in doc.machine_local() if "benchmark runs" in " ".join(r[1:])]
+        self.assertEqual([r.split(" ")[0] for r in rows], [root + "/ws/w/bench", doc.store.bench_dir()])
+        self.assertIn("(backed-up)", rows[0])
+        self.assertIn("wk bench export <task> copies one out", rows[0])
+
     def test_a_leftover_bridges_dir_is_missing_with_the_mv(self):
         fake = Fake()
         old = fleet.Fleet(REPO, {"HOME": "/h"}).old_local_dir()
         fake.dirs.add(old)
         row = next(r for r in self.rows(fake) if old in r[1])
         self.assertEqual(MISS, row[0])
-        self.assertIn("mv '%s'/*.conf '/h/.config/wk/machines'/" % old, row[2])
+        self.assertIn("mv %s/*.conf /h/.config/wk/machines/" % old, row[2])
 
 
 if __name__ == "__main__":

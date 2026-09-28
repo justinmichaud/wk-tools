@@ -1,11 +1,13 @@
 """The envelope a target is sized from and each build's budget, read through a `Machine`."""
 
+import argparse
 import os
 import sys
 import time
 
 from wk import act
 from wk import record
+from wk.kv import kv
 from wk.store import Store
 
 RESERVE_CORES = 1
@@ -148,7 +150,7 @@ class Resources:
 
 
 class Budget:
-    """Each build's memory and jobs, one record per build under <state>/builds, the shape lib/resources.sh's build_record writes."""
+    """Each build's memory and jobs, one record per build under <state>/builds."""
 
     def __init__(self, machine, env=None, clock=None):
         self.machine = machine
@@ -180,13 +182,13 @@ class Budget:
         for n in names:
             path = os.path.join(self.dir(), n)
             try:
-                kv = dict(l.split("=", 1) for l in self.machine.read(path).splitlines() if "=" in l)
+                rec = kv(self.machine.read(path))
             except OSError:
                 continue
-            if kv.get("machine") != me:
+            if rec.get("machine") != me:
                 continue
-            if holder_alive(kv.get("holder", "")):
-                out.append((kv.get("label", ""), int(kv.get("jobs") or 0), int(kv.get("budget_mb") or 0)))
+            if holder_alive(rec.get("holder", "")):
+                out.append((rec.get("label", ""), int(rec.get("jobs") or 0), int(rec.get("budget_mb") or 0)))
             else:
                 self.machine.remove(path)
         return out
@@ -253,70 +255,37 @@ def parse_df(out):
     return (int(fields[3]) + 1048575) // 1048576 if len(fields) > 3 and fields[3].isdigit() else None
 
 
-def build_jobs(res, budget, running, polite=False):
-    """From the memory not already spoken for, since a link out of RAM hangs a machine; clamped by cores and load."""
-    max_jobs = res._setting("WK_MAX_JOBS", None)
-    return budget.jobs(res.cores(), res.avail_mem_mb(), res.mb_per_job(), res.load() if polite else None,
-                       max_jobs, running)
+def build_jobs(res, budget, running):
+    """From the memory not already spoken for, since a link out of RAM hangs a machine; clamped by cores."""
+    return budget.jobs(res.cores(), res.avail_mem_mb(), res.mb_per_job(), None, res._setting("WK_MAX_JOBS", None), running)
 
 
 def defaults():
     from wk.buildconf import DISK_GB
-    return "".join(': "${%s:=%s}"\n' % kv for kv in (
+    return "".join(': "${%s:=%s}"\n' % pair for pair in (
         ("WK_RESERVE_CORES", RESERVE_CORES), ("WK_RESERVE_MB", RESERVE_MB),
         ("WK_HEADLESS_RESERVE_CORES", HEADLESS_RESERVE_CORES), ("WK_HEADLESS_RESERVE_MB", HEADLESS_RESERVE_MB),
         ("WK_MB_PER_JOB", MB_PER_JOB), ("WK_BUILD_DISK_GB", DISK_GB)))
 
 
+READINGS = {"host-mem-mb": "host_mem_mb", "envelope-cores": "envelope_cores", "envelope-mem-mb": "envelope_mem_mb",
+            "describe-cores": "describe_cores", "headless-marker": "headless_marker", "defaults": None}
+
+
 def main(argv, env=None):
-    """The envelope and the budget for a bash caller (lib/resources.sh): `python3 -m wk.resources <verb> ...`."""
-    from wk.build import holder_alive
-    from wk.clock import Clock
     from wk.machine import here
-    from wk.targets import Registry
-    env = os.environ if env is None else env
-    opts = {}
-    while argv and argv[0] == "--os":
-        opts[argv[0][2:]], argv = argv[1], argv[2:]
-    verb, a = argv[0], argv[1:]
-    machine = here()
-    res = Resources(machine, env, opts.get("os"))
-    budget = Budget(machine, env, Clock())
-    store = env.get("WK_STORE") or env.get("HOME", "")
-
-    def running():
-        root = env.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        return budget.running(holder_alive(Registry(root, env, machine)))
-
-    def disk(what, need):
-        budget.disk_admit(what, int(need or env.get("WK_BUILD_DISK_GB") or 0), budget.free_gb(store),
-                          "%s's filesystem" % store)
-
-    readings = {"host-cores": res.host_cores, "host-mem-mb": res.host_mem_mb, "host-load": res.host_load,
-                "envelope-cores": res.envelope_cores, "envelope-mem-mb": res.envelope_mem_mb,
-                "describe-cores": res.describe_cores, "headless-marker": res.headless_marker}
-    try:
-        if verb in readings:
-            sys.stdout.write("%s" % readings[verb]())
-            if verb not in ("describe-cores", "headless-marker"):
-                sys.stdout.write("\n")
-        elif verb == "defaults":
-            sys.stdout.write(defaults())
-        elif verb == "build-record":
-            budget.record(*a[:4])
-        elif verb == "disk-admit":
-            disk(a[0], a[1] if len(a) > 1 else "")
-        elif verb == "build-admit":
-            disk(a[0], a[2] if len(a) > 2 else "")
-            budget.admit(a[0], int(a[1]), running())
-        elif verb == "build-jobs":
-            sys.stdout.write("%d\n" % build_jobs(res, budget, running(), polite=bool(a and a[0])))
-        else:
-            act.die("wk.resources: no verb '%s'" % verb, 2)
-    except act.Refused as e:
-        return e.status
+    p = argparse.ArgumentParser(prog="python3 -m wk.resources")
+    p.add_argument("--os", choices=("linux", "macos"))
+    p.add_argument("reading", choices=sorted(READINGS))
+    a = p.parse_args(argv)
+    res = Resources(here(), os.environ if env is None else env, a.os)
+    out = str(getattr(res, READINGS[a.reading])() if READINGS[a.reading] else defaults())
+    sys.stdout.write(out if a.reading in ("describe-cores", "headless-marker", "defaults") else out + "\n")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except act.Refused as e:
+        sys.exit(e.status)

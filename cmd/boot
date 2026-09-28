@@ -79,8 +79,8 @@ def main(argv):
         boot = cli.Boot(ROOT, conf, cli.driver_for(ROOT, conf))
         boot.gate()
         if action == "boot-order":
-            if conf["NODE_DRIVER"] not in pi.DRIVERS:
-                die("%s is not a Raspberry Pi (its driver is %s), so it has no EEPROM boot order" % (name, conf["NODE_DRIVER"]))
+            if conf["driver"] not in pi.DRIVERS:
+                die("%s is not a Raspberry Pi (its driver is %s), so it has no EEPROM boot order" % (name, conf["driver"]))
             rc = eeprom.BootOrder(boot.d).run(args.value("--boot-order"))
         else:
             rc = boot.arm(args.value("--system") or "") if action == "arm" else getattr(boot, action)()

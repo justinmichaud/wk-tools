@@ -5,11 +5,14 @@ _claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 ensure_dir "$_claude_dir" 0755
 
 if [ -n "${WK_CLAUDE_REMOTE:-}" ]; then   # a remote host's settings.json is settings-host.json with Bash(wk *) merged in, `wk` being the one thing a shell there is for
-    have jq || die "jq is required to merge Bash(wk *) into a remote host's settings.json.
-    Install it (./setup --stage tools installs it from host/linux/apt.txt on
-    Linux; on macOS: brew install jq or the signed package) and re-run."
-    jq '.permissions.allow += ["Bash(wk *)"] | .permissions.allow |= unique' \
-        "$WK_ROOT/claude/settings-host.json" | write_file "$_claude_dir/settings.json" 0644
+    python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+allow = set(doc.setdefault("permissions", {}).setdefault("allow", []))
+allow.add("Bash(wk *)")
+doc["permissions"]["allow"] = sorted(allow)
+print(json.dumps(doc, indent=2))
+' "$WK_ROOT/claude/settings-host.json" | write_file "$_claude_dir/settings.json" 0644
 else
     link_config "$WK_ROOT/claude/settings-host.json" "$_claude_dir/settings.json"
 fi
@@ -26,7 +29,5 @@ for _h in "$WK_ROOT"/claude/hooks/*.sh; do   # a restrictive umask or a filesyst
         changed "hook +x $(basename "$_h")"
     fi
 done
-
-have jq || warn "jq is not installed; the WebKit skill-reminder hook will not fire"   # it parses its JSON payload with jq
 
 unset _claude_dir _h

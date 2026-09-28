@@ -2,7 +2,6 @@
 
 import os
 import shlex
-import sys
 
 from wk import act, fleet
 
@@ -180,7 +179,7 @@ class Config:
         return ("__XPC_" if self.xcode() else "") + "WEBKIT_PAUSE_WEB_PROCESS_ON_LAUNCH=1"
 
     def mb_per_job(self):
-        return 3072 if self.xcode() else 1536
+        return 1536 if self.jsc_only and not self.xcode() else 3072
 
     def cmake_summary(self):
         return self.cmake or "the flags it sets"
@@ -215,13 +214,12 @@ def resolve(name, os_name, kind=None, env=None):
 
 
 def libcxx(env):
-    """Opt-in by a machine's conf: the wkdev SDK image carries no libc++."""
     v = env.get("WK_TARGET_LIBCXX", "")
     if v in ("0", ""):
         return False
     if v == "1":
         return True
-    act.die("WK_TARGET_LIBCXX='%s' in %s\n    is neither 1 nor 0. It says whether that machine has libc++:\n"
+    act.die("libcxx='%s' in %s\n    is neither 1 nor 0. It says whether that machine has libc++:\n"
             "    1 to build with -stdlib=libc++, 0 (or unset) to leave it out."
             % (v, fleet.Fleet(env.get("WK_ROOT", ""), env).path(env.get("WK_TARGET") or "<target>")))
 
@@ -280,31 +278,3 @@ def build_env(cfg, src, jobs, nice, arch, ccache_dir, env, extra_cmake="", extra
         if env.get(v):
             out.append(v + "=1")
     return out + [e for e in extra_env if e]
-
-
-def shell_text(cfg):
-    fields = {"CFG_NAME": cfg.name, "CFG_OS": cfg.os, "CFG_KIND": cfg.kind, "CFG_PORT": cfg.port, "CFG_TYPE": cfg.type,
-              "CFG_ARGS": cfg.args, "CFG_CMAKE": cfg.cmake, "CFG_VARIANT": cfg.variant, "CFG_PGO": "1" if cfg.pgo else "",
-              "CFG_BUILDSYS": cfg.buildsys, "CFG_SCRIPT": cfg.script, "CFG_JSC_ONLY": "1" if cfg.jsc_only else "",
-              "CFG_CC": cfg.cc, "CFG_CXX": cfg.cxx, "CFG_BUILD_SUBDIR": cfg.build_subdir(),
-              "CFG_JSC_REL": cfg.jsc_path("")[1:], "CFG_RUN_VAR": cfg.run_var(), "CFG_RUN_REL": cfg.run_dir("")[1:],
-              "CFG_MB_PER_JOB": str(cfg.mb_per_job())}
-    return "".join("%s=%s\n" % (k, shlex.quote(v)) for k, v in fields.items())
-
-
-def main(argv):
-    if len(argv) < 2 or argv[0] != "shell":
-        sys.stderr.write("usage: python3 -m wk.buildconf shell <name> <os> [kind]\n")
-        return 2
-    try:
-        cfg = resolve(argv[1], argv[2] if len(argv) > 2 else "", argv[3] if len(argv) > 3 else None)
-    except LookupError:
-        return 3
-    except act.Refused as e:
-        return e.status
-    sys.stdout.write(shell_text(cfg))
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))

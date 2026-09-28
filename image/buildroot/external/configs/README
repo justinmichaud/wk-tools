@@ -5,7 +5,8 @@ are declared externals-first).
 
 raspberrypi3_wpe_2_38_cog_defconfig is the fork's, plus what every fleet bench
 system needs and the fork's cog images do not have (the rpi4 defconfig below
-carries the same four):
+carries the first three; its kernel is pinned, not built here, so the fourth
+does not apply -- see below):
 
   BR2_PACKAGE_WPA_SUPPLICANT*               the fork installs the Pi 3's WiFi
                                             firmware and no wpa_supplicant; the
@@ -36,7 +37,9 @@ the changes below. Each board change is taken from raspberrypi4_wpe_defconfig
 rather than invented; the last two are what this repository needs of any image.
 
   BR2_cortex_a53 -> BR2_cortex_a72          the SoC
-  DTS bcm2710-rpi-3-b... -> bcm2711-rpi-4-b the board
+  no BR2_LINUX_KERNEL*                      the board's kernel is pinned
+                                            (BR_KERNEL_DEB_URL), not built here;
+                                            see "The kernel is not built" above
   post-build.sh, post-image.sh              board/raspberrypi3 -> board/raspberrypi4
   post-script args                          the rpi3 set carries --rpi-wifi and
                                             --overclock-pi3, which name the wrong
@@ -73,22 +76,19 @@ a board run starts (the same one the yocto images use). wpebackend-rdk is
 explicitly off: one backend per image, and the one that cannot work here
 would otherwise still be the one libwpe dlopens as default.
 
-The kernel *tree* is not changed: the release-pinned rpi-5.15.y, which is what
-keeps this a 2.38 configuration rather than a different distribution wearing
-the release's name. The kernel *config* is: the fork's
-board/raspberrypi/rpi34-linux-5.15.config is named for the rpi3 and the rpi4
-but is a Pi 2/3 config in truth -- measured on an rpi4 (rev 1.5) over the
-tryboot lane 2026-08-31, it hangs before init, and it lacks the 2711's SD
-controller (MMC_SDHCI_IPROC), PCIe root (PCIE_BRCMSTB), XHCI, LPAE and
-HIGHMEM, so it could mount no root there even if it ran. The rpi4 defconfig
-uses the pinned tree's own in-tree bcm2711 defconfig instead (what RPi OS
-ships as kernel7l), with the same fleet fragment on top, compressed gzip:
-the LZ4 zImage of this same tree and config hangs the board before the
-console is up, while RPi OS's gzip kernel7l build of the same config
-(5.15.84) boots it in 90 s over the same tryboot staging -- measured
-2026-08-31, and compression is the one variable between the two.
+The kernel is not built here at all: the fork's rpi34-linux-5.15.config is
+named for the rpi3 and the rpi4 but is a Pi 2/3 config in truth -- measured on
+an rpi4 (rev 1.5) over the tryboot path 2026-08-31, it hangs before init, and
+it lacks the 2711's SD controller (MMC_SDHCI_IPROC), PCIe root (PCIE_BRCMSTB),
+XHCI, LPAE and HIGHMEM, so it could mount no root there even if it ran, and
+its LZ4 zImage hangs the board before the console is up even where the config
+is right. RPi OS's own gzip kernel7l build (5.15.84) boots it in 90 s over the
+same tryboot staging -- measured 2026-08-31 -- so BR_KERNEL_DEB_URL pins that
+package instead (image/configs/wpewebkit-2.38-buildroot-rpi4-32.conf) and the
+defconfig sets no BR2_LINUX_KERNEL: buildroot_target.py installs the pinned
+kernel's own zImage and device tree ahead of the board's post-image script.
 
-TODO: **a full bench run on this image is unmeasured.** The tryboot lane, the
+TODO: **a full bench run on this image is unmeasured.** The tryboot path, the
 32-bit kernel path (RPi OS's gzip build) and the compat of the userland with
 this board are proven; this image's own gzip kernel and the weston/mesa
 session are built to the measured constraints above but have not yet drawn a

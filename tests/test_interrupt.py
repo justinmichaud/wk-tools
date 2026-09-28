@@ -1,9 +1,10 @@
-"""INT/TERM handling: `on_interrupt`/`wk_sleep` (lib/common.sh) and the sites
-built on them (lib/watchdog.sh's `run_watched`). Each docstring is the phrase of the behaviour it checks.
+"""INT/TERM/HUP handling: lib/wk/job.py's `Signals` and `watch`, and the
+`kill_tree` walk both the stall path and the interrupt path end a job with.
+Each docstring is the phrase of the behaviour it checks.
 
-Every test here sends the signal to the bash process's own pid, not its
-process group -- exactly what a supervisor tracking one pid does (an agent's
-own tool cancellation, or `kill -INT <pid>` below), and the case default
+Every test here sends the signal to the driver's own pid, not its process
+group -- exactly what a supervisor tracking one pid does (an agent's own
+tool cancellation, or `kill -INT <pid>`), and the case default
 process-group delivery from a real terminal does not exercise.
 
 Run: python3 -m unittest tests.test_interrupt -v
@@ -20,164 +21,22 @@ from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import job  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from wk.machine import Fake, Local  # noqa: E402
 
-PRELUDE = f'set -euo pipefail\ncd "{REPO}"\n. lib/common.sh\n'
-
-
-def _env():
-    env = dict(os.environ)
-    env["WK_ROOT"] = str(REPO)
-    return env
-
-
-def _kill_group_and_drain(proc, grace=5):
-    """Kill the process group and read what is left, without waiting forever.
-
-    The group, not the process: a grandchild holding the stdout pipe is
-    exactly why the read blocked. A second timeout still gives up rather than
-    hanging -- a test that cannot clean up must fail, not stall the suite.
-    """
+# The driver as lib/wk/build.py runs a watched job: under Signals, an Interrupted converges and exits by its signal.
+DRIVER = '''
+import sys
+sys.path.insert(0, %(lib)r)
+from wk import job
+from wk.clock import Clock
+from wk.machine import Local
+with job.Signals():
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        proc.kill()
-    try:
-        out, _ = proc.communicate(timeout=grace)
-    except subprocess.TimeoutExpired:
-        proc.stdout.close()
-        out = "(output unreadable: the pipe was still held open after the group was killed)"
-    return out
-
-
-def _run_and_interrupt(script, sig=signal.SIGINT, delay=1.0, timeout=10, ready_file=None):
-    """Start `bash -c script`, wait until it is ready to be interrupted, signal
-    the bash pid alone, and return (returncode, elapsed_seconds, stdout+stderr).
-
-    "Ready" is <ready_file> appearing (polled, up to <timeout>s) when given --
-    the script touches it right before entering the loop under test, which is
-    what makes this robust under a loaded machine where a fixed sleep is not
-    long enough for bash to even finish sourcing lib/common.sh yet. Otherwise
-    a plain <delay>s sleep, matching "send SIGINT after ~1s".
-    """
-    # Its own session, so cleanup can kill the whole group. The signal below
-    # still goes to the bash pid alone -- that is the behaviour under test --
-    # but a script that spawns a grandchild (`wk logs` leaves a `tail -f`)
-    # leaves it holding the stdout pipe when bash exits, and communicate()
-    # then waits for an EOF that never comes. `wk selftest` hung there for
-    # 2h52m with a defunct bash and an orphaned tail (2026-09-05).
-    proc = subprocess.Popen(
-        ["bash", "-c", script],
-        cwd=str(REPO),
-        env=_env(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
-    )
-    if ready_file:
-        deadline = time.monotonic() + timeout
-        while not os.path.exists(ready_file):
-            if proc.poll() is not None:
-                out = proc.stdout.read()
-                raise AssertionError(f"process exited ({proc.returncode}) before becoming ready:\n{out}")
-            if time.monotonic() > deadline:
-                proc.kill()
-                raise AssertionError("never became ready (ready_file never appeared)")
-            time.sleep(0.02)
-    else:
-        time.sleep(delay)
-    sent_at = time.monotonic()
-    proc.send_signal(sig)
-    try:
-        out, _ = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        out = _kill_group_and_drain(proc)
-        raise AssertionError(f"did not exit within {timeout}s of the signal; output so far:\n{out}")
-    return proc.returncode, time.monotonic() - sent_at, out
-
-
-class TestRunWatchedInterrupt(unittest.TestCase):
-    def test_sigint_during_run_watched_kills_the_watched_child(self):
-        """SIGINT during `run_watched` kills the child it is watching, not just the watcher"""
-        with tempfile.TemporaryDirectory(prefix="wk-interrupt-test-") as tmp:
-            log = os.path.join(tmp, "build.log")
-            pidfile = os.path.join(tmp, "child.pid")
-
-            script = PRELUDE + f"""
-. lib/watchdog.sh
-WK_POLL_SECONDS=30
-run_watched {log!r} -- bash -c 'echo $$ > {pidfile!r}; exec sleep 1000'
-"""
-            # The watched child writing its own pidfile is close enough to
-            # "run_watched has registered its cleanup and entered the poll
-            # loop" -- both happen within a few bash instructions of the
-            # fork, well before a slow machine could plausibly take 1.5s.
-            rc, elapsed, out = _run_and_interrupt(script, ready_file=pidfile)
-
-            self.assertEqual(rc, 130, f"exit code was {rc}, not 130 (SIGINT); output:\n{out}")
-            self.assertLess(elapsed, 8, f"took {elapsed:.1f}s to exit after SIGINT")
-            self.assertTrue(os.path.exists(pidfile), f"the watched child never started; output:\n{out}")
-            with open(pidfile) as f:
-                child_pid = int(f.read().strip())
-
-        # A moment for the TERM/KILL in run_watched's cleanup to land -- fine
-        # to check after the `with` exits, since this reads the process
-        # table, not the temp dir it just deleted.
-        for _ in range(30):
-            if not _pid_alive(child_pid):
-                break
-            time.sleep(0.2)
-        self.assertFalse(_pid_alive(child_pid), "the watched child (sleep 1000) is still running")
-
-
-    def test_sighup_during_run_watched_runs_the_cancel_hook_and_exits_129(self):
-        """SIGHUP -- what a supervisor with no tty sends -- runs the cancel hook and exits 129"""
-        with tempfile.TemporaryDirectory(prefix="wk-interrupt-test-") as tmp:
-            log = os.path.join(tmp, "build.log")
-            pidfile = os.path.join(tmp, "child.pid")
-            marker = os.path.join(tmp, "cancelled")
-
-            # The marker stands in for what cmd/build's hook does with the
-            # signal: end the task record and kill the far-side build.
-            script = PRELUDE + f"""
-. lib/watchdog.sh
-WK_POLL_SECONDS=30
-cancel_the_far_side() {{ : > {marker!r}; }}
-on_interrupt cancel_the_far_side
-run_watched {log!r} -- bash -c 'echo $$ > {pidfile!r}; exec sleep 1000'
-"""
-            rc, elapsed, out = _run_and_interrupt(script, sig=signal.SIGHUP,
-                                                  ready_file=pidfile)
-
-            self.assertEqual(rc, 129, f"exit code was {rc}, not 129 (SIGHUP); output:\n{out}")
-            self.assertLess(elapsed, 8, f"took {elapsed:.1f}s to exit after SIGHUP")
-            self.assertTrue(os.path.exists(marker),
-                            f"the cancel hook did not run on HUP; output:\n{out}")
-            with open(pidfile) as f:
-                child_pid = int(f.read().strip())
-
-        for _ in range(30):
-            if not _pid_alive(child_pid):
-                break
-            time.sleep(0.2)
-        self.assertFalse(_pid_alive(child_pid), "the watched child (sleep 1000) is still running")
-
-
-class TestWkSleepInterruptible(unittest.TestCase):
-    def test_wk_sleep_is_interrupted_within_its_one_second_chunk(self):
-        """`wk_sleep` notices INT within its 1s chunk, not after the full duration"""
-        with tempfile.TemporaryDirectory(prefix="wk-interrupt-test-") as tmp:
-            ready = os.path.join(tmp, "ready")
-            script = PRELUDE + f"""
-noop() {{ :; }}
-on_interrupt noop
-: > {ready!r}
-wk_sleep 30
-"""
-            rc, elapsed, out = _run_and_interrupt(script, timeout=8, ready_file=ready)
-        self.assertEqual(rc, 130, f"exit code was {rc}, not 130 (SIGINT); output:\n{out}")
-        self.assertLess(elapsed, 3, f"took {elapsed:.1f}s to notice SIGINT during a 30s wk_sleep")
+        job.watch(["sh", "-c", "echo $$ > %(pidfile)s; exec sleep 1000"], %(log)r, Local(), Clock(), {"WK_POLL_SECONDS": "600"})
+    except job.Interrupted as e:
+        open(%(marker)r, "w").close()
+        sys.exit(job.EXIT_OF[e.signum])
+'''
 
 
 def _pid_alive(pid):
@@ -188,24 +47,74 @@ def _pid_alive(pid):
     return True
 
 
+def _wait_gone(pid):
+    """Returns once `pid` is gone: one that outlives its kill is stopped by the runner's budget."""
+    while _pid_alive(pid):
+        time.sleep(0.05)
 
-KILL_TREE_SCRIPT = '\nset -u\n. "%(repo)s/lib/common.sh" >/dev/null 2>&1\n. "%(repo)s/lib/watchdog.sh"\nmarker=$(mktemp)\nsh -c \'sleep 300 & echo $! > \'"$marker"\'; sleep 300\' &\njob=$!\nsleep 1\nkid=$(cat "$marker")\nwatched_kill "$job" TERM\nsleep 1\nkill -0 "$kid" 2>/dev/null && echo "CHILD SURVIVED" || echo "child reaped"\nkill -0 "$job" 2>/dev/null && echo "job survived" || echo "job reaped"\nrm -f "$marker"\n'
+
+def _interrupt_driver(tmp, sig):
+    """Run DRIVER until its watched child has written its pid, signal the driver alone; (rc, output, child pid, marker).
+    The watch polls every 600s, so a signal that did not cut the poll short outlives the runner's budget."""
+    pidfile, marker = os.path.join(tmp, "child.pid"), os.path.join(tmp, "cancelled")
+    script = DRIVER % {"lib": str(REPO / "lib"), "pidfile": pidfile, "log": os.path.join(tmp, "build.log"), "marker": marker}
+    # Its own session, so cleanup can kill the whole group; the signal still goes to the driver pid alone.
+    proc = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, start_new_session=True)
+    try:
+        while not (os.path.exists(pidfile) and open(pidfile).read().strip()):
+            if proc.poll() is not None:
+                raise AssertionError("the driver exited (%d) before its child started:\n%s" % (proc.returncode, proc.stdout.read()))
+            time.sleep(0.02)
+        child = int(open(pidfile).read())
+        proc.send_signal(sig)
+        out, _ = proc.communicate()
+        return proc.returncode, out, child, os.path.exists(marker)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+
+
+class TestWatchInterrupt(unittest.TestCase):
+    def test_sigint_during_watch_kills_the_watched_child(self):
+        """SIGINT during `watch` kills the child it is watching, not just the watcher, and exits 130"""
+        with tempfile.TemporaryDirectory(prefix="wk-interrupt-test-") as tmp:
+            rc, out, child, _ = _interrupt_driver(tmp, signal.SIGINT)
+        self.assertEqual(rc, 130, out)
+        _wait_gone(child)
+
+    def test_sighup_during_watch_runs_the_cancel_path_and_exits_129(self):
+        """SIGHUP -- what a supervisor with no tty sends -- arrives as Interrupted, runs the cancel path and exits 129"""
+        with tempfile.TemporaryDirectory(prefix="wk-interrupt-test-") as tmp:
+            rc, out, child, cancelled = _interrupt_driver(tmp, signal.SIGHUP)
+        self.assertEqual(rc, 129, out)
+        self.assertTrue(cancelled, "the cancel path did not run on HUP:\n" + out)
+        _wait_gone(child)
 
 
 class TestKillingAJobKillsWhatItStarted(unittest.TestCase):
-    """run_watched killed only the job's own pid, so a child outlived it: a
-    run-benchmark http server was still holding a port eleven days after its
-    driver died (measured 2026-09-10). The stall path and the interrupt path
-    both walk the descendants through lib/wk/job.py's kill_tree."""
+    """The stall path and the interrupt path both walk the descendants through kill_tree, so a child the job
+    started does not outlive it."""
 
     def test_a_grandchild_does_not_outlive_the_job(self):
-        cp = subprocess.run(["bash", "-c", KILL_TREE_SCRIPT % {"repo": REPO}],
-                            capture_output=True, text=True, timeout=90, cwd=str(REPO))
-        self.assertIn("child reaped", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("job reaped", cp.stdout, cp.stdout + cp.stderr)
+        with tempfile.TemporaryDirectory(prefix="wk-interrupt-test-") as tmp:
+            marker = os.path.join(tmp, "kid")
+            p = subprocess.Popen(["sh", "-c", "sleep 300 & echo $! > %s; sleep 300" % marker], start_new_session=True)
+            try:
+                while not (os.path.exists(marker) and open(marker).read().strip()):
+                    time.sleep(0.02)
+                kid = int(open(marker).read())
+                job.kill_tree(Local(), p.pid, signal.SIGTERM)
+                p.wait()
+                _wait_gone(kid)
+            finally:
+                if p.poll() is None:
+                    os.killpg(p.pid, signal.SIGKILL)
+                    p.wait()
 
     def test_it_never_signals_the_process_asking(self):
-        """The one walk (lib/wk/job.py, which watched_kill and the stall path both call) skips its own pid."""
+        """The one walk skips its own pid."""
         m = Fake()
         me = os.getpid()
         m.answer(["sh", "-c", job.TREE, "wk", "10"], out="%d\n11\n10\n" % me)

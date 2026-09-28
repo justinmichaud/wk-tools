@@ -37,14 +37,13 @@ import unittest
 from unittest import mock
 
 from tests.support import (assert_guest_start_converges, guest_step, REPO,
-                           WkTest, bash, stub_path)
+                           WkTest, stub_path)
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import guest, targets  # noqa: E402
+from wk import guest, secrets, targets  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 TOUCHED = (
-    "lib/store.sh", "targets/vm.sh",
     "vm/provision-base.sh", "vm/shell-rc.sh", "container/firstrun.sh",
     "container/proxy/ensure-bridge.sh",
 )
@@ -130,12 +129,17 @@ exit 255
 '''
 
 
-def _guest(tmp, name="demo"):
+def _guest(tmp, name="demo", claude=()):
     """A scratch guest home plus the host-side workspace directory and ready
-    marker targets/vm.sh's t_created reads -- without which t_info says
-    `creating`, not `running`."""
+    marker Vm.created reads (lib/wk/targets.py) -- without which Vm.info says
+    `creating`, not `running`. The guest's `ps` lists the `claude` pids given:
+    its commands run on this host, whose own processes are not the guest's."""
     home = tmp / "guest-home"
     (home / ".ssh").mkdir(parents=True, exist_ok=True)
+    (home / "bin").mkdir(exist_ok=True)
+    (home / "bin" / "ps").write_text("#!/bin/sh\n" + "".join("echo '%s /Users/admin/.local/bin/claude'\n" % p for p in claude))
+    (home / "bin" / "ps").chmod(0o755)
+    (home / ".bash_profile").write_text('PATH="$HOME/bin:$PATH"\n')
     vmstore = tmp / "vmstore"
     ws = vmstore / "ws" / name
     ws.mkdir(parents=True, exist_ok=True)
@@ -195,7 +199,7 @@ class TestScriptsParse(unittest.TestCase):
 
 
 class TestOneAliasBlock(WkTest):
-    """wk_ssh_alias_blocks is the one implementation of "the ssh config the
+    """secrets.alias_blocks is the one implementation of "the ssh config the
     forks need". Three machines read it: two name an agent socket and a path
     whose private half is not there (only `<path>.pub` is, which ssh reads for
     itself), and the third -- a shared build box, a plain checkout with no
@@ -207,30 +211,30 @@ class TestOneAliasBlock(WkTest):
     mode or its format (measured, 10.2p1 in the workspace image) -- a
     permissions fault where the real answer is that the agent holds nothing."""
 
+    CONTAINER = ("/secrets", "build_key_", "/run/wk/ssh-agent.sock")
+    GUEST = ("~/.ssh", "id_", "/a/sock", "nc %h %p")
+    BUILD = ("/wk/secrets",)
+
     def _blocks(self, args):
-        cp = bash(f'. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; '
-                  f'wk_ssh_alias_blocks {args}')
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        return cp.stdout
+        return secrets.alias_blocks(secrets.forks(), *args)
 
     def test_a_build_machine_names_the_private_half_and_no_agent(self):
-        out = self._blocks("/wk/secrets")
+        out = self._blocks(self.BUILD)
         self.assertIn("Host github-webkit", out)
         self.assertIn("IdentityFile /wk/secrets/build_key_fork", out)
         self.assertNotIn("IdentityAgent", out)
         self.assertNotIn("ProxyCommand", out)
 
     def test_a_container_names_the_identity_and_the_mounted_socket(self):
-        out = self._blocks("/secrets build_key_ /run/wk/ssh-agent.sock")
+        out = self._blocks(self.CONTAINER)
         self.assertIn("IdentityFile /secrets/build_key_fork\n", out)
         self.assertIn("IdentityAgent /run/wk/ssh-agent.sock", out)
         self.assertIn("IdentitiesOnly yes", out)
         self.assertNotIn("ProxyCommand", out)
 
     def test_a_guest_names_its_own_public_copy_and_carries_a_proxy(self):
-        out = self._blocks("'/Users/admin/.ssh' id_ "
-                           "'/Users/admin/.wk-ssh-agent.sock' "
-                           "'nc -X connect -x 10.0.0.1:3128 %h %p'")
+        out = self._blocks(("/Users/admin/.ssh", "id_", "/Users/admin/.wk-ssh-agent.sock",
+                            "nc -X connect -x 10.0.0.1:3128 %h %p"))
         self.assertIn("IdentityFile /Users/admin/.ssh/id_fork\n", out)
         self.assertIn("IdentityAgent /Users/admin/.wk-ssh-agent.sock", out)
         self.assertIn("ProxyCommand nc -X connect -x 10.0.0.1:3128 %h %p", out)
@@ -238,9 +242,7 @@ class TestOneAliasBlock(WkTest):
     def test_no_identity_line_ever_carries_the_pub_suffix(self):
         """The suffix is what made OpenSSH 10 read the public file as a
         private key; ssh appends `.pub` itself."""
-        for args in ("/secrets build_key_ /run/wk/ssh-agent.sock",
-                     "'~/.ssh' id_ /a/sock 'nc %h %p'",
-                     "/wk/secrets"):
+        for args in (self.CONTAINER, self.GUEST, self.BUILD):
             with self.subTest(args=args):
                 for line in self._blocks(args).splitlines():
                     if line.strip().startswith("IdentityFile"):
@@ -252,7 +254,7 @@ class TestOneAliasBlock(WkTest):
         avoids. Nothing puts one at that path in a workspace -- `wk doctor`
         measures that from inside -- so the named path is the public half's
         stem and ssh has only the agent to sign with."""
-        out = self._blocks("/secrets build_key_ /run/wk/ssh-agent.sock")
+        out = self._blocks(self.CONTAINER)
         named = [l.split(None, 1)[1] for l in out.splitlines()
                  if l.strip().startswith("IdentityFile")]
         self.assertTrue(named)
@@ -261,11 +263,9 @@ class TestOneAliasBlock(WkTest):
             self.assertTrue(path.startswith("/secrets/"), path)
 
     def test_every_fork_gets_a_block(self):
-        cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; '
-                  'wk_push_forks | awk "NF {print \\$3}"')
-        aliases = cp.stdout.split()
+        aliases = [r[2] for r in secrets.forks()]
         self.assertTrue(aliases)
-        out = self._blocks("/d")
+        out = self._blocks(("/d",))
         for a in aliases:
             self.assertIn(f"Host {a}\n", out)
 
@@ -285,9 +285,9 @@ class TestOneAliasBlock(WkTest):
                     out.append(line)
             return "\n".join(out)
 
-        container = self._blocks("/secrets build_key_ /run/wk/ssh-agent.sock")
-        guest = self._blocks("'~/.ssh' id_ /a/sock 'nc %h %p'")
-        store = self._blocks("/wk/secrets")
+        container = self._blocks(self.CONTAINER)
+        guest = self._blocks(self.GUEST)
+        store = self._blocks(self.BUILD)
         self.assertEqual(norm(container), norm(guest))
         self.assertEqual(norm(container), norm(store))
 
@@ -303,12 +303,8 @@ class TestOneAliasBlock(WkTest):
                          "firstrun.sh links a key into the workspace again")
 
     def test_the_switch_writes_that_file_from_the_same_function(self):
-        src = (REPO / "lib" / "store.sh").read_text()
-        body = src[src.index("push_agent_publish_config() {"):]
-        body = body[:body.index("\n}\n")]
-        self.assertIn("wk_ssh_alias_blocks", body)
-        self.assertIn("wk.secrets alias-blocks", src)
-        self.assertIn("alias_blocks(self.forks()", (REPO / "lib" / "wk" / "secrets.py").read_text())
+        self.assertIn("alias_blocks(self.forks()", inspect.getsource(secrets.Secrets.publish_config))
+        self.assertIn('python3 -m wk.secrets alias-blocks ""', (REPO / "remote" / "provision.sh").read_text())
         self.assertIn("secrets.alias_blocks(", (REPO / "lib" / "wk" / "guest.py").read_text())
 
 
@@ -458,6 +454,17 @@ class TestTheGuestHalfOfTheSwitch(WkTest):
 
     def _forward_is_up(self, vmstore, name="demo"):
         return _forward_pidfile(vmstore, name).exists()
+
+    @unittest.skipUnless(os.uname().sysname == "Darwin",
+                         "guests are a macOS-host thing (tart)")
+    def test_on_stops_at_a_claude_session_in_a_guest(self):
+        """The guest's own `ps` names a claude pid, which `on` asks to end before loading anything."""
+        home, vmstore = _guest(self.tmp, claude=("999999",))
+        store = _store(self.tmp, keys=("fork",))
+        cp = self._push("on", store, home, vmstore)
+        self.assertIn("a claude session is running in demo", cp.stdout)
+        self.assertIn("push stays off", cp.stdout)
+        self.assertFalse(self._forward_is_up(vmstore))
 
     @unittest.skipUnless(os.uname().sysname == "Darwin",
                          "guests are a macOS-host thing (tart)")

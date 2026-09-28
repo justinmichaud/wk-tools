@@ -1,10 +1,9 @@
 """Crash-only convergence (CLAUDE.md, rule 2): a killed mutating command
-re-runs to the declared final state. Two real, podman-gated cases drive an
-actual container workspace and kill its detached driver mid-creation
-(`wk new --no-wait` prints the driver's own pid, running inside the podman
-VM once `wk`'s forwarding execs the whole command there -- see
-lib/target.sh's forward_to_vm; killing it there is what
-support.podman_vm_ssh is for). What `wk gc` reaps after one is
+re-runs to the declared final state. Two real cases drive an actual
+container workspace and kill its detached driver mid-creation (`wk new
+--no-wait` prints the driver's own pid, running where the container target
+keeps its store -- on macOS the podman VM, which `wk`'s forwarding execs the
+whole command in; killing it there is what support.container_side is for). What `wk gc` reaps after one is
 tests/test_owed_gc.py's. The records-are-claims case (a `running` record
 whose log or pid says otherwise) is tests/test_build_liveness.py's, and
 `./setup` needs no hardware either: its home-scoped stages are driven for real
@@ -22,9 +21,9 @@ import unittest
 from tests.support import (
     REPO,
     WkTest,
-    podman_vm_ssh,
+    container_side,
     rand_suffix,
-    requires_podman_vm,
+    requires_container_target,
     run,
     scratch_dir,
 )
@@ -35,10 +34,10 @@ from wk.machine import Local  # noqa: E402
 
 
 def _wait_dead(pid, timeout=60):
-    """Poll until <pid>, inside the podman VM, is no longer alive."""
+    """Poll until <pid>, where the container target runs it, is no longer alive."""
     waited = 0
     while waited < timeout:
-        cp = podman_vm_ssh(f"kill -0 {pid} 2>/dev/null")
+        cp = container_side(f"kill -0 {pid} 2>/dev/null")
         if cp.returncode != 0:
             return True
         time.sleep(1)
@@ -65,7 +64,7 @@ def _wait_registered(name, timeout=600):
     return False
 
 
-@requires_podman_vm()
+@requires_container_target()
 class TestWkNewKilledMidway(WkTest):
     """`wk new` detaches its driver (cmd/new's `--_detached` half) and this
     end only follows the log -- so killing the *driver* (not the following
@@ -92,8 +91,8 @@ class TestWkNewKilledMidway(WkTest):
         self.assertIsNotNone(m, f"'wk new --no-wait' did not report a driver pid: {cp.stdout}")
         pid = m.group(1)
 
-        # Kill it where it actually lives: forwarded into the podman VM.
-        podman_vm_ssh(f"kill -9 {pid}")
+        # Kill it where it actually lives.
+        container_side(f"kill -9 {pid}")
         self.assertTrue(_wait_dead(pid), f"driver pid {pid} did not die")
 
         # Whatever it left behind, this end now owns cleanup either way.
@@ -123,7 +122,7 @@ class TestWkNewKilledMidway(WkTest):
         self.assertIn(self.name, ls.stdout, f"'{self.name}' is missing from 'wk ls' after converging: {ls.stdout}")
 
 
-@requires_podman_vm()
+@requires_container_target()
 class TestWkRmOfRubble(WkTest):
     """The same kill, but the recovery asked for is `wk rm` rather than a
     second `wk new`: rule 2 applies to destruction too -- a half-made
@@ -153,7 +152,7 @@ class TestWkRmOfRubble(WkTest):
             _wait_registered(self.name),
             f"'{self.name}' never came into existence for the kill to leave rubble",
         )
-        podman_vm_ssh(f"kill -9 {pid}")
+        container_side(f"kill -9 {pid}")
         self.assertTrue(_wait_dead(pid), f"driver pid {pid} did not die")
 
         cp2 = run("rm", self.name, env={"WK_YES": "1"}, timeout=180)

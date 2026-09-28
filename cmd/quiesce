@@ -2,7 +2,7 @@
 #
 # wk quiesce on|off|status -- quiet the machine for benchmarking
 #
-# wk: where=host name=none group=hosts needs quiesce-helper takes=1 dryrun on,off
+# wk: where=host name=none group=hosts needs quiesce-helper takes=1 verbs=on,off,status default=status dryrun on,off
 # wk: readonly status
 # wk: sub status needs=
 #
@@ -32,19 +32,15 @@ ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.absp
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
 from wk import decl, quiet  # noqa: E402
-from wk.act import Refused, die  # noqa: E402
+from wk.act import Refused  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import Local  # noqa: E402
 
-USAGE = "usage: wk quiesce on|off|status -- quiet the machine for benchmarking.; see wk quiesce -h"
 
 
 def parse(argv):
     args = decl.Args(decl.Decl(__file__), argv)
-    action = args.positionals[0] if args.positionals else "status"
-    if len(args.positionals) > 1 or action not in ("on", "off", "status"):
-        die(USAGE)
-    return action
+    return args.positionals[0]
 
 
 def interrupted(signum, frame):

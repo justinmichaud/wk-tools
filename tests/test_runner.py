@@ -45,11 +45,11 @@ MODULES = {
     ''',
     "test_d_gated.py": '''
         import unittest
-        from tests.support import requires_podman_vm
+        from tests.support import requires_machine
         class Plain(unittest.TestCase):
             def test_plain_runs(self):
                 pass
-        @requires_podman_vm()
+        @requires_machine("wk-test-nosuch.invalid")
         class Gated(unittest.TestCase):
             def test_live_by_gate(self):
                 pass
@@ -124,7 +124,7 @@ class TestTiers(RunnerTest):
         self.assertEqual(rc, 0, out)
         self.assertIn("tiers: live  tests: 1 ", out)
         self.assertIn("test_live_marked", out)
-        self.assertRegex(out, r"setUpClass \(suite\.test_d_gated\.Gated\) \.\.\. skipped .*not running")
+        self.assertRegex(out, r"setUpClass \(suite\.test_d_gated\.Gated\) \.\.\. skipped .*not reachable")
         self.assertNotIn("test_plain_runs", out)
 
     def test_tiers_combine(self):
@@ -132,17 +132,17 @@ class TestTiers(RunnerTest):
         self.assertIn("tiers: lint,live  tests: 2 ", out)
 
     def test_a_gate_probes_nothing_until_its_test_runs(self):
-        log = self.tmp / "podman-calls"
+        log = self.tmp / "ssh-calls"
         binp = self.tmp / "bin"
         binp.mkdir()
-        (binp / "podman").write_text('#!/bin/sh\necho "$*" >> "%s"\n' % log)
-        (binp / "podman").chmod(0o755)
+        (binp / "ssh").write_text('#!/bin/sh\necho "$*" >> "%s"\nexit 255\n' % log)
+        (binp / "ssh").chmod(0o755)
         env = {"PATH": f"{binp}:{os.environ['PATH']}"}
         rc, out = self.runner("--list", "--live", env=env)
         self.assertIn("suite.test_d_gated.Gated.test_live_by_gate", out)
-        self.assertFalse(log.exists(), "listing a gated test probed podman")
+        self.assertFalse(log.exists(), "listing a gated test probed its machine")
         rc, out = self.runner("--live", "-k", "live_by_gate", env=env)
-        self.assertIn("machine inspect wk", log.read_text())
+        self.assertIn("wk-test-nosuch.invalid true", log.read_text())
 
     def test_a_listing_names_the_selection_and_runs_nothing(self):
         rc, out = self.runner("--list", "--unit", "-k", "test_a_unit", "-k", "test_e_slow")
@@ -223,6 +223,18 @@ class TestBudget(RunnerTest):
         rc, out = self.runner("--unit", "-k", "test_e_slow", "-k", "test_a_unit")
         self.assertIn("slowest:", out)
         self.assertRegex(out, r"slowest:\n\s+0\.[3-9]\ds\s+\S*test_e_slow\.T\.test_sleeps")
+
+    def test_a_test_that_hangs_is_stopped_where_it_is_and_fails(self):
+        """The budget is the one bound on a test: a wait with no bound of its own fails rather than hangs the run."""
+        (self.suite / "test_i_hangs.py").write_text(textwrap.dedent('''
+            import threading, unittest
+            class T(unittest.TestCase):
+                def test_waits_forever(self):
+                    threading.Event().wait()
+        '''))
+        rc, out = self.runner("--unit", "-k", "test_i_hangs", budget=0.1)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("over budget: suite.test_i_hangs.T.test_waits_forever was stopped after 5.2s", out)
 
     def test_a_skip_or_an_owed_failure_past_the_budget_is_not_over_budget(self):
         (self.suite / "test_g_slow_exempt.py").write_text(textwrap.dedent('''

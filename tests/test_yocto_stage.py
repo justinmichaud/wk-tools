@@ -24,7 +24,7 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import build, images, job, record, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Fake, Result, isolated_module  # noqa: E402
 from wk.sysimage import yocto  # noqa: E402
 
 PROFILE = "wpewebkit-2.46-yocto-rpi4-64"
@@ -286,8 +286,8 @@ class TestTheRecordAStageWrites(YoctoTest):
     def test_the_stage_runs_in_the_workspace_under_the_wrapper(self):
         self.build()
         argv = self.w.watched()
-        self.assertEqual(argv[:12], ["exec", WS, "env", "PYTHONPATH=/opt/wk-tools/lib", "python3", "-m", "wk.sysimage.task",
-                                     "stage", "yocto", "--", "python3", "/opt/wk-tools/lib/wk/sysimage/yocto_target.py"])
+        self.assertEqual(argv[:13], ["exec", WS] + isolated_module("/opt/wk-tools/lib", "wk.sysimage.task")
+                         + ["stage", "yocto", "--", "python3", "/opt/wk-tools/lib/wk/sysimage/yocto_target.py"])
         for flag, value in (("--target", CROSS_TARGET), ("--stage", "image"), ("--board", "rpi4"), ("--jobs", str(self.cores())),
                             ("--rm-work", "1"), ("--chromium", "0"), ("--cross-config", "wpe-cross"),
                             ("--sstate-ns", self.w.tag().rsplit("/", 1)[-1].replace(":", "-"))):
@@ -410,7 +410,7 @@ class TestRefusals(YoctoTest):
         self.assertIn("builds no WebKit", self.refused("--config", "wpe-cross-pgo-collect"))
 
     def test_an_unknown_option_is_a_usage_error(self):
-        self.assertIn("unknown option: --bogus", self.refused("--bogus"))
+        self.assertIn("--bogus is not an option of this build", self.refused("--bogus"))
 
     def test_too_little_disk_is_a_barrier(self):
         self.w.answer(["df", "-Pk"], out="Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 1048576 1% /\n")

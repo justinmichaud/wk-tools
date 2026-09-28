@@ -1,8 +1,8 @@
-"""Every `WK_*` override read with a default under wk/lib/cmd/targets/build
+"""Every `WK_*` override read with a default under wk/lib/cmd/build
 is documented where the user meets it, or removed (owed, docs/PLAN.md).
 
 A static audit, not a retyped list: every `${WK_[A-Z_]+:-...}` occurrence
-under wk, lib/, cmd/, targets/, build/ is collected by regex (the same
+under wk, lib/, cmd/, build/ is collected by regex (the same
 `${VAR:-default}` shape bash actually uses for "read with a default"), and
 each variable name is then searched for, as a whole word, across every file
 in the tree -- a comment line (any file whose stripped line starts with
@@ -22,7 +22,7 @@ import unittest
 
 from tests.support import REPO
 
-SCOPE_NAMES = ("wk", "lib", "cmd", "targets", "build")
+SCOPE_NAMES = ("wk", "lib", "cmd", "build")
 
 VAR_RE = re.compile(r'\$\{(WK_[A-Z_]+):-')
 

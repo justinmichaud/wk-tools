@@ -27,7 +27,7 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import build, images, job, record, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Fake, Result, isolated_module  # noqa: E402
 from wk.sysimage import buildroot, task  # noqa: E402
 
 PROFILE = "wpewebkit-2.46-buildroot-rpi3-32"
@@ -196,9 +196,8 @@ class TestTheRecordAStageWrites(TaskTest):
         self.build()
         (w,) = [e for e in self.w.effects if e[0] == "watch"]
         argv = list(w[1])
-        self.assertEqual(argv[:9], ["exec", WS, "env", "PYTHONPATH=/opt/wk-tools/lib", "python3", "-m", "wk.sysimage.task",
-                                    "stage", "buildroot"])
-        self.assertEqual(argv[9:14], ["--", "python3", "/opt/wk-tools/lib/wk/sysimage/buildroot_target.py", "image", "--name"])
+        self.assertEqual(argv[:10], ["exec", WS] + isolated_module("/opt/wk-tools/lib", "wk.sysimage.task") + ["stage", "buildroot"])
+        self.assertEqual(argv[10:15], ["--", "python3", "/opt/wk-tools/lib/wk/sysimage/buildroot_target.py", "image", "--name"])
         self.assertIn("--overlay-wifi", argv)
         self.assertEqual(argv[argv.index("--jobs") + 1], "8")
 
@@ -252,6 +251,7 @@ class TestWhatItBuildsWith(TaskTest):
         p = dict(self.w.profile(), BR_KERNEL_DEB_URL="https://x/k.deb", BR_KERNEL_DEB_SHA256="d" * 64, BR_KERNEL_RELEASE="6.1.0-rpi")
         self.w.answer(["sha256sum"], out="d" * 64 + "  x\n")
         self.w.answer(["curl"])
+        self.w.answer(["mv"])
         dl = os.path.join(self.w.env["WK_STORE"], "cache", "buildroot", "dl")
 
         def pin(m, deb, release, out):
@@ -275,6 +275,13 @@ class TestTheBuilderIsTheProfiles(TaskTest):
     def sysimage(self):
         from wk.sysimage import cli
         return cli.Sysimage(self.w.reg, self.w.clock)
+
+    def test_a_profile_whose_conf_does_not_parse_is_refused_by_its_line_not_called_unknown(self):
+        with mock.patch.object(images, "load", side_effect=images.ConfError("bad.conf:3: not a KEY=value line: x")), \
+                self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.sysimage().profile("bad")
+        self.assertIn("bad.conf:3:", err.getvalue())
+        self.assertNotIn("unknown profile", err.getvalue())
 
     def test_a_profile_that_needs_something_says_what(self):
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
@@ -337,7 +344,11 @@ class TestRefusals(TaskTest):
         self.assertIn("a buildroot image builds in a container workspace, and target 'box' is a remote one", err)
 
     def test_an_unknown_option_is_a_usage_error(self):
-        self.assertIn("unknown option: --stage", self.refused(None, "--stage", "image"))
+        self.assertIn("--stage is not an option of this build", self.refused(None, "--stage", "image"))
+
+    def test_another_builder_s_option_is_refused(self):
+        """cmd/sysimage declares every builder's options; a buildroot build refuses pmos's"""
+        self.assertIn("--resume is not an option of this build", self.refused(None, "--resume"))
 
     def test_a_half_declared_kernel_pin_is_refused(self):
         p = dict(self.w.profile(), BR_KERNEL_DEB_URL="https://x/k.deb")
@@ -433,9 +444,9 @@ class TestDryRun(TaskTest):
         self.assertEqual(self.w.recs().list(), [])
         self.assertFalse([e for e in self.w.effects if e[0] not in ("run",)])
 
-    def test_the_tail_s_dry_run_is_the_dispatcher_s(self):
-        self.build(None, "--dry-run")
-        self.assertEqual(os.environ.get("WK_DRY_RUN"), "1")
+    def test_a_dry_run_arrives_only_as_the_dispatcher_s_global(self):
+        self.assertIn("--dry-run is not an option of this build", self.refused(None, "--dry-run"))
+        self.assertIsNone(os.environ.get("WK_DRY_RUN"))
         self.assertEqual(self.w.recs().list(), [])
 
 
@@ -532,18 +543,23 @@ class TestFetch(TaskTest):
         self.assertEqual(self.fetch()[0], self.dest())
         self.assertFalse([e for e in self.w.effects if e[0] == "run" and e[1][0] == "curl"])
 
-    def test_one_that_does_not_is_resumed_and_checked(self):
+    def test_one_that_does_not_is_resumed_and_checked_before_it_is_kept(self):
         self.w.answer(["curl"])
+        self.w.answer(["mv"])
         self.w.answer(["sha256sum"], out=self.PIN + "  x\n")
         self.assertEqual(self.fetch()[0], self.dest())
-        self.assertIn(("run", ("curl", "-fsSL", "--retry", "5", "-C", "-", "-o", self.dest(), self.URL)), self.w.effects)
+        part = self.dest() + ".part"
+        runs = [e[1] for e in self.w.effects if e[0] == "run"]
+        self.assertIn(("curl", "-fsSL", "--retry", "5", "-C", "-", "-o", part, self.URL), runs)
+        self.assertEqual(runs[-1], ("mv", part, self.dest()))
 
     def test_a_mismatch_is_refused_naming_the_stale_pin(self):
         self.w.answer(["curl"])
         self.w.answer(["sha256sum"], out="c" * 64 + "  x\n")
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
             task.fetch_base(self.w, self.URL, self.PIN, self.w.env)
-        self.assertIn("checksum mismatch", err.getvalue())
+        self.assertIn("does not match its pin (sha256 %s, expected %s)" % ("c" * 64, self.PIN), err.getvalue())
+        self.assertIn(("run", ("rm", "-f", self.dest() + ".part")), self.w.effects)
 
     def test_the_cache_is_the_store_s_where_this_machine_holds_it(self):
         self.assertEqual(task.cache_dir(self.w.env), os.path.join(self.w.env["WK_STORE"], "cache", "images"))

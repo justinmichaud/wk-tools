@@ -14,6 +14,8 @@
 #   ARCH      what it builds natively; blank when that is the host's own
 #   CHANGES   disk its own writes take -- the overlay layer, reclaimed by `wk gc`
 #
+#   Inside a workspace, BASE and CHANGES read `n/a`: the host holds both.
+#
 #   --json    one JSON document ({"workspaces": [...]}), the same fields as
 #             the table's columns, lower-cased; nothing else on stdout
 
@@ -32,6 +34,7 @@ from wk.machine import Local  # noqa: E402
 from wk.store import Bases  # noqa: E402
 
 FORMAT = "%-20s %-18s %-10s %-8s %-20s %-8s %8s"
+NOT_APPLICABLE = "n/a"
 
 def base_of(target, ws):
     return targets.image_base(ROOT, ws) or targets.git_base(target, ws) or "?"
@@ -41,12 +44,17 @@ def col(label, target):
     return target if not label or target == label else "%s:%s" % (label, target)
 
 
+def changes_of(target, ws):
+    r = Local().run(["du", "-sh", os.path.join(target.store.ws_dir(ws), "changes")])
+    return r.out.split("\t")[0].strip() if r.ok and r.out.strip() else "-"
+
+
 def row(target, ws, label, as_json):
     state = target.display_state(ws)
-    base = base_of(target, ws)
+    inside = target.kind == "local"
+    base = NOT_APPLICABLE if inside else base_of(target, ws)
     snap = target.store.ws_base_id(ws) or "-"
-    r = Local().run(["du", "-sh", os.path.join(target.store.ws_dir(ws), "changes")])
-    size = r.out.split("\t")[0].strip() if r.ok and r.out.strip() else "-"
+    size = NOT_APPLICABLE if inside else changes_of(target, ws)
     arch = target.arch(ws)
     fields = (ws, col(label, target.name), state, base, snap, arch, size)
     if as_json:

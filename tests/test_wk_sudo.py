@@ -20,7 +20,7 @@ from tests.support import REPO, run
 sys.path.insert(0, str(REPO / "lib"))
 from wk import sudo  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from wk.machine import HAVE, Fake  # noqa: E402
 from wk.sudo import Sudo, timeout_desc, timeout_is_ours, timeout_secs  # noqa: E402
 
 CMD_KEY = REPO / "cmd" / "key"
@@ -171,7 +171,7 @@ def _setup_fake(free_before=True, install_ok=True, post_check_ok=True, property_
     f = Fake("here")
     f.answer(["id", "-un"], 0, "justinmichaud\n")
     f.answer(["hostname", "-s"], 0, "tolken\n")
-    f.answer(["which", "visudo"], 0, "/usr/bin/visudo\n")
+    f.answer(HAVE + ("visudo",))
     listing = ("User justinmichaud may run the following commands on tolken:\n"
                "    (root) NOPASSWD: ALL\n") if free_before else LISTING_UNSET
     f.answer(["sudo", "-n", "-l"], 0, listing)
@@ -229,7 +229,7 @@ class TestSetup(unittest.TestCase):
 
     def test_already_set_up_is_a_no_op(self):
         f = _fake(free=False, listing="    timestamp_timeout=0.5\n\n" + LISTING_UNSET)
-        f.answer(["which", "visudo"], 0, "/usr/bin/visudo\n")
+        f.answer(HAVE + ("visudo",))
         s = Sudo(f, {"WK_SUDO_TIMEOUT_MIN": "0.5"}, linux=False)
         rc = s.setup()
         self.assertEqual(rc, 0)

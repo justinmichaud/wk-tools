@@ -4,7 +4,9 @@ import math
 import os
 import sys
 
+from wk import buildconf, pgo
 from wk.bench import record
+from wk.machine import replace_file
 
 
 def axis_check_lines(a, b):
@@ -386,8 +388,11 @@ def run_result(rundir):
     path = os.path.join(rundir, "result.json")
     if not os.path.isfile(path):
         return path, None, "%s: no result.json in this directory" % rundir
-    doc = record.load(path)
-    return path, doc, None if doc else "%s: empty, or not JSON" % path
+    try:
+        doc = record.load(path)
+    except ValueError as e:
+        return path, None, "%s: not valid JSON (%s)" % (path, e)
+    return path, doc, None if doc else "%s: empty" % path
 
 
 # env.json is read from the same directory, empty where missing, so an older run reads as unknown rather than refusing the report.
@@ -399,7 +404,10 @@ def _side_runs(dirs, side):
         if why:
             missing.append(why)
             continue
-        env = record.load(os.path.join(d, "env.json"))
+        try:
+            env = record.load(os.path.join(d, "env.json"))
+        except ValueError as e:
+            sys.exit("report: side %s: %s/env.json is not valid JSON (%s)" % (side, d, e))
         if record.not_a_measurement(env):
             sys.exit("report: side %s: %s -- %s" % (side, d, record.not_a_measurement(env)))
         runs.append((d, doc, env))
@@ -958,8 +966,8 @@ def ab_summary(runs, root, now, out_path="", out=None):
             emit("note: %d arms; comparing '%s' against '%s' only" % (len(labels), a, b))
         if {r[2] for r in rows if r[1] == a} & {r[2] for r in rows if r[1] == b}:
             for line in ("  both arms ran the SAME staged build. This is an A/A control: what it",
-                         "  measures is the noise floor of this lane, not a difference between",
-                         "  builds. A significant result here means the lane is not yet quiet",
+                         "  measures is the noise floor of this bench path, not a difference between",
+                         "  builds. A significant result here means the bench path is not yet quiet",
                          "  enough to trust a real A/B at that magnitude.", ""):
                 emit(line)
         for plan in dict.fromkeys(r[5] for r in rows):
@@ -997,8 +1005,7 @@ def split_paths(spec):
 
 
 def _write_html(path, report, title):
-    with open(path, "w") as f:
-        f.write(render_html(report, title=title))
+    replace_file(path, render_html(report, title=title))
 
 
 def two_runs(a_dirs, b_dirs, html="", text=False, out=None):
@@ -1011,7 +1018,68 @@ def two_runs(a_dirs, b_dirs, html="", text=False, out=None):
         out.write(render_text(report))
 
 
-def task_report(taskdir, running, html=False, text=False, out=None):
+def built_lines(doc, runs, arm_names, arm_kind):
+    """The commit each arm's runs measured, from their env.json, against the one the task names for it."""
+    subj = doc.get("subject", {})
+    named = {"a": subj.get("base") or "", "b": subj.get("head") or ""} if subj.get("kind") in ("pull", "commit") else {}
+    shas = {}
+    for r in runs:
+        shas.setdefault((r["env"].get("ab") or {}).get("arm", ""), set()).add(r["env"].get("webkit_sha") or "")
+    out = []
+    for arm, found in sorted(shas.items()):
+        label = "%s %s" % (arm_kind, arm_names["ab".index(arm)]) if arm in ("a", "b") and len(arm_names) == 2 else "the runs"
+        known, want = sorted(x for x in found if x), named.get(arm, "")
+        if not known:
+            verdict = "unknown -- no run recorded the commit it measured"
+        elif len(known) > 1:
+            verdict = "FAIL -- its runs measured %d different commits" % len(known)
+        elif want and not (want.startswith(known[0]) or known[0].startswith(want)):
+            verdict = "FAIL -- the task names %s" % want[:12]
+        else:
+            verdict = "ok" + (", the task's %s" % ("base" if arm == "a" else "head") if want else "")
+        out.append("%s: %s  %s" % (label, ",".join(k[:12] for k in known) or "?", verdict))
+    return out or ["no runs yet"]
+
+
+def pgo_built(env):
+    return bool(buildconf.CONFIGS.get(env.get("config") or "", {}).get("pgo")) or env.get("build_config") == pgo.USE
+
+
+def pgo_faults(reading):
+    if not all(k in reading for k in ("benchmarks", "combined", "compressed", "missing")):
+        return ["a profile-check.json that is not a profile-check reading"]
+    return pgo.faults(reading)
+
+
+def checks(taskdir, doc, runs, arm_kind):
+    """(verdict, check, evidence) for each check a run records: its preflight, the warmup round's, the PGO profile's reading."""
+    out = []
+    forced = [r for r in runs if r["env"].get("forced")]
+    if runs:
+        out.append(("FAIL", "preflight", "%d of %d runs forced past failing checks: %s" % (len(forced), len(runs), forced[0]["env"].get("preflight_notes") or "?"))
+                   if forced else ("ok", "preflight", "every run passed it"))
+    rehearsed = [r for r in runs if r["state"] == "rehearsal"]
+    if rehearsed:
+        out.append(("FAIL", "measured", "%d of %d runs are rehearsals, not measurements" % (len(rehearsed), len(runs))))
+    for d in doc.get("devices", []):
+        paths = [os.path.join(taskdir, "warmup", "%s-%s.evidence.json" % (d["device"], x)) for x in "ab"]
+        if any(os.path.isfile(p) for p in paths):
+            problems = warmup_check(paths[0], paths[1], arm_kind != "system")
+            out.append(("FAIL", "warmup", "%s: %s" % (d["device"], "; ".join(problems))) if problems else ("ok", "warmup", "%s: both arms are what the A/B claims" % d["device"]))
+    built = [r for r in runs if pgo_built(r["env"])]
+    readings = [record.load(os.path.join(r["dir"], "profile-check.json")) for r in built]
+    faults = sorted({f for reading in readings if reading for f in pgo_faults(reading)})
+    missing = sum(1 for reading in readings if not reading)
+    if faults:
+        out.append(("FAIL", "PGO profile", "; ".join(faults)))
+    elif missing:
+        out.append(("unknown", "PGO profile", "%d of %d PGO runs carry no profile-check.json reading" % (missing, len(built))))
+    elif built:
+        out.append(("ok", "PGO profile", "every one of %d PGO runs' readings passes" % len(built)))
+    return out
+
+
+def task_report(taskdir, running, html=False, text=False, out=None, shown=None):
     """A task's A/B, one report per device x plan out of its paired rounds; partial data is reported as partial, naming what is missing."""
     out = out or sys.stdout
     taskdir = taskdir.rstrip("/")
@@ -1022,12 +1090,16 @@ def task_report(taskdir, running, html=False, text=False, out=None):
     lines = ["task      %s" % name,
              "measures  %s" % record.subject_line(doc),
              "state     %s -- %s" % (st["state"], st["summary"]),
-             "data      %s" % taskdir]
+             "data      %s" % (shown or taskdir)]
+    if st["state"] == "incomplete" and doc.get("restart"):
+        lines.append("restart   %s" % doc["restart"])
+    lines += ["built:"] + ["  " + l for l in built_lines(doc, st["runs"], arm_names, arm_kind)]
+    lines += ["checks:"] + ["  %-8s %-13s %s" % c for c in checks(taskdir, doc, st["runs"], arm_kind)]
     out.write("\n".join(lines) + "\n")
     if len(arm_names) != 2:
         out.write("\nnot an A/B (one arm): nothing to compare. Runs:\n")
         for r in st["runs"]:
-            out.write("  %s  %s\n" % (r["state"], r["dir"]))
+            out.write("  %s  %s\n" % (r["state"], os.path.join(shown, os.path.relpath(r["dir"], taskdir)) if shown else r["dir"]))
         return
     for (device, plan), byround in sorted(record.task_rounds(doc, st["runs"]).items()):
         a_dirs, b_dirs, dropped = record.paired(byround, arm_names)
@@ -1045,6 +1117,6 @@ def task_report(taskdir, running, html=False, text=False, out=None):
         if html:
             path = os.path.join(taskdir, "report-%s-%s.html" % (device, plan))
             _write_html(path, report, "%s: %s on %s" % (name, plan, device))
-            out.write("wrote %s\n" % path)
+            out.write("wrote %s\n" % os.path.join(shown or taskdir, os.path.basename(path)))
         if text or not html:
             out.write("\n" + render_text(dict(report, header=[])))

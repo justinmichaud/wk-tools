@@ -12,17 +12,18 @@ import subprocess
 import sys
 import threading
 
-from wk import act, buildconf, fleet, job, notify, pgo, record as wkrecord, sched, shell
+from wk import act, buildconf, fleet, images, job, notify, pgo, record as wkrecord, samply as wksamply, sched, screen
 from wk.act import Refused, die, info, log, warn
 from wk.bench import ab, board_ab, pipeline, record, report, seed
 from wk.bench.systems import System, first_line, root_device
 from wk.boot import cli as bootcli, driver_class, open_driver
 from wk.boot.mac import BENCH_ROOT, TOOLS, Channel, Script
+from wk.clock import Clock
 from wk.kv import kv
 from wk.lock import Lock
 from wk.mac import SET_TOLERANCE
-from wk.machine import Ssh
-from wk.quiet import DESKTOP, PRIV, Quiesce, lib_argv
+from wk.machine import Ssh, isolated_module, lib_argv
+from wk.quiet import DESKTOP, PRIV, RAISER, Quiesce
 from wk.workspace import require_name
 
 MARKER = "/etc/wk-image"
@@ -31,8 +32,7 @@ PUT_SKIP = (".git", "__pycache__")   # never carried onto a benchmark install: h
 PYTHONS = ("/usr/bin/python3", "/Library/Developer/CommandLineTools/usr/bin/python3", "/usr/local/bin/python3",
            "/opt/homebrew/bin/python3")
 CHECK = "bench/mac-browser-check.py"
-WKMAC = "lib/wkmac.py"
-QUIET = "lib/quiet.sh"
+WKMAC = "lib/wk/mac.py"
 VM_PROCESS = "com.apple.Virtualization.VirtualMachine"
 WEB_PROCESS = "com.apple.WebKit.WebContent"
 WEB_PROCESS_WAIT = 600
@@ -87,15 +87,15 @@ class Install:
         f, want = fleet.Fleet(self.root, self.env), self.fields()
         for name in f.names(("mac", "guest")):
             conf = f.load(name)
-            if conf.get("NODE_PROFILE") and conf["NODE_PROFILE"] == (want.get("profile") or want.get("id")):
-                return name, dict(conf, NODE_NAME=name)
+            if conf.get("profile") and conf["profile"] == (want.get("profile") or want.get("id")):
+                return name, dict(conf, name=name)
         return "", None
 
     def driver(self, name):
         conf = fleet.Fleet(self.root, self.env).load(name)
         if conf is None:
             die("unknown machine '%s' (wk boot --list)" % name)
-        return self.make_driver(self.root, dict(conf, NODE_NAME=name))
+        return self.make_driver(self.root, dict(conf, name=name))
 
     def staging_root(self):
         if self.env.get("WK_BENCH_ROOT"):
@@ -110,9 +110,9 @@ class Install:
 
 def screen_row(m, root):
     """The window server's own list: a window-title query needs assistive access a fresh install has not granted."""
-    blocker = m.run(lib_argv(root, QUIET, "screen_blocker")).out.strip()
+    blocker = screen.blocker(m, root)
     if blocker == "?":
-        return False, "the window server was not asked -- no compiler here to build the probe with (bench/mac-window-probe.sh)"
+        return False, screen.UNASKED
     if blocker:
         return False, "on the screen, and nothing wk put there: %s -- answer it at the screen" % blocker
     return True, "no onboarding or installer pane in front"
@@ -209,7 +209,7 @@ class MacVolumeSystem(System):
         self.ws = self.manifest.get("workspace", "")
         self.py = staged_python(self.here, self.env)
         self.machine, self.conf = install.machine()
-        self.measures = bool(self.conf) and getattr(driver_class(self.conf.get("NODE_DRIVER", "")), "measures", False)
+        self.measures = bool(self.conf) and getattr(driver_class(self.conf.get("driver", "")), "measures", False)
 
     def boot(self):
         if not self.install.bench() and not act.dry_run():
@@ -262,7 +262,7 @@ class MacVolumeSystem(System):
 
     def run(self, leg, script, watched, log_path):
         want = self.o.get("profile") and not act.dry_run()
-        capture = Capture(self.root, self.here, self.clock, self.o["profile"], leg.out) if want else None
+        capture = Capture(self.reg.store.artifact_dir(), self.here, self.clock, self.o["profile"], leg.out) if want else None
         if capture is not None:
             capture.start()
         try:
@@ -284,7 +284,7 @@ class MacVolumeSystem(System):
             if self.install.faked():
                 warn("WK_IMAGE_MARKER points at %s, not %s -- recorded as a workstation number" % (self.install.marker, MARKER))
             rows.append((True, "the machine", self.machine + ("" if self.measures else " -- a rehearsal: its reading is no measurement"))
-                        if self.conf else (False, "the machine", "the marker names no machine in machines/ (NODE_PROFILE)"))
+                        if self.conf else (False, "the machine", "the marker names no machine in machines/ (profile)"))
         else:
             rows.append((False, "bench mode", "this is host mode -- a real run refuses"))
         runner = os.path.join(self.dir, "Tools/Scripts/run-benchmark")
@@ -338,14 +338,13 @@ class MacVolumeSystem(System):
 class Capture(threading.Thread):
     """samply attaches to a pid, so this waits for the web process; task_for_pid on another process is root's."""
 
-    def __init__(self, root, here, clock, out_file, rundir):
+    def __init__(self, cache, here, clock, out_file, rundir):
         super().__init__(daemon=True)
-        self.root, self.here, self.clock, self.out_file, self.rundir = root, here, clock, out_file, rundir
+        self.cache, self.here, self.clock, self.out_file, self.rundir = cache, here, clock, out_file, rundir
         self.taken = False
 
     def run(self):
-        samply = first_line(self.here.run(shell.argv(self.root, '. "%s/lib/profiler.sh"; samply_fetch' % self.root,
-                                                     first_line(self.here.run(["uname", "-m"])), "Darwin")))
+        samply = wksamply.fetch(self.here, self.cache, first_line(self.here.run(["uname", "-m"])), "Darwin")
         if not samply:
             warn("no samply for this machine, so the leg carries no profile")
             return
@@ -371,7 +370,7 @@ class Capture(threading.Thread):
 
 
 class StagedRun(pipeline.Run):
-    """The pipeline on the running install: no workspace, no task (the host lane's task collects the run directory)."""
+    """The pipeline on the running install: no workspace, no task (the host install's task collects the run directory)."""
 
     def __init__(self, root, reg, system, clock, env, popen):
         self.root, self.reg, self.system, self.clock, self.popen = str(root), reg, system, clock, popen
@@ -420,8 +419,18 @@ class StagedRun(pipeline.Run):
             "count=" + leg.count, "local_copy=" + leg.payload, "preflight_notes=" + leg.notes, "class=" + leg.klass,
             "runner=browser", "arch=native", "bench_host=" + s.bench_host] + s.facts(leg) + pipeline.configuration_fields(self.env),
             bool_fields=["forced=" + (self.env.get("WK_FORCE") or "")] + s.bool_facts())
+        self.carry_reading(leg)
         info("%s on %s, from '%s' (%s @%s)" % (leg.plan, s.sysctl("hw.model"), s.ws, leg.cfg.name, s.sha()[:10]))
         return steps
+
+    def carry_reading(self, leg):
+        """The staged build's PGO reading goes with the run it measured, so the task's report can judge it."""
+        build = os.path.join(self.system.dir, "WebKitBuild")
+        for sub in sorted(self.here.listdir(build)) if self.here.isdir(build) else []:
+            check = os.path.join(build, sub, "wk-profile-check.json")
+            if self.here.exists(check):
+                with open(os.path.join(leg.out, "profile-check.json"), "w") as f:
+                    f.write(self.here.read(check))
 
 
 def pick(m, home, want):
@@ -528,7 +537,7 @@ class Stage:
         except LookupError as e:
             die(str(e))
         target.wait_ready(ws, self.clock)
-        config = config or self.env.get("WK_CONFIG") or self.reg.default_config(ws)
+        config = config or self.reg.default_config(ws)
         try:
             cfg = buildconf.resolve(config, target.os(), target.kind, target.env)
         except LookupError:
@@ -544,7 +553,7 @@ class Stage:
         sha = first_line(target.exec(ws, ["git", "-C", src, "rev-parse", "HEAD"]))
         stamp = self.clock.stamp()
         dest = os.path.join(home, "staged", "%s-%s" % (stamp, config))
-        vol = drv.c("NODE_VOLUME")
+        vol = drv.c("volume")
         info("staging %s from '%s' onto %s%s" % (config, ws, machine, " (%s)" % vol if vol else ""))
         assemble = os.path.join(self.reg.store.state_dir(), "bench-stage", os.path.basename(dest)) if deliver else dest
         manifest = {"staged_at": self.clock.iso(), "staged_by": wkrecord.host_name(self.here), "workspace": ws,
@@ -602,10 +611,10 @@ class Stage:
 
     def next_steps(self, drv, machine, dest, plans):
         first = " --plan " + plans[0][0] if plans else ""
-        arming = drv.facts().get("BOOT_ARMING", "")
+        arming = drv.facts().get("arming", "")
         if arming == "guest":
             arm, go = ("wk boot %s        start the guest -- for a guest that *is* the transition" % machine,
-                       "wk enter %s -- wk bench staged%s" % (drv.facts().get("NODE_GUEST", "<guest>"), first))
+                       "wk enter %s -- wk bench staged%s" % (drv.facts().get("guest", "<guest>"), first))
         else:
             arm, go = ("wk boot %s        arm the one-shot and reboot into it" % machine,
                        "wk bench staged%s       on the machine, once it is up" % first)
@@ -654,13 +663,13 @@ class MacHostSystem(System):
 
     def __init__(self, root, reg, target, ws, clock, name, conf, channel_factory=None, stage_driver=None):
         super().__init__(root, reg, target, ws, clock)
-        self.name, self.conf, self.env = name, dict(conf, NODE_NAME=name), reg.env
+        self.name, self.conf, self.env = name, dict(conf, name=name), reg.env
         self.pending = None   # stashed by HostRun.leg(): System.boot() itself takes no leg
         self.channel_factory = channel_factory or (lambda conf, env, ch, via, root: Channel(conf, env=env, channel=ch, via=via, root=root))
         self.stage_driver = stage_driver or self.make_driver
 
     def make_driver(self, root, conf):
-        return driver_class(conf.get("NODE_DRIVER", ""))(root, conf, self.channel_factory(conf, self.env, "none", self.here, root))
+        return driver_class(conf.get("driver", ""))(root, conf, self.channel_factory(conf, self.env, "none", self.here, root))
 
     def driver(self):
         return self.make_driver(self.root, self.conf)
@@ -675,7 +684,7 @@ class MacHostSystem(System):
         ch = self.bench_channel()
         dest = ch.dest("i_ssh")
         if not dest:
-            die("%s (machines/%s.conf) sets no NODE_BENCH_SSH -- needed to reach its bench-mode install" % (self.name, self.name))
+            die("%s (machines/%s.conf) sets no bench_ssh -- needed to reach its bench-mode install" % (self.name, self.name))
         return self.here if ch.here() else Ssh(dest, via=self.here)
 
     def cores_refusal(self):
@@ -703,7 +712,7 @@ class MacHostSystem(System):
         return self.target.src(self.ws)
 
     def facts(self, leg):
-        return ["role=" + self.conf.get("NODE_PROFILE", ""), "system=" + self.conf.get("NODE_PROFILE", ""), "machine=" + self.name]
+        return ["role=" + self.conf.get("profile", ""), "system=" + self.conf.get("profile", ""), "machine=" + self.name]
 
     def deploy(self, leg):   # already crossed: boot() stages it before the reboot into bench mode
         pass
@@ -792,7 +801,7 @@ class HostRun(pipeline.Run):
         def read(path):
             r = self.target.exec(self.ws, ["cat", "%s/Tools/Scripts/%s" % (self.system.src(), path)])
             return r.out.replace("\r", "") if r.ok else None
-        seeder = seed.Seeder(self.here, self.lock, os.path.join(self.reg.store.artifact_dir(), "bench"))
+        seeder = seed.Seeder(self.here, self.lock, os.path.join(self.reg.store.artifact_dir(), "bench"), self.reg.store.mirror())
         leg.payload = seeder.seed(leg.plan, seed.plan_json(read, leg.plan))
 
     def idle_rows(self):
@@ -873,7 +882,7 @@ CHECKOUT = "git -C %s checkout -q %s"
 
 
 def q(*words):
-    return " ".join(shlex.quote(str(w)) for w in words)
+    return shlex.join(str(w) for w in words)
 
 
 def stripped(r):
@@ -920,8 +929,8 @@ def display_verdict(text, want):
     try:
         doc = json.loads(text)
     except ValueError:
-        return False, ("wkmac.py displays did not print JSON" if text
-                       else "'wkmac.py displays' answered nothing -- CoreGraphics could not be asked")
+        return False, ("wk/mac.py displays did not print JSON" if text
+                       else "'wk/mac.py displays' answered nothing -- CoreGraphics could not be asked")
 
     def kind(d):
         return "builtin" if d.get("builtin") else "external"
@@ -984,7 +993,7 @@ class MacAB:
         conf = fleet.Fleet(self.root, self.env).load(self.name)
         if not conf:
             die("unknown machine '%s' (wk boot --list)" % self.name)
-        self.conf = dict(conf, NODE_NAME=self.name)
+        self.conf = dict(conf, name=self.name)
         self.d = self.make_driver(self.root, self.conf)
         self.d.probe()
         self.guest = self.d.arming == "guest"
@@ -1000,7 +1009,7 @@ class MacAB:
         bench = self.mac.py(WKMAC, "volume-group", self.d.volume())
         host = self.mac.py(WKMAC, "volume-group", "/")
         if bench and grp == bench:
-            self.fw_detail = "%s = '%s', so the restart below needs no human" % (grp, self.d.c("NODE_VOLUME"))
+            self.fw_detail = "%s = '%s', so the restart below needs no human" % (grp, self.d.c("volume"))
             return True
         self.fw_detail = ("%s = the host install, so a restart comes back here and the A/B never runs" % grp if host and grp == host
                           else "%s matches neither install on this disk" % grp)
@@ -1050,10 +1059,10 @@ class MacAB:
             return len(fails)
         if not self.guest:
             done = self.provisioned(root)
-            ck(done, "provisioned", "'%s' has finished a first boot" % self.d.c("NODE_VOLUME") if done
+            ck(done, "provisioned", "'%s' has finished a first boot" % self.d.c("volume") if done
                else "no 'provisioning complete' in %s" % self.firstboot_log(root),
                "so the desktop was never quieted, and every leg is refused after the reboot. On the Mac:",
-               "  wk sysimage build %s --repair    then boot it once" % (self.d.c("NODE_PROFILE") or "<profile>"))
+               "  wk sysimage build %s --repair    then boot it once" % (self.d.c("profile") or "<profile>"))
         ck(self.mac.test("-w", root), "writable", "%s takes a plant without sudo" % root)
         bh = self.d.bench_home() or ""
         ck(bool(bh) and self.mac.test("-d", bh) and self.mac.test("-w", bh + "/Library"), "bench home",
@@ -1078,7 +1087,7 @@ class MacAB:
             ck(self.firmware_is_bench(), "firmware default", self.fw_detail,
                "This restarts %s and expects benchmarking to begin with nobody at the keyboard:" % n,
                "  wk boot %s            arms it; or the startup manager: hold the power button," % n,
-               "  pick '%s'. --plant leaves the job on the volume and reboots nothing." % self.d.c("NODE_VOLUME"))
+               "  pick '%s'. --plant leaves the job on the volume and reboots nothing." % self.d.c("volume"))
         ready = self.d.restart_ready()
         ck(ready, "restartable", "this restarts %s itself" % n if ready else self.d.restart_detail(),
            "A graceful restart is refusable by any application, so an unattended one uses the helper:",
@@ -1156,7 +1165,7 @@ class MacAB:
             die("staging %s failed" % label)
         new = sorted(set(self.staged_ids(root)) - before)
         if not new:
-            die("staging %s produced no new directory on %s" % (label, self.d.c("NODE_VOLUME") or self.name))
+            die("staging %s produced no new directory on %s" % (label, self.d.c("volume") or self.name))
         log("  %s staged as %s" % (label, new[-1]))
         self.reclaim(label)
         return new[-1]
@@ -1248,7 +1257,7 @@ class MacAB:
         return bool(want) and want == got
 
     def put_tree(self, src, dest):
-        """Every file verified, not a sentinel: a tree stale in one file behaves as an older lane, after the reboot."""
+        """Every file verified, not a sentinel: a tree stale in one file behaves as an older build, after the reboot."""
         if self.d.bench_put(src, dest, *PUT_SKIP):
             return False
         ex = [w for x in PUT_SKIP for w in ("--exclude", x)]
@@ -1282,7 +1291,7 @@ class MacAB:
         log("  arm B: %s%s" % (self.b or "built with %s" % o.get("patch"), "  args: " + o["b_args"] if o.get("b_args") else ""))
         for i, p in enumerate(self.plans):
             legs = (2 if i == 0 else 0) + 2 * self.rounds   # the warmup round runs the first plan, one leg per arm
-            seen = ab.leg_seconds(self.bench_dir, self.name, p, o["count"])
+            seen = ab.leg_seconds(self.reg.store, self.name, p, o["count"])
             each = statistics.median(seen) if seen else None
             log("  cost  %s: at least %d legs%s" % (p, legs, " x ~%s = ~%s" % (ab.duration(each), ab.duration(legs * each)) if seen
                                                   else "; no leg of it at --count %s measured on %s yet" % (o["count"], self.name)))
@@ -1291,8 +1300,8 @@ class MacAB:
         declared = self.d.display()
         if not declared:
             die("%s declares no display, so nothing here knows what the measured install must read.\n"
-                "    Add its own mode to machines/%s.conf, in points, kind first:\n        NODE_DISPLAY=\"builtin 1470x956\"\n"
-                "    ('python3 lib/wkmac.py displays' on that install prints both.)" % (self.name, self.name))
+                "    Add its own mode to machines/%s.conf, in points, kind first:\n        display=\"builtin 1470x956\"\n"
+                "    ('python3 lib/wk/mac.py displays' on that install prints both.)" % (self.name, self.name))
         root, bh = self.d.bench_root(), self.d.bench_home()
         if not root or not bh:
             die("nothing on %s is readable right now: it answers on neither node, or its volume is not attached.\n"
@@ -1369,18 +1378,15 @@ class MacAB:
                 "    browser and no gate downstream sees one. Nothing has been rebooted. To plant anyway:  --force" % (dnd or "unreadable"))
 
     def plant_samply(self, root):
-        """No network over there, so the warmup round's profiler goes in now, where samply_fetch will look for it."""
+        """No network over there, so the warmup round's profiler goes in now, where samply.fetch will look for it."""
         arch = self.mac.out("mac-arch.sh")
-        fn = ('. "%s/lib/profiler.sh"; f() { t=$(samply_triple "$1" Darwin) && p=$(samply_fetch "$1" Darwin) && '
-              'printf "%%s\\n%%s\\n%%s\\n" "$SAMPLY_VER" "$t" "$p"; }; f' % self.root)
-        said = self.here.run(shell.argv(self.root, fn, arch)).out.split()
-        if len(said) != 3:
+        path = wksamply.fetch(self.here, self.reg.store.artifact_dir(), arch, "Darwin")
+        if not path:
             warn("  no samply for %s here -- the warmup round will carry no profile" % (arch or "that machine"))
             return
-        ver, triple, path = said
-        dest = "%s/cache/samply/%s-%s/samply" % (root, ver, triple)
+        dest = wksamply.store_dir(root + "/cache", wksamply.triple(arch, "Darwin")) + "/samply"
         if self.put_file(path, dest) and self.mac.run("mac-executable.sh", mutates=True, WK_PATH=dest).ok:
-            log("  samply %s planted for the warmup round" % ver)
+            log("  samply %s planted for the warmup round" % wksamply.VERSION)
         else:
             warn("  could not plant samply -- the warmup round will carry no profile")
 
@@ -1412,7 +1418,7 @@ class MacAB:
         info("go: reboot %s now (boot before: %s)" % (self.name, self.boot_before or "unknown"))
         if not self.guest:
             log("  '%s' is the firmware default (preflight asserted it), so this restart enters bench mode by itself and\n"
-                "  nobody has to be at the keyboard." % self.d.c("NODE_VOLUME"))
+                "  nobody has to be at the keyboard." % self.d.c("volume"))
         self.d.reboot()
         if not self.clock.wait_until(lambda: not self.mac.test("-d", "/"), DOWN_WAIT, DOWN_POLL):
             die("could not reboot %s -- it is still answering. The helper exits 0 without acting when the reboot is\n"
@@ -1453,7 +1459,7 @@ class MacAB:
             warn("  could not send the notification '%s'" % headline)
 
     def outcome(self, came):
-        n, vol = self.name, self.d.c("NODE_VOLUME") or "the benchmark install"
+        n, vol = self.name, self.d.c("volume") or "the benchmark install"
         if came == "bench":
             info("%s answers in BENCH mode -- the A/B is running there. 'wk bench ab --devices %s --status' follows it,\n"
                  "  and the machine powers itself off when the job ends." % (n, n))
@@ -1550,10 +1556,9 @@ class MacAB:
         return 0
 
     def read_collect(self):
-        """The volume's result directories carry the env.json `wk bench staged` wrote beside each, so they are copied rather
-        than recomposed; the run map adds which round and arm each is. A contaminated leg is not compared, so not copied."""
+        """The volume's result directories carry the env.json `wk bench staged` wrote beside each, so they are copied rather than recomposed; the run map adds which round and arm each is. A contaminated leg is not compared, so not copied."""
         root = self.staging_root()
-        info("collect: reading the A/B off %s" % (self.d.c("NODE_VOLUME") or self.name))
+        info("collect: reading the A/B off %s" % (self.d.c("volume") or self.name))
         st = self.mac.read(root + "/autorun.state")
         if st:
             log("  autorun state:\n" + "\n".join("    " + l for l in st.splitlines()))
@@ -1571,12 +1576,24 @@ class MacAB:
         if not os.path.isdir(taskdir):
             die("job %s has no task in %s, so nothing here can record it; its results stay on the volume" % (stamp, self.bench_dir))
         self.here.write(os.path.join(taskdir, "autorun.state"), st)
+        if not self.collect_tree(root + "/ab/" + stamp, "warmup", taskdir):
+            warn("  the warmup round's captures (%s/ab/%s/warmup) did not copy onto the task" % (root, stamp))
         if self.collect_runs(taskdir, root, tsv):
             try:
                 report.task_report(taskdir, False, text=True)
             except (Refused, SystemExit, OSError, ValueError) as e:
                 warn("the report did not complete (%s); the runs are recorded:  wk bench report %s" % (e, os.path.basename(taskdir)))
         return 0
+
+    def collect_tree(self, parent, name, into):
+        """`parent`/`name` on the volume, copied under `into`; False when it did not land."""
+        got, packed = self.mac.run("mac-tar.sh", WK_PATH=parent, WK_DIR=name), os.path.join(into, name + ".tar.b64")
+        if got.ok:
+            self.here.write(packed, got.out)
+        landed = got.ok and self.here.act_run(["sh", "-c", 'base64 -d < "$1" | tar -xf - -C "$2"', "sh", packed, into]).ok
+        if got.ok:
+            self.here.remove(packed)
+        return landed
 
     def collect_runs(self, taskdir, root, tsv):
         rows = [r for r in (report.map_row(l) for l in tsv.splitlines() if l.strip()) if r[0] != "0" and r[4] == "clean" and r[3]]
@@ -1586,13 +1603,7 @@ class MacAB:
         into, n = os.path.join(taskdir, "runs"), 0
         self.here.mkdir(into)
         for rnd, label, sid, rid, _, plan in rows:
-            got, packed = self.mac.run("mac-tar.sh", WK_PATH=root + "/results", WK_DIR=rid), os.path.join(into, rid + ".tar.b64")
-            if got.ok:
-                self.here.write(packed, got.out)
-            landed = got.ok and self.here.act_run(["sh", "-c", 'base64 -d < "$1" | tar -xf - -C "$2"', "sh", packed, into]).ok
-            if got.ok:
-                self.here.remove(packed)
-            if not landed:
+            if not self.collect_tree(root + "/results", rid, into):
                 warn("  could not copy %s onto the task" % rid)
                 continue
             if act.dry_run():
@@ -1610,7 +1621,7 @@ class MacAB:
     def read_progress(self):
         """Every step of a Mac A/B: what it is, the command that does it, and the one that proves it."""
         info("the A/B on %s, step by step" % self.name)
-        n, mode, vol, status = self.name, self.d.mode, self.d.c("NODE_VOLUME"), "wk bench ab --devices %s --status" % self.name
+        n, mode, vol, status = self.name, self.d.mode, self.d.c("volume"), "wk bench ab --devices %s --status" % self.name
         steps = []
 
         def step(state, title, detail="", do="", verify=""):
@@ -1628,7 +1639,7 @@ class MacAB:
             return 0
         root = self.d.bench_root() or ""
         if not self.guest:
-            profile = self.d.c("NODE_PROFILE") or "<profile>"
+            profile = self.d.c("profile") or "<profile>"
             version = self.mac.out("mac-version.sh", WK_PATH=self.d.volume() + "/System/Library/CoreServices/SystemVersion.plist")
             step("yes" if version else "no", "the benchmark volume exists", "'%s', macOS %s" % (vol, version) if version else
                  "'%s' is not mounted here (a shutdown unmounts it; --all makes one that is not there at all)" % vol,
@@ -1676,7 +1687,7 @@ class MacAB:
             step("no", "a job is planted for the staged arms", "the planted job names arms that are not staged now (%s) -- it is an older "
                  "experiment's, and its rounds below are not this one's" % " ".join(job_arms), plant, status)
         st = self.mac.read(root + "/autorun.state") if root else ""
-        last = dict(l.split("=", 1) for l in st.splitlines() if "=" in l)
+        last = dict(l.split("=", 1) for l in st.splitlines() if "=" in l)  # last one wins: a crash mid-rewrite of autorun.state can leave a key twice, and the later line is the newer value
         results = len(self.mac.out("mac-ls.sh", WK_PATH=root + "/results").split()) if root else 0
         if not fresh:
             step("no", "the rounds are done", "nothing has run for these arms", "boot the volume; the planted job runs them", status)
@@ -1737,10 +1748,9 @@ class PgoCollect:
 
     def pins(self):
         """speedometer3 and jetstream3 name a moving branch, so each benchmark is pinned by its upstream commit first."""
-        from wk.clock import Clock
         from wk.store import Store
         store = Store(self.env)
-        seeder = seed.Seeder(self.m, Lock(store, self.m, self.clock or Clock()), os.path.join(store.artifact_dir(), "bench"))
+        seeder = seed.Seeder(self.m, Lock(store, self.m, self.clock or Clock()), os.path.join(store.artifact_dir(), "bench"), store.mirror())
         out = []
         for plan in pgo.BENCHMARKS:
             d = seeder.seed(plan, seed.plan_json(self.read, plan))
@@ -1765,7 +1775,7 @@ class PgoCollect:
             die("this machine cannot present an unthrottled browser, so every profile it collected would be of a throttled one:\n"
                 "%s\n    Collect on a machine that can -- the benchmark install." % "\n".join("  " + f for f in faults))
         self.m.mkdir(self.state)
-        self.m.act_run(lib_argv(self.root, QUIET, "mac_raiser_on", self.state))
+        self.m.act_run(lib_argv(self.root, RAISER, "mac_raiser_on", self.state))
         try:
             check = os.path.join(self.state, "browser-check.json")
             if not self.m.act_run(["/usr/bin/python3", os.path.join(self.root, CHECK), "--build-directory", instr, "--json", check]).ok:
@@ -1776,20 +1786,19 @@ class PgoCollect:
             self.m.write(os.path.join(self.state, "payload-pins"), text)
             log("wk: profiling against pinned payloads:\n" + "\n".join("  " + l for l in text.splitlines()))
             self.m.remove(profile)   # collect-pgo-profiles refuses a directory that is not empty
-            watch = os.path.join(self.state, "screen-watch")
-            self.m.act_run(lib_argv(self.root, QUIET, "screen_watch_start", watch))
+            watch = screen.Watch(self.m, self.root, self.clock or Clock(), self.env)
+            watch.start()
             rc = self.m.run_tty(self.argv(instr, profile, arch, pins)).rc
-            seen = self.m.act_run(lib_argv(self.root, QUIET, "screen_watch_stop", watch))
-            if not seen.ok:
+            seen = watch.stop()
+            if seen:
                 die("something drew over this collection, so every leg after it profiled a covered browser:\n%s"
-                    % "\n".join("  " + l for l in seen.out.splitlines()))
+                    % "\n".join("  " + l for l in seen))
         finally:
-            self.m.act_run(lib_argv(self.root, QUIET, "mac_raiser_off", self.state))
+            self.m.act_run(lib_argv(self.root, RAISER, "mac_raiser_off", self.state))
         if rc:
             return rc
         self.m.write(os.path.join(profile, "payload-pins"), text)
-        if not self.m.act_run(["env", "PYTHONPATH=" + os.path.join(self.root, "lib"), "/usr/bin/python3", "-m", "wk.pgo", "check",
-                               "--dir", profile, "--scripts", self.scripts, "--compressed", arch,
+        if not self.m.act_run(isolated_module(os.path.join(self.root, "lib"), "wk.pgo", "/usr/bin/python3") + ["check", "--dir", profile, "--scripts", self.scripts, "--compressed", arch,
                                "--json", os.path.join(self.state, "profile-check.json")]).ok:
             die("the collection finished and its profile is not one to build against (above)")
         return 0
@@ -1810,7 +1819,7 @@ class PgoCollect:
 def main(argv, env=None, here=None):
     """python3 -m wk.bench.mac <verb>: what build/mac-pgo.sh asks, one line each there."""
     env = os.environ if env is None else env
-    root = env.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    root = images.root(env)
     from wk.machine import Local
     here = here or Local()
     verb, args = (argv or [""])[0], argv[1:]

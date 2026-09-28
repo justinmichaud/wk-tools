@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk push on|off|status -- whether a workspace can push to git at all
-# wk: where=local name=none group=sources takes=1 opts --target=,--all dryrun on,off
+# wk: where=local name=none group=sources takes=1 verbs=on,off,status default=status opts --target=,--all dryrun on,off
 # wk: readonly status
 # wk: destructive on
 #
@@ -42,38 +42,43 @@
 #
 #   0  push is on (status), or the action succeeded
 #   1  push is off (status), or the action failed
-#   3  a machine did not answer, so its position is unknown -- never "off"
+#   3  a machine did not answer, so its position is unknown -- never "off"; in
+#      the podman machine, `on`/`off` switched its half and not the host's guests'
 #   4  there are no deploy keys on this machine at all
 #   5  this machine has no switch: its keys are live wherever they sit
 
 import os
+import signal
 import sys
 
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import act, decl, guest, record, secrets, status, targets  # noqa: E402
+from wk import act, decl, guest, job, record, secrets, status, targets  # noqa: E402
 from wk.act import Refused, die, info, log, warn  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 
-USAGE = "usage: wk push on|off|status; see wk push -h"
 UNASKED, NO_KEYS, NO_SWITCH = 3, 4, 5
 
-# The process is called `claude`, `node` or a version string, but its exe path resolves under the Claude install.
-AGENT_PID_SCAN = '''for e in /proc/[0-9]*/exe; do
-    case "$(readlink "$e" 2>/dev/null)" in
-        */claude/versions/*|*/.local/bin/claude) p=${e#/proc/}; printf "%s\\n" "${p%/exe}" ;;
-    esac
-done'''
+# The process is `claude`, `node` or a version string, but its exe resolves under the install; a macOS guest has no /proc.
+AGENT_PID_SCAN = '''if [ -d /proc/self ]; then
+    for e in /proc/[0-9]*/exe; do
+        case "$(readlink "$e" 2>/dev/null)" in
+            */claude/versions/*|*/.local/bin/claude) p=${e#/proc/}; printf "%s\\n" "${p%/exe}" ;;
+        esac
+    done
+else
+    ps -Ao pid=,comm= | while read -r p c; do
+        case "$c" in */claude/versions/*|*/.local/bin/claude|claude) printf "%s\\n" "$p" ;; esac
+    done
+fi'''
+
+NOT_RUNNING = ("absent", "created", "configured", "exited", "stopped")
 
 
 def parse(argv):
     args = decl.Args(decl.Decl(__file__), argv)
-    action = "status"
-    if args.positionals:
-        if len(args.positionals) > 1 or args.positionals[0] not in ("on", "off", "status"):
-            die(USAGE)
-        action = args.positionals[0]
+    action = args.positionals[0]
     target_named = {"--all": "--all" if args.flag("--all") else None, "--target": args.value("--target")}
     target = ""
     for opt in args.order:
@@ -144,6 +149,7 @@ class Push:
         self.ws_sock = self.target.agent_sock() if self.target else None
         self.sock, self.pat, self.bz = sec.machine_sock(), sec.machine_pat(), sec.machine_bugzilla_key()
         self.guest_live = False
+        self.in_vm = bool(reg.env.get("WK_IN_VM")) and not sec.macos
 
     def say(self, what, text):
         self.out.write("%-10s %s\n" % (what, text))
@@ -154,50 +160,71 @@ class Push:
             rc = max(rc, self.converge_guests(action))
         return rc
 
-    # -- the claude sessions `on` would hand a push
+    def session_targets(self):
+        """Every target this machine holds workspaces on, each of which `on` would hand the keys: the macOS guests too."""
+        out = [self.target] if self.target else []
+        if self.sec.macos and self.reg.vm_listed():
+            try:
+                out.append(self.reg.load("vm"))
+            except LookupError:
+                pass
+        return out
 
-    def agent_pids(self, ws):
-        return self.target.exec(ws, ["sh", "-c", AGENT_PID_SCAN]).out.replace("\r", "").split()
+    def agent_pids(self, t, ws):
+        """The claude pids in `ws`, or None: its scan failed and it may be running one."""
+        r = t.exec(ws, ["sh", "-c", AGENT_PID_SCAN])
+        if not r.ok:
+            return [] if t.info(ws) in NOT_RUNNING else None
+        return [p for p in r.out.replace("\r", "").split() if p.isdigit()]
 
     def agent_sessions(self):
-        return [ws for ws, _ in self.target.list() if ws and self.agent_pids(ws)]
-
-    def wait_gone(self, ws, limit):
-        waited = 0
-        while waited < limit and self.agent_pids(ws):
-            self.clock.sleep(1)
-            waited += 1
-        return waited
+        """(target, workspace, pids) for each workspace with a claude process in it, pids None where it could not be asked."""
+        found = [(t, ws, self.agent_pids(t, ws)) for t in self.session_targets() for ws, _ in t.list() if ws]
+        return [(t, ws, pids) for t, ws, pids in found if pids is None or pids]
 
     def end_agent_sessions(self, sessions):
-        """False when one outlived the KILL."""
+        """False when one outlived the KILL, or could no longer be asked."""
         ok = True
-        for ws in sessions:
-            pids = self.agent_pids(ws)
+        for t, ws, _ in sessions:
+            pids = self.agent_pids(t, ws)
+            if pids is None:
+                ok = False
+                continue
             if not pids:
                 continue
             info("ending the claude session(s) in '%s' (pid %s)" % (ws, " ".join(pids)))
-            self.target.act_exec(ws, ["sh", "-c", "kill %s 2>/dev/null; exit 0" % " ".join(pids)])
+            seen, grace = {"pids": pids}, int(self.reg.env.get("WK_KILL_WAIT") or 15)
+
+            def send(s, t=t, ws=ws, seen=seen, grace=grace):
+                if s == signal.SIGKILL:
+                    warn("pid %s did not stop on TERM after %ds -- killing" % (" ".join(seen["pids"]), grace))
+                t.act_exec(ws, ["sh", "-c", "kill %s%s 2>/dev/null; exit 0"
+                                % ("-KILL " if s == signal.SIGKILL else "", " ".join(seen["pids"]))])
+
+            def gone(t=t, ws=ws, seen=seen):
+                seen["pids"] = self.agent_pids(t, ws)
+                return not seen["pids"]
             if act.dry_run():
+                send(signal.SIGTERM)
                 continue
-            waited = self.wait_gone(ws, int(self.reg.env.get("WK_KILL_WAIT") or 15))
-            pids = self.agent_pids(ws)
-            if not pids:
-                continue
-            warn("pid %s did not stop on TERM after %ds -- killing" % (" ".join(pids), waited))
-            self.target.act_exec(ws, ["sh", "-c", "kill -KILL %s 2>/dev/null; exit 0" % " ".join(pids)])
-            self.wait_gone(ws, 5)
-            ok = ok and not self.agent_pids(ws)
+            job.terminate(send, gone, self.clock, grace, 5)
+            ok = ok and seen["pids"] == []
         return ok
 
     def end_sessions_first(self, sessions):
+        unknown = " ".join(ws for _, ws, pids in sessions if pids is None)
+        if unknown:
+            act.barrier("could not ask %s whether a claude session runs in it, and it may be running one --\n    loading the "
+                        "deploy keys would hand that session a working push. 'wk status' names\n    what is wrong with it." % unknown)
+        sessions = [(t, ws, pids) for t, ws, pids in sessions if pids]
+        names = " ".join(ws for _, ws, _ in sessions)
         if sessions and os.environ.get("WK_FORCE"):
             act.barrier("a claude session is running in %s -- loading the deploy keys hands it a\n    working push for as long "
-                        "as it runs, and its commit wall stays until it exits." % " ".join(sessions))
+                        "as it runs, and its commit wall stays until it exits." % names)
         elif sessions:
             warn("a claude session is running in %s -- loading the keys\n    would hand it a working push, and its commit wall "
-                 "stays until it exits, so\n    it is ended first. Whatever it has not written down cannot be undone." % " ".join(sessions))
-            if not act.confirm("end the claude session(s) in %s?" % " ".join(sessions)):
+                 "stays until it exits, so\n    it is ended first. Whatever it has not written down cannot be undone." % names)
+            if not act.confirm("end the claude session(s) in %s?" % names):
                 die("push stays off -- nothing was loaded and no session was touched")
             if not self.end_agent_sessions(sessions):
                 die("a claude session outlived a KILL, so the keys stay out of the agent.\n    Find it:  wk enter <workspace>")
@@ -359,6 +386,10 @@ class Push:
     # -- a macOS host's guests: an ssh-agent here and an `ssh -N -R` per guest (lib/wk/guest.py)
 
     def converge_guests(self, action):
+        if self.in_vm:
+            warn("this is the podman machine's half of the switch: the host's agent for its macOS\n    guests is not reached "
+                 "from here, so push is not %s everywhere. On the host:  wk push %s" % (action, action))
+            return UNASKED
         if not self.sec.macos or guest.vm_push_keys_converge(ROOT, self.sec.machine, action):
             return 0
         warn("the guest(s) named above were not converged and may still reach the agent;\n    'wk push %s' again once each one "
@@ -367,6 +398,9 @@ class Push:
 
     def guest_agent_row(self):
         """A key in the guests' agent is a push from every guest holding a forward, whether or not one is up now."""
+        if self.in_vm:
+            self.say("guests", "not read from the podman machine -- 'wk push status' on the host")
+            return
         n = guest.vm_push_agent_keys(ROOT, self.sec.machine) if self.sec.macos else None
         if n is None:
             return
@@ -391,7 +425,7 @@ def main(argv, env=None, reg=None, clock=None, out=None):
     if reg.in_workspace():
         die("'wk push' throws the credential switch, and this is workspace '%s'.\n    The keys and the token are on the host and "
             "a workspace cannot reach either --\n    which is what makes the switch a switch. Run it on the host."
-            % targets.read_conf(reg.marker_path()).get("name", ""))
+            % reg.workspace_name())
     action, target = parse(argv)
     if target:
         return FanOut(reg, action, out or sys.stdout).run(target)

@@ -7,12 +7,13 @@ import hashlib
 import os
 import re
 
+from wk import images
 from wk.boot.driver import BOOT_PRIV, CARD_PRIV, Channel, Onboard, disk_of, part, root_priv
 from wk.clock import FakeClock
 from wk.kv import kv
 from wk.machine import Fake, Result
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+ROOT = images.root()
 PARAMS = re.compile(r"^((?:[A-Z_][A-Z0-9_]*=[^;]*; )*)")
 
 
@@ -45,8 +46,8 @@ class FakeBoard(Channel):
         self.sides = {"m_ssh": Side(self, "host"), "i_ssh": Side(self, "bench")}
         self.onboard = {Onboard(ROOT, n).text(): n for n in os.listdir(os.path.join(ROOT, "boot", "onboard"))}
         self.fat = {}
-        self.roots = {self.conf["NODE_ROOT"]: {"id": "", "role": "rescue"}}
-        self.running = self.conf["NODE_ROOT"]
+        self.roots = {self.conf["root"]: {"id": "", "role": "rescue"}}
+        self.running = self.conf["root"]
         self.boots, self.booted = 1, int(self.clock.now())
         self.one_shot = None
         self.tryboot = False
@@ -62,8 +63,8 @@ class FakeBoard(Channel):
 
     # -- laying out media
     def rescue(self, ident, role="rescue"):
-        self.roots[self.conf["NODE_ROOT"]] = {"id": ident, "role": role}
-        self.fat[part(disk_of(self.conf["NODE_ROOT"]), 1)] = {"config.txt": "dtparam=audio=on\n", "cmdline.txt": "root=%s\n" % self.conf["NODE_ROOT"]}
+        self.roots[self.conf["root"]] = {"id": ident, "role": role}
+        self.fat[part(disk_of(self.conf["root"]), 1)] = {"config.txt": "dtparam=audio=on\n", "cmdline.txt": "root=%s\n" % self.conf["root"]}
 
     def write_system(self, boot, ident, failsafe=None, watchdog=True, systemd=True):
         root = part(disk_of(boot), int(re.search(r"(\d+)$", boot).group(1)) + 1)
@@ -71,16 +72,16 @@ class FakeBoard(Channel):
                           "cmdline.txt": "root=%s rootwait\n" % root, "kernel8.img": "k"}
         self.roots[root] = {"id": ident, "role": "bench", "failsafe": failsafe, "watchdog": watchdog, "systemd": systemd}
         disk = disk_of(boot)
-        if self.conf.get("NODE_DRIVER") == "pi-mbr":
+        if self.conf.get("driver") == "pi-mbr":
             self.mbr[disk] = "83"
         return root
 
     def sd(self):
-        return part(disk_of(self.conf["NODE_ROOT"]), 1)
+        return part(disk_of(self.conf["root"]), 1)
 
     # -- the firmware
     def firmware(self):
-        drv, dev, sd = self.conf.get("NODE_DRIVER"), self.conf.get("NODE_DEVICE", ""), self.fat.get(self.sd(), {})
+        drv, dev, sd = self.conf.get("driver"), self.conf.get("device", ""), self.fat.get(self.sd(), {})
         if drv == "pi-sd":
             m = re.search(r"(?m)^os_prefix=(\w+)/", sd.get("config.txt", ""))
             return kv(sd.get(m.group(1) + "/cmdline.txt", "").replace(" ", "\n")).get("root", "") if m else None
@@ -98,7 +99,7 @@ class FakeBoard(Channel):
         self.tryboot = tryboot
         root = self.firmware()
         self.one_shot = None
-        self.running = root if root in self.roots else self.conf["NODE_ROOT"]
+        self.running = root if root in self.roots else self.conf["root"]
         self.boots += 1
         self.clock.sleep(40)
         self.booted = int(self.clock.now())
@@ -109,7 +110,7 @@ class FakeBoard(Channel):
 
     # -- the Channel: every call is the real one, over the two sides
     def on_rescue(self):
-        return self.running == self.conf["NODE_ROOT"]
+        return self.running == self.conf["root"]
 
     def machine(self, fn):
         return self.sides[fn]

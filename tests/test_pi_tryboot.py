@@ -13,18 +13,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, bash
+from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act  # noqa: E402
+from wk.boot.cli import load_conf  # noqa: E402
 from wk.boot.driver import root_priv  # noqa: E402
 from wk.boot.pi import PiTryboot  # noqa: E402
 from wk.machine import Result  # noqa: E402
 
 TRYBOOT = REPO / "boot" / "onboard" / "tryboot.sh"
-CONF = {"NODE_NAME": "rpi4", "NODE_DRIVER": "pi-tryboot", "NODE_DEVICE": "/dev/sda", "NODE_ROOT": "/dev/mmcblk0p2",
-        "NODE_DTB": "bcm2711-rpi-4-b.dtb", "NODE_ROLE": "bench-device", "NODE_PROFILE": "p"}
+CONF = {"name": "rpi4", "driver": "pi-tryboot", "device": "/dev/sda", "root": "/dev/mmcblk0p2",
+        "dtb": "bcm2711-rpi-4-b.dtb", "role": "bench-device", "profile": "p"}
 
 
 class Channel:
@@ -55,9 +56,9 @@ def refused(fn, *args, **kw):
 
 class TestArrangement(unittest.TestCase):
     def test_rpi4_names_the_driver_and_keeps_its_media(self):
-        cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/boot/machines.sh"; machine_load rpi4; '
-                  'echo "$NODE_DRIVER $NODE_DEVICE $NODE_ROOT $NODE_DTB"', env={"WK_MACHINES_DIR": str(REPO / "machines")})
-        self.assertEqual(cp.stdout.strip(), "pi-tryboot /dev/sda /dev/mmcblk0p2 bcm2711-rpi-4-b.dtb", cp.stderr)
+        c = load_conf(REPO, "rpi4", {"WK_MACHINES_DIR": str(REPO / "machines")})
+        self.assertEqual([c[k] for k in ("driver", "device", "root", "dtb")],
+                         ["pi-tryboot", "/dev/sda", "/dev/mmcblk0p2", "bcm2711-rpi-4-b.dtb"])
 
     def test_this_board_is_armed_from_its_rescue(self):
         """the rescue is the one system on this board that always carries systemd, which passes the flag."""
@@ -187,7 +188,7 @@ class TestStagingRuns(unittest.TestCase):
         (shim / "sync").write_text("#!/bin/sh\nexit 0\n")
         for f in shim.iterdir():
             f.chmod(0o755)
-        d = PiTryboot(REPO, dict(CONF, NODE_ROOT="/dev/fake2"), None)
+        d = PiTryboot(REPO, dict(CONF, root="/dev/fake2"), None)
         text = d.ob("tryboot.sh", WK_DO="stage", WK_SD="/dev/fake1", WK_SRC="/dev/sda1", WK_DTB="bcm2711-rpi-4-b.dtb").text()
         cp = subprocess.run(["sh", "-c", text], capture_output=True, text=True,
                             env={"PATH": "%s:/usr/bin:/bin" % shim})

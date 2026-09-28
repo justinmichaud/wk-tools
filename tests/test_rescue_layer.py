@@ -37,7 +37,7 @@ class TestRescueLayer(unittest.TestCase):
 
     def test_installed_where_the_card_code_looks(self):
         self.assertIn('CARD_PRIV_DIR = "/usr/local/libexec"', RECIPE.read_text())
-        self.assertIn('CARD_PRIV = "/usr/local/libexec/wk-card-priv"', (REPO / "lib/wk/boot/driver.py").read_text())
+        self.assertIn('CARD_PRIV = "/usr/local/libexec/wk-card-priv"', (REPO / "lib/wk/sudo.py").read_text())
 
     def test_a_host_install_puts_the_checker_beside_the_helper(self):
         """admin/install.sh (./setup --stage quiesce on a card machine) installs

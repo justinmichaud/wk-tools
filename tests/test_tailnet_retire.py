@@ -12,6 +12,7 @@ urllib transport against a loopback server.
 
 Run: python3 tests/run.py --unit -k test_tailnet_retire
 """
+import contextlib
 import io
 import json
 import os
@@ -26,7 +27,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "lib"))
-from wk import tailnet  # noqa: E402
+from wk import act, tailnet  # noqa: E402
 
 
 class FakeTailnet:
@@ -130,6 +131,18 @@ class TestRetire(TailnetTest):
         self.assertEqual(fake.asked, [])
 
 
+    def test_a_stored_credential_that_is_no_api_key_is_refused_rather_than_called_missing(self):
+        self.key.write_text("tskey-auth-kXYZ-abc\n")
+        fake = FakeTailnet([node("111", "rpi3-bench", "rpi3-bench")])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(act.Refused) as cm:
+            self.fleet(fake).retire("rpi3-bench")
+        self.assertEqual(cm.exception.status, 4)
+        self.assertIn("does not hold a tailnet API access key", err.getvalue())
+        self.assertIn("wk key set tailnet-api --replace", err.getvalue())
+        self.assertEqual(fake.asked, [])
+
+
 class TestCredential(TailnetTest):
     def test_a_refused_credential_names_the_rotation(self):
         rc, _out, err = self.run_main(FakeTailnet(status=401), "check")
@@ -158,7 +171,9 @@ class TestCredential(TailnetTest):
         self.assertEqual(fake.asked[0][2]["Authorization"], "Basic dHNrZXktYXBpLWFiYzEyMzo=")
 
     def test_an_unknown_verb_is_the_usage(self):
-        self.assertEqual(self.run_main(FakeTailnet(), "retire", "x")[0], 1)
+        with self.assertRaises(SystemExit) as cm:
+            self.run_main(FakeTailnet(), "retire", "x")
+        self.assertEqual(cm.exception.code, 2)
 
 
 class TestAuthKey(TailnetTest):

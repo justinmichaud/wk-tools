@@ -31,11 +31,8 @@ check_order() {
     esac
 }
 
-# What this machine can be asked, not what the verb list holds: a Pi has no
-# `bless` and a Mac has neither vcmailbox nor /run/systemd, so a static yes for
-# every verb is a claim three of them cannot back on any one machine. `detach`
-# names the mechanism the reboot verbs use, so a caller can tell this helper from
-# one whose detach macOS does not ship and whose reboot exits 0 having done nothing.
+# What this machine can be asked: a Pi has no `bless`, a Mac has neither
+# vcmailbox nor /run/systemd. `detach` names the mechanism the reboot verbs use.
 v_status() {
     say "ok"
     command -v vcmailbox >/dev/null 2>&1 && say "order=yes" || say "order=no (no vcmailbox here)"
@@ -54,9 +51,7 @@ v_order() {
 }
 
 # Detached after a delay: the reboot kills the ssh session that asked for it, and
-# the teardown SIGHUPs the process group. `nohup` and not `setsid`, which macOS
-# does not ship -- with setsid this verb said "rebooting in 3s" and rebooted
-# nothing on every Mac, for as long as it existed.
+# the teardown SIGHUPs the process group. `nohup`, since macOS ships no `setsid`.
 v_reboot() {
     [ $# -eq 0 ] || deny "reboot takes no arguments"
     nohup sh -c 'sleep 3; reboot' </dev/null >/dev/null 2>&1 &
@@ -73,15 +68,11 @@ v_reboot_tryboot() {
     say "rebooting into tryboot in 3s"
 }
 
-# macOS. Which install the firmware boots is signed into a LocalPolicy. `bless
-# --help` (26.6.2, tolken) lists --user/--stdinpass under Snapshot options and
-# not under Mount Mode, so this blesses with root alone and quotes what bless
-# answered: whether that suffices is the platform's answer, and one run has it.
-# The gate is the volume, not an argument: neither verb takes one, no credential
-# is read and nothing reaches stdin, and the only volume `boot-volume` will ever
-# bless is a mounted macOS system volume that is not the running one and carries
-# /etc/wk-image naming a perf-macos profile -- a wk benchmark install and
-# nothing else.
+# macOS: `bless --help` (26.6.2) lists --user/--stdinpass only under Snapshot
+# options, so this blesses with root alone and quotes what bless answered. The
+# gate is the volume, not an argument: the only volume `boot-volume` blesses is a
+# mounted macOS system volume, not the running one, whose /etc/wk-image names a
+# perf-macos profile.
 
 bench_install() {   # the one wk benchmark install mounted here, or a refusal
     local v found="" n=0
@@ -111,9 +102,7 @@ v_boot_volume() {
     say "blessed $v"
 }
 
-# The way back, and the reason `wk boot` exercises it before it arms anything:
-# --setBoot is sticky, so a machine sent to the benchmark install without a
-# proven return is a machine that boots into it forever.
+# The way back: --setBoot is sticky, so `wk boot` proves this before it arms.
 v_boot_host() {
     [ $# -eq 0 ] || deny "boot-host takes no arguments"
     _bless /

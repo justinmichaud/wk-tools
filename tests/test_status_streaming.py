@@ -212,7 +212,7 @@ class TestEveryWorkspaceIsInTheListing(WkTest):
 
 _STOPPED_PODMAN = '''#!/bin/sh
 case "$*" in
-    *"machine inspect"*) echo stopped ;;
+    *"machine inspect"*) echo '[{"Name": "wk", "State": "stopped"}]' ;;
     *) exit 1 ;;
 esac
 '''

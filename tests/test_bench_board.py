@@ -1,4 +1,4 @@
-"""A board as a bench system (lib/wk/bench/board.py): `wk bench deploy` landing a lane's slot on its bench system,
+"""A board as a bench system (lib/wk/bench/board.py): `wk bench deploy` landing an image workspace's slot on its bench system,
 verified against the manifest read back off it, and `wk bench run <ws> <plan> --system <board>` measuring one slot
 there -- the bench system found and prepared through the boot driver's channel, the session brought up, run-benchmark
 run here with the board's page server behind `Machine.forward`, and the board's evidence taken whether or not the
@@ -34,7 +34,7 @@ from tests.support import REPO, requires_machine
 
 sys.path.insert(0, str(REPO / "lib"))
 from tests.test_bench_pipeline import PLAN_JSON, RESULT, SHA, Proc, Reg as PipelineReg, invoke  # noqa: E402
-from wk import act, fleet, images, record  # noqa: E402
+from wk import act, images, pgo, record, samply  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import board, board_ab, cli, record as brecord  # noqa: E402
 from wk.boot import cli as bootcli  # noqa: E402
@@ -42,14 +42,16 @@ from wk.boot.driver import Driver, Onboard, part  # noqa: E402
 from wk.boot.fake import FakeBoard, Side  # noqa: E402
 from wk.boot.pi import Rpi5Usb  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
+from wk.kv import kv  # noqa: E402
+from wk.lock import Lock  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 WS = "buildroot-webkit-2.52-buildroot-rpi5-64"
 FILES = {"usr/lib/libWPEWebKit-2.0.so.1.0.0": b"webkit-bytes-here"}
 BOARD = "testboard"
-BCONF = ('KIND=board\nNODE_SSH=testboard-rescue\nNODE_BENCH_SSH=testboard-bench\nNODE_DRIVER=rpi5-usb\nNODE_ROLE=bench-device\n'
-         'NODE_ROOT=/dev/mmcblk0p2\nNODE_DEVICE=/dev/sda\nNODE_NOTE="test board"\n')
+BCONF = ('kind=board\nssh=testboard-rescue\nbench_ssh=testboard-bench\ndriver=rpi5-usb\nrole=bench-device\n'
+         'root=/dev/mmcblk0p2\ndevice=/dev/sda\nnote="test board"\n')
 SLOT_DOC = {"slot": "a", "workspace": WS, "profile": "buildroot-rpi5-64", "browser": "cog", "commit": SHA, "build_id": "b1d" * 8,
             "build_config": "wpe-cross-release", "lib_dir": "usr/lib", "exec_dir": "usr/libexec/wpe-webkit-2.0",
             "bundle_dir": "usr/lib/wpe-webkit-2.0/injected-bundle", "lib_file": "usr/lib/libWPEWebKit-2.0.so.1.0.0",
@@ -96,8 +98,8 @@ def _mv(argv, fake):
 
 
 def board_conf():
-    return {"NODE_NAME": BOARD, "NODE_SSH": "testboard-rescue", "NODE_BENCH_SSH": "testboard-bench", "NODE_DRIVER": "rpi5-usb",
-            "NODE_ROLE": "bench-device", "NODE_ROOT": "/dev/mmcblk0p2", "NODE_DEVICE": "/dev/sda", "NODE_NOTE": "test board"}
+    return {"name": BOARD, "ssh": "testboard-rescue", "bench_ssh": "testboard-bench", "driver": "rpi5-usb",
+            "role": "bench-device", "root": "/dev/mmcblk0p2", "device": "/dev/sda", "note": "test board"}
 
 
 class BenchSide(Side):
@@ -237,7 +239,7 @@ class TestDeploy(unittest.TestCase):
         """The barrier asks the boot driver's own record: an arming not yet spent means the filesystem answering
         ssh is not the one about to run."""
         w = DeployWorld(self.tmp)
-        w.board.running = w.board.conf["NODE_ROOT"]
+        w.board.running = w.board.conf["root"]
         w.board.rescue("")
         w.board.record = "image=sys-b\narmed_boot_id=boot-%d\n" % w.board.boots
         err = io.StringIO()
@@ -248,7 +250,7 @@ class TestDeploy(unittest.TestCase):
 
     def test_a_board_that_declares_no_driver_is_refused(self):
         w = DeployWorld(self.tmp)
-        (Path(w.env["WK_MACHINES_DIR"]) / "bare.conf").write_text("KIND=board\nNODE_SSH=bare\n")
+        (Path(w.env["WK_MACHINES_DIR"]) / "bare.conf").write_text("kind=board\nssh=bare\n")
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()), local_holders():
             w.bench().deploy(WS, "bare", "a", machine=w.fake)
 
@@ -374,6 +376,15 @@ class TestTheBrokerRunsTheSameCommandOnTheWorkstation(unittest.TestCase):
             b.build_run({"machine": BOARD, "plan": "jetstream3"})
 
 
+def cached_samply(w):
+    """samply for the board's aarch64 userspace, already fetched into this host's store."""
+    path = os.path.join(samply.store_dir(w.store.artifact_dir(), samply.triple("aarch64")), "samply")
+    os.makedirs(os.path.dirname(path))
+    Path(path).write_text("binary")
+    w.answer(["test", "-x", path])
+    return path
+
+
 class BoardWorld(Fake):
     """This host running `wk bench run ws <plan> --system testboard`: its store, the mirror the runner tree is
     exported from (already exported), the payload pinned, and a BenchBoard up in bench mode with slot `a` on it.
@@ -455,7 +466,6 @@ class BoardWorld(Fake):
         with self.patches(), contextlib.redirect_stderr(err):
             system = board.for_board(str(REPO), reg, "", self.clock, BOARD)
             r = board.BoardRun(str(REPO), reg, system, self.clock, self.env, self.popen)
-            os.makedirs(r.bench_dir, exist_ok=True)
             try:
                 rc = r.go(plan, o)
             except Refused as e:
@@ -514,6 +524,19 @@ class BoardTest(unittest.TestCase):
 
 
 class TestARun(BoardTest):
+    def test_a_pgo_slot_carries_its_profile_reading_into_the_run(self):
+        w = self.world()
+        w.board.bench.files[board.slot_path("a") + "/slot.json"] = json.dumps(dict(SLOT_DOC, build_config=pgo.USE))
+        w._set_file(os.path.join(images.pgo_dir(WS, "a", w.env), "profile-check.json"), '{"missing": []}')
+        self.assertEqual(w.invoke(), 0, w.err)
+        self.assertEqual((w.run_dir() / "profile-check.json").read_text(), '{"missing": []}')
+
+    def test_a_slot_built_without_pgo_carries_no_reading(self):
+        w = self.world()
+        w._set_file(os.path.join(images.pgo_dir(WS, "a", w.env), "profile-check.json"), '{"missing": []}')
+        self.assertEqual(w.invoke(), 0, w.err)
+        self.assertFalse((w.run_dir() / "profile-check.json").exists())
+
     def test_the_board_is_prepared_and_the_run_is_run_here_with_its_forward_held(self):
         w = self.world()
         self.assertEqual(w.invoke(), 0, w.err)
@@ -582,26 +605,26 @@ class TestRefusals(BoardTest):
 
     def test_a_board_in_host_mode_is_not_measured(self):
         w = self.world()
-        w.board.running = w.board.conf["NODE_ROOT"]
+        w.board.running = w.board.conf["root"]
         w.board.rescue("")
         self.assertIn("not running a wk bench system", self.refused(w))
         self.assertEqual(w.watched, [])
 
     def test_a_board_on_its_rescue_system_is_a_barrier(self):
         w = self.world()
-        w.board.running = w.board.conf["NODE_ROOT"]
+        w.board.running = w.board.conf["root"]
         self.assertIn("running its rescue system", self.refused(w))
 
     def test_a_board_armed_for_a_boot_it_has_not_taken_is_not_measured(self):
         w = self.world()
-        w.board.running = w.board.conf["NODE_ROOT"]
+        w.board.running = w.board.conf["root"]
         w.board.rescue("")
         w.board.record = "image=sys-b\narmed_boot_id=boot-%d\n" % w.board.boots
         self.assertIn("armed for system 'sys-b'", self.refused(w))
 
     def test_no_slot_names_the_deploy(self):
         w = self.world()
-        self.assertIn("wk bench deploy <lane> testboard --slot b", self.refused(w, "jetstream3", "--slot", "b"))
+        self.assertIn("wk bench deploy <workspace> testboard --slot b", self.refused(w, "jetstream3", "--slot", "b"))
 
     def test_an_instrumented_slot_is_never_measured(self):
         w = self.world()
@@ -623,7 +646,7 @@ class TestRefusals(BoardTest):
     def test_a_collection_needs_an_instrumented_slot(self):
         self.assertIn("would write no profile", self.refused(self.collecting(), "jetstream3", "--slot", "a", "--collect"))
 
-    def test_a_collection_lands_in_its_lane_and_in_no_task(self):
+    def test_a_collection_lands_in_its_image_workspace_and_in_no_task(self):
         w = self.collecting()
         self.assertEqual(w.invoke("jetstream3", "--slot", "a-instr", "--collect"), 0, w.err)
         self.assertEqual(w.tasks(), [])
@@ -769,17 +792,13 @@ class TestALegForAnAB(BoardTest):
         self.assertEqual((env["warmup"], env["warmup_kind"]), (True, "settle"))
 
     def test_a_warmup_leg_stages_the_profiler_and_keeps_both_artifacts(self):
-        from wk.quiet import lib_argv
         w = self.world()
         taskdir = self.task(w)
-        samply = w.tmp / "samply"
-        samply.write_text("binary")
-        w.answer(lib_argv(str(REPO), "lib/profiler.sh", "profiler_resolve")[:3], out="samply upstream publishes samply for aarch64\n")
-        w.answer(lib_argv(str(REPO), "lib/profiler.sh", "samply_fetch")[:3], out=str(samply) + "\n")
+        binary = cached_samply(w)
         capture = "%s/%s-a.profile.json" % (board.PROF_REMOTE, BOARD)
         w.board.bench.files[capture] = "{\"meta\": {}}"
         self.assertEqual(w.leg(slot="a", task="t1", round="0", arm="a", warmup="1"), 0, w.err)
-        self.assertIn(("copy_in", str(samply), board.PROF_REMOTE + "/samply"), w.board.bench.effects)
+        self.assertIn(("copy_in", binary, board.PROF_REMOTE + "/samply"), w.board.bench.effects)
         self.assertTrue([e for e in w.board.bench.effects if e[0] == "act" and "perf_event_paranoid" in e[1][-1]])
         self.assertTrue((taskdir / "warmup" / "testboard-a.evidence.json").is_file())
         self.assertTrue((taskdir / "warmup" / "testboard-a.profile.json").is_file())
@@ -787,11 +806,22 @@ class TestALegForAnAB(BoardTest):
         env = w.env_json()
         self.assertEqual((env["warmup_kind"], env["profiler"], env["host"]["perf_event_paranoid"]), ("evidence", "samply", "2"))
 
+    def test_a_capture_that_cannot_be_copied_off_names_why(self):
+        """The copy's own error travels into the barrier, rather than a bare
+        'produced no capture' that looks the same for every cause."""
+        w = self.world()
+        self.task(w)
+        cached_samply(w)
+        capture = "%s/%s-a.profile.json" % (board.PROF_REMOTE, BOARD)
+        self.assertNotEqual(w.leg(slot="a", task="t1", round="0", arm="a", warmup="1"), 0)
+        self.assertIn("produced no", w.err)
+        self.assertIn("no such file: " + capture, w.err)
+
     def test_no_warmup_profile_stages_nothing(self):
         w = self.world()
         self.task(w)
         self.assertEqual(w.leg(slot="a", task="t1", arm="a", warmup="1", no_warmup_profile="1"), 0, w.err)
-        self.assertFalse([e for e in w.effects if e[0] == "run" and "profiler.sh" in " ".join(e[1])])
+        self.assertFalse([e for e in w.effects if e[0] == "run" and "samply" in " ".join(e[1])])
         self.assertEqual(w.exports["WK_BOARD_PROFILE"], "")
         self.assertEqual(w.env_json()["profiler"], "none")
 
@@ -865,12 +895,8 @@ class TestKillPoints(BoardTest):
 class ABTest(BoardTest):
     def world(self, **kw):
         """A world whose warmup legs can profile: samply resolves and fetches here, and each arm's capture is on the board."""
-        from wk.quiet import lib_argv
         w = super().world(**kw)
-        samply = w.tmp / "samply"
-        samply.write_text("binary")
-        w.answer(lib_argv(str(REPO), "lib/profiler.sh", "profiler_resolve")[:3], out="samply upstream publishes samply for aarch64\n")
-        w.answer(lib_argv(str(REPO), "lib/profiler.sh", "samply_fetch")[:3], out=str(samply) + "\n")
+        cached_samply(w)
         for arm in "ab":
             w.board.bench.files["%s/%s-%s.profile.json" % (board.PROF_REMOTE, BOARD, arm)] = "{}"
         return w
@@ -893,6 +919,40 @@ class TestASlotAB(ABTest):
         self.assertEqual(self.order(w), [("0", "a", "a", "evidence"), ("0", "b", "b", "evidence"),
                                          ("1", "a", "a", ""), ("1", "b", "b", ""), ("2", "b", "b", ""), ("2", "a", "a", "")])
         self.assertEqual({(e["ab"]["slot_a"], e["ab"]["slot_b"], e["task"]) for e in w.runs()}, {("a", "b", w.tasks()[-1])})
+
+    def test_a_restart_names_itself_and_runs_only_the_rounds_the_task_lacks(self):
+        w = self.ab_world()
+        self.assertEqual(w.invoke("jetstream3", "--ab", "a,b", "--rounds", "2"), 0, w.err)
+        task = w.tasks()[-1]
+        doc = json.loads((w.bench_dir() / task / "task.json").read_text())
+        self.assertEqual(doc["restart"], "wk bench run ws jetstream3 --system testboard --ab a,b --rounds 2 --task " + task)
+        runs = w.bench_dir() / task / "runs"
+        for d in [d for d in runs.iterdir() if json.loads((d / "env.json").read_text())["ab"]["round"] == "2"]:
+            shutil.rmtree(str(d))
+        w.clock.t += 60
+        self.assertEqual(w.invoke("jetstream3", "--ab", "a,b", "--rounds", "2", "--task", task), 0, w.err)
+        self.assertIn("round 1/2 -- recorded already", w.err)
+        self.assertEqual(self.order(w)[4:], [("0", "a", "a", "evidence"), ("0", "b", "b", "evidence"), ("2", "b", "b", ""), ("2", "a", "a", "")])
+        self.assertEqual(brecord.task_state(str(runs.parent), False)["usable"], 2)
+
+    def restartable(self):
+        w = self.ab_world()
+        self.assertEqual(w.invoke("jetstream3", "--ab", "a,b", "--rounds", "1"), 0, w.err)
+        task = w.tasks()[-1]
+        other = Lock(w.store, w, w.clock)
+        other.hold("bench-task-" + task)
+        w.pids.add(os.getpid())
+        return w, task
+
+    def test_a_restart_takes_the_tasks_lock_like_a_fresh_one(self):
+        w, task = self.restartable()
+        self.assertNotEqual(w.invoke("jetstream3", "--ab", "a,b", "--rounds", "1", "--task", task), 0)
+        self.assertIn("could not take the bench-task-%s lock" % task, w.err)
+
+    def test_the_ab_driving_it_holds_the_lock_for_it(self):
+        w, task = self.restartable()
+        w.env["WK_TASK_HELD"] = task
+        self.assertEqual(w.invoke("jetstream3", "--ab", "a,b", "--rounds", "1", "--task", task), 0, w.err)
 
     def test_the_board_is_prepared_once_and_rechecked_every_leg(self):
         """The clock pin, the claim and the session are taken once on a boot; every leg re-reads the probe and its slot."""
@@ -1053,7 +1113,7 @@ class TestARealBoardAnswersWhatALegRecords(unittest.TestCase):
         mode = d.probe()
         if not mode.startswith("bench"):
             self.skipTest("%s is in %s, not bench mode" % (name, mode))
-        facts = board.kv_all(system.sh(system.ob("facts.sh")).out)
+        facts = kv(system.sh(system.ob("facts.sh")).out)
         self.assertTrue(facts.get("kernel") and facts.get("arch"), facts)
         for slot in system.bench().listdir(board.SLOTS_DIR):
             doc = system.manifest(slot)

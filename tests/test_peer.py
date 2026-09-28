@@ -5,8 +5,8 @@ behaviour it checks.
 A peer's workspaces are its containers and its guests, in its own store --
 nothing this side has a path to, and nothing under the remote root the
 `remote` driver otherwise reads. So the driver asks the peer's own `wk`
-(targets/remote.sh, "peers") and `wk` hands the whole command over
-(delegate_target/delegate_run), which is what makes `wk logs`, `wk status`,
+(Remote's peer branch, lib/wk/targets.py) and `wk` hands the whole command
+over (lib/wk/dispatch.py), which is what makes `wk logs`, `wk status`,
 `wk build` and the rest work on one without a branch of their own.
 
 No peer is needed to test that: a scratch WK_ROOT holds one fake machine's
@@ -25,7 +25,9 @@ import subprocess
 import sys
 import unittest
 
-from tests.support import REPO, repo_files, WkTest, bash, stub_path
+from unittest import mock
+
+from tests.support import REPO, repo_files, WkTest, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import targets  # noqa: E402
@@ -33,7 +35,7 @@ from wk.act import Refused  # noqa: E402
 
 # Runs locally what `ssh <opts> <host> <command>` would have run over there.
 # Every option is dropped, then the destination, and what is left is the
-# command -- which is how _rsh/_rsh_q/t_wk_tty all spell it.
+# command -- which is how every Ssh machine spells it.
 #
 # Every WK_* variable is dropped first, because a real ssh carries none of
 # this shell's environment: without that, a fake that runs the command here
@@ -67,7 +69,7 @@ case "$1 $2" in
 esac
 case "$1 $3" in
 "zed --route")
-    printf 'user=dev\\nsrc=/src/WebKit\\nproxy=/opt/wk-tools/container/ssh-transport.sh %s\\n' "$2"
+    printf 'user=dev\\nsrc=/src/WebKit\\nproxy=/opt/wk-tools/container/ssh-transport %s\\n' "$2"
     exit 0 ;;
 esac
 case "$1" in
@@ -81,7 +83,7 @@ _LISTING = ('{"workspaces": [{"name": "peerws", "target": "container", '
 
 
 class PeerFixture(WkTest):
-    """A WK_ROOT whose registry (WK_MACHINES_DIR, lib/target.sh) holds one
+    """A WK_ROOT whose registry (WK_MACHINES_DIR, lib/wk/fleet.py) holds one
     peer and nothing else, so the walk cannot reach the real fleet, plus a
     $HOME of its own: `wk zed` writes an ssh alias, and no test may write
     into the person's real ~/.ssh."""
@@ -105,12 +107,12 @@ class PeerFixture(WkTest):
         peer_wk.chmod(0o755)
 
         (self.root / "machines" / "peerbox.conf").write_text(
-            "KIND=peer\nWK_TARGET_KIND=remote\n"
-            "WK_REMOTE_PEER=1\n"
-            "WK_REMOTE_HOST=peerbox\n"
-            f"WK_REMOTE_ROOT={self.tmp / 'remote-root'}\n"
-            f"WK_REMOTE_TOOLS={self.tools}\n"
-            f"WK_REMOTE_STORE={self.tmp / 'store'}\n"
+            "kind=peer\ndriver=remote\n"
+            "peer=1\n"
+            "host=peerbox\n"
+            f"root={self.tmp / 'remote-root'}\n"
+            f"tools={self.tools}\n"
+            f"store={self.tmp / 'store'}\n"
         )
         self.home = self.tmp / "home"
         self.home.mkdir()
@@ -139,47 +141,33 @@ class PeerFixture(WkTest):
 class TestPeerResolution(PeerFixture):
     """a workspace a peer owns resolves like any other"""
 
-    def _bash(self, script, binp):
-        return bash(script, env=self.env({"PATH": f"{binp}:{os.environ['PATH']}"}),
-                    cwd=str(self.root))
+    @contextlib.contextmanager
+    def faked_ssh(self):
+        with stub_path({"ssh": _FAKE_SSH}) as binp, \
+                mock.patch.dict(os.environ, {"PATH": f"{binp}:{os.environ['PATH']}"}):
+            yield
 
     def test_peer_workspace_resolves(self):
         """ws_target finds a workspace only the peer's own `wk` knows"""
-        with stub_path({"ssh": _FAKE_SSH}) as binp:
-            cp = self._bash('''
-set -euo pipefail
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/target.sh"
-t=$(ws_target peerws)
-[ "$t" = peerbox ] || { echo "ws_target said '$t'"; exit 1; }
-''', binp)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        with self.faked_ssh():
+            self.assertEqual(self.registry().ws_target("peerws"), "peerbox")
 
     def test_only_a_workstation_keeps_its_own_records(self):
         """a workstation's workspaces are its own, so a removal is its own `wk
         rm`; a build box's are recorded on the workstation that made them"""
         (self.root / "machines" / "buildbox.conf").write_text(
-            "KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_HOST=buildbox\n")
+            "kind=build\ndriver=remote\nhost=buildbox\n")
         reg = self.registry()
         self.assertTrue(reg.load("peerbox").peer)
         self.assertFalse(reg.load("buildbox").peer)
 
     def test_peer_info_and_list(self):
-        """t_info answers present/absent for a peer, and t_list names what it holds"""
-        with stub_path({"ssh": _FAKE_SSH}) as binp:
-            cp = self._bash('''
-set -euo pipefail
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target peerbox
-echo "info=$(t_info peerws)"
-echo "ghost=$(t_info ghost)"
-echo "list=$(t_list | cut -f1 | tr '\\n' ',')"
-''', binp)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("info=present", cp.stdout)
-        self.assertIn("ghost=absent", cp.stdout)
-        self.assertIn("list=peerws,", cp.stdout)
+        """info answers present/absent for a peer, and list names what it holds"""
+        with self.faked_ssh():
+            t = self.registry().load("peerbox")
+            self.assertEqual(t.info("peerws"), "present")
+            self.assertEqual(t.info("ghost"), "absent")
+            self.assertEqual([n for n, _ in t.list()], ["peerws"])
 
 
 class TestPeerDelegation(PeerFixture):
@@ -247,7 +235,7 @@ class TestPeerDelegation(PeerFixture):
         self.assertIn("Host wk-peerws", alias)
         self.assertIn("User dev", alias)
         self.assertIn(
-            "ProxyCommand ssh peerbox /opt/wk-tools/container/ssh-transport.sh peerws",
+            "ProxyCommand ssh peerbox /opt/wk-tools/container/ssh-transport peerws",
             alias)
 
     def test_the_peer_authorises_the_asking_machines_key(self):
@@ -274,16 +262,6 @@ class TestDelegatedGlobalFlags(PeerFixture):
                 [str(self.root / "wk"), *args],
                 cwd=str(self.root), env=env, timeout=120,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-
-    def _driver(self, script):
-        with stub_path({"ssh": _FAKE_SSH}) as binp:
-            return bash(f'''
-set -euo pipefail
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target peerbox
-{script}
-''', env=self.env({"PATH": f"{binp}:{os.environ['PATH']}"}), cwd=str(self.root))
 
     def test_force_reaches_the_peers_wk(self):
         """`wk <cmd> <ws> --force` is forced over there too: the barrier it
@@ -315,22 +293,9 @@ load_target peerbox
         self.assertFalse(any("force=1" in c for c in self.peer_calls()),
                          self.peer_calls())
 
-    def test_a_pty_carries_the_same_environment(self):
-        """t_wk_tty differs from t_wk in the transport and nothing else:
-        `wk ai claude <ws>` is interactive, so the tty path is the one a person
-        meets when they type --force"""
-        cp = self._driver('WK_FORCE=1 t_wk plain peerws\n'
-                          'WK_FORCE=1 t_wk_tty tty peerws')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        calls = self.peer_calls()
-        self.assertTrue(any(c.startswith("plain peerws") and "force=1" in c for c in calls), calls)
-        self.assertTrue(any(c.startswith("tty peerws") and "force=1" in c for c in calls), calls)
-
     def test_one_implementation_builds_the_forwarded_environment(self):
-        """the bash hop asks Target.wk_cmd through `wk-cmd` and every Python hop Target.wk_cmd, so a flag
+        """every hop, with a terminal or without, asks Target.wk_cmd, so a flag
         added to one is not missing from another (CLAUDE.md, "one implementation per rule")"""
-        self.assertIn("wk-cmd", (REPO / "targets" / "remote.sh").read_text())
-        self.assertNotIn("wk_forwarded_env", (REPO / "targets" / "remote.sh").read_text())
         builders = sorted(str(f.relative_to(REPO)) for f in (REPO / "lib" / "wk").rglob("*.py")
                           if '"%s=1 "' in f.read_text(errors="replace"))
         self.assertEqual(builders, ["lib/wk/targets.py"], "a far wk's line is Target.wk_cmd's alone")

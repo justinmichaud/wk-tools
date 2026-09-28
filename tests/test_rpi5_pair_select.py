@@ -36,8 +36,8 @@ class TestTheDriverSelectsByAutoboot(unittest.TestCase):
     """lib/wk/boot/pi.py's Rpi5Usb against a FakeBoard holding a stick with two systems."""
 
     def board(self):
-        conf = {"NODE_NAME": "rpi5", "NODE_DRIVER": "rpi5-usb", "NODE_DEVICE": "/dev/sda",
-                "NODE_ROOT": "/dev/nvme0n1p2", "NODE_ROLE": "workstation"}
+        conf = {"name": "rpi5", "driver": "rpi5-usb", "device": "/dev/sda",
+                "root": "/dev/nvme0n1p2", "role": "workstation"}
         fake = FakeBoard(conf)
         fake.write_system("/dev/sda1", "sys-a")
         fake.write_system("/dev/sda3", "sys-b")

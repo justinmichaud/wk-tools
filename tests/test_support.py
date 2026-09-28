@@ -12,16 +12,16 @@ import stat
 import subprocess
 import unittest
 
-from tests.support import BLIND_FLEET, NO_CONFIG, NO_SECRETS, _clean_env
+from tests.support import BLIND_FLEET, NO_CONFIG, NO_SECRETS, _clean_env, bash, stub_path
 
 
 class TestCleanEnvScrubsMachineState(unittest.TestCase):
     def test_the_default_fleet_holds_no_target(self):
         self.assertEqual(_clean_env()["WK_MACHINES_DIR"], BLIND_FLEET)
         kinds = {l for p in os.listdir(BLIND_FLEET)
-                 for l in open(os.path.join(BLIND_FLEET, p)).read().splitlines() if l.startswith("KIND=")}
+                 for l in open(os.path.join(BLIND_FLEET, p)).read().splitlines() if l.startswith("kind=")}
         self.assertTrue(kinds)
-        self.assertFalse(kinds & {"KIND=build", "KIND=peer"})
+        self.assertFalse(kinds & {"kind=build", "kind=peer"})
 
     def test_no_test_sees_this_machines_config_home(self):
         self.assertEqual(_clean_env()["XDG_CONFIG_HOME"], NO_CONFIG)
@@ -55,6 +55,25 @@ class TestNothingATestStartsReadsAStartupFile(unittest.TestCase):
                             env={"PATH": "/usr/bin:/bin"},
                             capture_output=True, text=True, timeout=60)
         self.assertEqual("/usr/bin:/bin", cp.stdout, cp.stderr)
+
+
+@unittest.skipUnless(os.environ.get("WK_TEST_SHIMS"), "the machine-tool shims are tests/run.py's, outside the live tier")
+class TestAPathATestHandsInStillReachesNoMachine(unittest.TestCase):
+    """A test that hid tart by dropping every PATH entry holding one dropped the runner's shim directory with it,
+    and `wk boot benchvm` reached the real podman machine (a hung guest made it a 60s timeout, 2026-09-27)."""
+
+    def test_system_directories_alone_get_the_shims_back(self):
+        cp = bash("ssh somehost true; podman machine ssh wk -- true", env={"PATH": "/usr/bin:/bin:/opt/homebrew/bin"})
+        self.assertIn("unit tier reached ssh somehost true", cp.stderr)
+
+    def test_a_tool_the_path_lacks_stays_absent(self):
+        cp = bash("command -v tart || echo absent", env={"PATH": "/usr/bin:/bin"})
+        self.assertEqual("absent\n", cp.stdout, cp.stderr)
+
+    def test_a_tests_own_stub_stays_first(self):
+        with stub_path({"podman": "echo stubbed"}) as binp:
+            cp = bash("podman machine ssh wk", env={"PATH": "%s:/usr/bin:/bin" % binp})
+        self.assertEqual("stubbed\n", cp.stdout, cp.stderr)
 
 
 if __name__ == "__main__":

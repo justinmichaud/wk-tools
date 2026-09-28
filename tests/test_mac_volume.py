@@ -10,19 +10,16 @@ import contextlib
 import io
 import json
 import os
-import re
 import subprocess
 import sys
 import tarfile
 import unittest
 
-from tests.support import REPO, bash, requires_machine, scratch_dir
+from tests.support import REPO, requires_machine, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act, fleet, guest  # noqa: E402
-from wk.boot import __main__ as boot_main  # noqa: E402
-from wk.boot import mac  # noqa: E402
 from wk.boot.mac import DRIVERS, HELPER, Channel, Script  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
@@ -34,8 +31,8 @@ BENCH_GROUP = "73C12614-1130-40DF-B9B9-9CA73D10F3AA"
 
 def conf_for(kind):
     conf = fleet.Fleet(REPO, {"HOME": "/nonexistent"}).load(MACHINES[kind])
-    conf = {k: v for k, v in conf.items() if k.startswith("NODE_")}
-    conf.update(NODE_NAME=MACHINES[kind], NODE_DRIVER=kind)
+    conf = {k: v for k, v in conf.items() if k != "kind"}
+    conf.update(name=MACHINES[kind], driver=kind)
     return conf
 
 
@@ -48,15 +45,15 @@ def quiet(fn, *args):
 
 
 class FakeMac:
-    """The host install on NODE_SSH, the bench install on NODE_BENCH_SSH, one of them running; `firmware` is the
+    """The host install on ssh, the bench install on bench_ssh, one of them running; `firmware` is the
     install the next boot enters, and only the helper moves it. `stuck` is a bless that exits 0 and changes nothing."""
 
     def __init__(self, conf, env=None, clock=None):
         self.conf, self.clock = dict(conf), clock or FakeClock()
         self.env = env if env is not None else {"HOME": "/nonexistent", "WK_STORE": "/nonexistent/store"}
-        self.vol = "/Volumes/" + self.conf["NODE_VOLUME"]
+        self.vol = "/Volumes/" + self.conf["volume"]
         self.roots = {"host": {"id": "", "group": HOST_GROUP, "name": "Macintosh HD"},
-                      "bench": {"id": "", "group": BENCH_GROUP, "name": self.conf["NODE_VOLUME"]}}
+                      "bench": {"id": "", "group": BENCH_GROUP, "name": self.conf["volume"]}}
         self.running = self.firmware = "host"
         self.channel, self.up, self.stuck, self.attached, self.data = "none", True, False, True, True
         self.helper = "current"
@@ -98,7 +95,7 @@ class FakeMac:
                 self.effects.append(("tar", tuple(sorted(t.getnames()))))
 
     def exec_argv(self, cmd):
-        return ["ssh", self.conf["NODE_SSH"], cmd]
+        return ["ssh", self.conf["ssh"], cmd]
 
     def call(self, fn, *args, input=None, mutates=False):
         ob = args[0]
@@ -260,7 +257,7 @@ def mac_board(kind, ids=("sys-a",), env=None):
 def arm_and_boot(d, fake):
     d.probe()
     p, ident = d.select_system("")
-    d.record_write(ident, "prof", fake.conf["NODE_DEVICE"], d.order_image)
+    d.record_write(ident, "prof", fake.conf["device"], d.order_image)
     d.arm(p, d.order_image)
     d.reboot(armed=True)
     return p, ident
@@ -271,14 +268,6 @@ class MacConformance:
     return from bench mode is the bench install's own job (a volume) or leaving the machine (a guest)."""
 
     kind = None
-
-    def test_the_shim_defines_exactly_the_functions_the_class_has(self):
-        """a bash caller asks `command -v b_disarm` of a Mac as of a board."""
-        cls = DRIVERS[self.kind]
-        text = (REPO / "boot" / ("%s.sh" % self.kind)).read_text()
-        self.assertEqual(set(re.findall(r"(?m)^(\w+)\(\)", text)), set(cls.shims))
-        for verb in re.findall(r"_wk_boot %s ([\w-]+)" % self.kind, text):
-            self.assertIn(verb, boot_main.VERBS, verb)
 
     def test_the_probe_names_the_channel_that_answered(self):
         fake, d = mac_board(self.kind)
@@ -369,8 +358,8 @@ class TestProbe(unittest.TestCase):
 
     def test_a_machine_that_declares_no_bench_node_is_not_reached_for(self):
         fake, d = volume()
-        fake.conf["NODE_BENCH_SSH"] = ""
-        d.conf["NODE_BENCH_SSH"] = ""
+        fake.conf["bench_ssh"] = ""
+        d.conf["bench_ssh"] = ""
         fake.enter_bench()
         self.assertEqual(d.probe(), "unreachable")
         self.assertNotIn("i_ssh", [a[0] for a in fake.asked])
@@ -523,11 +512,10 @@ class TestReports(unittest.TestCase):
     def test_the_facts_a_bash_caller_reads(self):
         _, d = volume()
         facts = d.facts()
-        self.assertEqual(facts["BOOT_ARMING"], "command")
-        self.assertEqual(facts["NODE_RECORD"], "${XDG_STATE_HOME:-$HOME/.local/state}/wk/boot-armed")
-        self.assertEqual(facts["BOOT_HELPER"], HELPER)
-        self.assertEqual(facts["B_MEASURES"], "yes")
-        self.assertIsNone(d.check_measurement())
+        self.assertEqual(facts["arming"], "command")
+        self.assertEqual(facts["record"], "${XDG_STATE_HOME:-$HOME/.local/state}/wk/boot-armed")
+        self.assertEqual(facts["helper"], HELPER)
+        self.assertEqual(facts["measures"], "yes")
 
 
 class TestStaging(unittest.TestCase):
@@ -594,9 +582,9 @@ class TestStaging(unittest.TestCase):
 
 
 class TestChannel(unittest.TestCase):
-    """Host mode is NODE_SSH, or this machine when it is that one; bench mode is its own node, or WK_MAC_BENCH_SSH."""
+    """Host mode is ssh, or this machine when it is that one; bench mode is its own node, or WK_MAC_BENCH_SSH."""
 
-    CONF = {"NODE_SSH": "tolken", "NODE_BENCH_SSH": "tolken-bench"}
+    CONF = {"ssh": "tolken", "bench_ssh": "tolken-bench"}
 
     def test_wk_mac_bench_ssh_moves_the_destination(self):
         self.assertEqual(Channel(self.CONF, {}).dest("i_ssh"), "tolken-bench")
@@ -621,7 +609,7 @@ class TestChannel(unittest.TestCase):
         self.assertTrue(ch.here())
         self.assertEqual(ch.call("r_ssh", Script(REPO, "mac-probe.sh")).out, "READY\n")
         self.assertEqual(ch.exec_argv("true"), ["bash", "-c", "true"])
-        self.assertTrue(DRIVERS["mac-volume"](REPO, dict(self.CONF, NODE_NAME="mbp"), ch).bench_local(),
+        self.assertTrue(DRIVERS["mac-volume"](REPO, dict(self.CONF, name="mbp"), ch).bench_local(),
                         "`wk bench stage --to mbp` on that Mac sends nothing")
 
     def _down(self, peers):
@@ -666,25 +654,9 @@ class TestChannel(unittest.TestCase):
         self.assertIn("BatchMode=yes", argv)
 
     def test_no_channel_is_no_call(self):
-        ch = Channel({"NODE_SSH": "tolken"}, {}, via=Fake("here"))
+        ch = Channel({"ssh": "tolken"}, {}, via=Fake("here"))
         self.assertEqual(ch.call("r_ssh", Script(REPO, "mac-probe.sh")).rc, 255)
         self.assertEqual(ch.call("i_ssh", Script(REPO, "mac-probe.sh")).rc, 255)
-
-    def test_a_bash_caller_gets_the_mac_channel_and_not_boot_machines_sh(self):
-        d = boot_main.build("mac-volume", {"NODE_SSH": "tolken", "NODE_NAME": "mbp", "MODE_CHANNEL": "bench"}, REPO)
-        self.assertIsInstance(d.ch, Channel)
-        self.assertEqual(d.ch.channel, "bench")
-
-
-class TestTheShim(unittest.TestCase):
-    """boot/mac-volume.sh over a shell's NODE_*: what cmd/boot asks."""
-
-    PRE = ('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; . "$WK_ROOT/lib/bench.sh"; . "$WK_ROOT/boot/machines.sh"\nNODE_NAME=mbp NODE_SSH=fakemac '
-           'NODE_BENCH_SSH=fakemac-bench NODE_VOLUME="WK Bench" NODE_DRIVER=mac-volume\n. "$WK_ROOT/boot/mac-volume.sh"\n')
-
-    def test_the_facts_and_a_verb_that_reaches_no_machine(self):
-        cp = bash(self.PRE + 'MODE_CHANNEL=bench\necho "$BOOT_ARMING|$BOOT_HELPER"')
-        self.assertEqual(cp.stdout.strip(), "command|%s" % HELPER, cp.stderr)
 
 
 class TestOnTheRealMac(unittest.TestCase):

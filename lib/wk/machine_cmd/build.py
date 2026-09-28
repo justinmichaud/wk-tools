@@ -14,10 +14,10 @@ from wk.machine_cmd.deps import Deps, inputs_hash, probe, said
 CONFS = {
     "build": "# %(name)s -- a shared build machine, reached through the ssh entry of the same name.\n"
              "# Written by 'wk machine setup'; commit it to give every device this machine.\n"
-             "KIND=build\nWK_TARGET_KIND=remote\n",
+             "kind=build\ndriver=remote\n",
     "peer": "# %(name)s -- a workstation with its own wk-tools, asked for its workspaces rather than driven.\n"
             "# Written by 'wk machine setup'; commit it to give every device this machine.\n"
-            "KIND=peer\nWK_TARGET_KIND=remote\nWK_REMOTE_PEER=1\nWK_REMOTE_TOOLS=Development/wk-tools\n",
+            "kind=peer\ndriver=remote\npeer=1\ntools=Development/wk-tools\n",
 }
 MOTD = "cat /etc/motd /etc/motd.d/* /run/motd.dynamic 2>/dev/null"
 OLD_TOOLS = 'for d in "$HOME"/Development/wk-tools "$HOME"/wk-tools; do [ -d "$d" ] && echo "$d"; done; true'
@@ -83,7 +83,7 @@ class BuildMachines:
         if re.search(r"home *(dir|directory)?.*shared", t._sh(MOTD).out, re.I):
             warn("this machine says its home directory is shared with other boxes.\n"
                  "  A workspace name is then the same directory on all of them, and one build\n"
-                 "  tree cannot hold two architectures. Give each box its own WK_REMOTE_ROOT\n"
+                 "  tree cannot hold two architectures. Give each box its own root=\n"
                  "  (in its conf) if you use more than one.")
         rubble = self.rubble(t, ref)
         clean = self.ask_rubble(host, rubble)
@@ -171,7 +171,7 @@ class BuildMachines:
         if not src:
             t._mirror_update(t.root_there())
             src = t.mirror_dir()
-        dirs = "Tools/gtk" + (" Tools/wpe" if self.env.get("WK_TARGET_WPE") else "")
+        dirs = "Tools/gtk" + (" Tools/wpe" if t.env.get("WK_TARGET_WPE") else "")
         script = ('set -e; tmp=$(mktemp -d); trap \'rm -rf "$tmp"\' 0\n'
                   'git -C %s archive main -- %s | tar -x -C "$tmp"\n'
                   'for d in %s; do "$tmp/$d/install-dependencies"; done' % (shlex.quote(src), dirs, dirs))

@@ -1,8 +1,16 @@
 #!/bin/bash
 # PreToolUse (Edit|Write|MultiEdit): once per session, when a WebKit source file is edited, injects a reminder that the jsc skill is mandatory.
 input=$(cat)
-file=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty')
-session=$(printf '%s' "$input" | jq -r '.session_id // "nosession"')
+line=$(printf '%s' "$input" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    d = {}
+print("%s\t%s" % (d.get("tool_input", {}).get("file_path") or "", d.get("session_id") or "nosession"))
+')
+file=${line%%$'\t'*}
+session=${line#*$'\t'}
 [ -z "$file" ] && exit 0
 
 case "$file" in   # tree shape and not an absolute path: a workspace lives at a different path on every machine and in every container, so these cover any WebKit checkout wherever it is

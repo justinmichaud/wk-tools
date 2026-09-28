@@ -1,4 +1,4 @@
-"""Profile-guided builds: the facts both lanes share (build/mac-pgo.sh, the boards), and a board's cycle -- an
+"""Profile-guided builds: the facts the Mac and the boards share (build/mac-pgo.sh, lib/wk/bench/board.py), and a board's cycle -- an
 instrumented slot, `wk bench run --collect` per benchmark, a mix, the measured build -- as `wk` steps of one graph.
 Every profdata operation is WebKit's own, imported from the checkout: `python3 -m wk.pgo mix|check`."""
 
@@ -25,7 +25,7 @@ CONFIGS = ("wpe-cross", COLLECT, USE)
 MIN_FUNCTIONS = 1000
 MIN_COVERAGE = 0.25   # of the combined profile's, per library; the thinnest leg measured was 53%
 SHA = re.compile(r"^[0-9a-f]{40}$")
-USAGE = "usage: wk sysimage webkit %s --commit <sha> --slot <name> [--workspace <lane>] [--config <c>] [--detach|--stop]"
+USAGE = "usage: wk sysimage webkit %s --commit <sha> --slot <name> [--workspace <ws>] [--config <c>] [--detach|--stop]"
 
 
 def collect_timeout(env):
@@ -36,23 +36,23 @@ def profile_path(slot):
     return "%s/output/%s.profdata" % (images.pgo_dir_in(slot), GLIB_LIB)
 
 
-def steps(step, holds, board, lane, spec, on, target, commit, slot, needs):
-    """The cycle's phases, each on the machine holding the lane, into whose build directory the board writes."""
-    instr, res, dev, w = images.instr_slot(slot), images.build_resource(on), "device:" + board, ["--workspace", lane]
-    out = [step("instr:%s:%s" % (lane, slot), on, tuple(needs), (res,),
-                holds(spec, lane, "--slot", instr, "--commit", commit, "--config", COLLECT),
+def steps(step, holds, board, ws, spec, on, target, commit, slot, needs):
+    """The cycle's phases, each on the machine holding the image workspace, into whose build directory the board writes."""
+    instr, res, dev, w = images.instr_slot(slot), images.build_resource(on), "device:" + board, ["--workspace", ws]
+    out = [step("instr:%s:%s" % (ws, slot), on, tuple(needs), (res,),
+                holds(spec, ws, "--slot", instr, "--commit", commit, "--config", COLLECT),
                 ["sysimage", "webkit", spec] + w + ["--commit", commit, "--slot", instr, "--config", COLLECT]),
-           step("deploy:%s:%s" % (board, instr), on, ("instr:%s:%s" % (lane, slot),), (dev,), None,
-                ["bench", "deploy", lane, board, "--slot", instr], target)]
+           step("deploy:%s:%s" % (board, instr), on, ("instr:%s:%s" % (ws, slot),), (dev,), None,
+                ["bench", "deploy", ws, board, "--slot", instr], target)]
     legs = []
     for plan in BENCHMARKS:
         legs.append("collect:%s:%s:%s" % (board, slot, plan))
         out.append(step(legs[-1], on, ("deploy:%s:%s" % (board, instr),), (dev,), None,
-                        ["bench", "run", lane, plan, "--system", board, "--slot", instr, "--collect"], target))
-    out.append(step("mix:%s:%s" % (lane, slot), on, legs, (res,), None,
+                        ["bench", "run", ws, plan, "--system", board, "--slot", instr, "--collect"], target))
+    out.append(step("mix:%s:%s" % (ws, slot), on, legs, (res,), None,
                     ["sysimage", "build", spec] + w + ["--stage", "pgo-mix", "--slot", slot]))
-    out.append(step("slot:%s:%s" % (lane, slot), on, ("mix:%s:%s" % (lane, slot),), (res,),
-                    holds(spec, lane, "--slot", slot, "--commit", commit),
+    out.append(step("slot:%s:%s" % (ws, slot), on, ("mix:%s:%s" % (ws, slot),), (res,),
+                    holds(spec, ws, "--slot", slot, "--commit", commit),
                     ["sysimage", "webkit", spec] + w + ["--commit", commit, "--slot", slot, "--config", USE]))
     return out
 
@@ -84,12 +84,12 @@ class Cycle:
 
     def webkit(self, rest):
         from wk.sysimage import task
-        o = task.options(rest, ("--dry-run", "--detach", "--stop"), ("--commit", "--slot", "--workspace", "--config"),
+        o = task.options(rest, ("--detach", "--stop"), ("--commit", "--slot", "--workspace", "--config"),
                          USAGE % self.name)
         commit, slot, config = o.get("--commit") or "", o.get("--slot") or "", o.get("--config") or ""
         if slot:
             images.check_slot_name(slot)
-        lane = o.get("--workspace") or images.image_ws(self.name, self.env)
+        ws = o.get("--workspace") or images.image_ws(self.name, self.env)
         if o.get("--stop"):
             if not slot:
                 die("usage: wk sysimage webkit %s --slot <name> --stop\n    --stop stops the cycle running for one slot, so it needs --slot"
@@ -97,7 +97,7 @@ class Cycle:
             if commit or config or o.get("--detach") or act.dry_run():
                 die("'wk sysimage webkit %s --slot %s --stop' stops the cycle already\n    running for that slot and takes nothing "
                     "with it -- no --commit, --config,\n    --detach or --dry-run." % (self.spec, slot))
-            return self.stop(lane, slot)
+            return self.stop(ws, slot)
         if config and config not in CONFIGS:
             die("--config takes one of the configs %s is built with, not '%s':\n    %s and %s are one phase of the cycle each\n"
                 "    ('wk sysimage webkit %s --commit <sha> --slot <name>' runs all of\n    them), and 'wpe-cross' is a slot built "
@@ -107,29 +107,29 @@ class Cycle:
         if not SHA.match(commit):
             die("--commit takes a full sha (40 hex digits), got '%s'" % commit)
         if config:
-            return self.phase(lane, commit, slot, config, o.get("--detach"))
+            return self.phase(ws, commit, slot, config, o.get("--detach"))
         if act.dry_run():
-            return self.plan(lane, commit, slot)
+            return self.plan(ws, commit, slot)
         board = self.require_board()
         if o.get("--detach"):
-            pid = job.detach(self.here, [self.wk, "sysimage", "webkit", self.spec, "--workspace", lane, "--commit", commit,
-                                         "--slot", slot], self.log_path(lane, slot))
+            pid = job.detach(self.here, [self.wk, "sysimage", "webkit", self.spec, "--workspace", ws, "--commit", commit,
+                                         "--slot", slot], self.log_path(ws, slot))
             info("detached as pid %d -- this end can go away" % pid)
-            log("  follow:  tail -f %s" % self.log_path(lane, slot))
+            log("  follow:  tail -f %s" % self.log_path(ws, slot))
             return 0
-        return self.cycle(lane, commit, slot, board)
+        return self.cycle(ws, commit, slot, board)
 
-    def phase(self, lane, commit, slot, config, detach):
+    def phase(self, ws, commit, slot, config, detach):
         extra = []
         if config == "wpe-cross":
             warn("slot '%s' is being built WITHOUT a profile, on a release where every\n  measured build has one. Nothing but a "
                  "comparison against a profile-guided\n  slot should be taken from it; 'wk sysimage ls' and each run's env.json\n"
                  "  record it as wpe-cross." % slot)
         elif config == COLLECT:
-            self.here.remove(images.pgo_dir(lane, images.measured_slot(slot), self.env))   # legs of the last instrumented build say nothing of this one
+            self.here.remove(images.pgo_dir(ws, images.measured_slot(slot), self.env))   # legs of the last instrumented build say nothing of this one
         else:
             extra = ["--pgo-profile", profile_path(slot)]
-        return self.build(["--stage", "webkit", "--workspace", lane, "--commit", commit, "--slot", slot, "--config", config]
+        return self.build(["--stage", "webkit", "--workspace", ws, "--commit", commit, "--slot", slot, "--config", config]
                           + extra + (["--detach"] if detach else []))
 
     def board(self):
@@ -139,7 +139,7 @@ class Cycle:
             conf = self.reg.fleet.load(m) if m else None
         except fleet.ConfError:
             conf = None
-        return m if conf and conf.get("KIND") == "board" else ""
+        return m if conf and conf.get("kind") == "board" else ""
 
     def require_board(self):
         board = self.board()
@@ -156,45 +156,45 @@ class Cycle:
                 "running now.)" % (board, mode, self.name, self.name, board, board, board, board))
         return board
 
-    def log_path(self, lane, slot):
-        return os.path.join(self.store.ws_dir(lane), "pgo-%s.log" % slot)
+    def log_path(self, ws, slot):
+        return os.path.join(self.store.ws_dir(ws), "pgo-%s.log" % slot)
 
     def step(self, sid, on, needs, holds, done, words, target=""):
         return sched.wk_step(self.here, self.wk, lambda s: self.log, sid, on, needs, holds, done, words, target)
 
-    def holds(self, spec, lane, *rest):
-        return sched.wk_yes(self.here, [self.wk, "sysimage", "holds", spec, "--workspace", lane] + list(rest))
+    def holds(self, spec, ws, *rest):
+        return sched.wk_yes(self.here, [self.wk, "sysimage", "holds", spec, "--workspace", ws] + list(rest))
 
-    def graph(self, lane, commit, slot, board):
+    def graph(self, ws, commit, slot, board):
         named, me = images.spec_machine(self.spec), progress.machine_name(self.env, self.here)
         try:
-            on = images.ws_machine(named, "" if named else self.reg.ws_target(lane), me)
+            on = images.ws_machine(named, "" if named else self.reg.ws_target(ws), me)
         except LookupError as e:
             die(str(e))
         target = named if named and named != me else ""
-        return sched.validate(steps(self.step, self.holds, board, lane, self.spec, on, target, commit, slot, ()))
+        return sched.validate(steps(self.step, self.holds, board, ws, self.spec, on, target, commit, slot, ()))
 
-    def plan(self, lane, commit, slot):
+    def plan(self, ws, commit, slot):
         board = self.board()
         log("would build slot '%s' of %s as a profile-guided build" % (slot, self.name))
-        log("  lane        %s" % lane)
+        log("  workspace   %s" % ws)
         log("  board       %s" % ("%s -- it has to be running this image; wk boot %s --status" % (board, board) if board
                                   else "the fleet has no board named by IMG_MACHINE, so this refuses"))
-        log("  collection  %s" % images.pgo_dir(lane, slot, self.env))
+        log("  collection  %s" % images.pgo_dir(ws, slot, self.env))
         log("  benchmarks  %s, mixed at WebKit's own weights\n" % " ".join(BENCHMARKS))
-        graph = self.graph(lane, commit, slot, board or "<board>")
+        graph = self.graph(ws, commit, slot, board or "<board>")
         sched.render(graph, sched.done_ids(graph, self.pool), sys.stderr)
         log("dry run -- nothing was built.")
         return 0
 
-    def cycle(self, lane, commit, slot, board):
-        order = sched.plan_order(self.graph(lane, commit, slot, board))
-        self.log = self.log_path(lane, slot)
+    def cycle(self, ws, commit, slot, board):
+        order = sched.plan_order(self.graph(ws, commit, slot, board))
+        self.log = self.log_path(ws, slot)
         self.here.mkdir(os.path.dirname(self.log))
-        t = self.records().begin("pgo", "here", "%s/%s" % (lane, slot), "wk sysimage webkit %s --workspace %s --slot %s --stop"
-                                 % (self.spec, lane, slot), self.log, [s.command for s in order])
-        info("profile-guided slot '%s' of %s in lane %s: instrument, collect on %s, rebuild" % (slot, self.name, lane, board))
-        log("  collection  %s" % images.pgo_dir(lane, slot, self.env))
+        t = self.records().begin("pgo", "here", "%s/%s" % (ws, slot), "wk sysimage webkit %s --workspace %s --slot %s --stop"
+                                 % (self.spec, ws, slot), self.log, [s.command for s in order])
+        info("profile-guided slot '%s' of %s in workspace %s: instrument, collect on %s, rebuild" % (slot, self.name, ws, board))
+        log("  collection  %s" % images.pgo_dir(ws, slot, self.env))
         log("  benchmarks  %s, mixed at WebKit's own weights (Tools/Scripts/pgo-profile)" % " ".join(BENCHMARKS))
 
         def announce(event, step, rc=0):
@@ -211,7 +211,7 @@ class Cycle:
                 if rc:
                     die("the cycle for '%s' stopped: the steps above say which phase is left\n    and why. What was collected is "
                         "in %s, and re-running this command takes\n    up what is left rather than starting again."
-                        % (slot, images.pgo_dir(lane, slot, self.env)))
+                        % (slot, images.pgo_dir(ws, slot, self.env)))
         except job.Interrupted as e:
             rc = "cancelled"
             raise Refused(job.EXIT_OF.get(e.signum, 130))
@@ -221,19 +221,19 @@ class Cycle:
         finally:
             t.end(rc)
         info("slot '%s' is a profile-guided build of %s" % (slot, commit[:12]))
-        log("  profile     %s/output/%s.profdata" % (images.pgo_dir(lane, slot, self.env), GLIB_LIB))
-        log("  readings    %s/profile-check.json  ('wk sysimage ls' has the slot)" % images.pgo_dir(lane, slot, self.env))
-        log("  next:       wk bench deploy %s %s --slot %s" % (lane, board, slot))
+        log("  profile     %s/output/%s.profdata" % (images.pgo_dir(ws, slot, self.env), GLIB_LIB))
+        log("  readings    %s/profile-check.json  ('wk sysimage ls' has the slot)" % images.pgo_dir(ws, slot, self.env))
+        log("  next:       wk bench deploy %s %s --slot %s" % (ws, board, slot))
         return 0
 
-    def stop(self, lane, slot):
-        name = "%s/%s" % (lane, slot)
+    def stop(self, ws, slot):
+        name = "%s/%s" % (ws, slot)
         t = self.records().find("pgo", name)
         if t is None or not t.alive(None):
             log("no pgo is running for '%s' -- 'wk status' says what it last did" % name)
             return 0
         info("stopping the cycle for '%s' (pid %s)" % (name, t.field("pid")))
-        if not job.kill(None, lane, t, "cancelled", self.here, self.clock, self.env):
+        if not job.kill(None, ws, t, "cancelled", self.here, self.clock, self.env):
             die("the driver of '%s' outlived a TERM and a KILL:\n    ps -p %s" % (name, t.field("pid")))
         return 0
 
@@ -266,11 +266,6 @@ def profdata(utils):
                  "  toolchain that wrote it: run this where that clang is -- inside the\n"
                  "  cross environment for a board, in the Xcode toolchain for macOS.")
     return utils.LLVMProfDataExecutable
-
-
-def cmd_plans(args):
-    for plan, weight in upstream(args.scripts).BENCHMARK_GROUP_WEIGHTS:
-        print("%s %s" % (plan, weight))
 
 
 def cmd_mix(args):
@@ -426,9 +421,6 @@ def cmd_check(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="python3 -m wk.pgo", allow_abbrev=False)
     sub = parser.add_subparsers(required=True, dest="subcommand")
-    plans = sub.add_parser("plans", help="the benchmarks upstream weighs, and at what")
-    plans.add_argument("--scripts", required=True, help="a checkout's Tools/Scripts")
-    plans.set_defaults(func=cmd_plans)
     mix = sub.add_parser("mix", help="merge each leg's .profraw and combine the legs at upstream's weights")
     mix.add_argument("--scripts", required=True, help="a checkout's Tools/Scripts")
     mix.add_argument("--dir", required=True, help="the collection: <dir>/<plan>/diagnose/*.profraw")

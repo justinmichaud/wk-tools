@@ -1,5 +1,5 @@
 """lib/wk/resources.py: the envelope a target is sized from, read through a
-machine -- the same arithmetic as lib/resources.sh over the same readings.
+machine, and the `python3 -m wk.resources` verbs the setup stages read it through.
 
 Run: python3 tests/run.py -k tests.test_wk_resources
 """
@@ -109,16 +109,16 @@ class TestEnvelope(ResourcesTest):
                 r.avail_mem_mb()
         self.assertIn("the cgroup memory limit (%s)" % resources.CGROUP_MEM_MAX, err.getvalue())
 
-    @unittest.skipUnless(IS_MACOS, "compares against lib/resources.sh on this Mac")
-    def test_the_bash_and_the_python_agree_on_this_machine(self):
+    def test_a_stage_reads_what_the_class_answers_on_this_machine(self):
         env = {k: v for k, v in os.environ.items() if not k.startswith("WK_")}
         env.update(self.env, XDG_STATE_HOME=str(self.tmp / "state"))
-        cp = subprocess.run(["bash", "-c", '. lib/common.sh; . lib/resources.sh; envelope_cores; envelope_mem_mb; host_cores; host_mem_mb'],
+        cp = subprocess.run(["bash", "-c", '. lib/common.sh; for v in envelope-cores envelope-mem-mb host-mem-mb; do '
+                             'wk_py wk.resources --os "$(wk_os)" "$v" || exit; done'],
                             cwd=str(REPO), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertEqual(cp.returncode, 0, cp.stderr)
-        r = resources.Resources(Local(), env, "macos")
+        r = resources.Resources(Local(), env, "macos" if IS_MACOS else "linux")
         self.assertEqual([int(x) for x in cp.stdout.split()],
-                         [r.envelope_cores(), r.envelope_mem_mb(), r.host_cores(), r.host_mem_mb()])
+                         [r.envelope_cores(), r.envelope_mem_mb(), r.host_mem_mb()])
 
 
 class TestBudget(ResourcesTest):

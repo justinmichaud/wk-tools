@@ -2,14 +2,14 @@
 (lib/wk/bench/pipeline.py), which systems refuse one (lib/wk/bench/systems.py), and the warning
 `wk bench compare` gives two runs pinned differently.
 
-Rows landed here: `unit bench.pins_cores`, `live bench.pins_cores[container]`.
+Rows landed here: `unit bench.pins_cores`; `live bench.pins_cores[container]` is tests/test_bench_container_run.py's.
 
 Run: python3 tests/run.py -k test_bench_cores
 """
 import json
 import unittest
 
-from tests.support import WkTest, bench_ls_runs, podman_vm_ssh, requires_podman_vm, run, scratch_dir
+from tests.support import WkTest, run, scratch_dir
 from tests.test_bench_pipeline import BenchTest, World
 from tests.test_bench_report import rep
 
@@ -63,25 +63,6 @@ class TestAPinnedRun(BenchTest):
     def test_only_the_container_pins(self):
         self.assertEqual(systems.ContainerSystem.cores_refusal(None), "")
         self.assertIn("no pin exists on macOS", systems.GuestSystem.cores_refusal(None))
-
-
-@requires_podman_vm()
-class TestAPinnedRunLive(WkTest):
-    """`live bench.pins_cores[container]`: a real run in a container workspace that already has a
-    jsc-release build records the pin it ran under."""
-
-    def test_the_record_carries_the_pin(self):
-        cp = run("ls", timeout=45)
-        names = [l.split()[0] for l in cp.stdout.splitlines() if len(l.split()) > 1 and l.split()[1] == "container"]
-        for ws in names:
-            b = run("bench", "run", ws, "sunspider1.0.2", "--config", "jsc-release", "--count", "1", "--cores", "0", timeout=300)
-            if b.returncode == 0:
-                break
-        else:
-            self.skipTest("no container workspace with a jsc-release build to bench in")
-        rid = bench_ls_runs(run("bench", "ls", timeout=60).stdout)[-1].split("/bench/", 1)[1]
-        env = json.loads(podman_vm_ssh("cat /var/lib/wk/bench/%s/env.json" % rid).stdout)
-        self.assertEqual(env["cores"], {"set": "0", "pinned": True})
 
 
 class TestCoresAxisWarning(WkTest):

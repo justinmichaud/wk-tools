@@ -1,7 +1,7 @@
-"""One record shape for every long-running command (lib/task.sh).
+"""One record shape for every long-running command (lib/wk/record.py).
 
-Every command that outlives its terminal writes one record through this
-library, and `wk status` renders every kind through one renderer: the steps
+Every command that outlives its terminal writes one record through that
+module, and `wk status` renders every kind through one renderer: the steps
 still to come are listed and the command that stops the job is named, so a
 person watching one has no file to know about and nothing to guess at.
 
@@ -16,17 +16,20 @@ a graph, so each step carries its own state and any number read as running.
 
 Run: python3 -m unittest tests.test_task_record -v
 """
-import json
+import io
 import os
-import pathlib
-import subprocess
-import time
+import sys
 import tempfile
+import types
 import unittest
+from pathlib import Path
 
-from tests.support import REPO, WkTest, bash
+from tests.support import REPO
 
-from tests.test_status import render as _render_records
+sys.path.insert(0, str(REPO / "lib"))
+from wk import record, statusview  # noqa: E402
+from wk.clock import FakeClock  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 PLANS = {
     "build":  ["configure", "compile", "link"],
@@ -44,11 +47,19 @@ KILLS = {
     "new":   "wk new ws1 --kill",
     "agent-forward": "wk push off",
 }
-HERE = ("test", "pgo", "new", "agent-forward")   # the pid is this machine's
 
 
 def render(records, mode="text"):
-    return _render_records(records, mode)
+    """The renderer on synthetic records, in process."""
+    records = list(records)
+    if mode == "html":
+        out = statusview.write_page(statusview.merge(records),
+                                    os.path.join(tempfile.mkdtemp(prefix="wk-status-page-"), "status.html")) + "\n"
+    else:
+        buf = io.StringIO()
+        statusview.render_text_stream(iter(records), buf, False)
+        out = buf.getvalue()
+    return types.SimpleNamespace(stdout=out, stderr="", returncode=0)
 
 
 def in_order(plan, step):
@@ -69,167 +80,38 @@ def task_rec(kind, state, step, plan=None, steps=None, **extra):
     return rec
 
 
-class TestOneRecordPerKind(WkTest):
-    """Every kind of task writes through the one library and renders through
-    the one renderer: the assertion is that nothing about the rendering
-    depends on which command wrote the record."""
+class TestWhatTheRecordHolds(unittest.TestCase):
+    """The rules of lib/wk/record.py that its own tests (tests/test_wk_record.py) leave to this module."""
 
-    def _sh(self, body, env=""):
-        cp = bash('%s\n. "%s/lib/common.sh"\n. "%s/lib/task.sh"\n%s'
-                  % (env, REPO, REPO, body),
-                  env={"WK_STORE": str(self.tmp / "store")})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-task-record-"))
+        self.addCleanup(record._rmtree, self.tmp)
+        self.clock = FakeClock()
 
-    def _write(self, kind):
-        """One record per kind, written by lib/task.sh itself."""
-        plan = " ".join('"%s"' % s for s in PLANS[kind])
-        where = "here" if kind in HERE else "target"
-        return self._sh(
-            'd=$(task_begin %s %s ws1 "%s" /store/ws/ws1/%s.log %s)\n'
-            'task_step "$d" 2\n'
-            'printf "%%s\\n" "$d"' % (kind, where, KILLS[kind], kind, plan)).strip()
-
-    def test_every_kind_writes_the_same_field_set(self):
-        for kind in PLANS:
-            with self.subTest(kind=kind):
-                d = self._write(kind)
-                have = sorted(os.listdir(d))
-                for field in ("plan", "steps", "kill", "log", "machine",
-                              "argv", "started", "kind", "name", "where"):
-                    self.assertIn(field, have, kind)
-                self.assertEqual(sorted(os.listdir(os.path.join(d, "steps"))),
-                                 ["1", "2"], "one file per step reached, no more")
-                self.assertNotIn("exit", have, "a running task records no exit")
-                self.assertEqual((self.tmp / "store" / "task" / os.path.basename(d)
-                                  / "plan").read_text().splitlines(), PLANS[kind])
+    def records(self):
+        return record.Records(self.tmp / "store", clock=self.clock, env={})
 
     def test_the_plan_is_declared_before_any_step_has_a_state(self):
-        d = self._sh('task_begin build target ws1 "wk build ws1 --kill" /l a b c').strip()
-        rec = self.tmp / "store" / "task" / os.path.basename(d)
-        self.assertEqual((rec / "plan").read_text().split(), ["a", "b", "c"])
-        self.assertEqual(os.listdir(rec / "steps"), [],
-                         "a step had a state before it ran")
-
-    def test_a_plan_and_a_kill_command_are_both_required(self):
-        for body, want in (
-            ('task_begin build target ws1 "wk build ws1 --kill" /l', "no plan"),
-            ('task_begin build target ws1 "" /l a b', "no kill command"),
-            ('task_begin build sideways ws1 "k" /l a b', "here or target"),
-            # An unset YOCTO_TASK/PGO_TASK arrives as this, and writing to
-            # "/finished" fails under `set -e` with nothing said.
-            ('task_end "" 0', "no task record"),
-        ):
-            cp = bash('. "%s/lib/common.sh"\n. "%s/lib/task.sh"\n%s' % (REPO, REPO, body),
-                      env={"WK_STORE": str(self.tmp / "store")})
-            self.assertNotEqual(cp.returncode, 0, body)
-            self.assertIn(want, cp.stderr, body)
-
-    def test_a_re_run_converges_onto_one_record(self):
-        """Crash-only: task_begin after a kill leaves one complete record for
-        that kind and name, never an 'already exists'."""
-        out = self._sh(
-            'task_begin yocto target ws1 "k" /l layers fetch >/dev/null\n'
-            'd=$(task_begin yocto target ws1 "k" /l layers fetch)\n'
-            'task_end "$d" 0\n'
-            'd2=$(task_begin yocto target ws1 "k" /l layers fetch)\n'
-            'printf "%s\\n" "$(task_list | wc -l)" "$(task_find yocto ws1)" "$d2"')
-        count, found, newest = out.split("\n")[:3]
-        self.assertEqual(count.strip(), "1")
-        self.assertEqual(found, newest)
-        self.assertFalse((self.tmp / "store" / "task" / os.path.basename(newest) / "exit").exists(),
-                         "the re-run cleared the ended record's exit")
+        t = self.records().begin("build", "target", "ws1", "wk build ws1 --kill", "/l", ["a", "b", "c"])
+        self.assertEqual(t.plan(), ["a", "b", "c"])
+        self.assertEqual(os.listdir(t.path / "steps"), [], "a step had a state before it ran")
 
     def test_a_run_that_is_still_alive_is_not_superseded(self):
         """Superseding a live record would hide the run a guard reads it for:
         the yocto builder refuses a second cooker by finding the first's record."""
-        out = self._sh(
-            'd=$(task_begin yocto here ws1 "k" /l layers fetch)\n'
-            'task_pid "$d" $$\n'
-            'sleep 1\n'   # the id carries a UTC second, and both would be one record
-            'd2=$(task_begin yocto here ws1 "k" /l layers fetch)\n'
-            'printf "%s\\n" "$(task_list | wc -l)"\n'
-            '[ -d "$d" ] && echo KEPT || echo GONE')
-        count, kept = out.split("\n")[:2]
-        self.assertEqual(count.strip(), "2")
-        self.assertEqual(kept, "KEPT")
+        recs = self.records()
+        first = recs.begin("yocto", "here", "ws1", "k", "/l", ["layers", "fetch"], pid=os.getpid())
+        self.clock.sleep(1)
+        second = recs.begin("yocto", "here", "ws1", "k", "/l", ["layers", "fetch"], pid=os.getpid())
+        self.assertTrue(first.path.is_dir())
+        self.assertEqual([t.id for t in recs.list()], [first.id, second.id])
 
-    def test_a_record_of_a_longer_name_is_not_this_name_s_record(self):
-        out = self._sh(
-            'd=$(task_begin new here ws1-extra "k" /nonexistent-log checking)\n'
-            'task_end "$d" refused\n'
-            'printf "[%s]\\n" "$(task_find new ws1)"')
-        self.assertEqual(out.strip(), "[]")
-
-    def test_a_live_pid_reads_running_and_a_dead_one_died(self):
-        out = self._sh(
-            'd=$(task_begin pgo here p/slot "k" /nonexistent-log a b c)\n'
-            'printf "%s " "$(task_verdict "$d")"\n'
-            'task_pid "$d" 999999999\n'
-            'printf "%s " "$(task_verdict "$d")"\n'
-            'task_end "$d" 3\n'
-            'printf "%s\\n" "$(task_verdict "$d")"')
-        self.assertEqual(out.split(), ["running", "died", "failed"])
-
-    def test_the_first_verdict_stands_and_a_re_run_still_clears_it(self):
-        """`wk build --kill` writes cancelled and the driver it stopped then
-        reaches its own end with the failure the kill caused: the record has
-        one author of its end, and it is the one that got there first."""
-        out = self._sh(
-            'd=$(task_begin build target ws1 "k" /nonexistent-log a b)\n'
-            'task_end "$d" cancelled\n'
-            'task_end "$d" 1\n'
-            'printf "%s " "$(task_verdict "$d")"\n'
-            'd2=$(task_begin build target ws1 "k" /nonexistent-log a b)\n'
-            'printf "%s\\n" "$(task_verdict "$d2")"')
-        self.assertEqual(out.split(), ["cancelled", "starting"])
-
-    def test_a_capped_reading_of_a_workspace_pid_is_the_workspaces_answer(self):
-        """`capped` asks the workspace through t_exec for WK_TASK_ASK_SECONDS at
-        most: 0 is alive, 1 is no such process, and anything else -- an ssh
-        that failed, a podman exec that did not, the cap -- is `unanswered`."""
-        # A name of its own per answer: task_begin prunes an earlier record of
-        # the same name through an uncapped task_alive, which is this stub too.
-        for i, (answer, word) in enumerate((("return 0", "running"), ("return 1", "died"),
-                                            ("return 255", "unanswered"), ("sleep 30", "unanswered"))):
-            with self.subTest(answer=answer):
-                out = self._sh(
-                    'd=$(task_begin test target ws%d "k" /l one)\n'
-                    'task_pid "$d" 4242\n'
-                    'printf "%%s\\n" "$(task_verdict "$d" capped)"' % i,
-                    env='WK_TASK_ASK_SECONDS=1\nt_exec() { %s; }' % answer)
-                self.assertEqual(out.strip(), word)
-
-    def test_an_uncapped_reading_waits_for_the_workspace(self):
-        out = self._sh(
-            'd=$(task_begin test target ws1 "k" /l one)\n'
-            'task_pid "$d" 4242\n'
-            'printf "%s\\n" "$(task_verdict "$d")"',
-            env='t_exec() { sleep 2; return 0; }')
-        self.assertEqual(out.strip(), "running")
-
-    def test_a_task_with_no_pid_yet_is_starting_not_died(self):
-        out = self._sh('d=$(task_begin test target ws1 "k" /l one)\n'
-                       'printf "%s\\n" "$(task_verdict "$d")"')
-        self.assertEqual(out.strip(), "starting")
-
-    def test_silence_past_wk_stall_seconds_is_silent_not_died(self):
-        """A job under a watchdog records the deadline it is watched against
-        (`abort_after`), and silence is measured against that. A session or a
-        tunnel declares none and produces no output, so its quiet log is not a
-        verdict about it -- it reads `running`, with the log's age reported
-        beside it."""
-        log = self.tmp / "t.log"
-        log.write_text("x\n")
-        old = time.time() - 4000
-        os.utime(log, (old, old))
-        out = self._sh(
-            'd=$(WK_ABORT_SECONDS=1800 task_begin build here ws1 "k" "%s" a b)\n'
-            'printf "%%s " "$(WK_STALL_SECONDS=9000 task_verdict "$d")"\n'
-            'printf "%%s " "$(task_verdict "$d")"\n'
-            'd=$(task_begin agent-forward here ws2 "k" "%s" session)\n'
-            'printf "%%s\\n" "$(task_verdict "$d")"' % (log, log))
-        self.assertEqual(out.split(), ["running", "silent", "running"])
+    def test_a_row_label_names_the_machine_only_inside_the_vm(self):
+        """A walk labels rows with a target name, and only the VM is another machine's."""
+        m = Fake()
+        m.answer(["hostname", "-s"], out="Tolken\n")
+        self.assertEqual(record.machine_name({"WK_ROW_LABEL": "container"}, m), "tolken")
+        self.assertEqual(record.machine_name({"WK_IN_VM": "1"}, m), "tolken")
 
 
 class TestTheRendererSaysWhatIsLeftAndWhatStopsIt(unittest.TestCase):
@@ -301,41 +183,10 @@ class TestTheRendererSaysWhatIsLeftAndWhatStopsIt(unittest.TestCase):
         cp = render([{"kind": "machine", "name": "tolken", "self": True},
                      task_rec("yocto", "running", 3)], "html")
         self.assertEqual(cp.returncode, 0, cp.stderr)
-        page = pathlib.Path(cp.stdout.strip()).read_text()
+        page = Path(cp.stdout.strip()).read_text()
         self.assertIn("[&gt;]", page)
         self.assertIn("wk sysimage build wpe --stage image --stop", page)
 
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class TheMachineARecordNames(WkTest):
-    """A record names the machine a person can act on. Inside the podman VM
-    that is the workstation that owns it -- the VM is that machine's
-    container target, not a machine of its own -- and the dispatcher passes
-    the name as it forwards. Measured 2026-09-16: an image build running in
-    the VM put a machine called `localhost` in `wk status`."""
-
-    PRELUDE = f'. "{REPO}/lib/common.sh"\n. "{REPO}/lib/store.sh"\n. "{REPO}/lib/task.sh"\n'
-
-    def _machine(self, env):
-        cp = bash(self.PRELUDE +
-                  'd=$(task_begin demo here thing "wk demo --kill" /dev/null step)\n'
-                  'task_field "$d" machine\n',
-                  env=dict(env, WK_STORE=str(self.tmp / "store")))
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.strip()
-
-    def test_in_the_vm_it_is_the_workstation_that_forwarded(self):
-        self.assertEqual(self._machine({"WK_IN_VM": "1", "WK_ROW_LABEL": "tolken"}), "tolken")
-
-    def test_on_a_machine_of_its_own_it_is_that_machine(self):
-        # Not the label: a walk labels rows with a target name, and only the
-        # VM is another machine's.
-        self.assertEqual(self._machine({"WK_ROW_LABEL": "container"}),
-                         subprocess.run(["hostname", "-s"], capture_output=True,
-                                        text=True).stdout.strip().lower())
-
-    def test_the_vm_with_nothing_passed_falls_back_to_its_hostname(self):
-        self.assertNotEqual(self._machine({"WK_IN_VM": "1"}), "")

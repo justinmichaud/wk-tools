@@ -41,8 +41,8 @@ on its own medium.
 A rescue must provide a way to write, arm and boot the bench system.
 
 The two systems are two
-tailnet nodes with two names -- the rescue `<board>-rescue` (`NODE_SSH`), the
-bench system `<board>-bench` (`NODE_BENCH_SSH`)
+tailnet nodes with two names -- the rescue `<board>-rescue` (`ssh`), the
+bench system `<board>-bench` (`bench_ssh`)
 
 **arm/disarm** — select, or deselect, what a bench machine boots next
 (`wk boot`). Every armed system disarms and reverts itself after one boot
@@ -72,6 +72,19 @@ before the command runs. `wk <cmd> -h` prints what those declarations say.
   follow the name, `passthrough` where the rest belongs to another program
   (after `--`, or `=tail` after the last positional). Anything else is refused
   with the usage line, once, in the dispatcher.
+- **Verbs and build configs are the dispatcher's too.** `verbs=` names a
+  command's subverbs: an unknown one is refused, and the command gets a
+  declared one as its first argument wherever it was typed; `default=` is
+  the verb a bare invocation stands for (`wk quiesce` is `wk quiesce
+  status`), and a first word that is no verb is its argument when it takes
+  one (`wk pr 1234`). A `gone <word> <replacement>` line retires a flag or a
+  verb, refused naming what replaced it. `config=--config` (or `config=arg`,
+  `wk build`'s positional) says the command takes a build config: `-h` lists
+  every name in lib/wk/buildconf.py, one it does not hold is refused, and the
+  config reaches the command as `WK_CONFIG`, never in argv; an exported
+  `WK_CONFIG` the arguments do not name is refused. `passthrough=all` is
+  `=tail` with nothing in the tail read by wk, not even `-h` or `--force`
+  (`wk ai pi <ws> --help` is pi's).
 - **`--force`, `--quiet`** are the dispatcher's too: `--force` crosses a
   refusal that exists because of a rule and says so again at the end;
   `--quiet` drops narration and keeps results, warnings and errors.
@@ -94,7 +107,7 @@ groups:
   machine's own `wk` resolves the name and does the work. The dispatcher
   exports `WK_NAME`, `WK_TARGET` and `WK_CONFIG` to the command it runs. Either
   hop carries the global flags as environment (`WK_QUIET`, `WK_FORCE`,
-  `WK_YES`, `WK_DRY_RUN`, `WK_DEBUG`), with `WK_CONFIG`, `WK_ROW_LABEL` (the
+  `WK_YES`, `WK_DRY_RUN`, `WK_DEBUG`), with `WK_ROW_LABEL` (the
   machine its rows name), `WK_NO_DELEGATE` (answer for itself, hand nothing
   on) and `WK_ZED_PUBKEY` (the asking machine's zed key), and never
   `WK_TARGET` or `WK_STORE`, which the far side resolves for itself; the
@@ -119,7 +132,7 @@ A machine is named by its tailnet name and nothing else. Only reach machines by 
 # Detatched commands
 
 Every command that outlives its terminal writes one record of
-the same shape (`lib/task.sh`): the plan it declared before its first step,
+the same shape (`lib/wk/record.py`): the plan it declared before its first step,
 the state of each of those steps, the machine and pid liveness is asked of, its log, the
 command a person types to stop it, and what resources it holds.
 
@@ -277,7 +290,32 @@ wk bench report <task> --html
 
 Every measurement is a task: `task.json`, then `runs/<run>/` with
 `env.json`, `result.json` and the logs. A task stays on the machine that
-took it, and `wk bench ls` asks them all.
+took it, in its workspace's directory (`ws/<name>/bench/<task>`) where that
+machine holds the workspace, else in the store's `bench/`; `wk bench ls`
+asks every machine. `wk rm` refuses a workspace holding a task that no
+export holds as it is now, naming `wk bench export <task>`; `--force`
+destroys it anyway.
+
+**Results**
+
+```sh
+wk bench report <task>                  # the commit each arm measured, each check's verdict
+wk bench export <task>                  # ~/Downloads/<task>.zip
+wk bench export <task> --to <dir> --force   # a task stopped short: what it has
+wk bench run <ws> <plan> --task <task>  # restart a one-run task; nothing if it holds its run ok
+```
+
+The report heads with the commit each arm's runs recorded, checked against
+the one the task names, and a verdict per check: the preflight (failed if a
+run was forced past it), the warmup round's evidence, and for a PGO build
+the profile reading its run carries (unknown when it carries none). A task
+stopped short names the command that restarts it; an A/B restarted with
+`--task <task>` runs only the rounds the task does not already hold with
+both arms. The export is the report as text and html, `task.json`, every
+run's json and the warmup round's evidence and profiles, written whole or
+not at all; replacing an earlier export asks first. A task in the podman
+VM's store or on a build box is read from there and zipped here. A PGO
+slot's board run carries the reading of its image workspace's collection.
 
 **A bench machine: build, write, arm, measure**
 
@@ -295,15 +333,16 @@ Only a removable disk plugged into `<writer>` is ever written, never its own
 system disk. A write refuses without the tailnet key or the board's WiFi
 credentials, and when a node of that name already exists on the tailnet.
 
-The image is the runtime and is built once. A **slot** is one WebKit built
-against it, deployed onto the booted board without a reflash:
+The image is the runtime and is built once, in its **image workspace**
+(`<builder>-<profile>[-<arm>]`, which `wk ls` lists). A **slot** is one WebKit
+built against it, deployed onto the booted board without a reflash:
 
 ```sh
 wk sysimage webkit <profile> --commit <sha> --slot base --detach   # at 2.52+ this is instrument,
                                                                    # collect on the board, rebuild
-wk bench deploy <lane> rpi3 --slot base                            # verified byte for byte
-wk bench run <lane> speedometer3 --system rpi3 --slot base         # run-benchmark here, the browser there
-wk bench run <lane> speedometer3 --system rpi3 --ab base,pr --rounds 5   # two slots, no reboot between
+wk bench deploy <image-ws> rpi3 --slot base                        # verified byte for byte
+wk bench run <image-ws> speedometer3 --system rpi3 --slot base     # run-benchmark here, the browser there
+wk bench run <image-ws> speedometer3 --system rpi3 --ab base,pr --rounds 5   # two slots, no reboot between
 ```
 
 A board run measures the bench system that is up: it refuses one in host
@@ -352,7 +391,7 @@ Subtests one arm cannot run are dropped from both
 wk sysimage write --from <2.38 img> --disk rpi3:/dev/mmcblk0@second --profile <2.38 profile>
 wk sysimage write --from <2.52 img> --disk rpi3:/dev/mmcblk0@third  --profile <2.52 profile>
 wk boot rpi3 --system <id>              # then wk bench deploy into each
-wk bench run <lane> speedometer3 --system rpi3 --ab-systems <a>,<b> --slot base --rounds 5
+wk bench run <image-ws> speedometer3 --system rpi3 --ab-systems <a>,<b> --slot base --rounds 5
 ```
 
 Each leg arms its arm's system where the board allows it, or from the rescue,
@@ -385,7 +424,7 @@ an unthrottled frame rate; then the profile is read back and judged
 `wk sysimage webkit <profile> --commit <sha> --slot <s>` instruments, collects
 with `wk bench run --collect` on the board, mixes and rebuilds.
 
-The display mode is declared (`NODE_DISPLAY`), held, and checked before the
+The display mode is declared (`display`), held, and checked before the
 restart and in every leg. Brightness is driven to minimum. What is on the
 screen is asked of the window server, and anything wk did not put there
 refuses the leg. `bench/quiet/macos.tsv` is the one table of what a
@@ -403,18 +442,18 @@ wk quiesce off && wk session off
 **Add a bench machine**
 
 ```sh
-$EDITOR machines/<name>.conf            # KIND=board (or mac, guest), NODE_SSH, NODE_BENCH_SSH,
-                                        # NODE_DRIVER, NODE_DEVICE, NODE_ROOT, NODE_PROFILE,
-                                        # NODE_NET, NODE_DTB, NODE_ROLE
+$EDITOR machines/<name>.conf            # kind=board (or mac, guest), ssh, bench_ssh,
+                                        # driver, device, root, profile,
+                                        # net, dtb, role
 git add machines/<name>.conf && git commit
 wk boot --list
 ```
 
 Every machine is one `machines/<name>.conf`, named as the CLI names it, with a
-`KIND`: `build` or `peer` (a target), `board`, `mac` or `guest` (a bench
+`kind`: `build` or `peer` (a target), `board`, `mac` or `guest` (a bench
 machine), or `bridge`. Values are literals. A bench role that is also a peer
-names the peer (`mbp.conf` sets `NODE_SSH=tolken`). A target whose `hostname -s`
-is not its name says what it is (`WK_REMOTE_HOSTNAME`): that is how its far
+names the peer (`mbp.conf` sets `ssh=tolken`). A target whose `hostname -s`
+is not its name says what it is (`hostname`): that is how its far
 end knows which machine it is, however many share its home. A conf in
 `~/.config/wk/machines/` sets keys over the shared one's, for this device only.
 
@@ -540,7 +579,13 @@ on the stick is `@second`; `wk boot rpi4 --system <id>` names one.
 written. Arming is a firmware mailbox one-shot (USB, then NVMe) that clears
 after one use. EEPROM `BOOT_ORDER` stays `local`, the only evidence the
 fallback is in place. Two systems on the stick are the firmware's own A/B: a
-static `autoboot.txt` selects the second pair under `[tryboot]`.
+static `autoboot.txt` selects the second pair under `[tryboot]`. As a
+workstation it is tuned by `host/linux/rpi5/rpi5-setup.sh` (run by `./setup`):
+2.8 GHz CPU (3.0 is unstable), v3d 1200, PCIe Gen3, fan 100%, swap off, and the
+`7.0.6-numa` kernel (`CONFIG_NUMA_EMU=y`, 8 nodes, firmware-injected
+`numa=fake`). A bench system runs a stock kernel, since customers ship one; an
+overclock belongs to an `-oc` image profile's `config.txt.append`, never the
+EEPROM, which both modes share.
 
 Reading a medium the board is not booted from goes through the card helper
 (`admin/wk-card-priv`, the driver's `medium_read`): read-only, three file names, one

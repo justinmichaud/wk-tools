@@ -12,12 +12,29 @@ import os
 import pty
 import select
 import subprocess
+import sys
 import time
 import unittest
+from unittest import mock
 
-from tests.support import (REPO, WK, WkTest, bash, rand_suffix,
-                           requires_container_target, requires_podman_vm,
-                           run, shell_files)
+from tests.support import (REPO, WK, WkTest, rand_suffix,
+                           requires_container_target, run, shell_files)
+
+sys.path.insert(0, str(REPO / "lib"))
+
+
+def firstrun_lines(log):
+    """What container/firstrun.sh said, out of a container's log, which also holds everything the tools it ran printed."""
+    return "\n".join(l for l in log.replace("\r", "").splitlines() if l.startswith("[firstrun]"))
+
+
+def container_log(ws):
+    """`podman logs` where the container is: inside the podman machine on macOS."""
+    argv = ["podman", "logs", "wk-" + ws]
+    if sys.platform == "darwin":
+        argv = ["podman", "machine", "ssh", "wk", "--"] + argv
+    cp = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+    return cp.stdout
 
 
 @requires_container_target()
@@ -65,14 +82,12 @@ class TestContainerWorkspaceLifecycle(WkTest):
 
         # Asked of the one list rather than retyped: origin is narrowed to the
         # branches the mirror carries, which is main plus the release branch of
-        # every image configuration this checkout defines (wk_mirror_branches).
-        carried = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
-                       'wk_mirror_branches\n')
-        self.assertEqual(carried.returncode, 0, carried.stdout + carried.stderr)
+        # every image configuration this checkout defines (mirror_branches, lib/wk/git.py).
+        from wk.git import mirror_branches
         self.assertEqual(
             self._config("--get-all", "remote.origin.fetch").split("\n"),
             ["+refs/heads/%s:refs/remotes/origin/%s" % (b, b)
-             for b in carried.stdout.split()])
+             for b in mirror_branches()])
         self.assertEqual(self._config("remote.origin.url"),
                          "https://github.com/WebKit/WebKit.git",
                          "git-webkit reads this to find the project")
@@ -98,10 +113,10 @@ class TestContainerWorkspaceLifecycle(WkTest):
                                   "the mirror bind-mounted in, so it is a "
                                   "local read of a handful of refs")
 
-        self.assertEqual(self._config("webkitscmpy.setup"), "true",
-                         "`git-webkit setup --defaults` runs at first start "
-                         "(container/firstrun.sh), so `git-webkit pr` and the "
-                         "commit hooks work without being asked for")
+        if self._config("webkitscmpy.setup") != "true":
+            self.fail("`git-webkit setup --defaults` runs at first start (container/firstrun.sh), so `git-webkit pr` "
+                      "and the commit hooks work without being asked for; it did not finish here. firstrun said:\n"
+                      + firstrun_lines(container_log(self.name)))
 
     def _assert_a_session_can_run_in_it(self):
         """The workspace user owns their home -- mountpoints included, and the
@@ -157,7 +172,7 @@ class TestContainerWorkspaceLifecycle(WkTest):
         print(f"[timing] wk new: {created_s:.1f}s, total lifecycle: {total_s:.1f}s")
 
 
-@requires_podman_vm()
+@requires_container_target()
 class TestCancellingARealBuild(WkTest):
     """^C reaches the driver and nothing else -- a container build is `podman
     exec` with no signal proxy -- so the driver has to tell the machine that
@@ -289,15 +304,33 @@ class TestCancellingARealBuild(WkTest):
 
 
 class TestOnePodmanWrapper(unittest.TestCase):
-    """`_hpodman` is how this driver reaches podman, everywhere. A second,
-    bare wrapper works wherever the daemon is local and reaches the *rootful*
-    podman from a macOS host -- and the commands a person types outside the VM
-    (`wk scp`, `wk stop`) are exactly where that shows up."""
+    """`Container.podman()` is how the container driver reaches podman, everywhere. A bare `podman` works wherever
+    the daemon is local and reaches the *rootful* podman from a macOS host -- and the commands a person types outside
+    the VM (`wk scp`, `wk stop`) are exactly where that shows up. The bare word is left only for `podman machine`,
+    which is the host's own, and `podman unshare`, which runs where the store is."""
 
-    def test_the_bare_wrapper_is_gone(self):
-        text = (REPO / "targets" / "container.sh").read_text()
-        self.assertNotIn("_podman() {", text)
-        self.assertIn("_hpodman() {", text)
+    def container(self, env, system):
+        from wk import targets
+        from wk.machine import Fake
+        with mock.patch("wk.targets.os.uname", return_value=mock.Mock(sysname=system)):
+            return targets.Container("container", str(REPO), env, Fake("here")).podman()
+
+    def test_from_a_macos_host_it_names_the_machines_connection(self):
+        self.assertEqual(["podman", "-c", "wk"], self.container({}, "Darwin"))
+        self.assertEqual(["podman", "-c", "other"], self.container({"WK_MACHINE": "other"}, "Darwin"))
+
+    def test_where_the_daemon_is_local_it_is_plain(self):
+        self.assertEqual(["podman"], self.container({"WK_IN_VM": "1"}, "Darwin"))
+        self.assertEqual(["podman"], self.container({}, "Linux"))
+
+    def test_the_driver_names_no_bare_podman_of_its_own(self):
+        import inspect
+        import re
+        from wk import targets
+        src = inspect.getsource(targets.Container)
+        for m in re.finditer(r'\["podman", "([^"]+)"', src):
+            with self.subTest(call=m.group(0)):
+                self.assertIn(m.group(1), ("-c", "machine", "unshare"))
 
     def test_nothing_in_the_tree_still_calls_it(self):
         for f in shell_files():
@@ -308,3 +341,9 @@ class TestOnePodmanWrapper(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAFailedSetupCarriesWhatFirstRunSaid(unittest.TestCase):
+    def test_only_firstruns_own_lines_are_kept(self):
+        log = "Installed jinja2-3.1.4!\r\n[firstrun] git-webkit: setup=failed\nSetup succeeded!\n[firstrun] ready\n"
+        self.assertEqual("[firstrun] git-webkit: setup=failed\n[firstrun] ready", firstrun_lines(log))

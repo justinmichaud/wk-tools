@@ -1,10 +1,11 @@
-"""Where a machine keeps things: the paths lib/store.sh spells, from the same variables."""
+"""Where a machine keeps things."""
 
+import argparse
 import os
+import shlex
 import sys
 
 from wk import record
-from wk.machine import Local
 
 
 class Store:
@@ -32,7 +33,6 @@ class Store:
         return os.path.join(self.lock_dir(), "%s@%s.lock" % (resource, record.host_name() or "local"))
 
     def default(self):
-        """The store a machine uses when none is named."""
         if self.env.get("WK_IN_VM") or os.uname().sysname == "Darwin":
             return "/var/lib/wk"
         if os.path.isdir("/var/lib/wk") and os.access("/var/lib/wk", os.W_OK):
@@ -209,31 +209,6 @@ class Bases:
         return [b for b in self.ids() if b != keep and b not in used]
 
 
-def main(argv):
-    bases = Bases(Store(), Local())
-    verb, args = (argv[0] if argv else ""), argv[1:]
-    if verb == "base-verify" and len(args) == 1:
-        why = bases.verify(args[0])
-        if why:
-            print(why)
-        return 1 if why else 0
-    if verb == "current-base" and not args:
-        got = bases.current()
-        if got:
-            print(got)
-        return 0 if got else 1
-    many = {"list-workspaces": bases.workspaces}
-    if verb in many and not args:
-        sys.stdout.write("".join(x + "\n" for x in many[verb]()))
-        return 0
-    sys.stderr.write("usage: python3 -m wk.store %s\n" % "|".join(sorted(list(many) + ["current-base", "base-verify <id>"])))
-    return 2
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
-
-
 def rubble(store, machine, mirror_here):
     """A snapshot no workspace is on goes with a plain `wk gc`; the mirror and every snapshot only with --purge-mirror, and never under a workspace."""
     from wk.rubble import du_kb, remover, row
@@ -254,3 +229,18 @@ def rubble(store, machine, mirror_here):
                         None if None in kbs else sum(kbs), "--purge-mirror", remover(machine, *paths),
                         "kept -- every workspace is overlaid on a snapshot here: 'wk rm' %s first" % " ".join(ws) if ws else ""))
     return rows
+
+
+def main(argv):
+    p = argparse.ArgumentParser(prog="python3 -m wk.store")
+    p.add_argument("verb", choices=("paths",), help="the store's directories, as shell assignments")
+    p.parse_args(argv)
+    s = Store()
+    for k, v in (("WK_STORE", s.root()), ("secrets_dir", s.secrets_dir()), ("agent_rw_dir", s.agent_rw_dir()),
+                 ("push_held_dir", s.push_held_dir()), ("mirror_dir", os.path.dirname(s.mirror()))):
+        print("%s=%s" % (k, shlex.quote(v)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

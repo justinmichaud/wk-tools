@@ -20,7 +20,7 @@ import unittest
 from unittest import mock
 
 from tests.killpoints import converges
-from tests.support import REPO, WkTest, bash, func_body, requires_machine
+from tests.support import REPO, WkTest, as_dispatched, bash, func_body, requires_machine, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, fleet, quiet  # noqa: E402
@@ -476,12 +476,15 @@ class TestTheCommand(QuiesceTest):
         return m
 
     def test_bare_is_status_and_anything_else_is_refused(self):
+        """the dispatcher hands a bare `wk quiesce` over as status, and refuses any other word"""
         m = self.load()
-        self.assertEqual("status", m.parse([]))
+        self.assertEqual("status", m.parse(as_dispatched("quiesce", [], {})))
         self.assertEqual("on", m.parse(["on"]))
         for bad in (["up"], ["on", "off"]):
             with self.subTest(argv=bad):
-                self.assertIn("usage: wk quiesce", self.refused(lambda: m.parse(bad)))
+                cp = run("quiesce", *bad)
+                self.assertEqual(2, cp.returncode, cp.stdout)
+                self.assertIn("usage: wk quiesce", cp.stdout)
 
 
 class APrivilegedVerbNeverBlocksOnAStoppedDaemon(unittest.TestCase):
@@ -522,13 +525,129 @@ class APrivilegedVerbNeverBlocksOnAStoppedDaemon(unittest.TestCase):
                     self.assertNotIn("$", line, "a bounded call takes a variable")
 
 
+class ALinuxQuiesceIsReadBack(unittest.TestCase):
+    """`on` and `off` read every sysfs file and sysctl back after writing it: a write the kernel
+    refused or rewrote is a failure naming the file, and nothing claims "quiesced" over it. The
+    functions are lifted out of the helper and run against a temp /sys and a stub sysctl."""
+
+    PRIV = REPO / "admin" / "wk-quiesce-priv"
+    FUNCS = ("put_sys", "put_sysctl", "can_boost", "tune", "linux_on", "linux_off")
+    FILES = ("devices/system/cpu/cpu0/cpufreq/scaling_governor", "devices/system/cpu/cpu1/cpufreq/scaling_governor",
+             "devices/system/cpu/intel_pstate/no_turbo", "devices/system/cpu/cpufreq/boost")
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-quiesce-"))
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(self.tmp)])
+        self.sys = self.tmp / "sys"
+        for f in self.FILES:
+            (self.sys / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.sys / f).write_text("schedutil\n" if f.endswith("governor") else "0\n")
+        (self.tmp / "sysctl").mkdir()
+
+    def _cppc(self, highest, nominal, cpus=("cpu0", "cpu1")):
+        """Moose's shape: `cpufreq/scaling_driver` names `cppc_cpufreq`, and each cpu's
+        `acpi_cppc/highest_perf`/`nominal_perf` say whether it has boost headroom."""
+        for cpu in cpus:
+            cpufreq = self.sys / "devices/system/cpu" / cpu / "cpufreq"
+            cpufreq.mkdir(parents=True, exist_ok=True)
+            (cpufreq / "scaling_driver").write_text("cppc_cpufreq\n")
+            cppc = self.sys / "devices/system/cpu" / cpu / "acpi_cppc"
+            cppc.mkdir(parents=True, exist_ok=True)
+            (cppc / "highest_perf").write_text("%s\n" % highest)
+            (cppc / "nominal_perf").write_text("%s\n" % nominal)
+
+    def helper(self, verb, sysctl_sticks=True):
+        text = self.PRIV.read_text()
+        lifted = "".join("%s() {%s}\n" % (f, func_body(text, f)) for f in self.FUNCS)
+        stub = (
+            'sysctl() {\n'
+            '    case "$1" in\n'
+            '        -q) [ "$2" = -w ] || return 2; local key="${3%%=*}" val="${3#*=}"\n'
+            '            %s printf "%%s\\n" "$val" > "$STORE/$key" ;;\n'
+            '        -n) cat "$STORE/$2" ;;\n'
+            '    esac\n'
+            '}\n'
+            'systemctl() { :; }\n'
+        ) % ("" if sysctl_sticks else "val=2;")
+        script = "set -euo pipefail\nSYS=%s\nSTORE=%s\n%s%s%s\n" % (self.sys, self.tmp / "sysctl", stub, lifted, verb)
+        return bash(script)
+
+    def read(self, rel):
+        return (self.sys / rel).read_text().strip()
+
+    def test_on_sets_every_knob_and_says_so(self):
+        cp = self.helper("linux_on")
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("quiesced: performance governor", cp.stdout)
+        self.assertEqual("performance", self.read(self.FILES[1]))
+        self.assertEqual(("1", "0"), (self.read(self.FILES[2]), self.read(self.FILES[3])))
+        self.assertEqual("0", (self.tmp / "sysctl" / "kernel.randomize_va_space").read_text().strip())
+
+    def test_off_restores_every_knob(self):
+        cp = self.helper("linux_off")
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("restored:", cp.stdout)
+        self.assertEqual("schedutil", self.read(self.FILES[0]))
+        self.assertEqual("1", self.read(self.FILES[3]))
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes a read-only file")
+    def test_a_refused_sysfs_write_fails_naming_the_file(self):
+        gov = self.sys / self.FILES[1]
+        gov.chmod(0o444)
+        self.addCleanup(gov.chmod, 0o644)
+        for verb, claim, boost in (("linux_on", "quiesced", "0"), ("linux_off", "restored", "1")):
+            with self.subTest(verb=verb):
+                cp = self.helper(verb)
+                self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
+                self.assertIn(str(gov), cp.stderr)
+                self.assertNotIn(claim, cp.stdout)
+                self.assertEqual(boost, self.read(self.FILES[3]), "a failed step skips the steps after it")
+
+    def test_a_sysctl_that_reads_back_otherwise_fails_naming_it(self):
+        cp = self.helper("linux_on", sysctl_sticks=False)
+        self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("kernel.perf_event_paranoid", cp.stderr)
+        self.assertNotIn("quiesced", cp.stdout)
+
+    def test_a_platform_with_no_boost_headroom_is_left_alone(self):
+        """moose: cppc_cpufreq, acpi_cppc highest_perf == nominal_perf == 300. Writing
+        `cpufreq/boost` there is EINVAL, not merely ignored, so the verb must not try."""
+        self._cppc(highest=300, nominal=300)
+        for verb, claim in (("linux_on", "quiesced"), ("linux_off", "restored")):
+            with self.subTest(verb=verb):
+                cp = self.helper(verb)
+                self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+                self.assertIn(claim, cp.stdout)
+                self.assertIn("boost left alone", cp.stdout)
+                self.assertIn("the platform has none", cp.stdout)
+                self.assertEqual("0", self.read(self.FILES[3]), "boost was never written")
+
+    def test_a_cppc_platform_that_can_boost_still_writes_it(self):
+        self._cppc(highest=380, nominal=300)
+        cp = self.helper("linux_off")
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertNotIn("boost left alone", cp.stdout)
+        self.assertEqual("1", self.read(self.FILES[3]))
+
+    def test_a_non_cppc_driver_keeps_writing_boost_as_before(self):
+        """No `scaling_driver` file at all -- most of the fleet, and every other test in
+        this class -- is today's behaviour: `can_boost` decides nothing and the write
+        happens unconditionally."""
+        cp = self.helper("linux_on")
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertNotIn("boost left alone", cp.stdout)
+        self.assertEqual("0", self.read(self.FILES[3]))
+
+
 def _ssh(dest, command, input=None, timeout=300):
     return subprocess.run(["ssh", "-o", "BatchMode=yes", dest, command], input=input,
                           capture_output=True, text=True, timeout=timeout)
 
 
 def _tools(name):
-    return fleet.Fleet(REPO).load(name).get("WK_REMOTE_TOOLS") or "Development/wk-tools"
+    return fleet.Fleet(REPO).load(name).get("tools") or "Development/wk-tools"
 
 
 class TestOnRealMachines(WkTest):

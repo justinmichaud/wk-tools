@@ -9,7 +9,7 @@ from wk.act import die, info
 
 class MacMachines:
     def setup_mac(self, name, conf):
-        dest = conf.get("NODE_SSH") or name
+        dest = conf.get("ssh") or name
         ok, why = self.answers(name, conf)
         if not ok:
             if not act.dry_run():

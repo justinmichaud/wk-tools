@@ -139,6 +139,39 @@ class TestPmosHostResolution(unittest.TestCase):
         self.assertIn("no PMO_BUILD_HOST", err.getvalue())
 
 
+class TestPmosOutputs(unittest.TestCase):
+    """`wk sysimage ls`'s reader for this builder (pmos.finished_image, pmos.outputs): the newest finished
+    build still on the build host, at the path `fetch_out` and `wk sysimage write --from` read from."""
+
+    def world(self, ls_out):
+        machine = Fake("buildhost1")
+        machine.react(("sh", "-c"), sh_react([("ls -1t", Result(0, ls_out)), ("disk.wic.xz", Result(0)),
+                                              ("result", Result(0)), ("true", Result(0))]))
+        return machine
+
+    def test_the_newest_finished_build_s_image_is_found(self):
+        machine = self.world("test-profile-20260102T000000Z\ntest-profile-20260101T000000Z\n")
+        self.assertEqual(pmos.finished_image(machine, {"WK_PMOS_ROOT": "/p"}, "test-profile"),
+                         ["/p/out/test-profile-20260102T000000Z/disk.wic.xz"])
+
+    def test_no_finished_build_is_no_image(self):
+        machine = self.world("")
+        self.assertEqual(pmos.finished_image(machine, {"WK_PMOS_ROOT": "/p"}, "test-profile"), [])
+
+    def test_a_finished_build_whose_image_is_no_longer_there_is_not_claimed(self):
+        machine = Fake("buildhost1")
+        machine.react(("sh", "-c"), sh_react([("ls -1t", Result(0, "test-profile-20260101T000000Z\n")),
+                                              ("result", Result(0))]))
+        self.assertEqual(pmos.finished_image(machine, {"WK_PMOS_ROOT": "/p"}, "test-profile"), [])
+
+    def test_outputs_resolves_the_build_host_and_asks_it(self):
+        machine = self.world("test-profile-20260101T000000Z\n")
+        reg = Reg(Fake("here"), {"WK_PMOS_ROOT": "/p"})
+        with mock.patch.object(pmos, "ssh_machine", return_value=machine) as ssh_mock:
+            self.assertEqual(pmos.outputs(reg, PROFILE), ["/p/out/test-profile-20260101T000000Z/disk.wic.xz"])
+        self.assertEqual(ssh_mock.call_args[0][-1], "buildhost1")
+
+
 class TestPmosImageKey(WkTest):
     """WK_IMAGE_KEY: the ssh key the image accepts on first boot (Pmos.key_path)."""
 

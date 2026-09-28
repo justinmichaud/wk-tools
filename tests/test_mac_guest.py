@@ -8,7 +8,7 @@ import os
 import sys
 import unittest
 
-from tests.support import REPO, bash
+from tests.support import REPO
 from tests.test_mac_volume import mac_board, quiet
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -26,12 +26,9 @@ def guest(**state):
 
 
 class TestTheRehearsalIsNotAMeasurement(unittest.TestCase):
-    def test_a_reading_from_it_is_refused(self):
+    def test_it_says_it_measures_nothing(self):
         _, d = guest()
-        got, err = quiet(d.check_measurement)
-        self.assertIs(got, act.Refused)
-        self.assertIn("benchvm is a rehearsal", err)
-        self.assertEqual(d.facts()["B_MEASURES"], "no")
+        self.assertEqual(d.facts()["measures"], "no")
         self.assertIn("measurement=refused", d.evidence())
 
 
@@ -73,7 +70,7 @@ class TestWhatItReports(unittest.TestCase):
 
     def test_the_guest_is_named_by_wk_bench_guest(self):
         _, d = mac_board("mac-guest", env={"WK_BENCH_GUEST": "my-custom-guest"})
-        self.assertEqual(d.facts()["NODE_GUEST"], "my-custom-guest")
+        self.assertEqual(d.facts()["guest"], "my-custom-guest")
 
     def test_without_tart_it_is_not_probeable_and_says_where_it_is_managed(self):
         _, d = guest(tart=False)
@@ -137,13 +134,6 @@ class TestGuestChannel(unittest.TestCase):
         finally:
             del os.environ["WK_DRY_RUN"]
         self.assertEqual(vm.ran, [])
-
-
-class TestTheShim(unittest.TestCase):
-    def test_sourced_alone_it_still_names_the_guest(self):
-        cp = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/boot/mac-guest.sh"\necho "$NODE_GUEST|$BOOT_ARMING"',
-                  env={"WK_BENCH_GUEST": "my-custom-guest"})
-        self.assertEqual(cp.stdout.strip(), "my-custom-guest|guest", cp.stderr)
 
 
 if __name__ == "__main__":

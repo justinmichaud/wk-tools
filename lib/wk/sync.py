@@ -3,10 +3,11 @@ workspace that reads the checkout's wiring back in the same round trip, `--fix` 
 
 import contextlib
 import os
+import shlex
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-from wk import act, git, pr, secrets, shell
+from wk import act, git, kv, pr, secrets
 from wk.act import Refused, debug, die, info, log, warn
 from wk.store import Bases, Store
 
@@ -34,11 +35,11 @@ def publish_branch(env):
 
 
 def fetch_script(src, mirror):
-    out = "cd %s || exit 1\nrc=0\ngit fetch --all --prune --quiet || rc=1\n" % shell.sh_quote(src)
+    out = "cd %s || exit 1\nrc=0\ngit fetch --all --prune --quiet || rc=1\n" % shlex.quote(src)
     if mirror:
-        test = "git config --get-all %s" % shell.sh_quote("url.%s.insteadOf" % mirror)
+        test = "git config --get-all %s" % shlex.quote("url.%s.insteadOf" % mirror)
     else:
-        test = "git config --get-regexp %s" % shell.sh_quote(r"^url\..*\.insteadof$")
+        test = "git config --get-regexp %s" % shlex.quote(r"^url\..*\.insteadof$")
     out += 'if [ -n "$(%s 2>/dev/null)" ]; then echo from=mirror; else echo from=github; fi\n' % test
     return out + "exit $rc\n"
 
@@ -379,7 +380,7 @@ class Sync:
         with stage(self.clock, "workspace fetch %s" % ws):
             r = target.act_exec(ws, ["sh", "-c", fetch_and_check_script(src, mirror, self.forks(), self.branches)])
         lines = r.out.replace("\r", "").splitlines()
-        said = dict(l.split("=", 1) for l in lines if l.startswith(("from=", "fetch=", "check=")))
+        said = kv.kv(r.out)
         problems = ["    - %s" % l[len("problem: "):] for l in lines if l.startswith("problem: ")]
         if said.get("fetch") != "0":
             return "failed", "  %-24s FAILED (continuing)\n%s" % (ws, "".join(p + "\n" for p in problems + notes))

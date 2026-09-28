@@ -218,7 +218,7 @@ class TestStatusReportsWhatThisMachineCanDo(unittest.TestCase):
                     self.assertIn("(", value, value)
 
     def test_the_reboot_every_machine_has_is_the_one_unconditional_yes(self):
-        """It is the verb the bench lane needs, and the helper's own reboot is
+        """It is the verb the bench pipeline needs, and the helper's own reboot is
         the same on both platforms."""
         for have in ((), ("bless",), ("vcmailbox",)):
             with self.subTest(have=have):
@@ -399,8 +399,8 @@ class TestTheDrivingEndAsksForTheOperationNotThePrivilege(unittest.TestCase):
         from wk.boot.fake import FakeBoard
         from wk.boot.pi import Rpi5Usb
         from wk.machine import Result
-        conf = {"NODE_NAME": "rpi5", "NODE_DRIVER": "rpi5-usb", "NODE_DEVICE": "/dev/sda",
-                "NODE_ROOT": "/dev/nvme0n1p2", "NODE_ROLE": "workstation"}
+        conf = {"name": "rpi5", "driver": "rpi5-usb", "device": "/dev/sda",
+                "root": "/dev/nvme0n1p2", "role": "workstation"}
         fake = FakeBoard(conf)
         fake.write_system("/dev/sda1", "sys-a")
         calls, answer = [], fake.call
@@ -444,7 +444,7 @@ class TestTheDrivingEndAsksForTheOperationNotThePrivilege(unittest.TestCase):
         from wk.machine import Fake
         via = Fake()
         via.answer(("ssh",), rc=1, err="sudo: a password is required")
-        ch = Channel(REPO, {"NODE_NAME": "rpi5", "NODE_SSH": "rpi5", "NODE_ROLE": "workstation"}, "host", env={}, via=via)
+        ch = Channel(REPO, {"name": "rpi5", "ssh": "rpi5", "role": "workstation"}, "host", env={}, via=via)
         with contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertRaises(act.Refused, ch.call, "boot_priv_require")
         self.assertIn("./setup --stage quiesce", err.getvalue())
@@ -577,7 +577,7 @@ sudo() {
 }
 '''
 
-_PRIV_FUNCS = ("_priv_owner", "_priv_mode", "_priv_companions", "_priv_state",
+_PRIV_FUNCS = ("_priv_companions", "_priv_state",
                "_priv_explain", "_priv_repair", "_priv_converge", "_priv_retired",
                "_priv_sweep_retired")
 
@@ -651,7 +651,7 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
         if granted is not None:
             pre += "wk_priv_answers() { return %d; }\n" % (0 if granted else 1)
         cp = bash(pre + _lift_install(*_PRIV_FUNCS)
-                  + "\n_priv_owner() { printf '%%s' %s; }\n" % _q(owner) + script
+                  + "\nfile_owner() { printf '%%s' %s; }\n" % _q(owner) + script
                   + '\necho "CHANGES=$WK_CHANGES"\n', env={"WK_DEBUG": "1"})
         return cp
 
@@ -855,7 +855,7 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
     def test_a_mode_that_cannot_be_read_refuses_to_vouch_for_the_grant(self):
         self.plant_binary()
         self.plant_rule()
-        cp = self.drive('_priv_mode() { printf ""; }\n'
+        cp = self.drive('file_mode() { printf ""; }\n'
                         '_priv_converge wk-boot-priv any "what it is for"')
         self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("could not read the mode", cp.stdout + cp.stderr)
@@ -867,7 +867,7 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
         self.assertIn("missing at", cp.said)
 
     def test_the_card_helper_is_skipped_on_macos(self):
-        """macOS has no card lane, and a helper held to is_linux was how the boot helper
+        """macOS writes no cards, and a helper held to is_linux was how the boot helper
         went unchecked there."""
         cp = self.converge("wk-card-priv", "linux", macos=True)
         self.assertEqual(0, cp.returncode, cp.said)
@@ -947,20 +947,17 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
     # --- the two facts read off the filesystem ----------------------------------------
 
     def test_the_owner_and_mode_are_read_by_the_form_this_platform_answers(self):
-        """`stat -c` on Linux, `stat -f` on macOS: the GNU form is asked first because
-        Linux's `stat -f` succeeds as "filesystem status" and never as an owner."""
+        """lib/common.sh's file_owner and file_mode, which GNU and BSD stat alike cannot answer with one flag."""
         f = self.tmp / "a-file"
         f.write_text("x\n")
         f.chmod(0o640)
-        cp = bash('. "$WK_ROOT/lib/common.sh"\n' + _lift_install("_priv_owner", "_priv_mode")
-                  + '\n_priv_owner %s\n_priv_mode %s\n' % (_q(str(f)), _q(str(f))))
+        cp = bash('. "$WK_ROOT/lib/common.sh"\nfile_owner %s\nfile_mode %s\n' % (_q(str(f)), _q(str(f))))
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertEqual([self.me, "640"], cp.stdout.split())
 
     def test_an_absent_file_answers_neither(self):
         cp = bash('. "$WK_ROOT/lib/common.sh"\nset -euo pipefail\n'
-                  + _lift_install("_priv_owner", "_priv_mode")
-                  + '\necho "owner=[$(_priv_owner /nope)] mode=[$(_priv_mode /nope)]"\n')
+                  'echo "owner=[$(file_owner /nope)] mode=[$(file_mode /nope)]"\n')
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("owner=[] mode=[]", cp.stdout)
 

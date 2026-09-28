@@ -84,9 +84,26 @@ class TestRefusesARemoteTarget(unittest.TestCase):
                 mock.patch.object(GUI, "exec_into"), \
                 mock.patch.object(GUI, "is_macos", return_value=False), \
                 mock.patch.object(GUI, "session_env", return_value=""), \
-                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_QUIET": "1"}):
-            GUI.main(["--gtk"])
+                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_QUIET": "1", "WK_CONFIG": "gtk-release"}):
+            GUI.main([])
         target.exec_argv.assert_called_once()
+
+    def test_a_dry_run_prints_the_launch_and_runs_nothing(self):
+        """`wk gui --dry-run`: the exec goes through act, which prints it and ends the run"""
+        target = _target(kind="container")
+        target.exec_argv.return_value = (["wkdev-enter", "--exec", "--", "run-minibrowser"], None)
+        reg = mock.Mock()
+        reg.load.return_value = target
+        err = io.StringIO()
+        with mock.patch.object(GUI.targets, "Registry", return_value=reg), \
+                mock.patch("os.execvp", side_effect=AssertionError("ran it")), \
+                mock.patch.object(GUI, "is_macos", return_value=False), \
+                mock.patch.object(GUI, "session_env", return_value=""), \
+                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_CONFIG": "gtk-release", "WK_DRY_RUN": "1"}), \
+                contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+            GUI.main([])
+        self.assertEqual(cm.exception.code, 0)
+        self.assertIn("would run: wkdev-enter --exec -- run-minibrowser", err.getvalue())
 
 
 class TestJscOnlyAndMissingBrowserRefusals(unittest.TestCase):
@@ -95,8 +112,8 @@ class TestJscOnlyAndMissingBrowserRefusals(unittest.TestCase):
         reg = mock.Mock()
         reg.load.return_value = target
         with mock.patch.object(GUI.targets, "Registry", return_value=reg), \
-                mock.patch.dict(os.environ, {"WK_NAME": "ws"}):
-            err = _refused(self, lambda: GUI.main(["--config", "jsc-release"]))
+                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_CONFIG": "jsc-release"}):
+            err = _refused(self, lambda: GUI.main([]))
         self.assertIn("there is no browser in it", err)
 
     def test_no_minibrowser_built_is_refused_naming_the_build_command(self):
@@ -106,8 +123,8 @@ class TestJscOnlyAndMissingBrowserRefusals(unittest.TestCase):
         reg.load.return_value = target
         with mock.patch.object(GUI.targets, "Registry", return_value=reg), \
                 mock.patch.object(GUI, "is_macos", return_value=False), \
-                mock.patch.dict(os.environ, {"WK_NAME": "ws"}):
-            err = _refused(self, lambda: GUI.main(["--gtk"]))
+                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_CONFIG": "gtk-release"}):
+            err = _refused(self, lambda: GUI.main([]))
         self.assertIn("wk build ws gtk-release", err)
 
 
@@ -118,8 +135,8 @@ class TestMacosContainerHasNoDisplay(unittest.TestCase):
         reg.load.return_value = target
         with mock.patch.object(GUI.targets, "Registry", return_value=reg), \
                 mock.patch.object(GUI, "is_macos", return_value=True), \
-                mock.patch.dict(os.environ, {"WK_NAME": "ws"}):
-            err = _refused(self, lambda: GUI.main(["--gtk"]))
+                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_CONFIG": "gtk-release"}):
+            err = _refused(self, lambda: GUI.main([]))
         self.assertIn("no display", err)
 
 

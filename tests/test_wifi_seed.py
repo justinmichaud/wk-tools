@@ -26,7 +26,7 @@ from unittest import mock
 from tests.support import FLEET_ENV, REPO, WkTest, bash, requires_machine, run, run_here
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, fleet, images, shell, tailnet  # noqa: E402
+from wk import act, fleet, images, tailnet  # noqa: E402
 from wk.machine import Local, Result  # noqa: E402
 from wk.sysimage import write  # noqa: E402
 
@@ -314,7 +314,7 @@ class Channel:
 
 def writer(**answers):
     w = write.Write(REPO, dict(os.environ, **FLEET_ENV), Local(), None)
-    w.conf, w.ch = {"NODE_NAME": "stub-disk-machine", "NODE_SSH": "stub-disk-machine"}, Channel(**answers)
+    w.conf, w.ch = {"name": "stub-disk-machine", "ssh": "stub-disk-machine"}, Channel(**answers)
     return w
 
 
@@ -336,24 +336,18 @@ class TestImageWantsWifi(WkTest):
         self.assertEqual(got, {"rpi3": True, "rpi4": True, "rpi5": True,
                                "mbp": False, "benchvm": False, "bogus": False, "": False})
 
-    def test_the_bash_callers_ask_the_same_rule(self):
-        """A bash caller asks boot/disk.sh's _image_wants_wifi, one line over the Python."""
-        cp = bash(f'. "{REPO}/lib/common.sh"; . "{REPO}/boot/disk.sh"; _image_wants_wifi rpi3 && echo Y; '
-                  '_image_wants_wifi mbp || echo N', env=FLEET_ENV)
-        self.assertEqual(cp.stdout.split(), ["Y", "N"], cp.stderr)
-
     def test_a_machine_wk_writes_no_card_for_does_not(self):
         """A Mac reaches the bench over WiFi and has no card to seed, so the question does not arise for it."""
         with tempfile.TemporaryDirectory() as d:
-            for name, body in (("wifimach", "NODE_NET=wifi\nNODE_DEVICE=/dev/sda\n"),
-                               ("ethmach", "NODE_NET=ethernet\nNODE_DEVICE=/dev/sda\n"),
-                               ("nocard", "NODE_NET=wifi\n")):
-                Path(d, name + ".conf").write_text("KIND=board\nNODE_DRIVER=pi-sd\nNODE_NOTE=x\n" + body)
+            for name, body in (("wifimach", "net=wifi\ndevice=/dev/sda\n"),
+                               ("ethmach", "net=ethernet\ndevice=/dev/sda\n"),
+                               ("nocard", "net=wifi\n")):
+                Path(d, name + ".conf").write_text("kind=board\ndriver=pi-sd\nnote=x\n" + body)
             f = fleet.Fleet(REPO, dict(FLEET_ENV, WK_MACHINES_DIR=d))
             self.assertEqual([write.wants_wifi(f, m) for m in ("wifimach", "ethmach", "nocard")], [True, False, False])
 
     def test_every_board_image_names_rpi3_rpi4_or_rpi5(self):
-        """every yocto or buildroot profile is for a board _image_wants_wifi knows about"""
+        """every yocto or buildroot profile is for a board wants_wifi knows about"""
         # static: the reason no IMG_NET field was added -- the fact is already
         # implied by IMG_MACHINE. A pmos or fetch profile is a phone's, seeded
         # by its own PMO_WIFI_BANDS and held to a declared bridge in test_profiles.
@@ -429,7 +423,7 @@ class TestSysimageWriteDryRun(WkTest):
 
 # --------------------------------------------------------------------------- #
 # The tailnet name a card joins under, checked against this machine's view
-# before anything is erased. lib/reach.sh's wk_tailscale_peers is the one
+# before anything is erased. wk.reach.parse_peers is the one
 # parser of `tailscale status --json`; these tests feed it a synthetic document
 # through a stubbed `tailscale` binary rather than adding a second parser.
 # --------------------------------------------------------------------------- #

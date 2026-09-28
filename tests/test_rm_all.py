@@ -29,10 +29,10 @@ import unittest
 from tests.support import WkTest, fake_workspace, run
 
 _LOCAL_CONF = (
-    "KIND=build\nWK_TARGET_KIND=remote\n"
-    "WK_REMOTE_LOCAL=1\n"
-    "WK_REMOTE_ROOT={root}\n"
-    "WK_REMOTE_STORE={store}\n"
+    "kind=build\ndriver=remote\n"
+    "local=1\n"
+    "root={root}\n"
+    "store={store}\n"
 )
 
 

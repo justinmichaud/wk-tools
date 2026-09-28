@@ -378,7 +378,7 @@ class TheStage(unittest.TestCase):
         with clean_env():
             got, err = quiet(tailnet(FakeMac()).stage, "/vol", "no-such-machine")
         self.assertIs(got, Refused)
-        self.assertIn("NODE_BENCH_SSH", err)
+        self.assertIn("bench_ssh", err)
 
     def test_a_dry_run_changes_nothing(self):
         mac = built(FakeMac())
@@ -759,7 +759,7 @@ class TheProvisionedVolume(unittest.TestCase):
     def test_the_volume_is_built(self):
         from wk import fleet
         from wk.machine import Ssh
-        m = Ssh(fleet.Fleet(REPO).load(PROFILE["IMG_MACHINE"])["NODE_SSH"])
+        m = Ssh(fleet.Fleet(REPO).load(PROFILE["IMG_MACHINE"])["ssh"])
         self.assertTrue(MacVolume(m, PROFILE, dict(os.environ)).outputs(), "no marker on an installed bench volume")
 
 

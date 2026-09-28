@@ -1,40 +1,43 @@
-"""t_os (lib/target.sh): the platform a build in a target runs on, `linux` or
-`macos`. It is not decoration -- build/configs.sh reads it to decide a
+"""Target.os (lib/wk/targets.py): the platform a build in a target runs on,
+`linux` or `macos`. It is not decoration -- the build reads it to decide a
 config's build system, because Xcode is the only one on macOS -- so every
 driver has to answer it, and answer it from evidence rather than from a name.
 
 Run: python3 -m unittest tests.test_target_os -v
 """
+import contextlib
+import inspect
+import io
 import platform
+import sys
+import tempfile
 import unittest
 
-from tests.support import REPO, bash, fake_workspace
+from tests.support import REPO, fake_workspace
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import targets  # noqa: E402
+from wk.machine import Fake  # noqa: E402
+from wk.record import Records  # noqa: E402
+from wk.store import Store  # noqa: E402
 
 
-def _t_os(target):
-    cp = bash(f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/target.sh"
-load_target {target} >/dev/null 2>&1
-t_os
-''')
-    assert cp.returncode == 0, cp.stdout + cp.stderr
-    return cp.stdout.strip()
+def _os(target):
+    return targets.Registry(REPO, env={"HOME": "/nonexistent"}, machine=Fake()).load(target).os()
 
 
 class TestEveryDriverAnswers(unittest.TestCase):
     def test_the_container_is_linux(self):
         """The SDK image is Fedora, whatever the workstation holding it is."""
-        self.assertEqual(_t_os("container"), "linux")
+        self.assertEqual(_os("container"), "linux")
 
     def test_a_macos_guest_is_macos(self):
-        """targets/vm.sh exists to build the Apple ports; there is no other
+        """The vm target exists to build the Apple ports; there is no other
         kind of guest it makes."""
-        self.assertEqual(_t_os("vm"), "macos")
+        self.assertEqual(_os("vm"), "macos")
 
     def test_a_workspace_answers_for_itself(self):
-        """targets/local.sh: inside a workspace `uname` is the truth -- a
+        """LocalWorkspace: inside a workspace `uname` is the truth -- a
         Fedora container says Linux, a macOS guest says Darwin -- so
         `wk build <config>` typed in there picks the same build system the
         host would have picked for it. Driven through `wk build --dry-run`,
@@ -49,55 +52,66 @@ class TestEveryDriverAnswers(unittest.TestCase):
 
 class TestTheDefaultIsNotAFallback(unittest.TestCase):
     def test_every_driver_states_its_own_or_inherits_linux_on_purpose(self):
-        """lib/target.sh's default is the container's answer, the same way
-        t_src's is. The three drivers that can be something else say so, and a
-        fourth added without one is caught here rather than by a build."""
-        for driver, expected in (("vm.sh", True), ("local.sh", True),
-                                 ("remote.sh", True), ("container.sh", False)):
-            src = (REPO / "targets" / driver).read_text()
-            with self.subTest(driver=driver):
-                self.assertEqual("t_os()" in src, expected)
+        """Target's default is the container's answer, the same way `src`'s
+        is. The three drivers that can be something else say so, and a fourth
+        added without one is caught here rather than by a build."""
+        for cls, expected in ((targets.Vm, True), (targets.LocalWorkspace, True),
+                              (targets.Remote, True), (targets.Container, False)):
+            with self.subTest(driver=cls.__name__):
+                self.assertEqual("os" in cls.__dict__, expected)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class _Target:
+    def __init__(self, os_, store):
+        self._os = os_
+        self.store = Store({"WK_STORE": store})
+        self.env = {"WK_STORE": store}
+
+    def os(self):
+        return self._os
 
 
 class TestTheDefaultConfigIsDerived(unittest.TestCase):
-    """default_config (lib/target.sh): the config a command uses when none is
-    given is the last build's, from its task record, and otherwise the target
+    """Registry.default_config: the config a command uses when none is given
+    is the last build's, from its task record, and otherwise the target
     platform's. Neither is recorded anywhere else: the workspace marker names
     the workspace, not a build."""
 
-    def _default(self, last_built, target):
-        cp = bash(f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/target.sh"
-last_built_config() {{ printf '%s' "{last_built}"; }}
-ws_target() {{ echo {target}; }}
-default_config demo
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.strip(), cp.stderr
+    def _default(self, last_built, os_):
+        with tempfile.TemporaryDirectory(prefix="wk-test-default-config-") as store:
+            if last_built:
+                t = Records(store, env={"WK_STORE": store}).begin("build", "here", "demo", "wk build demo --kill",
+                                                                   "/nolog", ["building"])
+                t.set("config", last_built)
+            reg = targets.Registry(REPO, env={"HOME": "/nonexistent"}, machine=Fake())
+            reg.ws_target = lambda name: "t"
+            reg.load = lambda name: _Target(os_, store)
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                return reg.default_config("demo"), err.getvalue()
 
     def test_the_last_build_wins_and_says_so(self):
-        config, err = self._default("mac-debug", "vm")
+        config, err = self._default("mac-debug", "macos")
         self.assertEqual(config, "mac-debug")
         self.assertIn("last built with", err)
 
     def test_a_macos_target_with_no_build_defaults_to_the_apple_port(self):
-        config, _ = self._default("", "vm")
+        config, _ = self._default("", "macos")
         self.assertEqual(config, "mac-release")
 
     def test_a_linux_target_with_no_build_defaults_to_jsc(self):
-        config, _ = self._default("", "container")
+        config, _ = self._default("", "linux")
         self.assertEqual(config, "jsc-release")
 
     def test_no_marker_records_a_config(self):
-        """The three writers of a workspace marker (targets/vm.sh,
+        """The three writers of a workspace marker (Vm.write_marker,
         container/firstrun.sh, tests/support.py) name the workspace only."""
-        for rel in ("targets/vm.sh", "container/firstrun.sh", "tests/support.py"):
-            with self.subTest(file=rel):
-                self.assertNotIn("config=", (REPO / rel).read_text())
-        self.assertNotIn("wk_marker_field config", (REPO / "lib/target.sh").read_text())
+        writers = {"Vm.write_marker": inspect.getsource(targets.Vm.write_marker),
+                   "container/firstrun.sh": (REPO / "container/firstrun.sh").read_text(),
+                   "tests/support.py": (REPO / "tests/support.py").read_text()}
+        for name, text in writers.items():
+            with self.subTest(writer=name):
+                self.assertNotIn("config=", text)
+
+
+if __name__ == "__main__":
+    unittest.main()

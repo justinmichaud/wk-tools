@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 #
 # wk bench run <workspace> <plan> [options] -- run a benchmark and keep the result defensible
-# wk: where=workspace name=required takes=1 values=--list ready=yes group=workspaces needs python3 dryrun run,stage,staged,deploy opts --list,--config=,--count=,--browser=,--subtests=,--software,--browser-args=,--cores=,--kill,--system=,--slot=,--ab=,--ab-systems=,--rounds=,--max-rounds=,--detect=,--task=,--timeout=,--exclude-subtests=,--no-warmup-profile,--jit-tiers,--collect readonly --list,ls,precision
+# wk: where=workspace name=required takes=1 values=--list config=--config verbs=run,seed,ls,compare,report,export,precision,stage,staged,mac,mac-volume,mac-ab,ab-summary,ab,deploy ready=yes group=workspaces needs python3 dryrun run,stage,staged,deploy opts --list,--config=,--count=,--browser=,--subtests=,--software,--browser-args=,--cores=,--kill,--system=,--slot=,--ab=,--ab-systems=,--rounds=,--max-rounds=,--detect=,--task=,--timeout=,--exclude-subtests=,--no-warmup-profile,--jit-tiers,--collect readonly --list,ls,precision
 # wk: flag --list where=store name=none takes=0
 # wk: sub run,deploy name=required@2 takes=1
 # wk: sub seed where=dynamic name=required@2 takes=1 opts=
 # wk: sub ls where=dynamic name=none takes=1 opts=--continued
 # wk: sub compare,report where=host name=none takes=4 opts=--html,--text
 # wk: sub precision where=host name=none takes=3 opts=--detect=
+# wk: sub export where=local name=none takes=2 destructive=yes dryrun=yes opts=--to=
 # wk: sub stage where=host takes=1 opts=--to=,--config=,--plan=,--payload=
 # wk: sub staged where=host opts=--id=,--plan=,--expect-display=,--count=,--subtests=,--browser-args=,--payload=,--profile=,--timeout=,--ls,--gates
 # wk: sub mac,mac-volume,mac-ab where=host takes=0 passthrough=tail
@@ -24,6 +25,8 @@
 #                                          macOS guest (run-benchmark --platform
 #                                          osx there, the result copied out)
 #       --count N                          iterations per run (default: run-benchmark's own)
+#       --task <task>                      restart a one-run task: run again into it only
+#                                          when it does not already hold its run ok
 #       --cores 0-3                       pin the run to this Linux cpu list
 #                                          (taskset -c) -- 0-3, 2,3, 0-1,4, 7.
 #                                          Refused on a macOS guest or host:
@@ -33,7 +36,7 @@
 #                                          workspace's own container or guest: stage the build onto
 #                                          it, arm and reboot into it, run there over ssh through its
 #                                          own `wk bench staged`, collect the result, reboot back
-#       --system <board> [--slot name]     measure the slot a board (machines/, KIND=board) holds
+#       --system <board> [--slot name]     measure the slot a board (machines/, kind=board) holds
 #                                          (default a), in its booted bench system: run-benchmark
 #                                          runs here and drives the board's browser over ssh; the
 #                                          display and the pinned clock are preflight checks. In a
@@ -71,7 +74,7 @@
 #       --base <sha|ref>                   the unpatched side (default: the merge-base with the
 #                                          PR's base branch). More than one commit behind the
 #                                          head is refused; --force crosses it
-#       --build-on <a[,b]>                 the machine each arm's lane builds on, base first
+#       --build-on <a[,b]>                 the machine each arm's image workspace builds on, base first
 #       --plan P                           repeatable (default speedometer3)
 #       --rounds N                         alternations per plan (default 5)
 #       --max-rounds N, --detect PCT       alternate past --rounds until the rounds resolve PCT per cent,
@@ -149,9 +152,19 @@
 #                                          and variance per device and plan,
 #                                          out of the rounds recorded so far --
 #                                          a task still running is reported as
-#                                          partial and says what is missing;
+#                                          partial and says what is missing. It
+#                                          heads with the commit each arm measured,
+#                                          each check's verdict (preflight, warmup,
+#                                          PGO profile) and, for a task stopped
+#                                          short, the command that restarts it;
 #                                          --html writes report-<device>-<plan>.html
 #                                          into the task's directory
+#   wk bench export <task> [--to <dir>]    the task's deliverables as <dir>/<task>.zip (default
+#                                          ~/Downloads), from this store or a target's own (the
+#                                          podman VM's, a build box's): the report, task.json,
+#                                          each run's json and the warmup round's evidence and
+#                                          profiles; a task still running or stopped short is
+#                                          refused, and --force exports what it has
 #   wk bench report <run-a> <run-b>        the same report for any two runs
 #       [--html out.html] [--text]        (either side may be comma-separated
 #                                          run directories, pooled)
@@ -232,14 +245,11 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import act, decl, shell, targets  # noqa: E402
+from wk import decl, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import cli, mac, pipeline  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import Local  # noqa: E402
-
-
-BASH_ARMS = ("--list",)
 
 
 def report_args(args):
@@ -254,7 +264,7 @@ def report_args(args):
 
 
 def run_arm(args, reg, clock, popen=subprocess.Popen):
-    o = {"config": args.value("--config"), "count": args.value("--count"), "browser": args.value("--browser"),
+    o = {"config": os.environ.get("WK_CONFIG"), "count": args.value("--count"), "browser": args.value("--browser"),
          "subtests": args.value("--subtests"), "cores": args.value("--cores"), "browser_args": args.value("--browser-args"),
          "software": args.flag("--software"), "system": args.value("--system"), "slot": args.value("--slot"),
          "ab": args.value("--ab"), "ab_systems": args.value("--ab-systems"), "rounds": args.value("--rounds"), "task": args.value("--task"),
@@ -276,7 +286,7 @@ def ab_options(args):
             "bits": args.value("--bits"), "base": args.value("--base"), "build_on": args.value("--build-on"), "rounds": args.value("--rounds"),
             "count": args.value("--count"), "timeout": args.value("--timeout"), "task": args.value("--task"),
             "systems": args.value("--systems"), "slot": args.value("--slot"), "plans": args.values("--plan"), "detach": args.flag("--detach"),
-            "patch": args.value("--patch"), "workspace": args.value("--workspace"), "config": args.value("--config"),
+            "patch": args.value("--patch"), "workspace": args.value("--workspace"), "config": os.environ.get("WK_CONFIG"),
             "max_rounds": args.value("--max-rounds"), "detect": args.value("--detect"), "settle": args.value("--settle"),
             "a_args": args.value("--a-args"), "b_args": args.value("--b-args"), "plant": args.flag("--plant"),
             "rehearse": args.flag("--rehearse"), "allow_network_fetch": args.flag("--allow-network-fetch"),
@@ -289,7 +299,7 @@ def main(argv):
     if argv[:1] == ["--where"]:
         print(cli.where(reg, argv[1:]))
         return 0
-    verb = argv[0] if argv else ""
+    verb = argv[0]
     args = decl.Args(decl.Decl(__file__), argv)
     bench = cli.Bench(ROOT, reg, Clock())
     if verb == "ls":
@@ -297,6 +307,8 @@ def main(argv):
     if verb in ("report", "compare"):
         positional, html, text = report_args(args)
         return bench.report(positional, html, text) if verb == "report" else bench.compare(positional, html)
+    if verb == "export":
+        return bench.export(args.positionals[1] if len(args.positionals) > 1 else "", args.value("--to"))
     if verb == "precision":
         return bench.precision(args.positionals[1:], args.value("--detect") or "0.3")
     if verb == "seed":
@@ -310,7 +322,7 @@ def main(argv):
         return bench.deploy(os.environ.get("WK_NAME", ""), board_name, args.value("--slot") or "a")
     if verb == "stage":
         pairs = mac.plans(args.order, args.values("--plan"), args.values("--payload"))
-        return mac.stage(ROOT, reg, Clock(), args.positionals[1:], args.value("--to") or "", args.value("--config"), pairs)
+        return mac.stage(ROOT, reg, Clock(), args.positionals[1:], args.value("--to") or "", os.environ.get("WK_CONFIG"), pairs)
     if verb == "staged":
         return mac.staged(ROOT, reg, Clock(), staged_options(args))
     if verb == "ab":
@@ -319,9 +331,8 @@ def main(argv):
         return {"mac": bench.mac, "mac-volume": bench.mac_volume, "mac-ab": bench.mac_ab}[verb]()
     if verb == "ab-summary":
         return bench.ab_summary(args.value("--runs"), args.value("--root") or "/var/wk", args.value("--out"))
-    if verb in BASH_ARMS:
-        shell.bench_arms(ROOT, *argv)
-    act.die("usage: wk bench run <workspace> <plan> [options]; see wk bench -h")
+    if args.flag("--list"):
+        return bench.plans()
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ import re
 import sys
 import unittest
 
-from tests.support import REPO, owed
+from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import images  # noqa: E402
@@ -16,9 +16,6 @@ from wk.sysimage import write  # noqa: E402
 
 ENV = {"WK_ROOT": str(REPO)}
 EXTERNAL_CONFIGS = REPO / "image" / "buildroot" / "external" / "configs"
-OWN_FILES = [REPO / "lib" / "image.sh", REPO / "image" / "profiles.sh", REPO / "lib" / "wk" / "images.py"] \
-    + sorted((REPO / "image" / "configs").glob("*.conf"))
-SHIMS = set()
 OC = "webkit-2.52-yocto-rpi5-64-oc"
 STOCK = "webkit-2.52-yocto-rpi5-64"
 CLOCKS = re.compile(r"(?m)^\s*(arm_freq|over_voltage)\w*=")
@@ -41,8 +38,6 @@ class TestProfilesAreData(unittest.TestCase):
             self.assertTrue(images.blurb(n, ENV), "%s.conf has no '# %s -- <description>' header" % (n, n))
 
     def test_no_profile_is_declared_in_code(self):
-        for path in (REPO / "lib" / "image.sh", REPO / "image" / "profiles.sh"):
-            self.assertNotRegex(path.read_text(), r"(?m)^\s*(IMG|YOC|BR|PMO|FET|CFG)_[A-Z_]+=", path)
         self.assertEqual({v for k, v in images.FIELDS.items() if k == "IMG_BUILDER"}, {""})
 
     def test_the_watchdog_is_one_value_a_profile_names_only_to_differ(self):
@@ -85,8 +80,6 @@ class TestProfilesAreData(unittest.TestCase):
             with self.subTest(profile=n):
                 self.assertIn(sum(bool(p[k]) for k in keys), (0, 3))
 
-    @owed("a pinned-kernel profile's defconfig still sets BR2_LINUX_KERNEL=y, and lib/wk/sysimage/buildroot_target.py "
-          "reads the DTS name from that build; 5.17 owns both")
     def test_a_pinned_kernel_builds_none(self):
         for n, p in profiles().items():
             if p["BR_KERNEL_DEB_URL"]:
@@ -98,17 +91,6 @@ class TestProfilesAreData(unittest.TestCase):
             if p["IMG_BUILDER"] == "buildroot" and images.pgo_wanted("yocto", p["CFG_RELEASE"]):
                 with self.subTest(profile=n):
                     self.assertIn("PGO", p["CFG_NEEDS"])
-
-
-class TestVocabulary(unittest.TestCase):
-    """An image's workspace is `image_ws`, never a "lane"."""
-    wk_tier = "lint"
-
-    def test_no_file_here_says_lane(self):
-        for path in OWN_FILES:
-            with self.subTest(file=path.name):
-                self.assertNotRegex(path.read_text(), r"(?i)\blanes?\b")
-                self.assertLessEqual(set(re.findall(r"\w*lane\w*", path.read_text())), SHIMS)
 
 
 class TestSysimage(unittest.TestCase):

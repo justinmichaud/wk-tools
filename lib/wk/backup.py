@@ -4,6 +4,7 @@ import os
 import plistlib
 import re
 import sys
+from xml.parsers.expat import ExpatError
 
 from wk.act import debug, die, info, warn
 
@@ -157,7 +158,8 @@ def candidates(machine, conf_text):
             continue
         try:
             data = plistlib.loads(export.out.encode("utf-8", errors="surrogateescape"))
-        except Exception:
+        except (ValueError, ExpatError) as e:
+            warn("defaults domain %s does not parse as a plist (%s); its keys are not listed" % (domain, e))
             continue
         if not isinstance(data, dict):
             continue

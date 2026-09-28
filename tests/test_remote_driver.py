@@ -82,12 +82,10 @@ class TestRemoteProbeParseDarwin(unittest.TestCase):
         # + 45678 speculative) pages * 16384 bytes/page, in MB.
         self.assertEqual(fields(targets.parse_probe(DARWIN_SAMPLE)), (10, 1, 8043, "no", "macos"))
 
-    def test_missing_page_size_yields_no_mem_answer_not_a_crash(self):
-        """a vm_stat excerpt with no page-size header parses cores/load/ionice
-        fine and answers 0 for memory rather than dividing by an empty page
-        size"""
+    def test_a_missing_page_size_is_refused_not_read_as_no_memory(self):
         sample = "/Users/t\nDarwin\n4\n{ 0.10 0.20 0.30 }\n===MEM===\nPages free:   123456.\n===IONICE===\nno\n"
-        self.assertEqual(fields(targets.parse_probe(sample)), (4, 0, 0, "no", "macos"))
+        with self.assertRaisesRegex(ValueError, "vm_stat printed no page size"):
+            targets.parse_probe(sample)
 
 
 class TestRemoteProbeParseRobustness(unittest.TestCase):
@@ -97,9 +95,11 @@ class TestRemoteProbeParseRobustness(unittest.TestCase):
         p = targets.parse_probe(LINUX_SAMPLE + "\n")
         self.assertEqual((p["ionice"], p["os"]), ("yes", "linux"))
 
-    def test_a_machine_that_answered_nothing_useful_still_parses(self):
-        """a far shell that printed only its home is a machine with one core and no load, not a crash"""
-        self.assertEqual(fields(targets.parse_probe("/home/t\n")), (1, 0, 0, "no", "linux"))
+    def test_an_answer_missing_a_figure_is_refused_not_read_as_one_core_and_no_memory(self):
+        with self.assertRaisesRegex(ValueError, "the core count is '', not a number"):
+            targets.parse_probe("/home/t\n")
+        with self.assertRaisesRegex(ValueError, "MemAvailable is '', not a number"):
+            targets.parse_probe(LINUX_SAMPLE.replace("MemAvailable:", "MemGone:"))
 
 
 class TimingFake(Fake):
@@ -122,14 +122,14 @@ class TestTheProbeIsBounded(unittest.TestCase):
     that accepts the connection and then answers nothing -- a wedged sshd, a
     box deep in swap -- held `wk status <ws>` and `wk logs <ws>` past a 300s
     wait (measured 2026-09-17, with moose down). So the probe runs under a
-    ceiling of its own (WK_PROBE_SECONDS), the way lib/reach.sh reads the
+    ceiling of its own (WK_PROBE_SECONDS), the way lib/wk/reach.py reads the
     tailnet."""
 
     def remote(self, fake, seconds):
         tmp = Path(tempfile.mkdtemp(prefix="wk-test-probe-"))
         self.addCleanup(os.system, "rm -rf %s" % tmp)
         (tmp / "hosts").mkdir()
-        (tmp / "hosts" / "hangs.conf").write_text("KIND=build\nWK_REMOTE_HOST=hangs.example\n")
+        (tmp / "hosts" / "hangs.conf").write_text("kind=build\nhost=hangs.example\n")
         env = {"HOME": str(tmp), "XDG_STATE_HOME": str(tmp / "state"), "WK_MACHINES_DIR": str(tmp / "hosts"),
                "WK_PROBE_SECONDS": seconds, "PATH": os.environ.get("PATH", "")}
         return targets.Registry(REPO, env=env, machine=fake).load("hangs")
@@ -150,6 +150,16 @@ class TestTheProbeIsBounded(unittest.TestCase):
         self.assertEqual(t.answers(), (True, ""))
         self.assertEqual((t.cores(), t.home()), (8, "/home/t"))
         self.assertEqual(fake.timeouts, [20])
+
+    def test_an_unreadable_answer_is_no_answer_and_a_command_needing_it_says_why(self):
+        from wk.act import Refused
+        import contextlib
+        import io
+        t = self.remote(TimingFake(Result(0, "/home/t\nLinux\neight\n")), "20")
+        self.assertEqual(t.answers(), (False, "it answered the probe with what this end cannot read: the core count is 'eight', not a number"))
+        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(Refused):
+            t.cores()
+        self.assertIn("PROBE_SCRIPT (lib/wk/targets.py) is what ran", err.getvalue())
 
 
 if __name__ == "__main__":

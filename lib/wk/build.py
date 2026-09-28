@@ -8,7 +8,7 @@ import shlex
 import subprocess
 import sys
 
-from wk import act, buildconf, git, job, record, shell
+from wk import act, buildconf, git, job, record
 from wk.act import Refused, die, info, log, warn
 from wk.clock import Clock
 from wk.lock import Lock
@@ -78,20 +78,8 @@ def forward(argv, drop=(), drop_valued=(), add=()):
 
 
 def holder_alive(reg):
-    """A budget record's holder: `pid:<n>` on this machine, `ws:<name>:<pidfile>` in that workspace's home."""
-    def alive(h):
-        if h.startswith("pid:") and h[4:].isdigit():
-            return reg.machine.alive(int(h[4:]))
-        if h.startswith("ws:") and ":" in h[3:]:
-            name, pidf = h[3:].split(":", 1)
-            try:
-                t = reg.load(reg.ws_target(name))
-                pid = re.sub(r"[^0-9]", "", reg.machine.read(os.path.join(t.store.ws_dir(name), "home", pidf)))
-            except (LookupError, OSError, Refused):
-                return False
-            return bool(pid) and t.exec(name, ["kill", "-0", pid]).ok
-        return False
-    return alive
+    """A budget record's holder, `pid:<n>` on this machine (Budget.record's callers write no other kind)."""
+    return lambda h: h.startswith("pid:") and h[4:].isdigit() and reg.machine.alive(int(h[4:]))
 
 
 def _exited(pid):
@@ -140,8 +128,8 @@ def size_for(reg, target, name, cfg, clock):
     else:
         avail = Resources(reg.machine, reg.env).avail_mem_mb(cgroup_mb=mem)
     if target.env.get("WK_REMOTE_MAX_JOBS"):
-        warn("WK_REMOTE_MAX_JOBS is set in %s's conf and is ignored: the job count\n"
-             "  is derived per build from what that machine has free. Delete the line." % target.name)
+        warn("WK_REMOTE_MAX_JOBS is set and is ignored for %s: the job count is\n"
+             "  derived per build from what that machine has free. Unset it." % target.name)
     budget = Budget(reg.machine, benv, clock)
     running = budget.running(holder_alive(reg))
     mbpj = buildconf.mb_per_job(cfg, reg.env)
@@ -177,10 +165,7 @@ class Build:
             for line in buildconf.LIST_TEXT.splitlines():
                 log("  " + line)
             raise Refused(2)
-        try:
-            self.cfg = buildconf.resolve(o["config"], self.target.os(), self.target.kind, self.target.env)
-        except LookupError:
-            die("unknown config '%s' (wk build --list)" % o["config"])
+        self.cfg = buildconf.resolve(o["config"], self.target.os(), self.target.kind, self.target.env)
         for e in o.get("env", []):
             if not re.match(r"^[A-Za-z_][^=]*=", e):
                 die("--env takes NAME=VALUE, got %s" % shlex.quote(e))
@@ -221,7 +206,8 @@ class Build:
         return 0
 
     def child_argv(self, drop, drop_valued=(), add=()):
-        return [os.path.join(self.root, "wk"), "build"] + ([] if self.in_ws else [self.name]) + forward(self.argv, drop, drop_valued, add)
+        return ([os.path.join(self.root, "wk"), "build"] + ([] if self.in_ws else [self.name]) + [self.cfg.name]
+                + forward(self.argv, drop, drop_valued, add))
 
     def detach(self):
         pid = detached(self.here, self.recs, self.clock, "build", self.name, self.child_argv(("--detach",)),
@@ -414,9 +400,9 @@ class Build:
             log("  branch:    %s (would be checked out first)" % o["branch"])
         log("  config:    %s (%s%s%s)" % (cfg.name, cfg.buildsys, " " + cfg.port if cfg.port else "", " " + cfg.args if cfg.args else ""))
         if tenv.get("WK_TARGET_CMAKE"):
-            log("  machine:   %s (WK_TARGET_CMAKE, from %s's conf)" % (tenv["WK_TARGET_CMAKE"], t.name))
+            log("  machine:   %s (cmake, from %s's conf)" % (tenv["WK_TARGET_CMAKE"], t.name))
         if defaults:
-            log("  defaults:  %s (WK_BUILD_ARGS, from %s's conf; --no-defaults skips it)" % (defaults, t.name))
+            log("  defaults:  %s (build_args, from %s's conf; --no-defaults skips it)" % (defaults, t.name))
         if o.get("cmake"):
             log("  --cmake:   %s (added to the config's)" % " ".join(o["cmake"]))
         if o.get("env"):

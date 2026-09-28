@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from wk import act, fleet, reach
 from wk.kv import kv
-from wk.machine import Local, Ssh
+from wk.machine import HAVE, Local, Ssh
 
 HEALTHCHECK = "/usr/local/sbin/wk-bridge-healthcheck"
 SSH_PROBE_WORKERS = 32
@@ -93,37 +93,37 @@ class BridgeConf:
         self.conf = conf
 
     def ssh(self):
-        return self.conf["BR_SSH"]
+        return self.conf["ssh"]
 
     def hostname(self):
-        return self.conf["BR_HOSTNAME"]
+        return self.conf["hostname"]
 
     def user(self):
-        return self.conf["BR_USER"]
+        return self.conf["user"]
 
     @property
     def device(self):
-        return self.conf.get("BR_DEVICE", "")
+        return self.conf.get("device", "")
 
     @property
     def segment(self):
-        return self.conf.get("BR_SEGMENT", "")
+        return self.conf.get("segment", "")
 
     @property
     def iface(self):
-        return self.conf["BR_IF"]
+        return self.conf["if"]
 
     @property
     def egress(self):
-        return self.conf["BR_EGRESS"]
+        return self.conf["egress"]
 
     @property
     def camera(self):
-        return self.conf["BR_CAMERA"]
+        return self.conf["camera"]
 
     @property
     def note(self):
-        return self.conf.get("BR_NOTE", "")
+        return self.conf.get("note", "")
 
 
 class Report:
@@ -207,13 +207,19 @@ def judge(facts, bc):
         (r.ok if up == "up" else r.bad)("%s %s" % (label, "responds" if up == "up" else "unreachable"))
 
     r.hdr("Tailnet")
-    (r.ok if facts.get("ts_backend") == "Running" else r.bad)(
-        "tailscaled running" if facts.get("ts_backend") == "Running" else "tailscale backend is %s" % facts.get("ts_backend", "?"))
-    (r.ok if facts.get("ts_online") == "true" else r.bad)("online" if facts.get("ts_online") == "true" else "reported offline")
-    tags = facts.get("ts_tags", "none")
-    (r.ok("tags %s" % tags) if tags != "none" else r.bad("UNTAGGED -- the node key will expire"))
-    routes = facts.get("ts_routes", "none")
-    if routes != "none":
+    try:
+        ts = json.loads(facts.get("ts_status_json") or "")
+    except ValueError:
+        ts = {}
+    self_ = ts.get("Self") or {}
+    backend = ts.get("BackendState", "?")
+    (r.ok if backend == "Running" else r.bad)(
+        "tailscaled running" if backend == "Running" else "tailscale backend is %s" % backend)
+    (r.ok if self_.get("Online") else r.bad)("online" if self_.get("Online") else "reported offline")
+    tags = self_.get("Tags") or []
+    (r.ok("tags %s" % tags) if tags else r.bad("UNTAGGED -- the node key will expire"))
+    routes = self_.get("PrimaryRoutes") or []
+    if routes:
         r.ok("routes %s" % routes)
         if bc.segment not in routes:
             r.bad("%s is advertised but not approved -- nothing behind this bridge is reachable" % bc.segment)
@@ -302,7 +308,7 @@ def render_ls(rows, out):
     for row in rows:
         out.write("%-28s %-10s %-16s %-12s %s\n" % (row["name"], row["device"] or "?", row["segment"] or "?", row["state"], row["note"]))
     if not rows:
-        out.write("(no bridges declared -- machines/*.conf with KIND=bridge)\n")
+        out.write("(no bridges declared -- machines/*.conf with kind=bridge)\n")
     out.write("\n"
               "  bare         answers ssh, nothing of this role on it yet\n"
               "  provisioned  'wk machine setup' has run against it\n"
@@ -329,7 +335,7 @@ class Bridge:
 
     def conf(self, name):
         c = self.fleet.load(name)
-        if c is None or c.get("KIND") != "bridge":
+        if c is None or c.get("kind") != "bridge":
             raise LookupError("'%s' is not a declared bridge. Declared bridges: %s"
                                % (name, ", ".join(self.names()) or "(none)"))
         return BridgeConf(name, c)
@@ -405,9 +411,9 @@ class Bridge:
             raise Unreachable("cannot ssh to %s." % dest)
         if uid.out.strip() == "0":
             return []
-        if ssh.run(["sh", "-c", "command -v doas"], timeout=15).ok:
+        if ssh.run(list(HAVE) + ["doas"], timeout=15).ok:
             prefix = ["doas", "-n"]
-        elif ssh.run(["sh", "-c", "command -v sudo"], timeout=15).ok:
+        elif ssh.run(list(HAVE) + ["sudo"], timeout=15).ok:
             prefix = ["sudo", "-n"]
         else:
             raise Unreachable("ssh to %s lands on uid %s and the phone has neither doas nor sudo." % (dest, uid.out.strip()))

@@ -111,9 +111,9 @@ class AB:
         self.env = dict(reg.env, WK_DEVICE_HELD="device:" + self.name)
         self.task, self.taskdir, self.owned, self.held = o.get("task") or "", "", False, None
         if self.task:
-            self.taskdir = os.path.join(reg.store.bench_dir(), self.task)
-            if not os.path.isfile(os.path.join(self.taskdir, "task.json")):
-                die("no such task '%s' (%s has no task.json); 'wk bench ls' lists the tasks" % (self.task, self.taskdir))
+            self.taskdir = record.homes(reg.store).get(self.task, "")
+            if not self.taskdir:
+                die("no such task '%s' in this machine's store; 'wk bench ls' lists the tasks" % self.task)
         self.system = board.for_board(self.root, reg, ws, clock, self.name, machine=machine, driver=driver)
         self.recs = progress.Records(reg.store.record_dir(), clock=clock, env=reg.env, machine=self.here)
         self.lock = Lock(reg.store, self.here, clock)
@@ -164,7 +164,10 @@ class AB:
             info("%s: arming and booting system %s (attempt %d of %d)" % (name, want, tries, SYSTEM_TRIES))
             if kind == "bench" and not d.arm_from_bench:
                 info("%s: it arms only from its rescue; going back to it first" % name)
-                self.transition("back")
+                if not self.transition("back"):
+                    warn("could not send %s back to its rescue (attempt %d)" % (name, tries))
+                    self.clock.sleep(ARM_RETRY)
+                    continue
                 self.answered(want_host=True)
                 continue
             if not self.transition("arm", want):
@@ -200,11 +203,13 @@ class AB:
         excluded = subtests(self.root, self.reg.env, self.plan, plan_doc, idents, self.o.get("subtests") or "", self.o.get("exclude_subtests") or "")
         self.base = {k: self.o.get(k) or "" for k in ("count", "timeout", "cores", "no_warmup_profile", "jit_tiers")}
         self.base.update(subtests=excluded[0], excluded=excluded[1], slot_a=a, slot_b=b, task=self.task)
+        if self.task and not act.dry_run() and self.reg.env.get("WK_TASK_HELD") != self.task:
+            self.lock.hold("bench-task-" + self.task, timeout=5)
         if self.task or act.dry_run():
             return
         stamp, flag = self.clock.stamp(), "--ab-systems" if self.systems else "--ab"
         self.task = "%s-%s-systems" % (stamp, self.name) if self.systems else "%s-%s-%s-vs-%s" % (stamp, self.name, a, b)
-        self.taskdir = os.path.join(self.reg.store.bench_dir(), self.task)
+        self.taskdir = record.home_for(self.reg.store, self.ws, self.task)
         if os.path.exists(self.taskdir):
             die("task %s already exists (%s); a task is one request, made once" % (self.task, self.taskdir))
         self.lock.hold("bench-task-" + self.task, timeout=5)
@@ -216,7 +221,8 @@ class AB:
             "".join(" --%s %s" % (k, self.base[k]) for k in ("count", "timeout") if self.base[k]))
         record.task_write(self.taskdir, ["task=" + self.task, "requested=" + self.clock.iso(), "subject.kind=" + ("systems" if self.systems else "slots"),
                                          "subject.spec=%s,%s" % (a, b), "devices=" + device, "plans=" + self.plan, "rounds=%d" % self.rounds,
-                                         "slots=" + ",".join(dict.fromkeys(s for _, s in self.arms))] + extra, [command])
+                                         "slots=" + ",".join(dict.fromkeys(s for _, s in self.arms)),
+                                         "restart=%s --task %s" % (command, self.task)] + extra, [command])
         self.base["task"], self.owned = self.task, True
 
     def warmup(self):
@@ -235,23 +241,35 @@ class AB:
             return
         log("  warmup      both arms confirmed; evidence in %s" % d)
 
+    def byround(self):
+        doc = record.task_doc(self.taskdir)
+        return record.task_rounds(doc, record.task_runs(self.taskdir)).get((self.name, self.plan), {})
+
     def resolved(self):
         """The rounds this task holds for this board and plan, paired as the report pairs them."""
-        doc = record.task_doc(self.taskdir)
-        byround = record.task_rounds(doc, record.task_runs(self.taskdir)).get((self.name, self.plan), {})
-        a_dirs, b_dirs, _ = record.paired(byround, self.labels)
+        a_dirs, b_dirs, _ = record.paired(self.byround(), self.labels)
         return report.resolved(a_dirs, b_dirs, self.detect)
 
+    def round(self, i, of):
+        done = {}
+        for arm in ((0, 1) if i % 2 else (1, 0)):   # counterbalanced: a round that always led with A would put every round's drift on B
+            log("round %d/%s -- %s %s%s" % (i, of, "system" if self.systems else "slot", self.labels[arm],
+                                             " (first)" if arm == (0 if i % 2 else 1) else ""))
+            done[arm] = self.arm_leg(arm, {"round": str(i), "arm": "ab"[arm]})
+        return done
+
     def measured(self):
+        """Each round not already in the task with both arms ok, so a restarted A/B takes up where it stopped."""
         kept = lost = 0
         of = "%d-%d" % (self.rounds, self.max_rounds) if self.detect else str(self.rounds)
+        have = {rnd for rnd, arms in self.byround().items() if all(arms.get(x, {}).get("state") == "ok" for x in "ab")}
         for i in range(1, self.max_rounds + 1):
             log("")
-            done = {}
-            for arm in ((0, 1) if i % 2 else (1, 0)):   # counterbalanced: a round that always led with A would put every round's drift on B
-                log("round %d/%s -- %s %s%s" % (i, of, "system" if self.systems else "slot", self.labels[arm],
-                                                 " (first)" if arm == (0 if i % 2 else 1) else ""))
-                done[arm] = self.arm_leg(arm, {"round": str(i), "arm": "ab"[arm]})
+            if i in have:
+                log("round %d/%s -- recorded already" % (i, of))
+                done = {0: True, 1: True}
+            else:
+                done = self.round(i, of)
             if done[0] and done[1]:
                 kept += 1
             else:

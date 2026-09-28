@@ -47,7 +47,7 @@ fi
 
 # tart is not installed here: non-OSI licence (FSL-1.1-ALv2), and the binary
 # needs com.apple.security.virtualization from its signed .app bundle.
-if tart_bin >/dev/null; then
+if wk_py wk.targets tart >/dev/null; then
     unchanged "tart present (macOS VM target available)"
 elif [ -d "$HOME/.tart" ]; then
     warn "~/.tart exists but tart is not on PATH -- no macOS guest will work"

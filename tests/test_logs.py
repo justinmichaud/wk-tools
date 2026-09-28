@@ -7,8 +7,8 @@ drives cmd/logs directly with WK_NAME/WK_TARGET/WK_VM_STORE set, the way a
 dispatcher-resolved `wk logs <ws>` would leave it for a `vm`-kind
 workspace, but without going through `./wk`: a maintainer's interactive
 shell can have WK_NAME/WK_TARGET/WK_TARGET_KIND exported for a real
-workspace (left over from working inside one), and `ws_target`/`resolve_target`
-(lib/target.sh) return an already-set WK_TARGET unasked -- so a bare `./wk
+workspace (left over from working inside one), and `Registry.ws_target` and
+`resolve_target` return an already-set WK_TARGET unasked -- so a bare `./wk
 logs <ws>` in such a shell resolves against whatever that leftover target is,
 not this test's scratch store. tests.support strips those three at import
 (see the top of tests/support.py), which is what makes `bash()` below safe

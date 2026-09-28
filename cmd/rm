@@ -5,7 +5,10 @@
 # wk: flag --all where=host name=none
 #
 # The container, the overlay, the home directory and the ssh alias all go;
-# shared caches (ccache, yocto, buildroot) survive.
+# shared caches (ccache, yocto, buildroot) survive. A workspace holding a
+# bench task that no export holds as it is now (the zip the task records, or
+# ~/Downloads/<task>.zip) is refused, naming `wk bench export <task>`;
+# --force destroys it anyway.
 #
 #   wk rm a b c   three removals: one confirmation for all, each destroyed
 #                 independently

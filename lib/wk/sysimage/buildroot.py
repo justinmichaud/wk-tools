@@ -93,7 +93,14 @@ class Buildroot(task.ContainerBuilder):
         fetched = task.fetch_base(self.here, self.p["BR_KERNEL_DEB_URL"], self.p["BR_KERNEL_DEB_SHA256"], self.env)
         return DL_IN_WS + "/" + os.path.basename(kernel_pin(self.here, fetched, self.p["BR_KERNEL_RELEASE"], self.cache("dl")))
 
-    def image_argv(self, tools, jobs, wifi, kernel_tar):
+    def kernel_dts(self):
+        m = self.p["IMG_MACHINE"]
+        dtb = (fleet.Fleet(images.root(self.env), self.env).load(m) or {}).get("dtb", "")
+        if not dtb:
+            die("%s pins a kernel but machines/%s.conf names no dtb=" % (self.name, m))
+        return os.path.splitext(dtb)[0]
+
+    def image_argv(self, tools, jobs, wifi, kernel_tar, kernel_dts=""):
         p = self.p
 
         def opt(flag, value):
@@ -103,14 +110,14 @@ class Buildroot(task.ContainerBuilder):
                 + opt("--tree-branch", p["BR_TREE_BRANCH"]) + opt("--tree-commit", p["BR_TREE_COMMIT"])
                 + ["--defconfig", p["BR_DEFCONFIG"], "--external", p["BR_EXTERNAL"] or "0"] + opt("--image", p["BR_IMAGE"])
                 + ["--jobs", str(jobs)] + opt("--overlay-arch", p["BR_OVERLAY_TAILSCALE"]) + opt("--overlay-wifi", "1" if wifi else "")
-                + opt("--kernel-tar", kernel_tar) + opt("--kernel-release", p["BR_KERNEL_RELEASE"]))
+                + opt("--kernel-tar", kernel_tar) + opt("--kernel-release", p["BR_KERNEL_RELEASE"]) + opt("--kernel-dts", kernel_dts))
 
     def du(self, path):
         words = self.here.run(["du", "-sh", path]).out.split()
         return words[0] if words else "not created yet"
 
     def build(self, rest):
-        o = task.options(rest, ("--detach", "--stop", "--dry-run"), ("--workspace",), BUILD_USAGE % self.name)
+        o = task.options(rest, ("--detach", "--stop"), ("--workspace",), BUILD_USAGE % self.name)
         p = self.p
         if not p["BR_DEFCONFIG"]:
             die("'%s' names no defconfig, so there is nothing to\n    build. Its configuration is %s." % (self.name, images.conf_path(self.name, self.env)))
@@ -135,12 +142,13 @@ class Buildroot(task.ContainerBuilder):
             plan = (["prepare the pinned kernel %s" % p["BR_KERNEL_RELEASE"]] if p["BR_KERNEL_DEB_URL"] else []) + [
                 "the workspace '%s' on %s" % (ws, tag), "sync wk-tools into '%s'" % ws, "build %s with -j%d" % (self.name, jobs)]
             t = st.begin(plan)
-            n, kernel_tar = 0, ""
+            n, kernel_tar, kernel_dts = 0, "", ""
             try:
                 if p["BR_KERNEL_DEB_URL"]:
                     n += 1
                     st.step(t, n)
                     kernel_tar = self.kernel()
+                    kernel_dts = self.kernel_dts()
                 n += 1
                 st.step(t, n)
                 self.ensure_ws(target, ws, base, tag)
@@ -154,7 +162,7 @@ class Buildroot(task.ContainerBuilder):
             st.step(t, n + 1)
             # BR_TREE_COMMIT is a commit, never the 2020.02 tag: the cog defconfig is absent there.
             info("building %s in '%s' (hours; --detach returns instead)" % (self.name, ws))
-            st.run(t, budget, jobs, self.image_argv(target.tools(ws), jobs, wifi, kernel_tar), PATTERN)
+            st.run(t, budget, jobs, self.image_argv(target.tools(ws), jobs, wifi, kernel_tar, kernel_dts), PATTERN)
         finally:
             lock.release_all()
         info("built %s in '%s'" % (self.name, ws))
@@ -186,7 +194,7 @@ class Buildroot(task.ContainerBuilder):
 
     def webkit(self, rest):
         """One commit built with the image's own wpewebkit package, so `wk bench run --ab` alternates two with no reflash."""
-        o = task.options(rest, ("--detach", "--dry-run"), ("--workspace", "--commit", "--slot"), WEBKIT_USAGE)
+        o = task.options(rest, ("--detach",), ("--workspace", "--commit", "--slot"), WEBKIT_USAGE)
         commit, name = o.get("--commit") or "", o.get("--slot") or ""
         if not commit or not name:
             die(WEBKIT_USAGE + "; see wk sysimage -h")

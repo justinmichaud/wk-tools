@@ -11,12 +11,12 @@ class BridgeMachines:
 
     def refuse_bridge_flags(self, conf, given):
         if given:
-            die("--at, --no-tailnet, --disk, --image and --rebuild are a bridge's, and this is a %s" % conf["KIND"])
+            die("--at, --no-tailnet, --disk, --image and --rebuild are a bridge's, and this is a %s" % conf["kind"])
 
     def tailnet(self, name, at=None):
         require_name(name)
         conf = self.conf(name)
-        if conf is None or conf["KIND"] != "bridge":
+        if conf is None or conf["kind"] != "bridge":
             die("'%s' is not a bridge: 'wk machine tailnet' joins a bridge phone to the tailnet" % name)
         return self.bridge().tailnet(name, at=at)
 
@@ -26,7 +26,7 @@ class BridgeMachines:
             return b.ls()
         require_name(name)
         conf = self.conf(name)
-        if conf is None or conf["KIND"] != "bridge":
+        if conf is None or conf["kind"] != "bridge":
             die("'%s' is not a bridge: 'wk machine status' is a bridge phone's health check; 'wk status' is every machine's" % name)
         try:
             return b.status(name, at=at)

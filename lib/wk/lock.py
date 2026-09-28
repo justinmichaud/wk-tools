@@ -1,7 +1,7 @@
-"""The lock lib/common.sh's hold_lock takes, on the same path with the same
-payload: a symlink `pid=<pid> tok=<hex> at=<iso> cmd=<cmd>`, a dead holder
+"""The one lock: a symlink `pid=<pid> tok=<hex> at=<iso> cmd=<cmd>` at Store.lock_path, a dead holder
 replaced under a `.breaking` symlink, a live one waited for."""
 
+import argparse
 import atexit
 import contextlib
 import os
@@ -19,27 +19,12 @@ def _pid_of(payload):
     return int(m.group(1)) if m else None
 
 
-def _payload(link, payload_file):
-    """A lock's payload: `link()`, else `payload_file()`, else "" -- the one shape both `holder_pid`s read."""
-    return link() or payload_file() or ""
-
-
 def holder_pid(path):
     """The pid in a lock's payload at `path` on this host, or None (`wk status`'s read-only lookup)."""
-    def link():
-        try:
-            return os.readlink(path)
-        except OSError:
-            return None
-
-    def payload_file():
-        try:
-            with open(os.path.join(path, "payload")) as f:
-                return f.read()
-        except OSError:
-            return None
-
-    return _pid_of(_payload(link, payload_file))
+    try:
+        return _pid_of(os.readlink(path))
+    except OSError:
+        return None
 
 
 class Lock:
@@ -60,17 +45,7 @@ class Lock:
         return self.machine.symlink(self.payload, path)
 
     def holder_pid(self, resource):
-        path = self.store.lock_path(resource)
-
-        def payload_file():
-            if not self.machine.isdir(path):
-                return None
-            try:
-                return self.machine.read(os.path.join(path, "payload"))
-            except OSError:
-                return None
-
-        return _pid_of(_payload(lambda: self.machine.readlink(path), payload_file))
+        return _pid_of(self.machine.readlink(self.store.lock_path(resource)))
 
     def _break(self, path, seen):
         breaker = path + ".breaking"
@@ -162,25 +137,23 @@ class Lock:
 
 
 def main(argv, env=None):
-    """`python3 -m wk.lock run <resource> [-w seconds] [--] cmd...`: the command under the lock, and its status.
+    """`python3 -m wk.lock run <resource> [-w seconds] -- cmd...`: the command under the lock, and its status.
     Not exec'd, so the lock drops when the command ends; a symlink lock leaves no descriptor for it to inherit."""
     from wk.clock import Clock
     from wk.machine import here
     from wk.store import Store
-    env = os.environ if env is None else env
-    if len(argv) < 2 or argv[0] != "run":
-        act.die("usage: lockrun.sh <resource> [-w seconds] -- cmd...", 2)
-    res, rest, timeout = argv[1], argv[2:], 600
-    if rest[:1] == ["-w"]:
-        timeout, rest = int(rest[1]), rest[2:]
-    if rest[:1] == ["--"]:
-        rest = rest[1:]
-    if not rest:
-        act.die("lockrun.sh: nothing to run")
-    lock = Lock(Store(env), here(), Clock())
-    with lock.held(res, timeout):
+    p = argparse.ArgumentParser(prog="python3 -m wk.lock", usage="%(prog)s run <resource> [-w seconds] -- cmd...")
+    p.add_argument("verb", choices=("run",))
+    p.add_argument("resource")
+    p.add_argument("-w", dest="timeout", type=int, default=600, help="seconds to wait for the lock")
+    cut = argv.index("--") if "--" in argv else len(argv)
+    a, cmd = p.parse_args(argv[:cut]), argv[cut + 1:]
+    if not cmd:
+        p.error("nothing to run after --")
+    lock = Lock(Store(os.environ if env is None else env), here(), Clock())
+    with lock.held(a.resource, a.timeout):
         sys.stdout.flush()
-        rc = subprocess.call(rest)
+        rc = subprocess.call(cmd)
     return rc if rc >= 0 else 128 - rc
 
 

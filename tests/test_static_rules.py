@@ -1,7 +1,7 @@
 """The static rules over the tree: each check here reads sources and confs
 and runs nothing that reaches a machine or a workspace. What exercises
 commands, drivers and locks at run time lives in tests/test_host_only.py,
-test_bridge.py, test_ceilings.py, test_locks.py and test_selftest_guard.py.
+test_bridge.py, test_ceilings.py, test_wk_lock.py and test_selftest_guard.py.
 
 Run: python3 -m unittest tests.test_static_rules -v
 """
@@ -12,7 +12,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WK, WkTest, bash, func_body, owed, shell_files
+from tests.support import REPO, WK, WkTest, shell_files
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import images  # noqa: E402
@@ -20,6 +20,11 @@ from wk import images  # noqa: E402
 # `ssh -G` evaluates a config and connects to nothing, so the system binary is
 # asked directly, past the runner's shim.
 SYSTEM_SSH = "/usr/bin/ssh"
+
+# The one file a phone genuinely must parse JSON in with no python3: busybox ash,
+# and its escalation ladder judges tailscale's own JSON with no host in the loop
+# to hand it off to.
+JSON_PARSING_EXEMPT = {"bridge/bin/wk-bridge-netwatch"}
 
 
 class TestParsing(WkTest):
@@ -62,7 +67,7 @@ class TestParsing(WkTest):
         """one lock mechanism, everywhere: nothing in the tree calls \\`flock\\`"""
         # static
         hits = []
-        for d in ("cmd", "lib", "targets", "boot", "image"):
+        for d in ("cmd", "lib", "boot", "image"):
             cp = subprocess.run(
                 ["grep", "-rn", r"\bflock\b", str(REPO / d)],
                 capture_output=True, text=True,
@@ -83,26 +88,25 @@ class TestParsing(WkTest):
                 hits.append(f"{WK}:{line}")
         self.assertEqual(hits, [], f"flock is still called here: {hits}")
 
-    @owed("structured data is not handled in bash (docs/PLAN.md 5.39 step 2's done condition): "
-          "bridge/bin/wk-bridge-healthcheck, bridge/bin/wk-bridge-netwatch and bridge/provision.sh call "
-          "jq; claude/hooks/webkit-jsc-skill-reminder.sh and claude/install.sh call jq to read/edit a hook's "
-          "settings.json; bench/mac-quiet-desktop.sh, admin/wk-card-priv, host/macos/machine.sh, "
-          "targets/vm.sh and targets/remote.sh run \\`python3 -c\\` inline with \\`import json\\`")
     def test_no_bash_file_parses_json(self):
-        """no bash file under the tree parses JSON: no \\`jq\\`, no inline \\`python3 -c ... import json\\`, no \\`sed\\` over a JSON blob"""
-        # static
-        jq_call = re.compile(r"(?<![\w-])jq(?![\w-])")
+        """no bash file under the tree parses JSON: no \\`jq\\` call, no inline \\`python3 -c ... import json\\`, no \\`sed\\` over a JSON blob"""
+        # static: a `jq` call takes a flag or a filter string right after it (`jq -r ...`, `| jq '...'`),
+        # which tells it apart from the bare word in a package list (bridge/provision.sh's `REQUIRED=`).
+        jq_call = re.compile(r"""(?<![\w-])jq(?=\s+[-'"])|\|\s*jq\b""")
         py_json = re.compile(r"python3\s+-c\s+.*import\s+json")
         sed_json = re.compile(r"(?<![\w-])sed\b[^\n]*[{}][^\n]*\bjson\b", re.IGNORECASE)
         hits = []
         for f in shell_files():
+            rel = str(f.relative_to(REPO))
+            if rel in JSON_PARSING_EXEMPT:
+                continue
             try:
                 text = f.read_text(errors="replace")
             except OSError:
                 continue
             for pat in (jq_call, py_json, sed_json):
                 if pat.search(text):
-                    hits.append(str(f.relative_to(REPO)))
+                    hits.append(rel)
                     break
         self.assertEqual(sorted(set(hits)), [])
 
@@ -138,7 +142,7 @@ class TestExitTrapOwnership(WkTest):
         claimants = []
         cp = subprocess.run(
             ["grep", "-rn", r"^[^#]*trap .*EXIT", str(REPO / "cmd"), str(REPO / "lib"),
-             str(REPO / "targets"), str(REPO / "boot"), str(REPO / "image")],
+             str(REPO / "boot"), str(REPO / "image")],
             capture_output=True, text=True,
         )
         for line in cp.stdout.splitlines():
@@ -157,77 +161,45 @@ class TestExitTrapOwnership(WkTest):
 class TestMachineRegistry(WkTest):
     def test_machine_registry_every_machine_is_a_conf(self):
         """every bench machine in machines/ stands alone"""
-        script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"; . "{REPO}/lib/image.sh"; . "{REPO}/image/profiles.sh"; . "{REPO}/boot/machines.sh"
-bad=""
-names=$(machine_names)
-[ -n "$names" ] || {{ echo "no bench machines at all"; exit 1; }}
-for n in $names; do
-    ( machine_load "$n" || exit 1
-      [ -n "$NODE_DRIVER" ] || {{ echo "  $n: no NODE_DRIVER"; exit 1; }}
-      [ -f "{REPO}/boot/$NODE_DRIVER.sh" ] || {{ echo "  $n: driver missing"; exit 1; }}
-      case "$NODE_ROLE" in workstation|bench-device) ;; *) echo "  $n: bad role"; exit 1 ;; esac
-      case "$NODE_OS" in any|macos|linux) ;; *) echo "  $n: bad os"; exit 1 ;; esac
-      [ -n "$NODE_PROFILE" ] || {{ echo "  $n: no NODE_PROFILE"; exit 1; }}
-      if [ "$NODE_OS" != macos ]; then
-          ( image_profile_load "$NODE_PROFILE" ) >/dev/null 2>&1 \\
-              || {{ echo "  $n: NODE_PROFILE '$NODE_PROFILE' does not resolve"; exit 1; }}
-      fi
-      [ -n "$NODE_NOTE" ] || {{ echo "  $n: no NODE_NOTE"; exit 1; }}
-    ) || bad="$bad $n"
-done
-[ -z "$bad" ] || {{ echo "machine confs that do not stand alone:$bad"; exit 1; }}
-listed=$(machine_list | awk '{{print $1}}' | sort)
-[ "$listed" = "$(printf '%s\\n' $names | sort)" ] || {{ echo "machine_list and machines/ disagree"; exit 1; }}
-'''
-        cp = bash(script)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-
-    def test_self_disarm_sh_is_single_quote_free(self):
-        """contains no single quote and no `%`: systemd's ExecStart parsing
-        would split on the one and expand the other as a specifier"""
-        found_any = False
+        from wk import boot, fleet
+        from wk.boot import cli
+        env = {"XDG_CONFIG_HOME": str(self.tmp / "no-config")}
+        names = fleet.Fleet(REPO, env).names(fleet.BENCH_KINDS)
+        self.assertTrue(names, "no bench machines at all")
         bad = []
-        for d in sorted((REPO / "boot").glob("*.sh")):
-            text = d.read_text(errors="replace")
-            if not re.search(r"(?m)^b_self_disarm_sh\(\)", text):
+        for n in names:
+            conf = cli.load_conf(REPO, n, env)
+            if conf is None:
+                bad.append("%s: no driver or note" % n)
                 continue
-            found_any = True
-            cp = bash(
-                f'NODE_DEVICE=/dev/sda NODE_NAME=selftest; . "{d}"; b_self_disarm_sh'
-            )
-            out = cp.stdout
-            if "'" in out or "%" in out:
-                bad.append(f"{d.name} emits a single quote or a %: {out}")
-            elif not out.strip():
-                bad.append(f"{d.name} emits nothing")
-        if not found_any:
-            self.skipTest("no driver defines b_self_disarm_sh")
-        self.assertEqual(bad, [], "; ".join(bad))
+            if conf["driver"] not in boot.drivers():
+                bad.append("%s: driver %s missing" % (n, conf["driver"]))
+            if conf["role"] not in ("workstation", "bench-device"):
+                bad.append("%s: bad role" % n)
+            if conf["os"] not in ("any", "macos", "linux"):
+                bad.append("%s: bad os" % n)
+            if not conf.get("profile"):
+                bad.append("%s: no profile" % n)
+            elif conf["os"] != "macos" and images.quiet_load(conf["profile"]) is None:
+                bad.append("%s: profile '%s' does not resolve" % (n, conf["profile"]))
+        self.assertEqual(bad, [], "machine confs that do not stand alone")
+        listed = sorted(line.split()[0] for line in cli.listing(REPO, env).splitlines())
+        self.assertEqual(listed, sorted(names), "wk boot's listing and machines/ disagree")
 
 
 class TestBridgeDeclarations(WkTest):
     def test_bridge_kconfig_delta_is_declarable(self):
         """a kernel config delta names an aport and well-formed options"""
-        script = f'''
-set -euo pipefail
-. "{REPO}/image/profiles.sh"
-bad=""
-for prof in bridge-pinephone bridge-librem5; do
-    ( image_profile_load "$prof" >/dev/null 2>&1 || exit 0
-      [ -n "${{PMO_KCONFIG:-}}" ] || exit 0
-      [ -n "${{PMO_KERNEL_APORT:-}}" ] || {{ echo "  $prof: PMO_KCONFIG with no PMO_KERNEL_APORT"; exit 1; }}
-      case "$PMO_KERNEL_APORT" in */*) ;; *) echo "  $prof: not a path"; exit 1 ;; esac
-      for opt in $PMO_KCONFIG; do
-          case "$opt" in CONFIG_*=y|CONFIG_*=m|CONFIG_*=n) ;; *) echo "  $prof: '$opt' malformed"; exit 1 ;; esac
-      done
-    ) || bad="$bad $prof"
-done
-[ -z "$bad" ] || {{ echo "kernel config deltas that would fail mid-build:$bad"; exit 1; }}
-'''
-        cp = bash(script)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        bad = []
+        for prof in ("bridge-pinephone", "bridge-librem5"):
+            p = images.quiet_load(prof)
+            if p is None or not p["PMO_KCONFIG"]:
+                continue
+            if "/" not in p["PMO_KERNEL_APORT"]:
+                bad.append("%s: PMO_KCONFIG with no PMO_KERNEL_APORT path" % prof)
+            bad += ["%s: '%s' malformed" % (prof, o) for o in p["PMO_KCONFIG"].split()
+                    if not re.match(r"^CONFIG_\w+=[ymn]$", o)]
+        self.assertEqual(bad, [], "kernel config deltas that would fail mid-build")
 
     def test_bridge_image_carries_role_packages(self):
         """the image carries every package the role requires"""
@@ -329,16 +301,9 @@ class TestTailnetHygiene(WkTest):
     def test_no_authkey_in_an_image(self):
         """no auth key is ever written into an image"""
         # static
-        cp = subprocess.run(
-            ["grep", "-rln", "wk_tailscale_authkey", str(REPO / "image")],
-            capture_output=True, text=True,
-        )
-        hits = cp.stdout.strip()
-        sysimage = (REPO / "lib" / "sysimage-arms.sh").read_text(errors="replace")
-        m = re.search(r"(?ms)^cmd_build\(\).*?^\}", sysimage)
-        if m and "wk_tailscale_authkey" in m.group(0):
-            hits += f"\n{REPO}/lib/sysimage-arms.sh (cmd_build)"
-        self.assertEqual(hits.strip(), "", f"the image build path resolves an auth key: {hits}")
+        hits = [f for f in ("buildroot", "buildroot_target", "yocto", "yocto_target", "pmos", "pmos_build")
+                if re.search(r"tailnet\.Fleet|\.authkey\(", (REPO / "lib/wk/sysimage" / (f + ".py")).read_text())]
+        self.assertEqual(hits, [], "the image build path resolves an auth key")
         write = (REPO / "lib" / "wk" / "sysimage" / "write.py").read_text()
         self.assertIn("self.seed_tailnet(dev, tailnet)", write, "nothing seeds the tailnet identity onto a written card")
 
@@ -382,20 +347,6 @@ class TestBuildLocations(WkTest):
         self.assertEqual(bad, [], "; ".join(bad))
         if not bad:
             self.assertRegex((d / "external.desc").read_text(), r"(?m)^name: ")
-
-    def test_disk_verbs_are_defined(self):
-        """every disk verb the write path calls is defined"""
-        # static
-        defs = set()
-        for f in ("boot/disk.sh", "boot/machines.sh", "lib/common.sh", "lib/sysimage-arms.sh"):
-            cp = subprocess.run(["grep", "-hoE", r"^[a-z_]+\(\)", str(REPO / f)], capture_output=True, text=True)
-            defs |= {l.rstrip("()") for l in cp.stdout.splitlines()}
-        used = set()
-        for f in ("lib/sysimage-arms.sh", "boot/disk.sh"):
-            text = re.sub(r"#.*", "", (REPO / f).read_text(errors="replace"))
-            used |= set(re.findall(r"(?:^|[;&|(}\s])(disk_[a-z_]+|card_priv[a-z_]*)(?=[\s]|$)", text, re.M))
-        bad = [f"{n} is called and defined nowhere" for n in used if n not in defs]
-        self.assertEqual(bad, [], "; ".join(bad))
 
     def test_card_helper_gate(self):
         """disk the machine is not running from"""

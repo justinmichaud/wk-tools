@@ -6,8 +6,8 @@ lib/wk/wall.py); a human `wk enter` shell is not wrapped and commits normally.
 tests/test_ai.py drives the session that is wrapped and the refusal without bwrap.
 
 The static half checks the wiring (no hardware). The functional half proves
-the recipe against a throwaway repo inside the podman VM's image -- the same
-image a container workspace runs -- and is skipped when that VM is not up.
+the recipe against a throwaway repo inside the image a container workspace
+runs, and is skipped when the container target is not up.
 
 Run: python3 -m unittest tests.test_commit_wall -v
 """
@@ -15,7 +15,7 @@ import shlex
 import sys
 import unittest
 
-from tests.support import REPO, podman_vm_ssh, requires_podman_vm
+from tests.support import REPO, container_side, requires_container_target
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import wall  # noqa: E402
@@ -58,12 +58,12 @@ class TestWiring(unittest.TestCase):
         self.assertIn("did NOT block a commit", WALL)
 
 
-def _vm_image():
-    cp = podman_vm_ssh("podman images --format '{{.Repository}}:{{.Tag}}' | grep -m1 wkdev")
+def _workspace_image():
+    cp = container_side("podman images --format '{{.Repository}}:{{.Tag}}' | grep -m1 wkdev")
     return cp.stdout.strip() if cp.returncode == 0 else ""
 
 
-@requires_podman_vm()
+@requires_container_target()
 class TestTheWallHolds(unittest.TestCase):
     """The recipe run for real inside the workspace image: a commit is blocked,
     an ordinary write is not, and no unmount/shadow/nested-namespace escape
@@ -71,9 +71,9 @@ class TestTheWallHolds(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.img = _vm_image()
+        cls.img = _workspace_image()
         if not cls.img:
-            raise unittest.SkipTest("no wkdev image in the podman VM")
+            raise unittest.SkipTest("no wkdev image for the container target")
         # the exact prefix production emits, for a repo at /tmp/r
         cls.prefix = prefix("/tmp/r")
 
@@ -83,7 +83,7 @@ class TestTheWallHolds(unittest.TestCase):
                  "git init -q; git config user.email a@b; git config user.name a; "
                  "echo hi>f; git add f; git commit -qm one >/dev/null; "
                  f"W='{self.prefix}'; " + script)
-        cp = podman_vm_ssh(
+        cp = container_side(
             f"podman run --rm --userns keep-id --security-opt no-new-privileges "
             f"--entrypoint /bin/sh {img} -c {shlex.quote(inner)}",
             timeout=120)
@@ -122,24 +122,23 @@ class TestBuiltinsAreAskedThroughAShell(unittest.TestCase):
     """A target's exec hands argv to an exec, not a shell, so a shell builtin
     such as `command -v` cannot be the program: measured live, the bare form
     failed in every container and no session started. cmd/ai asks
-    through `sh -c`, and nothing under cmd/ or lib/ uses the bare form (`test`
+    through `sh -c` (machine.HAVE), and nothing under cmd/ or lib/ uses the bare form (`test`
     is a real program in every image and is fine)."""
 
     def test_cmd_ai_asks_for_bwrap_through_a_shell(self):
         from tests.test_ai import AI, SimRegistry, SimTarget
-        from wk.machine import Fake
+        from wk.machine import HAVE, Fake
         fake = Fake()
         target = SimTarget(fake, {})
         AI.Ai(str(REPO), {}, SimRegistry({}, fake, target), target, "claude", "demo").wall_available()
-        self.assertEqual(["sh -c command -v bwrap >/dev/null 2>&1"], target.asked)
+        self.assertEqual([" ".join(HAVE + ("bwrap",))], target.asked)
 
-    def test_no_bare_builtin_reaches_t_exec(self):
+    def test_no_bare_builtin_reaches_a_targets_exec(self):
         import re
-        bad = re.compile(r't_exec "\$[A-Za-z_]+" (command|type|alias|cd|builtin|source) ')
-        for d in ("cmd", "lib", "targets"):
-            for f in sorted((REPO / d).iterdir()):
-                if not f.is_file() or f.suffix in (".py", ".pyc"):
-                    continue
-                for n, line in enumerate(f.read_text(errors="replace").splitlines(), 1):
-                    with self.subTest(file=f.name, line=n):
-                        self.assertIsNone(bad.search(line), line.strip())
+        bad = re.compile(r'exec\([^,()]+, \[\s*"(command|type|alias|cd|builtin|source)"')
+        files = [f for f in sorted((REPO / "cmd").iterdir()) if f.is_file()] + sorted((REPO / "lib" / "wk").rglob("*.py"))
+        self.assertIsNotNone(bad.search('target.exec(ws, ["command", "-v", "bwrap"])'))
+        for f in files:
+            for n, line in enumerate(f.read_text(errors="replace").splitlines(), 1):
+                with self.subTest(file=f.name, line=n):
+                    self.assertIsNone(bad.search(line), line.strip())

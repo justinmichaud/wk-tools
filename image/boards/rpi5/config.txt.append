@@ -14,7 +14,7 @@
 # It is a barrier crossed deliberately, not a fix: on this board the check was
 # also right, and forcing past it is what turned a fall-through into a kernel
 # panic (image/boards/rpi5/local.conf.append names the fault). Nothing else in
-# the lane reports the firmware's own judgement, so what this buys is a boot
+# the bench path reports the firmware's own judgement, so what this buys is a boot
 # that gets far enough to say why it failed.
 #
 # The workstation's config.txt does nothing for an image booting from its own

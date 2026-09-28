@@ -7,6 +7,7 @@ import sys
 
 from wk import fleet, reach, targets
 from wk.act import die, info, log, warn
+from wk.kv import ConfError
 from wk.machine import Local, Ssh
 from wk.machine_cmd.board import BoardMachines
 from wk.machine_cmd.bridge import BridgeMachines
@@ -27,12 +28,14 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
     def conf(self, name):
         try:
             return self.fleet.load(name)
-        except fleet.ConfError as e:
+        except ConfError as e:
             die(str(e))
 
     def target(self, name, conf):
-        env = dict(self.env)
-        env.update({k: v for k, v in conf.items() if k != "KIND"})
+        try:
+            env = dict(self.env, **targets.conf_env(conf, self.fleet.path(name)))
+        except LookupError as e:
+            die(str(e))
         t = targets.Remote(name, self.root, env, self.here)
         if self.far is not None:
             t.machine = self.far
@@ -59,26 +62,26 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
             if kind not in fleet.TARGET_KINDS:
                 die("--kind %s: 'wk machine setup' makes a build machine or a peer (--kind build | peer)" % kind)
             conf = fleet.parse_text(CONFS[kind] % {"name": name})
-        elif kind and kind != conf["KIND"]:
-            die("%s says KIND=%s, and --kind %s disagrees. The conf is the answer:\n"
-                "    edit it, or drop --kind." % (self.rel(self.fleet.path(name)), conf["KIND"], kind))
-        if conf["KIND"] == "bridge":
+        elif kind and kind != conf["kind"]:
+            die("%s says kind=%s, and --kind %s disagrees. The conf is the answer:\n"
+                "    edit it, or drop --kind." % (self.rel(self.fleet.path(name)), conf["kind"], kind))
+        if conf["kind"] == "bridge":
             return self.bridge().setup(name, at=at, no_tailnet=no_tailnet, disk=disk, image=image, rebuild=rebuild)
         self.refuse_bridge_flags(conf, at or no_tailnet or disk or image or rebuild)
-        if conf["KIND"] == "board":
+        if conf["kind"] == "board":
             return self.setup_board(name, conf)
-        if conf["KIND"] == "mac":
+        if conf["kind"] == "mac":
             return self.setup_mac(name, conf)
-        if conf["KIND"] not in fleet.TARGET_KINDS:
+        if conf["kind"] not in fleet.TARGET_KINDS:
             die("'%s' is a %s (%s): 'wk machine setup' sets up a build machine, a peer, a board or a Mac"
-                % (name, conf["KIND"], self.rel(self.fleet.path(name))))
+                % (name, conf["kind"], self.rel(self.fleet.path(name))))
         t = self.target(name, conf)
         ok, why = t.answers()
         if not ok:
             die("cannot ssh to '%s' non-interactively: %s\n"
                 "    A machine is named after an ssh destination that already works, keys and\n"
                 "    ProxyJump included:  ssh -o BatchMode=yes %s true" % (t.label(), why, t.label()))
-        if conf["KIND"] == "peer":
+        if conf["kind"] == "peer":
             return self.setup_peer(name, t, path, new)
         return self.setup_build(name, t, path, new)
 
@@ -95,13 +98,13 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
         if conf is None:
             die("no conf for '%s' (%s) -- nothing to remove" % (name, self.rel(self.fleet.conf_path(name))))
         path = self.fleet.path(name)
-        if conf["KIND"] == "bridge":
+        if conf["kind"] == "bridge":
             return self.bridge().rm(name, at=at)
         self.refuse_bridge_flags(conf, at)
-        if conf["KIND"] == "board":
+        if conf["kind"] == "board":
             return self.rm_board(name, conf, path)
-        if conf["KIND"] not in fleet.TARGET_KINDS:
-            die("'%s' is a %s (%s): 'wk machine rm' removes a build machine or a peer" % (name, conf["KIND"], self.rel(path)))
+        if conf["kind"] not in fleet.TARGET_KINDS:
+            die("'%s' is a %s (%s): 'wk machine rm' removes a build machine or a peer" % (name, conf["kind"], self.rel(path)))
         return self.rm_target(name, conf, path)
 
     # -- ls and probe
@@ -112,7 +115,7 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
         for name in self.fleet.names():
             c = self.conf(name)
             reached = "; ".join("%s %s" % (n, self.reach.tailnet(n) or "not a node") for n in self.reach.names(name))
-            rows.append({"name": name, "kind": c["KIND"], "tailnet": reached, "note": c.get("NODE_NOTE") or c.get("BR_NOTE", ""),
+            rows.append({"name": name, "kind": c["kind"], "tailnet": reached, "note": c.get("note") or c.get("note", ""),
                          "conf": self.rel(self.fleet.path(name))})
         if as_json:
             out.write(json.dumps({"machines": rows}) + "\n")
@@ -126,9 +129,9 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
     def answers(self, name, conf):
         """(True, "") or (False, why): a build machine or peer by its one probe, anything else by an ssh `true`, and
         a node the tailnet already reports down by that alone."""
-        if conf["KIND"] in fleet.TARGET_KINDS:
+        if conf["kind"] in fleet.TARGET_KINDS:
             return self.target(name, conf).answers()
-        dest = conf.get("NODE_SSH") or conf.get("BR_SSH") or name
+        dest = conf.get("ssh") or conf.get("ssh") or name
         down = self.reach.offline(dest)
         if down:
             return False, down
@@ -141,10 +144,10 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
         if conf is None:
             die("'%s' is not a machine here. machines:\n%s" % (name, "".join("      %s\n" % n for n in self.fleet.names())))
         ok, why = self.answers(name, conf)
-        doc = {"machine": name, "kind": conf["KIND"], "answers": ok, "why": why,
+        doc = {"machine": name, "kind": conf["kind"], "answers": ok, "why": why,
                "tailnet": {n: self.reach.tailnet(n) for n in self.reach.names(name)},
-               "ssh": self.reach.ssh_path(conf.get("NODE_SSH") or conf.get("BR_SSH") or name)}
-        mac = conf.get("NODE_MAC", "").lower()
+               "ssh": self.reach.ssh_path(conf.get("ssh") or conf.get("ssh") or name)}
+        mac = conf.get("mac", "").lower()
         if not ok and mac:
             doc["sweep"] = survey.run(mac)
         if as_json:

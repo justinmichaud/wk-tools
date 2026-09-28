@@ -1,5 +1,7 @@
 """The shell preludes cmd/run, cmd/gui, cmd/test and cmd/profile put in front of a target command: the loader path, prepended so the wkdev image's own jhbuild/libwpe prefix survives, and the lldb that starts (run, not found: the image's /opt/swift lldb links a libxml2 it lacks), pinned to the parent after ~/.lldbinit."""
 
+import shlex
+
 
 def prelude(var, dir_):
     return 'export %s="%s${%s:+:${%s}}"' % (var, dir_, var, var)
@@ -14,3 +16,8 @@ done
     "$(command -v lldb || echo 'nothing')" >&2; exit 127; }"""
 
 LLDB_PIN_OPTS = "-O 'settings set target.process.follow-fork-mode parent'"
+
+
+def lldb_waiting(run, log, attach, *commands):
+    opts = " ".join("-o " + shlex.quote(c) for c in commands + ("process attach --name %s --waitfor" % attach,))
+    return '%s\n( sleep 2; %s >%s 2>&1 ) &\nexec "$LLDB" %s %s' % (LLDB_PRELUDE, run, log, LLDB_PIN_OPTS, opts)

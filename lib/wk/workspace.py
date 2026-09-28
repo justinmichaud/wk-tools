@@ -10,12 +10,13 @@ waited for and the plan cannot differ from the run.
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
-from wk import act, buildconf, job, record, shell, sshalias
+from wk import act, buildconf, job, kv, record, sshalias
 from wk.act import Refused, die, info, log, warn
-from wk.machine import Killed
+from wk.machine import Killed, in_podman_machine
 from wk.pr import checkout as pr_checkout, parse_spec
 from wk.store import Bases
 from wk.targets import show
@@ -321,7 +322,7 @@ def fetch_from(probe):
 
 
 def checkout_script(src):
-    return "cd %s || exit 2\n" % shell.sh_quote(src) + CHECKOUT_SCRIPT
+    return "cd %s || exit 2\n" % shlex.quote(src) + CHECKOUT_SCRIPT
 
 
 def freshen(target, name, here):
@@ -330,7 +331,7 @@ def freshen(target, name, here):
     if act.dry_run():
         here.act_run([wk, "sync", name])
         return
-    mirror = shell.sh_quote(target.mirror_dir())
+    mirror = shlex.quote(target.mirror_dir())
     r = target.exec(name, ["sh", "-c", "[ -n %s ] && [ -d %s ] && echo yes || echo no" % (mirror, mirror)])
     lines = r.out.replace("\r", "").splitlines() if r.ok else []
     source = fetch_from(lines[-1].strip() if lines else "")
@@ -348,24 +349,21 @@ def freshen(target, name, here):
         log("  wk sync %s    once it is up" % name)
         return
     r = target.exec(name, ["sh", "-c", checkout_script(target.src(name))])
-    kv = {}
-    for line in (r.out.replace("\r", "").splitlines() if r.ok else []):
-        k, _, v = line.partition("=")
-        kv.setdefault(k, v)
-    if kv.get("detached"):
+    said = kv.kv(r.out if r.ok else "")
+    if said.get("detached"):
         warn("'%s' is not on a branch (detached at %s), so 'git status',\n"
              "    'git pull' and 'wk pr rebase' in there have no upstream to name:\n"
-             "        git checkout main    in the workspace" % (name, kv["detached"]))
+             "        git checkout main    in the workspace" % (name, said["detached"]))
         return
-    b = kv.get("branch")
+    b = said.get("branch")
     if not b:
         warn("could not read the checkout in '%s' to say where it is\n    ('wk enter %s', then 'git status' in there)" % (name, name))
         return
-    u = kv.get("upstream")
+    u = said.get("upstream")
     if not u:
         warn("'%s' is on '%s', which tracks nothing -- 'git pull' and\n    'wk pr' have no upstream to name:  wk sync %s --fix" % (name, b, name))
         return
-    head, moved = kv.get("head", ""), kv.get("moved", "")
+    head, moved = said.get("head", ""), said.get("moved", "")
     if moved == "refused":
         warn("'%s' in '%s' and %s have diverged, so the checkout is left where\n    it is:  git rebase %s   in the workspace" % (b, name, u, u))
     elif not moved:
@@ -464,6 +462,32 @@ def confirm_destroy(count, lines):
         die("aborted")
 
 
+def unsaved_results(reg, found):
+    """(workspace, task, why) for each bench task a removal would take that no export readable here holds."""
+    from wk.bench import record as bench_record
+    if in_podman_machine() and reg.env.get("WK_HOST_SELF"):
+        return []   # forwarded by a Mac, which read its own zips first (refuse_unsaved_before_forward)
+    out = []
+    for n, target, what in found:
+        at = target.results(n) if what != "record" else None
+        if at:
+            out += [(n, t, why) for t, why in bench_record.unexported(at[0], at[1], os.path.join(reg.store.home(), "Downloads"))]
+    return out
+
+
+def refuse_unsaved(reg, found):
+    unsaved = unsaved_results(reg, found)
+    if unsaved:
+        act.barrier("'wk rm' would destroy bench tasks no export holds as they are now:\n%s" % "\n".join(
+            "    %s: %s -- %s\n        wk bench export %s" % (n, t, why, t) for n, t, why in unsaved))
+
+
+def refuse_unsaved_before_forward(reg, names):
+    """A Mac's container removal runs in the podman machine, which cannot read a zip here, so this host reads them first."""
+    target = reg.load("container")
+    refuse_unsaved(reg, [(n, target, "workspace") for n in names])
+
+
 def rm_names(reg, records, names):
     """The named removals: each planned, one question for all, each destroyed independently; the worst status."""
     from wk.lock import Lock
@@ -479,6 +503,7 @@ def rm_names(reg, records, names):
             worst = 1
     if not found:
         return worst
+    refuse_unsaved(reg, found)
     confirm_destroy(len(found), "\n".join("    %s@%s" % (n, t.name) for n, t, _ in found))
     for n, target, what in found:
         lock = Lock(target.store, records.machine, records.clock)

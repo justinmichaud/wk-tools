@@ -1,5 +1,5 @@
-"""How a machine is reached (lib/wk/reach.py): the tailnet read once per invocation, `ssh -G`'s answer, the
-neighbour table as a sweep's answer, and the bash shims (lib/reach.sh) handing the shell's one read to the Python.
+"""How a machine is reached (lib/wk/reach.py): the tailnet read once per invocation, `ssh -G`'s answer, and the
+neighbour table as a sweep's answer.
 
 Run: python3 tests/run.py --unit -k test_reach
 """
@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, bash
+from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import fleet, reach  # noqa: E402
@@ -55,19 +55,19 @@ class TestTheTailnet(unittest.TestCase):
         self.assertEqual(r.offline("unlisted"), "")
 
     def test_a_bench_machine_is_reached_under_its_role_names(self):
-        _f, r = world({"rpi4": "KIND=board\nNODE_SSH=rpi4-rescue\nNODE_BENCH_SSH=rpi4-bench\n"})
+        _f, r = world({"rpi4": "kind=board\nssh=rpi4-rescue\nbench_ssh=rpi4-bench\n"})
         self.assertEqual(r.fleet_line("rpi4"), "rpi4-rescue 100.64.0.3 (up); rpi4-bench not a node")
         self.assertEqual(r.without_tailnet("rpi4"), "", "a role name on the tailnet is how it is reached")
 
 
 class TestWithoutTheTailnet(unittest.TestCase):
     def test_ssh_g_is_the_route_when_it_names_another_host(self):
-        f, r = world({"box": "KIND=build\n"})
+        f, r = world({"box": "kind=build\n"})
         f.answer(["ssh", "-G", "box"], out="user me\nhostname 10.0.0.5\nport 2222\nproxyjump gw\n")
         self.assertEqual(r.without_tailnet("box"), "me@10.0.0.5:2222  (through gw)")
 
     def test_a_board_is_swept_for_by_its_hardware_address(self):
-        f, r = world({"b": "KIND=board\nNODE_MAC=AA:BB:CC:DD:EE:FF\n"})
+        f, r = world({"b": "kind=board\nmac=AA:BB:CC:DD:EE:FF\n"})
         f.answer(["ssh", "-G", "b"], out="hostname b\n")
         f.answer(["ip", "-4", "-o", "addr", "show"], out="1: lo inet 127.0.0.1/8\n2: en0 inet 10.1.2.3/24 brd x\n"
                                                          "3: tailscale0 inet 100.64.0.1/32\n")
@@ -92,34 +92,11 @@ class TestTheSweep(unittest.TestCase):
         self.assertIsNone(r.sweep("10.99.0.0/24"))
 
     def test_a_bridge_contributes_the_segment_it_routes(self):
-        f, r = world({"br": "KIND=bridge\nBR_SSH=br-phone\nBR_SEGMENT=10.99.1.0/24\nBR_LEASES=\"aa:bb:cc:00:00:01,10.99.1.10,rpi4\"\n"})
+        f, r = world({"br": "kind=bridge\nssh=br-phone\nsegment=10.99.1.0/24\nleases=\"aa:bb:cc:00:00:01,10.99.1.10,rpi4\"\n"})
         f.answer(["ip", "-4", "-o", "addr", "show"], out="2: en0 inet 192.168.1.4/24 brd x\n")
         s = reach.Survey(r)
         self.assertEqual(s.vantages(), [("local", "192.168.1.0/24", "local"), ("br-phone", "10.99.1.0/24", "br")])
         self.assertEqual(s.leases(), {"aa:bb:cc:00:00:01": ("10.99.1.10", "rpi4", "br")})
-
-
-class TestTheShims(unittest.TestCase):
-    def test_the_shells_one_read_is_what_the_python_judges(self):
-        """reach_offline answers from the peers this shell read, by exit status and REACH_WHY."""
-        cp = bash(f'''
-. "{REPO}/lib/common.sh"; . "{REPO}/lib/reach.sh"
-wk_tailscale_peers() {{ printf 'downboard\\t100.64.0.2\\tdown\\nup\\t100.64.0.3\\tup\\n'; }}
-reach_offline downboard && echo "down: $REACH_WHY"
-reach_offline up || echo "up is not refused"
-echo "tailnet: $(reach_tailnet up)"
-''', env={"WK_ROOT": str(REPO)})
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertIn("down: the tailnet says downboard is offline", cp.stdout)
-        self.assertIn("up is not refused", cp.stdout)
-        self.assertIn("tailnet: 100.64.0.3 (up)", cp.stdout)
-
-    def test_the_shim_file_is_one_line_per_function(self):
-        text = (REPO / "lib" / "reach.sh").read_text()
-        defs = [l for l in text.splitlines() if "() {" in l]
-        self.assertTrue(defs)
-        for line in defs:
-            self.assertTrue(line.rstrip().endswith("}") or "}   #" in line, line)
 
 
 if __name__ == "__main__":

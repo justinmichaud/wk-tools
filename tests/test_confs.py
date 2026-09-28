@@ -16,7 +16,7 @@ import unittest
 from tests.support import FLEET_ENV, REAL_MACHINES, REPO, run
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import fleet  # noqa: E402
+from wk import fleet, targets  # noqa: E402
 
 REGISTRIES = {
     "image/configs": REPO / "image" / "configs",
@@ -48,6 +48,14 @@ def assigned_fields(path):
         fields.add(m.group(1))
         in_quote = (line.count('"') % 2 == 1)
     return fields
+
+
+def loader_keys(*paths):
+    """Every quoted lowercase name in the given readers: a machine conf key nothing quotes is read by nothing."""
+    out = set()
+    for path in paths:
+        out |= set(re.findall(r"[\"']([a-z][a-z0-9_]*)[\"']", path.read_text()))
+    return out
 
 
 def loader_fields(*paths_and_prefixes):
@@ -146,10 +154,11 @@ class TestConfFieldSets(unittest.TestCase):
     does not know."""
 
     def test_boot_machines_field_set(self):
-        known = loader_fields((REPO / "boot" / "machines.sh", "NODE_"))
+        known = loader_keys(*(p for d in ("boot", "sysimage") for p in sorted((REPO / "lib" / "wk" / d).glob("*.py"))),
+                            REPO / "lib" / "wk" / "reach.py")
         files = conf_files("machines", fleet.BENCH_KINDS)
         self.assertTrue(files, "no bench machine in machines/")
-        sets = {p.name: assigned_fields(p) - {"KIND"} for p in files}
+        sets = {p.name: assigned_fields(p) - {"kind"} for p in files}
         for name, fields in sets.items():
             self.assertTrue(fields <= known, f"{name} sets unknown field(s): {fields - known}")
         first_name, first_fields = next(iter(sets.items()))
@@ -161,11 +170,10 @@ class TestConfFieldSets(unittest.TestCase):
             )
 
     def test_bridge_hosts_field_set(self):
-        known = loader_fields(*[(p, "BR_") for p in sorted((REPO / "lib" / "wk" / "bridge").glob("*.py"))],
-                              (REPO / "lib" / "wk" / "fleet.py", "BR_"))
+        known = loader_keys(*sorted((REPO / "lib" / "wk" / "bridge").glob("*.py")), REPO / "lib" / "wk" / "fleet.py")
         files = conf_files("machines", ("bridge",))
         self.assertTrue(files, "no bridge in machines/")
-        sets = {p.name: assigned_fields(p) - {"KIND"} for p in files}
+        sets = {p.name: assigned_fields(p) - {"kind"} for p in files}
         for name, fields in sets.items():
             self.assertTrue(fields <= known, f"{name} sets unknown field(s): {fields - known}")
         first_name, first_fields = next(iter(sets.items()))
@@ -177,23 +185,10 @@ class TestConfFieldSets(unittest.TestCase):
             )
 
     def test_targets_hosts_field_set(self):
-        # Every file that READS one of these fields, so the vocabulary comes
-        # from code. lib/wk/buildconf.py and lib/target.sh are here because they
-        # are the only readers of some of them -- WK_TARGET_LIBCXX among them,
-        # which otherwise survives in this set only as prose in remote.sh.
-        known = loader_fields(
-            (REPO / "targets" / "remote.sh", "WK_"),
-            *((p, "WK_") for p in sorted((REPO / "lib" / "wk" / "machine_cmd").glob("*.py"))),
-            (REPO / "lib" / "wk" / "targets.py", "WK_"),
-            (REPO / "lib" / "wk" / "build.py", "WK_"),
-            (REPO / "lib" / "wk" / "buildconf.py", "WK_"),
-            (REPO / "lib" / "target.sh", "WK_"),
-            (REPO / "lib" / "wk" / "fleet.py", "WK_"),
-        )
-        known.add("WK_TARGET_KIND")
+        known = set(targets.CONF_ENV)
         files = conf_files("machines", fleet.TARGET_KINDS)
         self.assertTrue(files, "no build machine or peer in machines/")
-        sets = {p.name: assigned_fields(p) - {"KIND"} for p in files}
+        sets = {p.name: assigned_fields(p) - {"kind"} for p in files}
         for name, fields in sets.items():
             self.assertTrue(fields <= known, f"{name} sets unknown field(s): {fields - known}")
         first_name, first_fields = next(iter(sets.items()))
@@ -322,7 +317,7 @@ class TestNoHardcodedMachineDefaults(unittest.TestCase):
 class TestPiConfsSetDtb(unittest.TestCase):
     """A Pi's firmware halts, not panics, if it cannot find its device tree
     (the card helper's boot-check) -- so the write refuses to guess one, and
-    every Pi conf has to set NODE_DTB for real."""
+    every Pi conf has to set dtb for real."""
 
     PI_NAMES = {"rpi3", "rpi4", "rpi5"}
 
@@ -333,15 +328,15 @@ class TestPiConfsSetDtb(unittest.TestCase):
             with self.subTest(machine=path.stem):
                 fields = {}
                 for line in path.read_text().splitlines():
-                    m = re.match(r'^NODE_DTB=(.*)$', line)
+                    m = re.match(r'^dtb=(.*)$', line)
                     if m:
-                        fields["NODE_DTB"] = m.group(1).strip().strip('"')
-                self.assertIn("NODE_DTB", fields, f"{path.name} sets no NODE_DTB")
-                self.assertTrue(fields["NODE_DTB"], f"{path.name} sets NODE_DTB to an empty value")
+                        fields["dtb"] = m.group(1).strip().strip('"')
+                self.assertIn("dtb", fields, f"{path.name} sets no dtb")
+                self.assertTrue(fields["dtb"], f"{path.name} sets dtb to an empty value")
 
 
 class TestMachinesSetNet(unittest.TestCase):
-    """wants_wifi (lib/wk/sysimage/write.py) keys on NODE_NET rather than a case
+    """wants_wifi (lib/wk/sysimage/write.py) keys on net rather than a case
     arm naming machines, so every bench machine's conf has to set it to one of
     the two words that function checks against."""
 
@@ -350,12 +345,12 @@ class TestMachinesSetNet(unittest.TestCase):
             with self.subTest(machine=path.stem):
                 value = None
                 for line in path.read_text().splitlines():
-                    m = re.match(r'^NODE_NET=(.*)$', line)
+                    m = re.match(r'^net=(.*)$', line)
                     if m:
                         value = m.group(1).strip().strip('"')
                 self.assertIn(
                     value, ("wifi", "ethernet"),
-                    f"{path.name} sets NODE_NET to {value!r}, not 'wifi' or 'ethernet'",
+                    f"{path.name} sets net to {value!r}, not 'wifi' or 'ethernet'",
                 )
 
 
@@ -390,4 +385,4 @@ class TestUnknownTargetRefusal(unittest.TestCase):
         """the name may genuinely be a machine that has no conf yet"""
         cp = run("push", "status", "--target", "a-machine-with-no-conf")
         self.assertIn("wk machine setup a-machine-with-no-conf", cp.stdout)
-        self.assertIn("WK_REMOTE_HOST", cp.stdout)
+        self.assertIn("host=", cp.stdout)

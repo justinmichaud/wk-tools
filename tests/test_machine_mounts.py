@@ -5,7 +5,7 @@ machine OS also spells /opt/wk-tools, /opt being a symlink into /var on an
 ostree system -- this device's secrets directory at $WK_STORE/secrets and its
 WebKit mirror at $WK_STORE/git, all three read-only, plus the one directory a
 workspace may write -- $WK_STORE/agent-rw, holding the claude.ai login
-credential the Claude CLI rewrites in place (wk_agent_rw_dir, lib/store.sh)
+credential the Claude CLI rewrites in place (Store.agent_rw_dir, lib/wk/store.py)
 -- and nothing else:
 `/Users` above all, which podman mounts by default. Which mount is writable is
 as much a part of the invariant as which mounts there are, so the two are
@@ -24,19 +24,35 @@ scratch directory, so the init this file drives is the real one and what the
 verify reads back is what that init wrote.
 
 The stage is macOS-only, and the test drives it anyway by defining `is_macos`
-true in the shell it sources it into: the arm under test is the macOS-host one,
-and it is worth having on every machine that runs the suite.
+true in the shell it sources it into, and answering `wk_py wk.store paths` as a
+macOS host's Store does: the arm under test is the macOS-host one, and it is
+worth having on every machine that runs the suite.
 
 Run: python3 -m unittest tests.test_machine_mounts -v
 """
 import os
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, podman_vm_ssh, requires_podman_vm, stub_path
+from tests.support import REPO, WkTest, container_side, requires_container_target, stub_path
 
 MACHINE_SH = REPO / "host" / "macos" / "machine.sh"
+
+# The stage under test is the macOS one; this is the machine it is about.
+MACOS_HOST = r"""
+is_macos() { return 0; }
+wk_py() {
+    [ "$1" = wk.store ] || { PYTHONPATH="$WK_ROOT/lib" WK_ROOT="$WK_ROOT" python3 -m "$@"; return; }
+    shift
+    PYTHONPATH="$WK_ROOT/lib" python3 -c 'import os, sys
+from unittest import mock
+from wk import store
+with mock.patch.object(os, "uname", return_value=mock.Mock(sysname="Darwin")):
+    sys.exit(store.main(sys.argv[1:]))' "$@"
+}
+"""
 
 # `podman`, as far as this stage can tell: one machine that may or may not
 # exist, whose config file is written by `machine init` from the --volume flags
@@ -51,16 +67,14 @@ case "$1 $2" in
     echo "${WK_TEST_MACHINE_LIST:-[]}" ;;
 "machine inspect")
     [ -f "$WK_TEST_VM/exists" ] || exit 1
-    case "$*" in
-    *"{{.State}}"*)           cat "$WK_TEST_VM/state" ;;
     # What the machine currently has, which the resources step compares the
     # envelope against: what the init was given, or WK_TEST_CPUS/WK_TEST_MEM
     # for a machine no init in this run made -- a value nothing matches by
     # default, so the resize is exercised.
-    *"{{.Resources.CPUs}}"*)   cat "$WK_TEST_VM/cpus" 2>/dev/null || echo "${WK_TEST_CPUS:-999}" ;;
-    *"{{.Resources.Memory}}"*) cat "$WK_TEST_VM/mem"  2>/dev/null || echo "${WK_TEST_MEM:-999}" ;;
-    *) echo '{}' ;;
-    esac ;;
+    _cpus=$(cat "$WK_TEST_VM/cpus" 2>/dev/null || echo "${WK_TEST_CPUS:-999}")
+    _mem=$(cat "$WK_TEST_VM/mem" 2>/dev/null || echo "${WK_TEST_MEM:-999}")
+    printf '[{"State":"%s","Resources":{"CPUs":%s,"Memory":%s,"DiskSize":%s}}]\n' \
+        "$(cat "$WK_TEST_VM/state")" "$_cpus" "$_mem" "${WK_TEST_DISK:-500}" ;;
 "machine init")
     : > "$WK_TEST_VM/exists"
     echo stopped > "$WK_TEST_VM/state"
@@ -127,10 +141,10 @@ class _Stage(WkTest):
         self.home = self.tmp / "home"
         self.vm = self.tmp / "vm"
         self.secrets = self.tmp / "secrets"
-        # Not an environment variable of its own: wk_agent_rw_dir is a sibling
+        # Not an environment variable of its own: Store.agent_rw_dir is a sibling
         # of the secrets directory, so WK_HOST_SECRETS below places both.
         self.agent_rw = self.tmp / "agent-rw"
-        # wk_mirror on a macOS host is under wk_state_dir (lib/store.sh).
+        # Store.mirror on a macOS host is under its state directory.
         self.mirror_dir = self.home / ".local" / "state" / "wk" / "git"
         self.log = self.tmp / "podman.log"
         for d in (self.home, self.vm):
@@ -152,9 +166,7 @@ class _Stage(WkTest):
 set -euo pipefail
 WK_ROOT={REPO}
 . "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-# The stage under test is the macOS one; this is the machine it is about.
-is_macos() {{ return 0; }}
+{MACOS_HOST}
 . "$WK_ROOT/host/macos/machine.sh"
 '''
         e = dict(os.environ)
@@ -528,8 +540,7 @@ class TestTwoSpellingsOfOnePathAreOneMount(_Stage):
 set -euo pipefail
 WK_ROOT={self.wk_root}
 . "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-is_macos() {{ return 0; }}
+{MACOS_HOST}
 . "{REPO}/host/macos/machine.sh"
 '''
         base = dict(os.environ)
@@ -746,7 +757,8 @@ class TestAConfigItCannotReadIsRefused(_Stage):
         self.assertNotIn("machine rm", self.podman, self.podman)
 
 
-@requires_podman_vm()
+@requires_container_target()
+@unittest.skipUnless(sys.platform == "darwin", "the podman VM and its mounts are a macOS host's")
 class TestTheMountsAreThereOnThisMachine(unittest.TestCase):
     """The live half: what the three mounts are for is that the VM and every
     container can reach them. Fails with the remedy on a machine mounting
@@ -755,14 +767,14 @@ class TestTheMountsAreThereOnThisMachine(unittest.TestCase):
     REMEDY = "run ./setup (it recreates the machine with the three mounts)"
 
     def test_the_checkout_is_executable_at_opt_wk_tools(self):
-        cp = podman_vm_ssh("test -x /opt/wk-tools/wk && echo yes")
+        cp = container_side("test -x /opt/wk-tools/wk && echo yes")
         self.assertIn("yes", cp.stdout, f"{self.REMEDY}: {cp.stdout}{cp.stderr}")
 
     def test_it_is_this_checkout_and_not_a_copy(self):
         """A copy answers with its own bytes; the mount answers with this
         file's, and this test is in it."""
         rel = Path(__file__).relative_to(REPO)
-        cp = podman_vm_ssh(f"cat /opt/wk-tools/{rel} 2>/dev/null | head -1")
+        cp = container_side(f"cat /opt/wk-tools/{rel} 2>/dev/null | head -1")
         self.assertIn(__doc__.splitlines()[0], cp.stdout,
                       f"{self.REMEDY}: {cp.stdout}{cp.stderr}")
 
@@ -772,14 +784,14 @@ class TestTheMountsAreThereOnThisMachine(unittest.TestCase):
         expands the substitution to nothing and podman takes the next
         argument as the image name, which fails for a reason that has
         nothing to do with the mounts."""
-        cp = podman_vm_ssh("podman images --format '{{.Repository}}:{{.Tag}}' | head -1")
+        cp = container_side("podman images --format '{{.Repository}}:{{.Tag}}' | head -1")
         image = cp.stdout.strip()
         if not image or image.startswith("<none>"):
             self.skipTest("no container image on this machine to run a probe in")
         return image
 
     def test_the_secrets_directory_is_a_mount(self):
-        cp = podman_vm_ssh("findmnt -no TARGET /var/lib/wk/secrets")
+        cp = container_side("findmnt -no TARGET /var/lib/wk/secrets")
         self.assertIn("/var/lib/wk/secrets", cp.stdout,
                       f"{self.REMEDY}: {cp.stdout}{cp.stderr}")
 
@@ -788,14 +800,14 @@ class TestTheMountsAreThereOnThisMachine(unittest.TestCase):
         place the measurement can be taken: whether this podman's virtiofs
         gives the machine write access to a host directory is not answerable
         from the config file."""
-        cp = podman_vm_ssh("findmnt -no OPTIONS /var/lib/wk/agent-rw")
+        cp = container_side("findmnt -no OPTIONS /var/lib/wk/agent-rw")
         opts = cp.stdout.strip().split(",")
         self.assertTrue(cp.stdout.strip(),
                         f"/var/lib/wk/agent-rw is not mounted at all. {self.REMEDY}")
         self.assertIn("rw", opts,
                       f"/var/lib/wk/agent-rw is mounted {cp.stdout.strip()!r}: the "
                       f"Claude CLI cannot rotate the credential in it. {self.REMEDY}")
-        cp = podman_vm_ssh(
+        cp = container_side(
             "touch /var/lib/wk/agent-rw/.wk-write-probe "
             "&& rm -f /var/lib/wk/agent-rw/.wk-write-probe && echo wrote")
         self.assertIn("wrote", cp.stdout,
@@ -808,7 +820,7 @@ class TestTheMountsAreThereOnThisMachine(unittest.TestCase):
         kernel's own view of the mount, read without writing to it."""
         for target in ("/opt/wk-tools", "/var/lib/wk/secrets"):
             with self.subTest(target=target):
-                cp = podman_vm_ssh(f"findmnt -no OPTIONS {target}")
+                cp = container_side(f"findmnt -no OPTIONS {target}")
                 opts = cp.stdout.strip().split(",")
                 self.assertIn("ro", opts,
                               f"{target} is mounted {cp.stdout.strip()!r}: podman took "
@@ -818,7 +830,7 @@ class TestTheMountsAreThereOnThisMachine(unittest.TestCase):
     def test_a_container_can_read_both_through_its_own_mounts(self):
         """Nested: a container bind-mounts the VM's mount of this checkout at
         /opt/wk-tools and of the secrets at /secrets."""
-        cp = podman_vm_ssh(
+        cp = container_side(
             f"podman run --rm "
             f"-v /opt/wk-tools:/opt/wk-tools:ro -v /var/lib/wk/secrets:/secrets:ro "
             f"--entrypoint /bin/sh {self._an_image()} "
@@ -832,7 +844,7 @@ class TestTheMountsAreThereOnThisMachine(unittest.TestCase):
         and both have to work as the workspace's own uid. Two host hops of
         virtiofs and a bind mount stand between it and the host directory, and
         this is the only place that is measurable."""
-        cp = podman_vm_ssh(
+        cp = container_side(
             f"podman run --rm -v /var/lib/wk/agent-rw:/agent-rw "
             f"--entrypoint /bin/sh {self._an_image()} "
             f"-c 'echo hi > /agent-rw/.wk-probe.tmp "
@@ -897,8 +909,8 @@ class TestTheResourceEnvelopeIsReapplied(_Stage):
 
     def _envelope(self):
         cp = subprocess.run(
-            ["bash", "-c", f'. "{REPO}/lib/common.sh"; . "{REPO}/lib/resources.sh"; '
-                           'printf "%s %s" "$(envelope_cores)" "$(envelope_mem_mb)"'],
+            ["bash", "-c", f'. "{REPO}/lib/common.sh"; '
+                           'for v in envelope-cores envelope-mem-mb; do wk_py wk.resources --os "$(wk_os)" "$v" || exit; done'],
             cwd=str(REPO), capture_output=True, text=True, timeout=60)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         return cp.stdout.split()
@@ -950,11 +962,11 @@ class TestTheResourceEnvelopeIsReapplied(_Stage):
 class TestReportLossesStripsTheContainerPrefix(unittest.TestCase):
     """_report_losses (host/macos/machine.sh) lists what a recreate would
     lose by asking the machine's own podman for the container names -- and a
-    container is named `wk-<workspace>` (_ctr, targets/container.sh), never
+    container is named `wk-<workspace>` (Container.ctr, lib/wk/targets.py), never
     the workspace name itself. Printing the raw name reads as a container
     catalog; a person deciding whether to recreate the machine wants to know
     which workspaces this loses, so the report strips the prefix the same
-    way `t_list` (targets/container.sh) and `wk start` (cmd/start) do."""
+    way `Container.list` (lib/wk/targets.py) and `wk start` (cmd/start) do."""
 
     def _payload(self):
         """The script _report_losses pipes into `podman machine ssh`, lifted

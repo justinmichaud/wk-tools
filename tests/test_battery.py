@@ -247,7 +247,7 @@ class TestNoCaseNamesAPhone(unittest.TestCase):
         self.assertNotRegex(
             combined, r'case\s+"\$BR_(DEVICE|NAME|HOSTNAME)"',
             "battery code branches on which phone this is -- autodetect the sysfs "
-            "node instead (BR_BATTERY in the host conf), the way BR_LAN_MAC does",
+            "node instead (battery in the host conf), the way lan_mac does",
         )
         for name in self._device_names():
             self.assertNotIn(

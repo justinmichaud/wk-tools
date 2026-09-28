@@ -94,7 +94,6 @@ class TestTheLinuxMachineStageHonoursDryRun(WkTest):
 
         script = ('set -euo pipefail\n'
                   '. "$WK_ROOT/lib/common.sh"\n'
-                  '. "$WK_ROOT/lib/resources.sh"\n'
                   '. "$WK_ROOT/host/linux/machine.sh"\n')
         with stub_path({"sudo": FAKE_SUDO, "loginctl": FAKE_LOGINCTL,
                         "getent": FAKE_GETENT, "grep": FAKE_GREP}) as binp:
@@ -135,11 +134,9 @@ class TestTheLinuxMachineStageHonoursDryRun(WkTest):
 
     def test_it_reports_the_ccache_settings_it_would_write(self):
         """store_init reaches a store with no cache/ccache directory on a dry
-        run, since ensure_dir made none: the settings are reported, not
-        written into a directory that is not there."""
-        self.assertIn("would write", self.out)
-        self.assertIn("ccache.conf", self.out)
-        self.assertIn("max_size", self.out)
+        run, since it made none: the settings file is reported, not written
+        into a directory that is not there."""
+        self.assertRegex(self.out, r"would write: \S+/cache/ccache/ccache\.conf\n")
 
     def test_it_does_not_run_the_boards_tuning_tree(self):
         self.assertFalse(self.f["rpi5_ran"].exists(), self.out)

@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
-"""Every credential wk holds, what it must be able to do, and what it must not.
+"""Every credential wk holds, what it must be able to do, and what it must not (`credcheck.py -h`).
 
-    credcheck.py names
-    credcheck.py minted
-    credcheck.py mint  <name>
-    credcheck.py rule  <name> [--repos "<owner/repo> ..."]
-    credcheck.py check <name> [--repos "<owner/repo> ..."] [--path <file>]
-                              [--evidence <key>=<value>]...
-
-The value arrives on stdin, always; reading a stored one is lib/secretfile.py's discipline. --path names where it is kept, for the rule that hands the file to another tool, and makes an empty value `absent` rather than malformed.
+The value arrives on stdin, always; reading a stored one is lib/secretfile.py's discipline.
 One verdict comes back, first line `<verdict>\\t<summary>`, further lines the detail:
 
     absent      nothing is stored -- a state, not a fault, when optional
@@ -16,12 +9,13 @@ One verdict comes back, first line `<verdict>\\t<summary>`, further lines the de
     wide        it can do the job and reaches further than wk spends it; stored
     bad         it cannot do the job, is malformed, or carries a power wk refuses to hold; nothing is stored
     unverified  the answer needs a network that did not answer; stored, and re-asked by every reader -- no verdict is ever written down"""
+import argparse
 import collections
+import http.client as http_client
 import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -30,7 +24,7 @@ import urllib.request
 OK, WIDE, BAD, UNVERIFIED, ABSENT = ("ok", "wide", "bad",
                                     "unverified", "absent")
 
-def _api_base(var, default):
+def api_base(var, default):
     value = os.environ.get(var)
     if not value:
         return default
@@ -44,8 +38,8 @@ def _api_base(var, default):
         % (var, value, var, default))
 
 
-GITHUB_API = _api_base("WK_GITHUB_API", "https://api.github.com")
-BUGZILLA_API = _api_base("WK_BUGZILLA_API", "https://bugs.webkit.org")
+GITHUB_API = api_base("WK_GITHUB_API", "https://api.github.com")
+BUGZILLA_API = api_base("WK_BUGZILLA_API", "https://bugs.webkit.org")
 BUGZILLA_KEYS = "https://bugs.webkit.org/userprefs.cgi?tab=apikey"
 TIMEOUT = 20
 PER_PAGE = 100
@@ -59,7 +53,7 @@ FIELDS = tuple(f for f in Rule._fields if f not in ("check", "mint"))
 
 
 TAILSCALE_KEYS = "https://login.tailscale.com/admin/settings/keys"
-LITELLM_API = _api_base("WK_LITELLM_API", "https://ai.igalia.com")
+LITELLM_API = api_base("WK_LITELLM_API", "https://ai.igalia.com")
 LITELLM_KEYS = "https://ai.igalia.com/ui/api-keys/"
 LITELLM_ENDPOINT = LITELLM_API + "/v1"  # `wk ai pi` -- pi's OpenAI-compatible endpoint for the key above
 
@@ -92,22 +86,31 @@ GITHUB_HEADERS = (("Accept", "application/vnd.github+json"),)
 ANTHROPIC_HEADERS = (("anthropic-version", "2023-06-01"),)
 
 
-def _http(method, url, token, body=None, headers=()):
-    req = urllib.request.Request(url, method=method, data=body)
-    if token:
-        req.add_header("Authorization", "Bearer " + token)
-    req.add_header("User-Agent", "wk-credcheck")
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def http(method, url, headers=(), body=None, timeout=TIMEOUT, follow=True):
+    """(status, {header: value} lowercased, body) of wk's one HTTP request; a JSON `body`. Unreachable: no HTTP answer.
+    `follow=False` answers a redirect as itself."""
+    req = urllib.request.Request(url, method=method, data=body, headers={"User-Agent": "wk"})
     for name, value in headers:
         req.add_header(name, value)
     if body is not None:
         req.add_header("Content-Type", "application/json")
+    opener = urllib.request.build_opener(*(() if follow else (_NoRedirect,)))
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        with opener.open(req, timeout=timeout) as r:
             return r.status, _lower(r.headers), r.read()
     except urllib.error.HTTPError as e:
         return e.code, _lower(e.headers), e.read()
-    except Exception as e:
+    except (OSError, http_client.HTTPException) as e:
         raise Unreachable("%s: %s" % (e.__class__.__name__, e))
+
+
+def _http(method, url, token, body=None, headers=()):
+    return http(method, url, ((("Authorization", "Bearer " + token),) if token else ()) + tuple(headers), body)
 
 
 def _lower(headers):
@@ -359,7 +362,7 @@ def _github_pat_can_open_a_pr(token, repo):
 
 LOGIN_SCOPES = ("user:profile", "user:inference")
 
-CLAUDE_OAUTH = _api_base("WK_CLAUDE_OAUTH", "https://platform.claude.com")
+CLAUDE_OAUTH = api_base("WK_CLAUDE_OAUTH", "https://platform.claude.com")
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # the CLI's own OAuth client, which a refresh names
 # The CLI holds its refresh lock as a directory beside the credential and treats one older than a minute as abandoned; held the same way here, the two never spend one refresh token at once.
 REFRESH_LOCK = ".oauth_refresh.lock"
@@ -550,16 +553,8 @@ def _json(raw):
 
 # A new file renamed over the old one: the same move the CLI makes, so a reader sees either login whole and a planted link at the path is replaced rather than followed.
 def _write_login(path, doc):
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path),
-                               prefix=".credentials.json.")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(doc, f)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    except BaseException:
-        os.unlink(tmp)
-        raise
+    from wk.machine import replace_file
+    replace_file(path, json.dumps(doc), mode=0o600)
 
 
 def _login_measured(oauth, org):
@@ -649,7 +644,7 @@ def _when(millis):
     return time.strftime("%Y-%m-%d", time.localtime(millis / 1000.0))
 
 
-ANTHROPIC_API = _api_base("WK_ANTHROPIC_API", "https://api.anthropic.com")
+ANTHROPIC_API = api_base("WK_ANTHROPIC_API", "https://api.anthropic.com")
 
 # The read-only request that answers whether Anthropic still accepts a token,
 # measured 2026-09-10 against api.anthropic.com: a `Bearer sk-ant-oat` token
@@ -740,6 +735,28 @@ def _litellm_key(value, repos, path, evidence):
     return OK, ("%s.\n    `wk ai pi` writes it into a workspace's "
                 "~/.pi/agent/models.json for %s." % ("; ".join(facts),
                                                       LITELLM_ENDPOINT))
+
+
+def chat_model_ids(doc):
+    """LiteLLM's /model/info rows a chat agent can call; /models also lists an embedding model and answers no mode."""
+    return [m.get("model_name") for m in doc.get("data") or []
+            if m.get("model_name") and (m.get("model_info") or {}).get("mode") in (None, "chat")]
+
+
+def litellm_models(key):
+    """The chat models the endpoint serves this key, [] when it answers anything but 200; Unreachable when it does not answer."""
+    status, _headers, raw = _http("GET", LITELLM_ENDPOINT + "/model/info", key.strip())
+    return chat_model_ids(_json(raw)) if status == 200 else []
+
+
+def litellm_callable(key, ids):
+    """The first of `ids` a one-token completion reaches, or None: the endpoint lists models that answer 404 (measured 2026-09-27)."""
+    for model in ids:
+        body = json.dumps({"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]}).encode()
+        status, _headers, _raw = _http("POST", LITELLM_ENDPOINT + "/chat/completions", key.strip(), body)
+        if status == 200:
+            return model
+    return None
 
 
 # Tailscale spells three very different powers with one prefix: an auth key enrolls a node, an API access token administers the tailnet, an OAuth client secret mints both.
@@ -900,7 +917,7 @@ RULES = collections.OrderedDict((
         store_with="wk key set litellm",
         check=_litellm_key)),
     ("claude-login", Rule(
-        spent_by="targets/container.sh -- mounted into every container as the "
+        spent_by="lib/wk/targets.py's Container -- mounted into every container as the "
                  "one Claude credential it is given, and what a `wk ai claude` "
                  "session's Remote Control needs",
         needs="run inference and fetch the account profile (user:inference, "
@@ -1009,39 +1026,28 @@ def rule(name, repos):
 
 
 def main(argv):
-    if len(argv) >= 2 and argv[1] == "names":
-        sys.stdout.write("".join(n + "\n" for n in RULES))
+    p = argparse.ArgumentParser(prog="credcheck.py", description="The value arrives on stdin.")
+    verbs = p.add_subparsers(dest="verb", required=True)
+    verbs.add_parser("names", help="every credential wk holds")
+    verbs.add_parser("minted", help="the ones wk mints itself")
+    verbs.add_parser("mint", help="mint one").add_argument("name")
+    for verb in ("rule", "check"):
+        v = verbs.add_parser(verb, help="the rule for <name>" if verb == "rule" else "the verdict on the value")
+        v.add_argument("name")
+        v.add_argument("--repos", default="", help="the forks, as '<owner/repo> ...'")
+        if verb == "check":
+            v.add_argument("--path", default="", help="where it is kept: an empty value is then absent")
+            v.add_argument("--evidence", action="append", default=[], metavar="KEY=VALUE")
+    a = p.parse_args(argv)
+    if a.verb in ("names", "minted"):
+        sys.stdout.write("".join(n + "\n" for n in (RULES if a.verb == "names" else _minted())))
         return 0
-    if len(argv) == 2 and argv[1] == "minted":
-        sys.stdout.write("".join(n + "\n" for n in _minted()))
-        return 0
-    if len(argv) == 3 and argv[1] == "mint":
-        return mint(argv[2])
-    if len(argv) >= 3 and argv[1] in ("rule", "check"):
-        verb, name, repos, path, evidence = argv[1], argv[2], [], "", {}
-        rest = argv[3:]
-        while rest:
-            flag, rest = rest[0], rest[1:]
-            if not rest:
-                sys.stderr.write("credcheck: %s takes a value\n" % flag)
-                return 2
-            value, rest = rest[0], rest[1:]
-            if flag == "--repos":
-                repos = value.split()
-            elif flag == "--path":
-                path = value
-            elif flag == "--evidence":
-                k, _, v = value.partition("=")
-                evidence[k] = v
-            else:
-                sys.stderr.write("credcheck: unknown option %s\n" % flag)
-                return 2
-        if verb == "rule":
-            return rule(name, repos)
-        return check(name, repos, path, evidence)
-    sys.stderr.write(__doc__.split("\n\n")[1] + "\n")
-    return 2
+    if a.verb == "mint":
+        return mint(a.name)
+    if a.verb == "rule":
+        return rule(a.name, a.repos.split())
+    return check(a.name, a.repos.split(), a.path, dict(e.partition("=")[::2] for e in a.evidence))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv))
+    raise SystemExit(main(sys.argv[1:]))

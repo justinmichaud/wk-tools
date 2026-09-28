@@ -2,14 +2,19 @@
 on this host, a host over ssh, or an in-memory fake; a mutating call prints
 under --dry-run and refuses before a destructive command has asked."""
 
+import base64
+import errno
 import fnmatch
+import io
 import os
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
-import time
+import tarfile
+import tempfile
 
 from wk import act
 
@@ -20,6 +25,54 @@ def is_macos():
 
 def is_linux():
     return not is_macos()
+
+
+PODMAN_MACHINE = "/etc/containers/podman-machine"   # written by podman into every machine it provisions
+
+
+def in_podman_machine():
+    return os.path.exists(PODMAN_MACHINE)
+
+
+class Planted(OSError):
+    def __init__(self, path):
+        super().__init__("%s is a symbolic link or not a regular file, and nothing is read through one here" % path)
+        self.path = path
+
+
+def matches(rel, patterns):
+    return any(fnmatch.fnmatch(rel, p) for p in patterns)
+
+
+def replace_file(path, data, mode=None):
+    """`path` holds `data` whole or keeps what it held: the temp is mkstemp's (O_EXCL, never a planted name), and the
+    rename replaces a link at `path` rather than writing through it. `mode` is the file's, else the umask's."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".%s." % os.path.basename(path))
+    try:
+        if mode is None:
+            mask = os.umask(0)
+            os.umask(mask)
+            mode = 0o666 & ~mask
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "wb" if isinstance(data, bytes) else "w") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def lib_argv(root, rel, fn, *args):
+    return ["bash", "-c", '. "$0"; %s "$@"' % fn, os.path.join(str(root), rel), *args]
+
+
+ISOLATED = "import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module(sys.argv.pop(1), run_name=__name__, alter_sys=True)"
+
+
+def isolated_module(lib, module, python="python3"):
+    """-I keeps the working directory (a checkout's wk/ shadows ours) off sys.path; -P is 3.11+, a Mac's python3 3.9."""
+    return [python, "-I", "-c", ISOLATED, str(lib), module]
 
 
 class Result:
@@ -37,6 +90,7 @@ class Result:
 
 
 TIMED_OUT = 124
+HAVE = ("sh", "-c", 'command -v "$1" >/dev/null', "sh")
 
 
 class Machine:
@@ -44,7 +98,8 @@ class Machine:
     name = "machine"
 
     # -- reads
-    def run(self, argv, input=None, timeout=None):
+    def run(self, argv, input=None, timeout=None, stream=False):
+        """`stream`: the output goes to this process's stderr as it arrives, and the Result carries only the status."""
         raise NotImplementedError
 
     def run_tty(self, argv, cwd=None, timeout=None):
@@ -52,6 +107,11 @@ class Machine:
         raise NotImplementedError
 
     def read(self, path):
+        raise NotImplementedError
+
+    def read_tree(self, anchor, rel, patterns, depth=3):
+        """{path under anchor/rel: bytes} of each regular file there matching `patterns` (fnmatch), `depth` levels
+        down at most. Planted names a symbolic link or a special file among `rel`'s components or anywhere read."""
         raise NotImplementedError
 
     def exists(self, path):
@@ -69,14 +129,20 @@ class Machine:
     def readlink(self, path):
         raise NotImplementedError
 
+    def have(self, tool):
+        return self.run(list(HAVE) + [tool]).ok
+
     # -- effects
     def act_run(self, argv, **kw):
         if act.dry_run():
-            sys.stderr.write("would run%s: %s\n" % (self._where(), " ".join(shlex.quote(a) for a in argv)))
+            sys.stderr.write("would run%s: %s\n" % (self._where(), shlex.join(argv)))
             return Result(0)
         if os.environ.get("WK_DESTRUCTIVE") and not act.asked():
             act.die("BUG: this command is declared destructive and acted before asking:\n    %s"
-                    % " ".join(shlex.quote(a) for a in argv))
+                    % shlex.join(argv))
+        return self._effect_run(argv, **kw)
+
+    def _effect_run(self, argv, **kw):
         return self.run(argv, **kw)
 
     def write(self, path, text):
@@ -129,15 +195,23 @@ class Machine:
 class Local(Machine):
     name = "here"
 
-    def run(self, argv, input=None, timeout=None):
+    def run(self, argv, input=None, timeout=None, stream=False):
+        if stream:
+            sys.stdout.flush()
+            sys.stderr.flush()
         try:
-            cp = subprocess.run(argv, input=input, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            return Result(TIMED_OUT, "", "timed out after %ss" % timeout)
+            p = subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else None,
+                                 stdout=2 if stream else subprocess.PIPE, stderr=None if stream else subprocess.PIPE,
+                                 text=True, start_new_session=timeout is not None)
         except FileNotFoundError as e:
             return Result(127, "", str(e))
-        return Result(cp.returncode, cp.stdout, cp.stderr)
+        try:
+            out, err = p.communicate(input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, signal.SIGKILL)
+            p.communicate()
+            return Result(TIMED_OUT, "", "timed out after %ss" % timeout)
+        return Result(p.returncode, out or "", err or "")
 
     def run_tty(self, argv, cwd=None, timeout=None):
         try:
@@ -151,6 +225,21 @@ class Local(Machine):
     def read(self, path):
         with open(path, errors="replace") as f:
             return f.read()
+
+    def read_tree(self, anchor, rel, patterns, depth=3):
+        top = os.path.join(anchor, rel)
+        fd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            path = anchor
+            for part in (p for p in rel.split("/") if p):
+                path = os.path.join(path, part)
+                fd, parent = _open_at(fd, part, path, True), fd
+                os.close(parent)
+            out = {}
+            _walk(fd, top, "", depth, patterns, out)
+            return out
+        finally:
+            os.close(fd)
 
     def exists(self, path):
         return os.path.exists(path)
@@ -170,6 +259,9 @@ class Local(Machine):
         except PermissionError:
             return True
 
+    def have(self, tool):
+        return shutil.which(tool) is not None
+
     def readlink(self, path):
         try:
             return os.readlink(path)
@@ -180,10 +272,7 @@ class Local(Machine):
         if act.dry_run():
             sys.stderr.write("would write: %s\n" % path)
             return
-        tmp = "%s.tmp.%d" % (path, os.getpid())
-        with open(tmp, "w") as f:
-            f.write(text)
-        os.replace(tmp, path)
+        replace_file(path, text)
 
     def remove(self, path):
         if act.dry_run():
@@ -239,7 +328,7 @@ class Local(Machine):
 
     def spawn(self, argv, log):
         if act.dry_run():
-            sys.stderr.write("would start: %s > %s\n" % (" ".join(shlex.quote(a) for a in argv), log))
+            sys.stderr.write("would start: %s > %s\n" % (shlex.join(argv), log))
             return 0
         with open(log, "ab") as f:
             p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
@@ -268,6 +357,87 @@ class Local(Machine):
             raise OSError(cp.stderr.decode(errors="replace").strip() or "rsync failed")
 
 
+def _open_at(dirfd, name, path, directory):
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | (os.O_DIRECTORY if directory else 0), dir_fd=dirfd)
+    except OSError as e:
+        if e.errno != errno.ENOENT and stat.S_ISLNK(os.stat(name, dir_fd=dirfd, follow_symlinks=False).st_mode):
+            raise Planted(path)
+        raise
+    mode = os.fstat(fd).st_mode
+    if not (stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)):
+        os.close(fd)
+        raise Planted(path)
+    return fd
+
+
+def _walk(dirfd, top, prefix, depth, patterns, out):
+    with os.scandir(dirfd) as it:
+        entries = sorted(it, key=lambda e: e.name)
+    for e in entries:
+        rel = prefix + e.name
+        if e.is_symlink():
+            raise Planted(os.path.join(top, rel))
+        if e.is_dir(follow_symlinks=False):
+            if rel.count("/") < depth - 1:
+                sub = _open_at(dirfd, e.name, os.path.join(top, rel), True)
+                try:
+                    _walk(sub, top, rel + "/", depth, patterns, out)
+                finally:
+                    os.close(sub)
+        elif matches(rel, patterns):
+            fd = _open_at(dirfd, e.name, os.path.join(top, rel), False)
+            with os.fdopen(fd, "rb") as f:
+                out[rel] = f.read()
+
+
+# The far side's half of read_tree: tar archives a link as a link, so the reading side refuses it off the archive.
+FAR_TREE = r"""set -e
+export COPYFILE_DISABLE=1
+cd -- "$1"
+d=$2 w=$1
+shift 2
+for p in "$@"; do
+    w=$w/$p
+    if [ -L "$p" ]; then printf 'wk-planted %s\n' "$w" >&2; exit 3; fi
+    cd -- "$p"
+done
+t=$(mktemp)
+trap 'rm -f "$t"' EXIT
+find . -maxdepth "$d" \( -type f -o -type l \) -print0 | tar -cf "$t" --null -T -
+base64 < "$t"
+"""
+
+# The far side's half of write: never a rename onto a link, which `mv` follows into the directory it names.
+FAR_WRITE = r"""set -e
+if [ -L "$1" ]; then printf '%s is a symbolic link, and nothing is written through one here\n' "$1" >&2; exit 3; fi
+t=$(mktemp "$(dirname "$1")/.wk-write.XXXXXX")
+trap 'rm -f "$t"' EXIT
+chmod "$(umask -S)" "$t"
+chmod a-x "$t"
+cat > "$t"
+mv -f -- "$t" "$1"
+trap - EXIT
+"""
+
+
+def far_tree(out, top, patterns):
+    tree = {}
+    with tarfile.open(fileobj=io.BytesIO(base64.b64decode(out))) as t:
+        for m in t.getmembers():
+            rel = os.path.normpath(m.name)
+            if os.path.isabs(rel) or rel.split("/")[0] == "..":
+                raise OSError("the far side's archive names %s, outside %s" % (m.name, top))
+            if m.issym() or not (m.isfile() or m.islnk()):
+                raise Planted(os.path.join(top, rel))
+            if matches(rel, patterns):
+                try:
+                    tree[rel] = t.extractfile(m).read()
+                except KeyError:
+                    raise OSError("the far side's archive links %s to %s, which it does not hold" % (m.name, m.linkname))
+    return tree
+
+
 def far_side_start(cmd, out_path, tail):
     """The far-side start line: `cmd` detached, its output in `out_path`, ending in `tail` (a pid, or a disown)."""
     return "nohup %s > %s 2>&1 < /dev/null & %s" % (cmd, shlex.quote(out_path), tail)
@@ -289,11 +459,18 @@ class Ssh(Machine):
         # An empty stdin, not the caller's: ssh drinks whatever it is handed.
         return self.via.run(self.argv(remote), input="" if input is None else input, timeout=timeout)
 
-    def run(self, argv, input=None, timeout=None):
-        return self._ssh(" ".join(shlex.quote(a) for a in argv), input=input, timeout=timeout)
+    def _via(self, how, argv, input, timeout, stream):
+        return how(self.argv(shlex.join(argv)), input="" if input is None else input,
+                   timeout=timeout, **({"stream": True} if stream else {}))
+
+    def run(self, argv, input=None, timeout=None, stream=False):
+        return self._via(self.via.run, argv, input, timeout, stream)
+
+    def _effect_run(self, argv, input=None, timeout=None, stream=False):
+        return self._via(self.via.act_run, argv, input, timeout, stream)
 
     def run_tty(self, argv, cwd=None, timeout=None):
-        remote = " ".join(shlex.quote(a) for a in argv)
+        remote = shlex.join(argv)
         if cwd:
             remote = "cd %s && %s" % (shlex.quote(cwd), remote)
         return self.via.run_tty(self.argv(remote, tty=True), timeout=timeout)
@@ -303,6 +480,15 @@ class Ssh(Machine):
         if not r.ok:
             raise OSError(r.err.strip() or "cannot read %s on %s" % (path, self.dest))
         return r.out
+
+    def read_tree(self, anchor, rel, patterns, depth=3):
+        parts = [p for p in rel.split("/") if p]
+        r = self._ssh(shlex.join(["sh", "-c", FAR_TREE, "sh", anchor, str(depth)] + parts))
+        if r.rc == 3 and "wk-planted " in r.err:
+            raise Planted(r.err.split("wk-planted ", 1)[1].splitlines()[0])
+        if not r.ok:
+            raise OSError(r.err.strip() or "cannot read %s on %s" % (os.path.join(anchor, rel), self.dest))
+        return far_tree(r.out, os.path.join(anchor, rel), patterns)
 
     def exists(self, path):
         return self._ssh("test -e %s" % shlex.quote(path)).ok
@@ -327,7 +513,7 @@ class Ssh(Machine):
         if act.dry_run():
             sys.stderr.write("would write on %s: %s\n" % (self.dest, path))
             return
-        r = self._ssh("cat > %s.tmp.$$ && mv %s.tmp.$$ %s" % ((shlex.quote(path),) * 3), input=text)
+        r = self._ssh(shlex.join(("sh", "-c", FAR_WRITE, "sh", path)), input=text)
         if not r.ok:
             raise OSError(r.err.strip())
 
@@ -362,7 +548,7 @@ class Ssh(Machine):
         return self._ssh("kill -%d %d" % (sig, pid)).ok
 
     def spawn(self, argv, log):
-        line = far_side_start(" ".join(shlex.quote(a) for a in argv), log, "echo $!")
+        line = far_side_start(shlex.join(argv), log, "echo $!")
         if act.dry_run():
             sys.stderr.write("would start on %s: %s\n" % (self.dest, line))
             return 0
@@ -413,7 +599,7 @@ class Ssh(Machine):
         if act.dry_run():
             sys.stderr.write("would copy on %s: %s -> %s/\n" % (self.dest, src, dest))
             return
-        r = self.via.run(["rsync", "-a", "--chmod=go-w", "--delete", "-e", "ssh " + " ".join(shlex.quote(o) for o in self.opts),
+        r = self.via.run(["rsync", "-a", "--chmod=go-w", "--delete", "-e", "ssh " + shlex.join(self.opts),
                           src.rstrip("/") + "/", self._dest(dest.rstrip("/") + "/")])
         if not r.ok:
             raise OSError(r.err.strip() or "copy to %s failed" % self.dest)
@@ -422,10 +608,22 @@ class Ssh(Machine):
         if act.dry_run():
             sys.stderr.write("would copy on %s: %s -> %s/\n" % (self.dest, src, dest))
             return
-        r = self.via.run(["rsync", "-a", "--chmod=go-w", "--delete", *excludes(exclude), "-e", "ssh " + " ".join(shlex.quote(o) for o in self.opts),
+        r = self.via.run(["rsync", "-a", "--chmod=go-w", "--delete", *excludes(exclude), "-e", "ssh " + shlex.join(self.opts),
                           self._dest(src.rstrip("/") + "/"), dest.rstrip("/") + "/"])
         if not r.ok:
             raise OSError(r.err.strip() or "copy from %s failed" % self.dest)
+
+
+class PodmanVm(Ssh):
+    """A macOS host's podman machine, where the container store is, over `podman machine ssh`: reads and small writes only."""
+
+    def argv(self, remote, tty=False):
+        return ["podman", "machine", "ssh", self.dest, "--", remote]
+
+    def _refused(self, *a, **kw):
+        raise NotImplementedError("a copy into or out of the podman machine goes through its mounts, not %s" % self.dest)
+
+    run_tty = forward = copy_in = copy_out = copy_tree_in = copy_tree_out = _refused
 
 
 def excludes(patterns):
@@ -446,12 +644,14 @@ class Fake(Machine):
         self.name = name
         self.files = {}
         self.dirs = set()
+        self.links = set()
         self.pids = set()
         self.answers = []
         self.effects = []
         self.next_pid = 1000
         self.stop_after = None
         self.applied = 0
+        self.streamed = []
         self._acting = False
 
     def answer(self, prefix, rc=0, out="", err=""):
@@ -492,9 +692,14 @@ class Fake(Machine):
         finally:
             self._acting = False
 
-    def run(self, argv, input=None, timeout=None):
+    def run(self, argv, input=None, timeout=None, stream=False):
         self.record_run(argv)
-        return self._answer(argv)
+        r = self._answer(argv)
+        if not stream:
+            return r
+        self.streamed.append(tuple(argv))
+        sys.stderr.write(r.out + r.err)
+        return Result(r.rc)
 
     def run_tty(self, argv, cwd=None, timeout=None):
         self._record(("run_tty", tuple(argv), cwd))
@@ -504,6 +709,27 @@ class Fake(Machine):
         if path not in self.files:
             raise OSError("no such file: %s" % path)
         return self.files[path]
+
+    def read_tree(self, anchor, rel, patterns, depth=3):
+        top = os.path.join(anchor, rel).rstrip("/")
+        path = anchor.rstrip("/")
+        for part in (p for p in rel.split("/") if p):
+            path += "/" + part
+            if path in self.links:
+                raise Planted(path)
+        if top not in self.dirs:
+            raise OSError("no such directory: %s" % top)
+        out = {}
+        for p in sorted(self.files):
+            r = p[len(top) + 1:]
+            if not p.startswith(top + "/") or r.count("/") >= depth:
+                continue
+            if p in self.links:
+                raise Planted(p)
+            if matches(r, patterns):
+                data = self.files[p]
+                out[r] = data if isinstance(data, bytes) else data.encode()
+        return out
 
     def exists(self, path):
         return path in self.files or path in self.dirs
@@ -529,6 +755,7 @@ class Fake(Machine):
 
     def _set_file(self, path, text):
         self.files[path] = text
+        self.links.discard(path)
         parent = os.path.dirname(path)
         while parent and parent != "/":
             self.dirs.add(parent)
@@ -542,6 +769,7 @@ class Fake(Machine):
 
     def _drop(self, path):
         self.files = {p: t for p, t in self.files.items() if p != path and not p.startswith(path.rstrip("/") + "/")}
+        self.links &= set(self.files)
         self.dirs = {d for d in self.dirs if d != path and not d.startswith(path.rstrip("/") + "/")}
 
     def remove(self, path):
@@ -570,6 +798,7 @@ class Fake(Machine):
         if path in self.files or path in self.dirs or (parent not in ("", "/") and parent not in self.dirs):
             return False
         self.files[path] = target
+        self.links.add(path)
         return True
 
     def rename(self, path, dst):
@@ -577,6 +806,10 @@ class Fake(Machine):
         if path not in self.files:
             return False
         self.files[dst] = self.files.pop(path)
+        self.links.discard(dst)
+        if path in self.links:
+            self.links.discard(path)
+            self.links.add(dst)
         return True
 
     def kill(self, pid, sig=signal.SIGTERM):

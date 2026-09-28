@@ -5,7 +5,6 @@ the release branch, so an image pins the same commits as the WebKit that runs on
 import os
 import re
 import shlex
-import signal as sig
 
 from wk import act, build, fleet, images, job, pgo, record
 from wk.act import die, info, log, warn
@@ -170,7 +169,7 @@ class Yocto(task.ContainerBuilder):
                 % (q(branch), q(remote), q(branch + ":" + branch), q(branch)))
         if not target.act_exec(ws, ["bash", "-c", line]).ok:
             die("could not check out '%s' from '%s' in '%s'.\n    That fetch reads this machine's mirror and no upstream, and "
-                "the mirror\n    carries every branch a lane checks out -- %s of origin, every head of\n    the other upstreams "
+                "the mirror\n    carries every branch an image workspace checks out -- %s of origin, every head of\n    the other upstreams "
                 "-- so a missing one means the mirror is behind this\n    checkout:\n        wk sync\n    If the mirror does "
                 "have it, 'wk sync %s' reports the workspace's remotes\n    and '--fix' re-asserts them."
                 % (branch, remote, ws, " ".join(["main"] + images.origin_branches(self.env)), ws))
@@ -211,7 +210,7 @@ class Yocto(task.ContainerBuilder):
         return "  (verified on %s)" % self.p["YOC_BRANCH"] if t in have else "  ** %s has no [%s] section: this build would refuse **" % (self.p["YOC_BRANCH"], t)
 
     def cooker_pid(self, target, ws):
-        """The live bitbake this lane's lock names, believed only while its command line there says bitbake:
+        """The live bitbake this image workspace's lock names, believed only while its command line there says bitbake:
         a wkdev container shares the host's PID namespace."""
         lock = os.path.join(host_workdir(target.store.ws_dir(ws), self.p["YOC_TARGET"]), "build", "bitbake.lock")
         try:
@@ -228,13 +227,10 @@ class Yocto(task.ContainerBuilder):
         if pid is None:
             return True
         info("a bitbake cooker (pid %d) is still in '%s' with no record holding it -- a\n  killed driver left it. Stopping it." % (pid, ws))
-        for signum, wait in ((sig.SIGTERM, KILL_WAIT), (sig.SIGKILL, COOKER_KILL_WAIT)):
-            job.kill_tree_in(target, ws, pid, signum)
-            for _ in range(wait):
-                if self.cooker_pid(target, ws) is None:
-                    info("the cooker is gone; sstate is written as it goes, so what it had done stands.")
-                    return True
-                self.clock.sleep(1)
+        if job.terminate(lambda signum: job.kill_tree_in(target, ws, pid, signum),
+                         lambda: self.cooker_pid(target, ws) is None, self.clock, KILL_WAIT, COOKER_KILL_WAIT):
+            info("the cooker is gone; sstate is written as it goes, so what it had done stands.")
+            return True
         warn("pid %d outlived a TERM and a KILL. What ends it is the container:\n  wk stop %s" % (pid, ws))
         return False
 
@@ -255,7 +251,7 @@ class Yocto(task.ContainerBuilder):
         return 0
 
     def parse(self, rest):
-        o = task.options(rest, ("--dry-run", "--stop", "--detach", "--keep-work", "--chromium", "--local-layer",
+        o = task.options(rest, ("--stop", "--detach", "--keep-work", "--chromium", "--local-layer",
                                 "--no-local-layer", "--tailnet", "--no-tailnet"),
                          ("--workspace", "--stage", "--commit", "--slot", "--config", "--pgo-profile"), USAGE % (self.name, self.name))
         stage, commit, slot = o.get("--stage") or "image", o.get("--commit") or "", o.get("--slot") or ""

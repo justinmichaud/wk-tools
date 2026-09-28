@@ -104,31 +104,31 @@ ICMP = "icmp type { echo-request, echo-reply, destination-unreachable, time-exce
 
 
 def wk_bridge_conf(name, c):
-    keys = {"name": name, "device": c.get("BR_DEVICE", ""), "hostname": c["BR_HOSTNAME"],
-            "tag": c["BR_TAG"], "segment": c["BR_SEGMENT"], "router": c["BR_ROUTER"],
-            "iface": c["BR_IF"], "pool": c.get("BR_POOL", ""), "leases": c.get("BR_LEASES", ""),
-            "egress": c["BR_EGRESS"], "camera": c["BR_CAMERA"], "leasefile": LEASEFILE}
+    keys = {"name": name, "device": c.get("device", ""), "hostname": c["hostname"],
+            "tag": c["tag"], "segment": c["segment"], "router": c["router"],
+            "iface": c["if"], "pool": c.get("pool", ""), "leases": c.get("leases", ""),
+            "egress": c["egress"], "camera": c["camera"], "leasefile": LEASEFILE}
     return "# Rendered by wk machine setup from machines/%s.conf; sourced by /bin/sh.\n%s" % (
         name, "".join("%s=%s\n" % (k, shlex.quote(v)) for k, v in keys.items()))
 
 
 def dnsmasq(c, netmask):
-    nat, iface, router = c["BR_EGRESS"] == "nat", c["BR_IF"], c["BR_ROUTER"]
+    nat, iface, router = c["egress"] == "nat", c["if"], c["router"]
     out = ["# DHCP for the bridge segment."]
     # No egress: DNS off (port=0, an empty option 6), since there is nothing to resolve and a resolver is attackable.
     out += ["domain-needed", "bogus-priv"] if nat else ["port=0"]
     # bind-dynamic: the NIC comes and goes with the dock, and bind-interfaces fails to start while it is out.
     out += ["interface=" + iface, "bind-dynamic", "dhcp-authoritative", "log-dhcp", "dhcp-leasefile=" + LEASEFILE]
-    if c.get("BR_POOL"):
-        out.append("dhcp-range=%s,%s,infinite" % (c["BR_POOL"], netmask))
+    if c.get("pool"):
+        out.append("dhcp-range=%s,%s,infinite" % (c["pool"], netmask))
     out += ["dhcp-option=option:router," + router, "dhcp-option=option:ntp-server," + router]
     out.append("dhcp-option=option:dns-server," + router if nat else "dhcp-option=6")
-    out += ["dhcp-host=%s,infinite" % lease for lease in c.get("BR_LEASES", "").split()]
+    out += ["dhcp-host=%s,infinite" % lease for lease in c.get("leases", "").split()]
     return "\n".join(out) + "\n"
 
 
 def nft(c, uplink):
-    iface, nat = c["BR_IF"], c["BR_EGRESS"] == "nat"
+    iface, nat = c["if"], c["egress"] == "nat"
     up = 'iifname "%s" ' % uplink
     seg = 'iifname "%s" ' % iface
     lines = ["#!/usr/sbin/nft -f", "# create-then-delete makes the file idempotent.",
@@ -153,7 +153,7 @@ def nft(c, uplink):
     lines += ['        limit rate 10/minute log prefix "wkbridge-forward-drop " counter drop', "        counter drop", "    }"]
     if nat:
         lines += ["    chain postrouting {", "        type nat hook postrouting priority srcnat; policy accept;",
-                  '        oifname "%s" ip saddr %s masquerade' % (uplink, c["BR_SEGMENT"]), "    }"]
+                  '        oifname "%s" ip saddr %s masquerade' % (uplink, c["segment"]), "    }"]
     return "\n".join(lines + ["}"]) + "\n"
 
 
@@ -164,7 +164,7 @@ def packaged(facts, role):
 
 def battery_node(c, facts):
     nodes = [n for n in facts.get("battery_nodes", "").split(",") if n]
-    pinned = c.get("BR_BATTERY", "")
+    pinned = c.get("battery", "")
     if pinned:
         return next((n for n in nodes if os.path.basename(n) == pinned), "")
     return nodes[0] if nodes else ""
@@ -176,11 +176,11 @@ class Plan:
     def __init__(self, name, conf, facts=None):
         self.name, self.conf = name, conf
         self.files, self.lines, self.warnings = [], [], []
-        prefix = conf["BR_SEGMENT"].split("/")[-1]
+        prefix = conf["segment"].split("/")[-1]
         self.netmask = NETMASKS.get(prefix, "255.255.255.0")
         if prefix not in NETMASKS:
             self.warnings.append("prefix /%s is not one this understands -- assuming %s" % (prefix, self.netmask))
-        self.lan_mac = (conf.get("BR_LAN_MAC") or (facts or {}).get("lan_mac", "")).lower()
+        self.lan_mac = (conf.get("lan_mac") or (facts or {}).get("lan_mac", "")).lower()
         self.battery = battery_node(conf, facts) if facts is not None else ""
         self._common()
         if facts is not None:
@@ -199,24 +199,24 @@ class Plan:
         self.file("/etc/NetworkManager/conf.d/98-wk-bridge-dns.conf", NM_DNS)
         self.file("/etc/dnsmasq.d/wk-bridge.conf", dnsmasq(c, self.netmask))
         self.file("/etc/sysctl.d/99-wk-bridge.conf", SYSCTL)
-        self.file("/etc/chrony/conf.d/wk-bridge.conf", CHRONY % c["BR_SEGMENT"])
+        self.file("/etc/chrony/conf.d/wk-bridge.conf", CHRONY % c["segment"])
         self.file("/etc/ssh/sshd_config.d/10-wk-bridge.conf", SSHD)
         self.file("/etc/logrotate.d/wk-bridge", LOGROTATE)
 
     def _role(self, facts):
-        c, iface = self.conf, self.conf["BR_IF"]
+        c, iface = self.conf, self.conf["if"]
         uplink = facts.get("uplink") or "wlan0"
         if self.lan_mac:
             self.file("/etc/udev/rules.d/70-wk-bridge-net.rules",
                       'SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="%s", NAME="%s"\n' % (self.lan_mac, iface))
             self.file("/etc/NetworkManager/system-connections/wk-bridge-%s.nmconnection" % iface,
-                      NMCONNECTION % {"iface": iface, "router": c["BR_ROUTER"], "prefix": c["BR_SEGMENT"].split("/")[-1]}, "0600")
+                      NMCONNECTION % {"iface": iface, "router": c["router"], "prefix": c["segment"].split("/")[-1]}, "0600")
         else:
             self.warnings.append("no USB ethernet adapter is enumerated right now, so %s has no udev rename and no address;\n"
                                  "  one plugged in later comes up unnamed until 'wk machine setup %s' runs again." % (iface, self.name))
         self.file("/etc/nftables.d/wk-bridge.nft", nft(c, uplink))
         if self.battery:
-            self.file("/etc/wk-bridge-battery.conf", "node=%s\nlimit=%s\n" % (self.battery, c["BR_BATTERY_LIMIT"]))
+            self.file("/etc/wk-bridge-battery.conf", "node=%s\nlimit=%s\n" % (self.battery, c["battery_limit"]))
         for role, missing in (("nm", "NetworkManager"), ("tailscale", "the tailscale package")):
             if not packaged(facts, role):
                 raise LookupError("%s has no init script on the phone" % missing)
@@ -229,7 +229,7 @@ class Plan:
         self.lines.append("enable sshd")
         self.lines.append("enable zram-init" if "zram-init" in facts.get("init", "").split() else "")
         self.lines.append("service wk-bridge-watchdog" if facts.get("watchdog") == "yes" else "")
-        self.lines.append("service wk-bridge-camera" if c["BR_CAMERA"] != "off" else "drop wk-bridge-camera")
+        self.lines.append("service wk-bridge-camera" if c["camera"] != "off" else "drop wk-bridge-camera")
         self.lines.append("service wk-bridge-battery" if self.battery else "")
         self.lines += ["enable " + packaged(facts, "tailscale"), "start " + packaged(facts, "tailscale")]
         self.lines = [l for l in self.lines if l]
@@ -249,14 +249,14 @@ class Plan:
             out.append("no swap at all and no zram-init -- a memory spike will OOM the router")
         if not self.battery:
             out.append("no power_supply node here exposes charge_control_end_threshold%s, so the charge is not capped"
-                       % (" named %s (BR_BATTERY)" % self.conf["BR_BATTERY"] if self.conf.get("BR_BATTERY") else ""))
+                       % (" named %s (battery)" % self.conf["battery"] if self.conf.get("battery") else ""))
         return out
 
     def env(self):
         c = self.conf
-        values = (("BR_NAME", self.name), ("BR_HOSTNAME", c["BR_HOSTNAME"]), ("BR_IF", c["BR_IF"]),
-                  ("BR_LAN_MAC", self.lan_mac), ("BR_CAMERA", c["BR_CAMERA"]),
-                  ("BR_BATTERY_LIMIT", c["BR_BATTERY_LIMIT"]), ("BR_BATTERY_NODE", self.battery))
+        values = (("BR_NAME", self.name), ("BR_HOSTNAME", c["hostname"]), ("BR_IF", c["if"]),
+                  ("BR_LAN_MAC", self.lan_mac), ("BR_CAMERA", c["camera"]),
+                  ("BR_BATTERY_LIMIT", c["battery_limit"]), ("BR_BATTERY_NODE", self.battery))
         return "".join("%s=%s\n" % (k, shlex.quote(v)) for k, v in values)
 
     def paths(self):

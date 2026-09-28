@@ -53,7 +53,11 @@ def dry_run():
 
 
 def exec_into(argv, cwd=None, env=None):
-    """Replaces this process, so the far side's tty and job control are the caller's own."""
+    """Replaces this process, so the far side's tty and job control are the caller's own; a dry run prints it and ends."""
+    if dry_run():
+        sys.stderr.write("would run: %s%s\n" % ("cd %s && " % shlex.quote(cwd) if cwd else "",
+                                                shlex.join(argv)))
+        raise SystemExit(0)
     if cwd is not None:
         os.chdir(cwd)
     sys.stdout.flush()
@@ -99,12 +103,12 @@ def asked():
 
 def act(argv, **kw):
     if dry_run():
-        sys.stderr.write("would run: %s\n" % " ".join(shlex.quote(a) for a in argv))
+        sys.stderr.write("would run: %s\n" % shlex.join(argv))
         return None
     if os.environ.get("WK_DESTRUCTIVE") and not asked():
         die("BUG: this command is declared destructive and acted before asking:\n    %s"
-            % " ".join(shlex.quote(a) for a in argv))
-    debug("run: %s" % " ".join(shlex.quote(a) for a in argv))
+            % shlex.join(argv))
+    debug("run: %s" % shlex.join(argv))
     return subprocess.run(argv, **kw)
 
 

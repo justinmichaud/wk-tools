@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -21,10 +22,10 @@ from unittest import mock
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import buildconf, git, record, secrets, shell, targets  # noqa: E402
+from wk import buildconf, git, machine, record, secrets, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
-from wk.machine import TIMED_OUT, Fake, Result  # noqa: E402
+from wk.machine import TIMED_OUT, Fake, Result, lib_argv  # noqa: E402
 from wk.store import Store  # noqa: E402
 from wk.sysimage import guestbase  # noqa: E402
 
@@ -49,8 +50,8 @@ class TargetsTest(unittest.TestCase):
         os.system("rm -rf %s" % self.tmp)
 
     def conf(self, name, text):
-        kind = "" if "KIND=" in text.replace("WK_TARGET_KIND=", "") else \
-            "KIND=%s\n" % ("peer" if "WK_REMOTE_PEER=1" in text else "build")
+        kind = "" if "kind=" in text.replace("driver=", "") else \
+            "kind=%s\n" % ("peer" if "peer=1" in text else "build")
         (self.registry_dir / (name + ".conf")).write_text(kind + text)
 
     def stderr_of(self, fn):
@@ -112,8 +113,8 @@ class TestRegistry(TargetsTest):
         return targets.Registry(REPO, env=env, machine=self.fake)
 
     def test_the_builtins_and_every_conf_are_targets(self):
-        self.conf("box1", "KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_HOST=box1\n")
-        self.conf("peer", "# a peer\nWK_REMOTE_PEER=1\n")
+        self.conf("box1", "kind=build\ndriver=remote\nhost=box1\n")
+        self.conf("peer", "# a peer\npeer=1\n")
         reg = self.host_registry()
         self.assertEqual(reg.all(), ["container", "box1", "peer"])
         self.assertEqual(reg.machines(), ["box1", "peer"])
@@ -125,24 +126,19 @@ class TestRegistry(TargetsTest):
 
     def test_a_conf_named_after_this_machine_is_not_a_peer(self):
         me = record.machine_name({})
-        self.conf(me.upper(), "WK_REMOTE_HOST=%s\n" % me)
-        self.conf("box1", "WK_REMOTE_HOST=box1\n")
+        self.conf(me.upper(), "host=%s\n" % me)
+        self.conf("box1", "host=box1\n")
         self.assertEqual(self.host_registry().machines(), ["box1"])
 
     def test_the_far_end_of_a_target_lists_no_conf(self):
-        self.conf("box1", "WK_REMOTE_HOST=box1\n")
+        self.conf("box1", "host=box1\n")
         self.assertEqual(self.reg.all(), ["container"])   # WK_IN_VM
         env = {k: v for k, v in self.env.items() if k != "WK_IN_VM"}
         env["WK_REMOTE_MARKER"] = str(self.tmp / "wk-remote")
         (self.tmp / "wk-remote").write_text("target=box2\nroot=/home/u/wk\n")
-        self.conf("box2", "WK_REMOTE_HOSTNAME=box2-host\n")
+        self.conf("box2", "hostname=box2-host\n")
         self.fake.answer(["hostname", "-s"], out="box2-host\n")
         self.assertEqual(targets.Registry(REPO, env=env, machine=self.fake).all(), ["container", "box2"])
-
-    def test_a_conf_is_parsed_as_shell_assignments(self):
-        p = self.tmp / "x.conf"
-        p.write_text("# c\nA=1\nB=\"two words\"\nC='q'\nnot an assignment\n D = 4\n")
-        self.assertEqual(targets.read_conf(str(p)), {"A": "1", "B": "two words", "C": "q", "D": "4"})
 
     def test_inside_a_workspace_the_default_is_local(self):
         marker = self.tmp / "marker"
@@ -157,7 +153,7 @@ class TestRegistry(TargetsTest):
         rm = self.tmp / "remote-marker"
         rm.write_text("target=buildbox\nroot=/home/u/wk\n")
         self.env["WK_REMOTE_MARKER"] = str(rm)
-        self.conf("buildbox", "WK_REMOTE_HOST=buildbox\n")
+        self.conf("buildbox", "host=buildbox\n")
         self.fake.answer(["hostname", "-s"], out="buildbox\n")
         self.assertEqual(self.reg.default(), "buildbox")
         self.assertIn("buildbox", self.reg.all())
@@ -287,14 +283,10 @@ class VmTest(TargetsTest):
         super().setUp()
         self.env.pop("WK_IN_VM")
         self.env["WK_VM_STORE"] = str(self.tmp / "vmstore")
-        bin_dir = self.tmp / "bin"
-        bin_dir.mkdir()
-        (bin_dir / "tart").write_text("#!/bin/sh\nexit 0\n")
-        (bin_dir / "tart").chmod(0o755)
-        self.env["PATH"] = "%s:%s" % (bin_dir, os.environ.get("PATH", ""))
-        path = mock.patch.dict(os.environ, {"PATH": self.env["PATH"]})
-        path.start()
-        self.addCleanup(path.stop)
+        (self.tmp / "bin").mkdir()
+        (self.tmp / "bin" / "tart").write_text("")
+        (self.tmp / "bin" / "tart").chmod(0o755)
+        self.env["PATH"] = str(self.tmp / "bin")
         # A guest is driven from a macOS host; the store rule that says so is held by test_wk_store.
         mac = mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True)
         mac.start()
@@ -380,7 +372,7 @@ class RemoteTest(TargetsTest):
         self.fake = SshFake()
         self.env.update({"XDG_STATE_HOME": str(self.tmp / "state"), "WK_PROBE_SECONDS": "2", "WK_SSH_TIMEOUT": "3"})
         del self.env["WK_IN_VM"]   # a host with machines in its registry
-        self.conf("box", "WK_REMOTE_HOST=box.example\nWK_REMOTE_ROOT=/home/u/wk\n")
+        self.conf("box", "host=box.example\nroot=/home/u/wk\n")
         self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
         self.t = self.reg.load("box")
         self.fake.answer_remote("uname -s", out=LINUX_PROBE)
@@ -419,7 +411,7 @@ class TestRemote(RemoteTest):
         self.assertIsNone(cwd)
 
     def test_exec_tty_when_local_runs_directly_with_the_source_as_cwd(self):
-        self.conf("me", "WK_REMOTE_LOCAL=1\nWK_REMOTE_ROOT=%s\n" % (self.tmp / "rr"))
+        self.conf("me", "local=1\nroot=%s\n" % (self.tmp / "rr"))
         me = self.reg.load("me")
         self.fake.answer(["sh"], out=LINUX_PROBE)   # is_local still probes itself, over a plain shell, not ssh
         self.fake.answer(["true"], out="")
@@ -428,10 +420,10 @@ class TestRemote(RemoteTest):
         self.assertEqual(self.fake.effects[-1], ("run_tty", ("true",), me.src("a")))
 
     def test_the_root_defaults_to_wk_under_the_far_home(self):
-        self.conf("bare", "WK_REMOTE_HOST=bare.example\n")
+        self.conf("bare", "host=bare.example\n")
         t = self.reg.load("bare")
         self.assertEqual((t.tools(""), t.src("a")), ("/home/u/wk/tools", "/home/u/wk/ws/a/WebKit"))
-        self.conf("tools", "WK_REMOTE_HOST=bare.example\nWK_REMOTE_TOOLS=my/tools\n")
+        self.conf("tools", "host=bare.example\ntools=my/tools\n")
         self.assertEqual(self.reg.load("tools").tools(""), "/home/u/my/tools")
 
     def test_a_darwin_machine_is_read_from_sysctl_and_vm_stat(self):
@@ -460,7 +452,7 @@ class TestRemote(RemoteTest):
     def test_far_side_for_a_machine_with_no_wk_and_for_this_machine(self):
         self.fake.remote = [("uname -s", Result(0, LINUX_PROBE)), ("test -f $HOME/.wk-remote", Result(1))]
         self.assertEqual((self.t.far_side(), self.t.probe(), self.t.delegates()), ("no-wk", ("no-wk", ""), False))
-        self.conf("me", "WK_REMOTE_LOCAL=1\nWK_REMOTE_ROOT=%s\n" % (self.tmp / "rr"))
+        self.conf("me", "local=1\nroot=%s\n" % (self.tmp / "rr"))
         me = self.reg.load("me")
         self.assertTrue(me.is_here() and me.needs_base)
         self.assertEqual((me.far_side(), me.probe(), me.answers(), me.has_wk(), me.delegates()), ("none", ("none", ""), (True, ""), False, False))
@@ -500,7 +492,7 @@ class TestRemote(RemoteTest):
         self.assertNotIn("2>&1", self.fake.ssh_calls("tools/wk")[1][-1])
 
     def test_a_peer_is_asked_not_driven(self):
-        self.conf("peer", "WK_REMOTE_PEER=1\nWK_REMOTE_TOOLS=/opt/wk-tools\n")
+        self.conf("peer", "peer=1\ntools=/opt/wk-tools\n")
         self.fake.answer_remote("test -x", rc=0)
         self.fake.answer_remote("wk ls --json", out=json.dumps({"workspaces": [{"name": "pw", "state": "running"}, {"name": "half", "state": "creating"}]}))
         t = self.reg.load("peer")
@@ -575,7 +567,7 @@ class TestContainerWrite(TargetsTest):
         self.fake.dirs.add(self.t.store.base_path(self.base))
         self.fake.answer(["podman", "container", "exists"], rc=1)
         self.fake.answer(["podman", "container", "exists", "wk-a"], rc=0)
-        self.fake.answer(shell.argv(self.t.root, shell.GPU_FLAGS_FN)[:3], out="--device /dev/dri")
+        self.fake.answer(lib_argv(self.t.root, "host/linux/gpu.sh", "gpu_flags")[:3], out="--device /dev/dri")
         self.fake.answer(["env"], out="")
         self.fake.answer(["install"], out="")
 
@@ -597,7 +589,7 @@ class TestContainerWrite(TargetsTest):
                  ("--volume", "%s/build:/src/WebKit/WebKitBuild" % ws_dir), ("--volume", "%s:/var/lib/wk/ws/%s" % (ws_dir, ws))]
         pairs += [("--volume", "%s/%s:%s" % (root, sub, dest)) for sub, dest in (
             ("cache/ccache", "/ccache"), ("cache/yocto", "/cache/yocto"), ("cache/buildroot", "/cache/buildroot"),
-            ("cache/bench", "/cache/bench"), ("bench", "/bench"), ("skills", "/skills"))]
+            ("cache/bench", "/cache/bench"), ("skills", "/skills"))]
         pairs += [("--volume", "%s:/secrets:ro" % st.secrets_view_dir("container")), ("--volume", "%s/agent-rw:/agent-rw" % root),
                   ("--memory", "%dm" % mem), ("--cpus", str(cpus))]
         pairs += [("--env", kv) for kv in (
@@ -629,6 +621,7 @@ class TestContainerWrite(TargetsTest):
         self.assertEqual(install, ("install", "-m", "0755", os.path.join(self.t.root, "container", "firstrun.sh"), os.path.join(ws_dir, "home", ".wkdev-firstrun")))
         self.assertEqual(self.fake.effects[-1], ("write", os.path.join(ws_dir, "base-id")))
         self.assertEqual(self.fake.files[os.path.join(ws_dir, "base-id")], "main-1\n")
+        self.assertEqual(self.fake.streamed, [argv], "`unit machine.streams_long_effects`: wkdev-create streams to the task log")
 
     def test_an_armhf_workspace_names_the_arm_image_and_gets_no_gpu(self):
         self.stderr_of(lambda: self.t.create("new", self.base, "armhf"))
@@ -752,6 +745,7 @@ class TestContainerWrite(TargetsTest):
         self.fake.answer(["bash", script], out="")
         self.assertTrue(self.t.sdk_refresh())
         self.assertEqual(self.fake.effects[-1], ("run", ("bash", script, self.t.sdk())))
+        self.assertEqual(self.fake.streamed, [("bash", script, self.t.sdk())])
         self.fake.answer(["bash", script], rc=1, err="fetch failed\n")
         err = self.refused(self.t.sdk_refresh)
         self.assertIn("fetch failed", err)
@@ -785,6 +779,7 @@ class TestVmWrite(VmTest):
                                              (self.tart, "set", "wk-new", "--cpu", "9", "--memory", "20480", "--random-mac", "--display", "1280x800", "--display-refit")])
         self.assertEqual(self.fake.effects[-2:], [("mkdir", ws_dir), ("write", os.path.join(ws_dir, targets.READY_MARKER))])
         self.assertIn("cloning wk-base -> wk-new (APFS copy-on-write)", err)
+        self.assertEqual([a[:2] for a in self.fake.streamed], [(self.tart, "clone"), (self.tart, "set")])
         self.assertEqual(1, self.base_ensure.call_count)
         self.assertTrue(self.t.created("new"))
 
@@ -823,7 +818,7 @@ class TestVmWrite(VmTest):
 
     def test_a_full_host_is_warned_about_with_the_podman_machine_counted(self):
         self.env["WK_VM_MAX"] = "2"
-        self.fake.answer(["podman", "machine", "inspect"], out="running\n")
+        self.fake.answer(["podman", "machine", "inspect"], out=json.dumps([{"State": "running", "Resources": {"Memory": 8192}}]))
         _, err = self.stderr_of(lambda: self.reg.load("vm").create("new"))
         self.assertIn("2 VM(s) already running on this host; you will have to stop one before starting 'new':\n      mac\n      podman machine wk", err)
         self.assertEqual(len(self.tart_calls()), 2)
@@ -871,9 +866,10 @@ class TestVmWrite(VmTest):
         self.assertEqual((self.fake.files, self.fake.dirs), before)
 
     def test_store_init_makes_the_store_and_a_private_vm_dir(self):
+        before = len(self.fake.effects)
         self.t.store_init()
         root = self.t.store.root()
-        self.assertEqual(self.fake.effects, [("mkdir", root), ("mkdir", os.path.join(root, "ws")), ("mkdir", self.t.vm_dir()),
+        self.assertEqual(self.fake.effects[before:], [("mkdir", root), ("mkdir", os.path.join(root, "ws")), ("mkdir", self.t.vm_dir()),
                                              ("run", ("find", self.t.vm_dir(), "-maxdepth", "0", "-perm", "0700")), ("run", ("chmod", "0700", self.t.vm_dir()))])
 
     def test_ready_is_the_shared_poll_of_info(self):
@@ -900,7 +896,7 @@ class TestVmWrite(VmTest):
 class TestRemoteWrite(RemoteTest):
     def setUp(self):
         super().setUp()
-        self.conf("ref", "WK_REMOTE_HOST=ref.example\nWK_REMOTE_ROOT=/home/u/wk\nWK_REMOTE_REFERENCE=/srv/WebKit\n")
+        self.conf("ref", "host=ref.example\nroot=/home/u/wk\nreference=/srv/WebKit\n")
         self.ref = self.reg.load("ref")
         self.fake.answer_remote("ws/a ]", out="absent\n")
         self.fake.answer_remote("ws/half ]", out="creating\n")
@@ -923,8 +919,8 @@ class TestRemoteWrite(RemoteTest):
         acts = self.acts()
         self.assertEqual(len(acts), 4)
         self.assertIn("mkdir -p /home/u/wk/ws /home/u/wk/cache/ccache\n git clone --quiet -b main /srv/WebKit /home/u/wk/ws/a/WebKit", acts[0])
-        self.assertIn("cd '/home/u/wk/ws/a/WebKit'", acts[1])
-        self.assertIn("git remote add shared '/srv/WebKit'", acts[1])
+        self.assertIn("cd /home/u/wk/ws/a/WebKit\n", acts[1])
+        self.assertIn("git remote add shared /srv/WebKit", acts[1])
         self.assertIn("ssh -F /home/u/wk/ssh/config", acts[1])
         self.assertIn("[ -f /home/u/wk/cache/ccache/ccache.conf ] || printf %s 'max_size = 40G", acts[2])
         self.assertIn("touch /home/u/wk/ws/a/.wk-ready", acts[3])
@@ -937,9 +933,9 @@ class TestRemoteWrite(RemoteTest):
         _, err = self.stderr_of(lambda: self.t.create("a"))
         acts = self.acts()
         self.assertEqual(len(acts), 5)
-        self.assertIn("M='/home/u/wk/mirror'", acts[0])
+        self.assertIn("M=/home/u/wk/mirror\n", acts[0])
         self.assertIn("git clone --quiet --shared -b main /home/u/wk/mirror /home/u/wk/ws/a/WebKit", acts[1])
-        self.assertIn("git remote add mirror '/home/u/wk/mirror'", acts[2])
+        self.assertIn("git remote add mirror /home/u/wk/mirror", acts[2])
         self.assertIn("touch /home/u/wk/ws/a/.wk-ready", acts[4])
         self.assertIn("updating the WebKit mirror on box.example (first run clones it)", err)
         self.assertIn("  origin   ok\n  wpe      FAILED\n", err)
@@ -957,7 +953,7 @@ class TestRemoteWrite(RemoteTest):
         self.assertEqual(self.acts(), [])
 
     def test_a_failed_round_trip_ends_the_creation_where_it_stood(self):
-        for mod, name, text in ((git, "wiring_script", "git remote set-url origin x"), (shell, "ccache_conf", "max_size = 40G\n")):
+        for mod, name, text in ((git, "wiring_script", "git remote set-url origin x"), (targets.Target, "ccache_conf", "max_size = 40G\n")):
             p = mock.patch.object(mod, name, return_value=text)
             p.start()
             self.addCleanup(p.stop)
@@ -977,7 +973,7 @@ class TestRemoteWrite(RemoteTest):
         self.assertIn("touch", self.acts()[-1])
 
     def test_a_peer_is_not_a_build_machine_and_says_where_to_create(self):
-        self.conf("peer", "WK_REMOTE_PEER=1\nWK_REMOTE_TOOLS=/opt/wk-tools\n")
+        self.conf("peer", "peer=1\ntools=/opt/wk-tools\n")
         err = self.refused(lambda: self.reg.load("peer").create("newws"))
         self.assertIn("'peer' is a workstation, not a build machine for this one.", err)
         self.assertIn("ssh peer wk new newws", err)
@@ -998,7 +994,7 @@ class TestRemoteWrite(RemoteTest):
         self.assertNotIn(("remove", ws_dir), self.fake.effects)
 
     def test_a_peers_workspace_is_destroyed_by_its_own_wk(self):
-        self.conf("peer", "WK_REMOTE_PEER=1\nWK_REMOTE_TOOLS=/opt/wk-tools\n")
+        self.conf("peer", "peer=1\ntools=/opt/wk-tools\n")
         t = self.reg.load("peer")
         self.fake.answer_remote("wk rm a", out="==> workspace 'a' destroyed\n")
         _, err = self.stderr_of(lambda: t.destroy("a"))
@@ -1029,7 +1025,7 @@ class TestRemoteWrite(RemoteTest):
         self.assertIn("would run on box.example: sh -c 'rm -rf /home/u/wk/ws/a'", err)
 
     def test_this_machine_as_the_remote_runs_every_round_trip_in_a_local_shell(self):
-        self.conf("me", "WK_REMOTE_LOCAL=1\nWK_REMOTE_ROOT=%s\nWK_REMOTE_REFERENCE=/srv/WebKit\n" % (self.tmp / "rr"))
+        self.conf("me", "local=1\nroot=%s\nreference=/srv/WebKit\n" % (self.tmp / "rr"))
         me = self.reg.load("me")
 
         def sh(argv, fake):
@@ -1076,27 +1072,30 @@ class TestLocalWrite(TargetsTest):
 class TestBridges(TargetsTest):
     """What stays bash is reached by name, with the environment scoped to this test."""
 
-    def test_the_renderers_return_the_bash_text(self):
-        env = dict(self.env)
-        self.assertEqual(shell.ccache_conf(str(REPO), env), "max_size = 40G\n")
-        self.assertEqual(shell.ccache_conf(str(REPO), dict(env, WK_CCACHE_MAXSIZE="5G")), "max_size = 5G\n")
+    def test_the_ccache_conf_is_the_targets_size(self):
+        def conf(env):
+            return targets.Registry(str(REPO), env=env, machine=self.fake).load("container").ccache_conf()
+        self.assertEqual(conf(dict(self.env)), "max_size = 40G\n")
+        self.assertEqual(conf(dict(self.env, WK_CCACHE_MAXSIZE="5G")), "max_size = 5G\n")
 
     def test_the_scripts_are_the_bash_text_for_the_far_shell(self):
         env = dict(self.env)
         branches = git.mirror_branches(env)
         script = git.mirror_refresh_script("/m", branches)
-        self.assertIn("M='/m'", script)
+        self.assertIn("M=/m\n", script)
         self.assertIn('echo "mirror-fetch $r ok"', script)
         wiring = git.wiring_script("/src", "/m", [], branches, "shared", "/srv/WebKit", "/r/ssh/config")
-        self.assertTrue(wiring.startswith("set -e\ncd '/src'\n"))
-        self.assertIn("git remote add shared '/srv/WebKit'", wiring)
+        self.assertTrue(wiring.startswith("set -e\ncd /src\n"))
+        self.assertIn("git remote add shared /srv/WebKit", wiring)
         self.assertIn("git config core.sshCommand 'ssh -F /r/ssh/config'", wiring)
 
     def test_gpu_flags_are_read_where_the_container_is_made(self):
-        self.assertEqual(shell.gpu_flags(str(REPO), self.fake), [])
-        self.fake.answer(shell.argv(str(REPO), shell.GPU_FLAGS_FN)[:3], out="--device /dev/dri --device nvidia.com/gpu=all\n")
-        self.assertEqual(shell.gpu_flags(str(REPO), self.fake), ["--device", "/dev/dri", "--device", "nvidia.com/gpu=all"])
-        self.assertEqual(self.fake.effects[-1][1][:2], ("bash", "-c"))
+        t = self.reg.load("container")
+        self.fake.answer(lib_argv(str(REPO), "host/linux/gpu.sh", "gpu_flags")[:3], rc=1)
+        self.assertNotIn("--device", t.sandbox_flags("native"))
+        self.fake.answer(lib_argv(str(REPO), "host/linux/gpu.sh", "gpu_flags")[:3], out="--device /dev/dri --device nvidia.com/gpu=all\n")
+        self.assertEqual(t.sandbox_flags("native")[-4:], ["--device", "/dev/dri", "--device", "nvidia.com/gpu=all"])
+        self.assertNotIn("--device", t.sandbox_flags("armhf"), "an armhf workspace gets no GPU")
 
 
 class TestBuildSide(RemoteTest):
@@ -1115,8 +1114,20 @@ class TestBuildSide(RemoteTest):
         self.assertEqual(argv[-2], "box.example")
         text = shlex.split(argv[-1])[2]
         self.assertTrue(text.startswith("set -o pipefail\ncd /home/u/wk/ws/a/WebKit && "))
-        self.assertIn("/home/u/wk/tools/lib/lockrun.sh remote-build -w 3600 -- nice -n 19 ionice -c3 env A=1 /t/build-in-target.sh", text)
+        self.assertIn("python3 -I -c %s /home/u/wk/tools/lib wk.lock run remote-build -w 3600 -- nice -n 19 ionice -c3 env "
+                      "A=1 /t/build-in-target.sh" % shlex.quote(machine.ISOLATED), text)
         self.assertTrue(text.endswith("2>&1 | tee /home/u/wk/ws/a/build.log"))
+
+    def test_a_wk_directory_in_the_checkout_does_not_shadow_wk_tools(self):
+        """The lock runs from the checkout, whose files an agent writes."""
+        with tempfile.TemporaryDirectory() as src:
+            os.makedirs(os.path.join(src, "wk"))
+            with open(os.path.join(src, "wk", "__init__.py"), "w") as f:
+                f.write("raise SystemExit('the checkout was imported')\n")
+            env = dict(os.environ, WK_STORE=os.path.join(src, "store"), WK_LOCK_DIR=os.path.join(src, "locks"), PYTHONPATH=src)
+            cp = subprocess.run(machine.isolated_module(str(REPO / "lib"), "wk.lock") + ["run", "t", "--", "echo", "ran"],
+                                cwd=src, env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual((0, "ran\n"), (cp.returncode, cp.stdout), cp.stderr)
 
     def test_the_record_is_shipped_with_the_far_log_and_host(self):
         rec = record.Records(self.tmp / "rec", clock=FakeClock(), env=self.env, machine=self.fake)
@@ -1136,7 +1147,7 @@ class TestBuildSide(RemoteTest):
         self.assertIn("could not record 'a's build state on box.example", err)
 
     def test_a_target_on_this_machine_ships_nothing_and_runs_the_build_here(self):
-        self.conf("me", "WK_REMOTE_LOCAL=1\nWK_REMOTE_ROOT=%s\n" % (self.tmp / "rr"))
+        self.conf("me", "local=1\nroot=%s\n" % (self.tmp / "rr"))
         me = self.reg.load("me")
         me._probed = {"home": "/h", "cores": 2, "load": 0, "mem_mb": 100, "ionice": "no", "os": "linux", "root": str(self.tmp / "rr")}
         argv, _ = me.build_argv("a", ["true"])
@@ -1149,21 +1160,39 @@ class TestBuildSide(RemoteTest):
 
 
 class TestBuildSize(TargetsTest):
-    def test_a_workspace_is_sized_by_its_own_cgroup_else_the_machine(self):
+    def local(self, system):
         marker = self.tmp / "marker"
         marker.write_text("name=ws\nsrc=/src/WebKit\n")
         self.env["WK_MARKER"] = str(marker)
-        t = self.reg.load("local")
+        p = mock.patch.object(targets.LocalWorkspace, "os", lambda s: system)
+        p.start()
+        self.addCleanup(p.stop)
+        self.fake.answer(["nproc"], out="4\n")
+        self.fake.answer(["sysctl", "-n", "hw.ncpu"], out="4\n")
+        self.fake.answer(["sysctl", "-n", "hw.memsize"], out="8589934592\n")
+        self.fake.files["/proc/meminfo"] = "MemTotal: 8388608 kB\n"
+        return self.reg.load("local")
+
+    def test_a_workspace_is_sized_by_its_own_cgroup_else_the_machine(self):
+        t = self.local("linux")
         self.fake.files["/sys/fs/cgroup/cpu.max"] = "200000 100000\n"
         self.fake.files["/sys/fs/cgroup/memory.max"] = "4294967296\n"
         self.assertEqual(t.build_size("ws"), (2, 4096, None))
         self.fake.files["/sys/fs/cgroup/cpu.max"] = "max 100000\n"
         self.fake.files["/sys/fs/cgroup/memory.max"] = "max\n"
-        self.fake.answer(["nproc"], out="4\n")
-        self.fake.answer(["sysctl", "-n", "hw.ncpu"], out="4\n")
-        self.fake.answer(["sysctl", "-n", "hw.memsize"], out="8589934592\n")
-        self.fake.files["/proc/meminfo"] = "MemTotal: 8388608 kB\n"
         self.assertEqual(t.build_size("ws"), (4, 8192, None))
+
+    def test_a_guest_has_no_cgroup_and_is_the_machines_size(self):
+        self.assertEqual(self.local("macos").build_size("ws"), (4, 8192, None))
+
+    def test_an_unreadable_or_garbled_cgroup_limit_is_refused_not_replaced_by_the_machines(self):
+        t = self.local("linux")
+        self.fake.files["/sys/fs/cgroup/memory.max"] = "max\n"
+        err = self.refused(lambda: t.build_size("ws"))
+        self.assertIn("cannot read /sys/fs/cgroup/cpu.max", err)
+        self.fake.files["/sys/fs/cgroup/cpu.max"] = "lots\n"
+        err = self.refused(lambda: t.build_size("ws"))
+        self.assertIn("/sys/fs/cgroup/cpu.max reads 'lots', which is not what cgroup v2 writes there", err)
 
     def test_a_guest_is_sized_as_it_is_configured_and_else_as_this_host_would_size_one(self):
         with mock.patch.object(targets.Vm, "tart", lambda s: "/t/tart"):
@@ -1177,8 +1206,8 @@ class TestBuildSize(TargetsTest):
 
 class TestBuildBridges(TargetsTest):
     def test_a_branch_fetch_asks_the_mirror_first_or_origin_alone(self):
-        self.assertEqual(git.origin_branch_fetch_step("b", "").strip(), "git fetch -q origin 'b'")
-        self.assertIn("git fetch -q '/m' '+refs/heads/b:refs/remotes/origin/b'", git.origin_branch_fetch_step("b", "/m"))
+        self.assertEqual(git.origin_branch_fetch_step("b", "").strip(), "git fetch -q origin b")
+        self.assertIn("git fetch -q /m +refs/heads/b:refs/remotes/origin/b", git.origin_branch_fetch_step("b", "/m"))
 
 
 class _KillExecTarget(targets.Target):
@@ -1196,11 +1225,9 @@ class _KillExecTarget(targets.Target):
 
 
 class TestPidAliveIsTheOneAnswer(TargetsTest):
-    """shell.target_pid_alive (a bash round trip), record.of_target's own
-    closure and the drivers' own `kill -0` calls were three answers for "is
-    this pid alive in the target"; Target.pid_alive is the one now, and
-    cmd/stop, cmd/status, record.of_target and workspace.py (through it) all
-    ask it."""
+    """Target.pid_alive is the one answer for "is this pid alive in the
+    target": cmd/stop, cmd/status, record.of_target and workspace.py (through
+    it) all ask it."""
 
     def test_pid_alive_reads_kill_dash_0_true_false_or_no_answer(self):
         alive = _KillExecTarget(Result(0))
@@ -1217,7 +1244,90 @@ class TestPidAliveIsTheOneAnswer(TargetsTest):
         for cmd in ("stop", "status"):
             text = (REPO / "cmd" / cmd).read_text()
             self.assertIn(".pid_alive(n, pid, cap)", text, cmd)
-            self.assertNotIn("shell.target_pid_alive", text, cmd)
+
+
+class TestAMacHostReadsTheContainerStoreInThePodmanMachine(unittest.TestCase):
+    """On a macOS host the container store is inside the podman machine, so a command that runs here (`wk zed`)
+    reads a workspace's directory there; read on this host it was missing, and every workspace was `broken`."""
+
+    def test_a_finished_workspace_is_present_from_the_host(self):
+        from unittest import mock
+        fake = Fake("here")
+        fake.answer(["podman", "-c", "wk", "inspect"], out="running\n")
+        fake.answer(["podman", "machine", "ssh", "wk", "--"])
+        c = targets.Container("container", str(REPO), {"HOME": "/nonexistent"}, fake)
+        with mock.patch.object(targets.os, "uname", return_value=mock.Mock(sysname="Darwin")):
+            self.assertEqual("present", c.state("w"))
+        asked = [e[1][-1] for e in fake.effects if e[1][:4] == ("podman", "machine", "ssh", "wk")]
+        self.assertIn("test -d /var/lib/wk/ws/w", asked)
+
+    def test_a_command_in_a_container_is_entered_by_the_podman_machines_own_wk(self):
+        """The SDK's wkdev-enter is installed in the podman machine, not here: `wk push on` asked from this host
+        found no claude session to end, because every scan it ran exited 127."""
+        from unittest import mock
+        c = targets.Container("container", str(REPO), {"HOME": "/nonexistent"}, Fake("here"))
+        with mock.patch.object(targets.os, "uname", return_value=mock.Mock(sysname="Darwin")), \
+                mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
+            argv, _ = c.exec_argv("w", ["sh", "-c", "echo $0", "a b"])
+        self.assertEqual(["podman", "machine", "ssh", "wk", "--"], argv[:5])
+        self.assertIn("/opt/wk-tools/wk enter w -- sh -c 'echo $0' 'a b'", argv[5])
+        self.assertNotIn("WK_DRY_RUN", argv[5], "a read in a dry run is still a read; the far wk would refuse --dry-run")
+
+    def test_the_podman_machine_is_not_a_copy_path(self):
+        from wk.machine import PodmanVm
+        with self.assertRaises(NotImplementedError):
+            PodmanVm("wk", via=Fake()).copy_in("/a", "/b")
+
+
+class TestThePodmanMachineRecord(TargetsTest):
+    """`podman machine inspect`, read once as JSON: absent is None, and an answer it cannot read, or one naming no
+    way in, is refused rather than taken for a stopped machine or a fall back to `podman machine ssh`."""
+
+    def test_the_record_and_its_ssh(self):
+        self.assertIsNone(targets.podman_vm(self.fake, "wk"))
+        rec = {"Name": "wk", "State": "running", "SSHConfig": {"Port": 50123, "IdentityPath": "/k", "RemoteUsername": "core"}}
+        self.fake.answer(["podman", "machine", "inspect", "wk"], out=json.dumps([rec]))
+        self.assertEqual(targets.podman_vm(self.fake, "wk"), rec)
+        opts, dest = targets.podman_vm_route(rec)
+        self.assertEqual((opts[:4], dest), (["-p", "50123", "-i", "/k"], "core@127.0.0.1"))
+
+    def test_an_unreadable_answer_is_refused(self):
+        self.fake.answer(["podman", "machine", "inspect", "wk"], out="running\n")
+        err = self.refused(lambda: targets.podman_vm(self.fake, "wk"))
+        self.assertIn("'podman machine inspect wk' answered what this end cannot read", err)
+
+    def test_the_verbs_bash_asks(self):
+        rec = {"State": "running", "Resources": {"Memory": 8192}}
+        out = io.StringIO()
+        with mock.patch.object(targets, "podman_vm", return_value=rec), contextlib.redirect_stdout(out):
+            rc = targets.main(["podman-vm", "State", "Resources.Memory", "SSHConfig.Port"], env=self.env)
+        self.assertEqual((rc, out.getvalue()), (0, "running\n8192\n\n"))
+        with mock.patch.object(targets, "podman_vm", return_value=None):
+            self.assertEqual(targets.main(["podman-vm", "State"], env=self.env), 1)
+        env = dict(self.env, PATH=str(self.tmp / "bin"))
+        self.assertEqual(targets.main(["tart"], env=env), 1)
+        (self.tmp / "bin").mkdir()
+        (self.tmp / "bin" / "tart").write_text("")
+        (self.tmp / "bin" / "tart").chmod(0o755)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(targets.main(["tart"], env=env), 0)
+        self.assertEqual(out.getvalue(), os.path.realpath(self.tmp / "bin" / "tart") + "\n")
+
+    def test_the_named_form_prints_shell_assignments_wk_eval_can_read(self):
+        """A caller after several fields at once (host/macos/vmtools.sh, machine.sh) names each one, so a plain
+        `$(...)` split by line can never lose an empty trailing field the way an unnamed list would."""
+        rec = {"Resources": {"CPUs": 9, "Memory": 20480}, "SSHConfig": {"Port": 50123}}
+        out = io.StringIO()
+        with mock.patch.object(targets, "podman_vm", return_value=rec), contextlib.redirect_stdout(out):
+            rc = targets.main(["podman-vm", "_cpus=Resources.CPUs", "_disk=Resources.DiskSize"], env=self.env)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.getvalue(), "_cpus=9\n_disk=''\n")
+
+    def test_a_record_naming_no_way_in_is_refused(self):
+        err = self.refused(lambda: targets.podman_vm_route({"Name": "wk", "SSHConfig": {"Port": 0}}))
+        self.assertIn("podman names no ssh port, key and user for its machine 'wk'", err)
+        self.assertIn("./setup --stage machine", err)
 
 
 if __name__ == "__main__":

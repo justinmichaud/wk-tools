@@ -2,7 +2,7 @@
 
 Run the whole suite:      python3 tests/run.py -v      (wk selftest)
 Run one module:            python3 -m unittest tests.test_dispatcher -v
-A live test (requires_podman_vm and the other gates below) runs only when
+A live test (requires_container_target and the other gates below) runs only when
 the runner selected the live tier and its machine is up; it never starts
 one. Every test that touches real state cleans up after itself.
 """
@@ -35,7 +35,7 @@ REAL_MACHINES = REPO / "machines"
 NO_REGISTRY = tempfile.mkdtemp(prefix="wk-test-no-registry-")
 BLIND_FLEET = tempfile.mkdtemp(prefix="wk-test-blind-fleet-")
 for _conf in REAL_MACHINES.glob("*.conf"):
-    if not re.search(r"^KIND=(build|peer)$", _conf.read_text(), re.M):
+    if not re.search(r"^kind=(build|peer)$", _conf.read_text(), re.M):
         os.symlink(_conf, os.path.join(BLIND_FLEET, _conf.name))
 atexit.register(shutil.rmtree, NO_REGISTRY, True)
 atexit.register(shutil.rmtree, BLIND_FLEET, True)
@@ -48,16 +48,16 @@ for _entry in (_REAL_CONFIG.iterdir() if _REAL_CONFIG.is_dir() else ()):
         os.symlink(_entry, os.path.join(NO_CONFIG, _entry.name))
 atexit.register(shutil.rmtree, NO_CONFIG, True)
 FLEET_ENV = {"XDG_CONFIG_HOME": NO_CONFIG}
-# The name a fake target conf gives this host (WK_REMOTE_HOSTNAME) to be its far end.
+# The name a fake target conf gives this host (hostname=) to be its far end.
 THIS_HOST = subprocess.run(["hostname", "-s"], stdout=subprocess.PIPE, universal_newlines=True).stdout.strip().lower()
 
 
 def real_confs(*kinds):
     """This repo's machines/<name>.conf of those KINDs."""
     return sorted(p for p in REAL_MACHINES.glob("*.conf")
-                  if re.search(r"^KIND=(%s)$" % "|".join(kinds), p.read_text(), re.M))
+                  if re.search(r"^kind=(%s)$" % "|".join(kinds), p.read_text(), re.M))
 
-# Same reasoning, for wk_secrets_dir (lib/store.sh): on a macOS host it reads
+# Same reasoning, for the secrets directory (lib/wk/store.py): on a macOS host it reads
 # WK_HOST_SECRETS rather than $WK_STORE, so without a default of its own a
 # test would read and write the real ~/.config/wk/secrets. A test that wants
 # a populated store passes its own directory.
@@ -65,7 +65,7 @@ NO_SECRETS = tempfile.mkdtemp(prefix="wk-test-no-secrets-")
 atexit.register(shutil.rmtree, NO_SECRETS, True)
 
 # Same reasoning, for wk_state_dir (lib/common.sh): on a macOS workstation
-# that is where wk_record_dir sends a task record and where the mirror lives,
+# that is where a task record goes and where the mirror lives,
 # so a suite that merely popped XDG_STATE_HOME wrote into the real one -- 85
 # task records under ~/.local/state/wk/task, from tests about commands that
 # record a task. A test that wants this machine's own passes REAL_STATE.
@@ -80,7 +80,7 @@ atexit.register(shutil.rmtree, NO_STATE, True)
 # unverified. A test that wants answers points this at a stub of its own.
 NO_GITHUB = "http://127.0.0.1:1"
 
-# A tailnet that lists no peer, for stub_path: reach_offline (lib/reach.sh) then
+# A tailnet that lists no peer, for stub_path: Reach.offline (lib/wk/reach.py) then
 # refuses nothing and the stubbed `ssh` decides reachability, whatever the real
 # coordinator says about a board of that name.
 TAILSCALE_KNOWS_NOTHING = "echo '{}'\n"
@@ -93,7 +93,7 @@ os.environ["WK_LITELLM_API"] = NO_GITHUB
 os.environ["WK_BUGZILLA_API"] = NO_GITHUB
 
 # The tailnet keys are the two credentials whose paths are not under
-# wk_secrets_dir (lib/common.sh reads them from ~/.config/wk), so without these
+# Store.secrets_dir (lib/wk/store.py reads them from ~/.config/wk), so without these
 # a test would read the maintainer's real ones and put them to the tailnet.
 os.environ["WK_TS_AUTHKEY"] = os.path.join(NO_SECRETS, "tailscale-authkey")
 os.environ["WK_TS_API_SECRET"] = os.path.join(NO_SECRETS, "tailscale-api-key")
@@ -111,7 +111,8 @@ def dispatch_vars():
     return tuple(m.group(1).split())
 
 
-DISPATCH_VARS = dispatch_vars()
+# WK_CONFIG is the dispatcher's too (lib/wk/dispatch.py hands the build config over in it).
+DISPATCH_VARS = dispatch_vars() + ("WK_CONFIG",)
 
 # A shell started from `wk zed`/`wk enter` inherits those variables and keeps
 # them, so a test that inherits one is a test about whatever that person last
@@ -153,7 +154,7 @@ def _clean_env(extra=None, wk_root=False):
     WK_MACHINES_DIR or WK_HOST_SECRETS of its own.
 
     wk_root=True also sets WK_ROOT: every sourced lib in this tree that
-    needs it (image/profiles.sh, boot/machines.sh, ...) gets it for free
+    needs it (lib/common.sh, bench/*.sh, ...) gets it for free
     from lib/common.sh's own `WK_ROOT="${WK_ROOT:-$(cd ... )}"`, but a
     bash snippet that sources a lib *without* lib/common.sh first (as some
     of cmd/selftest's lifted checks do) needs it set explicitly.
@@ -181,7 +182,39 @@ def _clean_env(extra=None, wk_root=False):
         env["WK_ROOT"] = str(REPO)
     if extra:
         env.update(extra)
+    env["PATH"] = shimmed_path(env.get("PATH", ""))
     return env
+
+
+SYSTEM_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/opt/homebrew/bin")
+
+
+def _real_dirs():
+    shims = os.environ.get("WK_TEST_SHIMS", "")
+    given = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p and p != shims]
+    return {os.path.realpath(p) for p in given + list(SYSTEM_DIRS)}
+
+
+@functools.lru_cache(maxsize=None)
+def _shims_for(tools):
+    d = tempfile.mkdtemp(prefix="wk-test-shims-")
+    atexit.register(shutil.rmtree, d, True)
+    for tool in tools:
+        shutil.copy2(os.path.join(os.environ["WK_TEST_SHIMS"], tool), os.path.join(d, tool))
+    return d
+
+
+def shimmed_path(path):
+    """`path` with the runner's shim first for each machine tool it would find installed, so a test's own PATH --
+    one that leaves out the runner's shim directory, or names only system directories -- still reaches no machine;
+    a tool it lacks stays absent, and a test's own stub stays first."""
+    shims = os.environ.get("WK_TEST_SHIMS")
+    if not shims:
+        return path
+    real = _real_dirs()
+    reached = tuple(sorted(t for t in os.listdir(shims)
+                           if shutil.which(t, path=path) and os.path.realpath(os.path.dirname(shutil.which(t, path=path))) in real))
+    return _shims_for(reached) + os.pathsep + path if reached else path
 
 
 def clean_env(extra=None, wk_root=True):
@@ -216,6 +249,25 @@ def run(*args, env=None, check=False, timeout=120, input=None):
     return cp
 
 
+def as_dispatched(cmd, argv, env):
+    """argv as the dispatcher hands it to cmd/<cmd> (lib/wk/dispatch.py): the verb first, and a
+    declared build config -- `--config <c>`, or build's positional -- lifted into env's WK_CONFIG."""
+    sys.path.insert(0, str(REPO / "lib"))
+    from wk import decl, dispatch
+    env.pop("WK_CONFIG", None)
+    d = decl.Decl(REPO / "cmd" / cmd)
+    inv = dispatch.Invocation(cmd, d, list(argv))
+    args, joined, valued = inv.verb_first(), [], d.valued_opts()
+    while args:
+        a = args.pop(0)
+        if a == "--":
+            joined += [a] + args
+            break
+        joined.append(a + "=" + args.pop(0) if a in valued and args else a)
+    rest = inv.take_config(joined, env)
+    return dispatch.argv_split(d.opts_for(rest), rest)
+
+
 def run_here(*args, env=None, **kw):
     """`run`, as the machine that holds the store. WK_IN_VM=1 keeps the
     dispatcher from forwarding into the podman VM, and WK_STORE is a scratch
@@ -243,15 +295,6 @@ def bash(script, env=None, timeout=60, cwd=None):
         text=True,
         timeout=timeout,
     )
-
-
-def lock_bash(script, lock_dir, env=None, timeout=60):
-    """Run a bash script with lib/common.sh sourced and every lock under
-    `lock_dir`, so nothing it takes or breaks is this machine's."""
-    e = {"WK_LOCK_DIR": str(lock_dir)}
-    if env:
-        e.update(env)
-    return bash(f'. "{REPO}/lib/common.sh"; set +e\n{script}', env=e, timeout=timeout)
 
 
 def builds_on_the_books_env(tmp, *labels):
@@ -302,7 +345,7 @@ def repo_files():
 def shell_files():
     """Every shell file in the tree, by shebang or `.sh` suffix -- the same
     rule cmd/selftest's shell_files() uses, and for the same reason: most of
-    what bash loads here (lib/, boot/, targets/, image/) is sourced and has
+    what bash loads here (lib/, host/, bench/, image/) is sourced and has
     no shebang."""
     out = []
     for p in repo_files():
@@ -321,7 +364,7 @@ def shell_files():
 
 def assert_guest_start_converges(case, step):
     """A guest start converges it through one `Guest.converge` over `lib/wk/guest.py`'s STEPS, from both arms --
-    the guest that was already running and the one this start booted. `step` names it as targets/vm.sh did
+    the guest that was already running and the one this start booted. `step` names it as the bash guest driver did
     (`_set_guest_egress "$name" "$ip"`): the step is in STEPS once, and `start` converges once, after both arms."""
     import inspect
     sys.path.insert(0, str(REPO / "lib"))
@@ -447,10 +490,9 @@ def glob_bait(patterns):
 def podman_vm_running(machine="wk"):
     try:
         cp = subprocess.run(
-            ["podman", "machine", "inspect", machine, "--format", "{{.State}}"],
-            capture_output=True,
-            text=True,
-            timeout=15,
+            [sys.executable, "-m", "wk.targets", "podman-vm", "State"],
+            capture_output=True, text=True, timeout=15,
+            env=dict(os.environ, PYTHONPATH=str(REPO / "lib"), WK_MACHINE=machine),
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
@@ -477,6 +519,11 @@ def owed(reason):
         test.wk_owed = reason
         return test
     return mark
+
+
+def requires(need, *args):
+    """A live gate of a test module's own: `need(*args)` is the reason to skip, or nothing."""
+    return _live(need, *args)
 
 
 def _live(need, *args):
@@ -514,12 +561,6 @@ def requires_container_target():
     return _live(_needs_container_target)
 
 
-def requires_podman_vm(machine="wk"):
-    """Gate for a test that needs a real container workspace: the podman VM
-    this repo drives must already be up, and is never started here."""
-    return _live(_needs_podman_vm, machine)
-
-
 def requires_machine(name, timeout=5):
     """Gate for a test that reaches a configured machine over ssh: it never
     provisions, reboots or otherwise mutates the machine, and skips rather
@@ -527,24 +568,18 @@ def requires_machine(name, timeout=5):
     return _live(_needs_machine, name, timeout)
 
 
+def container_target_missing():
+    """Why this machine has no real container target to test against, or None."""
+    if sys.platform == "darwin":
+        return None if podman_vm_running("wk") else "podman machine 'wk' is not running"
+    return None if shutil.which("podman") else "podman is not installed"
+
+
 @functools.lru_cache(maxsize=None)
 def _needs_container_target():
     if not live_selected():
         return "live tier not selected: needs the container target"
-    if sys.platform == "darwin":
-        return _needs_podman_vm("wk")
-    if not shutil.which("podman"):
-        return "podman is not installed"
-    return _build_in_the_way()
-
-
-@functools.lru_cache(maxsize=None)
-def _needs_podman_vm(machine):
-    if not live_selected():
-        return "live tier not selected: needs the podman VM"
-    if not podman_vm_running(machine):
-        return f"podman machine '{machine}' is not running"
-    return _build_in_the_way()
+    return container_target_missing() or _build_in_the_way()
 
 
 @functools.lru_cache(maxsize=None)
@@ -570,8 +605,8 @@ def _build_in_the_way():
 
 
 # wk_state_dir (lib/common.sh), spelled for the shell that reads the records.
-# A record whose `pid:` holder is gone is a killed build (lib/resources.sh's
-# _build_holder_alive); any other holder is kept, since it cannot be read from here.
+# A record whose `pid:` holder is gone is a killed build (lib/wk/build.py's
+# holder_alive); any other holder is kept, since it cannot be read from here.
 _BUILD_RECORDS = r'''for f in "${XDG_STATE_HOME:-$HOME/.local/state}"/wk/builds/*; do
     [ -f "$f" ] || continue
     h=$(sed -n 's/^holder=//p' "$f")
@@ -582,15 +617,11 @@ done; true'''
 
 def builds_on_the_books():
     """The builds recorded where a container workspace is really built: inside
-    the podman VM on macOS, on this machine on Linux (build_record,
-    lib/resources.sh). Read and never pruned -- `builds_running` deletes the
+    the podman VM on macOS, on this machine on Linux (Budget.record,
+    lib/wk/resources.py). Read and never pruned -- `builds_running` deletes the
     record of a holder it cannot see, and a reading may not mutate what it
     reports on -- so a dead holder's record is skipped, not removed."""
-    if sys.platform == "darwin":
-        out = podman_vm_ssh(_BUILD_RECORDS).stdout
-    else:
-        out = subprocess.run(["bash", "-c", _BUILD_RECORDS], capture_output=True,
-                             text=True, timeout=60).stdout
+    out = container_side(_BUILD_RECORDS).stdout
     return [l.split("=", 1)[1] for l in out.splitlines() if l.startswith("label=")]
 
 
@@ -611,8 +642,7 @@ def machine_reachable(name, timeout=5):
 def stub_path(scripts):
     """A temp directory, first on PATH, holding one fake executable per
     `{name: body}` entry -- the technique 'un-managed clobbering' and the
-    disk-logic tests use to drive real driver code (targets/container.sh,
-    targets/vm.sh, boot/disk.sh) against a filesystem-only fake of
+    disk-logic tests use to drive real driver code against a filesystem-only fake of
     `podman`/`tart`/`sfdisk`/`lsblk` rather than real hardware or a real VM.
     `body` is wrapped in a `#!/bin/sh` shebang unless it supplies its own.
     Yields the bin directory; the caller puts it first on PATH, e.g.
@@ -629,17 +659,22 @@ def stub_path(scripts):
         shutil.rmtree(d, ignore_errors=True)
 
 
-def podman_vm_ssh(command, machine="wk", timeout=60):
-    """Run one command inside the podman VM this repo drives -- the same
-    machine `detach_run`'s driver process lives on once `wk new --target
-    container` forwards there (lib/target.sh's forward_to_vm execs the whole
-    command over `podman machine ssh`). For a test that has to reach in and
-    kill a real driver pid, or read its store, without forwarding a second
-    whole `wk` command to do it."""
-    return subprocess.run(
-        ["podman", "machine", "ssh", machine, "--", command],
-        capture_output=True, text=True, timeout=timeout,
-    )
+def container_side(command, timeout=60):
+    """Run one shell command where the container target keeps its store and its
+    drivers: inside the podman VM on macOS, on this host on Linux. For a test
+    that has to kill a real driver pid, or read the store, without forwarding
+    a second whole `wk` command to do it."""
+    argv = ["podman", "machine", "ssh", "wk", "--", command] if sys.platform == "darwin" else ["sh", "-c", command]
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+
+def container_store():
+    """The container target's store as container_side sees it."""
+    if sys.platform == "darwin":
+        return "/var/lib/wk"
+    sys.path.insert(0, str(REPO / "lib"))
+    from wk.store import Store
+    return Store(_clean_env()).root()
 
 
 class WkTest(unittest.TestCase):

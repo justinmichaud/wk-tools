@@ -2,7 +2,7 @@
 #
 # wk session on [--bmc|--mirror] | gdm [--bmc|--mirror] | off | status -- a real graphical session for benchmark runs, or a real desktop, on real hardware
 #
-# wk: where=host name=none group=hosts needs quiesce-helper takes=1 dryrun on,gdm,off
+# wk: where=host name=none group=hosts needs quiesce-helper takes=1 verbs=on,gdm,off,status default=status dryrun on,gdm,off
 # wk: readonly status
 # wk: sub status needs=
 # wk: sub on,gdm opts=--bmc,--mirror
@@ -52,16 +52,10 @@ from wk.act import Refused, die  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import Local, is_linux  # noqa: E402
 
-USAGE = ("usage: wk session on [--bmc] | gdm [--bmc] | off | status -- a real graphical session for benchmark runs, "
-         "or a real desktop, on real hardware.; see wk session -h")
-
 
 def parse(argv):
     args = decl.Args(decl.Decl(__file__), argv)
-    action = args.positionals[0] if args.positionals else "status"
-    if len(args.positionals) > 1 or action not in ("on", "gdm", "off", "status"):
-        die(USAGE)
-    return action, args.flag("--bmc") or args.flag("--mirror")
+    return args.positionals[0], args.flag("--bmc") or args.flag("--mirror")
 
 
 def main(argv):

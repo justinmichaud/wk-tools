@@ -20,7 +20,7 @@ from tests.test_bench_pipeline import BenchTest, World
 
 from wk.act import Refused  # noqa: E402
 
-BENCH = REPO / "lib" / "bench-arms.sh"
+BENCH = [REPO / "cmd" / "bench"] + sorted((REPO / "lib" / "wk" / "bench").glob("*.py"))
 BUILD_PY = REPO / "lib" / "wk" / "build.py"
 
 
@@ -155,7 +155,7 @@ class TestBenchBrowserRemoved(WkTest):
     implementation per behaviour". `--browser` alone now sets it."""
 
     def test_no_env_var_fallback_remains_in_the_source(self):
-        text = BENCH.read_text()
+        text = "".join(p.read_text() for p in BENCH)
         self.assertNotIn("WK_BENCH_BROWSER", text, "WK_BENCH_BROWSER should be fully removed, not just undocumented")
 
     def test_browser_flag_still_documented_and_wired(self):

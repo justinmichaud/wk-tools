@@ -3,16 +3,19 @@ names them (container, vm on a macOS host, this machine inside a workspace,
 and every build machine and peer in `machines/`); each driver answers the same
 contract over a `Machine`."""
 
+import argparse
+import hashlib
 import json
 import os
 import pwd
 import re
 import shlex
+import shutil
 import stat
 import sys
 
-from wk import act, buildconf, fleet, git, guest, record, secrets, shell, sshalias, tools
-from wk.machine import TIMED_OUT, Local, Result, Ssh
+from wk import act, buildconf, fleet, git, guest, images, kv, record, secrets, sshalias, tools
+from wk.machine import TIMED_OUT, Local, PodmanVm, Result, Ssh, isolated_module, lib_argv
 from wk.resources import Resources, workspace_marker_path
 from wk.store import Store
 
@@ -23,8 +26,10 @@ FIRSTRUN_MARKER = ".wk-firstrun-complete"   # TODO: drop once no pre-marker work
 STATES_NOT_THERE = ("absent", "creating", "broken", "unreachable")
 READY_TIMEOUT = 300
 WK_FLAGS = ("WK_DEBUG", "WK_QUIET", "WK_YES", "WK_FORCE", "WK_DRY_RUN", "WK_NO_DELEGATE")
-WK_CARRIED = ("WK_ROW_LABEL", "WK_CONFIG", "WK_ZED_PUBKEY")
+WK_CARRIED = ("WK_ROW_LABEL", "WK_ZED_PUBKEY")
 GUEST_MIRROR = "/Volumes/My Shared Files/mirror/WebKit.git"   # where macOS automounts the tart share `mirror`
+TOOLS = "/opt/wk-tools"
+BRIDGE = TOOLS + "/container/proxy/ensure-bridge.sh"
 PROXY = "http://127.0.0.1:3128"
 NO_PROXY = "localhost,127.0.0.1,::1"
 MOTD_REFERENCE = '''
@@ -62,38 +67,22 @@ def image_base(root, ws):
     for prefix in ("yocto-", "buildroot-"):
         if ws.startswith(prefix):
             conf = os.path.join(root, "image", "configs", ws[len(prefix):] + ".conf")
-            return read_conf(conf).get("CFG_RELEASE") or None
+            if not os.path.isfile(conf):
+                return None
+            return kv.conf_file(conf).get("CFG_RELEASE") or None
     return None
 
 
 def git_base(target, ws):
     if target.info(ws) in STATES_NOT_THERE:
         return None
-    r = target.exec(ws, ["sh", "-c", "cd %s 2>/dev/null || exit 0\n%s" % (shell.sh_quote(target.src(ws)), UPSTREAM_LINE)])
+    r = target.exec(ws, ["sh", "-c", "cd %s 2>/dev/null || exit 0\n%s" % (shlex.quote(target.src(ws)), UPSTREAM_LINE)])
     out = r.out.replace("\r", "").strip().splitlines()
     return out[-1] if r.ok and out else None
 
 
-def read_conf(path):
-    """KEY=value shell assignments, one per line, quotes stripped."""
-    out = {}
-    try:
-        with open(path, errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, _, v = line.partition("=")
-                k = k.strip()
-                if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k):
-                    continue
-                v = v.strip()
-                if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-                    v = v[1:-1]
-                out[k] = v
-    except OSError:
-        pass
-    return out
+def remote_marker_path(env):
+    return env.get("WK_REMOTE_MARKER") or os.path.join(env.get("HOME", os.path.expanduser("~")), ".wk-remote")
 
 
 def session_socket_path(env):
@@ -109,9 +98,8 @@ def session_socket_present(env):
 
 def zed_cli(machine):
     """The `zed` cli to exec into: on PATH, or the binary a drag-installed Zed.app carries with no PATH symlink."""
-    r = machine.run(["which", "zed"])
-    if r.ok and r.out.strip():
-        return r.out.strip()
+    if machine.have("zed"):
+        return "zed"
     app = "/Applications/Zed.app/Contents/MacOS/cli"
     return app if machine.run(["test", "-x", app]).ok else None
 
@@ -141,6 +129,35 @@ def zed_key_pub(machine, env):
         return None
 
 
+# A target conf's keys and the WK_* variable each sets; a conf value wins over the environment's.
+CONF_ENV = {"driver": "WK_TARGET_KIND", "host": "WK_REMOTE_HOST", "hostname": "WK_REMOTE_HOSTNAME", "root": "WK_REMOTE_ROOT",
+            "reference": "WK_REMOTE_REFERENCE", "local": "WK_REMOTE_LOCAL", "peer": "WK_REMOTE_PEER", "tools": "WK_REMOTE_TOOLS",
+            "store": "WK_REMOTE_STORE", "cmake": "WK_TARGET_CMAKE", "libcxx": "WK_TARGET_LIBCXX", "wpe": "WK_TARGET_WPE",
+            "build_args": "WK_BUILD_ARGS"}
+PER_CONFIG = ("cmake", "build_args")   # also `<key>_<config>`, the config's dashes as underscores: one build config's own
+RETIRED = {"max_jobs": "the job count is derived per build from what that machine has free. Delete the line."}
+
+
+def conf_key(k):
+    if k in CONF_ENV:
+        return CONF_ENV[k]
+    for stem in PER_CONFIG:
+        cfg = k[len(stem) + 1:]
+        if k.startswith(stem + "_") and cfg.replace("_", "-") in buildconf.CONFIGS:
+            return "%s_%s" % (CONF_ENV[stem], cfg)
+    return None
+
+
+def conf_env(conf, path):
+    for k in sorted(conf):
+        if k in RETIRED:
+            raise LookupError("%s: %s is not read: %s" % (path, k, RETIRED[k]))
+        if k != "kind" and conf_key(k) is None:
+            raise LookupError("%s: %s is not a key a build machine's conf takes (%s, or %s_<config>)"
+                              % (path, k, ", ".join(CONF_ENV), "|".join(PER_CONFIG)))
+    return {conf_key(k): v for k, v in conf.items() if k != "kind"}
+
+
 class Registry:
     def __init__(self, root, env=None, machine=None):
         self.root = str(root)
@@ -160,7 +177,7 @@ class Registry:
             conf = self.fleet.load(name)
         except fleet.ConfError as e:
             raise LookupError(str(e))
-        return conf if conf and conf["KIND"] in fleet.TARGET_KINDS else None
+        return conf if conf and conf["kind"] in fleet.TARGET_KINDS else None
 
     def kind(self, name):
         if name in BUILTIN:
@@ -169,7 +186,7 @@ class Registry:
             conf = self._conf(name)
         except LookupError:
             return None
-        return None if conf is None else conf.get("WK_TARGET_KIND") or "remote"
+        return None if conf is None else conf.get("driver") or "remote"
 
     def marker_path(self):
         return workspace_marker_path(self.env)
@@ -178,16 +195,16 @@ class Registry:
         return os.path.isfile(self.marker_path())
 
     def workspace_name(self):
-        return read_conf(self.marker_path()).get("name", "")
+        return kv.kv_file(self.marker_path()).get("name", "")
 
     def remote_marker_path(self):
-        return self.env.get("WK_REMOTE_MARKER") or os.path.join(self.env.get("HOME", os.path.expanduser("~")), ".wk-remote")
+        return remote_marker_path(self.env)
 
     def in_remote_host(self):
         return os.path.isfile(self.remote_marker_path())
 
     def remote_marker_field(self, key):
-        return read_conf(self.remote_marker_path()).get(key, "")
+        return kv.kv_file(self.remote_marker_path()).get(key, "")
 
     def self_target(self):
         if not self.in_remote_host():
@@ -221,8 +238,17 @@ class Registry:
     def machines(self):
         return [t for t in self.all() if t not in ("container", "vm", "local")]
 
+    def is_here(self, name):
+        """A built-in, or a machine's conf naming this one (`local=1`): asked without ssh."""
+        if name not in self.machines():
+            return True
+        try:
+            return getattr(self.load(name), "is_local", False)
+        except LookupError:
+            return False
+
     def here(self):
-        return [t for t in self.all() if t not in self.machines()]
+        return [t for t in self.all() if self.is_here(t)]
 
     def peer_workstations(self):
         """The peers whose own wk answers, each asked once."""
@@ -277,12 +303,14 @@ class Registry:
 
     def locate(self, ws):
         """Every target that answers for `ws`; the machines are asked at once."""
-        hits = [t for t in self.here() if self.on_target(t, ws)]
-        if hits or not self.machines():
+        here = self.here()
+        hits = [t for t in here if self.on_target(t, ws)]
+        far = [t for t in self.all() if t not in here]
+        if hits or not far:
             return hits
         from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=len(self.machines())) as pool:
-            answers = list(pool.map(lambda m: (m, self._asked(m, ws)), self.machines()))
+        with ThreadPoolExecutor(max_workers=len(far)) as pool:
+            answers = list(pool.map(lambda m: (m, self._asked(m, ws)), far))
         return [m for m, hit in answers if hit]
 
     def exists_on(self, t, ws):
@@ -320,12 +348,12 @@ class Registry:
             raise LookupError(
                 "unknown target '%s'.\n    The built-in ones are container, vm, remote and local.%s\n\n"
                 "    Anything else is a machine, and needs a conf -- in the registry, so every\n"
-                "    device gets it:\n\n        %s\n            KIND=build\n            WK_REMOTE_HOST=%s      # an ssh destination that already works\n"
-                "            WK_REMOTE_ROOT=/home/you/wk\n\n    'wk machine setup %s' writes it for you."
+                "    device gets it:\n\n        %s\n            kind=build\n            host=%s      # an ssh destination that already works\n"
+                "            root=/home/you/wk\n\n    'wk machine setup %s' writes it for you."
                 % (name, ("\n    The machines here: " + names) if names else "", self.conf_path(name), name, name))
-        conf = {} if name in BUILTIN else {k: v for k, v in self._conf(name).items() if k != "KIND"}
         env = dict(self.env)
-        env.update(conf)
+        if name not in BUILTIN:
+            env.update(conf_env(self._conf(name), self.conf_path(name)))
         if kind == "container":
             return Container(name, self.root, env, self.machine)
         if kind == "vm":
@@ -348,7 +376,7 @@ class Registry:
 def path_kind_probe(path):
     """The one `path_kind` shell test; Container, Vm and Remote each run it where the workspace lives."""
     return "if [ -d %s ]; then echo dir; elif [ -e %s ]; then echo file; else echo absent; fi" \
-        % ((shell.sh_quote(path),) * 2)
+        % ((shlex.quote(path),) * 2)
 
 
 def path_kind_result(r):
@@ -393,7 +421,7 @@ class Target:
         return "/src/WebKit"
 
     def tools(self, ws):
-        return "/opt/wk-tools"
+        return TOOLS
 
     def mirror_dir(self):
         return ""
@@ -417,7 +445,7 @@ class Target:
         return True
 
     def exec(self, ws, argv, tty=False, timeout=None):
-        raise NotImplementedError
+        return self.machine.run(self.exec_argv(ws, argv, tty)[0], timeout=timeout)
 
     def pid_alive(self, ws, pid, cap=None):
         """True, False or None (no answer within cap seconds) for a pid inside the workspace -- the one "is it alive in the target" answer."""
@@ -476,7 +504,7 @@ class Target:
         pre, wk, env = self.wk_far(env)
         pre += "".join("%s=1 " % v for v in WK_FLAGS if env.get(v))
         pre += "".join("%s=%s " % (v, shlex.quote(env[v])) for v in WK_CARRIED if env.get(v))
-        return "%s%s %s" % (pre, shlex.quote(wk), " ".join(shlex.quote(a) for a in args))
+        return "%s%s %s" % (pre, shlex.quote(wk), shlex.join(args))
 
     def branch(self, ws):
         if self.info(ws) in STATES_NOT_THERE:
@@ -596,15 +624,27 @@ class Target:
 
     def ready(self, ws, clock, timeout=None):
         """Whether the workspace came to exist within the timeout, `info` asked once a second; absent and unreachable do not improve with waiting."""
-        for _ in range(self.ready_timeout(timeout)):
-            st = self.info(ws)
-            if st != "creating":
-                return st not in ("absent", "unreachable")
-            clock.sleep(1)
-        return False
+        seen = {}
+
+        def settled():
+            seen["st"] = self.info(ws)
+            return seen["st"] != "creating"
+        return clock.wait_until(settled, self.ready_timeout(timeout), 1) and seen["st"] not in ("absent", "unreachable")
 
     def destroy(self, ws):
         raise NotImplementedError
+
+    def task_store(self):
+        return None
+
+    def results(self, ws):
+        return self.store_machine, os.path.join(self.store.ws_dir(ws), "bench")
+
+    def ccache_maxsize(self):
+        return self.env.get("WK_CCACHE_MAXSIZE") or "40G"
+
+    def ccache_conf(self):
+        return "max_size = %s\n" % self.ccache_maxsize()
 
     def ensure_dir_mode(self, path, mode):
         self.machine.mkdir(path)
@@ -616,7 +656,7 @@ class Target:
 
     def act_exec(self, ws, argv):
         if act.dry_run():
-            sys.stderr.write("would run in %s: %s\n" % (ws, " ".join(shlex.quote(a) for a in argv)))
+            sys.stderr.write("would run in %s: %s\n" % (ws, shlex.join(argv)))
             return Result(0)
         return self.exec(ws, argv)
 
@@ -696,8 +736,46 @@ def show(r):
     sys.stderr.write(r.out + r.err)
 
 
+TART_APP = ".local/share/tart/tart.app/Contents/MacOS/tart"
+
+
+def tart_path(env):
+    """On PATH, or in ~/.local/bin, which README.md's Setup links and ssh's PATH lacks; resolved into the bundle, whose entitlement it needs."""
+    dirs = [d for d in env.get("PATH", "").split(os.pathsep) if d]
+    found = shutil.which("tart", path=os.pathsep.join(dirs + [os.path.join(env.get("HOME") or os.path.expanduser("~"), ".local", "bin")]))
+    return os.path.realpath(found) if found else None
+
+
 def arch_image(arch):
     return buildconf.IMAGE_ARMHF if arch == "armhf" else ""
+
+
+def podman_vm(machine, name, timeout=None):
+    """`podman machine inspect`'s record of `name` (State, Resources, SSHConfig), or None where podman knows no such machine."""
+    r = machine.run(["podman", "machine", "inspect", name], timeout=timeout)
+    if not r.ok:
+        return None
+    try:
+        return json.loads(r.out)[0]
+    except (ValueError, IndexError, KeyError) as e:
+        act.die("'podman machine inspect %s' answered what this end cannot read (%s)" % (name, e))
+
+
+def podman_vm_field(rec, path):
+    v = rec
+    for k in path.split("."):
+        v = v.get(k, "") if isinstance(v, dict) else ""
+    return v
+
+
+def podman_vm_route(rec):
+    """(opts, dest) for ssh straight into the machine `rec` describes: `podman machine ssh` carries no terminal and no socket forward."""
+    c = rec.get("SSHConfig") or {}
+    if not (c.get("Port") and c.get("IdentityPath") and c.get("RemoteUsername")):
+        act.die("podman names no ssh port, key and user for its machine '%s', so nothing can reach it.\n"
+                "    ./setup --stage machine makes it again" % rec.get("Name", "?"))
+    return (["-p", str(c["Port"]), "-i", c["IdentityPath"], "-o", "StrictHostKeyChecking=no",
+             "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR"], "%s@127.0.0.1" % c["RemoteUsername"])
 
 
 class Container(Target):
@@ -714,6 +792,13 @@ class Container(Target):
 
     def egress_filtered(self, ws):
         return True
+
+    @property
+    def store_machine(self):
+        return self.machine if self.is_here() else PodmanVm(self.podman_machine(), via=self.machine)
+
+    def task_store(self):
+        return None if self.is_here() else (self.store_machine, self.store.root())
 
     def agent_sock(self):
         return "/run/wk/ssh-agent.sock"
@@ -765,7 +850,7 @@ class Container(Target):
     def arch(self, ws):
         path = os.path.join(self.store.ws_dir(ws), "arch")
         try:
-            return self.machine.read(path).strip() or "native"
+            return self.store_machine.read(path).strip() or "native"
         except OSError:
             return "native"
 
@@ -779,8 +864,8 @@ class Container(Target):
         return rows
 
     def created(self, ws):
-        home = os.path.join(self.store.ws_dir(ws), "home")
-        return self.machine.exists(os.path.join(home, READY_MARKER)) or self.machine.exists(os.path.join(home, FIRSTRUN_MARKER))
+        home, m = os.path.join(self.store.ws_dir(ws), "home"), self.store_machine
+        return m.exists(os.path.join(home, READY_MARKER)) or m.exists(os.path.join(home, FIRSTRUN_MARKER))
 
     def info(self, ws):
         r = self.machine.run(self.podman() + ["inspect", self.ctr(ws), "--format", "{{.State.Status}}"])
@@ -806,14 +891,14 @@ class Container(Target):
             return ref[len("ref: "):]
         return "detached %s" % ref[:10]
 
-    def exec(self, ws, argv, tty=False, timeout=None):
-        return self.machine.run(self.exec_argv(ws, argv, tty)[0], timeout=timeout)
-
     def exec_argv(self, ws, argv, tty=False):
+        if not self.is_here():
+            env = {k: v for k, v in os.environ.items() if k != "WK_DRY_RUN"}
+            return ["podman", "machine", "ssh", self.podman_machine(), "--", self.wk_cmd(["enter", ws, "--", *argv], env)], None
         cmd = self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", "wkdev-enter"), "--quiet", "--name", self.ctr(ws)]
         if not tty:
             cmd.append("--no-tty")
-        return cmd + ["--exec", "--", "/opt/wk-tools/container/proxy/ensure-bridge.sh", *argv], None
+        return cmd + ["--exec", "--", BRIDGE, *argv], None
 
     def is_here(self):
         return bool(self.env.get("WK_IN_VM")) or os.uname().sysname != "Darwin"
@@ -821,8 +906,8 @@ class Container(Target):
     def machine_state(self):
         """running | stopped | absent | ...: podman's own word for the machine, asked once per Container."""
         if not hasattr(self, "_machine_state"):
-            r = self.machine.run(["podman", "machine", "inspect", self.podman_machine(), "--format", "{{.State}}"])
-            self._machine_state = r.out.strip() if r.ok else "absent"
+            rec = podman_vm(self.machine, self.podman_machine())
+            self._machine_state = (rec.get("State") or "absent") if rec else "absent"
         return self._machine_state
 
     def far_side(self):
@@ -835,7 +920,7 @@ class Container(Target):
 
     def wk_far(self, env):
         """The VM is part of this machine, so its records name this host as itself."""
-        return "WK_IN_VM=1 WK_HOST_SELF=1 ", "/opt/wk-tools/wk", dict(env, WK_ROW_LABEL=env.get("WK_ROW_LABEL") or record.machine_name(env, self.machine))
+        return "WK_IN_VM=1 WK_HOST_SELF=1 ", TOOLS + "/wk", dict(env, WK_ROW_LABEL=env.get("WK_ROW_LABEL") or record.machine_name(env, self.machine))
 
     def wk(self, *args, env=None, quiet=False):
         env = os.environ if env is None else env
@@ -843,6 +928,7 @@ class Container(Target):
         return r.rc, r.out
 
     def start(self, ws):
+        secrets.Secrets(self.root, self.env, self.machine).pat_converge_machine()
         r = self.machine.act_run(self.podman() + ["start", self.ctr(ws)])
         return r.ok
 
@@ -851,7 +937,7 @@ class Container(Target):
         return r.ok
 
     def tools_src(self):
-        return self.env.get("WK_TOOLS_SRC") or ("/opt/wk-tools" if self.env.get("WK_IN_VM") else self.root)
+        return self.env.get("WK_TOOLS_SRC") or (TOOLS if self.env.get("WK_IN_VM") else self.root)
 
     def sync(self, named=False):
         act.info("nothing to copy: a container bind-mounts this checkout (%s) at\n"
@@ -863,9 +949,6 @@ class Container(Target):
     def runtime_dir(self):
         return os.path.join(self.env.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid(), "wk")
 
-    def ccache_maxsize(self):
-        return self.env.get("WK_CCACHE_MAXSIZE") or "40G"
-
     def exists(self, ws):
         return self.machine.run(self.podman() + ["container", "exists", self.ctr(ws)]).ok
 
@@ -876,14 +959,13 @@ class Container(Target):
             self.machine.mkdir(os.path.join(root, d) if d else root)
         conf = os.path.join(root, "cache", "ccache", "ccache.conf")
         if not self.machine.exists(conf):
-            self.machine.write(conf, shell.ccache_conf(self.root, self.env))
+            self.machine.write(conf, self.ccache_conf())
         for d in (self.store.secrets_dir(), self.store.agent_rw_dir()):
             self.ensure_dir_mode(d, "0700")
         secrets.Secrets(self.root, self.env, self.machine).store_publish()
 
     def sdk_refresh(self):
-        r = self.machine.act_run(["bash", os.path.join(self.root, "container", "sdk-refresh.sh"), self.sdk()])
-        show(r)
+        r = self.machine.act_run(["bash", os.path.join(self.root, "container", "sdk-refresh.sh"), self.sdk()], stream=True)
         if not r.ok:
             act.die("refreshing the webkit-container-sdk checkout failed (above); wkdev-create\n"
                     "    would otherwise ask for whatever image tag was current when this checkout\n    was last fetched.")
@@ -905,30 +987,32 @@ class Container(Target):
             flags += ["--env", "%s=%s" % (v, NO_PROXY)]
         flags += ["--env", "WAYLAND_DISPLAY=/run/wk/display/wayland-0"]
         if buildconf.arch_has_gpu(arch):
-            flags += shell.gpu_flags(self.root, self.machine)
+            r = self.machine.run(lib_argv(self.root, "host/linux/gpu.sh", "gpu_flags"))
+            sys.stderr.write(r.err)
+            flags += r.out.split() if r.ok else []
         return flags
 
     def create_flags(self, ws, base, arch):
         ws_dir, store, mirror = self.store.ws_dir(ws), self.store.root(), self.store.mirror()
         mirror_dir = os.path.dirname(mirror)
         res = Resources(self.machine, self.env, self.os())
-        volumes = [("%s:/opt/wk-tools:ro" % self.tools_src()), "%s:%s:ro" % (mirror_dir, mirror_dir)]
+        volumes = ["%s:%s:ro" % (self.tools_src(), TOOLS), "%s:%s:ro" % (mirror_dir, mirror_dir)]
         flags = ["--volume", volumes[0], "--volume", volumes[1], "--env", "WK_MIRROR=%s" % mirror,
                  "--volume", "%s:/src/WebKit:O,upperdir=%s/changes,workdir=%s/overlay-work" % (self.store.base_path(base), ws_dir, ws_dir),
                  "--volume", "%s/build:/src/WebKit/WebKitBuild" % ws_dir,
                  "--volume", "%s:/var/lib/wk/ws/%s" % (ws_dir, ws)]
         for sub, dest in (("cache/ccache", "/ccache"), ("cache/yocto", "/cache/yocto"), ("cache/buildroot", "/cache/buildroot"),
-                          ("cache/bench", "/cache/bench"), ("bench", "/bench"), ("skills", "/skills")):
+                          ("cache/bench", "/cache/bench"), ("skills", "/skills")):
             flags += ["--volume", "%s/%s:%s" % (store, sub, dest)]
         flags += ["--volume", "%s:/secrets:ro" % self.store.secrets_view_dir("container"),
                   "--volume", "%s/agent-rw:/agent-rw" % store,
                   "--memory", "%dm" % res.envelope_mem_mb(), "--cpus", str(res.envelope_cores())]
-        for kv in ("CCACHE_DIR=/ccache", "CCACHE_MAXSIZE=%s" % self.ccache_maxsize(), "CCACHE_BASEDIR=/src/WebKit",
+        for pair in ("CCACHE_DIR=/ccache", "CCACHE_MAXSIZE=%s" % self.ccache_maxsize(), "CCACHE_BASEDIR=/src/WebKit",
                    "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime", "CCACHE_PCH_EXTSUM=true",
                    "CCACHE_DEPEND=true", "CCACHE_NOHASHDIR=true", "DL_DIR=/cache/yocto/downloads", "SSTATE_DIR=/cache/yocto/sstate",
                    "BR2_DL_DIR=/cache/buildroot/dl", "BR2_CCACHE_DIR=/cache/buildroot/ccache", "WK_WORKSPACE=%s" % ws,
                    "WK_ARCH=%s" % arch, "WKDEV_OFFLINE=1", "WK_LOCAL_STORE=/var/lib/wk"):
-            flags += ["--env", kv]
+            flags += ["--env", pair]
         return flags + self.sandbox_flags(arch)
 
     def create_argv(self, ws, base, arch):
@@ -956,8 +1040,7 @@ class Container(Target):
         if self.env.get("WK_SDK_IMAGE"):
             act.info("using workspace image %s (WK_SDK_IMAGE)" % self.env["WK_SDK_IMAGE"])
         act.info("creating workspace '%s' from base %s (rootless-proxy, %s)" % (ws, base, arch))
-        r = self.machine.act_run(argv)
-        show(r)
+        r = self.machine.act_run(argv, stream=True)
         if not r.ok:
             act.die("wkdev-create failed for '%s' (exit %d); what it said is above" % (ws, r.rc), r.rc)
         r = self.machine.act_run(["install", "-m", "0755", os.path.join(self.root, "container", "firstrun.sh"),
@@ -969,12 +1052,8 @@ class Container(Target):
         self.machine.write(os.path.join(ws_dir, "base-id"), base + "\n")
 
     def ready(self, ws, clock, timeout=None):
-        for _ in range(self.ready_timeout(timeout)):
-            if self.created(ws):
-                return True
-            if not self.exists(ws):
-                break
-            clock.sleep(1)
+        if clock.wait_until(lambda: self.created(ws) or not self.exists(ws), self.ready_timeout(timeout), 1) and self.created(ws):
+            return True
         act.warn("initialisation did not complete; last output from the container:")
         r = self.machine.run(self.podman() + ["logs", self.ctr(ws)])
         for line in [l for l in (r.out + r.err).splitlines() if l.strip()][-8:]:
@@ -1008,18 +1087,19 @@ class Container(Target):
         bridge, `git-webkit pr` reports a locked macOS Keychain instead of a missing token."""
         return (self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", "wkdev-enter"),
                                   "--name", self.ctr(ws), "--exec", "--",
-                                  "/opt/wk-tools/container/proxy/ensure-bridge.sh",
+                                  BRIDGE,
                                   "/usr/bin/env", "USER=%s" % self.user(), "/bin/bash", "--login"], None)
 
-    def pull(self, ws, src, dest):
-        r = self.machine.act_run(self.podman() + ["cp", "%s:%s" % (self.ctr(ws), src), dest])
+    def _cp(self, src, dest):
+        r = self.machine.act_run(self.podman() + ["cp", src, dest])
         if not r.ok:
             raise OSError(r.err.strip() or "podman cp failed")
 
+    def pull(self, ws, src, dest):
+        self._cp("%s:%s" % (self.ctr(ws), src), dest)
+
     def push(self, ws, src, dest):
-        r = self.machine.act_run(self.podman() + ["cp", src, "%s:%s" % (self.ctr(ws), dest)])
-        if not r.ok:
-            raise OSError(r.err.strip() or "podman cp failed")
+        self._cp(src, "%s:%s" % (self.ctr(ws), dest))
 
     def pull_dir(self, ws, src, dest, exclude=()):
         if exclude:
@@ -1027,21 +1107,17 @@ class Container(Target):
                     "inside the workspace first" % " ".join(exclude))
         self.machine.remove(dest)
         self.machine.mkdir(dest)
-        r = self.machine.act_run(self.podman() + ["cp", "%s:%s/." % (self.ctr(ws), src), dest])
-        if not r.ok:
-            raise OSError(r.err.strip() or "podman cp failed")
+        self._cp("%s:%s/." % (self.ctr(ws), src), dest)
 
     def push_dir(self, ws, src, dest):
         u = self._ctr_user(ws)
         if u is None:
             act.die("workspace '%s' has no container to reach (podman does not know it)" % ws)
         r = self.machine.act_run(self.podman() + ["exec", "--user", u, self.ctr(ws), "/bin/sh", "-c",
-                                                    "rm -rf %s && mkdir -p %s" % (shell.sh_quote(dest), shell.sh_quote(dest))])
+                                                    "rm -rf %s && mkdir -p %s" % (shlex.quote(dest), shlex.quote(dest))])
         if not r.ok:
             raise OSError(r.err.strip() or "could not clear %s" % dest)
-        r = self.machine.act_run(self.podman() + ["cp", src + "/.", "%s:%s" % (self.ctr(ws), dest)])
-        if not r.ok:
-            raise OSError(r.err.strip() or "podman cp failed")
+        self._cp(src + "/.", "%s:%s" % (self.ctr(ws), dest))
 
     def path_kind(self, ws, path):
         u = self._ctr_user(ws)
@@ -1054,7 +1130,20 @@ class Container(Target):
         return self._ctr_user(ws)
 
     def ssh_proxy(self, ws):
-        return "%s %s" % (os.path.join(self.root, "container", "ssh-transport.sh"), ws)
+        return "%s %s" % (os.path.join(self.root, "container", "ssh-transport"), ws)
+
+    def sshd_cmd(self, u):
+        h = "/home/" + u
+        return ("mkdir -p /run/sshd && exec %s /bin/sh -c "
+                "'exec /usr/sbin/sshd -i -e -f /dev/null -o HostKey=%s/.wk-ssh/ssh_host_ed25519_key "
+                "-o AuthorizedKeysFile=.ssh/authorized_keys -o UsePAM=no -o PidFile=none -o PermitRootLogin=no "
+                "-o AllowUsers=%s -o LogLevel=ERROR -o Subsystem=\"sftp internal-sftp\" -o SetEnv=\"$WK_SSH_SETENV\"'" % (BRIDGE, h, u))
+
+    def ssh_transport(self, ws):
+        u = self._ctr_user(ws)
+        if u is None:
+            act.die("workspace '%s' has no container to reach (podman does not know it)" % ws)
+        os.execvp("podman", self.podman() + ["exec", "-i", self.ctr(ws), "/bin/sh", "-c", self.sshd_cmd(u)])
 
     def ssh_prepare(self, ws):
         """An sshd inside the container so Zed reaches it like every target, over the `Host wk-<ws>` alias."""
@@ -1068,7 +1157,7 @@ class Container(Target):
         h = "/home/%s" % u
         if not self.machine.run(self.podman() + ["exec", c, "test", "-x", "/usr/sbin/sshd"]).ok:
             act.info("installing openssh-server in '%s' (once per workspace; Zed needs an sshd to talk to)" % ws)
-            r = self.machine.act_run(self.podman() + ["exec", c, "/opt/wk-tools/container/proxy/ensure-bridge.sh", "/bin/sh", "-c",
+            r = self.machine.act_run(self.podman() + ["exec", c, BRIDGE, "/bin/sh", "-c",
                                                         "apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server"])
             show(r)
             if not r.ok or not self.machine.run(self.podman() + ["exec", c, "test", "-x", "/usr/sbin/sshd"]).ok:
@@ -1190,8 +1279,7 @@ class Vm(Target):
         return guest.base_name(self.env)
 
     def tart(self):
-        """lib/common.sh's tart_bin, the one locator every reader of "is tart here" asks."""
-        return shell.ask(self.root, "tart_bin", env=dict(self.env), quiet=True) or None
+        return tart_path(self.env)
 
     def vm(self, ws):
         return "wk-" + ws
@@ -1240,19 +1328,13 @@ class Vm(Target):
         ip = self.ip(ws)
         if not ip:
             return Result(1, "", "'%s' is not running (wk start %s)" % (ws, ws))
-        cmd = " ".join(shlex.quote(a) for a in argv)
-        return self.machine.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=%s" % self.env.get("WK_SSH_TIMEOUT", "10"),
-                                 "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
-                                 "-o", "ServerAliveInterval=60", "-o", "ServerAliveCountMax=10", "-i", self.key(),
-                                 "%s@%s" % (self.user(), ip), "bash -lc %s" % shlex.quote(cmd)], timeout=timeout)
-
-    def _guest_ssh_opts(self):
-        return ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
-                "-o", "ServerAliveInterval=60", "-o", "ServerAliveCountMax=10", "-i", self.key()]
+        return self.guest_at(ip).run(["bash", "-lc", shlex.join(argv)], timeout=timeout)
 
     def guest_at(self, ip):
-        """An `Ssh` onto a guest's address, its opts identical to `exec`'s."""
-        return Ssh("%s@%s" % (self.user(), ip), opts=self._guest_ssh_opts(),
+        """The one ssh onto a guest's address."""
+        return Ssh("%s@%s" % (self.user(), ip), opts=["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+                                                      "-o", "LogLevel=ERROR", "-o", "ServerAliveInterval=60",
+                                                      "-o", "ServerAliveCountMax=10", "-i", self.key()],
                    timeout=int(self.env.get("WK_SSH_TIMEOUT") or 10), via=self.machine)
 
     def _guest_ssh(self, ws):
@@ -1266,21 +1348,12 @@ class Vm(Target):
         return m
 
     def enter_argv(self, ws):
-        ip = self.ip(ws)
-        if not ip:
-            act.die("'%s' is not running (wk start %s)" % (ws, ws))
+        guest = self._guest_ssh_or_die(ws)
         self.login_note()
-        opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=%s" % self.env.get("WK_SSH_TIMEOUT", "10")] + self._guest_ssh_opts()
-        return (["ssh", "-t"] + opts + ["%s@%s" % (self.user(), ip),
-                "cd %s 2>/dev/null; exec $SHELL -l" % shell.sh_quote(self.src(ws))], None)
+        return guest.argv("cd %s 2>/dev/null; exec $SHELL -l" % shlex.quote(self.src(ws)), tty=True), None
 
     def exec_argv(self, ws, argv, tty=False):
-        ip = self.ip(ws)
-        if not ip:
-            act.die("'%s' is not running (wk start %s)" % (ws, ws))
-        opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=%s" % self.env.get("WK_SSH_TIMEOUT", "10")] + self._guest_ssh_opts()
-        cmd = " ".join(shlex.quote(a) for a in argv)
-        return (["ssh"] + (["-t"] if tty else []) + opts + ["%s@%s" % (self.user(), ip), "bash -lc %s" % shlex.quote(cmd)], None)
+        return self._guest_ssh_or_die(ws).argv("bash -lc %s" % shlex.quote(shlex.join(argv)), tty=tty), None
 
     def pull(self, ws, src, dest):
         self._guest_ssh_or_die(ws).copy_out(src, dest)
@@ -1320,16 +1393,15 @@ class Vm(Target):
         return ok
 
     def sync_tools(self, ws):
-        """A git bundle rather than a mount: a guest's shares are the agent-rw directory and the mirror. The marker
-        is rewritten with it, since the tooling pushed is what reads it."""
+        """A git bundle, not a mount (a guest shares only agent-rw and the mirror); the marker goes with the tooling that reads it."""
         guest = self._guest_ssh_or_die(ws)
         return tools.push(self.root, self.machine, guest, self.tools(ws), self.env) and self.write_marker(ws, guest)
 
     def write_marker(self, ws, guest):
-        """A bench image (/etc/wk-image) is no workspace, so it keeps none."""
+        """A bench image (its images.MARKER) is no workspace, so it keeps none."""
         path = self.home() + "/.wk-workspace"
         try:
-            if guest.run(["test", "-f", "/etc/wk-image"]).ok:
+            if guest.run(["test", "-f", images.MARKER]).ok:
                 guest.remove(path)
             else:
                 guest.write(path, "# wk: this machine IS a workspace. Written by lib/wk/targets.py.\nname=%s\nsrc=%s\n"
@@ -1349,12 +1421,12 @@ class Vm(Target):
     def tart_or_die(self):
         bin = self.tart()
         if not bin:
-            act.die("tart is not installed.\n    Install the signed bundle (it needs the virtualization entitlement, so the\n"
+            act.die("tart is not installed: not on PATH, and not in ~/.local/bin.\n    Install the signed bundle (it needs the virtualization entitlement, so the\n"
                     "    .app must stay intact):\n      mkdir -p ~/.local/share/tart ~/.local/bin\n"
                     "      curl -fsSLO https://github.com/cirruslabs/tart/releases/latest/download/tart.tar.gz\n"
                     "      tar -xzf tart.tar.gz -C ~/.local/share/tart/\n"
-                    "      ln -sfn ~/.local/share/tart/tart.app/Contents/MacOS/tart ~/.local/bin/tart\n"
-                    "    Licence: FSL-1.1-ALv2; internal use is a Permitted Purpose (README.md, Setup).")
+                    "      ln -sfn ~/%s ~/.local/bin/tart\n"
+                    "    Licence: FSL-1.1-ALv2; internal use is a Permitted Purpose (README.md, Setup)." % TART_APP)
         return bin
 
     def store_init(self):
@@ -1362,15 +1434,16 @@ class Vm(Target):
         self.machine.mkdir(os.path.join(self.store.root(), "ws"))
         self.ensure_dir_mode(self.vm_dir(), "0700")
 
+    def _podman_up(self):
+        rec = podman_vm(self.machine, self.podman_machine())
+        return rec if rec and rec.get("State") == "running" else None
+
     def podman_running(self):
-        r = self.machine.run(["podman", "machine", "inspect", self.podman_machine(), "--format", "{{.State}}"])
-        return r.ok and r.out.strip() == "running"
+        return self._podman_up() is not None
 
     def podman_mem_mb(self):
-        if not self.podman_running():
-            return 0
-        r = self.machine.run(["podman", "machine", "inspect", self.podman_machine(), "--format", "{{.Resources.Memory}}"])
-        return int(r.out.strip()) if r.ok and r.out.strip().isdigit() else 0
+        rec = self._podman_up()
+        return int(rec["Resources"]["Memory"]) if rec else 0
 
     def podman_containers(self):
         """An unreadable answer counts as busy: stopping a machine underneath something is the mistake this guards."""
@@ -1420,8 +1493,7 @@ class Vm(Target):
         tart = self.tart_or_die()
         for argv in ([tart, "clone", self.base(), v],
                      [tart, "set", v, "--cpu", cpus, "--memory", mem, "--random-mac", "--display", guest.display(self.env), "--display-refit"]):
-            r = self.machine.act_run(argv)
-            show(r)
+            r = self.machine.act_run(argv, stream=True)
             if not r.ok:
                 act.die("%s failed for '%s' (exit %d); what it said is above" % (" ".join(argv[1:2]), ws, r.rc), r.rc)
         self.machine.mkdir(ws_dir)
@@ -1466,7 +1538,7 @@ class LocalWorkspace(Target):
     def __init__(self, name, root, env, machine):
         super().__init__(name, root, env, machine)
         self._store = Store(dict(env, WK_STORE=env.get("WK_LOCAL_STORE") or Store(env).state_dir()))
-        marker = read_conf(workspace_marker_path(env))
+        marker = kv.kv_file(workspace_marker_path(env))
         self.ws_name = marker.get("name", "")
         self.ws_src = marker.get("src", "")
         self.ws_arch = marker.get("arch", "") or "native"
@@ -1497,11 +1569,8 @@ class LocalWorkspace(Target):
     def info(self, ws):
         return "running" if ws == self.ws_name else "absent"
 
-    def exec(self, ws, argv, tty=False, timeout=None):
-        return self.machine.run(self.exec_argv(ws, argv)[0], timeout=timeout)
-
     def exec_argv(self, ws, argv, tty=False):
-        return ["bash", "-lc", "exec " + " ".join(shlex.quote(a) for a in argv)], None
+        return ["bash", "-lc", "exec " + shlex.join(argv)], None
 
     def store_init(self):
         self.machine.mkdir(self.store.ws_dir(self.ws_name))
@@ -1519,22 +1588,24 @@ class LocalWorkspace(Target):
         act.die("a workspace has no ssh route to itself")
 
     def build_size(self, ws):
-        """This workspace's own cgroup limits, else the machine's."""
-        res = Resources(self.machine, self.env)
-        cores = mem = None
+        """A container is sized by its own cgroup, where `max` is no limit, so the machine's; a guest has no cgroup."""
+        res = Resources(self.machine, self.env, self.os())
+        if self.os() == "macos":
+            return res.host_cores(), res.host_mem_mb(), None
+        quota, period = self._cgroup("cpu.max", r"(max|[0-9]+) [0-9]+").split()
+        mem = self._cgroup("memory.max", r"max|[0-9]+")
+        return (res.host_cores() if quota == "max" else max(1, int(quota) // int(period)),
+                res.host_mem_mb() if mem == "max" else int(mem) // 1024 // 1024, None)
+
+    def _cgroup(self, name, shape):
+        path = "/sys/fs/cgroup/" + name
         try:
-            quota, period = (self.machine.read("/sys/fs/cgroup/cpu.max").split() + [""])[:2]
-            if quota != "max" and period.isdigit():
-                cores = int(quota) // int(period)
-        except OSError:
-            pass
-        try:
-            limit = self.machine.read("/sys/fs/cgroup/memory.max").strip()
-            if limit.isdigit():
-                mem = int(limit) // 1024 // 1024
-        except OSError:
-            pass
-        return cores or res.host_cores(), mem or res.host_mem_mb(), None
+            text = self.machine.read(path).strip()
+        except OSError as e:
+            act.die("cannot read %s (%s): a build in a container is sized by its cgroup's limits" % (path, e))
+        if not re.fullmatch(shape, text):
+            act.die("%s reads %r, which is not what cgroup v2 writes there" % (path, text))
+        return text
 
 
 class Remote(Target):
@@ -1544,7 +1615,7 @@ class Remote(Target):
 
     def __init__(self, name, root, env, machine):
         super().__init__(name, root, env, machine)
-        marker = read_conf(env.get("WK_REMOTE_MARKER") or os.path.join(env.get("HOME", os.path.expanduser("~")), ".wk-remote"))
+        marker = kv.kv_file(remote_marker_path(env))
         self.host = env.get("WK_REMOTE_HOST") or (name if name != "remote" else "")
         self.peer = bool(env.get("WK_REMOTE_PEER"))
         try:
@@ -1579,7 +1650,7 @@ class Remote(Target):
     def _far(self):
         if self.is_local or self.host:
             return self.machine
-        act.die("target '%s' has no host to reach.\n    Set WK_REMOTE_HOST in %s, or\n"
+        act.die("target '%s' has no host to reach.\n    Set host= in %s, or\n"
                 "    name the target after a machine your ~/.ssh/config already knows:\n        wk new <name> --target devbox-arm64-2"
                 % (self.name, Registry(self.root, self.env).conf_path(self.name)))
 
@@ -1602,11 +1673,17 @@ class Remote(Target):
         elif not r.ok:
             self._probed = {"why": ssh_last_word(r)}
         else:
-            self._probed = parse_probe(r.out, self.env.get("WK_REMOTE_ROOT", ""))
+            try:
+                self._probed = parse_probe(r.out, self.env.get("WK_REMOTE_ROOT", ""))
+            except ValueError as e:
+                self._probed = {"why": "it answered the probe with what this end cannot read: %s" % e, "unreadable": True}
         return self._probed
 
     def _probe_or_die(self):
         p = self.probed()
+        if p.get("unreadable"):
+            act.die("'%s' %s.\n    PROBE_SCRIPT (lib/wk/targets.py) is what ran: run its lines there to see which answers\n"
+                    "    differently from the Linux and macOS shapes it reads." % (self.host, p["why"]))
         if p.get("why") is not None:
             act.die("cannot reach '%s' over ssh: %s\n    This target has no way in but ssh, and it is not interactive: the key,\n"
                     "    the ProxyJump and the host entry all have to work non-interactively.\n"
@@ -1630,16 +1707,16 @@ class Remote(Target):
         return self._probe_or_die()["home"]
 
     def os(self):
-        return self._probe_or_die().get("os") or "linux"
+        return self._probe_or_die()["os"]
 
     def cores(self):
-        return self._probe_or_die().get("cores") or 1
+        return self._probe_or_die()["cores"]
 
     def load(self):
-        return self._probe_or_die().get("load") or 0
+        return self._probe_or_die()["load"]
 
     def mem_mb(self):
-        return self._probe_or_die().get("mem_mb") or 1024
+        return self._probe_or_die()["mem_mb"]
 
     def build_size(self, ws):
         return self.cores(), self.mem_mb(), self.load()
@@ -1648,15 +1725,14 @@ class Remote(Target):
         return self.root_there() + "/cache/ccache"
 
     def build_argv(self, ws, argv):
-        """lockrun: a lock descriptor would be inherited by what the build leaves behind."""
         prio = "nice -n 19" + (" ionice -c3" if self._probe_or_die().get("ionice") == "yes" else "")
         tee = "" if self.is_local else " 2>&1 | tee %s" % shlex.quote(self.ws_dir_there(ws) + "/build.log")
-        text = "set -o pipefail\ncd %s && %s remote-build -w 3600 -- %s %s%s" % (
-            shlex.quote(self.src(ws)), shlex.quote(self.tools(ws) + "/lib/lockrun.sh"), prio,
-            " ".join(shlex.quote(a) for a in argv), tee)
+        text = "set -o pipefail\ncd %s && %s run remote-build -w 3600 -- %s %s%s" % (
+            shlex.quote(self.src(ws)), shlex.join(isolated_module(self.tools(ws) + "/lib", "wk.lock")), prio,
+            shlex.join(argv), tee)
         if self.is_local:
             return ["bash", "-c", text], None
-        return ["ssh"] + self._far().opts + [self.host, "bash -c " + shlex.quote(text)], None
+        return self._far().argv("bash -c " + shlex.quote(text)), None
 
     def task_put(self, ws, task):
         """`wk status` asks the machine that builds, so the record goes there with its own log and name."""
@@ -1728,37 +1804,23 @@ class Remote(Target):
         return self.info(ws) == "present"
 
     def exec(self, ws, argv, tty=False, timeout=None):
-        return self._sh("cd %s && %s" % (shlex.quote(self.src(ws)), " ".join(shlex.quote(a) for a in argv)), timeout=timeout)
+        return self._sh("cd %s && %s" % (shlex.quote(self.src(ws)), shlex.join(argv)), timeout=timeout)
 
     def enter_argv(self, ws):
         self._probe_or_die()
         if self.is_local:
             return ([os.environ.get("SHELL", "/bin/sh"), "-l"], self.src(ws))
-        return (["ssh", "-t"] + self.machine.opts + [self.host, "cd %s && exec $SHELL -l" % shlex.quote(self.src(ws))], None)
+        return self.machine.argv("cd %s && exec $SHELL -l" % shlex.quote(self.src(ws)), tty=True), None
 
     def exec_argv(self, ws, argv, tty=False):
         if self.is_local:
             return list(argv), self.src(ws)
-        line = "cd %s && %s" % (shlex.quote(self.src(ws)), " ".join(shlex.quote(a) for a in argv))
-        return ["ssh"] + (["-t"] if tty else []) + self._far().opts + [self.host, line], None
+        return self._far().argv("cd %s && %s" % (shlex.quote(self.src(ws)), shlex.join(argv)), tty=tty), None
 
     def exec_tty(self, ws, argv, timeout=None):
-        """`exec_argv` already resolves to a literal command (its own `ssh` when not local) -- run
-        by `self.here`, never `self.machine`, which would double-wrap it onto a non-local target."""
+        """`exec_argv` is already a literal command (its own `ssh`), run by `self.here`: `self.machine` would wrap it twice."""
         cmd, cwd = self.exec_argv(ws, argv, tty=True)
         return self.here.run_tty(cmd, cwd=cwd, timeout=timeout)
-
-    def pull(self, ws, src, dest):
-        self.machine.copy_out(src, dest)
-
-    def push(self, ws, src, dest):
-        self.machine.copy_in(src, dest)
-
-    def pull_dir(self, ws, src, dest, exclude=()):
-        self.machine.copy_tree_out(src, dest, exclude)
-
-    def push_dir(self, ws, src, dest):
-        self.machine.copy_tree_in(src, dest)
 
     def path_kind(self, ws, path):
         r = self.machine.run(["sh", "-c", path_kind_probe(path)])
@@ -1794,10 +1856,10 @@ class Remote(Target):
             act.die("%s could not open a route into '%s'; what it said is above.\n"
                     "    A copy of wk-tools that has never heard of 'wk zed --route' says so as a usage\n"
                     "    error -- that one is fixed by bringing the machine up to date:  wk sync --tools" % (self.host, ws))
-        kv = dict(line.partition("=")[::2] for line in out.splitlines() if "=" in line)
-        if not kv.get("user") or not kv.get("src"):
+        route = kv.kv(out)
+        if not route.get("user") or not route.get("src"):
             act.die("%s said nothing an editor can use about '%s'" % (self.host, ws))
-        self._routes[ws] = (kv["user"], kv["src"], kv.get("proxy", ""))
+        self._routes[ws] = (route["user"], route["src"], route.get("proxy", ""))
         return self._routes[ws]
 
     @property
@@ -1912,8 +1974,8 @@ class Remote(Target):
             if not r.ok:
                 sys.stderr.write("  %-24s git pull --ff-only failed there\n" % self.name)
                 return False
-            mine = _kv(self.here.run(["env", "WK_ROOT=" + self.root, os.path.join(self.root, "cmd", "version")]).out)
-            theirs = _kv(self._sh(shlex.quote(tools + "/cmd/version")).out)
+            mine = kv.kv(self.here.run(["env", "WK_ROOT=" + self.root, os.path.join(self.root, "cmd", "version")]).out)
+            theirs = kv.kv(self._sh(shlex.quote(tools + "/cmd/version")).out)
             if not mine.get("sha") or (mine.get("sha"), mine.get("dirty")) != (theirs.get("sha"), theirs.get("dirty")):
                 sys.stderr.write("  %-24s pulled, still DIFFERS (%s, this machine has %s)\n  %-24s %s\n"
                                  % (self.name, _ident(theirs), _ident(mine), "", tools_why_behind(self.here, self.root)))
@@ -1966,11 +2028,17 @@ class Remote(Target):
                 act.die("could not create the checkout on %s" % host)
         self._wire(wsd + "/WebKit")
         conf = shlex.quote(root + "/cache/ccache/ccache.conf")
-        self._sh_act("[ -f %s ] || printf %%s %s > %s" % (conf, shlex.quote(shell.ccache_conf(self.root, self.env)), conf))
+        self._sh_act("[ -f %s ] || printf %%s %s > %s" % (conf, shlex.quote(self.ccache_conf()), conf))
         self.here.mkdir(self.store.ws_dir(ws))
         if not self._sh_act("touch %s" % shlex.quote(wsd + "/" + READY_MARKER)).ok:   # last: an ssh cut mid-clone leaves it creating
             act.die("could not mark '%s' ready on %s -- treat it as half-made\n    and re-run 'wk new %s --target %s'" % (ws, host, ws, self.name))
         act.info("remote workspace '%s' created on %s (%s)" % (ws, host, wsd))
+
+    def results(self, ws):
+        return None if self.peer else (self.machine, self.ws_dir_there(ws) + "/bench")
+
+    def task_store(self):
+        return None if self.peer or self.is_local else (self.machine, self.root_there())
 
     def destroy(self, ws):
         """The record here outlives anything the far side has not confirmed gone: a re-run finds it and retries."""
@@ -2013,10 +2081,6 @@ PROBE_SCRIPT = """
         command -v ionice >/dev/null 2>&1 && echo yes || echo no"""
 
 
-def _kv(text):
-    return dict(line.partition("=")[::2] for line in text.splitlines() if "=" in line)
-
-
 def _ident(ver):
     return (ver.get("sha") or "")[:12] + ("+dirty" if ver.get("dirty") == "yes" else "")
 
@@ -2033,8 +2097,10 @@ def tools_why_behind(machine, root):
         return "this machine has uncommitted changes -- a peer pulls from %s, so commit and push them first" % (up or "the upstream")
     if not up:
         return "branch '%s' has no upstream here, so there is nothing for a peer to pull from" % (git("rev-parse", "--abbrev-ref", "HEAD") or "HEAD")
-    ahead = _int(git("rev-list", "--count", up + "..HEAD"))
-    return "this machine is %d commit(s) ahead of %s -- push them, then re-run" % (ahead, up) if ahead else ""
+    ahead = git("rev-list", "--count", up + "..HEAD")
+    if ahead is None:
+        return "git could not count this machine's commits past %s" % up
+    return "this machine is %s commit(s) ahead of %s -- push them, then re-run" % (ahead, up) if ahead != "0" else ""
 
 
 def ssh_last_word(r):
@@ -2048,11 +2114,11 @@ def ssh_last_word(r):
 
 
 def parse_probe(text, root=""):
-    """`sysctl -n vm.loadavg` puts the load average second where /proc/loadavg puts it first, and `vm_stat` reports pages where /proc/meminfo has MemAvailable in kB."""
+    """`vm_stat` reports pages where /proc/meminfo has MemAvailable in kB; ValueError names a figure the answer lacks."""
     lines = text.splitlines()
     home = lines[0] if lines else ""
     uname = lines[1] if len(lines) > 1 else ""
-    cores = _int(lines[2] if len(lines) > 2 else "") or 1
+    cores = _num(lines[2] if len(lines) > 2 else "", "the core count")
     section, head, mem, ionice = "head", [], [], "no"
     for line in lines[3:]:
         if line == "===MEM===":
@@ -2065,63 +2131,82 @@ def parse_probe(text, root=""):
             mem.append(line)
         elif line:
             ionice = line
-    load, mem_mb = 0, 0
+    f = head[0].replace("{", " ").split() if head else []
+    load = _num(f[0] if f else "", "the load average")
     if uname == "Linux":
-        load = _int(head[0].split()[0]) if head and head[0].split() else 0
-        for l in mem:
-            if l.startswith("MemAvailable:"):
-                mem_mb = _int(l.split()[1]) // 1024
-                break
+        avail = [l.split()[1:2] for l in mem if l.startswith("MemAvailable:")]
+        mem_mb = _num((avail[0] or [""])[0] if avail else "", "/proc/meminfo's MemAvailable") // 1024
     else:
-        f = head[0].split() if head else []
-        load = _int(f[1]) if len(f) > 1 else 0
-        ps, pages = 0, 0
-        for l in mem:
-            if "page size of" in l:
-                ps = int(re.search(r"[0-9]+", l).group(0))
-            for key in ("Pages free:", "Pages inactive:", "Pages speculative:"):
-                if l.startswith(key):
-                    pages += _int(l.split()[-1].rstrip("."))
-        mem_mb = pages * ps // 1024 // 1024 if ps else 0
+        size = [re.search(r"page size of ([0-9]+)", l) for l in mem if "page size of" in l]
+        if not size or not size[0]:
+            raise ValueError("vm_stat printed no page size")
+        pages = sum(_num(l.split()[-1].rstrip("."), l.split(":")[0]) for l in mem
+                    if l.startswith(("Pages free:", "Pages inactive:", "Pages speculative:")))
+        mem_mb = pages * int(size[0].group(1)) // 1024 // 1024
     return {"home": home, "cores": cores, "load": load, "mem_mb": mem_mb, "ionice": ionice,
             "os": "macos" if uname == "Darwin" else "linux", "root": root or home + "/wk"}
 
 
-def _int(s):
+def _num(s, what):
     try:
         return int(float(s))
-    except (TypeError, ValueError):
-        return 0
+    except ValueError:
+        raise ValueError("%s is %r, not a number" % (what, s))
+
+
+def store_state(store):
+    """(path -> mode, digest) for what store-init can change; workspaces, snapshots and the mirror are not walked."""
+    out = {}
+
+    def note(p):
+        st = os.lstat(p)
+        digest = ""
+        if os.path.isfile(p) and not os.path.islink(p):
+            with open(p, "rb") as f:
+                digest = hashlib.sha256(f.read()).hexdigest()
+        out[p] = (st.st_mode, digest)
+
+    for top, deep in ((store.root(), False), (store.secrets_dir(), True), (store.agent_rw_dir(), False)):
+        for d, dirs, files in os.walk(top):
+            note(d)
+            for f in files:
+                note(os.path.join(d, f))
+            if not deep:
+                dirs[:] = [x for x in dirs if os.path.join(d, x).count(os.sep) - top.count(os.sep) < 3
+                           and x not in ("ws", "base", "git", "bench", "skills", "task", "log")]
+    return out
 
 
 def main(argv, env=None):
-    from wk.clock import Clock
     env = os.environ if env is None else env
-    root = env.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    if argv[:1] == ["wk-cmd"] and len(argv) > 1:
-        try:
-            print(Registry(root, env).load(argv[1]).wk_cmd(argv[2:], env))
-            return 0
-        except LookupError as e:
-            act.die(str(e))
-    arity = {"state": (2,), "ready": (2, 3), "creating-now": (2,), "needs-base": (1,), "sync-tools": (2,)}
-    if not argv or len(argv) - 1 not in arity.get(argv[0], ()):
-        act.die("usage: python3 -m wk.targets state|creating-now|sync-tools <target> <ws> | ready <target> <ws> [seconds]"
-                " | needs-base <target> | wk-cmd <target> [args...]")
-    try:
-        t = Registry(root, env).load(argv[1])
-        ws = argv[2] if len(argv) > 2 else ""
-        if argv[0] == "state":
-            print(t.state(ws))
-            return 0
-        if argv[0] == "ready":
-            t.wait_ready(ws, Clock(), argv[3] if len(argv) > 3 else None)
-            return 0
-        ok = {"creating-now": lambda: t.creating_now(ws), "needs-base": lambda: t.needs_base,
-              "sync-tools": lambda: t.sync_tools(ws)}[argv[0]]()
-        return 0 if ok else 1
-    except LookupError as e:
-        act.die(str(e))
+    ap = argparse.ArgumentParser(prog="python3 -m wk.targets")
+    sub = ap.add_subparsers(dest="verb", required=True)
+    sub.add_parser("store-init", help="make the container store; print each path it changed")
+    sub.add_parser("tart", help="print the tart binary's path (tart_path); exit 1 where there is none")
+    vm = sub.add_parser("podman-vm", help="print each field of the podman machine's record, or (name=Field.Sub) a shlex-quoted "
+                                           "shell assignment for wk_eval; exit 1 where there is none")
+    vm.add_argument("fields", nargs="+", metavar="Field.Sub|name=Field.Sub")
+    args = ap.parse_args(argv)
+    t = Registry(images.root(env), env).load("container")
+    if args.verb == "tart":
+        if not tart_path(env):
+            return 1
+        print(tart_path(env))
+        return 0
+    if args.verb == "podman-vm":
+        rec = podman_vm(t.machine, t.podman_machine())
+        if rec is None:
+            return 1
+        for field in args.fields:
+            var, eq, path = field.partition("=")
+            v = podman_vm_field(rec, path if eq else var)
+            print("%s=%s" % (var, shlex.quote(str(v))) if eq else v)
+        return 0
+    before = store_state(t.store)
+    t.store_init()
+    after = store_state(t.store)
+    sys.stdout.write("".join("%s\n" % p for p in sorted(after) if before.get(p) != after[p]))
+    return 0
 
 
 if __name__ == "__main__":

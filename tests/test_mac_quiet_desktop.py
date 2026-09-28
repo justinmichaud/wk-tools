@@ -494,8 +494,8 @@ class TestDoNotDisturb(WkTest):
     account's own home, not a preference, so it is written and read as one."""
 
     def _dnd(self, script):
-        return bash('. %r\n%s\n' % (str(QUIET), script),
-                    env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"})
+        """HOME a scratch directory: Apple's python3, first on this PATH, writes its bytecode cache under it."""
+        return bash('. %r\n%s\n' % (str(QUIET), script), env={"PATH": "/usr/bin:/bin", "HOME": str(self.tmp)})
 
     def test_no_file_is_not_off(self):
         """An unreadable file is `?<reason>`, which the findings report as
@@ -795,7 +795,7 @@ class TestBothKindsOfMeasuredMacGetIt(unittest.TestCase):
         """A second spelling anywhere is a setting that can drift out of the
         table and be true of one kind of measured Mac and not the other."""
         for f in (DESKTOP, FIRSTBOOT, VOLUME, REPO / "vm" / "desktop-probe.sh",
-                  REPO / "cmd" / "bench", REPO / "lib" / "bench-arms.sh"):
+                  REPO / "cmd" / "bench", REPO / "lib" / "wk" / "bench" / "mac.py"):
             text = f.read_text()
             with self.subTest(file=f.name):
                 for _name, domain, key, _t, _v, _why in _rows("rows"):

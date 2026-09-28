@@ -6,8 +6,8 @@ cmd/zed's --url path never calls zed_cli() (see the file: `Z` is left unset
 under --url, and `emit()` only ever execs it in the non-url branch), so a
 fake `zed` on PATH that fails loudly if invoked is a straightforward way to
 prove that -- and the URL itself has to come from a workspace whose route is
-real, since t_ssh_host asks the driver (a live sshd inside a container,
-installed on first use; see targets/container.sh). Gated on the same running
+real, since ssh_host asks the driver (a live sshd inside a container,
+installed on first use; see Container.ssh_transport, lib/wk/targets.py). Gated on the same running
 podman `wk` VM tests.test_container_workspace uses, and the same real
 container workspace, created and torn down the same way -- nothing here
 stands in for one.
@@ -18,7 +18,7 @@ import os
 import stat
 import unittest
 
-from tests.support import WkTest, rand_suffix, requires_podman_vm, run, scratch_dir
+from tests.support import WkTest, rand_suffix, requires_container_target, run, scratch_dir
 
 _FAKE_ZED = """#!/bin/sh
 echo "FAKE ZED WAS INVOKED: $*" >&2
@@ -26,7 +26,7 @@ exit 1
 """
 
 
-@requires_podman_vm()
+@requires_container_target()
 class TestZedUrl(WkTest):
     def setUp(self):
         super().setUp()

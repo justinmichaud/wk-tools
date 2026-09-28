@@ -1,3 +1,4 @@
+command -v warn >/dev/null 2>&1 || . "$(dirname "${BASH_SOURCE[0]}")/../../lib/common.sh"
 # NVIDIA userspace must match the host kernel driver exactly, so mount the host's.
 gpu_flags() {
     local flags=""

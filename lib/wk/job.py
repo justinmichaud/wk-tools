@@ -1,5 +1,4 @@
-"""A long-running job's watched run, the pid it announces and its adoption, and the one way a recorded
-job is stopped (0 stopped, 1 left, 2 none)."""
+"""A job's watched run, the pid it announces and its adoption, and how it is stopped (0 stopped, 1 left, 2 none)."""
 
 import fnmatch
 import os
@@ -22,7 +21,6 @@ ABORT_SECONDS = 1800
 EXIT_OF = {sig.SIGINT: 130, sig.SIGTERM: 143, sig.SIGHUP: 129}
 # Depth first, children before parents: ninja's children reparent to init once it is gone.
 TREE = '_d() { for k in $(pgrep -P "$1"); do _d "$k"; done; echo "$1"; }; _d "$1"'
-REFUSED = 3   # a bash caller's shim exits on it, as a die in the caller did
 
 
 def _seconds(env, name, default):
@@ -127,9 +125,7 @@ def watch(argv, path, machine, clock, env=None, cwd=None, popen=subprocess.Popen
             return 124
         return p.returncode
     except KeyboardInterrupt:
-        kill_tree(machine, p.pid, sig.SIGTERM)
-        clock.sleep(2)
-        kill_tree(machine, p.pid, sig.SIGKILL)
+        terminate(lambda s: kill_tree(machine, p.pid, s), lambda: p.poll() is not None, clock, 2)
         p.wait()
         raise
 
@@ -155,7 +151,8 @@ def watch_pid(ended, pid, path, machine, clock, env=None, abort=None, wedge=None
         if abort and idle >= abort:
             warn("no output for %ds -- giving up and killing the job" % idle)
             stall_report(machine, path, idle)
-            return _give_up(machine, clock, pid, "silent")
+            terminate(lambda s: kill_tree(machine, pid, s), lambda: ended() is not None, clock, 5)
+            return "silent"
         if idle >= stall and not warned:
             stall_report(machine, path, idle)
             log("  will abort if still silent at %ds" % abort if abort else "  not stopping it: silence is not a failure here")
@@ -168,16 +165,19 @@ def watch_pid(ended, pid, path, machine, clock, env=None, abort=None, wedge=None
                 named = now_named
                 if same >= wedge[0]:
                     stall_report(machine, path, int(same * beat), "wedged", named)
-                    return _give_up(machine, clock, pid, "wedged")
+                    terminate(lambda s: kill_tree(machine, pid, s), lambda: ended() is not None, clock, 5)
+                    return "wedged"
             last_beat = now
     return False
 
 
-def _give_up(machine, clock, pid, verdict):
-    kill_tree(machine, pid, sig.SIGTERM)
-    clock.sleep(5)
-    kill_tree(machine, pid, sig.SIGKILL)
-    return verdict
+def terminate(send, gone, clock, grace, kill_grace=0):
+    """`send(SIGTERM)`, then `send(SIGKILL)` once `grace` seconds pass without `gone()`; whether it went."""
+    send(sig.SIGTERM)
+    if clock.wait_until(gone, grace, 1):
+        return True
+    send(sig.SIGKILL)
+    return clock.wait_until(gone, kill_grace, 1)
 
 
 def detach(machine, argv, log_path):
@@ -294,7 +294,7 @@ def signal(target, ws, t, pid, signum):
     if not want:
         die("the record %s holds pid %s inside '%s' and no pattern its\n    command line must match, so nothing can tell it "
             "from any other pid in a\n    shared PID namespace. Whatever adopted that pid did not go through\n"
-            "    job.adopt (lib/wk/job.py; job_pid_adopt from bash), which is a bug." % (t.id, pid, ws))
+            "    job.adopt (lib/wk/job.py), which is a bug." % (t.id, pid, ws))
     args = pid_args(target, ws, pid)
     if not args:
         return
@@ -306,7 +306,6 @@ def signal(target, ws, t, pid, signum):
 
 
 def kill_tree_in(target, ws, pid, signum):
-    """Descendants first, inside the workspace, for a pid whose command line the caller has already checked."""
     pids = descendants(lambda argv: target.exec(ws, argv), pid)
     target.act_exec(ws, ["kill", "-" + signal_name(signum)] + [str(p) for p in pids])
 
@@ -323,8 +322,7 @@ def signal_name(signum):
 
 
 def kill(target, ws, task, word, machine, clock, env=None, me=None):
-    """TERM, KILL after WK_KILL_WAIT, and the record ended `word`; True when it is gone. `stopping` goes on
-    the record first, so the job's own driver, seeing its child die of the TERM, ends it `word` too."""
+    """TERM, KILL after WK_KILL_WAIT, the record ended `word`; `stopping` first, so the driver ends it `word` too."""
     env = os.environ if env is None else env
     pid, wait = task.field("pid"), _seconds(env, "WK_KILL_WAIT", KILL_WAIT)
     if act.dry_run():
@@ -334,21 +332,14 @@ def kill(target, ws, task, word, machine, clock, env=None, me=None):
         task.end(word)
         return True
     task.set("stopping", word)
-    _signal(target, ws, task, int(pid), machine, sig.SIGTERM)
-    waited = 0
-    while waited < wait and task.alive(None):
-        clock.sleep(1)
-        waited += 1
-    if task.alive(None):
-        warn("pid %s did not stop on TERM after %ds -- killing it" % (pid, waited))
-        _signal(target, ws, task, int(pid), machine, sig.SIGKILL)
-        for _ in range(5):
-            if not task.alive(None):
-                break
-            clock.sleep(1)
-    left = task.alive(None)
+
+    def send(signum):
+        if signum == sig.SIGKILL:
+            warn("pid %s did not stop on TERM after %ds -- killing it" % (pid, wait))
+        _signal(target, ws, task, int(pid), machine, signum)
+    gone = terminate(send, lambda: not task.alive(None), clock, wait, 5)
     task.end(word)
-    return not left
+    return gone
 
 
 def stop(target, records, ws, kind, machine, clock, env=None):
@@ -364,69 +355,3 @@ def stop(target, records, ws, kind, machine, clock, env=None):
     if ok:
         info("stopped '%s's %s and recorded it as cancelled" % (ws, kind))
     return 0 if ok else 1
-
-
-def main(argv, env=None):
-    """The job for a bash caller (lib/watchdog.sh, lib/detach.sh): `python3 -m wk.job <verb> ...`."""
-    from wk.clock import Clock
-    from wk.machine import here
-    from wk.record import Records, Task
-    from wk.shell import caller_shell
-    env = os.environ if env is None else env
-    verb, a = argv[0], argv[1:]
-    machine, clock, shell = here(), Clock(), caller_shell(env)
-    tail = a[a.index("--") + 1:] if "--" in a else []
-    a = a[:a.index("--")] if "--" in a else a
-
-    def target():
-        if shell is None:
-            die("%s: this runs inside a workspace and no target is loaded" % verb)
-        return shell
-
-    def signum(name):
-        return sig.Signals["SIG" + name]
-
-    try:
-        if verb == "watch":
-            pid = int(a[0])
-            return 124 if watch_pid(lambda: None if machine.alive(pid) else 0, pid, a[1], machine, clock, env) else 0
-        if verb == "kill-tree":
-            kill_tree(machine, int(a[0]), signum(a[1]))
-        elif verb == "kill-tree-in":
-            kill_tree_in(target(), a[0], int(a[1]), signum(a[2]))
-        elif verb == "pid-args":
-            sys.stdout.write(pid_args(target(), a[0], a[1]))
-        elif verb == "adopt":
-            return 0 if adopt(target(), a[0], Task(a[1], clock, machine=machine), int(a[2]), a[3]) else 1
-        elif verb == "kill":
-            t = Task(a[1], clock, target().ask if shell else None, machine)
-            return 0 if kill(shell, a[0], t, a[2], machine, clock, env, me=int(a[3])) else 1
-        elif verb == "stop":
-            records = Records(env=env, clock=clock, ask_target=target().ask, machine=machine)
-            return stop(shell, records, a[0], a[1], machine, clock, env)
-        elif verb == "detach":
-            if not tail:
-                die("detach: nothing to run")
-            sys.stdout.write(str(detach(machine, tail, a[0])))
-        elif verb == "remote":
-            if not tail:
-                die("detach_remote: nothing to run")
-            if not target().call(a[0], [remote_line(tail, a[1], a[2])]).ok:
-                die("detach_remote: could not start the job")
-        elif verb == "wait-remote":
-            fn, opt = a[0], a[3:] + [""] * 4
-            word, ok = wait_remote(lambda line: target().call(fn, [line], quiet=True), a[1], a[2], clock,
-                                   int(opt[0] or 30), opt[1] == "1", int(opt[2] or 0), opt[3], env)
-            sys.stdout.write(word)
-            return 0 if ok else 1
-        elif verb == "abort-seconds":
-            sys.stdout.write(str(ABORT_SECONDS))
-        else:
-            die("wk.job: no verb '%s'" % verb, 2)
-    except act.Refused:
-        return REFUSED
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))

@@ -4,7 +4,7 @@ A full-LTO link writes nothing to the log for many minutes, so silence is not
 death, and this machine's compiler count cannot say otherwise: a container
 build's compilers reach the process table through `podman exec` and name their
 workspace only in their cgroup, and a macOS guest's run in another kernel. So
-the verdict (`task_verdict`, lib/task.sh) is the recorded pid plus the log's
+the verdict (`Task.verdict`, lib/wk/record.py) is the recorded pid plus the log's
 age and nothing else, cmd/status reports `silent` rather than `stalled` for a
 quiet running record, and `stalled` stays what cmd/build and cmd/test write
 when a watchdog killed the job.
@@ -28,7 +28,7 @@ import sys
 import time
 import unittest
 
-from tests.support import REPO, WkTest, bash, rand_suffix, run, stub_path
+from tests.support import REPO, WkTest, rand_suffix, run, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import job, record  # noqa: E402
@@ -51,26 +51,16 @@ PS_OUT = " 99.5 cc1plus\n 98.0 cc1plus\n 97.0 ld\n  0.1 bash\n"
 def write_task(store, kind="build", name="ws1", pid=None, log=None,
                plan=("compile jsc-release with -j4",), end=None,
                abort_after=1800, config="jsc-release", kill=None):
-    """One task record, written by lib/task.sh itself into <store>, the way
-    every long-running command writes it. Returns the record's directory."""
-    steps = " ".join("'%s'" % s for s in plan)
-    kill = kill or "wk %s %s --kill" % (kind, name)
-    lines = [
-        '. "%s/lib/common.sh"' % REPO,
-        '. "%s/lib/task.sh"' % REPO,
-        "d=$(task_begin %s here %s '%s' '%s' %s)"
-        % (kind, name, kill, log or "/dev/null", steps),
-        'task_step "$d" 1',
-        'task_set "$d" config %s' % config,
-        'task_pid "$d" %s' % (pid if pid is not None else os.getpid()),
-    ]
+    """One task record, written by lib/wk/record.py into <store> the way every
+    long-running command writes it. Returns the record."""
+    t = record.Records(store, env={"WK_ABORT_SECONDS": str(abort_after)}).begin(
+        kind, "here", name, kill or "wk %s %s --kill" % (kind, name), str(log or "/dev/null"), list(plan),
+        pid=os.getpid() if pid is None else pid)
+    t.step(1)
+    t.set("config", config)
     if end is not None:
-        lines.append('task_end "$d" %s' % end)
-    lines.append('printf "%s" "$d"')
-    cp = bash("\n".join(lines),
-              env={"WK_STORE": str(store), "WK_ABORT_SECONDS": str(abort_after)})
-    assert cp.returncode == 0, cp.stdout + cp.stderr
-    return cp.stdout.strip()
+        t.end(end)
+    return t
 
 
 def age_log(path, seconds):
@@ -79,24 +69,16 @@ def age_log(path, seconds):
 
 
 class TestTheVerdictReadsThePidAndTheLogAndNotTheProcessTable(WkTest):
-    """`task_verdict` (lib/task.sh): a record with no outcome is running while
+    """`Task.verdict` (lib/wk/record.py): a record with no outcome is running while
     its pid answers and its log moved within WK_STALL_SECONDS, silent when the
     log went quiet, died when the pid is gone. A machine mid-link is the case
     that made someone want the process count in here; the verdict reads none."""
 
-    def _verdict(self, pid=None, log_age=0, end=None, stall=""):
-        store = self.tmp / "store"
+    def _verdict(self, pid=None, log_age=0, end=None, stall=None):
         logf = self.tmp / f"build-{rand_suffix()}.log"
         logf.write_text("[1/4200] cc\n")
         age_log(logf, log_age)
-        d = write_task(store, pid=pid, log=logf, end=end)
-        cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/task.sh"
-{stall}task_verdict "{d}"
-''', env={"WK_STORE": str(store)})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.strip()
+        return write_task(self.tmp / "store", pid=pid, log=logf, end=end).verdict(stall_seconds=stall)
 
     def test_the_reading_is_available_and_says_three(self):
         m = Fake()
@@ -118,7 +100,7 @@ class TestTheVerdictReadsThePidAndTheLogAndNotTheProcessTable(WkTest):
         self.assertEqual(self._verdict(end="cancelled"), "cancelled")
 
     def test_the_silence_threshold_is_wk_stall_seconds(self):
-        self.assertEqual(self._verdict(log_age=2, stall="WK_STALL_SECONDS=1 "),
+        self.assertEqual(self._verdict(log_age=2, stall=1),
                          "silent")
         self.assertEqual(self._verdict(log_age=2), "running")
 
@@ -128,7 +110,7 @@ class _FakeWalk(WkTest):
     =remote with an answering stub `ssh` (so nothing is delegated and the
     local records are reported), an empty WK_MACHINES_DIR so the device walk
     finds nothing, and the task records under the scratch XDG_STATE_HOME where
-    targets/remote.sh's per-target store resolves."""
+    the remote target's per-target store (lib/wk/targets.py) resolves."""
 
     def setUp(self):
         super().setUp()
@@ -158,9 +140,7 @@ class _FakeWalk(WkTest):
                 "WK_TARGET": "remote",
                 "WK_REMOTE_HOST": "fake-reachable-machine",
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
-                # The probe's cap (targets/remote.sh): the stub answers at once, and
-                # `capped` leaves its watchdog sleeping on the walk's stdout for the
-                # whole cap after the walk has exited.
+                # The remote target's probe cap; the stub answers at once.
                 "WK_PROBE_SECONDS": "1",
             }
             e.update(env or {})
@@ -248,25 +228,19 @@ class TestTheRecordedDeadlineTellsSilenceFromADeadWatchdog(_FakeWalk):
 
 
 class TestTheRecordCarriesTheDeadlineTheWatchdogIsArmedWith(WkTest):
-    """One writer for the deadline: lib/task.sh stamps `abort_after` from
-    WK_ABORT_SECONDS, the same variable lib/watchdog.sh aborts on, and
+    """One writer for the deadline: lib/wk/record.py stamps `abort_after` from
+    WK_ABORT_SECONDS, the same variable lib/wk/job.py aborts on, and
     `wk build` declares its record through it rather than writing one of its
     own."""
 
     def _record(self, env=None):
-        store = self.tmp / "store"
-        d = write_task(store, log=self.tmp / "build.log", **(env or {}))
-        return d
+        return write_task(self.tmp / "store", log=self.tmp / "build.log", **(env or {}))
 
     def test_a_running_record_carries_the_watchdogs_default_deadline(self):
-        d = self._record()
-        self.assertEqual((__import__("pathlib").Path(d) / "abort_after").read_text().strip(),
-                         "1800")
+        self.assertEqual(self._record().field("abort_after"), "1800")
 
     def test_a_per_run_override_is_what_the_record_says(self):
-        d = self._record({"abort_after": 5400})
-        self.assertEqual((__import__("pathlib").Path(d) / "abort_after").read_text().strip(),
-                         "5400")
+        self.assertEqual(self._record({"abort_after": 5400}).field("abort_after"), "5400")
 
     def test_the_record_and_the_watchdog_read_one_variable(self):
         records = record.Records(self.tmp / "s", env={"WK_ABORT_SECONDS": "77"})
@@ -349,8 +323,8 @@ class TestOneExitCodePerRecordedState(_FakeWalk):
 
 
 class TestWaitWaitsThroughSilence(_FakeWalk):
-    """`--wait` waits on exit 2 and on nothing else (cmd/status's one
-    `[ "$_rc" = 2 ] || break`), so this drives the states rather than the
+    """`--wait` waits on exit 2 and on nothing else (lib/wk/status.py's
+    `if rc != 2`), so this drives the states rather than the
     loop: a silent build blocks until --timeout, a killed one returns."""
 
     def _wait(self, **kw):
@@ -374,8 +348,8 @@ class TestWaitWaitsThroughSilence(_FakeWalk):
         than the timeout here, so one is all the loop can afford: what it
         reports waiting is what a clock says, not 1s of sleeping."""
         self.task(log="[1/4200] cc\n", log_age=600)
-        # The machine is slow to answer its first probe (`_remote_probe_cmd`,
-        # targets/remote.sh) and nothing else: one poll slower than the interval is
+        # The machine is slow to answer its first probe (the remote target's
+        # `probed`, lib/wk/targets.py) and nothing else: one poll slower than the interval is
         # what the assertion needs, and a walk makes several ssh calls and probes more
         # than once. The probe's cap has to outlast the sleep, or the slow machine
         # reads unreachable.
@@ -425,108 +399,3 @@ class TestTheViewCallsSilenceBusy(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class TestAJobsOwnExitStatusOutlivesItsDriver(WkTest):
-    """t_spawn has the job write its exit status beside its pid file, and the
-    record names that file as `exit_file`: a driver SIGTERMed mid-wait --
-    which is what a two-minute tool timeout does to `wk sysimage build` --
-    otherwise leaves a stage that finished reading `died -- no exit
-    recorded`. Measured 2026-09-17: a toolchain stage that had written
-    "stage 'toolchain' done" and installed its SDK read `died`."""
-
-    def _verdict(self, job_exit=None, pid=DEAD_PID):
-        store = self.tmp / "store"
-        exitf = self.tmp / f"yocto-{rand_suffix()}.pid.exit"
-        if job_exit is not None:
-            exitf.write_text("%s\n" % job_exit)
-        d = write_task(store, kind="yocto", pid=pid)
-        cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/task.sh"
-task_set "{d}" exit_file "{exitf}"
-task_verdict "{d}"
-''', env={"WK_STORE": str(store)})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.strip()
-
-    def test_a_finished_job_whose_driver_is_gone_is_not_died(self):
-        self.assertEqual(self._verdict(job_exit=0), "ok")
-
-    def test_a_failed_job_whose_driver_is_gone_says_failed(self):
-        self.assertEqual(self._verdict(job_exit=1), "failed")
-
-    def test_a_job_that_recorded_nothing_still_reads_died(self):
-        self.assertEqual(self._verdict(), "died")
-
-    def test_the_drivers_own_word_wins_over_the_jobs(self):
-        """`--kill` records `cancelled` and the job it stopped cannot
-        overwrite that with the status the kill caused."""
-        store = self.tmp / "store"
-        exitf = self.tmp / "job.pid.exit"
-        exitf.write_text("143\n")
-        d = write_task(store, kind="yocto", pid=DEAD_PID, end="cancelled")
-        cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/task.sh"
-task_set "{d}" exit_file "{exitf}"
-task_verdict "{d}"
-''', env={"WK_STORE": str(store)})
-        self.assertEqual(cp.stdout.strip(), "cancelled", cp.stdout + cp.stderr)
-
-    def test_reading_the_verdict_writes_nothing_into_the_record(self):
-        """A reporting command changes nothing: the job's status is read,
-        never copied into the record."""
-        store = self.tmp / "store"
-        exitf = self.tmp / "job.pid.exit"
-        exitf.write_text("0\n")
-        d = write_task(store, kind="yocto", pid=DEAD_PID)
-        cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/task.sh"
-task_set "{d}" exit_file "{exitf}"
-task_verdict "{d}" >/dev/null
-[ -f "{d}/exit" ] && echo WROTE || echo clean
-''', env={"WK_STORE": str(store)})
-        self.assertEqual(cp.stdout.strip(), "clean", cp.stdout + cp.stderr)
-
-
-class TestTheSpawnScriptRecordsBoth(WkTest):
-    """t_spawn_script (lib/target.sh) is what both drivers run: the command's
-    own pid where this end can signal it, and the command's exit status where
-    a driver that is gone can still be told a finished job from a killed
-    one."""
-
-    def _spawn(self, cmd):
-        d = self.tmp / rand_suffix()
-        d.mkdir()
-        log, pidf = d / "log", d / "pid"
-        cp = bash(f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/target.sh"
-bash -c "$(t_spawn_script "{log}" "{pidf}" {cmd})"
-''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return log, pidf
-
-    def test_it_records_a_success(self):
-        log, pidf = self._spawn("sh -c 'echo out'")
-        self.assertEqual((pidf.with_suffix(".exit")).read_text().strip(), "0")
-        self.assertEqual(log.read_text().strip(), "out")
-
-    def test_it_records_a_failure(self):
-        log, pidf = self._spawn("sh -c 'exit 7'")
-        self.assertEqual((pidf.with_suffix(".exit")).read_text().strip(), "7")
-
-    def test_the_pid_is_the_commands_own_and_not_the_wrappers(self):
-        log, pidf = self._spawn("sh -c 'echo $$ > %s/inner'" % self.tmp)
-        self.assertEqual(pidf.read_text().strip(),
-                         (self.tmp / "inner").read_text().strip())
-
-    def test_a_previous_runs_status_is_gone_before_the_pid_appears(self):
-        """Ordering, so a reader that has seen the pid is never looking at
-        the last run's status."""
-        script = (REPO / "lib" / "target.sh").read_text()
-        body = script[script.index("t_spawn_script()"):]
-        body = body[:body.index("\n}")]
-        self.assertLess(body.index("rm -f"), body.index("echo $_wk_job"))

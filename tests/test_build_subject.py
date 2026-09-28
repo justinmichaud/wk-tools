@@ -5,7 +5,7 @@ process and not one kind:
 
   * `wk status` said a build was running and not what it was building, so an
     instrumented slot and the measured one beside it read alike, and a number
-    from the first is not this engine's (image_build_subject, lib/image.sh);
+    from the first is not this engine's (images.build_subject);
   * build/mem-watchdog.sh walked the process tree under the build, and
     bitbake's cooker detaches out of it -- so the same stage was killed on the
     machine floor at "peak 96MB of budget 12800MB" while it held gigabytes
@@ -15,64 +15,45 @@ process and not one kind:
 
 Run: python3 -m unittest tests.test_build_subject -v
 """
-import json
 import os
 import subprocess
+import sys
 import unittest
 
 from tests.support import REPO, WkTest, bash, builds_on_the_books_env, func_body, run
 
-LIBS = "\n".join('. "%s/%s"' % (REPO, f) for f in (
-    "lib/common.sh", "lib/store.sh", "lib/target.sh", "lib/image.sh"))
+sys.path.insert(0, str(REPO / "lib"))
+from wk import images  # noqa: E402
 
 SHA = "a" * 40
+WS = "yocto-p"
 
 
 class TestABuildSaysWhatItIsOf(WkTest):
-    def _subject(self, *args):
-        cp = bash(LIBS + "\nimage_build_subject " + " ".join("'%s'" % a for a in args))
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.strip()
-
-    def test_an_instrumented_slot_says_it_is_not_a_measurement(self):
-        got = self._subject("yocto-p", "webkit", "base-instr", SHA, "wpe-cross-pgo-collect")
-        self.assertIn("base-instr", got)
-        self.assertIn("yocto-p", got)
-        self.assertIn(SHA[:12], got)
-        self.assertIn("not a measurement", got)
+    """images.build_subject; the instrumented slot and the mix stage are tests/test_images.py's."""
 
     def test_the_measured_build_says_which_it_is(self):
-        got = self._subject("yocto-p", "webkit", "base", SHA, "wpe-cross-pgo-use")
+        got = images.build_subject(WS, "webkit", "base", SHA, "wpe-cross-pgo-use")
         self.assertIn("the measured build", got)
         self.assertNotIn("not a measurement", got)
 
     def test_a_slot_built_without_a_profile_says_so(self):
-        got = self._subject("yocto-p", "webkit", "base", SHA, "wpe-cross")
-        self.assertIn("without a profile", got)
+        self.assertIn("without a profile", images.build_subject(WS, "webkit", "base", SHA, "wpe-cross"))
 
     def test_the_two_are_not_the_same_words(self):
         """The whole point: a reader can tell them apart at a glance."""
-        collect = self._subject("yocto-p", "webkit", "base-instr", SHA,
-                                "wpe-cross-pgo-collect")
-        use = self._subject("yocto-p", "webkit", "base", SHA, "wpe-cross-pgo-use")
-        self.assertNotEqual(collect, use)
+        self.assertNotEqual(images.build_subject(WS, "webkit", "base-instr", SHA, "wpe-cross-pgo-collect"),
+                            images.build_subject(WS, "webkit", "base", SHA, "wpe-cross-pgo-use"))
 
-    def test_the_mix_stage_says_which_slots_collection(self):
-        got = self._subject("yocto-p", "pgo-mix", "base", "", "")
-        self.assertIn("mixing", got)
-        self.assertIn("base", got)
+    def test_an_image_stage_says_the_stage_and_the_image_workspace(self):
+        self.assertEqual(images.build_subject(WS, "image", "", "", ""), "image stage of " + WS)
 
-    def test_an_image_stage_says_the_stage_and_the_lane(self):
-        got = self._subject("yocto-p", "image", "", "", "")
-        self.assertIn("image stage", got)
-        self.assertIn("yocto-p", got)
-
-    def test_the_lane_is_named_every_time(self):
-        """Two lanes of one profile build two different things, so the lane is
-        the subject's first fact."""
+    def test_the_image_workspace_is_named_every_time(self):
+        """Two image workspaces of one profile build two different things, so the
+        workspace is the subject's first fact."""
         for stage in ("webkit", "pgo-mix", "image"):
             with self.subTest(stage=stage):
-                self.assertIn("yocto-p", self._subject("yocto-p", stage, "s", SHA, "wpe-cross"))
+                self.assertIn(WS, images.build_subject(WS, stage, "s", SHA, "wpe-cross"))
 
 
 class TestTheRecordCarriesIt(WkTest):

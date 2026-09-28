@@ -334,7 +334,7 @@ def _staged(w, which):
 
 
 def _board(w, slot):
-    w.boards = [("rpi5", {"NODE_BENCH_SSH": "rpi5-bench"})]
+    w.boards = [("rpi5", {"bench_ssh": "rpi5-bench"})]
     for n in ("a", "a.part", "a-instr"):
         w.board.mkdirs("/var/wk/slots/" + n)
     return lambda: "/var/wk/slots/" + slot not in w.board.dirs and "/var/wk/slots/a" in w.board.dirs

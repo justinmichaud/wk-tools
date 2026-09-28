@@ -18,17 +18,15 @@ tty, so both cases already exercise "redirected stdout drops colour"; the
 `NO_COLOR` cases additionally prove the environment variable is read at all,
 not merely irrelevant because nothing here was ever going to be a tty.
 
-A positive control accompanies each: `render_text` given `colour=True`
+A positive control accompanies each: `render_text_stream` given `colour=True`
 against the exact same document does emit ESC, so "no ESC" above is the
 decision at work, not a renderer that never had colour to lose.
 
 Run: python3 -m unittest tests.test_owed_cli_color -v
 """
-import importlib.util
-import json
+import io
 import os
 import re
-import tempfile
 import sys
 import types
 import unittest
@@ -39,11 +37,6 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import statusview  # noqa: E402
 
 ESC = "\033["
-
-
-def _load_status_view():
-    return statusview
-
 
 
 def _decide(is_tty, no_color_set):
@@ -73,32 +66,17 @@ class TestColourDecisionLiftedDirectly(unittest.TestCase):
         self.assertFalse(_decide(is_tty=False, no_color_set=True))
 
 
-def _sample_doc(mod):
-    """A minimal but complete document, built the way test_status.py's
-    `render()` builds one -- real records folded through the module's own
-    Merger (`read_doc`), not a hand-assembled dict guessing at every key
-    render_machine_block happens to read today."""
+def _render(colour):
+    """Real records through the streaming renderer `wk status --text` uses."""
     records = [
         {"kind": "machine", "name": "buildbox4"},
-        {
-            "kind": "workspace",
-            "machine": "buildbox4",
-            "method": "container",
-            "name": "demo",
-            "state": "running",
-            "branch": "main",
-            "base": "main",
-        },
+        {"kind": "workspace", "machine": "buildbox4", "method": "container", "name": "demo",
+         "state": "running", "branch": "main", "base": "main"},
         {"kind": "exit", "code": 0},
     ]
-    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, dir="/tmp") as fh:
-        for rec in records:
-            fh.write(json.dumps(rec) + "\n")
-        path = fh.name
-    try:
-        return mod.read_doc(path)
-    finally:
-        os.unlink(path)
+    out = io.StringIO()
+    statusview.render_text_stream(iter(records), out, colour)
+    return out.getvalue()
 
 
 class TestRenderTextHonoursTheColourFlag(unittest.TestCase):
@@ -107,13 +85,11 @@ class TestRenderTextHonoursTheColourFlag(unittest.TestCase):
     with nothing to colour in the first place."""
 
     def test_colour_true_emits_esc(self):
-        mod = _load_status_view()
-        out = mod.render_text(_sample_doc(mod), True)
+        out = _render(True)
         self.assertIn(ESC, out, out)
 
     def test_colour_false_emits_no_esc(self):
-        mod = _load_status_view()
-        out = mod.render_text(_sample_doc(mod), False)
+        out = _render(False)
         self.assertNotIn(ESC, out, out)
 
 
@@ -152,9 +128,7 @@ class TestEndToEndTextModeHasNoEscBytes(WkTest):
                 "WK_REMOTE_HOST": "fake-reachable-machine",
                 "WK_REMOTE_ROOT": str(root),
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
-                # The probe's cap (targets/remote.sh): the stub answers at once, and
-                # `capped` leaves its watchdog sleeping on the walk's stdout for the
-                # whole cap after the walk has exited.
+                # The probe's cap: the stub answers at once.
                 "WK_PROBE_SECONDS": "1",
             }
             if no_color:

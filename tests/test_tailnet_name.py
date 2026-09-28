@@ -1,6 +1,6 @@
 """The tailnet name a system `wk sysimage write` seeds onto a card is the
-board's, by role: a bench system joins as NODE_BENCH_SSH (`<board>-bench`), a
-rescue as NODE_SSH -- `<board>-rescue` on a bench device, the workstation's
+board's, by role: a bench system joins as bench_ssh (`<board>-bench`), a
+rescue as ssh -- `<board>-rescue` on a bench device, the workstation's
 own name on a workstation (rpi5), whose own install is never written. Two
 names because each written system is its own tailnet node, and a second
 join under a name already on the tailnet comes up renamed --
@@ -11,7 +11,7 @@ Run: python3 -m unittest tests.test_tailnet_name -v
 import sys
 import unittest
 
-from tests.support import FLEET_ENV, REPO, WkTest, bash
+from tests.support import FLEET_ENV, REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import fleet  # noqa: E402
@@ -19,6 +19,9 @@ from wk.sysimage import write  # noqa: E402
 
 
 class TestBenchName(WkTest):
+    def _conf(self, machine):
+        return fleet.Fleet(REPO, FLEET_ENV).load(machine)
+
     def _name_for(self, machine, role="bench"):
         return write.tailnet_name(fleet.Fleet(REPO, FLEET_ENV), machine, role)
 
@@ -38,14 +41,14 @@ class TestBenchName(WkTest):
 
     def test_the_rpi5_workstation_keeps_its_own_name(self):
         """the rpi5's own install stays `rpi5`: only the stick is renamed"""
-        cp = bash(f'. "{REPO}/lib/common.sh"; . "{REPO}/boot/machines.sh"; machine_load rpi5; echo "$NODE_SSH"')
-        self.assertEqual(cp.stdout.strip(), "rpi5", cp.stdout + cp.stderr)
+        self.assertEqual(self._conf("rpi5")["ssh"], "rpi5")
 
     def test_a_bench_device_declares_both_names(self):
         for board in ("rpi3", "rpi4"):
             with self.subTest(board=board):
-                cp = bash(f'. "{REPO}/lib/common.sh"; . "{REPO}/boot/machines.sh"; machine_load {board}; echo "$NODE_ROLE $NODE_SSH $NODE_BENCH_SSH"')
-                self.assertEqual(cp.stdout.split(), ["bench-device", f"{board}-rescue", f"{board}-bench"], cp.stdout + cp.stderr)
+                c = self._conf(board)
+                self.assertEqual([c["role"], c["ssh"], c["bench_ssh"]],
+                                 ["bench-device", f"{board}-rescue", f"{board}-bench"])
 
     def test_a_machine_with_no_written_system_has_no_name_to_seed(self):
         """benchvm (a guest, reached through the host) has nothing to seed"""

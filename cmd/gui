@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 #
 # wk gui <workspace> [<url>] [flags] -- run MiniBrowser in the benchmark seat
-# wk: where=workspace name=required ready=yes forward=no group=workspaces takes=1 passthrough
-# wk: opts --config=,--wpe,--gtk,--mac,--no-fullscreen,--lldb=
+# wk: where=workspace name=required ready=yes forward=no group=workspaces takes=1 passthrough config=--config dryrun
+# wk: opts --config=,--no-fullscreen,--lldb=
+# wk: gone --wpe --config wpe-release
+# wk: gone --gtk --config gtk-release
+# wk: gone --mac --config mac-release
 #
 # The same launch a perf run performs (Tools/Scripts/run-minibrowser), without
 # the benchmark around it. Refuses when there is no session to draw into.
 #
 #   [<url>]                page to load (default: about:blank)
-#   --config <config>      build config to run (default: per-host/workspace);
-#                          `wk build --list` lists every name
-#   --wpe, --gtk, --mac    shorthand for --config wpe-release / gtk-release / mac-release
+#   --config <config>      build config to run (default: the last build's inside a
+#                          workspace, else mac-release on macOS and wpe-release elsewhere)
 #   --no-fullscreen        skip the port's fullscreen flag (WPE: --fullscreen,
 #                          GTK: --full-screen; the Apple port has neither)
 #   --lldb <ui|web>        run under lldb: "ui" stops before start; "web"
@@ -18,34 +20,26 @@
 #   -- <args>              extra arguments passed straight to the browser
 
 import os
+import shlex
 import sys
 
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import buildconf, decl, session, shell, targets  # noqa: E402
-from wk.ldpath import LLDB_PIN_OPTS, LLDB_PRELUDE  # noqa: E402
+from wk import buildconf, decl, session, targets  # noqa: E402
+from wk.ldpath import LLDB_PIN_OPTS, LLDB_PRELUDE, lldb_waiting  # noqa: E402
 from wk.act import Refused, die, exec_into, info, log, warn  # noqa: E402
 from wk.machine import is_macos  # noqa: E402
 
 
 def parse(argv):
     args = decl.Args(decl.Decl(__file__), argv)
-    # Whichever of --config/--wpe/--gtk/--mac is typed last wins, the same as
-    # any repeated option -- so the config each names is read back in the order seen.
-    config_named = {"--config": args.value("--config"), "--wpe": "wpe-release" if args.flag("--wpe") else None,
-                    "--gtk": "gtk-release" if args.flag("--gtk") else None, "--mac": "mac-release" if args.flag("--mac") else None}
-    config = None
-    for opt in args.order:
-        named = config_named.get(opt)
-        if named is not None:
-            config = named
     debug = args.value("--lldb") or ""
     if debug and debug not in ("ui", "web"):
         die("--lldb takes ui or web, not '%s'" % debug)
     fullscreen = not args.flag("--no-fullscreen")
     url = args.positionals[0] if args.positionals else ""
-    return {"config": config, "url": url, "fullscreen": fullscreen, "tail": args.tail, "debug": debug}
+    return {"url": url, "fullscreen": fullscreen, "tail": args.tail, "debug": debug}
 
 
 def gui_default_config(reg, name):
@@ -99,7 +93,7 @@ def main(argv):
             "    '%s' is a remote target, an arbitrary machine reached over ssh with no seat\n"
             "    of its own to draw into. Use a container or vm workspace instead." % name)
 
-    config = opts["config"] or os.environ.get("WK_CONFIG") or gui_default_config(reg, name)
+    config = os.environ.get("WK_CONFIG") or gui_default_config(reg, name)
     try:
         cfg = buildconf.resolve(config, target.os(), target.kind, target.env)
     except LookupError:
@@ -124,16 +118,16 @@ def main(argv):
         die("no MiniBrowser at %s -- wk build %s %s" % (browser, name, config))
 
     run_env = "" if is_macos() else session_env(ROOT)
-    extra_q = shell.sh_quote(*opts["tail"])
+    extra_q = shlex.join(opts["tail"])
     type_flag = "--" + cfg.type.lower()
 
     if cfg.buildsys == "xcode":
         launch_env = cfg.browser_env(src)
-        launch_cmd = "%s %s %s %s" % (shell.sh_quote(browser), cfg.browser_url_flag(), shell.sh_quote(url), extra_q)
+        launch_cmd = "%s %s %s %s" % (shlex.quote(browser), cfg.browser_url_flag(), shlex.quote(url), extra_q)
         ui_prefix = ""
     else:
         launch_env = ("WPE_BROWSER=minibrowser " + run_env).rstrip()
-        launch_cmd = "Tools/Scripts/run-minibrowser %s %s -- %s %s %s" % (cfg.port, type_flag, fs_flag, shell.sh_quote(url), extra_q)
+        launch_cmd = "Tools/Scripts/run-minibrowser %s %s -- %s %s %s" % (cfg.port, type_flag, fs_flag, shlex.quote(url), extra_q)
         ui_prefix = 'WEBKIT_MINI_BROWSER_PREFIX="$LLDB %s %s --"' % (target.lldb_opts(), LLDB_PIN_OPTS)
 
     if opts["debug"] == "":
@@ -166,14 +160,10 @@ def main(argv):
     log("  the live page, and stays there ('reattach' catches the next one at")
     log("  launch instead, for debugging it from the start). Re-set breakpoints.")
     log("  browser output: /tmp/wk-gui.log (in the workspace)")
-    run = ("cd %s && ( sleep 2; %s %s %s >/tmp/wk-gui.log 2>&1 ) & "
-          'exec "$LLDB" %s -o %s -o %s -o %s -o %s'
-          % (src, launch_env, cfg.web_process_pause_env(), launch_cmd, LLDB_PIN_OPTS,
-             shell.sh_quote("command script import %s/container/lldb/webprocess.py" % target.tools(name)),
-             shell.sh_quote("command alias follow-page wk-follow-page %s" % web_proc),
-             shell.sh_quote("command alias reattach process attach --name %s --waitfor" % web_proc),
-             shell.sh_quote("process attach --name %s --waitfor" % web_proc)))
-    cmd = "%s\n%s" % (LLDB_PRELUDE, run)
+    cmd = lldb_waiting("cd %s && %s %s %s" % (src, launch_env, cfg.web_process_pause_env(), launch_cmd), "/tmp/wk-gui.log", web_proc,
+                       "command script import %s/container/lldb/webprocess.py" % target.tools(name),
+                       "command alias follow-page wk-follow-page %s" % web_proc,
+                       "command alias reattach process attach --name %s --waitfor" % web_proc)
     argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=True)
     exec_into(argv_, cwd)
 

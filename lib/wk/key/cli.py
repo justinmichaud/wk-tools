@@ -5,7 +5,7 @@ import sys
 
 from wk.act import die, log, warn
 from wk.key.check import Check
-from wk.key.common import LOGIN, TOMBSTONES, GitHub, prompt_secret, summary
+from wk.key.common import LOGIN, GitHub, prompt_secret, summary
 from wk.key.creds import Creds
 from wk.key.deploy import DeployKeys
 from wk.key.election import Election
@@ -156,6 +156,3 @@ def main(root, verb, arg="", rotate=False, replace=False, paste=False, env=None,
         return rc
     if verb == "adopt":
         return k.adopt_verb(arg, stdin)
-    if verb in TOMBSTONES:
-        die("'wk key %s' is now:  %s\n    'wk key setup' does every credential this machine has not got yet." % (verb, TOMBSTONES[verb]))
-    die("'%s' is not a verb of wk key; see wk key -h" % verb)

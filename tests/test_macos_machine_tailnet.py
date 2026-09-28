@@ -1,20 +1,20 @@
 """The podman machine is a tailnet node of its own (host/macos/machine.sh).
 
-It holds this workstation's lanes, and a lane's bytes reach a board over the
+It holds this workstation's image workspaces, and their slots reach a board over the
 tailnet -- so the half that can read the store has to be the half that can
 reach the board, or neither can. gvproxy answers a 100.x address itself
 (measured 2026-09-16: ping replies in 0.13ms and a connection to port 22 is
 accepted) and delivers nothing, so the machine joins rather than being routed.
 
 Its workspaces do not join with it: they run `--network none` and reach the
-world only through the egress proxy's socket (targets/container.sh), so this
+world only through the egress proxy's socket (lib/wk/targets.py's Container), so this
 is not a hole in the sandbox -- the sandbox is the container, not the VM.
 
 The block is lifted out of the stage and driven against a `podman` stub that
 records its argv, the tests/test_macos_machine_disk.py idiom: no machine is
 created, started or joined, and no key leaves this test.
 
-Run: python3 -m unittest tests.test_macos_machine_tailnet -v
+Run: python3 tests/run.py -k test_macos_machine_tailnet
 """
 import unittest
 
@@ -27,7 +27,7 @@ STAGE = REPO / "host" / "macos" / "machine.sh"
 PODMAN_STUB = """#!/bin/sh
 printf '%s\\n' "$*" >> "$WK_TEST_PODMAN_LOG"
 case "$*" in
-    *"--format {{.State}}"*)     echo "${WK_TEST_STATE:-running}" ;;
+    "machine inspect wk")        printf '[{"State":"%s"}]\\n' "${WK_TEST_STATE:-running}" ;;
     *"command -v tailscale"*)    [ -n "$WK_TEST_NO_TS" ] && exit 1 ;;
     *"tailscale status --json"*) printf '%s' "$WK_TEST_TS_JSON" ;;
     *"tailscale up"*)            exit "${WK_TEST_UP_RC:-0}" ;;
@@ -42,7 +42,7 @@ RUNNING = '{"BackendState": "Running", "Self": {"TailscaleIPs": ["100.1.2.3"]}}'
 def tailnet_block():
     """From the comment that opens it to the `unset` that closes it."""
     text = STAGE.read_text()
-    start = text.index("# The machine holds this workstation's lanes")
+    start = text.index("# The machine holds this workstation's image workspaces")
     end = text.index("unset -f _ts _ts_state", start) + len("unset -f _ts _ts_state")
     return text[start:end]
 
@@ -55,8 +55,7 @@ class TailnetStage(WkTest):
         with stub_path({"podman": PODMAN_STUB}) as binp:
             cp = bash(
                 f'. "{REPO}/lib/common.sh"\n'
-                f'. "{REPO}/lib/store.sh"\n'
-                'WK_MACHINE=wk\n'
+                'WK_MACHINE=wk; export WK_MACHINE\n'
                 'wk_machine_name() { echo probehost; }\n'
                 + ("" if key else 'wk_tailscale_authkey() { return 1; }\n')
                 + tailnet_block() + "\n",
@@ -132,16 +131,6 @@ class TestWhatItWillNotDo(TailnetStage):
         cp = self.run_block({"WK_DRY_RUN": "1"})
         self.assertIn("dry run", cp.stdout + cp.stderr)
         self.assertNotIn("tailscale up", self.log)
-
-
-class TestTheWorkspacesDoNotJoinWithIt(unittest.TestCase):
-    """The sandbox is the container, not the VM: a workspace has no network
-    interface at all, so putting the machine on the tailnet reaches none of
-    them."""
-
-    def test_a_workspace_container_has_no_network(self):
-        text = (REPO / "targets" / "container.sh").read_text()
-        self.assertIn("--network none", text)
 
 
 if __name__ == "__main__":

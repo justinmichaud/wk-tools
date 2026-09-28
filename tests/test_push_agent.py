@@ -25,27 +25,23 @@ import sys
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, THIS_HOST, WkTest, bash, requires_podman_vm
+from tests.support import REPO, THIS_HOST, WkTest, bash, requires_container_target
 from tests.test_wk_key import GOOD, KeyTest
 from tests.test_wk_secrets import KEY_SH, SOCK
 
 sys.path.insert(0, str(REPO / "lib"))
+from wk import secrets, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Local  # noqa: E402
+from wk.machine import Fake, Local, Result  # noqa: E402
 from wk.secrets import Secrets  # noqa: E402
+from wk.store import Store  # noqa: E402
 
 FORKS = ("fork", "forkwpe")
 
-# An exec function that records every command line it is given and runs it
-# here. Stands in for `podman machine ssh wk --` without a machine: what is
-# under test is what push_agent_* *sends*, and a log of that is the evidence
-# for "the key was never an argument".
-FAKE_EXEC = '''
-_fake_exec() {
-    printf '%s\\n' "$1" >> "$WK_TEST_EXEC_LOG"
-    sh -c "$1"
-}
-'''
+
+def store_init(env, extra=""):
+    """`python3 -m wk.targets store-init`, what host/linux/machine.sh runs, then `extra` (bash with KEY_SH's key_store)."""
+    return bash('PYTHONPATH="$WK_ROOT/lib" python3 -m wk.targets store-init || exit\n' + KEY_SH + extra, env=env)
 
 
 def have_ssh_agent():
@@ -58,7 +54,7 @@ class _Agent(WkTest):
     laid out the way this machine lays them out: private halves in the
     never-mounted directory, public halves in the mounted one.
 
-    wk_secrets_dir (lib/store.sh) reads WK_HOST_SECRETS on a macOS host and
+    Store.secrets_dir reads WK_HOST_SECRETS on a macOS host and
     $WK_STORE/secrets everywhere else, so the two names are one directory."""
 
     def setUp(self):
@@ -69,8 +65,6 @@ class _Agent(WkTest):
         self.secrets.mkdir(parents=True)
         self.held.mkdir(parents=True)
         (self.store / "ws").mkdir(parents=True)
-        self.log = self.tmp / "exec.log"
-        self.log.write_text("")
 
         for fork in FORKS:
             priv = self.held / f"build_key_{fork}"
@@ -99,7 +93,6 @@ class _Agent(WkTest):
         e = {
             "WK_HOST_SECRETS": str(self.secrets),
             "WK_STORE": str(self.store),
-            "WK_TEST_EXEC_LOG": str(self.log),
             "WK_PUSH_AGENT_SOCK": str(self.sock),
             "WK_PUSH_PAT_FILE": str(self.tmp / "pat"),
             "WK_PUSH_READ_PAT_FILE": str(self.tmp / "read-pat"),
@@ -111,23 +104,15 @@ class _Agent(WkTest):
             e.update(extra)
         return e
 
-    def sh(self, script, env=None):
-        return bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
-                    + FAKE_EXEC + script,
-                    env=self.env(env))
-
     def ssh_add(self, *args):
         return subprocess.run(["ssh-add", *args],
                               env={**os.environ, "SSH_AUTH_SOCK": str(self.sock)},
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                               text=True)
 
-    def exec_log(self):
-        return self.log.read_text()
-
-    def py_secrets(self):
+    def py_secrets(self, machine=None):
         """lib/wk/secrets.py over this host, every command line it runs kept in self.machine.argvs."""
-        self.machine = _Recording()
+        self.machine = machine or _Recording()
         return Secrets(REPO, self.env(), self.machine)
 
 
@@ -137,6 +122,16 @@ class _Recording(Local):
 
     def run(self, argv, input=None, timeout=None):
         self.argvs.append(argv)
+        return super().run(argv, input=input, timeout=timeout)
+
+
+class _FarSideRefuses(_Recording):
+    """The machine that runs the workspaces is not there: every shell line meant for it fails."""
+
+    def run(self, argv, input=None, timeout=None):
+        if argv[:2] == ["sh", "-c"]:
+            self.argvs.append(argv)
+            return Result(1)
         return super().run(argv, input=input, timeout=timeout)
 
 
@@ -176,6 +171,13 @@ class TestThePythonSwitchAgainstARealAgent(_Agent):
         self.assertTrue(s.cred_present(str(pat)))
         self.assertNotIn("ghp-not-a-real-token", repr(self.machine.argvs))
         s.cred_clear(str(pat))
+        self.assertFalse(pat.exists())
+
+    def test_writing_with_no_token_here_fails_rather_than_writing_nothing(self):
+        """An empty token file would be a token file: the injector reads the
+        first line and would send `Authorization: Bearer`."""
+        pat = self.tmp / "pat"
+        self.assertFalse(self.py_secrets().cred_write(str(pat), "github-pat"))
         self.assertFalse(pat.exists())
 
 
@@ -245,32 +247,6 @@ class TestARotatedCredentialReachesTheInjectorWhilePushIsOn(_Agent):
         self.assertEqual("the-new-key\n", bz.read_text())
 
 
-class TestTheApiToken(_Agent):
-    def test_the_token_is_written_and_removed_by_the_same_switch(self):
-        (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
-        pat = self.tmp / "pat"
-        cp = self.sh(f'push_agent_cred_write _fake_exec "{pat}" github-pat')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual("ghp-not-a-real-token\n", pat.read_text())
-        self.assertEqual(0o600, pat.stat().st_mode & 0o777)
-
-        self.sh(f'push_agent_cred_clear _fake_exec "{pat}"')
-        self.assertFalse(pat.exists())
-
-    def test_the_token_is_never_an_argument_either(self):
-        (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
-        self.sh(f'push_agent_cred_write _fake_exec "{self.tmp}/pat" github-pat')
-        self.assertNotIn("ghp-not-a-real-token", self.exec_log())
-
-    def test_writing_with_no_token_here_fails_rather_than_writing_nothing(self):
-        """An empty token file would be a token file: the injector reads the
-        first line and would send `Authorization: Bearer`."""
-        pat = self.tmp / "pat"
-        cp = self.sh(f'push_agent_cred_write _fake_exec "{pat}" github-pat')
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertFalse(pat.exists())
-
-
 class TestTheBugzillaKey(_Agent):
     """The Bugzilla API key is the switch's alone: a Bugzilla key is one
     account with no read-only form, so no standing half exists and `wk push
@@ -290,8 +266,9 @@ class TestTheBugzillaKey(_Agent):
 
     def test_it_is_never_an_argument_either(self):
         (self.held / "bugzilla-api-key").write_text("not-a-real-bugzilla-key\n")
-        self.sh(f'push_agent_cred_write _fake_exec "{self.tmp}/bz" bugzilla-api-key')
-        self.assertNotIn("not-a-real-bugzilla-key", self.exec_log())
+        self.assertTrue(self.py_secrets().cred_write(str(self.tmp / "bz"), "bugzilla-api-key"))
+        self.assertEqual("not-a-real-bugzilla-key\n", (self.tmp / "bz").read_text())
+        self.assertNotIn("not-a-real-bugzilla-key", repr(self.machine.argvs))
 
     def test_on_without_one_says_so_and_leaves_no_file(self):
         (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
@@ -322,10 +299,12 @@ class TestTheStandingReadToken(_Agent):
     def read_pat(self):
         return self.tmp / "read-pat"
 
+    def sync(self, machine=None):
+        return self.py_secrets(machine).cred_sync(str(self.read_pat()), "github-pat")
+
     def test_it_is_written_from_the_token_this_device_holds(self):
         (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
-        cp = self.sh(f'push_agent_cred_sync _fake_exec "{self.read_pat()}" github-pat')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertTrue(self.sync())
         self.assertEqual("ghp-not-a-real-token\n", self.read_pat().read_text())
         self.assertEqual(0o600, self.read_pat().stat().st_mode & 0o777)
 
@@ -333,33 +312,27 @@ class TestTheStandingReadToken(_Agent):
         """Write-or-clear, not write-only: a `wk key set github-pat --replace`
         that stored nothing must not leave the old token on the machine."""
         self.read_pat().write_text("ghp-the-old-one\n")
-        cp = self.sh(f'push_agent_cred_sync _fake_exec "{self.read_pat()}" github-pat')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertTrue(self.sync())
         self.assertFalse(self.read_pat().exists())
 
     def test_it_is_never_an_argument_either(self):
         (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
-        self.sh(f'push_agent_cred_sync _fake_exec "{self.read_pat()}" github-pat')
-        self.assertNotIn("ghp-not-a-real-token", self.exec_log())
+        self.sync()
+        self.assertNotIn("ghp-not-a-real-token", repr(self.machine.argvs))
 
     def test_a_far_side_that_refuses_is_reported_not_swallowed(self):
         """The caller warns on this: the machine is stopped, and a workspace
         reads nothing until the next converging call."""
         (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
-        cp = self.sh('_no_exec() { return 1; }\n'
-                     f'push_agent_cred_sync _no_exec "{self.read_pat()}" github-pat && echo YES || echo NO')
-        self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
+        self.assertFalse(self.sync(_FarSideRefuses()))
+        self.assertFalse(self.read_pat().exists())
 
     def test_its_path_is_beside_the_switchs_and_carries_no_quotes(self):
         """It reaches `wk doctor` as user-facing text, and the far side's
-        quoting is push_agent_pat_*'s job (TestAPathWithASpaceInIt)."""
+        quoting is the writer's job (TestAPathWithASpaceInIt)."""
         store = self.tmp / "store"
-        cp = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
-                  'printf "[%s]\\n" "$(push_agent_machine_read_pat)"',
-                  env={**self.env(), "WK_STORE": str(store),
-                       "WK_PUSH_READ_PAT_FILE": ""})
-        self.assertEqual(f"[{store}/read-github-pat]", cp.stdout.strip())
-        self.assertNotIn("$", cp.stdout)
+        path = Secrets(REPO, {**self.env(), "WK_STORE": str(store), "WK_PUSH_READ_PAT_FILE": ""}, Local()).machine_read_pat()
+        self.assertEqual(f"{store}/read-github-pat", path)
 
     def test_the_switch_does_not_touch_it(self):
         """`wk push on|off` is over writing. A read that stopped working when
@@ -378,10 +351,15 @@ class TestTheStandingReadToken(_Agent):
         for f in ("host/macos/vmtools.sh", "host/linux/sdk.sh"):
             with self.subTest(host=f):
                 text = (REPO / f).read_text()
-                self.assertIn('push_agent_cred_sync push_agent_exec '
-                              '"$(push_agent_machine_read_pat)" github-pat', text)
+                self.assertIn("wk_py wk.secrets pat-converge", text)
                 self.assertLess(text.index("unit_start wk-github-inject.service"),
-                                text.index("push_agent_cred_sync"))
+                                text.index("wk.secrets pat-converge"))
+
+    def test_the_setup_entry_point_syncs_the_standing_copy(self):
+        (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
+        cp = bash('PYTHONPATH="$WK_ROOT/lib" python3 -m wk.secrets pat-converge', env=self.env())
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertEqual("ghp-not-a-real-token\n", self.read_pat().read_text())
 
     def test_the_switch_writes_and_removes_only_the_write_token(self):
         (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
@@ -443,16 +421,13 @@ class TestAPathWithASpaceInIt(_Agent):
 
     def test_the_token_round_trips_through_a_path_with_a_space(self):
         pat = self.spaced / "push-github-pat"
-        cp = self.sh(f'push_agent_cred_write _fake_exec "{pat}" github-pat')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        s = self.py_secrets()
+        self.assertTrue(s.cred_write(str(pat), "github-pat"))
         self.assertEqual("ghp-not-a-real-token\n", pat.read_text())
         self.assertEqual([pat.name], [p.name for p in self.spaced.iterdir()],
                          "the unquoted path made more than one file")
-
-        self.assertTrue(self.py_secrets().cred_present(str(pat)))
-
-        cp = self.sh(f'push_agent_cred_clear _fake_exec "{pat}"')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertTrue(s.cred_present(str(pat)))
+        self.assertTrue(s.cred_clear(str(pat)))
         self.assertFalse(pat.exists())
 
     def test_the_resolved_path_is_what_the_store_says_and_carries_no_quotes(self):
@@ -533,16 +508,16 @@ class TestAMachineWithNoAgentSaysSoRatherThanHeldBack(_Agent):
     MACHINE = "wk-test-buildbox"
 
     def env(self, extra=None):
-        """A machine that *is* a build box: a `remote` target of its own, which
-        names no t_agent_sock (lib/target.sh's default is `return 1`), and a
+        """A machine that *is* a build box: a `remote` target of its own, whose
+        agent_sock is None (lib/wk/targets.py), and a
         `.wk-remote` marker saying so -- which is what remote/provision.sh
         leaves behind and what makes `default_target` that target here."""
         registry = self.tmp / "registry"
         registry.mkdir(exist_ok=True)
         (registry / f"{self.MACHINE}.conf").write_text(
-            f"KIND=build\nWK_TARGET_KIND=remote\nWK_REMOTE_HOSTNAME={THIS_HOST}\n"
-            "WK_REMOTE_HOST=nonexistent.invalid\n"
-            f"WK_REMOTE_ROOT={self.tmp}\n")
+            f"kind=build\ndriver=remote\nhostname={THIS_HOST}\n"
+            "host=nonexistent.invalid\n"
+            f"root={self.tmp}\n")
         marker = self.tmp / "wk-remote"
         marker.write_text(f"target={self.MACHINE}\nroot={self.tmp}\n")
         return super().env({"WK_MACHINES_DIR": str(registry),
@@ -629,14 +604,17 @@ class TestTheSourceHasNoMoveLeft(unittest.TestCase):
         self.assertNotIn("/secrets/build_key_", text)
         self.assertIn("Include /secrets/ssh_config", text)
 
+    def registry(self):
+        return targets.Registry(REPO, {"HOME": "/nonexistent", "WK_STORE": "/nonexistent/store"}, Fake("here"))
+
     def test_the_container_target_names_the_socket_in_the_mounted_directory(self):
-        text = (REPO / "targets" / "container.sh").read_text()
-        self.assertIn("t_agent_sock() { echo /run/wk/ssh-agent.sock; }", text)
+        self.assertEqual("/run/wk/ssh-agent.sock", self.registry().load("container").agent_sock())
         self.assertIn('"--volume", "%s:/run/wk" % rt', (REPO / "lib" / "wk" / "targets.py").read_text())
 
     def test_a_target_with_no_agent_refuses_rather_than_guessing(self):
-        cp = bash('. "$WK_ROOT/lib/target.sh"; t_agent_sock && echo YES || echo NO')
-        self.assertIn("NO", cp.stdout)
+        for kind in ("remote", "local"):
+            with self.subTest(target=kind):
+                self.assertIsNone(self.registry().load(kind).agent_sock())
 
     def test_both_hosts_install_the_agent_unit(self):
         """One body, installed by both (tests/test_host_units.py holds the
@@ -657,7 +635,7 @@ def _machine(cmd, timeout=60):
                           text=True, timeout=timeout)
 
 
-@requires_podman_vm()
+@requires_container_target()
 class TestLiveAgentInTheMachine(unittest.TestCase):
     """The one thing no stub can answer: whether this machine's own agent is
     where every container's mount says it is. Read-only -- the switch is not
@@ -702,7 +680,7 @@ class TestLiveAgentInTheMachine(unittest.TestCase):
         self.assertIn("NO", cp.stdout, cp.stdout)
 
 
-@requires_podman_vm()
+@requires_container_target()
 @unittest.skipUnless(os.environ.get("WK_TEST_LIVE_PUSH") == "1",
                      "throws the real switch; set WK_TEST_LIVE_PUSH=1 to run it")
 class TestLivePushFromAContainer(unittest.TestCase):
@@ -734,10 +712,7 @@ class TestLivePushFromAContainer(unittest.TestCase):
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, timeout=180)
         self.assertEqual(0, cp.returncode, cp.stdout)
-        alias = subprocess.run(
-            ["bash", "-c", ". lib/common.sh; . lib/store.sh; "
-                           "wk_push_forks | awk 'NF{print $3; exit}'"],
-            cwd=str(REPO), stdout=subprocess.PIPE, text=True).stdout.strip()
+        alias = secrets.forks()[0][2]
         cp = subprocess.run([str(REPO / "wk"), "enter", ws,
                              "git", "ls-remote", f"git@{alias}:", "HEAD"],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -756,19 +731,11 @@ class TestASecretsDirectoryIsPublishedWithTheStore(WkTest):
 
     def _init(self):
         store = self.tmp / "store"
-        cp = bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target container >/dev/null 2>&1
-store_init
-printf %s "$(wk_secrets_dir)"
-''', env={"WK_STORE": str(store), "WK_STORE_DEFAULT": str(store),
-           "WK_HOST_SECRETS": str(store / "secrets"),
-           "XDG_STATE_HOME": str(self.tmp / "state")})
+        cp = store_init({"WK_STORE": str(store), "WK_STORE_DEFAULT": str(store),
+                         "WK_HOST_SECRETS": str(store / "secrets"),
+                         "XDG_STATE_HOME": str(self.tmp / "state")})
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        return Path(cp.stdout.strip())
+        return store / "secrets"
 
     def test_the_account_name_is_there_before_any_switch(self):
         secrets = self._init()
@@ -799,7 +766,7 @@ printf %s "$(wk_secrets_dir)"
 
 class TestWhatAContainerMountsAtSecrets(WkTest):
     """A container is handed its credentials by mounting a directory, so the
-    one it mounts holds exactly the rows wk_agent_secrets delivers to a
+    one it mounts holds exactly the rows AGENT_SECRETS (lib/wk/secrets.py) delivers to a
     container plus the public files. The store above it holds every row: the
     Claude token goes to a vm and a build box, and mounting the store whole
     puts it one `cat /secrets/claude-token` away from every workspace here."""
@@ -808,27 +775,21 @@ class TestWhatAContainerMountsAtSecrets(WkTest):
               "litellm-key": "every kind\n",
               "build_key_fork.pub": "ssh-ed25519 AAAA fork\n"}
 
-    def _publish(self, extra=""):
+    def env(self):
         store = self.tmp / "store"
-        secrets = store / "secrets"
+        return {"WK_STORE": str(store), "WK_STORE_DEFAULT": str(store),
+                "WK_HOST_SECRETS": str(store / "secrets"),
+                "XDG_STATE_HOME": str(self.tmp / "state")}
+
+    def _publish(self, extra=""):
+        secrets = self.tmp / "store" / "secrets"
         secrets.mkdir(parents=True, exist_ok=True)
         for name, text in self.SEEDED.items():
             (secrets / name).write_text(text)
-        cp = bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target container >/dev/null 2>&1
-store_init
-''' + KEY_SH + extra + '''
-printf %s "$(wk_secrets_view_dir container)"
-''', env={"WK_STORE": str(store), "WK_STORE_DEFAULT": str(store),
-           "WK_HOST_SECRETS": str(secrets),
-           "XDG_STATE_HOME": str(self.tmp / "state")})
+        cp = store_init(self.env(), extra)
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.last = cp
-        return secrets, Path(cp.stdout.strip().splitlines()[-1])
+        return secrets, secrets / "view" / "container"
 
     def test_with_no_mirror_the_bugzilla_login_is_absent_and_said_so(self):
         """The login is WebKit's record, read from the mirror; a machine with
@@ -843,14 +804,8 @@ printf %s "$(wk_secrets_view_dir container)"
         """metadata/contributors.json names each GitHub account's Bugzilla
         login -- the first email, webkitpy's Committer.bugzilla_email -- and
         the mirror is the copy every machine has, so nothing else records it."""
-        store = self.tmp / "store"
-        env = {"WK_STORE": str(store), "WK_STORE_DEFAULT": str(store),
-               "WK_HOST_SECRETS": str(store / "secrets"),
-               "XDG_STATE_HOME": str(self.tmp / "state")}
-        cp = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
-                  'printf "%s\\n%s\\n" "$(wk_mirror)" "$(wk_github_user)"', env=env)
-        mirror, user = cp.stdout.split()
-        mirror = Path(mirror)
+        mirror = Path(Store(self.env()).mirror())
+        user = Secrets(REPO, self.env(), Fake("here")).github_user()
         mirror.mkdir(parents=True)
         subprocess.run(["git", "init", "-q", "-b", "main", str(mirror)], check=True)
         (mirror / "metadata").mkdir()
@@ -892,9 +847,9 @@ printf %s "$(wk_secrets_view_dir container)"
 
 
 class TestOnlyTheOwningMachinePublishesSecrets(WkTest):
-    """/secrets has one publisher. Inside the podman VM wk_secrets_dir names
+    """/secrets has one publisher. Inside the podman VM Store.secrets_dir names
     the macOS host's ~/.config/wk/secrets, bind-mounted read-only, so a
-    store_init in there that wrote would die on `Read-only file system` and
+    store-init in there that wrote would die on `Read-only file system` and
     take `wk new` with it. In there it reads what the host published and says
     so when the host has published nothing."""
 
@@ -912,15 +867,7 @@ class TestOnlyTheOwningMachinePublishesSecrets(WkTest):
                "WK_HOST_SECRETS": str(secrets)}
         if in_vm:
             env["WK_IN_VM"] = "1"
-        cp = bash('''
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/target.sh"
-load_target container >/dev/null 2>&1
-store_init
-''', env=env)
-        return cp, secrets
+        return store_init(env), secrets
 
     def test_in_the_vm_a_read_only_secrets_dir_is_read_and_not_written(self):
         cp, secrets = self.init(True, secrets_ro=True,
@@ -992,8 +939,8 @@ class TestAskingAnotherMachine(WkTest):
         # WK_REMOTE_PEER is what a machine reached by delegation is: no
         # ~/.wk-remote marker of its own is required over there.
         (reg / "peerbox.conf").write_text(
-            f"KIND=peer\nWK_REMOTE_HOST=fake-peerbox\nWK_REMOTE_PEER=1\n"
-            f"WK_REMOTE_ROOT={root}\n")
+            f"kind=peer\nhost=fake-peerbox\npeer=1\n"
+            f"root={root}\n")
         self.log = self.tmp / "peer.log"
         self.log.write_text("")
         binp = self.tmp / "bin"
@@ -1044,14 +991,14 @@ class TestAMachineWithNoSwitchSaysSoWithACodeOfItsOwn(WkTest):
     "the switch is off" are the two answers `wk ai` must not confuse."""
 
     def _as_build_machine(self):
-        """What the dispatcher and lib/target.sh read on a shared build box:
+        """What the dispatcher and lib/wk/targets.py read on a shared build box:
         the ~/.wk-remote marker, that machine's conf naming this host, and a store of its own holding a private half. Its commands
         run here (WK_REMOTE_LOCAL), so nothing ssh's anywhere."""
         marker = self.tmp / "wk-remote"
         marker.write_text("target=buildbox4\n")
         reg = self.tmp / "registry"
         reg.mkdir(exist_ok=True)
-        (reg / "buildbox4.conf").write_text(f"KIND=build\nWK_REMOTE_HOST=buildbox4\nWK_REMOTE_HOSTNAME={THIS_HOST}\n")
+        (reg / "buildbox4.conf").write_text(f"kind=build\nhost=buildbox4\nhostname={THIS_HOST}\n")
         store = self.tmp / "store"
         (store / "push-keys").mkdir(parents=True, exist_ok=True)
         (store / "secrets").mkdir(parents=True, exist_ok=True)

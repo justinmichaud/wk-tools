@@ -19,13 +19,13 @@ import unittest
 from unittest import mock
 
 from tests.killpoints import converges
-from tests.support import REPO, WkTest, requires_machine
+from tests.support import REPO, WkTest, as_dispatched, requires_machine, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, fleet, quiet, session  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import HAVE, Fake, Result  # noqa: E402
 
 ROOT = str(REPO)
 PRIV = quiet.PRIV
@@ -55,7 +55,7 @@ class World(Fake):
         self.react(("systemctl", "is-active"), lambda a, f: Result(0, "active\n") if self.unit and a[2] == session.UNIT
                    else Result(3, "inactive\n"))
         self.answer(("systemctl", "show", session.UNIT, "-p", "MainPID", "--value"), out="0\n")
-        self.answer(("sh", "-c", 'command -v "$1"', "sh"))
+        self.answer(HAVE)
         self.react(("loginctl", "list-sessions", "--no-legend"),
                    lambda a, f: Result(0, "".join("%s 1000 u seat0 tty2\n" % s[0] for s in self.sessions)))
         self.react(("loginctl", "show-session"), self.show)
@@ -249,7 +249,7 @@ class TestOn(SessionTest):
 
     def test_no_wayland_info_is_refused_before_anything_starts(self):
         w = World()
-        w.answer(("sh", "-c", 'command -v "$1"', "sh", "wayland-info"), 1)
+        w.answer(HAVE + ("wayland-info",), 1)
         self.assertIn("wayland-info missing", self.refused(w.s().on, False))
         self.assertEqual([], w.priv_verbs())
 
@@ -366,10 +366,12 @@ class TestTheCommand(SessionTest):
 
     def test_the_words_it_takes(self):
         m = self.load()
-        self.assertEqual(("status", False), m.parse([]))
+        self.assertEqual(("status", False), m.parse(as_dispatched("session", [], {})))
         self.assertEqual(("on", True), m.parse(["on", "--bmc"]))
         self.assertEqual(("gdm", True), m.parse(["gdm", "--mirror"]))
-        self.assertIn("usage: wk session", self.refused(m.parse, ["up"]))
+        cp = run("session", "up")
+        self.assertEqual(2, cp.returncode, cp.stdout)
+        self.assertIn("usage: wk session", cp.stdout)
 
     def test_it_is_refused_off_linux(self):
         m = self.load()
@@ -382,7 +384,7 @@ class TestOnMoose(WkTest):
     def test_modes_moose(self):
         """`live session.modes[moose]`: read-only, so what `status` reads there; driving each mode from
         each half-state is the owed half of the row."""
-        tools = fleet.Fleet(REPO).load("moose").get("WK_REMOTE_TOOLS") or "Development/wk-tools"
+        tools = fleet.Fleet(REPO).load("moose").get("tools") or "Development/wk-tools"
         cp = subprocess.run(["ssh", "-o", "BatchMode=yes", "moose", "cd %s && ./wk session status" % tools],
                             capture_output=True, text=True, timeout=120)
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)

@@ -14,7 +14,8 @@ if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from wk.clock import Clock  # noqa: E402
-from wk.machine import here  # noqa: E402
+from wk import slot  # noqa: E402
+from wk.machine import here, isolated_module  # noqa: E402
 
 TOOLS = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 MB_PER_JOB = 2048
@@ -51,7 +52,7 @@ def parse(argv):
     sub = ap.add_subparsers(dest="stage")
     img = sub.add_parser("image")
     for flag in ("--name", "--tree-url", "--tree-branch", "--tree-commit", "--defconfig", "--image", "--jobs",
-                 "--kernel-tar", "--kernel-release", "--overlay-arch"):
+                 "--kernel-tar", "--kernel-release", "--kernel-dts", "--overlay-arch"):
         img.add_argument(flag, default="")
     for flag in ("--external", "--overlay-wifi"):
         img.add_argument(flag, default="0", choices=("0", "1"))
@@ -69,8 +70,8 @@ def parse(argv):
             ap.error("--%s is required" % n.replace("_", "-"))
     if a.stage == "webkit" and (len(a.commit) != SHA_LEN or any(c not in "0123456789abcdef" for c in a.commit)):
         ap.error("--commit takes a full 40-character sha, got '%s'" % a.commit)
-    if a.stage == "image" and a.kernel_tar and not a.kernel_release:
-        ap.error("--kernel-tar needs --kernel-release")
+    if a.stage == "image" and a.kernel_tar and not (a.kernel_release and a.kernel_dts):
+        ap.error("--kernel-tar needs --kernel-release and --kernel-dts")
     return a
 
 
@@ -145,7 +146,7 @@ class Build:
             d = self.env.get(name)
             if not d:
                 fail("BR2_DL_DIR/BR2_CCACHE_DIR are not set in this workspace.\n    They come from the container's "
-                     "store-backed cache mount (targets/container.sh); without them buildroot's download and ccache\n"
+                     "store-backed cache mount (lib/wk/targets.py's Container); without them buildroot's download and ccache\n"
                      "    caches would land in the workspace and die with it.")
             self.m.mkdir(d)
             if not self.m.run(["test", "-w", d]).ok:
@@ -268,13 +269,9 @@ class Build:
         return stage, overlay
 
     def post_image(self, stage):
-        conf = self.m.read(os.path.join(self.workdir, ".config"))
-        orig = config_value(conf, "BR2_ROOTFS_POST_IMAGE_SCRIPT")
-        dts = config_value(conf, "BR2_LINUX_KERNEL_INTREE_DTS_NAME")
-        if not dts:
-            fail("%s names no BR2_LINUX_KERNEL_INTREE_DTS_NAME, so there is no\n    device tree name to install the pinned "
-                 "kernel's copy of." % self.a.defconfig)
-        dtb = dts + ".dtb"
+        # No BR2_LINUX_KERNEL builds here, so the device tree name is --kernel-dts, not a buildroot config key.
+        orig = config_value(self.m.read(os.path.join(self.workdir, ".config")), "BR2_ROOTFS_POST_IMAGE_SCRIPT")
+        dtb = self.a.kernel_dts + ".dtb"
         if not self.m.exists(os.path.join(stage, "dtb", dtb)):
             fail("the pinned kernel carries no %s" % dtb)
         script = os.path.join(self.workdir, "wk-kernel-post-image.sh")
@@ -372,7 +369,7 @@ class Build:
         a, src = self.a, self.a.src
         mirror = self.env.get("WK_MIRROR")
         if not mirror:
-            fail("WK_MIRROR names the mirror this container mounts, set by targets/container.sh")
+            fail("WK_MIRROR names the mirror this container mounts, set by lib/wk/targets.py's Container")
         dirty = [l for l in self.m.run(["git", "-C", src, "status", "--porcelain"]).out.splitlines() if l.strip()]
         if dirty:
             fail("%s has %d uncommitted change(s); a slot is built from a\n    commit and nothing else. Commit or discard "
@@ -456,11 +453,14 @@ class Build:
         fields = dict(slot=a.slot, profile=a.name, commit=a.commit, browser="cog", lib_dir="usr/lib",
                       exec_dir=os.path.relpath(execdir, root), bundle_dir=os.path.relpath(bundle, root), jobs=str(self.jobs),
                       built_at=self.clock.iso(), wk_tools=rev.out.strip() if rev.ok else "unknown")
-        slot_py = os.path.join(self.tools, "lib", "wkslot.py")
         sj = os.path.join(slotdir, "slot.json")
-        self.ok(["python3", slot_py, "manifest", "--readelf", os.path.join(self.out, "host", "bin", cc.group(1) + "-readelf"),
-                 root, sj] + ["%s=%s" % kv for kv in sorted(fields.items())], "could not write %s" % sj)
-        bid = self.m.run(["python3", slot_py, "get", sj, "build_id"]).out.strip()
+        self.ok(isolated_module(os.path.join(self.tools, "lib"), "wk.slot")
+                + ["manifest", "--readelf", os.path.join(self.out, "host", "bin", cc.group(1) + "-readelf"), root, sj]
+                + ["%s=%s" % kv for kv in sorted(fields.items())], "could not write %s" % sj)
+        try:
+            bid = slot.recorded_build_id(self.m, sj)
+        except ValueError as e:
+            fail(str(e))
         du = self.m.run(["du", "-sh", root]).out.split()
         self.say("slot ready: %s" % slotdir)
         self.say("  %s in root/, %s build-id %s" % (du[0] if du else "?", os.path.basename(lib), bid))

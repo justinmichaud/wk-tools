@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 #
 # wk key check|setup|set|deploy|show|ensure|sudo|backup -- the credentials this machine holds, its sudo policy and its settings backup
-# wk: where=host name=none group=sources needs gh,gh-auth takes=1 destructive setup,deploy,--replace dryrun setup,deploy,set,sudo,--candidates
-# wk: sub show,ensure,pub,sshtest,fingerprints,set,register,claude,tailnet,tailnet-api,share,adopt,verdict,give,sudo,backup needs=
+# wk: where=host name=none group=sources needs gh,gh-auth takes=1 default=check verbs=check,setup,deploy,show,ensure,pub,sshtest,fingerprints,set,adopt,verdict,give,sudo,backup destructive setup,deploy,--replace dryrun setup,deploy,set,sudo,--candidates
+# wk: sub show,ensure,pub,sshtest,fingerprints,set,adopt,verdict,give,sudo,backup needs=
 # wk: sub set,pub,sshtest,adopt,verdict,give takes=2
 # wk: sub set opts=--replace,--paste
 # wk: sub deploy,setup opts=--rotate
 # wk: sub sudo takes=2 opts=--target=,--all destructive=
 # wk: sub backup opts=--candidates
+# wk: gone register deploy
+# wk: gone share setup   (it elects the credential the fleet holds rather than pushing this machine's)
+# wk: gone claude set claude   (the account login beside it is 'wk key set claude-login')
+# wk: gone tailnet set tailnet
+# wk: gone tailnet-api set tailnet-api
 #
 #   wk key setup      every credential this machine needs, and one working
 #                     credential of each kind on every workstation. The one
@@ -161,7 +166,7 @@
 #
 # A shared build machine holds no key at all: it reaches the deploy key through
 # an ssh-agent forwarded from the workstation that drives it, so nothing private
-# rests on a machine other people are root on (remote/provision.sh, targets/remote.sh).
+# rests on a machine other people are root on (remote/provision.sh, lib/wk/targets.py's Remote).
 # Registration goes through the GitHub API, which takes the title, key and
 # read_only=false directly.
 #
@@ -195,7 +200,7 @@
 # reported unverified.
 #
 # Runs on the machine that holds the keys: the secrets directory is this device's
-# (wk_secrets_dir), and on macOS the podman machine reads it as a mount, so every
+# (Store.secrets_dir), and on macOS the podman machine reads it as a mount, so every
 # subverb here is ssh-keygen, a file and `gh`, with no VM in the path.
 #
 # `setup`, `deploy` and `check` are the only ones that call the GitHub API, which
@@ -219,7 +224,7 @@ from wk.targets import Registry  # noqa: E402
 def main(argv, env=None, reg=None, machine=None, macos=None):
     args = decl.Args(decl.Decl(__file__), argv)
     words = args.positionals
-    verb = words[0] if words else "check"
+    verb = words[0]
     if verb == "sudo":
         return sudo.main(words[1:], args.value("--target"), args.flag("--all"),
                          reg or Registry(ROOT, os.environ if env is None else env, Local()), env=env)

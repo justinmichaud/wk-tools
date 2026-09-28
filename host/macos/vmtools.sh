@@ -1,34 +1,31 @@
-. "$WK_ROOT/lib/store.sh"
+wk_eval wk.store paths
 . "$WK_ROOT/host/units.sh"
 
-WK_MACHINE="${WK_MACHINE:-wk}"
+WK_MACHINE="${WK_MACHINE:-wk}"; export WK_MACHINE   # wk.targets podman-vm reads it from the environment
 
-podman machine inspect "$WK_MACHINE" >/dev/null 2>&1 || {
+_state=$(wk_py wk.targets podman-vm State) || {
     debug "no machine yet; skipping VM tooling"
     return 0 2>/dev/null || true
 }
 
-if [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}')" != running ]; then
+if [ "$_state" != running ]; then
     info "starting machine '$WK_MACHINE'"
     podman machine start "$WK_MACHINE" >/dev/null
 fi
 
-_ssh_port=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.Port}}')
-_ssh_key=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.IdentityPath}}')
-_ssh_user=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.RemoteUsername}}')
-
-command -v _unpinned_host_key_opts >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
+wk_eval wk.targets podman-vm _ssh_port=SSHConfig.Port _ssh_key=SSHConfig.IdentityPath _ssh_user=SSHConfig.RemoteUsername
+_unpinned=$(wk_py wk.reach unpinned)
 
 _rsh() {
-    # shellcheck disable=SC2046
-    ssh -o BatchMode=yes -o ConnectTimeout="$(wk_ssh_timeout)" $(_unpinned_host_key_opts) \
+    # shellcheck disable=SC2086
+    ssh -o BatchMode=yes -o ConnectTimeout="$(wk_ssh_timeout)" $_unpinned \
         -p "$_ssh_port" -i "$_ssh_key" \
         "$_ssh_user@localhost" "$@"
 }
 
 debug "re-applying machine provisioning"
-scp -q -P "$_ssh_port" -i "$_ssh_key" \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+# shellcheck disable=SC2086
+scp -q -P "$_ssh_port" -i "$_ssh_key" $_unpinned \
     "$WK_ROOT/host/macos/playbook.yaml" "$_ssh_user@localhost:/home/core/playbook.yaml"
 
 # ansible-core 2.16 has no machine-readable callback, so the recap line is all
@@ -79,19 +76,19 @@ _verify_mounts() {
     is created:  ./setup --stage machine"
     fi
 
-    if _rsh "findmnt -no TARGET $(sh_quote "$WK_STORE/secrets")" >/dev/null 2>&1; then
+    if _rsh "findmnt -no TARGET $(printf %q "$WK_STORE/secrets")" >/dev/null 2>&1; then
         unchanged "the secrets directory is mounted at $WK_STORE/secrets"
     else
         die "$WK_STORE/secrets is not a mount inside '$WK_MACHINE', so the keys this
-    host holds ($(wk_secrets_dir)) reach no workspace. The machine mounts them
+    host holds ($secrets_dir) reach no workspace. The machine mounts them
     there when it is created:  ./setup --stage machine"
     fi
 
-    if ! _rsh "findmnt -no TARGET $(sh_quote "$WK_STORE/agent-rw")" >/dev/null 2>&1; then
+    if ! _rsh "findmnt -no TARGET $(printf %q "$WK_STORE/agent-rw")" >/dev/null 2>&1; then
         die "$WK_STORE/agent-rw is not a mount inside '$WK_MACHINE', so the claude.ai
-    login this host holds ($(wk_agent_rw_dir)) reaches no workspace. The machine
+    login this host holds ($agent_rw_dir) reaches no workspace. The machine
     mounts it there when it is created:  ./setup --stage machine"
-    elif _rsh "test -w $(sh_quote "$WK_STORE/agent-rw")"; then
+    elif _rsh "test -w $(printf %q "$WK_STORE/agent-rw")"; then
         unchanged "the agent-writable directory is mounted read-write at $WK_STORE/agent-rw"
     else
         die "$WK_STORE/agent-rw is mounted read-only inside '$WK_MACHINE'. The Claude
@@ -100,17 +97,17 @@ _verify_mounts() {
     is created:  ./setup --stage machine"
     fi
 
-    if _rsh "findmnt -no TARGET $(sh_quote "$WK_STORE/git")" >/dev/null 2>&1; then
+    if _rsh "findmnt -no TARGET $(printf %q "$WK_STORE/git")" >/dev/null 2>&1; then
         unchanged "the mirror directory is mounted at $WK_STORE/git"
     else
         die "$WK_STORE/git is not a mount inside '$WK_MACHINE', so the mirror this host
-    keeps ($(dirname "$(wk_mirror)")) reaches no snapshot and no workspace. The
+    keeps ($mirror_dir) reaches no snapshot and no workspace. The
     machine mounts it there when it is created:  ./setup --stage machine"
     fi
 
     local target
     for target in /opt/wk-tools "$WK_STORE/secrets" "$WK_STORE/git"; do
-        if _rsh "findmnt -no TARGET -O ro $(sh_quote "$target")" >/dev/null 2>&1; then
+        if _rsh "findmnt -no TARGET -O ro $(printf %q "$target")" >/dev/null 2>&1; then
             unchanged "$target is mounted read-only"
         else
             die "$target is writable inside '$WK_MACHINE', so a workspace can rewrite
@@ -133,8 +130,9 @@ else
     changed "seeded /var/lib/wk/skills"
 fi
 
-"$WK_ROOT/cmd/key" ensure 2>&1 | sed 's/^/  /' || true
-if [ -f "$(wk_secrets_dir)/build_key_fork.pub" ]; then
+"$WK_ROOT/cmd/key" ensure 2>&1 | sed 's/^/  /' \
+    || die "wk key ensure failed (above), so workspaces on '$WK_MACHINE' have no key to push with"
+if [ -f "$secrets_dir/build_key_fork.pub" ]; then
     unchanged "build key present"
 else
     warn "no build key; workspaces will not be able to push"
@@ -177,12 +175,12 @@ unit_start wk-ssh-agent.service "$_unit_root" "$_unit_store" \
 unit_start wk-github-inject.service "$_unit_root" "$_unit_store" \
     "'git-webkit pr' in a workspace will fail" "$_unit_journal" _rsh
 
-if push_agent_cred_sync push_agent_exec "$(push_agent_machine_read_pat)" github-pat; then
+if wk_py wk.secrets pat-converge; then
     debug "GitHub read token converged on the machine"
 else
     warn "could not converge the GitHub read token on '$WK_MACHINE', so a read
   from a workspace answers 401 ('wk key set github-pat' stores one)"
 fi
 
-unset _ssh_port _ssh_key _ssh_user _unit_root _unit_store _unit_journal _pb _pb_state _pb_changed
+unset _state _ssh_port _ssh_key _ssh_user _unpinned _unit_root _unit_store _unit_journal _pb _pb_state _pb_changed
 unset -f _verify_mounts _playbook_verdict

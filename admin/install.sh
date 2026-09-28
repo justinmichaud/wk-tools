@@ -10,20 +10,9 @@ if is_macos; then _rootgrp=wheel; else _rootgrp=root; fi
 _check_source="$WK_ROOT/boot/check-boot-files.py"
 _check_target="$_libexec/wk-check-boot-files.py"
 
-# The rule is written to a fixed path, overwritten, that only this user and root can write:
-# a kill between writing it and installing it leaves one predictable file the next run
-# truncates, rather than an unpredictable mktemp name nothing will ever remove, and no
-# other account can change the bytes between `visudo -cqf` and the install that trusts it.
+# A fixed path only this user and root can write: a kill leaves one file the next run
+# truncates, and no other account can change the bytes between `visudo -cqf` and install.
 _rules_dir="$(wk_state_dir)/priv"
-
-# GNU form first: Linux's `stat -f` succeeds as "filesystem status", never as an owner.
-_priv_owner() {   # <path>
-    stat -c '%U' "$1" 2>/dev/null || stat -f '%Su' "$1" 2>/dev/null || echo ""
-}
-
-_priv_mode() {   # <path>
-    stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null || echo ""
-}
 
 # What a helper runs beside itself, and so is part of its state rather than a step of its own.
 _priv_companions() {   # <name> -- "<source> <installed path>" per line
@@ -33,19 +22,16 @@ _priv_companions() {   # <name> -- "<source> <installed path>" per line
     return 0
 }
 
-# The declared final state of one helper, both halves in one predicate: this tree's binary
-# installed root-owned and writable by nobody else, and a grant sudo reports. Both halves
-# are read off the machine and neither can be true for the wrong reason -- the binary from
-# the filesystem, the grant from the rule sudo lists rather than from a run of the helper,
-# which succeeds for anything while a sudo timestamp is cached.
+# One helper's final state: this tree's binary installed root-owned and writable by nobody
+# else, and a grant `sudo -l` lists (a run succeeds for anything while a timestamp is cached).
 _priv_state() {   # <name> -- "<binary> <grant>"
     local name="$1" tgt src bin grant csrc cdst
     tgt="$(wk_priv_path "$name")"
     src="$WK_ROOT/admin/$name"
     if [ ! -f "$tgt" ]; then bin=absent
-    elif [ "$(_priv_owner "$tgt")" != root ]; then bin=foreign
+    elif [ "$(file_owner "$tgt")" != root ]; then bin=foreign
     else
-        case "$(_priv_mode "$tgt")" in
+        case "$(file_mode "$tgt")" in
             ''|*[!0-7]*)      bin=nomode ;;
             *[2367]|?[2367]?) bin=writable ;;
             *) if cmp -s "$src" "$tgt"; then bin=ok; else bin=stale; fi ;;
@@ -54,7 +40,7 @@ _priv_state() {   # <name> -- "<binary> <grant>"
     if [ "$bin" = ok ]; then
         while read -r csrc cdst; do
             [ -n "$cdst" ] || continue
-            if [ "$(_priv_owner "$cdst")" != root ] || ! cmp -s "$csrc" "$cdst"; then
+            if [ "$(file_owner "$cdst")" != root ] || ! cmp -s "$csrc" "$cdst"; then
                 bin=stale
             fi
         done <<COMPANIONS
@@ -71,7 +57,7 @@ _priv_explain() {   # <name> <binary> <grant>
     sudoers="$(wk_priv_sudoers "$name")"
     case "$bin" in
         absent)  log "  $tgt is not installed" ;;
-        foreign) log "  $tgt is owned by $(_priv_owner "$tgt"), not root" ;;
+        foreign) log "  $tgt is owned by $(file_owner "$tgt"), not root" ;;
         stale)   log "  $tgt is not this tree's copy of admin/$name" ;;
     esac
     if [ "$grant" != ok ]; then
@@ -82,10 +68,8 @@ _priv_explain() {   # <name> <binary> <grant>
     return 0
 }
 
-# One repair, from any starting point -- absent, stale, wrong owner, no rule, a rule naming
-# a user nobody logs in as -- and safe to run when the state is already right: it installs
-# rather than deciding a second time what is missing, so a kill anywhere in it leaves a
-# state the next run converges from.
+# One repair from any starting point, safe when the state is already right: it installs
+# rather than deciding again what is missing, so a killed run converges on the next.
 _priv_repair() {   # <name> <binary verdict before>
     local name="$1" bin="$2" src tgt sudoers cand csrc cdst
     src="$WK_ROOT/admin/$name"
@@ -141,7 +125,7 @@ _priv_converge() {   # <name> <platform> <what it is for>
     # away now rather than to install this tree's copy over whatever is there.
     case "$bin" in
         nomode)   die "could not read the mode of $tgt -- refusing to vouch for $sudoers" ;;
-        writable) die "$tgt is writable by more than root (mode $(_priv_mode "$tgt")) -- this is a root escalation; remove $sudoers now" ;;
+        writable) die "$tgt is writable by more than root (mode $(file_mode "$tgt")) -- this is a root escalation; remove $sudoers now" ;;
     esac
     if [ "$bin" = ok ] && [ "$grant" = ok ]; then
         unchanged "$name and $sudoers"
@@ -219,11 +203,7 @@ $(wk_priv_helpers)
 ROWS
 unset _pname _pwhere _pwhat
 
-# Apple Silicon signs the startup-disk choice with a volume owner's credential, and `bless
-# --help` lists --user/--stdinpass under Snapshot options rather than Mount Mode, so whether
-# root alone suffices is the platform's answer: the helper blesses with a credential where
-# the machine holds one and without one where it does not, and says which it used. Keeping a
-# login password on disk stays the owner's call; nothing here creates that file.
+# Keeping a login password on disk stays the owner's call; nothing here creates that file.
 if is_macos && [ ! -f /usr/local/share/wk-bench/owner-password ]; then
     log "  no volume-owner credential here, which may not be needed: 'wk boot mbp'"
     log "  blesses with root alone and reports what bless answered."
@@ -271,7 +251,7 @@ unset _u _link
 # board's tailnet node key beside it (TAILNET_KEEP_DIR, 0700 root). Granted here, where a
 # password prompt can be answered: `wk boot` records over a BatchMode ssh, no terminal.
 _bootdir=/var/lib/wk/boot
-_bootowner=$(stat -c '%U' "$_bootdir" 2>/dev/null || stat -f '%Su' "$_bootdir" 2>/dev/null || echo "")
+_bootowner=$(file_owner "$_bootdir")
 if [ "$_bootowner" = "$(id -un)" ]; then
     unchanged "$_bootdir is writable by $(id -un)"
 elif ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then

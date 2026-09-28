@@ -1,10 +1,15 @@
-"""`wk bench`'s verbs that are Python -- ls, report, compare, precision, seed, deploy, ab -- over one registry; the rest are lib/bench-arms.sh."""
+"""`wk bench`'s verbs that are not the pipeline -- ls, report, export, compare, precision, seed, deploy, ab, --list -- over one registry."""
 
+import contextlib
+import io
 import os
+import tempfile
+import zipfile
 
 from wk import act, record as wkrecord
 from wk.bench import ab, board, record, report, seed
 from wk.lock import Lock, holder_pid
+from wk.machine import Local, Planted, matches
 
 REPORT_USAGE = ("usage: wk bench report <task> [--html] [--text]\n"
                 "       wk bench report <run-a> <run-b> [--html out.html] [--text]; see wk bench -h")
@@ -27,15 +32,27 @@ def where(reg, args):
 class Bench:
     def __init__(self, root, reg, clock):
         self.root, self.reg, self.clock, self.machine = str(root), reg, clock, reg.machine
-        self.bench_dir = reg.store.bench_dir()
 
     def lock_alive(self, path):
         pid = holder_pid(path)
         return pid is not None and self.machine.alive(pid)
 
+    def plans(self):
+        """`--list` runs before any workspace exists to read a plan from, so it asks the mirror: one `git ls-tree`, no export."""
+        mirror = self.reg.store.mirror()
+        ref = self.reg.env.get("WK_BENCH_RUNNER_REF") or "refs/heads/main"
+        if not self.machine.isdir(mirror) or not self.machine.run(
+                ["git", "-C", mirror, "rev-parse", "--verify", "--quiet", ref + "^{commit}"]).ok:
+            print("no mirror at %s to read plans from; 'wk sync' fetches one, or read\n"
+                  "them from a workspace's own checkout: Tools/Scripts/run-benchmark --list-plans" % mirror)
+            return 1
+        r = self.machine.run(["git", "-C", mirror, "ls-tree", "--name-only", ref, "Tools/Scripts/%s/" % seed.PLANS])
+        print("\n".join(sorted(os.path.basename(p)[:-5] for p in r.out.splitlines() if p.endswith(".plan"))))
+        return 0
+
     def listing(self, warn=act.warn):
         label = self.reg.env.get("WK_ROW_LABEL") or wkrecord.machine_name(self.reg.env)
-        return record.Listing(self.reg, self.bench_dir, self.reg.store.lock_path, self.lock_alive, label, warn)
+        return record.Listing(self.reg, self.reg.store, self.lock_alive, label, warn)
 
     def ls(self, continued):
         rows = self.listing().rows()
@@ -52,13 +69,37 @@ class Bench:
         act.log("  now.  wk bench report <task>  reports one.")
         return 0
 
-    def runs(self, spec, which):
+    def runs(self, spec, which, stack):
+        """A staged copy of each run directory, here or on the machine that holds it (the path `wk bench ls` printed there)."""
         out = []
         for one in (x for x in spec.split(",") if x):
-            d = one if os.path.isdir(one) else os.path.join(self.bench_dir, one)
-            if not os.path.isfile(os.path.join(d, "result.json")):
+            if "/bench/" in one and "/runs/" in one:
+                task, rest = one.split("/bench/", 1)[1].split("/")[0], "runs/" + one.split("/runs/", 1)[1]
+            else:
+                task, _, rest = one.partition("/")
+            m, d = Local(), one.rstrip("/")
+            hit = None if os.path.isdir(one) else self.find(task)
+            if hit:
+                m, d = hit[0], os.path.join(hit[1], rest)
+            if "/runs/" in d:
+                taskdir = d.rpartition("/runs/")[0]
+                anchor = os.path.dirname(os.path.dirname(taskdir))
+            else:
+                anchor = os.path.dirname(d)
+            copy = os.path.join(stack.enter_context(tempfile.TemporaryDirectory(prefix="wk-run-")), os.path.basename(d))
+            os.makedirs(copy)
+            try:
+                files = m.read_tree(anchor, os.path.relpath(d, anchor), ("*.json",), depth=1)
+            except Planted as e:
+                refuse_planted(e)
+            except OSError:
+                files = {}
+            for rel, data in files.items():
+                with open(os.path.join(copy, rel), "wb") as f:
+                    f.write(data)
+            if "result.json" not in files:
                 act.die("no such run in %s: %s (a run directory, from 'wk bench ls')" % (which, one))
-            out.append(d)
+            out.append(copy)
         if not out:
             act.die("no runs given for %s" % which)
         return out
@@ -73,27 +114,102 @@ class Bench:
             act.die(REPORT_USAGE)
         if html is True:
             act.die("the two-run form writes where it is told: --html out.html")
-        a, b = self.runs(positional[0], "-a"), self.runs(positional[1], "-b")
-        for r in (a[0], b[0]):
-            if str(record.get_nested(record.load(os.path.join(r, "env.json")), "count")) == "1":
-                act.warn("run '%s' has count=1: no p-value can be computed" % os.path.basename(r))
-                act.log("  re-run with --count 2 or more for a comparison with statistics")
-        report.two_runs(a, b, html=html, text=text)
+        with contextlib.ExitStack() as stack:
+            a, b = self.runs(positional[0], "-a", stack), self.runs(positional[1], "-b", stack)
+            for r in (a[0], b[0]):
+                if str(record.get_nested(record.load(os.path.join(r, "env.json")), "count")) == "1":
+                    act.warn("run '%s' has count=1: no p-value can be computed" % os.path.basename(r))
+                    act.log("  re-run with --count 2 or more for a comparison with statistics")
+            report.two_runs(a, b, html=html, text=text)
         return 0
 
-    def task_report(self, task, html, text):
-        d = os.path.join(self.bench_dir, task)
-        if not os.path.isfile(os.path.join(d, "task.json")):
+    def home(self, task):
+        d = record.homes(self.reg.store).get(task)
+        if not d:
             seen = [l for l in self.listing(warn=lambda _msg: None).rows() if task in l][:3]
-            act.die("no such task '%s' in this machine's store (%s has no task.json).\n%s\n"
+            act.die("no such task '%s' in this machine's store.\n%s\n"
                     "    A task stays on the machine that took it ('wk bench ls' names it in [] at\n"
                     "    the end of each line); run this there. Two run directories compare any two\n"
-                    "    runs without a task at all." % (task, d, "\n".join("    " + l for l in seen)))
+                    "    runs without a task at all." % (task, "\n".join("    " + l for l in seen)))
+        return d
+
+    def running(self, task):
+        return self.lock_alive(self.reg.store.lock_path("bench-task-" + task))
+
+    def task_report(self, task, html, text):
+        m, d, here = self.locate(task)
         if html and html is not True:
             act.die("a task's html reports are named for it (report-<device>-<plan>.html, in %s); "
                     "--html takes no file here" % d)
-        running = self.lock_alive(self.reg.store.lock_path("bench-task-" + task))
-        report.task_report(d, running, html=bool(html), text=text)
+        running = here and self.running(task)
+        with self.staged(m, d, task, record.LIVE if running else record.MEASURED) as copy:
+            report.task_report(copy, running, html=bool(html), text=text, shown=d)
+            for name in sorted(os.listdir(copy)) if html else ():
+                if name.startswith("report-") and name.endswith(".html"):
+                    with open(os.path.join(copy, name)) as f:
+                        m.write(os.path.join(d, name), f.read())
+        return 0
+
+    @contextlib.contextmanager
+    def staged(self, m, d, task, patterns=record.MEASURED):
+        """A copy here of a task, read through its machine's own reads: nothing reads a workspace's tasks in place."""
+        try:
+            files = record.gather(m, d, patterns)
+        except Planted as e:
+            refuse_planted(e)
+        with tempfile.TemporaryDirectory(prefix="wk-export-") as stage:
+            copy = os.path.join(stage, task)
+            os.makedirs(copy)
+            for rel, data in files.items():
+                os.makedirs(os.path.dirname(os.path.join(copy, rel)), exist_ok=True)
+                with open(os.path.join(copy, rel), "wb") as f:
+                    f.write(data)
+            yield copy
+
+    def locate(self, task):
+        """(machine, directory, whether this machine holds its lock): this store first, then each target's store of its own."""
+        hit = self.find(task)
+        if hit:
+            return hit[0], hit[1], hit[0] is self.machine
+        return None, self.home(task), False
+
+    def find(self, task):
+        """(machine, directory) of the task, or None."""
+        d = record.homes_at(self.machine, self.reg.store.record_dir()).get(task)
+        if d:
+            return self.machine, d
+        for name in self.reg.walk():
+            try:
+                t = self.reg.load(name)
+            except LookupError:
+                continue
+            if t.probe()[0] != "answering" or not t.task_store():
+                continue
+            m, root = t.task_store()
+            far = record.homes_at(m, root).get(task)
+            if far:
+                return m, far
+        return None
+
+    def export(self, task, to):
+        if not task:
+            act.die("usage: wk bench export <task> [--to <dir>]; see wk bench -h")
+        m, d, here = self.locate(task)
+        with self.staged(m, d, task) as copy:
+            running = here and self.running(task)
+            st = record.task_state(copy, running)
+            if st["state"] != "complete":
+                act.barrier("task %s is %s, so its report is partial: %s" % (task, st["state"], st["summary"]))
+            dest = os.path.join(to or os.path.join(self.reg.store.home(), "Downloads"), task + ".zip")
+            if self.machine.exists(dest):
+                if not act.confirm("replace %s?" % dest):
+                    act.die("not exported")
+            else:
+                act.nothing_to_ask()
+            self.machine.mkdir(os.path.dirname(dest))
+            m.write(os.path.join(d, record.EXPORT_RECORD), dest + "\n")
+            self.machine.write(dest, b"" if act.dry_run() else archive(copy, running, d))
+        print(dest)
         return 0
 
     def compare(self, positional, html):
@@ -130,7 +246,7 @@ class Bench:
 
         text = seed.plan_json(read, plan)
         lock = Lock(self.reg.store, self.machine, self.clock)
-        print(seed.Seeder(self.machine, lock, os.path.join(self.reg.store.artifact_dir(), "bench")).seed(plan, text))
+        print(seed.Seeder(self.machine, lock, os.path.join(self.reg.store.artifact_dir(), "bench"), self.reg.store.mirror()).seed(plan, text))
         return 0
 
     def deploy(self, ws, board_name, slot_name, machine=None, driver=None):
@@ -156,8 +272,7 @@ class Bench:
         return ab.run(self.root, self.reg, self.clock, spec, o, kill)
 
     def mac(self):
-        """`bench/mac-lane.sh` is gone: it drove the same trip `bench run --system` now runs as the
-        one pipeline (boot, deploy, run, collect), from wherever this is invoked."""
+        """A tombstone: the trip it drove is `bench run --system`'s one pipeline (boot, deploy, run, collect)."""
         act.die("""'wk bench mac' is gone -- it drove one bench system's whole trip (build, stage, arm,
     reboot, run, come back) by hand; that trip is now the pipeline's own:
 
@@ -179,3 +294,26 @@ class Bench:
     def mac_volume(self):
         act.die("'wk bench mac-volume' does not exist -- the benchmark install is an image, built on the Mac:\n"
                 "    wk sysimage build perf-macos-tolken [--create|--fetch|--install|--provision|--repair|--build-pkg|--all]")
+
+
+def refuse_planted(e):
+    act.die("%s.\n    A workspace can write its own tasks, and a link there could hand this host's files to whoever the\n"
+            "    report goes to. Remove it (rm %s), then re-run." % (e, e.path))
+
+
+def archive(taskdir, running, shown=None):
+    """The zip's bytes: the report, as text and as html, then EXPORTED, all under the task's name; `shown` is where the task is."""
+    name, text = os.path.basename(taskdir), io.StringIO()
+    report.task_report(taskdir, running, html=True, out=io.StringIO(), shown=shown)
+    report.task_report(taskdir, running, text=True, out=text, shown=shown)
+    try:
+        tree = Local().read_tree(*record.guarded(taskdir), record.EXPORTED)
+    except Planted as e:
+        refuse_planted(e)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(name + "/report.txt", text.getvalue())
+        for pattern in record.EXPORTED:
+            for rel in sorted(r for r in tree if matches(r, (pattern,))):
+                z.writestr(os.path.join(name, rel), tree.pop(rel))
+    return buf.getvalue()

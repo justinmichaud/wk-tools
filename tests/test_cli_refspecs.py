@@ -15,7 +15,7 @@ Run: python3 tests/run.py -k tests.test_cli_refspecs
 import sys
 import unittest
 
-from tests.support import REPO, bash
+from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import git  # noqa: E402
@@ -37,11 +37,6 @@ class TestRemotesIsTheOneList(unittest.TestCase):
 
     def test_todays_four_remotes_in_order(self):
         self.assertEqual([n for n, _ in git.REMOTES], ["origin", "wpe", "fork", "forkwpe"])
-
-    def test_the_bash_name_prints_the_same_list(self):
-        cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; wk_remotes')
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertEqual([tuple(l.split()) for l in cp.stdout.splitlines()], list(git.REMOTES))
 
     def test_the_mirror_fetches_every_one_and_a_fifth_with_no_other_change(self):
         script = git.mirror_refresh_script("/m", ["main"], FIFTH)
@@ -118,7 +113,7 @@ class TestTheWiringWritesThoseRefspecs(unittest.TestCase):
     def test_the_rendered_script_quotes_what_the_shell_would_split(self):
         script = git.render("/src/Web Kit", git.fetch_config("/m/My Mirror.git", ["main"]))
         self.assertTrue(script.startswith("set -e\ncd '/src/Web Kit'\n"), script)
-        self.assertIn("git config --add 'url./m/My Mirror.git.insteadOf' 'https://github.com/WebKit/WebKit.git'", script)
+        self.assertIn("git config --add 'url./m/My Mirror.git.insteadOf' https://github.com/WebKit/WebKit.git", script)
         self.assertIn("git config --unset-all remote.origin.fetch 2>/dev/null || true", script)
 
 

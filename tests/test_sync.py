@@ -49,7 +49,6 @@ def _load_cmd():
 
 cmd = _load_cmd()
 REAL_MIRROR_BRANCHES = git.mirror_branches
-FORKS = "fork justinmichaud/WebKit github-webkit\nforkwpe justinmichaud/WPEWebKit github-wpe\n"
 
 
 def fake_retarget(target, ws, src, forks, branches):
@@ -159,7 +158,6 @@ class World(Fake):
         self.reg = FakeRegistry(REPO, self.env, self, kinds or {"container": "container"})
         self.store = self.reg.store
         self.mirror = self.store.mirror()
-        self.react(["bash", "-c"], self._bash)
         self.react(["sh", "-c"], self._sh)
         self.react(["exec"], self._exec)
         self.react(["git"], self._git)
@@ -189,12 +187,6 @@ class World(Fake):
         base = self.base_dir()
         ids = sorted({p[len(base) + 1:].split("/")[0] for p in self.files if p.startswith(base + "/")}, reverse=True)
         return [i for i in ids if self.files.get(os.path.join(base, i, "sha"), "").strip()]
-
-    def _bash(self, argv, f):
-        script = argv[2]
-        if "wk_push_forks" in script:
-            return Result(0, FORKS)
-        return Result(127, "", "no bash answer for: %s" % script[-60:])
 
     def _sh(self, argv, f):
         text = argv[2]
@@ -827,7 +819,7 @@ class TestTheFetch(SyncTest):
         self.assertEqual(rc, 0)
         self.assertIn("  %-24s ok  (/mirror/container/WebKit.git)" % "one", err)
         script = next(e[1][-1] for e in self.w.effects if e[1][:1] == ("exec",))
-        self.assertIn("cd '/src/WebKit'", script)
+        self.assertIn("cd /src/WebKit || exit 1", script)
         self.assertIn("git fetch --all --prune --quiet", script)
         self.assertIn("url./mirror/container/WebKit.git.insteadOf", script)
         self.assertIn("CHECK /src/WebKit /mirror/container/WebKit.git", script)
@@ -849,20 +841,18 @@ class TestTheFetch(SyncTest):
         self.assertEqual(rc, 1)
 
     def test_they_run_at_once(self):
-        seen, lock = [], threading.Lock()
+        """Each fetch waits for the other two to start: fetches in turn break the barrier."""
+        met, broken = threading.Barrier(3, timeout=10), []
 
         def wait(argv):
-            with lock:
-                seen.append(argv[2])
-            for _ in range(50):
-                if len(seen) == 3:
-                    break
-                time.sleep(0.01)
+            try:
+                met.wait()
+            except threading.BrokenBarrierError:
+                broken.append(argv[2])
             return Result(0, "from=mirror\nfetch=0\ncheck=0\n")
         self.w.fetched = {n: wait for n in ("a", "b", "c")}
-        start = time.monotonic()
         self.fetch("a", "b", "c")
-        self.assertLess(time.monotonic() - start, 0.4)
+        self.assertEqual(broken, [], "the fetches ran in turn")
 
     def test_the_one_named_being_absent_is_a_refusal_not_a_skip(self):
         self.w.states = {"one": "absent"}
@@ -956,8 +946,8 @@ class TestEachDriversFurniture(SyncTest):
         self.assertIn("nothing to copy", err)
 
     def test_a_containers_exec_already_carries_the_injected_credential(self):
-        """Why --fix runs `git-webkit setup` through the plain exec and not a second bridge."""
-        t = targets.Container("container", str(REPO), dict(self.w.env), self.w)
+        """Why --fix runs `git-webkit setup` through the plain exec and not a second bridge (where the containers are)."""
+        t = targets.Container("container", str(REPO), dict(self.w.env, WK_IN_VM="1"), self.w)
         t.act_exec("ws", ["sh", "-c", "GITWEBKIT /src/WebKit"])
         argv = next(e[1] for e in self.w.effects if e[0] == "run")
         self.assertEqual(argv[argv.index("--") + 1:], ("/opt/wk-tools/container/proxy/ensure-bridge.sh", "sh", "-c", "GITWEBKIT /src/WebKit"))
@@ -1079,6 +1069,13 @@ class TestWhyAPeerIsBehind(SyncTest):
         self.assertIn("2 commit(s) ahead of origin/main", targets.tools_why_behind(self.w, "/t"))
         self.w.answer(["git", "-C", "/t", "rev-list"], out="0\n")
         self.assertEqual(targets.tools_why_behind(self.w, "/t"), "")
+
+    def test_a_count_git_could_not_make_is_said_not_read_as_in_sync(self):
+        self.w = Fake("here")
+        self.w.answer(["git", "-C", "/t", "rev-parse", "--git-dir"], out=".git\n")
+        self.w.answer(["git", "-C", "/t", "rev-parse", "--abbrev-ref", "@{upstream}"], out="origin/main\n")
+        self.w.answer(["git", "-C", "/t", "rev-list"], rc=128)
+        self.assertEqual(targets.tools_why_behind(self.w, "/t"), "git could not count this machine's commits past origin/main")
 
 
 class TestProcess(unittest.TestCase):

@@ -176,12 +176,12 @@ class TestTheClassTheFactoryUsesGetsTheAnswer(WkTest):
         self.assertIn("registers no osx minibrowser", cp.stdout + cp.stderr)
 
 
-class TestUpstreamCarriesWhatTheLanePatches(unittest.TestCase):
+class TestUpstreamCarriesWhatTheMacPGOPatches(unittest.TestCase):
     """`unit pgo.no_local_patch`: once upstream carries them, the harness file goes and the mixer patches nothing."""
 
     @owed("upstream's OSXMiniDriver names no pgo_profile_output_directories, and webkitpy's locate_binary_xcrun "
           "still runs /usr/bin/xcrun off macOS")
-    def test_the_lane_patches_nothing_upstream_owns(self):
+    def test_the_mac_pgo_patches_nothing_upstream_owns(self):
         self.assertFalse(HARNESS.exists())
         self.assertNotIn("locate_binary_xcrun", (REPO / "lib" / "wk" / "pgo.py").read_text())
 

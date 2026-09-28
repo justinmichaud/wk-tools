@@ -24,8 +24,8 @@ from tests.support import REPO, requires_machine
 
 sys.path.insert(0, str(REPO / "lib"))
 
-from wk import act, reach, shell, tailnet  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk import act, reach, tailnet  # noqa: E402
+from wk.machine import HAVE, Fake, Result  # noqa: E402
 from wk.sysimage import write  # noqa: E402
 
 IMAGE = "/imgs/webkit-2.52-yocto-rpi5-64.wic"
@@ -101,7 +101,7 @@ class World:
             cmd = args[0]
             if self.armed and ("WK_RECORD" in cmd or "boot_id" in cmd):
                 return Result(0, "image=sys-a\narmed_boot_id=b1\n" if "WK_RECORD" in cmd else "b1\n")
-            if cmd.startswith("command -v udisksctl"):
+            if cmd.endswith(" udisksctl") and "command -v" in cmd:
                 return Result(0 if self.udisks else 1)
             if cmd.startswith("udisksctl power-off"):
                 c.off = True
@@ -274,9 +274,9 @@ class TestTheWholeWrite(WriteTest):
     def test_a_board_whose_conf_names_no_device_tree_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
             conf = (REPO / "machines" / "rpi5.conf").read_text()
-            (Path(d) / "rpi5.conf").write_text(re.sub(r"(?m)^NODE_DTB=.*\n", "", conf))
+            (Path(d) / "rpi5.conf").write_text(re.sub(r"(?m)^dtb=.*\n", "", conf))
             self.assertIsInstance(self.w.run(env={"WK_MACHINES_DIR": d}), act.Refused)
-        self.assertIn("(machines/rpi5.conf) sets no NODE_DTB", self.w.err)
+        self.assertIn("(machines/rpi5.conf) sets no dtb", self.w.err)
 
     def test_a_card_without_its_joiners_is_not_seeded(self):
         w = World(joins=False)
@@ -323,6 +323,13 @@ class TestWhatTheImageSays(WriteTest):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(w.profile("", "/tmp/x.img"), ("", {}))
 
+    def test_a_named_profile_whose_conf_does_not_parse_refuses_the_write(self):
+        w = write.Write(REPO, ENV, Fake(), None)
+        with mock.patch.object(write.images, "load", side_effect=write.images.ConfError("bad.conf:3: not a KEY=value line")), \
+                self.assertRaises(act.Refused), contextlib.redirect_stderr(io.StringIO()) as err:
+            w.profile("bad", "/tmp/x.img")
+        self.assertIn("bad.conf:3:", err.getvalue())
+
     def test_the_board_fact_leads_the_overclock(self):
         text = write.config_add(REPO, write.images.load("webkit-2.52-yocto-rpi5-64-oc"))
         self.assertLess(text.index("os_check=0"), text.index("arm_freq=2800"))
@@ -342,7 +349,7 @@ class TestWhatTheImageSays(WriteTest):
 
     def test_a_self_disarm_unit_doubles_every_dollar(self):
         """systemd would expand the script's variables otherwise (pi-mbr's parks the partition type byte)."""
-        d = write.driver_class("pi-mbr")(REPO, {"NODE_NAME": "rpi4"}, None)
+        d = write.driver_class("pi-mbr")(REPO, {"name": "rpi4"}, None)
         with contextlib.redirect_stderr(io.StringIO()):
             units = write.stage_units(REPO, "900", d.self_disarm_sh())
         line = [l for l in units["systemd/wk-self-disarm.service"].splitlines() if l.startswith("ExecStart=")][0]
@@ -408,7 +415,7 @@ class TestTheStream(WriteTest):
 
     def test_a_decompressor_the_card_machine_lacks_is_refused_by_name(self):
         self.w.fake.files["/imgs/x.wic.zst"] = "compressed"
-        self.w.fake.react(("ssh",), lambda argv, f: Result(1) if sent(argv[-1]) == ("m_ssh", "command -v zstd >/dev/null")
+        self.w.fake.react(("ssh",), lambda argv, f: Result(1) if sent(argv[-1]) == ("m_ssh", shlex.join(HAVE + ("zstd",)))
                           else self.w.answer(sent(argv[-1])))
         self.assertIsInstance(self.w.run(src="/imgs/x.wic.zst"), act.Refused)
         self.assertIn("rpi5 has no zstd", self.w.err)
@@ -444,7 +451,7 @@ class Channel:
 
 def step(fn, *args, **answers):
     w = write.Write(REPO, ENV, Fake(), None)
-    w.conf, w.ch = {"NODE_NAME": "rescue", "NODE_SSH": "rescue"}, Channel(**answers)
+    w.conf, w.ch = {"name": "rescue", "ssh": "rescue"}, Channel(**answers)
     w.piped = lambda reader: w.ch
     with contextlib.redirect_stderr(io.StringIO()) as err:
         try:

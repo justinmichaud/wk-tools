@@ -2,8 +2,7 @@
 #
 # wk sysimage <sub> [args] -- build and manage bootable systems
 #
-# wk: where=host name=none values=--list group=hosts takes=1 opts --list dryrun build,webkit,write outside
-# wk: readonly ls,disks,holds,path,--list
+# wk: where=host name=none values=--list group=hosts takes=1 verbs=build,webkit,disks,write,ls,list,holds,path,rm,flash opts --list dryrun build,webkit,write outside readonly ls,disks,holds,path,--list
 # wk: destructive write,--install,--all,--rebuild,--rm
 # wk: flag --list takes=0
 # wk: sub ls,list where=dynamic opts=--continued
@@ -11,7 +10,8 @@
 # wk: sub build,webkit,disks,rm,flash,holds,path takes=2
 # wk: sub holds opts=--slot=,--commit=,--config=,--workspace=,--toolchain
 # wk: sub path opts=--workspace=
-# wk: sub build,webkit passthrough=tail
+# wk: sub build opts=--workspace=,--detach,--stop,--resume,--stage=,--commit=,--slot=,--config=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet,--create,--fetch,--install,--provision,--repair,--build-pkg,--all,--version=,--refresh,--rebuild,--rm
+# wk: sub webkit opts=--workspace=,--detach,--stop,--commit=,--slot=,--config=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet
 # wk: sub write opts=--from=,--disk=,--profile=,--machine=,--rescue,--grow,--no-grow
 #
 # An image is a whole machine, built from a spec in this repo, that a machine can
@@ -21,14 +21,14 @@
 # pass; every edit an image needs is made afterwards, on the card, by the
 # machine holding the reader (admin/wk-card-priv).
 #
-#   A yocto or buildroot profile is built in a lane -- the workspace named
-#   yocto-<profile> or buildroot-<profile> -- and 'build', 'webkit' and 'holds'
+#   A yocto or buildroot profile is built in its image workspace -- the one
+#   named yocto-<profile> or buildroot-<profile> -- and 'build', 'webkit' and 'holds'
 #   run on the machine holding that workspace, whichever machine they are typed
 #   on ('wk ls' names it). <profile>@<machine> says which machine instead: a
-#   lane nothing holds yet, or a second machine's lane of a profile another
-#   machine already has one of. --workspace <name> names a different lane on
-#   that machine -- <builder>-<profile>-<arm> is a lane of its own, so two arms
-#   build at once -- and the command follows that one.
+#   workspace nothing holds yet, or a second machine's workspace of a profile
+#   another machine already has one of. --workspace <name> names a different
+#   image workspace on that machine -- <builder>-<profile>-<arm> is one of its
+#   own, so two arms build at once -- and the command follows that one.
 #
 #   build <profile> [options]    build from the spec in this repo. A yocto
 #                                profile also takes --workspace, --detach,
@@ -78,16 +78,16 @@
 #                                profile). Without it a 2.52 profile runs all
 #                                three phases in order
 #   holds <profile> [--toolchain | --slot <name> --commit <sha> [--config <c>]]
-#                                prints `yes` when that lane already holds what
+#                                prints `yes` when that workspace already holds what
 #                                is named -- the built image, the cross SDK
 #                                (--toolchain), or the slot at that commit
 #                                built the way this release builds it -- and
 #                                `no` when it does not. Routed to the
-#                                lane like build and webkit, so a step asks the
+#                                workspace like build and webkit, so a step asks the
 #                                machine that would do the work rather than
 #                                this one (lib/wk/sched.py's done predicate)
-#   path <profile>               the path of the image that lane built, as the
-#                                machine holding the lane spells it, and
+#   path <profile>               the path of the image that workspace built, as
+#                                the machine holding it spells it, and
 #                                nothing (exit 1) when it has none. What
 #                                'write --from <configuration>' resolves
 #                                through
@@ -132,7 +132,7 @@ import sys
 ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from wk import decl, images, shell, targets  # noqa: E402
+from wk import act, decl, images, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import Local  # noqa: E402
@@ -140,18 +140,19 @@ from wk.sysimage import cli  # noqa: E402
 
 
 # The dispatcher's routing questions (lib/wk/dispatch.py), answered before anything else.
-HOOKS = {"--wsname": lambda rest, reg: cli.lane(rest, reg.env),
+HOOKS = {"--wsname": lambda rest, reg: cli.wsname(rest, reg.env),
          "--wstarget": cli.wstarget,
          "--where": lambda rest, reg: cli.where(rest, reg.env)}
 
 
 def main(argv):
     reg = targets.Registry(ROOT, machine=Local())
-    hook, rest = (argv[0], argv[1:]) if argv else ("", [])
+    hook, rest = argv[0], argv[1:]
     if hook in HOOKS:
         print(HOOKS[hook](rest, reg))
         return 0
-    args = decl.Args(decl.Decl(__file__), argv)
+    d = decl.Decl(__file__)
+    args = decl.Args(d, argv)
     spec = args.positionals[1] if len(args.positionals) > 1 else ""
     s = cli.Sysimage(reg, Clock())
     if args.flag("--list"):
@@ -169,13 +170,17 @@ def main(argv):
     if hook == "flash":
         return s.flash(spec)
     if hook in ("build", "webkit"):
-        rest = argv[2:]
-        return getattr(s, hook)(spec, rest[1:] if rest[:1] == ["--"] else rest)
+        rest, valued = argv[1:], d.valued_opts()
+        if spec:
+            del rest[next(i for i, a in enumerate(rest) if a == spec and (i == 0 or rest[i - 1] not in valued))]
+        return getattr(s, hook)(spec, rest)
     if hook == "write":
         return s.write(args.value("--from") or "", args.value("--disk") or "", args.value("--profile") or "",
                        args.value("--machine"), args.flag("--rescue"),
                        cli.grow(args.flag("--grow"), args.flag("--no-grow"), args.order))
-    shell.sysimage_arms(ROOT, *argv)   # disks: lib/sysimage-arms.sh
+    if hook == "disks":
+        return s.disks(spec)
+    act.die("usage: wk sysimage <sub> [args]; see wk sysimage -h")
 
 
 if __name__ == "__main__":

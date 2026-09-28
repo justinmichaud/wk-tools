@@ -3,6 +3,7 @@ collected with this machine's auth key and the node's remembered state, and inst
 `collect` needs a network and credentials and no root; `install` needs root and neither, so the bench install
 can install a collected payload onto itself. The join runs on the install (bench/mac-tailnet.sh)."""
 
+import argparse
 import os
 import plistlib
 import re
@@ -93,21 +94,10 @@ class Tailnet:
     def is_darwin_arm64(self, path):
         return self.m.run(["od", "-An", "-tx1", "-N8", path]).out.split() == MACHO_ARM64.split()
 
-    def verified(self, sha, path):
-        return self.m.exists(path) and task.sha256(self.m, path) == sha
-
     def fetch(self, url, dest, sha, what):
-        if self.verified(sha, dest):
-            return
-        info("fetching %s" % what)
-        self.run(["curl", "-fsSL", "-o", dest + ".part", url], "could not fetch %s" % what)
-        if act.dry_run():
-            return
-        if not self.verified(sha, dest + ".part"):
-            self.m.act_run(["rm", "-f", dest + ".part"])
-            die("%s does not match its pinned checksum in lib/wk/sysimage/mactailnet.py.\n"
-                "    Refusing to build a daemon out of unverified bytes." % os.path.basename(url))
-        self.run(["mv", dest + ".part", dest], "could not keep %s" % dest)
+        why = task.fetch_pinned(self.m, url, dest, sha)
+        if why:
+            die("%s: %s\n    The pins are in lib/wk/sysimage/mactailnet.py; no daemon is built out of unverified bytes." % (what, why))
 
     def unpack(self, argv, final, what):
         self.m.act_run(["rm", "-rf", final + ".part", final])
@@ -173,17 +163,16 @@ class Tailnet:
         return out
 
     def node_name(self, machine):
-        name = (fleet.Fleet(self.root, self.env).load(machine) or {}).get("NODE_BENCH_SSH", "")
+        name = (fleet.Fleet(self.root, self.env).load(machine) or {}).get("bench_ssh", "")
         if not name:
-            die("machines/%s.conf declares no NODE_BENCH_SSH,\n    so there is no name for the benchmark install to "
-                "join the tailnet under.\n    Every phase of this lane reaches it by that name." % machine)
+            die("machines/%s.conf declares no bench_ssh,\n    so there is no name for the benchmark install to "
+                "join the tailnet under.\n    Every phase of the Mac bench path reaches it by that name." % machine)
         return name
 
     def remembered(self, name):
         return os.path.join(Store(self.env).state_dir(), "mac-tailnet", name + ".state")
 
     def authkey(self):
-        """The key file; under --dry-run only whether there is one, since finding it may mint one."""
         if act.dry_run():
             return "<the tailnet auth key>" if tailnet.Fleet(self.root, self.env, self.m).key_present() else ""
         return tailnet.Fleet(self.root, self.env, self.m).authkey()
@@ -264,18 +253,15 @@ class Tailnet:
         info("  tailnet: kept '%s' aside; the next volume rejoins as it" % name)
 
 
-USAGE = "usage: python3 -m wk.sysimage.mactailnet install <volume-root> <collected-dir>"
-
-
 def main(argv, env=None, machine=None):
     from wk.machine import here
-    env = os.environ if env is None else env
-    t = Tailnet(machine or here(), env)
+    parser = argparse.ArgumentParser(prog="python3 -m wk.sysimage.mactailnet")
+    p = parser.add_subparsers(dest="verb", required=True).add_parser("install")
+    p.add_argument("volume_root")
+    p.add_argument("collected_dir")
+    a = parser.parse_args(argv)
     try:
-        if argv[:1] == ["install"] and len(argv) == 3:
-            t.install(argv[1], argv[2])
-        else:
-            die(USAGE, 2)
+        Tailnet(machine or here(), os.environ if env is None else env).install(a.volume_root, a.collected_dir)
     except Refused as e:
         return e.status
     return 0

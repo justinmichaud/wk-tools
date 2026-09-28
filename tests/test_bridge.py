@@ -28,6 +28,7 @@ from wk import act, bridge, reach  # noqa: E402
 from wk.bridge import plan, provision, role  # noqa: E402
 from wk.bridge.plan import AUTHKEY, LIB  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
+from wk.machine import HAVE  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.store import Store  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
@@ -100,18 +101,24 @@ class TestBridge(WkTest):
             if not conf.exists():
                 bad.append(f"{prof}: names bridge '{bridge}', which has no conf")
                 continue
-            decl_m = re.search(r"(?m)^BR_DEVICE=(.*)$", conf.read_text())
+            decl_m = re.search(r"(?m)^device=(.*)$", conf.read_text())
             declared = decl_m.group(1) if decl_m else ""
             if declared not in device:
-                bad.append(f"{prof}: builds for '{device}' but {bridge}.conf says BR_DEVICE={declared}")
+                bad.append(f"{prof}: builds for '{device}' but {bridge}.conf says device={declared}")
         self.assertEqual(bad, [], "; ".join(bad))
+
+
+def ts_status(**over):
+    """The one blob wk-bridge-healthcheck now hands judge(): raw `tailscale status --json`."""
+    self_ = dict({"Online": True, "Tags": ["tag:bridge"], "PrimaryRoutes": ["10.99.1.0/24"]}, **over)
+    return json.dumps({"BackendState": "Running", "Self": self_})
 
 
 GOOD_FACTS = {
     "facts": "yes", "wifi_iface": "wlan0", "wifi_addr": "192.168.1.5/24", "wifi_power_save": "off",
     "seg_iface_exists": "yes", "seg_carrier": "1", "seg_addr": "10.99.1.1/24", "seg_usb_speed": "480",
     "leases_file_nonempty": "yes", "leases_ping": "",
-    "ts_backend": "Running", "ts_online": "true", "ts_tags": '["tag:bridge"]', "ts_routes": '["10.99.1.0/24"]',
+    "ts_status_json": ts_status(),
     "svc_wk-bridge-dhcp": "running", "svc_wk-bridge-nftables": "running", "svc_wk-bridge-netwatch": "running",
     "svc_wk-bridge-usb-host": "running", "svc_sshd": "running", "svc_chrony": "running", "svc_nm": "running",
     "svc_tailscale": "running", "nft_table": "yes", "ip_forward": "1",
@@ -123,8 +130,8 @@ GOOD_FACTS = {
 
 
 def bridge_conf(name="tailnet-bridge-generic", **over):
-    conf = {"KIND": "bridge", "BR_DEVICE": "pinephone", "BR_SEGMENT": "10.99.1.0/24", "BR_IF": "lan0",
-            "BR_EGRESS": "none", "BR_CAMERA": "off", "BR_SSH": name, "BR_HOSTNAME": name, "BR_USER": "user"}
+    conf = {"kind": "bridge", "device": "pinephone", "segment": "10.99.1.0/24", "if": "lan0",
+            "egress": "none", "camera": "off", "ssh": name, "hostname": name, "user": "user"}
     conf.update(over)
     return bridge.BridgeConf(name, conf)
 
@@ -177,14 +184,14 @@ class TestJudge(unittest.TestCase):
         self.assertFalse(any("no carrier" in t for lvl, t in report.rows if lvl == "bad"))
 
     def test_an_unapproved_route_fails_by_segment_name(self):
-        report = bridge.judge(dict(GOOD_FACTS, ts_routes="none"), bridge_conf())
+        report = bridge.judge(dict(GOOD_FACTS, ts_status_json=ts_status(PrimaryRoutes=[])), bridge_conf())
         self.assertTrue(report.failed)
         self.assertTrue(any("no approved subnet route" in t for lvl, t in report.rows if lvl == "bad"))
 
     def test_camera_is_only_reported_when_declared(self):
         off = bridge.judge(GOOD_FACTS, bridge_conf())
         self.assertFalse(any(t == "Camera" for lvl, t in off.rows if lvl == "hdr"))
-        on = bridge.judge(dict(GOOD_FACTS, camera_device="no"), bridge_conf(BR_CAMERA="http"))
+        on = bridge.judge(dict(GOOD_FACTS, camera_device="no"), bridge_conf(camera="http"))
         self.assertTrue(any(t == "Camera" for lvl, t in on.rows if lvl == "hdr"))
 
 
@@ -321,8 +328,8 @@ class PhoneWorld:
         h.react(["sh", "-c", role.PAUSED], self.give_root)
         self.stored(authkey=KEY)
         f.answer(["id", "-u"], out=uid + "\n")
-        f.answer(["sh", "-c", "command -v apk"], rc=0 if apk else 1)
-        f.answer(["sh", "-c", "command -v doas"])
+        f.answer(HAVE + ("apk",), rc=0 if apk else 1)
+        f.answer(HAVE + ("doas",))
         f.answer(["doas", "-n", "true"], rc=1 if doas_password else 0)
         f.react(["sh", "-c", role.SHIP], self.ship)
         f.react(["sh", LIB + "/provision.sh", "base"], self.apply(("file",)))
@@ -466,7 +473,7 @@ class TestPlan(unittest.TestCase):
             self.assertIn(path, script)
 
     def test_nat_egress_masquerades_and_serves_dns(self):
-        p = plan.Plan(BMC, self.conf(BR_EGRESS="nat"), bridge.kv(FACTS))
+        p = plan.Plan(BMC, self.conf(egress="nat"), bridge.kv(FACTS))
         files = {path: text for path, _m, text in p.files}
         self.assertIn("masquerade", files["/etc/nftables.d/wk-bridge.nft"])
         self.assertIn("dhcp-option=option:dns-server,10.99.0.1", files["/etc/dnsmasq.d/wk-bridge.conf"])
@@ -482,18 +489,18 @@ class TestPlan(unittest.TestCase):
         self.assertTrue(any("no USB ethernet adapter" in w for w in p.warnings))
 
     def test_the_conf_mac_wins_over_the_detected_one_lowercased(self):
-        p = plan.Plan(BMC, self.conf(BR_LAN_MAC="AA:BB:CC:DD:EE:FF"), bridge.kv(FACTS))
+        p = plan.Plan(BMC, self.conf(lan_mac="AA:BB:CC:DD:EE:FF"), bridge.kv(FACTS))
         self.assertIn("BR_LAN_MAC=aa:bb:cc:dd:ee:ff", p.env())
 
     def test_a_pinned_battery_node_is_the_only_one_taken(self):
         facts = dict(bridge.kv(FACTS), battery_nodes="/sys/class/power_supply/a,/sys/class/power_supply/b")
-        self.assertEqual(plan.Plan(BMC, self.conf(BR_BATTERY="b"), facts).battery, "/sys/class/power_supply/b")
-        missing = plan.Plan(BMC, self.conf(BR_BATTERY="c"), facts)
+        self.assertEqual(plan.Plan(BMC, self.conf(battery="b"), facts).battery, "/sys/class/power_supply/b")
+        missing = plan.Plan(BMC, self.conf(battery="c"), facts)
         self.assertEqual(missing.battery, "")
         self.assertNotIn("service wk-bridge-battery", missing.lines)
 
     def test_camera_off_drops_the_service(self):
-        self.assertIn("drop wk-bridge-camera", plan.Plan(BMC, self.conf(BR_CAMERA="off"), bridge.kv(FACTS)).lines)
+        self.assertIn("drop wk-bridge-camera", plan.Plan(BMC, self.conf(camera="off"), bridge.kv(FACTS)).lines)
         self.assertIn("service wk-bridge-camera", plan.Plan(BMC, self.conf(), bridge.kv(FACTS)).lines)
 
     def test_the_packaged_names_come_from_the_phone(self):
@@ -810,7 +817,7 @@ class TestDevices(unittest.TestCase):
     def test_an_unknown_device_is_refused_by_name(self):
         w = PhoneWorld()
         r = w.role()
-        conf = dict(r.b.conf(BMC).conf, BR_DEVICE="nokia")
+        conf = dict(r.b.conf(BMC).conf, device="nokia")
         with mock.patch.object(r.b, "conf", return_value=bridge.BridgeConf(BMC, conf)):
             rc, out = quiet(r.setup, BMC)
         self.assertEqual(rc, 1)

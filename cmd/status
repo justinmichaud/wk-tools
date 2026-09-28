@@ -98,18 +98,19 @@ def main(argv):
     wait = args.flag("--wait")
     if not asked and mode == "web" and (name or wait):
         mode = "text"
+    waited = None
     if wait:
         timeout = int((args.value("--timeout") if args.value("--timeout") is not None else env.get("WK_WAIT_TIMEOUT", "0")) or 0)
-        wait_until_idle(lambda: Walk(ROOT, name=name, fleet=False, devices=False).worst_only(), timeout,
+        waited = wait_until_idle(lambda: Walk(ROOT, name=name, fleet=False, devices=False).worst_only(), timeout,
                         float(env.get("WK_WAIT_INTERVAL", "5")), Clock(), name, info, warn)
     walk = Walk(ROOT, name=name, fleet=not no_fleet, devices=devices)
     if args.flag("--records"):
         for r in walk.records(markers=False):
             print(statusview.dumps(r))
-        return walk.worst
+        return verdict(waited, walk)
     if mode == "text":
         statusview.render_text_stream(walk.records(), sys.stdout, statusview.colour_wanted())
-        return walk.worst
+        return verdict(waited, walk)
     doc = statusview.merge(walk.records())
     if mode == "json":
         json.dump(doc, sys.stdout, indent=2)
@@ -122,7 +123,12 @@ def main(argv):
             return rc
     else:
         die("'%s' is not a view: --text, --json, --html or --web" % mode)
-    return walk.worst
+    return verdict(waited, walk)
+
+
+def verdict(waited, walk):
+    """--wait's exit is the answer the wait confirmed; the walk after it only shows the state."""
+    return walk.worst if waited is None else waited
 
 
 if __name__ == "__main__":

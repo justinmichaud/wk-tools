@@ -15,13 +15,13 @@ import threading
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from wk import act  # noqa: E402
-from wk.bench.mac import AGENT, CHECK, MARKER, QUIET, WKMAC  # noqa: E402
+from wk import act, screen  # noqa: E402
+from wk.bench.mac import AGENT, CHECK, MARKER, WKMAC  # noqa: E402
 from wk.boot.mac import BENCH_ROOT  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.kv import kv  # noqa: E402
-from wk.machine import Local  # noqa: E402
-from wk.quiet import DESKTOP, lib_argv  # noqa: E402
+from wk.machine import Local, lib_argv  # noqa: E402
+from wk.quiet import DESKTOP  # noqa: E402
 
 TREE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
@@ -117,7 +117,7 @@ class Autorun:
 
     def logged(self, argv):
         if act.dry_run():
-            sys.stderr.write("would run: %s\n" % " ".join(shlex.quote(a) for a in argv))
+            sys.stderr.write("would run: %s\n" % shlex.join(argv))
             return 0
         self.out.flush()
         return self.m.run_tty(argv).rc
@@ -316,7 +316,7 @@ class Autorun:
         if self.display:
             return
         self.say("the job names no display, so what a round would be measured at is unknown.")
-        self.say("  From host mode: set NODE_DISPLAY in machines/mbp.conf, then plant again.")
+        self.say("  From host mode: set display in machines/mbp.conf, then plant again.")
         self.quit("the job names no display", outcome="no-display-expectation", agent=True)
 
     def hold_auto_brightness(self):
@@ -358,7 +358,7 @@ class Autorun:
             self.say("  Nothing is measured at a mode that is not the declared one: MotionMark's")
             self.say("  score is the area it draws. From host mode, set the mode on this install")
             self.say("  by hand and re-plant, or declare the mode it does come up at:")
-            self.say('    NODE_DISPLAY="%s %s"  in machines/mbp.conf' % (self.display.split()[0], running or "<what it reads>"))
+            self.say('    display="%s %s"  in machines/mbp.conf' % (self.display.split()[0], running or "<what it reads>"))
             self.quit("the declared display mode cannot be set", outcome="display-mode-unsettable", agent=True)
         if not self.sudo("python3", self.tool(WKMAC), "display-mode", "--declare", want):
             self.say("  the WindowServer configuration would not take %s." % want)
@@ -400,7 +400,7 @@ class Autorun:
 
     def clear_the_screen(self):
         """A window over MiniBrowser throttles it into a timeout; killing Setup Assistant ends the desktop session."""
-        front = self.m.run(lib_argv(self.tools, QUIET, "screen_blocker")).out.strip()
+        front = screen.blocker(self.m, self.tools)
         if front == "?":
             self.say("WARNING: could not ask the window server what is on the screen; a run that")
             self.say("    times out with no error is this and nothing else")

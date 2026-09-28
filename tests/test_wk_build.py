@@ -28,13 +28,13 @@ from pathlib import Path
 from unittest import mock
 
 from tests.killpoints import converges
-from tests.support import REPO
+from tests.support import REPO, as_dispatched
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, build, job, record, targets  # noqa: E402
+from wk import act, build, dispatch, job, record, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Local, Result  # noqa: E402
+from wk.machine import Fake, Local, Result, isolated_module  # noqa: E402
 
 FAR_LINE = "cd /src/WebKit && Tools/Scripts/build-webkit --jsc-only --release --makeargs=-j8\n"
 CMD_LOADER = importlib.machinery.SourceFileLoader("cmd_build", str(REPO / "cmd" / "build"))
@@ -129,7 +129,6 @@ class World(Fake):
         self.answer(["exec", "ws", "grep", "-q", "WK_DRY_RUN"])
         self.answer(["exec", "ws", "bash", "-c"])
         self.react(["exec", "ws", "env"], lambda a, f: Result(0, FAR_LINE) if "WK_DRY_RUN=1" in a else Result(1))
-        self.react(["bash", "-c"], self._bash)
         self.answer(["sync-tools"])
         self.reg = Reg(self)
         self.ws_dir = os.path.join(self.env["WK_STORE"], "ws", "ws")
@@ -139,11 +138,6 @@ class World(Fake):
     @property
     def fake(self):
         return self
-
-    def _bash(self, argv, f):
-        if "origin_branch_fetch_step" in argv[2]:
-            return Result(0, "git fetch -q origin 'topic'")
-        return Result(127, "", "no bash answer")
 
     def popen(self, argv, stdin=None, stdout=None, stderr=None, cwd=None):
         self.effect(("watch", tuple(argv)))
@@ -188,8 +182,8 @@ class BuildTest(unittest.TestCase):
 
     def make(self, w=None, *argv):
         w = w or self.w
-        opts = CMD.parse(list(argv) or argv_of())
-        return build.Build(w.reg, "ws", opts, list(argv) or argv_of(), w.clock, w.popen)
+        argv = as_dispatched("build", list(argv) or argv_of(), os.environ)
+        return build.Build(w.reg, "ws", CMD.parse(argv), argv, w.clock, w.popen)
 
     def run_(self, w=None, *argv):
         with contextlib.redirect_stderr(io.StringIO()) as err:
@@ -234,13 +228,13 @@ class TestTheRecordARunWrites(BuildTest):
         self.assertEqual(t.plan()[0], "check out topic")
         (co,) = [e for e in self.w.effects if e[0] == "run" and e[1][:3] == ("exec", "ws", "bash")]
         self.assertIn("git checkout -q topic", co[1][4])
-        self.assertIn("git fetch -q origin 'topic'", co[1][4])
+        self.assertIn("git fetch -q origin topic", co[1][4])
 
     def test_the_build_runs_the_target_half_under_the_config_environment(self):
         self.run_(None, "jsc-release", "--cmake", "-DX=1", "--env", "CC=gcc", "--", "--verbose")
         (w,) = [e for e in self.w.effects if e[0] == "watch"]
         argv = list(w[1])
-        self.assertEqual(argv[:3], ["exec", "ws", "env"])
+        self.assertEqual(argv[:9], ["exec", "ws"] + isolated_module("/opt/wk-tools/lib", "wk.sysimage.task") + ["stage"])
         self.assertEqual(argv[-2:], ["/opt/wk-tools/build/build-in-target.sh", "--verbose"])
         self.assertIn("CC=gcc", argv)
         self.assertTrue(any(a.startswith("WK_BUILD_CMAKE=") and a.endswith("-DX=1") for a in argv))
@@ -355,7 +349,12 @@ class TestRefusals(BuildTest):
         self.assertIn("usage: wk build <config>", self.refused(None, "--no-defaults", status=2))
 
     def test_an_unknown_config_names_the_list(self):
-        self.assertIn("unknown config 'nope' (wk build --list)", self.refused(None, "nope"))
+        """the dispatcher's refusal, before the build is made"""
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(dispatch.Exit) as cm:
+            self.make(None, "nope")
+        self.assertEqual(cm.exception.status, 2)
+        self.assertIn("unknown config: nope -- 'wk build --list' names every one", err.getvalue())
 
     def test_cmakeargs_is_refused_naming_what_it_would_drop(self):
         """`build.config_is_data`: the config's flags are data, and --cmakeargs would replace them."""
@@ -490,7 +489,7 @@ class TestDryRun(BuildTest):
         n = len(mutations(wet))
         self.assertEqual(rel[:n], rel[n:])
         self.assertGreaterEqual(n, 4)
-        self.assertIn("would run: exec ws env", err)
+        self.assertIn("would run: exec ws python3 -I -c", err)
         self.assertEqual(dry.pids, set())
 
     def test_a_stale_far_copy_is_named_rather_than_asked(self):

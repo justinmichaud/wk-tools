@@ -13,7 +13,11 @@ Image = namedtuple("Image", "builder ws path")   # path None: an image workspace
 ROW = "%-40s %-8s %-10s %-10s %-9s %-8s %s"
 HEADER = ("WORKSPACE", "BOARD", "WHERE", "BUILDER", "STATE", "SIZE", "BUILT")
 PGO_USE = "wpe-cross-pgo-use"
-HOST_BUILDERS = ("mac-volume", "guest")
+HOST_BUILDERS = ("mac-volume", "guest", "fetch", "pmos")
+
+
+class Unknown(Exception):
+    """A builder's outputs could not be read: neither an image nor its absence."""
 
 
 class Builder:
@@ -27,7 +31,7 @@ class Builder:
         return sorted(_glob(machine, ws_dir, self.pattern.split("/")))
 
 
-# Under ws/<name>/build, which targets/container.sh bind-mounts as /src/WebKit/WebKitBuild.
+# Under ws/<name>/build, which lib/wk/targets.py's Container bind-mounts as /src/WebKit/WebKitBuild.
 BUILDERS = (Builder("yocto", "build/CrossToolChains/*/build/image/*.wic.xz"),
             Builder("buildroot", "build/buildroot/*/output/images/*.img"))
 
@@ -78,15 +82,20 @@ def host_profiles(env):
 
 
 def builder_outputs(reg, clock, p):
-    """A host builder's marker, read off reg.machine/reg.env, the one path holds and path also ask."""
-    from wk.sysimage import guestbase, macvolume
-    try:
-        if p["IMG_BUILDER"] == "mac-volume":
-            return macvolume.MacVolume(reg.machine, p, reg.env, clock).outputs()
-        if p["IMG_BUILDER"] == "guest":
-            return guestbase.Base(reg.load("vm"), clock).outputs()
-    except LookupError:
-        return []
+    """A host builder's marker, read off reg.machine/reg.env, the one path holds and path also ask; Unknown when unreadable."""
+    from wk.sysimage import guestbase, macvolume, pmos, task
+    if p["IMG_BUILDER"] == "mac-volume":
+        return macvolume.MacVolume(reg.machine, p, reg.env, clock).outputs()
+    if p["IMG_BUILDER"] == "guest":
+        try:
+            vm = reg.load("vm")
+        except LookupError:
+            return []
+        return guestbase.Base(vm, clock).outputs()
+    if p["IMG_BUILDER"] == "fetch":
+        return task.Fetch(reg.machine, p, reg.env).outputs()
+    if p["IMG_BUILDER"] == "pmos":
+        return pmos.outputs(reg, p)
     return None
 
 
@@ -145,7 +154,8 @@ class Listing:
 
     def image_rows(self, image):
         ws, env = image.ws, self.reg.env
-        state = "building" if self.building(ws) else "none" if image.path is None else "ready"
+        building = self.building(ws)
+        state = "unknown" if building is None else "building" if building else "none" if image.path is None else "ready"
         prof = images.ws_profile(ws, env)
         board, note = "", ""
         if prof:
@@ -170,12 +180,17 @@ class Listing:
     def host_rows(self):
         rows = []
         for p in host_profiles(self.reg.env):
-            found = builder_outputs(self.reg, self.clock, p) or []
-            if not found:
-                continue
             name, builder, board = p["IMG_PROFILE"], p["IMG_BUILDER"], p["IMG_MACHINE"] or "-"
-            rows.append(ROW % (name, board, self.label, builder, "ready", "-", "-"))
-            rows.append("    " + found[0])
+            try:
+                found = builder_outputs(self.reg, self.clock, p) or []
+            except Unknown as e:
+                self.warn("cannot tell whether %s is built: %s" % (name, e))
+                continue
+            except act.Refused:
+                self.warn("cannot tell whether %s is built: the reason is above" % name)
+                continue
+            if found:
+                rows += [ROW % (name, board, self.label, builder, "ready", "-", "-"), "    " + found[0]]
         return rows
 
     def store_rows(self):

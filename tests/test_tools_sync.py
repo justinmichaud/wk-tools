@@ -1,4 +1,4 @@
-"""Putting wk-tools on a machine (lib/wk/tools.py, each driver's `sync_tools`, and the bash shim in lib/target.sh).
+"""Putting wk-tools on a machine (lib/wk/tools.py and each driver's `sync_tools`).
 
 The rule under test: a machine is given a *commit*, never a file copy. The copy over there is a real checkout whose
 HEAD is this tree's HEAD, converged from whatever was there before -- nothing, a directory an older tooling copied
@@ -27,8 +27,6 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import guest, targets, tools  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
 
-VM = REPO / "targets" / "vm.sh"
-REMOTE = REPO / "targets" / "remote.sh"
 SHA = "a" * 40
 
 
@@ -254,7 +252,7 @@ class EachKind(unittest.TestCase):
         return [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] in ("ssh", "scp")]
 
     def test_a_build_box_gets_the_bundle_at_its_tools_directory(self):
-        self.conf("box", "KIND=build\nWK_REMOTE_HOST=box.example\nWK_REMOTE_ROOT=/home/u/wk\nWK_REMOTE_TOOLS=/home/u/wk/tools\n")
+        self.conf("box", "kind=build\nhost=box.example\nroot=/home/u/wk\ntools=/home/u/wk/tools\n")
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertTrue(self.reg.load("box").sync_tools(""))
         runs = self.pushed()
@@ -264,7 +262,7 @@ class EachKind(unittest.TestCase):
         self.assertEqual(runs[1][-1], "box.example:/home/u/wk/tools/" + tools.BUNDLE)
 
     def test_a_peer_is_not_pushed_to_at_all(self):
-        self.conf("pal", "KIND=peer\nWK_REMOTE_HOST=pal.example\nWK_REMOTE_PEER=1\n")
+        self.conf("pal", "kind=peer\nhost=pal.example\npeer=1\n")
         self.assertTrue(self.reg.load("pal").sync_tools(""))
         self.assertEqual(self.pushed(), [])
 
@@ -284,30 +282,19 @@ class EachKind(unittest.TestCase):
         self.assertIn("/Users/admin/.wk-workspace", runs[-1][-1], "the marker the pushed tooling reads was not rewritten")
 
 
-class TestTheBashShim(ToolsPushCase):
-    """One push for every kind: lib/target.sh's `t_sync_tools` is the only bash caller left, and it asks
-    the Python. `boot/machines.sh`'s own push went with `machine_prepare` (`wk machine setup mbp`,
-    lib/wk/machine_cmd/mac.py, calls `tools.push` directly), so the bash `tools_push` shim it once sourced
-    has no caller left."""
+class TestOnePush(unittest.TestCase):
+    """One push for every kind: every driver that puts wk-tools on a machine asks `tools.push`, and none copies
+    files of its own."""
 
-    def test_no_driver_pushes_of_its_own(self):
-        for f in (REMOTE, VM, REPO / "targets" / "container.sh", REPO / "targets" / "local.sh"):
-            self.assertNotIn("\nt_sync_tools()", f.read_text(), f)
-        self.assertIn('t_sync_tools()    { _ws_py sync-tools "$WK_TARGET" "$1"; }', (REPO / "lib" / "target.sh").read_text())
+    def test_every_driver_that_pushes_asks_tools_push(self):
+        for cls in (targets.Vm, targets.Remote):
+            with self.subTest(driver=cls.__name__):
+                body = inspect.getsource(cls.sync_tools)
+                self.assertIn("tools.push(", body)
+                self.assertNotIn("rsync", body, "wk-tools is still being file-copied")
 
     def test_lib_tools_sh_is_gone(self):
         self.assertFalse((REPO / "lib" / "tools.sh").exists(), "the bash push shim has no caller left")
-        self.assertNotIn("tools_push", (REPO / "boot" / "machines.sh").read_text())
-
-
-class TestNoFileCopyLeft(unittest.TestCase):
-    def test_no_driver_rsyncs_the_wk_root(self):
-        hits = []
-        for f in (REMOTE, VM):
-            for i, line in enumerate(f.read_text().splitlines(), 1):
-                if not line.lstrip().startswith("#") and "rsync" in line and "WK_ROOT" in line:
-                    hits.append(f"{f}:{i}:{line.strip()}")
-        self.assertEqual(hits, [], "wk-tools is still being file-copied")
 
 
 class TestGuestStartConverges(unittest.TestCase):

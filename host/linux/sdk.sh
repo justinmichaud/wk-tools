@@ -1,5 +1,5 @@
 
-. "$WK_ROOT/lib/store.sh"
+wk_eval wk.store paths
 . "$WK_ROOT/host/units.sh"
 
 SDK="${WK_SDK:-${XDG_DATA_HOME:-$HOME/.local/share}/webkit-container-sdk}"
@@ -35,10 +35,10 @@ unit_start wk-ssh-agent.service "$WK_ROOT" "$WK_STORE" \
 unit_start wk-github-inject.service "$WK_ROOT" "$WK_STORE" \
     "'git-webkit pr' in a workspace will fail" "$_unit_journal" sh -c
 
-if push_agent_cred_sync push_agent_exec "$(push_agent_machine_read_pat)" github-pat; then
+if wk_py wk.secrets pat-converge; then
     debug "GitHub read token converged"
 else
-    warn "could not write $(push_agent_machine_read_pat), so a read from a
+    warn "could not write the injector's read token, so a read from a
   workspace answers 401 ('wk key set github-pat' stores a token)"
 fi
 

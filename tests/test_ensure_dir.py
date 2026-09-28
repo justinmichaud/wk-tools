@@ -104,8 +104,7 @@ class TestEnsureDir(WkTest):
 
 
 class TestFileMode(WkTest):
-    """The reader ensure_dir asks, and the one cmd/key prints a credential's
-    mode with: octal permission bits, on a GNU stat and a BSD one alike."""
+    """The reader ensure_dir and admin/install.sh ask: octal permission bits."""
 
     def test_it_reads_the_bits_without_a_leading_zero(self):
         d = self.tmp

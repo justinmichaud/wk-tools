@@ -13,7 +13,7 @@ Three things are driven:
   - A real, bare `wk status --records` walk over one faked target
     (WK_TARGET=remote, the tests/test_fleet_walk.py technique: a stub
     `ssh` that runs the probe locally) carrying two build task records
-    (lib/task.sh) in different states, asserting the process's own exit
+    (lib/wk/record.py) in different states, asserting the process's own exit
     status is the worse of the two -- not the first, not the last.
 
 Run: python3 -m unittest tests.test_owed_cli_exit_code -v
@@ -120,7 +120,7 @@ class TestFleetExitCodeIsTheWorst(WkTest):
     tidiness: `report_ws`'s `creating` branch calls `bump 4` outright for a
     workspace with no live creator, which would swamp the lower-severity
     build states this test distinguishes. The records go in the scratch
-    XDG_STATE_HOME targets/remote.sh's per-target store resolves to.
+    XDG_STATE_HOME a Remote target's per-target store resolves to.
     """
 
     def _two_workspaces(self, xdg, remote_root, states):
@@ -143,9 +143,7 @@ class TestFleetExitCodeIsTheWorst(WkTest):
                 "WK_TARGET": "remote",
                 "WK_REMOTE_HOST": "fake-reachable-machine",
                 "PATH": f"{binp}:{self._real_path()}",
-                # The probe's cap (targets/remote.sh): the stub answers at once, and
-                # `capped` leaves its watchdog sleeping on the walk's stdout for the
-                # whole cap after the walk has exited.
+                # The probe's cap: the stub answers at once.
                 "WK_PROBE_SECONDS": "1",
             }
             if extra_env:
