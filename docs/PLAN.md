@@ -1226,9 +1226,20 @@ decides is a row; one still open is listed under "Decisions for the user".
 ### Decisions for the user
 
 - Step 6: `wk rm` takes a workspace's tasks with it. The interim behaviour: it refuses a workspace holding a task no export holds as it is now (the zip the task records, or `~/Downloads/<task>.zip`, compared json by json), naming `wk bench export <task>`, and `--force` crosses it; whether that stays, becomes a line in rm's one question, or goes. A container mounts its whole workspace directory, so the workspace can read and write its own tasks' results (the store-wide `/bench` mount it replaces exposed every task).
+
+refuse but allow force
+
 - Step 6: `wk bench ab` across boards and a Mac A/B keep their task in the store's `bench/`, since neither has one workspace (the arms' image workspaces may be on other machines); whether each should instead live in one of them.
+
+Why has the concept of a store returned? I said I didn't want a store because it represented extra state.
+
+There should be a workspace for the bench run, since we needed to build the image. This is the source of truth. There is no image store! You deleted my comments where I said I didn't want a store! Workspaces are always the source of truth
+
 - README gets a section defining the `home`/`lab`/`wk`/`field`/`stock` layers, or the layering goes (5.39 deletes the `lint.layering` row; a later step can re-add it once README defines the layers).
 - Taken overnight on 2026-09-25, each reversible: PyYAML stays in `lib/wk/sysimage/pmos_build.py` (netplan's own dependency on the build host; the stdlib has no YAML reader); the bridge phones' images no longer install avahi and nothing here uses mDNS; `lint.one_wifi_reader` stays owed because the Mac reads its WiFi credential from the System keychain and the pmos build host from netplan, and routing both through `admin/wk-card-priv` would widen a privileged helper; `wk machine setup <board|mbp> --dry-run` on an unreachable machine prints the plan and exits 0 rather than refusing (a wet run still refuses), so the unit tier's ssh shim does not fail dry runs.
+
+This isn't a question.
+
 - The word "target": a device configuration or the execution target; one workspace per (perf task, device) rather than per profile, deletable once its results are in.
 - `git-sync-fork` against the fork's protected `main`: lift the protection, or the helper refuses by name.
 - `wk key check` reports a Bugzilla key's authentication only; whether editbugs capability is probed another way.
