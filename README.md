@@ -528,7 +528,9 @@ never read. The GitHub token and Bugzilla key go to the injector
 hosts and puts the credential on the request: a read always, a write only
 while push is on. With push off a write is refused with 412 naming `wk push
 on`. A macOS guest gets the same through an ssh-agent on the host forwarded
-per guest.
+per guest. A build box holds no deploy key and nothing forwards one to it,
+so a push is made from the workstation and `wk push status --target <box>`
+says off.
 
 **Housekeeping**
 
@@ -692,6 +694,33 @@ inside a container).
 `WK_POLL_SECONDS`, `WK_HEARTBEAT_SECONDS`, `WK_STATUS_PORT`,
 `WK_STATUS_INTERVAL`, `WK_BROKER_SOCKET`, `WK_SCREEN_EXPECTED`,
 `WK_BENCH_RUNNER_REF`.
+
+**The rest, one line each**
+
+- `WK_BENCH_ADMIN` the volume owner that authorises the bench install (default: the invoking user).
+- `WK_BENCH_GUEST` the name of the bench guest workspace (default `wk-bench`).
+- `WK_BENCH_NEED_GB` free GB the bench volume's container must have before the volume is added.
+- `WK_BENCH_WIRED` set when the bench install is on ethernet, so no Wi-Fi credential is copied.
+- `WK_HOST_FREE_MIN_GB` free GB on the host below which a macOS guest is refused (`WK_HOST_FREE_WARN_GB` only warns).
+- `WK_HOST_SECRETS` the macOS host's secrets directory (default `~/.config/wk/secrets`).
+- `WK_IMAGE_HOST` the address the bench image is reached at, ahead of the fleet peer lookup.
+- `WK_JOB_PID_TRIES` polls a watched job gets to announce its pid (default 900).
+- `WK_MACHINES_DIR` the directory of machine confs (default `machines/`).
+- `WK_MAC_BENCH_HOLD` seconds the Mac bench autorun stays up after its last job (default 900).
+- `WK_MAC_BENCH_SSH` the ssh destination of the Mac's bench install, over the conf's `bench_ssh`.
+- `WK_MAC_BENCH_TOOLS` where the wk-tools checkout is on the Mac's bench install.
+- `WK_PMOS_HOST` the postmarketOS build host, over the profile's `PMO_BUILD_HOST`.
+- `WK_PMOS_ROOT` the postmarketOS build root on that host (default `~/wk-pmos`).
+- `WK_QUIESCE_STATE` the directory quiesce records live in (default `quiesce/` under the state dir).
+- `WK_NTFY_API` the ntfy server notifications are published to (default `https://ntfy.sh`).
+- `WK_SCREEN_WATCH_SECONDS` how often the screen watch samples (default 10).
+- `WK_STORE_DEFAULT` the machine's own store when it differs from `WK_STORE`; its secrets live under it.
+- `WK_TAILNET_API` the tailnet API endpoint.
+- `WK_TAILNET_TAG` the tag a joining node advertises (default `tag:wk`).
+- `WK_VM_CLOCK_SKEW` seconds a guest's clock may differ before it is reset (default 30).
+- `WK_VM_MAX` running guests at which starting another is refused (default 2).
+- `WK_VM_SHARE` starts a guest that does not fit the memory envelope anyway.
+- `WK_VM_UNFILTERED` boots a guest with the open network, without the egress filter.
 
 ## Where the rest is
 

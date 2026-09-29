@@ -36,7 +36,7 @@ def inputs_hash(root, env):
     for rel in INPUTS:
         with open(os.path.join(root, rel), "rb") as f:
             h.update(f.read())
-    h.update(("image=%s\nuser=%s\n" % (image(env), env.get("WK_VM_USER") or "admin")).encode())
+    h.update(("image=%s\nuser=%s\n" % (image(env), guest.vm_user(env))).encode())
     return h.hexdigest()[:16]
 
 
@@ -227,7 +227,7 @@ class Base:
         cpus, mem = self.sizing()
         guest.admit(self.host, self.name, int(mem))
         v.ensure_dir_mode(v.vm_dir(), "0700")
-        cur, want = v.configured(self.name, "Disk"), int(self.env.get("WK_VM_DISK_GB") or guest.DISK_GB)
+        cur, want = v.configured(self.name, "Disk"), guest.vm_disk_gb(self.env)
         if cur is not None and cur < want:   # tart grows a disk only while the VM is off
             info("growing the base disk %dGB -> %dGB" % (cur, want))
             self.tart_or_die(["set", self.name, "--disk-size", str(want)])
@@ -294,8 +294,7 @@ class Base:
 
     def login_settled(self, g):
         """ssh answers before the login has drawn anything, so a read straight after boot reads clear whatever is coming."""
-        settle = int(self.env.get("WK_VM_LOGIN_SETTLE") or LOGIN_SETTLE)
-        return not self.clock.wait_until(lambda: guest.setup_assistant(g) == "up", settle, 3)
+        return not self.clock.wait_until(lambda: guest.setup_assistant(g) == "up", LOGIN_SETTLE, 3)
 
     def check_screen(self, g, ip):
         reading = guest.window_reading(self.root, self.machine, g)

@@ -14,6 +14,7 @@ from wk.bench import record, seed, systems
 from wk.lock import Lock
 from wk.machine import replace_file
 from wk.resources import Resources
+from wk.store import ws_name
 
 # gpu by default: guessing gpu fails as an easy refusal, guessing cpu as a MotionMark score off llvmpipe.
 CPU_PLANS = ("jetstream", "octane", "kraken", "sunspider", "ares6", "jsbench")
@@ -34,14 +35,31 @@ def cores_valid(spec):
     return bool(spec) and all(CORES_TOKEN.match(t) for t in spec.split(","))
 
 
-def knob(env, name):
-    v = env.get(name) or "0"
+VARIANCE = (("aslr", "WK_BENCH_ASLR"), ("env_pad", "WK_BENCH_ENV_PAD"), ("path_pad", "WK_BENCH_PATH_PAD"),
+            ("shared_cache", "WK_BENCH_SHARED_CACHE"))
+
+
+def variance(env):
+    """The variance knobs as set, "" when not."""
+    return {key: env.get(name, "") for key, name in VARIANCE}
+
+
+def knob(env, key):
+    v = variance(env)[key]
     return int(v) if v.isdigit() else 0
+
+
+def aslr_off(env):
+    return variance(env)["aslr"] == "off"
+
+
+def shared_cache_avoided(env):
+    return variance(env)["shared_cache"] == "avoid"
 
 
 def env_pad_prelude(env):
     """Source for the benchmark's own shell: envp's size moves where the initial stack starts."""
-    n = knob(env, "WK_BENCH_ENV_PAD")
+    n = knob(env, "env_pad")
     return 'export WK_BENCH_ENV_PAD_DUMMY="$(head -c %d /dev/zero | tr "\\0" x)"; ' % n if n else ""
 
 
@@ -52,10 +70,10 @@ def padded(path, n):
 
 def configuration_fields(env):
     """The knobs, recorded into `configuration` for `wk bench report` to group by; path_len is the pad asked for."""
-    out = ["configuration.aslr=off"] if env.get("WK_BENCH_ASLR") == "off" else []
-    for name, key in (("WK_BENCH_ENV_PAD", "env_pad_bytes"), ("WK_BENCH_PATH_PAD", "path_len")):
-        if knob(env, name):
-            out.append("configuration.%s=%d" % (key, knob(env, name)))
+    out = ["configuration.aslr=off"] if aslr_off(env) else []
+    for knob_key, field in (("env_pad", "env_pad_bytes"), ("path_pad", "path_len")):
+        if knob(env, knob_key):
+            out.append("configuration.%s=%d" % (field, knob(env, knob_key)))
     return out
 
 
@@ -113,7 +131,7 @@ def one_minute_load(res):
     try:
         return float(fields[index])
     except (IndexError, ValueError):
-        die("cannot read the load average on this machine, and an idle machine is what a measurement needs")
+        return None
 
 
 class Leg:
@@ -132,8 +150,7 @@ class Run:
     def __init__(self, root, reg, system, clock, env=None, popen=subprocess.Popen):
         self.root, self.reg, self.system, self.clock, self.popen = str(root), reg, system, clock, popen
         self.env = dict(os.environ if env is None else env)
-        self.env.setdefault("WK_STALL_SECONDS", STALL_SECONDS)
-        self.env.setdefault("WK_ABORT_SECONDS", ABORT_SECONDS)
+        progress.default_watchdog(self.env, STALL_SECONDS, ABORT_SECONDS)
         self.here, self.ws, self.target = reg.machine, system.ws, system.target
         self.recs = self.records(clock)
         self.lock = Lock(reg.store, self.here, clock)
@@ -141,10 +158,7 @@ class Run:
         self.kill_cmd = "wk bench run%s --kill" % ("" if reg.in_workspace() else " " + self.ws)
 
     def records(self, clock):
-        return progress.of_target(self.target, clock, self.here, env=dict(self.target.env, WK_ABORT_SECONDS=self.env["WK_ABORT_SECONDS"]))
-
-    def put(self):
-        self.target.task_put(self.ws, self.task)
+        return progress.of_target(self.target, clock, self.here, env=dict(self.target.env, WK_ABORT_SECONDS=str(progress.watchdog_abort(self.env))))
 
     def stop(self):
         rc = job.stop(self.target, self.recs, self.ws, "bench", self.here, self.clock, self.env)
@@ -186,7 +200,8 @@ class Run:
 
     @staticmethod
     def check(ok, what, detail):
-        mark = ("\033[32mok\033[0m  " if ok else "\033[31mFAIL\033[0m") if sys.stderr.isatty() else ("ok  " if ok else "FAIL")
+        word, colour = ("unk ", "33") if ok is record.UNKNOWN else ("ok  ", "32") if ok else ("FAIL", "31")
+        mark = "\033[%sm%s\033[0m" % (colour, word) if sys.stderr.isatty() else word
         sys.stderr.write("  %s  %-34s %s\n" % (mark, what, detail))
 
     def busy_builds(self):
@@ -196,6 +211,8 @@ class Run:
         busy, load = self.busy_builds(), one_minute_load(Resources(self.here, self.reg.env, self.system.host_os))
         if busy:
             return [(False, "no builds running", "%d build(s) in progress" % busy)]
+        if load is None:
+            return [(record.UNKNOWN, "machine idle", "load average unreadable, no wk builds")]
         if round(load) > int(self.reg.env.get("WK_BENCH_MAX_LOAD") or MAX_LOAD):
             return [(False, "machine idle", "1-minute load average is %.2f" % load)]
         return [(True, "machine idle", "load %.2f, no wk builds" % load)]
@@ -205,17 +222,17 @@ class Run:
         rows, notes = self.system.checks(leg)
         ok, detail = self.system.build_present(leg)
         rows = [(ok, "build present", detail)] + rows + self.idle_rows()
-        fails = [r for r in rows if not r[0]]
+        fails = record.failed(rows)
         for ok, what, detail in rows:
             self.check(ok, what, detail)
-        leg.notes = "".join("%s: %s; " % (w, d.replace('"', "").replace("\\", "")) for _, w, d in fails) + "".join(n + "; " for n in notes)
+        leg.notes = record.preflight_notes(rows, notes)
         sys.stderr.write("\n")
         if not fails:
-            info("preflight clean")
+            info("preflight clean" + record.not_measured(len(record.unmeasured(rows))))
         elif act.dry_run():
             self.dry_fails = len(fails)
             warn("%d preflight check(s) would fail -- a real run would stop here" % len(fails))
-        elif self.env.get("WK_FORCE"):
+        elif act.forced(self.env):
             warn("%d preflight check(s) failed -- continuing because --force was given" % len(fails))
             warn("the run will be recorded as forced, and is not comparable with a clean run")
         else:
@@ -265,26 +282,24 @@ class Run:
             "software_reason=" + leg.software_reason, "class=" + leg.klass, "runner=" + leg.runner, "arch=" + leg.arch,
             "bench_host=" + self.system.bench_host, "preflight_notes=" + leg.notes, "cores.set=" + leg.cores]
             + self.system.facts(leg) + configuration_fields(self.env),
-            bool_fields=["forced=" + (self.env.get("WK_FORCE") or ""), "software=" + ("1" if leg.software else ""), "cores.pinned=" + leg.cores])
+            bool_fields=["forced=" + act.forced(self.env), "software=" + ("1" if leg.software else ""), "cores.pinned=" + leg.cores])
         self.task = self.recs.begin("bench", "here", self.ws, self.kill_cmd, os.path.join(leg.out, "run.log"), steps)
         return steps
 
     def step(self, n):
         if self.task is not None:
             self.task.step(n)
-            self.put()
 
     def end(self, word):
         if self.task is not None:
             self.task.end(word)
-            self.put()
         self.lock.release_all()
 
     def watched(self, argv, cwd, path):
         watcher = None
         if self.task is not None:
             self.task.set("log", path)
-            watcher = job.PidWatch(self.target, self.ws, self.task, path, "bench", PID_MATCH, int(self.env.get("WK_JOB_PID_TRIES") or 900))
+            watcher = job.PidWatch(self.target, self.ws, self.task, path, "bench", PID_MATCH, job.pid_tries(self.env))
             watcher.start()
         try:
             return job.watch(argv, path, self.here, self.clock, self.env, cwd, self.popen)
@@ -295,10 +310,10 @@ class Run:
     def prefix(self, leg):
         """What the benchmark is exec'd through: the core pin, then ASLR off."""
         out = "taskset -c %s " % leg.cores if leg.cores else ""
-        return out + (self.system.aslr_prefix() if self.env.get("WK_BENCH_ASLR") == "off" else "")
+        return out + (self.system.aslr_prefix() if aslr_off(self.env) else "")
 
     def through_pad(self, path):
-        n = knob(self.env, "WK_BENCH_PATH_PAD")
+        n = knob(self.env, "path_pad")
         if not n:
             return path
         self.system.link(path, padded(path, n))
@@ -350,7 +365,7 @@ class Run:
             warn("the machine did not stay quiet under this run -- something drew over the\n"
                  "  browser, or a process that must not run came back while it measured:")
             sys.stderr.write("".join("    %s\n" % l for l in drew))
-            if not self.env.get("WK_FORCE"):
+            if not act.forced(self.env):
                 rc = rc or 1
             else:
                 warn("  --force: keeping the number anyway; it is one to distrust")
@@ -409,7 +424,7 @@ class Run:
             raise Refused(rc)
         if rc == 124:
             self.end("stalled")
-            die("BENCH STALLED  %s in '%s' (killed after %ss with no output)\n    log: %s" % (leg.plan, self.ws, self.env["WK_ABORT_SECONDS"], path))
+            die("BENCH STALLED  %s in '%s' (killed after %ss with no output)\n    log: %s" % (leg.plan, self.ws, progress.watchdog_abort(self.env), path))
         self.end(rc)
         warn(why)
         for e in progress.first_error(path):
@@ -447,7 +462,7 @@ def nothing_left(reg, plan, task):
 
 def run(root, reg, words, o, kill, clock, popen=subprocess.Popen):
     """`wk bench run <ws> <plan>`: the dispatcher resolved the workspace (WK_NAME) and dropped it from `words`."""
-    ws, plan = reg.env.get("WK_NAME", ""), (words[0] if words else "")
+    ws, plan = ws_name(reg.env), (words[0] if words else "")
     if not ws or not (plan or kill):
         die("usage: wk bench run <workspace> <plan> [options]; see wk bench -h")
     ab = not kill and (o.get("ab") or o.get("ab_systems"))

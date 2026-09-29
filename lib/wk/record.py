@@ -19,6 +19,7 @@ PROGRESS = (re.compile(r"\[[0-9]+/[0-9]+\]"),
                        r"|ProcessInfoPlistFile|GenerateDSYMFile) ([^ ]+)", re.M))
 STEP_EVENTS = {"start": "running", "ok": "done", "already": "done", "failed": "failed",
                "skipped": "skipped", "unneeded": "skipped", "refused": "pending"}
+REQUIRED = ("kind", "where", "name")
 _STAMP = re.compile(r"^\d{8}T\d{6}Z$")
 UNREADABLE = object()
 
@@ -36,23 +37,52 @@ def host_name(machine=None):
     return (machine or here()).run(["hostname", "-s"]).out.strip().lower()
 
 
+def row_label(env):
+    return env.get("WK_ROW_LABEL", "")
+
+
+def host_self(env):
+    return bool(env.get("WK_HOST_SELF"))
+
+
 def machine_name(env=None, machine=None):
     """A row's machine, in the VM the forwarding workstation; never a lock's, whose pid is the VM's."""
     env = os.environ if env is None else env
-    if env.get("WK_IN_VM") and env.get("WK_ROW_LABEL"):
-        return env["WK_ROW_LABEL"]
+    if store.in_vm(env) and row_label(env):
+        return row_label(env)
     return host_name(machine) or "here"
 
 
-def normalised(path):
-    with open(path, errors="replace") as f:
-        return f.read().replace("\r", "\n")
+STALL_SECONDS = 300
 
 
-def first_error(path):
+def watchdog_stall(env, default=STALL_SECONDS):
+    return float(env.get("WK_STALL_SECONDS") or default)
+
+
+def task_ask_seconds(env):
+    return float(env.get("WK_TASK_ASK_SECONDS") or 5)
+
+
+def watchdog_abort(env, default=0):
+    return float(env.get("WK_ABORT_SECONDS") or default)
+
+
+def default_watchdog(env, stall=None, abort=None):
+    if stall is not None:
+        env["WK_STALL_SECONDS"] = "%g" % watchdog_stall(env, stall)
+    if abort is not None:
+        env["WK_ABORT_SECONDS"] = "%g" % watchdog_abort(env, abort)
+
+
+def normalised(path, machine=None):
+    return (machine or here()).read(path).replace("\r", "\n")
+
+
+def first_error(path, machine=None):
     out = []
     try:
-        lines = normalised(path).split("\n")
+        lines = normalised(path, machine).split("\n")
     except OSError:
         return out
     for n, line in enumerate(lines, 1):
@@ -63,13 +93,10 @@ def first_error(path):
     return out
 
 
-def progress_line(path):
+def progress_line(path, machine=None):
     """What the last 64 KiB of a log says it reached: a ninja step, a benchmark iteration, an Xcode phase."""
     try:
-        with open(path, "rb") as f:
-            f.seek(0, 2)
-            f.seek(max(0, f.tell() - 65536))
-            tail = f.read().decode(errors="replace").replace("\r", "\n")
+        tail = (machine or here()).read_bytes(path, -65536).decode(errors="replace").replace("\r", "\n")
     except OSError:
         return ""
     m = None
@@ -86,59 +113,64 @@ def progress_line(path):
     return "%s %s" % (m.group(1), os.path.basename(m.group(2))) if m else ""
 
 
-def log_age(path, clock):
+def log_age(path, clock, machine=None):
     try:
-        return int(clock.now() - os.path.getmtime(path))
+        return int(clock.now() - (machine or here()).mtime(path))
     except (OSError, TypeError):
         return None
 
 
-def _put(path, value):
-    tmp = "%s.tmp.%d" % (path, os.getpid())
-    with open(tmp, "w") as f:
-        f.write(str(value) + "\n")
-    os.replace(tmp, path)
-
-
 class Task:
-    """One record; `ask_target(name, pid, cap)` answers True, False or None
-    (no answer within cap seconds) for a pid inside the workspace."""
+    """One record, on `machine`; `ask_target(name, pid, cap)` answers True, False or None (no answer in cap seconds)."""
 
-    def __init__(self, path, clock=None, ask_target=None, machine=None):
+    def __init__(self, path, clock=None, ask_target=None, machine=None, env=None):
+        self.env = os.environ if env is None else env
         self.path = Path(path)
         self.id = self.path.name
         self.clock = clock or Clock()
         self.ask_target = ask_target
         self.machine = machine or here()
 
+    def _at(self, name):
+        return str(self.path / name)
+
+    def has(self, name):
+        return self.machine.exists(self._at(name))
+
     def field(self, name):
-        try:
-            return (self.path / name).read_text().replace("\r", "").rstrip("\n")
-        except OSError:
-            return ""
+        got = self.raw(name)
+        return got if isinstance(got, str) else ""
 
     def raw(self, name):
         """A field's text, None where it is absent, UNREADABLE where it is there and cannot be read."""
         try:
-            return (self.path / name).read_text().replace("\r", "").rstrip("\n")
-        except FileNotFoundError:
-            return None
+            return self.machine.read(self._at(name)).replace("\r", "").rstrip("\n")
         except (OSError, UnicodeDecodeError):
-            return UNREADABLE
+            return UNREADABLE if self.has(name) else None
 
     def set(self, name, value):
-        _put(str(self.path / name), value)
+        self.machine.write_own(self._at(name), str(value) + "\n")
 
     def pid(self, pid, machine=None):
         self.set("pid", pid)
         if machine:
             self.set("machine", machine)
 
+    def unreadable(self):
+        """What keeps this record from a verdict: a required field absent (an older shape), unreadable or unknown, or an unreadable plan."""
+        out = [f for f in REQUIRED if not self.field(f)]
+        if self.field("where") and self.field("where") not in ("here", "target"):
+            out.append("where")
+        if self.raw("plan") is UNREADABLE:
+            out.append("plan")
+        return out
+
     def plan(self):
-        return self.field("plan").split("\n") if (self.path / "plan").is_file() else []
+        plan = self.raw("plan")
+        return plan.split("\n") if isinstance(plan, str) else []
 
     def step_state(self, index, state):
-        _put(str(self.path / "steps" / str(index)), state)
+        self.set("steps/%d" % index, state)
 
     def step_event(self, index, event):
         if event not in STEP_EVENTS:
@@ -171,7 +203,7 @@ class Task:
 
     def end(self, status):
         """The first verdict stands, and a stop asked for (`stopping`) outranks the status it caused."""
-        if (self.path / "exit").is_file():
+        if self.has("exit"):
             return
         if str(status) != "0" and self.field("stopping"):
             status = self.field("stopping")
@@ -179,7 +211,7 @@ class Task:
         self.set("exit", status)
 
     def alive(self, cap=None):
-        if (self.path / "exit").is_file():
+        if self.has("exit"):
             return False
         pid = self.field("pid")
         if not pid.isdigit():
@@ -192,7 +224,7 @@ class Task:
 
     def holder_gone(self):
         """True only where the process that took this record's claim is provably gone."""
-        if (self.path / "exit").is_file():
+        if self.has("exit"):
             return True
         pid = self.raw("pid")
         if self.field("where") != "here" or not isinstance(pid, str) or not pid.isdigit():
@@ -202,7 +234,9 @@ class Task:
     def verdict(self, how="pid", stall_seconds=None, ask_seconds=None):
         if how not in ("pid", "capped"):
             raise ValueError("the pid is asked for as long as it takes or capped, not '%s'" % how)
-        rc = self.field("exit") if (self.path / "exit").is_file() else ""
+        if self.unreadable():
+            return "unreadable"
+        rc = self.field("exit")
         if rc:
             if rc == "0":
                 return "ok"
@@ -211,20 +245,19 @@ class Task:
             return "starting"
         cap = None
         if how == "capped" and self.field("where") == "target":
-            cap = float(ask_seconds if ask_seconds is not None else os.environ.get("WK_TASK_ASK_SECONDS") or 5)
+            cap = ask_seconds if ask_seconds is not None else task_ask_seconds(self.env)
         alive = self.alive(cap)
         if alive is None:
             return "unanswered"
         if not alive:
             return "died"
-        log = self.field("log")
-        try:
-            age = self.clock.now() - os.path.getmtime(log)
-        except OSError:
-            return "running"
         if not self.field("abort_after"):
             return "running"
-        stall = float(stall_seconds if stall_seconds is not None else os.environ.get("WK_STALL_SECONDS") or 300)
+        try:
+            age = self.clock.now() - self.machine.mtime(self.field("log"))
+        except OSError:
+            return "running"
+        stall = float(stall_seconds if stall_seconds is not None else watchdog_stall(self.env))
         return "running" if age <= stall else "silent"
 
     def running(self, how="capped"):
@@ -246,12 +279,16 @@ class Records:
         self.machine = machine or here()
 
     def _task(self, path):
-        return Task(path, self.clock, self.ask_target, self.machine)
+        return Task(path, self.clock, self.ask_target, self.machine, self.env)
 
     def list(self):
-        if not self.root.is_dir():
+        if not self.machine.isdir(str(self.root)):
             return []
-        return [self._task(p) for p in sorted(self.root.iterdir()) if (p / "plan").is_file()]
+        tasks = [self._task(self.root / n) for n in self.machine.listdir(str(self.root))]
+        return [t for t in tasks if t.has("plan")]
+
+    def driving(self, name):
+        return any(t.field("name") == name and t.field("where") == "here" and t.alive(None) for t in self.list())
 
     def stamp_of(self, record_id, kind, name):
         prefix = "%s-%s-" % (slug(kind), slug(name))
@@ -280,7 +317,7 @@ class Records:
             if keep is not None and t.path == keep:
                 continue
             if self.stamp_of(t.id, kind, name) is not None and not t.alive(None):
-                _rmtree(t.path)
+                self.machine.remove_own(str(t.path))
 
     def begin(self, kind, where, name, kill, log, plan, holds=None, pid=None, argv=None):
         if where not in ("here", "target"):
@@ -294,16 +331,11 @@ class Records:
         pid = os.getpid() if pid is None else pid
         path = self.root / ("%s-%s-%s-%d" % (slug(kind), slug(name), self.clock.stamp(), pid))
         self.prune(kind, name, keep=path)
-        path.mkdir(parents=True, exist_ok=True)
         t = self._task(path)
         if where != "target":
             t.set("pid", pid)
-        # The claim goes on with its holder, before the plan that publishes the record.
         if holds:
             t.set("holds", holds)
-        tmp = path / ("plan.tmp.%d" % os.getpid())
-        tmp.write_text("".join(s + "\n" for s in plan))
-        os.replace(tmp, path / "plan")
         t.set("kind", kind)
         t.set("where", where)
         t.set("name", name)
@@ -312,15 +344,12 @@ class Records:
         t.set("machine", machine_name(self.env, self.machine))
         t.set("argv", " ".join(argv if argv is not None else sys.argv))
         t.set("started", self.clock.iso())
-        if self.env.get("WK_ABORT_SECONDS"):
-            t.set("abort_after", self.env["WK_ABORT_SECONDS"])
-        for f in ("exit", "finished"):
-            try:
-                (path / f).unlink()
-            except OSError:
-                pass
-        _rmtree(path / "steps")
-        (path / "steps").mkdir()
+        if watchdog_abort(self.env):
+            t.set("abort_after", "%g" % watchdog_abort(self.env))
+        for f in ("exit", "finished", "steps"):
+            self.machine.remove_own(str(path / f))
+        # The plan publishes the record, so every field, the claim first among them, is there before it.
+        self.machine.write_own(str(path / "plan"), "".join(s + "\n" for s in plan))
         return t
 
     def holders(self, resource):
@@ -342,11 +371,12 @@ class Records:
 
         def pump():
             nonlocal offset
-            if stream is None or not os.path.isfile(log):
+            if stream is None:
                 return
-            with open(log, "rb") as f:
-                f.seek(offset)
-                data = f.read()
+            try:
+                data = self.machine.read_bytes(log, offset)
+            except OSError:
+                return
             offset += len(data)
             if data:
                 stream.write(data.decode(errors="replace"))
@@ -433,15 +463,3 @@ def hold(records, fleet, machine, kind, name, kill, log, plan, pid, env):
     if act.dry_run():
         return None
     return records.begin(kind, "here", name, kill, log, plan, holds=res, pid=pid)
-
-
-def _rmtree(path):
-    path = Path(path)
-    if not path.exists():
-        return
-    for p in sorted(path.rglob("*"), reverse=True):
-        if p.is_dir() and not p.is_symlink():
-            p.rmdir()
-        else:
-            p.unlink()
-    path.rmdir()

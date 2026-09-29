@@ -20,6 +20,7 @@ Run: python3 -m unittest tests.test_machine_prepare -v
 import contextlib
 import io
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -250,7 +251,7 @@ class TheCommandRunsOnTheMachineTheConfNames(WkTest):
     def test_a_command_for_another_machine_goes_over_ssh(self):
         here, sshed = self._m_ssh({"ssh": "othermach"})
         self.assertEqual(here, [])
-        self.assertEqual([r[-2:] for r in sshed], [["othermach", "sh -c 'echo RAN-HERE'"]], sshed)
+        self.assertEqual([r[-2:-1] + [shlex.split(r[-1])[-1]] for r in sshed], [["othermach", "sh -c 'echo RAN-HERE'"]], sshed)
 
     def test_a_command_for_this_machine_runs_here(self):
         """Case-insensitively: a machine's own spelling of its name need not

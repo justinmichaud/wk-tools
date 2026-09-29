@@ -66,7 +66,7 @@ class Install:
 
     def __init__(self, root, here, env, driver=machine_driver):
         self.root, self.here, self.env, self.make_driver = str(root), here, env, driver
-        self.marker = env.get("WK_IMAGE_MARKER") or MARKER
+        self.marker = images.marker(env)
 
     def bench(self):
         return self.here.exists(self.marker)
@@ -112,7 +112,7 @@ def screen_row(m, root):
     """The window server's own list: a window-title query needs assistive access a fresh install has not granted."""
     blocker = screen.blocker(m, root)
     if blocker == "?":
-        return False, screen.UNASKED
+        return record.UNKNOWN, screen.UNASKED
     if blocker:
         return False, "on the screen, and nothing wk put there: %s -- answer it at the screen" % blocker
     return True, "no onboarding or installer pane in front"
@@ -165,7 +165,7 @@ class Gates:
             dim = float(level) <= SET_TOLERANCE
         except ValueError:
             dim = False
-        return dim and ambient in ("off", "none"), "brightness %s, ambient-light compensation %s" % (level or "unread", ambient or "unread")
+        return (record.UNKNOWN if not (level and ambient) else dim and ambient in ("off", "none")), "brightness %s, ambient-light compensation %s" % (level or "unread", ambient or "unread")
 
     def display_mode(self):
         return display_row(self.m, self.root, self.py, self.expect)
@@ -248,7 +248,7 @@ class MacVolumeSystem(System):
         return leg.payload
 
     def run_env(self, leg):
-        return ["DYLD_SHARED_REGION=avoid"] if self.env.get("WK_BENCH_SHARED_CACHE") == "avoid" else []
+        return ["DYLD_SHARED_REGION=avoid"] if pipeline.shared_cache_avoided(self.env) else []
 
     def runner_argv(self, leg):
         return [self.py, os.path.join(self.dir, "Tools/Scripts/run-benchmark"), "--browser", leg.browser, "--platform", "osx"]
@@ -292,8 +292,9 @@ class MacVolumeSystem(System):
                     (False, "run-benchmark", "not in the staged tree: " + runner))
         rows.append((True, "python with PyObjC", self.py))
         console, me = first_line(self.here.run(["stat", "-f", "%Su", "/dev/console"])), first_line(self.here.run(["id", "-un"]))
-        rows.append((console == me, "the console session", "%s is logged in at the screen" % me if console == me else
-                     "the screen belongs to '%s', not %s -- MiniBrowser has nowhere to draw" % (console or "nobody", me)))
+        rows.append((console == me if console and me else record.UNKNOWN, "the console session", "%s is logged in at the screen" % me if console == me else
+                     "the screen belongs to '%s', not %s -- MiniBrowser has nowhere to draw" % (console, me) if console and me else
+                     "could not read %s" % ("the console owner" if me else "the user this runs as")))
         rows.append(named("the screen is free", screen_row(self.here, self.root)))
         rows.append(named("the display", display_row(self.here, self.root, self.py, self.o.get("expect_display") or "")))
         rows.append(named("no auth panel", auth_row(self.here)))
@@ -325,7 +326,7 @@ class MacVolumeSystem(System):
 
     def bool_facts(self):
         return ["measures=" + ("1" if self.measures else ""), "role_marker_overridden=" + ("1" if self.install.faked() else "")] + \
-            (["configuration.shared_cache="] if self.env.get("WK_BENCH_SHARED_CACHE") == "avoid" else [])
+            (["configuration.shared_cache="] if pipeline.shared_cache_avoided(self.env) else [])
 
     def after(self, leg):
         """ASLR cannot be turned off on Apple Silicon, so what is recorded is the load address slide that happened."""
@@ -375,8 +376,7 @@ class StagedRun(pipeline.Run):
     def __init__(self, root, reg, system, clock, env, popen):
         self.root, self.reg, self.system, self.clock, self.popen = str(root), reg, system, clock, popen
         self.env = dict(env)
-        self.env.setdefault("WK_STALL_SECONDS", pipeline.STALL_SECONDS)
-        self.env.setdefault("WK_ABORT_SECONDS", pipeline.ABORT_SECONDS)
+        wkrecord.default_watchdog(self.env, pipeline.STALL_SECONDS, pipeline.ABORT_SECONDS)
         self.here, self.ws, self.target = reg.machine, system.ws, None
         self.bench_dir = os.path.join(system.home, "results")
         self.lock, self.task, self.kill_cmd, self.dry_fails = Lock(reg.store, self.here, clock), None, "", 0
@@ -418,7 +418,7 @@ class StagedRun(pipeline.Run):
             "plan=" + leg.plan, "workspace=" + s.ws, "config=" + leg.cfg.name, "browser=" + leg.browser, "webkit_sha=" + s.sha(),
             "count=" + leg.count, "local_copy=" + leg.payload, "preflight_notes=" + leg.notes, "class=" + leg.klass,
             "runner=browser", "arch=native", "bench_host=" + s.bench_host] + s.facts(leg) + pipeline.configuration_fields(self.env),
-            bool_fields=["forced=" + (self.env.get("WK_FORCE") or "")] + s.bool_facts())
+            bool_fields=["forced=" + act.forced(self.env)] + s.bool_facts())
         self.carry_reading(leg)
         info("%s on %s, from '%s' (%s @%s)" % (leg.plan, s.sysctl("hw.model"), s.ws, leg.cfg.name, s.sha()[:10]))
         return steps
@@ -493,11 +493,11 @@ def gates(root, reg, clock, system, plan):
     rows = Gates(root, reg.machine, clock, reg.env, plan, expect, system.build_dir(leg), system.py).ask()
     for name, ok, detail in rows:
         pipeline.Run.check(ok, name, detail)
-    fails = [r for r in rows if not r[1]]
+    fails = record.failed(rows, 1)
     if fails:
         warn("%d gate(s) refuse a run here: nothing should reboot into a leg that would be refused" % len(fails))
         return 1
-    info("every gate passes")
+    info("every gate passes" + record.not_measured(len(record.unmeasured(rows, 1))))
     return 0
 
 
@@ -929,8 +929,8 @@ def display_verdict(text, want):
     try:
         doc = json.loads(text)
     except ValueError:
-        return False, ("wk/mac.py displays did not print JSON" if text
-                       else "'wk/mac.py displays' answered nothing -- CoreGraphics could not be asked")
+        return record.UNKNOWN, ("wk/mac.py displays did not print JSON" if text
+                                else "'wk/mac.py displays' answered nothing -- CoreGraphics could not be asked")
 
     def kind(d):
         return "builtin" if d.get("builtin") else "external"
@@ -951,6 +951,8 @@ def display_verdict(text, want):
 class MacAB:
     """`wk bench ab --devices <mac>`: no session this side survives the reboot into the benchmark install, so the job
     is planted on it while it is merely mounted, and a LaunchAgent starts it at autologin."""
+
+    boot_wait = BOOT_WAIT
 
     def __init__(self, root, reg, clock, spec, o, driver=machine_driver):
         self.root, self.reg, self.clock, self.spec, self.o = str(root), reg, clock, spec or "", dict(o)
@@ -1005,7 +1007,7 @@ class MacAB:
         grp = self.mac.py(WKMAC, "boot-volume").rsplit(":", 1)[-1]
         if not grp:
             self.fw_detail = "the firmware publishes no boot-volume, so what a restart enters cannot be read"
-            return False
+            return record.UNKNOWN
         bench = self.mac.py(WKMAC, "volume-group", self.d.volume())
         host = self.mac.py(WKMAC, "volume-group", "/")
         if bench and grp == bench:
@@ -1032,12 +1034,15 @@ class MacAB:
     def preflight(self):
         """Every check is something that, if wrong, is discovered after the reboot on a machine nobody can reach."""
         info("preflight for an unattended A/B on %s" % self.name)
-        fails = []
+        fails, unknown = [], []
 
         def ck(ok, what, detail, *remedy):
             pipeline.Run.check(ok, what, detail)
-            if not ok:
+            if ok is record.UNKNOWN:
+                unknown.append(what)
+            elif not ok:
                 fails.append(what)
+            if not ok:
                 for line in remedy:
                     log("       " + line)
 
@@ -1065,8 +1070,11 @@ class MacAB:
                "  wk sysimage build %s --repair    then boot it once" % (self.d.c("profile") or "<profile>"))
         ck(self.mac.test("-w", root), "writable", "%s takes a plant without sudo" % root)
         bh = self.d.bench_home() or ""
-        ck(bool(bh) and self.mac.test("-d", bh) and self.mac.test("-w", bh + "/Library"), "bench home",
+        ck(self.mac.test("-d", bh) and self.mac.test("-w", bh + "/Library") if bh else False, "bench home",
            "%s (LaunchAgents installable without sudo)" % bh if bh else "the driver names no bench home")
+        if not bh:
+            log("  the checks below are relative to it, so nothing else was checked.")
+            return len(fails)
         alu = self.mac.out("mac-defaults.sh", WK_PATH=bh + "/../../Library/Preferences/com.apple.loginwindow", WK_KEY="autoLoginUser")
         ck(alu == "bench", "autologin", "the bench account logs in at the console" if alu == "bench" else
            "autoLoginUser is '%s' -- the run would have no session" % (alu or "unset"))
@@ -1097,7 +1105,7 @@ class MacAB:
         if fails:
             warn("%d preflight check(s) failed" % len(fails))
         else:
-            info("preflight clean")
+            info("preflight clean" + record.not_measured(len(unknown)))
         return len(fails)
 
     # -- the machine that builds and stages the arms
@@ -1214,17 +1222,16 @@ class MacAB:
         self.rwk("stop", self.ws)
         info("arms: A=%s  B=%s" % (self.a, self.b))
 
-    # -- the plant
     def job(self, declared, stamp):
         o = self.o
-        return {"plans": list(self.plans), "rounds": self.rounds, "max_rounds": int(o["max_rounds"]), "detect_pct": float(o["detect"]),
-                "timeout": int(o["timeout"]), "count": o["count"], "display": declared, "settle": int(o["settle"]), "n_arms": 2,
-                "arms": [{"label": "A", "id": self.a, "browser_args": o.get("a_args") or ""},
-                         {"label": "B", "id": self.b, "browser_args": o.get("b_args") or ""}],
-                "wk_tools": BENCH_ROOT + "/wk-tools", "created_at": self.clock.iso(), "created_by": wkrecord.host_name(self.here),
-                "stamp": stamp, "aslr": self.env.get("WK_BENCH_ASLR", ""), "env_pad": self.env.get("WK_BENCH_ENV_PAD", ""),
-                "path_pad": self.env.get("WK_BENCH_PATH_PAD", ""), "shared_cache": self.env.get("WK_BENCH_SHARED_CACHE", ""),
-                "rehearsal": "1" if o.get("rehearse") else ""}
+        out = {"plans": list(self.plans), "rounds": self.rounds, "max_rounds": int(o["max_rounds"]), "detect_pct": float(o["detect"]),
+               "timeout": int(o["timeout"]), "count": o["count"], "display": declared, "settle": int(o["settle"]), "n_arms": 2,
+               "arms": [{"label": "A", "id": self.a, "browser_args": o.get("a_args") or ""},
+                        {"label": "B", "id": self.b, "browser_args": o.get("b_args") or ""}],
+               "wk_tools": BENCH_ROOT + "/wk-tools", "created_at": self.clock.iso(), "created_by": wkrecord.host_name(self.here),
+               "stamp": stamp, "rehearsal": "1" if o.get("rehearse") else ""}
+        out.update(pipeline.variance(self.env))
+        return out
 
     def command(self):
         words = ["wk", "bench", "ab", "--devices", self.name, "--systems", "%s,%s" % (self.a, self.b), "--rounds", str(self.rounds)]
@@ -1353,7 +1360,7 @@ class MacAB:
 
     def quiet_account(self, bh, root):
         """A lock mid-run and a banner over the browser are both invisible to every later gate, so both are refused here."""
-        force = bool(self.env.get("WK_FORCE"))
+        force = bool(act.forced(self.env))
         uuid = next((l.split('"')[3] for l in self.mac.out("mac-platform.sh").splitlines()
                      if "IOPlatformUUID" in l and l.count('"') >= 4), "")
         ss = "%s/Library/Preferences/ByHost/com.apple.screensaver.%s" % (bh, uuid)
@@ -1408,12 +1415,16 @@ class MacAB:
 
     # -- the restart, and which install came up
     def restart(self):
-        """The display is asked again seconds before the transition: a monitor plugged in since preflight costs a cycle."""
-        ok, said = self.display_check()
-        if not ok:
-            die("the display on %s does not read as one panel of the declared kind: %s\n"
-                "    Nothing has been rebooted, and the job stays planted. Disconnect the monitor and re-run, or reboot\n"
-                "    %s by hand once it reads right -- the planted job runs by itself either way." % (self.name, said, self.name))
+        """The display and the firmware default are asked again seconds before the transition; a reading that is wrong or unread stops it."""
+        checks = [("the display on %s" % self.name, self.display_check)]
+        if not self.guest:
+            checks.append(("the firmware default on %s" % self.name, lambda: (self.firmware_is_bench(), self.fw_detail)))
+        for what, ask in checks:
+            ok, said = ask()
+            if not ok:
+                die("%s %s: %s\n    Nothing has been rebooted, and the job stays planted. Fix it and re-run, or reboot\n"
+                    "    %s by hand once it reads right -- the planted job runs by itself either way." %
+                    (what, "could not be read" if ok is record.UNKNOWN else "is not right", said, self.name))
         self.boot_before = self.d.boot_id()
         info("go: reboot %s now (boot before: %s)" % (self.name, self.boot_before or "unknown"))
         if not self.guest:
@@ -1481,7 +1492,6 @@ class MacAB:
     def go(self):
         self.check()
         self.resolve()
-        self.boot_wait = int(self.env.get("WK_MAC_BOOT_WAIT") or BOOT_WAIT)
         if not self.guest and self.d.ch.here():
             die("this reboots %s, so it cannot be driven from %s -- the reboot would take the driver with it.\n"
                 "    Run it from another machine." % (self.name, self.name))
@@ -1738,7 +1748,7 @@ class PgoCollect:
         if not self.m.run(["/usr/bin/python3", "-c", "import AppKit, sys; sys.exit(0 if AppKit.NSScreen.mainScreen() else 1)"]).ok:
             out.append("there is no main screen, so nothing can be drawn at all")
         ok, said = screen_row(self.m, self.root)
-        return out + ([] if ok else [said])
+        return out + ([said] if ok is False else [])
 
     def read(self, rel):
         try:

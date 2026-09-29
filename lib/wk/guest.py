@@ -164,13 +164,13 @@ class Host:
         return os.path.join(self.dir, name)
 
     def unfiltered(self):
-        return bool(self.env.get("WK_VM_UNFILTERED"))
+        return is_unfiltered(self.env)
 
     def port(self):
         return self.env.get("WK_VM_PROXY_PORT") or PROXY_PORT
 
     def softnet(self):
-        return self.env.get("WK_SOFTNET_BIN") or SOFTNET
+        return softnet_bin(self.env)
 
     def proxy_addr(self):
         if self._addr is None:
@@ -456,7 +456,7 @@ class Guest:
         if not blocked:
             return True
         lines = "".join("      %s\n" % b for b in blocked)
-        if self.host.env.get("WK_VM_FORCE"):
+        if vm_forced(self.host.env):
             warn("WK_VM_FORCE=1 -- '%s' is handed over with this in front of its desktop:\n%s" % (self.ws, lines))
             return True
         die("'%s' is not usable: something is in front of its desktop.\n%s    A clone cannot clear this itself -- Setup "
@@ -542,6 +542,38 @@ class Guest:
         return self.m.act_run(["rm", "-f", self.vm.agent_sock()]).ok
 
 
+def is_unfiltered(env):
+    return bool(env.get("WK_VM_UNFILTERED"))
+
+
+def softnet_bin(env):
+    return env.get("WK_SOFTNET_BIN") or SOFTNET
+
+
+def vm_user(env):
+    return env.get("WK_VM_USER") or "admin"
+
+
+def vm_max(env):
+    return int(env.get("WK_VM_MAX") or 2)
+
+
+def vm_forced(env):
+    return bool(env.get("WK_VM_FORCE"))
+
+
+def vm_cpus(env):
+    return int(env["WK_VM_CPUS"]) if env.get("WK_VM_CPUS") else None
+
+
+def vm_mem_mb(env):
+    return int(env["WK_VM_MEM_MB"]) if env.get("WK_VM_MEM_MB") else None
+
+
+def vm_disk_gb(env):
+    return int(env.get("WK_VM_DISK_GB") or DISK_GB)
+
+
 def display(env):
     return env.get("WK_VM_DISPLAY") or DISPLAY
 
@@ -575,7 +607,7 @@ def password(env):
 
 
 def login_note(env):
-    log("  the guest's own window logs in as %s / %s" % (env.get("WK_VM_USER") or "admin", password(env)))
+    log("  the guest's own window logs in as %s / %s" % (vm_user(env), password(env)))
     log("  (wk itself uses an ssh key; this is for a prompt on the screen)")
     log("  wk doctor <name>     what is in front of that window, and what is piling up in it")
 
@@ -814,7 +846,7 @@ def running_rows(vm):
 def admit(host, name, mine):
     """Virtualization.framework counts every VM on the host, the podman machine too, against one limit."""
     vm, env = host.vm, host.env
-    running, most = vm.running_vms(), int(env.get("WK_VM_MAX") or 2)
+    running, most = vm.running_vms(), vm_max(env)
     if len(running) >= most:
         die("%d VM(s) are already running on this host:\n%s    Virtualization.framework permits %d and refuses the next one "
             "with\n    VZErrorDomain code 6, in that guest's run log and nowhere else. Free a slot\n    with 'wk stop <name>', "
@@ -865,12 +897,13 @@ def host_disk(host):
     from wk.resources import Budget
     free = Budget(host.machine, host.env).free_gb("/")
     if free is None:
+        warn("cannot tell how much is free on the host, so its disk is not checked")
         return
     if free < int(host.env.get("WK_HOST_FREE_MIN_GB") or HOST_FREE_MIN_GB):
         die("only %d GB free on the host.\n    A macOS guest believes it has a %d GB disk, but every byte it writes has to "
             "come\n    from here, and a build that runs out fails as an I/O error naming nothing useful.\n\n"
             "      wk ls                        what exists\n      wk rm <name>                 reclaim a workspace\n"
-            "      tart prune --space-budget 0  drop the OCI image cache" % (free, int(host.env.get("WK_VM_DISK_GB") or DISK_GB)))
+            "      tart prune --space-budget 0  drop the OCI image cache" % (free, vm_disk_gb(host.env)))
     if free < int(host.env.get("WK_HOST_FREE_WARN_GB") or HOST_FREE_WARN_GB):
         warn("%d GB free on the host -- a Release build tree is ~39 GB and a Debug one ~78 GB, so this may not be enough "
              "to finish" % free)

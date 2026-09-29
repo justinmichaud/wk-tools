@@ -18,11 +18,12 @@
 #   4  a workspace needs a person: a creation whose driver is gone, a build
 #      silent past its own `abort_after` (its watchdog would have written
 #      `stalled` there, so the watchdog is gone too), an environment removed
-#      from under the record, or a machine that will not answer (3 is a build
-#      whose watchdog reported; 4 is a workspace whose record no longer has a
-#      writer -- don't conflate them). Also what a fleet walk reports for an
-#      unreachable peer, and a workspace that did not answer about its job's
-#      pid within WK_TASK_ASK_SECONDS (default 5): `unanswered`.
+#      from under the record, an unreadable task record, or a machine that
+#      will not answer (3 is a build whose watchdog reported; 4 is a workspace
+#      whose record no longer has a writer -- don't conflate them). Also what
+#      a fleet walk reports for an unreachable peer, and a workspace that did
+#      not answer about its job's pid within WK_TASK_ASK_SECONDS (default 5):
+#      `unanswered`.
 #
 #   wk status --holds device:rpi5    the live tasks in this machine's store
 #                                    holding that resource, one per line, for
@@ -49,13 +50,16 @@
 #   WK_BRIDGE_TIMEOUT=<s>   ceiling on one bridge-phone health check
 #                           (default 20; slower than a fleet probe on purpose)
 #   WK_STATUS_PORT, WK_STATUS_INTERVAL   --web's defaults (0: any free port; 20s)
+#   WK_STATUS_VIEW=<mode>   the view a bare `wk status` gets: text, web or json
 
 import json
 import os
 import sys
 
-ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import images, store  # noqa: E402
+
+ROOT = images.root()
 
 from wk import decl, statusview, targets  # noqa: E402
 from wk.act import Refused, die, info, warn  # noqa: E402
@@ -90,11 +94,14 @@ def main(argv):
         html_out = "" if html_out == "-" else html_out
     if args.flag("--web"):
         mode, asked = "web", True
-    port = args.value("--port") if args.value("--port") is not None else env.get("WK_STATUS_PORT", "0")
-    interval = args.value("--interval") if args.value("--interval") is not None else env.get("WK_STATUS_INTERVAL", "20")
+    port, interval = statusview.web_defaults(env)
+    if args.value("--port") is not None:
+        port = args.value("--port")
+    if args.value("--interval") is not None:
+        interval = args.value("--interval")
     if args.value("--holds") is not None:
         return holders(args.value("--holds"))
-    name = env.get("WK_NAME") or None
+    name = store.ws_name(env) or None
     wait = args.flag("--wait")
     if not asked and mode == "web" and (name or wait):
         mode = "text"

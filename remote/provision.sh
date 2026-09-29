@@ -41,13 +41,13 @@ root=$ROOT
 inputs=${WK_REMOTE_INPUTS:-}
 EOF
 
-# Other people are root here, so no key rests on disk: a push forwards the workstation's agent, and the aliases name no IdentityFile. ~/.ssh/config is often shared over NFS, so a checkout points at this file with core.sshCommand.
+# Other people are root here, so no key rests on disk and the aliases name no IdentityFile: a push is made from the workstation. ~/.ssh/config is often shared over NFS, so a checkout points at this file with core.sshCommand.
 ensure_dir "$ROOT/secrets" 0700
 write_file "$ROOT/ssh/config" 0600 <<EOF
 # Written by remote/provision.sh. One ssh alias per fork, because GitHub takes
 # one deploy key per repository and both forks live on github.com -- so the key
-# is selected by alias, never by hostname. No IdentityFile: the key is a
-# forwarded agent's, never a file here.
+# is selected by alias, never by hostname. No IdentityFile: no key is ever a
+# file here.
 $(PYTHONPATH="$TOOLS/lib" WK_ROOT="$TOOLS" python3 -m wk.secrets alias-blocks "")
 EOF
 rm -rf "$ROOT/push-keys" || die "could not remove $ROOT/push-keys, so deploy keys are still at rest on this machine"

@@ -46,8 +46,10 @@
 import os
 import sys
 
-ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import images, store  # noqa: E402
+
+ROOT = images.root()
 
 from wk import decl, wall  # noqa: E402
 from wk.act import Refused, die, info, log, warn  # noqa: E402
@@ -110,9 +112,10 @@ def main(argv, env=None, reg=None):
     if reg.in_workspace():
         only(args, (), "is not asked inside a workspace: 'wk doctor' here checks this one")
         return inside(reg)
-    if env.get("WK_NAME"):
+    name = store.ws_name(env)
+    if name:
         only(args, ("--gpu",), "is this machine's question, not a workspace's: drop the workspace name")
-        return workspace(reg, env["WK_NAME"], argv)
+        return workspace(reg, name, argv)
     only(args, ("--all", "--probe-store"), "is a workspace's question: wk doctor <workspace> --gpu")
     doc = Doctor(ROOT)
     if args.flag("--probe-store"):

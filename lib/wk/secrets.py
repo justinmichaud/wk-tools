@@ -6,10 +6,10 @@ import os
 import shlex
 import sys
 
-from wk import act
+from wk import act, images
 from wk.act import debug, die, warn
 from wk.machine import Local
-from wk.store import Store
+from wk.store import Store, in_vm
 
 AGENT_SOCK = "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/ssh-agent.sock"
 CONTAINER_SOCK = "/run/wk/ssh-agent.sock"
@@ -68,13 +68,16 @@ class Secrets:
 
     def owned_here(self):
         """Inside the podman VM the secrets directory is the macOS host's, mounted read-only."""
-        return not self.env.get("WK_IN_VM")
+        return not in_vm(self.env)
 
     def held_dir(self):
         return self.store.push_held_dir()
 
     def push_key_path(self, fork):
         return os.path.join(self.held_dir(), "build_key_" + fork)
+
+    def key_at_rest(self, fork):
+        return self.machine.exists(self.push_key_path(fork))
 
     def pub_path(self, fork):
         return os.path.join(self.secrets_dir(), "build_key_%s.pub" % fork)
@@ -385,7 +388,7 @@ def main(argv):
     sub.add_parser("alias-blocks").add_argument("dir")
     a = parser.parse_args(argv)
     if a.verb == "pat-converge":
-        s = Secrets(os.environ["WK_ROOT"])
+        s = Secrets(images.root())
         return 0 if s.cred_sync(s.machine_read_pat(), "github-pat") else 1
     sys.stdout.write(alias_blocks(FORKS, a.dir) if a.verb == "alias-blocks" else rows(FORKS if a.verb == "forks" else AGENT_SECRETS))
     return 0

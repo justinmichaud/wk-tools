@@ -60,13 +60,17 @@ def elf_arch(od):
     return ELF.get((h[4], h[18] | h[19] << 8), "") if len(h) >= 20 else ""
 
 
+def runner_ref(env):
+    return env.get("WK_BENCH_RUNNER_REF") or RUNNER_REF
+
+
 def runner_tree(reg, here, root):
     """(tree, sha): Tools/Scripts exported from the mirror at one commit, the runner_sha both arms of an A/B share, with the
     board driver beside the others. The export is an artifact keyed by that commit; the driver is copied in every run."""
     mirror = reg.store.mirror()
     if not here.isdir(mirror):
         die("no mirror at %s; 'wk sync' makes one. The runner tree is exported from it." % mirror)
-    ref = reg.env.get("WK_BENCH_RUNNER_REF") or RUNNER_REF
+    ref = runner_ref(reg.env)
     r = here.run(["git", "-C", mirror, "rev-parse", "--verify", "--quiet", ref + "^{commit}"])
     sha = r.out.strip()
     if not r.ok or not sha:
@@ -98,7 +102,7 @@ class BoardSystem(System):
         self.sysid = self.display = self.session = self.renderer = self.runner_dir = self.runner_sha = self.payload = self.plan_text = ""
         self.doc, self.facts_, self.clk, self.probed = {}, {}, {}, {}
         self.prepared_boot = self.session_boot = None
-        self.profiler = self.paranoid = self.capture = ""
+        self.profiler = self.paranoid = self.capture = self.unmeasured = ""
 
     def bench(self):
         if self.machine is None:
@@ -236,8 +240,9 @@ class BoardSystem(System):
         rows = [(True, "display attached", self.display) if self.display else
                 (False, "display attached", "no connected DRM connector and no HDMI -- a software path, indistinguishable later"),
                 (True, "clock pinned", "pinned as the run starts; a dry run pins nothing") if act.dry_run() else
-                (True, "clock pinned", "%s kHz (min=max)" % lo) if lo and lo == hi else
-                (False, "clock pinned", "min %s, max %s -- DVFS moves the clock under the measurement" % (lo or "unknown", hi or "unknown"))]
+                (record.UNKNOWN, "clock pinned", "min %s, max %s -- the board's clock was not read" % (lo or "unread", hi or "unread")) if not (lo and hi) else
+                (True, "clock pinned", "%s kHz (min=max)" % lo) if lo == hi else
+                (False, "clock pinned", "min %s, max %s -- DVFS moves the clock under the measurement" % (lo, hi))]
         notes = [] if self.clk.get("governor") == "performance" else ["governor %s" % (self.clk.get("governor") or "unknown")]
         if self.throttled() not in ("", "throttled=0x0"):
             notes.append(self.throttled())
@@ -301,14 +306,15 @@ class BoardSystem(System):
 
     def profiler_stage(self, leg):
         """A reboot empties /tmp, so every warmup leg stages its profiler again."""
-        self.profiler = self.paranoid = self.capture = ""
+        self.profiler = self.paranoid = self.capture = self.unmeasured = ""
         if leg.o.get("no_warmup_profile"):
             log("  profiler    off (--no-warmup-profile)")
             return
         m = self.bench()
         arch = elf_arch(m.run(["od", "-An", "-tu1", "-N20", slot_path(leg.slot) + "/root/" + self.doc.get("lib_file", "")]).out)
         if not arch:
-            act.barrier("could not read the word size of the slot's own library on %s, so which profiler can run there is unknown." % self.board)
+            self.unmeasured = record.UNMEASURED + "the word size of the slot's own library"
+            warn("could not read the word size of the slot's own library on %s: which profiler can run there is unknown, so none is staged." % self.board)
             return
         tool, why = samply.resolve(arch, bool(self.facts_.get("sysprof")))
         if tool is None:
@@ -397,7 +403,7 @@ class BoardSystem(System):
             bools.append("warmup=1")
             fields.append("warmup_kind=" + ("settle" if leg.o.get("settle") else "evidence"))
         if leg.o.get("warmup"):
-            fields += ["profiler=" + (self.profiler or "none"), "host.perf_event_paranoid=" + self.paranoid]
+            fields += ["profiler=" + (self.profiler or self.unmeasured or "none"), "host.perf_event_paranoid=" + self.paranoid]
         record.write_env(os.path.join(out, "env.json"), fields, bool_fields=bools, update=True)
         if n:
             log("  verified    the reporting WPEWebProcess ran slot '%s' (%d check(s), build-id %s)" % (leg.slot, n, self.doc.get("build_id", "")[:12]))
@@ -441,11 +447,8 @@ class BoardRun(pipeline.Run):
         return fleet_holders(self.root, self.env, self.recs, res)
 
     def records(self, clock):
-        return progress.Records(self.reg.store.record_dir(), clock=clock, env=dict(self.reg.env, WK_ABORT_SECONDS=self.env["WK_ABORT_SECONDS"]),
+        return progress.Records(self.reg.store.record_dir(), clock=clock, env=dict(self.reg.env, WK_ABORT_SECONDS=str(progress.watchdog_abort(self.env))),
                                 machine=self.here)
-
-    def put(self):
-        pass
 
     def stop(self):
         t = self.recs.find("bench", self.name)
@@ -565,7 +568,7 @@ class BoardRun(pipeline.Run):
             "host.root_device=" + s.probed.get("rootdev", ""), "host.cpu_khz=" + lo, "cores.set=" + leg.cores,
             "subtests_excluded=" + o.get("excluded", ""), "task=" + leg.task, "preflight_notes=" + leg.notes] + ab
             + pipeline.configuration_fields(self.env),
-            bool_fields=["forced=" + (self.env.get("WK_FORCE") or ""), "cores.pinned=" + leg.cores, "host.dvfs_pinned=" + ("1" if lo and lo == hi else "")])
+            bool_fields=["forced=" + act.forced(self.env), "cores.pinned=" + leg.cores, "host.dvfs_pinned=" + ("1" if lo and lo == hi else "")])
 
     def watched(self, argv, cwd, path):
         if self.task is not None:

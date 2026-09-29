@@ -6,6 +6,7 @@ import sys
 
 from wk import act, git
 from wk.act import die, info, log, warn
+from wk.store import in_vm
 
 DIGITS = re.compile(r"^[0-9]+$")
 PLANNED_COMMIT = "0" * 40
@@ -144,7 +145,7 @@ def checkout(target, here, name, spec, remotes=git.REMOTES):
             reset = True
         elif ahead == "unknown" or not ahead.isdigit():
             act.barrier("cannot tell whether '%s' in '%s' has work the PR head does not.\n    Checking it out will leave it as it is." % (branch, name))
-        elif os.environ.get("WK_FORCE"):
+        elif act.forced():
             act.barrier("discarding %s local commit(s) on '%s' in '%s'." % (ahead, branch, name))
             reset = True
         else:
@@ -178,7 +179,7 @@ def pull_refname(remote, n):
 
 def mirror_fetch(here, store, lock, src, srcspec, dest):
     """One ref from `src` into this machine's mirror, made on first use, under the store lock."""
-    if store.env.get("WK_IN_VM"):
+    if in_vm(store.env):
         die("the mirror in here is the host's, mounted read-only; run this on the host")
     mirror = store.mirror()
     here.mkdir(os.path.dirname(mirror))

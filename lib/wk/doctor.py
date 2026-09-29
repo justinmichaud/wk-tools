@@ -8,14 +8,14 @@ import shlex
 import shutil
 import subprocess
 
-from wk import bridge, fleet, git, record, secrets, targets
+from wk import bridge, fleet, git, guest, record, secrets, targets
 from wk.bench import record as bench_record
 from wk.key.cli import Key
 from wk.kv import kv
 from wk.machine import Local, lib_argv
 from wk.machine_cmd import deps as machine_deps
 from wk.status import machine_confs
-from wk.store import Store
+from wk.store import Store, in_vm
 
 OK, MISS, UNK, NOTE = "ok", "miss", "unk", "note"
 MARK = {OK: "\033[32mok\033[0m", MISS: "\033[31m--\033[0m", UNK: "\033[33m??\033[0m"}
@@ -304,7 +304,7 @@ class Doctor:
         self.mc = mc
         self.store = Store(self.env)
         self.macos = (os.uname().sysname == "Darwin") if macos is None else macos
-        self.macos_host = self.macos and not self.env.get("WK_IN_VM")
+        self.macos_host = self.macos and not in_vm(self.env)
         self.home = self.store.home()
         self.reg = targets.Registry(root, self.env, self.machine)
         self.container = self.reg.load("container")
@@ -328,7 +328,7 @@ class Doctor:
         if self._paths is None:
             sec = secrets.Secrets(self.root, self.env, self.machine)
             self._paths = {"push_held": self.store.push_held_dir(), "read_pat": sec.machine_read_pat(),
-                           "tailscale_api": sec.cred_path("tailnet-api"), "ntfy_topic": self.store.ntfy_topic_path()}
+                           "tailscale_api": sec.cred_path("tailnet-api"), "tailscale_authkey": sec.cred_path("tailnet"), "ntfy_topic": self.store.ntfy_topic_path()}
             self._paths.update(("secret." + r[0], sec.cred_path(r[0])) for r in secrets.agent_secrets())
         return self._paths
 
@@ -440,7 +440,7 @@ class Doctor:
             if key.startswith("secret."):
                 yield self.local_state(path, "re-authable",
                                        "wk key set %s stores one; every workspace this machine makes starts authenticated with it" % key[7:])
-        yield self.local_state(self.env.get("WK_TS_AUTHKEY") or os.path.join(self.home, ".config", "wk", "tailscale-authkey"), "re-authable",
+        yield self.local_state(p["tailscale_authkey"], "re-authable",
                                "wk key set tailnet asks for one (tag:wk, reusable, not ephemeral, longest expiry); joined nodes are unaffected")
         yield self.local_state(p["tailscale_api"], "re-authable",
                                "wk key set tailnet-api asks for one; only this machine holds it, and only writes that must retire a stale node need it")
@@ -469,6 +469,10 @@ class Doctor:
             if rpi5 and rpi5.get("ssh") == self.machine_name():
                 yield self.local_state(os.path.join(self.root, "host", "linux", "rpi5", "rpi5.conf"), "backed-up",
                                        "site WiFi identity (gitignored: repo is public); rpi5.conf.example documents the shape")
+                yield self.local_state(os.path.join(self.root, "host", "linux", "rpi5", "id_ed25519"), "backed-up",
+                                       "the ssh key rpi5-setup.sh installs from beside itself (gitignored: repo is public)")
+                yield self.local_state(os.path.join(self.home, "kbuild"), "backed-up",
+                                       "the -numa kernel .debs rpi5-numa-kernel.sh builds in 1-2 hours; dpkg -i reinstalls them")
             yield self.local_state("/var/lib/tailscale", "re-authable",
                                    "tailscale up re-authenticates; the node name survives via the admin console")
         if not self.macos_host:
@@ -529,7 +533,7 @@ class Doctor:
             yield unk("tart not installed", "README.md, Setup -- only needed for Apple-port builds")
             return
         yield ok("tart installed")
-        softnet = self.env.get("WK_SOFTNET_BIN") or "/usr/local/bin/softnet"
+        softnet = guest.softnet_bin(self.env)
         yield check("softnet installed SUID root", "./setup --stage softnet  (interactive sudo)",
                     self.machine.run(["test", "-x", softnet, "-a", "-u", softnet]).ok)
         from wk.sysimage import guestbase

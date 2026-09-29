@@ -25,7 +25,8 @@ from wk.machine import TIMED_OUT, Local, Ssh
 from wk.act import Refused
 from wk.resources import Resources
 from wk.kv import ANSI, kv, kv_file
-from wk.store import Bases, Store
+from wk.store import Bases, Store, dispatch_target, in_vm
+
 
 ENDED_AS_ASKED = ("ok", "cancelled", "stopped", "refused")
 METHOD = {"container": "container", "vm": "macOS guest"}
@@ -67,6 +68,10 @@ if [ -x /usr/local/sbin/wk-bridge-healthcheck ]; then
 else
     printf "role=no\n"
 fi'''
+
+
+def fleet_timeout(env):
+    return int(env.get("WK_FLEET_TIMEOUT") or 4)
 
 
 def clean(text):
@@ -198,7 +203,7 @@ def tools_fact(ver, expect, machine, label, in_vm=False, peer=False, dirty_here=
 def task_records(records, only=None, clock=None):
     """One record per task that is running or ended badly; one that ended as asked left its product as the report."""
     clock = clock or records.clock
-    ask = os.environ.get("WK_TASK_ASK_SECONDS", "5")
+    ask = int(record.task_ask_seconds(records.env))
     out, worst = [], 0
     for t in records.list():
         if only and t.field("name") != only:
@@ -215,7 +220,7 @@ def task_records(records, only=None, clock=None):
         r.opt("holds", t.field("holds"))
         r.opt("exit", t.field("exit"))
         r.raw("plan", t.plan())
-        age = record.log_age(log, clock)
+        age = record.log_age(log, clock, t.machine)
         abort = t.field("abort_after")
         shown_age = "?" if age is None else str(age)
         if st == "silent":
@@ -230,12 +235,16 @@ def task_records(records, only=None, clock=None):
                        "Follow it:  tail -f %s" % (shown_age, log))
                 worst = bump(worst, 2)
         elif st == "running":
-            r.note("alive: %s (last output %ss ago)" % (record.progress_line(log) or "running", shown_age))
+            r.note("alive: %s (last output %ss ago)" % (record.progress_line(log, t.machine) or "running", shown_age))
             worst = bump(worst, 2)
         elif st == "starting":
             worst = bump(worst, 2)
         elif st == "died":
             r.warn("%s '%s' died without recording an exit -- its log is %s" % (kind, name, log))
+            worst = bump(worst, 4)
+        elif st == "unreadable":
+            r.warn("this record cannot be read (%s): an older wk wrote it, or it is damaged,\n      so nothing here "
+                   "can say whether its job runs. The record is %s" % (", ".join(t.unreadable()), t.path))
             worst = bump(worst, 4)
         elif st == "unanswered":
             r.warn("'%s' did not say within %ss whether pid %s is alive, so\n      nothing here can confirm the record. "
@@ -243,7 +252,7 @@ def task_records(records, only=None, clock=None):
             worst = bump(worst, 4)
         elif st == "failed":
             r.warn("exit %s" % t.field("exit"))
-            for line in record.first_error(log):
+            for line in record.first_error(log, t.machine):
                 r.note("  " + line)
             worst = bump(worst, 1)
         elif st == "stalled":
@@ -255,7 +264,7 @@ def task_records(records, only=None, clock=None):
         elif st == "oom":
             r.warn("killed for memory; see %s" % log)
             try:
-                hits = [l for l in record.normalised(log).split("\n") if "wk: MEMORY LIMIT" in l]
+                hits = [l for l in record.normalised(log, t.machine).split("\n") if "wk: MEMORY LIMIT" in l]
             except OSError:
                 hits = []
             if hits:
@@ -291,9 +300,7 @@ def disk_record(store, machine, in_vm, reclaimable):
 
 def broker_record(store, machine, alive):
     """The request broker: in flight is read from the process table, since a `running` status file is a claim a killed broker leaves behind."""
-    env = store.env
-    sock = env.get("WK_BROKER_SOCKET") or (os.path.join(env["XDG_RUNTIME_DIR"], "wk", "broker.sock") if env.get("XDG_RUNTIME_DIR")
-                                          else os.path.join(store.state_dir(), "broker.sock"))
+    sock = store.broker_socket()
     brdir = os.path.join(store.state_dir(), "broker")
     try:
         is_sock = stat.S_ISSOCK(os.stat(sock).st_mode)
@@ -471,7 +478,7 @@ def bench_records(store, machine, alive):
 def fleet_probe(root, name, cap, env=None):
     """The board's boot driver (wk.boot.cli fleet-probe) asked under a ceiling: None when it did not answer in `cap` seconds."""
     env = os.environ if env is None else env
-    r = Local().run(["env", "PYTHONPATH=" + os.path.join(str(root), "lib"), "WK_SSH_TIMEOUT=" + env.get("WK_FLEET_TIMEOUT", "4"),
+    r = Local().run(["env", "PYTHONPATH=" + os.path.join(str(root), "lib"), "WK_SSH_TIMEOUT=" + str(fleet_timeout(env)),
                      sys.executable, "-m", "wk.boot.cli", "fleet-probe", name], input="", timeout=cap)
     if r.rc == TIMED_OUT:
         return None
@@ -547,7 +554,7 @@ def self_mode_word(env):
 
 def self_fleet_record(root, env, machine):
     """The self machine's role and mode, read locally with no probe of its own -- the record every
-    session's first line comes from (statusview.self_line)."""
+    session's first line comes from (statusview.self_line_text)."""
     r = Rec("fleet", machine=machine, role=self_role(root, machine),
             mode=fleet_mode("yes", self_mode_word(env), ""))
     r.raw("self", True)
@@ -654,9 +661,9 @@ class Walk:
         self.name = name
         self.fleet = fleet and not name
         self.devices = devices and not name
-        self.this_machine = self.env.get("WK_ROW_LABEL") or record.machine_name(self.env)
-        self.is_self = bool(self.env.get("WK_HOST_SELF")) or not self.env.get("WK_ROW_LABEL")
-        self.in_vm = bool(self.env.get("WK_IN_VM"))
+        self.this_machine = record.row_label(self.env) or record.machine_name(self.env)
+        self.is_self = record.host_self(self.env) or not record.row_label(self.env)
+        self.in_vm = in_vm(self.env)
         self.lock = threading.Lock()
         self.tasks_said = set()
         self.tooling_said = False
@@ -708,7 +715,7 @@ class Walk:
         if not self.name:
             yield self_fleet_record(self.root, self.env, self.this_machine)
         if self.name:
-            tname = self.env.get("WK_TARGET") or self.reg.ws_target(self.name)
+            tname = dispatch_target(self.env) or self.reg.ws_target(self.name)
             jobs = [(tname, self._job(tname, self.name))]
         else:
             names = self.targets()
@@ -764,6 +771,9 @@ class Walk:
             args = ["status", "--no-devices" if gm == self.this_machine else "--no-fleet", "--records"] + ([name] if name else [])
             recs, rc = self.delegate(target, gm, args)
             out += recs
+            recs, w = self.tasks(target.records(self.clock), name)
+            out += recs
+            rc = bump(rc, w)
             if gm != self.this_machine and self.fleet:
                 out += self.report_machine(target, gm, has_wk)
                 out.append(self.capacity_remote(target, gm))
@@ -773,7 +783,7 @@ class Walk:
         if side in ("unreachable", "stopped"):
             out.append(Rec("raw", machine=gm, text="%s: %s" % (target.name, far_side_reason(target, side, why))).done())
             return out, worst
-        records = record.of_target(target, self.clock)
+        records = target.records(self.clock)
         if name:
             r, w = self.workspace(target, gm, method, name, records)
             out.append(r)
@@ -833,7 +843,7 @@ class Walk:
     def current_base(self, target):
         with self.lock:
             if target.name not in self.bases:
-                self.bases[target.name] = Bases(target.store, Local()).current()
+                self.bases[target.name] = Bases(target.store, target.store_machine).current()
             return self.bases[target.name]
 
     def remake_hint(self, target, ws):
@@ -866,11 +876,7 @@ class Walk:
             r.set("snap", snap)
             cur = self.current_base(target)
             if cur and cur != snap:
-                try:
-                    newer = [b for b in os.listdir(target.store.base_dir()) if b > snap]
-                except OSError:
-                    newer = []
-                r.set("snap_behind", len(newer))
+                r.set("snap_behind", len([b for b in Bases(target.store, target.store_machine).ids() if b > snap]))
         if st == "creating":
             new = records.find("new", ws)
             if new and new.alive(None):
@@ -887,11 +893,11 @@ class Walk:
             r.warn("the record says a %s workspace and the machine has none --\n      something outside wk removed it "
                    "(podman rm, tart delete, an rm -rf over there)" % target.name)
             r.note("clear the record:  wk rm %s" % ws)
-            if os.path.isdir(target.store.ws_dir(ws)):
+            if target.store_machine.isdir(target.store.ws_dir(ws)):
                 r.note("what is left of it here: %s" % target.store.ws_dir(ws))
             worst = bump(worst, 4)
         elif st == "unreachable":
-            r.warn("the machine behind '%s' did not answer within %ss" % (target.name, self.env.get("WK_SSH_TIMEOUT", "10")))
+            r.warn("the machine behind '%s' did not answer within %ss" % (target.name, reach.ssh_timeout(self.env)))
             r.note("this is not 'absent': nothing about the workspace was checked at all,")
             r.note("and anything below is the last thing this machine wrote about it")
             worst = bump(worst, 4)
@@ -965,7 +971,7 @@ class Walk:
         if target.kind == "container":
             local = target.sdk_local()
             if local:
-                cap = int(self.env.get("WK_FLEET_TIMEOUT", "4"))
+                cap = fleet_timeout(self.env)
                 out.append(sdk_record(m, local, target.sdk_upstream(timeout=cap), cap))
         if not self.in_vm:
             out.append(broker_record(store, m, alive))
@@ -983,7 +989,7 @@ class Walk:
     def fleet_devices(self):
         if self.reg.in_workspace():
             return [], 0
-        cap = int(self.env.get("WK_FLEET_TIMEOUT", "4")) * 5
+        cap = fleet_timeout(self.env) * 5
         # This machine's own role and mode already lead every record (self_fleet_record); probing it
         # again as a board would print the one machine here twice.
         confs = [(n, c) for n, c in machine_confs(self.root, self.env) if n != self.this_machine]
@@ -1000,7 +1006,7 @@ class Walk:
         f = fleet.Fleet(self.root, self.env)
         names = f.names(("bridge",))
         want = bridge_role_sum(self.root)
-        connect = int(self.env.get("WK_FLEET_TIMEOUT") or 4)
+        connect = fleet_timeout(self.env)
         cap = float(self.env.get("WK_BRIDGE_TIMEOUT", "20"))
 
         def one(name):

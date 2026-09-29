@@ -1132,5 +1132,12 @@ class TestARealBoardAnswersWhatALegRecords(unittest.TestCase):
         self.evidence("rpi5")
 
 
+
+class TestTheRunnerRef(unittest.TestCase):
+    def test_the_runner_tree_is_main_unless_the_env_names_a_ref(self):
+        self.assertEqual(board.runner_ref({}), "refs/heads/main")
+        self.assertEqual(board.runner_ref({"WK_BENCH_RUNNER_REF": "refs/heads/x"}), "refs/heads/x")
+
+
 if __name__ == "__main__":
     unittest.main()

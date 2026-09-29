@@ -33,26 +33,29 @@
 # (where=local). `wk ai claude` turns it off before handing over control.
 #
 #   --target <machine>   ask that fleet machine instead of this one, through
-#                        its own wk. A `remote` target names no ssh-agent
-#                        socket, so it reports that there is no switch there
+#                        its own wk. A build box holds no deploy key: `wk enter`
+#                        forwards this machine's agent to a shell there, so it
+#                        reports off, with no switch of its own
 #   --all                ask everywhere: this machine and every other one
 #                        (wk boot --list names them)
 #   --force              `on` leaves a running claude session alone and loads the
 #                        keys anyway; that session can push until it exits
 #
 #   0  push is on (status), or the action succeeded
-#   1  push is off (status), or the action failed
+#   1  push is off (status), or the action failed; a build box with no key at rest
 #   3  a machine did not answer, so its position is unknown -- never "off"; in
 #      the podman machine, `on`/`off` switched its half and not the host's guests'
 #   4  there are no deploy keys on this machine at all
-#   5  this machine has no switch: its keys are live wherever they sit
+#   5  this machine has no switch: it holds no key, or one is live at rest
 
 import os
 import signal
 import sys
 
-ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import images, store  # noqa: E402
+
+ROOT = images.root()
 
 from wk import act, decl, guest, job, record, secrets, status, targets  # noqa: E402
 from wk.act import Refused, die, info, log, warn  # noqa: E402
@@ -149,7 +152,7 @@ class Push:
         self.ws_sock = self.target.agent_sock() if self.target else None
         self.sock, self.pat, self.bz = sec.machine_sock(), sec.machine_pat(), sec.machine_bugzilla_key()
         self.guest_live = False
-        self.in_vm = bool(reg.env.get("WK_IN_VM")) and not sec.macos
+        self.in_vm = store.in_vm(reg.env) and not sec.macos
 
     def say(self, what, text):
         self.out.write("%-10s %s\n" % (what, text))
@@ -193,7 +196,7 @@ class Push:
             if not pids:
                 continue
             info("ending the claude session(s) in '%s' (pid %s)" % (ws, " ".join(pids)))
-            seen, grace = {"pids": pids}, int(self.reg.env.get("WK_KILL_WAIT") or 15)
+            seen, grace = {"pids": pids}, job.kill_wait(self.reg.env)
 
             def send(s, t=t, ws=ws, seen=seen, grace=grace):
                 if s == signal.SIGKILL:
@@ -218,7 +221,7 @@ class Push:
                         "deploy keys would hand that session a working push. 'wk status' names\n    what is wrong with it." % unknown)
         sessions = [(t, ws, pids) for t, ws, pids in sessions if pids]
         names = " ".join(ws for _, ws, _ in sessions)
-        if sessions and os.environ.get("WK_FORCE"):
+        if sessions and act.forced():
             act.barrier("a claude session is running in %s -- loading the deploy keys hands it a\n    working push for as long "
                         "as it runs, and its commit wall stays until it exits." % names)
         elif sessions:
@@ -235,9 +238,8 @@ class Push:
     def require_agent_target(self):
         if self.ws_sock:
             return
-        warn("'%s' workspaces name no ssh-agent socket (t_agent_sock), so the\n    deploy keys have nowhere to live outside one and "
-             "there is no switch here.\n    Giving this target one -- wk-ssh-agent.service, the way host/linux/sdk.sh\n    installs it "
-             "-- is owed (docs/PLAN.md). Until then, push\n    from the workstation that holds the keys." % self.target_name)
+        warn("'%s' is a build box: it holds no deploy key, so there is no switch here.\n    A push is from a shell 'wk enter <workspace>' "
+             "opens from the workstation, which\n    forwards that workstation's agent: switch it there." % self.target_name)
         raise Refused(NO_SWITCH)
 
     # -- the switch
@@ -311,15 +313,15 @@ class Push:
         return 0
 
     def where(self, fork, in_agent):
-        """loaded | held | live | absent; `live` is a key on a machine with no agent socket (remote/provision.sh)."""
+        """loaded | held | live | absent | forwarded; `live` is a key at rest on a build box, which holds none (remote/provision.sh)."""
         pub = self.sec.pub_path(fork)
         if self.sec.machine.exists(pub):
             fp = self.sec.machine.run(["ssh-keygen", "-lf", pub], input="").out.split()
             if len(fp) > 1 and fp[1] in in_agent:
                 return "loaded"
-        if self.sec.machine.exists(self.sec.push_key_path(fork)):
+        if self.sec.key_at_rest(fork):
             return "held" if self.ws_sock else "live"
-        return "absent"
+        return "absent" if self.ws_sock else "forwarded"
 
     def exposed_private_keys(self):
         d = self.sec.secrets_dir()
@@ -332,7 +334,8 @@ class Push:
         held_dir = sec.held_dir()
         in_agent = {line.split()[1] for line in sec.agent_list(self.sock) if len(line.split()) > 1}
         words = {"loaded": "push allowed (in the agent)", "held": "held back (%s)" % held_dir,
-                 "live": "always live (%s) -- no switch on this machine" % held_dir, "absent": "no key ('wk key deploy')"}
+                 "live": "at rest (%s) -- a build box holds none; 'wk machine setup' removes it" % held_dir,
+                 "absent": "no key ('wk key deploy')", "forwarded": "no key at rest; a push is made from the workstation"}
         count = {w: 0 for w in words}
         for fork in [f[0] for f in sec.forks()]:
             w = self.where(fork, in_agent)
@@ -356,19 +359,14 @@ class Push:
             warn("private key(s) in the mounted secrets directory, readable by every workspace:\n    %s" % " ".join(exposed))
             log("  move them to %s, which nothing mounts anywhere" % held_dir)
 
-        if not self.ws_sock:
-            warn("'%s' workspaces name no ssh-agent socket, so there is no switch\n    on this machine: a checkout here is a plain one "
-                 "with no container around it\n    and its core.sshCommand names the private half directly\n    (remote/provision.sh). "
-                 "The key above is live whatever the switch says\n    anywhere else, and 'wk push on|off' here refuses rather than "
-                 "pretending.\n    Installing wk-ssh-agent.service here is owed (docs/PLAN.md)." % self.target_name)
-        elif (count["held"] or count["loaded"]) and not sec.agent_answers(self.sock):
+        if (count["held"] or count["loaded"]) and not sec.agent_answers(self.sock):
             log("  no ssh-agent answers at %s ('./setup' installs it there)" % self.sock)
 
         self.guest_agent_row()
         self.guest_rows()
 
         if count["live"]:
-            info("push is ON here and cannot be switched off -- %d key(s) are live" % count["live"])
+            info("push is ON here and cannot be switched off -- %d key(s) are live at rest" % count["live"])
             return 0
         if count["loaded"] or self.guest_live:
             info("push is ON")
@@ -379,6 +377,9 @@ class Push:
             return 0
         if count["held"]:
             info("push is OFF -- 'wk push on' to allow it")
+            return 1
+        if count["forwarded"]:
+            info("push is OFF here -- no key at rest, and an agent session is forwarded none")
             return 1
         warn("there are no deploy keys here at all -- 'wk key deploy' makes them")
         return NO_KEYS

@@ -196,5 +196,21 @@ class TestBases(unittest.TestCase):
         self.assertEqual(self.bases.unpinned(), ["b"])
 
 
+class TestStoreOverrides(unittest.TestCase):
+    def test_the_broker_socket_is_named_or_where_each_side_finds_it(self):
+        self.assertEqual(Store({"WK_BROKER_SOCKET": "/s"}).broker_socket(), "/s")
+        self.assertEqual(Store({"WK_BROKER_SOCKET": "/s"}).workspace_broker_socket(), "/s")
+        self.assertEqual(Store({"XDG_RUNTIME_DIR": "/run/u"}).broker_socket(), "/run/u/wk/broker.sock")
+        self.assertEqual(Store({}).workspace_broker_socket(), "/run/wk/broker.sock")
+
+    def test_a_disk_admission_measures_the_named_store_else_home(self):
+        self.assertEqual(Store({"WK_STORE": "/st", "HOME": "/h"}).admission_dir(), "/st")
+        self.assertEqual(Store({"HOME": "/h"}).admission_dir(), "/h")
+
+    def test_the_container_mirror_is_only_what_the_env_names(self):
+        self.assertIsNone(Store({}).container_mirror())
+        self.assertEqual(Store({"WK_MIRROR": "/m"}).container_mirror(), "/m")
+
+
 if __name__ == "__main__":
     unittest.main()

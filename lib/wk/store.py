@@ -7,14 +7,38 @@ import sys
 
 from wk import record
 
+BROKER_SOCKET = "/run/wk/broker.sock"
+
+
+def _env(env):
+    return os.environ if env is None else env
+
+
+def in_vm(env=None):
+    return bool(_env(env).get("WK_IN_VM"))
+
+
+def ws_name(env=None, take=False):  # `take` removes the answer too
+    env = _env(env)
+    return env.pop("WK_NAME", "") if take else env.get("WK_NAME", "")
+
+
+def build_config(env=None, take=False):  # the config lifted out of argv, or None
+    env = _env(env)
+    return env.pop("WK_CONFIG", None) if take else env.get("WK_CONFIG")
+
+
+def dispatch_target(env=None, default=None):
+    return _env(env).get("WK_TARGET", default)
+
 
 class Store:
     def __init__(self, env=None):
-        self.env = os.environ if env is None else env
+        self.env = _env(env)
 
     @property
     def macos_host(self):
-        return os.uname().sysname == "Darwin" and not self.env.get("WK_IN_VM")
+        return os.uname().sysname == "Darwin" and not in_vm(self.env)
 
     def home(self):
         return self.env.get("HOME") or os.path.expanduser("~")
@@ -33,20 +57,48 @@ class Store:
         return os.path.join(self.lock_dir(), "%s@%s.lock" % (resource, record.host_name() or "local"))
 
     def default(self):
-        if self.env.get("WK_IN_VM") or os.uname().sysname == "Darwin":
+        if in_vm(self.env) or os.uname().sysname == "Darwin":
             return "/var/lib/wk"
         if os.path.isdir("/var/lib/wk") and os.access("/var/lib/wk", os.W_OK):
             return "/var/lib/wk"
         return os.path.join(self.env.get("XDG_DATA_HOME") or os.path.join(self.home(), ".local", "share"), "wk")
 
+    def named_broker_socket(self):
+        return self.env.get("WK_BROKER_SOCKET")
+
+    def broker_socket(self):
+        if self.env.get("XDG_RUNTIME_DIR"):
+            default = os.path.join(self.env["XDG_RUNTIME_DIR"], "wk", "broker.sock")
+        else:
+            default = os.path.join(self.state_dir(), "broker.sock")
+        return self.named_broker_socket() or default
+
+    def workspace_broker_socket(self):
+        return self.named_broker_socket() or BROKER_SOCKET
+
+    def container_mirror(self):
+        return self.env.get("WK_MIRROR")
+
+    def named_root(self):
+        return self.env.get("WK_STORE")
+
+    def admission_dir(self):
+        return self.named_root() or self.home()
+
     def root(self):
-        return self.env.get("WK_STORE") or self.default()
+        return self.named_root() or self.default()
+
+    def provisioned_root(self):
+        return self.named_root() or "/var/lib/wk"
+
+    def vm_root(self):
+        return self.env.get("WK_VM_STORE") or self.record_dir()
 
     def vm_store(self):
         """The vm target's store, or None off a macOS host and where it would be the container's."""
         if not self.macos_host:
             return None
-        d = self.env.get("WK_VM_STORE") or self.record_dir()
+        d = self.vm_root()
         return None if os.path.realpath(d) == os.path.realpath(self.root()) else d
 
     def machine_store(self):
@@ -107,7 +159,7 @@ class Store:
 
     def is_local(self):
         """Whether this process can write the store; on a macOS host the default one is the podman VM's."""
-        if self.env.get("WK_IN_VM") or os.uname().sysname != "Darwin":
+        if in_vm(self.env) or os.uname().sysname != "Darwin":
             return True
         return os.path.isdir(self.root()) and os.access(self.root(), os.W_OK)
 

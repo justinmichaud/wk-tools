@@ -3,7 +3,8 @@
 import os
 import shlex
 
-from wk import act, fleet
+from wk import act, fleet, images, resources
+from wk.store import dispatch_target
 
 LIST_TEXT = """\
 jsc-debug          JSCOnly, Debug, assertions on
@@ -104,6 +105,18 @@ def arch_cmake(arch, port):
     return a["cmake"] + (" " + extra if extra else "")
 
 
+def target_cmake(env, cfg=None):
+    return env.get("WK_TARGET_CMAKE", "") if cfg is None else target_var(env, "WK_TARGET_CMAKE", cfg)
+
+
+def build_args(env, cfg=None):
+    return env.get("WK_BUILD_ARGS", "") if cfg is None else target_var(env, "WK_BUILD_ARGS", cfg)
+
+
+def disk_gb(env):
+    return int(env.get("WK_BUILD_DISK_GB") or DISK_GB)
+
+
 class Config:
     def __init__(self, name, os_name, kind, spec, env):
         self.name, self.os, self.kind = name, os_name, kind
@@ -119,7 +132,7 @@ class Config:
         self.script = spec.get("script", "Tools/Scripts/build-webkit")
         self.cc = "" if apple else (env.get("WK_CC") or "clang")
         self.cxx = "" if apple else (env.get("WK_CXX") or "clang++")
-        self.disk_gb = spec.get("disk_gb") or int(env.get("WK_BUILD_DISK_GB") or DISK_GB)
+        self.disk_gb = spec.get("disk_gb") or disk_gb(env)
 
     def build_subdir(self):
         """The build tree under the checkout; the variant suffix keeps a sanitized or profile-guided Apple build out of the shared one."""
@@ -221,7 +234,7 @@ def libcxx(env):
         return True
     act.die("libcxx='%s' in %s\n    is neither 1 nor 0. It says whether that machine has libc++:\n"
             "    1 to build with -stdlib=libc++, 0 (or unset) to leave it out."
-            % (v, fleet.Fleet(env.get("WK_ROOT", ""), env).path(env.get("WK_TARGET") or "<target>")))
+            % (v, fleet.Fleet(images.root(env), env).path(dispatch_target(env) or "<target>")))
 
 
 def target_var(env, stem, cfg):
@@ -245,13 +258,13 @@ def merge_cxx_flags(text):
 
 
 def mb_per_job(cfg, env):
-    return int(env.get("WK_MB_PER_JOB") or cfg.mb_per_job())
+    return resources.mb_per_job_setting(env, cfg.mb_per_job())
 
 
 def build_env(cfg, src, jobs, nice, arch, ccache_dir, env, extra_cmake="", extra_env=(), target_build_args=""):
     """What build/build-in-target.sh runs under, narrowest last: `env` applies left to right."""
-    cmake = [cfg.cmake, arch_cmake(arch, cfg.port), env.get("WK_TARGET_CMAKE", ""), target_var(env, "WK_TARGET_CMAKE", cfg), extra_cmake]
-    cfgargs = target_var(env, "WK_BUILD_ARGS", cfg)
+    cmake = [cfg.cmake, arch_cmake(arch, cfg.port), target_cmake(env), target_cmake(env, cfg), extra_cmake]
+    cfgargs = build_args(env, cfg)
     args = "%s %s%s%s" % (cfg.port, cfg.args, " " + target_build_args if target_build_args else "", " " + cfgargs if cfgargs else "")
     out = ["CCACHE_DIR=" + ccache_dir, "CCACHE_BASEDIR=" + src, "CCACHE_SLOPPINESS=" + CCACHE_SLOPPINESS,
            "CCACHE_NOHASHDIR=true", "NUMBER_OF_PROCESSORS=%s" % jobs, "CMAKE_BUILD_PARALLEL_LEVEL=%s" % jobs,

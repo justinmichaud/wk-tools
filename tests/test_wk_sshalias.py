@@ -27,8 +27,8 @@ CASES = (
      BLOCK % ("10.0.0.2", "root", "    IdentityFile /k/id\n    IdentitiesOnly yes\n    ProxyJump gw\n    Port 2222")),
     ("extra_alone", ("demo", "10.0.0.4", "u"), {"extra": ("Port 22",)}, "", BLOCK % ("10.0.0.4", "u", "\n    Port 22")),
     ("replacing", ("demo", "10.0.0.3", "u"), {}, OTHERS,
-     "Host other\n    HostName 1.2.3.4\n\nHost tail\n    User t\n" + BLOCK % ("10.0.0.3", "u", "")),
-    ("removing", None, {}, OTHERS, "Host other\n    HostName 1.2.3.4\n\nHost tail\n    User t\n"),
+     "Host other\n    HostName 1.2.3.4\nHost tail\n    User t\n" + BLOCK % ("10.0.0.3", "u", "")),
+    ("removing", None, {}, OTHERS, "Host other\n    HostName 1.2.3.4\nHost tail\n    User t\n"),
 )
 
 
@@ -105,7 +105,7 @@ class TestOnTheFake(unittest.TestCase):
     def test_removing_takes_only_the_named_block(self):
         self.fake.files[self.conf] = OTHERS
         sshalias.alias_remove(self.fake, self.env, "demo")
-        self.assertEqual(self.fake.files[self.conf], "Host other\n    HostName 1.2.3.4\n\nHost tail\n    User t\n")
+        self.assertEqual(self.fake.files[self.conf], "Host other\n    HostName 1.2.3.4\nHost tail\n    User t\n")
 
     def test_a_dry_run_writes_nothing(self):
         os.environ["WK_DRY_RUN"] = "1"

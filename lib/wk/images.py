@@ -80,6 +80,10 @@ def root(env=None):
     return env.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def driving_key_path(env):
+    return env.get("WK_IMAGE_KEY") or os.path.join(env.get("HOME") or os.path.expanduser("~"), ".ssh", "id_ed25519.pub")
+
+
 def marker(env=None):
     env = os.environ if env is None else env
     return env.get("WK_IMAGE_MARKER") or MARKER

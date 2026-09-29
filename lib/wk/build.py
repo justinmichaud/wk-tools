@@ -14,6 +14,7 @@ from wk.clock import Clock
 from wk.lock import Lock
 from wk.resources import Budget, Resources, parse_df
 from wk.sysimage import task as stage
+from wk.store import dispatch_target
 
 PID_MATCH = "*build-in-target.sh* *Tools/Scripts/build-*"   # build-in-target.sh execs the port's script; a PGO config stays in it across phases
 EXCLUSIVE = ("build", "babysit", "yocto", "buildroot")   # jobs that hold a checkout: two at once corrupt it
@@ -21,10 +22,14 @@ BABYSIT_MODEL = "haiku"
 BABYSIT_ATTEMPTS = 5
 
 
+def babysit_settings(env):
+    return env.get("WK_BABYSIT_MODEL") or BABYSIT_MODEL, int(env.get("WK_BABYSIT_ATTEMPTS") or BABYSIT_ATTEMPTS)
+
+
 def records_of(target, clock, machine):
     """The target's records, each begun with the watchdog's deadline, so `wk status` tells a quiet job from one whose watchdog is gone."""
     env = dict(target.env)
-    env.setdefault("WK_ABORT_SECONDS", str(job.ABORT_SECONDS))
+    record.default_watchdog(env, abort=job.ABORT_SECONDS)
     return record.of_target(target, clock, machine, env)
 
 
@@ -98,9 +103,7 @@ def detached(here, recs, clock, kind, name, argv, path, what):
 
     def pump():
         try:
-            with open(path, "rb") as f:
-                f.seek(offset[0])
-                data = f.read()
+            data = here.read_bytes(path, offset[0])
         except OSError:
             return
         offset[0] += len(data)
@@ -118,13 +121,13 @@ def detached(here, recs, clock, kind, name, argv, path, what):
 
 
 def size_for(reg, target, name, cfg, clock):
-    """(budget, the jobs already running, jobs, MB a job, nice), from the whole machine once: a remote target's
-    own numbers, else this machine's free memory under the target's envelope."""
+    """(budget, jobs running, jobs, MB a job, nice) from a remote target's own numbers, else this machine's free memory under the target's envelope."""
     cores, mem, load = target.build_size(name)
     polite = target.kind == "remote"
     benv = dict(reg.env, WK_BUILD_MACHINE=target.name) if polite else reg.env
     if polite:
-        avail = int(reg.env.get("WK_AVAIL_MB") or mem)
+        override = Resources(reg.machine, reg.env).avail_override()
+        avail = mem if override is None else override
     else:
         avail = Resources(reg.machine, reg.env).avail_mem_mb(cgroup_mb=mem)
     if target.env.get("WK_REMOTE_MAX_JOBS"):
@@ -133,7 +136,7 @@ def size_for(reg, target, name, cfg, clock):
     budget = Budget(reg.machine, benv, clock)
     running = budget.running(holder_alive(reg))
     mbpj = buildconf.mb_per_job(cfg, reg.env)
-    max_jobs = int(target.env.get("WK_MAX_JOBS") or 0) or None
+    max_jobs = Resources(reg.machine, target.env).max_jobs()
     jobs = budget.explain(cores, avail, mbpj, load if polite else None, max_jobs, running)
     return budget, running, jobs, mbpj, (19 if polite else 10)
 
@@ -147,7 +150,7 @@ class Build:
         self.in_ws = reg.in_workspace()
         self.kill = kill_cmd(self.in_ws, name)
         try:
-            self.target = reg.load(self.env.get("WK_TARGET") or reg.ws_target(name))
+            self.target = reg.load(dispatch_target(self.env) or reg.ws_target(name))
         except LookupError as e:
             die(str(e))
         self.recs = records_of(self.target, self.clock, self.here)
@@ -234,8 +237,7 @@ class Build:
         if t is not None and t.alive(None):
             die("a babysitter is already running for '%s' (pid %s).\n    Follow it:  tail -f %s\n    Stop it:    %s"
                 % (name, t.field("pid"), blog, self.kill))
-        model = env.get("WK_BABYSIT_MODEL") or BABYSIT_MODEL
-        attempts = int(env.get("WK_BABYSIT_ATTEMPTS") or BABYSIT_ATTEMPTS)
+        model, attempts = babysit_settings(env)
         argv = self.child_argv(("--babysit", "--detach"), add=("--_babysit",))
         if act.dry_run():
             log("dry run -- nothing was built, no babysitter started.")
@@ -254,8 +256,7 @@ class Build:
     def babysit(self):
         """The detached loop: build; on a failure a Claude fix from inside the workspace, then build again."""
         name, cfg, here, env = self.name, self.cfg, self.here, self.env
-        model = env.get("WK_BABYSIT_MODEL") or BABYSIT_MODEL
-        most = int(env.get("WK_BABYSIT_ATTEMPTS") or BABYSIT_ATTEMPTS)
+        model, most = babysit_settings(env)
         report, blog = os.path.join(self.ws_dir, "babysit.report"), os.path.join(self.ws_dir, "build.log")
         here.write(report, "")
         plan = ["build %s" % cfg.name] + ["fix %d of %d, build again" % (i, most) for i in range(1, most + 1)]
@@ -353,7 +354,7 @@ class Build:
         if busy:
             act.barrier("'%s' already has a job running in it: %s\n    Two builds in one checkout corrupt both, and this one would be the second.\n"
                         "    See what it is:  wk logs %s --all" % (name, busy, name))
-        store = self.env.get("WK_STORE") or self.env.get("HOME", "")
+        store = self.reg.store.admission_dir()
         budget.disk_admit("this build", self.cfg.disk_gb, budget.free_gb(store), "%s's filesystem" % store)
         if self.target.kind == "vm":   # the guest's disk, and the host image it grows, both fill
             free = parse_df(self.target.exec(name, ["df", "-Pk", self.target.src(name)]).out)
@@ -367,7 +368,7 @@ class Build:
             tenv["WK_MEM_BUDGET_MB"] = o["mem_budget"]
         if o.get("mem_floor"):
             tenv["WK_MEM_FLOOR_MB"] = o["mem_floor"]
-        defaults = "" if o.get("no_defaults") else tenv.get("WK_BUILD_ARGS", "")
+        defaults = "" if o.get("no_defaults") else buildconf.build_args(tenv)
         return tenv, defaults, buildconf.build_env(
             self.cfg, self.target.src(self.name), jobs, nice, self.target.arch(self.name), self.target.ccache_dir(self.name),
             tenv, " ".join(o.get("cmake", [])), o.get("env", []), defaults)
@@ -399,8 +400,8 @@ class Build:
         if o.get("branch"):
             log("  branch:    %s (would be checked out first)" % o["branch"])
         log("  config:    %s (%s%s%s)" % (cfg.name, cfg.buildsys, " " + cfg.port if cfg.port else "", " " + cfg.args if cfg.args else ""))
-        if tenv.get("WK_TARGET_CMAKE"):
-            log("  machine:   %s (cmake, from %s's conf)" % (tenv["WK_TARGET_CMAKE"], t.name))
+        if buildconf.target_cmake(tenv):
+            log("  machine:   %s (cmake, from %s's conf)" % (buildconf.target_cmake(tenv), t.name))
         if defaults:
             log("  defaults:  %s (build_args, from %s's conf; --no-defaults skips it)" % (defaults, t.name))
         if o.get("cmake"):
@@ -453,16 +454,13 @@ class Build:
             step[0] += 1
             if task is not None:
                 task.step(step[0])
-                t.task_put(name, task)
 
         def end(word):
             if task is not None:
                 task.end(word)
-                t.task_put(name, task)
 
         if task is not None:
             task.set("config", cfg.name)
-            t.task_put(name, task)
         watcher = None
         with job.Signals():
             try:
@@ -479,14 +477,14 @@ class Build:
                 log("  log: %s" % path)
                 log("  stop: %s" % self.kill)
                 log("  stall warning after %ss of silence; abort after %ss"
-                    % (self.env.get("WK_STALL_SECONDS") or 300, self.env.get("WK_ABORT_SECONDS") or job.ABORT_SECONDS))
+                    % (record.watchdog_stall(self.env), record.watchdog_abort(self.env, job.ABORT_SECONDS)))
                 if not dry:
                     line = self.far_line(cfg_env, bit, passthru)
                     if line is not None:
                         log("running:   %s" % line)
                 budget.record("wk build %s (%s)" % (name, cfg.name), jobs, budget_mb, "pid:%d" % os.getpid())
                 if task is not None:
-                    watcher = job.PidWatch(t, name, task, path, "build", PID_MATCH, int(self.env.get("WK_JOB_PID_TRIES") or 900))
+                    watcher = job.PidWatch(t, name, task, path, "build", PID_MATCH, job.pid_tries(self.env))
                     watcher.start()
                 argv, cwd = t.build_argv(name, stage.in_workspace(t.tools(name), "build", ["env"] + cfg_env + [bit] + passthru))
                 rc = job.watch(argv, path, here, self.clock, self.env, cwd, self.popen)
@@ -512,7 +510,6 @@ class Build:
         warn("interrupted -- stopping the build in '%s'" % self.name)
         if not job.kill(self.target, self.name, task, "cancelled", self.here, self.clock, self.env):
             warn("it is still running; stop it with:  %s" % self.kill)
-        self.target.task_put(self.name, task)
 
     def verdict(self, rc, path, start, end, task):
         name, cfg = self.name, self.cfg

@@ -650,7 +650,7 @@ class TestChannel(unittest.TestCase):
         via = Fake("here")
         via.answer(["hostname", "-s"], out="moose\n")
         argv = Channel(self.CONF, {}, via=via).exec_argv("cat > /tmp/wk-ab.patch")
-        self.assertEqual((argv[0], argv[-2:]), ("ssh", ["tolken", "cat > /tmp/wk-ab.patch"]))
+        self.assertEqual((argv[0], argv[-2:]), ("ssh", ["tolken", "\"$SHELL\" -lc 'cat > /tmp/wk-ab.patch'"]))
         self.assertIn("BatchMode=yes", argv)
 
     def test_no_channel_is_no_call(self):

@@ -13,6 +13,27 @@ from wk.machine import Local, replace_file
 # The axes a report groups variance by, filled in for every subfield a writer left alone, so an older record and an uncontrolled one read alike.
 DEFAULT_CONFIGURATION = {"aslr": "unset", "path_len": 0, "shared_cache": None, "env_pad_bytes": 0}
 
+UNKNOWN = None
+UNMEASURED = "unmeasured "
+
+
+def failed(rows, at=0):
+    return [r for r in rows if r[at] is False]
+
+
+def unmeasured(rows, at=0):
+    return [r for r in rows if r[at] is UNKNOWN]
+
+
+def not_measured(n):
+    return " (%d not measured)" % n if n else ""
+
+
+def preflight_notes(rows, notes):
+    clean = lambda d: d.replace('"', "").replace("\\", "")
+    return ("".join("%s: %s; " % (w, clean(d)) for _, w, d in failed(rows))
+            + "".join("%s%s: %s; " % (UNMEASURED, w, clean(d)) for _, w, d in unmeasured(rows)) + "".join(n + "; " for n in notes))
+
 
 def load(path):
     """{} where the file is absent -- an older run, or one still writing it; anything else (corrupt JSON, a permission error) raises, so it is not misreported as merely missing."""

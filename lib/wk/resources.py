@@ -32,7 +32,7 @@ class Resources:
 
     # Written by provisioning at the store's default path, before any wk command can derive $WK_STORE.
     def headless_marker(self):
-        return os.path.join(self.env.get("WK_STORE") or "/var/lib/wk", ".headless")
+        return os.path.join(Store(self.env).provisioned_root(), ".headless")
 
     def workspace_marker(self):
         return workspace_marker_path(self.env)
@@ -55,7 +55,7 @@ class Resources:
         return self._setting("WK_RESERVE_MB", RESERVE_MB)
 
     def mb_per_job(self):
-        return self._setting("WK_MB_PER_JOB", MB_PER_JOB)
+        return mb_per_job_setting(self.env)
 
     def _reading(self, value, what):
         value = value.strip()
@@ -121,10 +121,16 @@ class Resources:
                 return "%s P + %d E" % (p, e)
         return "%d cores" % self.host_cores()
 
+    def avail_override(self):
+        return self._setting("WK_AVAIL_MB", None)
+
+    def max_jobs(self):
+        return self._setting("WK_MAX_JOBS", None) or None
+
     def avail_mem_mb(self, cgroup_mb=None):
         """What a build here may take: free memory under any cgroup limit, since MemAvailable inside a container is the whole machine's."""
-        if self.env.get("WK_AVAIL_MB"):
-            return int(self.env["WK_AVAIL_MB"])
+        if self.avail_override() is not None:
+            return self.avail_override()
         if self.os_name == "linux":
             avail = self._reading(self._meminfo("MemAvailable"), "free memory (/proc/meminfo MemAvailable)") // 1024
         else:
@@ -231,7 +237,10 @@ class Budget:
         return parse_df(self.machine.run(["df", "-Pk", path]).out)
 
     def disk_admit(self, what, need, free, where):
-        if free is None or free >= need:
+        if free is None:
+            act.warn("cannot tell how much is free on %s; %s wants about %d GB, so this is not checked." % (where, what, need))
+            return
+        if free >= need:
             return
         act.barrier("%d GB free on %s; %s wants about %d GB.\n    It would halt part-built rather than fill the disk. 'wk gc' reclaims what\n"
                     "    nothing references, 'wk gc --purge-builds' the build trees images come out\n    of, and 'wk disk' says where the rest went."
@@ -249,6 +258,10 @@ class Budget:
                     % (self.machine_label(), rows, what, jobs), retry=True)
 
 
+def mb_per_job_setting(env, default=MB_PER_JOB):
+    return int(env.get("WK_MB_PER_JOB") or default)
+
+
 def parse_df(out):
     lines = out.replace("\r", "").splitlines()
     fields = lines[1].split() if len(lines) > 1 else []
@@ -257,7 +270,7 @@ def parse_df(out):
 
 def build_jobs(res, budget, running):
     """From the memory not already spoken for, since a link out of RAM hangs a machine; clamped by cores."""
-    return budget.jobs(res.cores(), res.avail_mem_mb(), res.mb_per_job(), None, res._setting("WK_MAX_JOBS", None), running)
+    return budget.jobs(res.cores(), res.avail_mem_mb(), res.mb_per_job(), None, res.max_jobs(), running)
 
 
 def defaults():

@@ -21,10 +21,13 @@ def alias_path(env):
 
 
 def _without(text, name):
+    """`text` with the block BLOCK wrote for `name` taken out, the blank line it opens with included."""
     kept, skip = [], False
     for line in text.splitlines():
         if line == "Host wk-" + name:
             skip = True
+            if kept and kept[-1] == "":
+                kept.pop()
             continue
         if line.startswith("Host "):
             skip = False

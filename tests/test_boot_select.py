@@ -90,7 +90,7 @@ class TestMediumRead(unittest.TestCase):
         d = PiTryboot(REPO, dict(CONF, role="bench-device"), ch)
         self.assertEqual(d.medium_read("/dev/mmcblk0p1", "wk-image.id"), "id-1\n")
         self.assertEqual(ch.calls[0][:2], ("r_sudo", "medium-read.sh"))
-        self.assertEqual(ch.calls[0][2], {"WK_PART": "/dev/mmcblk0p1", "WK_NAME": "wk-image.id"})
+        self.assertEqual(ch.calls[0][2], {"WK_PART": "/dev/mmcblk0p1", "WK_FILE": "wk-image.id"})
 
     def test_a_workstation_goes_through_the_card_helper_by_partition_number(self):
         ch = Channel()

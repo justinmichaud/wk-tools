@@ -70,7 +70,7 @@ class Channel:
                 self._here = wkrecord.host_name(self.via) == dest.lower()
             if self._here:
                 return self.via
-        return Ssh(dest, timeout=int(self.env.get("WK_SSH_TIMEOUT") or 10), via=self.via)
+        return Ssh(dest, timeout=reach.ssh_timeout(self.env), via=self.via)
 
     def call(self, fn, *args, input=None, mutates=False):
         if fn == "r_ssh":

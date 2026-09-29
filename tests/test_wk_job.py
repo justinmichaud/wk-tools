@@ -7,6 +7,7 @@ Run: python3 tests/run.py -k tests.test_wk_job
 import contextlib
 import io
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,7 +26,7 @@ from wk.machine import Fake, Result  # noqa: E402
 class Scratch(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-job-"))
-        self.addCleanup(record._rmtree, self.tmp)
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         self.clock = FakeClock()
         self.fake = Fake()
 
@@ -166,6 +167,14 @@ class TestTheLockedRun(Scratch):
         self.assertEqual(7, cp.returncode, cp.stderr)
         self.assertIn("demo@", cp.stdout)
         self.assertEqual([], os.listdir(self.tmp / "wk" / "locks"))
+
+
+
+class TestJobSettings(unittest.TestCase):
+    def test_the_kill_wait_and_pid_tries_come_from_the_env_else_the_default(self):
+        self.assertEqual((job.kill_wait({}), job.kill_wait({}, 120), job.pid_tries({})), (15, 120, 900))
+        env = {"WK_KILL_WAIT": "2", "WK_JOB_PID_TRIES": "0"}
+        self.assertEqual((job.kill_wait(env, 120), job.pid_tries(env)), (2, 0))
 
 
 if __name__ == "__main__":

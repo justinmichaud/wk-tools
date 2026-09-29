@@ -20,13 +20,21 @@ def _colour(code):
         return ""
 
 
+def quiet(env=None):
+    return bool((os.environ if env is None else env).get("WK_QUIET"))
+
+
+def forced(env=None):
+    return (os.environ if env is None else env).get("WK_FORCE") or ""
+
+
 def log(msg):
-    if not os.environ.get("WK_QUIET"):
+    if not quiet():
         sys.stderr.write(msg + "\n")
 
 
 def info(msg):
-    if not os.environ.get("WK_QUIET"):
+    if not quiet():
         sys.stderr.write("%s==>%s %s\n" % (_colour("\033[32m"), _colour("\033[0m"), msg))
 
 
@@ -101,11 +109,16 @@ def asked():
     return bool(os.environ.get("WK_CONFIRMED"))
 
 
+def destructive():
+    """Whether the dispatcher declared this command destructive: nothing may act before it asked."""
+    return bool(os.environ.get("WK_DESTRUCTIVE"))
+
+
 def act(argv, **kw):
     if dry_run():
         sys.stderr.write("would run: %s\n" % shlex.join(argv))
         return None
-    if os.environ.get("WK_DESTRUCTIVE") and not asked():
+    if destructive() and not asked():
         die("BUG: this command is declared destructive and acted before asking:\n    %s"
             % shlex.join(argv))
     debug("run: %s" % shlex.join(argv))
@@ -116,7 +129,7 @@ _forced = []
 
 
 def barrier(message, retry=False):
-    if not os.environ.get("WK_FORCE"):
+    if not forced():
         err("%s\n    --force proceeds anyway, with a warning." % message)
         raise Refused(RETRY_EXIT if retry else 1)
     warn("FORCED past a barrier: %s" % message)

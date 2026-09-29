@@ -514,5 +514,17 @@ class TestTheLiveDesktop(unittest.TestCase):
         self.assertEqual("off", d.v("screenlock"))
 
 
+
+class TestGuestSizeOverrides(unittest.TestCase):
+    def test_the_swap_threshold_is_the_documented_override(self):
+        f = load_findings(_load_sample(), {"WK_VM_SWAP_WARN_MB": "100000"})
+        self.assertFalse([x for x in f if "swap" in x[1]], f)
+        self.assertTrue([x for x in load_findings(_load_sample()) if "swap" in x[1]])
+
+    def test_the_guest_disk_is_the_override_else_the_base_size(self):
+        self.assertEqual(guest.vm_disk_gb({}), guest.DISK_GB)
+        self.assertEqual(guest.vm_disk_gb({"WK_VM_DISK_GB": "100"}), 100)
+
+
 if __name__ == "__main__":
     unittest.main()

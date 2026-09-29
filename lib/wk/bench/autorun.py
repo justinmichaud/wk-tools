@@ -17,6 +17,7 @@ if __name__ == "__main__":
 
 from wk import act, screen  # noqa: E402
 from wk.bench.mac import AGENT, CHECK, MARKER, WKMAC  # noqa: E402
+from wk.bench.pipeline import VARIANCE  # noqa: E402
 from wk.boot.mac import BENCH_ROOT  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.kv import kv  # noqa: E402
@@ -34,8 +35,10 @@ UPDATERS = ("system/com.apple.softwareupdated", "system/com.apple.mobile.softwar
 WATCH_POLL, STALL_GRACE = 60, 900
 TEMP_TRIES, TEMP_POLL = 12, 5
 DEFAULTS = {"rounds": 5, "max_rounds": 40, "detect_pct": "0.3", "timeout": 1800, "count": 2, "n_arms": 2, "settle": 90}
-VARIANCE = (("aslr", "WK_BENCH_ASLR"), ("env_pad", "WK_BENCH_ENV_PAD"), ("path_pad", "WK_BENCH_PATH_PAD"),
-            ("shared_cache", "WK_BENCH_SHARED_CACHE"))
+
+
+def ab_root(env):
+    return env.get("WK_AB_ROOT") or BENCH_ROOT
 
 
 class Stop(Exception):
@@ -54,7 +57,7 @@ class Autorun:
     def __init__(self, m, clock, env, tools=TREE, out=None, thread=threading.Thread):
         self.m, self.clock, self.env, self.tools = m, clock, env, tools
         self.out, self.thread = out or sys.stdout, thread
-        self.root = env.get("WK_AB_ROOT") or BENCH_ROOT
+        self.root = ab_root(env)
         self.job_path, self.state_path = self.root + "/job.json", self.root + "/autorun.state"
         self.log_path = self.root + "/autorun.log"
         self.agent = os.path.join(env.get("HOME", ""), "Library/LaunchAgents", AGENT + ".plist")
@@ -645,7 +648,7 @@ def main(argv):
         return 2
     os.environ["PATH"] = PATH
     m = Local()
-    root = os.environ.get("WK_AB_ROOT") or BENCH_ROOT
+    root = ab_root(os.environ)
     m.mkdir(root)
     if not act.dry_run():
         fd = os.open(root + "/autorun.log", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)

@@ -26,7 +26,7 @@ from tests.killpoints import TestConverges  # noqa: E402,F401  discovery reads t
 
 INTERFACE = ("run", "run_tty", "read", "exists", "isdir", "listdir", "alive", "act_run",
              "write", "remove", "mkdir", "kill", "spawn",
-             "readlink", "symlink", "rename", "remove_now", "mkdir_now",
+             "readlink", "mtime", "read_bytes", "symlink", "rename", "remove_now", "mkdir_now",
              "copy_in", "copy_out", "copy_tree_in", "copy_tree_out")
 
 
@@ -147,7 +147,37 @@ class CopyConformance:
         self.assertFalse(self.m.exists(dest))
 
 
-class TestLocal(MachineTest, LockEffectsConformance, CopyConformance):
+class LogReadConformance:
+    """mtime/read_bytes, over the `self.m`, `self.path` and `self.put(path, data, mtime)` a subclass gives: how a
+    task's log is read on the machine that holds it."""
+
+    def test_read_bytes_is_the_slice_from_start(self):
+        p = self.path("log")
+        self.put(p, b"0123456789", 1000)
+        self.assertEqual(self.m.read_bytes(p), b"0123456789")
+        self.assertEqual(self.m.read_bytes(p, 4), b"456789")
+        self.assertEqual(self.m.read_bytes(p, -3), b"789")
+        self.assertEqual(self.m.read_bytes(p, -64), b"0123456789")
+        self.assertEqual(self.m.read_bytes(p, 10), b"")
+
+    def test_read_bytes_carries_bytes_a_cut_splits(self):
+        p = self.path("log")
+        self.put(p, "a\u00e9b".encode(), 1000)
+        self.assertEqual(self.m.read_bytes(p, 2), b"\xa9b")
+
+    def test_mtime_is_the_files(self):
+        p = self.path("log")
+        self.put(p, b"x", 1234567890)
+        self.assertEqual(int(self.m.mtime(p)), 1234567890)
+
+    def test_an_absent_file_raises(self):
+        with self.assertRaises(OSError):
+            self.m.mtime(self.path("nope"))
+        with self.assertRaises(OSError):
+            self.m.read_bytes(self.path("nope"), -10)
+
+
+class TestLocal(MachineTest, LockEffectsConformance, CopyConformance, LogReadConformance):
     def setUp(self):
         super().setUp()
         self.tmp = tempfile.mkdtemp(prefix="wk-test-machine-")
@@ -161,6 +191,10 @@ class TestLocal(MachineTest, LockEffectsConformance, CopyConformance):
 
     def path(self, *parts):
         return os.path.join(self.tmp, *parts)
+
+    def put(self, path, data, mtime):
+        Path(path).write_bytes(data)
+        os.utime(path, (mtime, mtime))
 
     def test_run_captures_status_and_both_streams(self):
         r = self.m.run(["sh", "-c", "echo out; echo err >&2; exit 3"])
@@ -275,7 +309,7 @@ class TestLocal(MachineTest, LockEffectsConformance, CopyConformance):
         self.assertEqual((r.rc, r.out, r.err), (0, "", ""), "the output was held until the command ended")
 
 
-class TestFake(MachineTest, LockEffectsConformance, CopyConformance):
+class TestFake(MachineTest, LockEffectsConformance, CopyConformance, LogReadConformance):
     def setUp(self):
         super().setUp()
         self.m = machine.Fake("box")
@@ -284,6 +318,10 @@ class TestFake(MachineTest, LockEffectsConformance, CopyConformance):
 
     def path(self, *parts):
         return "/" + "/".join(parts)
+
+    def put(self, path, data, mtime):
+        self.m.files[path] = data
+        self.m.mtimes[path] = mtime
 
     def test_the_longest_registered_prefix_answers(self):
         self.m.answer(["podman"], rc=1, err="generic")
@@ -410,6 +448,23 @@ class TestReplaceFile(unittest.TestCase):
         self.assertEqual((os.stat(p).st_mode & 0o777, Path(p).read_text()), (0o600, "b"))
 
 
+class TestSshLogReads(MachineTest, LogReadConformance):
+    """The far-side commands, run by this host's own sh: what the login shell on the far side is handed."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.mkdtemp(prefix="wk-test-machine-ssh-")
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", self.tmp]))
+        via = machine.Fake("here")
+        via.react(["ssh"], lambda argv, fake: machine.Local().run(["sh", "-c", argv[-1]]))
+        self.m = machine.Ssh("box.example", via=via)
+
+    def path(self, *parts):
+        return os.path.join(self.tmp, *parts)
+
+    put = TestLocal.put
+
+
 class TestSsh(MachineTest):
     def test_every_call_is_one_bounded_non_interactive_ssh(self):
         m = machine.Ssh("box.example", timeout=3)
@@ -428,9 +483,9 @@ class TestSsh(MachineTest):
             self.assertIn("BatchMode=yes", argv)
             self.assertIn("ConnectTimeout=3", argv)
             self.assertEqual(argv[-2], "box.example")
-        self.assertEqual(seen[0][-1], "ls -1 '/tmp/a b'")
-        self.assertIn("kill -0 42", seen[2][-1])
-        self.assertIn("nohup sleep 9 > /tmp/log", seen[3][-1])
+        self.assertEqual(shlex.split(seen[0][-1]), ["$SHELL", "-lc", "ls -1 '/tmp/a b'"])
+        self.assertIn("kill -0 42", shlex.split(seen[2][-1])[-1])
+        self.assertIn("nohup sleep 9 > /tmp/log", shlex.split(seen[3][-1])[-1])
 
     def test_an_effect_over_ssh_is_an_effect_on_the_machine_that_drives_it(self):
         """`unit machine.ssh_effects_are_effects`: a kill point on `via` lands inside a remote flow, and never on a read."""
@@ -468,7 +523,7 @@ class TestSsh(MachineTest):
         self.assertEqual(seen[0][0], "ssh")
         self.assertIn("-t", seen[0])
         self.assertEqual(seen[0][-2], "box.example")
-        self.assertEqual(seen[0][-1], "cd /src/WebKit && lldb -o attach")
+        self.assertEqual(shlex.split(seen[0][-1]), ["$SHELL", "-lc", "cd /src/WebKit && lldb -o attach"])
 
     def test_the_lock_effects_are_one_command_each_and_readlink_answers(self):
         m = machine.Ssh("box.example", timeout=3)
@@ -476,7 +531,7 @@ class TestSsh(MachineTest):
 
         def fake_run(self_, argv, input=None, timeout=None):
             seen.append(argv[-1])
-            if argv[-1].startswith("readlink"):
+            if shlex.split(argv[-1])[-1].startswith("readlink"):
                 return machine.Result(0, "target\n")
             return machine.Result(0)
         with mock.patch.object(machine.Local, "run", fake_run):
@@ -485,7 +540,7 @@ class TestSsh(MachineTest):
             self.assertTrue(m.rename("/locks/r.lock.new", "/locks/r.lock"))
             m.remove_now("/locks/r.lock")
             m.mkdir_now("/locks")
-        self.assertEqual(seen, ["ln -s target /locks/r.lock", "readlink /locks/r.lock",
+        self.assertEqual([shlex.split(c)[-1] for c in seen], ["ln -s target /locks/r.lock", "readlink /locks/r.lock",
                                  "mv -f /locks/r.lock.new /locks/r.lock", "rm -rf /locks/r.lock", "mkdir -p /locks"])
 
     def test_copy_in_and_out_are_scp_naming_the_destination(self):

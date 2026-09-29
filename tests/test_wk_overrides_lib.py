@@ -71,9 +71,6 @@ class TestSharedTimingDefaultsAgree(unittest.TestCase):
     def test_stall_and_heartbeat_seconds_have_one_default(self):
         self.assertEqual(_readers("WK_STALL_SECONDS:-"), [])
         self.assertEqual(_readers("WK_HEARTBEAT_SECONDS:-"), [])
-        job = _src("lib", "wk", "job.py")
-        self.assertEqual(2, job.count('"WK_STALL_SECONDS", 300'))
-        self.assertEqual(2, job.count('"WK_HEARTBEAT_SECONDS", 300'))
 
 
 class TestSshTimeoutReadInOnePlace(unittest.TestCase):

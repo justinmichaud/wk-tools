@@ -32,6 +32,10 @@ def default_mode(env, isatty):
     return "web"
 
 
+def web_defaults(env):
+    return env.get("WK_STATUS_PORT") or "0", env.get("WK_STATUS_INTERVAL") or "20"
+
+
 def colour_wanted(stdout=None, env=None):
     stdout = sys.stdout if stdout is None else stdout
     env = os.environ if env is None else env
@@ -154,7 +158,7 @@ def merge(records):
 GOOD = ("ok", "present", "running", "host mode", "up", "bench", "open", "complete")
 BUSY = ("creating", "starting", "building", "fixing", "no", "empty", "held", "silent", "base", "role")
 BAD = ("unhealthy", "incomplete", "died", "unanswered", "failed", "oom", "stalled", "broken",
-       "unreachable", "gave-up", "error", "closed", "disagree", "desync")
+       "unreachable", "gave-up", "error", "closed", "disagree", "desync", "unreadable")
 IDLE = ("absent", "none", "stopped", "exited", "-", "clean", "finished", "off", "cancelled")
 
 
@@ -477,7 +481,7 @@ def render_machine_block(m, colour):
 def render_fleet_and_bridges(doc, colour):
     wr = Writer(colour)
     out = wr.out
-    # The self machine's row already led the whole document (self_line); the board table is for the
+    # The self machine's row already led the whole document (self_line_text); the board table is for the
     # other devices wk owns, not a second look at the one just named.
     fleet = [f for f in doc["fleet"] if f.get("machine") != self_machine_name(doc)]
 
@@ -563,16 +567,6 @@ def self_machine_name(doc):
 
 def self_line_text(machine, role, mode, colour):
     return "%s -- %s, %s" % (machine, paint(role, "dim", colour), paint(mode, severity(mode), colour))
-
-
-def self_line(doc, colour):
-    """The self machine's own fleet record (status.self_fleet_record): role and mode, the line every
-    session starts with, ahead of any machine block or probe."""
-    name = self_machine_name(doc)
-    f = next((f for f in doc.get("fleet", []) if f.get("machine") == name), None) if name else None
-    if not f:
-        return None
-    return self_line_text(name, f.get("role", "?"), f.get("mode", "?"), colour)
 
 
 def render_text_stream(records, out, colour):

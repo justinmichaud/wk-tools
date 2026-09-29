@@ -317,7 +317,7 @@ class TestStatus(PushTest):
 
 
 class TestAMachineWithNoSwitch(PushTest):
-    """A build box names no agent socket and its core.sshCommand names the private half: the key is live."""
+    """A build box names no agent socket and holds no key at rest: one found there is live."""
 
     def setUp(self):
         super().setUp()
@@ -327,10 +327,7 @@ class TestAMachineWithNoSwitch(PushTest):
         self.w.seed()
         rc, out, err = self.push("status")
         self.assertEqual(0, rc)
-        self.assertIn("always live", out)
         self.assertNotIn("held back (", out.split("api")[0])
-        self.assertIn("no ssh-agent socket", err)
-        self.assertIn("cannot be switched off", err)
 
     def test_on_and_off_refuse_with_5_and_touch_nothing(self):
         self.w.seed()
@@ -338,7 +335,6 @@ class TestAMachineWithNoSwitch(PushTest):
             with self.subTest(action=action):
                 rc, _, err = self.push(action)
                 self.assertEqual(5, rc)
-                self.assertIn("docs/PLAN.md", err)
                 self.assertEqual([], self.w.acts())
 
 

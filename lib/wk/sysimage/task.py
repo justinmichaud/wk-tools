@@ -10,10 +10,10 @@ import sys
 from wk import act, build, decl, images, job
 from wk.machine import isolated_module
 from wk.act import Refused, die, info, log, warn
-from wk.buildconf import DISK_GB
+from wk.buildconf import disk_gb
 from wk.lock import Lock
 from wk.resources import Budget, Resources, build_jobs
-from wk.store import Store
+from wk.store import Store, dispatch_target
 from wk.sysimage.ls import human_bytes
 
 MB_PER_JOB = 2048   # a WPE compile runs about 2 GB a job
@@ -166,8 +166,8 @@ class Stage:
         lock.hold("ws-" + self.ws, timeout=0)
         try:
             self.refuse_busy()
-            store = self.env.get("WK_STORE") or self.env.get("HOME", "")
-            need = int(self.env.get("WK_BUILD_DISK_GB") or DISK_GB) if need_gb is None else need_gb
+            store = self.reg.store.admission_dir()
+            need = disk_gb(self.env) if need_gb is None else need_gb
             budget.disk_admit(what or "the %s build" % self.stage, need, budget.free_gb(store),
                               "%s's filesystem" % store)
             budget.admit("the %s build" % self.stage, jobs, running)
@@ -181,18 +181,13 @@ class Stage:
         self.here.write(self.log, "")
         t = self.recs.begin(self.kind, "here", self.ws, self.kill, self.log, plan)
         t.set("stage", self.stage)
-        self.target.task_put(self.ws, t)
         return t
-
-    def step(self, task, n):
-        task.step(n)
-        self.target.task_put(self.ws, task)
 
     def run(self, task, budget, jobs, argv, pattern, mb=None):
         budget.record("wk sysimage %s %s" % (self.stage, self.ws), jobs, jobs * MB_PER_JOB if mb is None else mb, "pid:%d" % os.getpid())
         log("  log: %s" % self.log)
         log("  stop: %s" % self.kill)
-        watcher = job.PidWatch(self.target, self.ws, task, self.log, self.label, pattern, int(self.env.get("WK_JOB_PID_TRIES") or 900))
+        watcher = job.PidWatch(self.target, self.ws, task, self.log, self.label, pattern, job.pid_tries(self.env))
         watcher.start()
         try:
             cmd, cwd = self.target.build_argv(self.ws, in_workspace(self.target.tools(self.ws), self.label, argv))
@@ -202,7 +197,6 @@ class Stage:
             warn("interrupted -- stopping the %s build in '%s'" % (self.stage, self.ws))
             if not job.kill(self.target, self.ws, task, "cancelled", self.here, self.clock, self.env):
                 warn("it is still running; stop it with:  %s" % self.kill)
-            self.target.task_put(self.ws, task)
             raise Refused(job.EXIT_OF.get(e.signum, 130))
         finally:
             watcher.stop()
@@ -214,23 +208,18 @@ class Stage:
                 text = f.read()
         except OSError:
             text = ""
-
-        def end(word):
-            task.end(word)
-            self.target.task_put(self.ws, task)
-
         if "stage '%s' done" % self.stage in text:
-            end(0)
+            task.end(0)
             return 0
         if task.field("stopping"):
-            end(rc or 1)
+            task.end(rc or 1)
             warn("the %s build in '%s' was stopped (by '%s')" % (self.stage, self.ws, self.kill))
             raise Refused(rc or 1)
         if rc == 124:
-            end("stalled")
+            task.end("stalled")
             die("the %s build in '%s' stalled: its watchdog killed it, and says why above.\n    log: %s"
                 % (self.stage, self.ws, self.log))
-        end(rc or 1)
+        task.end(rc or 1)
         tail = [l for l in text.replace("\r", "\n").split("\n") if l][-TAIL_LINES:]
         die("the %s build in '%s' failed%s. Last lines:\n%s\n    log: %s"
             % (self.stage, self.ws, "" if rc else " (it exited 0 and never said it was done)",
@@ -257,7 +246,7 @@ class ContainerBuilder:
 
     def target(self):
         try:
-            t = self.reg.load(self.env.get("WK_TARGET") or self.reg.default())
+            t = self.reg.load(dispatch_target(self.env) or self.reg.default())
         except LookupError as e:
             die(str(e))
         if t.kind != "container":

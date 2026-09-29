@@ -631,7 +631,7 @@ class Write:
 
     def seed_tailnet(self, dev, name):
         """Onto the card just written, never baked into the image: wk-tailnet-join deletes it once spent."""
-        tag = self.env.get("WK_TAILNET_TAG") or "tag:wk"
+        tag = tailnet.fleet_tag(self.env)
         if self.step("seed the tailnet identity on %s (it would join as '%s', %s)" % (dev, name, tag)):
             return
         if not self.joins(dev, "joins", "joins the tailnet", "tailnet-join: yes", "tailnet-join: no"):
@@ -727,8 +727,7 @@ class Write:
         rep = self.stream(dev, reader, filt)
         if not act.dry_run() and int(rep.get("stream_bytes") or 0) <= 0:
             act.die("%s read as 0 bytes through: %s" % (src, shlex.join(reader)))
-        if not self.env.get("WK_NO_VERIFY"):
-            self.verify(dev, rep)
+        self.verify(dev, rep)
         self.parts_present(dev)
         if kept:
             self.simple("put the kept tailnet identity back on %s's partition 4" % dev, "tailnet-restore", dev,
@@ -844,7 +843,7 @@ class Write:
 
     def driving_key(self):
         """Tailscale SSH needs no key at all, so a working session is not evidence of the right one."""
-        path = self.env.get("WK_IMAGE_KEY") or os.path.join(os.path.expanduser("~"), ".ssh", "id_ed25519.pub")
+        path = images.driving_key_path(self.env)
         try:
             return self.machine.read(path)
         except OSError:

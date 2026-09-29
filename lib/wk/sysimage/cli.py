@@ -116,7 +116,7 @@ class Sysimage:
 
     def ls(self, continued):
         here = record.machine_name(self.env)
-        rows = lsmod.Listing(self.reg, self.env.get("WK_ROW_LABEL", ""), here, self.building, clock=self.clock).rows()
+        rows = lsmod.Listing(self.reg, record.row_label(self.env), here, self.building, clock=self.clock).rows()
         if rows:
             if not continued:
                 print(lsmod.ROW % lsmod.HEADER)

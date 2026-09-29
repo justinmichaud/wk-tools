@@ -246,8 +246,6 @@ class TestTheRecordCarriesTheDeadlineTheWatchdogIsArmedWith(WkTest):
         records = record.Records(self.tmp / "s", env={"WK_ABORT_SECONDS": "77"})
         t = records.begin("build", "here", "ws", "k", "/l", ["one"])
         self.assertEqual("77", t.field("abort_after"))
-        self.assertIn('_seconds(env, "WK_ABORT_SECONDS", ABORT_SECONDS)',
-                      (REPO / "lib" / "wk" / "job.py").read_text())
 
 
 class TestATestRunKeepsTheSameRecordAsABuild(_FakeWalk):

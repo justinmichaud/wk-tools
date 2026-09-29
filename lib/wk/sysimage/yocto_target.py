@@ -16,6 +16,7 @@ if __name__ == "__main__":
 from wk import slot  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import here, isolated_module  # noqa: E402
+from wk.store import Store  # noqa: E402
 
 TOOLS = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 STAGES = ("layers", "fetch", "image", "toolchain", "webkit", "pgo-mix")
@@ -211,7 +212,7 @@ class Build:
 
     def checkout_slot_commit(self):
         """Forced and cleaned: a killed webkit stage leaves the checkout mid-checkout. `-fd`, never `-fdx`: WebKitBuild holds the image workspace's slots."""
-        c, mirror = self.a.commit, self.env.get("WK_MIRROR")
+        c, mirror = self.a.commit, Store(self.env).container_mirror()
         if not mirror:
             fail("WK_MIRROR names the mirror this container mounts (lib/wk/targets.py's Container), and it is not set")
         if not self.m.run(["git", "-C", self.src, "cat-file", "-e", c + "^{commit}"]).ok \

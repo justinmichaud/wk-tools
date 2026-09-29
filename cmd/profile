@@ -62,8 +62,10 @@ import shlex
 import sys
 import time
 
-ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import images, store  # noqa: E402
+
+ROOT = images.root()
 
 from wk import buildconf, decl, targets  # noqa: E402
 from wk.act import Refused, die, dry_run, info, log, warn  # noqa: E402
@@ -168,7 +170,7 @@ def browser_target(cfg, url, process, process_explicit, mode, args, outdir):
 
 
 def main(argv, reg=None):
-    name = os.environ.get("WK_NAME", "")
+    name = store.ws_name()
     o = parse(argv)
 
     if o.get("list"):
@@ -194,7 +196,7 @@ def main(argv, reg=None):
             "    at, and without --browser there is no MiniBrowser to name one of.")
     reg = reg or targets.Registry(ROOT)
 
-    config = os.environ.get("WK_CONFIG") or reg.default_config(name)
+    config = store.build_config() or reg.default_config(name)
     try:
         tname = reg.ws_target(name)
         target = reg.load(tname)

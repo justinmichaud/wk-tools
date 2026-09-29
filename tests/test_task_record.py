@@ -18,6 +18,7 @@ Run: python3 -m unittest tests.test_task_record -v
 """
 import io
 import os
+import shutil
 import sys
 import tempfile
 import types
@@ -85,7 +86,7 @@ class TestWhatTheRecordHolds(unittest.TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-task-record-"))
-        self.addCleanup(record._rmtree, self.tmp)
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         self.clock = FakeClock()
 
     def records(self):
@@ -94,7 +95,7 @@ class TestWhatTheRecordHolds(unittest.TestCase):
     def test_the_plan_is_declared_before_any_step_has_a_state(self):
         t = self.records().begin("build", "target", "ws1", "wk build ws1 --kill", "/l", ["a", "b", "c"])
         self.assertEqual(t.plan(), ["a", "b", "c"])
-        self.assertEqual(os.listdir(t.path / "steps"), [], "a step had a state before it ran")
+        self.assertEqual([], list((t.path / "steps").glob("*")), "a step had a state before it ran")
 
     def test_a_run_that_is_still_alive_is_not_superseded(self):
         """Superseding a live record would hide the run a guard reads it for:

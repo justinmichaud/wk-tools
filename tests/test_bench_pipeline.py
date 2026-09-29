@@ -596,7 +596,7 @@ class MacWorld(Fake):
     def run(self, argv, input=None, timeout=None):
         if argv[:1] == ["ssh"]:
             self.record_run(argv)
-            return self._ssh_answer(argv[-1])
+            return self._ssh_answer(shlex.split(argv[-1])[-1])
         if argv[:1] == ["scp"]:
             self.record_run(argv)
             return Result(0)

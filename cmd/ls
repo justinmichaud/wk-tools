@@ -25,10 +25,12 @@ import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import images  # noqa: E402
 
-from wk import decl, targets  # noqa: E402
+ROOT = images.root()
+
+from wk import decl, record, targets  # noqa: E402
 from wk.act import Refused, die, log  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.store import Bases  # noqa: E402
@@ -104,7 +106,7 @@ def main(argv):
     more_follows = args.flag("--more-follows")
     empty_so_far = args.flag("--empty-so-far")
     as_json = args.flag("--json")
-    label = os.environ.get("WK_ROW_LABEL", "")
+    label = record.row_label(os.environ)
     reg = targets.Registry(ROOT)
     if not continued and not as_json:
         print(FORMAT % ("NAME", "TARGET", "STATE", "BASE", "SNAP", "ARCH", "CHANGES"))

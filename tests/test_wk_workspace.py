@@ -107,7 +107,7 @@ class World(Fake):
     def remove(self, path):
         super().remove(path)
         if path.startswith(str(self.tmp / "store" / "task")) and not act.dry_run():
-            record._rmtree(path)
+            shutil.rmtree(path, True)
 
     def _podman_rm(self, argv, f):
         f.containers.discard(argv[-1])
@@ -484,11 +484,16 @@ class TestNewFrontDetach(WorkspaceTest):
         self.assertIn(1001, self.w.pids)
 
     def test_the_log_is_streamed_while_waiting(self):
-        log = self.w.target.create_log("ws")
-        os.makedirs(os.path.dirname(log))
-        Path(log).write_text("driver says hello\n")
-        self.ended(0)
-        _, err = self.stderr(lambda: self.front())
+        """The driver's log is read through the machine that spawned it into that log."""
+        class Says(World):
+            def spawn(self, argv, log):
+                pid = super().spawn(argv, log)
+                self.files[log] = "driver says hello\n"
+                return pid
+        w = Says(self.tmp)
+        t = w.begin(plan=list(workspace.PLAN), log=w.target.create_log("ws"))
+        t.end(0)
+        _, err = self.stderr(lambda: self.front(w))
         self.assertIn("driver says hello", err)
 
 

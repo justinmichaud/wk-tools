@@ -13,6 +13,7 @@ import contextlib
 import inspect
 import io
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -258,7 +259,7 @@ class EachKind(unittest.TestCase):
         runs = self.pushed()
         self.assertEqual([a[0] for a in runs], ["ssh", "scp", "ssh"])
         self.assertIn("box.example", runs[0])
-        self.assertTrue(runs[0][-1].endswith("sh /home/u/wk/tools"), runs[0][-1])
+        self.assertTrue(shlex.split(runs[0][-1])[-1].endswith("sh /home/u/wk/tools"), runs[0][-1])
         self.assertEqual(runs[1][-1], "box.example:/home/u/wk/tools/" + tools.BUNDLE)
 
     def test_a_peer_is_not_pushed_to_at_all(self):
@@ -369,6 +370,15 @@ class TestStatusToolsRow(unittest.TestCase):
         for writer in ("tools_push", "t_sync", "sync_tools", "rsync", "rev-parse HEAD --"):
             self.assertNotIn(writer, code, f"the status path runs {writer}")
         self.assertIn('wk("version"', code)
+
+
+
+class TestTheToolsSource(unittest.TestCase):
+    def test_a_container_mounts_this_checkout_unless_the_env_names_another(self):
+        c = targets.Container("container", str(REPO), {"HOME": "/nonexistent"}, Fake("here"))
+        self.assertEqual(c.tools_src(), str(REPO))
+        c = targets.Container("container", str(REPO), {"HOME": "/nonexistent", "WK_TOOLS_SRC": "/x"}, Fake("here"))
+        self.assertEqual(c.tools_src(), "/x")
 
 
 if __name__ == "__main__":

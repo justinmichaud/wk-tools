@@ -1058,6 +1058,10 @@ def checks(taskdir, doc, runs, arm_kind):
     if runs:
         out.append(("FAIL", "preflight", "%d of %d runs forced past failing checks: %s" % (len(forced), len(runs), forced[0]["env"].get("preflight_notes") or "?"))
                    if forced else ("ok", "preflight", "every run passed it"))
+        said = [(r["env"].get("preflight_notes", "") + " " + r["env"].get("profiler", "")).strip() for r in runs]
+        unread = [s for s in said if record.UNMEASURED in s]
+        if unread:
+            out.append(("unknown", "preflight", "%d of %d runs could not measure every check: %s" % (len(unread), len(runs), unread[0])))
     rehearsed = [r for r in runs if r["state"] == "rehearsal"]
     if rehearsed:
         out.append(("FAIL", "measured", "%d of %d runs are rehearsals, not measurements" % (len(rehearsed), len(runs))))

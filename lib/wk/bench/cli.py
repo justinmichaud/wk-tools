@@ -40,7 +40,7 @@ class Bench:
     def plans(self):
         """`--list` runs before any workspace exists to read a plan from, so it asks the mirror: one `git ls-tree`, no export."""
         mirror = self.reg.store.mirror()
-        ref = self.reg.env.get("WK_BENCH_RUNNER_REF") or "refs/heads/main"
+        ref = board.runner_ref(self.reg.env)
         if not self.machine.isdir(mirror) or not self.machine.run(
                 ["git", "-C", mirror, "rev-parse", "--verify", "--quiet", ref + "^{commit}"]).ok:
             print("no mirror at %s to read plans from; 'wk sync' fetches one, or read\n"
@@ -51,7 +51,7 @@ class Bench:
         return 0
 
     def listing(self, warn=act.warn):
-        label = self.reg.env.get("WK_ROW_LABEL") or wkrecord.machine_name(self.reg.env)
+        label = wkrecord.row_label(self.reg.env) or wkrecord.machine_name(self.reg.env)
         return record.Listing(self.reg, self.reg.store, self.lock_alive, label, warn)
 
     def ls(self, continued):

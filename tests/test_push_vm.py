@@ -101,7 +101,8 @@ s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); time.sleep(
         ;;
 esac
 cmd=$(printf '%s' "$last" | sed "s|/Users/admin|$WK_TEST_GUEST|g")
-HOME="$WK_TEST_GUEST" sh -c "$cmd"; rc=$?
+# sshd sets SHELL to the account's login shell, and the command runs under it as `-lc`.
+HOME="$WK_TEST_GUEST" SHELL=$(command -v bash) sh -c "$cmd"; rc=$?
 # A real ssh forwards local stdin to the far side until EOF whether or not
 # the remote command reads it, so a caller inside a `while read` loop that
 # forgets </dev/null loses the rest of its list. Behave the same.

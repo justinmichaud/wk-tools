@@ -190,7 +190,7 @@ class Tailnet:
         self.m.mkdir(part)
         self.run(["install", "-m", "0755", out + "/tailscaled", out + "/tailscale", part + "/"], "could not collect the daemon")
         self.run(["install", "-m", "0600", keyfile, part + "/authkey"], "could not collect the auth key")
-        self.m.write(part + "/tailnet.conf", "hostname=%s\ntag=%s\n" % (name, self.env.get("WK_TAILNET_TAG") or "tag:wk"))
+        self.m.write(part + "/tailnet.conf", "hostname=%s\ntag=%s\n" % (name, tailnet.fleet_tag(self.env)))
         self.m.write(part + "/%s.plist" % DAEMON_LABEL, daemon_plist())
         self.m.write(part + "/%s.plist" % JOIN_LABEL, join_plist())
         kept = self.remembered(name)

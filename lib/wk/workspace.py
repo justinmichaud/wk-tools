@@ -465,7 +465,7 @@ def confirm_destroy(count, lines):
 def unsaved_results(reg, found):
     """(workspace, task, why) for each bench task a removal would take that no export readable here holds."""
     from wk.bench import record as bench_record
-    if in_podman_machine() and reg.env.get("WK_HOST_SELF"):
+    if in_podman_machine() and record.host_self(reg.env):
         return []   # forwarded by a Mac, which read its own zips first (refuse_unsaved_before_forward)
     out = []
     for n, target, what in found:

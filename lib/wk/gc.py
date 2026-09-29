@@ -14,7 +14,7 @@ from wk.bench.board import SLOTS_DIR
 from wk.clock import Clock
 from wk.lock import Lock
 from wk.machine import Ssh
-from wk.store import Store, rubble as store_rubble
+from wk.store import Store, in_vm, rubble as store_rubble
 from wk.sysimage import guestbase, pmos, task
 
 
@@ -33,7 +33,7 @@ class Gc:
         self.store = Store(self.env)
         self.clock = clock or Clock()
         self.mac_host = self.store.macos_host
-        self.host_half = not self.env.get("WK_IN_VM")
+        self.host_half = not in_vm(self.env)
         self.store_half = not self.mac_host
         self._container = None
 

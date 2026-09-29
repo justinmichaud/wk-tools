@@ -20,8 +20,10 @@ import os
 import re
 import sys
 
-ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import images, store  # noqa: E402
+
+ROOT = images.root()
 
 from wk import decl, record, targets  # noqa: E402
 from wk.act import Refused, die, exec_into, log  # noqa: E402
@@ -58,7 +60,7 @@ def main(argv):
     tools = args.flag("--tools")
     url_only = args.flag("--url")
     route = args.flag("--route")
-    name = os.environ.get("WK_NAME", "")
+    name = store.ws_name()
     if args.positionals:
         name = args.positionals[-1]
 

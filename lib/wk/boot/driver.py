@@ -274,7 +274,7 @@ class Driver:
     def medium_read(self, p, name):
         """"" for a file the partition lacks, None when unreadable; a bench-device mounts its own medium."""
         if self.c("role") == "bench-device":
-            r = self.sudo("medium-read.sh", WK_PART=p, WK_NAME=name)
+            r = self.sudo("medium-read.sh", WK_PART=p, WK_FILE=name)
             return r.out if r.ok else None
         r = self.card("boot-read", disk_of(p), partno(p), name)
         if r.ok:

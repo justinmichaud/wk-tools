@@ -144,6 +144,7 @@ class FakeBoard(Channel):
     def run_onboard(self, name, p, input=None):
         sys_ = self.roots[self.running]
         sd = self.fat.setdefault(self.sd(), {})
+        do = p.get("WK_DO", "")
         if name == "probe.sh":
             ident = "id=%s\nrole=%s\n" % (sys_["id"], sys_["role"]) if sys_["id"] else ""
             return Result(0, "%srootdev=%s\n" % (ident, self.running))
@@ -158,12 +159,12 @@ class FakeBoard(Channel):
         if name == "part-absent.sh":
             return Result(0, "yes\n" if p["WK_DEV"] in self.fat else "no\n")
         if name == "medium-read.sh":
-            return Result(0, self.fat.get(p["WK_PART"], {}).get(p["WK_NAME"], ""))
+            return Result(0, self.fat.get(p["WK_PART"], {}).get(p["WK_FILE"], ""))
         if name == "keep.sh":
             self.kept = True
             return Result(0)
         if name == "eeprom.sh":
-            return self.eeprom_do(p, input)
+            return self.eeprom_do(do, p, input)
         if name == "eeprom-order.sh":
             return Result(0, "eeprom_boot_order=0xf41\n")
         if name == "pimbr-type.sh":
@@ -183,13 +184,13 @@ class FakeBoard(Channel):
             self.tryboot_drop(sd)
             return Result(0)
         if name == "tryboot.sh":
-            return self.tryboot_do(p, sd)
+            return self.tryboot_do(do, p, sd)
         if name.startswith("record-"):
             return self.record_do(name, input)
         return Result(127, "", "%s: not an on-board script this board knows" % name)
 
-    def eeprom_do(self, p, input):
-        do, tool = p["WK_DO"], self.eeprom_tool
+    def eeprom_do(self, do, p, input):
+        tool = self.eeprom_tool
         answers = {"has-config": Result(0 if tool else 1), "has-vc": Result(0 if self.vc else 1),
                    "read": Result(0, self.eeprom) if tool else Result(127, "", "rpi-eeprom-config: not found"),
                    "vc-read": Result(0, self.eeprom if self.vc else ""), "soc": Result(0, self.soc),
@@ -207,8 +208,7 @@ class FakeBoard(Channel):
         for k in [k for k in sd if k == "tryboot.txt" or k.startswith("second/")]:
             del sd[k]
 
-    def tryboot_do(self, p, sd):
-        do = p["WK_DO"]
+    def tryboot_do(self, do, p, sd):
         if do == "stage":
             src = self.fat.get(p["WK_SRC"])
             if src is None:

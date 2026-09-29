@@ -315,7 +315,7 @@ class TestVm(VmTest):
         argv = self.fake.effects[-1][1]
         self.assertEqual(argv[0], "ssh")
         self.assertIn("admin@192.168.64.9", argv)
-        self.assertTrue(argv[-1].startswith("bash -lc "))
+        self.assertTrue(argv[-1].startswith('"$SHELL" -lc '))
         self.assertEqual(self.t.exec("gone", ["true"]).rc, 1)
 
     def test_exec_tty_allocates_a_pty_over_ssh_to_the_guest(self):
@@ -327,7 +327,7 @@ class TestVm(VmTest):
         self.assertEqual(argv[0], "ssh")
         self.assertIn("-t", argv)
         self.assertIn("admin@192.168.64.9", argv)
-        self.assertTrue(argv[-1].startswith("bash -lc "), argv[-1])
+        self.assertTrue(argv[-1].startswith('"$SHELL" -lc '), argv[-1])
         self.assertIsNone(cwd)
 
 
@@ -363,7 +363,8 @@ class SshFake(Fake):
         return super().run(argv, input=input, timeout=timeout)
 
     def ssh_calls(self, needle=""):
-        return [e[1] for e in self.effects if e[0] == "run" and e[1][0] == "ssh" and needle in e[1][-1]]
+        return [tuple(e[1][:-1]) + (shlex.split(e[1][-1])[-1],) for e in self.effects
+                if e[0] == "run" and e[1][0] == "ssh" and needle in e[1][-1]]
 
 
 class RemoteTest(TargetsTest):
@@ -839,7 +840,7 @@ class TestVmWrite(VmTest):
         _, err = self.stderr_of(lambda: self.t.destroy("mac"))
         acts = [e for e in self.fake.effects if e[0] != "run" or e[1][0] == self.tart and e[1][1] != "list"]
         self.assertEqual(acts, [("run", (self.tart, "stop", "wk-mac")), ("run", (self.tart, "delete", "wk-mac")), ("kill", 4242, 15),
-                                ("remove", ws_dir), ("remove", os.path.join(vm_dir, "mac.run.log")), ("remove", os.path.join(vm_dir, "mac.unfiltered"))])
+                                ("remove", os.path.join(vm_dir, "mac.run.log")), ("remove", os.path.join(vm_dir, "mac.unfiltered")), ("remove", ws_dir)])
         self.assertIn("deleted VM wk-mac", err)
         self.assertNotIn("still alive", err)
         self.fake.pids.add(4242)
@@ -924,7 +925,7 @@ class TestRemoteWrite(RemoteTest):
         self.assertIn("ssh -F /home/u/wk/ssh/config", acts[1])
         self.assertIn("[ -f /home/u/wk/cache/ccache/ccache.conf ] || printf %s 'max_size = 40G", acts[2])
         self.assertIn("touch /home/u/wk/ws/a/.wk-ready", acts[3])
-        self.assertEqual(shlex.split(self.fake.effects[-1][1][-1])[-1], acts[3])
+        self.assertEqual(shlex.split(shlex.split(self.fake.effects[-1][1][-1])[-1])[-1], acts[3])
         self.assertIn(("mkdir", self.ref.store.ws_dir("a")), self.fake.effects[:-1])
         self.assertIn("cloning from /srv/WebKit (this machine's shared WebKit, hardlinked)", err)
         self.assertIn("remote workspace 'a' created on ref.example (/home/u/wk/ws/a)", err)
@@ -1099,8 +1100,8 @@ class TestBridges(TargetsTest):
 
 
 class TestBuildSide(RemoteTest):
-    """What `wk build` asks of a driver: where ccache lives, the command the build runs as, the machine it
-    is sized from, and where its record has to be for that machine's `wk status`."""
+    """What `wk build` asks of a driver: where ccache lives, the command the build runs as, and the machine it
+    is sized from."""
 
     def test_the_ccache_and_the_size_are_the_machines_own(self):
         self.assertEqual(self.t.ccache_dir("a"), "/home/u/wk/cache/ccache")
@@ -1112,7 +1113,7 @@ class TestBuildSide(RemoteTest):
         self.assertIsNone(cwd)
         self.assertEqual(argv[0], "ssh")
         self.assertEqual(argv[-2], "box.example")
-        text = shlex.split(argv[-1])[2]
+        text = shlex.split(shlex.split(argv[-1])[-1])[2]
         self.assertTrue(text.startswith("set -o pipefail\ncd /home/u/wk/ws/a/WebKit && "))
         self.assertIn("python3 -I -c %s /home/u/wk/tools/lib wk.lock run remote-build -w 3600 -- nice -n 19 ionice -c3 env "
                       "A=1 /t/build-in-target.sh" % shlex.quote(machine.ISOLATED), text)
@@ -1129,24 +1130,7 @@ class TestBuildSide(RemoteTest):
                                 cwd=src, env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual((0, "ran\n"), (cp.returncode, cp.stdout), cp.stderr)
 
-    def test_the_record_is_shipped_with_the_far_log_and_host(self):
-        rec = record.Records(self.tmp / "rec", clock=FakeClock(), env=self.env, machine=self.fake)
-        with mock.patch.object(record, "host_name", return_value="here"):
-            t = rec.begin("build", "here", "a", "wk build a --kill", "/here/build.log", ["compile"], pid=4242)
-        self.fake.answer_remote("mkdir -p")
-        self.t.task_put("a", t)
-        (call,) = self.fake.ssh_calls("mkdir -p")
-        text = shlex.split(call[-1])[2]
-        self.assertIn("/home/u/wk/task/%s.new" % t.id, text)
-        self.assertIn("printf '%%s' 'compile\n' > /home/u/wk/task/%s.new/plan" % t.id, text)
-        self.assertIn("/home/u/wk/ws/a/build.log", text)
-        self.assertIn("printf '%%s\\n' box.example > /home/u/wk/task/%s.new/machine" % t.id, text)
-        self.assertTrue(text.endswith("mv /home/u/wk/task/%s.new /home/u/wk/task/%s" % (t.id, t.id)))
-        self.fake.answer_remote("mkdir -p", rc=255)
-        _, err = self.stderr_of(lambda: self.t.task_put("a", t))
-        self.assertIn("could not record 'a's build state on box.example", err)
-
-    def test_a_target_on_this_machine_ships_nothing_and_runs_the_build_here(self):
+    def test_a_target_on_this_machine_runs_the_build_here(self):
         self.conf("me", "local=1\nroot=%s\n" % (self.tmp / "rr"))
         me = self.reg.load("me")
         me._probed = {"home": "/h", "cores": 2, "load": 0, "mem_mb": 100, "ionice": "no", "os": "linux", "root": str(self.tmp / "rr")}
@@ -1154,9 +1138,6 @@ class TestBuildSide(RemoteTest):
         self.assertEqual(argv[:2], ["bash", "-c"])
         self.assertNotIn("tee", argv[2])
         self.assertNotIn("ionice", argv[2])
-        before = list(self.fake.effects)
-        me.task_put("a", None)
-        self.assertEqual(self.fake.effects, before)
 
 
 class TestBuildSize(TargetsTest):

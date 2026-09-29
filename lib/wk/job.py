@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 
-from wk import act
+from wk import act, record
 from wk.act import die, info, log, warn
 from wk.machine import far_side_start
 from wk.record import progress_line
@@ -25,6 +25,18 @@ TREE = '_d() { for k in $(pgrep -P "$1"); do _d "$k"; done; echo "$1"; }; _d "$1
 
 def _seconds(env, name, default):
     return int(env.get(name) or default)
+
+
+def heartbeat_seconds(env):
+    return _seconds(env, "WK_HEARTBEAT_SECONDS", 300)
+
+
+def pid_tries(env):
+    return int(env.get("WK_JOB_PID_TRIES") or 900)
+
+
+def kill_wait(env, default=KILL_WAIT):
+    return int(env.get("WK_KILL_WAIT") or default)
 
 
 class Interrupted(KeyboardInterrupt):
@@ -134,9 +146,9 @@ def watch_pid(ended, pid, path, machine, clock, env=None, abort=None, wedge=None
     """Until `ended()`; the verdict it killed on: "silent" past `abort` s (0 never), or "wedged" once `wedge`'s
     (beats, names) saw `names(path)` give one task for that many heartbeats in which the log grew."""
     env = os.environ if env is None else env
-    poll, stall = _seconds(env, "WK_POLL_SECONDS", 15), _seconds(env, "WK_STALL_SECONDS", 300)
-    beat = _seconds(env, "WK_HEARTBEAT_SECONDS", 300)
-    abort = _seconds(env, "WK_ABORT_SECONDS", ABORT_SECONDS) if abort is None else abort
+    poll, stall = _seconds(env, "WK_POLL_SECONDS", 15), record.watchdog_stall(env)
+    beat = heartbeat_seconds(env)
+    abort = record.watchdog_abort(env, ABORT_SECONDS) if abort is None else abort
     start = last_change = last_beat = clock.now()
     last_size, warned, named, same = 0, False, "", 0
     while ended() is None:
@@ -195,7 +207,7 @@ def remote_line(argv, log_path, rc):
 def wait_remote(ask, log_path, rc, clock, interval=30, stream=False, timeout=0, abort_re="", env=None):
     """(status, True), or ("timeout"|"aborted", False); silence is reported, and a wedged browser's traceback aborts."""
     env = os.environ if env is None else env
-    stall, beat = _seconds(env, "WK_STALL_SECONDS", 300), _seconds(env, "WK_HEARTBEAT_SECONDS", 300)
+    stall, beat = record.watchdog_stall(env), heartbeat_seconds(env)
     q = shlex.quote
     start = last_change = last_beat = clock.now()
     last_size, warned = 0, False
@@ -324,7 +336,7 @@ def signal_name(signum):
 def kill(target, ws, task, word, machine, clock, env=None, me=None):
     """TERM, KILL after WK_KILL_WAIT, the record ended `word`; `stopping` first, so the driver ends it `word` too."""
     env = os.environ if env is None else env
-    pid, wait = task.field("pid"), _seconds(env, "WK_KILL_WAIT", KILL_WAIT)
+    pid, wait = task.field("pid"), kill_wait(env)
     if act.dry_run():
         log("dry run -- would TERM pid %s, KILL it after %ds, and record it %s" % (pid or "(none yet)", wait, word))
         return True
@@ -351,7 +363,6 @@ def stop(target, records, ws, kind, machine, clock, env=None):
     ok = kill(target, ws, t, "cancelled", machine, clock, env)
     if act.dry_run():
         return 2
-    target.task_put(ws, t)
     if ok:
         info("stopped '%s's %s and recorded it as cancelled" % (ws, kind))
     return 0 if ok else 1

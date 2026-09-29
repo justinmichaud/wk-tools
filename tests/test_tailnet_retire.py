@@ -303,5 +303,12 @@ class TestWiring(unittest.TestCase):
         self.assertIn("re-authable: wk key set tailnet-api", rows[0][2])
 
 
+
+class TestTheFleetTag(unittest.TestCase):
+    def test_a_node_advertises_tag_wk_unless_the_env_names_another(self):
+        self.assertEqual(tailnet.fleet_tag({}), "tag:wk")
+        self.assertEqual(tailnet.fleet_tag({"WK_TAILNET_TAG": "tag:lab"}), "tag:lab")
+
+
 if __name__ == "__main__":
     unittest.main()

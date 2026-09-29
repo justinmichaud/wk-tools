@@ -15,7 +15,16 @@ from wk import act, images
 from wk.machine import Local, Result
 
 API = "https://api.tailscale.com/api/v2"
+TAG = "tag:wk"
 KEY_DAYS = 90        # tailscale's own ceiling for an auth key
+
+
+def api_url(env):
+    return env.get("WK_TAILNET_API") or API
+
+
+def fleet_tag(env):
+    return env.get("WK_TAILNET_TAG") or TAG
 
 
 class Failed(Exception):
@@ -121,7 +130,7 @@ class Fleet:
             key = secret(value, self.sec.cred_path("tailnet-api"))
         except Failed as e:
             act.die("%s -- store the API access key: wk key set tailnet-api --replace" % e, e.code)
-        return Api(key, self.env.get("WK_TAILNET_API") or API, self.transport)
+        return Api(key, api_url(self.env), self.transport)
 
     def api_present(self):
         return self.api() is not None
@@ -139,7 +148,7 @@ class Fleet:
         if key and ok and (api is None or live(api, key)):
             return path
         if api is not None:
-            return self.mint(api, path, self.env.get("WK_PI_TAG") or "tag:wk")
+            return self.mint(api, path, fleet_tag(self.env))
         if not key:
             act.warn("no tailnet auth key on this machine (%s) -- store one: wk key set tailnet" % path)
         else:
@@ -219,7 +228,7 @@ def main(argv, env=None, out=None, transport=urllib_transport):
             value = Local().read(path) if path else ""
         except OSError:
             value = ""
-        check(Api(secret(value, path), env.get("WK_TAILNET_API") or API, transport), out)
+        check(Api(secret(value, path), api_url(env), transport), out)
     except Failed as e:
         sys.stderr.write("wk-tailnet: %s\n" % e)
         return e.code

@@ -27,8 +27,10 @@
 import os
 import sys
 
-ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import images, store  # noqa: E402
+
+ROOT = images.root()
 
 from wk import act, decl, record, status, targets  # noqa: E402
 from wk.act import Refused, confirm, die, info, log, warn  # noqa: E402
@@ -39,7 +41,7 @@ MACHINE = Store().podman_machine()
 
 
 def here():
-    return is_macos() and not os.environ.get("WK_IN_VM")
+    return is_macos() and not store.in_vm()
 
 
 def running_tasks(records):
@@ -140,7 +142,7 @@ def main(argv):
     keep_vm = args.flag("--keep-vm")
     tasks = args.flag("--tasks")
     everywhere = args.flag("--all")
-    name = os.environ.get("WK_NAME", "")
+    name = store.ws_name()
     reg = targets.Registry(ROOT)
     try:
         if tasks:

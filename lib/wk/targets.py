@@ -14,10 +14,10 @@ import shutil
 import stat
 import sys
 
-from wk import act, buildconf, fleet, git, guest, images, kv, record, secrets, sshalias, tools
+from wk import act, buildconf, fleet, git, guest, images, kv, reach, record, secrets, sshalias, tools
 from wk.machine import TIMED_OUT, Local, PodmanVm, Result, Ssh, isolated_module, lib_argv
 from wk.resources import Resources, workspace_marker_path
-from wk.store import Store
+from wk.store import Store, dispatch_target, in_vm
 
 BUILTIN = ("container", "vm", "remote", "local")
 SDK_REPO = "ghcr.io/igalia/wkdev-sdk"
@@ -227,7 +227,7 @@ class Registry:
         if t:
             out.append(t)
         # Skipped on the far end of a target: a delegated listing would pay an ssh timeout per machine it has no route to.
-        if self.in_remote_host() or self.env.get("WK_IN_VM"):
+        if self.in_remote_host() or in_vm(self.env):
             return out
         me = record.machine_name(self.env)
         for name in self.known():
@@ -264,8 +264,8 @@ class Registry:
 
     def walk(self):
         """The targets a listing covers: WK_TARGET's, this workspace's, the ones here when another wk asked, else all."""
-        if self.env.get("WK_TARGET"):
-            return self.env["WK_TARGET"].split()
+        if dispatch_target(self.env):
+            return dispatch_target(self.env).split()
         if self.in_workspace():
             return [self.default()]
         if self.env.get("WK_NO_DELEGATE"):
@@ -330,8 +330,8 @@ class Registry:
 
     def ws_target(self, ws):
         """The one target holding `ws`; the default when none does."""
-        if self.env.get("WK_TARGET"):
-            return self.env["WK_TARGET"]
+        if dispatch_target(self.env):
+            return dispatch_target(self.env)
         hits = self.locate(ws)
         if not hits:
             return self.default()
@@ -396,6 +396,7 @@ class Target:
         self.root = root
         self.env = env
         self.machine = machine
+        self.here = machine
         self._store = Store(env)
 
     @property
@@ -407,7 +408,8 @@ class Target:
         return self.machine
 
     def records(self, clock=None):
-        return record.of_target(self, clock, self.store_machine)
+        """The records this machine holds for the target: every driver writes its own, here."""
+        return record.of_target(self, clock, self.here)
 
     def creating_now(self, ws):
         t = self.records().find("new", ws)
@@ -569,7 +571,7 @@ class Target:
                         "    Nothing is wrong with the workspace as far as this end can tell -- it\n"
                         "    cannot be reached to ask. Try again, or check the route:\n"
                         "        ssh -o BatchMode=yes %s true"
-                        % (ws, self.env.get("WK_SSH_TIMEOUT") or 10, getattr(self, "host", "") or "the machine"))
+                        % (ws, reach.ssh_timeout(self.env), getattr(self, "host", "") or "the machine"))
             if not now:
                 act.barrier("'%s' was never finished creating, and nothing is creating it now\n"
                             "    (the process that was is gone, with whatever connection started it).\n"
@@ -722,9 +724,6 @@ class Target:
         """(argv, cwd)."""
         return self.exec_argv(ws, argv)
 
-    def task_put(self, ws, task):
-        """The record already sits in the store the building machine reports from."""
-
     def build_size(self, ws):
         """(cores, mem_mb, load or None); a load makes the build polite."""
         res = Resources(self.machine, self.env)
@@ -783,7 +782,7 @@ class Container(Target):
     dir_first = True
 
     def podman(self):
-        if os.uname().sysname == "Darwin" and not self.env.get("WK_IN_VM"):
+        if os.uname().sysname == "Darwin" and not in_vm(self.env):
             return ["podman", "-c", self.podman_machine()]
         return ["podman"]
 
@@ -822,7 +821,7 @@ class Container(Target):
         return self.store.mirror()
 
     def sdk(self):
-        if self.env.get("WK_IN_VM"):
+        if in_vm(self.env):
             return self.env.get("WK_SDK") or "/opt/webkit-container-sdk"
         return self.env.get("WK_SDK") or os.path.join(
             self.env.get("XDG_DATA_HOME") or os.path.join(self.env.get("HOME", ""), ".local", "share"), "webkit-container-sdk")
@@ -901,7 +900,7 @@ class Container(Target):
         return cmd + ["--exec", "--", BRIDGE, *argv], None
 
     def is_here(self):
-        return bool(self.env.get("WK_IN_VM")) or os.uname().sysname != "Darwin"
+        return in_vm(self.env) or os.uname().sysname != "Darwin"
 
     def machine_state(self):
         """running | stopped | absent | ...: podman's own word for the machine, asked once per Container."""
@@ -920,7 +919,7 @@ class Container(Target):
 
     def wk_far(self, env):
         """The VM is part of this machine, so its records name this host as itself."""
-        return "WK_IN_VM=1 WK_HOST_SELF=1 ", TOOLS + "/wk", dict(env, WK_ROW_LABEL=env.get("WK_ROW_LABEL") or record.machine_name(env, self.machine))
+        return "WK_IN_VM=1 WK_HOST_SELF=1 ", TOOLS + "/wk", dict(env, WK_ROW_LABEL=record.row_label(env) or record.machine_name(env, self.machine))
 
     def wk(self, *args, env=None, quiet=False):
         env = os.environ if env is None else env
@@ -937,7 +936,7 @@ class Container(Target):
         return r.ok
 
     def tools_src(self):
-        return self.env.get("WK_TOOLS_SRC") or (TOOLS if self.env.get("WK_IN_VM") else self.root)
+        return self.env.get("WK_TOOLS_SRC") or (TOOLS if in_vm(self.env) else self.root)
 
     def sync(self, named=False):
         act.info("nothing to copy: a container bind-mounts this checkout (%s) at\n"
@@ -1015,12 +1014,15 @@ class Container(Target):
             flags += ["--env", pair]
         return flags + self.sandbox_flags(arch)
 
+    def sdk_image(self):
+        return self.env.get("WK_SDK_IMAGE")
+
     def create_argv(self, ws, base, arch):
         u = self.user()
         argv = self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", "wkdev-create"), "--network", "none", "--isolated"]
         if arch != "native":
             argv += ["--arch", "arm"]
-        image = self.env.get("WK_SDK_IMAGE") or arch_image(arch)
+        image = self.sdk_image() or arch_image(arch)
         if image:
             argv += ["--image", image]
         return argv + ["--name", self.ctr(ws), "--shell", "/bin/bash", "--user", u, "--group", u,
@@ -1037,8 +1039,8 @@ class Container(Target):
         self._ensure_home_mountpoint(ws_dir, os.path.dirname(self.store.mirror()))
         self.machine.write(os.path.join(ws_dir, "arch"), arch + "\n")
         argv = self.create_argv(ws, base, arch)
-        if self.env.get("WK_SDK_IMAGE"):
-            act.info("using workspace image %s (WK_SDK_IMAGE)" % self.env["WK_SDK_IMAGE"])
+        if self.sdk_image():
+            act.info("using workspace image %s (WK_SDK_IMAGE)" % self.sdk_image())
         act.info("creating workspace '%s' from base %s (rootless-proxy, %s)" % (ws, base, arch))
         r = self.machine.act_run(argv, stream=True)
         if not r.ok:
@@ -1208,7 +1210,7 @@ class Vm(Target):
         return self._vm_store
 
     def user(self):
-        return self.env.get("WK_VM_USER") or "admin"
+        return guest.vm_user(self.env)
 
     def src(self, ws):
         return "/Users/%s/WebKit" % self.user()
@@ -1238,11 +1240,15 @@ class Vm(Target):
 
     def cores(self, ws):
         c = self.configured(self.vm(ws), "CPU")
-        return c if c is not None else int(self.env.get("WK_VM_CPUS") or Resources(self.machine, self.env, "macos").envelope_cores())
+        if c is None:
+            c = guest.vm_cpus(self.env)
+        return c if c is not None else Resources(self.machine, self.env, "macos").envelope_cores()
 
     def mem_mb(self, ws):
         m = self.configured(self.vm(ws), "Memory")
-        return m if m is not None else int(self.env.get("WK_VM_MEM_MB") or Resources(self.machine, self.env, "macos").envelope_mem_mb())
+        if m is None:
+            m = guest.vm_mem_mb(self.env)
+        return m if m is not None else Resources(self.machine, self.env, "macos").envelope_mem_mb()
 
     def agent_rw_dir(self):
         return "/Volumes/My Shared Files/" + self.agent_rw_share
@@ -1258,7 +1264,7 @@ class Vm(Target):
 
     def vm_dir(self):
         """Where the guests' daemons and keys live, even where the vm store is the container's and lists no guest."""
-        return os.path.join(self.env.get("WK_VM_STORE") or Store(self.env).record_dir(), "vm")
+        return os.path.join(Store(self.env).vm_root(), "vm")
 
     def key(self):
         return os.path.join(self.vm_dir(), "id_ed25519")
@@ -1328,14 +1334,14 @@ class Vm(Target):
         ip = self.ip(ws)
         if not ip:
             return Result(1, "", "'%s' is not running (wk start %s)" % (ws, ws))
-        return self.guest_at(ip).run(["bash", "-lc", shlex.join(argv)], timeout=timeout)
+        return self.guest_at(ip).run(argv, timeout=timeout)
 
     def guest_at(self, ip):
         """The one ssh onto a guest's address."""
         return Ssh("%s@%s" % (self.user(), ip), opts=["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
                                                       "-o", "LogLevel=ERROR", "-o", "ServerAliveInterval=60",
                                                       "-o", "ServerAliveCountMax=10", "-i", self.key()],
-                   timeout=int(self.env.get("WK_SSH_TIMEOUT") or 10), via=self.machine)
+                   timeout=reach.ssh_timeout(self.env), via=self.machine)
 
     def _guest_ssh(self, ws):
         ip = self.ip(ws)
@@ -1350,10 +1356,10 @@ class Vm(Target):
     def enter_argv(self, ws):
         guest = self._guest_ssh_or_die(ws)
         self.login_note()
-        return guest.argv("cd %s 2>/dev/null; exec $SHELL -l" % shlex.quote(self.src(ws)), tty=True), None
+        return guest.argv("cd %s 2>/dev/null; exec \"$SHELL\"" % shlex.quote(self.src(ws)), tty=True), None
 
     def exec_argv(self, ws, argv, tty=False):
-        return self._guest_ssh_or_die(ws).argv("bash -lc %s" % shlex.quote(shlex.join(argv)), tty=tty), None
+        return self._guest_ssh_or_die(ws).argv(shlex.join(argv), tty=tty), None
 
     def pull(self, ws, src, dest):
         self._guest_ssh_or_die(ws).copy_out(src, dest)
@@ -1475,7 +1481,7 @@ class Vm(Target):
         with base.host.lock().held("guest-base"):
             base.ensure()
         why = base.stale()
-        if why and self.env.get("WK_VM_FORCE"):
+        if why and guest.vm_forced(self.env):
             act.warn("WK_VM_FORCE=1 -- '%s' is cloned from a base that\n  predates its own provisioning inputs: %s" % (ws, why))
         elif why:
             act.die("'%s' predates its own provisioning inputs: %s.\n  '%s' would be a clone of it, carrying the desktop settings of the day it\n"
@@ -1483,13 +1489,14 @@ class Vm(Target):
                     "      %s --rebuild     hours; existing guests are unaffected\n  WK_VM_FORCE=1 clones it anyway."
                     % (self.base(), why, ws, guest.BASE_BUILD))
         running = self.running_vms()
-        if len(running) >= int(self.env.get("WK_VM_MAX") or 2):
+        if len(running) >= guest.vm_max(self.env):
             act.warn("%d VM(s) already running on this host; you will have to stop one before starting '%s':\n%s"
                      % (len(running), ws, "\n".join("      " + n for n in running)))
         act.info("cloning %s -> %s (APFS copy-on-write)" % (self.base(), v))
         res = Resources(self.machine, self.env, "macos")
-        cpus = self.env.get("WK_VM_CPUS") or str(res.envelope_cores())
-        mem = self.env.get("WK_VM_MEM_MB") or str(res.envelope_mem_mb())
+        cpus, mem = guest.vm_cpus(self.env), guest.vm_mem_mb(self.env)
+        cpus = str(res.envelope_cores() if cpus is None else cpus)
+        mem = str(res.envelope_mem_mb() if mem is None else mem)
         tart = self.tart_or_die()
         for argv in ([tart, "clone", self.base(), v],
                      [tart, "set", v, "--cpu", cpus, "--memory", mem, "--random-mac", "--display", guest.display(self.env), "--display-refit"]):
@@ -1524,11 +1531,12 @@ class Vm(Target):
             act.die("refusing to delete the golden base (%s --rm)" % guest.BASE_BUILD)
         if self.vm_state(ws) != "absent":
             self.delete_vm(v)
+        for f in (ws + ".run.log", ws + ".unfiltered"):
+            self.machine.remove(os.path.join(self.vm_dir(), f))
+        # The directory goes last: it is what a re-run of a killed rm finds and destroys again.
         if self.machine.isdir(ws_dir):
             self.machine.remove(ws_dir)
             act.info("removed %s" % ws_dir)
-        for f in (ws + ".run.log", ws + ".unfiltered"):
-            self.machine.remove(os.path.join(self.vm_dir(), f))
 
 
 class LocalWorkspace(Target):
@@ -1558,7 +1566,7 @@ class LocalWorkspace(Target):
     def mirror_dir(self):
         if self.os() == "macos":
             return GUEST_MIRROR
-        return self.env.get("WK_MIRROR") or self.store.mirror()
+        return self.store.container_mirror() or self.store.mirror()
 
     def arch(self, ws):
         return self.ws_arch
@@ -1624,16 +1632,16 @@ class Remote(Target):
             here_target = ""
         self.is_local = bool(env.get("WK_REMOTE_LOCAL")) or (bool(here_target) and here_target == name)
         self.needs_base = self.is_local
-        root_there = env.get("WK_REMOTE_ROOT") or (marker.get("root", "") if self.is_local else "")
+        self.conf_root = env.get("WK_REMOTE_ROOT", "")
+        root_there = self.conf_root or (marker.get("root", "") if self.is_local else "")
         if self.is_local and root_there:
             store = env.get("WK_REMOTE_STORE") or root_there
         else:
             store = env.get("WK_REMOTE_STORE") or os.path.join(Store(env).state_dir(), "remote", name)
         self._store = Store(dict(env, WK_STORE=store))
         self.probe_seconds = int(env.get("WK_PROBE_SECONDS") or 20)
-        self.here = machine
         if not self.is_local and self.host:
-            self.machine = Ssh(self.host, opts=self.ssh_opts(), timeout=int(env.get("WK_SSH_TIMEOUT") or 10), via=machine)
+            self.machine = Ssh(self.host, opts=self.ssh_opts(), timeout=reach.ssh_timeout(env), via=machine)
         self._probed = None
         self._has_wk = None
         self._peer_rows = None
@@ -1674,7 +1682,7 @@ class Remote(Target):
             self._probed = {"why": ssh_last_word(r)}
         else:
             try:
-                self._probed = parse_probe(r.out, self.env.get("WK_REMOTE_ROOT", ""))
+                self._probed = parse_probe(r.out, self.conf_root)
             except ValueError as e:
                 self._probed = {"why": "it answered the probe with what this end cannot read: %s" % e, "unreadable": True}
         return self._probed
@@ -1734,24 +1742,6 @@ class Remote(Target):
             return ["bash", "-c", text], None
         return self._far().argv("bash -c " + shlex.quote(text)), None
 
-    def task_put(self, ws, task):
-        """`wk status` asks the machine that builds, so the record goes there with its own log and name."""
-        if self.is_local:
-            return
-        far = "%s/task/%s" % (self.root_there(), task.id)
-        new = far + ".new"
-        q = shlex.quote
-        lines = ["rm -rf %s && mkdir -p %s/steps" % (q(new), q(new))]
-        for p in sorted(task.path.rglob("*")):
-            if p.is_file() and ".tmp." not in p.name:
-                lines.append("printf '%%s' %s > %s" % (q(p.read_text()), q(new + "/" + str(p.relative_to(task.path)))))
-        lines.append("printf '%%s\\n' %s > %s" % (q(self.ws_dir_there(ws) + "/build.log"), q(new + "/log")))
-        lines.append("printf '%%s\\n' %s > %s" % (q(self.host), q(new + "/machine")))
-        lines.append("rm -rf %s && mv %s %s" % (q(far), q(new), q(far)))
-        if not self._sh(" &&\n".join(lines)).ok:
-            act.warn("could not record '%s's build state on %s -- 'wk status %s'\n    may show stale information until it answers again"
-                     % (ws, self.host, ws))
-
     def src(self, ws):
         if self.peer and ws:
             return self._peer_route(ws)[1]
@@ -1810,7 +1800,7 @@ class Remote(Target):
         self._probe_or_die()
         if self.is_local:
             return ([os.environ.get("SHELL", "/bin/sh"), "-l"], self.src(ws))
-        return self.machine.argv("cd %s && exec $SHELL -l" % shlex.quote(self.src(ws)), tty=True), None
+        return self.machine.argv("cd %s && exec \"$SHELL\"" % shlex.quote(self.src(ws)), tty=True), None
 
     def exec_argv(self, ws, argv, tty=False):
         if self.is_local:

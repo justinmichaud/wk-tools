@@ -22,6 +22,7 @@ Run: python3 tests/run.py -k tests.test_device_claim
 import contextlib
 import io
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -207,7 +208,7 @@ class TestTheFleetIsAsked(unittest.TestCase):
 class TestTheBarrier(unittest.TestCase):
     def setUp(self):
         self.store = Path(__import__("tempfile").mkdtemp(prefix="wk-test-claim-"))
-        self.addCleanup(record._rmtree, self.store)
+        self.addCleanup(shutil.rmtree, self.store, True)
         self.machine = Fake()
         self.records = record.Records(self.store, clock=FakeClock(), machine=self.machine,
                                       env={"WK_STORE": str(self.store)})

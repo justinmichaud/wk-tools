@@ -27,10 +27,15 @@
 
 import glob
 import os
+import shlex
 import sys
 
-ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import images  # noqa: E402
+
+ROOT = images.root()
+RUN_AS_VM_COPY = ('import sys; g = {"__file__": "/opt/wk-tools/cmd/disk", "__name__": "__main__"}; '
+                  'exec(compile(sys.stdin.read(), g["__file__"], "exec"), g)')
 
 from wk import decl, gc, kv, record, rubble, targets  # noqa: E402
 from wk.act import info, log  # noqa: E402
@@ -134,7 +139,7 @@ def workspace_report(reg, rep):
 
 
 def main(argv):
-    args = decl.Args(decl.Decl(os.path.join(ROOT, "cmd", "disk")), argv)   # ROOT's copy: --probe-store arrives on stdin
+    args = decl.Args(decl.Decl(os.path.join(ROOT, "cmd", "disk")), argv)
     store = Store()
     if args.flag("--probe-store"):
         sys.stdout.write(probe_store(store))
@@ -165,7 +170,7 @@ def main(argv):
         if ctr.machine_state() == "running":
             with open(__file__) as me:   # this file, not the VM's copy, which is only as new as `wk sync --tools container`
                 cp = here.run(["podman", "machine", "ssh", vm_name, "--",
-                               "WK_ROOT=/opt/wk-tools WK_STORE=/var/lib/wk python3 - --probe-store"], input=me.read())
+                               "WK_STORE=/var/lib/wk python3 -c %s --probe-store" % shlex.quote(RUN_AS_VM_COPY)], input=me.read())
             if cp.out.strip():
                 rep.render(cp.out, add=False)
             else:

@@ -242,8 +242,10 @@ import os
 import subprocess
 import sys
 
-ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import images, store  # noqa: E402
+
+ROOT = images.root()
 
 from wk import decl, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
@@ -264,7 +266,7 @@ def report_args(args):
 
 
 def run_arm(args, reg, clock, popen=subprocess.Popen):
-    o = {"config": os.environ.get("WK_CONFIG"), "count": args.value("--count"), "browser": args.value("--browser"),
+    o = {"config": store.build_config(), "count": args.value("--count"), "browser": args.value("--browser"),
          "subtests": args.value("--subtests"), "cores": args.value("--cores"), "browser_args": args.value("--browser-args"),
          "software": args.flag("--software"), "system": args.value("--system"), "slot": args.value("--slot"),
          "ab": args.value("--ab"), "ab_systems": args.value("--ab-systems"), "rounds": args.value("--rounds"), "task": args.value("--task"),
@@ -286,7 +288,7 @@ def ab_options(args):
             "bits": args.value("--bits"), "base": args.value("--base"), "build_on": args.value("--build-on"), "rounds": args.value("--rounds"),
             "count": args.value("--count"), "timeout": args.value("--timeout"), "task": args.value("--task"),
             "systems": args.value("--systems"), "slot": args.value("--slot"), "plans": args.values("--plan"), "detach": args.flag("--detach"),
-            "patch": args.value("--patch"), "workspace": args.value("--workspace"), "config": os.environ.get("WK_CONFIG"),
+            "patch": args.value("--patch"), "workspace": args.value("--workspace"), "config": store.build_config(),
             "max_rounds": args.value("--max-rounds"), "detect": args.value("--detect"), "settle": args.value("--settle"),
             "a_args": args.value("--a-args"), "b_args": args.value("--b-args"), "plant": args.flag("--plant"),
             "rehearse": args.flag("--rehearse"), "allow_network_fetch": args.flag("--allow-network-fetch"),
@@ -312,17 +314,17 @@ def main(argv):
     if verb == "precision":
         return bench.precision(args.positionals[1:], args.value("--detect") or "0.3")
     if verb == "seed":
-        name = os.environ.get("WK_NAME", "")
+        name = store.ws_name()
         words = ([name] if name else []) + args.positionals[1:]
         return bench.seed(words[0] if words else "", words[1] if len(words) > 1 else "", bool(name))
     if verb == "run":
         return run_arm(args, reg, Clock())
     if verb == "deploy":
         board_name = args.positionals[1] if len(args.positionals) > 1 else ""
-        return bench.deploy(os.environ.get("WK_NAME", ""), board_name, args.value("--slot") or "a")
+        return bench.deploy(store.ws_name(), board_name, args.value("--slot") or "a")
     if verb == "stage":
         pairs = mac.plans(args.order, args.values("--plan"), args.values("--payload"))
-        return mac.stage(ROOT, reg, Clock(), args.positionals[1:], args.value("--to") or "", os.environ.get("WK_CONFIG"), pairs)
+        return mac.stage(ROOT, reg, Clock(), args.positionals[1:], args.value("--to") or "", store.build_config(), pairs)
     if verb == "staged":
         return mac.staged(ROOT, reg, Clock(), staged_options(args))
     if verb == "ab":

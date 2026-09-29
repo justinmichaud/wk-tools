@@ -172,12 +172,15 @@ class WkBoardDriver(BrowserDriver):
 
     # A profile is written on the board, one file per process at LLVM_PROFILE_FILE
     # (lib/wk/pgo.py), so the two upstream hooks below are a clear over ssh and a pull.
+    def _pgo_dir(self):
+        return _need('WK_BOARD_PGO')
+
     def prepare_pgo_profile_collection(self):
-        directory = _need('WK_BOARD_PGO')
+        directory = self._pgo_dir()
         self._remote('rm -rf %s && mkdir -p %s' % (shlex.quote(directory), shlex.quote(directory)))
 
     def collect_pgo_profile(self, destination):
-        directory = _need('WK_BOARD_PGO')
+        directory = self._pgo_dir()
         os.makedirs(destination, exist_ok=True)
         packed = subprocess.run(
             self._ssh + ['cd %s && tar -cf - . 2>/dev/null | gzip -1' % shlex.quote(directory)],

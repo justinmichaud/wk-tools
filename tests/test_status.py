@@ -504,6 +504,28 @@ class TestToolsFact(unittest.TestCase):
         self.assertIn("DIFFERS from the workstation (abcdef1)", out)
         self.assertIn("wk sync --tools box", out)
 
+    def test_a_delegated_answer_stays_its_own_and_is_not_merged_into_this_machines_rows(self):
+        far = [{"kind": "machine", "name": "far"},
+               {"kind": "workspace", "machine": "far", "method": "native", "name": "ws", "state": "absent", "ws": "absent"}]
+        asked = []
+
+        class FarTarget:
+            def wk(self, *args, env=None, quiet=False):
+                asked.append((args, env))
+                return 0, "".join(json.dumps(r) + "\n" for r in far)
+
+        walk = object.__new__(status.Walk)
+        recs, rc = walk.delegate(FarTarget(), "far", ["status", "--no-fleet", "--records", "ws"])
+        self.assertEqual((rc, asked[0][1]["WK_ROW_LABEL"], asked[0][1]["WK_NO_DELEGATE"]), (0, "far", "1"))
+        here = {"kind": "workspace", "machine": "here", "method": "native", "name": "ws", "state": "present", "ws": "present"}
+        skew = status.tools_fact({"sha": "0000000", "dirty": "no"}, "abcdef1", "far", "far")
+        doc = statusview.merge([machine_rec("here"), here] + [dict(r) for r in recs] + [skew])
+        rows = {m["name"]: [w["state"] for meth in m["methods"] for w in meth["workspaces"]] for m in doc["machines"]}
+        self.assertEqual([f["sha"] for m in doc["machines"] if m["name"] == "far" for f in m["facts"]], ["0000000"])
+        self.assertEqual(rows, {"here": ["present"], "far": ["absent"]})
+        self.assertEqual(doc["exit"], 0, "a same-named workspace on another machine is not a disagreement")
+        self.assertEqual(skew["machine"], "far")
+
     def test_reporting_reaches_no_machine_and_syncs_nothing(self):
         code = inspect.getsource(status.tools_fact) + inspect.getsource(status.Walk.report_machine)
         for writer in ("tools_push", "t_sync", "rsync", "rev-parse HEAD --"):
@@ -944,8 +966,15 @@ class TestTheSelfLineIsSpacedOneWay(unittest.TestCase):
         out = io.StringIO()
         statusview.render_text_stream(iter(recs), out, False)
         lines = out.getvalue().split("\n")
-        self.assertEqual(lines[0], statusview.self_line(merger.doc, False))
+        self.assertEqual(lines[0], statusview.self_line_text("here", "workstation", "host", False))
         self.assertEqual(lines[1:3], statusview.render_machine_block(merger.doc["machines"][0], False)[:2])
+
+
+
+class TestTheWebViewDefaults(unittest.TestCase):
+    def test_the_port_and_interval_come_from_the_env_else_any_port_every_20s(self):
+        self.assertEqual(statusview.web_defaults({}), ("0", "20"))
+        self.assertEqual(statusview.web_defaults({"WK_STATUS_PORT": "8080", "WK_STATUS_INTERVAL": "5"}), ("8080", "5"))
 
 
 if __name__ == "__main__":

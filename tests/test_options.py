@@ -106,14 +106,6 @@ class TestQuietFlag(WkTest):
         self.assertNotIn("==>", cp.stdout)
 
 
-class TestSudoQuietGoesThroughEnv(WkTest):
-    def test_sudo_no_longer_parses_a_local_quiet_flag(self):
-        """`wk key sudo` (lib/wk/sudo.py) reads WK_QUIET, not its own --quiet case arm"""
-        text = (REPO / "lib" / "wk" / "sudo.py").read_text()
-        self.assertNotIn("--quiet)  QUIET=1", text)
-        self.assertIn("WK_QUIET", text)
-
-
 class TestLsJson(WkTest):
     def test_ls_json_is_one_valid_document(self):
         """`wk ls --json` (run directly, WK_TARGET=container) is one valid

@@ -97,7 +97,6 @@ class Machine:
 
     name = "machine"
 
-    # -- reads
     def run(self, argv, input=None, timeout=None, stream=False):
         """`stream`: the output goes to this process's stderr as it arrives, and the Result carries only the status."""
         raise NotImplementedError
@@ -129,6 +128,13 @@ class Machine:
     def readlink(self, path):
         raise NotImplementedError
 
+    def mtime(self, path):
+        raise NotImplementedError
+
+    def read_bytes(self, path, start=0):
+        """The bytes from `start` on; a negative start counts back from the end, as a slice does."""
+        raise NotImplementedError
+
     def have(self, tool):
         return self.run(list(HAVE) + [tool]).ok
 
@@ -137,7 +143,7 @@ class Machine:
         if act.dry_run():
             sys.stderr.write("would run%s: %s\n" % (self._where(), shlex.join(argv)))
             return Result(0)
-        if os.environ.get("WK_DESTRUCTIVE") and not act.asked():
+        if act.destructive() and not act.asked():
             act.die("BUG: this command is declared destructive and acted before asking:\n    %s"
                     % shlex.join(argv))
         return self._effect_run(argv, **kw)
@@ -146,6 +152,13 @@ class Machine:
         return self.run(argv, **kw)
 
     def write(self, path, text):
+        raise NotImplementedError
+
+    # -- the command's own task record: not a state change, so written whatever --dry-run says and never an effect
+    def write_own(self, path, text):
+        raise NotImplementedError
+
+    def remove_own(self, path):
         raise NotImplementedError
 
     def remove(self, path):
@@ -268,11 +281,27 @@ class Local(Machine):
         except OSError:
             return None
 
+    def mtime(self, path):
+        return os.path.getmtime(path)
+
+    def read_bytes(self, path, start=0):
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() + start) if start < 0 else start)
+            return f.read()
+
     def write(self, path, text):
         if act.dry_run():
             sys.stderr.write("would write: %s\n" % path)
             return
         replace_file(path, text)
+
+    def write_own(self, path, text):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        replace_file(path, text)
+
+    def remove_own(self, path):
+        self.remove_now(path)
 
     def remove(self, path):
         if act.dry_run():
@@ -443,6 +472,10 @@ def far_side_start(cmd, out_path, tail):
     return "nohup %s > %s 2>&1 < /dev/null & %s" % (cmd, shlex.quote(out_path), tail)
 
 
+LOGIN = '"$SHELL" -lc '
+MTIME = "import os, sys; print(os.path.getmtime(sys.argv[1]))"
+
+
 class Ssh(Machine):
     """A host over ssh, each call one bounded non-interactive round trip run by `via` (this host)."""
 
@@ -453,7 +486,8 @@ class Ssh(Machine):
         self.via = via or Local()
 
     def argv(self, remote, tty=False):
-        return ["ssh"] + (["-t"] if tty else []) + self.opts + [self.dest, remote]
+        # The far sshd runs a command under a non-login shell, so ~/.local/bin and Homebrew are off its PATH.
+        return ["ssh"] + (["-t"] if tty else []) + self.opts + [self.dest, LOGIN + shlex.quote(remote)]
 
     def _ssh(self, remote, input=None, timeout=None):
         # An empty stdin, not the caller's: ssh drinks whatever it is handed.
@@ -509,6 +543,21 @@ class Ssh(Machine):
         r = self._ssh("readlink %s" % shlex.quote(path))
         return r.out.strip() if r.ok else None
 
+    def _far(self, remote, path):
+        r = self._ssh(remote)
+        if not r.ok:
+            raise OSError(r.err.strip() or "cannot read %s on %s" % (path, self.dest))
+        return r.out
+
+    def mtime(self, path):
+        return float(self._far(shlex.join(["python3", "-c", MTIME, path]), path))
+
+    def read_bytes(self, path, start=0):
+        # base64 on the far side: a byte range can split a character, and the round trip carries text.
+        cut = "+%d" % (start + 1) if start >= 0 else "%d" % -start
+        q = shlex.quote(path)
+        return base64.b64decode(self._far("test -r %s && tail -c %s %s | base64" % (q, cut, q), path))
+
     def write(self, path, text):
         if act.dry_run():
             sys.stderr.write("would write on %s: %s\n" % (self.dest, path))
@@ -516,6 +565,14 @@ class Ssh(Machine):
         r = self._ssh(shlex.join(("sh", "-c", FAR_WRITE, "sh", path)), input=text)
         if not r.ok:
             raise OSError(r.err.strip())
+
+    def write_own(self, path, text):
+        r = self._ssh(shlex.join(("sh", "-c", 'mkdir -p "$(dirname "$1")"\n' + FAR_WRITE, "sh", path)), input=text)
+        if not r.ok:
+            raise OSError(r.err.strip())
+
+    def remove_own(self, path):
+        self.remove_now(path)
 
     def remove(self, path):
         if act.dry_run():
@@ -645,6 +702,7 @@ class Fake(Machine):
         self.files = {}
         self.dirs = set()
         self.links = set()
+        self.mtimes = {}
         self.pids = set()
         self.answers = []
         self.effects = []
@@ -683,7 +741,12 @@ class Fake(Machine):
                 best = (prefix, result)
         if best is None:
             return Result(127, "", "%s: no answer registered" % argv[0])
-        return best[1](list(argv), self) if callable(best[1]) else best[1]
+        if not callable(best[1]):
+            return best[1]
+        seen = list(argv)
+        if seen[0] == "ssh" and seen[-1].startswith(LOGIN):
+            seen[-1] = shlex.split(seen[-1])[-1]
+        return best[1](seen, self)
 
     def act_run(self, argv, **kw):
         self._acting = True
@@ -753,6 +816,15 @@ class Fake(Machine):
     def readlink(self, path):
         return self.files[path] if path in self.files else None
 
+    def mtime(self, path):
+        if path not in self.files:
+            raise OSError("no such file: %s" % path)
+        return self.mtimes.get(path, 0.0)
+
+    def read_bytes(self, path, start=0):
+        data = self.read(path)
+        return (data if isinstance(data, bytes) else data.encode())[start:]
+
     def _set_file(self, path, text):
         self.files[path] = text
         self.links.discard(path)
@@ -766,6 +838,12 @@ class Fake(Machine):
         if act.dry_run():
             return
         self._set_file(path, text)
+
+    def write_own(self, path, text):
+        self._set_file(path, text)
+
+    def remove_own(self, path):
+        self._drop(path)
 
     def _drop(self, path):
         self.files = {p: t for p, t in self.files.items() if p != path and not p.startswith(path.rstrip("/") + "/")}

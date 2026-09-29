@@ -129,8 +129,10 @@
 import os
 import sys
 
-ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import images  # noqa: E402
+
+ROOT = images.root()
 
 from wk import act, decl, images, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402

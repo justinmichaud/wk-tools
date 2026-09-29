@@ -358,11 +358,10 @@ class TestTheCommandsAskTheDriver(unittest.TestCase):
         self.assertIn("self.target.mirror_dir()", (REPO / "lib" / "wk" / "build.py").read_text(),
                       "wk build fetches without asking the driver")
 
-    def test_the_in_workspace_builders_read_the_drivers_answer_from_the_environment(self):
+    def test_the_in_workspace_builders_do_not_spell_the_container_mirror(self):
         for rel in ("yocto_target.py", "buildroot_target.py"):
             text = (REPO / "lib" / "wk" / "sysimage" / rel).read_text()
             with self.subTest(file=rel):
-                self.assertIn('self.env.get("WK_MIRROR")', text)
                 self.assertNotIn("/mirror/WebKit.git", text)
 
     def test_each_mirror_path_is_spelled_in_exactly_one_place(self):

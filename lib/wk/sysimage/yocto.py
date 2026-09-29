@@ -8,7 +8,7 @@ import shlex
 
 from wk import act, build, fleet, images, job, pgo, record
 from wk.act import die, info, log, warn
-from wk.buildconf import DISK_GB
+from wk.buildconf import disk_gb
 from wk.resources import Budget, Resources, build_jobs
 from wk.sysimage import task
 from wk.sysimage.write import wants_wifi
@@ -59,7 +59,7 @@ def disk_need(stage, chromium, rm_work, env):
     if stage == "pgo-mix":
         return 2
     if stage == "webkit":
-        return int(env.get("WK_BUILD_DISK_GB") or DISK_GB)
+        return disk_gb(env)
     return (120 if chromium else 60) + (0 if rm_work else 60)
 
 
@@ -134,7 +134,7 @@ class Yocto(task.ContainerBuilder):
         st = task.Stage(self.reg, target, ws, "yocto", stage, self.kill_cmd(ws, stage), self.clock, self.popen)
         env = {k: v for k, v in target.env.items() if k != "WK_ABORT_SECONDS"}
         st.recs = record.of_target(target, self.clock, self.here, env)   # a record with no deadline: silence is not a failure
-        st.env = dict(self.env, WK_KILL_WAIT=self.env.get("WK_KILL_WAIT") or str(KILL_WAIT))
+        st.env = dict(self.env, WK_KILL_WAIT=str(job.kill_wait(self.env, KILL_WAIT)))
         st.watchdog = {"abort": 0, "wedge": (WEDGE_BEATS, task_named)}
         return st
 
@@ -336,10 +336,8 @@ class Yocto(task.ContainerBuilder):
                 self.check_target(target, ws)
             except act.Refused as e:
                 t.end(e.status)
-                target.task_put(ws, t)
                 raise
             t.step_state(stage_index(o["stage"]), "running")   # this stage, and no claim about the ones before it
-            target.task_put(ws, t)
             info("stage '%s' for %s in '%s'" % (o["stage"], self.name, ws))
             st.run(t, budget, jobs, self.argv(target, ws, o, cores, stage_mb, webkit_jobs, tag), PATTERN, stage_mb)
         finally:
@@ -383,7 +381,7 @@ class Yocto(task.ContainerBuilder):
         cores, mem, webkit_jobs, budget, _ = self.sizes()
         cache = os.path.join(self.store.root(), "cache", "yocto")
         wifi = wants_wifi(fleet.Fleet(images.root(self.env), self.env), p["IMG_MACHINE"])
-        free = budget.free_gb(self.env.get("WK_STORE") or self.store.root())
+        free = budget.free_gb(self.store.admission_dir())
         log("would build image %s (builder: yocto)" % self.name)
         log("  for machine %s (%s)" % (p["IMG_MACHINE"], p["IMG_ARCH"]))
         log("  branch      %s  (from the '%s' remote)" % (p["YOC_BRANCH"], p["YOC_REMOTE"] or "origin"))

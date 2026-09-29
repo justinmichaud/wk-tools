@@ -6,16 +6,21 @@ scanner -- all against a Fake machine, so nothing here runs a real `defaults`,
 Run: python3 -m unittest tests.test_backup -v
 """
 
+import contextlib
+import io
 import os
+import types
 import unittest
 
-from tests.support import REPO
+from tests.killpoints import converges
+from tests.support import REAL_MACHINES, REPO
+from tests.test_doctor import fake_doctor
 
 import sys
 sys.path.insert(0, str(REPO / "lib"))
 from wk import backup, decl  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Fake, Local  # noqa: E402
+from wk.machine import Fake, Local, Result  # noqa: E402
 
 CMD_KEY = REPO / "cmd" / "key"
 
@@ -210,6 +215,52 @@ class TestLinuxBackup(unittest.TestCase):
         f.answer(["dconf", "dump", "/"], 1, "", "dconf: no such directory")
         with self.assertRaises(Refused):
             backup.linux_backup(f, "/root")
+
+
+class TestKillpointsKeyBackup(unittest.TestCase):
+    """`killpoints[key backup]`: killed after any effect and re-run, a backup reaches the files an uninterrupted one writes, each whole or unchanged."""
+
+    def world(self, macos):
+        f = Fake("here")
+        if macos:
+            f.files["/root/host/macos/defaults.conf"] = "# c\ncom.apple.dock tilesize int 36\n"
+            f.answer(["defaults", "read", "com.apple.dock", "tilesize"], 0, "48\n")
+            tmp = "/tmp/wk-backup-hotkeys.%d" % os.getpid()
+
+            def export(argv, fake):
+                fake.files[tmp] = "<plist/>\n"
+                return Result(0, "", "")
+            f.react(["defaults", "export", "com.apple.symbolichotkeys"], export)
+            f.answer(["plutil", "-convert", "xml1"], 0)
+        else:
+            f.files["/root/host/linux/config.dconf"] = "# head\n\n[a]\nx=1\n"
+            f.answer(["dconf", "dump", "/"], 0, "[a]\nx=2\n")
+        return types.SimpleNamespace(fake=f)
+
+    def test_each_platform_converges_after_a_kill_at_every_effect(self):
+        for macos in (False, True):
+            def run_once(w):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    backup.main("/root", False, w.fake, macos)
+            converges(self, lambda: self.world(macos), run_once, lambda w: dict(w.fake.files))
+
+
+class TestRpi5TuningIsBackedUp(unittest.TestCase):
+    """rpi5-setup.sh cannot re-make the NUMA kernel build or the ssh key beside it; the machine-local section declares both backed-up."""
+
+    def rows(self, name):
+        doc = fake_doctor(False, env={"WK_MACHINES_DIR": str(REAL_MACHINES), "WK_IN_VM": "1", "WK_ROW_LABEL": name})
+        return [r[1] for r in doc.machine_local() if r[2].startswith("backed-up")]
+
+    def test_the_rpi5_declares_its_key_and_kernel_build(self):
+        text = " ".join(self.rows("rpi5"))
+        self.assertIn("host/linux/rpi5/id_ed25519", text)
+        self.assertIn("~/kbuild", text)
+
+    def test_another_machine_declares_neither(self):
+        text = " ".join(self.rows("elsewhere"))
+        self.assertNotIn("id_ed25519", text)
+        self.assertNotIn("kbuild", text)
 
 
 # --- --candidates -------------------------------------------------------------

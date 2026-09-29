@@ -138,7 +138,7 @@ def audit(path):
     """Every argument this command decides for itself."""
     own = []
     name = decl_value(path, "name", "none").split("@")[0]
-    if name != "none" and "WK_NAME" not in path.read_text(errors="replace"):
+    if name != "none" and "ws_name(" not in path.read_text(errors="replace"):
         own.append("name")
     if takes_a_config(path):
         own.append("config")
@@ -187,7 +187,7 @@ class TestWhatTheDispatcherAlreadyDecides(unittest.TestCase):
         self.assertEqual(offenders("--quiet"), [])
 
     def test_every_workspace_name_comes_from_the_dispatcher(self):
-        """a command that takes a name reads WK_NAME, never a positional"""
+        """a command that takes a name reads store.ws_name(), never a positional"""
         self.assertEqual(offenders("name"), [])
 
 

@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import types
@@ -57,7 +58,7 @@ class Host(Fake):
 
 
 class World(Host):
-    """One store (records on disk, everything else in memory), the container target on this fake, and every far machine a fake."""
+    """One store in memory, the container target on this fake, and every far machine a fake."""
 
     def __init__(self, tmp):
         super().__init__("here")
@@ -125,7 +126,7 @@ class World(Host):
     def remove(self, path):
         super().remove(path)
         if path.startswith(str(self.tmp)) and not act.dry_run():
-            record._rmtree(path)
+            shutil.rmtree(path, True)
 
     def gc(self):
         return FakeGc(self)
@@ -147,10 +148,9 @@ class World(Host):
             self.containers.add(name)
 
     def creation_record(self, name, pid=999999):
-        d = Path(self.store_dir) / "task" / ("new-%s-20260101T000000Z" % name)
-        d.mkdir(parents=True)
+        d = os.path.join(self.store_dir, "task", "new-%s-20260101T000000Z" % name)
         for k, v in (("plan", "create"), ("kind", "new"), ("name", name), ("pid", str(pid)), ("where", "here")):
-            (d / k).write_text(v + "\n")
+            self.write_own(os.path.join(d, k), v + "\n")
         return d
 
     def state(self):
@@ -358,7 +358,7 @@ def _selftest(w):
 
 def _creation_record(w):
     d = w.creation_record("gone")
-    return lambda: not d.exists()
+    return lambda: not w.exists(d)
 
 
 # kind -> (make the rubble, returning "is it gone"; what takes it: "" a plain run, a --purge flag, or a command elsewhere)

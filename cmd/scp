@@ -15,8 +15,10 @@ import os
 import posixpath
 import sys
 
-ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import images, store  # noqa: E402
+
+ROOT = images.root()
 
 from wk import decl, targets  # noqa: E402
 from wk.act import Refused, barrier, die, info, log, warn  # noqa: E402
@@ -56,7 +58,7 @@ def kind_or_die(kind, what, name):
 
 
 def main(argv):
-    name = os.environ.get("WK_NAME", "")
+    name = store.ws_name()
     args = decl.Args(decl.Decl(__file__), argv)
     recurse = args.flag("-r")
     operands = args.positionals

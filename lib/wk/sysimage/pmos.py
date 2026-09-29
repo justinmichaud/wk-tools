@@ -28,11 +28,15 @@ def ssh_machine(fl, env, via, host):
     opts = list(KEEPALIVE_OPTS)
     if (conf or {}).get("role") == "bench-device":
         opts += ["-l", "root"] + reach.UNPINNED
-    return Ssh(dest, opts=opts, timeout=int(env.get("WK_SSH_TIMEOUT") or 10), via=via)
+    return Ssh(dest, opts=opts, timeout=reach.ssh_timeout(env), via=via)
+
+
+def build_host(p, env):
+    return env.get("WK_PMOS_HOST") or (p or {}).get("PMO_BUILD_HOST", "")
 
 
 def host_for(p, env):
-    h = env.get("WK_PMOS_HOST") or (p or {}).get("PMO_BUILD_HOST", "")
+    h = build_host(p, env)
     if not h:
         die("this pmos profile sets no PMO_BUILD_HOST (image/configs/<profile>.conf)")
     return h
@@ -58,8 +62,12 @@ def home_dir(machine):
     return h
 
 
+def root_override(env):
+    return env.get("WK_PMOS_ROOT")
+
+
 def root_dir(machine, env):
-    return env.get("WK_PMOS_ROOT") or (home_dir(machine) + "/wk-pmos")
+    return root_override(env) or (home_dir(machine) + "/wk-pmos")
 
 
 def out_dir(root, id_):
@@ -121,7 +129,7 @@ def build_hosts(env):
     for name in images.names(env):
         p = images.quiet_load(name, env)
         if p and p["IMG_BUILDER"] == "pmos":
-            h = env.get("WK_PMOS_HOST") or p["PMO_BUILD_HOST"]
+            h = build_host(p, env)
             if h:
                 hosts.add(h)
     return sorted(hosts)
@@ -129,7 +137,7 @@ def build_hosts(env):
 
 def cache_probe(machine, env):
     """{"work": kb, "out": kb} of what exists; None when the host did not answer, since {} would be a measurement."""
-    root_expr = env.get("WK_PMOS_ROOT") or "$HOME/wk-pmos"
+    root_expr = root_override(env) or "$HOME/wk-pmos"
     out = sh(machine, "du -sk %s/work %s/out 2>/dev/null || true" % (root_expr, root_expr))
     if not out.ok:
         return None
@@ -207,7 +215,7 @@ class Pmos:
         return ssh_machine(self.fleet, self.env, self.here, self.host())
 
     def key_path(self):
-        return self.env.get("WK_IMAGE_KEY") or os.path.join(self.env.get("HOME") or os.path.expanduser("~"), ".ssh", "id_ed25519.pub")
+        return images.driving_key_path(self.env)
 
     def dry_run(self):
         p, machine = self.p, self.machine()
@@ -223,7 +231,7 @@ class Pmos:
         log("  radio       %s GHz -- the build refuses if that SSID is not on the air in a" % (p["PMO_WIFI_BANDS"].replace(" ", "/") or "unknown"))
         log("              band this phone has, because such an image boots into isolation")
         log("  console     user '%s', password '%s' (the phone's screen; ssh is key-only)" % (p["PMO_USER"], p["PMO_PASSWORD"]))
-        log("  into        %s/out/<id> on %s" % (self.env.get("WK_PMOS_ROOT") or "$HOME/wk-pmos", machine.name))
+        log("  into        %s/out/<id> on %s" % (root_override(self.env) or "$HOME/wk-pmos", machine.name))
         log("  writes to   a card -- '%s' copies it off and writes it," % (PROVISION % (p["PMO_BRIDGE"] or "<bridge>")))
         log("              or by hand once it is local: wk sysimage write --from <path> --disk <machine>:<device>")
         log("dry run -- nothing was built.")

@@ -3,7 +3,9 @@ the record's shape on disk and what the verdict says under each condition.
 
 Run: python3 tests/run.py -k tests.test_wk_record
 """
+import io
 import os
+import shutil
 import sys
 import tempfile
 import types
@@ -16,7 +18,7 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
-from wk import record  # noqa: E402
+from wk import record, status, statusview  # noqa: E402
 
 
 class RecordTest(unittest.TestCase):
@@ -32,7 +34,7 @@ class RecordTest(unittest.TestCase):
                                       env={"WK_STORE": str(self.tmp / "store")})
 
     def tearDown(self):
-        record._rmtree(self.tmp)
+        shutil.rmtree(self.tmp, True)
 
     def begin(self, **kw):
         args = dict(kind="build", where="here", name="ws", kill="wk build ws --kill",
@@ -50,7 +52,7 @@ class TestTheShapeOnDisk(RecordTest):
         self.assertEqual(t.field("kind"), "build")
         self.assertEqual(t.plan(), ["configure", "compile"])
         self.assertEqual(t.field("holds"), "device:rpi3")
-        self.assertTrue((t.path / "steps").is_dir())
+        self.assertEqual([], list((t.path / "steps").glob("*")))
 
     def test_a_target_record_has_no_pid_until_the_job_announces_one(self):
         t = self.begin(where="target")
@@ -148,6 +150,58 @@ class TestTheVerdict(RecordTest):
         self.answers[("ws", 77)] = None
         self.assertEqual(t.verdict("capped"), "unanswered")
         self.assertTrue(t.running())
+
+
+class TestToleratesCorruptAndOld(RecordTest):
+    """`unit record.tolerates_corrupt_and_old`: a record missing a field the reader now requires (an older wk's
+    shape) or holding one it cannot read renders as unreadable, and every other record still lists."""
+
+    def mixed(self, damage):
+        good = self.begin(name="good")
+        bad = self.begin(name="bad")
+        damage(bad.path)
+        return good, bad
+
+    def assert_unreadable_beside_good(self, damage, missing):
+        good, bad = self.mixed(damage)
+        self.assertEqual(("running", "unreadable"), (good.verdict(), bad.verdict()))
+        self.assertEqual(missing, bad.unreadable())
+        rows, worst = status.task_records(self.records, clock=self.clock)
+        self.assertEqual({good.id: "running", bad.id: "unreadable"}, {r["task"]: r["state"] for r in rows})
+        self.assertEqual(4, worst)
+        self.assertEqual(good.id, self.records.find("build", "good").id)
+        buf = io.StringIO()
+        statusview.render_text_stream(iter([{"kind": "machine", "name": "m"}] + rows + [{"kind": "exit", "code": worst}]),
+                                      buf, False)
+        self.assertEqual(1, buf.getvalue().count(" unreadable"))
+
+    def test_a_record_missing_a_required_field_is_unreadable(self):
+        for field in record.REQUIRED:
+            with self.subTest(field=field):
+                self.assert_unreadable_beside_good(lambda p: (p / field).unlink(), [field])
+                shutil.rmtree(self.records.root)
+
+    def test_a_where_no_reader_knows_is_unreadable(self):
+        self.assert_unreadable_beside_good(lambda p: (p / "where").write_text("guest\n"), ["where"])
+
+    def test_a_field_that_cannot_be_read_is_unreadable(self):
+        def damage(p):
+            (p / "kind").unlink()
+            (p / "kind").mkdir()
+            (p / "plan").unlink()
+            (p / "plan").mkdir()
+        self.assert_unreadable_beside_good(damage, ["kind", "plan"])
+
+    def test_a_record_being_begun_is_never_seen_part_written(self):
+        """The plan publishes a record, so it is written last: a reader between two fields lists nothing."""
+        fake = Fake("m")
+        seen = []
+        recs = record.Records("/s", clock=self.clock, machine=fake, env={})
+        real = fake.write_own
+        fake.write_own = lambda path, text: (seen.append([t.unreadable() for t in recs.list()]), real(path, text))
+        recs.begin("build", "here", "ws", "wk build ws --kill", "/l", ["compile"], pid=1)
+        self.assertEqual([], [u for snap in seen for u in snap if u])
+        self.assertEqual([], recs.list()[0].unreadable())
 
 
 class TestAStopAskedFor(RecordTest):
@@ -270,16 +324,18 @@ class TestHoldFollowsHolder(RecordTest):
 
     def test_an_unreadable_pid_keeps_the_hold(self):
         t = self.held(1001)
-        (t.path / "pid").write_text("10x1\n")
+        pid = str(t.path / "pid")
+        self.machine.files[pid] = "10x1\n"
         self.assertEqual(self.holders(), [t.id])
-        (t.path / "pid").unlink()
-        (t.path / "pid").mkdir()
+        del self.machine.files[pid]
+        self.machine.dirs.add(pid)
         self.assertEqual(self.holders(), [t.id])
 
     def test_an_unreadable_claim_keeps_the_hold(self):
         t = self.held(1001)
-        (t.path / "holds").unlink()
-        (t.path / "holds").mkdir()
+        holds = str(t.path / "holds")
+        del self.machine.files[holds]
+        self.machine.dirs.add(holds)
         self.assertEqual(self.holders(), [t.id])
 
     def test_a_hold_names_the_pid_that_took_it(self):
@@ -323,7 +379,7 @@ class TestOneStorePerTarget(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="wk-test-vmstore-")
-        self.addCleanup(lambda: record._rmtree(self.tmp))
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, True))
         self.base = {"HOME": self.tmp, "XDG_STATE_HOME": self.tmp + "/state"}
 
     def envs(self):
@@ -374,6 +430,29 @@ class TestTheMachineName(unittest.TestCase):
 
     def test_in_the_vm_the_forwarding_workstation_names_the_row(self):
         self.assertEqual(record.machine_name({"WK_IN_VM": "1", "WK_ROW_LABEL": "mbp"}, Fake()), "mbp")
+
+
+
+class TestWatchdogSettings(unittest.TestCase):
+    def test_the_deadlines_come_from_the_env_else_the_default(self):
+        self.assertEqual((record.watchdog_stall({}), record.watchdog_abort({}), record.task_ask_seconds({})), (300, 0, 5))
+        env = {"WK_STALL_SECONDS": "60", "WK_ABORT_SECONDS": "90", "WK_TASK_ASK_SECONDS": "9"}
+        self.assertEqual((record.watchdog_stall(env), record.watchdog_abort(env, 1800), record.task_ask_seconds(env)), (60, 90, 9))
+
+    def test_the_deadlines_may_be_fractional(self):
+        env = {"WK_STALL_SECONDS": "1.5", "WK_ABORT_SECONDS": "2.5"}
+        self.assertEqual((record.watchdog_stall(env), record.watchdog_abort(env)), (1.5, 2.5))
+
+    def test_a_runs_own_deadlines_never_override_the_ones_set(self):
+        env = {"WK_STALL_SECONDS": "60"}
+        record.default_watchdog(env, 900, 5400)
+        self.assertEqual(env, {"WK_STALL_SECONDS": "60", "WK_ABORT_SECONDS": "5400"})
+
+
+class TestRowLabelAndHostSelf(unittest.TestCase):
+    def test_they_are_what_the_dispatcher_exported(self):
+        self.assertEqual((record.row_label({}), record.host_self({})), ("", False))
+        self.assertEqual((record.row_label({"WK_ROW_LABEL": "mbp"}), record.host_self({"WK_HOST_SELF": "1"})), ("mbp", True))
 
 
 if __name__ == "__main__":

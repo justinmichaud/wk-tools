@@ -9,12 +9,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 from wk import act, git, kv, pr, secrets
 from wk.act import Refused, debug, die, info, log, warn
-from wk.store import Bases, Store
+from wk.store import Bases, Store, in_vm
 
 SCOPE_FLAGS = ("--all", "--tools", "--target", "--machine", "--mirror")
 FETCH_JOBS = 16
 FIX_AGAIN = "'wk sync <ws> --fix' re-asserts the wiring"
-BROKER_SOCKET = "/run/wk/broker.sock"
 
 
 def where(in_workspace, args):
@@ -84,11 +83,11 @@ class Sync:
         return any(t in here for t in self.targets())
 
     def mirror_is_here(self):
-        return not self.env.get("WK_IN_VM")
+        return not in_vm(self.env)
 
     # The mirror is mounted read-only in a workspace, so the refresh is asked of the broker, which runs `wk sync --mirror`.
     def mirror_refresh_request(self):
-        sock = self.env.get("WK_BROKER_SOCKET") or BROKER_SOCKET
+        sock = Store(self.env).workspace_broker_socket()
         if not self.here.run(["test", "-S", sock]).ok:
             warn("no request broker at %s, so this machine's mirror was not\n"
                  "    refreshed -- only this workspace's own fetch ran, against whatever the\n"

@@ -23,8 +23,10 @@ import os
 import shlex
 import sys
 
-ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import images, store  # noqa: E402
+
+ROOT = images.root()
 
 from wk import buildconf, decl, session, targets  # noqa: E402
 from wk.ldpath import LLDB_PIN_OPTS, LLDB_PRELUDE, lldb_waiting  # noqa: E402
@@ -79,7 +81,7 @@ def session_env(root):
 
 
 def main(argv):
-    name = os.environ.get("WK_NAME", "")
+    name = store.ws_name()
     opts = parse(argv)
 
     reg = targets.Registry(ROOT)
@@ -93,7 +95,7 @@ def main(argv):
             "    '%s' is a remote target, an arbitrary machine reached over ssh with no seat\n"
             "    of its own to draw into. Use a container or vm workspace instead." % name)
 
-    config = os.environ.get("WK_CONFIG") or gui_default_config(reg, name)
+    config = store.build_config() or gui_default_config(reg, name)
     try:
         cfg = buildconf.resolve(config, target.os(), target.kind, target.env)
     except LookupError:

@@ -19,7 +19,7 @@ from wk import decl as D
 from wk import act, buildconf, clock, images, record, sshalias, targets
 from wk.act import info, log, warn
 from wk.machine import Local, is_macos
-from wk.store import Store
+from wk.store import Store, build_config, dispatch_target, in_vm, ws_name
 
 ROOT = Path(images.root())
 MACHINE = Store().podman_machine()
@@ -601,13 +601,13 @@ def registry():
     return _registry
 
 
-def delegate_target(target):
-    """The target's driver when it is a machine that runs commands itself, else None."""
+def delegate_target(target, ws=""):
+    """The target's driver when it runs commands itself and this machine drives no live task on `ws` there, else None."""
     try:
         t = registry().load(target)
     except LookupError:
         return None
-    return t if t.delegates() else None
+    return t if t.delegates() and not (ws and t.records().driving(ws)) else None
 
 
 def delegate_run(target, cmd, args):
@@ -752,8 +752,8 @@ def main(argv):
     args = inv.args = inv.verb_first()
 
     # WK_NAME and WK_CONFIG are this invocation's answers, never inherited ones.
-    os.environ.pop("WK_NAME", None)
-    inherited_config = os.environ.pop("WK_CONFIG", None)
+    ws_name(take=True)
+    inherited_config = build_config(take=True)
 
     where = inv.where()
     sub = args[0] if args else ""
@@ -780,7 +780,7 @@ def main(argv):
     inv.verb_given()
     inv.refuse_inherited_config(inherited_config)
     sub = args[0] if args else ""
-    if os.environ.get("WK_DRY_RUN") and not d.honours_dryrun(args) and not d.is_readonly(sub):
+    if act.dry_run() and not d.honours_dryrun(args) and not d.is_readonly(sub):
         inv.usage_die("'wk %s' has no dry run yet: not every change it makes goes through\n"
                       "    the one path --dry-run intercepts (owed, docs/PLAN.md)" % cmd)
     if d.is_destructive(args):
@@ -800,15 +800,15 @@ def main(argv):
 
     delegate = None
     if (where == "workspace" and name_decl.split("@")[0] != "none" and not in_workspace()
-            and not os.environ.get("WK_IN_VM") and not d.here and not d.lifecycle):
-        delegate = delegate_target(resolved)
+            and not in_vm() and not d.here and not d.lifecycle):
+        delegate = delegate_target(resolved, decl_name(inv, name_decl, slot, takes, derived))
 
-    forwards = (where == "workspace" and is_macos() and not os.environ.get("WK_IN_VM")
+    forwards = (where == "workspace" and is_macos() and not in_vm()
                 and not in_workspace() and d.forward and resolved == "container")
     if not forwards and delegate is None:
         inv.check_needs()
 
-    if where == "store" and not os.environ.get("WK_IN_VM"):
+    if where == "store" and not in_vm():
         if not registry().store.is_local():
             forward_to_vm(inv, cmd, args)
 
@@ -824,8 +824,8 @@ def main(argv):
         if name_in_argv("required", slot, takes, args) is None and not cwd_workspace():
             inv.usage_die()
     if in_workspace():
-        os.environ.setdefault("WK_TARGET", "local")
-        resolved = os.environ["WK_TARGET"]
+        resolved = dispatch_target(default="local")
+        os.environ.update({"WK_TARGET": resolved})
         name = wk_self()
         if name_decl.split("@")[0] != "none" and argv_name(slot, takes, args) == name:
             die("this is workspace '%s', and there is no workspace argument in here --\n"
@@ -897,21 +897,27 @@ def ask_target(inv, resolved, name, exists, ready):
         raise Exit(e.status)
 
 
+def decl_name(inv, name_decl, slot, takes, derived):
+    if name_decl.split("@")[0] == "derived":
+        return derived
+    if slot > 0:
+        return name_in_argv(name_decl.split("@")[0], slot, takes, inv.args) or cwd_workspace() or ""
+    return ""
+
+
 def resolve_target(inv, name_decl, slot, takes, derived):
-    if os.environ.get("WK_TARGET"):
-        return os.environ["WK_TARGET"]
+    inherited = dispatch_target()
+    if inherited:
+        return inherited
     args = inv.args
     named = D.Args(inv.decl, argv_split(inv.decl.opts_for(args), args)).value("--target")
     if named:
         return named
-    name = ""
     if name_decl.split("@")[0] == "derived":
         t = inv.named_target()
         if t:
             return t
-        name = derived
-    elif slot > 0:
-        name = name_in_argv(name_decl.split("@")[0], slot, takes, args) or cwd_workspace() or ""
+    name = decl_name(inv, name_decl, slot, takes, derived)
     if name:
         try:
             return registry().ws_target(name)

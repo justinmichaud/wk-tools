@@ -26,8 +26,10 @@ import shlex
 import subprocess
 import sys
 
-ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import images, store  # noqa: E402
+
+ROOT = images.root()
 
 from wk import buildconf, decl, job, record, session, targets  # noqa: E402
 from wk.ldpath import LLDB_PIN_OPTS, lldb_waiting  # noqa: E402
@@ -78,8 +80,8 @@ def missing_layout_paths(runner, src, paths):
 def size_and_admit(reg, target, name, cfg, clock):
     """`wk build`'s sizing: one machine's jobs and disk are spoken for the same way whether the job compiles or runs tests."""
     budget, running, jobs, mbpj, _ = size_for(reg, target, name, cfg, clock)
-    store = reg.env.get("WK_STORE") or reg.env.get("HOME", "")
-    budget.disk_admit("this test run", cfg.disk_gb, budget.free_gb(store), "%s's filesystem" % store)
+    admission = reg.store.admission_dir()
+    budget.disk_admit("this test run", cfg.disk_gb, budget.free_gb(admission), "%s's filesystem" % admission)
     budget.admit("this test run", jobs, running)
     if not dry_run():
         budget.record("wk test %s" % name, jobs, jobs * mbpj, "pid:%d" % os.getpid())
@@ -98,7 +100,7 @@ def build_cmd(suite, src, out_env, render_env, wrap, lower, port, jobs, debug_fl
 
 
 def main(argv, reg=None, clock=None, popen=None):
-    name = os.environ.get("WK_NAME", "")
+    name = store.ws_name()
     opts = parse(argv)
     clock = clock or Clock()
     popen = popen or subprocess.Popen
@@ -120,7 +122,7 @@ def main(argv, reg=None, clock=None, popen=None):
                 "    Look at it:  wk enter %s  and then  pgrep -af run-" % (name, name))
         return 0
 
-    config = os.environ.get("WK_CONFIG") or reg.default_config(name)
+    config = store.build_config() or reg.default_config(name)
     try:
         cfg = buildconf.resolve(config, target.os(), target.kind, target.env)
     except LookupError:
@@ -227,7 +229,7 @@ def main(argv, reg=None, clock=None, popen=None):
         try:
             log("  log: %s" % log_path)
             log("  stop: %s" % kill_cmd)
-            watcher = job.PidWatch(target, name, task, log_path, "test", PID_MATCH, int(reg.env.get("WK_JOB_PID_TRIES") or 900))
+            watcher = job.PidWatch(target, name, task, log_path, "test", PID_MATCH, job.pid_tries(reg.env))
             watcher.start()
             script = "echo \"wk: test pid $$\" >&2\n%s" % cmd
             run_argv, cwd = target.exec_argv(name, ["bash", "-lc", script])

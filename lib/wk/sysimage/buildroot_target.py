@@ -16,6 +16,7 @@ if __name__ == "__main__":
 from wk.clock import Clock  # noqa: E402
 from wk import slot  # noqa: E402
 from wk.machine import here, isolated_module  # noqa: E402
+from wk.store import Store  # noqa: E402
 
 TOOLS = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 MB_PER_JOB = 2048
@@ -367,7 +368,7 @@ class Build:
 
     def checkout(self):
         a, src = self.a, self.a.src
-        mirror = self.env.get("WK_MIRROR")
+        mirror = Store(self.env).container_mirror()
         if not mirror:
             fail("WK_MIRROR names the mirror this container mounts, set by lib/wk/targets.py's Container")
         dirty = [l for l in self.m.run(["git", "-C", src, "status", "--porcelain"]).out.splitlines() if l.strip()]

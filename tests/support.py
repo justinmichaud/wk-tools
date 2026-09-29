@@ -114,6 +114,19 @@ def dispatch_vars():
 # WK_CONFIG is the dispatcher's too (lib/wk/dispatch.py hands the build config over in it).
 DISPATCH_VARS = dispatch_vars() + ("WK_CONFIG",)
 
+# The dispatcher's variables and those wk sets for its own child processes and
+# scripts (onboard script parameters, the board driver's environment, the holds
+# a driver passes to the tasks it starts): a protocol between wk's own
+# processes, so no README line or test of its own is owed. Each is still read
+# in one function.
+INTERNAL_VARS = DISPATCH_VARS + (
+    "WK_AB_ROOT", "WK_MIRROR", "WK_DEV", "WK_DEVICE_HELD", "WK_DO", "WK_FILE", "WK_OCT", "WK_PART", "WK_PATH", "WK_SRC",
+    "WK_TASK_HELD", "WK_TASK_PARENT", "WK_TS_API_SECRET_FILE",
+    "WK_BOARD_CLASS", "WK_BOARD_EVIDENCE", "WK_BOARD_EXPECT", "WK_BOARD_JIT_TIERS",
+    "WK_BOARD_PROFILE", "WK_BOARD_WARMUP", "WK_BOARD_KILL", "WK_BOARD_LAUNCH", "WK_BOARD_PGO", "WK_BOARD_RESET",
+    "WK_BOARD_SSH", "WK_BOARD_URL",
+)
+
 # A shell started from `wk zed`/`wk enter` inherits those variables and keeps
 # them, so a test that inherits one is a test about whatever that person last
 # worked on. They go at import as well as in _clean_env below: _clean_env is

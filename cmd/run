@@ -22,8 +22,10 @@ import os
 import shlex
 import sys
 
-ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import images, store  # noqa: E402
+
+ROOT = images.root()
 
 from wk import buildconf, decl, targets  # noqa: E402
 from wk.act import Refused, die, exec_into  # noqa: E402
@@ -92,13 +94,13 @@ def parse(argv):
     max_raw = args.value("--max") or "200"
     if not max_raw.isdigit():
         die("--max needs a positive integer iteration count (got '%s')\n"
-            "    example:  wk run %s --until-crash --max 50 -- ..." % (max_raw, os.environ.get("WK_NAME", "")))
+            "    example:  wk run %s --until-crash --max 50 -- ..." % (max_raw, store.ws_name()))
     return {"lldb": args.flag("--lldb"),
             "until_crash": args.flag("--until-crash"), "max": int(max_raw), "tail": args.tail}
 
 
 def main(argv):
-    name = os.environ.get("WK_NAME", "")
+    name = store.ws_name()
     opts = parse(argv)
 
     reg = targets.Registry(ROOT)
@@ -107,7 +109,7 @@ def main(argv):
     except LookupError as e:
         die(str(e))
 
-    config = os.environ.get("WK_CONFIG") or reg.default_config(name)
+    config = store.build_config() or reg.default_config(name)
     try:
         cfg = buildconf.resolve(config, target.os(), target.kind, target.env)
     except LookupError:

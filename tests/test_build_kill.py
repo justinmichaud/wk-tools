@@ -86,9 +86,6 @@ class StubTarget:
     def pid_alive(self, ws, pid, cap=None):
         return self.exec(ws, ["kill", "-0", str(pid)]).rc == 0
 
-    def task_put(self, ws, task):
-        pass
-
 
 def records(store, target=None):
     return record.Records(store, env={}, ask_target=target.pid_alive if target else None)

@@ -46,8 +46,10 @@
 import os
 import sys
 
-ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import images, store  # noqa: E402
+
+ROOT = images.root()
 
 from wk import decl, sync, targets, workspace  # noqa: E402
 from wk.act import Refused, die  # noqa: E402
@@ -108,7 +110,7 @@ def main(argv):
     if argv[:1] == ["--where"]:
         print(sync.where(reg.in_workspace(), argv[1:]))
         return 0
-    scope, name, target, fix = parse(argv, os.environ.get("WK_NAME", ""))
+    scope, name, target, fix = parse(argv, store.ws_name())
     clock = Clock()
     return sync.Sync(reg, clock, Lock(reg.store, reg.machine, clock), scope, name, target, fix).run()
 

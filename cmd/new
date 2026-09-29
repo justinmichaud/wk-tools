@@ -38,8 +38,10 @@
 import os
 import sys
 
-ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import images, store  # noqa: E402
+
+ROOT = images.root()
 
 from wk import decl, record, targets, workspace  # noqa: E402
 from wk.act import Refused, die  # noqa: E402
@@ -66,7 +68,7 @@ def driver(reg, records, name, opts):
 
 def main(argv):
     opts = parse(argv)
-    name = os.environ.get("WK_NAME", "")
+    name = store.ws_name()
     reg = targets.Registry(ROOT)
     records = record.Records(machine=reg.machine)
     if opts.get("detached"):

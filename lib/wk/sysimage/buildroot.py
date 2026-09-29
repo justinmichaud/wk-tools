@@ -146,20 +146,20 @@ class Buildroot(task.ContainerBuilder):
             try:
                 if p["BR_KERNEL_DEB_URL"]:
                     n += 1
-                    st.step(t, n)
+                    t.step(n)
                     kernel_tar = self.kernel()
                     kernel_dts = self.kernel_dts()
                 n += 1
-                st.step(t, n)
+                t.step(n)
                 self.ensure_ws(target, ws, base, tag)
                 n += 1
-                st.step(t, n)
+                t.step(n)
                 if not target.sync_tools(ws):
                     die("pushing wk-tools into '%s' failed -- the reason is above" % ws)
             except act.Refused as e:
                 t.end(e.status)
                 raise
-            st.step(t, n + 1)
+            t.step(n + 1)
             # BR_TREE_COMMIT is a commit, never the 2020.02 tag: the cog defconfig is absent there.
             info("building %s in '%s' (hours; --detach returns instead)" % (self.name, ws))
             st.run(t, budget, jobs, self.image_argv(target.tools(ws), jobs, wifi, kernel_tar, kernel_dts), PATTERN)
@@ -221,11 +221,11 @@ class Buildroot(task.ContainerBuilder):
         lock = st.admit(budget, running, jobs)
         try:
             t = st.begin(["sync wk-tools into '%s'" % ws, "build WebKit %s into slot '%s' with -j%d" % (commit[:12], name, jobs)])
-            st.step(t, 1)
+            t.step(1)
             if not target.sync_tools(ws):
                 t.end(1)
                 die("pushing wk-tools into '%s' failed -- the reason is above" % ws)
-            st.step(t, 2)
+            t.step(2)
             info("building WebKit %s into slot '%s' of %s in '%s' (tens of minutes; --detach returns instead)" % (commit[:12], name, self.name, ws))
             st.run(t, budget, jobs, ["python3", target.tools(ws) + "/lib/wk/sysimage/buildroot_target.py", "webkit", "--name", self.name, "--commit", commit,
                                      "--slot", name, "--jobs", str(jobs)], PATTERN)

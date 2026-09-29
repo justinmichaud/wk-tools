@@ -256,5 +256,18 @@ class TestMbPerJob(unittest.TestCase):
         self.assertEqual(buildconf.mb_per_job(cfg("gtk-debug"), {}), 3072)
 
 
+
+class TestCompilerAndMemoryOverrides(unittest.TestCase):
+    def test_wk_cc_and_wk_cxx_pick_the_compilers(self):
+        e = env_of(cfg("gtk-debug", env={"WK_CC": "gcc-14", "WK_CXX": "g++-14"}))
+        self.assertEqual((e["CC"], e["CXX"]), ("gcc-14", "g++-14"))
+        e = env_of(cfg("gtk-debug"))
+        self.assertEqual((e["CC"], e["CXX"]), ("clang", "clang++"))
+
+    def test_the_memory_floor_reaches_the_build_only_when_set(self):
+        self.assertEqual(env_of(cfg("gtk-debug"), {"WK_MEM_FLOOR_MB": "1500"})["WK_MEM_FLOOR_MB"], "1500")
+        self.assertNotIn("WK_MEM_FLOOR_MB", env_of(cfg("gtk-debug")))
+
+
 if __name__ == "__main__":
     unittest.main()

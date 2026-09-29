@@ -51,10 +51,12 @@ import signal
 import subprocess
 import sys
 
-ROOT = os.environ.get("WK_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import images, store  # noqa: E402
 
-from wk import wall  # noqa: E402
+ROOT = images.root()
+
+from wk import guest, wall  # noqa: E402
 from wk.act import Refused, barrier, debug, die, info, log, warn  # noqa: E402
 from wk.doctor import Report  # noqa: E402
 from wk.kv import kv  # noqa: E402
@@ -255,11 +257,11 @@ class Ai:
     def guest_egress(self):
         """A macOS guest's egress is filtered on the host by Softnet, unmeasurable from in there, and Softnet applies at
         `tart run`: a guest booted without it is unfiltered."""
-        name, unfiltered = self.name, self.env.get("WK_VM_UNFILTERED")
+        name, unfiltered = self.name, guest.is_unfiltered(self.env)
         if not self.target.egress_filtered(name) and not unfiltered:
             barrier("'%s' was booted with NO egress filter.\n    Restart it filtered:  wk stop %s && wk start %s\n"
                     "    (WK_VM_UNFILTERED=1 is the same decision, said the older way.)" % (name, name, name))
-        softnet = self.env.get("WK_SOFTNET_BIN") or "/usr/local/bin/softnet"
+        softnet = guest.softnet_bin(self.env)
         if not unfiltered and self.machine.run(["test", "-x", softnet]).ok:
             info("'%s' is a macOS VM: egress is filtered on the host by Softnet,\n  default-deny except the wk-proxy address. Of "
                  "the host filesystem it reaches\n  one directory, the claude.ai login every container mounts too, and the\n"
@@ -407,7 +409,7 @@ class Ai:
 def main(argv, env=None, reg=None):
     env = os.environ if env is None else env
     agent = argv[0]
-    name = env.get("WK_NAME", "")
+    name = store.ws_name(env)
     require_name(name)
     reg = reg or Registry(ROOT, env, Local())
     try:

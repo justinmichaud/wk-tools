@@ -11,8 +11,8 @@ machine's. `--rotate` elects nothing: it removes the old key from GitHub, mints
 a fresh one and puts that everywhere, so the whole fleet turns over from one
 command. A shared build
 machine holds none: `remote/provision.sh` writes an ssh config with no
-IdentityFile, so a push there signs with a forwarded agent and nothing rests on
-a machine other people are root on.
+IdentityFile, so nothing rests on a machine other people are root on and a
+push is made from the workstation.
 
 Nothing here reaches a real machine, GitHub, or the tailnet: `gh` and `ssh` are
 recording stubs, and every key is a throwaway generated in the test's own tmp.
@@ -325,8 +325,7 @@ class _Fleet(_Shared):
 class TestSetupPutsOneWorkingCredentialOnEveryWorkstation(_Fleet):
     """`wk key setup` converges the fleet: the deploy keys and the GitHub API
     token go to every peer workstation over the tailnet, and to no shared build
-    machine -- a build machine holds nothing at rest and reaches the elected key
-    through a forwarded agent."""
+    machine -- a build machine holds nothing at rest."""
 
     def test_the_peer_takes_the_keys_and_the_token_and_the_box_takes_nothing(self):
         self.key("ensure")
@@ -805,12 +804,12 @@ class TestSetupLogsInForAWorkstationWithoutALogin(_Fleet):
 
 class TestABuildMachineHoldsNoKey(unittest.TestCase):
     """remote/provision.sh writes the ssh config that selects the deploy key by
-    fork alias. On a shared build machine that config names no IdentityFile --
-    the key is a forwarded agent's -- and no push-keys directory is made."""
+    fork alias. On a shared build machine that config names no IdentityFile and
+    no push-keys directory is made."""
 
     def _config(self):
         """The ssh config remote/provision.sh writes, produced the same way it
-        does: the alias blocks with an empty dir (the agent-forward form)."""
+        does: the alias blocks with an empty dir."""
         cp = subprocess.run(["python3", "-m", "wk.secrets", "alias-blocks", ""], capture_output=True, text=True,
                             cwd=str(REPO), env={**os.environ, "PYTHONPATH": str(REPO / "lib"), "WK_ROOT": str(REPO)})
         self.assertEqual(0, cp.returncode, cp.stderr)

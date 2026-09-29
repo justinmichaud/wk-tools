@@ -197,5 +197,16 @@ class TestBudget(ResourcesTest):
         self.assertIsNone(resources.parse_df("garbage"))
 
 
+
+class TestOverridesThatSizeABuild(ResourcesTest):
+    def test_the_free_memory_and_the_job_ceiling_come_from_the_env(self):
+        r = self.linux({"WK_AVAIL_MB": "4096", "WK_MAX_JOBS": "3"})
+        self.assertEqual((r.avail_override(), r.max_jobs(), r.avail_mem_mb()), (4096, 3, 4096))
+
+    def test_unset_neither_is_an_override(self):
+        r = self.linux()
+        self.assertEqual((r.avail_override(), r.max_jobs()), (None, None))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@ and a clock -- machine.conformance[<kind>] over one test body, boot.arming_exact
 Run: python3 tests/run.py --unit -k test_boot_driver
 """
 import re
+import shlex
 import subprocess
 import sys
 import unittest
@@ -269,7 +270,7 @@ class TestChannel(unittest.TestCase):
         (argv,) = self.sent(via)
         self.assertEqual(argv[argv.index("-l") + 1], "root")
         self.assertIn("StrictHostKeyChecking=no", argv)
-        self.assertEqual(argv[-2:], ("100.64.0.5", "sh -c 'cat /proc/sys/kernel/random/boot_id'"))
+        self.assertEqual((argv[-2], shlex.split(argv[-1])[-1]), ("100.64.0.5", "sh -c 'cat /proc/sys/kernel/random/boot_id'"))
 
     def test_a_workstation_in_host_mode_is_its_person_by_name(self):
         ch, via = self.channel()

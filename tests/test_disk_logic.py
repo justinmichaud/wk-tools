@@ -208,7 +208,7 @@ class TestChannel(unittest.TestCase):
         conf = {"name": "rpi4", "ssh": "rpi4", "device": "/dev/sdc"}
         d = disk.Disks(Channel(REPO, conf, "host", env={}, via=m), conf)
         self.assertEqual(d.for_machine("rpi4"), "")
-        sent = [e[1] for e in m.effects if e[1][0] == "ssh"]
+        sent = [e[1][:-1] + (shlex.split(e[1][-1])[-1],) for e in m.effects if e[1][0] == "ssh"]
         self.assertEqual(sent[0][-2:], ("rpi4", "sh -c %s" % shlex.quote(disk.LSBLK)))
         self.assertIn(("rpi4", "sudo -n %s whose /dev/sdc" % CARD_PRIV), [e[-2:] for e in sent])
         self.assertFalse([e for e in m.effects if e[1][0] in ("bash", "env")])

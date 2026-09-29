@@ -494,16 +494,9 @@ class TestTheSwitchEndToEnd(_Agent):
         self.assertIn("wk-ssh-agent.service", cp.stdout)
 
 
-class TestAMachineWithNoAgentSaysSoRatherThanHeldBack(_Agent):
-    """A build box is a plain checkout with no container around it, so it names
-    no ssh-agent socket and `remote/provision.sh` points its `core.sshCommand`
-    straight at the private half. The key in `push-keys` is therefore *live*
-    there whatever any switch says -- and `status` reported it as "held back",
-    which is what `wk push off --all` then aggregated into a fleet reported as
-    off while that box could still push.
-
-    Installing an agent there is owed (docs/PLAN.md); until
-    it lands, saying so is the honest report."""
+class TestABuildBoxHoldsNoKeyAndHasNoSwitch(_Agent):
+    """A build box is a plain checkout that other people are root on: remote/provision.sh leaves no deploy key
+    at rest there and nothing forwards one to it, so a push is made from the workstation."""
 
     MACHINE = "wk-test-buildbox"
 
@@ -524,40 +517,37 @@ class TestAMachineWithNoAgentSaysSoRatherThanHeldBack(_Agent):
                             "WK_REMOTE_MARKER": str(marker),
                             **(extra or {})})
 
-    def test_status_says_the_switch_does_not_exist_and_the_key_is_live(self):
-        cp = self.run_wk("push", "status", env=self.env())
-        out = cp.stdout
-        self.assertIn("always live", out)
-        self.assertNotIn("held back (", out)
-        self.assertIn("no ssh-agent socket", out)
-        self.assertIn("docs/PLAN.md", out)
+    def no_key_at_rest(self):
+        for p in self.held.iterdir():
+            p.unlink()
 
-    def test_that_position_is_on_so_a_fleet_is_not_reported_as_off(self):
+    def test_status_with_no_key_at_rest_is_off_not_a_missing_key(self):
+        """cmd/ai reads 1 as nothing to hold back; 4 is a workstation with no keys."""
+        self.no_key_at_rest()
+        cp = self.run_wk("push", "status", env=self.env())
+        self.assertEqual(1, cp.returncode, cp.stdout)
+
+    def test_a_key_left_at_rest_is_live_so_a_fleet_is_not_reported_as_off(self):
         """cmd/ai reads `push_switch status || return 0` as a closed switch, so
         exit 1 here is the sentence "nothing can push" about a machine that
         can."""
         cp = self.run_wk("push", "status", env=self.env())
         self.assertEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("cannot be switched off", cp.stdout)
 
     def test_off_refuses_here_rather_than_claiming_to_have_thrown_it(self):
         cp = self.run_wk("push", "off", env=self.env())
-        self.assertNotEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("no ssh-agent socket", cp.stdout)
-        self.assertIn("docs/PLAN.md", cp.stdout)
-        self.assertNotIn("push is OFF", cp.stdout)
+        self.assertEqual(5, cp.returncode, cp.stdout)
 
     def test_on_refuses_here_too(self):
         cp = self.run_wk("push", "on", env=self.env())
-        self.assertNotEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("no ssh-agent socket", cp.stdout)
+        self.assertEqual(5, cp.returncode, cp.stdout)
 
     def test_a_machine_that_does_have_one_still_says_held_back(self):
         """The container target names a socket, so nothing above changes the
         report on the machine the switch actually works on."""
         cp = self.run_wk("push", "status", env=super().env())
         self.assertIn("held back", cp.stdout)
-        self.assertNotIn("always live", cp.stdout)
+        self.assertNotIn("at rest (", cp.stdout)
         self.assertEqual(1, cp.returncode, cp.stdout)
 
 
@@ -1013,7 +1003,6 @@ class TestAMachineWithNoSwitchSaysSoWithACodeOfItsOwn(WkTest):
             with self.subTest(action=action):
                 cp = self.run_wk("push", action, env=self._as_build_machine())
                 self.assertEqual(5, cp.returncode, cp.stdout)
-                self.assertIn("no ssh-agent socket", cp.stdout)
 
     def test_status_still_reports_the_live_key_rather_than_refusing(self):
         """Reading is not switching: the key is live and `wk pr` needs to know

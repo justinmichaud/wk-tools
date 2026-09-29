@@ -8,9 +8,9 @@ from wk import act, fleet, images, reach, record as wkrecord
 from wk.boot import drivers, open_driver
 from wk.kv import ConfError, kv, kv_file
 from wk.machine import Local, is_macos
+from wk.store import Store
 
 CONF_DEFAULTS = {"role": "workstation", "os": "any"}
-BROKER_SOCKET = "/run/wk/broker.sock"
 BROKER_VERBS = {"arm": "arm", "status": "status", "keep": "keep", "back": "release", "disarm": "disarm"}
 
 
@@ -359,7 +359,7 @@ def broker(root, name, action, system, env, machine=None):
 
 def broker_request(root, verb, words, env, machine, typed):
     """One request over the socket a workspace sees, `words` its key=value arguments; `typed` is what to run on the workstation instead."""
-    sock = env.get("WK_BROKER_SOCKET") or BROKER_SOCKET
+    sock = Store(env).workspace_broker_socket()
     if not machine.run(["test", "-S", sock]).ok:
         act.die("No request broker is listening at %s, so there is no door\n    from this workspace for '%s'. Somebody with the "
                 "workstation opens it with:\n    ./setup --stage broker   ('wk doctor' then says it is reachable from in here).\n"

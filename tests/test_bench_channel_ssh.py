@@ -7,6 +7,7 @@ authorized_keys and it boots with a fresh host key every time it is written.
 
 Run: python3 tests/run.py -k test_bench_channel_ssh
 """
+import shlex
 import sys
 import unittest
 
@@ -59,7 +60,7 @@ class TestPrivilegeFollowsTheChannel(unittest.TestCase):
         via = Fake()
         via.answer(("ssh",))
         channel(role, name, via=via).call(fn, *args)
-        return [e[1][-1] for e in via.effects if e[1][0] == "ssh"]
+        return [shlex.split(e[1][-1])[-1] for e in via.effects if e[1][0] == "ssh"]
 
     def _root(self, name, role):
         return "USER" if self._argv(name, role, "card_priv", "status")[-1].startswith("sudo -n ") else "ROOT"
