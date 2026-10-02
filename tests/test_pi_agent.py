@@ -606,7 +606,7 @@ class TestPiEnsure(unittest.TestCase):
         status, err, scripts, _ = self.models_written(lambda key: ["m-404"])
         self.assertEqual(1, status, err)
         self.assertEqual([], scripts)
-        self.assertIn("wk key check litellm", err)
+        self.assertIn("'wk key check'", err)
 
     def test_an_endpoint_that_does_not_answer_writes_nothing(self):
         import credcheck

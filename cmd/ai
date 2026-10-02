@@ -334,10 +334,10 @@ class Ai:
             first = credcheck.litellm_callable(key, ids)
         except credcheck.Unreachable as e:
             die("could not ask %s which models the LiteLLM key may call (%s), so there is\n    no model to point pi at. "
-                "'wk key check litellm' asks again." % (endpoint, e))
+                "'wk key check' asks again." % (endpoint, e))
         if not first:
             die("%s answers a completion from none of the %d chat model(s) it lists for the\n    stored LiteLLM key, so pi would "
-                "have nothing to call. 'wk key check litellm' says\n    what the endpoint makes of the key." % (endpoint, len(ids)))
+                "have nothing to call. 'wk key check' says\n    what the endpoint makes of the key." % (endpoint, len(ids)))
         ids = [first] + [i for i in ids if i != first]
         write = "mkdir -p ~/.pi/agent && umask 077 && printf '%%s\\n' %s > ~/.pi/agent/models.json" % shlex.quote(pi_models(endpoint, ids))
         if not self.exec(["bash", "-c", write]).ok:

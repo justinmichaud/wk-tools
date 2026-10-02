@@ -32,6 +32,11 @@
           ]
         }
       ]
+    },
+    {
+      "host": "buildbox4",
+      "args": [],
+      "projects": []
     }
   ],
   "project_panel": {
