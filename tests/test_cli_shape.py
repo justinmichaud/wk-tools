@@ -16,7 +16,7 @@ import subprocess
 import sys
 import unittest
 
-from tests.support import REPO, WK, WkTest, bash, run
+from tests.support import REPO, WK, WkTest, bash, owed, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import decl as D  # noqa: E402
@@ -203,6 +203,20 @@ class TestTheGlobalFlagsBelongToTheDispatcher(WkTest):
                 self.assertEqual(cp.returncode, 2, cp.stdout)
                 self.assertIn("has no dry run yet", cp.stdout)
 
+    # The test runner's effects are each test's own; a dry run of a test is no test.
+    NO_DRY_RUN = {"selftest"}
+
+    @owed("dispatch.dry_run_is_the_recorder: ai")
+    def test_every_mutating_command_and_verb_has_a_dry_run(self):
+        missing = []
+        for d in D.all_commands(REPO):
+            if d.name in self.NO_DRY_RUN:
+                continue
+            for v in (d.verbs.split(",") if d.verbs else [""]):
+                if not d.is_readonly(v) and not d.honours_dryrun([v] if v else []):
+                    missing.append(("%s %s" % (d.name, v)).strip())
+        self.assertEqual(missing, [])
+
     def test_no_command_parses_the_global_flags_itself(self):
         offenders = []
         for path in CMD_FILES:
@@ -322,6 +336,17 @@ class TestPromptsAndDestructiveDeclarationsAgree(unittest.TestCase):
                     offenders.append(f"{d}/{p.name}")
         self.assertEqual(offenders, [], f"prompting helper not named by any destructive command: {offenders}")
 
+
+    # The files holding an effect that destroys what a user made: a workspace, a VM, a pulled image. Each names the
+    # commands that may reach it; a new file with one fails until it is named here, and every command named asks.
+    REMOVING = re.compile(r"delete_vm|\"podman\", *\"(rm|rmi)\"|\"image\", \"prune\"|\"volume\", \"prune\"|unshare\", \"rm\"|"
+                          r"tart, \"delete\"")
+    REMOVERS = {"lib/wk/gc.py": ("gc",), "lib/wk/sysimage/guestbase.py": ("sysimage",), "lib/wk/targets.py": ("rm", "gc", "stop")}
+
+    def test_every_removing_effect_is_reached_only_from_commands_that_ask(self):
+        found = {str(p.relative_to(REPO)) for p in (REPO / "lib" / "wk").rglob("*.py") if self.REMOVING.search(p.read_text())}
+        self.assertEqual(found, set(self.REMOVERS), "a file with a removing effect is not named in REMOVERS (or no longer has one)")
+        self.assertEqual(sorted({c for cs in self.REMOVERS.values() for c in cs} - self._destructive_cmds()), [])
 
 
 class TestActAndConfirm(unittest.TestCase):

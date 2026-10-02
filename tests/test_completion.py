@@ -274,6 +274,31 @@ printf '%s\\n' "${{COMPREPLY[@]}}"
         reply = self._complete([str(WK), "key", ""], 2)
         self.assertIn("sudo", reply)
 
+    def test_a_verb_prefix_completes_to_the_verb(self):
+        """`wk key che<TAB>` narrows to check"""
+        self.assertEqual(self._complete([str(WK), "key", "che"], 2), ["check"])
+
+    def test_a_verbs_options_follow_it_and_are_its_own(self):
+        """`wk key set --<TAB>` offers set's options, not setup's; a default verb's options come before any verb"""
+        self.assertEqual(self._complete([str(WK), "key", "set", "--"], 3), ["--paste", "--replace"])
+        self.assertEqual(self._complete([str(WK), "key", "setup", "--"], 3), ["--rotate"])
+        self.assertEqual(self._complete([str(WK), "push", "--"], 2), ["--all", "--target"])
+
+    def test_every_verb_of_every_command_completes_its_declared_options(self):
+        """the generated function offers, for each declared verb, exactly that verb's options"""
+        want, lines = {}, []
+        for d in C.declarations(REPO, TOMBSTONES):
+            for v in C.subverbs(d):
+                want[f"{d.name} {v}"] = " ".join(C.flags_for(d, v))
+                lines.append(f"t {d.name} {v}")
+        script = ('source <("%s" completion bash)\n'
+                  't() { COMP_WORDS=(wk "$1" "$2" --); COMP_CWORD=3; _wk_completion; echo "$1 $2:${COMPREPLY[*]}"; }\n%s\n'
+                  % (WK, "\n".join(lines)))
+        cp = subprocess.run(["bash", "-c", script], cwd=str(REPO), capture_output=True, text=True, timeout=60)
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        got = dict(l.split(":", 1) for l in cp.stdout.splitlines())
+        self.assertEqual(got, want)
+
     def test_completion_offers_its_shells(self):
         """`wk completion <TAB>` offers bash and zsh"""
         self.assertEqual(self._complete([str(WK), "completion", ""], 2), ["bash", "zsh"])

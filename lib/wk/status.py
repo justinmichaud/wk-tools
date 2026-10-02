@@ -128,6 +128,8 @@ def sha_matches(a, b):
 def far_side_reason(target, side, why):
     if side == "unreachable":
         return "unreachable over ssh" + (": %s" % why if why else "")
+    if side == "stopped" and target.machine_state() == "absent":
+        return "no podman machine '%s' yet -- ./setup makes it" % target.podman_machine()
     if side == "stopped":
         return "the podman machine '%s' is stopped -- 'wk start' brings it up" % target.podman_machine()
     if side == "no-wk":

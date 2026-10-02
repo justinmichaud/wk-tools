@@ -103,7 +103,17 @@ class TestConverge(ToolsPushCase):
         self.assertEqual(self.far_head(), self.sha)
         self.assertFalse((self.far / "theirs").exists(), "a commit of their own survived the reset")
 
-    def test_a_directory_that_is_not_a_checkout_is_replaced_and_says_so(self):
+    def test_a_directory_that_is_not_a_checkout_is_refused_without_force(self):
+        self.far.mkdir(parents=True)
+        (self.far / "wk").write_text("#!/bin/sh\necho months old\n")
+        with mock.patch.dict(os.environ, {"WK_FORCE": ""}):
+            ok, err = self.push()
+        self.assertFalse(ok)
+        self.assertIn("--force is what replaces it", err)
+        self.assertEqual((self.far / "wk").read_text(), "#!/bin/sh\necho months old\n")
+
+    @mock.patch.dict(os.environ, {"WK_FORCE": "1"})
+    def test_a_directory_that_is_not_a_checkout_is_replaced_and_says_so_under_force(self):
         self.far.mkdir(parents=True)
         (self.far / "wk").write_text("#!/bin/sh\necho months old\n")
         (self.far / "gone.sh").write_text("a file this tree no longer has\n")

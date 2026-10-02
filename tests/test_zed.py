@@ -105,6 +105,17 @@ class TestContainerAlias(DriverTest):
         installed = [e for e in self.fake.effects if e[0] == "run" and any("ensure-bridge.sh" in a for a in e[1])]
         self.assertTrue(installed)
 
+    def test_a_dry_prepare_on_a_machine_without_its_zed_key_prints_every_step(self):
+        self.t.env.pop("WK_ZED_PUBKEY")
+        before = (dict(self.fake.files), set(self.fake.dirs))
+        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), mock.patch("sys.stderr") as err:
+            self.t.ssh_prepare("demo")
+        said = "".join(c.args[0] for c in err.write.call_args_list)
+        self.assertIn("would run: ssh-keygen -q -t ed25519", said)
+        self.assertIn("would run: podman exec -i --user dev wk-demo /bin/sh -c", said)
+        self.assertIn(("write", sshalias.alias_path(self.env)), self.fake.effects)
+        self.assertEqual(before, (self.fake.files, self.fake.dirs))
+
 
 class TestToolsTargetResolvedOnce(TestContainerAlias):
     """`wk zed --tools <ws>` used to resolve `<ws>`'s target once to ask

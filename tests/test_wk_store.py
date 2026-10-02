@@ -113,24 +113,24 @@ class TestTheStagesReadTheStore(unittest.TestCase):
 
 
 class TestRecords(unittest.TestCase):
-    """Task records, bench runs and artifacts live in the store, except on a macOS host whose store is the podman
+    """Task records and artifacts live in the store, except on a macOS host whose store is the podman
     VM's: there they are this host's own, under its state directory."""
 
     def paths(self, env, system):
         with mock.patch("wk.store.os.uname", return_value=mock.Mock(sysname=system)):
             s = Store(dict({"HOME": "/h", "XDG_STATE_HOME": "/state"}, **env))
-            return s.record_dir(), s.bench_dir(), s.artifact_dir()
+            return s.record_dir(), s.artifact_dir()
 
     def test_a_named_store_holds_them(self):
         for system in ("Linux", "Darwin"):
             with self.subTest(system=system):
-                self.assertEqual(("/s", "/s/bench", "/s/cache"), self.paths({"WK_STORE": "/s"}, system))
+                self.assertEqual(("/s", "/s/cache"), self.paths({"WK_STORE": "/s"}, system))
 
     def test_a_macos_hosts_default_store_leaves_them_on_the_host(self):
-        self.assertEqual(("/state/wk", "/state/wk/bench", "/state/wk/cache"), self.paths({}, "Darwin"))
+        self.assertEqual(("/state/wk", "/state/wk/cache"), self.paths({}, "Darwin"))
 
     def test_in_the_podman_vm_they_are_the_stores(self):
-        self.assertEqual(("/var/lib/wk", "/var/lib/wk/bench", "/var/lib/wk/cache"), self.paths({"WK_IN_VM": "1"}, "Darwin"))
+        self.assertEqual(("/var/lib/wk", "/var/lib/wk/cache"), self.paths({"WK_IN_VM": "1"}, "Darwin"))
 
 
 

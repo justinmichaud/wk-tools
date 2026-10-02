@@ -30,6 +30,7 @@ Run: python3 -m unittest tests.test_new_fetch -v
 import os
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -414,6 +415,14 @@ class TestTheWiringCheck(MirrorFixture):
         self.assertEqual(out.stdout.count("problem:"), 1,
                          "the branch the mirror does carry is not a fault")
 
+    def test_a_checkout_that_trusts_ctime_is_a_fault(self):
+        tree = self.clone_snapshot(self.tmp / "ctime")
+        self.wire(tree)
+        _git("config", "--unset", "core.trustctime", cwd=tree)
+        out = self.check(tree)
+        self.assertNotEqual(out.returncode, 0, out.stdout)
+        self.assertIn("problem: git trusts ctime here", out.stdout)
+
     def test_a_checkout_with_no_mirror_is_checked_against_the_upstreams(self):
         """No rewrite is expected of it, and origin is still narrowed."""
         tree = self.clone_snapshot(self.tmp / "no-mirror-check")
@@ -657,6 +666,30 @@ class TestBaseVerify(StoreFixture):
         self.assertEqual(self.bases().current(), "")
 
 
+class TestAHardLinkedSnapshotStaysClean(MirrorFixture):
+    """The publish hard-links the last snapshot, and link() moves the ctime of every file -- in that snapshot and in
+    every workspace overlaid on it. A wired checkout does not trust ctime, so its index still vouches for each file."""
+
+    def link_every_file(self, tree):
+        dest = self.tmp / "links"
+        dest.mkdir()
+        for i, f in enumerate(p for p in Path(tree).iterdir() if p.is_file()):
+            os.link(f, dest / str(i))
+
+    def stat_dirty(self, tree, *config):
+        return _git(*config, "diff-files", "--name-only", cwd=tree).stdout.split()
+
+    def test_linking_the_files_dirties_nothing_in_a_wired_checkout(self):
+        tree = self.clone_snapshot(self.tmp / "linked")
+        self.wire(tree)
+        _git("update-index", "--refresh", "-q", cwd=tree, check=False)
+        time.sleep(1.1)   # git compares ctime to the second
+        self.link_every_file(tree)
+        self.assertEqual(self.stat_dirty(tree), [])
+        self.assertEqual(self.stat_dirty(tree, "-c", "core.trustctime=true"), ["a"],
+                         "the contrast: trusting ctime, the same link stat-dirties the file")
+
+
 class TestNewCheckoutScript(WorkspaceFixture):
     """`wk new`'s fast-forward and its report, run against the workspace
     checkout copied off the snapshot."""
@@ -685,6 +718,13 @@ class TestNewCheckoutScript(WorkspaceFixture):
         self.assertEqual(got["behind"], "0")
         self.assertNotIn("moved", got)
         self.assertEqual(self.head(self.ws), self.sha1)
+
+    def test_the_index_is_refreshed_before_the_person_runs_git_status(self):
+        """The checkout is a copy of the snapshot, so no entry's stat data matches its file until a status
+        re-reads it: creation pays that, even when nothing moved."""
+        self.assertNotEqual(_git("diff-files", "--name-only", cwd=self.ws).stdout, "")
+        self._run()
+        self.assertEqual(_git("diff-files", "--name-only", cwd=self.ws).stdout, "")
 
     def test_a_detached_checkout_reports_the_sha_and_nothing_else(self):
         _git("checkout", "-q", "--detach", "HEAD", cwd=self.ws)

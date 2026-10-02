@@ -1,8 +1,8 @@
-"""A command's declaration: the `# wk:` lines in the first 15 lines of cmd/<name> and the
+"""A command's declaration: the `# wk:` lines in the leading comment block of cmd/<name> and the
 `# wk <name> ... -- <summary>` synopsis. Keys: where=, name= (with @N for the slot), takes=,
 ready=yes, group=, lifecycle, readonly, destructive, dryrun, opts, passthrough[=tail|=all], broker,
 outside, forward=no, here, bare=merged, post=, values=, config=, verbs=, default=, needs;
-`sub`/`flag` lines override per subverb or flag; a `gone <word> <replacement>` line retires a flag or verb."""
+`sub` lines override per verb (a command with verbs= keeps its opts on them), `flag` lines per flag of a command without; a `gone <word> <replacement>` line retires a flag or verb."""
 
 import re
 from pathlib import Path
@@ -18,6 +18,17 @@ LIST_KEYS = ("needs", "opts", "readonly", "destructive", "dryrun", "broker")
 
 class DeclError(Exception):
     pass
+
+
+def leading_block(path):
+    """The lines of `path` up to its first that is not a comment: where its declaration and its help live."""
+    out = []
+    with open(path, errors="replace") as f:
+        for line in f:
+            if not line.startswith("#"):
+                break
+            out.append(line)
+    return out
 
 
 def in_list(word, spec):
@@ -62,8 +73,7 @@ class Decl:
         self._load()
 
     def _load(self):
-        with open(self.path, errors="replace") as f:
-            head = [next(f, "") for _ in range(15)]
+        head = leading_block(self.path)
         for line in head[:5]:
             if line.startswith("# wk "):
                 self.synopsis = line[len("# wk "):].rstrip("\n")
@@ -83,8 +93,24 @@ class Decl:
                 self.flag.append(self._override(body[5:]))
                 continue
             self._tokens(body.split())
+        self._check_verbs()
+
+    def _check_verbs(self):
+        """A command takes verbs or it does not: options and flags belong to one verb, never to the command."""
         if self.default and not in_list(self.default, self.verbs):
             raise DeclError("%s: default=%s is not one of verbs=%s" % (self.name, self.default, self.verbs))
+        if not self.verbs:
+            for verbs, _ in self.sub:
+                raise DeclError("%s: 'sub %s' but the command declares no verbs=" % (self.name, verbs))
+            return
+        for verbs, _ in self.sub:
+            for v in verbs.split(","):
+                if not in_list(v, self.verbs):
+                    raise DeclError("%s: 'sub %s' names no verb in verbs=%s" % (self.name, v, self.verbs))
+        if self.opts:
+            raise DeclError("%s: opts belong on the verbs that take them ('sub <verb> opts=...'), not on a command with verbs=" % self.name)
+        if self.flag:
+            raise DeclError("%s: a 'flag' line is no verb's: put it on a verb ('sub <verb> ...')" % self.name)
 
     def _override(self, text):
         words = text.split()
@@ -230,10 +256,6 @@ class Decl:
 
     def honours_dryrun(self, args):
         return self._in_argv_list(self._answer("dryrun", self.dryrun, args), args)
-
-    def flag_stands_for_verb(self, args):
-        """A `flag` line in argv that takes no positional (`--list`) is the invocation's verb."""
-        return self._flag_override("takes", args) == "0"
 
     def valued_opts(self):
         specs = [self.opts] + [spec.get("opts") or "" for _, spec in self.sub + self.flag]

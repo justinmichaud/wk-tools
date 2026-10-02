@@ -479,21 +479,29 @@ MTIME = "import os, sys; print(os.path.getmtime(sys.argv[1]))"
 class Ssh(Machine):
     """A host over ssh, each call one bounded non-interactive round trip run by `via` (this host)."""
 
-    def __init__(self, dest, opts=None, timeout=10, via=None):
+    def __init__(self, dest, opts=None, timeout=10, via=None, control_dir=None):
         self.dest = dest
         self.name = dest
+        self.control_dir = control_dir
         self.opts = list(opts or []) + ["-o", "BatchMode=yes", "-o", "ConnectTimeout=%d" % timeout]
         self.via = via or Local()
+
+    def _up(self):
+        """ssh creates no ControlPath directory; it is made on `via` before the first ssh that names it."""
+        if self.control_dir:
+            self.via.mkdir_now(self.control_dir)
 
     def argv(self, remote, tty=False):
         # The far sshd runs a command under a non-login shell, so ~/.local/bin and Homebrew are off its PATH.
         return ["ssh"] + (["-t"] if tty else []) + self.opts + [self.dest, LOGIN + shlex.quote(remote)]
 
     def _ssh(self, remote, input=None, timeout=None):
+        self._up()
         # An empty stdin, not the caller's: ssh drinks whatever it is handed.
         return self.via.run(self.argv(remote), input="" if input is None else input, timeout=timeout)
 
     def _via(self, how, argv, input, timeout, stream):
+        self._up()
         return how(self.argv(shlex.join(argv)), input="" if input is None else input,
                    timeout=timeout, **({"stream": True} if stream else {}))
 
@@ -504,6 +512,7 @@ class Ssh(Machine):
         return self._via(self.via.act_run, argv, input, timeout, stream)
 
     def run_tty(self, argv, cwd=None, timeout=None):
+        self._up()
         remote = shlex.join(argv)
         if cwd:
             remote = "cd %s && %s" % (shlex.quote(cwd), remote)
@@ -620,6 +629,7 @@ class Ssh(Machine):
 
         @contextmanager
         def held():
+            self._up()
             pid = self.via.spawn(["ssh", *self.opts, "-o", "ExitOnForwardFailure=yes", "-N", "-R",
                                   "127.0.0.1:%d:127.0.0.1:%d" % (port, port), self.dest], log)
             try:
@@ -638,6 +648,7 @@ class Ssh(Machine):
         if act.dry_run():
             sys.stderr.write("would copy on %s: %s -> %s\n" % (self.dest, src, dest))
             return
+        self._up()
         r = self.via.run(["scp", "-q", *self.opts, src, self._dest(dest)])
         if not r.ok:
             raise OSError(r.err.strip() or "copy to %s failed" % self.dest)
@@ -646,6 +657,7 @@ class Ssh(Machine):
         if act.dry_run():
             sys.stderr.write("would copy on %s: %s -> %s\n" % (self.dest, src, dest))
             return
+        self._up()
         r = self.via.run(["scp", "-q", *self.opts, self._dest(src), dest])
         if not r.ok:
             raise OSError(r.err.strip() or "copy from %s failed" % self.dest)
@@ -656,6 +668,7 @@ class Ssh(Machine):
         if act.dry_run():
             sys.stderr.write("would copy on %s: %s -> %s/\n" % (self.dest, src, dest))
             return
+        self._up()
         r = self.via.run(["rsync", "-a", "--chmod=go-w", "--delete", "-e", "ssh " + shlex.join(self.opts),
                           src.rstrip("/") + "/", self._dest(dest.rstrip("/") + "/")])
         if not r.ok:
@@ -665,6 +678,7 @@ class Ssh(Machine):
         if act.dry_run():
             sys.stderr.write("would copy on %s: %s -> %s/\n" % (self.dest, src, dest))
             return
+        self._up()
         r = self.via.run(["rsync", "-a", "--chmod=go-w", "--delete", *excludes(exclude), "-e", "ssh " + shlex.join(self.opts),
                           self._dest(src.rstrip("/") + "/"), dest.rstrip("/") + "/"])
         if not r.ok:

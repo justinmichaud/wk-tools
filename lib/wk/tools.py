@@ -19,7 +19,11 @@ if [ -L "$d" ]; then
     exit 1
 fi
 if ! { [ -d "$d/.git" ] && git -C "$d" rev-parse --git-dir >/dev/null 2>&1; }; then
-    if [ -e "$d" ]; then
+    if [ -n "$(ls -A "$d" 2>/dev/null)" ]; then
+        [ "$2" = 1 ] || {
+            echo "$d is not a git checkout, and --force is what replaces it" >&2
+            exit 1
+        }
         echo "replacing $d: it is not a git checkout" >&2
     fi
     rm -rf "$d"
@@ -88,7 +92,7 @@ def push(root, here, far, dest, env):
             act.warn("could not bundle %s at %s for the push" % (root, sha))
             return False
         act.debug("pushing wk-tools %s -> %s" % (sha, dest))
-        r = far.act_run(["sh", "-c", PREPARE, "sh", dest])
+        r = far.act_run(["sh", "-c", PREPARE, "sh", dest, *(["1"] if act.forced() else [])])
         _said(r)
         if not r.ok:
             act.warn("could not make %s a checkout on %s" % (dest, far.name))

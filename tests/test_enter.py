@@ -35,6 +35,15 @@ class TestRunsCommand(WkTest):
         self.assertIn("out", cp.stdout)
         self.assertIn("err", cp.stdout)
 
+    def test_a_dry_run_prints_the_command_and_runs_nothing(self):
+        with fake_workspace() as ws:
+            marker = ws.ws_dir / "dry-run-ran"
+            cp = ws.run("enter", "--dry-run", "touch", str(marker))
+            self.assertEqual(cp.returncode, 0, cp.stdout)
+            self.assertIn("would run:", cp.stdout)
+            self.assertIn("touch %s" % marker, cp.stdout)
+            self.assertFalse(marker.exists(), "a dry run ran the command")
+
     def test_zed_delegates_to_cmd_zed_by_name_rather_than_running_a_command(self):
         """--zed hands the workspace name to `cmd/zed` and never a command
         tail; `cmd/zed` itself (not a fake standing in for it) is what answers,

@@ -35,6 +35,7 @@ from tests.support import (
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import targets  # noqa: E402
+from wk.decl import leading_block  # noqa: E402
 from wk.machine import Fake, Local  # noqa: E402
 
 # `podman`: logs every invocation and answers the two questions the container
@@ -86,7 +87,7 @@ class TestDeclaration(WkTest):
         checkout and the two store directories, never where files are kept) or
         delegated to a build machine, that side would silently mean a path over
         there."""
-        decl = [l for l in (REPO / "cmd" / "scp").read_text().splitlines()[:15]
+        decl = [l for l in leading_block(REPO / "cmd" / "scp")
                 if l.startswith("# wk:")]
         self.assertEqual(len(decl), 1, decl)
         self.assertIn(" here", decl[0])
@@ -279,17 +280,34 @@ class TestRefusals(WkTest):
         (drop / "tree" / "stale").write_bytes(b"stale\n")
         return drop
 
-    def test_replacing_a_whole_directory_is_a_barrier(self):
+    def test_replacing_a_whole_directory_is_asked_and_declines_without_a_terminal(self):
         drop = self._copied_once()
         cp = self.scp("-r", ":tree", str(drop))
         self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("--force", cp.stdout)
+        self.assertIn("--yes", cp.stdout)
         self.assertTrue((drop / "tree" / "stale").exists(),
-                        "the barrier let a copy through")
+                        "a copy went through unasked")
 
-    def test_force_replaces_its_contents(self):
+    def test_replacing_a_file_is_asked_too(self):
+        (self.here / "file.txt").write_bytes(b"mine\n")
+        cp = self.scp(":file.txt", str(self.here / "file.txt"))
+        self.assertEqual(cp.returncode, 1, cp.stdout)
+        self.assertEqual((self.here / "file.txt").read_bytes(), b"mine\n")
+        self.assertEqual(self.scp(":file.txt", str(self.here / "file.txt"), "--yes").returncode, 0)
+        self.assertEqual((self.here / "file.txt").read_bytes(), b"f\n")
+
+    def test_a_dry_run_names_the_question_and_the_copy_and_changes_nothing(self):
         drop = self._copied_once()
-        cp = self.scp("-r", ":tree", str(drop), "--force")
+        cp = self.scp("-r", ":tree", str(drop), "--dry-run")
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("would ask:", cp.stdout)
+        self.assertIn("would copy", cp.stdout)
+        self.assertNotIn("copied", cp.stdout)
+        self.assertTrue((drop / "tree" / "stale").exists(), "a dry run copied")
+
+    def test_yes_replaces_its_contents(self):
+        drop = self._copied_once()
+        cp = self.scp("-r", ":tree", str(drop), "--yes")
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertEqual((drop / "tree" / "a").read_bytes(), b"a\n")
         self.assertFalse((drop / "tree" / "stale").exists(),

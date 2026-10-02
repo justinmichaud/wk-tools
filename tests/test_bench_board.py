@@ -408,6 +408,7 @@ class BoardWorld(Fake):
         self.fake = self.board.bench
         self.board.bench.files[board.slot_path("a") + "/slot.json"] = json.dumps(SLOT_DOC)
         self.store = Store(self.env)
+        os.makedirs(os.path.join(self.store.record_dir(), "ws", "ws"))
         self.tree = os.path.join(self.store.artifact_dir(), "bench-runner", SHA[:12])
         self.dirs.add(self.store.mirror())
         self.files[os.path.join(self.tree, "Tools", "Scripts", "run-benchmark")] = ""
@@ -460,11 +461,11 @@ class BoardWorld(Fake):
         return rc
 
     def leg(self, plan="jetstream3", **o):
-        """One leg as an A/B runs it, with the leg's own options and no workspace."""
+        """One leg as an A/B runs it, in the A/B's workspace, with the leg's own options."""
         reg = PipelineReg(self)
         err = io.StringIO()
         with self.patches(), contextlib.redirect_stderr(err):
-            system = board.for_board(str(REPO), reg, "", self.clock, BOARD)
+            system = board.for_board(str(REPO), reg, "ws", self.clock, BOARD)
             r = board.BoardRun(str(REPO), reg, system, self.clock, self.env, self.popen)
             try:
                 rc = r.go(plan, o)
@@ -474,7 +475,7 @@ class BoardWorld(Fake):
         return rc
 
     def bench_dir(self):
-        return Path(self.store.bench_dir())
+        return Path(self.store.record_dir(), "ws", "ws", "bench")
 
     def tasks(self):
         return brecord.tasks(str(self.bench_dir()))
@@ -633,10 +634,11 @@ class TestRefusals(BoardTest):
 
     def test_a_leg_on_the_wrong_system_is_refused_before_anything_runs(self):
         w = self.world()
-        self.assertNotEqual(w.leg(expect="sys-b", slot="a"), 0)
+        TestALegForAnAB.task(self, w)
+        self.assertNotEqual(w.leg(expect="sys-b", slot="a", task="t1"), 0)
         self.assertIn("not the 'sys-b' this leg is for", w.err)
         self.assertEqual(w.watched, [])
-        self.assertEqual(w.leg(expect="sys-a", slot="a"), 0, w.err)
+        self.assertEqual(w.leg(expect="sys-a", slot="a", task="t1"), 0, w.err)
 
     def collecting(self):
         w = self.world()
@@ -775,7 +777,7 @@ class TestALegForAnAB(BoardTest):
         self.assertEqual((env["task"], env["ab"]), ("t1", {"round": "1", "arm": "b", "slot_a": "a", "slot_b": "b"}))
         self.assertEqual(w.tasks(), ["t1"])
         (t,) = w.recs().list()
-        self.assertEqual((t.field("name"), t.field("kill")[:5]), (BOARD, "kill "))
+        self.assertEqual((t.field("name"), t.field("kill")), ("ws", "wk bench run ws --kill --system " + BOARD))
 
     def test_an_unknown_task_is_refused_before_the_board_is_touched(self):
         w = self.world()

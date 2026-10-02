@@ -26,6 +26,7 @@ import unittest
 from tests.support import REPO, run_here, scratch_dir, temp_store
 
 sys.path.insert(0, str(REPO / "lib"))
+from wk.decl import leading_block  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 # {cmd: {flag_or_positional_name: [valid, values, ...]}}
@@ -50,7 +51,7 @@ def help_text(cmd):
 # {cmd: flag} -- a closed set the dispatcher enumerates into `-h` itself.
 DECLARED_VALUES = {
     "boot": "--list",
-    "sysimage": "--list",
+    "sysimage": "configs",
     "profile": "--list",
 }
 
@@ -62,8 +63,7 @@ class TestDeclaredValuesReachTheHelp(unittest.TestCase):
 
     def test_each_command_declares_it(self):
         for cmd, flag in DECLARED_VALUES.items():
-            head = "\n".join(
-                (REPO / "cmd" / cmd).read_text().splitlines()[:15])
+            head = "".join(leading_block(REPO / "cmd" / cmd))
             with self.subTest(cmd=cmd):
                 self.assertIn(f"values={flag}", head,
                               f"cmd/{cmd} no longer declares its value list")
@@ -89,8 +89,7 @@ class TestDeclaredValuesReachTheHelp(unittest.TestCase):
         """`-h` runs it, so it must change nothing and never wait: every one is
         declared readonly (or the command is), and none of them is forwarded."""
         for cmd, flag in DECLARED_VALUES.items():
-            head = "\n".join(
-                (REPO / "cmd" / cmd).read_text().splitlines()[:15])
+            head = "".join(leading_block(REPO / "cmd" / cmd))
             with self.subTest(cmd=cmd):
                 self.assertTrue(
                     f"readonly" in head or f"flag {flag} where=local" in head
@@ -112,30 +111,30 @@ class TestHelpListsClosedSetValues(unittest.TestCase):
 
 
 class TestBenchListPlans(unittest.TestCase):
-    """`wk bench --list` (docs/defects): the plan set is not a list in this
+    """`wk bench plans` (docs/defects): the plan set is not a list in this
     repo -- it lives in the WebKit tree -- so it is not a DECLARED_VALUES
     entry above: running it for real asks podman about this machine's store
     (`where=store`), which the tests must never do, unlike boot/profile/
-    sysimage's --list, answered entirely out of this repo with `where=host`
+    sysimage's configs, answered entirely out of this repo with `where=host`
     or `where=local`. Its declaration is checked directly, and its read of
     the store against a fake mirror this test builds -- the one read `wk
-    bench --list` forwards to the podman VM for on a macOS host, and this
+    bench plans` forwards to the podman VM for on a macOS host, and this
     suite never exercises through the podman machine itself."""
 
     def test_declares_values_readonly_and_store(self):
-        head = "\n".join((REPO / "cmd" / "bench").read_text().splitlines()[:15])
-        self.assertIn("values=--list", head,
+        head = "".join(leading_block(REPO / "cmd" / "bench"))
+        self.assertIn("values=plans", head,
                        "cmd/bench no longer declares its plan list")
-        self.assertIn("flag --list where=store", head,
-                       "cmd/bench --list no longer reads the store")
-        self.assertIn("readonly --list", head,
-                       "cmd/bench --list is not read-only, so it could start the podman VM")
+        self.assertIn("sub plans where=store", head,
+                       "cmd/bench plans no longer reads the store")
+        self.assertIn("readonly plans,", head,
+                       "cmd/bench plans is not read-only, so it could start the podman VM")
 
     def test_help_ends_with_the_plans_or_the_one_honest_line(self):
         text = help_text("bench")
-        self.assertIn("valid values (wk bench --list):", text,
+        self.assertIn("valid values (wk bench plans):", text,
                        "wk bench -h does not print its plan list")
-        tail = text.split("valid values (wk bench --list):", 1)[1].strip()
+        tail = text.split("valid values (wk bench plans):", 1)[1].strip()
         self.assertTrue(tail, "wk bench -h prints nothing after its value-list header")
         # Either real plan names (this host has a readable mirror) or the
         # one line naming where the list actually lives (it does not, here).
@@ -159,7 +158,7 @@ class TestBenchListPlans(unittest.TestCase):
             mirror.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(["git", "clone", "-q", "--bare", str(src), str(mirror)], check=True)
 
-            cp = run_here("bench", "--list", env=env)
+            cp = run_here("bench", "plans", env=env)
             self.assertEqual(cp.returncode, 0, cp.stdout)
             self.assertEqual(sorted(cp.stdout.split()),
                               ["jetstream2.2", "speedometer3.1"])

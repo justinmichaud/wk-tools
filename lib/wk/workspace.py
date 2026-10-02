@@ -18,7 +18,7 @@ from wk import act, buildconf, job, kv, record, sshalias
 from wk.act import Refused, die, info, log, warn
 from wk.machine import Killed, in_podman_machine
 from wk.pr import checkout as pr_checkout, parse_spec
-from wk.store import Bases
+from wk.store import Bases, no_such_workspace
 from wk.targets import show
 
 PLAN = ("checking", "wipe", "base", "create", "init", "fetch", "register")
@@ -44,6 +44,8 @@ if [ "$behind" != 0 ]; then
         echo "moved=refused"
     fi
 fi
+# The first status re-reads every file the index cannot vouch for and rewrites the index: here, not in the person's first one.
+git status --porcelain >/dev/null 2>&1 || true
 echo "head=$(git rev-parse --short HEAD)"
 '''
 
@@ -222,6 +224,8 @@ def new_driver(target, records, lock, clock, name, base, arch):
         with lock.held("sdk"):
             target.sdk_refresh()
     lock.hold("ws-" + name)
+    if target.reads_host_mirror:
+        refresh_mirror(target, here, name)
     if target.needs_base:
         lock.hold("store")
     state = creation_state(target, records, name)
@@ -245,6 +249,14 @@ def new_driver(target, records, lock, clock, name, base, arch):
     if task is not None:
         info("workspace '%s' created" % name)
     return 0
+
+
+# Before the store lock, which `wk sync --mirror` takes for itself; other workspaces are left alone.
+def refresh_mirror(target, here, name):
+    r = here.act_run([wk_of(target.root), "sync", "--mirror"])
+    show(r)
+    if not r.ok:
+        die("the mirror refresh did not finish (above), so '%s' was not created.\n    Fix that:  wk sync --mirror   then  wk new %s" % (name, name))
 
 
 def _end(task, status):
@@ -469,6 +481,8 @@ def unsaved_results(reg, found):
         return []   # forwarded by a Mac, which read its own zips first (refuse_unsaved_before_forward)
     out = []
     for n, target, what in found:
+        if getattr(target, "peer", False):
+            continue   # its destroy runs the peer's own `wk rm`, which reads the exports there
         at = target.results(n) if what != "record" else None
         if at:
             out += [(n, t, why) for t, why in bench_record.unexported(at[0], at[1], os.path.join(reg.store.home(), "Downloads"))]
@@ -499,7 +513,7 @@ def rm_names(reg, records, names):
             found.append((n,) + rm_plan(reg, records, n))
         except Refused as e:
             if e.status == 1:
-                act.err("no such workspace: %s" % n)
+                act.err(no_such_workspace(n))
             worst = 1
     if not found:
         return worst

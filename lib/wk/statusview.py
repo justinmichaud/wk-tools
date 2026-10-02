@@ -7,12 +7,12 @@ job has flushed."""
 import http.server
 import json
 import os
-import subprocess
 import sys
 import threading
 import time
 import webbrowser
 
+from wk import store
 from wk.resources import workspace_marker_path
 
 MARKERS = ("plan", "flush")
@@ -1107,10 +1107,8 @@ class Live:
                 self.refreshing = True
             doc = None
             try:
-                env = dict(os.environ, WK_STATUS_VIEW="json")
-                out = subprocess.run([os.path.join(self.root, "wk"), "status", "--json"], capture_output=True,
-                                     text=True, timeout=600, env=env).stdout
-                doc = json.loads(out) if out.strip().startswith("{") else None
+                from wk import status   # status imports this module
+                doc = merge(status.Walk(self.root, name=store.ws_name() or None, fleet=True, devices=True).records())
             except Exception as exc:
                 print("wk status --web: refresh failed: %s" % exc, file=sys.stderr)
             with self.lock:

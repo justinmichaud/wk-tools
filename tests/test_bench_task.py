@@ -312,7 +312,7 @@ class TestTheFleetListing(WkTest):
 
     def test_each_answering_machine_adds_its_own_rows_after_this_stores(self):
         with scratch_dir() as tmp:
-            make_task(tmp / "bench")
+            make_task(tmp / "ws" / "w" / "bench")
             moose = FakeTarget("moose", out="T-moose  x  [moose]\r\n    complete\n")
             vm = FakeTarget("vm", kind="vm", out="T-vm  y  [here]\n")
             rows = self.listing(tmp, [moose, vm], []).rows()
@@ -349,8 +349,8 @@ class TestTheVerbs(WkTest):
     scratch store: the lock decides running, and the refusals name their remedy."""
 
     def store(self, s):
-        bench_dir = s["path"] / "bench"
-        bench_dir.mkdir()
+        bench_dir = s["path"] / "ws" / "w" / "bench"
+        bench_dir.mkdir(parents=True)
         d = make_task(bench_dir)
         add_run(d, "base", 1, "a", "ok", (100.0, 101.0, 99.0))
         add_run(d, "pr1725", 1, "b", "ok", (95.0, 96.0, 94.0))
@@ -440,7 +440,6 @@ class TestTheVerbs(WkTest):
 
     def test_an_unknown_task_names_the_fleet_rows_that_do(self):
         with temp_store() as s:
-            (s["path"] / "bench").mkdir()
             other = FakeTarget("moose", out="T-elsewhere  x  [moose]\n")
             self.assertIn("    T-elsewhere  x  [moose]", refusal(bench(s["path"], [other]).report, ["T-elsewhere"], "", False))
 
@@ -484,10 +483,10 @@ class TestWhere(WkTest):
 class TestThroughWk(WkTest):
     """Through ./wk: the dispatcher reaches the verbs with the options it normalised."""
 
-    def test_bench_ls_and_report_read_a_task_in_the_store(self):
+    def test_bench_ls_and_report_read_a_task_in_a_workspace(self):
         with temp_store() as store:
-            bench_dir = store["path"] / "bench"
-            bench_dir.mkdir()
+            bench_dir = store["path"] / "ws" / "w" / "bench"
+            bench_dir.mkdir(parents=True)
             d = make_task(bench_dir)
             add_run(d, "base", 1, "a", "ok", (100.0, 101.0, 99.0))
             add_run(d, "pr1725", 1, "b", "ok", (95.0, 96.0, 94.0))
@@ -560,7 +559,7 @@ class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
 
     def _ask(self, env):
         st = Store(clean_env(env))
-        return {"RECORD": st.record_dir(), "ARTIFACT": st.artifact_dir(), "BENCH": st.bench_dir(),
+        return {"RECORD": st.record_dir(), "ARTIFACT": st.artifact_dir(),
                 "SAMPLY": samply.store_dir(st.artifact_dir(), "aarch64-apple-darwin"),
                 "TASK": str(task_record.Records(env=clean_env(env)).root),
                 "SEED": os.path.join(st.artifact_dir(), "bench")}   # where wk.bench.seed pins a payload
@@ -570,7 +569,6 @@ class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
             f = self._dir(tmp, {"XDG_STATE_HOME": str(tmp / "state")})
             self.assertEqual(f["RECORD"], str(tmp))
             self.assertEqual(f["ARTIFACT"], f"{tmp}/cache")
-            self.assertEqual(f["BENCH"], f"{tmp}/bench")
             self.assertEqual(f["TASK"], f"{tmp}/task")
             self.assertEqual(f["SEED"], f"{tmp}/cache/bench")
             self.assertTrue(f["SAMPLY"].startswith(f"{tmp}/cache/samply/"), f["SAMPLY"])
@@ -586,9 +584,9 @@ class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
             f = self._dir_default({"XDG_STATE_HOME": str(tmp / "state")})
             state = f"{tmp}/state/wk"
             self.assertEqual(f["RECORD"], state)
-            for key in ("ARTIFACT", "BENCH", "TASK"):
+            for key in ("ARTIFACT", "TASK"):
                 self.assertTrue(f[key].startswith(state + "/"), f"{key}={f[key]}")
-            runs = os.path.join(f["BENCH"], "probe", "runs")
+            runs = os.path.join(f["RECORD"], "ws", "w", "bench", "probe", "runs")
             os.makedirs(runs)
             self.assertTrue(os.path.isdir(runs))
 
@@ -607,13 +605,13 @@ class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
         is where the macOS bench path broke."""
         with scratch_dir() as tmp:
             f = self._dir(tmp, {"XDG_STATE_HOME": str(tmp / "state")})
-            for key in ("ARTIFACT", "BENCH", "TASK", "SEED", "SAMPLY"):
+            for key in ("ARTIFACT", "TASK", "SEED", "SAMPLY"):
                 self.assertTrue(f[key].startswith(f['RECORD'] + "/"),
                                 f"{key}={f[key]} is not under {f['RECORD']}")
 
     def test_one_spelling_of_the_bench_directory(self):
-        """status asks the record where every task is and doctor asks the store, rather than spell a second `<store>/bench`."""
-        for rel, asks in (("lib/wk/status.py", "bench_record.homes(store)"), ("lib/wk/doctor.py", "store.bench_dir()")):
+        """status and doctor ask the record where every task is, rather than spell a second `<store>/bench`."""
+        for rel, asks in (("lib/wk/status.py", "bench_record.homes(store)"), ("lib/wk/doctor.py", "bench_record.task_roots(")):
             with self.subTest(file=rel):
                 text = (REPO / rel).read_text()
                 self.assertIn(asks, text)

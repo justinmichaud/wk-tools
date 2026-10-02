@@ -2,8 +2,8 @@
 #
 # wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n> -- check out a PR head, from either project
 # wk: where=workspace name=optional@2 takes=1 ready=yes group=sources dryrun verbs=checkout,rebase,open default=checkout
-# wk: sub open where=host name=optional@2 takes=0 opts=--draft,--web needs=gh,gh-auth dryrun=
-# wk: sub rebase name=optional@2 takes=0 dryrun=
+# wk: sub open where=host name=optional@2 takes=0 opts=--draft,--web needs=gh,gh-auth
+# wk: sub rebase name=optional@2 takes=0
 #
 #   wk pr justinmichaud:eng/non-cocoa-fuzz-Frame-cache-evicted-or-unparsed-frames-dereferenced
 #   wk pr 1234                                 # WebKit/WebKit pull request #1234
@@ -37,9 +37,10 @@
 #   --draft   open it as a draft
 #   --web     open the browser's new-PR form instead of creating it directly
 
+import contextlib
+import io
 import os
 import re
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
@@ -47,12 +48,14 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, git, pr, secrets, targets  # noqa: E402
+from wk import act, decl, git, pr, secrets, targets  # noqa: E402
 from wk.act import Refused, die, info, log, warn  # noqa: E402
+from wk.clock import Clock  # noqa: E402
+from wk.machine import Local  # noqa: E402
+from wk.pushswitch import Push  # noqa: E402
 from wk.targets import show  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
 
-WK = os.path.join(ROOT, "wk")
 
 
 class PrOpenError(Exception):
@@ -60,8 +63,8 @@ class PrOpenError(Exception):
 
 
 def _run_local(argv):
-    cp = subprocess.run(argv, capture_output=True, text=True)
-    return cp.returncode, cp.stdout, cp.stderr
+    r = Local().run(argv)
+    return r.rc, r.out, r.err
 
 
 def _owner_of(url):
@@ -130,12 +133,12 @@ def pr_rebase(target, name):
     src, mirror = target.src(name), target.mirror_dir()
     info("fetching in '%s' from the mirror, then rebasing onto origin/main" % name)
     if mirror and target.exec(name, ["test", "-d", mirror]).ok:
-        r = target.exec(name, ["git", "-C", src, "fetch", "--prune", "--quiet", mirror,
-                               "+refs/heads/*:refs/remotes/origin/*"])
+        r = target.act_exec(name, ["git", "-C", src, "fetch", "--prune", "--quiet", mirror,
+                                   "+refs/heads/*:refs/remotes/origin/*"])
     else:
-        r = target.exec(name, ["git", "-C", src, "fetch", "--prune", "--quiet", "origin"])
+        r = target.act_exec(name, ["git", "-C", src, "fetch", "--prune", "--quiet", "origin"])
     if r.ok:
-        r = target.exec(name, ["git", "-C", src, "rebase", "origin/main"])
+        r = target.act_exec(name, ["git", "-C", src, "rebase", "origin/main"])
     if r.ok:
         info("'%s' is rebased onto origin/main" % name)
         r = target.exec(name, ["git", "-C", src, "--no-pager", "log", "--oneline", "-1"])
@@ -147,7 +150,7 @@ def pr_rebase(target, name):
     return 1
 
 
-def pr_open(target, name, draft, web):
+def pr_open(target, name, draft, web, push_status):
     src = target.src(name)
     info("reading '%s's branch and remotes" % name)
 
@@ -161,18 +164,24 @@ def pr_open(target, name, draft, web):
         sys.stderr.write("error: %s\n" % e)
         die("'%s' is not ready to open as a pull request -- see above" % name)
 
-    if subprocess.run([WK, "push", "status"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+    if push_status() != 0:
         die("'wk pr open' pushes '%s' to '%s', and the deploy key is held back.\n    wk push on" % (branch, fork))
 
     info("pushing '%s' to '%s'" % (branch, fork))
-    r = target.exec(name, ["git", "-C", src, "push", "-u", fork, branch])
+    r = target.act_exec(name, ["git", "-C", src, "push", "-u", fork, branch])
     show(r)
     if not r.ok:
         die("the push to '%s' failed -- see above.\n    If the deploy key is the problem:  wk push on" % fork)
 
     flags = (["--draft"] if draft else []) + (["--web"] if web else [])
     info("opening a pull request: %s <- %s" % (base, head))
-    return subprocess.run(["gh", "pr", "create"] + pr_open_gh_args(base, head, *flags)).returncode
+    act.exec_into(["gh", "pr", "create"] + pr_open_gh_args(base, head, *flags))
+
+
+def push_rc(reg):
+    """`wk push status`'s own exit code: the key and the API credentials a push and a pull request need."""
+    with contextlib.redirect_stderr(io.StringIO()):
+        return Push(reg, secrets.Secrets(ROOT, reg.env, reg.machine), Clock(), io.StringIO()).switch_status()
 
 
 def _load(reg, name):
@@ -206,7 +215,7 @@ def main(argv):
             die("usage: wk pr open <workspace> [--draft] [--web]; see wk pr -h")
         require_name(name)
         target = _load(reg, name)
-        return pr_open(target, name, draft, web)
+        return pr_open(target, name, draft, web, lambda: push_rc(reg))
 
     spec = rest[0] if rest else ""
     if not spec:

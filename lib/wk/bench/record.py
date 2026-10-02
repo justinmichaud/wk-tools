@@ -7,8 +7,9 @@ import sys
 import zipfile
 
 from wk import fleetwalk
+from wk.act import die
 from wk.kv import kv_file
-from wk.machine import Local, replace_file
+from wk.machine import Local, PodmanVm, Ssh
 
 # The axes a report groups variance by, filled in for every subfield a writer left alone, so an older record and an uncontrolled one read alike.
 DEFAULT_CONFIGURATION = {"aslr": "unset", "path_len": 0, "shared_cache": None, "env_pad_bytes": 0}
@@ -69,9 +70,10 @@ def _pairs(fields, who):
         yield key, value
 
 
-def write_env(path, fields, bool_fields=(), update=False):
-    """The one writer of a run's env.json; `update` merges onto the write before the run, since wall_time_s comes after it."""
-    doc = load(path) if update else {}
+def write_env(path, fields, bool_fields=(), update=False, machine=None):
+    """The one writer of a run's env.json, on `machine`; `update` merges onto the write before the run (wall_time_s comes after)."""
+    m = machine or Local()
+    doc = (json.loads(m.read(path)) if m.exists(path) else {}) if update else {}
     for key, value in _pairs(fields, "env-record"):
         set_nested(doc, key, value)
     for key, value in _pairs(bool_fields, "env-record"):
@@ -79,14 +81,14 @@ def write_env(path, fields, bool_fields=(), update=False):
     cfg = doc.setdefault("configuration", {})
     for key, value in DEFAULT_CONFIGURATION.items():
         cfg.setdefault(key, value)
-    replace_file(path, json.dumps(doc, indent=2))
+    m.write_own(path, json.dumps(doc, indent=2))
 
 
 def _list_field(value):
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
-def task_write(taskdir, fields, commands):
+def task_write(taskdir, fields, commands, machine=None):
     doc = {"commands": list(commands)}
     for key, value in _pairs(fields, "task-write"):
         if key == "devices":
@@ -103,8 +105,9 @@ def task_write(taskdir, fields, commands):
             sys.exit("task-write: %s is required" % key)
     if not doc["devices"] or not doc["plans"] or not doc["slots"]:
         sys.exit("task-write: devices, plans and slots each need at least one entry")
-    os.makedirs(os.path.join(taskdir, "runs"), exist_ok=True)
-    replace_file(os.path.join(taskdir, "task.json"), json.dumps(doc, indent=2, sort_keys=True) + "\n")
+    m = machine or Local()
+    m.mkdir_now(os.path.join(taskdir, "runs"))
+    m.write_own(os.path.join(taskdir, "task.json"), json.dumps(doc, indent=2, sort_keys=True) + "\n")
 
 
 def task_doc(taskdir):
@@ -121,29 +124,27 @@ def not_a_measurement(env):
     return ""
 
 
-def run_state(rundir, env):
-    """ok has a result.json; failed has none but the wall_time_s written when run-benchmark returned; running has neither."""
-    result = os.path.join(rundir, "result.json")
-    if os.path.isfile(result) and os.path.getsize(result) > 0:
+def run_state(env, has_result):
+    """ok has a non-empty result.json; failed has none but the wall_time_s written when run-benchmark returned; running has neither."""
+    if has_result:
         return "rehearsal" if not_a_measurement(env) else "ok"
-    if "wall_time_s" in env:
-        return "failed"
-    return "running"
+    return "failed" if "wall_time_s" in env else "running"
 
 
-def task_runs(taskdir):
+def task_runs(taskdir, machine=None):
+    m = machine or Local()
+    if not m.isdir(os.path.join(taskdir, "runs")):
+        return []
+    files = m.read_tree(taskdir.rstrip("/"), "runs", ("*/*.json",))
     runs = []
-    root = os.path.join(taskdir, "runs")
-    if not os.path.isdir(root):
-        return runs
-    for name in sorted(os.listdir(root)):
-        rundir = os.path.join(root, name)
-        env = load(os.path.join(rundir, "env.json"))
+    for name in sorted({k.split("/")[0] for k in files}):
+        pre = name + "/"
+        env = json.loads(files[pre + "env.json"]) if pre + "env.json" in files else {}
         if not env or env.get("warmup"):
             continue
-        runs.append({"id": name, "dir": rundir, "env": env, "state": run_state(rundir, env)})
+        runs.append({"id": name, "dir": os.path.join(taskdir, "runs", name), "env": env,
+                     "state": run_state(env, bool(files.get(pre + "result.json")))})
     return runs
-
 
 
 def task_arms(doc):
@@ -324,20 +325,51 @@ def unexported(machine, bench, default_dir):
     return out
 
 
-def _ws_root(store):
-    return os.path.join(store.record_dir(), "ws")
+def driver_logs(store, task):
+    return os.path.join(store.record_dir(), "log", task)
 
 
-def home_for(store, ws, task):
-    """A new task's directory: its workspace's where this store (record_dir, not the podman VM's root) holds it, else bench/."""
-    wsdir = os.path.join(_ws_root(store), ws) if ws else ""
-    return os.path.join(wsdir, "bench", task) if wsdir and os.path.isdir(wsdir) else os.path.join(store.bench_dir(), task)
+def ws_home(reg, ws, target=""):
+    """(machine, directory) where `ws` keeps its tasks, wherever it lives: its target's own answer (Target.results)."""
+    try:
+        home = reg.load(target or reg.ws_target(ws)).results(ws) if ws else None
+    except LookupError as e:
+        die(str(e))
+    if not home:
+        die("no machine this one reaches holds workspace '%s''s tasks ('wk ls' lists the workspaces)" % ws)
+    return home
+
+
+def hops(machine):
+    out = []
+    while isinstance(machine, Ssh):
+        out.append(["podman" if isinstance(machine, PodmanVm) else "ssh", machine.dest])
+        machine = machine.via
+    return out[::-1]
+
+
+def held(home, ws):
+    """`home` (a `ws_home`), once its workspace's directory is there to hold a task."""
+    if not home[0].isdir(os.path.dirname(home[1])):
+        die("a task lives in its workspace's directory, and no workspace '%s' is at %s ('wk ls' lists them)"
+            % (ws, os.path.dirname(home[1])))
+    return home
 
 
 def task_roots(machine, root):
     ws = os.path.join(root, "ws")
     dirs = [os.path.join(ws, w, "bench") for w in (sorted(machine.listdir(ws)) if machine.isdir(ws) else [])]
-    return [d for d in dirs if machine.isdir(d)] + [os.path.join(root, "bench")]
+    return [d for d in dirs if machine.isdir(d)]
+
+
+def outside(store):
+    """Where tasks lived before each moved into its workspace: no command reads it, and `wk gc` names each one's move."""
+    return os.path.join(store.record_dir(), "bench")
+
+
+def workspace_of(taskdir, machine):
+    names = {r["env"].get("workspace", "") for r in task_runs(taskdir, machine)}
+    return names.pop() if len(names) == 1 else ""
 
 
 def homes_at(machine, root):
@@ -350,6 +382,18 @@ def homes_at(machine, root):
 
 def homes(store):
     return homes_at(Local(), store.record_dir())
+
+
+def leg_home(reg, ws, task=""):
+    """(machine, bench) of `ws`, holding `task` when named: run-benchmark writes a leg's log and result where it runs."""
+    home = ws_home(reg, ws)
+    if isinstance(home[0], Ssh):
+        die("workspace '%s' keeps its tasks in %s on %s, and a leg writes its log and result where it runs: run it on %s"
+            % (ws, home[1], home[0].name, home[0].name))
+    held(home, ws)
+    if task and not home[0].exists(os.path.join(home[1], task, "task.json")):
+        die("no such task '%s' in workspace '%s' (%s); 'wk bench ls' lists the tasks and where each is" % (task, ws, home[1]))
+    return home
 
 
 def running_tasks(found, lock_path, alive):
@@ -396,3 +440,17 @@ class Listing:
 
     def rows(self):
         return self.store_rows() + self.fleet_rows()
+
+
+def main(argv):
+    from wk import images, targets
+    if len(argv) != 2 or argv[0] != "home":
+        die("usage: python3 -m wk.bench.record home <workspace>")
+    env = os.environ
+    m, path = ws_home(targets.Registry(images.root(env), env, Local()), argv[1])
+    print(json.dumps({"via": hops(m), "path": path}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

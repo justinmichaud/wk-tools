@@ -20,7 +20,7 @@ from tests.support import REPO, container_side, requires_container_target
 sys.path.insert(0, str(REPO / "lib"))
 from wk import wall  # noqa: E402
 
-PUSH = (REPO / "cmd" / "push").read_text()
+PUSH = (REPO / "lib" / "wk" / "pushswitch.py").read_text()
 WALL = (REPO / "lib" / "wk" / "wall.py").read_text()
 
 

@@ -49,7 +49,7 @@ def commands():
 
 
 def header(path):
-    return path.read_text(errors="replace").splitlines()[:15]
+    return [line.rstrip("\n") for line in D.leading_block(path)]
 
 
 def synopsis(path):
@@ -229,13 +229,30 @@ class TestTheConfigAndTheSubverbAreTheDispatchers(unittest.TestCase):
                 self.assertIn("'wk %s' needs one of:" % c.name, cp.stdout)
 
     def test_the_verb_is_handed_over_first(self):
-        """a declared verb is argv[0] wherever it was typed; any other word is the default verb's argument"""
+        """a declared verb is argv[0]; any other word is the default verb's argument, even one named like a later verb"""
         def first(cmd, *args):
             return dispatch.Invocation(cmd, D.Decl(REPO / "cmd" / cmd), list(args)).verb_first()
-        self.assertEqual(first("push", "--target", "box", "on"), ["on", "--target", "box"])
+        self.assertEqual(first("push", "on", "--target", "box"), ["on", "--target", "box"])
+        self.assertEqual(first("push", "--target", "box"), ["status", "--target", "box"])
+        self.assertEqual(first("pr", "ws", "rebase"), ["checkout", "ws", "rebase"])
+        self.assertEqual(first("pr", "rebase", "ws"), ["rebase", "ws"])
         self.assertEqual(first("quiesce"), ["status"])
         self.assertEqual(first("pr", "ws", "1234"), ["checkout", "ws", "1234"])
-        self.assertEqual(first("sysimage", "--list"), ["--list"])
+        self.assertEqual(first("sysimage", "configs"), ["configs"])
+
+    def test_an_option_before_the_verb_is_refused(self):
+        """a verb's options follow it: `wk push --target box on` is refused, not reordered"""
+        for argv in (("push", "--target", "box", "on"), ("key", "--rotate", "setup"), ("pr", "--draft", "open")):
+            with self.subTest(argv=argv):
+                cp = run(*argv)
+                self.assertEqual(cp.returncode, 2, cp.stdout)
+                self.assertIn("comes before the verb", cp.stdout)
+
+    def test_a_sibling_verbs_option_is_refused(self):
+        """`--rotate` is setup's and deploy's: `wk key set --rotate` is an unknown option"""
+        cp = run("key", "set", "--rotate")
+        self.assertEqual(cp.returncode, 2, cp.stdout)
+        self.assertIn("unknown option: --rotate", cp.stdout)
 
     def test_a_mistyped_verb_is_named_where_the_default_takes_no_argument(self):
         for argv in (("push", "onn"), ("key", "chek"), ("quiesce", "of")):
@@ -247,7 +264,9 @@ class TestTheConfigAndTheSubverbAreTheDispatchers(unittest.TestCase):
     def test_a_retired_flag_or_verb_names_its_replacement(self):
         """a `gone` line: the dispatcher's tombstone, anywhere for a flag, in the verb's place for a verb"""
         for argv, said in ((("gui", "ws", "--wpe"), "'wk gui --wpe' is gone: wk gui --config wpe-release"),
-                           (("key", "register"), "'wk key register' is gone: wk key deploy")):
+                           (("key", "register"), "'wk key register' is gone: wk key deploy"),
+                           (("bench", "--list"), "'wk bench --list' is gone: wk bench plans"),
+                           (("sysimage", "--list"), "'wk sysimage --list' is gone: wk sysimage configs")):
             with self.subTest(argv=argv):
                 cp = run(*argv)
                 self.assertEqual(cp.returncode, 1, cp.stdout)

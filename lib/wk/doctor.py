@@ -8,11 +8,11 @@ import shlex
 import shutil
 import subprocess
 
-from wk import bridge, fleet, git, guest, record, secrets, targets
+from wk import bridge, fleet, git, guest, priv, record, secrets, targets
 from wk.bench import record as bench_record
 from wk.key.cli import Key
 from wk.kv import kv
-from wk.machine import Local, lib_argv
+from wk.machine import Local
 from wk.machine_cmd import deps as machine_deps
 from wk.status import machine_confs
 from wk.store import Store, in_vm
@@ -273,8 +273,8 @@ def gh_authenticated(env=None):
                                         stderr=subprocess.DEVNULL, env=env).returncode == 0
 
 
-class Bash:
-    """What a Doctor asks outside Python: gh's token, and lib/common.sh's table of the privileged helpers, which ./setup installs."""
+class Host:
+    """What a Doctor asks of the host that tests replace: gh's token and the privileged helpers' table and grants."""
 
     @staticmethod
     def gh_authenticated(root, env=None):
@@ -282,21 +282,17 @@ class Bash:
 
     @staticmethod
     def priv_helpers(root, env=None):
-        fn = ('_ph() { wk_priv_helpers | while read -r n w what; do if [ -n "$n" ]; then '
-              'printf \'%s\\t%s\\t%s\\t%s\\t%s\\n\' "$n" "$w" "$what" "$(wk_priv_path "$n")" "$(wk_priv_sudoers "$n")"; fi; done; }; _ph')
-        out = subprocess.run(lib_argv(root, "lib/common.sh", fn), stdout=subprocess.PIPE, text=True, env=env).stdout
-        return [tuple(line.split("\t")) for line in out.splitlines() if line.count("\t") == 4]
+        return priv.helpers()
 
     @staticmethod
     def priv_answers(root, path, env=None):
-        return subprocess.run(lib_argv(root, "lib/common.sh", "wk_priv_answers", path), stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, env=env).returncode == 0
+        return priv.answers(path, env=env)
 
 
 class Doctor:
-    """This machine's checks; `sh` answers what is asked outside Python (Bash)."""
+    """This machine's checks; `sh` answers what is asked of the host (Host)."""
 
-    def __init__(self, root, env=None, machine=None, macos=None, sh=Bash, mc=machine_deps, keys=None):
+    def __init__(self, root, env=None, machine=None, macos=None, sh=Host, mc=machine_deps, keys=None):
         self.root = root
         self.env = os.environ if env is None else env
         self.machine = machine or Local()
@@ -427,7 +423,10 @@ class Doctor:
         store, p = self.store, self.paths()
         for d in bench_record.task_roots(self.machine, store.record_dir()):
             yield self.local_state(d, "backed-up", "benchmark runs and their provenance -- not regenerable at any price; a rerun is a "
-                                   "different measurement" + ("" if d == store.bench_dir() else "; wk bench export <task> copies one out"))
+                                   "different measurement; wk bench export <task> copies one out")
+        if bench_record.tasks(bench_record.outside(store), self.machine):
+            yield self.local_state(bench_record.outside(store), "backed-up", "benchmark tasks outside any workspace, which no command reads "
+                                   "until each is moved into its workspace's bench/: wk gc names each one's move")
         yield self.local_state(store.mirror(), "regenerable",
                                "wk sync clones WebKit into it again (the one copy here; the podman VM and every tart guest read it)")
         yield self.local_state(store.secrets_dir(), "regenerable", "wk key deploy makes new deploy keys (revoke the old ones on GitHub)")

@@ -44,8 +44,8 @@ EDITED = ("container/bin/wk-build-wall", "shell/path.sh", "shell/bashrc")
 
 def wall_names():
     """The wrapped names, read from the one place that lists them (WALL_NAMES
-    in the wall itself) rather than copied into this test -- the same way
-    tests/support.py reads WK_DISPATCH_VARS out of lib/common.sh."""
+    in the wall itself) rather than copied into this test -- as the
+    dispatcher's own constants are read from Python."""
     m = re.search(r'^WALL_NAMES="([^"]+)"', WALL.read_text(), re.M)
     assert m, "container/bin/wk-build-wall no longer defines WALL_NAMES"
     return tuple(m.group(1).split())

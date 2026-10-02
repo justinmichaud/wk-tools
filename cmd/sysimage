@@ -2,9 +2,8 @@
 #
 # wk sysimage <sub> [args] -- build and manage bootable systems
 #
-# wk: where=host name=none values=--list group=hosts takes=1 verbs=build,webkit,disks,write,ls,list,holds,path,rm,flash opts --list dryrun build,webkit,write outside readonly ls,disks,holds,path,--list
+# wk: where=host name=none values=configs group=hosts takes=1 verbs=configs,build,webkit,disks,write,ls,list,holds,path,rm,flash dryrun build,webkit,write outside readonly ls,list,disks,holds,path,configs,rm,flash
 # wk: destructive write,--install,--all,--rebuild,--rm
-# wk: flag --list takes=0
 # wk: sub ls,list where=dynamic opts=--continued
 # wk: sub build,webkit,holds,path where=dynamic name=derived
 # wk: sub build,webkit,disks,rm,flash,holds,path takes=2
@@ -13,6 +12,7 @@
 # wk: sub build opts=--workspace=,--detach,--stop,--resume,--stage=,--commit=,--slot=,--config=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet,--create,--fetch,--install,--provision,--repair,--build-pkg,--all,--version=,--refresh,--rebuild,--rm
 # wk: sub webkit opts=--workspace=,--detach,--stop,--commit=,--slot=,--config=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet
 # wk: sub write opts=--from=,--disk=,--profile=,--machine=,--rescue,--grow,--no-grow
+# wk: gone --list configs
 #
 # An image is a whole machine, built from a spec in this repo, that a machine can
 # be put into for one boot and taken out of again.
@@ -157,7 +157,7 @@ def main(argv):
     args = decl.Args(d, argv)
     spec = args.positionals[1] if len(args.positionals) > 1 else ""
     s = cli.Sysimage(reg, Clock())
-    if args.flag("--list"):
+    if hook == "configs":
         sys.stdout.write(images.listing(reg.env))
         return 0
     if hook in ("ls", "list"):

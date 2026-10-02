@@ -551,18 +551,18 @@ is_macos() { return %(notmacos)d; }
 wk_priv_path() { printf '%%s/%%s' "$_libexec" "$1"; }
 wk_priv_sudoers() { local n="${1#wk-}"; printf '%%s/sudoers.d/zzz-wk-%%s' "$FAKE" "${n%%%%-priv}"; }
 
+# `sudo -n -l` as lib/wk/priv.py asks it, from outside bash: the rules this user would get. A run under
+# a cached credential succeeds in the function below whatever this lists, so the two cannot stand in for one another.
+mkdir -p "$FAKE/bin"
+printf '#!/bin/sh\ngrep -h "^$(id -un) " "%%s"/sudoers.d/* 2>/dev/null || true\n' "$FAKE" > "$FAKE/bin/sudo"
+chmod +x "$FAKE/bin/sudo"
+PATH="$FAKE/bin:$PATH"
+
 sudo() {
     local a args=()
     if [ "${1:-}" = -n ]; then
         shift
         if [ "${1:-}" = true ]; then return "$NOSUDO"; fi
-        # `sudo -n -l`: the rules sudo would apply to this user, which is the only thing
-        # lib/common.sh's wk_priv_answers reads. A run under a cached credential succeeds
-        # below whatever this lists, so the two cannot stand in for one another.
-        if [ "${1:-}" = -l ]; then
-            grep -h "^$(id -un) " "$FAKE"/sudoers.d/* 2>/dev/null || true
-            return 0
-        fi
     fi
     if [ "${1:-}" = visudo ]; then return "$VISUDO"; fi
     for a in "$@"; do

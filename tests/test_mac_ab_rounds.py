@@ -58,14 +58,14 @@ class TestTheStoppingRule(WkTest):
     def test_a_fleet_ab_hands_the_rule_to_each_board_as_the_command_it_prints(self):
         with temp_store() as store:
             reg = targets.Registry(REPO, env={"WK_STORE": store["WK_STORE"], "HOME": "/nonexistent"}, machine=Fake())
-            a = ab.AB(REPO, reg, FakeClock(), "", {"devices": "rpi5", "systems": "a,b", "detect": "0.5", "max_rounds": "9"})
+            a = ab.AB(REPO, reg, FakeClock(), "", {"devices": "rpi5", "systems": "a,b", "workspace": "ws", "detect": "0.5", "max_rounds": "9"})
             a.check()
 
             class Dev:
                 name, arm_ws = "rpi5", [("ws", "")]
             _, o = a.bench_options(Dev())
             self.assertEqual((o["max_rounds"], o["detect"]), ("9", "0.5"))
-            self.assertIn("--max-rounds 9 --detect 0.5", a.bench_command(Dev(), "speedometer3"))
+            self.assertIn("--max-rounds 9 --detect 0.5", " ".join(a.bench_words(Dev(), "speedometer3")))
 
 
 class Rounds:
@@ -216,6 +216,12 @@ class TestTheSummary(WkTest):
         _, text, written = self.summary(ab_legs(QUIET, QUIET[::-1]), out="summary.txt")
         self.assertEqual(written["summary.txt"], text)
         self.assertIn("summary-speedometer3.html", written)
+
+    def test_a_dry_run_writes_neither_the_text_nor_a_page(self):
+        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
+            _, text, written = self.summary(ab_legs(QUIET, QUIET[::-1]), out="summary.txt")
+        self.assertIn("comparing arm A against arm B", text)
+        self.assertEqual(written, {})
 
     def test_the_command_refuses_a_missing_run_map(self):
         from wk.bench import cli

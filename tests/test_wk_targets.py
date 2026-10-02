@@ -481,6 +481,15 @@ class TestRemote(RemoteTest):
         self.assertEqual(argv[-2], "box.example")
         self.assertIn("cd /home/u/wk/ws/a/WebKit && git status", argv[-1])
 
+    def test_the_ssh_option_getter_makes_no_directory_and_the_first_ssh_does(self):
+        state = self.tmp / "state" / "wk" / "ssh"
+        self.t.ssh_opts()
+        self.assertFalse(state.exists())
+        self.assertNotIn(("mkdir", str(state)), self.fake.effects)
+        self.fake.answer_remote("git status", out="clean\n")
+        self.t.exec("a", ["git", "status"])
+        self.assertIn(("mkdir", str(state)), self.fake.effects)
+
     def test_wk_is_the_far_machines_own_with_the_flags_as_environment(self):
         self.fake.answer_remote("tools/wk", out="==> no task is running on box\n")
         rc, out = self.t.wk("stop", "--tasks", env={"WK_YES": "1", "WK_ROW_LABEL": "box", "WK_NO_DELEGATE": "1", "HOME": "/x"})
@@ -727,7 +736,7 @@ class TestContainerWrite(TargetsTest):
         with mock.patch.object(secrets.Secrets, "store_publish") as sp:
             self.t.store_init()
             sp.assert_called_once_with()
-        for d in ("git", "base", "ws", "cache/ccache", "cache/yocto/downloads", "cache/buildroot/ccache", "cache/bench", "bench", "skills"):
+        for d in ("git", "base", "ws", "cache/ccache", "cache/yocto/downloads", "cache/buildroot/ccache", "cache/bench", "skills"):
             self.assertIn(os.path.join(root, d), self.fake.dirs)
         conf = os.path.join(root, "cache", "ccache", "ccache.conf")
         self.assertEqual(self.fake.files[conf], "max_size = 40G\n")

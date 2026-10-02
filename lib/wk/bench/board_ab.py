@@ -111,9 +111,7 @@ class AB:
         self.env = dict(reg.env, WK_DEVICE_HELD="device:" + self.name)
         self.task, self.taskdir, self.owned, self.held = o.get("task") or "", "", False, None
         if self.task:
-            self.taskdir = record.homes(reg.store).get(self.task, "")
-            if not self.taskdir:
-                die("no such task '%s' in this machine's store; 'wk bench ls' lists the tasks" % self.task)
+            self.taskdir = os.path.join(record.leg_home(reg, ws, self.task)[1], self.task)
         self.system = board.for_board(self.root, reg, ws, clock, self.name, machine=machine, driver=driver)
         self.recs = progress.Records(reg.store.record_dir(), clock=clock, env=reg.env, machine=self.here)
         self.lock = Lock(reg.store, self.here, clock)
@@ -209,8 +207,9 @@ class AB:
             return
         stamp, flag = self.clock.stamp(), "--ab-systems" if self.systems else "--ab"
         self.task = "%s-%s-systems" % (stamp, self.name) if self.systems else "%s-%s-%s-vs-%s" % (stamp, self.name, a, b)
-        self.taskdir = record.home_for(self.reg.store, self.ws, self.task)
-        if os.path.exists(self.taskdir):
+        m, bench = record.leg_home(self.reg, self.ws)
+        self.taskdir = os.path.join(bench, self.task)
+        if m.exists(self.taskdir):
             die("task %s already exists (%s); a task is one request, made once" % (self.task, self.taskdir))
         self.lock.hold("bench-task-" + self.task, timeout=5)
         device = self.name if self.systems else "%s=%s" % (self.name, self.system.manifest(a).get("profile", ""))
@@ -222,7 +221,7 @@ class AB:
         record.task_write(self.taskdir, ["task=" + self.task, "requested=" + self.clock.iso(), "subject.kind=" + ("systems" if self.systems else "slots"),
                                          "subject.spec=%s,%s" % (a, b), "devices=" + device, "plans=" + self.plan, "rounds=%d" % self.rounds,
                                          "slots=" + ",".join(dict.fromkeys(s for _, s in self.arms)),
-                                         "restart=%s --task %s" % (command, self.task)] + extra, [command])
+                                         "restart=%s --task %s" % (command, self.task)] + extra, [command], machine=m)
         self.base["task"], self.owned = self.task, True
 
     def warmup(self):

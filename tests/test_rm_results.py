@@ -17,7 +17,7 @@ from tests.test_bench_task import TASK
 from tests.test_rm_remote import _LOCAL_CONF
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import machine, targets  # noqa: E402
+from wk import machine, targets, workspace  # noqa: E402
 from wk.bench import cli, record  # noqa: E402
 from wk.machine import Fake, Local  # noqa: E402
 
@@ -112,13 +112,15 @@ class TestTheEvidenceIsReadOrRefused(WkTest):
     def test_no_bench_directory_is_nothing_to_lose(self):
         self.assertEqual(record.unexported(Fake(), "/ws/w/bench", "/d"), [])
 
-    def test_a_peer_answers_for_its_own_tasks(self):
-        """A peer's `wk rm` is its own wk's, which asks this of its own store."""
-        peer = targets.Remote.__new__(targets.Remote)
-        peer.peer = True
-        self.assertIsNone(peer.results("w"))
+    def test_a_build_boxs_tasks_are_in_its_workspace_directory_there(self):
         box = types.SimpleNamespace(peer=False, machine="ssh", ws_dir_there=lambda ws: "/srv/wk/ws/" + ws)
         self.assertEqual(targets.Remote.results(box, "w"), ("ssh", "/srv/wk/ws/w/bench"))
+
+
+    def test_a_peers_tasks_are_left_to_the_peers_own_rm(self):
+        peer = types.SimpleNamespace(peer=True, results=lambda ws: self.fail("a peer's tasks were read from here"))
+        reg = types.SimpleNamespace(env={}, store=types.SimpleNamespace(home=lambda: "/h"))
+        self.assertEqual(workspace.unsaved_results(reg, [("w", peer, "workspace")]), [])
 
 
 class _Holder:

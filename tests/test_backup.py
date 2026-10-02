@@ -11,6 +11,7 @@ import io
 import os
 import types
 import unittest
+from unittest import mock
 
 from tests.killpoints import converges
 from tests.support import REAL_MACHINES, REPO
@@ -243,6 +244,20 @@ class TestKillpointsKeyBackup(unittest.TestCase):
                 with contextlib.redirect_stderr(io.StringIO()):
                     backup.main("/root", False, w.fake, macos)
             converges(self, lambda: self.world(macos), run_once, lambda w: dict(w.fake.files))
+
+
+    def test_a_dry_run_records_the_wet_runs_writes_and_makes_none(self):
+        for macos in (False, True):
+            with self.subTest(macos=macos):
+                wet, dry = self.world(macos).fake, self.world(macos).fake
+                before = dict(dry.files)
+                with contextlib.redirect_stderr(io.StringIO()):
+                    backup.main("/root", False, wet, macos)
+                    with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
+                        backup.main("/root", False, dry, macos)
+                self.assertTrue([e for e in wet.effects if e[0] == "write"])
+                self.assertEqual(wet.effects, dry.effects)
+                self.assertEqual(before, dry.files)
 
 
 class TestRpi5TuningIsBackedUp(unittest.TestCase):

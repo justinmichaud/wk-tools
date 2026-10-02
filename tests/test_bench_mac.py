@@ -220,8 +220,7 @@ class TestTheRecord(MacTest):
         self.assertEqual((env["stage"]["id"], env["staged_from"]), (STAGE_ID, self.w.stage))
         self.assertEqual((env["configuration"]["aslr"], env["role_marker_overridden"], env["forced"]), ("os-randomised", False, False))
         self.assertIn("wall_time_s", env)
-        rundir = os.path.join(self.w.home, "results", self.w.results()[0])
-        self.assertEqual(brecord.run_state(rundir, env), "ok")
+        self.assertEqual(brecord.run_state(env, True), "ok")
 
     def test_the_staged_builds_pgo_reading_goes_with_the_run(self):
         self.w._set_file(os.path.join(self.w.build, "wk-profile-check.json"), '{"missing": []}')
@@ -241,8 +240,7 @@ class TestTheRecord(MacTest):
         env = w.env_json()
         self.assertEqual((env["machine"], env["measures"]), ("benchvm", False))
         self.assertIn("rehearsal", brecord.not_a_measurement(env))
-        rundir = os.path.join(w.home, "results", w.results()[0])
-        self.assertEqual(brecord.run_state(rundir, env), "rehearsal")
+        self.assertEqual(brecord.run_state(env, True), "rehearsal")
 
     def test_a_rehearsed_round_ends_the_task_and_is_never_usable(self):
         task = self.tmp / "task"

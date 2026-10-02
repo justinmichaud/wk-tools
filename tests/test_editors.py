@@ -11,7 +11,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, dispatch_vars, run, stub_path
+from tests.support import REPO, DISPATCH_VARS, run, stub_path
 
 HELIX_DIR = REPO / "container" / "helix"
 FIRSTRUN = REPO / "container" / "firstrun.sh"
@@ -242,5 +242,5 @@ class TestZedInheritsNoDispatcherVariables(unittest.TestCase):
             })
             self.assertEqual(cp.returncode, 0, cp.stdout)
             env = dict(l.split("=", 1) for l in log.read_text().splitlines() if "=" in l)
-        leaked = sorted(k for k in dispatch_vars() if k in env)
+        leaked = sorted(k for k in DISPATCH_VARS if k in env)
         self.assertEqual(leaked, [], f"zed inherited {leaked}")

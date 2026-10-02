@@ -476,6 +476,38 @@ class TestCrashOnlyAndDryRun(KeyTest):
         self.assertIn(TOPIC + "\n", wet.files.values())
 
 
+class TestTheStoringVerbsHaveADryRun(KeyTest):
+    """`ensure` and `adopt`: a dry run records the wet run's effects and leaves the world as it was."""
+
+    def dry_equals_wet(self, make, verb, minted=False):
+        """`minted`: the wet run publishes the public half of a key the dry one did not write, so has none to derive."""
+        wet = make()
+        with contextlib.redirect_stderr(io.StringIO()), mock.patch("os.urandom", return_value=b"\0" * 8):
+            verb(self.key(wet))
+            dry = make()
+            before = dry.state()
+            os.environ["WK_DRY_RUN"] = "1"
+            verb(self.key(dry))
+        plan = wet.acts()
+        self.assertTrue(plan)
+        self.assertEqual([a for a in plan if not (minted and (".pub" in str(a) or "/view" in str(a)))], dry.acts())
+        self.assertEqual(before, dry.state())
+
+    def test_ensure(self):
+        self.dry_equals_wet(lambda: KeyWorld(self.tmp), lambda k: k.ensure(), minted=True)
+
+    def test_adopt_a_deploy_key(self):
+        self.dry_equals_wet(lambda: KeyWorld(self.tmp), lambda k: k.adopt_verb("fork", lambda: b"KEY:taken\n"), minted=True)
+
+    def test_adopt_a_login(self):
+        def make():
+            w = KeyWorld(self.tmp)
+            w._set_file(self.tmp + "/made/.credentials.json", "{login}\n")
+            w._set_file(self.tmp + "/made/.claude.json", "{}\n")
+            return w
+        self.dry_equals_wet(make, lambda k: k.adopt_verb(common.LOGIN, lambda: k.login_pack(self.tmp + "/made").encode()))
+
+
 class TestTheFleetQuestion(KeyTest):
     """`setup` is declared destructive for what it overwrites on other workstations: asked when there is one to
     overwrite, and acting unasked when there is none or the question was declined."""
@@ -525,10 +557,11 @@ class TestTheDeclaration(unittest.TestCase):
         self.assertFalse(self.d.is_destructive(["sudo", "setup"]))
         self.assertFalse(self.d.is_destructive(["backup"]))
 
-    def test_sudo_has_a_dry_run_and_backup_only_for_its_read(self):
+    def test_every_verb_has_a_dry_run_or_only_reads(self):
         self.assertTrue(self.d.honours_dryrun(["sudo", "setup"]) and self.d.honours_dryrun(["sudo"]))
-        self.assertTrue(self.d.honours_dryrun(["backup", "--candidates"]))
-        self.assertFalse(self.d.honours_dryrun(["backup"]))
+        self.assertTrue(self.d.honours_dryrun(["backup"]) and self.d.honours_dryrun(["backup", "--candidates"]))
+        for v in ("check", "show", "pub", "sshtest", "fingerprints", "verdict", "give"):
+            self.assertTrue(self.d.is_readonly(v), v)
 
     def test_each_subverb_takes_its_own_options(self):
         self.assertEqual(["sudo", "status", "--target=box"], self.check("sudo", "status", "--target", "box"))

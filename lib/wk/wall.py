@@ -7,6 +7,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 
 from wk import buildconf, reach, secrets
+from wk.store import no_such_workspace
 from wk.act import die
 from wk.doctor import MISS, miss, note, ok
 
@@ -22,7 +23,17 @@ COMMIT_WALL_PATHS = ("objects", "refs", "logs", "HEAD", "packed-refs", "index.lo
 
 
 def http(url, extra=""):
-    return "curl -sS -m 20 -o /dev/null -w '%%{http_code}' %s%s 2>/dev/null" % (extra, url)
+    return "curl -sS -m 40 -o /dev/null -w '%%{http_code}' %s%s 2>/dev/null" % (extra, url)
+
+
+def upstream_gap(name, remedy, *codes):
+    """The injector's own 502/504 is the far end down; its 598 is the injector failing TLS or DNS toward it."""
+    if "598" in codes:
+        return [miss("%s: the injector failed to verify or resolve the host (HTTP 598) -- a fault in the injector, not the upstream" % name, remedy)]
+    bad = next((c for c in codes if c in ("502", "504")), None)
+    if bad is None:
+        return []
+    return [note("%s did not answer through the injector (HTTP %s) -- an upstream outage, not the sandbox" % (name, bad))]
 
 
 def claude_status(text):
@@ -81,7 +92,7 @@ class Wall:
         code = self.inside(http("https://github.com/"))
         if code == "200":
             return [ok("github reachable through the proxy (HTTP %s)" % code)]
-        return [miss("github unreachable through the proxy (got '%s')" % (code or "nothing"), "systemctl --user status wk-proxy")]
+        return [miss("github unreachable through the proxy (got '%s')" % (code or "nothing"), self.target.daemon_remedy(self.ws, "proxy"))]
 
     def allowlist(self):
         denied = self.inside("curl -sS -m 15 -o /dev/null https://example.com/ 2>&1")
@@ -226,6 +237,8 @@ class Wall:
         """GET / answers 200 unauthenticated and 401 only for a token GitHub refuses, which is the injector's own standing one."""
         root = self.inside(http("https://api.github.com/"))
         user = self.inside(http("https://api.github.com/user"))
+        if gap := self.gap("GitHub", root, user):
+            return gap
         if root == "200" and user == "200":
             return [ok("a read is authenticated (HTTP 200) from a token this workspace never holds")]
         if root == "200" and user == "401":
@@ -241,13 +254,15 @@ class Wall:
             return [miss("a read answered '%s' rather than 200 or 401" % (user or "nothing"),
                          "the injector is in the path but not answering for api.github.com/user")]
         return [miss("api.github.com answered '%s' -- the injector is not in the path" % (root or "nothing"),
-                     "systemctl --user status wk-github-inject; the CA is /run/wk/wk-github-ca.pem")]
+                     self.target.daemon_remedy(self.ws, "inject"))]
 
     def github_write(self):
         """An empty body names no branch, so 422 is the authenticated answer and no pull request is created."""
         fork = next((r[1] for r in secrets.forks()), "")
         pulls = "https://api.github.com/repos/%s/pulls" % fork
         code = self.inside(http(pulls, "-X POST -d '{}' "))
+        if gap := self.gap("GitHub", code):
+            return gap
         if self.push_on != 1:
             if code == "412":
                 return [ok("a write is refused by the injector (HTTP 412), which names 'wk push on'")]
@@ -309,12 +324,17 @@ class Wall:
         return [miss("'git-webkit setup' has not completed in '%s' (webkitscmpy.setup is not true): `git-webkit pr` prompts or refuses" % self.ws,
                      "'wk sync %s --fix' re-asserts the remotes and runs it" % self.ws)]
 
+    def gap(self, name, *codes):
+        return upstream_gap(name, self.target.daemon_remedy(self.ws, "inject"), *codes)
+
     def bugzilla_read(self):
         code = self.inside(http("https://bugs.webkit.org/rest/version"))
+        if gap := self.gap("Bugzilla", code):
+            return gap
         if code == "200":
             return [ok("bugs.webkit.org reachable through the injector (HTTP %s)" % code)]
         return [miss("bugs.webkit.org answered '%s' -- the injector is not in the path for it" % (code or "nothing"),
-                     "systemctl --user status wk-github-inject; the CA is /run/wk/wk-github-ca.pem")]
+                     self.target.daemon_remedy(self.ws, "inject"))]
 
     def bugzilla_write(self):
         """Bugzilla names its own refusal in the body: 410 "log in first", 306 an unknown key, else an empty bug refused."""
@@ -322,13 +342,17 @@ class Wall:
         if self.push_on != 1:
             # Nothing reaches Bugzilla here, so the status is the injector's own.
             code = self.inside(http("https://bugs.webkit.org/rest/bug", post))
+            if gap := self.gap("Bugzilla", code):
+                return gap
             if code == "412":
                 return [ok("a Bugzilla write is refused by the injector (HTTP 412), which names 'wk push on'")]
             return [miss("POST /rest/bug answered '%s' where the host does not say push is on -- expected 412, the injector's own refusal"
                          % (code or "nothing"),
                          "Bugzilla's own 'log in first' is an injector still running older code, which 'wk status' reports and "
                          "'./setup' on that machine restarts; anything else is a Bugzilla key still on the machine:  wk push off")]
-        body = self.inside("curl -sS -m 20 %shttps://bugs.webkit.org/rest/bug 2>/dev/null" % post)
+        body = self.inside("curl -sS -m 40 %shttps://bugs.webkit.org/rest/bug 2>/dev/null" % post)
+        if "wk credential injector" in body:
+            return self.gap("Bugzilla", "504" if "did not answer" in body else "502" if "could not reach" in body else "598")
         try:
             code = str(json.loads(body).get("code", ""))
         except (ValueError, AttributeError):
@@ -372,7 +396,7 @@ class Wall:
         if self.machine.run(["systemctl", "--user", "is-active", "--quiet", "wk-proxy.service"]).ok:
             rows.append(ok("egress proxy running"))
         else:
-            rows.append(miss("egress proxy is not running", "systemctl --user status wk-proxy"))
+            rows.append(miss("egress proxy is not running", self.target.daemon_remedy(self.ws, "proxy")))
         written = self.inside("touch /opt/wk-tools/.wk-write-probe 2>&1")
         if "read-only" in written.lower() or "permission denied" in written.lower():
             rows.append(ok("/opt/wk-tools is read-only"))
@@ -446,7 +470,7 @@ def from_host(root, target, ws, machine, rep, want_gpu=False):
             "    than a measurement, for the same reason." % ws)
     state = target.info(ws)
     if state == "absent":
-        die("no such workspace: %s" % ws)
+        die(no_such_workspace(ws))
     rows = [ok("workspace running") if state == "running" else miss("workspace state: %s" % state, "wk start %s" % ws)]
     if target.agent_secret_present(ws, "claude-login"):
         rows.append(note("this workspace has your claude.ai login (account scope, not just inference)"))

@@ -17,8 +17,9 @@ def local_workspaces(root, env=None):
     return Registry(root, env).local_workspaces()
 
 
-def flags_for(d):
-    specs = [d.opts] + [spec.get("opts") for _, spec in d.sub + d.flag]
+def flags_for(d, verb=None):
+    """The options of one verb, or of a command with none."""
+    specs = [d.opts_for([verb])] if verb else [d.opts] + [spec.get("opts") for _, spec in d.flag]
     return sorted({x.rstrip("=") for spec in specs for x in (spec or "").split(",") if x})
 
 
@@ -51,7 +52,7 @@ def _words(words):
 
 _FUNCTION = r'''
 _wk_completion() {
-    local cur prev bin cmd i v typed=0 words= first= verb= slot shift=0
+    local cur prev bin cmd i typed=0 words= first= verb= slot shift=0
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
@@ -66,9 +67,6 @@ _wk_completion() {
         COMPREPLY=( $(compgen -W "$_wk_configs" -- "$cur") )
         return 0
     fi
-    case "$cur" in
-        -*) COMPREPLY=( $(compgen -W "$_wk_flags" -- "$cur") ); return 0 ;;
-    esac
     i=2
     while [ "$i" -lt "$COMP_CWORD" ]; do
         case " $_wk_valued " in
@@ -77,12 +75,23 @@ _wk_completion() {
         esac
         i=$((i + 1))
     done
+    case "$cur" in
+        -*)
+            words=$_wk_flags
+            if [ -n "$_wk_vslots" ]; then
+                case " $_wk_subverbs " in *" $first "*) verb=$first ;; *) verb=$_wk_default ;; esac
+                words=$(_wk_lookup "$_wk_vflags" "$verb")
+                words=${words//,/ }
+            fi
+            COMPREPLY=( $(compgen -W "$words" -- "$cur") )
+            return 0 ;;
+    esac
     slot=$_wk_slot
     if [ -n "$_wk_vslots" ]; then
         # the workspace's place is the verb's: typed, or the default one a first word stands for
         case " $_wk_subverbs " in *" $first "*) verb=$first ;; *) verb=$_wk_default; shift=1 ;; esac
-        slot=0
-        for v in $_wk_vslots; do [ "${v%%:*}" != "$verb" ] || slot=${v#*:}; done
+        slot=$(_wk_lookup "$_wk_vslots" "$verb")
+        [ -n "$slot" ] || slot=0
         [ "$slot" -eq 0 ] || slot=$((slot - shift))
     fi
     if [ "$slot" -gt 0 ] && [ "$typed" -eq $((slot - 1)) ]; then
@@ -98,6 +107,10 @@ _wk_completion() {
     fi
     COMPREPLY=( $(compgen -W "$words" -- "$cur") )
     return 0
+}
+_wk_lookup() {
+    local r=" $1"
+    case "$r" in *" $2:"*) r=${r#* $2:}; printf '%s' "${r%% *}" ;; esac
 }
 _wk_values() {
     local out
@@ -115,10 +128,11 @@ def _case_arm(d):
         slot = int(d.name_decl.split("@")[1]) if "@" in d.name_decl else 1
     flags = flags_for(d)
     vslots = ["%s:%d" % (v, D.name_slot(d.name_for([v]))) for v in subverbs(d)]
+    vflags = ["%s:%s" % (v, ",".join(flags_for(d, v))) for v in subverbs(d)]
     return ("        %s) _wk_slot=%d; _wk_first_arg=%d; _wk_flags=%s; _wk_valued=%s; _wk_subverbs=%s; _wk_vslots=%s;"
-            " _wk_default=%s; _wk_vals=%s; _wk_config=%s ;;\n"
+            " _wk_vflags=%s; _wk_default=%s; _wk_vals=%s; _wk_config=%s ;;\n"
             % (d.name, slot, 1 if slot == 1 else 0, _words(flags), _words(sorted(d.valued_opts())), _words(subverbs(d)),
-               _words(vslots), _words([d.default]), _words([values_cmd(d)]), _words([d.config])))
+               _words(vslots), _words(vflags), _words([d.default]), _words([values_cmd(d)]), _words([d.config])))
 
 
 def generate(root, shell_name, tombstones):
@@ -136,7 +150,7 @@ def generate(root, shell_name, tombstones):
     for d in decls:
         out.append(_case_arm(d))
     out.append("        completion) _wk_slot=0; _wk_first_arg=0; _wk_flags=''; _wk_valued=''; _wk_subverbs=%s; _wk_vslots='';"
-               " _wk_default=''; _wk_vals=''; _wk_config='' ;;\n" % _words(SHELLS))
+               " _wk_vflags=''; _wk_default=''; _wk_vals=''; _wk_config='' ;;\n" % _words(SHELLS))
     out.append("        *) return 1 ;;\n    esac\n}\n")
     out.append(_FUNCTION)
     return "".join(out)

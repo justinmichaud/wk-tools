@@ -55,7 +55,7 @@ _DOWNSTREAM = """there is no profile '%s'. Configurations are named for the proj
         downstream-yocto-wpe-2.48-rpi3-64 -> the rpi3 is 32-bit here
         downstream-yocto-wpe-2.48-rpi5    -> webkit-2.52-yocto-rpi5-64
 
-    'wk sysimage --list' has all of them."""
+    'wk sysimage configs' has all of them."""
 _PERF_LINUX = """there is no '%s'. A perf system is built by yocto or buildroot, or
     it is macOS (wk help). For this board:
 
@@ -123,6 +123,10 @@ def load(name, env=None):
     profile["IMG_PROFILE"] = name
     profile["IMG_SPEC_DIR"] = os.path.join(root(env), "image", name)
     return profile
+
+
+def mac_profile(env=None):
+    return next((n for n in names(env) if (quiet_load(n, env) or {}).get("IMG_BUILDER") == "mac-volume"), "")
 
 
 def quiet_load(name, env=None):

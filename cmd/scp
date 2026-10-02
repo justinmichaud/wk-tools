@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 #
 # wk scp [<workspace>] [-r] <src> <dst> -- copy a file or directory in or out of a workspace
-# wk: where=workspace name=required takes=2 here group=workspaces opts -r
+# wk: where=workspace name=required takes=2 here group=workspaces destructive dryrun opts -r
 #
 #   wk scp bug-238 :Tools/foo.js ./foo.js      # out of the workspace
 #   wk scp bug-238 ./foo.js :Tools/foo.js      # into it
 #   wk scp :WebKitBuild/build.log ~/log        # inside a workspace: no name
 #
 #   -r   the source may be a directory. The destination becomes a copy of it,
-#        contents replaced rather than merged, so an existing one is refused
-#        unless --force.
+#        contents replaced rather than merged.
+#
+# An existing destination is asked about before it is replaced.
 
 import os
 import posixpath
@@ -21,7 +22,7 @@ from wk import images, store  # noqa: E402
 ROOT = images.root()
 
 from wk import decl, targets  # noqa: E402
-from wk.act import Refused, barrier, die, info, log, warn  # noqa: E402
+from wk.act import Refused, confirm, die, dry_run, info, log, nothing_to_ask, warn  # noqa: E402
 
 
 def usage(why):
@@ -55,6 +56,13 @@ def kind_or_die(kind, what, name):
         return
     die("could not tell what %s is: workspace '%s' did not answer.\n"
         "    'wk status %s' says whether it is up." % (what, name, name))
+
+
+def ask_to_replace(dst_kind, where):
+    if dst_kind == "absent":
+        nothing_to_ask()
+    elif not confirm("%s already exists; replace it%s?" % (where, " (a directory's whole contents, not a merge)" if dst_kind == "dir" else "")):
+        die("not copied")
 
 
 def main(argv):
@@ -113,19 +121,19 @@ def main(argv):
             if dst_kind == "file":
                 die("%s%s is a file, and a directory cannot replace it.\n"
                     "    Name a path for the copy, or remove that file first." % (dst_pfx, dst_path))
-            if dst_kind == "dir":
-                barrier("%s%s already exists, and -r replaces a directory's\n"
-                        "    whole contents rather than merging into it" % (dst_pfx, dst_path))
+            ask_to_replace(dst_kind, dst_pfx + dst_path)
             copy_dir()
         else:
             if dst_kind == "dir":
                 die("%s%s is a directory, and a file cannot replace it.\n"
                     "    Name a path for the copy, or remove that directory first." % (dst_pfx, dst_path))
+            ask_to_replace(dst_kind, dst_pfx + dst_path)
             copy_file()
     except OSError as e:
         die("copying %s%s to %s%s failed%s" % (src_pfx, src_path, dst_pfx, dst_path, ": %s" % e if str(e) else ""))
 
-    info("copied %s%s to %s%s" % (src_pfx, src_path, dst_pfx, dst_path))
+    if not dry_run():
+        info("copied %s%s to %s%s" % (src_pfx, src_path, dst_pfx, dst_path))
     return 0
 
 

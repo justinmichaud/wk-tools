@@ -19,7 +19,7 @@ from wk import decl as D
 from wk import act, buildconf, clock, images, record, sshalias, targets
 from wk.act import info, log, warn
 from wk.machine import Local, is_macos
-from wk.store import Store, build_config, dispatch_target, in_vm, ws_name
+from wk.store import Store, build_config, dispatch_target, in_vm, no_such_workspace, ws_name
 
 ROOT = Path(images.root())
 MACHINE = Store().podman_machine()
@@ -37,6 +37,8 @@ TOMBSTONES = {
     "remote": "'wk remote' is now 'wk machine setup|rm <name>'", "find": "'wk find' is now 'wk machine probe [<name>]'", "pi": "'wk pi' is gone; each verb is now:\n    bench --ab A,B | --ab-systems A,B   wk bench run <ws> <plan> --system <board> --ab A,B | --ab-systems A,B\n    bench --slot <name>                 wk bench run <ws> <plan> --system <board> --slot <name>\n    bench --pgo                         wk bench run <ws> <plan> --system <board> --slot <name>-instr --collect\n    deploy                              wk bench deploy <ws> <board> --slot <name>\n    boot-order                          wk boot <board> --boot-order <usb-first|sd-first|local>\n    setup, helper                       wk machine setup <board>\n    flash                               wk sysimage write --from <path> --disk <board>:<device>",
     "ab": "'wk ab' is now 'wk bench ab' (wk bench ab <pr-spec> --devices <a,b>; wk bench ab <task> --kill)",
 }
+DISPATCH_VARS = ("WK_NAME", "WK_TARGET", "WK_TARGET_KIND", "WK_ROOT", "WK_FORCE", "WK_QUIET", "WK_DRY_RUN", "WK_DESTRUCTIVE",
+                 "WK_CONFIRMED", "WK_ROW_LABEL", "WK_HOST_SELF", "WK_IN_VM", "WK_CONFIG")
 GLOBALS = {"--force": "WK_FORCE", "--quiet": "WK_QUIET", "--dry-run": "WK_DRY_RUN",
            "-n": "WK_DRY_RUN", "--yes": "WK_YES", "-y": "WK_YES"}
 
@@ -270,15 +272,18 @@ class Invocation:
         return takes == "*" or D.name_slot(d.name_for([d.default])) + int(takes) > 1
 
     def verb_first(self):
-        """A declared verb is moved to argv[0]. No word, or one that is no verb where the default verb
-        takes an argument, is the default verb's; any other word is refused. No word and no default is
-        verb_given's to refuse."""
+        """A declared verb is argv[0], with no option before it. No word, or one that is no verb where the
+        default verb takes an argument, is the default verb's; any other word is refused. No word and no
+        default is verb_given's to refuse."""
         d, args = self.decl, self.args
         if not d.verbs:
             return args
         pos = first_positional(d, args)
         if pos is not None and D.in_list(args[pos], d.verbs):
-            return [args[pos]] + args[:pos] + args[pos + 1:]
+            if pos:
+                self.usage_die("%s comes before the verb: a verb's options follow it (wk %s %s ...)"
+                               % (args[0], self.cmd, args[pos]))
+            return args
         if d.default and (pos is None or self.default_takes_a_word()):
             return [d.default] + args
         if pos is None:
@@ -307,9 +312,9 @@ class Invocation:
                            "    its arguments: unset it, or name the config:  %s" % (inherited, remedy))
 
     def verb_given(self):
-        """After the options are checked: a verb, unless a flag that takes no positional stands for one (`--list`)."""
+        """After the options are checked: a verb."""
         d, args = self.decl, self.args
-        if d.verbs and not (args and D.in_list(args[0], d.verbs)) and not d.flag_stands_for_verb(args):
+        if d.verbs and not (args and D.in_list(args[0], d.verbs)):
             self.usage_die("'wk %s' needs one of: %s" % (self.cmd, d.verbs.replace(",", ", ")))
 
     def take_config(self, args, env=None):
@@ -563,7 +568,7 @@ def machine_running():
 
 def forward_to_vm(inv, cmd, args):
     if not shutil.which("podman"):
-        die("podman is required; install the official pkg from podman.io")
+        die("podman is required: install the official pkg from podman.io, then ./setup")
     rec = podman_vm()
     if rec is None:
         die("podman machine '%s' does not exist -- run ./setup first" % MACHINE)
@@ -888,7 +893,7 @@ def ask_target(inv, resolved, name, exists, ready):
     try:
         target = registry().load(resolved)
         if exists and not registry().exists_on(target, name):
-            inv.usage_die("no such workspace: %s -- 'wk ls' lists them" % name)
+            inv.usage_die(no_such_workspace(name))
         if ready:
             target.wait_ready(name, clock.Clock())
     except LookupError as e:

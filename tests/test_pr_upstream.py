@@ -341,9 +341,31 @@ class TestThePrFetchRetiresNothing(Checkout):
         self.assertNotIn(str(self.fork), fetches[0])
 
 
-class TestThePrBranchIsLeftPushable(Checkout):
+class Pushable(Checkout):
+    """A wired checkout whose fork remote has a real URL and pushes land in the fork."""
+
+    def setUp(self):
+        super().setUp()
+        # `wk new` wires the URL beside the refspec the fixture already wrote.
+        git_("remote", "set-url", "fork", str(self.fork), cwd=self.src)
+        git_("config", "push.default", "current", cwd=self.src)
+        # A push is not rewritten to the mirror, so the user's own pushes land in the fork.
+        git_("config", f"url.{self.dir / 'fork'}.pushInsteadOf", str(self.fork), cwd=self.src)
+        self.forks = [("fork", "justinmichaud/WebKit", "github-webkit")]
+
+    def check(self):
+        script = git.wiring_check_script(str(self.src), "", self.forks, ["main"], skip_env=True)
+        return subprocess.run(["sh", "-c", script], cwd=str(self.src), capture_output=True, text=True).stdout
+
+    def resolves(self):
+        return git_("rev-parse", "--abbrev-ref", "@{u}", cwd=self.src)
+
+
+class TestThePrBranchIsLeftPushable(Pushable):
     """What `wk pr <user>:<branch>` leaves behind: a branch whose upstream is
-    the fork's branch *by name*, so a bare `git push` in the workspace works.
+    the fork's tracking ref, which `@{u}` resolves, and which a bare `git
+    push` sends to the fork's branch of the same name (`push.default =
+    current`, as dotfiles/gitconfig sets it).
 
     The wiring is what makes this need saying. A non-origin remote is fetched
     as `+refs/remotes/<r>/*:refs/remotes/<r>/*` (fetch_refspecs), because
@@ -351,12 +373,44 @@ class TestThePrBranchIsLeftPushable(Checkout):
     mapping the tracking ref back through that refspec, which here answers
     with the tracking ref itself."""
 
-    def setUp(self):
-        super().setUp()
-        # `wk new` wires the URL beside the refspec the fixture already wrote.
-        git_("remote", "set-url", "fork", str(self.fork), cwd=self.src)
+    def assert_bare_push_goes_to_own_name(self, name):
+        cp = self.push()
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("%s -> %s" % (name, name), cp.stderr + cp.stdout)
+
+    def test_a_real_push_u_is_reported_and_converged(self):
+        git_("checkout", "-q", "-b", "mine", cwd=self.src)
+        self.commit(self.src, "mine")
+        git_("push", "-q", "-u", "fork", "mine", cwd=self.src)
+        self.assertEqual(self.upstream("mine"), ("fork", "refs/heads/mine"))
+        self.assertNotEqual(subprocess.run(["git", "rev-parse", "@{u}"], cwd=str(self.src), capture_output=True).returncode, 0)
+        self.assertIn("branch mine was set up by git push -u", self.check())
+        self.assertIn("wk sync --fix", self.check())
+        self.assertEqual(pr.converge(Here(self.src), "ws", str(self.src), self.forks), ["converged: mine tracks fork/mine"])
+        # The next `wk sync` brings the fork's branch into the mirror, and the checkout's fetch brings it here.
+        git_("push", "-q", str(self.mirror), "mine:refs/remotes/fork/mine", cwd=self.src)
+        git_("fetch", "-q", "fork", cwd=self.src)
+        self.assertEqual(self.resolves(), "fork/mine")
+        self.assertNotIn("push -u", self.check())
+        self.assert_bare_push_goes_to_own_name("mine")
+
+    def test_a_real_checkout_track_resolves_and_pushes(self):
+        git_("fetch", "-q", "fork", cwd=self.src)
+        git_("checkout", "-q", "--track", "fork/topic", cwd=self.src)
+        self.assertEqual(self.resolves(), "fork/topic")
+        self.assertNotIn("push -u", self.check())
+        self.assert_bare_push_goes_to_own_name("topic")
+
+    def test_a_real_branch_u_resolves_and_pushes(self):
+        git_("fetch", "-q", "fork", cwd=self.src)
+        git_("checkout", "-q", "-b", "other", cwd=self.src)
+        git_("branch", "-u", "fork/topic", cwd=self.src)
+        self.assertEqual(self.resolves(), "fork/topic")
+        self.assertNotIn("push -u", self.check())
+        self.assert_bare_push_goes_to_own_name("other")
 
     def push(self):
+        self.commit(self.src, "work-%s" % git_("rev-parse", "--short", "HEAD", cwd=self.src))
         return subprocess.run(["git", "push", "--dry-run"], cwd=str(self.src), capture_output=True, text=True)
 
     def test_git_derives_the_tracking_ref_itself_as_the_upstream(self):
@@ -367,6 +421,7 @@ class TestThePrBranchIsLeftPushable(Checkout):
         git_("checkout", "-q", "-b", "topic", "refs/remotes/fork/topic", cwd=self.src)
         git_("branch", "--set-upstream-to=refs/remotes/fork/topic", "topic", cwd=self.src)
         self.assertEqual(self.upstream(), ("fork", "refs/remotes/fork/topic"))
+        git_("config", "push.default", "simple", cwd=self.src)
         cp = self.push()
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("does not match", cp.stderr)
@@ -374,16 +429,61 @@ class TestThePrBranchIsLeftPushable(Checkout):
     def test_the_branch_tracks_the_forks_branch_by_name_and_a_bare_push_resolves(self):
         _, err = self.run_checkout("justinmichaud:topic")
         self.assertIn("'ws' is on topic (WebKit, from fork)", err)
-        self.assertEqual(self.upstream(), ("fork", "refs/heads/topic"))
+        self.assertEqual(self.upstream(), ("fork", "refs/remotes/fork/topic"))
+        self.assertEqual(git_("rev-parse", "--abbrev-ref", "@{u}", cwd=self.src), "fork/topic")
         cp = self.push()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("topic -> topic", cp.stderr + cp.stdout)
+
+    def test_a_push_u_is_converged_by_sync_fix(self):
+        """`git push -u` records `merge = refs/heads/topic`, which `@{u}` cannot resolve here; converge rewrites it."""
+        self.run_checkout("justinmichaud:topic")
+        git_("config", "branch.topic.merge", "refs/heads/topic", cwd=self.src)
+        self.assertNotEqual(subprocess.run(["git", "rev-parse", "@{u}"], cwd=str(self.src), capture_output=True).returncode, 0)
+        self.assertEqual(pr.converge(Here(self.src), "ws", str(self.src), [("fork", "justinmichaud/WebKit", "github-webkit")]),
+                         ["converged: topic tracks fork/topic"])
+        self.assertEqual(git_("rev-parse", "--abbrev-ref", "@{u}", cwd=self.src), "fork/topic")
+        cp = self.push()
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("topic -> topic", cp.stderr + cp.stdout)
+        self.assertEqual(pr.converge(Here(self.src), "ws", str(self.src), [("fork", "justinmichaud/WebKit", "github-webkit")]), [])
+
+    def test_the_second_fork_converges_the_same_way(self):
+        git_("remote", "add", "forkwpe", str(self.fork), cwd=self.src)
+        git_("config", "remote.forkwpe.fetch", "+refs/remotes/forkwpe/*:refs/remotes/forkwpe/*", cwd=self.src)
+        git_("push", "-q", str(self.mirror), "topic:refs/remotes/forkwpe/topic", cwd=self.fork)
+        git_("fetch", "-q", "forkwpe", cwd=self.src)
+        git_("checkout", "-q", "-b", "topic", "refs/remotes/forkwpe/topic", cwd=self.src)
+        git_("config", "branch.topic.remote", "forkwpe", cwd=self.src)
+        git_("config", "branch.topic.merge", "refs/heads/topic", cwd=self.src)
+        forks = [("fork", "justinmichaud/WebKit", "github-webkit"), ("forkwpe", "justinmichaud/WPEWebKit", "github-wpewebkit")]
+        self.assertEqual(pr.converge(Here(self.src), "ws", str(self.src), forks), ["converged: topic tracks forkwpe/topic"])
+        self.assertEqual(git_("rev-parse", "--abbrev-ref", "@{u}", cwd=self.src), "forkwpe/topic")
+        cp = self.push()
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertIn("topic -> topic", cp.stderr + cp.stdout)
+
+    def test_origin_and_wpe_refuse_a_bare_push(self):
+        for remote in ("origin", "wpe"):
+            if remote == "wpe":
+                git_("remote", "add", "wpe", str(self.fork), cwd=self.src)
+            git_("remote", "set-url", "--push", remote, git.NO_PUSH, cwd=self.src)
+            git_("branch", "-f", "t-" + remote, "main", cwd=self.src)
+            git_("checkout", "-q", "t-" + remote, cwd=self.src)
+            git_("config", "branch.t-%s.remote" % remote, remote, cwd=self.src)
+            git_("config", "branch.t-%s.merge" % remote, "refs/heads/main", cwd=self.src)
+            cp = self.push()
+            self.assertNotEqual(cp.returncode, 0, remote + cp.stdout)
+            self.assertIn("no-push", cp.stderr)
+
+    def test_the_gitconfig_pushes_the_current_name(self):
+        self.assertEqual(git_("config", "--file", str(REPO / "dotfiles" / "gitconfig"), "push.default"), "current")
 
     def test_it_converges_over_an_upstream_already_recorded_wrong(self):
         self.run_checkout("justinmichaud:topic")
         git_("branch", "--set-upstream-to=refs/remotes/fork/topic", "topic", cwd=self.src)
         self.run_checkout("justinmichaud:topic")
-        self.assertEqual(self.upstream(), ("fork", "refs/heads/topic"))
+        self.assertEqual(self.upstream(), ("fork", "refs/remotes/fork/topic"))
 
     def test_an_account_with_no_remote_gets_one_named_for_it(self):
         other = self.dir / "alice.git"
@@ -392,6 +492,8 @@ class TestThePrBranchIsLeftPushable(Checkout):
         target, err = self.run_checkout("alice:topic", found=[("WPEWebKit", str(other), git_("rev-parse", "topic", cwd=other))])
         self.assertEqual(git_("config", "--get", "remote.alice-wpewebkit.url", cwd=self.src), str(other))
         self.assertEqual(self.upstream(), ("alice-wpewebkit", "refs/heads/topic"))
+        self.assertEqual(self.resolves(), "alice-wpewebkit/topic")
+        git_("pull", "--ff-only", "-q", cwd=self.src)
 
     def test_local_commits_the_head_lacks_are_kept_unless_forced(self):
         self.run_checkout("justinmichaud:topic")
@@ -446,14 +548,14 @@ class TestThePrBranchIsLeftPushable(Checkout):
         forks = [("fork", "justinmichaud/WebKit", "github-webkit")]
         lines = pr.retarget(Here(self.src), "ws", str(self.src), forks, ["main"], (("origin", git.REMOTES[0][1]), ("fork", str(self.fork))))
         self.assertEqual(lines, ["retargeted: topic now tracks fork/topic"])
-        self.assertEqual(self.upstream(), ("fork", "refs/heads/topic"))
+        self.assertEqual(self.upstream(), ("fork", "refs/remotes/fork/topic"))
         self.assertEqual(pr.retarget(Here(self.src), "ws", str(self.src), forks, ["main"]), [], "a branch on its fork is left alone")
 
     def test_neither_caller_points_a_branch_but_through_track(self):
         text = (REPO / "lib" / "wk" / "pr.py").read_text()
         self.assertNotIn("--set-upstream-to", text)
         self.assertNotIn('"branch", "-u"', text)
-        self.assertEqual(len(re.findall(r"(?<!def )track\(src, ", text)), 2)
+        self.assertEqual(len(re.findall(r"(?<!def )track\(src, ", text)), 3)
 
 
 class TestTheBrokerServesTheMirrorRefresh(unittest.TestCase):
@@ -489,3 +591,19 @@ class TestTheBrokerServesTheMirrorRefresh(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheMergeRefFollowsTheRemotesRefspec(Pushable):
+    """A remote on git's default `+refs/heads/*` refspec (an account remote `wk pr alice:topic` adds, a fork of a target with a reference checkout) is
+    tracked by `refs/heads/<b>`; only a mirror-shaped remote is tracked by its tracking ref."""
+
+    def test_a_heads_refspec_fork_is_not_flagged_and_not_rewritten(self):
+        git_("config", "--replace-all", "remote.fork.fetch", "+refs/heads/*:refs/remotes/fork/*", cwd=self.src)
+        git_("fetch", "-q", "--no-prune", str(self.dir / "fork"), "refs/heads/topic:refs/remotes/fork/topic", cwd=self.src)
+        git_("checkout", "-q", "-b", "mine", "fork/topic", cwd=self.src)
+        git_("config", "branch.mine.remote", "fork", cwd=self.src)
+        git_("config", "branch.mine.merge", "refs/heads/topic", cwd=self.src)
+        self.assertEqual(self.resolves(), "fork/topic")
+        self.assertNotIn("push -u", self.check())
+        self.assertEqual(pr.converge(Here(self.src), "ws", str(self.src), self.forks), [])
+        self.assertEqual(self.upstream("mine"), ("fork", "refs/heads/topic"))

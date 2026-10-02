@@ -418,6 +418,32 @@ class TestReclaimsOrNames(GcTest):
         self.assertTrue(any("a plain 'wk gc' takes it" in l for l in lines), lines)
 
 
+class TestAMeasurementIsNeverRubble(GcTest):
+    """A task left in <store>/bench, outside any workspace, is named with the move into its workspace's bench/ and never taken."""
+
+    def task(self, *workspaces):
+        d = os.path.join(self.w.store.record_dir(), "bench", "20260101T000000Z-rpi5-a")
+        self.w.files[os.path.join(d, "task.json")] = "{}"
+        for i, ws in enumerate(workspaces):
+            self.w.files[os.path.join(d, "runs", "r%d" % i, "env.json")] = json.dumps({"workspace": ws})
+        self.w.mkdirs(os.path.join(d, "runs", "r0"))
+        return d
+
+    def test_no_flag_takes_it_and_gc_names_the_move_into_its_workspace(self):
+        d = self.task("bug-238")
+        for flags in ((), ("--purge-rubble",), ("--purge-rubble", "--purge-builds", "--purge-images", "--purge-pmos")):
+            with self.subTest(flags=flags):
+                rc, err = self.run_gc(*flags)
+                self.assertEqual(rc, 0, err)
+                self.assertTrue(self.w.exists(os.path.join(d, "task.json")), err)
+                self.assertIn("mv %s %s/" % (d, os.path.join(self.w.store.ws_dir("bug-238"), "bench")), err)
+
+    def test_a_task_whose_runs_name_no_one_workspace_names_the_placeholder(self):
+        d = self.task("a", "b")
+        rc, err = self.run_gc()
+        self.assertIn("mv %s %s/" % (d, os.path.join(self.w.store.ws_dir("<workspace>"), "bench")), err)
+
+
 class TestWhatAPlainRunKeeps(GcTest):
     def test_a_workspace_a_live_selftest_made_is_kept(self):
         _selftest(self.w)

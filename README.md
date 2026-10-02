@@ -178,7 +178,7 @@ settings, the wk-tools commit, the provisioning hash.
 **A workspace, start to finish**
 
 ```sh
-wk new bug-238                          # an overlay on the base snapshot; seconds
+wk new bug-238                          # refresh the mirror, overlay the base snapshot, fast-forward
 wk build bug-238 jsc-release --detach   # prints the build line; wk status follows it
 wk build bug-238 --kill
 wk run   bug-238 -- -e 'print(1+1)'
@@ -258,6 +258,7 @@ A PR head goes straight into the checkout, never through the mirror.
 
 ```sh
 wk sync                                 # this machine: tooling, mirror, snapshot, then every workspace
+wk sync                                 # inside a workspace: the mirror (asked of the broker), then this one
 wk sync bug-238                         # one workspace's fetch
 wk sync --mirror                        # the mirror alone
 wk sync --tools buildbox4               # that machine's wk-tools, mirror and snapshot
@@ -266,8 +267,13 @@ wk sync bug-238 --fix                   # re-assert its remotes and git-webkit s
 ```
 
 A sync fetches and never checks out, and names any checkout, or base
-snapshot, whose remotes are wired wrong. Tooling goes to a machine as a git
-bundle of HEAD; an uncommitted tree here is refused.
+snapshot, whose remotes are wired wrong. Every workspace, guest and the
+podman VM mounts the mirror read-only, so a refresh from one of them is asked
+of the machine that keeps it, through the broker. A workspace overlays a
+snapshot it never writes, so a newer tree is a new snapshot, hard-linked from
+the last; checkouts are wired with `core.trustctime false`, since each link
+moves every file's ctime. Tooling goes to a machine as a git bundle of HEAD;
+an uncommitted tree here is refused.
 
 **Profile**
 
@@ -289,12 +295,19 @@ wk bench report <task> --html
 ```
 
 Every measurement is a task: `task.json`, then `runs/<run>/` with
-`env.json`, `result.json` and the logs. A task stays on the machine that
-took it, in its workspace's directory (`ws/<name>/bench/<task>`) where that
-machine holds the workspace, else in the store's `bench/`; `wk bench ls`
-asks every machine. `wk rm` refuses a workspace holding a task that no
-export holds as it is now, naming `wk bench export <task>`; `--force`
-destroys it anyway.
+`env.json`, `result.json` and the logs. A task lives in its workspace's
+directory (`ws/<name>/bench/<task>`), on the machine holding that workspace
+-- the podman VM, a build box, this one -- and a command driving it from
+elsewhere reads and writes it through that machine. The workspace is
+`wk bench run`'s; for `wk bench ab` across boards, the first device's image
+workspace, the task recorded once its image step has made it; for a
+`--systems` A/B or a Mac A/B, `--workspace` (the one that built system A, or
+the Mac's arms). `wk bench ls` asks every machine. `wk rm` refuses a
+workspace holding a task that no export holds as it is now, naming
+`wk bench export <task>`; `--force` destroys it anyway. A task left in a store's
+`bench/`, outside any workspace, is no command's to read and none takes it:
+`wk gc` names each with the `mv` into its workspace's `bench/`, and `wk
+doctor` lists it as backed-up state while one is there.
 
 **Results**
 
@@ -352,7 +365,8 @@ missing). The board reaches this host's page server through an ssh reverse
 forward held for the run. An A/B prepares the board once per boot (the
 clock pin, the claim, the session) and re-reads its system and slot every
 leg. In a workspace, `wk bench deploy <board>` and `wk bench run <plan>
---system <board>` are requests to the broker; an A/B runs on the workstation.
+--system <board>` are requests to the broker. An A/B is driven from the
+workstation; its deploys and board runs run where the image workspace is.
 
 **An A/B of a pull request, one command**
 
@@ -361,7 +375,7 @@ wk bench ab wpe:1725 --devices rpi3-32,rpi4-32,rpi5-64 --dry-run   # every step 
 wk bench ab wpe:1725 --devices rpi4 --bits 32 --plan jetstream3 --rounds 8 --yes --detach
 wk bench ab <task> --kill
 wk bench ab <sha> --base <sha> --release 2.38 --devices rpi3       # A/A: the noise floor
-wk bench ab --systems <id-a>,<id-b> --devices rpi5                  # two system images, one slot
+wk bench ab --systems <id-a>,<id-b> --devices rpi5 --workspace <image-ws>   # two system images, one slot
 wk bench report <task> --html
 ```
 
@@ -405,7 +419,7 @@ board is handed back to its rescue with its arming record cleared.
 wk boot mbp --status                    # which volume the firmware default is
 wk sysimage build perf-macos-tolken --all   # on the Mac: the WK Bench volume, installed and armed
 wk bench ab --devices mbp --patch <ref> --base <ref> --workspace mac-rel --detect 0.3
-wk bench ab --devices mbp --systems <staged-a>,<staged-b>   # two builds already staged
+wk bench ab --devices mbp --systems <staged-a>,<staged-b> --workspace mac-rel   # two builds already staged
 wk bench ab --devices mbp --status     # the planted job, read over either install
 wk bench ab --devices mbp --collect    # its result onto the task, then reported
 wk bench precision <run-a> <run-b>      # what the rounds so far resolve
@@ -452,7 +466,7 @@ wk boot --list
 Every machine is one `machines/<name>.conf`, named as the CLI names it, with a
 `kind`: `build` or `peer` (a target), `board`, `mac` or `guest` (a bench
 machine), or `bridge`. Values are literals. A bench role that is also a peer
-names the peer (`mbp.conf` sets `ssh=tolken`). A target whose `hostname -s`
+names the peer (`ssh=<peer>`). A target whose `hostname -s`
 is not its name says what it is (`hostname`): that is how its far
 end knows which machine it is, however many share its home. A conf in
 `~/.config/wk/machines/` sets keys over the shared one's, for this device only.
@@ -582,10 +596,8 @@ written. Arming is a firmware mailbox one-shot (USB, then NVMe) that clears
 after one use. EEPROM `BOOT_ORDER` stays `local`, the only evidence the
 fallback is in place. Two systems on the stick are the firmware's own A/B: a
 static `autoboot.txt` selects the second pair under `[tryboot]`. As a
-workstation it is tuned by `host/linux/rpi5/rpi5-setup.sh` (run by `./setup`):
-2.8 GHz CPU (3.0 is unstable), v3d 1200, PCIe Gen3, fan 100%, swap off, and the
-`7.0.6-numa` kernel (`CONFIG_NUMA_EMU=y`, 8 nodes, firmware-injected
-`numa=fake`). A bench system runs a stock kernel, since customers ship one; an
+workstation it is tuned by `host/linux/rpi5/rpi5-setup.sh` (run by `./setup`),
+which holds the settings. A bench system runs a stock kernel, since customers ship one; an
 overclock belongs to an `-oc` image profile's `config.txt.append`, never the
 EEPROM, which both modes share.
 
@@ -601,8 +613,6 @@ a Mac's own disks.
 
 **benchvm — `mac-guest`.** A Tart guest rehearsing the Mac path. Nothing
 measured in it is comparable with hardware.
-
-**moose** has no bench driver yet (docs/Urgent/HANDOFF-moose-bench.md).
 
 ## Lifecycle
 

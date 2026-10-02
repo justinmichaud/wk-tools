@@ -48,7 +48,7 @@ def boom(*a, **kw):
 
 
 def stub_shell(**over):
-    """Every question a Doctor asks outside Python (doctor.Bash), answered with nothing unless the test says otherwise."""
+    """Every question a Doctor asks outside Python (doctor.Host), answered with nothing unless the test says otherwise."""
     base = dict(gh_authenticated=lambda root, env=None: False,
                 priv_helpers=lambda root, env=None: [],
                 priv_answers=lambda root, path, env=None: False)
@@ -566,7 +566,7 @@ class TestPrivilegedHelpers(unittest.TestCase):
     on the platform each applies to."""
 
     def setUp(self):
-        self.helpers = doctor.Bash.priv_helpers(str(REPO), env=clean_env())
+        self.helpers = doctor.Host.priv_helpers(str(REPO), env=clean_env())
 
     def test_the_table_names_all_three(self):
         self.assertEqual(["wk-quiesce-priv", "wk-card-priv", "wk-boot-priv"], [h[0] for h in self.helpers])
@@ -619,7 +619,7 @@ class ACachedCredentialIsNotAGrant(WkTest):
                                 'for a in "$@"; do [ "$a" = -l ] && { cat <<EOF\n'
                                 + listing + '\nEOF\nexit 0; }; done\n'
                                 'exit %d\n' % (0 if run_succeeds else 1)}) as binp:
-            return doctor.Bash.priv_answers(str(REPO), self.HELPER, env=clean_env({"PATH": "%s:%s" % (binp, os.environ["PATH"])}))
+            return doctor.Host.priv_answers(str(REPO), self.HELPER, env=clean_env({"PATH": "%s:%s" % (binp, os.environ["PATH"])}))
 
     def test_a_listing_without_the_path_is_no_grant_even_though_it_runs(self):
         listing = ("User justinmichaud may run the following commands on Tolken:\n"
@@ -657,15 +657,27 @@ class TestTheMachineOverlay(unittest.TestCase):
         self.assertTrue(any(r[1].startswith("~/.config/wk/machines (absent)") and r[2].startswith("backed-up") for r in rows), rows)
         self.assertEqual([], [r for r in rows if "bridges" in r[1]])
 
-    def test_tasks_kept_in_a_workspace_are_backed_up_beside_bench(self):
+    def test_each_workspace_holding_tasks_is_backed_up(self):
         fake = Fake()
         doc = fake_doctor(False, machine=fake)
         root = doc.store.record_dir()
         fake.dirs.update({root + "/ws", root + "/ws/w", root + "/ws/w/bench", root + "/ws/bare"})
         rows = [" ".join(r[1:]) for r in doc.machine_local() if "benchmark runs" in " ".join(r[1:])]
-        self.assertEqual([r.split(" ")[0] for r in rows], [root + "/ws/w/bench", doc.store.bench_dir()])
+        self.assertEqual([r.split(" ")[0] for r in rows], [root + "/ws/w/bench"])
         self.assertIn("(backed-up)", rows[0])
         self.assertIn("wk bench export <task> copies one out", rows[0])
+
+    def test_tasks_outside_any_workspace_are_backed_up_while_any_is_there(self):
+        fake = Fake()
+        doc = fake_doctor(False, machine=fake)
+        legacy = doc.store.record_dir() + "/bench"
+        fake.dirs.add(legacy)
+        named = lambda: [" ".join(r[1:]) for r in doc.machine_local() if r[1].startswith(legacy + " ")]   # noqa: E731
+        self.assertEqual([], named())
+        fake._set_file(legacy + "/t/task.json", "{}")
+        (row,) = named()
+        self.assertIn("(backed-up)", row)
+        self.assertIn("wk gc names", row)
 
     def test_a_leftover_bridges_dir_is_missing_with_the_mv(self):
         fake = Fake()

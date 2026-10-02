@@ -192,6 +192,7 @@ class FakeTarget(targets.Target):
         super().__init__(name, root, env, machine)
         self.kind = kind
         self.needs_base = kind == "container"
+        self.reads_host_mirror = kind in ("container", "vm")
         self.host = "box.example" if kind == "remote" else ""
         self.peer = False
 
@@ -619,7 +620,7 @@ class TestNewDriver(WorkspaceTest):
         rc, err = self.stderr(lambda: self.driver())
         self.assertEqual(rc, 0)
         heads = [e[1][0] if e[0] == "run" else e[0] for e in self.acts()]
-        self.assertEqual(heads, ["sdk-refresh", "mkdir", "mkdir", "mkdir", "mkdir", "mkdir", "write", "wkdev-create", "write", WK])
+        self.assertEqual(heads, ["sdk-refresh", WK, "mkdir", "mkdir", "mkdir", "mkdir", "mkdir", "write", "wkdev-create", "write", WK])
         ws = self.w.ws_dir()
         self.assertEqual(self.w.files[os.path.join(ws, "base-id")], "main-1\n")
         self.assertIn("wk-ws", self.w.containers)
@@ -641,6 +642,28 @@ class TestNewDriver(WorkspaceTest):
             w = self.make_world(kinds={"fakebox": kind})
             self.stderr(lambda: self.driver(w))
             self.assertEqual(self.lock_takes(w, heads=("sdk-refresh",)), ["lock ws-ws"], kind)
+
+    def test_the_mirror_is_refreshed_alone_before_the_store_lock_and_only_where_the_checkout_reads_it(self):
+        """`wk sync --mirror` takes the store lock itself, and touches no other workspace; a remote keeps its own."""
+        self.stderr(lambda: self.driver())
+        self.assertEqual(self.lock_takes(heads=(WK, "wkdev-create")),
+                         ["lock sdk", "lock ws-ws", WK, "lock store", "wkdev-create", WK])
+        self.assertEqual(self.runs(head=WK)[0], (WK, "sync", "--mirror"))
+        for kind, want in (("vm", [(WK, "sync", "--mirror")]), ("remote", [])):
+            w = self.make_world(kinds={"fakebox": kind})
+            self.stderr(lambda: self.driver(w))
+            self.assertEqual([r for r in self.runs(w, WK) if "--mirror" in r], want, kind)
+
+    def test_a_mirror_refresh_that_failed_refuses_the_creation_naming_the_remedy(self):
+        self.w.answer([WK, "sync", "--mirror"], rc=1, err="no request broker\n")
+        err = self.refused(lambda: self.driver())
+        self.assertIn("no request broker", err)
+        self.assertIn("'ws' was not created.\n    Fix that:  wk sync --mirror   then  wk new ws", err)
+        self.assertNotIn("wk-ws", self.w.containers)
+
+    def test_the_targets_that_read_this_machines_mirror(self):
+        self.assertEqual({c.kind: c.reads_host_mirror for c in (targets.Container, targets.Vm, targets.Remote, targets.LocalWorkspace)},
+                         {"container": True, "vm": True, "remote": False, "local": False})
 
     def test_a_present_broken_or_unreachable_workspace_is_refused_and_the_record_says_refused(self):
         cases = []
@@ -757,6 +780,7 @@ class TestNewDriver(WorkspaceTest):
         self.assertEqual((self.w.files, self.w.dirs, self.w.containers), before)
         self.assertEqual(self.w.records.list(), [])
         self.assertIn("would run: wkdev-create --name wk-ws", err)
+        self.assertIn("would run: %s sync --mirror" % WK, err)
         self.assertIn("would run: %s sync ws" % WK, err)
         self.assertNotIn("created", err)
         self.assertEqual(self.w.clock.slept, [])
@@ -816,6 +840,7 @@ class TestFreshen(WorkspaceTest):
         self.assertTrue(script.startswith("cd '/src/We bKit' || exit 2\n"))
         self.assertIn("git merge --ff-only --quiet", script)
         self.assertNotIn("reset", script)
+        self.assertLess(script.index("git merge"), script.index("git status --porcelain"))
 
     def test_a_dry_run_names_the_fetch_and_asks_the_workspace_nothing(self):
         self.dry_run()

@@ -45,6 +45,7 @@ def _load_cmd_pr():
 # The real git.REMOTES and wk.secrets.forks: pr_open_target never fetches or pushes over them (it
 # only reads remote *names* and URLs already configured in the test's own local-path repo).
 CMD_PR_MODULE = _load_cmd_pr()
+KEY_LOADED = lambda: 0
 
 from wk import act, decl, git, pr, targets  # noqa: E402  -- needs CMD_PR_MODULE's sys.path.insert above
 from wk.clock import Clock  # noqa: E402
@@ -166,6 +167,9 @@ class GitWorld(Fake):
             self.effect(("config", key))
             self.upstream.setdefault(branch, {})[field] = value
             return Result(0)
+        if sub[:2] == ["config", "--get-all"] and sub[2].endswith(".fetch"):
+            name = sub[2][len("remote."):-len(".fetch")]
+            return Result(0, "+refs/heads/*:refs/remotes/%s/*\n" % name) if name in self.remotes else Result(1)
         if sub[0] == "config" and sub[1] == "--get" and sub[2].startswith("remote."):
             name = sub[2][len("remote."):-len(".url")]
             url = self.remotes.get(name)
@@ -290,16 +294,14 @@ class TestPrOpenKillPoints(unittest.TestCase):
         return GitWorld()
 
     def run_once(self, w):
-        def fake_run(argv, **kw):
-            if argv[:1] == ["gh"]:
-                w.effect(("gh",) + tuple(argv))
-                w.opened += 1
-            return subprocess.CompletedProcess(argv, 0)
+        def fake_exec(argv):
+            w.effect(("gh",) + tuple(argv))
+            w.opened += 1
         with mock.patch.object(CMD_PR_MODULE, "pr_open_target",
                                return_value=("WebKit/WebKit", "alice:eng/x", "fork", "eng/x")), \
-                mock.patch.object(CMD_PR_MODULE.subprocess, "run", fake_run), \
+                mock.patch.object(CMD_PR_MODULE.act, "exec_into", fake_exec), \
                 contextlib.redirect_stderr(io.StringIO()):
-            CMD_PR_MODULE.pr_open(w.target, "ws", False, False)
+            CMD_PR_MODULE.pr_open(w.target, "ws", False, False, push_status=KEY_LOADED)
 
     def state(self, w):
         return (set(w.pushed), w.opened > 0)
@@ -309,12 +311,9 @@ class TestPrOpenKillPoints(unittest.TestCase):
 
 
 class TestPrCheckoutDryRunEqualsWetRun(unittest.TestCase):
-    """cmd/pr declares 'dryrun' for the plain checkout form because every
-    mutation in pr.checkout goes through Target.act_exec -- the one place
-    --dry-run intercepts it -- so a dry run's plan is the wet run's argv
-    list, in order, and a dry run touches no state. 'rebase' and 'open' stay
-    undeclared: their mutations run through plain exec (pr_rebase's fetch and
-    rebase, pr_open's push and `gh pr create`), so nothing would stop them."""
+    """Every mutation of pr.checkout, pr_rebase and pr_open goes through
+    Target.act_exec -- the one place --dry-run intercepts it -- so a dry run's
+    plan is the wet run's argv list, in order, and a dry run touches no state."""
 
     URL = "https://github.com/alice/WebKit.git"
     WPE_URL = "https://github.com/alice/WPEWebKit.git"
@@ -343,15 +342,43 @@ class TestPrCheckoutDryRunEqualsWetRun(unittest.TestCase):
         self.assertGreaterEqual(len(dry_target.mutations), 6)
         self.assertEqual(self._state(dry_world), before)
 
-    def test_the_declaration_only_covers_the_path_that_honours_it(self):
-        """rebase/open's mutations bypass act_exec (plain Target.exec), so the
-        decl's per-sub override must turn dryrun back off for both -- the
-        invariant CLAUDE.md holds cmd/pr to: declare it only where every path
-        honours it."""
+    def dry_and_wet(self, make, verb):
+        wet_world, dry_world = make(), make()
+        wet_target, dry_target = RecordingTarget(wet_world), RecordingTarget(dry_world)
+        with contextlib.redirect_stderr(io.StringIO()):
+            verb(wet_target)
+            with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
+                verb(dry_target)
+        self.assertTrue(wet_target.mutations)
+        self.assertEqual(dry_target.mutations, wet_target.mutations)
+        return wet_world, dry_world
+
+    def test_a_dry_rebase_is_the_wet_runs_plan_and_touches_nothing(self):
+        def make():
+            w = GitWorld()
+            w.local, w.head, w.fetch_shas = {"eng/y": "d" * 40}, "eng/y", {"origin/main": "c" * 40}
+            return w
+        wet, dry = self.dry_and_wet(make, lambda t: CMD_PR_MODULE.pr_rebase(t, "ws"))
+        self.assertEqual({"eng/y": "c" * 40}, wet.local)
+        self.assertEqual({"eng/y": "d" * 40}, dry.local)
+
+    def test_a_dry_open_pushes_nothing_and_prints_the_pull_request(self):
+        with mock.patch.object(CMD_PR_MODULE, "pr_open_target",
+                               return_value=("WebKit/WebKit", "alice:eng/x", "fork", "eng/x")), \
+                mock.patch.object(CMD_PR_MODULE.os, "execvp") as execvp, \
+                mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), contextlib.redirect_stderr(io.StringIO()) as err:
+            w = GitWorld()
+            with self.assertRaises(SystemExit):
+                CMD_PR_MODULE.pr_open(RecordingTarget(w), "ws", False, False, push_status=KEY_LOADED)
+        execvp.assert_not_called()
+        self.assertEqual(set(), w.pushed)
+        self.assertIn("would run in ws: git -C /src/WebKit push -u fork eng/x", err.getvalue())
+        self.assertIn("would run: gh pr create --repo WebKit/WebKit --head alice:eng/x --fill", err.getvalue())
+
+    def test_every_form_declares_its_dry_run(self):
         d = decl.Decl(CMD_PR)
-        self.assertTrue(d.honours_dryrun(["some-workspace", "42"]))
-        self.assertFalse(d.honours_dryrun(["rebase", "some-workspace"]))
-        self.assertFalse(d.honours_dryrun(["open", "some-workspace"]))
+        for args in (["some-workspace", "42"], ["rebase", "some-workspace"], ["open", "some-workspace"]):
+            self.assertTrue(d.honours_dryrun(args), args)
 
 
 class TestPrParseSpec(unittest.TestCase):
@@ -658,6 +685,8 @@ class _FakeRebaseTarget:
         self.calls.append(argv)
         return self._responses.pop(0)
 
+    act_exec = targets.Target.act_exec
+
 
 class TestPrRebase(unittest.TestCase):
     """pr_rebase: fetch from the mirror when the target has one and it is
@@ -722,24 +751,14 @@ class TestPrRebase(unittest.TestCase):
 
 
 class TestPrOpenStatus(unittest.TestCase):
-    """'wk pr open' ends with gh's own exit status: a PR gh did not create is not a success."""
+    """'wk pr open' ends as gh: the process becomes `gh pr create`, so a PR gh did not create is not a success."""
 
-    def _open(self, gh_rc):
+    def test_the_command_execs_into_gh(self):
         target = _FakeRebaseTarget("", [Result(0)])   # the push
-        ran = []
-
-        def fake_run(argv, **kw):
-            ran.append(argv)
-            return subprocess.CompletedProcess(argv, gh_rc if argv[:3] == ["gh", "pr", "create"] else 0)
         with mock.patch.object(CMD_PR_MODULE, "pr_open_target", return_value=("WebKit/WebKit", "me:b", "fork", "b")), \
-                mock.patch.object(CMD_PR_MODULE.subprocess, "run", fake_run), contextlib.redirect_stderr(io.StringIO()):
-            rc = CMD_PR_MODULE.pr_open(target, "myws", draft=False, web=False)
-        self.assertEqual(ran[-1][:3], ["gh", "pr", "create"])
-        return rc
-
-    def test_gh_failing_is_the_commands_failure(self):
-        self.assertEqual(self._open(1), 1)
-        self.assertEqual(self._open(0), 0)
+                mock.patch.object(CMD_PR_MODULE.os, "execvp") as execvp, contextlib.redirect_stderr(io.StringIO()):
+            CMD_PR_MODULE.pr_open(target, "myws", draft=True, web=False, push_status=KEY_LOADED)
+        execvp.assert_called_once_with("gh", ["gh", "pr", "create", "--repo", "WebKit/WebKit", "--head", "me:b", "--fill", "--draft"])
 
 
 class TestPrOpenRefusals(unittest.TestCase):

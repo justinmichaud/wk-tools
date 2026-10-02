@@ -491,7 +491,7 @@ class TestReports(unittest.TestCase):
     def test_the_newest_planted_task_is_the_one_reported(self):
         with scratch_dir() as tmp:
             for stamp in ("20260901T000000Z", "20260908T010203Z", "20260909T000000Z"):
-                task = tmp / "bench" / (stamp + "-mbp-mac-ab")
+                task = tmp / "log" / (stamp + "-mbp-mac-ab")
                 task.mkdir(parents=True)
                 if stamp != "20260909T000000Z":
                     (task / "job.json").write_text("{}")

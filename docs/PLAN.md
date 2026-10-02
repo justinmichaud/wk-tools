@@ -105,6 +105,10 @@ minutes before the first real wait. The CLI, the conf files and the record
 on disk do not change, so nothing a person types or a running build depends
 on moves.
 
+`wk rm` refuses a workspace holding a task no export holds as it is now, naming `wk bench export <task>`; `--force` crosses it.
+
+PyYAML stays in `lib/wk/sysimage/pmos_build.py` (netplan's own dependency on the build host; the stdlib has no YAML reader); the bridge phones' images no longer install avahi and nothing here uses mDNS; `lint.one_wifi_reader` stays owed because the Mac reads its WiFi credential from the System keychain and the pmos build host from netplan, and routing both through `admin/wk-card-priv` would widen a privileged helper; `wk machine setup <board|mbp> --dry-run` on an unreachable machine prints the plan and exits 0 rather than refusing (a wet run still refuses), so the unit tier's ssh shim does not fail dry runs.
+
 ## Cutting it down
 
 40k lines of bash is the problem, not the raw material. It is that big
@@ -999,7 +1003,7 @@ exist.
 
    5.39 **The deletion.** *Landed.* No step-5 shim and no bash driver remains:
      `lib/common.sh` is the one bash library. What ran through the shims is Python: `wk sysimage
-     disks` (`Sysimage.disks`), `wk bench --list` (`Bench.plans`), samply (`lib/wk/samply.py`),
+     disks` (`Sysimage.disks`), `wk bench plans` (`Bench.plans`), samply (`lib/wk/samply.py`),
      the container's ssh transport (`container/ssh-transport`, `Container.ssh_transport`),
      `cmd/selftest`, the broker's fleet and reach, the store a setup stage lays out
      (`python3 -m wk.targets store-init`) and the injector's read token (`python3 -m wk.secrets
@@ -1015,9 +1019,8 @@ exist.
      except `bridge/bin/wk-bridge-netwatch`, named there by its own narrow
      exemption (busybox ash, no python3, judging tailscale's own JSON with no host in the loop).
      The tart locator is `wk.targets tart` (`tart_path`), asked through `wk_py` by every shell
-     reader and directly by `Vm.tart` in Python; the privileged-helper table stays in
-     `lib/common.sh`, asked by `doctor.Bash`, since `./setup` and `admin/install.sh` read it
-     before any Python runs.
+     reader and directly by `Vm.tart` in Python; the privileged-helper table is
+     `lib/wk/priv.py`, asked by `doctor.Host` and, through `wk_py`, by `./setup` and `admin/install.sh`.
      `machines/*.conf` keys are lowercase (`fleet.parse_text` refuses an old uppercase one, naming its
      new spelling), and a target conf reaches its `WK_*` variables through the one table
      `targets.CONF_ENV` (one build config's own `cmake_<config>`/`build_args_<config>` included).
@@ -1060,11 +1063,15 @@ exist.
    from where it stopped, and the deliverables export as one archive
    (README, "results").
 
-   Landed: `record.home_for` puts a new task in `ws/<name>/bench/` where this
-   store holds the workspace (a `wk bench run` task, a board run, a board
-   A/B), else in `bench/` (`wk bench ab` across boards, a Mac A/B);
-   `record.homes` finds both, for `ls`, `report`, `status` and the cost
-   estimate. A container writes its run through its own
+   Landed: every task lives in `ws/<name>/bench/<task>` of its workspace,
+   on the machine holding it; a driver elsewhere reaches it through
+   `Target.results` (`record.ws_home`), and `record.homes` finds the tasks
+   here for `ls`, `report`, `status` and the cost estimate. The workspace is
+   the one `wk bench run` names; for `wk bench ab` across boards, the first
+   device's image workspace, the task recorded after its image step and
+   each board's rounds a `wk bench run` there; for a `--systems` A/B or a
+   Mac A/B, `--workspace`. A store's `bench/` is rubble
+   `wk gc --purge-rubble` takes. A container writes its run through its own
    `/var/lib/wk/ws/<ws>` mount, and the store-wide `/bench` mount is gone.
    The report heads with the commit each arm measured against the task's,
    and a verdict per check (preflight, warmup, PGO reading), and an
@@ -1115,7 +1122,8 @@ decides is a row; one still open is listed under "Decisions for the user".
 | A workspace name is resolved once per invocation and every machine probed at most once | 1 | `unit machine.probed_once_per_invocation` |
 | Interrupting a command (Ctrl-C, a lost ssh) stops the process it started on the far machine and releases its holds | 1 | `unit machine.interrupt_stops_remote_process` |
 | A scratch store never puts two targets on one directory, and one machine's task records live in one directory | 1 | `unit record.one_store_per_target` |
-| Every mutating command honours `--dry-run` as the recorder: the plan and the run cannot differ, and a dry run fetches nothing | 1 | `unit dispatch.dry_run_is_the_recorder[<cmd>]` |
+| Every mutating command honours `--dry-run` as the recorder: the plan and the run cannot differ, and a dry run fetches nothing | 1 | `unit dispatch.dry_run_is_the_recorder[<cmd>]`; `lint` tests/test_cli_shape.py `test_every_mutating_command_and_verb_has_a_dry_run` names the commands and verbs still refused it: `wk ai` |
+| No state change in lib/wk or a Python command bypasses `Machine`/`act`: `bench/board_driver.py`'s own ssh and tar, `mac.py`'s WindowServer plist, `cmd/ai`'s session | 1 | `lint.effects_through_machine` (tests/test_lint_effects.py) |
 | The dispatcher parses every argument: the build config, the subverb, `--target`, paths | 1 | `unit dispatch.parses_every_argument` |
 | `wk <cmd> -h` previews the command line it would run and lists the values every config-taking flag accepts | 1 | `unit dispatch.help_previews_and_lists_values` |
 | Every destructive effect is named in one question asked before it (a tailnet device delete, a replaced root-owned helper, a removed far destination, a reset SDK checkout, an overwritten credential), the default is No, no terminal declines, `--yes` answers, and a forwarded command carries the answer rather than exempting the receiver | 1 | `unit dispatch.destructive_asks_once[<cmd>]` |
@@ -1225,20 +1233,14 @@ decides is a row; one still open is listed under "Decisions for the user".
 
 ### Decisions for the user
 
-- Step 6: `wk rm` takes a workspace's tasks with it. The interim behaviour: it refuses a workspace holding a task no export holds as it is now (the zip the task records, or `~/Downloads/<task>.zip`, compared json by json), naming `wk bench export <task>`, and `--force` crosses it; whether that stays, becomes a line in rm's one question, or goes. A container mounts its whole workspace directory, so the workspace can read and write its own tasks' results (the store-wide `/bench` mount it replaces exposed every task).
+- `lib/wk/dispatch.py` starts the podman machine itself (it needs a terminal, so it is not under `act`): move it behind a command, or keep it.
+- `lib/wk/dispatch.py` probes `tailscale status` directly rather than through `Machine`.
+- `lib/wk/bench/board_driver.py` runs its own ssh outside `Machine`.
+- `lib/wk/mac.py` writes WindowServer's plist directly rather than through `Machine`.
 
-refuse but allow force
 
-- Step 6: `wk bench ab` across boards and a Mac A/B keep their task in the store's `bench/`, since neither has one workspace (the arms' image workspaces may be on other machines); whether each should instead live in one of them.
-
-Why has the concept of a store returned? I said I didn't want a store because it represented extra state.
-
-There should be a workspace for the bench run, since we needed to build the image. This is the source of truth. There is no image store! You deleted my comments where I said I didn't want a store! Workspaces are always the source of truth
-
+- On a macOS host a board A/B's run-benchmark and page server now run in the podman VM (the image workspace's machine, as its deploys and PGO collections already did); a live run must confirm the VM reaches the boards.
 - README gets a section defining the `home`/`lab`/`wk`/`field`/`stock` layers, or the layering goes (5.39 deletes the `lint.layering` row; a later step can re-add it once README defines the layers).
-- Taken overnight on 2026-09-25, each reversible: PyYAML stays in `lib/wk/sysimage/pmos_build.py` (netplan's own dependency on the build host; the stdlib has no YAML reader); the bridge phones' images no longer install avahi and nothing here uses mDNS; `lint.one_wifi_reader` stays owed because the Mac reads its WiFi credential from the System keychain and the pmos build host from netplan, and routing both through `admin/wk-card-priv` would widen a privileged helper; `wk machine setup <board|mbp> --dry-run` on an unreachable machine prints the plan and exits 0 rather than refusing (a wet run still refuses), so the unit tier's ssh shim does not fail dry runs.
-
-This isn't a question.
 
 - The word "target": a device configuration or the execution target; one workspace per (perf task, device) rather than per profile, deletable once its results are in.
 - `git-sync-fork` against the fork's protected `main`: lift the protection, or the helper refuses by name.
@@ -1264,3 +1266,12 @@ This isn't a question.
 - What each part of `$WK_STORE` is called before a second project needs a name.
 - How a push from a build box is authorised. A build box holds no deploy key and nothing forwards one to it. A forwarded agent socket is usable by root and by every same-uid process on the box (a `wk ai claude` session in another workspace there included, since a remote target has no container), and `wk enter` on a box with its own wk runs the far wk, so the workstation's ssh never opens that shell. The options: push only from the workstation (`wk pr` or `git push` run here against the box's checkout over ssh); a per-push forwarded agent (`ssh -A`) holding the key under `ssh-add -c`, so each signature is confirmed on the workstation; or a deploy key per box, held on the box.
 - Where a build this workstation drives on a build box keeps its record: here, beside the driver (so another workstation, and the box's own `wk status`, do not see it, and records an earlier copy left on a box read `died` and nothing reclaims them), or on the box (the build hands itself to the box's wk once its tools sync lands, so the box's record is the one record).
+- The mirror's second writer: `pr.mirror_fetch` fetches PR and branch heads into the mirror for `wk bench ab`. Move that fetch under `wk sync` (the mirror's one writer), or keep it.
+- A macOS guest has no request broker, so `wk sync` inside one fetches only itself and warns; whether a guest gets the broker.
+- Not prompted, judged recoverable or the receiving half of a prompted command: `wk key adopt` (stdin carries the key), `wk pr rebase` (reflog), the `reset --hard`/`clean` of a machine's tooling copy in `wk sync --tools`.
+- `wk ai --dry-run`: its install, probe and session depend on each other (a dry install fails the next probe) and it throws the push switch; what its dry run prints.
+- `wk selftest` has no dry run: exempt it in its declaration (the dispatcher then says why rather than "not yet"), or give it one that lists the tests it would run.
+- A task left in `<store>/bench/` from before tasks lived in workspaces: `wk gc` names a `mv` into the workspace's `bench/`; on a Mac the store is the host's and the workspace is in the podman VM, so that move crosses machines and is not one command yet. Unmeasured.
+- `wk bench run --task <task>` now accepts only a task in the leg's own workspace (every current caller passes that one).
+- The injector answers `598` for its own TLS-verification or DNS failure, so the wall can tell it from an upstream's 500; a standard status with a marker header is the alternative.
+- A running macOS guest keeps a stale view of the host's mirror after `wk sync --mirror` rewrites it: git replaces a ref by renaming a new file over it, and the guest's shared-folder mount keeps the old, unlinked inode (`refs/heads/main` showed link count 0 and the previous mtime; `git` called the directory "not a git repository"), so every fetch in the guest fails until the guest restarts, which cleared it. Measured 2026-10-02. The fix: the sync that writes the mirror restarts or remounts each running guest, or guests read the mirror another way.

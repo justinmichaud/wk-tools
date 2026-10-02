@@ -17,7 +17,7 @@ from unittest import mock
 from tests.killpoints import converges
 from tests.support import REPO, WkTest, bash, run
 from tests.test_wk_secrets import SOCK, SecretsTest, World
-from wk import act, guest, targets
+from wk import act, guest, pushswitch, targets
 from wk.act import Refused
 from wk.clock import FakeClock
 from wk.machine import Result
@@ -629,7 +629,7 @@ class TestThePodmanMachineIsHalfTheSwitch(PushTest):
 
     def test_off_empties_its_half_and_says_the_host_is_not_reached(self):
         rc, _, err = self.push("off")
-        self.assertEqual(PUSH.UNASKED, rc, err)
+        self.assertEqual(pushswitch.UNASKED, rc, err)
         self.assertIn("not reached from here", err)
         self.assertIn("On the host:  wk push off", err)
         self.assertEqual(set(), self.w.agents[SOCK])
@@ -652,6 +652,6 @@ class TestTheScanReadsPsWhereThereIsNoProc(WkTest):
               "echo '14 /Applications/Claude.app/Contents/MacOS/Claude'\necho '15 node'\necho '16 claude'\n")
         (self.tmp / "ps").write_text(ps)
         (self.tmp / "ps").chmod(0o755)
-        scan = PUSH.AGENT_PID_SCAN.replace("[ -d /proc/self ]", "false")
+        scan = pushswitch.AGENT_PID_SCAN.replace("[ -d /proc/self ]", "false")
         cp = subprocess.run(["sh", "-c", scan], env={"PATH": "%s:/usr/bin:/bin" % self.tmp}, capture_output=True, text=True)
         self.assertEqual(["12", "13", "16"], cp.stdout.split(), cp.stderr)

@@ -23,18 +23,19 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --stage) STAGE="${2:-}"; shift 2 ;;
         --dry-run) WK_DRY_RUN=1; shift ;;
-        -h|--help) sed -n '2,12p' "$0" >&2; exit 0 ;;
-        *) die "unknown option: $1" ;;
+        -h|--help) awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0" >&2; exit 0 ;;
+        *) die "unknown option: $1 -- ./setup -h lists them" ;;
     esac
 done
 
 # Each stage runs in a subshell rather than sourced: `set -e` inside a stage would abort the whole script, and the stages that need a password are the last three.
 WK_FAILED_STAGES=""
+WK_STAGE_FOUND=""
 
 run_stage() {
     local name="$1" script="$2"
     case "$STAGE" in
-        all|"$name") ;;
+        all|"$name") WK_STAGE_FOUND=1 ;;
         *) return 0 ;;
     esac
     [ -f "$script" ] || { debug "no $name stage for this OS"; return 0; }
@@ -108,6 +109,7 @@ run_stage softnet  "$HOST_DIR/softnet.sh"
 run_stage sdk      "$HOST_DIR/sdk.sh"
 run_stage broker   "$HOST_DIR/broker.sh"   # after sdk and vmtools: the broker publishes its socket into the podman machine on macOS, and binds beside the proxy the sdk stage started on Linux
 run_stage quiesce  "$WK_ROOT/admin/install.sh"
+[ -n "$WK_STAGE_FOUND" ] || die "no stage '$STAGE' -- ./setup -h lists them"
 
 echo >&2
 if [ -n "$WK_FAILED_STAGES" ]; then

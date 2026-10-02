@@ -14,8 +14,9 @@
 #   --purge-pmos     the pmbootstrap chroots on the pmos build hosts
 #   --purge-builds   image build trees, and every finished stage on the Mac's
 #                    benchmark volume but the newest (hours to rebuild)
-#   --purge-rubble   half-made workspaces nothing is creating, and instrumented
-#                    slots left on a board
+#   --purge-rubble   half-made workspaces nothing is creating, instrumented
+#                    slots left on a board, and a store's bench/: tasks outside
+#                    any workspace, which no command reads
 #   --purge-images   container images no container uses ('wk new' pulls again)
 #   --rows           print the rows, tab-separated, and remove nothing
 

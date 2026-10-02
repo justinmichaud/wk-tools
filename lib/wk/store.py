@@ -23,6 +23,10 @@ def ws_name(env=None, take=False):  # `take` removes the answer too
     return env.pop("WK_NAME", "") if take else env.get("WK_NAME", "")
 
 
+def no_such_workspace(name):
+    return "no such workspace: %s -- 'wk ls' lists them" % name
+
+
 def build_config(env=None, take=False):  # the config lifted out of argv, or None
     env = _env(env)
     return env.pop("WK_CONFIG", None) if take else env.get("WK_CONFIG")
@@ -163,9 +167,6 @@ class Store:
             return True
         return os.path.isdir(self.root()) and os.access(self.root(), os.W_OK)
 
-    def bench_dir(self):
-        return os.path.join(self.record_dir(), "bench")
-
     def artifact_dir(self):
         return os.path.join(self.record_dir(), "cache")
 
@@ -280,6 +281,14 @@ def rubble(store, machine, mirror_here):
         rows.append(row("mirror", "the mirror and every base snapshot" if store.mirror() in paths else "every base snapshot",
                         None if None in kbs else sum(kbs), "--purge-mirror", remover(machine, *paths),
                         "kept -- every workspace is overlaid on a snapshot here: 'wk rm' %s first" % " ".join(ws) if ws else ""))
+    from wk.bench import record as bench_record
+    stray = bench_record.outside(store)
+    for t in bench_record.tasks(stray, machine):
+        d = os.path.join(stray, t)
+        dest = os.path.join(store.ws_dir(bench_record.workspace_of(d, machine) or "<workspace>"), "bench")
+        rows.append(row("bench", "%s: a task outside any workspace" % d, du_kb(machine, d),
+                        why="kept -- a measurement is never rubble; once moved into its workspace every command reads it:"
+                            "  mkdir -p %s && mv %s %s/" % (dest, d, dest)))
     return rows
 
 

@@ -1,17 +1,3 @@
-Bash completions should work for subcommands: ex, wk key check (check should be completed)
-
-Verbs should not be able to be mixed with subcommands. Audit all commands to ensure they are not mixed or confused.
-
-All commands that make irrevrsable changes should prompt.
-
-Text that explains things to the user should be conscise. We should never embedd facts in text (ex: "one key located on moose" must be derived and must change, you can't put that in text because it makes the user think you actually checked something)
-
 Commands should be clear and concise, consistent with each other, and you should step through the full process of using the command as a new user to ensure it is always clear what to do next. Each command should give enough outupt that if something goes wrong, it can be debugged (for example, the explain mode should print every command it would have executed), instead of needing sketchy debugging commands. This is part of a bigger principle, which is that everything should be constructed by layered levels of abstraction that are never leaky, not by bespoke hacks. Nothing should reach across a logical layer of abstraction.
 
-New workspaces should pre-run git status to ensure files are touched correctly. They should wk sync by default, but not touch existing workspaces (only update the mirror) so the new workspace is up to date.
-
-wk sync is quite slow, especially with multiple workspaces. Profile it and figure out why. It seems like workspaces aren't hard-linking to snapshots after all, and I don't know why we make a new snapshot when we sync. The mirror should be RO other than wk sync.
-
-wk sync should be able to be run inside a workspace, where it will only update the mirror and sync itself. this is the most common use case, and would improve speed.
-
-A branch on a fork must be pushable with a bare `git push`, resolve `@{u}` (so `git status`, `git pull` and `git rebase` work), and survive a user's own `git push -u`, `git checkout --track` and `git branch -u`, all at once. Today it cannot: a fork is fetched from the mirror with `+refs/remotes/<r>/*:refs/remotes/<r>/*`, so `push -u` records `merge = refs/heads/<b>` and `@{u}` fails ("not stored as a remote-tracking branch"), while `--track` and `-u` record `merge = refs/remotes/<r>/<b>` and `push.default=simple` refuses with "does not match" and suggests `git push fork HEAD:refs/remotes/fork/<b>`, which creates a stray ref on GitHub (measured on workspace m, git 2.53: dev/mya-1 one way, eng/246 and wpe-2.46 the other). Fix without leaving the mirror or copying anything: `push.default = current` in dotfiles/gitconfig, wk_track_branch records the tracking ref `refs/remotes/<r>/<b>`, and `wk sync --fix` converges a branch `push -u` left the other way. Must hold for both forks (fork for WebKit, forkwpe for WPEWebKit) and `wk pr open` against each, and origin and wpe must stay unpushable: their push URL is the no-push sentinel, and a test asserts a bare `git push` on a branch tracking either is refused. Tests: a tracked branch resolves `@{u}` and dry-run pushes to its own name on its fork; the same after `git push -u` plus `--fix`. Delete the stray `refs/remotes/fork/dev/mya-1` on justinmichaud/WebKit by hand once.
+The stray `refs/remotes/fork/dev/mya-1` on justinmichaud/WebKit is yours to delete by hand.

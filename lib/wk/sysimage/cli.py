@@ -1,4 +1,4 @@
-"""`wk sysimage`'s verbs -- ls, holds, path, disks, write, --list, build and webkit's dispatch on the builder, and the rm
+"""`wk sysimage`'s verbs -- ls, holds, path, disks, write, configs, build and webkit's dispatch on the builder, and the rm
 and flash tombstones -- and the questions the dispatcher asks before it routes one. A 2.52+ yocto profile's PGO
 cycle is lib/wk/pgo.py."""
 
@@ -12,7 +12,7 @@ from wk.sysimage import guestbase, macvolume
 from wk.sysimage import yocto
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
-UNKNOWN = "unknown profile '%s'.\n    'wk sysimage --list' has every configuration."
+UNKNOWN = "unknown profile '%s'.\n    'wk sysimage configs' has every configuration."
 BUILDERS = ("yocto", "buildroot", "pmos", "fetch", "mac-volume", "guest")
 
 

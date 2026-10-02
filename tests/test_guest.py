@@ -175,7 +175,7 @@ class TestBothArms(GuestTest):
     def test_a_running_guest_is_converged_and_not_booted(self):
         ip, err = self.run_start()
         self.assertEqual(IP, ip, err)
-        self.assertEqual([], self.w.spawned("run"), "a running guest was booted again")
+        self.assertEqual([], self.w.spawned(" run "), "a running guest was booted again")
         self.assertEqual(BASH_STEPS, self.steps)
         self.assertEqual([1], self.notes, "the login is stated once, on the one exit")
 
@@ -196,7 +196,7 @@ class TestBothArms(GuestTest):
         self.w.state, self.admit_rc = "stopped", 1
         ip, _ = self.run_start()
         self.assertIsNone(ip)
-        self.assertEqual([], self.w.spawned("run"))
+        self.assertEqual([], self.w.spawned(" run "))
 
     def test_an_unfiltered_guest_is_marked_and_gets_no_softnet(self):
         self.w.state = "stopped"
@@ -250,13 +250,24 @@ class TestBothArms(GuestTest):
         self.assertIn("no such workspace: demo", err)
 
     def test_a_dry_run_changes_nothing(self):
-        self.w.state = "stopped"
         before = self.w.state_of()
         with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
             ip, err = self.run_start()
         self.assertEqual(IP, ip, err)
         self.assertEqual(before, self.w.state_of())
         self.assertIn("would run on admin@%s: env WK_ADDR=%s" % (IP, ADDR), err)
+
+    def test_a_dry_run_of_a_stopped_guest_ends_at_its_boot(self):
+        """A guest this run did not boot has no address to wait for: the plan ends at the `tart run`."""
+        self.w.state = "stopped"
+        before = self.w.state_of()
+        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
+            ip, err = self.run_start()
+        self.assertEqual("", ip, err)
+        self.assertEqual(before, self.w.state_of())
+        self.assertEqual("wk-demo", self.w.spawned(" run ")[0][-1])
+        self.assertEqual([], [e for e in self.w.effects if e[0] == "run" and e[1][1:2] == ("ip",)])
+        self.assertEqual([], self.steps)
 
     def test_killpoints_guest_start(self):
         def world():
@@ -358,6 +369,39 @@ class TestTheDaemons(GuestTest):
         self.w._set_file(self.vmdir + "/proxy.pid", "777\n")
         self.assertTrue(quiet(self.host().start_proxy)[0])
         self.assertEqual([], self.w.spawned("wk-proxy.py"))
+
+    def ready(self):
+        ws_dir = self.vm.store.ws_dir("demo")
+        self.w.mkdir_now(ws_dir)
+        self.w._set_file(os.path.join(ws_dir, targets.READY_MARKER), "")
+        quiet(lambda: self.vm.wait_ready("demo", self.clock))
+
+    def test_a_command_that_waits_for_a_running_guest_respawns_a_dead_proxy(self):
+        self.w._set_file(self.vmdir + "/proxy.pid", "778\n")   # 778 is not in the process table
+        self.ready()
+        self.assertEqual(1, len(self.w.spawned("wk-proxy.py")))
+
+    def test_a_command_that_waits_for_a_running_guest_leaves_a_live_proxy_alone(self):
+        self.w.pids.add(777)
+        self.w._set_file(self.vmdir + "/proxy.pid", "777\n")
+        self.ready()
+        self.assertEqual([], self.w.spawned("wk-proxy.py"))
+
+    def test_a_stopped_guest_gets_no_proxy_from_waiting(self):
+        self.w.state = "stopped"
+        self.ready()
+        self.assertEqual([], self.w.spawned("wk-proxy.py"))
+
+    def test_a_guests_wall_rows_name_start_as_the_remedy_for_every_daemon(self):
+        from wk import wall
+        w = wall.Wall(str(REPO), self.vm, "demo", self.w)
+        with mock.patch.object(wall.Wall, "inside", lambda self, cmd: "000"):
+            for rows in (w.github(), w.github_read(), w.bugzilla_read()):
+                self.assertEqual("wk start demo", rows[0][2], rows)
+
+    def test_the_vm_remedy_for_a_dead_proxy_is_start(self):
+        for daemon in ("proxy", "inject"):
+            self.assertEqual("wk start demo", self.vm.daemon_remedy("demo", daemon))
 
     def test_a_proxy_older_than_its_source_is_stopped_and_started_again(self):
         self.w.pids.add(777)

@@ -143,6 +143,7 @@ class Leg:
         self.software, self.software_reason, self.browser = bool(o.get("software")), "", o.get("browser") or ""
         self.cfg = self.runner = self.klass = self.arch = None
         self.payload = self.id = self.task = self.rel = self.out = ""
+        self.machine = None   # what holds `out`: each Run's begin names it
         self.notes = ""
 
 
@@ -259,13 +260,14 @@ class Run:
         stamp, given = self.clock.stamp(), leg.o.get("task") or ""
         leg.id, leg.task = "%s-%s-%s" % (stamp, leg.plan, self.ws), given or "%s-%s" % (stamp, self.ws)
         leg.rel = "%s/runs/%s" % (leg.task, leg.id)
-        taskdir = record.homes(self.reg.store)[given] if given else record.home_for(self.reg.store, self.ws, leg.task)
+        leg.machine, bench = record.leg_home(self.reg, self.ws, given)
+        taskdir = os.path.join(bench, leg.task)
         leg.out = os.path.join(taskdir, "runs", leg.id)
         steps = ["deploy %s to the %s '%s'" % (leg.cfg.name, self.system.kind, self.ws),
                  "run %s (%s, %s iteration(s))" % (leg.plan, leg.runner, leg.count or "default"), "collect into %s" % leg.out]
         if act.dry_run():
             return steps
-        if not given and os.path.exists(taskdir):
+        if not given and leg.machine.exists(taskdir):
             die("task %s already exists (%s); a task is one request, made once" % (leg.task, taskdir))
         self.lock.hold("bench-task-" + leg.task, timeout=5)
         count = ["count=" + leg.count] if leg.count else []
@@ -274,15 +276,16 @@ class Run:
             record.task_write(taskdir, ["task=" + leg.task, "requested=" + self.clock.iso(), "subject.kind=workspace",
                                         "subject.spec=" + self.ws, "devices=%s=%s" % (self.system.kind, leg.cfg.name),
                                         "plans=" + leg.plan, "rounds=1", "slots=" + self.ws, "restart=%s --task %s" % (command, leg.task)] + count,
-                              [command])
-        os.makedirs(leg.out, exist_ok=True)
+                              [command], machine=leg.machine)
+        leg.machine.mkdir(leg.out)
         record.write_env(os.path.join(leg.out, "env.json"), [
             "plan=" + leg.plan, "workspace=" + self.ws, "config=" + leg.cfg.name, "browser=" + leg.browser, "task=" + leg.task,
             "webkit_sha=" + self.system.sha(), "count=" + leg.count, "local_copy=" + leg.payload,
             "software_reason=" + leg.software_reason, "class=" + leg.klass, "runner=" + leg.runner, "arch=" + leg.arch,
             "bench_host=" + self.system.bench_host, "preflight_notes=" + leg.notes, "cores.set=" + leg.cores]
             + self.system.facts(leg) + configuration_fields(self.env),
-            bool_fields=["forced=" + act.forced(self.env), "software=" + ("1" if leg.software else ""), "cores.pinned=" + leg.cores])
+            bool_fields=["forced=" + act.forced(self.env), "software=" + ("1" if leg.software else ""), "cores.pinned=" + leg.cores],
+            machine=leg.machine)
         self.task = self.recs.begin("bench", "here", self.ws, self.kill_cmd, os.path.join(leg.out, "run.log"), steps)
         return steps
 
@@ -402,7 +405,7 @@ class Run:
                 log("  %d. %s" % (n, s))
             return 1 if self.dry_fails else 0
         record.write_env(os.path.join(leg.out, "env.json"), ["wall_time_s=%d" % int(self.clock.now() - start)] + self.system.after(leg),
-                         update=True)
+                         update=True, machine=leg.machine)
         return self.verdict(leg, rc, why, path)
 
     def verdict(self, leg, rc, why, path):
@@ -443,11 +446,9 @@ def _run_class(system):
     return mac.HostRun if isinstance(system, mac.MacHostSystem) else Run
 
 
-def nothing_left(reg, plan, task):
+def nothing_left(reg, ws, plan, task):
     """A one-run task restarted with --task: whether it already holds its run ok. An A/B restarts through its own command."""
-    d = record.homes(reg.store).get(task)
-    if not d:
-        die("no such task '%s' in this machine's store; 'wk bench ls' lists the tasks" % task)
+    d = os.path.join(record.leg_home(reg, ws, task)[1], task)
     doc = record.task_doc(d)
     if len(record.task_arms(doc)[0]) != 1:
         die("task %s is an A/B; restart it with its own command:\n    %s" % (task, doc.get("restart") or doc.get("commands", ["?"])[-1]))
@@ -479,7 +480,7 @@ def run(root, reg, words, o, kill, clock, popen=subprocess.Popen):
         from wk.bench import board
         return board.request(root, reg, "run", ["machine=" + o["system"], "workspace=" + ws, "plan=" + plan, "slot=" + (o.get("slot") or ""),
                                                 "count=" + (o.get("count") or "")], "wk bench run %s %s --system %s" % (ws, plan, o["system"]))
-    if o.get("task") and not kill and nothing_left(reg, plan, o["task"]):
+    if o.get("task") and not kill and nothing_left(reg, ws, plan, o["task"]):
         return 0
     system = systems.for_workspace(root, reg, ws, clock, o.get("system") or "")
     if o.get("collect") and system.kind != "board":

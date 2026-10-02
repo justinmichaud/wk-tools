@@ -67,6 +67,7 @@ GENERATORS = {
     (git, "REMOTES"): (("origin", "u1"), ("wpe", "u2"), ("fork", "u3"), ("forkwpe", "u4")),
     (git, "mirror_branches"): lambda env=None: ["main"],
     (pr, "retarget"): fake_retarget,
+    (pr, "converge"): lambda target, ws, src, forks: [],
 }
 
 
@@ -490,8 +491,28 @@ class TestWhatEachScopeRuns(SyncTest):
     def test_the_mirror_alone(self):
         rc, steps, _ = self.steps("mirror")
         self.assertEqual((rc, steps), (0, ["MIRROR"]))
+
+    def test_in_the_podman_vm_the_mirror_is_a_request_too(self):
+        """The VM mounts the host's mirror read-only: `wk new`'s refresh from in there is asked of the broker."""
         self.w.reg.env["WK_IN_VM"] = "1"
-        self.assertIn("mounted read-only", self.refused(Steps(self.w.reg, self.w.clock, self.w.lock(), "mirror").run))
+        with mock.patch.object(sync.Sync, "mirror_refresh_request", return_value=0) as ask:
+            rc, steps, _ = self.steps("mirror")
+        self.assertEqual((rc, steps, ask.called), (0, [], True))
+
+    def test_inside_a_workspace_a_bare_sync_is_the_mirror_then_this_one_alone(self):
+        Path(self.w.env["WK_MARKER"]).write_text("name=ws\n")
+        self.w.reg.env["WK_TARGET"] = "container"
+        with mock.patch.object(sync.Sync, "mirror_refresh_request",
+                               side_effect=lambda: self.w.steps.append("ASK BROKER") or 0):
+            rc, steps, _ = self.steps("ws", only="ws")
+        self.assertEqual((rc, steps), (0, ["ASK BROKER", "FETCH-IN container: ws"]))
+
+    def test_inside_a_workspace_a_refresh_that_failed_still_fetches_and_is_not_a_success(self):
+        Path(self.w.env["WK_MARKER"]).write_text("name=ws\n")
+        self.w.reg.env["WK_TARGET"] = "container"
+        with mock.patch.object(sync.Sync, "mirror_refresh_request", return_value=1):
+            rc, steps, _ = self.steps("ws", only="ws")
+        self.assertEqual((rc, steps), (1, ["FETCH-IN container: ws"]))
 
     def test_inside_a_workspace_the_mirror_is_a_request(self):
         Path(self.w.env["WK_MARKER"]).write_text("name=ws\n")
@@ -528,11 +549,16 @@ class TestTheRefreshAskedOfTheBroker(SyncTest):
         return [e[1] for e in self.w.effects if e[0] == "run" and e[1][0] == "env"]
 
     def test_no_broker_is_named_with_the_stage_that_makes_one_and_asks_nothing(self):
+        Path(self.w.env["WK_MARKER"]).write_text("name=ws\n")
         rc, err = self.ask(sock=False)
         self.assertEqual(rc, 1)
         self.assertIn("no request broker at /run/wk/broker.sock", err)
         self.assertIn("./setup --stage broker", err)
         self.assertEqual(self.client_runs(), [])
+
+    def test_the_podman_vm_asks_at_the_socket_the_broker_publishes_into_it(self):
+        self.w.env.update({"WK_IN_VM": "1", "XDG_RUNTIME_DIR": "/run/user/501"})
+        self.assertIn("no request broker at /run/user/501/wk/broker.sock", self.ask(sock=False)[1])
 
     def test_the_request_is_the_client_asking_for_sync_and_its_status_is_the_answer(self):
         client = str(REPO / "container" / "broker" / "wk-broker-client.py")

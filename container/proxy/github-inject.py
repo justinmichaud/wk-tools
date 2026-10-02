@@ -6,6 +6,7 @@ bugs.webkit.org takes an api_key query parameter, `wk push on`'s alone; a write
 with the switch off is refused here, naming it. See `wk help push`."""
 
 import asyncio
+import errno
 import os
 import re
 import subprocess
@@ -24,7 +25,12 @@ HOSTS = (GITHUB, BUGZILLA)
 INJECT_PORT = 443
 
 READ_TIMEOUT = 30
+# Connect and TLS only: the status line waits READ_TIMEOUT, which stays under the `curl -m` of lib/wk/wall.py so a stalled upstream is answered 504 rather than read as a dead injector.
+UPSTREAM_TIMEOUT = 12
+# Not a status any upstream sends: the injector's own TLS or DNS failure toward the host.
+FAULT_STATUS = b"598 Injector Upstream Fault"
 IDLE_TIMEOUT = 300
+UNREACHABLE = (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN, errno.EHOSTDOWN, errno.ETIMEDOUT)
 MAX_HEAD = 65536
 
 DROP_FROM_FORWARDED = ("authorization", "connection", "proxy-connection",
@@ -252,6 +258,10 @@ async def pipe(reader, writer):
             pass
 
 
+class StatusTimeout(asyncio.TimeoutError):
+    """The request was sent and the upstream sent no status line."""
+
+
 class Injector:
     def __init__(self, pat_path, read_pat_path, bugzilla_key_path, client_ctx):
         self.pat_path = pat_path
@@ -272,6 +282,18 @@ class Injector:
                       b"Content-Length: " + str(len(reason)).encode("ascii") +
                       b"\r\nConnection: close\r\n\r\n" + reason)
         await cwriter.drain()
+
+    async def exchange(self, host, request, opened):
+        # The status line is read before the rest is piped back: without it an injected credential the far end refused and one it accepted are the same line in this log.
+        ureader, uwriter = await asyncio.wait_for(asyncio.open_connection(
+            host, INJECT_PORT, ssl=self.client_ctx, server_hostname=host), UPSTREAM_TIMEOUT)
+        opened.append((ureader, uwriter))
+        uwriter.write(request)
+        await uwriter.drain()
+        try:
+            return await asyncio.wait_for(ureader.readline(), READ_TIMEOUT)
+        except asyncio.TimeoutError as exc:
+            raise StatusTimeout() from exc
 
     async def handle(self, creader, cwriter):
         upstream = None
@@ -333,19 +355,38 @@ class Injector:
                 await self.refuse(cwriter, PUSH_OFF_STATUS, PUSH_OFF_REASON)
                 return
 
-            ureader, uwriter = await asyncio.open_connection(
-                host, INJECT_PORT, ssl=self.client_ctx, server_hostname=host)
-            upstream = uwriter
-            uwriter.write(new_head + body)
-            await uwriter.drain()
-
-            status = await asyncio.wait_for(ureader.readline(), READ_TIMEOUT)   # read before the rest is piped back: without it an injected credential the far end refused and one it accepted are the same line in this log
+            opened = []
+            try:
+                status = await self.exchange(host, new_head + body, opened)
+            except asyncio.TimeoutError as exc:
+                log("%s upstream failed: %s" % (host, type(exc).__name__))
+                sent = isinstance(exc, StatusTimeout)
+                await self.refuse(
+                    cwriter, b"504 Gateway Timeout",
+                    b"%s did not answer within %d seconds%s; the wk credential "
+                    b"injector is up, the upstream is not\r\n"
+                    % (host.encode("latin-1"),
+                       READ_TIMEOUT if sent else UPSTREAM_TIMEOUT,
+                       b" (the request was sent; it may have been applied)"
+                       if sent else b""))
+                return
+            except OSError as exc:
+                log("%s upstream failed: %s: %s" % (host, type(exc).__name__, exc))
+                reached = isinstance(exc, ConnectionError) or exc.errno in UNREACHABLE
+                await self.refuse(
+                    cwriter, b"502 Bad Gateway" if reached else FAULT_STATUS,
+                    (b"the wk credential injector could not reach " if reached else
+                     b"the wk credential injector failed to verify or resolve ") +
+                    host.encode("latin-1") + b" (" +
+                    type(exc).__name__.encode("ascii") + b")\r\n")
+                return
+            ureader, upstream = opened[0]
             log("%s %s %s -> %s" % (host, method, target[:120],
                                     status.decode("latin-1", "replace").strip()))
             cwriter.write(status)
             await pipe(ureader, cwriter)
         except (asyncio.TimeoutError, ConnectionResetError, OSError) as exc:
-            log("connection failed: %s" % exc)
+            log("connection failed: %s: %s" % (type(exc).__name__, exc))
         finally:
             for w in (cwriter, upstream):
                 if w is not None:

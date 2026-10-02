@@ -13,7 +13,7 @@ from wk import act, git, secrets, tools
 from wk.act import Refused, debug, die, info, log, warn
 from wk.clock import Clock
 from wk.lock import Lock
-from wk.store import Store
+from wk.store import Store, no_such_workspace
 
 SUBNET = "192.168.2"   # Softnet's own network, not vmnet's 192.168.64
 PROXY_PORT = "3128"
@@ -927,6 +927,8 @@ def boot(host, ws, wait=BOOT_WAIT):
         m.spawn(["env", "PATH=" + path, vm.tart_or_die(), "run", *flags, "--dir=%s:%s" % (vm.agent_rw_share, agent_rw),
                  "--dir=%s:%s:ro" % (vm.mirror_share, os.path.dirname(vm.store.mirror())), vm.vm(ws)], runlog)
         info("booting %s (log: %s)" % (vm.vm(ws), runlog))
+        if act.dry_run():
+            return ""   # a guest this run did not boot has no address, nor anything to converge
     # The dhcp resolver works behind Softnet; the arp one does not.
     r = m.run([vm.tart_or_die(), "ip", vm.vm(ws), "--wait", str(wait)], timeout=wait + 30)
     ip = r.out.strip() if r.ok else ""
@@ -944,7 +946,7 @@ def start(vm, ws, clock=None):
     with host.lock().held("guest-" + ws):
         state = vm.vm_state(ws)
         if state == "absent":
-            die("no such workspace: %s" % ws)
+            die(no_such_workspace(ws))
         if state == "running":
             ip = vm.ip(ws)
             if not ip:
@@ -953,7 +955,8 @@ def start(vm, ws, clock=None):
         else:
             admit(host, vm.vm(ws), vm.mem_mb(ws))
             ip = boot(host, ws)
-        Guest(host, ws, ip).converge()
+        if ip:
+            Guest(host, ws, ip).converge()
     login_note(vm.env)
     return ip
 

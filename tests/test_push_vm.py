@@ -326,7 +326,7 @@ class TestAGuestGetsTheConfigOnStart(WkTest):
                 # not under $WK_STORE; a test must not read the real one.
                 "WK_HOST_SECRETS": str(store / "secrets"),
                 "WK_VM_STORE": str(vmstore),
-                "WK_VM_PROXY_ADDR": "192.168.2.1",
+                "WK_VM_PROXY_ADDR": "192.0.2.1",
             }
             if extra:
                 env.update(extra)
@@ -384,7 +384,7 @@ class TestAGuestGetsTheConfigOnStart(WkTest):
         self.assertIn("Host github-wpe", text)
         self.assertIn("IdentityFile /Users/admin/.ssh/id_fork\n", text)
         self.assertIn("IdentityAgent /Users/admin/.wk-ssh-agent.sock", text)
-        self.assertIn("-X connect -x 192.168.2.1:3128 %h %p", text)
+        self.assertIn("-X connect -x 192.0.2.1:3128 %h %p", text)
 
     def test_the_config_is_written_even_with_nothing_behind_it(self):
         """An IdentityAgent pointing at a socket that is not there is the off
@@ -441,7 +441,7 @@ class TestTheGuestHalfOfTheSwitch(WkTest):
                 "WK_STORE": str(store),
                 "WK_HOST_SECRETS": str(store / "secrets"),
                 "WK_VM_STORE": str(vmstore),
-                "WK_VM_PROXY_ADDR": "192.168.2.1",
+                "WK_VM_PROXY_ADDR": "192.0.2.1",
                 # The machine half is not what this file is about: point it at
                 # an agent that is not there, so it fails loudly rather than
                 # reaching this developer's own.
@@ -641,7 +641,7 @@ class TestTheGuestGetsTheInjectorsCa(WkTest):
                 "WK_STORE": str(self.tmp / "store"),
                 "WK_HOST_SECRETS": str(self.tmp / "store" / "secrets"),
                 "WK_VM_STORE": str(vmstore),
-                "WK_VM_PROXY_ADDR": "192.168.2.1",
+                "WK_VM_PROXY_ADDR": "192.0.2.1",
                 "XDG_STATE_HOME": str(self.tmp / "state"),
                 **extra,
             }, "set_guest_egress", secrets={"bugzilla_user": lambda s: bugzilla})
@@ -664,7 +664,7 @@ class TestTheGuestGetsTheInjectorsCa(WkTest):
         self._egress(home, vmstore, ca_text="-----BEGIN CERTIFICATE-----\nx\n"
                                             "-----END CERTIFICATE-----\n")
         rc = (home / ".wk-egress").read_text()
-        self.assertIn("http_proxy=http://192.168.2.1:3128", rc)
+        self.assertIn("http_proxy=http://192.0.2.1:3128", rc)
         self.assertIn("GITHUB_COM_TOKEN=wk-injects-this", rc)
         self.assertIn("GITHUB_COM_USERNAME=justinmichaud", rc)
         self.assertIn("PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring", rc)
@@ -689,6 +689,7 @@ class TestTheGuestGetsTheInjectorsCa(WkTest):
         self.assertFalse((home / ".wk-ca-bundle.pem").exists())
 
 
+# TEST-NET-1: a real Host kills whatever listens on its proxy address, so never the live guest bridge's.
 def _host(case, **env):
     """A Host over this machine and a scratch vm store, as a macOS host has one."""
     mac = mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True)
@@ -817,7 +818,7 @@ class TestEveryGuestStartConvergesTheReadToken(WkTest):
         read_pat = vmstore / "vm" / "read-github-pat"
         (vmstore / "vm").mkdir(parents=True, exist_ok=True)
         read_pat.write_text("ghp-yesterdays\n")
-        host = _host(self, WK_VM_PROXY_ADDR="192.168.2.1")
+        host = _host(self, WK_VM_PROXY_ADDR="192.0.2.1")
         with mock.patch.object(host, "proxy_running", lambda: True), mock.patch.object(host, "inject_running", lambda: True):
             ok, err = _quiet(host.start_proxy)
         self.assertTrue(ok, err)
@@ -846,7 +847,7 @@ class TestAHostDaemonOlderThanItsSourceIsRestarted(WkTest):
         self.addCleanup(lambda: subprocess.run(["kill", str(pid)], capture_output=True))
         pidfile.write_text("%d\n" % pid)
         os.utime(pidfile, (stamp, stamp))
-        host = _host(self, WK_VM_PROXY_ADDR="192.168.2.1")
+        host = _host(self, WK_VM_PROXY_ADDR="192.0.2.1")
         _, err = _quiet(host.restart_if_stale, str(pidfile), "egress proxy", host.proxy_where())
         deadline = time.time() + 5
         while time.time() < deadline and subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode == 0:
@@ -912,7 +913,7 @@ class TestOneOffClearsEveryAgentThisMachineRuns(WkTest):
                 "WK_STORE": str(store),
                 "WK_HOST_SECRETS": str(store / "secrets"),
                 "WK_VM_STORE": str(vmstore),
-                "WK_VM_PROXY_ADDR": "192.168.2.1",
+                "WK_VM_PROXY_ADDR": "192.0.2.1",
                 "WK_PUSH_AGENT_SOCK": str(machine_sock),
                 "WK_PUSH_PAT_FILE": str(self.tmp / "machine-pat"),
             })

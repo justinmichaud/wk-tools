@@ -9,6 +9,7 @@ import tempfile
 import time
 
 from wk import act, guest, images, reach, record as wkrecord
+from wk.bench import record as bench_record
 from wk.boot.driver import Driver, Onboard
 from wk.machine import Local, Result, Ssh, is_macos
 from wk.store import Store
@@ -296,12 +297,12 @@ class MacVolume(MacDriver):
         return "%s (matches neither install on this disk)" % grp
 
     def planted(self):
-        """`wk bench ab --devices <mac>` names each plant's task after the UTC stamp it was planted at, so the newest sorts last."""
-        bench = Store(self.ch.env).bench_dir()
-        tasks = [d for d in sorted(glob.glob(os.path.join(bench, "*-%s-mac-ab" % self.who()))) if os.path.isfile(os.path.join(d, "job.json"))]
+        """Each plant is in the driving machine's logs, named after its UTC stamp, so the newest sorts last."""
+        logs = os.path.dirname(bench_record.driver_logs(Store(self.ch.env), ""))
+        tasks = [d for d in sorted(glob.glob(os.path.join(logs, "*-%s-mac-ab" % self.who()))) if os.path.isfile(os.path.join(d, "job.json"))]
         if not tasks:
-            return "none in %s" % bench
-        return "%s (planted %s)" % (tasks[-1], os.path.basename(tasks[-1]).split("-")[0])
+            return "none planted from here (%s)" % logs
+        return "%s (planted %s)" % (os.path.basename(tasks[-1]), os.path.basename(tasks[-1]).split("-")[0])
 
     def evidence(self):
         vol, disp = self.c("volume"), self.display() or "unpinned"
@@ -331,9 +332,10 @@ class MacVolume(MacDriver):
         return "%s: neither %s nor %s answers, so this Mac is between its two installs or off" % (what, self.c("ssh"), self.bench_name())
 
     def reprovision(self):
-        return ("wk sysimage build perf-macos-tolken --create\n    a second APFS volume in its own container, on the Mac\n"
-                "wk sysimage build perf-macos-tolken --install\nwk sysimage build perf-macos-tolken --provision\nhold the power button and pick the volume\n"
-                "    by command: wk boot %s, which proves the way back before it arms" % self.who())
+        build = "wk sysimage build %s" % self.c("profile")
+        return ("%s --create\n    a second APFS volume in its own container, on the Mac\n"
+                "%s --install\n%s --provision\nhold the power button and pick the volume\n"
+                "    by command: wk boot %s, which proves the way back before it arms" % (build, build, build, self.who()))
 
     def systems(self):
         if self.ch.channel == "bench":

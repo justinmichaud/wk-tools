@@ -37,7 +37,7 @@ SYSIMAGE = REPO / "cmd" / "sysimage"
 def _profiles():
     """Every configuration this checkout defines, with the builder its conf
     declares (empty for a conf that declares none)."""
-    out = subprocess.run([str(REPO / "wk"), "sysimage", "--list"],
+    out = subprocess.run([str(REPO / "wk"), "sysimage", "configs"],
                          capture_output=True, text=True, cwd=str(REPO)).stdout
     names = [l.strip() for l in out.splitlines() if l.strip() and not l.startswith(" ")]
     got = []
@@ -45,7 +45,7 @@ def _profiles():
         conf = REPO / "image" / "configs" / f"{n}.conf"
         m = re.search(r"(?m)^IMG_BUILDER=(\S+)", conf.read_text()) if conf.is_file() else None
         got.append((n, m.group(1) if m else ""))
-    assert got, "'wk sysimage --list' named no configuration"
+    assert got, "'wk sysimage configs' named no configuration"
     return got
 
 

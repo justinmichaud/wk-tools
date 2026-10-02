@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk machine setup|rm|tailnet|status|ls|probe [<name>] -- the machines in machines/: set one up, remove it, list them, find one
-# wk: where=host name=none group=hosts takes=2 verbs=setup,rm,tailnet,status,ls,probe destructive setup,rm dryrun setup,rm,tailnet opts --kind=,--json,--segment=,--vantage=,--no-ssh,--timeout=
+# wk: where=host name=none group=hosts takes=2 verbs=setup,rm,tailnet,status,ls,probe destructive setup,rm dryrun setup,rm,tailnet
 # wk: readonly ls,probe,status
 # wk: sub setup needs=ssh,git opts=--kind=,--at=,--no-tailnet,--disk=,--image=,--rebuild
 # wk: sub rm needs=ssh opts=--at=

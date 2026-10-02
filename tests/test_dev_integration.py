@@ -39,6 +39,7 @@ PROBE_BRANCH = "refs/heads/wk-integ-probe"
 # The first `git status` in the checkout, cold: measured once per target on 2026-09-27.
 GIT_STATUS_BUDGET = {
     "container": 3.0,     # 0.84 s cold and 0.46 s warm in a new container: headroom for a loaded podman VM
+    "tart": 3.0,          # 0.82 s cold in a guest sharing the host with the podman VM (2026-10-01)
 }
 
 TARGETS = {

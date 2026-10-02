@@ -2,19 +2,18 @@
 patched head, each built against every device's image and deployed to its board; `--systems A,B` names two
 system images on one board instead. The plan is a graph (lib/wk/sched.py) run in this process: each build,
 deploy and collection is the `wk` command a person types, and each board's rounds are one board A/B
-(lib/wk/bench/board_ab.py) recorded into this task."""
+(lib/wk/bench/board_ab.py), a `wk bench run` on the machine holding the image workspace the task lives in."""
 
 import concurrent.futures as futures
 import os
 import re
 import statistics
-import subprocess
 import sys
 from fnmatch import fnmatchcase
 
 from wk import act, fleet, git, images, job, pgo, pr, record as progress, sched
 from wk.act import Refused, die, info, log, warn
-from wk.bench import board, board_ab, record, report
+from wk.bench import board, board_ab, record
 from wk.lock import Lock
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -24,11 +23,11 @@ ROUNDS, PLAN = "5", "speedometer3"
 SLOTS = 'for s in %s/*/slot.json; do [ -f "$s" ] && basename "$(dirname "$s")"; done 2>/dev/null; true' % board.SLOTS_DIR
 USAGE = ("usage: wk bench ab <pr-spec|branch|sha> --devices <a,b> [--release X.Y] [--builder B] [--bits N] [--base <sha>]\n"
          "           [--build-on <a[,b]>] [--plan P]... [--rounds N] [--count N] [--timeout S] [--detach]\n"
-         "       wk bench ab --systems A,B --devices <board> [--slot S] [--plan P]... [--rounds N]\n"
-         "       wk bench ab --devices <mac> --systems A,B | --patch <ref|diff> --workspace <ws> [--base <ref>] ...\n"
+         "       wk bench ab --systems A,B --devices <board> --workspace <ws> [--slot S] [--plan P]... [--rounds N]\n"
+         "       wk bench ab --devices <mac> --systems A,B | --patch <ref|diff> [--base <ref>] --workspace <ws> ...\n"
          "       wk bench ab <task> --kill; see wk bench -h")
 BUILD_ONLY = ("release", "builder", "bits", "base", "build_on")
-MAC_ONLY = ("patch", "workspace", "config", "settle", "a_args", "b_args", "plant", "rehearse", "allow_network_fetch",
+MAC_ONLY = ("patch", "config", "settle", "a_args", "b_args", "plant", "rehearse", "allow_network_fetch",
             "preflight", "progress", "status", "collect")
 
 
@@ -41,12 +40,12 @@ def legs_per_plan(rounds, systems):
     return 2 + rounds * (4 if systems else 2)
 
 
-def leg_seconds(store, device, plan, count):
-    """Every measured leg of `plan` on `device` in this store, as seconds at `count` iterations: a leg at another
-    count scales by the ratio, and one at the plan's own default count stands only for that default."""
+def leg_seconds(reg, homes, device, plan, count):
+    """Seconds at `count` of every measured leg of `plan` on `device` in the tasks of `homes` ((workspace, target) pairs): a leg at
+    another count scales by the ratio, and one at the plan's own default count stands only for that default."""
     out = []
-    for taskdir in record.homes(store).values():
-        for r in record.task_runs(taskdir):
+    for m, bench in (record.ws_home(reg, *h) for h in dict.fromkeys(homes)):
+        for r in (r for t in record.tasks(bench, m) for r in record.task_runs(os.path.join(bench, t), m)):
             e = r["env"]
             if e.get("machine") != device or e.get("plan") != plan or r["state"] != "ok" or "wall_time_s" not in e:
                 continue
@@ -96,18 +95,16 @@ class Device:
 
 
 class AB:
-    """`boards(name)` answers (mode, slots) for a board and `bench(ws, plan, o)` runs one board A/B; both default
-    to the real board, and `pool` is the executor steps run on."""
+    """`boards(name)` answers (mode, slots) for a board, by default the real board's; `pool` is the executor steps run on."""
 
-    def __init__(self, root, reg, clock, spec, o, boards=None, bench=None, pool=futures.ThreadPoolExecutor, popen=subprocess.Popen):
+    def __init__(self, root, reg, clock, spec, o, boards=None, pool=futures.ThreadPoolExecutor):
         self.root, self.reg, self.clock, self.spec, self.o = str(root), reg, clock, spec or "", dict(o)
         self.here, self.env, self.store = reg.machine, reg.env, reg.store
-        self.boards, self.bench, self.pool, self.popen = boards or self.board_state, bench or self.board_ab, pool, popen
+        self.boards, self.pool = boards or self.board_state, pool
         self.lock = Lock(self.store, self.here, clock)
         self.wk = os.path.join(self.root, "wk")
         self.systems = bool(self.o.get("systems"))
         self.task = self.o.get("task") or ""
-        self.taskdir = record.homes(self.store).get(self.task, "") if self.task else ""
         self.me = progress.machine_name(self.env, self.here)
         self.devices, self.arms, self.pr, self._base_branch = [], [], {}, None
         self.head = self.base = self.head_desc = self.base_how = self.branch = ""
@@ -125,14 +122,14 @@ class AB:
         self.max_rounds, self.detect = board_ab.stopping(o, self.rounds)
         if o.get("detach") and act.dry_run():
             die("--detach and --dry-run: a dry run has nothing to detach")
-        if self.task and not self.taskdir:
-            die("no such task '%s' in this machine's store; 'wk bench ls' lists the tasks" % self.task)
         if o.get("bits") not in (None, "", "32", "64"):
             die("--bits takes 32 or 64 (got '%s')" % o["bits"])
         if self.systems:
             self.check_systems()
         elif not self.spec or self.spec.startswith("-"):
             die(USAGE)
+        elif o.get("workspace"):
+            die("--workspace names the workspace a --systems A/B keeps its task in; a change's is the first device's image workspace")
         elif o.get("slot"):
             die("--slot names the one slot a --systems A/B holds fixed; a change's arms are the slots base and pr<n>")
 
@@ -145,6 +142,8 @@ class AB:
             die("--%s says how to build a change's slots, and a --systems A/B builds nothing" % given[0].replace("_", "-"))
         if "," in o["devices"]:
             die("--systems names two system ids, and a system id names one board's image: one --devices board")
+        if not o.get("workspace"):
+            die("--systems keeps its task in the image workspace that built system A: --workspace <ws> ('wk sysimage ls')")
         a, b = board_ab.pair(o["systems"], "systems")
         slot = o.get("slot") or "a"
         images.check_slot_name(slot)
@@ -166,7 +165,7 @@ class AB:
         self.pr = dict(kind="commit", n="", remote="") if SHA.match(s) else pr.parse_spec(s)
         if not self.o.get("release") and self.pr["kind"] != "pull":
             die("--release is required for a commit or a branch: only a pull request\n"
-                "    has a base branch saying which image it is for ('wk sysimage --list' has\n"
+                "    has a base branch saying which image it is for ('wk sysimage configs' has\n"
                 "    every release; --release 2.52).")
         self.mirror = self.store.mirror()
         if not self.here.isdir(self.mirror):
@@ -214,7 +213,7 @@ class AB:
             if not r.ok or not r.out.strip():
                 die("could not read pull request %s's base branch from %s (gh auth login signs gh in):\n    %s\n"
                     "    Say both of the things it answers yourself:\n"
-                    "        --release <x.y>   which image to measure on (wk sysimage --list)\n"
+                    "        --release <x.y>   which image to measure on (wk sysimage configs)\n"
                     "        --base <sha>      the unpatched side, usually the head's own parent"
                     % (self.pr["n"], repo, (r.err or r.out).strip()))
             self._base_branch = r.out.strip()
@@ -226,7 +225,7 @@ class AB:
         m = RELEASE_OF.match(self.pr_base_branch())
         if not m:
             die("pull request %s targets '%s', which names no release.\n    Say which image to measure on: --release 2.38 "
-                "(wk sysimage --list)" % (self.pr["n"], self.pr_base_branch()))
+                "(wk sysimage configs)" % (self.pr["n"], self.pr_base_branch()))
         return m.group(2)
 
     def narrow(self, dev, matches, release):
@@ -244,7 +243,7 @@ class AB:
         pattern = "*-%s-%s-%s-%s" % (release, self.o.get("builder") or "*", dev, bits or "*")
         matches = [c for c in images.names(self.env) if fnmatchcase(c, pattern)]
         if not matches:
-            die("no image configuration for %s at release %s%s%s.\n    'wk sysimage --list' has every configuration this checkout "
+            die("no image configuration for %s at release %s%s%s.\n    'wk sysimage configs' has every configuration this checkout "
                 "defines." % (dev, release, " (%s)" % self.o["builder"] if self.o.get("builder") else "", ", %s-bit" % bits if bits else ""))
         if len(matches) > 1:
             die("%s has more than one image at release %s:\n%s\n    Say which: %s"
@@ -336,7 +335,7 @@ class AB:
 
     def wk_step(self, sid, on, needs, holds, done, words, target=""):
         self.logged.add(sid)
-        return sched.wk_step(self.here, self.wk, lambda s: os.path.join(self.taskdir, sched.log_name(s)), sid, on, needs, holds,
+        return sched.wk_step(self.here, self.wk, lambda s: os.path.join(self.logdir(), sched.log_name(s)), sid, on, needs, holds,
                              done, words, target, env=["WK_TASK_HELD=" + self.task] if self.task else [])
 
     def pgo_steps(self, d, ws, spec, on, target, commit, slot, need):
@@ -365,54 +364,72 @@ class AB:
                                     ["bench", "deploy", ws, d.name, "--slot", slot], target))
         return out
 
+    def home(self):
+        """(workspace, target) the task lives in: a --systems A/B's --workspace, else the first device's base image workspace."""
+        if self.systems:
+            return self.o["workspace"], ""
+        ws, _, _, target = self.devices[0].arm_ws[0]
+        return ws, target
+
+    def cost_homes(self):
+        return [self.home()] + [(ws, target) for d in self.devices for ws, _, _, target in d.arm_ws]
+
+    def logdir(self):
+        return record.driver_logs(self.store, self.task)
+
+    def task_path(self):
+        m, d = record.ws_home(self.reg, *self.home())
+        return m, os.path.join(d, self.task)
+
+    def task_step(self):
+        """The task is recorded through the machine holding its workspace, once the image step has made that workspace."""
+        ws, _ = self.home()
+        needs = () if self.systems else ("image:%s@%s" % (ws, self.devices[0].arm_ws[0][2]),)
+
+        def done():
+            m, d = self.task_path()
+            return bool(self.task) and m.exists(os.path.join(d, "task.json"))
+
+        def run():
+            m, d = self.task_path()
+            try:
+                record.held((m, os.path.dirname(d)), ws)
+            except Refused as e:
+                return e.status
+            record.task_write(d, self.task_fields(), [" ".join(["wk"] + self.argv()[1:])], machine=m)
+            return 0
+        return sched.Step("task", self.me, needs, (), done, run, command="record task %s in workspace %s" % (self.task or "<task>", ws))
+
     def steps(self):
         out, imaged, benches = [], set(), []
         for d in self.devices:
-            needs = ()
             if not self.systems:
                 out += self.build_steps(d, imaged)
-                needs = tuple("deploy:%s:%s" % (d.name, s) for _, s in self.arms)
+        out.append(self.task_step())
+        for d in self.devices:
+            needs = ("task",) + (() if self.systems else tuple("deploy:%s:%s" % (d.name, s) for _, s in self.arms))
+            on, target = (self.me, "") if self.systems else d.arm_ws[0][2:]
             for plan in self.plans:
                 benches.append("bench:%s:%s" % (d.name, plan))
-                out.append(sched.Step(benches[-1], self.me, needs, ("device:" + d.name,), None,
-                                      (lambda d, plan: lambda: self.run_bench(d, plan))(d, plan), command=self.bench_command(d, plan)))
-        out.append(sched.Step("report", self.me, benches, (), None, self.run_report,
-                              command="wk bench report %s --html --text" % (self.task or "<task>")))
+                out.append(self.wk_step(benches[-1], on, needs, ("device:" + d.name,), None, self.bench_words(d, plan), target))
+        out.append(self.wk_step("report", self.me, benches, (), None, ["bench", "report", self.task or "<task>", "--html", "--text"]))
         return sched.validate(out)
 
     def bench_options(self, d):
-        o = {"system": d.name, "rounds": str(self.rounds), "task": self.task, "count": self.o.get("count") or "",
+        o = {"rounds": str(self.rounds), "count": self.o.get("count") or "",
              "timeout": self.o.get("timeout") or "", "max_rounds": str(self.max_rounds) if self.detect else "",
              "detect": "%g" % self.detect if self.detect else ""}
         a, b = self.arms
         if self.systems:
-            return d.name, dict(o, ab_systems="%s,%s" % (a[0], b[0]), slot=a[1])
+            return self.o["workspace"], dict(o, ab_systems="%s,%s" % (a[0], b[0]), slot=a[1])
         return d.arm_ws[0][0], dict(o, ab="%s,%s" % (a[1], b[1]))
 
-    def bench_command(self, d, plan):
+    def bench_words(self, d, plan):
         ws, o = self.bench_options(d)
-        flag = "--ab-systems " + o["ab_systems"] + " --slot " + o["slot"] if self.systems else "--ab " + o["ab"]
-        return "wk bench run %s %s --system %s %s --rounds %s%s --task %s" % (
-            ws, plan, d.name, flag, o["rounds"], "".join(" --%s %s" % (k.replace("_", "-"), o[k]) for k in ("max_rounds", "detect", "count", "timeout")
-                                                      if o[k]), self.task or "<task>")
-
-    def run_bench(self, d, plan):
-        ws, o = self.bench_options(d)
-        try:
-            return self.bench(ws, plan, o) or 0
-        except Refused as e:
-            return e.status
-
-    def board_ab(self, ws, plan, o):
-        return board_ab.run(self.root, self.reg, ws, plan, o, self.clock, self.popen)
-
-    def run_report(self):
-        try:
-            report.task_report(self.taskdir, False, html=True, text=True)
-        except (Refused, SystemExit, OSError, ValueError) as e:
-            warn("the report did not complete (%s); the runs are recorded:  wk bench report %s" % (e, self.task))
-            return 1
-        return 0
+        flag = ["--ab-systems", o["ab_systems"], "--slot", o["slot"]] if self.systems else ["--ab", o["ab"]]
+        return (["bench", "run", ws, plan, "--system", d.name] + flag + ["--rounds", o["rounds"]]
+                + [w for k in ("max_rounds", "detect", "count", "timeout") if o[k] for w in ("--" + k.replace("_", "-"), o[k])]
+                + ["--task", self.task or "<task>"])
 
     def board_state(self, name):
         """(mode, slots): what the board answers it is running now, and the slots its bench system holds.
@@ -433,7 +450,7 @@ class AB:
         for d in self.devices:
             for plan in self.plans:
                 legs = legs_per_plan(self.rounds, self.systems)
-                seen = leg_seconds(self.store, d.name, plan, self.o.get("count") or "")
+                seen = leg_seconds(self.reg, self.cost_homes(), d.name, plan, self.o.get("count") or "")
                 out[(d.name, plan)] = (legs, legs * statistics.median(seen) if seen else None, len(seen))
         return out
 
@@ -479,7 +496,7 @@ class AB:
             self.rounds, "; up to %d until they resolve %g%%" % (self.max_rounds, self.detect) if self.detect else "",
             "; --count %s iterations per run" % self.o["count"] if self.o.get("count") else ""))
         log("  arms      %s" % ", ".join(s for _, s in self.arms) if not self.systems else "  slot      %s in both systems" % self.arms[0][1])
-        log("  task      %s" % (self.task or "(named when it is created)"))
+        log("  task      %s, in workspace %s" % (self.task or "(named when it is created)", self.home()[0]))
         for line in self.cost_lines():
             log("  cost      " + line)
         log("")
@@ -503,7 +520,7 @@ class AB:
     def argv(self):
         """This A/B as a command, for the process --detach hands it to."""
         words = [self.spec] if self.spec else []
-        for key in ("devices", "release", "builder", "bits", "base", "build_on", "systems", "slot", "count", "timeout", "max_rounds", "detect"):
+        for key in ("devices", "release", "builder", "bits", "base", "build_on", "systems", "workspace", "slot", "count", "timeout", "max_rounds", "detect"):
             if self.o.get(key):
                 words += ["--" + key.replace("_", "-"), self.o[key]]
         for p in self.plans:
@@ -511,17 +528,17 @@ class AB:
         return [self.wk, "bench", "ab"] + words + ["--rounds", str(self.rounds)]
 
     def create_task(self):
-        """Created, and its lock taken, before any work; a given --task is a --detach parent's, whose lock this process takes over."""
+        """Named, and its lock taken, before any work; a given --task is a --detach parent's, whose lock this process takes over."""
         if self.task:
             self.lock.hold("bench-task-" + self.task, timeout=30)
-            return
-        stamp = self.clock.stamp()
-        self.task = ("%s-%s-systems" % (stamp, self.devices[0].name) if self.systems
-                     else "%s-%s-pr%s" % (stamp, self.pr["remote"], self.pr["n"]) if self.pr.get("n") else "%s-%s" % (stamp, self.head[:12]))
-        self.taskdir = record.home_for(self.store, "", self.task)
-        if os.path.exists(self.taskdir):
-            die("task %s already exists (%s); a task is one request, made once" % (self.task, self.taskdir))
-        self.lock.hold("bench-task-" + self.task, timeout=5)
+        else:
+            stamp = self.clock.stamp()
+            self.task = ("%s-%s-systems" % (stamp, self.devices[0].name) if self.systems
+                         else "%s-%s-pr%s" % (stamp, self.pr["remote"], self.pr["n"]) if self.pr.get("n") else "%s-%s" % (stamp, self.head[:12]))
+            self.lock.hold("bench-task-" + self.task, timeout=5)
+        self.here.mkdir_now(self.logdir())
+
+    def task_fields(self):
         a, b = self.arms
         if self.systems:
             subj = ["subject.kind=systems", "subject.spec=%s,%s" % (a[0], b[0])]
@@ -531,10 +548,10 @@ class AB:
                     "subject.number=" + self.pr["n"], "subject.head=" + self.head, "subject.base=" + self.base, "subject.base_how=" + self.base_how,
                     "subject.release=" + self.devices[0].p["CFG_RELEASE"], "subject.branch=%s/%s" % (self.devices[0].p["CFG_REMOTE"], self.devices[0].p["CFG_BRANCH"])]
             devices = ",".join("%s=%s" % (d.name, d.profile) for d in self.devices)
-        record.task_write(self.taskdir, ["task=" + self.task, "requested=" + self.clock.iso(), "devices=" + devices, "plans=" + ",".join(self.plans),
-                                         "rounds=%d" % self.rounds, "slots=" + ",".join(dict.fromkeys(s for _, s in self.arms))] + subj
-                          + ["%s=%s" % (k, self.o[k]) for k in ("count", "timeout") if self.o.get(k)]
-                          + ["restart=%s --task %s" % (" ".join(["wk"] + self.argv()[1:]), self.task)], [" ".join(["wk"] + self.argv()[1:])])
+        return (["task=" + self.task, "requested=" + self.clock.iso(), "devices=" + devices, "plans=" + ",".join(self.plans),
+                 "rounds=%d" % self.rounds, "slots=" + ",".join(dict.fromkeys(s for _, s in self.arms))] + subj
+                + ["%s=%s" % (k, self.o[k]) for k in ("count", "timeout") if self.o.get(k)]
+                + ["restart=%s --task %s" % (" ".join(["wk"] + self.argv()[1:]), self.task)])
 
     def resolve(self):
         self.check()
@@ -548,6 +565,8 @@ class AB:
             self.devices.append(Device(self.o["devices"], "", images.FIELDS))
         for d in self.devices:
             d.mode, d.slots = self.boards(d.name)
+        if self.task and not self.here.isdir(self.logdir()) and not self.task_step().done():   # an A/B named here, or one recorded
+            die("no such task '%s' in workspace %s; 'wk bench ls' lists the tasks" % (self.task, self.home()[0]))
 
     def go(self):
         self.resolve()
@@ -568,25 +587,25 @@ class AB:
         if not act.confirm("run these %d step(s)%s?" % (len(steps), "" if self.systems else ", replacing those slots")):
             die("not run")
         self.create_task()
-        info("task %s  (%s)" % (self.task, self.taskdir))
+        info("task %s, in workspace %s  (logs: %s)" % (self.task, self.home()[0], self.logdir()))
         if self.o.get("detach"):
-            pid = job.detach(self.here, self.argv() + ["--yes", "--task", self.task], os.path.join(self.taskdir, "ab.log"))
+            pid = job.detach(self.here, self.argv() + ["--yes", "--task", self.task], os.path.join(self.logdir(), "ab.log"))
             info("detached as pid %d -- this end can go away" % pid)
             log("  follow:  tail -f %s/ab.log\n  state:   wk status;  wk bench ls\n  report:  wk bench report %s   (partial while it runs)"
-                % (self.taskdir, self.task))
+                % (self.logdir(), self.task))
             return 0
         return self.run(self.steps())
 
     def run(self, steps):
         order = sched.plan_order(steps)
         recs = progress.Records(self.store.record_dir(), clock=self.clock, env=self.env, machine=self.here)
-        t = recs.begin("ab", "here", self.task, "wk bench ab %s --kill" % self.task, os.path.join(self.taskdir, "ab.log"),
+        t = recs.begin("ab", "here", self.task, "wk bench ab %s --kill" % self.task, os.path.join(self.logdir(), "ab.log"),
                        [s.command for s in order])
         t.set("subject", self.subject())
 
         def announce(event, step, rc=0):
             t.step_event(order.index(step) + 1, event)
-            log(sched.say_event(order, event, step, rc, os.path.join(self.taskdir, sched.log_name(step)) if step.id in self.logged else ""))
+            log(sched.say_event(order, event, step, rc, os.path.join(self.logdir(), sched.log_name(step)) if step.id in self.logged else ""))
 
         rc = 1
         try:
@@ -598,7 +617,7 @@ class AB:
                 if rc:
                     die("A/B incomplete: the steps above say which did not run, and each one's log is beside its own resource in\n"
                         "    %s. Every round that finished is recorded ('wk bench report %s'), and re-running\n"
-                        "    'wk bench ab ... --task %s' takes up what is left." % (self.taskdir, self.task, self.task))
+                        "    'wk bench ab ... --task %s' takes up what is left." % (self.logdir(), self.task, self.task))
                 self.verify()
         except job.Interrupted as e:
             rc = "cancelled"
@@ -609,7 +628,7 @@ class AB:
         finally:
             t.end(rc)
             self.lock.release_all()
-        info("A/B complete: %s  (wk bench ls; wk bench report %s)" % (self.taskdir, self.task))
+        info("A/B complete: task %s in workspace %s  (wk bench ls; wk bench report %s)" % (self.task, self.home()[0], self.task))
         return 0
 
     def verify(self):
@@ -636,7 +655,7 @@ def kill(reg, clock, task):
     if not job.kill(None, task, t, "cancelled", reg.machine, clock, reg.env):
         die("pid %s outlived a TERM and a KILL (ps -p %s); the record says cancelled, the process does not" % (t.field("pid"), t.field("pid")))
     info("cancelled. The rounds it recorded stay in %s ('wk bench report %s');\n    re-running with --task %s takes up what is left."
-         % (record.homes(reg.store).get(task) or "this machine's store", task, task))
+         % (record.homes(reg.store).get(task) or "its workspace", task, task))
     return 0
 
 

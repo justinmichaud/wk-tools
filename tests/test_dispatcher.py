@@ -51,7 +51,7 @@ class TestHelpAndDeclarations(WkTest):
                 continue
             n = f.name
             lines = f.read_text(errors="replace").splitlines()
-            head = lines[:15]
+            head = [line.rstrip("\n") for line in D.leading_block(f)]
             line3 = lines[2] if len(lines) > 2 else ""
             if line3.endswith("."):
                 bad.append(f"{n}: synopsis summary ends in a period")
@@ -62,7 +62,7 @@ class TestHelpAndDeclarations(WkTest):
 
             decl_lines = [l for l in head if l.startswith("# wk:")]
             if not decl_lines:
-                bad.append(f"{n}: no '# wk:' declaration line in the first 15 lines")
+                bad.append(f"{n}: no '# wk:' declaration line in its leading comment block")
                 continue
             has_where = has_group = False
             where_val = ""
@@ -111,7 +111,7 @@ class TestHelpAndDeclarations(WkTest):
         """`-h` prints a subverb's destructive override under the command's own line"""
         cmd = self.tmp / "demo"
         cmd.write_text("#!/usr/bin/env python3\n#\n# wk demo a|b|c -- a demo\n"
-                       "# wk: where=host name=none destructive a,--replace\n"
+                       "# wk: where=host name=none verbs=a,b,c destructive a,--replace\n"
                        "# wk: sub b destructive=\n# wk: sub c destructive=yes\n#\n#   wk demo a   does a\n")
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(dispatch.Exit):
@@ -370,7 +370,7 @@ class TestUnknownWorkspaceName(WkTest):
         for f in sorted((REPO / "cmd").iterdir()):
             if not (f.is_file() and os.access(f, os.X_OK)):
                 continue
-            for line in f.read_text(errors="replace").splitlines()[:15]:
+            for line in D.leading_block(f):
                 if not line.startswith("# wk:"):
                     continue
                 for tok in re.findall(r"name=(\S*)", line):
@@ -571,7 +571,7 @@ class TestWhereTheNameSitsInArgv(WkTest):
         for f in sorted((REPO / "cmd").iterdir()):
             if not (f.is_file() and os.access(f, os.X_OK)):
                 continue
-            head = "\n".join(f.read_text(errors="replace").splitlines()[:15])
+            head = "".join(D.leading_block(f))
             if "name=optional" not in head:
                 continue
             syn = re.search(r"^# wk \S+ (.*?) -- ", head, re.M)
@@ -685,7 +685,7 @@ class TestHelpNamesEveryWhereOverride(WkTest):
         top = [i for i, l in enumerate(lines) if l.startswith("  runs on: ")]
         self.assertEqual(len(top), 1, lines)
         self.assertIn(self._prose(D.Decl(REPO / "cmd" / "bench"), "workspace"), lines[top[0]])
-        self.assertTrue(lines[top[0] + 1].startswith("    seed: "), lines)
+        self.assertTrue(lines[top[0] + 1].startswith("    plans: "), lines)
 
 
 class TestNothingBootsTheMachineToRefuse(WkTest):

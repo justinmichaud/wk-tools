@@ -18,6 +18,7 @@ import unittest
 from tests.support import REPO
 from tests.test_push_switch import PUSH, Fleet, PushTest
 from tests.test_wk_secrets import SOCK
+from wk import pushswitch  # noqa: E402
 from wk.machine import Result  # noqa: E402
 
 PROXY = REPO / "container" / "proxy" / "wk-proxy.py"
@@ -87,7 +88,7 @@ class TestPushOnEndsAnyRunningAgent(PushTest):
         self.assertEqual([], self.sessions())
 
     def test_the_scan_is_plain_sh(self):
-        cp = subprocess.run(["sh", "-n", "-c", PUSH.AGENT_PID_SCAN], capture_output=True, text=True)
+        cp = subprocess.run(["sh", "-n", "-c", pushswitch.AGENT_PID_SCAN], capture_output=True, text=True)
         self.assertEqual(0, cp.returncode, cp.stderr)
 
     def test_on_ends_them_before_loading_the_agent(self):

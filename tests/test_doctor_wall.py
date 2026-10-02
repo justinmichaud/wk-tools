@@ -71,7 +71,7 @@ HEALTHY = [
     ("webkitscmpy.setup", "true"),
     ("rest/version", "200"),
     ("http_code}' -X POST -H", "412"),
-    ("curl -sS -m 20 -X POST -H", '{"code": 50, "message": "a product is required"}'),
+    ("curl -sS -m 40 -X POST -H", '{"code": 50, "message": "a product is required"}'),
     ("gpu-probe.sh", Result(0, "renderer=NVIDIA Tegra | vendor=NVIDIA\n", "")),
     ("touch /opt/wk-tools/.wk-write-probe", "touch: cannot touch '/opt/wk-tools/.wk-write-probe': Read-only file system"),
     ("rm -f /opt/wk-tools", ""),
@@ -370,7 +370,59 @@ class TestGitHubRead(_Wall):
         self.set("api.github.com/user", "000")
         self.assertFails(self.check("github_read"), "rather than 200 or 401")
         self.set("https://api.github.com/ 2", "000")
-        self.assertFails(self.check("github_read"), "the injector is not in the path")
+        self.assertFails(self.check("github_read"), "the injector is not in the path", "systemctl --user status wk-github-inject", "/run/wk/wk-github-ca.pem")
+
+
+class TestAnInjectorFaultIsNotAnUpstreamOutage(_Wall):
+    """The injector's 598 (TLS or DNS toward the host failed) is a miss naming the injector."""
+
+    def assertInjectorFault(self, rows, name):
+        self.assertEqual(MISS, rows[0][0])
+        self.assertIn("%s: the injector failed to verify or resolve the host (HTTP 598)" % name, rows[0][1])
+        self.assertIn("wk-github-inject", rows[0][2])
+        self.assertNotIn("upstream outage", rows[0][1])
+
+    def test_a_github_598_is_a_miss(self):
+        self.set("api.github.com/user", "598")
+        self.assertInjectorFault(self.check("github_read"), "GitHub")
+
+    def test_a_bugzilla_598_is_a_miss_for_read_and_write(self):
+        self.set("rest/version", "598")
+        self.assertInjectorFault(self.check("bugzilla_read"), "Bugzilla")
+        self.set("http_code}' -X POST -H", "598")
+        self.assertInjectorFault(self.check("bugzilla_write"), "Bugzilla")
+        self.set("curl -sS -m 40 -X POST -H", "the wk credential injector failed to verify or resolve bugs.webkit.org (SSLCertVerificationError)\r\n")
+        self.assertInjectorFault(self.check("bugzilla_write", push_on=1), "Bugzilla")
+
+
+class TestAnUpstreamOutageIsNotTheSandbox(_Wall):
+    """The injector's own 502/504 means it answered; '000' means nothing did."""
+
+    def assertNoted(self, rows, name):
+        self.assertPasses(rows)
+        self.assertEqual(NOTE, rows[0][0])
+        self.assertIn("%s did not answer through the injector (HTTP 504) -- an upstream outage, not the sandbox" % name, rows[0][1])
+
+    def test_a_github_read_504_is_a_note(self):
+        self.set("api.github.com/user", "504")
+        self.assertNoted(self.check("github_read"), "GitHub")
+
+    def test_a_github_write_504_is_a_note_on_and_off(self):
+        self.set("/pulls", "504")
+        self.assertNoted(self.check("github_write"), "GitHub")
+        self.assertNoted(self.check("github_write", push_on=1), "GitHub")
+
+    def test_a_bugzilla_504_is_a_note_for_read_and_both_writes(self):
+        self.set("rest/version", "504")
+        self.assertNoted(self.check("bugzilla_read"), "Bugzilla")
+        self.set("http_code}' -X POST -H", "504")
+        self.assertNoted(self.check("bugzilla_write"), "Bugzilla")
+        self.set("curl -sS -m 40 -X POST -H", "bugs.webkit.org did not answer within 12 seconds; the wk credential injector is up\r\n")
+        self.assertNoted(self.check("bugzilla_write", push_on=1), "Bugzilla")
+
+    def test_a_000_stays_a_miss(self):
+        self.set("api.github.com/user", "000")
+        self.assertFails(self.check("github_read"), "rather than 200 or 401")
 
 
 class TestGitHubWrite(_Wall):
@@ -451,7 +503,7 @@ class TestBugzilla(_Wall):
     def test_the_read_goes_through_the_injector(self):
         self.assertPasses(self.check("bugzilla_read"))
         self.set("rest/version", "000")
-        self.assertFails(self.check("bugzilla_read"), "not in the path for it")
+        self.assertFails(self.check("bugzilla_read"), "not in the path for it", "systemctl --user status wk-github-inject")
 
     def test_off_wants_the_injectors_412(self):
         self.assertPasses(self.check("bugzilla_write"))
@@ -464,7 +516,7 @@ class TestBugzilla(_Wall):
                             ('{"code": 306}', ("does not know it", "--replace")),
                             ("<html>", ("nothing Bugzilla-shaped",))):
             with self.subTest(body=body):
-                self.set("curl -sS -m 20 -X POST -H", body)
+                self.set("curl -sS -m 40 -X POST -H", body)
                 self.assertFails(self.check("bugzilla_write", push_on=1), *words)
 
 

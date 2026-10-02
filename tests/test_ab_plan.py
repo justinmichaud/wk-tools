@@ -14,9 +14,12 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -24,11 +27,11 @@ from tests.killpoints import converges
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, pgo, record as progress, sched, targets  # noqa: E402
+from wk import act, images, pgo, record as progress, sched, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import ab, record  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Fake, Result, Ssh  # noqa: E402
 
 HEAD, BASE, TIP = "a" * 40, "b" * 40, "c" * 40
 WK = str(REPO / "wk")
@@ -64,15 +67,43 @@ class Inline:
         return False
 
 
+class Far(Fake):
+    """This host, whose podman machine and build boxes run their shell on the scratch tree the store paths name; a
+    peer's shell runs in `peer_env`, the environment its own wk has."""
+
+    peer_env = None
+
+    def run(self, argv, input=None, timeout=None, stream=False):
+        if argv[:3] == ["podman", "machine", "ssh"] or argv[:1] == ["ssh"]:
+            self.record_run(argv)
+            remote = argv[-1] if argv[0] == "podman" else shlex.split(argv[-1])[-1]
+            env = self.peer_env if argv[:1] == ["ssh"] and "peer1" in argv else None
+            cp = subprocess.run(["sh", "-c", remote], input=input or "", capture_output=True, text=True, env=env)
+            return Result(cp.returncode, cp.stdout, cp.stderr)
+        return super().run(argv, input, timeout, stream)
+
+
 class Reg(targets.Registry):
+    """The container target as a macOS host has it: its store in the podman machine, reached over `podman machine ssh`."""
+
     def __init__(self, env, fake):
         super().__init__(REPO, env=env, machine=fake)
 
     def ws_target(self, ws):
         return "container"
 
+    remote = {}
+
+    def load(self, name):
+        if name in self.remote:
+            return types.SimpleNamespace(kind="remote", results=lambda ws: self.remote[name])
+        t = super().load(name)
+        if t.kind == "container":
+            t.is_here = lambda: False
+        return t
+
     def known(self):
-        return ["one", "two"]
+        return ["one", "two", "peer1"]
 
     def in_workspace(self):
         return False
@@ -80,7 +111,7 @@ class Reg(targets.Registry):
 
 def opts(**kw):
     o = dict.fromkeys(("devices", "release", "builder", "bits", "base", "build_on", "rounds", "count", "timeout", "task",
-                       "systems", "slot"))
+                       "systems", "slot", "workspace"))
     o.update(plans=[], detach=False)
     o.update(kw)
     return o
@@ -96,7 +127,7 @@ class World:
         (self.tmp / "machines").mkdir(parents=True, exist_ok=True)
         for name in self.boards_:
             (self.tmp / "machines" / (name + ".conf")).write_text("kind=board\nssh=%s-rescue\n" % name)
-        self.fake, self.clock = Fake("here"), FakeClock()
+        self.fake, self.clock = Far("here"), FakeClock()
         self.reg = Reg(self.env, self.fake)
         self.mirror = self.reg.store.mirror()
         self.fake.dirs.add(self.mirror)
@@ -116,6 +147,23 @@ class World:
         f.answer(["gh", "pr", "view"], out=pr_base + "\n", rc=0 if pr_base else 1)
         f.react(["sh", "-c", sched.LOGGED], self.logged)
         f.react([WK, "sysimage", "holds"], self.holds)
+        for name in images.names(self.env):
+            if images.image_ws(name, self.env):
+                os.makedirs(os.path.join(self.reg.store.record_dir(), "ws", images.image_ws(name, self.env)))
+
+    def peer(self):
+        """peer1, a workstation with its own wk: what it holds is in its own store, which only its wk knows."""
+        store = self.tmp / "peer1"
+        (self.tmp / "machines" / "peer1.conf").write_text("kind=peer\ndriver=remote\nhost=peer1\npeer=1\ntools=%s\n" % REPO)
+        (store / "machines").mkdir(parents=True)
+        self.fake.peer_env = {"PATH": os.environ["PATH"], "HOME": str(store), "SHELL": "/bin/sh", "WK_TARGET": "local",
+                              "WK_LOCAL_STORE": str(store), "XDG_STATE_HOME": str(store / "state"),
+                              "XDG_CONFIG_HOME": str(store / "config"), "WK_MACHINES_DIR": str(store / "machines")}
+        return store / "ws" / ("buildroot-" + R38) / "bench"
+
+    def home(self):
+        """Where the A/B keeps its task: the first device's image workspace."""
+        return os.path.join(self.reg.store.record_dir(), "ws", "buildroot-" + R38, "bench")
 
     def rev(self, argv, fk):
         ref = argv[-1][:-len("^{commit}")]
@@ -137,8 +185,16 @@ class World:
     def logged(self, argv, fk):
         words = argv[5:]
         if words[0] == "env":
-            words = words[2:]
-        fk._set_file("/state/" + self.key(words[1:]), "1")
+            words = [w for w in words[1:] if "=" not in w]
+        if words[1:3] == ["bench", "run"] and "--task" in words:
+            flags = dict(zip(words[7::2], words[8::2]))
+            o = {k[2:].replace("-", "_"): v for k, v in flags.items()}
+            fk._set_file("/measured/%s/%s" % (words[6], words[4]), o.get("ab") or o.get("ab_systems"))
+            self.benched.append((words[3], words[4], o))
+        elif words[1:3] != ["bench", "report"]:
+            if words[1:3] == ["sysimage", "build"]:   # the image step makes its workspace
+                os.makedirs(os.path.join(self.reg.store.record_dir(), "ws", words[words.index("--workspace") + 1]), exist_ok=True)
+            fk._set_file("/state/" + self.key(words[1:]), "1")
         return Result(0)
 
     def holds(self, argv, fk):
@@ -151,15 +207,11 @@ class World:
     def boards(self, name):
         return "bench %s-0123abcd" % self.boards_.get(name, "sysa"), ["base"]
 
-    def bench(self, ws, plan, o):
-        self.fake.write("/measured/%s/%s" % (o["system"], plan), o.get("ab") or o.get("ab_systems"))
-        self.benched.append((ws, plan, o))
-
     def ab(self, spec=HEAD, **kw):
         kw.setdefault("devices", ",".join(self.boards_))
         if not kw.get("systems"):
             kw.setdefault("release", "2.38")
-        return ab.AB(REPO, self.reg, self.clock, spec, opts(**kw), boards=self.boards, bench=self.bench, pool=Inline)
+        return ab.AB(REPO, self.reg, self.clock, spec, opts(**kw), boards=self.boards, pool=Inline)
 
     def state(self):
         return sorted(k for k in self.fake.files if k.startswith(("/state/", "/measured/")))
@@ -277,6 +329,16 @@ class TestTheRefusals(ABTest):
     def test_a_change_holds_no_one_slot(self):
         self.assertIn("--slot", self.refused(self.world(), slot="a"))
 
+    def test_the_task_needs_a_workspace_to_live_in(self):
+        """A change's task is the first device's image workspace's; a --systems A/B's is the --workspace it names."""
+        w = self.world()
+        w.fake._set_file("/state/image/" + R38, "1")   # held, so the step that would make the workspace is not run
+        shutil.rmtree(os.path.dirname(w.home()))
+        self.assertIn("no workspace 'buildroot-%s' is at" % R38, self.refused(w))
+        self.assertIn("--workspace <ws>", self.refused(self.world(), "", systems="x,y"))
+        self.assertIn("no workspace 'gone' is at", self.refused(self.world(), "", systems="x,y", workspace="gone"))
+        self.assertIn("--workspace", self.refused(self.world(), workspace="buildroot-" + R38))
+
 
 class TestTheCommits(ABTest):
     def test_the_base_is_the_merge_base_with_the_images_branch_for_a_commit(self):
@@ -340,7 +402,7 @@ class TestTheGraph(ABTest):
         self.assertEqual(s[image].holds, ("machine:tolken",))
         self.assertEqual(s["slot:%s:base" % self.ws].needs, (image,))
         self.assertEqual(s["deploy:rpi3:base"].holds, ("device:rpi3",))
-        self.assertEqual(s["bench:rpi3:speedometer3"].needs, ("deploy:rpi3:base", "deploy:rpi3:pr"))
+        self.assertEqual(s["bench:rpi3:speedometer3"].needs, ("task", "deploy:rpi3:base", "deploy:rpi3:pr"))
         self.assertEqual(s["report"].needs, ("bench:rpi3:speedometer3",))
 
     def test_a_build_is_serialised_by_the_machine_it_runs_on(self):
@@ -405,8 +467,8 @@ class TestTheGraph(ABTest):
         nothing is built -- both are one board A/B per board and plan, told apart only by its arms."""
         w = self.world()
         _, s = self.graph(w)
-        _, t = self.graph(w, "", systems="sys-a,sys-b", slot="s")
-        self.assertEqual(sorted(t), ["bench:rpi3:speedometer3", "report"])
+        _, t = self.graph(w, "", systems="sys-a,sys-b", slot="s", workspace="buildroot-" + R38)
+        self.assertEqual(sorted(t), ["bench:rpi3:speedometer3", "report", "task"])
         self.assertEqual([steps["bench:rpi3:speedometer3"].run() for steps in (s, t)], [0, 0])
         (_, _, slots), (_, _, systems) = w.benched
         self.assertEqual((slots["ab"], slots["rounds"]), ("base,pr", "5"))
@@ -415,9 +477,11 @@ class TestTheGraph(ABTest):
     def test_a_dry_run_creates_no_task_and_runs_nothing(self):
         os.environ["WK_DRY_RUN"] = "1"
         w = self.world()
+        shutil.rmtree(os.path.dirname(w.home()))
         rc, err = self.quiet(w.ab().go)
         self.assertEqual(rc, 0, err)
-        self.assertFalse(os.path.isdir(w.reg.store.bench_dir()))
+        self.assertIn("in workspace buildroot-%s" % R38, err, "a dry run names the workspace the task would live in")
+        self.assertFalse(os.path.isdir(os.path.dirname(w.home())))
         self.assertEqual((w.state(), w.benched), ([], []))
 
     def test_a_dry_run_resolves_the_arms_commits_without_fetching(self):
@@ -451,11 +515,45 @@ class TestARun(ABTest):
         self.assertTrue(t.field("subject"))
         self.assertEqual({state for _, state in t.steps()}, {"done"})
         self.assertEqual(t.field("exit"), "0")
-        doc = record.task_doc(os.path.join(w.reg.store.bench_dir(), name))
+        doc = record.task_doc(os.path.join(w.home(), name))
         self.assertEqual((doc["slots"], doc["rounds"], doc["subject"]["head"]), (["base", "pr"], 5, HEAD))
         self.assertEqual(doc["restart"], doc["commands"][0] + " --task " + name, "a restart is the request itself, into this task")
         stepped = [e[1] for e in w.fake.effects if e[0] == "run" and e[1][:2] == ("sh", "-c") and "bench" in e[1]]
         self.assertTrue(stepped and all("WK_TASK_HELD=" + name in argv for argv in stepped), "a step is told the A/B holds its task")
+
+    def test_a_first_ab_records_its_task_once_the_image_step_has_made_the_workspace(self):
+        w = self.world()
+        shutil.rmtree(os.path.dirname(w.home()))
+        self.run_ab(w)
+        self.assertEqual(record.tasks(w.home()), [self.task(w).field("name")])
+
+    def test_a_task_in_the_podman_machines_store_is_written_through_it(self):
+        """The container target's store is the podman machine's on a macOS host: the task goes there over `podman machine ssh`."""
+        w = self.world()
+        self.run_ab(w)
+        wrote = [e[1] for e in w.fake.effects if e[0] == "run" and e[1][:3] == ("podman", "machine", "ssh") and "task.json" in e[1][-1]]
+        self.assertTrue(wrote, "task.json is written through the podman machine")
+
+    def test_a_task_on_a_build_box_is_written_there_and_its_run_sent_there(self):
+        """--build-on: the first arm's image workspace is on the box, so the task lives there and the board A/B runs there."""
+        w = self.world()
+        far = Path(w.tmp, "far", "ws", "buildroot-" + R38)
+        far.mkdir(parents=True)
+        w.reg.remote = {"one": (Ssh("one", via=w.fake), str(far / "bench"))}
+        self.run_ab(w, build_on="one")
+        name = self.task(w).field("name")
+        self.assertEqual(record.tasks(str(far / "bench")), [name])
+        self.assertEqual(record.tasks(w.home()), [], "nothing is written into the workspace of the same name here")
+        bench = [e[1] for e in w.fake.effects if e[0] == "run" and e[1][:2] == ("sh", "-c") and "run" in e[1] and "--ab" in e[1]]
+        self.assertTrue(bench and all("WK_TARGET=one" in argv for argv in bench), bench)
+
+    def test_a_task_in_a_peers_workspace_is_written_where_its_own_wk_holds_it(self):
+        """--build-on a peer: the peer's own wk names where its workspace keeps tasks, and the task is written there."""
+        w = self.world()
+        bench = w.peer()
+        bench.parent.mkdir(parents=True)
+        self.run_ab(w, build_on="peer1")
+        self.assertEqual(record.tasks(str(bench)), [self.task(w).field("name")])
 
     def test_a_step_already_done_is_not_run_again(self):
         w = self.world()
@@ -503,7 +601,7 @@ class TestARun(ABTest):
             return World(os.path.join(base, str(self.n)))
 
         def once(w):
-            tasks = record.tasks(w.reg.store.bench_dir())
+            tasks = record.tasks(w.home())
             a = w.ab(task=tasks[0] if tasks else None)
             err = io.StringIO()
             with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
@@ -515,8 +613,8 @@ class TestARun(ABTest):
 class TestTheCost(ABTest):
     """`unit bench.report_and_cost`, the cost half: a plan's cost is stated from measured leg times before it runs."""
 
-    def leg(self, w, task, run, secs, count="", machine="rpi3", plan="speedometer3", ok=True):
-        d = os.path.join(w.reg.store.bench_dir(), task, "runs", run)
+    def leg(self, w, task, run, secs, count="", machine="rpi3", plan="speedometer3", ok=True, home=None):
+        d = os.path.join(home or w.home(), task, "runs", run)
         os.makedirs(d)
         Path(d, "env.json").write_text(json.dumps({"machine": machine, "plan": plan, "count": count, "wall_time_s": secs}))
         if ok:
@@ -536,12 +634,31 @@ class TestTheCost(ABTest):
         a, _ = self.graph(w)
         self.assertEqual(a.cost(), {("rpi3", "speedometer3"): (12, 12 * 200.0, 3)})
 
+    def test_legs_measured_in_a_workspace_on_a_build_box_count(self):
+        w = self.world()
+        far = Path(w.tmp, "far", "ws", "buildroot-" + R38, "bench")
+        far.mkdir(parents=True)
+        w.reg.remote = {"one": (Ssh("one", via=w.fake), str(far))}
+        self.leg(w, "t1", "r", 100, home=str(far))
+        a, _ = self.graph(w, build_on="one")
+        self.assertEqual(a.cost(), {("rpi3", "speedometer3"): (12, 12 * 100.0, 1)})
+
+    def test_legs_measured_in_a_peers_workspace_count_and_a_dry_run_states_them(self):
+        """The cost is stated before the confirm, under --dry-run too, from the legs the peer's own wk holds."""
+        w = self.world()
+        far = w.peer()
+        far.mkdir(parents=True)
+        self.leg(w, "t1", "r", 100, home=str(far))
+        os.environ["WK_DRY_RUN"] = "1"
+        a, _ = self.graph(w, build_on="peer1")
+        self.assertEqual(a.cost(), {("rpi3", "speedometer3"): (12, 12 * 100.0, 1)})
+
     def test_a_leg_at_another_count_scales_and_one_at_the_default_stands_only_for_it(self):
         w = self.world()
         self.leg(w, "t1", "r", 100, count="2")
         self.leg(w, "t2", "r", 999)
-        self.assertEqual(ab.leg_seconds(w.reg.store, "rpi3", "speedometer3", "4"), [200.0])
-        self.assertEqual(ab.leg_seconds(w.reg.store, "rpi3", "speedometer3", ""), [999.0])
+        self.assertEqual(ab.leg_seconds(w.reg, [("buildroot-" + R38, "")], "rpi3", "speedometer3", "4"), [200.0])
+        self.assertEqual(ab.leg_seconds(w.reg, [("buildroot-" + R38, "")], "rpi3", "speedometer3", ""), [999.0])
 
     def test_nothing_measured_is_an_unknown_cost(self):
         a, _ = self.graph(self.world())

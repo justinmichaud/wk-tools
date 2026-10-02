@@ -11,6 +11,7 @@ from wk import buildconf, fleet
 from wk.act import die
 from wk.resources import Resources
 from wk.session import Session
+from wk.store import no_such_workspace
 
 GOVERNOR = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
 DRM = "/sys/class/drm"
@@ -68,7 +69,7 @@ class System:
 
     def boot(self):
         if self.target.info(self.ws) in ("absent", "unreachable"):
-            die("no such workspace: %s ('wk ls' lists them)" % self.ws)
+            die(no_such_workspace(self.ws))
 
     def deploy(self, leg):
         raise NotImplementedError

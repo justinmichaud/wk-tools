@@ -55,6 +55,25 @@ class TestDeclarations(unittest.TestCase):
         self.assertEqual(d.broker, "*")
         self.assertEqual((d.bare, d.post, d.values, d.needs), ("merged", "zed", "--list", "gh,ssh"))
 
+    def _refused(self, *lines):
+        with self.assertRaises(D.DeclError) as cm:
+            declare(self.tmp, "probe", *lines)
+        return str(cm.exception)
+
+    def test_a_command_with_verbs_declares_no_options_of_its_own(self):
+        self.assertIn("opts belong on the verbs", self._refused("# wk: verbs=a,b opts --x"))
+        declare(self.tmp, "probe", "# wk: verbs=a,b", "# wk: sub a opts=--x")
+
+    def test_a_command_with_verbs_has_no_flag_that_stands_for_a_verb(self):
+        self.assertIn("no verb's", self._refused("# wk: verbs=a,b", "# wk: flag --list takes=0"))
+
+    def test_a_sub_line_names_a_declared_verb(self):
+        self.assertIn("names no verb", self._refused("# wk: verbs=a,b", "# wk: sub c opts=--x"))
+        self.assertIn("declares no verbs", self._refused("# wk: opts --x", "# wk: sub a opts=--x"))
+
+    def test_every_command_declaration_keeps_verbs_and_options_apart(self):
+        self.assertGreater(len(list(D.all_commands(REPO))), 20)
+
     def test_an_unknown_word_is_refused_by_name(self):
         with self.assertRaises(D.DeclError) as cm:
             declare(self.tmp, "probe", "# wk: where=host frobnicate")
@@ -69,26 +88,37 @@ class TestDeclarations(unittest.TestCase):
     def test_a_flag_override_beats_a_subverb_override_beats_the_default(self):
         d = declare(self.tmp, "probe",
                     "# wk: where=workspace name=required takes=1 opts --list",
-                    "# wk: sub ls where=store name=none takes=0",
                     "# wk: flag --list where=local name=none takes=0 opts=--list")
         self.assertEqual(d.where_for(["build"]), "workspace")
-        self.assertEqual(d.where_for(["ls"]), "store")
-        self.assertEqual(d.where_for(["ls", "--list"]), "local")
-        self.assertEqual(d.takes_for(["ls"]), "0")
+        self.assertEqual(d.where_for(["--list"]), "local")
         self.assertEqual(d.name_for(["--list=x"]), "none")
+        d = declare(self.tmp, "probe", "# wk: where=workspace name=required takes=1 verbs=ls,run",
+                    "# wk: sub ls where=store name=none takes=0")
+        self.assertEqual(d.where_for(["run"]), "workspace")
+        self.assertEqual(d.where_for(["ls"]), "store")
+        self.assertEqual(d.takes_for(["ls"]), "0")
 
     def test_a_subverb_overrides_destructive_and_dryrun(self):
         d = declare(self.tmp, "probe",
-                    "# wk: where=host destructive setup,--purge dryrun setup",
+                    "# wk: where=host verbs=setup,inner destructive setup,--purge dryrun setup",
                     "# wk: sub inner destructive= dryrun=--list")
         self.assertTrue(d.is_destructive(["setup"]))
         self.assertFalse(d.is_destructive(["inner", "setup"]))
         self.assertTrue(d.honours_dryrun(["inner", "--list"]))
         self.assertFalse(d.honours_dryrun(["inner", "setup"]))
 
-    def test_only_the_first_fifteen_lines_declare(self):
-        d = declare(self.tmp, "probe", *(["#"] * 14 + ["# wk: where=host"]))
+    def test_the_whole_leading_comment_block_declares(self):
+        d = declare(self.tmp, "probe", *(["#"] * 30 + ["# wk: where=host"]))
+        self.assertEqual(d.where, "host")
+
+    def test_a_wk_line_past_the_leading_comment_block_does_not_declare(self):
+        d = declare(self.tmp, "probe", "import os", "# wk: where=host")
         self.assertEqual(d.where, "workspace")
+
+    def test_bench_ab_declaration_is_read(self):
+        d = D.Decl(REPO / "cmd" / "bench")
+        self.assertTrue(d.honours_dryrun(["ab"]))
+        self.assertIn("--devices=", d.opts_for(["ab"]))
 
     def test_the_synopsis_is_the_wk_line(self):
         d = declare(self.tmp, "probe", "# wk: group=other")

@@ -30,7 +30,7 @@ from wk import act, decl, dispatch, fleet, record, screen, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import mac, pipeline, record as brecord, systems  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Fake, Local, Result, Ssh  # noqa: E402
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
 PLAN_JSON = json.dumps({"git_repository": {"url": "https://example.com/bench.git", "branch": "main"}})
@@ -50,6 +50,10 @@ class BenchTarget(targets.Target):
 
     def info(self, ws):
         return "running"
+
+    def results(self, ws):
+        """The scratch store is this machine's own disk."""
+        return Local(), os.path.join(self.store.ws_dir(ws), "bench")
 
     def exec(self, ws, argv, tty=False, timeout=None):
         return self.machine.run(["exec", ws] + list(argv))
@@ -364,6 +368,16 @@ class TestARestart(BenchTest):
         self.assertIn("is an A/B; restart it with its own command:\n    wk bench ab x --task " + task, self.said(*self.ARGV + ("--task", task)))
 
 
+class TestWhereTheLegRecords(BenchTest):
+    def test_a_workspace_whose_tasks_are_on_another_machine_is_refused_before_anything_is_written(self):
+        """run-benchmark writes its log and result where it runs, so the task has to be on this machine."""
+        with mock.patch.object(BenchTarget, "results", lambda t, ws: (Ssh("box", via=self.w), str(self.tmp / "far" / "bench"))):
+            err = self.said()
+        self.assertIn("run it on box", err)
+        self.assertEqual(self.w.watched, [])
+        self.assertFalse((self.tmp / "far").exists())
+
+
 class TestRefusals(BenchTest):
     def dispatch_refuses(self, *argv):
         err = io.StringIO()
@@ -575,6 +589,7 @@ class MacWorld(Fake):
                     "XDG_STATE_HOME": str(self.tmp / "state"), "WK_NAME": "ws", "WK_MACHINES_DIR": str(machines),
                     "WK_MAC_BENCH_TOOLS": "/tools", "WK_POLL_SECONDS": "1", "WK_JOB_PID_TRIES": "0"}
         self.clock = FakeClock()
+        os.makedirs(os.path.join(self.env["WK_STORE"], "ws", "ws"))
         self.home = "/var/wk"
         conf = dict(fleet.Fleet(str(REPO), self.env).load("mbp"), name="mbp")
         self.mac = FakeMac(conf, env=self.env, clock=self.clock)
@@ -633,7 +648,7 @@ class MacWorld(Fake):
         return r.go(plan, {"config": config})
 
     def bench_dir(self):
-        return Path(self.env["WK_STORE"]) / "bench"
+        return Path(self.env["WK_STORE"]) / "ws" / "ws" / "bench"
 
     def tasks(self):
         return brecord.tasks(str(self.bench_dir()))

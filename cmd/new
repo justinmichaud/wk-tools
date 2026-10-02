@@ -31,9 +31,10 @@
 #                        initialising (default 300)
 #   WK_KILL_WAIT=<s>     how long --kill waits after TERM before KILL (default 15)
 #
-# Creation fetches from the mirror beside its snapshot and fast-forwards the
-# checkout onto it. It never fetches over the network and never refreshes the
-# mirror itself: that is `wk sync --tools`.
+# Creation refreshes this machine's mirror first (`wk sync --mirror`: no other
+# workspace is touched), then fetches from it, fast-forwards the checkout onto
+# it and runs one `git status`, so the first one in the workspace is fast.
+# A refresh that fails refuses the creation: fix it with `wk sync --mirror`.
 
 import os
 import sys

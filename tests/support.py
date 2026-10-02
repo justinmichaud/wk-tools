@@ -99,20 +99,9 @@ os.environ["WK_TS_AUTHKEY"] = os.path.join(NO_SECRETS, "tailscale-authkey")
 os.environ["WK_TS_API_SECRET"] = os.path.join(NO_SECRETS, "tailscale-api-key")
 
 
-def dispatch_vars():
-    """The variables the dispatcher exports for the one command it runs, read
-    from the file that defines them (`WK_DISPATCH_VARS` in lib/common.sh)
-    rather than copied into a test -- the same way where_values() reads
-    WK_WHERE_VALUES out of `wk`."""
-    import re
-    m = re.search(r'WK_DISPATCH_VARS="([^"]+)"',
-                  (REPO / "lib" / "common.sh").read_text())
-    assert m, "lib/common.sh no longer defines WK_DISPATCH_VARS"
-    return tuple(m.group(1).split())
+sys.path.insert(0, str(REPO / "lib"))
+from wk.dispatch import DISPATCH_VARS  # noqa: E402
 
-
-# WK_CONFIG is the dispatcher's too (lib/wk/dispatch.py hands the build config over in it).
-DISPATCH_VARS = dispatch_vars() + ("WK_CONFIG",)
 
 # The dispatcher's variables and those wk sets for its own child processes and
 # scripts (onboard script parameters, the board driver's environment, the holds

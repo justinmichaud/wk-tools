@@ -102,7 +102,7 @@ def probe_store(store):
     rows.append((kb(store.base_dir()), "base snapshots", "%d of them; unreferenced ones go with wk gc" % bases))
     for ws in store.workspaces():
         rows.append((kb(store.ws_dir(ws)), "workspace %s" % ws, "wk rm %s" % ws))
-    for d in ("cache/ccache", "cache/bench", "cache/images", "cache/yocto", "cache/buildroot", "images", "bench", "skills", "tools"):
+    for d in ("cache/ccache", "cache/bench", "cache/images", "cache/yocto", "cache/buildroot", "skills", "tools"):
         p = os.path.join(store.root(), d)
         if os.path.isdir(p):
             rows.append((kb(p), d, ""))

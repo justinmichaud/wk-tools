@@ -12,6 +12,7 @@ import os
 import re
 import shlex
 import sys
+import types
 import unittest
 from unittest import mock
 
@@ -24,7 +25,7 @@ from wk.act import Refused  # noqa: E402
 from wk.bench import ab, mac, record  # noqa: E402
 from wk.boot.mac import DRIVERS, HELPER, Channel  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Fake, Local, Result  # noqa: E402
 
 DIGEST = "d" * 64
 
@@ -148,12 +149,33 @@ def here_fake():
     return here
 
 
+class ManagerReg(targets.Registry):
+    """The arms' workspace on the Mac's manager, a target of its own: its store a scratch tree this test reads in place."""
+
+    def __init__(self, far, **kw):
+        super().__init__(REPO, **kw)
+        self.far = far
+
+    def ws_target(self, ws):
+        return "manager"
+
+    def walk(self):
+        return ["manager"]
+
+    def load(self, name):
+        if name != "manager":
+            return super().load(name)
+        return types.SimpleNamespace(kind="remote", probe=lambda: ("answering", ""), task_store=lambda: (Local(), self.far),
+                                     results=lambda ws: (Local(), os.path.join(self.far, "ws", ws, "bench")))
+
+
 @contextlib.contextmanager
 def world(kind="mac-volume", env=None, **o):
     """A MacAB over a fake Mac, this machine a Fake, the store a scratch directory, every prompt answered yes."""
     with temp_store() as store, scratch_dir() as tree:
         for part in ("bench", "boot", "lib", "machines"):
             os.symlink(REPO / part, tree / part)
+        (tree / "manager" / "ws" / "mac-rel").mkdir(parents=True)
         clock, here = FakeClock(), here_fake()
         e = {"HOME": str(tree), "WK_STORE": store["WK_STORE"]}
         e.update(env or {})
@@ -162,8 +184,8 @@ def world(kind="mac-volume", env=None, **o):
         fake = PlantMac(conf, env=e, clock=clock, manager=manager) if kind == "mac-volume" else PlantGuest(conf, env=e, clock=clock)
         fake.write_system("perf-macos-tolken-1")
         driver = DRIVERS[kind](REPO, conf, fake)
-        reg = targets.Registry(REPO, env=e, machine=here)
-        opts = dict({"devices": "mbp" if kind == "mac-volume" else "benchvm", "systems": "sid-a,sid-b"}, **o)
+        reg = ManagerReg(str(tree / "manager"), env=e, machine=here)
+        opts = dict({"devices": "mbp" if kind == "mac-volume" else "benchvm", "systems": "sid-a,sid-b", "workspace": "mac-rel"}, **o)
         m = mac.MacAB(tree, reg, clock, "", opts, driver=lambda root, c: driver)
         m.fake, m.here_fake, m.manager_fake, m.store, m.clock_ = fake, here, manager, store["path"], clock
         def sent(root, headline, *a, **k):
@@ -381,8 +403,24 @@ class TestItSharesTheBoardABsRefusals(WkTest):
     def test_the_ceiling_is_not_below_the_floor(self):
         self.assertIn("below --rounds", self.refused(rounds="9", max_rounds="4"))
 
-    def test_patch_builds_in_a_workspace_and_excludes_systems(self):
-        self.assertIn("--workspace <ws>", self.refused(systems="", patch="HEAD"))
+    def test_the_task_is_written_in_its_workspace_on_the_machine_holding_it(self):
+        """The arms' workspace is on the Mac's manager: the task goes there through that target, the plants stay here."""
+        with world() as m:
+            ready(m)
+            m.create_task("20260101T000000Z")
+            m.lock.release_all()
+            self.assertEqual(m.taskdir, os.path.join(m.reg.far, "ws", "mac-rel", "bench", "20260101T000000Z-mbp-mac-ab"))
+            self.assertTrue(os.path.isfile(os.path.join(m.taskdir, "task.json")))
+            self.assertEqual(m.logs, os.path.join(m.reg.store.record_dir(), "log", "20260101T000000Z-mbp-mac-ab"))
+        with world(workspace="gone") as m:
+            ready(m)
+            got, err = said(m.create_task, "20260101T000000Z")
+        self.assertIs(got, Refused)
+        self.assertIn("no workspace 'gone'", err)
+
+    def test_the_task_lives_in_a_workspace_and_patch_excludes_systems(self):
+        self.assertIn("--workspace <ws>", self.refused(systems="", patch="HEAD", workspace=""))
+        self.assertIn("--workspace <ws>", self.refused(workspace=""))
         self.assertIn("One or the other", self.refused(patch="HEAD", workspace="mac-rel"))
 
     def test_a_board_is_refused_a_macs_option(self):
@@ -404,7 +442,7 @@ class TestThePlant(WkTest):
         return said(m.plant)
 
     def job(self, m):
-        return json.loads(m.here_fake.files[os.path.join(m.taskdir, "job.json")])
+        return json.loads(m.here_fake.files[os.path.join(m.logs, "job.json")])
 
     def test_the_job_carries_the_plan_the_arms_and_the_declared_display(self):
         with world(rehearse=True) as m:
@@ -482,7 +520,7 @@ class TestThePlant(WkTest):
     def test_the_agent_runs_the_tree_the_plant_verified(self):
         with world() as m:
             self.plant(m)
-            plist = m.here_fake.files[os.path.join(m.taskdir, mac.AGENT + ".plist")]
+            plist = m.here_fake.files[os.path.join(m.logs, mac.AGENT + ".plist")]
         self.assertIn("/var/wk/wk-tools/lib/wk/bench/autorun.py", plist)
         self.assertNotIn("KeepAlive", plist)
 
@@ -495,7 +533,7 @@ class TestThePlant(WkTest):
     def test_the_autorun_state_is_reset_to_this_job(self):
         with world() as m:
             self.plant(m)
-            state = m.here_fake.files[os.path.join(m.taskdir, "planted.state")]
+            state = m.here_fake.files[os.path.join(m.logs, "planted.state")]
         self.assertIn("phase=planted\njob_stamp=", state)
         self.assertIn("attempts=0", state)
 

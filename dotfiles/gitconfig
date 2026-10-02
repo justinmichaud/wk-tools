@@ -17,6 +17,9 @@
 [fetch]
 	prune = true
 
+[push]
+	default = current
+
 [diff]
 	# Better function-context headers in C++ and Objective-C hunks.
 	algorithm = histogram

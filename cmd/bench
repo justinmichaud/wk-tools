@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 #
 # wk bench run <workspace> <plan> [options] -- run a benchmark and keep the result defensible
-# wk: where=workspace name=required takes=1 values=--list config=--config verbs=run,seed,ls,compare,report,export,precision,stage,staged,mac,mac-volume,mac-ab,ab-summary,ab,deploy ready=yes group=workspaces needs python3 dryrun run,stage,staged,deploy opts --list,--config=,--count=,--browser=,--subtests=,--software,--browser-args=,--cores=,--kill,--system=,--slot=,--ab=,--ab-systems=,--rounds=,--max-rounds=,--detect=,--task=,--timeout=,--exclude-subtests=,--no-warmup-profile,--jit-tiers,--collect readonly --list,ls,precision
-# wk: flag --list where=store name=none takes=0
-# wk: sub run,deploy name=required@2 takes=1
+# wk: where=workspace name=required takes=1 values=plans config=--config verbs=plans,run,seed,ls,compare,report,export,precision,stage,staged,mac,mac-volume,mac-ab,ab-summary,ab,deploy ready=yes group=workspaces needs python3 dryrun run,stage,staged,deploy,seed,report,compare,ab-summary readonly plans,ls,precision,mac,mac-volume,mac-ab
+# wk: sub plans where=store name=none
+# wk: sub run,deploy name=required@2 takes=1 opts=--config=,--count=,--browser=,--subtests=,--software,--browser-args=,--cores=,--kill,--system=,--slot=,--ab=,--ab-systems=,--rounds=,--max-rounds=,--detect=,--task=,--timeout=,--exclude-subtests=,--no-warmup-profile,--jit-tiers,--collect
 # wk: sub seed where=dynamic name=required@2 takes=1 opts=
 # wk: sub ls where=dynamic name=none takes=1 opts=--continued
 # wk: sub compare,report where=host name=none takes=4 opts=--html,--text
@@ -14,8 +14,9 @@
 # wk: sub mac,mac-volume,mac-ab where=host takes=0 passthrough=tail
 # wk: sub ab-summary where=host name=none takes=1 opts=--runs=,--root=,--out=
 # wk: sub ab where=host name=none takes=2 destructive=yes dryrun=yes opts=--devices=,--release=,--builder=,--bits=,--base=,--build-on=,--plan=,--rounds=,--count=,--timeout=,--task=,--kill,--detach,--systems=,--slot=,--patch=,--workspace=,--config=,--max-rounds=,--detect=,--settle=,--a-args=,--b-args=,--plant,--rehearse,--allow-network-fetch,--preflight,--progress,--status,--collect
+# wk: gone --list plans
 #
-# <plan> is Tools/Scripts/run-benchmark's own name; `wk bench --list` reads
+# <plan> is Tools/Scripts/run-benchmark's own name; `wk bench plans` reads
 # them off the machine's WebKit mirror, no workspace needed.
 #
 #   wk bench run <workspace> <plan> [--config C] [--count N] [--subtests "A B"]
@@ -84,11 +85,17 @@
 #       --detach                           confirm, create the task, hand the rest to a process
 #                                          that outlives this one
 #       --task <name>                      work in an existing task (what --detach hands its child)
-#   wk bench ab --systems A,B --devices <board> [--slot S]   the same A/B of two system images
-#                                          on one board, holding slot S (default a); nothing built
-#   wk bench ab --devices <mac> --systems A,B   an A/B of two builds staged on a Mac's benchmark
-#                                          install, planted there, the Mac restarted into it;
-#                                          the rounds run with nobody in the room
+#                                          The task lives in the first device's image workspace,
+#                                          recorded there once its image step has made it; each
+#                                          board's rounds run where that workspace is
+#   wk bench ab --systems A,B --devices <board> --workspace <ws> [--slot S]   the same A/B of two
+#                                          system images on one board, holding slot S (default a);
+#                                          nothing built; the task lives in <ws>, the image
+#                                          workspace that built A
+#   wk bench ab --devices <mac> --systems A,B --workspace <ws>   an A/B of two builds staged on a
+#                                          Mac's benchmark install, planted there, the Mac restarted
+#                                          into it; the rounds run with nobody in the room. The task
+#                                          lives in <ws>, the workspace that staged A
 #       --patch <ref|diff> --workspace <ws> [--base <ref>] [--config C]   build and stage both arms
 #                                          first (default mac-release-pgo)
 #       --settle S, --a-args, --b-args     the pause before each leg; each arm's browser arguments
@@ -183,7 +190,7 @@
 #                                          measurement is recorded once, on the
 #                                          machine that took it, and read from
 #                                          anywhere. WHERE names that machine
-#   wk bench --list                        the plans in this machine's WebKit
+#   wk bench plans                         the plans in this machine's WebKit
 #                                          mirror -- no workspace, never starts
 #                                          the podman machine; it says which and
 #                                          how to fix it, instead of the list,
@@ -333,7 +340,7 @@ def main(argv):
         return {"mac": bench.mac, "mac-volume": bench.mac_volume, "mac-ab": bench.mac_ab}[verb]()
     if verb == "ab-summary":
         return bench.ab_summary(args.value("--runs"), args.value("--root") or "/var/wk", args.value("--out"))
-    if args.flag("--list"):
+    if verb == "plans":
         return bench.plans()
 
 

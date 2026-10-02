@@ -127,6 +127,8 @@ def wiring(mirror, forks, branches, extra_name="", extra_url="", ssh_config="", 
         steps += [(["git", "config", "--add", "remote.%s.fetch" % extra_name, "+refs/heads/%s:refs/remotes/%s/%s" % (b, extra_name, b)], None)
                   for b in branches]
         steps.append((["git", "config", "remote.%s.tagOpt" % extra_name, "--no-tags"], None))
+    # Each snapshot publish hard-links the last tree, and link() moves every file's ctime: trusted, it makes git re-read every file.
+    steps.append((["git", "config", "core.trustctime", "false"], None))
     return steps + fetch_config(mirror, branches, remotes) + push_rewrite(forks)
 
 
@@ -197,6 +199,12 @@ def wiring_check_script(src, mirror, forks, branches, skip_env="", remotes=REMOT
         if f:
             out.append('    %s/*) echo "problem: branch $b tracks $up, and we never push to %s -- it belongs to the fork: %s/$b"; bad=1 ;;' % (name, name, f))
     out.append('  esac\nfi')
+    out.append('if [ -n "$b" ]; then\n  r=$(git config --get "branch.$b.remote" 2>/dev/null || echo "")\n  m=$(git config --get "branch.$b.merge" 2>/dev/null || echo "")\n'
+               '  case "$r" in\n    %s)\n      g=$(git config --get-all "remote.$r.fetch" 2>/dev/null | tr "\\n" " "); g="${g%%%% }"\n'
+               '      if [ "$m" = "refs/heads/$b" ] && [ "$g" = "+refs/remotes/$r/*:refs/remotes/$r/*" ]; then echo "problem: branch $b was set up by git push -u: its upstream %s/$b does not resolve here '
+               '-- \'wk sync --fix\' records it as refs/remotes/%s/$b"; bad=1; fi ;;\n  esac\nfi' % ("|".join(sorted(names)) or '""', "$r", "$r"))
+    out.append('[ "$(git config --get core.trustctime 2>/dev/null)" = false ] || { echo "problem: git trusts ctime here, and every snapshot '
+               'publish hard-links the tree and so moves every file\'s ctime -- the next git status re-reads every file"; bad=1; }')
     return "\n".join(out + fetch_check(mirror, branches, remotes) + ["exit $bad"]) + "\n"
 
 

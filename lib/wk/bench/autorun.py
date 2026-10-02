@@ -15,7 +15,7 @@ import threading
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from wk import act, screen  # noqa: E402
+from wk import act, images, screen  # noqa: E402
 from wk.bench.mac import AGENT, CHECK, MARKER, WKMAC  # noqa: E402
 from wk.bench.pipeline import VARIANCE  # noqa: E402
 from wk.boot.mac import BENCH_ROOT  # noqa: E402
@@ -458,7 +458,7 @@ class Autorun:
         for w in wrong:
             self.say("  " + w)
         self.say("  Every leg would be refused for these. From host mode:")
-        self.say("    wk sysimage build perf-macos-tolken --repair    then boot this volume once")
+        self.say("    wk sysimage build %s --repair    then boot this volume once" % images.mac_profile(self.env))
         self.quit("this volume is not set up as a measured Mac")
 
     def refuse_throttled_browser(self):

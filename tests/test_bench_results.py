@@ -1,4 +1,4 @@
-"""A task's results: where a task lives (its workspace's directory, else the store's bench directory), what its
+"""A task's results: where a task lives (its workspace's directory, and nowhere else), what its
 report confirms (the commit each arm measured, each check's verdict, how to restart it), and `wk bench export`,
 the deliverables as one zip (lib/wk/bench/record.py, report.py, cli.py).
 
@@ -9,8 +9,10 @@ import io
 import json
 import os
 import sys
+import tempfile
 import types
 import zipfile
+from pathlib import Path
 from unittest import mock
 
 from tests.killpoints import converges
@@ -45,25 +47,25 @@ def clean_env():
 
 
 class TestATaskLivesInItsWorkspace(WkTest):
-    def test_a_workspace_this_store_holds_keeps_its_tasks_and_one_it_does_not_leaves_them_in_bench(self):
+    def test_a_workspace_this_store_holds_keeps_its_tasks_and_one_it_does_not_is_refused(self):
         with scratch_dir() as tmp:
-            store = FakeRegistry(tmp).store
             (tmp / "ws" / "w").mkdir(parents=True)
-            self.assertEqual(record.home_for(store, "w", "t1"), str(tmp / "ws" / "w" / "bench" / "t1"))
-            self.assertEqual(record.home_for(store, "elsewhere", "t2"), str(tmp / "bench" / "t2"))
-            self.assertEqual(record.home_for(store, "", "t3"), str(tmp / "bench" / "t3"))
+            home = (Local(), str(tmp / "ws" / "w" / "bench"))
+            self.assertEqual(record.held(home, "w"), home)
+            self.assertIn("no workspace 'elsewhere'", refusal(record.held, (Local(), str(tmp / "ws" / "elsewhere" / "bench")), "elsewhere"))
             self.assertFalse((tmp / "ws" / "elsewhere").exists(), "no workspace directory is made for a task")
 
     def test_every_task_is_found_wherever_it_lives(self):
         with scratch_dir() as tmp:
             reg = FakeRegistry(tmp, env={"WK_ROW_LABEL": "here"})
             in_ws = make_task(tmp / "ws" / "w" / "bench", name="20260901T000000Z-w")
-            in_bench = make_task(tmp / "bench")
-            self.assertEqual(record.homes(reg.store), {TASK: str(in_bench), "20260901T000000Z-w": str(in_ws)})
+            in_other = make_task(tmp / "ws" / "v" / "bench")
+            make_task(tmp / "bench", name="20260101T000000Z-stray")
+            self.assertEqual(record.homes(reg.store), {TASK: str(in_other), "20260901T000000Z-w": str(in_ws)}, "a store's bench/ is no home")
             b = cli.Bench(REPO, reg, FakeClock())
             listed = in_process(b.ls, True).stdout
             self.assertIn(str(in_ws), listed)
-            self.assertIn(str(in_bench), listed)
+            self.assertIn(str(in_other), listed)
             self.assertIn("data      %s" % in_ws, in_process(b.report, ["20260901T000000Z-w"], "", True).stdout)
             (rec,) = status.bench_records(reg.store, "here", lambda pid: False)
             self.assertEqual((rec["task"], rec["path"]), ("20260901T000000Z-w", str(in_ws)))
@@ -170,12 +172,12 @@ class TestExport(ExportTest):
         self.assertEqual((d / record.EXPORT_RECORD).read_text(), str(dest) + "\n", "the task records where it went")
 
     def test_to_names_the_directory_and_makes_it(self):
-        complete_task(self.tmp / "store" / "bench")
+        complete_task(self.tmp / "store" / "ws" / "w" / "bench")
         rc, out, _ = self.export(self.bench(), to=str(self.tmp / "out" / "here"))
         self.assertTrue((self.tmp / "out" / "here" / (TASK + ".zip")).is_file(), out)
 
     def test_a_task_not_complete_is_refused_and_force_exports_it(self):
-        make_task(self.tmp / "store" / "bench")
+        make_task(self.tmp / "store" / "ws" / "w" / "bench")
         b = self.bench()
         self.assertIn("is incomplete, so its report is partial", refusal(b.export, TASK, ""))
         self.assertFalse((self.tmp / "home" / "Downloads").exists())
@@ -184,7 +186,7 @@ class TestExport(ExportTest):
         self.assertTrue((self.tmp / "home" / "Downloads" / (TASK + ".zip")).is_file())
 
     def test_an_existing_archive_is_replaced_only_when_asked(self):
-        complete_task(self.tmp / "store" / "bench")
+        complete_task(self.tmp / "store" / "ws" / "w" / "bench")
         dest = self.tmp / "home" / "Downloads" / (TASK + ".zip")
         dest.parent.mkdir(parents=True)
         dest.write_text("older")
@@ -196,7 +198,7 @@ class TestExport(ExportTest):
         self.assertTrue(zipfile.is_zipfile(str(dest)))
 
     def test_a_dry_run_writes_nothing(self):
-        d = complete_task(self.tmp / "store" / "bench")
+        d = complete_task(self.tmp / "store" / "ws" / "w" / "bench")
         os.environ["WK_DRY_RUN"] = "1"
         rc, _, err = self.export(self.bench())
         self.assertEqual(rc, 0)
@@ -224,7 +226,7 @@ class TestAOneArmReportNamesRunsWhereTheTaskIs(ExportTest):
 class TestExportKillPoints(ExportTest):
     def test_an_export_killed_after_any_effect_and_rerun_converges(self):
         """`killpoints[bench export]`: the archive is written whole or not at all, and a re-run replaces a partial one."""
-        d = complete_task(self.tmp / "store" / "bench")
+        d = complete_task(self.tmp / "store" / "ws" / "w" / "bench")
         dest = str(self.tmp / "home" / "Downloads" / (TASK + ".zip"))
         os.environ["WK_YES"] = "1"
 
@@ -247,7 +249,7 @@ class TestExportKillPoints(ExportTest):
 class TestThroughWk(ExportTest):
     def test_export_is_declared_with_its_destination_and_its_dry_run(self):
         store = self.tmp / "store"
-        complete_task(store / "bench")
+        complete_task(store / "ws" / "w" / "bench")
         env = {"WK_STORE": str(store), "WK_LOCK_DIR": str(store / "locks"), "WK_TARGET": "local", "HOME": str(self.tmp / "home")}
         dry = run("bench", "export", TASK, "--to", str(self.tmp / "out"), "--dry-run", env=env, timeout=60)
         self.assertEqual(dry.returncode, 0, dry.stdout)
@@ -267,6 +269,42 @@ class FarTarget(FakeTarget):
 
     def task_store(self):
         return self.far, "/var/lib/wk"
+
+
+class FarBox(Fake, Ssh):
+    """A machine reached over ssh, whose files answer from memory."""
+
+
+class TestWhereALegRecords(WkTest):
+    """record.leg_home: a leg records into its workspace's bench/, a named task there, and on this machine."""
+
+    def reg(self, far):
+        d = complete_task(Path(tempfile.mkdtemp(dir=str(self.tmp))))
+        for p in d.rglob("*"):
+            if p.is_file():
+                far._set_file("/var/lib/wk/ws/w/bench/%s/%s" % (TASK, p.relative_to(d)), p.read_bytes())
+        far.dirs.add("/var/lib/wk/ws/w")
+        vm = FarTarget("vm", far)
+        vm.results = lambda ws: (far, "/var/lib/wk/ws/%s/bench" % ws)
+        return FakeRegistry(self.tmp / "store", [vm])
+
+    def refused(self, *args):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(Refused):
+            record.leg_home(*args)
+        return err.getvalue()
+
+    def test_a_leg_records_into_its_workspaces_bench_through_the_machine_holding_it(self):
+        far = Fake("vm")
+        reg = self.reg(far)
+        self.assertEqual(record.leg_home(reg, "w"), (far, "/var/lib/wk/ws/w/bench"))
+        self.assertEqual(record.leg_home(reg, "w", TASK), (far, "/var/lib/wk/ws/w/bench"))
+
+    def test_a_task_its_workspace_does_not_hold_is_refused(self):
+        self.assertIn("no such task 'nope' in workspace 'w'", self.refused(self.reg(Fake("vm")), "w", "nope"))
+
+    def test_a_workspace_on_a_machine_reached_over_ssh_is_refused_naming_it(self):
+        self.assertIn("run it on box", self.refused(self.reg(FarBox("box")), "w", TASK))
 
 
 class TestExportReachesATaskOnAnotherMachine(ExportTest):
@@ -511,3 +549,31 @@ class TestTheSeamReadsATree(PlantedTest):
         self.assertEqual(targets.Remote.task_store(box), ("ssh", "/srv/wk"))
         for peer, local in ((True, False), (False, True)):
             self.assertIsNone(targets.Remote.task_store(types.SimpleNamespace(peer=peer, is_local=local)))
+
+    def peer(self, rc=0, out=""):
+        far = Fake("peer")
+        far.answer(["sh", "-c"], rc=rc, out=out, err="" if rc == 0 else "ssh: connect to host peer1: refused")
+        p = targets.Remote.__new__(targets.Remote)
+        p.peer, p.is_local, p.machine, p.host, p.env = True, False, far, "peer1", {"WK_REMOTE_TOOLS": "/t"}
+        return p, far
+
+    def test_a_peer_names_its_tasks_home_through_the_hops_its_own_wk_reaches_it_by(self):
+        """A Mac peer's container workspace keeps its tasks in that Mac's podman machine, reached through the Mac."""
+        p, far = self.peer(out=json.dumps({"via": [["podman", "wk"]], "path": "/var/lib/wk/ws/w/bench"}))
+        m, path = p.results("w")
+        self.assertEqual((type(m), m.dest, m.via, path), (PodmanVm, "wk", far, "/var/lib/wk/ws/w/bench"))
+        self.assertIn("wk.bench.record home w", far.effects[-1][1][-1])
+
+    def test_a_peer_that_does_not_answer_is_named_with_what_it_said(self):
+        for rc, out in ((255, ""), (0, "")):
+            with self.subTest(rc=rc):
+                p, _ = self.peer(rc=rc, out=out)
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err), self.assertRaises(Refused):
+                    p.results("w")
+                self.assertIn("peer1 did not say where 'w' keeps its bench tasks", err.getvalue())
+                self.assertIn("wk sync --tools", err.getvalue())
+
+    def test_a_machine_is_named_as_its_hops_nearest_first(self):
+        self.assertEqual(record.hops(Local()), [])
+        self.assertEqual(record.hops(PodmanVm("wk", via=Ssh("box"))), [["ssh", "box"], ["podman", "wk"]])

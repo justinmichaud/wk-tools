@@ -109,7 +109,7 @@ class TestConfShape(unittest.TestCase):
 
 
 class TestEveryImageListsADescription(unittest.TestCase):
-    """`wk sysimage --list` prints each image's description, and that text is
+    """`wk sysimage configs` prints each image's description, and that text is
     the header line's own second half.
 
     It used to be line 3, read positionally (`sed -n '3s/^# //p'`), so trimming
@@ -134,7 +134,7 @@ class TestEveryImageListsADescription(unittest.TestCase):
     def test_the_listing_reads_the_description_from_that_line(self):
         """The one reader, exercised rather than retyped: wk.images.listing
         must print a non-empty description under every image it names."""
-        cp = run("sysimage", "--list")
+        cp = run("sysimage", "configs")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         names = {p.stem for p in conf_files("image/configs")}
         lines = cp.stdout.splitlines()

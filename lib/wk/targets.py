@@ -17,7 +17,7 @@ import sys
 from wk import act, buildconf, fleet, git, guest, images, kv, reach, record, secrets, sshalias, tools
 from wk.machine import TIMED_OUT, Local, PodmanVm, Result, Ssh, isolated_module, lib_argv
 from wk.resources import Resources, workspace_marker_path
-from wk.store import Store, dispatch_target, in_vm
+from wk.store import Store, dispatch_target, in_vm, no_such_workspace
 
 BUILTIN = ("container", "vm", "remote", "local")
 SDK_REPO = "ghcr.io/igalia/wkdev-sdk"
@@ -122,6 +122,8 @@ def zed_key_pub(machine, env):
                              "wk zed key (%s)" % (record.machine_name(env) or "host"), "-f", k])
         if not r.ok:
             return None
+        if act.dry_run():
+            return "<the zed key this run would generate>"
         act.info("generated this machine's zed key (%s)" % k)
     try:
         return machine.read(k + ".pub").strip()
@@ -390,6 +392,7 @@ class Target:
     kind = "target"
     needs_base = True
     dir_first = False   # the workspace directory is made before the environment, so an environment without one is no creation
+    reads_host_mirror = False
 
     def __init__(self, name, root, env, machine):
         self.name = name
@@ -563,7 +566,7 @@ class Target:
             if st == "present":
                 return True
             if st == "absent":
-                act.die("no such workspace: %s" % ws)
+                act.die(no_such_workspace(ws))
             if st == "broken":
                 act.die(self._broken_words(ws))
             if st == "unreachable":
@@ -592,6 +595,15 @@ class Target:
                     "    whether the driver is alive, and %s says what it is doing." % (ws, seen["st"], timeout, ws, self.create_log(ws)))
         if seen["said"]:
             act.info("'%s' is ready" % ws)
+        self.converge(ws, clock)
+
+    def converge(self, ws, clock):
+        """What a running `ws` needs from this machine's daemons, asserted by every command that waits for it."""
+
+    def daemon_remedy(self, ws, daemon):
+        if daemon == "proxy":
+            return "systemctl --user status wk-proxy"
+        return "systemctl --user status wk-github-inject; the CA is /run/wk/wk-github-ca.pem"
 
     def _broken_words(self, ws):
         if not self.store_machine.isdir(self.store.ws_dir(ws)):
@@ -780,6 +792,7 @@ def podman_vm_route(rec):
 class Container(Target):
     kind = "container"
     dir_first = True
+    reads_host_mirror = True
 
     def podman(self):
         if os.uname().sysname == "Darwin" and not in_vm(self.env):
@@ -954,7 +967,7 @@ class Container(Target):
     def store_init(self):
         root = self.store.root()
         for d in ("", "git", "base", "ws", "cache/ccache", "cache/yocto/downloads", "cache/yocto/sstate", "cache/buildroot/dl",
-                  "cache/buildroot/ccache", "cache/bench", "bench", "skills"):
+                  "cache/buildroot/ccache", "cache/bench", "skills"):
             self.machine.mkdir(os.path.join(root, d) if d else root)
         conf = os.path.join(root, "cache", "ccache", "ccache.conf")
         if not self.machine.exists(conf):
@@ -1193,6 +1206,7 @@ class Container(Target):
 class Vm(Target):
     kind = "vm"
     needs_base = False
+    reads_host_mirror = True
     agent_rw_share = "agent-rw"
     mirror_share = "mirror"
 
@@ -1417,8 +1431,17 @@ class Vm(Target):
             return False
         return True
 
+    def converge(self, ws, clock):
+        if self.vm_state(ws) == "running":
+            guest.Host(self, clock).start_proxy()
+
+    def daemon_remedy(self, ws, daemon):
+        return "wk start %s" % ws
+
     def start(self, ws):
         ip = guest.start(self, ws)
+        if not ip:
+            return True
         sshalias.alias_set(self.machine, self.env, ws, ip, self.user(), self.key())
         act.info("%s is up at %s (ssh alias wk-%s)" % (ws, ip, ws))
         act.log("  wk build %s mac-release\n  zed ssh://wk-%s%s" % (ws, ws, self.src(ws)))
@@ -1641,17 +1664,19 @@ class Remote(Target):
         self._store = Store(dict(env, WK_STORE=store))
         self.probe_seconds = int(env.get("WK_PROBE_SECONDS") or 20)
         if not self.is_local and self.host:
-            self.machine = Ssh(self.host, opts=self.ssh_opts(), timeout=reach.ssh_timeout(env), via=machine)
+            self.machine = Ssh(self.host, opts=self.ssh_opts(), control_dir=self.ssh_dir(), timeout=reach.ssh_timeout(env), via=machine)
         self._probed = None
         self._has_wk = None
         self._peer_rows = None
         self._routes = {}
         self._reference = None
 
-    # ServerAliveInterval/CountMax because ConnectTimeout covers the TCP connect and nothing after it: a machine that accepts the connection and then stops answering -- a wedged sshd, a box deep in swap -- held `wk status <ws>` and `wk logs <ws>` past a 300s wait with no bound of their own (measured 2026-09-17, with moose down). Four missed keepalives at 15s is a session given up inside a minute, and a healthy long build answers them at the protocol level however busy the box is.
+    def ssh_dir(self):
+        return os.path.join(Store(self.env).state_dir(), "ssh")
+
+    # ConnectTimeout covers only the TCP connect; the keepalives give up on a machine that accepts the connection and then stops answering (four misses at 15s).
     def ssh_opts(self):
-        d = os.path.join(Store(self.env).state_dir(), "ssh")
-        os.makedirs(d, exist_ok=True)
+        d = self.ssh_dir()
         return ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4", "-o", "ControlMaster=auto",
                 "-o", "ControlPath=%s/%%h-%%p-%%r" % d, "-o", "ControlPersist=60"]
 
@@ -2025,7 +2050,22 @@ class Remote(Target):
         act.info("remote workspace '%s' created on %s (%s)" % (ws, host, wsd))
 
     def results(self, ws):
-        return None if self.peer else (self.machine, self.ws_dir_there(ws) + "/bench")
+        """A peer's own wk names where it holds `ws`'s tasks (`python3 -m wk.bench.record home`), reached through the peer."""
+        if not self.peer:
+            return self.machine, self.ws_dir_there(ws) + "/bench"
+        r = self._sh("cd $HOME && " + shlex.join(isolated_module(self.tools("") + "/lib", "wk.bench.record") + ["home", ws]))
+        try:
+            doc = json.loads(r.out) if r.ok else None
+        except ValueError:
+            doc = None
+        if not doc:
+            act.die("%s did not say where '%s' keeps its bench tasks:\n    %s\n"
+                    "    A copy of wk-tools there that predates the question answers nothing: wk sync --tools"
+                    % (self.label(), ws, (r.err.strip() or r.out.strip() or "rc %d" % r.rc).replace("\n", "\n    ")))
+        m = self.machine
+        for kind, dest in doc["via"]:
+            m = (PodmanVm if kind == "podman" else Ssh)(dest, via=m)
+        return m, doc["path"]
 
     def task_store(self):
         return None if self.peer or self.is_local else (self.machine, self.root_there())
@@ -2163,7 +2203,7 @@ def store_state(store):
                 note(os.path.join(d, f))
             if not deep:
                 dirs[:] = [x for x in dirs if os.path.join(d, x).count(os.sep) - top.count(os.sep) < 3
-                           and x not in ("ws", "base", "git", "bench", "skills", "task", "log")]
+                           and x not in ("ws", "base", "git", "skills", "task", "log")]
     return out
 
 

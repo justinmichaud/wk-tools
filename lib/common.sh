@@ -53,8 +53,6 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 wk_ssh_timeout() { printf '%s' "${WK_SSH_TIMEOUT:-10}"; }
 
-WK_DISPATCH_VARS="WK_NAME WK_TARGET WK_TARGET_KIND WK_ROOT WK_FORCE WK_QUIET WK_DRY_RUN WK_DESTRUCTIVE WK_CONFIRMED WK_ROW_LABEL WK_HOST_SELF WK_IN_VM"
-
 link_config() { # <src> <dst> -- symlink dst -> src, moving any real dst aside once
     local src="$1" dst="$2"
 
@@ -242,23 +240,8 @@ barrier() { # [--retry] <message...> -- refuse, or warn loudly and continue unde
 
 wk_state_dir() { echo "${XDG_STATE_HOME:-$HOME/.local/state}/wk"; }
 
-# The privileged helpers, one row each: <name> <platform> <what it is for>. A helper whose
-# sudoers rule is out-ranked is installed, executable and useless, so what is ever asked of
-# one is whether it answers.
-wk_priv_helpers() {
-    cat <<'ROWS'
-wk-quiesce-priv any wk quiesce / wk session
-wk-card-priv linux wk sysimage (writing a card)
-wk-boot-priv any wk boot (arming the firmware, restarting a machine)
-ROWS
-}
-
-wk_priv_path() { printf '/usr/local/libexec/%s' "$1"; }
-
-wk_priv_sudoers() { local n="${1#wk-}"; printf '/etc/sudoers.d/zzz-wk-%s' "${n%-priv}"; }
-
-wk_priv_answers() { # <helper path> -- the NOPASSWD rule `sudo -l` lists, never a run: `sudo -n <helper>` succeeds for anything while a timestamp is cached, and `./setup` holds that window open
-    sudo -n -l 2>/dev/null \
-        | awk -v p="$1" '/NOPASSWD:/ { for (i = 1; i <= NF; i++) if ($i == p) found = 1 }
-                         END { exit !found }'
-}
+# The privileged helpers' table, paths and grant check live in lib/wk/priv.py.
+wk_priv_helpers() { wk_py wk.priv rows; }
+wk_priv_path() { wk_py wk.priv path "$1"; }
+wk_priv_sudoers() { wk_py wk.priv sudoers "$1"; }
+wk_priv_answers() { wk_py wk.priv answers "$1"; }   # <helper path>

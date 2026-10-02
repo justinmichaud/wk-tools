@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk start [<workspace>] -- bring one workspace back up, or everything
-# wk: where=workspace name=optional forward=no group=hosts needs podman
+# wk: where=workspace name=optional forward=no group=hosts needs podman dryrun
 #
 # `forward=no`: runs on the host that holds the environment, never forwarded
 # into the podman VM. macOS guests are listed rather than started.
@@ -19,7 +19,7 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import act, secrets, targets  # noqa: E402
+from wk import act, secrets, status, statusview, targets  # noqa: E402
 from wk.act import Refused, die, info, log  # noqa: E402
 from wk.store import Store  # noqa: E402
 
@@ -33,7 +33,7 @@ def here():
 def start_workspace(reg, name):
     target = reg.load(reg.ws_target(name))
     if target.info(name) == "absent":
-        die("no such workspace: %s" % name)
+        die(store.no_such_workspace(name))
     return 0 if target.start(name) else 1
 
 
@@ -67,7 +67,7 @@ def start_everything(reg):
         if guests:
             log("macOS VM(s) not started (they compete with the machine for memory): %s\n  wk start <name>" % " ".join(guests))
     log("status (information only)")
-    subprocess.call([os.path.join(ROOT, "wk"), "status", "--no-fleet"])
+    statusview.render_text_stream(status.Walk(ROOT, fleet=False, devices=False).records(), sys.stdout, statusview.colour_wanted())
     return 0
 
 

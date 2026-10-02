@@ -6,6 +6,7 @@ Run: python3 -m unittest tests.test_bench_seed -v
 import json
 import os
 import sys
+from unittest import mock
 
 from tests.killpoints import converges
 from tests.support import REPO, WkTest
@@ -128,6 +129,16 @@ class TestAPayloadIsSeededOnce(WkTest):
             return ({p: t for p, t in w.fake.files.items() if p.startswith(SEEDS + "/")},
                     sorted(d for d in w.fake.dirs if d.startswith(SEEDS + "/")))
         converges(self, world, run_once, payload)
+
+    def test_a_dry_seed_prints_the_fetch_and_makes_nothing(self):
+        m = fake()
+        before = (dict(m.files), set(m.dirs))
+        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), in_process_ok() as err:
+            seeder(m).seed("jetstream3", PLAN)
+        self.assertIn("would run: git clone -q https://github.com/WebKit/JetStream.git", err.getvalue())
+        self.assertIn("would run: mv ", err.getvalue())
+        self.assertEqual(ran(m, "clone"), [])
+        self.assertEqual(before, (dict(m.files), set(m.dirs) - {"/locks"}), "the lock's directory is no state")
 
     def test_a_github_tree_pins_the_subdirectory_it_names(self):
         m = fake()

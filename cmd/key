@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk key check|setup|set|deploy|show|ensure|sudo|backup -- the credentials this machine holds, its sudo policy and its settings backup
-# wk: where=host name=none group=sources needs gh,gh-auth takes=1 default=check verbs=check,setup,deploy,show,ensure,pub,sshtest,fingerprints,set,adopt,verdict,give,sudo,backup destructive setup,deploy,--replace dryrun setup,deploy,set,sudo,--candidates
+# wk: where=host name=none group=sources needs gh,gh-auth takes=1 default=check verbs=check,setup,deploy,show,ensure,pub,sshtest,fingerprints,set,adopt,verdict,give,sudo,backup destructive setup,deploy,--replace dryrun setup,deploy,set,sudo,ensure,adopt,backup readonly check,show,pub,sshtest,fingerprints,verdict,give
 # wk: sub show,ensure,pub,sshtest,fingerprints,set,adopt,verdict,give,sudo,backup needs=
 # wk: sub set,pub,sshtest,adopt,verdict,give takes=2
 # wk: sub set opts=--replace,--paste

@@ -49,10 +49,35 @@ def branch_repos(machine, user, branch, remotes=git.REMOTES):
     return out
 
 
-# Written as config, never `git branch -u`: git maps the tracking ref back through a non-origin remote's `+refs/remotes/<r>/*` refspec, answers with the tracking ref itself, and `git push` then refuses (measured, git 2.43).
-def track(src, remote, branch):
+# The `branch.<b>.merge` that makes `@{u}` resolve: git maps it through the remote's fetch refspec, so a mirror-shaped remote (`git.fetch_refspecs`) is named by its tracking ref and any other by `refs/heads/<b>`. `push.default = current` (dotfiles/gitconfig) pushes to `<b>`.
+def merge_ref(target, ws, src, remote, branch):
+    specs = _out(target.exec(ws, ["git", "-C", src, "config", "--get-all", "remote.%s.fetch" % remote])).splitlines()
+    if git.fetch_refspecs(remote, True, [])[0] in specs:
+        return "refs/remotes/%s/%s" % (remote, branch)
+    return "refs/heads/" + branch
+
+
+def track(src, remote, branch, merge):
     return [["git", "-C", src, "config", "branch.%s.remote" % branch, remote],
-            ["git", "-C", src, "config", "branch.%s.merge" % branch, "refs/heads/" + branch]]
+            ["git", "-C", src, "config", "branch.%s.merge" % branch, merge]]
+
+
+def converge(target, ws, src, forks):
+    cfg = target.exec(ws, ["git", "-C", src, "config", "--get-regexp", r"^branch\..*\.(remote|merge)$"])
+    seen = {}
+    for line in _out(cfg).splitlines():
+        key, _, value = line.partition(" ")
+        branch, _, field = key[len("branch."):].rpartition(".")
+        seen.setdefault(branch, {})[field] = value
+    names = {f[0] for f in forks}
+    out = []
+    for b, c in sorted(seen.items()):
+        if c.get("remote") not in names or c.get("merge") != "refs/heads/" + b:
+            continue
+        merge = merge_ref(target, ws, src, c["remote"], b)
+        if merge != c["merge"] and all(target.act_exec(ws, argv).ok for argv in track(src, c["remote"], b, merge)):
+            out.append("converged: %s tracks %s/%s" % (b, c["remote"], b))
+    return out
 
 
 def _out(r):
@@ -75,7 +100,7 @@ def retarget(target, ws, src, forks, branches, remotes=git.REMOTES):
     target.act_exec(ws, ["git", "-C", src, "fetch", "-q", f, b])
     if not target.exec(ws, ["git", "-C", src, "rev-parse", "--verify", "-q", "refs/remotes/%s/%s" % (f, b)]).ok:
         return ["left alone: %s is not on %s yet -- push it first:  git push %s %s" % (b, f, f, b)]
-    if all(target.act_exec(ws, argv).ok for argv in track(src, f, b)):
+    if all(target.act_exec(ws, argv).ok for argv in track(src, f, b, merge_ref(target, ws, src, f, b))):
         return ["retargeted: %s now tracks %s/%s" % (b, f, b)]
     return []
 
@@ -163,7 +188,7 @@ def checkout(target, here, name, spec, remotes=git.REMOTES):
     if pr["kind"] == "pull":
         target.act_exec(name, ["git", "-C", src, "branch", "--quiet", "--unset-upstream", branch])
     else:
-        for argv in track(src, remote, branch):
+        for argv in track(src, remote, branch, merge_ref(target, name, src, remote, branch)):
             step(argv[3:], why)
     info("'%s' is on %s (%s, from %s)" % (name, branch, repo, remote))
     log("  " + _out(target.exec(name, ["git", "-C", src, "--no-pager", "log", "--oneline", "-1"])))

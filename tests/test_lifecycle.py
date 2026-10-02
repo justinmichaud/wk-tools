@@ -8,11 +8,20 @@ Run: python3 -m unittest tests.test_lifecycle -v
 The one integration test class is live, gated on the container target
 (requires_container_target in tests/support.py).
 """
+import contextlib
+import io
 import os
+import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from tests.support import WkTest, rand_suffix, requires_container_target, run, stub_path
+from tests.support import REPO, WkTest, rand_suffix, requires_container_target, run, stub_path
+from tests.test_layers import load_cmd
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import targets  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 
 # A machine that is up with nothing stopped in it, and a peer that refuses
@@ -69,7 +78,46 @@ class TestStartExitsOnItsOwnResult(WkTest):
     def test_it_does_not_hand_its_exit_code_to_status(self):
         text = (Path(__file__).resolve().parent.parent / "cmd" / "start").read_text()
         self.assertNotIn("execv", text.split("def main", 1)[-1].split('"status"', 1)[0][-200:])
-        self.assertIn('"status", "--no-fleet"', text)
+        self.assertIn("statusview.render_text_stream", text)
+
+
+class TestStartAndStopHaveADryRun(unittest.TestCase):
+    """`wk start` and `wk stop`, everything or one container workspace, under --dry-run: each podman change printed, none run."""
+
+    def setUp(self):
+        self.m = Fake("here")
+        self.m.answer(["podman", "ps"], out="wk-a\nwk-b\n")
+        self.ctr = targets.Container("container", str(REPO), {}, self.m)
+        self.reg = mock.Mock()
+        self.reg.load.return_value = self.ctr
+        for p in (mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), mock.patch.object(self.ctr, "podman", lambda: ["podman"]),
+                  mock.patch("wk.secrets.Secrets")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def dry(self, fn, *args):
+        with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, fn(*args))
+        self.assertEqual([], [e for e in self.m.effects if e[0] != "run" or e[1][1] != "ps"], "only the listing ran")
+        return err.getvalue()
+
+    def test_start_everything(self):
+        start = load_cmd("start")
+        with mock.patch.object(start, "here", lambda: False), mock.patch.object(start.status, "Walk"), \
+                mock.patch.object(start.statusview, "render_text_stream"):
+            self.assertIn("would run: podman start wk-a wk-b", self.dry(start.start_everything, self.reg))
+
+    def test_stop_everything(self):
+        stop = load_cmd("stop")
+        with mock.patch.object(stop, "here", lambda: False):
+            self.assertIn("would run: podman stop --time 30 wk-a wk-b", self.dry(stop.stop_everything, self.reg, False))
+
+    def test_one_workspace(self):
+        for verb in ("start", "stop"):
+            with self.subTest(verb=verb), contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertTrue(getattr(self.ctr, verb)("a"))
+            self.assertIn("would run: podman %s" % verb, err.getvalue())
+        self.assertEqual([], self.m.effects)
 
 
 class TestExplainStatic(unittest.TestCase):

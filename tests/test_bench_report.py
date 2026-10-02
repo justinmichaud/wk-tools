@@ -15,6 +15,7 @@ import re
 import statistics
 import sys
 import unittest
+import unittest.mock
 
 from tests.support import REPO, WkTest, run, scratch_dir
 from tests.test_ab_precision import (
@@ -151,6 +152,11 @@ class TestReportWalkerAndStats(WkTest):
             cp = rep(a, b, html=str(html_out))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn(f"wrote {html_out}", cp.stdout)
+
+            with unittest.mock.patch.dict("os.environ", {"WK_DRY_RUN": "1"}):
+                dry = rep(a, b, html=str(tmp / "dry.html"))
+            self.assertIn("would write: %s" % (tmp / "dry.html"), dry.stderr)
+            self.assertFalse((tmp / "dry.html").exists())
 
             html = html_out.read_text()
             for name in ("gaussian-blur", "richards"):

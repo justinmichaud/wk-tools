@@ -79,6 +79,9 @@ class DriverWorld(World):
         return [e for e in work[first:] if not (e[0] == "remove" and e[1].startswith(root))]
 
     def mutates(self, e):
+        """An ssh ControlPath directory is the connection's, not the workspace's."""
+        if e[0] == "mkdir":
+            return not e[1].endswith(os.path.join("wk", "ssh"))
         return e[0] != "run" or e[1] in self.acted
 
     def act_run(self, argv, **kw):

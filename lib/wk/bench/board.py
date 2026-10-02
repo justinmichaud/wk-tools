@@ -261,7 +261,7 @@ class BoardSystem(System):
             software = self.renderer == "pixman"
             record.write_env(os.path.join(leg.out, "env.json"), ["session_mode=" + self.session, "gpu_renderer=" + self.renderer,
                                                                  "software_reason=" + ("no display attached; weston rdp + pixman" if software else "")],
-                             bool_fields=["software=" + ("1" if software else "")], update=True)
+                             bool_fields=["software=" + ("1" if software else "")], update=True, machine=leg.machine)
 
     def session_up(self):
         if not self.sh(self.ob("browsers-dead.sh"), mutates=True).ok:
@@ -384,7 +384,7 @@ class BoardSystem(System):
         m, out, dry = self.bench(), leg.out, act.dry_run()
         result = os.path.join(out, "result.json")
         if not dry and not (os.path.isfile(result) and os.path.getsize(result)):
-            write(os.path.join(out, "diagnose", "board-at-failure.txt"), self.sh(self.ob("at-failure.sh")).out)
+            leg.machine.write(os.path.join(out, "diagnose", "board-at-failure.txt"), self.sh(self.ob("at-failure.sh")).out)
         m.act_run(["sh", "-c", kill_cmd(self.doc["browser"])])
         try:
             browser_log = m.read(BROWSER_LOG)
@@ -395,8 +395,8 @@ class BoardSystem(System):
             self.pull_profile(leg)
         if dry:
             return
-        write(os.path.join(out, "browser.log"), browser_log)
-        write(os.path.join(out, "board.log"), m.run(["tail", "-n", "300", "/tmp/messages"]).out)
+        leg.machine.write(os.path.join(out, "browser.log"), browser_log)
+        leg.machine.write(os.path.join(out, "board.log"), m.run(["tail", "-n", "300", "/tmp/messages"]).out)
         n = wkslot.verified(os.path.join(out, "verify.jsonl"))
         fields, bools = [], ["verified=" + ("1" if n else "")]
         if leg.o.get("settle") or leg.o.get("warmup"):
@@ -404,7 +404,7 @@ class BoardSystem(System):
             fields.append("warmup_kind=" + ("settle" if leg.o.get("settle") else "evidence"))
         if leg.o.get("warmup"):
             fields += ["profiler=" + (self.profiler or self.unmeasured or "none"), "host.perf_event_paranoid=" + self.paranoid]
-        record.write_env(os.path.join(out, "env.json"), fields, bool_fields=bools, update=True)
+        record.write_env(os.path.join(out, "env.json"), fields, bool_fields=bools, update=True, machine=leg.machine)
         if n:
             log("  verified    the reporting WPEWebProcess ran slot '%s' (%d check(s), build-id %s)" % (leg.slot, n, self.doc.get("build_id", "")[:12]))
 
@@ -423,16 +423,10 @@ class BoardSystem(System):
             log("  profile     %s (%s)" % (local, self.profiler))
             return
         if os.path.exists(local):
-            os.unlink(local)
+            leg.machine.remove(local)
         act.barrier("the warmup leg for arm %s produced no %s capture on %s.%s"
                     % (leg.o.get("arm", ""), self.profiler, self.board,
                        "\n    copying it off failed: %s" % copy_error if copy_error else ""))
-
-
-def write(path, text):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        f.write(text)
 
 
 class BoardRun(pipeline.Run):
@@ -470,8 +464,8 @@ class BoardRun(pipeline.Run):
         if leg.cores and not pipeline.cores_valid(leg.cores):
             die("--cores '%s' is not a valid Linux cpu list (e.g. 0-3, 2,3, 0-1,4, 7)" % leg.cores)
         task = o.get("task") or ""
-        if task and not o.get("pgo_dir") and not record.homes(self.reg.store).get(task):
-            die("no such task '%s' in this machine's store; 'wk bench ls' lists the tasks" % task)
+        if task and not o.get("pgo_dir"):
+            record.leg_home(self.reg, self.ws, task)
         leg.klass, leg.runner, leg.browser = pipeline.bench_class(plan), "browser", ""
         leg.port = 0
         self.system.pending = leg
@@ -516,10 +510,12 @@ class BoardRun(pipeline.Run):
         leg.id = "%s-%s-%s-%s%s" % (stamp, leg.plan, s.board, leg.slot, "-settle" if o.get("settle") else "")
         if o.get("pgo_dir"):
             leg.task, leg.out = "", os.path.join(o["pgo_dir"], leg.plan)   # one leg of the profile the next build reads, in no task
+            leg.machine = record.leg_home(self.reg, self.ws)[0]
         else:
             if not leg.task:
                 leg.task, new = "%s-%s-%s" % (stamp, s.board, leg.slot), True
-            taskdir = record.home_for(self.reg.store, self.ws, leg.task) if new else record.homes(self.reg.store)[leg.task]
+            leg.machine, bench = record.leg_home(self.reg, self.ws, "" if new else leg.task)
+            taskdir = os.path.join(bench, leg.task)
             leg.out = os.path.join(taskdir, "runs", leg.id)
         steps = ["bring up the session on %s for slot '%s' (WebKit %s)" % (s.board, leg.slot, s.doc.get("commit", "")[:12]),
                  "run %s (browser, %s iteration(s)) on %s" % (leg.plan, leg.count or "default", s.board), "collect into %s" % leg.out]
@@ -530,18 +526,19 @@ class BoardRun(pipeline.Run):
         self.task = (progress.hold(self.recs, self.holders, s.board, "bench", self.name, self.kill_cmd, log_path, steps, os.getpid(), self.env)
                      or self.recs.begin("bench", "here", self.name, self.kill_cmd, log_path, steps))
         if new:
-            if os.path.exists(taskdir):
+            if leg.machine.exists(taskdir):
                 die("task %s already exists (%s); a task is one request, made once" % (leg.task, taskdir))
             self.lock.hold("bench-task-" + leg.task, timeout=5)
             record.task_write(taskdir, ["task=" + leg.task, "requested=" + self.clock.iso(), "subject.kind=slots", "subject.spec=" + leg.slot,
                                         "devices=%s=%s" % (s.board, s.doc.get("profile", "")), "plans=" + leg.plan, "rounds=1", "slots=" + leg.slot]
                               + (["count=" + leg.count] if leg.count else []),
-                              ["wk bench run %s %s --system %s --slot %s%s" % (self.ws, leg.plan, s.board, leg.slot, " --count " + leg.count if leg.count else "")])
+                              ["wk bench run %s %s --system %s --slot %s%s" % (self.ws, leg.plan, s.board, leg.slot, " --count " + leg.count if leg.count else "")],
+                              machine=leg.machine)
         if o.get("pgo_dir"):
             self.here.remove(leg.out)
-        os.makedirs(os.path.join(leg.out, "diagnose"), exist_ok=True)
+        leg.machine.mkdir(os.path.join(leg.out, "diagnose"))
         if o.get("warmup"):
-            os.makedirs(os.path.dirname(s.warm_file(leg, "")), exist_ok=True)
+            leg.machine.mkdir(os.path.dirname(s.warm_file(leg, "")))
         self.write_env(leg)
         self.carry_reading(leg)
         return steps
@@ -551,8 +548,7 @@ class BoardRun(pipeline.Run):
         doc = self.system.doc
         check = os.path.join(images.pgo_dir(doc.get("workspace") or self.ws, leg.slot, self.reg.env), "profile-check.json")
         if doc.get("build_config") == pgo.USE and not leg.o.get("pgo_dir") and self.here.exists(check):
-            with open(os.path.join(leg.out, "profile-check.json"), "w") as f:
-                f.write(self.here.read(check))
+            leg.machine.write(os.path.join(leg.out, "profile-check.json"), self.here.read(check))
 
     def write_env(self, leg):
         s, doc, o = self.system, self.system.doc, leg.o
@@ -568,7 +564,8 @@ class BoardRun(pipeline.Run):
             "host.root_device=" + s.probed.get("rootdev", ""), "host.cpu_khz=" + lo, "cores.set=" + leg.cores,
             "subtests_excluded=" + o.get("excluded", ""), "task=" + leg.task, "preflight_notes=" + leg.notes] + ab
             + pipeline.configuration_fields(self.env),
-            bool_fields=["forced=" + act.forced(self.env), "cores.pinned=" + leg.cores, "host.dvfs_pinned=" + ("1" if lo and lo == hi else "")])
+            bool_fields=["forced=" + act.forced(self.env), "cores.pinned=" + leg.cores, "host.dvfs_pinned=" + ("1" if lo and lo == hi else "")],
+            machine=leg.machine)
 
     def watched(self, argv, cwd, path):
         if self.task is not None:

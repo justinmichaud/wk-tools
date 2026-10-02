@@ -17,7 +17,9 @@
 #                              through the request broker
 #   wk sync <workspace>        a fetch in that one workspace, from its mirror
 #   wk sync --mirror           the mirror alone -- no snapshot, no tooling, no
-#                              workspace. What the brokered refresh above runs
+#                              workspace. What the brokered refresh above runs,
+#                              and what 'wk new' runs first; in the podman VM
+#                              it is asked of the broker the same way
 #   wk sync --target <target>  that target's furniture, then its workspaces
 #   wk sync --all              every target's furniture, then its workspaces
 #   wk sync --tools [<target>] the furniture alone: a machine's copy of

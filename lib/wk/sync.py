@@ -85,9 +85,10 @@ class Sync:
     def mirror_is_here(self):
         return not in_vm(self.env)
 
-    # The mirror is mounted read-only in a workspace, so the refresh is asked of the broker, which runs `wk sync --mirror`.
+    # The mirror is mounted read-only in a workspace and in the podman VM, so the refresh is asked of the broker, which runs `wk sync --mirror`.
     def mirror_refresh_request(self):
-        sock = Store(self.env).workspace_broker_socket()
+        store = Store(self.env)
+        sock = store.workspace_broker_socket() if self.reg.in_workspace() else store.broker_socket()
         if not self.here.run(["test", "-S", sock]).ok:
             warn("no request broker at %s, so this machine's mirror was not\n"
                  "    refreshed -- only this workspace's own fetch ran, against whatever the\n"
@@ -112,10 +113,8 @@ class Sync:
 
     def run(self):
         if self.scope == "mirror":
-            if self.reg.in_workspace():
+            if self.reg.in_workspace() or not self.mirror_is_here():
                 return self.mirror_refresh_request()
-            if not self.mirror_is_here():
-                die("the mirror in here is the host's, mounted read-only.\n    Run it on the machine that keeps it.")
             with self.lock.held("store"):
                 self.sync_mirror()
             return 0
@@ -404,7 +403,7 @@ class Sync:
             notes.append("    could not re-wire '%s'" % ws)
             return False
         notes.append("    re-wired")
-        notes.extend("    " + l for l in pr.retarget(target, ws, src, self.forks(), self.branches))
+        notes.extend("    " + l for l in pr.retarget(target, ws, src, self.forks(), self.branches) + pr.converge(target, ws, src, self.forks()))
         if target.kind not in ("container", "vm"):
             return True
         r = target.act_exec(ws, ["sh", "-c", git.gitwebkit_setup_script(src, self.forks())])

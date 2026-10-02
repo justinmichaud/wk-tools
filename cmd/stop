@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk stop [<workspace>|--keep-vm|--tasks [--all]] -- shut down one workspace, or everything
-# wk: where=workspace name=optional forward=no group=hosts needs podman opts --keep-vm,--tasks,--all destructive --tasks dryrun --tasks
+# wk: where=workspace name=optional forward=no group=hosts needs podman opts --keep-vm,--tasks,--all destructive --tasks dryrun
 # wk: flag --keep-vm name=none
 # wk: flag --tasks name=none
 # wk: flag --all name=none
@@ -103,7 +103,7 @@ def stop_tasks_everywhere(reg, records):
 def stop_workspace(reg, name):
     target = reg.load(reg.ws_target(name))
     if target.info(name) == "absent":
-        die("no such workspace: %s" % name)
+        die(store.no_such_workspace(name))
     if not target.stop(name):
         raise Refused(1)
     return 0

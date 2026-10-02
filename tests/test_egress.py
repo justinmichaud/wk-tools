@@ -16,10 +16,13 @@ Run: python3 -m unittest tests.test_egress -v
 """
 import asyncio
 import contextlib
+import errno
 import os
 import importlib.util
 import io
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -44,6 +47,10 @@ SHELL_RC = REPO / "vm" / "shell-rc.sh"
 # loopback services off the proxy.
 VARS = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
         "no_proxy", "NO_PROXY")
+
+
+# drive_injector patches asyncio.open_connection for the length of a run.
+REAL_OPEN_CONNECTION = asyncio.open_connection
 
 
 def _load(path, name):
@@ -95,7 +102,8 @@ def _reader(data=b"", eof=True):
 def drive_injector(tmp, client_bytes,
                    upstream_reply=b"HTTP/1.1 204 No Content\r\n\r\n",
                    token="ghp-not-a-real-token", read_token=None,
-                   bugzilla_key=None):
+                   bugzilla_key=None, connect=None, upstream_timeout=None,
+                   read_timeout=None):
     """Injector.handle against a fake upstream: returns what the client was
     sent, every byte that reached the upstream, the hosts it connected to and
     what the injector logged.
@@ -123,7 +131,14 @@ def drive_injector(tmp, client_bytes,
 
     async def fake_open_connection(host, port, **kw):
         opened.append((host, port))
+        if connect is not None:
+            return await connect()
         return _reader(upstream_reply), uwriter
+
+    if upstream_timeout is not None:
+        m.UPSTREAM_TIMEOUT = upstream_timeout
+    if read_timeout is not None:
+        m.READ_TIMEOUT = read_timeout
 
     async def drive():
         await inj.handle(_reader(client_bytes), cwriter)
@@ -950,6 +965,91 @@ class TestTheInjectorRecordsWhatTheFarEndAnswered(WkTest):
         _client, logged = self.drive(reply)
         self.assertIn("403 Forbidden", logged)
         self.assertNotIn("secret", logged)
+
+
+class TestTheInjectorBoundsTheUpstream(WkTest):
+    """A stalled or unreachable far end is answered 504 or 502 inside
+    UPSTREAM_TIMEOUT, so the caller's own timeout never fires on a live injector."""
+
+    HEAD = b"GET /user HTTP/1.1\r\nHost: api.github.com\r\nContent-Length: 0\r\n\r\n"
+
+    def drive(self, connect):
+        client, _up, _opened, logged = drive_injector(
+            self.tmp, self.HEAD, read_token="t", connect=connect, upstream_timeout=0.3, read_timeout=0.3)
+        return client, logged
+
+    def test_a_connect_that_never_completes_is_a_504(self):
+        async def never():
+            await asyncio.sleep(60)
+        client, logged = self.drive(never)
+        self.assertIn(b"504 Gateway Timeout", client)
+        self.assertIn(b"api.github.com did not answer", client)
+        self.assertIn("TimeoutError", logged)
+
+    def test_a_server_that_accepts_and_stalls_is_a_504(self):
+        async def stalled():
+            async def hold(reader, writer):
+                await asyncio.sleep(60)
+            server = await asyncio.start_server(hold, "127.0.0.1", 0)
+            self.addCleanup(server.close)
+            return await REAL_OPEN_CONNECTION("127.0.0.1", server.sockets[0].getsockname()[1])
+        client, logged = self.drive(stalled)
+        self.assertIn(b"504 Gateway Timeout", client)
+        self.assertIn(b"the request was sent; it may have been applied", client)
+
+    def test_a_connect_timeout_says_nothing_was_sent(self):
+        async def never():
+            await asyncio.sleep(60)
+        client, _ = self.drive(never)
+        self.assertNotIn(b"may have been applied", client)
+
+    def test_the_status_line_outlasts_the_connect_bound(self):
+        """A server slow to answer, within READ_TIMEOUT, is relayed rather than cut at UPSTREAM_TIMEOUT."""
+        async def slow():
+            async def late(reader, writer):
+                await reader.readuntil(b"\r\n\r\n")
+                await asyncio.sleep(0.5)
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                await writer.drain()
+                writer.close()
+            server = await asyncio.start_server(late, "127.0.0.1", 0)
+            self.addCleanup(server.close)
+            return await REAL_OPEN_CONNECTION("127.0.0.1", server.sockets[0].getsockname()[1])
+        client, _up, _o, _l = drive_injector(
+            self.tmp, self.HEAD, read_token="t", connect=slow, upstream_timeout=0.2, read_timeout=5)
+        self.assertIn(b"200 OK", client)
+
+    def test_a_tls_verification_failure_is_not_a_502(self):
+        async def bad_ca():
+            raise ssl.SSLCertVerificationError("certificate verify failed")
+        client, logged = self.drive(bad_ca)
+        self.assertIn(b"598 Injector Upstream Fault", client)
+        self.assertIn(b"failed to verify or resolve api.github.com", client)
+        self.assertNotIn(b"502", client)
+
+    def test_a_dns_failure_is_not_a_502(self):
+        async def no_dns():
+            raise socket.gaierror(-2, "Name or service not known")
+        client, _ = self.drive(no_dns)
+        self.assertIn(b"598 Injector Upstream Fault", client)
+
+    def test_an_unreachable_network_is_a_502(self):
+        async def unreachable():
+            raise OSError(errno.ENETUNREACH, "Network is unreachable")
+        client, _ = self.drive(unreachable)
+        self.assertIn(b"502 Bad Gateway", client)
+
+    def test_a_refused_connect_is_a_502_naming_the_host(self):
+        async def refused():
+            probe = socket.socket()
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+            probe.close()
+            return await REAL_OPEN_CONNECTION("127.0.0.1", port)
+        client, logged = self.drive(refused)
+        self.assertIn(b"502 Bad Gateway", client)
+        self.assertIn(b"api.github.com", client)
+        self.assertIn("ConnectionRefusedError", logged)
 
 
 class TestTheInjectorForwardsEverything(WkTest):

@@ -1,4 +1,4 @@
-"""`wk bench`'s verbs that are not the pipeline -- ls, report, export, compare, precision, seed, deploy, ab, --list -- over one registry."""
+"""`wk bench`'s verbs that are not the pipeline -- ls, report, export, compare, precision, seed, deploy, ab, plans -- over one registry."""
 
 import contextlib
 import io
@@ -38,7 +38,7 @@ class Bench:
         return pid is not None and self.machine.alive(pid)
 
     def plans(self):
-        """`--list` runs before any workspace exists to read a plan from, so it asks the mirror: one `git ls-tree`, no export."""
+        """`plans` runs before any workspace exists to read a plan from, so it asks the mirror: one `git ls-tree`, no export."""
         mirror = self.reg.store.mirror()
         ref = board.runner_ref(self.reg.env)
         if not self.machine.isdir(mirror) or not self.machine.run(
@@ -120,14 +120,14 @@ class Bench:
                 if str(record.get_nested(record.load(os.path.join(r, "env.json")), "count")) == "1":
                     act.warn("run '%s' has count=1: no p-value can be computed" % os.path.basename(r))
                     act.log("  re-run with --count 2 or more for a comparison with statistics")
-            report.two_runs(a, b, html=html, text=text)
+            report.two_runs(a, b, html=html, text=text, machine=self.machine)
         return 0
 
     def home(self, task):
         d = record.homes(self.reg.store).get(task)
         if not d:
             seen = [l for l in self.listing(warn=lambda _msg: None).rows() if task in l][:3]
-            act.die("no such task '%s' in this machine's store.\n%s\n"
+            act.die("no such task '%s' on this machine.\n%s\n"
                     "    A task stays on the machine that took it ('wk bench ls' names it in [] at\n"
                     "    the end of each line); run this there. Two run directories compare any two\n"
                     "    runs without a task at all." % (task, "\n".join("    " + l for l in seen)))
@@ -289,7 +289,7 @@ class Bench:
     def ab_summary(self, runs, root, out):
         if not runs or not os.path.isfile(runs):
             act.die("no run map at '%s' -- the A/B recorded nothing (--runs <runs.tsv>)" % runs)
-        return report.ab_summary(runs, root, self.clock.iso(), out)
+        return report.ab_summary(runs, root, self.clock.iso(), out, machine=self.machine)
 
     def mac_volume(self):
         act.die("'wk bench mac-volume' does not exist -- the benchmark install is an image, built on the Mac:\n"

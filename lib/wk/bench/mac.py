@@ -16,13 +16,14 @@ from wk import act, buildconf, fleet, images, job, notify, pgo, record as wkreco
 from wk.act import Refused, die, info, log, warn
 from wk.bench import ab, board_ab, pipeline, record, report, seed
 from wk.bench.systems import System, first_line, root_device
+from wk.store import no_such_workspace
 from wk.boot import cli as bootcli, driver_class, open_driver
 from wk.boot.mac import BENCH_ROOT, TOOLS, Channel, Script
 from wk.clock import Clock
 from wk.kv import kv
 from wk.lock import Lock
 from wk.mac import SET_TOLERANCE
-from wk.machine import Ssh, isolated_module, lib_argv
+from wk.machine import Local, Ssh, isolated_module, lib_argv
 from wk.quiet import DESKTOP, PRIV, RAISER, Quiesce
 from wk.workspace import require_name
 
@@ -274,7 +275,7 @@ class MacVolumeSystem(System):
 
     def collect(self, leg):
         log("  it is on the benchmark volume, so it survives the way back:")
-        log("    wk boot %s --back        reboot back into host mode" % (self.machine or "mbp"))
+        log("    wk boot %s --back        reboot back into host mode" % self.machine)
         log("    wk bench staged --ls      list it from over there")
 
     def checks(self, leg):
@@ -357,15 +358,13 @@ class Capture(threading.Thread):
         pid = web_process()
         log("  profiling the web process (pid %s) into %s" % (pid, self.out_file))
         r = self.here.act_run(["sudo", "-n", samply, "record", "--save-only", "--profile-name", "wk-warmup", "-o", self.out_file, "-p", pid])
-        if not act.dry_run():
-            with open(os.path.join(self.rundir, "profile.log"), "w") as f:
-                f.write(r.out + r.err)
+        Local().write(os.path.join(self.rundir, "profile.log"), r.out + r.err)
         self.taken = r.ok
 
     def report(self, leg):
         if self.taken:
             log("  profile: %s" % self.out_file)
-            record.write_env(os.path.join(leg.out, "env.json"), ["profile=" + self.out_file], update=True)
+            record.write_env(os.path.join(leg.out, "env.json"), ["profile=" + self.out_file], update=True, machine=leg.machine)
         elif not act.dry_run():
             warn("  no samply capture was taken -- see %s/profile.log" % leg.out)
 
@@ -411,9 +410,10 @@ class StagedRun(pipeline.Run):
         steps = ["run %s from %s (%s)" % (leg.plan, s.dir, leg.cfg.name), "record into %s" % leg.out]
         if leg.o.get("profile"):
             steps.append("profile the web process into %s" % leg.o["profile"])
+        leg.machine = Local()
         if act.dry_run():
             return steps
-        os.makedirs(leg.out, exist_ok=True)
+        leg.machine.mkdir(leg.out)
         record.write_env(os.path.join(leg.out, "env.json"), [
             "plan=" + leg.plan, "workspace=" + s.ws, "config=" + leg.cfg.name, "browser=" + leg.browser, "webkit_sha=" + s.sha(),
             "count=" + leg.count, "local_copy=" + leg.payload, "preflight_notes=" + leg.notes, "class=" + leg.klass,
@@ -429,8 +429,7 @@ class StagedRun(pipeline.Run):
         for sub in sorted(self.here.listdir(build)) if self.here.isdir(build) else []:
             check = os.path.join(build, sub, "wk-profile-check.json")
             if self.here.exists(check):
-                with open(os.path.join(leg.out, "profile-check.json"), "w") as f:
-                    f.write(self.here.read(check))
+                leg.machine.write(os.path.join(leg.out, "profile-check.json"), self.here.read(check))
 
 
 def pick(m, home, want):
@@ -719,7 +718,7 @@ class MacHostSystem(System):
 
     def boot(self):
         if self.target.info(self.ws) in ("absent", "unreachable"):
-            die("no such workspace: %s ('wk ls' lists them)" % self.ws)
+            die(no_such_workspace(self.ws))
         leg = self.pending
         if leg is None:
             die("internal: %s.boot() reached with no leg pending (HostRun.leg() sets it)" % type(self).__name__)
@@ -770,7 +769,8 @@ class MacHostSystem(System):
             return
         remote_dir = results + "/" + newest[-1]
         m.copy_out(remote_dir + "/result.json", os.path.join(leg.out, "result.json"))
-        record.write_env(os.path.join(leg.out, "env.json"), ["remote.run=" + newest[-1], "remote.dir=" + remote_dir], update=True)
+        record.write_env(os.path.join(leg.out, "env.json"), ["remote.run=" + newest[-1], "remote.dir=" + remote_dir], update=True,
+                         machine=leg.machine)
         log("  collected from %s:%s" % (self.name, remote_dir))
 
     def after(self, leg):
@@ -850,6 +850,7 @@ DETECT = "0.3"   # nobody is in the room to extend a run, so a Mac's rounds go o
 READS = ("preflight", "progress", "status", "collect")
 MAC_USAGE = ("usage: wk bench ab --devices <mac> --systems <staged-a>,<staged-b> [--plan P]... [--rounds N] [--max-rounds N]\n"
              "           [--detect PCT] [--count N] [--timeout S] [--settle S] [--a-args ...] [--b-args ...] [--plant] [--rehearse]\n"
+             "           --workspace <ws>\n"
              "       wk bench ab --devices <mac> --patch <ref|diff> --workspace <ws> [--base <ref>] [--config C] ...")
 BOARD_ONLY = ("release", "builder", "bits", "build_on", "slot", "detach", "task")
 SITE = "Library/Python/3.9/lib/python/site-packages"
@@ -959,8 +960,7 @@ class MacAB:
         self.here, self.env, self.make_driver = reg.machine, reg.env, driver
         self.name = self.o.get("devices") or ""
         self.lock = Lock(reg.store, self.here, clock)
-        self.bench_dir = reg.store.bench_dir()
-        self.a = self.b = self.fw_detail = self.task = self.taskdir = ""
+        self.a = self.b = self.fw_detail = self.task = self.taskdir = self.logs = ""
         self._mgr = self._tools = None
 
     def check(self):
@@ -980,16 +980,15 @@ class MacAB:
                 die("--%s takes a number (got '%s')" % (key, o[key]))
         self.config = o.get("config") or AB_CONFIG
         if o.get("systems"):
-            if o.get("patch") or o.get("workspace") or o.get("base"):
-                die("--systems names two builds already staged; --patch, --workspace and --base build them. One or the other.")
+            if o.get("patch") or o.get("base"):
+                die("--systems names two builds already staged; --patch and --base build them. One or the other.")
             self.a, self.b = board_ab.pair(o["systems"], "systems")
-        elif o.get("patch"):
-            if not o.get("workspace"):
-                die("--patch builds both arms in a workspace: --workspace <ws> (a macOS one, 'wk ls')")
-            require_name(o["workspace"])
-        else:
+        elif not o.get("patch"):
             die(MAC_USAGE)
-        self.ws = o.get("workspace") or ""
+        if not o.get("workspace"):
+            die("the task lives in the workspace that builds the arms (--patch) or staged arm A (--systems): --workspace <ws> ('wk ls')")
+        require_name(o["workspace"])
+        self.ws = o["workspace"]
 
     def resolve(self):
         conf = fleet.Fleet(self.root, self.env).load(self.name)
@@ -1163,13 +1162,13 @@ class MacAB:
         root = self.d.bench_root()
         before = set(self.staged_ids(root))
         info("  building %s" % label)
-        path = os.path.join(self.taskdir, "build-%s.log" % slug)
+        path = os.path.join(self.logs, "build-%s.log" % slug)
         if not self.rwk("build", self.ws, self.config, logged=path).ok:
             die("the %s build failed; its log is %s" % (label, path))
         plans = self.stage_plans()
         info("  staging %s" % label)
         if not self.rwk("bench", "stage", self.ws, "--to", self.name, "--config", self.config, *plans,
-                        logged=os.path.join(self.taskdir, "stage-%s.log" % slug)).ok:
+                        logged=os.path.join(self.logs, "stage-%s.log" % slug)).ok:
             die("staging %s failed" % label)
         new = sorted(set(self.staged_ids(root)) - before)
         if not new:
@@ -1234,24 +1233,27 @@ class MacAB:
         return out
 
     def command(self):
-        words = ["wk", "bench", "ab", "--devices", self.name, "--systems", "%s,%s" % (self.a, self.b), "--rounds", str(self.rounds)]
+        words = ["wk", "bench", "ab", "--devices", self.name, "--systems", "%s,%s" % (self.a, self.b), "--workspace", self.ws, "--rounds", str(self.rounds)]
         for key in ("max_rounds", "detect", "count", "timeout", "settle"):
             words += ["--" + key.replace("_", "-"), self.o[key]]
         return " ".join(words + [w for p in self.plans for w in ("--plan", p)])
 
     def create_task(self, stamp):
-        """Recorded before the Mac is touched, where `wk status` lists it, so a killed run still names what was asked."""
+        """Recorded through its workspace's machine before the Mac is touched, so a killed run still names what was asked."""
         self.task = "%s-%s-mac-ab" % (stamp, self.name)
-        self.taskdir = os.path.join(self.bench_dir, self.task)
+        self.home, bench = record.ws_home(self.reg, self.ws)
+        self.taskdir, self.logs = os.path.join(bench, self.task), record.driver_logs(self.reg.store, self.task)
         if act.dry_run():
             return
-        if os.path.exists(self.taskdir):
+        record.held((self.home, bench), self.ws)
+        if self.home.exists(self.taskdir):
             die("task %s already exists (%s); a task is one request, made once" % (self.task, self.taskdir))
         self.lock.hold("bench-task-" + self.task, timeout=5)
+        self.here.mkdir_now(self.logs)
         slots = [self.a or "baseline %s" % (self.o.get("base") or "HEAD"), self.b or "patched %s" % self.o.get("patch")]
         record.task_write(self.taskdir, ["task=" + self.task, "requested=" + self.clock.iso(), "devices=%s=%s" % (self.name, self.config),
                                          "plans=" + ",".join(self.plans), "rounds=%d" % self.rounds, "slots=" + ",".join(slots)],
-                          [self.command()])
+                          [self.command()], machine=self.home)
 
     def put_file(self, src, dest):
         """The driver delivers and what landed is judged here: a transport that wrote nothing still exits 0."""
@@ -1298,7 +1300,7 @@ class MacAB:
         log("  arm B: %s%s" % (self.b or "built with %s" % o.get("patch"), "  args: " + o["b_args"] if o.get("b_args") else ""))
         for i, p in enumerate(self.plans):
             legs = (2 if i == 0 else 0) + 2 * self.rounds   # the warmup round runs the first plan, one leg per arm
-            seen = ab.leg_seconds(self.reg.store, self.name, p, o["count"])
+            seen = ab.leg_seconds(self.reg, [(self.ws, "")], self.name, p, o["count"])
             each = statistics.median(seen) if seen else None
             log("  cost  %s: at least %d legs%s" % (p, legs, " x ~%s = ~%s" % (ab.duration(each), ab.duration(legs * each)) if seen
                                                   else "; no leg of it at --count %s measured on %s yet" % (o["count"], self.name)))
@@ -1318,7 +1320,7 @@ class MacAB:
         stamp = self.task.split("-", 1)[0]
         if act.dry_run():
             for line in ("sync wk-tools to %s/wk-tools" % root, "point the launch agent at %s" % AUTORUN,
-                         "plant samply for the warmup round's profile", "record the task %s in %s and write its job.json" % (self.task, self.bench_dir),
+                         "plant samply for the warmup round's profile", "record the task %s in %s and write its job.json" % (self.task, self.taskdir),
                          "copy that job to %s/job.json and reset %s/autorun.state" % (root, root),
                          "turn Do Not Disturb on for the bench account and read it back",
                          "install %s/Library/LaunchAgents/%s.plist" % (bh, AGENT),
@@ -1340,17 +1342,17 @@ class MacAB:
         if not self.mac.test("-r", root + "/wk-tools/lib/wk/bench/autorun.py"):
             die("the planted tree carries no lib/wk/bench/autorun.py, so the launch agent has nothing to start.")
         info("  writing the job")
-        job_json = os.path.join(self.taskdir, "job.json")
+        job_json = os.path.join(self.logs, "job.json")
         self.here.write(job_json, json.dumps(self.job(declared, stamp), indent=2) + "\n")
         if not self.put_file(job_json, root + "/job.json"):
             die("could not write the job onto the volume")
-        state = os.path.join(self.taskdir, "planted.state")   # reset here and nowhere else: the autorun only advances it
+        state = os.path.join(self.logs, "planted.state")   # reset here and nowhere else: the autorun only advances it
         self.here.write(state, "phase=planted\njob_stamp=%s\nattempts=0\nplanted_at=%s\n" % (stamp, self.clock.iso()))
         if not self.put_file(state, root + "/autorun.state"):
             die("could not reset the autorun's state on the volume")
         self.mac.run("mac-mkdir.sh", mutates=True, WK_PATH="%s/ab/%s" % (root, stamp))
         info("  installing the launch agent")
-        agent = os.path.join(self.taskdir, AGENT + ".plist")
+        agent = os.path.join(self.logs, AGENT + ".plist")
         self.here.write(agent, PLIST % {"agent": AGENT, "autorun": AUTORUN, "root": BENCH_ROOT})
         if not self.put_file(agent, "%s/Library/LaunchAgents/%s.plist" % (bh, AGENT)):
             die("could not install the launch agent")
@@ -1582,48 +1584,52 @@ class MacAB:
             log("  the autorun's own log is the place to look:\n    %s/autorun.log   ('wk bench ab --devices %s --status' tails it)" % (root, self.name))
             return 1
         log("\n  runs:\n" + "\n".join("    " + l for l in tsv.splitlines()) + "\n")
-        taskdir = os.path.join(self.bench_dir, "%s-%s-mac-ab" % (stamp, self.name))
-        if not os.path.isdir(taskdir):
-            die("job %s has no task in %s, so nothing here can record it; its results stay on the volume" % (stamp, self.bench_dir))
-        self.here.write(os.path.join(taskdir, "autorun.state"), st)
-        if not self.collect_tree(root + "/ab/" + stamp, "warmup", taskdir):
+        from wk.bench import cli   # it reaches this module through ab
+        bench, task = cli.Bench(self.root, self.reg, self.clock), "%s-%s-mac-ab" % (stamp, self.name)
+        hit = bench.find(task)
+        if not hit:
+            die("job %s has no task in any workspace this machine reaches, so nothing can record it; its results stay on the volume"
+                % stamp)
+        m, taskdir = hit
+        m.write_own(os.path.join(taskdir, "autorun.state"), st)
+        if not self.collect_tree(m, root + "/ab/" + stamp, "warmup", taskdir):
             warn("  the warmup round's captures (%s/ab/%s/warmup) did not copy onto the task" % (root, stamp))
-        if self.collect_runs(taskdir, root, tsv):
+        if self.collect_runs(m, taskdir, root, tsv):
             try:
-                report.task_report(taskdir, False, text=True)
+                bench.task_report(task, False, True)
             except (Refused, SystemExit, OSError, ValueError) as e:
-                warn("the report did not complete (%s); the runs are recorded:  wk bench report %s" % (e, os.path.basename(taskdir)))
+                warn("the report did not complete (%s); the runs are recorded:  wk bench report %s" % (e, task))
         return 0
 
-    def collect_tree(self, parent, name, into):
-        """`parent`/`name` on the volume, copied under `into`; False when it did not land."""
+    def collect_tree(self, m, parent, name, into):
+        """`parent`/`name` on the volume, copied under `into` on `m`; False when it did not land."""
         got, packed = self.mac.run("mac-tar.sh", WK_PATH=parent, WK_DIR=name), os.path.join(into, name + ".tar.b64")
         if got.ok:
-            self.here.write(packed, got.out)
-        landed = got.ok and self.here.act_run(["sh", "-c", 'base64 -d < "$1" | tar -xf - -C "$2"', "sh", packed, into]).ok
+            m.write(packed, got.out)
+        landed = got.ok and m.act_run(["sh", "-c", 'base64 -d < "$1" | tar -xf - -C "$2"', "sh", packed, into]).ok
         if got.ok:
-            self.here.remove(packed)
+            m.remove(packed)
         return landed
 
-    def collect_runs(self, taskdir, root, tsv):
+    def collect_runs(self, m, taskdir, root, tsv):
         rows = [r for r in (report.map_row(l) for l in tsv.splitlines() if l.strip()) if r[0] != "0" and r[4] == "clean" and r[3]]
         if not rows:
             warn("  no clean leg after the warmup round -- nothing to record on the task")
             return 0
         into, n = os.path.join(taskdir, "runs"), 0
-        self.here.mkdir(into)
+        m.mkdir(into)
         for rnd, label, sid, rid, _, plan in rows:
-            if not self.collect_tree(root + "/results", rid, into):
+            if not self.collect_tree(m, root + "/results", rid, into):
                 warn("  could not copy %s onto the task" % rid)
                 continue
             if act.dry_run():
                 continue
             env = os.path.join(into, rid, "env.json")
-            if not os.path.isfile(env):
+            if not m.exists(env):
                 warn("  %s carries no env.json, so it cannot be paired with round %s arm %s" % (rid, rnd, label))
                 continue
             record.write_env(env, ["machine=" + self.name, "plan=" + plan, "ab.round=" + rnd, "ab.staged=" + sid,
-                                   "ab.arm=" + label.lower()], update=True)
+                                   "ab.arm=" + label.lower()], update=True, machine=m)
             n += 1
         log("  recorded %d clean leg(s) onto %s" % (n, taskdir))
         return n

@@ -6,7 +6,7 @@ import sys
 
 from wk import buildconf, pgo
 from wk.bench import record
-from wk.machine import replace_file
+from wk.machine import Local
 
 
 def axis_check_lines(a, b):
@@ -936,17 +936,16 @@ def runs_map(path):
         return [map_row(l) for l in f if l.strip()]
 
 
-def ab_summary(runs, root, now, out_path="", out=None):
+def ab_summary(runs, root, now, out_path="", out=None, machine=None):
     """A Mac A/B's verdict off its run map, per plan: precision, then arm A against arm B. The warmup round is left out;
     a leg a software-update scan ran across is kept and named."""
-    out = out or sys.stdout
+    out, machine = out or sys.stdout, machine or Local()
     rows = runs_map(runs)
-    sink = open(out_path, "w") if out_path else None
+    sink = []
 
     def emit(line=""):
         out.write(line + "\n")
-        if sink:
-            sink.write(line + "\n")
+        sink.append(line + "\n")
 
     try:
         labels = list(dict.fromkeys(r[1] for r in rows))
@@ -989,30 +988,26 @@ def ab_summary(runs, root, now, out_path="", out=None):
                 report = build_report(dirs[a], dirs[b])
                 if out_path:
                     html = "%s-%s.html" % (os.path.splitext(out_path)[0], plan)
-                    _write_html(html, report, "A/B summary: %s" % plan)
+                    machine.write(html, render_html(report, title="A/B summary: %s" % plan))
                     emit("wrote %s" % html)
                 for line in render_text(report).splitlines():
                     emit(line)
             emit()
         return 0
     finally:
-        if sink:
-            sink.close()
+        if out_path:
+            machine.write(out_path, "".join(sink))
 
 
 def split_paths(spec):
     return [p.strip() for p in spec.split(",") if p.strip()]
 
 
-def _write_html(path, report, title):
-    replace_file(path, render_html(report, title=title))
-
-
-def two_runs(a_dirs, b_dirs, html="", text=False, out=None):
+def two_runs(a_dirs, b_dirs, html="", text=False, out=None, machine=None):
     out = out or sys.stdout
     report = build_report(a_dirs, b_dirs)
     if html:
-        _write_html(html, report, "wk bench report")
+        (machine or Local()).write(html, render_html(report, title="wk bench report"))
         out.write("wrote %s\n" % html)
     if text or not html:
         out.write(render_text(report))
@@ -1119,8 +1114,8 @@ def task_report(taskdir, running, html=False, text=False, out=None, shown=None):
         report = build_report(a_dirs, b_dirs, header=lines + [""] + header,
                               warmup=warmup_lines(warmup_load(taskdir, device)))
         if html:
-            path = os.path.join(taskdir, "report-%s-%s.html" % (device, plan))
-            _write_html(path, report, "%s: %s on %s" % (name, plan, device))
+            path = os.path.join(taskdir, "report-%s-%s.html" % (device, plan))   # taskdir is the caller's staged copy
+            Local().write_own(path, render_html(report, title="%s: %s on %s" % (name, plan, device)))
             out.write("wrote %s\n" % os.path.join(shown or taskdir, os.path.basename(path)))
         if text or not html:
             out.write("\n" + render_text(dict(report, header=[])))

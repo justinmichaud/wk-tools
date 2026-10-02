@@ -363,6 +363,8 @@ class Secrets:
             self.machine.remove(new)
             return False
         self.machine.act_run(["mv", "-f", new, priv])
+        if act.dry_run():
+            return True
         return self.pub_publish(fork)
 
     def pub_publish(self, fork):
