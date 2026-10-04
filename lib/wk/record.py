@@ -287,9 +287,6 @@ class Records:
         tasks = [self._task(self.root / n) for n in self.machine.listdir(str(self.root))]
         return [t for t in tasks if t.has("plan")]
 
-    def driving(self, name):
-        return any(t.field("name") == name and t.field("where") == "here" and t.alive(None) for t in self.list())
-
     def stamp_of(self, record_id, kind, name):
         prefix = "%s-%s-" % (slug(kind), slug(name))
         if not record_id.startswith(prefix):

@@ -32,7 +32,8 @@
 # 'open' pushes the workspace's current branch to its fork and opens it as a pull request with
 # `gh pr create --fill`. Runs on the host only and refuses inside a workspace. The project comes
 # from which upstream the branch tracks; no upstream, `main`, a detached HEAD, or a dirty tree is
-# refused by name. Pushing needs `wk push on`, which is never flipped here.
+# refused by name. Pushing needs `wk push on`, which is never flipped here. A build box's branch is
+# fetched over ssh into this machine's mirror and pushed from here: no key reaches a box.
 #
 #   --draft   open it as a draft
 #   --web     open the browser's new-PR form instead of creating it directly
@@ -48,11 +49,13 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import act, decl, git, pr, secrets, targets  # noqa: E402
+from wk import act, decl, git, pr, secrets, sync, targets  # noqa: E402
 from wk.act import Refused, die, info, log, warn  # noqa: E402
 from wk.clock import Clock  # noqa: E402
+from wk.lock import Lock  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.pushswitch import Push  # noqa: E402
+from wk.store import Store  # noqa: E402
 from wk.targets import show  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
 
@@ -168,7 +171,10 @@ def pr_open(target, name, draft, web, push_status):
         die("'wk pr open' pushes '%s' to '%s', and the deploy key is held back.\n    wk push on" % (branch, fork))
 
     info("pushing '%s' to '%s'" % (branch, fork))
-    r = target.act_exec(name, ["git", "-C", src, "push", "-u", fork, branch])
+    if target.kind == "remote" and not target.is_local and not target.peer:
+        r = push_from_here(target, src, fork, branch)
+    else:
+        r = target.act_exec(name, ["git", "-C", src, "push", "-u", fork, branch])
     show(r)
     if not r.ok:
         die("the push to '%s' failed -- see above.\n    If the deploy key is the problem:  wk push on" % fork)
@@ -176,6 +182,20 @@ def pr_open(target, name, draft, web, push_status):
     flags = (["--draft"] if draft else []) + (["--web"] if web else [])
     info("opening a pull request: %s <- %s" % (base, head))
     act.exec_into(["gh", "pr", "create"] + pr_open_gh_args(base, head, *flags))
+
+
+def push_from_here(target, src, fork, branch):
+    """The box's branch into this machine's mirror over ssh, then pushed from here with this machine's deploy key."""
+    here, store = target.here, Store(target.env)
+    keys = secrets.Secrets(ROOT, target.env, here)
+    ref = "refs/wk/push/%s/%s" % (target.name, branch)
+    sync.fetch_into_mirror(here, store, Lock(store, here, Clock()), "%s:%s" % (target.ssh_host(""), src), "refs/heads/" + branch, ref)
+    repo = next(r for f, r, _ in keys.forks() if f == fork)
+    git_here = ["git", "-C", store.mirror()]
+    r = here.act_run(git_here + ["-c", "core.sshCommand=ssh -i %s -o IdentitiesOnly=yes" % keys.push_key_path(fork),
+                                 "push", "git@github.com:%s.git" % repo, "%s:refs/heads/%s" % (ref, branch)])
+    here.act_run(git_here + ["update-ref", "-d", ref])
+    return r
 
 
 def push_rc(reg):

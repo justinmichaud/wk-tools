@@ -27,6 +27,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes import FakeProc, FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO, as_dispatched
 
@@ -74,40 +75,6 @@ class BuildTarget(targets.Target):
         return self.machine.target_os
 
 
-class Reg(targets.Registry):
-    def __init__(self, world):
-        super().__init__(REPO, env=world.env, machine=world)
-        self.world = world
-
-    def load(self, name):
-        return BuildTarget("box", self.root, dict(self.env, **self.world.conf), self.world, self.world.kind)
-
-    def ws_target(self, ws):
-        return "box"
-
-    def in_workspace(self):
-        return self.world.in_ws
-
-
-class Proc:
-    def __init__(self, world, rc, hang, interrupt):
-        self.pid, self.world, self.rc, self.hang, self.interrupt = 4242, world, rc, hang, interrupt
-        self.returncode = None
-
-    def poll(self):
-        if self.interrupt is not None:
-            signum, self.interrupt = self.interrupt, None
-            raise job.Interrupted(signum)
-        if self.hang and self.returncode is None:
-            return None
-        self.returncode = self.rc if self.returncode is None else self.returncode
-        return self.returncode
-
-    def wait(self):
-        self.returncode = -9 if self.returncode is None else self.returncode
-        return self.returncode
-
-
 class World(Fake):
     """This host building in one workspace `ws` on target `box`: the far half answers the dry-run
     line, df has room, the build writes `out` to its log and exits `rc`."""
@@ -130,7 +97,8 @@ class World(Fake):
         self.answer(["exec", "ws", "bash", "-c"])
         self.react(["exec", "ws", "env"], lambda a, f: Result(0, FAR_LINE) if "WK_DRY_RUN=1" in a else Result(1))
         self.answer(["sync-tools"])
-        self.reg = Reg(self)
+        self.reg = FakeRegistry(self.env, self, lambda n, e: BuildTarget("box", str(REPO), dict(e, **self.conf), self, self.kind),
+                                ws_target=lambda ws: "box", in_workspace=lambda: self.in_ws)
         self.ws_dir = os.path.join(self.env["WK_STORE"], "ws", "ws")
         os.makedirs(self.ws_dir)
         self.log = os.path.join(self.ws_dir, "build.log")
@@ -142,7 +110,7 @@ class World(Fake):
     def popen(self, argv, stdin=None, stdout=None, stderr=None, cwd=None):
         self.effect(("watch", tuple(argv)))
         stdout.write(self.out)
-        return Proc(self, self.rc, self.hang, self.interrupt)
+        return FakeProc(self.rc, None if self.hang else 0, self.interrupt)
 
     def recs(self):
         return build.records_of(self.reg.load("box"), self.clock, self)
@@ -575,6 +543,11 @@ class TestDetach(BuildTest):
         w.begin("build", pid=4000).end(0)
         err = self.refused(w, "jsc-release", "--detach")
         self.assertIn("the detached build of 'ws' ended before it started", err)
+
+    def test_whether_the_child_lives_is_the_machines_answer_alone(self):
+        w = Detaching(self.tmp, starts=False)
+        with mock.patch("os.waitpid", side_effect=AssertionError("asked this process, not the machine")):
+            self.assertIn("ended before it started", self.refused(w, "jsc-release", "--detach"))
 
     def test_inside_a_workspace_the_name_is_not_passed_on(self):
         w = Detaching(self.tmp)

@@ -192,6 +192,14 @@ class TestWhatIsNotToldTheTarget(unittest.TestCase):
                 self.assertNotIn("WK_TARGET", line, "a forwarded command is told a target it must resolve itself")
                 self.assertNotIn("WK_STORE", line, "the far side's store is its own")
 
+    def test_the_sdk_image_override_is_carried_to_the_far_side(self):
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import targets
+        from wk.machine import Fake
+        remote = {"WK_REMOTE_LOCAL": "1", "WK_REMOTE_TOOLS": "/opt/wk-tools"}
+        line = targets.Remote("box", str(REPO), remote, Fake()).wk_cmd(["new", "x"], {"WK_SDK_IMAGE": "ghcr.io/igalia/wkdev-sdk:2.55-v1-abc"})
+        self.assertIn("WK_SDK_IMAGE=ghcr.io/igalia/wkdev-sdk:2.55-v1-abc ", line)
+
     def test_the_export_is_on_the_running_here_path_only(self):
         lines = (REPO / "lib" / "wk" / "dispatch.py").read_text().splitlines()
         exports = [i for i, l in enumerate(lines) if 'os.environ["WK_TARGET"] = resolved' in l]

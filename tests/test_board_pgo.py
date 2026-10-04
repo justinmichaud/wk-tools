@@ -22,13 +22,15 @@ import tempfile
 import textwrap
 import types
 import unittest
+import unittest.mock
 from pathlib import Path
 
+from tests.fakes import FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO, WkTest, _clean_env, requires_machine, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import images, pgo, record as progress, sched, targets  # noqa: E402
+from wk import images, pgo, record as progress, sched  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
@@ -68,14 +70,6 @@ class Inline:
         return False
 
 
-class Reg(targets.Registry):
-    def __init__(self, env, fake):
-        super().__init__(REPO, env=env, machine=fake)
-
-    def ws_target(self, ws):
-        return "container"
-
-
 class World:
     """This host holding the image workspace, a board `rpi5` running `mode`, and every step's command answered by the state it leaves."""
 
@@ -89,7 +83,7 @@ class World:
         self.fake.answer(["hostname", "-s"], out="tolken\n")
         self.fake.react(["sh", "-c", sched.LOGGED], self.logged)
         self.fake.react([WK, "sysimage", "holds"], self.holds)
-        self.reg = Reg(self.env, self.fake)
+        self.reg = FakeRegistry(self.env, self.fake, ws_target=lambda ws: "container")
         self.p = images.load(PROFILE, self.env)
 
     @staticmethod
@@ -541,16 +535,42 @@ class TestTheDriverPullsWhatTheBoardWrote(WkTest):
 
     def test_a_run_that_wrote_nothing_is_an_error_and_not_an_empty_profile(self):
         driver = self.module.WkBoardDriver.__new__(self.module.WkBoardDriver)
-        driver._ssh = ["true"]
-        with scratch_dir() as tmp:
-            os.environ["WK_BOARD_PGO"] = "/var/wk/pgo"
-            try:
-                with self.assertRaises(RuntimeError):
-                    driver.collect_pgo_profile(str(tmp / "dest"))
-            finally:
-                os.environ.pop("WK_BOARD_PGO", None)
+        driver._board, driver._here = Fake("board"), Fake()
+        with unittest.mock.patch.dict(os.environ, {"WK_BOARD_PGO": "/var/wk/pgo"}):
+            with self.assertRaises(RuntimeError):
+                driver.collect_pgo_profile("/dest")
 
+    def test_the_profiles_are_read_off_the_board_through_the_machine(self):
+        board, here = Fake("board"), Fake()
+        board.files = {"/var/wk/pgo/a.profraw": b"A", "/var/wk/pgo/b.profraw": b"B"}
+        board.dirs = {"/var/wk/pgo"}
+        driver = self.module.WkBoardDriver.__new__(self.module.WkBoardDriver)
+        driver._board, driver._here = board, here
+        with unittest.mock.patch.dict(os.environ, {"WK_BOARD_PGO": "/var/wk/pgo"}):
+            driver.collect_pgo_profile("/dest")
+        self.assertEqual(here.files, {"/dest/a.profraw": b"A", "/dest/b.profraw": b"B"})
 
+    def test_a_directory_beside_the_profiles_is_skipped(self):
+        board, here = Fake("board"), Fake()
+        board.files = {"/var/wk/pgo/a.profraw": b"A"}
+        board.dirs = {"/var/wk/pgo", "/var/wk/pgo/sub"}
+        driver = self.module.WkBoardDriver.__new__(self.module.WkBoardDriver)
+        driver._board, driver._here = board, here
+        with unittest.mock.patch.dict(os.environ, {"WK_BOARD_PGO": "/var/wk/pgo"}):
+            driver.collect_pgo_profile("/dest")
+        self.assertEqual(here.files, {"/dest/a.profraw": b"A"})
+
+    def test_what_a_board_command_says_reaches_the_run_log(self):
+        board = Fake("board")
+        board.answer(["sh", "-c"], out="said\n", err="warned\n")
+        driver = self.module.WkBoardDriver.__new__(self.module.WkBoardDriver)
+        driver._board = board
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(driver._remote("true"), "")
+        self.assertEqual((out.getvalue(), err.getvalue()), ("said\n", "warned\n"))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(driver._remote("true", capture=True), "said\n")
+        self.assertEqual(out.getvalue(), "")
 
 
 class TestARealCollection(unittest.TestCase):

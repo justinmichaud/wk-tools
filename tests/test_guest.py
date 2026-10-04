@@ -18,6 +18,7 @@ from unittest import mock
 from tests.killpoints import converges
 from tests.support import REPO, live_selected
 from tests.test_wk_secrets import SECRETFILE, SecretsTest, World, quiet
+from tests.test_wk_targets import TargetConformance
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import guest, targets, tools  # noqa: E402
@@ -144,6 +145,19 @@ class GuestTest(SecretsTest):
         self.w.mkdir_now(os.path.dirname(path))
         self.w.symlink("pid=%d tok=beef at=2026-09-24T00:00:00Z cmd=wk start" % pid, path)
         return path
+
+
+class TestVmConformance(GuestTest, TargetConformance):
+    """A guest needs no base snapshot to be present, and its start boots it."""
+    cls, ws, down = targets.Vm, "demo", "stopped"
+
+    def stopped(self):
+        self.w.state = "stopped"
+        self.w.write(os.path.join(self.vm.store.ws_dir("demo"), targets.READY_MARKER), "")
+        return self.vm
+
+    def brought_up(self, t):
+        return [r[-1] for r in self.w.spawned(" run ")] == ["wk-demo"]
 
 
 class TestOneLockPerGuest(GuestTest):
@@ -629,6 +643,24 @@ class TestTheLiveGuest(unittest.TestCase):
                      % (vm.src(ws), vm.src(ws)))
         self.assertTrue(r.ok, r.out + r.err)
         self.assertIn(guest_mirror_objects(vm), r.out)
+
+
+class TestTheLiveRemount(unittest.TestCase):
+    """What `wk sync` does to a running guest after it rewrites the host's mirror."""
+    wk_tier = "live"
+
+    def setUp(self):
+        self.found = _a_running_guest()
+        if self.found is None:
+            self.skipTest("live tier not selected, or no macOS guest is running on this host")
+
+    def test_sync_guest_remount(self):
+        """`live sync.guest_remount`: after the remount the guest reads the host mirror's main as the host does."""
+        vm, ws = self.found
+        host = vm.machine.run(["git", "-C", vm.store.mirror(), "rev-parse", "refs/heads/main"])
+        self.assertEqual(vm.remount_shares(ws), "")
+        r = vm.exec(ws, ["git", "-C", vm.mirror_dir(), "rev-parse", "refs/heads/main"], timeout=60)
+        self.assertEqual((r.ok, r.out.strip()), (True, host.out.strip()), r.err)
 
 
 def guest_mirror_objects(vm):

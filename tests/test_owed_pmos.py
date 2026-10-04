@@ -20,10 +20,11 @@ import sys
 import unittest
 from unittest import mock
 
+from tests.fakes import FakeRegistry
 from tests.support import BLIND_FLEET, REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, fleet  # noqa: E402
+from wk import act  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
@@ -40,18 +41,14 @@ PROFILE = {
 }
 
 
-class Reg:
-    """Just enough of targets.Registry for Pmos: a machine, an env, and a fleet BLIND_FLEET never declares
-    'buildhost1' in, so host resolution falls through to the raw name (the not-a-fleet-name case)."""
-
-    def __init__(self, machine, env):
-        self.machine, self.env = machine, dict(env)
-        self.fleet = fleet.Fleet(str(BLIND_FLEET), self.env)
+def registry(machine, env):
+    """A fleet BLIND_FLEET never declares 'buildhost1' in, so host resolution falls through to the raw name."""
+    return FakeRegistry(dict({"WK_MACHINES_DIR": BLIND_FLEET}, **env), machine)
 
 
 def make(env=None, profile=None):
     machine = Fake("buildhost1")
-    return pmos.Pmos(Reg(machine, env or {}), dict(profile or PROFILE), "test-profile", FakeClock()), machine
+    return pmos.Pmos(registry(machine, env or {}), dict(profile or PROFILE), "test-profile", FakeClock()), machine
 
 
 def sh_react(handlers):
@@ -166,7 +163,7 @@ class TestPmosOutputs(unittest.TestCase):
 
     def test_outputs_resolves_the_build_host_and_asks_it(self):
         machine = self.world("test-profile-20260101T000000Z\n")
-        reg = Reg(Fake("here"), {"WK_PMOS_ROOT": "/p"})
+        reg = registry(Fake("here"), {"WK_PMOS_ROOT": "/p"})
         with mock.patch.object(pmos, "ssh_machine", return_value=machine) as ssh_mock:
             self.assertEqual(pmos.outputs(reg, PROFILE), ["/p/out/test-profile-20260101T000000Z/disk.wic.xz"])
         self.assertEqual(ssh_mock.call_args[0][-1], "buildhost1")

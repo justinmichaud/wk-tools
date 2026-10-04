@@ -17,6 +17,7 @@ from wk.clock import Clock  # noqa: E402
 from wk import slot  # noqa: E402
 from wk.machine import here, isolated_module  # noqa: E402
 from wk.store import Store  # noqa: E402
+from wk.sysimage import Failed, fail  # noqa: E402
 
 TOOLS = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 MB_PER_JOB = 2048
@@ -38,14 +39,6 @@ mkdir -p "$b/rpi-firmware/overlays"
 cp -f {stage}/dtb/overlays/*.dtbo "$b/rpi-firmware/overlays/"
 echo "wk: installed the pinned kernel {release} and its device trees into $b"
 """
-
-
-class Failed(Exception):
-    pass
-
-
-def fail(text):
-    raise Failed(text)
 
 
 def parse(argv):

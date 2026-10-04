@@ -13,10 +13,11 @@ import shutil
 import sys
 from unittest import mock
 
+from tests.fakes import FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO
 from tests.test_wk_targets import LINUX_PROBE
-from tests.test_wk_workspace import ContainerWorld, FakeRegistry, World, WorkspaceTest
+from tests.test_wk_workspace import ContainerWorld, World, WorkspaceTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, record, targets, workspace  # noqa: E402
@@ -25,17 +26,18 @@ from wk.machine import Result  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 FAR_ROOT = "/home/u/wk"
+DRIVERS = {"container": targets.Container, "vm": targets.Vm, "remote": targets.Remote, "local": targets.LocalWorkspace}
 
 
 class DriverWorld(World):
-    """The World with one real driver in FakeTarget's place, its records where that driver keeps them."""
+    """The World with one real driver in PodmanTarget's place, its records where that driver keeps them."""
 
     KIND = None
 
     def __init__(self, tmp):
         super().__init__(tmp)
         self.env_for_driver()
-        self.reg = DriverRegistry(REPO, self.env, self, {"fakebox": self.KIND}, {})
+        self.reg = FakeRegistry(self.env, self, lambda n, e: DRIVERS[self.KIND](n, str(REPO), e, self), names=["fakebox"])
         self.target = self.reg.load("fakebox")
         self.records = record.of_target(self.target, self.clock, self)
         self.lock = Lock(self.target.store, self, self.clock)
@@ -87,12 +89,6 @@ class DriverWorld(World):
     def act_run(self, argv, **kw):
         self.acted.add(tuple(argv))
         return super().act_run(argv, **kw)
-
-
-class DriverRegistry(FakeRegistry):
-    def load(self, name):
-        cls = {"container": targets.Container, "vm": targets.Vm, "remote": targets.Remote, "local": targets.LocalWorkspace}
-        return cls[self.kinds[name]](name, self.root, dict(self.env), self.machine)
 
 
 class RealContainerWorld(DriverWorld, ContainerWorld):

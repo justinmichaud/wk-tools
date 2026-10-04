@@ -40,13 +40,17 @@ PROBE_BRANCH = "refs/heads/wk-integ-probe"
 GIT_STATUS_BUDGET = {
     "container": 3.0,     # 0.84 s cold and 0.46 s warm in a new container: headroom for a loaded podman VM
     "tart": 3.0,          # 0.82 s cold in a guest sharing the host with the podman VM (2026-10-01)
+    "moose": 3.0,         # 0.36 s cold in a container on moose (2026-10-04)
 }
 
 TARGETS = {
     "container": {"new": (), "machine": None, "push": True},
     "tart": {"new": ("--target", "vm"), "machine": None, "push": True},
+    # A peer workstation: `wk new --target moose` is moose's own `wk new`, a container there, and every later
+    # command (push included, as `--target moose`) is moose's own wk.
     "moose": {"new": ("--target", "moose"), "machine": "moose", "push": True,
-              "remedy": "switch moose's wk-tools checkout to python-core, then 'wk sync --tools moose'"},
+              "remedy": "moose pulls its own checkout: push this commit to the branch moose's checkout tracks, "
+                        "then 'wk sync --tools moose'"},
     "bb4": {"new": ("--target", "buildbox4"), "machine": "buildbox4", "push": False,
             "remedy": "'wk sync --tools buildbox4' from a clean tree here"},
 }
@@ -315,8 +319,8 @@ class TargetSteps:
         return [p for p in wk("enter", ws, "--", "sh", "-c", AGENT_SCAN, timeout=120).out.split() if p.isdigit()]
 
     def foreign_sessions(self):
-        """Workspaces on this host the test did not make, with a claude process in them: `wk push on` ends or arms it."""
-        host = support.THIS_HOST
+        """Workspaces on the switch's machine the test did not make, with a claude process in them: `wk push on` ends or arms it."""
+        host = self.conf["machine"] or support.THIS_HOST
         return [n for n, t, st in ls_rows(wk("ls", timeout=300).out)
                 if not n.startswith(PREFIX) and st == "running" and t.split(":")[0].lower() == host and self.agent_pids(n)]
 
@@ -404,6 +408,7 @@ class TargetSteps:
     @step(2, needs_workspace=False)
     def test_02_workspace_is_ready(self):
         action = workspace_action(self.record())
+        made = action == "new"
         if action == "broken":
             self.fail("'%s' is broken; wk says:\n%s" % (self.ws, tail(wk("status", self.ws, "--text", timeout=300).out)))
         if action == "new":
@@ -417,6 +422,8 @@ class TargetSteps:
         wk("status", self.ws, "--wait", "--timeout", str(int(self.left())), timeout=int(self.left()) + 30)
         rec = self.record()
         self.assertEqual("none", workspace_action(rec), "'%s' is not running and ready: %r" % (self.ws, rec))
+        if not made:    # a workspace this run joined fetches what the mirror gained since, as a returning developer does
+            self.wk_ok("sync", self.ws, timeout=900)
 
     @step(3)
     def test_03_git_is_fast_and_current(self):

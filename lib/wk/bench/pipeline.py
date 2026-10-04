@@ -233,12 +233,9 @@ class Run:
         elif act.dry_run():
             self.dry_fails = len(fails)
             warn("%d preflight check(s) would fail -- a real run would stop here" % len(fails))
-        elif act.forced(self.env):
-            warn("%d preflight check(s) failed -- continuing because --force was given" % len(fails))
-            warn("the run will be recorded as forced, and is not comparable with a clean run")
         else:
-            die("%d preflight check(s) failed -- refusing to produce a number that cannot be defended.\n"
-                "    Fix the above, or re-run with --force to record a result anyway." % len(fails))
+            act.barrier("%d preflight check(s) failed -- a number from this run cannot be defended. Fix the above;\n"
+                        "    a forced run is recorded as forced, and is not comparable with a clean run." % len(fails), env=self.env)
 
     def seed(self, leg):
         def read(path):
@@ -368,10 +365,10 @@ class Run:
             warn("the machine did not stay quiet under this run -- something drew over the\n"
                  "  browser, or a process that must not run came back while it measured:")
             sys.stderr.write("".join("    %s\n" % l for l in drew))
-            if not act.forced(self.env):
+            try:
+                act.barrier("something drew over this run, so its number is one to distrust", env=self.env)
+            except act.Refused:
                 rc = rc or 1
-            else:
-                warn("  --force: keeping the number anyway; it is one to distrust")
         return rc, "run-benchmark exited %d" % rc, path
 
     def go(self, plan, o):

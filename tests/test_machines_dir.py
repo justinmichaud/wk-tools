@@ -263,6 +263,13 @@ class TestSharedHome(FleetTest):
                 self.assertIn(name, reg.all())
                 self.assertEqual([e for e in far.effects if e[0] == "run" and e[1][0] == "ssh"], [])
 
+    def test_each_machine_of_a_shared_home_has_its_own_root(self):
+        self.conf("boxa", "kind=build\nhostname=\nroot=/h/wk-a\n")
+        self.conf("boxb", "kind=build\nhostname=bbox-2\nroot=/h/wk-b\n")
+        for host, root in (("boxa", "/h/wk-a"), ("bbox-2", "/h/wk-b")):
+            with self.subTest(host=host):
+                self.assertEqual(self.registry(host)[0].far_root(), root)
+
     def test_a_host_no_conf_names_is_refused_with_the_key_to_add(self):
         reg, _ = self.registry("stranger")
         with self.assertRaises(LookupError) as cm:

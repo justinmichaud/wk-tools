@@ -16,7 +16,7 @@ import subprocess
 import sys
 import unittest
 
-from tests.support import REPO, WK, WkTest, bash, owed, run
+from tests.support import REPO, WK, WkTest, bash, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import decl as D  # noqa: E402
@@ -206,7 +206,6 @@ class TestTheGlobalFlagsBelongToTheDispatcher(WkTest):
     # The test runner's effects are each test's own; a dry run of a test is no test.
     NO_DRY_RUN = {"selftest"}
 
-    @owed("dispatch.dry_run_is_the_recorder: ai")
     def test_every_mutating_command_and_verb_has_a_dry_run(self):
         missing = []
         for d in D.all_commands(REPO):

@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, WkTest, bash, clean_env
+from tests.support import REPO, WkTest, bash, clean_env, run
 from tests.test_wk_targets import LINUX_PROBE, SshFake
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -943,6 +943,12 @@ class TestOwedStatusRules(unittest.TestCase):
         out = render([{"kind": "fleet", "machine": "m", "self": True, "role": "workstation", "mode": "host mode", "media": ""},
                       machine_rec("m", self=True)]).stdout
         self.assertRegex(out.strip().splitlines()[0], r"workstation.*host mode")
+
+    def test_help_leads_with_role_and_mode(self):
+        """`wk help` starts the way `wk status` does: this machine, its role, its mode, then README.md"""
+        lines = run("help").stdout.splitlines()
+        self.assertEqual(lines[0], status.self_line(str(REPO), clean_env(wk_root=False), False))
+        self.assertEqual(lines[2], (REPO / "README.md").read_text().splitlines()[0])
 
     def test_armed_transition(self):
         rec = {"kind": "fleet", "machine": "rpi5", "role": "workstation", "mode": "host mode", "media": "usb", "armed": "img-1",

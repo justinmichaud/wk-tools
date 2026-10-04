@@ -13,6 +13,7 @@ import io
 import json
 import re
 import statistics
+import subprocess
 import sys
 import unittest
 import unittest.mock
@@ -32,11 +33,6 @@ ROW = re.compile(r"^(?P<name>\S.*?) +(?P<metric>Score|Time) +"
                  r"(?P<a>-?[0-9.]+)\+-[0-9.]+ +(?P<b>-?[0-9.]+)\+-[0-9.]+ ")
 
 
-class Ran:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
-
-
 def in_process(fn, *args, **kw):
     """`fn`'s stdout, stderr and exit status, as the command would have had them."""
     out, err, rc = io.StringIO(), io.StringIO(), 0
@@ -47,7 +43,7 @@ def in_process(fn, *args, **kw):
             rc = 1 if isinstance(e.code, str) else (e.code or 0)
             if isinstance(e.code, str):
                 err.write(e.code + "\n")
-    return Ran(rc, out.getvalue(), err.getvalue())
+    return subprocess.CompletedProcess(None, rc, out.getvalue(), err.getvalue())
 
 
 def rep(a, b, html=""):

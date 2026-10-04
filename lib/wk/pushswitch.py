@@ -3,7 +3,7 @@ import signal
 import sys
 
 from wk import act, guest, images, job, secrets, store
-from wk.act import Refused, die, info, log, warn
+from wk.act import Refused, changed, die, info, log, warn
 
 ROOT = images.root()
 
@@ -23,10 +23,6 @@ else
 fi'''
 
 NOT_RUNNING = ("absent", "created", "configured", "exited", "stopped")
-
-
-def changed(msg):
-    info(("dry run: " if act.dry_run() else "") + msg)
 
 
 class Push:
@@ -127,8 +123,8 @@ class Push:
     def require_agent_target(self):
         if self.ws_sock:
             return
-        warn("'%s' is a build box: it holds no deploy key, so there is no switch here.\n    A push is from a shell 'wk enter <workspace>' "
-             "opens from the workstation, which\n    forwards that workstation's agent: switch it there." % self.target_name)
+        warn("'%s' is a build box: it holds no deploy key, so there is no switch here.\n    A push is made from the workstation, "
+             "with the switch there:  wk pr open <workspace>" % self.target_name)
         raise Refused(NO_SWITCH)
 
     def switch_on(self):

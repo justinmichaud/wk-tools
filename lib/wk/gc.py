@@ -195,6 +195,7 @@ class Gc:
     def remote_rows(self):
         rows = []
         for t in self.remotes():
+            rows += self.box_record_rows(t)
             ok, why = t.answers()
             if not ok:
                 rows.append(rb.row("remote-mirror", "%s: its store's mirror" % t.name, None,
@@ -203,6 +204,19 @@ class Gc:
             kb = rb.du_kb(t.machine, t.root_there() + "/git/WebKit.git")
             if kb is not None:
                 rows.append(rb.row("remote-mirror", "%s: its store's mirror" % t.name, kb, "wk machine rm %s" % t.name))
+        return rows
+
+    def box_record_rows(self, t):
+        """A build record kept here for a box, whose builds are recorded on the box by its own wk."""
+        rows = []
+        for task in t.records(self.clock).list():
+            if task.field("kind") != "build":
+                continue
+            what = "%s: a build record of '%s' kept here, not on the box" % (t.name, task.field("name"))
+            pid, paths = task.field("pid"), [str(task.path)] + ([task.field("log")] if task.field("log") else [])
+            why = "kept -- its driver, pid %s, still runs here: 'kill %s' ends it" % (pid, pid) if task.alive(None) else ""
+            rows.append(rb.row("box-record", what, rb.du_kb(self.here, str(task.path)), "--purge-rubble",
+                               rb.remover(self.here, *paths), why))
         return rows
 
     def print_rows(self):

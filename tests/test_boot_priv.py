@@ -396,7 +396,7 @@ class TestTheDrivingEndAsksForTheOperationNotThePrivilege(unittest.TestCase):
     def _rpi5(require_ok=True):
         import sys
         sys.path.insert(0, str(REPO / "lib"))
-        from wk.boot.fake import FakeBoard
+        from tests.fake_boot import FakeBoard
         from wk.boot.pi import Rpi5Usb
         from wk.machine import Result
         conf = {"name": "rpi5", "driver": "rpi5-usb", "device": "/dev/sda",

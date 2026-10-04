@@ -14,6 +14,7 @@ import shlex
 import unittest
 from unittest import mock
 
+from tests.fakes import FakeRegistry, FakeTarget
 from tests.killpoints import converges
 from tests.test_wk_secrets import ROOT, SECRETFILE, SecretsTest, World
 
@@ -69,30 +70,6 @@ class Peer:
             return self.login
         v = self.creds.get(name, "")
         return judge(name, v, "path", {}) + ("\n    fingerprint: fp-%s" % v if v else "")
-
-
-class FakeTarget:
-    kind = "remote"
-
-    def __init__(self, name, world, peer):
-        self.name, self.machine, self.peer = name, world, peer
-
-    def has_wk(self):
-        return True
-
-    def wk_cmd(self, args, env):
-        return "PEER %s %s" % (self.name, " ".join(shlex.quote(a) for a in args))
-
-
-class FakeRegistry:
-    def __init__(self, world, boxes=()):
-        self.world, self.boxes = world, list(boxes)
-
-    def machines(self):
-        return sorted(list(self.world.peers) + self.boxes)
-
-    def load(self, name):
-        return FakeTarget(name, self.world, name in self.world.peers)
 
 
 class KeyWorld(World):
@@ -232,7 +209,8 @@ class KeyTest(SecretsTest):
 
     def key(self, w=None, rotate=False, tty=False, typed="", boxes=()):
         w = w or self.w
-        return cli.Key(ROOT, env=w.env, machine=w, reg=FakeRegistry(w, boxes), sec=w.sec(), tty=lambda: tty,
+        reg = FakeRegistry(w.env, w, lambda n, e: FakeTarget(n, peer=n in w.peers, machine=w), names=sorted(list(w.peers) + list(boxes)))
+        return cli.Key(ROOT, env=w.env, machine=w, reg=reg, sec=w.sec(), tty=lambda: tty,
                        prompt=lambda *a: typed or None, out=io.StringIO(), rotate=rotate)
 
     def run_verb(self, verb, w=None, **kw):

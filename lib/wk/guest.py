@@ -558,6 +558,10 @@ def vm_max(env):
     return int(env.get("WK_VM_MAX") or 2)
 
 
+def vm_share(env):
+    return bool(env.get("WK_VM_SHARE"))
+
+
 def vm_forced(env):
     return bool(env.get("WK_VM_FORCE"))
 
@@ -874,7 +878,7 @@ def memory_budget(host, name, mine):
         warn("the podman machine did not stop; '%s' may not fit" % name)
     if mine + pod + guests <= budget:
         return
-    if env.get("WK_VM_SHARE"):
+    if vm_share(env):
         warn("'%s' (%dMB) on top of %dMB podman + %dMB of running guests exceeds the %dMB envelope -- continuing because "
              "WK_VM_SHARE is set" % (name, mine, pod, guests, budget))
         return
@@ -890,6 +894,25 @@ def memory_budget(host, name, mine):
     die("not enough memory to start '%s'.\n%s\n      podman machine stop %s\n          free the whole envelope (workspaces "
         "and their state survive)\n      wk stop <name>\n          free a running guest\n%s\n      WK_VM_SHARE=1, then retry\n"
         "          proceed anyway" % (name, rows, vm.podman_machine(), advice))
+
+
+def podman_admit(vm):
+    """The podman machine holds its whole size from the moment it starts, so it is refused beside running guests it does not fit with."""
+    from wk.resources import Resources
+    from wk.targets import podman_vm
+    name = Store(vm.env).podman_machine()
+    pod = int(((podman_vm(vm.machine, name) or {}).get("Resources") or {}).get("Memory") or 0)
+    guests = vm.committed_mem_mb(None)
+    budget = Resources(vm.machine, vm.env, "macos").envelope_mem_mb()
+    if not guests or pod + guests <= budget:
+        return
+    if vm_share(vm.env):
+        warn("the podman machine '%s' (%dMB) on top of %dMB of running guests exceeds the %dMB envelope -- starting it "
+             "because WK_VM_SHARE is set" % (name, pod, guests, budget))
+        return
+    die("not starting the podman machine '%s' (%dMB): %dMB of macOS guests are running, and the\n"
+        "    host envelope is %dMB.\n      wk stop <name>\n          free a running guest ('wk ls' names them)\n"
+        "      WK_VM_SHARE=1, then retry\n          start it anyway" % (name, pod, guests, budget))
 
 
 def host_disk(host):

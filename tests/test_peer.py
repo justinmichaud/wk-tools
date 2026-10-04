@@ -30,8 +30,9 @@ from unittest import mock
 from tests.support import REPO, repo_files, WkTest, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets  # noqa: E402
+from wk import targets, workspace  # noqa: E402
 from wk.act import Refused  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 # Runs locally what `ssh <opts> <host> <command>` would have run over there.
 # Every option is dropped, then the destination, and what is left is the
@@ -74,6 +75,7 @@ case "$1 $3" in
 esac
 case "$1" in
 rm) : > "{removed}"; exit 0 ;;
+new) [ "$2" = refusedws ] && exit 3; exit 0 ;;
 esac
 exit 0
 """
@@ -213,14 +215,57 @@ class TestPeerDelegation(PeerFixture):
         self.assertFalse([c for c in self.peer_calls() if c.startswith("rm ")],
                          self.peer_calls())
 
-    def test_making_one_stays_with_the_owner(self):
-        """the other half of the lifecycle is still typed over there: this
-        driver would make a plain checkout under ~/wk, which is not what a
-        workstation's workspaces are"""
+    def test_making_one_is_the_peers_own_wk_new(self):
+        """`wk new <ws> --target <peer>` is the peer's `wk new <ws>` at its own default
+        target: the driver here would make a plain checkout under ~/wk instead"""
+        cp = self._wk("new", "newws", "--target", "peerbox", "--arch", "armhf", "--pr", "1234")
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("new newws --arch armhf --pr 1234 ", self.peer_calls())
+        self.assertEqual(0, self._wk("new", "newws", "--target", "peerbox", "--kill").returncode)
+        self.assertIn("new newws --kill ", self.peer_calls())
+        self.assertFalse((self.tmp / "remote-root").exists(), "a checkout was made here for the peer")
+
+    def test_zed_opens_the_peers_new_workspace_from_here(self):
+        cp = self._wk("new", "newws", "--target", "peerbox", "--no-wait", "--zed", "--dry-run")
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertEqual(self.peer_calls(), [], "a dry run hands nothing over")
+        self.assertRegex(cp.stdout, r"would run: .* new newws --no-wait")
+        self.assertRegex(cp.stdout, r"would run: \S*/cmd/zed newws")
+
+    def test_a_refused_creation_is_the_peers_refusal(self):
+        cp = self._wk("new", "refusedws", "--target", "peerbox")
+        self.assertEqual(cp.returncode, 3, cp.stdout)
+        self.assertIn("peerbox did not create 'refusedws'; what its own wk said is above.", cp.stdout)
+
+    def test_this_machine_named_as_a_peer_is_its_own_default(self):
+        (self.root / "machines" / "me.conf").write_text("kind=peer\npeer=1\nlocal=1\n")
+        reg = targets.Registry(self.root, env=dict(os.environ, **self.env()), machine=Fake("host"))
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
-            self.registry().load("peerbox").create("newws")
-        self.assertIn("ssh peerbox wk new newws", err.getvalue())
-        self.assertFalse(self.peer_calls())
+            workspace.new_front(reg, None, "newws", {"target": "me"})
+        self.assertIn("'me' is this machine, and its workspaces are made at its own default", err.getvalue())
+        self.assertEqual(reg.machine.effects, [])
+
+    def test_every_command_the_integration_run_types_reaches_the_peer(self):
+        """tests/test_dev_integration.py's moose steps, typed here: each command about the
+        peer's workspace runs there, by its own wk, never against anything here"""
+        steps = [(("start", "peerws"), "start peerws "),
+                (("ai", "claude", "peerws", "-p", "hi"), "ai claude peerws -p hi "),
+                (("build", "peerws", "jsc-debug", "--detach"), "build peerws jsc-debug --detach "),
+                (("status", "peerws", "--wait", "--timeout", "60"), "status --no-fleet --records peerws "),
+                (("logs", "peerws"), "logs peerws "),
+                (("enter", "peerws", "--", "bash", "-lc", "true"), "enter peerws -- bash -lc true "),
+                (("sync", "peerws"), "sync peerws "),
+                (("doctor", "peerws"), "doctor peerws "),
+                (("push", "on", "--target", "peerbox", "--yes"), "push on yes=1 "),
+                (("push", "status", "--target", "peerbox"), "push status ")]
+        for argv, asked in steps:
+            with self.subTest(argv=argv):
+                cp = self._wk(*argv)
+                self.assertEqual(cp.returncode, 0, cp.stdout)
+                self.assertIn(asked, self.peer_calls())
+        cp = self._wk("ls", "--json", extra_env={"WK_TARGET": "peerbox"})
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("ls --continued --json ", self.peer_calls())
 
     def test_a_here_command_stays_here(self):
         """`wk zed` is declared `here`: it asks the peer for a route and opens it from this machine"""

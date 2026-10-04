@@ -1,7 +1,7 @@
 """lint.effects_through_machine: a process, a file write, a removal or an exec
 in lib/wk or a Python command goes through lib/wk/machine.py or lib/wk/act.py,
 the one path `--dry-run` intercepts. A file that acts directly is named below,
-in NOT_STATE with why that is no state change, or in OWED until it moves.
+in NOT_STATE with why that is no state change.
 
 Run: python3 tests/run.py --lint -k test_lint_effects
 """
@@ -9,7 +9,7 @@ TIER = "lint"
 import re
 import unittest
 
-from tests.support import REPO, owed
+from tests.support import REPO
 
 SEAM = {"lib/wk/machine.py", "lib/wk/act.py"}
 EFFECT = re.compile(
@@ -32,18 +32,12 @@ NOT_STATE = {
     "lib/wk/status.py": "a checksum read",
     "lib/wk/statusview.py": "the --html page asked for",
     "lib/wk/slot.py": "`python3 -m wk.slot`: a step's tool writing the output its caller named",
+    "lib/wk/mac.py": "`python3 -`: the program a Machine runs on the Mac (autorun's `sudo wkmac display-mode --declare`); the effect is that act_run",
     "lib/wk/pgo.py": "`python3 -m wk.pgo`: a step's tool writing the output its caller named",
     "lib/wk/bench/cli.py": "copies into its own temporary directory",
     "cmd/logs": "tail -f is a read",
     "cmd/selftest": "the test runner is the command",
 }
-
-OWED = {
-    "lib/wk/bench/board_driver.py": "its own ssh and tar to the board, not the Machine copy",
-    "lib/wk/mac.py": "writes WindowServer's plist directly",
-    "cmd/ai": "the session's Popen",
-}
-
 
 def acting_files():
     files = list((REPO / "lib" / "wk").rglob("*.py"))
@@ -63,14 +57,9 @@ def acting_files():
 class TestEffectsGoThroughMachine(unittest.TestCase):
     def test_every_direct_effect_is_named(self):
         found = acting_files()
-        self.assertEqual(sorted(found - set(NOT_STATE) - set(OWED)), [],
+        self.assertEqual(sorted(found - set(NOT_STATE)), [],
                          "acts outside lib/wk/machine.py: route it through the Machine or act, or name why it is no state change")
-        self.assertEqual(sorted((set(NOT_STATE) | set(OWED)) - found), [], "named here but no longer acts directly: remove it")
-        self.assertEqual(sorted(set(NOT_STATE) & set(OWED)), [])
-
-    @owed("lint.effects_through_machine: the OWED files still act outside the seam")
-    def test_no_state_change_bypasses_the_seam(self):
-        self.assertEqual(sorted(acting_files() & set(OWED)), [])
+        self.assertEqual(sorted(set(NOT_STATE) - found), [], "named here but no longer acts directly: remove it")
 
 
 if __name__ == "__main__":

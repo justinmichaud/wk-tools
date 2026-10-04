@@ -109,6 +109,8 @@ def new_front(reg, records, name, opts):
         target = reg.load(tname)
     except LookupError as e:
         die(str(e))
+    if getattr(target, "peer", False):
+        return new_on_peer(target, here, root, name, arch, opts)
     recs = record.of_target(target, records.clock, records.machine)
     if opts.get("kill"):
         return new_kill(target, here, recs, env, name, opts)
@@ -174,10 +176,34 @@ def new_front(reg, records, name, opts):
         pr_checkout(target, here, name, pr)
     new_hints(target, name, arch)
     if opts.get("zed"):
-        r = here.act_run([os.path.join(str(root), "cmd", "zed"), name])
-        show(r)
-        if not r.ok:
-            warn("'%s' is there; opening it in Zed is what failed (above) -- 'wk zed %s' retries" % (name, name))
+        open_zed(here, root, name)
+    return 0
+
+
+def open_zed(here, root, name):
+    r = here.act_run([os.path.join(str(root), "cmd", "zed"), name])
+    show(r)
+    if not r.ok:
+        warn("'%s' is there; opening it in Zed is what failed (above) -- 'wk zed %s' retries" % (name, name))
+
+
+def new_on_peer(target, here, root, name, arch, opts):
+    """A peer workstation's workspaces are its own: its `wk new`, at its own default target, makes this one."""
+    if target.is_local:
+        die("'%s' is this machine, and its workspaces are made at its own default\n"
+            "    target:  wk new %s" % (target.name, name))
+    if opts.get("base"):
+        die("--base names a snapshot in this machine's store, and %s makes '%s' from its own.\n"
+            "    Drop --base, or on %s:  wk new %s --base <id>" % (target.name, name, target.name, name))
+    args = [name] + (["--arch", arch] if arch != "native" else [])
+    if opts.get("pr"):
+        args += ["--pr", opts["pr"]]
+    args += [flag for key, flag in (("no_wait", "--no-wait"), ("kill", "--kill")) if opts.get(key)]
+    r = here.act_run(target.hand_over("new", args, tty=os.isatty(0) and os.isatty(1)), tty=True)
+    if not r.ok:
+        die("%s did not create '%s'; what its own wk said is above." % (target.name, name), status=r.rc)
+    if opts.get("zed"):
+        open_zed(here, root, name)
     return 0
 
 
@@ -251,7 +277,7 @@ def new_driver(target, records, lock, clock, name, base, arch):
     return 0
 
 
-# Before the store lock, which `wk sync --mirror` takes for itself; other workspaces are left alone.
+# Before the store lock, which `wk sync --mirror` takes for itself; a refresh that moves a ref remounts each running guest's shares.
 def refresh_mirror(target, here, name):
     r = here.act_run([wk_of(target.root), "sync", "--mirror"])
     show(r)

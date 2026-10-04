@@ -147,9 +147,9 @@ class TestAMacReadsItsZipsBeforeTheRemovalIsForwarded(WkTest):
         self.home = self.tmp / "home"
 
     def reg(self, **env):
-        from tests.test_bench_task import FakeRegistry
+        from tests.test_bench_task import registry
         from wk.machine import Local
-        reg = FakeRegistry(self.tmp / "store", env=dict(env, HOME=str(self.home)))
+        reg = registry(self.tmp / "store", env=dict(env, HOME=str(self.home)))
         reg.load = lambda name: _Holder(Local(), str(self.tmp / "vm" / "ws" / "w" / "bench"))
         return reg
 
@@ -184,4 +184,3 @@ class TestAMacReadsItsZipsBeforeTheRemovalIsForwarded(WkTest):
         text = (REPO / "lib" / "wk" / "dispatch.py").read_text()
         branch = text[text.index('if d.post == "ssh-alias-remove":'):]
         self.assertLess(branch.index("refuse_unsaved_before_forward"), branch.index("forward_status"))
-        self.assertLess(branch.index("except act.Refused"), branch.index("forward_status"), "a refusal is an exit status, not a traceback")

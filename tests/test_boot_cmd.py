@@ -27,7 +27,7 @@ from wk import act, status, statusview  # noqa: E402
 from wk.boot import drivers  # noqa: E402
 from wk.boot import cli, eeprom  # noqa: E402
 from wk.boot.driver import part  # noqa: E402
-from wk.boot.fake import FakeBoard  # noqa: E402
+from tests.fake_boot import FakeBoard  # noqa: E402
 from wk.machine import Fake, Killed, Result  # noqa: E402
 
 PI_KINDS = ("pi-sd", "pi-tryboot", "rpi5-usb", "pi-mbr")

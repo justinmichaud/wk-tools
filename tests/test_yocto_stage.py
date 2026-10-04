@@ -17,11 +17,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes import FakeProc, FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO
+from tests.test_sysimage_task import Box
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import build, images, job, record, targets  # noqa: E402
+from wk import build, images, job, record  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result, isolated_module  # noqa: E402
@@ -32,58 +34,6 @@ WS = "yocto-" + PROFILE
 CROSS_TARGET = "rpi4-64bits-mesa"
 SHA = "a" * 40
 TASK_LINE = "NOTE: Running task 7658 of 13213 (virtual:native:/w/sources/meta-clang/recipes-devtools/clang/clang_git.bb:do_compile)\n"
-
-
-class Box(targets.Target):
-    kind = "container"
-
-    def podman(self):
-        return ["podman"]
-
-    def ctr(self, ws):
-        return "wk-" + ws
-
-    def info(self, ws):
-        return "running" if self.machine.made else "absent"
-
-    def exec(self, ws, argv, tty=False, timeout=None):
-        return self.machine.run(["exec", ws] + list(argv))
-
-    def exec_argv(self, ws, argv, tty=False):
-        return ["exec", ws] + list(argv), None
-
-
-class Reg(targets.Registry):
-    def __init__(self, world):
-        super().__init__(REPO, env=world.env, machine=world)
-        self.world = world
-
-    def load(self, name):
-        return Box("box", self.root, self.env, self.world)
-
-    def default(self):
-        return "box"
-
-
-class Proc:
-    """Running for `polls` polls, then exiting `rc`; `grow` is called on each poll, to write to the log."""
-
-    def __init__(self, rc, polls, grow):
-        self.pid, self.rc, self.polls, self.grow, self.returncode = 4242, rc, polls, grow, None
-
-    def poll(self):
-        if self.polls is None or self.polls > 0:
-            if self.polls:
-                self.polls -= 1
-            if self.grow:
-                self.grow()
-            return None
-        self.returncode = self.rc if self.returncode is None else self.returncode
-        return self.returncode
-
-    def wait(self):
-        self.returncode = -9 if self.returncode is None else self.returncode
-        return self.returncode
 
 
 class World(Fake):
@@ -116,7 +66,7 @@ class World(Fake):
         self.sections = Result(0, "[rpi3-32bits-mesa]\n[%s]\nimage_basename = webkit-dev-ci-tools\n" % CROSS_TARGET)
         self.react(["exec", WS, "bash", "-c"], self._bash)
         self.react(["exec", WS, "kill", "-0"], lambda a, f: Result(0 if int(a[-1]) in f.pids else 1))
-        self.reg = Reg(self)
+        self.reg = FakeRegistry(self.env, self, lambda n, e: Box("box", str(REPO), self.env, self), default=lambda: "box")
         self.ws_dir = os.path.join(str(store), "ws", WS)
         os.makedirs(os.path.join(self.ws_dir, "home"))
         self.log = os.path.join(self.ws_dir, "home", "yocto-image.log")
@@ -147,7 +97,7 @@ class World(Fake):
     def popen(self, argv, stdin=None, stdout=None, stderr=None, cwd=None):
         self.effect(("watch", tuple(argv)))
         stdout.write(self.out)
-        return Proc(self.rc, self.polls, self.grow)
+        return FakeProc(self.rc, self.polls, grow=self.grow)
 
     def driver(self):
         return yocto.Yocto(self.reg, self.profile(), PROFILE, self.clock, self.popen)

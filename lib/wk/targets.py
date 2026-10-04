@@ -26,8 +26,9 @@ FIRSTRUN_MARKER = ".wk-firstrun-complete"   # TODO: drop once no pre-marker work
 STATES_NOT_THERE = ("absent", "creating", "broken", "unreachable")
 READY_TIMEOUT = 300
 WK_FLAGS = ("WK_DEBUG", "WK_QUIET", "WK_YES", "WK_FORCE", "WK_DRY_RUN", "WK_NO_DELEGATE")
-WK_CARRIED = ("WK_ROW_LABEL", "WK_ZED_PUBKEY")
-GUEST_MIRROR = "/Volumes/My Shared Files/mirror/WebKit.git"   # where macOS automounts the tart share `mirror`
+WK_CARRIED = ("WK_ROW_LABEL", "WK_ZED_PUBKEY", "WK_SDK_IMAGE")
+GUEST_SHARES = "/Volumes/My Shared Files"
+GUEST_MIRROR = GUEST_SHARES + "/mirror/WebKit.git"
 TOOLS = "/opt/wk-tools"
 BRIDGE = TOOLS + "/container/proxy/ensure-bridge.sh"
 PROXY = "http://127.0.0.1:3128"
@@ -79,6 +80,10 @@ def git_base(target, ws):
     r = target.exec(ws, ["sh", "-c", "cd %s 2>/dev/null || exit 0\n%s" % (shlex.quote(target.src(ws)), UPSTREAM_LINE)])
     out = r.out.replace("\r", "").strip().splitlines()
     return out[-1] if r.ok and out else None
+
+
+def default_root(home):
+    return home.rstrip("/") + "/wk"
 
 
 def remote_marker_path(env):
@@ -205,8 +210,10 @@ class Registry:
     def in_remote_host(self):
         return os.path.isfile(self.remote_marker_path())
 
-    def remote_marker_field(self, key):
-        return kv.kv_file(self.remote_marker_path()).get(key, "")
+    def far_root(self):
+        """This far end's root: its own conf's, since two machines of one home share the marker and nothing machine-specific is in it."""
+        conf = self.fleet.load(self.self_target()) or {}
+        return conf.get("root") or default_root(self.env.get("HOME", os.path.expanduser("~")))
 
     def self_target(self):
         if not self.in_remote_host():
@@ -510,6 +517,19 @@ class Target:
         pre += "".join("%s=1 " % v for v in WK_FLAGS if env.get(v))
         pre += "".join("%s=%s " % (v, shlex.quote(env[v])) for v in WK_CARRIED if env.get(v))
         return "%s%s %s" % (pre, shlex.quote(wk), shlex.join(args))
+
+    def hand_over(self, cmd, args, tty):
+        self.far_wk_or_die(cmd)
+        return self.machine.argv(self.wk_cmd([cmd, *args], dict(os.environ, WK_ROW_LABEL=self.name)), tty=tty)
+
+    def far_wk_or_die(self, cmd):
+        far = self.far_side()
+        if far == "unreachable":
+            act.die("'%s' acts on a workspace on %s, and %s did not answer.\n"
+                    "    Nothing here can reach into it: the workspace is that machine's own." % (cmd, self.name, self.name))
+        if far != "answering":
+            act.die("'%s' acts on a workspace on %s, which has no wk-tools of its own to\n"
+                    "    run it:  wk machine setup %s" % (cmd, self.name, self.name))
 
     def branch(self, ws):
         if self.info(ws) in STATES_NOT_THERE:
@@ -1030,6 +1050,19 @@ class Container(Target):
     def sdk_image(self):
         return self.env.get("WK_SDK_IMAGE")
 
+    def check_sdk_tag(self):
+        r = self.machine.run(self.sdk_env() + [os.path.join(self.sdk(), "scripts", "helpers", "print-sdk-version")])
+        tag = r.out.strip() if r.ok else ""
+        published = self.sdk_upstream() if tag else None   # a registry that cannot be asked is left to the pull's own failure
+        if published is None or tag in published:
+            return
+        series = tag.split("-v")[0] + "-v"
+        newest = max((t for t in published if re.fullmatch(re.escape(series) + r"\d+-[0-9a-f]+", t)),
+                     key=lambda t: int(t[len(series):].split("-")[0]), default="<tag>")
+        act.die("the SDK checkout asks for image %s:%s, which upstream has not published.\n"
+                "    The newest published tag of that series is %s.\n"
+                "    Use it:  WK_SDK_IMAGE=%s:%s wk new ..." % (SDK_REPO, tag, newest, SDK_REPO, newest))
+
     def create_argv(self, ws, base, arch):
         u = self.user()
         argv = self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", "wkdev-create"), "--network", "none", "--isolated"]
@@ -1047,6 +1080,8 @@ class Container(Target):
             act.die("base snapshot %s not found; run 'wk sync' first" % base)
         if self.exists(ws):
             act.die("workspace '%s' already exists" % ws)
+        if not (self.sdk_image() or arch_image(arch)):
+            self.check_sdk_tag()
         for d in (ws_dir, "changes", "overlay-work", "home", "build"):
             self.machine.mkdir(d if d == ws_dir else os.path.join(ws_dir, d))
         self._ensure_home_mountpoint(ws_dir, os.path.dirname(self.store.mirror()))
@@ -1265,10 +1300,18 @@ class Vm(Target):
         return m if m is not None else Resources(self.machine, self.env, "macos").envelope_mem_mb()
 
     def agent_rw_dir(self):
-        return "/Volumes/My Shared Files/" + self.agent_rw_share
+        return GUEST_SHARES + "/" + self.agent_rw_share
 
     def login_note(self):
         guest.login_note(self.env)
+
+    # tart serves every untagged --dir share (agent-rw too) under this one tag macOS automounts at GUEST_SHARES; a fresh mount re-reads renamed-over refs.
+    def remount_shares(self, ws):
+        q = shlex.quote(GUEST_SHARES)
+        r = self.act_exec(ws, ["sh", "-c", "if mount | grep -qF %s; then sudo -n umount %s || exit; fi; sudo -n mkdir -p %s && "
+                                           "sudo -n mount_virtiofs com.apple.virtio-fs.automount %s"
+                                           % (shlex.quote(" on %s (" % GUEST_SHARES), q, q, q)])
+        return "" if r.ok else (r.err.strip() or r.out.strip() or "exit %d" % r.rc)
 
     def check_rows(self, ws):
         return guest.check_rows(self, ws)
@@ -1612,6 +1655,13 @@ class LocalWorkspace(Target):
     def destroy(self, ws):
         act.die("a workspace cannot destroy itself -- run 'wk rm %s' on the host" % self.ws_name)
 
+    def start(self, ws):
+        act.info("'%s' is the workspace this runs in, so it is up -- nothing to start" % self.ws_name)
+        return True
+
+    def stop(self, ws):
+        act.die("a workspace cannot stop itself -- run 'wk stop %s' on the host" % self.ws_name)
+
     def enter_argv(self, ws):
         act.die("already inside workspace '%s'" % self.ws_name)
 
@@ -1646,7 +1696,6 @@ class Remote(Target):
 
     def __init__(self, name, root, env, machine):
         super().__init__(name, root, env, machine)
-        marker = kv.kv_file(remote_marker_path(env))
         self.host = env.get("WK_REMOTE_HOST") or (name if name != "remote" else "")
         self.peer = bool(env.get("WK_REMOTE_PEER"))
         try:
@@ -1656,7 +1705,7 @@ class Remote(Target):
         self.is_local = bool(env.get("WK_REMOTE_LOCAL")) or (bool(here_target) and here_target == name)
         self.needs_base = self.is_local
         self.conf_root = env.get("WK_REMOTE_ROOT", "")
-        root_there = self.conf_root or (marker.get("root", "") if self.is_local else "")
+        root_there = self.conf_root or (default_root(env.get("HOME", os.path.expanduser("~"))) if self.is_local else "")
         if self.is_local and root_there:
             store = env.get("WK_REMOTE_STORE") or root_there
         else:
@@ -2016,9 +2065,6 @@ class Remote(Target):
         return ok
 
     def create(self, ws, base=None, arch="native"):
-        if self.peer:
-            act.die("'%s' is a workstation, not a build machine for this one.\n    Its workspaces are its own -- containers or guests, from its own store --\n"
-                    "    and this driver would make a plain checkout under ~/wk instead. Create it\n    there:  ssh %s wk new %s" % (self.label(), self.label(), ws))
         self._probe_or_die()
         root, wsd, host = self.root_there(), self.ws_dir_there(ws), self.label()
         st = self.info(ws)
@@ -2174,7 +2220,7 @@ def parse_probe(text, root=""):
                     if l.startswith(("Pages free:", "Pages inactive:", "Pages speculative:")))
         mem_mb = pages * int(size[0].group(1)) // 1024 // 1024
     return {"home": home, "cores": cores, "load": load, "mem_mb": mem_mb, "ionice": ionice,
-            "os": "macos" if uname == "Darwin" else "linux", "root": root or home + "/wk"}
+            "os": "macos" if uname == "Darwin" else "linux", "root": root or default_root(home)}
 
 
 def _num(s, what):

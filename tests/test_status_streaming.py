@@ -87,6 +87,18 @@ class TestTextStreamsAsRecordsArrive(unittest.TestCase):
         self.assertEqual(tap.when(lambda l: "probing slowbox" in l), 1)
         self.assertGreater(tap.when(lambda l: l.strip() == "slowbox"), 1)
 
+    def test_a_delegated_machines_heading_comes_before_its_rows_even_when_its_rows_lead_or_its_job_never_flushes(self):
+        """`unit status.renders_partial`: a delegated answer whose rows precede its machine record, and one cut off before its flush."""
+        for records in ([_plan(("far", "far")), _rec(kind="workspace", machine="far", method="native", name="ws-far", state="present", ws="present"),
+                         _rec(kind="machine", name="far"), _rec(kind="flush", job="far"), _rec(kind="exit", code=0)],
+                        [_plan(("far", "far")), _rec(kind="machine", name="far"),
+                         _rec(kind="workspace", machine="far", method="native", name="ws-far", state="present", ws="present"),
+                         _rec(kind="exit", code=0)]):
+            tap, _ = _render(records)
+            out = [l for _, l in tap.lines]
+            heading = next(i for i, l in enumerate(out) if l.strip() == "far")
+            self.assertLess(heading, next(i for i, l in enumerate(out) if "ws-far" in l), "\n".join(out))
+
 
 class TestABlockWaitsForEveryPlannedJob(unittest.TestCase):
     """A macOS host feeds one machine from two jobs, the podman VM's container target and the tart vm target."""

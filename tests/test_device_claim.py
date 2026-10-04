@@ -30,6 +30,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes import FakeTarget
 from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -127,22 +128,6 @@ class TestTheRecordDeclaresWhatItHolds(ClaimTest):
         self.assertEqual([], self.rows())
 
 
-class Target:
-    """A machine that answers a probe with `side` and its own wk with (rc, out)."""
-
-    def __init__(self, name, side="answering", why="", rc=0, out=""):
-        self.name, self.env = name, {}
-        self.side, self.why, self.rc, self.out = side, why, rc, out
-        self.asked = []
-
-    def probe(self):
-        return self.side, self.why
-
-    def wk(self, *args, env=None, quiet=False):
-        self.asked.append(args)
-        return self.rc, self.out
-
-
 class TestTheFleetIsAsked(unittest.TestCase):
     def setUp(self):
         self.records = mock.Mock()
@@ -171,19 +156,19 @@ class TestTheFleetIsAsked(unittest.TestCase):
             return [(name, ask("device:rpi5")) for name, ask in record.fleet_stores(str(REPO), {}, Fake())]
 
     def test_a_peer_is_asked_through_its_own_wk(self):
-        moose = Target("moose", out="\t".join(ROW))
+        moose = FakeTarget("moose", out="\t".join(ROW))
         self.assertEqual([("moose", ("\t".join(ROW), ""))], self.stores(True, {"moose": moose}))
-        self.assertEqual([("status", "--holds", "device:rpi5")], moose.asked)
+        self.assertEqual([("status", "--holds", "device:rpi5")], [args for args, _, _ in moose.asked])
 
     def test_a_peer_that_cannot_be_reached_is_not_asked_and_says_why(self):
-        moose = Target("moose", side="unreachable", why="timed out")
+        moose = FakeTarget("moose", side="unreachable", why="timed out")
         [(_, (rows, why))] = self.stores(True, {"moose": moose})
         self.assertIsNone(rows)
         self.assertIn("unreachable over ssh", why)
         self.assertEqual([], moose.asked)
 
     def test_a_peer_whose_wk_does_not_read_the_flag_names_the_sync(self):
-        [(_, (rows, why))] = self.stores(True, {"moose": Target("moose", rc=1)})
+        [(_, (rows, why))] = self.stores(True, {"moose": FakeTarget("moose", rc=1)})
         self.assertIsNone(rows)
         self.assertIn("wk sync --tools moose", why)
 
@@ -193,13 +178,13 @@ class TestTheFleetIsAsked(unittest.TestCase):
         self.assertEqual([], self.stores(True, {}, peers=()))
 
     def test_a_store_elsewhere_is_asked_as_well(self):
-        vm = Target("container", out="\t".join(ROW))
+        vm = FakeTarget("container", out="\t".join(ROW))
         [(name, (rows, _))] = self.stores(False, {"container": vm}, peers=())
         self.assertIn("podman machine", name)
         self.assertEqual("\t".join(ROW), rows)
 
     def test_a_podman_machine_that_did_not_answer_says_so(self):
-        [(name, (rows, why))] = self.stores(False, {"container": Target("container", rc=1)}, peers=())
+        [(name, (rows, why))] = self.stores(False, {"container": FakeTarget("container", rc=1)}, peers=())
         self.assertIn("podman machine", name)
         self.assertIsNone(rows)
         self.assertIn("wk start", why)

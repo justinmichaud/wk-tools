@@ -16,7 +16,7 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import act, fleet  # noqa: E402
 from wk.boot import driver_class  # noqa: E402
 from wk.boot.driver import Channel, Driver, Onboard, interface, part  # noqa: E402
-from wk.boot.fake import FakeBoard  # noqa: E402
+from tests.fake_boot import FakeBoard  # noqa: E402
 from wk.boot import drivers, open_driver  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 from tests.test_mac_volume import FAKES, MacConformance, mac_board, conf_for as mac_conf  # noqa: E402

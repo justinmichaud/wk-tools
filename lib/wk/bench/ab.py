@@ -11,7 +11,7 @@ import statistics
 import sys
 from fnmatch import fnmatchcase
 
-from wk import act, fleet, git, images, job, pgo, pr, record as progress, sched
+from wk import act, fleet, git, images, job, pgo, pr, record as progress, sched, sync
 from wk.act import Refused, die, info, log, warn
 from wk.bench import board, board_ab, record
 from wk.lock import Lock
@@ -180,7 +180,7 @@ class AB:
             remote, n = self.pr["remote"], self.pr["n"]
             dest = "refs/remotes/pr/" + pr.pull_refname(remote, n)
             self.head = self._resolved_or_planned(dest, "pull request %s" % n,
-                                                  lambda: pr.mirror_fetch_pull(self.here, self.store, self.lock, remote, n))
+                                                  lambda: sync.fetch_pull_into_mirror(self.here, self.store, self.lock, remote, n))
             if not self.head:
                 die("the mirror has no head for pull request %s after fetching it" % n)
             self.head_desc = "%s (pull request %s on %s)" % (s, n, remote)
@@ -199,7 +199,7 @@ class AB:
         ref = pr.pr_refname(user, repo, branch)
         dest = "refs/remotes/pr/" + ref
         self.head = self._resolved_or_planned(dest, "%s:%s from %s" % (user, branch, url),
-                                              lambda: pr.mirror_fetch(self.here, self.store, self.lock, url, "refs/heads/" + branch, dest))
+                                              lambda: sync.fetch_into_mirror(self.here, self.store, self.lock, url, "refs/heads/" + branch, dest))
         if not self.head:
             die("the mirror has no head for '%s' after fetching it from %s" % (branch, url))
         self.head_desc = "%s:%s (branch of %s/%s)" % (user, branch, user, repo)
@@ -283,7 +283,7 @@ class AB:
             die("no upstream remote '%s' (lib/wk/git.py REMOTES) to fetch %s from" % (remote, branch))
         dest = "refs/remotes/%s/%s" % (remote, branch)
         tip = self._resolved_or_planned(dest, "%s/%s" % (remote, branch),
-                                        lambda: pr.mirror_fetch(self.here, self.store, self.lock, url, "refs/heads/" + branch, dest))
+                                        lambda: sync.fetch_into_mirror(self.here, self.store, self.lock, url, "refs/heads/" + branch, dest))
         if not tip:
             die("the mirror has no %s/%s after fetching it" % (remote, branch))
         self.branch = "%s/%s" % (remote, branch)

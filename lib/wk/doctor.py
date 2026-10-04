@@ -425,7 +425,7 @@ class Doctor:
             yield self.local_state(d, "backed-up", "benchmark runs and their provenance -- not regenerable at any price; a rerun is a "
                                    "different measurement; wk bench export <task> copies one out")
         if bench_record.tasks(bench_record.outside(store), self.machine):
-            yield self.local_state(bench_record.outside(store), "backed-up", "benchmark tasks outside any workspace, which no command reads "
+            yield self.local_state(bench_record.outside(store), "backed-up", "bench tasks outside any workspace, which no command reads "
                                    "until each is moved into its workspace's bench/: wk gc names each one's move")
         yield self.local_state(store.mirror(), "regenerable",
                                "wk sync clones WebKit into it again (the one copy here; the podman VM and every tart guest read it)")

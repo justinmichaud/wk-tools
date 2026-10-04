@@ -72,6 +72,19 @@ class TestRemoteProbeParseLinux(unittest.TestCase):
         self.assertEqual(targets.parse_probe(LINUX_SAMPLE, "/srv/wk")["root"], "/srv/wk")
 
 
+class TestTheDefaultRoot(unittest.TestCase):
+    """A far end with no `root=` in its conf keeps its store at one default under its home, however it is asked."""
+
+    def test_the_probe_the_far_end_and_the_driver_agree(self):
+        self.assertEqual(targets.parse_probe(LINUX_SAMPLE)["root"], targets.default_root("/home/t"))
+        env = {"HOME": "/h", "WK_REMOTE_MARKER": "/nonexistent/.wk-remote"}
+        reg = targets.Registry(REPO, env=env, machine=Fake())
+        reg.fleet.load = lambda name: {}
+        self.assertEqual(reg.far_root(), targets.default_root("/h"))
+        local = targets.Remote("box", REPO, dict(env, WK_REMOTE_LOCAL="1"), Fake())
+        self.assertEqual(local.store.root(), targets.default_root("/h"))
+
+
 class TestRemoteProbeParseDarwin(unittest.TestCase):
     def test_parses_cores_load_mem_ionice_os_from_sysctl_vm_stat(self):
         """cores, load and free memory come out of `sysctl -n hw.ncpu`,

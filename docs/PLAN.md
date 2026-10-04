@@ -109,6 +109,14 @@ on moves.
 
 PyYAML stays in `lib/wk/sysimage/pmos_build.py` (netplan's own dependency on the build host; the stdlib has no YAML reader); the bridge phones' images no longer install avahi and nothing here uses mDNS; `lint.one_wifi_reader` stays owed because the Mac reads its WiFi credential from the System keychain and the pmos build host from netplan, and routing both through `admin/wk-card-priv` would widen a privileged helper; `wk machine setup <board|mbp> --dry-run` on an unreachable machine prints the plan and exits 0 rather than refusing (a wet run still refuses), so the unit tier's ssh shim does not fail dry runs.
 
+Answered 2026-10-04: `pr.mirror_fetch` moves under `wk sync`, the mirror's one writer; the sync that rewrites the host mirror remounts its share in each running macOS guest; a push from a build box is made only from the workstation, against the box's checkout over ssh, and no key reaches a box; a build a workstation drives on a build box keeps its record on the box, handed to the box's wk.
+
+`wk ai --dry-run` runs its reads, prints each install as "would run" and takes it as done, prints the probe of what an install made instead of running it, then prints the push-switch change and the session's argv, and installs, switches and starts nothing (taken by the overnight run 2026-10-04; the user may overrule).
+
+Answered 2026-10-04 (second batch): DevIntegration step 13 closes the person's Zed, runs, and reopens nothing; guest commands run through `tart exec` (the guest agent), the one way into a guest; the mirror is its own tagged virtiofs share in a guest, mounted at boot, so a remount never touches agent-rw; a box whose wk-tools sha differs from the workstation's refuses, naming `wk sync --tools <box>`; `Host igalia.com` forwards no agent; a box push goes through the ssh-agent `wk push on` loads, not the key file; `wk gc` names a leftover `refs/wk/push/*` ref; agents are installed at `wk new`, so `wk ai` throws the push switch and starts the session (Claude's remote control on by default) and nothing more; the size budgets stand and the cut follows four rules -- upstream first, fewer cases and branches, no duplication, tests that test behaviour rather than that the code is unchanged; `MacHostSystem`/`HostRun` and wk's own claude.ai login and OAuth refresh go; one way of running commands across systems; every concept has one spelling (`experiment` stays only where nothing else says it); shell stays only where the shell is the point and the rest is Python.
+
+Answered 2026-10-04 (third batch): `pi-mbr` is deleted; `wk selftest` is exempt from dry-run, saying why; the injector answers its own TLS/DNS failure with a standard 502 and an `X-Wk-Injector` header; README defines the home/lab/wk/field/stock layers and `lint.layering` holds them; a macOS guest gets the request broker; `wk key adopt`, `wk pr rebase` and `wk sync --tools`' reset stay unprompted; existing perf tasks and workspaces are obsolete and were removed; "target" is retired in both meanings -- a *place* is the vm or container a workspace lives in, a *driver* is what makes one (podman, tart, remote, ...), and a *build preset* names a build target tuple, arch and build system together (e.g. `yocto-2.54-debug-pgo`); "profile" stays PGO's and samply's; buildroot stays, and the 2.38 rpi4 image pins a newer rpi-firmware instead of tryboot; rpi3 runs Speedometer 3 with zram, clearing foreign processes; boards reach the benchmark server directly through a tailnet ACL grant; the boards' perf build uses the Mac's LTO (thin, then full); rr record, the sysprof JIT dump, the option-toggle A/B and the weekly report come back; a host setting persists only with a recorded reason; device connectivity and perf facts are `wk doctor <device>` rows; git-lfs is on every host; wk-tools work moves into a workspace and the host `claude` goes; the sandbox escape audit follows the cut; reprovisioning tolken and the write-ups and upstreaming are deferred; boards and bridge phones get network-switched smart plugs, declared in their confs; the `$WK_STORE` parts are named now; the fork's `main` protection is lifted for `git-sync-fork`; Bugzilla editbugs is probed with a harmless test edit; the bench macOS install is updated on purpose but need not match the host; Speedometer 3's `wakeLock` error under MiniBrowser is an upstream patch at the very end; a Pi with an orphaned root is re-provisioned, not rescued.
+
 ## Cutting it down
 
 40k lines of bash is the problem, not the raw material. It is that big
@@ -211,9 +219,6 @@ exist.
      `lib/wk/sshalias.py`, and each driver's write side and `mirror_dir` in
      `lib/wk/targets.py`; `tests/test_wk_workspace.py` holds every refusal,
      `killpoints[new]`, `killpoints[rm]` and dry-run-equals-wet-run.
-   - *Owed.* The live check, one pattern per run: `wk selftest --live
-     crash_only`, `wk selftest --live container_workspace`, `wk selftest
-     --live lifecycle`.
    - *`enter`/`scp`/`zed`.* All three are Python entry points over
      `lib/wk/targets.py`: `enter` runs a command through `Target.exec` or
      execs into `Target.enter_argv`'s shell; `scp` moves bytes through
@@ -225,9 +230,10 @@ exist.
      calls `Target.pull_dir` directly.
      `tests/test_enter.py`, `tests/test_scp.py` and `tests/test_zed.py` hold
      the refusals; `tests/test_wk_targets.py` holds each driver's argv;
-     `tests/test_wk_machine.py` holds the copy conformance. Owed: the live
-     checks (`enter.shell`, `zed.peer`) against a real container, guest and
-     peer.
+     `tests/test_wk_machine.py` holds the copy conformance. Live:
+     `test_dev_integration`'s steps 3 and 5 run `wk enter <ws> -- <cmd>` in a
+     container, a guest and a peer's container and assert the command's
+     output. Owed: `enter.shell` (the interactive shell) and `zed.peer`.
    - *`pr`.* `cmd/pr` is a Python entry point: `rebase` and `open` run over
      `Target.exec`/`src`/`mirror_dir` (on the base `Target` and on
      `LocalWorkspace`), and `pr_open_target`/
@@ -235,28 +241,38 @@ exist.
      and `tests/test_pr_upstream.py` import directly rather than lifting bash.
      The plain `wk pr <ws> <spec>` checkout is `pr.checkout`, over
      `Target.exec`/`act_exec`; the mirror fetch a pull request or a fork's
-     branch resolves through (`pr.mirror_fetch`/`mirror_fetch_pull`) runs only
+     branch resolves through (`sync.fetch_into_mirror`/`fetch_pull_into_mirror`, the mirror's one writer) runs only
      inside `pr.resolved_or_planned`, the one dry-run recorder `wk bench ab`
-     shares, so a dry run never reaches git. Owed: `killpoints[pr]` (5.4's).
+     shares, so a dry run never reaches git. `killpoints[pr]` is in `tests/test_pr_workflow.py`.
    - *`verify`.* Merged into `wk doctor <workspace>` (and `wk doctor` inside
      one, the half `wk ai claude` runs there): the checks are
      `lib/wk/wall.py`, run at once, `tests/test_doctor_wall.py` holds each;
-     `wk verify` is a tombstone. Owed: the live check against a container and
-     a guest.
+     `wk verify` is a tombstone. Live: `test_dev_integration`'s
+     `test_11_push_off_reaches_nothing` runs `wk doctor <ws>` on a container
+     and a guest and asserts it exits 0, which `cmd/doctor` returns only for
+     an intact wall.
    - *`ai`.* `cmd/ai` is a Python entry point: the wall's checks are
      `lib/wk/wall.py`'s own (`from_host`, `from_inside`, `commit_walled`,
      `commit_wall_prefix`), and each driver's `exec_argv` is in
      `lib/wk/targets.py`. `tests/test_ai.py` holds the flow,
-     `ai.verifies_wall` and the session's `--remote-control <ws>`. Owed: the
-     live checks (`ai.walled_session`, `ai.commit_wall`,
-     `ai.remote_control`).
+     `ai.verifies_wall` and the session's `--remote-control <ws>`. Live:
+     `test_dev_integration`'s `test_04_claude_starts_after_the_sandbox_check`
+     starts `wk ai claude` on a container, a guest and a peer's container and
+     asserts the wall check printed `sandbox intact`; `test_05_push_on_never_coexists_with_claude`
+     asserts `wk push on` on the host ends the session. Owed: the live
+     checks `ai.walled_session` (the stopped-proxy refusal, a tool refused
+     the network), `ai.commit_wall` (git's own error and the rule, a
+     terminal session's push back on at exit) and `ai.remote_control`.
    - *`sync`.* `cmd/sync` is a Python entry point (its parse and `--where`)
      over `lib/wk/sync.py`; each driver's furniture is `Target.sync` in
      `lib/wk/targets.py`, and `wk remotes` is a tombstone for `wk sync
      [<ws>] --fix`, the wiring read back in every fetch.
      `tests/test_sync.py` holds `sync.scopes`, the wiring report and fix,
      `killpoints[sync]`, `dispatch.where[sync]` and dry-run-equals-wet-run.
-     Owed: the live check (`sync.fleet`); `status.py` calls
+     Live: `test_dev_integration`'s
+     `test_12_sync_leaves_every_remote_current` runs `wk sync <ws>` and
+     asserts every remote current. Owed: `sync.fleet` (bare, `--all`,
+     `--tools`, `WK_MIRROR_BRANCHES`); `status.py` calls
      `Target.workspaces`, and the one remaining inline copy of its union is
      `cmd/ls`.
    - *`build`.* `cmd/build` is a Python entry point over `lib/wk/build.py`
@@ -284,8 +300,10 @@ exist.
      `tests/test_wk_run.py` holds `run.finds_binary[<port>]` and `--lldb`'s
      tty request on every target, `tests/test_wk_gui.py` holds
      `gui.refuses_remote`, the jsc-only/no-browser/macOS-container
-     refusals and the fullscreen-flag table. Owed: the live checks
-     (`run.lldb_tty`, `session.modes[moose]`).
+     refusals and the fullscreen-flag table. Live:
+     `tests.test_session.TestOnMoose.test_modes_moose` reads `wk session
+     status` on moose. Owed: `run.lldb_tty`, and `session.modes[moose]`'s
+     driving of each mode from each half-state.
    - *`test`/`profile`.* Both are Python entry points. `cmd/test` runs the
      JSC and layout suites over `lib/wk/job.py` (`watch`, `PidWatch`,
      `kill`, `stop`) and `lib/wk/resources.py`'s `Budget`, its record
@@ -346,7 +364,7 @@ exist.
      `tests/test_wk_secrets.py`'s `TestAStoredCredentialIsReadTheOneWay`
      holds the read against a `Fake` refusing as `lib/secretfile.py` would.
      `-h` prints each subverb's destructive override under the command's line.
-   - *Owed.* The live checks (`key.election[<peer>]`, `push.from_remote`,
+   - *Owed.* The live checks (`key.election[<peer>]`, `push.from_box`,
      `backup.roundtrip`, `sudo.require[<machine>]`).
 5. **Fleet and bench.** `sysimage`, `boot`, `pi`, `bench`, `ab`, `quiesce`,
    `session`, `bridge`, `vm`, `find`, `remote`, `gc`, `completion`, as the one
@@ -465,7 +483,7 @@ exist.
      `tests/test_pr_workflow.py`
      holds `killpoints[pr]` (checkout onto a fork's branch, `pr_rebase`'s
      fetch and rebase, and `pr_open`'s push and `gh pr create`, each killed
-     after any effect and rerun converging) and dry-run-equals-wet-run for
+     after any effect and rerun converging; the box push `push_from_here`'s fetch, push and temporary-ref delete likewise) and dry-run-equals-wet-run for
      the plain checkout; `cmd/pr` declares `dryrun` for that form only --
      `rebase` and `open` mutate through plain `Target.exec`, not `act_exec`,
      so their own sub declarations turn it back off. Owed: none.
@@ -1104,88 +1122,47 @@ decides is a row; one still open is listed under "Decisions for the user".
 | owed behaviour | lands in step | test |
 | --- | --- | --- |
 | Every mutating command, killed after any effect and re-run, converges on the declared final state (`new`, `rm`, `build`, `test`, `bench`, `gc`, `vm base`, `machine setup/rm`, `key`, `skills`, `backup`, `quiesce`, `session`, `boot`, `sysimage`, `./setup`) | 1 (helper), then each command's step | `unit killpoints[<cmd>]`, `live killpoints[setup]` |
-| `wk gc` reclaims or names every kind of rubble: tagged container images nothing references, an abandoned `.tmp-*` seed, a workspace a killed selftest left, a staged build on the Mac volume, an instrumented slot on a board, a remote store's mirror, ccache and dead workspaces; and `wk disk` names what it can reclaim | 5 | `unit gc.reclaims_or_names[<kind>]` |
-| A machine on another wk-tools sha or a dirty checkout is named with both shas, a delegated answer from it is reported as its own rather than merged, and the remedy is `wk sync --tools` once clean, "commit and push here first" while dirty | 2 | `unit status.version_skew` |
 | `wk profile` records in every mode (sampling prints the tier breakdown, bytecode leaves one JSCProfile json, samply refuses with the host remedy above `perf_event_paranoid` 1, instruments records a `.trace`) and `--fetch` copies the recording out byte for byte | 3 | `live profile.modes[<mode>]` |
 | rpi4 boots its bench system reliably: EEPROM sd-first with `BOOT_WATCHDOG_TIMEOUT` and `MAX_RESTARTS`, a medium that holds the bus under write load, the stick reproduced from the repo by `wk sysimage write --disk rpi4:/dev/sda`, and `--back` reaches the rescue | 5 | `live boot[rpi4]` |
 | The Mac's bench volume runs the whole lifecycle: `wk boot mbp` against the real install, a stage from a guest onto it, a measured run, `wk quiesce status` before it, the screen watch during it, and `wk bench compare` against a container run | 5 | `live bench[mbp]` |
-| One spelling per concept: a round is run-benchmark's round, a perf task is (name, stamp, description, ref), a device is a device, a slot is named for its arm and phase, a time profile is one thing; "lane" and the second spellings fail lint | 5 | `lint.vocabulary` |
-| Every gate a bench run needs is asked over the running install before anything reboots (quiet desktop, quiesce readback, brightness, display mode, browser check, the staged dry run, the window in front, no other machine running), a reboot is only the transition, and a run that starts behind another window fails at its own gate | 5 | `unit bench.preflight_asks_every_gate` |
+| The second spellings of a round, a device, a slot and a time profile fail lint (`lint.vocabulary` catches "lane" and "benchmark task"; README defines no name for these, so which spellings are second is the user's call) | 5 | `lint.vocabulary` |
 | A failed leg on a board leaves evidence readable afterwards: a persistent journal, browser and tunnel logs on every leg, a board-at-failure capture, and warmup evidence on a leg that timed out | 5 | `unit bench.failed_leg_keeps_evidence`, `live bench.evidence[<board>]` |
-| Bash mechanics the Python core removes: a script read mid-edit, `capped`'s orphaned sleep holding `wk status` open, `wk key`'s two hops into the VM, `wk help hardware` tracking the drivers, `wk pick`, `wk mcp` | — | delete |
-| A task's log is read through the machine that holds it, as its record is (`Task.verdict`'s mtime, `log_age`, `progress_line`, `first_error`, `Records.wait`), and `wk build <ws> --kill` finds a host-driven box build after its tools sync hands the far side a wk | 1 | `unit record.home_is_the_machine` (tests/test_record_home.py) |
-| Every `WK_*` override is read once, documented where the user meets it and tested, or removed | 1 | `lint.wk_overrides` (tests/test_lint_wk_overrides.py; the once-read check is owed for WK_BENCH_ENV_PAD, WK_BENCH_PATH_PAD and WK_BOARD_PGO, each read in two lib/wk/bench functions, and the documented check for WK_BOARD_KILL, _LAUNCH, _PGO, _RESET, _SSH and _URL; the tested check passes) |
-| No unit test asserts a wall-clock bound of its own (the interrupt test's 10 s, the lock tests' polls): the runner's budget is the one bound, and a test proves ordering with a fake clock | 1 | `lint.no_wall_clock_assertions` |
-| A workspace whose creation died (container up, directory gone, nothing creating it) is refused at once by every command, naming `wk rm`; nothing asks the SDK's `wkdev-enter`, which waits 182 s on such a container before aborting, and `wk gc` names it as rubble | 1 | `unit machine.dead_creation_refused_at_once` |
 | The live tier runs against the container target on Linux and macOS alike; no test is gated on the podman VM | 1 | `live` runner rule |
-| A hold is released only when its holder is provably gone, an unreadable holder keeps it, and no child process inherits one | 1 | `unit record.hold_follows_holder` |
-| A workspace name is resolved once per invocation and every machine probed at most once | 1 | `unit machine.probed_once_per_invocation` |
-| Interrupting a command (Ctrl-C, a lost ssh) stops the process it started on the far machine and releases its holds | 1 | `unit machine.interrupt_stops_remote_process` |
 | A scratch store never puts two targets on one directory, and one machine's task records live in one directory | 1 | `unit record.one_store_per_target` |
-| Every mutating command honours `--dry-run` as the recorder: the plan and the run cannot differ, and a dry run fetches nothing | 1 | `unit dispatch.dry_run_is_the_recorder[<cmd>]`; `lint` tests/test_cli_shape.py `test_every_mutating_command_and_verb_has_a_dry_run` names the commands and verbs still refused it: `wk ai` |
-| No state change in lib/wk or a Python command bypasses `Machine`/`act`: `bench/board_driver.py`'s own ssh and tar, `mac.py`'s WindowServer plist, `cmd/ai`'s session | 1 | `lint.effects_through_machine` (tests/test_lint_effects.py) |
-| The dispatcher parses every argument: the build config, the subverb, `--target`, paths | 1 | `unit dispatch.parses_every_argument` |
-| `wk <cmd> -h` previews the command line it would run and lists the values every config-taking flag accepts | 1 | `unit dispatch.help_previews_and_lists_values` |
-| Every destructive effect is named in one question asked before it (a tailnet device delete, a replaced root-owned helper, a removed far destination, a reset SDK checkout, an overwritten credential), the default is No, no terminal declines, `--yes` answers, and a forwarded command carries the answer rather than exempting the receiver | 1 | `unit dispatch.destructive_asks_once[<cmd>]` |
-| `--force` crosses only the barriers it names and records itself; a preflight that cannot be measured reports unknown, never failure | 1 | `unit dispatch.force_names_what_it_crosses` |
-| Every long-running command (build, test, bench, image build, A/B, board run) writes the one progress record (step n of m, since when, the log) that dies with it; `wk status` shows every running one and a board run prints its iterations from it | 1 | `unit record.progress_shape[<cmd>]` |
-| Two commands mutating one resource serialise or refuse naming the holder, on every target (two builds, two syncs, two guest starts, two image builds, a base refresh during a build) | 1 | `unit record.one_lock_per_resource[<cmd>]` |
-| An unreadable or older-shape task record renders as unreadable and everything else still lists | 1 | `unit record.tolerates_corrupt_and_old` |
-| Every target driver and every boot driver implements the whole interface (a guest driver starts a stopped guest, reports stopped as stopped and needs no image build) | 1, 5 | `unit machine.conformance[<kind>]` |
-| A machine that cannot be probed is named unreachable with its timeout, never dropped or hung on | 1 | `unit machine.unreachable_is_named` |
-| A probe or a boot driven over non-interactive ssh finds the same tools a login shell does | 1 | `unit machine.remote_path` |
-| The podman machine is not started beside a running macOS guest on a host too small for both | 1 | `unit machine.podman_not_started_beside_guest` |
-| Copying bytes out of a workspace, onto a board or onto a card is the one `Machine` copy | 1 | `unit machine.one_copy_path` |
-| Each command runs where its declaration says, and a forwarded one forwards only the flags that apply there (`bench` on the Mac's volume runs on the Mac) | 1 | `unit dispatch.where[<cmd>]` |
-| When the record and the machine disagree (a hand `podman rm` or `tart delete`, a deleted `ws/<n>`, an edited `~/.ssh/config.d/wk`, a fetch into a published base) the command reports it, believes the machine, refuses by name and touches only its own lines | 1 | `unit machine.machine_wins[<case>]` (tests/test_machine_wins.py) |
 | The fleet view is one: the exit code is the worst state found anywhere, a name alive on two machines is a conflict `--target` disambiguates, two workstations reaching one box see one state and a disagreement names both views | 2 | `unit status.fleet_is_one` |
-| An armed machine's status line shows the transition (system, who, when); armed too long or back in host mode with the record uncleared reads desync; a mutating command aimed at it refuses | 2, 5 | `unit status.armed_transition` |
-| `wk status` renders what it has: an empty health block is silent, a workspace whose exec fails shows its row without the extra fields, one whose machine does not answer reads unreachable, `--json` and `--html` are untouched by the text renderer, and delegated headings come before their rows | 2 | `unit status.renders_partial` |
-| `wk status <ws> --wait` blocks while busy and reports once; `--timeout` stops waiting without claiming the work stopped | 2 | `unit status.wait_and_timeout` |
-| Every session start (`wk status`, `wk help`) leads with the machine's role and mode | 2 | `unit status.leads_with_role_and_mode` |
 | `wk logs <ws> -f` follows a live build on any target | 2 | `live logs.follow[<target>]` |
-| `wk ls` inside a workspace prints a not-applicable marker for BASE and CHANGES | 2 | `unit ls.in_workspace_marks_not_applicable` |
-| A reporting command (`status`, `ls`, `logs`, `disk`, `doctor`) starts, boots or repairs nothing, here or on the far machine | 2 | `unit report.readonly[<cmd>]` |
-| `wk stop` then `wk start` returns every workspace to running; `--keep-vm` leaves the podman machine up | 2 | `live start.roundtrip` |
+| Bare `wk stop` then `wk start` returns every workspace to running; `--keep-vm` leaves the podman machine up | 2 | `live start.roundtrip` (one workspace's stop and start is `tests.test_lifecycle.TestContainerLifecycle`) |
 | `wk doctor` on a freshly set-up machine reports ok, and each printed fix clears its line when run | 2 | `live doctor.fix_clears_line` |
 | `wk doctor` reports a bench machine's readiness (SIP on both installs, the quieting) the way `wk quiesce status` does | 5 | `live doctor.bench_readiness[mbp]` |
 | A machine is rebuilt from the repo alone: `wk doctor` names every machine-local entry regenerable, re-authable or backed-up before the wipe, and a fresh clone plus `./setup` sees the whole fleet with nothing copied | 2 | `live doctor.reprovision[<machine>]` |
 | `./setup` completes on every host OS and every privileged stage installs its helper | 2 | `live setup.completes[<host>]` |
-| `wk new` refuses without a base snapshot naming `wk sync` and creates nothing, remakes a half-made workspace rather than answering "already exists", and waits for the ready marker | 3 | `unit new.lifecycle` |
 | A workspace on a peer is created there by hand (refused here, naming the command) and removed from here; `wk rm --all` asks once for the whole fleet and routes each removal | 3 | `live rm.peer[<machine>]` |
-| `wk rm` leaves nothing on any target: no container, guest or checkout, no ws dir, no registry entry, no `Host wk-<name>` alias, no `.unfiltered`; the registry entry outlives the artifacts, never the reverse | 3 | `unit rm.final_state[<target>]` (tests/test_rm_final_state.py) |
+| `wk build <box-ws> <config> --detach` from a workstation leaves its record on buildbox4 alone: the box's own `wk status`, this workstation's and another's show the one build, `wk logs -f`, `wk status --wait` and `wk build --kill` reach it through the hand-over, and a hand-over killed mid-way and re-run converges | 3 | `live build.box_record` |
 | `wk build --babysit` is a task: one at a time by its record, ends stalled, gave-up or error by name, refuses where it cannot run, and a killed one reads died | 3 | `live build.babysit_e2e` |
 | Every declared build config builds on its target (gtk, wpe, mac-debug, ios-sim, armhf on 2.48), a fresh clone off a warm base builds in under 45 min, and a mac build produces ImageDiff | 3 | `live build.config[<config>]` |
 | `wk test <ws>` runs the JSC suite and `--layout` on every target, against a remote target's own build | 3 | `live test.suite[<target>]` |
 | `wk run` finds its binary on every port (GTK, WPE, an Apple-port guest) with `LD_LIBRARY_PATH` prepended, and `--lldb` gets a pty on every target | 3 | `unit run.finds_binary[<port>]`, `live run.lldb_tty` |
-| `wk enter <ws>` lands in a shell, `wk enter <ws> <cmd>` runs the command, `--zed` against a broken workspace refuses naming the repair | 3 | `unit enter.runs_command`, `live enter.shell` |
-| `wk sync` bare inside a workspace syncs it, `--all` reaches every workspace on every target, `--tools` refreshes every machine's copy and publishes one snapshot, `WK_MIRROR_BRANCHES` carries the extra branches | 3 | `live sync.fleet` |
+| `wk enter <ws>` lands in a shell, `--zed` against a broken workspace refuses naming the repair | 3 | `live enter.shell` |
+| `wk sync` bare inside a workspace syncs it, `--all` reaches every workspace on every target, `--tools` refreshes every machine's copy and publishes one snapshot, `WK_MIRROR_BRANCHES` carries the extra branches | 3 | `live sync.fleet` (`wk sync <ws>` is `test_dev_integration` step 12) |
 | The PR workflow runs as one flow: `wk push on\|off`, `wk sync --fix`, `wk pr`, the `container/bin` helpers, agents building while a person pushes, including from an armhf container | 3 | `live pr.workflow` |
-| `wk ai claude` against a real container and guest runs the wall's checks, refuses a stopped proxy, and a tool inside wanting the network is refused and told so | 3 | `live ai.walled_session` |
-| In an agent session `git commit` and `git push` name the rule after git's own error, `wk push on` on the host ends the session, and a terminal session turns push back on at exit | 3 | `live ai.commit_wall` |
+| `wk ai claude` refuses a stopped proxy, and a tool inside wanting the network is refused and told so | 3 | `live ai.walled_session` |
+| In an agent session `git commit` and `git push` name the rule after git's own error, and a terminal session turns push back on at exit | 3 | `live ai.commit_wall` |
 | `wk ai claude` on a terminal, against a real container with the claude.ai login, starts a session Remote Control shows under the workspace's name; on a build box holding the inference token it starts without it and says so | 3 | `live ai.remote_control` |
 | `wk zed` reaches a workspace through its `Host wk-<name>` ProxyCommand alias on every target, one hop for a peer's, and `wk new --zed` warns instead of failing when zed cannot launch | 3 | `unit zed.alias_is_proxycommand`, `live zed.peer` |
 | `wk key setup` elects across workstations: the credential its issuer accepts wins from whichever machine runs it, a refused peer is re-logged in, a second run moves nothing, and one `claude login` seeds every workspace | 4 | `live key.election[<peer>]` |
-| `wk key register` registers each fork's one shared deploy key once under the single title, `wk key check` reports per workstation, and a peer that did not answer reads differently from one holding no key | 4 | `unit key.register_per_machine` |
-| A build box holds no deploy key at rest, an agent session is forwarded none, `wk push status --target <box>` says so, and a push from a remote workspace succeeds once the user chooses how it is authorised (Decisions for the user) | 4 | `unit push.remote_forwarding`, `live push.from_remote` |
+| A build box holds no deploy key at rest, no ssh to it forwards an agent, `wk push status --target <box>` says so, a push on the box is refused naming `wk pr open`, and `wk pr open <box-ws>` on the workstation fetches the box's branch into the mirror over ssh and pushes it from there | 4 | `unit push.remote_forwarding`, `live push.from_box` |
 | `wk key backup` then `./setup` round-trips with no spurious change; the junk filters strip what they claim; a write is whole or unchanged; one path with a per-platform adapter | 4 | `unit backup.filters`, `live backup.roundtrip` |
 | Every skill is followable from inside a container and a guest | 4 | `live ai.skills_workspace_true` |
 | `wk key sudo setup` installs its sudoers rule, validates with `visudo -c` before and after, proves `sudo -n true` fails, gets a terminal over ssh with `--target`, and no fleet machine holds a NOPASSWD grant wider than the three helpers | 4 | `live sudo.require[<machine>]` |
-| No builder or configure cache records a tool from `container/bin` (the build wall stays off PATH) | 5 | `lint.build_wall` |
-| A macOS guest reaches the network only through softnet's proxy: nothing with it bypassed, PyPI through it, the egress block in `~/.zprofile` | 5 | `live vm.egress[<check>]` |
-| One host-owned mirror feeds the podman VM and every guest: clones are `--shared`, alternates resolve inside a container, `./setup` recreates the mount, and a missing mirror refuses naming `wk sync` | 5 | `live vm.shared_mirror`, `unit new.refuses_without_mirror` |
+| One host-owned mirror feeds the podman VM and every guest: alternates resolve inside a container, `./setup` recreates the mount, and a missing mirror refuses naming `wk sync` | 5 | `live vm.shared_mirror` (the guest half), `unit new.refuses_without_mirror` |
 | The golden base is rebuilt from `WK_VM_IMAGE`, carries no build caches, tracks the Xcode GA image, and `wk vm base --rm` asks separately about the pulled image while guests keep working | 5 | `live vm.base_matches_pin`, `unit vm.base_rm_asks_twice` |
 | The guest desktop is usable and stays so: the window resizes, `open -a` launches, screen saver, sleep and lock stay off across a reboot, both Setup Assistants stay suppressed, lldb prints no `llvmcas:` warnings | 5 | `live vm.desktop` |
 | `wk quiesce on` sets and reads back every setting on every machine (governor, App Nap, high power mode, sleep, update checks from the setting, Do Not Disturb proven by a banner not drawn), `off` restores the real prior values after a reboot, a re-run is a no-op, and it returns over ssh | 5 | `live quiesce.readback[<machine>]` |
 | Every launchd job on a Mac bench install and every systemd unit on a Pi image is classified in the quiet tables, none wedges a probe when stopped, and the table is re-read after an OS bump | 5 | `live quiesce.classified[<machine>]` |
 | `wk session on\|gdm\|off` reaches the asked mode from any half-state on the intended chip, `wk gui` draws in that seat and refuses a remote target, and `wk bench` refuses a BMC seat | 5 | `live session.modes[moose]`, `unit gui.refuses_remote` |
-| One bench pipeline (deploy, run, record, report) over the driver interface for board, volume, guest and container; state keyed per machine and per run, the result collected from where it was written, the phases one ordered list, no per-system runner, arming or record writer | 5 | `unit bench.pipeline_conformance[<system>]` |
-| Every bench run writes the one result record with its provenance (kernel, arch, profile, root device, cores, the manifest reconciled with the disk) and `wk bench ls`, `compare` and `report` read only that | 5 | `unit bench.one_record[<system>]` |
 | A bench run pins the cores it records, in a container and in a guest | 5 | `unit bench.pins_cores`, `live bench.pins_cores[<target>]` |
 | `wk bench compare` gives per-subtest confidence intervals from the workspace that built the run | 5 | `live bench.compare` |
-| A benchmark payload is seeded from the mirror, once, whatever runs at once | 5 | `unit bench.seed_from_mirror` |
-| `wk bench ab` drives a PR's two slots or two system images alike, refuses arms whose payload pins differ, and compares only rounds both arms finished | 5 | `unit ab.plan_and_pairing` |
-| A report names iteration spread apart from run-to-run spread, labels an instrumented leg's time, leaves no stray settle directory, and states a plan's cost (`--rounds`, `--count`) from measured leg times before it runs | 5 | `unit bench.report_and_cost` |
+| A report labels an instrumented leg's time and leaves no stray settle directory (a settle or warmup leg is already no measured leg and no cost) | 5 | `unit bench.report_and_cost` |
 | An A/B on the Mac resolves a PR-sized delta: one run varies `--count`, one `--rounds`, against the measured per-round spreads of all three plans | 5 | `live ab.resolution[mbp]` |
 | `wk bench ab --patch` builds, stages and measures both arms of a `mac-release-pgo` pair end to end, and the measured build's dSYMs symbolicate a capture | 5 | `live ab.pgo_pair[mbp]` |
 | The guest rehearsal drives the whole Mac A/B path (two arms staged, run, collected) on `benchvm` | 5 | `live bench.rehearsal[benchvm]` |
@@ -1197,81 +1174,27 @@ decides is a row; one still open is listed under "Decisions for the user".
 | Upstream carries what the lane patches locally (OSXMiniDriver's pgo dirs, `locate_binary_xcrun` off macOS, an optional `pgo-profile compress`, the JIT-report crash in JSC, the SSID redaction), and the local patch file goes | 5 | `unit pgo.no_local_patch` |
 | The Mac's startup volume is set by the privileged helper, proven round trip before arming, and read back from firmware | 5 | `live boot.arm[mbp]` |
 | A fresh bench volume provisions itself: python3 present before it is needed, Command Line Tools fetched and the update denial restored, no FileVault, the `bench` account, room checked, network credentials checked | 5 | `live sysimage.mac_volume_provision` |
-| One image model: the Mac volume and the guest base are `wk sysimage build` builders with the one marker and manifest, and `wk sysimage ls` reaches a build left on a build host | 5 | `unit sysimage.builders_conform` |
-| `wk sysimage build` is a task: `--detach` re-attaches, a running stage is refused by name, done is the wrapper's marker, a silent bitbake is reported not killed, one naming the same task past N heartbeats is reported wedged and given up on, `--stop` kills the process group and reports only when it is gone | 5 | `unit sysimage.task_states` |
 | A second build of one profile reuses sstate, and `--keep-work` leaves the kernel tree to configure | 5 | `live sysimage.sstate_reuse` |
-| An image profile is data: a board declares it or it goes, its defconfig is derived by the repo, a pinned kernel builds none, and a buildroot 2.52 profile takes the three PGO phases or says why not | 5 | `lint.profiles_are_data` |
 | meta-wk's pseudo bump stays only if the reproducer shows it needed | 5 | `live sysimage.pseudo_reproducer` |
 | A disk written from any image is unique per disk (`LABEL=` images included) and mountable whatever the medium held | 5 | `unit sysimage.write_identity`, `live sysimage.write[<board>]` |
 | Every card verb runs against a real card and is read back before unmount, and a board boots from it onto the tailnet with its seeded key | 5 | `live sysimage.card_verbs[rpi5]` |
-| A write refuses by name: two unmarked disks of one transport are listed, a missing or out-ranked card helper names the remedy | 5 | `unit sysimage.write_refusals` |
 | One WiFi credential reader, in the card helper | 5 | `lint.one_wifi_reader` |
-| Arming is exact: two systems with one image id are told apart by slot, the leg is verified after the last arm, and a failsafe lives outside the script it guards | 5 | `unit boot.arming_exact` |
-| The two-system lane runs against the fake board (arm, boot, probe, measure, disarm) | 5 | `unit boot.two_systems_on_fake` |
 | A board's first boot is proven on hardware: self-disarm parks the medium, self-return reboots an unclaimed board within the watchdog, the rescue marker holds, `config.txt.append` lands for every builder, an absent boot device falls through to host mode, armed-not-rebooted reads ARMED exit 2, and the prompt shows `bench` | 5 | `live boot.firstboot[<board>]` |
 | rpi5 boots a bench system from its stick, the second-system pair included, and hands itself back | 5 | `live boot[rpi5]` |
 | rpi3 runs the shared-card two-system layout: the helper on the rescue, `@second` and `@third` written from it, armed by id, an `--ab-systems` run, and a panicking bench kernel reverts | 5 | `live boot[rpi3]` |
 | rpi4's 2.52 system brings up KMS on every boot, or the run names why not | 5 | `live boot[rpi4].kms` |
 | rpi4's 32-bit buildroot system reaches userspace, read at a serial console | 5 | `live boot[rpi4].armhf` |
-| rpi5's tuning has two owners: stability in `./setup`, the overclock as an `oc` image profile, never the EEPROM; the 26.04 paths re-checked | 5 | `unit sysimage.oc_profile_in_image` |
-| rpi5's workstation tuning is restorable: `wk key backup` holds what `rpi5-setup.sh` cannot re-make (the NUMA kernel build, the ssh key shipped beside the script); the 26.04 re-check covers `/boot/firmware/config.txt` and `cmdline.txt` under A/B boot, the root fstab label and its `discard`, the GNOME 50 indexer names and default swap | 5 | `unit key.backup_rpi5_tuning` |
+| The 26.04 re-check of rpi5's workstation tuning covers `/boot/firmware/config.txt` and `cmdline.txt` under A/B boot, the root fstab label and its `discard`, the GNOME 50 indexer names and default swap | 5 | `unit key.backup_rpi5_tuning` |
 | A board is re-flashed from nothing by the machine holding its card reader, with no other provisioned machine | 5 | `live sysimage.reflash[rpi5]` |
 | `wk machine setup <board>` takes a board from a blank card to an answering tailnet name in `pi-hosts` and back, `wk machine probe` finds it when on, and a workspace reaches only that address, on port 22 | 5 | `live pi.setup[<board>]` |
 | `wk machine setup <box>` leaves a build box in one shape (zsh, or a named warning), and a cleanup accepted at the prompt is removed | 5 | `live machine_cmd.setup[<box>]` |
-| Two machines sharing one home each resolve their own target by hostname with no ssh, provisioning one never clobbers the other, and builds key dirs and locks per machine | 5 | `unit machine_cmd.shared_home` |
 | A board is reached by tailnet name alone: no MAC, `.local`, address stanza, `HostKeyAlias` or ProxyJump remains once both boards join by image, and the bench install is reached at its own name | 5 | `lint.no_addresses` (tests/test_lint_no_addresses.py; the tree check is owed: the board and bridge confs' MACs, the bridges' `HostKeyAlias`) |
 | The Librem 5 runs the pmOS bridge role in front of moose's BMC, with the BMC's own config in a conf file | 5 | `live bridge.setup[moose-bmc]` |
 | A bridge's segment is proven: provision on the eMMC route asks which disk, a board on `lan0` gets its reserved address and a workspace reaches it, `wk bridge tailnet` approves the route and `autoApprovers` holds after a policy edit, the netwatch ladder stops at its budget, the dock holds 480 Mbit, the watchdog device exists, the camera streams, and a bridge whose segment is down reads differently from one that is off | 5 | `live bridge.segment[<bridge>]`, `unit bridge.segment_down_vs_off` |
 | An image build runs from a Tart guest and the image reaches the host for writing | 5 | `live sysimage.build[vm]` |
 | A task's results live in its workspace, `wk bench ls` names them wherever they are, the task restarts from where it stopped on any machine, and `wk doctor` names the results backed-up | 6 | `unit results.restart_anywhere` |
-| A task's deliverables export as one archive | 6 | `unit results.export_archive` |
-| A long effect (`wkdev-create`, `sdk-refresh`, `tart clone`) streams to the task log as it runs, so the silence watchdog and a followed log see it; `Machine.run` captures and prints only after it ends | 3 | `unit machine.streams_long_effects` |
-| An effect run over ssh counts as an effect on the machine that drives it, so a kill point can land inside a remote flow (`Ssh.act_run` runs through `via.run` today) | 3 | `unit machine.ssh_effects_are_effects` |
-| A hold names the pid that took it: the record carries the taker's pid before `holds` | 3 | `unit record.hold_names_its_taker` |
-| `Target.state` reads the workspace directory through the machine, not `os.path`, so the real drivers run in a Fake world and `killpoints[new]` runs over them rather than a stand-in | 3 | `unit killpoints[new]` |
-| The `--web` status page renders `armed_by`, `armed_at`, `armed_desync` and `disagree` as the text renderer does | 5 | `unit status.web_mirrors_text` |
+| On a macOS host a board A/B's run-benchmark and page server run in the podman VM and reach the boards | 5 | `live bench.vm_reaches_boards` |
 
 ### Decisions for the user
 
-- `lib/wk/dispatch.py` starts the podman machine itself (it needs a terminal, so it is not under `act`): move it behind a command, or keep it.
-- `lib/wk/dispatch.py` probes `tailscale status` directly rather than through `Machine`.
-- `lib/wk/bench/board_driver.py` runs its own ssh outside `Machine`.
-- `lib/wk/mac.py` writes WindowServer's plist directly rather than through `Machine`.
-
-
-- On a macOS host a board A/B's run-benchmark and page server now run in the podman VM (the image workspace's machine, as its deploys and PGO collections already did); a live run must confirm the VM reaches the boards.
-- README gets a section defining the `home`/`lab`/`wk`/`field`/`stock` layers, or the layering goes (5.39 deletes the `lint.layering` row; a later step can re-add it once README defines the layers).
-
-- The word "target": a device configuration or the execution target; one workspace per (perf task, device) rather than per profile, deletable once its results are in.
-- `git-sync-fork` against the fork's protected `main`: lift the protection, or the helper refuses by name.
-- `wk key check` reports a Bugzilla key's authentication only; whether editbugs capability is probed another way.
-- Whether `wk boot mbp --diag` and `--back` reach the bench install from host mode.
-- The bench volume runs 26.6.1, the host 26.6.2: whether the two installs need to be comparable.
-- Speedometer 3's `wakeLock` NotAllowedError under MiniBrowser: confirm Safari's path, or accept.
-- rpi3: refuse a board with foreign processes, or clear them; Speedometer 2.1 as its plan, or swap/zram for 3.
-- The 2.38 buildroot rpi4 image: pin a newer rpi-firmware so it boots a rev 1.4/1.5 board without tryboot, or keep tryboot.
-- Delete the `pi-mbr` boot driver (`lib/wk/boot/pi.py`'s `PiMbr`; no machine declares it), or keep it for a firmware-bootable SSD.
-- Tailnet ACL: boards reach a workstation's benchmark server directly, or keep the ssh tunnel; the `tag:wk` grant `wk pi setup` prints as a manual step.
-- `wk pi helper` onto a workstation holding a card reader: a wk-driven path, or none.
-- A rescue whose root reference is orphaned: a `wk` verb, or the helper's one-liner.
-- LTO mode for the boards' perf build (the Mac lane is thin then full; the boards set none).
-- Which pre-`wk` helper capabilities return: rr record, sysprof JIT dump, the wasm wrappers, SIMD and V8 comparisons, the weekly report, an option-toggle A/B; a baseline build reachable outside `wk bench`.
-- Settings audit: which non-default host settings persist (config.dconf's `why: unknown` entries; tolken's `wk key backup --candidates`).
-- A per-device connectivity and perf subcommand (wifi channels, autosleep, overclock) and its boundary with the settings audit.
-- Host tools: git-lfs on every host or none; pmOS builder prerequisites only on the aarch64 build host; wk-tools work in a workspace so the host `claude` goes.
-- Bridge phones: auto power-on after power loss; remote power for the boards, which nothing here can switch on.
-- Write-ups and upstreaming: the egress-proxy design, SDK patches 3 and 11, the cross-compile commits, the `CONFIG_NUMA_EMU` Launchpad request, `gpr`/`wk pr` and the profiling wrappers.
-- The sandbox escape audit, last and on both platforms: the incident list, the allowlist and CDNs, apt and ddebs, the broker, the agent-rw mount, the injector's standing tokens, remote targets, bridges, device paths, yocto egress, the git helpers.
-- Reprovision tolken: host user `jmichaud`, Remote Login on both installs, keys per install; register each build box's deploy key on GitHub.
-- What each part of `$WK_STORE` is called before a second project needs a name.
-- How a push from a build box is authorised. A build box holds no deploy key and nothing forwards one to it. A forwarded agent socket is usable by root and by every same-uid process on the box (a `wk ai claude` session in another workspace there included, since a remote target has no container), and `wk enter` on a box with its own wk runs the far wk, so the workstation's ssh never opens that shell. The options: push only from the workstation (`wk pr` or `git push` run here against the box's checkout over ssh); a per-push forwarded agent (`ssh -A`) holding the key under `ssh-add -c`, so each signature is confirmed on the workstation; or a deploy key per box, held on the box.
-- Where a build this workstation drives on a build box keeps its record: here, beside the driver (so another workstation, and the box's own `wk status`, do not see it, and records an earlier copy left on a box read `died` and nothing reclaims them), or on the box (the build hands itself to the box's wk once its tools sync lands, so the box's record is the one record).
-- The mirror's second writer: `pr.mirror_fetch` fetches PR and branch heads into the mirror for `wk bench ab`. Move that fetch under `wk sync` (the mirror's one writer), or keep it.
-- A macOS guest has no request broker, so `wk sync` inside one fetches only itself and warns; whether a guest gets the broker.
-- Not prompted, judged recoverable or the receiving half of a prompted command: `wk key adopt` (stdin carries the key), `wk pr rebase` (reflog), the `reset --hard`/`clean` of a machine's tooling copy in `wk sync --tools`.
-- `wk ai --dry-run`: its install, probe and session depend on each other (a dry install fails the next probe) and it throws the push switch; what its dry run prints.
-- `wk selftest` has no dry run: exempt it in its declaration (the dispatcher then says why rather than "not yet"), or give it one that lists the tests it would run.
-- A task left in `<store>/bench/` from before tasks lived in workspaces: `wk gc` names a `mv` into the workspace's `bench/`; on a Mac the store is the host's and the workspace is in the podman VM, so that move crosses machines and is not one command yet. Unmeasured.
-- `wk bench run --task <task>` now accepts only a task in the leg's own workspace (every current caller passes that one).
-- The injector answers `598` for its own TLS-verification or DNS failure, so the wall can tell it from an upstream's 500; a standard status with a marker header is the alternative.
-- A running macOS guest keeps a stale view of the host's mirror after `wk sync --mirror` rewrites it: git replaces a ref by renaming a new file over it, and the guest's shared-folder mount keeps the old, unlinked inode (`refs/heads/main` showed link count 0 and the previous mtime; `git` called the directory "not a git repository"), so every fetch in the guest fails until the guest restarts, which cleared it. Measured 2026-10-02. The fix: the sync that writes the mirror restarts or remounts each running guest, or guests read the mirror another way.
+None open: decisions are asked as questions, and their answers are recorded under "Decisions taken".

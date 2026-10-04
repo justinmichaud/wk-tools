@@ -13,7 +13,7 @@ import sys
 import unittest
 
 from tests.support import REPO
-from tests.test_bench_board import BOARD, BoardTest, PipelineReg
+from tests.test_bench_board import BOARD, BoardTest, pipeline_registry
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.bench import board_ab  # noqa: E402
@@ -48,7 +48,7 @@ class SystemBootTest(BoardTest):
         d = driver(REPO, w.board.conf, w.board)
         self.w = w
         with w.patches():
-            return board_ab.AB(str(REPO), PipelineReg(w), "ws", "jetstream3", {"system": BOARD, "ab_systems": "sys-a,sys-b"},
+            return board_ab.AB(str(REPO), pipeline_registry(w), "ws", "jetstream3", {"system": BOARD, "ab_systems": "sys-a,sys-b"},
                                w.clock, w.popen, driver=d)
 
     def boot(self, ab, want):

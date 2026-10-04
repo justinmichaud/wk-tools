@@ -2,6 +2,7 @@
 
 import os
 import shlex
+import signal
 import subprocess
 import sys
 
@@ -49,6 +50,17 @@ def err(msg):
 def die(msg, status=1):
     err(msg)
     raise Refused(status)
+
+
+def changed(msg):
+    info(("dry run: " if dry_run() else "") + msg)
+
+
+def terminate_as_interrupt():
+    def raise_interrupt(signum, frame):
+        raise KeyboardInterrupt
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, raise_interrupt)
 
 
 def debug(msg):
@@ -128,8 +140,8 @@ def act(argv, **kw):
 _forced = []
 
 
-def barrier(message, retry=False):
-    if not forced():
+def barrier(message, retry=False, env=None):
+    if not forced(env):
         err("%s\n    --force proceeds anyway, with a warning." % message)
         raise Refused(RETRY_EXIT if retry else 1)
     warn("FORCED past a barrier: %s" % message)

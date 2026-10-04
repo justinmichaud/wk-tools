@@ -14,6 +14,7 @@ import sys
 import unittest
 from unittest import mock
 
+from tests.fakes import FakeRegistry, FakeTarget
 from tests.killpoints import converges
 from tests.support import REPO, run
 
@@ -39,7 +40,7 @@ cmd = _load_cmd()
 
 def key_sudo(argv, env=None, reg=None):
     """`wk key sudo <argv>` as the dispatcher hands it on."""
-    return cmd.main(["sudo"] + argv, env={} if env is None else env, reg=reg or _FakeRegistry())
+    return cmd.main(["sudo"] + argv, env={} if env is None else env, reg=reg or registry())
 
 LISTING_UNSET = "User justinmichaud may run the following commands on tolken:\n    (ALL : ALL) ALL\n"
 
@@ -271,64 +272,38 @@ class TestSetupConvergesAndDryRun(unittest.TestCase):
         self.assertEqual([e for e in dry.fake.effects if e[0] == "run" and e[1][:2] == ("sudo", "install")], [])
 
 
-class _FakeTarget:
-    def __init__(self, side="answering", why="", wk_result=(0, "ok\n")):
-        self.name = "box"
-        self.env = {}
-        self._side = side
-        self._why = why
-        self._wk_result = wk_result
-
-    def probe(self):
-        return self._side, self._why
-
-    def wk(self, *args, env=None, quiet=False):
-        self.asked = args
-        return self._wk_result
-
-
-class _FakeRegistry:
-    def __init__(self, targets_by_name=None, machine=None):
-        self._targets = targets_by_name or {}
-        self.machine = machine or Fake("here")
-
-    def in_workspace(self):
-        return False
-
-    def load(self, name):
-        if name not in self._targets:
-            raise LookupError("unknown target '%s'" % name)
-        return self._targets[name]
-
-    def machines(self):
-        return list(self._targets)
+def registry(targets=None, machine=None):
+    ts = targets or {}
+    return FakeRegistry({}, machine or Fake("here"), lambda n, e: ts[n], names=list(ts), in_workspace=lambda: False)
 
 
 class TestTargetAndAll(unittest.TestCase):
     def test_target_status_asks_the_machine_and_reports_its_line(self):
-        box = _FakeTarget(wk_result=(0, "tolken box status line\n"))
-        rc = key_sudo(["status", "--target", "box"], reg=_FakeRegistry({"box": box}))
+        box = FakeTarget("box", out="tolken box status line\n")
+        rc = key_sudo(["status", "--target", "box"], reg=registry({"box": box}))
         self.assertEqual(rc, 0)
-        self.assertEqual(box.asked, ("key", "sudo", "status", "--quiet"))
+        self.assertEqual([args for args, _, _ in box.asked], [("key", "sudo", "status", "--quiet")])
 
     def test_target_setup_goes_over_a_tty(self):
-        reg = _FakeRegistry({"box": _FakeTarget(wk_result=(0, "setup ok\n"))})
-        rc = key_sudo(["setup", "--target", "box"], reg=reg)
+        box = Fake("box")
+        box.answer(["sh", "-c"])
+        rc = key_sudo(["setup", "--target", "box"], reg=registry({"box": FakeTarget("box", machine=box)}))
         self.assertEqual(rc, 0)
+        self.assertEqual([e[1] for e in box.effects if e[0] == "run_tty"], [("sh", "-c", "PEER box key sudo setup")])
 
     def test_an_unreachable_target_is_named_not_run(self):
-        reg = _FakeRegistry({"box": _FakeTarget(side="unreachable", why="timed out after 10s")})
+        reg = registry({"box": FakeTarget("box", side="unreachable", why="timed out after 10s", out="ok\n")})
         rc = key_sudo(["status", "--target", "box"], reg=reg)
         self.assertEqual(rc, 1)
 
     def test_an_unknown_target_is_refused(self):
-        reg = _FakeRegistry({})
+        reg = registry({})
         with self.assertRaises(Refused):
             key_sudo(["status", "--target", "nowhere"], reg=reg)
 
     def test_all_reports_the_local_machine_and_fans_out(self):
         local = _fake(free=False, listing="    timestamp_timeout=0.5\n\n" + LISTING_UNSET)
-        reg = _FakeRegistry({"box": _FakeTarget(wk_result=(0, "box status line\n"))}, machine=local)
+        reg = registry({"box": FakeTarget("box", out="box status line\n")}, machine=local)
         rc = key_sudo(["status", "--all"], env={"WK_SUDO_TIMEOUT_MIN": "0.5"}, reg=reg)
         self.assertEqual(rc, 0)
 
@@ -336,14 +311,16 @@ class TestTargetAndAll(unittest.TestCase):
         """`--all` always reports the local machine's own status, whatever the action -- only
         'wk key sudo setup' bare or --target actually sets a machine up."""
         local = _fake(free=False, listing="    timestamp_timeout=0.5\n\n" + LISTING_UNSET)
-        reg = _FakeRegistry({"box": _FakeTarget(wk_result=(0, "setup ok\n"))}, machine=local)
+        box = Fake("box")
+        box.answer(["sh", "-c"])
+        reg = registry({"box": FakeTarget("box", machine=box)}, machine=local)
         key_sudo(["setup", "--all"], env={"WK_SUDO_TIMEOUT_MIN": "0.5"}, reg=reg)
         self.assertFalse(any(e[0] == "run" and e[1][:2] == ("sudo", "install") for e in local.effects))
 
 
 class TestRefusesInAWorkspace(unittest.TestCase):
     def test_refuses_in_a_workspace(self):
-        reg = _FakeRegistry({})
+        reg = registry({})
         reg.in_workspace = lambda: True
         with self.assertRaises(Refused):
             key_sudo(["status"], env={"WK_NAME": "myws"}, reg=reg)

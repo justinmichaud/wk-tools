@@ -14,6 +14,7 @@ import subprocess
 import types
 from unittest import mock
 
+from tests.fakes import FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO, WkTest, bash, run
 from tests.test_wk_secrets import SOCK, SecretsTest, World
@@ -79,24 +80,8 @@ class Box(targets.Target):
         return self.far
 
 
-class Fleet(targets.Registry):
-    def __init__(self, w, boxes):
-        super().__init__(str(REPO), env=w.env, machine=w)
-        self.boxes = boxes
-
-    def default(self):
-        return "container"
-
-    def load(self, name):
-        if name not in self.boxes:
-            raise LookupError("unknown target '%s'" % name)
-        return self.boxes[name]
-
-    def machines(self):
-        return [n for n in self.boxes if n not in ("container", "vm")]
-
-    def vm_listed(self):
-        return "vm" in self.boxes
+def registry(w, boxes):
+    return FakeRegistry(w.env, w, lambda n, e: boxes[n], names=list(boxes), default=lambda: "container")
 
 
 class PushTest(SecretsTest):
@@ -117,7 +102,7 @@ class PushTest(SecretsTest):
         """(exit status, stdout, stderr) of one `wk push <action>`."""
         w = w or self.w
         out = io.StringIO()
-        reg = Fleet(w, boxes or self.boxes)
+        reg = registry(w, boxes or self.boxes)
         with contextlib.redirect_stderr(io.StringIO()) as err:
             try:
                 p = PUSH.Push(reg, w.sec(macos=macos), self.clock, out)
@@ -130,7 +115,7 @@ class PushTest(SecretsTest):
         out = io.StringIO()
         with contextlib.redirect_stderr(io.StringIO()) as err:
             try:
-                rc = PUSH.main(list(argv), env=self.w.env, reg=Fleet(self.w, boxes or self.boxes), out=out)
+                rc = PUSH.main(list(argv), env=self.w.env, reg=registry(self.w, boxes or self.boxes), out=out)
             except Refused as e:
                 rc = e.status
         return rc, out.getvalue(), err.getvalue()
@@ -152,7 +137,12 @@ class TestWhere(WkTest):
         marker.write_text("target=buildbox4\n")
         store = self.tmp / "store"
         store.mkdir()
-        return {"WK_REMOTE_MARKER": str(marker), "WK_STORE": str(store)}
+        # The far end knows which target it is by its hostname, from its conf.
+        machines = self.tmp / "machines"
+        machines.mkdir()
+        host = subprocess.run(["hostname", "-s"], capture_output=True, text=True).stdout.strip().lower()
+        (machines / "buildbox4.conf").write_text("kind=build\ndriver=remote\nhostname=%s\n" % host)
+        return {"WK_REMOTE_MARKER": str(marker), "WK_STORE": str(store), "WK_MACHINES_DIR": str(machines)}
 
     def test_a_store_command_runs_on_a_build_machine(self):
         cp = self.run_wk("push", "status", env=self._as_build_machine())
@@ -603,7 +593,7 @@ class TestEveryTargetThisMachineHoldsIsAsked(PushTest):
         self.guests.claude = {"mac-rel": ["4242"]}
 
     def test_a_session_in_a_guest_is_found_on_a_mac(self):
-        sessions = PUSH.Push(Fleet(self.w, self.boxes), self.w.sec(macos=True), self.clock).agent_sessions()
+        sessions = PUSH.Push(registry(self.w, self.boxes), self.w.sec(macos=True), self.clock).agent_sessions()
         self.assertEqual([(self.guests, "mac-rel", ["4242"])], sessions)
 
     def test_on_ends_it_in_the_guest_before_the_keys_load(self):
@@ -615,7 +605,7 @@ class TestEveryTargetThisMachineHoldsIsAsked(PushTest):
 
     def test_a_machine_with_no_guests_asks_only_its_containers(self):
         del self.boxes["vm"]
-        self.assertEqual([], PUSH.Push(Fleet(self.w, self.boxes), self.w.sec(macos=True), self.clock).agent_sessions())
+        self.assertEqual([], PUSH.Push(registry(self.w, self.boxes), self.w.sec(macos=True), self.clock).agent_sessions())
 
 
 class TestThePodmanMachineIsHalfTheSwitch(PushTest):

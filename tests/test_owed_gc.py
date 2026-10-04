@@ -340,10 +340,23 @@ def _board(w, slot):
     return lambda: "/var/wk/slots/" + slot not in w.board.dirs and "/var/wk/slots/a" in w.board.dirs
 
 
+def _box(w):
+    recs = record.Records(os.path.join(w.store_dir, "remote", "box"), clock=w.clock, machine=w, env=w.env)
+    w.remotes = [types.SimpleNamespace(name="box", answers=lambda: (True, ""), root_there=lambda: "/r", machine=Host("box"),
+                                       records=lambda clock: recs)]
+    return recs
+
+
 def _remote_mirror(w):
-    far = Host("box")
-    w.remotes = [types.SimpleNamespace(name="box", answers=lambda: (True, ""), root_there=lambda: "/r", machine=far)]
+    _box(w)
     return lambda: False
+
+
+def _box_record(w, pid=999999):
+    t = _box(w).begin("build", "here", "a", "wk build a --kill", os.path.join(w.store_dir, "remote", "box", "build.log"),
+                      ["compile"], pid=pid)
+    w.files[t.field("log")] = ""
+    return lambda: not w.exists(str(t.path)) and not w.exists(t.field("log"))
 
 
 def _half_made(w):
@@ -383,6 +396,7 @@ KINDS = {
     "board-slot-copy": (lambda w: _board(w, "a.part"), ""),
     "board-slot-instrumented": (lambda w: _board(w, "a-instr"), "--purge-rubble"),
     "remote-mirror": (_remote_mirror, "wk machine rm box"),
+    "box-record": (_box_record, "--purge-rubble"),
     "half-made": (_half_made, "--purge-rubble"),
     "selftest-ws": (_selftest, ""),
     "creation-record": (_creation_record, ""),
@@ -407,6 +421,18 @@ class TestReclaimsOrNames(GcTest):
                     rc, err = self.run_gc(taker, w=w)
                     self.assertEqual(rc, 0, err)
                     self.assertTrue(gone(), err)
+
+    def test_a_box_record_whose_driver_still_runs_here_is_named_with_its_kill(self):
+        """`gc.reclaims_or_names[box-record]`: a box's builds are recorded on the box, and one this end still drives is kept."""
+        self.w.pids.add(4242)
+        gone = _box_record(self.w, pid=4242)
+        rc, err = self.run_gc()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("box: a build record of 'a' kept here, not on the box", err)
+        self.assertIn("kept -- its driver, pid 4242, still runs here: 'kill 4242' ends it", err)
+        with self.assertRaises(Refused):
+            self.run_gc("--purge-rubble")
+        self.assertFalse(gone())
 
     def test_wk_disk_renders_the_same_rows(self):
         _half_made(self.w)

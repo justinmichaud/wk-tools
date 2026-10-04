@@ -19,6 +19,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes import FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO
 
@@ -68,7 +69,12 @@ class World(Fake):
         self.checkouts = []
         self.records = record.Records(self.tmp / "store", clock=self.clock, env=self.env, machine=self,
                                       ask_target=lambda n, pid, cap: pid in self.pids)
-        self.reg = FakeRegistry(REPO, self.env, self, kinds or {"fakebox": "container"}, stores or {})
+        kinds, stores = kinds or {"fakebox": "container"}, stores or {}
+
+        def make(name, env):
+            env.update({"WK_STORE": stores[name]} if name in stores else {})
+            return PodmanTarget(name, str(REPO), env, self, kinds[name])
+        self.reg = FakeRegistry(self.env, self, make, names=list(kinds))
         self.target = self.reg.load("fakebox")
         self.lock = Lock(self.target.store, self, self.clock)
         self.publish("main-1")
@@ -185,7 +191,7 @@ class World(Fake):
                 self.files.get(workspace.sshalias.alias_path(self.env), ""))
 
 
-class FakeTarget(targets.Target):
+class PodmanTarget(targets.Target):
     """The write side over the World's podman, with the record read from the fake's files."""
 
     def __init__(self, name, root, env, machine, kind):
@@ -250,39 +256,13 @@ class FakeTarget(targets.Target):
             self.machine.remove(ws_dir)
 
 
-class FakeRegistry(targets.Registry):
-    def __init__(self, root, env, machine, kinds, stores):
-        super().__init__(root, env=env, machine=machine)
-        self.kinds = kinds
-        self.stores = stores
-
-    def all(self):
-        return list(self.kinds)
-
-    def default(self):
-        return next(iter(self.kinds))
-
-    def load(self, name):
-        if name not in self.kinds:
-            raise LookupError("unknown target '%s'.\n    The built-in ones are container, vm, remote and local." % name)
-        env = dict(self.env)
-        if name in self.stores:
-            env["WK_STORE"] = self.stores[name]
-        return FakeTarget(name, self.root, env, self.machine, self.kinds[name])
-
-
-class RealRegistry(FakeRegistry):
-    def load(self, name):
-        return targets.Container(name, self.root, dict(self.env), self.machine)
-
-
 class ContainerWorld(World):
-    """The World with the real container driver in FakeTarget's place: the SDK's scripts answer behind its `env`
+    """The World with the real container driver in PodmanTarget's place: the SDK's scripts answer behind its `env`
     prefix, `wkdev-enter` as the World's `exec` does."""
 
     def __init__(self, tmp):
         super().__init__(tmp)
-        self.reg = RealRegistry(REPO, self.env, self, {"fakebox": "container"}, {})
+        self.reg = FakeRegistry(self.env, self, lambda n, e: targets.Container(n, str(REPO), e, self), names=["fakebox"])
         self.target = self.reg.load("fakebox")
         self.lock = Lock(self.target.store, self, self.clock)
         self.react(["env"], self._sdk)
@@ -296,7 +276,46 @@ class ContainerWorld(World):
     def _sdk(self, argv, f):
         if any(a.endswith("wkdev-create") for a in argv):
             return self._wkdev_create(argv, f)
+        if argv[-1].endswith("print-sdk-version"):
+            return Result(1, "", "no checkout")
         return self._exec(["exec", argv[argv.index("--name") + 1][3:]] + list(argv[argv.index("--") + 2:]), f)
+
+
+class VmWorld(World):
+    """The World with the real vm driver in PodmanTarget's place: tart answers from `vms` (name -> state), a clone
+    adds a stopped guest and a delete removes it; the guest base is built and current, so `ensure` and `stale` are
+    the test's to patch."""
+
+    def __init__(self, tmp):
+        super().__init__(tmp)
+        self.env.pop("WK_IN_VM")
+        self.env["WK_VM_STORE"] = str(self.tmp / "vmstore")
+        tart = self.tmp / "home" / ".local" / "bin" / "tart"
+        tart.parent.mkdir(parents=True)
+        tart.write_text("")
+        tart.chmod(0o755)
+        self.vms = {}
+        self.reg = FakeRegistry(self.env, self, lambda n, e: targets.Vm(n, str(REPO), e, self), names=["fakebox"])
+        self.target = self.reg.load("fakebox")
+        self.lock = Lock(self.target.store, self, self.clock)
+        t = self.target.tart()
+        self.react([t, "list"], lambda a, f: Result(0, json.dumps([{"Name": n, "State": s, "Source": "local"} for n, s in f.vms.items()])))
+        self.react([t, "clone"], lambda a, f: (f.vms.__setitem__(a[3], "stopped"), Result(0))[1])
+        self.react([t, "delete"], lambda a, f: (f.vms.pop(a[2], None), Result(0))[1])
+        self.answer([t, "set"])
+        self.answer([t, "stop"])
+        self.answer(["pgrep"], rc=1)
+        self.answer(["sysctl", "-n", "hw.ncpu"], out="10\n")
+        self.answer(["sysctl", "-n", "hw.memsize"], out="34359738368\n")
+        self.answer(["podman", "machine", "inspect"], rc=125)
+        self.dirs.add(self.target.store.mirror())
+        self.effects = []
+
+    def state(self):
+        vmstore = self.env["WK_VM_STORE"]
+        return (sorted(self.vms.items()), sorted(self.rel(p) for p in self.files if p.startswith(vmstore)),
+                sorted(self.rel(d) for d in self.dirs if d.startswith(vmstore + "/ws")),
+                [(t.field("kind"), t.field("exit")) for t in self.records.list()])
 
 
 class WorkspaceTest(unittest.TestCase):
@@ -557,6 +576,43 @@ class TestNewFrontTail(WorkspaceTest):
         rc, err = self.stderr(lambda: self.front(w, zed=True))
         self.assertEqual(rc, 0)
         self.assertIn("'ws' is there; opening it in Zed is what failed (above) -- 'wk zed ws' retries", err)
+
+
+class TestNewOnAPeer(unittest.TestCase):
+    """A peer workstation's `wk new` makes the workspace: its argv is handed over through act_run, so a dry run prints
+    it here; a base id names this machine's snapshot, so --base is refused."""
+
+    def setUp(self):
+        self.here = Fake("here")
+        self.here.answer(["ssh"])
+        self.target = mock.Mock(is_local=False, hand_over=lambda cmd, args, tty: ["ssh", "peer", "wk", cmd, *args])
+        for p in (mock.patch.dict(os.environ), mock.patch("os.isatty", lambda fd: True)):
+            p.start()
+            self.addCleanup(p.stop)
+        for v in ("WK_DRY_RUN", "WK_DESTRUCTIVE"):
+            os.environ.pop(v, None)
+
+    def new(self, **opts):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            try:
+                return workspace.new_on_peer(self.target, self.here, str(REPO), "ws", "native", opts), err.getvalue()
+            except Refused as e:
+                return e.status, err.getvalue()
+
+    def test_the_hand_over_runs_on_a_terminal(self):
+        self.assertEqual(self.new(pr="123")[0], 0)
+        self.assertEqual(self.here.effects, [("run_tty", ("ssh", "peer", "wk", "new", "ws", "--pr", "123"), None)])
+
+    def test_a_dry_run_prints_the_hand_over_and_runs_none(self):
+        os.environ["WK_DRY_RUN"] = "1"
+        rc, err = self.new()
+        self.assertEqual((rc, self.here.effects), (0, []))
+        self.assertIn("would run: ssh peer wk new ws", err)
+
+    def test_a_base_is_refused(self):
+        rc, err = self.new(base="20260101-000000")
+        self.assertEqual((rc, self.here.effects), (1, []))
+        self.assertIn("--base", err)
 
 
 class TestNewKill(WorkspaceTest):
@@ -903,10 +959,9 @@ class TestRmPlan(WorkspaceTest):
         self.assertIn("re-run once fakebox answers.", err)
 
     def test_a_name_on_two_targets_is_refused_by_the_registry(self):
-        class Two(FakeRegistry):
-            def ws_target(self, ws):
-                raise LookupError("workspace '%s' exists on targets: a b -- this cannot be\n    resolved; remove one, or set WK_TARGET" % ws)
-        self.w.reg = Two(REPO, self.w.env, self.w, {"fakebox": "container"}, {})
+        def two(ws):
+            raise LookupError("workspace '%s' exists on targets: a b -- this cannot be\n    resolved; remove one, or set WK_TARGET" % ws)
+        self.w.reg = FakeRegistry(self.w.env, self.w, self.w.reg.make, names=["fakebox"], ws_target=two)
         self.assertIn("exists on targets: a b", self.refused(lambda: self.plan()))
 
 
@@ -1137,6 +1192,27 @@ class TestKillPoints(WorkspaceTest):
         converges(self, lambda: ContainerWorld(self.tmp), run_once, World.state, max_effects=80)
         w = ContainerWorld(self.tmp)
         run_once(w)
+        self.assertEqual(w.target.state("ws"), "present")
+
+    def test_new_over_the_real_vm_driver_killed_after_any_effect_and_rerun_converges(self):
+        """`unit killpoints[new]` over the vm driver: a clone killed before its marker is a guest `info` calls
+        creating, which the re-run wipes and clones again."""
+        from wk.sysimage import guestbase
+        from wk.store import Store
+        for p in (mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True),
+                  mock.patch.object(guestbase.Base, "ensure", return_value=None),
+                  mock.patch.object(guestbase.Base, "stale", return_value="")):
+            p.start()
+            self.addCleanup(p.stop)
+
+        def run_once(w):
+            w.lock = Lock(w.target.store, w, w.clock)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.driver(w)
+        converges(self, lambda: VmWorld(self.tmp), run_once, VmWorld.state, max_effects=80)
+        w = VmWorld(self.tmp)
+        run_once(w)
+        self.assertEqual(w.vms, {"wk-ws": "stopped"})
         self.assertEqual(w.target.state("ws"), "present")
 
     def rm_world(self, cls=World):

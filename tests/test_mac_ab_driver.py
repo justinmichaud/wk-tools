@@ -505,11 +505,11 @@ class TestThePlant(WkTest):
         with world() as m:
             got, err = self.plant(m, idle)
         self.assertIs(got, Refused)
-        self.assertIn("To plant anyway:  --force", err)
+        self.assertIn("--force proceeds anyway", err)
         with world(env={"WK_FORCE": "1"}) as m:
             got, err = self.plant(m, idle)
         self.assertIsNone(got, err)
-        self.assertIn("the screen may lock", err)
+        self.assertIn("FORCED past a barrier: could not disable the screensaver", err)
 
     def test_do_not_disturb_is_read_back(self):
         with world() as m:

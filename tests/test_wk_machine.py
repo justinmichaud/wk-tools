@@ -7,6 +7,7 @@ Run: python3 tests/run.py -k tests.test_wk_machine
 """
 import io
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -260,6 +261,15 @@ class TestLocal(MachineTest, LockEffectsConformance, CopyConformance, LogReadCon
             except ProcessLookupError:
                 pass
         self.assertFalse(self.m.kill(999999))
+
+    def test_a_spawned_driver_that_exited_is_not_alive(self):
+        """`wk new`'s front follows the driver it spawned; its unreaped zombie answered kill(pid, 0) for an hour."""
+        import time
+        pid = self.m.spawn(["true"], os.path.join(self.tmp, "log"))
+        deadline = time.monotonic() + 0.4
+        while self.m.alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertFalse(self.m.alive(pid))
 
     def test_dry_run_prints_every_effect_and_changes_nothing(self):
         os.environ["WK_DRY_RUN"] = "1"
@@ -636,6 +646,32 @@ class TestForward(MachineTest):
             with f.forward(4567):
                 raise RuntimeError("the run died")
         self.assertEqual(f.pids, set())
+
+
+# A copy's transport named outside the seam: an argv headed scp or rsync, a shell line starting one, podman's cp, shutil's copies.
+COPY = re.compile(r"\[\s*[\"'](scp|rsync)[\"']|[\"'](scp|rsync) -|podman\(\)\s*\+\s*\[[\"']cp[\"']|\bshutil\.copy\w*\(")
+COPIES_ELSEWHERE = {
+    "lib/wk/targets.py": "the container driver's half of the one copy: `podman cp` is how bytes cross into a container",
+    "lib/wk/bench/mac.py": "pins a payload into the staging tree: both ends are this host's own filesystem",
+    "lib/wk/sysimage/macvolume.py": "stages wk-tools onto the bench volume, mounted on the machine that runs the copy",
+}
+
+
+class TestOneCopyPath(unittest.TestCase):
+    def test_nothing_outside_the_machine_copies(self):
+        """`unit machine.one_copy_path`: copying out of a workspace, onto a board or onto a card is a Machine's
+        copy_in/copy_out/copy_tree_in/copy_tree_out; a file that names a transport itself is listed with why."""
+        files = list((REPO / "lib" / "wk").rglob("*.py"))
+        files += [p for p in (REPO / "cmd").iterdir()
+                  if p.is_file() and p.read_text(errors="replace").startswith("#!/usr/bin/env python3")]
+        found = set()
+        for p in files:
+            rel = str(p.relative_to(REPO))
+            if rel != "lib/wk/machine.py" and any(COPY.search(l) and not l.lstrip().startswith("#")
+                                                  for l in p.read_text(errors="replace").splitlines()):
+                found.add(rel)
+        self.assertEqual(sorted(found - set(COPIES_ELSEWHERE)), [], "copies outside lib/wk/machine.py")
+        self.assertEqual(sorted(set(COPIES_ELSEWHERE) - found), [], "listed, and no longer copying")
 
 
 if __name__ == "__main__":

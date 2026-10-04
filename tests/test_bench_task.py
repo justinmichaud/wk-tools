@@ -16,6 +16,7 @@ import subprocess
 import sys
 import unittest
 
+from tests.fakes import FakeRegistry, FakeTarget
 from tests.support import REPO, WkTest, clean_env, run, scratch_dir, temp_store
 from tests.test_bench_report import in_process
 
@@ -75,46 +76,16 @@ def status(d, running=False):
     return dict(out, subject=record.subject_line(st["doc"]), current=st["current"]["id"] if st["current"] else "")
 
 
-class FakeTarget:
-    def __init__(self, name, kind="remote", is_local=False, side="answering", rc=0, out=""):
-        self.name, self.kind, self.is_local = name, kind, is_local
-        self.side, self.rc, self.out = side, rc, out
-        self.asked = []
-
-    def probe(self):
-        return self.side, ""
-
-    def wk(self, *args, env=None, quiet=False):
-        self.asked.append((args, dict(env or {}), quiet))
-        return self.rc, self.out
-
-    def task_store(self):
-        return None
-
-
-class FakeRegistry:
-    """What cli.Bench and record.Listing ask of targets.Registry: a store, the walk, and each target."""
-
-    def __init__(self, store_dir, targets=(), env=None):
-        self.env = dict(env or {}, WK_STORE=str(store_dir), WK_LOCK_DIR=str(store_dir / "locks"))
-        self.store = Store(self.env)
-        self.machine = Local()
-        self.targets = {t.name: t for t in targets}
-
-    def walk(self):
-        return list(self.targets)
-
-    def load(self, name):
-        if name not in self.targets:
-            raise LookupError("unknown target '%s'" % name)
-        return self.targets[name]
-
-    def ws_target(self, ws):
-        return {"cws": "container"}.get(ws, "vm")
+def registry(store_dir, targets=(), env=None):
+    """What cli.Bench and record.Listing ask of the registry: a store, the walk, and each target."""
+    env = dict(env or {}, WK_STORE=str(store_dir), WK_LOCK_DIR=str(store_dir / "locks"))
+    ts = {t.name: t for t in targets}
+    return FakeRegistry(env, Local(), lambda n, e: ts[n], names=list(ts),
+                        ws_target=lambda ws: {"cws": "container"}.get(ws, "vm"), in_workspace=lambda: False)
 
 
 def bench(store_dir, targets=(), env=None):
-    return cli.Bench(REPO, FakeRegistry(store_dir, targets, dict(env or {}, WK_ROW_LABEL="here")), FakeClock())
+    return cli.Bench(REPO, registry(store_dir, targets, dict(env or {}, WK_ROW_LABEL="here")), FakeClock())
 
 
 class TestTaskState(WkTest):
@@ -307,7 +278,7 @@ class TestTheFleetListing(WkTest):
     its own wk with the label it is to print and no walk of its own."""
 
     def listing(self, tmp, targets, warned):
-        reg = FakeRegistry(tmp, targets)
+        reg = registry(tmp, targets)
         return record.Listing(reg, reg.store, lambda path: False, "here", warned.append)
 
     def test_each_answering_machine_adds_its_own_rows_after_this_stores(self):
@@ -463,7 +434,7 @@ class TestWhere(WkTest):
 
     def test_each_verb_answers_where_it_runs(self):
         with scratch_dir() as tmp:
-            reg = FakeRegistry(tmp)
+            reg = registry(tmp)
             self.assertEqual(cli.where(reg, ["ls"]), "local")
             self.assertEqual(cli.where(reg, ["ls", "--continued"]), "store")
             self.assertEqual(cli.where(reg, ["seed", "cws", "jetstream3"]), "workspace")
@@ -472,7 +443,7 @@ class TestWhere(WkTest):
 
     def test_a_workspace_no_target_answers_for_is_asked_for_here(self):
         with scratch_dir() as tmp:
-            reg = FakeRegistry(tmp)
+            reg = registry(tmp)
 
             def nowhere(ws):
                 raise LookupError(ws)

@@ -1,10 +1,9 @@
 """`unit record.home_is_the_machine`: a task's record and log live on the machine that runs it, every reader
 reaches them through that machine, nothing copies them, a build started in a guest shows on the host, and
-`wk build <ws> --kill` finds a build the host drives even once the far side has a wk of its own.
+a build on a box with a wk of its own is handed to that wk whole, so its record is the box's.
 
 Run: python3 tests/run.py -k tests.test_record_home
 """
-import contextlib
 import io
 import os
 import sys
@@ -12,6 +11,7 @@ import unittest
 from unittest import mock
 
 from tests import test_wk_targets
+from tests.killpoints import converges
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -56,21 +56,16 @@ class TestEveryReaderGoesThroughTheMachine(test_wk_targets.TargetsTest):
 
 
 class TestNothingCopiesARecord(test_wk_targets.RemoteTest):
-    def test_a_far_build_is_the_hosts_own_record_and_shows_while_the_far_wk_answers(self):
-        """The driver runs here, so its record is written here and nowhere else; the host's `wk status` shows it
-        beside what the far machine's own wk answers."""
+    def test_a_box_build_is_read_through_the_boxs_own_wk_and_nothing_here_holds_one(self):
+        """`live build.box_record`'s unit half: the host's `wk status` asks the box's wk for its records."""
         clock = FakeClock()
-        self.fake.pids.add(os.getpid())
-        self.fake.answer_remote("tools/wk", out="")
-        t = build.records_of(self.t, clock, self.fake).begin("build", "here", "a", "wk build a --kill", "/nolog", ["compile"])
-        t.step(1)
-        self.assertEqual([], self.fake.ssh_calls("/task/"))
         self.env["WK_TARGET"] = "box"
         walk = status.Walk(REPO, name="a", fleet=False, devices=False, env=self.env, reg=self.reg, clock=clock)
         with mock.patch.object(status.Walk, "reach", return_value=("", "")):
             recs = [r for r in walk.records(markers=False) if r.get("kind") == "task"]
-        self.assertEqual([("a", "running")], [(r["name"], r["state"]) for r in recs])
+        self.assertEqual([], recs)
         self.assertTrue(self.fake.ssh_calls("status --no-fleet --records a"))
+        self.assertEqual([], self.t.records(clock).list())
 
 
 class TestTheLogIsReadThroughItsMachine(unittest.TestCase):
@@ -123,30 +118,68 @@ class TestTheLogIsReadThroughItsMachine(unittest.TestCase):
         self.assertEqual("[1/9] CXX a.o\r[7/9] CXX g.o\n[9/9] Linking jsc\n", out.getvalue())
 
 
-class TestKillFindsTheHostsOwnBuild(test_wk_targets.RemoteTest):
-    """A build the host drives on a box is the host's record. Once a tools sync gives the box a wk, a command
-    about another workspace there goes to that wk, and `--kill` of this one is still answered here."""
+class TestABoxBuildIsHandedToTheBox(test_wk_targets.RemoteTest):
+    """A build on a box that runs its own wk is that wk's, record and all: the dispatcher hands every command about
+    it over, and nothing here drives one or records one."""
 
     def setUp(self):
         super().setUp()
         self.env["WK_TARGET"] = "box"
-        self.clock = FakeClock()
-        self.fake.pids.add(4242)
-        self.task = build.records_of(self.t, self.clock, self.fake).begin(
-            "build", "here", "a", "wk build a --kill", "/nolog", ["compile"], pid=4242)
-        self.assertTrue(self.t.delegates())
 
-    def test_the_host_driving_a_workspace_keeps_it_from_the_far_wk(self):
+    def build(self):
+        return build.Build(self.reg, "a", {"config": "jsc-release"}, clock=FakeClock())
+
+    def made_here(self, t):
+        """What this end changed beyond the ssh control directory every far call makes."""
+        return t.records().list(), [e for e in t.here.effects if e[0] != "run" and e != ("mkdir", t.ssh_dir())]
+
+    def test_every_command_about_a_box_workspace_goes_to_the_boxs_wk(self):
         with mock.patch.object(dispatch, "_registry", self.reg):
-            self.assertIsNone(dispatch.delegate_target("box", "a"))
-            self.assertEqual("box", dispatch.delegate_target("box", "b").name)
-            self.fake.pids.discard(4242)
-            self.assertEqual("box", dispatch.delegate_target("box", "a").name)
+            self.assertEqual("box", dispatch.delegate_target("box").name)
 
-    def test_the_kill_lands_on_the_hosts_pid_and_ends_the_hosts_record(self):
-        with contextlib.redirect_stderr(io.StringIO()):
-            rc = build.Build(self.reg, "a", {"kill": True}, clock=self.clock).front()
-        self.assertEqual(0, rc)
-        self.assertIn(("kill", 4242, 15), self.fake.effects)
-        self.assertEqual(("cancelled", "cancelled"), (self.task.field("exit"), self.task.field("stopping")))
-        self.assertEqual([], self.fake.ssh_calls("--kill"))
+    def test_the_hand_over_is_the_whole_command_and_changes_nothing_here(self):
+        """`killpoints[build.hand_over]`: the workstation's half makes no effect, so a kill anywhere in it leaves
+        only what the box's wk made, and a re-run hands the same command over again."""
+        def world():
+            w = test_wk_targets.RemoteTest()
+            w.setUp()
+            w.env["WK_TARGET"] = "box"
+            w.ran = []
+            self.addCleanup(w.tearDown)
+            return w
+
+        def run_once(w):
+            with mock.patch.object(dispatch, "_registry", w.reg), mock.patch.object(dispatch.os, "execvp", lambda f, a: w.ran.append(a)):
+                dispatch.delegate_run(dispatch.delegate_target("box"), "build", ["a", "jsc-release", "--detach"])
+
+        def final(w):
+            return self.made_here(w.reg.load("box")), [a[-1] for a in w.ran]
+
+        converges(self, world, run_once, final)
+        w = world()
+        run_once(w)
+        (argv,) = w.ran
+        self.assertEqual(argv[0], "ssh")
+        self.assertIn("/home/u/wk/tools/wk build a jsc-release --detach", argv[-1])
+        self.assertEqual(([], []), self.made_here(w.reg.load("box")))
+
+    def test_a_box_without_a_wk_of_its_own_is_refused_and_nothing_is_recorded(self):
+        self.fake.answer_remote("test -f $HOME/.wk-remote", rc=1)
+        self.assertIn("no wk-tools of its own to\n    run it:  wk machine setup box", self.refused(self.build))
+        self.assertEqual(([], []), self.made_here(self.t))
+
+    def test_a_box_that_does_not_answer_is_refused_and_nothing_is_recorded(self):
+        self.fake.answer_remote("uname -s", rc=255, err="ssh: connect to host box.example port 22: Operation timed out")
+        self.assertIn("'build' acts on a workspace on box, and box did not answer", self.refused(self.build))
+        self.assertEqual(([], []), self.made_here(self.t))
+
+    def test_a_build_reaching_this_end_with_the_boxs_wk_answering_is_refused(self):
+        self.assertIn("'a' is on box, whose own wk runs its builds; 'wk build a' hands it there", self.refused(self.build))
+        self.assertEqual(([], []), self.made_here(self.t))
+
+    def test_on_the_box_the_build_is_recorded_in_the_boxs_own_store(self):
+        root = self.tmp / "rr"
+        self.conf("me", "local=1\nroot=%s\n" % root)
+        self.env["WK_TARGET"] = "me"
+        b = build.Build(self.reg, "a", {"config": "jsc-release"}, clock=FakeClock())
+        self.assertTrue(str(b.recs.root).startswith(str(root)), b.recs.root)

@@ -809,8 +809,8 @@ class TestABuildMachineHoldsNoKey(unittest.TestCase):
 
     def _config(self):
         """The ssh config remote/provision.sh writes, produced the same way it
-        does: the alias blocks with an empty dir."""
-        cp = subprocess.run(["python3", "-m", "wk.secrets", "alias-blocks", ""], capture_output=True, text=True,
+        does."""
+        cp = subprocess.run(["python3", "-m", "wk.secrets", "box-alias-blocks"], capture_output=True, text=True,
                             cwd=str(REPO), env={**os.environ, "PYTHONPATH": str(REPO / "lib"), "WK_ROOT": str(REPO)})
         self.assertEqual(0, cp.returncode, cp.stderr)
         return cp.stdout
@@ -826,7 +826,7 @@ class TestABuildMachineHoldsNoKey(unittest.TestCase):
         text = PROVISION.read_text()
         self.assertNotIn('ensure_dir "$ROOT/push-keys"', text)
         self.assertIn('rm -rf "$ROOT/push-keys"', text)
-        self.assertIn('python3 -m wk.secrets alias-blocks ""', text)
+        self.assertIn("python3 -m wk.secrets box-alias-blocks", text)
 
 
 if __name__ == "__main__":

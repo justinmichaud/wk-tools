@@ -30,8 +30,6 @@ from wk.store import Store  # noqa: E402
 from wk.sysimage import guestbase  # noqa: E402
 
 IS_MACOS = os.uname().sysname == "Darwin"
-WRITE_INTERFACE = ("store_init", "create", "ready", "destroy", "sdk_refresh", "create_log")
-SHARED = ("ready", "sdk_refresh", "create_log")
 LINUX_MEMINFO = "MemTotal:       32806140 kB\nMemFree:         1000000 kB\nMemAvailable:   20480000 kB\n"
 
 
@@ -555,16 +553,71 @@ class MarkerClock(FakeClock):
             self.fake.files[self.path] = ""
 
 
-class TestWriteInterface(unittest.TestCase):
-    def test_every_driver_implements_the_whole_write_side(self):
-        for cls in (targets.Container, targets.Vm, targets.LocalWorkspace, targets.Remote):
-            for name in WRITE_INTERFACE:
-                with self.subTest(cls=cls.__name__, method=name):
-                    own, base = getattr(cls, name), getattr(targets.Target, name)
-                    if name in SHARED:
-                        self.assertNotIn("NotImplementedError", inspect.getsource(base))
-                    else:
-                        self.assertIsNot(own, base, "%s inherits %s unimplemented" % (cls.__name__, name))
+class TargetConformance:
+    """`unit machine.conformance[<kind>]`: one body over every target driver on the Fake machine. `stopped()` makes
+    workspace `ws` there and not running and returns the driver; `down` is what `info` reads of it, and `brought_up()`
+    whether the driver's `start` brought it up."""
+
+    cls = None
+    ws = "ws"
+    down = None
+
+    def test_the_driver_implements_the_whole_interface(self):
+        for name, fn in inspect.getmembers(targets.Target, inspect.isfunction):
+            if "raise NotImplementedError" in inspect.getsource(fn):
+                with self.subTest(method=name):
+                    self.assertIsNot(getattr(self.cls, name), fn, "%s forgot %s" % (self.cls.__name__, name))
+
+    def test_a_stopped_workspace_reads_stopped_is_present_and_is_started(self):
+        t = self.stopped()
+        self.assertIs(type(t), self.cls)
+        self.assertEqual(t.info(self.ws), self.down)
+        self.assertEqual(t.state(self.ws), "present")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertTrue(t.start(self.ws))
+        self.assertTrue(self.brought_up(t))
+
+
+class TestContainerConformance(TargetsTest, TargetConformance):
+    cls, down = targets.Container, "exited"
+
+    def stopped(self):
+        self.up = False
+        self.fake.react(["podman", "inspect", "wk-ws"], lambda a, f: Result(0, "running\n" if self.up else "exited\n"))
+        self.fake.react(["podman", "start"], lambda a, f: (setattr(self, "up", True), Result(0))[1])
+        d = os.path.join(self.env["WK_STORE"], "ws", "ws")
+        self.fake.write(os.path.join(d, "home", targets.READY_MARKER), "")
+        self.fake.write(os.path.join(d, "base-id"), "main-1\n")
+        return self.reg.load("container")
+
+    def brought_up(self, t):
+        return t.info(self.ws) == "running"
+
+
+class TestRemoteConformance(RemoteTest, TargetConformance):
+    """A build machine's workspace is a checkout: there and not running is no state it has, and start acts on nothing."""
+    cls, down = targets.Remote, "present"
+
+    def stopped(self):
+        self.fake.answer_remote("ws/ws ]", out="present\n")
+        return self.t
+
+    def brought_up(self, t):
+        return t.info(self.ws) == "present"
+
+
+class TestLocalConformance(TargetsTest, TargetConformance):
+    """The workspace this process runs in is up by being asked."""
+    cls, down = targets.LocalWorkspace, "running"
+
+    def stopped(self):
+        marker = self.tmp / "marker"
+        marker.write_text("name=ws\nsrc=/src/WebKit\n")
+        self.env["WK_MARKER"] = str(marker)
+        return self.reg.load("local")
+
+    def brought_up(self, t):
+        return t.info(self.ws) == "running" and self.fake.effects == []
 
 
 class TestContainerWrite(TargetsTest):
@@ -646,6 +699,36 @@ class TestContainerWrite(TargetsTest):
         self.assertIn("--image", self.wkdev_create())
         self.assertIn("ghcr.io/x/sdk:tag", self.wkdev_create())
         self.assertIn("using workspace image ghcr.io/x/sdk:tag (WK_SDK_IMAGE)", err)
+
+    def sdk_asks_for(self, tag, published):
+        self.fake.answer(["env", "WKDEV_SDK=%s" % self.t.sdk()], out=tag + "\n")
+        rows = "".join("ghcr.io/igalia/wkdev-sdk\t%s\n" % t for t in published)
+        self.fake.answer(["podman", "search", "--list-tags"], out="NAME\tTAG\n" + rows)
+
+    def test_an_unpublished_sdk_tag_is_refused_naming_the_newest_of_its_series_before_anything_is_made(self):
+        self.sdk_asks_for("2.55-v2-8434060", ["2.55-v2-8434060_amd64", "2.54-v9-aaa", "2.55-v1-1111111", "2.55-v10-2222222", "2.55-v2-3333333"])
+        err = self.refused(lambda: self.t.create("new", self.base))
+        self.assertIn("ghcr.io/igalia/wkdev-sdk:2.55-v2-8434060, which upstream has not published", err)
+        self.assertIn("WK_SDK_IMAGE=ghcr.io/igalia/wkdev-sdk:2.55-v10-2222222 wk new", err)
+        self.assertEqual([e for e in self.fake.effects if e[0] != "run"], [])
+
+    def test_a_published_sdk_tag_goes_on_to_wkdev_create(self):
+        self.sdk_asks_for("2.55-v2-8434060", ["2.55-v2-8434060"])
+        self.stderr_of(lambda: self.t.create("new", self.base))
+        self.assertTrue(self.wkdev_create())
+
+    def test_a_registry_that_cannot_be_asked_goes_on_to_wkdev_create(self):
+        self.sdk_asks_for("2.55-v2-8434060", [])
+        self.fake.answer(["podman", "search", "--list-tags"], rc=1, err="timed out")
+        self.stderr_of(lambda: self.t.create("new", self.base))
+        self.assertTrue(self.wkdev_create())
+
+    def test_an_image_override_skips_the_registry_check(self):
+        self.sdk_asks_for("2.55-v2-8434060", [])
+        self.env["WK_SDK_IMAGE"] = "ghcr.io/x/sdk:tag"
+        self.stderr_of(lambda: self.reg.load("container").create("other", self.base))
+        self.assertFalse([e for e in self.fake.effects if e[1][:2] == ("podman", "search")])
+        self.assertIn("ghcr.io/x/sdk:tag", self.wkdev_create())
 
     def test_create_refuses_without_a_base_or_over_a_container_and_makes_nothing(self):
         err = self.refused(lambda: self.t.create("new", "main-9"))
@@ -982,13 +1065,6 @@ class TestRemoteWrite(RemoteTest):
         self.assertIn("could not wire the remotes in /home/u/wk/ws/a/WebKit", err)
         self.assertIn("touch", self.acts()[-1])
 
-    def test_a_peer_is_not_a_build_machine_and_says_where_to_create(self):
-        self.conf("peer", "peer=1\ntools=/opt/wk-tools\n")
-        err = self.refused(lambda: self.reg.load("peer").create("newws"))
-        self.assertIn("'peer' is a workstation, not a build machine for this one.", err)
-        self.assertIn("ssh peer wk new newws", err)
-        self.assertEqual(self.fake.ssh_calls(), [])
-
     def test_destroy_removes_the_far_checkout_then_the_record_here(self):
         ws_dir = self.t.store.ws_dir("a")
         self.fake.dirs.add(ws_dir)
@@ -1002,6 +1078,18 @@ class TestRemoteWrite(RemoteTest):
         self.assertIn("could not remove /home/u/wk/ws/a on box.example", err)
         self.assertIn("The record of 'a' here is kept", err)
         self.assertNotIn(("remove", ws_dir), self.fake.effects)
+
+    def test_a_command_is_handed_over_whole_to_the_peers_own_wk(self):
+        self.conf("peer", "peer=1\ntools=/opt/wk-tools\n")
+        self.fake.answer_remote("test -x /opt/wk-tools/wk", rc=0)
+        argv = self.reg.load("peer").hand_over("new", ["a", "--no-wait"], tty=False)
+        self.assertEqual((argv[0], argv[-2]), ("ssh", "peer"))
+        self.assertNotIn("-t", argv)
+        self.assertIn("WK_ROW_LABEL=peer /opt/wk-tools/wk new a --no-wait", argv[-1])
+        self.assertEqual(self.fake.ssh_calls("wk new"), [])
+        self.fake.answer_remote("test -x /opt/wk-tools/wk", rc=1)
+        err = self.refused(lambda: self.reg.load("peer").hand_over("new", ["a"], tty=False))
+        self.assertIn("'new' acts on a workspace on peer, which has no wk-tools of its own", err)
 
     def test_a_peers_workspace_is_destroyed_by_its_own_wk(self):
         self.conf("peer", "peer=1\ntools=/opt/wk-tools\n")
@@ -1061,11 +1149,13 @@ class TestLocalWrite(TargetsTest):
         self.env["WK_MARKER"] = str(marker)
         self.t = self.reg.load("local")
 
-    def test_a_workspace_neither_creates_nor_destroys_and_names_the_host_command(self):
+    def test_a_workspace_neither_creates_destroys_nor_stops_itself_and_names_the_host_command(self):
         err = self.refused(lambda: self.t.create("x"))
         self.assertIn("a workspace cannot create a workspace -- run 'wk new x' on the host", err)
         err = self.refused(lambda: self.t.destroy("ws"))
         self.assertIn("a workspace cannot destroy itself -- run 'wk rm ws' on the host", err)
+        err = self.refused(lambda: self.t.stop("ws"))
+        self.assertIn("a workspace cannot stop itself -- run 'wk stop ws' on the host", err)
         self.assertEqual(self.fake.effects, [])
 
     def test_store_init_makes_its_own_record(self):

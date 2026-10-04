@@ -8,6 +8,7 @@ import os
 import sys
 from unittest import mock
 
+from tests.fakes import FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO, WkTest
 from tests.test_bench_report import in_process
@@ -266,26 +267,20 @@ class TestTheVerb(WkTest):
             self.read.append((ws, tuple(argv)))
             return Result(0, PLAN.replace("\n", "\r\n"))
 
-    class Registry:
-        def __init__(self, target, machine, store):
-            self.env, self.machine, self.target = {"WK_STORE": store, "WK_LOCK_DIR": "/locks"}, machine, target
-            self.store = Store(self.env)
-
-        def ws_target(self, ws):
-            return "container"
-
-        def load(self, name):
-            return self.target
+    @staticmethod
+    def registry(target, machine, store):
+        return FakeRegistry({"WK_STORE": store, "WK_LOCK_DIR": "/locks"}, machine, lambda n, e: target,
+                            ws_target=lambda ws: "container")
 
     def test_the_verb_reads_the_checkout_and_prints_the_payload(self):
         m, target = fake(), self.Target()
-        reg = self.Registry(target, m, "/store")
+        reg = self.registry(target, m, "/store")
         cp = in_process(cli.Bench(REPO, reg, FakeClock()).seed, "w", "jetstream3", True)
         self.assertEqual(cp.stdout.strip(), "/store/cache/bench/jetstream3-%s" % SHA[:12], cp.stderr)
         self.assertEqual(target.read, [("w", ("cat", "/src/WebKit/Tools/Scripts/webkitpy/benchmark_runner/data/plans/jetstream3.plan"))])
 
     def test_it_needs_a_workspace_and_a_plan(self):
-        b = cli.Bench(REPO, self.Registry(self.Target(), fake(), "/store"), FakeClock())
+        b = cli.Bench(REPO, self.registry(self.Target(), fake(), "/store"), FakeClock())
         with self.assertRaises(Refused):
             with in_process_ok():
                 b.seed("w", "", True)

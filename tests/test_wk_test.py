@@ -11,17 +11,19 @@ import importlib.util
 import io
 import os
 import shutil
+import signal
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes import FakeProc, FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO, as_dispatched
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import record, targets  # noqa: E402
+from wk import job, record, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
@@ -66,35 +68,6 @@ class TestTarget(targets.Target):
         return self.machine.act_run(["sync-tools", ws]).ok
 
 
-class Reg(targets.Registry):
-    def __init__(self, world):
-        super().__init__(REPO, env=world.env, machine=world)
-        self.world = world
-
-    def load(self, name):
-        return TestTarget("box", self.root, dict(self.env, **self.world.conf), self.world, self.world.kind)
-
-    def ws_target(self, ws):
-        return "box"
-
-    def in_workspace(self):
-        return False
-
-
-class Proc:
-    def __init__(self, world, rc):
-        self.pid, self.world, self.rc = 4242, world, rc
-        self.returncode = None
-
-    def poll(self):
-        self.returncode = self.rc if self.returncode is None else self.returncode
-        return self.returncode
-
-    def wait(self):
-        self.returncode = -9 if self.returncode is None else self.returncode
-        return self.returncode
-
-
 class World(Fake):
     """This host testing workspace `ws` on target `box`: `sh -c` finds every layout
     path present, the run writes `out` to its log and exits `rc`."""
@@ -115,7 +88,8 @@ class World(Fake):
         self.react(["bash", "-c"], self._bash)
         self.answer(["sync-tools"])
         self.react(["exec", "ws", "kill", "-0"], lambda a, f: Result(0 if int(a[-1]) in f.pids else 1))
-        self.reg = Reg(self)
+        self.reg = FakeRegistry(self.env, self, lambda n, e: TestTarget("box", str(REPO), dict(e, **self.conf), self, self.kind),
+                                ws_target=lambda ws: "box", in_workspace=lambda: False)
         self.ws_dir = os.path.join(self.env["WK_STORE"], "ws", "ws")
         os.makedirs(self.ws_dir)
 
@@ -129,7 +103,7 @@ class World(Fake):
     def popen(self, argv, stdin=None, stdout=None, stderr=None, cwd=None):
         self.effect(("watch", tuple(argv)))
         stdout.write(self.out)
-        return Proc(self, self.rc)
+        return FakeProc(self.rc)
 
     def recs(self):
         return CMD.records_of(self.reg.load("box"), self.clock, self)
@@ -298,6 +272,32 @@ class TestTheRecordARunWrites(TestTest):
         self.assertIn("no such test in 'ws'", err)
         self.assertIn("fast/gone.html", err)
         self.assertEqual(self.w.recs().list(), [])
+
+
+class TestInterrupted(TestTest):
+    def test_an_interrupt_stops_the_run_where_it_runs_and_the_record_reads_cancelled(self):
+        """`unit machine.interrupt_stops_remote_process[test]`: the suite's own pid, announced from the workspace, is
+        TERMed there, as `wk build`'s is."""
+        class Interrupting(FakeProc):
+            def poll(self):
+                raise job.Interrupted(signal.SIGINT)
+        real = record.Records.begin
+
+        def begin(recs, *a, **kw):
+            t = real(recs, *a, **kw)
+            t.set("pid_match", CMD.PID_MATCH)
+            t.pid(777)
+            t.set("where", "target")
+            return t
+        self.w.pids.add(777)
+        self.w.answer(["exec", "ws", "ps", "-o", "args=", "-p", "777"], out="perl Tools/Scripts/run-javascriptcore-tests\n")
+        self.w.react(["exec", "ws", "kill", "-TERM"], lambda a, f: (f.pids.discard(777), Result(0))[1])
+        self.w.popen = lambda argv, **kw: Interrupting(self.w, 0)
+        with mock.patch.object(record.Records, "begin", begin):
+            err = self.refused(status=130)
+        self.assertIn("interrupted -- stopping the test run in 'ws'", err)
+        self.assertIn(("run", ("exec", "ws", "kill", "-TERM", "777")), self.w.effects)
+        self.assertEqual(self.w.recs().list()[0].field("exit"), "cancelled")
 
 
 class TestKillPoints(TestTest):

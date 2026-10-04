@@ -24,6 +24,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes import FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO, fake_workspace, run
 
@@ -71,7 +72,7 @@ GENERATORS = {
 }
 
 
-class FakeTarget(targets.Target):
+class SyncTarget(targets.Target):
     """A target whose environment is the World's: workspaces, states, far side and far `wk` are its answers."""
 
     def __init__(self, name, root, env, machine, kind):
@@ -123,23 +124,6 @@ class FakeTarget(targets.Target):
         return self.machine.wk_rc.get(args[1] if len(args) > 1 else "", 0), "said %s\n" % " ".join(args)
 
 
-class FakeRegistry(targets.Registry):
-    def __init__(self, root, env, machine, kinds):
-        super().__init__(root, env=env, machine=machine)
-        self.kinds = kinds
-
-    def all(self):
-        return list(self.kinds)
-
-    def default(self):
-        return next(iter(self.kinds))
-
-    def load(self, name):
-        if name not in self.kinds:
-            raise LookupError("unknown target '%s'.\n    The built-in ones are container, vm, remote and local." % name)
-        return FakeTarget(name, self.root, dict(self.env), self.machine, self.kinds[name])
-
-
 class World(Fake):
     """This host: a store in a scratch directory, a mirror the refresh makes, git answering for the snapshot, the
     bridged bash functions answering from `bash`, and each workspace's exec answering from `fetched`."""
@@ -156,7 +140,8 @@ class World(Fake):
         self.steps, self.refuse_tools = [], set()
         self.local_store, self.verified = True, set()
         self.heads = ["main"]
-        self.reg = FakeRegistry(REPO, self.env, self, kinds or {"container": "container"})
+        self.refs, self.upstream = "", MAIN_SHA + " refs/heads/main\n"
+        self.reg = self.registry(kinds or {"container": "container"})
         self.store = self.reg.store
         self.mirror = self.store.mirror()
         self.react(["sh", "-c"], self._sh)
@@ -168,6 +153,14 @@ class World(Fake):
     @property
     def fake(self):
         return self
+
+    def registry(self, kinds, guests=False):
+        """A SyncTarget of each of `kinds` (name -> kind), but a FakeVm for 'vm' when `guests`."""
+        def make(name, env):
+            if guests and name == "vm":
+                return FakeVm(name, str(REPO), env, self)
+            return SyncTarget(name, str(REPO), env, self, kinds[name])
+        return FakeRegistry(self.env, self, make, names=list(kinds))
 
     def lock(self):
         return Lock(self.store, self, self.clock)
@@ -193,6 +186,7 @@ class World(Fake):
         text = argv[2]
         if text.startswith("REFRESH "):
             f.dirs.add(text.split(" ", 1)[1])
+            f.refs = f.upstream
             return Result(0, "mirror-fetch origin ok\nmirror-fetch wpe FAILED\n")
         if text.startswith("CHECK "):
             return f.base_check
@@ -215,6 +209,8 @@ class World(Fake):
     def _git(self, argv, f):
         """A snapshot is on its branch, tracking it, once `verified` names it."""
         tree, args = argv[2], argv[3:]
+        if tree == f.mirror and args[:1] == ["for-each-ref"]:
+            return Result(0, f.refs)
         if tree.startswith(f.base_dir() + "/") and args[:2] == ["symbolic-ref", "--quiet"]:
             return Result(0, "refs/heads/main\n") if tree[len(f.base_dir()) + 1:].split("/")[0] in f.verified else Result(1)
         if args[:3] == ["rev-parse", "--abbrev-ref", "--symbolic-full-name"]:
@@ -382,6 +378,11 @@ class Steps(sync.Sync):
 
     def sync_mirror(self):
         self.here.steps.append("MIRROR")
+        return True
+
+    def remount_guests(self):
+        self.here.steps.append("REMOUNT")
+        return 0
 
     def sync_snapshot(self, target):
         self.here.steps.append("SNAPSHOT %s" % target.name)
@@ -417,28 +418,28 @@ class TestWhatEachScopeRuns(SyncTest):
 
     def test_bare_is_the_tooling_the_mirror_then_each_target_here(self):
         rc, steps, _ = self.steps()
-        self.assertEqual((rc, steps), (0, ["FURNITURE container", "FURNITURE vm", "MIRROR", "SNAPSHOT container",
+        self.assertEqual((rc, steps), (0, ["FURNITURE container", "FURNITURE vm", "MIRROR", "REMOUNT", "SNAPSHOT container",
                                            "FETCH-IN container: container-ws", "FETCH-IN vm: vm-ws"]))
 
     def test_a_named_target_refreshes_its_furniture_before_fetching_in_it(self):
         rc, steps, _ = self.steps("target", "container")
-        self.assertEqual(steps, ["FURNITURE container named", "MIRROR", "SNAPSHOT container", "FETCH-IN container: container-ws"])
+        self.assertEqual(steps, ["FURNITURE container named", "MIRROR", "REMOUNT", "SNAPSHOT container", "FETCH-IN container: container-ws"])
 
     def test_a_guest_target_gets_the_mirror_and_a_fetch_but_no_snapshot(self):
         rc, steps, _ = self.steps("target", "vm")
-        self.assertEqual(steps, ["FURNITURE vm named", "MIRROR", "FETCH-IN vm: vm-ws"])
+        self.assertEqual(steps, ["FURNITURE vm named", "MIRROR", "REMOUNT", "FETCH-IN vm: vm-ws"])
 
     def test_all_reaches_every_workspace_on_every_target(self):
         rc, steps, _ = self.steps("all")
-        self.assertEqual(steps, ["FURNITURE container", "FURNITURE vm", "FURNITURE buildbox4", "MIRROR", "SNAPSHOT container",
+        self.assertEqual(steps, ["FURNITURE container", "FURNITURE vm", "FURNITURE buildbox4", "MIRROR", "REMOUNT", "SNAPSHOT container",
                                  "FETCH-IN container: container-ws", "FETCH-IN vm: vm-ws", "FETCH-IN buildbox4: buildbox4-ws"])
 
     def test_tools_refreshes_every_machines_copy_and_publishes_one_snapshot(self):
         rc, steps, _ = self.steps("tools")
-        self.assertEqual(steps, ["FURNITURE container", "FURNITURE vm", "FURNITURE buildbox4", "MIRROR", "SNAPSHOT container"])
+        self.assertEqual(steps, ["FURNITURE container", "FURNITURE vm", "FURNITURE buildbox4", "MIRROR", "REMOUNT", "SNAPSHOT container"])
         self.w.steps.clear()
         rc, steps, _ = self.steps("tools", "container")
-        self.assertEqual(steps, ["FURNITURE container named", "MIRROR", "SNAPSHOT container"])
+        self.assertEqual(steps, ["FURNITURE container named", "MIRROR", "REMOUNT", "SNAPSHOT container"])
 
     def test_a_machine_of_its_own_touches_neither_the_mirror_nor_a_snapshot_here(self):
         rc, steps, _ = self.steps("target", "buildbox4")
@@ -453,16 +454,16 @@ class TestWhatEachScopeRuns(SyncTest):
         self.w.local_store = False
         self.w.far["container"] = "answering"
         _, steps, _ = self.steps("target", "container")
-        self.assertEqual(steps, ["FURNITURE container named", "MIRROR", "ASKED container: wk sync --target container"])
+        self.assertEqual(steps, ["FURNITURE container named", "MIRROR", "REMOUNT", "ASKED container: wk sync --target container"])
         self.w.steps.clear()
         _, steps, _ = self.steps("tools", "container", fix=True)
-        self.assertEqual(steps, ["FURNITURE container named", "MIRROR", "ASKED container: wk sync --tools container --fix"])
+        self.assertEqual(steps, ["FURNITURE container named", "MIRROR", "REMOUNT", "ASKED container: wk sync --tools container --fix"])
 
     def test_a_stopped_podman_machine_is_named_and_is_not_a_success(self):
         self.w.local_store = False
         self.w.far["container"] = "stopped"
         rc, steps, err = self.steps("target", "container")
-        self.assertEqual((rc, steps), (1, ["FURNITURE container named", "MIRROR"]))
+        self.assertEqual((rc, steps), (1, ["FURNITURE container named", "MIRROR", "REMOUNT"]))
         self.assertIn("podman machine is stopped", err)
         self.assertIn("wk start, then  wk sync --target container", err)
 
@@ -490,7 +491,7 @@ class TestWhatEachScopeRuns(SyncTest):
 
     def test_the_mirror_alone(self):
         rc, steps, _ = self.steps("mirror")
-        self.assertEqual((rc, steps), (0, ["MIRROR"]))
+        self.assertEqual((rc, steps), (0, ["MIRROR", "REMOUNT"]))
 
     def test_in_the_podman_vm_the_mirror_is_a_request_too(self):
         """The VM mounts the host's mirror read-only: `wk new`'s refresh from in there is asked of the broker."""
@@ -671,6 +672,96 @@ class TestTheMirror(SyncTest):
         self.assertRegex(self.mirror(), r"stage mirror fetch: \d+s")
         os.environ.pop("WK_DEBUG")
         self.assertNotIn("stage mirror fetch", self.mirror())
+
+
+class FakeVm(targets.Vm):
+    """The guest driver with tart's listing and the ssh into a guest answered by the World."""
+
+    def list(self):
+        return sorted(self.machine.guests.items())
+
+    def exec(self, ws, argv, tty=False, timeout=None):
+        return self.machine.run(["guest", ws] + list(argv))
+
+
+class TestTheGuestsRemount(SyncTest):
+    """`unit sync.guest_remount`: after the refresh, each running guest mounts the host's shares afresh, since its
+    old mount keeps the inode of every ref git renamed over; a guest that cannot is named with the restart."""
+
+    def setUp(self):
+        super().setUp()
+        self.w.reg = self.w.registry({"container": "container", "vm": "vm"}, guests=True)
+        self.w.guests = {"up-a": "running", "down": "stopped", "up-b": "running"}
+        self.w.answer(["guest"])
+
+    def remounts(self):
+        return [e[1][1] for e in self.w.effects if e[0] == "run" and e[1][0] == "guest"]
+
+    def test_each_running_guest_remounts_and_a_stopped_one_does_not(self):
+        rc, _ = self.stderr(self.w.sync("mirror").run)
+        self.assertEqual((rc, self.remounts()), (0, ["up-a", "up-b"]))
+
+    def test_a_refresh_that_moved_no_ref_remounts_nothing(self):
+        self.stderr(self.w.sync("mirror").run)
+        self.w.effects = []
+        rc, _ = self.stderr(self.w.sync("mirror").run)
+        self.assertEqual((rc, self.remounts()), (0, []))
+        self.w.upstream = "f" * 40 + " refs/heads/main\n"
+        self.stderr(self.w.sync("mirror").run)
+        self.assertEqual(self.remounts(), ["up-a", "up-b"])
+
+    def test_the_remount_converges_from_a_share_mounted_or_not(self):
+        """A remount killed after its umount leaves the share unmounted; the rerun mounts it rather than failing the umount."""
+        self.stderr(self.w.sync("mirror").run)
+        script = next(e[1][-1] for e in self.w.effects if e[0] == "run" and e[1][0] == "guest")
+        bindir = self.tmp / "bin"
+        bindir.mkdir()
+        (bindir / "mount").write_text('#!/bin/sh\n[ -f "$STATE" ] && echo "tag on %s (virtiofs, local)"\nexit 0\n'
+                                      % targets.GUEST_SHARES)
+        (bindir / "sudo").write_text('#!/bin/sh\n[ "$1" = -n ] && shift\ncase "$1" in\n'
+                                     '  umount) [ -f "$STATE" ] || exit 1; rm "$STATE";;\n'
+                                     '  mkdir) ;;\n'
+                                     '  mount_virtiofs) [ -f "$STATE" ] && exit 1; touch "$STATE";;\n'
+                                     '  *) exit 99;;\nesac\n')
+        for stub in ("mount", "sudo"):
+            os.chmod(bindir / stub, 0o755)
+        for mounted in (True, False):
+            with self.subTest(mounted=mounted):
+                state = self.tmp / "mounted"
+                if mounted:
+                    state.write_text("")
+                elif state.exists():
+                    state.unlink()
+                cp = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30,
+                                    env=dict(os.environ, PATH="%s:%s" % (bindir, os.environ["PATH"]), STATE=str(state)))
+                self.assertEqual((cp.returncode, state.exists()), (0, True), cp.stderr)
+
+    def test_the_remount_follows_the_refresh_whatever_target_asked_for_it(self):
+        self.stderr(self.w.sync("target", target="container").run)
+        runs = [e[1] for e in self.w.effects if e[0] == "run"]
+        refresh = runs.index(("sh", "-c", "REFRESH %s" % self.w.mirror))
+        self.assertEqual([r[1] for r in runs[refresh:] if r[0] == "guest"], ["up-a", "up-b"])
+
+    def test_a_dry_run_lists_each_remount_and_runs_none(self):
+        os.environ["WK_DRY_RUN"] = "1"
+        rc, err = self.stderr(self.w.sync("mirror").run)
+        self.assertEqual((rc, self.remounts()), (0, []))
+        for ws in ("up-a", "up-b"):
+            self.assertIn("would run in %s: sh -c 'if mount | grep -qF" % ws, err)
+        self.assertNotIn("would run in down", err)
+
+    def test_a_busy_share_is_named_with_the_restart_and_the_refresh_still_succeeds(self):
+        self.w.react(["guest", "up-a"], lambda a, f: Result(16, "", "umount(/Volumes/My Shared Files): Resource busy\n"))
+        rc, err = self.stderr(self.w.sync("mirror").run)
+        self.assertEqual((rc, self.remounts()), (0, ["up-a", "up-b"]))
+        self.assertIn("'up-a' could not remount the host's shares (umount(/Volumes/My Shared Files): Resource busy)", err)
+        self.assertIn("wk stop up-a, then  wk start up-a", err)
+        self.assertNotIn("'up-b' could not", err)
+
+    def test_no_guest_target_here_remounts_nothing(self):
+        self.w.reg = self.w.registry({"container": "container"}, guests=True)
+        rc, _ = self.stderr(self.w.sync("mirror").run)
+        self.assertEqual((rc, self.remounts()), (0, []))
 
 
 class TestTheSnapshot(SyncTest):

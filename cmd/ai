@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk ai claude|pi <workspace> [agent options] -- run a coding agent inside a workspace
-# wk: where=workspace name=required@2 ready=yes group=workspaces passthrough=all verbs=claude,pi
+# wk: where=workspace name=required@2 ready=yes group=workspaces passthrough=all verbs=claude,pi dryrun
 #
 # The workspace name comes first; everything after it is the agent's, verbatim.
 #
@@ -9,6 +9,7 @@
 #   wk ai claude bb4 --continue  and so on
 #   wk ai pi bb4 --help          pi's own help, not this one
 #   wk ai claude                 in a workspace: this one, no name
+#   wk ai claude --dry-run bb4   the install, push switch and session it would run
 #
 # Permissions are relaxed because the workspace is the blast radius, not the
 # machine, so this checks the boundary holds before handing over control. For
@@ -48,7 +49,6 @@ import json
 import os
 import shlex
 import signal
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
@@ -56,11 +56,11 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import guest, wall  # noqa: E402
+from wk import act, guest, wall  # noqa: E402
 from wk.act import Refused, barrier, debug, die, info, log, warn  # noqa: E402
 from wk.doctor import Report  # noqa: E402
 from wk.kv import kv  # noqa: E402
-from wk.machine import HAVE, Local  # noqa: E402
+from wk.machine import HAVE, Local, Result  # noqa: E402
 from wk.secrets import Secrets, first_line  # noqa: E402
 from wk.targets import Registry, show  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
@@ -129,14 +129,17 @@ def indented(text):
     return "\n".join("    " + line for line in text.replace("\r", "").splitlines())
 
 
-def foreground(argv, cwd):
-    """The session, on this process's terminal; a Ctrl-C there is the agent's, and this waits for it to end."""
-    p = subprocess.Popen(argv, cwd=cwd)
-    while True:
-        try:
-            return p.wait()
-        except KeyboardInterrupt:
-            continue
+def _the_agents(signum, frame):
+    pass
+
+
+def foreground(machine, argv, cwd):
+    """The session on this terminal, waited for; a Ctrl-C is the agent's (a handler: SIG_IGN would outlive its exec)."""
+    old = signal.signal(signal.SIGINT, _the_agents)
+    try:
+        return machine.act_run(argv, tty=True, cwd=cwd).rc
+    finally:
+        signal.signal(signal.SIGINT, old)
 
 
 def on_a_terminal():
@@ -169,6 +172,13 @@ class Ai:
 
     def exec(self, argv):
         return self.target.exec(self.name, argv)
+
+    def probe(self, argv, planned=None):
+        """With `planned`, a read of what an install made: a dry run made nothing, so it prints the read and answers `planned`."""
+        if planned is None:
+            return self.exec(argv)
+        r = self.target.act_exec(self.name, argv)
+        return Result(0, planned) if act.dry_run() else r
 
     def push_switch(self, verb):
         argv = [os.path.join(self.root, "wk"), "push", verb] + (["--target", self.push_target] if self.push_target else [])
@@ -216,17 +226,17 @@ class Ai:
         if diag:
             sys.stderr.write(diag + "\n")
         info("installing the Claude CLI on %s (your own ~/.local, as you)" % tname)
-        r = self.exec(["bash", "-lc", "curl -fsSL https://claude.ai/install.sh | bash"])
+        r = self.target.act_exec(self.name, ["bash", "-lc", "curl -fsSL https://claude.ai/install.sh | bash"])
         show(r)
         if not r.ok:
             die("the installer failed on %s. By hand:\n    ssh %s 'curl -fsSL https://claude.ai/install.sh | bash'" % (tname, tname))
-        found = self.find_claude()
+        found = self.find_claude(planned=self.agent)
         if not found:
             die("installed, and still nothing on %s runs: try it by hand --\n    ssh %s '~/.local/bin/claude --version'" % (tname, tname))
         return found
 
-    def find_claude(self):
-        lines = self.exec(["bash", "-lc", FIND_CLAUDE]).out.replace("\r", "").splitlines()
+    def find_claude(self, planned=None):
+        lines = self.probe(["bash", "-lc", FIND_CLAUDE], planned).out.replace("\r", "").splitlines()
         return lines[-1] if lines else ""
 
     def checks(self):
@@ -280,8 +290,8 @@ class Ai:
     def workspace_config(self):
         """Onboarding, the trust dialog and the remote-control dialog, answered before a session waits on one."""
         t = self.target
-        r = self.exec(["bash", "-lc", "python3 %s %s" % (shlex.quote(t.tools(self.name) + "/claude/workspace-config.py"),
-                                                          shlex.quote(t.src(self.name)))])
+        r = t.act_exec(self.name, ["bash", "-lc", "python3 %s %s" % (shlex.quote(t.tools(self.name) + "/claude/workspace-config.py"),
+                                                                     shlex.quote(t.src(self.name)))])
         out = (r.out + r.err).replace("\r", "").rstrip("\n")
         if not r.ok:
             die("could not record Claude's start-up answers in '%s', and every\n    session there would stop at a dialog "
@@ -289,8 +299,8 @@ class Ai:
         if out:
             debug(out)
 
-    def pi_probe(self):
-        r = self.exec(["bash", "-lc", PI_PROBE])
+    def pi_probe(self, planned=None):
+        r = self.probe(["bash", "-lc", PI_PROBE], planned)
         if not r.ok:
             die("could not reach the checkout in '%s'" % self.name)
         return kv(r.out)
@@ -306,13 +316,13 @@ class Ai:
                 % (name, node or "absent", npm or "absent", PI_PKG, PI_NODE_MIN, name, PI_NODE_MIN))
         if not probe.get("pi"):
             info("installing pi in '%s' (npm, into your own ~/.local)" % name)
-            r = self.exec(["bash", "-lc", PI_INSTALL + shlex.quote(PI_PKG)])
+            r = self.target.act_exec(self.name, ["bash", "-lc", PI_INSTALL + shlex.quote(PI_PKG)])
             show(r)
             if not r.ok:
                 die("npm could not install %s in '%s'. By hand:\n        wk enter %s\n        %s%s\n    The workspace's egress "
                     "allows registry.npmjs.org and nothing else npm\n    reaches for (container/proxy/wk-proxy.py is the list)."
                     % (PI_PKG, name, name, PI_INSTALL, PI_PKG))
-            probe = self.pi_probe()
+            probe = self.pi_probe(planned="pi=%s\nmodels=%s\n" % (self.agent, probe.get("models", "")))
             if not probe.get("pi"):
                 die("installed, and nothing in '%s' runs as pi. Try it by hand:\n        wk enter %s\n        ~/.local/bin/pi --version"
                     % (name, name))
@@ -340,7 +350,7 @@ class Ai:
                 "have nothing to call. 'wk key check' says\n    what the endpoint makes of the key." % (endpoint, len(ids)))
         ids = [first] + [i for i in ids if i != first]
         write = "mkdir -p ~/.pi/agent && umask 077 && printf '%%s\\n' %s > ~/.pi/agent/models.json" % shlex.quote(pi_models(endpoint, ids))
-        if not self.exec(["bash", "-c", write]).ok:
+        if not self.target.act_exec(self.name, ["bash", "-c", write]).ok:
             die("could not write ~/.pi/agent/models.json in '%s'. By hand:\n        wk enter %s\n"
                 "        mkdir -p ~/.pi/agent && cat > ~/.pi/agent/models.json" % (name, name))
         info("wrote ~/.pi/agent/models.json in '%s' ($LITELLM_API_KEY, %s; %d model(s), %s first)" % (name, endpoint, len(ids), ids[0]))
@@ -379,7 +389,7 @@ class Ai:
                 # The babysitter's fix loop runs this under nohup with -p, where a terminal of its own would be demanded.
                 argv, cwd = t.exec_argv(name, ["env", "WK_AGENT=" + self.agent, "WK_WORKSPACE=" + name, "bash", "-lc", line],
                                         on_a_terminal())
-                return foreground(argv, cwd)
+                return foreground(self.machine, argv, cwd)
             finally:
                 self.restore_push(on_a_terminal())
 

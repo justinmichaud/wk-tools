@@ -18,6 +18,7 @@ import time
 import unittest
 from unittest import mock
 
+from tests.fakes import FakeRegistry
 from tests.support import REPO, run
 from tests.test_doctor_wall import _Wall
 
@@ -86,14 +87,10 @@ class SimTarget(targets.Target):
         return self.remedy
 
 
-class SimRegistry(targets.Registry):
-    def __init__(self, env, machine, target):
-        env.setdefault("WK_MARKER", "/nonexistent/wk-marker")   # this host, even when the suite runs in a workspace
-        super().__init__(str(REPO), env=env, machine=machine)
-        self.target = target
-
-    def load(self, name):
-        return self.target
+def sim_registry(env, machine, target):
+    """A registry loading `target` under any name, on this host even when the suite runs in a workspace."""
+    env.setdefault("WK_MARKER", "/nonexistent/wk-marker")
+    return FakeRegistry(env, machine, lambda n, e: target)
 
 
 def quiet_env():
@@ -113,9 +110,10 @@ class _Flow(unittest.TestCase):
         self.addCleanup(env.stop)
         self.addCleanup(act._forced.clear)
         self.handed = []
-        fg = mock.patch.object(AI, "foreground", side_effect=lambda argv, cwd: self.handed.append(argv) or 0)
+        fg = mock.patch.object(AI, "foreground", side_effect=lambda machine, argv, cwd: self.handed.append(argv) or 0)
         fg.start()
         self.addCleanup(fg.stop)
+        self.fg = fg
         self.terminal = mock.patch.object(AI, "on_a_terminal", return_value=False)
         self.terminal.start()
         self.addCleanup(self.terminal.stop)
@@ -314,7 +312,7 @@ class TestThePushSwitch(_Host):
         would otherwise end the process before `finally` runs and turns the switch back on."""
         self.terminal.stop()
 
-        def killed_mid_session(argv, cwd):
+        def killed_mid_session(machine, argv, cwd):
             os.kill(os.getpid(), signal.SIGTERM)
             time.sleep(0.2)   # gives the pending signal a chance to be delivered before returning
             return 0
@@ -361,7 +359,7 @@ class TestWhatIsWkTheAgentNever(_Flow):
         self.setUpFlow()
         self.fake = Fake()
         self.env = {"WK_NAME": "demo", "WK_TARGET": "container"}
-        self.reg = SimRegistry(self.env, self.fake, SimTarget(self.fake, self.env))
+        self.reg = sim_registry(self.env, self.fake, SimTarget(self.fake, self.env))
 
     def test_each_refusal(self):
         """the dispatcher's, before the command runs"""
@@ -389,7 +387,7 @@ class TestABuildBox(_Flow):
         self.target = SimTarget(self.fake, self.env, kind="remote", name="box")
         self.target.answers["command -v claude"] = Result(0, "/home/u/.local/bin/claude\r\n")
         self.target.answers["gh auth status"] = Result(1)
-        self.reg = SimRegistry(self.env, self.fake, self.target)
+        self.reg = sim_registry(self.env, self.fake, self.target)
 
     def test_it_is_a_barrier(self):
         status, err = self.ai("claude")
@@ -449,6 +447,50 @@ class TestABuildBox(_Flow):
         self.assertIn("the installer failed on box. By hand:\n    ssh box 'curl -fsSL https://claude.ai/install.sh | bash'", err)
 
 
+class TestTheSessionIsAnEffect(_Flow):
+    """The session starts through the Machine, so --dry-run prints it with the install and the switch it would make."""
+
+    def setUp(self):
+        self.setUpFlow()
+        self.fg.stop()
+        self.fake = Fake()
+        self.fake.answer([WK, "push", "status"], rc=0)
+        self.fake.answer([WK, "push"])
+        self.fake.answer(["exec"])
+        self.env = {"WK_NAME": "demo", "WK_TARGET": "box"}
+        self.target = SimTarget(self.fake, self.env, kind="remote", name="box")
+        self.target.answers["command -v claude 2>/dev/null)\"; do"] = Result(1)
+        self.target.answers["gh auth status"] = Result(1)
+        self.reg = sim_registry(self.env, self.fake, self.target)
+
+    def sessions(self):
+        return [e for e in self.fake.effects if e[0] == "run_tty"]
+
+    def test_a_wet_run_starts_the_session_as_an_effect_and_gives_ctrl_c_back(self):
+        self.target.answers["command -v claude 2>/dev/null)\"; do"] = Result(0, "/home/u/.local/bin/claude\n")
+        before = signal.getsignal(signal.SIGINT)
+        status, err = self.ai("claude", force=True)
+        self.assertEqual(0, status, err)
+        [(_, argv, cwd)] = self.sessions()
+        self.assertEqual(("exec", "demo", "no-tty"), argv[:3])
+        self.assertIn("exec /home/u/.local/bin/claude --permission-mode auto", argv[-1])
+        self.assertEqual(["push status --target box", "push off --target box"], self.pushes())
+        self.assertIs(before, signal.getsignal(signal.SIGINT))
+
+    def test_a_dry_run_prints_the_install_the_switch_and_the_session_and_does_none(self):
+        os.environ["WK_DRY_RUN"] = "1"
+        status, err = self.ai("claude", force=True)
+        self.assertEqual(0, status, err)
+        self.assertIn("would run in demo: bash -lc 'curl -fsSL https://claude.ai/install.sh | bash'", err)
+        self.assertIn("would run in demo: bash -lc 'for c in", err, "the probe of the install is planned")
+        self.assertIn("would run on fake: %s push off --target box" % WK, err)
+        self.assertRegex(err, r"would run on fake: exec demo no-tty .*exec claude --permission-mode auto")
+        self.assertFalse([a for a in self.target.asked if "install.sh" in a])
+        self.assertEqual(1, sum("command -v claude 2>/dev/null)\"; do" in a for a in self.target.asked))
+        self.assertEqual(["push status --target box"], self.pushes())
+        self.assertEqual([], self.sessions())
+
+
 class TestAGuest(_Flow):
     """A macOS guest's egress is Softnet's, applied on the host at boot."""
 
@@ -459,7 +501,7 @@ class TestAGuest(_Flow):
         self.fake.answer(["test", "-x"])
         self.env = {"WK_NAME": "demo", "WK_TARGET": "vm"}
         self.target = SimTarget(self.fake, self.env, kind="vm")
-        self.reg = SimRegistry(self.env, self.fake, self.target)
+        self.reg = sim_registry(self.env, self.fake, self.target)
         p = mock.patch.object(AI.Ai, "checks")
         p.start()
         self.addCleanup(p.stop)

@@ -467,6 +467,62 @@ class TestAGuestIsAdmittedOnlyWhereItFits(BaseTest):
         self.assertIn("only 10 GB free on the host", err)
 
 
+class TestThePodmanMachineIsNotStartedBesideAGuest(BaseTest):
+    """`unit machine.podman_not_started_beside_guest`: the dispatcher's start of the podman machine asks the guests' memory first."""
+
+    def start(self, pod_mb):
+        from wk import dispatch
+        self.w.answer(["podman", "machine", "inspect"], out=json.dumps([{"State": "stopped", "Resources": {"Memory": pod_mb}}]))
+        self.w.answer(["podman", "machine", "start"])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), mock.patch.dict(os.environ, self.w.env):
+            try:
+                dispatch.start_podman_machine(self.w, "build", True)
+                return 0, err.getvalue()
+            except Refused as e:
+                return e.status, err.getvalue()
+
+    def started(self):
+        return [e for e in self.w.effects if e[0] in ("run", "run_tty") and e[1][:3] == ("podman", "machine", "start")]
+
+    def test_a_host_too_small_for_both_refuses_and_starts_nothing(self):
+        self.w.state = "running"
+        rc, err = self.start(16384)
+        self.assertEqual(1, rc)
+        self.assertIn("not starting the podman machine 'wk' (16384MB): 8192MB of macOS guests are running", err)
+        self.assertIn("wk stop <name>", err)
+        self.assertEqual([], self.started())
+
+    def test_one_that_fits_beside_the_guest_or_with_no_guest_running_is_started(self):
+        self.w.state = "running"
+        self.assertEqual(0, self.start(8192)[0])
+        self.assertEqual(1, len(self.started()))
+        self.w.state = "stopped"
+        self.assertEqual(0, self.start(65536)[0])
+        self.assertEqual(2, len(self.started()))
+
+    def test_wk_start_asks_the_same_rule(self):
+        from tests.test_layers import load_cmd
+        start = load_cmd("start")
+        self.w.state = "running"
+        self.w.answer(["podman", "machine", "inspect"], out=json.dumps([{"State": "stopped", "Resources": {"Memory": 16384}}]))
+        reg = mock.Mock(machine=self.w)
+        reg.load.side_effect = lambda n: mock.Mock(machine_state=lambda: "stopped") if n == "container" else self.base().vm
+        with mock.patch.object(start, "here", lambda: True), mock.patch.dict(os.environ, self.w.env), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertRaises(Refused, start.start_everything, reg)
+        self.assertIn("not starting the podman machine", err.getvalue())
+        self.assertEqual([], self.started())
+
+    def test_wk_vm_share_starts_it_anyway_and_says_so(self):
+        self.w.state = "running"
+        self.w.env["WK_VM_SHARE"] = "1"
+        rc, err = self.start(16384)
+        self.assertEqual(0, rc, err)
+        self.assertIn("starting it because WK_VM_SHARE is set", err)
+        self.assertEqual(1, len(self.started()))
+
+
 class TestWhatTheBaseCarries(unittest.TestCase):
     """A base is rebuilt for a new image and for nothing else: what depends on this tree, a credential or the host is
     made at a guest's first start, or mounted in, and converged on every start."""

@@ -16,7 +16,7 @@ import tempfile
 import unittest
 
 from tests.support import REPO
-from tests.test_push_switch import PUSH, Fleet, PushTest
+from tests.test_push_switch import PUSH, PushTest, registry
 from tests.test_wk_secrets import SOCK
 from wk import pushswitch  # noqa: E402
 from wk.machine import Result  # noqa: E402
@@ -78,7 +78,7 @@ class TestPushOnEndsAnyRunningAgent(PushTest):
         self.box.claude = {"a": [], "b": ["4242"]}
 
     def sessions(self):
-        return [ws for _, ws, _ in PUSH.Push(Fleet(self.w, self.boxes), self.w.sec(), self.clock).agent_sessions()]
+        return [ws for _, ws, _ in PUSH.Push(registry(self.w, self.boxes), self.w.sec(), self.clock).agent_sessions()]
 
     def test_names_the_workspaces_with_a_claude_process(self):
         self.assertEqual(["b"], self.sessions())

@@ -644,7 +644,7 @@ class TestPiSdDriver(unittest.TestCase):
     def board(self, *boots):
         import sys
         sys.path.insert(0, str(REPO / "lib"))
-        from wk.boot.fake import FakeBoard
+        from tests.fake_boot import FakeBoard
         from wk.boot.pi import PiSd
         fake = FakeBoard(self.CONF)
         fake.rescue("rescue-1")

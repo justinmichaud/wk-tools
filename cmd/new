@@ -12,7 +12,8 @@
 # --dry-run runs the driver here instead and prints what it would change.
 #
 #   --target <target>   container, vm, or a machine named in
-#                        machines/<name>.conf (default: container)
+#                        machines/<name>.conf (default: container); a peer
+#                        workstation's own `wk new` makes it at its default
 #   --base <id>          which base snapshot to build from -- an id 'wk sync'
 #                        published, under $WK_STORE/base (default: current)
 #   --arch <arch>        native|armhf -- the architecture the workspace

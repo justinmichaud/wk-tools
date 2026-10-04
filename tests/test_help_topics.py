@@ -16,7 +16,7 @@ class TestHelpTopics(unittest.TestCase):
     def test_bare_help_is_the_whole_readme(self):
         cp = run("help")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), (REPO / "README.md").read_text().strip())
+        self.assertEqual(cp.stdout.split("\n", 2)[2].strip(), (REPO / "README.md").read_text().strip())
 
     def test_a_topic_prints_that_section_only(self):
         cp = run("help", "lifecycle")

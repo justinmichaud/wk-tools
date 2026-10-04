@@ -23,6 +23,7 @@ BROWSER_LOG = "/tmp/wk-browser.log"
 PROF_REMOTE = "/tmp/wk-prof"
 RUNNER_REF = "refs/heads/main"
 DRIVER = "lib/wk/bench/board_driver.py"
+WKLIB = "wklib"
 DRIVERS = "Tools/Scripts/webkitpy/benchmark_runner/browser_driver"
 INSTRUMENTED = pgo.COLLECT
 PROCESSES = {"cog": "cog", "minibrowser": "MiniBrowser"}
@@ -87,6 +88,7 @@ def runner_tree(reg, here, root):
         if not here.act_run(["mv", "-f", tmp, tree]).ok:
             die("could not move the exported runner into place at %s" % tree)
     here.copy_in(os.path.join(root, DRIVER), os.path.join(tree, DRIVERS, "wk_board_driver.py"))
+    here.copy_tree_in(os.path.join(root, "lib", "wk"), os.path.join(tree, WKLIB, "wk"))
     return tree, sha
 
 
@@ -353,7 +355,8 @@ class BoardSystem(System):
 
     def board_env(self, leg):
         m = self.bench()
-        return [("WK_BOARD_SSH", shlex.join(["ssh", *m.opts, m.dest])), ("WK_BOARD_LAUNCH", self.launch(leg)),
+        return [("WK_BOARD_DEST", m.dest), ("WK_BOARD_OPTS", json.dumps(m.opts)), ("WK_BOARD_LIB", os.path.join(self.runner_dir, WKLIB)),
+                ("WK_BOARD_LAUNCH", self.launch(leg)),
                 ("WK_BOARD_KILL", kill_cmd(self.doc["browser"])), ("WK_BOARD_RESET", "rm -rf %s && mkdir -p %s" % (CACHE_DIR, CACHE_DIR)),
                 ("WK_BOARD_URL", "127.0.0.1:%d" % leg.port),
                 ("WK_BOARD_EXPECT", json.dumps(wkslot.expect(self.doc, slot_path(leg.slot) + "/root"))),
@@ -438,7 +441,7 @@ class BoardRun(pipeline.Run):
         self.kill_cmd = ("wk bench run %s --kill --system %s" % (self.ws, system.board)) if self.ws else "kill %d" % os.getpid()
 
     def holders(self, res):
-        return fleet_holders(self.root, self.env, self.recs, res)
+        return progress.fleet_holders(res, self.recs, progress.fleet_stores(self.root, self.env, self.recs.machine))
 
     def records(self, clock):
         return progress.Records(self.reg.store.record_dir(), clock=clock, env=dict(self.reg.env, WK_ABORT_SECONDS=str(progress.watchdog_abort(self.env))),
@@ -597,10 +600,6 @@ class BoardRun(pipeline.Run):
         return rc, "run-benchmark exited %d from slot '%s'" % (rc, leg.slot), path
 
 
-def fleet_holders(root, env, records, res):
-    return progress.fleet_holders(res, records, progress.fleet_stores(root, env, records.machine))
-
-
 def require_board(root, env, board):
     try:
         conf = fleet.Fleet(root, env).load(board)
@@ -613,7 +612,7 @@ def require_board(root, env, board):
 def claim(root, env, board, what):
     """A deploy's hold on the board, a record of its own; None under --dry-run or inside a driver that holds it."""
     records = progress.Records(env=env)
-    return progress.hold(records, lambda res: fleet_holders(root, env, records, res), board, "bench", what,
+    return progress.hold(records, lambda res: progress.fleet_holders(res, records, progress.fleet_stores(root, env, records.machine)), board, "bench", what,
                          "kill %d" % os.getpid(), "", [what], os.getpid(), env)
 
 

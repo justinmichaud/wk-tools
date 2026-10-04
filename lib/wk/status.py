@@ -455,7 +455,7 @@ def quiesce_record(qdir, machine):
 
 
 def bench_records(store, machine, alive):
-    """Every running benchmark task, else the newest, its state recomputed from its runs (lib/wk/bench/record.py)."""
+    """Every running bench task, else the newest, its state recomputed from its runs (lib/wk/bench/record.py)."""
     found = bench_record.homes(store)
     tasks = list(found)
     running = [t for t in tasks if alive(holder_pid(store.lock_path("bench-task-" + t)))]
@@ -561,6 +561,12 @@ def self_fleet_record(root, env, machine):
             mode=fleet_mode("yes", self_mode_word(env), ""))
     r.raw("self", True)
     return r.done()
+
+
+def self_line(root, env, colour):
+    """This machine, its role and its mode: the line `wk status` and `wk help` start with."""
+    r = self_fleet_record(root, env, record.row_label(env) or record.machine_name(env))
+    return statusview.self_line_text(r["machine"], r["role"], r["mode"], colour)
 
 
 def machine_confs(root, env):

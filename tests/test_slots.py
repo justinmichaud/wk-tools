@@ -7,7 +7,9 @@ gcc and a chosen --build-id, read back through readelf.
 
 Run: python3 -m unittest tests.test_slots -v
 """
+import contextlib
 import hashlib
+import io
 import json
 import shutil
 import subprocess
@@ -24,7 +26,7 @@ from tests.support import (REPO, WkTest, bash, container_side, container_store, 
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import slot as wkslot_lib  # noqa: E402
-from wk.machine import isolated_module  # noqa: E402
+from wk.machine import Fake, isolated_module  # noqa: E402
 
 BUILD_ID = "3dca0e504a7438009c3eadf6113833fcc6297428"
 
@@ -179,7 +181,7 @@ class TestBoardDriver(unittest.TestCase):
         """prepare_env runs before each launch: the kill, then the cache
         reset -- a second launch at a cached URL never starts the benchmark
         (lib/wk/bench/board_driver.py, prepare_env)."""
-        env = {"WK_BOARD_SSH": "ssh board", "WK_BOARD_LAUNCH": "cog", "WK_BOARD_KILL": "killall cog",
+        env = {"WK_BOARD_DEST": "board", "WK_BOARD_OPTS": "[]", "WK_BOARD_LIB": str(REPO / "lib"), "WK_BOARD_LAUNCH": "cog", "WK_BOARD_KILL": "killall cog",
                "WK_BOARD_RESET": "rm -rf /root/.cache/WebKitCache", "WK_BOARD_URL": "127.0.0.1:1"}
         with unittest.mock.patch.dict(os.environ, env):
             drv = self.d.WkBoardDriver([])
@@ -187,6 +189,28 @@ class TestBoardDriver(unittest.TestCase):
         drv._remote = lambda text, check=True, capture=False: ran.append((text, check)) or ""
         drv.prepare_env(None)
         self.assertEqual(ran, [("killall cog", False), ("rm -rf /root/.cache/WebKitCache", True)])
+
+    def driver(self, board):
+        drv = self.d.WkBoardDriver.__new__(self.d.WkBoardDriver)
+        drv._board, drv._here = board, Fake()
+        return drv
+
+    def test_a_board_command_is_an_effect_on_the_board_machine(self):
+        """`machine.board_driver_effects`: the driver's ssh is the Machine's, so the fake records it and --dry-run prints it."""
+        board = Fake("board")
+        board.answer(["sh", "-c"])
+        self.driver(board)._remote("killall cog")
+        self.assertEqual(board.effects, [("run", ("sh", "-c", "killall cog"))])
+        with unittest.mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.driver(Fake("board"))._remote("killall cog")
+        self.assertIn("would run on board: sh -c 'killall cog'", err.getvalue())
+
+    def test_a_failed_board_command_names_its_status(self):
+        board = Fake("board")
+        board.answer(["sh", "-c"], rc=3, err="boom")
+        with self.assertRaisesRegex(RuntimeError, r"(?s)\(3\).*boom"):
+            self.driver(board)._remote("false")
+        self.assertEqual(self.driver(board)._remote("false", check=False), "")
 
     def test_url_keeps_path_and_query_and_swaps_host(self):
         url = self.d.rewrite_url("http://127.0.0.1:41235/Speedometer/index.html?startAutomatically=true", "127.0.0.1:5000")

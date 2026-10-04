@@ -49,6 +49,31 @@ def fetch_and_check_script(src, mirror, forks, branches):
     return "%s(\n%s\n)\necho check=$?\n" % (fetch, git.wiring_check_script(src, mirror, forks, branches))
 
 
+def fetch_into_mirror(here, store, lock, src, srcspec, dest):
+    """The one entry point that fetches a named ref from `src` into this machine's mirror (`wk bench ab`'s PR and branch heads), made on first use, under the store lock."""
+    if in_vm(store.env):
+        die("the mirror in here is the host's, mounted read-only; run this on the host")
+    mirror = store.mirror()
+    here.mkdir(os.path.dirname(mirror))
+    with lock.held("store"):
+        if not here.isdir(mirror):
+            info("creating bare mirror (first run: this clones all of WebKit)")
+            if not (here.act_run(["git", "init", "--bare", "-q", mirror]).ok
+                    and here.act_run(["git", "-C", mirror, "config", "gc.auto", "0"]).ok):
+                die("could not make the mirror at %s" % mirror)
+        r = here.act_run(["git", "-C", mirror, "fetch", "--quiet", src, "+%s:%s" % (srcspec, dest)])
+        if not r.ok:
+            sys.stderr.write(r.err)
+            die("could not fetch %s from %s into the mirror" % (srcspec, src), r.rc)
+
+
+def fetch_pull_into_mirror(here, store, lock, remote, n, remotes=git.REMOTES):
+    url = dict(remotes).get(remote)
+    if not url:
+        die("no such upstream remote '%s' to fetch a pull request from" % remote)
+    fetch_into_mirror(here, store, lock, url, "refs/pull/%s/head" % n, "refs/remotes/pr/" + pr.pull_refname(remote, n))
+
+
 @contextlib.contextmanager
 def stage(clock, name):
     t0 = clock.monotonic()
@@ -115,17 +140,14 @@ class Sync:
         if self.scope == "mirror":
             if self.reg.in_workspace() or not self.mirror_is_here():
                 return self.mirror_refresh_request()
-            with self.lock.held("store"):
-                self.sync_mirror()
-            return 0
+            return self.refresh_mirror()
         if self.scope == "ws":
             return self.sync_one()
         if self.target:
             self.load(self.target)
         rc = self.sync_furniture()
         if self.touches_here() and self.mirror_is_here():
-            with self.lock.held("store"):
-                self.sync_mirror()
+            rc |= self.refresh_mirror()
         for t in self.targets():
             rc |= self.sync_store_of(t)
         return rc
@@ -209,8 +231,14 @@ class Sync:
 
     # -- the mirror and the snapshot
 
+    def refresh_mirror(self):
+        with self.lock.held("store"):
+            moved = self.sync_mirror()
+        return self.remount_guests() if moved else 0
+
     def sync_mirror(self):
         mirror = self.reg.store.mirror()
+        refs = self.mirror_refs(mirror)
         self.here.mkdir(os.path.dirname(mirror))
         if self.here.isdir(mirror):
             debug("ok: mirror exists")
@@ -227,7 +255,7 @@ class Sync:
             if len(f) == 3 and f[0] == "mirror-fetch":
                 log("  %-8s %s" % (f[1], "ok" if f[2] == "ok" else "FAILED (continuing)"))
         if act.dry_run():
-            return
+            return True
 
         def has(b):
             return self.here.run(["git", "-C", mirror, "rev-parse", "--verify", "--quiet", "refs/heads/" + b]).ok
@@ -239,6 +267,24 @@ class Sync:
             warn("origin advertises no %s, so the mirror carries none of it and every\n"
                  "    workspace wired to ask for it fails its fetch. An image configuration names\n"
                  "    it (image/configs, CFG_BRANCH); 'wk doctor' reports the mirror the same way." % " ".join(gap))
+        return self.mirror_refs(mirror) != refs
+
+    def mirror_refs(self, mirror):
+        return self.here.run(["git", "-C", mirror, "for-each-ref", "--format=%(objectname) %(refname)"]).out
+
+    def remount_guests(self):
+        """A running guest's share holds the inode of each ref the refresh renamed over; one that cannot remount is named."""
+        if "vm" not in self.reg.all():
+            return 0
+        vm = self.load("vm")
+        for ws, st in vm.list():
+            if st != "running":
+                continue
+            why = vm.remount_shares(ws)
+            if why:
+                warn("'%s' could not remount the host's shares (%s), so it reads the mirror as it\n"
+                     "    was before this refresh and every fetch in it fails:  wk stop %s, then  wk start %s" % (ws, why, ws, ws))
+        return 0
 
     def git(self, tree, *args):
         return self.here.run(["git", "-C", tree] + list(args))

@@ -9,6 +9,7 @@ machine's own wk. The targets are asked through one Registry (wk.targets).
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -16,9 +17,10 @@ from pathlib import Path
 
 from wk import completion as C
 from wk import decl as D
-from wk import act, buildconf, clock, images, record, sshalias, targets
+from wk import act, buildconf, clock, guest, images, record, sshalias, targets
 from wk.act import info, log, warn
 from wk.machine import Local, is_macos
+from wk.reach import Reach
 from wk.store import Store, build_config, dispatch_target, in_vm, no_such_workspace, ws_name
 
 ROOT = Path(images.root())
@@ -43,14 +45,8 @@ GLOBALS = {"--force": "WK_FORCE", "--quiet": "WK_QUIET", "--dry-run": "WK_DRY_RU
            "-n": "WK_DRY_RUN", "--yes": "WK_YES", "-y": "WK_YES"}
 
 
-class Exit(Exception):
-    def __init__(self, status):
-        self.status = status
-
-
-def die(msg, status=1):
-    act.err(msg)
-    raise Exit(status)
+Exit = act.Refused
+die = act.die
 
 
 def in_workspace():
@@ -76,9 +72,7 @@ def _logical_cwd():
 def cwd_workspace():
     if not registry().in_remote_host():
         return ""
-    root = registry().remote_marker_field("root")
-    if not root:
-        return ""
+    root = registry().far_root()
     cwd = _logical_cwd() + "/"
     prefix = root + "/ws/"
     if not cwd.startswith(prefix) or cwd == prefix:
@@ -359,7 +353,7 @@ class Invocation:
 
     # -- checks
 
-    def check_needs(self):
+    def check_needs(self, machine=None):
         needs = self.decl.needs_for(self.args)
         if not needs:
             return
@@ -371,9 +365,7 @@ class Invocation:
                 if not ok:
                     missing.append("gh-auth    gh cannot reach the GitHub API (not logged in, or the token expired): gh auth login")
             elif n == "tailnet":
-                ok = subprocess.call(["tailscale", "status"], stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL) == 0 if shutil.which("tailscale") else False
-                if not ok:
+                if not Reach(machine or Local()).peers():
                     missing.append("tailnet    this machine is not on the tailnet: tailscale up")
             elif n == "quiesce-helper":
                 from wk.sudo import QUIESCE_PRIV
@@ -471,7 +463,7 @@ def where_prose(d, where):
     if d.here:
         return "the machine you type it on"
     if d.lifecycle:
-        return "the workstation that keeps the workspace record"
+        return "the workstation that keeps the workspace record (a peer workstation keeps its own)"
     return ("the workspace's target, on the machine holding it (the podman VM for a container "
             "workspace on macOS; that machine's own wk when it has one)")
 
@@ -484,9 +476,41 @@ def destructive_prose(spec):
     return "no -- asks nothing"
 
 
-def explain(cmd, d):
+def take_name(inv, args):
+    name_decl = inv.decl.name_for(args)
+    slot = D.name_slot(name_decl)
+    name = name_in_argv(name_decl.split("@")[0], slot, inv.decl.takes_for(args), args)
+    return name, (args if name is None else without_positional(slot, args))
+
+
+def command_line(inv, args, env=None):
+    args = inv.take_config(args, env)
+    return [str(inv.decl.path), *argv_split(inv.decl.opts_for(args), args)]
+
+
+def preview(cmd, d, args):
+    """The argv, config and machine `wk <cmd> <args>` would run with, or the refusal it would print; runs nothing."""
+    inv = Invocation(cmd, d, args)
+    env = {}
+    try:
+        inv.args = inv.verb_first()
+        argv = inv.argv_check()
+        where = d.where_for(argv)
+        if where == "workspace" and not in_workspace() and d.name_for(argv).split("@")[0] in ("required", "optional"):
+            argv = take_name(inv, argv)[1]
+        line = command_line(inv, argv, env)
+    except Exit:
+        sys.stderr.flush()
+        return "  this command line is refused, as above\n"
+    return "  this command line runs: %s%s\n    on: %s\n" % (
+        "".join("%s=%s " % kv for kv in env.items()), shlex.join(line), where_prose(d, where))
+
+
+def explain(cmd, d, args=()):
     out = sys.stdout
     out.write("wk %s\n\n" % d.synopsis)
+    if args:
+        out.write(preview(cmd, d, list(args)))
     if d.is_readonly():
         out.write("  changes things: no -- starts nothing, writes nothing, repairs nothing\n")
     elif d.dryrun == "yes":
@@ -527,8 +551,10 @@ def help_doc(topic):
     path = ROOT / "README.md"
     text = path.read_text()
     if not topic:
+        from wk import status
+        text = "%s\n\n%s" % (status.self_line(str(ROOT), os.environ, False), text)
         if os.isatty(1) and shutil.which("less"):
-            os.execvp("less", ["less", str(path)])
+            raise Exit(subprocess.run(["less"], input=text, text=True).returncode)
         sys.stdout.write(text)
         raise Exit(0)
     topic = topic.lower()
@@ -566,6 +592,15 @@ def machine_running():
     return bool(rec) and rec.get("State") == "running"
 
 
+def start_podman_machine(machine, cmd, tty):
+    if not tty and not act.dry_run():
+        die("the podman machine '%s' is stopped, and 'wk %s' needs it.\n"
+            "    Nothing here starts it without a terminal asking:  wk start" % (MACHINE, cmd))
+    guest.podman_admit(targets.Registry(ROOT, os.environ, machine).load("vm"))
+    info("starting podman machine '%s'" % MACHINE)
+    machine.act_run(["podman", "machine", "start", MACHINE], tty=True)
+
+
 def forward_to_vm(inv, cmd, args):
     if not shutil.which("podman"):
         die("podman is required: install the official pkg from podman.io, then ./setup")
@@ -577,11 +612,7 @@ def forward_to_vm(inv, cmd, args):
             warn("the podman machine '%s' is stopped, so its store cannot be read" % MACHINE)
             log("  'wk start' to bring it up -- 'wk %s' will not start it" % cmd)
             raise Exit(0)
-        if not (os.isatty(0) and os.isatty(1)):
-            die("the podman machine '%s' is stopped, and 'wk %s' needs it.\n"
-                "    Nothing here starts it without a terminal asking:  wk start" % (MACHINE, cmd))
-        info("starting podman machine '%s'" % MACHINE)
-        subprocess.call(["podman", "machine", "start", MACHINE], stdout=sys.stderr)
+        start_podman_machine(Local(), cmd, os.isatty(0) and os.isatty(1))
     line = registry().load("container").wk_cmd([cmd, *args], os.environ)
     sys.stdout.flush()
     sys.stderr.flush()
@@ -606,29 +637,20 @@ def registry():
     return _registry
 
 
-def delegate_target(target, ws=""):
-    """The target's driver when it runs commands itself and this machine drives no live task on `ws` there, else None."""
+def delegate_target(target):
+    """The target's driver when it runs commands itself, else None."""
     try:
         t = registry().load(target)
     except LookupError:
         return None
-    return t if t.delegates() and not (ws and t.records().driving(ws)) else None
+    return t if t.delegates() else None
 
 
 def delegate_run(target, cmd, args):
-    machine = target.name
-    far = target.far_side()
-    if far == "unreachable":
-        die("'%s' acts on a workspace on %s, and %s did not answer.\n"
-            "    Nothing here can reach into it: the workspace is that machine's own." % (cmd, machine, machine))
-    if far != "answering":
-        die("'%s' acts on a workspace on %s, which has no wk-tools of its own to\n"
-            "    run it:  wk machine setup %s" % (cmd, machine, machine))
-    os.environ["WK_ROW_LABEL"] = machine
-    line = target.wk_cmd([cmd, *args], os.environ)
+    argv = target.hand_over(cmd, args, tty=os.isatty(0) and os.isatty(1))
     sys.stdout.flush()
     sys.stderr.flush()
-    os.execvp("ssh", target.machine.argv(line, tty=os.isatty(0) and os.isatty(1)))
+    os.execvp(argv[0], argv)
 
 
 def json_merge_list(key, paths):
@@ -743,7 +765,7 @@ def main(argv):
             break
         if not seen_dashdash:
             if a in ("-h", "--help", "--explain"):
-                explain(cmd, d)
+                explain(cmd, d, [w for w in args[:tail] if w not in GLOBALS and w not in ("-h", "--help", "--explain")])
             if a in GLOBALS:
                 os.environ[GLOBALS[a]] = "1"
                 globals_text += " " + a
@@ -762,6 +784,10 @@ def main(argv):
 
     where = inv.where()
     sub = args[0] if args else ""
+    try:
+        registry().self_target()
+    except LookupError as e:
+        die(str(e))
 
     if in_workspace() and (where in ("host", "store") or d.outside) and not D.in_list(sub, d.broker):
         if d.outside:
@@ -773,12 +799,12 @@ def main(argv):
         die("'wk %s' acts on a workstation's own store or hardware, and this is\n"
             "    the shared build machine for target '%s'.\n"
             "    Run it on the workstation instead. What works here: ls, status, build,\n"
-            "    run, test, logs, enter." % (cmd, registry().remote_marker_field("target")))
+            "    run, test, logs, enter." % (cmd, registry().self_target()))
     if registry().in_remote_host() and d.lifecycle:
         die("workspaces are created and destroyed from the workstation, and this is\n"
             "    the shared build machine for target '%s'.\n"
             "    Run 'wk %s' there: the workstation owns the workspace's store, and a\n"
-            "    later 'wk build' finds its target from that store." % (registry().remote_marker_field("target"), cmd))
+            "    later 'wk build' finds its target from that store." % (registry().self_target(), cmd))
 
     args = inv.argv_check()
     inv.args = args
@@ -806,7 +832,7 @@ def main(argv):
     delegate = None
     if (where == "workspace" and name_decl.split("@")[0] != "none" and not in_workspace()
             and not in_vm() and not d.here and not d.lifecycle):
-        delegate = delegate_target(resolved, decl_name(inv, name_decl, slot, takes, derived))
+        delegate = delegate_target(resolved)
 
     forwards = (where == "workspace" and is_macos() and not in_vm()
                 and not in_workspace() and d.forward and resolved == "container")
@@ -818,8 +844,8 @@ def main(argv):
             forward_to_vm(inv, cmd, args)
 
     if where != "workspace":
-        args = inv.take_config(args)
-        os.execv(str(impl), [str(impl), *argv_split(d.opts_for(args), args)])
+        line = command_line(inv, args)
+        os.execv(line[0], line)
 
     if delegate is not None:
         delegate_run(delegate, cmd, inv.typed)
@@ -849,10 +875,7 @@ def main(argv):
         if d.post == "ssh-alias-remove":
             name = positional(1, args) or ""
             from wk import workspace
-            try:
-                workspace.refuse_unsaved_before_forward(registry(), positionals(args))
-            except act.Refused as e:
-                raise Exit(e.status)
+            workspace.refuse_unsaved_before_forward(registry(), positionals(args))
             rc = forward_status(inv, cmd, args)
             if rc != 0:
                 raise Exit(rc)
@@ -871,11 +894,8 @@ def main(argv):
     if base == "derived":
         name = name or derived
     elif base in ("required", "optional") and not name:
-        a = name_in_argv(base, slot, takes, args)
-        if a is not None:
-            name = a
-            args = without_positional(slot, args)
-        else:
+        name, args = take_name(inv, args)
+        if name is None:
             name = cwd_workspace()
     if name:
         os.environ["WK_NAME"] = name
@@ -884,8 +904,8 @@ def main(argv):
             os.environ["WK_TARGET"] = resolved
         if asks or d.ready:
             ask_target(inv, resolved, name, asks, d.ready)
-    args = inv.take_config(args)
-    os.execv(str(impl), [str(impl), *argv_split(d.opts_for(args), args)])
+    line = command_line(inv, args)
+    os.execv(line[0], line)
 
 
 def ask_target(inv, resolved, name, exists, ready):
@@ -898,8 +918,6 @@ def ask_target(inv, resolved, name, exists, ready):
             target.wait_ready(name, clock.Clock())
     except LookupError as e:
         die(str(e))
-    except act.Refused as e:
-        raise Exit(e.status)
 
 
 def decl_name(inv, name_decl, slot, takes, derived):
@@ -936,7 +954,7 @@ def entry():
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)   # `wk help | head` ends quietly, as a shell tool does
     try:
         main(sys.argv[1:])
-    except (Exit, act.Refused) as e:
+    except Exit as e:
         sys.exit(e.status)
     except KeyboardInterrupt:
         sys.exit(130)

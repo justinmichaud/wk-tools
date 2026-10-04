@@ -14,19 +14,21 @@ import io
 import json
 import os
 import shlex
+import signal
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes import FakeProc, FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO, as_dispatched
 
 sys.path.insert(0, str(REPO / "lib"))
 from tests.test_bench_mac import Drv, StubWatch  # noqa: E402
 from tests.test_mac_volume import FakeMac  # noqa: E402
-from wk import act, decl, dispatch, fleet, record, screen, targets  # noqa: E402
+from wk import act, decl, dispatch, fleet, job, record, screen, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import mac, pipeline, record as brecord, systems  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
@@ -69,33 +71,6 @@ class BenchTarget(targets.Target):
 
     def os(self):
         return "macos" if self.kind == "vm" else "linux"
-
-
-class Reg(targets.Registry):
-    def __init__(self, world):
-        super().__init__(REPO, env=world.env, machine=world)
-        self.world = world
-
-    def load(self, name):
-        return BenchTarget(name, self.root, dict(self.env), self.world, self.world.kind)
-
-    def ws_target(self, ws):
-        return self.world.kind
-
-    def in_workspace(self):
-        return False
-
-
-class Proc:
-    def __init__(self, rc):
-        self.pid, self.rc, self.returncode = 4242, rc, None
-
-    def poll(self):
-        self.returncode = self.rc
-        return self.rc
-
-    def wait(self):
-        return self.rc
 
 
 class World(Fake):
@@ -153,7 +128,7 @@ class World(Fake):
                 Path(dest).write_text(RESULT)
             else:
                 self._set_file(dest, RESULT)
-        return Proc(self.rc)
+        return FakeProc(self.rc)
 
     def bench_dir(self):
         return Path(self.env["WK_STORE"]) / "ws" / "ws" / "bench"
@@ -174,10 +149,16 @@ class World(Fake):
         return st["state"], st["ok"], recs[-1].field("exit") if recs else None
 
 
+def registry(w, target=None):
+    """The registry a run resolves its workspace through: a `target` (BenchTarget) of the world's kind."""
+    return FakeRegistry(w.env, w, lambda n, e: (target or BenchTarget)(n, str(REPO), e, w, w.kind),
+                        ws_target=lambda ws: w.kind, in_workspace=lambda: False)
+
+
 def invoke(w, argv):
     """cmd/bench's run arm: its options read off the declaration, then the pipeline."""
     argv = as_dispatched("bench", argv, os.environ)
-    return CMD.run_arm(decl.Args(decl.Decl(REPO / "cmd" / "bench"), argv), Reg(w), w.clock, w.popen)
+    return CMD.run_arm(decl.Args(decl.Decl(REPO / "cmd" / "bench"), argv), registry(w), w.clock, w.popen)
 
 
 class BenchTest(unittest.TestCase):
@@ -321,6 +302,35 @@ class TestTheRecord(BenchTest):
         self.w.rc = 124
         self.refused()
         self.assertEqual(self.w.state()[2], "stalled")
+
+
+class TestInterrupted(BenchTest):
+    def test_an_interrupt_stops_the_benchmark_where_it_runs_and_the_record_reads_cancelled(self):
+        """`unit machine.interrupt_stops_remote_process[bench]`: the benchmark's announced pid is TERMed in the workspace."""
+        class Interrupting(FakeProc):
+            def poll(self):
+                raise job.Interrupted(signal.SIGINT)
+        real = record.Records.begin
+
+        def begin(recs, *a, **kw):
+            t = real(recs, *a, **kw)
+            t.set("pid_match", pipeline.PID_MATCH)
+            t.pid(77)
+            t.set("where", "target")
+            return t
+        self.w.pids.add(77)
+        self.w.answer(["exec", "ws", "ps", "-o", "args=", "-p", "77"], out="jsc cli.js\n")
+        self.w.react(["exec", "ws", "kill", "-TERM"], lambda a, f: (f.pids.discard(77), Result(0))[1])
+        self.w.react(["exec", "ws", "kill", "-0"], lambda a, f: Result(0 if int(a[-1]) in f.pids else 1))
+        self.w.popen = lambda argv, **kw: Interrupting(0)
+        with mock.patch.object(record.Records, "begin", begin):
+            e = self.refused()
+        self.assertEqual(e.status, 130)
+        self.assertIn(("run", ("exec", "ws", "kill", "-TERM", "77")), self.w.effects)
+        (t,) = self.w.recs().list()
+        self.assertEqual(t.field("exit"), "cancelled")
+        self.assertTrue(any(e[0] == "symlink" for e in self.w.effects), "the run took its locks")
+        self.assertEqual([p for p in self.w.links if p in self.w.files], [], "and released them")
 
 
 class TestARestart(BenchTest):
@@ -469,7 +479,7 @@ class TestAMeasuredRunIsWatchedThroughout(BenchTest):
         w.drew = ["2026-09-27T12:00:00Z\trunning again: NotificationCenter"]
         rc, err = self.run_(w, "run", "speedometer3", "--config", "wpe-release", extra={"WK_FORCE": "1"})
         self.assertEqual(rc, 0, err)
-        self.assertIn("keeping the number anyway", err)
+        self.assertIn("FORCED past a barrier: something drew over this run", err)
 
 
 class TestKnobs(BenchTest):
@@ -561,14 +571,6 @@ class MacBenchTarget(BenchTarget):
         self.machine.effect(("copy_tree_out", src, dest) + tuple(exclude))
 
 
-class MacReg(Reg):
-    """`Stage.run()` re-resolves the workspace target through the registry, not through the `System`
-    it was handed, so this is the one place a `--system mbp` run's target comes from."""
-
-    def load(self, name):
-        return MacBenchTarget(name, self.root, dict(self.env), self.world, self.world.kind)
-
-
 class MacWorld(Fake):
     """The driving machine for `wk bench run <ws> <plan> --system mbp`: its own store, a macOS
     workspace target to stage from, and a fake Mac (5.12's `FakeMac`, over its own `Channel`
@@ -631,12 +633,13 @@ class MacWorld(Fake):
         if "wk bench staged" in argv[-1]:
             stdout.write(("wk: bench pid 77\nBENCH OK  speedometer3 -> %s/results/%s/result.json\n"
                           % (self.home, self.RESULT_ID)).encode())
-        return Proc(self.rc)
+        return FakeProc(self.rc)
 
     def system(self, target_kind="vm"):
         self.kind = target_kind
         target = MacBenchTarget("ws", str(REPO), dict(self.env), self, target_kind)
-        reg = MacReg(self)
+        # Stage.run() re-resolves the workspace target through the registry, so a `--system mbp` run's target is this one.
+        reg = registry(self, MacBenchTarget)
         conf = dict(fleet.Fleet(str(REPO), self.env).load("mbp"), name="mbp")
         return mac.MacHostSystem(str(REPO), reg, target, "ws", self.clock, "mbp", conf,
                                   channel_factory=lambda conf, env, ch, via, root: self.mac,

@@ -975,9 +975,8 @@ class TestAskingAnotherMachine(WkTest):
 
 
 class TestAMachineWithNoSwitchSaysSoWithACodeOfItsOwn(WkTest):
-    """A build box keeps its private half on disk and points core.sshCommand
-    at it (remote/provision.sh): there is no agent to empty, so `on` and `off`
-    refuse. That refusal is 5, not a die's 1 -- "there is no switch here" and
+    """A build box holds no deploy key (remote/provision.sh): there is no
+    agent to empty, so `on` and `off` refuse. That refusal is 5, not a die's 1 -- "there is no switch here" and
     "the switch is off" are the two answers `wk ai` must not confuse."""
 
     def _as_build_machine(self):
@@ -1003,6 +1002,7 @@ class TestAMachineWithNoSwitchSaysSoWithACodeOfItsOwn(WkTest):
             with self.subTest(action=action):
                 cp = self.run_wk("push", action, env=self._as_build_machine())
                 self.assertEqual(5, cp.returncode, cp.stdout)
+                self.assertIn("A push is made from the workstation, with the switch there:  wk pr open <workspace>", cp.stdout)
 
     def test_status_still_reports_the_live_key_rather_than_refusing(self):
         """Reading is not switching: the key is live and `wk pr` needs to know

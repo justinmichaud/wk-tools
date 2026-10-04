@@ -30,7 +30,7 @@ from unittest import mock
 from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, git, images, pr, sync, targets  # noqa: E402
+from wk import act, git, images, sync, targets  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
 from wk.clock import Clock  # noqa: E402
@@ -414,7 +414,7 @@ class TestOneMirrorPerMachine(WkTest):
         any lock or fetch."""
         here = Fake("here")
         with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
-            pr.mirror_fetch(here, Store({"WK_STORE": "/var/lib/wk", "WK_IN_VM": "1"}), None,
+            sync.fetch_into_mirror(here, Store({"WK_STORE": "/var/lib/wk", "WK_IN_VM": "1"}), None,
                             "https://example/x.git", "refs/heads/b", "refs/remotes/pr/b")
         self.assertIn("the host", err.getvalue())
         self.assertEqual(here.effects, [])

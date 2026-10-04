@@ -35,8 +35,6 @@ fi
 
 if [ -f "$HOME/.wk-remote" ]; then
     printf 'marker=yes\n'
-    printf 'root=%s\n' "$(sed -n 's/^root=//p' "$HOME/.wk-remote" | tail -1)"
-    printf 'target=%s\n' "$(sed -n 's/^target=//p' "$HOME/.wk-remote" | tail -1)"
 else
     printf 'marker=no\n'
 fi

@@ -1362,7 +1362,6 @@ class MacAB:
 
     def quiet_account(self, bh, root):
         """A lock mid-run and a banner over the browser are both invisible to every later gate, so both are refused here."""
-        force = bool(act.forced(self.env))
         uuid = next((l.split('"')[3] for l in self.mac.out("mac-platform.sh").splitlines()
                      if "IOPlatformUUID" in l and l.count('"') >= 4), "")
         ss = "%s/Library/Preferences/ByHost/com.apple.screensaver.%s" % (bh, uuid)
@@ -1371,20 +1370,16 @@ class MacAB:
         idle = (said.out.split() or [""])[-1] if said.ok else ""
         if idle == "0":
             log("  screen lock: screensaver disabled on the volume (idleTime=0, verified)")
-        elif force:
-            warn("  screen lock: idleTime reads '%s'; --force given, so planting anyway: the screen may lock during a run" % (idle or "unreadable"))
         else:
-            die("could not disable the screensaver on %s -- idleTime reads '%s'. A benchmark makes no input, so the idle\n"
-                "    timer runs as on an abandoned machine and the lock behind it ends a run in silence. Nothing has been\n"
-                "    rebooted. To plant anyway:  --force" % (self.name, idle or "unreadable"))
+            act.barrier("could not disable the screensaver on %s -- idleTime reads '%s'. A benchmark makes no input, so the\n"
+                        "    idle timer runs as on an abandoned machine and the screen lock behind it ends a run in silence.\n"
+                        "    Nothing has been rebooted." % (self.name, idle or "unreadable"), env=self.env)
         dnd = (self.mac.run("mac-dnd.sh", mutates=True, WK_TOOLS=root + "/wk-tools", WK_HOME=bh).out.split() or [""])[-1]
         if dnd == "on":
             log("  notifications: Do Not Disturb on for the bench account (verified)")
-        elif force:
-            warn("  notifications: Do Not Disturb reads '%s'; --force given, so a banner may be drawn over a measured browser" % (dnd or "unreadable"))
         else:
-            die("could not turn Do Not Disturb on for the bench account -- it reads '%s'. A banner is drawn over the\n"
-                "    browser and no gate downstream sees one. Nothing has been rebooted. To plant anyway:  --force" % (dnd or "unreadable"))
+            act.barrier("could not turn Do Not Disturb on for the bench account -- it reads '%s'. A banner is drawn over\n"
+                        "    the browser and no gate downstream sees one. Nothing has been rebooted." % (dnd or "unreadable"), env=self.env)
 
     def plant_samply(self, root):
         """No network over there, so the warmup round's profiler goes in now, where samply.fetch will look for it."""

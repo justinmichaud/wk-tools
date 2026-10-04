@@ -201,11 +201,9 @@ class TestScriptsParse(unittest.TestCase):
 
 class TestOneAliasBlock(WkTest):
     """secrets.alias_blocks is the one implementation of "the ssh config the
-    forks need". Three machines read it: two name an agent socket and a path
+    forks need". A container and a guest name an agent socket and a path
     whose private half is not there (only `<path>.pub` is, which ssh reads for
-    itself), and the third -- a shared build box, a plain checkout with no
-    container and nothing to keep a key away from -- names a path whose
-    private half *is* there, and gets no IdentityAgent line.
+    itself); a build box holds no key, and its aliases refuse a push by name.
 
     IdentityFile never carries the `.pub` suffix: pointed straight at the
     public file, OpenSSH 10 loads that path as the private key and reports its
@@ -214,17 +212,16 @@ class TestOneAliasBlock(WkTest):
 
     CONTAINER = ("/secrets", "build_key_", "/run/wk/ssh-agent.sock")
     GUEST = ("~/.ssh", "id_", "/a/sock", "nc %h %p")
-    BUILD = ("/wk/secrets",)
 
     def _blocks(self, args):
         return secrets.alias_blocks(secrets.forks(), *args)
 
-    def test_a_build_machine_names_the_private_half_and_no_agent(self):
-        out = self._blocks(self.BUILD)
+    def test_a_build_box_names_no_identity_and_refuses_by_name(self):
+        out = secrets.box_alias_blocks(secrets.forks())
         self.assertIn("Host github-webkit", out)
-        self.assertIn("IdentityFile /wk/secrets/build_key_fork", out)
+        self.assertNotIn("IdentityFile", out)
         self.assertNotIn("IdentityAgent", out)
-        self.assertNotIn("ProxyCommand", out)
+        self.assertIn("wk pr open", out)
 
     def test_a_container_names_the_identity_and_the_mounted_socket(self):
         out = self._blocks(self.CONTAINER)
@@ -243,7 +240,7 @@ class TestOneAliasBlock(WkTest):
     def test_no_identity_line_ever_carries_the_pub_suffix(self):
         """The suffix is what made OpenSSH 10 read the public file as a
         private key; ssh appends `.pub` itself."""
-        for args in (self.CONTAINER, self.GUEST, self.BUILD):
+        for args in (self.CONTAINER, self.GUEST):
             with self.subTest(args=args):
                 for line in self._blocks(args).splitlines():
                     if line.strip().startswith("IdentityFile"):
@@ -271,16 +268,14 @@ class TestOneAliasBlock(WkTest):
             self.assertIn(f"Host {a}\n", out)
 
     def test_the_arg_sets_differ_only_where_they_must(self):
-        """Byte-identical modulo the identity path, the agent and the
+        """Byte-identical modulo the identity, the agent and the
         ProxyCommand: the callers must not drift into offering different
         StrictHostKeyChecking, User or HostName."""
         def norm(text):
             out = []
             for line in text.splitlines():
                 s = line.strip()
-                if s.startswith("IdentityFile"):
-                    out.append("    IdentityFile <identity>")
-                elif s.startswith(("ProxyCommand", "IdentityAgent")):
+                if s.startswith(("IdentityFile", "IdentitiesOnly", "ProxyCommand", "IdentityAgent")):
                     continue
                 else:
                     out.append(line)
@@ -288,9 +283,9 @@ class TestOneAliasBlock(WkTest):
 
         container = self._blocks(self.CONTAINER)
         guest = self._blocks(self.GUEST)
-        store = self._blocks(self.BUILD)
+        box = secrets.box_alias_blocks(secrets.forks())
         self.assertEqual(norm(container), norm(guest))
-        self.assertEqual(norm(container), norm(store))
+        self.assertEqual(norm(container), norm(box))
 
     def test_a_container_includes_the_file_rather_than_writing_the_blocks(self):
         """firstrun.sh runs once per workspace, and the switch is thrown many
@@ -305,7 +300,7 @@ class TestOneAliasBlock(WkTest):
 
     def test_the_switch_writes_that_file_from_the_same_function(self):
         self.assertIn("alias_blocks(self.forks()", inspect.getsource(secrets.Secrets.publish_config))
-        self.assertIn('python3 -m wk.secrets alias-blocks ""', (REPO / "remote" / "provision.sh").read_text())
+        self.assertIn("python3 -m wk.secrets box-alias-blocks", (REPO / "remote" / "provision.sh").read_text())
         self.assertIn("secrets.alias_blocks(", (REPO / "lib" / "wk" / "guest.py").read_text())
 
 

@@ -87,14 +87,6 @@ def holder_alive(reg):
     return lambda h: h.startswith("pid:") and h[4:].isdigit() and reg.machine.alive(int(h[4:]))
 
 
-def _exited(pid):
-    """A spawned child that exited is a zombie `kill -0` still answers for until it is reaped."""
-    try:
-        return os.waitpid(pid, os.WNOHANG)[0] == pid
-    except ChildProcessError:
-        return False
-
-
 def detached(here, recs, clock, kind, name, argv, path, what):
     """`argv` detached, its log echoed here until the child's own `kind` record exists; its pid."""
     since = clock.stamp()
@@ -114,7 +106,7 @@ def detached(here, recs, clock, kind, name, argv, path, what):
         t = recs.find(kind, name, floor=since)
         if t is not None and t.id.endswith("-%d" % pid):
             return pid
-        if _exited(pid) or not here.alive(pid):
+        if not here.alive(pid):
             pump()
             die("the detached %s of '%s' ended before it started -- what it said is\n    above, in full in %s" % (what, name, path))
         clock.sleep(1)
@@ -153,6 +145,9 @@ class Build:
             self.target = reg.load(dispatch_target(self.env) or reg.ws_target(name))
         except LookupError as e:
             die(str(e))
+        if not self.target.is_here():
+            self.target.far_wk_or_die("build")
+            die("'%s' is on %s, whose own wk runs its builds; 'wk build %s' hands it there" % (name, self.target.name, name))
         self.recs = records_of(self.target, self.clock, self.here)
         self.ws_dir = self.target.store.ws_dir(name)
         self.cfg = None

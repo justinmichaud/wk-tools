@@ -480,7 +480,7 @@ class TestBothLegPathsWatchTheScreen(unittest.TestCase):
             text = f.read_text()
             with self.subTest(file=f.name):
                 self.assertEqual(1, text.count("the machine did not stay quiet under this run"))
-                self.assertEqual(1, text.count('--force: keeping the number anyway; it is one to distrust'))
+                self.assertEqual(1, text.count('act.barrier("something drew over this run, so its number is one to distrust"'))
 
 
 class TestTheWatchSeesAPausedAgentComeBack(unittest.TestCase):

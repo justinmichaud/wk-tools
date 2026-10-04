@@ -29,19 +29,14 @@ from wk.machine import Fake, Result, here  # noqa: E402
 from wk.sysimage import buildroot  # noqa: E402
 
 
-class Ran:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
-
-
 def run(deb, release, out, machine=None):
     """kernel_pin as a process would report it: the tarball on stdout, the refusal on stderr."""
     with contextlib.redirect_stderr(io.StringIO()) as err:
         try:
             got = buildroot.kernel_pin(machine or here(), str(deb), release, str(out))
         except Refused as e:
-            return Ran(e.status, "", err.getvalue())
-    return Ran(0, got, err.getvalue())
+            return subprocess.CompletedProcess(None, e.status, "", err.getvalue())
+    return subprocess.CompletedProcess(None, 0, got, err.getvalue())
 
 
 class TestPrepare(unittest.TestCase):

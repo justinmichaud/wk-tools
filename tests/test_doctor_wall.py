@@ -21,6 +21,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes import FakeRegistry
 from tests.support import REPO, WkTest, bash, clean_env
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -802,25 +803,14 @@ class TestTheCommand(WkTest):
         self.assertFalse((REPO / "cmd" / "verify").exists())
 
 
-class _SimReg:
-    """Just enough of a Registry for `inside`/`workspace`'s own exit-code
-    translation: a report's `.missing` and (inside) whether it is publishing
-    are what decide 0 | 1 | 3, not what a target actually measures."""
-
-    def __init__(self, in_ws):
-        self._in_ws = in_ws
-        self.machine = Fake()
-
-    def in_workspace(self):
-        return self._in_ws
-
-    def load(self, name):
-        t = mock.Mock()
-        t.name, t.ws_name = name, "demo"
+def sim_registry(in_ws):
+    """Just enough of a Registry for `inside`/`workspace`'s own exit-code translation: a report's `.missing` and
+    (inside) whether it is publishing decide 0 | 1 | 3, not what a target actually measures."""
+    def target(name, env):
+        t = mock.Mock(ws_name="demo")
+        t.name = name
         return t
-
-    def ws_target(self, name):
-        return "container"
+    return FakeRegistry({}, Fake(), target, ws_target=lambda ws: "container", in_workspace=lambda: in_ws)
 
 
 class TestExitCodes(unittest.TestCase):
@@ -834,14 +824,14 @@ class TestExitCodes(unittest.TestCase):
             return publishing
         with mock.patch.object(DOCTOR_CMD.wall, "from_inside", side_effect=fake_from_inside), \
                 contextlib.redirect_stderr(io.StringIO()):
-            return DOCTOR_CMD.inside(_SimReg(True))
+            return DOCTOR_CMD.inside(sim_registry(True))
 
     def _workspace(self, missing):
         def fake_from_host(root, target, ws, machine, rep, want_gpu=False):
             rep.missing = missing
         with mock.patch.object(DOCTOR_CMD.wall, "from_host", side_effect=fake_from_host), \
                 contextlib.redirect_stderr(io.StringIO()):
-            return DOCTOR_CMD.workspace(_SimReg(False), "demo", [])
+            return DOCTOR_CMD.workspace(sim_registry(False), "demo", [])
 
     def test_inside_intact_is_0(self):
         self.assertEqual(0, self._inside(0, False))

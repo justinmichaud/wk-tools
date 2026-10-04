@@ -225,9 +225,6 @@ class TestBrokenRefusesNamingTheRepair(unittest.TestCase):
         (self.tmp / "hosts").mkdir()
         self.fake = Fake("here")
         self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
-        # `Target.state` reads the workspace directory straight off disk
-        # (owed: `unit killpoints[new]`), so the directory side of "broken"
-        # is real while the container side stays on the fake.
         os.makedirs(os.path.join(self.env["WK_STORE"], "ws", "demo", "home"))
         self.fake.write(os.path.join(self.env["WK_STORE"], "ws", "demo", "home", targets.READY_MARKER), "")
 

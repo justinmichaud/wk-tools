@@ -146,6 +146,8 @@ class Machine:
         if act.destructive() and not act.asked():
             act.die("BUG: this command is declared destructive and acted before asking:\n    %s"
                     % shlex.join(argv))
+        if kw.pop("tty", False):
+            return self.run_tty(argv, **kw)
         return self._effect_run(argv, **kw)
 
     def _effect_run(self, argv, **kw):
@@ -264,6 +266,11 @@ class Local(Machine):
         return sorted(os.listdir(path))
 
     def alive(self, pid):
+        try:
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                return False
+        except ChildProcessError:
+            pass
         try:
             os.kill(pid, 0)
             return True

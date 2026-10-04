@@ -25,7 +25,6 @@
 #   (`wk sysimage build <profile> --provision`); `status` reports both.
 
 import os
-import signal
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
@@ -33,7 +32,7 @@ from wk import images  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, quiet  # noqa: E402
+from wk import act, decl, quiet  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import Local  # noqa: E402
@@ -45,14 +44,9 @@ def parse(argv):
     return args.positionals[0]
 
 
-def interrupted(signum, frame):
-    raise KeyboardInterrupt
-
-
 def main(argv):
     action = parse(argv)
-    for sig in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, interrupted)
+    act.terminate_as_interrupt()
     q = quiet.Quiesce(ROOT, Local(), Clock(), os.environ)
     return getattr(q, action)()
 

@@ -17,6 +17,7 @@ from wk import slot  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import here, isolated_module  # noqa: E402
 from wk.store import Store  # noqa: E402
+from wk.sysimage import Failed, fail  # noqa: E402
 
 TOOLS = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 STAGES = ("layers", "fetch", "image", "toolchain", "webkit", "pgo-mix")
@@ -44,14 +45,6 @@ MISSING = """the workspace image is missing Yocto host tooling:%s
     These are host-side build dependencies, so they belong in the workspace
     image (container/yocto/Containerfile) rather than apt-installed into a
     workspace that is thrown away."""
-
-
-class Failed(Exception):
-    pass
-
-
-def fail(text):
-    raise Failed(text)
 
 
 def say(text):

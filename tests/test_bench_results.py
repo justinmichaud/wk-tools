@@ -15,10 +15,11 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes import FakeTarget
 from tests.killpoints import converges
 from tests.support import REPO, WkTest, run, scratch_dir
 from tests.test_bench_report import in_process
-from tests.test_bench_task import TASK, FakeRegistry, FakeTarget, add_run, make_task, refusal
+from tests.test_bench_task import TASK, add_run, make_task, refusal, registry
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import status, targets  # noqa: E402
@@ -57,7 +58,7 @@ class TestATaskLivesInItsWorkspace(WkTest):
 
     def test_every_task_is_found_wherever_it_lives(self):
         with scratch_dir() as tmp:
-            reg = FakeRegistry(tmp, env={"WK_ROW_LABEL": "here"})
+            reg = registry(tmp, env={"WK_ROW_LABEL": "here"})
             in_ws = make_task(tmp / "ws" / "w" / "bench", name="20260901T000000Z-w")
             in_other = make_task(tmp / "ws" / "v" / "bench")
             make_task(tmp / "bench", name="20260101T000000Z-stray")
@@ -144,7 +145,7 @@ class ExportTest(WkTest):
         self.addCleanup(env.stop)
 
     def bench(self, machine=None):
-        reg = FakeRegistry(self.tmp / "store", env={"HOME": str(self.tmp / "home"), "WK_ROW_LABEL": "here"})
+        reg = registry(self.tmp / "store", env={"HOME": str(self.tmp / "home"), "WK_ROW_LABEL": "here"})
         if machine is not None:
             reg.machine = machine
         return cli.Bench(REPO, reg, FakeClock())
@@ -262,13 +263,8 @@ class TestThroughWk(ExportTest):
         self.assertIn("usage", run("bench", "export", TASK, "--nosuch", env=env, timeout=60).stdout)
 
 
-class FarTarget(FakeTarget):
-    def __init__(self, name, far, side="answering"):
-        super().__init__(name, side=side)
-        self.far = far
-
-    def task_store(self):
-        return self.far, "/var/lib/wk"
+def far_target(name, far, side="answering"):
+    return FakeTarget(name, side=side, far_store=(far, "/var/lib/wk"))
 
 
 class FarBox(Fake, Ssh):
@@ -284,9 +280,9 @@ class TestWhereALegRecords(WkTest):
             if p.is_file():
                 far._set_file("/var/lib/wk/ws/w/bench/%s/%s" % (TASK, p.relative_to(d)), p.read_bytes())
         far.dirs.add("/var/lib/wk/ws/w")
-        vm = FarTarget("vm", far)
+        vm = far_target("vm", far)
         vm.results = lambda ws: (far, "/var/lib/wk/ws/%s/bench" % ws)
-        return FakeRegistry(self.tmp / "store", [vm])
+        return registry(self.tmp / "store", [vm])
 
     def refused(self, *args):
         err = io.StringIO()
@@ -319,12 +315,12 @@ class TestExportReachesATaskOnAnotherMachine(ExportTest):
         return far
 
     def bench_with(self, target):
-        reg = FakeRegistry(self.tmp / "store", [target], env={"HOME": str(self.tmp / "home"), "WK_ROW_LABEL": "here"})
+        reg = registry(self.tmp / "store", [target], env={"HOME": str(self.tmp / "home"), "WK_ROW_LABEL": "here"})
         return cli.Bench(REPO, reg, FakeClock())
 
     def test_the_zip_is_built_here_from_reads_and_the_task_records_it(self):
         far = self.far()
-        rc, out, err = self.export(self.bench_with(FarTarget("container", far)))
+        rc, out, err = self.export(self.bench_with(far_target("container", far)))
         dest = self.tmp / "home" / "Downloads" / (TASK + ".zip")
         self.assertEqual((rc, out.strip()), (0, str(dest)), err)
         names = zipfile.ZipFile(str(dest)).namelist()
@@ -340,7 +336,7 @@ class TestExportReachesATaskOnAnotherMachine(ExportTest):
         it was 'no such task' about a task `wk bench ls` listed one line up (measured 2026-09-27)."""
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.bench_with(FarTarget("container", self.far())).task_report(TASK, False, True)
+            rc = self.bench_with(far_target("container", self.far())).task_report(TASK, False, True)
         self.assertEqual(0, rc, err.getvalue())
         self.assertIn("data      /var/lib/wk/ws/w/bench/" + TASK, out.getvalue())
 
@@ -351,12 +347,12 @@ class TestExportReachesATaskOnAnotherMachine(ExportTest):
         a, b = ("/var/lib/wk/ws/w/bench/%s/runs/%s" % (TASK, r) for r in runs[:2])
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.bench_with(FarTarget("container", far)).report([a, b], False, True)
+            rc = self.bench_with(far_target("container", far)).report([a, b], False, True)
         self.assertEqual(0, rc, err.getvalue())
         self.assertIn("Elm-TodoMVC", out.getvalue())
 
     def test_a_machine_that_does_not_answer_is_not_asked(self):
-        target = FarTarget("buildbox", self.far(), side="unreachable")
+        target = far_target("buildbox", self.far(), side="unreachable")
         self.assertIn("stays on the machine that took it", refusal(self.bench_with(target).export, TASK, ""))
 
 

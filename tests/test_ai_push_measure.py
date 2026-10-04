@@ -7,11 +7,10 @@ Run: python3 -m unittest tests.test_ai_push_measure -v
 """
 import contextlib
 import io
-import os
 import unittest
 
 from tests.support import WkTest
-from tests.test_ai import AI, WK, SimRegistry, SimTarget
+from tests.test_ai import AI, WK, sim_registry, SimTarget
 from wk.machine import Fake
 
 
@@ -26,9 +25,10 @@ class TestOnlyAWorkspaceMeasuresInsteadOfSwitching(WkTest):
         env = {"WK_MARKER": str(self.tmp / "wk-marker")}
         if marker:
             (self.tmp / "wk-marker").write_text("name=demo\nsrc=/src/WebKit\n")
-        reg = SimRegistry(env, fake, SimTarget(fake, env))
+        target = SimTarget(fake, env)
+        reg = sim_registry(env, fake, target)
         with contextlib.redirect_stderr(io.StringIO()):
-            AI.Ai(AI.ROOT, env, reg, reg.target, "claude", "demo").push_hold_back()
+            AI.Ai(AI.ROOT, env, reg, target, "claude", "demo").push_hold_back()
         return [e[1] for e in fake.effects if e[1][:1] == (WK,)]
 
     def test_outside_a_workspace_it_throws_the_switch(self):

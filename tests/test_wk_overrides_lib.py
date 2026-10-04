@@ -231,7 +231,6 @@ class TestTargetLib(WkTest):
         self.assertFalse(reg.in_remote_host(), "should be false before the marker exists")
         marker.write_text("target=devbox\nroot=/home/x/wk\n")
         self.assertTrue(reg.in_remote_host(), "should be true once the marker exists")
-        self.assertEqual(reg.remote_marker_field("target"), "devbox")
 
 
 class TestBootMacGuest(unittest.TestCase):

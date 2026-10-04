@@ -107,6 +107,16 @@ class TestStartAndStopHaveADryRun(unittest.TestCase):
                 mock.patch.object(start.statusview, "render_text_stream"):
             self.assertIn("would run: podman start wk-a wk-b", self.dry(start.start_everything, self.reg))
 
+    def test_start_everything_starts_a_stopped_podman_machine_the_one_way(self):
+        start = load_cmd("start")
+        self.ctr.machine_state = lambda: "stopped"
+        self.reg.machine = self.m
+        with mock.patch.object(start, "here", lambda: True), mock.patch.object(start.status, "Walk"), \
+                mock.patch.object(start.statusview, "render_text_stream"), \
+                mock.patch.object(start.dispatch, "start_podman_machine") as one:
+            self.dry(start.start_everything, self.reg)
+        one.assert_called_once_with(self.m, "start", True)
+
     def test_stop_everything(self):
         stop = load_cmd("stop")
         with mock.patch.object(stop, "here", lambda: False):

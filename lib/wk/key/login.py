@@ -7,8 +7,8 @@ import tarfile
 import time
 
 from wk import act
-from wk.act import info, warn
-from wk.key.common import LOGIN, LOGIN_FILES, changed, detail, summary, unchanged, verdict
+from wk.act import changed, info, warn
+from wk.key.common import LOGIN, LOGIN_FILES, detail, summary, unchanged, verdict
 from wk.secrets import first_line
 
 

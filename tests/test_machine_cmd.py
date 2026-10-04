@@ -82,6 +82,7 @@ class World:
         for w in ws:
             f.dirs.add(HOME + "/wk/ws/" + w)
         self.answers = answers
+        self.motd = ""
         f.react(["sh", "-c"], self.sh)
         # A board or a Mac is asked for over a literal `ssh`, not the `sh -c` probe a Remote target's
         # Fake substitution shortcuts -- Machines.answers() builds a real Ssh wrapping this same Fake.
@@ -112,6 +113,8 @@ class World:
             return Result(0, PROBE)
         if text == tools.CONVERGE:
             return Result(0, SHA + "\n")
+        if text == build.MOTD:
+            return Result(0, self.motd)
         if text == build.OLD_TOOLS:
             return Result(0, "".join(d + "\n" for d in sorted(fake.dirs) if d.endswith("wk-tools")))
         if text.startswith("umask 077 && cat > "):
@@ -163,6 +166,29 @@ class MachineTest(unittest.TestCase):
         return [e[1] for e in w.fake.effects if e[0] == "run"]
 
 
+class TestSharedHomeProvisioning(unittest.TestCase):
+    """`machine_cmd.shared_home`: remote/provision.sh run for two machines of one home writes the one marker
+    both read and keeps each machine's root, so neither undoes the other."""
+
+    def provision(self, home, target, root):
+        env = dict(os.environ, HOME=home, GIT_CONFIG_GLOBAL=home + "/.gitconfig", WK_REMOTE_TARGET=target,
+                   WK_REMOTE_ROOT=root, WK_REMOTE_INPUTS="abc")
+        cp = subprocess.run(["bash", str(REPO / "remote" / "provision.sh")], env=env, capture_output=True, text=True)
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        return Path(home, ".wk-remote").read_text()
+
+    def test_the_second_machine_leaves_the_first_as_it_was(self):
+        home = tempfile.mkdtemp(prefix="wk-test-shared-home-")
+        self.addCleanup(shutil.rmtree, home, True)
+        first = self.provision(home, "boxa", home + "/wk-a")
+        (Path(home) / "wk-a" / "secrets" / "token").write_text("a's")
+        second = self.provision(home, "boxb", home + "/wk-b")
+        self.assertEqual(first, second)
+        self.assertEqual((Path(home) / "wk-a" / "secrets" / "token").read_text(), "a's")
+        for root in ("wk-a", "wk-b"):
+            self.assertTrue((Path(home) / root / "secrets").is_dir(), root)
+
+
 class TestSetup(MachineTest):
     def test_a_first_setup_without_a_conf_needs_the_kind_and_changes_nothing(self):
         w = self.world()
@@ -183,6 +209,19 @@ class TestSetup(MachineTest):
         rc, err = self.quiet(w.machines().setup, "box", "build")
         self.assertEqual(rc, 1)
         self.assertEqual(w.fake.effects, [])
+
+    def test_a_shared_home_needs_a_root_of_its_own_and_nothing_is_changed_without_one(self):
+        """`machine_cmd.shared_home`: a root per machine is what gives each its own key dirs and locks."""
+        w = self.world(conf="kind=build\n")
+        w.motd = "Your home directory is shared across all of these boxes.\n"
+        rc, err = self.quiet(w.machines().setup, "box")
+        self.assertEqual(rc, 1)
+        self.assertIn("root=", err)
+        self.assertEqual([r for r in self.runs(w) if r[0] == "env"], [])
+        w = self.world(conf="kind=build\nroot=%s/wk-box\n" % HOME)
+        w.motd = "Your home directory is shared across all of these boxes.\n"
+        rc, err = self.quiet(w.machines().setup, "box")
+        self.assertEqual(rc, 0, err)
 
     def test_a_missing_required_tool_stops_it_before_any_change(self):
         w = self.world(deps=DEPS_PROBE.replace("tool.git=/usr/bin/git", "tool.git="))

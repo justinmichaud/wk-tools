@@ -17,6 +17,7 @@ import types
 import unittest
 import unittest.mock
 
+from tests.fakes import FakeRegistry, FakeTarget
 from tests.support import NO_REGISTRY, REPO, WkTest, requires_machine, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -31,49 +32,17 @@ YWS, BWS = "yocto-" + YOCTO, "buildroot-" + BUILDROOT
 SHA = "a" * 40
 
 
-class FakeTarget:
-    def __init__(self, name, here=False, side="answering", rc=0, out=""):
-        self.name, self.here, self.side, self.rc, self.out = name, here, side, rc, out
-        self.asked = []
-
-    def probe(self):
-        return self.side, ""
-
-    def is_here(self):
-        return self.here
-
-    def wk(self, *args, env=None, quiet=False):
-        self.asked.append((args, dict(env or {})))
-        return self.rc, self.out
-
-
-class FakeRegistry:
-    """What cli.Sysimage and ls.Listing ask of targets.Registry."""
-
-    def __init__(self, store_dir, targets=(), machine=None, env=None):
-        # A blind fleet unless a test names its own: host_profiles()'s mac-volume check reads
-        # machines/<IMG_MACHINE>.conf through this env, and this repo's real one names a real Mac's real volume.
-        # WK_IN_VM=1 keeps the fetch builder's cache in this store too, not this host's real one.
-        self.env = dict({"WK_MACHINES_DIR": NO_REGISTRY, "WK_IN_VM": "1"}, **(env or {}), WK_STORE=str(store_dir))
-        self.env.pop("WK_ROW_LABEL", None)
-        self.store = Store(self.env)
-        self.machine = machine or Local()
-        self.targets = {t.name: t for t in targets}
-
-    def walk(self):
-        return list(self.targets)
-
-    def load(self, name):
-        if name not in self.targets:
-            raise LookupError("unknown target '%s'" % name)
-        return self.targets[name]
-
-    def default(self):
-        return "container"
+def registry(store_dir, targets=(), machine=None):
+    """What cli.Sysimage and ls.Listing ask of the registry."""
+    # A blind fleet: host_profiles()'s mac-volume check reads machines/<IMG_MACHINE>.conf through this env, and this
+    # repo's real one names a real Mac's real volume. WK_IN_VM=1 keeps the fetch builder's cache in this store too.
+    env = {"WK_MACHINES_DIR": NO_REGISTRY, "WK_IN_VM": "1", "WK_STORE": str(store_dir)}
+    ts = {t.name: t for t in targets}
+    return FakeRegistry(env, machine or Local(), lambda n, e: ts[n], names=list(ts), default=lambda: "container")
 
 
 def sysimage(store_dir, targets=(), machine=None, building=()):
-    s = cli.Sysimage(FakeRegistry(store_dir, targets, machine), clock=None)
+    s = cli.Sysimage(registry(store_dir, targets, machine), clock=None)
     s.building = lambda ws: ws in building
     return s
 
@@ -157,7 +126,7 @@ class TestPmosAndFetchImagesHaveAReader(unittest.TestCase):
 
     def test_a_fetched_image_is_found_in_this_host_s_cache(self):
         with scratch_dir() as d:
-            reg = FakeRegistry(d)
+            reg = registry(d)
             p = images.load("recovery-pinephone", reg.env)
             cached = os.path.join(str(d), "cache", "images", "pine64-pinephone.img.xz")
             os.makedirs(os.path.dirname(cached), exist_ok=True)
@@ -166,13 +135,13 @@ class TestPmosAndFetchImagesHaveAReader(unittest.TestCase):
 
     def test_no_fetched_image_yet_is_no_marker(self):
         with scratch_dir() as d:
-            reg = FakeRegistry(d)
+            reg = registry(d)
             p = images.load("recovery-pinephone", reg.env)
             self.assertEqual(ls.builder_outputs(reg, None, p), [])
 
     def test_a_pmos_image_is_asked_of_its_build_host(self):
         with scratch_dir() as d:
-            reg = FakeRegistry(d)
+            reg = registry(d)
             reg.env["WK_PMOS_ROOT"] = "/p"
             p = images.load("bridge-pinephone", reg.env)
             machine = Fake("rpi5")
@@ -192,7 +161,7 @@ class TestPmosAndFetchImagesHaveAReader(unittest.TestCase):
 
     def test_a_pmos_build_host_that_does_not_answer_is_unknown_not_no_image(self):
         with scratch_dir() as d:
-            reg = FakeRegistry(d)
+            reg = registry(d)
             reg.env["WK_PMOS_ROOT"] = "/p"
             p = images.load("bridge-pinephone", reg.env)
             machine = Fake("rpi5")
@@ -311,7 +280,7 @@ class TestTheFleetWalk(NoPmosHost):
     asked through its own wk with the label it is to print and no walk of its own."""
 
     def rows(self, d, targets, warned):
-        return ls.Listing(FakeRegistry(d, targets), "", "here", lambda ws: False, warned.append).rows()
+        return ls.Listing(registry(d, targets), "", "here", lambda ws: False, warned.append).rows()
 
     def test_each_answering_machine_adds_its_rows_after_this_stores(self):
         with scratch_dir() as d:
@@ -321,7 +290,7 @@ class TestTheFleetWalk(NoPmosHost):
             rows = self.rows(d, [far, vm], [])
         self.assertTrue(rows[0].startswith(YWS))
         self.assertEqual(rows[-2:], ["yocto-faraway  rpi4  fakebox", "    /elsewhere/faraway.wic.xz"])
-        args, env = far.asked[0]
+        args, env, _ = far.asked[0]
         self.assertEqual(args, ("sysimage", "ls", "--continued"))
         self.assertEqual((env["WK_ROW_LABEL"], env["WK_NO_DELEGATE"]), ("fakebox", "1"))
         self.assertEqual(vm.asked[0][1]["WK_ROW_LABEL"], "here", "a machine behind this one is labelled as this one")
@@ -349,7 +318,7 @@ class TestTheFleetWalk(NoPmosHost):
     def test_an_unknown_target_is_named(self):
         with scratch_dir() as d:
             warned = []
-            listing = ls.Listing(FakeRegistry(d), "", "here", lambda ws: False, warned.append)
+            listing = ls.Listing(registry(d), "", "here", lambda ws: False, warned.append)
             listing.reg.walk = lambda: ["ghost"]
             self.assertEqual(listing.rows(), [])
         self.assertIn("unknown target 'ghost'", warned[0])
@@ -476,7 +445,7 @@ class TestTheRoutingAnswers(unittest.TestCase):
 
     def test_a_spec_naming_a_machine_is_its_target_and_this_machine_its_default(self):
         with scratch_dir() as d:
-            reg = FakeRegistry(d)
+            reg = registry(d)
             self.assertEqual(cli.wstarget(["holds", YOCTO + "@moose"], reg), "moose")
             self.assertEqual(cli.wstarget(["holds", YOCTO + "@" + record.machine_name(reg.env)], reg), "container")
             self.assertEqual(cli.wstarget(["holds", YOCTO], reg), "")

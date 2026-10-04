@@ -1,6 +1,6 @@
 from wk import act
-from wk.act import die, info, log, warn
-from wk.key.common import TITLE, changed, unchanged
+from wk.act import changed, die, info, log, warn
+from wk.key.common import TITLE, unchanged
 
 
 class DeployKeys:

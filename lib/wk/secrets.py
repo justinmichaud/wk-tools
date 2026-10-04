@@ -52,6 +52,13 @@ def alias_blocks(forks, d, prefix="build_key_", sock="", proxy=""):
     return "".join(out)
 
 
+BOX_PUSH_REFUSAL = "error: a build box holds no deploy key; push from the workstation:  wk pr open <workspace>"
+
+
+def box_alias_blocks(forks):
+    return alias_blocks(forks, "", proxy="sh -c %s" % shlex.quote('echo "%s" >&2; exit 1' % BOX_PUSH_REFUSAL))
+
+
 class Secrets:
     def __init__(self, root, env=None, machine=None, macos=None, host_side=False):
         self.root = str(root)
@@ -387,12 +394,12 @@ def main(argv):
     sub = parser.add_subparsers(dest="verb", required=True)
     for verb in ("forks", "agent-secrets", "pat-converge"):
         sub.add_parser(verb)
-    sub.add_parser("alias-blocks").add_argument("dir")
+    sub.add_parser("box-alias-blocks")
     a = parser.parse_args(argv)
     if a.verb == "pat-converge":
         s = Secrets(images.root())
         return 0 if s.cred_sync(s.machine_read_pat(), "github-pat") else 1
-    sys.stdout.write(alias_blocks(FORKS, a.dir) if a.verb == "alias-blocks" else rows(FORKS if a.verb == "forks" else AGENT_SECRETS))
+    sys.stdout.write(box_alias_blocks(FORKS) if a.verb == "box-alias-blocks" else rows(FORKS if a.verb == "forks" else AGENT_SECRETS))
     return 0
 
 

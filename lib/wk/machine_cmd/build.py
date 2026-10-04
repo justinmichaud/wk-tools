@@ -80,11 +80,12 @@ class BuildMachines:
             log("  workspaces will be cloned from it (hardlinked objects), not from a mirror of ours")
         else:
             log("  no shared WebKit repository advertised -- a mirror under the root will be kept instead")
-        if re.search(r"home *(dir|directory)?.*shared", t._sh(MOTD).out, re.I):
-            warn("this machine says its home directory is shared with other boxes.\n"
-                 "  A workspace name is then the same directory on all of them, and one build\n"
-                 "  tree cannot hold two architectures. Give each box its own root=\n"
-                 "  (in its conf) if you use more than one.")
+        if re.search(r"home *(dir|directory)?.*shared", t._sh(MOTD).out, re.I) and not t.conf_root:
+            die("this machine says its home directory is shared with other boxes. Each needs a root of its\n"
+                "    own, or they share one set of workspaces, key dirs and locks, and one build tree\n"
+                "    cannot hold two architectures. Add root=<a directory only this box uses> to\n"
+                "    machines/%s.conf (and hostname=<its `hostname -s`> if that is not %s), then re-run.\n"
+                "    Nothing has been changed." % (name, name))
         rubble = self.rubble(t, ref)
         clean = self.ask_rubble(host, rubble)
         self.write_conf(name, path, new, "build")

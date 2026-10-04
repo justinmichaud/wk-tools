@@ -287,7 +287,7 @@ class AB:
         return kept, lost
 
     def go(self):
-        self.held = progress.hold(self.recs, lambda r: board.fleet_holders(self.root, self.reg.env, self.recs, r), self.name, "bench",
+        self.held = progress.hold(self.recs, lambda r: progress.fleet_holders(r, self.recs, progress.fleet_stores(self.root, self.reg.env, self.recs.machine)), self.name, "bench",
                                   self.ws, "wk bench run %s --kill --system %s" % (self.ws, self.name), "",
                                   ["%s on %s, %s" % (self.plan, self.name, " vs ".join(self.labels))], os.getpid(), self.reg.env)
         rc = 1

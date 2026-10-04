@@ -3,8 +3,8 @@ import io
 from concurrent.futures import ThreadPoolExecutor
 
 from wk import act, record
-from wk.act import Refused, info, log, warn
-from wk.key.common import LOCAL, RANKS, Fleet, Indented, changed, fact, summary, unchanged, verdict
+from wk.act import Refused, changed, info, log, warn
+from wk.key.common import LOCAL, RANKS, Fleet, Indented, fact, summary, unchanged, verdict
 
 
 class Election:

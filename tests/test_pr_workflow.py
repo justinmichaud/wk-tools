@@ -1,5 +1,5 @@
 """`wk pr` / `wk new --pr`: the spec parser and the mirror fetches underneath
-them (lib/wk/pr.py's parse_spec, mirror_fetch and mirror_fetch_pull).
+them (lib/wk/pr.py's parse_spec, sync.fetch_into_mirror and fetch_pull_into_mirror).
 
 The fetches run against temporary git repositories standing in for a fork,
 an upstream, and the mirror -- git accepts a plain path as a URL, so no
@@ -22,6 +22,7 @@ import importlib.util
 import io
 import os
 import subprocess
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -47,7 +48,7 @@ def _load_cmd_pr():
 CMD_PR_MODULE = _load_cmd_pr()
 KEY_LOADED = lambda: 0
 
-from wk import act, decl, git, pr, targets  # noqa: E402  -- needs CMD_PR_MODULE's sys.path.insert above
+from wk import act, decl, git, pr, sync, targets  # noqa: E402  -- needs CMD_PR_MODULE's sys.path.insert above
 from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
@@ -310,6 +311,50 @@ class TestPrOpenKillPoints(unittest.TestCase):
         converges(self, self.make_world, self.run_once, self.state)
 
 
+class TestPrOpenFromABoxKillPoints(unittest.TestCase):
+    """`killpoints[pr]`: `push_from_here`'s fetch into the mirror, the push and the delete of the temporary ref,
+    killed after any of them and rerun converging on the pushed branch and no ref left in the mirror."""
+
+    MIRROR = "/h/mirror"
+    REF = "refs/wk/push/box/eng/x"
+
+    def make_world(self):
+        w = Fake("here")
+        w.fake, w.refs, w.pushed = w, set(), set()
+        w.answer(["git", "init"], 0)
+        w.answer(["git", "-C", self.MIRROR, "config"], 0)
+
+        def git_in_mirror(argv, fake):
+            if "fetch" in argv:
+                fake.refs.add(argv[-1].split(":", 1)[1])
+            elif "push" in argv:
+                fake.pushed.add(argv[-1])
+            elif "update-ref" in argv:
+                fake.refs.discard(argv[-1])
+            return Result(0)
+        w.react(["git", "-C", self.MIRROR], git_in_mirror)
+        return w
+
+    def run_once(self, w):
+        target = types.SimpleNamespace(here=w, env={"HOME": "/h"}, name="box", ssh_host=lambda _: "box")
+        keys = mock.Mock(forks=lambda: [("fork", "alice/WebKit", "")], push_key_path=lambda f: "/k")
+        with mock.patch.object(CMD_PR_MODULE, "Store", lambda env: mock.Mock(mirror=lambda: self.MIRROR)), \
+                mock.patch.object(CMD_PR_MODULE, "Lock", lambda *a: mock.Mock(held=lambda r: contextlib.nullcontext())), \
+                mock.patch.object(CMD_PR_MODULE.secrets, "Secrets", lambda *a: keys), \
+                mock.patch.object(sync, "in_vm", lambda env: False), \
+                contextlib.redirect_stderr(io.StringIO()):
+            CMD_PR_MODULE.push_from_here(target, "/src", "fork", "eng/x")
+
+    def state(self, w):
+        return (set(w.refs), set(w.pushed))
+
+    def test_a_push_from_a_box_killed_after_any_effect_and_rerun_converges(self):
+        converges(self, self.make_world, self.run_once, self.state)
+        w = self.make_world()
+        self.run_once(w)
+        self.assertEqual(self.state(w), (set(), {"%s:refs/heads/eng/x" % self.REF}))
+
+
 class TestPrCheckoutDryRunEqualsWetRun(unittest.TestCase):
     """Every mutation of pr.checkout, pr_rebase and pr_open goes through
     Target.act_exec -- the one place --dry-run intercepts it -- so a dry run's
@@ -424,7 +469,7 @@ class TestPrParseSpec(unittest.TestCase):
 
 
 class TestMirrorFetch(unittest.TestCase):
-    """mirror_fetch and mirror_fetch_pull, against real (local-path) git
+    """sync.fetch_into_mirror and fetch_pull_into_mirror, against real (local-path) git
     repositories standing in for a fork and an upstream."""
 
     def setUp(self):
@@ -447,36 +492,36 @@ class TestMirrorFetch(unittest.TestCase):
     def test_a_fork_branch_lands_under_pr_and_the_second_fetch_is_a_no_op(self):
         fork = self.tmp / "fork"
         sha = _make_repo(fork, "eng-test")
-        err = self.fetch(pr.mirror_fetch, str(fork), "refs/heads/eng-test", "refs/remotes/pr/alice/WebKit/eng-test")
+        err = self.fetch(sync.fetch_into_mirror, str(fork), "refs/heads/eng-test", "refs/remotes/pr/alice/WebKit/eng-test")
         self.assertIn("creating bare mirror", err)
         self.assertEqual(self.mirror_rev("refs/remotes/pr/alice/WebKit/eng-test"), sha)
         self.assertEqual(_git("config", "gc.auto", cwd=self.store.mirror()).stdout.strip(), "0")
         before = _git("count-objects", "-v", cwd=self.store.mirror()).stdout
         self.assertNotIn("creating bare mirror",
-                         self.fetch(pr.mirror_fetch, str(fork), "refs/heads/eng-test", "refs/remotes/pr/alice/WebKit/eng-test"))
+                         self.fetch(sync.fetch_into_mirror, str(fork), "refs/heads/eng-test", "refs/remotes/pr/alice/WebKit/eng-test"))
         self.assertEqual(_git("count-objects", "-v", cwd=self.store.mirror()).stdout, before)
 
     def test_a_pull_request_lands_as_refs_pull_n_head(self):
         origin = self.tmp / "origin"
         sha = _make_repo(origin, "main")
         _git("update-ref", "refs/pull/7/head", sha, cwd=origin)
-        self.fetch(pr.mirror_fetch_pull, "origin", "7", (("origin", str(origin)),))
+        self.fetch(sync.fetch_pull_into_mirror, "origin", "7", (("origin", str(origin)),))
         self.assertEqual(self.mirror_rev("refs/remotes/pr/" + pr.pull_refname("origin", "7")), sha)
 
     def test_an_unknown_remote_is_refused_by_name(self):
         with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
-            pr.mirror_fetch_pull(self.here, self.store, None, "nosuchremote", "1")
+            sync.fetch_pull_into_mirror(self.here, self.store, None, "nosuchremote", "1")
         self.assertIn("no such upstream remote", err.getvalue())
 
     def test_a_failed_fetch_is_a_refusal_naming_the_ref(self):
         with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
-            pr.mirror_fetch(self.here, self.store, Lock(self.store, self.here, Clock()),
+            sync.fetch_into_mirror(self.here, self.store, Lock(self.store, self.here, Clock()),
                             str(self.tmp / "nowhere"), "refs/heads/x", "refs/remotes/pr/x")
         self.assertIn("could not fetch refs/heads/x", err.getvalue())
 
 
 class TestMirrorFetchIsARecorderUnderADryRun(unittest.TestCase):
-    """dispatch.dry_run_is_the_recorder: mirror_fetch's git init/config/fetch all run through
+    """dispatch.dry_run_is_the_recorder: fetch_into_mirror's git init/config/fetch all run through
     act_run, so a dry run leaves the mirror untouched even if a caller reaches this directly;
     resolved_or_planned is the one place that decides whether to, and never calls it under one."""
 
@@ -492,9 +537,9 @@ class TestMirrorFetchIsARecorderUnderADryRun(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
-    def test_mirror_fetch_runs_no_git_under_a_dry_run(self):
+    def test_fetch_into_mirror_runs_no_git_under_a_dry_run(self):
         with contextlib.redirect_stderr(io.StringIO()):
-            pr.mirror_fetch(self.here, self.store, Lock(self.store, self.here, Clock()),
+            sync.fetch_into_mirror(self.here, self.store, Lock(self.store, self.here, Clock()),
                             "https://example/x.git", "refs/heads/b", "refs/remotes/pr/b")
         self.assertEqual([e for e in self.here.effects if e[0] == "run"], [])
 
@@ -670,6 +715,8 @@ class _FakeRebaseTarget:
     it, so a fake answering those three, from a scripted list of Results, is
     the whole of what a unit test needs -- no container, guest or ssh driver."""
 
+    kind = targets.Target.kind
+
     def __init__(self, mirror, responses):
         self._mirror = mirror
         self._responses = list(responses)
@@ -759,6 +806,26 @@ class TestPrOpenStatus(unittest.TestCase):
                 mock.patch.object(CMD_PR_MODULE.os, "execvp") as execvp, contextlib.redirect_stderr(io.StringIO()):
             CMD_PR_MODULE.pr_open(target, "myws", draft=True, web=False, push_status=KEY_LOADED)
         execvp.assert_called_once_with("gh", ["gh", "pr", "create", "--repo", "WebKit/WebKit", "--head", "me:b", "--fill", "--draft"])
+
+
+class TestPrOpenPushesFromWhereTheKeyIs(unittest.TestCase):
+    """A build box's branch is pushed from here, with this machine's deploy key; a peer workstation pushes its own,
+    with its own key and push switch, as every other target does in the workspace."""
+
+    def _open(self, peer):
+        target = _FakeRebaseTarget("", [Result(0)])
+        target.kind, target.is_local, target.peer = "remote", False, peer
+        with mock.patch.object(CMD_PR_MODULE, "pr_open_target", return_value=("WebKit/WebKit", "me:b", "fork", "b")), \
+                mock.patch.object(CMD_PR_MODULE, "push_from_here", return_value=Result(0)) as from_here, \
+                mock.patch.object(CMD_PR_MODULE.os, "execvp"), contextlib.redirect_stderr(io.StringIO()):
+            CMD_PR_MODULE.pr_open(target, "myws", draft=False, web=False, push_status=KEY_LOADED)
+        return from_here.called, target.calls
+
+    def test_a_build_box_pushes_from_here(self):
+        self.assertEqual(self._open(peer=False), (True, []))
+
+    def test_a_peer_pushes_its_own(self):
+        self.assertEqual(self._open(peer=True), (False, [["git", "-C", "/src/WebKit", "push", "-u", "fork", "b"]]))
 
 
 class TestPrOpenRefusals(unittest.TestCase):
@@ -963,3 +1030,17 @@ class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
 class TestPrEndToEnd(unittest.TestCase):
     def test_new_then_pr_against_a_local_fork(self):
         pass
+
+
+class TestTheMirrorHasOneWriter(unittest.TestCase):
+    """The mirror is written by `wk sync` alone: pr.py has no fetch into it, and `wk bench ab` reaches it through sync."""
+
+    def test_pr_has_no_mirror_fetch(self):
+        self.assertFalse([n for n in dir(pr) if n.startswith("mirror_fetch")])
+
+    def test_bench_ab_fetches_through_sync(self):
+        from wk.bench import ab
+        src = (REPO / "lib" / "wk" / "bench" / "ab.py").read_text()
+        self.assertNotIn("pr.mirror_fetch", src)
+        self.assertIn("sync.fetch_into_mirror", src)
+        self.assertIs(ab.sync, sync)

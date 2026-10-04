@@ -598,16 +598,20 @@ class TestTheDirectoryNamesTheWorkspaceOnABuildBox(WkTest):
     def _name(self, marker_root, cwd, remote=True):
         """cwd_workspace's answer standing in `cwd` as a shell does (PWD is
         the path the person typed), on a machine whose build-box marker
-        (WK_REMOTE_MARKER) names `marker_root`, or has no marker."""
+        (WK_REMOTE_MARKER) exists, whose conf names `marker_root`, or has no marker."""
         marker = self.tmp / "remote-marker"
+        fleet = self.tmp / "far-fleet"
+        fleet.mkdir(exist_ok=True)
         if remote:
-            marker.write_text(f"target=fake\nroot={marker_root}\n")
+            marker.write_text("inputs=x\n")
+            host = subprocess.run(["hostname", "-s"], capture_output=True, text=True).stdout.strip().lower()
+            (fleet / "fake.conf").write_text(f"kind=build\nhostname={host}\nroot={marker_root}\n")
         cp = subprocess.run(
             [sys.executable, "-c",
              f"import sys; sys.path.insert(0, {str(REPO / 'lib')!r})\n"
              "from wk import dispatch\n"
              "print(dispatch.cwd_workspace() or 'NONE')"],
-            cwd=cwd, env={**os.environ, "WK_REMOTE_MARKER": str(marker), "PWD": cwd},
+            cwd=cwd, env={**os.environ, "WK_REMOTE_MARKER": str(marker), "WK_MACHINES_DIR": str(fleet), "PWD": cwd},
             capture_output=True, text=True, timeout=30)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         return cp.stdout.strip()

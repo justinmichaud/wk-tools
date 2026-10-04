@@ -226,6 +226,16 @@ class TestTheWholeWrite(WriteTest):
         self.assertEqual(self.w.fake.applied, 0)
         self.assertTrue(self.w.card.mounted)
 
+    def test_a_stale_tailnet_node_is_retired_only_after_the_write_is_confirmed(self):
+        self.w.peers = [("rpi5-bench", "100.1.1.2", "offline")]
+        with mock.patch.object(tailnet.Fleet, "api_present", lambda fl: True):
+            os.environ.pop("WK_YES")
+            self.assertIsInstance(self.w.run(), act.Refused)
+            self.assertEqual(self.retired, [])
+            os.environ["WK_YES"] = "1"
+            self.assertIsNone(self.w.run(), self.w.err)
+        self.assertEqual(self.retired, ["rpi5-bench"])
+
     def test_a_board_armed_for_a_one_shot_boot_is_not_written_under(self):
         self.w.armed = True
         self.assertIsInstance(self.w.run(), act.Refused)

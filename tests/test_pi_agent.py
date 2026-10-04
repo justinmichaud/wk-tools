@@ -503,7 +503,7 @@ class TestPiEnsure(unittest.TestCase):
     installed before it has run."""
 
     def setUp(self):
-        from tests.test_ai import AI, SimRegistry, SimTarget, quiet_env
+        from tests.test_ai import AI, sim_registry, SimTarget, quiet_env
         from wk.machine import Fake, Result
         self.AI, self.Result = AI, Result
         env = quiet_env()
@@ -513,13 +513,13 @@ class TestPiEnsure(unittest.TestCase):
         self.fake.answer(["bash", "-c"], rc=1)   # Target.agent_secret_present litellm: none stored
         self.env = {"WK_NAME": "ws", "WK_TARGET": "container"}
         self.target = SimTarget(self.fake, self.env)
-        self.reg = SimRegistry(self.env, self.fake, self.target)
+        self.reg = sim_registry(self.env, self.fake, self.target)
         self.node, self.npm, self.installed = "v22.19.0", "/usr/bin/npm", False
         self.target.answers["npm install"] = self._install
         self.target.answers['printf "node=%s'] = self._probe
         self.handed = []
         for p in (mock.patch.object(AI.Ai, "checks"),
-                  mock.patch.object(AI, "foreground", side_effect=lambda argv, cwd: self.handed.append(argv) or 0)):
+                  mock.patch.object(AI, "foreground", side_effect=lambda machine, argv, cwd: self.handed.append(argv) or 0)):
             p.start()
             self.addCleanup(p.stop)
 

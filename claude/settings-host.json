@@ -8,7 +8,7 @@
       "Read(//tmp/**)",
       "Read(//private/tmp/**)"
     ],
-    "deny": [
+    "deny_temp": [
       "Bash(ninja *)",
       "Bash(*/ninja *)",
       "Bash(cmake *)",

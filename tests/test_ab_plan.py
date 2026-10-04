@@ -23,11 +23,12 @@ import types
 import unittest
 from pathlib import Path
 
+from tests.fakes import FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, images, pgo, record as progress, sched, targets  # noqa: E402
+from wk import act, images, pgo, record as progress, sched  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import ab, record  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
@@ -83,14 +84,8 @@ class Far(Fake):
         return super().run(argv, input, timeout, stream)
 
 
-class Reg(targets.Registry):
+class Reg(FakeRegistry):
     """The container target as a macOS host has it: its store in the podman machine, reached over `podman machine ssh`."""
-
-    def __init__(self, env, fake):
-        super().__init__(REPO, env=env, machine=fake)
-
-    def ws_target(self, ws):
-        return "container"
 
     remote = {}
 
@@ -104,9 +99,6 @@ class Reg(targets.Registry):
 
     def known(self):
         return ["one", "two", "peer1"]
-
-    def in_workspace(self):
-        return False
 
 
 def opts(**kw):
@@ -128,7 +120,7 @@ class World:
         for name in self.boards_:
             (self.tmp / "machines" / (name + ".conf")).write_text("kind=board\nssh=%s-rescue\n" % name)
         self.fake, self.clock = Far("here"), FakeClock()
-        self.reg = Reg(self.env, self.fake)
+        self.reg = Reg(self.env, self.fake, ws_target=lambda ws: "container", in_workspace=lambda: False)
         self.mirror = self.reg.store.mirror()
         self.fake.dirs.add(self.mirror)
         self.ahead, self.benched = ahead, []
@@ -659,6 +651,15 @@ class TestTheCost(ABTest):
         self.leg(w, "t2", "r", 999)
         self.assertEqual(ab.leg_seconds(w.reg, [("buildroot-" + R38, "")], "rpi3", "speedometer3", "4"), [200.0])
         self.assertEqual(ab.leg_seconds(w.reg, [("buildroot-" + R38, "")], "rpi3", "speedometer3", ""), [999.0])
+
+    def test_a_settle_or_warmup_leg_is_no_measured_leg_and_stands_for_no_cost(self):
+        w = self.world()
+        self.leg(w, "t1", "r", 100)
+        for kind in ("settle", "evidence"):
+            self.leg(w, "t1", "w-" + kind, 900)
+            env = Path(w.home(), "t1", "runs", "w-" + kind, "env.json")
+            env.write_text(json.dumps(dict(json.loads(env.read_text()), warmup=True, warmup_kind=kind)))
+        self.assertEqual(ab.leg_seconds(w.reg, [("buildroot-" + R38, "")], "rpi3", "speedometer3", ""), [100.0])
 
     def test_nothing_measured_is_an_unknown_cost(self):
         a, _ = self.graph(self.world())

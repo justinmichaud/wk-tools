@@ -55,10 +55,6 @@ def table_row(state, label, text):
     return "    %-4s %-28s %s\n" % (state, label, text)
 
 
-def changed(msg):
-    info(msg)
-
-
 def unchanged(msg):
     debug("ok: " + msg)
 

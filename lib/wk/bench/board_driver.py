@@ -1,11 +1,11 @@
 """A run-benchmark BrowserDriver for a browser on a board: lib/wk/bench/board.py copies it into the runner tree as
-wk_board_driver.py and sets WK_BOARD_*. It runs here, beside run-benchmark, and reaches the board over ssh; the URL is
+wk_board_driver.py and sets WK_BOARD_*. It runs here, beside run-benchmark, and reaches the board over wk.machine's Ssh; the URL is
 rewritten to the board's own end of the forward the run holds, since the tailnet lets a board reach nothing but boards."""
 import json
 import logging
 import os
 import shlex
-import subprocess
+import sys
 import time
 from urllib.parse import urlsplit, urlunsplit
 
@@ -111,7 +111,10 @@ class WkBoardDriver(BrowserDriver):
 
     def __init__(self, browser_args):
         super().__init__(browser_args)
-        self._ssh = shlex.split(_need('WK_BOARD_SSH'))
+        sys.path.insert(0, _need('WK_BOARD_LIB'))
+        from wk.machine import Local, Ssh
+        self._here = Local()
+        self._board = Ssh(_need('WK_BOARD_DEST'), json.loads(_need('WK_BOARD_OPTS')))
         self._launch = _need('WK_BOARD_LAUNCH')
         self._kill = _need('WK_BOARD_KILL')
         self._reset = _need('WK_BOARD_RESET')
@@ -181,19 +184,20 @@ class WkBoardDriver(BrowserDriver):
 
     def collect_pgo_profile(self, destination):
         directory = self._pgo_dir()
-        os.makedirs(destination, exist_ok=True)
-        packed = subprocess.run(
-            self._ssh + ['cd %s && tar -cf - . 2>/dev/null | gzip -1' % shlex.quote(directory)],
-            stdout=subprocess.PIPE)
-        if packed.returncode != 0 or not packed.stdout:
-            raise RuntimeError('nothing came back from %s on the board: an instrumented '
+        try:
+            names = self._board.listdir(directory)
+            files = {n: self._board.read_bytes(directory + '/' + n) for n in names
+                     if not self._board.isdir(directory + '/' + n)}
+        except OSError as e:
+            raise RuntimeError('nothing came back from %s on the board (%s): an instrumented '
                                'build writes a .profraw per process as it exits, so a run '
                                'that wrote none either was not instrumented or never '
-                               'started the browser' % directory)
-        subprocess.run(['tar', '-xzf', '-', '-C', destination], input=packed.stdout, check=True)
-        pulled = [n for n in os.listdir(destination) if n.endswith('.profraw')]
+                               'started the browser' % (directory, e))
+        for n, data in files.items():
+            self._here.write_own(os.path.join(destination, n), data)
+        pulled = [n for n in files if n.endswith('.profraw')]
         if not pulled:
-            raise RuntimeError('%s held no .profraw, only %s' % (directory, os.listdir(destination)))
+            raise RuntimeError('%s held no .profraw, only %s' % (directory, names))
         _log.info('pgo: pulled %d profile(s) from %s' % (len(pulled), directory))
 
     def verify_running_binary(self):
@@ -203,8 +207,8 @@ class WkBoardDriver(BrowserDriver):
         record = {'when': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                   'expect': self._expect, 'got': got, 'ok': not problems}
         if self._evidence:
-            with open(self._evidence, 'a') as f:
-                f.write(json.dumps(record) + '\n')
+            before = self._here.read(self._evidence) if self._here.exists(self._evidence) else ''
+            self._here.write_own(self._evidence, before + json.dumps(record) + '\n')
         if problems:
             raise RuntimeError('the process that produced this result is not the slot '
                                'under test:\n  ' + '\n  '.join(problems))
@@ -239,19 +243,20 @@ class WkBoardDriver(BrowserDriver):
         if self._profile:
             tool, _, capture = self._profile.partition(':')
             record['profile'] = {'tool': tool, 'file': os.path.basename(capture)}
-        with open(self._warmup, 'w') as f:
-            f.write(json.dumps(record, indent=2, sort_keys=True) + '\n')
+        self._here.write_own(self._warmup, json.dumps(record, indent=2, sort_keys=True) + '\n')
         _log.info('warmup: %d-bit %s, renderer %s, gpu %d ms, tiers %s, %s' % (
             record['elf']['bits'], record['elf']['machine'],
             record['gl']['driver'] or 'unknown', record['gpu']['busy_ms'],
             record['jit']['tiers'], record['jit']['verdict']))
 
     def _remote(self, text, check=True, capture=False):
-        cp = subprocess.run(self._ssh + [text], stdout=subprocess.PIPE if capture else None,
-                            stderr=subprocess.PIPE if capture else None, text=True)
-        if check and cp.returncode != 0:
-            raise RuntimeError('board command failed (%d): %s\n%s' % (cp.returncode, text, cp.stderr or ''))
-        return cp.stdout if capture else ''
+        r = self._board.act_run(['sh', '-c', text])
+        if not capture:
+            sys.stdout.write(r.out)
+            sys.stderr.write(r.err)
+        if check and not r.ok:
+            raise RuntimeError('board command failed (%d): %s\n%s' % (r.rc, text, r.err))
+        return r.out if capture else ''
 
 
 def _need(name):

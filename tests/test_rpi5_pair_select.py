@@ -26,7 +26,7 @@ sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act  # noqa: E402
 from wk.boot.driver import Driver  # noqa: E402
-from wk.boot.fake import FakeBoard  # noqa: E402
+from tests.fake_boot import FakeBoard  # noqa: E402
 from wk.boot.pi import Rpi5Usb  # noqa: E402
 
 CARD_PRIV = REPO / "admin" / "wk-card-priv"

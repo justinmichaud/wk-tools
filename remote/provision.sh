@@ -36,8 +36,8 @@ write_file "$HOME/.wk-remote" 0644 <<EOF
 # no store, no VM and no hardware of yours), so \`wk\` reads this to know it is
 # the far end of a target -- and refuses the commands that only make sense on
 # a workstation. Which target it is the far end of comes from machines/*.conf
-# (hostname=), the one place a machine's kind is read.
-root=$ROOT
+# (hostname=), the one place a machine's kind is read. Nothing here is one machine's
+# own: the home may be shared, and each machine's root is its conf's.
 inputs=${WK_REMOTE_INPUTS:-}
 EOF
 
@@ -47,8 +47,8 @@ write_file "$ROOT/ssh/config" 0600 <<EOF
 # Written by remote/provision.sh. One ssh alias per fork, because GitHub takes
 # one deploy key per repository and both forks live on github.com -- so the key
 # is selected by alias, never by hostname. No IdentityFile: no key is ever a
-# file here.
-$(PYTHONPATH="$TOOLS/lib" WK_ROOT="$TOOLS" python3 -m wk.secrets alias-blocks "")
+# file here, and every alias refuses, naming the workstation's \`wk pr open\`.
+$(PYTHONPATH="$TOOLS/lib" WK_ROOT="$TOOLS" python3 -m wk.secrets box-alias-blocks)
 EOF
 rm -rf "$ROOT/push-keys" || die "could not remove $ROOT/push-keys, so deploy keys are still at rest on this machine"
 

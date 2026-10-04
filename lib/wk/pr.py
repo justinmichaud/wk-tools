@@ -1,12 +1,9 @@
-"""A PR head taken into a checkout or into the mirror (`wk bench ab`), and a branch pointed at its fork: git argv through a target's exec."""
+"""A PR head taken into a checkout, and a branch pointed at its fork: git argv through a target's exec."""
 
-import os
 import re
-import sys
 
 from wk import act, git
 from wk.act import die, info, log, warn
-from wk.store import in_vm
 
 DIGITS = re.compile(r"^[0-9]+$")
 PLANNED_COMMIT = "0" * 40
@@ -200,31 +197,6 @@ def pr_refname(user, repo, branch):
 
 def pull_refname(remote, n):
     return "%s/%s" % (remote, n)
-
-
-def mirror_fetch(here, store, lock, src, srcspec, dest):
-    """One ref from `src` into this machine's mirror, made on first use, under the store lock."""
-    if in_vm(store.env):
-        die("the mirror in here is the host's, mounted read-only; run this on the host")
-    mirror = store.mirror()
-    here.mkdir(os.path.dirname(mirror))
-    with lock.held("store"):
-        if not here.isdir(mirror):
-            info("creating bare mirror (first run: this clones all of WebKit)")
-            if not (here.act_run(["git", "init", "--bare", "-q", mirror]).ok
-                    and here.act_run(["git", "-C", mirror, "config", "gc.auto", "0"]).ok):
-                die("could not make the mirror at %s" % mirror)
-        r = here.act_run(["git", "-C", mirror, "fetch", "--quiet", src, "+%s:%s" % (srcspec, dest)])
-        if not r.ok:
-            sys.stderr.write(r.err)
-            die("could not fetch %s from %s into the mirror" % (srcspec, src), r.rc)
-
-
-def mirror_fetch_pull(here, store, lock, remote, n, remotes=git.REMOTES):
-    url = dict(remotes).get(remote)
-    if not url:
-        die("no such upstream remote '%s' to fetch a pull request from" % remote)
-    mirror_fetch(here, store, lock, url, "refs/pull/%s/head" % n, "refs/remotes/pr/" + pull_refname(remote, n))
 
 
 def mirror_rev(machine, mirror, ref):

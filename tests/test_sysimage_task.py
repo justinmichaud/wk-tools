@@ -20,6 +20,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes import FakeProc, FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO
 
@@ -57,36 +58,6 @@ class Box(targets.Target):
         return self.machine.act_run(["sync-tools", ws]).ok
 
 
-class Reg(targets.Registry):
-    def __init__(self, world):
-        super().__init__(REPO, env=world.env, machine=world)
-        self.world = world
-
-    def load(self, name):
-        return Box("box", self.root, self.env, self.world)
-
-    def default(self):
-        return "box"
-
-
-class Proc:
-    def __init__(self, rc, hang, interrupt):
-        self.pid, self.rc, self.hang, self.interrupt, self.returncode = 4242, rc, hang, interrupt, None
-
-    def poll(self):
-        if self.interrupt is not None:
-            signum, self.interrupt = self.interrupt, None
-            raise job.Interrupted(signum)
-        if self.hang and self.returncode is None:
-            return None
-        self.returncode = self.rc if self.returncode is None else self.returncode
-        return self.returncode
-
-    def wait(self):
-        self.returncode = -9 if self.returncode is None else self.returncode
-        return self.returncode
-
-
 class World(Fake):
     """This machine holding `WS` on its container target `box`: the image and the workspace exist unless
     `made` is False, the stage writes `out` to its log and exits `rc`."""
@@ -110,7 +81,7 @@ class World(Fake):
         self.react(["env"], self._new)
         self.react(["exec", WS, "kill", "-0"], lambda a, f: Result(0 if int(a[-1]) in f.pids else 1))
         self.answer(["sync-tools"])
-        self.reg = Reg(self)
+        self.reg = FakeRegistry(self.env, self, lambda n, e: Box("box", str(REPO), self.env, self), default=lambda: "box")
         self.ws_dir = os.path.join(str(store), "ws", WS)
         os.makedirs(os.path.join(self.ws_dir, "home"))
         self.log = os.path.join(self.ws_dir, "home", "buildroot-image.log")
@@ -132,7 +103,7 @@ class World(Fake):
     def popen(self, argv, stdin=None, stdout=None, stderr=None, cwd=None):
         self.effect(("watch", tuple(argv)))
         stdout.write(self.out)
-        return Proc(self.rc, self.hang, self.interrupt)
+        return FakeProc(self.rc, None if self.hang else 0, self.interrupt)
 
     def driver(self):
         return buildroot.Buildroot(self.reg, self.profile(), PROFILE, self.clock, self.popen)
@@ -370,6 +341,25 @@ class TestTheWatchdog(TaskTest):
         self.w.hang, self.w.interrupt = True, signal.SIGHUP
         err = self.refused(status=129)
         self.assertIn("interrupted -- stopping the image build in '%s'" % WS, err)
+        self.assertEqual(self.w.recs().list()[0].field("exit"), "cancelled")
+
+    def test_an_interrupt_stops_the_stage_where_it_runs(self):
+        """`unit machine.interrupt_stops_remote_process[image build]`: the stage's announced pid is TERMed in the workspace."""
+        self.w.hang, self.w.interrupt = True, signal.SIGINT
+        real = record.Records.begin
+
+        def begin(recs, *a, **kw):
+            t = real(recs, *a, **kw)
+            t.set("pid_match", buildroot.PATTERN)
+            t.pid(777)
+            t.set("where", "target")
+            return t
+        self.w.pids.add(777)
+        self.w.answer(["exec", WS, "ps", "-o", "args=", "-p", "777"], out="python3 /opt/wk-tools/lib/wk/sysimage/buildroot_target.py image --name x\n")
+        self.w.react(["exec", WS, "kill", "-TERM"], lambda a, f: (f.pids.discard(777), Result(0))[1])
+        with mock.patch.object(record.Records, "begin", begin):
+            self.refused(status=130)
+        self.assertIn(("run", ("exec", WS, "kill", "-TERM", "777")), self.w.effects)
         self.assertEqual(self.w.recs().list()[0].field("exit"), "cancelled")
 
 

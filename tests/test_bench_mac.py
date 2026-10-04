@@ -22,6 +22,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes import FakeProc
 from tests.killpoints import converges
 from tests.support import REPO
 
@@ -72,18 +73,6 @@ class StubWatch:
 
 def args(*argv):
     return decl.Args(decl.Decl(BENCH), list(argv))
-
-
-class Proc:
-    def __init__(self, rc):
-        self.pid, self.rc, self.returncode = 4242, rc, None
-
-    def poll(self):
-        self.returncode = self.rc
-        return self.rc
-
-    def wait(self):
-        return self.rc
 
 
 class World(Fake):
@@ -141,7 +130,7 @@ class World(Fake):
         stdout.write(b"wk: bench pid 77\nScore: 30\n")
         words = shlex.split(argv[-1].split("exec ", 1)[1])
         Path(words[words.index("--output-file") + 1]).write_text(RESULT)
-        return Proc(self.rc)
+        return FakeProc(self.rc)
 
     def results(self):
         d = os.path.join(self.home, "results")

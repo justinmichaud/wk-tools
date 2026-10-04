@@ -24,7 +24,6 @@
 # the machine it describes, next to the boot mechanism, and nowhere else.
 
 import os
-import signal
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
@@ -32,16 +31,12 @@ from wk import images  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl  # noqa: E402
+from wk import act, decl  # noqa: E402
 from wk.act import Refused, die  # noqa: E402
 from wk.boot import cli, eeprom, pi  # noqa: E402
 from wk.targets import Registry  # noqa: E402
 
 USAGE = "usage: wk boot <machine> [options]; see wk boot -h"
-
-
-def interrupted(signum, frame):
-    raise KeyboardInterrupt
 
 
 def parse(argv):
@@ -73,8 +68,7 @@ def main(argv):
     conf = cli.load_conf(ROOT, name, os.environ)
     if conf is None:
         die("unknown machine '%s' (wk boot --list)" % name)
-    for sig in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, interrupted)
+    act.terminate_as_interrupt()
     held = cli.hold(ROOT, name, action, os.environ) if action in ("arm", "back") else None
     rc = 1
     try:

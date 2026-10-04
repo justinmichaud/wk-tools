@@ -68,6 +68,7 @@ _priv_explain() {   # <name> <binary> <grant>
     return 0
 }
 
+# Not destructive: the helper path is wk's own, sudo's password is its gate, and a replaced copy is this tree's own bytes.
 # One repair from any starting point, safe when the state is already right: it installs
 # rather than deciding again what is missing, so a killed run converges on the next.
 _priv_repair() {   # <name> <binary verdict before>

@@ -109,7 +109,8 @@ groups:
   hop carries the global flags as environment (`WK_QUIET`, `WK_FORCE`,
   `WK_YES`, `WK_DRY_RUN`, `WK_DEBUG`), with `WK_ROW_LABEL` (the
   machine its rows name), `WK_NO_DELEGATE` (answer for itself, hand nothing
-  on) and `WK_ZED_PUBKEY` (the asking machine's zed key), and never
+  on), `WK_ZED_PUBKEY` (the asking machine's zed key) and `WK_SDK_IMAGE`
+  (the workspace image override), and never
   `WK_TARGET` or `WK_STORE`, which the far side resolves for itself; the
   podman VM is also told `WK_IN_VM` and `WK_HOST_SELF`, since it is part of
   this machine and its records name it. `wk zed` is the one
@@ -242,6 +243,13 @@ wk machine probe                        # every device on every segment a sweep 
 A build machine is someone else's: no credential rests on it, `wk ai` there
 needs `--force`, and `USE_LIBBACKTRACE` is off.
 
+`wk build` on a build machine's workspace is handed to that machine's own wk,
+which runs it, sizes it and keeps its record there: the box's `wk status`
+and every workstation's show the one build, and `wk logs`, `wk status
+--wait` and `wk build --kill` reach it the same way. It builds with the
+wk-tools the box has (`wk sync --tools buildbox4` refreshes them). A box that
+does not answer, or has no wk-tools of its own, is refused with the remedy.
+
 **Pull requests**
 
 ```sh
@@ -266,10 +274,12 @@ wk sync --all                           # every machine
 wk sync bug-238 --fix                   # re-assert its remotes and git-webkit setup, then fetch
 ```
 
-A sync fetches and never checks out, and names any checkout, or base
-snapshot, whose remotes are wired wrong. Every workspace, guest and the
-podman VM mounts the mirror read-only, so a refresh from one of them is asked
-of the machine that keeps it, through the broker. A workspace overlays a
+A sync fetches and never checks out, and names any checkout, or base snapshot,
+whose remotes are wired wrong. Every workspace, guest and the podman VM mounts
+the mirror read-only, so a refresh from one of them is asked of the machine
+that keeps it, through the broker. A refresh on a Mac then remounts the shares
+in each running guest, whose old mount keeps reading the refs as they were;
+one that cannot is named with `wk stop`/`wk start`. A workspace overlays a
 snapshot it never writes, so a newer tree is a new snapshot, hard-linked from
 the last; checkouts are wired with `core.trustctime false`, since each link
 moves every file's ctime. Tooling goes to a machine as a git bundle of HEAD;
@@ -544,7 +554,9 @@ while push is on. With push off a write is refused with 412 naming `wk push
 on`. A macOS guest gets the same through an ssh-agent on the host forwarded
 per guest. A build box holds no deploy key and nothing forwards one to it,
 so a push is made from the workstation and `wk push status --target <box>`
-says off.
+says off: `wk pr open <ws>` fetches the box's branch into this machine's
+mirror over ssh and pushes it from here. A push on the box itself, `git push`
+or `git-webkit pr`, is refused naming `wk pr open`.
 
 **Housekeeping**
 

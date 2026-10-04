@@ -28,7 +28,7 @@ import unittest
 from unittest import mock
 
 from tests.support import REPO, WkTest, bash, stub_path
-from tests.test_ai import AI, WK, SimRegistry, SimTarget
+from tests.test_ai import AI, WK, sim_registry, SimTarget
 from wk.act import Refused
 from wk.machine import Fake, Result
 
@@ -208,8 +208,9 @@ class TestTheSwitchComesBackOnlyForAPerson(unittest.TestCase):
         fake = Fake()
         fake.answer([WK, "push"])
         env = {}
-        reg = SimRegistry(env, fake, SimTarget(fake, env))
-        ai = AI.Ai(AI.ROOT, env, reg, reg.target, "claude", "demo")
+        target = SimTarget(fake, env)
+        reg = sim_registry(env, fake, target)
+        ai = AI.Ai(AI.ROOT, env, reg, target, "claude", "demo")
         ai.push_was_on = was_on
         with contextlib.redirect_stderr(io.StringIO()) as err:
             ai.restore_push(terminal)
@@ -246,7 +247,7 @@ class TestOneShapeAndNoTargetNames(unittest.TestCase):
                 target = SimTarget(fake, env, kind=kind)
                 target.answers["command -v claude"] = Result(0, "/c\n")
                 target.answers["gh auth status"] = lambda argv: order.append("gh") or Result(0)
-                reg = SimRegistry(env, fake, target)
+                reg = sim_registry(env, fake, target)
                 with mock.patch.dict(os.environ, {"WK_FORCE": "1"}), mock.patch.object(AI, "foreground", return_value=0), \
                         mock.patch.object(AI.Ai, "checks", side_effect=lambda: order.append("checks")), \
                         mock.patch.object(AI.Ai, "guest_egress", side_effect=lambda: order.append("guest_egress")), \

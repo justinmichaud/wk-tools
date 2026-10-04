@@ -208,11 +208,7 @@ def machine_answers(target, name):
 def wk_tty(target, *args, env=None):
     """With a terminal, for far-side commands that prompt a human -- 'wk key sudo setup' over ssh -t."""
     env = os.environ if env is None else env
-    if hasattr(target, "wk_cmd"):
-        return target.machine.run_tty(["sh", "-c", target.wk_cmd(list(args), env)]).rc
-    rc, out = target.wk(*args, env=env)
-    sys.stderr.write(out)
-    return rc
+    return target.machine.run_tty(["sh", "-c", target.wk_cmd(list(args), env)]).rc
 
 
 def on_target(reg, action, name, env):

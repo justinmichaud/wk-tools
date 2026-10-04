@@ -22,6 +22,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes import FakeRegistry
 from tests.support import REPO, as_dispatched
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -61,18 +62,6 @@ class ProfileTarget(targets.Target):
         return self.machine.run_tty(["exec-tty", ws] + list(argv))
 
 
-class Reg(targets.Registry):
-    def __init__(self, world):
-        super().__init__(REPO, env=world.env, machine=world)
-        self.world = world
-
-    def load(self, name):
-        return ProfileTarget("box", self.root, dict(self.env), self.world)
-
-    def ws_target(self, ws):
-        return "box"
-
-
 class World(Fake):
     def __init__(self, tmp):
         super().__init__("here")
@@ -80,7 +69,7 @@ class World(Fake):
         self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"),
                     "XDG_STATE_HOME": str(self.tmp / "state"), "WK_NAME": "ws", "WK_IN_VM": "1"}
         self.answer(["exec", "ws", "test", "-x"], rc=0)   # the binary is built
-        self.reg = Reg(self)
+        self.reg = FakeRegistry(self.env, self, lambda n, e: ProfileTarget("box", str(REPO), e, self), ws_target=lambda ws: "box")
 
 
 class ProfileTest(unittest.TestCase):

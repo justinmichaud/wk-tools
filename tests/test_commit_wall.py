@@ -126,11 +126,11 @@ class TestBuiltinsAreAskedThroughAShell(unittest.TestCase):
     is a real program in every image and is fine)."""
 
     def test_cmd_ai_asks_for_bwrap_through_a_shell(self):
-        from tests.test_ai import AI, SimRegistry, SimTarget
+        from tests.test_ai import AI, sim_registry, SimTarget
         from wk.machine import HAVE, Fake
         fake = Fake()
         target = SimTarget(fake, {})
-        AI.Ai(str(REPO), {}, SimRegistry({}, fake, target), target, "claude", "demo").wall_available()
+        AI.Ai(str(REPO), {}, sim_registry({}, fake, target), target, "claude", "demo").wall_available()
         self.assertEqual([" ".join(HAVE + ("bwrap",))], target.asked)
 
     def test_no_bare_builtin_reaches_a_targets_exec(self):

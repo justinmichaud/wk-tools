@@ -2,7 +2,7 @@
 verified against the manifest read back off it, and `wk bench run <ws> <plan> --system <board>` measuring one slot
 there -- the bench system found and prepared through the boot driver's channel, the session brought up, run-benchmark
 run here with the board's page server behind `Machine.forward`, and the board's evidence taken whether or not the
-leg produced a number. Against a FakeBoard (lib/wk/boot/fake.py) whose bench system also answers a run's on-board
+leg produced a number. Against a FakeBoard (tests/fake_boot.py) whose bench system also answers a run's on-board
 files: no ssh, no hardware.
 
 An A/B on one board (lib/wk/bench/board_ab.py) runs its legs as that same run: two slots on one booted system, or
@@ -29,17 +29,18 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes import FakeProc, FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO, requires_machine
 
 sys.path.insert(0, str(REPO / "lib"))
-from tests.test_bench_pipeline import PLAN_JSON, RESULT, SHA, Proc, Reg as PipelineReg, invoke  # noqa: E402
+from tests.test_bench_pipeline import PLAN_JSON, RESULT, SHA, registry as pipeline_registry, invoke  # noqa: E402
 from wk import act, images, pgo, record, samply  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import board, board_ab, cli, record as brecord  # noqa: E402
 from wk.boot import cli as bootcli  # noqa: E402
 from wk.boot.driver import Driver, Onboard, part  # noqa: E402
-from wk.boot.fake import FakeBoard, Side  # noqa: E402
+from tests.fake_boot import FakeBoard, Side  # noqa: E402
 from wk.boot.pi import Rpi5Usb  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.kv import kv  # noqa: E402
@@ -153,21 +154,7 @@ class BenchBoard(FakeBoard):
 
 def local_holders():
     """The claim asked of this store alone: the fleet's other stores are real machines."""
-    return mock.patch.object(board, "fleet_holders", lambda root, env, records, res: list(records.holders(res)))
-
-
-class DeployReg:
-    def __init__(self, env):
-        self.env, self.machine, self.store = env, Local(), Store(env)
-
-    def ws_target(self, ws):
-        return "container"
-
-    def load(self, name):
-        return mock.Mock(**{"info.return_value": "running"})
-
-    def in_workspace(self):
-        return False
+    return mock.patch.object(board.progress, "fleet_stores", lambda root, env, machine: [])
 
 
 class DeployWorld:
@@ -183,7 +170,9 @@ class DeployWorld:
         self.slotdir, self.doc = write_slot(self.env, "a")
 
     def bench(self):
-        return cli.Bench(str(REPO), DeployReg(self.env), self.clock)
+        reg = FakeRegistry(self.env, Local(), lambda n, e: mock.Mock(**{"info.return_value": "running"}),
+                           ws_target=lambda ws: "container", in_workspace=lambda: False)
+        return cli.Bench(str(REPO), reg, self.clock)
 
     def deploy(self, name="a", ok=True):
         self.fake.answer(["sh"], rc=0 if ok else 1, out="" if ok else "usr/lib/libWPEWebKit-2.0.so.1.0.0: FAILED\n")
@@ -442,7 +431,7 @@ class BoardWorld(Fake):
             Path(self.exports["WK_BOARD_WARMUP"]).write_text(json.dumps(self.evidence(self.exports)))
         self.board.bench.files[board.BROWSER_LOG] = "browser said this\n"
         self.clock.t += 60   # a run takes time, so two legs of one slot are two run directories
-        return Proc(rc)
+        return FakeProc(rc)
 
     def patches(self):
         stack = contextlib.ExitStack()
@@ -462,7 +451,7 @@ class BoardWorld(Fake):
 
     def leg(self, plan="jetstream3", **o):
         """One leg as an A/B runs it, in the A/B's workspace, with the leg's own options."""
-        reg = PipelineReg(self)
+        reg = pipeline_registry(self)
         err = io.StringIO()
         with self.patches(), contextlib.redirect_stderr(err):
             system = board.for_board(str(REPO), reg, "ws", self.clock, BOARD)
@@ -548,7 +537,8 @@ class TestARun(BoardTest):
         self.assertEqual(w.board.bench.pids, set(), "the forward outlived the run")
         self.assertIn(("forward", 45678), w.board.bench.effects)
         self.assertEqual(w.exports["WK_BOARD_URL"], "127.0.0.1:45678")
-        self.assertEqual(w.exports["WK_BOARD_SSH"], "ssh -l root testboard-bench")
+        self.assertEqual((w.exports["WK_BOARD_DEST"], json.loads(w.exports["WK_BOARD_OPTS"])), ("testboard-bench", ["-l", "root"]))
+        self.assertEqual(w.exports["WK_BOARD_LIB"], os.path.join(w.tree, board.WKLIB))
         self.assertTrue(w.board.kept, "the bench system was not claimed against its self-return watchdog")
         self.assertEqual(json.loads(w.exports["WK_BOARD_EXPECT"])["lib"], "/var/wk/slots/a/root/usr/lib/libWPEWebKit-2.0.so.1.0.0")
 
@@ -834,18 +824,19 @@ class TestTheRunnerTree(BoardTest):
         del w.files[os.path.join(w.tree, "Tools", "Scripts", "run-benchmark")]
         w.answer(["sh", "-c"], out="")
         with contextlib.redirect_stderr(io.StringIO()):
-            tree, sha = board.runner_tree(PipelineReg(w), w, str(REPO))
+            tree, sha = board.runner_tree(pipeline_registry(w), w, str(REPO))
         self.assertEqual((tree, sha), (w.tree, SHA))
         order = [e[1][:2] if e[0] == "act" else e[:2] for e in w.effects if e[0] in ("act", "remove", "mkdir")]
         self.assertEqual(order, [("remove", w.tree + ".tmp"), ("mkdir", w.tree + ".tmp"), ("sh", "-c"), ("remove", w.tree), ("mv", "-f")])
         self.assertIn(("copy_in", str(REPO / board.DRIVER), os.path.join(w.tree, board.DRIVERS, "wk_board_driver.py")), w.effects)
+        self.assertIn(("copy_tree_in", str(REPO / "lib" / "wk"), os.path.join(w.tree, board.WKLIB, "wk")), w.effects)
 
     def test_no_mirror_names_wk_sync(self):
         w = self.world()
         w.dirs.discard(w.store.mirror())
         err = io.StringIO()
         with self.assertRaises(Refused), contextlib.redirect_stderr(err):
-            board.runner_tree(PipelineReg(w), w, str(REPO))
+            board.runner_tree(pipeline_registry(w), w, str(REPO))
         self.assertIn("'wk sync' makes one", err.getvalue())
 
 
