@@ -125,6 +125,8 @@ Answered 2026-10-05 (third batch): Bugzilla editbugs is probed through the comme
 
 Answered 2026-10-05 (fourth batch): wk-tools work happens in a workspace made by `wk new <ws> --repo wk-tools`, whose checkout is wk-tools instead of WebKit and where `./wk selftest` runs, while live lanes stay driven from the host; the host `claude` goes once that works.
 
+Answered 2026-10-05 (fifth batch): the user's Bugzilla account has no editbugs, so the comment-tag probe's "cannot tag comments" is right for it; boards keep the ssh -R tunnel to the page server until upstream run-benchmark takes a bind address (an upstream patch), after which a run from a `tag:wk` machine hands boards the server's tailnet address.
+
 ## Cutting it down
 
 40k lines of bash is the problem, not the raw material. It is that big

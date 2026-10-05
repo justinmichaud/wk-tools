@@ -187,3 +187,13 @@ class TestNothingButAFileIsReadOrWrittenThroughAgentRw(_Here):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestABuildBoxReadsWhatSetupDelivered(WkTest):
+    def test_an_agent_secret_on_a_box_is_the_delivered_file(self):
+        marker = self.tmp / ".wk-remote"
+        env = {"HOME": str(self.tmp), "WK_REMOTE_MARKER": str(marker), "WK_STORE": str(self.tmp / "store")}
+        sec = Secrets(str(REPO), env, Local())
+        self.assertNotEqual(str(self.tmp / ".wk-litellm-key"), sec.cred_path("litellm"))
+        marker.write_text("")
+        self.assertEqual(str(self.tmp / ".wk-litellm-key"), sec.cred_path("litellm"))

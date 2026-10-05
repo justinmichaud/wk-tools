@@ -9,7 +9,7 @@ import sys
 from wk import act, images, project
 from wk.act import debug, die, warn
 from wk.machine import Local
-from wk.store import Store, in_vm
+from wk.store import Store, in_vm, remote_marker_path
 
 AGENT_SOCK = "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/ssh-agent.sock"
 CONTAINER_SOCK = "/run/wk/ssh-agent.sock"
@@ -101,6 +101,8 @@ class Secrets:
         row = next((r for r in self.agent_secrets() if r[0] == name), None)
         if row is None:
             return None
+        if "remote" in row[5].split(",") and os.path.isfile(remote_marker_path(self.env)):
+            return os.path.join(home, row[2])
         return os.path.join(self.store.keyring_agent_rw_dir() if row[4] == "file" else self.store.keyring_dir(), row[1])
 
     def read(self, path):

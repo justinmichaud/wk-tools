@@ -15,6 +15,10 @@ def _env(env):
     return os.environ if env is None else env
 
 
+def remote_marker_path(env):
+    return env.get("WK_REMOTE_MARKER") or os.path.join(env.get("HOME", os.path.expanduser("~")), ".wk-remote")
+
+
 def in_vm(env=None):
     return bool(_env(env).get("WK_IN_VM"))
 

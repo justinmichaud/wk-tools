@@ -17,7 +17,7 @@ import sys
 from wk import act, agents, fleet, git, guest, images, kv, project, reach, record, secrets, sshalias, tools
 from wk.machine import TIMED_OUT, Local, PodmanVm, Result, Ssh, TartExec, isolated_module, lib_argv
 from wk.resources import Resources, arch_has_gpu, workspace_marker_path
-from wk.store import Store, dispatch_place, in_vm, no_such_workspace
+from wk.store import Store, dispatch_place, in_vm, no_such_workspace, remote_marker_path
 
 BUILTIN = ("container", "vm", "remote", "local")
 READY_MARKER = ".wk-ready"
@@ -91,10 +91,6 @@ def git_base(driver, ws):
 
 def default_root(home):
     return home.rstrip("/") + "/wk"
-
-
-def remote_marker_path(env):
-    return env.get("WK_REMOTE_MARKER") or os.path.join(env.get("HOME", os.path.expanduser("~")), ".wk-remote")
 
 
 def session_socket_path(env):
