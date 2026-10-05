@@ -7,6 +7,7 @@ from unittest import mock
 from tests.support import REPO, WkTest, run
 from tests.test_bench_results import complete_task
 from tests.test_bench_task import TASK
+from tests.test_dispatch import dispatched
 from tests.test_rm_remote import _LOCAL_CONF
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -168,6 +169,11 @@ class TestAMacReadsItsZipsBeforeTheRemovalIsForwarded(WkTest):
             self.assertTrue(workspace.unsaved_results(self.reg(WK_IN_VM="1", WK_HOST_SELF="1"), [("w", self.holder(), "workspace")]))
 
     def test_the_dispatcher_asks_before_it_forwards_a_removal(self):
-        text = (REPO / "lib" / "wk" / "dispatch.py").read_text()
-        branch = text[text.index('if d.post == "ssh-alias-remove":'):]
-        self.assertLess(branch.index("refuse_unsaved_before_forward"), branch.index("forward_status"))
+        def refuse(registry, names):
+            raise Refused("wk bench export task")
+
+        env = {"WK_YES": "1", "WK_DESTRUCTIVE": "1", "WK_CONFIRMED": "1"}
+        how, status, _ = dispatched(["rm", "ws1"], macos=True, env=env, refuse=refuse)
+        self.assertEqual(how, "exit")
+        self.assertNotEqual(status, 0)
+        self.assertEqual(dispatched(["rm", "ws1"], macos=True, env=env)[0], "forward")

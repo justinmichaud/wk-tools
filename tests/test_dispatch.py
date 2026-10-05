@@ -29,7 +29,7 @@ class Handed(Exception):
 HANDED = []
 
 
-def dispatched(argv, macos=False, place="container", delegates=False, env=None):
+def dispatched(argv, macos=False, place="container", delegates=False, env=None, refuse=lambda *a: None):
     def execv(path, args):
         raise Handed("here", args[1:])
 
@@ -55,7 +55,7 @@ def dispatched(argv, macos=False, place="container", delegates=False, env=None):
                mock.patch.object(dispatch.Invocation, "check_needs", lambda self, machine=None: None),
                mock.patch.object(dispatch.Invocation, "derived_name", lambda self: "ws1"),
                mock.patch.object(dispatch.Invocation, "named_place", lambda self: ""),
-               mock.patch.object(workspace, "refuse_unsaved_before_forward", lambda *a: None),
+               mock.patch.object(workspace, "refuse_unsaved_before_forward", refuse),
                mock.patch.object(dispatch.sshalias, "alias_remove", lambda *a: None)]
     out = io.StringIO()
     with contextlib.ExitStack() as stack:
