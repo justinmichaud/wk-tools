@@ -380,6 +380,9 @@ class Wall:
                              self.driver.daemon_remedy(self.ws, "inject")))
         return rows
 
+    def pr_tool_check(self):
+        return [("pr-tool-setup", self.pr_tool_setup)] if self.driver.repo(self.ws).pr_tool else []
+
     def pr_tool_setup(self):
         tool, key = project.get("PR_TOOL"), project.get("PR_TOOL_SETUP")
         if self.inside("git -C %s config --get %s" % (self.driver.src(self.ws), key)) == "true":
@@ -486,14 +489,14 @@ class Wall:
         return checks + [("no-credentials-inside", self.no_credentials_inside), ("secrets-view", self.secrets_view),
                          ("agent-identities", self.agent_identities), ("github-read", self.github_read),
                          ("github-write", self.github_write), ("bugzilla-read", self.bugzilla_read),
-                         ("bugzilla-write", self.bugzilla_write), ("pr-tool-setup", self.pr_tool_setup),
+                         ("bugzilla-write", self.bugzilla_write), *self.pr_tool_check(),
                          ("agent-credential", self.agent_credential), ("gpu", self.gpu)]
 
     def from_inside(self):
         checks = [("push-keys", self.push_here), ("github-read", self.github_read), ("github-write", self.github_write),
                   ("bugzilla-read", self.bugzilla_read), ("bugzilla-write", self.bugzilla_write), ("egress-github", self.github),
                   ("egress-allowlist", self.allowlist), ("egress-off-allowlist", self.off_allowlist),
-                  ("no-credentials", self.no_credentials_inside), ("pr-tool-setup", self.pr_tool_setup)]
+                  ("no-credentials", self.no_credentials_inside), *self.pr_tool_check()]
         if commit_walled(self.driver):
             checks.append(("commit-wall", self.commit_wall))
         return checks

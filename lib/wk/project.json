@@ -3,7 +3,7 @@
   "MIRROR": "WebKit.git",
   "SRC": "/src/WebKit",
   "REPO": "webkit",
-  "REPOS": {"webkit": {"clone": "snapshot",
+  "REPOS": {"webkit": {"clone": "snapshot", "pr_tool": true,
                        "push": [["fork", "justinmichaud/WebKit", "github-webkit"],
                                 ["forkwpe", "justinmichaud/WPEWebKit", "github-wpe"]]},
             "wk-tools": {"clone": "tools-origin", "checkout": "wk-tools",

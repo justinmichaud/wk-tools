@@ -523,6 +523,12 @@ class TestGitWebkitSetup(_Wall):
                 self.set("webkitscmpy.setup", answer)
                 self.assertFails(self.check("pr_tool_setup"), "has not completed", "wk sync demo --fix")
 
+    def test_only_a_repo_that_uses_the_pr_tool_is_asked(self):
+        from wk import repos
+        self.assertIn("pr-tool-setup", [n for n, _ in self.wall().from_host()])
+        self.driver.repo = lambda ws: repos.Repo("wk-tools")
+        self.assertNotIn("pr-tool-setup", [n for n, _ in self.wall().from_host()])
+
 
 class TestBugzilla(_Wall):
     def test_the_read_goes_through_the_injector(self):
