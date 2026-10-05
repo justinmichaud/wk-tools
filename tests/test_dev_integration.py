@@ -154,7 +154,7 @@ def workspace_action(rec):
         return "new"
     if rec.get("ws") == "broken" or rec.get("state") == "broken":
         return "broken"
-    return "none" if rec.get("state") == "running" else "start"
+    return "none" if rec.get("state") in ("running", "present") else "start"   # a build box's workspace has no running state
 
 
 def last_build(rec):
