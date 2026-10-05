@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import shutil
 import signal
 import sys
@@ -14,62 +15,140 @@ from unittest import mock
 from tests.fakes import FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO
+from tests.test_wk_places import LINUX_PROBE
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, places, record, workspace  # noqa: E402
+from wk import act, places, record, secrets, workspace  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
+from wk.store import Store  # noqa: E402
 
 WK = str(REPO / "wk")
 ZED = str(REPO / "cmd" / "zed")
 CHECKOUT = "branch=main\nupstream=origin/main\nbehind=0\nhead=abc1234\n"
 
 
-class World(Fake):
-    """This host with one container place: podman answers from `containers`, wkdev-create writes the ready
-    marker, and the store holds a mirror and one snapshot, `main-1`."""
+def step(argv):
+    """A run named by what it does: the SDK scripts by their name, a command in the workspace "exec", anything else
+    by its program."""
+    for a in argv:
+        name = os.path.basename(a).split(".")[0]
+        if name in ("wkdev-create", "sdk-refresh"):
+            return name
+        if name == "wkdev-enter":
+            return "exec"
+    return argv[0]
 
-    def __init__(self, tmp, kinds=None, stores=None):
+
+DRIVERS = {"container": places.Container, "vm": places.Vm, "remote": places.Remote, "local": places.LocalWorkspace}
+FAR_ROOT = "/home/u/wk"
+
+
+class World(Fake):
+    """This host with a place per `kinds` entry, each the real driver: podman answers from `containers` (wkdev-create
+    writes the ready marker), tart from `vms`, a build box's ssh from `far` (its workspace directories) or fails
+    with `unreachable`; inside workspace `ws` (local) its marker names it. The store holds a mirror and one
+    snapshot, `main-1`."""
+
+    def __init__(self, tmp, kinds=None):
         super().__init__("here")
         self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
         self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"), "WK_LOCK_DIR": str(self.tmp / "locks"),
                     "WK_IN_VM": "1", "WK_PLACE": "fakebox"}
         self.clock = FakeClock()
-        self.containers = set()
-        self.far = (True, "")
+        self.containers, self.vms, self.far, self.unreachable = set(), {}, set(), None
         self.probe = "yes"
         self.checkout = Result(0, CHECKOUT)
         self.bash = {}
+        self.acted = set()
         self.dirs.add(self.env["WK_LOCK_DIR"])
         self.answer(["hostname"], out="here\n")
-        self.answer(["sdk-refresh"])
         self.answer([WK, "sync"], out="fetched\n")
         self.answer([ZED])
         self.react(["podman", "container", "exists"], lambda a, f: Result(0 if a[-1] in f.containers else 1))
         self.react(["podman", "inspect"], lambda a, f: Result(0, "running\n") if a[2] in f.containers else Result(125, "", "no such container"))
         self.react(["podman", "rm", "-f"], self._podman_rm)
         self.react(["podman", "unshare", "rm", "-rf"], self._rm_rf)
-        self.react(["wkdev-create"], self._wkdev_create)
+        self.react(["env"], self._sdk)
+        self.answer(["bash", os.path.join(str(REPO), "container", "sdk-refresh.sh")])
+        self.answer(["install", "-m"])
+        self.answer(["nproc"], out="8\n")
+        self.files["/proc/meminfo"] = "MemTotal:       33554432 kB\n"
         self.react(["find"], self._find)
         self.react(["bash", "-c"], self._bash)
-        self.react(["exec"], self._exec)
+        self.bash["gpu_flags"] = Result(0, "")
         self.react(["git", "-C"], self._git)
-        self.checkouts = []
-        self.records = record.Records(self.tmp / "store", clock=self.clock, env=self.env, machine=self,
-                                      ask_place=lambda n, pid, cap: pid in self.pids)
-        kinds, stores = kinds or {"fakebox": "container"}, stores or {}
+        kinds = kinds or {"fakebox": "container"}
+        for kind in set(kinds.values()):
+            getattr(self, "_" + kind)()
 
-        def make(name, env):
-            env.update({"WK_STORE": stores[name]} if name in stores else {})
-            return PodmanDriver(name, str(REPO), env, self, kinds[name])
-        self.reg = FakeRegistry(self.env, self, make, names=list(kinds))
+        self.reg = FakeRegistry(self.env, self, lambda name, env: DRIVERS[kinds[name]](name, str(REPO), env, self), names=list(kinds))
         self.driver = self.reg.load("fakebox")
+        self.records = record.of_driver(self.driver, self.clock, self)
         self.lock = Lock(self.driver.store, self, self.clock)
+        keyring = Store(self.env).keyring_dir()
+        for f in secrets.PUBLISHED:
+            self.files[os.path.join(keyring, f)] = "published by the host\n"
         self.publish("main-1")
         self.dirs.add(self.driver.store.mirror_dir())
         self.effects = []
+
+    def _container(self):
+        pass
+
+    def _vm(self):
+        self.env.pop("WK_IN_VM")
+        self.env["WK_VM_STORE"] = str(self.tmp / "vmstore")
+        bindir = self.tmp / "bin"
+        bindir.mkdir()
+        (bindir / "tart").write_text("")
+        (bindir / "tart").chmod(0o755)
+        self.env["PATH"] = str(bindir)
+        self.tart = t = os.path.realpath(str(bindir / "tart"))
+        self.react([t, "list"], lambda a, f: Result(0, json.dumps([{"Name": n, "State": s, "Source": "local"} for n, s in sorted(f.vms.items())])))
+        self.react([t, "clone"], lambda a, f: (f.vms.__setitem__(a[3], "stopped"), Result(0))[1])
+        self.react([t, "delete"], lambda a, f: (f.vms.pop(a[-1], None), Result(0))[1])
+        self.answer([t, "set"])
+        self.answer([t, "stop"])
+        self.answer(["pgrep"], rc=1)
+        self.answer(["sysctl", "-n", "hw.ncpu"], out="10\n")
+        self.answer(["sysctl", "-n", "hw.memsize"], out="34359738368\n")
+        self.answer(["podman", "machine", "inspect"], rc=125)
+
+    def _remote(self):
+        self.env.update({"WK_REMOTE_HOST": "box.example", "WK_REMOTE_ROOT": FAR_ROOT,
+                         "WK_REMOTE_STORE": str(self.tmp / "rstore"), "XDG_STATE_HOME": str(self.tmp / "state")})
+        self.react(["ssh"], self._ssh)
+        self.answer(["git", "-C", str(REPO), "rev-parse", "HEAD"], out="abc1234def\n")
+
+    def _local(self):
+        marker = self.tmp / "home" / ".wk-workspace"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("name=ws\nsrc=/src/WebKit\n")
+
+    def _ssh(self, argv, f):
+        if f.unreachable:
+            return Result(255, "", f.unreachable + "\n")
+        cmd = argv[-1]
+        if "uname -s" in cmd:
+            return Result(0, LINUX_PROBE)
+        words = shlex.split(cmd)
+        text = words[2] if words[:2] == ["sh", "-c"] else cmd
+        if text.startswith("test -f $HOME/.wk-remote"):
+            return Result(0)
+        if "/wk doctor --probe-tools" in text:
+            return Result(0, "sha=abc1234def\ndirty=no\n")
+        if "/wk rm " in text:
+            f.far.discard("%s/ws/%s" % (FAR_ROOT, words[-1]))
+            return Result(0)
+        if text.startswith("if [ ! -d"):
+            return Result(0, "present\n" if shlex.split(text)[4] in f.far else "absent\n")
+        path = shlex.split(text)[-1]
+        if text.startswith(("test -d", "test -e")):
+            return Result(0 if path in f.far else 1)
+        return Result(1, "", "no far answer for: %s" % text[:60])
 
     def publish(self, bid, on_branch=True):
         store = self.driver.store
@@ -102,8 +181,12 @@ class World(Fake):
 
     def remove(self, path):
         super().remove(path)
-        if path.startswith(str(self.tmp / "store" / "task")) and not act.dry_run():
+        if path.startswith(str(self.records.root)) and not act.dry_run():
             shutil.rmtree(path, True)
+
+    def act_run(self, argv, **kw):
+        self.acted.add(tuple(argv))
+        return super().act_run(argv, **kw)
 
     def _podman_rm(self, argv, f):
         f.containers.discard(argv[-1])
@@ -115,12 +198,19 @@ class World(Fake):
         f.dirs = {d for d in f.dirs if d != p and not d.startswith(p + "/")}
         return Result(0)
 
-    def _wkdev_create(self, argv, f):
+    def wkdev_create(self, argv, f):
         f.containers.add(argv[argv.index("--name") + 1])
         home = argv[argv.index("--home") + 1]
         f.dirs.add(home)
         f.files[os.path.join(home, places.READY_MARKER)] = ""
         return Result(0)
+
+    def _sdk(self, argv, f):
+        if step(argv) == "wkdev-create":
+            return self.wkdev_create(argv, f)
+        if argv[-1].endswith("print-sdk-version"):
+            return Result(1, "", "no checkout")
+        return self._exec(["exec", argv[argv.index("--name") + 1][3:]] + list(argv[argv.index("--") + 2:]), f)
 
     def _find(self, argv, f):
         p = argv[1]
@@ -143,7 +233,7 @@ class World(Fake):
         return self.driver.store.ws_dir(name)
 
     def make(self, name="ws", marker=True, base=True):
-        d = self.ws_dir(name)
+        d, kind = self.ws_dir(name), self.driver.kind
         for sub in ("changes", "overlay-work", "home", "build"):
             self.dirs.add(os.path.join(d, sub))
         self.dirs.add(d)
@@ -151,8 +241,15 @@ class World(Fake):
         if base:
             self.files[os.path.join(d, "base-id")] = "main-1\n"
         if marker:
-            self.files[os.path.join(d, "home", places.READY_MARKER)] = ""
-        self.containers.add("wk-" + name)
+            self.files[os.path.join(d, "home" if kind == "container" else "", places.READY_MARKER)] = ""
+        if kind == "container":
+            self.containers.add("wk-" + name)
+        elif kind == "vm":
+            self.vms["wk-" + name] = "running"
+            for f in (".run.log", ".unfiltered"):
+                self.files[os.path.join(self.driver.vm_dir(), name + f)] = ""
+        elif kind == "remote":
+            self.far.add("%s/ws/%s" % (FAR_ROOT, name))
 
     def alias(self, name="ws"):
         conf = workspace.sshalias.alias_path(self.env)
@@ -173,133 +270,47 @@ class World(Fake):
 
     def state(self):
         """What a flow leaves, less lock files and the snapshot."""
+        recs = [(t.field("kind"), t.field("exit")) for t in self.records.list()]
+        if self.driver.kind == "vm":
+            vmstore = self.env["WK_VM_STORE"]
+            return (sorted(self.vms.items()), sorted(self.rel(p) for p in self.files if p.startswith(vmstore)),
+                    sorted(self.rel(d) for d in self.dirs if d.startswith(vmstore + "/ws")), recs)
         store = str(self.tmp / "store")
         return (sorted(self.containers), sorted(self.rel(p) for p in self.files if p.startswith(store) and not p.startswith(store + "/base/")),
-                sorted(self.rel(d) for d in self.dirs if d.startswith(store + "/ws")),
-                [(t.field("kind"), t.field("exit")) for t in self.records.list()],
+                sorted(self.rel(d) for d in self.dirs if d.startswith(store + "/ws")), recs,
                 self.files.get(workspace.sshalias.alias_path(self.env), ""))
 
+    def left(self, name="ws"):
+        """What of `name` is still anywhere, by where it lives; empty is gone."""
+        t, out = self.driver, {}
+        if t.info(name) != "absent":
+            out["environment"] = t.info(name)
+        if self.isdir(t.store.ws_dir(name)):
+            out["directory"] = t.store.ws_dir(name)
+        if self.records.list():
+            out["records"] = len(self.records.list())
+        if "Host wk-%s" % name in self.files.get(workspace.sshalias.alias_path(self.env), "").splitlines():
+            out["alias"] = True
+        if t.create_log(name) in self.files:
+            out["log"] = t.create_log(name)
+        if t.kind == "vm":
+            guest = [f for f in (name + ".run.log", name + ".unfiltered") if os.path.join(t.vm_dir(), f) in self.files]
+            if guest:
+                out["guest files"] = guest
+        return out
 
-class PodmanDriver(places.Driver):
-    """The write side over the World's podman, with the record read from the fake's files."""
+    def record_goes_last(self):
+        """Every mutation that is not a record's lands before the first record removal."""
+        root = str(self.records.root)
+        work = [e for e in self.work() if e[0] in ("run", "write", "remove", "mkdir", "kill") and self.mutates(e)]
+        first = next(i for i, e in enumerate(work) if e[0] == "remove" and e[1].startswith(root))
+        return [e for e in work[first:] if not (e[0] == "remove" and e[1].startswith(root))]
 
-    def __init__(self, name, root, env, machine, kind):
-        super().__init__(name, root, env, machine)
-        self.kind = kind
-        self.needs_base = kind == "container"
-        self.reads_host_mirror = kind in ("container", "vm")
-        self.host = "box.example" if kind == "remote" else ""
-        self.peer = False
-
-    def ctr(self, ws):
-        return "wk-" + ws
-
-    def created(self, ws):
-        return self.machine.exists(os.path.join(self.store.ws_dir(ws), "home", places.READY_MARKER))
-
-    def answers(self):
-        return self.machine.far
-
-    def info(self, ws):
-        if not self.machine.far[0]:
-            return "unreachable"
-        r = self.machine.run(["podman", "inspect", self.ctr(ws), "--format", "{{.State.Status}}"])
-        if not r.ok:
-            return "absent"
-        return r.out.strip() if self.created(ws) else "creating"
-
-    def exec(self, ws, argv, tty=False, timeout=None):
-        return self.machine.run(["exec", ws] + list(argv))
-
-    def mirror_dir(self):
-        return "/mirror/of/" + self.kind
-
-    def store_init(self):
-        self.machine.mkdir(os.path.join(self.store.store_dir(), "ws"))
-
-    def sdk_refresh(self):
-        return self.machine.act_run(["sdk-refresh"]).ok
-
-    def create(self, ws, base=None, arch="native"):
-        if self.kind == "local":
-            act.die("a workspace cannot create a workspace -- run 'wk new %s' on the host" % ws)
-        ws_dir = self.store.ws_dir(ws)
-        if self.machine.run(["podman", "container", "exists", self.ctr(ws)]).ok:
-            act.die("workspace '%s' already exists" % ws)
-        for d in ("", "changes", "overlay-work", "home", "build"):
-            self.machine.mkdir(os.path.join(ws_dir, d) if d else ws_dir)
-        self.machine.write(os.path.join(ws_dir, "arch"), arch + "\n")
-        r = self.machine.act_run(["wkdev-create", "--name", self.ctr(ws), "--home", os.path.join(ws_dir, "home")])
-        if not r.ok:
-            act.die("wkdev-create failed for '%s' (exit %d); what it said is above" % (ws, r.rc), r.rc)
-        self.machine.write(os.path.join(ws_dir, "base-id"), (base or "") + "\n")
-
-    def destroy(self, ws):
-        if self.kind == "local":
-            act.die("a workspace cannot destroy itself -- run 'wk rm %s' on the host" % ws)
-        c, ws_dir = self.ctr(ws), self.store.ws_dir(ws)
-        if self.machine.run(["podman", "container", "exists", c]).ok:
-            self.machine.act_run(["podman", "rm", "-f", c])
-        if self.machine.isdir(ws_dir):
-            self.machine.act_run(["podman", "unshare", "rm", "-rf", ws_dir])
-            self.machine.remove(ws_dir)
-
-
-class ContainerWorld(World):
-
-    def __init__(self, tmp):
-        super().__init__(tmp)
-        self.reg = FakeRegistry(self.env, self, lambda n, e: places.Container(n, str(REPO), e, self), names=["fakebox"])
-        self.driver = self.reg.load("fakebox")
-        self.lock = Lock(self.driver.store, self, self.clock)
-        self.react(["env"], self._sdk)
-        self.answer(["bash", os.path.join(str(REPO), "container", "sdk-refresh.sh")])
-        self.answer(["install", "-m"])
-        self.answer(["nproc"], out="8\n")
-        self.files["/proc/meminfo"] = "MemTotal:       33554432 kB\n"
-        self.bash["gpu_flags"] = Result(0, "")
-        self.effects = []
-
-    def _sdk(self, argv, f):
-        if any(a.endswith("wkdev-create") for a in argv):
-            return self._wkdev_create(argv, f)
-        if argv[-1].endswith("print-sdk-version"):
-            return Result(1, "", "no checkout")
-        return self._exec(["exec", argv[argv.index("--name") + 1][3:]] + list(argv[argv.index("--") + 2:]), f)
-
-
-class VmWorld(World):
-
-    def __init__(self, tmp):
-        super().__init__(tmp)
-        self.env.pop("WK_IN_VM")
-        self.env["WK_VM_STORE"] = str(self.tmp / "vmstore")
-        tart = self.tmp / "home" / ".local" / "bin" / "tart"
-        tart.parent.mkdir(parents=True)
-        tart.write_text("")
-        tart.chmod(0o755)
-        self.vms = {}
-        self.reg = FakeRegistry(self.env, self, lambda n, e: places.Vm(n, str(REPO), e, self), names=["fakebox"])
-        self.driver = self.reg.load("fakebox")
-        self.lock = Lock(self.driver.store, self, self.clock)
-        t = self.driver.tart()
-        self.react([t, "list"], lambda a, f: Result(0, json.dumps([{"Name": n, "State": s, "Source": "local"} for n, s in f.vms.items()])))
-        self.react([t, "clone"], lambda a, f: (f.vms.__setitem__(a[3], "stopped"), Result(0))[1])
-        self.react([t, "delete"], lambda a, f: (f.vms.pop(a[2], None), Result(0))[1])
-        self.answer([t, "set"])
-        self.answer([t, "stop"])
-        self.answer(["pgrep"], rc=1)
-        self.answer(["sysctl", "-n", "hw.ncpu"], out="10\n")
-        self.answer(["sysctl", "-n", "hw.memsize"], out="34359738368\n")
-        self.answer(["podman", "machine", "inspect"], rc=125)
-        self.dirs.add(self.driver.store.mirror_dir())
-        self.effects = []
-
-    def state(self):
-        vmstore = self.env["WK_VM_STORE"]
-        return (sorted(self.vms.items()), sorted(self.rel(p) for p in self.files if p.startswith(vmstore)),
-                sorted(self.rel(d) for d in self.dirs if d.startswith(vmstore + "/ws")),
-                [(t.field("kind"), t.field("exit")) for t in self.records.list()])
+    def mutates(self, e):
+        """An ssh ControlPath directory is the connection's, not the workspace's."""
+        if e[0] == "mkdir":
+            return not e[1].endswith(os.path.join("wk", "ssh"))
+        return e[0] != "run" or e[1] in self.acted
 
 
 class WorkspaceTest(unittest.TestCase):
@@ -344,7 +355,7 @@ class WorkspaceTest(unittest.TestCase):
 
     def runs(self, w=None, head=None):
         w = w or self.w
-        return [e[1] for e in w.effects if e[0] == "run" and (head is None or e[1][0] == head)]
+        return [e[1] for e in w.effects if e[0] == "run" and (head is None or step(e[1]) == head)]
 
     def lock_takes(self, w=None, heads=()):
         """Each lock taken, as "lock <resource>", in order with the runs whose head is in `heads`."""
@@ -352,9 +363,14 @@ class WorkspaceTest(unittest.TestCase):
         for e in (w or self.w).effects:
             if e[0] == "symlink" and not e[1].endswith(".breaking") and ".new." not in e[1]:
                 out.append("lock " + os.path.basename(e[1]).split("@")[0])
-            elif e[0] == "run" and e[1][0] in heads:
-                out.append(e[1][0])
+            elif e[0] == "run" and step(e[1]) in heads:
+                out.append(step(e[1]))
         return out
+
+    def attempt(self, w):
+        """A creation as far as this world answers it: the vm's and a build box's own create are past what it emulates."""
+        with contextlib.suppress(Refused):
+            self.stderr(lambda: self.detached(w))
 
     def bash_runs(self, w=None, fn=""):
         return [a for a in self.runs(w, "bash") if fn in a[2]]
@@ -617,13 +633,13 @@ class TestNewKill(WorkspaceTest):
 class TestNewDriver(WorkspaceTest):
     def acts(self, w=None):
         w = w or self.w
-        return [e for e in w.work() if e[0] in ("write", "mkdir", "remove") or (e[0] == "run" and e[1][0] in ("sdk-refresh", "wkdev-create", WK))]
+        return [e for e in w.work() if e[0] in ("write", "mkdir", "remove") or (e[0] == "run" and step(e[1]) in ("sdk-refresh", "wkdev-create", WK))]
 
     def test_the_steps_land_in_order_and_the_record_ends_0(self):
         rc, err = self.stderr(lambda: self.detached())
         self.assertEqual(rc, 0)
-        heads = [e[1][0] if e[0] == "run" else e[0] for e in self.acts()]
-        self.assertEqual(heads, ["sdk-refresh", WK, "mkdir", "mkdir", "mkdir", "mkdir", "mkdir", "write", "wkdev-create", "write", WK])
+        heads = [step(e[1]) for e in self.acts() if e[0] == "run"]
+        self.assertEqual(heads, ["sdk-refresh", WK, "wkdev-create", WK])
         ws = self.w.ws_dir()
         self.assertEqual(self.w.files[os.path.join(ws, "base-id")], "main-1\n")
         self.assertIn("wk-ws", self.w.containers)
@@ -635,7 +651,7 @@ class TestNewDriver(WorkspaceTest):
 
     def test_the_agents_are_installed_once_it_is_up_and_before_the_fetch(self):
         self.stderr(lambda: self.detached())
-        execs = [e[1][-1] for e in self.w.effects if e[0] == "run" and e[1][0] == "exec"]
+        execs = [a[-1] for a in self.runs(head="exec")]
         install = next(i for i, c in enumerate(execs) if "claude.ai/install.sh" in c)
         config = next(i for i, c in enumerate(execs) if "claude/workspace-config.py" in c)
         fetch = next(i for i, c in enumerate(execs) if "echo yes || echo no" in c)
@@ -645,13 +661,13 @@ class TestNewDriver(WorkspaceTest):
     def test_an_agent_install_that_fails_fails_the_creation_and_a_rerun_remakes_it(self):
         def failing(argv, f):
             return Result(1, "claude=failed\n") if "claude.ai/install.sh" in argv[-1] else World._exec(f, argv, f)
-        self.w.react(["exec"], failing)
+        self.w._exec = failing
         err = self.refused(lambda: self.detached())
         self.assertIn("could not install the coding agents in 'ws' (claude=failed pi=?)", err)
         (t,) = self.w.records.list()
         self.assertNotEqual("0", t.field("exit"))
         self.assertEqual("creating", workspace.creation_state(self.w.driver, self.w.records, "ws"))
-        self.w.react(["exec"], World._exec.__get__(self.w))
+        del self.w._exec
         rc, err = self.stderr(lambda: self.detached())
         self.assertEqual(0, rc, err)
         self.assertIn("'ws' exists but was never finished -- destroying it and starting again", err)
@@ -662,8 +678,11 @@ class TestNewDriver(WorkspaceTest):
                          ["lock sdk", "sdk-refresh", "lock ws-ws", "lock store", "wkdev-create"])
         for kind in ("vm", "remote"):
             w = self.make_world(kinds={"fakebox": kind})
-            self.stderr(lambda: self.detached(w))
-            self.assertEqual(self.lock_takes(w, heads=("sdk-refresh",)), ["lock ws-ws"], kind)
+            self.attempt(w)
+            takes = self.lock_takes(w, heads=("sdk-refresh",))
+            self.assertEqual(takes[0], "lock ws-ws", kind)
+            self.assertNotIn("lock sdk", takes, kind)
+            self.assertNotIn("sdk-refresh", takes, kind)
 
     def test_the_mirror_is_refreshed_alone_before_the_store_lock_and_only_where_the_checkout_reads_it(self):
         self.stderr(lambda: self.detached())
@@ -672,7 +691,7 @@ class TestNewDriver(WorkspaceTest):
         self.assertEqual(self.runs(head=WK)[0], (WK, "sync", "--mirror"))
         for kind, want in (("vm", [(WK, "sync", "--mirror")]), ("remote", [])):
             w = self.make_world(kinds={"fakebox": kind})
-            self.stderr(lambda: self.detached(w))
+            self.attempt(w)
             self.assertEqual([r for r in self.runs(w, WK) if "--mirror" in r], want, kind)
 
     def test_a_mirror_refresh_that_failed_refuses_the_creation_naming_the_remedy(self):
@@ -691,8 +710,8 @@ class TestNewDriver(WorkspaceTest):
         w.make()
         w.containers.clear()
         cases.append((w, "'ws' is a record without an environment: creation finished, and the\n    fakebox side of it is gone -- something outside wk removed it."))
-        w = self.make_world()
-        w.far = (False, "Connection refused")
+        w = self.make_world(kinds={"fakebox": "remote"})
+        w.unreachable = "Connection refused"
         cases.append((w, "cannot reach the machine behind place 'fakebox', so whether 'ws' is\n    already there cannot be known"))
         for w, words in cases:
             err = self.refused(lambda: self.detached(w))
@@ -700,7 +719,7 @@ class TestNewDriver(WorkspaceTest):
             (t,) = w.records.list()
             self.assertEqual(t.verdict(), "refused")
             self.assertEqual(t.stage(), ["checking"])
-            self.assertEqual([a for a in self.runs(w) if a[0] == "wkdev-create"], [])
+            self.assertEqual([a for a in self.runs(w) if step(a) == "wkdev-create"], [])
             self.assertEqual(w.lock_files(), [])
 
     def test_a_half_made_workspace_is_wiped_and_remade(self):
@@ -709,8 +728,9 @@ class TestNewDriver(WorkspaceTest):
         rc, err = self.stderr(lambda: self.detached())
         self.assertEqual(rc, 0)
         self.assertIn("'ws' exists but was never finished -- destroying it and starting again", err)
-        heads = [a[:3] for a in self.runs() if a[0] == "wkdev-create" or a[:2] in (("podman", "rm"), ("podman", "unshare"))]
-        self.assertEqual(heads, [("podman", "rm", "-f"), ("podman", "unshare", "rm"), ("wkdev-create", "--name", "wk-ws")])
+        heads = [step(a) if step(a) == "wkdev-create" else a[:3] for a in self.runs()
+                 if step(a) == "wkdev-create" or a[:2] in (("podman", "rm"), ("podman", "unshare"))]
+        self.assertEqual(heads, [("podman", "rm", "-f"), ("podman", "unshare", "rm"), "wkdev-create"])
         self.assertNotIn("Host wk-ws", self.w.files[conf])
         self.assertIn("Host other", self.w.files[conf])
         self.assertEqual(self.w.records.list()[0].verdict(), "ok")
@@ -721,7 +741,7 @@ class TestNewDriver(WorkspaceTest):
         err = self.refused(lambda: self.detached())
         self.assertIn("could not destroy the half-made workspace 'ws'; still here: the fakebox environment\n"
                       "    'wk rm ws' retries exactly that, then 'wk new ws'", err)
-        self.assertEqual([a for a in self.runs() if a[0] == "wkdev-create"], [])
+        self.assertEqual([a for a in self.runs() if step(a) == "wkdev-create"], [])
         self.assertEqual(self.w.records.list()[0].verdict(), "failed")
         self.assertEqual(self.w.lock_files(), [])
 
@@ -750,7 +770,7 @@ class TestNewDriver(WorkspaceTest):
         err = self.refused(lambda: self.detached())
         self.assertIn("no WebKit mirror at %s" % self.w.driver.store.mirror_dir(), err)
         self.assertIn("wk sync    makes it", err)
-        self.assertEqual([a for a in self.runs() if a[0] == "wkdev-create"], [])
+        self.assertEqual([a for a in self.runs() if step(a) == "wkdev-create"], [])
         (t,) = self.w.records.list()
         self.assertEqual((t.verdict(), t.stage()), ("failed", ["base"]))
 
@@ -758,7 +778,7 @@ class TestNewDriver(WorkspaceTest):
         self.w.publish("main-1", on_branch=False)
         err = self.refused(lambda: self.detached())
         self.assertIn("no snapshot this machine can build a workspace from:  wk sync\n    publishes one.", err)
-        self.assertEqual([a for a in self.runs() if a[0] == "wkdev-create"], [])
+        self.assertEqual([a for a in self.runs() if step(a) == "wkdev-create"], [])
         self.assertNotIn(self.w.ws_dir(), self.w.dirs)
         (t,) = self.w.records.list()
         self.assertEqual((t.verdict(), t.stage()), ("failed", ["base"]))
@@ -770,14 +790,14 @@ class TestNewDriver(WorkspaceTest):
         self.w.publish("main-9", on_branch=False)
         self.assertIn("snapshot main-9 is not on branch main tracking origin/main", self.refused(lambda: self.detached(base="main-9")))
         w = self.make_world(kinds={"fakebox": "vm"})
-        self.stderr(lambda: self.detached(w))
+        self.attempt(w)
         self.assertEqual(self.runs(w, head="git"), [])
 
     def test_a_workspace_that_never_initialises_is_refused_after_wk_ready_timeout(self):
         def no_firstrun(argv, f):
             f.containers.add(argv[argv.index("--name") + 1])
             return Result(0)
-        self.w.react(["wkdev-create"], no_firstrun)
+        self.w.wkdev_create = no_firstrun
         self.w.env["WK_READY_TIMEOUT"] = "2"
         self.w.driver = self.w.reg.load("fakebox")
         err = self.refused(lambda: self.detached())
@@ -788,7 +808,7 @@ class TestNewDriver(WorkspaceTest):
         self.assertEqual((t.verdict(), t.stage()), ("failed", ["init"]))
 
     def test_a_create_that_fails_ends_the_record_with_its_status(self):
-        self.w.react(["wkdev-create"], lambda a, f: Result(125, "", "podman: boom\n"))
+        self.w.wkdev_create = lambda a, f: Result(125, "", "podman: boom\n")
         err = self.refused(lambda: self.detached(), 125)
         self.assertIn("wkdev-create failed for 'ws' (exit 125)", err)
         self.assertEqual(self.w.records.list()[0].field("exit"), "125")
@@ -804,7 +824,7 @@ class TestFreshen(WorkspaceTest):
         self.assertEqual(self.runs(head=WK), [(WK, "sync", "ws")])
         self.assertIn("'ws' is on main at abc1234, up to date with origin/main", err)
         probe = [a for a in self.runs(head="exec")][0]
-        self.assertIn("[ -d /mirror/of/container ]", probe[-1])
+        self.assertIn("[ -d %s ]" % self.w.driver.mirror_dir(), probe[-1])
 
     def test_no_mirror_names_wk_sync_and_still_reads_the_checkout(self):
         self.w.probe = "no"
@@ -873,9 +893,10 @@ class TestRmPlan(WorkspaceTest):
         return workspace.rm_plan(w.reg, w.records, name)
 
     def test_a_directory_here_is_a_workspace_whatever_the_machine_says(self):
-        self.w.dirs.add(self.w.ws_dir())
-        self.w.far = (False, "down")
-        t, what = self.plan()
+        w = self.make_world(kinds={"fakebox": "remote"})
+        w.dirs.add(w.ws_dir())
+        w.unreachable = "down"
+        t, what = self.plan(w)
         self.assertEqual((t.name, what), ("fakebox", "workspace"))
 
     def test_an_environment_with_no_directory_is_a_workspace(self):
@@ -885,17 +906,16 @@ class TestRmPlan(WorkspaceTest):
     def test_only_a_creation_record_is_a_record_on_the_target_that_holds_it(self):
         self.w.begin()
         self.assertEqual(self.plan()[1], "record")
-        other = str(self.tmp / "other-store")
-        w = self.make_world(kinds={"fakebox": "container", "box2": "remote"}, stores={"box2": other})
-        record.Records(other, clock=w.clock, env=dict(w.env, WK_STORE=other), machine=w).begin(
-            "new", "here", "ws", "wk new ws --kill", "/nolog", ["a"], pid=1)
+        w = self.make_world(kinds={"fakebox": "container", "box2": "remote"})
+        record.of_driver(w.reg.load("box2"), w.clock, w).begin("new", "here", "ws", "wk new ws --kill", "/nolog", ["a"], pid=1)
         t, what = self.plan(w)
         self.assertEqual((t.name, what), ("box2", "record"))
 
     def test_nothing_anywhere_is_1_and_a_machine_that_did_not_answer_is_2_with_ssh_words(self):
         self.refused(lambda: self.plan(), 1)
-        self.w.far = (False, "Host key verification failed.")
-        err = self.refused(lambda: self.plan(), 2)
+        w = self.make_world(kinds={"fakebox": "remote"})
+        w.unreachable = "Host key verification failed."
+        err = self.refused(lambda: self.plan(w), 2)
         self.assertIn("'ws' has no record here, and fakebox did not answer: Host key verification failed.", err)
         self.assertIn("re-run once fakebox answers.", err)
 
@@ -1018,8 +1038,9 @@ class TestRmNames(WorkspaceTest):
         self.assertNotIn("destroy them?", err)
 
     def test_an_unanswering_machine_is_1_without_the_no_such_line(self):
-        self.w.far = (False, "Host key verification failed.")
-        rc, err = self.stderr(lambda: self.names("ws"))
+        w = self.make_world(kinds={"fakebox": "remote"})
+        w.unreachable = "Host key verification failed."
+        rc, err = self.stderr(lambda: self.names("ws", w=w))
         self.assertEqual(rc, 1)
         self.assertIn("fakebox did not answer: Host key verification failed.", err)
         self.assertNotIn("no such workspace", err)
@@ -1104,14 +1125,14 @@ class TestKillPoints(WorkspaceTest):
             w.lock = Lock(w.driver.store, w, w.clock)   # each run is its own process: nothing the killed one held survives it
             with contextlib.redirect_stderr(io.StringIO()):
                 self.detached(w)
-        for cls in (ContainerWorld, VmWorld):
-            with self.subTest(driver=cls.__name__), contextlib.ExitStack() as guest_host:
-                if cls is VmWorld:
+        for kind in ("container", "vm"):
+            with self.subTest(driver=kind), contextlib.ExitStack() as guest_host:
+                if kind == "vm":
                     guest_host.enter_context(mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True))
                     guest_host.enter_context(mock.patch.object(guestbase.Base, "ensure", return_value=None))
                     guest_host.enter_context(mock.patch.object(guestbase.Base, "stale", return_value=""))
-                converges(self, lambda: cls(self.tmp), run_once, cls.state, max_effects=80)
-                w = cls(self.tmp)
+                converges(self, lambda: World(self.tmp, kinds={"fakebox": kind}), run_once, World.state, max_effects=80)
+                w = World(self.tmp, kinds={"fakebox": kind})
                 run_once(w)
                 self.assertEqual(w.driver.state("ws"), "present")
 
@@ -1159,7 +1180,7 @@ class TestKillPoints(WorkspaceTest):
         rc, err = self.stderr(lambda: self.front())
         self.assertEqual(rc, 0)
         self.assertEqual([e for e in self.w.effects if e[0] == "spawn"], [])
-        self.assertIn("would run: wkdev-create --name wk-ws", err)
+        self.assertRegex(err, r"would run: .*/wkdev-create .*--name wk-ws")
         self.assertNotIn("detached as pid", err)
         self.assertEqual(self.w.records.list(), [])
 

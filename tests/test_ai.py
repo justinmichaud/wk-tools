@@ -4,8 +4,6 @@ container tests/test_doctor_wall.py answers for, and each refusal is driven by
 taking one answer away. The session itself is never started: `foreground` is
 replaced, and what it would have run is what is asserted."""
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import os
 import shlex
@@ -15,8 +13,8 @@ import time
 import unittest
 from unittest import mock
 
-from tests.fakes import FakeRegistry
-from tests.support import REPO, run
+from tests.fakes import FakeRegistry, WsDriver
+from tests.support import REPO, load_cmd, run
 from tests.test_doctor_wall import _Wall
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -25,45 +23,28 @@ from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
 
-def load_ai():
-    """cmd/ai as a module: a real file with no extension needs its loader spelled out."""
-    path = str(REPO / "cmd" / "ai")
-    loader = importlib.machinery.SourceFileLoader("wk_cmd_ai", path)
-    spec = importlib.util.spec_from_file_location("wk_cmd_ai", path, loader=loader)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
 
 
-AI = load_ai()
+AI = load_cmd("ai")
 WK = os.path.join(AI.ROOT, "wk")
 
 
-class SimDriver(places.Driver):
+class SimDriver(WsDriver):
+    """A WsDriver whose commands answer by substring (`answers`), recorded as lines in `asked`; a handed-over argv
+    names its terminal."""
 
     def __init__(self, machine, env, kind="container", name=None):
-        super().__init__(name or kind, str(REPO), env, machine)
-        self.kind = kind
-        self.answers = {}
-        self.asked = []
+        super().__init__(name or kind, str(REPO), env, machine, kind)
+        self.answers, self.asked = {}, []
         self.filtered = True
         self.present, self.remedy = True, "the place's own remedy"
         self.is_local = False
-
-    def home(self):
-        return "/home/u"
-
-    def src(self, ws):
-        return "/src/WebKit"
 
     def tools(self, ws):
         return "/opt/wk-tools"
 
     def egress_filtered(self, ws):
         return self.filtered
-
-    def info(self, ws):
-        return "running"
 
     def exec(self, ws, argv, tty=False, timeout=None):
         line = " ".join(argv)

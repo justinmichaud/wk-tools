@@ -5,8 +5,6 @@ each driver's furniture, a publish killed after any effect and re-run converging
 wet run's plan."""
 
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import json
 import os
@@ -22,7 +20,7 @@ from unittest import mock
 
 from tests.fakes import FakeRegistry
 from tests.killpoints import converges
-from tests.support import REPO
+from tests.support import REPO, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, git, places, pr, sync  # noqa: E402
@@ -37,15 +35,9 @@ CMD_SYNC = REPO / "cmd" / "sync"
 MAIN_SHA = "a" * 40
 
 
-def _load_cmd():
-    loader = importlib.machinery.SourceFileLoader("wk_cmd_sync", str(CMD_SYNC))
-    spec = importlib.util.spec_from_file_location("wk_cmd_sync", str(CMD_SYNC), loader=loader)
-    m = importlib.util.module_from_spec(spec)
-    loader.exec_module(m)
-    return m
 
 
-cmd = _load_cmd()
+cmd = load_cmd("sync")
 REAL_MIRROR_BRANCHES = git.mirror_branches
 
 

@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes import WsDriver
 from tests.killpoints import converges
 from tests.support import REPO, load_cmd, rand_suffix, run, scratch_dir, stub_path
 
@@ -56,7 +57,9 @@ class GitWorld(Fake):
         self.dirty = 0
         self.upstream = {}         # branch -> {"remote": r, "merge": ref}
         self.pushed = set()        # (fork, branch)
-        self.driver = SimDriver(self)
+        self.driver = WsDriver("ws", REPO, {}, self)
+        self.react(["exec", "ws", "test", "-d"], lambda a, f: Result(0 if a[4] in f.dirs else 1))
+        self.react(["exec", "ws", "git", "-C"], lambda a, f: f.git(a[5:]))
 
     @property
     def fake(self):
@@ -162,31 +165,11 @@ class GitWorld(Fake):
         raise AssertionError("GitWorld: unhandled git subcommand: %r" % (sub,))
 
 
-class SimDriver(places.Driver):
+class RecordingDriver(WsDriver):
+    """Workspace `ws` on a GitWorld, its mutations kept in order."""
 
-    def __init__(self, world, src="/src/WebKit", mirror=""):
+    def __init__(self, world):
         super().__init__("ws", REPO, {}, world)
-        self.world = world
-        self._src = src
-        self._mirror = mirror
-
-    def src(self, ws):
-        return self._src
-
-    def mirror_dir(self):
-        return self._mirror
-
-    def exec(self, ws, argv, tty=False, timeout=None):
-        if argv[:2] == ["test", "-d"]:
-            return Result(0 if argv[2] in self.world.dirs else 1)
-        assert argv[:2] == ["git", "-C"], argv
-        return self.world.git(argv[3:])
-
-
-class RecordingDriver(SimDriver):
-
-    def __init__(self, world, **kw):
-        super().__init__(world, **kw)
         self.mutations = []
 
     def act_exec(self, ws, argv):
@@ -582,37 +565,25 @@ class TestPrOpenTarget(unittest.TestCase):
             self.assertIn(why, err.getvalue())
 
 
-class _FakeRebaseTarget:
+def rebase_place(mirror, responses):
+    """Workspace `myws` whose commands answer `responses` in turn."""
+    fake, queue = Fake(), list(responses)
+    fake.react(["exec", "myws"], lambda a, f: queue.pop(0))
+    return WsDriver("ws", str(REPO), {}, fake, kind=places.Driver.kind, mirror=mirror)
 
-    kind = places.Driver.kind
 
-    def __init__(self, mirror, responses):
-        self._mirror = mirror
-        self._responses = list(responses)
-        self.calls = []
-        self.here = Fake()
-
-    def src(self, ws):
-        return "/src/WebKit"
-
-    def mirror_dir(self):
-        return self._mirror
-
-    def exec(self, ws, argv, tty=False, timeout=None):
-        self.calls.append(argv)
-        return self._responses.pop(0)
-
-    act_exec = places.Driver.act_exec
+def calls(driver):
+    return [list(e[1][2:]) for e in driver.machine.effects if e[0] == "run" and e[1][:2] == ("exec", "myws")]
 
 
 class TestPrRebase(unittest.TestCase):
 
     def _run(self, mirror, responses):
-        driver = _FakeRebaseTarget(mirror, responses)
+        driver = rebase_place(mirror, responses)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             rc = CMD_PR_MODULE.pr_rebase(driver, "myws")
-        return rc, driver.calls, err.getvalue()
+        return rc, calls(driver), err.getvalue()
 
     def test_it_fetches_from_the_mirror_only_when_it_is_there(self):
         ok = [Result(0), Result(0), Result(0, "abc1234 c\n")]   # fetch, rebase, log
@@ -644,24 +615,24 @@ class TestPrOpenStatus(unittest.TestCase):
     """'wk pr open' ends as gh: the process becomes `gh pr create`, so a PR gh did not create is not a success."""
 
     def test_the_command_execs_into_gh(self):
-        driver = _FakeRebaseTarget("", [Result(0)])   # the push
+        driver = rebase_place("", [Result(0)])   # the push
         with mock.patch.object(CMD_PR_MODULE, "pr_open_target", return_value=("WebKit/WebKit", "me:b", "fork", "b")), \
                 contextlib.redirect_stderr(io.StringIO()):
             CMD_PR_MODULE.pr_open(driver, "myws", draft=True, web=False, push_status=KEY_LOADED)
         self.assertEqual([("exec", ("gh", "pr", "create", "--repo", "WebKit/WebKit", "--head", "me:b", "--fill", "--draft"), None)],
-                         driver.here.effects)
+                         [e for e in driver.here.effects if e[0] == "exec"])
 
 
 class TestPrOpenPushesFromWhereTheKeyIs(unittest.TestCase):
 
     def _open(self, peer):
-        driver = _FakeRebaseTarget("", [Result(0)])
+        driver = rebase_place("", [Result(0)])
         driver.kind, driver.is_local, driver.peer = "remote", False, peer
         with mock.patch.object(CMD_PR_MODULE, "pr_open_target", return_value=("WebKit/WebKit", "me:b", "fork", "b")), \
                 mock.patch.object(CMD_PR_MODULE, "push_from_here", return_value=Result(0)) as from_here, \
                 contextlib.redirect_stderr(io.StringIO()):
             CMD_PR_MODULE.pr_open(driver, "myws", draft=False, web=False, push_status=KEY_LOADED)
-        return from_here.called, driver.calls
+        return from_here.called, calls(driver)
 
     def test_a_build_box_pushes_from_here(self):
         self.assertEqual(self._open(peer=False), (True, []))

@@ -43,9 +43,8 @@ class World(Fake):
         self.sessions = []
         self.unit = False
         self.react(("sudo", "-n", PRIV, "session-status"), lambda a, f: Result(0 if passwordless else 1, "modeset:   Y\ndesktop:   none\n"))
-        for sudo in (("sudo", "-n"), ("sudo",)):
-            for verb in ("session-on", "session-on-bmc", "session-stop", "session-gdm", "session-gdm-bmc", "session-off"):
-                self.react(sudo + (PRIV, verb), self.helper)
+        for verb in ("session-on", "session-on-bmc", "session-stop", "session-gdm", "session-gdm-bmc", "session-off"):
+            self.react(("sudo", "-n", PRIV, verb), self.helper)
         self.react(("systemctl", "is-active", "--quiet"), lambda a, f: Result(0 if self.unit and a[3] == session.UNIT else 3))
         self.react(("systemctl", "is-active"), lambda a, f: Result(0, "active\n") if self.unit and a[2] == session.UNIT
                    else Result(3, "inactive\n"))
@@ -251,11 +250,10 @@ class TestOn(SessionTest):
         w.react(("sudo", "-n", PRIV, "session-on"), lambda a, f: Result(0))
         self.assertIn("no Wayland socket", self.refused(w.s().on, False))
 
-    def test_a_password_is_asked_for_when_the_grant_is_missing(self):
+    def test_a_missing_grant_is_refused_naming_the_setup_stage(self):
         w = World(passwordless=False)
-        rc, out = self.go(w.s().on, False)
-        self.assertIn("passwordless sudo unavailable", out)
-        self.assertIn(("run", ("sudo", PRIV, "session-on")), w.effects)
+        self.assertIn("./setup --stage quiesce", self.refused(w.s().on, False))
+        self.assertEqual([], w.priv_verbs())
 
     def test_no_helper_is_refused(self):
         w = World()

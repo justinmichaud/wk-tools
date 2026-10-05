@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes import FakeProc, FakeRegistry
+from tests.fakes import FakeProc, FakeRegistry, WsDriver
 from tests.killpoints import converges
 from tests.support import REPO, requires_machine
 
@@ -154,7 +154,7 @@ class DeployWorld:
         self.slotdir, self.doc = write_slot(self.env, "a")
 
     def bench(self):
-        reg = FakeRegistry(self.env, Local(), lambda n, e: mock.Mock(**{"info.return_value": "running"}),
+        reg = FakeRegistry(self.env, self.fake, lambda n, e: WsDriver(n, str(REPO), e, self.fake),
                            ws_place=lambda ws: "container", in_workspace=lambda: False)
         return cli.Bench(str(REPO), reg, self.clock)
 

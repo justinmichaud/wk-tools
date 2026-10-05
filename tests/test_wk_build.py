@@ -2,8 +2,6 @@
 the refusals, the record a run writes and how it ends, --kill, --detach, the
 babysitter, a dry run as the recorder, and a run killed after any effect."""
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import os
 import posix
@@ -20,7 +18,7 @@ from unittest import mock
 
 from tests.fakes import JobWorld
 from tests.killpoints import converges
-from tests.support import REPO, as_dispatched
+from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, build, dispatch, job, places, record  # noqa: E402
@@ -28,9 +26,7 @@ from wk.act import Refused  # noqa: E402
 from wk.machine import Local, Result, isolated_module  # noqa: E402
 
 FAR_LINE = "cd /src/WebKit && Tools/Scripts/build-webkit --jsc-only --release --makeargs=-j8\n"
-CMD_LOADER = importlib.machinery.SourceFileLoader("cmd_build", str(REPO / "cmd" / "build"))
-CMD = importlib.util.module_from_spec(importlib.util.spec_from_loader("cmd_build", CMD_LOADER))
-CMD_LOADER.exec_module(CMD)
+CMD = load_cmd("build")
 LINUX = posix.uname_result(("Linux", "h", "6", "#1", "aarch64"))
 
 

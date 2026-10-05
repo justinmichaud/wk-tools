@@ -1,7 +1,5 @@
 """`wk bench run` as a flow (lib/wk/bench/pipeline.py over lib/wk/bench/systems.py) against a Fake world."""
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import json
 import os
@@ -13,13 +11,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes import FakeProc, FakeRegistry
+from tests.fakes import FakeProc, FakeRegistry, WsDriver
 from tests.killpoints import converges
-from tests.support import REPO, as_dispatched
+from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from tests.test_bench_mac import StubWatch  # noqa: E402
-from wk import decl, dispatch, job, places, record, screen  # noqa: E402
+from wk import decl, dispatch, job, record, screen  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import pipeline, record as brecord, systems  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
@@ -29,39 +27,19 @@ SHA = "0123456789abcdef0123456789abcdef01234567"
 PLAN_JSON = json.dumps({"git_repository": {"url": "https://example.com/bench.git", "branch": "main"}})
 JSC_LOG = b'wk: bench pid 77\nScore: 12\n{"JetStream3.0": {"tests": {"t": {"metrics": {"Score": {"current": [12.0]}}}}}}\n'
 RESULT = json.dumps({"Speedometer-3": {"metrics": {"Score": {"current": [30.0, 31.0]}}}})
-CMD_LOADER = importlib.machinery.SourceFileLoader("cmd_bench", str(REPO / "cmd" / "bench"))
-CMD = importlib.util.module_from_spec(importlib.util.spec_from_loader("cmd_bench", CMD_LOADER))
-CMD_LOADER.exec_module(CMD)
+CMD = load_cmd("bench")
 
 
-class BenchDriver(places.Driver):
-    """A workspace `ws` whose commands answer from the world as ("exec", ws, ...)."""
+class BenchDriver(WsDriver):
+    """Workspace `ws` on a container or a guest, its scratch store this machine's own disk."""
 
     def __init__(self, name, root, env, machine, kind):
-        super().__init__(name, root, env, machine)
-        self.kind = kind
-
-    def info(self, ws):
-        return "running"
+        mac = kind == "vm"
+        super().__init__(name, root, env, machine, kind, "/Users/admin/WebKit" if mac else "/src/WebKit", "/Users/admin",
+                         "macos" if mac else "linux")
 
     def results(self, ws):
-        """The scratch store is this machine's own disk."""
         return Local(), os.path.join(self.store.ws_dir(ws), "bench")
-
-    def exec(self, ws, argv, tty=False, timeout=None):
-        return self.machine.run(["exec", ws] + list(argv))
-
-    def exec_argv(self, ws, argv, tty=False):
-        return ["exec", ws] + list(argv), None
-
-    def src(self, ws):
-        return "/Users/admin/WebKit" if self.kind == "vm" else "/src/WebKit"
-
-    def home(self):
-        return "/Users/admin"
-
-    def os(self):
-        return "macos" if self.kind == "vm" else "linux"
 
 
 class World(Fake):

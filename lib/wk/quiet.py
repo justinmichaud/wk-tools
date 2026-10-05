@@ -27,6 +27,7 @@ def said(r):
 
 
 NOT_INSTALLED = "%s is not installed.\n    Remedy:  %s" % (PRIV, SETUP)
+NO_GRANT = "passwordless sudo is not set up for %s.\n    Remedy:  %s" % (PRIV, SETUP)
 
 
 def require_helper(machine):
@@ -57,7 +58,7 @@ class Quiesce:
             return ("%s exited nonzero running '%s'. Passwordless sudo is\n"
                     "    in force, so this is the helper and not the grant -- its own output above says what\n"
                     "    it was doing." % (PRIV, verb))
-        return "passwordless sudo is not set up for %s.\n    Remedy:  %s" % (PRIV, SETUP)
+        return NO_GRANT
 
     def priv(self, verb):
         require_helper(self.m)

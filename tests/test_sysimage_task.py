@@ -12,12 +12,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes import FakeProc, FakeRegistry
+from tests.fakes import FakeProc, FakeRegistry, WsDriver
 from tests.killpoints import converges
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import build, images, job, places, record  # noqa: E402
+from wk import build, images, job, record  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result, isolated_module  # noqa: E402
@@ -28,8 +28,8 @@ WS = "buildroot-" + PROFILE
 SHA = "a" * 40
 
 
-class Box(places.Driver):
-    kind = "container"
+class Box(WsDriver):
+    """The container place, holding `WS` once the world has made it."""
 
     def podman(self):
         return ["podman"]
@@ -39,15 +39,6 @@ class Box(places.Driver):
 
     def info(self, ws):
         return "running" if self.machine.made else "absent"
-
-    def exec(self, ws, argv, tty=False, timeout=None):
-        return self.machine.run(["exec", ws] + list(argv))
-
-    def exec_argv(self, ws, argv, tty=False):
-        return ["exec", ws] + list(argv), None
-
-    def sync_tools(self, ws):
-        return self.machine.act_run(["sync-tools", ws]).ok
 
 
 class World(Fake):
@@ -63,7 +54,7 @@ class World(Fake):
                     "WK_CGROUP_CORES": "8", "WK_JOB_PID_TRIES": "0", "WK_KILL_WAIT": "2", "WK_ROOT": str(REPO)}
         self.clock = FakeClock()
         self.dirs.add(self.env["WK_LOCK_DIR"])
-        self.made, self.rc, self.hang, self.interrupt = True, 0, False, None
+        self.made, self.rc, self.hang, self.interrupt, self.kind = True, 0, False, None, "container"
         self.out = b"wk-buildroot: building\nwk-buildroot: stage 'image' done\n"
         self.answer(["hostname"], out="here\n")
         self.answer(["df", "-Pk"], out="Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 209715200 1% /\n")
@@ -73,7 +64,7 @@ class World(Fake):
         self.react(["env"], self._new)
         self.react(["exec", WS, "kill", "-0"], lambda a, f: Result(0 if int(a[-1]) in f.pids else 1))
         self.answer(["sync-tools"])
-        self.reg = FakeRegistry(self.env, self, lambda n, e: Box("box", str(REPO), self.env, self), default=lambda: "box")
+        self.reg = FakeRegistry(self.env, self, lambda n, e: Box("box", str(REPO), self.env, self, self.kind), default=lambda: "box")
         self.ws_dir = os.path.join(str(store), "ws", WS)
         os.makedirs(os.path.join(self.ws_dir, "home"))
         self.log = os.path.join(self.ws_dir, "home", "buildroot-image.log")
@@ -302,8 +293,8 @@ class TestRefusals(TaskTest):
         self.assertIn("is already building", err)
 
     def test_a_target_that_is_not_a_container_is_refused(self):
-        with mock.patch.object(Box, "kind", "remote"):
-            err = self.refused()
+        self.w.kind = "remote"
+        err = self.refused()
         self.assertIn("a buildroot image builds in a container workspace, and place 'box' is a remote one", err)
 
     def test_an_unknown_option_is_a_usage_error(self):

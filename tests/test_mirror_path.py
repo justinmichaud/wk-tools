@@ -8,7 +8,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, WkTest
+from tests.support import REPO, GitMirror, WkTest, git_run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, git, images, places, sync  # noqa: E402
@@ -93,44 +93,10 @@ class MirrorFixture(WkTest):
 
     ENV = {"WK_MIRROR_BRANCHES": "main"}
 
-    def _git(self, *args, cwd, check=True):
-        return subprocess.run(["git", *args], cwd=str(cwd), text=True,
-                              capture_output=True, check=check)
-
     def setUp(self):
         super().setUp()
-        # Two upstreams: one standing in for origin (a branch the mirror
-        # carries) and one for a fork (namespaced, and not `main`).
-        for bare in ("up.git", "fk.git"):
-            self._git("init", "-q", "--bare", "-b", "main", bare, cwd=self.tmp)
-        seed = self.tmp / "seed"
-        self._git("init", "-q", "-b", "main", "seed", cwd=self.tmp)
-        (seed / "a").write_text("a\n")
-        self._git("add", "a", cwd=seed)
-        self._git("-c", "user.email=t@example.com", "-c", "user.name=T",
-                  "commit", "-q", "-m", "a", cwd=seed)
-        self._git("push", "-q", str(self.tmp / "up.git"), "main", cwd=seed)
-        self._git("checkout", "-q", "-b", "side", cwd=seed)
-        (seed / "b").write_text("b\n")
-        self._git("add", "b", cwd=seed)
-        self._git("-c", "user.email=t@example.com", "-c", "user.name=T",
-                  "commit", "-q", "-m", "b", cwd=seed)
-        self._git("push", "-q", str(self.tmp / "fk.git"), "side", cwd=seed)
-        # The fork's own default branch is not the mirror's: WPEWebKit's is
-        # `wpe-2.46`, and `git fetch` in a bare repository takes the fetched
-        # remote's HEAD as its own (measured, git 2.48.1). A stand-in whose
-        # default branch is also `main` hides that.
-        self._git("symbolic-ref", "HEAD", "refs/heads/side",
-                  cwd=self.tmp / "fk.git")
-
-        # git.REMOTES is the one list of upstreams; stood in for here so nothing
-        # reaches github.com, and the rest of the script is the real one.
-        self.remotes = (("origin", str(self.tmp / "up.git")), ("fork", str(self.tmp / "fk.git")))
-        self.mirror = self.tmp / "m.git"
-        cp = subprocess.run(["sh", "-c", git.mirror_refresh_script(str(self.mirror), ["main"], self.remotes)],
-                            capture_output=True, text=True)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.refresh_out = cp.stdout
+        m = GitMirror(self.tmp)
+        self.remotes, self.mirror, self.refresh_out = m.remotes, m.mirror, m.refresh_out
 
     def wire_fetches(self, ws):
         """fetch_config's steps, rendered and run in the checkout."""
@@ -149,42 +115,42 @@ class TestOneMirrorLayoutEverywhere(MirrorFixture):
         self.assertIn("mirror-fetch fork ok", self.refresh_out)
 
     def test_origins_branches_are_the_mirrors_own_heads_and_forks_are_namespaced(self):
-        refs = self._git("for-each-ref", "--format=%(refname)",
+        refs = git_run("for-each-ref", "--format=%(refname)",
                          cwd=self.mirror).stdout.split()
         self.assertIn("refs/heads/main", refs)
         self.assertIn("refs/remotes/fork/side", refs)
         self.assertEqual(
-            self._git("symbolic-ref", "HEAD", cwd=self.mirror).stdout.strip(),
+            git_run("symbolic-ref", "HEAD", cwd=self.mirror).stdout.strip(),
             "refs/heads/main")
 
     def test_it_follows_no_tags_and_is_never_repacked_under_a_sharing_clone(self):
         for key, want in (("remote.origin.tagOpt", "--no-tags"), ("gc.auto", "0")):
             with self.subTest(key=key):
-                self.assertEqual(self._git("config", key, cwd=self.mirror).stdout.strip(), want)
+                self.assertEqual(git_run("config", key, cwd=self.mirror).stdout.strip(), want)
 
     def test_a_wired_checkout_writes_no_commit_graph_on_fetch(self):
         ws = self.tmp / "ws-graph"
-        self._git("clone", "-q", "--shared", "--branch", "main",
+        git_run("clone", "-q", "--shared", "--branch", "main",
                   str(self.mirror), "ws-graph", cwd=self.tmp)
         self.wire_fetches(ws)
         for key in ("fetch.writeCommitGraph", "gc.writeCommitGraph"):
             with self.subTest(key=key):
-                self.assertEqual(self._git("config", key, cwd=ws).stdout.strip(), "false")
+                self.assertEqual(git_run("config", key, cwd=ws).stdout.strip(), "false")
 
     def test_a_workspace_fetch_against_it_takes_the_mirror_arm(self):
         ws = self.tmp / "ws"
-        self._git("clone", "-q", "--shared", "--branch", "main",
+        git_run("clone", "-q", "--shared", "--branch", "main",
                   str(self.mirror), "ws", cwd=self.tmp)
         for remote, bare in (("origin", "up.git"), ("fork", "fk.git")):
-            self._git("remote", "remove", remote, cwd=ws, check=False)
-            self._git("remote", "add", remote, str(self.tmp / bare), cwd=ws)
+            git_run("remote", "remove", remote, cwd=ws, check=False)
+            git_run("remote", "add", remote, str(self.tmp / bare), cwd=ws)
         self.wire_fetches(ws)
         for bare in ("up.git", "fk.git"):
             shutil.rmtree(self.tmp / bare)
         out = subprocess.run(["sh", "-c", sync.fetch_script(str(ws), "")], cwd=str(self.tmp),
                              capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        refs = self._git("for-each-ref", "--format=%(refname)", cwd=ws).stdout.split()
+        refs = git_run("for-each-ref", "--format=%(refname)", cwd=ws).stdout.split()
         self.assertIn("refs/remotes/origin/main", refs)
         self.assertIn("refs/remotes/fork/side", refs)
 
@@ -199,30 +165,30 @@ class TestABranchIsTakenFromTheMirrorFirst(MirrorFixture):
         """A workspace checkout whose origin is a real (local-path) upstream, as a workspace's is after the
         wiring."""
         ws = self.tmp / "co"
-        self._git("clone", "-q", "--shared", "--branch", "main",
+        git_run("clone", "-q", "--shared", "--branch", "main",
                   str(self.mirror), "co", cwd=self.tmp)
-        self._git("remote", "set-url", "origin", str(self.tmp / "up.git"), cwd=ws)
+        git_run("remote", "set-url", "origin", str(self.tmp / "up.git"), cwd=ws)
         return ws
 
     def test_a_branch_the_mirror_carries_costs_no_network(self):
         ws = self._checkout()
-        self._git("remote", "set-url", "origin", str(self.tmp / "gone.git"), cwd=ws)
+        git_run("remote", "set-url", "origin", str(self.tmp / "gone.git"), cwd=ws)
         out = subprocess.run(["sh", "-c", self._step("main", self.mirror)],
                              cwd=str(ws), capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertEqual(
-            self._git("rev-parse", "refs/remotes/origin/main", cwd=ws).stdout.strip(),
-            self._git("rev-parse", "refs/heads/main", cwd=self.mirror).stdout.strip())
+            git_run("rev-parse", "refs/remotes/origin/main", cwd=ws).stdout.strip(),
+            git_run("rev-parse", "refs/heads/main", cwd=self.mirror).stdout.strip())
 
     def test_a_branch_it_does_not_carry_is_asked_of_origin(self):
         ws = self._checkout()
-        self._git("push", "-q", str(self.tmp / "up.git"), "HEAD:refs/heads/other",
+        git_run("push", "-q", str(self.tmp / "up.git"), "HEAD:refs/heads/other",
                   cwd=self.tmp / "seed")
         out = subprocess.run(["sh", "-c", self._step("other", self.mirror)],
                              cwd=str(ws), capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertEqual(
-            self._git("rev-parse", "FETCH_HEAD", cwd=ws, check=False).returncode, 0)
+            git_run("rev-parse", "FETCH_HEAD", cwd=ws, check=False).returncode, 0)
 
     def test_a_target_with_no_mirror_asks_origin_and_nothing_else(self):
         step = self._step("main", "")
@@ -314,9 +280,9 @@ class TestASnapshotBorrowsTheMirrorsObjects(MirrorFixture):
         self.assertTrue(alternates.exists(), "the snapshot copied the history instead of borrowing it")
         self.assertEqual(os.path.realpath(alternates.read_text().strip()), os.path.realpath(str(self.mirror / "objects")))
         self.assertEqual((d / "sha").read_text().strip(),
-                         self._git("rev-parse", "refs/heads/main", cwd=self.mirror).stdout.strip())
+                         git_run("rev-parse", "refs/heads/main", cwd=self.mirror).stdout.strip())
         self.assertEqual((d / "branch").read_text().strip(), "origin/main")
-        self.assertEqual(self._git("symbolic-ref", "--short", "HEAD", cwd=d / "WebKit").stdout.strip(), "main")
+        self.assertEqual(git_run("symbolic-ref", "--short", "HEAD", cwd=d / "WebKit").stdout.strip(), "main")
 
 if __name__ == "__main__":
     unittest.main()

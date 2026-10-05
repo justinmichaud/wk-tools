@@ -4,6 +4,7 @@ import os
 import sys
 import unittest
 
+from tests.fakes import FakeRegistry
 from tests.support import REPO, WkTest, rand_suffix, run, scratch_dir, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -104,33 +105,29 @@ class TestFleetWalkBareFormMultiMachine(WkTest):
                 self.assertIn(n, cp.stdout, f"'{n}' missing from a bare 'wk status --text':\n{cp.stdout}")
 
 
-class _Registry(places.Registry):
-    """A registry of named places, `holding` the ones a workspace is on."""
+def registry(names, holding, ws):
+    """Container places `names` on one fake machine, each with a store of its own; `ws` is on those in `holding`."""
+    fake = Fake()
+    fake.answer(["podman", "inspect"], rc=125)
 
-    def __init__(self, names, holding):
-        super().__init__(REPO, env={}, machine=Fake())
-        self.names, self.holding = names, holding
-
-    def all(self):
-        return self.names
-
-    def machines(self):
-        return []
-
-    def on_place(self, name, ws):
-        return name in self.holding
+    def make(name, env):
+        return places.Container(name, str(REPO), dict(env, WK_STORE="/store/" + name, WK_IN_VM="1"), fake)
+    reg = FakeRegistry({}, fake, make, names=names)
+    for name in holding:
+        fake.dirs.add(reg.load(name).store.ws_dir(ws))
+    return reg
 
 
 class TestResolution(unittest.TestCase):
     def test_a_name_on_two_places_refuses_naming_both(self):
         with self.assertRaises(LookupError) as e:
-            _Registry(["alpha", "beta", "gamma"], {"alpha", "beta"}).ws_place("demo-ambiguous")
+            registry(["alpha", "beta", "gamma"], {"alpha", "beta"}, "demo-ambiguous").ws_place("demo-ambiguous")
         self.assertIn("demo-ambiguous", str(e.exception))
         self.assertIn("alpha beta", str(e.exception))
         self.assertNotIn("gamma", str(e.exception))
 
     def test_a_name_on_one_target_still_resolves(self):
-        self.assertEqual(_Registry(["alpha", "beta"], {"beta"}).ws_place("demo-single"), "beta")
+        self.assertEqual(registry(["alpha", "beta"], {"beta"}, "demo-single").ws_place("demo-single"), "beta")
 
 
 if __name__ == "__main__":

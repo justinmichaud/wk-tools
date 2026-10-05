@@ -6,8 +6,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, WkTest, rand_suffix, requires_container_place, run, stub_path
-from tests.test_layers import load_cmd
+from tests.support import REPO, WkTest, load_cmd, rand_suffix, requires_container_place, run, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places  # noqa: E402

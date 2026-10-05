@@ -476,7 +476,7 @@ class TestThePodmanMachineIsNotStartedBesideAGuest(BaseTest):
         self.assertEqual(2, len(self.started()))
 
     def test_wk_start_asks_the_same_rule(self):
-        from tests.test_layers import load_cmd
+        from tests.support import load_cmd
         start = load_cmd("start")
         self.w.state = "running"
         self.w.answer(["podman", "machine", "inspect"], out=json.dumps([{"State": "stopped", "Resources": {"Memory": 16384}}]))

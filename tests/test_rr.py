@@ -2,15 +2,13 @@
 replays the latest recording under lldb; a non-Linux place, a missing rr and closed perf events are refused.
 cmd/run and cmd/gui exec into `Driver.exec_argv`'s result, intercepted here before it replaces the process."""
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import os
 import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO
+from tests.support import REPO, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import ldpath  # noqa: E402
@@ -18,17 +16,10 @@ from wk.machine import Fake  # noqa: E402
 from wk.act import Refused  # noqa: E402
 
 
-def _load(cmd):
-    path = str(REPO / "cmd" / cmd)
-    loader = importlib.machinery.SourceFileLoader("cmd_" + cmd, path)
-    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader, origin=path))
-    mod.__file__ = path
-    loader.exec_module(mod)
-    return mod
 
 
 os.environ.setdefault("WK_ROOT", str(REPO))
-RUN, GUI = _load("run"), _load("gui")
+RUN, GUI = load_cmd("run"), load_cmd("gui")
 
 
 def _driver(os_name="linux", have_rr=True, paranoid="1"):

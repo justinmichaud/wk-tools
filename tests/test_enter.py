@@ -1,21 +1,12 @@
 """`wk enter` -- a shell in a workspace, or one command run there and exited."""
-import importlib.machinery
-import importlib.util
 import io
 import os
 import unittest
 from unittest import mock
 
-from tests.support import REPO, WkTest, fake_workspace, run
+from tests.support import WkTest, fake_workspace, load_cmd, run
 
 
-def _load_enter():
-    path = os.path.join(str(REPO), "cmd", "enter")
-    loader = importlib.machinery.SourceFileLoader("wk_cmd_enter", path)
-    spec = importlib.util.spec_from_loader("wk_cmd_enter", loader)
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    return mod
 
 
 class TestRunsCommand(WkTest):
@@ -46,7 +37,7 @@ class TestRunsCommand(WkTest):
 class TestNoTerminalAsksForNone(unittest.TestCase):
 
     def test_the_command_is_exec_argv_without_a_tty_and_replaces_this_process(self):
-        enter = _load_enter()
+        enter = load_cmd("enter")
         driver = mock.Mock()
         driver.info.return_value = "present"
         driver.exec_argv.return_value = (["true"], None)

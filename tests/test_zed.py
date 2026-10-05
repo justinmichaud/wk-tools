@@ -1,6 +1,4 @@
 """`wk zed` -- reaching a workspace's checkout in Zed."""
-import importlib.machinery
-import importlib.util
 import os
 import shutil
 import sys
@@ -9,25 +7,17 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, WkTest, run
+from tests.support import REPO, WkTest, load_cmd, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places, sshalias  # noqa: E402
 from wk.machine import HAVE, Fake, Result  # noqa: E402
 
 
-def _load_cmd_zed():
-    path = str(REPO / "cmd" / "zed")
-    loader = importlib.machinery.SourceFileLoader("cmd_zed", path)
-    spec = importlib.util.spec_from_loader("cmd_zed", loader, origin=path)
-    mod = importlib.util.module_from_spec(spec)
-    mod.__file__ = path
-    loader.exec_module(mod)
-    return mod
 
 
 os.environ.setdefault("WK_ROOT", str(REPO))
-ZED = _load_cmd_zed()
+ZED = load_cmd("zed")
 
 
 class DriverTest(unittest.TestCase):

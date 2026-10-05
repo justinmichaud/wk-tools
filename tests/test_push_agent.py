@@ -172,7 +172,13 @@ class TestDoctorNamesTheReadToken(WkTest):
 
 
 class TestTheSwitchEndToEnd(_Agent):
+    def stop_guests_agent(self):
+        """On a macOS host `wk key push on` also starts the agent it runs for its guests (lib/wk/guest.py)."""
+        with contextlib.suppress(OSError, ValueError):
+            _kill(int((self.store / "vm" / "ssh-agent.pid").read_text()))
+
     def test_on_loads_and_writes_the_config_off_empties_and_status_reads_the_agent(self):
+        self.addCleanup(self.stop_guests_agent)
         (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
         self.assertEqual(1, self.run_wk("key", "push", "status", env=self.env()).returncode)
         for action, rc, keys in (("on", 0, len(FORKS)), ("status", 0, len(FORKS)), ("off", 0, 0)):

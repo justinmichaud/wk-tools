@@ -1,7 +1,5 @@
 """`wk stop --tasks` ends what is still running through the kill command each record names, and reads the tasks
 again afterwards for its exit status."""
-import importlib.machinery
-import importlib.util
 import os
 from unittest import mock
 import shlex
@@ -9,9 +7,8 @@ import shutil
 import subprocess
 import sys
 import unittest
-from pathlib import Path
 
-from tests.support import REPO, WkTest
+from tests.support import REPO, WkTest, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import record  # noqa: E402
@@ -112,13 +109,6 @@ class TestWhichVerdictsAreStillGoing(unittest.TestCase):
         self.assertEqual([w for w in going + over if w in record.RUNNING], list(going))
 
 
-def load_stop():
-    path = str(REPO / "cmd" / "stop")
-    loader = importlib.machinery.SourceFileLoader("wk_cmd_stop", path)
-    spec = importlib.util.spec_from_file_location("wk_cmd_stop", path, loader=loader)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
 
 
 class TestStopWorkspace(unittest.TestCase):
@@ -146,7 +136,7 @@ class TestStopWorkspace(unittest.TestCase):
             return self.driver
 
     def test_each_kind_is_stopped_by_its_driver_alone(self):
-        stop = load_stop()
+        stop = load_cmd("stop")
         for kind in ("container", "vm", "remote"):
             with self.subTest(kind=kind):
                 t = self.Driver(kind)

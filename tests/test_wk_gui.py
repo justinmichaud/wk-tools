@@ -1,15 +1,13 @@
 """`wk gui` (cmd/gui): MiniBrowser in the benchmark seat, its refusals, and the fullscreen flag per port, with
 `Driver.exec_argv` intercepted before it replaces the process."""
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import os
 import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO
+from tests.support import REPO, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import presets  # noqa: E402
@@ -17,18 +15,10 @@ from wk.act import Refused  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
 
-def _load_cmd_gui():
-    path = str(REPO / "cmd" / "gui")
-    loader = importlib.machinery.SourceFileLoader("cmd_gui", path)
-    spec = importlib.util.spec_from_loader("cmd_gui", loader, origin=path)
-    mod = importlib.util.module_from_spec(spec)
-    mod.__file__ = path
-    loader.exec_module(mod)
-    return mod
 
 
 os.environ.setdefault("WK_ROOT", str(REPO))
-GUI = _load_cmd_gui()
+GUI = load_cmd("gui")
 
 
 def _driver(kind="container", os_name="linux"):

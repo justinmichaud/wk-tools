@@ -12,43 +12,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes import FakeRegistry
-from tests.support import REPO, as_dispatched
-from tests.test_layers import load_cmd
+from tests.fakes import FakeRegistry, WsDriver
+from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import decl, ldpath, places, profile  # noqa: E402
+from wk import decl, ldpath, profile  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
 RUN = decl.Decl(REPO / "cmd" / "run")
-
-
-class ProfileDriver(places.Driver):
-    def __init__(self, name, root, env, machine, kind="container"):
-        super().__init__(name, root, env, machine)
-        self.kind = kind
-
-    def info(self, ws):
-        return "running"
-
-    def state(self, ws, info=None):
-        return "present"
-
-    def os(self):
-        return "linux"
-
-    def src(self, ws):
-        return "/src/WebKit"
-
-    def home(self):
-        return "/home/u"
-
-    def exec(self, ws, argv, tty=False, timeout=None):
-        return self.machine.run(["exec", ws] + list(argv))
-
-    def exec_tty(self, ws, argv, timeout=None):
-        return self.machine.run_tty(["exec-tty", ws] + list(argv))
 
 
 class World(Fake):
@@ -58,7 +30,8 @@ class World(Fake):
         self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"),
                     "XDG_STATE_HOME": str(self.tmp / "state"), "WK_NAME": "ws", "WK_IN_VM": "1"}
         self.answer(["exec", "ws", "test", "-x"], rc=0)   # the binary is built
-        self.reg = FakeRegistry(self.env, self, lambda n, e: ProfileDriver("box", str(REPO), e, self), ws_place=lambda ws: "box")
+        self.place_os = "linux"
+        self.reg = FakeRegistry(self.env, self, lambda n, e: WsDriver("box", str(REPO), e, self, os=self.place_os), ws_place=lambda ws: "box")
 
 
 class ProfileTest(unittest.TestCase):
@@ -159,8 +132,8 @@ class TestSysprof(ProfileTest):
         self._ready()
         e, err = self.refused("--preset", "gtk-release", "--profile=sysprof", "--attach", "123")
         self.assertIn("there is no attach", err)
-        with mock.patch.object(ProfileDriver, "os", lambda self: "macos"):
-            e, err = self.refused("--preset", "mac-release", "--profile=sysprof", "--", "x.js")
+        self.w.place_os = "macos"
+        e, err = self.refused("--preset", "mac-release", "--profile=sysprof", "--", "x.js")
         self.assertIn("'mac-release' is an Apple-port build", err)
 
     def test_sysprof_against_the_browser_prefixes_minibrowser_and_refuses_process(self):
@@ -209,13 +182,13 @@ class TestTheBrowserAndItsProcesses(ProfileTest):
                         self.assertIn(w, err)
 
     def test_the_apple_port_profiles_minibrowser_itself_and_refuses_process(self):
-        with mock.patch.object(ProfileDriver, "os", lambda self: "macos"):
-            rc, err = self.run_("--preset", "mac-release", "--browser", "--profile")
-            self.assertEqual(rc, 0, err)
-            self.assertIn("MiniBrowser.app/Contents/MacOS/MiniBrowser", err)
-            self.assertNotIn("WEBKIT_MINI_BROWSER_PREFIX", err)
-            _, err = self.refused("--preset", "mac-release", "--browser", "--process", "web", "--profile")
-            self.assertIn("not wired up for the Apple ports", err)
+        self.w.place_os = "macos"
+        rc, err = self.run_("--preset", "mac-release", "--browser", "--profile")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("MiniBrowser.app/Contents/MacOS/MiniBrowser", err)
+        self.assertNotIn("WEBKIT_MINI_BROWSER_PREFIX", err)
+        _, err = self.refused("--preset", "mac-release", "--browser", "--process", "web", "--profile")
+        self.assertIn("not wired up for the Apple ports", err)
 
     def test_a_mode_that_covers_the_whole_tree_or_must_start_first_is_refused(self):
         _, err = self.refused("--preset", "gtk-release", "--browser", "--process", "ui", "--profile=sampling")

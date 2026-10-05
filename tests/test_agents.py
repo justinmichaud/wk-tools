@@ -13,11 +13,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes import WsDriver
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 import credcheck  # noqa: E402
-from wk import agents, places  # noqa: E402
+from wk import agents  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
@@ -210,24 +211,12 @@ class TestInstall(unittest.TestCase):
         self.assertEqual([], writes)
 
 
-class Recorded(places.Driver):
-    kind = "container"
-
-    def __init__(self):
-        super().__init__("container", str(REPO), {}, Fake())
-        self.asked = []
-
-    def exec(self, ws, argv, tty=False, timeout=None):
-        self.asked.append(argv)
-        return Result(0)
-
-
 class TestADryRun(unittest.TestCase):
     def test_it_prints_the_install_and_runs_nothing_in_the_workspace(self):
-        t, err = Recorded(), io.StringIO()
+        t, err = WsDriver("container", str(REPO), {}, Fake()), io.StringIO()
         with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), contextlib.redirect_stderr(err):
             t.install_agents("demo")
-        self.assertEqual([], t.asked)
+        self.assertEqual([], t.machine.effects)
         self.assertIn("would run in demo: bash -lc", err.getvalue())
         self.assertIn("would run in demo: bash -lc 'python3 /opt/wk-tools/claude/workspace-config.py /src/WebKit'", err.getvalue())
 

@@ -3,6 +3,7 @@ import os
 import sys
 import unittest
 
+from tests.fakes import WsDriver
 from tests.support import REPO, rand_suffix, requires_container_place, run
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -10,20 +11,15 @@ from wk import places  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
 
-class Up(places.Driver):
-    def info(self, ws):
-        return "running"
-
-
 class TestWorkspaceWithNoBaseIdIsStillCreating(unittest.TestCase):
     def _state(self, needs_base, has_base_id):
         fake = Fake()
-        t = Up("stub", str(REPO), {"WK_STORE": "/store", "HOME": "/home/u"}, fake)
+        t = WsDriver("stub", str(REPO), {"WK_STORE": "/store", "HOME": "/home/u"}, fake)
         t.needs_base = needs_base
         fake.mkdir(t.store.ws_dir("somews"))
         if has_base_id:
             fake.write(os.path.join(t.store.ws_dir("somews"), "base-id"), "some-snapshot-id\n")
-        return t.state("somews")
+        return places.Driver.state(t, "somews")
 
     def test_a_workspace_needing_a_base_with_none_recorded_is_creating(self):
         self.assertEqual(self._state(needs_base=True, has_base_id=False), "creating")

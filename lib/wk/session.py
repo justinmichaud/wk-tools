@@ -6,7 +6,7 @@ import sys
 
 from wk import act
 from wk.act import die, info, log, warn
-from wk.quiet import PRIV, require_helper, said
+from wk.quiet import NO_GRANT, PRIV, require_helper, said
 
 SYS_DRM = "/sys/class/drm"
 MODE_FILE = "/run/wk-session-mode"
@@ -21,16 +21,13 @@ class Session:
         self.root, self.m, self.clock, self.env = str(root), machine, clock, env
         run = env.get("XDG_RUNTIME_DIR") or "/run/user/%d" % (os.getuid() if uid is None else uid)
         self.socket = os.path.join(run, "wk", "display", "wayland-0")
-        self.sudo = None
 
     def priv(self, verb):
-        """Whether sudo needs a password is asked once, with a read-only verb, because session-on-bmc may fail."""
+        """The grant is asked with a read-only verb, because session-on-bmc may fail and its caller falls back."""
         require_helper(self.m)
-        if self.sudo is None:
-            self.sudo = ["sudo", "-n"] if self.m.run(["sudo", "-n", PRIV, "session-status"]).ok else ["sudo"]
-            if self.sudo == ["sudo"]:
-                warn("passwordless sudo unavailable for the helper; re-run ./setup --stage quiesce")
-        return said(self.m.act_run([*self.sudo, PRIV, verb])).ok
+        if not self.m.run(["sudo", "-n", PRIV, "session-status"]).ok:
+            die(NO_GRANT)
+        return said(self.m.act_run(["sudo", "-n", PRIV, verb])).ok
 
     def _text(self, path, default=""):
         try:

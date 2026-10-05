@@ -22,16 +22,7 @@ here = Local()
 
 
 def kb(path):
-    """KiB allocated, 0 for an absent path; `sudo -n` only, so this never prompts."""
-    if not os.path.exists(path):
-        return 0
-    r = here.run(["du", "-sk", path])
-    if r.err and here.run(["sudo", "-n", "true"]).ok:
-        r = here.run(["sudo", "-n", "du", "-sk", path])
-    try:
-        return int(r.out.split()[0])
-    except (IndexError, ValueError):
-        return 0
+    return rubble.du_kb(here, path) if os.path.exists(path) else 0
 
 
 class Report:
@@ -43,12 +34,12 @@ class Report:
         sys.stderr.write(("  %7s  %-28s %s\n" % (size, what, note)) if note else ("  %7s  %s\n" % (size, what)))
 
     def row(self, k, what, note=""):
-        self.total += k
-        self.line(human_bytes(k * 1024), what, note)
+        self.total += k or 0
+        self.line(rubble.size(k), what, note)
 
     def note(self, k, what, note):
         self.noted = True
-        self.line("(%s)" % human_bytes(k * 1024), what, note)
+        self.line("(%s)" % rubble.size(k), what, note)
 
     def section(self, title):
         sys.stderr.write("\n%s\n" % title)
@@ -66,7 +57,7 @@ class Report:
             k, what, note = parts[0], parts[1], parts[2] if len(parts) > 2 else ""
             if k == "0" and not note:
                 continue
-            (self.row if add else self.note)(int(k), what, note)
+            (self.row if add else self.note)(None if k == "??" else int(k), what, note)
 
 
 def probe_store(store):
@@ -83,7 +74,7 @@ def probe_store(store):
     containers = os.path.join(DATA, "containers", "storage")   # podman's own rootless tree: not under the store, still the store
     if os.path.isdir(containers):
         rows.append((kb(containers), "container images", "wk gc prunes the dangling ones"))
-    return "".join("%d\t%s\t%s\n" % r for r in rows)
+    return "".join("%s\t%s\t%s\n" % ("??" if k is None else k, what, note) for k, what, note in rows)
 
 
 def workspace_report(reg):
@@ -128,7 +119,7 @@ def machine_report(root, reg):
             rep.line("??", "disk image", "not found under %s" % mdir)
         for f in glob.glob(os.path.join(mdir, "*", "cache")):
             k = kb(f)
-            if k > 0:
+            if k:
                 rep.row(k, "downloaded machine image", "re-downloadable")
         rep.section("the container store, inside that image (already counted above)")
         if ctr.machine_state() == "running":
@@ -167,7 +158,7 @@ def machine_report(root, reg):
         cache = task.cache_dir(os.environ)
         if cache.startswith(store.state_dir() + "/") and os.path.isdir(cache):
             k = kb(cache)
-            if k > 0:
+            if k:
                 rep.note(k, "fetched base images", "inside the row above; a re-fetchable input, kept by wk gc")
     rep.row(kb(root), "wk-tools checkout", root)
     rep.section("total")

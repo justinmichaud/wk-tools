@@ -3,8 +3,8 @@ import os
 import sys
 
 from tests.support import REPO
-from tests.test_rm_final_state import RealContainerWorld, RmFinalStateTest, VmWorld
-from tests.test_wk_workspace import World
+from tests.test_rm_final_state import RmFinalStateTest
+from tests.test_wk_workspace import World, step
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import sshalias, status, workspace  # noqa: E402
@@ -23,9 +23,9 @@ class TestMachineWins(RmFinalStateTest):
     def runs_of(self, w, head):
         return [e[1][:2] for e in w.effects if e[0] == "run" and e[1][:len(head)] == head]
 
-    def gone_by_hand(self, cls, by_hand):
+    def gone_by_hand(self, kind, by_hand):
         """Status names the half the machine still holds; rm takes it without re-running what already happened."""
-        w = self.world(cls)
+        w = self.world(kind)
         by_hand(w)
         word, notes = self.status_of(w)
         self.assertEqual(word, "broken")
@@ -37,15 +37,15 @@ class TestMachineWins(RmFinalStateTest):
         return w
 
     def case_podman_rm(self):
-        w = self.gone_by_hand(RealContainerWorld, lambda w: w.containers.clear())
+        w = self.gone_by_hand("container", lambda w: w.containers.clear())
         self.assertEqual(self.runs_of(w, ("podman", "rm")), [])
 
     def case_tart_delete(self):
-        w = self.gone_by_hand(VmWorld, lambda w: w.vms.clear())
+        w = self.gone_by_hand("vm", lambda w: w.vms.clear())
         self.assertEqual(self.runs_of(w, (w.tart, "delete")) + self.runs_of(w, (w.tart, "stop")), [])
 
     def case_deleted_ws_dir(self):
-        w = self.gone_by_hand(RealContainerWorld, lambda w: w._rm_rf(["rm", w.ws_dir()], w))
+        w = self.gone_by_hand("container", lambda w: w._rm_rf(["rm", w.ws_dir()], w))
         self.assertEqual(self.runs_of(w, ("podman", "unshare")), [])
 
     def case_edited_alias(self):
@@ -73,7 +73,7 @@ class TestMachineWins(RmFinalStateTest):
         for given in ("", "main-1"):
             w.effects = []
             self.refused(lambda: workspace.new_detached_run(w.driver, w.records, w.lock, w.clock, "ws", given, "native"))
-            self.assertEqual([a for a in self.runs(w) if a[0] == "wkdev-create"], [])
+            self.assertEqual([a for a in self.runs(w) if step(a) == "wkdev-create"], [])
             self.assertEqual([e for e in w.effects if e[0] in ("write", "remove", "mkdir") and e[1].startswith(base)], [])
             (t,) = w.records.list()
             self.assertEqual((t.verdict(), t.stage()), ("failed", ["base"]))

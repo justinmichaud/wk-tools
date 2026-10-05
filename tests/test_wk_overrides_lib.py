@@ -5,6 +5,7 @@ import types
 import unittest
 from unittest import mock
 
+from tests.fakes import FakeRegistry
 from tests.support import REAL_MACHINES, REPO, WkTest, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -117,16 +118,12 @@ class TestStoreLib(unittest.TestCase):
         self.assertEqual(git.mirror_branches({"WK_MIRROR_BRANCHES": "main release/1.0"}), ["main", "release/1.0"])
 
 
-class _Walk(places.Registry):
-    def all(self):
-        return ["container", "vm", "buildbox1"]
-
-
 class TestPlaceLib(WkTest):
     def test_wk_no_delegate_stops_a_fleet_walk_asking_a_remote_place(self):
         env = {"HOME": str(self.tmp), "WK_MARKER": str(self.tmp / "no-such-marker")}
-        self.assertEqual(_Walk(REPO, env=env, machine=Fake()).walk(), ["container", "vm", "buildbox1"])
-        self.assertEqual(_Walk(REPO, env=dict(env, WK_NO_DELEGATE="1"), machine=Fake()).walk(), ["container", "vm"])
+        fleet = ["container", "vm", "buildbox1"]
+        self.assertEqual(FakeRegistry(env, Fake(), names=fleet).walk(), fleet)
+        self.assertEqual(FakeRegistry(dict(env, WK_NO_DELEGATE="1"), Fake(), names=fleet).walk(), ["container", "vm"])
 
     def test_wk_remote_marker_overrides_the_remote_host_marker(self):
         marker = self.tmp / "remote-marker"
@@ -249,7 +246,7 @@ class TestStatusOverrides(WkTest):
         self.assertEqual(status.bridge_record("testphone", {}, "x", kv.kv(out), lambda n: ("", ""))["state"], "unreachable")
 
     def test_wk_wait_timeout_is_the_waits_default_timeout(self):
-        from tests.test_layers import load_cmd
+        from tests.support import load_cmd
         cmd = load_cmd("status")
         seen = []
 

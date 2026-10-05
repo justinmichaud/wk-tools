@@ -12,7 +12,8 @@ def row(kind, what, kb, flag="", take=None, why=""):
 
 
 def du_kb(machine, path):
-    words = machine.run(["du", "-sk", path]).out.split()
+    r = machine.run(["du", "-sk", path])
+    words = r.out.split() if r.ok else []
     try:
         return int(words[0])
     except (IndexError, ValueError):

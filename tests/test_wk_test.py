@@ -1,7 +1,5 @@
 """`wk test` (cmd/test) against a Fake world: the JSC and layout suites, --kill, and the record a run writes."""
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import os
 import shutil
@@ -15,16 +13,14 @@ from unittest import mock
 
 from tests.fakes import FakeProc, JobWorld
 from tests.killpoints import converges
-from tests.support import REPO, as_dispatched
+from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import job, record  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Result  # noqa: E402
 
-CMD_LOADER = importlib.machinery.SourceFileLoader("cmd_test", str(REPO / "cmd" / "test"))
-CMD = importlib.util.module_from_spec(importlib.util.spec_from_loader("cmd_test", CMD_LOADER))
-CMD_LOADER.exec_module(CMD)
+CMD = load_cmd("test")
 
 class World(JobWorld):
     """`sh -c` finds every layout path present unless a test says otherwise."""

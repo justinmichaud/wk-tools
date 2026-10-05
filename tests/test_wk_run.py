@@ -1,8 +1,6 @@
 """`wk run` (cmd/run): the jsc a build produced, direct or under lldb, once or until it crashes, with
 `Driver.exec_argv` intercepted before it replaces the process."""
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import os
 import subprocess
@@ -10,7 +8,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO
+from tests.support import REPO, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import presets  # noqa: E402
@@ -18,18 +16,10 @@ from wk.act import Refused  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
 
-def _load_cmd_run():
-    path = str(REPO / "cmd" / "run")
-    loader = importlib.machinery.SourceFileLoader("cmd_run", path)
-    spec = importlib.util.spec_from_loader("cmd_run", loader, origin=path)
-    mod = importlib.util.module_from_spec(spec)
-    mod.__file__ = path
-    loader.exec_module(mod)
-    return mod
 
 
 os.environ.setdefault("WK_ROOT", str(REPO))
-RUN = _load_cmd_run()
+RUN = load_cmd("run")
 
 
 class TestFindsBinaryOnEveryPort(unittest.TestCase):

@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes import FakeProc
+from tests.fakes import FakeProc, WsDriver
 from tests.killpoints import converges
 from tests.support import REPO
 
@@ -446,28 +446,6 @@ class TestTheInstallResolvesItself(MacTest):
             mac.staged_python(Fake(), {})
 
 
-class Driver(places.Driver):
-    kind = "vm"
-
-    def wait_ready(self, ws, clock, timeout=None):
-        return None
-
-    def exec(self, ws, argv, tty=False, timeout=None):
-        return self.machine.run(["exec", ws] + list(argv))
-
-    def exec_argv(self, ws, argv, tty=False):
-        return ["exec", ws] + list(argv), None
-
-    def pull_dir(self, ws, src, dest, exclude=()):
-        self.machine.effect(("copy_tree_out", src, dest) + tuple(exclude))
-
-    def src(self, ws):
-        return "/Users/admin/WebKit"
-
-    def os(self):
-        return "macos"
-
-
 class Drv:
     def __init__(self, w, local):
         self.w, self.local, self.put_rc = w, local, 0
@@ -498,7 +476,7 @@ class StageWorld(World):
         super().__init__(tmp)
         self._drop(os.path.join(self.home, "staged"))
         self.drv = Drv(self, local)
-        self.reg.load = lambda name: Driver(name, str(REPO), dict(self.env), self)
+        self.reg.load = lambda name: WsDriver(name, str(REPO), dict(self.env), self, "vm", "/Users/admin/WebKit", os="macos")
         self.reg.ws_place = lambda ws: "vm"
         self.answer(["exec", "ws", "test"], out="")
         self.answer(["exec", "ws", "git"], out=SHA + "\n")
@@ -507,7 +485,7 @@ class StageWorld(World):
         self.answer(["hostname"], out="tolken\n")
         self.answer(["sh", "-c"], out="")
         self.answer(["rsync"], out="")
-        self.dirs.add("/seed/speedometer3-abc")
+        self.dirs.update({"/seed/speedometer3-abc", "/Users/admin/WebKit/WebKitBuild/Release", "/Users/admin/WebKit/Tools"})
 
     def stage_(self, *argv):
         err = io.StringIO()

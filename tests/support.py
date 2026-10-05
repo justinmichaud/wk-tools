@@ -415,6 +415,54 @@ def scratch_dir(prefix="wk-test-"):
         shutil.rmtree(d, ignore_errors=True)
 
 
+def git_run(*args, cwd, check=True):
+    return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, check=check)
+
+
+def git_commit(repo, name):
+    """A commit adding the file `name`; its sha."""
+    (Path(repo) / name).write_text(name + "\n")
+    git_run("add", name, cwd=repo)
+    git_run("-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "-m", name, cwd=repo)
+    return git_run("rev-parse", "HEAD", cwd=repo).stdout.strip()
+
+
+class GitMirror:
+    """A mirror under `tmp` made by the real mirror_refresh_script (lib/wk/git.py) of two local upstreams -- origin
+    (`up.git`, main at `sha1`) and a fork (`fk.git`, branch `side`) -- pushed to from the clone `seed`."""
+
+    def __init__(self, tmp):
+        from wk import git
+        tmp = Path(tmp)
+        self.upstream, self.fork, self.seed, self.mirror = tmp / "up.git", tmp / "fk.git", tmp / "seed", tmp / "m.git"
+        for bare in (self.upstream, self.fork):
+            git_run("init", "-q", "--bare", "-b", "main", str(bare), cwd=tmp)
+        git_run("clone", "-q", str(self.upstream), str(self.seed), cwd=tmp)
+        self.sha1 = git_commit(self.seed, "a")
+        git_run("push", "-q", "origin", "main", cwd=self.seed)
+        git_run("checkout", "-q", "-b", "side", cwd=self.seed)
+        git_commit(self.seed, "side")
+        git_run("push", "-q", str(self.fork), "side", cwd=self.seed)
+        git_run("checkout", "-q", "main", cwd=self.seed)
+        # A fork's default branch is not the mirror's (WPEWebKit's is wpe-2.46), which a bare fetch takes as its HEAD.
+        git_run("symbolic-ref", "HEAD", "refs/heads/side", cwd=self.fork)
+        self.remotes = (("origin", str(self.upstream)), ("fork", str(self.fork)))
+        cp = subprocess.run(["sh", "-c", git.mirror_refresh_script(str(self.mirror), ["main"], self.remotes)],
+                            capture_output=True, text=True)
+        assert cp.returncode == 0, cp.stdout + cp.stderr
+        self.refresh_out = cp.stdout
+
+    def fetch(self):
+        git_run("fetch", "--prune", "-q", "origin", cwd=self.mirror)
+
+    def advance(self, name="b"):
+        """One more commit on the upstream's main, and into the mirror."""
+        sha = git_commit(self.seed, name)
+        git_run("push", "-q", "origin", "main", cwd=self.seed)
+        self.fetch()
+        return sha
+
+
 @contextlib.contextmanager
 def glob_bait(patterns):
     """A directory holding one file per pattern word, named so the word
@@ -631,7 +679,13 @@ class WkTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.mkdtemp(prefix="wk-test-")
         self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
+        self.addCleanup(self.assert_no_process_left)
         self.tmp = Path(self._tmp)
+
+    def assert_no_process_left(self):
+        """A daemon a test started under its scratch dir is stopped by that test, so none outlives the run."""
+        left = subprocess.run(["pgrep", "-fl", re.escape(self._tmp)], stdout=subprocess.PIPE, text=True).stdout
+        self.assertEqual("", left, "processes this test started are still running")
 
     def run_wk(self, *args, env=None, **kwargs):
         return run(*args, env=env, **kwargs)

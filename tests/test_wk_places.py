@@ -4,7 +4,6 @@ import inspect
 import io
 import json
 import os
-import re
 import shlex
 import subprocess
 import sys
@@ -13,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes import WsDriver
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -1251,24 +1251,14 @@ class TestBuildSize(DriversTest):
             self.assertEqual(vm.build_size("g"), (3, 4096, None))
 
 
-class _KillExecTarget(places.Driver):
-    def __init__(self, result):
-        super().__init__("t", str(REPO), {}, Fake("here"))
-        self.result = result
-        self.asked = None
-
-    def exec(self, ws, argv, tty=False, timeout=None):
-        self.asked = (ws, argv, timeout)
-        return self.result
-
-
 class TestPidAliveIsTheOneAnswer(DriversTest):
     def test_pid_alive_reads_kill_dash_0_true_false_or_no_answer(self):
-        alive = _KillExecTarget(Result(0))
-        self.assertTrue(alive.pid_alive("a", 123, 5))
-        self.assertEqual(alive.asked, ("a", ["kill", "-0", "123"], 5))
-        self.assertFalse(_KillExecTarget(Result(1)).pid_alive("a", 123, 5))
-        self.assertIsNone(_KillExecTarget(Result(TIMED_OUT)).pid_alive("a", 123, 5))
+        for rc, want in ((0, True), (1, False), (TIMED_OUT, None)):
+            t = WsDriver("t", str(REPO), {}, Fake("here"))
+            t.machine.answer(["exec", "a", "kill", "-0", "123"], rc=rc)
+            with mock.patch.object(t.machine, "run", wraps=t.machine.run) as run:
+                self.assertEqual(want, t.pid_alive("a", 123, 5))
+            run.assert_called_once_with(["exec", "a", "kill", "-0", "123"], timeout=5)
 
 
 class TestAMacHostReadsTheContainerStoreInThePodmanMachine(unittest.TestCase):

@@ -6,8 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO
-from tests.test_layers import load_cmd
+from tests.support import REPO, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import decl as D  # noqa: E402

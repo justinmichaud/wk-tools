@@ -113,12 +113,13 @@ class BenchHere(Fake):
         self.react(["bash", "-c"], lambda a, f: bench_lib(tuple(a)))
 
 
-class JobDriver(places.Driver):
-    """A present workspace `ws` whose commands run as `exec ws ...` on the JobWorld behind it."""
+class WsDriver(places.Driver):
+    """A present, running workspace on a fake machine: a command in it runs there as `exec <ws> <argv>` (`exec-tty` on
+    a terminal), and `kind`, `src`, `home`, `os` and `mirror` are what it answers."""
 
-    def __init__(self, name, root, env, machine, kind="container"):
+    def __init__(self, name, root, env, machine, kind="container", src="/src/WebKit", home="/home/u", os="linux", mirror=""):
         super().__init__(name, root, env, machine)
-        self.kind = kind
+        self.kind, self._src, self._home, self._os, self._mirror = kind, src, home, os, mirror
         self.host = "box.example" if kind == "remote" else ""
 
     def info(self, ws):
@@ -127,8 +128,17 @@ class JobDriver(places.Driver):
     def state(self, ws, info=None):
         return "present"
 
-    def exec(self, ws, argv, tty=False, timeout=None):
-        return self.machine.run(["exec", ws] + list(argv))
+    def src(self, ws):
+        return self._src
+
+    def home(self):
+        return self._home
+
+    def os(self):
+        return self._os
+
+    def mirror_dir(self):
+        return self._mirror
 
     def exec_argv(self, ws, argv, tty=False):
         return ["exec", ws] + list(argv), None
@@ -136,14 +146,15 @@ class JobDriver(places.Driver):
     def exec_tty(self, ws, argv, timeout=None):
         return self.machine.run_tty(["exec-tty", ws] + list(argv))
 
-    def build_size(self, ws):
-        return self.machine.size
-
     def sync_tools(self, ws):
         return self.machine.act_run(["sync-tools", ws]).ok
 
-    def mirror_dir(self):
-        return "/mirror"
+
+class JobDriver(WsDriver):
+    """A WsDriver on the JobWorld behind it, which answers its size and its OS."""
+
+    def build_size(self, ws):
+        return self.machine.size
 
     def os(self):
         return self.machine.place_os
@@ -175,7 +186,7 @@ class JobWorld(Fake):
         self.answer(["df", "-Pk"], out="Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 209715200 1% /\n")
         self.react(["exec", "ws", "kill", "-0"], lambda a, f: Result(0 if int(a[-1]) in f.pids else 1))
         self.answer(["sync-tools"])
-        self.reg = FakeRegistry(self.env, self, lambda n, e: JobDriver("box", str(REPO), dict(e, **self.conf), self, self.kind),
+        self.reg = FakeRegistry(self.env, self, lambda n, e: JobDriver("box", str(REPO), dict(e, **self.conf), self, self.kind, mirror="/mirror"),
                                 ws_place=lambda ws: "box", in_workspace=lambda: self.in_ws)
         self.ws_dir = os.path.join(self.env["WK_STORE"], "ws", "ws")
         os.makedirs(self.ws_dir)

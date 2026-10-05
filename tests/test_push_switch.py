@@ -3,8 +3,6 @@
 Run: python3 tests/run.py --unit -k test_push_switch
 """
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import os
 import shlex
@@ -14,7 +12,7 @@ from unittest import mock
 
 from tests.fakes import FakeRegistry
 from tests.killpoints import converges
-from tests.support import REPO, WkTest, bash
+from tests.support import REPO, WkTest, bash, load_cmd
 from tests.test_wk_secrets import SOCK, SecretsTest, World
 from wk import act, guest, places, pushswitch
 from wk.act import Refused
@@ -22,16 +20,9 @@ from wk.clock import FakeClock
 from wk.machine import Result
 
 
-def load_key():
-    path = str(REPO / "cmd" / "key")
-    loader = importlib.machinery.SourceFileLoader("wk_cmd_key", path)
-    spec = importlib.util.spec_from_file_location("wk_cmd_key", path, loader=loader)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
 
 
-KEY = load_key()
+KEY = load_cmd("key")
 
 
 class Box(places.Driver):
