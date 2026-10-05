@@ -123,6 +123,8 @@ Answered 2026-10-05 (second batch): rotation allows one holder of the claude.ai 
 
 Answered 2026-10-05 (third batch): Bugzilla editbugs is probed through the comment-tag API, after one live check that bugs.webkit.org gates it on editbugs; boards reach the benchmark server through a `tag:wk -> tag:wk` grant; smart plugs wait for the hardware to be chosen; the images `wk sysimage` builds are *image presets*, separating the base image from WebKit's build presets.
 
+Answered 2026-10-05 (fourth batch): wk-tools work happens in a workspace made by `wk new <ws> --repo wk-tools`, whose checkout is wk-tools instead of WebKit and where `./wk selftest` runs, while live lanes stay driven from the host; the host `claude` goes once that works.
+
 ## Cutting it down
 
 40k lines of bash is the problem, not the raw material. It is that big
