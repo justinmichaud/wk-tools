@@ -48,6 +48,7 @@ class SimTarget(targets.Target):
         self.asked = []
         self.filtered = True
         self.present, self.remedy = True, "the target's own remedy"
+        self.is_local = False
 
     def home(self):
         return "/home/u"
@@ -390,6 +391,12 @@ class TestABuildBox(_Flow):
         self.assertIn("Claude on box runs in auto mode", err)
         self.assertIn("exec /home/u/.local/bin/claude --permission-mode auto", self.line())
         self.assertNotIn("bwrap", self.line())
+
+    def test_handed_over_the_box_asks_its_own_switch(self):
+        self.target.is_local = True
+        status, err = self.ai("claude", force=True)
+        self.assertEqual(0, status, err)
+        self.assertEqual(["push status"], self.pushes())
 
     def test_the_setup_token_it_is_given_starts_the_session_without_remote_control_and_says_why(self):
         with mock.patch.object(AI, "on_a_terminal", return_value=True):

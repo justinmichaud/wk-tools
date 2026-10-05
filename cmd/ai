@@ -236,7 +236,7 @@ class Ai:
             if self.agent == "claude":
                 mode = ["--permission-mode", "auto"]
                 info("Claude on %s runs in auto mode (this machine is not a sandbox)" % t.name)
-            self.push_target = t.name
+            self.push_target = None if t.is_local else t.name
         agent_bin = self.agent_bin()
         self.push_hold_back()
         if t.kind == "remote" and self.exec(["sh", "-c", GH_LOGIN]).ok:
