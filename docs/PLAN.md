@@ -1221,6 +1221,8 @@ decides is a row; one still open is listed under "Decisions for the user".
 | On a macOS host a board A/B's run-benchmark and page server run in the podman VM and reach the boards | 5 | `live bench.vm_reaches_boards` |
 | `wk doctor <board>` against a live board prints its tailnet names, its system and arm, and its governor and temperature, with the rows the unit half asserts on a fake | 5 | `unit doctor.TestDeviceRows`, `live doctor.device[<board>]` |
 | `./setup --stage tools` on a bare macOS host downloads git-lfs at its pinned version, checks it against the release's sha256sums, and `wk doctor` then reports it present | 5 | `unit doctor.TestHostToolsGitLfs`, `live setup.git_lfs[macos]` |
+| bugs.webkit.org gates comment tagging on editbugs, so `wk doctor`'s Bugzilla row can say editbugs: the comment-tag probe answers a key of an account with editbugs and refuses (304) one without | 4 | `live credcheck.editbugs_probe` |
+| A board reaches the page server at its tailnet name and port through the `tag:wk -> tag:wk` grant, with no `ssh -R` held for the run | 5 | `live bench.direct_page_server[<board>]` |
 | Speedometer 3 under MiniBrowser runs without its `wakeLock` error: an upstream WebKit patch, landed last, after every other owed row | end | `live bench.speedometer3_wakelock[mbp]` |
 
 ### Decisions for the user

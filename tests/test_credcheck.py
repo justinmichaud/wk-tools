@@ -16,6 +16,7 @@ CREDCHECK = REPO / "lib" / "credcheck.py"
 
 sys.path.insert(0, str(REPO / "lib"))
 import credcheck   # noqa: E402
+from tests.support import live_selected, owed, requires   # noqa: E402
 
 FORKS = "wkuser/WebKit wkuser/WPEWebKit"
 PROJECTS = {"wkuser/WebKit": "WebKit/WebKit",
@@ -153,14 +154,20 @@ BZ_KEY = "notarealbugzillakey0123456789abcdefghijk"
 
 class FakeBugzilla(JsonHandler):
     """bugs.webkit.org's valid_login, measured 2026-09-14: true for the key's own login, false for another, 400/306
-    for a key it does not know."""
+    for a key it does not know; Bugzilla 5.0's comment-tag search answers `tags` (a status and a body; None hangs up)."""
 
     seen = []
+    tags = (200, [])
 
     def do_GET(self):
         FakeBugzilla.seen.append(self.path)
         path, _, query = self.path.partition("?")
         q = urllib.parse.parse_qs(query)
+        if path.startswith("/rest/bug/comment/tags/"):
+            if FakeBugzilla.tags is None:
+                self.close_connection = True
+                return None
+            return self._send(*FakeBugzilla.tags)
         if path != "/rest/valid_login":
             return self._send(404, {"error": True, "code": 32614})
         if q.get("api_key", [""])[0] != BZ_KEY:
@@ -178,6 +185,7 @@ class _Bugzilla(_Rules):
     def setUp(self):
         super().setUp()
         FakeBugzilla.seen = []
+        FakeBugzilla.tags = (200, [])
 
     def bz_check(self, value, login=BZ_LOGIN, api=None):
         return self.check("bugzilla-api-key", value,
@@ -192,12 +200,39 @@ class TestTheBugzillaKey(_Bugzilla):
         self.assertIn(BZ_LOGIN, detail)
         self.assertIn("while push is on", detail)
 
-    def test_it_is_judged_as_a_pair_by_one_request(self):
+    def test_it_is_judged_as_a_pair_then_probed_read_only_for_comment_tagging(self):
         self.bz_check(BZ_KEY)
-        self.assertEqual(1, len(FakeBugzilla.seen), FakeBugzilla.seen)
+        self.assertEqual(2, len(FakeBugzilla.seen), FakeBugzilla.seen)
         self.assertTrue(FakeBugzilla.seen[0].startswith("/rest/valid_login?"))
         self.assertIn("api_key=" + BZ_KEY, FakeBugzilla.seen[0])
         self.assertIn("login=me%40example.test", FakeBugzilla.seen[0])
+        self.assertTrue(FakeBugzilla.seen[1].startswith("/rest/bug/comment/tags/"), FakeBugzilla.seen)
+        self.assertIn("api_key=" + BZ_KEY, FakeBugzilla.seen[1])
+
+    def test_an_account_that_can_tag_comments_is_named_so(self):
+        verdict, detail = self.bz_check(BZ_KEY)
+        self.assertEqual("ok", verdict, detail)
+        self.assertIn("can tag comments", detail)
+        self.assertNotIn("cannot", detail)
+
+    def test_a_refused_tag_search_names_the_account_as_unable(self):
+        for answer in ((401, {"error": True, "code": 304, "message": "not authorized"}),
+                       (400, {"error": True, "code": 304}), (403, {"error": True})):
+            with self.subTest(answer=answer):
+                FakeBugzilla.tags = answer
+                verdict, detail = self.bz_check(BZ_KEY)
+                self.assertEqual("ok", verdict, detail)
+                self.assertIn("cannot tag comments", detail)
+
+    def test_tagging_off_or_an_odd_answer_leaves_editbugs_unknown(self):
+        for answer, word in (((400, {"error": True, "code": 125}), "tagging is off"),
+                             ((500, {"error": True, "code": 32000}), "HTTP 500"), (None, "not known")):
+            with self.subTest(answer=answer):
+                FakeBugzilla.tags = answer
+                verdict, detail = self.bz_check(BZ_KEY)
+                self.assertEqual("ok", verdict, detail)
+                self.assertIn(word, detail)
+                self.assertNotIn("can tag comments", detail)
 
     def test_another_accounts_key_is_refused_by_name(self):
         verdict, detail = self.bz_check(BZ_KEY, login="other@example.test")
@@ -227,6 +262,14 @@ class TestTheBugzillaKey(_Bugzilla):
         verdict, detail = self.bz_check(BZ_KEY, api="http://127.0.0.1:1")
         self.assertEqual("unverified", verdict, detail)
         self.assertIn("could not reach", detail)
+
+class TestBugsWebkitOrgGatesTaggingOnEditbugs(unittest.TestCase):
+    @requires(lambda: None if live_selected() else "live tier not selected: needs bugs.webkit.org and two accounts")
+    @owed("whether bugs.webkit.org's comment_taggers_group is editbugs: the comment-tag probe answers a key of an account "
+          "with editbugs and refuses (304) one of an account without it")
+    def test_editbugs_probe(self):
+        self.fail("not measured: run the probe with both accounts' keys, then make the doctor row say editbugs")
+
 
 class TestTheTokenCanDoTheJob(_Rules):
     def test_a_fine_grained_token_that_can_open_a_pull_request_on_both_forks(self):

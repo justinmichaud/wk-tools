@@ -41,6 +41,7 @@ def api_base(var, default):
 
 GITHUB_API = api_base("WK_GITHUB_API", "https://api.github.com")
 BUGZILLA_API = api_base("WK_BUGZILLA_API", project.get("BUGZILLA"))
+TAG_PROBE = "wk-credcheck"
 
 
 def bugzilla_host():
@@ -258,10 +259,26 @@ def _bugzilla_api_key(value, repos, path, evidence):
         return BAD, ("%s accepts this key, but not as %s: it belongs to another "
                      "account, and `%s pr` would file and assign as that "
                      "one." % (BUGZILLA_API, login, project.get("PR_TOOL")))
-    # Bugzilla discloses no group membership to a caller without editusers, so editbugs is not knowable here.
-    return OK, ("%s accepts it as %s; whether that account has editbugs is not "
-                "knowable from here.\n    spent on every %s request "
-                "a workspace makes while push is on" % (BUGZILLA_API, login, bugzilla_host()))
+    return OK, ("%s accepts it as %s; %s.\n    spent on every %s request a workspace makes while push is on"
+                % (BUGZILLA_API, login, _bugzilla_tagger(key), bugzilla_host()))
+
+
+# Bugzilla 5.0's comment-tag search is gated on `comment_taggers_group` (editbugs by default): error 304 is a refusal,
+# 125 a site with tagging off. The query reads tag names and writes nothing.
+def _bugzilla_tagger(key):
+    url = BUGZILLA_API + "/rest/bug/comment/tags/" + TAG_PROBE + "?" + urllib.parse.urlencode({"api_key": key})
+    try:
+        status, _headers, raw = _http("GET", url, None)
+    except Unreachable as e:
+        return "its comment-tagging right is not known (%s)" % e
+    if status == 200 and raw.lstrip().startswith(b"["):
+        return "it can tag comments (editbugs on a default install)"
+    doc = _json(raw)
+    if doc.get("code") == 304 or status in (401, 403):
+        return "it cannot tag comments (no editbugs on a default install)"
+    if doc.get("code") == 125:
+        return "comment tagging is off there, so editbugs is not knowable from it"
+    return "GET /rest/bug/comment/tags answered HTTP %d, so its comment-tagging right is not known" % status
 
 
 def _some(names, n=3):
