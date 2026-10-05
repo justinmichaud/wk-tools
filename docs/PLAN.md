@@ -121,6 +121,8 @@ Answered 2026-10-05: the flag that names where a workspace lives is `--on <place
 
 Answered 2026-10-05 (second batch): rotation allows one holder of the claude.ai credential, so the host-side injector holds and refreshes it and adds the bearer token to Anthropic and claude.ai requests, Remote Control's included, and no workspace holds it; `wk machine setup` installs a pinned node into a build box user's `~/.local` so pi installs there; the size budgets are targets, met by cutting under the four rules; Claude pushed `python-core` once (fast-forward) so moose could sync.
 
+Answered 2026-10-05 (third batch): Bugzilla editbugs is probed through the comment-tag API, after one live check that bugs.webkit.org gates it on editbugs; boards reach the benchmark server through a `tag:wk -> tag:wk` grant; smart plugs wait for the hardware to be chosen; the images `wk sysimage` builds are *image presets*, separating the base image from WebKit's build presets.
+
 ## Cutting it down
 
 40k lines of bash is the problem, not the raw material. It is that big
