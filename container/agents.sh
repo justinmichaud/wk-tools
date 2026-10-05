@@ -1,15 +1,20 @@
-# lib/wk/agents.py's: `find <agent>` prints the one that runs; otherwise it installs what is missing, exiting 1 on a failure.
+# lib/wk/agents.py's: `find <agent>` prints the one that runs, `node` asks whether pi's node runs; otherwise it installs what is missing, exiting 1 on a failure.
 [ ! -r "$HOME/.wk-egress" ] || . "$HOME/.wk-egress"
+PATH="$HOME/.local/bin:$PATH"
+node_ok() {
+    command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 \
+        && node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && b >= 19) ? 0 : 1)' 2>/dev/null
+}
 found() {
     for c in "$HOME/.local/bin/$1" "$(command -v "$1" 2>/dev/null)"; do
         [ -n "$c" ] && [ -x "$c" ] && "$c" --version >/dev/null 2>&1 && { echo "$c"; return 0; }
     done
     return 1
 }
-if [ "${1:-}" = find ]; then
-    found "$2"
-    exit
-fi
+case "${1:-}" in
+    find) found "$2"; exit ;;
+    node) node_ok; exit ;;
+esac
 if found claude >/dev/null; then
     echo claude=present
 elif curl -fsSL https://claude.ai/install.sh | bash >/dev/null && found claude >/dev/null; then
@@ -20,8 +25,7 @@ else
 fi
 if found pi >/dev/null; then
     echo pi=present
-elif ! command -v npm >/dev/null 2>&1 \
-    || ! node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && b >= 19) ? 0 : 1)' 2>/dev/null; then
+elif ! node_ok; then
     echo "pi=no-node $(node -v 2>/dev/null || echo absent)"
 elif npm install -g --ignore-scripts --prefix "$HOME/.local" @earendil-works/pi-coding-agent >/dev/null && found pi >/dev/null; then
     echo pi=installed

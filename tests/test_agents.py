@@ -92,6 +92,18 @@ class TestTheScript(unittest.TestCase):
         (self.bin / "node").unlink()
         self.assertEqual("no-node absent", self.run_script()[1]["pi"])
 
+    def test_the_node_verb_answers_whether_pi_can_be_installed(self):
+        self.assertEqual(0, self.script("node").returncode)
+        self.assertEqual(1, self.script("node", NODE_V="v20.11.1", NODE_OK="0").returncode)
+        (self.bin / "node").unlink()
+        self.assertEqual(1, self.script("node").returncode)
+
+    def test_a_node_in_the_users_own_prefix_is_found(self):
+        (self.bin / "node").rename(self.home / "node")
+        (self.home / ".local" / "bin").mkdir(parents=True)
+        (self.home / "node").rename(self.home / ".local" / "bin" / "node")
+        self.assertEqual("installed", self.run_script()[1]["pi"])
+
     def test_an_npm_install_that_fails_fails(self):
         rc, said = self.run_script(NPM_OK="0")
         self.assertEqual((1, "failed"), (rc, said["pi"]))

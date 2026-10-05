@@ -405,6 +405,14 @@ class TestABuildBox(_Box):
         self.assertEqual([], self.handed)
         self.assertFalse([a for a in self.driver.asked if "install.sh" in a and "find" not in a])
 
+    def test_pi_on_a_box_without_node_names_the_setup(self):
+        self.driver.answers["find pi"] = Result(1)
+        self.driver.answers["agents.sh node"] = Result(1)
+        status, err = self.ai("pi", force=True)
+        self.assertEqual(1, status, err)
+        self.assertIn("wk machine setup", err)
+        self.assertNotIn("Make it again", err)
+
 
 class TestTheSessionIsAnEffect(_Box):
     """The session starts through the Machine, so --dry-run prints it with the switch it would make."""

@@ -21,6 +21,10 @@ def find_argv(root, agent):
     return ["bash", "-lc", script(root), SCRIPT, "find", agent]
 
 
+def node_argv(root):
+    return ["bash", "-lc", script(root), SCRIPT, "node"]
+
+
 # pi has no LiteLLM provider (https://github.com/earendil-works/pi#4561); LiteLLM speaks OpenAI's wire format.
 def pi_models(endpoint, ids):
     return json.dumps({"providers": {"litellm": {

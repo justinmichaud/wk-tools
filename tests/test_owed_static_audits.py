@@ -10,6 +10,7 @@ FUNC_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{\s*(#.*)?$')
 DELIBERATE_PREDICATES = {
     ("admin/wk-card-priv", "_slot_present"),
     ("build/mem-watchdog.sh", "_alive"),
+    ("container/agents.sh", "node_ok"),
     ("container/proxy/ensure-bridge.sh", "bridge_alive"),
 }
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.killpoints import converges
-from tests.support import REAL_MACHINES, REPO, live_selected, machine_reachable
+from tests.support import REAL_MACHINES, REPO, live_selected, machine_reachable, owed
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, machine_cmd, places, reach, tools  # noqa: E402
@@ -175,6 +175,72 @@ class TestSharedHomeProvisioning(unittest.TestCase):
         self.assertEqual((Path(home) / "wk-a" / "secrets" / "token").read_text(), "a's")
         for root in ("wk-a", "wk-b"):
             self.assertTrue((Path(home) / root / "secrets").is_dir(), root)
+
+
+class TestNodeForPi(unittest.TestCase):
+    """remote/provision.sh against stand-in uname, curl and sha256sum: the pinned node goes into ~/.local once."""
+
+    VERSION = "v22.23.3"
+    DIR = "node-v22.23.3-linux-x64"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-node-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.home, self.stubs, self.log = self.tmp / "home", self.tmp / "stubs", self.tmp / "log"
+        self.home.mkdir()
+        self.stubs.mkdir()
+        tree = self.tmp / "tree" / self.DIR / "bin"
+        tree.mkdir(parents=True)
+        (tree / "node").write_text("#!/bin/sh\necho %s\n" % self.VERSION)
+        (tree / "node").chmod(0o755)
+        subprocess.run(["tar", "-cJf", str(self.tmp / "node.tar.xz"), "-C", str(self.tmp / "tree"), self.DIR], check=True)
+        self.stub("uname", 'case "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) echo Linux x86_64 ;; esac')
+        self.stub("curl", 'echo "curl $*" >> "%s"\ncp "%s" "$3"' % (self.log, self.tmp / "node.tar.xz"))
+        self.sha = "df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de"
+        self.stub("sha256sum", 'echo "$SHA  $1"')
+
+    def stub(self, name, body):
+        (self.stubs / name).write_text("#!/bin/sh\n" + body + "\n")
+        (self.stubs / name).chmod(0o755)
+
+    def provision(self, **env):
+        e = dict(os.environ, HOME=str(self.home), GIT_CONFIG_GLOBAL=str(self.home / ".gitconfig"), WK_REMOTE_MACHINE="boxa",
+                 WK_REMOTE_ROOT=str(self.home / "wk"), WK_REMOTE_INPUTS="abc", SHA=self.sha,
+                 PATH="%s:%s" % (self.stubs, os.environ["PATH"]))
+        e.update(env)
+        cp = subprocess.run(["bash", str(REPO / "remote" / "provision.sh")], env=e, capture_output=True, text=True)
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        return cp.stderr + cp.stdout
+
+    def downloads(self):
+        return self.log.read_text().count("curl") if self.log.exists() else 0
+
+    def test_the_pinned_node_is_installed_and_a_rerun_does_nothing(self):
+        self.provision()
+        node = self.home / ".local" / "bin" / "node"
+        self.assertEqual(self.VERSION, subprocess.run([str(node)], capture_output=True, text=True).stdout.strip())
+        self.assertTrue((self.home / ".local" / "bin" / "npm").is_symlink())
+        self.provision()
+        self.assertEqual(1, self.downloads())
+
+    def test_a_tarball_that_fails_its_checksum_installs_nothing(self):
+        out = self.provision(SHA="0" * 64)
+        self.assertFalse((self.home / ".local" / "bin" / "node").exists())
+        self.assertIn("did not download, verify or install", out)
+
+    def test_another_version_is_replaced(self):
+        self.provision()
+        (self.home / ".local" / "bin" / "node").unlink()
+        old = self.home / ".local" / "lib" / "node-v20.0.0-linux-x64"
+        old.mkdir()
+        (self.home / ".local" / "bin" / "node").symlink_to(old / "node")
+        self.provision()
+        self.assertFalse(old.exists())
+        self.assertEqual(2, self.downloads())
+
+    @owed("needs a real build box and nodejs.org: `live machine_cmd.node[buildbox4]` runs setup, then `wk new --on` installs pi")
+    def test_a_build_box_runs_pi_after_setup(self):
+        self.fail("live")
 
 
 class TestSetup(MachineTest):

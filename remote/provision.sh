@@ -24,6 +24,36 @@ done
 
 have ccache || warn "no ccache on this machine -- every build starts cold"
 
+# pi needs node >= 22.19 (container/agents.sh); an official tarball, checked against nodejs.org's SHASUMS256.txt, goes into ~/.local.
+NODE_VERSION=v22.23.3
+case "$(uname -m)" in
+    x86_64) _node=linux-x64;   _node_sha=df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de ;;
+    aarch64|arm64) _node=linux-arm64; _node_sha=a44aeb94849a299b22df10b9e622ec2f605c2183501bc40590705131de7c740f ;;
+    *) _node= ;;
+esac
+if [ -z "$_node" ] || [ "$(uname -s)" != Linux ]; then
+    warn "no node is installed here: no pinned build for $(uname -sm), so pi cannot be installed on this machine"
+elif [ "$("$HOME/.local/bin/node" -v 2>/dev/null)" = "$NODE_VERSION" ]; then
+    unchanged "node $NODE_VERSION"
+else
+    _dir="node-$NODE_VERSION-$_node"
+    _tmp=$(mktemp -d)
+    if curl -fsSL -o "$_tmp/$_dir.tar.xz" "https://nodejs.org/dist/$NODE_VERSION/$_dir.tar.xz" \
+        && [ "$(sha256sum "$_tmp/$_dir.tar.xz" | cut -d' ' -f1)" = "$_node_sha" ] \
+        && ensure_dir "$HOME/.local/lib" && ensure_dir "$HOME/.local/bin" \
+        && rm -rf "$HOME/.local/lib"/node-v*-linux-* && tar -xJf "$_tmp/$_dir.tar.xz" -C "$HOME/.local/lib" \
+        && ln -sf "../lib/$_dir/bin/node" "$HOME/.local/bin/node" \
+        && ln -sf "../lib/$_dir/lib/node_modules/npm/bin/npm-cli.js" "$HOME/.local/bin/npm" \
+        && ln -sf "../lib/$_dir/lib/node_modules/npm/bin/npx-cli.js" "$HOME/.local/bin/npx"; then
+        changed "node $NODE_VERSION installed in ~/.local"
+    else
+        warn "node $NODE_VERSION did not download, verify or install -- pi cannot be installed on this machine"
+    fi
+    rm -rf "$_tmp"
+    unset _dir _tmp
+fi
+unset _node _node_sha
+
 ensure_dir "$ROOT"
 ensure_dir "$ROOT/ws"
 ensure_dir "$ROOT/cache/ccache"
