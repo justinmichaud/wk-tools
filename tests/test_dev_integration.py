@@ -568,6 +568,9 @@ class PlaceSteps:
 
 
 def under_zed():
+    """Zed's terminal exports TERM_PROGRAM=zed, which survives the re-parenting a backgrounded run goes through."""
+    if os.environ.get("TERM_PROGRAM") == "zed" or os.environ.get("ZED_TERM"):
+        return True
     pid = os.getppid()
     while pid > 1:
         r = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True, text=True)
