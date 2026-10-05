@@ -1,5 +1,5 @@
 """`unit push.remote_forwarding`: a build box holds no deploy key at rest and nothing forwards one to it, so a push is made
-from the workstation (`wk pr open`, which fetches the box's branch into this machine's mirror) and `wk push status` on the
+from the workstation (`wk pr open`, which fetches the box's branch into this machine's mirror) and `wk key push status` on the
 box says off.
 
 Run: python3 tests/run.py -k tests.test_push_remote
@@ -16,7 +16,7 @@ from tests import test_pr_workflow, test_push_switch, test_wk_targets
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import secrets  # noqa: E402
+from wk import pushswitch, secrets  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 CMD_PR = test_pr_workflow.CMD_PR_MODULE
@@ -54,7 +54,7 @@ class TestAPushFromABoxIsMadeHere(test_wk_targets.RemoteTest):
                 mock.patch.object(CMD_PR.secrets, "Secrets", lambda *a: test_pr_workflow.AgentKeys()), \
                 contextlib.redirect_stderr(io.StringIO()):
             CMD_PR.pr_open(self.t, "a", False, False, push_status=lambda: 0)
-        mirror = Store(self.env).mirror()
+        mirror = Store(self.env).mirror_dir()
         here = [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] == "git"]
         self.assertIn(("git", "-C", mirror, "fetch", "--quiet", "box.example:/home/u/wk/ws/a/WebKit",
                        "+refs/heads/eng/b:refs/wk/push/box/eng/b"), here)
@@ -85,5 +85,5 @@ class TestStatusOnTheBox(test_push_switch.PushTest):
         self.boxes = {"container": self.box}
 
     def test_each_fork_is_neither_held_nor_absent(self):
-        p = test_push_switch.PUSH.Push(test_push_switch.registry(self.w, self.boxes), self.w.sec(), self.clock)
+        p = pushswitch.Push(test_push_switch.registry(self.w, self.boxes), self.w.sec(), self.clock)
         self.assertEqual({"forwarded"}, {p.where(f, set()) for f, _, _ in secrets.FORKS})

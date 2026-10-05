@@ -37,13 +37,13 @@ _disk="${WK_DISK_GB:-500}"   # sparse, so it costs what is written; three yocto 
 # TODO: upstream -- podman 5.4 does not canonicalise a --volume target against
 # the machine OS (ostree, hence /var), and a non-canonical one yields a .mount
 # unit that fails at boot: the machine then runs without the mount, silently.
-ensure_dir "$secrets_dir" 0700
-ensure_dir "$agent_rw_dir" 0700
-ensure_dir "$mirror_dir"
-_secrets_mount="$secrets_dir:$WK_STORE/secrets:ro"
+ensure_dir "$keyring_dir" 0700
+ensure_dir "$keyring_agent_rw_dir" 0700
+ensure_dir "$mirror_parent"
+_secrets_mount="$keyring_dir:$WK_STORE/secrets:ro"
 _tools_mount="$WK_ROOT:/var/opt/wk-tools:ro"
-_agent_rw_mount="$agent_rw_dir:$WK_STORE/agent-rw:rw"
-_mirror_mount="$mirror_dir:$WK_STORE/git:ro"
+_agent_rw_mount="$keyring_agent_rw_dir:$WK_STORE/agent-rw:rw"
+_mirror_mount="$mirror_parent:$WK_STORE/git:ro"
 
 # `podman machine inspect` does not expose Mounts (podman 5.4); read the config.
 _cfg="$HOME/.config/containers/podman/machine/applehv/$WK_MACHINE.json"
@@ -156,7 +156,7 @@ $(_mount_rows | sed 's/^/    has  /')
     Fix the comparison in _mount_state (host/macos/machine.sh)."
     fi
     case "$_verdict" in
-        ok) unchanged "machine mounts exactly this checkout, the secrets directory and the mirror read-only, and the agent credential directory read-write (verified)" ;;
+        ok) unchanged "machine mounts exactly this checkout, the keyring and the mirror read-only, and the agent credential directory read-write (verified)" ;;
         notro)
             die "podman machine '$WK_MACHINE' has this design's mounts, mounted the wrong way:
 $(_mount_rows | sed 's/^/    has /')
@@ -175,7 +175,7 @@ $(_mount_rows | sed 's/^/    has /')
     Recreate it with:  ./setup" ;;
         *)  die "could not read mounts from $_cfg -- refusing to proceed.
     Workspace isolation depends on this machine mounting exactly this
-    checkout, the secrets directory, the mirror and the agent-writable
+    checkout, the keyring, the mirror and the agent-writable
     directory, and that cannot be confirmed." ;;
     esac
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk bench run <workspace> <plan> [options] -- run a benchmark and keep the result defensible
-# wk: where=workspace name=required takes=1 values=plans config=--config verbs=plans,run,seed,ls,compare,report,export,precision,stage,staged,mac,mac-volume,mac-ab,ab-summary,ab,deploy ready=yes group=workspaces needs python3 dryrun run,stage,staged,deploy,seed,report,compare,ab-summary readonly plans,ls,precision,mac,mac-volume,mac-ab
+# wk: where=workspace name=required takes=1 values=plans config=--config verbs=plans,run,seed,ls,compare,report,export,precision,stage,staged,ab-summary,ab,deploy ready=yes group=workspaces needs python3 dryrun run,stage,staged,deploy,seed,report,compare,ab-summary readonly plans,ls,precision
 # wk: sub plans where=store name=none
 # wk: sub run,deploy name=required@2 takes=1 opts=--config=,--count=,--browser=,--subtests=,--software,--browser-args=,--cores=,--kill,--system=,--slot=,--ab=,--ab-systems=,--rounds=,--max-rounds=,--detect=,--task=,--timeout=,--exclude-subtests=,--no-warmup-profile,--jit-tiers,--collect,--a-args=,--b-args=
 # wk: sub seed where=dynamic name=required@2 takes=1 opts=
@@ -11,10 +11,8 @@
 # wk: sub export where=local name=none takes=2 destructive=yes dryrun=yes opts=--to=
 # wk: sub stage where=host takes=1 opts=--to=,--config=,--plan=,--payload=
 # wk: sub staged where=host opts=--id=,--plan=,--expect-display=,--count=,--subtests=,--browser-args=,--payload=,--profile=,--timeout=,--ls,--gates
-# wk: sub mac,mac-volume,mac-ab where=host takes=0 passthrough=tail
 # wk: sub ab-summary where=host name=none takes=1 opts=--runs=,--root=,--out=
 # wk: sub ab where=host name=none takes=2 destructive=yes dryrun=yes opts=--devices=,--release=,--builder=,--bits=,--base=,--build-on=,--plan=,--rounds=,--count=,--timeout=,--task=,--kill,--detach,--systems=,--slot=,--patch=,--workspace=,--config=,--max-rounds=,--detect=,--settle=,--a-args=,--b-args=,--plant,--rehearse,--allow-network-fetch,--preflight,--progress,--status,--collect
-# wk: gone --list plans
 #
 # <plan> is Tools/Scripts/run-benchmark's own name; `wk bench plans` reads
 # them off the machine's WebKit mirror, no workspace needed.
@@ -140,12 +138,6 @@
 #       --force                            record it despite a preflight fail
 #                                          (still refuses to run outside bench
 #                                          mode -- nothing does)
-#   wk bench mac                           tombstone -- wk bench ab --devices <mac>
-#   wk bench mac-volume                    tombstone -- the benchmark install
-#                                          is an image: wk sysimage build
-#                                          perf-macos-tolken, on the Mac
-#   wk bench mac-ab                        tombstone -- wk bench ab --devices <mac> --status (and
-#                                          --preflight, --progress, --collect)
 #   wk bench precision <run-a> <run-b>     how fine a difference the rounds so
 #       [--detect PCT]                     far resolve, and how many more it
 #                                          would take -- the rule an unattended
@@ -335,8 +327,6 @@ def main(argv):
         return mac.staged(ROOT, reg, Clock(), staged_options(args))
     if verb == "ab":
         return bench.ab(args.positionals[1] if len(args.positionals) > 1 else "", ab_options(args), args.flag("--kill"))
-    if verb in ("mac", "mac-volume", "mac-ab"):
-        return {"mac": bench.mac, "mac-volume": bench.mac_volume, "mac-ab": bench.mac_ab}[verb]()
     if verb == "ab-summary":
         return bench.ab_summary(args.value("--runs"), args.value("--root") or "/var/wk", args.value("--out"))
     if verb == "plans":

@@ -1,4 +1,4 @@
-"""The credentials: where this machine keeps them, the agent and injector files `wk push` switches, and
+"""The credentials: where this machine keeps them, the agent and injector files `wk key push` switches, and
 /secrets, what every workspace here reads."""
 
 import argparse
@@ -20,9 +20,9 @@ FORKS = (("fork", "justinmichaud/WebKit", "github-webkit"),
 AGENT_SECRETS = (("claude", "claude-token", ".wk-agent-token", "CLAUDE_CODE_OAUTH_TOKEN", "value", "remote"),
                  ("litellm", "litellm-key", ".wk-litellm-key", "LITELLM_API_KEY", "value", "container,vm,remote"),
                  ("claude-login", ".credentials.json", ".claude/.credentials.json", "-", "file", "container,vm"))
-CONFIG_HEADER = """# wk: written by 'wk push on|off' (lib/wk/secrets.py). One alias per fork, because GitHub takes one deploy
+CONFIG_HEADER = """# wk: written by 'wk key push on|off' (lib/wk/secrets.py). One alias per fork, because GitHub takes one deploy
 # key per repository and both forks live on github.com. The identity is a public half; the private one is
-# in an ssh-agent outside this workspace, and whether it is loaded there is what 'wk push' switches.
+# in an ssh-agent outside this workspace, and whether it is loaded there is what 'wk key push' switches.
 """
 
 
@@ -70,30 +70,24 @@ class Secrets:
         self.planned = {}
         self.planned_dirs = set()
 
-    def secrets_dir(self):
-        return self.store.secrets_dir()
-
     def owned_here(self):
-        """Inside the podman VM the secrets directory is the macOS host's, mounted read-only."""
+        """Inside the podman VM the keyring is the macOS host's, mounted read-only."""
         return not in_vm(self.env)
 
-    def held_dir(self):
-        return self.store.push_held_dir()
-
     def push_key_path(self, fork):
-        return os.path.join(self.held_dir(), "build_key_" + fork)
+        return os.path.join(self.store.keyring_push_dir(), "build_key_" + fork)
 
     def key_at_rest(self, fork):
         return self.machine.exists(self.push_key_path(fork))
 
     def pub_path(self, fork):
-        return os.path.join(self.secrets_dir(), "build_key_%s.pub" % fork)
+        return os.path.join(self.store.keyring_dir(), "build_key_%s.pub" % fork)
 
     def github_pat_path(self):
-        return os.path.join(self.held_dir(), "github-pat")
+        return os.path.join(self.store.keyring_push_dir(), "github-pat")
 
     def bugzilla_key_path(self):
-        return os.path.join(self.held_dir(), "bugzilla-api-key")
+        return os.path.join(self.store.keyring_push_dir(), "bugzilla-api-key")
 
     def agent_secrets(self):
         return agent_secrets()
@@ -101,7 +95,7 @@ class Secrets:
     def cred_path(self, name):
         home = self.env.get("HOME") or os.path.expanduser("~")
         fixed = {"github-pat": self.github_pat_path, "bugzilla-api-key": self.bugzilla_key_path,
-                 "ntfy": self.store.ntfy_topic_path,
+                 "ntfy": self.store.keyring_ntfy_topic,
                  "tailnet": lambda: self.env.get("WK_TS_AUTHKEY") or os.path.join(home, ".config", "wk", "tailscale-authkey"),
                  "tailnet-api": lambda: self.env.get("WK_TS_API_SECRET") or os.path.join(home, ".config", "wk", "tailscale-api-key")}
         if name in fixed:
@@ -109,7 +103,7 @@ class Secrets:
         row = next((r for r in self.agent_secrets() if r[0] == name), None)
         if row is None:
             return None
-        return os.path.join(self.store.agent_rw_dir() if row[4] == "file" else self.secrets_dir(), row[1])
+        return os.path.join(self.store.keyring_agent_rw_dir() if row[4] == "file" else self.store.keyring_dir(), row[1])
 
     def read(self, path):
         """Every byte, "" when absent, None when lib/secretfile.py refused it (a link or a shared inode)."""
@@ -167,7 +161,7 @@ class Secrets:
         return self.forks()[0][1].split("/")[0]
 
     def bugzilla_user(self):
-        r = self.machine.run(["git", "-C", self.store.mirror(), "cat-file", "-p", "main:metadata/contributors.json"], input="")
+        r = self.machine.run(["git", "-C", self.store.mirror_dir(), "cat-file", "-p", "main:metadata/contributors.json"], input="")
         if not r.ok:
             return None
         r = self.machine.run(["python3", os.path.join(self.root, "lib", "contributors.py"), "bugzilla-login", self.github_user()],
@@ -180,7 +174,7 @@ class Secrets:
         return self.env.get("WK_PUSH_AGENT_SOCK") or AGENT_SOCK
 
     def _machine_file(self, var, name):
-        return self.env.get(var) or os.path.join(self.store.root(), name)
+        return self.env.get(var) or os.path.join(self.store.store_dir(), name)
 
     def machine_pat(self):
         return self._machine_file("WK_PUSH_PAT_FILE", "push-github-pat")
@@ -252,9 +246,9 @@ class Secrets:
         return self.cred_sync(path, name)
 
     def pat_converge_machine(self):
-        if not self.machine.isdir(self.held_dir()):
+        if not self.machine.isdir(self.store.keyring_push_dir()):
             debug("the held credentials are not on this machine (%s; the podman machine never mounts them), so the read "
-                  "token is left to the host that has them" % self.held_dir())
+                  "token is left to the host that has them" % self.store.keyring_push_dir())
             return
         if not self.cred_sync(self.machine_read_pat(), "github-pat"):
             warn("the injector in the podman machine did not take the read token; './setup' converges it")
@@ -311,10 +305,10 @@ class Secrets:
         else:
             self.drop(os.path.join(d, "bugzilla-user"))
             warn("no Bugzilla login for %s: metadata/contributors.json in the\n    mirror (%s) has no entry for that account, or there "
-                 "is no mirror\n    ('wk sync'). git-webkit in a workspace asks for one instead" % (self.github_user(), self.store.mirror()))
+                 "is no mirror\n    ('wk sync'). git-webkit in a workspace asks for one instead" % (self.github_user(), self.store.mirror_dir()))
 
     def publish(self):
-        self.publish_config(self.secrets_dir(), CONTAINER_SOCK)
+        self.publish_config(self.store.keyring_dir(), CONTAINER_SOCK)
         self.publish_view("container")
 
     def store_publish(self):
@@ -324,19 +318,16 @@ class Secrets:
             self.require_published()
 
     def require_published(self):
-        d = self.secrets_dir()
+        d = self.store.keyring_dir()
         for f in PUBLISHED:
             if not self.machine.exists(os.path.join(d, f)):
                 die("%s/%s is not there, and nothing in here publishes it: %s is the\n    host's ~/.config/wk/secrets, mounted "
                     "read-only. Publish it from the host:\n        ./setup --stage vmtools" % (d, f, d))
 
-    def view_dir(self, kind):
-        return self.store.secrets_view_dir(kind)
-
     def view_files(self, kind):
         want = {f: "0644" for f in PUBLIC}
         try:
-            names = self.machine.listdir(self.secrets_dir())
+            names = self.machine.listdir(self.store.keyring_dir())
         except OSError:
             names = []
         want.update({f: "0644" for f in names if f.startswith("build_key_") and f.endswith(".pub")})
@@ -348,7 +339,7 @@ class Secrets:
     def publish_view(self, kind):
         if not self.owned_here():
             return True
-        src, d = self.secrets_dir(), self.view_dir(kind)
+        src, d = self.store.keyring_dir(), self.store.keyring_view_dir(kind)
         self.ensure_dir(d, "0700")
         want = self.view_files(kind)
         for f, mode in sorted(want.items()):
@@ -364,8 +355,8 @@ class Secrets:
 
     def push_key_adopt(self, fork, key):
         priv = self.push_key_path(fork)
-        self.ensure_dir(self.held_dir(), "0700")
-        self.ensure_dir(self.secrets_dir(), "0700")
+        self.ensure_dir(self.store.keyring_push_dir(), "0700")
+        self.ensure_dir(self.store.keyring_dir(), "0700")
         new = priv + ".new"
         if not self.machine.act_run(["sh", "-c", 'umask 077 && cat > "$0"', new], input=key.rstrip("\n") + "\n").ok:
             return False

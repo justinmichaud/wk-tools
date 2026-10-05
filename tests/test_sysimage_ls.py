@@ -211,7 +211,7 @@ class TestTheListing(NoPmosHost):
             (d / "ws" / YWS / "build").mkdir(parents=True)
             cp = ran(sysimage(d, building={YWS}).ls, False)
         self.assertIn("building", cp.out.splitlines()[1])
-        self.assertIn("a build is running here -- 'wk logs %s' follows it" % YWS, cp.out)
+        self.assertIn("a build is running here -- 'wk status %s --log' follows it" % YWS, cp.out)
 
     def test_a_workspace_whose_build_state_cannot_be_read_says_unknown(self):
         with scratch_dir() as d:
@@ -440,12 +440,6 @@ class TestTheRoutingAnswers(unittest.TestCase):
             self.assertEqual(cli.wstarget(["holds", "bridge-pinephone@moose"], reg), "")
 
 
-class TestTheFlashTombstone(unittest.TestCase):
-    def test_it_names_disks_write_and_boot(self):
-        cp = ran(cli.Sysimage.flash, "rpi3")
-        self.assertEqual(cp.rc, 1)
-        for words in ("wk sysimage disks rpi3", "--disk rpi3:<device>", "wk boot rpi3"):
-            self.assertIn(words, cp.err)
 
 
 class TestAnImageBuiltInAGuestReachesTheHost(unittest.TestCase):

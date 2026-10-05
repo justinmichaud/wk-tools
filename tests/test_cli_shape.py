@@ -63,6 +63,13 @@ def package_opts(path):
     return {o for t in texts for o in re.findall(r'"(--[a-z][a-z-]*)"', t)}
 
 
+def imported_reads(path):
+    """The options the wk modules a command imports read off its Args (`args.flag("--x")`)."""
+    names = {n.strip() for line in re.findall(r"^from wk import ([\w, ]+)", path.read_text(), re.M) for n in line.split(",")}
+    mods = [REPO / "lib" / "wk" / (n + ".py") for n in names]
+    return {o for m in mods if m.is_file() for o in ARGS_READ.findall(m.read_text())}
+
+
 def code_opts(path):
     text = path.read_text()
     return literal_opts(text) | set(ARGS_READ.findall(text))
@@ -108,7 +115,7 @@ class TestArgumentsAreRefusedOnce(WkTest):
             with self.subTest(cmd=path.name):
                 declared = declared_opts(path) - DISPATCHER_READS.get(D.Decl(path).config, set())
                 code = code_opts(path) - GLOBAL_OPTS
-                code |= declared & package_opts(path)
+                code |= declared & (package_opts(path) | imported_reads(path))
                 self.assertEqual(
                     declared, code,
                     f"cmd/{path.name}: declared but not read: "
@@ -118,10 +125,10 @@ class TestArgumentsAreRefusedOnce(WkTest):
 
 class TestTheGlobalFlagsBelongToTheDispatcher(WkTest):
     def test_dry_run_and_yes_are_stripped_before_the_command(self):
-        plain = run("version").stdout
+        plain = run("doctor", "--probe-tools").stdout
         for flag in ("--dry-run", "-n", "--yes", "-y", "--force", "--quiet"):
             with self.subTest(flag=flag):
-                cp = run("version", flag)
+                cp = run("doctor", "--probe-tools", flag)
                 self.assertEqual(cp.returncode, 0, cp.stdout)
                 self.assertEqual(cp.stdout, plain)
 

@@ -190,11 +190,11 @@ class ContainerSystem(System):
             rows.append((True, "sandbox and GPU", self.renderer[:44]) if r.ok else
                         (False, "sandbox and GPU", " ".join([l for l in text.splitlines() if " -> " in l][:2])))
             if not self.here.exists(self.session.socket):
-                rows.append((False, "graphical session", "no compositor -- wk session on"))
+                rows.append((False, "graphical session", "no compositor -- wk quiesce session on"))
             elif self.session_mode() in ("gpu", "none"):
                 rows.append((True, "graphical session", "%s (%s)" % (self.session.socket, self.session_mode())))
             else:
-                rows.append((False, "graphical session", "session mode '%s' -- watchable over the BMC, not measurable; wk session on"
+                rows.append((False, "graphical session", "session mode '%s' -- watchable over the BMC, not measurable; wk quiesce session on"
                              % self.session_mode()))
         gov = self.governor()
         rows.append((True, "cpu governor", gov) if gov == "performance" else (False, "cpu governor", gov + " -- wk quiesce on"))
@@ -244,7 +244,7 @@ class ContainerSystem(System):
                 "host.kernel=" + first_line(m.run(["uname", "-r"])), "host.cpu=" + cpu, "host.cores=%d" % res.host_cores(),
                 "host.kernel_arch=" + first_line(m.run(["uname", "-m"])), "host.governor=" + self.governor(),
                 "host.nvidia_driver=" + first_line(m.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"])),
-                "host.root_device=" + root_device(m.run, m.read, self.reg.store.root(), False),
+                "host.root_device=" + root_device(m.run, m.read, self.reg.store.store_dir(), False),
                 "host.container_cpus=%d" % res.envelope_cores(), "host.container_mem_mb=%d" % res.envelope_mem_mb()]
 
 

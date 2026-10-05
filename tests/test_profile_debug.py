@@ -1,28 +1,27 @@
-"""Tests for the provisioning half of `wk profile` and its neighbours --
+"""Tests for the provisioning half of `wk run --profile` and its neighbours --
 docs/Urgent/HANDOFF-profile.md, HANDOFF-debug.md and HANDOFF-memory.md."""
 
-import importlib.machinery
-import importlib.util
 import platform
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from tests.support import REPO, clean_env, fake_workspace
 
-PROFILE = REPO / "cmd" / "profile"
+sys.path.insert(0, str(REPO / "lib"))
+from wk import profile  # noqa: E402
+
+RUN = REPO / "cmd" / "run"
 PLOTTER = REPO / "container" / "bin" / "plot-memory-log.py"
-_LOADER = importlib.machinery.SourceFileLoader("cmd_profile", str(PROFILE))
-_MOD = importlib.util.module_from_spec(importlib.util.spec_from_loader(_LOADER.name, _LOADER))
-_LOADER.exec_module(_MOD)
-KNOWN_MODES = list(_MOD.MODES)
+KNOWN_MODES = list(profile.MODES)
 
 
 def run_profile(*args, env=None, timeout=30):
     e = clean_env(env)
     cp = subprocess.run(
-        [str(PROFILE), *args],
+        [str(RUN), *args],
         cwd=str(REPO),
         env=e,
         stdout=subprocess.PIPE,
@@ -35,14 +34,14 @@ def run_profile(*args, env=None, timeout=30):
 
 class ProfileModeRefusalTest(unittest.TestCase):
     def test_unknown_mode_is_refused_naming_the_valid_ones(self):
-        cp = run_profile("--mode", "bogus", "--dry-run", env={"WK_NAME": "test-ws"})
+        cp = run_profile("--profile=bogus", "--dry-run", env={"WK_NAME": "test-ws"})
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("no such mode", cp.stdout, cp.stdout)
         for mode in KNOWN_MODES:
             self.assertIn(mode, cp.stdout, f"refusal does not name '{mode}': {cp.stdout}")
 
     def test_known_mode_gets_past_the_mode_check(self):
-        cp = run_profile("--mode", "sampling", "--dry-run", env={"WK_NAME": "test-ws"})
+        cp = run_profile("--profile=sampling", "--dry-run", env={"WK_NAME": "test-ws"})
         self.assertNotIn("no such mode", cp.stdout, cp.stdout)
 
 
@@ -56,8 +55,8 @@ class ProfileBrowserProcessTest(unittest.TestCase):
     def test_process_ui_prefixes_samply_via_mini_browser_prefix(self):
         with fake_workspace() as ws:
             for config in self.PORT_PROCESS_NAMES:
-                cp = ws.run("profile", "--config", config, "--browser", "--process", "ui",
-                             "--mode", "samply", "--dry-run")
+                cp = ws.run("run", "--config", config, "--browser", "--process", "ui",
+                             "--profile=samply", "--dry-run")
                 self.assertEqual(cp.returncode, 0, f"{config}: {cp.stdout}")
                 self.assertIn("WEBKIT_MINI_BROWSER_PREFIX=", cp.stdout, f"{config}: {cp.stdout}")
                 self.assertIn("samply record", cp.stdout, f"{config}: {cp.stdout}")
@@ -69,7 +68,7 @@ class ProfileBrowserProcessTest(unittest.TestCase):
         with fake_workspace() as ws:
             for config, names in self.PORT_PROCESS_NAMES.items():
                 for process, proc_name in names.items():
-                    args = ["profile", "--config", config, "--browser", "--mode", "samply", "--dry-run"]
+                    args = ["run", "--config", config, "--browser", "--profile=samply", "--dry-run"]
                     if process != "web":
                         args += ["--process", process]
                     cp = ws.run(*args)
@@ -84,44 +83,44 @@ class ProfileBrowserProcessTest(unittest.TestCase):
                          "a mac-* config is refused off an Apple host")
     def test_apple_port_browser_path_is_unchanged(self):
         with fake_workspace() as ws:
-            cp = ws.run("profile", "--config", "mac-release", "--browser", "--dry-run")
+            cp = ws.run("run", "--profile", "--config", "mac-release", "--browser", "--dry-run")
             self.assertEqual(cp.returncode, 0, cp.stdout)
             self.assertIn("MiniBrowser.app/Contents/MacOS/MiniBrowser", cp.stdout, cp.stdout)
             self.assertIn("--url", cp.stdout, cp.stdout)
             self.assertNotIn("WEBKIT_MINI_BROWSER_PREFIX", cp.stdout, cp.stdout)
 
-            cp = ws.run("profile", "--config", "mac-release", "--browser", "--process", "web", "--dry-run")
+            cp = ws.run("run", "--profile", "--config", "mac-release", "--browser", "--process", "web", "--dry-run")
             self.assertNotEqual(cp.returncode, 0, cp.stdout)
             self.assertIn("not wired up for the Apple ports", cp.stdout, cp.stdout)
             self.assertIn("--attach", cp.stdout, cp.stdout)
 
     def test_process_with_a_non_wrapper_mode_refuses_naming_the_remedy(self):
         with fake_workspace() as ws:
-            cp = ws.run("profile", "--config", "gtk-release", "--browser", "--process", "ui",
-                         "--mode", "sampling", "--dry-run")
+            cp = ws.run("run", "--config", "gtk-release", "--browser", "--process", "ui",
+                         "--profile=sampling", "--dry-run")
             self.assertNotEqual(cp.returncode, 0, cp.stdout)
             self.assertIn("meaningless", cp.stdout, cp.stdout)
-            self.assertIn("--mode samply", cp.stdout, cp.stdout)
+            self.assertIn("--profile=samply", cp.stdout, cp.stdout)
 
-            cp = ws.run("profile", "--config", "gtk-release", "--browser", "--mode", "sampling", "--dry-run")
+            cp = ws.run("run", "--config", "gtk-release", "--browser", "--profile=sampling", "--dry-run")
             self.assertEqual(cp.returncode, 0, cp.stdout)
 
     def test_unknown_process_value_is_refused(self):
-        cp = run_profile("--process", "bogus", "--dry-run", env={"WK_NAME": "test-ws"})
+        cp = run_profile("--profile", "--process", "bogus", "--dry-run", env={"WK_NAME": "test-ws"})
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("no such process", cp.stdout, cp.stdout)
         for p in ("ui", "web", "network", "gpu"):
             self.assertIn(p, cp.stdout, f"refusal does not name '{p}': {cp.stdout}")
 
     def test_process_without_browser_is_refused(self):
-        cp = run_profile("--process", "ui", "--dry-run", env={"WK_NAME": "test-ws"})
+        cp = run_profile("--profile", "--process", "ui", "--dry-run", env={"WK_NAME": "test-ws"})
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("--browser", cp.stdout, cp.stdout)
 
     def test_heaptrack_massif_browser_on_cmake_ports_refuses_owed(self):
         with fake_workspace() as ws:
             for mode in ("heaptrack", "massif"):
-                cp = ws.run("profile", "--config", "gtk-release", "--browser", "--mode", mode, "--dry-run")
+                cp = ws.run("run", "--config", "gtk-release", "--browser", "--profile=" + mode, "--dry-run")
                 self.assertNotEqual(cp.returncode, 0, f"{mode}: {cp.stdout}")
                 self.assertIn("not wired up", cp.stdout, f"{mode}: {cp.stdout}")
 

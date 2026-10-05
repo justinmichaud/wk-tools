@@ -1,48 +1,20 @@
-#!/usr/bin/env python3
-#
-# wk disk -- everything wk is storing on this machine, with the total
-#
-# wk: where=local name=none readonly group=sources opts --probe-store
-#
-# The bytes are in three places no single `du` reaches:
-#
-#   the podman VM's disk image     on a macOS host, the whole container store
-#                                  -- mirror, snapshots, every overlay -- in
-#                                  one sparse .raw file; the breakdown
-#                                  *inside* it is asked over ssh
-#   the Tart guests                ~/.tart, outside every wk directory
-#   the store                      the mirror, base snapshots and workspace
-#                                  upper layers -- on Linux under the user's
-#                                  data directory, on macOS inside the VM
-#
-# Read-only: never starts the podman machine, never boots a guest, never
-# prompts. What it cannot see without starting something is reported as '??'
-# with the command that would reveal it.
-#
-# `du` counts allocated blocks, so a sparse guest disk costs what it has
-# written; APFS clones share blocks, so the total is an upper bound.
-#
-# Erasing is elsewhere -- `wk gc`, `wk gc --purge-mirror`, `wk sysimage build macos-guest-base --rm`,
-# `wk rm` -- named per row.
+"""`wk doctor`'s disk section: the bytes in the places no single `du` reaches -- the podman VM's disk image, the Tart
+guests, the store. Run as a script (in the VM, against its own lib/), the store's rows as probe_store writes them."""
 
 import glob
 import os
 import shlex
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images  # noqa: E402
+from wk import gc, kv, rubble, targets
+from wk.act import log
+from wk.machine import Local
+from wk.store import Store
+from wk.sysimage import guestbase, task
+from wk.sysimage.ls import human_bytes
 
-ROOT = images.root()
-RUN_AS_VM_COPY = ('import sys; g = {"__file__": "/opt/wk-tools/cmd/disk", "__name__": "__main__"}; '
-                  'exec(compile(sys.stdin.read(), g["__file__"], "exec"), g)')
-
-from wk import decl, gc, kv, record, rubble, targets  # noqa: E402
-from wk.act import info, log  # noqa: E402
-from wk.machine import Local  # noqa: E402
-from wk.store import Store  # noqa: E402
-from wk.sysimage import guestbase, task  # noqa: E402
-from wk.sysimage.ls import human_bytes  # noqa: E402
+RUN_AS_VM_COPY = ('import sys; sys.path.insert(0, "/opt/wk-tools/lib"); '
+                  'exec(compile(sys.stdin.read(), "disk.py", "exec"), {"__name__": "__main__"})')
 
 HOME = os.environ.get("HOME", os.path.expanduser("~"))
 DATA = os.environ.get("XDG_DATA_HOME") or os.path.join(HOME, ".local", "share")
@@ -97,13 +69,13 @@ class Report:
 
 def probe_store(store):
     """kb<TAB>label<TAB>note per store row; on macOS this runs in the VM and renders out here."""
-    rows = [(kb(store.mirror()), "the WebKit mirror", "git/WebKit.git -- refetchable (wk sync)")]
-    bases = len(os.listdir(store.base_dir())) if os.path.isdir(store.base_dir()) else 0
-    rows.append((kb(store.base_dir()), "base snapshots", "%d of them; unreferenced ones go with wk gc" % bases))
+    rows = [(kb(store.mirror_dir()), "the WebKit mirror", "git/WebKit.git -- refetchable (wk sync)")]
+    bases = len(os.listdir(store.snapshots_dir())) if os.path.isdir(store.snapshots_dir()) else 0
+    rows.append((kb(store.snapshots_dir()), "snapshots", "%d of them; unreferenced ones go with wk gc" % bases))
     for ws in store.workspaces():
         rows.append((kb(store.ws_dir(ws)), "workspace %s" % ws, "wk rm %s" % ws))
     for d in ("cache/ccache", "cache/bench", "cache/images", "cache/yocto", "cache/buildroot", "skills", "tools"):
-        p = os.path.join(store.root(), d)
+        p = os.path.join(store.store_dir(), d)
         if os.path.isdir(p):
             rows.append((kb(p), d, ""))
     containers = os.path.join(DATA, "containers", "storage")   # podman's own rootless tree: not under the store, still the store
@@ -112,7 +84,9 @@ def probe_store(store):
     return "".join("%d\t%s\t%s\n" % r for r in rows)
 
 
-def workspace_report(reg, rep):
+def workspace_report(reg):
+    """`wk doctor`'s disk section inside a workspace: what this workspace's checkout and builds cost."""
+    rep = Report()
     marker = kv.kv_file(reg.marker_path())
     src = marker.get("src", "")
     rep.section("workspace '%s'" % marker.get("name", ""))
@@ -138,19 +112,10 @@ def workspace_report(reg, rep):
     log("  all of it at once. 'wk help' is the whole-machine picture.")
 
 
-def main(argv):
-    args = decl.Args(decl.Decl(os.path.join(ROOT, "cmd", "disk")), argv)
-    store = Store()
-    if args.flag("--probe-store"):
-        sys.stdout.write(probe_store(store))
-        return 0
-    reg = targets.Registry(ROOT)
-    rep = Report()
+def machine_report(root, reg):
+    """`wk doctor`'s disk section: everything wk stores on this machine, with the total."""
+    store, rep = reg.store, Report()
     macos_host = store.macos_host
-    info("wk disk on %s (%s)" % ("macos" if os.uname().sysname == "Darwin" else "linux", record.host_name(here)))
-    if reg.in_workspace():
-        workspace_report(reg, rep)
-        return 0
     if macos_host:
         ctr = reg.load("container")
         vm_name = store.podman_machine()
@@ -170,7 +135,7 @@ def main(argv):
         if ctr.machine_state() == "running":
             with open(__file__) as me:   # this file, not the VM's copy, which is only as new as `wk sync --tools container`
                 cp = here.run(["podman", "machine", "ssh", vm_name, "--",
-                               "WK_STORE=/var/lib/wk python3 -c %s --probe-store" % shlex.quote(RUN_AS_VM_COPY)], input=me.read())
+                               "WK_STORE=/var/lib/wk python3 -c %s" % shlex.quote(RUN_AS_VM_COPY)], input=me.read())
             if cp.out.strip():
                 rep.render(cp.out, add=False)
             else:
@@ -178,7 +143,7 @@ def main(argv):
         else:
             rep.unknown("the store inside the VM", "the machine is stopped: 'wk start', then re-run")
     else:
-        rep.section("the store (%s)" % store.root())
+        rep.section("the store (%s)" % store.store_dir())
         rep.render(probe_store(store), add=True)
     tart_home = guestbase.tart_home(os.environ)
     if macos_host and os.path.isdir(tart_home):
@@ -205,7 +170,7 @@ def main(argv):
             k = kb(cache)
             if k > 0:
                 rep.note(k, "fetched base images", "inside the row above; a re-fetchable input, kept by wk gc")
-    rep.row(kb(ROOT), "wk-tools checkout", ROOT)
+    rep.row(kb(root), "wk-tools checkout", root)
     rep.section("total")
     sys.stderr.write("  %7s  %s\n" % (human_bytes(rep.total * 1024), "wk's storage on this machine"))
     if rep.noted:
@@ -217,14 +182,13 @@ def main(argv):
         log("           du counts allocated blocks, and hardlinked snapshots are counted")
         log("           once -- df below is the filesystem's own answer")
     log("")
-    df = here.run(["df", "-h", store.root() if os.path.isdir(store.root()) else HOME])
+    df = here.run(["df", "-h", store.store_dir() if os.path.isdir(store.store_dir()) else HOME])
     sys.stderr.write("".join("  " + l + "\n" for l in df.out.splitlines()))
     log("")
     rep.section("what 'wk gc' reclaims or names (inside the rows above, or on another machine)")
-    for r in sorted(gc.Gc(ROOT, reg).rows(), key=lambda r: r.kind):
+    for r in sorted(gc.Gc(root, reg).rows(), key=lambda r: r.kind):
         sys.stderr.write(rubble.line(r, (), "a plain 'wk gc' takes it") + "\n")
-    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.stdout.write(probe_store(Store()))

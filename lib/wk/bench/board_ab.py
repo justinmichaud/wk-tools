@@ -124,7 +124,7 @@ class AB:
         if self.task:
             self.taskdir = os.path.join(record.leg_home(reg, ws, self.task)[1], self.task)
         self.system = board.for_board(self.root, reg, ws, clock, self.name, machine=machine, driver=driver)
-        self.recs = progress.Records(reg.store.record_dir(), clock=clock, env=reg.env, machine=self.here)
+        self.recs = progress.Records(reg.store.records_dir(), clock=clock, env=reg.env, machine=self.here)
         self.lock = Lock(reg.store, self.here, clock)
 
     def run(self):

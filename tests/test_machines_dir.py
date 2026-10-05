@@ -101,17 +101,15 @@ class TestTheReader(FleetTest):
             self.fleet.load("m")
         self.assertIn("volume is not a literal", str(cm.exception))
 
-    def test_an_uppercase_key_is_refused_naming_the_file_the_key_and_its_new_spelling(self):
-        for old, new in (("KIND=board", "kind"), ("NODE_BENCH_SSH=x", "bench_ssh"), ("BR_LAN_MAC=x", "lan_mac"),
-                         ("WK_REMOTE_HOST=x", "host"), ("WK_TARGET_CMAKE=x", "cmake"),
-                         ("WK_TARGET_KIND=remote", "driver"), ("WK_BUILD_ARGS=x", "build_args")):
+    def test_an_uppercase_key_is_refused_naming_the_file_and_the_key(self):
+        for old in ("KIND=board", "NODE_BENCH_SSH=x", "WK_TARGET_KIND=remote"):
             with self.subTest(key=old):
                 self.conf("old", "kind=build\n" + old + "\n")
                 with self.assertRaises(fleet.ConfError) as cm:
                     self.fleet.load("old")
                 msg = str(cm.exception)
                 self.assertIn(str(self.dir / "old.conf") + ":2:", msg)
-                self.assertIn("%s is spelled %s now" % (old.split("=")[0], new), msg)
+                self.assertIn("%s is not a key" % old.split("=")[0], msg)
 
     def test_a_conf_that_does_not_parse_refuses_every_listing_by_name(self):
         for text in ("host=k\n", "kind=board\nNODE_SSH=k\n"):
@@ -202,15 +200,6 @@ class TestTheReadersOverIt(FleetTest):
             targets.Registry(REPO, env=self.env, machine=Fake()).load("box")
         self.assertIn("cmake_no_such_config is not a key", str(cm.exception))
 
-    def test_every_old_spelling_the_parser_suggests_is_one_the_loader_takes_or_refuses_by_name(self):
-        for old in ("WK_REMOTE_HOST", "WK_TARGET_CMAKE_wpe_release", "WK_BUILD_ARGS_jsc_release", "WK_REMOTE_MAX_JOBS"):
-            with self.subTest(key=old):
-                new = fleet.renamed(old)
-                self.conf("box", "kind=build\n%s=x\n" % new)
-                try:
-                    targets.Registry(REPO, env=self.env, machine=Fake()).load("box")
-                except LookupError as e:
-                    self.assertIn("%s is not read:" % new, str(e))
 
 
 class TestSharedHome(FleetTest):

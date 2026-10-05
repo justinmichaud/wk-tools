@@ -351,7 +351,7 @@ class TestTheProfile(MacTest):
                 self.assertFalse([e for e in w.effects if e[0] == "act"])
 
     def test_a_staged_run_records_where_its_profile_is(self):
-        self.w.answer(["test", "-x", self.samply(self.w.reg.store.artifact_dir())])
+        self.w.answer(["test", "-x", self.samply(self.w.reg.store.cache_dir())])
         self.w.answer(["pgrep", "-n", "-f", mac.WEB_PROCESS], out="321\n")
         rc, err = self.staged("--profile", "/tmp/p.json")
         self.assertEqual(rc, 0, err)
@@ -501,7 +501,8 @@ class StageWorld(World):
         self.reg.ws_target = lambda ws: "vm"
         self.answer(["exec", "ws", "test"], out="")
         self.answer(["exec", "ws", "git"], out=SHA + "\n")
-        self.answer([os.path.join(str(REPO), "cmd", "version")], out="sha=abc\ndirty=%s\n" % dirty)
+        self.answer(["git", "-C", str(REPO), "rev-parse", "HEAD"], out="abc\n")
+        self.answer(["git", "-C", str(REPO), "status"], out=" M lib/wk/x.py\n" if dirty == "yes" else "")
         self.answer(["hostname"], out="tolken\n")
         self.answer(["sh", "-c"], out="")
         self.answer(["rsync"], out="")

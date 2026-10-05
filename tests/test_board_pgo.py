@@ -79,7 +79,7 @@ class World:
         return pgo.Cycle(self.reg, p or self.p, spec, self.clock, build=build, mode_of=lambda b: self.mode, pool=Inline)
 
     def recs(self):
-        return progress.Records(self.reg.store.record_dir(), clock=self.clock, env=self.env, machine=self.fake)
+        return progress.Records(self.reg.store.records_dir(), clock=self.clock, env=self.env, machine=self.fake)
 
     def state(self):
         return sorted(k for k in self.fake.files if k.startswith("/state/"))

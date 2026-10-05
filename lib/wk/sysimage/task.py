@@ -22,7 +22,7 @@ TAIL_LINES = 20
 def image_root(env):
     """On a macOS host the store is the podman VM's /var/lib/wk, a path the Mac cannot create."""
     s = Store(env)
-    return s.state_dir() if s.macos_host else s.root()
+    return s.state_dir() if s.macos_host else s.store_dir()
 
 
 def cache_dir(env):
@@ -138,13 +138,13 @@ class Stage:
         busy = build.busy_reason(self.target, self.recs, self.ws)
         if busy:
             die("a build is still running in '%s': %s.\n    One job per workspace: both move the checkout and the tree's output.\n"
-                "    Follow it:  wk logs %s -f\n    Stop it:    %s" % (self.ws, busy, self.ws, self.kill))
+                "    Follow it:  wk status %s --log -f\n    Stop it:    %s" % (self.ws, busy, self.ws, self.kill))
 
     def detach(self, argv, what):
         pid = build.detached(self.here, self.recs, self.clock, self.kind, self.ws, argv,
                              os.path.join(self.ws_dir, "detached-%s.log" % self.stage), what)
         info("running detached in '%s' as pid %d -- this end can go away" % (self.ws, pid))
-        log("  follow:  wk logs %s -f" % self.ws)
+        log("  follow:  wk status %s --log -f" % self.ws)
         log("  state:   wk status %s" % self.ws)
         log("  stop it: %s" % self.kill)
         return 0
@@ -160,7 +160,7 @@ class Stage:
         lock = Lock(self.target.store, self.here, self.clock)
         holder = lock.holder_pid("ws-" + self.ws)
         if holder is not None and self.here.alive(holder):
-            die("'%s' is already building -- its driver holds the ws-%s lock.\n    Follow it:  wk logs %s -f\n    Stop it:    %s"
+            die("'%s' is already building -- its driver holds the ws-%s lock.\n    Follow it:  wk status %s --log -f\n    Stop it:    %s"
                 % (self.ws, self.ws, self.ws, self.kill))
         lock.hold("ws-" + self.ws, timeout=0)
         try:

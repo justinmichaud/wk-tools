@@ -1,4 +1,4 @@
-"""The shell preludes cmd/run, cmd/gui, cmd/test and cmd/profile put in front of a target command: the loader path, prepended so the wkdev image's own jhbuild/libwpe prefix survives, and the lldb that starts (run, not found: the image's /opt/swift lldb links a libxml2 it lacks), pinned to the parent after ~/.lldbinit; and the checks a recorder needs before it runs: the tool, and the kernel's perf events."""
+"""The shell preludes cmd/run, cmd/gui, cmd/test and lib/wk/profile.py put in front of a target command: the loader path, prepended so the wkdev image's own jhbuild/libwpe prefix survives, and the lldb that starts (run, not found: the image's /opt/swift lldb links a libxml2 it lacks), pinned to the parent after ~/.lldbinit; and the checks a recorder needs before it runs: the tool, and the kernel's perf events."""
 
 import os
 import shlex

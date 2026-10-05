@@ -77,16 +77,16 @@ _verify_mounts() {
     fi
 
     if _rsh "findmnt -no TARGET $(printf %q "$WK_STORE/secrets")" >/dev/null 2>&1; then
-        unchanged "the secrets directory is mounted at $WK_STORE/secrets"
+        unchanged "the keyring is mounted at $WK_STORE/secrets"
     else
         die "$WK_STORE/secrets is not a mount inside '$WK_MACHINE', so the keys this
-    host holds ($secrets_dir) reach no workspace. The machine mounts them
+    host holds ($keyring_dir) reach no workspace. The machine mounts them
     there when it is created:  ./setup --stage machine"
     fi
 
     if ! _rsh "findmnt -no TARGET $(printf %q "$WK_STORE/agent-rw")" >/dev/null 2>&1; then
         die "$WK_STORE/agent-rw is not a mount inside '$WK_MACHINE', so the claude.ai
-    login this host holds ($agent_rw_dir) reaches no workspace. The machine
+    login this host holds ($keyring_agent_rw_dir) reaches no workspace. The machine
     mounts it there when it is created:  ./setup --stage machine"
     elif _rsh "test -w $(printf %q "$WK_STORE/agent-rw")"; then
         unchanged "the agent-writable directory is mounted read-write at $WK_STORE/agent-rw"
@@ -101,7 +101,7 @@ _verify_mounts() {
         unchanged "the mirror directory is mounted at $WK_STORE/git"
     else
         die "$WK_STORE/git is not a mount inside '$WK_MACHINE', so the mirror this host
-    keeps ($mirror_dir) reaches no snapshot and no workspace. The
+    keeps ($mirror_parent) reaches no snapshot and no workspace. The
     machine mounts it there when it is created:  ./setup --stage machine"
     fi
 
@@ -132,7 +132,7 @@ fi
 
 "$WK_ROOT/cmd/key" ensure 2>&1 | sed 's/^/  /' \
     || die "wk key ensure failed (above), so workspaces on '$WK_MACHINE' have no key to push with"
-if [ -f "$secrets_dir/build_key_fork.pub" ]; then
+if [ -f "$keyring_dir/build_key_fork.pub" ]; then
     unchanged "build key present"
 else
     warn "no build key; workspaces will not be able to push"

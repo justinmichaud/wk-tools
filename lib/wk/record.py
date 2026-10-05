@@ -1,8 +1,10 @@
 """The task record: one directory per long-running command under
 <record dir>/task/, one file per field. Liveness is asked of the process table at read time, never stored."""
 
+import glob
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -26,10 +28,6 @@ UNREADABLE = object()
 
 def slug(text):
     return re.sub(r"[^A-Za-z0-9._-]", "-", text)
-
-
-def record_dir(env=None):
-    return store.Store(env).record_dir()
 
 
 def host_name(machine=None):
@@ -91,6 +89,74 @@ def first_error(path, machine=None):
             if len(out) == 5:
                 break
     return out
+
+
+# The readings travel beside the products (lib/wk/bench/mac.py's `PgoCollect.evidence`), read from the build
+# the workspace holds now, on the machine holding it, each verdict re-derived by its own checker.
+GATES = r'''
+set -u
+shopt -s nullglob
+seen=0
+for f in "$SRC"/WebKitBuild/*/wk-browser-check.json; do
+    seen=1; printf 'browser check %s\n' "$f"
+    python3 "$TOOLS/bench/mac-browser-check.py" --read "$f" 2>&1 | sed 's/^/  /'
+done
+for f in "$SRC"/WebKitBuild/*/wk-profile-check.json "$SRC"/WebKitBuild/wk-pgo/*/profile-check.json; do
+    [ -f "$f" ] || continue
+    seen=1; printf 'profile check %s\n' "$f"
+    PYTHONPATH="$TOOLS/lib" python3 -m wk.pgo check --read "$f" 2>&1 | sed 's/^/  /'
+done
+for f in "$SRC"/WebKitBuild/*/wk-payload-pins; do
+    seen=1; printf 'benchmark payloads %s\n' "$f"
+    sed 's/^/  /' "$f"
+done
+[ "$seen" = 1 ] || printf 'no readings under %s/WebKitBuild -- only a profile-guided build
+collects them (build/mac-pgo.sh beside the products, a board cycle under
+wk-pgo/); every other build has no gates.\n' "$SRC"
+'''
+
+
+def workspace_log(target, name):
+    """(path, whether it is an image-stage log): build.log, else the newest log an image builder wrote under home/."""
+    ws_dir = target.store.ws_dir(name)
+    build_log = os.path.join(ws_dir, "build.log")
+    if os.path.isfile(build_log):
+        return build_log, False
+    stage_logs = glob.glob(os.path.join(ws_dir, "home", "yocto-*.log")) + glob.glob(os.path.join(ws_dir, "home", "buildroot-*.log"))
+    if not stage_logs:
+        act.die("no build log and no image-stage log for '%s' -- has it been\n    built? ('wk build', 'wk sysimage build')" % name)
+    return max(stage_logs, key=os.path.getmtime), True
+
+
+def show_log(target, name, mode, hint):
+    if mode == "gates":
+        r = target.exec(name, ["bash", "-c", "SRC=%s TOOLS=%s\n%s" % (shlex.quote(target.src(name)), shlex.quote(target.tools(name)), GATES)])
+        sys.stdout.write(r.out)
+        sys.stderr.write(r.err)
+        return r.rc
+    path, stage = workspace_log(target, name)
+    if stage:
+        act.info("showing %s" % path)
+    if mode == "follow":
+        here().exec(["tail", "-f", path])
+    if mode == "all":
+        sys.stdout.write(normalised(path))
+        return 0
+    act.log("errors:")
+    errors = first_error(path)
+    for e in errors:
+        act.log("  " + e)
+    if not errors:
+        act.log("  (none)")
+    act.log("")
+    act.log("last output:")
+    for line in [l for l in normalised(path).split("\n") if l][-15:]:
+        act.log("  " + line)
+    act.log("")
+    act.log("  wk status%s --log --all     full log" % hint)
+    act.log("  wk status%s --log --follow  live" % hint)
+    act.log("  wk status%s --log --gates   the readings this build was collected under" % hint)
+    return 0
 
 
 def progress_line(path, machine=None):
@@ -266,14 +332,14 @@ class Task:
 
 def of_target(target, clock=None, machine=None, env=None):
     """`target`'s records; a pid in a workspace is asked there, None where the workspace does not answer in time."""
-    return Records(target.store.record_dir(), clock=clock, ask_target=target.pid_alive, env=target.env if env is None else env,
+    return Records(target.store.records_dir(), clock=clock, ask_target=target.pid_alive, env=target.env if env is None else env,
                    machine=machine)
 
 
 class Records:
     def __init__(self, root=None, clock=None, ask_target=None, env=None, machine=None):
         self.env = os.environ if env is None else env
-        self.root = Path(root or record_dir(self.env)) / "task"
+        self.root = Path(root or store.Store(self.env).records_dir()) / "task"
         self.clock = clock or Clock()
         self.ask_target = ask_target
         self.machine = machine or here()

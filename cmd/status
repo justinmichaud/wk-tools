@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 #
-# wk status [<workspace>] -- what is happening, without guessing
+# wk status [<workspace> [--log]] -- what is happening, without guessing
 # wk: where=workspace name=optional here readonly group=workspaces
-# wk: opts --no-fleet,--no-devices,--records,--json,--text,--cli,--html=,--web,--port=,--interval=,--wait,--timeout=,--holds=
+# wk: opts --no-fleet,--no-devices,--records,--json,--text,--cli,--html=,--web,--port=,--interval=,--wait,--timeout=,--holds=,--log,--follow,-f,--all,-a,--gates,-g
+# wk: flag --log,--follow,-f,--all,-a,--gates,-g name=required here=no
 #
 # The build records its own state, not a process list, and this reads it.
 #
@@ -51,6 +52,14 @@
 #                           (default 20; slower than a fleet probe on purpose)
 #   WK_STATUS_PORT, WK_STATUS_INTERVAL   --web's defaults (0: any free port; 20s)
 #   WK_STATUS_VIEW=<mode>   the view a bare `wk status` gets: text, web or json
+#
+#   wk status <workspace> --log   the build or image-stage log, read on the
+#                 machine holding the workspace: ninja's carriage returns
+#                 normalised, the first error and the last output
+#     --follow, -f   stream the log live
+#     --all, -a      print the full normalised log
+#     --gates, -g    the readings this build was collected under: the browser
+#                    check, the profile check, and the pinned benchmark payloads
 
 import json
 import os
@@ -61,7 +70,7 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, statusview, targets  # noqa: E402
+from wk import decl, record, statusview, targets  # noqa: E402
 from wk.act import Refused, die, info, warn  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.record import Records  # noqa: E402
@@ -76,9 +85,35 @@ def holders(resource):
     return 0
 
 
+LOG_FLAGS = ("--log", "--follow", "-f", "--all", "-a", "--gates", "-g")
+
+
+def show_log(args):
+    if not args.flag("--log"):
+        die("--follow, --all and --gates read the log: wk status <workspace> --log --follow")
+    modes = [m for m, on in (("follow", args.flag("--follow") or args.flag("-f")), ("all", args.flag("--all") or args.flag("-a")),
+                             ("gates", args.flag("--gates") or args.flag("-g"))) if on]
+    if len(modes) > 1:
+        die("--log shows one of --follow, --all or --gates at a time; see wk status -h")
+    rest = [o for o in args.order if o not in LOG_FLAGS]
+    if rest:
+        die("--log shows the log alone: drop %s" % " ".join(rest))
+    name = store.ws_name()
+    if not name:
+        die("wk status --log needs a workspace name")
+    reg = targets.Registry(ROOT)
+    try:
+        target = reg.load(reg.ws_target(name))
+    except LookupError as e:
+        die(str(e))
+    return record.show_log(target, name, modes[0] if modes else "", "" if reg.in_workspace() else " " + name)
+
+
 def main(argv):
     env = os.environ
     args = decl.Args(decl.Decl(__file__), argv)
+    if any(args.flag(f) for f in LOG_FLAGS):
+        return show_log(args)
     no_fleet = args.flag("--no-fleet")
     no_devices = args.flag("--no-devices")
     devices = not (no_fleet or no_devices)

@@ -52,7 +52,7 @@ def _glob(machine, base, parts):
 
 def scan(machine, store):
     """Every image in this store's workspaces; an image workspace that holds none gets a placeholder."""
-    root = os.path.join(store.root(), "ws")
+    root = os.path.join(store.store_dir(), "ws")
     try:
         names = machine.listdir(root)
     except OSError:
@@ -163,14 +163,14 @@ class Listing:
             note = "" if board else "this checkout does not define '%s'" % prof
         if image.path is None:
             out = [ROW % (ws, board or "?", self.label, image.builder, state, "-", "-"), "    no image here yet",
-                   "    a build is running here -- 'wk logs %s' follows it" % ws if state == "building"
+                   "    a build is running here -- 'wk status %s --log' follows it" % ws if state == "building"
                    else "    'wk sysimage build %s' builds one" % (prof or "<profile>")]
         else:
             st = os.stat(image.path)
             out = [ROW % (ws, board or "?", self.label, image.builder, state, human_bytes(st.st_size), stamp(image.path)),
                    "    " + image.path]
             if state == "building":
-                out.append("    a build is running here -- these bytes are the previous image; 'wk logs %s' follows it" % ws)
+                out.append("    a build is running here -- these bytes are the previous image; 'wk status %s --log' follows it" % ws)
         for d, doc in slot_docs(ws, env):
             out.append("    slot %-12s %s  %s  built %s  (%s)" % (
                 doc.get("slot", ""), doc.get("commit", "")[:12], doc.get("build_config", "?"),

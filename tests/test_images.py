@@ -57,10 +57,6 @@ class TestTheLoader(ScratchRoot):
                 with self.assertRaises(LookupError):
                     images.load(name, self.env)
 
-    def test_a_retired_name_names_its_replacement(self):
-        with self.assertRaises(images.Tombstone) as cm:
-            images.load("rpi5-perf", self.env)
-        self.assertIn("webkit-2.52-yocto-rpi5-64", str(cm.exception))
 
     def test_a_conf_is_literals_of_known_fields(self):
         for text in ("IMG_BUILDER=$HOME\n", "IMG_NOPE=1\n", "IMG_ARCH=a b\n",
@@ -128,7 +124,7 @@ class TestTheImageWorkspace(unittest.TestCase):
         self.assertEqual(images.image_ws(PROFILE + "@moose", STORE), WS)
 
     def test_a_host_builder_or_no_profile_names_none(self):
-        for spec in ("bridge-pinephone", "recovery-pinephone", "nosuch", "rpi5-perf"):
+        for spec in ("bridge-pinephone", "recovery-pinephone", "nosuch"):
             with self.subTest(spec=spec):
                 self.assertEqual(images.image_ws(spec, STORE), "")
 

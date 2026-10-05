@@ -1,87 +1,38 @@
-#!/usr/bin/env python3
-#
-# wk profile [<workspace>] [flags] [file.js] -- profile a jsc or browser run
-# wk: where=workspace name=required values=--list config=--config ready=yes group=workspaces takes=* passthrough dryrun
-# wk: opts --mode=,--config=,--browser,--process=,--attach=,--jit-dump,--markers,--top=,--fetch,--env=,--list
-# wk: flag --list where=local name=none
-#
-# Where the time went, with the env-var wall for each profiler written down once.
-#
-# Which profiler:
-#
-#   sampling    JSC's own sampling profiler: JS function names and the tier
-#               breakdown (LLInt/Baseline/DFG/FTL/C++). No tools, no privileges,
-#               every port and architecture -- including armhf, where the native
-#               profilers need a patched build. The default.
-#   bytecode    JSC's Profiler::Database: per-CodeBlock, per-bytecode counts by
-#               tier, plus the compile/OSR-exit/jettison log.
-#   samply      native sampling with the Firefox Profiler UI: C++ frames, every
-#               thread, the GC and the compiler. Precise about the engine, poor
-#               about JS -- `--jit-dump` gives it JS frame names too.
-#   sysprof     the whole system through sysprof-cli, with JSC's JIT dump and
-#               text markers always on so JS frames are named and phases
-#               marked (Linux ports only).
-#   instruments Apple's Time Profiler through xctrace: samply's job on a Mac,
-#               needing nothing installed. `--mode native` picks this on the
-#               Apple ports and samply everywhere else.
-#   heaptrack   allocations rather than time (Linux ports only).
-#   massif      the same question asked of the peak, through valgrind.
-#
-# What this doesn't decide is *what* to profile: the jsc shell with your file,
-# MiniBrowser with your page, or an attach to something already running -- one
-# that also picks the workload is `wk bench`. Artifacts stay in the workspace;
-# `--fetch` copies them out through pull_dir, since a captured `cat` corrupts a
-# binary.
-#
-#   --mode <m>        which profiler runs (default sampling); native picks
-#                     instruments on the Apple ports and samply everywhere
-#                     else; `wk profile --list` lists the rest
-#   --config <c>      which build to profile (default: the last build's, else the
-#                     platform's; the list is below)
-#   --browser [url]   profile MiniBrowser on that page instead of the jsc shell
-#   --process <p>     which of MiniBrowser's processes: ui | web (default) |
-#                     network | gpu. Refused on the Apple ports, where the
-#                     browser is profiled directly. On GTK/WPE, 'ui' puts the
-#                     recorder in front of the launch (WEBKIT_MINI_BROWSER_PREFIX,
-#                     the hook `wk gui --lldb ui` uses); web/network/gpu launch
-#                     and attach once the named process appears -- first cut: a
-#                     fixed wait, so it may not be mid-load. Only --mode samply
-#                     attaches; sampling/bytecode/sysprof cover the whole tree
-#                     and refuse --process; heaptrack/massif are not
-#                     wired up for a browser (docs/Urgent/HANDOFF-linux-minibrower.md).
-#   --attach <pid|name>
-#                     profile something already running in the workspace
-#   --jit-dump        JS/JIT frame names for the native profilers
-#   --markers         JSC's interval text markers, for splitting a trace by phase
-#   --top <n>         how many functions/bytecodes the sampling report prints
-#   --fetch [dir]     copy the artifacts to this machine when the run ends
-#   --env NAME=VALUE  one more variable for the run (repeatable)
-#   --list            print the available modes and exit
-#
-# Everything after `--` is passed to what is being profiled.
+"""`wk run|test <ws> --profile[=<mode>]`: the jsc shell, MiniBrowser (`--browser`) or a running process (`--attach`)
+under one profiler, its env-var wall written down once; `--fetch` copies the artifacts out through pull_dir."""
 
 import os
 import shlex
-import sys
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images, store  # noqa: E402
-
-ROOT = images.root()
-
-from wk import buildconf, decl, targets  # noqa: E402
-from wk.act import Refused, die, dry_run, info, log, warn  # noqa: E402
-from wk.ldpath import perf_events, prelude, require_tool  # noqa: E402
-from wk.store import Store  # noqa: E402
-from wk.workspace import require_name  # noqa: E402
+from wk import buildconf, images, store, targets
+from wk.act import Refused, die, dry_run, info, log, warn
+from wk.ldpath import perf_events, prelude, require_tool
+from wk.store import Store
+from wk.workspace import require_name
 
 MODES = ("sampling", "bytecode", "samply", "sysprof", "instruments", "heaptrack", "massif")
+ONLY_WITH_PROFILE = ("--browser", "--process", "--attach", "--jit-dump", "--markers", "--top", "--fetch", "--env")
 
 
-def parse(argv):
-    args = decl.Args(decl.Decl(__file__), argv)
-    o = {"mode": args.value("--mode") or "sampling", "process": "web", "extra_env": args.values("--env")}
+def asked(args):
+    return args.flag("--profile") or args.value("--profile") is not None
+
+
+def refuse_mixed(args, own):
+    """A profiler flag without --profile, or one of the command's own `own` flags with it, is refused naming which."""
+    if not asked(args):
+        stray = [o for o in args.order if o in ONLY_WITH_PROFILE]
+        if stray:
+            die("%s is --profile's: add --profile[=<mode>]" % stray[0])
+        return
+    mixed = [o for o in args.order if o in own]
+    if mixed:
+        die("--profile runs on its own; drop %s" % mixed[0])
+
+
+def options(args):
+    o = {"mode": args.value("--profile") or "sampling", "process": "web", "extra_env": args.values("--env")}
     if args.value("--process") is not None:
         o["process"] = args.value("--process")
         o["process_explicit"] = True
@@ -93,19 +44,17 @@ def parse(argv):
         o["jitdump"] = True
     if args.flag("--markers"):
         o["markers"] = True
-    if args.flag("--list"):
-        o["list"] = True
 
     loose = list(args.positionals)
     given = {"--browser": args.flag("--browser"), "--fetch": args.flag("--fetch")}
     for opt in args.order:
         if not given.get(opt):
             continue
-        if opt in ("--browser",) and "browser" not in o:
+        if opt == "--browser" and "browser" not in o:
             o["browser"] = True
             if loose:
                 o["url"] = loose.pop(0)
-        elif opt in ("--fetch",) and "fetch" not in o:
+        elif opt == "--fetch" and "fetch" not in o:
             o["fetch"] = True
             if loose:
                 o["fetch_dir"] = loose.pop(0)
@@ -128,15 +77,15 @@ def browser_target(cfg, url, process, process_explicit, mode, args, outdir):
         return subject, cmd, False
 
     if mode in ("heaptrack", "massif"):
-        die("--browser --mode %s is not wired up on the CMake ports: %s has to\n"
+        die("--browser --profile=%s is not wired up on the CMake ports: %s has to\n"
             "    be there from the process's first allocation, and its own launch line is a\n"
             "    shell fragment ('cd <dir> && %s'), not the plain command\n"
             "    WEBKIT_MINI_BROWSER_PREFIX needs. Owed --\n"
-            "    docs/Urgent/HANDOFF-linux-minibrower.md. Use --mode samply against the\n"
+            "    docs/Urgent/HANDOFF-linux-minibrower.md. Use --profile=samply against the\n"
             "    browser, or profile the jsc shell instead." % (mode, mode, mode))
     if process_explicit and mode in ("sampling", "bytecode", "sysprof"):
-        die("--process is meaningless with --mode %s: it covers the whole browser\n"
-            "    process tree, not one process. Drop --process, or use --mode samply to pick one." % mode)
+        die("--process is meaningless with --profile=%s: it covers the whole browser\n"
+            "    process tree, not one process. Drop --process, or use --profile=samply to pick one." % mode)
 
     type_flag = "--%s" % cfg.type.lower()
     launch_env = "WPE_BROWSER=minibrowser"
@@ -169,23 +118,16 @@ def browser_target(cfg, url, process, process_explicit, mode, args, outdir):
     return subject, "%s %s" % (launch_env, launch_cmd), mb_prefix
 
 
-def main(argv, reg=None):
+def main(args, cmd, reg=None):
     name = store.ws_name()
-    o = parse(argv)
-
-    if o.get("list"):
-        for m in MODES:
-            log(m)
-        return 0
+    o = options(args)
 
     if o["process"] not in ("ui", "web", "network", "gpu"):
         die("no such process '%s' -- there are: ui web network gpu" % o["process"])
 
     require_name(name)
 
-    # Every refusal that reads only the arguments comes first: resolving the
-    # workspace walks the fleet, and an argument error paid for that walk before
-    # saying what was wrong with the command line.
+    # Every refusal that reads only the arguments comes first: resolving the workspace walks the fleet.
     if o.get("attach") and o.get("browser"):
         die("--attach and --browser are two ways to name the same thing: one starts\n"
             "    the browser under the profiler, the other profiles a process that is\n"
@@ -194,7 +136,7 @@ def main(argv, reg=None):
         die("--process only makes sense with --browser: it names which of\n"
             "    MiniBrowser's own processes (ui, web, network, gpu) to point the profiler\n"
             "    at, and without --browser there is no MiniBrowser to name one of.")
-    reg = reg or targets.Registry(ROOT)
+    reg = reg or targets.Registry(images.root())
 
     config = store.build_config() or reg.default_config(name)
     try:
@@ -259,7 +201,7 @@ def main(argv, reg=None):
     if mode == "sampling":
         if attach:
             die("the sampling profiler is a JSC option, not an attach: it has to be\n"
-                "    on when the process starts. Use --mode samply (or instruments) to profile\n"
+                "    on when the process starts. Use --profile=samply (or instruments) to profile\n"
                 "    something already running.")
         if browser:
             jsc_env.append("JSC_useSamplingProfiler=1")
@@ -301,17 +243,17 @@ def main(argv, reg=None):
             wrap = "samply record --save-only -o %s --" % shlex.quote(artifact)
     elif mode == "sysprof":
         if cfg.xcode():
-            die("sysprof profiles Linux; '%s' is an Apple-port build. Use --mode instruments there." % config)
+            die("sysprof profiles Linux; '%s' is an Apple-port build. Use --profile=instruments there." % config)
         if attach:
             die("sysprof-cli records a command it launches, and samples the whole system while it\n"
-                "    runs; there is no attach. Use --mode samply to attach to a pid.")
+                "    runs; there is no attach. Use --profile=samply to attach to a pid.")
         needs = "sysprof-cli"
         artifact = os.path.join(outdir, "capture.syscap")
         wrap = "sysprof-cli --force %s --" % shlex.quote(artifact)
     elif mode == "instruments":
         if not cfg.xcode():
             die("xctrace profiles Mach-O processes on macOS; '%s' is a %s\n"
-                "    build. Use --mode samply there." % (config, cfg.buildsys))
+                "    build. Use --profile=samply there." % (config, cfg.buildsys))
         needs = "xctrace"
         artifact = os.path.join(outdir, "trace.trace")
         if attach:
@@ -322,7 +264,7 @@ def main(argv, reg=None):
         if cfg.xcode():
             die("%s is a Linux tool and this is an Apple-port build.\n"
                 "    For allocations on macOS use Instruments' Allocations template by hand --\n"
-                "    'wk profile --mode instruments' records Time Profiler only." % mode)
+                "    '--profile=instruments' records Time Profiler only." % mode)
         if attach:
             die("%s has to be there from the first allocation; there is nothing\n"
                 "    useful to attach to." % mode)
@@ -379,9 +321,7 @@ def main(argv, reg=None):
     info("%s: %s in '%s' (%s)" % (mode, subject, name, config))
     log("  output: %s" % outdir)
 
-    # exec_tty inherits this process's own stdio: the sampling report, the bytecode
-    # tier breakdown and a crash's error text all print here instead of being captured
-    # and dropped, and xctrace/an attached samply still get ctrl-c through the pty.
+    # exec_tty inherits this stdio, so reports and a crash's text print here, and xctrace/samply still get ctrl-c.
     r = target.exec_tty(name, ["bash", "-lc", "cd %s && %s" % (src, cmd)])
     if not r.ok:
         raise Refused(r.rc)
@@ -400,7 +340,7 @@ def main(argv, reg=None):
         except OSError:
             warn("could not copy '%s' out of '%s'" % (outdir, name))
 
-    closing_lines(mode, artifact, name)
+    closing_lines(cmd, mode, artifact, name)
     return 0
 
 
@@ -419,7 +359,7 @@ def info_lines_dry(name, tname, config, subject, bin_path, bin_present, outdir, 
             log("    " + line)
 
 
-def closing_lines(mode, artifact, name):
+def closing_lines(cmd, mode, artifact, name):
     if mode == "samply":
         log("  view it:  samply load %s          (in the workspace)" % artifact)
         log("            or --fetch it here and open it at profiler.firefox.com --")
@@ -437,14 +377,5 @@ def closing_lines(mode, artifact, name):
         log("    then: summary | bytecode <hash> | log <hash>")
     elif mode == "sampling":
         log("  the tier breakdown decides the next step: mostly FTL/DFG/Baseline")
-        log("  means the cost is in generated JS -- 'wk profile %s --mode bytecode'." % name)
-        log("  Mostly C/C++ means the engine itself -- '--mode native'.")
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
-    except KeyboardInterrupt:
-        sys.exit(130)
+        log("  means the cost is in generated JS -- 'wk %s %s --profile=bytecode'." % (cmd, name))
+        log("  Mostly C/C++ means the engine itself -- '--profile=native'.")

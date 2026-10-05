@@ -101,7 +101,7 @@ class KeyWorld(World):
     def keys(self, tags=None):
         for fork in REPOS:
             self._set_file(self.held + "/build_key_" + fork, "KEY:%s\n" % (tags or {}).get(fork, fork))
-            self._set_file("%s/build_key_%s.pub" % (self.secrets_dir, fork), pub_of("KEY:" + (tags or {}).get(fork, fork)) + "\n")
+            self._set_file("%s/build_key_%s.pub" % (self.keyring_dir, fork), pub_of("KEY:" + (tags or {}).get(fork, fork)) + "\n")
 
     def register(self, tags=None):
         for fork, repo in REPOS.items():
@@ -263,7 +263,7 @@ class TestTheElection(KeyTest):
         w.register({f: "peer-" + f for f in REPOS})
         self.run_verb("setup")
         self.assertEqual("KEY:peer-fork\n", w.files[w.held + "/build_key_fork"])
-        self.assertEqual(pub_of("KEY:peer-fork") + "\n", w.files[w.secrets_dir + "/build_key_fork.pub"])
+        self.assertEqual(pub_of("KEY:peer-fork") + "\n", w.files[w.keyring_dir + "/build_key_fork.pub"])
         self.assertFalse([a for a in w.peer_acts() if " adopt fork" in a])
 
     def test_one_nobody_could_judge_is_not_written_over_a_peers(self):

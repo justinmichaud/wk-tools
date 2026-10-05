@@ -103,7 +103,7 @@ _history_walled() {   # the wall is read-only mounts, so this asks the machine r
     [ ! -w "$g/objects" ]
 }
 
-_no_deploy_key() {   # the agent the fork aliases name, asked of the agent; the path is followed from ~/.ssh/config's own Include rather than written down here, so this reads the file ssh would (`wk push on|off` rewrites it). Exit 1 is "answered, holds nothing"; 2 is "could not be asked", which proves nothing and says nothing
+_no_deploy_key() {   # the agent the fork aliases name, asked of the agent; the path is followed from ~/.ssh/config's own Include rather than written down here, so this reads the file ssh would (`wk key push on|off` rewrites it). Exit 1 is "answered, holds nothing"; 2 is "could not be asked", which proves nothing and says nothing
     local conf sock rc=0
     conf=$(sed -n 's/^[[:space:]]*Include[[:space:]]*//p' "$HOME/.ssh/config" 2>/dev/null | head -1)
     [ -n "$conf" ] || return 1
@@ -124,16 +124,16 @@ if [ "$self" = git ]; then
             if [ "$verb" = push ] && _no_deploy_key; then
                 printf '\nwk: no deploy key reaches this workspace. The private halves are in an\n' >&2
                 printf '    ssh-agent on the host, which this workspace can only ask to sign, and\n' >&2
-                printf "    'wk push' is the switch over what it holds -- it is off, so github.com\n" >&2
+                printf "    'wk key push' is the switch over what it holds -- it is off, so github.com\n" >&2
                 printf '    has no identity to accept.\n' >&2
-                printf '    On the host:  wk push on\n' >&2
+                printf '    On the host:  wk key push on\n' >&2
             fi
             if _history_walled; then
                 printf '\nwk: git history is read-only in this session. An agent runs under bwrap\n' >&2
                 printf "    with this checkout's .git commit parts bound read-only, so nothing it\n" >&2
                 printf '    runs writes history -- a build, an edit and git status/diff/log all work.\n' >&2
                 printf '    A person\x27s own shell here (wk enter) is not walled, and on the host\n' >&2
-                printf "    'wk push on' lifts it for the next session.\n" >&2
+                printf "    'wk key push on' lifts it for the next session.\n" >&2
             fi
             exit "$rc" ;;
     esac

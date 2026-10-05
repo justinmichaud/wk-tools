@@ -205,7 +205,7 @@ class Build:
 
     def checkout_slot_commit(self):
         """Forced and cleaned: a killed webkit stage leaves the checkout mid-checkout. `-fd`, never `-fdx`: WebKitBuild holds the image workspace's slots."""
-        c, mirror = self.a.commit, Store(self.env).container_mirror()
+        c, mirror = self.a.commit, Store(self.env).container_mirror_dir()
         if not mirror:
             fail("WK_MIRROR names the mirror this container mounts (lib/wk/targets.py's Container), and it is not set")
         if not self.m.run(["git", "-C", self.src, "cat-file", "-e", c + "^{commit}"]).ok \

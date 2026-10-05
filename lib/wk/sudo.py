@@ -13,7 +13,7 @@ DEFAULT_TIMEOUT_MIN = "0.5"
 QUIESCE_PRIV = "/usr/local/libexec/wk-quiesce-priv"
 CARD_PRIV = "/usr/local/libexec/wk-card-priv"
 BOOT_PRIV = "/usr/local/libexec/wk-boot-priv"
-# A drop-in that out-ranks one of these three sudoers-allowlisted helpers costs 'wk quiesce'/'wk session' a password too.
+# A drop-in that out-ranks one of these three sudoers-allowlisted helpers costs 'wk quiesce' a password too.
 PRIV_HELPERS = (QUIESCE_PRIV, CARD_PRIV, BOOT_PRIV)
 
 _RULE_LINE = re.compile(r'^\s*\(.*\)')
@@ -190,7 +190,7 @@ class Sudo:
         if broke:
             act.warn("the drop-in is in force, but it now out-ranks a privileged helper:%s"
                      % "".join(" " + h for h in broke))
-            act.log("  those grants exist so 'wk quiesce' and 'wk session' need no password.")
+            act.log("  those grants exist so 'wk quiesce' needs no password.")
             act.log("  './setup --stage quiesce' reinstalls their rules under names that sort last.")
             return 1
         return 0

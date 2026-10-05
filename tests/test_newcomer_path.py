@@ -16,7 +16,7 @@ WORKSPACE_STEPS = (
     ("new", WS),
     ("build", WS, "jsc-release", "--detach"),
     ("status", WS),
-    ("logs", WS),
+    ("status", WS, "--log"),
     ("enter", WS, "--", "ls"),
     ("stop", WS),
     ("start", WS),

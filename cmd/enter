@@ -26,7 +26,7 @@ from wk.machine import is_linux  # noqa: E402
 def session_display_warning(env):
     if not targets.session_socket_present(env):
         warn("no benchmark session running; GPU-accelerated tests fall back to software rendering")
-        log("  start one with:  wk session on")
+        log("  start one with:  wk quiesce session on")
     else:
         session.here(ROOT, env).mode_warn()
 

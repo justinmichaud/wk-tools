@@ -2,7 +2,8 @@
 `# wk <name> ... -- <summary>` synopsis. Keys: where=, name= (with @N for the slot), takes=,
 ready=yes, group=, lifecycle, readonly, destructive, dryrun, nodryrun, opts, passthrough[=tail|=all], broker,
 outside, forward=no, here, bare=merged, post=, values=, config=, verbs=, default=, needs;
-`sub` lines override per verb (a command with verbs= keeps its opts on them), `flag` lines per flag of a command without; a `gone <word> <replacement>` line retires a flag or verb."""
+`sub` lines override per verb (a command with verbs= keeps its opts on them), `flag` lines per flag of a command without.
+An option declared both bare and with `=` (`--x,--x=`) takes a value only as `--x=v`."""
 
 import re
 from pathlib import Path
@@ -69,7 +70,6 @@ class Decl:
         self.nodryrun = False
         self.sub = []    # (verbs, {key: value})
         self.flag = []   # (flags, {key: value})
-        self.gone = {}
         self.synopsis = ""
         self._load()
 
@@ -85,10 +85,6 @@ class Decl:
             body = line[len("# wk:"):].strip()
             if body.startswith("sub "):
                 self.sub.append(self._override(body[4:]))
-                continue
-            if body.startswith("gone "):
-                word, _, replacement = body[5:].strip().partition(" ")
-                self.gone[word] = replacement.strip()
                 continue
             if body.startswith("flag "):
                 self.flag.append(self._override(body[5:]))
@@ -232,6 +228,14 @@ class Decl:
     def where_for(self, args):
         return self._answer("where", self.where, args)
 
+    def here_for(self, args):
+        v = self._answer("here", None, args)
+        return self.here if v is None else v == "yes"
+
+    def forward_for(self, args):
+        v = self._answer("here", None, args)
+        return self.forward if v is None else v != "yes"
+
     def passthrough_for(self, args):
         v = self._sub_override("passthrough", args[0] if args else "")
         return self.passthrough if v is None else v
@@ -262,7 +266,7 @@ class Decl:
 
     def valued_opts(self):
         specs = [self.opts] + [spec.get("opts") or "" for _, spec in self.sub + self.flag]
-        return {x[:-1] for spec in specs for x in spec.split(",") if x.endswith("=")}
+        return {x[:-1] for spec in specs for x in spec.split(",") if x.endswith("=") and not in_list(x[:-1], spec)}
 
     def synopsis_line(self):
         return self.synopsis.split(" -- ")[0]
@@ -306,7 +310,11 @@ class Args:
             if a == "--":
                 self.tail = argv[i:]
                 break
-            if in_list(a + "=", opts):
+            key, eq, given = a.partition("=")
+            if eq and in_list(key + "=", opts):
+                self._values.setdefault(key, []).append(given)
+                self.order.append(key)
+            elif in_list(a + "=", opts) and not in_list(a, opts):
                 self._values.setdefault(a, []).append(argv[i])
                 self.order.append(a)
                 i += 1

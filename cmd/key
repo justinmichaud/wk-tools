@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 #
-# wk key check|setup|set|deploy|show|ensure|sudo|backup -- the credentials this machine holds, its sudo policy and its settings backup
-# wk: where=host name=none group=sources needs gh,gh-auth takes=1 default=check verbs=check,setup,deploy,show,ensure,pub,sshtest,fingerprints,set,adopt,verdict,give,sudo,backup destructive setup,deploy,--replace dryrun setup,deploy,set,sudo,ensure,adopt,backup readonly check,show,pub,sshtest,fingerprints,verdict,give
+# wk key check|setup|set|deploy|show|ensure|push|sudo|backup -- the credentials this machine holds, whether a workspace can push, its sudo policy and its settings backup
+# wk: where=host name=none group=sources needs gh,gh-auth takes=1 default=check verbs=check,setup,deploy,show,ensure,pub,sshtest,fingerprints,set,adopt,verdict,give,push,sudo,backup destructive setup,deploy,--replace dryrun setup,deploy,set,sudo,ensure,adopt,backup readonly check,show,pub,sshtest,fingerprints,verdict,give
 # wk: sub show,ensure,pub,sshtest,fingerprints,set,adopt,verdict,give,sudo,backup needs=
 # wk: sub set,pub,sshtest,adopt,verdict,give takes=2
 # wk: sub set opts=--replace,--paste
 # wk: sub deploy,setup opts=--rotate
 # wk: sub sudo takes=2 opts=--target=,--all destructive=
 # wk: sub backup opts=--candidates
-# wk: gone register deploy
-# wk: gone share setup   (it elects the credential the fleet holds rather than pushing this machine's)
-# wk: gone claude set claude
-# wk: gone tailnet set tailnet
-# wk: gone tailnet-api set tailnet-api
+# wk: sub push where=local takes=2 needs= opts=--target=,--all destructive=on dryrun=yes
 #
 #   wk key setup      every credential this machine needs, and one working
 #                     credential of each kind on every workstation. The one
@@ -51,7 +47,7 @@
 #                       github-pat    what `git-webkit pr` opens a pull request
 #                                     with. Never enters a workspace: only the credential
 #                                     injector reads it, which reads GitHub
-#                                     with it whatever position `wk push` is in
+#                                     with it whatever position `wk key push` is in
 #                                     and writes only while it is on. A classic
 #                                     token with 'public_repo': a fine-grained
 #                                     one opens a pull request on every fork and
@@ -60,13 +56,13 @@
 #                                     unless it can open one on each fork and on
 #                                     the project that fork belongs to, each
 #                                     asked with the write itself. Rotating it
-#                                     while `wk push` is on hands the new one
+#                                     while `wk key push` is on hands the new one
 #                                     straight to the injector
 #                       bugzilla-api-key
 #                                     what `git-webkit pr` files and updates the
 #                                     bug with. Never enters a workspace either:
 #                                     the injector adds it to every
-#                                     bugs.webkit.org request while `wk push` is
+#                                     bugs.webkit.org request while `wk key push` is
 #                                     on and to none while it is off. Judged as
 #                                     the login WebKit's contributors.json gives
 #                                     this GitHub account
@@ -106,6 +102,49 @@
 #   wk key show       print the public halves, and the ntfy topic URL to point a
 #                     phone at
 #   wk key ensure     create missing push keys without registering them
+#   wk key push [on|off|status] [--target <machine>|--all] [--force]
+#                     whether a workspace can push to git at all (`status`,
+#                     the default, asks). Only the person at the keyboard
+#                     pushes: an agent in a workspace cannot publish anything,
+#                     while a shell there run by a human pushes normally. It is
+#                     a switch over credentials nothing in a workspace ever
+#                     holds: the deploy keys sit in an ssh-agent outside it, the
+#                     GitHub token and the Bugzilla key in the injector that
+#                     terminates TLS for api.github.com and bugs.webkit.org
+#                     (README.md has the mechanism).
+#                       on     the keys are in the agent and the token and the
+#                              Bugzilla key where the injector reads them:
+#                              `git push` and `git-webkit pr` work, the bug
+#                              included. A claude session in any workspace
+#                              would be handed that push, so `on` asks once and
+#                              ends every one of them
+#                       off    `ssh-add -D` empties the agent and both files go:
+#                              ssh has no identity to offer, and the injector
+#                              refuses a write with a 412 naming this switch
+#                     `status` asks the agent what it holds (`ssh-add -l`) and
+#                     the machine whether the credential files are there; there
+#                     is no state file. A machine runs an agent per kind of
+#                     workspace -- one in the podman machine the containers
+#                     mount its socket from, and on macOS one here for the
+#                     guests, reached through a forward (lib/wk/guest.py). `on`
+#                     and `off` switch every one or name the one they could not
+#                     reach; `status` says ON while any holds a key. It runs on
+#                     this machine (where=local), a build box included, and
+#                     `wk ai claude` turns it off before handing over control.
+#                       --target <machine>   ask that fleet machine, through its
+#                                            own wk. A build box holds no deploy
+#                                            key (`wk enter` forwards this
+#                                            machine's agent), so it reports off
+#                       --all                this machine and every other one
+#                                            (wk boot --list names them)
+#                       --force              `on` leaves a running claude session
+#                                            alone; it can push until it exits
+#                     Exit: 0 on (status) or done; 1 off (status) or failed, or
+#                     a build box with no key at rest; 3 a machine did not
+#                     answer, so its position is unknown -- never "off" (in the
+#                     podman machine, `on`/`off` switched its half and not the
+#                     host's guests'); 4 no deploy keys here at all; 5 no
+#                     switch here: no key, or one live at rest
 #   wk key sudo [status|setup] [--target <t>|--all]
 #                     make root cost a password, on a short leash: no blanket
 #                     NOPASSWD, and a 30-second cached-credential window
@@ -181,8 +220,8 @@
 # that reach named; one no network could be reached to judge is kept and
 # reported unverified.
 #
-# Runs on the machine that holds the keys: the secrets directory is this device's
-# (Store.secrets_dir), and on macOS the podman machine reads it as a mount, so every
+# Runs on the machine that holds the keys: the keyring is this device's
+# (Store.keyring_dir), and on macOS the podman machine reads it as a mount, so every
 # subverb here is ssh-keygen, a file and `gh`, with no VM in the path.
 #
 # `setup`, `deploy` and `check` are the only ones that call the GitHub API, which
@@ -198,17 +237,31 @@ from wk import images  # noqa: E402
 
 ROOT = images.root()
 
-from wk import backup, decl, sudo  # noqa: E402
+from wk import backup, decl, pushswitch, sudo  # noqa: E402
 from wk.key import cli  # noqa: E402
 from wk.act import Refused  # noqa: E402
+from wk.clock import Clock  # noqa: E402
 from wk.machine import Local, is_macos  # noqa: E402
 from wk.targets import Registry  # noqa: E402
 
 
-def main(argv, env=None, reg=None, machine=None, macos=None):
+def push_target(args):
+    """The last of --target <machine> and --all as typed, or ""."""
+    named = {"--all": "--all" if args.flag("--all") else None, "--target": args.value("--target")}
+    target = ""
+    for opt in args.order:
+        if named.get(opt) is not None:
+            target = named[opt]
+    return target
+
+
+def main(argv, env=None, reg=None, machine=None, macos=None, clock=None, out=None):
     args = decl.Args(decl.Decl(__file__), argv)
     words = args.positionals
     verb = words[0]
+    if verb == "push":
+        return pushswitch.main(ROOT, words[1:], push_target(args), reg or Registry(ROOT, os.environ if env is None else env),
+                               clock or Clock(), out)
     if verb == "sudo":
         return sudo.main(words[1:], args.value("--target"), args.flag("--all"),
                          reg or Registry(ROOT, os.environ if env is None else env, Local()), env=env)

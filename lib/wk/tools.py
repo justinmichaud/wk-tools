@@ -55,6 +55,18 @@ def committed(root, here):
             "    Commit them and re-run:\n        git -C %s status --short\n        git -C %s commit -a" % (NOT_A_COMMIT, root, root))
 
 
+def identity(root, here):
+    head = here.run(["git", "-C", root, "rev-parse", "HEAD"])
+    if not head.ok:
+        return {"sha": "-", "dirty": "unknown"}
+    status = here.run(["git", "-C", root, "status", "--porcelain", "--untracked-files=no"])
+    return {"sha": head.out.strip(), "dirty": "no" if status.ok and not status.out.strip() else "yes"}
+
+
+def identity_text(ident):
+    return "sha=%s\ndirty=%s\n" % (ident["sha"], ident["dirty"])
+
+
 def sha_matches(a, b):
     """`git rev-parse --short` picks its own length per repository, so one abbreviation can be a prefix of the other."""
     return bool(a and b and (a.startswith(b) or b.startswith(a)))

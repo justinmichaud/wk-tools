@@ -77,7 +77,7 @@ class Election:
                     warn("%s: %s's deploy key did not arrive, so nothing was changed (an older wk-tools there has no 'give': "
                          "wk sync --tools %s)" % (repo, winner, winner))
                     return False
-                log("  an ssh-agent already holding the old key keeps offering it:  wk push off && wk push on")
+                log("  an ssh-agent already holding the old key keeps offering it:  wk key push off && wk key push on")
         ok = self.register_fork(fork, repo)
         if not self.fleet_on:
             return ok

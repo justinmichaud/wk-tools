@@ -8,7 +8,7 @@ import unittest
 
 from tests.support import BLIND_FLEET, REPO, run
 
-REPORTS = (("status",), ("ls",), ("logs", "nosuch"), ("disk",), ("doctor",))
+REPORTS = (("status",), ("ls",), ("status", "nosuch", "--log"), ("doctor",))
 PLACES = {"store": {"WK_IN_VM": "1"}, "workstation": {}}
 TOOLS = ("ssh", "scp", "rsync", "podman", "tart", "tailscale", "sudo", "systemctl", "launchctl", "gh", "nmap")
 # A tool followed by one of these words acts; the power verbs and the copies act whatever follows.

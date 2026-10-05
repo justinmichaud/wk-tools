@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk sync [<workspace>|--mirror|--target <t>|--all|--tools [<t>]] [--fix] -- bring WebKit and the tooling up to date
-# wk: where=dynamic name=optional group=sources needs git dryrun opts --all,--target=,--tools,--machine,--mirror,--fix broker --mirror
+# wk: where=dynamic name=optional group=sources needs git dryrun opts --all,--target=,--tools,--mirror,--fix broker --mirror
 #
 # A fetch, and never a checkout: no branch is switched, merged or rebased, here
 # or in a workspace. Safe to run at any time -- workspaces already made stay
@@ -31,7 +31,7 @@
 # Each fetch also reads the checkout's wiring back: `origin` is upstream
 # (fetch-only, push URL `no-push://`), each fork pushes over ssh through its
 # host alias, and a fetch reads the machine's mirror. A deviation is named
-# under the workspace, and so is one in the base snapshot every new workspace
+# under the workspace, and so is one in the snapshot every new workspace
 # starts from.
 #
 #   --fix   before each fetch, re-assert the wiring, point the branch at the
@@ -66,13 +66,6 @@ USAGE = "usage: wk sync [<workspace>|--mirror|--target <target>|--all|--tools [<
 def parse(argv, name=""):
     """(scope, the workspace named, the target named, --fix): ws | here | target | all | tools | mirror."""
     args = decl.Args(decl.Decl(__file__), argv)
-    if args.flag("--machine"):
-        die("'wk sync --machine' is gone: it meant a machine's furniture and\n"
-            "    every workspace on it at once. Say which:\n"
-            "        wk sync --all         every workspace on every target\n"
-            "        wk sync --tools       every machine's wk-tools, mirror and snapshot\n"
-            "        wk sync --tools <t>   just that one's")
-
     scope, spelled, target = "", "", ""
 
     def set_scope(s, as_typed):
@@ -88,7 +81,6 @@ def parse(argv, name=""):
         target = values[0]
     tools = args.flag("--tools")
 
-    # --tools [<target>]: the sole positional, if there is one, is its optional value.
     positionals = list(args.positionals)
     if tools and positionals:
         target = positionals.pop(0)

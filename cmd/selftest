@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk selftest [--lint] [--unit] [--live] [-v] [<pattern>] -- run the test suite in tests/
-# wk: where=local name=none group=hosts needs python3 takes=1 opts --lint,--unit,--live,--quick,-v nodryrun
+# wk: where=local name=none group=hosts needs python3 takes=1 opts --lint,--unit,--live,-v nodryrun
 #
 # Three tiers, any combination; with none named, lint then unit run. A test
 # over WK_TEST_BUDGET seconds (30) fails; the summary prints the owed count and
@@ -50,8 +50,6 @@ def refuse_live_beside(lock):
 
 def main(argv):
     args = decl.Args(decl.Decl(__file__), argv)
-    if args.flag("--quick"):
-        act.die("--quick is gone: 'wk selftest' with no tier named runs lint then unit and makes no workspace")
     given = {"--lint": args.flag("--lint"), "--unit": args.flag("--unit"), "--live": args.flag("--live"), "-v": args.flag("-v")}
     run = [f for f, on in given.items() if on]
     for p in args.positionals:

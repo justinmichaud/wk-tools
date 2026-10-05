@@ -108,7 +108,7 @@ class Creds:
             return
         if not self.sec.switch_cred_converge(self.sec.machine_sock(), target, name):
             warn("the injector on this machine is still writing with the %s stored\n    before this one, so 'git-webkit pr' in a "
-                 "workspace spends that: 'wk push off'\n    then 'wk push on' hands it the one stored here." % name)
+                 "workspace spends that: 'wk key push off'\n    then 'wk key push on' hands it the one stored here." % name)
 
     def set(self, name, replace=False, paste=False, value=None):
         """`wk key set`: 0 when what is stored can do its job."""

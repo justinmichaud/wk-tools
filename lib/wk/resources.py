@@ -32,7 +32,7 @@ class Resources:
 
     # Written by provisioning at the store's default path, before any wk command can derive $WK_STORE.
     def headless_marker(self):
-        return os.path.join(Store(self.env).provisioned_root(), ".headless")
+        return os.path.join(Store(self.env).provisioned_store_dir(), ".headless")
 
     def workspace_marker(self):
         return workspace_marker_path(self.env)
@@ -243,7 +243,7 @@ class Budget:
         if free >= need:
             return
         act.barrier("%d GB free on %s; %s wants about %d GB.\n    It would halt part-built rather than fill the disk. 'wk gc' reclaims what\n"
-                    "    nothing references, 'wk gc --purge-builds' the build trees images come out\n    of, and 'wk disk' says where the rest went."
+                    "    nothing references, 'wk gc --purge-builds' the build trees images come out\n    of, and 'wk doctor' says where the rest went."
                     % (free, where, what, need))
 
     def admit(self, what, jobs, running):

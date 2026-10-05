@@ -7,9 +7,9 @@
 # it reaches, asks once, and removes what a plain run may: what loses no work --
 # unreferenced snapshots, abandoned payload seeds, ccache and tart's image cache
 # down to their budgets, dangling images, a killed selftest's workspaces. The
-# rest is named with the flag or command that takes it. 'wk disk' shows the same rows.
+# rest is named with the flag or command that takes it. 'wk doctor' shows the same rows.
 #
-#   --purge-mirror   the mirror and every base snapshot ('wk sync' refetches);
+#   --purge-mirror   the mirror and every snapshot ('wk sync' refetches);
 #                    refused while a workspace or guest exists
 #   --purge-pmos     the pmbootstrap chroots on the pmos build hosts
 #   --purge-builds   image build trees, and every finished stage on the Mac's

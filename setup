@@ -168,15 +168,15 @@ fi
 
 if is_linux && [ "$STAGE" = all ]; then
     _todo=""
-    have cage || _todo="$_todo\n  - cage is not installed; 'wk session on' cannot start a compositor"
+    have cage || _todo="$_todo\n  - cage is not installed; 'wk quiesce session on' cannot start a compositor"
     [ -x /usr/local/libexec/wk-quiesce-priv ] \
-        || _todo="$_todo\n  - the privileged helper is missing; 'wk quiesce' and 'wk session' will not work"
+        || _todo="$_todo\n  - the privileged helper is missing; 'wk quiesce' will not work"
     case " $(id -nG "$(id -un)") " in   # group membership only reaches a process at login, so configured is not yet active
         *" render "*)
             case " $(id -nG) " in
                 *" render "*) ;;
                 *) _todo="$_todo\n  - the 'render' group is configured but not active in this shell;"
-                   _todo="$_todo\n    log out and back in (or 'wk session on' grants access via logind's ACL)" ;;
+                   _todo="$_todo\n    log out and back in (or 'wk quiesce session on' grants access via logind's ACL)" ;;
             esac ;;
         *) _todo="$_todo\n  - not in the 'render' group; /dev/dri is unreachable from an ssh session" ;;
     esac

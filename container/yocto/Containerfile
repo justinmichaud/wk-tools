@@ -131,7 +131,7 @@ RUN userdel -r ubuntu 2>/dev/null || true
 # teaches the guard about this one.
 # docs/Urgent/HANDOFF-profile.md's tool list, for parity with the SDK
 # workspace (container/firstrun.sh installs the same set there, which is the
-# image 'wk profile' actually runs against -- this repo owns no Containerfile
+# image 'wk run --profile' actually runs against -- this repo owns no Containerfile
 # for the SDK image itself, only sdk-patches/apply.sh, which patches its
 # scripts, not its filesystem). heaptrack, valgrind and sysprof are Ubuntu
 # packages; samply ships no .deb, so it is a pinned, checksummed release

@@ -145,7 +145,6 @@ CONF_ENV = {"driver": "WK_TARGET_KIND", "host": "WK_REMOTE_HOST", "hostname": "W
             "store": "WK_REMOTE_STORE", "cmake": "WK_TARGET_CMAKE", "libcxx": "WK_TARGET_LIBCXX", "wpe": "WK_TARGET_WPE",
             "build_args": "WK_BUILD_ARGS"}
 PER_CONFIG = ("cmake", "build_args")   # also `<key>_<config>`, the config's dashes as underscores: one build config's own
-RETIRED = {"max_jobs": "the job count is derived per build from what that machine has free. Delete the line."}
 
 
 def conf_key(k):
@@ -160,8 +159,6 @@ def conf_key(k):
 
 def conf_env(conf, path):
     for k in sorted(conf):
-        if k in RETIRED:
-            raise LookupError("%s: %s is not read: %s" % (path, k, RETIRED[k]))
         if k != "kind" and conf_key(k) is None:
             raise LookupError("%s: %s is not a key a build machine's conf takes (%s, or %s_<config>)"
                               % (path, k, ", ".join(CONF_ENV), "|".join(PER_CONFIG)))
@@ -229,7 +226,7 @@ class Registry:
         return self.self_target() or "container"
 
     def vm_listed(self):
-        return self.store.vm_store() is not None
+        return self.store.vm_store_apart()
 
     def all(self):
         out = ["container"]
@@ -377,7 +374,7 @@ class Registry:
     def default_config(self, name):
         """The last build's config, from its task record; else the target's own platform default."""
         target = self.load(self.ws_target(name))
-        rec = record.Records(target.store.record_dir(), env=target.env).find("build", name)
+        rec = record.Records(target.store.records_dir(), env=target.env).find("build", name)
         cfg = rec.field("config") if rec else ""
         if cfg:
             act.info("config: %s -- what '%s' was last built with" % (cfg, name))
@@ -644,7 +641,7 @@ class Target:
         return self.info(ws) if st == "present" else st
 
     def create_log(self, ws):
-        return os.path.join(self.store.root(), "log", "new-%s.log" % ws)
+        return os.path.join(self.store.store_dir(), "log", "new-%s.log" % ws)
 
     def store_init(self):
         raise NotImplementedError
@@ -832,7 +829,7 @@ class Container(Target):
         return self.machine if self.is_here() else PodmanVm(self.podman_machine(), via=self.machine)
 
     def task_store(self):
-        return None if self.is_here() else (self.store_machine, self.store.root())
+        return None if self.is_here() else (self.store_machine, self.store.store_dir())
 
     def agent_sock(self):
         return "/run/wk/ssh-agent.sock"
@@ -853,7 +850,7 @@ class Container(Target):
 
     def mirror_dir(self):
         """Mounted at this machine's own path, so a `--shared` snapshot's alternates resolve on both sides."""
-        return self.store.mirror()
+        return self.store.mirror_dir()
 
     def sdk(self):
         if in_vm(self.env):
@@ -911,10 +908,10 @@ class Container(Target):
     def branch(self, ws):
         head = os.path.join(self.store.ws_dir(ws), "changes", ".git", "HEAD")
         if not self.machine.exists(head):
-            base = self.store.ws_base_id(ws)
+            base = self.store.ws_snapshot_id(ws)
             if not base:
                 return "-"
-            head = os.path.join(self.store.base_path(base), ".git", "HEAD")
+            head = os.path.join(self.store.snapshot_tree(base), ".git", "HEAD")
         try:
             ref = self.machine.read(head).strip()
         except OSError:
@@ -987,14 +984,14 @@ class Container(Target):
         return self.machine.run(self.podman() + ["container", "exists", self.ctr(ws)]).ok
 
     def store_init(self):
-        root = self.store.root()
+        root = self.store.store_dir()
         for d in ("", "git", "base", "ws", "cache/ccache", "cache/yocto/downloads", "cache/yocto/sstate", "cache/buildroot/dl",
                   "cache/buildroot/ccache", "cache/bench", "skills"):
             self.machine.mkdir(os.path.join(root, d) if d else root)
         conf = os.path.join(root, "cache", "ccache", "ccache.conf")
         if not self.machine.exists(conf):
             self.machine.write(conf, self.ccache_conf())
-        for d in (self.store.secrets_dir(), self.store.agent_rw_dir()):
+        for d in (self.store.keyring_dir(), self.store.keyring_agent_rw_dir()):
             self.ensure_dir_mode(d, "0700")
         secrets.Secrets(self.root, self.env, self.machine).store_publish()
 
@@ -1027,18 +1024,18 @@ class Container(Target):
         return flags
 
     def create_flags(self, ws, base, arch):
-        ws_dir, store, mirror = self.store.ws_dir(ws), self.store.root(), self.store.mirror()
+        ws_dir, store, mirror = self.store.ws_dir(ws), self.store.store_dir(), self.store.mirror_dir()
         mirror_dir = os.path.dirname(mirror)
         res = Resources(self.machine, self.env, self.os())
         volumes = ["%s:%s:ro" % (self.tools_src(), TOOLS), "%s:%s:ro" % (mirror_dir, mirror_dir)]
         flags = ["--volume", volumes[0], "--volume", volumes[1], "--env", "WK_MIRROR=%s" % mirror,
-                 "--volume", "%s:/src/WebKit:O,upperdir=%s/changes,workdir=%s/overlay-work" % (self.store.base_path(base), ws_dir, ws_dir),
+                 "--volume", "%s:/src/WebKit:O,upperdir=%s/changes,workdir=%s/overlay-work" % (self.store.snapshot_tree(base), ws_dir, ws_dir),
                  "--volume", "%s/build:/src/WebKit/WebKitBuild" % ws_dir,
                  "--volume", "%s:/var/lib/wk/ws/%s" % (ws_dir, ws)]
         for sub, dest in (("cache/ccache", "/ccache"), ("cache/yocto", "/cache/yocto"), ("cache/buildroot", "/cache/buildroot"),
                           ("cache/bench", "/cache/bench"), ("skills", "/skills")):
             flags += ["--volume", "%s/%s:%s" % (store, sub, dest)]
-        flags += ["--volume", "%s:/secrets:ro" % self.store.secrets_view_dir("container"),
+        flags += ["--volume", "%s:/secrets:ro" % self.store.keyring_view_dir("container"),
                   "--volume", "%s/agent-rw:/agent-rw" % store,
                   "--memory", "%dm" % res.envelope_mem_mb(), "--cpus", str(res.envelope_cores())]
         for pair in ("CCACHE_DIR=/ccache", "CCACHE_MAXSIZE=%s" % self.ccache_maxsize(), "CCACHE_BASEDIR=/src/WebKit",
@@ -1078,15 +1075,15 @@ class Container(Target):
 
     def create(self, ws, base=None, arch="native"):
         ws_dir = self.store.ws_dir(ws)
-        if not self.machine.isdir(self.store.base_path(base)):
-            act.die("base snapshot %s not found; run 'wk sync' first" % base)
+        if not self.machine.isdir(self.store.snapshot_tree(base)):
+            act.die("snapshot %s not found; run 'wk sync' first" % base)
         if self.exists(ws):
             act.die("workspace '%s' already exists" % ws)
         if not (self.sdk_image() or arch_image(arch)):
             self.check_sdk_tag()
         for d in (ws_dir, "changes", "overlay-work", "home", "build"):
             self.machine.mkdir(d if d == ws_dir else os.path.join(ws_dir, d))
-        self._ensure_home_mountpoint(ws_dir, os.path.dirname(self.store.mirror()))
+        self._ensure_home_mountpoint(ws_dir, os.path.dirname(self.store.mirror_dir()))
         self.machine.write(os.path.join(ws_dir, "arch"), arch + "\n")
         argv = self.create_argv(ws, base, arch)
         if self.sdk_image():
@@ -1258,10 +1255,9 @@ class Vm(Target):
     @property
     def store(self):
         if self._vm_store is None:
-            d = self.vm_store()
-            if d is None:
+            if not self.vm_store_apart():
                 act.die("the vm target has no store of its own on this machine -- set WK_VM_STORE apart from WK_STORE")
-            self._vm_store = Store(dict(self.env, WK_STORE=d))
+            self._vm_store = Store(dict(self.env, WK_STORE=Store(self.env).vm_store_dir()))
         return self._vm_store
 
     def user(self):
@@ -1305,7 +1301,7 @@ class Vm(Target):
             m = guest.vm_mem_mb(self.env)
         return m if m is not None else Resources(self.machine, self.env, "macos").envelope_mem_mb()
 
-    def agent_rw_dir(self):
+    def keyring_agent_rw_dir(self):
         return GUEST_SHARES + "/" + self.agent_rw_share
 
     def login_note(self):
@@ -1319,12 +1315,12 @@ class Vm(Target):
     def check_rows(self, ws):
         return guest.check_rows(self, ws)
 
-    def vm_store(self):
-        return Store(self.env).vm_store()
+    def vm_store_apart(self):
+        return Store(self.env).vm_store_apart()
 
     def vm_dir(self):
         """Where the guests' daemons and keys live, even where the vm store is the container's and lists no guest."""
-        return os.path.join(Store(self.env).vm_root(), "vm")
+        return os.path.join(Store(self.env).vm_store_dir(), "vm")
 
     def key(self):
         return os.path.join(self.vm_dir(), "id_ed25519")
@@ -1520,8 +1516,8 @@ class Vm(Target):
         return bin
 
     def store_init(self):
-        self.machine.mkdir(self.store.root())
-        self.machine.mkdir(os.path.join(self.store.root(), "ws"))
+        self.machine.mkdir(self.store.store_dir())
+        self.machine.mkdir(os.path.join(self.store.store_dir(), "ws"))
         self.ensure_dir_mode(self.vm_dir(), "0700")
 
     def _podman_up(self):
@@ -1555,7 +1551,7 @@ class Vm(Target):
         return names
 
     def create(self, ws, base=None, arch="native"):
-        v, ws_dir, mirror = self.vm(ws), self.store.ws_dir(ws), self.store.mirror()
+        v, ws_dir, mirror = self.vm(ws), self.store.ws_dir(ws), self.store.mirror_dir()
         if self.vm_state(ws) != "absent":
             act.die("workspace '%s' already exists" % ws)
         if not self.machine.isdir(mirror):
@@ -1650,7 +1646,7 @@ class LocalWorkspace(Target):
     def mirror_dir(self):
         if self.os() == "macos":
             return GUEST_MIRROR
-        return self.store.container_mirror() or self.store.mirror()
+        return self.store.container_mirror_dir() or self.store.mirror_dir()
 
     def arch(self, ws):
         return self.ws_arch
@@ -1711,6 +1707,7 @@ class Remote(Target):
     """A machine of its own, reached over ssh (or this machine, when ~/.wk-remote names the target)."""
 
     kind = "remote"
+    needs_base = False
 
     def __init__(self, name, root, env, machine):
         super().__init__(name, root, env, machine)
@@ -1721,7 +1718,6 @@ class Remote(Target):
         except LookupError:
             here_target = ""
         self.is_local = bool(env.get("WK_REMOTE_LOCAL")) or (bool(here_target) and here_target == name)
-        self.needs_base = self.is_local
         self.conf_root = env.get("WK_REMOTE_ROOT", "")
         root_there = self.conf_root or (default_root(env.get("HOME", os.path.expanduser("~"))) if self.is_local else "")
         if self.is_local and root_there:
@@ -1990,15 +1986,15 @@ class Remote(Target):
     def wk_far(self, env):
         return "cd $HOME && ", self.tools("") + "/wk", env
 
-    def hand_over(self, cmd, args, tty, readonly=False):
+    def hand_over(self, cmd, args, tty, readonly=False, env=None):
         """The far side's wk running `cmd`; a box at another wk-tools commit is refused it, or warned on a read-only one."""
         self.far_wk_or_die(cmd)
         if not self.peer:
             self.tools_level_or_refuse(cmd, readonly)
-        return self.machine.argv(self.wk_cmd([cmd, *args], dict(os.environ, WK_ROW_LABEL=self.name)), tty=tty)
+        return self.machine.argv(self.wk_cmd([cmd, *args], dict(env or os.environ, WK_ROW_LABEL=self.name)), tty=tty)
 
     def tools_level_or_refuse(self, cmd, readonly):
-        theirs = kv.kv(self.wk("version", quiet=True)[1]).get("sha", "")
+        theirs = kv.kv(self.wk("doctor", "--probe-tools", quiet=True)[1]).get("sha", "")
         mine = self.here.run(["git", "-C", self.root, "rev-parse", "HEAD"]).out.strip()
         if tools.sha_matches(theirs, mine):
             return
@@ -2023,8 +2019,8 @@ class Remote(Target):
         return False
 
     def store_init(self):
-        self.here.mkdir(self.store.root())
-        self.here.mkdir(os.path.join(self.store.root(), "ws"))
+        self.here.mkdir(self.store.store_dir())
+        self.here.mkdir(os.path.join(self.store.store_dir(), "ws"))
 
     def reference(self):
         """A shared WebKit checkout this machine's admins keep (named in the conf, or by its MOTD), verified to hold main."""
@@ -2068,15 +2064,15 @@ class Remote(Target):
 
     def sync(self, named=False):
         """A peer pulls, and publishes its own snapshot only once it matches this checkout and was named."""
-        tools, host = self.tools(""), self.label()
+        far_tools, host = self.tools(""), self.label()
         if self.peer:
-            r = self._sh_act("cd %s && git pull --ff-only" % shlex.quote(tools))
+            r = self._sh_act("cd %s && git pull --ff-only" % shlex.quote(far_tools))
             show(r)
             if not r.ok:
                 sys.stderr.write("  %-24s git pull --ff-only failed there\n" % self.name)
                 return False
-            mine = kv.kv(self.here.run(["env", "WK_ROOT=" + self.root, os.path.join(self.root, "cmd", "version")]).out)
-            theirs = kv.kv(self._sh(shlex.quote(tools + "/cmd/version")).out)
+            mine = tools.identity(self.root, self.here)
+            theirs = kv.kv(self._sh(shlex.quote(far_tools + "/wk") + " doctor --probe-tools").out)
             if not mine.get("sha") or (mine.get("sha"), mine.get("dirty")) != (theirs.get("sha"), theirs.get("dirty")):
                 sys.stderr.write("  %-24s pulled, still DIFFERS (%s, this machine has %s)\n  %-24s %s\n"
                                  % (self.name, _ident(theirs), _ident(mine), "", tools_why_behind(self.here, self.root)))
@@ -2107,7 +2103,7 @@ class Remote(Target):
         st = self.info(ws)
         if st == "creating":
             act.die("'%s' on %s is a checkout that never finished being\n    made, and destroying it did not take. Remove it by hand and try again:\n"
-                    "        ssh %s rm -rf %s" % (ws, host, host, shlex.quote(wsd)))
+                    "        rm -rf %s" % (ws, host, shlex.quote(wsd)))
         if st == "unreachable":
             act.die("cannot reach %s to create '%s'" % (host, ws))
         if st != "absent":
@@ -2154,10 +2150,11 @@ class Remote(Target):
         return None if self.peer or self.is_local else (self.machine, self.root_there())
 
     def destroy(self, ws):
-        """The record here outlives anything the far side has not confirmed gone: a re-run finds it and retries."""
+        """Another machine's own wk destroys its workspace; the record here outlives anything it has not confirmed gone."""
         host = self.label()
-        if self.peer:
-            r = self._sh_act(self.wk_cmd(("rm", ws), dict(self.env, WK_YES="1")) + " 2>&1")
+        if not self.is_local:
+            self._probe_or_die()
+            r = self.here.act_run(self.hand_over("rm", [ws], tty=False, env=dict(os.environ, WK_YES="1")))
             show(r)
             if not r.ok:
                 act.die("%s did not destroy '%s'; what its own wk said is above.\n    Nothing here was changed -- re-run 'wk rm %s' once that is settled." % (host, ws, ws))
@@ -2165,14 +2162,13 @@ class Remote(Target):
             self._peer_rows = None   # the listing read before the removal is what the read-back must not see
             act.info("'%s' destroyed on %s, by that machine's own wk" % (ws, host))
             return
-        self._probe_or_die()
         wsd = self.ws_dir_there(ws)
         r = self._sh_act("rm -rf %s" % shlex.quote(wsd))
         show(r)
         if not r.ok:
-            act.die("could not remove %s on %s; what ssh said is above.\n    The record of '%s' here is kept -- re-run 'wk rm %s' once it answers." % (wsd, host, ws, ws))
+            act.die("could not remove %s (above); re-run 'wk rm %s'" % (wsd, ws))
         self.here.remove(self.store.ws_dir(ws))
-        act.info("removed remote workspace '%s' from %s" % (ws, host))
+        act.info("removed workspace '%s' (%s)" % (ws, wsd))
 
 
 PROBE_SCRIPT = """
@@ -2279,7 +2275,7 @@ def store_state(store):
                 digest = hashlib.sha256(f.read()).hexdigest()
         out[p] = (st.st_mode, digest)
 
-    for top, deep in ((store.root(), False), (store.secrets_dir(), True), (store.agent_rw_dir(), False)):
+    for top, deep in ((store.store_dir(), False), (store.keyring_dir(), True), (store.keyring_agent_rw_dir(), False)):
         for d, dirs, files in os.walk(top):
             note(d)
             for f in files:

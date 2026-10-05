@@ -167,7 +167,7 @@ class AB:
             die("--release is required for a commit or a branch: only a pull request\n"
                 "    has a base branch saying which image it is for ('wk sysimage configs' has\n"
                 "    every release; --release 2.52).")
-        self.mirror = self.store.mirror()
+        self.mirror = self.store.mirror_dir()
         if not self.here.isdir(self.mirror):
             die("no mirror at %s; 'wk sync' makes one. Both commits are resolved in it." % self.mirror)
         if self.pr["kind"] == "commit":
@@ -598,7 +598,7 @@ class AB:
 
     def run(self, steps):
         order = sched.plan_order(steps)
-        recs = progress.Records(self.store.record_dir(), clock=self.clock, env=self.env, machine=self.here)
+        recs = progress.Records(self.store.records_dir(), clock=self.clock, env=self.env, machine=self.here)
         t = recs.begin("ab", "here", self.task, "wk bench ab %s --kill" % self.task, os.path.join(self.logdir(), "ab.log"),
                        [s.command for s in order])
         t.set("subject", self.subject())
@@ -645,7 +645,7 @@ class AB:
 
 def kill(reg, clock, task):
     """`wk bench ab <task> --kill`: the A/B's process and every step it started, the record ended cancelled once they are gone."""
-    recs = progress.Records(reg.store.record_dir(), clock=clock, env=reg.env, machine=reg.machine)
+    recs = progress.Records(reg.store.records_dir(), clock=clock, env=reg.env, machine=reg.machine)
     t = recs.find("ab", task)
     if t is None:
         die("no A/B task '%s' was started from this machine.\n    'wk bench ls' names the tasks and 'wk status' the one running." % task)

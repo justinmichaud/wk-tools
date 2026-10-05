@@ -69,7 +69,7 @@ class TestMachineWins(RmFinalStateTest):
         """A snapshot whose tree moved is not the one the record names: new builds on neither, and leaves it as it is."""
         w = World(self.tmp)
         w.react(["git", "-C"], lambda a, f: Result(0, "b" * 40 + "\n") if a[3:] == ["rev-parse", "HEAD"] else World._git(w, a, f))
-        base = w.target.store.base_dir()
+        base = w.target.store.snapshots_dir()
         for given in ("", "main-1"):
             w.effects = []
             self.refused(lambda: workspace.new_driver(w.target, w.records, w.lock, w.clock, "ws", given, "native"))

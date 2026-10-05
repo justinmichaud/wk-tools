@@ -55,7 +55,7 @@ TARGETS = {
             "remedy": "'wk sync --tools buildbox4' from a clean tree here"},
 }
 
-# cmd/push's scan, and `ps` where there is no /proc (a macOS guest).
+# lib/wk/pushswitch.py's scan, and `ps` where there is no /proc (a macOS guest).
 AGENT_SCAN = r'''if [ -d /proc/self ]; then
     for e in /proc/[0-9]*/exe; do
         case "$(readlink "$e" 2>/dev/null)" in
@@ -217,7 +217,7 @@ def tail(text, n=40):
 
 class PushGuard:
     """Push stays on while this is held: a child in a session of its own reads a pipe only this process writes, and
-    runs `wk push off` when it closes -- at release(), or when this process ends however it ends."""
+    runs `wk key push off` when it closes -- at release(), or when this process ends however it ends."""
 
     def __init__(self, off_argv):
         self.log = tempfile.NamedTemporaryFile(prefix="wk-integ-push-guard-", suffix=".log", delete=False)
@@ -281,7 +281,7 @@ class TargetSteps:
             rc, text = cls.guard.release()
             cls.guard = None
             if rc != 0:
-                sys.stderr.write("[%s] push guard: 'wk push off' exited %d:\n%s\n" % (cls.ws, rc, text))
+                sys.stderr.write("[%s] push guard: 'wk key push off' exited %d:\n%s\n" % (cls.ws, rc, text))
 
     # -- helpers
 
@@ -295,7 +295,7 @@ class TargetSteps:
 
     def push_args(self, verb, *more):
         machine = self.conf["machine"]
-        return ("push", verb) + (("--target", machine) if machine else ()) + more
+        return ("key", "push", verb) + (("--target", machine) if machine else ()) + more
 
     def record(self):
         return workspace_record(wk("status", self.ws, "--records", timeout=300).out, self.ws)
@@ -319,18 +319,18 @@ class TargetSteps:
         return [p for p in wk("enter", ws, "--", "sh", "-c", AGENT_SCAN, timeout=120).out.split() if p.isdigit()]
 
     def foreign_sessions(self):
-        """Workspaces on the switch's machine the test did not make, with a claude process in them: `wk push on` ends or arms it."""
+        """Workspaces on the switch's machine the test did not make, with a claude process in them: `wk key push on` ends or arms it."""
         host = self.conf["machine"] or support.THIS_HOST
         return [n for n, t, st in ls_rows(wk("ls", timeout=300).out)
                 if not n.startswith(PREFIX) and st == "running" and t.split(":")[0].lower() == host and self.agent_pids(n)]
 
     def need_push_target(self):
         if not self.conf["push"]:
-            self.skipTest("'%s' is a build machine, which has no push switch ('wk push' exits 5 there): "
+            self.skipTest("'%s' is a build machine, which has no push switch ('wk key push' exits 5 there): "
                           "its keys are live wherever they sit" % self.conf["machine"])
         foreign = self.foreign_sessions()
         if foreign:
-            self.skipTest("a claude session runs in %s, which this test did not make, and 'wk push on' "
+            self.skipTest("a claude session runs in %s, which this test did not make, and 'wk key push on' "
                           "would end it (or arm it, with --force)" % " ".join(foreign))
 
     def ensure_push_on(self):
@@ -339,17 +339,17 @@ class TargetSteps:
             cls.guard = PushGuard([str(WK), *self.push_args("off")])
         if wk(*self.push_args("status"), timeout=300).rc != 0:
             self.wk_ok(*self.push_args("on", "--yes"), timeout=600)
-        self.assertEqual(0, wk(*self.push_args("status"), timeout=300).rc, "push is not on after 'wk push on'")
+        self.assertEqual(0, wk(*self.push_args("status"), timeout=300).rc, "push is not on after 'wk key push on'")
 
     def push_off(self):
         cls = type(self)
         if cls.guard is not None:
             rc, text = cls.guard.release()
             cls.guard = None
-            self.assertEqual(0, rc, "'wk push off' (the guard's) exited %d:\n%s" % (rc, tail(text)))
+            self.assertEqual(0, rc, "'wk key push off' (the guard's) exited %d:\n%s" % (rc, tail(text)))
         else:
             self.wk_ok(*self.push_args("off"), timeout=600)
-        self.assertEqual(1, wk(*self.push_args("status"), timeout=300).rc, "push is not off after 'wk push off'")
+        self.assertEqual(1, wk(*self.push_args("status"), timeout=300).rc, "push is not off after 'wk key push off'")
 
     @classmethod
     def stop_background(cls):
@@ -446,13 +446,13 @@ class TargetSteps:
             cls = type(self)
             cls.guard = PushGuard([str(WK), *self.push_args("off")])
             self.wk_ok(*self.push_args("on", "--force", "--yes"), why="--force keeps the session and loads the keys")
-            self.assertEqual(0, wk(*self.push_args("status")).rc, "push is not on after 'wk push on --force'")
+            self.assertEqual(0, wk(*self.push_args("status")).rc, "push is not on after 'wk key push on --force'")
             self.assertTrue(set(pids) & set(self.agent_pids(self.ws)), "--force ended the claude session it was to keep")
-            inside = wk("enter", self.ws, "--", "bash", "-lc", "wk push on --force", timeout=120)
-            self.assertNotEqual(0, inside.rc, "'wk push on --force' worked inside '%s':\n%s" % (self.ws, tail(inside.out)))
+            inside = wk("enter", self.ws, "--", "bash", "-lc", "wk key push on --force", timeout=120)
+            self.assertNotEqual(0, inside.rc, "'wk key push on --force' worked inside '%s':\n%s" % (self.ws, tail(inside.out)))
             self.assertIn("throws the credential switch", inside.out)
             self.push_off()
-            self.assertTrue(self.agent_pids(self.ws), "the claude session ended before 'wk push on' was asked about it")
+            self.assertTrue(self.agent_pids(self.ws), "the claude session ended before 'wk key push on' was asked about it")
             cls.guard = PushGuard([str(WK), *self.push_args("off")])
             on = self.wk_ok(*self.push_args("on", "--yes"))
             self.assertIn("ending the claude session", on.out)
@@ -478,7 +478,7 @@ class TargetSteps:
         state, config = last_build(self.record())
         if (state, config) != ("ok", "jsc-debug"):
             self.fail("the jsc-debug build in '%s' ended %s (%s):\n%s"
-                      % (self.ws, state, config, tail(wk("logs", self.ws, timeout=300).out, 60)))
+                      % (self.ws, state, config, tail(wk("status", self.ws, "--log", timeout=300).out, 60)))
 
     @step(8)
     def test_08_push_on(self):
@@ -499,7 +499,7 @@ class TargetSteps:
     @step(10)
     def test_10_claude_never_runs_with_push_on(self):
         """A Mac's container session is started in the podman machine, which holds half the switch and cannot throw the
-        host's: it refuses until `wk push off` here. Where the whole switch is in reach, it is thrown first."""
+        host's: it refuses until `wk key push off` here. Where the whole switch is in reach, it is thrown first."""
         self.need_push_target()
         self.ensure_push_on()
         if self.target == "container" and sys.platform == "darwin":
@@ -615,7 +615,7 @@ def target_unready(target):
         side, why = t.probe()
         if side != "answering":
             return "'%s' does not answer (%s %s)" % (conf["machine"], side, why)
-        rc, out = t.wk("version")
+        rc, out = t.wk("doctor", "--probe-tools")
         far = dict(l.partition("=")[::2] for l in out.splitlines() if "=" in l).get("sha", "")
         here = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
         if far != here:

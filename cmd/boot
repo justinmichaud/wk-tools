@@ -3,7 +3,7 @@
 # wk boot <machine> [options] -- put a machine into bench mode for one boot, then back
 #
 # wk: where=host name=none values=--list group=hosts broker * takes=1 dryrun destructive --boot-order
-# wk: opts --status,--prepare,--diag,--keep,--back,--disarm,--system=,--boot-order=,--image=,--list
+# wk: opts --status,--diag,--keep,--back,--disarm,--system=,--boot-order=,--list
 # wk: readonly --status,--diag
 #
 #   wk boot <machine> [--system <id>]              arm the one-shot and reboot
@@ -41,10 +41,8 @@ USAGE = "usage: wk boot <machine> [options]; see wk boot -h"
 
 def parse(argv):
     args = decl.Args(decl.Decl(__file__), argv)
-    if args.value("--image") is not None:
-        die("renamed: --system <id> (a bootable artifact is a system, never bare\n    'image' -- wk help architecture)")
     asked = (("status", args.flag("--status")), ("diag", args.flag("--diag")), ("keep", args.flag("--keep")),
-             ("back", args.flag("--back")), ("disarm", args.flag("--disarm")), ("prepare", args.flag("--prepare")),
+             ("back", args.flag("--back")), ("disarm", args.flag("--disarm")),
              ("boot-order", args.value("--boot-order") is not None))
     chosen = [a for a, on in asked if on]
     if len(chosen) > 1 or len(args.positionals) > 1:
@@ -60,9 +58,6 @@ def main(argv):
     if not args.positionals:
         die(USAGE)
     name = args.positionals[0]
-    if action == "prepare":
-        die("'wk boot %s --prepare' is now 'wk machine setup %s': it pushes this tree there and\n"
-            "    installs the privileged helpers (one sudo prompt, from a terminal)." % (name, name))
     if Registry(ROOT).in_workspace():
         return cli.broker(ROOT, name, action, args.value("--system") or "", os.environ)
     conf = cli.load_conf(ROOT, name, os.environ)

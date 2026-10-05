@@ -114,7 +114,7 @@ ensure_dir() { # <path> [mode] -- mode, if named, is asserted on every run
         chmod "${mode:-0755}" "$d" || die "cannot set mode ${mode:-0755} on $d"
         changed "create $d"
     fi
-    # In the podman machine the secrets directory is a read-only host mount, 0700.
+    # In the podman machine the keyring is a read-only host mount, 0700.
     [ -z "$mode" ] || [ "$(file_mode "$d")" = "${mode#0}" ] \
         || chmod "$mode" "$d" || die "cannot set mode $mode on $d"
 }

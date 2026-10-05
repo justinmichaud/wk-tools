@@ -1,4 +1,4 @@
-"""lib/wk/guest.py against a fake host: start and stop, the host daemons, the forwards and the guests' `wk push`."""
+"""lib/wk/guest.py against a fake host: start and stop, the host daemons, the forwards and the guests' `wk key push`."""
 import contextlib
 import io
 import json
@@ -190,7 +190,7 @@ class TestBothArms(GuestTest):
         self.assertIn("--net-softnet-block=0.0.0.0/0", run)
         self.assertIn("--net-softnet-allow=%s/32" % ADDR, run)
         self.assertIn("--dir=agent-rw:%s" % (self.tmp + "/store/agent-rw"), run)
-        self.assertIn("--dir=mirror:%s:ro,tag=wk-mirror" % os.path.dirname(self.vm.store.mirror()), run)
+        self.assertIn("--dir=mirror:%s:ro,tag=wk-mirror" % os.path.dirname(self.vm.store.mirror_dir()), run)
         self.assertEqual("wk-demo", run[-1])
         self.assertTrue(run[1].startswith("PATH=/usr/local/bin:"), "tart finds softnet through PATH")
         self.assertNotIn(self.vmdir + "/demo.unfiltered", self.w.files)
@@ -522,7 +522,7 @@ class TestTheForward(GuestTest):
     def test_a_start_forwards_the_host_broker_to_the_socket_the_guests_client_dials(self):
         self.assertTrue(quiet(guest.Guest(self.h, "demo", self.g).broker_forward)[0])
         (fwd,) = self.w.spawned(" -N ")
-        self.assertIn("/Users/admin/.wk-broker.sock:%s" % Store(self.w.env).broker_socket(), fwd)
+        self.assertIn("/Users/admin/.wk-broker.sock:%s" % Store(self.w.env).runtime_socket(), fwd)
         self.assertIn(self.h.forward_pidfile("demo", "broker"), self.w.files)
 
     def test_stopping_a_guest_ends_every_forward(self):
@@ -660,7 +660,7 @@ class TestTheLiveRemount(unittest.TestCase):
         """`live sync.guest_remount`: after the remount the guest reads the host mirror's main as the host does, and
         agent-rw, on the automount tag, is the mount it was."""
         vm, ws = self.found
-        host = vm.machine.run(["git", "-C", vm.store.mirror(), "rev-parse", "refs/heads/main"])
+        host = vm.machine.run(["git", "-C", vm.store.mirror_dir(), "rev-parse", "refs/heads/main"])
         rw = vm.exec(ws, ["sh", "-c", "mount | grep -F %s" % shlex.quote(" on %s (" % targets.GUEST_SHARES)], timeout=60)
         self.assertEqual(vm.remount_mirror(ws), "")
         r = vm.exec(ws, ["git", "-C", vm.mirror_dir(), "rev-parse", "refs/heads/main"], timeout=60)

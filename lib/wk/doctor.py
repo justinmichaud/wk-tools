@@ -177,18 +177,18 @@ def probe_store(store, machine, branches, env):
         except OSError:
             return False
 
-    mirror = store.mirror()
+    mirror = store.mirror_dir()
     if not machine.isdir(mirror):
         lines = ["mirror=no"]
     else:
         gap = [b for b in branches if not machine.run(["git", "-C", mirror, "rev-parse", "--verify", "--quiet", "refs/heads/" + b]).ok]
         lines = ["mirror=ok" if not gap else "mirror=gap " + " ".join(gap)]
-    lines.append("base=" + ("ok" if filled(store.base_dir()) else "no"))
-    lines.append("skills=" + ("ok" if filled(os.path.join(store.root(), "skills")) else "no"))
+    lines.append("base=" + ("ok" if filled(store.snapshots_dir()) else "no"))
+    lines.append("skills=" + ("ok" if filled(os.path.join(store.store_dir(), "skills")) else "no"))
     proxy = machine.run(["systemctl", "--user", "is-active", "--quiet", "wk-proxy.service"]).ok or sock("proxy.sock")
     lines.append("proxy=" + ("ok" if proxy else "no"))
     try:
-        pihosts = bool(machine.read(os.path.join(store.root(), "pi-hosts")))
+        pihosts = bool(machine.read(os.path.join(store.store_dir(), "pi-hosts")))
     except OSError:
         pihosts = False
     lines.append("pihosts=" + ("ok" if pihosts else "no"))
@@ -206,7 +206,7 @@ def report_store(out, gitremedy, fork_key, macos, want):
         rows = [miss("WebKit mirror carries no %s" % mirror[4:], "wk sync --mirror")]
     else:
         rows = [miss("WebKit mirror", "wk sync")]
-    rows.append(check("base snapshot", "wk sync", f.get("base") == "ok"))
+    rows.append(check("snapshot", "wk sync", f.get("base") == "ok"))
     rows.append(check("fork push key", "wk key deploy  (needs gh auth)", fork_key))
     rows.append(check("shared skills seeded", "./setup --stage vmtools" if macos else "./setup --stage machine", f.get("skills") == "ok"))
     rows.append(check("egress proxy running", "./setup --stage sdk, then systemctl --user status wk-proxy", f.get("proxy") == "ok"))
@@ -336,8 +336,8 @@ class Doctor:
     def paths(self):
         if self._paths is None:
             sec = secrets.Secrets(self.root, self.env, self.machine)
-            self._paths = {"push_held": self.store.push_held_dir(), "read_pat": sec.machine_read_pat(),
-                           "tailscale_api": sec.cred_path("tailnet-api"), "tailscale_authkey": sec.cred_path("tailnet"), "ntfy_topic": self.store.ntfy_topic_path()}
+            self._paths = {"push_held": self.store.keyring_push_dir(), "read_pat": sec.machine_read_pat(),
+                           "tailscale_api": sec.cred_path("tailnet-api"), "tailscale_authkey": sec.cred_path("tailnet"), "ntfy_topic": self.store.keyring_ntfy_topic()}
             self._paths.update(("secret." + r[0], sec.cred_path(r[0])) for r in secrets.agent_secrets())
         return self._paths
 
@@ -421,7 +421,7 @@ class Doctor:
 
     def local_state(self, path, kind, how):
         disp = "~" + path[len(self.home):] if path.startswith(self.home) else path
-        if self.macos_host and path.startswith(self.store.root() + "/"):
+        if self.macos_host and path.startswith(self.store.store_dir() + "/"):
             disp += " (podman VM)"
             if self.podman_state() != "running":
                 return unk("%s -- not visible while the podman machine is stopped" % disp, "%s: %s" % (kind, how))
@@ -434,15 +434,15 @@ class Doctor:
 
     def machine_local(self):
         store, p = self.store, self.paths()
-        for d in bench_record.task_roots(self.machine, store.record_dir()):
+        for d in bench_record.task_roots(self.machine, store.records_dir()):
             yield self.local_state(d, "backed-up", "benchmark runs and their provenance -- not regenerable at any price; a rerun is a "
                                    "different measurement; wk bench export <task> copies one out")
         if bench_record.tasks(bench_record.outside(store), self.machine):
             yield self.local_state(bench_record.outside(store), "backed-up", "bench tasks outside any workspace, which no command reads "
                                    "until each is moved into its workspace's bench/: wk gc names each one's move")
-        yield self.local_state(store.mirror(), "regenerable",
+        yield self.local_state(store.mirror_dir(), "regenerable",
                                "wk sync clones WebKit into it again (the one copy here; the podman VM and every tart guest read it)")
-        yield self.local_state(store.secrets_dir(), "regenerable", "wk key deploy makes new deploy keys (revoke the old ones on GitHub)")
+        yield self.local_state(store.keyring_dir(), "regenerable", "wk key deploy makes new deploy keys (revoke the old ones on GitHub)")
         yield self.local_state(p["push_held"], "regenerable",
                                "wk key deploy makes new deploy keys; wk key set github-pat and wk key set bugzilla-api-key store new ones "
                                "(revoke the old ones on GitHub and Bugzilla)")
@@ -466,10 +466,6 @@ class Doctor:
         machines = fleet.Fleet(self.root, self.env)
         yield self.local_state(machines.local_dir(), "backed-up",
                                "hand-written machine confs for this device only, their keys over machines/<name>.conf's")
-        if self.machine.isdir(machines.old_local_dir()):
-            yield miss("%s -- no longer read: machine-local confs live in %s" % (machines.old_local_dir(), machines.local_dir()),
-                       "mkdir -p %s && mv %s/*.conf %s/ && rmdir %s" % tuple(shlex.quote(d) for d in (
-                           machines.local_dir(), machines.old_local_dir(), machines.local_dir(), machines.old_local_dir())))
         yield self.local_state(os.path.join(store.state_dir(), "ssh", "zed_ed25519"), "regenerable",
                                "wk zed makes a new one and re-authorises it in the workspace")
         if self.macos:

@@ -1,4 +1,4 @@
-"""`wk session`: lib/wk/session.py's on/gdm/off/status against a fake Linux machine -- a GPU and the
+"""`wk quiesce session`: lib/wk/session.py's on/gdm/off/status against a fake Linux machine -- a GPU and the
 BMC's `ast` chip under /sys/class/drm, loginctl's sessions, systemctl's units and a privileged helper
 whose session verbs move the socket and the mode the way the real one does. Nothing here runs the real
 helper, systemctl, loginctl or gdm. Also `killpoints[session]`, a dry run printing the wet run's plan,
@@ -16,7 +16,7 @@ import unittest
 from unittest import mock
 
 from tests.killpoints import converges
-from tests.support import REPO, WkTest, as_dispatched, requires_machine, run
+from tests.support import REPO, WkTest, as_dispatched, requires_machine
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, fleet, quiet, session  # noqa: E402
@@ -351,33 +351,35 @@ class TestCrashOnly(SessionTest):
 
 class TestTheCommand(SessionTest):
     def load(self):
-        path = str(REPO / "cmd" / "session")
-        loader = importlib.machinery.SourceFileLoader("wk_cmd_session", path)
-        spec = importlib.util.spec_from_file_location("wk_cmd_session", path, loader=loader)
+        path = str(REPO / "cmd" / "quiesce")
+        loader = importlib.machinery.SourceFileLoader("wk_cmd_quiesce", path)
+        spec = importlib.util.spec_from_file_location("wk_cmd_quiesce", path, loader=loader)
         m = importlib.util.module_from_spec(spec)
         loader.exec_module(m)
         return m
 
     def test_the_words_it_takes(self):
         m = self.load()
-        self.assertEqual(("status", False), m.parse(as_dispatched("session", [], {})))
-        self.assertEqual(("on", True), m.parse(["on", "--bmc"]))
-        self.assertEqual(("gdm", True), m.parse(["gdm", "--mirror"]))
-        cp = run("session", "up")
-        self.assertEqual(2, cp.returncode, cp.stdout)
-        self.assertIn("usage: wk session", cp.stdout)
+        with mock.patch.object(m, "is_linux", return_value=True), mock.patch.object(m.session, "Session") as s:
+            m.main(as_dispatched("quiesce", ["session"], {}))
+            m.main(["session", "on", "--bmc"])
+            m.main(["session", "gdm", "--mirror"])
+        self.assertEqual([c[0] for c in s.return_value.method_calls], ["status", "on", "gdm"])
+        self.assertEqual([c[1] for c in s.return_value.method_calls], [(), (True,), (True,)])
+        self.assertIn("on, gdm, off or status", self.refused(m.main, ["session", "up"]))
+        self.assertIn("--bmc moves the session", self.refused(m.main, ["session", "off", "--bmc"]))
 
     def test_it_is_refused_off_linux(self):
         m = self.load()
         with mock.patch.object(m, "is_linux", return_value=False):
-            self.assertIn("Linux-only", self.refused(m.main, ["status"]))
+            self.assertIn("Linux-only", self.refused(m.main, ["session", "status"]))
 
 
 class TestOnMoose(WkTest):
     @requires_machine("moose")
     def test_modes_moose(self):
         tools = fleet.Fleet(REPO).load("moose").get("tools") or "Development/wk-tools"
-        cp = subprocess.run(["ssh", "-o", "BatchMode=yes", "moose", "cd %s && ./wk session status" % tools],
+        cp = subprocess.run(["ssh", "-o", "BatchMode=yes", "moose", "cd %s && ./wk quiesce session status" % tools],
                             capture_output=True, text=True, timeout=120)
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         for row in ("session:", "mode:", "gpu:", "bmc:", "lit:"):

@@ -474,15 +474,15 @@ class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
         return self._ask({"WK_STORE": str(store), **(extra or {})})
 
     def _dir_default(self, extra=None):
-        """No WK_STORE at all, so Store.default decides -- which on a macOS workstation is the podman machine's."""
+        """No WK_STORE at all, so Store.default_store_dir decides -- which on a macOS workstation is the podman machine's."""
         return self._ask(dict(extra or {}))
 
     def _ask(self, env):
         st = Store(clean_env(env))
-        return {"RECORD": st.record_dir(), "ARTIFACT": st.artifact_dir(),
-                "SAMPLY": samply.store_dir(st.artifact_dir(), "aarch64-apple-darwin"),
+        return {"RECORD": st.records_dir(), "ARTIFACT": st.cache_dir(),
+                "SAMPLY": samply.store_dir(st.cache_dir(), "aarch64-apple-darwin"),
                 "TASK": str(task_record.Records(env=clean_env(env)).root),
-                "SEED": os.path.join(st.artifact_dir(), "bench")}   # where wk.bench.seed pins a payload
+                "SEED": os.path.join(st.cache_dir(), "bench")}   # where wk.bench.seed pins a payload
 
     def test_a_writable_store_keeps_them(self):
         with scratch_dir() as tmp:

@@ -80,7 +80,7 @@ class Buildroot(task.ContainerBuilder):
     SURVIVES = "the buildroot downloads are in the store and survive"
 
     def cache(self, what):
-        return os.path.join(self.store.root(), "cache", "buildroot", what)
+        return os.path.join(self.store.store_dir(), "cache", "buildroot", what)
 
     def kill_cmd(self, ws):
         return "wk sysimage build %s%s --stop" % (self.spec, self.ws_flag(ws))

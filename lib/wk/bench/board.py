@@ -67,7 +67,7 @@ def runner_ref(env):
 def runner_tree(reg, here, root):
     """(tree, sha): Tools/Scripts exported from the mirror at one commit, the runner_sha both arms of an A/B share, with the
     board driver beside the others. The export is an artifact keyed by that commit; the driver is copied in every run."""
-    mirror = reg.store.mirror()
+    mirror = reg.store.mirror_dir()
     if not here.isdir(mirror):
         die("no mirror at %s; 'wk sync' makes one. The runner tree is exported from it." % mirror)
     ref = runner_ref(reg.env)
@@ -75,7 +75,7 @@ def runner_tree(reg, here, root):
     sha = r.out.strip()
     if not r.ok or not sha:
         die("the mirror has no '%s' to export a runner from ('wk sync' fetches main)" % ref)
-    tree = os.path.join(reg.store.artifact_dir(), "bench-runner", sha[:12])
+    tree = os.path.join(reg.store.cache_dir(), "bench-runner", sha[:12])
     if not here.exists(os.path.join(tree, "Tools", "Scripts", "run-benchmark")):
         info("exporting run-benchmark from the mirror at %s (Tools/Scripts only)" % sha[:12])
         tmp = tree + ".tmp"   # renamed into place, so a kill mid-export leaves nothing the next run reads
@@ -326,7 +326,7 @@ class BoardSystem(System):
             return
         m.mkdir(PROF_REMOTE)
         if tool == "samply":
-            binary = samply.fetch(self.here, self.reg.store.artifact_dir(), arch)
+            binary = samply.fetch(self.here, self.reg.store.cache_dir(), arch)
             if not binary:
                 act.barrier("samply for %s could not be fetched to this host." % arch)
                 return
@@ -446,7 +446,7 @@ class BoardRun(pipeline.Run):
         return progress.fleet_holders(res, self.recs, progress.fleet_stores(self.root, self.env, self.recs.machine))
 
     def records(self, clock):
-        return progress.Records(self.reg.store.record_dir(), clock=clock, env=dict(self.reg.env, WK_ABORT_SECONDS=str(progress.watchdog_abort(self.env))),
+        return progress.Records(self.reg.store.records_dir(), clock=clock, env=dict(self.reg.env, WK_ABORT_SECONDS=str(progress.watchdog_abort(self.env))),
                                 machine=self.here)
 
     def stop(self):
@@ -502,7 +502,7 @@ class BoardRun(pipeline.Run):
             except OSError:
                 return None
         s.plan_text = seed.plan_json(read, plan)
-        s.payload = seed.Seeder(self.here, self.lock, os.path.join(self.reg.store.artifact_dir(), "bench"), self.reg.store.mirror()).seed(plan, s.plan_text)
+        s.payload = seed.Seeder(self.here, self.lock, os.path.join(self.reg.store.cache_dir(), "bench"), self.reg.store.mirror_dir()).seed(plan, s.plan_text)
         return s.plan_text
 
     def seed(self, leg):

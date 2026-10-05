@@ -719,7 +719,7 @@ around the boundary rather than measuring, and the number would not be defensibl
 Inside a **wk workspace**, which is where an agent already is: the checkout is `/src/WebKit` on Linux
 and `/Users/admin/WebKit` in a macOS guest, and `wk build` / `wk run` / `wk test` need no workspace
 name in there. The host drives it with `wk build <ws> …`, reads progress with `wk status <ws>` and
-`wk logs <ws>`, and nothing on the host reaches into the workspace's filesystem — so write results
+`wk status <ws> --log`, and nothing on the host reaches into the workspace's filesystem — so write results
 where the run can read them back, not where the host expects to find them.
 
 ### Browser runs on Linux: find the Wayland display (wkdev container)

@@ -143,7 +143,7 @@ class Yocto(task.ContainerBuilder):
         if t is not None and t.alive(None):
             live = running_stage(t) or t.field("stage")
             die("a '%s' build is already running in '%s', and the stages share one\n    bitbake build directory -- two cookers "
-                "in it is what bitbake's own lock\n    exists to prevent.\n    Follow it:  wk logs %s -f\n    Stop it:    %s"
+                "in it is what bitbake's own lock\n    exists to prevent.\n    Follow it:  wk status %s --log -f\n    Stop it:    %s"
                 % (live, ws, ws, t.field("kill")))
         st.refuse_busy()
 
@@ -379,7 +379,7 @@ class Yocto(task.ContainerBuilder):
             return 0
         at = "not created" if target.info(ws) == "absent" else self.ws_head(target, ws)
         cores, mem, webkit_jobs, budget, _ = self.sizes()
-        cache = os.path.join(self.store.root(), "cache", "yocto")
+        cache = os.path.join(self.store.store_dir(), "cache", "yocto")
         wifi = wants_wifi(fleet.Fleet(images.root(self.env), self.env), p["IMG_MACHINE"])
         free = budget.free_gb(self.store.admission_dir())
         log("would build image %s (builder: yocto)" % self.name)

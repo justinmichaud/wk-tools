@@ -1,4 +1,4 @@
-"""cmd/key end to end against a scratch secrets directory: every subverb acts here, with a `podman` that fails on
+"""cmd/key end to end against a scratch keyring: every subverb acts here, with a `podman` that fails on
 PATH. tests/test_wk_key.py holds the fleet election over a fake machine.
 
 Run: python3 -m unittest tests.test_key -v

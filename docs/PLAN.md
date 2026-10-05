@@ -343,7 +343,7 @@ exist.
      the session socket in `targets.session_socket_present`, the loader-path
      prelude in `lib/wk/ldpath.py`, the Zed CLI in `targets.zed_cli`, and
      `cmd/zed --tools` resolves its target once. `lib/wk/sshalias.py` is the
-     one alias writer and `lib/wk/store.py`'s `artifact_dir` the one artifact
+     one alias writer and `lib/wk/store.py`'s `cache_dir` the one artifact
      path. "Is this pid alive in the target" is one answer,
      `Target.pid_alive` (`lib/wk/targets.py`), which `record.of_target`,
      `workspace.py`, `cmd/stop` and `cmd/status` all ask.
@@ -482,8 +482,8 @@ exist.
      `_push_tools` goes.
 
    5.4 **The store, the mirror and the PR fetch.** *Landed* (`lib/wk/git.py`,
-     `lib/wk/pr.py`, `store.Bases`). `targets.py`, `build.py` and `doctor.py`
-     call `wk.git` directly and `cmd/ls` uses `store.Bases`.
+     `lib/wk/pr.py`, `store.Snapshots`). `targets.py`, `build.py` and `doctor.py`
+     call `wk.git` directly and `cmd/ls` uses `store.Snapshots`.
      `tests/test_pr_workflow.py`
      holds `killpoints[pr]` (checkout onto a fork's branch, `pr_rebase`'s
      fetch and rebase, and `pr_open`'s push and `gh pr create`, each killed
@@ -1126,8 +1126,8 @@ decides is a row; one still open is listed under "Decisions for the user".
 | owed behaviour | lands in step | test |
 | --- | --- | --- |
 | Every mutating command, killed after any effect and re-run, converges on the declared final state (`new`, `rm`, `build`, `test`, `bench`, `gc`, `vm base`, `machine setup/rm`, `key`, `skills`, `backup`, `quiesce`, `session`, `boot`, `sysimage`, `./setup`) | 1 (helper), then each command's step | `unit killpoints[<cmd>]`, `live killpoints[setup]` |
-| `wk profile` records in every mode (sampling prints the tier breakdown, bytecode leaves one JSCProfile json, samply refuses with the host remedy above `perf_event_paranoid` 1, instruments records a `.trace`) and `--fetch` copies the recording out byte for byte | 3 | `live profile.modes[<mode>]` |
-| `wk profile --mode sysprof` captures a jsc run with sysprof-cli in a container workspace (unprivileged, no sysprofd), and the capture opened in Sysprof names JS frames from the JIT dump | 3 | `live profile.modes[sysprof]` |
+| `wk run --profile` records in every mode (sampling prints the tier breakdown, bytecode leaves one JSCProfile json, samply refuses with the host remedy above `perf_event_paranoid` 1, instruments records a `.trace`) and `--fetch` copies the recording out byte for byte | 3 | `live profile.modes[<mode>]` |
+| `wk run --profile=sysprof` captures a jsc run with sysprof-cli in a container workspace (unprivileged, no sysprofd), and the capture opened in Sysprof names JS frames from the JIT dump | 3 | `live profile.modes[sysprof]` |
 | `wk run --rr` records jsc and `wk gui --rr` MiniBrowser's process tree in a container workspace (seccomp, the perf counters in the podman VM, the web process sandbox), and `wk run --replay` reaches lldb with rr's commands | 3 | `live run.rr_record_replay` |
 | `wk bench run --a-args/--b-args` runs a JetStream3 subtest in the jsc shell with an option toggled, in alternating rounds, and `wk bench report <task>` compares it per subtest | 5 | `live bench.options_ab` |
 | `wk pr report` against the real GitHub API lists the week's pull requests, reviews and comments on WebKit/WebKit | 3 | `live pr.report` |
@@ -1138,28 +1138,29 @@ decides is a row; one still open is listed under "Decisions for the user".
 | The live tier runs against the container target on Linux and macOS alike; no test is gated on the podman VM | 1 | `live` runner rule |
 | A scratch store never puts two targets on one directory, and one machine's task records live in one directory | 1 | `unit record.one_store_per_target` |
 | The fleet view is one: the exit code is the worst state found anywhere, a name alive on two machines is a conflict `--target` disambiguates, two workstations reaching one box see one state and a disagreement names both views | 2 | `unit status.fleet_is_one` |
-| `wk logs <ws> -f` follows a live build on any target | 2 | `live logs.follow[<target>]` |
+| `wk status <ws> --log -f` follows a live build on any target | 2 | `live logs.follow[<target>]` |
 | Bare `wk stop` then `wk start` returns every workspace to running; `--keep-vm` leaves the podman machine up | 2 | `live start.roundtrip` (one workspace's stop and start is `tests.test_lifecycle.TestContainerLifecycle`) |
 | `wk doctor` on a freshly set-up machine reports ok, and each printed fix clears its line when run | 2 | `live doctor.fix_clears_line` |
 | `wk doctor` reports a bench machine's readiness (SIP on both installs, the quieting) the way `wk quiesce status` does | 5 | `live doctor.bench_readiness[mbp]` |
 | A machine is rebuilt from the repo alone: `wk doctor` names every machine-local entry regenerable, re-authable or backed-up before the wipe, and a fresh clone plus `./setup` sees the whole fleet with nothing copied | 2 | `live doctor.reprovision[<machine>]` |
 | `./setup` completes on every host OS and every privileged stage installs its helper | 2 | `live setup.completes[<host>]` |
 | A workspace on a peer is created there by hand (refused here, naming the command) and removed from here; `wk rm --all` asks once for the whole fleet and routes each removal | 3 | `live rm.peer[<machine>]` |
-| `wk build <box-ws> <config> --detach` from a workstation leaves its record on buildbox4 alone: the box's own `wk status`, this workstation's and another's show the one build, `wk logs -f`, `wk status --wait` and `wk build --kill` reach it through the hand-over, and a hand-over killed mid-way and re-run converges | 3 | `live build.box_record` |
+| `wk build <box-ws> <config> --detach` from a workstation leaves its record on buildbox4 alone: the box's own `wk status`, this workstation's and another's show the one build, `wk status --log -f`, `wk status --wait` and `wk build --kill` reach it through the hand-over, and a hand-over killed mid-way and re-run converges | 3 | `live build.box_record` |
 | `wk build --babysit` is a task: one at a time by its record, ends stalled, gave-up or error by name, refuses where it cannot run, and a killed one reads died | 3 | `live build.babysit_e2e` |
 | Every declared build config builds on its target (gtk, wpe, mac-debug, ios-sim, armhf on 2.48), a fresh clone off a warm base builds in under 45 min, and a mac build produces ImageDiff | 3 | `live build.config[<config>]` |
 | `wk test <ws>` runs the JSC suite and `--layout` on every target, against a remote target's own build | 3 | `live test.suite[<target>]` |
 | `wk run` finds its binary on every port (GTK, WPE, an Apple-port guest) with `LD_LIBRARY_PATH` prepended, and `--lldb` gets a pty on every target | 3 | `unit run.finds_binary[<port>]`, `live run.lldb_tty` |
 | `wk enter <ws>` lands in a shell, `--zed` against a broken workspace refuses naming the repair | 3 | `live enter.shell` |
 | `wk sync` bare inside a workspace syncs it, `--all` reaches every workspace on every target, `--tools` refreshes every machine's copy and publishes one snapshot, `WK_MIRROR_BRANCHES` carries the extra branches | 3 | `live sync.fleet` (`wk sync <ws>` is `test_dev_integration` step 12) |
-| The PR workflow runs as one flow: `wk push on\|off`, `wk sync --fix`, `wk pr`, the `container/bin` helpers, agents building while a person pushes, including from an armhf container | 3 | `live pr.workflow` |
+| The PR workflow runs as one flow: `wk key push on\|off`, `wk sync --fix`, `wk pr`, the `container/bin` helpers, agents building while a person pushes, including from an armhf container | 3 | `live pr.workflow` |
 | `wk ai claude` refuses a stopped proxy, and a tool inside wanting the network is refused and told so | 3 | `live ai.walled_session` |
 | In an agent session `git commit` and `git push` name the rule after git's own error, and a terminal session turns push back on at exit | 3 | `live ai.commit_wall` |
 | `wk ai claude` on a terminal, against a real container where `/login` made the shared claude.ai login, starts a session Remote Control shows under the workspace's name; on a build box holding the inference token it starts without it and says so | 3 | `live ai.remote_control` |
 | `wk zed` reaches a workspace through its `Host wk-<name>` ProxyCommand alias on every target, one hop for a peer's, and `wk new --zed` warns instead of failing when zed cannot launch | 3 | `unit zed.alias_is_proxycommand`, `live zed.peer` |
 | `wk key setup` elects across workstations: the credential its issuer accepts wins from whichever machine runs it, and a second run moves nothing | 4 | `live key.election[<peer>]` |
-| A build box holds no deploy key at rest, no ssh to it (nor to the gateway in front of it) forwards an agent, `wk push status --target <box>` says so, a push on the box is refused naming `wk pr open`, and `wk pr open <box-ws>` on the workstation fetches the box's branch into the mirror over ssh and pushes it from there through the agent `wk push on` loads, refusing naming `wk push on` while that agent is empty; the `refs/wk/push/*` ref a killed push leaves is taken by a plain `wk gc`. The unit half is green; the live run against buildbox4 is owed | 4 | `unit push.remote_forwarding`, `live push.from_box` |
-| A hand-over to buildbox4 while its wk-tools commit differs from the workstation's is refused naming `wk sync --tools buildbox4`, `--force` crosses it and says so, and `wk status`/`wk logs` hand over and report the difference. The unit half is green; the live run is owed | 3 | `unit handover.tools_level`, `live handover.tools_level[buildbox4]` |
+| A build box holds no deploy key at rest, no ssh to it (nor to the gateway in front of it) forwards an agent, `wk key push status --target <box>` says so, a push on the box is refused naming `wk pr open`, and `wk pr open <box-ws>` on the workstation fetches the box's branch into the mirror over ssh and pushes it from there through the agent `wk push on` loads, refusing naming `wk push on` while that agent is empty; the `refs/wk/push/*` ref a killed push leaves is taken by a plain `wk gc`. The unit half is green; the live run against buildbox4 is owed | 4 | `unit push.remote_forwarding`, `live push.from_box` |
+| `wk new <ws> --target buildbox4` and `wk rm <ws>` from a workstation are the box's own `wk new` and `wk rm`: the creation record and log are on the box and the workstation keeps none, the box's `wk status` and the workstation's read one state for the workspace during creation and after, and the creation's fetch step fetches. The unit half is green; the live run is owed | 3 | `unit box_workspace`, `live new.box_record[buildbox4]` |
+| A hand-over to buildbox4 while its wk-tools commit differs from the workstation's is refused naming `wk sync --tools buildbox4`, `--force` crosses it and says so, and `wk status`/`wk status --log` hand over and report the difference. The unit half is green; the live run is owed | 3 | `unit handover.tools_level`, `live handover.tools_level[buildbox4]` |
 | `wk key backup` then `./setup` round-trips with no spurious change; the junk filters strip what they claim; a write is whole or unchanged; one path with a per-platform adapter | 4 | `unit backup.filters`, `live backup.roundtrip` |
 | Every skill is followable from inside a container and a guest | 4 | `live ai.skills_workspace_true` |
 | `wk key sudo setup` installs its sudoers rule, validates with `visudo -c` before and after, proves `sudo -n true` fails, gets a terminal over ssh with `--target`, and no fleet machine holds a NOPASSWD grant wider than the three helpers | 4 | `live sudo.require[<machine>]` |
@@ -1167,12 +1168,12 @@ decides is a row; one still open is listed under "Decisions for the user".
 | The golden base is rebuilt from `WK_VM_IMAGE`, carries no build caches, tracks the Xcode GA image, and `wk vm base --rm` asks separately about the pulled image while guests keep working | 5 | `live vm.base_matches_pin`, `unit vm.base_rm_asks_twice` |
 | `tart exec` is the one way into a guest: a command runs as the guest's user with its home and its status, a binary copy crosses both ways intact, and a detached job outlives its exec | 5 | `live vm.tart_exec` |
 | A guest booted from a base rebuilt with vm/mount-mirror.sh has the mirror's `wk-mirror` tag mounted at boot under `/Volumes/wk-mirror`, the checkout's alternates resolve there, and `wk sync`'s remount leaves agent-rw's mount as it was | 5 | `live vm.mirror_tag_mount`, `live sync.guest_remount`, `live vm.shared_mirror` |
-| The editor and the socket forwards reach a guest's sshd over `tart exec` (`sshd -i` as the guest's user, no network): `wk zed <guest>` opens, and `wk push on` reaches the guest's agent | 5 | `live vm.ssh_transport`, `live zed.peer` |
+| The editor and the socket forwards reach a guest's sshd over `tart exec` (`sshd -i` as the guest's user, no network): `wk zed <guest>` opens, and `wk key push on` reaches the guest's agent | 5 | `live vm.ssh_transport`, `live zed.peer` |
 | `wk sync` inside a guest asks the host's broker over the socket each start forwards to `~/.wk-broker.sock` | 5 | `live vm.broker_forward` |
 | The guest desktop is usable and stays so: the window resizes, `open -a` launches, screen saver, sleep and lock stay off across a reboot, both Setup Assistants stay suppressed, lldb prints no `llvmcas:` warnings | 5 | `live vm.desktop` |
 | `wk quiesce on` sets and reads back every setting on every machine (governor, App Nap, high power mode, sleep, update checks from the setting, Do Not Disturb proven by a banner not drawn), `off` restores the real prior values after a reboot, a re-run is a no-op, and it returns over ssh | 5 | `live quiesce.readback[<machine>]` |
 | Every launchd job on a Mac bench install and every systemd unit on a Pi image is classified in the quiet tables, none wedges a probe when stopped, and the table is re-read after an OS bump | 5 | `live quiesce.classified[<machine>]` |
-| `wk session on\|gdm\|off` reaches the asked mode from any half-state on the intended chip, `wk gui` draws in that seat and refuses a remote target, and `wk bench` refuses a BMC seat | 5 | `live session.modes[moose]`, `unit gui.refuses_remote` |
+| `wk quiesce session on\|gdm\|off` reaches the asked mode from any half-state on the intended chip, `wk gui` draws in that seat and refuses a remote target, and `wk bench` refuses a BMC seat | 5 | `live session.modes[moose]`, `unit gui.refuses_remote` |
 | A bench run pins the cores it records, in a container and in a guest | 5 | `unit bench.pins_cores`, `live bench.pins_cores[<target>]` |
 | `wk bench compare` gives per-subtest confidence intervals from the workspace that built the run | 5 | `live bench.compare` |
 | A report labels an instrumented leg's time and leaves no stray settle directory (a settle or warmup leg is already no measured leg and no cost) | 5 | `unit bench.report_and_cost` |

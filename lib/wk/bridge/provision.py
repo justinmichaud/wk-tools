@@ -50,7 +50,7 @@ def bridge_profile(name, env):
 
 
 def image_dir(store):
-    return os.path.join(store.artifact_dir(), "bridge")
+    return os.path.join(store.cache_dir(), "bridge")
 
 
 def image_lock(name):

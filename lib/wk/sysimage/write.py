@@ -290,11 +290,9 @@ class Write:
             return name, images.load(name, self.env)
         except ConfError as e:
             act.die(str(e))
-        except LookupError as e:
+        except LookupError:
             act.warn("this write cannot tell which machine the card is for, so there is no\n  firmware check and no "
                      "tailnet name to seed. Pass --profile with a\n  configuration this checkout defines.")
-            if isinstance(e, images.Tombstone):
-                act.log(self.indent(str(e)))
             return name, {}
 
     def key_preflight(self, img_machine, role):

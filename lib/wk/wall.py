@@ -186,7 +186,7 @@ class Wall:
             elif not tok:
                 rows.append(miss("%s is unset in here, so nothing that reads it sends a credential for the injector to replace" % var,
                                  "container/proxy/ensure-bridge.sh exports all three, from /secrets/github-user, "
-                                 "/secrets/bugzilla-user and the injector's CA; 'wk push on' rewrites /secrets"))
+                                 "/secrets/bugzilla-user and the injector's CA; 'wk key push on' rewrites /secrets"))
             else:
                 rows.append(miss("%s in the workspace is not the placeholder: something put a real credential in here" % var,
                                  "find it and remove it"))
@@ -230,10 +230,10 @@ class Wall:
         if self.push_on == 1:
             if n > 0:
                 return [ok("%d deploy key(s) reach this workspace through %s, and push is on" % (n, sock))]
-            return [miss("push is ON but no identity reaches %s in here" % sock, "wk push on")]
+            return [miss("push is ON but no identity reaches %s in here" % sock, "wk key push on")]
         if n == 0:
             return [ok("no identity reaches this workspace (%s is empty): a push is refused" % sock)]
-        return [miss("%d identity/identities reach this workspace, and the host does not say push is on" % n, "wk push off")]
+        return [miss("%d identity/identities reach this workspace, and the host does not say push is on" % n, "wk key push off")]
 
     def push_here(self):
         alias = next((r[2] for r in secrets.forks()), "")
@@ -245,7 +245,7 @@ class Wall:
         if ident == 0:
             return [ok("the agent holds nothing, so a push from in here has no identity to offer")]
         return [miss("%d deploy key(s) reach this workspace through %s, so an agent in here could push" % (ident, sock),
-                     "the switch is the host's:  wk push off")]
+                     "the switch is the host's:  wk key push off")]
 
     def github_read(self):
         """GET / answers 200 unauthenticated and 401 only for a token GitHub refuses, which is the injector's own standing one."""
@@ -280,11 +280,11 @@ class Wall:
         code = status_of(reply)
         if self.push_on != 1:
             if code == "412":
-                return [ok("a write is refused by the injector (HTTP 412), which names 'wk push on'")]
+                return [ok("a write is refused by the injector (HTTP 412), which names 'wk key push on'")]
             return [miss("POST /repos/%s/pulls answered '%s' where the host does not say push is on -- expected 412, the injector's own refusal"
                          % (fork, code or "nothing"),
                          "a 401 is an injector still running older code, which 'wk status' reports and './setup' on that machine "
-                         "restarts; anything else is a write token still on the machine:  wk push off")]
+                         "restarts; anything else is a write token still on the machine:  wk key push off")]
         if code == "422":
             return [ok("a write is authenticated (HTTP 422, nothing created), and push is on")]
         if code == "403":
@@ -292,10 +292,10 @@ class Wall:
                          "reissue it with that permission and 'wk key set github-pat --replace'")]
         if code == "401":
             return [miss("push is ON but POST /repos/%s/pulls answered 401: the injector has no write token, or one GitHub refuses" % fork,
-                         "'wk push on' again for the first; 'wk key set github-pat --replace', then './setup' for a spent, revoked or "
-                         "expired PAT. 'wk push status' says which of the two the machine is in")]
+                         "'wk key push on' again for the first; 'wk key set github-pat --replace', then './setup' for a spent, revoked or "
+                         "expired PAT. 'wk key push status' says which of the two the machine is in")]
         return [miss("push is ON but POST /repos/%s/pulls answered '%s' rather than 422" % (fork, code or "nothing"),
-                     "the injector has no write token ('wk push on' again)")]
+                     "the injector has no write token ('wk key push on' again)")]
 
     def agent_credential(self):
         """`claude auth status` is local (measured 2026-09-10: loggedIn for a token Anthropic has never seen)."""
@@ -362,11 +362,11 @@ class Wall:
                 return gap
             code = status_of(reply)
             if code == "412":
-                return [ok("a Bugzilla write is refused by the injector (HTTP 412), which names 'wk push on'")]
+                return [ok("a Bugzilla write is refused by the injector (HTTP 412), which names 'wk key push on'")]
             return [miss("POST /rest/bug answered '%s' where the host does not say push is on -- expected 412, the injector's own refusal"
                          % (code or "nothing"),
                          "Bugzilla's own 'log in first' is an injector still running older code, which 'wk status' reports and "
-                         "'./setup' on that machine restarts; anything else is a Bugzilla key still on the machine:  wk push off")]
+                         "'./setup' on that machine restarts; anything else is a Bugzilla key still on the machine:  wk key push off")]
         reply = self.inside("%s %shttps://bugs.webkit.org/rest/bug 2>/dev/null" % (CURL, post))
         headers, _, body = reply.partition("\n\n") if reply.startswith("HTTP/") else ("", "", reply)
         if "wk credential injector" in body or fault_of(headers):
@@ -377,10 +377,10 @@ class Wall:
             code = ""
         if code == "410":
             return [miss("push is ON but POST /rest/bug answered 'log in first' (410): the injector has no Bugzilla API key",
-                         "'wk key set bugzilla-api-key', then 'wk push on' again")]
+                         "'wk key set bugzilla-api-key', then 'wk key push on' again")]
         if code == "306":
             return [miss("push is ON and the key reached Bugzilla, which does not know it (306)",
-                         "'wk key set bugzilla-api-key --replace', then 'wk push on' again")]
+                         "'wk key set bugzilla-api-key --replace', then 'wk key push on' again")]
         if not code:
             return [miss("POST /rest/bug answered nothing Bugzilla-shaped", "the injector is in the path but not answering for bugs.webkit.org")]
         return [ok("a Bugzilla write is authenticated (error %s: an empty bug, nothing filed), and push is on" % code)]
@@ -459,7 +459,7 @@ def verdict(rep, publishing=False):
 
 
 def push_verdict(rc):
-    """push_on (1, 0 or None) from `wk push status`'s exit code: 0 on, 1|4 off, else unmeasured."""
+    """push_on (1, 0 or None) from `wk key push status`'s exit code: 0 on, 1|4 off, else unmeasured."""
     if rc == 0:
         return 1
     if rc in (1, 4):
@@ -468,13 +468,13 @@ def push_verdict(rc):
 
 
 def push_switch(root, machine):
-    rc = machine.run([os.path.join(root, "wk"), "push", "status"]).rc
+    rc = machine.run([os.path.join(root, "wk"), "key", "push", "status"]).rc
     push_on = push_verdict(rc)
     if push_on == 1:
         return 1, "the host says push is ON"
     if push_on == 0:
         return 0, "the host says push is OFF"
-    return None, ("the host could not measure the switch ('wk push status' exited %d), so what reaches this workspace "
+    return None, ("the host could not measure the switch ('wk key push status' exited %d), so what reaches this workspace "
                   "is measured below and compared to nothing" % rc)
 
 

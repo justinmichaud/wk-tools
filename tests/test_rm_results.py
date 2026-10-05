@@ -112,7 +112,7 @@ class TestTheEvidenceIsReadOrRefused(WkTest):
 
     def test_a_peers_tasks_are_left_to_the_peers_own_rm(self):
         peer = types.SimpleNamespace(peer=True, results=lambda ws: self.fail("a peer's tasks were read from here"))
-        reg = types.SimpleNamespace(env={}, store=types.SimpleNamespace(home=lambda: "/h"))
+        reg = types.SimpleNamespace(env={}, store=types.SimpleNamespace(home=lambda: "/h"), in_remote_host=lambda: False)
         self.assertEqual(workspace.unsaved_results(reg, [("w", peer, "workspace")]), [])
 
 

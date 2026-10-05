@@ -248,7 +248,7 @@ class Run:
         def read(path):
             r = self.target.exec(self.ws, ["cat", "%s/Tools/Scripts/%s" % (self.system.src(), path)])
             return r.out.replace("\r", "") if r.ok else None
-        seeder = seed.Seeder(self.here, self.lock, os.path.join(self.reg.store.artifact_dir(), "bench"), self.reg.store.mirror())
+        seeder = seed.Seeder(self.here, self.lock, os.path.join(self.reg.store.cache_dir(), "bench"), self.reg.store.mirror_dir())
         leg.payload = seeder.seed(leg.plan, seed.plan_json(read, leg.plan))
         if leg.runner != "jsc":
             return

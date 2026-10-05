@@ -17,7 +17,7 @@ from tests.support import NO_REGISTRY, REPO, WkTest, clean_env
 from tests.test_credcheck import FakeAnthropic, FakeLiteLLM
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import doctor, fleet  # noqa: E402
+from wk import doctor  # noqa: E402
 from wk.key.cli import Key  # noqa: E402
 from wk.machine import HAVE, Fake, Local, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
@@ -672,7 +672,7 @@ class TestTheMachineOverlay(unittest.TestCase):
     def test_each_workspace_holding_tasks_is_backed_up(self):
         fake = Fake()
         doc = fake_doctor(False, machine=fake)
-        root = doc.store.record_dir()
+        root = doc.store.records_dir()
         fake.dirs.update({root + "/ws", root + "/ws/w", root + "/ws/w/bench", root + "/ws/bare"})
         rows = [" ".join(r[1:]) for r in doc.machine_local() if "benchmark runs" in " ".join(r[1:])]
         self.assertEqual([r.split(" ")[0] for r in rows], [root + "/ws/w/bench"])
@@ -682,7 +682,7 @@ class TestTheMachineOverlay(unittest.TestCase):
     def test_tasks_outside_any_workspace_are_backed_up_while_any_is_there(self):
         fake = Fake()
         doc = fake_doctor(False, machine=fake)
-        legacy = doc.store.record_dir() + "/bench"
+        legacy = doc.store.records_dir() + "/bench"
         fake.dirs.add(legacy)
         named = lambda: [" ".join(r[1:]) for r in doc.machine_local() if r[1].startswith(legacy + " ")]   # noqa: E731
         self.assertEqual([], named())
@@ -691,13 +691,6 @@ class TestTheMachineOverlay(unittest.TestCase):
         self.assertIn("(backed-up)", row)
         self.assertIn("wk gc names", row)
 
-    def test_a_leftover_bridges_dir_is_missing_with_the_mv(self):
-        fake = Fake()
-        old = fleet.Fleet(REPO, {"HOME": "/h"}).old_local_dir()
-        fake.dirs.add(old)
-        row = next(r for r in self.rows(fake) if old in r[1])
-        self.assertEqual(MISS, row[0])
-        self.assertIn("mv %s/*.conf /h/.config/wk/machines/" % old, row[2])
 
 
 if __name__ == "__main__":

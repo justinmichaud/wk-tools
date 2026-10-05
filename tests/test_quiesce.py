@@ -461,8 +461,10 @@ class TestTheCommand(QuiesceTest):
     def test_bare_is_status_and_anything_else_is_refused(self):
         """the dispatcher hands a bare `wk quiesce` over as status, and refuses any other word"""
         m = self.load()
-        self.assertEqual("status", m.parse(as_dispatched("quiesce", [], {})))
-        self.assertEqual("on", m.parse(["on"]))
+        with mock.patch.object(m.quiet, "Quiesce") as q, mock.patch.object(m.act, "terminate_as_interrupt"):
+            m.main(as_dispatched("quiesce", [], {}))
+            m.main(["on"])
+        self.assertEqual(["status", "on"], [c[0] for c in q.return_value.method_calls])
         for bad in (["up"], ["on", "off"]):
             with self.subTest(argv=bad):
                 cp = run("quiesce", *bad)

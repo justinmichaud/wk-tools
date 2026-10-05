@@ -19,7 +19,7 @@ BUILDROOT = STORE + "/ws/buildroot-wpewebkit-2.38-buildroot-rpi3-32/build/buildr
 
 
 class Store:
-    def root(self):
+    def store_dir(self):
         return STORE
 
 

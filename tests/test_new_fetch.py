@@ -12,7 +12,7 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import git, secrets, sync, targets, workspace  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import Local  # noqa: E402
-from wk.store import Bases, Store  # noqa: E402
+from wk.store import Snapshots, Store  # noqa: E402
 
 
 def _forks():
@@ -527,11 +527,11 @@ class StoreFixture(MirrorFixture):
         return d
 
     def bases(self):
-        return Bases(Store({"WK_STORE": str(self.store)}), Local())
+        return Snapshots(Store({"WK_STORE": str(self.store)}), Local())
 
 
 class TestBaseVerify(StoreFixture):
-    """Bases.verify, which `wk new` asks before overlaying a workspace on a snapshot and Bases.current asks
+    """Snapshots.verify, which `wk new` asks before overlaying a workspace on a snapshot and Snapshots.current asks
     before offering one."""
 
     def test_a_snapshot_on_its_branch_verifies(self):

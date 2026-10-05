@@ -34,8 +34,8 @@
 # 'open' pushes the workspace's current branch to its fork and opens it as a pull request with
 # `gh pr create --fill`. Runs on the host only and refuses inside a workspace. The project comes
 # from which upstream the branch tracks; no upstream, `main`, a detached HEAD, or a dirty tree is
-# refused by name. Pushing needs `wk push on`, which is never flipped here. A build box's branch is
-# fetched over ssh into this machine's mirror and pushed from here through the agent `wk push on`
+# refused by name. Pushing needs `wk key push on`, which is never flipped here. A build box's branch is
+# fetched over ssh into this machine's mirror and pushed from here through the agent `wk key push on`
 # loads: no key reaches a box.
 #
 #   --draft   open it as a draft
@@ -178,7 +178,7 @@ def pr_open(target, name, draft, web, push_status):
         die("'%s' is not ready to open as a pull request -- see above" % name)
 
     if push_status() != 0:
-        die("'wk pr open' pushes '%s' to '%s', and the deploy key is held back.\n    wk push on" % (branch, fork))
+        die("'wk pr open' pushes '%s' to '%s', and the deploy key is held back.\n    wk key push on" % (branch, fork))
 
     info("pushing '%s' to '%s'" % (branch, fork))
     if target.kind == "remote" and not target.is_local and not target.peer:
@@ -187,7 +187,7 @@ def pr_open(target, name, draft, web, push_status):
         r = target.act_exec(name, ["git", "-C", src, "push", "-u", fork, branch])
     show(r)
     if not r.ok:
-        die("the push to '%s' failed -- see above.\n    If the deploy key is the problem:  wk push on" % fork)
+        die("the push to '%s' failed -- see above.\n    If the deploy key is the problem:  wk key push on" % fork)
 
     flags = (["--draft"] if draft else []) + (["--web"] if web else [])
     info("opening a pull request: %s <- %s" % (base, head))
@@ -195,28 +195,28 @@ def pr_open(target, name, draft, web, push_status):
 
 
 def push_from_here(target, src, fork, branch):
-    """The box's branch into this machine's mirror over ssh, then pushed from here through the agent `wk push on` loads."""
+    """The box's branch into this machine's mirror over ssh, then pushed from here through the agent `wk key push on` loads."""
     here, store = target.here, Store(target.env)
     sec = secrets.Secrets(ROOT, target.env, here)
     # A macOS host's podman machine holds its agent inside the VM; the one a process here reaches is the guests'.
     sec, sock = guest.push_agent(ROOT, here, target.env) if sec.macos else (sec, sec.machine_sock())
     if not sec.agent_list(sock):
-        die("'wk pr open' pushes '%s' from here through the agent 'wk push on' loads, and it holds no key.\n"
-            "    wk push on" % branch)
+        die("'wk pr open' pushes '%s' from here through the agent 'wk key push on' loads, and it holds no key.\n"
+            "    wk key push on" % branch)
     ref, lock = "%s%s/%s" % (pr.PUSH_REFS, target.name, branch), Lock(store, here, Clock())
     repo = next(r for f, r, _ in sec.forks() if f == fork)
     ssh = "ssh -o IdentitiesOnly=yes -i %s" % shlex.quote(sec.pub_path(fork)[:-len(".pub")])
     with lock.held(pr.push_lock(ref)):
         sync.fetch_into_mirror(here, store, lock, "%s:%s" % (target.ssh_host(""), src), "refs/heads/" + branch, ref)
         r = here.act_run(sec.agent_argv("SSH_AUTH_SOCK=%s exec git -C %s -c core.sshCommand=%s push %s %s" % (
-            sock, shlex.quote(store.mirror()), shlex.quote(ssh), shlex.quote("git@github.com:%s.git" % repo),
+            sock, shlex.quote(store.mirror_dir()), shlex.quote(ssh), shlex.quote("git@github.com:%s.git" % repo),
             shlex.quote("%s:refs/heads/%s" % (ref, branch)))))
-        here.act_run(["git", "-C", store.mirror(), "update-ref", "-d", ref])
+        here.act_run(["git", "-C", store.mirror_dir(), "update-ref", "-d", ref])
     return r
 
 
 def push_rc(reg):
-    """`wk push status`'s own exit code: the key and the API credentials a push and a pull request need."""
+    """`wk key push status`'s own exit code: the key and the API credentials a push and a pull request need."""
     with contextlib.redirect_stderr(io.StringIO()):
         return Push(reg, secrets.Secrets(ROOT, reg.env, reg.machine), Clock(), io.StringIO()).switch_status()
 

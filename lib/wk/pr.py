@@ -21,7 +21,7 @@ def push_lock(ref):
 def rubble(store, machine, lock):
     """A box push's temporary ref a killed `wk pr open` left in the mirror; the branch it copied lives on the box."""
     from wk.rubble import row
-    mirror = store.mirror()
+    mirror = store.mirror_dir()
     if not machine.isdir(mirror):
         return []
     r = machine.run(["git", "-C", mirror, "for-each-ref", "--format=%(refname)", PUSH_REFS])

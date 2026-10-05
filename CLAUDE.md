@@ -38,8 +38,8 @@ rewritten file resumes a running process mid-word. Check `wk status` first.
 - **Measure before theorising.** A fault is fixed at its root after it has been
   measured; machinery built around an unmeasured fault is deleted.
 - **No dead code, ever.** A function, file, package or dependency with no
-  caller is removed in the change that strands it. Tombstones — a name the
-  tooling still refuses, naming its replacement — are the only remnant allowed.
+  caller is removed in the change that strands it. Nothing remains of a
+  removed name: the dispatcher refuses it as it refuses any unknown word.
 - **Every line of comment, help text and documentation earns its place.**
   A comment says what the code does and why it has to be that way; if the code
   already says it, the comment goes. Help text states what a flag does, not why
@@ -191,7 +191,7 @@ test or it refuses loudly; it never silently degrades.
 - **Write the present tense.** Nothing in this repo narrates its own past: not
   what a file used to do, what was removed, what an attempt got wrong, or when.
   State the rule, not the bug that motivated it. What is not yet true is a
-  `TODO:` line naming what is owed. The one exception is a tombstone.
+  `TODO:` line naming what is owed.
 
 ## Refusals, secrets and privilege
 

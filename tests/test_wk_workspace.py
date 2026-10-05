@@ -68,15 +68,15 @@ class World(Fake):
         self.target = self.reg.load("fakebox")
         self.lock = Lock(self.target.store, self, self.clock)
         self.publish("main-1")
-        self.dirs.add(self.target.store.mirror())
+        self.dirs.add(self.target.store.mirror_dir())
         self.effects = []
 
     def publish(self, bid, on_branch=True):
         store = self.target.store
-        d = os.path.join(store.base_dir(), bid)
-        self.dirs.update({store.base_dir(), d, store.base_path(bid), os.path.join(store.base_path(bid), ".git")})
+        d = os.path.join(store.snapshots_dir(), bid)
+        self.dirs.update({store.snapshots_dir(), d, store.snapshot_tree(bid), os.path.join(store.snapshot_tree(bid), ".git")})
         self.files[os.path.join(d, "branch")] = "origin/main\n"
-        self.files[store.base_sha_file(bid)] = "a" * 40 + "\n"
+        self.files[store.snapshot_sha_file(bid)] = "a" * 40 + "\n"
         if not on_branch:
             self.detached = getattr(self, "detached", set()) | {bid}
 
@@ -215,7 +215,7 @@ class PodmanTarget(targets.Target):
         return "/mirror/of/" + self.kind
 
     def store_init(self):
-        self.machine.mkdir(os.path.join(self.store.root(), "ws"))
+        self.machine.mkdir(os.path.join(self.store.store_dir(), "ws"))
 
     def sdk_refresh(self):
         return self.machine.act_run(["sdk-refresh"]).ok
@@ -292,7 +292,7 @@ class VmWorld(World):
         self.answer(["sysctl", "-n", "hw.ncpu"], out="10\n")
         self.answer(["sysctl", "-n", "hw.memsize"], out="34359738368\n")
         self.answer(["podman", "machine", "inspect"], rc=125)
-        self.dirs.add(self.target.store.mirror())
+        self.dirs.add(self.target.store.mirror_dir())
         self.effects = []
 
     def state(self):
@@ -550,7 +550,7 @@ class TestNewOnAPeer(unittest.TestCase):
     def new(self, **opts):
         with contextlib.redirect_stderr(io.StringIO()) as err:
             try:
-                return workspace.new_on_peer(self.target, self.here, str(REPO), "ws", "native", opts), err.getvalue()
+                return workspace.new_handed_over(self.target, self.here, str(REPO), "ws", "native", opts), err.getvalue()
             except Refused as e:
                 return e.status, err.getvalue()
 
@@ -751,9 +751,9 @@ class TestNewDriver(WorkspaceTest):
         self.assertEqual(workspace.creation_state(self.w.target, self.w.records, "ws"), "present")
 
     def test_no_mirror_refuses_naming_wk_sync_and_creates_nothing(self):
-        self.w.dirs.discard(self.w.target.store.mirror())
+        self.w.dirs.discard(self.w.target.store.mirror_dir())
         err = self.refused(lambda: self.driver())
-        self.assertIn("no WebKit mirror at %s" % self.w.target.store.mirror(), err)
+        self.assertIn("no WebKit mirror at %s" % self.w.target.store.mirror_dir(), err)
         self.assertIn("wk sync    makes it", err)
         self.assertEqual([a for a in self.runs() if a[0] == "wkdev-create"], [])
         (t,) = self.w.records.list()
@@ -762,7 +762,7 @@ class TestNewDriver(WorkspaceTest):
     def test_no_base_snapshot_refuses_naming_wk_sync_and_creates_nothing(self):
         self.w.publish("main-1", on_branch=False)
         err = self.refused(lambda: self.driver())
-        self.assertIn("no base snapshot this machine can build a workspace from:  wk sync\n    publishes one.", err)
+        self.assertIn("no snapshot this machine can build a workspace from:  wk sync\n    publishes one.", err)
         self.assertEqual([a for a in self.runs() if a[0] == "wkdev-create"], [])
         self.assertNotIn(self.w.ws_dir(), self.w.dirs)
         (t,) = self.w.records.list()
@@ -866,12 +866,12 @@ class TestFreshen(WorkspaceTest):
 class TestRecordHelpers(WorkspaceTest):
     def test_live_lines_name_every_live_job_and_skip_dead_pids(self):
         self.w.begin("build", "ws1", pid=4242)
-        self.w.begin("agent-forward", "ws1", pid=4243, kill="wk push off")
+        self.w.begin("agent-forward", "ws1", pid=4243, kill="wk key push off")
         self.w.begin("test", "ws1", pid=4244)
         self.w.begin("build", "ws2", pid=4245)
         self.w.pids.update({4242, 4243, 4245})
         self.assertEqual(workspace.live_task_lines(self.w.records, "ws1"),
-                         "    agent-forward (pid 4243 on here)  stop it:  wk push off\n"
+                         "    agent-forward (pid 4243 on here)  stop it:  wk key push off\n"
                          "    build (pid 4242 on here)  stop it:  wk build ws1 --kill")
         self.assertEqual(len(workspace.task_records_for(self.w.records, "ws1")), 3)
 

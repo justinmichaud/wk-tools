@@ -48,7 +48,7 @@ class TestBenchContainerRun(WkTest):
             run("status", ws, "--wait", "--timeout", "600", timeout=660)
             self.assertEqual(0, run("build", ws, CONFIG, "--detach", timeout=120).returncode)
             cp = run("status", ws, "--wait", "--timeout", "1500", timeout=1560)
-            self.assertEqual(0, cp.returncode, "the %s build did not succeed:\n%s\n%s" % (CONFIG, cp.stdout, run("logs", ws).stdout))
+            self.assertEqual(0, cp.returncode, "the %s build did not succeed:\n%s\n%s" % (CONFIG, cp.stdout, run("status", ws, "--log").stdout))
 
             self.bench(ws)
             self.bench(ws, "--cores", "0")

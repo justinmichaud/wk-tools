@@ -33,7 +33,7 @@ ROOT = images.root()
 from wk import decl, record, targets  # noqa: E402
 from wk.act import Refused, die, log  # noqa: E402
 from wk.machine import Local  # noqa: E402
-from wk.store import Bases  # noqa: E402
+from wk.store import Snapshots  # noqa: E402
 
 FORMAT = "%-20s %-18s %-10s %-8s %-20s %-8s %8s"
 NOT_APPLICABLE = "n/a"
@@ -55,7 +55,7 @@ def row(target, ws, label, as_json):
     state = target.display_state(ws)
     inside = target.kind == "local"
     base = NOT_APPLICABLE if inside else base_of(target, ws)
-    snap = target.store.ws_base_id(ws) or "-"
+    snap = target.store.ws_snapshot_id(ws) or "-"
     size = NOT_APPLICABLE if inside else changes_of(target, ws)
     arch = target.arch(ws)
     fields = (ws, col(label, target.name), state, base, snap, arch, size)
@@ -93,7 +93,7 @@ def footer(reg, names):
             print()
             spaced = True
         prefix = "%s: " % name if multi else ""
-        bases = Bases(target.store, target.store_machine)
+        bases = Snapshots(target.store, target.store_machine)
         log("%scurrent base: %s" % (prefix, bases.current() or "none"))
         unref = len(bases.unreferenced())
         if unref > 0:

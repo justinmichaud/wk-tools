@@ -282,12 +282,6 @@ class TestOwed(RunnerTest):
 
 
 class TestSelftestFlags(WkTest):
-    def test_quick_is_a_tombstone_naming_the_default(self):
-        cp = run("selftest", "--quick")
-        self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("--quick is gone", cp.stdout)
-        self.assertIn("lint then unit", cp.stdout)
-        self.assertNotIn("tiers:", cp.stdout)
 
     def test_a_tier_flag_and_a_pattern_reach_the_runner(self):
         cp = run("selftest", "--lint", "test_the_declared_options_are_the_ones_the_code_reads")

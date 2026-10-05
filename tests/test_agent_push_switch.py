@@ -14,13 +14,13 @@ from wk.machine import Fake, Result
 
 class _AiRun(unittest.TestCase):
     def _ai(self, target, agent="claude", push_status=0, push_off=1):
-        """(status, stderr) of `wk ai <agent> probe-ws` on a workspace of that kind; the `wk push` calls it made are self.calls."""
+        """(status, stderr) of `wk ai <agent> probe-ws` on a workspace of that kind; the `wk key push` calls it made are self.calls."""
         fake, self.calls = Fake(), []
 
         def push(argv, f):
-            self.calls.append(" ".join(argv[1:]))
-            return Result({"status": push_status, "off": push_off}.get(argv[2], 0))
-        fake.react([WK, "push"], push)
+            self.calls.append(" ".join(argv[2:]))
+            return Result({"status": push_status, "off": push_off}.get(argv[3], 0))
+        fake.react([WK, "key", "push"], push)
         env = {"WK_NAME": "probe-ws", "WK_TARGET": target}
         t = SimTarget(fake, env, kind=target)
         t.answers["find " + agent] = Result(0, "/c\n")
@@ -94,7 +94,7 @@ class TestAnUnmeasuredSwitchIsARefusal(_AiRun):
         status, out = self._ai("remote", push_status=3)
         self.assertNotEqual(status, 0, out)
         self.assertIn("refusing to run", out)
-        self.assertIn("wk push status --target remote", out)
+        self.assertIn("wk key push status --target remote", out)
         self.assertEqual(["push status --target remote"], self.calls, self.calls)
 
     def test_a_machine_with_no_switch_stops_it_too(self):
@@ -117,7 +117,7 @@ class TestTheSwitchComesBackOnlyForAPerson(unittest.TestCase):
 
     def _restore(self, was_on, terminal):
         fake = Fake()
-        fake.answer([WK, "push"])
+        fake.answer([WK, "key", "push"])
         env = {}
         target = SimTarget(fake, env)
         reg = sim_registry(env, fake, target)
@@ -125,7 +125,7 @@ class TestTheSwitchComesBackOnlyForAPerson(unittest.TestCase):
         ai.push_was_on = was_on
         with contextlib.redirect_stderr(io.StringIO()) as err:
             ai.restore_push(terminal)
-        return [" ".join(e[1][1:]) for e in fake.effects], err.getvalue()
+        return [" ".join(e[1][2:]) for e in fake.effects], err.getvalue()
 
     def test_a_headless_session_leaves_it_off(self):
         self.assertEqual([], self._restore(True, terminal=False)[0])
@@ -146,7 +146,7 @@ class TestOneShapeAndNoTargetNames(unittest.TestCase):
             with self.subTest(kind=kind):
                 order = []
                 fake = Fake()
-                fake.react([WK, "push"], lambda argv, f: order.append("push") or Result(1))
+                fake.react([WK, "key", "push"], lambda argv, f: order.append("push") or Result(1))
                 env = {"WK_NAME": "demo", "WK_TARGET": kind}
                 target = SimTarget(fake, env, kind=kind)
                 target.answers["find claude"] = Result(0, "/c\n")
@@ -165,11 +165,11 @@ class TestOneShapeAndNoTargetNames(unittest.TestCase):
 
 
 class TestOnlyAWorkspaceMeasuresInsteadOfSwitching(WkTest):
-    """Inside a workspace `wk push` is refused, so `wk ai` leaves the question to `wk doctor`'s checks."""
+    """Inside a workspace `wk key push` is refused, so `wk ai` leaves the question to `wk doctor`'s checks."""
 
     def _hold_back(self, marker):
         fake = Fake()
-        fake.answer([WK, "push"], rc=1)
+        fake.answer([WK, "key", "push"], rc=1)
         env = {"WK_MARKER": str(self.tmp / "wk-marker")}
         if marker:
             (self.tmp / "wk-marker").write_text("name=demo\nsrc=/src/WebKit\n")
@@ -179,5 +179,5 @@ class TestOnlyAWorkspaceMeasuresInsteadOfSwitching(WkTest):
         return [e[1] for e in fake.effects if e[1][:1] == (WK,)]
 
     def test_outside_a_workspace_it_throws_the_switch_and_inside_never_asks_it(self):
-        self.assertEqual([(WK, "push", "status")], self._hold_back(marker=False))
+        self.assertEqual([(WK, "key", "push", "status")], self._hold_back(marker=False))
         self.assertEqual([], self._hold_back(marker=True))

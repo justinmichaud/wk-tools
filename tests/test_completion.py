@@ -1,6 +1,5 @@
 """`wk --declarations` and `wk completion` -- the machine-readable command"""
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -13,7 +12,6 @@ from tests.support import REPO, WK, WkTest, run
 sys.path.insert(0, str(REPO / "lib"))
 from wk import completion as C          # noqa: E402
 from wk import decl as D                 # noqa: E402
-from wk.dispatch import TOMBSTONES       # noqa: E402
 from wk.machine import Local             # noqa: E402
 
 
@@ -27,22 +25,13 @@ class TestDeclarations(WkTest):
 
 class TestCompletionGenerator(unittest.TestCase):
 
-
-    def test_a_tombstoned_command_does_not_complete(self):
-        script = C.generate(REPO, "bash", TOMBSTONES)
-        m = re.search(r"_wk_commands='([^']*)'", script)
-        self.assertIsNotNone(m, script)
-        offered = m.group(1).split()
-        for name in TOMBSTONES:
-            self.assertNotIn(name, offered, f"tombstoned command '{name}' still completes")
-
     def test_completion_itself_completes_though_it_has_no_cmd_file(self):
-        self.assertIn("completion", C.commands(REPO, TOMBSTONES))
+        self.assertIn("completion", C.commands(REPO))
 
     def test_a_values_list_answered_by_a_store_is_not_asked_at_tab(self):
         cmds = {d.name: d for d in D.all_commands(REPO)}
         self.assertEqual(C.values_cmd(cmds["bench"]), "")
-        self.assertEqual(C.values_cmd(cmds["profile"]), "--list")
+        self.assertEqual(C.values_cmd(cmds["boot"]), "--list")
 
     def test_workspace_listing_never_touches_a_machine(self):
         tmp = tempfile.mkdtemp(prefix="wk-completion-test-")
@@ -177,7 +166,7 @@ printf '%s\\n' "${{COMPREPLY[@]}}"
 
     def test_every_verb_of_every_command_completes_its_declared_options(self):
         want, lines = {}, []
-        for d in C.declarations(REPO, TOMBSTONES):
+        for d in D.all_commands(REPO):
             for v in C.subverbs(d):
                 want[f"{d.name} {v}"] = " ".join(C.flags_for(d, v))
                 lines.append(f"t {d.name} {v}")

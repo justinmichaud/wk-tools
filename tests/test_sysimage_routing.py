@@ -126,7 +126,7 @@ class TestAnImageWorkspaceOnAnotherMachine(WkTest):
 
     SSH_STUB = """#!/bin/sh
 printf '%s\\n' "$*" >> "$WK_TEST_SSH_LOG"
-case "$*" in *"/wk version"*) printf 'sha=%s\n' "$WK_TEST_TOOLS_SHA" ;; esac
+case "$*" in *"/wk doctor --probe-tools"*) printf 'sha=%s\n' "$WK_TEST_TOOLS_SHA" ;; esac
 case "$*" in *===MEM===*) printf '/home/u\\nLinux\\n4\\n0.1 0 0\\n===MEM===\\nMemAvailable: 1024 kB\\n===IONICE===\\nno\\n' ;; esac
 exit 0
 """

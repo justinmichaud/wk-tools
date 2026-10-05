@@ -391,7 +391,7 @@ class TestItSharesTheBoardABsRefusals(WkTest):
             m.lock.release_all()
             self.assertEqual(m.taskdir, os.path.join(m.reg.far, "ws", "mac-rel", "bench", "20260101T000000Z-mbp-mac-ab"))
             self.assertTrue(os.path.isfile(os.path.join(m.taskdir, "task.json")))
-            self.assertEqual(m.logs, os.path.join(m.reg.store.record_dir(), "log", "20260101T000000Z-mbp-mac-ab"))
+            self.assertEqual(m.logs, os.path.join(m.reg.store.records_dir(), "log", "20260101T000000Z-mbp-mac-ab"))
         with world(workspace="gone") as m:
             ready(m)
             got, err = said(m.create_task, "20260101T000000Z")

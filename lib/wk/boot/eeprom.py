@@ -149,7 +149,7 @@ class BootOrder:
             self.eeprom("clear", sudo=True, mutates=True, WK_DIR=self.said(r))
 
     def fetch(self):
-        cache = os.path.join(Store(self.env).root(), "rpi-eeprom", COMMIT)
+        cache = os.path.join(Store(self.env).store_dir(), "rpi-eeprom", COMMIT)
         self.here.mkdir(cache)
         for name, path, sha in PINS:
             f = os.path.join(cache, name)
@@ -182,7 +182,7 @@ class BootOrder:
     def stage_recovery(self, config):
         """recovery.bin last: it is the trigger, so a copy cut short leaves a board that boots as it did."""
         cache, board = self.fetch(), self.board()
-        work = os.path.join(Store(self.env).root(), "rpi-eeprom", "stage-" + self.name)
+        work = os.path.join(Store(self.env).store_dir(), "rpi-eeprom", "stage-" + self.name)
         self.here.remove(work)
         self.here.mkdir(work)
         try:

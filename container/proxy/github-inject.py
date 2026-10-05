@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Swap the placeholder credential a workspace holds for a real one, on the two
 hosts whose TLS ends here. api.github.com takes a token in the Authorization
-header: a read spends the standing one, a write only `wk push on`'s.
-bugs.webkit.org takes an api_key query parameter, `wk push on`'s alone; a write
+header: a read spends the standing one, a write only `wk key push on`'s.
+bugs.webkit.org takes an api_key query parameter, `wk key push on`'s alone; a write
 with the switch off is refused here, naming it. See `wk help push`."""
 
 import asyncio
@@ -47,10 +47,10 @@ READ_METHODS = ("GET", "HEAD")
 # Not one of the far end's own codes: GitHub's 401 and Bugzilla's 410 mean a credential was refused, and this one was never sent.
 PUSH_OFF_STATUS = b"412 Precondition Failed"
 PUSH_OFF_REASON = (
-    b"wk push is off for this workspace's machine, so the wk credential "
+    b"wk key push is off for this workspace's machine, so the wk credential "
     b"injector has no credential to write with and did not forward this "
-    b"request. Outside the workspace, 'wk push on' allows it and "
-    b"'wk push status --all' says where every switch is.\r\n")
+    b"request. Outside the workspace, 'wk key push on' allows it and "
+    b"'wk key push status --all' says where every switch is.\r\n")
 
 # GitHub's API is all behind /graphql: only the document says if a POST writes.
 _MUTATION = re.compile(rb"mutation", re.IGNORECASE)

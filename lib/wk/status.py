@@ -24,7 +24,7 @@ from wk.machine import TIMED_OUT, Local, Ssh
 from wk.act import Refused
 from wk.resources import Resources
 from wk.kv import ANSI, kv, kv_file
-from wk.store import Bases, Store, dispatch_target, in_vm
+from wk.store import Snapshots, Store, dispatch_target, in_vm
 
 
 ENDED_AS_ASKED = ("ok", "cancelled", "stopped", "refused")
@@ -175,7 +175,7 @@ def sdk_record(machine, local, tags, cap):
 
 
 def tools_fact(ver, expect, machine, label, in_vm=False, peer=False, dirty_here=False):
-    """One machine's wk-tools against this checkout's commit; `ver` is `wk version`'s sha= and dirty=."""
+    """One machine's wk-tools against this checkout's commit; `ver` is `wk doctor --probe-tools`' sha= and dirty=."""
     sha = ver.get("sha", "")
     insync = tools.sha_matches(sha, expect)
     r = Rec("fact", machine=machine, type="wk-tools")
@@ -271,7 +271,7 @@ def task_records(records, only=None, clock=None):
 
 
 def disk_record(store, machine, in_vm, reclaimable):
-    root = store.root()
+    root = store.store_dir()
     if not os.path.isdir(root):
         return None
     r = Rec("disk", machine=machine, store=root)
@@ -284,7 +284,7 @@ def disk_record(store, machine, in_vm, reclaimable):
     except OSError as e:
         r.warn("cannot measure the disk under %s: %s" % (root, e))
     try:
-        snapshots = len(os.listdir(store.base_dir()))
+        snapshots = len(os.listdir(store.snapshots_dir()))
     except OSError:
         snapshots = 0
     r.set("snapshots", snapshots)
@@ -296,7 +296,7 @@ def disk_record(store, machine, in_vm, reclaimable):
 
 def broker_record(store, machine, alive):
     """The request broker: in flight is read from the process table, since a `running` status file is a claim a killed broker leaves behind."""
-    sock = store.broker_socket()
+    sock = store.runtime_socket()
     brdir = os.path.join(store.state_dir(), "broker")
     try:
         is_sock = stat.S_ISSOCK(os.stat(sock).st_mode)
@@ -395,11 +395,11 @@ def lock_records(store, machine, alive):
 
 
 def push_record(store, machine, forks, in_vm):
-    """The deploy keys held on disk: a count, never a switch position, which only `wk push status` measures.
+    """The deploy keys held on disk: a count, never a switch position, which only `wk key push status` measures.
     The podman VM mounts only their public halves, so it has no row."""
     if in_vm or not forks:
         return None
-    held = os.path.join(os.path.dirname(store.secrets_dir()), "push-keys")
+    held = store.keyring_push_dir()
     keys = sum(1 for f in forks if os.path.isfile(os.path.join(held, "build_key_" + f)))
     absent = len(forks) - keys
     r = Rec("switch", machine=machine, name="push credentials")
@@ -408,7 +408,7 @@ def push_record(store, machine, forks, in_vm):
         pat = secretfile.present(os.path.join(held, "github-pat")) == 0
     except SystemExit:
         pat = False
-    r.set("detail", "%d deploy key(s), %d absent, %s -- 'wk push status' says whether they are loaded"
+    r.set("detail", "%d deploy key(s), %d absent, %s -- 'wk key push status' says whether they are loaded"
           % (keys, absent, "an API token" if pat else "no API token"))
     return r.done()
 
@@ -842,7 +842,7 @@ class Walk:
     def current_base(self, target):
         with self.lock:
             if target.name not in self.bases:
-                self.bases[target.name] = Bases(target.store, target.store_machine).current()
+                self.bases[target.name] = Snapshots(target.store, target.store_machine).current()
             return self.bases[target.name]
 
     def remake_hint(self, target, ws):
@@ -870,12 +870,12 @@ class Walk:
                     r.set(f, probe[f])
         base = targets.image_base(self.root, ws) or (probe.get("wsbase") if probe.get("wsbase") != "?" else None)
         r.opt("base", base)
-        snap = target.store.ws_base_id(ws)
+        snap = target.store.ws_snapshot_id(ws)
         if snap:
             r.set("snap", snap)
             cur = self.current_base(target)
             if cur and cur != snap:
-                r.set("snap_behind", len([b for b in Bases(target.store, target.store_machine).ids() if b > snap]))
+                r.set("snap_behind", len([b for b in Snapshots(target.store, target.store_machine).ids() if b > snap]))
         if st == "creating":
             new = records.find("new", ws)
             if new and new.alive(None):
@@ -923,11 +923,11 @@ class Walk:
             return self._git
 
     def version_here(self):
-        return kv(Local().run([os.path.join(self.root, "cmd", "version")]).out)
+        return tools.identity(self.root, Local())
 
     def report_machine(self, target, gm, has_wk):
         if target.kind == "remote" and has_wk:
-            ver = kv(target.wk("version", quiet=True)[1])
+            ver = kv(target.wk("doctor", "--probe-tools", quiet=True)[1])
             keys = clean(target.wk("key", "fingerprints", quiet=True)[1])
             peer = target.peer
         elif target.name == self.reg.default():
@@ -966,7 +966,7 @@ class Walk:
         store = target.store
         alive = Local().alive
         out = []
-        out.append(disk_record(store, m, self.in_vm, len(Bases(store, Local()).unreferenced())))
+        out.append(disk_record(store, m, self.in_vm, len(Snapshots(store, Local()).unreferenced())))
         if target.kind == "container":
             local = target.sdk_local()
             if local:

@@ -143,6 +143,22 @@ We never run more than one task at a time.
 
 *** Claude edit below here ***
 
+## Layers
+
+The tree is five layers. A layer uses only the layers above it in this table,
+never one below.
+
+| layer | what it holds | rule |
+| --- | --- | --- |
+| `home` | the fleet as facts: `machines/*.conf`, the tailnet, bridges, the BMC | config only; nothing imports it, every layer reads it |
+| `lab` | places and drivers, the fleet walk, sysimage, boot, quiesce and session, the bench pipeline's mechanics | knows nothing of WebKit |
+| `wk` | the WebKit kit: build presets, `Tools/Scripts` wrappers, plans, PGO, the PR flow | wraps `Tools/Scripts`, never replaces it; drives places through `lab` |
+| `field` | what reads results: reports, crash dumps, symbolication | consumes `wk`; nothing depends on it |
+| `stock` | the pristine environment plus onboarding (`./setup`) | a profile of `lab`, not a codebase of its own |
+
+`lint.layering` holds the rule: a `lab` module names no WebKit and imports no
+`wk` or `field` module.
+
 ## Setup
 
 **macOS** — Xcode command line tools, podman (the official installer, not
@@ -167,7 +183,7 @@ gh auth login                  # wk key setup uses this once, for the deploy key
 claude setup-token             # the token wk key setup asks for
 wk key setup                   # every credential, one at a time; Enter skips one
 wk doctor                      # what is provisioned, what is missing, the fix for each
-wk sync                        # the WebKit mirror and the base snapshot; then wk new works
+wk sync                        # the WebKit mirror and the snapshot; then wk new works
 ```
 
 `wk doctor` names what is missing and the command that fixes it. It also
@@ -179,7 +195,7 @@ settings, the wk-tools commit, the provisioning hash.
 **A workspace, start to finish**
 
 ```sh
-wk new bug-238                          # refresh the mirror, overlay the base snapshot, fast-forward
+wk new bug-238                          # refresh the mirror, overlay the snapshot, fast-forward
 wk build bug-238 jsc-release --detach   # prints the build line; wk status follows it
 wk build bug-238 --kill
 wk run   bug-238 -- -e 'print(1+1)'
@@ -187,7 +203,7 @@ wk run   bug-238 --until-crash --max 50 -- crash.js   # repeat until it fails; k
 wk run   bug-238 --rr -- crash.js       # record it with rr (Linux ports); wk gui --rr records the browser
 wk run   bug-238 --replay               # the latest recording, under lldb
 wk test  bug-238
-wk logs  bug-238 --follow
+wk status bug-238 --log --follow
 wk enter bug-238 -- ls                  # a shell or one command, on any target
 wk stop  bug-238                        # parked; wk start brings it back
 wk rm    bug-238
@@ -255,13 +271,15 @@ wk machine probe                        # every device on every segment a sweep 
 A build machine is someone else's: no credential rests on it, `wk ai` there
 needs `--force`, and `USE_LIBBACKTRACE` is off.
 
-`wk build` on a build machine's workspace is handed to that machine's own wk,
-which runs it, sizes it and keeps its record there: the box's `wk status`
-and every workstation's show the one build, and `wk logs`, `wk status
+`wk new`, `wk rm` and `wk build` on a build machine's workspace are handed to
+that machine's own wk, which runs each (sizing a build) and keeps its record
+there. The workspace is a clone from the box's mirror, so the box and every
+workstation read one state for it, and the box's `wk status` and every
+workstation's show the one build, and `wk status --log`, `wk status
 --wait` and `wk build --kill` reach it the same way. It builds with the
 wk-tools the box has, and a box whose wk-tools commit differs from this
 checkout's is refused naming `wk sync --tools buildbox4` (`--force` crosses
-it); `wk status` and `wk logs` still hand over and report the difference. A
+it); `wk status` and `wk status --log` still hand over and report the difference. A
 box that does not answer, or has no wk-tools of its own, is refused with the
 remedy.
 
@@ -290,7 +308,7 @@ wk sync --all                           # every machine
 wk sync bug-238 --fix                   # re-assert its remotes and git-webkit setup, then fetch
 ```
 
-A sync fetches and never checks out, and names any checkout, or base snapshot,
+A sync fetches and never checks out, and names any checkout, or snapshot,
 whose remotes are wired wrong. Every workspace, guest and the podman VM mounts
 the mirror read-only, so a refresh from one of them is asked of the machine
 that keeps it, through the broker. A refresh on a Mac then remounts the mirror's
@@ -304,16 +322,17 @@ an uncommitted tree here is refused.
 **Profile**
 
 ```sh
-wk profile bug-238 script.js                    # jsc's sampling profiler
-wk profile bug-238 --mode samply --browser       # native sampling, MiniBrowser
-wk profile bug-238 --mode bytecode --fetch       # per-bytecode tier report, copied out
-wk profile bug-238 --mode sysprof script.js      # sysprof-cli, JS frames named from the JIT dump
+wk run bug-238 --profile script.js              # jsc's sampling profiler
+wk run bug-238 --profile=samply --browser       # native sampling, MiniBrowser
+wk run bug-238 --profile=bytecode --fetch       # per-bytecode tier report, copied out
+wk run bug-238 --profile=sysprof script.js      # sysprof-cli, JS frames named from the JIT dump
+wk test bug-238 --profile=native --attach <pid> # the same profiler, from wk test
 ```
 
 **Benchmark in a workspace**
 
 ```sh
-wk quiesce on && wk session on
+wk quiesce on && wk quiesce session on
 wk bench run bug-238 speedometer3
 wk bench run bug-238 jetstream3 --cores 0-3      # pinned; recorded and compared
 wk bench run bug-238 jetstream3 --config jsc-release --a-args '' --b-args '--useFoo=1' --rounds 10
@@ -477,9 +496,9 @@ quiet Mac is; `wk quiesce status` reads it back off the machine.
 
 ```sh
 wk quiesce on                           # background daemons paused, App Nap off, display held
-wk session on                           # a compositor on the attached monitor
+wk quiesce session on                           # a compositor on the attached monitor
 wk quiesce status                       # read off the machine, not off a record
-wk quiesce off && wk session off
+wk quiesce off && wk quiesce session off
 ```
 
 **Add a bench machine**
@@ -525,7 +544,7 @@ wk ai claude                            # inside a workspace: this one
 ```
 
 An agent cannot push, commit or build directly. Pushing needs a key that is
-not there (`wk push`, below). Committing is walled: the checkout's `.git`
+not there (`wk key push`, below). Committing is walled: the checkout's `.git`
 commit parts are mounted read-only under the agent. Building goes through
 `wk build`: the build tools on `PATH` refuse an agent by name. `wk doctor
 <ws>` measures all three from inside.
@@ -560,12 +579,12 @@ and renews it itself, in `~/.config/wk/agent-rw`, the one directory a
 workspace mounts read-write, so every workspace on the machine shares it.
 `CLAUDE_CODE_OAUTH_TOKEN` is what a build machine gets instead.
 
-**`wk push`: publishing without the credentials inside**
+**`wk key push`: publishing without the credentials inside**
 
 ```sh
-wk push on                              # asks once; ends every agent session first
-wk push status                          # asks the agent, not a record
-wk push off
+wk key push on                              # asks once; ends every agent session first
+wk key push status                          # asks the agent, not a record
+wk key push off
 ```
 
 The deploy keys live in an ssh-agent on the machine running the workspaces;
@@ -573,12 +592,12 @@ a workspace's ssh config names the socket, so ssh signs with a key it can
 never read. The GitHub token and Bugzilla key go to the injector
 (`container/proxy/github-inject.py`), which terminates TLS for those two
 hosts and puts the credential on the request: a read always, a write only
-while push is on. With push off a write is refused with 412 naming `wk push
+while push is on. With push off a write is refused with 412 naming `wk key push
 on`. A macOS guest gets the same through an ssh-agent on the host forwarded
 per guest over its sshd on `tart exec`. A build box holds no deploy key and nothing forwards one to it,
-so a push is made from the workstation and `wk push status --target <box>`
+so a push is made from the workstation and `wk key push status --target <box>`
 says off: `wk pr open <ws>` fetches the box's branch into this machine's
-mirror over ssh and pushes it from here, through the agent `wk push on`
+mirror over ssh and pushes it from here, through the agent `wk key push on`
 loads (on a macOS host, the one it runs for its guests). A ref a killed push
 leaves in the mirror is `wk gc` rubble. A push on the box itself, `git push`
 or `git-webkit pr`, is refused naming `wk pr open`.
@@ -587,8 +606,7 @@ or `git-webkit pr`, is refused naming `wk pr open`.
 
 ```sh
 wk status                               # every workspace, task, machine and bench device
-wk doctor --all                         # this machine and every build machine
-wk disk
+wk doctor --all                         # this machine (its wk-tools and disk too) and every build machine
 wk gc                                   # asks once, takes what loses no work, names the rest with what takes it
 wk gc --purge-rubble                    # half-made workspaces nothing is creating, instrumented slots on a board
 wk gc --purge-mirror                    # the mirror and every snapshot; refused with a live workspace
@@ -714,8 +732,21 @@ Every `WK_*` variable is read with a default; each moves one decision.
 **Where state lives** — `WK_LOCAL_STORE`, `WK_REMOTE_STORE`, `WK_LOCK_DIR`,
 `WK_MARKER`, `WK_REMOTE_MARKER`, `WK_IMAGE_MARKER`,
 `WK_SESSION_MODE_FILE`, `WK_MIRROR_BRANCHES`, `WK_TART_CACHE_GB`, `WK_CMD`.
+What lives there has six parts, each with one name in code, help and prose
+(`lib/wk/store.py`):
+
+- the **store**, a place's data: `ws/`, `base/`, `cache/` under `$WK_STORE`;
+- the **records**, what outlives a command: `task/`, `log/` and the locks
+  (`~/.local/state/wk/locks`, or `WK_LOCK_DIR`);
+- the **mirror**, `git/WebKit.git`;
+- the **snapshots**, `base/<id>`, the clones a workspace starts from;
+- the **keyring**: `secrets/`, with `agent-rw/` and `push-keys/` beside it;
+- the **runtime**, the broker socket (`$XDG_RUNTIME_DIR/wk/broker.sock`,
+  `/run/wk/broker.sock` in a workspace, or `WK_BROKER_SOCKET`).
+
 On a macOS workstation the store is the podman machine's, so this machine's
-own records go under `~/.local/state/wk`.
+own records and mirror go under `~/.local/state/wk` and its keyring under
+`~/.config/wk/secrets`.
 
 **The container target** — `WK_SDK`, `WK_SDK_IMAGE`, `WK_CONTAINER_USER`,
 `WK_TOOLS_SRC`, `WK_MACHINE`, `WK_MIRROR` (the mirror's path
@@ -727,7 +758,7 @@ inside a container).
 `WK_VM_PROXY_ADDR`, `WK_VM_PROXY_PORT`, `WK_HOST_FREE_WARN_GB`,
 `WK_VM_SHELLS_WARN`, `WK_VM_MEM_FREE_WARN_PCT`, `WK_VM_SWAP_WARN_MB`,
 `WK_VM_FORCE` (crosses a stale base or a blocked desktop, recorded),
-`WK_VM_STORE` (where the guests' records live, apart from the container store).
+`WK_VM_STORE` (the guests' store and records, apart from the container's).
 
 **The Mac's bench install** — `WK_BENCH_USER`, `WK_BENCH_VOLUME`.
 
@@ -749,7 +780,7 @@ inside a container).
 - `WK_BENCH_NEED_GB` free GB the bench volume's container must have before the volume is added.
 - `WK_BENCH_WIRED` set when the bench install is on ethernet, so no Wi-Fi credential is copied.
 - `WK_HOST_FREE_MIN_GB` free GB on the host below which a macOS guest is refused (`WK_HOST_FREE_WARN_GB` only warns).
-- `WK_HOST_SECRETS` the macOS host's secrets directory (default `~/.config/wk/secrets`).
+- `WK_HOST_SECRETS` the macOS host's keyring (default `~/.config/wk/secrets`).
 - `WK_IMAGE_HOST` the address the bench image is reached at, ahead of the fleet peer lookup.
 - `WK_JOB_PID_TRIES` polls a watched job gets to announce its pid (default 900).
 - `WK_MACHINES_DIR` the directory of machine confs (default `machines/`).
@@ -758,7 +789,7 @@ inside a container).
 - `WK_MAC_BENCH_TOOLS` where the wk-tools checkout is on the Mac's bench install.
 - `WK_PMOS_HOST` the postmarketOS build host, over the profile's `PMO_BUILD_HOST`.
 - `WK_PMOS_ROOT` the postmarketOS build root on that host (default `~/wk-pmos`).
-- `WK_QUIESCE_STATE` the directory quiesce records live in (default `quiesce/` under the state dir).
+- `WK_QUIESCE_STATE` the directory quiesce records live in (default `~/.local/state/wk/quiesce`).
 - `WK_NTFY_API` the ntfy server notifications are published to (default `https://ntfy.sh`).
 - `WK_SCREEN_WATCH_SECONDS` how often the screen watch samples (default 10).
 - `WK_STORE_DEFAULT` the machine's own store when it differs from `WK_STORE`; its secrets live under it.

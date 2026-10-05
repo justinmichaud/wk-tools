@@ -2,7 +2,7 @@ import os
 import signal
 import sys
 
-from wk import act, guest, images, job, secrets, store
+from wk import act, guest, images, job, record, secrets, status, store
 from wk.act import Refused, changed, die, info, log, warn
 
 ROOT = images.root()
@@ -141,7 +141,7 @@ class Push:
         rows = [state for _, state in sec.agent_load(self.sock)]
         if rows.count("FAILED"):
             warn("%d deploy key(s) would not load into the agent, so push is not fully on" % rows.count("FAILED"))
-            log("  the agent is at %s; 'wk push on' again once it answers" % self.sock)
+            log("  the agent is at %s; 'wk key push on' again once it answers" % self.sock)
             return 1
         if not rows.count("loaded"):
             warn("no deploy key here to load -- 'wk key deploy' makes them")
@@ -150,7 +150,7 @@ class Push:
         if rows.count("no-key"):
             log("  %d fork(s) have no key here ('wk key deploy')" % rows.count("no-key"))
         log("  every workspace can push to the forks now, including any agent in one.")
-        log("  'wk push off' when you are done; 'wk ai claude' turns it off by itself.")
+        log("  'wk key push off' when you are done; 'wk ai claude' turns it off by itself.")
         if sec.cred_write(self.pat, "github-pat"):
             changed("the GitHub API token is where the injector reads it (%s)" % sec.github_user())
             log("  'git-webkit pr' in a workspace posts as that account; the token stays here")
@@ -183,16 +183,16 @@ class Push:
         left = sec.agent_list(self.sock)
         if left:
             warn("the agent at %s still holds %d identity/identities" % (self.sock, len(left)))
-            log("  push is NOT off; 'wk push off' again, or restart wk-ssh-agent.service there")
+            log("  push is NOT off; 'wk key push off' again, or restart wk-ssh-agent.service there")
             return 1
         for path, what in ((self.pat, "GitHub API token"), (self.bz, "Bugzilla API key")):
             if sec.cred_present(path):
                 warn("the %s is still at %s on that machine" % (what, path))
-                log("  push is NOT off; 'wk push off' again")
+                log("  push is NOT off; 'wk key push off' again")
                 return 1
         changed("push is OFF -- the agent is empty and the injector has no token and no Bugzilla key")
         log("  workspaces keep their remotes and can fetch; a push and an API call are")
-        log("  both refused at the door. The keys never left %s." % sec.held_dir())
+        log("  both refused at the door. The keys never left %s." % sec.store.keyring_push_dir())
         return 0
 
     def where(self, fork, in_agent):
@@ -207,17 +207,17 @@ class Push:
         return "absent" if self.ws_sock else "forwarded"
 
     def exposed_private_keys(self):
-        d = self.sec.secrets_dir()
+        d = self.sec.store.keyring_dir()
         m = self.sec.machine
         names = m.listdir(d) if m.isdir(d) else []
         return [f for f in names if f.startswith("build_key") and not f.endswith(".pub") and not m.isdir(os.path.join(d, f))]
 
     def switch_status(self):
         sec = self.sec
-        held_dir = sec.held_dir()
+        push_dir = sec.store.keyring_push_dir()
         in_agent = {line.split()[1] for line in sec.agent_list(self.sock) if len(line.split()) > 1}
-        words = {"loaded": "push allowed (in the agent)", "held": "held back (%s)" % held_dir,
-                 "live": "at rest (%s) -- a build box holds none; 'wk machine setup' removes it" % held_dir,
+        words = {"loaded": "push allowed (in the agent)", "held": "held back (%s)" % push_dir,
+                 "live": "at rest (%s) -- a build box holds none; 'wk machine setup' removes it" % push_dir,
                  "absent": "no key ('wk key deploy')", "forwarded": "no key at rest; a push is made from the workstation"}
         count = {w: 0 for w in words}
         for fork in [f[0] for f in sec.forks()]:
@@ -239,8 +239,8 @@ class Push:
 
         exposed = self.exposed_private_keys()
         if exposed:
-            warn("private key(s) in the mounted secrets directory, readable by every workspace:\n    %s" % " ".join(exposed))
-            log("  move them to %s, which nothing mounts anywhere" % held_dir)
+            warn("private key(s) in the mounted keyring, readable by every workspace:\n    %s" % " ".join(exposed))
+            log("  move them to %s, which nothing mounts anywhere" % push_dir)
 
         if (count["held"] or count["loaded"]) and not sec.agent_answers(self.sock):
             log("  no ssh-agent answers at %s ('./setup' installs it there)" % self.sock)
@@ -259,7 +259,7 @@ class Push:
             info("push is ON -- no deploy key is loaded, but the injector has a write credential")
             return 0
         if count["held"]:
-            info("push is OFF -- 'wk push on' to allow it")
+            info("push is OFF -- 'wk key push on' to allow it")
             return 1
         if count["forwarded"]:
             info("push is OFF here -- no key at rest, and an agent session is forwarded none")
@@ -272,18 +272,18 @@ class Push:
     def converge_guests(self, action):
         if self.in_vm:
             warn("this is the podman machine's half of the switch: the host's agent for its macOS\n    guests is not reached "
-                 "from here, so push is not %s everywhere. On the host:  wk push %s" % (action, action))
+                 "from here, so push is not %s everywhere. On the host:  wk key push %s" % (action, action))
             return UNASKED
         if not self.sec.macos or guest.vm_push_keys_converge(ROOT, self.sec.machine, action):
             return 0
-        warn("the guest(s) named above were not converged and may still reach the agent;\n    'wk push %s' again once each one "
+        warn("the guest(s) named above were not converged and may still reach the agent;\n    'wk key push %s' again once each one "
              "answers" % action)
         return 1
 
     def guest_agent_row(self):
         """A key in this host's agent is a push from here and from every guest holding a forward, whether or not one is up now."""
         if self.in_vm:
-            self.say("guests", "not read from the podman machine -- 'wk push status' on the host")
+            self.say("guests", "not read from the podman machine -- 'wk key push status' on the host")
             return
         if not self.sec.macos:
             return
@@ -301,3 +301,65 @@ class Push:
                 self.out.write("guest %-10s %s\n" % (g, forks))
             else:
                 self.out.write("guest %-10s %s\n" % (g, "no agent socket -- a push from in there is refused"))
+
+
+PUSH_VERBS = ("on", "off", "status")
+
+
+class FanOut:
+    """Another machine's switch, asked of its own wk: the credentials never travel."""
+
+    def __init__(self, reg, action, out):
+        self.reg, self.action, self.out = reg, action, out
+        self.unasked = []
+
+    def row(self, name, text):
+        for line in text.rstrip("\n").split("\n"):
+            self.out.write("%-22s%s\n" % (name, line))
+
+    def one(self, name):
+        try:
+            t = self.reg.load(name)
+        except LookupError as e:
+            die(str(e))
+        side, why = t.probe()
+        if side != "answering":
+            # One that cannot be asked may be holding keys, so it is 3 and never 1, which `wk ai` reads as off.
+            self.out.write("%-22s %s\n" % (name, status.far_side_reason(t, side, why)))
+            self.unasked.append(name)
+            return UNASKED
+        rc, text = t.wk("key", "push", self.action)
+        self.row(name, text)
+        return rc
+
+    def here(self):
+        r = self.reg.machine.run(["sh", "-c", '"$0" key push "$1" 2>&1', os.path.join(ROOT, "wk"), self.action], input="")
+        self.row(record.machine_name(self.reg.env, self.reg.machine), r.out)
+        return r.rc
+
+    def run(self, target):
+        if target == "--all":
+            rc = self.here()
+            for m in self.reg.machines():
+                rc = max(rc, self.one(m))
+        else:
+            rc = self.one(target)
+        if self.unasked:
+            warn("not asked: %s -- the keys there are wherever they were, which\n    is not 'off'. 'wk key push %s --target <machine>' "
+                 "once each one answers." % (" ".join(self.unasked), self.action))
+            return UNASKED
+        return rc
+
+
+def main(root, words, target, reg, clock, out=None):
+    # Refused before the target loads: in a workspace the default is `local`, which names no switch.
+    if reg.in_workspace():
+        die("'wk key push' throws the credential switch, and this is workspace '%s'.\n    The keys and the token are on the host and "
+            "a workspace cannot reach either --\n    which is what makes the switch a switch. Run it on the host."
+            % reg.workspace_name())
+    action = words[0] if words else "status"
+    if action not in PUSH_VERBS:
+        die("'%s' is not a verb of wk key push: on, off or status; see wk key -h" % action)
+    if target:
+        return FanOut(reg, action, out or sys.stdout).run(target)
+    return Push(reg, secrets.Secrets(root, reg.env, reg.machine), clock, out).run(action)

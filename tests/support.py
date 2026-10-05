@@ -111,7 +111,7 @@ def _clean_env(extra=None, wk_root=False):
     would make the command under test think it is already a workspace or
     already pointed at a scratch store, and with a fleet of no build machine
     or peer (BLIND_FLEET above) so nothing reaches a real target, and a scratch
-    secrets directory (NO_SECRETS above) so nothing reads or writes the real
+    keyring (NO_SECRETS above) so nothing reads or writes the real
     ~/.config/wk/secrets, plus whatever the caller adds -- including a
     WK_MACHINES_DIR or WK_HOST_SECRETS of its own."""
     env = dict(os.environ)
@@ -174,7 +174,7 @@ def shimmed_path(path):
 def clean_env(extra=None, wk_root=True):
     """`_clean_env` for a test that invokes a cmd/* file directly instead of
     through ./wk -- the fleet-blindness above is the suite's, not the
-    dispatcher's: cmd/profile resolving a workspace name against the real
+    dispatcher's: `wk run --profile` resolving a workspace name against the real
     registry asked moose over ssh three times before refusing an argument,
     and outlived a 30s timeout while moose was down (2026-09-17)."""
     return _clean_env(extra, wk_root=wk_root)
@@ -248,7 +248,7 @@ def bash(script, env=None, timeout=60, cwd=None):
 def builds_on_the_books_env(tmp, *labels):
     """An environment in which builds_on_the_books() reads exactly `labels`:
     a stub podman answers `machine ssh` with them and reports no running
-    machine (macOS), and a state directory holds one record each (Linux)."""
+    machine (macOS), and the records hold one each (Linux)."""
     tmp = Path(tmp)
     records = tmp / "wk" / "builds"
     records.mkdir(parents=True, exist_ok=True)
@@ -604,7 +604,7 @@ def container_store():
         return "/var/lib/wk"
     sys.path.insert(0, str(REPO / "lib"))
     from wk.store import Store
-    return Store(_clean_env()).root()
+    return Store(_clean_env()).store_dir()
 
 
 class WkTest(unittest.TestCase):

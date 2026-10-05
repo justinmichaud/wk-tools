@@ -14,7 +14,6 @@ allowed-tools:
   - Bash(wk build:*)
   - Bash(wk run:*)
   - Bash(wk status:*)
-  - Bash(wk logs:*)
 ---
 
 # Building JavaScriptCore / WebKit
@@ -35,7 +34,7 @@ wk build <config>              # jsc-release, gtk-debug, wpe-release, mac-releas
 wk build <config> --detach     # tens of minutes; survives the shell going away
 wk build --list                # what the configs are
 wk status                      # build/test state, machine-readable exit code
-wk logs [-f]                   # the log, errors first
+wk status --log [-f]                   # the log, errors first
 wk run -- <args>               # run jsc from the build just made
 ```
 

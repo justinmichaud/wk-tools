@@ -1,16 +1,16 @@
-"""`wk logs <ws>` (cmd/logs, driven directly with WK_NAME/WK_TARGET/WK_VM_STORE): build.log, else the image stage
+"""`wk status <ws> --log` (cmd/status, driven directly with WK_NAME/WK_TARGET/WK_VM_STORE): build.log, else the image stage
 log its builder wrote under home/."""
 import unittest
 
 from tests.support import REPO, WkTest, bash
 
-CMD_LOGS = REPO / "cmd" / "logs"
+CMD_STATUS = REPO / "cmd" / "status"
 
 
 class TestLogsPicksTheRightFile(WkTest):
     def _run(self, name, store, args=()):
         env = {"WK_NAME": name, "WK_TARGET": "vm", "WK_VM_STORE": str(store)}
-        return bash(f'exec "{CMD_LOGS}" {" ".join(args)}', env=env)
+        return bash(f'exec "{CMD_STATUS}" --log {" ".join(args)}', env=env)
 
     def test_with_no_build_log_an_image_stage_log_is_shown_and_named(self):
         for builder in ("yocto", "buildroot"):

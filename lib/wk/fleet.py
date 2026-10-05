@@ -17,22 +17,9 @@ BRIDGE_DEFAULTS = {"ssh": lambda n: n, "hostname": lambda n: n, "tag": "tag:brid
 LOWER = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
-def renamed(key):
-    """The lowercase spelling of a key a conf wrote in upper case (KIND, NODE_*, BR_*, WK_REMOTE_*, WK_TARGET_*)."""
-    special = {"WK_TARGET_KIND": "driver", "WK_BUILD_ARGS": "build_args"}
-    if key in special:
-        return special[key]
-    if key.startswith("WK_BUILD_ARGS_"):
-        return "build_args_" + key[len("WK_BUILD_ARGS_"):]
-    for prefix in ("NODE_", "BR_", "WK_REMOTE_", "WK_TARGET_"):
-        if key.startswith(prefix):
-            return key[len(prefix):].lower()
-    return key.lower()
-
-
 def _lowercase(key):
     if not LOWER.match(key):
-        return "%s is spelled %s now: a machine conf's keys are lowercase" % (key, renamed(key))
+        return "%s is not a key: a machine conf's keys are lowercase" % key
     return None
 
 
@@ -119,9 +106,6 @@ class Fleet:
                 return n
         raise LookupError("this host, %s, is the far end of a target (~/.wk-remote), and no machines/<name>.conf\n"
                           "    names it. Set hostname=%s in the conf of the machine it is." % (host, host))
-
-    def old_local_dir(self):
-        return os.path.join(config_home(self.env), "wk", "bridges")
 
 
 def main(argv, env=None):

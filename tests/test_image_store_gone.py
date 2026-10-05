@@ -1,5 +1,5 @@
 """There is no image store: a build's output lives where its builder left it, and every reader finds it there
-(`wk sysimage rm` is a tombstone, `wk boot` reads the device, a write derives the profile from the path)."""
+(`wk boot` reads the device, a write derives the profile from the path)."""
 import contextlib
 import io
 import sys
@@ -12,17 +12,7 @@ from wk import images  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.sysimage import write  # noqa: E402
 from wk.store import Store  # noqa: E402
-from wk import act  # noqa: E402
-from wk.sysimage import cli, ls  # noqa: E402
-
-class TestSysimageRmIsATombstone(unittest.TestCase):
-    def test_rm_names_wk_rm_instead(self):
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err), self.assertRaises(act.Refused):
-            cli.Sysimage.rm()
-        self.assertIn("does not exist", err.getvalue())
-        self.assertIn("wk rm <workspace>", err.getvalue())
-
+from wk.sysimage import ls  # noqa: E402
 
 # Answers the card helper's read of wk-image.id off partition 1 of the board's medium; partition 3 is bare.
 _SSH_STUB = '''#!/bin/sh

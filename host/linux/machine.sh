@@ -117,7 +117,7 @@ _missing_keys=""
 _forks=$(wk_py wk.secrets forks)
 while read -r _remote _repo _alias; do
     [ -n "$_remote" ] || continue
-    [ -f "$push_held_dir/build_key_$_remote" ] || _missing_keys="$_missing_keys $_repo"
+    [ -f "$keyring_push_dir/build_key_$_remote" ] || _missing_keys="$_missing_keys $_repo"
 done <<EOF
 $_forks
 EOF

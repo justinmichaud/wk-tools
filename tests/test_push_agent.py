@@ -1,4 +1,4 @@
-"""The deploy keys in a real ssh-agent, `wk push` end to end against it, and the /secrets a store publishes.
+"""The deploy keys in a real ssh-agent, `wk key push` end to end against it, and the /secrets a store publishes.
 tests/test_push_switch.py and tests/test_wk_secrets.py hold the switch's logic over a fake machine.
 
 Run: python3 -m unittest tests.test_push_agent -v
@@ -155,7 +155,7 @@ class TestTheStandingReadToken(_Agent):
         self.read_pat().write_text("ghp-standing\n")
         for action in ("on", "off"):
             with self.subTest(action=action):
-                self.run_wk("push", action, env=self.env())
+                self.run_wk("key", "push", action, env=self.env())
                 self.assertEqual("ghp-standing\n", self.read_pat().read_text())
 
 
@@ -182,11 +182,11 @@ class TestDoctorNamesTheReadToken(WkTest):
 class TestTheSwitchEndToEnd(_Agent):
     def test_on_loads_and_writes_the_config_off_empties_and_status_reads_the_agent(self):
         (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
-        self.assertEqual(1, self.run_wk("push", "status", env=self.env()).returncode)
+        self.assertEqual(1, self.run_wk("key", "push", "status", env=self.env()).returncode)
         for action, rc, keys in (("on", 0, len(FORKS)), ("status", 0, len(FORKS)), ("off", 0, 0)):
             with self.subTest(action=action):
                 (self.secrets / "ssh_config").unlink(missing_ok=True)
-                cp = self.run_wk("push", action, env=self.env())
+                cp = self.run_wk("key", "push", action, env=self.env())
                 self.assertEqual(rc, cp.returncode, cp.stdout)
                 self.assertEqual(keys, len(self.identities()))
                 self.assertEqual(bool(keys), (self.tmp / "pat").exists())
@@ -248,12 +248,12 @@ class TestLivePushFromAContainer(unittest.TestCase):
                               text=True, timeout=timeout)
 
     def test_a_container_can_push_through_the_agent_while_on(self):
-        was_on = self.wk("push", "status").returncode == 0
-        self.addCleanup(self.wk, "push", "on" if was_on else "off")
+        was_on = self.wk("key", "push", "status").returncode == 0
+        self.addCleanup(self.wk, "key", "push", "on" if was_on else "off")
         names = [ln.split()[0] for ln in self.wk("ls", timeout=120).stdout.splitlines()[1:] if ln.split()]
         if not names:
             self.skipTest("no workspace here to push from ('wk new <name>')")
-        cp = self.wk("push", "on")
+        cp = self.wk("key", "push", "on")
         self.assertEqual(0, cp.returncode, cp.stdout)
         cp = self.wk("enter", names[0], "git", "ls-remote", "git@%s:" % secrets.forks()[0][2], "HEAD")
         self.assertEqual(0, cp.returncode, cp.stdout)
@@ -269,27 +269,27 @@ class TestStoreInitPublishesSecrets(WkTest):
                 "XDG_STATE_HOME": str(self.tmp / "state")}
 
     def publish(self, extra=""):
-        secrets_dir = self.tmp / "store" / "secrets"
-        secrets_dir.mkdir(parents=True, exist_ok=True)
+        keyring_dir = self.tmp / "store" / "secrets"
+        keyring_dir.mkdir(parents=True, exist_ok=True)
         for name, text in self.SEEDED.items():
-            (secrets_dir / name).write_text(text)
+            (keyring_dir / name).write_text(text)
         cp = store_init(self.env(), extra)
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.last = cp
-        return secrets_dir, secrets_dir / "view" / "container"
+        return keyring_dir, keyring_dir / "view" / "container"
 
     def test_the_aliases_the_account_and_the_view_and_no_private_half(self):
-        secrets_dir, view = self.publish()
-        self.assertIn("Host github-webkit", (secrets_dir / "ssh_config").read_text())
-        self.assertTrue((secrets_dir / "github-user").read_text().strip())
+        keyring_dir, view = self.publish()
+        self.assertIn("Host github-webkit", (keyring_dir / "ssh_config").read_text())
+        self.assertTrue((keyring_dir / "github-user").read_text().strip())
         self.assertEqual({"ssh_config", "github-user", "build_key_fork.pub", "litellm-key"},
                          {p.name for p in view.iterdir()})
-        for f in secrets_dir.rglob("*"):
+        for f in keyring_dir.rglob("*"):
             if f.is_file():
                 self.assertNotIn("PRIVATE KEY", f.read_text(errors="replace"), f.name)
-        first = (secrets_dir / "ssh_config").read_text()
+        first = (keyring_dir / "ssh_config").read_text()
         self.publish()
-        self.assertEqual(first, (secrets_dir / "ssh_config").read_text())
+        self.assertEqual(first, (keyring_dir / "ssh_config").read_text())
 
     def test_a_rotation_reaches_the_view(self):
         _, view = self.publish(extra='printf "rotated\\n" | key_store litellm\n')
@@ -299,7 +299,7 @@ class TestStoreInitPublishesSecrets(WkTest):
         _, view = self.publish()
         self.assertFalse((view / "bugzilla-user").exists())
         self.assertIn("wk sync", self.last.stderr)
-        mirror = Path(Store(self.env()).mirror())
+        mirror = Path(Store(self.env()).mirror_dir())
         user = Secrets(REPO, self.env(), Fake("here")).github_user()
         mirror.mkdir(parents=True)
         subprocess.run(["git", "init", "-q", "-b", "main", str(mirror)], check=True)
@@ -314,16 +314,16 @@ class TestStoreInitPublishesSecrets(WkTest):
         self.assertEqual("me@example.test\n", (view / "bugzilla-user").read_text())
 
     def test_in_the_vm_a_read_only_secrets_dir_is_read_and_not_written(self):
-        secrets_dir = self.tmp / "store" / "secrets"
+        keyring_dir = self.tmp / "store" / "secrets"
         for name in ("ssh_config", "github-user", "view/container/ssh_config"):
-            (secrets_dir / name).parent.mkdir(parents=True, exist_ok=True)
-            (secrets_dir / name).write_text("published by the host\n")
-        secrets_dir.chmod(0o500)
-        self.addCleanup(secrets_dir.chmod, 0o700)
+            (keyring_dir / name).parent.mkdir(parents=True, exist_ok=True)
+            (keyring_dir / name).write_text("published by the host\n")
+        keyring_dir.chmod(0o500)
+        self.addCleanup(keyring_dir.chmod, 0o700)
         cp = store_init({**self.env(), "WK_IN_VM": "1"})
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        self.assertEqual({"ssh_config", "github-user", "view"}, {p.name for p in secrets_dir.iterdir()})
-        self.assertEqual("published by the host\n", (secrets_dir / "ssh_config").read_text())
+        self.assertEqual({"ssh_config", "github-user", "view"}, {p.name for p in keyring_dir.iterdir()})
+        self.assertEqual("published by the host\n", (keyring_dir / "ssh_config").read_text())
 
 
 PEER_SSH = '#!/bin/sh\nfor last; do :; done\nexec bash -c "$last"\n'
@@ -331,7 +331,7 @@ PEER_WK = '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$WK_TEST_PEER_LOG"\necho "fork  
 
 
 class TestAskingAnotherMachine(WkTest):
-    """`wk push --target <machine>` runs the far side's own `wk push` over ssh; ssh is a stub that runs it here."""
+    """`wk key push --target <machine>` runs the far side's own `wk key push` over ssh; ssh is a stub that runs it here."""
 
     def test_the_far_side_runs_the_same_command(self):
         reg, root, binp = self.tmp / "registry", self.tmp / "peer-root", self.tmp / "bin"
@@ -342,10 +342,10 @@ class TestAskingAnotherMachine(WkTest):
             path.chmod(0o755)
         (reg / "peerbox.conf").write_text("kind=peer\nhost=fake-peerbox\npeer=1\nroot=%s\n" % root)
         log = self.tmp / "peer.log"
-        cp = self.run_wk("push", "status", "--target", "peerbox", env={
+        cp = self.run_wk("key", "push", "status", "--target", "peerbox", env={
             "PATH": f"{binp}:{os.environ['PATH']}", "WK_MACHINES_DIR": str(reg), "WK_STORE": str(self.tmp / "store"),
             "WK_HOST_SECRETS": str(self.tmp / "secrets"), "WK_TEST_PEER_LOG": str(log)})
-        self.assertEqual(["push status"], log.read_text().split("\n")[:-1], cp.stdout)
+        self.assertEqual(["key push status"], log.read_text().split("\n")[:-1], cp.stdout)
         self.assertIn("push allowed", cp.stdout)
         self.assertEqual(0, cp.returncode, cp.stdout)
 

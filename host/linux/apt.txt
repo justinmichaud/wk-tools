@@ -58,11 +58,11 @@ python3-yaml
 # GPU and the benchmark session on the attached monitor. cage is a one-client
 # kiosk compositor: a real DRM session for benchmark runs without a desktop's
 # worth of background compositing noise. wayland-utils' wayland-info is how
-# `wk session on/status` tells the session apart from llvmpipe or nothing at
-# all: without it, `wk session on` refuses rather than start something
+# `wk quiesce session on/status` tells the session apart from llvmpipe or nothing at
+# all: without it, `wk quiesce session on` refuses rather than start something
 # nobody can verify.
 #
-# wlr-randr is what makes `wk session off` an output that is off rather than an
+# wlr-randr is what makes `wk quiesce session off` an output that is off rather than an
 # output painted black: cage exports wlr-output-management but ships no client
 # for it, and disabling a head through that protocol is the only modeset path
 # this driver honours. 11 kB, libc and libwayland-client and nothing else.

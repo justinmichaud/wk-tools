@@ -1,4 +1,4 @@
-"""`wk push` -- the deploy-key switch, as a flow over the fake machine tests/test_wk_secrets.py builds.
+"""`wk key push` -- the deploy-key switch, as a flow over the fake machine tests/test_wk_secrets.py builds.
 
 Run: python3 tests/run.py --unit -k test_push_switch
 """
@@ -14,7 +14,7 @@ from unittest import mock
 
 from tests.fakes import FakeRegistry
 from tests.killpoints import converges
-from tests.support import REPO, WkTest, bash, run
+from tests.support import REPO, WkTest, bash
 from tests.test_wk_secrets import SOCK, SecretsTest, World
 from wk import act, guest, pushswitch, targets
 from wk.act import Refused
@@ -22,16 +22,16 @@ from wk.clock import FakeClock
 from wk.machine import Result
 
 
-def load_push():
-    path = str(REPO / "cmd" / "push")
-    loader = importlib.machinery.SourceFileLoader("wk_cmd_push", path)
-    spec = importlib.util.spec_from_file_location("wk_cmd_push", path, loader=loader)
+def load_key():
+    path = str(REPO / "cmd" / "key")
+    loader = importlib.machinery.SourceFileLoader("wk_cmd_key", path)
+    spec = importlib.util.spec_from_file_location("wk_cmd_key", path, loader=loader)
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
 
 
-PUSH = load_push()
+KEY = load_key()
 
 
 class Box(targets.Target):
@@ -87,13 +87,13 @@ class PushTest(SecretsTest):
         self.vm["vm_push_keys_state"].return_value = []
 
     def push(self, action, w=None, macos=False, boxes=None):
-        """(exit status, stdout, stderr) of one `wk push <action>`."""
+        """(exit status, stdout, stderr) of one `wk key push <action>`."""
         w = w or self.w
         out = io.StringIO()
         reg = registry(w, boxes or self.boxes)
         with contextlib.redirect_stderr(io.StringIO()) as err:
             try:
-                p = PUSH.Push(reg, w.sec(macos=macos), self.clock, out)
+                p = pushswitch.Push(reg, w.sec(macos=macos), self.clock, out)
                 rc = p.run(action)
             except Refused as e:
                 rc = e.status
@@ -103,7 +103,7 @@ class PushTest(SecretsTest):
         out = io.StringIO()
         with contextlib.redirect_stderr(io.StringIO()) as err:
             try:
-                rc = PUSH.main(list(argv), env=self.w.env, reg=registry(self.w, boxes or self.boxes), out=out)
+                rc = KEY.main(["push", *argv], env=self.w.env, reg=registry(self.w, boxes or self.boxes), out=out)
             except Refused as e:
                 rc = e.status
         return rc, out.getvalue(), err.getvalue()
@@ -123,7 +123,7 @@ class TestWhere(WkTest):
         return {"WK_REMOTE_MARKER": str(marker), "WK_STORE": str(store), "WK_MACHINES_DIR": str(machines)}
 
     def test_a_store_command_runs_on_a_build_machine(self):
-        cp = self.run_wk("push", "status", env=self._as_build_machine())
+        cp = self.run_wk("key", "push", "status", env=self._as_build_machine())
         self.assertNotIn("acts on a workstation", cp.stdout)
 
     def test_a_host_command_is_still_refused_on_a_build_machine(self):
@@ -133,7 +133,7 @@ class TestWhere(WkTest):
     def test_a_store_command_is_refused_inside_a_workspace(self):
         marker = self.tmp / "wk-workspace"
         marker.write_text("name=probe\ntarget=container\n")
-        cp = self.run_wk("push", "status", env={"WK_MARKER": str(marker)})
+        cp = self.run_wk("key", "push", "status", env={"WK_MARKER": str(marker)})
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("this is workspace 'probe'", cp.stdout)
 
@@ -183,7 +183,7 @@ class TestOn(PushTest):
         self.w.seed()
         self.push("on")
         acts = [e for e in self.w.acts()]
-        cfg = acts.index(("write", self.w.secrets_dir + "/ssh_config"))
+        cfg = acts.index(("write", self.w.keyring_dir + "/ssh_config"))
         load = next(i for i, e in enumerate(acts) if e[0] == "act" and "ssh-add -" in e[1][-1])
         self.assertLess(cfg, load)
 
@@ -200,7 +200,7 @@ class TestOff(PushTest):
         self.assertEqual(set(), self.w.agents[SOCK])
         self.assertNotIn(self.tmp + "/store/push-github-pat", self.w.files)
         self.assertNotIn(self.tmp + "/store/push-bugzilla-api-key", self.w.files)
-        self.assertIn("ssh_config", self.w.listdir(self.w.secrets_dir))
+        self.assertIn("ssh_config", self.w.listdir(self.w.keyring_dir))
 
     def test_it_reads_the_agent_back_rather_than_trusting_the_clear(self):
         self.on()
@@ -249,7 +249,7 @@ class TestStatus(PushTest):
         self.assertIn("no key ('wk key set bugzilla-api-key')", out)
 
     def test_a_private_half_in_the_mounted_directory_is_named(self):
-        self.w._set_file(self.w.secrets_dir + "/build_key_strays", "x\n")
+        self.w._set_file(self.w.keyring_dir + "/build_key_strays", "x\n")
         _, _, err = self.push("status")
         self.assertIn("build_key_strays", err)
 
@@ -326,7 +326,7 @@ class TestTheGuests(PushTest):
 
 
 class TestTheClaudeSessionGate(PushTest):
-    """`wk push on` with a claude session already running in a workspace."""
+    """`wk key push on` with a claude session already running in a workspace."""
 
     def setUp(self):
         super().setUp()
@@ -380,7 +380,7 @@ class TestAskingAnotherMachine(PushTest):
         super().setUp()
         self.peer = Box(self.w, self.w.env, name="peerbox")
         self.boxes["peerbox"] = self.peer
-        self.w.react(["sh", "-c", '"$0" push "$1" 2>&1'], lambda a, f: f.effects.append(("here", a[-1])) or Result(1, "api  held\n"))
+        self.w.react(["sh", "-c", '"$0" key push "$1" 2>&1'], lambda a, f: f.effects.append(("here", a[-1])) or Result(1, "api  held\n"))
         self.w.react(["hostname"], lambda a, f: Result(0, "thishost\n"))
 
     def test_the_far_side_runs_the_same_command_and_its_verdict_is_this_ones(self):
@@ -389,7 +389,7 @@ class TestAskingAnotherMachine(PushTest):
                 self.peer.far = (rc_there, "fork       push allowed (in the agent)\n")
                 rc, out, _ = self.main("status", "--target", "peerbox")
                 self.assertEqual(rc_there, rc)
-                self.assertEqual(("push", "status"), self.peer.asked[-1])
+                self.assertEqual(("key", "push", "status"), self.peer.asked[-1])
                 self.assertIn("peerbox               fork       push allowed", out)
 
     def test_a_machine_that_did_not_answer_is_3_and_never_off(self):
@@ -411,10 +411,10 @@ class TestAskingAnotherMachine(PushTest):
         self.assertEqual(1, rc)
         self.assertIn("nosuch", err)
 
-    def test_an_unknown_word_is_the_usage(self):
-        """refused by the dispatcher, before anything runs"""
-        cp = run("push", "maybe")
-        self.assertEqual(2, cp.returncode, cp.stdout)
+    def test_an_unknown_word_is_refused_naming_the_verbs(self):
+        rc, _, err = self.main("maybe")
+        self.assertEqual(1, rc)
+        self.assertIn("on, off or status", err)
 
 
 class TestCrashOnlyAndDryRun(PushTest):
@@ -466,7 +466,7 @@ class TestNoFalseClaim(WkTest):
 
 
 class TestTheStatusRowIsCredentialsNotThePosition(WkTest):
-    """`wk status` reads this machine's own directories; only `wk push status` asks the agent and the
+    """`wk status` reads this machine's own directories; only `wk key push status` asks the agent and the
     injector. So the row is named for what it measures and names the command that answers the other question."""
 
     FORKS = ("fork", "forkwpe")
@@ -512,7 +512,7 @@ class TestEveryTargetThisMachineHoldsIsAsked(PushTest):
         self.guests.claude = {"mac-rel": ["4242"]}
 
     def test_a_session_in_a_guest_is_found_on_a_mac(self):
-        sessions = PUSH.Push(registry(self.w, self.boxes), self.w.sec(macos=True), self.clock).agent_sessions()
+        sessions = pushswitch.Push(registry(self.w, self.boxes), self.w.sec(macos=True), self.clock).agent_sessions()
         self.assertEqual([(self.guests, "mac-rel", ["4242"])], sessions)
 
     def test_on_ends_it_in_the_guest_before_the_keys_load(self):
@@ -523,7 +523,7 @@ class TestEveryTargetThisMachineHoldsIsAsked(PushTest):
 
     def test_a_machine_with_no_guests_asks_only_its_containers(self):
         del self.boxes["vm"]
-        self.assertEqual([], PUSH.Push(registry(self.w, self.boxes), self.w.sec(macos=True), self.clock).agent_sessions())
+        self.assertEqual([], pushswitch.Push(registry(self.w, self.boxes), self.w.sec(macos=True), self.clock).agent_sessions())
 
 
 class TestThePodmanMachineIsHalfTheSwitch(PushTest):
@@ -538,7 +538,7 @@ class TestThePodmanMachineIsHalfTheSwitch(PushTest):
     def test_off_empties_its_half_and_says_the_host_is_not_reached(self):
         rc, _, err = self.push("off")
         self.assertEqual(pushswitch.UNASKED, rc, err)
-        self.assertIn("wk push off", err)
+        self.assertIn("wk key push off", err)
         self.assertEqual(set(), self.w.agents[SOCK])
 
     def test_status_names_the_half_it_cannot_read(self):

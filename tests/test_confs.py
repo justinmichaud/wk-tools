@@ -153,7 +153,7 @@ class TestUnknownTargetRefusal(unittest.TestCase):
         names = fleet.Fleet(REPO, FLEET_ENV).names(fleet.TARGET_KINDS)
         self.assertTrue(names)
         typo = names[0][::-1]
-        cp = run("push", "status", "--target", typo, env={"WK_MACHINES_DIR": str(REAL_MACHINES)})
+        cp = run("key", "push", "status", "--target", typo, env={"WK_MACHINES_DIR": str(REAL_MACHINES)})
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         for n in names + ["wk machine setup " + typo]:
             self.assertIn(n, cp.stdout)

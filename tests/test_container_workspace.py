@@ -175,7 +175,7 @@ class TestCancellingARealBuild(WkTest):
         return cp, task or sub
 
     def _ninja_started(self):
-        cp = run("logs", self.name, timeout=300)
+        cp = run("status", self.name, "--log", timeout=300)
         return any(l.strip().startswith("[") and "/" in l[:16]
                    for l in cp.stdout.splitlines())
 

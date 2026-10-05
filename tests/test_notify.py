@@ -232,7 +232,7 @@ class TestTheCredentialIsDeclaredWhereARebuildLooks(unittest.TestCase):
     def test_it_is_not_in_a_directory_a_workspace_can_read(self):
         from wk.store import Store
         store = Store(clean_env({"WK_STORE": "/scratch/store", "WK_HOST_SECRETS": "/scratch/store/secrets"}))
-        topic, secrets, agent_rw = store.ntfy_topic_path(), store.secrets_dir(), store.agent_rw_dir()
+        topic, secrets, agent_rw = store.keyring_ntfy_topic(), store.keyring_dir(), store.keyring_agent_rw_dir()
         self.assertEqual("/scratch/store/notify/ntfy-topic", topic)
         for mounted in (secrets, agent_rw):
             self.assertFalse(topic.startswith(mounted + "/"), topic)

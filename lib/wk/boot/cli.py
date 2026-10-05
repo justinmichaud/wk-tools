@@ -359,7 +359,7 @@ def broker(root, name, action, system, env, machine=None):
 
 def broker_request(root, verb, words, env, machine, typed):
     """One request over the socket a workspace sees, `words` its key=value arguments; `typed` is what to run on the workstation instead."""
-    sock = Store(env).workspace_broker_socket()
+    sock = Store(env).workspace_runtime_socket()
     if not machine.run(["test", "-S", sock]).ok:
         act.die("No request broker is listening at %s, so there is no door\n    from this workspace for '%s'. Somebody with the "
                 "workstation opens it with:\n    ./setup --stage broker   ('wk doctor' then says it is reachable from in here).\n"

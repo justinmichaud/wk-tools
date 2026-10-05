@@ -69,7 +69,7 @@ class TestWhatEachKindOfFailureDoes(_Inside):
                 refused, err = self.checks(force=force)
                 self.assertTrue(refused, err)
                 self.assertIn("could publish", err)
-                self.assertIn("wk push off", err)
+                self.assertIn("wk key push off", err)
 
 
 class TestTheFunctionDoesNotShadowTheRealCli(WkTest):

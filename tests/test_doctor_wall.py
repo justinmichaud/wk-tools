@@ -303,7 +303,7 @@ class TestAgentIdentities(_Wall):
 
     def test_an_identity_while_push_is_off_fails(self):
         self.set("ssh-add -l", "1")
-        self.assertFails(self.check("agent_identities"), "1 identity/identities reach this workspace", "wk push off")
+        self.assertFails(self.check("agent_identities"), "1 identity/identities reach this workspace", "wk key push off")
 
     def test_an_unmeasured_switch_is_compared_as_off(self):
         self.set("ssh-add -l", "1")
@@ -340,7 +340,7 @@ class TestTheSwitchMeasuredInside(_Wall):
 
     def test_a_key_names_the_socket_and_the_hosts_remedy(self):
         self.ssh("/run/wk/ssh-agent.sock", 2)
-        self.assertFails(self.check("push_here"), "2 deploy key(s) reach this workspace through /run/wk/ssh-agent.sock", "wk push off")
+        self.assertFails(self.check("push_here"), "2 deploy key(s) reach this workspace through /run/wk/ssh-agent.sock", "wk key push off")
 
 
 class TestGitHubRead(_Wall):
@@ -436,7 +436,7 @@ class TestGitHubWrite(_Wall):
         self.assertPasses(self.check("github_write"))
         self.assertIn("-X POST -d '{}' https://api.github.com/repos/%s/pulls" % FORK, [c for c in self.asked if "/pulls" in c][0])
         self.set("/pulls", "422")
-        self.assertFails(self.check("github_write"), "where the host does not say push is on", "wk push off")
+        self.assertFails(self.check("github_write"), "where the host does not say push is on", "wk key push off")
 
     def test_on_wants_githubs_422(self):
         self.set("/pulls", "422")
@@ -514,7 +514,7 @@ class TestBugzilla(_Wall):
     def test_off_wants_the_injectors_412(self):
         self.assertPasses(self.check("bugzilla_write"))
         self.set("http_code}' -X POST -H", "410")
-        self.assertFails(self.check("bugzilla_write"), "Bugzilla key still on the machine", "wk push off")
+        self.assertFails(self.check("bugzilla_write"), "Bugzilla key still on the machine", "wk key push off")
 
     def test_on_reads_bugzillas_own_code(self):
         self.assertIn("error 50", rows_text(self.check("bugzilla_write", push_on=1)))
@@ -599,7 +599,7 @@ class TestFromTheHost(_Wall):
         super().setUp()
         self.fake.answer(["podman", "inspect", "wk-demo"], out="running\n")
         self.fake.files[os.path.join(self.target.store.ws_dir("demo"), "home", targets.READY_MARKER)] = ""
-        self.fake.answer([str(REPO / "wk"), "push", "status"], rc=1)
+        self.fake.answer([str(REPO / "wk"), "key", "push", "status"], rc=1)
         self.fake.answer(["podman", "info"], out="true\n")
         self.fake.answer(["systemctl", "--user"])
 
@@ -617,16 +617,16 @@ class TestFromTheHost(_Wall):
             self.assertIn(w, out)
 
     def test_the_switch_is_read_once_and_only_a_measured_off_is_off(self):
-        for rc, said in ((0, "push is ON"), (4, "push is OFF"), (3, "could not measure the switch ('wk push status' exited 3)")):
+        for rc, said in ((0, "push is ON"), (4, "push is OFF"), (3, "could not measure the switch ('wk key push status' exited 3)")):
             with self.subTest(rc=rc):
-                self.fake.answer([str(REPO / "wk"), "push", "status"], rc=rc)
+                self.fake.answer([str(REPO / "wk"), "key", "push", "status"], rc=rc)
                 self.assertIn(said, wall.push_switch(str(REPO), self.fake)[1])
         self.assertEqual(None, wall.push_switch(str(REPO), self.fake)[0])
 
     def test_the_switch_is_asked_once_and_the_write_probe_after_the_parallel_pass(self):
         self.report()
         runs = [e[1] for e in self.fake.effects if e[0] == "run"]
-        self.assertEqual(1, runs.count((str(REPO / "wk"), "push", "status")))
+        self.assertEqual(1, runs.count((str(REPO / "wk"), "key", "push", "status")))
         self.assertEqual("rm -f /opt/wk-tools/.wk-write-probe" in self.asked, False)
         self.assertEqual("touch /opt/wk-tools/.wk-write-probe 2>&1", self.asked[-1])
 
@@ -677,7 +677,7 @@ class TestAGuest(_Wall):
     def test_an_unfiltered_guest_is_a_failure(self):
         self.target.info = lambda ws: "running"
         self.target.exec = self._direct
-        self.fake.answer([str(REPO / "wk"), "push", "status"], rc=1)
+        self.fake.answer([str(REPO / "wk"), "key", "push", "status"], rc=1)
         self.fake.files[os.path.join(self.target.vm_dir(), "demo.unfiltered")] = ""
         out = io.StringIO()
         rep = doctor.Report(out)

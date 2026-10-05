@@ -384,10 +384,6 @@ class TestTheReadingsAreOneAtATime(WkTest):
             err = refused(ab.run, REPO, reg, FakeClock(), "", {"devices": "rpi5", "systems": "a,b", "status": True})
         self.assertIn("--status is a Mac A/B's", err)
 
-    def test_mac_ab_is_a_tombstone_naming_the_readings(self):
-        from wk.bench import cli
-        bench = cli.Bench(REPO, targets.Registry(REPO, env={"HOME": "/nonexistent"}, machine=Fake()), FakeClock())
-        self.assertIn("wk bench ab --devices <mac> --preflight|--progress|--status|--collect", refused(bench.mac_ab))
 
 
 class TestTheLiveRows(unittest.TestCase):

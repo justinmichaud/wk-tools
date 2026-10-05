@@ -12,7 +12,7 @@ from wk import buildconf                 # noqa: E402
 from wk import decl as D                 # noqa: E402
 from wk import dispatch                  # noqa: E402
 
-TAKERS = ("bench", "build", "gui", "profile", "run", "test")
+TAKERS = ("bench", "build", "gui", "run", "test")
 
 
 def _decl(cmd):

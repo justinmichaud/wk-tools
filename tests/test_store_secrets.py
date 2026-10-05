@@ -1,4 +1,4 @@
-"""The secrets directory is this device's own: `wk key` and `wk push` read and write it with a `podman` on PATH that
+"""The keyring is this device's own: `wk key` and `wk key push` read and write it with a `podman` on PATH that
 leaves a witness and fails, and every reader refuses a link a workspace could plant in agent-rw.
 
 Run: python3 -m unittest tests.test_store_secrets -v
@@ -120,11 +120,11 @@ class TestThePushSwitchRunsHere(_Here):
             p.chmod(0o600)
 
     def test_status_and_off_read_the_keys_here_and_start_nothing(self):
-        self.assertEqual(4, self.wk("push", "status").returncode)
+        self.assertEqual(4, self.wk("key", "push", "status").returncode)
         self._keys()
         for action, rc in (("status", 1), ("off", 0)):
             with self.subTest(action=action):
-                cp = self.wk("push", action)
+                cp = self.wk("key", "push", action)
                 self.assertEqual(rc, cp.returncode, cp.stdout)
                 self.assert_no_podman(cp)
 

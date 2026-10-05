@@ -96,14 +96,14 @@ class TestTheShellExportsIt(WkTest):
         self.assertEqual(self._value("bash", ["-c"], home), PLACEHOLDER)
 
 class TestTheVmDriverFindsTheMachinesToken(unittest.TestCase):
-    """The vm driver keeps its own store (WK_VM_STORE) and still reads this device's secrets directory."""
+    """The vm driver keeps its own store (WK_VM_STORE) and still reads this device's keyring."""
 
     def test_the_vm_driver_itself_still_finds_it(self):
         env = {"WK_HOST_SECRETS": "/this/device/secrets", "WK_STORE": "/the/machine/store",
                "WK_STORE_DEFAULT": "/the/machine/store", "WK_VM_STORE": "/some/vm/state", "HOME": "/nonexistent"}
         with mock.patch("wk.store.os.uname", return_value=mock.Mock(sysname="Darwin")):
             vm = targets.Registry(REPO, env, Fake("here")).load("vm")
-            self.assertEqual("/some/vm/state", vm.store.root())
+            self.assertEqual("/some/vm/state", vm.store.store_dir())
             self.assertEqual("/this/device/secrets/claude-token", guest.Host(vm).secrets.cred_path("claude"))
 
 

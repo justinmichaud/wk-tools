@@ -109,7 +109,7 @@ class TestTheStoreIsByName(WkTest):
 
     def test_the_writable_directory_is_beside_the_secrets_one_never_inside(self):
         sec = self._sec(self._store())
-        secrets, rw = sec.secrets_dir(), sec.store.agent_rw_dir()
+        secrets, rw = sec.store.keyring_dir(), sec.store.keyring_agent_rw_dir()
         self.assertNotIn(secrets + "/", rw + "/")
         self.assertEqual(str(Path(secrets).parent), str(Path(rw).parent))
 

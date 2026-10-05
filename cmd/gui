@@ -3,9 +3,6 @@
 # wk gui <workspace> [<url>] [flags] -- run MiniBrowser in the benchmark seat
 # wk: where=workspace name=required ready=yes forward=no group=workspaces takes=1 passthrough config=--config dryrun
 # wk: opts --config=,--no-fullscreen,--lldb=,--rr
-# wk: gone --wpe --config wpe-release
-# wk: gone --gtk --config gtk-release
-# wk: gone --mac --config mac-release
 #
 # The same launch a perf run performs (Tools/Scripts/run-minibrowser), without
 # the benchmark around it. Refuses when there is no session to draw into.
@@ -67,7 +64,7 @@ def fullscreen_flag(cfg):
 def session_env(root):
     """The Linux GPU-session gate and, on a BMC seat, the software-rendering pins."""
     if not targets.session_socket_present(os.environ):
-        die("no graphical session -- 'wk session on', or 'wk session on --bmc' to watch it over the BMC")
+        die("no graphical session -- 'wk quiesce session on', or 'wk quiesce session on --bmc' to watch it over the BMC")
     seat = session.here(root, os.environ)
     seat.mode_warn()
     if seat.mode() != "bmc":

@@ -40,7 +40,7 @@ if [ -s /secrets/ssh_config ]; then
     log "ssh: fork aliases from /secrets/ssh_config; keys are in an agent outside this workspace"
 else
     log "no /secrets/ssh_config, so ~/.ssh/config names no fork host and a push"
-    log "         from here cannot resolve one -- 'wk push on' (or 'off') writes it"
+    log "         from here cannot resolve one -- 'wk key push on' (or 'off') writes it"
 fi
 
 _git_py() { PYTHONPATH="$WK_TOOLS/lib" WK_ROOT="$WK_TOOLS" python3 -m wk.git "$@"; }
@@ -62,7 +62,7 @@ if [ -d "$SRC/.git" ]; then             # an old snapshot's remotes are stale
         && _out=$("$WK_TOOLS/container/proxy/ensure-bridge.sh" sh -c "$_setup" </dev/null); then
         log "git-webkit: $_out"
     else
-        log "WARNING: 'git-webkit setup' did not finish (above) -- 'wk push on' if the"
+        log "WARNING: 'git-webkit setup' did not finish (above) -- 'wk key push on' if the"
         log "         token is off, then 'wk sync ${WK_WORKSPACE:-?} --fix' on the host"
     fi
 fi
@@ -131,7 +131,7 @@ _install_profilers() {                  # wrapped: not load-bearing
     else
         warn "apt install of heaptrack/valgrind/sysprof failed -- check egress. Retry by hand:
          sudo apt-get update && sudo apt-get install heaptrack valgrind sysprof
-         Until then 'wk profile --mode heaptrack|massif' refuses by name."
+         Until then 'wk run --profile=heaptrack|massif' refuses by name."
     fi
 
     if command -v samply >/dev/null 2>&1; then
@@ -155,7 +155,7 @@ _install_profilers() {                  # wrapped: not load-bearing
             warn "samply $ver download did not verify (expected sha256 $sum) -- not installed"
         fi
     else
-        warn "samply download failed -- check egress. 'wk profile --mode samply' will refuse by name."
+        warn "samply download failed -- check egress. 'wk run --profile=samply' will refuse by name."
     fi
     rm -rf "$tmp"
 }

@@ -17,8 +17,8 @@ class DeployKeys:
         return self.sec.read(self.sec.push_key_path(fork))
 
     def ensure(self):
-        self.private_dir(self.sec.secrets_dir())
-        self.private_dir(self.sec.held_dir())
+        self.private_dir(self.sec.store.keyring_dir())
+        self.private_dir(self.sec.store.keyring_push_dir())
         for fork, repo in [f[:2] for f in self.forks()]:
             key = self.sec.push_key_path(fork)
             if self.machine.exists(key):

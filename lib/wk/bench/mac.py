@@ -11,7 +11,7 @@ import statistics
 import sys
 import threading
 
-from wk import act, buildconf, fleet, images, job, notify, pgo, record as wkrecord, samply as wksamply, sched, screen
+from wk import act, buildconf, fleet, images, job, notify, pgo, record as wkrecord, samply as wksamply, sched, screen, tools
 from wk.act import Refused, die, info, log, warn
 from wk.bench import ab, board_ab, pipeline, record, report, seed
 from wk.bench.systems import System, first_line, root_device
@@ -261,7 +261,7 @@ class MacVolumeSystem(System):
 
     def run(self, leg, script, watched, log_path):
         want = self.o.get("profile") and not act.dry_run()
-        capture = Capture(self.reg.store.artifact_dir(), self.here, self.clock, self.o["profile"], leg.out) if want else None
+        capture = Capture(self.reg.store.cache_dir(), self.here, self.clock, self.o["profile"], leg.out) if want else None
         if capture is not None:
             capture.start()
         try:
@@ -510,7 +510,7 @@ class Stage:
         self.install = Install(root, reg.machine, reg.env, driver)
 
     def tools_version(self):
-        said = kv(self.here.run([os.path.join(self.root, "cmd", "version")]).out)
+        said = tools.identity(self.root, self.here)
         return (said.get("sha") or "unknown") + ("+dirty" if said.get("dirty") == "yes" else "")
 
     def run(self, words, machine, config, plans):
@@ -1205,7 +1205,7 @@ class MacAB:
     def plant_samply(self, root):
         """No network over there, so the warmup round's profiler goes in now, where samply.fetch will look for it."""
         arch = self.mac.out("mac-arch.sh")
-        path = wksamply.fetch(self.here, self.reg.store.artifact_dir(), arch, "Darwin")
+        path = wksamply.fetch(self.here, self.reg.store.cache_dir(), arch, "Darwin")
         if not path:
             warn("  no samply for %s here -- the warmup round will carry no profile" % (arch or "that machine"))
             return
@@ -1582,7 +1582,7 @@ class PgoCollect:
         """speedometer3 and jetstream3 name a moving branch, so each benchmark is pinned by its upstream commit first."""
         from wk.store import Store
         store = Store(self.env)
-        seeder = seed.Seeder(self.m, Lock(store, self.m, self.clock or Clock()), os.path.join(store.artifact_dir(), "bench"), store.mirror())
+        seeder = seed.Seeder(self.m, Lock(store, self.m, self.clock or Clock()), os.path.join(store.cache_dir(), "bench"), store.mirror_dir())
         out = []
         for plan in pgo.BENCHMARKS:
             d = seeder.seed(plan, seed.plan_json(self.read, plan))

@@ -17,7 +17,7 @@ from wk import act, buildconf, job, kv, record, sshalias
 from wk.act import Refused, die, info, log, warn
 from wk.machine import Killed, in_podman_machine
 from wk.pr import checkout as pr_checkout, parse_spec
-from wk.store import Bases, no_such_workspace
+from wk.store import Snapshots, no_such_workspace
 from wk.targets import show
 
 PLAN = ("checking", "wipe", "base", "create", "init", "agents", "fetch", "register")
@@ -109,8 +109,8 @@ def new_front(reg, records, name, opts):
         target = reg.load(tname)
     except LookupError as e:
         die(str(e))
-    if getattr(target, "peer", False):
-        return new_on_peer(target, here, root, name, arch, opts)
+    if target.kind == "remote" and (target.peer or not target.is_local):
+        return new_handed_over(target, here, root, name, arch, opts)
     recs = record.of_target(target, records.clock, records.machine)
     if opts.get("kill"):
         return new_kill(target, here, recs, env, name, opts)
@@ -187,14 +187,14 @@ def open_zed(here, root, name):
         warn("'%s' is there; opening it in Zed is what failed (above) -- 'wk zed %s' retries" % (name, name))
 
 
-def new_on_peer(target, here, root, name, arch, opts):
-    """A peer workstation's workspaces are its own: its `wk new`, at its own default target, makes this one."""
+def new_handed_over(target, here, root, name, arch, opts):
+    """A machine that runs wk for itself makes its own workspaces and keeps their records: its `wk new`, at its own default target."""
     if target.is_local:
         die("'%s' is this machine, and its workspaces are made at its own default\n"
             "    target:  wk new %s" % (target.name, name))
     if opts.get("base"):
-        die("--base names a snapshot in this machine's store, and %s makes '%s' from its own.\n"
-            "    Drop --base, or on %s:  wk new %s --base <id>" % (target.name, name, target.name, name))
+        die("--base names a snapshot in this machine's store, and %s makes '%s' from its own:\n"
+            "    drop --base" % (target.name, name))
     args = [name] + (["--arch", arch] if arch != "native" else [])
     if opts.get("pr"):
         args += ["--pr", opts["pr"]]
@@ -325,14 +325,14 @@ def _create(target, records, task, clock, name, base, arch, state):
         sshalias.alias_remove(here, target.env, name)
     if target.needs_base:
         stage("base")
-        mirror = target.store.mirror()
+        mirror = target.store.mirror_dir()
         if not here.isdir(mirror):
             die("no WebKit mirror at %s, and every snapshot borrows its objects:\n"
                 "    wk sync    makes it, then publishes a snapshot to build a workspace from." % mirror)
-        bases = Bases(target.store, here)
+        bases = Snapshots(target.store, here)
         base = base or bases.current()
         if not base:
-            die("no base snapshot this machine can build a workspace from:  wk sync\n"
+            die("no snapshot this machine can build a workspace from:  wk sync\n"
                 "    publishes one. A snapshot that is not on the branch it was published from\n"
                 "    is refused here -- every workspace overlaid on it starts detached.")
         why = bases.verify(base)
@@ -505,8 +505,8 @@ def confirm_destroy(count, lines):
 def unsaved_results(reg, found):
     """(workspace, task, why) for each bench task a removal would take that no export readable here holds."""
     from wk.bench import record as bench_record
-    if in_podman_machine() and record.host_self(reg.env):
-        return []   # forwarded by a Mac, which read its own zips first (refuse_unsaved_before_forward)
+    if reg.in_remote_host() or in_podman_machine() and record.host_self(reg.env):
+        return []   # the workstation that handed `wk rm` over (refuse_unsaved_before_forward) read its own zips first
     out = []
     for n, target, what in found:
         if getattr(target, "peer", False):

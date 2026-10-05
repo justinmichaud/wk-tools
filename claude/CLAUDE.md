@@ -53,16 +53,17 @@ wk run -- <args>      # run jsc from the current build
 wk test <args>        # run tests
 wk status             # this workspace's build/test state; exit code is machine-readable
 wk status --wait      # ... blocking until it is not busy, instead of polling a pid
-wk logs [-f|--all]    # the build log, errors first
+wk status --log [-f|--all]     # the build log, errors first
 wk build <config> --dry-run    # what it would build, and where, without building
-wk profile [file.js]  # where the time went: JSC's own profilers, samply,
+wk run --profile[=<mode>] [file.js]
+                      # where the time went: JSC's own profilers, samply,
                       # Instruments -- one flag each, no env-var walls
 ```
 
-`wk profile --mode sampling` (the default) prints the tier breakdown, which is
+`wk run --profile` (sampling, the default) prints the tier breakdown, which is
 what decides the next step: mostly FTL/DFG/Baseline means the cost is in
-generated JS, so `--mode bytecode` next; mostly C/C++ means the engine itself,
-so `--mode native` -- samply on Linux, Instruments on a macOS guest. The
+generated JS, so `--profile=bytecode` next; mostly C/C++ means the engine itself,
+so `--profile=native` -- samply on Linux, Instruments on a macOS guest. The
 jsc-profile skill explains how to read each one; the flags are here so no run
 has to be assembled by hand.
 
@@ -90,7 +91,7 @@ only one there is. `wk build --list` shows the configs, and a bare `wk run` or
 not have to be told it is an Apple port every time.
 
 Commands that act on the *host* — `wk new`, `wk rm`, `wk gc`,
-`wk session`, `wk quiesce` — refuse in here and say
+`wk quiesce` — refuse in here and say
 so. That is not something to work around: nothing in a workspace can create or
 destroy a workspace. The boundary is measured from the host by `wk doctor <ws>`;
 `wk doctor` in here answers only the half a workspace can see of itself.
@@ -136,12 +137,12 @@ an `ssh-agent` outside it and only its socket crosses in, so ssh here can sign
 with a key it cannot read; the GitHub API token is in a proxy that puts it in
 the `Authorization` header, so `GITHUB_COM_TOKEN` in here is the literal
 placeholder `wk-injects-this` and not a secret. The switch is thrown on the
-host (`wk push`), and `wk ai claude` turns it off before handing over control:
+host (`wk key push`), and `wk ai claude` turns it off before handing over control:
 a push is then refused at the door — `Permission denied (publickey)` from ssh
 means exactly that, not a broken setup — and an API call that needs an account
 answers `401`. Do not try to work around it: publishing is the one thing a
 disposable workspace is not allowed to do on its own. Say what you would have
-pushed and let the person at the keyboard run `wk push on`, which is also what
+pushed and let the person at the keyboard run `wk key push on`, which is also what
 makes `git-webkit pr` work from in here. The same switch covers Bugzilla:
 `BUGS_WEBKIT_ORG_PASSWORD` is the same placeholder, filing or updating a bug
 answers `410` while push is off, and `git-webkit pr` never asks for a login.
@@ -153,7 +154,7 @@ asked.
 
 A build here is tens of minutes and the shell running it is not guaranteed to
 last that long. `wk build <config> --detach` starts it and returns
-immediately; `wk status` and `wk logs -f` follow it. Nothing is lost if this
+immediately; `wk status` and `wk status --log -f` follow it. Nothing is lost if this
 session ends, and the build's record ends up saying what actually happened
 rather than `running` forever. `wk build <config> --kill` stops one that is
 running, wherever it runs, and records it as cancelled -- which is also what

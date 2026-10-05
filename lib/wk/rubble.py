@@ -1,5 +1,5 @@
 """A piece of rubble: its size, `flag` ("" for a plain `wk gc`, a --purge flag, or the command elsewhere that takes it),
-`why` nothing may take it now, and `take`, FAR when another machine's wk acts on it. gc and `wk disk` render these rows."""
+`why` nothing may take it now, and `take`, FAR when another machine's wk acts on it. gc and `wk doctor` render these rows."""
 
 from collections import namedtuple
 

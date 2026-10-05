@@ -17,7 +17,7 @@ DENIED_HOSTS = {
     "uploads.github.com": "GitHub's upload API is refused: nothing in a workspace may publish",
 }
 
-# The hosts whose TLS is not tunnelled: CONNECT goes to the credential injector (github-inject.py), exact-match and checked first. SANDBOX AUDIT (docs/PLAN.md): a workspace reaches GitHub's API and Bugzilla but cannot authenticate -- under `wk push off`, which `wk ai claude` sets, the injector refuses a write itself (412) rather than forwarding it uncredentialed.
+# The hosts whose TLS is not tunnelled: CONNECT goes to the credential injector (github-inject.py), exact-match and checked first. SANDBOX AUDIT (docs/PLAN.md): a workspace reaches GitHub's API and Bugzilla but cannot authenticate -- under `wk key push off`, which `wk ai claude` sets, the injector refuses a write itself (412) rather than forwarding it uncredentialed.
 INJECTED_HOSTS = {
     "api.github.com": 443,
     "bugs.webkit.org": 443,

@@ -111,7 +111,7 @@ class TestTheCommitWallExplainsItself(_Gate):
     def test_a_commit_that_the_wall_blocked_names_the_wall_and_the_remedy(self):
         self.wall_on(staged=True)
         cp = self._git("commit", "-m", "two")
-        self.assertIn("wk push on", cp.stderr)
+        self.assertIn("wk key push on", cp.stderr)
 
     def test_an_unwalled_checkout_is_silent(self):
         cp = self._git("commit", "--allow-empty", "-m", "two")
@@ -126,7 +126,7 @@ class TestThePushSwitchExplainsItself(_Gate):
                   wrapped=False)
         cp = self._git("push", "fork", "HEAD")
         self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("wk push on", cp.stderr)
+        self.assertIn("wk key push on", cp.stderr)
 
     def test_an_agent_holding_a_key_is_not_the_switch_being_off(self):
         self.agent(keys=1)

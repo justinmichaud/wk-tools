@@ -57,6 +57,28 @@ class TestArgs(unittest.TestCase):
         self.assertEqual(D.Args(self.d, ["x", "--zed", "--", "--base", "z"]).order, ["--zed"])
 
 
+class TestAnOptionalValue(unittest.TestCase):
+    """`--x,--x=`: bare it is a flag, and a value is only ever `--x=v`, through the dispatcher and Args alike."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="wk-test-args-")
+        self.addCleanup(self.tmp.cleanup)
+        self.d = declare(self.tmp.name, "# wk: takes=* opts --mode,--mode=")
+
+    def checked(self, *argv):
+        inv = dispatch.Invocation("probe", self.d, list(argv))
+        return dispatch.argv_split(self.d.opts_for(argv), inv.argv_check())
+
+    def test_bare_takes_no_word_and_a_value_is_the_one_word(self):
+        self.assertEqual(self.checked("--mode", "x.js"), ["--mode", "x.js"])
+        self.assertEqual(self.checked("--mode=samply", "x.js"), ["--mode=samply", "x.js"])
+        a = D.Args(self.d, ["--mode", "x.js"])
+        self.assertEqual((a.flag("--mode"), a.value("--mode"), a.positionals), (True, None, ["x.js"]))
+        a = D.Args(self.d, ["--mode=samply", "x.js"])
+        self.assertEqual((a.flag("--mode"), a.value("--mode"), a.positionals), (False, "samply", ["x.js"]))
+        self.assertEqual(self.d.valued_opts(), set())
+
+
 class TestResolveTargetReadsTheSameWay(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="wk-test-args-")

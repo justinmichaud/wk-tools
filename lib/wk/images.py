@@ -32,48 +32,6 @@ NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 BLURB = re.compile(r"^# \S+ -- (.*)$")
 SLOT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 
-_PERF = """there is no profile '%s'. Use:
-    rpi5-perf        -> webkit-2.52-yocto-rpi5-64
-    rpi4-perf        -> webkit-2.52-yocto-rpi4-64
-    rpi3-perf        -> webkit-2.52-yocto-rpi3-32
-    rpi4-wpe-2.48    -> webkit-2.52-yocto-rpi4-64
-    rpi4-wpe-2.48-32 -> webkit-2.52-yocto-rpi4-32
-    rpi3-wpe-2.48-32 -> webkit-2.52-yocto-rpi3-32
-    rpi3-wpe-2.48-64 -> rpi3 is 32-bit here; use webkit-2.52-yocto-rpi3-32
-    rpi5-wpe-2.48    -> webkit-2.52-yocto-rpi5-64
-    mac-bench        -> perf-macos-tolken"""
-_DOWNSTREAM = """there is no profile '%s'. Configurations are named for the project
-    they are built from -- WebKit or WPEWebKit -- and webkitglib/2.48 is a
-    branch in WebKit/WebKit.
-
-    WPEWebKit releases here are 2.38 and 2.46; WebKit's is 2.52. So:
-
-        downstream-wpe-2.46-rpi4          -> wpewebkit-2.46-yocto-rpi4-64
-        downstream-yocto-wpe-2.48-rpi4    -> webkit-2.52-yocto-rpi4-64
-        downstream-yocto-wpe-2.48-rpi4-32 -> webkit-2.52-yocto-rpi4-32
-        downstream-yocto-wpe-2.48-rpi3-32 -> webkit-2.52-yocto-rpi3-32
-        downstream-yocto-wpe-2.48-rpi3-64 -> the rpi3 is 32-bit here
-        downstream-yocto-wpe-2.48-rpi5    -> webkit-2.52-yocto-rpi5-64
-
-    'wk sysimage configs' has all of them."""
-_PERF_LINUX = """there is no '%s'. A perf system is built by yocto or buildroot, or
-    it is macOS (wk help). For this board:
-
-        perf-linux-rpi3  -> webkit-2.52-yocto-rpi3-32   (32-bit, its native width)
-        perf-linux-rpi4  -> webkit-2.52-yocto-rpi4-64
-        perf-linux-rpi5  -> webkit-2.52-yocto-rpi5-64"""
-TOMBSTONES = dict(
-    [(n, _PERF) for n in ("rpi5-perf", "rpi4-perf", "rpi3-perf", "rpi4-wpe-2.48", "rpi4-wpe-2.48-32",
-                          "rpi3-wpe-2.48-32", "rpi3-wpe-2.48-64", "rpi5-wpe-2.48", "mac-bench")]
-    + [(n, _DOWNSTREAM) for n in ("downstream-wpe-2.46-rpi4", "downstream-yocto-wpe-2.48-rpi4",
-                                  "downstream-yocto-wpe-2.48-rpi4-32", "downstream-yocto-wpe-2.48-rpi3-32",
-                                  "downstream-yocto-wpe-2.48-rpi3-64", "downstream-yocto-wpe-2.48-rpi5")]
-    + [(n, _PERF_LINUX) for n in ("perf-linux-rpi3", "perf-linux-rpi4", "perf-linux-rpi5")])
-
-
-class Tombstone(LookupError):
-    pass
-
 
 def root(env=None):
     env = os.environ if env is None else env
@@ -113,8 +71,6 @@ def parse(path):
 
 
 def load(name, env=None):
-    if name in TOMBSTONES:
-        raise Tombstone(TOMBSTONES[name] % name)
     path = conf_path(name, env)
     if not NAME.match(name or "") or not os.path.isfile(path):
         raise LookupError(name)
@@ -202,7 +158,6 @@ def ws_profile(ws, env=None):
 
 
 def ws_arg(args, env=None):
-    """`--workspace <name>` when the arguments give one, else the profile's own image workspace."""
     if not args or not args[0] or args[0].startswith("-"):
         return ""
     for prev, a in zip([""] + args[1:], args[1:]):
@@ -259,7 +214,6 @@ def ws_machine(named, target, here):
 
 
 def build_resource(machine):
-    """One machine builds one image at a time, whichever workspace it is for."""
     return "machine:" + machine
 
 

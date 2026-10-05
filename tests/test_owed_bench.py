@@ -1,4 +1,4 @@
-"""The `wk bench mac` tombstone, the real mbp reached, and a sysimage write dry run on a Mac."""
+"""The real mbp reached, and a sysimage write dry run on a Mac."""
 import os
 import platform
 import sys
@@ -14,14 +14,6 @@ def _is_macos():
     return platform.system() == "Darwin"
 
 
-class TestBenchMacIsATombstone(unittest.TestCase):
-
-    def test_the_dispatcher_routes_it_to_the_same_tombstone(self):
-        cp = run("bench", "mac", "fakews", "--plan", "speedometer3")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("'wk bench mac' is gone", cp.stdout)
-        self.assertIn("wk bench ab --devices <mac>", cp.stdout)
-        self.assertNotIn("No such file or directory", cp.stdout)
 
 
 class TestBenchReachesTheRealMbp(unittest.TestCase):

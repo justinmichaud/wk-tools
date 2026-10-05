@@ -1,5 +1,4 @@
-"""`wk sysimage`'s verbs -- ls, holds, path, disks, write, configs, build and webkit's dispatch on the builder, and the rm
-and flash tombstones -- and the questions the dispatcher asks before it routes one. A 2.52+ yocto profile's PGO
+"""`wk sysimage`'s verbs -- ls, holds, path, disks, write, configs, build and webkit's dispatch on the builder -- and the questions the dispatcher asks before it routes one. A 2.52+ yocto profile's PGO
 cycle is lib/wk/pgo.py."""
 
 import re
@@ -56,7 +55,7 @@ class Sysimage:
         name = images.spec_profile(spec)
         try:
             return images.load(name, self.env)
-        except (images.Tombstone, ConfError) as e:
+        except ConfError as e:
             act.die(str(e))
         except LookupError:
             act.die(UNKNOWN % name)
@@ -225,28 +224,3 @@ class Sysimage:
                 "  a machine's own system disk is never listed and never writable." % name)
         return 0
 
-    @staticmethod
-    def rm():
-        act.die("""'wk sysimage rm' does not exist -- there is no image store to remove from
-    (wk help). An image lives in the workspace that built it, so removing it
-    is removing that workspace:
-
-        wk rm <workspace>                 (buildroot, or a yocto image workspace)
-
-    'wk sysimage ls' names the workspace beside each image it lists.""")
-
-    @staticmethod
-    def flash(machine):
-        act.die("""'wk sysimage flash' does not exist -- it named the wrong thing twice.
-
-    'flash <machine>' reads as reflashing {m}. That never happened: the
-    machine's own system disk is refused, and what gets written is a removable
-    disk plugged into it. And nothing here is permanent -- a machine boots such
-    a disk once, by a firmware one-shot, and returns to host mode by itself.
-
-    So the disk is named, and the verb says what it does to it:
-
-        wk sysimage disks {m}                  what is attached over there
-        wk sysimage write --from <path> --disk {m}:<device>
-
-    Booting it is still a separate step, and still one-shot:  wk boot {m}""".format(m=machine or "<machine>"))

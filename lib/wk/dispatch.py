@@ -26,19 +26,6 @@ from wk.store import Store, build_config, dispatch_target, in_vm, no_such_worksp
 ROOT = Path(images.root())
 MACHINE = Store().podman_machine()
 _registry = None
-TOMBSTONES = {
-    "image": "'wk image' is renamed: wk sysimage",
-    "mcp": "'wk mcp' is removed",
-    "pick": "'wk pick' is removed",
-    "skills": "'wk skills' is removed",
-    "notify": "'wk notify' is removed: a program calls lib/wk/notify.py's send",
-    "verify": "'wk verify' is merged into doctor: wk doctor <workspace>",
-    "remotes": "'wk remotes' is merged into sync: wk sync [<workspace>] --fix",
-    "sudo": "'wk sudo' is now 'wk key sudo'", "bridge": "'wk bridge' is now 'wk machine setup|status|tailnet|rm'",
-    "backup": "'wk backup' is now 'wk key backup'", "vm": "'wk vm' is gone: a guest is a workspace (--target vm), its base 'wk sysimage build macos-guest-base'",
-    "remote": "'wk remote' is now 'wk machine setup|rm <name>'", "find": "'wk find' is now 'wk machine probe [<name>]'", "pi": "'wk pi' is gone; each verb is now:\n    bench --ab A,B | --ab-systems A,B   wk bench run <ws> <plan> --system <board> --ab A,B | --ab-systems A,B\n    bench --slot <name>                 wk bench run <ws> <plan> --system <board> --slot <name>\n    bench --pgo                         wk bench run <ws> <plan> --system <board> --slot <name>-instr --collect\n    deploy                              wk bench deploy <ws> <board> --slot <name>\n    boot-order                          wk boot <board> --boot-order <usb-first|sd-first|local>\n    setup, helper                       wk machine setup <board>\n    flash                               wk sysimage write --from <path> --disk <board>:<device>",
-    "ab": "'wk ab' is now 'wk bench ab' (wk bench ab <pr-spec> --devices <a,b>; wk bench ab <task> --kill)",
-}
 DISPATCH_VARS = ("WK_NAME", "WK_TARGET", "WK_TARGET_KIND", "WK_ROOT", "WK_FORCE", "WK_QUIET", "WK_DRY_RUN", "WK_DESTRUCTIVE",
                  "WK_CONFIRMED", "WK_ROW_LABEL", "WK_HOST_SELF", "WK_IN_VM", "WK_CONFIG")
 GLOBALS = {"--force": "WK_FORCE", "--quiet": "WK_QUIET", "--dry-run": "WK_DRY_RUN",
@@ -58,8 +45,7 @@ def wk_self():
 
 
 def _logical_cwd():
-    """The path the shell shows ($PWD), when it is this directory: a symlinked
-    root is named the way the marker names it."""
+    """$PWD when it is this directory, so a symlinked root is named the way the marker names it."""
     pwd = os.environ.get("PWD", "")
     try:
         if pwd and os.path.samefile(pwd, os.getcwd()):
@@ -135,7 +121,7 @@ def argv_split(opts, args):
         if a == "--":
             out.extend(args[i:])
             break
-        if a.startswith("--") and "=" in a and D.in_list(a.split("=")[0] + "=", opts):
+        if a.startswith("--") and "=" in a and D.in_list(a.split("=")[0] + "=", opts) and not D.in_list(a.split("=")[0], opts):
             k, _, v = a.partition("=")
             out.extend([k, v])
         else:
@@ -216,7 +202,7 @@ class Invocation:
                 return out
             if a.startswith("-") and len(a) > 1:
                 key = a.split("=")[0]
-                if D.in_list(key + "=", opts):
+                if D.in_list(key + "=", opts) and ("=" in a or not D.in_list(key, opts)):
                     if "=" in a:
                         out.append(a)
                     else:
@@ -249,16 +235,6 @@ class Invocation:
                 out.extend(args[i:])
                 return out
         return out
-
-    def gone_check(self):
-        """A retired flag anywhere, or a retired verb where the verb goes, is refused naming its replacement."""
-        d, args = self.decl, self.args
-        pos = first_positional(d, args)
-        for i, a in enumerate(args):
-            if a == "--":
-                break
-            if a in d.gone and (a.startswith("-") or i == pos):
-                die("'wk %s %s' is gone: wk %s %s" % (self.cmd, a, self.cmd, d.gone[a]))
 
     def default_takes_a_word(self):
         d = self.decl
@@ -410,9 +386,9 @@ def usage():
   An option a command does not name in its -h, or an argument past what it
   takes, is refused with its usage line.
   wk <command> --all       every one of what the command acts on -- every
-                           machine ('wk push'/'wk key sudo'), every workspace on
+                           machine ('wk key push'/'wk key sudo'), every workspace on
                            every target ('wk sync', 'wk rm'), every line of
-                           the log ('wk logs'); a command's own -h says what
+                           the log ('wk status <ws> --log --all'); a command's own -h says what
                            its --all covers
   WK_DEBUG=1               verbose output
 """)
@@ -446,7 +422,7 @@ def completion_cmd(args):
         raise Exit(0)
     if sub not in C.SHELLS or len(args) != 1:
         die("usage: wk completion bash|zsh -- print a shell completion script for wk; see wk completion -h", 2)
-    sys.stdout.write(C.generate(ROOT, sub, TOMBSTONES))
+    sys.stdout.write(C.generate(ROOT, sub))
     raise Exit(0)
 
 
@@ -462,7 +438,7 @@ def where_prose(d, where):
     if d.here:
         return "the machine you type it on"
     if d.lifecycle:
-        return "the workstation that keeps the workspace record (a peer workstation keeps its own)"
+        return "the machine holding the workspace, which keeps its record: a build box or a peer workstation is handed it"
     return ("the workspace's target, on the machine holding it (the podman VM for a container "
             "workspace on macOS; that machine's own wk when it has one)")
 
@@ -735,17 +711,11 @@ def main(argv):
         help_doc(args[0] if args else "")
     if cmd == "setup":
         os.execv(str(ROOT / "setup"), [str(ROOT / "setup"), *args])
-    if cmd in TOMBSTONES:
-        die(TOMBSTONES[cmd])
-    if cmd == "claude":
-        die("'wk claude' is renamed: wk ai claude%s\n    One command for every coding agent (wk ai -h)."
-            % ((" " + args[0]) if args else ""))
     if cmd == "--declarations":
         dump_declarations()
     if cmd == "completion":
         completion_cmd(args)
     if cmd == "--forward":
-        # this process's own forward, in a child that goes on afterwards (bare_report)
         d = D.Decl(ROOT / "cmd" / args[0])
         forward_to_vm(Invocation(args[0], d, args[1:]), args[0], args[1:])
     impl = ROOT / "cmd" / cmd
@@ -775,7 +745,6 @@ def main(argv):
         rest.append(a)
     inv = Invocation(cmd, d, rest)
     inv.globals_text = globals_text
-    inv.gone_check()
     args = inv.args = inv.verb_first()
 
     # WK_NAME and WK_CONFIG are this invocation's answers, never inherited ones.
@@ -799,12 +768,7 @@ def main(argv):
         die("'wk %s' acts on a workstation's own store or hardware, and this is\n"
             "    the shared build machine for target '%s'.\n"
             "    Run it on the workstation instead. What works here: ls, status, build,\n"
-            "    run, test, logs, enter." % (cmd, registry().self_target()))
-    if registry().in_remote_host() and d.lifecycle:
-        die("workspaces are created and destroyed from the workstation, and this is\n"
-            "    the shared build machine for target '%s'.\n"
-            "    Run 'wk %s' there: the workstation owns the workspace's store, and a\n"
-            "    later 'wk build' finds its target from that store." % (registry().self_target(), cmd))
+            "    run, test, enter, new, rm." % (cmd, registry().self_target()))
 
     args = inv.argv_check()
     inv.args = args
@@ -833,11 +797,11 @@ def main(argv):
 
     delegate = None
     if (where == "workspace" and name_decl.split("@")[0] != "none" and not in_workspace()
-            and not in_vm() and not d.here and not d.lifecycle):
+            and not in_vm() and not d.here_for(args) and not d.lifecycle):
         delegate = delegate_target(resolved)
 
     forwards = (where == "workspace" and is_macos() and not in_vm()
-                and not in_workspace() and d.forward and resolved == "container")
+                and not in_workspace() and d.forward_for(args) and resolved == "container")
     if not forwards and delegate is None:
         inv.check_needs()
 

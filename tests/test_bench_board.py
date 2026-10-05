@@ -377,7 +377,7 @@ class TestTheBrokerRunsTheSameCommandOnTheWorkstation(unittest.TestCase):
 
 def cached_samply(w):
     """samply for the board's aarch64 userspace, already fetched into this host's store."""
-    path = os.path.join(samply.store_dir(w.store.artifact_dir(), samply.triple("aarch64")), "samply")
+    path = os.path.join(samply.store_dir(w.store.cache_dir(), samply.triple("aarch64")), "samply")
     os.makedirs(os.path.dirname(path))
     Path(path).write_text("binary")
     w.answer(["test", "-x", path])
@@ -407,9 +407,9 @@ class BoardWorld(Fake):
         self.fake = self.board.bench
         self.board.bench.files[board.slot_path("a") + "/slot.json"] = json.dumps(SLOT_DOC)
         self.store = Store(self.env)
-        os.makedirs(os.path.join(self.store.record_dir(), "ws", "ws"))
-        self.tree = os.path.join(self.store.artifact_dir(), "bench-runner", SHA[:12])
-        self.dirs.add(self.store.mirror())
+        os.makedirs(os.path.join(self.store.records_dir(), "ws", "ws"))
+        self.tree = os.path.join(self.store.cache_dir(), "bench-runner", SHA[:12])
+        self.dirs.add(self.store.mirror_dir())
         self.files[os.path.join(self.tree, "Tools", "Scripts", "run-benchmark")] = ""
         self.files[os.path.join(self.tree, "Tools", "Scripts", "webkitpy/benchmark_runner/data/plans/jetstream3.plan")] = PLAN_JSON
         self.seed_dest = os.path.join(self.env["WK_STORE"], "cache", "bench", "jetstream3-" + SHA[:12])
@@ -474,13 +474,13 @@ class BoardWorld(Fake):
         return rc
 
     def bench_dir(self):
-        return Path(self.store.record_dir(), "ws", "ws", "bench")
+        return Path(self.store.records_dir(), "ws", "ws", "bench")
 
     def tasks(self):
         return brecord.tasks(str(self.bench_dir()))
 
     def recs(self):
-        return record.Records(self.store.record_dir(), clock=self.clock, env=self.env, machine=self)
+        return record.Records(self.store.records_dir(), clock=self.clock, env=self.env, machine=self)
 
     def run_dir(self, task=None):
         task = task or self.tasks()[-1]
@@ -829,7 +829,7 @@ class TestTheRunnerTree(BoardTest):
 
     def test_no_mirror_names_wk_sync(self):
         w = self.world()
-        w.dirs.discard(w.store.mirror())
+        w.dirs.discard(w.store.mirror_dir())
         err = io.StringIO()
         with self.assertRaises(Refused), contextlib.redirect_stderr(err):
             board.runner_tree(pipeline_registry(w), w, str(REPO))

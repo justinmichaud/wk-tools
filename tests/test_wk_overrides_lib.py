@@ -151,7 +151,7 @@ class TestTargetsLocal(WkTest):
     def test_wk_local_store_overrides_the_bind_mounted_store(self):
         store = self.tmp / "customstore"
         t = targets.LocalWorkspace("local", str(REPO), {"HOME": str(self.tmp), "WK_LOCAL_STORE": str(store)}, Fake())
-        self.assertEqual(t.store.root(), str(store))
+        self.assertEqual(t.store.store_dir(), str(store))
 
 
 class TestTheGuestOverrides(unittest.TestCase):

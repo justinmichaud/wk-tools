@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 #
-# wk quiesce on|off|status -- quiet the machine for benchmarking
+# wk quiesce on|off|status | session on|gdm|off|status [--bmc] -- quiet the machine for benchmarking, or give it a real graphical session
 #
-# wk: where=host name=none group=hosts needs quiesce-helper takes=1 verbs=on,off,status default=status dryrun on,off
+# wk: where=host name=none group=hosts needs quiesce-helper takes=1 verbs=on,off,status,session default=status dryrun on,off
 # wk: readonly status
 # wk: sub status needs=
+# wk: sub session takes=2 needs= opts=--bmc,--mirror dryrun=yes
 #
 # Privileged actions go through the sudoers-allowlisted helper (wk-quiesce-priv);
 # everything else stays here.
@@ -23,6 +24,42 @@
 #
 #   What a measured Mac is permanently is written at provisioning time
 #   (`wk sysimage build <profile> --provision`); `status` reports both.
+#
+#   session ...   a real graphical session on real hardware (Linux), below.
+#
+# GPU benchmarks need a real DRM session on real hardware: Speedometer and
+# MotionMark under llvmpipe, or headless, are a different measurement.
+#
+#   session on [--bmc]   the benchmark session: a single-client kiosk compositor
+#                (cage), nothing else on seat0. A no-op if someone is already
+#                logged in, or if the wanted mode is already running.
+#                Unattended (nobody logged in) it stops the display manager
+#                and starts cage; that is the only case needing privilege.
+#                --mirror is an accepted synonym for --bmc.
+#   session gdm [--bmc]  a real, loggable-into desktop instead of a kiosk, for
+#                debugging that needs more than one window.
+#   session off  the opposite of `on`/`gdm`: outputs modeset off (the CRTC
+#                disabled, not painted black -- a compositor painting black
+#                is still scanning out a lit signal) and a placeholder
+#                compositor left holding the device (so the kernel's fbcon
+#                can't repaint the now-masterless outputs on top). It does
+#                not bring anything back -- `wk quiesce session gdm` does that.
+#   session status   unit, socket, display manager and DRM state, read without
+#                privilege wherever possible.
+#
+# This machine has two DRM devices: the GPU, and the ASPEED BMC's display-only
+# `ast` chip, served over KVM-over-IP. The default session names the GPU alone;
+# --bmc moves the session onto the ast chip instead (software-rendered -- ast has
+# no render node) and the monitor goes dark. The mode is in /run/wk-session-mode.
+#
+# cage takes its device from WLR_DRM_DEVICES; gdm's mutter has none, so `gdm
+# --bmc` strips the GPU's seat-member udev tags instead. That only reaches a
+# compositor taking devices from logind (Wayland) -- NVIDIA's Xorg driver uses
+# /dev/nvidia* -- so both gdm modes force the greeter onto Wayland and check it.
+#
+# The compositor's Wayland socket is $XDG_RUNTIME_DIR/wk/display/wayland-0,
+# separate from the user runtime directory so a workspace can be handed the
+# socket without the session D-Bus socket next to it.
 
 import os
 import sys
@@ -32,23 +69,34 @@ from wk import images  # noqa: E402
 
 ROOT = images.root()
 
-from wk import act, decl, quiet  # noqa: E402
-from wk.act import Refused  # noqa: E402
+from wk import act, decl, quiet, session  # noqa: E402
+from wk.act import Refused, die  # noqa: E402
 from wk.clock import Clock  # noqa: E402
-from wk.machine import Local  # noqa: E402
+from wk.machine import Local, is_linux  # noqa: E402
+
+SESSION_VERBS = ("on", "gdm", "off", "status")
 
 
-
-def parse(argv):
-    args = decl.Args(decl.Decl(__file__), argv)
-    return args.positionals[0]
+def graphical(words, bmc):
+    action = words[0] if words else "status"
+    if action not in SESSION_VERBS:
+        die("'%s' is not a verb of wk quiesce session: on, gdm, off or status; see wk quiesce -h" % action)
+    if bmc and action not in ("on", "gdm"):
+        die("--bmc moves the session 'on' or 'gdm' starts: wk quiesce session on --bmc")
+    if not is_linux():
+        die("wk quiesce session is Linux-only (macOS workspaces have no GPU to reach)")
+    s = session.Session(ROOT, Local(), Clock(), os.environ)
+    return s.on(bmc) if action == "on" else s.gdm(bmc) if action == "gdm" else getattr(s, action)()
 
 
 def main(argv):
-    action = parse(argv)
+    args = decl.Args(decl.Decl(__file__), argv)
+    verb = args.positionals[0]
+    if verb == "session":
+        return graphical(args.positionals[1:], args.flag("--bmc") or args.flag("--mirror"))
     act.terminate_as_interrupt()
     q = quiet.Quiesce(ROOT, Local(), Clock(), os.environ)
-    return getattr(q, action)()
+    return getattr(q, verb)()
 
 
 if __name__ == "__main__":

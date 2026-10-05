@@ -361,7 +361,7 @@ class Build:
 
     def checkout(self):
         a, src = self.a, self.a.src
-        mirror = Store(self.env).container_mirror()
+        mirror = Store(self.env).container_mirror_dir()
         if not mirror:
             fail("WK_MIRROR names the mirror this container mounts, set by lib/wk/targets.py's Container")
         dirty = [l for l in self.m.run(["git", "-C", src, "status", "--porcelain"]).out.splitlines() if l.strip()]

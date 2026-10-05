@@ -101,11 +101,11 @@ class Ai:
         return self.target.exec(self.name, argv)
 
     def push_switch(self, verb):
-        argv = [os.path.join(self.root, "wk"), "push", verb] + (["--target", self.push_target] if self.push_target else [])
+        argv = [os.path.join(self.root, "wk"), "key", "push", verb] + (["--target", self.push_target] if self.push_target else [])
         return self.machine.run(argv) if verb == "status" else self.machine.act_run(argv)
 
     def push_status_line(self):
-        return "wk push status" + (" --target %s" % self.push_target if self.push_target else "")
+        return "wk key push status" + (" --target %s" % self.push_target if self.push_target else "")
 
     def push_hold_back(self):
         """In a workspace the measurement stands in for the switch, beside the sandbox probes (`checks`)."""
@@ -130,11 +130,11 @@ class Ai:
         if not self.push_was_on:
             return
         if not terminal:
-            log("git push stays off (headless session; 'wk push on' when you want it back)")
+            log("git push stays off (headless session; 'wk key push on' when you want it back)")
         elif self.push_switch("on").ok:
             info("git push turned back on")
         else:
-            warn("could not turn git push back on -- 'wk push on'")
+            warn("could not turn git push back on -- 'wk key push on'")
 
     def agent_bin(self):
         lines = self.exec(agents.find_argv(self.root, self.agent)).out.replace("\r", "").splitlines()
@@ -161,7 +161,7 @@ class Ai:
         v = wall.verdict(rep, publishing)
         if v == "publishing":
             die("refusing to run: an agent in '%s' could publish (see above).\n    Nothing in here can fix it and --force does "
-                "not cross it; the switch is the\n    host's:  wk push off" % name)
+                "not cross it; the switch is the\n    host's:  wk key push off" % name)
         if v == "broken":
             warn("%d check(s) failed -- the sandbox is not intact" % rep.missing)
             barrier(NOT_INTACT % name)
@@ -212,7 +212,7 @@ class Ai:
                             "a current base ('wk rm %s' then 'wk new'), or\n    install bwrap in the image; nothing an agent runs "
                             "may write git history\n    while the sandbox cannot stop it." % (name, name))
                     prefix = wall.commit_wall_prefix(self.root, t.src(name))
-                    info("git commits are walled off for this session (bwrap; 'wk push on' lifts it for the next)")
+                    info("git commits are walled off for this session (bwrap; 'wk key push on' lifts it for the next)")
                 if self.agent == "claude":
                     info("starting Claude in '%s' (permissions relaxed; the workspace is the boundary)" % name)
                 else:

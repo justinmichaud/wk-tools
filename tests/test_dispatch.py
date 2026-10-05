@@ -137,9 +137,9 @@ class TestWhere(unittest.TestCase):
             return "here"
         if where == "store":
             return "forward" if macos else "here"
-        if delegates and d.name_for(argv).split("@")[0] != "none" and not d.here and not d.lifecycle:
+        if delegates and d.name_for(argv).split("@")[0] != "none" and not d.here_for(argv) and not d.lifecycle:
             return "delegate"
-        return "forward" if macos and d.forward else "here"
+        return "forward" if macos and d.forward_for(argv) else "here"
 
     def test_every_invocation_runs_where_it_says(self):
         checked = 0
@@ -169,13 +169,17 @@ class TestParsesEveryArgument(unittest.TestCase):
         checked = 0
         for d in DECLS:
             for label, argv in invocations(d):
-                for opt in sorted(o[:-1] for o in d.opts_for(argv).split(",") if o.endswith("=") and o != "--config="):
-                    for typed in ([opt, self.PATH], ["%s=%s" % (opt, self.PATH)]):
+                opts = d.opts_for(argv).split(",")
+                for opt in sorted(o[:-1] for o in opts if o.endswith("=") and o != "--config="):
+                    optional = opt in opts   # declared bare too: a value only as `--x=v`, handed on so
+                    for typed in ([] if optional else [[opt, self.PATH]]) + [["%s=%s" % (opt, self.PATH)]]:
                         with self.subTest(cmd=d.name, verb=label, typed=typed):
                             how, handed, _ = dispatched([d.name, *argv, *typed])
                             self.assertEqual(how, "here", handed)
-                            i = handed.index(opt)
-                            self.assertEqual(handed[i + 1], self.PATH, handed)
+                            if optional:
+                                self.assertIn("%s=%s" % (opt, self.PATH), handed)
+                            else:
+                                self.assertEqual(handed[handed.index(opt) + 1], self.PATH, handed)
                             checked += 1
         self.assertGreater(checked, 100)
 

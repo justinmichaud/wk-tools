@@ -126,7 +126,7 @@ class Base:
 
     def erase(self):
         if not self.exists():
-            die("no golden base '%s' on this machine -- nothing to erase.\n    '%s' builds one; 'wk disk' says what "
+            die("no golden base '%s' on this machine -- nothing to erase.\n    '%s' builds one; 'wk doctor' says what "
                 "everything here costs." % (self.name, guest.BASE_BUILD))
         home = tart_home(self.env)
         if not act.confirm("delete the golden base VM '%s' (%s)? rebuilding it is hours"

@@ -54,7 +54,7 @@ So never run one in the foreground. Two ways, and prefer the first:
   leaves the build running *on the machine that builds it* — in the podman VM
   for a container workspace, on the build machine itself for a remote one. No
   ssh session has to stay up, so nothing this end does can kill it. Then poll
-  `wk status <ws>` and read `wk logs <ws>` when it ends.
+  `wk status <ws>` and read `wk status <ws> --log` when it ends.
 - `run_in_background` for anything without a `--detach` of its own
   (`wk test`, `wk bench`, `./setup`), then poll the same way.
 
@@ -67,7 +67,7 @@ reports "still building" about a build that failed a minute ago.
 
 **Do not reach around `wk` to judge a build.** `wk status <ws>` is the stage
 and the health -- the plan it recorded, the step it is on, and the watchdog
-that calls it silent or stalled; `wk logs <ws>` is the errors, already
+that calls it silent or stalled; `wk status <ws> --log` is the errors, already
 normalised past the carriage returns ninja writes progress with; `wk status
 <ws> --wait` is the outcome. Tailing the raw build log, or sshing into the
 guest to count `.o` files, answers a different question and answers it badly:

@@ -1,4 +1,4 @@
-"""wk-tools' identity across machines (cmd/version, Remote.sync's peer arm, tools.committed): the commit, plus
+"""wk-tools' identity across machines (`wk doctor --probe-tools`, Remote.sync's peer arm, tools.committed): the commit, plus
 `+dirty` for a tracked modification only -- untracked and ignored files never make two checkouts differ."""
 import contextlib
 import io
@@ -18,7 +18,7 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import targets  # noqa: E402
 from wk.machine import Local  # noqa: E402
 
-CMD_VERSION = REPO / "cmd" / "version"
+CMD_DOCTOR = REPO / "cmd" / "doctor"
 
 
 def git(cwd, *args, check=True):
@@ -40,8 +40,8 @@ def kv(text):
 
 
 def version(root):
-    """cmd/version, pointed at an arbitrary checkout via WK_ROOT."""
-    cp = subprocess.run([str(CMD_VERSION)], env={**os.environ, "WK_ROOT": str(root)},
+    """`doctor --probe-tools`, pointed at an arbitrary checkout via WK_ROOT."""
+    cp = subprocess.run([str(CMD_DOCTOR), "--probe-tools"], env={**os.environ, "WK_ROOT": str(root)},
                         capture_output=True, text=True, timeout=15)
     return kv(cp.stdout)
 
@@ -67,10 +67,11 @@ class TwoClonesCase(unittest.TestCase):
         git(self.tmp, "clone", "-q", str(origin), str(self.b))
         for d in (self.a, self.b):
             git(d, "config", "pull.rebase", "false")
-        # Untracked, so invisible to the dirty check; each clone runs its own cmd/version.
+        # Untracked, so invisible to the dirty check; each clone runs its own cmd/doctor.
         for d in (self.a, self.b):
             (d / "cmd").symlink_to(REPO / "cmd")
             (d / "lib").symlink_to(REPO / "lib")
+            (d / "wk").symlink_to(REPO / "wk")
 
     def _peer_sync(self, mine_root, their_root):
         """Remote.sync's peer arm with no ssh (WK_REMOTE_LOCAL)."""

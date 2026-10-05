@@ -103,12 +103,6 @@ class TestHelpAndDeclarations(WkTest):
         self.assertEqual(cp.returncode, 2, cp.stdout + cp.stderr)
         self.assertIn("unknown command", cp.stdout + cp.stderr)
 
-    def test_every_tombstoned_command_is_refused_naming_its_replacement(self):
-        for cmd, said in dispatch.TOMBSTONES.items():
-            with self.subTest(cmd=cmd):
-                cp = run(cmd, "x")
-                self.assertNotEqual(cp.returncode, 0, cp.stdout)
-                self.assertIn(said.splitlines()[0], cp.stdout)
 
     def test_unknown_target_names_the_conf_to_write(self):
         cp = run("ls", env={"WK_TARGET": "nosuchtarget-selftest",
@@ -146,9 +140,9 @@ class TestDelegationReadsTheRegistry(WkTest):
             peer = dispatch.delegate_target("peer")
             with contextlib.redirect_stderr(io.StringIO()) as err:
                 with self.assertRaises(dispatch.Exit) as raised:
-                    dispatch.delegate_run(peer, "logs", ["ws"])
+                    dispatch.delegate_run(peer, "status", ["ws"])
         self.assertEqual(raised.exception.status, 1)
-        self.assertIn("'logs' acts on a workspace on peer, and peer did not answer.", err.getvalue())
+        self.assertIn("'status' acts on a workspace on peer, and peer did not answer.", err.getvalue())
         self.assertIn("the workspace is that machine's own", err.getvalue())
         self.assertEqual(len([e for e in self.fake.effects if e[1][0] == "ssh"]), 1)
 
@@ -162,7 +156,7 @@ class TestWorkspaceRefusals(WkTest):
         self.assertIn("no workspace argument in here", cp.stdout + cp.stderr)
 
     def test_host_only_commands_refuse_inside_a_workspace(self):
-        for c in ("gc", "session", "quiesce"):
+        for c in ("gc", "quiesce"):
             with self.subTest(cmd=c):
                 with fake_workspace() as ws:
                     cp = ws.run(c)
@@ -225,7 +219,7 @@ class TestWorkspaceRefusals(WkTest):
 class TestUnknownWorkspaceName(WkTest):
 
     COMMANDS = (
-        "build", "enter", "gui", "logs", "pr", "profile",
+        "build", "enter", "gui", "pr",
         "run", "status", "sync", "test", "doctor", "zed",
     )
 
@@ -297,10 +291,10 @@ class TestZedNames(WkTest):
 
 class TestFlagNameOverride(WkTest):
 
-    def test_a_flag_can_answer_without_a_workspace(self):
-        cp = run("profile", "--list")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("sampling", cp.stdout + cp.stderr)
+    def test_a_flag_can_require_the_workspace_the_command_does_not(self):
+        cp = run("status", "--log")
+        self.assertEqual(cp.returncode, 2, cp.stdout + cp.stderr)
+        self.assertIn("usage: wk status", cp.stdout)
 
 
 class TestSubverbNeedsOverride(WkTest):

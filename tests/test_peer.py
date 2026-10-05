@@ -153,10 +153,10 @@ class TestPeerResolution(PeerFixture):
 class TestPeerDelegation(PeerFixture):
 
     def test_command_runs_on_the_peer(self):
-        """`wk logs <ws>` runs `wk logs <ws>` over there, not a thing here"""
-        cp = self._wk("logs", "peerws")
+        """`wk status <ws> --log` runs `wk status <ws> --log` over there, not a thing here"""
+        cp = self._wk("status", "peerws", "--log")
         self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("logs peerws ", self.peer_calls())
+        self.assertIn("status peerws --log ", self.peer_calls())
 
     def test_destroying_one_is_asked_of_the_peer(self):
         """`wk rm <ws>` of a workspace a peer keeps the record of is that
@@ -216,12 +216,12 @@ class TestPeerDelegation(PeerFixture):
                 (("ai", "claude", "peerws", "-p", "hi"), "ai claude peerws -p hi "),
                 (("build", "peerws", "jsc-debug", "--detach"), "build peerws jsc-debug --detach "),
                 (("status", "peerws", "--wait", "--timeout", "60"), "status --no-fleet --records peerws "),
-                (("logs", "peerws"), "logs peerws "),
+                (("status", "peerws", "--log"), "status peerws --log "),
                 (("enter", "peerws", "--", "bash", "-lc", "true"), "enter peerws -- bash -lc true "),
                 (("sync", "peerws"), "sync peerws "),
                 (("doctor", "peerws"), "doctor peerws "),
-                (("push", "on", "--target", "peerbox", "--yes"), "push on yes=1 "),
-                (("push", "status", "--target", "peerbox"), "push status ")]
+                (("key", "push", "on", "--target", "peerbox", "--yes"), "key push on yes=1 "),
+                (("key", "push", "status", "--target", "peerbox"), "key push status ")]
         for argv, asked in steps:
             with self.subTest(argv=argv):
                 cp = self._wk(*argv)
@@ -259,10 +259,10 @@ class TestPeerDelegation(PeerFixture):
 
 class TestDelegatedGlobalFlags(PeerFixture):
     def test_force_and_quiet_cross_as_environment_and_only_when_asked(self):
-        self.assertEqual(self._wk("logs", "peerws").returncode, 0)
+        self.assertEqual(self._wk("status", "peerws", "--log").returncode, 0)
         self.assertFalse(any("force=1" in c or "quiet=1" in c for c in self.peer_calls()), self.peer_calls())
         for flag, seen in (("--force", "force=1"), ("--quiet", "quiet=1")):
-            cp = self._wk("logs", "peerws", flag)
+            cp = self._wk("status", "peerws", "--log", flag)
             self.assertEqual(cp.returncode, 0, cp.stdout)
             self.assertIn(seen, self.peer_calls()[-1])
             self.assertNotIn(flag, self.peer_calls()[-1])

@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 #
 # wk doctor [<workspace> [--gpu] | <machine>] [--all] -- what is provisioned on this machine, a machine's facts, or whether a workspace's wall holds
-# wk: where=dynamic name=optional readonly group=hosts opts --all,--probe-store,--gpu
+# wk: where=dynamic name=optional readonly group=hosts opts --all,--probe-store,--probe-tools,--gpu
 #
 # The reinstall companion: `./setup` is the automated path, but several pieces
 # are deliberately manual (interactive sudo, credentials, hardware). This prints
-# the full checklist with the exact next command for everything missing.
+# the full checklist with the exact next command for everything missing, then
+# which wk-tools this is (`sha`, the commit HEAD is at, and `dirty`, judged on
+# tracked files only) and everything wk stores on this machine, with the total:
+# the podman VM's disk image (on a macOS host the whole container store, its
+# breakdown asked over ssh), the Tart guests, the store, and what `wk gc`
+# reclaims or names. Inside a workspace the disk section is that workspace's.
 #
 # Read-only by design: it never starts the podman machine, never boots a guest,
 # and never prompts. State it cannot see without starting something is reported
@@ -40,6 +45,8 @@
 #
 #   --probe-store   the store's key=value facts alone, for the host that asks
 #                   the podman VM to run this where the store is
+#   --probe-tools   this checkout's sha= and dirty= alone, for a machine
+#                   comparing its wk-tools with this one's
 #
 #   0  everything checkable is provisioned; every check of the wall passed
 #   1  something is missing, or a check of the wall failed (the lines say what and how)
@@ -54,13 +61,13 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, fleet, wall  # noqa: E402
+from wk import decl, disk, fleet, tools, wall  # noqa: E402
 from wk.act import Refused, die, info, log, warn  # noqa: E402
 from wk.doctor import Doctor, Report, device  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.targets import Registry  # noqa: E402
 
-ALLOWED = ("--all", "--probe-store", "--gpu")
+ALLOWED = ("--all", "--probe-store", "--probe-tools", "--gpu")
 
 
 def machine_named(argv, env):
@@ -96,6 +103,7 @@ def inside(reg):
     rep = Report(sys.stderr)
     publishing = wall.from_inside(ROOT, target, target.ws_name, reg.machine, rep)
     sys.stderr.write("\n")
+    disk.workspace_report(reg)
     v = wall.verdict(rep, publishing)
     if v == "publishing":
         warn("an agent in here could publish (see above)")
@@ -127,6 +135,10 @@ def main(argv, env=None, reg=None):
         print(where(argv[1:], env))
         return 0
     args = decl.Args(decl.Decl(__file__), argv)
+    if args.flag("--probe-tools"):
+        only(args, ("--probe-tools",), "is not asked with --probe-tools")
+        sys.stdout.write(tools.identity_text(tools.identity(ROOT, Local())))
+        return 0
     reg = reg or Registry(ROOT, env, Local())
     named = machine_named(args.positionals, env)
     if named:
@@ -151,6 +163,10 @@ def main(argv, env=None, reg=None):
     for title, rows in doc.sections(args.flag("--all")):
         rep.section(title)
         rep.rows(rows)
+    rep.section("wk-tools")
+    ident = tools.identity(ROOT, Local())
+    sys.stderr.write("  sha    %s\n  dirty  %s\n" % (ident["sha"], ident["dirty"]))
+    disk.machine_report(ROOT, reg)
     sys.stderr.write("\n")
     if not rep.missing:
         info("everything checkable is provisioned")

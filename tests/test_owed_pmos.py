@@ -149,7 +149,7 @@ class TestPmosImageKey(WkTest):
 
 
 class TestPmosBuildHostsAndCacheProbe(unittest.TestCase):
-    """What `wk disk` and `wk gc` read: every unique build host a pmos profile names, and what each holds."""
+    """What `wk doctor` and `wk gc` read: every unique build host a pmos profile names, and what each holds."""
 
     def test_build_hosts_is_the_pmos_profiles_own_build_host(self):
         self.assertIn("rpi5", pmos.build_hosts({}))

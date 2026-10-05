@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 #
-# wk test <workspace> [flags] [paths...] -- run the JSC or layout test suites
+# wk test <workspace> [flags] [paths...] -- run the JSC or layout test suites, or profile a run
 # wk: where=workspace name=required ready=yes group=workspaces takes=* passthrough dryrun config=--config
-# wk: opts --config=,--layout,--gpu,--lldb,--kill
+# wk: opts --config=,--layout,--gpu,--lldb,--kill,--profile,--profile=,--browser,--process=,--attach=,--jit-dump,--markers,--top=,--fetch,--env=
 #
 # The same reportability as `wk build`: a watchdog that detects a silent run, a
 # status file `wk status` can read, and a summary instead of raw output. --lldb
@@ -19,6 +19,8 @@
 #   --lldb [web|ui]      debug one layout test: "web" (default) attaches to the
 #                        web process, "ui" to WebKitTestRunner
 #   --kill               stop the test run in this workspace, wherever it runs
+#   --profile[=<mode>]   a run under a profiler instead of the suite, with every
+#                        mode and flag `wk run --profile` takes (wk run -h)
 
 import os
 import re
@@ -30,7 +32,7 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import buildconf, decl, job, record, session, targets  # noqa: E402
+from wk import buildconf, decl, job, profile, record, session, targets  # noqa: E402
 from wk.ldpath import LLDB_PIN_OPTS, lldb_waiting  # noqa: E402
 from wk.act import Refused, die, dry_run, info, log, warn  # noqa: E402
 from wk.build import records_of, size_for  # noqa: E402
@@ -99,6 +101,10 @@ def build_cmd(suite, src, out_env, render_env, wrap, lower, port, jobs, debug_fl
 
 
 def main(argv, reg=None, clock=None):
+    args = decl.Args(decl.Decl(__file__), argv)
+    profile.refuse_mixed(args, ("--layout", "--gpu", "--lldb", "--kill"))
+    if profile.asked(args):
+        return profile.main(args, "test", reg)
     name = store.ws_name()
     opts = parse(argv)
     clock = clock or Clock()

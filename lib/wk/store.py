@@ -61,77 +61,77 @@ class Store:
     def lock_path(self, resource):
         return os.path.join(self.lock_dir(), "%s@%s.lock" % (resource, record.host_name() or "local"))
 
-    def default(self):
+    def default_store_dir(self):
         if in_vm(self.env) or os.uname().sysname == "Darwin":
             return "/var/lib/wk"
         if os.path.isdir("/var/lib/wk") and os.access("/var/lib/wk", os.W_OK):
             return "/var/lib/wk"
         return os.path.join(self.env.get("XDG_DATA_HOME") or os.path.join(self.home(), ".local", "share"), "wk")
 
-    def named_broker_socket(self):
+    def named_runtime_socket(self):
         return self.env.get("WK_BROKER_SOCKET")
 
-    def broker_socket(self):
+    def runtime_socket(self):
         if self.env.get("XDG_RUNTIME_DIR"):
             default = os.path.join(self.env["XDG_RUNTIME_DIR"], "wk", "broker.sock")
         else:
             default = os.path.join(self.state_dir(), "broker.sock")
-        return self.named_broker_socket() or default
+        return self.named_runtime_socket() or default
 
-    def workspace_broker_socket(self):
-        return self.named_broker_socket() or (os.path.join(self.home(), GUEST_BROKER_SOCKET) if self.macos_host else BROKER_SOCKET)
+    def workspace_runtime_socket(self):
+        return self.named_runtime_socket() or (os.path.join(self.home(), GUEST_BROKER_SOCKET) if self.macos_host else BROKER_SOCKET)
 
-    def container_mirror(self):
+    def container_mirror_dir(self):
         return self.env.get("WK_MIRROR")
 
-    def named_root(self):
+    def named_store_dir(self):
         return self.env.get("WK_STORE")
 
     def admission_dir(self):
-        return self.named_root() or self.home()
+        return self.named_store_dir() or self.home()
 
-    def root(self):
-        return self.named_root() or self.default()
+    def store_dir(self):
+        return self.named_store_dir() or self.default_store_dir()
 
-    def provisioned_root(self):
-        return self.named_root() or "/var/lib/wk"
+    def provisioned_store_dir(self):
+        return self.named_store_dir() or "/var/lib/wk"
 
-    def vm_root(self):
-        return self.env.get("WK_VM_STORE") or self.record_dir()
+    def vm_store_dir(self):
+        return self.env.get("WK_VM_STORE") or self.records_dir()
 
-    def vm_store(self):
-        """The vm target's store, or None off a macOS host and where it would be the container's."""
-        if not self.macos_host:
-            return None
-        d = self.vm_root()
-        return None if os.path.realpath(d) == os.path.realpath(self.root()) else d
+    def vm_store_apart(self):
+        """Whether the vm place has a store of its own: only on a macOS host, and never the container's."""
+        return self.macos_host and os.path.realpath(self.vm_store_dir()) != os.path.realpath(self.store_dir())
 
-    def machine_store(self):
-        return self.env.get("WK_STORE_DEFAULT") or self.root()
+    def machine_store_dir(self):
+        return self.env.get("WK_STORE_DEFAULT") or self.store_dir()
 
-    def record_dir(self):
-        if self.macos_host and self.root() == self.default():
+    def records_dir(self):
+        if self.macos_host and self.store_dir() == self.default_store_dir():
             return self.state_dir()
-        return self.root()
+        return self.store_dir()
 
-    def mirror(self):
+    def mirror_dir(self):
         if self.macos_host:
             return os.path.join(self.state_dir(), "git", "WebKit.git")
-        return os.path.join(self.root(), "git", "WebKit.git")
+        return os.path.join(self.store_dir(), "git", "WebKit.git")
 
-    def base_dir(self):
-        return os.path.join(self.root(), "base")
+    def snapshots_dir(self):
+        return os.path.join(self.store_dir(), "base")
 
-    def base_path(self, base_id):
-        return os.path.join(self.base_dir(), base_id, "WebKit")
+    def snapshot_dir(self, bid):
+        return os.path.join(self.snapshots_dir(), bid)
 
-    def base_sha_file(self, base_id):
-        return os.path.join(self.base_dir(), base_id, "sha")
+    def snapshot_tree(self, bid):
+        return os.path.join(self.snapshot_dir(bid), "WebKit")
+
+    def snapshot_sha_file(self, bid):
+        return os.path.join(self.snapshot_dir(bid), "sha")
 
     def ws_dir(self, name):
-        return os.path.join(self.root(), "ws", name)
+        return os.path.join(self.store_dir(), "ws", name)
 
-    def ws_base_id(self, name):
+    def ws_snapshot_id(self, name):
         try:
             with open(os.path.join(self.ws_dir(name), "base-id")) as f:
                 return f.read().strip()
@@ -140,39 +140,39 @@ class Store:
 
     def workspaces(self):
         try:
-            return sorted(os.listdir(os.path.join(self.root(), "ws")))
+            return sorted(os.listdir(os.path.join(self.store_dir(), "ws")))
         except OSError:
             return []
 
-    def secrets_dir(self):
+    def keyring_dir(self):
         if self.macos_host:
             return self.env.get("WK_HOST_SECRETS") or os.path.join(
                 self.env.get("XDG_CONFIG_HOME") or os.path.join(self.home(), ".config"), "wk", "secrets")
-        return os.path.join(self.machine_store(), "secrets")
+        return os.path.join(self.machine_store_dir(), "secrets")
 
-    def secrets_view_dir(self, kind):
-        return os.path.join(self.secrets_dir(), "view", kind)
+    def keyring_view_dir(self, kind):
+        return os.path.join(self.keyring_dir(), "view", kind)
 
-    def agent_rw_dir(self):
-        return os.path.join(os.path.dirname(self.secrets_dir()), "agent-rw")
+    def keyring_agent_rw_dir(self):
+        return os.path.join(os.path.dirname(self.keyring_dir()), "agent-rw")
 
-    def push_held_dir(self):
-        return os.path.join(os.path.dirname(self.secrets_dir()), "push-keys")
+    def keyring_push_dir(self):
+        return os.path.join(os.path.dirname(self.keyring_dir()), "push-keys")
 
-    def ntfy_topic_path(self):
-        return os.path.join(os.path.dirname(self.secrets_dir()), "notify", "ntfy-topic")
+    def keyring_ntfy_topic(self):
+        return os.path.join(os.path.dirname(self.keyring_dir()), "notify", "ntfy-topic")
 
     def is_local(self):
         """Whether this process can write the store; on a macOS host the default one is the podman VM's."""
         if in_vm(self.env) or os.uname().sysname != "Darwin":
             return True
-        return os.path.isdir(self.root()) and os.access(self.root(), os.W_OK)
+        return os.path.isdir(self.store_dir()) and os.access(self.store_dir(), os.W_OK)
 
-    def artifact_dir(self):
-        return os.path.join(self.record_dir(), "cache")
+    def cache_dir(self):
+        return os.path.join(self.records_dir(), "cache")
 
 
-class Bases:
+class Snapshots:
     def __init__(self, store, machine):
         self.store = store
         self.machine = machine
@@ -190,28 +190,28 @@ class Bases:
             return []
 
     def _git(self, bid, *args):
-        r = self.machine.run(["git", "-C", self.store.base_path(bid)] + list(args))
+        r = self.machine.run(["git", "-C", self.store.snapshot_tree(bid)] + list(args))
         return r.out.strip() if r.ok else ""
 
     def ids(self):
-        return self._ls(self.store.base_dir())
+        return self._ls(self.store.snapshots_dir())
 
     # `wk sync` publishes into a hardlinked copy of the last snapshot, so a kill mid-publish leaves a newer directory than any good one; the sha lands last.
     def complete(self, bid):
-        return bool(self._read(self.store.base_sha_file(bid)))
+        return bool(self._read(self.store.snapshot_sha_file(bid)))
 
     def recorded_branch(self, bid):
-        return (self._read(os.path.join(self.store.base_dir(), bid, "branch")) or "").strip()
+        return (self._read(os.path.join(self.store.snapshot_dir(bid), "branch")) or "").strip()
 
     def verify(self, bid):
-        if not self.machine.isdir(os.path.join(self.store.base_dir(), bid)):
+        if not self.machine.isdir(self.store.snapshot_dir(bid)):
             return "snapshot %s does not exist" % bid
         if not self.complete(bid):
             return ("snapshot %s was never finished publishing (no completion marker).\n"
                     "    An interrupted 'wk sync' leaves one; the next 'wk gc' removes it." % bid)
-        if not self.machine.isdir(os.path.join(self.store.base_path(bid), ".git")):
+        if not self.machine.isdir(os.path.join(self.store.snapshot_tree(bid), ".git")):
             return "snapshot %s is not a git checkout" % bid
-        want = (self._read(self.store.base_sha_file(bid)) or "").strip()
+        want = (self._read(self.store.snapshot_sha_file(bid)) or "").strip()
         got = self._git(bid, "rev-parse", "HEAD")
         if not got:
             return "snapshot %s has no readable HEAD" % bid
@@ -245,7 +245,7 @@ class Bases:
         return next((b for b in reversed(self.ids()) if self.complete(b)), "")
 
     def workspaces(self):
-        return self._ls(os.path.join(self.store.root(), "ws"))
+        return self._ls(os.path.join(self.store.store_dir(), "ws"))
 
     def pin(self, ws):
         text = self._read(os.path.join(self.store.ws_dir(ws), "base-id"))
@@ -266,20 +266,20 @@ class Bases:
 def rubble(store, machine, mirror_here):
     """A snapshot no workspace is on goes with a plain `wk gc`; the mirror and every snapshot only with --purge-mirror, and never under a workspace."""
     from wk.rubble import du_kb, remover, row
-    bases = Bases(store, machine)
-    rows, ws = [], bases.workspaces()
-    unpinned = bases.unpinned()
-    if unpinned and [b for b in bases.ids() if b != bases.newest_complete()]:
-        rows.append(row("snapshot", "base snapshots", du_kb(machine, store.base_dir()), take=remover(machine),
-                        why="kept -- %s never recorded a base, so any snapshot may be under it: 'wk new <name>' remakes "
+    snaps = Snapshots(store, machine)
+    rows, ws = [], snaps.workspaces()
+    unpinned = snaps.unpinned()
+    if unpinned and [b for b in snaps.ids() if b != snaps.newest_complete()]:
+        rows.append(row("snapshot", "snapshots", du_kb(machine, store.snapshots_dir()), take=remover(machine),
+                        why="kept -- %s never recorded a snapshot, so any snapshot may be under it: 'wk new <name>' remakes "
                             "one, 'wk rm <name>' removes it" % " ".join(unpinned)))
-    for b in bases.unreferenced():
-        d = os.path.join(store.base_dir(), b)
+    for b in snaps.unreferenced():
+        d = store.snapshot_dir(b)
         rows.append(row("snapshot", "snapshot %s, no workspace on it" % b, du_kb(machine, d), take=remover(machine, d)))
-    paths = [p for p in [store.base_dir()] + ([store.mirror()] if mirror_here else []) if machine.isdir(p)]
+    paths = [p for p in [store.snapshots_dir()] + ([store.mirror_dir()] if mirror_here else []) if machine.isdir(p)]
     if paths:
         kbs = [du_kb(machine, p) for p in paths]
-        rows.append(row("mirror", "the mirror and every base snapshot" if store.mirror() in paths else "every base snapshot",
+        rows.append(row("mirror", "the mirror and every snapshot" if store.mirror_dir() in paths else "every snapshot",
                         None if None in kbs else sum(kbs), "--purge-mirror", remover(machine, *paths),
                         "kept -- every workspace is overlaid on a snapshot here: 'wk rm' %s first" % " ".join(ws) if ws else ""))
     from wk.bench import record as bench_record
@@ -298,8 +298,8 @@ def main(argv):
     p.add_argument("verb", choices=("paths",), help="the store's directories, as shell assignments")
     p.parse_args(argv)
     s = Store()
-    for k, v in (("WK_STORE", s.root()), ("secrets_dir", s.secrets_dir()), ("agent_rw_dir", s.agent_rw_dir()),
-                 ("push_held_dir", s.push_held_dir()), ("mirror_dir", os.path.dirname(s.mirror()))):
+    for k, v in (("WK_STORE", s.store_dir()), ("keyring_dir", s.keyring_dir()), ("keyring_agent_rw_dir", s.keyring_agent_rw_dir()),
+                 ("keyring_push_dir", s.keyring_push_dir()), ("mirror_parent", os.path.dirname(s.mirror_dir()))):
         print("%s=%s" % (k, shlex.quote(v)))
     return 0
 

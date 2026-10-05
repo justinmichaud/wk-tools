@@ -1,5 +1,5 @@
 """`wk status`: the collector (lib/wk/status.py) and the renderer (lib/wk/statusview.py) driven in process, plus
-`wk push status --all`."""
+`wk key push status --all`."""
 import contextlib
 import io
 import json
@@ -517,20 +517,20 @@ class TestToolsFact(unittest.TestCase):
         self.assertEqual(skew["machine"], "far")
 
 class TestPushStatusAll(WkTest):
-    """`wk push status --all` prints one line per machine, this one included."""
+    """`wk key push status --all` prints one line per machine, this one included."""
 
     def test_one_line_per_machine_including_this_one(self):
         env = clean_env()
         here = record.machine_name(env)
         expected = set(targets.Registry(REPO, env=env).machines()) | {here}
         try:
-            cp = self.run_wk("push", "status", "--all", timeout=180)
+            cp = self.run_wk("key", "push", "status", "--all", timeout=180)
         except subprocess.TimeoutExpired:
             self.skipTest("no route to the configured machines from here")
         lines = [l for l in cp.stdout.splitlines() if l.strip()]
         seen = {l.split()[0] for l in lines}
         self.assertIn(here, seen, "--all skipped the machine it was typed on")
-        self.assertEqual(seen, expected, "wk push status --all must answer for every machine")
+        self.assertEqual(seen, expected, "wk key push status --all must answer for every machine")
         self.assertIn(cp.returncode, (0, 1, 4))
 
 
@@ -693,7 +693,7 @@ class TestHealthRecords(unittest.TestCase):
         (held / "build_key_fork").write_text("not-a-key\n")
         rec = status.push_record(store, "m", ["fork", "forkwpe"], False)
         self.assertEqual((rec["name"], rec["state"]), ("push credentials", "some keys held"))
-        self.assertIn("1 deploy key(s), 1 absent, no API token -- 'wk push status' says whether they are loaded", rec["detail"])
+        self.assertIn("1 deploy key(s), 1 absent, no API token -- 'wk key push status' says whether they are loaded", rec["detail"])
         (held / "build_key_forkwpe").write_text("not-a-key\n")
         (held / "github-pat").write_text("ghp_notatoken\n")
         rec = status.push_record(store, "m", ["fork", "forkwpe"], False)
@@ -785,7 +785,7 @@ class TestTheWalkProbesAMachineOnce(unittest.TestCase):
         self.assertEqual(len(self.fake.ssh_calls("test -f $HOME/.wk-remote")), 1)
         wk_calls = [c[-1] for c in self.fake.ssh_calls("tools/wk ")]
         self.assertEqual([c.split("tools/wk ", 1)[1].split(" 2>&1")[0].rstrip("'") for c in wk_calls],
-                         ["status --no-fleet --records", "version", "key fingerprints"])
+                         ["status --no-fleet --records", "doctor --probe-tools", "key fingerprints"])
         self.assertEqual(len(self.fake.ssh_calls()), 5)
         cap = [r for r in recs if r["kind"] == "capacity"]
         self.assertEqual(len(cap), 1)

@@ -2,17 +2,16 @@
 #
 # wk sysimage <sub> [args] -- build and manage bootable systems
 #
-# wk: where=host name=none values=configs group=hosts takes=1 verbs=configs,build,webkit,disks,write,ls,list,holds,path,rm,flash dryrun build,webkit,write outside readonly ls,list,disks,holds,path,configs,rm,flash
+# wk: where=host name=none values=configs group=hosts takes=1 verbs=configs,build,webkit,disks,write,ls,list,holds,path dryrun build,webkit,write outside readonly ls,list,disks,holds,path,configs
 # wk: destructive write,--install,--all,--rebuild,--rm
 # wk: sub ls,list where=dynamic opts=--continued
 # wk: sub build,webkit,holds,path where=dynamic name=derived
-# wk: sub build,webkit,disks,rm,flash,holds,path takes=2
+# wk: sub build,webkit,disks,holds,path takes=2
 # wk: sub holds opts=--slot=,--commit=,--config=,--workspace=,--toolchain
 # wk: sub path opts=--workspace=
 # wk: sub build opts=--workspace=,--detach,--stop,--resume,--stage=,--commit=,--slot=,--config=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet,--create,--fetch,--install,--provision,--repair,--build-pkg,--all,--version=,--refresh,--rebuild,--rm
 # wk: sub webkit opts=--workspace=,--detach,--stop,--commit=,--slot=,--config=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet
 # wk: sub write opts=--from=,--disk=,--profile=,--machine=,--rescue,--grow,--no-grow
-# wk: gone --list configs
 #
 # An image is a whole machine, built from a spec in this repo, that a machine can
 # be put into for one boot and taken out of again.
@@ -121,10 +120,6 @@
 #                                units that hand a machine back stay inert
 #       --grow | --no-grow       fill the disk with the root partition, or
 #                                leave it at its built size
-#   rm <name>                   tombstone -- the image lives in the workspace
-#                                that built it; 'wk rm <workspace>' removes it
-#   flash <machine>              tombstone -- named the wrong thing twice over;
-#                                see 'wk sysimage disks' / 'write' / 'wk boot'
 
 import os
 import sys
@@ -167,10 +162,6 @@ def main(argv):
                        args.value("--config"), args.flag("--toolchain"))
     if hook == "path":
         return s.path(spec, args.value("--workspace"))
-    if hook == "rm":
-        return s.rm()
-    if hook == "flash":
-        return s.flash(spec)
     if hook in ("build", "webkit"):
         rest, valued = argv[1:], d.valued_opts()
         if spec:

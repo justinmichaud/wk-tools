@@ -1,4 +1,4 @@
-"""A layer is reached through its own Python API: no command runs `wk status` or `wk push status` as a subprocess to read"""
+"""A layer is reached through its own Python API: no command runs `wk status` or `wk key push status` as a subprocess to read"""
 import importlib.machinery
 import importlib.util
 import io

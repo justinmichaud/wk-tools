@@ -102,7 +102,7 @@ sudo -n networksetup -setsecurewebproxy "$svc" "$addr" "$port" &&
 sudo -n networksetup -setproxybypassdomains "$svc" localhost 127.0.0.1
 """
 
-DEPLOY_HEADER = "# wk: written by lib/wk/guest.py on every start. Whether the agent these name\n# holds a key at all is 'wk push'.\n"
+DEPLOY_HEADER = "# wk: written by lib/wk/guest.py on every start. Whether the agent these name\n# holds a key at all is 'wk key push'.\n"
 PASSWORD = "admin"
 DISPLAY = "1280x800"
 BASE = "wk-base"
@@ -254,7 +254,7 @@ class Host:
             warn("the guest bridge never got address %s; not starting the proxy" % addr)
             return False
         pid = self.spawn(["env", "WK_PROXY_UNIX=0", "WK_PROXY_TCP=%s:%s" % (addr, self.port()),
-                          "WK_STORE=" + self.vm.store.root(), "WK_INJECT_SOCK=" + self.path("github-inject.sock"),
+                          "WK_STORE=" + self.vm.store.store_dir(), "WK_INJECT_SOCK=" + self.path("github-inject.sock"),
                           "/usr/bin/python3", os.path.join(self.root, "container", "proxy", "wk-proxy.py")], log, pidfile)
         if act.dry_run():
             return True
@@ -311,7 +311,7 @@ class Host:
             return self._start_agent()
 
     def _start_agent(self):
-        # One that answers is adopted, not replaced, which would drop the keys `wk push on` loaded.
+        # One that answers is adopted, not replaced, which would drop the keys `wk key push on` loaded.
         sock, pidfile = self.agent_sock(), self.path("ssh-agent.pid")
         if self.secrets.agent_answers(sock):
             pid = None if self.daemon_pid(pidfile) else self.listener([sock])
@@ -373,8 +373,8 @@ STEPS = (
     ("install_agents", warn, "{ws} has no working coding agents (above); 'wk rm {ws}' and 'wk new' remake it"),
     ("write_claude_config", warn, "could not link ~/.claude in {ws}; an agent in there would have no instructions"),
     ("write_agent_secrets", warn, "could not write the agent credentials into {ws}; an agent in there will ask you to log in"),
-    ("write_deploy_keys", warn, "could not write {ws}'s ssh config and public key halves; a push from in there is refused ('wk push status')"),
-    ("agent_converge_guest", warn, "could not converge {ws}'s ssh-agent forward; 'wk push status' says what it can reach"),
+    ("write_deploy_keys", warn, "could not write {ws}'s ssh config and public key halves; a push from in there is refused ('wk key push status')"),
+    ("agent_converge_guest", warn, "could not converge {ws}'s ssh-agent forward; 'wk key push status' says what it can reach"),
     ("broker_forward", warn, "could not reach the request broker from {ws}; 'wk sync' in there refreshes no mirror"),
     ("settle_desktop", warn, "could not settle {ws}'s desktop; 'wk doctor {ws}' says what is in front of the window"),
     ("report_desktop", None, ""),
@@ -406,7 +406,7 @@ class Guest:
         return self.vm.write_marker(self.ws, self.m)
 
     def write_shell_rc(self):
-        return self._said(self.m.act_run(["bash", "-s", self.vm.tools(self.ws), self.vm.agent_rw_dir()],
+        return self._said(self.m.act_run(["bash", "-s", self.vm.tools(self.ws), self.vm.keyring_agent_rw_dir()],
                                          input=tree(self.host.root, "vm/shell-rc.sh")))
 
     def write_lldbinit(self):
@@ -546,7 +546,7 @@ class Guest:
     def broker_forward(self):
         """The host broker's socket at the one a workspace's broker client dials; a broker that starts later is reached then."""
         return self.host.forward_start(self.ws, self.m, "broker", self.vm.home() + "/" + GUEST_BROKER_SOCKET,
-                                       Store(self.host.env).broker_socket())
+                                       Store(self.host.env).runtime_socket())
 
 
 def is_unfiltered(env):
@@ -949,12 +949,12 @@ def boot(host, ws, wait=BOOT_WAIT):
             m.remove(host.path(ws + ".unfiltered"))
         else:
             m.write(host.path(ws + ".unfiltered"), "")
-        agent_rw = host.secrets.store.agent_rw_dir()
+        agent_rw = host.secrets.store.keyring_agent_rw_dir()
         host.secrets.ensure_dir(agent_rw, "0700")
         path = "%s:%s" % (os.path.dirname(host.softnet()), host.env.get("PATH") or os.environ.get("PATH", ""))
         m.remove(runlog)
         m.spawn(["env", "PATH=" + path, vm.tart_or_die(), "run", *flags, "--dir=%s:%s" % (vm.agent_rw_share, agent_rw),
-                 "--dir=%s:%s:ro,tag=%s" % (vm.mirror_share, os.path.dirname(vm.store.mirror()), vm.mirror_tag), vm.vm(ws)], runlog)
+                 "--dir=%s:%s:ro,tag=%s" % (vm.mirror_share, os.path.dirname(vm.store.mirror_dir()), vm.mirror_tag), vm.vm(ws)], runlog)
         info("booting %s (log: %s)" % (vm.vm(ws), runlog))
         if act.dry_run():
             return ""   # a guest this run did not boot has no address, nor anything to converge
@@ -1019,13 +1019,13 @@ def pat_converge(root, env, machine):
 
 
 def push_agent(root, machine, env=None):
-    """(Secrets, socket) of the agent `wk push on` loads on this host for its own pushes and its guests."""
+    """(Secrets, socket) of the agent `wk key push on` loads on this host for its own pushes and its guests."""
     host = Host(_vm(root, machine, env))
     return host.secrets, host.agent_sock()
 
 
 def vm_push_keys_converge(root, machine, action, env=None):
-    """`wk push on|off` for push_agent's agent, then each running guest; one that did not converge fails it."""
+    """`wk key push on|off` for push_agent's agent, then each running guest; one that did not converge fails it."""
     vm = _vm(root, machine, env)
     host = Host(vm)
     sec, sock, ok = host.secrets, host.agent_sock(), True
@@ -1045,7 +1045,7 @@ def vm_push_keys_converge(root, machine, action, env=None):
         if left:
             sys.stderr.write("  %-24s still holds %d identity/identities at %s\n" % ("the guests' agent", left, sock))
             ok = False
-    for g in vm.workspaces() if vm.vm_store() else ():
+    for g in vm.workspaces() if vm.vm_store_apart() else ():
         if vm.info(g) != "running":
             continue
         guest = Guest(host, g, vm.guest_of(vm.vm(g)))
@@ -1069,7 +1069,7 @@ def vm_push_agent_keys(root, machine, env=None):
 def vm_push_keys_state(root, machine, env=None):
     """(guest, state, what it reaches) per guest; a stopped one is reported, never started."""
     vm = _vm(root, machine, env)
-    if not vm.vm_store():
+    if not vm.vm_store_apart():
         return []
     host = Host(vm)
     n = len(host.secrets.agent_list(host.agent_sock()))

@@ -126,7 +126,7 @@ class _Flow(unittest.TestCase):
         return status, err.getvalue()
 
     def pushes(self):
-        return [" ".join(e[1][1:]) for e in self.fake.effects if e[0] == "run" and e[1][:2] == (WK, "push")]
+        return [" ".join(e[1][2:]) for e in self.fake.effects if e[0] == "run" and e[1][:3] == (WK, "key", "push")]
 
     def line(self):
         self.assertEqual(1, len(self.handed), self.handed)
@@ -143,8 +143,8 @@ class _Host(_Flow, _Wall):
         self.env.update(WK_NAME="demo", WK_TARGET="container")
         self.fake.answer(["podman", "inspect", "wk-demo"], out="running\n")
         self.fake.files[os.path.join(self.target.store.ws_dir("demo"), "home", targets.READY_MARKER)] = ""
-        self.fake.answer([WK, "push", "status"], rc=1)
-        self.fake.answer([WK, "push"])
+        self.fake.answer([WK, "key", "push", "status"], rc=1)
+        self.fake.answer([WK, "key", "push"])
         self.fake.answer(["podman", "info"], out="true\n")
         self.fake.answer(["systemctl", "--user"])
         p = mock.patch.object(AI.Ai, "agent_bin", return_value="claude")
@@ -201,10 +201,10 @@ class TestItVerifiesTheWall(_Host):
         self.assertIn("the allowlist is not being enforced", err)
 
     def test_the_keys_are_held_back_before_anything_is_measured(self):
-        self.fake.answer([WK, "push", "status"], rc=0)
+        self.fake.answer([WK, "key", "push", "status"], rc=0)
         self.ai("claude")
         runs = [e[1] for e in self.fake.effects if e[0] == "run"]
-        off = runs.index((WK, "push", "off"))
+        off = runs.index((WK, "key", "push", "off"))
         self.assertLess(off, runs.index(("podman", "inspect", "wk-demo", "--format", "{{.State.Status}}")))
 
     def test_the_commit_wall_goes_in_front_of_the_agent(self):
@@ -273,12 +273,12 @@ class TestThePushSwitch(_Host):
         super().setUp()
         self.push_on = True
         for verb in ("status", "off", "on"):
-            self.fake.react([WK, "push", verb], self._push)
+            self.fake.react([WK, "key", "push", verb], self._push)
 
     def _push(self, argv, fake):
-        if argv[2] == "status":
+        if argv[3] == "status":
             return Result(0 if self.push_on else 1)
-        self.push_on = argv[2] == "on"
+        self.push_on = argv[3] == "on"
         return Result(0)
 
     def test_a_terminal_session_turns_push_back_on_at_exit(self):
@@ -323,21 +323,21 @@ class TestThePushSwitch(_Host):
         self.assertTrue(self.push_on)
 
     def test_a_switch_that_would_not_go_off_refuses(self):
-        self.fake.answer([WK, "push", "status"], rc=0)
-        self.fake.answer([WK, "push", "off"], rc=3, err="error: this is the podman machine.\n    On the host: wk push off\n")
+        self.fake.answer([WK, "key", "push", "status"], rc=0)
+        self.fake.answer([WK, "key", "push", "off"], rc=3, err="error: this is the podman machine.\n    On the host: wk key push off\n")
         status, err = self.ai("claude")
         self.assertEqual(1, status, err)
-        self.assertIn("refusing to run: could not hold back the push keys ('wk push status'); it said:\n"
-                      "    error: this is the podman machine.\n        On the host: wk push off", err)
+        self.assertIn("refusing to run: could not hold back the push keys ('wk key push status'); it said:\n"
+                      "    error: this is the podman machine.\n        On the host: wk key push off", err)
         self.assertEqual([], self.handed)
 
     def test_an_unmeasured_switch_refuses(self):
         for st in (3, 5):
             with self.subTest(status=st):
-                self.fake.answer([WK, "push", "status"], rc=st)
+                self.fake.answer([WK, "key", "push", "status"], rc=st)
                 status, err = self.ai("claude")
                 self.assertEqual(1, status, err)
-                self.assertIn("'wk push status' exited %d rather" % st, err)
+                self.assertIn("'wk key push status' exited %d rather" % st, err)
 
 
 class TestWhatIsWkTheAgentNever(_Flow):
@@ -369,7 +369,7 @@ class TestABuildBox(_Flow):
     def setUp(self):
         self.setUpFlow()
         self.fake = Fake()
-        self.fake.answer([WK, "push"], rc=1)
+        self.fake.answer([WK, "key", "push"], rc=1)
         self.env = {"WK_NAME": "demo", "WK_TARGET": "box"}
         self.target = SimTarget(self.fake, self.env, kind="remote", name="box")
         self.target.answers["find claude"] = Result(0, "/home/u/.local/bin/claude\r\n")
@@ -423,8 +423,8 @@ class TestTheSessionIsAnEffect(_Flow):
         self.setUpFlow()
         self.fg.stop()
         self.fake = Fake()
-        self.fake.answer([WK, "push", "status"], rc=0)
-        self.fake.answer([WK, "push"])
+        self.fake.answer([WK, "key", "push", "status"], rc=0)
+        self.fake.answer([WK, "key", "push"])
         self.fake.answer(["exec"])
         self.env = {"WK_NAME": "demo", "WK_TARGET": "box"}
         self.target = SimTarget(self.fake, self.env, kind="remote", name="box")
@@ -449,7 +449,7 @@ class TestTheSessionIsAnEffect(_Flow):
         os.environ["WK_DRY_RUN"] = "1"
         status, err = self.ai("claude", force=True)
         self.assertEqual(0, status, err)
-        self.assertIn("would run on fake: %s push off --target box" % WK, err)
+        self.assertIn("would run on fake: %s key push off --target box" % WK, err)
         self.assertRegex(err, r"would run on fake: exec demo no-tty .*exec /home/u/.local/bin/claude --permission-mode auto")
         self.assertNotIn("would run in demo", err)
         self.assertEqual(["push status --target box"], self.pushes())
@@ -462,7 +462,7 @@ class TestAGuest(_Flow):
     def setUp(self):
         self.setUpFlow()
         self.fake = Fake()
-        self.fake.answer([WK, "push"], rc=1)
+        self.fake.answer([WK, "key", "push"], rc=1)
         self.fake.answer(["test", "-x"])
         self.env = {"WK_NAME": "demo", "WK_TARGET": "vm"}
         self.target = SimTarget(self.fake, self.env, kind="vm")

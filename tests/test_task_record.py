@@ -27,7 +27,7 @@ KILLS = {
     "yocto": "wk sysimage build wpe --stage image --stop",
     "pgo":   "kill 1234 on tolken",
     "new":   "wk new ws1 --kill",
-    "agent-forward": "wk push off",
+    "agent-forward": "wk key push off",
 }
 
 

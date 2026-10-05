@@ -323,7 +323,7 @@ class TestPrOpenFromABoxKillPoints(unittest.TestCase):
             w.effects.append(("hold", resource))
             yield
             w.effects.append(("release", resource))
-        with mock.patch.object(CMD_PR_MODULE, "Store", lambda env: mock.Mock(mirror=lambda: self.MIRROR)), \
+        with mock.patch.object(CMD_PR_MODULE, "Store", lambda env: mock.Mock(mirror_dir=lambda: self.MIRROR)), \
                 mock.patch.object(CMD_PR_MODULE, "Lock", lambda *a: mock.Mock(held=held)), \
                 mock.patch.object(CMD_PR_MODULE.secrets, "Secrets", lambda *a: keys), \
                 mock.patch.object(sync, "in_vm", lambda env: False), \
@@ -360,7 +360,7 @@ class TestPrOpenFromABoxKillPoints(unittest.TestCase):
         w = self.make_world()
         with self.assertRaises(act.Refused), mock.patch.object(CMD_PR_MODULE, "die", side_effect=act.Refused(1)) as die:
             self.run_once(w, AgentKeys(keys=()))
-        self.assertIn("wk push on", die.call_args[0][0])
+        self.assertIn("wk key push on", die.call_args[0][0])
         self.assertEqual((set(), set()), self.state(w))
 
     def test_a_macos_host_pushes_through_the_agent_it_runs_for_its_guests(self):
@@ -476,7 +476,7 @@ class TestMirrorFetch(unittest.TestCase):
         return err.getvalue()
 
     def mirror_rev(self, ref):
-        return _git("rev-parse", ref, cwd=self.store.mirror()).stdout.strip()
+        return _git("rev-parse", ref, cwd=self.store.mirror_dir()).stdout.strip()
 
     def test_a_fork_branch_lands_under_pr_and_the_second_fetch_is_a_no_op(self):
         fork = self.tmp / "fork"
@@ -484,11 +484,11 @@ class TestMirrorFetch(unittest.TestCase):
         err = self.fetch(sync.fetch_into_mirror, str(fork), "refs/heads/eng-test", "refs/remotes/pr/alice/WebKit/eng-test")
         self.assertIn("creating bare mirror", err)
         self.assertEqual(self.mirror_rev("refs/remotes/pr/alice/WebKit/eng-test"), sha)
-        self.assertEqual(_git("config", "gc.auto", cwd=self.store.mirror()).stdout.strip(), "0")
-        before = _git("count-objects", "-v", cwd=self.store.mirror()).stdout
+        self.assertEqual(_git("config", "gc.auto", cwd=self.store.mirror_dir()).stdout.strip(), "0")
+        before = _git("count-objects", "-v", cwd=self.store.mirror_dir()).stdout
         self.assertNotIn("creating bare mirror",
                          self.fetch(sync.fetch_into_mirror, str(fork), "refs/heads/eng-test", "refs/remotes/pr/alice/WebKit/eng-test"))
-        self.assertEqual(_git("count-objects", "-v", cwd=self.store.mirror()).stdout, before)
+        self.assertEqual(_git("count-objects", "-v", cwd=self.store.mirror_dir()).stdout, before)
 
     def test_a_pull_request_lands_as_refs_pull_n_head(self):
         origin = self.tmp / "origin"
@@ -530,7 +530,7 @@ class TestMirrorFetchIsARecorderUnderADryRun(unittest.TestCase):
         self.assertEqual([e for e in self.here.effects if e[0] == "run"], [])
 
     def test_resolved_or_planned_answers_from_the_mirror_already_there(self):
-        mirror = self.store.mirror()
+        mirror = self.store.mirror_dir()
         self.here.dirs.add(mirror)
         sha = "c" * 40
         self.here.answer(["git", "-C", mirror, "rev-parse", "--verify", "--quiet", "refs/x^{commit}"], out=sha + "\n")
@@ -539,7 +539,7 @@ class TestMirrorFetchIsARecorderUnderADryRun(unittest.TestCase):
         self.assertEqual((got, called), (sha, []))
 
     def test_resolved_or_planned_plans_a_fetch_it_has_not_made_yet(self):
-        mirror = self.store.mirror()
+        mirror = self.store.mirror_dir()
         self.here.dirs.add(mirror)
         self.here.answer(["git", "-C", mirror, "rev-parse", "--verify", "--quiet"], rc=1)
         called = []

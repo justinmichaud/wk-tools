@@ -1,4 +1,4 @@
-"""`wk push` reaches a macOS guest: the guest holds the ssh config and public halves, its agent is on this host and
+"""`wk key push` reaches a macOS guest: the guest holds the ssh config and public halves, its agent is on this host and
 reaches it through one `ssh -N -R` per running guest, and no private key byte is ever written into it. `tart` and
 `ssh` are stubs whose guest is a scratch directory; the keys and the ssh-agent are real.
 
@@ -93,7 +93,7 @@ def _guest(tmp, name="demo", claude=()):
 
 
 def _store(tmp, keys=()):
-    """A scratch store, and beside its secrets directory the one that nothing
+    """A scratch store, and beside its keyring the one that nothing
     mounts. Real keys, because `ssh-add` will not take anything else: private
     halves where they live for good, public halves where a workspace reads
     them."""
@@ -112,7 +112,7 @@ def _store(tmp, keys=()):
 
 
 def _forward_pidfile(vmstore, name="demo"):
-    """`wk push on` starts one tunnel per guest, a daemon whose pidfile is in the vm target's own store."""
+    """`wk key push on` starts one tunnel per guest, a daemon whose pidfile is in the vm target's own store."""
     return pathlib.Path(vmstore) / "vm" / ("%s.agent-forward.pid" % name)
 
 
@@ -269,7 +269,7 @@ class TestAGuestGetsTheConfigOnStart(WkTest):
 
 
 class TestTheGuestHalfOfTheSwitch(WkTest):
-    """`wk push` end to end with one fake guest and the real ssh-agent the code under test starts."""
+    """`wk key push` end to end with one fake guest and the real ssh-agent the code under test starts."""
 
     def _push(self, action, store, home, vmstore, tart=FAKE_TART):
         log = self.tmp / "guest.log"
@@ -289,7 +289,7 @@ class TestTheGuestHalfOfTheSwitch(WkTest):
                 "WK_PUSH_PAT_FILE": str(self.tmp / "machine-pat"),
                 "WK_MACHINE": "wk-no-such-machine",
             }
-            cp = self.run_wk("push", action, env=env)
+            cp = self.run_wk("key", "push", action, env=env)
         self.log = log.read_text()
         return cp
 
@@ -586,7 +586,7 @@ class TestAHostDaemonOlderThanItsSourceIsRestarted(WkTest):
                      "guests are a macOS-host thing (tart)")
 @unittest.skipUnless(shutil.which("ssh-agent"), "needs ssh-agent")
 class TestOneOffClearsEveryAgentThisMachineRuns(WkTest):
-    """One `wk push off` empties both the containers' agent and the guests'."""
+    """One `wk key push off` empties both the containers' agent and the guests'."""
 
     def _machine_agent(self):
         sock = self.tmp / "machine-agent.sock"
@@ -611,7 +611,7 @@ class TestOneOffClearsEveryAgentThisMachineRuns(WkTest):
         self.addCleanup(_kill_pidfile, vmstore / "vm" / "ssh-agent.pid")
         self.addCleanup(_kill_forward, vmstore)
         with stub_path({"ssh": FAKE_SSH, "tart": FAKE_TART}) as binp:
-            return self.run_wk("push", action, env={
+            return self.run_wk("key", "push", action, env={
                 "PATH": f"{binp}:{os.environ['PATH']}",
                 "WK_TEST_GUEST": str(home),
                 "WK_TEST_LOG": str(log),

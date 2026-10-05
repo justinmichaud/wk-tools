@@ -250,18 +250,18 @@ class TestWhatTheMirrorCarries(WkTest):
 
 class TestTheContainersMirrorIsTheStores(unittest.TestCase):
     def test_in_the_podman_vm_it_is_the_stores_mirror(self):
-        mine = Store({"HOME": "/nonexistent", "WK_STORE": "/the/store", "WK_IN_VM": "1"}).mirror()
+        mine = Store({"HOME": "/nonexistent", "WK_STORE": "/the/store", "WK_IN_VM": "1"}).mirror_dir()
         self.assertEqual(mine, _driver("container", {"WK_IN_VM": "1"}))
 
 class TestOneMirrorPerMachine(WkTest):
-    """Store.mirror (lib/wk/store.py): a machine keeps one mirror, written where `wk sync` runs."""
+    """Store.mirror_dir (lib/wk/store.py): a machine keeps one mirror, written where `wk sync` runs."""
 
     def _ask(self, macos, in_vm=False):
         env = {"WK_STORE": "/var/lib/wk", "XDG_STATE_HOME": str(self.tmp / "state"), "HOME": str(self.tmp)}
         if in_vm:
             env["WK_IN_VM"] = "1"
         with mock.patch("wk.store.os.uname", return_value=mock.Mock(sysname="Darwin" if macos else "Linux")):
-            return Store(env).mirror()
+            return Store(env).mirror_dir()
 
     def test_a_macos_host_keeps_it_in_its_own_state_directory(self):
         self.assertEqual(self._ask(macos=True),

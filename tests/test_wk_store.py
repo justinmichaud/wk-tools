@@ -1,6 +1,6 @@
 """lib/wk/store.py: the paths a setup stage evals from `python3 -m wk.store paths`
 are Store's, under every environment they are read in: a Linux machine, a macOS
-host, the podman VM, and a test's scratch store; and its Bases say which
+host, the podman VM, and a test's scratch store; and its Snapshots say which
 snapshot a workspace may be made from, over a fake machine.
 
 Run: python3 tests/run.py -k tests.test_wk_store
@@ -16,14 +16,14 @@ from tests.support import REPO, bash
 sys.path.insert(0, str(REPO / "lib"))
 from wk import record  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
-from wk.store import Bases, Store  # noqa: E402
+from wk.store import Snapshots, Store  # noqa: E402
 
 PAIRS = (
-    ("WK_STORE", lambda s: s.root()),
-    ("secrets_dir", lambda s: s.secrets_dir()),
-    ("agent_rw_dir", lambda s: s.agent_rw_dir()),
-    ("push_held_dir", lambda s: s.push_held_dir()),
-    ("mirror_dir", lambda s: os.path.dirname(s.mirror())),
+    ("WK_STORE", lambda s: s.store_dir()),
+    ("keyring_dir", lambda s: s.keyring_dir()),
+    ("keyring_agent_rw_dir", lambda s: s.keyring_agent_rw_dir()),
+    ("keyring_push_dir", lambda s: s.keyring_push_dir()),
+    ("mirror_parent", lambda s: os.path.dirname(s.mirror_dir())),
 )
 
 
@@ -102,10 +102,10 @@ class TestTheStagesReadTheStore(unittest.TestCase):
         with open(os.path.join(s.ws_dir("a"), "base-id"), "w") as f:
             f.write("main-1\n")
         self.assertEqual(s.workspaces(), ["a"])
-        self.assertEqual(s.ws_base_id("a"), "main-1")
-        self.assertIsNone(s.ws_base_id("b"))
-        self.assertEqual(s.base_path("main-1"), os.path.join(tmp, "base", "main-1", "WebKit"))
-        self.assertEqual(s.secrets_view_dir("container"), os.path.join(s.secrets_dir(), "view", "container"))
+        self.assertEqual(s.ws_snapshot_id("a"), "main-1")
+        self.assertIsNone(s.ws_snapshot_id("b"))
+        self.assertEqual(s.snapshot_tree("main-1"), os.path.join(tmp, "base", "main-1", "WebKit"))
+        self.assertEqual(s.keyring_view_dir("container"), os.path.join(s.keyring_dir(), "view", "container"))
 
     def test_a_lock_path_is_per_resource_and_per_host(self):
         store = Store({"HOME": "/h", "WK_LOCK_DIR": "/l"})
@@ -113,13 +113,13 @@ class TestTheStagesReadTheStore(unittest.TestCase):
 
 
 class TestRecords(unittest.TestCase):
-    """Task records and artifacts live in the store, except on a macOS host whose store is the podman
-    VM's: there they are this host's own, under its state directory."""
+    """The records and the cache live in the store, except on a macOS host whose store is the podman
+    VM's: there they are this host's own, under ~/.local/state/wk."""
 
     def paths(self, env, system):
         with mock.patch("wk.store.os.uname", return_value=mock.Mock(sysname=system)):
             s = Store(dict({"HOME": "/h", "XDG_STATE_HOME": "/state"}, **env))
-            return s.record_dir(), s.artifact_dir()
+            return s.records_dir(), s.cache_dir()
 
     def test_a_named_store_holds_them(self):
         for system in ("Linux", "Darwin"):
@@ -134,7 +134,7 @@ class TestRecords(unittest.TestCase):
 
 
 
-class TestBases(unittest.TestCase):
+class TestSnapshots(unittest.TestCase):
     """A snapshot is handed out only when it finished publishing, is untouched since, and is on the branch it
     records; `wk gc` keeps the newest finished one whatever it records."""
 
@@ -143,7 +143,7 @@ class TestBases(unittest.TestCase):
     def setUp(self):
         self.m = Fake()
         self.store = Store({"WK_STORE": "/s", "HOME": "/h"})
-        self.bases = Bases(self.store, self.m)
+        self.bases = Snapshots(self.store, self.m)
         self.heads, self.ups = {}, {}
         self.m.react(["git", "-C"], self._git)
 
@@ -187,7 +187,7 @@ class TestBases(unittest.TestCase):
         self.publish("20260303", sha=None)
         self.assertEqual(self.bases.current(), "20260101")
         self.assertEqual(self.bases.newest_complete(), "20260202")
-        self.assertEqual(Bases(Store({"WK_STORE": "/none"}), self.m).current(), "")
+        self.assertEqual(Snapshots(Store({"WK_STORE": "/none"}), self.m).current(), "")
 
     def test_a_pin_is_the_record_and_its_absence_is_unpinned(self):
         self.m.dirs.update({"/s/ws", "/s/ws/a", "/s/ws/b"})
@@ -198,20 +198,20 @@ class TestBases(unittest.TestCase):
 
 class TestStoreOverrides(unittest.TestCase):
     def test_the_broker_socket_is_named_or_where_each_side_finds_it(self):
-        self.assertEqual(Store({"WK_BROKER_SOCKET": "/s"}).broker_socket(), "/s")
-        self.assertEqual(Store({"WK_BROKER_SOCKET": "/s"}).workspace_broker_socket(), "/s")
-        self.assertEqual(Store({"XDG_RUNTIME_DIR": "/run/u"}).broker_socket(), "/run/u/wk/broker.sock")
+        self.assertEqual(Store({"WK_BROKER_SOCKET": "/s"}).runtime_socket(), "/s")
+        self.assertEqual(Store({"WK_BROKER_SOCKET": "/s"}).workspace_runtime_socket(), "/s")
+        self.assertEqual(Store({"XDG_RUNTIME_DIR": "/run/u"}).runtime_socket(), "/run/u/wk/broker.sock")
         for mac, sock in ((False, "/run/wk/broker.sock"), (True, "/h/.wk-broker.sock")):
             with mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=mac):
-                self.assertEqual(Store({"HOME": "/h"}).workspace_broker_socket(), sock, "a macOS workspace is a guest, with no /run")
+                self.assertEqual(Store({"HOME": "/h"}).workspace_runtime_socket(), sock, "a macOS workspace is a guest, with no /run")
 
     def test_a_disk_admission_measures_the_named_store_else_home(self):
         self.assertEqual(Store({"WK_STORE": "/st", "HOME": "/h"}).admission_dir(), "/st")
         self.assertEqual(Store({"HOME": "/h"}).admission_dir(), "/h")
 
     def test_the_container_mirror_is_only_what_the_env_names(self):
-        self.assertIsNone(Store({}).container_mirror())
-        self.assertEqual(Store({"WK_MIRROR": "/m"}).container_mirror(), "/m")
+        self.assertIsNone(Store({}).container_mirror_dir())
+        self.assertEqual(Store({"WK_MIRROR": "/m"}).container_mirror_dir(), "/m")
 
 
 if __name__ == "__main__":

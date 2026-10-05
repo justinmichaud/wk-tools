@@ -225,7 +225,7 @@ if [ -f "$(wk_priv_path wk-quiesce-priv)" ]; then
         if sudo install -o root -m 0644 "$_sesscand" "$_sessenv" 2>/dev/null; then
             changed "recorded the session user in $_sessenv"
         else
-            warn "could not write $_sessenv; 'wk session' will refuse to start"
+            warn "could not write $_sessenv; 'wk quiesce session' will refuse to start"
         fi
         rm -f "$_sesscand"
     fi
@@ -242,7 +242,7 @@ for _u in getty@tty2.service autovt@tty2.service; do
         unchanged "$_u already masked"
     else
         sudo systemctl mask --now "$_u"
-        changed "masked $_u -- tty2 is wk session's VT, not a login prompt's"
+        changed "masked $_u -- tty2 is wk quiesce session's VT, not a login prompt's"
     fi
 done
 fi

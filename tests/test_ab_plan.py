@@ -111,7 +111,7 @@ class World:
             (self.tmp / "machines" / (name + ".conf")).write_text("kind=board\nssh=%s-rescue\n" % name)
         self.fake, self.clock = Far("here"), FakeClock()
         self.reg = Reg(self.env, self.fake, ws_target=lambda ws: "container", in_workspace=lambda: False)
-        self.mirror = self.reg.store.mirror()
+        self.mirror = self.reg.store.mirror_dir()
         self.fake.dirs.add(self.mirror)
         self.ahead, self.benched = ahead, []
         self.refs = {"refs/remotes/pr/origin/990": HEAD, "refs/remotes/pr/wpe/990": HEAD, "refs/remotes/pr/alice/WebKit/feature-x": HEAD, HEAD: HEAD, BASE: BASE}
@@ -131,7 +131,7 @@ class World:
         f.react([WK, "sysimage", "holds"], self.holds)
         for name in images.names(self.env):
             if images.image_ws(name, self.env):
-                os.makedirs(os.path.join(self.reg.store.record_dir(), "ws", images.image_ws(name, self.env)))
+                os.makedirs(os.path.join(self.reg.store.records_dir(), "ws", images.image_ws(name, self.env)))
 
     def peer(self):
         """peer1, a workstation with its own wk: what it holds is in its own store, which only its wk knows."""
@@ -145,7 +145,7 @@ class World:
 
     def home(self):
         """Where the A/B keeps its task: the first device's image workspace."""
-        return os.path.join(self.reg.store.record_dir(), "ws", "buildroot-" + R38, "bench")
+        return os.path.join(self.reg.store.records_dir(), "ws", "buildroot-" + R38, "bench")
 
     def rev(self, argv, fk):
         ref = argv[-1][:-len("^{commit}")]
@@ -175,7 +175,7 @@ class World:
             self.benched.append((words[3], words[4], o))
         elif words[1:3] != ["bench", "report"]:
             if words[1:3] == ["sysimage", "build"]:   # the image step makes its workspace
-                os.makedirs(os.path.join(self.reg.store.record_dir(), "ws", words[words.index("--workspace") + 1]), exist_ok=True)
+                os.makedirs(os.path.join(self.reg.store.records_dir(), "ws", words[words.index("--workspace") + 1]), exist_ok=True)
             fk._set_file("/state/" + self.key(words[1:]), "1")
         return Result(0)
 
@@ -444,7 +444,7 @@ class TestARun(ABTest):
         return err
 
     def task(self, w):
-        (t,) = progress.Records(w.reg.store.record_dir(), env=w.env, machine=w.fake).list()
+        (t,) = progress.Records(w.reg.store.records_dir(), env=w.env, machine=w.fake).list()
         return t
 
     def test_every_step_runs_and_the_record_names_the_kill_and_the_subject(self):
@@ -662,7 +662,7 @@ class TestTheArmsMayDifferByOneCommit(ABTest):
 class TestTheKill(ABTest):
 
     def record(self, w, pid):
-        recs = progress.Records(w.reg.store.record_dir(), clock=w.clock, env=w.env, machine=w.fake)
+        recs = progress.Records(w.reg.store.records_dir(), clock=w.clock, env=w.env, machine=w.fake)
         return recs.begin("ab", "here", "t1", "wk bench ab t1 --kill", "/x/ab.log", ["wk sysimage build"], pid=pid)
 
     def kill(self, w, task="t1"):

@@ -328,7 +328,7 @@ def unexported(machine, bench, default_dir):
 
 
 def driver_logs(store, task):
-    return os.path.join(store.record_dir(), "log", task)
+    return os.path.join(store.records_dir(), "log", task)
 
 
 def ws_home(reg, ws, target=""):
@@ -366,7 +366,7 @@ def task_roots(machine, root):
 
 def outside(store):
     """Where tasks lived before each moved into its workspace: no command reads it, and `wk gc` names each one's move."""
-    return os.path.join(store.record_dir(), "bench")
+    return os.path.join(store.records_dir(), "bench")
 
 
 def workspace_of(taskdir, machine):
@@ -383,7 +383,7 @@ def homes_at(machine, root):
 
 
 def homes(store):
-    return homes_at(Local(), store.record_dir())
+    return homes_at(Local(), store.records_dir())
 
 
 def leg_home(reg, ws, task=""):

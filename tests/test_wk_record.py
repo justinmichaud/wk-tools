@@ -357,12 +357,12 @@ class TestOneStorePerTarget(unittest.TestCase):
         for label, env in self.envs():
             with self.subTest(env=label):
                 store = Store(env)
-                vm = store.vm_store()
-                if vm is None:
+                if not store.vm_store_apart():
                     continue
-                self.assertNotEqual(os.path.realpath(vm), os.path.realpath(store.root()))
-                vm_records = Store(dict(env, WK_STORE=vm)).record_dir()
-                self.assertNotEqual(os.path.realpath(vm_records), os.path.realpath(store.root()))
+                vm = store.vm_store_dir()
+                self.assertNotEqual(os.path.realpath(vm), os.path.realpath(store.store_dir()))
+                vm_records = Store(dict(env, WK_STORE=vm)).records_dir()
+                self.assertNotEqual(os.path.realpath(vm_records), os.path.realpath(store.store_dir()))
 
     @unittest.skipUnless(sys.platform == "darwin", "a guest exists only on a macOS host")
     def test_a_macos_host_gives_the_vm_its_own_store_or_none(self):
@@ -373,13 +373,14 @@ class TestOneStorePerTarget(unittest.TestCase):
                 "in the podman VM": None}
         for label, env in self.envs():
             with self.subTest(env=label):
-                self.assertEqual(Store(env).vm_store(), want[label])
+                s = Store(env)
+                self.assertEqual(s.vm_store_dir() if s.vm_store_apart() else None, want[label])
 
     @unittest.skipIf(sys.platform == "darwin", "a guest exists only on a macOS host")
     def test_off_macos_there_is_no_vm_store(self):
         for label, env in self.envs():
             with self.subTest(env=label):
-                self.assertIsNone(Store(env).vm_store())
+                self.assertFalse(Store(env).vm_store_apart())
 
 
 class TestTheMachineName(unittest.TestCase):

@@ -123,8 +123,8 @@ class TestTheVerbIsTheDispatchers(unittest.TestCase):
     def test_the_verb_is_handed_over_first(self):
         def first(cmd, *args):
             return dispatch.Invocation(cmd, D.Decl(REPO / "cmd" / cmd), list(args)).verb_first()
-        self.assertEqual(first("push", "on", "--target", "box"), ["on", "--target", "box"])
-        self.assertEqual(first("push", "--target", "box"), ["status", "--target", "box"])
+        self.assertEqual(first("key", "push", "on", "--target", "box"), ["push", "on", "--target", "box"])
+        self.assertEqual(first("key", "--rotate"), ["check", "--rotate"])
         self.assertEqual(first("pr", "ws", "rebase"), ["checkout", "ws", "rebase"])
         self.assertEqual(first("pr", "rebase", "ws"), ["rebase", "ws"])
         self.assertEqual(first("quiesce"), ["status"])
@@ -132,7 +132,7 @@ class TestTheVerbIsTheDispatchers(unittest.TestCase):
         self.assertEqual(first("sysimage", "configs"), ["configs"])
 
     def test_an_option_before_the_verb_is_refused(self):
-        for argv in (("push", "--target", "box", "on"), ("key", "--rotate", "setup"), ("pr", "--draft", "open")):
+        for argv in (("key", "--target", "box", "push"), ("key", "--rotate", "setup"), ("pr", "--draft", "open")):
             with self.subTest(argv=argv):
                 cp = run(*argv)
                 self.assertEqual(cp.returncode, 2, cp.stdout)
@@ -144,22 +144,12 @@ class TestTheVerbIsTheDispatchers(unittest.TestCase):
         self.assertIn("unknown option: --rotate", cp.stdout)
 
     def test_a_mistyped_verb_is_named_where_the_default_takes_no_argument(self):
-        for argv in (("push", "onn"), ("key", "chek"), ("quiesce", "of")):
+        for argv in (("key", "chek"), ("quiesce", "of")):
             with self.subTest(argv=argv):
                 cp = run(*argv)
                 self.assertEqual(cp.returncode, 2, cp.stdout)
                 self.assertIn("unknown verb: %s (one of" % argv[1], cp.stdout)
 
-    def test_every_retired_flag_or_verb_names_its_replacement(self):
-        checked = 0
-        for d in D.all_commands(REPO):
-            for word, instead in d.gone.items():
-                with self.subTest(cmd=d.name, word=word):
-                    cp = run(d.name, word)
-                    self.assertEqual(cp.returncode, 1, cp.stdout)
-                    self.assertIn("'wk %s %s' is gone: wk %s %s" % (d.name, word, d.name, instead), cp.stdout)
-                checked += 1
-        self.assertGreater(checked, 3)
 
     def test_the_far_machine_is_handed_argv_as_typed(self):
         inv = dispatch.Invocation("pr", D.Decl(REPO / "cmd" / "pr"), ["ws", "1234"])

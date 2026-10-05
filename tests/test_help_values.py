@@ -23,7 +23,6 @@ def help_text(cmd):
 DECLARED_VALUES = {
     "boot": "--list",
     "sysimage": "configs",
-    "profile": "--list",
 }
 
 
@@ -74,7 +73,7 @@ class TestBenchListPlans(unittest.TestCase):
             subprocess.run(["git", "-C", str(src), "commit", "-q", "-m", "plans"], check=True)
 
             env = {"WK_STORE": store["WK_STORE"], "WK_IN_VM": "1"}
-            mirror = Path(Store(env).mirror())
+            mirror = Path(Store(env).mirror_dir())
             mirror.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(["git", "clone", "-q", "--bare", str(src), str(mirror)], check=True)
 

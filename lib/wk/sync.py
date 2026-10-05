@@ -9,9 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 from wk import act, git, kv, pr, secrets
 from wk.act import Refused, debug, die, info, log, warn
-from wk.store import Bases, Store, in_vm
+from wk.store import Snapshots, Store, in_vm
 
-SCOPE_FLAGS = ("--all", "--tools", "--target", "--machine", "--mirror")
+SCOPE_FLAGS = ("--all", "--tools", "--target", "--mirror")
 FETCH_JOBS = 16
 FIX_AGAIN = "'wk sync <ws> --fix' re-asserts the wiring"
 
@@ -53,7 +53,7 @@ def fetch_into_mirror(here, store, lock, src, srcspec, dest):
     """The one entry point that fetches a named ref from `src` into this machine's mirror (`wk bench ab`'s PR and branch heads), made on first use, under the store lock."""
     if in_vm(store.env):
         die("the mirror in here is the host's, mounted read-only; run this on the host")
-    mirror = store.mirror()
+    mirror = store.mirror_dir()
     here.mkdir(os.path.dirname(mirror))
     with lock.held("store"):
         if not here.isdir(mirror):
@@ -113,7 +113,7 @@ class Sync:
     # The mirror is mounted read-only in a workspace and in the podman VM, so the refresh is asked of the broker, which runs `wk sync --mirror`.
     def mirror_refresh_request(self):
         store = Store(self.env)
-        sock = store.workspace_broker_socket() if self.reg.in_workspace() else store.broker_socket()
+        sock = store.workspace_runtime_socket() if self.reg.in_workspace() else store.runtime_socket()
         if not self.here.run(["test", "-S", sock]).ok:
             warn("no request broker at %s, so this machine's mirror was not\n"
                  "    refreshed -- only this workspace's own fetch ran, against whatever the\n"
@@ -237,7 +237,7 @@ class Sync:
         return self.remount_guests() if moved else 0
 
     def sync_mirror(self):
-        mirror = self.reg.store.mirror()
+        mirror = self.reg.store.mirror_dir()
         refs = self.mirror_refs(mirror)
         self.here.mkdir(os.path.dirname(mirror))
         if self.here.isdir(mirror):
@@ -312,19 +312,19 @@ class Sync:
     def sync_snapshot(self, target):
         target.store_init()
         store, here = target.store, self.here
-        mirror = store.mirror()
+        mirror = store.mirror_dir()
         if not here.isdir(mirror):
             die("no mirror at %s to publish a snapshot from -- 'wk sync' on the host makes it" % mirror)
         main_sha = self.git(mirror, "rev-parse", "refs/heads/main").out.strip()
         branch = publish_branch(self.env)
         new_id = self.clock.stamp()
-        new_dir = os.path.join(store.base_dir(), new_id)
+        new_dir = os.path.join(store.snapshots_dir(), new_id)
         new_tree = os.path.join(new_dir, "WebKit")
-        bases = Bases(store, here)
+        bases = Snapshots(store, here)
         prev = bases.newest_complete()
         if branch == "origin/main" and prev and not bases.verify(prev):
             try:
-                recorded = here.read(store.base_sha_file(prev)).strip()
+                recorded = here.read(store.snapshot_sha_file(prev)).strip()
             except OSError:
                 recorded = ""
             if snapshot_current(recorded, main_sha):
@@ -340,7 +340,7 @@ class Sync:
         if prev:
             info("snapshotting %s -> %s" % (prev, new_id))
             with stage(self.clock, "snapshot publish (cp -al)"):
-                r = here.act_run(["cp", "-al", store.base_path(prev), new_tree])
+                r = here.act_run(["cp", "-al", store.snapshot_tree(prev), new_tree])
         else:
             info("no previous snapshot; checking out %s (this takes a few minutes)" % branch)
             with stage(self.clock, "snapshot publish (clone)"):
@@ -366,28 +366,28 @@ class Sync:
             fail("snapshot %s has no HEAD to record" % new_id)
         # `sha` is the completion marker, written last; `branch` goes first, so a complete snapshot has everything beside it.
         here.write(os.path.join(new_dir, "branch"), branch + "\n")
-        here.write(store.base_sha_file(new_id), sha + "\n")
+        here.write(store.snapshot_sha_file(new_id), sha + "\n")
         info("published base %s (%s)" % (new_id, sha[:10]))
 
     def base_wiring(self, target):
         """The current snapshot is where every future workspace gets its remotes from."""
-        base = Bases(target.store, self.here).current()
-        tree = target.store.base_path(base) if base else ""
+        base = Snapshots(target.store, self.here).current()
+        tree = target.store.snapshot_tree(base) if base else ""
         if not tree or not self.here.isdir(os.path.join(tree, ".git")):
             return 0
-        mirror = target.store.mirror()
+        mirror = target.store.mirror_dir()
         r = self.here.run(["sh", "-c", git.wiring_check_script(tree, mirror, self.forks(), self.branches, "skip-env")])
         if r.ok:
             return 0
-        warn("the base snapshot %s is wired wrong, and every new workspace starts from it:\n%s"
+        warn("the snapshot %s is wired wrong, and every new workspace starts from it:\n%s"
              % (base, "".join("    - %s\n" % l[len("problem: "):] for l in r.out.splitlines() if l.startswith("problem: ")).rstrip("\n")))
         if not self.fix:
             log("  re-assert it:  wk sync --target %s --fix" % target.name)
             return 1
         if not self.here.act_run(["sh", "-c", git.wiring_script(tree, mirror, self.forks(), self.branches)]).ok:
-            warn("could not re-wire the base snapshot %s" % base)
+            warn("could not re-wire the snapshot %s" % base)
             return 1
-        info("re-wired the base snapshot %s" % base)
+        info("re-wired the snapshot %s" % base)
         return 0
 
     # -- the workspaces
@@ -456,7 +456,7 @@ class Sync:
         said = (r.out.replace("\r", "").strip().splitlines() or [""])[-1]
         if not r.ok:
             notes.extend("    " + l for l in r.err.replace("\r", "").splitlines() if l.strip())
-            notes.append("    'git-webkit setup' did not finish (%s); 'wk push on' if the read token\n"
+            notes.append("    'git-webkit setup' did not finish (%s); 'wk key push on' if the read token\n"
                          "    is off, then 'wk sync %s --fix' again" % (said or "no answer", ws))
             return False
         notes.append("    git-webkit: %s" % said)

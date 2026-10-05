@@ -408,7 +408,7 @@ class TestDetach(TaskTest):
         self.assertEqual(list(sp[1]), [str(REPO / "wk"), "sysimage", "build", PROFILE])
         self.assertEqual(sp[2], os.path.join(w.ws_dir, "detached-image.log"))
         self.assertIn("running detached in '%s' as pid 1001 -- this end can go away" % WS, err)
-        self.assertIn("  follow:  wk logs %s -f" % WS, err)
+        self.assertIn("  follow:  wk status %s --log -f" % WS, err)
         self.assertFalse([e for e in w.effects if e[0] == "watch"])
 
     def test_a_child_that_ends_before_its_record_is_named(self):

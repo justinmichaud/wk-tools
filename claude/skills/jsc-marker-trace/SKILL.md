@@ -7,7 +7,7 @@ allowed-tools:
   - Bash(~/.claude/skills/jsc-marker-trace/split-trace.py:*)
   - Bash(samply:*)
   - Bash(samply:*)
-  - Bash(wk profile:*)
+  - Bash(wk run:*)
   - Bash(make release:*)
   - Bash(Tools/Scripts/build-webkit:*)
   - Bash(git rev-parse:*)
@@ -32,8 +32,8 @@ allowed-tools:
 
 # Per-section samply traces for JavaScriptCore
 
-> **The JSC options this needs have a flag inside a workspace**: `wk profile
-> --mode samply --markers --jit-dump` sets `JSC_useTextMarkers=1`,
+> **The JSC options this needs have a flag inside a workspace**: `wk run
+> --profile=samply --markers --jit-dump` sets `JSC_useTextMarkers=1`,
 > `JSC_textMarkersDirectory`, `JSC_useJITDump=1` and `JSC_jitDumpDirectory`,
 > pointed at a directory of that run's own, and `--dry-run` prints the exact
 > command first. The marker directory *must* be a real path (an empty default
@@ -144,15 +144,15 @@ that directory.
      so the per-function summaries the analysis relies on stay trustworthy. A ready-made diagnostic
      is `phantom-check.py` in this dir: `phantom-check.py trace-gc-sweeping.json.gz` reports the
      seam and the adjacent-same-func share.
-2. **samply** on PATH — inside a workspace `wk profile --mode samply` composes the
+2. **samply** on PATH — inside a workspace `wk run --profile=samply` composes the
    run and refuses by name if it is missing. On macOS run `samply setup`
    once (codesign). On Linux set `sudo sysctl kernel.perf_event_paranoid=1` (samply refuses
    to start at the default `2` with "Permission denied ... currently set to 2").
    **Inside a container (the wkdev docker box), this sysctl is non-namespaced and cannot be
    written from within** -- even `sudo` returns `permission denied on key`, and a `!`-prefixed
    command runs in-container and fails the same way. It must be set on the **host**; ask the
-   user to run `echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid` there. `wk profile
-   --mode samply` reads the value first and refuses with that line rather than failing inside the
+   user to run `echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid` there. `wk run
+   --profile=samply` reads the value first and refuses with that line rather than failing inside the
    run; on a bench system it is already `-1`, set when the system was built.
 3. The workload served somewhere (e.g. the user's app at `http://localhost:8080`). Use
    the user's real server; do not roll your own unless asked.

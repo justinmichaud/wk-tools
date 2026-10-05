@@ -104,7 +104,7 @@ class SyncTarget(targets.Target):
         return ("mirror", "/far/mirror", "/far/ssh/config") if self.kind == "remote" else ("", "", "")
 
     def store_init(self):
-        self.machine.mkdir(os.path.join(self.store.root(), "ws"))
+        self.machine.mkdir(os.path.join(self.store.store_dir(), "ws"))
 
     def sync(self, named=False):
         self.machine.steps.append("FURNITURE %s%s" % (self.name, " named" if named else ""))
@@ -140,7 +140,7 @@ class World(Fake):
         self.refs, self.upstream = "", MAIN_SHA + " refs/heads/main\n"
         self.reg = self.registry(kinds or {"container": "container"})
         self.store = self.reg.store
-        self.mirror = self.store.mirror()
+        self.mirror = self.store.mirror_dir()
         self.react(["sh", "-c"], self._sh)
         self.react(["exec"], self._exec)
         self.react(["git"], self._git)
@@ -165,17 +165,17 @@ class World(Fake):
     def sync(self, scope="here", only="", target="", fix=False):
         return sync.Sync(self.reg, self.clock, self.lock(), scope, only, target, fix)
 
-    def base_dir(self):
-        return self.store.base_dir()
+    def snapshots_dir(self):
+        return self.store.snapshots_dir()
 
     def publish(self, bid, sha=MAIN_SHA):
-        d = os.path.join(self.base_dir(), bid)
-        self.dirs.update({self.base_dir(), d, os.path.join(d, "WebKit"), os.path.join(d, "WebKit", ".git")})
+        d = os.path.join(self.snapshots_dir(), bid)
+        self.dirs.update({self.snapshots_dir(), d, os.path.join(d, "WebKit"), os.path.join(d, "WebKit", ".git")})
         self.files[os.path.join(d, "branch")] = "origin/main\n"
         self.files[os.path.join(d, "sha")] = sha + "\n"
 
     def complete(self):
-        base = self.base_dir()
+        base = self.snapshots_dir()
         ids = sorted({p[len(base) + 1:].split("/")[0] for p in self.files if p.startswith(base + "/")}, reverse=True)
         return [i for i in ids if self.files.get(os.path.join(base, i, "sha"), "").strip()]
 
@@ -208,8 +208,8 @@ class World(Fake):
         tree, args = argv[2], argv[3:]
         if tree == f.mirror and args[:1] == ["for-each-ref"]:
             return Result(0, f.refs)
-        if tree.startswith(f.base_dir() + "/") and args[:2] == ["symbolic-ref", "--quiet"]:
-            return Result(0, "refs/heads/main\n") if tree[len(f.base_dir()) + 1:].split("/")[0] in f.verified else Result(1)
+        if tree.startswith(f.snapshots_dir() + "/") and args[:2] == ["symbolic-ref", "--quiet"]:
+            return Result(0, "refs/heads/main\n") if tree[len(f.snapshots_dir()) + 1:].split("/")[0] in f.verified else Result(1)
         if args[:3] == ["rev-parse", "--abbrev-ref", "--symbolic-full-name"]:
             return Result(0, "origin/main\n")
         if args[:2] == ["rev-parse", "refs/heads/main"]:
@@ -335,11 +335,6 @@ class TestParse(SyncTest):
         self.assertIn("one target at a time (got 'moose' and 'buildbox4')",
                       self.refused(lambda: self.parse("--target", "moose", "--target", "buildbox4")))
 
-    def test_machine_is_a_tombstone_naming_both_replacements(self):
-        err = self.refused(lambda: self.parse("--machine"))
-        self.assertIn("'wk sync --machine' is gone", err)
-        self.assertIn("wk sync --all", err)
-        self.assertIn("wk sync --tools", err)
 
     def test_an_invalid_name_is_refused(self):
         self.assertIn("invalid name", self.refused(lambda: self.parse("bad/name")))
@@ -358,7 +353,7 @@ class TestWhere(unittest.TestCase):
 
     def test_every_scope_flag_is_this_host(self):
         for args in (("--all",), ("--tools",), ("--target", "moose"), ("--tools", "buildbox4"), ("--target=moose",),
-                     ("--tools=buildbox4",), ("--machine",), ("--mirror",), ("--tools", "--all"), ("--fix", "--all")):
+                     ("--tools=buildbox4",), ("--mirror",), ("--tools", "--all"), ("--fix", "--all")):
             with self.subTest(args=args):
                 self.assertEqual(sync.where(False, list(args)), "host")
 
@@ -790,7 +785,7 @@ class TestTheSnapshot(SyncTest):
     def test_the_first_snapshot_is_a_shared_clone_on_its_branch_with_the_sha_last(self):
         self.w.dirs.add(self.w.mirror)
         err = self.publish()
-        new = os.path.join(self.w.base_dir(), self.w.clock.stamp())
+        new = os.path.join(self.w.snapshots_dir(), self.w.clock.stamp())
         tree, m = new + "/WebKit", self.w.mirror
         self.assertEqual(self.acts(), [
             ("git", "clone", "--quiet", "--shared", m, tree),
@@ -817,8 +812,8 @@ class TestTheSnapshot(SyncTest):
         self.w.dirs.add(self.w.mirror)
         self.w.publish("20200101T000000Z")
         self.publish()
-        self.assertEqual(self.acts()[0], ("cp", "-al", self.w.store.base_path("20200101T000000Z"),
-                                          os.path.join(self.w.base_dir(), self.w.clock.stamp(), "WebKit")))
+        self.assertEqual(self.acts()[0], ("cp", "-al", self.w.store.snapshot_tree("20200101T000000Z"),
+                                          os.path.join(self.w.snapshots_dir(), self.w.clock.stamp(), "WebKit")))
         self.assertEqual(self.w.complete()[0], self.w.clock.stamp())
 
     def test_another_branch_is_published_even_when_main_is_current(self):
@@ -828,7 +823,7 @@ class TestTheSnapshot(SyncTest):
         self.w.reg.env["WK_BRANCH"] = "origin/wpe-2.46"
         err = self.publish()
         self.assertIn("tracking origin/wpe-2.46", err)
-        self.assertEqual(self.w.files[os.path.join(self.w.base_dir(), self.w.clock.stamp(), "branch")], "origin/wpe-2.46\n")
+        self.assertEqual(self.w.files[os.path.join(self.w.snapshots_dir(), self.w.clock.stamp(), "branch")], "origin/wpe-2.46\n")
 
     def test_a_branch_that_is_not_remote_tracking_is_refused_and_the_half_publish_removed(self):
         self.w.dirs.add(self.w.mirror)
@@ -836,13 +831,13 @@ class TestTheSnapshot(SyncTest):
         err = self.refused(self.publish_raw)
         self.assertIn("<remote>/<branch>", err)
         self.assertIn("origin/main", err)
-        self.assertNotIn(os.path.join(self.w.base_dir(), self.w.clock.stamp()), self.w.dirs)
+        self.assertNotIn(os.path.join(self.w.snapshots_dir(), self.w.clock.stamp()), self.w.dirs)
 
     def test_a_failed_clone_is_refused_and_removed(self):
         self.w.dirs.add(self.w.mirror)
         self.w.react(["git", "clone"], lambda a, f: Result(128, "", "fatal: no space"))
         self.assertIn("fatal: no space", self.refused(self.publish_raw))
-        self.assertNotIn(os.path.join(self.w.base_dir(), self.w.clock.stamp()), self.w.dirs)
+        self.assertNotIn(os.path.join(self.w.snapshots_dir(), self.w.clock.stamp()), self.w.dirs)
 
     def test_a_publish_killed_after_any_effect_and_rerun_converges(self):
         def world():
@@ -897,7 +892,7 @@ class TestTheBaseWiring(SyncTest):
         self.w.base_check = Result(1, "problem: origin is /x\n")
         rc, err = self.wiring()
         self.assertEqual(rc, 1)
-        self.assertIn("the base snapshot 20200101T000000Z is wired wrong", err)
+        self.assertIn("the snapshot 20200101T000000Z is wired wrong", err)
         self.assertIn("    - origin is /x", err)
         self.assertIn("wk sync --target container --fix", err)
 
@@ -905,8 +900,8 @@ class TestTheBaseWiring(SyncTest):
         self.w.base_check = Result(1, "problem: origin is /x\n")
         rc, err = self.wiring(fix=True)
         self.assertEqual(rc, 0)
-        self.assertIn("re-wired the base snapshot", err)
-        self.assertIn(("sh", "-c", "WIRING %s %s   " % (self.w.store.base_path(self.current), self.w.mirror)),
+        self.assertIn("re-wired the snapshot", err)
+        self.assertIn(("sh", "-c", "WIRING %s %s   " % (self.w.store.snapshot_tree(self.current), self.w.mirror)),
                       [e[1] for e in self.w.effects if e[0] == "run"])
         self.w.wire_result = Result(1)
         self.assertEqual(self.wiring(fix=True)[0], 1)
@@ -1042,7 +1037,7 @@ class TestTheFetch(SyncTest):
         self.assertIn("-- wired wrong:", err)
         self.assertIn("    HTTP 401", err)
         self.assertIn("'git-webkit setup' did not finish (setup=failed)", err)
-        self.assertIn("wk push on", err)
+        self.assertIn("wk key push on", err)
         self.assertIn("wk sync one --fix", err)
 
     def test_a_wiring_that_did_not_take_is_named_and_the_fetch_still_runs(self):
@@ -1095,15 +1090,16 @@ class TestRemoteFurniture(SyncTest):
             env["WK_REMOTE_PEER"] = "1"
         return targets.Remote("apeer" if peer else "box", str(REPO), env, self.w)
 
-    def answer_versions(self, theirs, mine="sha=abc\ndirty=no\n"):
-        self.w.answer(["env", "WK_ROOT=%s" % REPO], out=mine)
+    def answer_versions(self, theirs):
+        self.w.answer(["git", "-C", str(REPO), "rev-parse", "HEAD"], out="abc\n")
+        self.w.answer(["git", "-C", str(REPO), "status"], out="")
         self.w.react(["sh", "-c"], lambda a, f: self._far(a, theirs))
 
     def _far(self, argv, theirs):
         text = argv[2]
         if "git pull --ff-only" in text:
             return Result(0, "Already up to date.\n")
-        if text.endswith("/cmd/version'") or text.endswith("/cmd/version"):
+        if text.endswith(" doctor --probe-tools"):
             return Result(0, theirs)
         if "sync --tools" in text:
             self.w.steps.append("ASKED: %s" % text)
@@ -1121,7 +1117,7 @@ class TestRemoteFurniture(SyncTest):
         self.w.answer(["git", "-C", str(REPO), "status"], out=" M wk\n")
         ok, err = self.stderr(lambda: self.remote(peer=True).sync(named=True))
         self.assertFalse(ok)
-        self.assertIn("pulled, still DIFFERS (0000stale000, this machine has abc)", err)
+        self.assertIn("pulled, still DIFFERS (0000stale000, this machine has abc+dirty)", err)
         self.assertIn("uncommitted changes -- a peer pulls from origin/main", err)
         self.assertEqual(self.w.steps, [])
 

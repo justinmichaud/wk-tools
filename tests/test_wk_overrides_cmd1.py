@@ -34,14 +34,11 @@ class TestBenchRunKnobs(BenchTest):
 
 
 class TestBuildDryRunKnobs(WkTest):
-    def test_the_tombstoned_jobs_cap_warns_and_the_memory_interval_is_read(self):
+    def test_the_memory_interval_is_read(self):
         with fake_workspace() as ws:
-            cp = ws.run("build", "jsc-release", "--dry-run", env={"WK_REMOTE_MAX_JOBS": "8", "WK_MEM_INTERVAL": "7"})
-            plain = ws.run("build", "jsc-release", "--dry-run")
-        self.assertEqual((cp.returncode, plain.returncode), (0, 0), cp.stdout + plain.stdout)
-        self.assertIn("WK_REMOTE_MAX_JOBS is set", cp.stdout)
+            cp = ws.run("build", "jsc-release", "--dry-run", env={"WK_MEM_INTERVAL": "7"})
+        self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("watched every 7s", cp.stdout)
-        self.assertNotIn("WK_REMOTE_MAX_JOBS", plain.stdout)
 
 
 if __name__ == "__main__":

@@ -67,7 +67,7 @@ class TestTheDefaultRoot(unittest.TestCase):
         reg.fleet.load = lambda name: {}
         self.assertEqual(reg.far_root(), targets.default_root("/h"))
         local = targets.Remote("box", REPO, dict(env, WK_REMOTE_LOCAL="1"), Fake())
-        self.assertEqual(local.store.root(), targets.default_root("/h"))
+        self.assertEqual(local.store.store_dir(), targets.default_root("/h"))
 
 
 class TestRemoteProbeParseDarwin(unittest.TestCase):

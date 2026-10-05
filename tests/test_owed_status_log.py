@@ -1,10 +1,10 @@
-"""What `wk logs` says about a build: `(none)` on a good one, and the"""
+"""What `wk status <ws> --log` says about a build: `(none)` on a good one, and the"""
 import json
 import unittest
 
 from tests.support import REPO, WkTest, bash, fake_workspace
 
-CMD_LOGS = REPO / "cmd" / "logs"
+CMD_STATUS = REPO / "cmd" / "status"
 
 GOOD_BROWSER = {
     "accelerator": "IOAccelerator", "dpr": 2, "focused": True, "raf_hz": 59.7,
@@ -26,7 +26,7 @@ GOOD_PROFILE = {
 class TestLogsShowsNoneOnAGoodBuild(WkTest):
     def _run(self, name, store):
         env = {"WK_NAME": name, "WK_TARGET": "vm", "WK_VM_STORE": str(store)}
-        return bash(f'exec "{CMD_LOGS}"', env=env)
+        return bash(f'exec "{CMD_STATUS}" --log', env=env)
 
     def test_a_message_containing_the_word_error_mid_sentence_is_not_reported(self):
         name = "goodws"
@@ -72,7 +72,7 @@ class TestTheReadingsTravelWithTheBuild(WkTest):
                 (products / "wk-profile-check.json").write_text(json.dumps(profile))
             if pins is not None:
                 (products / "wk-payload-pins").write_text(pins)
-            cp = bash(f'exec "{CMD_LOGS}" --gates',
+            cp = bash(f'exec "{CMD_STATUS}" --log --gates',
                       env=ws.env({"WK_NAME": "selftest-ws", "WK_TARGET": "local"}))
             return cp, cp.stdout + cp.stderr
 

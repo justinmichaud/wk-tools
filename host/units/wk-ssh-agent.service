@@ -1,6 +1,6 @@
 [Unit]
 Description=wk deploy-key ssh-agent (outside every workspace)
-Documentation=file://@WK_ROOT@/cmd/push
+Documentation=file://@WK_ROOT@/cmd/key
 
 [Service]
 # ssh-agent binds and listens on the socket in its parent, and only then

@@ -1,5 +1,5 @@
 #!/bin/bash
-# A samply trace of MiniBrowser with GC-section text markers and JIT data, to split per GC section with split-trace.py. Runs on macOS (Apple WebKit, XPC web process) and Linux (GTK WebKit, the sandbox disabled so the web process inherits the env), and needs a Release WebKit build with the GC text-marker patch and samply on PATH. `wk profile --mode samply` composes the whole invocation and is the shorter road than this script.
+# A samply trace of MiniBrowser with GC-section text markers and JIT data, to split per GC section with split-trace.py. Runs on macOS (Apple WebKit, XPC web process) and Linux (GTK WebKit, the sandbox disabled so the web process inherits the env), and needs a Release WebKit build with the GC text-marker patch and samply on PATH. `wk run --profile=samply` composes the whole invocation and is the shorter road than this script.
 # Usage:  capture.sh <periodMS> <durationSec> <out.json.gz> [url] [rateHz]  -- env overrides WEBKIT_ROOT, WEBKIT_BUILD, SAMPLY, TRACE_AUX, JITDUMP
 set -u
 

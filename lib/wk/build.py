@@ -121,9 +121,6 @@ def size_for(reg, target, name, cfg, clock):
         avail = mem if override is None else override
     else:
         avail = Resources(reg.machine, reg.env).avail_mem_mb(cgroup_mb=mem)
-    if target.env.get("WK_REMOTE_MAX_JOBS"):
-        warn("WK_REMOTE_MAX_JOBS is set and is ignored for %s: the job count is\n"
-             "  derived per build from what that machine has free. Unset it." % target.name)
     budget = Budget(reg.machine, benv, clock)
     running = budget.running(holder_alive(reg))
     mbpj = buildconf.mb_per_job(cfg, reg.env)
@@ -209,7 +206,7 @@ class Build:
         pid = detached(self.here, self.recs, self.clock, "build", self.name, self.child_argv(("--detach",)),
                        os.path.join(self.ws_dir, "detached.log"), "build")
         info("building %s in '%s', detached as pid %d -- this end can go away" % (self.cfg.name, self.name, pid))
-        log("  follow:  wk logs %s -f" % self.name)
+        log("  follow:  wk status %s --log -f" % self.name)
         log("  state:   wk status %s" % self.name)
         log("  stop it: %s" % self.kill)
         return 0
@@ -340,13 +337,13 @@ class Build:
         lock = Lock(self.target.store, here, self.clock)
         holder = lock.holder_pid("ws-" + name)
         if holder is not None and here.alive(holder):   # refused, not queued: an hour on a lock names no remedy
-            die("'%s' is already building -- its driver holds the ws-%s lock.\n    Follow it:  wk logs %s -f\n    Stop it:    %s"
+            die("'%s' is already building -- its driver holds the ws-%s lock.\n    Follow it:  wk status %s --log -f\n    Stop it:    %s"
                 % (name, name, name, self.kill))
         lock.hold("ws-" + name, timeout=0)
         busy = busy_reason(self.target, self.recs, name, self.env.get("WK_TASK_PARENT", ""))
         if busy:
             act.barrier("'%s' already has a job running in it: %s\n    Two builds in one checkout corrupt both, and this one would be the second.\n"
-                        "    See what it is:  wk logs %s --all" % (name, busy, name))
+                        "    See what it is:  wk status %s --log --all" % (name, busy, name))
         store = self.reg.store.admission_dir()
         budget.disk_admit("this build", self.cfg.disk_gb, budget.free_gb(store), "%s's filesystem" % store)
         if self.target.kind == "vm":   # the guest's disk, and the host image it grows, both fill

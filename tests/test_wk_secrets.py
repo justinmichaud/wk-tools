@@ -1,9 +1,9 @@
-"""lib/wk/secrets.py against a fake machine: the held credentials, the agent and injector files `wk push`
+"""lib/wk/secrets.py against a fake machine: the held credentials, the agent and injector files `wk key push`
 switches, and /secrets, what a container mounts.
 
 The fake is an ssh-agent and a filesystem in one: `ssh-add` over `sh -c` loads and lists what came in on
 stdin, a private half is `KEY:<fork>` and its public half `PUB:<fork>`, so ssh-keygen's answers follow from
-the bytes. `SecretsTest` is the base tests/test_push_switch.py drives cmd/push over.
+the bytes. `SecretsTest` is the base tests/test_push_switch.py drives `wk key push` over.
 
 Run: python3 tests/run.py --unit -k test_wk_secrets
 """
@@ -71,7 +71,7 @@ class World(Fake):
         return secrets.Secrets(ROOT, self.env, self, macos=macos)
 
     @property
-    def secrets_dir(self):
+    def keyring_dir(self):
         return self.env["WK_HOST_SECRETS"]
 
     @property
@@ -81,7 +81,7 @@ class World(Fake):
     def seed(self, forks=("fork", "forkwpe"), pat="ghp-held", bz="bz-held"):
         for f in forks:
             self._set_file("%s/build_key_%s" % (self.held, f), "KEY:%s\n" % f)
-            self._set_file("%s/build_key_%s.pub" % (self.secrets_dir, f), "PUB:%s\n" % f)
+            self._set_file("%s/build_key_%s.pub" % (self.keyring_dir, f), "PUB:%s\n" % f)
         if pat:
             self._set_file(self.held + "/github-pat", pat + "\nsecond line\n")
         if bz:
@@ -197,13 +197,13 @@ class SecretsTest(unittest.TestCase):
 class TestWhereThingsAre(SecretsTest):
     def test_the_held_directory_is_beside_the_mounted_one_and_nothing_mounts_it(self):
         s = self.w.sec()
-        self.assertEqual(os.path.dirname(s.held_dir()), os.path.dirname(s.secrets_dir()))
+        self.assertEqual(os.path.dirname(s.store.keyring_push_dir()), os.path.dirname(s.store.keyring_dir()))
         self.assertEqual(s.github_pat_path(), self.w.held + "/github-pat")
         self.assertEqual(s.cred_path("bugzilla-api-key"), self.w.held + "/bugzilla-api-key")
 
     def test_a_row_of_the_agent_table_is_kept_by_its_kind(self):
         s = self.w.sec()
-        self.assertEqual(s.cred_path("litellm"), self.w.secrets_dir + "/litellm-key")
+        self.assertEqual(s.cred_path("litellm"), self.w.keyring_dir + "/litellm-key")
         self.assertEqual(s.cred_path("claude-login"), self.tmp + "/store/agent-rw/.credentials.json")
         self.assertIsNone(s.cred_path("no-such-credential"))
 
@@ -373,40 +373,40 @@ class TestSecretsIsPublished(SecretsTest):
     def test_the_aliases_and_the_account_are_there_whatever_the_switch(self):
         self.w.seed()
         quiet(self.w.sec().publish)
-        cfg = self.w.files[self.w.secrets_dir + "/ssh_config"]
+        cfg = self.w.files[self.w.keyring_dir + "/ssh_config"]
         self.assertIn("Host github-webkit", cfg)
         self.assertIn("IdentityAgent /run/wk/ssh-agent.sock", cfg)
-        self.assertEqual("justinmichaud\n", self.w.files[self.w.secrets_dir + "/github-user"])
+        self.assertEqual("justinmichaud\n", self.w.files[self.w.keyring_dir + "/github-user"])
         for p in self.w.files:
-            if p.startswith(self.w.secrets_dir):
+            if p.startswith(self.w.keyring_dir):
                 self.assertNotIn("KEY:", self.w.files[p], p)
 
     def test_the_bugzilla_login_is_read_from_the_mirror(self):
         self.contributors()
         quiet(self.w.sec().publish)
-        self.assertEqual("me@example.test\n", self.w.files[self.w.secrets_dir + "/bugzilla-user"])
-        self.assertEqual("me@example.test\n", self.w.files[self.w.secrets_dir + "/view/container/bugzilla-user"])
+        self.assertEqual("me@example.test\n", self.w.files[self.w.keyring_dir + "/bugzilla-user"])
+        self.assertEqual("me@example.test\n", self.w.files[self.w.keyring_dir + "/view/container/bugzilla-user"])
 
     def test_no_login_in_the_mirror_is_absent_and_said_so(self):
-        self.w.files[self.w.secrets_dir + "/bugzilla-user"] = "stale@example.test\n"
+        self.w.files[self.w.keyring_dir + "/bugzilla-user"] = "stale@example.test\n"
         _, err = quiet(self.w.sec().publish)
-        self.assertNotIn(self.w.secrets_dir + "/bugzilla-user", self.w.files)
+        self.assertNotIn(self.w.keyring_dir + "/bugzilla-user", self.w.files)
         self.assertIn("no Bugzilla login", err)
         self.assertIn("wk sync", err)
 
     def test_the_view_is_the_delivered_rows_and_the_public_files(self):
         self.w.seed()
         for name in ("claude-token", "litellm-key"):
-            self.w.files["%s/%s" % (self.w.secrets_dir, name)] = name + "\n"
+            self.w.files["%s/%s" % (self.w.keyring_dir, name)] = name + "\n"
         quiet(self.w.sec().publish)
-        view = self.w.secrets_dir + "/view/container"
+        view = self.w.keyring_dir + "/view/container"
         self.assertEqual({"ssh_config", "github-user", "build_key_fork.pub", "build_key_forkwpe.pub", "litellm-key"},
                          set(self.w.listdir(view)))
         self.assertIn(("act", ("chmod", "0600", view + "/litellm-key")), self.w.effects)
         self.assertIn(("act", ("chmod", "0700", view)), self.w.effects)
 
     def test_a_file_that_belongs_to_no_row_is_taken_out_again(self):
-        view = self.w.secrets_dir + "/view/container"
+        view = self.w.keyring_dir + "/view/container"
         self.w.files[view + "/claude-token"] = "planted\n"
         self.w.dirs.add(view)
         quiet(self.w.sec().publish)
@@ -433,7 +433,7 @@ class TestSecretsIsPublished(SecretsTest):
     def test_in_the_podman_vm_nothing_is_written_and_what_is_there_is_read(self):
         self.w.env["WK_IN_VM"] = "1"
         self.w.env["WK_STORE"] = self.w.env["WK_STORE_DEFAULT"] = self.tmp + "/store"
-        d = self.w.sec().secrets_dir()
+        d = self.w.sec().store.keyring_dir()
         for f in secrets.PUBLISHED:
             self.w.files[os.path.join(d, f)] = "published by the host\n"
         quiet(self.w.sec().store_publish)
@@ -441,7 +441,7 @@ class TestSecretsIsPublished(SecretsTest):
 
     def test_in_the_podman_vm_a_missing_published_file_dies_with_the_remedy(self):
         self.w.env["WK_IN_VM"] = "1"
-        d = self.w.sec().secrets_dir()
+        d = self.w.sec().store.keyring_dir()
         self.w.files[d + "/ssh_config"] = "x\n"
         self.w.files[d + "/github-user"] = "x\n"
         with self.assertRaises(Refused):
@@ -456,8 +456,8 @@ class TestTheDeployKeys(SecretsTest):
         s = self.w.sec()
         self.assertTrue(quiet(s.push_key_adopt, "fork", "KEY:fork")[0])
         self.assertEqual("KEY:fork\n", self.w.files[self.w.held + "/build_key_fork"])
-        self.assertEqual("PUB:fork\n", self.w.files[self.w.secrets_dir + "/build_key_fork.pub"])
-        self.assertIn("build_key_fork.pub", self.w.listdir(self.w.secrets_dir + "/view/container"))
+        self.assertEqual("PUB:fork\n", self.w.files[self.w.keyring_dir + "/build_key_fork.pub"])
+        self.assertIn("build_key_fork.pub", self.w.listdir(self.w.keyring_dir + "/view/container"))
 
     def test_something_that_is_not_a_key_is_refused_and_leaves_nothing(self):
         self.w.seed(forks=("fork",))

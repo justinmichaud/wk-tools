@@ -80,7 +80,7 @@ class Cycle:
             return "unreachable"
 
     def records(self):
-        return progress.Records(self.store.record_dir(), clock=self.clock, env=self.env, machine=self.here)
+        return progress.Records(self.store.records_dir(), clock=self.clock, env=self.env, machine=self.here)
 
     def webkit(self, rest):
         from wk.sysimage import task

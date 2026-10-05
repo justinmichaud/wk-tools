@@ -40,12 +40,12 @@ class TestBinDir(WkTest):
             "kind=build\ndriver=remote\nhost=overlaybox\nroot=/tmp/x\n")
 
         env = {"HOME": str(self.tmp), "PATH": "/usr/bin:/bin"}
-        cp = subprocess.run([str(root / "wk"), "push", "status", "--target", "overlaybox"],
+        cp = subprocess.run([str(root / "wk"), "key", "push", "status", "--target", "overlaybox"],
                             cwd="/", env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, timeout=60)
         self.assertNotIn("unknown target", cp.stdout)
         real = fleet.Fleet(REPO, FLEET_ENV).names(fleet.TARGET_KINDS)
-        cp = subprocess.run([str(root / "wk"), "push", "status", "--target", "nosuchbox"],
+        cp = subprocess.run([str(root / "wk"), "key", "push", "status", "--target", "nosuchbox"],
                             cwd="/", env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, timeout=60)
         self.assertIn("overlaybox", cp.stdout)
@@ -54,7 +54,7 @@ class TestBinDir(WkTest):
 
     def test_wk_finds_its_root_through_the_symlink(self):
         cp = subprocess.run(
-            [str(REPO / "bin" / "wk"), "version"],
+            [str(REPO / "bin" / "wk"), "doctor", "--probe-tools"],
             cwd="/", env={"HOME": os.environ["HOME"], "PATH": "/usr/bin:/bin"},
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60,
         )

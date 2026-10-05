@@ -133,7 +133,7 @@ def drive_injector(tmp, client_bytes,
 
 def assert_refused_with_the_switch_off(case, method, target,
                                        host="api.github.com", extra="", **kw):
-    """One write with `wk push off`: nothing leaves the injector, and what the client reads back names the switch
+    """One write with `wk key push off`: nothing leaves the injector, and what the client reads back names the switch
     rather than the far end answering for a credential it was never sent."""
     sep = "&" if "?" in target else "?"
     full = target + (sep + extra if extra else "")
@@ -145,8 +145,8 @@ def assert_refused_with_the_switch_off(case, method, target,
                      "%s %s reached the network" % (method, target))
     case.assertEqual(b"", upstream)
     case.assertIn(b"412 Precondition Failed", client)
-    case.assertIn(b"wk push is off for this workspace's machine", client)
-    case.assertIn(b"'wk push on'", client)
+    case.assertIn(b"wk key push is off for this workspace's machine", client)
+    case.assertIn(b"'wk key push on'", client)
     case.assertNotIn(b"wk-injects-this", client)
     case.assertIn("write refused: push is off", logged)
     return client, logged
@@ -951,7 +951,7 @@ class TestTheGraphQLReadWriteSplit(WkTest):
 
 
 class TestTheTwoTokens(WkTest):
-    """Which token a request spends, which is the whole of what `wk push` switches."""
+    """Which token a request spends, which is the whole of what `wk key push` switches."""
 
     def setUp(self):
         super().setUp()

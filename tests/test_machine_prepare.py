@@ -96,11 +96,6 @@ class PreparingPushesACommitAndStopsAtTheSudo(WkTest):
         self.assertIn("git -C", out, out)
         self.assertFalse(self.far.exists(), f"{self.far} was written anyway")
 
-class TheVerbMoved(WkTest):
-    def test_boot_prepare_names_machine_setup(self):
-        cp = bash('exec "$WK_ROOT/cmd/boot" mbp --prepare')
-        self.assertEqual(cp.returncode, 1, cp.stdout + cp.stderr)
-        self.assertIn("wk machine setup mbp", cp.stderr)
 
 
 class TheHostOsGateAsksWhetherTheDriverCanReachIt(WkTest):

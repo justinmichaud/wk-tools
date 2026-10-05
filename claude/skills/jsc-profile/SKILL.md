@@ -20,7 +20,7 @@ allowed-tools:
 
 # Profiling a JSC run (root-causing where time goes)
 
-> **Inside a workspace, run `wk profile` and let it compose the command.**
+> **Inside a workspace, run `wk run --profile` and let it compose the command.**
 > Every recipe below is correct and worth reading for *how to read the output*
 > — the tier breakdown, the bytecode counts, the OSR-exit log — but the
 > invocations were written for a host checkout and carry host paths
@@ -28,13 +28,13 @@ allowed-tools:
 > workspace. One flag each, from the same facts the build used:
 >
 > ```bash
-> wk profile bench.js                    # JSC's sampling profiler (Step 1)
-> wk profile --mode bytecode bench.js    # the bytecode profiler + summary (Step 2)
-> wk profile --mode native bench.js      # samply on Linux, Instruments on macOS (Step 3)
-> wk profile --mode native --jit-dump bench.js   # ... with JS/JIT frame names
-> wk profile --mode heaptrack bench.js   # allocations (Linux)
-> wk profile --mode native --attach <pid>        # something already running
-> wk profile --mode <m> --dry-run bench.js       # the exact command, run nothing
+> wk run --profile bench.js                    # JSC's sampling profiler (Step 1)
+> wk run --profile=bytecode bench.js    # the bytecode profiler + summary (Step 2)
+> wk run --profile=native bench.js      # samply on Linux, Instruments on macOS (Step 3)
+> wk run --profile=native --jit-dump bench.js   # ... with JS/JIT frame names
+> wk run --profile=heaptrack bench.js   # allocations (Linux)
+> wk run --profile=native --attach <pid>        # something already running
+> wk run --profile=<m> --dry-run bench.js       # the exact command, run nothing
 > ```
 >
 > It resolves the build directory and the loader variable from the config
@@ -220,7 +220,7 @@ DYLD_FRAMEWORK_PATH="$DIR" "$SAMPLY" record --save-only -o /tmp/prof-patched.jso
 > 3. **Run every samply invocation under `linux32`** (sets the uname personality to 32-bit so samply
 >    picks the arm code paths) and pin cores: `linux32 taskset -c 2-9 "$SAMPLY" record …`.
 > 4. **Lower `perf_event_paranoid` to ≤1** (default 2 → samply errors out): the box-owner runs
->    `echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid` on the **host** — `wk profile` reads it
+>    `echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid` on the **host** — `wk run --profile` reads it
 >    first and refuses with exactly that line, and a bench system already has `-1` (host-wide knob;
 >    the agent can't and shouldn't silently weaken it). Restore the prior value after.
 > 5. **Symbolicate JIT'd JS frames** with jsc flags `--logJITCodeForPerf=1 --jitDumpDirectory=/tmp`

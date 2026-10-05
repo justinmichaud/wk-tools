@@ -20,8 +20,8 @@ from wk.sysimage import guestbase, pmos, task
 
 def build_outputs(store, env):
     """Where each image builder leaves bytes; `pmos` builds on its host and `guest` is a tart VM, each with rows of its own."""
-    return {"buildroot": os.path.join(store.root(), "cache", "buildroot"),
-            "yocto": os.path.join(store.root(), "cache", "yocto"),
+    return {"buildroot": os.path.join(store.store_dir(), "cache", "buildroot"),
+            "yocto": os.path.join(store.store_dir(), "cache", "yocto"),
             "fetch": task.cache_dir(env),
             "mac-volume": os.path.join(os.path.dirname(task.cache_dir(env)), "mac-tailnet"),
             "pmos": None, "guest": None}
@@ -86,7 +86,7 @@ class Gc:
         rows = store_rubble(self.store, self.here, self.host_half)
         if self.store_half:
             rows += self.image_rows() + self.ccache_rows()
-        rows += seed.rubble(self.here, lock, os.path.join(self.store.artifact_dir(), "bench"))
+        rows += seed.rubble(self.here, lock, os.path.join(self.store.cache_dir(), "bench"))
         rows += bridge_provision.rubble(self.store, self.here, lock)
         rows += self.runner_rows() + self.build_output_rows()
         rows += workspace.rubble(listed, stored, self.here, self.root, pid is not None and self.here.alive(pid), self.clock)
@@ -142,7 +142,7 @@ class Gc:
         return rows
 
     def ccache_rows(self):
-        d = os.path.join(self.store.root(), "cache", "ccache")
+        d = os.path.join(self.store.store_dir(), "cache", "ccache")
         if not self.here.isdir(d) or not self.here.run(["ccache", "--version"]).ok:
             return []
         size = self.container().ccache_maxsize()
@@ -153,7 +153,7 @@ class Gc:
 
     def runner_rows(self):
         """Tools/Scripts trees exported per WebKit commit: the newest stays, the rest are re-exported on demand."""
-        d = os.path.join(self.store.artifact_dir(), "bench-runner")
+        d = os.path.join(self.store.cache_dir(), "bench-runner")
         if not self.here.isdir(d):
             return []
         order = self.here.run(["ls", "-1At", d]).out.split()
@@ -208,12 +208,12 @@ class Gc:
         return rows
 
     def box_record_rows(self, t):
-        """A build record kept here for a box, whose builds are recorded on the box by its own wk."""
+        """A build or creation record kept here for a box, whose own wk records both on the box."""
         rows = []
         for task in t.records(self.clock).list():
-            if task.field("kind") != "build":
+            if task.field("kind") not in ("build", "new"):
                 continue
-            what = "%s: a build record of '%s' kept here, not on the box" % (t.name, task.field("name"))
+            what = "%s: a %s record of '%s' kept here, not on the box" % (t.name, task.field("kind"), task.field("name"))
             pid, paths = task.field("pid"), [str(task.path)] + ([task.field("log")] if task.field("log") else [])
             why = "kept -- its driver, pid %s, still runs here: 'kill %s' ends it" % (pid, pid) if task.alive(None) else ""
             rows.append(rb.row("box-record", what, rb.du_kb(self.here, str(task.path)), "--purge-rubble",

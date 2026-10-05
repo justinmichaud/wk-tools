@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 #
-# wk run <workspace> [options] [-- jsc-args] -- run jsc from a workspace build
-# wk: where=workspace name=required ready=yes group=workspaces config=--config dryrun opts --config=,--lldb,--until-crash,--max=,--rr,--replay passthrough
+# wk run <workspace> [options] [--profile[=<mode>]] [-- jsc-args] -- run jsc from a workspace build, or profile it
+# wk: where=workspace name=required ready=yes group=workspaces config=--config dryrun passthrough
+# wk: opts --config=,--lldb,--until-crash,--max=,--rr,--replay,--profile,--profile=,--browser,--process=,--attach=,--jit-dump,--markers,--top=,--fetch,--env=
+# wk: flag --profile takes=*
 #
 # Runs the jsc binary a build produced, from the workspace's own build tree on
 # its target. Everything after `--` goes to jsc verbatim.
@@ -22,6 +24,41 @@
 #   --replay            replay the latest recording under lldb (rr's own commands
 #                       are there as `rr ...`); everything after `--` goes to
 #                       `rr replay` instead of jsc: a trace directory, -p <pid>
+#   --profile[=<mode>]  where the time went: the run under a profiler (default
+#                       sampling), its artifacts in the workspace's ~/wk-profile.
+#                       It runs on its own, without the flags above
+#
+#     sampling    JSC's own sampling profiler: JS function names and the tier
+#                 breakdown (LLInt/Baseline/DFG/FTL/C++). No tools, no
+#                 privileges, every port and architecture -- including armhf,
+#                 where the native profilers need a patched build
+#     bytecode    JSC's Profiler::Database: per-CodeBlock, per-bytecode counts
+#                 by tier, plus the compile/OSR-exit/jettison log
+#     samply      native sampling with the Firefox Profiler UI: C++ frames,
+#                 every thread, the GC and the compiler; `--jit-dump` names JS
+#     sysprof     the whole system through sysprof-cli, JSC's JIT dump and text
+#                 markers always on (Linux ports only)
+#     instruments Apple's Time Profiler through xctrace, nothing to install
+#     native      instruments on the Apple ports, samply everywhere else
+#     heaptrack   allocations rather than time (Linux ports only)
+#     massif      the same question asked of the peak, through valgrind
+#
+#     --browser [url]   MiniBrowser on that page instead of the jsc shell
+#     --process <p>     which of MiniBrowser's processes: ui | web (default) |
+#                       network | gpu. Refused on the Apple ports, where the
+#                       browser is profiled directly. On GTK/WPE, 'ui' puts the
+#                       recorder in front of the launch (WEBKIT_MINI_BROWSER_PREFIX,
+#                       the hook `wk gui --lldb ui` uses); web/network/gpu launch
+#                       and attach after a fixed wait, so it may not be mid-load.
+#                       Only samply attaches; sampling/bytecode/sysprof cover the
+#                       whole tree and refuse it; heaptrack/massif are not wired
+#                       up for a browser (docs/Urgent/HANDOFF-linux-minibrower.md)
+#     --attach <pid|name>   something already running in the workspace
+#     --jit-dump        JS/JIT frame names for the native profilers
+#     --markers         JSC's interval text markers, for splitting a trace by phase
+#     --top <n>         how many functions/bytecodes the sampling report prints
+#     --fetch [dir]     copy the artifacts to this machine when the run ends
+#     --env NAME=VALUE  one more variable for the run (repeatable)
 
 import os
 import shlex
@@ -32,7 +69,7 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import buildconf, decl, targets  # noqa: E402
+from wk import buildconf, decl, profile, targets  # noqa: E402
 from wk.act import Refused, die  # noqa: E402
 from wk.ldpath import LLDB_PRELUDE, prelude, rr_ready, rr_trace_dir  # noqa: E402
 
@@ -113,6 +150,10 @@ def parse(argv):
 
 
 def main(argv):
+    args = decl.Args(decl.Decl(__file__), argv)
+    profile.refuse_mixed(args, ("--lldb", "--until-crash", "--max", "--rr", "--replay"))
+    if profile.asked(args):
+        return profile.main(args, "run")
     name = store.ws_name()
     opts = parse(argv)
 

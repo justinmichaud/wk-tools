@@ -134,7 +134,7 @@ class VmWorld(DriverWorld):
 
 
 class RemoteWorld(DriverWorld):
-    """A build machine over ssh: `far` is the set of workspace directories on it; its record here is a directory."""
+    """A build machine over ssh whose own wk destroys a workspace: `far` is the set of workspace directories on it."""
 
     KIND = "remote"
 
@@ -143,6 +143,7 @@ class RemoteWorld(DriverWorld):
                          "WK_REMOTE_STORE": str(self.tmp / "rstore"), "XDG_STATE_HOME": str(self.tmp / "state")})
         self.far = set()
         self.react(["ssh"], self._ssh)
+        self.answer(["git", "-C", str(REPO), "rev-parse", "HEAD"], out="abc1234def\n")
 
     def _ssh(self, argv, f):
         cmd = argv[-1]
@@ -150,12 +151,16 @@ class RemoteWorld(DriverWorld):
             return Result(0, LINUX_PROBE)
         words = shlex.split(cmd)
         text = words[2] if words[:2] == ["sh", "-c"] else cmd
+        if text.startswith("test -f $HOME/.wk-remote"):
+            return Result(0)
+        if "/wk doctor --probe-tools" in text:
+            return Result(0, "sha=abc1234def\ndirty=no\n")
+        if "/wk rm " in text:
+            f.far.discard("%s/ws/%s" % (FAR_ROOT, words[-1]))
+            return Result(0)
         if text.startswith("if [ ! -d"):
             return Result(0, "present\n" if shlex.split(text)[4] in f.far else "absent\n")
         path = shlex.split(text)[-1]
-        if text.startswith("rm -rf"):
-            f.far.discard(path)
-            return Result(0)
         if text.startswith(("test -d", "test -e")):
             return Result(0 if path in f.far else 1)
         return Result(1, "", "no far answer for: %s" % text[:60])

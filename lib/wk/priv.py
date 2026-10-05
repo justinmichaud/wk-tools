@@ -3,7 +3,7 @@ import sys
 from wk.machine import Local
 
 LIBEXEC = "/usr/local/libexec"
-HELPERS = (("wk-quiesce-priv", "any", "wk quiesce / wk session"),
+HELPERS = (("wk-quiesce-priv", "any", "wk quiesce"),
            ("wk-card-priv", "linux", "wk sysimage (writing a card)"),
            ("wk-boot-priv", "any", "wk boot (arming the firmware, restarting a machine)"))
 

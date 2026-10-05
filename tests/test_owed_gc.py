@@ -20,7 +20,7 @@ from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.machine import Fake, Local, Machine, Result  # noqa: E402
-from wk.store import Bases, Store  # noqa: E402
+from wk.store import Snapshots, Store  # noqa: E402
 
 WK = str(REPO / "wk")
 MUTATIONS = ("act", "write", "mkdir", "remove")
@@ -70,7 +70,7 @@ class World(Host):
         self.react(["podman", "volume", "ls"], lambda a, f: Result(0, "".join(v + "\n" for v in f.volumes)))
         self.react(["podman", "volume", "prune"], lambda a, f: self._no_volumes())
         self.react(["env"], self._env)
-        self.answer(["git", "-C", self.store.mirror(), "for-each-ref"])
+        self.answer(["git", "-C", self.store.mirror_dir(), "for-each-ref"])
         self.container = targets.Container("container", str(REPO), self.env, self)
         self.vm = None
         self.remotes, self.boards, self.offline, self.pmos_hosts = [], [], {}, []
@@ -124,8 +124,8 @@ class World(Host):
         return FakeGc(self)
 
     def publish(self, bid, complete=True):
-        d = os.path.join(self.store.base_dir(), bid)
-        self.dirs.update({self.store.base_dir(), d, os.path.join(d, "WebKit")})
+        d = os.path.join(self.store.snapshots_dir(), bid)
+        self.dirs.update({self.store.snapshots_dir(), d, os.path.join(d, "WebKit")})
         if complete:
             self.files[os.path.join(d, "sha")] = "a" * 40 + "\n"
 
@@ -227,23 +227,23 @@ class GcTest(WkTest):
 def _snapshot(w):
     w.publish("b1")
     w.publish("b2")
-    return lambda: os.path.join(w.store.base_dir(), "b1") not in w.dirs
+    return lambda: os.path.join(w.store.snapshots_dir(), "b1") not in w.dirs
 
 
 def _mirror(w):
     w.publish("b1")
-    w.mkdirs(w.store.mirror())
-    return lambda: w.store.mirror() not in w.dirs
+    w.mkdirs(w.store.mirror_dir())
+    return lambda: w.store.mirror_dir() not in w.dirs
 
 
 def _seed(w):
-    d = os.path.join(w.store.artifact_dir(), "bench", ".tmp-speedometer3-aaaaaaaaaaaa")
+    d = os.path.join(w.store.cache_dir(), "bench", ".tmp-speedometer3-aaaaaaaaaaaa")
     w.mkdirs(d)
     return lambda: d not in w.dirs
 
 
 def _bridge_image(w):
-    d = os.path.join(w.store.artifact_dir(), "bridge")
+    d = os.path.join(w.store.cache_dir(), "bridge")
     w.mkdirs(d)
     path = os.path.join(d, "moose-bmc.img")
     w.files[path] = "x" * 64
@@ -251,7 +251,7 @@ def _bridge_image(w):
 
 
 def _payload(w):
-    seeds = os.path.join(w.store.artifact_dir(), "bench")
+    seeds = os.path.join(w.store.cache_dir(), "bench")
     for n in ("speedometer3-aaaaaaaaaaaa", "speedometer3-bbbbbbbbbbbb"):
         w.mkdirs(os.path.join(seeds, n))
     w.order[seeds] = ["speedometer3-bbbbbbbbbbbb", "speedometer3-aaaaaaaaaaaa"]
@@ -259,7 +259,7 @@ def _payload(w):
 
 
 def _runner(w):
-    d = os.path.join(w.store.artifact_dir(), "bench-runner")
+    d = os.path.join(w.store.cache_dir(), "bench-runner")
     for n in ("new", "old"):
         w.mkdirs(os.path.join(d, n))
     w.order[d] = ["new", "old"]
@@ -343,15 +343,15 @@ def _remote_mirror(w):
     return lambda: False
 
 
-def _box_record(w, pid=999999):
-    t = _box(w).begin("build", "here", "a", "wk build a --kill", os.path.join(w.store_dir, "remote", "box", "build.log"),
+def _box_record(w, pid=999999, kind="build"):
+    t = _box(w).begin(kind, "here", "a", "wk %s a --kill" % kind, os.path.join(w.store_dir, "remote", "box", kind + ".log"),
                       ["compile"], pid=pid)
     w.files[t.field("log")] = ""
     return lambda: not w.exists(str(t.path)) and not w.exists(t.field("log"))
 
 
 def _push_ref(w):
-    mirror, w.refs = w.store.mirror(), {"refs/wk/push/box/eng/x"}
+    mirror, w.refs = w.store.mirror_dir(), {"refs/wk/push/box/eng/x"}
     w.mkdirs(mirror)
     w.react(["git", "-C", mirror, "for-each-ref"], lambda a, f: Result(0, "".join(r + "\n" for r in sorted(f.refs))))
     w.react(["git", "-C", mirror, "update-ref"], lambda a, f: f.refs.discard(a[-1]) or Result(0))
@@ -395,6 +395,7 @@ KINDS = {
     "board-slot-instrumented": (lambda w: _board(w, "a-instr"), "--purge-rubble"),
     "remote-mirror": (_remote_mirror, "wk machine rm box"),
     "box-record": (_box_record, "--purge-rubble"),
+    "box-creation-record": (lambda w: _box_record(w, kind="new"), "--purge-rubble"),
     "push-ref": (_push_ref, ""),
     "half-made": (_half_made, "--purge-rubble"),
     "selftest-ws": (_selftest, ""),
@@ -444,7 +445,7 @@ class TestReclaimsOrNames(GcTest):
 class TestAMeasurementIsNeverRubble(GcTest):
 
     def task(self, *workspaces):
-        d = os.path.join(self.w.store.record_dir(), "bench", "20260101T000000Z-rpi5-a")
+        d = os.path.join(self.w.store.records_dir(), "bench", "20260101T000000Z-rpi5-a")
         self.w.files[os.path.join(d, "task.json")] = "{}"
         for i, ws in enumerate(workspaces):
             self.w.files[os.path.join(d, "runs", "r%d" % i, "env.json")] = json.dumps({"workspace": ws})
@@ -498,8 +499,8 @@ class TestWhatAPlainRunKeeps(GcTest):
         _snapshot(self.w)
         self.w.workspace("nopin", ready=True, base="")
         rc, err = self.run_gc()
-        self.assertIn(os.path.join(self.w.store.base_dir(), "b1"), self.w.dirs)
-        self.assertIn("nopin never recorded a base", err)
+        self.assertIn(os.path.join(self.w.store.snapshots_dir(), "b1"), self.w.dirs)
+        self.assertIn("nopin never recorded a snapshot", err)
 
 
 class TestWhatWasNotLookedAt(GcTest):
@@ -520,7 +521,7 @@ class TestWhatWasNotLookedAt(GcTest):
 
     def test_a_failed_ref_listing_in_the_mirror_is_named(self):
         _push_ref(self.w)
-        self.w.answer(["git", "-C", self.w.store.mirror(), "for-each-ref"], rc=128, err="fatal: not a git repository")
+        self.w.answer(["git", "-C", self.w.store.mirror_dir(), "for-each-ref"], rc=128, err="fatal: not a git repository")
         rc, err = self.run_gc()
         self.assertEqual(rc, 0, err)
         self.assertIn("not looked at -- git for-each-ref failed: fatal: not a git repository", err)
@@ -583,15 +584,15 @@ class TestTheVmHalf(GcTest):
         self.assertIsNone(os.environ.get("WK_YES"), "the answer reaches the VM's wk in its argv, not this process's environment")
 
     def test_the_hosts_mirror_is_kept_while_the_vm_has_a_workspace_on_it(self):
-        self.w.mkdirs(self.w.store.mirror())
-        g, calls = self.mac([rubble.row("mirror", "every base snapshot", 4, "--purge-mirror", lambda: None, "kept -- 'wk rm' a first")])
+        self.w.mkdirs(self.w.store.mirror_dir())
+        g, calls = self.mac([rubble.row("mirror", "every snapshot", 4, "--purge-mirror", lambda: None, "kept -- 'wk rm' a first")])
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()):
             g.run(("--purge-mirror",))
-        self.assertIn(self.w.store.mirror(), self.w.dirs)
+        self.assertIn(self.w.store.mirror_dir(), self.w.dirs)
         self.assertEqual([c[0] for c in calls], [("gc", "--rows")])
 
     def test_a_stopped_vm_is_named_and_keeps_the_mirror(self):
-        self.w.mkdirs(self.w.store.mirror())
+        self.w.mkdirs(self.w.store.mirror_dir())
         g, calls = self.mac([], running=False)
         with contextlib.redirect_stderr(io.StringIO()):
             rows = g.rows()
@@ -649,7 +650,7 @@ class TestWhatGcKeepsWhenNothingVerifies(WkTest):
         return store
 
     def _unreferenced(self, store):
-        return Bases(Store({"WK_STORE": str(store)}), Local()).unreferenced()
+        return Snapshots(Store({"WK_STORE": str(store)}), Local()).unreferenced()
 
     def test_the_newest_finished_snapshot_is_kept_though_none_verifies(self):
         store = self._bases(["20260101", "20260202"], complete=["20260101", "20260202"])

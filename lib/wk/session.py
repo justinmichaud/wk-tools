@@ -1,4 +1,4 @@
-"""wk session. The kernel driver tells the GPU from the BMC's `ast` chip, never the card number: card1 is
+"""wk quiesce session. The kernel driver tells the GPU from the BMC's `ast` chip, never the card number: card1 is
 the ast on moose only because of PCI enumeration order."""
 
 import os
@@ -93,12 +93,12 @@ class Session:
             warn("SLOW SESSION: SOFTWARE RENDERING -- the BMC display chip, no GPU at all")
             log("  llvmpipe is not a slow GPU, it is a different measurement: MotionMark\n"
                 "  differs by ~400x. Nothing measured here means anything.\n"
-                "  measurable session again:  wk session on")
+                "  measurable session again:  wk quiesce session on")
         elif m == "off":
             warn("SESSION IS OFF -- this socket is the screen-off placeholder, not a session")
             log("  its outputs are modeset off on purpose and it has no head to draw on;\n"
                 "  nothing rendered into it will show up anywhere.\n"
-                "  a real session:  wk session on")
+                "  a real session:  wk quiesce session on")
 
     def bmc_drm_device(self):
         try:
@@ -146,7 +146,7 @@ class Session:
             # "already running" answered for a software session is an afternoon of numbers that measured llvmpipe.
             wanted, running = ("bmc" if bmc else "gpu"), self.mode()
             if wanted == running:
-                info("wk session already running (%s, mode %s)" % (self.socket, running))
+                info("wk quiesce session already running (%s, mode %s)" % (self.socket, running))
                 self.mode_warn()
                 return 0
             info("a '%s' session is running; restarting it as '%s'" % (running, wanted))
@@ -157,7 +157,7 @@ class Session:
         seated = self.foreign()
         if seated:
             info("a graphical session is already active on seat0 (session %s)" % seated)
-            log("  leaving it alone; run 'wk session off' first if you want a clean")
+            log("  leaving it alone; run 'wk quiesce session off' first if you want a clean")
             log("  benchmark compositor instead of a full desktop")
             return 0
         if not self.m.have("wayland-info"):
@@ -193,7 +193,7 @@ class Session:
         seated = self.foreign()
         if seated:
             info("a graphical session is already active on seat0 (session %s)" % seated)
-            log("  leaving it alone; run 'wk session off' first if you want a clean start")
+            log("  leaving it alone; run 'wk quiesce session off' first if you want a clean start")
             return 0
         if self.active(UNIT):
             info("stopping the benchmark compositor to start a desktop instead")
@@ -239,7 +239,7 @@ class Session:
             log("  a compositor holding an output and painting it black is not an\n"
                 "  output that is off -- the CRTC keeps scanning out, so the monitor\n"
                 "  keeps its signal. The modeset that darkens it needs wlr-randr:\n"
-                "    ./setup --stage tools   (then: wk session off)")
+                "    ./setup --stage tools   (then: wk quiesce session off)")
         else:
             info("screen off -- outputs modeset off, placeholder compositor holding the seat")
             log("  both halves are load-bearing: disabling the outputs is what darkens\n"
@@ -248,7 +248,7 @@ class Session:
         bmc_lit = self.lit("ast")
         if bmc_lit:
             log("  still lit on the BMC's chip: %s (its console keeps its last frame)" % " ".join(bmc_lit))
-        log("  a desktop back:  wk session gdm      a benchmark session:  wk session on")
+        log("  a desktop back:  wk quiesce session gdm      a benchmark session:  wk quiesce session on")
         return 0
 
     def status(self, out=None):

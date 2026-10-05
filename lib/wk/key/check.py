@@ -74,7 +74,7 @@ class Check:
                 replay(j)
         if boxes:
             self.out.write("  build machines:\n")
-            self.out.write(table_row("ok", ", ".join(boxes), "nothing at rest; 'wk push' forwards the elected key"))
+            self.out.write(table_row("ok", ", ".join(boxes), "nothing at rest; 'wk key push' forwards the elected key"))
         self.out.write("  credentials:\n")
         for j in cred_jobs:
             replay(j)

@@ -39,7 +39,7 @@ class Bench:
 
     def plans(self):
         """`plans` runs before any workspace exists to read a plan from, so it asks the mirror: one `git ls-tree`, no export."""
-        mirror = self.reg.store.mirror()
+        mirror = self.reg.store.mirror_dir()
         ref = board.runner_ref(self.reg.env)
         if not self.machine.isdir(mirror) or not self.machine.run(
                 ["git", "-C", mirror, "rev-parse", "--verify", "--quiet", ref + "^{commit}"]).ok:
@@ -175,7 +175,7 @@ class Bench:
 
     def find(self, task):
         """(machine, directory) of the task, or None."""
-        d = record.homes_at(self.machine, self.reg.store.record_dir()).get(task)
+        d = record.homes_at(self.machine, self.reg.store.records_dir()).get(task)
         if d:
             return self.machine, d
         for name in self.reg.walk():
@@ -246,7 +246,7 @@ class Bench:
 
         text = seed.plan_json(read, plan)
         lock = Lock(self.reg.store, self.machine, self.clock)
-        print(seed.Seeder(self.machine, lock, os.path.join(self.reg.store.artifact_dir(), "bench"), self.reg.store.mirror()).seed(plan, text))
+        print(seed.Seeder(self.machine, lock, os.path.join(self.reg.store.cache_dir(), "bench"), self.reg.store.mirror_dir()).seed(plan, text))
         return 0
 
     def deploy(self, ws, board_name, slot_name, machine=None, driver=None):
@@ -271,21 +271,10 @@ class Bench:
     def ab(self, spec, o, kill):
         return ab.run(self.root, self.reg, self.clock, spec, o, kill)
 
-    def mac(self):
-        act.die("'wk bench mac' is gone -- the Mac's round trip is:\n    wk bench ab --devices <mac> --systems <a>,<b> --workspace <ws>")
-
-    def mac_ab(self):
-        act.die("'wk bench mac-ab' is gone -- a Mac A/B is read back where it is planted:\n"
-                "    wk bench ab --devices <mac> --preflight|--progress|--status|--collect")
-
     def ab_summary(self, runs, root, out):
         if not runs or not os.path.isfile(runs):
             act.die("no run map at '%s' -- the A/B recorded nothing (--runs <runs.tsv>)" % runs)
         return report.ab_summary(runs, root, self.clock.iso(), out, machine=self.machine)
-
-    def mac_volume(self):
-        act.die("'wk bench mac-volume' does not exist -- the benchmark install is an image, built on the Mac:\n"
-                "    wk sysimage build perf-macos-tolken [--create|--fetch|--install|--provision|--repair|--build-pkg|--all]")
 
 
 def refuse_planted(e):

@@ -662,7 +662,7 @@ RULES = collections.OrderedDict((
         check=_tailnet_api)),
     ("deploy-key", Rule(
         spent_by="lib/wk/secrets.py agent_load -- loaded into the ssh-agent a "
-                 "workspace reaches while `wk push` is on",
+                 "workspace reaches while `wk key push` is on",
         needs="push to exactly one fork",
         forbids="reach any other repository, or be read-only",
         what="an ed25519 key per fork, generated here and never pasted",
