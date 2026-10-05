@@ -116,6 +116,9 @@ class Result(unittest.TextTestResult):
 
     def startTest(self, test):
         self._passed = False
+        act = sys.modules.get("wk.act")
+        if act:
+            del act._forced[:]   # process-global: a barrier forced by one in-process test would count in the next
         super().startTest(test)
         self._started = time.monotonic()
         stop = hang_after(budget_for(test))
