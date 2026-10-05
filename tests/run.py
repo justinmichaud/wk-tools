@@ -21,6 +21,10 @@ MACHINE_TOOLS = ("ssh", "scp", "podman", "tart", "tailscale", "nmap", "gh", "sud
 SHIM = '#!/bin/sh\necho "unit tier reached %s $*" >&2\nexit 97\n'
 # `ssh -G` prints the resolved config and never connects, so it is the one call handed to the real ssh.
 SSH_SHIM = '#!/bin/sh\nfor a; do [ "$a" = -G ] && exec %s "$@"; done\n' + SHIM
+# Beside WK_*, what a workspace container exports (lib/wk/places.py create_flags, sandbox_flags).
+WORKSPACE_PREFIXES = ("WK_", "WKDEV_", "CCACHE_", "BR2_")
+WORKSPACE_VARS = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY",
+                  "WAYLAND_DISPLAY", "DL_DIR", "SSTATE_DIR")
 
 
 def parse_args(argv):
@@ -83,6 +87,18 @@ def shim_machine_tools():
         p.chmod(0o755)
     os.environ["WK_TEST_SHIMS"] = d
     os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+
+
+def isolate_from_this_machine():
+    """The tiers that need no machine run the same on a host and inside a workspace: no WK_* or workspace
+    variable of the caller's reaches a test, and HOME is an empty directory, so no marker, ~/.wk-remote,
+    ~/.ssh/config or dotfile of this machine's is read."""
+    for var in list(os.environ):
+        if var in WORKSPACE_VARS or (var.startswith(WORKSPACE_PREFIXES) and not var.startswith("WK_TEST_")):
+            del os.environ[var]
+    home = tempfile.mkdtemp(prefix="wk-test-home-")
+    atexit.register(shutil.rmtree, home, True)
+    os.environ["HOME"] = home
 
 
 def select(tests_dir, tiers, patterns):
@@ -166,6 +182,7 @@ def main(argv):
     a = parse_args(argv)
     os.environ["WK_TEST_TIERS"] = ",".join(a.tiers)
     if "live" not in a.tiers:
+        isolate_from_this_machine()
         shim_machine_tools()
     for root in (a.tests.resolve().parent, REPO):
         if str(root) not in sys.path:

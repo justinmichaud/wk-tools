@@ -26,12 +26,14 @@ esac
     def test_dry_run_prints_its_plan_and_says_nothing_was_written(self):
         img = self.tmp / "fake.img"
         img.write_text("not a real image, just bytes\n")
+        key = self.tmp / "id_ed25519.pub"
+        key.write_text("ssh-ed25519 AAAA wk-selftest\n")
         with stub_path({"ssh": self._SSH, "tailscale": TAILSCALE_KNOWS_NOTHING}) as binp, \
                 scratch_dir() as store:
             cp = run(
                 "sysimage", "write", "--from", str(img),
                 "--disk", f"rpi5:/dev/sd{rand_suffix(2)}", "--dry-run",
-                env={"PATH": f"{binp}:{os.environ['PATH']}", "WK_STORE": str(store)},
+                env={"PATH": f"{binp}:{os.environ['PATH']}", "WK_STORE": str(store), "WK_IMAGE_KEY": str(key)},
             )
         out = cp.stdout
         self.assertEqual(cp.returncode, 0, out)

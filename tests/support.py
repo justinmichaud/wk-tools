@@ -58,7 +58,6 @@ NO_SECRETS = tempfile.mkdtemp(prefix="wk-test-no-secrets-")
 atexit.register(shutil.rmtree, NO_SECRETS, True)
 
 NO_STATE = tempfile.mkdtemp(prefix="wk-test-no-state-")
-REAL_STATE = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
 atexit.register(shutil.rmtree, NO_STATE, True)
 
 NO_GITHUB = "http://127.0.0.1:1"

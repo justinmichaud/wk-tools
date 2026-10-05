@@ -1,11 +1,14 @@
 """tests/support.py's own environment scrub: every test that shells out reaches no machine and no config."""
 TIER = "lint"
 import os
+import pwd
 import stat
 import subprocess
 import unittest
 
 from tests.support import BLIND_FLEET, NO_CONFIG, NO_SECRETS, _clean_env, bash, stub_path
+from wk.resources import workspace_marker_path
+from wk.store import remote_marker_path
 
 
 class TestCleanEnvScrubsMachineState(unittest.TestCase):
@@ -31,6 +34,21 @@ class TestCleanEnvScrubsMachineState(unittest.TestCase):
     def test_a_callers_own_value_still_wins(self):
         env = _clean_env({"WK_HOST_SECRETS": "/explicit/scratch/secrets"})
         self.assertEqual(env["WK_HOST_SECRETS"], "/explicit/scratch/secrets")
+
+
+class TestNoTestSeesTheMachineItRunsOn(unittest.TestCase):
+    """tests/run.py's isolate_from_this_machine: the suite runs the same inside a workspace as on a host."""
+
+    def test_no_marker_a_test_reads_is_this_users(self):
+        real_home = pwd.getpwuid(os.getuid()).pw_dir
+        for env in (os.environ, _clean_env()):
+            for path in (workspace_marker_path(env), remote_marker_path(env)):
+                self.assertFalse(path.startswith(real_home + os.sep), path)
+                self.assertFalse(os.path.exists(path), path)
+
+    def test_no_workspace_variable_reaches_a_test(self):
+        given = {"WK_WORKSPACE", "WK_REPO", "WK_LOCAL_STORE", "WK_PROXY_SOCKET", "https_proxy", "CCACHE_DIR"}
+        self.assertFalse(given & set(os.environ))
 
 
 class TestNothingATestStartsReadsAStartupFile(unittest.TestCase):

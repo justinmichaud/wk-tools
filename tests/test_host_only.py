@@ -7,23 +7,12 @@ import shutil
 import subprocess
 import sys
 import unittest
-from pathlib import Path
 
 from tests.support import REPO, WkTest, fake_workspace, run, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import fleet, places  # noqa: E402
+from wk import fleet  # noqa: E402
 from wk.boot.driver import Driver  # noqa: E402
-
-
-class TestHostState(WkTest):
-    def test_no_host_marker_on_the_host(self):
-        if places.Registry(REPO).in_workspace():
-            self.skipTest("this machine is a workspace")
-        self.assertFalse(
-            (Path.home() / ".wk-workspace").exists(),
-            f"{Path.home()}/.wk-workspace exists on a host",
-        )
 
 
 class TestCommandsWithoutAMachine(WkTest):
@@ -171,7 +160,11 @@ class TestHandsOnArmingAndBench(WkTest):
     def test_bench_role_required_or_it_does_not_run(self):
         if not self._is_macos():
             self.skipTest("bare-metal bench mode is this Mac")
-        cp = run("bench", "staged", "--plan", "jetstream2.2", env={"WK_BENCH_ROOT": str(self.tmp / "bench")})
+        objc = self.tmp / "python-with-objc"
+        objc.write_text("#!/bin/sh\nexit 0\n")
+        objc.chmod(0o755)
+        env = {"WK_BENCH_ROOT": str(self.tmp / "bench"), "WK_BENCH_PYTHON": str(objc)}
+        cp = run("bench", "staged", "--plan", "jetstream2.2", env=env)
         self.assertNotEqual(cp.returncode, 0, "a run was accepted with no benchmark volume at all")
 
         stage = self.tmp / "bench" / "staged" / "20260101T000000Z-mac-release"
@@ -179,11 +172,11 @@ class TestHandsOnArmingAndBench(WkTest):
         (stage / "WebKitBuild" / "Release" / "MiniBrowser.app" / "Contents" / "MacOS").mkdir(parents=True)
         (stage / "stage.json").write_text('{"preset":"mac-release","plans":"jetstream2.2"}')
 
-        cp2 = run("bench", "staged", "--plan", "jetstream2.2", "--force", env={"WK_BENCH_ROOT": str(self.tmp / "bench")})
+        cp2 = run("bench", "staged", "--plan", "jetstream2.2", "--force", env=env)
         self.assertNotEqual(cp2.returncode, 0, "--force ran a benchmark in host mode")
         self.assertIn("host mode", cp2.stdout + cp2.stderr)
 
-        cp3 = run("bench", "staged", "--plan", "jetstream2.2", "--dry-run", env={"WK_BENCH_ROOT": str(self.tmp / "bench")})
+        cp3 = run("bench", "staged", "--plan", "jetstream2.2", "--dry-run", env=env)
         self.assertEqual(cp3.returncode, 1, "a dry run in host mode is a leg that would be refused")
         self.assertIn("--browser minibrowser --platform osx --plan jetstream2.2", cp3.stdout + cp3.stderr)
 
