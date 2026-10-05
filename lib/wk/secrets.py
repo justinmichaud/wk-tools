@@ -6,7 +6,7 @@ import os
 import shlex
 import sys
 
-from wk import act, images, project, repos
+from wk import act, claudelogin, images, project, repos
 from wk.act import debug, die, warn
 from wk.machine import Local
 from wk.store import Store, in_vm, remote_marker_path
@@ -15,9 +15,10 @@ AGENT_SOCK = "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/ssh-agent.sock"
 CONTAINER_SOCK = "/run/wk/ssh-agent.sock"
 PUBLIC = ("ssh_config", "github-user", "bugzilla-user")
 PUBLISHED = ("ssh_config", "github-user", "view/container/ssh_config")
-AGENT_SECRETS = (("claude", "claude-token", ".wk-agent-token", "CLAUDE_CODE_OAUTH_TOKEN", "value", "remote"),
-                 ("litellm", "litellm-key", ".wk-litellm-key", "LITELLM_API_KEY", "value", "container,vm,remote"),
-                 ("claude-login", ".credentials.json", ".claude/.credentials.json", "-", "file", "container,vm"))
+AGENT_SECRETS = (("claude", "claude-token", ".wk-agent-token", "CLAUDE_CODE_OAUTH_TOKEN", "remote"),
+                 ("litellm", "litellm-key", ".wk-litellm-key", "LITELLM_API_KEY", "container,vm,remote"))
+LOGIN_KINDS = ("container", "vm")
+LOGIN_DIR = ".wk-claude"
 CONFIG_HEADER = """# wk: written by 'wk key push on|off' (lib/wk/secrets.py). One alias per deploy key, because GitHub takes one
 # deploy key per repository and every repository lives on github.com. The identity is a public half; the private one is
 # in an ssh-agent outside this workspace, and whether it is loaded there is what 'wk key push' switches.
@@ -97,6 +98,7 @@ class Secrets:
     def cred_path(self, name):
         home = self.env.get("HOME") or os.path.expanduser("~")
         fixed = {"github-pat": self.github_pat_path, "bugzilla-api-key": self.bugzilla_key_path,
+                 "claude-login": self.store.keyring_claude_login,
                  "ntfy": self.store.keyring_ntfy_topic,
                  "tailnet": lambda: self.env.get("WK_TS_AUTHKEY") or os.path.join(home, ".config", "wk", "tailscale-authkey"),
                  "tailnet-api": lambda: self.env.get("WK_TS_API_SECRET") or os.path.join(home, ".config", "wk", "tailscale-api-key")}
@@ -105,9 +107,9 @@ class Secrets:
         row = next((r for r in self.agent_secrets() if r[0] == name), None)
         if row is None:
             return None
-        if "remote" in row[5].split(",") and os.path.isfile(remote_marker_path(self.env)):
+        if "remote" in row[4].split(",") and os.path.isfile(remote_marker_path(self.env)):
             return os.path.join(home, row[2])
-        return os.path.join(self.store.keyring_agent_rw_dir() if row[4] == "file" else self.store.keyring_dir(), row[1])
+        return os.path.join(self.store.keyring_dir(), row[1])
 
     def read(self, path):
         """Every byte, "" when absent, None when lib/secretfile.py refused it (a link or a shared inode)."""
@@ -145,10 +147,7 @@ class Secrets:
         return self.check_value(name, value, "--path", path)
 
     def agent_secret_remedy(self, name):
-        """What this machine's store owes a workspace missing <name>; a `file` row is the Claude CLI's own login, made in a workspace."""
-        if any(r[0] == name and r[4] == "file" for r in self.agent_secrets()):
-            return ("no claude.ai login in the directory every workspace here shares: /login in a 'wk ai claude' session "
-                    "makes it, and the Claude CLI renews it")
+        """What this machine's store owes a workspace missing <name>."""
         if not self.cred_stored(name):
             return "this machine's store holds no %s: 'wk key set %s' puts one there" % (name, name)
         verdict, _, detail = self.cred_verdict(name).partition("\t")
@@ -265,6 +264,18 @@ class Secrets:
             ok = guest.pat_converge(self.root, self.env, self.machine) and ok
         return ok
 
+    def claude_login_migrate(self):
+        """Once, by rename: agent-rw, where the login was, is still mounted by an older podman machine, container or guest."""
+        old, new = os.path.join(self.store.keyring_agent_rw_dir(), ".credentials.json"), self.cred_path("claude-login")
+        if not self.machine.exists(old):
+            return "unchanged"
+        if self.machine.exists(new):
+            warn("%s is an older copy of the claude.ai login, readable where agent-rw is mounted; %s is the one the injector "
+                 "holds:  rm %s" % (old, new, old))
+            return "both"
+        self.ensure_dir(os.path.dirname(new), "0700")
+        return "moved" if self.machine.act_run(["mv", old, new]).ok else "failed"
+
     def ensure_dir(self, path, mode):
         if not self.made_dir(path):
             self.machine.mkdir(path)
@@ -336,7 +347,7 @@ class Secrets:
             names = []
         want.update({f: "0644" for f in names if f.startswith("build_key_") and f.endswith(".pub")})
         for row in self.agent_secrets():
-            if row[4] == "value" and kind in row[5].split(","):
+            if kind in row[4].split(","):
                 want[row[1]] = "0600"
         return want
 
@@ -390,13 +401,20 @@ def rows(table):
 def main(argv):
     parser = argparse.ArgumentParser(prog="python3 -m wk.secrets")
     sub = parser.add_subparsers(dest="verb", required=True)
-    for verb in ("push-keys", "agent-secrets", "pat-converge"):
+    for verb in ("push-keys", "agent-secrets", "pat-converge", "claude-placeholder", "claude-login-migrate"):
         sub.add_parser(verb)
     sub.add_parser("box-alias-blocks")
     a = parser.parse_args(argv)
     if a.verb == "pat-converge":
         s = Secrets(images.root())
         return 0 if s.cred_sync(s.machine_read_pat(), "github-pat") else 1
+    if a.verb == "claude-login-migrate":
+        said = Secrets(images.root()).claude_login_migrate()
+        print(said)
+        return 1 if said == "failed" else 0
+    if a.verb == "claude-placeholder":
+        sys.stdout.write(claudelogin.placeholder())
+        return 0
     sys.stdout.write(box_alias_blocks(forks()) if a.verb == "box-alias-blocks" else
                      rows([k, alias] for k, _, alias in push_keys()) if a.verb == "push-keys" else rows(AGENT_SECRETS))
     return 0

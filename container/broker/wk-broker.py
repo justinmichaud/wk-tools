@@ -6,18 +6,16 @@ import asyncio
 import json
 import os
 import re
-import shutil
 import signal
 import socket
-import subprocess
 import sys
 import time
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "lib"))
-from wk import act as wkact, fleet as wkfleet, images as wkimages, kv as wkkv, places as wkplaces, reach as wkreach  # noqa: E402
+from wk import act as wkact, fleet as wkfleet, images as wkimages, kv as wkkv, publish as wkpublish, reach as wkreach  # noqa: E402
 from wk.boot import cli as bootcli  # noqa: E402
-from wk.machine import Local, replace_file  # noqa: E402
+from wk.machine import replace_file  # noqa: E402
 from wk.notify import sd_notify  # noqa: E402
 from wk.store import Store  # noqa: E402
 
@@ -549,33 +547,6 @@ class Broker:
                 pass
 
 
-async def publish_into_machine(machine, local_sock):
-    # On macOS the containers mount the podman guest's runtime directory, so the socket is carried in over a remote unix-socket forward the Mac dials itself; the guest's sshd will not replace an existing one, so remove it.
-    while True:
-        try:
-            rec = wkplaces.podman_vm(Local(), machine, timeout=30)
-            if rec is None:
-                raise OSError(f"podman machine '{machine}' is not there")
-            opts, dest = wkplaces.podman_vm_route(rec)
-            base = ["ssh", "-q", *opts, "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=3",
-                    "-o", "ExitOnForwardFailure=yes", dest]
-            rt = subprocess.run(
-                base + ["printf %s \"$XDG_RUNTIME_DIR\""], capture_output=True, timeout=30
-            ).stdout.decode().strip()
-            if not rt:
-                raise OSError("the machine reported no XDG_RUNTIME_DIR")
-            remote = f"{rt}/wk/broker.sock"
-            subprocess.run(base + [f"mkdir -p {rt}/wk && rm -f {remote}"], timeout=30)
-            log(f"publishing {local_sock} into machine '{machine}' at {remote}")
-            argv = base[:-1] + ["-N", "-R", f"{remote}:{local_sock}", base[-1]]
-            proc = await asyncio.create_subprocess_exec(*argv)
-            rc = await proc.wait()
-            log(f"the forward into '{machine}' ended (rc={rc}); re-establishing")
-        except Exception as exc:                            # noqa: BLE001
-            log(f"cannot publish into machine '{machine}': {exc}")
-        await asyncio.sleep(5)
-
-
 def socket_path():
     if os.environ.get("WK_BROKER_SOCKET"):
         return os.environ["WK_BROKER_SOCKET"]
@@ -606,14 +577,7 @@ async def main():
     tasks = [server.serve_forever()]
     publish = os.environ.get("WK_BROKER_PUBLISH_MACHINE")
     if publish:
-        # launchd's minimal PATH does not carry podman's pkg location.
-        if shutil.which("podman"):
-            tasks.append(publish_into_machine(publish, path))
-        else:
-            log(f"asked to publish into podman machine '{publish}' but there is no "
-                f"podman on PATH ({os.environ.get('PATH')}) -- no workspace in that "
-                f"machine can see this broker. Fix the PATH in the LaunchAgent: "
-                f"./setup --stage broker")
+        tasks.append(wkpublish.publish(publish, path, "wk/broker.sock", log, "broker"))
     else:
         log("not publishing into a podman machine: the containers here share "
             "this machine's runtime directory, so the socket above is already "

@@ -4,9 +4,36 @@ unit_exists() { # <unit name>
     [ -f "$WK_ROOT/host/units/$1" ] || die "no unit body for '$1' in $WK_ROOT/host/units"
 }
 
-unit_render() { # <unit name> <tools root over there> <store over there>
+unit_render() { # <unit name> <tools root over there> <store over there>; WK_UNIT_CLAUDE_LOGIN, the login the injector holds
     unit_exists "$1"
-    sed -e "s|@WK_ROOT@|$2|g" -e "s|@WK_STORE@|$3|g" "$WK_ROOT/host/units/$1"
+    sed -e "s|@WK_ROOT@|$2|g" -e "s|@WK_STORE@|$3|g" -e "s|@WK_CLAUDE_LOGIN@|${WK_UNIT_CLAUDE_LOGIN:-}|g" "$WK_ROOT/host/units/$1"
+}
+
+# The one stamp of a daemon setup restarts when it changes: its program and every module of this tree that imports.
+program_stamp() { # <program, relative to WK_ROOT>
+    python3 - "$WK_ROOT" "$1" <<'PY'
+import modulefinder, os, sys, zlib
+
+root, prog = sys.argv[1], sys.argv[2]
+lib = os.path.join(root, "lib")
+
+
+class InTree(modulefinder.ModuleFinder):
+    def find_module(self, name, path, parent=None):
+        return super().find_module(name, [lib] if path is None else path, parent)
+
+
+files = {os.path.join(root, prog)}
+if prog.endswith(".py"):
+    f = InTree([lib])
+    f.run_script(os.path.join(root, prog))
+    files |= {m.__file__ for m in f.modules.values() if m.__file__}
+crc = 0
+for p in sorted(files):
+    with open(p, "rb") as fh:
+        crc = zlib.crc32(fh.read(), crc)
+print(crc)
+PY
 }
 
 unit_program() { # <unit name>
@@ -59,7 +86,7 @@ unit_start() { # <unit name> <root> <store> <consequence> <journal prefix> <run.
     prog=$(unit_program "$name")
     if [ -n "$prog" ]; then
         stamp="$store/.${name%.service}.program"
-        want=$(cksum < "$WK_ROOT/$prog" | awk '{print $1}')
+        want="$(program_stamp "$prog")-$(unit_render "$name" "$root" "$store" | cksum | awk '{print $1}')"
         have=$("$@" "cat $stamp 2>/dev/null" || true)
     fi
 
@@ -69,7 +96,7 @@ unit_start() { # <unit name> <root> <store> <consequence> <journal prefix> <run.
         elif [ "$have" = "$want" ]; then
             unchanged "$name ready"
         else
-            changed "would restart $name (its program changed)"
+            changed "would restart $name (its program or unit changed)"
         fi
         return 0
     fi
@@ -97,5 +124,5 @@ unit_start() { # <unit name> <root> <store> <consequence> <journal prefix> <run.
         return 0
     fi
     "$@" "echo $want > $stamp"
-    changed "restarted $name (program changed)"
+    changed "restarted $name (program or unit changed)"
 }

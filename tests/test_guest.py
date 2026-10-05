@@ -10,12 +10,12 @@ import unittest
 from unittest import mock
 
 from tests.killpoints import converges
-from tests.support import REPO, live_selected
+from tests.support import REPO, live_selected, owed
 from tests.test_wk_secrets import SECRETFILE, SecretsTest, World, quiet
 from tests.test_wk_places import DriverConformance
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import agents, guest, places, secrets, tools  # noqa: E402
+from wk import agents, doctor, guest, places, secrets, tools, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Killed, Result  # noqa: E402
@@ -185,15 +185,15 @@ class TestBothArms(GuestTest):
         self.assertEqual(BASH_STEPS, self.steps)
         self.assertEqual([1], self.notes, "the login is stated once, on the one exit")
 
-    def test_a_stopped_guest_is_admitted_then_booted_filtered_with_both_shares(self):
+    def test_a_stopped_guest_is_admitted_then_booted_filtered_with_the_mirror_alone(self):
         self.w.state = "stopped"
         ip, err = self.run_start()
         self.assertEqual(IP, ip, err)
         run = self.w.spawned(" run ")[0]
         self.assertIn("--net-softnet-block=0.0.0.0/0", run)
         self.assertIn("--net-softnet-allow=%s/32" % ADDR, run)
-        self.assertIn("--dir=agent-rw:%s" % (self.tmp + "/store/agent-rw"), run)
-        self.assertIn("--dir=mirror:%s:ro,tag=wk-mirror" % os.path.dirname(self.vm.store.mirror_dir()), run)
+        self.assertEqual(["--dir=mirror:%s:ro,tag=wk-mirror" % os.path.dirname(self.vm.store.mirror_dir())],
+                         [a for a in run if a.startswith("--dir")])
         self.assertEqual("wk-demo", run[-1])
         self.assertTrue(run[1].startswith("PATH=/usr/local/bin:"), "tart finds softnet through PATH")
         self.assertNotIn(self.vmdir + "/demo.unfiltered", self.w.files)
@@ -357,7 +357,52 @@ class TestTheDaemons(GuestTest):
         self.assertIn("WK_PROXY_TCP=%s:3128" % ADDR, argv)
         self.assertIn("WK_INJECT_SOCK=%s/github-inject.sock" % self.vmdir, argv)
         self.assertIn(self.vmdir + "/proxy.pid", self.w.files)
-        self.assertEqual(1, len(self.w.spawned("github-inject.py")), "the injector goes up ahead of the proxy")
+        self.assertEqual([], self.w.spawned("github-inject.py"), "launchd keeps the injector")
+
+    def test_an_injector_that_does_not_answer_is_named_with_its_setup_stage(self):
+        ok, err = quiet(self.host().start_inject)
+        self.assertFalse(ok)
+        self.assertIn("./setup --stage inject", err)
+        self.w.serving[999] = self.vmdir + "/github-inject.sock"
+        self.w.pids.add(999)
+        self.w._set_file(self.vmdir + "/github-inject.sock", "")
+        ok, err = quiet(self.host().start_inject)
+        self.assertTrue(ok, err)
+        self.assertNotIn("not running", err)
+
+    def test_an_injector_wk_start_spawned_is_named_by_gc_and_stopped_by_setup(self):
+        pidfile = self.vmdir + "/github-inject.pid"
+        self.w.pids.add(555)
+        self.w._set_file(pidfile, "555\n")
+        self.w.answer(["ps", "-o", "command=", "-p", "555"], out="/usr/bin/python3 /t/container/proxy/github-inject.py\n")
+        self.assertEqual([("inject", None, "./setup --stage inject")], [(r.kind, r.take, r.flag) for r in guest.rubble(self.vm)])
+        self.assertTrue(quiet(self.host().retire_spawned_inject)[0])
+        self.assertIn(("kill", 555, 15), self.w.effects)
+        self.assertNotIn(pidfile, self.w.files)
+        self.assertEqual([], guest.rubble(self.vm))
+        self.assertFalse(quiet(self.host().retire_spawned_inject)[0])
+
+    def test_a_pidfile_naming_another_process_stops_nothing_and_gc_takes_it(self):
+        pidfile = self.vmdir + "/github-inject.pid"
+        self.w.pids.add(556)
+        self.w._set_file(pidfile, "556\n")
+        self.w.answer(["ps", "-o", "command=", "-p", "556"], out="/usr/bin/vim\n")
+        (row,) = guest.rubble(self.vm)
+        self.assertIsNotNone(row.take)
+        self.assertFalse(quiet(self.host().retire_spawned_inject)[0])
+        self.assertNotIn(("kill", 556, 15), self.w.effects)
+        self.assertNotIn(pidfile, self.w.files)
+
+    def test_the_launch_agent_names_the_injectors_files_and_the_login_it_holds(self):
+        import plistlib
+        doc = plistlib.loads(guest.inject_plist(self.host(), "com.wk.inject", "/log", "/bin").encode())
+        env = doc["EnvironmentVariables"]
+        self.assertEqual(self.vmdir + "/github-inject.sock", env["WK_INJECT_SOCK"])
+        self.assertEqual(self.vmdir + "/claude-inject.sock", env["WK_INJECT_PLAIN_SOCK"])
+        self.assertEqual(guest.Host(self.vm).secrets.cred_path("claude-login"), env["WK_INJECT_CLAUDE_LOGIN"])
+        self.assertEqual(self.vm.store.podman_machine(), env["WK_INJECT_PUBLISH_MACHINE"])
+        self.assertTrue(doc["ProgramArguments"][-1].endswith("container/proxy/github-inject.py"))
+        self.assertTrue(doc["KeepAlive"])
 
     def test_a_bridge_that_never_gets_its_address_starts_no_proxy(self):
         self.w.bridge = False
@@ -392,12 +437,13 @@ class TestTheDaemons(GuestTest):
                 self.ready()
                 self.assertEqual(spawns, len(self.w.spawned("wk-proxy.py")))
 
-    def test_a_guests_wall_rows_name_start_as_the_remedy_for_every_daemon(self):
+    def test_a_guests_wall_rows_name_each_daemons_remedy(self):
         from wk import wall
         w = wall.Wall(str(REPO), self.vm, "demo", self.w)
         with mock.patch.object(wall.Wall, "inside", lambda self, cmd: "000"):
-            for rows in (w.github(), w.github_read(), w.bugzilla_read()):
-                self.assertEqual("wk start demo", rows[0][2], rows)
+            self.assertEqual("wk start demo", w.github()[0][2])
+            for rows in (w.github_read(), w.bugzilla_read()):
+                self.assertIn("./setup --stage inject", rows[0][2], rows)
 
     def test_a_proxy_older_than_its_source_is_stopped_and_started_again(self):
         self.w.pids.add(777)
@@ -422,7 +468,7 @@ class TestTheDaemons(GuestTest):
         return quiet(self.host().start_proxy)
 
     def test_a_daemon_whose_pidfile_a_kill_lost_is_replaced_not_left_running(self):
-        for word, pidfile in (("wk-proxy.py", "proxy.pid"), ("github-inject.py", "github-inject.pid")):
+        for word, pidfile in (("wk-proxy.py", "proxy.pid"),):
             with self.subTest(daemon=word):
                 self.setUp()
                 ok, err = self.killed_before_the_pidfile(pidfile)
@@ -450,6 +496,40 @@ class TestTheDaemons(GuestTest):
         self.assertTrue(quiet(h.start_agent)[0])
         self.assertTrue(quiet(h.start_agent)[0])
         self.assertEqual(1, len(self.w.spawned("ssh-agent")))
+
+
+FAKE_LAUNCHCTL = """#!/bin/sh
+held() { for f in "$WK_FAKE_LOCKS"/claude-login@*.lock; do [ -L "$f" ] && { echo held; return; }; done; echo free; }
+case "$1" in
+    bootout) echo "bootout $(held)" >> "$WK_FAKE_LOG"; echo 3 > "$WK_FAKE_LEFT" ;;
+    print) n=$(cat "$WK_FAKE_LEFT" 2>/dev/null || echo 0); echo "print $n" >> "$WK_FAKE_LOG"
+           [ "$n" -gt 0 ] || exit 1; echo $((n - 1)) > "$WK_FAKE_LEFT" ;;
+    bootstrap) echo "bootstrap $(held)" >> "$WK_FAKE_LOG" ;;
+esac
+"""
+
+
+class TestTheInjectorsRestart(unittest.TestCase):
+    """launchd's restart of the Mac's injector, against a launchctl that keeps the label for three prints after a bootout."""
+
+    def test_it_boots_out_under_the_logins_lock_and_bootstraps_once_launchd_lets_go(self):
+        from types import SimpleNamespace
+        from wk.clock import Clock
+        from wk.machine import Local
+        d = tempfile.mkdtemp(prefix="wk-test-restart-")
+        self.addCleanup(__import__("shutil").rmtree, d, True)
+        login, log = os.path.join(d, "claude-login", ".credentials.json"), os.path.join(d, "log")
+        with open(os.path.join(d, "launchctl"), "w") as f:
+            f.write(FAKE_LAUNCHCTL)
+        os.chmod(os.path.join(d, "launchctl"), 0o755)
+        host = SimpleNamespace(machine=Local(), clock=Clock(), secrets=SimpleNamespace(
+            cred_path=lambda name: login, ensure_dir=lambda path, mode: os.makedirs(path, exist_ok=True)))
+        env = {"PATH": d + os.pathsep + os.environ["PATH"], "WK_FAKE_LOG": log, "WK_FAKE_LEFT": os.path.join(d, "left"),
+               "WK_FAKE_LOCKS": os.path.dirname(login)}
+        with mock.patch.dict(os.environ, env):
+            self.assertTrue(guest.inject_restart(host, "com.wk.inject", "/p.plist"))
+        with open(log) as f:
+            self.assertEqual(["bootout held", "print 3", "print 2", "print 1", "print 0", "bootstrap free"], f.read().splitlines())
 
 
 class TestTheForward(GuestTest):
@@ -627,6 +707,17 @@ class TestTheLiveGuest(_LiveGuest):
                 r = self.ask(script)
                 self.assertEqual(reaches, r.ok, r.out + r.err)
 
+    @owed("live inject.claude_login[vm]: the CLI accepting the placeholder and the host injector's swap are measured only "
+          "against the real CLI and api.anthropic.com")
+    def test_inject_claude_login(self):
+        """`live inject.claude_login[vm]`: the guest holds the placeholder and no token, and a session answers through the
+        host's injector."""
+        vm, ws = self.found
+        rows = wall.Wall(str(REPO), vm, ws, vm.machine).claude_login()
+        self.assertEqual([], [r for r in rows if r[0] != doctor.OK], rows)
+        r = self.ask("claude -p 'Reply with the single word OK.'")
+        self.assertIn("OK", r.out, r.err)
+
     def test_vm_shared_mirror(self):
         """`live vm.shared_mirror`: the checkout is --shared off the mirror share, and its alternates resolve."""
         vm, ws = self.found
@@ -638,16 +729,12 @@ class TestTheLiveGuest(_LiveGuest):
 
 class TestTheLiveRemount(_LiveGuest):
     def test_sync_guest_remount(self):
-        """`live sync.guest_remount`: after the remount the guest reads the host mirror's main as the host does, and
-        agent-rw, on the automount tag, is the mount it was."""
+        """`live sync.guest_remount`: after the remount the guest reads the host mirror's main as the host does."""
         vm, ws = self.found
         host = vm.machine.run(["git", "-C", vm.store.mirror_dir(), "rev-parse", "refs/heads/main"])
-        rw = vm.exec(ws, ["sh", "-c", "mount | grep -F %s" % shlex.quote(" on %s (" % places.GUEST_SHARES)], timeout=60)
         self.assertEqual(vm.remount_mirror(ws), "")
         r = vm.exec(ws, ["git", "-C", vm.mirror_dir(), "rev-parse", "refs/heads/main"], timeout=60)
         self.assertEqual((r.ok, r.out.strip()), (True, host.out.strip()), r.err)
-        self.assertEqual(rw.out, vm.exec(ws, ["sh", "-c", "mount | grep -F %s" % shlex.quote(" on %s (" % places.GUEST_SHARES)],
-                                         timeout=60).out)
 
 
 class TestTheLiveWayIn(_LiveGuest):

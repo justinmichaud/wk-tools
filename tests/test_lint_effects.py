@@ -24,6 +24,7 @@ NOT_STATE = {
     "lib/wk/mac.py": "`python3 -`: the program a Machine runs on the Mac (autorun's `sudo wkmac display-mode --declare`); the effect is that act_run",
     "lib/wk/pgo.py": "`python3 -m wk.pgo`: a step's tool writing the output its caller named",
     "lib/wk/bench/cli.py": "copies into its own temporary directory",
+    "lib/wk/publish.py": "a host daemon's socket forward into the podman machine, held for the daemon's life",
 }
 
 PROCESS = re.compile(r"\bsubprocess\.(run|Popen|call|check_call|check_output)\b|\bos\.(exec\w*|system|spawn\w*|posix_spawn\w*|popen)\(")
@@ -32,6 +33,7 @@ FORCED = {
     "lib/wk/dispatch.py": "the dispatcher starts the command it resolved under --dry-run too, since that command is what honours it",
     "lib/wk/places.py": "the ProxyCommand exec is the transport a dry run's reads also travel",
     "lib/wk/mac.py": "a program sent whole to a Mac's `python3 -`, where no wk package is importable",
+    "lib/wk/publish.py": "a daemon's (the broker's, the injector's) forward, outside any wk command and its dry run",
 }
 
 

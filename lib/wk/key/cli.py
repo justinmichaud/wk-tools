@@ -44,7 +44,7 @@ class Key(Creds, DeployKeys, Election, Check):
                 warn("%s was left exactly as it is -- this machine's own credentials are still set up" % peers)
         left = "" if self.converge_keys() else "the deploy keys"
         for name in self.settable():
-            ok = self.fleet_cred(name) if self.fleet_on else self.local_cred(name)
+            ok = self.fleet_cred(name) if self.fleet_on and not self.alone(name) else self.local_cred(name)
             if not ok:
                 left += " " + name
         if left:
@@ -103,6 +103,8 @@ class Key(Creds, DeployKeys, Election, Check):
             die("usage: wk key give <key>|<name>   (it prints on stdout, for the workstation electing one to take)")
         if what in self.key_names():
             val = self.push_key(what)
+        elif what in self.settable() and self.alone(what):
+            die("%s is held by this machine alone and never given to another: %s" % (what, self.rule(what, "forbids")))
         elif what in self.settable():
             val = self.sec.cred_read(what)
         else:

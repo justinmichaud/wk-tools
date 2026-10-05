@@ -685,7 +685,7 @@ class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
             client_ctx = ssl.create_default_context(cafile=str(d / "ca.pem"))
             m.INJECT_PORT = port
             injector = m.Injector(str(pat), str(d / "read-pat"), str(d / "bz-key"),
-                                  client_ctx)
+                                  m.Holder(str(d / "claude-login")), client_ctx)
 
             srv_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             srv_ctx.load_cert_chain(chain, str(d / "certs" / "leaf.key"))

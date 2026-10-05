@@ -229,6 +229,14 @@ class TestEveryCredentialIsTheFleets(_Fleet):
             with self.subTest(name=name):
                 self.assertIn(name, asked, cp.stdout + cp.stderr)
 
+    def test_the_claude_ai_login_is_neither_elected_nor_sent(self):
+        self.key("ensure")
+        self.registered()
+        cp = self.setup(env=self.fleet_env(verdict="ok\tit works\n    fingerprint: elsewhere\n", give="peer-login\n"))
+        calls = self.calls()
+        self.assertNotIn("key verdict claude-login", calls, cp.stdout + cp.stderr)
+        self.assertEqual([], [c for c in calls if "claude-login" in c], calls)
+
     def test_one_no_workstation_accepts_is_not_written_over_a_peers(self):
         """No terminal to ask for a fresh one: the peer keeps what it has and the command is named."""
         self.key("ensure")
@@ -251,6 +259,11 @@ class TestCheckAsksEachWorkstationWhatItHolds(_Fleet):
             with self.subTest(name=name):
                 self.assertRegex(out, r"peerbox %s\s+it reaches exactly the forks"
                                  % name)
+
+    def test_no_peer_is_asked_about_the_claude_ai_login(self):
+        cp = self.check(verdict="ok\tit reaches exactly the forks\n")
+        self.assertNotIn("peerbox claude-login", cp.stdout + cp.stderr)
+        self.assertNotIn("key verdict claude-login", self.calls())
 
     def test_a_peer_holding_none_of_the_fleets_is_a_fault_with_one_remedy(self):
         cp = self.check(verdict="absent\tnothing stored\n")
@@ -309,6 +322,15 @@ class TestGiveIsTheOtherHalfOfAdopt(_Shared):
         (self.held / "github-pat").chmod(0o600)
         cp = self.key("give", "github-pat")
         self.assertEqual(GOOD_PAT, cp.stdout.strip())
+
+    def test_the_claude_ai_login_is_never_given(self):
+        login = self.tmp / "store" / "claude-login" / ".credentials.json"
+        login.parent.mkdir(parents=True)
+        login.write_text('{"claudeAiOauth": {"accessToken": "sk-ant-oat01-x"}}\n')
+        cp = self.key("give", "claude-login")
+        self.assertNotEqual(0, cp.returncode)
+        self.assertNotIn("sk-ant", cp.stdout)
+        self.assertIn("never given to another", cp.stdout + cp.stderr)
 
 
 if __name__ == "__main__":

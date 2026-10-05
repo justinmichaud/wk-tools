@@ -25,8 +25,8 @@
 #
 # A Claude session on a terminal starts with Remote Control on, named after
 # the workspace (`claude --remote-control <ws>`), so claude.ai/code and the
-# mobile app can join it. It needs the claude.ai login, which `/login` in any
-# session makes and every container and guest here shares; a build box is given
+# mobile app can join it. It needs the claude.ai login the credential injector
+# holds (`wk key set claude-login`), a placeholder in here; a build box is given
 # the `claude setup-token` credential instead, which Remote Control refuses, so
 # a session there starts without it and says so.
 #
@@ -181,11 +181,11 @@ class Ai:
         softnet = guest.softnet_bin(self.env)
         if not unfiltered and self.machine.run(["test", "-x", softnet]).ok:
             info("'%s' is a macOS VM: egress is filtered on the host by Softnet,\n  default-deny except the wk-proxy address. Of "
-                 "the host filesystem it reaches\n  one directory, the claude.ai login every container mounts too, and the\n"
+                 "the host filesystem it reaches\n  only the mirror, read-only, and the\n"
                  "  guest is disposable." % name)
         elif unfiltered:
-            warn("WK_VM_UNFILTERED=1: '%s' has the open network. Of the host filesystem\n  it still reaches only the login "
-                 "directory, and the guest is still\n  disposable -- but that is the whole of the boundary right now." % name)
+            warn("WK_VM_UNFILTERED=1: '%s' has the open network. Of the host filesystem\n  it still reaches only the mirror, "
+                 "read-only, and the guest is still\n  disposable -- but that is the whole of the boundary right now." % name)
         else:
             barrier("softnet is not installed, so this guest's egress is not filtered.\n    Install it:  ./setup --stage softnet"
                     "   (needs a terminal)")
@@ -198,7 +198,7 @@ class Ai:
         """A person's Claude session, not the babysitter's `-p`; the setup token a driver is given wins over the login."""
         if self.agent != "claude" or not on_a_terminal():
             return []
-        if any(r[0] == "claude" and self.driver.kind in r[5].split(",") for r in secrets.agent_secrets()):
+        if any(r[0] == "claude" and self.driver.kind in r[4].split(",") for r in secrets.agent_secrets()):
             warn("Remote Control is off for this session: a %s place authenticates with the\n"
                  "  `claude setup-token` credential, which Remote Control refuses" % self.driver.kind)
             return []

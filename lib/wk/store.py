@@ -161,6 +161,10 @@ class Store:
     def keyring_agent_rw_dir(self):
         return os.path.join(os.path.dirname(self.keyring_dir()), "agent-rw")
 
+    def keyring_claude_login(self):
+        """Beside the keyring, where no podman machine, container or guest mount reaches."""
+        return os.path.join(os.path.dirname(self.keyring_dir()), "claude-login", ".credentials.json")
+
     def keyring_push_dir(self):
         return os.path.join(os.path.dirname(self.keyring_dir()), "push-keys")
 
@@ -305,6 +309,7 @@ def main(argv):
     p.parse_args(argv)
     s = Store()
     for k, v in (("WK_STORE", s.store_dir()), ("keyring_dir", s.keyring_dir()), ("keyring_agent_rw_dir", s.keyring_agent_rw_dir()),
+                 ("keyring_claude_login", s.keyring_claude_login()),
                  ("keyring_push_dir", s.keyring_push_dir()), ("mirror_parent", s.mirror_parent())):
         print("%s=%s" % (k, shlex.quote(v)))
     return 0

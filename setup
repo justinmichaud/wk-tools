@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bootstrap this machine. Idempotent: running it twice in a row must report no changes the second time, and it must never install software the host does not strictly need. Everything mutable belongs in a workspace, not here.
 #   ./setup              everything for this OS
-#   ./setup --stage X    just one stage (tools, settings, dotfiles, claude, sharing, machine, vmtools, softnet, sdk, broker, quiesce)
+#   ./setup --stage X    just one stage (tools, settings, dotfiles, claude, sharing, machine, vmtools, softnet, sdk, inject, broker, quiesce)
 #   ./setup --dry-run    report what would change (WK_DRY_RUN=1; host/macos/sharing.sh reads the same variable)
 
 set -euo pipefail
@@ -107,6 +107,7 @@ run_stage machine  "$HOST_DIR/machine.sh"
 run_stage vmtools  "$HOST_DIR/vmtools.sh"
 run_stage softnet  "$HOST_DIR/softnet.sh"
 run_stage sdk      "$HOST_DIR/sdk.sh"
+run_stage inject   "$HOST_DIR/inject.sh"   # after vmtools: it publishes the claude.ai login's socket into the podman machine
 run_stage broker   "$HOST_DIR/broker.sh"   # after sdk and vmtools: the broker publishes its socket into the podman machine on macOS, and binds beside the proxy the sdk stage started on Linux
 run_stage quiesce  "$WK_ROOT/admin/install.sh"
 [ -n "$WK_STAGE_FOUND" ] || die "no stage '$STAGE' -- ./setup -h lists them"

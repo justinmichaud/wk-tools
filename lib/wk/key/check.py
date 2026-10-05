@@ -52,7 +52,7 @@ class Check:
         with ThreadPoolExecutor(max_workers=16) as pool:
             key_jobs = [(m, [pool.submit(self.key_row, m, f[0], f[1]) for f in forks]) for m in self.workstations()]
             cred_jobs = [pool.submit(self.local_row, c) for c in creds]
-            peer_jobs = [pool.submit(self.peer_row, m, c) for m in peers for c in creds]
+            peer_jobs = [pool.submit(self.peer_row, m, c) for m in peers for c in creds if not self.alone(c)]
         ok, actions, held = True, [], []
 
         def replay(job):

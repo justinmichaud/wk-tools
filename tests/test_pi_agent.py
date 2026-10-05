@@ -26,34 +26,21 @@ CLAUDE_SHAPED = "sk-ant-oat01-" + PLACEHOLDER
 
 
 def secret_table():
-    """(name, store file, home file, variable, kind, delivery) per row."""
+    """(name, store file, home file, variable, delivery) per row."""
     from wk import secrets
     rows = [tuple(r) for r in secrets.AGENT_SECRETS]
-    assert rows and all(len(r) == 6 for r in rows), rows
-    assert all(r[4] in ("value", "file") for r in rows), rows
+    assert rows and all(len(r) == 5 for r in rows), rows
     return rows
 
 
 TABLE = secret_table()
 NAMES = [r[0] for r in TABLE]
 
-VALUE_ROWS = [r for r in TABLE if r[4] == "value"]
-FILE_ROWS = [r for r in TABLE if r[4] == "file"]
-VALUE_NAMES = [r[0] for r in VALUE_ROWS]
-
-CONTAINER_ROWS = [r for r in VALUE_ROWS if "container" in r[5].split(",")]
-NOT_CONTAINER_ROWS = [r for r in VALUE_ROWS if "container" not in r[5].split(",")]
+CONTAINER_ROWS = [r for r in TABLE if "container" in r[4].split(",")]
 
 
 def store_path(store, row):
-    return store / ("agent-rw" if row[4] == "file" else "secrets") / row[1]
-
-
-class TestTheTable(unittest.TestCase):
-    def test_a_file_row_names_no_variable(self):
-        for row in FILE_ROWS:
-            with self.subTest(name=row[0]):
-                self.assertEqual("-", row[3])
+    return store / "secrets" / row[1]
 
 
 class TestTheStoreIsByName(WkTest):
@@ -95,12 +82,6 @@ class TestTheStoreIsByName(WkTest):
                 self.assertEqual(f"{name}-{PLACEHOLDER}\n", self._sec(store).cred_read(name))
                 mode = store_path(store, row).stat().st_mode & 0o777
                 self.assertEqual(0o600, mode, oct(mode))
-
-    def test_a_file_row_is_read_whole_and_not_by_its_first_line(self):
-        store = self._store()
-        row = FILE_ROWS[0]
-        self._sh(f'printf "one\\ntwo\\n" | key_store {row[0]}', store)
-        self.assertEqual("one\ntwo\n", self._sec(store).cred_read(row[0]))
 
     def test_the_writable_directory_is_beside_the_secrets_one_never_inside(self):
         sec = self._sec(self._store())
@@ -151,7 +132,7 @@ class TestWkKeySet(WkTest):
                 cp = self._key(*args, store=store)
                 self.assertNotEqual(0, cp.returncode)
                 self.assertIn(args[-1], cp.stdout)
-                for name in VALUE_NAMES:
+                for name in NAMES:
                     self.assertIn(name, cp.stdout)
 
     def test_replacing_nothing_is_refused_and_names_the_remedy(self):
@@ -168,11 +149,6 @@ class TestWkKeySet(WkTest):
                 self.assertRegex(cp.stdout, r"%s\s+stored\s+\S.*\$%s" % (name, var))
                 self.assertNotIn(PLACEHOLDER, cp.stdout)
 
-    def test_the_login_the_cli_makes_is_not_set_here(self):
-        cp = self._key("set", FILE_ROWS[0][0])
-        self.assertNotEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("there is no credential called '%s'" % FILE_ROWS[0][0], cp.stdout)
-
     def test_a_stored_credential_that_breaks_its_rule_is_reported_non_zero(self):
         store = self._store(claude="sk-ant-api03-" + PLACEHOLDER)
         cp = self._key("set", "claude", store=store)
@@ -186,10 +162,9 @@ class TestWkKeySet(WkTest):
         self.assertIn("usage: wk key", cp.stdout)
 
 class TestAContainerLinksEveryName(WkTest):
-    """container/firstrun.sh links each value row a container gets, dangling until stored; a file row is not linked,
-    since the Claude CLI's rename on refresh would replace the link with a private copy."""
+    """container/firstrun.sh links each row a container gets, dangling until stored."""
 
-    def test_the_loop_links_every_container_row_and_no_file_row(self):
+    def test_the_loop_links_every_container_row(self):
         home = self.tmp / "home"
         home.mkdir()
         block = FIRSTRUN.split("_agent_secrets() {", 1)[1]
@@ -201,15 +176,12 @@ HOME={home}
 {block}
 ''')
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        for name, file_, home_file, var, _kind, _delivery in CONTAINER_ROWS:
+        for name, file_, home_file, var, _delivery in CONTAINER_ROWS:
             with self.subTest(name=name):
                 link = home / home_file
                 self.assertTrue(link.is_symlink(), f"{home_file} is not a link")
                 self.assertEqual(f"/secrets/{file_}", str(link.readlink()))
                 self.assertIn(f"wk key set {name}", cp.stdout)
-        for row in FILE_ROWS:
-            with self.subTest(name=row[0]):
-                self.assertFalse((home / row[2]).exists() or (home / row[2]).is_symlink(), row[2])
 
 
 class TestTheShellExportsEveryName(WkTest):
@@ -225,13 +197,13 @@ class TestTheShellExportsEveryName(WkTest):
     def _home(self, values=None):
         h = self.tmp / "home"
         h.mkdir(exist_ok=True)
-        for name, _file, home_file, _var, _kind, _delivery in VALUE_ROWS:
+        for name, _file, home_file, _var, _delivery in TABLE:
             if values and name in values:
                 (h / home_file).write_text(values[name] + "\n")
         return h
 
     def _values(self, shell, args, home):
-        script = "; ".join(f'echo "{r[3]}=${r[3]}"' for r in VALUE_ROWS)
+        script = "; ".join(f'echo "{r[3]}=${r[3]}"' for r in TABLE)
         cp = subprocess.run(
             [shell, *args, f'. "{RC}"; {script}'],
             cwd=str(REPO),
@@ -242,18 +214,18 @@ class TestTheShellExportsEveryName(WkTest):
         out = {}
         for line in cp.stdout.splitlines():
             k, _, v = line.partition("=")
-            if k in [r[3] for r in VALUE_ROWS]:
+            if k in [r[3] for r in TABLE]:
                 out[k] = v
         return out
 
     def test_every_shell_exports_every_one(self):
-        want = {r[0]: f"{r[0]}-{PLACEHOLDER}" for r in VALUE_ROWS}
+        want = {r[0]: f"{r[0]}-{PLACEHOLDER}" for r in TABLE}
         home = self._home(want)
         for what, (shell, args) in self.SHELLS.items():
             if not shutil.which(shell):
                 continue
             got = self._values(shell, args, home)
-            for name, _file, _home_file, var, _kind, _delivery in VALUE_ROWS:
+            for name, _file, _home_file, var, _delivery in TABLE:
                 with self.subTest(shell=what, name=name):
                     self.assertEqual(want[name], got.get(var))
 

@@ -637,6 +637,42 @@ class TestTheAgentKeys(_Anthropic):
         self.assertEqual("bad", verdict)
 
 
+class TestTheClaudeLogin(_Anthropic):
+    """A login document: its access token is asked about while it lasts, and its refresh token is never spent here."""
+
+    def login(self, expires_at, access="sk-ant-oat01-abc", refresh="sk-ant-ort01-def"):
+        return self.check("claude-login", json.dumps({"claudeAiOauth": {"accessToken": access, "refreshToken": refresh,
+                                                                        "expiresAt": expires_at}}),
+                          env=self.anthropic_env())
+
+    def test_one_anthropic_accepts_is_ok_and_asked_with_its_access_token(self):
+        verdict, detail = self.login(4102444800000)
+        self.assertEqual("ok", verdict, detail)
+        self.assertEqual("Bearer sk-ant-oat01-abc", FakeAnthropic.seen[0][2])
+
+    def test_one_anthropic_refuses_is_bad(self):
+        FakeAnthropic.status = 401
+        verdict, detail = self.login(4102444800000)
+        self.assertEqual("bad", verdict, detail)
+        self.assertIn("another holder", detail)
+
+    def test_an_expired_one_is_unverified_and_nothing_is_asked(self):
+        verdict, detail = self.login(1)
+        self.assertEqual("unverified", verdict, detail)
+        self.assertEqual([], FakeAnthropic.seen)
+
+    def test_what_is_not_a_login_is_refused_without_a_request(self):
+        for value, why in (("sk-ant-oat01-abc", "not JSON"), ("{}", "no claudeAiOauth"),
+                           (json.dumps({"claudeAiOauth": {"accessToken": "a", "expiresAt": 1}}), "no refreshToken"),
+                           (json.dumps({"claudeAiOauth": {"accessToken": "wk-injects-this", "refreshToken": "wk-injects-this",
+                                                          "expiresAt": 1}}), "placeholder")):
+            with self.subTest(why=why):
+                verdict, detail = self.check("claude-login", value, env=self.anthropic_env())
+                self.assertEqual("bad", verdict, detail)
+                self.assertIn(why, detail)
+        self.assertEqual([], FakeAnthropic.seen)
+
+
 class TestTheTailnetKeys(_Rules):
     def test_an_auth_key_is_accepted_and_what_it_cannot_prove_is_said(self):
         verdict, detail = self.check("tailnet", "tskey-auth-k1-abc")
@@ -695,8 +731,8 @@ class TestOneTableForEveryCredential(_Rules):
 
     def test_every_credential_wk_stores_has_a_rule(self):
         from wk import secrets
-        held = ["github-pat", "bugzilla-api-key", "tailnet", "tailnet-api", "deploy-key"]
-        for row in [r[0] for r in secrets.AGENT_SECRETS if r[4] == "value"] + held:
+        held = ["github-pat", "bugzilla-api-key", "claude-login", "tailnet", "tailnet-api", "deploy-key"]
+        for row in [r[0] for r in secrets.AGENT_SECRETS] + held:
             self.assertIn(row, self.names(), row)
 
     def rule(self, name):
@@ -709,7 +745,7 @@ class TestOneTableForEveryCredential(_Rules):
             fields = self.rule(name)
             with self.subTest(name=name):
                 self.assertEqual({"needs", "forbids", "what", "url",
-                                  "remedy", "store_with", "fix"}, set(fields), name)
+                                  "remedy", "store_with", "alone", "fix"}, set(fields), name)
                 self.assertTrue(fields["what"].strip(), "%s: no `what`" % name)
                 self.assertTrue(fields["remedy"].strip(), name)
                 if fields["url"]:

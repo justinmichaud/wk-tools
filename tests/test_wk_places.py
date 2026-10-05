@@ -775,7 +775,7 @@ class TestContainerWrite(DriversTest):
         conf = os.path.join(root, "cache", "ccache", "ccache.conf")
         self.assertEqual(self.fake.files[conf], "max_size = 40G\n")
         chmods = [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] == "chmod"]
-        self.assertEqual(chmods, [("chmod", "0700", self.t.store.keyring_dir()), ("chmod", "0700", self.t.store.keyring_agent_rw_dir())])
+        self.assertEqual(chmods, [("chmod", "0700", self.t.store.keyring_dir())])
         self.fake.effects = []
         with mock.patch.object(secrets.Secrets, "store_publish"):
             self.t.store_init()

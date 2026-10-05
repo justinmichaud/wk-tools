@@ -33,6 +33,9 @@ class Creds:
                 return v
         return ""
 
+    def alone(self, name):
+        return self.rule(name, "alone") == "True"
+
     def path(self, name):
         return self.sec.cred_path(name)
 

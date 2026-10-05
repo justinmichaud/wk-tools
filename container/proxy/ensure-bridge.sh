@@ -42,7 +42,7 @@ if ! bridge_alive; then
     done
 fi
 
-# api.github.com's TLS terminates at the injector, which swaps the placeholder Authorization header for the real token. The bundle is the system store plus that CA and never that CA alone, since these variables replace the trust store outright; `gh` is Go and reads only SSL_CERT_FILE/SSL_CERT_DIR, webkitcorepy only GITHUB_COM_* and BUGS_WEBKIT_ORG_* -- and, for every other credential, the keyring git-webkit autoinstalls, whose libsecret backend raises KeyringLocked on every lookup here (no session bus) and exits git-webkit; the null backend answers "nothing stored" and it prompts instead.
+# api.github.com's and api.anthropic.com's TLS terminates at the injector, which swaps the placeholder Authorization header for the real token. The bundle is the system store plus that CA and never that CA alone, since these variables replace the trust store outright -- except NODE_EXTRA_CA_CERTS, which the Claude CLI adds to its own; `gh` is Go and reads only SSL_CERT_FILE/SSL_CERT_DIR, webkitcorepy only GITHUB_COM_* and BUGS_WEBKIT_ORG_* -- and, for every other credential, the keyring git-webkit autoinstalls, whose libsecret backend raises KeyringLocked on every lookup here (no session bus) and exits git-webkit; the null backend answers "nothing stored" and it prompts instead.
 wk_export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring
 WK_CA_SRC=/run/wk/wk-github-ca.pem
 WK_CA_BUNDLE="$WK_TMP/.wk-ca-bundle.pem"
@@ -61,6 +61,7 @@ if [ -r "$WK_CA_SRC" ]; then
         wk_export GIT_SSL_CAINFO="$WK_CA_BUNDLE"
         wk_export SSL_CERT_FILE="$WK_CA_BUNDLE"
         wk_export SSL_CERT_DIR=/etc/ssl/certs
+        wk_export NODE_EXTRA_CA_CERTS="$WK_CA_SRC"
         wk_export GH_TOKEN=wk-injects-this
     fi
 fi

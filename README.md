@@ -277,9 +277,9 @@ Everything wk runs in a guest, and every copy in or out, goes through `tart
 exec`, the guest agent's own channel, never the network (macOS refuses a
 launchd job's connection to a guest). The `wk-<name>` alias the editor uses
 reaches the guest's sshd the same way: its ProxyCommand runs `nc 127.0.0.1 22`
-under `tart exec`. A guest mounts two host directories: agent-rw on macOS's
-automount tag, and the mirror read-only on its own tag, `wk-mirror`, which a
-LaunchDaemon the base installs mounts at boot under `/Volumes/wk-mirror`.
+under `tart exec`. A guest mounts one host directory: the mirror, read-only
+on its own tag, `wk-mirror`, which a LaunchDaemon the base installs mounts at
+boot under `/Volumes/wk-mirror`.
 Each start forwards the host's request broker to `~/.wk-broker.sock` in the
 guest, so `wk sync` in there asks the broker as a container does.
 
@@ -340,7 +340,7 @@ A sync fetches and never checks out, and names any checkout, or snapshot,
 whose remotes are wired wrong. Every workspace, guest and the podman VM mounts
 the mirror read-only, so a refresh from one of them is asked of the machine
 that keeps it, through the broker. A refresh on a Mac then remounts the mirror's
-share (never agent-rw) in each running guest, whose old mount keeps reading the refs as they were;
+share in each running guest, whose old mount keeps reading the refs as they were;
 one that cannot is named with `wk stop`/`wk start`. A workspace overlays a
 snapshot it never writes, so a newer tree is a new snapshot, hard-linked from
 the last; checkouts are wired with `core.trustctime false`, since each link
@@ -588,7 +588,7 @@ session, nothing more; a workspace made without an agent is refused, naming
 
 A Claude session on a terminal starts with Remote Control on, named after the
 workspace, so claude.ai/code and the mobile app can join it. It needs the
-claude.ai login, which `/login` in any session makes; where the inference
+claude.ai login (`wk key set claude-login`, below); where the inference
 token authenticates the session (a build machine), it starts without Remote
 Control and says so.
 
@@ -599,6 +599,7 @@ wk key setup                            # deploy keys, then every credential thi
 wk key check                            # one row per credential, what its issuer says now
 wk key set github-pat                   # one by name; --replace rotates it
 wk key set claude                       # the inference token, for build machines
+wk key set claude-login                 # the claude.ai login the injector holds
 wk key deploy --rotate                  # the deploy keys, revoked and reissued fleet-wide
 ```
 
@@ -606,9 +607,21 @@ wk key deploy --rotate                  # the deploy keys, revoked and reissued 
 not do. Nothing is stored until it passes, and no verdict is remembered. A
 credential is the fleet's: `wk key setup` asks every workstation what it
 holds, the best working one wins, and it is put everywhere. The claude.ai
-login is not one of them: the Claude CLI makes it (`/login` in a session)
-and renews it itself, in `~/.config/wk/agent-rw`, the one directory a
-workspace mounts read-write, so every workspace on the machine shares it.
+login is the exception: each refresh spends its refresh token, so it has one
+holder, this machine's credential injector, and is never copied to another
+workstation. The injector keeps it in `claude-login/` beside the keyring,
+which no podman machine, container or guest mounts (`./setup` moves an older
+one there out of `agent-rw/`), refreshes it under a lock beside it, and puts
+its access token on every request to `api.anthropic.com`, `claude.ai` or
+`platform.claude.com` that carries the placeholder login each container and
+guest holds (`~/.wk-claude`); a WebSocket upgrade passes through, and their
+OAuth token and authorize endpoints are refused. On Linux the injector's unit
+names the login (`./setup --stage sdk`). On a Mac the holder is the host's
+injector, kept by launchd (`./setup --stage inject`) and serving the guests;
+it publishes a socket into the podman machine the way the broker does, and the
+machine's own injector, which never holds the login, relays Claude's hosts
+there whole, so a guest never needs the podman machine and a container shares
+the guests' holder.
 `CLAUDE_CODE_OAUTH_TOKEN` is what a build machine gets instead.
 
 **`wk key push`: publishing without the credentials inside**
@@ -623,7 +636,7 @@ The deploy keys live in an ssh-agent on the machine running the workspaces;
 a workspace's ssh config names the socket, so ssh signs with a key it can
 never read. The GitHub token and Bugzilla key go to the injector
 (`container/proxy/github-inject.py`), which terminates TLS for those two
-hosts and puts the credential on the request: a read always, a write only
+hosts (and Claude's three, for the claude.ai login) and puts the credential on the request: a read always, a write only
 while push is on. With push off a write is refused with 412 naming `wk key push
 on`. A macOS guest gets the same through an ssh-agent on the host forwarded
 per guest over its sshd on `tart exec`. A build box holds no deploy key and nothing forwards one to it,
@@ -772,7 +785,8 @@ What lives there has six parts, each with one name in code, help and prose
   (`~/.local/state/wk/locks`, or `WK_LOCK_DIR`);
 - the **mirror**, `git/WebKit.git`;
 - the **snapshots**, `base/<id>`, the clones a workspace starts from;
-- the **keyring**: `secrets/`, with `agent-rw/` and `push-keys/` beside it;
+- the **keyring**: `secrets/`, with `claude-login/` (the injector's claude.ai
+  login) and `push-keys/` beside it;
 - the **runtime**, the broker socket (`$XDG_RUNTIME_DIR/wk/broker.sock`,
   `/run/wk/broker.sock` in a workspace, or `WK_BROKER_SOCKET`).
 

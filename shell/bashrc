@@ -296,9 +296,9 @@ for _wk_sec in .wk-agent-token:CLAUDE_CODE_OAUTH_TOKEN .wk-litellm-key:LITELLM_A
 done
 unset _wk_sec _wk_sec_file _wk_sec_var _wk_sec_val
 
-# The claude.ai login credential is a file the CLI rewrites in place, so it is not exported: the CLI is pointed at the directory every container on this machine shares (Store.keyring_agent_rw_dir, lib/wk/store.py), which also holds its `.storage-write` lock. A directory and not a symlink into it, the CLI writing through a temp file and a rename. Set only where a mount put one, or a workstation's own `claude` would look for a Keychain item under a name nothing wrote.
-if [ -d /agent-rw ]; then
-  export CLAUDE_SECURESTORAGE_CONFIG_DIR=/agent-rw
+# The placeholder claude.ai login a workspace holds (lib/wk/claudelogin.py): on macOS the CLI hashes this directory into its Keychain service name, so one no Keychain item matches makes it read the file there. Set only where wk wrote one, or a workstation's own `claude` would look for an item nothing wrote.
+if [ -d "$HOME/.wk-claude" ]; then
+  export CLAUDE_SECURESTORAGE_CONFIG_DIR="$HOME/.wk-claude"
 fi
 
 # --- 7. Completion -----------------------------------------------------------

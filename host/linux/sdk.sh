@@ -32,8 +32,12 @@ unit_start wk-proxy.service "$WK_ROOT" "$WK_STORE" \
 unit_start wk-ssh-agent.service "$WK_ROOT" "$WK_STORE" \
     "no workspace here can push" "$_unit_journal" sh -c
 
-unit_start wk-github-inject.service "$WK_ROOT" "$WK_STORE" \
-    "'git-webkit pr' in a workspace will fail" "$_unit_journal" sh -c
+case "$(wk_py wk.secrets claude-login-migrate)" in
+    moved) changed "moved the claude.ai login out of agent-rw to $keyring_claude_login" ;;
+    failed) die "could not move the claude.ai login out of agent-rw (above)" ;;
+esac
+WK_UNIT_CLAUDE_LOGIN="$keyring_claude_login" unit_start wk-github-inject.service "$WK_ROOT" "$WK_STORE" \
+    "'git-webkit pr' and claude in a workspace will fail" "$_unit_journal" sh -c
 
 if wk_py wk.secrets pat-converge; then
     debug "GitHub read token converged"

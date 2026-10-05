@@ -1,5 +1,5 @@
 """The keyring is this device's own: `wk key` and `wk key push` read and write it with a `podman` on PATH that
-leaves a witness and fails, and every reader refuses a link a workspace could plant in agent-rw."""
+leaves a witness and fails, and every reader refuses a link planted beside a credential."""
 import contextlib
 import io
 import os
@@ -119,22 +119,21 @@ class TestThePushSwitchRunsHere(_Here):
                 self.assert_no_podman(cp)
 
 
-class TestNothingButAFileIsReadOrWrittenThroughAgentRw(_Here):
-    """agent-rw is mounted read-write into every container beside the unmounted push-keys: a link planted there
-    must not turn a host-side read or write of the login into one of the token."""
+class TestNothingButAFileIsReadOrWrittenThroughALink(_Here):
+    """A link planted where the login is must not turn a host-side read or write of it into one of the token."""
 
     NAME = "claude-login"
     REAL = "not-a-real-credential-just-this-tests-bytes"
 
     def setUp(self):
         super().setUp()
-        self.agent_rw = self.secrets.parent / "agent-rw"
-        self.agent_rw.mkdir(parents=True)
+        self.login_dir = self.secrets.parent / "claude-login"
+        self.login_dir.mkdir(parents=True)
         self.held = self.secrets.parent / "push-keys"
         self.held.mkdir(parents=True)
         self.token = self.held / "github-pat"
         self.token.write_text(self.REAL + "\n")
-        self.cred = self.agent_rw / ".credentials.json"
+        self.cred = self.login_dir / ".credentials.json"
 
     def entry_points(self):
         """Each reader and writer of one of these paths, as (succeeded, stdout, stderr), each run on its own so

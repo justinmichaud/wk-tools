@@ -84,19 +84,6 @@ _verify_mounts() {
     there when it is created:  ./setup --stage machine"
     fi
 
-    if ! _rsh "findmnt -no TARGET $(printf %q "$WK_STORE/agent-rw")" >/dev/null 2>&1; then
-        die "$WK_STORE/agent-rw is not a mount inside '$WK_MACHINE', so the claude.ai
-    login this host holds ($keyring_agent_rw_dir) reaches no workspace. The machine
-    mounts it there when it is created:  ./setup --stage machine"
-    elif _rsh "test -w $(printf %q "$WK_STORE/agent-rw")"; then
-        unchanged "the agent-writable directory is mounted read-write at $WK_STORE/agent-rw"
-    else
-        die "$WK_STORE/agent-rw is mounted read-only inside '$WK_MACHINE'. The Claude
-    CLI rewrites the login credential in place, so a workspace would be logged
-    out the first time it refreshes. The machine mounts it read-write when it
-    is created:  ./setup --stage machine"
-    fi
-
     if _rsh "findmnt -no TARGET $(printf %q "$WK_STORE/git")" >/dev/null 2>&1; then
         unchanged "the mirror directory is mounted at $WK_STORE/git"
     else

@@ -121,7 +121,7 @@ class TestCheckAsksAboutEveryCredential(_KeyRun):
         actions = cp.stdout.partition("needs you:")[2]
         self.assertEqual(KEYS, actions.count("wk key deploy"), "one line per deploy key: " + actions)
         self.assertIn("credentials:", cp.stdout)
-        for name in ("github-pat", "bugzilla-api-key", "claude", "litellm",
+        for name in ("github-pat", "bugzilla-api-key", "claude", "claude-login", "litellm",
                      "tailnet", "tailnet-api", "ntfy"):
             with self.subTest(name=name):
                 self.assertIn(name, cp.stdout)
@@ -302,6 +302,9 @@ def provision_credentials(secrets, tmp):
     (store / "push-keys" / "bugzilla-api-key").write_text("notarealbugzillakey\n")
     (secrets / "claude-token").write_text("sk-ant-oat01-notarealtoken\n")
     (secrets / "litellm-key").write_text("sk-notarealvirtualkey\n")
+    (store / "claude-login").mkdir(exist_ok=True)
+    (store / "claude-login" / ".credentials.json").write_text(
+        '{"claudeAiOauth": {"accessToken": "sk-ant-oat01-x", "refreshToken": "sk-ant-ort01-x", "expiresAt": 1}}\n')
     (store / "notify").mkdir(exist_ok=True)
     (store / "notify" / "ntfy-topic").write_text("a-topic-minted-here\n")
     (tmp / "tailscale-authkey").write_text("tskey-auth-k1-abc\n")
@@ -312,7 +315,7 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
     """`wk key setup` prints one line per credential and `wk key check`'s table once, within a line budget."""
 
     EMPTY_BUDGET = 45
-    PROVISIONED_BUDGET = 22
+    PROVISIONED_BUDGET = 23
 
     def stubs(self, gh):
         return {"gh": gh, "ssh": SSH_IS_THE_FORKS_KEY}
@@ -337,7 +340,7 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
         lines = self.lines(cp)
         self.assertLess(len(lines), self.EMPTY_BUDGET,
                         "\n".join(lines))
-        for name in ("github-pat", "bugzilla-api-key", "claude", "litellm",
+        for name in ("github-pat", "bugzilla-api-key", "claude", "claude-login", "litellm",
                      "tailnet", "tailnet-api"):
             with self.subTest(name=name):
                 self.assertRegex(cp.stderr, r"%s\s+skipped\s+\S" % name)
@@ -349,7 +352,7 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
                          env=self.env())
         lines = self.lines(cp)
         self.assertLess(len(lines), self.PROVISIONED_BUDGET, "\n".join(lines))
-        for name in ("github-pat", "bugzilla-api-key", "claude", "litellm",
+        for name in ("github-pat", "bugzilla-api-key", "claude", "claude-login", "litellm",
                      "tailnet", "tailnet-api", "ntfy"):
             with self.subTest(name=name):
                 self.assertRegex(cp.stderr, r"%s\s+stored\s+/" % name)
@@ -361,7 +364,7 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
                          env=self.env())
         rows = [l for l in cp.stdout.splitlines()
                 if l.startswith("    ") and l.strip()]
-        self.assertEqual(7 + KEYS, len(rows), cp.stdout)
+        self.assertEqual(8 + KEYS, len(rows), cp.stdout)
 
 
 class TestAnAuthKeyIsMintedNotOnlyHanded(WkTest):

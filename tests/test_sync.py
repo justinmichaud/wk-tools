@@ -666,11 +666,10 @@ class TestTheGuestsRemount(SyncTest):
         self.stderr(self.w.sync("mirror").run)
         self.assertEqual(self.remounts(), ["up-a", "up-b"])
 
-    def test_the_remount_is_the_mirror_tag_alone_never_agent_rw(self):
+    def test_the_remount_is_the_mirror_tag(self):
         self.stderr(self.w.sync("mirror").run)
         asked = [e[1][2:] for e in self.w.effects if e[0] == "run" and e[1][0] == "guest"]
         self.assertEqual(asked, [("sudo", "-n", places.GUEST_MOUNT_MIRROR, places.MIRROR_TAG, places.GUEST_MIRROR_MOUNT)] * 2)
-        self.assertNotIn(places.GUEST_SHARES, " ".join(" ".join(a) for a in asked))
 
     def test_the_remount_converges_from_a_share_mounted_or_not(self):
         bindir, at = self.tmp / "bin", str(self.tmp / "mnt")

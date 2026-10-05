@@ -15,11 +15,12 @@ import http.client as http_client
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-from wk import project
+from wk import claudelogin, project
 from wk.machine import Local
 
 OK, WIDE, BAD, UNVERIFIED, ABSENT = ("ok", "wide", "bad",
@@ -49,10 +50,11 @@ def bugzilla_host():
 TIMEOUT = 20
 PER_PAGE = 100
 
-# `url` mints one with what a link can carry filled in, `remedy` is what is left to choose there.
+# `url` mints one with what a link can carry filled in, `remedy` is what is left to choose there; `alone` is held by one
+# machine and never copied to another.
 Rule = collections.namedtuple(
-    "Rule", "needs forbids what url remedy store_with check mint",
-    defaults=(None,))
+    "Rule", "needs forbids what url remedy store_with check mint alone",
+    defaults=(None, False))
 
 FIELDS = tuple(f for f in Rule._fields if f not in ("check", "mint"))
 
@@ -407,6 +409,24 @@ def _claude_token(value, repos, path, evidence):
                 "(GET /v1/models, HTTP 200).")
 
 
+def _claude_login(value, repos, path, evidence):
+    try:
+        oauth = claudelogin.parse(value)
+    except ValueError as e:
+        return BAD, "that is not a claude.ai login document: %s." % e
+    if oauth["expiresAt"] <= time.time() * 1000:
+        return UNVERIFIED, ("its access token has expired, so Anthropic was not asked about it: the credential injector "
+                            "refreshes it on the next request, the first that shows whether the refresh token still works.")
+    verdict, why = _claude_token_accepted(oauth["accessToken"])
+    if verdict == BAD:
+        return BAD, ("Anthropic does not accept its access token (HTTP 401): the login was revoked, or another holder "
+                     "refreshed it and spent this one.")
+    if verdict != OK:
+        return verdict, why
+    return OK, ("a claude.ai login, account scope: Anthropic accepts it (GET /v1/models, HTTP 200).\n    The credential "
+                "injector holds and refreshes it; every workspace here holds a placeholder.")
+
+
 def _litellm_key(value, repos, path, evidence):
     key = value.strip()
     if not key:
@@ -612,6 +632,16 @@ def rules():
             remedy="run `claude setup-token` here and paste what it prints",
             store_with="wk key set claude",
             check=_claude_token)),
+        ("claude-login", Rule(
+            needs="authenticate Claude Code as your claude.ai account, Remote Control included",
+            forbids="have a second holder: a refresh spends the refresh token, so whichever holder refreshes second is "
+                    "logged out",
+            what="your claude.ai login, which the credential injector holds and refreshes for every workspace here",
+            url="",
+            remedy="d=$(mktemp -d); CLAUDE_SECURESTORAGE_CONFIG_DIR=$d claude, /login, quit, paste the one line of "
+                   "$d/.credentials.json, then rm -r $d so nothing else keeps it",
+            store_with="wk key set claude-login",
+            check=_claude_login, alone=True)),
         ("litellm", Rule(
             needs="reach your own LiteLLM endpoint",
             forbids="reach the upstream provider account directly",

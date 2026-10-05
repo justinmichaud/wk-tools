@@ -16,7 +16,7 @@ from tests.fakes import FakeRegistry
 from tests.support import REPO, WkTest, bash, clean_env, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import doctor, places, wall  # noqa: E402
+from wk import claudelogin, doctor, places, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
@@ -27,6 +27,9 @@ OK, MISS, NOTE = doctor.OK, doctor.MISS, doctor.NOTE
 
 # Most specific first: the first key found in the command answers it.
 HEALTHY = [
+    ("sk-ant-o[ar]t", ""),
+    ("/.credentials.json", claudelogin.placeholder()),
+    ("api.anthropic.com/v1/models", 'HTTP/1.1 200 OK\r\n\r\n{"data": []}\n200'),
     ("hosts.yml", ""),
     ("https://github.com/ 2", "200"),
     ("example.com", "curl: (56) Received HTTP code 403 from proxy after CONNECT"),
@@ -420,10 +423,10 @@ class TestGitHubWrite(_Wall):
 class TestAgentCredential(_Wall):
     TOKEN = '{"loggedIn": true, "authMethod": "oauth_token"}'
 
-    def test_a_container_with_the_login_passes(self):
+    def test_a_container_with_the_placeholder_login_passes(self):
         rows = self.check("agent_credential")
         self.assertPasses(rows)
-        self.assertIn("from the claude-login credential", rows_text(rows))
+        self.assertIn("from the placeholder claude.ai login credential", rows_text(rows))
 
     def test_the_token_beside_the_login_wins_and_fails(self):
         self.set("CLAUDE_CODE_OAUTH_TOKEN:+set", "set")
@@ -441,7 +444,7 @@ class TestAgentCredential(_Wall):
 
     def test_not_logged_in_names_the_places_remedy(self):
         self.set("claude auth status", '{"loggedIn": false}')
-        self.assertFails(self.check("agent_credential"), "not logged in", "/login in a 'wk ai claude' session")
+        self.assertFails(self.check("agent_credential"), "not logged in", "'wk rm demo' and 'wk new'", "'wk start demo'")
 
     def test_an_unreadable_answer_is_quoted(self):
         self.set("claude auth status", "")
@@ -457,6 +460,56 @@ class TestAgentCredential(_Wall):
         raw = (b'\x1b7\x1b[r\x1b8\x1b[?25h{\r\r\n\x1b[3G"loggedIn":\x1b[15Gtrue,\r\r\n\x1b[3G"authMethod":\x1b[17G"claude.ai"\r\r\n}\r\r\n'
                b'\x1b[?25h\x1b[?1006l\x1b(B\x0f\x1b[>4m\x1b[<u\x1b[?1004l\x1b7\x1b[r\x1b8\x1b[?25h\n')
         self.assertEqual("True claude.ai", wall.claude_status(raw.decode("utf-8", "surrogateescape")))
+
+
+class TestClaudeLogin(_Wall):
+    def test_the_placeholder_no_token_and_an_injected_request_pass(self):
+        rows = self.check("claude_login")
+        self.assertPasses(rows)
+        self.assertIn("HTTP 200", rows_text(rows))
+        self.assertIn("Authorization: Bearer %s" % claudelogin.PLACEHOLDER,
+                      next(c for c in self.asked if "api.anthropic.com" in c))
+
+    def test_a_login_that_is_not_the_placeholder_fails(self):
+        for held in ('{"claudeAiOauth": {"accessToken": "sk-ant-oat01-x", "refreshToken": "wk-injects-this"}}', "", "[]"):
+            with self.subTest(held=held):
+                self.set("/.credentials.json", held)
+                self.assertFails(self.check("claude_login"), "is not the placeholder login", "'wk start demo'")
+
+    def test_a_readable_token_fails_naming_where(self):
+        self.set("sk-ant-o[ar]t", "/run/wk/.credentials.json")
+        self.assertFails(self.check("claude_login"), "a claude.ai token is readable in 'demo': /run/wk/.credentials.json",
+                         "'wk key check claude-login'")
+
+    def test_the_scan_reads_no_mount_an_older_workspace_had(self):
+        for old in ("/agent-rw", "My Shared Files"):
+            with self.subTest(old=old):
+                self.assertNotIn(old, wall.CLAUDE_TOKEN_SCAN)
+
+    def test_the_injectors_own_refusal_is_a_note_naming_it(self):
+        self.set("api.anthropic.com/v1/models", "HTTP/1.1 401 Unauthorized\r\n\r\nthe wk credential injector put no claude.ai "
+                 "login on this request: this machine holds no claude.ai login\n401")
+        rows = self.check("claude_login")
+        self.assertPasses(rows)
+        self.assertIn("holds no claude.ai login", rows_text(rows))
+
+    def test_anthropic_refusing_the_login_fails(self):
+        self.set("api.anthropic.com/v1/models", 'HTTP/1.1 401 Unauthorized\r\n\r\n{"type": "error"}\n401')
+        self.assertFails(self.check("claude_login"), "Anthropic refused", "wk key set claude-login --replace")
+
+    def test_no_injector_in_the_path_fails_with_the_places_remedy(self):
+        self.set("api.anthropic.com/v1/models", "\n000")
+        self.assertFails(self.check("claude_login"), "not in the path", "wk-github-inject")
+
+    def test_an_upstream_outage_is_a_note(self):
+        self.set("api.anthropic.com/v1/models", "HTTP/1.1 504 Gateway Timeout\r\n\r\napi.anthropic.com did not answer\n504")
+        rows = self.check("claude_login")
+        self.assertPasses(rows)
+        self.assertIn("an upstream outage", rows_text(rows))
+
+    def test_a_build_box_is_not_asked(self):
+        self.driver = self.reg.load("remote")
+        self.assertNotIn("claude-login", [n for n, _ in self.wall().from_host()])
 
 
 class TestGitWebkitSetup(_Wall):
@@ -578,7 +631,7 @@ class TestFromTheHost(_Wall):
     def test_a_healthy_container_passes_every_check(self):
         rep, out = self.report()
         self.assertEqual(0, rep.missing, out)
-        for w in ("workspace running", "the host says push is OFF", "account scope", "commit wall", "podman is rootless",
+        for w in ("workspace running", "the host says push is OFF", "the placeholder login is authenticated", "commit wall", "podman is rootless",
                   "no network interface but loopback", "github reachable"):
             self.assertIn(w, out)
 
@@ -595,13 +648,6 @@ class TestFromTheHost(_Wall):
         self.assertEqual(1, runs.count((str(REPO / "wk"), "key", "push", "status")))
         self.assertNotIn("rm -f /opt/wk-tools/.wk-write-probe", self.asked)
         self.assertEqual("touch /opt/wk-tools/.wk-write-probe 2>&1", self.asked[-1])
-
-    def test_a_workspace_without_the_login_gets_the_places_remedy(self):
-        self.set("test -s", Result(1, "", ""))
-        _, out = self.report()
-        self.assertIn("remote control refuses to start without one", out)
-        self.assertIn("/login in a 'wk ai claude' session", out)
-        self.assertIn('test -s "$CLAUDE_SECURESTORAGE_CONFIG_DIR/.credentials.json"', self.asked)
 
     def test_a_stopped_workspace_fails(self):
         self.fake.answer(["podman", "inspect", "wk-demo"], out="exited\n")
@@ -711,19 +757,15 @@ class TestTheDriversAnswer(_Wall):
         self.fake.files[os.path.join(str(self.tmp / "vmstore"), "vm", "demo.unfiltered")] = ""
         self.assertFalse(vm.egress_filtered("demo"))
 
-    def test_agent_secret_present_asks_where_each_kind_of_row_lives(self):
-        self.assertTrue(self.driver.agent_secret_present("demo", "claude-login"))
-        self.driver.agent_secret_present("demo", "litellm")
+    def test_agent_secret_present_asks_the_workspaces_home(self):
+        self.assertTrue(self.driver.agent_secret_present("demo", "litellm"))
         self.assertIn('test -s "$HOME/.wk-litellm-key"', self.asked)
         self.set("test -s", Result(1, "", ""))
-        self.assertFalse(self.driver.agent_secret_present("demo", "claude-login"))
+        self.assertFalse(self.driver.agent_secret_present("demo", "litellm"))
 
-    def test_a_guest_without_the_share_is_told_to_boot_with_it(self):
+    def test_a_guests_remedy_is_this_machines_store(self):
         vm = self.load("vm")
         vm.exec = self._direct
-        self.assertIn("/login in a 'wk ai claude' session", vm.agent_secret_remedy("demo", "claude-login"))
-        self.set("test -d", Result(1, "", ""))
-        self.assertIn("the agent-rw share is not mounted in 'demo'", vm.agent_secret_remedy("demo", "claude-login"))
         self.assertIn("usable litellm", vm.agent_secret_remedy("demo", "litellm"))
 
     def test_rootless_is_podmans_word(self):

@@ -69,7 +69,7 @@ class Deps:
         return r.out.strip() if r.ok else ""
 
     def remote_rows(self):
-        return [r for r in secrets.agent_secrets() if "remote" in (r[5:6] or [""])[0].split(",")]
+        return [r for r in secrets.agent_secrets() if "remote" in r[4].split(",")]
 
     def stored_digest(self, name):
         value = secrets.first_line(secrets.Secrets(self.root, self.env, self.here).cred_read(name) or "")

@@ -45,9 +45,11 @@ def matches(rel, patterns):
 
 
 def replace_file(path, data, mode=None):
-    """`path` holds `data` whole or keeps what it held: the temp is mkstemp's (O_EXCL, never a planted name), and the
-    rename replaces a link at `path` rather than writing through it. `mode` is the file's, else the umask's."""
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".%s." % os.path.basename(path))
+    """`path` holds `data` whole or keeps what it held, across a power loss too: the temp is mkstemp's (O_EXCL, never a
+    planted name), synced before the rename, which replaces a link at `path` rather than writing through it and is synced
+    in its directory. `mode` is the file's, else the umask's."""
+    parent = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".%s." % os.path.basename(path))
     try:
         if mode is None:
             mask = os.umask(0)
@@ -56,11 +58,18 @@ def replace_file(path, data, mode=None):
         os.fchmod(fd, mode)
         with os.fdopen(fd, "wb" if isinstance(data, bytes) else "w") as f:
             f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
     except BaseException:
         if os.path.lexists(tmp):
             os.unlink(tmp)
         raise
+    dfd = os.open(parent, os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
 
 
 def lib_argv(root, rel, fn, *args):

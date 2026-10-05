@@ -80,18 +80,16 @@ done
 
 ln -sfn /skills "$HOME/.claude/skills"  # one mutable dir, shared by every ws
 
+# The claude.ai login is a placeholder the injector swaps on the way out (lib/wk/claudelogin.py).
+install -d -m 700 "$HOME/.wk-claude"
+(umask 077 && PYTHONPATH="$WK_TOOLS/lib" python3 -m wk.secrets claude-placeholder > "$HOME/.wk-claude/.credentials.json")
+
 _agent_secrets() { PYTHONPATH="$WK_TOOLS/lib" python3 -m wk.secrets agent-secrets 2>/dev/null; }
-while read -r _sname _sfile _shome _svar _skind _sdelivery; do
+while read -r _sname _sfile _shome _svar _sdelivery; do
     [ -n "$_sname" ] || continue
     # Taken away where it is not delivered: a token beside the login wins over it.
     _sdelivered=0
     case ",$_sdelivery," in *,container,*) _sdelivered=1 ;; esac
-    if [ "$_skind" = file ]; then       # rewritten in place: /agent-rw
-        [ "$_sdelivered" = 1 ] || continue
-        [ -s "/agent-rw/$_sfile" ] \
-            || log "no claude.ai login yet -- /login in a 'wk ai claude' session makes the one every workspace here shares"
-        continue
-    fi
     if [ "$_sdelivered" = 0 ]; then
         rm -f "$HOME/$_shome"
         continue
@@ -102,9 +100,6 @@ while read -r _sname _sfile _shome _svar _skind _sdelivery; do
 done <<EOF
 $(_agent_secrets)
 EOF
-
-[ -d /agent-rw ] \
-    || log "no /agent-rw mount -- this container predates it; 'wk rm' and 'wk new' remake it"
 
 # Every apt below runs under sudo, whose env_reset drops http_proxy, and the sandbox has no route of its own: apt is told in config what the shell is told in the environment, read from it rather than copied.
 APT_PROXY_CONF=/etc/apt/apt.conf.d/99-wk-proxy

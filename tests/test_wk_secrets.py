@@ -191,7 +191,7 @@ class TestWhereThingsAre(SecretsTest):
     def test_a_row_of_the_agent_table_is_kept_by_its_kind(self):
         s = self.w.sec()
         self.assertEqual(s.cred_path("litellm"), self.w.keyring_dir + "/litellm-key")
-        self.assertEqual(s.cred_path("claude-login"), self.tmp + "/store/agent-rw/.credentials.json")
+        self.assertEqual(s.cred_path("claude-login"), self.tmp + "/store/claude-login/.credentials.json")
         self.assertIsNone(s.cred_path("no-such-credential"))
 
     def test_the_agent_is_reached_here_or_in_the_podman_vm(self):
@@ -199,13 +199,6 @@ class TestWhereThingsAre(SecretsTest):
         self.assertEqual(["sh", "-c", "true"], s.agent_argv("true"))
         with mock.patch.object(s.store, "is_local", return_value=False):
             self.assertEqual(["podman", "machine", "ssh", "wk-test", "--", "true"], s.agent_argv("true"))
-
-
-class TestTheLoginIsTheClaudeClis(SecretsTest):
-    def test_a_workspace_missing_the_login_is_sent_to_slash_login_and_nothing_is_judged(self):
-        said = self.w.sec().agent_secret_remedy("claude-login")
-        self.assertIn("/login", said)
-        self.assertEqual([], [a for a in self.w.argvs() if "credcheck.py" in " ".join(a) or "secretfile.py" in " ".join(a)])
 
 
 class TestAStoredCredentialIsReadTheOneWay(SecretsTest):

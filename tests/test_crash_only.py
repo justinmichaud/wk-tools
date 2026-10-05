@@ -137,7 +137,7 @@ class TestRmTakesTheWorkspacesRecordsWithIt(unittest.TestCase):
 # A scratch HOME is a whole machine for these stages; the rest change the machine itself.
 HOME_SCOPED = ("dotfiles", "claude")
 NEEDS_THE_MACHINE = ("tools", "settings", "sharing", "machine",
-                     "vmtools", "softnet", "sdk", "broker", "quiesce")
+                     "vmtools", "softnet", "sdk", "inject", "broker", "quiesce")
 
 
 class TestSetupStagesConverge(WkTest):

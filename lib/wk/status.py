@@ -338,7 +338,7 @@ def unit_stale(root, unit, run=None):
 
 def services():
     return (("wk-proxy.service", "egress proxy", "workspaces have no network without it"),
-            ("wk-github-inject.service", "credential injector", "'%s pr' and 'gh' in a workspace get no credential" % project.get("PR_TOOL")))
+            ("wk-github-inject.service", "credential injector", "'%s pr', 'gh' and claude in a workspace get no credential" % project.get("PR_TOOL")))
 
 
 def service_records(root, machine, run=None):

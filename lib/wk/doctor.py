@@ -315,6 +315,7 @@ class Doctor:
         if self._paths is None:
             sec = secrets.Secrets(self.root, self.env, self.machine)
             self._paths = {"push_held": self.store.keyring_push_dir(), "read_pat": sec.machine_read_pat(),
+                           "claude_login": sec.cred_path("claude-login"),
                            "tailscale_api": sec.cred_path("tailnet-api"), "tailscale_authkey": sec.cred_path("tailnet"), "ntfy_topic": self.store.keyring_ntfy_topic()}
             self._paths.update(("secret." + r[0], sec.cred_path(r[0])) for r in secrets.agent_secrets())
         return self._paths
@@ -425,6 +426,9 @@ class Doctor:
             if key.startswith("secret."):
                 yield self.local_state(path, "re-authable",
                                        "wk key set %s stores one; every workspace this machine makes starts authenticated with it" % key[7:])
+        yield self.local_state(p["claude_login"], "re-authable",
+                               "wk key set claude-login stores one; the credential injector holds and refreshes it, and every "
+                               "workspace here holds a placeholder")
         yield self.local_state(p["tailscale_authkey"], "re-authable",
                                "wk key set tailnet asks for one (tag:wk, reusable, not ephemeral, longest expiry); joined nodes are unaffected")
         yield self.local_state(p["tailscale_api"], "re-authable",

@@ -6,7 +6,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 
 import credcheck
-from wk import project, reach, secrets
+from wk import claudelogin, project, reach, secrets
 from wk.store import no_such_workspace
 from wk.act import die
 from wk.doctor import MISS, miss, note, ok
@@ -21,6 +21,11 @@ CSI = re.compile(r"\x1b\[[0-9;?<>=]*[A-Za-z]|\x1b[78]|\x1b\([A-Z]|\x0f")
 COMMIT_WALL_PATHS = ("objects", "refs", "logs", "HEAD", "packed-refs", "index.lock", "ORIG_HEAD")
 
 CURL = "curl -sS -m 40 --suppress-connect-headers -D -"
+# Where a claude.ai token could be read in a workspace: the login, the CLI's state, the mounts.
+CLAUDE_TOKEN_SCAN = ("grep -rlE 'sk-ant-o[ar]t[0-9]+-[A-Za-z0-9_-]{40}' \"$HOME/%s\" $HOME/.claude $HOME/.claude.json "
+                     "/secrets /run/wk 2>/dev/null | head -5" % secrets.LOGIN_DIR)
+LOGIN_REMEDY = ("a container is given the placeholder when it is made ('wk rm %s' and 'wk new'), a guest at every "
+                "'wk start %s'")
 
 
 def placeholders():
@@ -205,9 +210,9 @@ class Wall:
     def secrets_view(self):
         rows, kept = [], []
         for row in secrets.agent_secrets():
-            if self.driver.kind in row[5].split(","):
+            if self.driver.kind in row[4].split(","):
                 continue
-            path = ("/agent-rw/" if row[4] == "file" else "/secrets/") + row[1]
+            path = "/secrets/" + row[1]
             if self.inside("test -r %s && echo yes" % path) == "yes":
                 rows.append(miss("%s is readable in '%s' and the delivery table gives %s to no %s place" % (path, self.ws, row[0], self.driver.kind),
                                  "what a workspace mounts holds only what it is given (Secrets.publish_view, lib/wk/secrets.py)"))
@@ -303,18 +308,18 @@ class Wall:
     def agent_credential(self):
         """`claude auth status` is local (measured 2026-09-10: loggedIn for a token Anthropic has never seen)."""
         rows = []
-        login = any(r[0] == "claude-login" and self.driver.kind in r[5].split(",")
-                    for r in secrets.agent_secrets())
-        secret, want = ("claude-login", "claude.ai") if login else ("claude", "oauth_token")
+        login = self.driver.kind in secrets.LOGIN_KINDS
+        secret, want = ("placeholder claude.ai login", "claude.ai") if login else ("claude", "oauth_token")
+        remedy = LOGIN_REMEDY % (self.ws, self.ws) if login else self.driver.agent_secret_remedy(self.ws, "claude")
         token = self.inside('printf %s "${CLAUDE_CODE_OAUTH_TOKEN:+set}"')
         if login and token == "set":
-            rows.append(miss("$CLAUDE_CODE_OAUTH_TOKEN is set in this workspace as well as the claude.ai login, and the token wins: "
+            rows.append(miss("$CLAUDE_CODE_OAUTH_TOKEN is set in this workspace as well as the placeholder claude.ai login, and the token wins: "
                              "every session authenticates as an inference-only credential and remote control refuses to start",
                              "nothing should put it here (%s/shell/bashrc exports it only where the delivery column sends it); "
                              "'wk rm %s' and 'wk new' remake the workspace without it" % (self.driver.tools(self.ws), self.ws)))
         elif not login and token != "set":
             rows.append(miss("no $CLAUDE_CODE_OAUTH_TOKEN in this workspace, which is the one Claude credential a %s place is given"
-                             % self.driver.kind, self.driver.agent_secret_remedy(self.ws, "claude")))
+                             % self.driver.kind, remedy))
         verdict = claude_status(self.inside("if command -v claude >/dev/null 2>&1; then claude auth status 2>/dev/null; "
                                             "else echo wk-no-claude-cli; fi"))
         if verdict == "True " + want:
@@ -333,7 +338,46 @@ class Wall:
                              "or what it wrote is not the JSON this reads" % self.ws))
         else:
             rows.append(miss("'claude auth status' in '%s' says it is not logged in, so every session there stops at /login" % self.ws,
-                             self.driver.agent_secret_remedy(self.ws, secret)))
+                             remedy))
+        return rows
+
+    def claude_login(self):
+        """The workspace holds the placeholder and no token; the placeholder, sent, comes back authenticated by the injector."""
+        rows = []
+        try:
+            oauth = json.loads(self.inside('cat "$HOME/%s/.credentials.json" 2>/dev/null' % secrets.LOGIN_DIR))["claudeAiOauth"]
+            held = {oauth.get("accessToken"), oauth.get("refreshToken")} == {claudelogin.PLACEHOLDER}
+        except (ValueError, KeyError, TypeError, AttributeError):
+            held = False
+        if held:
+            rows.append(ok("the claude.ai login in here is the placeholder the injector swaps"))
+        else:
+            rows.append(miss("~/%s/.credentials.json in '%s' is not the placeholder login" % (secrets.LOGIN_DIR, self.ws),
+                             LOGIN_REMEDY % (self.ws, self.ws)))
+        found = self.inside(CLAUDE_TOKEN_SCAN)
+        if found:
+            rows.append(miss("a claude.ai token is readable in '%s': %s" % (self.ws, " ".join(found.splitlines())),
+                             "the injector is its one holder: remove it, and 'wk key check claude-login' outside says "
+                             "whether the login still works"))
+        else:
+            rows.append(ok("no claude.ai token is readable in here (the login, ~/.claude, /secrets, /run/wk)"))
+        reply = self.inside("%s -w '\n%%{http_code}' -H 'Authorization: Bearer %s' -H 'anthropic-version: 2023-06-01' "
+                            "'https://api.anthropic.com/v1/models?limit=1' 2>/dev/null" % (CURL, claudelogin.PLACEHOLDER))
+        if gap := self.gap("Anthropic", reply):
+            return rows + gap
+        code = status_of(reply)
+        said = next((l for l in reply.splitlines() if "wk credential injector" in l), "")
+        if code == "200":
+            rows.append(ok("the placeholder login is authenticated through the injector (HTTP 200), from a login no workspace holds"))
+        elif code == "401" and said:
+            rows += [note("no claude.ai session here can authenticate: " + said.strip()),
+                     note("'wk key check claude-login' says what this machine holds")]
+        elif code == "401":
+            rows.append(miss("Anthropic refused the claude.ai login the injector put on a request (HTTP 401)",
+                             "'wk key check claude-login'; 'wk key set claude-login --replace' stores a new one"))
+        else:
+            rows.append(miss("api.anthropic.com answered '%s' -- the injector is not in the path for it" % (code or "nothing"),
+                             self.driver.daemon_remedy(self.ws, "inject")))
         return rows
 
     def pr_tool_setup(self):
@@ -437,6 +481,8 @@ class Wall:
             checks.append(("isolation", self.isolation))
         if commit_walled(self.driver):
             checks.append(("commit-wall", self.commit_wall))
+        if self.driver.kind in secrets.LOGIN_KINDS:
+            checks.append(("claude-login", self.claude_login))
         return checks + [("no-credentials-inside", self.no_credentials_inside), ("secrets-view", self.secrets_view),
                          ("agent-identities", self.agent_identities), ("github-read", self.github_read),
                          ("github-write", self.github_write), ("bugzilla-read", self.bugzilla_read),
@@ -485,11 +531,6 @@ def from_host(root, driver, ws, machine, rep, want_gpu=False):
     if state == "absent":
         die(no_such_workspace(ws))
     rows = [ok("workspace running") if state == "running" else miss("workspace state: %s" % state, "wk start %s" % ws)]
-    if driver.agent_secret_present(ws, "claude-login"):
-        rows.append(note("this workspace has your claude.ai login (account scope, not just inference)"))
-    else:
-        rows += [note("no claude.ai login here, and remote control refuses to start without one:"),
-                 note(driver.agent_secret_remedy(ws, "claude-login"))]
     push_on, said = push_switch(root, machine)
     rows.append(note(said))
     if driver.kind == "vm" and not driver.egress_filtered(ws):

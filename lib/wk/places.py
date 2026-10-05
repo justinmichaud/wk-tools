@@ -25,7 +25,6 @@ STATES_NOT_THERE = ("absent", "creating", "broken", "unreachable")
 READY_TIMEOUT = 300
 WK_FLAGS = ("WK_DEBUG", "WK_QUIET", "WK_YES", "WK_FORCE", "WK_DRY_RUN", "WK_NO_DELEGATE", "WK_EXPORTS_READ")
 WK_CARRIED = ("WK_ROW_LABEL", "WK_ZED_PUBKEY", "WK_SDK_IMAGE", "WK_NEW_TIMEOUT", "WK_READY_TIMEOUT")
-GUEST_SHARES = "/Volumes/My Shared Files"
 MIRROR_TAG = "wk-mirror"
 GUEST_MIRROR_MOUNT = "/Volumes/" + MIRROR_TAG
 GUEST_MOUNT_MIRROR = "/usr/local/libexec/wk-mount-mirror"
@@ -444,11 +443,7 @@ class Driver:
         return next(r for r in secrets.agent_secrets() if r[0] == secret)
 
     def _agent_secret_file(self, secret):
-        """Where the workspace holds it, as login-shell text: the rc names CLAUDE_SECURESTORAGE_CONFIG_DIR, where a `file` row's own tool rewrites it."""
-        row = self._agent_secret(secret)
-        if row[4] == "file":
-            return '"$CLAUDE_SECURESTORAGE_CONFIG_DIR/%s"' % row[1]
-        return '"$HOME/%s"' % row[2]
+        return '"$HOME/%s"' % self._agent_secret(secret)[2]
 
     def install_agents(self, ws):
         agents.install(self.root, self.env, self.here, lambda argv: self.act_exec(ws, argv), ws, self.tools(ws), self.src(ws))
@@ -960,8 +955,7 @@ class Container(Driver):
         conf = os.path.join(root, "cache", "ccache", "ccache.conf")
         if not self.machine.exists(conf):
             self.machine.write(conf, self.ccache_conf())
-        for d in (self.store.keyring_dir(), self.store.keyring_agent_rw_dir()):
-            self.ensure_dir_mode(d, "0700")
+        self.ensure_dir_mode(self.store.keyring_dir(), "0700")
         secrets.Secrets(self.root, self.env, self.machine).store_publish()
 
     def sdk_refresh(self):
@@ -1013,7 +1007,6 @@ class Container(Driver):
                           ("cache/bench", "/cache/bench"), ("skills", "/skills")):
             flags += ["--volume", "%s/%s:%s" % (store, sub, dest)]
         flags += ["--volume", "%s:/secrets:ro" % self.store.keyring_view_dir("container"),
-                  "--volume", "%s/agent-rw:/agent-rw" % store,
                   "--memory", "%dm" % res.envelope_mem_mb(), "--cpus", str(res.envelope_cores())]
         for pair in ("CCACHE_DIR=/ccache", "CCACHE_MAXSIZE=%s" % self.ccache_maxsize(), "CCACHE_BASEDIR=" + project.get("SRC"),
                    "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime", "CCACHE_PCH_EXTSUM=true",
@@ -1218,7 +1211,6 @@ class Vm(Driver):
     kind = "vm"
     needs_base = False
     reads_host_mirror = True
-    agent_rw_share = "agent-rw"
     mirror_share = "mirror"
     mirror_tag = MIRROR_TAG
 
@@ -1278,14 +1270,11 @@ class Vm(Driver):
     def mem_mb(self, ws):
         return self._sized(ws, "Memory", guest.vm_mem_mb, Resources.envelope_mem_mb)
 
-    def keyring_agent_rw_dir(self):
-        return GUEST_SHARES + "/" + self.agent_rw_share
-
     def login_note(self):
         guest.login_note(self.env)
 
     def remount_mirror(self, ws):
-        """A fresh mount re-reads the refs a refresh renamed over; the mirror has its own tag, so agent-rw is never touched."""
+        """A fresh mount re-reads the refs a refresh renamed over."""
         r = self.act_exec(ws, ["sudo", "-n", GUEST_MOUNT_MIRROR, MIRROR_TAG, GUEST_MIRROR_MOUNT])
         return "" if r.ok else (r.err.strip() or r.out.strip() or "exit %d" % r.rc)
 
@@ -1307,12 +1296,6 @@ class Vm(Driver):
 
     def agent_sock(self):
         return "/Users/%s/.wk-ssh-agent.sock" % self.user()
-
-    def agent_secret_remedy(self, ws, secret):
-        if self._agent_secret(secret)[4] == "file" and not self.exec(ws, ["bash", "-lc", 'test -d "$CLAUDE_SECURESTORAGE_CONFIG_DIR"']).ok:
-            return ("the %s share is not mounted in '%s': 'wk stop %s', then 'wk start %s' boots it with the share"
-                    % (self.agent_rw_share, ws, ws, ws))
-        return super().agent_secret_remedy(ws, secret)
 
     def base(self):
         return guest.base_name(self.env)
@@ -1429,7 +1412,7 @@ class Vm(Driver):
         return ok
 
     def sync_tools(self, ws):
-        """A git bundle, not a mount (a guest shares only agent-rw and the mirror); the marker goes with the tooling that reads it."""
+        """A git bundle, not a mount (a guest shares only the mirror); the marker goes with the tooling that reads it."""
         g = self._guest_or_die(ws)
         return tools.push(self.root, self.machine, g, self.tools(ws), self.env) and self.write_marker(ws, g)
 
@@ -1452,7 +1435,7 @@ class Vm(Driver):
             guest.Host(self, clock).start_proxy()
 
     def daemon_remedy(self, ws, daemon):
-        return "wk start %s" % ws
+        return "./setup --stage inject (launchd keeps the injector)" if daemon == "inject" else "wk start %s" % ws
 
     def start(self, ws):
         ip = guest.start(self, ws)
@@ -2233,7 +2216,7 @@ def store_state(store):
                 digest = hashlib.sha256(f.read()).hexdigest()
         out[p] = (st.st_mode, digest)
 
-    for top, deep in ((store.store_dir(), False), (store.keyring_dir(), True), (store.keyring_agent_rw_dir(), False)):
+    for top, deep in ((store.store_dir(), False), (store.keyring_dir(), True)):
         for d, dirs, files in os.walk(top):
             note(d)
             for f in files:

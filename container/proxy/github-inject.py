@@ -1,27 +1,36 @@
 #!/usr/bin/env python3
-"""Swap the placeholder credential a workspace holds for a real one, on the two
+"""Swap the placeholder credential a workspace holds for a real one, on the
 hosts whose TLS ends here. api.github.com takes a token in the Authorization
 header: a read spends the standing one, a write only `wk key push on`'s.
 bugs.webkit.org takes an api_key query parameter, `wk key push on`'s alone; a write
-with the switch off is refused here, naming it. See `wk help push`."""
+with the switch off is refused here, naming it. See `wk help push`.
+api.anthropic.com, claude.ai and platform.claude.com take the claude.ai login's
+access token for the placeholder bearer, and refuse their OAuth endpoints; the rest
+passes as sent. WK_INJECT_CLAUDE_LOGIN names the holder; the podman machine's relays to the Mac's."""
 
 import asyncio
 import errno
+import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.parse
+import urllib.request
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "lib"))
-from wk.machine import replace_file  # noqa: E402
+from wk import claudelogin  # noqa: E402
+from wk.machine import in_podman_machine, replace_file  # noqa: E402
 from wk.notify import sd_notify  # noqa: E402
 
 GITHUB = "api.github.com"
 BUGZILLA = "bugs.webkit.org"
-HOSTS = (GITHUB, BUGZILLA)
+CLAUDE_HOSTS = ("api.anthropic.com", "claude.ai", "platform.claude.com")
+HOSTS = (GITHUB, BUGZILLA) + CLAUDE_HOSTS
 INJECT_PORT = 443
 
 READ_TIMEOUT = 30
@@ -56,8 +65,94 @@ PUSH_OFF_REASON = (
 _MUTATION = re.compile(rb"mutation", re.IGNORECASE)
 
 
+# The Claude CLI's own claude.ai login constants (measured in its binary, beside CLAUDEAI_SUCCESS_URL).
+TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+MARGIN_MS = 300000
+REFRESH_TIMEOUT = 20
+DEFAULT_EXPIRES_S = 3600
+BACKOFF_S = 60
+OAUTH_PATHS = ("/v1/oauth/token", "/oauth/authorize")
+FORWARD_SOCK = "claude-inject.sock"
+
+
 def log(msg):
     print("[wk-github-inject] %s" % msg, file=sys.stderr, flush=True)
+
+
+class LoginError(Exception):
+    pass
+
+
+class Holder:
+    def __init__(self, path, token_url=TOKEN_URL, clock=time.time):
+        self.path = path
+        self.token_url = token_url
+        self.clock = clock
+        self.failed = None
+
+    def read(self):
+        try:
+            with open(self.path) as f:
+                return claudelogin.parse(f.read())
+        except FileNotFoundError:
+            raise LoginError("this machine holds no claude.ai login (%s): 'wk key set claude-login'" % self.path)
+        except ValueError as e:
+            raise LoginError("the claude.ai login at %s is unusable (%s): 'wk key set claude-login --replace'" % (self.path, e))
+
+    def fresh(self, oauth):
+        return oauth["expiresAt"] - MARGIN_MS > self.clock() * 1000
+
+    def access_token(self):
+        """Re-read once the lock is held: a request that waited on it finds the refresh another made."""
+        oauth = self.read()
+        if self.fresh(oauth):
+            return oauth["accessToken"]
+        try:
+            with claudelogin.locked(self.path):
+                oauth = self.read()
+                if not self.fresh(oauth):
+                    oauth = self.refresh_once(oauth)
+        except TimeoutError as e:
+            raise LoginError("the claude.ai login was not refreshed: %s" % e)
+        return oauth["accessToken"]
+
+    def refresh_once(self, oauth):
+        if self.failed and self.failed[0] == oauth["refreshToken"] and self.clock() < self.failed[1]:
+            raise LoginError("%s (not asked again for %ds)" % (self.failed[2], self.failed[1] - self.clock()))
+        try:
+            return self.refresh(oauth)
+        except LoginError as e:
+            self.failed = (oauth["refreshToken"], self.clock() + BACKOFF_S, str(e))
+            raise
+
+    def refresh(self, oauth):
+        body = json.dumps({"grant_type": "refresh_token", "refresh_token": oauth["refreshToken"],
+                           "client_id": CLIENT_ID}).encode()
+        req = urllib.request.Request(self.token_url, data=body, method="POST",
+                                     headers={"Content-Type": "application/json", "User-Agent": "wk"})
+        try:
+            with urllib.request.urlopen(req, timeout=REFRESH_TIMEOUT) as r:
+                got = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            if e.code in (400, 401, 403):
+                raise LoginError("%s refused to refresh the claude.ai login (HTTP %d): it was revoked, or something else holds "
+                                 "and spent it -- 'wk key set claude-login --replace'" % (self.token_url, e.code))
+            raise LoginError("%s answered HTTP %d to a refresh; it is tried again" % (self.token_url, e.code))
+        except (OSError, ValueError) as e:
+            raise LoginError("could not refresh the claude.ai login at %s (%s); it is tried again" % (self.token_url, e))
+        if not isinstance(got, dict) or not got.get("access_token"):
+            raise LoginError("%s answered a refresh with no access_token; it is tried again" % self.token_url)
+        oauth = dict(oauth, accessToken=got["access_token"], refreshToken=got.get("refresh_token") or oauth["refreshToken"],
+                     expiresAt=int((self.clock() + float(got.get("expires_in") or DEFAULT_EXPIRES_S)) * 1000))
+        if got.get("scope"):
+            oauth["scopes"] = got["scope"].split()
+        with open(self.path) as f:
+            doc = json.load(f)
+        doc["claudeAiOauth"] = oauth
+        replace_file(self.path, json.dumps(doc) + "\n", mode=0o600)
+        log("refreshed the claude.ai login in %s" % self.path)
+        return oauth
 
 
 def request_line(head):
@@ -75,13 +170,17 @@ def is_read(method, target, body):
             and not _MUTATION.search(body))
 
 
-def host_of(head):
+def header(head, want):
     for line in head.split(b"\r\n")[1:]:
         name, _, value = line.partition(b":")
-        if name.strip().lower() == b"host":
-            host = value.strip().decode("latin-1", "replace").lower().rstrip(".")
-            return host.rsplit(":", 1)[0] if ":" in host else host
-    return ""
+        if name.strip().lower() == want:
+            return value.strip()
+    return None
+
+
+def host_of(head):
+    host = (header(head, b"host") or b"").decode("latin-1", "replace").lower().rstrip(".")
+    return host.rsplit(":", 1)[0] if ":" in host else host
 
 
 def bugzilla_target(target, key):
@@ -94,9 +193,10 @@ def bugzilla_target(target, key):
     return path + ("?" + "&".join(kept) if kept else "")
 
 
-def rewrite_head(head, host, token, length=0):
+def rewrite_head(head, host, token, length=0, upgrade=False):
     # Host and Content-Length are ours: a client's Host spends the token on
     # another name, and a length GitHub reads differently smuggles a second head.
+    keep = ("authorization",) if host in CLAUDE_HOSTS and not token else ()
     lines = head.split(b"\r\n")
     request = lines[0]
     if host == BUGZILLA:
@@ -109,14 +209,14 @@ def rewrite_head(head, host, token, length=0):
     for line in lines[1:]:
         if not line:
             continue
-        name = line.split(b":", 1)[0].strip().lower()
-        if name.decode("latin-1", "replace") in DROP_FROM_FORWARDED:
+        name = line.split(b":", 1)[0].strip().lower().decode("latin-1", "replace")
+        if name in DROP_FROM_FORWARDED and name not in keep:
             continue
         out.append(line)
-    if token and host == GITHUB:
+    if token and (host == GITHUB or host in CLAUDE_HOSTS):
         out.append(b"Authorization: Bearer " + token.encode("latin-1"))
     out.append(b"Content-Length: %d" % length)
-    out.append(b"Connection: close")
+    out.append(b"Connection: Upgrade" if upgrade else b"Connection: close")
     return b"\r\n".join(out) + b"\r\n\r\n"
 
 
@@ -261,12 +361,31 @@ class StatusTimeout(asyncio.TimeoutError):
     """The request was sent and the upstream sent no status line."""
 
 
+NO_RELAY = (b"the wk credential injector put no claude.ai login on this request: the Mac's injector, its one holder, "
+            b"does not answer at %s. On the Mac, 'launchctl print gui/$(id -u)/com.wk.inject' says whether launchd runs it: "
+            b"if it does, inject.log in the wk state directory (~/.local/state/wk) says why it cannot publish here; if "
+            b"not, './setup --stage inject' starts it\r\n")
+NO_HOLDER = (b"the wk credential injector put no claude.ai login on this request: this machine's injector holds none "
+             b"(no WK_INJECT_CLAUDE_LOGIN): './setup --stage inject' on a Mac, './setup --stage sdk' on Linux\r\n")
+OAUTH_REFUSED = (b"the wk credential injector refuses the claude.ai OAuth endpoints: the login is its alone, and a "
+                 b"workspace holds a placeholder that never needs refreshing ('wk key set claude-login' outside)\r\n")
+
+
+class Forward:
+    """Claude's hosts relayed whole to the injector that holds the login (a Mac's, from its podman machine)."""
+
+    def __init__(self, path):
+        self.path = path
+
+
 class Injector:
-    def __init__(self, pat_path, read_pat_path, bugzilla_key_path, client_ctx):
+    def __init__(self, pat_path, read_pat_path, bugzilla_key_path, claude, client_ctx, hosts=HOSTS):
         self.pat_path = pat_path
         self.read_pat_path = read_pat_path
         self.bugzilla_key_path = bugzilla_key_path
+        self.claude = claude
         self.client_ctx = client_ctx
+        self.hosts = hosts
 
     def token_for(self, host, reading):
         if host == BUGZILLA:
@@ -295,6 +414,17 @@ class Injector:
         except asyncio.TimeoutError as exc:
             raise StatusTimeout() from exc
 
+    async def relay(self, request, creader, cwriter, host, method, target):
+        try:
+            freader, fwriter = await asyncio.open_unix_connection(self.claude.path)
+        except OSError as e:
+            log("%s %s %s refused: no holder at %s (%s)" % (host, method, target[:200], self.claude.path, e))
+            await self.refuse(cwriter, b"401 Unauthorized", NO_RELAY % self.claude.path.encode())
+            return
+        log("%s login forward %s %s" % (host, method, target[:200]))
+        fwriter.write(request)
+        await asyncio.gather(pipe(freader, cwriter), pipe(creader, fwriter))
+
     async def handle(self, creader, cwriter):
         upstream = None
         try:
@@ -319,7 +449,7 @@ class Injector:
                 await self.refuse(cwriter, *refusal)
                 return
 
-            body = body[:length]
+            body, early = body[:length], body[length:]
             while len(body) < length:
                 chunk = await asyncio.wait_for(
                     creader.read(length - len(body)), READ_TIMEOUT)
@@ -328,17 +458,41 @@ class Injector:
                 body += chunk
 
             host = host_of(head)
-            if host not in HOSTS:
+            if host not in self.hosts:
                 await self.refuse(
                     cwriter, b"421 Misdirected Request",
                     b"the wk credential injector answers for " +
-                    " and ".join(HOSTS).encode("latin-1") +
-                    b", and this request's Host is neither\r\n")
+                    ", ".join(self.hosts).encode("latin-1") +
+                    b", and this request's Host is none of them\r\n")
                 return
             method, target = request_line(head)
-            reading = is_read(method, target, body)
-            token = self.token_for(host, reading)
-            new_head = rewrite_head(head, host, token, len(body))
+            if host in CLAUDE_HOSTS and isinstance(self.claude, Forward):
+                await self.relay(head + b"\r\n\r\n" + body + early, creader, cwriter, host, method, target)
+                return
+            if host in CLAUDE_HOSTS and target.split("?", 1)[0].rstrip("/") in OAUTH_PATHS:
+                log("%s %s %s refused: an OAuth endpoint" % (host, method, target[:200]))
+                await self.refuse(cwriter, b"403 Forbidden", OAUTH_REFUSED)
+                return
+            upgrade = host in CLAUDE_HOSTS and header(head, b"upgrade") is not None
+            if host in CLAUDE_HOSTS:
+                reading, token = True, ""
+                if header(head, b"authorization") == b"Bearer " + claudelogin.PLACEHOLDER.encode():
+                    if self.claude is None:
+                        log("%s %s %s refused: no claude.ai login is held here" % (host, method, target[:200]))
+                        await self.refuse(cwriter, b"401 Unauthorized", NO_HOLDER)
+                        return
+                    try:
+                        token = await asyncio.to_thread(self.claude.access_token)
+                    except LoginError as e:
+                        log("%s %s %s refused: %s" % (host, method, target[:200], e))
+                        await self.refuse(cwriter, b"401 Unauthorized",
+                                          b"the wk credential injector put no claude.ai login on this request: "
+                                          + str(e).encode("utf-8") + b"\r\n")
+                        return
+            else:
+                reading = is_read(method, target, body)
+                token = self.token_for(host, reading)
+            new_head = rewrite_head(head, host, token, len(body), upgrade)
             if new_head is None:
                 await self.refuse(
                     cwriter, b"400 Bad Request",
@@ -346,8 +500,9 @@ class Injector:
                     b"refused for " + host.encode("latin-1") + b"\r\n")
                 return
             # The client's target, never the rewritten one: that carries the key.
-            log("%s %s %s %s %s" % (host, "read" if reading else "write",
+            log("%s %s %s %s %s" % (host, "login" if host in CLAUDE_HOSTS else "read" if reading else "write",
                                     "inject" if token else
+                                    "as sent" if host in CLAUDE_HOSTS else
                                     "unauthenticated" if reading else
                                     "refused: push is off",
                                     method, target[:200]))
@@ -385,7 +540,11 @@ class Injector:
             log("%s %s %s -> %s" % (host, method, target[:120],
                                     status.decode("latin-1", "replace").strip()))
             cwriter.write(status)
-            await pipe(ureader, cwriter)
+            if upgrade and status.split(b" ")[1:2] == [b"101"]:
+                upstream.write(early)
+                await asyncio.gather(pipe(ureader, cwriter), pipe(creader, upstream))
+            else:
+                await pipe(ureader, cwriter)
         except (asyncio.TimeoutError, ConnectionResetError, OSError) as exc:
             log("connection failed: %s: %s" % (type(exc).__name__, exc))
         finally:
@@ -397,8 +556,19 @@ class Injector:
                         pass
 
 
-def _default_runtime():
-    return os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid()
+def _default_runtime(env=os.environ):
+    return env.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid()
+
+
+def claude_source(env, in_machine):
+    """The podman machine's injector relays to the Mac's and never holds; elsewhere only WK_INJECT_CLAUDE_LOGIN makes a holder."""
+    login = env.get("WK_INJECT_CLAUDE_LOGIN")
+    if in_machine:
+        if login:
+            sys.exit("[wk-github-inject] refused: WK_INJECT_CLAUDE_LOGIN=%s inside a podman machine, whose injector relays "
+                     "Claude's hosts to the Mac's, the login's one holder" % login)
+        return Forward(os.path.join(_default_runtime(env), FORWARD_SOCK))
+    return Holder(login) if login else None
 
 
 async def main():
@@ -426,7 +596,8 @@ async def main():
 
     client_ctx = ssl.create_default_context()
 
-    injector = Injector(pat, read_pat, bugzilla_key, client_ctx)
+    claude = claude_source(os.environ, in_podman_machine())
+    injector = Injector(pat, read_pat, bugzilla_key, claude, client_ctx)
 
     if os.path.exists(sock):
         os.unlink(sock)
@@ -435,12 +606,21 @@ async def main():
                                              ssl=server_ctx)
     os.chmod(sock, 0o600)
     log("listening on %s for %s (write token: %s, read token: %s, Bugzilla key: %s, "
-        "CA published at %s)" % (sock, ", ".join(HOSTS), pat, read_pat,
-                                 bugzilla_key, ca_out))
+        "claude.ai login: %s, CA published at %s)" % (sock, ", ".join(HOSTS), pat, read_pat,
+                                                      bugzilla_key, claude.path if claude else "none held", ca_out))
+    tasks = [server.serve_forever()]
+    machine = os.environ.get("WK_INJECT_PUBLISH_MACHINE")
+    if machine:
+        from wk import publish
+        plain = os.environ["WK_INJECT_PLAIN_SOCK"]
+        if os.path.exists(plain):
+            os.unlink(plain)
+        claude_only = Injector(pat, read_pat, bugzilla_key, claude, client_ctx, CLAUDE_HOSTS)
+        tasks.append((await asyncio.start_unix_server(claude_only.handle, path=plain)).serve_forever())
+        os.chmod(plain, 0o600)
+        tasks.append(publish.publish(machine, plain, FORWARD_SOCK, log, "inject"))
     sd_notify("READY=1")
-
-    async with server:
-        await server.serve_forever()
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":

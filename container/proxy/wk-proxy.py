@@ -17,15 +17,21 @@ DENIED_HOSTS = {
     "uploads.github.com": "GitHub's upload API is refused: nothing in a workspace may publish",
 }
 
-# The hosts whose TLS is not tunnelled: CONNECT goes to the credential injector (github-inject.py), exact-match and checked first. SANDBOX AUDIT (docs/PLAN.md): a workspace reaches GitHub's API and Bugzilla but cannot authenticate -- under `wk key push off`, which `wk ai claude` sets, the injector refuses a write itself (412) rather than forwarding it uncredentialed.
+# The hosts whose TLS is not tunnelled: CONNECT goes to the credential injector (github-inject.py), exact-match and checked first. SANDBOX AUDIT (docs/PLAN.md): a workspace reaches GitHub's API and Bugzilla but cannot authenticate -- under `wk key push off`, which `wk ai claude` sets, the injector refuses a write itself (412) rather than forwarding it uncredentialed; Anthropic's API gets the claude.ai login, which no workspace holds.
 INJECTED_HOSTS = {
     "api.github.com": 443,
     "bugs.webkit.org": 443,
+    "api.anthropic.com": 443,
+    "claude.ai": 443,
+    "platform.claude.com": 443,
 }
 
 INJECT_SOCKET = os.environ.get(
     "WK_INJECT_SOCK",
     os.path.join(os.environ.get("WK_STORE", "/var/lib/wk"), "github-inject.sock"))
+INJECT_CA = os.environ.get(
+    "WK_INJECT_CA_OUT",
+    os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid(), "wk", "wk-github-ca.pem"))
 
 # ALLOWED_HOSTS matches by dot-boundary suffix, never plain substring, so 'evilgithub.com' cannot match 'github.com'; port 80 is opened only where a client's own URLs are http (apt, poky's mirrors) or redirect to :443.
 ALLOWED_HOSTS = {
@@ -130,7 +136,7 @@ def normalize_host(host):
     return host.lower().rstrip(".")
 
 
-# Verified against the system trust; the proxy presents no certificate of its own (only the github injector terminates a client's TLS), so nothing here forges one.
+# Verified against the system trust; the proxy presents no certificate of its own (only the credential injector terminates a client's TLS), so nothing here forges one.
 UPSTREAM_TLS = ssl.create_default_context()
 
 
@@ -228,7 +234,10 @@ class Proxy:
 
     async def open_upstream(self, host, port, tls=False):
         if INJECTED_HOSTS.get(host) == port:
-            return await asyncio.open_unix_connection(INJECT_SOCKET)
+            if not tls:
+                return await asyncio.open_unix_connection(INJECT_SOCKET)
+            return await asyncio.open_unix_connection(INJECT_SOCKET, server_hostname=host,
+                                                      ssl=ssl.create_default_context(cafile=INJECT_CA))
 
         loop = asyncio.get_running_loop()
         infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
@@ -309,11 +318,6 @@ class Proxy:
                 headers = f"{method} {path} {parts[2]}\r\n".encode("latin-1")
 
             host = normalize_host(host)
-
-            if method != "CONNECT" and host in INJECTED_HOSTS:  # the injector terminates the client's TLS, so it is reached by a CONNECT tunnel, never a relayed plaintext request
-                cwriter.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
-                await cwriter.drain()
-                return
 
             allowed, why = self.policy.host_allowed(host, port)
             if not allowed:

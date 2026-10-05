@@ -12,6 +12,8 @@ Type=notify
 NotifyAccess=all
 ExecStart=/usr/bin/python3 @WK_ROOT@/container/proxy/github-inject.py
 Environment=WK_STORE=@WK_STORE@
+# Empty in the podman machine, whose injector relays the login's requests to the Mac's.
+Environment=WK_INJECT_CLAUDE_LOGIN=@WK_CLAUDE_LOGIN@
 Restart=on-failure
 RestartSec=2
 # It publishes its CA certificate into %t/wk, which every container mounts.

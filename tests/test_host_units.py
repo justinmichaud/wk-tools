@@ -60,6 +60,37 @@ class TestRenderingSubstitutesBothEnds(unittest.TestCase):
                 self.assertIn("wk-nonesuch.service", cp.stderr)
 
 
+class TestTheProgramStamp(WkTest):
+    """One rule for every daemon setup restarts, a unit's or the Mac injector's LaunchAgent: its program and each module of
+    this tree it imports, however late."""
+
+    def stamp(self, prog):
+        cp = bash(f'. "$WK_ROOT/host/units.sh"; WK_ROOT={shlex.quote(str(self.tmp))} program_stamp {prog}')
+        self.assertEqual(0, cp.returncode, cp.stderr)
+        return cp.stdout.strip()
+
+    def test_an_imported_module_changes_it_and_an_unimported_one_does_not(self):
+        (self.tmp / "lib" / "wk").mkdir(parents=True)
+        (self.tmp / "lib" / "wk" / "__init__.py").write_text("")
+        for mod in ("held", "late", "other"):
+            (self.tmp / "lib" / "wk" / (mod + ".py")).write_text("X = 1\n")
+        (self.tmp / "prog.py").write_text("import json\nfrom wk import held\n\ndef f():\n    from wk import late\n")
+        first = self.stamp("prog.py")
+        (self.tmp / "lib" / "wk" / "other.py").write_text("X = 2\n")
+        self.assertEqual(first, self.stamp("prog.py"))
+        for mod in ("held", "late"):
+            with self.subTest(module=mod):
+                before = self.stamp("prog.py")
+                (self.tmp / "lib" / "wk" / (mod + ".py")).write_text("X = 3\n")
+                self.assertNotEqual(before, self.stamp("prog.py"))
+
+    def test_a_program_that_is_not_python_is_stamped_alone(self):
+        (self.tmp / "run.sh").write_text("exec sleep 1\n")
+        first = self.stamp("run.sh")
+        (self.tmp / "run.sh").write_text("exec sleep 2\n")
+        self.assertNotEqual(first, self.stamp("run.sh"))
+
+
 class TestTheInstallerConverges(WkTest):
 
     def _install(self, name="wk-proxy.service"):
@@ -146,7 +177,8 @@ class TestTheStartVerdictComesFromSystemd(WkTest):
         return cp, cp.stdout + cp.stderr
 
     def _real_hash(self):
-        cp = bash('cksum < "$WK_ROOT/container/proxy/wk-proxy.py" | awk "{print \\$1}"')
+        cp = bash(f'. "$WK_ROOT/host/units.sh"; echo "$(program_stamp container/proxy/wk-proxy.py)-'
+                  f'$(unit_render {self.UNIT} /opt/wk-tools {self.store} | cksum | awk \'{{print $1}}\')"')
         return cp.stdout.strip()
 
     def _stamp(self):
@@ -181,7 +213,7 @@ class TestTheStartVerdictComesFromSystemd(WkTest):
         (self.store / self.STAMP).write_text("0 not-the-current-program\n")
         cp, out = self._start(active=True)
         self.assertEqual(0, cp.returncode, out)
-        self.assertIn(f"restarted {self.UNIT} (program changed)", out)
+        self.assertIn(f"restarted {self.UNIT}", out)
         self.assertIn("--user restart " + self.UNIT, self.log.read_text())
         self.assertEqual(self._real_hash(), self._stamp())
 
@@ -220,6 +252,22 @@ class TestTheStartVerdictComesFromSystemd(WkTest):
         cp, out = self._start(active=True, dry=True)
         self.assertIn(f"would restart {self.UNIT}", out)
         self.assertEqual("0 not-the-current-program", self._stamp())
+
+    def test_a_running_service_whose_unit_changed_is_restarted(self):
+        self.UNIT = "wk-github-inject.service"
+        self.STAMP = ".wk-github-inject.program"
+        cp = bash(f'. "$WK_ROOT/host/units.sh"; echo "$(program_stamp container/proxy/github-inject.py)-'
+                  f'$(unit_render {self.UNIT} /opt/wk-tools {self.store} | cksum | awk \'{{print $1}}\')"')
+        (self.store / self.STAMP).write_text(cp.stdout)
+        cp, out = self._start(active=True)
+        self.assertIn(f"{self.UNIT} ready", out)
+        self.assertNotIn("--user restart", self.log.read_text())
+        cp = bash(f'. "$WK_ROOT/host/units.sh"; WK_UNIT_CLAUDE_LOGIN=/s/claude-login/.credentials.json unit_start {self.UNIT} '
+                  f'/opt/wk-tools {self.store} "why" "" sh -c',
+                  env={"HOME": str(self.home), "PATH": f"{self.binp}:{os.environ['PATH']}", "WK_FAKE_LOG": str(self.log),
+                       "WK_FAKE_ACTIVE": "0"})
+        self.assertIn(f"restarted {self.UNIT}", cp.stdout + cp.stderr)
+        self.assertIn("--user restart " + self.UNIT, self.log.read_text())
 
     def test_a_service_with_no_program_of_ours_stamps_nothing(self):
         self.UNIT, self.STAMP = "wk-ssh-agent.service", ".wk-ssh-agent.program"

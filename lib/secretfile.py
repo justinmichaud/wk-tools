@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""One credential file, opened O_NOFOLLOW and checked regular, ours and singly linked: agent-rw is mounted
-read-write into every container, where a workspace could otherwise aim a credential at push-keys."""
+"""One credential file, opened O_NOFOLLOW and checked regular, ours and singly linked, so a link planted in a
+keyring directory never aims a read or a write at another credential."""
 
 import argparse
 import hashlib

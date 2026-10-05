@@ -48,18 +48,21 @@ _verify_mounts && echo VERIFIED
           "WK_HOST_SECRETS": str(self.tmp / "secrets"),
           "WK_DEBUG": "1"})
 
-    def test_all_four_there_and_the_writable_one_writable(self):
+    def test_all_three_there_and_read_only(self):
         cp = self._run()
         out = cp.stdout + cp.stderr
         self.assertEqual(cp.returncode, 0, out)
         self.assertIn("VERIFIED", cp.stdout)
 
+    def test_agent_rw_is_not_asked_for(self):
+        """No injector or workspace in the machine reads it: the injector there never holds the claude.ai login."""
+        cp = self._run(rw_mount=0, rw_writable=0)
+        self.assertIn("VERIFIED", cp.stdout, cp.stdout + cp.stderr)
+
     def test_each_missing_mount_is_refused_for_its_own_reason(self):
         for flags, said, unsaid in (({"git": 0}, ("/var/lib/wk/git is not a mount", "reaches no snapshot"), ()),
                                     ({"tools": 0}, ("nothing in", "./setup --stage machine"), ()),
-                                    ({"secrets": 0}, ("/var/lib/wk/secrets is not a mount", "reach no workspace"), ()),
-                                    ({"rw_mount": 0}, ("/var/lib/wk/agent-rw is not a mount", "claude.ai"), ()),
-                                    ({"rw_writable": 0}, ("mounted read-only", "logged"), ("is not a mount",))):
+                                    ({"secrets": 0}, ("/var/lib/wk/secrets is not a mount", "reach no workspace"), ())):
             with self.subTest(**flags):
                 cp = self._run(**flags)
                 out = cp.stdout + cp.stderr

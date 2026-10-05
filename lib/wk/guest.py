@@ -9,10 +9,11 @@ import signal
 import sys
 import time
 
-from wk import act, agents, git, images, project, secrets, tools
+from wk import act, agents, claudelogin, git, images, project, secrets, tools
 from wk.act import Refused, debug, die, info, log, warn
 from wk.clock import Clock
 from wk.lock import Lock
+from wk.machine import Local
 from wk.store import GUEST_BROKER_SOCKET, Store, no_such_workspace
 
 SUBNET = "192.168.2"   # Softnet's own network, not vmnet's 192.168.64
@@ -70,6 +71,7 @@ export GIT_SSL_CAINFO=$HOME/.wk-ca-bundle.pem
 export GITHUB_COM_USERNAME=$ghuser
 export GITHUB_COM_TOKEN=wk-injects-this
 export SSL_CERT_FILE=$HOME/.wk-ca-bundle.pem
+export NODE_EXTRA_CA_CERTS=$HOME/.wk-github-ca.pem
 export GH_TOKEN=wk-injects-this
 WKCAENV
     [ -z "$bzuser" ] || cat >> "$HOME/.wk-egress" <<WKBZENV
@@ -223,10 +225,30 @@ class Host:
                 return
             why = "no pidfile names it"
         info("restarting the %s: %s" % (what, why))
+        self.stop(pid, pidfile)
+
+    def stop(self, pid, pidfile):
         self.machine.kill(pid)
         if not act.dry_run() and not self.clock.wait_until(lambda: not self.machine.alive(pid), 5, 0.25):
             self.machine.kill(pid, signal.SIGKILL)
         self.machine.remove(pidfile)
+
+    def spawned_inject(self):
+        pid = self.daemon_pid(self.path("github-inject.pid"))
+        if pid is None or "github-inject.py" not in self.machine.run(["ps", "-o", "command=", "-p", str(pid)]).out:
+            return None
+        return pid
+
+    def retire_spawned_inject(self):
+        pidfile = self.path("github-inject.pid")
+        if not self.machine.exists(pidfile):
+            return False
+        pid = self.spawned_inject()
+        if pid is None:
+            self.machine.remove(pidfile)
+            return False
+        self.stop(pid, pidfile)
+        return True
 
     def proxy_where(self):
         return ["-nP", "-iTCP@%s:%s" % (self.proxy_addr(), self.port()), "-sTCP:LISTEN"]
@@ -255,6 +277,7 @@ class Host:
             return False
         pid = self.spawn(["env", "WK_PROXY_UNIX=0", "WK_PROXY_TCP=%s:%s" % (addr, self.port()),
                           "WK_STORE=" + self.vm.store.store_dir(), "WK_INJECT_SOCK=" + self.path("github-inject.sock"),
+                          "WK_INJECT_CA_OUT=" + self.path("wk-github-ca.pem"),
                           "/usr/bin/python3", os.path.join(self.root, "container", "proxy", "wk-proxy.py")], log, pidfile)
         if act.dry_run():
             return True
@@ -284,22 +307,22 @@ class Host:
         warn("could not converge %s; a read from a guest answers 401" % self.path("read-github-pat"))
         return False
 
+    def inject_env(self):
+        return {"WK_INJECT_SOCK": self.path("github-inject.sock"), "WK_INJECT_DIR": self.path("github-inject"),
+                "WK_INJECT_CA_OUT": self.path("wk-github-ca.pem"), "WK_INJECT_PAT": self.path("push-github-pat"),
+                "WK_INJECT_READ_PAT": self.path("read-github-pat"), "WK_INJECT_BUGZILLA_KEY": self.path("push-bugzilla-api-key"),
+                "WK_INJECT_CLAUDE_LOGIN": self.secrets.cred_path("claude-login"),
+                "WK_INJECT_PLAIN_SOCK": self.path("claude-inject.sock"),
+                "WK_INJECT_PUBLISH_MACHINE": Store(self.env).podman_machine()}
+
     def start_inject(self):
+        """launchd keeps it (host/macos/inject.sh); a start converges its read token and asks whether it answers."""
         self.machine.mkdir(self.dir)
         self.pat_converge()
-        pidfile, log, sock = self.path("github-inject.pid"), self.path("github-inject.log"), self.path("github-inject.sock")
-        self.restart_if_stale(pidfile, "GitHub API injector", [sock])
         if self.inject_running():
             return True
-        self.spawn(["env", "WK_INJECT_SOCK=" + sock, "WK_INJECT_DIR=" + self.path("github-inject"),
-                    "WK_INJECT_CA_OUT=" + self.path("wk-github-ca.pem"), "WK_INJECT_PAT=" + self.path("push-github-pat"),
-                    "WK_INJECT_READ_PAT=" + self.path("read-github-pat"),
-                    "WK_INJECT_BUGZILLA_KEY=" + self.path("push-bugzilla-api-key"),
-                    "/usr/bin/python3", os.path.join(self.root, "container", "proxy", "github-inject.py")], log, pidfile)
-        if act.dry_run() or self.clock.wait_until(self.inject_running, 10, 0.25):
-            info("GitHub API injector on %s" % sock)
-            return True
-        warn("the GitHub API injector did not start, so '%s pr' in a guest\n  will fail; see %s" % (project.get("PR_TOOL"), log))
+        warn("the credential injector is not running on this Mac, so '%s pr' and Claude in a guest get no\n"
+             "  credential:  ./setup --stage inject" % project.get("PR_TOOL"))
         return False
 
     def agent_sock(self):
@@ -406,7 +429,7 @@ class Guest:
         return self.vm.write_marker(self.ws, self.m)
 
     def write_shell_rc(self):
-        return self._said(self.m.act_run(["bash", "-s", self.vm.tools(self.ws), self.vm.keyring_agent_rw_dir()],
+        return self._said(self.m.act_run(["bash", "-s", self.vm.tools(self.ws)],
                                          input=tree(self.host.root, "vm/shell-rc.sh")))
 
     def write_lldbinit(self):
@@ -493,16 +516,12 @@ class Guest:
                                "WK_BZUSER=" + (self.secrets.bugzilla_user() or ""), "bash", "-s"], input=script).ok
 
     def write_agent_secrets(self):
-        """Rewritten every start, so a withdrawn one goes; a file row is never copied, only read on the share."""
+        """Rewritten every start, so a withdrawn one goes; the claude.ai login is the placeholder the host's injector swaps."""
+        if not self.m.act_run(["sh", "-c", 'umask 077 && mkdir -p "$HOME/$1" && cat > "$HOME/$1/.credentials.json"', "sh",
+                               secrets.LOGIN_DIR], input=claudelogin.placeholder()).ok:
+            return False
         n = 0
-        for name, _file, home_path, _var, kind, delivery in self.secrets.agent_secrets():
-            if kind == "file":
-                if not self.m.act_run(["sh", "-c", 'rm -f "$HOME/$1" && bash -lc \'test -d "$CLAUDE_SECURESTORAGE_CONFIG_DIR"\'',
-                                       "sh", home_path]).ok:
-                    warn("the %s share is not mounted in %s, so it has no claude.ai login:\n"
-                         "    'wk stop %s', then 'wk start %s' boots it with the share"
-                         % (self.vm.agent_rw_share, self.ws, self.ws, self.ws))
-                continue
+        for name, _file, home_path, _var, delivery in self.secrets.agent_secrets():
             here = self.secrets.cred_stored(name) if "vm" in delivery.split(",") else False
             if here is None:
                 return False
@@ -946,11 +965,9 @@ def boot(host, ws, wait=BOOT_WAIT):
             m.remove(host.path(ws + ".unfiltered"))
         else:
             m.write(host.path(ws + ".unfiltered"), "")
-        agent_rw = host.secrets.store.keyring_agent_rw_dir()
-        host.secrets.ensure_dir(agent_rw, "0700")
         path = "%s:%s" % (os.path.dirname(host.softnet()), host.env.get("PATH") or os.environ.get("PATH", ""))
         m.remove(runlog)
-        m.spawn(["env", "PATH=" + path, vm.tart_or_die(), "run", *flags, "--dir=%s:%s" % (vm.agent_rw_share, agent_rw),
+        m.spawn(["env", "PATH=" + path, vm.tart_or_die(), "run", *flags,
                  "--dir=%s:%s:ro,tag=%s" % (vm.mirror_share, vm.store.mirror_parent(), vm.mirror_tag), vm.vm(ws)], runlog)
         info("booting %s (log: %s)" % (vm.vm(ws), runlog))
         if act.dry_run():
@@ -1081,3 +1098,55 @@ def vm_push_keys_state(root, machine, env=None):
             rows.append((g, "running", ""))
     return rows
 
+
+def rubble(vm):
+    """The injector a `wk start` spawned, which launchd's replaces: './setup --stage inject' stops it."""
+    from wk.rubble import remover, row
+    host = Host(vm)
+    pidfile = host.path("github-inject.pid")
+    if not host.machine.exists(pidfile):
+        return []
+    pid = host.spawned_inject()
+    if pid is None:
+        return [row("inject", "the pidfile of a spawned injector that is gone", 0, take=remover(host.machine, pidfile))]
+    return [row("inject", "an injector 'wk start' spawned, not launchd's (pid %d)" % pid, None, "./setup --stage inject")]
+
+
+def inject_host(root, env):
+    from wk import places
+    return Host(places.Registry(root, env, Local()).load("vm"))
+
+
+def inject_restart(host, label, plist):
+    """Booted out under the login's lock, so no refresh is cut short; bootstrapped once launchd has let the label go."""
+    svc, login = "gui/%d/%s" % (os.getuid(), label), host.secrets.cred_path("claude-login")
+    host.secrets.ensure_dir(os.path.dirname(login), "0700")
+    with claudelogin.locked(login):
+        host.machine.act_run(["launchctl", "bootout", svc])
+        if not act.dry_run() and not host.clock.wait_until(lambda: not host.machine.run(["launchctl", "print", svc]).ok, 10, 0.2):
+            warn("launchd still has %s 10 seconds after booting it out" % svc)
+            return False
+    return host.machine.act_run(["launchctl", "bootstrap", "gui/%d" % os.getuid(), plist]).ok
+
+
+def inject_plist(host, label, log, path):
+    import plistlib
+    return plistlib.dumps({"Label": label, "ProgramArguments": ["/usr/bin/python3", os.path.join(host.root, "container", "proxy",
+                                                                                                     "github-inject.py")],
+                           "EnvironmentVariables": dict(host.inject_env(), PATH=path), "RunAtLoad": True, "KeepAlive": True,
+                           "StandardOutPath": log, "StandardErrorPath": log}).decode()
+
+
+INJECT_VERBS = {"inject-plist": 3, "inject-restart": 2, "inject-retire": 0}
+
+if __name__ == "__main__":
+    verb, args = (sys.argv[1:2] or [""])[0], sys.argv[2:]
+    if INJECT_VERBS.get(verb) != len(args):
+        sys.exit("usage: python3 -m wk.guest inject-plist <label> <log> <PATH> | inject-restart <label> <plist> | inject-retire")
+    h = inject_host(images.root(), os.environ)
+    if verb == "inject-plist":
+        sys.stdout.write(inject_plist(h, *args))
+    elif verb == "inject-restart":
+        sys.exit(0 if inject_restart(h, *args) else 1)
+    else:
+        print("stopped" if h.retire_spawned_inject() else "none")
