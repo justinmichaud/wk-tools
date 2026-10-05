@@ -16,7 +16,7 @@ import sys
 
 from wk import act, agents, fleet, git, guest, images, kv, presets, reach, record, secrets, sshalias, tools
 from wk.machine import TIMED_OUT, Local, PodmanVm, Result, Ssh, TartExec, isolated_module, lib_argv
-from wk.resources import Resources, workspace_marker_path
+from wk.resources import Resources, arch_has_gpu, workspace_marker_path
 from wk.store import Store, dispatch_place, in_vm, no_such_workspace
 
 BUILTIN = ("container", "vm", "remote", "local")
@@ -976,7 +976,7 @@ class Container(Driver):
         for v in ("no_proxy", "NO_PROXY"):
             flags += ["--env", "%s=%s" % (v, NO_PROXY)]
         flags += ["--env", "WAYLAND_DISPLAY=/run/wk/display/wayland-0"]
-        if presets.arch_has_gpu(arch):
+        if arch_has_gpu(arch):
             r = self.machine.run(lib_argv(self.root, "host/linux/gpu.sh", "gpu_flags"))
             sys.stderr.write(r.err)
             flags += r.out.split() if r.ok else []

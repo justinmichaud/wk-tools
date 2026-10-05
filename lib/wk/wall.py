@@ -5,10 +5,11 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 
-from wk import presets, reach, secrets
+from wk import reach, secrets
 from wk.store import no_such_workspace
 from wk.act import die
 from wk.doctor import MISS, miss, note, ok
+from wk.resources import arch_has_gpu
 
 # Named places, never the checkout: WebKit ships PEM fixtures.
 KEY_SCAN = ("{ grep -rl 'PRIVATE KEY' $HOME/.ssh $HOME/.claude /secrets /run/wk;\n"
@@ -386,7 +387,7 @@ class Wall:
     def gpu(self):
         """gpu-probe.sh exits 0 hardware, 1 software only, 2 no EGL, 3 build failed."""
         arch = self.driver.arch(self.ws)
-        if not presets.arch_has_gpu(arch):
+        if not arch_has_gpu(arch):
             rows = [note("no GPU: an %s workspace gets none (the NVIDIA userspace is aarch64-only)" % arch)]
             if self.want_gpu:
                 rows.append(miss("--gpu on an %s workspace, which cannot have one" % arch, "a native workspace"))

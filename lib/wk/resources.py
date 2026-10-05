@@ -19,6 +19,11 @@ MIN_ENVELOPE_MB = 2048
 CGROUP_MEM_MAX = "/sys/fs/cgroup/memory.max"
 
 
+def arch_has_gpu(arch):
+    """The NVIDIA userspace is aarch64-only."""
+    return (arch or "native") != "armhf"
+
+
 def workspace_marker_path(env):
     return env.get("WK_MARKER") or os.path.join(env.get("HOME", os.path.expanduser("~")), ".wk-workspace")
 

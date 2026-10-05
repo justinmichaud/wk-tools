@@ -6,12 +6,12 @@ import os
 import re
 import shlex
 
+from treehash import sha256_file
 from wk import act, fleet, images, job, reach
 from wk.act import die, info, log, warn
 from wk.kv import kv
 from wk.machine import Ssh
 from wk.rubble import row
-from wk.slot import sha256_file
 from wk.sysimage import pmos_build, task
 from wk.sysimage.ls import Unknown, human_bytes
 

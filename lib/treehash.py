@@ -8,6 +8,19 @@ import sys
 CHUNK = 1 << 20
 
 
+def chunks(path):
+    with open(path, "rb") as handle:
+        yield from iter(lambda: handle.read(CHUNK), b"")
+
+
+def sha256_file(path):
+    """hashlib.file_digest is 3.11; a Mac runs 3.9."""
+    h = hashlib.sha256()
+    for chunk in chunks(path):
+        h.update(chunk)
+    return h.hexdigest()
+
+
 def digest(root, exclude):
     h = hashlib.sha256()
     for dirpath, dirnames, filenames in os.walk(root):
@@ -22,9 +35,8 @@ def digest(root, exclude):
                 continue
             h.update(b"f\0" + rel + b"\0")
             h.update(b"x" if os.access(path, os.X_OK) else b"-")
-            with open(path, "rb") as handle:
-                for chunk in iter(lambda: handle.read(CHUNK), b""):
-                    h.update(chunk)
+            for chunk in chunks(path):
+                h.update(chunk)
             h.update(b"\0")
     return h.hexdigest()
 

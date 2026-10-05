@@ -157,7 +157,9 @@ never one below.
 | `stock` | the pristine environment plus onboarding (`./setup`) | a profile of `lab`, not a codebase of its own |
 
 `lint.layering` holds the rule: a `lab` module names no WebKit and imports no
-`wk` or `field` module.
+`wk` or `field` module. `cmd/*`, the dispatcher, completion and the verb tables
+of `wk bench` and `wk sysimage` are the CLI over every layer, and no layer
+imports them.
 
 ## Setup
 

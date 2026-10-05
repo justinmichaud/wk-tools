@@ -84,10 +84,6 @@ def arch_canon(arch):
             "    docs/Nice to have/HANDOFF-cross-compile.md." % (arch, " ".join(ARCHES)))
 
 
-def arch_has_gpu(arch):
-    return (arch or "native") != "armhf"
-
-
 def arch_label(arch):
     return "" if arch in ("", "native") else arch
 

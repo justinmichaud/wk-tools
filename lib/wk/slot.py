@@ -1,22 +1,13 @@
 """A WebKit *slot*: one built WebKit that sits beside others on a board. Its layout
 is written by lib/wk/sysimage/buildroot_ws.py and read by lib/wk/bench/board.py and `wk sysimage`."""
 import argparse
-import hashlib
 import json
 import os
 import re
 import sys
 
+from treehash import sha256_file
 from wk.machine import Local
-
-
-def sha256_file(path):
-    """hashlib.file_digest is 3.11; a Mac runs 3.9."""
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def build_id_of(path, readelf):

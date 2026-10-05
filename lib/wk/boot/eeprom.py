@@ -7,11 +7,11 @@ import hashlib
 import os
 import re
 
+from treehash import sha256_file
 from wk import act
 from wk.clock import Clock
 from wk.kv import kv
 from wk.machine import Local, Result
-from wk.slot import sha256_file
 from wk.store import Store
 
 COMMIT = "86759b04b22173e10186139ac3ae4debcd0d7252"

@@ -7,9 +7,9 @@ import os
 import plistlib
 import shlex
 
-from wk import fleet, presets
+from wk import fleet
 from wk.act import die
-from wk.resources import Resources
+from wk.resources import Resources, arch_has_gpu
 from wk.session import Session
 from wk.store import no_such_workspace
 
@@ -123,7 +123,7 @@ class ContainerSystem(System):
         return "setarch $(uname -m) -R -- "
 
     def has_gpu(self, arch):
-        return presets.arch_has_gpu(arch)
+        return arch_has_gpu(arch)
 
     def session_mode(self):
         if self.mode is None:
