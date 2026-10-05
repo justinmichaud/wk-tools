@@ -13,12 +13,12 @@ UNASKED, NO_KEYS, NO_SWITCH = 3, 4, 5
 AGENT_PID_SCAN = '''if [ -d /proc/self ]; then
     for e in /proc/[0-9]*/exe; do
         case "$(readlink "$e" 2>/dev/null)" in
-            */claude/versions/*|*/.local/bin/claude) p=${e#/proc/}; printf "%s\\n" "${p%/exe}" ;;
+            */claude/versions/*|*/claude) p=${e#/proc/}; printf "%s\\n" "${p%/exe}" ;;
         esac
     done
 else
     ps -Ao pid=,comm= | while read -r p c; do
-        case "$c" in */claude/versions/*|*/.local/bin/claude|claude) printf "%s\\n" "$p" ;; esac
+        case "$c" in */claude/versions/*|*/claude|claude) printf "%s\\n" "$p" ;; esac
     done
 fi'''
 
