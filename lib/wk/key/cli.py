@@ -3,18 +3,17 @@
 import os
 import sys
 
-from wk.act import die, log, warn
+from wk.act import die, warn
 from wk.key.check import Check
-from wk.key.common import LOGIN, GitHub, prompt_secret, summary
+from wk.key.common import GitHub, prompt_secret
 from wk.key.creds import Creds
 from wk.key.deploy import DeployKeys
 from wk.key.election import Election
-from wk.key.login import Login
 from wk.secrets import Secrets
 from wk.targets import Registry
 
 
-class Key(Creds, DeployKeys, Login, Election, Check):
+class Key(Creds, DeployKeys, Election, Check):
     def __init__(self, root, env=None, machine=None, reg=None, sec=None, tty=None, prompt=None, out=None, rotate=False):
         self.root = str(root)
         self.env = os.environ if env is None else env
@@ -38,19 +37,16 @@ class Key(Creds, DeployKeys, Login, Election, Check):
                                 % (", and what %s hold(s) overwritten with the fresh ones" % peers if peers else "")):
                 die("not done -- nothing was changed")
         else:
-            if not self.confirm("put one working deploy key and one of every credential but the claude.ai login on this machine "
-                                "and on %s, overwriting what differs, and log in here for any of them without a claude.ai login?"
-                                % peers):
+            if not self.confirm("put one working deploy key and one of every credential on this machine and on %s, "
+                                "overwriting what differs?" % peers):
                 self.fleet_on = False
             if peers and not self.fleet_on:
                 warn("%s was left exactly as it is -- this machine's own credentials are still set up" % peers)
         left = "" if self.converge_forks() else "the deploy keys"
         for name in self.settable():
-            ok = self.fleet_cred(name) if self.fleet_on and name != LOGIN else self.local_cred(name)
+            ok = self.fleet_cred(name) if self.fleet_on else self.local_cred(name)
             if not ok:
                 left += " " + name
-        if self.fleet_on and not all([self.share_login(m) for m in self.fleet.peers]):
-            left += " the other workstations' logins"
         if left:
             warn("not settled:" + left)
         return self.check()
@@ -105,10 +101,6 @@ class Key(Creds, DeployKeys, Login, Election, Check):
     def give(self, what):
         if not what:
             die("usage: wk key give <fork>|<name>   (it prints on stdout, for the workstation electing one to take)")
-        if what == LOGIN:
-            die("a claude.ai login is never handed over: a copy is a second holder of one\n    refresh token, and the first refresh "
-                "on either side locks the other out.\n    'wk key setup' on a workstation that has one logs in for this machine "
-                "instead.")
         if what in self.fork_names():
             val = self.push_key(what)
         elif what in self.settable():
@@ -129,16 +121,8 @@ class Key(Creds, DeployKeys, Login, Election, Check):
 
     def adopt_verb(self, what, stdin):
         if not what:
-            die("usage: wk key adopt <fork>|claude-login   (the private key, or a tar of the login's two files, on stdin)")
-        if what != LOGIN:
-            return self.adopt(what, stdin().decode(errors="replace"))
-        rc, line = self.login_adopt(stdin())
-        if rc:
-            die("what arrived on stdin is not a claude.ai login a workspace here can use: " + summary(line))
-        self.out.write(line + "\n")
-        log("adopted a claude.ai login made for this workstation")
-        return 0
-
+            die("usage: wk key adopt <fork>   (the private key on stdin)")
+        return self.adopt(what, stdin().decode(errors="replace"))
 
 def main(root, verb, arg="", rotate=False, replace=False, paste=False, env=None, stdin=None, **kw):
     """`stdin()` is every byte on it, read only by the verbs that take a value there."""

@@ -41,6 +41,27 @@ else
     _missing=$((_missing + 1))
 fi
 
+WK_GIT_LFS_VERSION=3.6.1
+if have git-lfs || [ -x "$HOME/.local/bin/git-lfs" ]; then
+    unchanged "git-lfs present"
+else
+    _tmp=$(mktemp -d)
+    case "$(uname -m)" in x86_64) _arch=amd64 ;; *) _arch=arm64 ;; esac
+    _zip="git-lfs-darwin-$_arch-v$WK_GIT_LFS_VERSION.zip"
+    _base="https://github.com/git-lfs/git-lfs/releases/download/v$WK_GIT_LFS_VERSION"
+    if curl -fsSL -o "$_tmp/$_zip" "$_base/$_zip" && curl -fsSL -o "$_tmp/sums" "$_base/sha256sums.asc" &&
+       [ "$(awk -v z="$_zip" '$2 == z {print $1}' "$_tmp/sums")" = "$(shasum -a 256 "$_tmp/$_zip" | awk '{print $1}')" ] &&
+       unzip -q "$_tmp/$_zip" -d "$_tmp" &&
+       install -d "$HOME/.local/bin" && install -m 755 "$_tmp/git-lfs-$WK_GIT_LFS_VERSION/git-lfs" "$HOME/.local/bin/git-lfs"; then
+        changed "git-lfs $WK_GIT_LFS_VERSION installed at ~/.local/bin/git-lfs"
+    else
+        warn "git-lfs $WK_GIT_LFS_VERSION did not download, verify or install -- install it from: https://git-lfs.com"
+        _missing=$((_missing + 1))
+    fi
+    rm -rf "$_tmp"
+    unset _tmp _arch _zip _base
+fi
+
 if [ "$_missing" -gt 0 ]; then
     die "$_missing required tool(s) missing; install them and re-run ./setup"
 fi

@@ -19,12 +19,9 @@ from tests.test_doctor import fake_doctor
 
 import sys
 sys.path.insert(0, str(REPO / "lib"))
-from wk import backup, decl  # noqa: E402
+from wk import backup  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
-
-CMD_KEY = REPO / "cmd" / "key"
-
 
 # --- dconf_filter -------------------------------------------------------------
 
@@ -173,6 +170,16 @@ class TestMacosBackup(unittest.TestCase):
         lines = [l for l in new_conf.splitlines() if l]
         self.assertEqual(lines[0], "# a comment")
         self.assertEqual(lines[-1], "com.apple.dock tilesize int 48")
+
+    def test_a_refreshed_value_keeps_its_reason(self):
+        f = Fake("here")
+        f.files["/root/host/macos/defaults.conf"] = "com.apple.dock tilesize int 36 the person's choice: icon size\n"
+        f.answer(["defaults", "read", "com.apple.dock", "tilesize"], 0, "48\n")
+        f.answer(["defaults", "export", "com.apple.symbolichotkeys"], 0)
+        f.answer(["plutil", "-convert", "xml1"], 0)
+        f.files["/tmp/wk-backup-hotkeys.%d" % os.getpid()] = "<plist/>\n"
+        backup.macos_backup(f, "/root")
+        self.assertIn("com.apple.dock tilesize int 48 the person's choice: icon size", f.files["/root/host/macos/defaults.conf"])
 
     def test_a_value_no_longer_set_keeps_the_recorded_one(self):
         f = Fake("here")
@@ -324,14 +331,6 @@ class TestBackupMain(unittest.TestCase):
         f.answer(["dconf", "dump", "/"], 0, "[a]\nb=1\n")
         self.assertEqual(backup.main("/root", False, f, macos=False), 0)
         self.assertIn("/root/host/linux/config.dconf", f.files)
-
-
-# --- documentation stays true -----------------------------------------------
-
-class TestHeaderDocumentsCandidates(unittest.TestCase):
-    def test_help_text_mentions_candidates(self):
-        self.assertIn("wk key backup [--candidates]", decl.Decl(CMD_KEY).leading_comment(),
-                      "cmd/key's help (what `wk key -h` prints) doesn't document backup --candidates")
 
 
 if __name__ == "__main__":

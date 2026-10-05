@@ -25,7 +25,7 @@ from wk import images, store  # noqa: E402
 ROOT = images.root()
 
 from wk import decl, dispatch, record, targets  # noqa: E402
-from wk.act import Refused, die, exec_into, log  # noqa: E402
+from wk.act import Refused, die, log  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
 
@@ -33,7 +33,7 @@ from wk.workspace import require_name  # noqa: E402
 def exec_clean(argv):
     """Zed outlives this command and every terminal it opens inherits its environment,
     so the dispatcher's own variables are stripped first."""
-    exec_into(argv, env={k: v for k, v in os.environ.items() if k not in dispatch.DISPATCH_VARS})
+    Local().exec(argv, env={k: v for k, v in os.environ.items() if k not in dispatch.DISPATCH_VARS})
 
 
 def emit(url_only, zed, url):

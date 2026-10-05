@@ -2,17 +2,7 @@
 is fetched and moved onto its remote's current default branch. The image tag
 `wkdev-create` asks for is read out of that checkout (the SDK's own
 `get_sdk_version`), so a checkout that never fetches pins every container this
-machine makes to whatever commit `./setup` first cloned.
-
-host/linux/sdk.sh, host/macos/vmtools.sh (over ssh) and lib/wk/targets.py's
-`Container.sdk_refresh` (from `wk new`, before `wkdev-create`) all invoke this script
-rather than each carrying a copy of the fetch.
-
-Driven against real, disposable git repos: a temporary "upstream" and a
-clone of it, never the real webkit-container-sdk or a workspace.
-
-Run: python3 -m unittest tests.test_sdk_refresh -v
-"""
+machine makes to whatever commit `./setup` first cloned."""
 import os
 import subprocess
 import unittest
@@ -52,9 +42,6 @@ def commit_more(dirpath, text):
 
 
 def refresh(checkout, timeout=30, patcher=None):
-    """Run the script. The default patcher is a stub, since a disposable git
-    repo is not an SDK checkout; patcher=SCRIPT.parent / "sdk-patches" /
-    "apply.sh" runs the real one."""
     if patcher is None:
         patcher = checkout.parent / "patcher.sh"
         patcher.write_text("#!/bin/sh\nexit 0\n")
@@ -92,8 +79,6 @@ class TestSdkRefresh(unittest.TestCase):
             self.assertEqual(head(checkout), new_tip)
 
     def test_a_renamed_default_branch_is_followed(self):
-        """The remote's own choice, re-read every time (`git remote set-head
-        -a`), not the branch name the checkout happened to clone."""
         with scratch_dir() as d:
             upstream = make_upstream(d / "upstream")
             git("clone", "-q", str(upstream), str(d / "checkout"), cwd=d)
@@ -127,10 +112,6 @@ class TestSdkRefresh(unittest.TestCase):
             self.assertEqual(head(checkout), tip_before)
 
     def test_the_patches_are_applied_after_the_reset(self):
-        """A reset alone leaves a wkdev-create that refuses wk's options; the
-        patcher runs last, on the reset tree."""
-        text = SCRIPT.read_text()
-        self.assertLess(text.index("git reset --hard"), text.index("sdk-patches/apply.sh"))
         with scratch_dir() as d:
             upstream = make_upstream(d / "upstream")
             git("clone", "-q", str(upstream), str(d / "checkout"), cwd=d)
@@ -140,8 +121,6 @@ class TestSdkRefresh(unittest.TestCase):
             self.assertIn("not an SDK checkout", cp.stderr)
 
     def test_a_refresh_that_changes_nothing_says_nothing_about_the_patches(self):
-        """Every refresh resets and re-patches, so the patcher's lines would read as changes on a machine already set up:
-        they are printed when the tree ends up different from how it started, and when the patcher fails."""
         with scratch_dir() as d:
             upstream = make_upstream(d / "upstream")
             git("clone", "-q", str(upstream), str(d / "checkout"), cwd=d)

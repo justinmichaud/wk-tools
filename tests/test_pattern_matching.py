@@ -1,12 +1,4 @@
-"""Matching a string against declared glob patterns happens in one place.
-
-A pattern that travels as data -- a job's `pid_match` -- is matched by lib/wk/job.py's `match_any`, which never
-consults the filesystem. bash pathname-expands a pattern word split out of an unquoted expansion, so a shell matcher
-looping `for p in $list` would match from one cwd and not from another: inside a WebKit checkout,
-`*Tools/Scripts/build-*` is the two files it names. No shell file uses a variable as a pattern.
-
-Run: python3 -m unittest tests.test_pattern_matching -v
-"""
+"""Matching a string against declared glob patterns happens in one place."""
 TIER = "lint"
 import os
 import re
@@ -25,7 +17,6 @@ ARGS = "perl Tools/Scripts/build-webkit --jsc-only --debug --makeargs=-j75 "
 
 class TestMatchAnyIsIndependentOfTheCwd(unittest.TestCase):
     def test_the_bait_cwd_expands_the_pattern_words(self):
-        """The fixture proves itself: word-split there, the pattern is filenames."""
         with glob_bait(WANT) as cwd:
             cp = bash("want=%s; for p in $want; do echo \"$p\"; done" % shlex.quote(WANT), cwd=str(cwd), timeout=30)
         self.assertEqual(["xbuild-in-target.shx", "xTools/Scripts/build-x"], cp.stdout.split())
@@ -45,7 +36,6 @@ class TestMatchAnyIsIndependentOfTheCwd(unittest.TestCase):
                 self.assertFalse(job.match_any(args, want))
 
 
-# A `case` arm or a `[[ == ]]` whose pattern is a variable.
 VAR = r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?"
 VARIABLE_PATTERN = re.compile(
     r"^\s*(?:;;\s*)?%s\)|\bcase\b.*\bin\s+%s\)|\S\|%s\)"

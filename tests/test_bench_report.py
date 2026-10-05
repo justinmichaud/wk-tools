@@ -1,13 +1,5 @@
 """`wk bench report` / `compare`: the unified score+time+variance report
-(lib/wk/bench/report.py `subtest_metrics`, `welch_p`, `two_runs`).
-
-Unit tests build two synthetic run directories -- a result.json and an
-env.json in each -- and call the report on them in-process, the way `wk bench
-report` does. The text and html outputs are checked to agree. No workspace,
-no podman VM. `live bench.compare` is tests/test_bench_container_run.py's, against a workspace of its own.
-
-Run: python3 -m unittest tests.test_bench_report -v
-"""
+(lib/wk/bench/report.py `subtest_metrics`, `welch_p`, `two_runs`)."""
 import contextlib
 import io
 import json
@@ -18,7 +10,7 @@ import sys
 import unittest
 import unittest.mock
 
-from tests.support import REPO, WkTest, run, scratch_dir
+from tests.support import REPO, WkTest, scratch_dir
 from tests.test_ab_precision import (
     JETSTREAM3_CHILDREN, JETSTREAM3_HEADLINE, MOTIONMARK_CHILDREN, MOTIONMARK_HEADLINE,
     SPEEDOMETER3_HEADLINE, aggregate_doc, fields, speedometer_doc,
@@ -70,8 +62,6 @@ def env_record(path, *fields):
 
 
 class TestRecordLoadTellsMissingFromCorrupt(WkTest):
-    """A missing file is a legitimate, silent {} (an older run predating a
-    field); a corrupt one is a different fact and is not folded into it."""
 
     def test_a_missing_file_reads_as_empty(self):
         with scratch_dir() as tmp:
@@ -86,7 +76,6 @@ class TestRecordLoadTellsMissingFromCorrupt(WkTest):
 
 
 class TestReportWalkerAndStats(WkTest):
-    """Two synthetic runs, every shape `wk bench report` has to read."""
 
     def _write_pair(self, tmp, a_doc, b_doc, a_extra=(), b_extra=()):
         """Two run directories. A run is named by the directory a benchmark
@@ -108,41 +97,15 @@ class TestReportWalkerAndStats(WkTest):
             "Score": {"current": [99.0, 100.0, 101.0, 100.0]}}}}}}
 
     def test_report_html_has_every_subtest_both_metrics_and_one_svg_each(self):
-        """the shape a merged jsc-shell log and run-benchmark's own JetStream
-        output both use: metrics.Score with no modifier level for one
-        subtest (jsc-log), metrics.Score.None and metrics.Time with no
-        modifier for another (run-benchmark) -- both read by the one walker."""
         with scratch_dir() as tmp:
-            a_doc = {
-                "JetStream3.0": {
-                    "tests": {
-                        "gaussian-blur": {
-                            "metrics": {
-                                "Score": {None: {"current": [95.0, 97.0, 96.0, 94.0, 98.0, 96.5]}},
-                                "Time": {"current": [10.1, 10.3, 10.2, 10.0, 10.4, 10.2]},
-                            }
-                        },
-                        "richards": {
-                            "metrics": {"Score": {"current": [50.0, 51.0, 49.5, 50.5, 50.2, 49.8]}},
-                        },
-                    }
-                }
-            }
-            b_doc = {
-                "JetStream3.0": {
-                    "tests": {
-                        "gaussian-blur": {
-                            "metrics": {
-                                "Score": {None: {"current": [104.0, 106.0, 105.0, 103.0, 107.0, 105.5]}},
-                                "Time": {"current": [9.1, 9.3, 9.2, 9.0, 9.4, 9.2]},
-                            }
-                        },
-                        "richards": {
-                            "metrics": {"Score": {"current": [52.0, 53.0, 51.5, 52.5, 52.2, 51.8]}},
-                        },
-                    }
-                }
-            }
+            def doc(blur, blur_time, rich):
+                return {"JetStream3.0": {"tests": {
+                    "gaussian-blur": {"metrics": {"Score": {None: {"current": blur}}, "Time": {"current": blur_time}}},
+                    "richards": {"metrics": {"Score": {"current": rich}}}}}}
+            a_doc = doc([95.0, 97.0, 96.0, 94.0, 98.0, 96.5], [10.1, 10.3, 10.2, 10.0, 10.4, 10.2],
+                        [50.0, 51.0, 49.5, 50.5, 50.2, 49.8])
+            b_doc = doc([104.0, 106.0, 105.0, 103.0, 107.0, 105.5], [9.1, 9.3, 9.2, 9.0, 9.4, 9.2],
+                        [52.0, 53.0, 51.5, 52.5, 52.2, 51.8])
             a, b = self._write_pair(tmp, a_doc, b_doc)
             html_out = tmp / "report.html"
             cp = rep(a, b, html=str(html_out))
@@ -181,9 +144,6 @@ class TestReportWalkerAndStats(WkTest):
             self.assertIn("%.3f" % b_mean, html)
 
     def test_report_handles_speedometer_total_modifier_shape(self):
-        """Speedometer's own shape nests Time one level deeper again, under a
-        "Total" modifier rather than None -- a third shape the same walker
-        has to dig through."""
         with scratch_dir() as tmp:
             a_doc = {"Speedometer-3": {"tests": {"TodoMVC-JS": {
                 "metrics": {"Time": {"Total": {"current": [100.0, 102.0, 99.0, 101.0]}}}
@@ -198,12 +158,6 @@ class TestReportWalkerAndStats(WkTest):
             self.assertIn("Time", cp.stdout)
 
     def test_report_reads_speedometer2_board_results(self):
-        """the shape a board run records from the webserver patch's POST:
-        the total Score at the suite root, declarations (metrics.Time ==
-        ["Total"]) in the middle, and the numbers three levels down under
-        Sync/Async. Every level becomes a row, named by its path from the
-        suite down: the ones holding numbers from those, and the ones holding
-        a declaration from resolving it over the level below."""
         def doc(base):
             return {"debugOutput": [None], "Speedometer-2": {
                 "metrics": {"Score": {"current": [[base, base + 1.0, base + 0.5]]},
@@ -241,8 +195,6 @@ class TestReportWalkerAndStats(WkTest):
                 self.assertEqual((122.5, 117.0), means[(name, "Time")], name)
 
     def test_variance_by_configuration_groups_matching_tuples(self):
-        """Two runs sharing a `configuration` tuple land in one variance
-        group; the group's line names the axes and both sides' spread."""
         with scratch_dir() as tmp:
             doc_a = {"JetStream3.0": {"tests": {"t": {"metrics": {
                 "Score": {"current": [99.0, 100.0, 101.0, 100.0]}
@@ -262,7 +214,6 @@ class TestReportWalkerAndStats(WkTest):
             self.assertIn("exceeds A sd by >20%", cp.stdout, "B is far noisier than A and should be flagged")
 
     def test_axis_check_warnings_appear_in_the_report(self):
-        """A mismatched axis (different runner) is warned about before any statistic."""
         with scratch_dir() as tmp:
             doc = {"JetStream3.0": {"tests": {"t": {"metrics": {"Score": {"current": [1.0, 2.0]}}}}}}
             a, b = self._write_pair(
@@ -290,8 +241,6 @@ class TestReportWalkerAndStats(WkTest):
         self.assertIn("no run directories given", cp.stdout + cp.stderr)
 
     def test_one_missing_run_among_several_is_warned_about_not_hidden(self):
-        """A side that still has evidence reports on it, and says which round
-        it could not read -- a shorter side must not go unremarked."""
         with scratch_dir() as tmp:
             a, b = self._write_pair(tmp, self._one_subtest(), self._one_subtest())
             gone = tmp / "a-gone"
@@ -302,8 +251,6 @@ class TestReportWalkerAndStats(WkTest):
             self.assertIn("no result.json in this directory", cp.stderr)
 
     def test_a_run_with_no_env_json_reads_as_unknown_rather_than_refusing(self):
-        """Deliberate: env.json is how the axis check knows what a run was, and
-        a run predating a field has to report rather than refuse."""
         with scratch_dir() as tmp:
             a, b = self._write_pair(tmp, self._one_subtest(), self._one_subtest())
             (a / "env.json").unlink()
@@ -314,9 +261,6 @@ class TestReportWalkerAndStats(WkTest):
             self.assertIn("no warnings", cp.stdout)
 
     def test_env_record_defaults_configuration_for_untouched_runs(self):
-        """A run that never sets any configuration.* field still gets a full
-        `configuration` block, with the "not controlled" defaults -- an
-        older env.json and one written today read the same way."""
         with scratch_dir() as tmp:
             f = tmp / "env.json"
             env_record(f, "plan=jetstream3")
@@ -327,8 +271,6 @@ class TestReportWalkerAndStats(WkTest):
             )
 
     def test_env_record_update_merges_wall_time_without_clobbering(self):
-        """--update is how wall_time_s is added after a run finishes,
-        without a second write discarding the axes recorded before it."""
         with scratch_dir() as tmp:
             f = tmp / "env.json"
             env_record(f, "plan=jetstream3", "config=jsc-release")
@@ -339,7 +281,6 @@ class TestReportWalkerAndStats(WkTest):
             self.assertEqual(doc["wall_time_s"], "42")
 
     def test_env_record_refuses_a_field_that_is_not_key_value(self):
-        """a mistyped field is refused as one, not written silently"""
         with scratch_dir() as tmp:
             r = in_process(record.write_env, str(tmp / "env.json"), ["--nosuch"])
             self.assertEqual(1, r.returncode)
@@ -347,10 +288,6 @@ class TestReportWalkerAndStats(WkTest):
 
 
 class TestTheHeadlineRow(WkTest):
-    """JetStream3 and MotionMark never write their overall score into the file:
-    each declares itself the geometric mean of its first-level children's
-    Scores. The report resolves the declaration into a row, and it is the same
-    number `wk bench precision` stops on -- one implementation, read by both."""
 
     def _pair(self, tmp, doc):
         a_dir, b_dir = tmp / "a", tmp / "b"
@@ -386,16 +323,12 @@ class TestTheHeadlineRow(WkTest):
             self.assertAlmostEqual(row, precision, places=2)
 
     def test_speedometer3_reports_the_score_it_writes_itself(self):
-        """The third shape materialises its suite Score, and reads the same
-        way it did before either of the other two got a row."""
         with scratch_dir() as tmp:
             row, precision = self._headline_row(tmp, speedometer_doc(), "Speedometer-3")
             self.assertAlmostEqual(row, SPEEDOMETER3_HEADLINE, places=3)
             self.assertAlmostEqual(row, precision, places=3)
 
     def test_the_declared_row_is_the_suite_and_its_children_are_below_it(self):
-        """A first-level child and the suite are two rows, not one: the child
-        carries its own Score and the suite the aggregate of every child."""
         with scratch_dir() as tmp:
             doc = aggregate_doc("JetStream3.0", "Geometric", {"x": [1.0], "y": [4.0]})
             a, b = self._pair(tmp, doc)
@@ -407,9 +340,6 @@ class TestTheHeadlineRow(WkTest):
             self.assertEqual(means[("JetStream3.0/y", "Score")][0], 4.0)
 
     def test_a_child_that_declares_its_own_aggregate_becomes_a_row_too(self):
-        """A declaration is not the suite root's alone: a JetStream3 subtest
-        declares its Time as the geometric mean of First/Worst/Average, and a
-        level that resolves nothing is a level the file read and dropped."""
         with scratch_dir() as tmp:
             doc = {"JetStream3.0": {
                 "metrics": {"Score": ["Geometric"]},
@@ -430,8 +360,6 @@ class TestTheHeadlineRow(WkTest):
             self.assertEqual(8.0, means[("JetStream3.0", "Score")][0])
 
     def test_only_the_topmost_declaration_that_cannot_be_resolved_says_so(self):
-        """Every level above a silent subtest is silent for that one reason,
-        and a report that says it once per level buries the subtest's name."""
         with scratch_dir() as tmp:
             doc = {"JetStream3.0": {
                 "metrics": {"Score": ["Geometric"]},
@@ -448,9 +376,6 @@ class TestTheHeadlineRow(WkTest):
                             + "\n".join(said))
 
     def test_a_partial_suite_still_reports_its_subtests_and_says_why_it_has_no_total(self):
-        """`ab-precision` refuses a partial suite -- a stopping rule cannot run
-        on a score that is not the plan's. A report is what the operator reads
-        to find out which subtest went silent, so it reports and names it."""
         with scratch_dir() as tmp:
             doc = aggregate_doc("JetStream3.0", "Geometric", {"x": [1.0], "y": [4.0]})
             doc["JetStream3.0"]["tests"]["y"] = {"metrics": {"Time": {"current": [9.0]}}}
@@ -479,9 +404,6 @@ class TestTheHeadlineRow(WkTest):
 
 
 class TestSpreadWithinAndBetweenRuns(WkTest):
-    """`unit bench.report_and_cost`, the report half: a report names the
-    iteration spread inside a run apart from the spread between runs -- the
-    first is what --count averages down, the second only more rounds do."""
 
     def _side(self, tmp, name, runs):
         dirs = []
@@ -519,11 +441,6 @@ class TestSpreadWithinAndBetweenRuns(WkTest):
 
 
 class TestPrecisionCarriesTheNoiseFloor(WkTest):
-    """`met` answers --target; it does not say whether a run can see the
-    difference it just measured. The spread each arm carries and the delta read
-    against the resolvable one are what separate "no effect" from "cannot see",
-    and both were arithmetic a reader had to do by hand -- wrongly, if they
-    reached for the report table's per-iteration sd instead of this one."""
 
     def _precision(self, a, b, target="0.3"):
         with scratch_dir() as tmp:

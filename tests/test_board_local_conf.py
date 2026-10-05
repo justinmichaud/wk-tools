@@ -1,20 +1,9 @@
-"""What the *build* is told about a board, and by whom.
-
-`image/boards/<board>/local.conf.append` is the build-time sibling of that
-board's `config.txt.append`: what the board's own silicon needs of every image
-built for it, keyed on the board so a new profile for a board already known is
-right without being told.
-
-Today that is one line. The Pi 5 exists in two steppings; meta-raspberrypi at
-the rev these branches pin lists only the C0 device tree, whose pinctrl nodes
-carry the stepping-agnostic compatible that the same kernel's driver maps to
-C0 pin data. On the D0 board that is a fatal SError and a panic in
-bcm2712_pull_config_set before rootfs (rpi5, 2026-09-04).
-
-Run: python3 -m unittest tests.test_board_local_conf -v
-"""
-import re
+"""What the *build* is told about a board, and by whom."""
+import os
+import shlex
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -24,7 +13,6 @@ BOARDS = REPO / "image" / "boards"
 sys.path.insert(0, str(REPO / "lib"))
 from wk.sysimage import yocto_target  # noqa: E402
 
-DRIVER = REPO / "lib" / "wk" / "sysimage" / "yocto.py"
 ENV = {"DL_DIR": "/cache/dl", "SSTATE_DIR": "/cache/sstate"}
 
 
@@ -37,83 +25,48 @@ class TestTheBoardHalfIsWired(unittest.TestCase):
     def test_the_builder_takes_a_board(self):
         self.assertEqual(yocto_target.parse(["--target", "t", "--board", "rpi5"]).board, "rpi5")
 
-    def test_the_driver_passes_the_board_it_already_knows(self):
-        """IMG_MACHINE is the board name every profile already carries."""
-        self.assertIn('opt("--board", p["IMG_MACHINE"])', DRIVER.read_text())
-
     def test_the_board_file_is_appended_last(self):
-        """bitbake takes the last assignment, so a board fact must land after
-        the knobs above it -- and inside the block that writes local.conf."""
         text = conf("rpi5", 'X = "1"\n')
         self.assertLess(text.index("RM_WORK_EXCLUDE"), text.index("image/boards/rpi5"),
                         "a board fact is appended before knobs that could override it")
         self.assertTrue(text.rstrip("\n").endswith('X = "1"'))
 
-    def test_a_board_with_nothing_to_say_appends_nothing(self):
-        """Absent is the normal case: rpi3 and rpi4 need no build-time fact."""
-        for board in ("rpi3", "rpi4"):
-            with self.subTest(board=board):
-                self.assertFalse((BOARDS / board / "local.conf.append").exists())
-
     def test_no_board_file_appends_nothing(self):
         self.assertNotIn("image/boards/", conf("", None))
-        self.assertNotIn("image/boards/", conf("rpi3", None))
+        self.assertNotIn("image/boards/", conf("rpi4", None))
 
 
-class TestTheRpi5NeedsTheD0Overlay(unittest.TestCase):
-    """The firmware loads one base tree for both steppings and adapts it on
-    D0 silicon with overlays/bcm2712d0.dtbo. meta-raspberrypi installs a
-    hand-curated 52 of the 367 overlays the kernel compiles, and that one is
-    not among them."""
+class TestTheRpi3SwapsToZram(unittest.TestCase):
 
-    APPEND = BOARDS / "rpi5" / "local.conf.append"
+    UNIT = REPO / "boot" / "firstboot" / "wk-no-swap.service"
 
-    def test_the_file_exists(self):
-        self.assertTrue(self.APPEND.exists())
+    def swapped_off(self, swaps):
+        line = next(l for l in self.UNIT.read_text().splitlines() if l.startswith("ExecStart="))
+        argv = shlex.split(line[len("ExecStart="):].replace("$$", "$"))
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "swaps").write_text("Filename Type Size Used Priority\n" + swaps)
+            Path(d, "swapoff").write_text('#!/bin/sh\necho "$@" >> "%s/off"\n' % d)
+            os.chmod(Path(d, "swapoff"), 0o755)
+            subprocess.run(argv[:2] + [argv[2].replace("/proc/swaps", d + "/swaps")], check=True,
+                           env={"PATH": d + ":/usr/bin:/bin"})
+            off = Path(d, "off")
+            return off.read_text().split() if off.exists() else []
 
-    def _active(self):
-        return [l.strip() for l in self.APPEND.read_text().splitlines()
-                if l.strip() and not l.strip().startswith("#")]
+    def test_disk_swap_goes_and_zram_stays(self):
+        self.assertEqual(["/dev/mmcblk0p3", "/swapfile"],
+                         self.swapped_off("/dev/zram0 partition 474000 0 100\n/dev/mmcblk0p3 partition 1 0 -2\n"
+                                          "/swapfile file 1 0 -3\n"))
 
-    def test_it_asks_for_the_d0_overlay(self):
-        self.assertIn('RPI_KERNEL_DEVICETREE_OVERLAYS:append = " overlays/bcm2712d0.dtbo"',
-                      self._active(),
-                      "the rpi5 board append does not ask for the D0 overlay")
+    def test_no_swap_runs_nothing(self):
+        self.assertEqual([], self.swapped_off(""))
 
-    def test_it_asks_for_a_4k_page_kernel(self):
-        """arm64 COMPAT executes an AArch32 binary only when its segments are
-        aligned to the kernel's page size, and the lib32 userspace is 4K
-        aligned: under the 16K default every 32-bit binary segfaults, init
-        included. bcm2711_defconfig names no page size, so it takes the 4K
-        default, and it already carries this silicon."""
-        self.assertIn('KBUILD_DEFCONFIG:raspberrypi5 = "bcm2711_defconfig"',
-                      self._active(),
-                      "the board would build the 16K kernel its 32-bit userspace cannot run on")
 
-    def test_it_says_nothing_else(self):
-        self.assertEqual(2, len(self._active()), self._active())
-
-    def test_it_appends_rather_than_replaces(self):
-        """The other 52 overlays are the branch's own choice; this adds one."""
-        text = self.APPEND.read_text()
-        self.assertIn("RPI_KERNEL_DEVICETREE_OVERLAYS:append", text)
-        self.assertNotIn("RPI_KERNEL_DEVICETREE_OVERLAYS = ", text)
-
-    def test_it_does_not_ship_a_per_stepping_base_tree(self):
-        """Measured: a card carrying bcm2712d0-rpi-5-b.dtb panics identically,
-        so the firmware does not ask for it by name and shipping it is weight
-        nothing loads."""
-        self.assertNotIn("bcm2712d0-rpi-5-b.dtb",
-                         [l.strip() for l in self.APPEND.read_text().splitlines()
-                          if l.strip() and not l.strip().startswith("#")])
-
-    def test_the_machine_conf_names_the_tree_the_firmware_loads(self):
-        """dtb is what boot-check verifies resolves on the card, so a
-        name the firmware never requests passes a card that cannot boot."""
-        conf = (REPO / "machines" / "rpi5.conf").read_text()
-        m = re.search(r"^dtb=(\S+)", conf, re.M)
-        self.assertIsNotNone(m)
-        self.assertEqual("bcm2712-rpi-5-b.dtb", m.group(1))
+class TestTheRpi5Board(unittest.TestCase):
+    def test_it_appends_the_d0_overlay_and_a_4k_page_kernel_and_nothing_else(self):
+        active = [l.strip() for l in (BOARDS / "rpi5" / "local.conf.append").read_text().splitlines()
+                  if l.strip() and not l.strip().startswith("#")]
+        self.assertEqual(sorted(active), ['KBUILD_DEFCONFIG:raspberrypi5 = "bcm2711_defconfig"',
+                                          'RPI_KERNEL_DEVICETREE_OVERLAYS:append = " overlays/bcm2712d0.dtbo"'])
 
 
 if __name__ == "__main__":

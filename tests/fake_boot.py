@@ -51,7 +51,6 @@ class FakeBoard(Channel):
         self.boots, self.booted = 1, int(self.clock.now())
         self.one_shot = None
         self.tryboot = False
-        self.mbr = {}
         self.record = None
         self.stuck = False
         self.up = True
@@ -71,9 +70,6 @@ class FakeBoard(Channel):
         self.fat[boot] = {"wk-image.id": ident + "\n", "config.txt": "kernel=kernel8.img\n",
                           "cmdline.txt": "root=%s rootwait\n" % root, "kernel8.img": "k"}
         self.roots[root] = {"id": ident, "role": "bench", "failsafe": failsafe, "watchdog": watchdog, "systemd": systemd}
-        disk = disk_of(boot)
-        if self.conf.get("driver") == "pi-mbr":
-            self.mbr[disk] = "83"
         return root
 
     def sd(self):
@@ -90,8 +86,6 @@ class FakeBoard(Channel):
         if drv == "rpi5-usb" and self.one_shot and self.one_shot.endswith("4"):
             pair = kv(self.fat.get(part(dev, 1), {}).get("autoboot.txt", "")).get("boot_partition", "") or "1"
             return part(dev, int(pair) + 1)
-        if drv == "pi-mbr" and self.mbr.get(dev) == "0c":
-            return part(dev, 2)
         return None
 
     def reboot(self, tryboot=False):
@@ -167,15 +161,6 @@ class FakeBoard(Channel):
             return self.eeprom_do(do, p, input)
         if name == "eeprom-order.sh":
             return Result(0, "eeprom_boot_order=0xf41\n")
-        if name == "pimbr-type.sh":
-            return Result(0, " %s\n" % self.mbr.get(p["WK_DEV"], ""))
-        if name == "pimbr-set-type.sh":
-            if not self.stuck:
-                self.mbr[p["WK_DEV"]] = "%02x" % int(p["WK_OCT"], 8)
-            return Result(0)
-        if name == "pimbr-self-disarm.sh":
-            self.mbr[disk_of(self.running)] = "83"
-            return Result(0)
         if name == "pisd-self-disarm.sh":
             if "config.txt.rescue" in sd:
                 sd["config.txt"] = sd.pop("config.txt.rescue")

@@ -6,7 +6,7 @@ import json
 import os
 
 from wk import act, guest, job, tools
-from wk.act import debug, die, info, log, warn
+from wk.act import die, info, log, warn
 from wk.clock import Clock
 from wk.kv import kv
 from wk.store import Store
@@ -15,8 +15,8 @@ from wk.sysimage import task
 # macOS 26.6.2 with Xcode 27 beta 6. A Cirrus Labs `-xcode` tag names the Xcode, and the first Saturday of every month
 # re-pushes it onto the newest macOS, so only a digest names one image.
 IMAGE = "ghcr.io/cirruslabs/macos-tahoe-xcode@sha256:f441eb487a18b4588c096adcff5eb48fddca550909e01c472580872b48c166b0"
-INPUTS = ("vm/provision-base.sh", "vm/desktop.sh", "bench/mac-pyobjc.sh")
-LOGIN_SETTLE = 45    # measured: Setup Assistant is up 4s after boot, and ssh answers before that
+INPUTS = ("vm/provision-base.sh", "vm/desktop.sh", "vm/mount-mirror.sh", "bench/mac-pyobjc.sh")
+LOGIN_SETTLE = 45    # measured: Setup Assistant is up 4s after boot, and the guest answers before that
 BOOT_WAIT = 300
 PLOG, PRC = "/tmp/wk-base-provision.log", "/tmp/wk-base-provision.rc"
 MODES = ("--refresh", "--rebuild", "--rm")
@@ -31,12 +31,17 @@ def image(env):
     return env.get("WK_VM_IMAGE") or IMAGE
 
 
+def mirror_env_words():
+    from wk.targets import GUEST_MIRROR_MOUNT, GUEST_MOUNT_MIRROR, MIRROR_TAG
+    return " ".join(("WK_MIRROR_TAG=" + MIRROR_TAG, "WK_MIRROR_MOUNT=" + GUEST_MIRROR_MOUNT, "WK_MOUNT_MIRROR=" + GUEST_MOUNT_MIRROR))
+
+
 def inputs_hash(root, env):
     h = hashlib.sha256()
     for rel in INPUTS:
         with open(os.path.join(root, rel), "rb") as f:
             h.update(f.read())
-    h.update(("image=%s\nuser=%s\n" % (image(env), guest.vm_user(env))).encode())
+    h.update(("image=%s\nuser=%s\n" % (image(env), guest.vm_user(env))).encode() + mirror_env_words().encode())
     return h.hexdigest()[:16]
 
 
@@ -203,24 +208,18 @@ class Base:
             die("the base VM did not boot. Its run log says:\n%s" % guest.runlog_tail(self.machine, self.runlog()))
         return ip
 
-    def wait_ssh(self, g):
+    def wait_agent(self, g):
         return self.clock.wait_until(lambda: g.run(["true"]).ok, 120, 2)
 
     def install_key(self, g):
-        if self.wait_ssh(g):
-            debug("ssh already works in '%s'; no key to install" % self.name)
-            return
-        info("installing the wk ssh key over the guest agent")
+        if not self.wait_agent(g):
+            die("the tart guest agent in '%s' never answered, and it is the one way into a guest.\n    The Cirrus Labs images "
+                "ship it and a vanilla macOS image does not: build the base from\n    the image WK_VM_IMAGE names. Its run log says:\n%s"
+                % (self.name, guest.runlog_tail(self.machine, self.runlog())))
         pub = self.machine.read(self.vm.key() + ".pub").strip()
-        r = self.machine.act_run([self.vm.tart_or_die(), "exec", self.name, "/bin/sh", "-c",
-                                  "mkdir -p ~/.ssh && chmod 700 ~/.ssh && grep -qxF '%s' ~/.ssh/authorized_keys 2>/dev/null "
-                                  "|| echo '%s' >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys" % (pub, pub)])
-        if not r.ok:
-            die("could not reach the guest agent in '%s'.\n    `tart exec` needs the Tart guest agent, which the Cirrus Labs "
-                "images ship\n    but a vanilla macOS image does not: log in once with the image's own credentials,\n"
-                "    append %s.pub to ~/.ssh/authorized_keys, then re-run." % (self.name, self.vm.key()))
-        if not self.wait_ssh(g):
-            die("ssh key was installed but ssh still refuses. Its run log says:\n%s" % guest.runlog_tail(self.machine, self.runlog()))
+        if not g.act_run(["sh", "-c", 'umask 077 && mkdir -p ~/.ssh && { grep -qxF "$1" ~/.ssh/authorized_keys 2>/dev/null || '
+                          'echo "$1" >> ~/.ssh/authorized_keys; }', "sh", pub]).ok:
+            die("could not authorise the wk ssh key in '%s'" % self.name)
 
     def provision(self):
         v = self.vm
@@ -242,10 +241,10 @@ class Base:
                 "  and seal it only on a clear screen -- nothing past here can be shown without a running guest" % self.name)
             return
         ip = self.start()
-        g = v.guest_at(ip)
+        g = v.guest_of(self.name)
         self.install_key(g)
         # A stale clock fails provisioning's first HTTPS clone as a not-yet-valid certificate, and a base hands it to every clone.
-        if not guest.Guest(self.host, self.name, ip).set_guest_clock():
+        if not guest.Guest(self.host, self.name, g).set_guest_clock():
             die("could not set the clock in '%s'. Passwordless sudo is what it needs, and the base is\n    built from the image "
                 "WK_VM_IMAGE names -- check that image rather than patching the guest" % self.name)
         info("provisioning the base VM (Xcode licence, disk, desktop)")
@@ -257,14 +256,13 @@ class Base:
             die("Setup Assistant is still on '%s''s screen, and a base is not sealed behind a pane:\n    every guest cloned "
                 "from it would come up behind one too. It is running at %s --\n    answer it at its own window, then  %s --refresh"
                 % (self.name, ip, guest.BASE_BUILD))
-        if not guest.Guest(self.host, self.name, ip).settle_desktop():
+        if not guest.Guest(self.host, self.name, g).settle_desktop():
             warn("could not re-settle the base's desktop after Setup Assistant")
         info("rebooting the base to prove its screen comes up clear")   # a dismissed pane comes back at the next login
         self.tart_or_die(["stop", self.name])
         ip = self.start()
-        g = v.guest_at(ip)
-        if not self.wait_ssh(g):
-            die("'%s' rebooted to %s but ssh never answered, so the screen it came up with\n    cannot be read. Its run log says:\n%s"
+        if not self.wait_agent(g):
+            die("'%s' rebooted to %s but its guest agent never answered, so the screen it came up\n    with cannot be read. Its run log says:\n%s"
                 % (self.name, ip, guest.runlog_tail(self.machine, self.runlog())))
         if not self.login_settled(g):
             die("Setup Assistant came back at '%s''s next login, so the flow that answered it did\n    not finish. The base is "
@@ -277,9 +275,10 @@ class Base:
         info("golden base VM '%s' is sealed" % self.name)
 
     def run_provisioning(self, g):
-        """Detached and polled: provisioning is minutes, and a dropped connection takes a foreground ssh with it."""
+        """Detached and polled: provisioning is minutes, and a dropped connection takes a foreground exec with it."""
         argv = ["env", "WK_VM_DISPLAY=" + guest.display(self.env), "WK_VM_USER=" + self.vm.user(),
-                "WK_VM_PASSWORD=" + guest.password(self.env), "bash", self.vm.tools(self.name) + "/vm/provision-base.sh"]
+                "WK_VM_PASSWORD=" + guest.password(self.env), *mirror_env_words().split(), "bash",
+                self.vm.tools(self.name) + "/vm/provision-base.sh"]
         if not g.act_run(["sh", "-c", job.remote_line(argv, PLOG, PRC)]).ok:
             die("could not start base provisioning in '%s'" % self.name)
         word, _ = job.wait_remote(lambda line: g.run(["sh", "-c", line]), PLOG, PRC, self.clock, env=self.env)
@@ -293,7 +292,7 @@ class Base:
                 "    and a re-run starts it again:  %s --refresh" % ("rc=" + word if word.isdigit() else word, saved, guest.BASE_BUILD))
 
     def login_settled(self, g):
-        """ssh answers before the login has drawn anything, so a read straight after boot reads clear whatever is coming."""
+        """The guest answers before the login has drawn anything, so a read straight after boot reads clear whatever is coming."""
         return not self.clock.wait_until(lambda: guest.setup_assistant(g) == "up", LOGIN_SETTLE, 3)
 
     def check_screen(self, g, ip):

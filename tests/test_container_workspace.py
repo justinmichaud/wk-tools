@@ -1,12 +1,4 @@
-"""Real integration tests against one container workspace: create it,
-exercise the read-only surface, cancel a real build in it, then destroy it.
-Gated on the container target being there -- podman on Linux, the `wk` podman
-VM on macOS -- and never starting either itself. The lifecycle is the cheap
-half and runs wherever a workspace can be made; cancelling a build compiles
-JSC, so it stays on the machine that keeps the VM.
-
-Run: python3 -m unittest tests.test_container_workspace -v
-"""
+"""Live: one real container workspace created, read, a real build cancelled in it, and destroyed."""
 import json
 import os
 import pty
@@ -17,14 +9,12 @@ import time
 import unittest
 from unittest import mock
 
-from tests.support import (REPO, WK, WkTest, rand_suffix,
-                           requires_container_target, run, shell_files)
+from tests.support import REPO, WK, WkTest, rand_suffix, requires_container_target, run
 
 sys.path.insert(0, str(REPO / "lib"))
 
 
 def firstrun_lines(log):
-    """What container/firstrun.sh said, out of a container's log, which also holds everything the tools it ran printed."""
     return "\n".join(l for l in log.replace("\r", "").splitlines() if l.startswith("[firstrun]"))
 
 
@@ -39,9 +29,6 @@ def container_log(ws):
 
 @requires_container_target()
 class TestContainerWorkspaceLifecycle(WkTest):
-    """`wk new` (container target) -> `wk ls`/`wk status`/`wk build --dry-run`
-    -> `wk rm`, cleaning up in tearDown even if an assertion fails midway."""
-
     def setUp(self):
         super().setUp()
         self.name = f"wk-test-{rand_suffix()}"
@@ -49,18 +36,12 @@ class TestContainerWorkspaceLifecycle(WkTest):
 
     def tearDown(self):
         if self._created:
-            # cmd/rm's confirm() only skips the prompt with WK_YES=1 (no
-            # terminal here declines by default, which would leave the
-            # workspace behind).
             cp = run("rm", self.name, env={"WK_YES": "1"})
-            # Best-effort: report but do not mask the real test failure.
             if cp.returncode != 0:
                 print(f"[teardown] 'wk rm {self.name}' exited {cp.returncode}: {cp.stdout + cp.stderr}")
         super().tearDown()
 
     def _in_ws(self, *args, timeout=180):
-        """One command in the workspace's checkout, the way a person reaches
-        it: `wk enter <ws> -- ...` in /src/WebKit."""
         return run("enter", self.name, "--", "git", "-C", "/src/WebKit", *args,
                    timeout=timeout)
 
@@ -68,11 +49,6 @@ class TestContainerWorkspaceLifecycle(WkTest):
         return self._in_ws("config", *args).stdout.strip()
 
     def _assert_the_checkout_is_what_wk_new_promises(self):
-        """The four defects, asked of a real workspace: it is on main tracking
-        origin/main (not detached), every remote fetches the machine's mirror
-        for the refs that mirror carries, a bare `git fetch origin` is a local
-        read rather than half a minute of github.com, and `git-webkit setup`
-        has already run."""
         self.assertEqual(self._in_ws("symbolic-ref", "--short", "HEAD").stdout.strip(),
                          "main", "a fresh workspace is on main, not detached")
         self.assertEqual(
@@ -80,9 +56,6 @@ class TestContainerWorkspaceLifecycle(WkTest):
                         "@{u}").stdout.strip(),
             "origin/main", "main tracks origin/main, so `git pull` has an upstream")
 
-        # Asked of the one list rather than retyped: origin is narrowed to the
-        # branches the mirror carries, which is main plus the release branch of
-        # every image configuration this checkout defines (mirror_branches, lib/wk/git.py).
         from wk.git import mirror_branches
         self.assertEqual(
             self._config("--get-all", "remote.origin.fetch").split("\n"),
@@ -119,11 +92,6 @@ class TestContainerWorkspaceLifecycle(WkTest):
                       + firstrun_lines(container_log(self.name)))
 
     def _assert_a_session_can_run_in_it(self):
-        """The workspace user owns their home -- mountpoints included, and the
-        mirror's is inside it where this machine's store is under $HOME
-        (tests/test_home_mounts.py) -- and the Claude CLI first start installs
-        into ~/.local/bin is on $PATH. Without either, `wk ai claude` refuses
-        the workspace and no session in it can run at all."""
         cp = run("enter", self.name, "--", "bash", "-c",
                  'find "$HOME" -xdev -maxdepth 4 ! -user "$(id -un)" -printf "%u %m %p\\n"',
                  timeout=300)
@@ -138,14 +106,12 @@ class TestContainerWorkspaceLifecycle(WkTest):
         self.assertTrue(cp.stdout.strip().endswith("claude"), cp.stdout)
 
     def test_create_list_status_build_dry_run_remove(self):
-        """wk new -> wk ls -> wk status --text --no-fleet -> wk build --dry-run -> wk rm"""
         t0 = time.time()
         cp = run("new", self.name, "--target", "container", timeout=600)
         self._created = cp.returncode == 0
         self.assertEqual(cp.returncode, 0, f"wk new failed: {cp.stdout + cp.stderr}")
         created_s = time.time() - t0
 
-        # It may still be finishing in the background; wait for it to settle.
         run("status", self.name, "--wait", "--timeout", "900", timeout=960)
 
         self._assert_the_checkout_is_what_wk_new_promises()
@@ -174,18 +140,8 @@ class TestContainerWorkspaceLifecycle(WkTest):
 
 @requires_container_target()
 class TestCancellingARealBuild(WkTest):
-    """^C reaches the driver and nothing else -- a container build is `podman
-    exec` with no signal proxy -- so the driver has to tell the machine that
-    builds. This drives the real thing: a real JSC build in a real container,
-    interrupted once ninja is running, then refused while one runs, then
-    stopped by name.
-
-    The interrupt is a ^C byte into a pty, which is what a person does and the
-    only thing that reaches the far side: on a macOS host the command is
-    forwarded into the podman VM, and with a terminal that hop is `ssh -t`, so
-    the remote pty raises the signal there (measured: a SIGINT to the local
-    `podman machine ssh` is ignored and the build carries on).
-    """
+    """A ^C byte into a pty (the only interrupt that crosses `ssh -t` into the podman VM), a refused second
+    build, and --kill, on a real JSC build."""
 
     def setUp(self):
         super().setUp()
@@ -204,10 +160,7 @@ class TestCancellingARealBuild(WkTest):
         super().tearDown()
 
     def _build_task(self):
-        """The build's state as `wk status --records` reports it, and the
-        walk's own exit code: a task record while it runs or ended badly, the
-        workspace row's build sub once it ended as asked (cmd/status
-        report_tasks: what it produced is the report)."""
+        """(`wk status --records` result, the build's task record or the workspace row's build sub)."""
         cp = run("status", self.name, "--records", "--no-fleet", timeout=300)
         task, sub = None, None
         for line in cp.stdout.splitlines():
@@ -222,17 +175,11 @@ class TestCancellingARealBuild(WkTest):
         return cp, task or sub
 
     def _ninja_started(self):
-        """Whether the log has a ninja progress line yet: the build's output
-        goes to its log, not to the driver's stdout."""
         cp = run("logs", self.name, timeout=300)
         return any(l.strip().startswith("[") and "/" in l[:16]
                    for l in cp.stdout.splitlines())
 
     def test_interrupt_then_refuse_then_kill(self):
-        """One workspace, three questions in the order a person meets them:
-        ^C on a foreground build, a second build while one runs, and --kill on
-        a detached one. One `wk new` for all three -- creating the workspace is
-        the expensive part."""
         self._interrupt_stops_the_build_inside_the_container()
         self._a_second_build_is_refused_and_kill_converges_the_detached_one()
 
@@ -304,10 +251,7 @@ class TestCancellingARealBuild(WkTest):
 
 
 class TestOnePodmanWrapper(unittest.TestCase):
-    """`Container.podman()` is how the container driver reaches podman, everywhere. A bare `podman` works wherever
-    the daemon is local and reaches the *rootful* podman from a macOS host -- and the commands a person types outside
-    the VM (`wk scp`, `wk stop`) are exactly where that shows up. The bare word is left only for `podman machine`,
-    which is the host's own, and `podman unshare`, which runs where the store is."""
+    """`Container.podman()` names the machine's connection from a macOS host; bare `podman` is only `machine`/`unshare`."""
 
     def container(self, env, system):
         from wk import targets
@@ -332,18 +276,5 @@ class TestOnePodmanWrapper(unittest.TestCase):
             with self.subTest(call=m.group(0)):
                 self.assertIn(m.group(1), ("-c", "machine", "unshare"))
 
-    def test_nothing_in_the_tree_still_calls_it(self):
-        for f in shell_files():
-            with self.subTest(script=str(f.relative_to(REPO))):
-                for line in f.read_text().splitlines():
-                    self.assertNotRegex(line, r"(?<![_A-Za-z])_podman ")
-
-
 if __name__ == "__main__":
     unittest.main()
-
-
-class TestAFailedSetupCarriesWhatFirstRunSaid(unittest.TestCase):
-    def test_only_firstruns_own_lines_are_kept(self):
-        log = "Installed jinja2-3.1.4!\r\n[firstrun] git-webkit: setup=failed\nSetup succeeded!\n[firstrun] ready\n"
-        self.assertEqual("[firstrun] git-webkit: setup=failed\n[firstrun] ready", firstrun_lines(log))

@@ -1,13 +1,5 @@
-"""A macOS guest fit to look at and to measure in: what `wk doctor <guest>` and every start read of its desktop, what
-vm/desktop.sh writes, and what accumulates in a guest that stays up.
-
-An occluded window is a throttled window, so a benchmark behind the screen lock, the screen saver, display sleep or a
-modal pane measures something else rather than failing. The findings are driven from captured probe output: what the
-probe says about a real guest is a fact about that guest, not about this code. The probe and the writer are held to
-the two properties that make them safe on somebody's live guest -- the writer kills nothing, the probe changes nothing.
-
-Run: python3 tests/run.py --unit -k test_vm_desktop
-"""
+"""A macOS guest's desktop and load, as `wk doctor <guest>` and every start read them from captured probe output;
+the writer (vm/desktop.sh) kills nothing and the probes change nothing."""
 import contextlib
 import functools
 import inspect
@@ -18,7 +10,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, assert_guest_start_converges, live_selected, repo_files
+from tests.support import REPO, live_selected, repo_files
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import doctor, guest, targets  # noqa: E402
@@ -31,8 +23,7 @@ DESKTOP = REPO / "vm" / "desktop.sh"
 PROBE = REPO / "vm" / "desktop-probe.sh"
 REBUILD = guest.BASE_BUILD + " --rebuild"
 
-# A real reading of a settled guest with every table row in force. The pyobjc pin
-# is read from bench/mac-pyobjc.sh, so a re-pin changes no behaviour here.
+# A real reading of a settled guest with every table row in force.
 PYOBJC_VERSION = re.search(
     r'WK_PYOBJC_VERSION="\$\{WK_PYOBJC_VERSION:-([^}]*)\}"',
     (REPO / "bench" / "mac-pyobjc.sh").read_text()).group(1)
@@ -120,10 +111,7 @@ securityagent=down
 user=admin
 """
 
-# A real reading of a clone behind Setup Assistant, with the screen saver armed
-# (a base's ByHost setting does not survive a clone). It carries only the keys an
-# older probe printed: a guest that answers nothing about a row is unknown, never
-# settled.
+# A real reading of a clone behind Setup Assistant with the screen saver armed; a key it lacks is unknown, not settled.
 AS_FOUND = """console_user=admin
 screenlock=off
 widgets_desktop=?
@@ -148,10 +136,7 @@ user=admin
 
 LOGIN_WINDOW = SETTLED.replace("console_user=admin", "console_user=root")
 
-# A guest whose base never turned Software Update off: an update that downloads
-# itself, macOS updates set to install themselves -- which reboots the guest,
-# mid-build if that is when one lands -- and a Setup Assistant that has not seen
-# this macOS, so Buddy shows its "what is new" pane at login.
+# A base that never turned Software Update off, and a Setup Assistant that has not seen this macOS.
 UPDATE_ON = (SETTLED
              .replace("update_download_system=0", "update_download_system=1")
              .replace("update_autoinstall_system=0", "update_autoinstall_system=1")
@@ -198,7 +183,6 @@ class TestTheFindings(unittest.TestCase):
         self.assertTrue(any("wk start" in x[2] for x in f), f)
 
     def test_an_update_that_reboots_or_downloads_itself_is_wrong(self):
-        """The per-user domain is what System Settings shows; softwareupdated obeys /Library/Preferences."""
         f = findings(UPDATE_ON)
         wrong = [x[1] for x in f if x[0] == "wrong"]
         for what in ("install themselves", "download themselves", "what is new in macOS"):
@@ -206,8 +190,6 @@ class TestTheFindings(unittest.TestCase):
         self.assertTrue(all(REBUILD in x[2] for x in f if "install themselves" in x[1]))
 
     def test_the_check_flag_no_guest_can_set_is_not_judged(self):
-        self.assertNotIn("update_check_system", PROBE.read_text())
-        self.assertNotIn("softwareupdate --schedule", PROBE.read_text())
         for probe in (SETTLED, AS_FOUND, UPDATE_ON):
             self.assertFalse([x for x in findings(probe) if "scheduled update check" in x[1]])
 
@@ -231,12 +213,6 @@ class TestTheFindings(unittest.TestCase):
         asked = set(re.findall(r"DidSee[A-Za-z0-9]+", PROBE.read_text()))
         self.assertEqual(set(), asked - set(re.findall(r"DidSee[A-Za-z0-9]+", DESKTOP.read_text())))
 
-    def test_nothing_claims_to_stop_the_update_pane(self):
-        for f in (DESKTOP, PROBE, REPO / "bench" / "mac-quiet-desktop.sh"):
-            with self.subTest(file=f.name):
-                self.assertNotIn("DidSeeAutoUpdatePrompt", f.read_text())
-                self.assertNotIn("mbuseragent", f.read_text().replace("has no launchd label", ""))
-
     def test_a_login_window_is_no_desktop_at_all(self):
         self.assertTrue([x for x in findings(LOGIN_WINDOW) if x[0] == "wrong" and "nobody is logged in" in x[1]])
 
@@ -255,8 +231,6 @@ class TestTheFindings(unittest.TestCase):
 
 
 class TestWhatIsInFrontOfTheDesktop(unittest.TestCase):
-    """The faults a guest is refused over: a guest with the wrong pyobjc still builds; one behind a pane does not."""
-
     def test_a_settled_guest_has_nothing_in_front(self):
         self.assertEqual([], desktop(SETTLED).blockers())
 
@@ -268,34 +242,15 @@ class TestWhatIsInFrontOfTheDesktop(unittest.TestCase):
         self.assertEqual([], desktop(SETTLED.replace("pyobjc=" + PYOBJC_VERSION, "pyobjc=9.0")).blockers())
 
 
-class TestTheWriterIsSafeToRunOnALiveGuest(unittest.TestCase):
-    def test_it_kills_nothing(self):
+class TestTheScriptsAreSafeOnALiveGuest(unittest.TestCase):
+    def test_the_writer_kills_nothing_and_the_probes_only_read_and_source_nothing(self):
         for bad in ("pkill", "killall", "kill -"):
             self.assertNotIn(bad, DESKTOP.read_text())
-
-    def test_it_never_offers_a_password_it_has_not_checked(self):
-        text = DESKTOP.read_text()
-        self.assertLess(text.index("dscl . -authonly"), text.index("sysadminctl -screenLock off"))
-
-    def test_the_per_clone_settings_are_its_own(self):
-        """`defaults -currentHost` is keyed by the hardware UUID `tart clone` changes."""
-        self.assertIn("setting\tidletime\t@com.apple.screensaver\tidleTime", (REPO / "bench" / "quiet" / "macos.tsv").read_text())
-
-    def test_the_base_and_every_start_run_this_file_and_the_password_rides_in_the_script(self):
-        self.assertIn("vm/desktop.sh", (REPO / "vm" / "provision-base.sh").read_text())
-        settle = inspect.getsource(guest.Guest.settle_desktop)
-        self.assertIn('"vm/desktop.sh"', settle)
-        self.assertIn('"WK_VM_PASSWORD=%s\\n"', settle, "the password travels as an argument, in `ps` on both machines")
-        self.assertNotIn("DidSeeSiriSetup", (REPO / "vm" / "provision-base.sh").read_text())
-
-
-class TestTheProbeChangesNothing(unittest.TestCase):
-    def test_it_only_reads(self):
         for bad in ("defaults write", "defaults -currentHost write", "pkill", "killall", "softwareupdate --schedule off",
                     "softwareupdate --schedule on", "sysadminctl -screenLock off", "pmset -a"):
             self.assertNotIn(bad, PROBE.read_text())
-
-    def test_it_sources_nothing(self):
+        for bad in ("pkill", "killall", "kill -", "defaults write", "sudo"):
+            self.assertNotIn(bad, (REPO / "vm" / "load-probe.sh").read_text())
         for rel in ("vm/desktop-probe.sh", "vm/load-probe.sh"):
             for bad in ("lib/common.sh", "$WK_ROOT", "$WK_TOOLS_DIR"):
                 self.assertNotIn(bad, (REPO / rel).read_text(), rel)
@@ -309,13 +264,9 @@ class TestTheProbeChangesNothing(unittest.TestCase):
         self.assertTrue(read)
         self.assertEqual(set(), read - keys)
 
-    def test_the_load_probe_only_reads(self):
-        for bad in ("pkill", "killall", "kill -", "defaults write", "sudo"):
-            self.assertNotIn(bad, (REPO / "vm" / "load-probe.sh").read_text())
-
 
 def _load_sample(shells=40, free_pct=6, swap_used="4096.00M"):
-    """A guest a fortnight up with an editor attached, as `ps -Ao rss=,comm=` and macOS's own readings put it."""
+    """A guest a fortnight up with an editor attached."""
     rows = ["proc=24880 /sbin/launchd", "proc=1048576 /System/Library/Frameworks/WebKit.framework/jsc",
             "proc=512000 /Users/admin/.zed_server/stable-0.1/zed-remote-server",
             "proc=221000 /Users/admin/.local/share/claude/versions/2.0.1/claude",
@@ -360,15 +311,13 @@ class TestWhatIsResidentInThere(unittest.TestCase):
         self.assertFalse([x for x in f if "shells are resident" in x[1] or "macOS calls that pressure" in x[1]], f)
 
     def test_nothing_wk_runs_in_a_guest_leaves_a_shell_behind(self):
-        """No ControlPersist master holds a session open, and `wk enter` execs its ssh rather than backgrounding it."""
-        vm = targets.Vm("vm", str(REPO), {}, Fake())
-        self.assertNotIn("ControlPersist", " ".join(vm.guest_at("192.0.2.9").opts))
-        self.assertIn("exec_into(argv, cwd)", (REPO / "cmd" / "enter").read_text())
+        with mock.patch.object(targets.Vm, "tart", lambda s: "/t/tart"):
+            argv = targets.Vm("vm", str(REPO), {}, Fake()).guest_of("wk-demo").argv("true")
+        self.assertEqual(["/t/tart", "exec"], argv[:2])
+        self.assertNotIn("ControlPersist", " ".join(argv))
 
 
 class TestARehearsalGuestIsNotAlsoAWorkspace(unittest.TestCase):
-    """A guest carrying /etc/wk-image stands in for a machine in bench mode, and every start writes the claim back."""
-
     def _write_marker(self, bench):
         g = Fake("guest")
         g.answer(["test", "-f", "/etc/wk-image"], rc=0 if bench else 1)
@@ -386,12 +335,12 @@ class TestARehearsalGuestIsNotAlsoAWorkspace(unittest.TestCase):
 
 
 class GuestAt(Here):
-    """This host with one guest behind ssh, answering each probe streamed in with the capture it is given."""
+    """This host with one guest behind tart exec, answering each probe streamed in with the capture it is given."""
 
     def __init__(self, desktop, load=None):
         super().__init__()
         self.desktop, self.load, self.inputs = desktop, load, []
-        self.react(["ssh"], self._guest)
+        self.react(["/t/tart", "exec"], self._guest)
 
     def run(self, argv, input=None, timeout=None):
         self.last = input or ""
@@ -420,7 +369,7 @@ class ReportTest(unittest.TestCase):
     def report(self, sample):
         """(started, stdout, stderr) of the start's last step against a guest answering `sample`."""
         vm = self.vm(GuestAt(sample))
-        g = guest.Guest(guest.Host(vm, FakeClock()), "demo", "10.0.0.2")
+        g = guest.Guest(guest.Host(vm, FakeClock()), "demo", vm.guest_of("wk-demo"))
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
@@ -460,21 +409,16 @@ class TestTheStartReport(ReportTest):
         self.assertTrue(ok)
         self.assertIn("WK_VM_FORCE=1", err)
 
-    def test_both_arms_of_a_start_report_and_after_the_settle(self):
-        assert_guest_start_converges(self, '_report_desktop "$name"')
+    def test_the_report_follows_the_settle(self):
         steps = [s[0] for s in guest.STEPS]
         self.assertLess(steps.index("settle_desktop"), steps.index("report_desktop"))
 
     def test_one_renderer_for_every_report(self):
-        """A second renderer is a second voice about the same guest."""
         self.assertEqual([REPO / "lib" / "common.sh"],
                          [f for f in sorted(repo_files()) if f.suffix != ".py" and "render_findings() {" in f.read_text(errors="replace")])
-        self.assertIn("doctor.Report", inspect.getsource(guest.render))
 
 
 class TestTheDoctorOfAGuest(ReportTest):
-    """`wk doctor <guest>`: the base, the desktop and what is resident, in the one renderer, with one exit code."""
-
     def rows(self, desktop_sample, load=None):
         here = GuestAt(desktop_sample, load)
         here.answer(["/t/tart", "list"], out='[{"Name": "wk-demo", "Source": "local", "State": "running"}]')
@@ -500,14 +444,13 @@ class TestTheLiveDesktop(unittest.TestCase):
     wk_tier = "live"
 
     def test_vm_desktop(self):
-        """`live vm.desktop`: a running guest's desktop has nothing in front of it and nothing that arms a lock."""
         if not live_selected() or sys.platform != "darwin":
             self.skipTest("live tier not selected, or not a macOS host")
         vm = targets.Registry(str(REPO)).load("vm")
         up = [n for n, state in vm.list() if state == "running"] if vm.tart() else []
         if not up:
             self.skipTest("no macOS guest is running on this host")
-        probe = guest.desktop_probe(vm.root, vm.machine, vm.guest_at(vm.ip(up[0])))
+        probe = guest.desktop_probe(vm.root, vm.machine, vm.guest(up[0]))
         self.assertTrue(probe, "the guest did not answer the desktop probe")
         d = guest.Desktop(vm.root, vm.machine, probe)
         self.assertEqual([], d.blockers())

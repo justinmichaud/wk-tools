@@ -9,7 +9,6 @@ import os
 import re
 import shutil
 import stat
-import subprocess
 import sys
 import threading
 import time
@@ -17,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import secretfile
 import shlex
-from wk import bridge, fleet, images, reach, record, secrets, statusview, targets
+from wk import bridge, fleet, images, reach, record, secrets, statusview, targets, tools
 from wk.bench import record as bench_record
 from wk.clock import Clock
 from wk.lock import holder_pid
@@ -120,11 +119,6 @@ class Rec:
         return d
 
 
-def sha_matches(a, b):
-    """`git rev-parse --short` picks its own length per repository, so one abbreviation can be a prefix of the other."""
-    return bool(a and b and (a.startswith(b) or b.startswith(a)))
-
-
 def far_side_reason(target, side, why):
     if side == "unreachable":
         return "unreachable over ssh" + (": %s" % why if why else "")
@@ -183,7 +177,7 @@ def sdk_record(machine, local, tags, cap):
 def tools_fact(ver, expect, machine, label, in_vm=False, peer=False, dirty_here=False):
     """One machine's wk-tools against this checkout's commit; `ver` is `wk version`'s sha= and dirty=."""
     sha = ver.get("sha", "")
-    insync = sha_matches(sha, expect)
+    insync = tools.sha_matches(sha, expect)
     r = Rec("fact", machine=machine, type="wk-tools")
     r.opt("copy", "mounted in the podman VM" if in_vm else "")
     r.set("sha", sha)
@@ -582,18 +576,15 @@ def machine_confs(root, env):
 
 def bridge_role_sum(root):
     """cksum over the role's files in the order the phone sums them: bin, then init.d, each sorted."""
-    data = b""
+    paths = []
     for sub in ("bin", "init.d"):
         d = os.path.join(root, "bridge", sub)
         try:
-            names = sorted(os.listdir(d))
+            paths += [os.path.join(d, n) for n in sorted(os.listdir(d))]
         except OSError:
             continue
-        for n in names:
-            with open(os.path.join(d, n), "rb") as f:
-                data += f.read()
-    cp = subprocess.run(["cksum"], input=data, stdout=subprocess.PIPE)
-    return cp.stdout.split()[0].decode() if cp.stdout.split() else ""
+    out = Local().run(["sh", "-c", 'cat "$@" | cksum', "sh", *paths], input="").out.split()
+    return out[0] if out else ""
 
 
 def bridge_ssh(name, script, as_root, connect_timeout, cap):

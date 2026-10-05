@@ -184,6 +184,8 @@ wk build bug-238 jsc-release --detach   # prints the build line; wk status follo
 wk build bug-238 --kill
 wk run   bug-238 -- -e 'print(1+1)'
 wk run   bug-238 --until-crash --max 50 -- crash.js   # repeat until it fails; keeps log and core
+wk run   bug-238 --rr -- crash.js       # record it with rr (Linux ports); wk gui --rr records the browser
+wk run   bug-238 --replay               # the latest recording, under lldb
 wk test  bug-238
 wk logs  bug-238 --follow
 wk enter bug-238 -- ls                  # a shell or one command, on any target
@@ -227,6 +229,16 @@ start. `wk start` prints what it found on the desktop and refuses a guest
 with anything in front of it; `wk doctor <name>` asks again. The base is
 stale once an input that made it changes, and `wk doctor` says so.
 
+Everything wk runs in a guest, and every copy in or out, goes through `tart
+exec`, the guest agent's own channel, never the network (macOS refuses a
+launchd job's connection to a guest). The `wk-<name>` alias the editor uses
+reaches the guest's sshd the same way: its ProxyCommand runs `sshd -i` under
+`tart exec`. A guest mounts two host directories: agent-rw on macOS's
+automount tag, and the mirror read-only on its own tag, `wk-mirror`, which a
+LaunchDaemon the base installs mounts at boot under `/Volumes/wk-mirror`.
+Each start forwards the host's request broker to `~/.wk-broker.sock` in the
+guest, so `wk sync` in there asks the broker as a container does.
+
 **A build machine**
 
 ```sh
@@ -247,8 +259,11 @@ needs `--force`, and `USE_LIBBACKTRACE` is off.
 which runs it, sizes it and keeps its record there: the box's `wk status`
 and every workstation's show the one build, and `wk logs`, `wk status
 --wait` and `wk build --kill` reach it the same way. It builds with the
-wk-tools the box has (`wk sync --tools buildbox4` refreshes them). A box that
-does not answer, or has no wk-tools of its own, is refused with the remedy.
+wk-tools the box has, and a box whose wk-tools commit differs from this
+checkout's is refused naming `wk sync --tools buildbox4` (`--force` crosses
+it); `wk status` and `wk logs` still hand over and report the difference. A
+box that does not answer, or has no wk-tools of its own, is refused with the
+remedy.
 
 **Pull requests**
 
@@ -258,6 +273,7 @@ wk pr bug-238 alice:eng/branch          # a fork's branch
 wk new review-1234 --pr 1234
 wk pr rebase                            # inside a workspace: fetch main, rebase onto it
 wk pr open bug-238                      # from the host: push the branch, open the PR
+wk pr report                            # from the host: your last 7 days on WebKit/WebKit (--since <date>)
 ```
 
 A PR head goes straight into the checkout, never through the mirror.
@@ -277,8 +293,8 @@ wk sync bug-238 --fix                   # re-assert its remotes and git-webkit s
 A sync fetches and never checks out, and names any checkout, or base snapshot,
 whose remotes are wired wrong. Every workspace, guest and the podman VM mounts
 the mirror read-only, so a refresh from one of them is asked of the machine
-that keeps it, through the broker. A refresh on a Mac then remounts the shares
-in each running guest, whose old mount keeps reading the refs as they were;
+that keeps it, through the broker. A refresh on a Mac then remounts the mirror's
+share (never agent-rw) in each running guest, whose old mount keeps reading the refs as they were;
 one that cannot is named with `wk stop`/`wk start`. A workspace overlays a
 snapshot it never writes, so a newer tree is a new snapshot, hard-linked from
 the last; checkouts are wired with `core.trustctime false`, since each link
@@ -291,6 +307,7 @@ an uncommitted tree here is refused.
 wk profile bug-238 script.js                    # jsc's sampling profiler
 wk profile bug-238 --mode samply --browser       # native sampling, MiniBrowser
 wk profile bug-238 --mode bytecode --fetch       # per-bytecode tier report, copied out
+wk profile bug-238 --mode sysprof script.js      # sysprof-cli, JS frames named from the JIT dump
 ```
 
 **Benchmark in a workspace**
@@ -299,6 +316,8 @@ wk profile bug-238 --mode bytecode --fetch       # per-bytecode tier report, cop
 wk quiesce on && wk session on
 wk bench run bug-238 speedometer3
 wk bench run bug-238 jetstream3 --cores 0-3      # pinned; recorded and compared
+wk bench run bug-238 jetstream3 --config jsc-release --a-args '' --b-args '--useFoo=1' --rounds 10
+                                                 # one build, a jsc option toggled in alternating rounds
 wk bench ls                                      # every task on every machine, where it is
 wk bench compare <run-a> <run-b>
 wk bench report <task> --html
@@ -511,10 +530,16 @@ commit parts are mounted read-only under the agent. Building goes through
 `wk build`: the build tools on `PATH` refuse an agent by name. `wk doctor
 <ws>` measures all three from inside.
 
+`wk new` installs both agents into the workspace (a macOS guest gets them at
+its first `wk start`), and `wk ai` throws the push switch and starts the
+session, nothing more; a workspace made without an agent is refused, naming
+`wk rm` and `wk new`. pi needs node 22.19 or newer where it is made.
+
 A Claude session on a terminal starts with Remote Control on, named after the
 workspace, so claude.ai/code and the mobile app can join it. It needs the
-claude.ai login; where only the inference token authenticates the session (a
-build machine), the session starts without it and says so.
+claude.ai login, which `/login` in any session makes; where the inference
+token authenticates the session (a build machine), it starts without Remote
+Control and says so.
 
 **`wk key`: every credential, one fleet**
 
@@ -523,7 +548,6 @@ wk key setup                            # deploy keys, then every credential thi
 wk key check                            # one row per credential, what its issuer says now
 wk key set github-pat                   # one by name; --replace rotates it
 wk key set claude                       # the inference token, for build machines
-wk key set claude-login                 # the account login, which Remote Control needs
 wk key deploy --rotate                  # the deploy keys, revoked and reissued fleet-wide
 ```
 
@@ -531,11 +555,10 @@ wk key deploy --rotate                  # the deploy keys, revoked and reissued 
 not do. Nothing is stored until it passes, and no verdict is remembered. A
 credential is the fleet's: `wk key setup` asks every workstation what it
 holds, the best working one wins, and it is put everywhere. The claude.ai
-login is the exception, one per machine, because a second holder of a
-refresh token locks the first out. It lands in `~/.config/wk/agent-rw`, the
-one directory a workspace mounts read-write, so the CLI rotates the file
-every workspace reads. `CLAUDE_CODE_OAUTH_TOKEN` is what a build machine
-gets instead.
+login is not one of them: the Claude CLI makes it (`/login` in a session)
+and renews it itself, in `~/.config/wk/agent-rw`, the one directory a
+workspace mounts read-write, so every workspace on the machine shares it.
+`CLAUDE_CODE_OAUTH_TOKEN` is what a build machine gets instead.
 
 **`wk push`: publishing without the credentials inside**
 
@@ -552,10 +575,12 @@ never read. The GitHub token and Bugzilla key go to the injector
 hosts and puts the credential on the request: a read always, a write only
 while push is on. With push off a write is refused with 412 naming `wk push
 on`. A macOS guest gets the same through an ssh-agent on the host forwarded
-per guest. A build box holds no deploy key and nothing forwards one to it,
+per guest over its sshd on `tart exec`. A build box holds no deploy key and nothing forwards one to it,
 so a push is made from the workstation and `wk push status --target <box>`
 says off: `wk pr open <ws>` fetches the box's branch into this machine's
-mirror over ssh and pushes it from here. A push on the box itself, `git push`
+mirror over ssh and pushes it from here, through the agent `wk push on`
+loads (on a macOS host, the one it runs for its guests). A ref a killed push
+leaves in the mirror is `wk gc` rubble. A push on the box itself, `git push`
 or `git-webkit pr`, is refused naming `wk pr open`.
 
 **Housekeeping**

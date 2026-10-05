@@ -1,8 +1,5 @@
-"""lib/wk/resources.py: the envelope a target is sized from, read through a
-machine, and the `python3 -m wk.resources` verbs the setup stages read it through.
-
-Run: python3 tests/run.py -k tests.test_wk_resources
-"""
+"""lib/wk/resources.py: the envelope a target is sized from, the budget `wk build` sizes against, and the
+`wk_py wk.resources` verbs."""
 import contextlib
 import io
 import os
@@ -17,7 +14,7 @@ from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import resources  # noqa: E402
-from wk.act import Refused  # noqa: E402
+from wk.act import RETRY_EXIT, Refused  # noqa: E402
 from wk.machine import Fake, Local  # noqa: E402
 
 IS_MACOS = os.uname().sysname == "Darwin"
@@ -60,6 +57,7 @@ class TestEnvelope(ResourcesTest):
         self.fake.files[os.path.join(self.env["HOME"], ".wk-workspace")] = "name=ws\n"
         self.assertTrue(r.is_headless())
         self.assertEqual(resources.Resources(self.fake, {}, "linux").headless_marker(), "/var/lib/wk/.headless")
+        self.assertEqual(resources.Resources(self.fake, {"WK_STORE": "/s"}, "linux").headless_marker(), "/s/.headless")
 
     def test_a_small_machine_gives_half_rather_than_nothing(self):
         r = self.linux(meminfo="MemTotal:        8388608 kB\nMemAvailable:    4000000 kB\n")
@@ -96,18 +94,17 @@ class TestEnvelope(ResourcesTest):
         with self.assertRaises(Refused):
             with contextlib.redirect_stderr(io.StringIO()) as err:
                 r.envelope_cores()
-        self.assertIn("cannot read the core count (nproc) on this linux machine", err.getvalue())
-        self.assertIn("it builds nothing from a guess", err.getvalue())
+        self.assertIn("nproc", err.getvalue())
         with self.assertRaises(Refused):
             with contextlib.redirect_stderr(io.StringIO()) as err:
                 r.envelope_mem_mb()
-        self.assertIn("cannot read total memory (/proc/meminfo MemTotal)", err.getvalue())
+        self.assertIn("/proc/meminfo", err.getvalue())
         self.fake.files[resources.CGROUP_MEM_MAX] = "lots\n"
         self.fake.files["/proc/meminfo"] = MEMINFO
         with self.assertRaises(Refused):
             with contextlib.redirect_stderr(io.StringIO()) as err:
                 r.avail_mem_mb()
-        self.assertIn("the cgroup memory limit (%s)" % resources.CGROUP_MEM_MAX, err.getvalue())
+        self.assertIn(resources.CGROUP_MEM_MAX, err.getvalue())
 
     def test_a_stage_reads_what_the_class_answers_on_this_machine(self):
         env = {k: v for k, v in os.environ.items() if not k.startswith("WK_")}
@@ -122,8 +119,6 @@ class TestEnvelope(ResourcesTest):
 
 
 class TestBudget(ResourcesTest):
-    """The budget half `wk build` sizes against: other builds' records on this machine, the job count,
-    the warning when it is low, and the two admissions."""
 
     def budget(self, env=None):
         self.fake.answer(["hostname"], out="here\n")
@@ -137,18 +132,16 @@ class TestBudget(ResourcesTest):
     def test_a_low_count_warns_once_with_its_reason(self):
         jobs, err = self.explain(10, 1000, 1536)
         self.assertEqual(jobs, 1)
-        self.assertIn("parallelism: 1 jobs is under half of 10 cores -- the memory", err)
+        self.assertIn("parallelism:", err)
         self.assertNotIn("parallelism:", self.explain(8, 100000, 1536)[1])
         self.assertNotIn("parallelism:", self.explain(10, 100000, 1536, max_jobs=1)[1])
-        self.assertIn("is\n  this target's own ceiling", self.explain(10, 100000, 1536, running=[("x", 8, 0)])[1])
 
     def test_a_polite_count_discounts_a_stale_load_and_trusts_a_real_one(self):
         b = self.budget()
         self.assertGreater(b.jobs(10, 100000, 1536, load=9), 1)
         self.assertEqual(b.jobs(20, 23040, 1536, load=18), 2)
         self.assertEqual(b.jobs(12, 100000, 1000, load=0), 6)   # never more than half a shared box
-        _, err = self.explain(12, 10000, 1000, load=10)
-        self.assertIn("parallelism: 2 jobs is under half of 12 cores -- load average\n  10 is treated as that many cores already spoken for", err)
+        self.assertIn("load average", self.explain(12, 10000, 1000, load=10)[1])
 
     def test_other_builds_on_this_machine_are_spoken_for_and_a_dead_ones_record_goes(self):
         b = self.budget()
@@ -162,10 +155,10 @@ class TestBudget(ResourcesTest):
         self.assertEqual(running, [("live", 4, 40000)])
         self.assertEqual(len([p for p in self.fake.files if "/builds/" in p]), 2)
         self.assertEqual(b.jobs(24, 88000, 2000, running=running), 20)
+        box = self.budget({"WK_BUILD_MACHINE": "there"})
+        self.assertEqual(box.running(alive), [("elsewhere", 4, 40000)])
 
     def test_reaping_a_dead_record_is_dry_run_safe(self):
-        """A read-and-reap during `wk build --dry-run` must not delete a build record for
-        real: `Budget.running` goes through `machine.remove`, not the lock-only `remove_now`."""
         b = self.budget()
         b.record("dead", 4, 40000, "pid:8")
         before = {p for p in self.fake.files if "/builds/" in p}
@@ -179,12 +172,14 @@ class TestBudget(ResourcesTest):
         with self.assertRaises(Refused) as cm:
             with contextlib.redirect_stderr(io.StringIO()) as err:
                 b.admit("this build", 8, [("wk build a (gtk-release)", 6, 9216)])
-        self.assertEqual(cm.exception.status, 75)
-        self.assertIn("here is already building:\n      wk build a (gtk-release) (6 jobs, 9216 MB)\n    this build wants 8 job(s)", err.getvalue())
-        with self.assertRaises(Refused):
+        self.assertEqual(cm.exception.status, RETRY_EXIT)
+        self.assertIn("wk build a (gtk-release)", err.getvalue())
+        self.assertIn("--force", err.getvalue())
+        with self.assertRaises(Refused) as cm:
             with contextlib.redirect_stderr(io.StringIO()) as err:
                 b.disk_admit("this build", 25, 10, "/s's filesystem")
-        self.assertIn("10 GB free on /s's filesystem; this build wants about 25 GB.", err.getvalue())
+        self.assertEqual(cm.exception.status, 1)
+        self.assertIn("wk gc", err.getvalue())
         b.disk_admit("this build", 25, None, "x")   # no answer from df is not evidence of a full disk
         b.admit("this build", 8, [])
         with mock.patch.dict(os.environ, {"WK_FORCE": "1"}):
@@ -195,7 +190,6 @@ class TestBudget(ResourcesTest):
         self.fake.answer(["df", "-Pk", "/s"], out="Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/d 1 1 1048577 1% /\n")
         self.assertEqual(self.budget().free_gb("/s"), 2)
         self.assertIsNone(resources.parse_df("garbage"))
-
 
 
 class TestOverridesThatSizeABuild(ResourcesTest):

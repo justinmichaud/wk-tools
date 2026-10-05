@@ -1,38 +1,9 @@
 #!/usr/bin/env python3
-"""workspace-config.py <checkout>: records in ~/.claude.json the onboarding, remote-control-dialog
-and trust answers `wk` already gave, plus the account record beside the shared login (cmd/ai says why each is needed)."""
+"""workspace-config.py <checkout>: records onboarding, the remote-control dialog and trust in ~/.claude.json."""
 import json
 import os
 import sys
 import tempfile
-
-
-def account_record():  # (record, None) | (None, why) | (None, None) with no shared credential mounted
-    shared = os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR")
-    if not shared:
-        return None, None
-    config = os.path.join(shared, ".claude.json")
-    try:
-        with open(config) as f:
-            doc = json.load(f)
-    except FileNotFoundError:
-        doc = {}
-    except (OSError, ValueError) as e:
-        return None, "%s is not readable as JSON (%s)" % (config, e)
-    record = doc.get("oauthAccount") if isinstance(doc, dict) else None
-    if isinstance(record, dict) and record.get("organizationUuid"):
-        return record, None
-    credential = os.path.join(shared, ".credentials.json")
-    try:
-        held = os.path.getsize(credential) > 0
-    except OSError:
-        held = False
-    if not held:
-        return None, None
-    return None, ("the login at %s carries no account record (%s, "
-                  "oauthAccount.organizationUuid), and remote control refuses "
-                  "a login whose organization it cannot read. On the host: "
-                  "wk key set claude-login --replace" % (shared, config))
 
 
 def main(argv):
@@ -58,16 +29,9 @@ def main(argv):
               file=sys.stderr)
         return 1
 
-    record, why = account_record()
-    if why:
-        print(why, file=sys.stderr)
-        return 1
-
     before = json.dumps(doc, sort_keys=True)
     doc["hasCompletedOnboarding"] = True
     doc["remoteDialogSeen"] = True
-    if record is not None:
-        doc["oauthAccount"] = record
     projects = doc.setdefault("projects", {})
     if not isinstance(projects, dict):
         print("%s holds no projects object" % path, file=sys.stderr)
@@ -92,9 +56,8 @@ def main(argv):
     except BaseException:
         os.unlink(tmp)
         raise
-    print("recorded onboarding, the remote-control dialog%s and trust for "
-          "%s in %s" % (", the account record" if record is not None else "",
-                        checkout, path))
+    print("recorded onboarding, the remote-control dialog and trust for "
+          "%s in %s" % (checkout, path))
     return 0
 
 

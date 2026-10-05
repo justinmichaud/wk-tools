@@ -1,13 +1,4 @@
-"""Streaming behaviour of `wk status --text`: the renderer (wk.statusview)
-over the stream the collector (wk.status) hands it.
-
-The stream opens with one `plan` record naming every job and the machine
-each one's records belong to; a `flush` ends one job, and a machine's block
-is drawn when the last job the plan gave it has flushed. A run asked for
-`--records` is one job of the wk that asked and carries neither.
-
-Run: python3 tests/run.py -k tests.test_status_streaming
-"""
+"""Streaming behaviour of `wk status --text`: the renderer (wk.statusview)"""
 import contextlib
 import io
 import json
@@ -88,7 +79,6 @@ class TestTextStreamsAsRecordsArrive(unittest.TestCase):
         self.assertGreater(tap.when(lambda l: l.strip() == "slowbox"), 1)
 
     def test_a_delegated_machines_heading_comes_before_its_rows_even_when_its_rows_lead_or_its_job_never_flushes(self):
-        """`unit status.renders_partial`: a delegated answer whose rows precede its machine record, and one cut off before its flush."""
         for records in ([_plan(("far", "far")), _rec(kind="workspace", machine="far", method="native", name="ws-far", state="present", ws="present"),
                          _rec(kind="machine", name="far"), _rec(kind="flush", job="far"), _rec(kind="exit", code=0)],
                         [_plan(("far", "far")), _rec(kind="machine", name="far"),
@@ -159,8 +149,8 @@ exec bash -c "$last"
 
 
 class TestCollectorMarkers(WkTest):
-    """The stream cmd/status collects over one faked reachable target: a rendering run opens with a plan
-    and ends every job with a flush; a run asked for `--records` carries neither."""
+    """The stream cmd/status collects over one faked reachable target: a rendering run opens with a plan and ends
+    every job with a flush; a run asked for `--records` carries neither."""
 
     def _status(self, *args):
         with scratch_dir(prefix="wk-test-machines-") as machdir, stub_path({"ssh": _ANSWERING_SSH}) as binp:

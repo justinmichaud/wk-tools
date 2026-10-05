@@ -1,15 +1,6 @@
 """`wk build` as a flow (lib/wk/build.py, lib/wk/job.py) against a Fake world:
 the refusals, the record a run writes and how it ends, --kill, --detach, the
-babysitter, a dry run as the recorder, and a run killed after any effect.
-
-Owed rows landed here: `unit build.config_is_data` (its --cmakeargs and disk
-halves; the configs are tests/test_buildconf.py's), `unit build.sizes_once`,
-`unit build.babysit_states`, `unit record.detach_reads_its_own_build`,
-`unit record.progress_shape[build]`, `unit killpoints[build]`,
-`unit dispatch.dry_run_is_the_recorder[build]`.
-
-Run: python3 tests/run.py -k test_wk_build
-"""
+babysitter, a dry run as the recorder, and a run killed after any effect."""
 import contextlib
 import importlib.machinery
 import importlib.util
@@ -76,8 +67,6 @@ class BuildTarget(targets.Target):
 
 
 class World(Fake):
-    """This host building in one workspace `ws` on target `box`: the far half answers the dry-run
-    line, df has room, the build writes `out` to its log and exits `rc`."""
 
     def __init__(self, tmp, kind="container"):
         super().__init__("here")
@@ -107,9 +96,9 @@ class World(Fake):
     def fake(self):
         return self
 
-    def popen(self, argv, stdin=None, stdout=None, stderr=None, cwd=None):
+    def start(self, argv, out, cwd=None):
         self.effect(("watch", tuple(argv)))
-        stdout.write(self.out)
+        out.write(self.out)
         return FakeProc(self.rc, None if self.hang else 0, self.interrupt)
 
     def recs(self):
@@ -151,7 +140,7 @@ class BuildTest(unittest.TestCase):
     def make(self, w=None, *argv):
         w = w or self.w
         argv = as_dispatched("build", list(argv) or argv_of(), os.environ)
-        return build.Build(w.reg, "ws", CMD.parse(argv), argv, w.clock, w.popen)
+        return build.Build(w.reg, "ws", CMD.parse(argv), argv, w.clock)
 
     def run_(self, w=None, *argv):
         with contextlib.redirect_stderr(io.StringIO()) as err:
@@ -168,7 +157,6 @@ class BuildTest(unittest.TestCase):
 
 class TestTheRecordARunWrites(BuildTest):
     def test_a_build_that_succeeds_ends_ok_with_the_one_progress_record(self):
-        """`record.progress_shape[build]`: step n of m, since when, the log, how to stop it."""
         rc, err = self.run_()
         self.assertEqual(rc, 0, err)
         self.assertIn("BUILD OK  jsc-release in 'ws'", err)
@@ -238,7 +226,6 @@ class TestTheRecordARunWrites(BuildTest):
         self.assertEqual(self.w.recs().list()[0].field("exit"), "stalled")
 
     def test_the_log_is_truncated_before_the_record_says_running(self):
-        """`record.detach_reads_its_own_build`, its first half."""
         Path(self.w.log).write_text("the previous build's log\n")
         seen = []
         real = record.Records.begin
@@ -279,17 +266,15 @@ class TestInterrupted(BuildTest):
 
 
 class TestStoppedByItsKill(BuildTest):
-    """A detached build stopped by `wk build --kill`: its driver sees its child die of the TERM (143) before the
-    kill command sees the build gone, and the record still reads cancelled."""
 
     def test_the_driver_that_saw_143_records_cancelled(self):
-        real = self.w.popen
+        real = self.w.start
 
         def killed(*a, **kw):
             (t,) = self.w.recs().list()
             t.set("stopping", "cancelled")
             return real(*a, **kw)
-        self.w.popen, self.w.rc = killed, 143
+        self.w.start, self.w.rc = killed, 143
         err = self.refused(status=143)
         self.assertIn("BUILD STOPPED  jsc-release in 'ws'  (by 'wk build ws --kill'", err)
         self.assertEqual(self.w.recs().list()[0].field("exit"), "cancelled")
@@ -317,7 +302,6 @@ class TestRefusals(BuildTest):
         self.assertIn("usage: wk build <config>", self.refused(None, "--no-defaults", status=2))
 
     def test_an_unknown_config_names_the_list(self):
-        """the dispatcher's refusal, before the build is made"""
         err = io.StringIO()
         with contextlib.redirect_stderr(err), self.assertRaises(dispatch.Exit) as cm:
             self.make(None, "nope")
@@ -325,7 +309,6 @@ class TestRefusals(BuildTest):
         self.assertIn("unknown config: nope -- 'wk build --list' names every one", err.getvalue())
 
     def test_cmakeargs_is_refused_naming_what_it_would_drop(self):
-        """`build.config_is_data`: the config's flags are data, and --cmakeargs would replace them."""
         err = self.refused(None, "jsc-release", "--cmakeargs", "-DX=1")
         self.assertIn("--cmakeargs would replace the config's CMake flags", err)
         self.assertIn("wk build ws jsc-release --cmake -DX=1", err)
@@ -372,8 +355,6 @@ class TestRefusals(BuildTest):
         self.assertIn("minus 9216MB other builds", err)
 
     def test_a_full_disk_is_a_barrier_and_a_guest_is_asked_about_its_own(self):
-        """`build.config_is_data`: a profile-guided config declares its disk need, asked of the host
-        store (the image a guest grows) and of the guest."""
         full = "Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 10485760 99% /\n"
         self.w.answer(["df", "-Pk"], out=full)
         self.assertIn("10 GB free on %s's filesystem; this build wants about 25 GB." % self.w.env["WK_STORE"], self.refused())
@@ -438,7 +419,6 @@ class TestDryRun(BuildTest):
         self.assertEqual([e for e in self.w.effects if e[0] in ("watch", "spawn")], [])
 
     def test_the_plan_is_the_runs_mutations(self):
-        """`dispatch.dry_run_is_the_recorder[build]`."""
         class Recording(World):
             def act_run(self, argv, **kw):
                 self.effects.append(("act", tuple(argv)))
@@ -458,7 +438,7 @@ class TestDryRun(BuildTest):
         self.assertEqual(rel[:n], rel[n:])
         self.assertGreaterEqual(n, 4)
         self.assertIn("would run: exec ws python3 -I -c", err)
-        self.assertEqual(dry.pids, set())
+        self.assertEqual(dry.pids, {os.getpid()})
 
     def test_a_stale_far_copy_is_named_rather_than_asked(self):
         os.environ["WK_DRY_RUN"] = "1"
@@ -504,7 +484,7 @@ class TestKill(BuildTest):
         rc, err = self.run_(None, "--kill")
         self.assertIn("dry run -- would TERM pid 12, KILL it after 2s, and record it cancelled", err)
         self.assertNotIn("stopped 'ws's build", err)
-        self.assertEqual(self.w.pids, {12})
+        self.assertEqual(self.w.pids, {12, os.getpid()})
         self.assertEqual(self.w.recs().list()[0].field("exit"), "")
 
 
@@ -526,7 +506,6 @@ class Detaching(World):
 
 class TestDetach(BuildTest):
     def test_it_returns_on_its_own_builds_record_and_not_the_last_report(self):
-        """`record.detach_reads_its_own_build`, its second half."""
         w = Detaching(self.tmp)
         w.begin("build", pid=4000).end(1)
         rc, err = self.run_(w, "jsc-release", "--detach")
@@ -582,7 +561,6 @@ class TestBabysitStates(BuildTest):
     """`build.babysit_states`: one record, ended by name however it ends, and a killed one reads died."""
 
     def loop(self, builds, fixes=None, attempts="2"):
-        """`builds` answers each inner `wk build` in turn: (status, the word its own record ends with)."""
         w = self.w
         w.env["WK_BABYSIT_ATTEMPTS"] = attempts
         results = list(builds)
@@ -678,7 +656,6 @@ class TestBusyReason(BuildTest):
         self.assertIsNone(build.busy_reason(self.target(), self.w.recs(), "ws"))
 
     def test_a_pid_a_target_record_names_is_judged_by_its_kind_alone(self):
-        """A pid file a record names is that record's, and a `test` record holds no checkout."""
         home = os.path.join(self.w.ws_dir, "home")
         self.w.files[os.path.join(home, "jsc-tests.pid")] = "88\n"
         self.w.begin("test", pid=88, where="target")
@@ -733,7 +710,7 @@ class TestJob(BuildTest):
         self.w.hang = True
         self.w.env.update({"WK_HEARTBEAT_SECONDS": "20", "WK_POLL_SECONDS": "10", "WK_ABORT_SECONDS": "30", "WK_STALL_SECONDS": "100"})
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = job.watch(["x"], self.w.log, self.w, self.w.clock, self.w.env, None, self.w.popen)
+            rc = job.watch(["x"], self.w.log, self.w, self.w.clock, self.w.env, None)
         self.assertEqual(rc, 124)
         self.assertIn("  ... [2/2] (0m elapsed)", err.getvalue())
 
@@ -750,7 +727,6 @@ class TestJob(BuildTest):
 
 class TestKillPoints(BuildTest):
     def test_a_build_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[build]`: each run its own process, whatever the killed one held gone with it."""
         def run_once(w):
             with contextlib.redirect_stderr(io.StringIO()):
                 self.make(w).front()

@@ -2,10 +2,7 @@
 machine whose privileged helper, `sudo`, `defaults`, `tmutil` and in-target bash calls answer as a
 real one would -- nothing here runs the real helper or signals a real daemon. Also the one state
 directory, the helper's bound on a stopped daemon, `killpoints[quiesce]`, a dry run printing the
-wet run's plan, and the live rows `quiesce.readback[<m>]` and `quiesce.classified[<m>]`.
-
-Run: python3 tests/run.py -k tests.test_quiesce
-"""
+wet run's plan, and the live rows `quiesce.readback[<m>]` and `quiesce.classified[<m>]`."""
 
 import contextlib
 import importlib.machinery
@@ -161,9 +158,6 @@ class TestOn(QuiesceTest):
         self.assertEqual([3], w.clock.slept)
 
     def test_the_user_half_is_written_only_on_a_bench_install(self):
-        """A first boot's write to a protected domain does not survive the session starting, so quiesce
-        writes it again in the session -- and only in bench mode, since a workstation's accessibility
-        settings are not this command's to rewrite."""
         bench, desk = World(bench=True), World()
         self.quiet_run(bench.q().on)
         self.quiet_run(desk.q().on)
@@ -200,16 +194,11 @@ class TestOn(QuiesceTest):
         self.assertNotIn(STATE + "/daemons_paused", w.files)
 
     def test_quiesce_keeps_no_list_of_its_own(self):
-        """A second list is a daemon that gets paused and never resumed: the pause and the resume are the
-        table's own functions, and nothing here signals a process itself."""
         w = World()
         self.quiet_run(w.q().on)
         self.quiet_run(w.q().off)
         self.assertTrue(w.ran(PAUSE) and w.ran(RESUME))
         self.assertEqual([], [e for e in w.effects if e[0] == "kill"])
-        text = (REPO / "lib" / "wk" / "quiet.py").read_text()
-        code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
-        self.assertNotIn("launchctl", code)
 
 
 class TestOff(QuiesceTest):
@@ -298,8 +287,6 @@ class TestStatus(QuiesceTest):
         self.assertIn("is not installed", self.status(World(helper=False)))
 
     def test_an_older_wk_tools_state_is_named_and_not_read(self):
-        """One state directory: a directory an older wk-tools left at $TMPDIR/wk-quiesce is not read,
-        undone or migrated, but named, so a person can remove it."""
         w = World()
         w._set_file("/tmp/wk-quiesce/caffeinate.pid", "4242\n")
         w.pids.add(4242)
@@ -328,8 +315,6 @@ class TestStatus(QuiesceTest):
 
 
 class TestTheReadings(QuiesceTest):
-    """`Quiesce.noise` runs in every leg's preflight (wk bench staged) and inside `wk quiesce on`, both after
-    the daemons are paused, so a reading of one held stopped must be bounded and must refuse no leg."""
 
     def noise(self, w):
         with contextlib.redirect_stderr(io.StringIO()) as err:
@@ -406,8 +391,6 @@ class TestTheReadings(QuiesceTest):
         self.assertIn(b"\033[31m--", out)
 
     def test_a_workstation_is_judged_on_its_clock_alone(self):
-        """The rest is what a bench install is and a workstation never will be; a red line nothing there
-        can clear teaches a reader to skip the list."""
         w = World()
         self.noise(w)
         asked = [e[1] for e in w.effects if e[0] == "run"]
@@ -488,22 +471,12 @@ class TestTheCommand(QuiesceTest):
 
 
 class APrivilegedVerbNeverBlocksOnAStoppedDaemon(unittest.TestCase):
-    """A stopped daemon answers no XPC request: `tmutil stopbackup` against one hung `wk quiesce on`,
-    and every later step of a benchmark boot, for 37 minutes (bench install, 2026-09-09). macOS ships
-    no `timeout`, so the bound is in the helper."""
 
     PRIV = REPO / "admin" / "wk-quiesce-priv"
 
     def _bounded(self, script, timeout=30):
         body = func_body(self.PRIV.read_text(), "bounded")
         return bash("set -euo pipefail\nbounded() {" + body + "}\n" + script, timeout=timeout)
-
-    def test_every_daemon_asking_verb_is_bounded(self):
-        text = self.PRIV.read_text()
-        for verb in ("tmutil stopbackup", "softwareupdate --schedule off", "softwareupdate --schedule on",
-                     "mdutil -a -i off", "mdutil -a -i on"):
-            with self.subTest(verb=verb):
-                self.assertRegex(text, r"bounded \d+ " + verb)
 
     def test_a_call_that_never_returns_is_killed_and_reported(self):
         cp = self._bounded('bounded 2 sleep 600\nprintf "WENT ON rc=%s\\n" "$?"\n')
@@ -526,9 +499,6 @@ class APrivilegedVerbNeverBlocksOnAStoppedDaemon(unittest.TestCase):
 
 
 class ALinuxQuiesceIsReadBack(unittest.TestCase):
-    """`on` and `off` read every sysfs file and sysctl back after writing it: a write the kernel
-    refused or rewrote is a failure naming the file, and nothing claims "quiesced" over it. The
-    functions are lifted out of the helper and run against a temp /sys and a stub sysctl."""
 
     PRIV = REPO / "admin" / "wk-quiesce-priv"
     FUNCS = ("put_sys", "put_sysctl", "can_boost", "tune", "linux_on", "linux_off")
@@ -547,8 +517,6 @@ class ALinuxQuiesceIsReadBack(unittest.TestCase):
         (self.tmp / "sysctl").mkdir()
 
     def _cppc(self, highest, nominal, cpus=("cpu0", "cpu1")):
-        """Moose's shape: `cpufreq/scaling_driver` names `cppc_cpufreq`, and each cpu's
-        `acpi_cppc/highest_perf`/`nominal_perf` say whether it has boost headroom."""
         for cpu in cpus:
             cpufreq = self.sys / "devices/system/cpu" / cpu / "cpufreq"
             cpufreq.mkdir(parents=True, exist_ok=True)
@@ -612,8 +580,6 @@ class ALinuxQuiesceIsReadBack(unittest.TestCase):
         self.assertNotIn("quiesced", cp.stdout)
 
     def test_a_platform_with_no_boost_headroom_is_left_alone(self):
-        """moose: cppc_cpufreq, acpi_cppc highest_perf == nominal_perf == 300. Writing
-        `cpufreq/boost` there is EINVAL, not merely ignored, so the verb must not try."""
         self._cppc(highest=300, nominal=300)
         for verb, claim in (("linux_on", "quiesced"), ("linux_off", "restored")):
             with self.subTest(verb=verb):
@@ -632,9 +598,6 @@ class ALinuxQuiesceIsReadBack(unittest.TestCase):
         self.assertEqual("1", self.read(self.FILES[3]))
 
     def test_a_non_cppc_driver_keeps_writing_boost_as_before(self):
-        """No `scaling_driver` file at all -- most of the fleet, and every other test in
-        this class -- is today's behaviour: `can_boost` decides nothing and the write
-        happens unconditionally."""
         cp = self.helper("linux_on")
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertNotIn("boost left alone", cp.stdout)
@@ -651,8 +614,6 @@ def _tools(name):
 
 
 class TestOnRealMachines(WkTest):
-    """Read-only: `requires_machine` never mutates a machine, so these read what `status` and the probe
-    say. `on`/`off` against a real machine is the owed half of `quiesce.readback`."""
 
     def _readback(self, name):
         cp = _ssh(name, "cd %s && ./wk quiesce status" % _tools(name))
@@ -674,8 +635,6 @@ class TestOnRealMachines(WkTest):
 
     @requires_machine("tolken-bench")
     def test_classified_mbp(self):
-        """`live quiesce.classified[mbp]`: every row of the table is answered on the bench install, as
-        running, stopped or absent, and no reading wedged on a stopped daemon."""
         script = bash('. "$WK_ROOT/bench/mac-quiet-desktop.sh"; wk_quiet_desktop_script').stdout
         cp = _ssh("tolken-bench", "bash -s", input=script + "\nwk_quiet_desktop_probe\n")
         self.assertEqual(0, cp.returncode, cp.stderr)

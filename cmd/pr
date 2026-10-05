@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 #
 # wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n> -- check out a PR head, from either project
-# wk: where=workspace name=optional@2 takes=1 ready=yes group=sources dryrun verbs=checkout,rebase,open default=checkout
+# wk: where=workspace name=optional@2 takes=1 ready=yes group=sources dryrun verbs=checkout,rebase,open,report default=checkout readonly report
 # wk: sub open where=host name=optional@2 takes=0 opts=--draft,--web needs=gh,gh-auth
+# wk: sub report where=host name=none takes=1 opts=--since= needs=gh,gh-auth
 # wk: sub rebase name=optional@2 takes=0
 #
 #   wk pr justinmichaud:eng/non-cocoa-fuzz-Frame-cache-evicted-or-unparsed-frames-dereferenced
@@ -10,6 +11,7 @@
 #   wk pr wpe:1234                             # WPEWebKit's pull request #1234
 #   wk pr rebase [<workspace>]                 # rebase the current branch onto origin/main
 #   wk pr open <workspace> [--draft] [--web]   # push the branch and open it as a PR
+#   wk pr report [--since <YYYY-MM-DD>]        # your week on WebKit/WebKit
 #
 # <user>:<branch> is a fork's branch; both projects are tried, and a branch existing in both is
 # refused by name. A bare number is a WebKit/WebKit pull request, `wpe:<number>` a WPEWebKit one.
@@ -33,15 +35,23 @@
 # `gh pr create --fill`. Runs on the host only and refuses inside a workspace. The project comes
 # from which upstream the branch tracks; no upstream, `main`, a detached HEAD, or a dirty tree is
 # refused by name. Pushing needs `wk push on`, which is never flipped here. A build box's branch is
-# fetched over ssh into this machine's mirror and pushed from here: no key reaches a box.
+# fetched over ssh into this machine's mirror and pushed from here through the agent `wk push on`
+# loads: no key reaches a box.
 #
 #   --draft   open it as a draft
 #   --web     open the browser's new-PR form instead of creating it directly
+#
+# 'report' summarises your GitHub activity on WebKit/WebKit through gh: the pull requests you
+# created and updated, and others' you reviewed or commented on. Host only.
+#
+#   --since <date>   the first day it covers (default: seven days ago)
 
 import contextlib
+import datetime
 import io
 import os
 import re
+import shlex
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
@@ -49,7 +59,7 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import act, decl, git, pr, secrets, sync, targets  # noqa: E402
+from wk import decl, git, guest, pr, secrets, sync, targets  # noqa: E402
 from wk.act import Refused, die, info, log, warn  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
@@ -181,20 +191,27 @@ def pr_open(target, name, draft, web, push_status):
 
     flags = (["--draft"] if draft else []) + (["--web"] if web else [])
     info("opening a pull request: %s <- %s" % (base, head))
-    act.exec_into(["gh", "pr", "create"] + pr_open_gh_args(base, head, *flags))
+    target.here.exec(["gh", "pr", "create"] + pr_open_gh_args(base, head, *flags))
 
 
 def push_from_here(target, src, fork, branch):
-    """The box's branch into this machine's mirror over ssh, then pushed from here with this machine's deploy key."""
+    """The box's branch into this machine's mirror over ssh, then pushed from here through the agent `wk push on` loads."""
     here, store = target.here, Store(target.env)
-    keys = secrets.Secrets(ROOT, target.env, here)
-    ref = "refs/wk/push/%s/%s" % (target.name, branch)
-    sync.fetch_into_mirror(here, store, Lock(store, here, Clock()), "%s:%s" % (target.ssh_host(""), src), "refs/heads/" + branch, ref)
-    repo = next(r for f, r, _ in keys.forks() if f == fork)
-    git_here = ["git", "-C", store.mirror()]
-    r = here.act_run(git_here + ["-c", "core.sshCommand=ssh -i %s -o IdentitiesOnly=yes" % keys.push_key_path(fork),
-                                 "push", "git@github.com:%s.git" % repo, "%s:refs/heads/%s" % (ref, branch)])
-    here.act_run(git_here + ["update-ref", "-d", ref])
+    sec = secrets.Secrets(ROOT, target.env, here)
+    # A macOS host's podman machine holds its agent inside the VM; the one a process here reaches is the guests'.
+    sec, sock = guest.push_agent(ROOT, here, target.env) if sec.macos else (sec, sec.machine_sock())
+    if not sec.agent_list(sock):
+        die("'wk pr open' pushes '%s' from here through the agent 'wk push on' loads, and it holds no key.\n"
+            "    wk push on" % branch)
+    ref, lock = "%s%s/%s" % (pr.PUSH_REFS, target.name, branch), Lock(store, here, Clock())
+    repo = next(r for f, r, _ in sec.forks() if f == fork)
+    ssh = "ssh -o IdentitiesOnly=yes -i %s" % shlex.quote(sec.pub_path(fork)[:-len(".pub")])
+    with lock.held(pr.push_lock(ref)):
+        sync.fetch_into_mirror(here, store, lock, "%s:%s" % (target.ssh_host(""), src), "refs/heads/" + branch, ref)
+        r = here.act_run(sec.agent_argv("SSH_AUTH_SOCK=%s exec git -C %s -c core.sshCommand=%s push %s %s" % (
+            sock, shlex.quote(store.mirror()), shlex.quote(ssh), shlex.quote("git@github.com:%s.git" % repo),
+            shlex.quote("%s:refs/heads/%s" % (ref, branch)))))
+        here.act_run(["git", "-C", store.mirror(), "update-ref", "-d", ref])
     return r
 
 
@@ -215,6 +232,10 @@ def main(argv):
     name = store.ws_name()
     args = decl.Args(decl.Decl(__file__), argv)
     verb, rest = args.positionals[0], args.positionals[1:]
+    if verb == "report":
+        today = datetime.date.today()
+        return pr.weekly(Local(), pr.since_date(args.value("--since"), today), today, sys.stdout)
+
     reg = targets.Registry(ROOT)
 
     if verb == "rebase":

@@ -1,9 +1,4 @@
-"""`unit machine.machine_wins[<case>]`: when the record and the machine disagree -- a hand `podman rm`, a hand
-`tart delete`, a deleted `ws/<n>`, an edited `~/.ssh/config.d/wk`, a fetch into a published snapshot -- the
-command that meets it reports what the machine holds and acts on that, touching only what is its own.
-
-Run: python3 tests/run.py -k tests.test_machine_wins
-"""
+"""When the record and the machine disagree, the command reports what the machine holds and acts on that."""
 import os
 import sys
 

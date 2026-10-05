@@ -1,13 +1,15 @@
 """`wk bench run <ws> <plan> --system <board> --ab A,B | --ab-systems A,B`: an interleaved A/B on one board, each leg a
-BoardRun. An arm is (system, slot): a slot A/B holds the system fixed, a system A/B the slot, booting each leg's system."""
+BoardRun. An arm is (system, slot): a slot A/B holds the system fixed, a system A/B the slot, booting each leg's system.
+`--a-args X --b-args Y` without --system is the same rounds in a workspace, one build under two argument sets."""
 
 import json
 import os
 import re
+import shlex
 
 from wk import act, images, job, record as progress
 from wk.act import Refused, die, info, log, warn
-from wk.bench import board, pipeline, record, report
+from wk.bench import board, pipeline, record, report, systems
 from wk.boot import cli as bootcli
 from wk.lock import Lock
 
@@ -17,6 +19,7 @@ SYSTEM_TRIES = 3
 WAIT, POLL, ARM_RETRY = 420, 12, 15
 LOST_ROUNDS = 3
 MAX_ROUNDS = 40
+ARGS_AB_MEASURED = ("count", "timeout", "subtests", "cores", "browser", "browser_args")
 INTERRUPTED = set(job.EXIT_OF.values())
 
 
@@ -74,6 +77,13 @@ def pair(spec, what):
     return a, b
 
 
+def rounds_of(o):
+    rounds = o.get("rounds") or "3"
+    if not rounds.isdigit() or int(rounds) < 1:
+        die("--rounds takes a number of at least 1 (got '%s')" % rounds)
+    return int(rounds)
+
+
 def stopping(o, rounds, detect="0"):
     """(max_rounds, detect): past --rounds the rounds go on until report.resolved says they resolve --detect percent,
     up to --max-rounds; --detect 0 runs --rounds exactly."""
@@ -93,8 +103,12 @@ def stopping(o, rounds, detect="0"):
 
 
 class AB:
-    def __init__(self, root, reg, ws, plan, o, clock, popen, driver=None, machine=None):
-        self.root, self.reg, self.ws, self.plan, self.o, self.clock, self.popen = str(root), reg, ws, plan, o, clock, popen
+    @property
+    def arm_word(self):
+        return "system" if self.systems else "slot"
+
+    def __init__(self, root, reg, ws, plan, o, clock, driver=None, machine=None):
+        self.root, self.reg, self.ws, self.plan, self.o, self.clock = str(root), reg, ws, plan, o, clock
         self.name, self.here = o["system"], reg.machine
         self.systems = bool(o.get("ab_systems"))
         a, b = pair(o.get("ab_systems") or o.get("ab"), "ab-systems" if self.systems else "ab")
@@ -103,10 +117,7 @@ class AB:
         for _, s in self.arms:
             images.check_slot_name(s)
         self.labels = (a, b)
-        rounds = o.get("rounds") or "3"
-        if not rounds.isdigit() or int(rounds) < 1:
-            die("--rounds takes a number of at least 1 (got '%s')" % rounds)
-        self.rounds = int(rounds)
+        self.rounds = rounds_of(o)
         self.max_rounds, self.detect = stopping(o, self.rounds)
         self.env = dict(reg.env, WK_DEVICE_HELD="device:" + self.name)
         self.task, self.taskdir, self.owned, self.held = o.get("task") or "", "", False, None
@@ -117,7 +128,7 @@ class AB:
         self.lock = Lock(reg.store, self.here, clock)
 
     def run(self):
-        return board.BoardRun(self.root, self.reg, self.system, self.clock, self.env, self.popen, name=self.ws + "-leg")
+        return board.BoardRun(self.root, self.reg, self.system, self.clock, self.env, name=self.ws + "-leg")
 
     def leg(self, o):
         """One leg; False when it produced nothing, which loses its round but not the A/B."""
@@ -201,7 +212,7 @@ class AB:
         excluded = subtests(self.root, self.reg.env, self.plan, plan_doc, idents, self.o.get("subtests") or "", self.o.get("exclude_subtests") or "")
         self.base = {k: self.o.get(k) or "" for k in ("count", "timeout", "cores", "no_warmup_profile", "jit_tiers")}
         self.base.update(subtests=excluded[0], excluded=excluded[1], slot_a=a, slot_b=b, task=self.task)
-        if self.task and not act.dry_run() and self.reg.env.get("WK_TASK_HELD") != self.task:
+        if self.task and not act.dry_run() and not pipeline.task_held(self.reg.env, self.task):
             self.lock.hold("bench-task-" + self.task, timeout=5)
         if self.task or act.dry_run():
             return
@@ -252,7 +263,7 @@ class AB:
     def round(self, i, of):
         done = {}
         for arm in ((0, 1) if i % 2 else (1, 0)):   # counterbalanced: a round that always led with A would put every round's drift on B
-            log("round %d/%s -- %s %s%s" % (i, of, "system" if self.systems else "slot", self.labels[arm],
+            log("round %d/%s -- %s %s%s" % (i, of, self.arm_word, self.labels[arm],
                                              " (first)" if arm == (0 if i % 2 else 1) else ""))
             done[arm] = self.arm_leg(arm, {"round": str(i), "arm": "ab"[arm]})
         return done
@@ -322,6 +333,9 @@ class AB:
         if act.dry_run():
             info("dry run -- then %d round(s), each arm once per round, the lead alternating" % n)
             return 0
+        return self.finish()
+
+    def finish(self):
         kept, lost = self.measured()
         if self.systems:
             self.release()
@@ -348,7 +362,75 @@ class AB:
             warn("the report did not complete (%s); the runs are recorded:  wk bench report %s" % (e, self.task))
 
 
-def run(root, reg, ws, plan, o, clock, popen, driver=None, machine=None):
+class ArgsAB(AB):
+    """One build in the workspace, each arm its own arguments to what runs the benchmark: jsc options in the jsc shell,
+    MiniBrowser's in a browser. Each leg is a pipeline Run; no warmup round, since nothing about the arms is to establish."""
+
+    arm_word = "options"
+
+    def __init__(self, root, reg, ws, plan, o, clock):
+        self.root, self.reg, self.ws, self.plan, self.o, self.clock = str(root), reg, ws, plan, o, clock
+        self.args = (o.get("a_args") or "", o.get("b_args") or "")
+        if self.args[0] == self.args[1]:
+            die("--a-args and --b-args are the same ('%s'). Two runs of one arm measure it twice,\n"
+                "    which is a repeatability check rather than an A/B -- '--count N' asks for that." % self.args[0])
+        self.labels = tuple(a or "(none)" for a in self.args)
+        self.name, self.systems, self.env = ws, False, reg.env
+        self.rounds = rounds_of(o)
+        self.max_rounds, self.detect = stopping(o, self.rounds)
+        self.task, self.taskdir, self.owned = o.get("task") or "", "", False
+        if self.task:
+            self.taskdir = os.path.join(record.leg_home(reg, ws, self.task)[1], self.task)
+        self.system = systems.for_workspace(self.root, reg, ws, clock, "")
+        self.lock = Lock(reg.store, reg.machine, clock)
+
+    def run(self):
+        return pipeline.Run(self.root, self.reg, self.system, self.clock, dict(self.env, WK_TASK_HELD=self.task))
+
+    def arm_leg(self, arm, o):
+        return self.leg(dict(o, arm_args=self.args[arm]))
+
+    def begin(self):
+        self.base = dict(self.o, slot_a=self.labels[0], slot_b=self.labels[1], task=self.task)
+        if self.task and not act.dry_run():
+            self.lock.hold("bench-task-" + self.task, timeout=5)
+        if self.task or act.dry_run():
+            return
+        self.task = "%s-%s-options" % (self.clock.stamp(), self.ws)
+        m, bench = record.leg_home(self.reg, self.ws)
+        self.taskdir = os.path.join(bench, self.task)
+        if m.exists(self.taskdir):
+            die("task %s already exists (%s); a task is one request, made once" % (self.task, self.taskdir))
+        self.lock.hold("bench-task-" + self.task, timeout=5)
+        config = self.o.get("config") or pipeline.DEFAULT_CONFIG
+        measured = "".join(" --%s %s" % (k.replace("_", "-"), shlex.quote(self.o[k])) for k in ARGS_AB_MEASURED if self.o.get(k))
+        command = "wk bench run %s %s --config %s --a-args %s --b-args %s --rounds %d%s%s%s" % (
+            self.ws, self.plan, config, shlex.quote(self.args[0]), shlex.quote(self.args[1]), self.rounds,
+            " --max-rounds %d --detect %g" % (self.max_rounds, self.detect) if self.detect else "", measured,
+            " --software" if self.o.get("software") else "")
+        record.task_write(self.taskdir, ["task=" + self.task, "requested=" + self.clock.iso(), "subject.kind=options",
+                                         "subject.a=" + self.args[0], "subject.b=" + self.args[1], "devices=%s=%s" % (self.ws, config),
+                                         "plans=" + self.plan, "rounds=%d" % self.rounds, "slots=" + self.ws,
+                                         "restart=%s --task %s" % (command, self.task)], [command], machine=m)
+        self.base["task"], self.owned = self.task, True
+
+    def go(self):
+        try:
+            with job.Signals():
+                self.begin()
+                log("interleaving %d round(s) of %s vs %s in '%s'" % (self.rounds, self.labels[0], self.labels[1], self.ws))
+                if act.dry_run():
+                    self.round(1, str(self.rounds))
+                    info("dry run -- then the rest of %d round(s), each arm once per round, the lead alternating" % self.rounds)
+                    return 0
+                return self.finish()
+        except job.Interrupted as e:
+            raise Refused(job.EXIT_OF.get(e.signum, 130))
+        finally:
+            self.lock.release_all()
+
+
+def run(root, reg, ws, plan, o, clock, driver=None, machine=None):
     if o.get("ab") and o.get("ab_systems"):
         die("--ab compares two slots in one booted system, --ab-systems two systems -- they are different comparisons; pick one.")
     if not o.get("system"):
@@ -359,4 +441,4 @@ def run(root, reg, ws, plan, o, clock, popen, driver=None, machine=None):
         die("--slot names the one slot a system A/B holds fixed; a slot A/B names its two slots in --ab")
     if o.get("cores") and not pipeline.cores_valid(o["cores"]):
         die("--cores '%s' is not a valid Linux cpu list (e.g. 0-3, 2,3, 0-1,4, 7)" % o["cores"])
-    return AB(root, reg, ws, plan, o, clock, popen, driver=driver, machine=machine).go()
+    return AB(root, reg, ws, plan, o, clock, driver=driver, machine=machine).go()

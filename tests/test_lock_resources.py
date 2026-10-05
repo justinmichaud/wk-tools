@@ -1,9 +1,5 @@
-"""`unit record.one_lock_per_resource[<cmd>]`: two commands mutating one resource serialise or refuse naming the
-holder. `guest start` is tests/test_guest.py's; the others are here, each driven through the command's own entry
-with the resource held by a live process on the Fake.
-
-Run: python3 tests/run.py -k tests.test_lock_resources
-"""
+"""Two commands mutating one resource serialise or refuse naming the holder, each driven through the command's own
+entry with the resource held by a live process on the Fake. `guest start` is tests/test_guest.py's."""
 import contextlib
 import io
 import os

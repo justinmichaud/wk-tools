@@ -1,24 +1,7 @@
-"""One record shape for every long-running command (lib/wk/record.py).
-
-Every command that outlives its terminal writes one record through that
-module, and `wk status` renders every kind through one renderer: the steps
-still to come are listed and the command that stops the job is named, so a
-person watching one has no file to know about and nothing to guess at.
-
-A task is a directory under $WK_STORE/task: plan, steps/<n>, pid, machine, log,
-kill, argv, started, and on end exit and finished. Each field is one file, so
-every write is one tmp+rename and a reader never sees half a record. Liveness
-is the process table at read time -- a pid that no longer answers with no exit
-recorded reads `died` -- and the renderer (wk.statusview render_task) puts
-the plan under the task as [x] done, [>] running, [-] skipped, [!] stopped
-there and [ ] pending, with the kill command and the log beneath it. A plan is
-a graph, so each step carries its own state and any number read as running.
-
-Run: python3 -m unittest tests.test_task_record -v
-"""
+"""One renderer for every long-running command's task record (wk.statusview): the plan under the task as [x] done,
+[>] running, [-] skipped, [!] stopped there and [ ] pending, with the kill command and the log beneath it."""
 import io
 import os
-import shutil
 import sys
 import tempfile
 import types
@@ -28,9 +11,7 @@ from pathlib import Path
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import record, statusview  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from wk import statusview  # noqa: E402
 
 PLANS = {
     "build":  ["configure", "compile", "link"],
@@ -81,43 +62,7 @@ def task_rec(kind, state, step, plan=None, steps=None, **extra):
     return rec
 
 
-class TestWhatTheRecordHolds(unittest.TestCase):
-    """The rules of lib/wk/record.py that its own tests (tests/test_wk_record.py) leave to this module."""
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-task-record-"))
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.clock = FakeClock()
-
-    def records(self):
-        return record.Records(self.tmp / "store", clock=self.clock, env={})
-
-    def test_the_plan_is_declared_before_any_step_has_a_state(self):
-        t = self.records().begin("build", "target", "ws1", "wk build ws1 --kill", "/l", ["a", "b", "c"])
-        self.assertEqual(t.plan(), ["a", "b", "c"])
-        self.assertEqual([], list((t.path / "steps").glob("*")), "a step had a state before it ran")
-
-    def test_a_run_that_is_still_alive_is_not_superseded(self):
-        """Superseding a live record would hide the run a guard reads it for:
-        the yocto builder refuses a second cooker by finding the first's record."""
-        recs = self.records()
-        first = recs.begin("yocto", "here", "ws1", "k", "/l", ["layers", "fetch"], pid=os.getpid())
-        self.clock.sleep(1)
-        second = recs.begin("yocto", "here", "ws1", "k", "/l", ["layers", "fetch"], pid=os.getpid())
-        self.assertTrue(first.path.is_dir())
-        self.assertEqual([t.id for t in recs.list()], [first.id, second.id])
-
-    def test_a_row_label_names_the_machine_only_inside_the_vm(self):
-        """A walk labels rows with a target name, and only the VM is another machine's."""
-        m = Fake()
-        m.answer(["hostname", "-s"], out="Tolken\n")
-        self.assertEqual(record.machine_name({"WK_ROW_LABEL": "container"}, m), "tolken")
-        self.assertEqual(record.machine_name({"WK_IN_VM": "1"}, m), "tolken")
-
-
 class TestTheRendererSaysWhatIsLeftAndWhatStopsIt(unittest.TestCase):
-    """One renderer for every kind: the step now running, the steps done, the
-    steps to come, the command a person types to stop it, and the log."""
 
     def _text(self, rec):
         cp = render([{"kind": "machine", "name": "tolken", "self": True}, rec])
@@ -126,18 +71,11 @@ class TestTheRendererSaysWhatIsLeftAndWhatStopsIt(unittest.TestCase):
 
     def test_exactly_one_step_is_marked_running(self):
         out = self._text(task_rec("yocto", "running", 3))
-        self.assertEqual(out.count("[>]"), 1, out)
-        self.assertIn("[>] image", out)
-        self.assertIn("[x] layers", out)
-        self.assertIn("[x] fetch", out)
-        self.assertIn("[ ] toolchain", out)
-        self.assertIn("[ ] pgo-mix", out)
-        self.assertEqual(out.count("[x]"), 2, out)
-        self.assertEqual(out.count("[ ]"), 3, out)
+        self.assertEqual((out.count("[>]"), out.count("[x]"), out.count("[ ]")), (1, 2, 3), out)
+        for line in ("[>] image", "[x] layers", "[x] fetch", "[ ] toolchain", "[ ] pgo-mix"):
+            self.assertIn(line, out)
 
     def test_two_steps_running_at_once_read_as_two(self):
-        """A graph runs what is ready, so a plan is not a line number: with two
-        arms in flight the record says two, not one further on than the other."""
         plan = ["build base", "build pr", "bench rpi4", "bench rpi5", "report"]
         out = self._text(task_rec("pgo", "running", 0, plan=plan,
                                   steps=["done", "running", "running", "pending", "pending"]))
@@ -148,15 +86,13 @@ class TestTheRendererSaysWhatIsLeftAndWhatStopsIt(unittest.TestCase):
         self.assertEqual(out.count("[ ]"), 2, out)
 
     def test_a_step_that_failed_and_one_never_reached_are_told_apart(self):
-        """What the scheduler knows reaches the reader: the step that failed,
-        and the steps it fed that were never run for it."""
         plan = ["build base", "build pr", "bench rpi4", "report"]
         out = self._text(task_rec("pgo", "died", 0, plan=plan,
                                   steps=["done", "failed", "skipped", "skipped"]))
         self.assertIn("[x] build base", out)
         self.assertIn("[!] build pr", out)
         self.assertEqual(out.count("[-]"), 2, out)
-        self.assertNotIn("[>]", out, "nothing is running in a task that died")
+        self.assertNotIn("[>]", out)
 
     def test_it_names_the_kill_command_and_the_log_for_every_kind(self):
         for kind in PLANS:
@@ -170,14 +106,14 @@ class TestTheRendererSaysWhatIsLeftAndWhatStopsIt(unittest.TestCase):
         out = self._text(task_rec("build", "died", 2))
         self.assertIn("died", out)
         self.assertIn("no exit recorded", out)
-        self.assertNotIn("[>]", out, "nothing is running in a dead task")
+        self.assertNotIn("[>]", out)
         out = self._text(task_rec("build", "died", 2, exit="137"))
         self.assertIn("exit 137", out)
 
     def test_a_finished_task_marks_every_step_done(self):
         out = self._text(task_rec("build", "ok", 3, exit="0"))
         self.assertNotIn("[>]", out)
-        self.assertNotIn("[!]", out, "a task that ran to the end stopped at no step")
+        self.assertNotIn("[!]", out)
         self.assertEqual(out.count("[x]"), 3, out)
 
     def test_the_page_renders_the_same_plan(self):

@@ -1,6 +1,6 @@
 """A command's declaration: the `# wk:` lines in the leading comment block of cmd/<name> and the
 `# wk <name> ... -- <summary>` synopsis. Keys: where=, name= (with @N for the slot), takes=,
-ready=yes, group=, lifecycle, readonly, destructive, dryrun, opts, passthrough[=tail|=all], broker,
+ready=yes, group=, lifecycle, readonly, destructive, dryrun, nodryrun, opts, passthrough[=tail|=all], broker,
 outside, forward=no, here, bare=merged, post=, values=, config=, verbs=, default=, needs;
 `sub` lines override per verb (a command with verbs= keeps its opts on them), `flag` lines per flag of a command without; a `gone <word> <replacement>` line retires a flag or verb."""
 
@@ -10,7 +10,7 @@ from pathlib import Path
 WHERE_VALUES = ("host", "store", "local", "workspace", "dynamic")
 NAME_VALUES = ("required", "optional", "none", "derived")
 FLAGS = ("lifecycle", "readonly", "destructive", "broker", "needs", "opts",
-         "passthrough", "dryrun", "passthrough=tail", "passthrough=all", "forward=no", "here",
+         "passthrough", "dryrun", "nodryrun", "passthrough=tail", "passthrough=all", "forward=no", "here",
          "outside", "bare=merged")
 CONFIG_VALUES = ("--config", "arg")
 LIST_KEYS = ("needs", "opts", "readonly", "destructive", "dryrun", "broker")
@@ -66,6 +66,7 @@ class Decl:
         self.opts = ""
         self.passthrough = ""
         self.dryrun = ""
+        self.nodryrun = False
         self.sub = []    # (verbs, {key: value})
         self.flag = []   # (flags, {key: value})
         self.gone = {}
@@ -174,6 +175,8 @@ class Decl:
                     pending = "opts"
                 elif tok == "passthrough":
                     self.passthrough = "yes"
+                elif tok == "nodryrun":
+                    self.nodryrun = True
                 elif tok == "dryrun":
                     self.dryrun = "yes"
                     pending = "dryrun"

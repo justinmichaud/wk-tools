@@ -3,7 +3,7 @@
 import re
 from concurrent.futures import ThreadPoolExecutor
 
-from wk.key.common import LOCAL, LOGIN, SAME_AS_HERE, STATES, detail, fact, summary, table_row, verdict
+from wk.key.common import LOCAL, SAME_AS_HERE, STATES, detail, fact, summary, table_row, verdict
 
 
 class Check:
@@ -32,10 +32,7 @@ class Check:
         """One command is the remedy for every fault here, because one command puts all of it there."""
         line = self.cred_verdict_of(m, name)
         v, label = verdict(line), "%s %s" % (m, name)
-        if name == LOGIN and v == "absent":
-            return False, [("row", table_row("FIX", label, "no claude.ai login of its own")),
-                           ("action", label, "from a terminal here: wk key setup   (it logs in for %s)" % m)]
-        if name != LOGIN and self.row_agrees(self.fingerprint(name), line):
+        if self.row_agrees(self.fingerprint(name), line):
             return True, [("row", table_row("ok", label, SAME_AS_HERE))]
         rows = self.cred_row(label, line)
         if v == "absent":
@@ -43,7 +40,7 @@ class Check:
         if v == "bad":
             return False, rows + [("action", label, "from a terminal here: wk key setup   (it replaces what %s holds)" % m)]
         fp = fact(line, "fingerprint")
-        if name == LOGIN or not fp or fp == self.fingerprint(name):
+        if not fp or fp == self.fingerprint(name):
             return True, rows
         rows.append(("action", label, "wk key setup   (it is not the one this machine holds; an election settles it)"))
         if v in ("ok", "wide"):
@@ -82,7 +79,7 @@ class Check:
         for j in cred_jobs:
             replay(j)
         if peers:
-            self.out.write("  the other workstations (one of each, and each its own login):\n")
+            self.out.write("  the other workstations (one of each):\n")
             for j in peer_jobs:
                 replay(j)
         for name, holder in held:

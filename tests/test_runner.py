@@ -1,10 +1,4 @@
-"""tests/run.py's own rules -- the per-test budget, tier selection, the owed
-count, the listing -- each driven against a small suite this file writes,
-never the real one, with a stub podman so no gate reaches a machine; and
-cmd/selftest's `--quick` tombstone.
-
-Run: python3 -m unittest tests.test_runner -v
-"""
+"""tests/run.py's own rules -- the per-test budget, tier selection, the owed"""
 import os
 import subprocess
 import sys
@@ -225,7 +219,6 @@ class TestBudget(RunnerTest):
         self.assertRegex(out, r"slowest:\n\s+0\.[3-9]\ds\s+\S*test_e_slow\.T\.test_sleeps")
 
     def test_a_test_that_hangs_is_stopped_where_it_is_and_fails(self):
-        """The budget is the one bound on a test: a wait with no bound of its own fails rather than hangs the run."""
         (self.suite / "test_i_hangs.py").write_text(textwrap.dedent('''
             import threading, unittest
             class T(unittest.TestCase):

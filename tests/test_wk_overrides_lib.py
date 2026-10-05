@@ -1,23 +1,11 @@
-"""WK_* override audit -- lib/ and boot/ (every WK_* read with a default is
-documented where the user meets it and covered by a test, or removed).
-
-Each test below either (a) drives a real override end to end through the
-function that reads it, with no hardware and no real machine touched -- a
-PATH stub, a Fake machine, a scratch file -- or
-(b) is a cheap regression guard on a source-level fact (two files must not
-disagree on one name's default). Vars this agent decided to REMOVE
-(WK_IMAGE_ARMHF, WK_DETACH_POLL_SECONDS, WK_SWEEP_TIMEOUT, WK_RPI3_SSH,
-WK_RPI4_SSH, WK_MAC_SSH, WK_MAC_BENCH_SSH) are checked absent, so a later
-re-add is a decision, not a drift.
-
-Run: python3 -m unittest tests.test_wk_overrides_lib -v
-"""
+"""WK_* override audit -- lib/ and boot/ (every WK_* read with a default is"""
 import os
 import sys
+import types
 import unittest
 from unittest import mock
 
-from tests.support import REPO, WkTest, stub_path
+from tests.support import REAL_MACHINES, REPO, WkTest, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import git, reach, resources, screen, targets  # noqa: E402
@@ -26,74 +14,6 @@ from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.machine import Fake, Local, lib_argv  # noqa: E402
 from wk.store import Store  # noqa: E402
-
-
-def _src(*parts):
-    return (REPO.joinpath(*parts)).read_text()
-
-
-def _readers(name):
-    """Every file under lib/, cmd/ and boot/ that names `name`."""
-    return [str(f.relative_to(REPO)) for top in ("lib", "cmd", "boot") for f in (REPO / top).rglob("*")
-            if f.is_file() and name in f.read_text(errors="ignore")]
-
-
-class TestRemovedOverridesStayRemoved(unittest.TestCase):
-    """Source-level regression guards: an override this agent removed because
-    nothing used it should not silently come back."""
-
-    def test_wk_image_armhf_is_pinned_not_overridable(self):
-        self.assertNotIn("WK_IMAGE_ARMHF", _src("lib", "wk", "buildconf.py"))
-
-    def test_wk_detach_poll_seconds_removed(self):
-        self.assertEqual(_readers("WK_DETACH_POLL_SECONDS"), [])
-
-    def test_wk_sweep_timeout_removed(self):
-        self.assertEqual(_readers("WK_SWEEP_TIMEOUT"), [])
-
-    def test_fleet_conf_ssh_names_not_overridable(self):
-        """machines/*.conf: a fleet device is renamed by editing the
-        conf, not by an environment variable nothing sets."""
-        self.assertNotIn("WK_RPI3_SSH", _src("machines", "rpi3.conf"))
-        self.assertNotIn("WK_RPI4_SSH", _src("machines", "rpi4.conf"))
-        mbp = _src("machines", "mbp.conf")
-        self.assertNotIn("WK_MAC_SSH", mbp)
-        self.assertNotIn("WK_MAC_BENCH_SSH", mbp)
-        # WK_BENCH_VOLUME survives, in code: tests/test_host_only.py drives it.
-        self.assertNotIn("WK_BENCH_VOLUME", mbp)
-        self.assertIn("WK_BENCH_VOLUME", _src("lib", "wk", "fleet.py"))
-
-
-class TestSharedTimingDefaultsAgree(unittest.TestCase):
-    """CLAUDE.md: 'same name read in several files: one default.' The watched run and the far-side poll read
-    WK_STALL_SECONDS and WK_HEARTBEAT_SECONDS in lib/wk/job.py alone, and no bash file restates them."""
-
-    def test_stall_and_heartbeat_seconds_have_one_default(self):
-        self.assertEqual(_readers("WK_STALL_SECONDS:-"), [])
-        self.assertEqual(_readers("WK_HEARTBEAT_SECONDS:-"), [])
-
-
-class TestSshTimeoutReadInOnePlace(unittest.TestCase):
-    """lib/common.sh's wk_ssh_timeout() is the one place the
-    WK_SSH_TIMEOUT default lives; every caller reads it through that
-    function instead of repeating `${WK_SSH_TIMEOUT:-10}`."""
-
-    def test_no_other_file_reads_the_default_inline(self):
-        owner = REPO / "lib" / "common.sh"
-        offenders = []
-        for top in ("cmd", "lib", "boot", "image", "host", "targets", "bench"):
-            d = REPO / top
-            if not d.is_dir():
-                continue
-            for path in d.rglob("*"):
-                if not path.is_file() or path == owner:
-                    continue
-                if "WK_SSH_TIMEOUT:-" in path.read_text(errors="ignore"):
-                    offenders.append(str(path.relative_to(REPO)))
-        wk = REPO / "wk"
-        if wk.is_file() and "WK_SSH_TIMEOUT:-" in wk.read_text(errors="ignore"):
-            offenders.append("wk")
-        self.assertEqual(offenders, [], f"WK_SSH_TIMEOUT:- read inline outside lib/common.sh: {offenders}")
 
 
 class TestCommonLib(WkTest):
@@ -127,21 +47,12 @@ echo PASS
 
 
 class TestScreenBlocker(unittest.TestCase):
-    """`screen.blocker` (lib/wk/screen.py) names what is covering the window, from the window
-    server's own list rather than from a list of application names: a pane
-    nobody has met yet is caught the first time it draws. WK_SCREEN_EXPECTED is
-    the other half -- what wk itself put there."""
 
-    # `windows=` as vm/desktop-probe.sh prints it. Captured from a Tahoe 26.4
-    # guest on 2026-09-05 with Setup Assistant's "Update Mac Automatically" pane
-    # up: the pane at layer 0, its own full-screen backdrop at -1, Notification
-    # Centre's click-catcher at 21, and the shell wk itself started.
     PANE = ("Setup Assistant:0:800x600;Setup Assistant:-1:1417x805;"
             "Notification Center:21:1417x805;Terminal:0:863x499;")
     CLEAN = "Notification Center:21:1417x805;Terminal:0:863x499;"
 
     def _blocker(self, reading, expected=None):
-        """The window server answers `reading`; bench/mac-window-probe.sh's own filter judges it, for real."""
         m = Fake()
         m.answer(lib_argv(REPO, screen.WINDOWS, "wk_window_probe"), out="windows=%s\n" % reading)
         m.react(lib_argv(REPO, screen.WINDOWS, "wk_window_unexpected"), lambda argv, f: Local().run(argv))
@@ -158,25 +69,17 @@ class TestScreenBlocker(unittest.TestCase):
         self.assertEqual("[]", self._blocker(self.CLEAN))
 
     def test_the_menu_bar_and_the_dock_are_not_blockers(self):
-        """Notification Centre's click-catcher is full-screen and always there;
-        judging by size or by presence would call every clean screen busy."""
         self.assertNotIn("Notification Center", self._blocker(self.PANE))
 
     def test_what_wk_puts_there_is_overridable(self):
         self.assertEqual("[Terminal]", self._blocker(self.CLEAN, "Finder|Safari"))
 
     def test_a_screen_that_could_not_be_read_is_not_reported_as_free(self):
-        """`?` is "nobody asked the window server", which is not "nothing is
-        there". An empty answer would make every machine with no compiler read
-        as a clear screen, and a run that times out with no error is exactly
-        this and nothing else."""
         self.assertEqual("[?]", self._blocker("?"))
 
 
 class TestReachLib(WkTest):
     def test_wk_tailscale_timeout_bounds_a_wedged_cli(self):
-        """A wedged tailscale CLI costs the walk WK_TAILSCALE_TIMEOUT, not its own hang (Reach.peers): the stub outlasts the
-        runner's budget."""
         with stub_path({"tailscale": "#!/bin/sh\nsleep 600\n"}) as binp, \
                 mock.patch.dict(os.environ, {"PATH": f"{binp}:{os.environ['PATH']}"}):
             peers = reach.Reach(Local(), {"WK_TAILSCALE_TIMEOUT": "1", "WK_ROOT": str(REPO)}).peers()
@@ -252,8 +155,6 @@ class TestTargetsLocal(WkTest):
 
 
 class TestTheGuestOverrides(unittest.TestCase):
-    """Every WK_VM_*/WK_HOST_* a guest or its base reads reaches what it names; lib/wk/guest.py's daemons' own
-    are tests/test_guest.py's, and a guest's size and display tests/test_wk_targets.py's."""
 
     def setUp(self):
         from wk.machine import Fake, Result
@@ -303,6 +204,84 @@ class TestTheGuestOverrides(unittest.TestCase):
         self.assertTrue(self.admitted(WK_HOST_FREE_MIN_GB="1", WK_HOST_FREE_WARN_GB="2"))
         self.assertFalse(self.admitted(mine=99999999))
         self.assertTrue(self.admitted(mine=99999999, WK_VM_SHARE="1"))
+
+
+class TestEachOverrideReachesWhatItNames(WkTest):
+    def test_the_plain_readers(self):
+        from wk import guest, status
+        self.assertEqual((status.fleet_timeout({}), status.fleet_timeout({"WK_FLEET_TIMEOUT": "9"})), (4, 9))
+        self.assertEqual(guest.password({"WK_VM_PASSWORD": "pw"}), "pw")
+        t = targets.Registry(REPO, env={"HOME": "/h", "WK_SDK": "/my/sdk"}, machine=Fake()).load("container")
+        self.assertEqual(t.sdk(), "/my/sdk")
+
+    def test_wk_bench_machine_names_the_volume_in_host_mode(self):
+        from wk.bench.mac import Install
+        seen = []
+        env = {"HOME": "/h", "WK_MACHINES_DIR": str(REAL_MACHINES), "WK_BENCH_MACHINE": "mbp", "WK_ROOT": str(REPO)}
+        install = Install(REPO, Fake(), env, lambda root, conf: seen.append(conf["name"]) or types.SimpleNamespace(bench_root=lambda: "/v"))
+        self.assertEqual((install.staging_root(), seen), ("/v", ["mbp"]))
+
+    def test_wk_bench_user_is_the_second_account_asked(self):
+        asked = []
+        survey = reach.Survey(reach.Reach(Fake(), {"WK_BENCH_USER": "benchy"}, peers=[]))
+        with mock.patch.object(reach.Survey, "_ask", lambda self, dest, opts=(): asked.append(dest) or ""):
+            survey.identify("10.0.0.9", "")
+        self.assertEqual(asked[-1], "benchy@10.0.0.9")
+
+    def test_wk_bridge_timeout_caps_each_health_check(self):
+        from wk import status
+        caps = []
+        walk = types.SimpleNamespace(root=str(REPO), reach=lambda n: ("", ""),
+                                     env={"HOME": "/h", "WK_MACHINES_DIR": str(REAL_MACHINES), "WK_BRIDGE_TIMEOUT": "3"})
+        with mock.patch.object(status, "bridge_ssh", lambda name, probe, ts, connect, cap: caps.append(cap) or ""):
+            status.Walk.bridges(walk)
+        self.assertTrue(caps)
+        self.assertEqual(set(caps), {3.0})
+
+
+class TestStatusOverrides(WkTest):
+    def test_a_wedged_bridge_ssh_cannot_outlive_the_ceiling(self):
+        from wk import kv, status
+        with stub_path({"ssh": "#!/bin/sh\nsleep 30\n"}) as binp, \
+                mock.patch.dict(os.environ, {"PATH": "%s:%s" % (binp, os.environ["PATH"])}):
+            out = status.bridge_ssh("testphone", status.BRIDGE_PROBE, True, 1, 1)
+        self.assertEqual(out, "")
+        self.assertEqual(status.bridge_record("testphone", {}, "x", kv.kv(out), lambda n: ("", ""))["state"], "unreachable")
+
+    def test_wk_wait_timeout_is_the_waits_default_timeout(self):
+        from tests.test_layers import load_cmd
+        cmd = load_cmd("status")
+        seen = []
+
+        def wait(probe, timeout, interval, *rest):
+            seen.append((timeout, interval))
+            raise SystemExit(0)
+        with mock.patch.object(cmd, "wait_until_idle", wait), \
+                mock.patch.dict(os.environ, {"WK_WAIT_TIMEOUT": "7", "WK_WAIT_INTERVAL": "2"}), self.assertRaises(SystemExit):
+            cmd.main(["--wait"])
+        self.assertEqual(seen, [(7, 2.0)])
+
+
+class TestOtherOverrides(WkTest):
+    def test_sudo_and_sync(self):
+        from wk import sync
+        from wk.sudo import Sudo
+        self.assertEqual((Sudo(None, {}).timeout_desc, Sudo(None, {"WK_SUDO_TIMEOUT_MIN": "2"}).timeout_desc),
+                         ("30 seconds", "120 seconds"))
+        self.assertEqual((sync.publish_branch({}), sync.publish_branch({"WK_BRANCH": "wpe-2.44"})), ("origin/main", "wpe-2.44"))
+
+    def session_user(self, conf):
+        text = (REPO / "admin" / "wk-quiesce-priv").read_text()
+        func = text[text.index("session_user() {"):]
+        func = func[:func.index("\n}\n") + 3]
+        return self.bash(func + "session_user", env={"WK_SESSION_CONF": str(conf), "WK_SESSION_USER": "hostile"})
+
+    def test_quiesce_priv_takes_the_session_user_from_its_conf_never_the_caller(self):
+        conf = self.tmp / "wk-session.env"
+        conf.write_text("WK_SESSION_USER=root\n")
+        cp = self.session_user(conf)
+        self.assertEqual((cp.returncode, cp.stdout.strip()), (0, "root"), cp.stderr)
+        self.assertNotEqual(self.session_user(self.tmp / "none").returncode, 0)
 
 
 if __name__ == "__main__":

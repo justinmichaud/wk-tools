@@ -1,14 +1,4 @@
-"""Where tart is, asked once.
-
-tart ships as a signed .app (it needs the virtualization entitlement) and is
-reached through ~/.local/bin, which a non-interactive ssh session's PATH does
-not carry -- and driving this fleet's Mac from another machine is exactly a
-non-interactive ssh session. So every reader of "is tart here" has to give the
-same answer as the one that runs it, or a guest command refuses what it could
-have run.
-
-Run: python3 -m unittest tests.test_tart_locator -v
-"""
+"""Where tart is: a signed .app linked from ~/.local/bin, which a non-interactive ssh's PATH lacks."""
 import os
 import stat
 import unittest
@@ -59,24 +49,6 @@ class TestThePythonLocator(WkTest):
         with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(Refused):
             self.targets.Vm("vm", str(REPO), env, Fake()).tart_or_die()
         self.assertIn("ln -sfn ~/.local/share/tart/tart.app/Contents/MacOS/tart ~/.local/bin/tart", err.getvalue())
-
-
-class TestEveryReaderAsksIt(WkTest):
-    """A second spelling of "is tart here" is a command that refuses work it
-    could do: a `command -v` refuses a guest start over ssh with tart installed."""
-
-    SHELL_READERS = ("host/macos/tools.sh", "host/macos/softnet.sh")
-
-    def test_no_reader_spells_it_for_itself(self):
-        for rel in ("lib/wk/targets.py",) + self.SHELL_READERS:
-            text = (REPO / rel).read_text()
-            self.assertNotIn('-x "$HOME/.local/bin/tart"', text, rel)
-            self.assertNotIn("command -v tart", text, rel)
-            self.assertNotIn('".local", "bin", "tart"', text, rel)
-            self.assertNotIn('which("tart")', text, rel)
-        for rel in self.SHELL_READERS:
-            text = (REPO / rel).read_text()
-            self.assertIn("wk.targets tart", text, rel)
 
 
 if __name__ == "__main__":

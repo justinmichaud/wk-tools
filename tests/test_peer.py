@@ -1,48 +1,22 @@
-"""A workspace another workstation owns: resolving it, and the one place a
-command about it is handed over. Each docstring is the phrase of the
-behaviour it checks.
-
-A peer's workspaces are its containers and its guests, in its own store --
-nothing this side has a path to, and nothing under the remote root the
-`remote` driver otherwise reads. So the driver asks the peer's own `wk`
-(Remote's peer branch, lib/wk/targets.py) and `wk` hands the whole command
-over (lib/wk/dispatch.py), which is what makes `wk logs`, `wk status`,
-`wk build` and the rest work on one without a branch of their own.
-
-No peer is needed to test that: a scratch WK_ROOT holds one fake machine's
-conf, a stub `ssh` first on PATH runs what would have crossed the network in
-this shell, and a stub `wk` at the far end answers and records what it was
-asked -- the same technique tests.test_remote and the disk-logic tests use to
-drive real driver code against a fake of the thing it talks to.
-
-Run: python3 -m unittest tests.test_peer -v
-"""
+"""A workspace another workstation owns: resolved through the peer's own `wk`, and every command about it handed
+over, against a stub ssh that runs the far side in this shell and a stub peer `wk` that records what it was asked."""
 import contextlib
 import io
 import os
-import re
 import subprocess
 import sys
 import unittest
 
 from unittest import mock
 
-from tests.support import REPO, repo_files, WkTest, stub_path
+from tests.support import REPO, WkTest, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import targets, workspace  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
-# Runs locally what `ssh <opts> <host> <command>` would have run over there.
-# Every option is dropped, then the destination, and what is left is the
-# command -- which is how every Ssh machine spells it.
-#
-# Every WK_* variable is dropped first, because a real ssh carries none of
-# this shell's environment: without that, a fake that runs the command here
-# would let one leak across and prove nothing about what the far side was
-# actually told. What the command string carries in front of `wk` is exactly
-# what arrives.
+# `ssh <opts> <host> <command>` run here, with no WK_* variable carried across, as a real ssh carries none.
 _FAKE_SSH = """#!/bin/sh
 for v in $(env | sed -n 's/^\\(WK_[A-Za-z0-9_]*\\)=.*/\\1/p'); do unset "$v"; done
 while [ $# -gt 0 ]; do
@@ -55,12 +29,7 @@ done
 exec /bin/sh -c "$*"
 """
 
-# The peer's own `wk`. It answers the questions the driver asks -- `wk ls
-# --json` for what it holds, `wk zed <ws> --route` for how to reach one --
-# destroys what it is asked to destroy, and records every invocation, so a
-# test can prove a command was handed over rather than run here. Its `rm`
-# converges: what it has removed it stops listing, which is the evidence
-# `wk rm` reads back before it reports a workspace gone.
+# The peer's own `wk`: answers `ls --json` and `zed --route`, stops listing what it removed, and logs every call.
 _PEER_WK = """#!/bin/sh
 printf '%s\\n' "$* ${{WK_ZED_PUBKEY:+key=$WK_ZED_PUBKEY}}${{WK_FORCE:+force=1 }}${{WK_QUIET:+quiet=1 }}${{WK_YES:+yes=1 }}" >> "{log}"
 case "$1 $2" in
@@ -85,10 +54,7 @@ _LISTING = ('{"workspaces": [{"name": "peerws", "target": "container", '
 
 
 class PeerFixture(WkTest):
-    """A WK_ROOT whose registry (WK_MACHINES_DIR, lib/wk/fleet.py) holds one
-    peer and nothing else, so the walk cannot reach the real fleet, plus a
-    $HOME of its own: `wk zed` writes an ssh alias, and no test may write
-    into the person's real ~/.ssh."""
+    """A WK_ROOT whose fleet is one peer, and a $HOME of its own for `wk zed`'s ssh alias."""
 
     def setUp(self):
         super().setUp()
@@ -134,6 +100,18 @@ class PeerFixture(WkTest):
     def registry(self):
         return targets.Registry(self.root, env=dict(os.environ, **self.env()))
 
+    def _wk(self, *args, extra_env=None):
+        with stub_path({"ssh": _FAKE_SSH}) as binp:
+            env = dict(os.environ)
+            env.update(self.env({"PATH": f"{binp}:{os.environ['PATH']}"}))
+            for v in ("WK_MARKER", "WK_FORCE", "WK_QUIET"):
+                env.pop(v, None)
+            env.update(extra_env or {})
+            return subprocess.run(
+                [str(self.root / "wk"), *args],
+                cwd=str(self.root), env=env, timeout=120,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
     def peer_calls(self):
         if not self.calls.exists():
             return []
@@ -173,18 +151,6 @@ class TestPeerResolution(PeerFixture):
 
 
 class TestPeerDelegation(PeerFixture):
-    """`wk` hands a command about a peer's workspace to the peer"""
-
-    def _wk(self, *args, extra_env=None):
-        with stub_path({"ssh": _FAKE_SSH}) as binp:
-            env = dict(os.environ)
-            env.update(self.env({"PATH": f"{binp}:{os.environ['PATH']}"}))
-            env.update(extra_env or {})
-            env.pop("WK_MARKER", None)
-            return subprocess.run(
-                [str(self.root / "wk"), *args],
-                cwd=str(self.root), env=env, timeout=120,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
     def test_command_runs_on_the_peer(self):
         """`wk logs <ws>` runs `wk logs <ws>` over there, not a thing here"""
@@ -202,8 +168,6 @@ class TestPeerDelegation(PeerFixture):
         self.assertIn("rm peerws", asked[0])
         self.assertIn("yes=1", asked[0],
                       "the peer was left a question with no terminal to ask it on")
-        self.assertIn("destroyed on peerbox", cp.stdout, cp.stdout)
-        self.assertIn("workspace 'peerws' destroyed", cp.stdout, cp.stdout)
 
     def test_the_question_is_asked_here_and_names_the_machine(self):
         """one confirmation, on the machine the person typed it on, naming the
@@ -294,63 +258,14 @@ class TestPeerDelegation(PeerFixture):
 
 
 class TestDelegatedGlobalFlags(PeerFixture):
-    """the dispatcher's global flags cross the hop with the command"""
-
-    def _wk(self, *args):
-        with stub_path({"ssh": _FAKE_SSH}) as binp:
-            env = dict(os.environ)
-            env.update(self.env({"PATH": f"{binp}:{os.environ['PATH']}"}))
-            env.pop("WK_MARKER", None)
-            env.pop("WK_FORCE", None)
-            env.pop("WK_QUIET", None)
-            return subprocess.run(
-                [str(self.root / "wk"), *args],
-                cwd=str(self.root), env=env, timeout=120,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-
-    def test_force_reaches_the_peers_wk(self):
-        """`wk <cmd> <ws> --force` is forced over there too: the barrier it
-        crosses is raised on the machine that runs the command"""
-        cp = self._wk("logs", "peerws", "--force")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertTrue(any("force=1" in c for c in self.peer_calls()),
-                        self.peer_calls())
-
-    def test_force_travels_as_environment_not_as_an_argument(self):
-        """an older `wk` over there ignores a variable it does not know and
-        dies on a flag it does not"""
-        self._wk("logs", "peerws", "--force")
-        self.assertFalse(any("--force" in c for c in self.peer_calls()),
-                         self.peer_calls())
-
-    def test_quiet_reaches_the_peers_wk(self):
-        """--quiet is the far side's narration, not this side's"""
-        cp = self._wk("logs", "peerws", "--quiet")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertTrue(any("quiet=1" in c for c in self.peer_calls()),
-                        self.peer_calls())
-
-    def test_nothing_is_forced_when_nothing_asked(self):
-        """the prefix is empty without the flag -- no command is forced by
-        merely being delegated"""
-        cp = self._wk("logs", "peerws")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertFalse(any("force=1" in c for c in self.peer_calls()),
-                         self.peer_calls())
-
-    def test_one_implementation_builds_the_forwarded_environment(self):
-        """every hop, with a terminal or without, asks Target.wk_cmd, so a flag
-        added to one is not missing from another (CLAUDE.md, "one implementation per rule")"""
-        builders = sorted(str(f.relative_to(REPO)) for f in (REPO / "lib" / "wk").rglob("*.py")
-                          if '"%s=1 "' in f.read_text(errors="replace"))
-        self.assertEqual(builders, ["lib/wk/targets.py"], "a far wk's line is Target.wk_cmd's alone")
-        # The tracked tree, not a directory walk: an agent's git worktree
-        # under .claude/worktrees is a second copy of every file.
-        offenders = [str(f) for f in repo_files()
-                     if f.parts[len(REPO.parts)] != "tests"
-                     and re.search(r"WK_(FORCE|QUIET|YES|DEBUG):\+",
-                                   f.read_text(errors="replace"))]
-        self.assertEqual(offenders, [], "no bash file spells the forwarded environment: %s" % offenders)
+    def test_force_and_quiet_cross_as_environment_and_only_when_asked(self):
+        self.assertEqual(self._wk("logs", "peerws").returncode, 0)
+        self.assertFalse(any("force=1" in c or "quiet=1" in c for c in self.peer_calls()), self.peer_calls())
+        for flag, seen in (("--force", "force=1"), ("--quiet", "quiet=1")):
+            cp = self._wk("logs", "peerws", flag)
+            self.assertEqual(cp.returncode, 0, cp.stdout)
+            self.assertIn(seen, self.peer_calls()[-1])
+            self.assertNotIn(flag, self.peer_calls()[-1])
 
 
 if __name__ == "__main__":

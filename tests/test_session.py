@@ -2,10 +2,7 @@
 BMC's `ast` chip under /sys/class/drm, loginctl's sessions, systemctl's units and a privileged helper
 whose session verbs move the socket and the mode the way the real one does. Nothing here runs the real
 helper, systemctl, loginctl or gdm. Also `killpoints[session]`, a dry run printing the wet run's plan,
-and the live row `session.modes[moose]`.
-
-Run: python3 tests/run.py -k tests.test_session
-"""
+and the live row `session.modes[moose]`."""
 
 import contextlib
 import importlib.machinery
@@ -163,7 +160,6 @@ class TestTheReadings(SessionTest):
         self.assertEqual("none", w.s().driver("card0"))
 
     def test_lit_needs_connected_enabled_and_on(self):
-        """`dpms` alone reads On for a connector whose CRTC was never enabled."""
         w = World()
         self.assertEqual(["DP-1"], w.s().lit())
         w.files[DRM + "/card0-DP-1/enabled"] = "disabled\n"
@@ -212,7 +208,6 @@ class TestOn(SessionTest):
         self.assertIn("already running", out)
 
     def test_another_mode_running_is_restarted_as_the_one_asked_for(self):
-        """"already running" answered for a software session is an afternoon of numbers that measured llvmpipe."""
         w = World()
         self.go(w.s().on, True)
         w.effects = []
@@ -332,7 +327,6 @@ class TestCrashOnly(SessionTest):
         return w
 
     def test_each_verb_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[session]`: the helper verbs each mode takes, from the mode before it."""
         for what, verb, start in self.CASES:
             with self.subTest(verb=what):
                 converges(self, lambda: types.SimpleNamespace(fake=self.world(start)),
@@ -382,8 +376,6 @@ class TestTheCommand(SessionTest):
 class TestOnMoose(WkTest):
     @requires_machine("moose")
     def test_modes_moose(self):
-        """`live session.modes[moose]`: read-only, so what `status` reads there; driving each mode from
-        each half-state is the owed half of the row."""
         tools = fleet.Fleet(REPO).load("moose").get("tools") or "Development/wk-tools"
         cp = subprocess.run(["ssh", "-o", "BatchMode=yes", "moose", "cd %s && ./wk session status" % tools],
                             capture_output=True, text=True, timeout=120)

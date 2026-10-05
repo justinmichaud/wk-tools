@@ -34,7 +34,7 @@ ROOT = images.root()
 
 from wk import act, decl, record, status, targets  # noqa: E402
 from wk.act import Refused, confirm, die, info, log, warn  # noqa: E402
-from wk.machine import is_macos  # noqa: E402
+from wk.machine import Local, is_macos  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 MACHINE = Store().podman_machine()
@@ -66,8 +66,7 @@ def stop_tasks_here(records):
     os.environ["WK_YES"] = "1"   # answered once, here: a kill command of its own would ask again with no terminal
     path = "%s/bin:%s" % (ROOT, os.environ.get("PATH", ""))
     for _, what, kill in rows:
-        cp = act.act(["env", "PATH=" + path, "sh", "-c", kill])
-        if cp is not None and cp.returncode != 0:
+        if not Local().act_run(["env", "PATH=" + path, "sh", "-c", kill], stream=True).ok:
             warn("'%s' exited non-zero" % kill)
     if act.dry_run():
         return 0
@@ -132,7 +131,7 @@ def stop_everything(reg, keep_vm):
         log("leaving the machine running (--keep-vm)")
     elif here():
         info("stopping the machine")
-        act.act(["podman", "machine", "stop", MACHINE], stdout=sys.stderr)
+        Local().act_run(["podman", "machine", "stop", MACHINE], stream=True)
         info("machine stopped -- CPU and memory returned to the host")
     return 0
 

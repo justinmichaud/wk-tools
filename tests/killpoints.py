@@ -6,6 +6,7 @@ loaded through tests/test_wk_machine.py.
 
 Run: python3 tests/run.py -k tests.killpoints
 """
+import os
 import sys
 import types
 import unittest
@@ -30,6 +31,9 @@ def converges(case, make_world, run_once, final_state, max_effects=60):
         else:
             return
         w.fake.stop_after = None
+        for m in (w, w.fake):   # the killed process is gone, and with it every claim made in its pid
+            if isinstance(m, Fake):
+                m.pids.discard(os.getpid())
         if final_state(w) == want:
             continue
         run_once(w)

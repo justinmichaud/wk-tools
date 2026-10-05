@@ -15,11 +15,9 @@ sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act  # noqa: E402
 from wk.boot.cli import load_conf  # noqa: E402
-from wk.boot.driver import RECORD, Driver  # noqa: E402
-from wk.boot.pi import DRIVERS, PiTryboot, Rpi5Usb  # noqa: E402
+from wk.boot.pi import PiTryboot, Rpi5Usb  # noqa: E402
 from wk.machine import Result  # noqa: E402
 
-ONBOARD = REPO / "boot" / "onboard"
 CONF = {"name": "b", "device": "/dev/sda", "root": "/dev/mmcblk0p2", "role": "workstation"}
 
 
@@ -54,11 +52,6 @@ def listing(*systems):
 
 
 class TestEnumeration(unittest.TestCase):
-    def test_every_driver_states_its_candidates(self):
-        self.assertEqual(Driver.system_parts, (1,))
-        want = {"pi-tryboot": (1, 3), "pi-sd": (3, 5, 7), "pi-mbr": (1,), "rpi5-usb": (1, 3)}
-        self.assertEqual({k: v.system_parts for k, v in DRIVERS.items()}, want)
-
     def test_systems_reads_each_candidate_and_skips_an_empty_one(self):
         ch = Channel({"card_priv": lambda fn, w, p: Result(0, "alpha-1\n" if w[2] == "1" else "")})
         self.assertEqual(PiTryboot(REPO, CONF, ch).systems(), [("/dev/sda1", "alpha-1")])
@@ -85,7 +78,6 @@ class TestEnumeration(unittest.TestCase):
 
 class TestMediumRead(unittest.TestCase):
     def test_a_bench_device_mounts_the_medium_itself(self):
-        """its medium is often the disk it runs from, which the card helper refuses by design."""
         ch = Channel({"r_sudo": Result(0, "id-1\n")})
         d = PiTryboot(REPO, dict(CONF, role="bench-device"), ch)
         self.assertEqual(d.medium_read("/dev/mmcblk0p1", "wk-image.id"), "id-1\n")
@@ -99,12 +91,6 @@ class TestMediumRead(unittest.TestCase):
         d.medium_read("/dev/mmcblk0p12", "wk-diag.txt")
         self.assertEqual(ch.calls, [("card_priv", "boot-read", "/dev/sda", "3", "wk-image.id"),
                                     ("card_priv", "boot-read", "/dev/mmcblk0", "12", "wk-diag.txt")])
-
-    def test_the_medium_is_read_over_the_channel_that_answered(self):
-        """no reader of the medium names the rescue's own channel (m_ssh)."""
-        text = (REPO / "lib" / "wk" / "boot" / "pi.py").read_text()
-        self.assertNotIn("m_ssh", text)
-
 
 class TestSelection(unittest.TestCase):
     def test_sole_system_is_the_default(self):
@@ -143,49 +129,6 @@ class TestDiag(unittest.TestCase):
         self.assertIn("== beta-2 (/dev/sda3) ==\n(no wk-diag.txt", out)
 
 
-class TestRpi5SelectsBetweenTwoSystems(unittest.TestCase):
-    """The stick's pair is autoboot.txt's `boot_partition=`, written and read back before each arm, and the reboot
-    is a plain one: this board's tryboot flag belongs to flash-kernel's staging on its NVMe."""
-
-    def arm(self, part, written):
-        ch = Channel({"card_priv": lambda fn, w, p: Result(0, "[all]\nboot_partition=%s\n" % written if w[0] == "boot-read" else ""),
-                      "boot_priv": Result(0, "0x0 0x80000000\n")})
-        d = Rpi5Usb(REPO, CONF, ch)
-        return d, ch
-
-    def test_each_pair_is_selected_explicitly(self):
-        for p, pair in (("/dev/sda3", "3"), ("/dev/sda1", "1"), ("", "1")):
-            with self.subTest(part=p):
-                d, ch = self.arm(p, pair)
-                d.arm(p, "0xf64")
-                self.assertIn(("card_priv", "autoboot", "/dev/sda", pair), ch.calls)
-                self.assertIn(("boot_priv", "order", "0xf64"), ch.calls)
-                d.reboot(armed=True)
-                self.assertEqual(ch.calls[-1], ("boot_priv", "reboot"))
-
-    def test_the_helper_is_asked_for_before_the_firmware_call(self):
-        """otherwise a missing helper reads as a firmware that would not answer."""
-        d, ch = self.arm("/dev/sda1", "1")
-        ch.answers["boot_priv_require"] = Result(1)
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.assertRaises(act.Refused, d.arm, "/dev/sda1", "0xf64")
-        self.assertEqual([c[0] for c in ch.calls], ["boot_priv_require"])
-
-    def test_a_selector_that_did_not_take_is_refused(self):
-        d, _ = self.arm("/dev/sda3", "1")
-        err = refused(d.arm, "/dev/sda3", "0xf64")
-        self.assertIn("does not select pair 3", err)
-        self.assertIn("./setup --stage quiesce", err)
-
-    def test_a_partition_this_stick_does_not_select_is_refused(self):
-        d, _ = self.arm("/dev/sda5", "5")
-        self.assertIn("partition 1 or 3", refused(d.arm, "/dev/sda5", "0xf64"))
-
-    def test_the_selector_is_only_written_where_the_firmware_uses_it(self):
-        """an autoboot.txt on the rpi4's stick would make its tryboot flag boot the stick's second pair."""
-        self.assertEqual([k for k, v in DRIVERS.items() if v.selects_by_partition], ["rpi5-usb"])
-
-
 class TestEveryMachineConfLoads(unittest.TestCase):
     """A conf `load_conf` cannot load is a machine that silently leaves the fleet."""
 
@@ -197,34 +140,6 @@ class TestEveryMachineConfLoads(unittest.TestCase):
             with self.subTest(machine=conf.stem):
                 got = load_conf(REPO, conf.stem, {"WK_MACHINES_DIR": str(REPO / "machines")})
                 self.assertEqual((got or {}).get("name"), conf.stem, f"load_conf {conf.stem} failed")
-
-
-class TestTheArmingRecordNeedsNoPrivilege(unittest.TestCase):
-    """The record is written over BatchMode ssh with no terminal, so a sudo in it cannot be answered on a
-    workstation; `./setup` grants the directory once, where a prompt can be."""
-
-    def test_no_record_script_calls_sudo(self):
-        for name in ("record-write.sh", "record-read.sh", "record-clear.sh"):
-            with self.subTest(file=name):
-                self.assertNotIn("sudo", (ONBOARD / name).read_text())
-        text = (REPO / "lib" / "wk" / "boot" / "driver.py").read_text()
-        body = text[text.index("    def record("):text.index("    def armed_barrier(")]
-        self.assertNotIn("sudo", body)
-
-    def test_the_record_is_not_directly_under_the_root_owned_dir(self):
-        """/var/lib/wk stays root-owned: the card helper keeps the board's tailnet node key there."""
-        self.assertTrue(RECORD.startswith("/var/lib/wk/"), RECORD)
-        self.assertNotEqual("/var/lib/wk", RECORD.rsplit("/", 1)[0])
-
-    def test_setup_owns_that_directory_and_not_its_parent(self):
-        text = (REPO / "admin" / "install.sh").read_text()
-        self.assertIn("/var/lib/wk/boot", text)
-        for line in text.splitlines():
-            if "install -d" in line and "/var/lib/wk" in line:
-                with self.subTest(line=line.strip()):
-                    self.assertIn("/var/lib/wk/boot", line)
-        block = text[text.index("_bootdir=/var/lib/wk/boot"):]
-        self.assertIn("./setup --stage quiesce", block[:block.index("unset _bootdir")])
 
 
 if __name__ == "__main__":

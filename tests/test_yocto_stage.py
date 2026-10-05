@@ -1,12 +1,6 @@
-"""`wk sysimage build` of a yocto profile (lib/wk/sysimage/yocto.py) as a task against a Fake world: the stage
-index the record steps, what each stage books, the refusals, the branch and target checks, the cross configs,
-the watchdog's silent and wedged verdicts, --stop and the cooker a killed driver leaves, --detach, a dry run,
-a stage killed after any effect.
-
-Rows landed here: `unit sysimage.task_states` (the yocto half).
-
-Run: python3 tests/run.py -k test_yocto_stage
-"""
+"""`wk sysimage build` of a yocto profile (lib/wk/sysimage/yocto.py) as a task against a Fake world. What the task base
+(lib/wk/sysimage/task.py) does for every driver -- the workspace, its image, the target kind, options, done marker,
+--detach -- is tests/test_sysimage_task.py's."""
 import contextlib
 import io
 import os
@@ -94,13 +88,13 @@ class World(Fake):
     def profile(self):
         return images.load(PROFILE, self.env)
 
-    def popen(self, argv, stdin=None, stdout=None, stderr=None, cwd=None):
+    def start(self, argv, out, cwd=None):
         self.effect(("watch", tuple(argv)))
-        stdout.write(self.out)
+        out.write(self.out)
         return FakeProc(self.rc, self.polls, grow=self.grow)
 
     def driver(self):
-        return yocto.Yocto(self.reg, self.profile(), PROFILE, self.clock, self.popen)
+        return yocto.Yocto(self.reg, self.profile(), PROFILE, self.clock)
 
     def recs(self):
         return build.records_of(self.reg.load("box"), self.clock, self)
@@ -204,12 +198,13 @@ class TestTheCrossConfigs(unittest.TestCase):
         self.assertEqual((cc, pgo), ("clang", "use"))
         self.assertIn("-DUSE_PGO_PROFILE=ON -DPGO_PROFILE_PATH=/src/WebKit/WebKitBuild/wk-pgo/pr/output/WPEWebKit.profdata", cmake)
 
-    def test_each_pgo_config_states_both_options(self):
-        """They share one build directory and cmake refuses the pair (WEBKIT_OPTION_CONFLICT)."""
-        for name, profile in (("wpe-cross-pgo-collect", ""), ("wpe-cross-pgo-use", "/x.profdata")):
+    def test_each_pgo_config_states_both_options_and_its_lto(self):
+        """They share one build directory and cmake refuses the pair; LTO is thin to collect, full to measure."""
+        for (name, profile), lto in ((("wpe-cross-pgo-collect", ""), "thin"), (("wpe-cross-pgo-use", "/x.profdata"), "full")):
             cmake = self.cross(name, profile)[0][2]
             self.assertIn("ENABLE_LLVM_PROFILE_GENERATION=", cmake, name)
             self.assertIn("USE_PGO_PROFILE=", cmake, name)
+            self.assertIn("-DLTO_MODE=" + lto, cmake, name)
 
     def test_an_unknown_one_is_refused_listing_them_and_a_profile_needs_the_measured_one(self):
         self.assertIn("wpe-cross-pgo-use", self.cross("wpe-cross-pgo")[1])
@@ -258,11 +253,6 @@ class TestTheRecordAStageWrites(YoctoTest):
         self.assertEqual([argv[argv.index(f) + 1] for f in ("--rm-work", "--chromium", "--local-layer", "--tailnet")],
                          ["0", "1", "1", "0"])
 
-    def test_done_is_the_wrapper_s_marker_not_the_exit_status(self):
-        self.w.out = b"wk-yocto: layers already synced\n"
-        self.assertIn("it exited 0 and never said it was done", self.refused())
-        self.assertEqual(self.w.recs().list()[0].field("exit"), "1")
-
     def test_a_slot_is_the_webkit_stage_booked_at_its_own_jobs(self):
         self.w.out = b"wk-yocto: stage 'webkit' done\n"
         with contextlib.redirect_stderr(io.StringIO()) as err:
@@ -278,13 +268,6 @@ class TestTheRecordAStageWrites(YoctoTest):
 
 
 class TestTheWorkspace(YoctoTest):
-    def test_a_workspace_that_is_not_there_is_made_from_the_host_image(self):
-        self.w.made = False
-        rc, err = self.build()
-        self.assertEqual(rc, 0, err)
-        (new,) = [e for e in self.w.effects if e[0] == "run_tty" and e[1][:1] == ("env",)]
-        self.assertEqual(list(new[1]), ["env", "WK_SDK_IMAGE=" + self.w.tag(), str(REPO / "wk"), "new", WS, "--target", "box"])
-
     def test_the_host_image_is_tagged_by_its_base_and_its_containerfile(self):
         self.assertRegex(self.w.tag(), r"^localhost/wk-yocto-host:24\.04-[0-9a-f]{8}$")
 
@@ -293,12 +276,6 @@ class TestTheWorkspace(YoctoTest):
         base, tag = self.w.driver().host_image()
         self.assertEqual(base, "docker.io/library/ubuntu:26.04")
         self.assertIn(":26.04-", tag)
-
-    def test_a_workspace_made_from_another_image_is_refused_naming_the_remake(self):
-        self.w.answer(["podman", "container", "inspect"], out="localhost/wk-yocto-host:24.04-old\n")
-        err = self.refused()
-        self.assertIn("wk rm %s && wk sysimage build %s" % (WS, PROFILE), err)
-        self.assertEqual(self.w.recs().list()[0].field("exit"), "1")
 
     def test_a_workspace_on_another_branch_is_checked_out_from_the_mirror(self):
         self.w.head = "main\n"
@@ -332,7 +309,7 @@ class TestTheWorkspace(YoctoTest):
         self.w.sections = Result(0, "")
         p = dict(self.w.profile(), YOC_PORT_TARGET_FROM="rpi3-32bits-mesa", YOC_MACHINE="raspberrypi4-64")
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = yocto.Yocto(self.w.reg, p, PROFILE, self.w.clock, self.w.popen).build([])
+            rc = yocto.Yocto(self.w.reg, p, PROFILE, self.w.clock).build([])
         self.assertEqual(rc, 0, err.getvalue())
         argv = self.w.watched()
         self.assertEqual(argv[argv.index("--port-target-from") + 1:argv.index("--port-target-from") + 4],
@@ -347,10 +324,6 @@ class TestRefusals(YoctoTest):
         self.assertIn("Stop it:    wk sysimage build %s --stage toolchain --stop" % PROFILE, err)
         self.assertEqual(t.field("exit"), "")
 
-    def test_a_target_that_is_not_a_container_is_refused(self):
-        with mock.patch.object(Box, "kind", "remote"):
-            self.assertIn("needs a container workspace, and target 'box' is a remote one", self.refused())
-
     def test_a_slot_s_arguments_belong_to_the_webkit_stage(self):
         self.assertIn("belong to the webkit stage", self.refused("--commit", SHA, "--slot", "s"))
         self.assertIn("needs both --commit", self.refused("--stage", "webkit", "--slot", "s"))
@@ -358,9 +331,6 @@ class TestRefusals(YoctoTest):
         self.assertIn("--slot <name>", self.refused("--stage", "pgo-mix"))
         self.assertIn("--commit builds", self.refused("--stage", "pgo-mix", "--slot", "s", "--commit", SHA))
         self.assertIn("builds no WebKit", self.refused("--config", "wpe-cross-pgo-collect"))
-
-    def test_an_unknown_option_is_a_usage_error(self):
-        self.assertIn("--bogus is not an option of this build", self.refused("--bogus"))
 
     def test_too_little_disk_is_a_barrier(self):
         self.w.answer(["df", "-Pk"], out="Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 1048576 1% /\n")
@@ -475,23 +445,7 @@ class TestStop(YoctoTest):
         self.assertIn("no workspace '%s', so nothing is building" % WS, self.refused("--stop"))
 
 
-class Detaching(World):
-    def spawn(self, argv, log):
-        pid = super().spawn(argv, log)
-        self.recs().begin("yocto", "here", WS, "k", self.log, list(yocto.STAGES), pid=pid)
-        return pid
-
-
-class TestDetachAndDryRun(YoctoTest):
-    def test_detach_returns_once_its_own_child_has_begun_its_record(self):
-        w = Detaching(self.tmp)
-        rc, err = self.build("--stage", "fetch", "--detach", w=w)
-        self.assertEqual(rc, 0, err)
-        (sp,) = [e for e in w.effects if e[0] == "spawn"]
-        self.assertEqual(list(sp[1]), [str(REPO / "wk"), "sysimage", "build", PROFILE, "--stage", "fetch"])
-        self.assertEqual(sp[2], os.path.join(w.ws_dir, "detached-fetch.log"))
-        self.assertFalse([e for e in w.effects if e[0] == "watch"])
-
+class TestDryRun(YoctoTest):
     def test_a_dry_run_reports_the_plan_and_changes_nothing(self):
         os.environ["WK_DRY_RUN"] = "1"
         rc, err = self.build()

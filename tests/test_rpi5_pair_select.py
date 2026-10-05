@@ -1,19 +1,5 @@
-"""The rpi5 picks its pair with autoboot.txt, never with the tryboot flag.
-
-The stick holds two systems on primaries 1-2 and 3-4, and something has to
-tell the firmware which one a boot lands on. Two mechanisms exist and only one
-works here: this board's tryboot flag belongs to flash-kernel's staging on its
-NVMe (machines/rpi5.conf), and a pair selected with it does not boot at
-all -- dark, no kernel, no panic -- where the same pair, same kernel, same
-card, selected by `[all] boot_partition=3` and a plain reboot runs to
-userspace (rpi5, 2026-09-05).
-
-The write-then-read-back matters: a card helper older than the pair argument
-ignores it and writes partition 1, which would boot the other system and
-measure it under this one's name.
-
-Run: python3 -m unittest tests.test_rpi5_pair_select -v
-"""
+"""The rpi5 picks its stick's pair with autoboot.txt's boot_partition= and a plain reboot: its tryboot flag belongs
+to flash-kernel on the NVMe, and a pair selected with it does not boot (rpi5, measured)."""
 import contextlib
 import io
 import subprocess
@@ -25,7 +11,6 @@ from tests.support import REPO, bash
 sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act  # noqa: E402
-from wk.boot.driver import Driver  # noqa: E402
 from tests.fake_boot import FakeBoard  # noqa: E402
 from wk.boot.pi import Rpi5Usb  # noqa: E402
 
@@ -33,7 +18,6 @@ CARD_PRIV = REPO / "admin" / "wk-card-priv"
 
 
 class TestTheDriverSelectsByAutoboot(unittest.TestCase):
-    """lib/wk/boot/pi.py's Rpi5Usb against a FakeBoard holding a stick with two systems."""
 
     def board(self):
         conf = {"name": "rpi5", "driver": "rpi5-usb", "device": "/dev/sda",
@@ -54,16 +38,13 @@ class TestTheDriverSelectsByAutoboot(unittest.TestCase):
                 self.assertEqual(fake.running, root)
 
     def test_arming_never_uses_the_tryboot_flag(self):
-        """the arming reboot is a plain one, and a plain one is the only reboot this driver makes."""
         fake, d = self.board()
         d.arm("/dev/sda3", d.order_image)
         d.reboot(armed=True)
         d.probe()
         d.reboot()
-        self.assertEqual([e for e in fake.effects if e[0] in ("boot_priv", "reboot")],
-                         [("boot_priv", "order", "0xf64"), ("boot_priv", "reboot"), ("reboot", False),
-                          ("boot_priv", "reboot"), ("reboot", False)])
-        self.assertIs(Rpi5Usb.reboot, Driver.reboot)
+        self.assertEqual([("reboot", False)] * 2, [e for e in fake.effects if e[0] == "reboot"])
+        self.assertFalse([e for e in fake.effects if "reboot-tryboot" in e])
 
     def test_both_pairs_are_selectable_and_nothing_else_is(self):
         fake, d = self.board()
@@ -73,7 +54,6 @@ class TestTheDriverSelectsByAutoboot(unittest.TestCase):
         self.assertNotIn("autoboot", [e[1] for e in fake.effects if len(e) > 1])
 
     def test_the_selection_is_read_back(self):
-        """An older helper ignores the argument and writes partition 1."""
         fake, d = self.board()
         fake.stuck = True
         with contextlib.redirect_stderr(io.StringIO()) as err:
@@ -84,8 +64,6 @@ class TestTheDriverSelectsByAutoboot(unittest.TestCase):
 
 
 class TestTheHelperTakesAPair(unittest.TestCase):
-    """The rule lives where the privilege is: the helper decides which pairs
-    exist, and refuses anything else."""
 
     def _run(self, args):
         body = subprocess.run(

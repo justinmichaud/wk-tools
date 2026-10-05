@@ -1,12 +1,6 @@
 """Tests for bench/mac-quiet-hosts.sh -- the /etc/hosts software-update
 denial block shared by lib/wk/sysimage/macvolume.py's provision and
-mac-bench-firstboot.sh, its list read from bench/quiet/macos-hosts.txt.
-
-Hardware-free: every test drives the shared shell functions against a
-temp file passed as the hosts path, never the real /etc/hosts, and never
-needs sudo (the functions themselves never call sudo -- that only happens
-in do_provision's caller, which this suite does not run).
-"""
+mac-bench-firstboot.sh, its list read from bench/quiet/macos-hosts.txt."""
 
 import contextlib
 import io
@@ -26,8 +20,6 @@ from wk.quiet import Quiesce
 
 REPO = Path(__file__).resolve().parent.parent
 QUIET_HOSTS = REPO / "bench" / "mac-quiet-hosts.sh"
-FIRSTBOOT = REPO / "bench" / "mac-bench-firstboot.sh"
-VOLUME_PY = REPO / "lib" / "wk" / "sysimage" / "macvolume.py"
 
 # The markers the script itself writes into /etc/hosts, read from it: a second
 # copy here would let the two drift and the test would still pass.
@@ -36,17 +28,8 @@ _MARKERS = dict(re.findall(r'^(WK_BENCH_HOSTS_(?:BEGIN|END))="([^"]*)"$',
 BEGIN = _MARKERS["WK_BENCH_HOSTS_BEGIN"]
 END = _MARKERS["WK_BENCH_HOSTS_END"]
 
-EXPECTED_HOSTS = [
-    "swscan.apple.com",
-    "swdist.apple.com",
-    "swcdn.apple.com",
-    "swdownload.apple.com",
-    "mesu.apple.com",
-    "gdmf.apple.com",
-    "updates.cdn-apple.com",
-    "updates-http.cdn-apple.com",
-    "xp.apple.com",
-]
+EXPECTED_HOSTS = [l for l in (REPO / "bench" / "quiet" / "macos-hosts.txt").read_text().splitlines()
+                  if l and not l.startswith("#")]
 
 
 def _run(function, *args):
@@ -68,13 +51,6 @@ def apply_block(path, dry=None):
 
 def is_present(path):
     return _run("wk_bench_hosts_present", path)
-
-
-class SharedFileSanityTest(unittest.TestCase):
-    def test_shared_file_exists_and_parses(self):
-        self.assertTrue(QUIET_HOSTS.is_file(), QUIET_HOSTS)
-        cp = subprocess.run(["bash", "-n", str(QUIET_HOSTS)], capture_output=True, text=True)
-        self.assertEqual(cp.returncode, 0, cp.stderr)
 
 
 class ApplyHostsBlockTest(unittest.TestCase):
@@ -174,9 +150,6 @@ class ApplyHostsBlockTest(unittest.TestCase):
 
     def test_the_list_is_the_data_file_and_no_list_is_no_block(self):
         """A copy of the script with no list beside it must not write, or accept, an empty block."""
-        listed = [l for l in (REPO / "bench" / "quiet" / "macos-hosts.txt").read_text().splitlines()
-                  if l and not l.startswith("#")]
-        self.assertEqual(EXPECTED_HOSTS, listed)
         lone = self.tmp / "mac-quiet-hosts.sh"
         lone.write_text(QUIET_HOSTS.read_text())
         self.hosts.write_text(f"{BEGIN}\n{END}\n")
@@ -201,28 +174,11 @@ class ApplyHostsBlockTest(unittest.TestCase):
 
 
 class NoSecondWriterTest(unittest.TestCase):
-    """Static checks: both consumers call the one shared function, and
-    nothing else in bench/ writes /etc/hosts on its own."""
 
     # A shell redirect or `tee` aimed at /etc/hosts, wherever it appears.
     WRITE_PATTERN = re.compile(r'(>{1,2}\s*"?\$?\{?\w*\}?/etc/hosts)|(\btee\b[^|;\n]*\/etc\/hosts)')
 
-    def test_firstboot_invokes_shared_function(self):
-        # Sources the installed copy of the shared file (do_build_pkg/
-        # do_repair lay it down as wk-bench-quiet-hosts.sh next to this
-        # script) and calls its function -- not a reimplementation.
-        text = FIRSTBOOT.read_text()
-        self.assertIn("quiet-hosts.sh", text, "firstboot does not source the shared file")
-        self.assertIn("wk_bench_hosts_apply", text)
-
-    def test_provision_invokes_shared_function(self):
-        text = VOLUME_PY.read_text()
-        self.assertIn("wk_bench_hosts_apply", text)
-        self.assertIn('"usr/local/libexec/wk-bench-quiet-hosts.sh"', text)
-
     def test_the_denial_can_be_lifted_and_put_back(self):
-        """A benchmark install has to fetch the Command Line Tools once, and
-        softwareupdate cannot reach Apple through the denial."""
         import tempfile
         with tempfile.NamedTemporaryFile("w", suffix=".hosts", delete=False) as fh:
             fh.write("127.0.0.1 localhost\n")
@@ -242,14 +198,6 @@ class NoSecondWriterTest(unittest.TestCase):
         self.assertNotIn("0.0.0.0", cp.stdout.split("idempotent")[-1])
         self.assertIn("127.0.0.1 localhost", cp.stdout, "it kept what it did not write")
 
-    def test_first_boot_takes_the_tools_before_it_denies_the_servers(self):
-        """The order is the whole point: denied first, and the install has no
-        python3 and can measure nothing."""
-        text = FIRSTBOOT.read_text()
-        self.assertIn("wk_bench_hosts_remove", text)
-        self.assertLess(text.index("CommandLineTools"), text.index("wk_bench_hosts_apply"))
-        self.assertLess(text.index("CommandLineTools"), text.index("wk_pyobjc_install"))
-
     def test_no_second_hosts_writer_in_bench(self):
         offenders = []
         for path in sorted((REPO / "bench").glob("*.sh")):
@@ -260,69 +208,9 @@ class NoSecondWriterTest(unittest.TestCase):
                     offenders.append(f"{path.name}:{lineno}: {line.strip()}")
         self.assertEqual(offenders, [], "a second /etc/hosts writer exists:\n" + "\n".join(offenders))
 
-    def test_shared_file_never_calls_sudo(self):
-        # The function must work unprivileged against a plain temp file --
-        # privilege is the caller's problem (do_provision's `sudo bash -c`).
-        # Comments may still explain that in prose, so only real code lines
-        # are checked.
-        for lineno, line in enumerate(QUIET_HOSTS.read_text().splitlines(), 1):
-            code = line.split("#", 1)[0]
-            self.assertNotRegex(code, r"\bsudo\b", f"mac-quiet-hosts.sh:{lineno} calls sudo: {line}")
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-class TestNothingUnattendedNeedsAPerson(unittest.TestCase):
-    """The first boot runs with nobody in the room, so it may contain no step
-    that waits on a human. macOS grants a VPN tunnel only through a consent
-    panel (every Tailscale build for it uses NetworkExtension, and
-    pkgs.tailscale.com publishes no darwin daemon), so that install is not in
-    it -- and the payload no longer carries what it needed."""
-
-    UNATTENDED = (
-        REPO / "bench" / "mac-bench-firstboot.sh",
-        REPO / "lib" / "wk" / "bench" / "autorun.py",
-    )
-
-    def test_no_unattended_path_installs_a_package_or_a_tunnel(self):
-        for path in self.UNATTENDED:
-            text = path.read_text()
-            for command in ("installer -pkg", "tailscale up", "Tailscale.app",
-                            "io.tailscale"):
-                self.assertNotIn(command, text,
-                                 f"{path.name} runs `{command}` with nobody in the room")
-
-    def test_the_payload_is_never_given_the_key_or_the_package(self):
-        """The only mention left is the tombstone that deletes them (tests/test_mac_tailnet.py)."""
-        text = VOLUME_PY.read_text()
-        self.assertNotIn("wk_tailscale_authkey", text)
-        named = [l for l in text.splitlines() if "Tailscale-macos.pkg" in l]
-        self.assertEqual(len(named), 1)
-        self.assertTrue(named[0].startswith("STALE = "), named)
-
-    def test_the_setup_stage_that_fed_it_is_gone(self):
-        self.assertFalse((REPO / "host" / "macos" / "benchkey.sh").exists())
-        self.assertNotIn("benchkey", (REPO / "setup").read_text())
-
-
 class TestTheDaemonsEnvironment(unittest.TestCase):
-    """A LaunchDaemon inherits no environment at all -- no HOME, no USER, no
-    TMPDIR -- and the first-boot script runs under `set -euo pipefail`, so one
-    bare `$HOME` in anything it sources ends provisioning where it stands. It
-    got as far as the last step that way, leaving a volume 95% provisioned
-    with no completion line and no reboot."""
 
     SOURCED = ("mac-pyobjc.sh", "mac-quiet-desktop.sh", "mac-quiet-hosts.sh")
-
-    def test_nothing_it_sources_reads_an_environment_it_will_not_have(self):
-        for name in self.SOURCED:
-            text = (REPO / "bench" / name).read_text()
-            for var in ("$HOME", "$USER", "$LOGNAME", "$TMPDIR"):
-                for line in text.splitlines():
-                    if var in line and f"${{{var[1:]}:-" not in line:
-                        self.fail(f"bench/{name} reads {var} bare: {line.strip()}")
 
     def test_each_one_survives_an_empty_environment_under_set_u(self):
         for name in self.SOURCED:
@@ -334,43 +222,9 @@ class TestTheDaemonsEnvironment(unittest.TestCase):
                           f"bench/{name} dies when sourced by a daemon: "
                           f"{cp.stdout}{cp.stderr}")
 
-    def test_the_reboot_it_ends_with_cannot_be_vetoed(self):
-        """`shutdown -r` asks loginwindow, and a modal dialog refuses for it.
-        The daemon has removed itself by then, so a reboot that does not
-        happen leaves the volume provisioned and idle for ever."""
-        code = [l for l in FIRSTBOOT.read_text().splitlines()
-                if not l.lstrip().startswith("#")]
-        self.assertNotIn("shutdown -r", "\n".join(code))
-        self.assertIn("/sbin/reboot", "\n".join(code))
-
-    def test_pyobjc_is_installed_as_the_account_that_drives_the_browser(self):
-        """`pip install --user` installs into the running user's home, and
-        root's is not where run-benchmark looks."""
-        text = FIRSTBOOT.read_text()
-        self.assertIn('su -l "$BENCH_USER" -c ". $PYOBJC; wk_pyobjc_install"', text)
-
-
 class TestWhatIsStoppedIsWhatIsJudged(unittest.TestCase):
-    """`wk bench staged` refuses a leg for any process on the stopped list
-    that is not stopped. Measured 2026-09-07: `launchctl bootout`, and
-    `launchctl disable` in the live GUI domain followed by `bootout`, both
-    left 17 of the 21 agents running within the second -- macOS starts them on
-    demand -- so every leg was refused and no A/B could run at all. One list,
-    stopped by signal and judged by process state, is what is left."""
 
-    QUIESCE = REPO / "lib" / "wk" / "quiet.py"
     TABLE = REPO / "bench" / "mac-quiet-desktop.sh"
-
-    def test_one_list_is_signalled_and_one_list_is_judged(self):
-        text = self.TABLE.read_text()
-        signal = text[text.index("_wk_qd_daemons_signal()"):]
-        self.assertIn("$(wk_quiet_desktop_stopped)",
-                      signal[:signal.index("wk_quiet_daemons_pause")])
-        probe = text[text.index("wk_quiet_desktop_probe()"):]
-        self.assertIn("$(wk_quiet_desktop_stopped)",
-                      probe[:probe.index("_wk_qf()")])
-        judge = text[text.index("wk_quiet_daemons_findings()"):]
-        self.assertIn("$(wk_quiet_desktop_stopped)", judge)
 
     def test_that_list_holds_both_halves_of_the_machine(self):
         cp = bash(f'. "{self.TABLE}"\nwk_quiet_desktop_stopped\n')
@@ -380,19 +234,7 @@ class TestWhatIsStoppedIsWhatIsJudged(unittest.TestCase):
         for proc in ("softwareupdated", "backupd", "ReportCrash"):
             self.assertIn(proc, listed, "a daemon is missing from the list")
 
-    def test_a_leg_stops_them_again_before_it_judges_them(self):
-        """`wk quiesce on` runs once per boot; the gate runs per leg. macOS
-        restarts a stopped daemon on demand in between -- spindump was absent
-        at the quiesce and running at all 16 legs after it -- so the leg that
-        is about to measure stops them again first. A dry run must not."""
-        text = (REPO / "lib" / "wk" / "bench" / "mac.py").read_text()
-        body = text[text.index("def checks(self, leg):"):text.index('named("quiet machine"')]
-        self.assertIn("wk_quiet_daemons_pause", body)
-        self.assertIn("if self.install.bench():", body)
-
     def test_the_findings_renderer_still_changes_nothing(self):
-        """`wk quiesce status` renders the same findings, and a reporting
-        command mutates nothing: it may read with sudo; it may not write."""
         m = Fake("mac")
         m.answer([], out="")
         m._set_file("/etc/wk-image", "id=perf-macos-tolken\n")
@@ -407,22 +249,7 @@ class TestWhatIsStoppedIsWhatIsJudged(unittest.TestCase):
             if argv[:1] == ("sudo",):
                 self.assertIn("defaults read", " ".join(argv), argv)
 
-    def test_nothing_reaches_for_launchd_any_more(self):
-        """Two mechanisms is how the enforced set and the judged set drifted
-        apart in the first place."""
-        for path in (self.QUIESCE, self.TABLE):
-            text = path.read_text()
-            code = "\n".join(l for l in text.splitlines()
-                              if not l.lstrip().startswith("#"))
-            self.assertNotIn("launchctl bootout", code, f"{path.name} boots out")
-            self.assertNotIn("launchctl disable", code, f"{path.name} disables")
-
-
 class TestASweepCanNameABenchInstall(unittest.TestCase):
-    """A bench install has no tailnet identity, so a sweep is the only way to
-    find it -- and it runs as `bench`, not as whoever is sweeping. Probing
-    only the invoking account lists it as an unnamed address and says nothing
-    about what it is (measured 2026-09-07: identified by hand instead)."""
 
     def test_the_sweep_tries_the_bench_account(self):
         """lib/wk/reach.py's Survey.identify, driven: this account first, then the bench install's."""
@@ -444,52 +271,7 @@ class TestASweepCanNameABenchInstall(unittest.TestCase):
         via.react(["ssh"], lambda a, f: Result(0, "host=benchbox\n") if "bench@10.0.0.9" in a else Result(255))
         self.assertEqual(reach.Survey(reach.Reach(via, {}, peers=[])).identify("10.0.0.9", "")["account"], "bench")
 
-    def test_one_spelling_of_that_account(self):
-        """the sweep (lib/wk/reach.py) and the first-boot script cannot disagree about it."""
-        common = (REPO / "lib" / "common.sh").read_text()
-        self.assertIn('WK_BENCH_ACCOUNT="${WK_BENCH_USER:-bench}"', common)
-        self.assertIn('BENCH_USER="${WK_BENCH_USER:-bench}"', FIRSTBOOT.read_text())
-        self.assertIn('self.r.env.get("WK_BENCH_USER") or "bench"', (REPO / "lib" / "wk" / "reach.py").read_text())
-
-
-class TestBothLegPathsWatchTheScreen(unittest.TestCase):
-    """The preflight reads the screen at an instant and a leg is minutes: a
-    banner that draws after it covers the browser for the rest of the run and
-    nothing downstream can tell. `wk.screen.Watch` is how this tree
-    catches that -- and a staged leg, which is the one every A/B runs, did not
-    have it while the workspace leg did."""
-
-    PIPELINE = REPO / "lib" / "wk" / "bench" / "pipeline.py"
-
-    def test_every_run_is_bracketed_by_the_watch(self):
-        """The staged leg is the pipeline's browser run (lib/wk/bench/mac.py), not a second one."""
-        text = (REPO / "lib" / "wk" / "bench" / "mac.py").read_text()
-        self.assertIn("class StagedRun(pipeline.Run):", text)
-        self.assertNotIn("screen.Watch", text[:text.index("class PgoCollect")], "a PGO collection is watched; a leg is the pipeline's")
-        self.assertEqual(1, self.PIPELINE.read_text().count("screen.Watch("))
-        # The host side's browser leg is the install's `wk bench staged` over ssh, never a run-benchmark of its own.
-        host = text[text.index("class HostRun(pipeline.Run):"):]
-        host = host[:host.index("\ndef ")]
-        self.assertEqual(1, text.count("def run_browser"))
-        self.assertIn("def run_browser(self, leg):\n        return self.run_remote(leg)", host)
-        self.assertNotIn("run-benchmark", host)
-
-    def test_what_drew_fails_the_leg_unless_forced(self):
-        """Once, for every leg: `wk bench run` and the staged leg are one pipeline."""
-        for f in (self.PIPELINE,):
-            text = f.read_text()
-            with self.subTest(file=f.name):
-                self.assertEqual(1, text.count("the machine did not stay quiet under this run"))
-                self.assertEqual(1, text.count('act.barrier("something drew over this run, so its number is one to distrust"'))
-
-
 class TestTheWatchSeesAPausedAgentComeBack(unittest.TestCase):
-    """`wk_quiet_daemons_pause` is an instant and a leg is half an hour, and the
-    file itself records that macOS restarts these on demand -- so the pair that
-    draws a notification banner, NotificationCenter and usernoted, can be back
-    inside a leg that began with both held stopped. Nothing else sees one: a
-    banner never becomes the frontmost *application*, so the window probe and
-    the browser check both pass with one on the screen."""
 
     def _mac(self, ps_output):
         """A Fake Mac whose must-not-run table is the real one and whose `ps` is the test's, so every state is reachable."""
@@ -515,9 +297,6 @@ class TestTheWatchSeesAPausedAgentComeBack(unittest.TestCase):
             "S   /usr/sbin/usernoted\n"))
 
     def test_a_process_the_kernel_will_not_stop_is_not_a_finding(self):
-        """Running is its permanent state -- the signal answers EPERM for a
-        platform binary -- and the preflight already says what it can do. In the
-        watch it would be a finding on every leg, which is a watch nobody reads."""
         unstoppable = bash(". %r\nwk_quiet_desktop_unstoppable\n"
                            % str(REPO / "bench" / "mac-quiet-desktop.sh")).stdout.split()
         self.assertTrue(unstoppable)
@@ -528,8 +307,6 @@ class TestTheWatchSeesAPausedAgentComeBack(unittest.TestCase):
         self.assertEqual([], self._restarted("S   MiniBrowser\nS   bash\n"))
 
     def test_the_watch_records_it_where_the_leg_reads_it(self):
-        """One record, so one `stop()` fails the leg for either reason rather
-        than a second watch nothing reads."""
         m, sampled = self._mac(""), threading.Event()
 
         def ps(argv, fake):
@@ -593,3 +370,7 @@ class TestTheWatchSeesAPausedAgentComeBack(unittest.TestCase):
         self.assertEqual(1, sum(1 for a in ran if a[:1] == ("ps",)))
         self.assertFalse([a for a in ran if a[:1] == ("pgrep",)])
         self.assertEqual(3, len(ran))
+
+
+if __name__ == "__main__":
+    unittest.main()

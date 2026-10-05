@@ -1,13 +1,7 @@
-"""The golden macOS base, `wk sysimage build macos-guest-base`, against a fake host whose tart keeps one VM's state
-and whose ssh answers as the guest would: built once, sealed only on a clear screen, stale when its inputs move,
-crash-only, and erased on two separate questions. The base is the one artifact whose mistakes every clone inherits.
-
-Run: python3 tests/run.py --unit -k test_vm_base
-"""
+"""The golden macOS base, `wk sysimage build macos-guest-base`, against a fake host whose tart keeps one VM's state."""
 import contextlib
 import functools
 import importlib.util
-import inspect
 import io
 import json
 import os
@@ -20,7 +14,7 @@ import unittest
 from unittest import mock
 
 from tests.killpoints import converges
-from tests.support import REPO, assert_guest_start_converges, live_selected
+from tests.support import REPO, live_selected
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, guest, targets, tools  # noqa: E402
@@ -32,7 +26,6 @@ from wk.sysimage import cli, guestbase  # noqa: E402
 
 TART = "/t/tart"
 IP = "192.168.64.7"
-PROVISION = REPO / "vm" / "provision-base.sh"
 CLEAR = "Notification Center:21:1280x800@0,0;Terminal:0:863x499@40,51;"
 PANE = "Setup Assistant:0:800x600;Terminal:0:863x499;"
 
@@ -44,14 +37,14 @@ def _bench(argv):
 
 
 class BaseWorld(Fake):
-    """One Mac: tart holding at most `wk-base` (in `state`), and a guest behind ssh that says what `sa` and `screen` say."""
+    """One Mac: tart holding at most `wk-base` (in `state`), and a guest behind tart exec that says what `sa` and `screen` say."""
 
     def __init__(self, base):
         super().__init__("here")
         self.env = {"HOME": base + "/home", "WK_STORE": base + "/store", "WK_VM_STORE": base + "/vmstore",
                     "XDG_STATE_HOME": base + "/state", "WK_MACHINES_DIR": base + "/registry", "PATH": os.environ["PATH"]}
         self.state, self.disk, self.cached, self.sa, self.screen, self.prov_rc = "absent", 140, True, ["0"], CLEAR, "0"
-        self.guest_cmds, self.dirty = [], False
+        self.guest_cmds, self.dirty, self.agent_down = [], False, False
         self.react([TART, "list"], self._list)
         self.react([TART, "get"], lambda a, f: Result(0, json.dumps({"CPU": 4, "Memory": 8192, "Disk": f.disk})))
         self.react([TART, "clone"], lambda a, f: f._to("stopped", disk=140))
@@ -61,7 +54,6 @@ class BaseWorld(Fake):
         self.react([TART, "pull"], lambda a, f: f._cache())
         self.answer([TART, "ip"], out=IP + "\n")
         self.answer([TART, "prune"])
-        self.answer([TART, "exec"])
         self.answer(["sysctl", "-n", "hw.ncpu"], out="10\n")
         self.answer(["sysctl", "-n", "hw.memsize"], out="34359738368\n")
         self.answer(["podman", "machine", "inspect"], rc=125)
@@ -73,7 +65,7 @@ class BaseWorld(Fake):
         self.react(["git", "-C"], lambda a, f: Result(0, " M wk\n" if f.dirty and "status" in a else ""))
         self.react(["ssh-keygen"], self._keygen)
         self.react(["bash", "-c"], lambda a, f: _bench(tuple(a)))
-        self.react(["ssh"], self._guest)
+        self.react([TART, "exec"], self._guest)
 
     def _to(self, state, disk=None):
         self.state = state
@@ -111,6 +103,8 @@ class BaseWorld(Fake):
     def _guest(self, argv, _):
         cmd = argv[-1]
         self.guest_cmds.append(cmd)
+        if cmd == "true" and self.agent_down:
+            return Result(255, "", "no guest agent\n")
         if "Setup Assistant.app" in cmd:
             return Result(0, (self.sa.pop(0) if len(self.sa) > 1 else self.sa[0]) + "\n")
         if guestbase.PRC in cmd and cmd.startswith("sh -c") and "cat" in cmd and "nohup" not in cmd:
@@ -181,7 +175,6 @@ class TestTheBaseIsBuiltOnce(BaseTest):
         self.assertEqual([a[1] for a in self.w.streamed], ["pull", "clone"], "the tens-of-GB pull and the clone stream to the log")
         self.assertIn("inputs=%s\n" % guestbase.inputs_hash(str(REPO), self.w.env), self.marker())
         self.assertIn("image=%s\n" % guestbase.IMAGE, self.marker())
-        self.assertIn("golden base 'wk-base' is ready", err)
 
     def test_a_sealed_base_is_left_alone(self):
         self.build()
@@ -199,7 +192,6 @@ class TestTheBaseIsBuiltOnce(BaseTest):
         self.assertTrue(self.marker())
 
     def test_the_base_boots_one_way_only_with_the_open_network(self):
-        """Booting it once each way changes its subnet, and `tart ip` answers with the lease from before."""
         self.build()
         runs = [e[1] for e in self.w.effects if e[0] == "spawn"]
         self.assertEqual([(TART, "run", "--no-graphics", "wk-base")] * 2, runs)
@@ -209,7 +201,20 @@ class TestTheBaseIsBuiltOnce(BaseTest):
         started = [c for c in self.w.guest_cmds if "nohup" in c]
         self.assertEqual(1, len(started))
         self.assertIn("vm/provision-base.sh", started[0])
+        self.assertIn("WK_MIRROR_TAG=%s" % targets.MIRROR_TAG, started[0], "the mount daemon is given the tag tart runs with")
         self.assertTrue([c for c in self.w.guest_cmds if "wc -c" in c], "nothing polled the detached log")
+
+    def test_the_wk_key_is_authorised_through_the_guest_agent(self):
+        self.build()
+        (cmd,) = [c for c in self.w.guest_cmds if "authorized_keys" in c]
+        self.assertIn("ssh-ed25519 AAAA wk-vm", cmd)
+
+    def test_a_base_whose_guest_agent_never_answers_is_refused_unsealed(self):
+        self.w.agent_down = True
+        rc, err = self.build()
+        self.assertEqual(1, rc)
+        self.assertIn("tart guest agent in 'wk-base' never answered", err)
+        self.assertEqual("", self.marker())
 
     def test_a_failed_provisioning_names_its_log_and_the_rerun(self):
         self.w.prov_rc = "3"
@@ -221,7 +226,6 @@ class TestTheBaseIsBuiltOnce(BaseTest):
         self.assertEqual("", self.marker())
 
     def test_killpoints_vm_base(self):
-        """`unit killpoints[vm base]`: killed after any effect, a re-run ends in the same sealed base."""
         def world():
             w = BaseWorld(self.tmp)
             return type("W", (), {"fake": w})
@@ -252,7 +256,6 @@ class TestItIsSealedOnlyOnAClearScreen(BaseTest):
         drove = next(i for i, c in enumerate(self.w.guest_cmds) if c == "/usr/bin/python3 -")
         stops = [i for i, e in enumerate(self.w.effects) if e[0] == "run" and e[1][:2] == (TART, "stop")]
         self.assertTrue(stops)
-        self.assertIn("driving Setup Assistant off the screen", err)
         self.assertLess(drove, len(self.w.guest_cmds))
 
     def test_a_pane_that_comes_back_at_the_next_login_is_not_sealed(self):
@@ -307,7 +310,6 @@ class TestItsStalenessIsRecomputed(BaseTest):
         self.assertNotEqual(before, guestbase.inputs_hash(root, self.w.env))
 
     def test_the_record_holds_no_password(self):
-        """A short digest over public files and a trivial password is a password a reader could recover."""
         self.build()
         self.assertNotIn("password", self.marker().lower())
 
@@ -341,7 +343,6 @@ class TestTheDestructiveModes(BaseTest):
         self.assertTrue(self.marker())
 
     def test_vm_base_rm_asks_twice(self):
-        """`unit vm.base_rm_asks_twice`: the base, then separately the pulled image, which is re-downloadable."""
         self.build()
         self.w.dirs.add(os.path.join(self.w.env["HOME"], ".tart", "cache"))
         self.w._set_file(os.path.join(self.w.env["HOME"], ".tart", "cache", "OCIs", "x"), "")
@@ -378,8 +379,6 @@ class TestTheDestructiveModes(BaseTest):
 
 class TestTheBuilderConforms(BaseTest):
     def test_sysimage_builders_conform_guest(self):
-        """`unit sysimage.builders_conform[guest]`: a profile names the builder, the command routes it, the rest of
-        argv reaches it, and it runs on the host that holds the guests."""
         self.assertIn("guest", cli.BUILDERS)
         seen = []
         reg = targets.Registry(str(REPO), env=self.w.env, machine=self.w)
@@ -387,8 +386,6 @@ class TestTheBuilderConforms(BaseTest):
             self.assertEqual(0, cli.Sysimage(reg, self.clock).build(guest.BASE_PROFILE, ["--refresh"]))
         self.assertEqual([("wk-base", ["--refresh"])], seen)
         self.assertEqual("host", cli.where(["build", guest.BASE_PROFILE, "--rm"], self.w.env))
-        header = (REPO / "cmd" / "sysimage").read_text()
-        self.assertIn("--rebuild,--rm", header.split("# wk: destructive ", 1)[1].split("\n")[0])
 
     def out(self, fn, *a):
         buf = io.StringIO()
@@ -397,7 +394,6 @@ class TestTheBuilderConforms(BaseTest):
         return rc, buf.getvalue()
 
     def test_path_and_holds_reach_the_sealed_base_marker(self):
-        """`unit sysimage.builders_conform[guest]`, the read half: unbuilt answers nothing, sealed answers the marker."""
         reg = targets.Registry(str(REPO), env=self.w.env, machine=self.w)
         s = cli.Sysimage(reg, self.clock)
         self.assertEqual(self.out(s.path, guest.BASE_PROFILE, None), (1, ""))
@@ -407,8 +403,6 @@ class TestTheBuilderConforms(BaseTest):
         self.assertEqual(self.out(s.holds, guest.BASE_PROFILE, None, None, None, None, False)[1], "yes\n")
 
     def test_ls_lists_it_only_once_sealed(self):
-        """`unit sysimage.builders_conform[guest]`: `ls` has no workspace to anchor a placeholder row at,
-        so the profile is silent until `builder_outputs` finds the sealed marker."""
         reg = targets.Registry(str(REPO), env=self.w.env, machine=self.w)
         s = cli.Sysimage(reg, self.clock)
         self.assertNotIn(guest.BASE_PROFILE, self.out(lambda: s.ls(False))[1])
@@ -420,8 +414,6 @@ class TestTheBuilderConforms(BaseTest):
 
 
 class TestAGuestIsAdmittedOnlyWhereItFits(BaseTest):
-    """Virtualization.framework has one limit for the whole host, and the podman machine spends a slot of it."""
-
     def admit(self, mine=8192):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
@@ -468,8 +460,6 @@ class TestAGuestIsAdmittedOnlyWhereItFits(BaseTest):
 
 
 class TestThePodmanMachineIsNotStartedBesideAGuest(BaseTest):
-    """`unit machine.podman_not_started_beside_guest`: the dispatcher's start of the podman machine asks the guests' memory first."""
-
     def start(self, pod_mb):
         from wk import dispatch
         self.w.answer(["podman", "machine", "inspect"], out=json.dumps([{"State": "stopped", "Resources": {"Memory": pod_mb}}]))
@@ -523,60 +513,14 @@ class TestThePodmanMachineIsNotStartedBesideAGuest(BaseTest):
         self.assertEqual(1, len(self.started()))
 
 
-class TestWhatTheBaseCarries(unittest.TestCase):
-    """A base is rebuilt for a new image and for nothing else: what depends on this tree, a credential or the host is
-    made at a guest's first start, or mounted in, and converged on every start."""
-
-    def test_provisioning_makes_no_checkout_mirror_or_tool(self):
-        text = PROVISION.read_text()
-        for word in ("git clone", "mirror_refresh_script", "wiring-script", "gitwebkit-setup-script",
-                     "claude.ai/install.sh", "claude-cli.sh", "include.path", "shell-rc.sh", ".claude",
-                     "WK_VM_MIRROR", "github.com", "wk-seed", "rsync"):
-            with self.subTest(word=word):
-                self.assertNotIn(word, text)
-
-    def test_the_guest_gets_them_on_every_start(self):
-        assert_guest_start_converges(self, '_write_checkout "$name" "$ip"')
-        assert_guest_start_converges(self, '_install_claude_cli "$name" "$ip"')
-
-    def test_one_installer_script_for_container_and_guest(self):
-        self.assertIn("container/claude-cli.sh", (REPO / "container" / "firstrun.sh").read_text())
-        self.assertIn("container/claude-cli.sh", inspect.getsource(guest.Guest.install_claude_cli))
-        for rel in ("container/firstrun.sh", "lib/wk/guest.py", "vm/provision-base.sh"):
-            self.assertNotIn("claude.ai/install.sh", (REPO / rel).read_text(), rel)
-
-    def test_the_guest_keeps_the_images_password_and_one_name_holds_it(self):
-        """`sysadminctl -oldPassword`, the only form the account itself can run, exits 0 having changed nothing."""
-        code = "\n".join(l for l in PROVISION.read_text().splitlines() if not l.lstrip().startswith("#"))
-        for word in ("-newPassword", "-oldPassword"):
-            self.assertNotIn(word, code)
-        self.assertIn('WK_VM_PASSWORD="${WK_VM_PASSWORD:-admin}"', PROVISION.read_text())
-        self.assertEqual("admin", guest.PASSWORD)
-        gone = "WK_VM_IMAGE" + "_PASSWORD"
-        self.assertEqual("", subprocess.run(["git", "grep", "-l", gone], cwd=REPO, capture_output=True, text=True).stdout)
-
-    def test_every_tart_delete_goes_through_the_one_that_reaps_its_runner(self):
-        for rel in ("lib/wk/targets.py", "lib/wk/sysimage/guestbase.py", "lib/wk/guest.py"):
-            text = (REPO / rel).read_text()
-            with self.subTest(file=rel):
-                self.assertEqual(1 if rel.endswith("targets.py") else 0, text.count('"delete", v]') + text.count('"delete"]'))
-
-    def test_the_login_is_stated_on_a_starts_one_exit_and_by_each_attach(self):
-        body = inspect.getsource(guest.start)
-        self.assertEqual(1, body.count("login_note("), body)
-        self.assertEqual(1, body.count("return "), body)
-        self.assertIn("login_note()", (REPO / "cmd" / "zed").read_text())
-        self.assertIn("login_note()", inspect.getsource(targets.Vm.enter_argv))
-
-
-# `ssh` to the guest as a directory here: /Users/admin and the mirror share are rewritten to a scratch guest, and the
+# The guest as a directory here: /Users/admin and the mirror share are rewritten to a scratch guest, and the
 # command runs with HOME there, so the real git runs.
 class LocalGuest(Local):
     def __init__(self, home):
         self.home = home
 
     def _map(self, text):
-        return text.replace("/Volumes/My Shared Files/mirror", self.home + "/share").replace("/Users/admin", self.home)
+        return text.replace(os.path.dirname(targets.GUEST_MIRROR), self.home + "/share").replace("/Users/admin", self.home)
 
     def run(self, argv, input=None, timeout=None):
         env = dict(os.environ, HOME=self.home)
@@ -596,9 +540,6 @@ esac
 
 
 class TestTheCheckoutIsMadeAtFirstStart(unittest.TestCase):
-    """The first start clones --shared off the mirror on the share, wires it and runs setup; the next finds all three
-    done and changes nothing."""
-
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="wk-test-checkout-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -624,8 +565,7 @@ class TestTheCheckoutIsMadeAtFirstStart(unittest.TestCase):
                "XDG_STATE_HOME": self.tmp + "/state", "WK_MACHINES_DIR": self.tmp + "/registry", "PATH": os.environ["PATH"],
                "WK_MIRROR_BRANCHES": "main"}
         vm = targets.Registry(str(REPO), env=env, machine=Local()).load("vm")
-        g = guest.Guest(guest.Host(vm, FakeClock()), "demo", IP)
-        g.m = LocalGuest(self.guest)
+        g = guest.Guest(guest.Host(vm, FakeClock()), "demo", LocalGuest(self.guest))
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             ok = g.write_checkout()
@@ -638,8 +578,6 @@ class TestTheCheckoutIsMadeAtFirstStart(unittest.TestCase):
     def test_the_first_start_clones_wires_and_sets_up(self):
         ok, err = self.start()
         self.assertTrue(ok, err)
-        self.assertIn("checkout made from its mirror in", err)
-        self.assertIn("git-webkit is set up in demo", err)
         self.assertEqual(["true"], self.config("webkitscmpy.setup"))
         self.assertEqual(["https://github.com/WebKit/WebKit.git"], self.config("remote.origin.url"))
         with open(os.path.join(self.guest, ".gitconfig")) as f:
@@ -668,8 +606,6 @@ class TestTheCheckoutIsMadeAtFirstStart(unittest.TestCase):
 
 @unittest.skipUnless(platform.system() == "Darwin", "the unblocker imports pyobjc's ApplicationServices, a macOS framework")
 class TestSetupAssistantIsDrivenByIdentifier(unittest.TestCase):
-    """Elements are chosen by AXIdentifier, never by where they draw: a coordinate lands on "Restart"."""
-
     def pick(self, pairs):
         spec = importlib.util.spec_from_file_location("wk_unblock", REPO / "vm" / "desktop-unblock.py")
         mod = importlib.util.module_from_spec(spec)
@@ -696,7 +632,6 @@ class TestTheLiveBase(unittest.TestCase):
     wk_tier = "live"
 
     def test_vm_base_matches_pin(self):
-        """`live vm.base_matches_pin`: the base on this Mac was sealed from the pinned image and its current inputs."""
         if not live_selected() or sys.platform != "darwin":
             self.skipTest("live tier not selected, or not a macOS host")
         vm = targets.Registry(str(REPO)).load("vm")

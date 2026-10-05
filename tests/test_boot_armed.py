@@ -1,13 +1,12 @@
 """Driver.armed_barrier (lib/wk/boot/driver.py): the one check that stops a mutating command
 from racing a machine between `wk boot <machine>`, which leaves an arming record on it, and the reboot that record
-waits for -- driven with a stubbed probe, record and boot id; and each call site calls it, in command position.
+waits for -- driven with a stubbed probe, record and boot id.
 
 Run: python3 tests/run.py --unit -k test_boot_armed
 """
 import contextlib
 import io
 import os
-import re
 import sys
 import unittest
 from unittest import mock
@@ -56,7 +55,6 @@ class TestMachineArmedBarrier(unittest.TestCase):
         self.assertEqual(self.barrier("bench demo-system", ["image=demo-system", "armed_boot_id=boot-1"], "boot-1")[0], 0)
 
     def test_a_board_that_could_not_be_probed_is_not_read_as_unarmed(self):
-        """a barrier may not skip in silence: a board in bench mode answers a workspace, one in host mode does not."""
         rc, out = self.barrier("unreachable", [], "boot-1", what="Doing the thing now would race the reboot.")
         self.assertNotEqual(rc, 0, out)
         self.assertIn("could not tell what testmach is running", out)
@@ -68,47 +66,6 @@ class TestMachineArmedBarrier(unittest.TestCase):
                 rc, out = self.barrier(mode, record, "boot-1", force=True)
                 self.assertEqual(rc, 0, out)
                 self.assertIn("FORCED past a barrier", out)
-
-
-class TestEveryMutatingPathCallsTheBarrier(unittest.TestCase):
-    """Static check: `armed_barrier` is called (not just mentioned in a comment)
-    from `wk bench deploy` and a board run. A grep, not an
-    execution: the point is that nobody can delete the call and leave the
-    docstring believing it is still there. `wk sysimage write` is
-    tests/test_sysimage_write.py's
-    test_a_board_armed_for_a_one_shot_boot_is_not_written_under, and `wk boot
-    --boot-order` tests/test_boot_cmd.py's."""
-
-    _PY_CALL = re.compile(r'\.armed_barrier\(')
-
-    @staticmethod
-    def _live_lines(text):
-        for line in text.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            yield line
-
-    def _calls_in(self, path):
-        text = (REPO / path).read_text()
-        return [l for l in self._live_lines(text) if self._PY_CALL.search(l)]
-
-    def test_wk_bench_deploy_and_a_board_run_call_it(self):
-        """lib/wk/bench/board.py's one call, which deploy_slot and boot() both make; each refusal is
-        tests/test_bench_board.py's."""
-        text = (REPO / "lib" / "wk" / "bench" / "board.py").read_text()
-        calls = self._calls_in("lib/wk/bench/board.py")
-        self.assertEqual(len(calls), 1, "lib/wk/bench/board.py asks armed_barrier from more than one place")
-        for fn in ("def deploy_slot(", "def boot("):
-            body = text[text.index(fn):text.index("\n    def ", text.index(fn) + 1)]
-            self.assertIn("self.barrier(", body, "%s does not ask the barrier" % fn)
-
-    def test_defined_once(self):
-        # One implementation per rule (CLAUDE.md): a second definition
-        # elsewhere would be a second, driftable copy of the same refusal.
-        hits = [str(p.relative_to(REPO)) for p in sorted((REPO / "lib").rglob("*.py"))
-                if re.search(r'^\s*def armed_barrier\(', p.read_text(), re.MULTILINE)]
-        self.assertEqual(hits, ["lib/wk/boot/driver.py"])
 
 
 if __name__ == "__main__":

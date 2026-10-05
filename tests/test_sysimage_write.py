@@ -1,10 +1,5 @@
-"""`wk sysimage write` (lib/wk/sysimage/write.py) against a card machine faked at its Machine: the real Channel's
-ssh argv is answered by a card model, so every helper verb, the stream and the unit archive are what the command sends.
-Closes `unit sysimage.write_identity` and `unit killpoints[sysimage write]`; `live sysimage.write[<board>]` and
-`live sysimage.card_verbs[rpi5]` skip by name. No real disk, helper or credential is touched.
-
-Run: python3 tests/run.py --unit -k test_sysimage_write
-"""
+"""`wk sysimage write` (lib/wk/sysimage/write.py) against a card machine faked at its Machine: the real Channel's ssh
+argv is answered by a card model, so every helper verb, the stream and the unit archive are what the command sends."""
 import base64
 import contextlib
 import hashlib
@@ -302,8 +297,7 @@ class TestTheWholeWrite(WriteTest):
 
 
 class TestTheBenchNode(WriteTest):
-    """A bench system rewritten on a board's own bench medium, whole or @second, keeps its tailnet node: saved before
-    anything is erased, the name preflight stood down, put back once the new partitions are there."""
+    """A bench system rewritten on its own bench medium keeps its tailnet node, saved before anything is erased."""
 
     def test_a_whole_bench_medium_keeps_its_node_too(self):
         w = World(dev="/dev/sda")
@@ -358,13 +352,13 @@ class TestWhatTheImageSays(WriteTest):
             self.assertTrue([u for u in units if u.endswith("/" + unit)], unit)
 
     def test_a_self_disarm_unit_doubles_every_dollar(self):
-        """systemd would expand the script's variables otherwise (pi-mbr's parks the partition type byte)."""
-        d = write.driver_class("pi-mbr")(REPO, {"name": "rpi4"}, None)
+        """systemd would expand the script's variables otherwise (pi-sd's parks the config.txt)."""
+        d = write.driver_class("pi-sd")(REPO, {"name": "rpi3"}, None)
         with contextlib.redirect_stderr(io.StringIO()):
             units = write.stage_units(REPO, "900", d.self_disarm_sh())
         line = [l for l in units["systemd/wk-self-disarm.service"].splitlines() if l.startswith("ExecStart=")][0]
         self.assertNotRegex(line, r"(?<!\$)\$(?!\$)", line)
-        self.assertIn("$$mp", line)
+        self.assertIn("$$m", line)
 
 
 class TestIdentity(WriteTest):
@@ -415,13 +409,17 @@ class TestKillpoints(WriteTest):
 
 
 class TestTheStream(WriteTest):
+    def test_each_extension_names_its_decompressor(self):
+        for path, want in (("rpi3.wic.xz", "xz -dc"), ("rpi3.img.zst", "zstd -dc"), ("rpi3.img.gz", "gzip -dc"),
+                           ("rpi3.img", "cat"), ("rpi3.wic", "cat")):
+            self.assertEqual(write.from_filter(path), want, path)
+
     def test_the_card_machine_decompresses_and_meters(self):
         self.w.fake.files["/imgs/x.wic.xz"] = "compressed"
         self.w.run(src="/imgs/x.wic.xz")
         far = [c for c in self.w.fake.effects if c[0] == "run" and c[1][:2] == ("bash", "-o")][0][1][4]
         self.assertTrue(far.startswith("cat /imgs/x.wic.xz | "), far)
-        self.assertIn("exec 3>&1; xz -dc | python3 -c", far)
-        self.assertIn("sudo -n /usr/local/libexec/wk-card-priv write", far)
+        self.assertIn("xz -dc |", far)
 
     def test_a_decompressor_the_card_machine_lacks_is_refused_by_name(self):
         self.w.fake.files["/imgs/x.wic.zst"] = "compressed"

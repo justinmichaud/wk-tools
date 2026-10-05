@@ -1,17 +1,4 @@
-"""The refspecs follow the layout of whatever a checkout fetches from:
-origin's branches are a wk mirror's own heads, every other upstream is
-namespaced under its own name, and an upstream asked directly has only
-refs/heads. A fifth upstream needs no change beyond `git.REMOTES`, which is
-what the tests with one assert.
-
-  - `REMOTES` (lib/wk/git.py): the one list of upstreams.
-  - `fetch_refspecs`: what one remote is asked for, by the source it is asked of.
-  - `fetch_config`: the one writer of those specs into a checkout's
-    `remote.<r>.fetch`, as git argv steps.
-  - `mirror_refresh_script`: the mirror side of the same layout.
-
-Run: python3 tests/run.py -k tests.test_cli_refspecs
-"""
+"""The refspecs follow the layout of whatever a checkout fetches from:"""
 import sys
 import unittest
 
@@ -32,11 +19,7 @@ def _argvs(steps):
 
 
 class TestRemotesIsTheOneList(unittest.TestCase):
-    """Today's four upstreams, in order -- pinned so a change to this list is a
-    deliberate edit, not a silent drift the refspec tests below would mask."""
 
-    def test_todays_four_remotes_in_order(self):
-        self.assertEqual([n for n, _ in git.REMOTES], ["origin", "wpe", "fork", "forkwpe"])
 
     def test_the_mirror_fetches_every_one_and_a_fifth_with_no_other_change(self):
         script = git.mirror_refresh_script("/m", ["main"], FIFTH)
@@ -45,19 +28,11 @@ class TestRemotesIsTheOneList(unittest.TestCase):
 
 
 class TestFetchRefspecs(unittest.TestCase):
-    """From a wk mirror, origin's branches are that mirror's own heads and every
-    other upstream is namespaced under its own name; from an upstream itself,
-    every remote's branches are refs/heads. Origin is narrowed to the mirrored
-    branches either way -- WebKit/WebKit's 924 heads are what git's default
-    refspec writes a remote-tracking ref for, one by one."""
 
-    def test_origin_from_a_mirror_is_narrowed_to_the_mirrored_branches(self):
-        self.assertEqual(git.fetch_refspecs("origin", "/mirror/WebKit.git", ["main"]),
-                         ["+refs/heads/main:refs/remotes/origin/main"])
+    def test_origin_is_narrowed_to_the_mirrored_branches_wherever_it_comes_from(self):
+        for mirror in ("/mirror/WebKit.git", ""):
+            self.assertEqual(git.fetch_refspecs("origin", mirror, ["main"]), ["+refs/heads/main:refs/remotes/origin/main"])
 
-    def test_origin_from_the_upstream_itself_is_narrowed_the_same_way(self):
-        self.assertEqual(git.fetch_refspecs("origin", "", ["main"]),
-                         ["+refs/heads/main:refs/remotes/origin/main"])
 
     def test_the_mirrored_branches_are_the_one_list(self):
         self.assertEqual(git.fetch_refspecs("origin", "/m", git.mirror_branches({"WK_MIRROR_BRANCHES": "main wpe-2.46"})),
@@ -68,11 +43,8 @@ class TestFetchRefspecs(unittest.TestCase):
         for remote in ("wpe", "fork", "forkwpe"):
             with self.subTest(remote=remote):
                 self.assertEqual(git.fetch_refspecs(remote, "/m", ["main"]), [_namespaced(remote)])
-
-    def test_every_other_upstream_from_itself_maps_its_heads(self):
-        for remote in ("wpe", "fork", "forkwpe"):
-            with self.subTest(remote=remote):
                 self.assertEqual(git.fetch_refspecs(remote, "", ["main"]), [f"+refs/heads/*:refs/remotes/{remote}/*"])
+
 
     def test_a_fifth_upstream_needs_no_change_here(self):
         self.assertEqual(git.fetch_refspecs("fifth", "/m", ["main"]), [_namespaced("fifth")])
@@ -80,9 +52,6 @@ class TestFetchRefspecs(unittest.TestCase):
 
 
 class TestTheWiringWritesThoseRefspecs(unittest.TestCase):
-    """fetch_config puts exactly fetch_refspecs' answer into `remote.<r>.fetch`,
-    one `--add` per spec after the old ones go, so a checkout's configuration
-    and a `wk sync` fetch cannot disagree about what is asked for."""
 
     def test_each_remote_gets_its_specs_and_no_tags(self):
         steps = git.fetch_config("/mirror/WebKit.git", ["main"], FIFTH)

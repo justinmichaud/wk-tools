@@ -281,15 +281,16 @@ class Push:
         return 1
 
     def guest_agent_row(self):
-        """A key in the guests' agent is a push from every guest holding a forward, whether or not one is up now."""
+        """A key in this host's agent is a push from here and from every guest holding a forward, whether or not one is up now."""
         if self.in_vm:
             self.say("guests", "not read from the podman machine -- 'wk push status' on the host")
             return
-        n = guest.vm_push_agent_keys(ROOT, self.sec.machine) if self.sec.macos else None
-        if n is None:
+        if not self.sec.macos:
             return
+        n = guest.vm_push_agent_keys(ROOT, self.sec.machine)
         self.guest_live = self.guest_live or n > 0
-        self.say("guests", "%d key(s) in the agent this host runs for them" % n if n else "the agent this host runs for them holds nothing")
+        self.say("guests", "%d key(s) in the agent this host runs for them and its own pushes" % n if n
+                 else "the agent this host runs for them and its own pushes holds nothing")
 
     def guest_rows(self):
         for g, state, forks in guest.vm_push_keys_state(ROOT, self.sec.machine) if self.sec.macos else []:

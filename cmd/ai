@@ -9,7 +9,7 @@
 #   wk ai claude bb4 --continue  and so on
 #   wk ai pi bb4 --help          pi's own help, not this one
 #   wk ai claude                 in a workspace: this one, no name
-#   wk ai claude --dry-run bb4   the install, push switch and session it would run
+#   wk ai claude --dry-run bb4   the push switch and session it would run
 #
 # Permissions are relaxed because the workspace is the blast radius, not the
 # machine, so this checks the boundary holds before handing over control. For
@@ -25,27 +25,15 @@
 #
 # A Claude session on a terminal starts with Remote Control on, named after
 # the workspace (`claude --remote-control <ws>`), so claude.ai/code and the
-# mobile app can join it. Remote Control needs the claude.ai account login
-# ('wk key set claude-login', which every container and guest reads); where
-# $CLAUDE_CODE_OAUTH_TOKEN authenticates the session instead -- the `claude
-# setup-token` credential a build box is given -- it starts without Remote
-# Control and says so. Onboarding, the trust dialog and the remote-control
-# dialog are recorded in the workspace first (claude/workspace-config.py),
-# with the account record (oauthAccount.organizationUuid) `claude auth login`
-# wrote beside the shared login: each dialog waits for a terminal the agent
-# may not have, and Remote Control refuses a login whose organization it
-# cannot read (measured against Claude Code 2.1.269).
+# mobile app can join it. It needs the claude.ai login, which `/login` in any
+# session makes and every container and guest here shares; a build box is given
+# the `claude setup-token` credential instead, which Remote Control refuses, so
+# a session there starts without it and says so.
 #
-# The agents this knows:
-#
-#   claude   Claude Code. Installed by container/firstrun.sh, and authenticated
-#            by whichever one credential the store delivers to this kind of
-#            target (AGENT_SECRETS, lib/wk/secrets.py).
-#   pi       the pi coding agent. Installed per workspace from npm on first
-#            use, and pointed at an OpenAI-compatible endpoint by its own
-#            config file; `wk key set litellm` stores the key for it.
+# The agents, Claude Code and pi, are installed when the workspace is made
+# (`wk new`; a macOS guest at its first start). A workspace made without one is
+# refused, naming the remedy: make it again.
 
-import json
 import os
 import shlex
 import signal
@@ -56,77 +44,16 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import act, guest, wall  # noqa: E402
-from wk.act import Refused, barrier, debug, die, info, log, warn  # noqa: E402
+from wk import agents, guest, secrets, wall  # noqa: E402
+from wk.act import Refused, barrier, die, info, log, warn  # noqa: E402
 from wk.doctor import Report  # noqa: E402
-from wk.kv import kv  # noqa: E402
-from wk.machine import HAVE, Local, Result  # noqa: E402
-from wk.secrets import Secrets, first_line  # noqa: E402
-from wk.targets import Registry, show  # noqa: E402
+from wk.machine import HAVE, Local  # noqa: E402
+from wk.targets import Registry  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
 
 NOT_INTACT = ("the sandbox around '%s' is not intact (see above), and relaxed\n"
               "    permissions are only defensible while it is.")
-# A shared box's `claude` on PATH can be an npm install under too old a node.
-FIND_CLAUDE = '''for c in "$HOME/.local/bin/claude" "$(command -v claude 2>/dev/null)"; do
-    [ -n "$c" ] && [ -x "$c" ] || continue
-    "$c" --version >/dev/null 2>&1 && { echo "$c"; exit 0; }
-done
-exit 1'''
-CLAUDE_DIAG = '''c=$(command -v claude 2>/dev/null) || true
-if [ -n "$c" ]; then
-    echo "  on PATH:  $c"
-    echo "  node:     $(node -v 2>&1 | head -1)  (Claude Code needs 18 or newer)"
-    echo "  it fails to start; see for yourself:  ssh %s claude --version"
-else
-    echo "  nothing called claude is on PATH in a login shell there"
-fi'''
-TOKEN_SET = 'printf %s "${CLAUDE_CODE_OAUTH_TOKEN:+set}"'
 GH_LOGIN = 'test -e "$HOME/.config/gh/hosts.yml" || { command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; }'
-
-# https://www.npmjs.com/package/@earendil-works/pi-coding-agent has no LiteLLM provider
-# (https://github.com/earendil-works/pi#4561, closed unimplemented); LiteLLM speaks the OpenAI
-# wire format, so it is a custom provider in ~/.pi/agent/models.json.
-PI_PKG = "@earendil-works/pi-coding-agent"
-PI_NODE_MIN = "22.19.0"
-PI_PROBE = '''printf "node=%s\\n" "$(node -v 2>/dev/null || true)"
-printf "npm=%s\\n" "$(command -v npm 2>/dev/null || true)"
-p=""
-for c in "$HOME/.local/bin/pi" "$(command -v pi 2>/dev/null)"; do
-    [ -n "$c" ] && [ -x "$c" ] || continue
-    "$c" --version >/dev/null 2>&1 && { p="$c"; break; }
-done
-printf "pi=%s\\n" "$p"
-[ -f "$HOME/.pi/agent/models.json" ] && printf "models=yes\\n" || printf "models=no\\n"'''
-PI_INSTALL = 'npm install -g --ignore-scripts --prefix "$HOME/.local" '   # the image's global prefix is /usr, which the user cannot write
-
-
-def pi_node_ok(version):
-    have = (version[1:] if version.startswith("v") else version).split(".")
-    want = PI_NODE_MIN.split(".")
-    if have == [""]:
-        return False
-    n = max(len(have), len(want))
-    for h, w in zip(have + ["0"] * (n - len(have)), want + ["0"] * (n - len(want))):
-        h, w = h or "0", w or "0"
-        if not (h + w).isdigit():
-            return False
-        if int(h) != int(w):
-            return int(h) > int(w)
-    return True
-
-
-def pi_models(endpoint, ids):
-    return json.dumps({"providers": {"litellm": {
-        "baseUrl": endpoint,
-        "api": "openai-completions",
-        "apiKey": "$LITELLM_API_KEY",
-        "models": [{"id": i} for i in ids],
-    }}}, indent=2)
-
-
-def indented(text):
-    return "\n".join("    " + line for line in text.replace("\r", "").splitlines())
 
 
 def _the_agents(signum, frame):
@@ -173,13 +100,6 @@ class Ai:
     def exec(self, argv):
         return self.target.exec(self.name, argv)
 
-    def probe(self, argv, planned=None):
-        """With `planned`, a read of what an install made: a dry run made nothing, so it prints the read and answers `planned`."""
-        if planned is None:
-            return self.exec(argv)
-        r = self.target.act_exec(self.name, argv)
-        return Result(0, planned) if act.dry_run() else r
-
     def push_switch(self, verb):
         argv = [os.path.join(self.root, "wk"), "push", verb] + (["--target", self.push_target] if self.push_target else [])
         return self.machine.run(argv) if verb == "status" else self.machine.act_run(argv)
@@ -216,28 +136,12 @@ class Ai:
         else:
             warn("could not turn git push back on -- 'wk push on'")
 
-    def remote_claude(self):
-        tname = self.target.name
-        found = self.find_claude()
-        if found:
-            return found
-        warn("there is no Claude CLI on %s that runs" % tname)
-        diag = self.exec(["bash", "-lc", CLAUDE_DIAG % tname]).out.replace("\r", "").rstrip("\n")
-        if diag:
-            sys.stderr.write(diag + "\n")
-        info("installing the Claude CLI on %s (your own ~/.local, as you)" % tname)
-        r = self.target.act_exec(self.name, ["bash", "-lc", "curl -fsSL https://claude.ai/install.sh | bash"])
-        show(r)
-        if not r.ok:
-            die("the installer failed on %s. By hand:\n    ssh %s 'curl -fsSL https://claude.ai/install.sh | bash'" % (tname, tname))
-        found = self.find_claude(planned=self.agent)
-        if not found:
-            die("installed, and still nothing on %s runs: try it by hand --\n    ssh %s '~/.local/bin/claude --version'" % (tname, tname))
-        return found
-
-    def find_claude(self, planned=None):
-        lines = self.probe(["bash", "-lc", FIND_CLAUDE], planned).out.replace("\r", "").splitlines()
-        return lines[-1] if lines else ""
+    def agent_bin(self):
+        lines = self.exec(agents.find_argv(self.root, self.agent)).out.replace("\r", "").splitlines()
+        if not lines:
+            die("there is no %s in '%s' that runs: the agents are installed when a workspace\n    is made, and this one was made "
+                "without it. Make it again:  wk rm %s && wk new %s" % (self.agent, self.name, self.name, self.name))
+        return lines[-1]
 
     def checks(self):
         """`wk doctor`'s checks, run at once: from the host for a container or a guest, from inside for this workspace."""
@@ -287,81 +191,13 @@ class Ai:
         """A builtin needs `sh -c`: a target's exec hands argv to an exec, not a shell (measured)."""
         return self.exec(list(HAVE) + ["bwrap"]).ok
 
-    def workspace_config(self):
-        """Onboarding, the trust dialog and the remote-control dialog, answered before a session waits on one."""
-        t = self.target
-        r = t.act_exec(self.name, ["bash", "-lc", "python3 %s %s" % (shlex.quote(t.tools(self.name) + "/claude/workspace-config.py"),
-                                                                     shlex.quote(t.src(self.name)))])
-        out = (r.out + r.err).replace("\r", "").rstrip("\n")
-        if not r.ok:
-            die("could not record Claude's start-up answers in '%s', and every\n    session there would stop at a dialog "
-                "instead of starting:\n%s" % (self.name, indented(out)))
-        if out:
-            debug(out)
-
-    def pi_probe(self, planned=None):
-        r = self.probe(["bash", "-lc", PI_PROBE], planned)
-        if not r.ok:
-            die("could not reach the checkout in '%s'" % self.name)
-        return kv(r.out)
-
-    def pi_ensure(self):
-        name, probe = self.name, self.pi_probe()
-        node, npm = probe.get("node", ""), probe.get("npm", "")
-        if not npm or not pi_node_ok(node):
-            die("'%s' has no node runtime pi can use: node %s, npm %s.\n    %s needs node >= %s and npm to install itself.\n"
-                "    A container workspace gets Ubuntu's nodejs and npm from container/firstrun.sh:\n"
-                "    'sudo apt-get install nodejs npm' in there, or 'wk rm %s' and 'wk new'.\n"
-                "    On a build box or a macOS guest, install node >= %s into your own\n    ~/.local there."
-                % (name, node or "absent", npm or "absent", PI_PKG, PI_NODE_MIN, name, PI_NODE_MIN))
-        if not probe.get("pi"):
-            info("installing pi in '%s' (npm, into your own ~/.local)" % name)
-            r = self.target.act_exec(self.name, ["bash", "-lc", PI_INSTALL + shlex.quote(PI_PKG)])
-            show(r)
-            if not r.ok:
-                die("npm could not install %s in '%s'. By hand:\n        wk enter %s\n        %s%s\n    The workspace's egress "
-                    "allows registry.npmjs.org and nothing else npm\n    reaches for (container/proxy/wk-proxy.py is the list)."
-                    % (PI_PKG, name, name, PI_INSTALL, PI_PKG))
-            probe = self.pi_probe(planned="pi=%s\nmodels=%s\n" % (self.agent, probe.get("models", "")))
-            if not probe.get("pi"):
-                die("installed, and nothing in '%s' runs as pi. Try it by hand:\n        wk enter %s\n        ~/.local/bin/pi --version"
-                    % (name, name))
-        if probe.get("models") == "no":
-            self.pi_models()
-        return probe["pi"]
-
-    def pi_models(self):
-        name, sec = self.name, Secrets(self.root, self.env, self.machine)
-        if not sec.cred_stored("litellm"):
-            log("no LiteLLM key on this machine ('wk key set litellm') and no")
-            log("~/.pi/agent/models.json in '%s', so pi will ask you to /login" % name)
-            return
-        import credcheck
-        endpoint = credcheck.LITELLM_ENDPOINT
-        key = first_line(sec.cred_read("litellm"))
-        try:
-            ids = credcheck.litellm_models(key)
-            first = credcheck.litellm_callable(key, ids)
-        except credcheck.Unreachable as e:
-            die("could not ask %s which models the LiteLLM key may call (%s), so there is\n    no model to point pi at. "
-                "'wk key check' asks again." % (endpoint, e))
-        if not first:
-            die("%s answers a completion from none of the %d chat model(s) it lists for the\n    stored LiteLLM key, so pi would "
-                "have nothing to call. 'wk key check' says\n    what the endpoint makes of the key." % (endpoint, len(ids)))
-        ids = [first] + [i for i in ids if i != first]
-        write = "mkdir -p ~/.pi/agent && umask 077 && printf '%%s\\n' %s > ~/.pi/agent/models.json" % shlex.quote(pi_models(endpoint, ids))
-        if not self.target.act_exec(self.name, ["bash", "-c", write]).ok:
-            die("could not write ~/.pi/agent/models.json in '%s'. By hand:\n        wk enter %s\n"
-                "        mkdir -p ~/.pi/agent && cat > ~/.pi/agent/models.json" % (name, name))
-        info("wrote ~/.pi/agent/models.json in '%s' ($LITELLM_API_KEY, %s; %d model(s), %s first)" % (name, endpoint, len(ids), ids[0]))
-
     def remote_control(self):
-        """A person's Claude session, not the babysitter's `-p`; a set token wins over the login and Remote Control refuses it."""
+        """A person's Claude session, not the babysitter's `-p`; the setup token a target kind is given wins over the login."""
         if self.agent != "claude" or not on_a_terminal():
             return []
-        if self.exec(["bash", "-lc", TOKEN_SET]).out.replace("\r", "").strip() == "set":
-            warn("Remote Control is off for this session: $CLAUDE_CODE_OAUTH_TOKEN authenticates it,\n"
-                 "  an inference-only credential Remote Control refuses; the claude.ai login is what it needs")
+        if any(r[0] == "claude" and self.target.kind in r[5].split(",") for r in secrets.agent_secrets()):
+            warn("Remote Control is off for this session: a %s target authenticates with the\n"
+                 "  `claude setup-token` credential, which Remote Control refuses" % self.target.kind)
             return []
         return ["--remote-control", self.name]
 
@@ -377,10 +213,7 @@ class Ai:
                             "may write git history\n    while the sandbox cannot stop it." % (name, name))
                     prefix = wall.commit_wall_prefix(self.root, t.src(name))
                     info("git commits are walled off for this session (bwrap; 'wk push on' lifts it for the next)")
-                if self.agent == "pi":
-                    agent_bin = self.pi_ensure()
                 if self.agent == "claude":
-                    self.workspace_config()
                     info("starting Claude in '%s' (permissions relaxed; the workspace is the boundary)" % name)
                 else:
                     info("starting %s in '%s' (%s; the workspace is the boundary)" % (self.agent, name, agent_bin))
@@ -395,17 +228,16 @@ class Ai:
 
     def run(self, args):
         t, name = self.target, self.name
-        agent_bin = self.agent
         mode = ["--dangerously-skip-permissions"] if self.agent == "claude" else []
         if t.kind == "remote":
             barrier("'%s' is on the shared build machine '%s', which has no sandbox at\n    all: no container, no separate uid, "
                     "no filesystem boundary, and other\n    people's work on the same machine. An agent there is an agent "
                     "on that\n    machine, with your access." % (name, t.name))
             if self.agent == "claude":
-                agent_bin = self.remote_claude()
                 mode = ["--permission-mode", "auto"]
-                info("using %s on %s, in auto mode (this machine is not a sandbox)" % (agent_bin, t.name))
+                info("Claude on %s runs in auto mode (this machine is not a sandbox)" % t.name)
             self.push_target = t.name
+        agent_bin = self.agent_bin()
         self.push_hold_back()
         if t.kind == "remote" and self.exec(["sh", "-c", GH_LOGIN]).ok:
             die("'%s' holds a GitHub credential in the account the agent would run as\n    (~/.config/gh/hosts.yml, or gh is "

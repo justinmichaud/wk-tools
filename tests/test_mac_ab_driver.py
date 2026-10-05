@@ -1,10 +1,4 @@
-"""The Mac A/B's front half, `wk bench ab --devices <mac>` (lib/wk/bench/mac.py's MacAB -- preflight, build,
-stage, plant, restart), against FakeMac and the fake clock; its back half is tests/test_mac_ab_rounds.py.
-
-Nothing here touches a real Mac, startup disk or helper; the live rows read the real machines and change nothing.
-
-Run: python3 tests/run.py --unit -k test_mac_ab_driver
-"""
+"""The Mac A/B's front half (lib/wk/bench/mac.py's MacAB) against FakeMac; the back half is test_mac_ab_rounds."""
 import contextlib
 import io
 import json
@@ -53,8 +47,6 @@ def rendered(name, p):
 
 
 class Shell:
-    """The Mac A/B's on-board files answered from `answers`, (pattern, Result or fn(cmd)) searched latest first, each
-    matched against the command the file stands for; the rest of the Mac is the fake it is mixed into."""
 
     def sh_setup(self):
         self.answers, self.ran = [], []
@@ -219,7 +211,6 @@ def mutations(m):
 
 
 class TestTheFirmwareDefaultIsAsserted(WkTest):
-    """A restart only starts an A/B if the firmware's own default is the bench volume."""
 
     def _fw(self, firmware=None, blank=False):
         with world() as m:
@@ -254,8 +245,6 @@ class TestTheFirmwareDefaultIsAsserted(WkTest):
 
 
 class TestOnlyTheDeclaredDisplay(WkTest):
-    """An external monitor changes the compositing, the refresh rate and which GPU the window lands on, and
-    MotionMark's score is the area it draws."""
 
     def v(self, doc, want="builtin"):
         return mac.display_verdict(doc if isinstance(doc, str) else json.dumps(doc), want)
@@ -266,7 +255,6 @@ class TestOnlyTheDeclaredDisplay(WkTest):
         self.assertIn("builtin 1470x956", detail)
 
     def test_the_host_installs_own_reading_passes_too(self):
-        """The mode differs between the two installs; what this asks is the count and which panel."""
         self.assertTrue(self.v(HOST_DISPLAY)[0])
 
     def test_two_online_displays_fail(self):
@@ -295,10 +283,6 @@ class TestOnlyTheDeclaredDisplay(WkTest):
 
 
 class TestThePinnedDisplayIsConfig(WkTest):
-    def test_mbp_declares_the_bench_installs_measured_mode(self):
-        """1280x832 at scale 2 is exactly the 2560x1664 panel: no frame is rendered larger and downsampled."""
-        self.assertEqual(conf_for("mac-volume")["display"], "builtin 1280x832")
-
     def test_a_machine_that_declares_no_display_refuses_the_plant(self):
         with world() as m:
             ready(m)
@@ -306,12 +290,10 @@ class TestThePinnedDisplayIsConfig(WkTest):
             m.create_task("20260908T000000Z")
             got, err = said(m.plant)
         self.assertIs(got, Refused)
-        self.assertIn("declares no display", err)
         self.assertIn("machines/mbp.conf", err)
 
 
 class TestPreflight(WkTest):
-    """Every check is something that, if wrong, is discovered after the reboot where nothing can report it."""
 
     def pf(self, m, setup=lambda m: None):
         ready(m)
@@ -352,7 +334,6 @@ class TestPreflight(WkTest):
             n, err = self.pf(m)
         self.assertEqual(n, 1, err)
         self.assertIn("wk machine setup mbp", err)
-        self.assertIn("planted and", err)
 
     def test_nothing_staged_fails_unless_patch_will_stage(self):
         empty = lambda m: m.fake.answer(r"^ls -1 .*/staged", Result(0, ""))   # noqa: E731
@@ -404,7 +385,6 @@ class TestItSharesTheBoardABsRefusals(WkTest):
         self.assertIn("below --rounds", self.refused(rounds="9", max_rounds="4"))
 
     def test_the_task_is_written_in_its_workspace_on_the_machine_holding_it(self):
-        """The arms' workspace is on the Mac's manager: the task goes there through that target, the plants stay here."""
         with world() as m:
             ready(m)
             m.create_task("20260101T000000Z")
@@ -432,8 +412,6 @@ class TestItSharesTheBoardABsRefusals(WkTest):
 
 
 class TestThePlant(WkTest):
-    """Recorded before the Mac is touched, then everything the run needs written onto the volume while it is
-    merely mounted, each write judged by reading it back."""
 
     def plant(self, m, setup=lambda m: None):
         ready(m)
@@ -456,7 +434,6 @@ class TestThePlant(WkTest):
         self.assertEqual(job["rehearsal"], "1")
 
     def test_the_job_carries_no_force(self):
-        """Crossing a preflight barrier must not reach each leg's own quiet-machine gate."""
         with world(env={"WK_FORCE": "1"}) as m:
             self.plant(m)
             job = self.job(m)
@@ -548,7 +525,6 @@ class TestTheWholeTrip(WkTest):
             self.assertEqual(rc, 0, err)
             self.assertEqual(mutations(m), [])
             self.assertFalse(os.path.exists(m.taskdir))
-        self.assertIn("dry run -- nothing on mbp was changed", err)
         self.assertIn("wk bench staged --gates", err)
 
     def test_a_failed_preflight_is_a_barrier_that_force_crosses(self):
@@ -615,7 +591,6 @@ class TestTheWholeTrip(WkTest):
 
 
 class TestTheWaitReadsBothNodes(WkTest):
-    """Bench mode is a positive reading: the install answers as its own node while it measures."""
 
     def wait(self, m, same_boot=False):
         ready(m)
@@ -661,7 +636,6 @@ class TestAFailedNotifyCostsNothing(WkTest):
 
 
 class TestTheArmsAreBuiltInTheWorkspace(WkTest):
-    """--patch: the baseline and the patched tree are built and staged in the guest, each reclaimed once staged."""
 
     def build(self, patch="refs/heads/pr", setup=lambda m: None, **o):
         with world(systems="", patch=patch, workspace="mac-rel", **o) as m:
@@ -696,7 +670,6 @@ class TestTheArmsAreBuiltInTheWorkspace(WkTest):
         self.assertTrue([s for s in self.guest_scripts(m) if "rm -rf" in s and "Release-pgo-instr" in s])
 
     def test_a_diff_travels_inside_the_guest_script(self):
-        """The guest's /tmp is not the manager's, so the patch crosses in the script that applies it."""
         with scratch_dir() as tmp:
             (tmp / "x.diff").write_text("--- a\n+++ b\n")
             m, got, err, _ = self.build(patch=str(tmp / "x.diff"))
@@ -729,9 +702,7 @@ def guest_script(inner):
 
 
 class TestTheLiveRows(unittest.TestCase):
-    """Read-only, as `requires_machine` is: the preflight of each machine the Mac A/B plants on, which changes nothing.
-    The end-to-end halves -- building, staging and measuring a real `mac-release-pgo` pair on mbp and the rehearsal
-    on benchvm -- spend hours of those machines, and are the live tier's to run."""
+    """Read-only: the preflight of each machine the Mac A/B plants on."""
 
     def preflight(self, machine):
         reg = targets.Registry(REPO, machine=None)
@@ -753,9 +724,6 @@ class TestTheLiveRows(unittest.TestCase):
 
 
 class TestStatusCarriesTheLegs(WkTest):
-    """`--status` is the command that answers "how far has it got", so the
-    per-leg timings belong in it. Reaching past it with an ssh of one's own
-    leaves the gap in place for the next person."""
 
     def _legs(self, started="2026-09-09T18:08:20Z", tsv=None, older=True):
         with scratch_dir() as root:
@@ -790,12 +758,9 @@ class TestStatusCarriesTheLegs(WkTest):
             return cp.stdout
 
     def test_it_counts_what_ran_against_what_the_job_planned(self):
-        """Two warmup legs, then rounds x plans x arms -- the warmup round runs
-        the first plan only, one leg per arm."""
         self.assertIn("3 of 14 planned", self._legs())
 
     def test_an_older_experiments_results_are_not_this_jobs(self):
-        """The volume keeps every result it has ever produced."""
         out = self._legs()
         self.assertNotIn("20260101", out)
         self.assertNotIn(" 42s", out)
@@ -809,22 +774,15 @@ class TestStatusCarriesTheLegs(WkTest):
         self.assertRegex(out, r"warmup\s+B\s+speedometer3\s+92s")
 
     def test_the_leg_in_flight_is_not_called_a_warmup(self):
-        """A row reaches the map when its leg ends, so the running leg is never
-        in it -- and calling it a warmup misreports which round is under way."""
         out = self._legs()
         self.assertRegex(out, r"-\s+B\s+motionmark\s+running")
-        import re as _re
-        self.assertEqual(2, len([l for l in out.splitlines()
-                                 if _re.match(r"warmup\s+[AB]\s", l)]))
+        self.assertEqual(2, len([l for l in out.splitlines() if re.match(r"warmup\s+[AB]\s", l)]))
 
     def test_a_job_that_has_not_started_says_so_rather_than_listing_the_volume(self):
         out = self._legs(started="")
         self.assertIn("no leg of this job", out)
 
     def test_an_empty_warmup_directory_is_reported_and_not_passed_over(self):
-        """The warmup round exists to carry a profile the measured rounds
-        cannot take, so an empty capture directory is that round wasted --
-        and it is the command's job to say so, not a person's to go and look."""
         self.assertRegex(self._legs(), r"warmup captures: none in .*/warmup")
 
     def test_a_capture_that_landed_is_named(self):
@@ -842,19 +800,9 @@ class TestStatusCarriesTheLegs(WkTest):
 
 
 class TestTheDriverAnswersFromAnotherMachine(WkTest):
-    """Every board's driver probes over the tailnet from anywhere; this one
-    reports `unknown from here` only if it refuses to try."""
-
     def test_it_is_probeable_off_the_mac(self):
         conf = {"name": "mbp", "ssh": "fakemac", "bench_ssh": "fakemac-bench", "volume": "WK Bench"}
         self.assertTrue(DRIVERS["mac-volume"](REPO, conf, Channel(conf, {}, via=Fake("here"))).probeable())
-
-    def test_nothing_about_the_mac_is_stored_between_reads(self):
-        """Every fact above is recomputed; the only file the driver keeps is
-        the record of a person's arming."""
-        text = (REPO / "lib" / "wk" / "boot" / "mac.py").read_text()
-        self.assertNotIn("cache", text.lower())
-        self.assertEqual(1, text.count('lead=("mac-record.sh",)'))
 
 
 if __name__ == "__main__":

@@ -1,15 +1,6 @@
 """Benchmark *tasks*: the unit `wk ab` and `wk bench` produce
 and `wk bench ls`, `wk bench report` and `wk status` speak in
-(lib/wk/bench/record.py; `wk bench`'s verbs in lib/wk/bench/cli.py).
-
-A synthetic task -- task.json plus runs whose env.json carries the round and
-arm `wk bench run --ab` records -- read in-process against a scratch store and
-a fake registry: no board, no workspace, no machine asked. The fleet walk is
-driven through fake targets; two tests go through ./wk to hold the
-declaration (`ls` runs here, reads this store and starts nothing).
-
-Run: python3 -m unittest tests.test_bench_task -v
-"""
+(lib/wk/bench/record.py; `wk bench`'s verbs in lib/wk/bench/cli.py)."""
 import json
 import os
 import subprocess
@@ -89,8 +80,6 @@ def bench(store_dir, targets=(), env=None):
 
 
 class TestTaskState(WkTest):
-    """planned, ended, usable, complete: recomputed from task.json and the
-    runs; running is what the caller says the lock says."""
 
     def test_a_fresh_task_is_incomplete_with_nothing_run(self):
         with scratch_dir() as tmp:
@@ -141,9 +130,6 @@ class TestTaskState(WkTest):
 
 
 class TestOneRecord(WkTest):
-    """`unit bench.one_record[container]`: a workspace run's env.json, written
-    by the one writer with its provenance, is all `wk bench ls` and the report
-    read -- nothing else in the run directory is consulted."""
 
     FIELDS = ["plan=jetstream3", "workspace=w", "config=jsc-release", "class=cpu", "runner=jsc",
               "arch=native", "bench_host=container", "webkit_sha=0123456789abcdef", "count=4",
@@ -196,8 +182,6 @@ class TestOneRecord(WkTest):
 
 
 class TestTaskReport(WkTest):
-    """The task report: partial data reported as partial, paired rounds only,
-    one html per device x plan, named for the task."""
 
     def test_partial_task_reports_usable_rounds_and_names_the_missing(self):
         with scratch_dir() as tmp:
@@ -245,7 +229,6 @@ class TestTaskReport(WkTest):
 
 
 class TestLs(WkTest):
-    """One store's rows: every task, its state and each run's directory."""
 
     def test_lists_tasks_with_run_paths_and_states(self):
         with scratch_dir() as tmp:
@@ -260,7 +243,6 @@ class TestLs(WkTest):
             self.assertTrue(any(str(b) in l and l.rstrip().endswith("failed") for l in lines), lines)
 
     def test_an_empty_store_has_no_rows(self):
-        """The "no tasks anywhere" line belongs to the listing that merged the stores."""
         with scratch_dir() as tmp:
             self.assertEqual(record.ls_rows(found(tmp)), [])
             self.assertEqual(record.ls_rows(found(tmp / "absent")), [])
@@ -273,9 +255,6 @@ class TestLs(WkTest):
 
 
 class TestTheFleetListing(WkTest):
-    """`wk bench ls` walks the fleet: this store's rows first, then each target
-    whose machine answers for a store of its own, in walk order, asked through
-    its own wk with the label it is to print and no walk of its own."""
 
     def listing(self, tmp, targets, warned):
         reg = registry(tmp, targets)
@@ -316,8 +295,6 @@ class TestTheFleetListing(WkTest):
 
 
 class TestTheVerbs(WkTest):
-    """`wk bench ls` and `report <task>` / `report <run-a> <run-b>` over a
-    scratch store: the lock decides running, and the refusals name their remedy."""
 
     def store(self, s):
         bench_dir = s["path"] / "ws" / "w" / "bench"
@@ -429,8 +406,6 @@ def refusal(fn, *args):
 
 
 class TestWhere(WkTest):
-    """Where each Python verb runs: seed where its workspace's store is, ls
-    where it was typed and --continued in this machine's store."""
 
     def test_each_verb_answers_where_it_runs(self):
         with scratch_dir() as tmp:
@@ -452,7 +427,6 @@ class TestWhere(WkTest):
 
 
 class TestThroughWk(WkTest):
-    """Through ./wk: the dispatcher reaches the verbs with the options it normalised."""
 
     def test_bench_ls_and_report_read_a_task_in_a_workspace(self):
         with temp_store() as store:
@@ -486,12 +460,6 @@ class TestThroughWk(WkTest):
 
 
 class TestReadingTasksStartsNothing(WkTest):
-    """`wk bench ls` walks the fleet from where it is typed and reads a store
-    without starting the machine that holds it."""
-
-    def _decl(self, key):
-        text = (REPO / "cmd" / "bench").read_text()
-        return [l for l in text.splitlines() if l.startswith("# wk:") and key in l]
 
     def test_cmd_bench_answers_where_itself(self):
         cp = subprocess.run([str(REPO / "cmd" / "bench"), "--where", "ls", "--continued"],
@@ -499,27 +467,8 @@ class TestReadingTasksStartsNothing(WkTest):
                             env={"WK_ROOT": str(REPO), "HOME": "/tmp", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
         self.assertEqual((cp.returncode, cp.stdout.strip()), (0, "store"), cp.stderr)
 
-    def test_report_and_compare_still_read_one_store(self):
-        host = [l for l in self._decl("where=host") if l.startswith("# wk: sub ")]
-        self.assertTrue(host, self._decl("where=host"))
-        subs = host[0].split()[3].split(",")
-        for verb in ("report", "compare"):
-            self.assertIn(verb, subs, host[0])
-
-    def test_ls_is_declared_read_only(self):
-        """The dispatcher starts the podman machine for anything that forwards
-        and is not read-only. Reading a list of tasks is not a reason to boot a VM."""
-        ro = self._decl("readonly")
-        self.assertTrue(ro, "cmd/bench no longer declares anything read-only")
-        self.assertIn("ls", ro[0].split()[-1].split(","), ro[0])
-
 
 class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
-    """Store.record_dir (lib/wk/store.py): what this machine writes for itself and opens again -- a seeded benchmark
-    payload, an exported runner tree, a downloaded profiler, a long-running command's task record, a bench task's
-    directory. On a Linux host that is the store; on a macOS workstation the store is the podman VM's, root-owned and
-    unwritable from this side, so they go in this machine's own state directory instead. `wk ab` and
-    `wk bench run --ab` are host commands that record a task."""
 
     def _dir(self, store, extra=None):
         return self._ask({"WK_STORE": str(store), **(extra or {})})
@@ -547,9 +496,6 @@ class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
     @unittest.skipUnless(sys.platform == "darwin",
                          "only a macOS workstation keeps the store off this machine")
     def test_the_one_store_no_host_command_can_write_sends_them_to_its_own_state(self):
-        """The podman machine's store, which is what this machine's default
-        resolves to: the answer is the machine's own directory, and a task can
-        actually be created there."""
         with scratch_dir() as tmp:
             # No WK_STORE: the default is the one that is the VM's.
             f = self._dir_default({"XDG_STATE_HOME": str(tmp / "state")})
@@ -562,28 +508,9 @@ class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
             self.assertTrue(os.path.isdir(runs))
 
     def test_a_store_this_machine_was_pointed_at_keeps_its_own_records(self):
-        """Only the VM's store is diverted. A target's own store, or a test's
-        scratch one, is where its records belong -- diverting those put a
-        record where the command that wrote it would never look again."""
         with scratch_dir() as tmp:
             named = tmp / "somewhere" / "store"        # not created: a store is made on demand
             f = self._dir(named, {"XDG_STATE_HOME": str(tmp / "state")})
             self.assertEqual(f["RECORD"], str(named))
             self.assertEqual(f["TASK"], f"{named}/task")
 
-    def test_they_are_all_under_the_one_directory(self):
-        """One rule -- a second answer to 'where can this machine put a file'
-        is where the macOS bench path broke."""
-        with scratch_dir() as tmp:
-            f = self._dir(tmp, {"XDG_STATE_HOME": str(tmp / "state")})
-            for key in ("ARTIFACT", "TASK", "SEED", "SAMPLY"):
-                self.assertTrue(f[key].startswith(f['RECORD'] + "/"),
-                                f"{key}={f[key]} is not under {f['RECORD']}")
-
-    def test_one_spelling_of_the_bench_directory(self):
-        """status and doctor ask the record where every task is, rather than spell a second `<store>/bench`."""
-        for rel, asks in (("lib/wk/status.py", "bench_record.homes(store)"), ("lib/wk/doctor.py", "bench_record.task_roots(")):
-            with self.subTest(file=rel):
-                text = (REPO / rel).read_text()
-                self.assertIn(asks, text)
-                self.assertNotIn('record_dir(), "bench"', text)

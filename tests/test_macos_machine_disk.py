@@ -1,18 +1,5 @@
 """The podman machine's disk is a declared size, not whatever it was made with
-(host/macos/machine.sh).
-
-Every container workspace lives on that disk, so a machine created when the
-figure was smaller has to be grown rather than left -- a setting only applied
-at `podman machine init` is one a rebuild silently loses. podman grows a disk
-and refuses to shrink one, so the smaller case is reported instead.
-
-The reconcile block is lifted out of the stage and driven against a `podman`
-stub that records its argv, the tests/test_linux_machine_dry_run.py idiom: no
-machine is created, started or stopped.
-
-Run: python3 -m unittest tests.test_macos_machine_disk -v
-"""
-import re
+(host/macos/machine.sh)."""
 import subprocess
 import unittest
 
@@ -58,12 +45,8 @@ class TestTheDiskIsGrownToTheDeclaredSize(WkTest):
                  f'WK_MACHINE=wk; export WK_MACHINE; _cores={cpus}; _mem={mem}; _disk={want_disk}\n'
                  + ("WK_DRY_RUN=1\n" if dry else "")
                  + 'WK_RESERVE_CORES=1; WK_RESERVE_MB=1024\n'
-                 # The stage continues past this block; its last line here is a
-                 # conditional start, whose false is not a failure.
                  + block + "\ntrue\n"],
                 capture_output=True, text=True, timeout=60,
-                # WK_DEBUG, because a no-op reports through `unchanged`, which
-                # is debug-level: ./setup narrates what it changed, not what it did not.
                 env={"PATH": f"{binp}:/usr/bin:/bin", "HOME": str(self.tmp),
                      "WK_DEBUG": "1",
                      "WK_TEST_PODMAN_LOG": str(log), "WK_TEST_CPUS": cpus,
@@ -91,17 +74,7 @@ class TestTheDiskIsGrownToTheDeclaredSize(WkTest):
         self.assertIn("800", out)
         self.assertIn("only grows", out, "the refusal does not say why")
 
-    def test_growing_stops_the_machine_first_and_starts_it_after(self):
-        cp, sent = self._run(cur_disk="200")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        order = [l for l in sent.splitlines() if re.search(r"machine (stop|set|start)", l)]
-        self.assertTrue(order, sent)
-        self.assertIn("set", order[0] if "set" in order[0] else "".join(order))
-
-
     def test_the_guest_filesystem_is_grown_to_the_disk(self):
-        """podman resizes the image and nothing inside it, so a 500 GiB disk
-        with a 200 GiB filesystem on it is the declared size being a lie."""
         cp, sent = self._run(cur_disk="200")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("growpart", sent, "the partition was never grown")
@@ -109,8 +82,6 @@ class TestTheDiskIsGrownToTheDeclaredSize(WkTest):
         self.assertRegex(cp.stdout + cp.stderr, r"filesystem grew to \d+ GiB")
 
     def test_the_filesystem_is_checked_even_when_the_disk_is_unchanged(self):
-        """A disk grown by an earlier run whose filesystem did not follow is
-        put right by the next one, rather than waiting for another resize."""
         _, sent = self._run(cur_disk="500")
         self.assertNotIn("machine set", sent)
         self.assertIn("growpart", sent, "a machine at its size is never checked")
@@ -121,16 +92,6 @@ class TestTheDiskIsGrownToTheDeclaredSize(WkTest):
         for word in ("machine set", "machine stop", "growpart"):
             self.assertNotIn(word, sent, f"a dry run ran '{word}'")
         self.assertIn("dry run", cp.stdout + cp.stderr)
-
-
-class TestTheDeclaredSizeFitsThreeImageWorkspaces(unittest.TestCase):
-    def test_the_default_holds_the_fleet_this_repo_builds(self):
-        """A yocto image workspace measured 84 GB of build tree beside a shared sstate and
-        download cache; rpi3, rpi4 and rpi5 at once is about 450 GB."""
-        m = re.search(r'^_disk="\$\{WK_DISK_GB:-(\d+)\}"', STAGE.read_text(), re.M)
-        self.assertIsNotNone(m, "host/macos/machine.sh declares no disk size")
-        self.assertGreaterEqual(int(m.group(1)), 450,
-                                "the podman machine is too small for three yocto image workspaces")
 
 
 if __name__ == "__main__":

@@ -1,14 +1,4 @@
-"""The dispatcher's rules, each one body over every declaration (`# wk:` lines in cmd/*): where an invocation runs
-and what it hands on (`dispatch.where[<cmd>]`), every argument reaching the command as typed
-(`dispatch.parses_every_argument`), every destructive invocation armed to ask once (`dispatch.destructive_asks_once`),
-`--force` crossing only what it names (`dispatch.force_names_what_it_crosses`) and `-h` previewing the command
-line (`dispatch.help_previews_and_lists_values`).
-
-`dispatch.main` runs in this process with each way out -- the exec here, the forward into the podman VM, the hand-over
-to a machine's own wk -- replaced by a record of the argv and environment it would have handed on.
-
-Run: python3 tests/run.py -k test_dispatch
-"""
+"""The dispatcher's rules, each one body over every declaration (`# wk:` lines in cmd/*): where an invocation runs"""
 import contextlib
 import io
 import os
@@ -25,28 +15,29 @@ from tests.support import REPO, bash, clean_env, run
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, buildconf, dispatch, store, targets, workspace  # noqa: E402
 from wk import decl as D  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from wk.machine import Fake, Local  # noqa: E402
 
 DECLS = [d for d in D.all_commands(REPO)]
 GLOBAL_WORDS = set(dispatch.GLOBALS) | {"-h", "--help", "--explain"}
 
 
 class Handed(Exception):
-    def __init__(self, how, argv):
-        self.how, self.argv, self.env = how, list(argv), dict(os.environ)
+    def __init__(self, how, argv, readonly=None):
+        self.how, self.argv, self.env, self.readonly = how, list(argv), dict(os.environ), readonly
+
+
+HANDED = []
 
 
 def dispatched(argv, macos=False, target="container", delegates=False, env=None):
-    """(how, argv, env) the dispatcher hands on: `here` (exec'd on this machine), `forward` (into the podman VM, whose
-    store this host cannot write) or `delegate` (to the machine holding the workspace); or ("exit", status, output)."""
     def execv(path, args):
         raise Handed("here", args[1:])
 
     def forward(inv, cmd, args, env=None):
         raise Handed("forward", args)
 
-    def delegate(t, cmd, args):
-        raise Handed("delegate", args)
+    def delegate(t, cmd, args, readonly):
+        raise Handed("delegate", args, readonly)
 
     patches = [mock.patch.dict(os.environ, clean_env(env, wk_root=False), clear=True),
                mock.patch.object(dispatch, "_registry", None),
@@ -75,6 +66,7 @@ def dispatched(argv, macos=False, target="container", delegates=False, env=None)
         try:
             dispatch.main(list(argv))
         except Handed as h:
+            HANDED.append(h)
             return h.how, h.argv, h.env
         except (dispatch.Exit, act.Refused) as e:
             return "exit", e.status, out.getvalue()
@@ -82,8 +74,6 @@ def dispatched(argv, macos=False, target="container", delegates=False, env=None)
 
 
 def positionals_for(d, probe):
-    """The positional words an invocation selecting `probe` (its verb, its flag) takes: the name where it goes,
-    a build config where `config=arg` takes one, a plain word everywhere else."""
     slot = D.name_slot(d.name_for(probe))
     takes = d.takes_for(probe)
     total = max(slot + (0 if takes == "*" else int(takes)), 1 if d.verbs else 0)
@@ -101,7 +91,6 @@ def positionals_for(d, probe):
 
 
 def invocations(d):
-    """(label, argv) for the command, each of its verbs, and each flag a `flag` line overrides."""
     if d.verbs:
         out = [(v, positionals_for(d, [v])) for v in d.verbs.split(",")]
     else:
@@ -114,8 +103,6 @@ def invocations(d):
 
 
 def destructive_invocations(d):
-    """(label, argv) for every invocation the declaration names destructive: the command, a verb, or a flag on the
-    verb that declares it."""
     out = []
     for label, argv in invocations(d):
         if d.is_destructive(argv):
@@ -141,10 +128,6 @@ def declared_option(d, argv, word):
 
 
 class TestWhere(unittest.TestCase):
-    """`dispatch.where[<cmd>]`: every invocation runs where its declaration says -- this machine for `host` and
-    `local`, the store's machine for `store`, the workspace's machine for `workspace`, the command's own answer for
-    `dynamic` -- and what is handed on is the invocation's own options, with every global flag carried as
-    environment rather than as an argument the far side would have to know."""
 
     def expected(self, d, argv, macos, delegates):
         where = d.where_for(argv)
@@ -167,6 +150,8 @@ class TestWhere(unittest.TestCase):
                         want = self.expected(d, argv, macos, delegates)
                         how, handed, env = dispatched([d.name, "--quiet", *argv], macos=macos, delegates=delegates)
                         self.assertEqual(how, want, "wk %s %s -> %s %s %s" % (d.name, " ".join(argv), how, handed, env))
+                        if how == "delegate":
+                            self.assertEqual(HANDED[-1].readonly, d.is_readonly(argv[0] if argv else ""))
                         self.assertFalse(GLOBAL_WORDS & set(handed), handed)
                         self.assertEqual(env.get("WK_QUIET"), "1")
                         for w in handed[:handed.index("--") if "--" in handed else len(handed)]:
@@ -177,8 +162,6 @@ class TestWhere(unittest.TestCase):
 
 
 class TestParsesEveryArgument(unittest.TestCase):
-    """`dispatch.parses_every_argument`: a path, as an option's value in either spelling or as a positional, reaches
-    the command as the one word typed -- spaces, `=` and `:` included -- wherever it runs."""
 
     PATH = "some dir/a=b:c.txt"
 
@@ -202,10 +185,6 @@ class TestParsesEveryArgument(unittest.TestCase):
 
 
 class TestDestructiveAsksOnce(unittest.TestCase):
-    """`dispatch.destructive_asks_once[<cmd>]`: every invocation a declaration names destructive reaches its command
-    armed -- nothing it does goes through `act` before `confirm` is answered -- and nothing else is; `--yes` is the
-    answer, carried as the environment a forwarded command's own dispatcher asks again from; the one question
-    defaults to No and declines without a terminal."""
 
     def test_every_destructive_invocation_is_armed_and_nothing_else_is(self):
         armed = 0
@@ -229,8 +208,6 @@ class TestDestructiveAsksOnce(unittest.TestCase):
         self.assertGreater(armed, 10)
 
     def test_an_effect_outside_act_is_armed_by_the_command_that_reaches_it(self):
-        """The tailnet node delete is reached only through `sysimage write`, and the far destination replaced only
-        through `scp`; both ask through their command's one `confirm` (tests/test_sysimage_write.py, test_scp)."""
         for effect, cmd, argv in (("retire a tailnet node", "sysimage", ["write"]),
                                   ("replace a far destination", "scp", ["-r"])):
             with self.subTest(effect=effect):
@@ -242,8 +219,6 @@ class TestDestructiveAsksOnce(unittest.TestCase):
         with mock.patch.dict(os.environ, {"WK_DESTRUCTIVE": "1"}), contextlib.redirect_stderr(io.StringIO()):
             os.environ.pop("WK_CONFIRMED", None)
             with self.assertRaises(act.Refused):
-                act.act(["true"])
-            with self.assertRaises(act.Refused):
                 Fake().act_run(["true"])
         cp = bash(". lib/common.sh; export WK_DESTRUCTIVE=1; act true; echo REACHED")
         self.assertNotIn("REACHED", cp.stdout)
@@ -251,8 +226,8 @@ class TestDestructiveAsksOnce(unittest.TestCase):
     def test_one_answer_covers_every_effect_after_it(self):
         with mock.patch.dict(os.environ, {"WK_DESTRUCTIVE": "1", "WK_YES": "1"}):
             self.assertTrue(act.confirm("remove ws1?"))
-            self.assertEqual(act.act(["true"]).returncode, 0)
-            self.assertEqual(act.act(["true"]).returncode, 0)
+            self.assertTrue(Local().act_run(["true"]).ok)
+            self.assertTrue(Local().act_run(["true"]).ok)
 
     def test_the_default_is_no_and_no_terminal_declines(self):
         class Tty(io.StringIO):
@@ -280,10 +255,6 @@ class TestDestructiveAsksOnce(unittest.TestCase):
 
 
 class TestForceNamesWhatItCrosses(unittest.TestCase):
-    """`dispatch.force_names_what_it_crosses`: `--force` is the global WK_FORCE, carried to a forwarded command; it
-    crosses a barrier only through `barrier`, which names it as it crosses and again when the command ends; a
-    refusal that is no barrier is not crossed. (A preflight that cannot be measured reports unknown:
-    tests/test_preflight_unknown.py.)"""
 
     def test_force_is_carried_as_environment(self):
         how, handed, env = dispatched(["gc", "--force"])
@@ -319,8 +290,6 @@ class TestForceNamesWhatItCrosses(unittest.TestCase):
     FORCED = re.compile(r"\bforced\(")
 
     def test_force_is_read_only_to_cross_a_barrier_or_to_record_a_result_as_forced(self):
-        """Every read of WK_FORCE outside lib/wk/act.py guards a `barrier` (the next lines call it) or writes the
-        `forced=` field of a result."""
         offenders = []
         for p in sorted((REPO / "lib" / "wk").rglob("*.py")):
             if p.name == "act.py":
@@ -335,8 +304,6 @@ class TestForceNamesWhatItCrosses(unittest.TestCase):
 
 
 class TestAFarEndNoConfNames(unittest.TestCase):
-    """A host whose ~/.wk-remote says it is a target's far end, and whose hostname no machines/<name>.conf names, is
-    refused with that remedy -- whatever the command, and before anything resolves a target from it."""
 
     def test_it_is_refused_naming_the_conf_to_write(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -351,9 +318,6 @@ class TestAFarEndNoConfNames(unittest.TestCase):
 
 
 class TestHelpPreviewsTheCommandLine(unittest.TestCase):
-    """`dispatch.help_previews_and_lists_values`: `wk <cmd> <args> -h` says what the dispatcher would run for those
-    arguments -- the command's argv, the config it lifts out, where it runs -- or the refusal it would print, and
-    runs nothing."""
 
     def test_the_preview_is_the_argv_and_where(self):
         out = run("bench", "stage", "ws1", "--to=mbp", "--config", "mac-release", "-h", timeout=30).stdout

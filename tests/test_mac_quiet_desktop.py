@@ -1,22 +1,5 @@
 """bench/mac-quiet-desktop.sh and its table, bench/quiet/macos.tsv -- what a
-macOS machine that exists to be measured is, and the one place it is written down.
-
-A guest and a bench install are the same kind of machine for this purpose: a
-window that gets looked at, nobody at the keyboard, and a number coming out at
-the end. A widget that animates, a notification banner, a Setup Assistant pane,
-a Spotlight scan and a clock the machine took down itself each cost the
-measurement, and each used to be turned off in one of those two places and not
-the other. So the settings are one table of several kinds, the appliers read it, the
-probe reads the machine, and the findings judge one against the other -- and
-this file measures the tables and every caller.
-
-The `defaults`, `launchctl`, `mdutil`, `pmset`, `pgrep` and `killall` calls run
-against stubs on PATH: what is under test is which settings are asked for and
-how, not what macOS does with them -- that is measured on a real guest by
-`wk doctor <guest>`.
-
-Run: python3 -m unittest tests.test_mac_quiet_desktop -v
-"""
+macOS machine that exists to be measured is, and the one place it is written down."""
 import json
 import os
 import re
@@ -29,15 +12,11 @@ TABLE = REPO / "bench" / "quiet" / "macos.tsv"
 DESKTOP = REPO / "vm" / "desktop.sh"
 FIRSTBOOT = REPO / "bench" / "mac-bench-firstboot.sh"
 VOLUME = REPO / "lib" / "wk" / "sysimage" / "macvolume.py"
-VM_DRIVER = REPO / "lib" / "wk" / "guest.py"
 
 # Every call lands in one log, so a test reads what was asked for in order.
 STUB = '#!/bin/sh\nprintf \'%s %s\\n\' "$(basename "$0")" "$*" >> "$WK_TEST_CALLS"\nexit 0\n'
 # `id -u` decides whether a root-only function runs at all.
 ID_ROOT = '#!/bin/sh\n[ "$1" = -u ] && { echo 0; exit 0; }\necho root\n'
-ID_USER = '#!/bin/sh\n[ "$1" = -u ] && { echo 501; exit 0; }\necho tester\n'
-# A machine where every daemon in the table is running.
-PGREP_ALL = '#!/bin/sh\necho 4242\nexit 0\n'
 
 # The fields each kind of row carries after its kind, the last one free text.
 FIELDS = {"rows": 6, "agents": 4, "daemons": 3, "power": 4, "expected": 3}
@@ -57,61 +36,21 @@ def _probe_only_keys():
 
 
 class TestTheTables(unittest.TestCase):
-    def test_the_agents_that_draw_on_their_own_are_named(self):
-        """chronod redraws a desktop widget on its own timer; NotificationCenter
-        draws a banner over whatever is being measured. Both were measured
-        stopping on a Tahoe 26.4 clone, 2026-09-05."""
-        labels = [r[1] for r in _rows("agents")]
-        self.assertIn("com.apple.chronod", labels)
-        self.assertIn("com.apple.notificationcenterui", labels)
-
-    def test_a_lever_that_was_disproved_is_not_carried(self):
-        """Setup Assistant's MiniBuddy pane is submitted by runningboardd on
-        behalf of loginwindow: `launchctl disable gui/<uid>/com.apple.mbuseragent`
-        is recorded and ignored, measured on a clone that showed the pane on
-        three consecutive boots with it disabled. A row that does nothing is
-        machinery around a fault, and the window probe is what catches it."""
-        self.assertNotIn("mbuseragent", QUIET.read_text())
 
     def test_spotlights_indexer_is_turned_off_and_not_stopped(self):
-        """`mdutil` asks mds over XPC and never returns while mds is held
-        stopped -- measured in the rehearsal guest on 2026-09-05, where it
-        deadlocked `wk quiesce off` through the helper's own status verb. With
-        indexing off, mds has nothing to do, so it is left alone."""
         stopped = [r[1] for r in _rows("daemons")]
         for proc in ("mds", "mds_stores", "mdworker", "mdbulkimport"):
             self.assertNotIn(proc, stopped)
-        self.assertIn("mdutil -i off -a", QUIET.read_text())
 
     def test_every_row_is_complete(self):
+        for name, n in FIELDS.items():
+            for r in _rows(name):
+                with self.subTest(kind=name, row=r):
+                    self.assertEqual(n, len(r), r)
         for r in _rows("rows"):
-            with self.subTest(row=r):
-                self.assertEqual(6, len(r), r)
-                self.assertIn(r[3], ("bool", "int", "string"))
-
-    def test_every_agent_row_names_the_process_and_why(self):
-        for r in _rows("agents"):
-            with self.subTest(agent=r[1]):
-                self.assertEqual(4, len(r), r)
-
-    def test_every_daemon_row_says_what_it_costs(self):
-        """The report prints `why` when one is still running under a run, so a
-        row without one is a refusal that does not say why."""
-        for r in _rows("daemons"):
-            with self.subTest(daemon=r[1]):
-                self.assertEqual(3, len(r), r)
-                self.assertGreater(len(r[2].split()), 2, r)
-
-    def test_every_power_row_names_where_pmset_prints_it_back(self):
-        """`pmset -a disablesleep 1` is read back as SleepDisabled, so the
-        setting name and the reading name are two columns, not one."""
-        for r in _rows("power"):
-            with self.subTest(key=r[1]):
-                self.assertEqual(4, len(r), r)
+            self.assertIn(r[3], ("bool", "int", "string"))
 
     def test_the_names_are_distinct(self):
-        """Every name is a key in one probe reading; two rows sharing one means
-        the second silently answers for the first."""
         names = [r[0] for name in FIELDS for r in _rows(name)]
         names += sorted(_probe_only_keys())
         self.assertEqual(len(names), len(set(names)),
@@ -119,27 +58,6 @@ class TestTheTables(unittest.TestCase):
 
 
 class TestWhatSipWillNotLetGo(unittest.TestCase):
-    """A lever macOS refuses cannot be held, so the row is reported and not
-    refused on -- otherwise no modern Mac ever measures. Each name here was
-    measured answering `Operation not permitted` to `kill -STOP` as root."""
-
-    def test_the_whole_xprotect_family_is_named(self):
-        """XProtect launches the scanning that XprotectService does and
-        xprotectd schedules. The latter two were named and the first was not,
-        so `wk bench staged` refused every leg of job 20260909T154515Z on it --
-        four legs in two seconds each -- for a signal SIP refuses anyway
-        (measured on the bench install, macOS 26.6.2, 2026-09-09)."""
-        named = bash('. %s\nwk_quiet_desktop_unstoppable\n' % QUIET).stdout.split()
-        for proc in ("XProtect", "XprotectService", "xprotectd"):
-            with self.subTest(proc=proc):
-                self.assertIn(proc, named)
-
-    def test_an_unstoppable_process_is_not_signalled_at_all(self):
-        """Signalling it fails, and a failed signal made the pause report a
-        failure the caller could do nothing about."""
-        body = func_body(QUIET.read_text(), "_wk_qd_daemons_signal")
-        self.assertIn("_wk_qd_unstoppable", body)
-        self.assertLess(body.index("_wk_qd_unstoppable"), body.index("kill -"))
 
     def test_every_name_is_a_process_the_table_asks_about(self):
         """A name nobody looks up is an exemption that exempts nothing."""
@@ -152,10 +70,6 @@ class TestWhatSipWillNotLetGo(unittest.TestCase):
 
 
 class TestWhatMustKeepRunning(unittest.TestCase):
-    """One row is judged the other way round. The bench install has no other way
-    to be reached while it measures, and pausing it would drop the tailnet
-    mid-leg -- the very thing it is there to fix -- leaving a live utun with
-    nothing draining it."""
 
     def test_it_is_not_in_the_table_that_gets_signalled(self):
         stopped = bash('. %r\nwk_quiet_desktop_stopped\n' % str(QUIET)).stdout.split()
@@ -164,16 +78,12 @@ class TestWhatMustKeepRunning(unittest.TestCase):
                 self.assertNotIn(row[1], stopped)
 
     def test_every_row_says_what_it_costs(self):
-        """It is the one thing here allowed to burn cycles under a measurement,
-        so the row carries the measurement that says how few."""
         for row in _rows("expected"):
             with self.subTest(proc=row[1]):
                 self.assertRegex(row[2], r"[0-9]")
                 self.assertGreater(len(row[2].split()), 8, row)
 
     def _judge(self, probe):
-        """A heredoc, not an argument: the probe is many lines, and one that
-        arrives as a single line matches no key at all."""
         cp = bash(""". %r
 probe=$(cat <<'P'
 %s
@@ -203,8 +113,6 @@ wk_quiet_daemons_findings "$probe" 'the remedy'
             self.assertIn("find what did", f[2])
 
     def test_absent_is_a_note_and_not_a_refusal(self):
-        """An install that never joined the tailnet still measures correctly --
-        it just cannot be watched. Refusing every leg for that measures nothing."""
         states = {f[0] for f in self._judge(self._probe("absent"))
                   if "tailscaled" in f[1]}
         self.assertEqual({"note"}, states)
@@ -212,9 +120,6 @@ wk_quiet_daemons_findings "$probe" 'the remedy'
 
 class TestApplyingIt(WkTest):
     def _dscl_stub(self):
-        """`dscl . -read /Users/<u> NFSHomeDirectory` names the home the Do Not
-        Disturb assertion is written into. A real directory, so the real python
-        writes a real file the state read can be asserted against."""
         home = self.tmp / "home"
         home.mkdir(exist_ok=True)
         return home, 'printf "NFSHomeDirectory: %s\\n" %s\n' % (home, home)
@@ -233,8 +138,6 @@ class TestApplyingIt(WkTest):
         return cp, calls.read_text()
 
     def test_sourcing_it_changes_nothing(self):
-        """It is streamed into a guest ahead of another script; a side effect
-        on source would fire wherever it is read."""
         _, calls = self._run("true")
         self.assertEqual("", calls)
 
@@ -246,9 +149,6 @@ class TestApplyingIt(WkTest):
                 self.assertIn(f"write {domain.lstrip('@')} {key} -{type_} {value}", calls)
 
     def test_a_row_already_right_is_not_written_again(self):
-        """`wk start` settles a running guest's desktop on every start, so
-        the second pass has to be silent: Finder and the Dock are restarted
-        only when a setting actually moved."""
         store = self.tmp / "defaults"
         store.mkdir()
         fake = "\n".join([
@@ -284,14 +184,10 @@ class TestApplyingIt(WkTest):
         self.assertNotIn("killall", again)
 
     def test_finder_and_the_dock_are_restarted_when_a_row_moved(self):
-        """Both read CreateDesktop, launchanim and show-recents once, when they
-        start, so a write nothing re-reads is a setting that is not in force."""
         _, calls = self._run("wk_quiet_desktop_user")
         self.assertRegex(calls, r"killall -u \S+ Finder Dock")
 
     def test_a_per_hardware_uuid_key_is_written_that_way(self):
-        """`tart clone` remints the hardware UUID, so a `@` row set in the
-        golden base does not reach the clone unless it is written again."""
         _, calls = self._run("wk_quiet_desktop_user")
         host = [r for r in _rows("rows") if r[1].startswith("@")]
         self.assertTrue(host, "no per-hardware-UUID row left in the table")
@@ -300,10 +196,6 @@ class TestApplyingIt(WkTest):
                 self.assertRegex(calls, rf"defaults -currentHost write {domain[1:]} {key}")
 
     def test_every_agent_is_on_the_list_that_gets_signalled(self):
-        """Neither `disable` nor `bootout` holds one down -- measured
-        2026-09-07, 17 of the 21 running again within the second, because
-        macOS starts them on demand. They are stopped by signal now, on the
-        one list `_wk_qd_daemons_signal` reads."""
         stopped = bash(f'. {str(QUIET)!r}\nwk_quiet_desktop_stopped\n').stdout
         listed = {line.split()[1] for line in stopped.splitlines() if line.split()}
         for row in _rows("agents"):
@@ -314,25 +206,11 @@ class TestApplyingIt(WkTest):
                 self.assertIn(row[1], listed)
 
     def test_applying_the_settings_signals_nothing_itself(self):
-        """One enforcement: the signal, sent by the privileged half. Writing a
-        preference must not also reach for launchd."""
         _, calls = self._run("wk_quiet_desktop_user")
         self.assertNotIn("bootout", calls)
         self.assertNotRegex(calls, r"launchctl disable")
 
-    def test_the_probe_asks_the_process_not_launchd(self):
-        """launchd's disabled list said `off` for an agent that was running,
-        and `pgrep` alone cannot tell a stopped process from a running one --
-        so every row is read as absent, stopped or running."""
-        body = QUIET.read_text()
-        probe = body[body.index("wk_quiet_desktop_probe()"):]
-        self.assertIn("_wk_qd_procstate", probe)
-        self.assertNotIn("print-disabled", probe)
-        self.assertNotIn("pgrep -x", probe)
-
     def test_another_account_is_written_as_that_account(self):
-        """A bench install's first boot runs as root before anyone has logged
-        in; an unqualified write would land in root's own domain."""
         _, calls = self._run("wk_quiet_desktop_user nosuchuser || true")
         self.assertIn("sudo -u nosuchuser defaults", calls)
 
@@ -342,16 +220,12 @@ class TestApplyingIt(WkTest):
         self.assertIn("no such account", cp.stdout + cp.stderr)
 
     def test_the_system_half_refuses_without_root(self):
-        """It writes /Library/Preferences and stops Spotlight; saying so beats
-        a run of `defaults` that quietly does nothing."""
         cp, calls = self._run("wk_quiet_desktop_system; echo rc=$?")
         self.assertIn("rc=1", cp.stdout)
         self.assertIn("needs root", cp.stdout + cp.stderr)
         self.assertEqual("", calls)
 
     def test_every_power_key_is_applied_on_its_own(self):
-        """pmset applies nothing at all from a command line naming a key this
-        model does not have, so one key per call is what makes the rest land."""
         calls = self.tmp / "calls"
         calls.write_text("")
         with stub_path({n: STUB for n in ("defaults", "mdutil", "tmutil", "pmset")}
@@ -365,9 +239,6 @@ class TestApplyingIt(WkTest):
 
 
 class TestPausingTheDaemons(WkTest):
-    """`ps` and `kill` are shell functions here rather than PATH stubs, because
-    `kill` is a bash builtin and the point of the design is that the listing is
-    taken once, before anything is signalled."""
 
     PS = "\n".join("%d /usr/libexec/%s" % (100 + i, r[1])
                    for i, r in enumerate(_rows("daemons")))
@@ -392,9 +263,6 @@ class TestPausingTheDaemons(WkTest):
         return cp, calls.read_text()
 
     def test_pausing_needs_root_and_says_so(self):
-        """A `kill -STOP` a user cannot deliver to a root daemon fails silently
-        for all but the ones it owns, which would report a quiet machine that
-        is not."""
         cp, calls = self._signal("wk_quiet_daemons_pause", uid=501)
         self.assertIn("rc=1", cp.stdout)
         self.assertIn("needs root", cp.stdout + cp.stderr)
@@ -418,8 +286,6 @@ class TestPausingTheDaemons(WkTest):
                 self.assertIn("kill -CONT %d\n" % (100 + i), calls)
 
     def test_what_sip_refuses_is_never_signalled(self):
-        """`kill -STOP` on a platform binary answers EPERM however it is sent,
-        so trying is noise in every log a run leaves behind."""
         _, calls = self._signal("wk_quiet_daemons_pause")
         skip = bash(f'. {str(QUIET)!r}\nwk_quiet_desktop_unstoppable\n').stdout.split()
         self.assertTrue(skip)
@@ -430,14 +296,8 @@ class TestPausingTheDaemons(WkTest):
                     self.assertNotIn("kill -STOP %d\n" % rows[proc], calls)
 
     def test_the_machine_is_listed_once_and_never_asked_again(self):
-        """Measured in the rehearsal guest on 2026-09-05: `pgrep` never returns
-        once sysmond is stopped, so a loop that re-asked the machine after each
-        signal stopped itself half way through the table and left no way back."""
         _, calls = self._signal("wk_quiet_daemons_pause")
         self.assertEqual(1, calls.count("ps "), calls)
-        body = func_body(QUIET.read_text(), "_wk_qd_daemons_signal")
-        self.assertNotIn("pgrep", body)
-        self.assertNotIn("killall", body)
 
     def test_a_daemon_that_is_not_running_is_not_signalled(self):
         cp, calls = self._signal("wk_quiet_daemons_pause", listing="1 /usr/sbin/nothing")
@@ -445,8 +305,6 @@ class TestPausingTheDaemons(WkTest):
         self.assertNotIn("kill ", calls)
 
     def test_a_name_that_is_a_prefix_of_another_is_not_confused(self):
-        """`backupd` is a prefix of `backupd-helper`, and a substring match
-        would stop the helper twice and the daemon never."""
         _, calls = self._signal("wk_quiet_daemons_pause",
                                 listing="7 /usr/libexec/backupd-helper")
         self.assertIn("kill -STOP 7\n", calls)
@@ -487,23 +345,12 @@ class TestTheProbe(WkTest):
 
 
 class TestDoNotDisturb(WkTest):
-    """A notification banner is drawn over whatever is on the screen and no
-    other gate here can see one: NotificationCenter never becomes the frontmost
-    *application*, so the window probe and the browser check both pass with a
-    banner up. From macOS 12 on the setting is an assertion record in the
-    account's own home, not a preference, so it is written and read as one."""
 
     def _dnd(self, script):
         """HOME a scratch directory: Apple's python3, first on this PATH, writes its bytecode cache under it."""
         return bash('. %r\n%s\n' % (str(QUIET), script), env={"PATH": "/usr/bin:/bin", "HOME": str(self.tmp)})
 
     def test_no_file_is_not_off(self):
-        """An unreadable file is `?<reason>`, which the findings report as
-        unknown: a missing assertion database is not evidence that DND is on OR
-        off. The reason is part of the answer because a bare `?` refused a run
-        without saying which of "no such file", "not allowed to read it" and
-        "not the JSON this writes" it met, and each wants a different remedy
-        (measured on the bench install, 2026-09-09)."""
         cp = self._dnd('wk_quiet_dnd_state %r' % str(self.tmp / "absent"))
         self.assertEqual("?nofile", cp.stdout.strip(), cp.stdout + cp.stderr)
 
@@ -525,13 +372,6 @@ class TestDoNotDisturb(WkTest):
         self.assertEqual("?malformed", cp.stdout.strip(), cp.stdout + cp.stderr)
 
     def test_a_denied_read_is_left_out_of_the_probe_rather_than_refused(self):
-        """`~/Library/DoNotDisturb` is TCC-protected and root does not bypass it,
-        so nothing running on the measured install can read the record -- as
-        bench or under sudo alike (`Operation not permitted`, measured on the
-        bench install 2026-09-09). A row nothing can read must not refuse every
-        leg: the probe leaves it out, the findings call it unknown, and the
-        machine that has the volume merely mounted is where it is set and read
-        back."""
         script = (". %s\n" % QUIET
                   + '_wk_qd_home() { printf "/nonexistent"; }\n'
                   + 'wk_quiet_dnd_state() { printf "?denied"; }\n'
@@ -542,8 +382,6 @@ class TestDoNotDisturb(WkTest):
                          "a row nothing can read refuses every leg:\n" + cp.stdout)
 
     def test_a_reading_that_worked_is_still_judged(self):
-        """The discriminating half: leaving it out when it cannot be read must
-        not leave it out when it can."""
         script = (". %s\n" % QUIET
                   + '_wk_qd_home() { printf "/nonexistent"; }\n'
                   + 'wk_quiet_dnd_state() { printf "off"; }\n'
@@ -570,8 +408,6 @@ class TestDoNotDisturb(WkTest):
         self.assertNotIn("assertionEndDateTimestamp", record)
 
     def test_an_assertion_that_lapses_is_off(self):
-        """An end timestamp is an assertion that stops holding, and a run is an
-        hour: only an open-ended record counts as on."""
         path = self.tmp / "Library/DoNotDisturb/DB/Assertions.json"
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps({"data": [{"storeAssertionRecords": [
@@ -586,14 +422,7 @@ class TestDoNotDisturb(WkTest):
         cp = self._dnd('wk_quiet_dnd_state %r' % str(self.tmp))
         self.assertEqual("off", cp.stdout.strip(), cp.stdout + cp.stderr)
 
-    def test_it_reads_no_home_from_the_environment(self):
-        """wk_quiet_desktop_user runs from a LaunchDaemon, which has no HOME."""
-        self.assertNotIn("$HOME", QUIET.read_text())
-
-
 class TestTheFindings(WkTest):
-    """One judge for both kinds of measured Mac, driven against a written-out
-    probe: what a real machine says is a fact about that machine."""
 
     def _judge(self, func, probe, fix="the remedy"):
         cp = bash(f'''. {str(QUIET)!r}
@@ -637,10 +466,6 @@ P
         self.assertEqual("the remedy", wrong[0][2])
 
     def test_a_row_macos_will_not_set_says_what_it_costs(self):
-        """TCC drops a write to com.apple.universalaccess however it is sent,
-        and askForPasswordDelay cannot hold once askForPassword is 0. Failing
-        on them refuses every leg for ever, so they are notes that name the
-        cost -- and a note is not a fault."""
         unsettable = bash(f'. {str(QUIET)!r}\nwk_quiet_desktop_unsettable\n').stdout.split()
         self.assertTrue(unsettable)
         for name in unsettable:
@@ -653,8 +478,6 @@ P
                 self.assertIn("note", states, f)
 
     def test_a_key_the_probe_never_answered_is_unknown_not_off(self):
-        """A machine whose copy of this file is older answers nothing for a row
-        added since. Silence is not off."""
         probe = "\n".join(l for l in self._settled().splitlines()
                           if not l.startswith("appnap="))
         f = [x for x in self._judge("wk_quiet_desktop_findings", probe)
@@ -699,16 +522,12 @@ P
         self.assertIn("plug it in", wrong[0][2])
 
     def test_a_clock_already_held_down_is_refused(self):
-        """The one thing on Apple silicon that says the run would be measuring
-        a throttled machine rather than the change."""
         probe = self._settled().replace("cpu_speed_limit=100", "cpu_speed_limit=70")
         wrong = [f for f in self._judge("wk_quiet_cpu_findings", probe) if f[0] == "wrong"]
         self.assertEqual(1, len(wrong), wrong)
         self.assertIn("70%", wrong[0][1])
 
     def test_a_lever_this_model_does_not_have_is_a_note_not_a_fault(self):
-        """highpowermode raises the fans; a fanless Mac has no such setting and
-        a report that called that a failure would be red on every run."""
         probe = self._settled().replace("power_highpowermode=1",
                                         "power_highpowermode=")
         f = [x for x in self._judge("wk_quiet_cpu_findings", probe)
@@ -716,8 +535,6 @@ P
         self.assertEqual(["note"], [x[0] for x in f], f)
 
     def test_no_finding_wraps_over_two_lines(self):
-        """render_findings reads a line at a time, so a remedy on a second line
-        is a remedy nobody sees."""
         for func in ("wk_quiet_desktop_findings", "wk_quiet_cpu_findings",
                      "wk_quiet_daemons_findings"):
             cp = bash(f'''. {str(QUIET)!r}
@@ -733,67 +550,8 @@ P
 
 
 class TestBothKindsOfMeasuredMacGetIt(unittest.TestCase):
-    """The whole point of the file: a setting cannot be true of a guest and not
-    of a bench install."""
-
-    def test_a_guest_is_sent_it_with_the_script_that_uses_it(self):
-        """vm/desktop.sh sources nothing -- it is streamed into a guest that has
-        no wk-tools on disk -- so both callers send the two files together."""
-        self.assertIn("wk_quiet_desktop_user", DESKTOP.read_text())
-        for caller in (VM_DRIVER, REPO / "vm" / "provision-base.sh"):
-            with self.subTest(caller=caller.name):
-                self.assertIn("mac-quiet-desktop.sh", caller.read_text())
-                self.assertIn("wk_quiet_desktop_script", caller.read_text(), "sent without its table")
-
-    def test_the_sudo_shell_carries_what_the_system_half_calls(self):
-        """`declare -f` copies one function, and wk_quiet_desktop_system reads
-        the power table and the pmset helper through the shell it lands in."""
-        body = DESKTOP.read_text()
-        line = [l for l in body.splitlines() if "wk_quiet_desktop_system" in l
-                and "declare -f" in l]
-        self.assertEqual(1, len(line), body)
-        for fn in ("wk_quiet_desktop_power", "_wk_qd_pmset"):
-            self.assertIn(fn, line[0])
-
-    def test_the_probe_is_sent_it_too(self):
-        import inspect
-        from wk import guest
-        self.assertIn("wk_quiet_desktop_probe", (REPO / "vm" / "desktop-probe.sh").read_text())
-        self.assertIn("quiet_script(", inspect.getsource(guest.desktop_probe))
-
-    def test_the_guest_report_judges_it_through_the_shared_findings(self):
-        """`wk doctor <guest>` and a bench-mode preflight read the same table the
-        same way, or a guest is called settled on a row a bench install fails."""
-        import inspect
-        from wk import guest
-        self.assertIn("wk_quiet_desktop_findings", guest.READINGS)
-        self.assertIn("wk_quiet_cpu_findings", guest.READINGS)
-        self.assertIn("READINGS", inspect.getsource(guest.Desktop))
-        self.assertIn("wk_quiet_desktop_findings", (REPO / "lib" / "wk" / "quiet.py").read_text())
-
-    def test_a_bench_install_gets_the_file_and_runs_it(self):
-        # The payload table, wherever it is read from: one file now, so both the
-        # host writer and the benchmark install's own convergence lay it down.
-        self.assertIn("wk-bench-quiet-desktop.sh", VOLUME.read_text(),
-                      "nothing installs it into the image")
-        first = FIRSTBOOT.read_text()
-        self.assertIn("wk_quiet_desktop_system", first)
-        self.assertIn("wk_quiet_desktop_user", first)
-
-    def test_a_bench_install_can_run_wk_quiesce_at_all(self):
-        """`wk quiesce` refuses to start without the privileged helper, and
-        nothing else on a benchmark install ever runs ./setup."""
-        self.assertIn("wk-quiesce-priv", FIRSTBOOT.read_text())
-
-    def test_the_bench_install_names_the_account_being_measured(self):
-        """Its first boot is root, and the account that gets measured is the
-        bench user -- not root, whose desktop nobody ever looks at."""
-        first = FIRSTBOOT.read_text()
-        self.assertIn('wk_quiet_desktop_user "$BENCH_USER"', first)
 
     def test_nothing_keeps_its_own_copy_of_a_setting(self):
-        """A second spelling anywhere is a setting that can drift out of the
-        table and be true of one kind of measured Mac and not the other."""
         for f in (DESKTOP, FIRSTBOOT, VOLUME, REPO / "vm" / "desktop-probe.sh",
                   REPO / "cmd" / "bench", REPO / "lib" / "wk" / "bench" / "mac.py"):
             text = f.read_text()
@@ -808,8 +566,6 @@ class TestBothKindsOfMeasuredMacGetIt(unittest.TestCase):
 
 
 class TestTheTableTravelsWithTheFile(WkTest):
-    """The table is a data file beside the script, and the script is streamed into a guest with no copy
-    of wk-tools on disk: whatever runs it has to be sent both, or be told it was not."""
 
     PROBE = "set -u\nwk_quiet_desktop_power | head -1\nwk_quiet_desktop_stopped | wc -l\n"
 

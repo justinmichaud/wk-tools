@@ -1,5 +1,8 @@
-"""A PR head taken into a checkout, and a branch pointed at its fork: git argv through a target's exec."""
+"""A PR head taken into a checkout, and a branch pointed at its fork: git argv through a target's exec; and the week's
+activity on WebKit/WebKit, read through gh's JSON."""
 
+import datetime
+import json
 import re
 
 from wk import act, git
@@ -7,6 +10,32 @@ from wk.act import die, info, log, warn
 
 DIGITS = re.compile(r"^[0-9]+$")
 PLANNED_COMMIT = "0" * 40
+PUSH_REFS = "refs/wk/push/"
+
+
+def push_lock(ref):
+    """The lock a box push holds on its temporary ref from the fetch into the mirror until the ref is deleted."""
+    return "push-ref-" + ref[len(PUSH_REFS):].replace("/", "%")
+
+
+def rubble(store, machine, lock):
+    """A box push's temporary ref a killed `wk pr open` left in the mirror; the branch it copied lives on the box."""
+    from wk.rubble import row
+    mirror = store.mirror()
+    if not machine.isdir(mirror):
+        return []
+    r = machine.run(["git", "-C", mirror, "for-each-ref", "--format=%(refname)", PUSH_REFS])
+    if not r.ok:
+        return [row("push-ref", "box pushes' temporary refs in the mirror", None,
+                    why="not looked at -- git for-each-ref failed: %s" % r.err.strip())]
+    rows = []
+    for ref in r.out.split():
+        pid = lock.holder_pid(push_lock(ref))
+        busy = pid is not None and machine.alive(pid)
+        rows.append(row("push-ref", "%s, left in the mirror by a killed box push" % ref, 0,
+                        take=lambda ref=ref: machine.act_run(["git", "-C", mirror, "update-ref", "-d", ref]).ok,
+                        why="kept -- the 'wk pr open' (pid %d) pushing it holds it" % pid if busy else ""))
+    return rows
 
 
 def parse_spec(spec):
@@ -214,3 +243,50 @@ def resolved_or_planned(machine, mirror, dest, what, fetch):
         return PLANNED_COMMIT
     fetch()
     return mirror_rev(machine, mirror, dest)
+
+
+REPORT_REPO = "WebKit/WebKit"
+PR_FIELDS = "number,title,url,state,createdAt,updatedAt,author"
+
+
+def gh_json(machine, argv):
+    r = machine.run(["gh"] + argv)
+    if not r.ok:
+        die("gh %s failed: %s" % (" ".join(argv[:2]), (r.err or r.out).strip()))
+    return json.loads(r.out)
+
+
+def since_date(given, today):
+    if not given:
+        return (today - datetime.timedelta(days=7)).isoformat()
+    try:
+        return datetime.date.fromisoformat(given).isoformat()
+    except ValueError:
+        die("--since takes a date as YYYY-MM-DD (got '%s')" % given)
+
+
+def weekly(machine, since, today, out):
+    """The person's pull requests created and updated since `since`, and the others' they reviewed or commented on."""
+    login = gh_json(machine, ["api", "user"])["login"]
+
+    def mine(qualifier):
+        return gh_json(machine, ["pr", "list", "--repo", REPORT_REPO, "--author", login, "--state", "all",
+                                 "--search", "%s:>=%s" % (qualifier, since), "--json", PR_FIELDS, "--limit", "1000"])
+
+    def theirs(role):
+        found = gh_json(machine, ["search", "prs", "--repo", REPORT_REPO, "--" + role, login, "--updated", ">=" + since,
+                                  "--json", PR_FIELDS, "--limit", "1000"])
+        return [p for p in found if (p.get("author") or {}).get("login") != login]
+
+    created = mine("created")
+    updated = [p for p in mine("updated") if p["number"] not in {c["number"] for c in created}]
+    reviewed = theirs("reviewed-by")
+    commented = [p for p in theirs("commenter") if p["number"] not in {r["number"] for r in reviewed}]
+    out.write("@%s on %s, %s to %s (week %s)\n" % (login, REPORT_REPO, since, today.isoformat(), today.strftime("%V")))
+    for title, prs in (("pull requests created", created), ("pull requests updated", updated),
+                       ("reviewed", reviewed), ("commented on", commented)):
+        out.write("\n%s: %d\n" % (title, len(prs)))
+        for p in sorted(prs, key=lambda p: p["number"]):
+            who = "" if title.startswith("pull") else " (%s)" % (p.get("author") or {}).get("login", "?")
+            out.write("  #%-6d %-7s %s%s\n          %s\n" % (p["number"], p["state"].lower(), p["title"], who, p["url"]))
+    return 0

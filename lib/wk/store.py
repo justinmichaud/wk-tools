@@ -8,6 +8,7 @@ import sys
 from wk import record
 
 BROKER_SOCKET = "/run/wk/broker.sock"
+GUEST_BROKER_SOCKET = ".wk-broker.sock"
 
 
 def _env(env):
@@ -78,7 +79,7 @@ class Store:
         return self.named_broker_socket() or default
 
     def workspace_broker_socket(self):
-        return self.named_broker_socket() or BROKER_SOCKET
+        return self.named_broker_socket() or (os.path.join(self.home(), GUEST_BROKER_SOCKET) if self.macos_host else BROKER_SOCKET)
 
     def container_mirror(self):
         return self.env.get("WK_MIRROR")

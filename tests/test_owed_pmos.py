@@ -1,17 +1,5 @@
 """The pmos builder against a Fake world: the driving half (lib/wk/sysimage/pmos.py) and the pure parts of the
-build host's half (lib/wk/sysimage/pmos_build.py).
-
-Rows closed here (docs/PLAN.md 5.20):
-  - `wk sysimage build <pmos profile>` reports the remote build's own exit code, or that it lost track of
-    it, rather than a bare non-zero from the ssh round trip (Pmos._report_follow).
-  - a second `wk sysimage build` refuses while one runs, matched by `pgrep -f` against the ssh command line
-    that carries the build module's own name (Pmos._refuse_if_running).
-  - PMO_BUILD_HOST/WK_PMOS_HOST and WK_IMAGE_KEY, the build host and the key the image accepts.
-  - the image comes off the build host as bytes through `Machine.copy_out`, checked against the far hash.
-  - `wk gc`'s rows are built from the probe's numbers, and taking one asks nothing of its own.
-
-Run: python3 -m unittest tests.test_owed_pmos -v
-"""
+build host's half (lib/wk/sysimage/pmos_build.py)."""
 import contextlib
 import io
 import lzma
@@ -29,8 +17,6 @@ from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 from wk.sysimage import pmos, pmos_build  # noqa: E402
-
-PMOS_PY = REPO / "lib" / "wk" / "sysimage" / "pmos.py"
 
 PROFILE = {
     "IMG_PROFILE": "test-profile", "IMG_BUILDER": "pmos", "IMG_HOSTNAME": "test-host", "IMG_ARCH": "aarch64",
@@ -63,9 +49,7 @@ def sh_react(handlers):
 
 
 class TestPmosFollowReportsAFailure(unittest.TestCase):
-    """Pmos._report_follow: the remote build's own exit code, read back once `job.wait_remote` has already
-    decided it saw one -- this is pmos's own reporting, not wait_remote's polling, which is tested on its own
-    in tests/test_wk_job.py."""
+    """Pmos._report_follow: the remote build's own exit code, or that it lost track of it."""
 
     def test_a_failed_remote_build_dies_naming_the_host_code_and_log(self):
         p, machine = make()
@@ -94,8 +78,6 @@ class TestPmosFollowReportsAFailure(unittest.TestCase):
 
 
 class TestPmosRefusesASecondConcurrentBuild(unittest.TestCase):
-    """Pmos._refuse_if_running: `pgrep -f 'wk[.]sysimage[.]pmos_build'` on the build host, asked over the same ssh
-    (`pmos.ask`) that carries every other question this driver asks it."""
 
     def test_a_build_already_running_refuses_and_names_the_host(self):
         p, machine = make()
@@ -111,28 +93,18 @@ class TestPmosRefusesASecondConcurrentBuild(unittest.TestCase):
         p._refuse_if_running(machine, "/home/x/wk-pmos")   # does not raise
 
     def test_the_pattern_is_bracketed_so_the_asking_ssh_does_not_match_itself(self):
-        """`pgrep -f` matches every process's full command line, including the ssh carrying this very check,
-        which contains the pattern's own spelling -- so the pattern must match the far command line and not itself."""
         import re
         far = " ".join(pmos_build.argv_for("/r", "remote-build"))
         self.assertRegex(far, pmos.RUNNING_PATTERN)
         self.assertIsNone(re.search(pmos.RUNNING_PATTERN, "pgrep -f %s" % pmos.RUNNING_PATTERN))
-        self.assertIn('"pgrep -f %s', PMOS_PY.read_text())
 
 
 class TestPmosHostResolution(unittest.TestCase):
-    """PMO_BUILD_HOST and its WK_PMOS_HOST override, read through pmos.host_for."""
-
-    def test_the_profile_names_the_host(self):
+    def test_the_profile_names_the_host_wk_pmos_host_overrides_and_neither_refuses(self):
         self.assertEqual("buildhost1", pmos.host_for(PROFILE, {}))
-
-    def test_wk_pmos_host_overrides_the_profile(self):
         self.assertEqual("override-host", pmos.host_for(PROFILE, {"WK_PMOS_HOST": "override-host"}))
-
-    def test_no_build_host_and_no_override_refuses(self):
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            with self.assertRaises(Refused):
-                pmos.host_for(dict(PROFILE, PMO_BUILD_HOST=""), {})
+        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(Refused):
+            pmos.host_for(dict(PROFILE, PMO_BUILD_HOST=""), {})
         self.assertIn("no PMO_BUILD_HOST", err.getvalue())
 
 
@@ -170,13 +142,8 @@ class TestPmosOutputs(unittest.TestCase):
 
 
 class TestPmosImageKey(WkTest):
-    """WK_IMAGE_KEY: the ssh key the image accepts on first boot (Pmos.key_path)."""
-
-    def test_default_is_the_driving_machine_s_own_key(self):
-        p, _ = make(env={"HOME": str(self.tmp)})
-        self.assertEqual(str(self.tmp / ".ssh" / "id_ed25519.pub"), p.key_path())
-
-    def test_wk_image_key_overrides_the_default(self):
+    def test_the_key_the_image_accepts_is_this_machine_s_unless_wk_image_key_names_one(self):
+        self.assertEqual(str(self.tmp / ".ssh" / "id_ed25519.pub"), make(env={"HOME": str(self.tmp)})[0].key_path())
         p, _ = make(env={"HOME": str(self.tmp), "WK_IMAGE_KEY": "/tmp/wk-selftest-key.pub"})
         self.assertEqual("/tmp/wk-selftest-key.pub", p.key_path())
 

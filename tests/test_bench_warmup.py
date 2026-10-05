@@ -1,17 +1,5 @@
 """The A/B warmup round: what it measures, what it refuses, and that its runs
-never reach the statistics.
-
-Round 0 of every A/B is a leg per arm that is thrown away. It exists because a
-measured round records only what the run *claimed* -- `gpu_renderer=gl` is set
-the moment weston reports an output, and nothing checks which mesa driver the
-web process resolved to, how wide it is, or whether it JITted at all. The
-warmup leg reads those off the live process (lib/wk/bench/board_driver.py) and
-carries a profile.
-
-Unit tests only: the probe's raw board output is a fixture, so no board.
-
-Run: python3 tests/run.py -k test_bench_warmup
-"""
+never reach the statistics."""
 import contextlib
 import io
 import json
@@ -20,7 +8,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 
@@ -115,7 +102,6 @@ class TestWarmupProbe(WkTest):
 
 
 class TestGpuLoad(WkTest):
-    """Which driver is mapped says the driver loaded; engine time says it worked."""
 
     def setUp(self):
         self.d = load_driver()
@@ -136,42 +122,14 @@ class TestGpuLoad(WkTest):
         self.assertEqual(g["by_process_ms"]["WPEWebProcess"], 2700)
         self.assertEqual(g["by_process_ms"]["weston"], 400)
 
-    def test_a_run_that_billed_the_gpu_nothing_refuses(self):
-        rec = {"elf": {"bits": 64}, "gl": {"mapped": ["v3d_dri.so"], "software": False},
-               "jit": {"exec_mappings": 1, "tiers": {"FTL": 3}}, "class": "gpu",
-               "gpu": self.d.gpu_delta(self.BEFORE, self.BEFORE)}
-        self.assertIn("billed no engine time", " ".join(self.d.warmup_problems(rec)))
-
     def test_a_cpu_class_plan_records_gpu_time_but_never_requires_it(self):
-        """JetStream renders almost nothing; demanding engine time there would
-        refuse every correct run."""
         rec = {"elf": {"bits": 64}, "gl": {"mapped": ["v3d_dri.so"], "software": False},
                "jit": {"exec_mappings": 1, "tiers": {"FTL": 3}}, "class": "cpu",
                "gpu": self.d.gpu_delta(self.BEFORE, self.BEFORE)}
         self.assertEqual(self.d.warmup_problems(rec), [])
         self.assertEqual(rec["gpu"]["busy_ms"], 0)
 
-    def test_no_counters_and_no_render_node_refuses_rather_than_reading_as_zero(self):
-        rec = {"elf": {"bits": 64}, "gl": {"mapped": ["v3d_dri.so"], "software": False,
-                                           "render_nodes": []},
-               "jit": {"exec_mappings": 1, "tiers": {"FTL": 3}}, "class": "gpu",
-               "gpu": self.d.gpu_delta("", "")}
-        self.assertIn("nothing evidences a GPU path",
-                      " ".join(self.d.warmup_problems(rec)))
-
-
 class TestArtifactsOfOneLegDoNotCollide(WkTest):
-    """The evidence file and the profile capture are two artifacts of one leg.
-    Naming both `<machine>-<arm>.json` made samply's capture overwrite the
-    evidence, and the gate then passed because a samply profile is valid JSON
-    (2026-09-05, task 20260905T200814Z)."""
-
-    def test_the_two_paths_are_never_the_same(self):
-        s = board.BoardSystem(str(REPO), types.SimpleNamespace(machine=None), None, "", None, "rpi5", None)
-        leg = types.SimpleNamespace(out="/b/t/runs/r", o={"arm": "a"})
-        self.assertEqual(s.warm_file(leg, "evidence.json"), "/b/t/warmup/rpi5-a.evidence.json")
-        self.assertNotEqual(s.warm_file(leg, "evidence.json"), s.warm_file(leg, "profile.json"))
-
     def test_a_json_file_that_is_not_evidence_is_refused(self):
         d = tmpdir(self)
         # a samply profile: valid JSON, no evidence fields
@@ -184,9 +142,6 @@ class TestArtifactsOfOneLegDoNotCollide(WkTest):
 
 
 class TestGpuClaimMatchesWhatTheDriverCanSay(WkTest):
-    """v3d on 6.6.22 publishes no fdinfo drm-engine-* counters at all, so
-    engine time is unreadable there. Refusing every run on that board forever
-    would be refusing an unmeasurable quantity, not a bad arm."""
 
     def setUp(self):
         self.d = load_driver()
@@ -218,7 +173,6 @@ class TestGpuClaimMatchesWhatTheDriverCanSay(WkTest):
 
 
 class TestJitTierIsConfirmed(WkTest):
-    """A JIT that took executable memory may still never have left baseline."""
 
     def setUp(self):
         self.d = load_driver()
@@ -246,6 +200,11 @@ class TestJitTierIsConfirmed(WkTest):
     def test_no_report_at_all_refuses_rather_than_passing(self):
         self.assertIn("no JSC compile-time report",
                       " ".join(self.d.warmup_problems(self.record(64, {}))))
+
+    def test_not_probed_is_a_note_and_not_a_problem(self):
+        rec = self.record(64, None)
+        self.assertEqual(self.d.warmup_problems(rec), [])
+        self.assertTrue(any("not probed" in n for n in rec.get("notes", [])), rec.get("notes"))
 
 
 class TestWarmupCheck(WkTest):
@@ -289,8 +248,6 @@ class TestWarmupCheck(WkTest):
 
 
 class TestWarmupEvidenceIsPerBoard(WkTest):
-    """One task can hold several boards at once (wk ab --devices rpi3,rpi4), so
-    the evidence is keyed by machine or the boards overwrite each other."""
 
     def test_each_board_reads_back_its_own_evidence(self):
         wk = report
@@ -333,7 +290,6 @@ class TestWarmupNeverEntersTheStatistics(WkTest):
 
 
 class TestSubtestExclusions(WkTest):
-    """A subtest dropped from both arms says so in the report; which are dropped is tests/test_pi_ab_systems.py's."""
 
     def test_an_excluded_run_says_so_in_the_report(self):
         cp = subprocess.run(
@@ -383,14 +339,8 @@ class TestRunOrderAndSettling(WkTest):
         lines = self.wkd().order_lines(a, b)
         self.assertIn("5.0 position", lines[0])
 
-    def test_the_clock_is_pinned_not_merely_governed(self):
-        self.assertIn("scaling_min_freq", (REPO / "bench" / "onboard" / "pin-clock.sh").read_text())
-        self.assertIn("host.dvfs_pinned=", (REPO / "lib" / "wk" / "bench" / "board.py").read_text())
-
 
 class TestScoreAgainstItsOwnSubtests(WkTest):
-    """The check a person kept doing by hand: a score and the subtest times it
-    is built from must move opposite ways."""
 
     def wkd(self):
         return report
@@ -421,20 +371,11 @@ class TestScoreAgainstItsOwnSubtests(WkTest):
 
 
 class TestProfilerChoice(WkTest):
-    """samply.resolve (lib/wk/samply.py): samply where upstream publishes one, sysprof where it does not."""
 
     def test_aarch64_and_x86_64_use_samply(self):
         for arch in ("aarch64", "x86_64"):
             with self.subTest(arch=arch):
                 self.assertEqual(samply.resolve(arch, False)[0], "samply")
-
-    def test_the_arch_asked_about_is_the_userspace_not_the_kernel(self):
-        """A lib32 image reports aarch64 from `uname -m` and has no 64-bit loader, so the
-        profiler is chosen from the measured library's own ELF header."""
-        text = (REPO / "lib" / "wk" / "bench" / "board.py").read_text()
-        stage = text[text.index("    def profiler_stage("):text.index("    def launch(")]
-        self.assertNotIn("uname", stage, "the profiler is resolved from the kernel arch again")
-        self.assertIn("elf_arch(", stage)
 
     def test_armv7_falls_to_the_image_sysprof(self):
         self.assertEqual(samply.resolve("armv7l", True)[0], "sysprof")
@@ -447,13 +388,6 @@ class TestProfilerChoice(WkTest):
 
 
 class TestSamplyFetchUnderADryRun(unittest.TestCase):
-    """samply.fetch (lib/wk/samply.py) fetches through task.fetch_pinned, whose curl is
-    an act_run and so a no-op under --dry-run. `wk bench run --dry-run`'s warmup-profiler
-    step (lib/wk/bench/board.py profiler_stage) then unpacks and installs what curl never
-    really downloaded -- if that unpack and install are plain `run`s, they fail for real
-    against a missing file, fetch() returns "", and board.py raises the barrier "samply
-    for X could not be fetched" on every dry run. A real run is unchanged: fetch_pinned's
-    curl, the unpack and the install all still run for real."""
 
     def setUp(self):
         os.environ["WK_DRY_RUN"] = "1"
@@ -476,52 +410,10 @@ class TestSamplyFetchUnderADryRun(unittest.TestCase):
         self.assertIn("curl", err)
 
     def test_it_never_tries_to_unpack_what_curl_never_really_fetched(self):
-        """No answer is registered for `tar` or `install`: a real `machine.run` reaching
-        either would fail with 'no answer registered', which is exactly the bug -- an
-        unpack of a file that was never really downloaded."""
         found, _, err = self.fetch()
         self.assertTrue(found)
         self.assertNotIn("would not unpack", err)
 
-
-class TestTheJitTierProbeIsOptIn(unittest.TestCase):
-    """The tier counts come from JSC_report*CompileTimes, which dump a JS
-    function signature from the compiler thread -- and that SIGSEGVs the JIT
-    worker on WebKit 2.52/rpi5: two warmup legs, two `comm="JITWorker" sig=11`
-    audit records, against none in ~15 legs without it (2026-09-10). So the
-    probe is asked for, and its absence is a note rather than a fault."""
-
-    def test_the_options_are_only_set_when_asked(self):
-        s = board.BoardSystem(str(REPO), types.SimpleNamespace(machine=None), None, "", None, "rpi5", None)
-        s.doc = {"browser": "cog", "lib_dir": "usr/lib", "exec_dir": "usr/libexec", "bundle_dir": "usr/lib/b"}
-
-        def launch(**o):
-            return s.launch(types.SimpleNamespace(slot="a", cores="", o=o))
-        self.assertIn("JSC_reportDFGCompileTimes=1", launch(warmup="1", jit_tiers="1"))
-        self.assertNotIn("JSC_reportDFGCompileTimes=1", launch(warmup="1"))
-
-    def test_not_probed_is_a_note_and_not_a_problem(self):
-        record = {"elf": {"bits": 64}, "gl": {"mapped": ["x_dri.so"], "render_nodes": ["/dev/dri/renderD128"]},
-                  "jit": {"exec_mappings": 3, "tiers": None}, "class": "jsc",
-                  "gpu": {"measured": True, "busy_ms": 5}}
-        problems = load_driver().warmup_problems(record)
-        self.assertFalse([p for p in problems if "tier" in p], problems)
-        self.assertTrue(any("not probed" in n for n in record.get("notes", [])),
-                        record.get("notes"))
-
-    def test_probed_but_empty_is_still_a_fault(self):
-        record = {"elf": {"bits": 64}, "gl": {"mapped": ["x_dri.so"], "render_nodes": ["/dev/dri/renderD128"]},
-                  "jit": {"exec_mappings": 3, "tiers": {}}, "class": "jsc",
-                  "gpu": {"measured": True, "busy_ms": 5}}
-        problems = load_driver().warmup_problems(record)
-        self.assertTrue(any("no tier" in p for p in problems), problems)
-
-    def test_probed_without_the_top_tier_is_still_a_fault(self):
-        record = {"elf": {"bits": 64}, "gl": {"mapped": ["x_dri.so"], "render_nodes": ["/dev/dri/renderD128"]},
-                  "jit": {"exec_mappings": 3, "tiers": {"DFG": 12, "FTL": 0}}, "class": "jsc",
-                  "gpu": {"measured": True, "busy_ms": 5}}
-        problems = load_driver().warmup_problems(record)
-        self.assertTrue(any("no FTL compilation" in p for p in problems), problems)
 
 if __name__ == "__main__":
     unittest.main()

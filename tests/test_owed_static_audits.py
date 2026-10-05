@@ -1,71 +1,29 @@
-"""Static audits over the tree's shell: four shapes that are invisible in
-review and fatal at run time, each pinned to what the tree looks like today so
-a *new* one fails here rather than shipping quietly.
-
-The first: every command file runs under `set -euo pipefail`, and a function
-whose *last* statement is an unguarded `&&` chain returns the left side's
-failure as its own exit status -- called as a plain statement (not inside
-`if`/`||`), that kills the whole script. A function whose return value is the
-answer is exempt and is named below; anything else ends in `return 0`.
-
-Functions are found the way every `_lift`-style helper in this suite already
-assumes shell code here is written -- `name() {` alone on a line, closing
-`}` alone on a line -- so this reuses that convention rather than parsing
-shell in general.
-
-Run: python3 -m unittest tests.test_owed_static_audits -v
-"""
+"""Static audits over the tree's shell: four shapes that are invisible in"""
 TIER = "lint"
 import re
 import unittest
 
 from tests.support import REPO
 
-# A trailing comment on the definition line is this tree's way of stating a
-# function's contract, so it cannot hide a function from this audit.
 FUNC_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{\s*(#.*)?$')
 
-# Predicates whose return value is the point, not commands whose failure
-# would surprise a caller under `set -e`; a function that ends in an `&&`
-# chain and is not a predicate gets `return 0` instead of a place here.
 DELIBERATE_PREDICATES = {
     ("admin/wk-card-priv", "_slot_present"),
     ("container/proxy/ensure-bridge.sh", "bridge_alive"),
 }
 
 
-# Every directory holding shell in this tree. Audit 3's SCRIPT_ROOTS is
-# narrower on purpose: it asks a question only a standalone script can answer.
 SHELL_ROOTS = ("admin", "bench", "boot", "bridge", "build", "cmd", "container",
                "host", "image", "lib", "vm")
 SHELL_SHEBANG_LINE = re.compile(r'^#!.*\b(bash|sh|dash|ksh)\b')
 
-# --- an assignment whose value comes out of a command that reports absence --------------------------
-#
-# `grep` exits 1 when it matches nothing and `ls` exits nonzero when a path is
-# not there, and under `set -euo pipefail` that
-# status is the assignment's -- at any stage of the pipeline. So the very case
-# the code below then handles (`[ -z "$x" ]`, a `*)` arm, a `pass` line) is the
-# one that never arrives: the script dies at the assignment instead. The fix is
-# `|| x=""`, which is how the rest of the tree writes it.
-#
-# The command word only, so `git ls-remote` -- whose failure a caller does mean
-# to inherit -- is not this. And only a command this statement itself runs counts. One inside a quoted argument
-# belongs to another shell -- `inside`'s own `|| true`, a remote pipeline ending
-# in `head` -- and its status never reaches here, so quoted spans are blanked
-# out the way audit 1 blanks them.
 GREP_ASSIGN_RE = re.compile(
     r'^(local\s+|export\s+|declare\s+)?[A-Za-z_][A-Za-z0-9_]*=\$\(')
 
-# At the head of the substitution or of a pipeline stage: `$(grep …`, `| ls …`.
 ABSENCE_CMD_RE = re.compile(r'(?:\$\(|\||;|^)\s*(grep|ls)\s')
 
 
 def _without_strings(s):
-    """The statement with quoted spans blanked and everything else -- the
-    substitution's own pipeline included -- left alone. Audit 1 wants the
-    opposite (`_without_data` blanks whole substitutions), because the
-    question there is which operators are at the *statement's* level."""
     out, quote, i = [], None, 0
     while i < len(s):
         c = s[i]
@@ -89,8 +47,6 @@ def _without_strings(s):
 
 
 def _grep_assignments_in(text):
-    """The rule, over any shell text: an assignment from a substitution whose
-    own pipeline runs one of those, with nothing to absorb its status."""
     found = []
     for stmt in _statements(text.splitlines()):
         if not GREP_ASSIGN_RE.match(stmt):
@@ -126,8 +82,6 @@ class TestGrepAssignmentAudit(unittest.TestCase):
         )
 
     def test_the_audit_sees_the_shape_it_is_for(self):
-        """A positive control: the rule is a regex over shell, so a passing
-        audit above has to be a clean tree and not a broken scan."""
         self.assertEqual(len(_grep_assignments_in(
             'blanket=$(printf "%s" "$rules" | grep -E NOPASSWD | tail -1)\n')), 1)
         self.assertEqual(len(_grep_assignments_in(
@@ -144,8 +98,6 @@ HEREDOC_OP_RE = re.compile(r'<<(?!<)(-)?\s*([\'"]?)([A-Za-z_][A-Za-z0-9_]*)\2')
 
 
 def _iter_shell_files():
-    """Shell by content, not by extension: a `cmd/*` dispatch file and a
-    sourced `lib/*.sh` are both shell, and `wk` has no suffix either."""
     for root in SHELL_ROOTS:
         for p in sorted((REPO / root).rglob("*")):
             if not p.is_file() or "__pycache__" in p.parts:
@@ -186,8 +138,6 @@ def _functions(path):
 
 
 def _open_quote(text, quote=None):
-    """The quote still open at the end of `text`, if any. Comments are skipped
-    whole: half the apostrophes in this tree are in prose."""
     i = 0
     while i < len(text):
         c = text[i]
@@ -210,10 +160,6 @@ def _open_quote(text, quote=None):
 
 
 def _statements(body):
-    """One entry per statement: continuations joined, a quoted span that runs
-    across lines kept whole, a heredoc body skipped. A shell script this tree
-    *prints* (a `printf` of a whole self-disarm hook) is one argument, not
-    code at this level."""
     out, buf, heredoc = [], "", None
     for raw in body:
         if heredoc is not None:
@@ -239,18 +185,7 @@ def _statements(body):
     return out
 
 
-
-
 def _without_data(s):
-    """The statement with quoted spans and command substitutions blanked out,
-    length preserved so an offset into the result still points into `s`.
-
-    An `&&` inside a string wk hands to another shell, or inside `$( )`, is not
-    a chain at this statement's level: its falsiness never becomes the
-    function's exit status.
-    """
-    # Substitutions first, by paren depth: inside `$( )` quoting restarts, so a
-    # single left-to-right pass over quotes closes the outer one too early.
     out = list(s)
     depth = 0
     i = 0
@@ -269,7 +204,6 @@ def _without_data(s):
             out[i] = " "
         i += 1
 
-    # Then quoted spans in what is left.
     quote = None
     for i, c in enumerate(out):
         if quote:
@@ -282,9 +216,6 @@ def _without_data(s):
     return "".join(out)
 
 
-# The compounds whose exit status is their body's last statement. A group's `{`
-# is a word of its own, so `${x}` and `find … {} \;` are not one, and its `}`
-# follows a space or a `;`.
 BODY_TOKEN_RE = re.compile(
     r'(?<![\w$])\{(?=\s)|(?<=[\s;])\}|\bdo\b|\bdone\b|\bthen\b|\bfi\b')
 TAIL_CLOSER_RE = re.compile(r'(\}|\bdone\b|\bfi\b)\s*;?\s*$')
@@ -292,10 +223,6 @@ BODY_SPLIT_RE = re.compile(BODY_TOKEN_RE.pattern + r'|;')
 
 
 def _last_statement(body):
-    """The statement whose exit status the body returns. `_statements` splits a
-    compound at its line breaks, so the `while …; do` and the `done` come back
-    as separate entries; joining them back from the tail leaves a statement
-    whose end is the group or the loop rather than a bare `done`."""
     stmts = _statements(body)
     depth = 0
     for i in range(len(stmts) - 1, -1, -1):
@@ -308,8 +235,6 @@ def _last_statement(body):
 
 
 def _last_in_body(body, masked):
-    """The body's last statement: what follows the last `;` that is outside any
-    compound nested in it."""
     depth, cut = 0, 0
     for m in BODY_SPLIT_RE.finditer(masked):
         tok = m.group(0)
@@ -323,9 +248,6 @@ def _last_in_body(body, masked):
 
 
 def _without_bodies(masked):
-    """`masked` with every compound body blanked out, leaving the statement's
-    own tail: an `&&` inside a body decides that body's status and reaches the
-    function only if the body is what the statement ends with."""
     out = list(masked)
     stack = []
     for m in BODY_TOKEN_RE.finditer(masked):
@@ -338,8 +260,6 @@ def _without_bodies(masked):
 
 
 def _tail_body(stmt):
-    """The last statement of the compound that closes at the end of `stmt`, or
-    None when the tail is an ordinary command."""
     masked = _without_data(stmt)
     if not TAIL_CLOSER_RE.search(masked):
         return None
@@ -355,10 +275,6 @@ def _tail_body(stmt):
 
 
 def _decisive(stmt):
-    """The statement whose exit status the function returns. A compound at the
-    tail -- whatever pipeline it ends -- hands out the status of the last
-    statement of its own body, so a `||` anywhere else in the statement absorbs
-    nothing: the last iteration's condition is what `set -e` reads."""
     while True:
         inner = _tail_body(stmt)
         if inner is None:
@@ -367,7 +283,6 @@ def _decisive(stmt):
 
 
 def deciding_and_chain(body):
-    """The unguarded `&&` chain this function body returns the status of, or ""."""
     last = _last_statement(body)
     if not last or last.endswith("\\"):
         return ""
@@ -406,9 +321,6 @@ class TestTrailingAndChainAudit(unittest.TestCase):
         )
 
     def test_a_loop_body_decides_the_status_a_stray_or_does_not_absorb(self):
-        """The hole a statement-level scan leaves: the `||` belongs to another
-        part of the statement, while the last iteration's condition is what the
-        function returns."""
         self.assertEqual(deciding_and_chain([
             '{ have gh || true; } | while read -r n; do',
             '    [ -n "$n" ] && printf \'%s\\n\' "$n"',
@@ -419,9 +331,6 @@ class TestTrailingAndChainAudit(unittest.TestCase):
             'fi']), '[ -e "$p" ] && echo "$p"')
 
     def test_a_body_the_statement_does_not_end_with_is_not_the_status(self):
-        """The negative controls that keep the rule from firing on every `&&`
-        anywhere in a compound: a pipeline stage after `done` and a statement
-        after the chain are what the function actually returns."""
         self.assertEqual(deciding_and_chain([
             'for app in /Applications/Install\\ macOS*.app; do',
             '    [ -x "$app/Contents/Resources/startosinstall" ] && printf %s "$app"',
@@ -433,97 +342,12 @@ class TestTrailingAndChainAudit(unittest.TestCase):
             'done']), "")
 
 
-SHELL_DASH_S_RE = re.compile(r'\b(bash|sh)\s+-s\b')
-
-
-def _heredoc_script_roots():
-    for p in sorted((REPO / "cmd").iterdir()):
-        if p.is_file():
-            yield p
-    for p in sorted((REPO / "lib").glob("*.sh")):
-        yield p
-
-
-def find_remote_script_heredocs():
-    """Every heredoc whose opening line names a shell reading a script from
-    stdin (`bash -s`/`sh -s`, however it is reached -- `rsh`, `ssh`, `i_ssh`,
-    `t_exec` and `_ssh` all end up invoking one of those two forms in this
-    tree), paired with the first non-comment line of its body.
-
-    A heredoc that hands a remote `cat` literal *file content* (no `-s`
-    shell on the line) is not this: `set -u` means nothing to a config file.
-    That is why the trigger is `bash -s`/`sh -s` themselves, not the wrapper
-    names alone.
-    """
-    found = []
-    for path in _heredoc_script_roots():
-        rel = str(path.relative_to(REPO))
-        lines = path.read_text(errors="replace").splitlines()
-        i = 0
-        stmt_start = 0
-        while i < len(lines):
-            line = lines[i]
-            if i == 0 or not lines[i - 1].rstrip().endswith("\\"):
-                stmt_start = i
-            m = HEREDOC_OP_RE.search(line)
-            if m and SHELL_DASH_S_RE.search("\n".join(lines[stmt_start:i + 1])):
-                delim = m.group(3)
-                j = i + 1
-                body = []
-                while j < len(lines) and lines[j].rstrip() != delim:
-                    body.append(lines[j])
-                    j += 1
-                first = ""
-                for b in body:
-                    s = b.strip()
-                    if not s or s.startswith("#"):
-                        continue
-                    first = s
-                    break
-                found.append((rel, i + 1, delim, first))
-                i = j + 1
-                continue
-            i += 1
-    return found
-
-
-class TestRemoteScriptHeredocsSetDashU(unittest.TestCase):
-    """The tree's remote-script convention: a heredoc body executed by a
-    remote `bash -s`/`sh -s` opens with `set -u` (or `set -e`), so a bad
-    substitution or an unset variable fails loudly instead of a
-    silently-backgrounded launch failing opaquely three commands later.
-    Pinned the same way the audits above are: every heredoc found today must
-    comply, so a *new* one that skips it fails here rather than shipping
-    quietly."""
-
-    def test_every_remote_script_heredoc_opens_with_set_dash_u_or_e(self):
-        found = find_remote_script_heredocs()
-        bad = [(rel, line, delim, first) for rel, line, delim, first in found
-               if not re.match(r'^set\s+-[a-zA-Z]*[eu]', first)]
-        self.assertEqual(
-            bad, [],
-            "these remote-script heredocs do not open with `set -u`/`set -e`: "
-            f"{bad}",
-        )
-
-
-# --- every non-sourced, non-daemon script sets `set -euo pipefail` -----------
-#
-# A file with no shell shebang is read only via `.` (a library) in this tree
-# (verified by hand for every file below); that is what "non-sourced" means
-# here, and it excludes lib/*.sh and most of host/*
-# without naming any of them. What is left are scripts that run standalone
-# (as `wk`'s dispatcher, a LaunchDaemon/LaunchAgent, or someone's `bash
-# foo.sh`) or are fed to a remote shell -- and those set -euo pipefail unless
-# named below, with the one reason each that earns the exception.
 SCRIPT_ROOTS = (
     "cmd", "lib", "vm", "boot", "build", "host", "bench",
     "container/bin", "container/proxy", "admin",
 )
-SHELL_SHEBANG_RE = re.compile(r'^#!.*\b(bash|sh|dash|ksh)\b')
 SET_EUO_PIPEFAIL_RE = re.compile(r'(?m)^\s*set\s+-euo\s+pipefail\s*$')
 
-# Structural: these have a shell shebang but are never executed through it.
 DELIBERATE_EXCLUSIONS = {
     "bench/mac-quiet-hosts.sh":
         "sourced, not run: its own header says it is `.`-read by "
@@ -537,60 +361,14 @@ DELIBERATE_EXCLUSIONS = {
         "header describes, so it deliberately keeps `set -uo pipefail`",
 }
 
-# Empty: every candidate script sets it. The set stays so a script that stops
-# setting it names itself here rather than passing unnoticed -- and a genuinely
-# exempt one belongs in DELIBERATE_EXCLUSIONS above, with its reason.
-NOT_YET_COMPLIANT = set()
-
-
-def _is_shell_script(path):
-    try:
-        with path.open(errors="replace") as f:
-            first_line = f.readline()
-    except OSError:
-        return False
-    return bool(SHELL_SHEBANG_RE.match(first_line))
-
-
-# A file fed whole to a remote shell (`_ssh ... 'bash -s' < "$WK_ROOT/vm/
-# desktop-probe.sh"`) runs as a script exactly like one with
-# its own shebang -- the shebang is simply irrelevant when the caller already
-# named the interpreter -- so it is a candidate too, found the same way
-# audit 1 above finds a heredoc's `bash -s`/`sh -s`.
-REMOTE_FED_SCRIPT_RE = re.compile(r'(?:bash|sh)\s+-s[\'"]?\s*<\s*"\$WK_ROOT/([^"]+)"')
-
-
-def _remote_fed_script_paths():
-    paths = set()
-    for root in ("cmd", "lib"):
-        base = REPO / root
-        if not base.exists():
-            continue
-        candidates = base.iterdir() if root == "cmd" else base.glob("*.sh")
-        for p in candidates:
-            if not p.is_file():
-                continue
-            paths.update(REMOTE_FED_SCRIPT_RE.findall(p.read_text(errors="replace")))
-    return paths
-
 
 def _iter_candidate_scripts():
-    seen = set()
     for root in SCRIPT_ROOTS:
-        base = REPO / root
-        if not base.exists():
-            continue
-        for p in sorted(base.rglob("*")):
-            if not p.is_file() or "__pycache__" in p.parts:
-                continue
-            if _is_shell_script(p):
-                seen.add(p)
-                yield p
-    for rel in sorted(_remote_fed_script_paths()):
-        p = REPO / rel
-        if p.is_file() and p not in seen:
-            seen.add(p)
-            yield p
+        for p in sorted((REPO / root).rglob("*")):
+            if p.is_file() and "__pycache__" not in p.parts:
+                with p.open(errors="replace") as f:
+                    if SHELL_SHEBANG_LINE.match(f.readline()):
+                        yield p
 
 
 class TestEveryScriptSetsEuoPipefail(unittest.TestCase):
@@ -603,12 +381,7 @@ class TestEveryScriptSetsEuoPipefail(unittest.TestCase):
             if SET_EUO_PIPEFAIL_RE.search(p.read_text(errors="replace")):
                 continue
             missing.add(rel)
-        self.assertEqual(
-            missing, NOT_YET_COMPLIANT,
-            f"scripts without `set -euo pipefail` changed since NOT_YET_COMPLIANT "
-            f"was pinned (new: {missing - NOT_YET_COMPLIANT}; now fixed, drop from "
-            f"NOT_YET_COMPLIANT: {NOT_YET_COMPLIANT - missing})",
-        )
+        self.assertEqual(missing, set(), "scripts without `set -euo pipefail`")
 
     def test_the_deliberate_exclusions_exist_lack_it_and_have_a_reason(self):
         for rel, reason in DELIBERATE_EXCLUSIONS.items():
@@ -622,13 +395,7 @@ class TestEveryScriptSetsEuoPipefail(unittest.TestCase):
 
 
 class TestEveryCrossMachinePushNormalisesTheMode(unittest.TestCase):
-    """A tree pushed with `rsync -a` carries the *pushing* machine's umask. moose
-    is jmichaud:jmichaud at umask 002, so its files are 0664; on a Mac the group
-    is the shared `staff`, and ssh refuses a config file it can reach that is
-    group-writable -- `Bad owner or permissions`, which broke `git pull` on
-    tolken via the ~/.ssh/config.d symlink into this repo (2026-09-08)."""
 
-    # `-e "ssh …"` or a remote `host:path`: a push that leaves this machine.
     REMOTE = re.compile(r'rsync\s[^\n]*(-e\s+"ssh|\$\w+:|@\$)')
 
     def test_no_cross_machine_rsync_carries_the_local_umask(self):

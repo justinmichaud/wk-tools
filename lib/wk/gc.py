@@ -6,7 +6,7 @@ import json
 import os
 import sys
 
-from wk import act, images, reach, rubble as rb, workspace
+from wk import act, images, pr, reach, rubble as rb, workspace
 from wk.bridge import provision as bridge_provision
 from wk.act import die, info, log, warn
 from wk.bench import mac as benchmac, seed
@@ -91,6 +91,7 @@ class Gc:
         rows += self.runner_rows() + self.build_output_rows()
         rows += workspace.rubble(listed, stored, self.here, self.root, pid is not None and self.here.alive(pid), self.clock)
         if self.host_half:
+            rows += pr.rubble(self.store, self.here, lock)
             rows += (guestbase.rubble(vm) if vm else []) + self.board_rows() + self.remote_rows()
             rows += pmos.rubble(self.pmos_hosts(), self.pmos_machine, self.env)
             if self.mac_host:

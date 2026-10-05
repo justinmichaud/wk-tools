@@ -27,8 +27,7 @@ INJECT_PORT = 443
 READ_TIMEOUT = 30
 # Connect and TLS only: the status line waits READ_TIMEOUT, which stays under the `curl -m` of lib/wk/wall.py so a stalled upstream is answered 504 rather than read as a dead injector.
 UPSTREAM_TIMEOUT = 12
-# Not a status any upstream sends: the injector's own TLS or DNS failure toward the host.
-FAULT_STATUS = b"598 Injector Upstream Fault"
+FAULT_HEADER = b"X-Wk-Injector"
 IDLE_TIMEOUT = 300
 UNREACHABLE = (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN, errno.EHOSTDOWN, errno.ETIMEDOUT)
 MAX_HEAD = 65536
@@ -276,8 +275,9 @@ class Injector:
             return read_token(self.read_pat_path) or read_token(self.pat_path)
         return read_token(self.pat_path)
 
-    async def refuse(self, cwriter, status, reason):
+    async def refuse(self, cwriter, status, reason, fault=b""):
         cwriter.write(b"HTTP/1.1 " + status + b"\r\n"
+                      + (FAULT_HEADER + b": " + fault + b"\r\n" if fault else b"") +
                       b"Content-Type: text/plain\r\n"
                       b"Content-Length: " + str(len(reason)).encode("ascii") +
                       b"\r\nConnection: close\r\n\r\n" + reason)
@@ -374,11 +374,12 @@ class Injector:
                 log("%s upstream failed: %s: %s" % (host, type(exc).__name__, exc))
                 reached = isinstance(exc, ConnectionError) or exc.errno in UNREACHABLE
                 await self.refuse(
-                    cwriter, b"502 Bad Gateway" if reached else FAULT_STATUS,
+                    cwriter, b"502 Bad Gateway",
                     (b"the wk credential injector could not reach " if reached else
                      b"the wk credential injector failed to verify or resolve ") +
                     host.encode("latin-1") + b" (" +
-                    type(exc).__name__.encode("ascii") + b")\r\n")
+                    type(exc).__name__.encode("ascii") + b")\r\n",
+                    b"" if reached else type(exc).__name__.encode("ascii"))
                 return
             ureader, upstream = opened[0]
             log("%s %s %s -> %s" % (host, method, target[:120],

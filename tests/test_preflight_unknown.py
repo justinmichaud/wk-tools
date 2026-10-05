@@ -1,8 +1,4 @@
-"""A preflight whose measurement cannot be taken reports unknown and lets the command go on: only a
-measured value refuses (README: --force crosses only the barriers it names).
-
-Run: python3 tests/run.py -k tests.test_preflight_unknown
-"""
+"""A preflight whose measurement cannot be taken reports unknown and lets the command go on: only a"""
 import contextlib
 import io
 import sys

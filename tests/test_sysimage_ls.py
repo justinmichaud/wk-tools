@@ -1,13 +1,5 @@
-"""`wk sysimage`'s read side and `rm`, in process (lib/wk/sysimage/).
-
-Covers: each builder's outputs are what `ls`, `holds`, `path` and `rm` read,
-recomputed on every read (`unit sysimage.builders_conform`, the read half);
-`ls`'s rows, states and footnotes, and its fleet walk; `holds` and its
-refusals; `path`; the routing answers the dispatcher asks for; and the live
-row `sysimage.build[vm]`.
-
-Run: python3 tests/run.py -k tests.test_sysimage_ls
-"""
+"""`wk sysimage`'s read side in process (lib/wk/sysimage/): each builder's outputs are what `ls`, `holds` and
+`path` read, recomputed on every read; `ls`'s rows and fleet walk; the routing answers the dispatcher asks for."""
 import contextlib
 import io
 import json
@@ -112,17 +104,13 @@ class TestTheBuildersConform(unittest.TestCase):
         self.assertIn("mac-volume", cli.BUILDERS)
 
     def test_every_builder_a_profile_names_has_outputs(self):
-        """mac-volume, guest, pmos and fetch have no workspace, so each marker is read through
-        `ls.builder_outputs` (5.32, 5.34, 5.17, 5.20) -- `cli.Sysimage.builder_outputs`'s one
-        implementation -- rather than `ls.BUILDERS`'s workspace globs."""
         named = {images.load(n)["IMG_BUILDER"] for n in images.names()}
         reachable = {b.kind for b in ls.BUILDERS} | set(ls.HOST_BUILDERS)
         self.assertLessEqual(named, reachable)
 
 
 class TestPmosAndFetchImagesHaveAReader(unittest.TestCase):
-    """5.17, 5.20: a fetch image is left in this host's own cache; a pmos image is left on its build host
-    (machines/<name>.conf), read over the same ssh the builder itself asks."""
+    """A fetch image is left in this host's own cache; a pmos image on its build host."""
 
     def test_a_fetched_image_is_found_in_this_host_s_cache(self):
         with scratch_dir() as d:

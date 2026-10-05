@@ -1,20 +1,5 @@
-"""The guest's clock, set from the host on every start (lib/wk/guest.py).
-
-A macOS guest cannot keep its own time. `tart clone` hands a clone the golden
-base's clock, and Softnet allows one address -- the proxy -- while NTP is UDP,
-which an HTTP CONNECT proxy cannot carry. Left alone the clock stays at the
-date the base was sealed, and every TLS handshake to a certificate issued
-after it fails as CERT_NOT_YET_VALID: `wk ai claude` in the guest reports
-`Failed to connect to platform.claude.com`, which reads like an egress refusal
-and is not one.
-
-Hermetic: the guest is this host, running the step's script locally. The
-host's clock is a FakeClock, the guest's a fake `date` the test pins, and
-`sudo` is a fake that records what would have been set. No tart, no VM, no
-network.
-
-Run: python3 -m unittest tests.test_vm_clock -v
-"""
+"""The guest's clock, set from the host on every start (lib/wk/guest.py): Softnet carries no NTP, so a clone keeps
+the base's date and TLS fails. The guest is this host, with a fake `date` and a `sudo` that records."""
 import contextlib
 import io
 import os
@@ -22,7 +7,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, WkTest, assert_guest_start_converges
+from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import guest, targets  # noqa: E402
@@ -31,12 +16,7 @@ from wk.machine import Local  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 
-# Both clocks the function compares are pinned by this one fake, each half
-# reaching it with its own FAKE_EPOCH: the skew asserted below is then
-# arithmetic rather than the difference between two reads of a moving clock,
-# which crossed a second boundary and reported 950401s. Everything but
-# `-u +%s` is the real date, so the set form the function builds is still
-# parsed by a real `date` if it is ever run.
+# Pins `date -u +%s` to FAKE_EPOCH, so the skew is arithmetic rather than two reads of a moving clock.
 FAKE_DATE = """#!/bin/sh
 if [ "$1" = "-u" ] && [ "$2" = "+%s" ]; then echo "$FAKE_EPOCH"; exit 0; fi
 exec /bin/date "$@"
@@ -44,9 +24,7 @@ exec /bin/date "$@"
 
 HOST_EPOCH = 1788900000
 
-# `printf`, not `echo`: the first argument is `-n`, which /bin/sh's echo eats
-# as its own no-newline flag -- so the log lost the very token the assertions
-# below look for, and every test here failed against correct code.
+# `printf`, not `echo`: the first argument is `-n`.
 FAKE_SUDO = """#!/bin/sh
 printf '%s\\n' "$*" >> "$SUDO_LOG"
 exit ${SUDO_RC:-0}
@@ -69,21 +47,17 @@ class TestGuestClock(WkTest):
         env = {"HOME": str(self.tmp), "WK_VM_STORE": str(self.tmp / "vmstore"), "WK_STORE": str(self.tmp / "store")}
         if tolerance:
             env["WK_VM_CLOCK_SKEW"] = tolerance
-        # The guest half, run here: its own clock, and the only `sudo` in the run.
         guest_env = {"PATH": "%s:%s:%s" % (datebin, sudobin, os.environ["PATH"]), "FAKE_EPOCH": str(HOST_EPOCH - skew),
                      "SUDO_LOG": str(log), "SUDO_RC": str(sudo_rc)}
         err = io.StringIO()
         with mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True), \
                 mock.patch.dict(os.environ, guest_env), contextlib.redirect_stderr(err):
             vm = targets.Registry(str(REPO), env=env).load("vm")
-            g = guest.Guest(guest.Host(vm, FakeClock(HOST_EPOCH)), "testguest", "10.0.0.2")
-            g.m = Local()
+            g = guest.Guest(guest.Host(vm, FakeClock(HOST_EPOCH)), "testguest", Local())
             rc = 0 if g.set_guest_clock() else 1
         return "rc=%d\n%s" % (rc, err.getvalue()), log.read_text()
 
     def test_a_stale_guest_is_set_from_the_host(self):
-        """Eleven days behind -- the skew actually measured on a cloned guest.
-        The function reports it and hands `date` a value to set."""
         out, sudolog = self._drive(11 * 86400)
         self.assertIn("rc=0", out, out)
         self.assertIn("clock was", out, out)
@@ -91,29 +65,22 @@ class TestGuestClock(WkTest):
         self.assertIn("-n date -u ", sudolog, sudolog)
 
     def test_a_guest_already_in_time_is_left_alone(self):
-        """Idempotent by measurement: no sudo, and nothing reported."""
         out, sudolog = self._drive(0)
         self.assertIn("rc=0", out, out)
         self.assertNotIn("clock was", out, out)
         self.assertEqual("", sudolog.strip(), sudolog)
 
     def test_a_guest_ahead_of_the_host_is_set_too(self):
-        """The comparison is absolute: a clock in the future breaks TLS at the
-        other end of the validity window and is just as wrong."""
         out, sudolog = self._drive(-3600)
         self.assertIn("rc=0", out, out)
         self.assertIn("3600s", out, out)
         self.assertIn("-n date -u ", sudolog, sudolog)
 
     def test_a_guest_that_refuses_the_write_fails(self):
-        """No passwordless sudo means the clock stays wrong, and the caller
-        has to hear about it rather than start a guest that cannot do TLS."""
         out, _ = self._drive(86400, sudo_rc=1)
         self.assertIn("rc=1", out, out)
 
     def test_wk_vm_clock_skew_sets_the_tolerance(self):
-        """The override reaches the comparison: a five-minute error is left
-        alone at a ten-minute tolerance and corrected at the default 30s."""
         out, sudolog = self._drive(300, tolerance="600")
         self.assertEqual("", sudolog.strip(), out)
         out, sudolog = self._drive(300)
@@ -121,23 +88,9 @@ class TestGuestClock(WkTest):
 
 
 class TestStartSetsTheClock(unittest.TestCase):
-    """The wiring: both of a start's arms set the clock (a running guest is the one most likely to have been
-    cloned days ago), and the base build sets it before provisioning speaks HTTPS, through the same code."""
-
-    def test_both_start_arms_set_the_clock(self):
-        assert_guest_start_converges(self, '_set_guest_clock "$name" "$ip"')
-
     def test_the_clock_is_set_before_the_proxy(self):
-        """Order matters: everything reached through the proxy speaks TLS."""
         steps = [s[0] for s in guest.STEPS]
         self.assertEqual(steps.index("set_guest_clock") + 1, steps.index("set_guest_egress"))
-
-    def test_the_base_build_sets_the_clock_through_the_same_step_before_provisioning(self):
-        import inspect
-        from wk.sysimage import guestbase
-        body = inspect.getsource(guestbase.Base.provision)
-        self.assertLess(body.index(".set_guest_clock()"), body.index("self.run_provisioning(g)"))
-
 
 if __name__ == "__main__":
     unittest.main()

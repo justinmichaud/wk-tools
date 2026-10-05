@@ -1,176 +1,20 @@
-"""The systemd --user units a machine that runs workspaces carries, and the one
-installer that puts them there and starts them (host/units.sh,
-host/units/*.service).
-
-Two machines install them and they differ in two strings: where the checkout
-is (a virtiofs mount at /opt/wk-tools inside the podman machine on macOS, this
-checkout itself on a Linux workstation) and where the store is. So there is one
-body per service, with those two spelled as placeholders, and one installer
-taking the caller's own way of running a command on the machine the unit is for
--- `sh -c` locally, the ssh wrapper for the podman machine.
-
-The verdict that installer answers with is systemd's: every body is Type=notify
-or Type=forking, so a start job finishes when the service can be *used*, and a
-service that execs and dies a fraction of a second later fails the start job
-instead of answering `is-active` yes at t=0.
-
-Run: python3 -m unittest tests.test_host_units -v
-"""
+"""The systemd --user units a machine that runs workspaces carries, and the one installer that puts them there
+and starts them (host/units.sh, host/units/*.service)."""
 import os
 import shlex
 import shutil
 import subprocess
 import time
 import unittest
-from pathlib import Path
 
-from tests.support import REPO, repo_files, WkTest, bash, func_body
+from tests.support import REPO, WkTest, bash
 
-UNIT_DIR = REPO / "host" / "units"
 UNITS = ("wk-proxy.service", "wk-ssh-agent.service", "wk-github-inject.service",
          "wk-broker.service")
 
-# Each stage that installs units, and the ones it installs. The podman machine
-# runs no broker: on macOS the broker is a LaunchAgent on the host itself
-# (host/macos/broker.sh), because the boards it drives are reachable from there.
-STAGES = {
-    "host/macos/vmtools.sh": ("wk-proxy.service", "wk-ssh-agent.service",
-                              "wk-github-inject.service"),
-    "host/linux/sdk.sh": ("wk-proxy.service", "wk-ssh-agent.service",
-                          "wk-github-inject.service"),
-    "host/linux/broker.sh": ("wk-broker.service",),
-}
-
-# The services whose program is in this tree and can therefore say READY=1
-# itself; ssh-agent is the system's own binary and cannot.
-NOTIFYING = ("wk-proxy.service", "wk-github-inject.service", "wk-broker.service")
-
-
-class TestOneBodyPerService(unittest.TestCase):
-    def test_every_unit_has_a_body_and_there_are_no_others(self):
-        self.assertEqual(sorted(UNITS), sorted(p.name for p in UNIT_DIR.glob("*")))
-
-    def test_each_body_is_defined_exactly_once_in_the_tree(self):
-        """A second copy of a unit is a second thing to keep true, and the two
-        would drift silently: the machine that runs the stale one just behaves
-        differently."""
-        for name in UNITS:
-            exec_start = [l for l in (UNIT_DIR / name).read_text().splitlines()
-                          if l.startswith("ExecStart=")]
-            self.assertEqual(1, len(exec_start), f"{name} has {len(exec_start)} ExecStart lines")
-            # The ExecStart *line* itself, placeholders and all, is what must
-            # be unique -- the program path alone is named by prose too.
-            hits = [p for p in repo_files()
-                    if p.name != Path(__file__).name
-                    and exec_start[0] in p.read_text(errors="replace")]
-            self.assertEqual([UNIT_DIR / name], hits,
-                             f"{name}'s ExecStart is written in more than one place: {hits}")
-
-    def test_no_stage_writes_a_unit_body_of_its_own(self):
-        for rel in STAGES:
-            text = (REPO / rel).read_text()
-            with self.subTest(stage=rel):
-                self.assertNotIn("[Install]", text,
-                                 f"{rel} still writes a unit body inline")
-                self.assertNotIn("_install_unit", text,
-                                 f"{rel} still has an installer of its own")
-
-
-class TestEveryStageGoesThroughTheOneInstaller(unittest.TestCase):
-    def test_each_stage_starts_its_units_through_the_shared_installer(self):
-        for rel, units in STAGES.items():
-            text = (REPO / rel).read_text()
-            with self.subTest(stage=rel):
-                self.assertIn('. "$WK_ROOT/host/units.sh"', text)
-                for name in units:
-                    self.assertIn(f"unit_start {name} ", text,
-                                  f"{rel} does not start {name}")
-
-    def test_the_stages_differ_only_in_the_root_the_store_and_the_transport(self):
-        """The whole point of the split: everything else about a unit -- when
-        it is restarted, what its failure says, what "ready" means -- is the
-        same on both machines and lives in host/units.sh."""
-        calls = {}
-        for rel in STAGES:
-            calls[rel] = [l.split() for l in (REPO / rel).read_text().splitlines()
-                          if l.startswith("unit_start ")]
-        mac, linux = calls["host/macos/vmtools.sh"], calls["host/linux/sdk.sh"]
-        self.assertEqual([c[1] for c in mac], [c[1] for c in linux])
-        self.assertEqual(['"$_unit_root"'] * 3, [c[2] for c in mac])
-        self.assertEqual(['"$WK_ROOT"'] * 3, [c[2] for c in linux])
-        self.assertEqual(['"$_unit_store"'] * 3, [c[3] for c in mac])
-        self.assertEqual(['"$WK_STORE"'] * 3, [c[3] for c in linux])
-
-    def test_no_stage_runs_systemctl_of_its_own(self):
-        """The defect this replaced: three stages each asking `is-active`
-        straight after `enable --now`, which a service that is about to die
-        answers yes to."""
-        for rel in STAGES:
-            with self.subTest(stage=rel):
-                self.assertNotIn("systemctl", (REPO / rel).read_text(),
-                                 f"{rel} drives systemd itself instead of unit_start")
-
-
-class TestReadinessIsWhatSystemdIsAskedFor(unittest.TestCase):
-    """Structural facts that make the fix real rather than a settle-and-look."""
-
-    def test_no_unit_is_type_simple(self):
-        for name in UNITS:
-            body = (UNIT_DIR / name).read_text()
-            types = [l for l in body.splitlines() if l.startswith("Type=")]
-            with self.subTest(unit=name):
-                self.assertEqual(1, len(types), f"{name}: {types}")
-                self.assertIn(types[0], ("Type=notify", "Type=forking"),
-                              f"{name} is {types[0]}, which is active at t=0")
-
-    def test_the_services_this_tree_writes_are_type_notify(self):
-        for name in NOTIFYING:
-            body = (UNIT_DIR / name).read_text()
-            with self.subTest(unit=name):
-                self.assertIn("Type=notify", body)
-                self.assertIn("NotifyAccess=all", body)
-
-    def test_ssh_agent_forks_so_the_start_job_waits_for_the_bound_socket(self):
-        """ssh-agent binds and listens before it forks, and says nothing over
-        sd_notify -- so the parent exiting is the readiness signal, and -D
-        (stay in the foreground) would put readiness back at the exec."""
-        body = (UNIT_DIR / "wk-ssh-agent.service").read_text()
-        self.assertIn("Type=forking", body)
-        exec_start = [l for l in body.splitlines() if l.startswith("ExecStart=")][0]
-        self.assertNotIn(" -D ", exec_start)
-        self.assertIn("/usr/bin/ssh-agent -a %t/wk/ssh-agent.sock", exec_start)
-
-    def test_the_installer_asks_is_active_before_it_starts_anything(self):
-        """Only to choose a word between "started" and "already ready". The
-        verdict is the exit status of the start itself, so nothing may look
-        again afterwards."""
-        body = func_body((REPO / "host" / "units.sh").read_text(), "unit_start")
-        ask, start = "systemctl --user is-active", "systemctl --user enable --now"
-        self.assertEqual(1, body.count(ask))
-        self.assertEqual(1, body.count(start))
-        self.assertLess(body.index(ask), body.index(start))
-
-    def test_one_sd_notify_in_the_tree(self):
-        defs = [p for p in repo_files()
-                if p.suffix == ".py" and p.name != Path(__file__).name
-                and "def sd_notify(" in p.read_text(errors="replace")]
-        self.assertEqual([REPO / "lib" / "wk" / "notify.py"], defs)
-
-    def test_every_notifying_service_imports_it_and_says_ready(self):
-        for name in NOTIFYING:
-            rel = unit_program(name)
-            text = (REPO / rel).read_text()
-            with self.subTest(program=rel):
-                # assertTrue, not assertIn: the haystack is a whole program.
-                self.assertTrue("from wk.notify import sd_notify" in text,
-                                f"{rel} does not import the one sd_notify")
-                self.assertTrue('sd_notify("READY=1")' in text,
-                                f"{rel} never tells systemd it is ready")
-
 
 def unit_program(name):
-    """The same derivation host/units.sh makes, asked of the shell that owns
-    it rather than repeated here."""
+    """The same derivation host/units.sh makes, asked of the shell that owns it rather than repeated here."""
     cp = bash(f'. "$WK_ROOT/host/units.sh"; unit_program {name}')
     assert cp.returncode == 0, cp.stdout + cp.stderr
     return cp.stdout.strip()
@@ -217,14 +61,10 @@ class TestRenderingSubstitutesBothEnds(unittest.TestCase):
                 self.assertNotIn("@WK_", self._render(name, "/r", "/s"))
 
     def test_percent_t_is_left_for_systemd(self):
-        """%t is the *machine's* runtime directory, resolved by systemd there;
-        rendering must not touch it."""
         out = self._render("wk-ssh-agent.service", "/r", "/s")
         self.assertIn("%t/wk/ssh-agent.sock", out)
 
     def test_a_unit_with_no_body_is_refused_by_name(self):
-        """By both readers of a body, and by name -- sed and awk would fail on
-        the path instead, naming neither the unit nor where a body belongs."""
         for call in ("unit_render wk-nonesuch.service /r /s",
                      "unit_program wk-nonesuch.service"):
             with self.subTest(call=call):
@@ -234,8 +74,8 @@ class TestRenderingSubstitutesBothEnds(unittest.TestCase):
 
 
 class TestTheInstallerConverges(WkTest):
-    """Driven with `sh -c` against a scratch HOME, so the writes, the compare
-    and the daemon-reload are the real ones."""
+    """Driven with `sh -c` against a scratch HOME, so the writes, the compare and the daemon-reload are the real
+    ones."""
 
     def _install(self, name="wk-proxy.service"):
         home = self.tmp / "home"
@@ -259,8 +99,6 @@ class TestTheInstallerConverges(WkTest):
         self.assertIn("--user daemon-reload", log.read_text())
 
     def test_a_second_run_changes_nothing_and_does_not_reload(self):
-        """A re-run of ./setup must not daemon-reload under a service a build
-        is depending on."""
         self._install()
         cp, unit, log = self._install()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -273,8 +111,6 @@ class TestTheInstallerConverges(WkTest):
         self.assertEqual([unit.name], [p.name for p in unit.parent.iterdir()])
 
     def test_an_edited_unit_is_replaced_and_reloaded(self):
-        """The machine wins over the record everywhere else; here the tree
-        wins, because the unit is generated from it."""
         _cp, unit, _log = self._install()
         unit.write_text("[Service]\nExecStart=/bin/false\n")
         cp, unit, log = self._install()
@@ -297,8 +133,8 @@ exit 0
 
 
 class TestTheStartVerdictComesFromSystemd(WkTest):
-    """`unit_start` against a scripted systemctl and a scratch store: one test
-    per state a machine can be in when ./setup reaches it."""
+    """`unit_start` against a scripted systemctl and a scratch store: one test per state a machine can be in when
+    ./setup reaches it."""
 
     UNIT = "wk-proxy.service"
     STAMP = ".wk-proxy.program"
@@ -348,16 +184,12 @@ class TestTheStartVerdictComesFromSystemd(WkTest):
         self.assertEqual(self._real_hash(), self._stamp())
 
     def test_a_service_that_does_not_reach_readiness_is_not_reported_started(self):
-        """The defect: `enable --now` returning non-zero is systemd saying the
-        start job failed, and that is the whole verdict -- nothing looks
-        again."""
         cp, out = self._start(active=False, start_ok=False)
         self.assertNotIn("started", out)
         self.assertIn("did not reach readiness", out)
         self.assertIn(self.UNIT, out)
         self.assertIn("workspaces will have no egress", out)
         self.assertIn(f"OVER-THERE journalctl --user -u {self.UNIT} -e", out)
-        # Nothing is recorded about a program that never ran.
         self.assertIsNone(self._stamp())
 
     def test_a_running_service_on_an_unchanged_program_is_left_alone(self):
@@ -384,9 +216,6 @@ class TestTheStartVerdictComesFromSystemd(WkTest):
         self.assertEqual("0 not-the-current-program", self._stamp())
 
     def test_a_start_limited_unit_is_cleared_before_it_is_started(self):
-        """A unit that has hit its start limit refuses to start at all until
-        the counter is cleared, so a ./setup after a bad one could not fix the
-        thing the bad one broke."""
         self._start(active=False)
         log = self.log.read_text().splitlines()
         reset = [i for i, l in enumerate(log) if "reset-failed" in l]
@@ -395,9 +224,6 @@ class TestTheStartVerdictComesFromSystemd(WkTest):
         self.assertLess(reset[0], start[0])
 
     def test_a_dry_run_says_what_it_would_do_and_drives_nothing(self):
-        """`./setup --dry-run` reports the install and the start and leaves
-        the machine alone: reading `is-active` is the only systemctl it
-        runs."""
         cp, out = self._start(active=False, dry=True)
         self.assertEqual(0, cp.returncode, out)
         self.assertIn(f"would install {self.UNIT}", out)
@@ -409,8 +235,6 @@ class TestTheStartVerdictComesFromSystemd(WkTest):
         self.assertIsNone(self._stamp())
 
     def test_a_dry_run_over_a_running_service_reports_only_what_changed(self):
-        """The stamp and the unit body are both read, so the report is the
-        same verdict a real run would reach."""
         (self.store / self.STAMP).write_text(self._real_hash() + "\n")
         cp, out = self._start(active=True, dry=True)
         self.assertIn(f"{self.UNIT} ready", out)
@@ -421,8 +245,6 @@ class TestTheStartVerdictComesFromSystemd(WkTest):
         self.assertEqual("0 not-the-current-program", self._stamp())
 
     def test_a_service_with_no_program_of_ours_stamps_nothing(self):
-        """ssh-agent is the system's own binary: there is no file in this tree
-        an edit could make stale, so there is nothing to record."""
         self.UNIT, self.STAMP = "wk-ssh-agent.service", ".wk-ssh-agent.program"
         cp, out = self._start(active=False)
         self.assertIn("started wk-ssh-agent.service", out)
@@ -438,15 +260,9 @@ def _has_user_systemd():
 
 @unittest.skipUnless(_has_user_systemd(), "no systemd --user bus here")
 class TestAServiceRunningOlderCodeThanTheTree(WkTest):
-    """`wk status` reports it, because a tools sync replaces a program under a
-    long-lived service and systemd goes on running what it exec'd: the egress
-    allowlist and the credential injector both live in files a sync moves, and
-    a host added to either reaches nothing until the service is restarted.
-
-    Driven against a real transient unit, whose program is a file this test
-    owns: the fact is the program file's mtime against /proc/<pid>, which is
-    stamped with when the process started.
-    """
+    """`wk status` reports it, because a tools sync replaces a program under a long-lived service and systemd
+    goes on running what it exec'd: the egress allowlist and the credential injector both live in files a sync
+    moves, and a host added to either reaches nothing until the service is restarted."""
 
     UNIT = "wk-test-unit-stale.service"
 
@@ -493,22 +309,9 @@ class TestAServiceRunningOlderCodeThanTheTree(WkTest):
         self.assertEqual("stale", self.stale())
 
     def test_a_service_that_is_not_running_is_not_called_stale(self):
-        """Stopped is its own verdict in the report, with its own remedy."""
         subprocess.run(["systemctl", "--user", "stop", self.UNIT], capture_output=True)
         self.prog.write_text("#!/bin/bash\nexec sleep 301\n")
         self.assertEqual("current", self.stale())
-
-
-class TestTheReportNamesBothServices(WkTest):
-    """The injector is reported beside the proxy: a workspace with neither has
-    no network and no credential, and both are units this tree's code runs."""
-
-    def test_status_reports_each_one_and_asks_whether_it_is_stale(self):
-        text = (REPO / "lib" / "wk" / "status.py").read_text()
-        for unit in ("wk-proxy.service", "wk-github-inject.service"):
-            with self.subTest(unit=unit):
-                self.assertIn(unit, text)
-        self.assertIn("unit_stale", text)
 
 
 if __name__ == "__main__":

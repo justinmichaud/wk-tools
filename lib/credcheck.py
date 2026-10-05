@@ -14,12 +14,12 @@ import collections
 import http.client as http_client
 import json
 import os
-import subprocess
 import sys
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from wk.machine import Local
 
 OK, WIDE, BAD, UNVERIFIED, ABSENT = ("ok", "wide", "bad",
                                     "unverified", "absent")
@@ -115,6 +115,14 @@ def _http(method, url, token, body=None, headers=()):
 
 def _lower(headers):
     return dict((k.lower(), v) for k, v in headers.items())
+
+
+def _json(raw):
+    try:
+        doc = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
 
 
 # Powers no wk code path spends and a token reachable from the boundary must not carry; every other classic scope is merely broader than needed.
@@ -360,290 +368,6 @@ def _github_pat_can_open_a_pr(token, repo):
                         "not known." % (repo, status))
 
 
-LOGIN_SCOPES = ("user:profile", "user:inference")
-
-CLAUDE_OAUTH = api_base("WK_CLAUDE_OAUTH", "https://platform.claude.com")
-CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # the CLI's own OAuth client, which a refresh names
-# The CLI holds its refresh lock as a directory beside the credential and treats one older than a minute as abandoned; held the same way here, the two never spend one refresh token at once.
-REFRESH_LOCK = ".oauth_refresh.lock"
-REFRESH_LOCK_STALE = 60
-REFRESH_AHEAD = 60
-RC_FACT = "remote-control"
-
-
-def _claude_login(value, repos, path, evidence):
-    try:
-        doc = json.loads(value)
-    except Exception as e:
-        return BAD, "that is not JSON at all (%s)." % e.__class__.__name__
-    oauth = doc.get("claudeAiOauth") if isinstance(doc, dict) else None
-    verdict, why = _login_shape(oauth)
-    if verdict != OK:
-        return verdict, why
-    if not path:
-        return OK, "; ".join(_login_facts(oauth)) + "."
-    org = _login_organization(path)
-    if not org:
-        return BAD, ("no account record beside it: remote control reads "
-                     "the organization from the CLI's own config file "
-                     "(oauthAccount.organizationUuid in %s), which `claude "
-                     "auth login` writes into the directory CLAUDE_CONFIG_DIR "
-                     "names, and this login was made without pointing it "
-                     "there." % _login_record_path(path))
-    verdict, why, oauth = _login_renewed(path, doc)
-    if verdict != OK:
-        return verdict, why + _rc_line("unverified")
-    return _login_measured(oauth, org)
-
-
-def _login_shape(oauth):
-    if not isinstance(oauth, dict):
-        return BAD, "no claudeAiOauth object -- not a claude.ai login credential."
-    if not oauth.get("accessToken"):
-        return BAD, "no accessToken."
-    if not oauth.get("refreshToken"):
-        return BAD, ("no refreshToken -- that is a `claude setup-token` "
-                     "credential, which is inference-only and cannot refresh "
-                     "the profile remote control reads.")
-    scopes = oauth.get("scopes")
-    if not isinstance(scopes, list):
-        return BAD, "no scopes list."
-    missing = [s for s in LOGIN_SCOPES if s not in scopes]
-    if missing:
-        return BAD, ("the login is missing %s; it carries %s."
-                     % (", ".join(missing), " ".join(str(s) for s in scopes)))
-    refresh_expiry = oauth.get("refreshTokenExpiresAt")
-    if isinstance(refresh_expiry, (int, float)) and refresh_expiry < time.time() * 1000:
-        return BAD, ("the refresh token expired %s, so this login cannot be "
-                     "renewed and no workspace can use it."
-                     % _when(refresh_expiry))
-    return OK, ""
-
-
-def _login_facts(oauth):
-    facts = ["scopes: %s" % " ".join(str(s) for s in oauth["scopes"])]
-    if oauth.get("subscriptionType"):
-        facts.append("subscription: %s" % oauth["subscriptionType"])
-    refresh_expiry = oauth.get("refreshTokenExpiresAt")
-    if isinstance(refresh_expiry, (int, float)):
-        facts.append("renewable until %s" % _when(refresh_expiry))
-    return facts
-
-
-def _rc_line(state):
-    return "\n    %s: %s" % (RC_FACT, state)
-
-
-def _login_current(oauth):
-    expiry = oauth.get("expiresAt")
-    return (isinstance(expiry, (int, float))
-            and expiry > (time.time() + REFRESH_AHEAD) * 1000)
-
-
-# The login as a session would spend it: renewed through its refresh token once the access token has run out, and written back over the one file every holder reads.
-def _login_renewed(path, doc):
-    oauth = doc["claudeAiOauth"]
-    if _login_current(oauth):
-        return OK, "", oauth
-    lock = os.path.join(os.path.dirname(path), REFRESH_LOCK)
-    held = _take_refresh_lock(lock)
-    if held is not True:
-        return UNVERIFIED, ("its access token has expired and another process "
-                            "holds the refresh lock (%s, %ds old), so it was "
-                            "neither renewed nor asked about; the next check "
-                            "asks again." % (lock, held)), None
-    try:
-        # Re-read under the lock: a session may have renewed it since the value was read.
-        try:
-            with open(path) as f:
-                current = json.load(f)
-        except (OSError, ValueError):
-            current = doc
-        oauth = current.get("claudeAiOauth") if isinstance(current, dict) else None
-        if not isinstance(oauth, dict) or not oauth.get("refreshToken"):
-            return BAD, "the file no longer holds a login.", None
-        if _login_current(oauth):
-            return OK, "", oauth
-        verdict, why, fresh = _refresh(oauth)
-        if verdict != OK:
-            return verdict, why, None
-        current["claudeAiOauth"] = fresh
-        _write_login(path, current)
-        return OK, "", fresh
-    finally:
-        try:
-            os.rmdir(lock)
-        except OSError:
-            pass
-
-
-def _take_refresh_lock(lock):
-    """True once taken; otherwise the age in seconds of the lock another process holds."""
-    for _ in range(2):
-        try:
-            os.mkdir(lock)
-            return True
-        except FileExistsError:
-            try:
-                age = time.time() - os.stat(lock).st_mtime
-            except OSError:
-                continue
-            if age < REFRESH_LOCK_STALE:
-                return int(age)
-            try:
-                os.rmdir(lock)
-            except OSError:
-                pass
-    return 0
-
-
-def _refresh(oauth):
-    body = json.dumps({"grant_type": "refresh_token",
-                       "refresh_token": oauth["refreshToken"],
-                       "client_id": CLAUDE_CLIENT_ID,
-                       "scope": " ".join(str(s) for s in oauth["scopes"])}).encode()
-    try:
-        status, _headers, raw = _http("POST", CLAUDE_OAUTH + "/v1/oauth/token",
-                                      None, body=body)
-    except Unreachable as e:
-        return UNVERIFIED, ("its access token has expired and %s (%s) did not "
-                            "answer, so it was neither renewed nor asked about."
-                            % (CLAUDE_OAUTH, e)), None
-    if status in (400, 401, 403):
-        return BAD, ("its access token has expired and Anthropic refuses to "
-                     "renew it (HTTP %d%s): the login is revoked, or a copy of "
-                     "it refreshed first and rotated the refresh token out from "
-                     "under this one. Every session holding it stops at /login "
-                     "and remote control cannot start."
-                     % (status, _oauth_error(raw))), None
-    if status != 200:
-        return UNVERIFIED, ("its access token has expired and the token endpoint "
-                            "answered HTTP %d rather than 200 or 401, so it was "
-                            "not renewed." % status), None
-    answer = _json(raw)
-    try:
-        access, expires_in = answer["access_token"], int(answer["expires_in"])
-    except (KeyError, TypeError, ValueError):
-        return UNVERIFIED, ("the token endpoint answered 200 with something "
-                            "that is not a token."), None
-    now = int(time.time() * 1000)
-    fresh = dict(oauth)
-    fresh["accessToken"] = access
-    fresh["refreshToken"] = answer.get("refresh_token") or oauth["refreshToken"]
-    fresh["expiresAt"] = now + expires_in * 1000
-    if isinstance(answer.get("refresh_token_expires_in"), (int, float)):
-        fresh["refreshTokenExpiresAt"] = now + int(answer["refresh_token_expires_in"]) * 1000
-    if isinstance(answer.get("scope"), str) and answer["scope"].split():
-        fresh["scopes"] = answer["scope"].split()
-    return OK, "", fresh
-
-
-def _oauth_error(raw):
-    error = _json(raw).get("error")
-    return ", %s" % error if isinstance(error, str) and error else ""
-
-
-def _json(raw):
-    try:
-        doc = json.loads(raw)
-    except (ValueError, TypeError):
-        return {}
-    return doc if isinstance(doc, dict) else {}
-
-
-# A new file renamed over the old one: the same move the CLI makes, so a reader sees either login whole and a planted link at the path is replaced rather than followed.
-def _write_login(path, doc):
-    from wk.machine import replace_file
-    replace_file(path, json.dumps(doc), mode=0o600)
-
-
-def _login_measured(oauth, org):
-    token = oauth["accessToken"]
-    facts = _login_facts(oauth)
-    try:
-        status, _headers, raw = _http("GET", ANTHROPIC_API + "/api/oauth/profile",
-                                      token)
-    except Unreachable as e:
-        return UNVERIFIED, ("could not reach %s (%s) to ask whether Anthropic "
-                            "still accepts this login.\n    %s."
-                            % (ANTHROPIC_API, e, "; ".join(facts))
-                            + _rc_line("unverified"))
-    if status == 401:
-        return BAD, ("Anthropic does not accept this login (HTTP 401 on the "
-                     "profile its scope grants): revoked, or signed out "
-                     "elsewhere. Every session holding it stops at /login and "
-                     "remote control cannot start.")
-    if status != 200:
-        return UNVERIFIED, ("GET /api/oauth/profile answered HTTP %d rather "
-                            "than 200 or 401, so whether Anthropic accepts this "
-                            "login is not known." % status
-                            + _rc_line("unverified"))
-    organization = _json(raw).get("organization") or {}
-    facts.append("organization: %s" % (organization.get("name") or org))
-    if organization.get("subscription_status"):
-        facts.append("subscription %s" % organization["subscription_status"])
-    state, why = _remote_control_policy(token)
-    if state == "allowed":
-        facts.append("remote control allowed by the organization's policy")
-        return OK, "; ".join(facts) + "." + _rc_line(state)
-    if state == "denied":
-        return OK, ("%s; remote control DENIED: %s." % ("; ".join(facts), why)
-                    + _rc_line(state)
-                    + "\n    fix: an owner of the %s organization turns Remote "
-                      "Control on in its Claude Code policy "
-                      "(allow_remote_control); until then `wk ai claude` "
-                      "sessions run without it" % (organization.get("name") or org))
-    return OK, ("%s; remote control unverified: %s." % ("; ".join(facts), why)
-                + _rc_line(state))
-
-
-# What the CLI reads before it starts remote control (measured in 2.1.270): an `allow_remote_control` restriction, a HIPAA taint, or -- when the document cannot be loaded at all -- a refusal worded as the organization's policy.
-def _remote_control_policy(token):
-    try:
-        status, _headers, raw = _http("GET", ANTHROPIC_API
-                                      + "/api/claude_code/policy_limits", token)
-    except Unreachable as e:
-        return "unverified", ("could not reach %s (%s) for the organization's "
-                              "policy" % (ANTHROPIC_API, e))
-    if status == 404:
-        return "unverified", ("the request for /api/claude_code/policy_limits "
-                              "got a 404 -- a proxy between here and the API not "
-                              "forwarding that path -- and the CLI refuses remote "
-                              "control on the same answer")
-    if status != 200:
-        return "unverified", ("GET /api/claude_code/policy_limits answered HTTP "
-                              "%d" % status)
-    policy = _json(raw)
-    restriction = (policy.get("restrictions") or {}).get("allow_remote_control")
-    if isinstance(restriction, dict) and restriction.get("allowed") is False:
-        return "denied", ("allow_remote_control is off in the organization's "
-                          "Claude Code policy")
-    if "hipaa" in (policy.get("compliance_taints") or []):
-        return "denied", ("the organization is HIPAA-regulated, under which the "
-                          "CLI refuses remote control")
-    return "allowed", ""
-
-
-def _login_record_path(path):
-    return os.path.join(os.path.dirname(path), ".claude.json")
-
-
-# Measured 2026-09-11 in Claude Code 2.1.269: `claude remote-control` refuses with "Unable to determine your organization" unless its config file's oauthAccount carries organizationUuid; nothing fetches one at start-up.
-def _login_organization(path):
-    try:
-        with open(_login_record_path(path)) as f:
-            account = (json.load(f) or {}).get("oauthAccount") or {}
-    except (OSError, ValueError, AttributeError):
-        return ""
-    if not isinstance(account, dict) or not account.get("organizationUuid"):
-        return ""
-    return account.get("organizationName") or account["organizationUuid"]
-
-
-def _when(millis):
-    return time.strftime("%Y-%m-%d", time.localtime(millis / 1000.0))
-
-
 ANTHROPIC_API = api_base("WK_ANTHROPIC_API", "https://api.anthropic.com")
 
 # The read-only request that answers whether Anthropic still accepts a token,
@@ -673,8 +397,8 @@ def _claude_token_accepted(token):
 def _claude_token(value, repos, path, evidence):
     token = value.strip()
     if token.startswith("{"):
-        return BAD, ("that is a login document, not a token: 'wk key set "
-                     "claude-login' is the row that takes one of those.")
+        return BAD, ("that is a login document, not a token: `claude "
+                     "setup-token` prints the one this row takes.")
     if token.startswith("sk-ant-api"):
         return BAD, ("that is an Anthropic Console API key: it bills the "
                      "organization, is not restricted to Claude Code, and every "
@@ -732,7 +456,7 @@ def _litellm_key(value, repos, path, evidence):
                             "403, so what else the key reaches is not known."
                             % (facts[0], status))
     facts.append("restricted to the LLM API routes, so it cannot read or mint keys")
-    return OK, ("%s.\n    `wk ai pi` writes it into a workspace's "
+    return OK, ("%s.\n    `wk new` writes it into a workspace's "
                 "~/.pi/agent/models.json for %s." % ("; ".join(facts),
                                                       LITELLM_ENDPOINT))
 
@@ -779,17 +503,14 @@ def _tailnet_api(value, repos, path, evidence):
     if not path:
         return OK, ("an API access token; whether the tailnet still accepts it "
                     "is asked as soon as it is stored.")
-    probe = subprocess.run(
-        [sys.executable, "-m", "wk.tailnet", "check"],
-        env=dict(os.environ, WK_TS_API_SECRET_FILE=path,
-                 PYTHONPATH=os.path.dirname(os.path.abspath(__file__))),
-        capture_output=True, text=True)
-    detail = (probe.stdout + probe.stderr).strip().splitlines()
+    probe = Local().run(["env", "WK_TS_API_SECRET_FILE=" + path, "PYTHONPATH=" + os.path.dirname(os.path.abspath(__file__)),
+                         sys.executable, "-m", "wk.tailnet", "check"])
+    detail = (probe.out + probe.err).strip().splitlines()
     detail = detail[-1] if detail else "no answer"
-    if probe.returncode == 0:
+    if probe.rc == 0:
         return OK, ("the tailnet accepts it: %s.\n    It is never written to a "
                     "card -- it administers the whole tailnet." % detail)
-    if probe.returncode == 6:
+    if probe.rc == 6:
         return UNVERIFIED, "could not ask the tailnet: %s" % detail
     return BAD, "the tailnet refused it: %s" % detail
 
@@ -916,22 +637,6 @@ RULES = collections.OrderedDict((
         remedy="'+ Create New Key' there; the key is shown once",
         store_with="wk key set litellm",
         check=_litellm_key)),
-    ("claude-login", Rule(
-        spent_by="lib/wk/targets.py's Container -- mounted into every container as the "
-                 "one Claude credential it is given, and what a `wk ai claude` "
-                 "session's Remote Control needs",
-        needs="run inference and fetch the account profile (user:inference, "
-              "user:profile), and still be renewable",
-        forbids="be an inference-only setup token, which cannot fetch a profile",
-        what="your claude.ai login credential, so a container authenticates "
-             "and remote control works in it",
-        url="",
-        remedy="it is `claude auth login` in a browser, run with the directory "
-               "the containers share as the CLI's config home rather than this "
-               "machine's, so the credential and the account record land beside "
-               "each other; nothing is pasted",
-        store_with="wk key set claude-login",
-        check=_claude_login)),
     ("tailnet", Rule(
         spent_by="cmd/sysimage -- seeded onto every card written from here",
         needs="enroll a node on the tailnet",

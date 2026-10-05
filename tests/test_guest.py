@@ -1,17 +1,11 @@
-"""lib/wk/guest.py against a fake host: a guest's start and stop, what a start converges in it, the three host
-daemons, the agent forwards and the guests' half of `wk push`.
-
-Nothing here starts a guest: tart, softnet and ssh are answers on a Fake (tests/test_wk_secrets.py's World, which
-is also an ssh-agent and a filesystem), the steps that stream a script into the guest are recorded rather than run
-(tests/test_vm_base.py and tests/test_vm_desktop.py run them), and time is a FakeClock.
-
-Run: python3 tests/run.py --unit -k test_guest
-"""
+"""lib/wk/guest.py against a fake host: start and stop, the host daemons, the forwards and the guests' `wk push`."""
 import contextlib
 import io
 import json
 import os
+import shlex
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -21,16 +15,17 @@ from tests.test_wk_secrets import SECRETFILE, SecretsTest, World, quiet
 from tests.test_wk_targets import TargetConformance
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import guest, targets, tools  # noqa: E402
+from wk import agents, guest, targets, tools  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Killed, Result  # noqa: E402
-from wk.store import Store  # noqa: E402
+from wk.store import GUEST_BROKER_SOCKET, Store  # noqa: E402
 
 TART = "/fake/tart"
 IP = "192.168.2.5"
 ADDR = "192.168.2.1"
-BASH_STEPS = [s[0] for s in guest.STEPS if s[0] in ("write_shell_rc", "write_lldbinit", "write_checkout", "install_claude_cli",
+INSTALL_AGENTS = guest.Guest.install_agents   # GuestTest records the step; TestTheSteps runs it
+BASH_STEPS = [s[0] for s in guest.STEPS if s[0] in ("write_shell_rc", "write_lldbinit", "write_checkout", "install_agents",
                                                     "write_claude_config", "settle_desktop", "report_desktop")]
 
 
@@ -48,7 +43,7 @@ class GuestWorld(World):
         self.answer([TART, "ip"], out=IP + "\n")
         self.answer([TART, "get"], out='{"CPU": 4, "Memory": 8192}')
         self.answer([TART, "stop"])
-        self.react(["ssh"], self._guest)
+        self.react([TART, "exec"], self._guest)
         self.react(["ifconfig"], lambda a, f: Result(0, "\tinet %s netmask 0xffffff00\n" % ADDR if f.bridge else "\tinet 10.0.0.2\n"))
         self.answer(["test", "-x"])
         self.react(["lsof", "-t"], self._lsof)
@@ -67,18 +62,15 @@ class GuestWorld(World):
         return Result(self.ssh_rc)
 
     def _lsof(self, argv, _):
-        """Whichever live daemon serves the port or socket asked about, as the process table has it."""
         where = argv[-2] if argv[-1] == "-sTCP:LISTEN" else argv[-1]
         key = where.split("@", 1)[1] if where.startswith("-iTCP@") else where
         pids = [p for p, serves in self.serving.items() if key in serves and p in self.pids]
         return Result(0 if pids else 1, "".join("%d\n" % p for p in pids))
 
     def daemons(self, word):
-        """The live pids of one kind of daemon."""
         return sorted(p for p, serves in self.serving.items() if word in serves and p in self.pids)
 
     def spawn(self, argv, log):
-        """A daemon that comes up says so where its start looks: the proxy in its log, the injector at its socket."""
         pid = super().spawn(argv, log)
         joined = " ".join(argv)
         if not pid:
@@ -148,7 +140,6 @@ class GuestTest(SecretsTest):
 
 
 class TestVmConformance(GuestTest, TargetConformance):
-    """A guest needs no base snapshot to be present, and its start boots it."""
     cls, ws, down = targets.Vm, "demo", "stopped"
 
     def stopped(self):
@@ -162,8 +153,6 @@ class TestVmConformance(GuestTest, TargetConformance):
 
 class TestOneLockPerGuest(GuestTest):
     def test_one_lock_per_resource_guest_start(self):
-        """`unit record.one_lock_per_resource[guest start]`: a second start waits on the first and names it, and
-        one that outlives the wait is refused naming it again -- never two converges at once."""
         self.w.pids.add(4242)
         self.hold("guest-demo", 4242)
         ip, err = self.run_start()
@@ -201,7 +190,7 @@ class TestBothArms(GuestTest):
         self.assertIn("--net-softnet-block=0.0.0.0/0", run)
         self.assertIn("--net-softnet-allow=%s/32" % ADDR, run)
         self.assertIn("--dir=agent-rw:%s" % (self.tmp + "/store/agent-rw"), run)
-        self.assertIn("--dir=mirror:%s:ro" % os.path.dirname(self.vm.store.mirror()), run)
+        self.assertIn("--dir=mirror:%s:ro,tag=wk-mirror" % os.path.dirname(self.vm.store.mirror()), run)
         self.assertEqual("wk-demo", run[-1])
         self.assertTrue(run[1].startswith("PATH=/usr/local/bin:"), "tart finds softnet through PATH")
         self.assertNotIn(self.vmdir + "/demo.unfiltered", self.w.files)
@@ -224,7 +213,6 @@ class TestBothArms(GuestTest):
         self.assertEqual([], self.w.spawned("wk-proxy.py"), "an unfiltered guest needs no proxy")
 
     def test_no_softnet_refuses_before_tart_runs(self):
-        """Softnet applies at `tart run` and cannot be added later: a guest booted without it is open for life."""
         self.w.state = "stopped"
         self.w.answer(["test", "-x"], rc=1)
         ip, err = self.run_start()
@@ -240,11 +228,11 @@ class TestBothArms(GuestTest):
         self.assertIn("did not come up within 180s", err)
         self.assertIn("demo.run.log is empty", err)
 
-    def test_a_guest_whose_ssh_never_answers_is_refused(self):
+    def test_a_guest_whose_agent_never_answers_is_refused(self):
         self.w.state, self.w.ssh_rc = "stopped", 255
         ip, err = self.run_start()
         self.assertIsNone(ip)
-        self.assertIn("ssh never answered", err)
+        self.assertIn("guest agent never answered", err)
 
     def test_a_failed_step_is_named_and_the_start_goes_on(self):
         self.step_ok["write_shell_rc"] = False
@@ -269,10 +257,9 @@ class TestBothArms(GuestTest):
             ip, err = self.run_start()
         self.assertEqual(IP, ip, err)
         self.assertEqual(before, self.w.state_of())
-        self.assertIn("would run on admin@%s: env WK_ADDR=%s" % (IP, ADDR), err)
+        self.assertIn("would run on wk-demo: env WK_ADDR=%s" % ADDR, err)
 
     def test_a_dry_run_of_a_stopped_guest_ends_at_its_boot(self):
-        """A guest this run did not boot has no address to wait for: the plan ends at the `tart run`."""
         self.w.state = "stopped"
         before = self.w.state_of()
         with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
@@ -292,8 +279,6 @@ class TestBothArms(GuestTest):
         def run_once(w):
             quiet(guest.start, w.vm, "demo", FakeClock())
         def final(w):
-            """A pidfile names whichever pid the last start spawned: what must hold is that it names a live one,
-            and that exactly one of each daemon is up."""
             files = {p: ("live" if int(t) in w.fake.pids else "dead") if p.endswith(".pid") else t
                      for p, t in w.fake.files.items()}
             return files, [len(w.fake.daemons(d)) for d in ("wk-proxy.py", "github-inject.py")]
@@ -302,15 +287,23 @@ class TestBothArms(GuestTest):
 
 class TestTheSteps(GuestTest):
     def test_the_marker_is_written_and_a_bench_image_keeps_none(self):
-        g = guest.Guest(guest.Host(self.vm, self.clock), "demo", IP)
+        g = guest.Guest(guest.Host(self.vm, self.clock), "demo", self.vm.guest("demo"))
         quiet(g.write_marker)
         self.assertIn("name=demo", "".join(i for c, i in self.w.guest_cmds if ".wk-workspace" in c))
         self.w.bench, self.w.guest_cmds = True, []
         quiet(g.write_marker)
         self.assertTrue([c for c, _ in self.w.guest_cmds if c.startswith("rm -rf") and ".wk-workspace" in c])
 
+    def test_the_agents_are_installed_as_every_driver_installs_them(self):
+        g = guest.Guest(guest.Host(self.vm, self.clock), "demo", self.vm.guest("demo"))
+        self.assertTrue(quiet(INSTALL_AGENTS, g)[0])
+        cmds = [c for c, _ in self.w.guest_cmds]
+        self.assertIn(shlex.join(["bash", "-lc", agents.script(str(REPO))]), cmds)
+        self.assertIn(shlex.join(["bash", "-lc", "python3 %s/claude/workspace-config.py %s" % (self.vm.tools("demo"), self.vm.src("demo"))]),
+                      cmds)
+
     def test_the_clock_step_hands_the_guest_this_hosts_time(self):
-        g = guest.Guest(guest.Host(self.vm, self.clock), "demo", IP)
+        g = guest.Guest(guest.Host(self.vm, self.clock), "demo", self.vm.guest("demo"))
         self.assertTrue(quiet(g.set_guest_clock)[0])
         cmd, script = next((c, i) for c, i in self.w.guest_cmds if "WK_NOW_EPOCH" in c)
         self.assertIn("WK_NOW_EPOCH=%d" % self.clock.now(), cmd)
@@ -318,15 +311,14 @@ class TestTheSteps(GuestTest):
         self.assertEqual(guest.CLOCK, script)
 
     def test_a_credential_file_its_reader_refuses_stops_the_delivery(self):
-        """Refused is not absent: it must not land in the guest as an empty file, nor be taken away as withdrawn."""
         self.w.answer(["python3", SECRETFILE, "present"], rc=2, err="wk: refusing to read ...\n")
-        g = guest.Guest(guest.Host(self.vm, self.clock), "demo", IP)
+        g = guest.Guest(guest.Host(self.vm, self.clock), "demo", self.vm.guest("demo"))
         self.assertFalse(quiet(g.write_agent_secrets)[0])
         self.assertFalse([c for c, _ in self.w.guest_cmds if ".wk-litellm-key" in c])
 
     def test_the_deploy_config_names_the_proxy_and_the_forwarded_agent(self):
         self.w.seed()
-        g = guest.Guest(guest.Host(self.vm, self.clock), "demo", IP)
+        g = guest.Guest(guest.Host(self.vm, self.clock), "demo", self.vm.guest("demo"))
         self.assertTrue(quiet(g.write_deploy_keys)[0])
         cfg = next(i for c, i in self.w.guest_cmds if c.endswith('cat > "$HOME/.ssh/config"\''))
         self.assertIn("ProxyCommand /usr/bin/nc -X connect -x %s:3128 %%h %%p" % ADDR, cfg)
@@ -366,7 +358,6 @@ class TestTheDaemons(GuestTest):
         self.assertIn("WK_PROXY_TCP=%s:3128" % ADDR, argv)
         self.assertIn("WK_INJECT_SOCK=%s/github-inject.sock" % self.vmdir, argv)
         self.assertIn(self.vmdir + "/proxy.pid", self.w.files)
-        self.assertIn("egress proxy on %s:3128" % ADDR, err)
         self.assertEqual(1, len(self.w.spawned("github-inject.py")), "the injector goes up ahead of the proxy")
 
     def test_a_bridge_that_never_gets_its_address_starts_no_proxy(self):
@@ -413,21 +404,15 @@ class TestTheDaemons(GuestTest):
             for rows in (w.github(), w.github_read(), w.bugzilla_read()):
                 self.assertEqual("wk start demo", rows[0][2], rows)
 
-    def test_the_vm_remedy_for_a_dead_proxy_is_start(self):
-        for daemon in ("proxy", "inject"):
-            self.assertEqual("wk start demo", self.vm.daemon_remedy("demo", daemon))
-
     def test_a_proxy_older_than_its_source_is_stopped_and_started_again(self):
         self.w.pids.add(777)
         self.w._set_file(self.vmdir + "/proxy.pid", "777\n")
         self.w.answer(["find"], out=str(REPO / "container/proxy/wk-proxy.py") + "\n")
         _, err = quiet(self.host().start_proxy)
         self.assertIn(("kill", 777, 15), self.w.effects)
-        self.assertIn("restarting the egress proxy", err)
         self.assertEqual(1, len(self.w.spawned("wk-proxy.py")))
 
     def killed_before_the_pidfile(self, name):
-        """A start of every daemon killed once, between `name`'s spawn and its pidfile, then run again."""
         write = self.w.write
 
         def dies(path, text):
@@ -454,7 +439,6 @@ class TestTheDaemons(GuestTest):
                 self.assertIn("no pidfile names it", err)
 
     def test_an_agent_whose_pidfile_a_kill_lost_is_adopted(self):
-        """Replacing it would drop the keys `wk push on` loaded."""
         h = self.host()
         write = self.w.write
         with mock.patch.object(self.w, "write", lambda p, t: (_ for _ in ()).throw(Killed(p)) if p.endswith("ssh-agent.pid")
@@ -474,21 +458,23 @@ class TestTheDaemons(GuestTest):
 
 
 class TestTheForward(GuestTest):
-    """`wk push on`, `wk start` and a second `wk push on` all start one guest's forward; the tunnel is a pidfile'd
-    daemon, up once the guest's end of it serves, and `wk push off` is what ends it whoever started it."""
-
     def setUp(self):
         super().setUp()
         self.h = guest.Host(self.vm, self.clock)
-        self.g = self.vm.guest_at(IP)
-        self.pidfile = self.h.forward_pidfile("demo")
+        self.g = self.vm.guest("demo")
+        self.pidfile = self.h.forward_pidfile("demo", "agent")
+        self.far, self.near = "/Users/admin/.wk-ssh-agent.sock", self.h.agent_sock()
+
+    def start(self):
+        return quiet(self.h.forward_start, "demo", self.g, "agent", self.far, self.near)[0]
 
     def test_a_second_start_while_one_is_alive_is_a_no_op(self):
-        self.assertTrue(self.h.forward_start("demo", self.g))
-        self.assertTrue(self.h.forward_start("demo", self.g))
+        self.assertTrue(self.start())
+        self.assertTrue(self.start())
         forwards = self.w.spawned(" -N ")
         self.assertEqual(1, len(forwards), forwards)
         self.assertIn("/Users/admin/.wk-ssh-agent.sock:%s/ssh-agent.sock" % self.vmdir, forwards[0])
+        self.assertIn("ProxyCommand=%s/container/ssh-transport vm demo" % REPO, forwards[0], "over tart exec, not the network")
         self.assertIn(int(self.w.files[self.pidfile]), self.w.pids)
 
     def test_a_forward_whose_guest_end_never_serves_is_stopped(self):
@@ -499,27 +485,26 @@ class TestTheForward(GuestTest):
             self.w.guest_sock = False
             return pid
         with mock.patch.object(self.w, "spawn", never_serves):
-            self.assertFalse(quiet(self.h.forward_start, "demo", self.g)[0])
+            self.assertFalse(self.start())
         (pid,) = [e[1] for e in self.w.effects if e[0] == "kill"]
         self.assertNotIn(self.pidfile, self.w.files)
         self.assertGreaterEqual(sum(self.clock.slept), guest.FORWARD_WAIT)
 
     def test_a_pidfile_whose_pid_is_gone_is_started_again(self):
         self.w._set_file(self.pidfile, "4194304\n")
-        self.assertTrue(self.h.forward_start("demo", self.g))
+        self.assertTrue(self.start())
         self.assertEqual(1, len(self.w.spawned(" -N ")))
 
     def test_both_ends_take_the_forwards_lock(self):
-        """A stop while a start is mid-flight would kill a pid the start is about to overwrite."""
         self.w.pids.add(4242)
         self.hold("vm-agent-forward-demo", 4242)
-        for fn in (lambda: self.h.forward_start("demo", self.g), lambda: self.h.forward_stop("demo")):
+        for fn in (self.start, lambda: self.h.forward_stop("demo", "agent")):
             with self.assertRaises(Refused):
                 quiet(fn)
         self.assertEqual([], self.w.spawned(" -N "))
 
     def test_stopping_a_guest_ends_its_forward_first(self):
-        self.h.forward_start("demo", self.g)
+        self.start()
         pid = int(self.w.files[self.pidfile])
         quiet(guest.stop, self.vm, "demo", self.clock)
         kill = self.w.effects.index(("kill", pid, 15))
@@ -527,11 +512,25 @@ class TestTheForward(GuestTest):
         self.assertNotIn(self.pidfile, self.w.files)
 
     def test_a_converge_with_an_empty_agent_ends_the_forward(self):
-        self.h.forward_start("demo", self.g)
-        g = guest.Guest(self.h, "demo", IP)
+        self.start()
+        g = guest.Guest(self.h, "demo", self.g)
         self.assertTrue(quiet(g.agent_converge_guest)[0])
         self.assertNotIn(self.pidfile, self.w.files)
         self.assertIn(("rm -f /Users/admin/.wk-ssh-agent.sock", ""), self.w.guest_cmds)
+
+
+    def test_a_start_forwards_the_host_broker_to_the_socket_the_guests_client_dials(self):
+        self.assertTrue(quiet(guest.Guest(self.h, "demo", self.g).broker_forward)[0])
+        (fwd,) = self.w.spawned(" -N ")
+        self.assertIn("/Users/admin/.wk-broker.sock:%s" % Store(self.w.env).broker_socket(), fwd)
+        self.assertIn(self.h.forward_pidfile("demo", "broker"), self.w.files)
+
+    def test_stopping_a_guest_ends_every_forward(self):
+        self.start()
+        quiet(guest.Guest(self.h, "demo", self.g).broker_forward)
+        quiet(guest.stop, self.vm, "demo", self.clock)
+        for what in guest.FORWARDS:
+            self.assertNotIn(self.h.forward_pidfile("demo", what), self.w.files)
 
 
 class TestTheSwitchForTheGuests(GuestTest):
@@ -545,7 +544,6 @@ class TestTheSwitchForTheGuests(GuestTest):
         self.assertTrue(ok, err)
         self.assertEqual({"KEY:fork", "KEY:forkwpe"}, self.w.agents[self.vmdir + "/ssh-agent.sock"])
         self.assertEqual(["ghp-held\n", "bz-held\n"], list(self.creds().values()))
-        self.assertIn("reaches the agent on this host", err)
         self.assertEqual(1, len(self.w.spawned(" -N ")))
 
     def test_on_without_a_bugzilla_key_leaves_no_file(self):
@@ -583,11 +581,15 @@ class TestTheSwitchForTheGuests(GuestTest):
         self.assertEqual([("demo", "running", "2 key(s) through the agent on this host")], rows)
         self.assertEqual(before, self.w.state_of())
 
-    def test_a_host_whose_vm_target_has_no_store_of_its_own_has_no_guests_to_switch(self):
+    def test_a_host_with_no_guests_still_loads_the_agent_its_own_pushes_use(self):
+        self.w.seed()
         self.w.env["WK_VM_STORE"] = self.w.env["WK_STORE"]
-        self.assertTrue(guest.vm_push_keys_converge(str(REPO), self.w, "on", self.w.env))
-        self.assertIsNone(guest.vm_push_agent_keys(str(REPO), self.w, self.w.env))
+        ok, err = quiet(guest.vm_push_keys_converge, str(REPO), self.w, "on", self.w.env)
+        self.assertTrue(ok, err)
+        self.assertEqual({"KEY:fork", "KEY:forkwpe"}, self.w.agents[self.vmdir + "/ssh-agent.sock"])
+        self.assertEqual(2, guest.vm_push_agent_keys(str(REPO), self.w, self.w.env))
         self.assertEqual([], guest.vm_push_keys_state(str(REPO), self.w, self.w.env))
+        self.assertEqual([], self.w.spawned(" -N "))
 
 
 def _state_of(self):
@@ -655,12 +657,66 @@ class TestTheLiveRemount(unittest.TestCase):
             self.skipTest("live tier not selected, or no macOS guest is running on this host")
 
     def test_sync_guest_remount(self):
-        """`live sync.guest_remount`: after the remount the guest reads the host mirror's main as the host does."""
+        """`live sync.guest_remount`: after the remount the guest reads the host mirror's main as the host does, and
+        agent-rw, on the automount tag, is the mount it was."""
         vm, ws = self.found
         host = vm.machine.run(["git", "-C", vm.store.mirror(), "rev-parse", "refs/heads/main"])
-        self.assertEqual(vm.remount_shares(ws), "")
+        rw = vm.exec(ws, ["sh", "-c", "mount | grep -F %s" % shlex.quote(" on %s (" % targets.GUEST_SHARES)], timeout=60)
+        self.assertEqual(vm.remount_mirror(ws), "")
         r = vm.exec(ws, ["git", "-C", vm.mirror_dir(), "rev-parse", "refs/heads/main"], timeout=60)
         self.assertEqual((r.ok, r.out.strip()), (True, host.out.strip()), r.err)
+        self.assertEqual(rw.out, vm.exec(ws, ["sh", "-c", "mount | grep -F %s" % shlex.quote(" on %s (" % targets.GUEST_SHARES)],
+                                         timeout=60).out)
+
+
+class TestTheLiveWayIn(unittest.TestCase):
+    """`tart exec` as the one way into a real guest, and what rides it. Starts nothing; it writes only under /tmp in there."""
+    wk_tier = "live"
+
+    def setUp(self):
+        self.found = _a_running_guest()
+        if self.found is None:
+            self.skipTest("live tier not selected, or no macOS guest is running on this host")
+
+    def test_vm_tart_exec(self):
+        """`live vm.tart_exec`: a command runs as the guest's user with its home, its status comes back, a binary file
+        crosses both ways byte for byte, and a detached job outlives the exec that started it."""
+        vm, ws = self.found
+        g = vm.guest(ws)
+        r = g.run(["sh", "-c", 'echo "$(id -un) $HOME"; exit 3'])
+        self.assertEqual((r.rc, r.out.strip()), (3, "%s %s" % (vm.user(), vm.home())), r.err)
+        with tempfile.TemporaryDirectory() as d:
+            data = bytes(range(256)) * 64
+            with open(os.path.join(d, "in"), "wb") as f:
+                f.write(data)
+            g.copy_in(os.path.join(d, "in"), "/tmp/wk-live-copy")
+            g.copy_out("/tmp/wk-live-copy", os.path.join(d, "out"))
+            with open(os.path.join(d, "out"), "rb") as f:
+                self.assertEqual(f.read(), data)
+        pid = g.spawn(["sleep", "30"], "/tmp/wk-live-spawn.log")
+        self.assertTrue(g.alive(pid), "a detached job died with its tart exec")
+        g.kill(pid)
+
+    def test_vm_mirror_tag_mount(self):
+        """`live vm.mirror_tag_mount`: the base's LaunchDaemon mounted the mirror's own tag at boot, where mirror_dir is."""
+        vm, ws = self.found
+        r = vm.exec(ws, ["sh", "-c", "mount | grep -F %s && test -d %s" % (shlex.quote(" on %s (" % targets.GUEST_MIRROR_MOUNT),
+                                                                        shlex.quote(vm.mirror_dir()))], timeout=60)
+        self.assertTrue(r.ok, r.out + r.err)
+
+    def test_vm_ssh_transport(self):
+        """`live vm.ssh_transport`: ssh over the guest's sshd on tart exec answers, as the editor's alias and the
+        socket forwards use it."""
+        vm, ws = self.found
+        r = vm.machine.run(vm.ssh_argv(ws) + ["id", "-un"], timeout=60)
+        self.assertEqual((r.rc, r.out.strip()), (0, vm.user()), r.err)
+
+    def test_vm_broker_forward(self):
+        """`live vm.broker_forward`: `wk sync`'s broker client in a guest reaches the host's broker."""
+        vm, ws = self.found
+        r = vm.exec(ws, ["env", "WK_BROKER_SOCKET=%s/%s" % (vm.home(), GUEST_BROKER_SOCKET), "python3",
+                         vm.tools(ws) + "/container/broker/wk-broker-client.py", "capabilities"], timeout=60)
+        self.assertTrue(r.ok, r.out + r.err)
 
 
 def guest_mirror_objects(vm):

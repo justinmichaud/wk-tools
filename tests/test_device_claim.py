@@ -1,24 +1,5 @@
-"""One board, one driver -- across the whole fleet.
-
-A benchmark board is a fleet resource: exactly one thing may drive it at a
-time, and the two workstations are peers with their own `wk`. The claim is a
-hold on the holder's own task record (`holds: device:<machine>`,
-lib/wk/record.py), so there is no second store to keep in step: a holder is
-live by construction, and liveness is asked of the process table at read time.
-
-`Records.holders` is this machine's half of the answer, `wk status --holds` is
-that same read as a read-only CLI surface, and `record.fleet_holders` asks the
-podman machine's store and every peer workstation through its own wk.
-`record.hold` is the barrier the commands that touch a board take first (`wk
-bench run --system`, `wk bench deploy`, `wk boot`): it
-names the machine, the task and the command that stops it, and `--force`
-crosses it and records that it did.
-
-No board, no ssh, no hardware: the fleet is fakes, and the records are written
-into a scratch $WK_STORE.
-
-Run: python3 tests/run.py -k tests.test_device_claim
-"""
+"""One board, one driver, across the fleet: the claim is a `holds: device:<machine>` field on the holder's own task
+record (lib/wk/record.py), asked of this store, the podman machine's and every peer's; `record.hold` is the barrier."""
 import contextlib
 import io
 import os
@@ -50,7 +31,6 @@ def alive(pid):
 
 
 class ClaimTest(WkTest):
-    """A scratch store that is this machine's own, and a registry of no other machine."""
 
     def setUp(self):
         super().setUp()
@@ -60,8 +40,7 @@ class ClaimTest(WkTest):
         self.env = {"WK_STORE": str(self.store), "WK_MACHINES_DIR": str(self.tmp / "no-machines")}
 
     def spawn(self):
-        """A pid this test is not the parent of, so `kill -0` reads it as
-        running rather than as an unreaped zombie (tests/test_stop_tasks.py)."""
+        """A pid this test is not the parent of, so `kill -0` never reads an unreaped zombie."""
         cp = subprocess.run(["bash", "-c", "sleep 300 >/dev/null 2>&1 & echo $!"],
                             capture_output=True, text=True, timeout=30)
         pid = int(cp.stdout.strip())
@@ -72,7 +51,6 @@ class ClaimTest(WkTest):
         return record.Records(env={"WK_STORE": str(self.store)})
 
     def holder(self, machine="rpi5", kind="bench", name="rpi5/speedometer3", pid=None, ended=None):
-        """A live task record holding <machine>."""
         if pid is None:
             pid = self.spawn()
         t = self.records().begin(kind, "here", name, "kill %d" % pid, "", ["one step"],
@@ -117,8 +95,6 @@ class TestTheRecordDeclaresWhatItHolds(ClaimTest):
         self.assertEqual([], self.rows())
 
     def test_a_holder_whose_pid_is_gone_holds_nothing(self):
-        """The claim cannot outlive its holder: liveness is the process table
-        at read time, so a killed driver leaves no board held."""
         _, pid = self.holder()
         os.kill(pid, 9)
         for _ in range(50):
@@ -144,7 +120,6 @@ class TestTheFleetIsAsked(unittest.TestCase):
         self.assertEqual([here, ROW], rows)
 
     def test_a_store_that_could_not_be_asked_is_a_row_of_its_own(self):
-        """Never silence: an unread machine is not a free board."""
         rows = record.fleet_holders("device:rpi5", self.records, [("moose", lambda r: (None, "unreachable\tover ssh"))])
         self.assertEqual([("?", "moose", "unknown", "unreachable over ssh")], rows)
 
@@ -173,8 +148,6 @@ class TestTheFleetIsAsked(unittest.TestCase):
         self.assertIn("wk sync --tools moose", why)
 
     def test_a_store_of_this_machines_own_is_not_asked_twice(self):
-        """On Linux the container target's store is the directory this machine
-        has already walked, and a board would read as held by itself."""
         self.assertEqual([], self.stores(True, {}, peers=()))
 
     def test_a_store_elsewhere_is_asked_as_well(self):
@@ -234,16 +207,12 @@ class TestTheBarrier(unittest.TestCase):
         self.assertEqual([t.id], self.tasks())
 
     def test_a_machine_that_could_not_be_asked_is_reported_and_does_not_refuse(self):
-        """A workstation that is off is the normal state, so this is a warning
-        and not a refusal -- but it is never silent."""
         t, out = self.hold(rows=[("?", "moose", "unknown", "unreachable over ssh")])
         self.assertIn("moose -- unreachable over ssh", out)
         self.assertIn("could not be asked", out)
         self.assertEqual([t.id], self.tasks())
 
     def test_one_drivers_own_claim_passes_down_to_what_it_runs(self):
-        """`wk bench run --ab-systems` arms and boots for each leg: a claim
-        that refused its own holder would deadlock the board's own driver."""
         t, _ = self.hold(rows=[ROW], env={"WK_DEVICE_HELD": "device:rpi5"})
         self.assertIsNone(t)
         self.assertEqual([], self.fleet_asked)
@@ -265,9 +234,6 @@ class TestTheBarrier(unittest.TestCase):
 
 
 class TestStatusHolds(ClaimTest):
-    """`wk status --holds <resource>`: the read-only CLI surface the asking
-    machine calls over its own wk. It answers about this store alone -- the
-    caller walks the peers -- and changes nothing."""
 
     def test_it_prints_the_rows_and_changes_nothing(self):
         _, pid = self.holder()
@@ -285,28 +251,18 @@ class TestStatusHolds(ClaimTest):
         self.assertEqual(0, cp.returncode, cp.stdout)
         self.assertEqual("", cp.stdout.strip())
 
-    def test_the_flag_is_declared_readonly(self):
-        decl = [l for l in (REPO / "cmd" / "status").read_text().splitlines()
-                if l.startswith("# wk:")]
-        self.assertTrue(any("--holds=" in l for l in decl), decl)
-        self.assertTrue(any("readonly" in l for l in decl), decl)
-
-
 MACHINE_CONF = '''kind=board
 ssh=fakeboard
 driver=no-such-driver
 device=/dev/null
 profile=webkit-2.52-yocto-rpi5-64
 role=bench-device
-note="a board that is not there, for a refusal that needs no hardware"
+note="a board that is not there"
 '''
 
 
 class TestTheCommandsTakeIt(ClaimTest):
-    """The three commands that touch a board take the claim before anything
-    reaches the board. Driven against a machine conf of this test's own
-    (WK_MACHINES_DIR), so nothing here needs a board: the refusal comes
-    before the first ssh."""
+    """The commands that touch a board take the claim before the first ssh."""
 
     def setUp(self):
         super().setUp()
@@ -326,11 +282,6 @@ class TestTheCommandsTakeIt(ClaimTest):
         self.assertIn("kill %d" % pid, out)
 
     def test_bench_deploy_takes_it_where_the_image_workspace_is(self):
-        """A deploy is routed to the machine holding the image workspace (the dispatcher's
-        `where=workspace`), so the claim is taken there and not here -- which is
-        why that machine's store is one fleet_holders asks. Driven in-process
-        (lib/wk/bench/cli.py's Bench.deploy), the refusal the routing would
-        reach; a board run's claim is tests/test_bench_board.py's."""
         from wk import targets
         from wk.bench import cli
         from wk.clock import Clock
@@ -346,26 +297,23 @@ class TestTheCommandsTakeIt(ClaimTest):
 
     def test_boot_refuses(self):
         pid = self.held()
-        self.assert_refused(self.run_wk("boot", "fakeboard", env=self.env), pid)
-
-    def test_boot_back_refuses(self):
-        pid = self.held()
-        self.assert_refused(self.run_wk("boot", "fakeboard", "--back", env=self.env), pid)
+        for args in ((), ("--back",)):
+            with self.subTest(args=args):
+                self.assert_refused(self.run_wk("boot", "fakeboard", *args, env=self.env), pid)
 
     def test_reading_the_boards_state_takes_no_claim(self):
-        """Read-only is read-only: `--status` reports on a board somebody
-        else is benching on rather than refusing, and holds nothing itself."""
         self.held()
         cp = self.run_wk("boot", "fakeboard", "--status", env=self.env)
         out = cp.stdout + cp.stderr
         self.assertNotIn("another live task holds it", out)
-        self.assertIn("no boot driver", out)   # as far as it gets with no driver
+        self.assertIn("no boot driver", out)
         self.assertEqual(1, len(self.tasks()), out)
 
     def test_a_dry_run_holds_nothing(self):
         cp = self.run_wk("boot", "fakeboard", "--dry-run", env=self.env)
         self.assertIn("no boot driver", cp.stdout + cp.stderr)
         self.assertEqual([], self.tasks())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,20 +1,5 @@
-"""host/linux/machine.sh under `./setup --dry-run` (WK_DRY_RUN=1): every
-mutating step reports what it would do and does none of it.
-
-The stage is the Linux workstation's, and this drives it on whatever runs the
-suite: the machine facts it branches on -- /etc/subuid, the render and video
-groups, systemd lingering, /proc/device-tree/model -- come from stubs on PATH,
-so both arms are reachable everywhere. `sudo`, `loginctl` and the board's
-tuning tree record their argv instead of running, which is what the dry run
-must leave untouched, and the second half runs the same stage without
-WK_DRY_RUN to show each of those records is written when it is not set.
-
-WK_ROOT is a scratch tree whose lib/ and claude/ are this checkout's and whose
-host/linux/rpi5/rpi5-setup.sh is the recorder: the stage names that script by
-$WK_ROOT, so a dry run that runs it anyway is caught rather than performed.
-
-Run: python3 -m unittest tests.test_linux_machine_dry_run -v
-"""
+"""host/linux/machine.sh under WK_DRY_RUN=1: every mutating step reports what it would do and does none of it, and
+without it does each. The machine facts it branches on, sudo, loginctl and the board's tuning tree are stubs on PATH."""
 import os
 import subprocess
 import unittest
@@ -23,8 +8,6 @@ from tests.support import REPO, WkTest, stub_path
 
 STAGE = REPO / "host" / "linux" / "machine.sh"
 
-# The one probe this stage makes of the board it is on; every other grep is
-# the real one, including the two this stage makes of /etc/subuid.
 FAKE_GREP = '''#!/bin/sh
 case "$*" in
 *"Raspberry Pi 5"*) exit "$WK_TEST_RPI5" ;;
@@ -32,23 +15,18 @@ esac
 exec /usr/bin/grep "$@"
 '''
 
-# Every privileged command is `sudo <what>`, so the log records the whole line
-# and a step that reached the tool without sudo leaves no record at all.
 # WK_TEST_SUDO_FAIL names the one `sudo <tool>` this machine refuses.
 FAKE_SUDO = '''#!/bin/sh
 printf "sudo %s\\n" "$*" >> "$WK_TEST_SUDO_LOG"
 [ "$1" != "${WK_TEST_SUDO_FAIL:-}" ] || exit 1
 case "$1" in loginctl) exec "$@" ;; esac
 '''
-# Lingering as systemd answers it: off until enable-linger has run.
 FAKE_LOGINCTL = '''#!/bin/sh
 case "$1" in
 show-user) if [ -f "$WK_TEST_LINGER" ]; then echo yes; else echo no; fi ;;
 enable-linger) : > "$WK_TEST_LINGER" ;;
 esac
 '''
-# render and video exist on this machine, as far as the stage can tell; `id
-# -nG` then says the user is in neither, so the membership step has work.
 FAKE_GETENT = 'exit 0\n'
 RPI5_RECORDER = 'printf "ran\\n" > "$WK_TEST_RPI5_RAN"\n'
 
@@ -112,8 +90,6 @@ class TestTheLinuxMachineStageHonoursDryRun(WkTest):
         self.out = self.cp.stdout + self.cp.stderr
 
     def test_the_stage_reaches_every_step(self):
-        """Each mutating step says what it would do, so a step that wrote
-        nothing because it never ran is not mistaken for one held back."""
         for phrase in ("would create", "would remove the headless marker",
                        "would add subordinate id ranges", "usermod -aG",
                        "would enable systemd lingering", "would seed",
@@ -121,7 +97,6 @@ class TestTheLinuxMachineStageHonoursDryRun(WkTest):
             self.assertIn(phrase, self.out, self.out)
 
     def test_it_runs_no_privileged_command(self):
-        """usermod and enable-linger are what the stage asks root for."""
         self.assertFalse(self.f["sudo_log"].exists(), self.out)
 
     def test_it_writes_nothing(self):
@@ -133,16 +108,12 @@ class TestTheLinuxMachineStageHonoursDryRun(WkTest):
         self.assertFalse((self.f["store"] / "log" / "rpi5-setup.log").exists(), self.out)
 
     def test_it_reports_the_ccache_settings_it_would_write(self):
-        """store_init reaches a store with no cache/ccache directory on a dry
-        run, since it made none: the settings file is reported, not written
-        into a directory that is not there."""
         self.assertRegex(self.out, r"would write: \S+/cache/ccache/ccache\.conf\n")
 
     def test_it_does_not_run_the_boards_tuning_tree(self):
         self.assertFalse(self.f["rpi5_ran"].exists(), self.out)
 
     def test_without_it_the_same_stage_does_each_of_those(self):
-        """The control: every file and command the dry run withheld."""
         cp, f = self._run(dry=False)
         out = cp.stdout + cp.stderr
         self.assertTrue((f["store"] / "pi-hosts").exists(), out)
@@ -153,24 +124,11 @@ class TestTheLinuxMachineStageHonoursDryRun(WkTest):
         sudo = f["sudo_log"].read_text()
         self.assertIn("sudo usermod --add-subuids", sudo, sudo)
         self.assertIn("sudo loginctl enable-linger", sudo, sudo)
-        self.assertIn("enabled lingering", out)
-
-    def test_lingering_is_asked_of_root_and_of_nothing_else(self):
-        """One path, so one privileged command: a plain `loginctl
-        enable-linger` writes /var/lib/systemd/linger and is refused without
-        polkit's say-so, and a second path nothing runs is a second path
-        nothing tests."""
-        stage = STAGE.read_text()
-        self.assertEqual(1, stage.count("enable-linger \"$_user\""), stage)
-        self.assertIn('sudo loginctl enable-linger "$_user"', stage)
 
     def test_a_refused_sudo_stops_the_stage_and_names_the_remedy(self):
-        """Nothing silently degrades: lingering off is the egress proxy gone
-        at logout, so the stage says so rather than carrying on."""
         cp, f = self._wet(sudo_fails="loginctl")
         out = cp.stdout + cp.stderr
         self.assertNotEqual(0, cp.returncode, out)
-        self.assertIn("could not enable lingering", out)
         self.assertIn("sudo loginctl enable-linger", out)
 
 

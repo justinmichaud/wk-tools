@@ -6,7 +6,6 @@ import atexit
 import contextlib
 import os
 import re
-import subprocess
 import sys
 
 from wk import act
@@ -153,7 +152,7 @@ def main(argv, env=None):
     lock = Lock(Store(os.environ if env is None else env), here(), Clock())
     with lock.held(a.resource, a.timeout):
         sys.stdout.flush()
-        rc = subprocess.call(cmd)
+        rc = here().run_tty(cmd).rc
     return rc if rc >= 0 else 128 - rc
 
 

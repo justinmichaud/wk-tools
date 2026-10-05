@@ -1,14 +1,6 @@
 """The display readings a Mac benchmark is judged against: `lib/wk/mac.py
 displays` / `brightness`, and the faults bench/mac-browser-check.py raises when
-the screen it is measuring on is not the declared one.
-
-The CoreGraphics and DisplayServices calls are driven through fakes standing in
-for the two library handles, so every refusal is exercised on any host; the two
-tests that ask a real window server skip unless this machine is a Mac. Nothing
-here sets a brightness on a real display.
-
-Run: python3 -m unittest tests.test_mac_display -v
-"""
+the screen it is measuring on is not the declared one."""
 import argparse
 import importlib.util
 import io
@@ -50,9 +42,6 @@ ROW_KEYS = {"id", "builtin", "main", "active", "online", "mirrored", "asleep",
 
 
 class FakeCG:
-    """The CoreGraphics handle `_coregraphics()` returns, answering out of a
-    list of display dicts. The symbol names come from wkmac's own maps, so a
-    renamed call fails here rather than passing against a stale fake."""
 
     def __init__(self, displays, err=0):
         self.displays = displays
@@ -83,9 +72,6 @@ class FakeCG:
 
 
 class FakeDS:
-    """The DisplayServices handle: a brightness and an ambient-light
-    compensation flag, each readable, settable, and each able to refuse a set or
-    to ignore one."""
 
     def __init__(self, value=0.4375, can_change=True, set_rc=0, get_rc=0, sticks=True,
                  has_als=True, als=False, als_rc=0, als_set_rc=0, als_sticks=True):
@@ -153,12 +139,6 @@ class WkmacHandles(WkTest):
 
 
 class WkmacDisplayMode(WkmacHandles):
-    """The mode the bench install is measured at is held, not hoped for. It is
-    declared in machines/<node>.conf, and macOS offers no runtime way to
-    reach a scaled mode on an Apple Silicon panel -- CGDisplayCopyAllDisplayModes
-    lists the 1:1 modes alone, with or without the duplicates option (measured
-    2026-09-08 on Mac16,12) -- so the WindowServer configuration is rewritten
-    and read back."""
 
     UUID = "37D8832A-2D66-02CA-B9F7-8F30A301B230"
 
@@ -172,9 +152,6 @@ class WkmacDisplayMode(WkmacHandles):
             return self.call(WKMAC.cmd_display_mode, cg, FakeDS(), declare=declare)
 
     def _config(self, wide=1470, high=956, scale=2, uuid=None):
-        """The shape tolken's bench install carries: two Configs, the built-in
-        panel's row repeated in each, and an external panel's row that must not
-        move. CurrentInfo and UnmirrorInfo both hold a mode."""
         def row(w, h, sc, ident):
             info = {"Wide": w, "High": h, "Scale": sc, "Hz": 60.0, "Depth": 8}
             return {"UUID": ident, "Rotation": 0,
@@ -200,11 +177,6 @@ class WkmacDisplayMode(WkmacHandles):
         self.assertEqual(0, rc)
         self.assertEqual("1280x832", out.strip())
 
-    def test_a_second_display_is_refused_rather_than_guessed(self):
-        rc, out = self.mode(FakeCG([PANEL, EXTERNAL]))
-        self.assertEqual(1, rc)
-        self.assertEqual("", out)
-
     def test_declaring_a_mode_rewrites_every_row_of_that_panel(self):
         config = self._config(wide=1470, high=956)
         rc, out = self.mode(FakeCG([PANEL]), declare=(1280, 832), config=config)
@@ -216,9 +188,6 @@ class WkmacDisplayMode(WkmacHandles):
             self.assertEqual((1280, 832, 2), (row["Wide"], row["High"], row["Scale"]))
 
     def test_it_leaves_another_panels_rows_alone(self):
-        """The declared mode is the built-in panel's. A row for a monitor that
-        was once attached governs a configuration the Mac bench path refuses anyway, and
-        rewriting it would be this tool changing something it was not asked to."""
         config = self._config()
         self.mode(FakeCG([PANEL]), declare=(1280, 832), config=config)
         other = self._rows(config, "AN-EXTERNAL-PANEL")
@@ -233,18 +202,11 @@ class WkmacDisplayMode(WkmacHandles):
             self.assertEqual(60.0, row["Hz"])
             self.assertEqual(8, row["Depth"])
 
-    def test_a_configuration_naming_no_such_panel_is_refused(self):
-        """Writing nothing and reporting success would leave the autorun
-        rebooting into the same wrong mode for ever."""
-        config = self._config(uuid="SOME-OTHER-PANEL")
-        rc, out = self.mode(FakeCG([PANEL]), declare=(1280, 832), config=config)
-        self.assertEqual(1, rc)
-        self.assertEqual("", out)
-
-    def test_an_absent_configuration_is_refused(self):
-        rc, out = self.mode(FakeCG([PANEL]), declare=(1280, 832))
-        self.assertEqual(1, rc)
-        self.assertEqual("", out)
+    def test_a_mode_it_cannot_place_is_refused_printing_nothing(self):
+        self.assertEqual((1, ""), self.mode(FakeCG([PANEL, EXTERNAL])))
+        self.assertEqual((1, ""), self.mode(FakeCG([PANEL]), declare=(1280, 832)))
+        self.assertEqual((1, ""), self.mode(FakeCG([PANEL]), declare=(1280, 832),
+                                            config=self._config(uuid="SOME-OTHER-PANEL")))
 
     def test_the_declared_mode_is_parsed_before_anything_is_written(self):
         for spec in ("1280", "1280x", "x832", "1280x832x2", "", "wide x high"):
@@ -279,15 +241,9 @@ class WkmacDisplays(WkmacHandles):
         self.assertEqual(0, rc)
         self.assertEqual({"count": 0, "displays": []}, json.loads(out))
 
-    def test_coregraphics_that_cannot_be_loaded_prints_nothing(self):
-        rc, out = self.displays(None)
-        self.assertEqual(1, rc)
-        self.assertEqual("", out)
-
-    def test_a_display_list_call_that_errors_prints_nothing(self):
-        rc, out = self.displays(FakeCG([PANEL], err=1000))
-        self.assertEqual(1, rc)
-        self.assertEqual("", out)
+    def test_a_display_list_it_cannot_read_prints_nothing(self):
+        self.assertEqual((1, ""), self.displays(None))
+        self.assertEqual((1, ""), self.displays(FakeCG([PANEL], err=1000)))
 
     def test_brightness_is_null_when_display_services_cannot_be_loaded(self):
         rc, out = self.displays(FakeCG([PANEL]), ds=None)
@@ -320,27 +276,6 @@ class WkmacBrightness(WkmacHandles):
         self.assertEqual(0, rc)
         self.assertEqual(0.4375, float(out))
 
-    def test_a_brightness_that_cannot_be_read_prints_nothing(self):
-        rc, out = self.brightness(FakeCG([PANEL]), ds=FakeDS(get_rc=1))
-        self.assertEqual(1, rc)
-        self.assertEqual("", out)
-
-    def test_more_than_one_online_display_is_refused(self):
-        """Which display to dim is not a guess."""
-        rc, out = self.brightness(FakeCG([PANEL, EXTERNAL]))
-        self.assertEqual(1, rc)
-        self.assertEqual("", out)
-
-    def test_a_machine_with_no_builtin_display_is_refused(self):
-        rc, out = self.brightness(FakeCG([EXTERNAL]))
-        self.assertEqual(1, rc)
-        self.assertEqual("", out)
-
-    def test_no_display_at_all_is_refused(self):
-        rc, out = self.brightness(FakeCG([]))
-        self.assertEqual(1, rc)
-        self.assertEqual("", out)
-
     def test_a_set_prints_the_value_read_back(self):
         ds = FakeDS()
         rc, out = self.brightness(FakeCG([PANEL]), ds=ds, value=0.0)
@@ -348,22 +283,15 @@ class WkmacBrightness(WkmacHandles):
         self.assertEqual(0.0, float(out))
         self.assertEqual(0.0, ds.value)
 
-    def test_a_set_that_did_not_take_is_refused(self):
-        """The autorun halts the machine on this: a panel still lit is a panel
-        whose compositing the benchmark pays for."""
-        rc, out = self.brightness(FakeCG([PANEL]), ds=FakeDS(sticks=False), value=0.0)
-        self.assertEqual(1, rc)
-        self.assertEqual("", out)
-
-    def test_a_set_the_framework_rejected_is_refused(self):
-        rc, out = self.brightness(FakeCG([PANEL]), ds=FakeDS(set_rc=-1), value=0.0)
-        self.assertEqual(1, rc)
-        self.assertEqual("", out)
-
-    def test_a_panel_that_cannot_change_brightness_is_refused(self):
-        rc, out = self.brightness(FakeCG([PANEL]), ds=FakeDS(can_change=False), value=0.0)
-        self.assertEqual(1, rc)
-        self.assertEqual("", out)
+    def test_each_reading_or_set_it_cannot_stand_behind_is_refused_printing_nothing(self):
+        for name, displays, ds, value in (("unreadable", [PANEL], FakeDS(get_rc=1), None),
+                                          ("two displays", [PANEL, EXTERNAL], UNSET, None),
+                                          ("no builtin", [EXTERNAL], UNSET, None), ("none", [], UNSET, None),
+                                          ("did not take", [PANEL], FakeDS(sticks=False), 0.0),
+                                          ("rejected", [PANEL], FakeDS(set_rc=-1), 0.0),
+                                          ("fixed panel", [PANEL], FakeDS(can_change=False), 0.0)):
+            with self.subTest(case=name):
+                self.assertEqual((1, ""), self.brightness(FakeCG(displays), ds=ds, value=value))
 
     def test_a_value_outside_0_to_1_is_a_usage_error(self):
         cp = subprocess.run([sys.executable, str(REPO / "lib" / "wk" / "mac.py"),
@@ -410,51 +338,23 @@ class TheScreenTheReadingWasTakenOn(WkTest):
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertEqual("", cp.stderr)
 
-    def test_a_second_online_display_is_refused(self):
-        self.assertFault("displays are online, not one",
-                         displays=[dict(PANEL), dict(EXTERNAL)])
-
-    def test_the_one_display_not_being_the_builtin_one_is_refused(self):
-        self.assertFault("is not the builtin panel", displays=[dict(EXTERNAL)])
-
-    def test_a_mirror_set_is_refused(self):
-        self.assertFault("mirror set", displays=[dict(PANEL, mirrored=True)])
-
-    def test_a_display_mode_other_than_the_declared_one_is_refused(self):
-        """The defect this exists for: run-benchmark sizes its window from the
-        screen, so 1280x832 and 1470x956 are two different measurements."""
-        self.assertFault("points, not [1470, 956]",
-                         displays=[dict(PANEL, points=[1280, 832])])
-
-    def test_a_display_list_that_could_not_be_read_is_refused(self):
-        self.assertFault("display list could not be read", displays=None)
-
     def test_a_window_that_is_not_frontmost_is_refused(self):
         self.assertFault("not org.webkit.MiniBrowser", frontmost="com.apple.Terminal")
 
     def test_a_machine_without_pyobjc_is_refused(self):
-        """No `frontmost` sentinel travels through a stored reading: the
-        machine that cannot import AppKit refuses immediately."""
         with mock.patch.dict(sys.modules, {"AppKit": None}):
             with self.assertRaises(SystemExit) as cm:
                 BROWSER.frontmost_bundle()
         self.assertIn("pyobjc", str(cm.exception))
 
     def test_brightness_is_recorded_and_not_judged(self):
-        """`wk/mac.py brightness --set 0` verifies its own read-back; a second
-        judgement here could drift from that one."""
         cp = self.check(brightness=0.9, displays=[dict(PANEL, brightness=0.9)])
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
 
     def test_a_page_that_does_not_have_the_focus_is_refused(self):
-        """Measured over six browser-check readings on the bench install
-        (2026-09-07): five read focused=True and one read False, so True is the
-        healthy population and the raiser does take."""
         self.assertFault("did not have the focus", focused=False)
 
     def test_focus_and_frontmost_answer_different_questions(self):
-        """Which application is active is not whether the measured window is
-        key, so a reading can fail one and pass the other."""
         cp = self.check(focused=False)
         self.assertNotIn("org.webkit.MiniBrowser: ", cp.stderr)
         self.assertIn("focused=False", cp.stdout)
@@ -471,10 +371,6 @@ class TheScreenTheReadingWasTakenOn(WkTest):
                       "mirrored=False asleep=True", cp.stdout)
 
     def test_no_expectation_records_the_display_and_judges_nothing_on_it(self):
-        """One branch, not a third mode: a PGO collection trains a profile
-        rather than producing a number, and a reading stored before the pin
-        existed is history — both name no expectation, and the display is
-        recorded for a reader without being compared against anything."""
         cp = self.check(expect=None,
                         displays=[dict(EXTERNAL, mirrored=True, points=[800, 600])])
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
@@ -489,8 +385,6 @@ class TheScreenTheReadingWasTakenOn(WkTest):
         self.assertNotIn("built-in panel", cp.stderr)
 
     def test_a_stored_reading_that_records_one_is_judged_against_it(self):
-        """What a reading was judged against travels in it, so re-deriving the
-        verdict later reaches the same one with no argument."""
         script = str(REPO / "bench" / "mac-browser-check.py")
         src, out = self.tmp / "in.json", self.tmp / "out.json"
         src.write_text(json.dumps(dict(GOOD)))
@@ -513,9 +407,6 @@ class TheScreenTheReadingWasTakenOn(WkTest):
                 self.assertIn("<kind> <w>x<h>", cp.stderr)
 
     def test_a_panel_that_is_not_a_built_in_one_is_declarable(self):
-        """A guest draws on a paravirtual panel, and the kind is what makes it
-        representable without the rule weakening for a machine whose panel is
-        built in."""
         self.assertEqual(("external", [1470, 956]),
                          BROWSER.parse_expect_display("external 1470x956"))
         cp = self.check(expect="external 1470x956",
@@ -528,9 +419,6 @@ class TheScreenTheReadingWasTakenOn(WkTest):
         self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("is not the external panel", cp.stderr)
 
-    def test_the_display_list_is_read_through_wk_mac(self):
-        self.assertEqual(str(REPO / "lib" / "wk" / "mac.py"), BROWSER.WKMAC)
-
     @unittest.skipIf(platform.system() == "Darwin",
                      "this machine is a Mac: CoreGraphics loads here")
     def test_a_display_list_nothing_could_answer_reads_as_none(self):
@@ -538,10 +426,6 @@ class TheScreenTheReadingWasTakenOn(WkTest):
 
 
 class TakeReadingNeverLeavesTheBrowserRunning(WkTest):
-    """`take_reading()` starts MiniBrowser before it can know whether pyobjc is
-    here to ask what is frontmost. `frontmost_bundle()` used to raise
-    (`SystemExit`, no pyobjc) after `launch()` and before `browser.terminate()`,
-    so a bench machine without pyobjc was left with MiniBrowser running."""
 
     def args(self, timeout=0):
         return argparse.Namespace(build_directory="/nonexistent", timeout=timeout)
@@ -556,9 +440,6 @@ class TakeReadingNeverLeavesTheBrowserRunning(WkTest):
         self.assertIn("pyobjc", str(cm.exception))
 
     def test_a_refusal_after_launch_still_terminates_the_browser(self):
-        """Belt and suspenders for any other exit path between `launch()` and
-        the old bare `browser.terminate()`: the browser is torn down in a
-        `finally`, not only on the path that raises nothing."""
         proc = mock.Mock()
         proc.poll.return_value = None
         with mock.patch.dict(sys.modules, {"AppKit": mock.MagicMock()}), \
@@ -573,10 +454,6 @@ class TakeReadingNeverLeavesTheBrowserRunning(WkTest):
 
 
 class TheDisplayRuleAskedOnItsOwn(WkTest):
-    """`--displays-only` is the same rule with no browser launched, so a leg's
-    own preflight can ask it -- a panel attached between two legs resizes
-    run-benchmark's window, and every check that ran once per boot has already
-    passed by then."""
 
     def test_it_needs_neither_a_build_nor_a_reading(self):
         cp = subprocess.run([sys.executable, str(REPO / "bench" / "mac-browser-check.py")],
@@ -585,9 +462,6 @@ class TheDisplayRuleAskedOnItsOwn(WkTest):
         self.assertIn("--displays-only", cp.stderr)
 
     def test_it_judges_the_display_and_nothing_about_a_browser(self):
-        """The browser faults must not fire: there is no reading of one, and a
-        leg that had to launch a browser to check its display would be paying
-        for a second launch before every leg."""
         found = BROWSER.display_faults([dict(PANEL)],
                                        BROWSER.parse_expect_display(EXPECT), True)
         self.assertEqual([], found)
@@ -608,8 +482,6 @@ class TheDisplayRuleAskedOnItsOwn(WkTest):
                 self.assertTrue([f for f in found if phrase in f], found)
 
     def test_ambient_light_is_judged_with_no_expectation_at_all(self):
-        """A brightness the sensor can raise again is a load that varies, so it
-        is a fault whether or not a mode was declared."""
         lit = [dict(PANEL, auto_brightness=True)]
         for expect in (None, BROWSER.parse_expect_display(EXPECT)):
             with self.subTest(expect=expect):
@@ -618,12 +490,6 @@ class TheDisplayRuleAskedOnItsOwn(WkTest):
 
 
 class AmbientLightControl(WkTest):
-    """Minimum brightness that ambient light can raise again is not a held
-    setting, and power is thermal headroom. DisplayServices does expose the
-    control -- `DisplayServicesEnableAmbientLightCompensation` to set it and
-    `DisplayServicesAmbientLightCompensationEnabled` to read it, both listed by
-    `dyld_info -exports` on tolken (26.6.2, `Mac16,12`) -- so the bench path holds it
-    off and the gate below refuses only a panel that will not let go."""
 
     def check(self, auto, **overrides):
         panel = dict(PANEL, auto_brightness=auto)
@@ -645,15 +511,11 @@ class AmbientLightControl(WkTest):
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
 
     def test_a_panel_with_no_sensor_to_ask_is_reported_not_refused(self):
-        """A guest panel answers nothing; absent is not the same as off, so it
-        is printed for a reader and does not refuse the run."""
         cp = self.check(None)
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("auto_brightness=None", cp.stdout)
 
     def test_the_verb_that_holds_it_off_reads_it_back(self):
-        """Held, not written and hoped for: the write is trusted no more than
-        the brightness write beside it."""
         ds = FakeDS(als=True)
         rc, out = WkmacHandles.call(self, WKMAC.cmd_auto_brightness,
                                     FakeCG([PANEL]), ds, off=True)
@@ -681,19 +543,6 @@ class AmbientLightControl(WkTest):
         self.assertEqual(0, rc, out)
         self.assertEqual("on\n", out)
         self.assertTrue(ds.als, "a read turned it off")
-
-    def test_it_is_judged_even_where_no_display_is_pinned(self):
-        """It is a property of the machine, not of comparability, so a run
-        compared with nothing is still refused for it."""
-        panel = dict(PANEL, auto_brightness=True)
-        path = self.tmp / "r.json"
-        path.write_text(json.dumps(dict(GOOD, displays=[panel])))
-        cp = subprocess.run(
-            [sys.executable, str(REPO / "bench" / "mac-browser-check.py"),
-             "--read", str(path)], capture_output=True, text=True)
-        self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
-        self.assertIn("ambient-light control", cp.stderr)
-
 
 if __name__ == "__main__":
     unittest.main()

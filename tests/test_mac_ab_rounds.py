@@ -1,10 +1,7 @@
 """An A/B's rounds and its back half: the stopping rule every system asks between rounds (--rounds the floor,
 --detect the precision to resolve, --max-rounds the ceiling; lib/wk/bench/board_ab.py and report.py), the A/B summary
 a Mac's benchmark install writes (report.ab_summary), and a planted Mac A/B read back -- --status, --progress,
---collect (lib/wk/bench/mac.py's MacAB) -- against FakeMac and the fake clock.
-
-Run: python3 tests/run.py --unit -k test_mac_ab_rounds
-"""
+--collect (lib/wk/bench/mac.py's MacAB) -- against FakeMac and the fake clock."""
 import base64
 import contextlib
 import io
@@ -69,8 +66,6 @@ class TestTheStoppingRule(WkTest):
 
 
 class Rounds:
-    """board_ab.AB's round loop alone: each leg answers `legs`, and `resolves` says after which round the rounds so far
-    resolve the target."""
 
     def __init__(self, rounds, max_rounds, detect, resolves_at=None, lost=(), recorded=()):
         self.ab = board_ab.AB.__new__(board_ab.AB)
@@ -172,8 +167,6 @@ def ab_legs(values_a, values_b, plan="speedometer3", same=False):
 
 
 class TestTheSummary(WkTest):
-    """The verdict a Mac's install writes beside its results: per plan, the precision the rounds stopped on, then A
-    against B."""
 
     def summary(self, legs, out=""):
         with scratch_dir() as root:
@@ -231,8 +224,6 @@ class TestTheSummary(WkTest):
 
 @contextlib.contextmanager
 def planted(legs=(), state=None, **o):
-    """A Mac A/B planted and read back: the volume a scratch directory, served off FakeMac's host channel under the
-    path the driver resolves, and this machine's extraction of a leg real."""
     with world(**o) as m, scratch_dir() as vol:
         ready(m)
         root = m.d.bench_root()
@@ -400,9 +391,6 @@ class TestTheReadingsAreOneAtATime(WkTest):
 
 
 class TestTheLiveRows(unittest.TestCase):
-    """Read-only halves: the planted job on mbp as its steps and its legs. The rows themselves -- a PR-sized delta
-    resolved with --count and --rounds varied, and the warmup's profile captured and symbolicated on every system --
-    spend hours of each machine, and are the live tier's to run."""
 
     def back(self, reading):
         reg = targets.Registry(REPO, machine=None)

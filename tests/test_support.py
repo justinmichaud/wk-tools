@@ -1,11 +1,4 @@
-"""tests/support.py's own environment scrub: every test that shells out
-through run()/bash() gets a WK_MACHINES_DIR holding no build machine or peer
-and a WK_HOST_SECRETS in a scratch directory, never the real fleet or the real
-~/.config/wk/secrets -- a test that forgot to pass its own would otherwise
-read or write machine state silently.
-
-Run: python3 -m unittest tests.test_support -v
-"""
+"""tests/support.py's own environment scrub: every test that shells out"""
 TIER = "lint"
 import os
 import stat
@@ -41,11 +34,6 @@ class TestCleanEnvScrubsMachineState(unittest.TestCase):
 
 
 class TestNothingATestStartsReadsAStartupFile(unittest.TestCase):
-    """A bash built with SSH_SOURCE_BASHRC sources ~/.bashrc in a
-    non-interactive shell whose stdin is a connected socket and whose SHLVL is
-    below 2 -- so with a socketpair on the runner's stdin the machine's rc
-    rewrote the PATH of every command a test handed a hand-built env. Both
-    halves: the fd tests/support.py guarantees, and what a test observes."""
 
     def test_the_suites_stdin_is_not_a_socket(self):
         self.assertFalse(stat.S_ISSOCK(os.fstat(0).st_mode))
@@ -59,8 +47,6 @@ class TestNothingATestStartsReadsAStartupFile(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("WK_TEST_SHIMS"), "the machine-tool shims are tests/run.py's, outside the live tier")
 class TestAPathATestHandsInStillReachesNoMachine(unittest.TestCase):
-    """A test that hid tart by dropping every PATH entry holding one dropped the runner's shim directory with it,
-    and `wk boot benchvm` reached the real podman machine (a hung guest made it a 60s timeout, 2026-09-27)."""
 
     def test_system_directories_alone_get_the_shims_back(self):
         cp = bash("ssh somehost true; podman machine ssh wk -- true", env={"PATH": "/usr/bin:/bin:/opt/homebrew/bin"})

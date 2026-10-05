@@ -1,12 +1,5 @@
-"""A macOS `wk ls` is one table from two halves -- this host's targets, then
-the podman VM's containers -- and the "(no workspaces ...)" note may appear
-only when both halves are empty. cmd/ls carries the two dispatcher-only flags
-that make that one decision: --more-follows (first half: never call the
-listing empty) and --empty-so-far (second half: the note is yours if you are
-empty too).
-
-Run: python3 -m unittest tests.test_ls_halves -v
-"""
+"""A macOS `wk ls` is one table from two halves, and the "(no workspaces ...)" note appears only when both are empty:
+the dispatcher hands the halves --more-follows and --empty-so-far."""
 import contextlib
 import io
 import json
@@ -27,12 +20,7 @@ from wk import dispatch  # noqa: E402
 class TestTheEmptyNoteIsDecidedOnce(unittest.TestCase):
     def _ls(self, *flags):
         with temp_store() as store:
-            # The container target lists real containers through podman, and
-            # this table must be empty by construction. Trimming PATH does not
-            # do that -- podman lives in /usr/bin on a Linux host, so the real
-            # workspaces came back and every assertion here read the machine it
-            # ran on. A stub that lists nothing is the empty table, wherever
-            # podman is installed.
+            # A podman that lists nothing, wherever the real one is installed.
             binp = store["path"] / "bin"
             binp.mkdir(parents=True, exist_ok=True)
             (binp / "podman").write_text("#!/bin/sh\n[ \"$1 $2\" = 'machine inspect' ] && echo '[{\"Name\": \"wk\", \"State\": \"stopped\"}]'\nexit 0\n")
@@ -55,18 +43,14 @@ class TestTheEmptyNoteIsDecidedOnce(unittest.TestCase):
         self.assertIn("no workspaces", cp.stdout)
         cp = self._ls("--continued")
         self.assertNotIn("no workspaces", cp.stdout)
-        self.assertNotIn("NAME", cp.stdout, "the second half must not print a second header")
+        self.assertNotIn("NAME", cp.stdout)
 
     def test_a_bare_ls_still_prints_the_note_alone(self):
         cp = self._ls()
         self.assertIn("no workspaces", cp.stdout)
 
     def _halves(self, first_half_lines):
-        """The arguments `bare_report` (lib/wk/dispatch.py) hands each half
-        of a bare `wk ls` when the first half prints `first_half_lines`: a
-        stub `ls` is the first half and records its argv, and the
-        dispatcher's own seams -- which targets are here, whether the machine
-        runs, the forward -- answer as told."""
+        """The arguments `bare_report` hands each half when the first prints `first_half_lines`."""
         with tempfile.TemporaryDirectory(prefix="wk-test-halves-") as tmp:
             stub, argv = Path(tmp) / "ls", Path(tmp) / "argv"
             stub.write_text("#!/bin/sh\n# wk ls -- a stub\n# wk: where=workspace name=none bare=merged readonly\n"
@@ -84,8 +68,6 @@ class TestTheEmptyNoteIsDecidedOnce(unittest.TestCase):
             return argv.read_text().split(), forwarded.call_args[0][2]
 
     def test_the_dispatcher_owns_the_flags(self):
-        """the first half is told more follows, and the second whether the
-        first was empty -- decided once, by the dispatcher"""
         first, second = self._halves(["NAME"])
         self.assertEqual(first, ["--more-follows"])
         self.assertEqual(second, ["--continued", "--empty-so-far"])
@@ -95,8 +77,7 @@ class TestTheEmptyNoteIsDecidedOnce(unittest.TestCase):
 
 
 class TestInsideAWorkspace(unittest.TestCase):
-    """`unit ls.in_workspace_marks_not_applicable`: the host holds a workspace's base and its overlay layer, so from
-    inside, BASE and CHANGES say not applicable rather than unknown."""
+    """From inside a workspace BASE and CHANGES are not applicable: the host holds them."""
 
     def test_base_and_changes_are_not_applicable(self):
         with fake_workspace() as ws:

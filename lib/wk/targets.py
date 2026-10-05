@@ -14,8 +14,8 @@ import shutil
 import stat
 import sys
 
-from wk import act, buildconf, fleet, git, guest, images, kv, reach, record, secrets, sshalias, tools
-from wk.machine import TIMED_OUT, Local, PodmanVm, Result, Ssh, isolated_module, lib_argv
+from wk import act, agents, buildconf, fleet, git, guest, images, kv, reach, record, secrets, sshalias, tools
+from wk.machine import TIMED_OUT, Local, PodmanVm, Result, Ssh, TartExec, isolated_module, lib_argv
 from wk.resources import Resources, workspace_marker_path
 from wk.store import Store, dispatch_target, in_vm, no_such_workspace
 
@@ -28,7 +28,10 @@ READY_TIMEOUT = 300
 WK_FLAGS = ("WK_DEBUG", "WK_QUIET", "WK_YES", "WK_FORCE", "WK_DRY_RUN", "WK_NO_DELEGATE")
 WK_CARRIED = ("WK_ROW_LABEL", "WK_ZED_PUBKEY", "WK_SDK_IMAGE")
 GUEST_SHARES = "/Volumes/My Shared Files"
-GUEST_MIRROR = GUEST_SHARES + "/mirror/WebKit.git"
+MIRROR_TAG = "wk-mirror"
+GUEST_MIRROR_MOUNT = "/Volumes/" + MIRROR_TAG
+GUEST_MIRROR = GUEST_MIRROR_MOUNT + "/mirror/WebKit.git"
+GUEST_MOUNT_MIRROR = "/usr/local/libexec/wk-mount-mirror"
 TOOLS = "/opt/wk-tools"
 BRIDGE = TOOLS + "/container/proxy/ensure-bridge.sh"
 PROXY = "http://127.0.0.1:3128"
@@ -483,6 +486,9 @@ class Target:
             return '"$CLAUDE_SECURESTORAGE_CONFIG_DIR/%s"' % row[1]
         return '"$HOME/%s"' % row[2]
 
+    def install_agents(self, ws):
+        agents.install(self.root, self.env, self.here, lambda argv: self.act_exec(ws, argv), ws, self.tools(ws), self.src(ws))
+
     def agent_secret_present(self, ws, secret):
         return self.exec(ws, ["bash", "-lc", "test -s %s" % self._agent_secret_file(secret)]).ok
 
@@ -517,10 +523,6 @@ class Target:
         pre += "".join("%s=1 " % v for v in WK_FLAGS if env.get(v))
         pre += "".join("%s=%s " % (v, shlex.quote(env[v])) for v in WK_CARRIED if env.get(v))
         return "%s%s %s" % (pre, shlex.quote(wk), shlex.join(args))
-
-    def hand_over(self, cmd, args, tty):
-        self.far_wk_or_die(cmd)
-        return self.machine.argv(self.wk_cmd([cmd, *args], dict(os.environ, WK_ROW_LABEL=self.name)), tty=tty)
 
     def far_wk_or_die(self, cmd):
         far = self.far_side()
@@ -702,7 +704,7 @@ class Target:
         return True
 
     def enter_argv(self, ws):
-        """(argv, cwd) to `os.execvp` into a login shell in `ws`; `cwd` is set only when the shell needs starting there rather than told to `cd`."""
+        """(argv, cwd) to `Machine.exec` into a login shell in `ws`; `cwd` is set only when the shell needs starting there rather than told to `cd`."""
         raise NotImplementedError
 
     def pull(self, ws, src, dest):
@@ -744,7 +746,7 @@ class Target:
         raise NotImplementedError
 
     def exec_tty(self, ws, argv, timeout=None):
-        """Blocking, this process's own stdio inherited -- a real pty for lldb/samply/xctrace -- control returns here, unlike `enter_argv`'s `os.execvp`."""
+        """Blocking, this process's own stdio inherited -- a real pty for lldb/samply/xctrace -- control returns here, unlike `enter_argv`'s exec."""
         cmd, cwd = self.exec_argv(ws, argv, tty=True)
         return self.machine.run_tty(cmd, cwd=cwd, timeout=timeout)
 
@@ -1180,7 +1182,7 @@ class Container(Target):
         return self._ctr_user(ws)
 
     def ssh_proxy(self, ws):
-        return "%s %s" % (os.path.join(self.root, "container", "ssh-transport"), ws)
+        return "%s container %s" % (os.path.join(self.root, "container", "ssh-transport"), ws)
 
     def sshd_cmd(self, u):
         h = "/home/" + u
@@ -1244,10 +1246,14 @@ class Vm(Target):
     reads_host_mirror = True
     agent_rw_share = "agent-rw"
     mirror_share = "mirror"
+    mirror_tag = MIRROR_TAG
 
     def __init__(self, name, root, env, machine):
         super().__init__(name, root, env, machine)
         self._vm_store = None
+
+    def install_agents(self, ws):
+        return None
 
     @property
     def store(self):
@@ -1305,12 +1311,9 @@ class Vm(Target):
     def login_note(self):
         guest.login_note(self.env)
 
-    # tart serves every untagged --dir share (agent-rw too) under this one tag macOS automounts at GUEST_SHARES; a fresh mount re-reads renamed-over refs.
-    def remount_shares(self, ws):
-        q = shlex.quote(GUEST_SHARES)
-        r = self.act_exec(ws, ["sh", "-c", "if mount | grep -qF %s; then sudo -n umount %s || exit; fi; sudo -n mkdir -p %s && "
-                                           "sudo -n mount_virtiofs com.apple.virtio-fs.automount %s"
-                                           % (shlex.quote(" on %s (" % GUEST_SHARES), q, q, q)])
+    def remount_mirror(self, ws):
+        """A fresh mount re-reads the refs a refresh renamed over; the mirror has its own tag, so agent-rw is never touched."""
+        r = self.act_exec(ws, ["sudo", "-n", GUEST_MOUNT_MIRROR, MIRROR_TAG, GUEST_MIRROR_MOUNT])
         return "" if r.ok else (r.err.strip() or r.out.strip() or "exit %d" % r.rc)
 
     def check_rows(self, ws):
@@ -1387,59 +1390,74 @@ class Vm(Target):
         r = self.machine.run([self.tart(), "ip", self.vm(ws), "--wait", "30"])
         return r.out.strip() or None
 
-    def exec(self, ws, argv, tty=False, timeout=None):
-        ip = self.ip(ws)
-        if not ip:
-            return Result(1, "", "'%s' is not running (wk start %s)" % (ws, ws))
-        return self.guest_at(ip).run(argv, timeout=timeout)
+    def guest_of(self, v):
+        return TartExec(self.tart_or_die(), v, via=self.machine)
 
-    def guest_at(self, ip):
-        """The one ssh onto a guest's address."""
-        return Ssh("%s@%s" % (self.user(), ip), opts=["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-                                                      "-o", "LogLevel=ERROR", "-o", "ServerAliveInterval=60",
-                                                      "-o", "ServerAliveCountMax=10", "-i", self.key()],
-                   timeout=reach.ssh_timeout(self.env), via=self.machine)
+    def guest(self, ws):
+        return self.guest_of(self.vm(ws)) if self.vm_state(ws) == "running" else None
 
-    def _guest_ssh(self, ws):
-        ip = self.ip(ws)
-        return self.guest_at(ip) if ip else None
-
-    def _guest_ssh_or_die(self, ws):
-        m = self._guest_ssh(ws)
-        if m is None:
+    def _guest_or_die(self, ws):
+        g = self.guest(ws)
+        if g is None:
             act.die("'%s' is not running (wk start %s)" % (ws, ws))
-        return m
+        return g
+
+    def exec(self, ws, argv, tty=False, timeout=None):
+        g = self.guest(ws)
+        if g is None:
+            return Result(1, "", "'%s' is not running (wk start %s)" % (ws, ws))
+        return g.run(argv, timeout=timeout)
 
     def enter_argv(self, ws):
-        guest = self._guest_ssh_or_die(ws)
+        g = self._guest_or_die(ws)
         self.login_note()
-        return guest.argv("cd %s 2>/dev/null; exec \"$SHELL\"" % shlex.quote(self.src(ws)), tty=True), None
+        return g.argv("cd %s 2>/dev/null; exec \"${SHELL:-/bin/zsh}\" -l" % shlex.quote(self.src(ws)), tty=True), None
 
     def exec_argv(self, ws, argv, tty=False):
-        return self._guest_ssh_or_die(ws).argv(shlex.join(argv), tty=tty), None
+        return self._guest_or_die(ws).argv(shlex.join(argv), tty=tty), None
 
     def pull(self, ws, src, dest):
-        self._guest_ssh_or_die(ws).copy_out(src, dest)
+        self._guest_or_die(ws).copy_out(src, dest)
 
     def push(self, ws, src, dest):
-        self._guest_ssh_or_die(ws).copy_in(src, dest)
+        self._guest_or_die(ws).copy_in(src, dest)
 
     def pull_dir(self, ws, src, dest, exclude=()):
-        self._guest_ssh_or_die(ws).copy_tree_out(src, dest, exclude)
+        self._guest_or_die(ws).copy_tree_out(src, dest, exclude)
 
     def push_dir(self, ws, src, dest):
-        self._guest_ssh_or_die(ws).copy_tree_in(src, dest)
+        self._guest_or_die(ws).copy_tree_in(src, dest)
 
     def path_kind(self, ws, path):
-        r = self._guest_ssh_or_die(ws).run(["sh", "-c", path_kind_probe(path)])
-        return path_kind_result(r)
-
-    def ssh_host(self, ws):
-        ip = self.ip(ws)
-        return "%s@%s" % (self.user(), ip) if ip else None
+        return path_kind_result(self._guest_or_die(ws).run(["sh", "-c", path_kind_probe(path)]))
 
     def ssh_user(self, ws):
         return self.user()
+
+    def ssh_proxy(self, ws):
+        return "%s vm %s" % (os.path.join(self.root, "container", "ssh-transport"), ws)
+
+    def sshd_cmd(self):
+        """sshd on stdio as the guest's own user, keyed by a host key it makes once; never a listener on the network."""
+        return ("k=$HOME/.wk-ssh/ssh_host_ed25519_key; [ -f \"$k\" ] || { mkdir -p -m 0700 \"$HOME/.wk-ssh\" && "
+                "ssh-keygen -q -t ed25519 -N '' -f \"$k\"; } >&2 && exec /usr/sbin/sshd -i -e -f /dev/null -o HostKey=\"$k\" "
+                "-o AuthorizedKeysFile=.ssh/authorized_keys -o UsePAM=no -o PidFile=none -o PermitRootLogin=no "
+                "-o AllowUsers=%s -o LogLevel=ERROR -o Subsystem='sftp internal-sftp'" % self.user())
+
+    def ssh_transport(self, ws):
+        os.execvp(self.tart_or_die(), [self.tart_or_die(), "exec", "-i", self.vm(ws), "/bin/sh", "-c", self.sshd_cmd()])
+
+    def ssh_argv(self, ws):
+        return ["ssh", "-o", "ProxyCommand=" + self.ssh_proxy(ws), "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "LogLevel=ERROR", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=60", "-o", "ServerAliveCountMax=10",
+                "-i", self.key(), "-l", self.user(), self.vm(ws) + ".vm.invalid"]
+
+    def ssh_prepare(self, ws):
+        sshalias.alias_set(self.machine, self.env, ws, self.vm(ws) + ".vm.invalid", self.user(), self.key(),
+                           extra=("ProxyCommand %s" % self.ssh_proxy(ws),))
+
+    def ssh_host(self, ws):
+        return "wk-%s" % ws if self.vm_state(ws) == "running" else None
 
     def stop(self, ws):
         return guest.stop(self, ws)
@@ -1457,8 +1475,8 @@ class Vm(Target):
 
     def sync_tools(self, ws):
         """A git bundle, not a mount (a guest shares only agent-rw and the mirror); the marker goes with the tooling that reads it."""
-        guest = self._guest_ssh_or_die(ws)
-        return tools.push(self.root, self.machine, guest, self.tools(ws), self.env) and self.write_marker(ws, guest)
+        g = self._guest_or_die(ws)
+        return tools.push(self.root, self.machine, g, self.tools(ws), self.env) and self.write_marker(ws, g)
 
     def write_marker(self, ws, guest):
         """A bench image (its images.MARKER) is no workspace, so it keeps none."""
@@ -1485,7 +1503,7 @@ class Vm(Target):
         ip = guest.start(self, ws)
         if not ip:
             return True
-        sshalias.alias_set(self.machine, self.env, ws, ip, self.user(), self.key())
+        self.ssh_prepare(ws)
         act.info("%s is up at %s (ssh alias wk-%s)" % (ws, ip, ws))
         act.log("  wk build %s mac-release\n  zed ssh://wk-%s%s" % (ws, ws, self.src(ws)))
         return True
@@ -1597,7 +1615,7 @@ class Vm(Target):
             act.die("refusing to delete the golden base (%s --rm)" % guest.BASE_BUILD)
         if self.vm_state(ws) != "absent":
             self.delete_vm(v)
-        for f in (ws + ".run.log", ws + ".unfiltered"):
+        for f in (ws + ".run.log", ws + ".unfiltered", ws + ".agent-forward.log", ws + ".broker-forward.log"):
             self.machine.remove(os.path.join(self.vm_dir(), f))
         # The directory goes last: it is what a re-run of a killed rm finds and destroys again.
         if self.machine.isdir(ws_dir):
@@ -1971,6 +1989,25 @@ class Remote(Target):
 
     def wk_far(self, env):
         return "cd $HOME && ", self.tools("") + "/wk", env
+
+    def hand_over(self, cmd, args, tty, readonly=False):
+        """The far side's wk running `cmd`; a box at another wk-tools commit is refused it, or warned on a read-only one."""
+        self.far_wk_or_die(cmd)
+        if not self.peer:
+            self.tools_level_or_refuse(cmd, readonly)
+        return self.machine.argv(self.wk_cmd([cmd, *args], dict(os.environ, WK_ROW_LABEL=self.name)), tty=tty)
+
+    def tools_level_or_refuse(self, cmd, readonly):
+        theirs = kv.kv(self.wk("version", quiet=True)[1]).get("sha", "")
+        mine = self.here.run(["git", "-C", self.root, "rev-parse", "HEAD"]).out.strip()
+        if tools.sha_matches(theirs, mine):
+            return
+        why = ("wk-tools on %s is at %s, and this workstation's at %s.\n    Bring it level:  wk sync --tools %s"
+               % (self.name, theirs[:12] or "?", mine[:12] or "?", self.name))
+        if readonly:
+            act.warn(why)
+        else:
+            act.barrier("'%s' is not handed to %s: %s" % (cmd, self.name, why))
 
     def wk(self, *args, env=None, quiet=False):
         env = os.environ if env is None else env

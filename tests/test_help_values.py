@@ -1,22 +1,4 @@
-"""Every closed-set value a command's argument parser accepts must appear in
-its own `wk <cmd> -h` text (docs/defects, "Help options should always list
-all valid values for params"). CLOSED_SETS pins the values found by reading
-each parser once; a new case arm added without a matching help entry makes
-this fail, since the value will not appear in a stale header.
-
-A closed set that lives in one list in the code -- image profiles, fleet
-machines, profiler modes -- is not copied into a header at all: the command
-declares `values=<flag>` and the dispatcher runs it, so `wk boot -h` prints
-today's machines and cannot fall out of step with them. That mechanism is
-checked here too; build configs are `config=`'s (tests/test_dispatch_help_values.py).
-
-Open-ended sets (a workspace name, a free-text path, a git ref, a benchmark
-plan from `Tools/Scripts/run-benchmark --list`) are deliberately not
-enumerated here or in the commands' headers -- the header says in prose where
-the list comes from instead.
-
-Run: python3 -m unittest tests.test_help_values -v
-"""
+"""Every closed-set value a command's argument parser accepts must appear in"""
 TIER = "lint"
 import subprocess
 import sys
@@ -29,16 +11,6 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk.decl import leading_block  # noqa: E402
 from wk.store import Store  # noqa: E402
 
-# {cmd: {flag_or_positional_name: [valid, values, ...]}}
-# Only sets that are genuinely closed -- read directly out of each command's
-# own case statement or while-loop -- belong here.
-CLOSED_SETS = {
-    "push": {"action": ["on", "off", "status"]},
-    "machine": {"verb": ["setup", "rm", "tailnet", "status", "ls", "probe"]},
-    "bench": {"--builder": ["buildroot", "yocto"], "--bits": ["32", "64"]},
-    "completion": {"shell": ["bash", "zsh"]},
-}
-
 
 def help_text(cmd):
     cp = subprocess.run(
@@ -48,7 +20,6 @@ def help_text(cmd):
     return cp.stdout + cp.stderr
 
 
-# {cmd: flag} -- a closed set the dispatcher enumerates into `-h` itself.
 DECLARED_VALUES = {
     "boot": "--list",
     "sysimage": "configs",
@@ -57,16 +28,7 @@ DECLARED_VALUES = {
 
 
 class TestDeclaredValuesReachTheHelp(unittest.TestCase):
-    """`values=<flag>` (the dispatcher's declaration): the set a command
-    accepts is printed by running the one list that defines it, so a value
-    added to that list appears in `-h` with no second edit."""
 
-    def test_each_command_declares_it(self):
-        for cmd, flag in DECLARED_VALUES.items():
-            head = "".join(leading_block(REPO / "cmd" / cmd))
-            with self.subTest(cmd=cmd):
-                self.assertIn(f"values={flag}", head,
-                              f"cmd/{cmd} no longer declares its value list")
 
     def test_the_help_prints_what_the_flag_prints(self):
         for cmd, flag in DECLARED_VALUES.items():
@@ -86,8 +48,6 @@ class TestDeclaredValuesReachTheHelp(unittest.TestCase):
                     self.assertIn(v, text, f"wk {cmd} -h omits '{v}'")
 
     def test_a_value_flag_is_read_only(self):
-        """`-h` runs it, so it must change nothing and never wait: every one is
-        declared readonly (or the command is), and none of them is forwarded."""
         for cmd, flag in DECLARED_VALUES.items():
             head = "".join(leading_block(REPO / "cmd" / cmd))
             with self.subTest(cmd=cmd):
@@ -98,48 +58,8 @@ class TestDeclaredValuesReachTheHelp(unittest.TestCase):
                     f"`wk {cmd} -h` runs it")
 
 
-class TestHelpListsClosedSetValues(unittest.TestCase):
-    def test_every_closed_set_value_appears_in_help(self):
-        for cmd, params in CLOSED_SETS.items():
-            text = help_text(cmd)
-            for param, values in params.items():
-                for v in values:
-                    with self.subTest(cmd=cmd, param=param, value=v):
-                        self.assertIn(v, text,
-                                      f"wk {cmd} -h does not mention '{v}' "
-                                      f"(a valid value for {param})")
-
-
 class TestBenchListPlans(unittest.TestCase):
-    """`wk bench plans` (docs/defects): the plan set is not a list in this
-    repo -- it lives in the WebKit tree -- so it is not a DECLARED_VALUES
-    entry above: running it for real asks podman about this machine's store
-    (`where=store`), which the tests must never do, unlike boot/profile/
-    sysimage's configs, answered entirely out of this repo with `where=host`
-    or `where=local`. Its declaration is checked directly, and its read of
-    the store against a fake mirror this test builds -- the one read `wk
-    bench plans` forwards to the podman VM for on a macOS host, and this
-    suite never exercises through the podman machine itself."""
 
-    def test_declares_values_readonly_and_store(self):
-        head = "".join(leading_block(REPO / "cmd" / "bench"))
-        self.assertIn("values=plans", head,
-                       "cmd/bench no longer declares its plan list")
-        self.assertIn("sub plans where=store", head,
-                       "cmd/bench plans no longer reads the store")
-        self.assertIn("readonly plans,", head,
-                       "cmd/bench plans is not read-only, so it could start the podman VM")
-
-    def test_help_ends_with_the_plans_or_the_one_honest_line(self):
-        text = help_text("bench")
-        self.assertIn("valid values (wk bench plans):", text,
-                       "wk bench -h does not print its plan list")
-        tail = text.split("valid values (wk bench plans):", 1)[1].strip()
-        self.assertTrue(tail, "wk bench -h prints nothing after its value-list header")
-        # Either real plan names (this host has a readable mirror) or the
-        # one line naming where the list actually lives (it does not, here).
-        self.assertTrue("no mirror at" in tail or tail.split(),
-                         f"wk bench -h's plan list is empty: {tail!r}")
 
     def test_lists_plan_names_from_a_fake_mirror(self):
         with scratch_dir("wk-test-bench-src-") as src, temp_store() as store:

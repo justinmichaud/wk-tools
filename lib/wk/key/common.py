@@ -8,10 +8,8 @@ from wk.act import debug, info, log, warn
 from wk.secrets import first_line
 
 LOCAL = "local"
-LOGIN = "claude-login"
 TITLE = "wk shared deploy key"
 SAME_AS_HERE = "the one this machine holds"
-LOGIN_FILES = (".credentials.json", ".claude.json")
 STATES = {"ok": "ok", "wide": "wide", "unverified": "?", "absent": "none"}
 RANKS = {"ok": 3, "wide": 2}
 

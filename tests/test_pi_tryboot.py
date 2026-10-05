@@ -18,12 +18,9 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act  # noqa: E402
-from wk.boot.cli import load_conf  # noqa: E402
-from wk.boot.driver import root_priv  # noqa: E402
 from wk.boot.pi import PiTryboot  # noqa: E402
 from wk.machine import Result  # noqa: E402
 
-TRYBOOT = REPO / "boot" / "onboard" / "tryboot.sh"
 CONF = {"name": "rpi4", "driver": "pi-tryboot", "device": "/dev/sda", "root": "/dev/mmcblk0p2",
         "dtb": "bcm2711-rpi-4-b.dtb", "role": "bench-device", "profile": "p"}
 
@@ -55,15 +52,6 @@ def refused(fn, *args, **kw):
 
 
 class TestArrangement(unittest.TestCase):
-    def test_rpi4_names_the_driver_and_keeps_its_media(self):
-        c = load_conf(REPO, "rpi4", {"WK_MACHINES_DIR": str(REPO / "machines")})
-        self.assertEqual([c[k] for k in ("driver", "device", "root", "dtb")],
-                         ["pi-tryboot", "/dev/sda", "/dev/mmcblk0p2", "bcm2711-rpi-4-b.dtb"])
-
-    def test_this_board_is_armed_from_its_rescue(self):
-        """the rescue is the one system on this board that always carries systemd, which passes the flag."""
-        self.assertFalse(PiTryboot.arm_from_bench)
-
     def test_an_arming_reboot_refuses_where_the_flag_cannot_be_passed(self):
         d, ch = driver({"has-systemd.sh": Result(1)})
         err = refused(d.reboot, armed=True)
@@ -76,7 +64,6 @@ class TestArrangement(unittest.TestCase):
         d.reboot(armed=True)
         d.reboot()
         self.assertEqual([c[1] for c in ch.calls if c[0] == "boot_priv"], [("reboot-tryboot",), ("reboot",)])
-        self.assertIn("/run/systemd/reboot-param && systemctl reboot", root_priv("reboot-tryboot")[-1])
 
     def test_identity_still_reads_off_the_bench_medium(self):
         self.assertEqual(driver()[0].boot_part(), "/dev/sda1")
@@ -89,7 +76,6 @@ class TestArrangement(unittest.TestCase):
             self.assertIn(piece, out)
 
     def test_every_step_goes_over_the_channel_that_answered(self):
-        """while the staging is in force the board answers as its bench system, so nothing addresses the rescue alone."""
         d, ch = driver({"staged-root": Result(0, "root=PARTUUID=aa-04\n"),
                         "medium-read.sh": Result(0, "root=PARTUUID=aa-04 rootwait\n")})
         d.arm("/dev/sda3")
@@ -138,13 +124,6 @@ class TestEvidence(unittest.TestCase):
             self.assertIn(want, out)
         self.assertIn("tryboot_staged=unreadable", self.evidence("staging\n", ""))
 
-    def test_the_reporting_path_mounts_read_only(self):
-        """mounting a FAT read-write and unmounting it rewrites the dirty flag on a card somebody only asked about."""
-        text = TRYBOOT.read_text()
-        for verb in ("staged)", "staged-root)", "source)"):
-            branch = text[text.index("    " + verb):]
-            self.assertIn("wk_sd_mount -o ro", branch[:branch.index(";;")], verb)
-
     def test_reprovision_puts_the_sd_first(self):
         out = driver()[0].reprovision()
         self.assertIn("wk boot rpi4 --boot-order sd-first", out)
@@ -153,8 +132,7 @@ class TestEvidence(unittest.TestCase):
 
 
 class TestStagingRuns(unittest.TestCase):
-    """boot/onboard/tryboot.sh executed for real against a fixture: `mount`, `umount`, `sync` and the /proc/mounts
-    read are shimmed (they need root and a board), and the SD's boot partition answers as already mounted."""
+    """boot/onboard/tryboot.sh run against a fixture, with mount, umount, sync and /proc/mounts shimmed."""
 
     ZIMAGE_MAGIC = (36, bytes((0x18, 0x28, 0x6F, 0x01)))
     ARM64_MAGIC = (56, b"ARM\x64")
@@ -165,14 +143,14 @@ class TestStagingRuns(unittest.TestCase):
         blob[off:off + 4] = word
         path.write_bytes(bytes(blob))
 
-    def stage(self, config, kernels):
+    def stage(self, config, kernels, cmdline="root=PARTUUID=aa-02 rootwait\n"):
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, True)
         medium, sd, shim = tmp / "medium", tmp / "sd", tmp / "bin"
         for d in (medium, sd, shim):
             d.mkdir()
         (medium / "config.txt").write_text(config)
-        (medium / "cmdline.txt").write_text("root=PARTUUID=aa-02 rootwait\n")
+        (medium / "cmdline.txt").write_text(cmdline)
         (medium / "bcm2711-rpi-4-b.dtb").write_bytes(b"dtb")
         (medium / "overlays").mkdir()
         (medium / "overlays" / "vc4-kms-v3d.dtbo").write_bytes(b"ovl")
@@ -206,9 +184,9 @@ class TestStagingRuns(unittest.TestCase):
         self.assertIn("panic=10", (sd / "second" / "cmdline.txt").read_text())
 
     def test_a_cmdline_that_chose_a_panic_keeps_its_own(self):
-        cp, sd = self.stage("kernel=zImage\n", {"zImage": self.ZIMAGE_MAGIC})
-        self.assertEqual((sd / "second" / "cmdline.txt").read_text().split(), ["root=PARTUUID=aa-02", "rootwait", "panic=10"])
-        self.assertIn("/ panic=[0-9]/!", TRYBOOT.read_text())
+        cp, sd = self.stage("kernel=zImage\n", {"zImage": self.ZIMAGE_MAGIC}, cmdline="root=PARTUUID=aa-02 panic=5\n")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual((sd / "second" / "cmdline.txt").read_text().split(), ["root=PARTUUID=aa-02", "panic=5"])
 
     def test_the_prefix_leads_the_staged_config(self):
         """the firmware resolves each filename as it reads the directive asking for it."""

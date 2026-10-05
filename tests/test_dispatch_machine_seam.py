@@ -1,10 +1,4 @@
-"""The dispatcher's two effects go through the one Machine seam: the `tailnet`
-need is answered by `tailscale status` on the machine, and the podman machine
-start is an `act_run` with a terminal (recorded, printed by --dry-run, refused
-without a tty).
-
-Run: python3 tests/run.py -k tests.test_dispatch_machine_seam
-"""
+"""The dispatcher's two effects go through the one Machine seam: the `tailnet`"""
 import contextlib
 import io
 import os
@@ -57,7 +51,6 @@ class TestPodmanMachineStart(unittest.TestCase):
         fake.answer(START)
         env = {"WK_DRY_RUN": "1"} if dry else {}
         err = io.StringIO()
-        # The memory admission is guest.podman_admit's own (tests/test_vm_base.py); here it admits.
         with mock.patch.dict(os.environ, env), mock.patch.object(dispatch.guest, "podman_admit"), \
                 contextlib.redirect_stderr(err), contextlib.redirect_stdout(err):
             try:

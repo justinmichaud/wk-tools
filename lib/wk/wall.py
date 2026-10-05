@@ -22,15 +22,29 @@ CSI = re.compile(r"\x1b\[[0-9;?<>=]*[A-Za-z]|\x1b[78]|\x1b\([A-Z]|\x0f")
 COMMIT_WALL_PATHS = ("objects", "refs", "logs", "HEAD", "packed-refs", "index.lock", "ORIG_HEAD")
 
 
+CURL = "curl -sS -m 40 --suppress-connect-headers -D -"
+
+
 def http(url, extra=""):
-    return "curl -sS -m 40 -o /dev/null -w '%%{http_code}' %s%s 2>/dev/null" % (extra, url)
+    return "%s -o /dev/null -w '%%{http_code}' %s%s 2>/dev/null" % (CURL, extra, url)
 
 
-def upstream_gap(name, remedy, *codes):
-    """The injector's own 502/504 is the far end down; its 598 is the injector failing TLS or DNS toward it."""
-    if "598" in codes:
-        return [miss("%s: the injector failed to verify or resolve the host (HTTP 598) -- a fault in the injector, not the upstream" % name, remedy)]
-    bad = next((c for c in codes if c in ("502", "504")), None)
+def fault_of(reply):
+    """The reason in the injector's `X-Wk-Injector` header: it answers its own TLS or DNS failure toward the upstream with a 502 that carries one."""
+    m = re.search(r"(?im)^x-wk-injector:[ \t]*(.+?)\s*$", reply)
+    return m.group(1) if m else ""
+
+
+def status_of(reply):
+    return reply.rsplit("\n", 1)[-1].strip()
+
+
+def upstream_gap(name, remedy, *replies):
+    """The injector's 502/504 without the header is the far end down; with it, the injector failing toward the far end."""
+    for r in replies:
+        if reason := fault_of(r):
+            return [miss("%s: the injector failed to verify or resolve the host (%s) -- a fault in the injector, not the upstream" % (name, reason), remedy)]
+    bad = next((c for c in map(status_of, replies) if c in ("502", "504")), None)
     if bad is None:
         return []
     return [note("%s did not answer through the injector (HTTP %s) -- an upstream outage, not the sandbox" % (name, bad))]
@@ -89,7 +103,7 @@ class Wall:
         return self.target.exec(self.ws, ["bash", "-lc", cmd]).out.replace("\r", "").rstrip("\n")
 
     def github(self):
-        code = self.inside(http("https://github.com/"))
+        code = status_of(self.inside(http("https://github.com/")))
         if code == "200":
             return [ok("github reachable through the proxy (HTTP %s)" % code)]
         return [miss("github unreachable through the proxy (got '%s')" % (code or "nothing"), self.target.daemon_remedy(self.ws, "proxy"))]
@@ -235,10 +249,10 @@ class Wall:
 
     def github_read(self):
         """GET / answers 200 unauthenticated and 401 only for a token GitHub refuses, which is the injector's own standing one."""
-        root = self.inside(http("https://api.github.com/"))
-        user = self.inside(http("https://api.github.com/user"))
-        if gap := self.gap("GitHub", root, user):
+        rroot, ruser = self.inside(http("https://api.github.com/")), self.inside(http("https://api.github.com/user"))
+        if gap := self.gap("GitHub", rroot, ruser):
             return gap
+        root, user = status_of(rroot), status_of(ruser)
         if root == "200" and user == "200":
             return [ok("a read is authenticated (HTTP 200) from a token this workspace never holds")]
         if root == "200" and user == "401":
@@ -260,9 +274,10 @@ class Wall:
         """An empty body names no branch, so 422 is the authenticated answer and no pull request is created."""
         fork = next((r[1] for r in secrets.forks()), "")
         pulls = "https://api.github.com/repos/%s/pulls" % fork
-        code = self.inside(http(pulls, "-X POST -d '{}' "))
-        if gap := self.gap("GitHub", code):
+        reply = self.inside(http(pulls, "-X POST -d '{}' "))
+        if gap := self.gap("GitHub", reply):
             return gap
+        code = status_of(reply)
         if self.push_on != 1:
             if code == "412":
                 return [ok("a write is refused by the injector (HTTP 412), which names 'wk push on'")]
@@ -324,13 +339,14 @@ class Wall:
         return [miss("'git-webkit setup' has not completed in '%s' (webkitscmpy.setup is not true): `git-webkit pr` prompts or refuses" % self.ws,
                      "'wk sync %s --fix' re-asserts the remotes and runs it" % self.ws)]
 
-    def gap(self, name, *codes):
-        return upstream_gap(name, self.target.daemon_remedy(self.ws, "inject"), *codes)
+    def gap(self, name, *replies):
+        return upstream_gap(name, self.target.daemon_remedy(self.ws, "inject"), *replies)
 
     def bugzilla_read(self):
-        code = self.inside(http("https://bugs.webkit.org/rest/version"))
-        if gap := self.gap("Bugzilla", code):
+        reply = self.inside(http("https://bugs.webkit.org/rest/version"))
+        if gap := self.gap("Bugzilla", reply):
             return gap
+        code = status_of(reply)
         if code == "200":
             return [ok("bugs.webkit.org reachable through the injector (HTTP %s)" % code)]
         return [miss("bugs.webkit.org answered '%s' -- the injector is not in the path for it" % (code or "nothing"),
@@ -341,18 +357,20 @@ class Wall:
         post = "-X POST -H 'Content-Type: application/json' -d '{}' "
         if self.push_on != 1:
             # Nothing reaches Bugzilla here, so the status is the injector's own.
-            code = self.inside(http("https://bugs.webkit.org/rest/bug", post))
-            if gap := self.gap("Bugzilla", code):
+            reply = self.inside(http("https://bugs.webkit.org/rest/bug", post))
+            if gap := self.gap("Bugzilla", reply):
                 return gap
+            code = status_of(reply)
             if code == "412":
                 return [ok("a Bugzilla write is refused by the injector (HTTP 412), which names 'wk push on'")]
             return [miss("POST /rest/bug answered '%s' where the host does not say push is on -- expected 412, the injector's own refusal"
                          % (code or "nothing"),
                          "Bugzilla's own 'log in first' is an injector still running older code, which 'wk status' reports and "
                          "'./setup' on that machine restarts; anything else is a Bugzilla key still on the machine:  wk push off")]
-        body = self.inside("curl -sS -m 40 %shttps://bugs.webkit.org/rest/bug 2>/dev/null" % post)
-        if "wk credential injector" in body:
-            return self.gap("Bugzilla", "504" if "did not answer" in body else "502" if "could not reach" in body else "598")
+        reply = self.inside("%s %shttps://bugs.webkit.org/rest/bug 2>/dev/null" % (CURL, post))
+        headers, _, body = reply.partition("\n\n") if reply.startswith("HTTP/") else ("", "", reply)
+        if "wk credential injector" in body or fault_of(headers):
+            return self.gap("Bugzilla", headers + "\n" + ("504" if "did not answer" in body else "502"))
         try:
             code = str(json.loads(body).get("code", ""))
         except (ValueError, AttributeError):

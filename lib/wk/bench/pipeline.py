@@ -5,7 +5,6 @@ import json
 import os
 import re
 import shlex
-import subprocess
 import sys
 
 from wk import act, buildconf, job, record as progress, screen
@@ -23,8 +22,10 @@ PID_MATCH = "*run-benchmark* *cli.js*"
 # A benchmark reports once per subtest, far less often than a compiler does.
 STALL_SECONDS, ABORT_SECONDS = "900", "5400"
 MAX_LOAD = 4
+DEFAULT_CONFIG = "wpe-release"
 SCORE = re.compile(r"^(Score|Total|.*Score:)", re.I)
-AB_ONLY = ("rounds", "exclude_subtests", "no_warmup_profile", "jit_tiers")
+BOARD_AB_ONLY = ("exclude_subtests", "no_warmup_profile", "jit_tiers")
+AB_ONLY = ("rounds",) + BOARD_AB_ONLY
 
 
 def bench_class(plan):
@@ -47,6 +48,11 @@ def variance(env):
 def knob(env, key):
     v = variance(env)[key]
     return int(v) if v.isdigit() else 0
+
+
+def task_held(env, task):
+    """The A/B that started this run holds its task's lock already: a leg in-process, or a step it spawned."""
+    return env.get("WK_TASK_HELD") == task
 
 
 def aslr_off(env):
@@ -145,11 +151,12 @@ class Leg:
         self.payload = self.id = self.task = self.rel = self.out = ""
         self.machine = None   # what holds `out`: each Run's begin names it
         self.notes = ""
+        self.args = shlex.split(o.get("arm_args") or "")   # an options A/B's arm: jsc options, or MiniBrowser's
 
 
 class Run:
-    def __init__(self, root, reg, system, clock, env=None, popen=subprocess.Popen):
-        self.root, self.reg, self.system, self.clock, self.popen = str(root), reg, system, clock, popen
+    def __init__(self, root, reg, system, clock, env=None):
+        self.root, self.reg, self.system, self.clock = str(root), reg, system, clock
         self.env = dict(os.environ if env is None else env)
         progress.default_watchdog(self.env, STALL_SECONDS, ABORT_SECONDS)
         self.here, self.ws, self.target = reg.machine, system.ws, system.target
@@ -174,7 +181,7 @@ class Run:
                 die("--cores '%s' is not a valid Linux cpu list (e.g. 0-3, 2,3, 0-1,4, 7)" % leg.cores)
             if s.cores_refusal():
                 die("--cores: " + s.cores_refusal())
-        name = o.get("config") or "wpe-release"
+        name = o.get("config") or DEFAULT_CONFIG
         try:
             leg.cfg = buildconf.resolve(name, self.target.os(), self.target.kind, self.target.env)
         except LookupError:
@@ -254,8 +261,9 @@ class Run:
 
     def begin(self, leg):
         """The task (task.json, under its lock) and its run directory, the env.json the report reads, and the progress record."""
-        stamp, given = self.clock.stamp(), leg.o.get("task") or ""
-        leg.id, leg.task = "%s-%s-%s" % (stamp, leg.plan, self.ws), given or "%s-%s" % (stamp, self.ws)
+        stamp, given, rnd = self.clock.stamp(), leg.o.get("task") or "", leg.o.get("round") or ""
+        leg.id = "%s-%s-%s%s" % (stamp, leg.plan, self.ws, "-r%s%s" % (rnd, leg.o.get("arm", "")) if rnd else "")
+        leg.task = given or "%s-%s" % (stamp, self.ws)
         leg.rel = "%s/runs/%s" % (leg.task, leg.id)
         leg.machine, bench = record.leg_home(self.reg, self.ws, given)
         taskdir = os.path.join(bench, leg.task)
@@ -266,7 +274,8 @@ class Run:
             return steps
         if not given and leg.machine.exists(taskdir):
             die("task %s already exists (%s); a task is one request, made once" % (leg.task, taskdir))
-        self.lock.hold("bench-task-" + leg.task, timeout=5)
+        if not task_held(self.env, leg.task):
+            self.lock.hold("bench-task-" + leg.task, timeout=5)
         count = ["count=" + leg.count] if leg.count else []
         command = "wk bench run %s %s --config %s%s" % (self.ws, leg.plan, leg.cfg.name, " --count " + leg.count if leg.count else "")
         if not given:
@@ -280,6 +289,8 @@ class Run:
             "webkit_sha=" + self.system.sha(), "count=" + leg.count, "local_copy=" + leg.payload,
             "software_reason=" + leg.software_reason, "class=" + leg.klass, "runner=" + leg.runner, "arch=" + leg.arch,
             "bench_host=" + self.system.bench_host, "preflight_notes=" + leg.notes, "cores.set=" + leg.cores]
+            + (["ab.round=" + rnd, "ab.arm=" + leg.o.get("arm", ""), "ab.slot_a=" + leg.o.get("slot_a", ""),
+                "ab.slot_b=" + leg.o.get("slot_b", ""), "arm_args=" + shlex.join(leg.args)] if rnd else [])
             + self.system.facts(leg) + configuration_fields(self.env),
             bool_fields=["forced=" + act.forced(self.env), "software=" + ("1" if leg.software else ""), "cores.pinned=" + leg.cores],
             machine=leg.machine)
@@ -302,7 +313,7 @@ class Run:
             watcher = job.PidWatch(self.target, self.ws, self.task, path, "bench", PID_MATCH, job.pid_tries(self.env))
             watcher.start()
         try:
-            return job.watch(argv, path, self.here, self.clock, self.env, cwd, self.popen)
+            return job.watch(argv, path, self.here, self.clock, self.env, cwd)
         finally:
             if watcher is not None:
                 watcher.stop()
@@ -336,7 +347,7 @@ class Run:
                 info("iteration %d/%d" % (i, n))
             logs.append(os.path.join(leg.out, "run-%d.log" % i))
             exports = ['%s="%s${%s:+:${%s}}"' % (var, lib, var, var)]
-            rc = s.run(leg, self.script(leg, exports, s.payload_dir(leg), [shlex.quote(jsc), "cli.js", "--"] + cli), self.watched, logs[-1])
+            rc = s.run(leg, self.script(leg, exports, s.payload_dir(leg), [shlex.quote(jsc)] + [shlex.quote(a) for a in leg.args] + ["cli.js", "--"] + cli), self.watched, logs[-1])
             if rc != 0:
                 return rc, "jsc exited %d on iteration %d" % (rc, i), logs[-1]
         if not act.dry_run():
@@ -350,7 +361,7 @@ class Run:
         args += (["--count", leg.count] if leg.count else []) + (["--local-copy", s.payload_dir(leg)] if leg.payload else [])
         args += ["--timeout", leg.o["timeout"]] if leg.o.get("timeout") else []
         args += ["--subtests"] + leg.subtests.split() if leg.subtests else []
-        extra = (["--headless"] if leg.software else []) + (leg.o.get("browser_args") or "").split()
+        extra = (["--headless"] if leg.software else []) + (leg.o.get("browser_args") or "").split() + leg.args
         args += ["--"] + extra if extra else []
         info("running %s in '%s' (%s, %s)" % (leg.plan, self.ws, leg.cfg.name, leg.browser))
         log("  results: %s" % leg.out)
@@ -434,13 +445,10 @@ class Run:
 
 
 def _run_class(system):
-    """A `--system <mac>` run is driven over ssh through that install's own `wk bench staged` (lib/wk/bench/mac.py), a
-    `--system <board>` run is run-benchmark here driving the board's browser (lib/wk/bench/board.py); every other
+    """A `--system <board>` run is run-benchmark here driving the board's browser (lib/wk/bench/board.py); every other
     system runs run-benchmark or the jsc shell directly, through the base `Run`."""
-    from wk.bench import board, mac
-    if isinstance(system, board.BoardSystem):
-        return board.BoardRun
-    return mac.HostRun if isinstance(system, mac.MacHostSystem) else Run
+    from wk.bench import board
+    return board.BoardRun if isinstance(system, board.BoardSystem) else Run
 
 
 def nothing_left(reg, ws, plan, task):
@@ -458,21 +466,28 @@ def nothing_left(reg, ws, plan, task):
     return True
 
 
-def run(root, reg, words, o, kill, clock, popen=subprocess.Popen):
+def run(root, reg, words, o, kill, clock):
     """`wk bench run <ws> <plan>`: the dispatcher resolved the workspace (WK_NAME) and dropped it from `words`."""
     ws, plan = ws_name(reg.env), (words[0] if words else "")
     if not ws or not (plan or kill):
         die("usage: wk bench run <workspace> <plan> [options]; see wk bench -h")
     ab = not kill and (o.get("ab") or o.get("ab_systems"))
-    alone = [k for k in AB_ONLY if o.get(k)] if not ab else []
+    options = not kill and (o.get("a_args") is not None or o.get("b_args") is not None)
+    if options and (ab or o.get("system")):
+        die("--a-args and --b-args are an A/B of one build in this workspace; on a board the arms are\n"
+            "    slots (--ab) or systems (--ab-systems)")
+    alone = [k for k in (BOARD_AB_ONLY if options else () if ab else AB_ONLY) if o.get(k)]
     if alone:
         die("--%s belongs to an A/B on a board (--ab or --ab-systems)" % alone[0].replace("_", "-"))
+    if options:
+        from wk.bench import board_ab
+        return board_ab.ArgsAB(root, reg, ws, plan, o, clock).go()
     if o.get("system") and reg.in_workspace() and (ab or o.get("collect")):
         die("an A/B or a collection on a board is not a request a workspace can make; run it on the workstation:\n"
             "    wk bench run %s %s --system %s ..." % (ws, plan, o["system"]))
     if ab:
         from wk.bench import board_ab
-        return board_ab.run(root, reg, ws, plan, o, clock, popen)
+        return board_ab.run(root, reg, ws, plan, o, clock)
     if o.get("system") and reg.in_workspace():
         from wk.bench import board
         return board.request(root, reg, "run", ["machine=" + o["system"], "workspace=" + ws, "plan=" + plan, "slot=" + (o.get("slot") or ""),
@@ -482,7 +497,7 @@ def run(root, reg, words, o, kill, clock, popen=subprocess.Popen):
     system = systems.for_workspace(root, reg, ws, clock, o.get("system") or "")
     if o.get("collect") and system.kind != "board":
         die("--collect takes a PGO profile from a board's instrumented slot: --system <board> --slot <name>-instr")
-    r = _run_class(system)(root, reg, system, clock, reg.env, popen)
+    r = _run_class(system)(root, reg, system, clock, reg.env)
     if kill:
         return r.stop()
     if o.get("task") and not act.dry_run():

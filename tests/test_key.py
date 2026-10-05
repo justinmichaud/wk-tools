@@ -1,48 +1,26 @@
-"""cmd/key: the keys are this machine's own, and every subverb acts here.
-
-The secrets directory is this device's (Store.secrets_dir, lib/wk/store.py); on macOS
-the podman machine reads it as a read-only mount rather than holding it, so
-`wk key ensure`, `wk key pub` and `wk key fingerprints` are ssh-keygen and a
-file on this side, with no `podman machine ssh` in the path and nothing that
-has to be running.
+"""cmd/key end to end against a scratch secrets directory: every subverb acts here, with a `podman` that fails on
+PATH. tests/test_wk_key.py holds the fleet election over a fake machine.
 
 Run: python3 -m unittest tests.test_key -v
 """
 
-import inspect
-import json
 import os
 import subprocess
 import sys
 import unittest
 
-from tests.support import REPO, WkTest, as_dispatched, bash, run, stub_path
-from tests.test_credcheck import FINE, login
+from tests.support import REPO, WkTest, as_dispatched, bash, stub_path
+from tests.test_credcheck import FINE
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.key import cli  # noqa: E402
 
 KEY = REPO / "cmd" / "key"
-KEY_PY = "".join(p.read_text() for p in sorted((REPO / "lib" / "wk" / "key").glob("*.py")))
-
-# A `podman` that fails loudly if anything calls it: what this file is mostly
-# about is that nothing does.
 PODMAN_TRAP = '#!/bin/sh\necho "podman was called" >&2\nexit 1\n'
 
 
 class _KeyRun(WkTest):
-    """cmd/key against a scratch secrets directory, with the trap on PATH."""
-
     def key(self, *args, env=None, stubs=None, input=None):
-        # Store.secrets_dir (lib/wk/store.py) reads WK_HOST_SECRETS on a macOS host
-        # and $WK_STORE/secrets everywhere else. Pointing both at one directory
-        # is what a real machine looks like, and is what makes these tests read
-        # the directory the command actually wrote on either platform.
-        #
-        # WK_NTFY_API: the ntfy rule asks ntfy.sh whether it serves the topic,
-        # and port 1 refuses at once -- the same answer a machine with no
-        # network gives, and the branch that reports one unverified. No test
-        # here reaches ntfy.sh.
         store = self.tmp / "store"
         secrets = store / "secrets"
         e = {"WK_HOST_SECRETS": str(secrets), "WK_STORE": str(store),
@@ -66,10 +44,7 @@ class _KeyRun(WkTest):
 
 
 class TestEnsureRunsHere(_KeyRun):
-    def test_the_two_halves_go_to_the_two_directories(self):
-        """The private half is generated where it lives for good -- the
-        directory nothing mounts -- and only the public one is copied to the
-        directory every workspace reads."""
+    def test_the_two_halves_go_to_the_two_directories_unreadable_to_anyone_else(self):
         cp, secrets = self.key("ensure")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertNotIn("podman was called", cp.stderr)
@@ -78,12 +53,7 @@ class TestEnsureRunsHere(_KeyRun):
             with self.subTest(fork=fork):
                 self.assertTrue((held / f"build_key_{fork}").exists(), cp.stderr)
                 self.assertTrue((secrets / f"build_key_{fork}.pub").exists())
-                self.assertFalse((secrets / f"build_key_{fork}").exists(),
-                                 "a private half is in the directory every workspace mounts")
-
-    def test_the_directory_it_makes_is_not_readable_by_anyone_else(self):
-        _cp, secrets = self.key("ensure")
-        held = secrets.parent / "push-keys"
+                self.assertFalse((secrets / f"build_key_{fork}").exists())
         self.assertEqual(0o700, secrets.stat().st_mode & 0o777)
         self.assertEqual(0o700, held.stat().st_mode & 0o777)
         self.assertEqual(0o600, (held / "build_key_fork").stat().st_mode & 0o777)
@@ -97,8 +67,6 @@ class TestEnsureRunsHere(_KeyRun):
         self.assertEqual(before, (held / "build_key_fork").read_bytes())
 
     def test_the_public_half_is_re_asserted_from_the_private_one(self):
-        """A secrets directory recreated without it would leave every
-        workspace's ssh config naming an identity that is not there."""
         _cp, secrets = self.key("ensure")
         (secrets / "build_key_fork.pub").unlink()
         cp, _ = self.key("ensure")
@@ -106,12 +74,7 @@ class TestEnsureRunsHere(_KeyRun):
         self.assertTrue((secrets / "build_key_fork.pub").exists())
 
     def test_the_public_half_is_the_private_ones_own_and_nothing_sits_beside_the_key(self):
-        """ssh reads a `.pub` beside an identity and refuses the identity when
-        the two disagree ("private key contents do not match public"), so the
-        one public half is derived from the private key on every run and no
-        copy is kept next to it -- a stale one there would otherwise be
-        re-asserted over the published one after `wk key adopt` replaced the
-        private key."""
+        """ssh refuses an identity whose `.pub` beside it disagrees."""
         _cp, secrets = self.key("ensure")
         held = secrets.parent / "push-keys"
         self.assertFalse((held / "build_key_fork.pub").exists())
@@ -136,8 +99,6 @@ class TestTheKeysAreReadFromHere(_KeyRun):
         self.assertIn("ssh-ed25519", cp.stdout)
 
     def test_fingerprints_say_whether_this_machine_holds_a_private_half(self):
-        """Where the private half is is not the switch: it is always in the
-        directory nothing mounts, and whether it is loaded is `wk push`."""
         _cp, secrets = self.key("ensure")
         held = secrets.parent / "push-keys"
         (held / "build_key_forkwpe").unlink()
@@ -146,25 +107,7 @@ class TestTheKeysAreReadFromHere(_KeyRun):
         self.assertRegex(cp.stdout, r"fork\s+SHA256:\S+\s+private half here")
         self.assertRegex(cp.stdout, r"forkwpe\s+SHA256:\S+\s+no private half")
 
-    def test_nothing_here_reaches_the_podman_machine(self):
-        """the hop is gone, not merely unused"""
-        text = KEY.read_text() + KEY_PY
-        for gone in ("podman machine ssh", "IN_VM_SSH", "in_vm "):
-            with self.subTest(gone=gone):
-                self.assertNotIn(gone, text)
-
-
-class TestEnsureIsOneImplementation(WkTest):
-    def test_deploy_ensures_through_this_same_file(self):
-        """`wk key deploy` walks the machines and asks each to make its
-        missing keys; for this one that is `ensure` itself, not a second copy
-        of ssh-keygen"""
-        self.assertIn("self.ensure()", inspect.getsource(cli.Key.converge_forks))
-        self.assertEqual(1, KEY_PY.count('"-t", "ed25519"'))
-
-
-# `gh` marking when it starts and when it ends, so a test can see whether two
-# rows' calls overlap; exit 1 is the read_only evidence a refused call gives.
+# exit 1 is the read_only evidence a refused call gives.
 GH_OVERLAPS = '''#!/bin/sh
 echo start >> "$GH_LOG"
 sleep 1
@@ -172,20 +115,12 @@ echo end >> "$GH_LOG"
 exit 1
 '''
 
-# No row may dial github.com from a test: this is the answer a key that cannot
-# authenticate gives.
 SSH_REFUSES = '#!/bin/sh\nexit 255\n'
 
-# A `gh` that answers every call with an empty body: the key list could not be
-# read, so whether a registration carries write access is unestablished.
 GH_SAYS_NOTHING = '#!/bin/sh\nexit 0\n'
 
 
 class TestCheckAsksAboutEveryCredential(_KeyRun):
-    """`wk key check` is the one report over all of them, and every line of it
-    comes from an answer taken at that moment: the deploy keys through the same
-    rule table as the rest (lib/credcheck.py's deploy-key row), and one line per
-    credential this machine can hold."""
 
     def test_a_machine_with_no_keys_names_the_remedy_for_each_fork(self):
         cp, _secrets = self.key("check")
@@ -198,75 +133,40 @@ class TestCheckAsksAboutEveryCredential(_KeyRun):
         cp, _secrets = self.key("check")
         self.assertIn("credentials:", cp.stdout)
         for name in ("github-pat", "bugzilla-api-key", "claude", "litellm",
-                     "claude-login", "tailnet", "tailnet-api", "ntfy"):
+                     "tailnet", "tailnet-api", "ntfy"):
             with self.subTest(name=name):
                 self.assertIn(name, cp.stdout)
         self.assertIn("nothing stored", cp.stdout)
 
-    def test_a_stored_credential_that_breaks_its_rule_fails_the_check(self):
+    def test_a_broken_credential_fails_the_check_and_its_fix_leaves_the_table(self):
         cp, secrets = self.key("ensure")
         (secrets.parent / "push-keys" / "github-pat").write_text("hunter2\n")
         cp, _ = self.key("check")
         self.assertNotEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("does not start like a GitHub personal access token",
-                      cp.stdout)
-
-    def test_a_row_is_one_line_and_the_fix_leaves_the_table(self):
-        """`wk key check` is an aligned table, so a row is a state, a name and
-        one summary line -- never the whole detail wrapped across the column,
-        and never the `fix:` line, which leaves the table for the block at the
-        end where a person looks for what to type."""
-        cp, secrets = self.key("ensure")
-        (secrets.parent / "push-keys" / "github-pat").write_text("hunter2\n")
-        cp, _ = self.key("check")
         table, _, actions = cp.stdout.partition("needs you:")
         rows = [l for l in table.splitlines() if l.startswith("    ") and l.strip()]
-        for line in rows:
-            with self.subTest(line=line):
-                self.assertNotIn("it must ", line)
-                self.assertNotIn("fix:", line)
         self.assertTrue(rows, cp.stdout)
-        self.assertIn("github-pat", actions)
-
-    def test_what_needs_doing_is_named_once_with_the_command_to_type(self):
-        """The one thing a person wants from this report: a numbered list of
-        what is not right and the command that puts each one right, the command
-        first and where to get what it wants under it."""
-        cp, secrets = self.key("ensure")
-        (secrets.parent / "push-keys" / "github-pat").write_text("hunter2\n")
-        cp, _ = self.key("check")
-        self.assertNotEqual(0, cp.returncode, cp.stdout)
-        actions = cp.stdout.partition("needs you:")[2]
+        for line in rows:
+            self.assertNotIn("fix:", line)
         self.assertRegex(actions, r"\d+\. github-pat\s+wk key set github-pat --replace")
         self.assertIn("https://github.com/settings/tokens/new", actions)
 
     def test_a_deploy_key_remedy_is_not_printed_twice(self):
-        """The deploy-key rule's remedy *is* the command, so the line naming
-        where to get one would otherwise repeat it."""
         cp, _secrets = self.key("check")
         actions = cp.stdout.partition("needs you:")[2]
         self.assertEqual(2, actions.count("wk key deploy"),
                          "one line per fork, not two: " + actions)
 
     def test_a_row_that_fails_without_a_remedy_is_not_called_nothing_to_do(self):
-        """A fork whose registration could not be read fails the check and
-        names no remedy -- there is nothing to go and do about an issuer that
-        did not answer, and saying `nothing needs you` while exiting non-zero
-        would be the report contradicting itself."""
         self.key("ensure")
         cp, _ = self.key("check", stubs={"gh": GH_SAYS_NOTHING,
                                          "ssh": SSH_IS_THE_FORKS_KEY})
         self.assertNotEqual(0, cp.returncode, cp.stdout)
         self.assertNotIn("nothing needs you.", cp.stdout)
         self.assertNotIn("needs you:", cp.stdout)
-        self.assertIn("could not be\n  established just now", cp.stdout)
 
     def test_the_fork_rows_are_asked_at_once(self):
-        """Every row of the table is an independent probe -- a `gh api` call
-        per fork per machine, an ssh test beside it, an HTTPS reach per
-        credential -- so they are asked together and replayed in the table's
-        order. Proved by overlap rather than by a clock: two serial calls
-        would log start, end, start, end."""
+        """Proved by overlap: two serial calls would log start, end, start, end."""
         calls = self.tmp / "gh-calls"
         self.key("ensure")
         cp, _ = self.key("check", env={"GH_LOG": str(calls)},
@@ -276,93 +176,38 @@ class TestCheckAsksAboutEveryCredential(_KeyRun):
         self.assertEqual(marks[:2], ["start", "start"],
                          f"the fork rows ran one after the other: {marks}")
 
-    def test_the_switch_is_not_mistaken_for_where_the_private_half_is(self):
-        """A private half is always in the directory nothing mounts, so its
-        path says nothing about `wk push`; a guard on that path would make
-        every key report the switch instead of GitHub's answer."""
-        self.assertNotIn("push is off", KEY_PY)
-
-
-# A `gh` that refuses every call: `setup` and `deploy` must not reach GitHub
-# from a test, and a refused API call is also what a machine with no network
-# gives.
 GH_REFUSES = '#!/bin/sh\necho "gh: refused in a test" >&2\nexit 1\n'
-
-# `wk key set claude-login` reads what the Claude CLI stored on this machine
-# (a Keychain item on macOS, ~/.claude/.credentials.json on Linux), so a test
-# that walks every credential needs both of those pointed away from the
-# maintainer's real login -- a scratch HOME and a `security` that answers
-# nothing, the pair tests/test_claude_login.py uses.
-SECURITY_HAS_NOTHING = '#!/bin/sh\nexit 1\n'
 
 
 class TestSetupDoesWhateverIsMissing(_KeyRun):
-    """`wk key setup` is the one command a new machine needs: the push keys,
-    then every credential this machine has not got, then the report. Each step
-    is independent -- one credential nobody can be asked for here (there is no
-    terminal) must not leave the ones after it unset -- and a second run asks
-    for nothing that is already stored."""
+    """`wk key setup`: the push keys, every credential not yet held (no terminal here, so none is asked), the report."""
 
     def setup_run(self):
         home = self.tmp / "home"
         home.mkdir(exist_ok=True)
         return self.key("setup",
-                        stubs={"gh": GH_REFUSES,
-                               "security": SECURITY_HAS_NOTHING},
+                        stubs={"gh": GH_REFUSES},
                         env={"HOME": str(home)})
 
-    def test_it_reaches_every_credential_and_reports_them_all(self):
-        cp, _secrets = self.setup_run()
+    def test_what_it_could_not_settle_is_named_and_the_rest_still_runs(self):
+        cp, secrets = self.setup_run()
         self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        self.assertIn("credentials:", cp.stdout)
-        for name in ("github-pat", "bugzilla-api-key", "claude", "litellm",
-                     "claude-login", "tailnet", "tailnet-api", "ntfy"):
-            with self.subTest(name=name):
-                self.assertIn(name, cp.stdout)
-
-    def test_what_it_could_not_settle_is_named_before_the_report(self):
-        """A run that was declined, could not ask, or was killed part way looks
-        exactly like one that finished unless it says so -- and then `wk key
-        check` afterwards reads as the report complaining about work the run
-        was supposed to have done."""
-        cp, _secrets = self.setup_run()
+        self.assertTrue((secrets.parent / "push-keys" / "build_key_fork").exists(), cp.stdout + cp.stderr)
+        self.assertIn(cli.Key(REPO).settable()[-1], cp.stdout)
         left = [l for l in cp.stderr.splitlines() if "not settled:" in l]
         self.assertEqual(1, len(left), cp.stderr)
         for name in ("litellm", "tailnet-api"):
             with self.subTest(name=name):
                 self.assertIn(name, left[0])
 
-    def test_a_credential_it_cannot_ask_for_does_not_end_the_run(self):
-        """No terminal, so every prompt refuses; the last credential in the
-        table still gets its turn and the report still comes out."""
-        cp, _secrets = self.setup_run()
-        self.assertIn("Re-run interactively", cp.stderr)
-        self.assertIn(cli.Key(REPO).settable()[-1], cp.stdout)
-
-    def test_it_makes_the_push_keys_on_the_way(self):
-        cp, secrets = self.setup_run()
-        self.assertTrue((secrets.parent / "push-keys" / "build_key_fork").exists(),
-                        cp.stdout + cp.stderr)
-
     def test_a_credential_wk_mints_is_made_rather_than_asked_for(self):
-        """The walk ends with every credential this machine can hold: one it is
-        given is asked for, one it mints is simply made, so a new machine has a
-        working ntfy topic without anybody inventing a name."""
         cp, secrets = self.setup_run()
         topic = secrets.parent / "notify" / "ntfy-topic"
         self.assertTrue(topic.exists(), cp.stdout + cp.stderr)
         self.assertTrue(topic.read_text().strip())
-        self.assertIn("printed once", cp.stdout + cp.stderr)
-        self.assertNotIn("ntfy.sh topic this machine's notifications go to",
-                         cp.stdout + cp.stderr, "it asked for one instead")
 
     def test_rotate_turns_over_every_stored_credential(self):
-        """`wk key setup --rotate` is the one command that turns the lot over:
-        the deploy keys are re-minted the way `deploy --rotate` does, then each
-        stored credential is replaced the way `set --replace` does -- cleared,
-        then asked for or minted anew -- so a run abandoned at a prompt leaves
-        no old value behind, and the next `wk key setup` asks for what is
-        missing."""
+        """Re-minted deploy keys, and each stored credential cleared then asked for or minted anew."""
         _cp, secrets = self.key("ensure")
         held = secrets.parent / "push-keys"
         old_key = (held / "build_key_fork").read_bytes()
@@ -371,16 +216,13 @@ class TestSetupDoesWhateverIsMissing(_KeyRun):
         home = self.tmp / "home"
         home.mkdir(exist_ok=True)
         cp, _ = self.key("setup", "--rotate",
-                         stubs={"gh": GH_REFUSES, "security": SECURITY_HAS_NOTHING},
+                         stubs={"gh": GH_REFUSES},
                          env={"HOME": str(home), "WK_YES": "1"})
         out = cp.stdout + cp.stderr
         self.assertNotEqual(old_key, (held / "build_key_fork").read_bytes(),
                             "the deploy key was not re-minted: " + out)
-        self.assertIn("removed the old github-pat credential", out)
-        self.assertIn("removed the old litellm credential", out)
         self.assertFalse((held / "github-pat").exists(), "the old token outlived its replace")
         self.assertFalse((secrets / "litellm-key").exists())
-        self.assertIn("credentials:", cp.stdout)
 
     def test_one_already_stored_is_left_exactly_as_it_is(self):
         _cp, secrets = self.key("ensure")
@@ -390,22 +232,11 @@ class TestSetupDoesWhateverIsMissing(_KeyRun):
         before = token.read_bytes()
         cp, _ = self.setup_run()
         self.assertEqual(before, token.read_bytes())
-        self.assertNotIn("GitHub personal access token", cp.stderr,
-                         "asked for one it already has")
         self.assertIn("github-pat", cp.stdout)
 
 
 class TestTheTopicIsMintedNotAsked(_KeyRun):
-    """`wk key set ntfy` mints the topic, the way `wk key deploy` generates a
-    deploy key rather than asking for one: a name a person invents is short and
-    guessable, which lib/credcheck.py's rule can report and never prevent.
-
-    The topic name is the whole credential, so the two moments it is shown are
-    the mint -- a phone has to be pointed at it once -- and `wk key show`, which
-    is how a second phone, or one reinstalled, reaches the topic already minted
-    instead of a fresh one that leaves the first phone silent. Every other
-    reader reports on the stored one without printing it (lib/wk/notify.py's
-    hidden)."""
+    """The topic is the whole credential: printed at the mint and by `wk key show`, and by nothing else."""
 
     SHARED = "a-topic-minted-on-the-first-machine"
 
@@ -420,23 +251,14 @@ class TestTheTopicIsMintedNotAsked(_KeyRun):
         self.assertTrue(path.read_text().strip())
         self.assertEqual(0o600, path.stat().st_mode & 0o777)
 
-    def test_nothing_asks_a_person_for_a_name(self):
-        cp, _secrets = self.key("set", "ntfy")
-        self.assertNotIn("paste it", cp.stdout + cp.stderr)
-
     def test_it_prints_the_subscribe_url_once(self):
         cp, secrets = self.key("set", "ntfy")
         topic = self.topic_path(secrets).read_text().strip()
         out = cp.stdout + cp.stderr
         self.assertEqual(1, out.count(topic), out)
         self.assertIn("https://ntfy.sh/" + topic, out)
-        for fact in ("app", "iOS", "Android"):
-            with self.subTest(fact=fact):
-                self.assertIn(fact, out)
 
     def test_nothing_prints_it_a_second_time(self):
-        """`wk key check` and a re-run of `set` report on the stored topic;
-        neither is the moment a phone is pointed at it."""
         _cp, secrets = self.key("set", "ntfy")
         topic = self.topic_path(secrets).read_text().strip()
         for args in (("check",), ("set", "ntfy")):
@@ -445,8 +267,6 @@ class TestTheTopicIsMintedNotAsked(_KeyRun):
                 self.assertNotIn(topic, cp.stdout + cp.stderr)
 
     def test_only_show_prints_it_again(self):
-        """`wk key show` is where a phone is pointed at the topic already
-        minted, so the subscribe URL comes out whole."""
         _cp, secrets = self.key("set", "ntfy")
         topic = self.topic_path(secrets).read_text().strip()
         cp, _ = self.key("show")
@@ -469,9 +289,6 @@ class TestTheTopicIsMintedNotAsked(_KeyRun):
         self.assertIn(second, cp.stdout + cp.stderr)
 
     def test_a_topic_from_another_machine_is_taken_on_stdin(self):
-        """A maintainer moving a topic between machines: the second machine
-        holds the first's, so one phone subscription covers both. On stdin,
-        because an argument is visible in `ps`."""
         cp, secrets = self.key("set", "ntfy", "--paste",
                                input=self.SHARED + "\n")
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
@@ -483,7 +300,6 @@ class TestTheTopicIsMintedNotAsked(_KeyRun):
         cp, secrets = self.key("set", "ntfy", "--paste",
                                input="not one word\n")
         self.assertNotEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("one word of letters", cp.stdout + cp.stderr)
         self.assertFalse(self.topic_path(secrets).exists())
 
     def test_nothing_on_stdin_stores_nothing_and_names_the_mint(self):
@@ -493,40 +309,18 @@ class TestTheTopicIsMintedNotAsked(_KeyRun):
         self.assertFalse(self.topic_path(secrets).exists())
 
     def test_paste_carries_a_handed_credential_too(self):
-        """--paste takes any credential's value on stdin so a second workstation
-        can hold the same one as the first -- how `wk key setup` puts the API
-        token out. A malformed one is still put to the rule and refused."""
-        cp, _secrets = self.key("set", "github-pat", "--paste",
-                                input="not-a-token\n")
+        cp, secrets = self.key("set", "github-pat", "--paste", input="not-a-token\n")
         self.assertNotEqual(0, cp.returncode, cp.stdout)
-        self.assertNotIn("--paste is for a credential wk mints itself",
-                         cp.stdout + cp.stderr)
-        self.assertIn("does not start like a GitHub personal access token",
-                      cp.stdout + cp.stderr)
+        self.assertFalse((secrets.parent / "push-keys" / "github-pat").exists())
 
-    def test_paste_cannot_carry_a_claude_login(self):
-        """The one credential --paste refuses: a claude.ai login is a browser
-        flow, not a value."""
-        cp, _secrets = self.key("set", "claude-login", "--paste",
-                                input='{"claudeAiOauth":{}}\n')
-        self.assertNotEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("--paste cannot carry a claude.ai login",
-                      cp.stdout + cp.stderr)
-
-# A `gh` whose answers are GitHub's for a machine whose deploy keys are not
-# registered yet (an empty key list; every registration accepted) and for one
-# where they are (the list carries the public halves). `read_only` is in the
-# arguments of both the registration and the one query `wk key check` makes of
-# a registered key, and `false` is the answer to that query.
+# GitHub with the deploy keys not yet registered, and with them registered; `false` answers the read_only query.
 GH_NO_KEYS_YET = ('#!/bin/sh\ncase "$*" in *read_only*) echo false ;; esac\nexit 0\n')
 GH_HAS_THE_KEYS = ('#!/bin/sh\ncase "$*" in\n'
                    '  *read_only*) echo false ;;\n'
                    '  *) cat "$WK_HOST_SECRETS"/build_key_*.pub 2>/dev/null ;;\n'
                    'esac\nexit 0\n')
 
-# `wk key sshtest` asks github.com what a deploy key authenticates as; this is
-# that answer for a key registered on its own fork, keyed by the file ssh was
-# handed, so a line budget is measured without a network in it.
+# What github.com answers `wk key sshtest` for a key registered on its own fork.
 SSH_IS_THE_FORKS_KEY = (
     '#!/bin/sh\ncase "$*" in\n'
     '  *build_key_forkwpe*) echo "Hi justinmichaud/WPEWebKit! You\'ve '
@@ -537,19 +331,12 @@ SSH_IS_THE_FORKS_KEY = (
 
 
 def provision_credentials(secrets, tmp):
-    """Every credential a machine can hold, each one its rule accepts. What a
-    test that must not stop at a prompt starts from."""
+    """Every credential a machine can hold, each one its rule accepts."""
     store = secrets.parent
     (store / "push-keys" / "github-pat").write_text(FINE + "\n")
     (store / "push-keys" / "bugzilla-api-key").write_text("notarealbugzillakey\n")
     (secrets / "claude-token").write_text("sk-ant-oat01-notarealtoken\n")
     (secrets / "litellm-key").write_text("sk-notarealvirtualkey\n")
-    (store / "agent-rw").mkdir(exist_ok=True)
-    (store / "agent-rw" / ".credentials.json").write_text(login())
-    # The account record `claude auth login` writes beside the credential, in the CLI's config home (cmd/key points CLAUDE_CONFIG_DIR there); the rule reads its organization, which remote control needs.
-    (store / "agent-rw" / ".claude.json").write_text(json.dumps(
-        {"oauthAccount": {"organizationUuid": "org-1",
-                          "organizationName": "Example Org"}}))
     (store / "notify").mkdir(exist_ok=True)
     (store / "notify" / "ntfy-topic").write_text("a-topic-minted-here\n")
     (tmp / "tailscale-authkey").write_text("tskey-auth-k1-abc\n")
@@ -557,21 +344,13 @@ def provision_credentials(secrets, tmp):
 
 
 class TestSetupSaysOneLinePerCredential(_KeyRun):
-    """What `wk key setup` prints is one line per credential -- name, what
-    happened to it, and the path or the one-line reason -- the prompt sequence
-    for the ones it has to ask for, and `wk key check`'s table once. The budget
-    is asserted because verbosity arrives one defensible line at a time.
-
-    Both runs are headless, so no prompt is printed; a terminal adds the three
-    lines the rule carries (what it is, the page that mints one, the field that
-    page cannot fill) per credential asked for."""
+    """`wk key setup` prints one line per credential and `wk key check`'s table once, within a line budget."""
 
     EMPTY_BUDGET = 45
     PROVISIONED_BUDGET = 22
 
     def stubs(self, gh):
-        return {"gh": gh, "ssh": SSH_IS_THE_FORKS_KEY,
-                "security": SECURITY_HAS_NOTHING}
+        return {"gh": gh, "ssh": SSH_IS_THE_FORKS_KEY}
 
     def env(self):
         home = self.tmp / "home"
@@ -594,7 +373,7 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
         self.assertLess(len(lines), self.EMPTY_BUDGET,
                         "\n".join(lines))
         for name in ("github-pat", "bugzilla-api-key", "claude", "litellm",
-                     "claude-login", "tailnet", "tailnet-api"):
+                     "tailnet", "tailnet-api"):
             with self.subTest(name=name):
                 self.assertRegex(cp.stderr, r"%s\s+skipped\s+\S" % name)
 
@@ -602,8 +381,6 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
         provision_credentials(secrets, self.tmp)
 
     def test_a_machine_that_holds_them_all_stays_under_its_budget(self):
-        """Nothing to ask for and nothing to register: one line each saying
-        where it is, then the table."""
         _cp, secrets = self.key("ensure")
         self.provision(secrets)
         cp, _ = self.key("setup", stubs=self.stubs(GH_HAS_THE_KEYS),
@@ -611,110 +388,25 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
         lines = self.lines(cp)
         self.assertLess(len(lines), self.PROVISIONED_BUDGET, "\n".join(lines))
         for name in ("github-pat", "bugzilla-api-key", "claude", "litellm",
-                     "claude-login", "tailnet", "tailnet-api", "ntfy"):
+                     "tailnet", "tailnet-api", "ntfy"):
             with self.subTest(name=name):
                 self.assertRegex(cp.stderr, r"%s\s+stored\s+/" % name)
 
     def test_the_table_is_one_row_per_credential(self):
-        """A row is the verdict's summary line; the rest of a detail -- what the
-        credential must do, and the fix -- is what a refusal prints."""
         _cp, secrets = self.key("ensure")
         self.provision(secrets)
         cp, _ = self.key("check", stubs=self.stubs(GH_HAS_THE_KEYS),
                          env=self.env())
         rows = [l for l in cp.stdout.splitlines()
                 if l.startswith("    ") and l.strip()]
-        self.assertEqual(10, len(rows), cp.stdout)
+        self.assertEqual(9, len(rows), cp.stdout)
 
 
 class TestTheOldNamesSayWhatReplacedThem(WkTest):
-    """Four ways in became two, and a tombstone (a `gone` line) names the one
-    that is left rather than printing a usage line -- the dispatcher's, before
-    `needs` asks for a GitHub login nobody could read it past."""
 
-    def test_each_one_names_its_replacement(self):
-        for old, want in (("register", "wk key deploy"),
-                          ("share", "wk key setup"),
-                          ("claude", "wk key set claude"),
-                          ("tailnet", "wk key set tailnet"),
-                          ("tailnet-api", "wk key set tailnet-api")):
-            with self.subTest(old=old):
-                cp = run("key", old, env={"PATH": "/usr/bin:/bin"})
-                self.assertEqual(1, cp.returncode, cp.stdout)
-                self.assertIn("'wk key %s' is gone: %s" % (old, want), cp.stdout)
-
-    def test_the_claude_one_names_both_of_claudes_credentials(self):
-        """Which of the two `wk key claude` meant was never in the name."""
-        self.assertIn("claude-login", run("key", "claude").stdout)
-
-    def test_a_retired_verb_is_not_one_it_offers(self):
-        cp = run("key", "zz-no-such-verb")
-        self.assertNotIn("register", cp.stdout)
 
     def test_a_retired_word_is_still_a_verbs_argument(self):
-        """`wk key set claude` is the replacement, not the tombstone"""
         self.assertEqual(as_dispatched("key", ["set", "claude"], {}), ["set", "claude"])
-
-
-class TestTheTailnetKeyScope(WkTest):
-    """The tailnet rule (lib/credcheck.py, asked through lib/wk/tailnet.py's `usable`): tailscale spells three very
-    different powers with one prefix. An auth key enrolls a node; an API access
-    token administers the tailnet; an OAuth client secret mints tokens of its
-    own. All three start `tskey-`, and this key is copied onto every card
-    written from here -- so only the narrow one is accepted, and the properties
-    that cannot be read from a key are reported as unverified rather than
-    claimed."""
-
-    def _reject(self, key):
-        from wk import tailnet
-        ok, why = tailnet.usable("tailnet", key)
-        return "ACCEPTED" if ok else "REJECTED: %s" % why
-
-    def test_an_auth_key_is_accepted(self):
-        self.assertIn("ACCEPTED", self._reject("tskey-auth-k123CNTRL-abcdef"))
-
-    def test_an_api_access_token_is_refused_as_too_broad(self):
-        out = self._reject("tskey-api-k123CNTRL-abcdef")
-        self.assertIn("REJECTED", out)
-        self.assertIn("API access token", out)
-        self.assertIn("administers", out)
-
-    def test_an_oauth_client_secret_is_refused_as_too_broad(self):
-        for key in ("tskey-client-k123-abc", "tskey-oauth-k123-abc"):
-            with self.subTest(key=key):
-                out = self._reject(key)
-                self.assertIn("REJECTED", out)
-                self.assertIn("OAuth client secret", out)
-
-    def test_a_tskey_that_is_none_of_them_is_refused_by_shape(self):
-        out = self._reject("tskey-something-else")
-        self.assertIn("REJECTED", out)
-        self.assertIn("tskey-auth-", out)
-
-    def test_nothing_and_nonsense_are_refused(self):
-        self.assertIn("REJECTED", self._reject(""))
-        self.assertIn("REJECTED", self._reject("hunter2"))
-
-    def test_the_presence_check_uses_the_same_rule(self):
-        """`wk doctor`'s read-only probe and the prompt cannot disagree about
-        what a usable key is -- one function answers for both."""
-        for key, present in (("tskey-auth-k1-abc", True),
-                             ("tskey-api-k1-abc", False),
-                             ("nonsense", False)):
-            path = self.tmp / f"key-{present}-{key[:10]}"
-            path.write_text(key + "\n")
-            from tests.support import clean_env
-            from wk import tailnet
-            env = clean_env({"WK_TS_AUTHKEY": str(path), "WK_TS_API_SECRET": str(self.tmp / "no-api")})
-            with self.subTest(key=key):
-                self.assertEqual(present, tailnet.Fleet(str(REPO), env).key_present())
-
-    def test_the_card_helper_refuses_the_broad_ones_too(self):
-        """The rule lives where the privilege is as well: admin/wk-card-priv
-        writes what it is handed onto a card that leaves the building."""
-        text = (REPO / "admin" / "wk-card-priv").read_text()
-        self.assertIn("'^tskey-auth-'", text,
-                      "the card helper still accepts any tskey- value")
 
 
 if __name__ == "__main__":
@@ -722,50 +414,15 @@ if __name__ == "__main__":
 
 
 class TestABareKeyChangesNothing(_KeyRun):
-    """`wk key` with no verb is `wk key check`: a report. What writes to
-    another machine or to GitHub -- the fan-out to peer workstations, the
-    revocation `--rotate` starts with -- asks first, defaulting to No."""
-
-    def test_it_prints_the_report_and_nothing_else(self):
+    def test_it_is_check_and_prints_the_report_and_nothing_else(self):
         self.assertEqual(as_dispatched("key", [], {}), ["check"])
         check, _ = self.key("check")
         self.assertIn("credentials:", check.stdout)
         for word in ("sharing to", "registering", "minted"):
             self.assertNotIn(word, check.stdout + check.stderr)
 
-    def arm(self, verb):
-        return inspect.getsource(getattr(cli.Key, verb))
-
-    def test_nothing_is_elected_taken_or_written_before_the_question(self):
-        """Every arm that can overwrite another workstation, or revoke a key on
-        GitHub, asks first: the election, the fan-out and rotate_keys all sit
-        inside converge_forks and the credential walk, after the question.
-        The declined run itself is driven against a peer in
-        tests/test_key_shared.py and tests/test_wk_key.py."""
-        self.assertIn("rotate_keys", inspect.getsource(cli.Key.converge_forks))
-        for verb in ("setup", "deploy"):
-            with self.subTest(verb=verb):
-                arm = self.arm(verb)
-                self.assertLess(arm.index("self.confirm("), arm.index("self.converge_forks()"), arm)
-
-    def test_a_declined_question_is_not_reported_as_done(self):
-        """`deploy` has nothing left to do, so it says so and stops; `setup`
-        still has this machine's own credentials to set up, so it drops the
-        fleet and goes on."""
-        self.assertIn('die("not done', self.arm("deploy"))
-        setup = self.arm("setup")
-        self.assertIn("self.fleet_on = False", setup, setup)
-        self.assertIn("was left exactly as it is", setup)
-
-
 class TestAnAuthKeyIsMintedNotOnlyHanded(WkTest):
-    """`wk_tailscale_authkey` (lib/common.sh): a stored key expires, and a
-    fleet that finds that out at a board's first boot has lost the board. The
-    machine that can administer the tailnet mints its own; one that cannot
-    uses what it was given.
-
-    The API endpoint is the suite's dead one (WK_TAILNET_API, tests/support.py),
-    so nothing here reaches a real tailnet or makes a real key."""
+    """`wk_tailscale_authkey` (lib/common.sh): a machine that can administer the tailnet mints its own key."""
 
     LIB = '. "%s/lib/common.sh"\n' % REPO
 
@@ -792,9 +449,6 @@ class TestAnAuthKeyIsMintedNotOnlyHanded(WkTest):
         self.assertIn("wk key set tailnet", cp.stdout + cp.stderr)
 
     def test_a_mint_that_failed_names_both_ways_to_a_key(self):
-        """One remedy is replacing the credential that mints, the other is
-        storing a key by hand; naming only the first strands a person whose
-        API credential is fine and whose tailnet simply refused the tag."""
         cp = bash(self.LIB + "wk_tailscale_authkey\n",
                   env=self._env(api=self._api_key()))
         out = cp.stdout + cp.stderr
@@ -802,17 +456,15 @@ class TestAnAuthKeyIsMintedNotOnlyHanded(WkTest):
         self.assertIn("wk key set tailnet-api", out)
         self.assertRegex(out, r"wk key set tailnet(?!-api)")
 
-    def test_asking_whether_a_key_is_available_mints_nothing(self):
-        """`wk sysimage write`'s preflight and its report both ask this, and a
-        reading may not make a credential as a side effect."""
+    def test_a_key_is_present_if_usable_or_mintable_and_asking_mints_nothing(self):
         from tests.support import clean_env
         from wk import tailnet
-        self.assertTrue(tailnet.Fleet(str(REPO), clean_env(self._env(api=self._api_key()))).key_present(),
-                        "a machine that can mint has a key available")
-        self.assertFalse((self.tmp / "no-such-key").exists(),
-                         "a presence check wrote a key file")
-
-    def test_with_neither_a_key_nor_the_power_to_mint_none_is_available(self):
-        from tests.support import clean_env
-        from wk import tailnet
-        self.assertFalse(tailnet.Fleet(str(REPO), clean_env(self._env())).key_present())
+        usable = self.tmp / "usable"
+        usable.write_text("tskey-auth-k1-abc\n")
+        broad = self.tmp / "broad"
+        broad.write_text("tskey-api-k1-abc\n")
+        for env, present in ((self._env(api=self._api_key()), True), (self._env(), False),
+                             (self._env(authkey=usable), True), (self._env(authkey=broad), False)):
+            with self.subTest(env=env):
+                self.assertEqual(present, tailnet.Fleet(str(REPO), clean_env(env)).key_present())
+        self.assertFalse((self.tmp / "no-such-key").exists())

@@ -1,9 +1,4 @@
-"""lint.vocabulary: one spelling per concept, in no file outside docs/, CLAUDE.md
-and claude/skills/. An image build's workspace is its image workspace (`image_ws`
-in code); a bench task has no longer name.
-
-Run: python3 tests/run.py --lint -k test_lint_vocabulary
-"""
+"""lint.vocabulary: one spelling per concept, in no file outside docs/, CLAUDE.md"""
 TIER = "lint"
 import re
 import subprocess

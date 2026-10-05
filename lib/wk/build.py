@@ -5,7 +5,6 @@ its record; the babysitter re-runs the build with a Claude fix between failures.
 import os
 import re
 import shlex
-import subprocess
 import sys
 
 from wk import act, buildconf, git, job, record
@@ -134,11 +133,10 @@ def size_for(reg, target, name, cfg, clock):
 
 
 class Build:
-    def __init__(self, reg, name, opts, argv=(), clock=None, popen=subprocess.Popen):
+    def __init__(self, reg, name, opts, argv=(), clock=None):
         self.reg, self.name, self.opts, self.argv = reg, name, opts, list(argv)
         self.here, self.root, self.env = reg.machine, reg.root, reg.env
         self.clock = clock or Clock()
-        self.popen = popen
         self.in_ws = reg.in_workspace()
         self.kill = kill_cmd(self.in_ws, name)
         try:
@@ -482,7 +480,7 @@ class Build:
                     watcher = job.PidWatch(t, name, task, path, "build", PID_MATCH, job.pid_tries(self.env))
                     watcher.start()
                 argv, cwd = t.build_argv(name, stage.in_workspace(t.tools(name), "build", ["env"] + cfg_env + [bit] + passthru))
-                rc = job.watch(argv, path, here, self.clock, self.env, cwd, self.popen)
+                rc = job.watch(argv, path, here, self.clock, self.env, cwd)
             except job.Interrupted as e:
                 if watcher is not None:
                     watcher.stop()

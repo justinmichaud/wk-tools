@@ -1,12 +1,4 @@
-"""lint.wk_overrides: every `WK_*` environment variable the Python core reads
-(lib/wk, cmd/*, wk) is read in one function, named in README.md or a command's
-help block, and named in a test. A read is `x.get("WK_..")`, `os.getenv`,
-`x["WK_.."]`, `"WK_.." in x`, or a call with the name as its first or second
-argument (`_seconds(env, "WK_X", d)`); a write into a child's environment is not one.
-The bash that remains is audited by tests/test_owed_cli_env_audit.py.
-
-Run: python3 tests/run.py --lint -k test_lint_wk_overrides
-"""
+"""lint.wk_overrides: every `WK_*` environment variable the Python core reads"""
 TIER = "lint"
 import ast
 import re
@@ -26,7 +18,6 @@ def _is_name(node):
 
 
 class _Reads(ast.NodeVisitor):
-    """{variable: {enclosing function}} for every read in one module."""
 
     def __init__(self):
         self.where = ["<module>"]
@@ -60,7 +51,6 @@ class _Reads(ast.NodeVisitor):
 
 
 def reads(sources):
-    """{variable: {(file, function)}} over (relative path, source text) pairs."""
     out = {}
     for rel, text in sources:
         r = _Reads()
@@ -71,7 +61,6 @@ def reads(sources):
 
 
 def help_block(text):
-    """The leading comment lines of a command file: what `wk <cmd> -h` prints."""
     lines = []
     for line in text.splitlines()[1:]:
         if not line.startswith("#"):
@@ -86,13 +75,10 @@ def read_sites():
 
 
 def user_overrides():
-    """The variables a user sets: not the protocol between wk's own processes (INTERNAL_VARS) nor what a machine
-    conf's keys arrive as (CONF_ENV)."""
     return set(read_sites()) - set(INTERNAL_VARS) - set(CONF_ENV.values())
 
 
 def documentation():
-    """README.md plus every command's help block."""
     texts = [(REPO / "README.md").read_text(errors="replace")]
     texts += [help_block(p.read_text(errors="replace")) for p in sorted((REPO / "cmd").iterdir()) if p.is_file()]
     return "\n".join(texts)

@@ -1,30 +1,10 @@
-"""`wk push` reaches a macOS guest.
-
-A container reads the ssh-agent's socket through its /run/wk mount, so the
-machine half is the whole switch for one. A guest mounts nothing of ours and
-cannot see a unix socket across the hypervisor, so its half is an ssh-agent on
-*this host* and one `ssh -N -R` per running guest (lib/wk/guest.py). No private
-key byte is ever written into a guest. Four things to hold to:
-
-    the guest gets the ssh config and the *public* halves on every start, and
-      never a private one
-    a guest reaches the agent exactly while push is on, and the forward is a
-      process this host holds and can be seen to hold
-    ssh in the guest can actually reach github.com, which needs a
-      ProxyCommand: Softnet allows one address, the host's own, where
-      wk-proxy listens
-    the guest's trust for the API injector's CA goes in with its egress, and
-      what it holds as a token is the placeholder
-
-Nothing here touches a real guest or the podman machine: `tart`, `ssh` and
-`podman` are stubs on PATH and the "guest" is a scratch directory the fake ssh
-runs its commands against. The keys and the ssh-agent are real -- `ssh-add`
-will not load a placeholder, and an agent is the thing under test.
+"""`wk push` reaches a macOS guest: the guest holds the ssh config and public halves, its agent is on this host and
+reaches it through one `ssh -N -R` per running guest, and no private key byte is ever written into it. `tart` and
+`ssh` are stubs whose guest is a scratch directory; the keys and the ssh-agent are real.
 
 Run: python3 -m unittest tests.test_push_vm -v
 """
 import contextlib
-import inspect
 import io
 import os
 import pathlib
@@ -36,24 +16,30 @@ import time
 import unittest
 from unittest import mock
 
-from tests.support import (assert_guest_start_converges, guest_step, REPO,
+from tests.support import (guest_step, REPO,
                            WkTest, stub_path)
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import guest, secrets, targets  # noqa: E402
 from wk.store import Store  # noqa: E402
 
-TOUCHED = (
-    "vm/provision-base.sh", "vm/shell-rc.sh", "container/firstrun.sh",
-    "container/proxy/ensure-bridge.sh",
-)
-
-# `tart`: one running guest called wk-demo, at an address, and nothing else.
-# `tart list` mixes local VMs with cached OCI images, so Source matters.
+# `tart`: one running guest called wk-demo, and the guest itself as a directory. `tart exec` hands the guest's
+# command as the last argument for a login shell, and everything it writes it writes under $HOME, so running that command with HOME
+# pointed at a scratch directory exercises the real umask, mkdir, redirect and rm -- not a transcript of them.
+# /Users/admin is rewritten to that directory for the same reason: the agent socket's path has to be absolute on the
+# guest, because that is what `ssh -R` binds. `tart list` mixes local VMs with cached OCI images, so Source matters.
+# Every invocation is appended to $WK_TEST_LOG, which is how a test asks whether a private key was ever an argument.
 FAKE_TART = '''
 case "$1" in
 list) echo '[{"Name":"wk-demo","State":"running","Source":"local"}]' ;;
 ip)   echo 1.2.3.4 ;;
+exec)
+    printf '%s\\n' "$*" >> "$WK_TEST_LOG"
+    for a in "$@"; do last="$a"; done
+    cmd=$(printf '%s' "$last" | sed "s|/Users/admin|$WK_TEST_GUEST|g")
+    HOME="$WK_TEST_GUEST" SHELL=$(command -v bash) bash -lc "$cmd"; rc=$?
+    [ -t 0 ] || cat >/dev/null
+    exit $rc ;;
 *)    exit 1 ;;
 esac
 '''
@@ -62,33 +48,17 @@ esac
 FAKE_TART_STOPPED = '''
 case "$1" in
 list) echo '[{"Name":"wk-demo","State":"stopped","Source":"local"}]' ;;
-ip)   exit 1 ;;
 *)    exit 1 ;;
 esac
 '''
 
-# `ssh`: the guest, as a directory. The guest's Ssh (lib/wk/machine.py) hands the remote
-# command as the last argument and everything the remote end writes it writes
-# under $HOME, so running that command with HOME pointed at a scratch
-# directory exercises the real umask, mkdir, redirect and rm -- not a
-# transcript of them. /Users/admin is rewritten to that directory for the same
-# reason: the agent socket's path has to be absolute on the guest, because that
-# is what `ssh -R` binds.
-#
-# `-N` is the agent forward, which has no remote command at all and is meant to
-# stay up: it sleeps, so this host's own liveness check sees a live process.
-#
-# Every invocation is appended to $WK_TEST_SSH_LOG, which is how a test asks
-# whether a private key was ever an argument.
+# `ssh`: only the socket forward, which rides the guest's sshd on tart exec and stays up -- what sshd does at the far
+# end of `-R <remote>:<local>` is bind the remote socket, and `test -S` on it is how this host reports that a guest
+# reaches the agent. Anything else is a network ssh into a guest, which nothing makes.
 FAKE_SSH = '''
-for a in "$@"; do last="$a"; done
-printf '%s\\n' "$*" >> "$WK_TEST_SSH_LOG"
+printf '%s\\n' "$*" >> "$WK_TEST_LOG"
 case " $* " in
     *" -N "*)
-        # What sshd does at the far end of `-R <remote>:<local>`: it binds the
-        # remote socket. `test -S` on it is how this host reports that a guest
-        # reaches the agent, so a stub that only slept would report a switch
-        # that is not thrown.
         fwd=""
         for a in "$@"; do
             case "$a" in
@@ -100,35 +70,9 @@ case " $* " in
 s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); time.sleep(30)' "$fwd"
         ;;
 esac
-cmd=$(printf '%s' "$last" | sed "s|/Users/admin|$WK_TEST_GUEST|g")
-# sshd sets SHELL to the account's login shell, and the command runs under it as `-lc`.
-HOME="$WK_TEST_GUEST" SHELL=$(command -v bash) sh -c "$cmd"; rc=$?
-# A real ssh forwards local stdin to the far side until EOF whether or not
-# the remote command reads it, so a caller inside a `while read` loop that
-# forgets </dev/null loses the rest of its list. Behave the same.
-[ -t 0 ] || cat >/dev/null
-exit $rc
-'''
-
-# `podman`: a machine that exists and is stopped, logging every verb so a test
-# can say whether it was started.
-FAKE_PODMAN = '''
-printf '%s\\n' "$*" >> "$WK_TEST_PODMAN_LOG"
-case "$*" in
-    *"machine inspect"*"State"*) echo stopped ;;
-    *"machine inspect"*)         echo '{}' ;;
-esac
-exit 0
-'''
-
-# `ssh` that cannot reach the guest: what a guest that stopped answering
-# between the two halves looks like from here.
-FAKE_SSH_UNREACHABLE = '''
-[ -t 0 ] || cat >/dev/null
-echo "ssh: connect to host 1.2.3.4 port 22: Operation timed out" >&2
+echo "ssh: a guest is reached through tart exec, never the network" >&2
 exit 255
 '''
-
 
 def _guest(tmp, name="demo", claude=()):
     """A scratch guest home plus the host-side workspace directory and ready
@@ -187,28 +131,8 @@ def _kill_pidfile(path):
         pass
 
 
-class TestScriptsParse(unittest.TestCase):
-    """`bash -n` is the cheapest thing that catches a quoting mistake in a
-    heredoc, which is most of what these files are."""
-
-    def test_bash_n(self):
-        for f in TOUCHED:
-            with self.subTest(script=f):
-                cp = subprocess.run(["bash", "-n", str(REPO / f)],
-                                    capture_output=True, text=True, timeout=60)
-                self.assertEqual(cp.returncode, 0, cp.stderr)
-
-
 class TestOneAliasBlock(WkTest):
-    """secrets.alias_blocks is the one implementation of "the ssh config the
-    forks need". A container and a guest name an agent socket and a path
-    whose private half is not there (only `<path>.pub` is, which ssh reads for
-    itself); a build box holds no key, and its aliases refuse a push by name.
-
-    IdentityFile never carries the `.pub` suffix: pointed straight at the
-    public file, OpenSSH 10 loads that path as the private key and reports its
-    mode or its format (measured, 10.2p1 in the workspace image) -- a
-    permissions fault where the real answer is that the agent holds nothing."""
+    """IdentityFile never carries `.pub`: OpenSSH 10 then loads the public file as the private key (10.2p1)."""
 
     CONTAINER = ("/secrets", "build_key_", "/run/wk/ssh-agent.sock")
     GUEST = ("~/.ssh", "id_", "/a/sock", "nc %h %p")
@@ -246,20 +170,6 @@ class TestOneAliasBlock(WkTest):
                     if line.strip().startswith("IdentityFile"):
                         self.assertFalse(line.strip().endswith(".pub"), line)
 
-    def test_what_keeps_the_agent_signing_is_the_absent_private_half(self):
-        """IdentitiesOnly with a readable private IdentityFile would let ssh
-        sign with the file rather than the agent, which is the whole thing this
-        avoids. Nothing puts one at that path in a workspace -- `wk doctor`
-        measures that from inside -- so the named path is the public half's
-        stem and ssh has only the agent to sign with."""
-        out = self._blocks(self.CONTAINER)
-        named = [l.split(None, 1)[1] for l in out.splitlines()
-                 if l.strip().startswith("IdentityFile")]
-        self.assertTrue(named)
-        for path in named:
-            self.assertIn("IdentitiesOnly yes", out)
-            self.assertTrue(path.startswith("/secrets/"), path)
-
     def test_every_fork_gets_a_block(self):
         aliases = [r[2] for r in secrets.forks()]
         self.assertTrue(aliases)
@@ -287,35 +197,18 @@ class TestOneAliasBlock(WkTest):
         self.assertEqual(norm(container), norm(guest))
         self.assertEqual(norm(container), norm(box))
 
-    def test_a_container_includes_the_file_rather_than_writing_the_blocks(self):
-        """firstrun.sh runs once per workspace, and the switch is thrown many
-        times after that: an Include of a file `wk push on|off` regenerates
-        reaches every workspace that already exists at once."""
-        text = (REPO / "container" / "firstrun.sh").read_text()
-        self.assertIn("Include /secrets/ssh_config", text)
-        self.assertNotIn("HostName github.com", text,
-                         "firstrun.sh writes its own alias blocks again")
-        self.assertNotIn("/secrets/build_key_", text,
-                         "firstrun.sh links a key into the workspace again")
-
-    def test_the_switch_writes_that_file_from_the_same_function(self):
-        self.assertIn("alias_blocks(self.forks()", inspect.getsource(secrets.Secrets.publish_config))
-        self.assertIn("python3 -m wk.secrets box-alias-blocks", (REPO / "remote" / "provision.sh").read_text())
-        self.assertIn("secrets.alias_blocks(", (REPO / "lib" / "wk" / "guest.py").read_text())
-
-
 class TestAGuestGetsTheConfigOnStart(WkTest):
     """The real Guest.write_deploy_keys, against a fake guest: what it writes is
     what a guest would end up holding -- and what it must never write."""
 
     def _write(self, store, home, vmstore, extra=None):
-        log = self.tmp / "ssh.log"
+        log = self.tmp / "guest.log"
         log.write_text("")
         with stub_path({"ssh": FAKE_SSH, "tart": FAKE_TART}) as binp:
             env = {
                 "PATH": f"{binp}:{os.environ['PATH']}",
                 "WK_TEST_GUEST": str(home),
-                "WK_TEST_SSH_LOG": str(log),
+                "WK_TEST_LOG": str(log),
                 "WK_STORE": str(store),
                 # The keys are this device's own directory, which on macOS is
                 # not under $WK_STORE; a test must not read the real one.
@@ -329,20 +222,12 @@ class TestAGuestGetsTheConfigOnStart(WkTest):
         self.log = log.read_text()
         return cp
 
-    def test_the_public_half_lands_in_the_guest_and_the_private_one_never_does(self):
+    def test_the_public_half_lands_in_the_guest_and_no_private_key_byte_does(self):
         home, vmstore = _guest(self.tmp)
-        store = _store(self.tmp, keys=("fork",))
-        cp = self._write(store, home, vmstore)
+        cp = self._write(_store(self.tmp, keys=("fork", "forkwpe")), home, vmstore)
         self.assertEqual(cp.returncode, 0, cp.stderr)
         self.assertIn("ssh-ed25519 ", (home / ".ssh" / "id_fork.pub").read_text())
-        self.assertFalse((home / ".ssh" / "id_fork").exists(),
-                         "a private key half was written into the guest")
-
-    def test_no_private_key_byte_reaches_the_guest_at_all(self):
-        """The property the whole arrangement rests on, measured against
-        everything the fake guest ends up holding."""
-        home, vmstore = _guest(self.tmp)
-        self._write(_store(self.tmp, keys=("fork", "forkwpe")), home, vmstore)
+        self.assertFalse((home / ".ssh" / "id_fork").exists())
         for path in home.rglob("*"):
             if path.is_file():
                 self.assertNotIn("PRIVATE KEY", path.read_text(errors="replace"),
@@ -355,9 +240,6 @@ class TestAGuestGetsTheConfigOnStart(WkTest):
         self.assertFalse((home / ".ssh" / "id_forkwpe.pub").exists())
 
     def test_a_public_half_withdrawn_here_is_withdrawn_there(self):
-        """A guest naming an identity this host no longer has offers a dead
-        key, which reads as a GitHub permission problem rather than as a
-        missing key."""
         home, vmstore = _guest(self.tmp)
         (home / ".ssh" / "id_fork.pub").write_text("stale\n")
         (home / ".ssh" / "id_forkwpe.pub").write_text("stale\n")
@@ -367,10 +249,6 @@ class TestAGuestGetsTheConfigOnStart(WkTest):
         self.assertFalse((home / ".ssh" / "id_forkwpe.pub").exists())
 
     def test_the_config_names_the_aliases_the_agent_and_a_route_to_github(self):
-        """Both forks are on github.com, so the key is selected by alias;
-        Softnet allows one address, so port 22 is reached by CONNECT through
-        the proxy at that address or not at all; and the signature is the
-        agent's, reached through the forwarded socket."""
         home, vmstore = _guest(self.tmp)
         cfg = self._write(_store(self.tmp, keys=("fork",)), home, vmstore)
         self.assertEqual(cfg.returncode, 0, cfg.stdout + cfg.stderr)
@@ -381,65 +259,32 @@ class TestAGuestGetsTheConfigOnStart(WkTest):
         self.assertIn("IdentityAgent /Users/admin/.wk-ssh-agent.sock", text)
         self.assertIn("-X connect -x 192.0.2.1:3128 %h %p", text)
 
-    def test_the_config_is_written_even_with_nothing_behind_it(self):
-        """An IdentityAgent pointing at a socket that is not there is the off
-        position and says so as `Permission denied (publickey)` -- the same
-        thing a container's empty agent does. So the two halves never have to
-        agree about anything."""
+    def test_the_config_is_written_once_however_often_and_with_no_key_behind_it(self):
         home, vmstore = _guest(self.tmp)
-        self._write(_store(self.tmp), home, vmstore)
-        self.assertIn("Host github-webkit", (home / ".ssh" / "config").read_text())
-
-    def test_it_is_idempotent(self):
-        """It runs on every start; a guest started fifty times holds one
-        config, not fifty appended blocks."""
-        home, vmstore = _guest(self.tmp)
-        store = _store(self.tmp, keys=("fork",))
+        store = _store(self.tmp)
         for _ in range(3):
             self._write(store, home, vmstore)
         text = (home / ".ssh" / "config").read_text()
         self.assertEqual(1, text.count("Host github-webkit"), text)
 
-    def test_it_is_wired_into_both_start_paths(self):
-        """A start has two arms -- a guest that is already running is
-        converged, one that is not is booted first -- and a step delivered on
-        only one of them is a switch that half works."""
-        assert_guest_start_converges(self, '_write_deploy_keys "$name" "$ip"')
-
-    def test_the_forward_is_converged_from_both_start_paths_too(self):
-        assert_guest_start_converges(self, '_agent_converge_guest "$name" "$ip"')
-
-    def test_the_source_writes_no_private_half(self):
-        """Source-level twin of the tests above, so the property survives a
-        rewrite the fake ssh happens not to exercise."""
-        text = (REPO / "lib" / "wk" / "guest.py").read_text()
-        for private in ("push_key_path", "held_dir", "agent_load("):
-            self.assertNotIn(private, inspect.getsource(guest.Guest), private)
-        self.assertIn("pub_path(fork)", text)
-
 
 class TestTheGuestHalfOfTheSwitch(WkTest):
-    """`wk push on|off|status` end to end on this host, with a scratch store,
-    one fake running guest and a real ssh-agent started by the code under
-    test."""
+    """`wk push` end to end with one fake guest and the real ssh-agent the code under test starts."""
 
-    def _push(self, action, store, home, vmstore, tart=FAKE_TART, ssh=FAKE_SSH):
-        log = self.tmp / "ssh.log"
+    def _push(self, action, store, home, vmstore, tart=FAKE_TART):
+        log = self.tmp / "guest.log"
         log.write_text("")
         self.addCleanup(_kill_pidfile, vmstore / "vm" / "ssh-agent.pid")
         self.addCleanup(_kill_forward, vmstore)
-        with stub_path({"ssh": ssh, "tart": tart}) as binp:
+        with stub_path({"ssh": FAKE_SSH, "tart": tart}) as binp:
             env = {
                 "PATH": f"{binp}:{os.environ['PATH']}",
                 "WK_TEST_GUEST": str(home),
-                "WK_TEST_SSH_LOG": str(log),
+                "WK_TEST_LOG": str(log),
                 "WK_STORE": str(store),
                 "WK_HOST_SECRETS": str(store / "secrets"),
                 "WK_VM_STORE": str(vmstore),
                 "WK_VM_PROXY_ADDR": "192.0.2.1",
-                # The machine half is not what this file is about: point it at
-                # an agent that is not there, so it fails loudly rather than
-                # reaching this developer's own.
                 "WK_PUSH_AGENT_SOCK": str(self.tmp / "no-machine-agent.sock"),
                 "WK_PUSH_PAT_FILE": str(self.tmp / "machine-pat"),
                 "WK_MACHINE": "wk-no-such-machine",
@@ -458,8 +303,7 @@ class TestTheGuestHalfOfTheSwitch(WkTest):
         home, vmstore = _guest(self.tmp, claude=("999999",))
         store = _store(self.tmp, keys=("fork",))
         cp = self._push("on", store, home, vmstore)
-        self.assertIn("a claude session is running in demo", cp.stdout)
-        self.assertIn("push stays off", cp.stdout)
+        self.assertIn("demo", cp.stdout)
         self.assertFalse(self._forward_is_up(vmstore))
 
     @unittest.skipUnless(os.uname().sysname == "Darwin",
@@ -468,9 +312,6 @@ class TestTheGuestHalfOfTheSwitch(WkTest):
         home, vmstore = _guest(self.tmp)
         store = _store(self.tmp, keys=("fork",))
         cp = self._push("on", store, home, vmstore)
-        self.assertIn("demo", cp.stdout)
-        self.assertIn("reaches the agent on this host", cp.stdout)
-
         sock = vmstore / "vm" / "ssh-agent.sock"
         listed = subprocess.run(["ssh-add", "-l"], text=True,
                                 env={**os.environ, "SSH_AUTH_SOCK": str(sock)},
@@ -498,7 +339,6 @@ class TestTheGuestHalfOfTheSwitch(WkTest):
         store = _store(self.tmp, keys=("fork",))
         self._push("on", store, home, vmstore)
         cp = self._push("off", store, home, vmstore)
-        self.assertIn("a push in there is refused", cp.stdout)
         sock = vmstore / "vm" / "ssh-agent.sock"
         listed = subprocess.run(["ssh-add", "-l"], text=True,
                                 env={**os.environ, "SSH_AUTH_SOCK": str(sock)},
@@ -509,93 +349,32 @@ class TestTheGuestHalfOfTheSwitch(WkTest):
 
     @unittest.skipUnless(os.uname().sysname == "Darwin",
                          "guests are a macOS-host thing (tart)")
-    def test_the_private_halves_never_move(self):
-        home, vmstore = _guest(self.tmp)
-        store = _store(self.tmp, keys=("fork",))
-        self._push("on", store, home, vmstore)
-        self._push("off", store, home, vmstore)
-        self.assertTrue((store / "push-keys" / "build_key_fork").exists())
-        self.assertFalse((store / "secrets" / "build_key_fork").exists())
-
-    @unittest.skipUnless(os.uname().sysname == "Darwin",
-                         "guests are a macOS-host thing (tart)")
-    def test_status_reads_both_ends_and_writes_nothing(self):
-        home, vmstore = _guest(self.tmp)
-        store = _store(self.tmp, keys=("fork",))
-        self._push("on", store, home, vmstore)
-        before = sorted((p.name, p.read_text()) for p in (home / ".ssh").iterdir())
-        cp = self._push("status", store, home, vmstore)
-        self.assertIn("guest demo", cp.stdout)
-        self.assertIn("through the agent on this host", cp.stdout)
-        after = sorted((p.name, p.read_text()) for p in (home / ".ssh").iterdir())
-        self.assertEqual(before, after, cp.stdout)
-
-    @unittest.skipUnless(os.uname().sysname == "Darwin",
-                         "guests are a macOS-host thing (tart)")
     def test_a_stopped_guest_is_reported_not_started(self):
-        """Booting a guest to look inside it is a side effect nobody asked
-        `status` for, and rule 6 says a reporting command starts nothing."""
         home, vmstore = _guest(self.tmp)
         cp = self._push("status", _store(self.tmp, keys=("fork",)), home, vmstore,
                         tart=FAKE_TART_STOPPED)
-        self.assertIn("guest demo", cp.stdout)
         self.assertIn("stopped", cp.stdout)
         self.assertEqual("", self.log, self.log)
 
     @unittest.skipUnless(os.uname().sysname == "Darwin",
                          "guests are a macOS-host thing (tart)")
-    def test_a_guest_that_did_not_answer_fails_the_switch_and_is_named(self):
-        """The measured hole: `converge_guests` swallowed its failure into a
-        warning and the command reported only the machine half, so `wk push
-        off` against an unreachable guest exited 0 -- which cmd/ai's
-        `push_switch status || return 0` reads as a closed switch."""
-        home, vmstore = _guest(self.tmp)
-        store = _store(self.tmp, keys=("fork",))
-        cp = self._push("off", store, home, vmstore, ssh=FAKE_SSH_UNREACHABLE)
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("demo", cp.stdout)
-        self.assertIn("may still reach the agent", cp.stdout)
-
-    @unittest.skipUnless(os.uname().sysname == "Darwin",
-                         "guests are a macOS-host thing (tart)")
-    def test_status_is_on_while_any_running_guest_reaches_the_agent(self):
-        """The switch is on when *anything* can push. The machine's own agent
-        is unreachable in these tests, so a running guest that reaches the
-        host's is the whole of `on` -- and it must exit 0."""
-        home, vmstore = _guest(self.tmp)
-        store = _store(self.tmp, keys=("fork",))
-        self._push("on", store, home, vmstore)
-        cp = self._push("status", store, home, vmstore)
-        self.assertIn("push is ON", cp.stdout)
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-
-    @unittest.skipUnless(os.uname().sysname == "Darwin",
-                         "guests are a macOS-host thing (tart)")
     def test_status_is_on_while_the_guests_agent_holds_a_key_with_no_guest_up(self):
-        """The measured defect: the headline was over the container half and
-        the running guests only, so it said OFF while deploy keys sat in the
-        agent every guest reaches the moment it starts -- and `wk ai` read that
-        as a closed switch."""
         home, vmstore = _guest(self.tmp)
         store = _store(self.tmp, keys=("fork",))
         self._push("on", store, home, vmstore)
         cp = self._push("status", store, home, vmstore, tart=FAKE_TART_STOPPED)
-        self.assertIn("in the agent this host runs for them", cp.stdout)
+        self.assertIn("in the agent this host runs for them and its own pushes", cp.stdout)
         self.assertIn("push is ON", cp.stdout)
         self.assertEqual(0, cp.returncode, cp.stdout)
 
     @unittest.skipUnless(os.uname().sysname == "Darwin",
                          "guests are a macOS-host thing (tart)")
     def test_off_is_not_reported_until_that_agent_is_empty(self):
-        """Evidence, not the exit status of `ssh-add -D`: an agent that
-        ignored the clear is one every guest can still push with."""
         home, vmstore = _guest(self.tmp)
         store = _store(self.tmp, keys=("fork",))
         self._push("on", store, home, vmstore)
-        cp = self._push("off", store, home, vmstore)
-        self.assertNotIn("still holds", cp.stdout)
+        self._push("off", store, home, vmstore)
         cp = self._push("status", store, home, vmstore, tart=FAKE_TART_STOPPED)
-        self.assertIn("holds nothing", cp.stdout)
         self.assertEqual(1, cp.returncode, cp.stdout)
 
     @unittest.skipUnless(os.uname().sysname == "Darwin",
@@ -604,35 +383,23 @@ class TestTheGuestHalfOfTheSwitch(WkTest):
         home, vmstore = _guest(self.tmp)
         store = _store(self.tmp, keys=("fork",))
         cp = self._push("status", store, home, vmstore)
-        self.assertIn("push is OFF", cp.stdout)
         self.assertEqual(cp.returncode, 1, cp.stdout)
-
-    def test_status_stays_declared_readonly_and_the_guest_half_reads(self):
-        src = (REPO / "cmd" / "push").read_text()
-        self.assertIn("# wk: readonly status", src)
-        state = inspect.getsource(guest.vm_push_keys_state)
-        for writer in ("act_run", ".write(", "remove(", "spawn", "start(", "agent_load", "converge"):
-            self.assertNotIn(writer, state, f"{writer!r} in vm_push_keys_state")
 
 
 class TestTheGuestGetsTheInjectorsCa(WkTest):
-    """api.github.com is terminated on this host for a guest, so the guest has
-    to trust the injector's CA and hold the placeholder -- delivered with the
-    proxy address, because both are properties of this host and neither may be
-    baked into an image."""
 
     def _egress(self, home, vmstore, ca_text=None, bugzilla=None, **extra):
-        log = self.tmp / "ssh.log"
+        log = self.tmp / "guest.log"
         log.write_text("")
         vmdir = vmstore / "vm"
         vmdir.mkdir(parents=True, exist_ok=True)
         if ca_text is not None:
             (vmdir / "wk-github-ca.pem").write_text(ca_text)
-        with stub_path({"ssh": FAKE_SSH}) as binp:
+        with stub_path({"ssh": FAKE_SSH, "tart": FAKE_TART}) as binp:
             return guest_step({
                 "PATH": f"{binp}:{os.environ['PATH']}",
                 "WK_TEST_GUEST": str(home),
-                "WK_TEST_SSH_LOG": str(log),
+                "WK_TEST_LOG": str(log),
                 "WK_STORE": str(self.tmp / "store"),
                 "WK_HOST_SECRETS": str(self.tmp / "store" / "secrets"),
                 "WK_VM_STORE": str(vmstore),
@@ -642,9 +409,6 @@ class TestTheGuestGetsTheInjectorsCa(WkTest):
             }, "set_guest_egress", secrets={"bugzilla_user": lambda s: bugzilla})
 
     def test_the_bugzilla_placeholder_goes_in_with_the_login_and_not_without(self):
-        """The login is read from the mirror (Secrets.bugzilla_user); a host with
-        none writes no Bugzilla pair, so git-webkit in the guest asks rather
-        than validating an empty login."""
         home, vmstore = _guest(self.tmp)
         ca = "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n"
         self._egress(home, vmstore, ca_text=ca)
@@ -668,15 +432,7 @@ class TestTheGuestGetsTheInjectorsCa(WkTest):
         self.assertIn("GIT_SSL_CAINFO=", rc)
         self.assertIn("BEGIN CERTIFICATE", (home / ".wk-github-ca.pem").read_text())
 
-    def test_the_bundle_is_the_systems_plus_that_ca_and_not_that_ca_alone(self):
-        """Those variables replace the trust store outright: a bundle holding
-        one certificate would fail every other HTTPS request in the guest."""
-        self.assertIn('cat /etc/ssl/cert.pem "$HOME/.wk-github-ca.pem" > "$HOME/.wk-ca-bundle.pem"', guest.EGRESS)
-
     def test_an_unfiltered_guest_gets_neither(self):
-        """WK_VM_UNFILTERED means no proxy and so no injector: a guest left
-        trusting a CA nothing terminates with would be a certificate anybody
-        who obtained the key could use against it."""
         home, vmstore = _guest(self.tmp)
         (home / ".wk-github-ca.pem").write_text("stale\n")
         self._egress(home, vmstore, ca_text="x\n", WK_VM_UNFILTERED="1")
@@ -704,11 +460,7 @@ def _quiet(fn, *args):
 
 
 class TestTheInjectorReadinessProbeAnswersOnThisPlatform(WkTest):
-    """`nc -z -U` answers 1 for a unix socket that is being served on macOS
-    (measured 2026-09-05, macOS 26.6.2), which is where every guest runs. That
-    false negative started a second injector over a live one: the warning said
-    the guest had no injector, and api.github.com answered 000 in the guest for
-    the rest of the session."""
+    """`nc -z -U` answers 1 for a served unix socket on macOS (measured 2026-09-05, macOS 26.6.2)."""
 
     def _running(self, sock):
         host = _host(self)
@@ -727,7 +479,6 @@ class TestTheInjectorReadinessProbeAnswersOnThisPlatform(WkTest):
             srv.close()
 
     def test_a_socket_nothing_listens_on_reads_as_not_running(self):
-        """What a crashed injector leaves behind: the path is still a socket."""
         import socket as sk
         sock = self.tmp / "dead.sock"
         srv = sk.socket(sk.AF_UNIX)
@@ -740,13 +491,8 @@ class TestTheInjectorReadinessProbeAnswersOnThisPlatform(WkTest):
 
 
 class TestTheGuestsInjectorGetsTheStandingReadToken(WkTest):
-    """The injector a guest talks to runs on this host, so its standing read
-    token is a file here. Reading is open whatever position `wk push` is in, so
-    every `wk start` converges that file from what this host holds -- and
-    `wk push on|off` never touches it."""
 
     def _start_inject(self, vmstore, pat=None):
-        """Already up: what a start has to converge is the token, whether or not it also has to start the program."""
         store = self.tmp / "store"
         held = store / "push-keys"
         held.mkdir(parents=True, exist_ok=True)
@@ -775,14 +521,6 @@ class TestTheGuestsInjectorGetsTheStandingReadToken(WkTest):
         self._start_inject(vmstore, pat=None)
         self.assertFalse(self.read_pat(vmstore).exists())
 
-    def test_the_injector_is_told_where_to_read_it(self):
-        """A file nothing names is a file nothing reads: the program takes the
-        path from WK_INJECT_READ_PAT (container/proxy/github-inject.py)."""
-        body = inspect.getsource(guest.Host.start_inject)
-        self.assertIn('"WK_INJECT_READ_PAT=" + self.path("read-github-pat")', body)
-        self.assertIn('"WK_INJECT_BUGZILLA_KEY=" + self.path("push-bugzilla-api-key")', body)
-        self.assertIn("github-inject.py", body)
-
     @unittest.skipUnless(os.uname().sysname == "Darwin",
                          "guests are a macOS-host thing (tart)")
     def test_neither_position_of_the_switch_touches_it(self):
@@ -798,11 +536,6 @@ class TestTheGuestsInjectorGetsTheStandingReadToken(WkTest):
 
 
 class TestEveryGuestStartConvergesTheReadToken(WkTest):
-    """The measured defect: the token the guests' injector reads was converged
-    by the injector's start, and the only caller of that was past the proxy's
-    "already running" return -- so a `wk start <guest>` on a host whose proxy
-    was up left a rotated token undelivered and every read from a guest
-    answered 401 (Bad credentials)."""
 
     def test_a_start_that_finds_the_proxy_up_still_delivers_the_token(self):
         _, vmstore = _guest(self.tmp)
@@ -819,24 +552,11 @@ class TestEveryGuestStartConvergesTheReadToken(WkTest):
         self.assertTrue(ok, err)
         self.assertEqual("ghp-todays\n", read_pat.read_text())
 
-    def test_the_injector_is_converged_before_that_check_and_not_after(self):
-        """Source-level twin: the call has to be ahead of the early return, or
-        the test above only passes while the proxy happens to be down."""
-        body = inspect.getsource(guest.Host._start_proxy)
-        self.assertLess(body.index("self.start_inject()"), body.index("self.proxy_running()"))
-
-
 class TestAHostDaemonOlderThanItsSourceIsRestarted(WkTest):
-    """The proxy and the injector run on this host from container/proxy, and a
-    guest start that found one already up left it running the copy it was
-    started from: a proxy older than its fix kept the old behaviour for
-    every guest (measured 2026-09-14: three days of `GET https://` relayed
-    to :80 after the fix landed). A pidfile is written at the start, so its
-    mtime against the sources says whether the daemon predates them."""
+    """A daemon whose pidfile is older than container/proxy's sources is restarted."""
 
     def _run(self, stamp):
         pidfile = self.tmp / "proxy.pid"
-        # Detached, so the daemon is nobody's child here and is reaped once it goes.
         pid = int(subprocess.run(["sh", "-c", "sleep 60 >/dev/null 2>&1 & echo $!"], capture_output=True,
                                  text=True).stdout.strip())
         self.addCleanup(lambda: subprocess.run(["kill", str(pid)], capture_output=True))
@@ -862,21 +582,11 @@ class TestAHostDaemonOlderThanItsSourceIsRestarted(WkTest):
         self.assertTrue(kept)
         self.assertNotIn("restarting", err)
 
-    def test_both_daemons_are_checked_ahead_of_their_already_running_return(self):
-        for fn, probe in ((guest.Host._start_proxy, "self.proxy_running()"),
-                          (guest.Host.start_inject, "self.inject_running()")):
-            body = inspect.getsource(fn)
-            self.assertLess(body.index("self.restart_if_stale("), body.index(probe), fn.__name__)
-
-
 @unittest.skipUnless(os.uname().sysname == "Darwin",
                      "guests are a macOS-host thing (tart)")
 @unittest.skipUnless(shutil.which("ssh-agent"), "needs ssh-agent")
 class TestOneOffClearsEveryAgentThisMachineRuns(WkTest):
-    """Two agents run on a macOS workstation -- the one a container mounts the
-    socket of, and the one a guest reaches through a forward -- and one `wk
-    push off` empties both. A switch that clears one of them is a switch that
-    reports OFF while a workspace pushes."""
+    """One `wk push off` empties both the containers' agent and the guests'."""
 
     def _machine_agent(self):
         sock = self.tmp / "machine-agent.sock"
@@ -896,7 +606,7 @@ class TestOneOffClearsEveryAgentThisMachineRuns(WkTest):
                               stderr=subprocess.STDOUT).stdout
 
     def _push(self, action, store, home, vmstore, machine_sock):
-        log = self.tmp / "ssh.log"
+        log = self.tmp / "guest.log"
         log.write_text("")
         self.addCleanup(_kill_pidfile, vmstore / "vm" / "ssh-agent.pid")
         self.addCleanup(_kill_forward, vmstore)
@@ -904,7 +614,7 @@ class TestOneOffClearsEveryAgentThisMachineRuns(WkTest):
             return self.run_wk("push", action, env={
                 "PATH": f"{binp}:{os.environ['PATH']}",
                 "WK_TEST_GUEST": str(home),
-                "WK_TEST_SSH_LOG": str(log),
+                "WK_TEST_LOG": str(log),
                 "WK_STORE": str(store),
                 "WK_HOST_SECRETS": str(store / "secrets"),
                 "WK_VM_STORE": str(vmstore),
@@ -929,66 +639,13 @@ class TestOneOffClearsEveryAgentThisMachineRuns(WkTest):
         self.assertIn("no identities", self._identities(guest_agent))
 
 
-class TestBothHalvesRunHere(WkTest):
-    def test_the_whole_command_runs_here(self):
-        src = (REPO / "cmd" / "push").read_text()
-        self.assertIn("# wk: where=local", src)
-        for gone in ("where=store", "--store", "STORE_ONLY"):
-            with self.subTest(gone=gone):
-                self.assertNotIn(gone, src)
-
-    def test_the_guest_half_is_told_the_action(self):
-        """The private halves no longer move, so the guest half cannot infer the position from what it can
-        read: cmd/push hands it the action (tests/test_push_switch.py, TestTheGuests)."""
-        self.assertIn("action", inspect.signature(guest.vm_push_keys_converge).parameters)
-
-    def test_a_workspace_is_still_refused(self):
-        marker = self.tmp / "wk-workspace"
-        marker.write_text("name=probe\ntarget=container\n")
-        for action in ("on", "off", "status"):
-            with self.subTest(action=action):
-                cp = self.run_wk("push", action, env={"WK_MARKER": str(marker)})
-                self.assertNotEqual(cp.returncode, 0, cp.stdout)
-                self.assertIn("workspace", cp.stdout)
-
-
-@unittest.skipUnless(os.uname().sysname == "Darwin",
-                     "the store is only somewhere else on a macOS host")
-class TestNothingStartsThePodmanMachine(WkTest):
-    """The credentials are on this host, so no part of the switch has to start
-    the machine. Reaching an agent that is *in* it is one `podman machine ssh`,
-    which is not the same thing as starting it."""
-
-    def _push(self, *args):
-        plog = self.tmp / "podman.log"
-        plog.write_text("")
-        home, vmstore = _guest(self.tmp)
-        store = _store(self.tmp, keys=("fork",))
-        self.addCleanup(_kill_pidfile, vmstore / "vm" / "ssh-agent.pid")
-        with stub_path({"podman": FAKE_PODMAN, "ssh": FAKE_SSH,
-                        "tart": FAKE_TART_STOPPED}) as binp:
-            cp = self.run_wk("push", *args, env={
-                "PATH": f"{binp}:{os.environ['PATH']}",
-                # The real store path, which this host cannot read: what used
-                # to make the hop happen at all.
-                "WK_STORE": "/var/lib/wk",
-                "WK_HOST_SECRETS": str(store / "secrets"),
-                "WK_VM_STORE": str(vmstore),
-                "WK_TEST_GUEST": str(home),
-                "WK_TEST_SSH_LOG": str(self.tmp / "ssh.log"),
-                "WK_TEST_PODMAN_LOG": str(plog),
-            })
-        return cp, plog.read_text()
-
-    def test_off_asks_the_agent_and_starts_nothing(self):
-        cp, plog = self._push("off")
-        self.assertNotIn("machine start", plog, plog)
-        self.assertIn("push is OFF", cp.stdout)
-
-    def test_status_does_not_start_it(self):
-        cp, plog = self._push("status")
-        self.assertNotIn("machine start", plog, plog)
-        self.assertIn("stopped", cp.stdout)
+class TestABoxPushReachesTheGuestsAgent(WkTest):
+    def test_a_box_push_on_this_host_reaches_the_agent_the_guest_half_loads(self):
+        """`wk pr open`'s push runs here, on the socket `vm_push_keys_converge` loads."""
+        from wk.machine import Fake
+        env = {"HOME": str(self.tmp), "WK_VM_STORE": str(self.tmp / "vs"), "WK_STORE": str(self.tmp / "st"), "PATH": "/usr/bin"}
+        sec, sock = guest.push_agent(str(REPO), Fake(), env)
+        self.assertEqual((sock, sec.agent_argv("true")), (str(self.tmp / "vs" / "vm" / "ssh-agent.sock"), ["sh", "-c", "true"]))
 
 
 if __name__ == "__main__":

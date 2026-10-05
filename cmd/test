@@ -23,7 +23,6 @@
 import os
 import re
 import shlex
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
@@ -99,11 +98,10 @@ def build_cmd(suite, src, out_env, render_env, wrap, lower, port, jobs, debug_fl
             % (src, head, lower, port, jobs, debug_flags, tail)).rstrip()
 
 
-def main(argv, reg=None, clock=None, popen=None):
+def main(argv, reg=None, clock=None):
     name = store.ws_name()
     opts = parse(argv)
     clock = clock or Clock()
-    popen = popen or subprocess.Popen
     reg = reg or targets.Registry(ROOT)
 
     try:
@@ -233,7 +231,7 @@ def main(argv, reg=None, clock=None, popen=None):
             watcher.start()
             script = "echo \"wk: test pid $$\" >&2\n%s" % cmd
             run_argv, cwd = target.exec_argv(name, ["bash", "-lc", script])
-            rc = job.watch(run_argv, log_path, reg.machine, clock, reg.env, cwd, popen)
+            rc = job.watch(run_argv, log_path, reg.machine, clock, reg.env, cwd)
         except job.Interrupted as e:
             warn("interrupted -- stopping the test run in '%s'" % name)
             if not job.kill(target, name, task, "cancelled", reg.machine, clock, reg.env):

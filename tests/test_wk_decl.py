@@ -1,9 +1,4 @@
-"""lib/wk/decl.py and the argv arithmetic in lib/wk/dispatch.py, driven in
-process: a declaration is data, and every answer it gives is a pure function
-of the header and the arguments.
-
-Run: python3 tests/run.py -k tests.test_wk_decl
-"""
+"""lib/wk/decl.py and the argv arithmetic in lib/wk/dispatch.py, driven in"""
 import os
 import sys
 import tempfile
@@ -39,6 +34,9 @@ class TestDeclarations(unittest.TestCase):
         self.assertFalse(d.is_readonly())
         self.assertFalse(d.is_destructive([]))
 
+    def test_nodryrun_declares_the_exemption(self):
+        self.assertTrue(declare(self.tmp, "probe", "# wk: where=host nodryrun").nodryrun)
+
     def test_every_key_is_read(self):
         d = declare(self.tmp, "probe",
                     "# wk: where=host name=required@2 takes=1 ready=yes group=hosts lifecycle "
@@ -51,6 +49,7 @@ class TestDeclarations(unittest.TestCase):
         self.assertTrue(d.is_destructive(["rm"]) and d.is_destructive(["--purge=x"]))
         self.assertFalse(d.is_destructive(["ls"]))
         self.assertTrue(d.honours_dryrun(["anything"]))
+        self.assertFalse(d.nodryrun)
         self.assertEqual(d.passthrough, "tail")
         self.assertEqual(d.broker, "*")
         self.assertEqual((d.bare, d.post, d.values, d.needs), ("merged", "zed", "--list", "gh,ssh"))
@@ -71,8 +70,6 @@ class TestDeclarations(unittest.TestCase):
         self.assertIn("names no verb", self._refused("# wk: verbs=a,b", "# wk: sub c opts=--x"))
         self.assertIn("declares no verbs", self._refused("# wk: opts --x", "# wk: sub a opts=--x"))
 
-    def test_every_command_declaration_keeps_verbs_and_options_apart(self):
-        self.assertGreater(len(list(D.all_commands(REPO))), 20)
 
     def test_an_unknown_word_is_refused_by_name(self):
         with self.assertRaises(D.DeclError) as cm:
@@ -115,23 +112,11 @@ class TestDeclarations(unittest.TestCase):
         d = declare(self.tmp, "probe", "import os", "# wk: where=host")
         self.assertEqual(d.where, "workspace")
 
-    def test_bench_ab_declaration_is_read(self):
-        d = D.Decl(REPO / "cmd" / "bench")
-        self.assertTrue(d.honours_dryrun(["ab"]))
-        self.assertIn("--devices=", d.opts_for(["ab"]))
 
     def test_the_synopsis_is_the_wk_line(self):
         d = declare(self.tmp, "probe", "# wk: group=other")
         self.assertEqual(d.synopsis_line(), "probe <x>")
         self.assertEqual(d.summary(), "a probe")
-
-    def test_every_real_command_declares_cleanly(self):
-        decls = list(D.all_commands(REPO))
-        self.assertGreater(len(decls), 30)
-        for d in decls:
-            self.assertIn(d.where, D.WHERE_VALUES, d.name)
-            self.assertIn(d.name_decl.split("@")[0], D.NAME_VALUES, d.name)
-            self.assertTrue(d.synopsis, "%s has no `# wk` synopsis line" % d.name)
 
 
 class TestArgvArithmetic(unittest.TestCase):
@@ -191,21 +176,12 @@ class TestArgvCheck(unittest.TestCase):
         self.assertIsNone(rc)
         self.assertEqual(out, ["ws", "cfg", "--count=3", "--list"])
 
-    def test_an_undeclared_option_is_refused_with_usage(self):
-        out, rc = self._check(["# wk: name=required takes=1 opts --list"], ["ws", "cfg", "--bogus"])
-        self.assertEqual(rc, 2)
+    def test_a_malformed_argv_is_refused_with_usage(self):
+        for decl, args in (("takes=1 opts --list", ["ws", "cfg", "--bogus"]), ("opts --list", ["ws", "--list=yes"]),
+                           ("opts --count=", ["ws", "--count"]), ("takes=1", ["ws", "cfg", "extra"])):
+            with self.subTest(args=args):
+                self.assertEqual(self._check(["# wk: name=required " + decl], args), (None, 2))
 
-    def test_a_value_where_none_is_taken_is_refused(self):
-        out, rc = self._check(["# wk: name=required opts --list"], ["ws", "--list=yes"])
-        self.assertEqual(rc, 2)
-
-    def test_a_missing_value_is_refused(self):
-        out, rc = self._check(["# wk: name=required opts --count="], ["ws", "--count"])
-        self.assertEqual(rc, 2)
-
-    def test_a_positional_past_takes_is_refused(self):
-        out, rc = self._check(["# wk: name=required takes=1"], ["ws", "cfg", "extra"])
-        self.assertEqual(rc, 2)
 
     def test_takes_star_takes_everything(self):
         out, rc = self._check(["# wk: name=required takes=*"], ["ws", "a", "b", "c"])

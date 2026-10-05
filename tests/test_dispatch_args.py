@@ -1,10 +1,4 @@
-"""wk.decl.Args: how a command, and resolve_target, read the options the
-dispatcher checked and handed on -- by the command's own declaration.
-
-Run: python3 tests/run.py --unit -k test_dispatch_args
-"""
-import importlib.machinery
-import importlib.util
+"""wk.decl.Args: how a command, and resolve_target, read the options the"""
 import os
 import sys
 import tempfile
@@ -13,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.support import REPO
+from tests.test_layers import load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import decl as D  # noqa: E402
@@ -23,13 +18,6 @@ def declare(tmp, *lines):
     p = Path(tmp) / "probe"
     p.write_text("#!/usr/bin/env python3\n# wk probe <x> -- a probe\n%s\n" % "\n".join(lines))
     return D.Decl(p)
-
-
-def load_cmd(name):
-    loader = importlib.machinery.SourceFileLoader("cmd_" + name, str(REPO / "cmd" / name))
-    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("cmd_" + name, loader))
-    loader.exec_module(mod)
-    return mod
 
 
 class TestArgs(unittest.TestCase):
@@ -66,10 +54,7 @@ class TestArgs(unittest.TestCase):
     def test_order_keeps_every_option_seen_in_the_order_typed(self):
         a = D.Args(self.d, ["--zed", "x", "--base", "b", "--env", "A=1", "--zed"])
         self.assertEqual(a.order, ["--zed", "--base", "--env", "--zed"])
-
-    def test_order_excludes_positionals_and_the_tail(self):
-        a = D.Args(self.d, ["x", "--zed", "--", "--base", "z"])
-        self.assertEqual(a.order, ["--zed"])
+        self.assertEqual(D.Args(self.d, ["x", "--zed", "--", "--base", "z"]).order, ["--zed"])
 
 
 class TestResolveTargetReadsTheSameWay(unittest.TestCase):
@@ -98,11 +83,8 @@ class TestNewReadsEveryOptionThroughArgs(unittest.TestCase):
                                      "--zed", "--no-wait", "--kill", "--sysroot", "--_detached"])
         self.assertEqual(got, {"target": "vm", "base": "b1", "arch": "armhf", "pr": "7", "zed": True,
                                "no_wait": True, "kill": True, "sysroot": True, "detached": True})
-
-    def test_nothing_given(self):
-        got = load_cmd("new").parse([])
-        self.assertEqual(got, {"target": None, "base": None, "arch": None, "pr": None, "zed": False,
-                               "no_wait": False, "kill": False, "sysroot": False, "detached": False})
+        self.assertEqual(load_cmd("new").parse([]), {"target": None, "base": None, "arch": None, "pr": None, "zed": False,
+                                                     "no_wait": False, "kill": False, "sysroot": False, "detached": False})
 
 
 if __name__ == "__main__":

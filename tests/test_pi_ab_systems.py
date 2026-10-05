@@ -1,11 +1,4 @@
-"""`--ab-systems`'s boot per leg (lib/wk/bench/board_ab.py's AB.boot): a leg runs on the system it names -- proven from
-the marker the running system serves, never the arming record -- or it does not run. Against the fake board of
-tests/test_bench_board.py holding two systems on its stick, driven through the real rpi5 driver and `wk boot`'s own
-arming (lib/wk/boot/cli.py's Boot), with the fake clock under every wait. The whole A/B on it is
-tests/test_bench_board.py's TestTwoSystemsOnFake.
-
-Run: python3 tests/run.py -k tests.test_pi_ab_systems
-"""
+"""`--ab-systems`'s boot per leg (lib/wk/bench/board_ab.py's AB.boot): a leg runs on the system the running system's marker names, or not at all."""
 import contextlib
 import io
 import os
@@ -49,7 +42,7 @@ class SystemBootTest(BoardTest):
         self.w = w
         with w.patches():
             return board_ab.AB(str(REPO), pipeline_registry(w), "ws", "jetstream3", {"system": BOARD, "ab_systems": "sys-a,sys-b"},
-                               w.clock, w.popen, driver=d)
+                               w.clock, driver=d)
 
     def boot(self, ab, want):
         err = io.StringIO()
@@ -69,7 +62,6 @@ class TestTheLegsSystem(SystemBootTest):
         self.assertEqual(self.landed, [])
 
     def test_a_board_that_arms_where_it_stands_is_armed_there(self):
-        """One boot, and no trip through the rescue."""
         ab = self.ab(driver=ArmsFromBench)
         self.assertTrue(self.boot(ab, "sys-b"), self.err)
         self.assertEqual(self.landed, [SYS_B])
@@ -81,8 +73,6 @@ class TestTheLegsSystem(SystemBootTest):
         self.assertEqual(self.armings(), 1)
 
     def test_a_failed_back_transition_is_retried_not_ignored(self):
-        """A `back()` refusal used to be followed by `answered()` as if it had
-        landed; now it is warned about and retried like any other failed transition."""
         ab = self.ab()
         real_transition, calls = ab.transition, []
 
@@ -110,7 +100,6 @@ class TestTheLegsSystem(SystemBootTest):
         self.assertEqual(self.landed, [SYS_A, SYS_A, SYS_B])
 
     def test_the_last_arming_is_read_before_the_leg_is_given_up(self):
-        """The passes are one more than the armings: a board that comes up right on the final arming has won its leg."""
         ab = self.ab(driver=ArmsFromBench)
         self.misroute = board_ab.SYSTEM_TRIES - 1
         self.assertTrue(self.boot(ab, "sys-b"), self.err)
@@ -161,14 +150,11 @@ class TestTheLegsSystem(SystemBootTest):
 
 
 class TestTheWidth(unittest.TestCase):
-    """A system id is <profile>-<hash>, and the width is the profile's."""
 
-    def test_a_system_id_reads_its_profiles_width(self):
-        self.assertEqual(board_ab.width("webkit-2.52-yocto-rpi3-32-ebb646f3bf67", os.environ), 32)
-        self.assertEqual(board_ab.width("webkit-2.52-yocto-rpi5-64-cddf63dc0d4b", os.environ), 64)
-
-    def test_a_profile_name_is_its_own_width(self):
-        self.assertEqual(board_ab.width("webkit-2.52-yocto-rpi4-32", os.environ), 32)
+    def test_a_system_id_or_a_profile_name_reads_its_profiles_width(self):
+        for name, bits in (("webkit-2.52-yocto-rpi3-32-ebb646f3bf67", 32), ("webkit-2.52-yocto-rpi5-64-cddf63dc0d4b", 64),
+                           ("webkit-2.52-yocto-rpi4-32", 32)):
+            self.assertEqual(board_ab.width(name, os.environ), bits, name)
 
     def test_the_narrow_width_selects_the_exclusions_and_the_wide_one_none(self):
         self.assertIn("argon2-wasm", [n for n, _ in board_ab.exclusions(str(REPO), "jetstream3", 32)])

@@ -1,14 +1,6 @@
 """`wk profile` (cmd/profile) against a Fake world: the host-side
 perf_event_paranoid gate (samply's own refusal, not reachable under
---dry-run) and `--fetch` copying the recording out byte for byte.
-
-test_profile_debug.py already drives the mode/browser/process argv and
-refusal shapes through the real dispatcher against a FakeWorkspace; this
-file covers what only a Fake machine can reach: a host setting samply
-depends on, and a real (non-dry) run's artifact copy.
-
-Run: python3 tests/run.py -k test_wk_profile
-"""
+--dry-run) and `--fetch` copying the recording out byte for byte."""
 import contextlib
 import importlib.machinery
 import importlib.util
@@ -26,7 +18,7 @@ from tests.fakes import FakeRegistry
 from tests.support import REPO, as_dispatched
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets  # noqa: E402
+from wk import ldpath, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
@@ -97,8 +89,7 @@ class ProfileTest(unittest.TestCase):
 
 
 class TestPerfEventParanoidGate(ProfileTest):
-    """samply's own host-side refusal: `_check_perf_paranoid`, unreachable under
-    --dry-run (the mode block that calls it is skipped entirely)."""
+    """The host-side refusal samply, sysprof and rr share (`ldpath.perf_events`), unreachable under --dry-run."""
 
     def _paranoid(self, level):
         self.w.answer(["exec", "ws", "cat", "/proc/sys/kernel/perf_event_paranoid"], out="%d\n" % level)
@@ -112,7 +103,7 @@ class TestPerfEventParanoidGate(ProfileTest):
 
     def test_high_paranoid_off_linux_names_the_sysctl_remedy(self):
         self._paranoid(2)
-        with mock.patch.object(CMD, "is_linux", return_value=False):
+        with mock.patch.object(ldpath, "is_linux", return_value=False):
             e, err = self.refused("--config", "gtk-release", "--mode", "samply", "--", "x.js")
         self.assertEqual(e.status, 1)
         self.assertIn("perf_event_paranoid is 2 in 'ws'", err)
@@ -121,7 +112,7 @@ class TestPerfEventParanoidGate(ProfileTest):
 
     def test_high_paranoid_on_linux_without_the_helper_names_setup(self):
         self._paranoid(2)
-        with mock.patch.object(CMD, "is_linux", return_value=True), \
+        with mock.patch.object(ldpath, "is_linux", return_value=True), \
              mock.patch("os.access", return_value=False):
             e, err = self.refused("--config", "gtk-release", "--mode", "samply", "--", "x.js")
         self.assertEqual(e.status, 1)
@@ -130,13 +121,58 @@ class TestPerfEventParanoidGate(ProfileTest):
 
     def test_high_paranoid_the_helper_could_not_fix_names_setup_too(self):
         self._paranoid(2)
-        with mock.patch.object(CMD, "is_linux", return_value=True), \
+        with mock.patch.object(ldpath, "is_linux", return_value=True), \
              mock.patch("os.access", return_value=True), \
-             mock.patch.object(CMD.Local, "act_run") as run:
+             mock.patch.object(ldpath.Local, "act_run") as run:
             e, err = self.refused("--config", "gtk-release", "--mode", "samply", "--", "x.js")
         self.assertTrue(run.called)
         self.assertEqual(e.status, 1)
         self.assertIn("did not bring it down", err)
+
+
+class TestSysprof(ProfileTest):
+    def _ready(self, level=1):
+        self.w.answer(["exec", "ws", "cat", "/proc/sys/kernel/perf_event_paranoid"], out="%d\n" % level)
+        self.w.answer(["exec", "ws", "sh", "-c"], rc=0)
+        self.w.answer(["exec-tty", "ws", "bash", "-lc"], out="")
+
+    def script(self):
+        return [e[1][-1] for e in self.w.effects if e[0] == "run_tty" and e[1][:2] == ("exec-tty", "ws")][0]
+
+    def test_sysprof_wraps_jsc_with_the_jit_dump_and_markers_on(self):
+        self._ready()
+        rc, err = self.run_("--config", "gtk-release", "--mode", "sysprof", "--", "x.js")
+        self.assertEqual(rc, 0, err)
+        cmd = self.script()
+        self.assertRegex(cmd, r"sysprof-cli --force /home/u/wk-profile/\S+-sysprof/capture.syscap -- \S+/bin/jsc x.js")
+        for env in ("JSC_useJITDump=1", "JSC_useTextMarkers=1", "JSC_jitDumpDirectory=/home/u/wk-profile/"):
+            self.assertIn(env, cmd)
+
+    def test_sysprof_asks_for_sysprof_cli_and_the_perf_events(self):
+        self._ready(level=2)
+        self.w.answer(["exec", "ws", "sh", "-c"], rc=1)
+        e, err = self.refused("--config", "gtk-release", "--mode", "sysprof", "--", "x.js")
+        self.assertIn("sysprof-cli is not installed in 'ws'", err)
+        self.w.answer(["exec", "ws", "sh", "-c"], rc=0)
+        with mock.patch.object(ldpath, "is_linux", return_value=False):
+            e, err = self.refused("--config", "gtk-release", "--mode", "sysprof", "--", "x.js")
+        self.assertIn("sysprof needs 1 or less", err)
+
+    def test_sysprof_refuses_an_apple_port_and_an_attach(self):
+        self._ready()
+        e, err = self.refused("--config", "gtk-release", "--mode", "sysprof", "--attach", "123")
+        self.assertIn("there is no attach", err)
+        with mock.patch.object(ProfileTarget, "os", lambda self: "macos"):
+            e, err = self.refused("--config", "mac-release", "--mode", "sysprof", "--", "x.js")
+        self.assertIn("'mac-release' is an Apple-port build", err)
+
+    def test_sysprof_against_the_browser_prefixes_minibrowser_and_refuses_process(self):
+        self._ready()
+        rc, err = self.run_("--config", "gtk-release", "--mode", "sysprof", "--browser", "about:blank")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("WEBKIT_MINI_BROWSER_PREFIX='sysprof-cli --force", self.script())
+        e, err = self.refused("--config", "gtk-release", "--mode", "sysprof", "--browser", "--process", "web")
+        self.assertIn("--process is meaningless with --mode sysprof", err)
 
 
 class TestFetch(ProfileTest):
@@ -163,8 +199,6 @@ class TestFetch(ProfileTest):
 
 
 class TestOutputReachesTheTerminal(ProfileTest):
-    """The run (and `post`, for a mode that has one) inherit this process's own
-    stdio through exec_tty rather than being captured and dropped by exec."""
 
     def test_the_run_and_post_go_through_exec_tty_not_the_capturing_exec(self):
         self.w.answer(["exec-tty", "ws", "bash", "-lc"], out="")
@@ -180,15 +214,6 @@ class TestOutputReachesTheTerminal(ProfileTest):
         rc, err = self.run_("--config", "gtk-release", "--mode", "sampling", "--", "x.js")
         self.assertEqual(rc, 0, err)
         self.assertTrue([e for e in self.w.effects if e[0] == "run_tty" and e[1][:2] == ("exec-tty", "ws")], self.w.effects)
-
-
-class TestLdpathIsShared(unittest.TestCase):
-    """`cmd/profile` and `cmd/run` import the same `wk.ldpath.prelude`
-    rather than each defining their own copy."""
-
-    def test_profile_imports_the_one_prelude(self):
-        from wk import ldpath
-        self.assertIs(CMD.prelude, ldpath.prelude)
 
 
 if __name__ == "__main__":

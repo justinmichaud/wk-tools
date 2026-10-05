@@ -23,6 +23,7 @@ ROOT = images.root()
 
 from wk import decl, targets  # noqa: E402
 from wk.act import Refused, die, info, log  # noqa: E402
+from wk.machine import Local  # noqa: E402
 from wk.record import first_error, normalised  # noqa: E402
 
 # The readings travel beside the products (lib/wk/bench/mac.py's `PgoCollect.evidence`), read from the build
@@ -85,8 +86,7 @@ def main(argv):
     if shown:
         info("showing %s" % path)
     if follow:
-        sys.stdout.flush()
-        os.execvp("tail", ["tail", "-f", path])
+        Local().exec(["tail", "-f", path])
     if whole:
         sys.stdout.write(normalised(path))
         return 0

@@ -1,14 +1,4 @@
-"""`wk bench ab` (lib/wk/bench/ab.py) against a Fake world: the refusals, which commits and images an A/B resolves,
-the graph it declares -- what each step needs and holds, what runs at once -- and what it costs, a run killed after
-any effect and run again, and the report's pairing of rounds (lib/wk/bench/record.py's `paired`).
-
-The world is a Fake machine answering git as a mirror would, `wk sysimage holds` from what the steps built, and
-every step's `wk` command by recording what it would leave; each board's rounds are a callable, since a board A/B is
-tests/test_bench_board.py's. Rows landed here: `unit ab.plan_and_pairing`, `unit killpoints[bench ab]`,
-`unit bench.report_and_cost` (the cost half).
-
-Run: python3 tests/run.py -k test_ab_plan
-"""
+"""`wk bench ab` (lib/wk/bench/ab.py) against a Fake world: refusals, commits, images, the graph, its cost, the arms' distance, the kill, and the pairing."""
 import concurrent.futures as futures
 import contextlib
 import io
@@ -246,9 +236,6 @@ class ABTest(unittest.TestCase):
 
 
 class TestBoardStateNamesAConfigProblem(ABTest):
-    """A config problem (an unresolvable board name) is refused by name; only
-    the ssh round trip to a board already probed as reachable is folded into
-    'unreachable'."""
 
     def test_a_board_machines_does_not_name_is_refused_not_called_unreachable(self):
         w = self.world()
@@ -260,8 +247,6 @@ class TestBoardStateNamesAConfigProblem(ABTest):
 
 
 class TestMachineKindNamesAMalformedConf(ABTest):
-    """A conf that does not parse is refused by name, not read as `kind=""`
-    and quietly sent down the board (not-a-Mac) path."""
 
     def test_a_malformed_conf_is_refused_not_treated_as_not_a_mac(self):
         w = self.world()
@@ -272,31 +257,20 @@ class TestMachineKindNamesAMalformedConf(ABTest):
 
 
 class TestTheRefusals(ABTest):
-    """A malformed request is refused before the mirror, a board or GitHub is asked anything."""
 
-    def test_devices_are_required(self):
-        self.assertIn("--devices", self.refused(self.world(), devices=""))
-
-    def test_bits_are_32_or_64(self):
-        self.assertIn("--bits", self.refused(self.world(), bits="16"))
-
-    def test_rounds_count_and_timeout_are_numbers(self):
-        for key in ("rounds", "count", "timeout"):
-            with self.subTest(key=key):
-                self.assertIn("--" + key, self.refused(self.world(), **{key: "many"}))
-
-    def test_a_plan_is_a_name(self):
-        self.assertIn("--plan", self.refused(self.world(), plans=["x;y"]))
-
-    def test_an_unknown_task_is_refused(self):
-        self.assertIn("nosuch", self.refused(self.world(), task="nosuch"))
+    def test_a_bad_option_is_refused_by_name(self):
+        for kw, named in (({"devices": ""}, "--devices"), ({"bits": "16"}, "--bits"), ({"rounds": "many"}, "--rounds"),
+                          ({"count": "many"}, "--count"), ({"timeout": "many"}, "--timeout"), ({"plans": ["x;y"]}, "--plan"),
+                          ({"task": "nosuch"}, "nosuch"), ({"devices": "nosuch"}, "nosuch"), ({"slot": "a"}, "--slot"),
+                          ({"build_on": "nosuch"}, "nosuch")):
+            with self.subTest(kw=kw):
+                self.assertIn(named, self.refused(self.world(), **kw))
 
     def test_detach_and_dry_run_exclude_each_other(self):
         os.environ["WK_DRY_RUN"] = "1"
         self.assertIn("--detach", self.refused(self.world(), detach=True))
 
     def test_a_branch_or_a_commit_needs_the_release_named(self):
-        """Only a pull request has a base branch to read the image off."""
         for spec in (HEAD, "alice:feature-x"):
             with self.subTest(spec=spec):
                 self.assertIn("--release", self.refused(self.world(), spec, release=""))
@@ -305,9 +279,6 @@ class TestTheRefusals(ABTest):
         w = self.world()
         w.fake.dirs.discard(w.mirror)
         self.assertIn("wk sync", self.refused(w))
-
-    def test_a_device_that_is_no_board_is_refused(self):
-        self.assertIn("nosuch", self.refused(self.world(), devices="nosuch"))
 
     def test_systems_build_nothing_so_the_build_options_are_refused(self):
         for key in ab.BUILD_ONLY:
@@ -318,11 +289,7 @@ class TestTheRefusals(ABTest):
         w = self.world(boards={"rpi3": R38, "rpi4": R38})
         self.assertIn("--devices", self.refused(w, "", systems="x,y"))
 
-    def test_a_change_holds_no_one_slot(self):
-        self.assertIn("--slot", self.refused(self.world(), slot="a"))
-
     def test_the_task_needs_a_workspace_to_live_in(self):
-        """A change's task is the first device's image workspace's; a --systems A/B's is the --workspace it names."""
         w = self.world()
         w.fake._set_file("/state/image/" + R38, "1")   # held, so the step that would make the workspace is not run
         shutil.rmtree(os.path.dirname(w.home()))
@@ -338,7 +305,6 @@ class TestTheCommits(ABTest):
         self.assertEqual((a.head, a.base, a.branch), (HEAD, BASE, "wpe/wpe-2.38"))
 
     def test_a_pull_requests_base_comes_off_its_own_base_branch(self):
-        """The release says which image to measure on; the PR's base branch says where the change begins."""
         w = self.world(boards=Y52, pr_base="feature-x")
         a, _ = self.graph(w, "990", release="2.52", builder="yocto", devices="rpi5-64")
         self.assertEqual((a.head, a.branch), (HEAD, "origin/feature-x"))
@@ -362,13 +328,11 @@ class TestTheCommits(ABTest):
         self.assertIn("https://github.com/alice/WebKit.git", err)
 
     def test_a_branch_two_of_the_users_repositories_carry_is_refused(self):
-        """WebKit and WPEWebKit are different projects, and a name in both says nothing about which one is meant."""
         self.assertIn("more than one", self.refused(self.world(repos=("WebKit", "WPEWebKit")), "alice:wpe-2.38"))
 
 
 class TestTheImages(ABTest):
     def test_a_board_with_two_builders_at_one_release_asks_for_the_builder(self):
-        """rpi5 at 2.52 has a buildroot image and a yocto one of one width, where naming the width narrows nothing."""
         err = self.refused(self.world(boards=Y52), release="2.52", devices="rpi5-64")
         self.assertIn("--builder", err)
         self.assertNotIn("rpi5-64 or rpi5-64", err)
@@ -384,7 +348,6 @@ class TestTheImages(ABTest):
 
 
 class TestTheGraph(ABTest):
-    """`unit ab.plan_and_pairing`, the plan half: what each step needs and holds, and so what runs at once."""
 
     ws = "buildroot-" + R38
 
@@ -421,7 +384,6 @@ class TestTheGraph(ABTest):
             self.assertEqual(s["instr:yocto-webkit-2.52-yocto-rpi5-64:" + arm].needs, ("toolchain:" + ws,))
 
     def test_a_profile_guided_arm_is_the_cycles_phases_not_one_build(self):
-        """So one arm's collection on the board and the other arm's instrumented build run at once."""
         _, s = self.graph(self.world(boards=Y52), release="2.52", builder="yocto", devices="rpi5-64")
         ws = "yocto-webkit-2.52-yocto-rpi5-64"
         self.assertEqual(s["instr:%s:base" % ws].holds, ("machine:tolken",))
@@ -431,14 +393,15 @@ class TestTheGraph(ABTest):
         waves = [{x.id for x in wave} for wave in sched.waves(list(s.values()))]
         self.assertTrue([w for w in waves if {"deploy:rpi5:base-instr", "instr:%s:pr" % ws} <= w], waves)
 
-    def test_two_boards_on_one_machine_build_in_turn(self):
-        w = self.world(boards={"rpi4": "webkit-2.52-yocto-rpi4-64", "rpi5": "webkit-2.52-yocto-rpi5-64"})
-        _, s = self.graph(w, release="2.52", builder="yocto", devices="rpi4-64,rpi5-64")
-        for wave in sched.waves(list(s.values())):
-            self.assertLessEqual(len([x for x in wave if x.id.split(":")[0] in BUILDS]), 1, wave)
+    def test_builds_on_one_machine_run_in_turn(self):
+        two = {"rpi4": "webkit-2.52-yocto-rpi4-64", "rpi5": "webkit-2.52-yocto-rpi5-64"}
+        for boards, kw in ((two, {"devices": "rpi4-64,rpi5-64"}), (Y52, {"devices": "rpi5-64", "build_on": "one"})):
+            with self.subTest(boards=sorted(boards)):
+                _, s = self.graph(self.world(boards=boards), release="2.52", builder="yocto", **kw)
+                for wave in sched.waves(list(s.values())):
+                    self.assertLessEqual(len([x for x in wave if x.id.split(":")[0] in BUILDS]), 1, wave)
 
     def test_build_on_puts_each_arm_on_its_own_machine(self):
-        """Two machines are what makes the two arms build at once; each arm's deploy is sent to the machine holding its image workspace."""
         _, s = self.graph(self.world(boards=Y52), release="2.52", builder="yocto", devices="rpi5-64", build_on="one,two")
         ws = "yocto-webkit-2.52-yocto-rpi5-64"
         self.assertEqual((s["instr:%s:base" % ws].holds, s["instr:%s:pr" % ws].holds), (("machine:one",), ("machine:two",)))
@@ -446,17 +409,7 @@ class TestTheGraph(ABTest):
         self.assertEqual(first, {"image:%s@one" % ws, "image:%s@two" % ws})
         self.assertTrue(s["deploy:rpi5:pr"].command.startswith("WK_TARGET=two "))
 
-    def test_one_machine_named_for_both_arms_builds_them_in_turn(self):
-        _, s = self.graph(self.world(boards=Y52), release="2.52", builder="yocto", devices="rpi5-64", build_on="one")
-        for wave in sched.waves(list(s.values())):
-            self.assertLessEqual(len([x for x in wave if x.id.split(":")[0] in BUILDS]), 1, wave)
-
-    def test_build_on_names_a_known_machine(self):
-        self.assertIn("nosuch", self.refused(self.world(), build_on="nosuch"))
-
     def test_two_slots_and_two_systems_are_one_board_ab_each(self):
-        """A change's arms are two slots on each board's image; --systems names two images holding one slot, and
-        nothing is built -- both are one board A/B per board and plan, told apart only by its arms."""
         w = self.world()
         _, s = self.graph(w)
         _, t = self.graph(w, "", systems="sys-a,sys-b", slot="s", workspace="buildroot-" + R38)
@@ -477,8 +430,6 @@ class TestTheGraph(ABTest):
         self.assertEqual((w.state(), w.benched), ([], []))
 
     def test_a_dry_run_resolves_the_arms_commits_without_fetching(self):
-        """dispatch.dry_run_is_the_recorder: resolving a branch, a pull request or a sha to a commit is a
-        read of the mirror the plan is built from, never a fetch into it."""
         os.environ["WK_DRY_RUN"] = "1"
         w = self.world(boards=Y52, pr_base="feature-x")
         a, _ = self.graph(w, "990", release="2.52", builder="yocto", devices="rpi5-64")
@@ -520,14 +471,12 @@ class TestARun(ABTest):
         self.assertEqual(record.tasks(w.home()), [self.task(w).field("name")])
 
     def test_a_task_in_the_podman_machines_store_is_written_through_it(self):
-        """The container target's store is the podman machine's on a macOS host: the task goes there over `podman machine ssh`."""
         w = self.world()
         self.run_ab(w)
         wrote = [e[1] for e in w.fake.effects if e[0] == "run" and e[1][:3] == ("podman", "machine", "ssh") and "task.json" in e[1][-1]]
         self.assertTrue(wrote, "task.json is written through the podman machine")
 
     def test_a_task_on_a_build_box_is_written_there_and_its_run_sent_there(self):
-        """--build-on: the first arm's image workspace is on the box, so the task lives there and the board A/B runs there."""
         w = self.world()
         far = Path(w.tmp, "far", "ws", "buildroot-" + R38)
         far.mkdir(parents=True)
@@ -540,7 +489,6 @@ class TestARun(ABTest):
         self.assertTrue(bench and all("WK_TARGET=one" in argv for argv in bench), bench)
 
     def test_a_task_in_a_peers_workspace_is_written_where_its_own_wk_holds_it(self):
-        """--build-on a peer: the peer's own wk names where its workspace keeps tasks, and the task is written there."""
         w = self.world()
         bench = w.peer()
         bench.parent.mkdir(parents=True)
@@ -585,7 +533,6 @@ class TestARun(ABTest):
         self.assertEqual(w.state(), [])
 
     def test_a_run_killed_after_any_effect_and_run_again_converges(self):
-        """`unit killpoints[bench ab]`: a re-run names the task the first one made, as the refusal says to."""
         base = os.path.join(self.tmp, "kill")
 
         def make():
@@ -603,7 +550,6 @@ class TestARun(ABTest):
 
 
 class TestTheCost(ABTest):
-    """`unit bench.report_and_cost`, the cost half: a plan's cost is stated from measured leg times before it runs."""
 
     def leg(self, w, task, run, secs, count="", machine="rpi3", plan="speedometer3", ok=True, home=None):
         d = os.path.join(home or w.home(), task, "runs", run)
@@ -636,7 +582,6 @@ class TestTheCost(ABTest):
         self.assertEqual(a.cost(), {("rpi3", "speedometer3"): (12, 12 * 100.0, 1)})
 
     def test_legs_measured_in_a_peers_workspace_count_and_a_dry_run_states_them(self):
-        """The cost is stated before the confirm, under --dry-run too, from the legs the peer's own wk holds."""
         w = self.world()
         far = w.peer()
         far.mkdir(parents=True)
@@ -667,7 +612,6 @@ class TestTheCost(ABTest):
 
 
 class TestThePairing(unittest.TestCase):
-    """`unit ab.plan_and_pairing`, the pairing half: only rounds both arms finished on one payload pin are compared."""
 
     def run_(self, state="ok", runner="r1", copy="/p"):
         return {"state": state, "dir": "/runs/%s-%s" % (runner, state), "env": {"runner_sha": runner, "local_copy": copy}}
@@ -688,6 +632,74 @@ class TestThePairing(unittest.TestCase):
                 a, _, dropped = record.paired({1: {"a": self.run_(), "b": self.run_(**other)}, 2: {"a": self.run_(), "b": self.run_()}},
                                               ["base", "pr"])
                 self.assertEqual((len(a), len(dropped)), (1, 1))
+
+
+class TestTheArmsMayDifferByOneCommit(ABTest):
+
+    def test_one_commit_apart_or_none_is_allowed(self):
+        for ahead in (0, 1):
+            with self.subTest(ahead=ahead):
+                os.environ["WK_DRY_RUN"] = "1"
+                rc, err = self.quiet(self.world(ahead=ahead).ab().go)
+                self.assertEqual(rc, 0, err)
+
+    def test_two_commits_apart_is_refused_given_or_guessed(self):
+        for base in ("", BASE):
+            with self.subTest(base=base):
+                os.environ["WK_DRY_RUN"] = "1"
+                w = self.world(ahead=2)
+                err = self.refused(w, base=base)
+                self.assertIn("--base", err)
+                self.assertFalse([e for e in w.fake.effects if e[0] == "run" and e[1][:2] == ("sh", "-c")])
+
+    def test_force_crosses_it(self):
+        os.environ.update(WK_DRY_RUN="1", WK_FORCE="1")
+        rc, err = self.quiet(self.world(ahead=2).ab().go)
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(act._forced)
+
+
+class TestTheKill(ABTest):
+
+    def record(self, w, pid):
+        recs = progress.Records(w.reg.store.record_dir(), clock=w.clock, env=w.env, machine=w.fake)
+        return recs.begin("ab", "here", "t1", "wk bench ab t1 --kill", "/x/ab.log", ["wk sysimage build"], pid=pid)
+
+    def kill(self, w, task="t1"):
+        return self.quiet(ab.kill, w.reg, w.clock, task)
+
+    def test_the_process_and_its_steps_go_and_the_record_says_cancelled(self):
+        w = self.world()
+        w.fake.pids |= {4000, 4001}
+        w.fake.answer(["sh", "-c"], out="4001\n4000\n")
+        t = self.record(w, 4000)
+        rc, err = self.kill(w)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual((w.fake.pids, t.field("exit")), ({os.getpid()}, "cancelled"))
+
+    def test_a_process_that_ignores_term_is_killed_after_the_bound(self):
+        w = self.world()
+        w.fake.pids.add(4000)
+        w.fake.answer(["sh", "-c"], out="4000\n")
+        w.fake.kill = lambda pid, sig=15: (w.fake.pids.discard(pid) if sig == 9 else None) or True
+        w.env["WK_KILL_WAIT"] = "3"
+        t = self.record(w, 4000)
+        rc, err = self.kill(w)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual((t.field("exit"), w.clock.slept.count(1) >= 3), ("cancelled", True))
+
+    def test_no_record_is_a_refusal_naming_where_the_tasks_are_listed(self):
+        rc, err = self.kill(self.world(), "nosuch")
+        self.assertIsInstance(rc, Refused)
+        self.assertIn("wk bench ls", err)
+
+    def test_a_finished_task_is_not_killed(self):
+        w = self.world()
+        w.fake.pids.add(4000)
+        self.record(w, 4000).end(0)
+        rc, err = self.kill(w)
+        self.assertIsInstance(rc, Refused)
+        self.assertEqual(w.fake.pids, {4000, os.getpid()})
 
 
 if __name__ == "__main__":

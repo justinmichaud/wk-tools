@@ -1,13 +1,5 @@
-"""`wk sysimage build` and `webkit` for a buildroot image as a task (lib/wk/sysimage/task.py,
-lib/wk/sysimage/buildroot.py) against a Fake world: the record a stage writes and how it ends, the
-refusals, --detach, --stop, the watchdog, a dry run, a stage killed after any effect, the wrapper a stage
-runs under in the workspace, and the pinned fetch.
-
-Rows landed here: `unit sysimage.task_states` (the buildroot half; yocto's is
-tests/test_yocto_stage.py), `unit record.progress_shape[sysimage]`, `unit killpoints[sysimage build]`.
-
-Run: python3 tests/run.py -k test_sysimage_task
-"""
+"""`wk sysimage build` and `webkit` for a buildroot image as a task (lib/wk/sysimage/task.py, the base every
+workspace builder shares, and lib/wk/sysimage/buildroot.py) against a Fake world."""
 import contextlib
 import io
 import os
@@ -100,13 +92,13 @@ class World(Fake):
     def profile(self):
         return images.load(PROFILE, self.env)
 
-    def popen(self, argv, stdin=None, stdout=None, stderr=None, cwd=None):
+    def start(self, argv, out, cwd=None):
         self.effect(("watch", tuple(argv)))
-        stdout.write(self.out)
+        out.write(self.out)
         return FakeProc(self.rc, None if self.hang else 0, self.interrupt)
 
     def driver(self):
-        return buildroot.Buildroot(self.reg, self.profile(), PROFILE, self.clock, self.popen)
+        return buildroot.Buildroot(self.reg, self.profile(), PROFILE, self.clock)
 
     def recs(self):
         return build.records_of(self.reg.load("box"), self.clock, self)
@@ -229,7 +221,7 @@ class TestWhatItBuildsWith(TaskTest):
             m.act_run(["kernel_pin", deb, release, out])
             return os.path.join(out, "wk-kernel-%s.tar" % release)
         with contextlib.redirect_stderr(io.StringIO()) as err, mock.patch.object(buildroot, "kernel_pin", pin):
-            rc = buildroot.Buildroot(self.w.reg, p, PROFILE, self.w.clock, self.w.popen).build([])
+            rc = buildroot.Buildroot(self.w.reg, p, PROFILE, self.w.clock).build([])
         self.assertEqual(rc, 0, err.getvalue())
         (t,) = self.w.recs().list()
         self.assertEqual(t.plan()[0], "prepare the pinned kernel 6.1.0-rpi")
@@ -455,12 +447,12 @@ class TestWebkitSlot(TaskTest):
 
     def test_a_slot_is_its_own_stage_and_ends_on_its_manifest(self):
         self.w.react(["exec", WS, "env"], lambda a, f: Result(0))
-        real = self.w.popen
+        real = self.w.start
 
         def built(*a, **kw):
             self.w.files[os.path.join(self.slotdir, "slot.json")] = "{}"
             return real(*a, **kw)
-        self.w.popen = built
+        self.w.start = built
         rc, err = self.slot()
         self.assertEqual(rc, 0, err)
         (t,) = self.w.recs().list()

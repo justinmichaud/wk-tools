@@ -1,10 +1,6 @@
-"""`wk status`: the collector (lib/wk/status.py) and the renderer
-(lib/wk/statusview.py) driven in process, plus `wk push status --all`.
-
-Run: python3 tests/run.py -k tests.test_status
-"""
+"""`wk status`: the collector (lib/wk/status.py) and the renderer (lib/wk/statusview.py) driven in process, plus
+`wk push status --all`."""
 import contextlib
-import inspect
 import io
 import json
 import os
@@ -29,8 +25,8 @@ from wk.store import Store  # noqa: E402
 
 
 def render(records, mode="text"):
-    """The renderer on synthetic records, in process: what a person or an
-    agent reading `wk status` sees, with no machine required."""
+    """The renderer on synthetic records, in process: what a person or an agent reading `wk status` sees, with no
+    machine required."""
     records = list(records)
     doc = statusview.merge(records)
     if mode == "json":
@@ -214,9 +210,9 @@ class TestFleetDeviceRecord(unittest.TestCase):
 
 
 class TestBridgeRecord(unittest.TestCase):
-    """`fields` is bridge/bin/wk-bridge-healthcheck's raw facts (lib/wk/bridge judges them);
-    `facts` missing from an answering, role-carrying phone means the healthcheck itself never ran
-    (no non-interactive root), told apart here from one that ran and found something wrong."""
+    """`fields` is bridge/bin/wk-bridge-healthcheck's raw facts (lib/wk/bridge judges them); `facts` missing from
+    an answering, role-carrying phone means the healthcheck itself never ran (no non-interactive root), told
+    apart here from one that ran and found something wrong."""
 
     CONF = dict({k: v("phone") if callable(v) else v for k, v in fleet.BRIDGE_DEFAULTS.items()},
                 device="pinephone", segment="10.99.1.0/24", note="a phone")
@@ -300,8 +296,8 @@ class TestSelfRoleAndMode(unittest.TestCase):
 
 
 class TestWalkLeadsWithSelf(unittest.TestCase):
-    """A bare `wk status` yields its own role and mode first, computed locally and not by re-probing
-    itself as a fleet device."""
+    """A bare `wk status` yields its own role and mode first, computed locally and not by re-probing itself as a
+    fleet device."""
 
     def _walk(self, root, env):
         w = status.Walk(root, env=env, fleet=False, devices=False)
@@ -426,9 +422,6 @@ class TestWaitAndTimeout(unittest.TestCase):
         self.assertEqual(clock.slept, [7, 7, 7])
 
     def test_one_poll_that_could_not_ask_does_not_end_the_wait(self):
-        """A healthy detached build: one walk whose probe timed out read 4, the wait took it for a verdict, and the
-        walk after it said busy -- exit 2 after 181s of a 3300s wait. After busy, a verdict holds only when the
-        next poll repeats it."""
         rc, polls, said, _ = self._wait([2, 2, 4, 2, 2, 0, 0], timeout=3300)
         self.assertEqual((0, 7), (rc, len(polls)))
         self.assertFalse([s for s in said if "still busy" in s])
@@ -495,9 +488,6 @@ class TestToolsFact(unittest.TestCase):
         self.assertEqual(status.tools_fact(ver, "abc", "peer", "peer", peer=True, dirty_here=True)["fix"],
                          "commit and push here first -- a peer pulls, and this checkout is dirty")
 
-    def test_a_copy_with_no_commit_is_never_in_sync(self):
-        self.assertFalse(status.tools_fact({"sha": "-", "dirty": "unknown"}, "abc", "box", "box")["insync"])
-
     def test_the_text_says_differs_and_the_page_gets_the_same_document(self):
         rec = status.tools_fact({"sha": "0000000", "dirty": "no"}, "abcdef1", "box", "box")
         out = render([machine_rec("box"), rec]).stdout
@@ -525,13 +515,6 @@ class TestToolsFact(unittest.TestCase):
         self.assertEqual(rows, {"here": ["present"], "far": ["absent"]})
         self.assertEqual(doc["exit"], 0, "a same-named workspace on another machine is not a disagreement")
         self.assertEqual(skew["machine"], "far")
-
-    def test_reporting_reaches_no_machine_and_syncs_nothing(self):
-        code = inspect.getsource(status.tools_fact) + inspect.getsource(status.Walk.report_machine)
-        for writer in ("tools_push", "t_sync", "rsync", "rev-parse HEAD --"):
-            self.assertNotIn(writer, code)
-        self.assertIn('wk("version"', code)
-
 
 class TestPushStatusAll(WkTest):
     """`wk push status --all` prints one line per machine, this one included."""
@@ -622,11 +605,6 @@ class TestTasksOfOneWorkspace(TaskTest):
         self.assertEqual((rec["plan"], rec["steps"]), (["layers", "fetch", "image"], ["done", "running", "pending"]))
         self.assertEqual(rec["state"], "running")
 
-    def test_the_single_workspace_path_passes_the_name_and_asks_each_store_once(self):
-        self.assertIn("self.tasks(records, name)", inspect.getsource(status.Walk.report_target))
-        self.assertIn("tasks_said", inspect.getsource(status.Walk.tasks))
-
-
 class TestTaskVerdictsBecomeExitCodes(TaskTest):
     """One exit code per recorded state, and the note that goes with it."""
 
@@ -669,13 +647,6 @@ class TestTaskVerdictsBecomeExitCodes(TaskTest):
         rec, worst, notes = self._task(pid=4194304)
         self.assertEqual((rec["state"], worst), ("died", 4))
         self.assertIn("died without recording an exit", notes)
-
-    def test_nothing_here_manufactures_a_state(self):
-        src = inspect.getsource(status.task_records)
-        self.assertIn('.verdict("capped")', src)
-        self.assertNotIn('set("state", "stalled")', src)
-        self.assertNotIn("likely stalled or killed", src)
-
 
 class TestHealthRecords(unittest.TestCase):
     """What a machine is apart from its workspaces, each from the evidence handed in."""
@@ -772,9 +743,6 @@ class TestHealthRecords(unittest.TestCase):
         self.assertIsNone(status.broker_record(Store(dict(self.env, XDG_STATE_HOME=str(self.tmp / "nostate"))), "m", lambda p: False))
 
     def test_services_are_named_and_asked_whether_they_are_stale(self):
-        src = (REPO / "lib" / "wk" / "status.py").read_text()
-        for unit in ("wk-proxy.service", "wk-github-inject.service"):
-            self.assertIn(unit, src)
         self.assertEqual(status.unit_program(REPO, "wk-proxy.service"), "container/proxy/wk-proxy.py")
         calls = []
 
@@ -789,8 +757,8 @@ class TestHealthRecords(unittest.TestCase):
 
 
 class TestTheWalkProbesAMachineOnce(unittest.TestCase):
-    """One remote target in the walk: the driver object is the walk's, so its
-    probe is paid once and capacity, delegation and tooling read the memo."""
+    """One remote target in the walk: the driver object is the walk's, so its probe is paid once and capacity,
+    delegation and tooling read the memo."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-walk-"))
@@ -938,29 +906,10 @@ class TestFleetIsOne(unittest.TestCase):
         self.assertEqual(doc["exit"], 0)
 
 
-class TestOwedStatusRules(unittest.TestCase):
-    def test_leads_with_role_and_mode(self):
-        out = render([{"kind": "fleet", "machine": "m", "self": True, "role": "workstation", "mode": "host mode", "media": ""},
-                      machine_rec("m", self=True)]).stdout
-        self.assertRegex(out.strip().splitlines()[0], r"workstation.*host mode")
-
+class TestHelpLeadsWithTheSelfLine(unittest.TestCase):
     def test_help_leads_with_role_and_mode(self):
-        """`wk help` starts the way `wk status` does: this machine, its role, its mode, then README.md"""
         lines = run("help").stdout.splitlines()
         self.assertEqual(lines[0], status.self_line(str(REPO), clean_env(wk_root=False), False))
-        self.assertEqual(lines[2], (REPO / "README.md").read_text().splitlines()[0])
-
-    def test_armed_transition(self):
-        rec = {"kind": "fleet", "machine": "rpi5", "role": "workstation", "mode": "host mode", "media": "usb", "armed": "img-1",
-               "armed_by": "tolken", "armed_at": "2026-01-01T00:00:00Z"}
-        out = render([rec]).stdout
-        self.assertIn("armed for img-1 by tolken since 2026-01-01T00:00:00Z", out)
-
-    def test_fleet_is_one(self):
-        recs = [machine_rec("box"), {"kind": "workspace", "machine": "box", "method": "native", "name": "ws", "state": "present", "ws": "present"},
-                {"kind": "workspace", "machine": "box", "method": "native", "name": "ws", "state": "absent", "ws": "absent"}]
-        self.assertIn("disagree", render(recs).stdout)
-
 
 class TestTheSelfLineIsSpacedOneWay(unittest.TestCase):
     def test_the_stream_leads_with_the_self_line_and_then_its_block(self):

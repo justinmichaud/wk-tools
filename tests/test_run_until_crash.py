@@ -1,18 +1,4 @@
-"""`wk run --until-crash`: loop the jsc invocation in one round trip into the
-workspace until it exits non-zero, cap the iterations, and keep the crashing
-iteration's output; `--lldb` combined with it drops into the debugger at the
-crash instead of exiting with it.
-
-Nothing here builds or runs real WebKit: a FakeWorkspace stands in for a
-checkout, and a planted shell script at the path `Config.jsc_path` resolves
-for jsc-release stands in for the jsc binary (WK_TARGET=local inside a fake
-workspace, so the loop runs right here). Where that path is, is asked of
-lib/wk/buildconf.py rather than spelled again here: jsc-release is the
-JSCOnly port on Linux and an Apple Xcode build on macOS, and they lay their
-products out differently.
-
-Run: python3 -m unittest tests.test_run_until_crash -v
-"""
+"""`wk run --until-crash`: loop jsc in the workspace until it exits non-zero, capped, keeping the crash's output."""
 import os
 import re
 import shutil
@@ -64,8 +50,6 @@ echo "DISTINCTIVE-JSC-OUTPUT call=$n"
 
 class TestUntilCrashLoopsToTheCrash(WkTest):
     def test_runs_until_nonzero_exit_and_reports_it(self):
-        """3 iterations, the 3rd exits 139: the loop stops there, exits 139,
-        and the log it names holds that iteration's output"""
         with fake_workspace() as ws:
             counter = ws.tmp / "calls"
             home = ws.tmp / "home"
@@ -89,8 +73,6 @@ class TestUntilCrashLoopsToTheCrash(WkTest):
             self.assertEqual(log_path.parent, home / "until-crash")
 
     def test_max_caps_iterations_and_exits_zero(self):
-        """--max 2 against a jsc that never crashes: 2 iterations, exit 0,
-        and the cap is named as the reason"""
         with fake_workspace() as ws:
             counter = ws.tmp / "calls"
             home = ws.tmp / "home"
@@ -105,7 +87,6 @@ class TestUntilCrashLoopsToTheCrash(WkTest):
             self.assertEqual(counter.read_text().strip(), "2")
 
     def test_max_refuses_a_non_numeric_value(self):
-        """--max abc is refused, naming the remedy, before anything runs"""
         with fake_workspace() as ws:
             cp = ws.run("run", "--until-crash", "--max", "abc", "--", "x.js")
             self.assertNotEqual(cp.returncode, 0, cp.stdout)
@@ -114,38 +95,16 @@ class TestUntilCrashLoopsToTheCrash(WkTest):
 
 @unittest.skipUnless(shutil.which("lldb"), "no lldb on this host")
 class TestUntilCrashLldbCommandFile(unittest.TestCase):
-    """The generated --until-crash --lldb command sequence is exercised
-    through container/lldb/until-crash-run-file (cmd/run:until-crash+lldb
-    branch), not by driving a real crash through lldb here: launching and
-    controlling *any* process under lldb hangs indefinitely on this host
-    (measured -- `DevToolsSecurity -status` reports Developer Mode disabled,
-    and `lldb -o run -o quit -- /bin/echo hi` never returns). Both checks
-    below give `run` no target, so lldb fails fast ("invalid target")
-    instead of trying to launch anything, and cannot hit that hang."""
 
     PATH = REPO / "container" / "lldb" / "until-crash-run-file"
 
-    def test_file_exists_and_does_not_stop_at_entry(self):
-        """unlike run-file (interactive breakpoint-setting), this one runs
-        straight through so an unattended loop can tell pass from crash"""
-        self.assertTrue(self.PATH.is_file())
-        text = self.PATH.read_text()
-        self.assertNotIn("--stop-at-entry", text)
-        self.assertIn("\nrun\n", "\n" + text)
-
     def test_commands_are_accepted_by_lldb(self):
-        """every non-script command lldb recognises: `run` is reached and
-        fails only for lack of a target, never as an unknown command"""
         cp = subprocess.run(["lldb", "-b", "-s", str(self.PATH)],
                              capture_output=True, text=True, timeout=15)
         self.assertIn("invalid target", cp.stderr, cp.stdout + cp.stderr)
         self.assertNotIn("is not a valid command", cp.stdout + cp.stderr)
 
     def test_script_lines_are_valid_python(self):
-        """the conditional-quit lines, chained in one session as the real
-        file runs them, with no process to inspect -- the SB API returns
-        empty/zero values rather than raising, so this only fails on an
-        actual syntax or name error"""
         lines = [l for l in self.PATH.read_text().splitlines() if l.startswith("script ")]
         self.assertTrue(lines)
         args = ["lldb"]

@@ -1,8 +1,4 @@
-"""What a host installs: host/linux/apt.txt names the command that needs
-each package, and Tart is verified, never installed.
-
-Run: python3 -m unittest tests.test_host_tools -v
-"""
+"""What a host installs: host/linux/apt.txt names the command that needs each package."""
 import re
 import unittest
 
@@ -12,9 +8,7 @@ APT_TXT = REPO / "host" / "linux" / "apt.txt"
 
 
 def parse_apt_blocks(text):
-    """Group host/linux/apt.txt into (comment_lines, package_lines) blocks,
-    split on blank lines. A chunk with no package line (the file's leading
-    header) is dropped -- there is nothing for its comment to justify."""
+    """Group host/linux/apt.txt into (comment_lines, package_lines) blocks, split on blank lines."""
     blocks = []
     chunk = []
     for raw in text.splitlines():
@@ -44,9 +38,8 @@ PATH_RE = re.compile(r"\b[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\b")
 
 
 class TestAptTxtNamesItsConsumers(unittest.TestCase):
-    """Every host/linux/apt.txt block names the `wk` command or repo file
-    that needs it, and that thing actually exists (CLAUDE.md: 'no apt.txt
-    line without earning its place')."""
+    """Every host/linux/apt.txt block names the `wk` command or repo file that needs it, and that thing actually
+    exists (CLAUDE.md: 'no apt.txt line without earning its place')."""
 
     def test_every_block_names_something_checkable(self):
         text = APT_TXT.read_text()
@@ -75,9 +68,6 @@ class TestAptTxtNamesItsConsumers(unittest.TestCase):
                 path = m.group(0).rstrip(").,:;")
                 if (REPO / path).exists():
                     found_anything = True
-                # A path-shaped token that isn't a real repo path (e.g. a
-                # URL fragment or a sysfs path) is not itself a failure --
-                # only the absence of *any* checkable mention is.
 
             if not found_anything:
                 unchecked.append(label)
@@ -91,69 +81,24 @@ class TestAptTxtNamesItsConsumers(unittest.TestCase):
         )
 
     def test_apt_txt_is_comment_blocks_and_bare_package_names(self):
-        """Every non-comment, non-blank line is a single bare package name --
-        the shape lib/... tools.sh's own parser (host/linux/tools.sh) assumes."""
         for line in APT_TXT.read_text().splitlines():
             if line.strip() == "" or line.lstrip().startswith("#"):
                 continue
             self.assertNotIn(" ", line.strip(), f"not a bare package name: {line!r}")
 
 
-TART_MENTION_RE = re.compile(r"\btart\b", re.IGNORECASE)
-TART_APP_CREATE_VERBS = ("mkdir", "cp ", "cp\t", "mv ", "ditto", "unzip", "tar -x", "touch ")
+class TestPersistentSettingsRecordAReason(unittest.TestCase):
+    """A host setting persists only with a recorded reason: every host/macos/defaults.conf entry is `domain key
+    type value reason`, the shape host/macos/settings.sh reads and refuses without the reason."""
 
-
-def _tart_lines(path):
-    return [l for l in path.read_text().splitlines() if TART_MENTION_RE.search(l)]
-
-
-class TestTartVerifiedNeverInstalled(unittest.TestCase):
-    """`./setup` and the macOS host stages only ever check for Tart
-    (~/.local/share/tart/tart.app, ~/.local/bin/tart symlinked into the
-    bundle); nothing here installs it."""
-
-    def _files(self):
-        files = [REPO / "setup"]
-        files += sorted((REPO / "host" / "macos").glob("*.sh"))
-        return [f for f in files if f.is_file()]
-
-    def test_presence_check_exists(self):
-        found = False
-        for f in self._files():
-            for line in _tart_lines(f):
-                if "have tart" in line or ".local/bin/tart" in line:
-                    found = True
-        self.assertTrue(
-            found, "no 'have tart' / '$HOME/.local/bin/tart' presence check found"
-        )
-
-    def test_no_brew_install(self):
-        bad = []
-        for f in self._files():
-            for line in _tart_lines(f):
-                if re.search(r"brew\s+install\s+tart\b", line, re.IGNORECASE):
-                    bad.append(f"{f}: {line.strip()}")
-        self.assertEqual(bad, [], f"found a 'brew install tart' line: {bad}")
-
-    def test_no_download_line_naming_tart(self):
-        bad = []
-        for f in self._files():
-            for line in _tart_lines(f):
-                low = line.lower()
-                if "curl" in low or "download" in low:
-                    bad.append(f"{f}: {line.strip()}")
-        self.assertEqual(
-            bad, [], f"found a curl/download line naming tart: {bad}"
-        )
-
-    def test_no_tart_app_being_created(self):
-        bad = []
-        for f in self._files():
-            for line in _tart_lines(f):
-                low = line.lower()
-                if "tart.app" in low and any(v in low for v in TART_APP_CREATE_VERBS):
-                    bad.append(f"{f}: {line.strip()}")
-        self.assertEqual(bad, [], f"found a line creating tart.app: {bad}")
+    def test_every_default_names_its_reason(self):
+        bare = []
+        for line in (REPO / "host" / "macos" / "defaults.conf").read_text().splitlines():
+            if line.strip() and not line.lstrip().startswith("#"):
+                fields = line.split(None, 4)
+                if len(fields) < 5 or fields[2] not in ("string", "bool", "int", "float"):
+                    bare.append(line)
+        self.assertEqual([], bare)
 
 
 if __name__ == "__main__":

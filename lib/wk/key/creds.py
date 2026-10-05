@@ -5,7 +5,7 @@ import sys
 
 from wk import act
 from wk.act import Refused, die, info, log, warn
-from wk.key.common import LOGIN, cred_print, detail, verdict
+from wk.key.common import cred_print, detail, verdict
 
 
 class Creds:
@@ -66,9 +66,6 @@ class Creds:
         fp = self.fingerprint(name)
         return self.stored_verdict(name) + ("\n    fingerprint: %s" % fp if fp else "")
 
-    def kind(self, name):
-        return next((r[4] for r in self.agent_rows() if r[0] == name), "")
-
     def private_dir(self, d):
         """0700 asserted on every run: a directory made by hand is as open as its umask left it."""
         if self.sec.made_dir(d):
@@ -86,12 +83,7 @@ class Creds:
         return self.sec.publish_view("container")
 
     def clear(self, name):
-        """A file row's login takes its config home (record, lock, backups) with it."""
-        p = self.path(name)
-        self.machine.act_run(["rm", "-f", p])
-        if self.kind(name) == "file":
-            d = os.path.dirname(p)
-            self.machine.act_run(["rm", "-rf", d + "/.claude.json", d + "/.claude.json.lock", d + "/backups"])
+        self.machine.act_run(["rm", "-f", self.path(name)])
         self.sec.publish_view("container")
 
     def cred_line(self, name, state, where):
@@ -129,9 +121,6 @@ class Creds:
             die("there is no credential called '%s'.\n    This checkout knows: %s \n    Each is a row of lib/credcheck.py, which is "
                 "also what says where to mint\n    one and what it must be able to do." % (name, " ".join(names)))
         mints = name in self._cc("minted").out.split()
-        if paste and name == LOGIN:
-            die("--paste cannot carry a claude.ai login -- it is made in a browser:\n    wk key set claude-login here, or "
-                "'wk key setup' from a workstation with one")
         path = self.path(name)
         if replace:
             if not self.present(name):
@@ -142,14 +131,6 @@ class Creds:
             self.deliver(name)
             info("removed the old %s credential -- revoke it too if it is still live" % name)
         if self.present(name) and not paste:
-            return 0 if self.cred_report(name) else 1
-        if name == LOGIN:
-            if not self.login_run(name):
-                return 1
-            if act.dry_run():
-                return 0
-            if not self.present(name):
-                die(self.cred_line(name, "skipped", "'claude auth login' left nothing at %s" % path))
             return 0 if self.cred_report(name) else 1
         minted = False
         if paste:

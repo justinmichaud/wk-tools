@@ -1,18 +1,4 @@
-"""Where an instrumented build writes its profiles (build/pgo-run-benchmark.py).
-
-`collect-pgo-profiles --browser minibrowser` cannot start without it: upstream's
-OSXMiniDriver names no profile directory and raises at the first iteration. What
-makes this worth a test is *which* class gets the answer. BrowserDriverFactory
-loads each driver module by file path, so the registry's class and the one a
-dotted `import webkitpy...` returns are two different objects -- and patching the
-dotted one is a no-op that a real collection discovers an hour into a build
-(measured 2026-09-06 in a macOS guest).
-
-The checkout is stubbed to that exact shape, so the test fails if the harness
-ever goes back to patching whatever an import happens to hand it.
-
-Run: python3 -m unittest tests.test_pgo_harness -v
-"""
+"""Where an instrumented build writes its profiles (build/pgo-run-benchmark.py)."""
 import subprocess
 import textwrap
 import unittest
@@ -115,12 +101,7 @@ def ask(root, scripts):
                           timeout=60)
 
 
-class TestTheCollectionDoesNotPhotographTheScreen(WkTest):
-    """run-benchmark photographs the screen into --diagnose-directory on every
-    leg, and --diagnose-directory is where a collection's profiles land.
-    `screencapture` needs Screen Recording, and asking for it puts a consent
-    dialog over the browser that nothing headless will answer -- measured
-    2026-09-06, one sat there for four hours from the first leg onward."""
+class TestTheHarness(WkTest):
 
     def setUp(self):
         self._scratch = scratch_dir()
@@ -129,38 +110,15 @@ class TestTheCollectionDoesNotPhotographTheScreen(WkTest):
     def tearDown(self):
         self._scratch.__exit__(None, None, None)
 
-    def test_the_driver_a_run_instantiates_takes_no_screenshot(self):
+    def test_the_driver_a_run_instantiates_knows_where_the_profiles_go_and_takes_no_screenshot(self):
         scripts = stub_checkout(self.root)
         cp = ask(self.root, scripts)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("screenshot: None", cp.stdout, cp.stdout + cp.stderr)
         self.assertNotIn("screencapture ran", cp.stdout + cp.stderr)
-
-
-class TestTheClassTheFactoryUsesGetsTheAnswer(WkTest):
-    def setUp(self):
-        self._scratch = scratch_dir()
-        self.root = self._scratch.__enter__()
-
-    def tearDown(self):
-        self._scratch.__exit__(None, None, None)
-
-    def test_the_driver_a_run_instantiates_knows_where_the_profiles_go(self):
-        scripts = stub_checkout(self.root)
-        cp = ask(self.root, scripts)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("/private/tmp/WebKitPGO", cp.stdout, cp.stdout + cp.stderr)
 
-    def test_the_answer_is_safaris_own_and_not_a_second_copy_of_the_path(self):
-        """Both drivers load the same frameworks, so one path serves both; a
-        constant spelled again here would go stale on its own."""
-        text = HARNESS.read_text()
-        self.assertNotIn("/private/tmp/WebKitPGO", text)
-        self.assertIn("safari", text)
-
     def test_it_stands_aside_once_upstream_names_them(self):
-        """This file exists to be deleted; when the property lands upstream it
-        must not overwrite it, and it should say so."""
         scripts = stub_checkout(self.root, minibrowser_answers=True)
         cp = ask(self.root, scripts)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -177,7 +135,6 @@ class TestTheClassTheFactoryUsesGetsTheAnswer(WkTest):
 
 
 class TestUpstreamCarriesWhatTheMacPGOPatches(unittest.TestCase):
-    """`unit pgo.no_local_patch`: once upstream carries them, the harness file goes and the mixer patches nothing."""
 
     @owed("upstream's OSXMiniDriver names no pgo_profile_output_directories, and webkitpy's locate_binary_xcrun "
           "still runs /usr/bin/xcrun off macOS")

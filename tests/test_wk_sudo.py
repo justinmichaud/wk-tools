@@ -16,7 +16,7 @@ from unittest import mock
 
 from tests.fakes import FakeRegistry, FakeTarget
 from tests.killpoints import converges
-from tests.support import REPO, run
+from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import sudo  # noqa: E402
@@ -66,25 +66,17 @@ class TestArgv(unittest.TestCase):
             key_sudo(argv)
         return seen
 
-    def test_bare_defaults_to_status(self):
-        self.assertEqual(self.reached([]), [("here", "status")])
+    def test_each_spelling_reaches_its_arm(self):
+        for argv, want in (([], ("here", "status")), (["setup"], ("here", "setup")),
+                           (["setup", "--target", "moose"], ("target", "setup", "moose")),
+                           (["status", "--all"], ("all", "status"))):
+            with self.subTest(argv=argv):
+                self.assertEqual([want], self.reached(argv))
 
-    def test_setup_here(self):
-        self.assertEqual(self.reached(["setup"]), [("here", "setup")])
-
-    def test_setup_with_target(self):
-        self.assertEqual(self.reached(["setup", "--target", "moose"]), [("target", "setup", "moose")])
-
-    def test_target_needs_a_name(self):
-        with self.assertRaises(Refused):
-            self.reached(["--target", ""])
-
-    def test_an_unknown_verb_is_refused(self):
-        with self.assertRaises(Refused):
-            self.reached(["bogus"])
-
-    def test_all_flag(self):
-        self.assertEqual(self.reached(["status", "--all"]), [("all", "status")])
+    def test_an_unknown_verb_or_an_empty_target_is_refused(self):
+        for argv in (["bogus"], ["--target", ""]):
+            with self.subTest(argv=argv), self.assertRaises(Refused):
+                self.reached(argv)
 
 
 class TestTimeoutMath(unittest.TestCase):
@@ -324,16 +316,6 @@ class TestRefusesInAWorkspace(unittest.TestCase):
         reg.in_workspace = lambda: True
         with self.assertRaises(Refused):
             key_sudo(["status"], env={"WK_NAME": "myws"}, reg=reg)
-
-
-
-class TestTheOldSpellings(unittest.TestCase):
-    def test_wk_sudo_and_wk_backup_are_tombstones_naming_wk_key(self):
-        for old, new in (("sudo", "'wk sudo' is now 'wk key sudo'"), ("backup", "'wk backup' is now 'wk key backup'")):
-            with self.subTest(old=old):
-                cp = run(old)
-                self.assertEqual(cp.returncode, 1, cp.stdout)
-                self.assertIn(new, cp.stdout)
 
 
 if __name__ == "__main__":

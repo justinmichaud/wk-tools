@@ -30,7 +30,7 @@ from wk.boot.driver import part  # noqa: E402
 from tests.fake_boot import FakeBoard  # noqa: E402
 from wk.machine import Fake, Killed, Result  # noqa: E402
 
-PI_KINDS = ("pi-sd", "pi-tryboot", "rpi5-usb", "pi-mbr")
+PI_KINDS = ("pi-sd", "pi-tryboot", "rpi5-usb")
 
 
 def run(fn, *args, env=None):
@@ -226,15 +226,6 @@ class TestBackAndDisarm(unittest.TestCase):
                 d.reboot()
                 self.assertTrue(fake.on_rescue(), err)
 
-    def test_a_medium_armed_board_is_disarmed_whoever_armed_it(self):
-        """The byte on the medium is the arming, so there is something to park with no record."""
-        fake, d, b = pi("pi-mbr")
-        d.probe()
-        d.arm(part(fake.conf["device"], 1))
-        rc, err = run(b.disarm)
-        self.assertEqual(rc, 0, err)
-        self.assertEqual(fake.mbr[fake.conf["device"]], "83")
-
     def test_a_one_shot_board_with_no_record_has_nothing_to_disarm(self):
         fake, d, b = pi("rpi5-usb")
         rc, err = run(b.disarm)
@@ -290,7 +281,7 @@ class TestKillpoints(unittest.TestCase):
 
     def state(self, w):
         f = w.fake
-        return (f.running, f.record, json.dumps(f.fat, sort_keys=True), json.dumps(f.mbr, sort_keys=True), f.one_shot)
+        return (f.running, f.record, json.dumps(f.fat, sort_keys=True), f.one_shot)
 
     def flow(self, action):
         def run_once(w):

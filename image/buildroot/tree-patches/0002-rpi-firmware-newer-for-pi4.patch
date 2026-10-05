@@ -1,0 +1,17 @@
+--- a/package/rpi-firmware/Config.in
++++ b/package/rpi-firmware/Config.in
+@@ -29,11 +29,9 @@
+ 	  The Raspberry Pi 4 files
+ endchoice
+ 
+-if BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI
+-	config BR2_PACKAGE_RPI_FIRMWARE_3BPLUSNEW
+-		bool "Override firmware version for new revisions of PI 3B+"
+-		default "n"
+-endif
++config BR2_PACKAGE_RPI_FIRMWARE_3BPLUSNEW
++	bool "Override firmware version for new board revisions (Pi 3B+, Pi 4)"
++	default "n"
+ 
+ choice
+ 	bool "Firmware to boot"

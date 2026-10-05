@@ -1,20 +1,5 @@
-"""A test that makes a workspace removes it, however the test ends.
-
-`wk selftest default` left `wk-test-<rnd>` running on the container target:
-the class that made it removed it in the body of its one test, so an
-assertion failing first -- or the `wk rm` under test not converging -- left
-the workspace, its container and its build tree behind for a person to find
-with `wk ls`. A workspace is expensive and shared; the removal belongs
-somewhere the test framework runs either way.
-
-So: a class that calls `wk new` registers the removal in `setUp`/`tearDown`
-(`addCleanup`, or a `tearDown` that removes), or removes it in a `finally`
-of the same function. This reads the test sources rather than running them:
-the classes it is about need a podman VM, and the rule has to hold on a
-machine that skips every one of them.
-
-Run: python3 -m unittest tests.test_workspace_cleanup -v
-"""
+"""Lint over the suite: a test class that makes a workspace with `wk new` removes it however the test ends --
+addCleanup, a tearDown that removes, or a finally."""
 TIER = "lint"
 import ast
 import unittest

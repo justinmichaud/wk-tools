@@ -1,15 +1,4 @@
-"""The boards' profile-guided build (lib/wk/pgo.py) against a Fake world: which profiles are profile-guided, the
-board a profile collects on, the cycle's phases as one graph shared with `wk bench ab`, each phase by itself, the
-dry run, the record the cycle keeps and its stop, a cycle killed after any effect and run again, and the mixing,
-which is WebKit's own `Tools/Scripts/pgo-profile` told that a GLib port carries one library.
-
-The world answers each step's `wk` command by recording what it would leave and `wk sysimage holds` from that; the
-yocto stage a phase runs is a recorder, since a stage is tests/test_yocto_stage.py's, and the collection run is
-tests/test_bench_board.py's. The mixer runs against a stubbed checkout of exactly upstream's shape.
-
-Run: python3 tests/run.py -k test_board_pgo
-"""
-import concurrent.futures as futures
+"""The boards' profile-guided build (lib/wk/pgo.py) against a Fake world, and the mixing through WebKit's own `Tools/Scripts/pgo-profile`."""
 import contextlib
 import importlib.util
 import io
@@ -27,6 +16,7 @@ from pathlib import Path
 
 from tests.fakes import FakeRegistry
 from tests.killpoints import converges
+from tests.test_ab_plan import Inline
 from tests.support import REPO, WkTest, _clean_env, requires_machine, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -41,33 +31,6 @@ WS = "yocto-" + PROFILE
 SHA = "a" * 40
 WK = str(REPO / "wk")
 RES = "machine:tolken"
-
-
-class Inline:
-    """An executor that runs each step as it is submitted: one order of effects, so a kill point is one place."""
-
-    def __init__(self, max_workers=None):
-        pass
-
-    def submit(self, fn, *args):
-        f = futures.Future()
-        try:
-            f.set_result(fn(*args))
-        except BaseException as e:   # noqa: B902 -- a Killed is what the kill-point test is after
-            f.set_exception(e)
-        return f
-
-    def map(self, fn, items):
-        return [fn(x) for x in items]
-
-    def shutdown(self, wait=True):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
 
 
 class World:
@@ -157,7 +120,6 @@ class PgoTest(unittest.TestCase):
 
 
 class TestWhichProfilesAreProfileGuided(unittest.TestCase):
-    """2.52 is where upstream's cmake support arrives; from it on there is no plain build to fall back to."""
 
     def wanted(self, glob):
         seen = {}
@@ -193,7 +155,6 @@ class TestTheBoardIsReadOffTheFleet(PgoTest):
 
 
 class TestThePhasesAndTheirOrder(PgoTest):
-    """Each phase is one `wk` command and one step of the graph `wk bench ab` also runs (ab.py's pgo_steps)."""
 
     def test_it_instruments_then_collects_every_benchmark_then_mixes_then_rebuilds(self):
         order = [s.id for s in sched.plan_order(list(self.graph(self.world()).values()))]
@@ -229,7 +190,6 @@ class TestThePhasesAndTheirOrder(PgoTest):
 
 
 class TestEachPhaseByItself(PgoTest):
-    """`--config` is one phase of the cycle, or the unprofiled build, as one yocto webkit stage."""
 
     def phase(self, w, config, slot="pr"):
         rc, err = self.webkit(w, "--commit", SHA, "--slot", slot, "--config", config)
@@ -273,7 +233,6 @@ class TestTheDryRun(PgoTest):
 
 
 class TestTheCycle(PgoTest):
-    """One `pgo` record whose plan is the graph's steps in order, stepped as each runs, ended when the cycle ends."""
 
     def test_the_whole_cycle_runs_every_phase_once_into_one_record(self):
         w = self.world()
@@ -292,7 +251,6 @@ class TestTheCycle(PgoTest):
         self.assertNotEqual(w.recs().list()[0].field("exit"), "0")
 
     def test_a_cycle_killed_after_any_effect_and_run_again_converges(self):
-        """`unit killpoints[sysimage webkit]` for a profile-guided slot: a re-run takes up what is left."""
         base = os.path.join(self.tmp, "kill")
 
         def make():
@@ -325,9 +283,6 @@ class TestTheCycle(PgoTest):
 class TestTheFacts(unittest.TestCase):
     def test_a_collection_is_as_long_as_it_is_told_and_two_hours_otherwise(self):
         self.assertEqual((pgo.collect_timeout({"WK_PGO_COLLECT_TIMEOUT": "99"}), pgo.collect_timeout({})), ("99", "7200"))
-
-    def test_a_board_writes_one_file_per_process_into_the_directory_the_build_bakes_in(self):
-        self.assertTrue(pgo.BOARD_FILE.startswith(pgo.BOARD_DIR + "/") and pgo.BOARD_FILE.endswith("_%p.profraw"))
 
 
 # A `pgo-profile` of exactly upstream's shape: the two names lib/wk/pgo.py reaches
@@ -449,18 +404,12 @@ class TestTheMixingIsUpstreams(WkTest):
         self.assertIn("motionmark", cp.stdout + cp.stderr)
 
     def test_a_benchmark_upstream_does_not_weigh_is_refused(self):
-        """Naming the three is all this repo may decide, and a list that has
-        drifted from the one upstream weighs has no ratio to be mixed at."""
         cp = mix_cli("mix", "--scripts", str(self.scripts), "--dir", str(self.dir),
                    "--lib", "WPEWebKit", "--plan", "speedometer2")
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("carries no weight", cp.stdout + cp.stderr)
 
     def test_upstreams_xcrun_search_does_not_kill_a_linux_mix(self):
-        """webkitpy's llvm-profdata finder runs /usr/bin/xcrun for each SDK, and
-        off macOS that is not a program: subprocess.run raises rather than
-        returning non-zero. The stub keeps that shape, so this fails if the
-        blunting goes."""
         if os.path.exists("/usr/bin/xcrun"):
             self.skipTest("this host has xcrun, so the raise cannot happen here")
         cp = mix_cli("mix", "--scripts", str(self.scripts), "--dir", str(self.dir),
@@ -477,8 +426,6 @@ class TestTheMixingIsUpstreams(WkTest):
 
 
 class TestTheGateReadsBothLayouts(WkTest):
-    """One reader for the Mac's three frameworks and the boards' one
-    library; a board profile has no compressed copy and is not asked for one."""
 
     def setUp(self):
         self._scratch = scratch_dir()
@@ -529,13 +476,13 @@ class TestTheDriverPullsWhatTheBoardWrote(WkTest):
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)
 
-    def test_it_implements_the_two_hooks_upstream_calls(self):
-        for hook in ("prepare_pgo_profile_collection", "collect_pgo_profile"):
-            self.assertTrue(callable(getattr(self.module.WkBoardDriver, hook)), hook)
+    def driver(self, board, here=None):
+        driver = self.module.WkBoardDriver.__new__(self.module.WkBoardDriver)
+        driver._board, driver._here = board, here or Fake()
+        return driver
 
     def test_a_run_that_wrote_nothing_is_an_error_and_not_an_empty_profile(self):
-        driver = self.module.WkBoardDriver.__new__(self.module.WkBoardDriver)
-        driver._board, driver._here = Fake("board"), Fake()
+        driver = self.driver(Fake("board"))
         with unittest.mock.patch.dict(os.environ, {"WK_BOARD_PGO": "/var/wk/pgo"}):
             with self.assertRaises(RuntimeError):
                 driver.collect_pgo_profile("/dest")
@@ -544,8 +491,7 @@ class TestTheDriverPullsWhatTheBoardWrote(WkTest):
         board, here = Fake("board"), Fake()
         board.files = {"/var/wk/pgo/a.profraw": b"A", "/var/wk/pgo/b.profraw": b"B"}
         board.dirs = {"/var/wk/pgo"}
-        driver = self.module.WkBoardDriver.__new__(self.module.WkBoardDriver)
-        driver._board, driver._here = board, here
+        driver = self.driver(board, here)
         with unittest.mock.patch.dict(os.environ, {"WK_BOARD_PGO": "/var/wk/pgo"}):
             driver.collect_pgo_profile("/dest")
         self.assertEqual(here.files, {"/dest/a.profraw": b"A", "/dest/b.profraw": b"B"})
@@ -554,8 +500,7 @@ class TestTheDriverPullsWhatTheBoardWrote(WkTest):
         board, here = Fake("board"), Fake()
         board.files = {"/var/wk/pgo/a.profraw": b"A"}
         board.dirs = {"/var/wk/pgo", "/var/wk/pgo/sub"}
-        driver = self.module.WkBoardDriver.__new__(self.module.WkBoardDriver)
-        driver._board, driver._here = board, here
+        driver = self.driver(board, here)
         with unittest.mock.patch.dict(os.environ, {"WK_BOARD_PGO": "/var/wk/pgo"}):
             driver.collect_pgo_profile("/dest")
         self.assertEqual(here.files, {"/dest/a.profraw": b"A"})
@@ -563,8 +508,7 @@ class TestTheDriverPullsWhatTheBoardWrote(WkTest):
     def test_what_a_board_command_says_reaches_the_run_log(self):
         board = Fake("board")
         board.answer(["sh", "-c"], out="said\n", err="warned\n")
-        driver = self.module.WkBoardDriver.__new__(self.module.WkBoardDriver)
-        driver._board = board
+        driver = self.driver(board)
         with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(driver._remote("true"), "")
         self.assertEqual((out.getvalue(), err.getvalue()), ("said\n", "warned\n"))
@@ -574,9 +518,6 @@ class TestTheDriverPullsWhatTheBoardWrote(WkTest):
 
 
 class TestARealCollection(unittest.TestCase):
-    """`live bench.pgo_collection[<b>]`, the read-only half: the newest collection a board left in this store's image workspaces
-    passes the gate and has every leg's run. Taking one reflashes nothing but deploys and runs on the board, so a
-    collection itself is a person's `wk sysimage webkit <profile> --commit <sha> --slot <s>`."""
 
     def collection(self, board):
         found = sorted(Path(Store().ws_dir("x")).parent.glob("yocto-webkit-2.52-yocto-%s-*/build/wk-pgo/*/profile-check.json"

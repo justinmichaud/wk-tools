@@ -1,13 +1,7 @@
 """The Mac volume builder (lib/wk/sysimage/macvolume.py) and its tailnet half (lib/wk/sysimage/mactailnet.py)
 against a Mac in memory: FakeMac answers diskutil, the installer, the Go toolchain and the file tools the way the
 Mac does and moves its files, so every step is checked by what it leaves. The on-board join
-(bench/mac-tailnet.sh) runs on the install; its refusal off root and its layout are checked here.
-
-Rows landed here: `unit killpoints[sysimage build mac-volume]` (the tailnet stage); marks live
-`sysimage.mac_volume_provision`.
-
-Run: python3 tests/run.py --unit -k test_mac_tailnet
-"""
+(bench/mac-tailnet.sh) runs on the install; its refusal off root and its layout are checked here."""
 import contextlib
 import hashlib
 import io

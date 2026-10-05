@@ -5,7 +5,6 @@ import os
 import re
 import shlex
 import signal as sig
-import subprocess
 import sys
 import threading
 
@@ -124,13 +123,13 @@ def stall_report(machine, path, idle, verdict="silent", named=""):
     log("  tail: %s" % (tail[-1][:100] if tail else ""))
 
 
-def watch(argv, path, machine, clock, env=None, cwd=None, popen=subprocess.Popen, abort=None, wedge=None):
+def watch(argv, path, machine, clock, env=None, cwd=None, abort=None, wedge=None):
     """The job's status, or 124 once its watchdog killed it (watch_pid)."""
     if act.dry_run():
         sys.stderr.write("would run: %s\n" % " ".join(shlex.quote(a) for a in argv))
         return 0
     with open(path, "wb") as out:
-        p = popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, cwd=cwd)
+        p = machine.start(argv, out, cwd)
     try:
         if watch_pid(p.poll, p.pid, path, machine, clock, env, abort, wedge):
             p.wait()

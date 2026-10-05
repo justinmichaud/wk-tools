@@ -1,8 +1,5 @@
 """`wk bench seed` (lib/wk/bench/seed.py): a plan's payload fetched once per
-upstream commit, pinned without its .git, against a fake machine and a fake clock.
-
-Run: python3 -m unittest tests.test_bench_seed -v
-"""
+upstream commit, pinned without its .git, against a fake machine and a fake clock."""
 import json
 import os
 import sys
@@ -69,9 +66,6 @@ def ran(m, word):
 
 
 class TestAPayloadIsSeededOnce(WkTest):
-    """`unit bench.seed_from_mirror`: one fetch per upstream commit, whatever
-    runs at once -- a second seed of the payload waits on the first one's lock
-    and finds it pinned."""
 
     def test_the_first_seed_clones_and_pins_it_without_its_history(self):
         m = fake()
@@ -116,7 +110,6 @@ class TestAPayloadIsSeededOnce(WkTest):
         self.assertNotIn(lock_path(), m.files)
 
     def test_a_seed_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[bench seed]`: nothing a killed seed leaves is trusted, and none of it outlives the re-run."""
         import types
 
         def world():
@@ -159,7 +152,6 @@ class TestAPayloadIsSeededOnce(WkTest):
 
 
 class TestWhatCannotBeSeeded(WkTest):
-    """Nothing to pin is an empty answer, and run-benchmark fetches it itself."""
 
     def test_a_plan_with_no_fetchable_source_warns_and_answers_nothing(self):
         for plan in (json.dumps({"remote_archive": "https://x/y.zip"}), "not json",
@@ -205,8 +197,6 @@ def mirror_seeder(m):
 
 
 class TestWebKitsOwnPayloadComesFromTheMirror(WkTest):
-    """A plan whose payload is a directory of WebKit itself is read out of the machine's WebKit mirror: a clone of
-    WebKit from GitHub was 13 GB and 29 minutes to seed SunSpider (measured 2026-09-27)."""
 
     def test_it_is_archived_out_of_the_mirror_and_nothing_is_cloned(self):
         m = mirror_fake()
@@ -234,7 +224,6 @@ class TestWebKitsOwnPayloadComesFromTheMirror(WkTest):
 
 
 class TestThePlanIsRead(WkTest):
-    """A plan file may hold only another plan's name; the chain is followed, and bounded."""
 
     def test_a_plan_naming_another_is_followed(self):
         files = {"webkitpy/benchmark_runner/data/plans/speedometer3.plan": "speedometer3.1.plan\n",
@@ -254,7 +243,6 @@ class TestThePlanIsRead(WkTest):
 
 
 class TestTheVerb(WkTest):
-    """`wk bench seed <ws> <plan>` reads the plan out of the workspace's checkout and prints the pinned directory."""
 
     class Target:
         def __init__(self):

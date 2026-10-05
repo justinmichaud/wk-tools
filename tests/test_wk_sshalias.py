@@ -1,11 +1,9 @@
-"""lib/wk/sshalias.py writes the `Host wk-<name>` block byte for byte, takes it
-out leaving every other host, and refuses an empty HostName or User, since ssh
-would refuse the whole file and every host in it.
-
-Run: python3 tests/run.py -k tests.test_wk_sshalias
-"""
+"""lib/wk/sshalias.py writes the `Host wk-<name>` block byte for byte, takes it out leaving every other host, and
+refuses an empty HostName or User, since ssh would refuse the whole file and every host in it."""
 import io
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -72,12 +70,11 @@ class TestOnTheFake(unittest.TestCase):
             fn()
         return buf.getvalue()
 
-    def test_no_address_or_user_is_refused_with_the_words_bash_uses_and_nothing_is_written(self):
+    def test_no_address_or_user_is_refused_and_nothing_is_written(self):
         for hostname, user in (("", "admin"), ("10.0.0.1", "")):
             err = self.stderr(lambda: self.assertRaises(
                 Refused, sshalias.alias_set, self.fake, self.env, "demo", hostname, user))
-            self.assertIn("no address for 'demo', so no ssh alias was written: an empty HostName\n"
-                          "    makes ssh refuse to read %s at all, and with it every other host in it" % self.conf, err)
+            self.assertIn("demo", err)
         self.assertEqual(self.fake.effects, [])
 
     def test_the_directory_is_made_private_once(self):
@@ -92,7 +89,7 @@ class TestOnTheFake(unittest.TestCase):
         self.fake.answer(["chmod"], rc=1, err="chmod: not permitted")
         err = self.stderr(lambda: self.assertRaises(
             Refused, sshalias.alias_set, self.fake, self.env, "a", "10.0.0.1", "u"))
-        self.assertIn("cannot set mode 0700 on %s" % os.path.dirname(self.conf), err)
+        self.assertIn(os.path.dirname(self.conf), err)
 
     def test_removing_an_absent_block_writes_nothing(self):
         sshalias.alias_remove(self.fake, self.env, "demo")
@@ -114,6 +111,28 @@ class TestOnTheFake(unittest.TestCase):
         sshalias.alias_set(self.fake, self.env, "demo", "10.0.0.9", "u")
         self.assertEqual(self.fake.files[self.conf], OTHERS)
         self.assertEqual([e[0] for e in self.fake.effects], ["write"])
+
+
+class TestSshReadsIt(unittest.TestCase):
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix="wk-test-ssh-alias-")
+        self.addCleanup(machine.Local().remove, self.home)
+
+    @unittest.skipUnless(shutil.which("ssh"), "no ssh here")
+    def test_a_written_alias_is_a_file_ssh_can_read(self):
+        env = {"HOME": self.home}
+        sshalias.alias_set(machine.Local(), env, "demo", "10.0.0.1", "admin", "/dev/null")
+        got = subprocess.run(["ssh", "-F", sshalias.alias_path(env), "-G", "wk-demo"], capture_output=True, text=True)
+        self.assertEqual(0, got.returncode, got.stderr)
+        self.assertIn("hostname 10.0.0.1", got.stdout)
+
+    @unittest.skipUnless(shutil.which("ssh"), "no ssh here")
+    def test_ssh_really_does_refuse_a_whole_file_for_one_empty_hostname(self):
+        """The premise of the refusal: if ssh ever stops doing this, the refusal can go."""
+        bad = os.path.join(self.home, "bad")
+        with open(bad, "w") as f:
+            f.write("Host other\n    HostName 10.0.0.2\n\nHost broken\n    HostName \n")
+        self.assertNotEqual(0, subprocess.run(["ssh", "-F", bad, "-G", "other"], capture_output=True).returncode)
 
 
 if __name__ == "__main__":

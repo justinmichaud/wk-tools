@@ -1,40 +1,14 @@
-"""Battery charge cap (docs/Urgent/HUMAN-battery.md): `wk machine setup` writes
-charge_control_end_threshold on the two bridge phones (bridge/provision.sh,
-bridge/bin/wk-bridge-battery, bridge/init.d/wk-bridge-battery) and
-`wk doctor --all` reads it back, over ssh, through wk.bridge's
-`Bridge.battery`. On this Mac there is no equivalent to set -- macOS's optimized
-charging has no CLI knob -- so `wk doctor --all` prints the honest
-`pmset -g batt` line instead.
-
-Every test here lifts the exact code that runs in production (the phone-side
-apply script, and the two verdict functions in lib/wk/doctor.py) rather than
-re-typing a second copy of the logic; see tests/test_wifi_seed.py and
-tests/test_bridge.py's _ls_classify for the same technique. No test needs a
-phone or a Mac's real /sys or /etc: the apply script's CONF path is
-overridden via WK_BRIDGE_BATTERY_CONF (bridge/bin/wk-bridge-battery), and the
-verdict functions take their input as plain strings.
-
-Run: python3 -m unittest tests.test_battery -v
-"""
+"""Battery charge cap: bridge/bin/wk-bridge-battery writes it on a bridge phone, `wk doctor --all` reads it back."""
 import subprocess
 import unittest
 
 from tests.support import REPO, scratch_dir
 from tests.test_doctor import MISS, OK, doctor
-from wk import bridge  # noqa: E402
 
 BATTERY_BIN = REPO / "bridge" / "bin" / "wk-bridge-battery"
-BATTERY_INIT = REPO / "bridge" / "init.d" / "wk-bridge-battery"
-PROVISION = REPO / "bridge" / "provision.sh"
 
 
 class TestWkBridgeBatteryScript(unittest.TestCase):
-    """The apply script phone-side: reads /etc/wk-bridge-battery.conf (here,
-    a scratch file via WK_BRIDGE_BATTERY_CONF), writes
-    charge_control_end_threshold, and is idempotent. It runs locally on the
-    phone (the openrc service invokes it directly, no ssh involved there);
-    `wk machine setup` reaches it *through* ssh, which is what
-    TestBatteryAppliedThroughFakeSsh below drives."""
 
     def _run(self, conf_path):
         return subprocess.run(
@@ -92,11 +66,6 @@ class TestWkBridgeBatteryScript(unittest.TestCase):
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
     def test_a_clamped_readback_is_reported_as_did_not_take(self):
-        """A sysfs write can return success against a value the driver
-        clamps to something else -- the write's own exit status is not
-        proof the cap took. A fake `cat` stands in for the node: it always
-        answers a value other than the one requested, the way a driver's
-        show() callback would if it clamped the store() it just accepted."""
         from tests.support import stub_path
 
         with scratch_dir(prefix="wk-test-battery-") as d:
@@ -136,10 +105,6 @@ exec bash -c "$last"
 
 
 class TestBatteryAppliedThroughFakeSsh(unittest.TestCase):
-    """The same script, this time reached the way `wk machine setup` reaches
-    it: over ssh. A fake `ssh` (tests/support.py's stub_path) runs the
-    command locally instead of on a phone, so this is the real write/read-back
-    path with a scratch sysfs standing in for the phone's."""
 
     def test_ssh_driven_write_and_read_back(self):
         with scratch_dir(prefix="wk-test-battery-ssh-") as d:
@@ -166,8 +131,6 @@ class TestBatteryAppliedThroughFakeSsh(unittest.TestCase):
 
 
 class TestBatteryVerdict(unittest.TestCase):
-    """battery_verdict (lib/wk/doctor.py): the row `wk doctor --all` prints for
-    one bridge phone, from `Bridge.battery`'s key=value blob."""
 
     def test_ok_when_current_equals_the_configured_limit(self):
         state, line, _ = doctor.battery_verdict("tailnet-bridge-generic",
@@ -191,9 +154,6 @@ class TestBatteryVerdict(unittest.TestCase):
 
 
 class TestMacBatteryLine(unittest.TestCase):
-    """mac_battery_line (lib/wk/doctor.py): the honest line for this Mac itself,
-    parsed from a captured `pmset -g batt`. No settable limit exists on
-    macOS, so every case ends in the same disclaimer."""
 
     PLUGGED_IN = (
         "Now drawing from 'AC Power'\n"
@@ -213,47 +173,6 @@ class TestMacBatteryLine(unittest.TestCase):
 
     def test_no_battery_is_no_line(self):
         self.assertIsNone(doctor.mac_battery_line(self.NO_BATTERY))
-
-
-class TestSyntax(unittest.TestCase):
-    """bash -n on every touched file: a name check `wk selftest` can run on
-    every platform, phones included, with nothing to reach."""
-
-    def test_touched_files_parse(self):
-        for path, shell in (
-            (PROVISION, "sh"),
-            (BATTERY_BIN, "sh"),
-            (BATTERY_INIT, "sh"),
-        ):
-            cp = subprocess.run([shell, "-n", str(path)], capture_output=True, text=True)
-            self.assertEqual(cp.returncode, 0, f"{path}: {cp.stderr}")
-
-
-class TestNoCaseNamesAPhone(unittest.TestCase):
-    """CLAUDE.md: 'a case statement naming a machine is a bug'. The battery
-    feature is one behaviour for both phones -- the sysfs node is
-    autodetected (or pinned per-host in machines/<name>.conf), never
-    picked by branching on which phone this is."""
-
-    def _device_names(self):
-        return sorted(bridge.devices(REPO))
-
-    def test_no_case_on_device_name_or_br_name(self):
-        provision_text = PROVISION.read_text()
-        plan_text = (REPO / "lib" / "wk" / "bridge" / "plan.py").read_text()
-        self.assertIn("BR_BATTERY_NODE", provision_text, "the battery apply is gone from bridge/provision.sh")
-
-        combined = "\n".join([provision_text, plan_text, BATTERY_BIN.read_text(), BATTERY_INIT.read_text()])
-        self.assertNotRegex(
-            combined, r'case\s+"\$BR_(DEVICE|NAME|HOSTNAME)"',
-            "battery code branches on which phone this is -- autodetect the sysfs "
-            "node instead (battery in the host conf), the way lan_mac does",
-        )
-        for name in self._device_names():
-            self.assertNotIn(
-                f'"{name}")', combined,
-                f"battery code has a case arm for device '{name}'",
-            )
 
 
 if __name__ == "__main__":

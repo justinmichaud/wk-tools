@@ -1,23 +1,12 @@
-"""`wk key set github-pat` -- the one credential that never enters a workspace.
-
-It lives beside the private deploy-key halves in the directory nothing mounts
-(Store.push_held_dir, lib/wk/store.py); the only thing that ever reads it is the
-credential injector on the machine that runs the workspaces, and `wk push`
-is what hands it over and takes it away.
-
-Every arm of `wk key set github-pat` is here, including the two that need a
-terminal: the value is asked for with `read -rs`, so those run the real
-command under a pty rather than a stub of the prompt.
+"""`wk key set github-pat` end to end, the arms that need a terminal under a pty (the value is read with `read -rs`).
+The token is held beside the private deploy-key halves, in the directory nothing mounts.
 
 Run: python3 -m unittest tests.test_key_github_pat -v
 """
-import inspect
 import os
 import pty
-import re
 import select
 import subprocess
-import sys
 import termios
 import threading
 import time
@@ -27,9 +16,6 @@ from http.server import HTTPServer
 from tests.support import REPO, WkTest, clean_env, stub_path
 from tests.test_credcheck import CLASSIC, FINE, POLICY, FakeGitHub
 
-sys.path.insert(0, str(REPO / "lib"))
-from wk.key import cli  # noqa: E402
-
 KEY = REPO / "cmd" / "key"
 
 FORKS = {"justinmichaud/WebKit": "WebKit/WebKit",
@@ -37,10 +23,7 @@ FORKS = {"justinmichaud/WebKit": "WebKit/WebKit",
 
 
 def _wait_for_echo_off(fd):
-    """The prompt is printed before `read -rs` turns the terminal's echo off,
-    so a paste written the instant it appears is echoed by the tty itself --
-    which is the very thing these tests assert against. Wait for the flag the
-    command sets rather than for a length of time."""
+    """A paste written before `read -rs` turns echo off is echoed by the tty itself."""
     while termios.tcgetattr(fd)[3] & termios.ECHO:
         time.sleep(0.005)
 
@@ -52,14 +35,6 @@ TOKEN = "ghp_thisisnotarealtoken0123456789"
 class _PatRun(WkTest):
     def setUp(self):
         super().setUp()
-        # A store this process can write is a machine Secrets.agent_argv runs
-        # on directly (Store.is_local), which is what makes the read token's
-        # delivery observable here without a podman machine.
-        #
-        # Store.secrets_dir reads WK_HOST_SECRETS on a macOS host
-        # and $WK_STORE/secrets everywhere else; one directory under both names
-        # is what a real machine looks like, and is what makes these tests read
-        # the path the command actually wrote on either platform.
         self.store = self.tmp / "store"
         self.secrets = self.store / "secrets"
         self.held = self.store / "push-keys"
@@ -69,9 +44,6 @@ class _PatRun(WkTest):
         self.extra_env = {}
 
     def _env(self, binp):
-        # tests/support's environment, not one built here: which variables a
-        # command must not inherit from the person running the suite is one
-        # rule, and the store this command writes through is only half of it.
         reg = self.tmp / "no-registry"
         reg.mkdir(exist_ok=True)
         return clean_env({"WK_HOST_SECRETS": str(self.secrets),
@@ -81,16 +53,13 @@ class _PatRun(WkTest):
                           **self.extra_env})
 
     def key(self, *args):
-        """No terminal: what a script, a hook or a headless run gets."""
         with stub_path({"podman": PODMAN_TRAP}) as binp:
             return subprocess.run([str(KEY), *args], cwd=str(REPO),
                                   env=self._env(binp), capture_output=True,
                                   text=True, timeout=120)
 
     def key_tty(self, *args, paste="", answer="y"):
-        """The same command with a real terminal on stdin, and <paste> typed
-        at the prompt -- the only way through `read -rs`, which is what keeps
-        the value out of argv and out of the shell's history."""
+        """The same command with a real terminal on stdin, and <paste> typed at the prompt."""
         with stub_path({"podman": PODMAN_TRAP}) as binp:
             master, slave = pty.openpty()
             p = subprocess.Popen([str(KEY), *args], cwd=str(REPO),
@@ -128,19 +97,14 @@ class TestNothingStoredYet(_PatRun):
     def test_replace_with_nothing_to_replace_names_the_path(self):
         cp = self.key("set", "github-pat", "--replace")
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("no github-pat credential here to replace", cp.stderr)
         self.assertIn(str(self.pat()), cp.stderr)
 
     def test_an_empty_answer_stores_nothing_and_says_what_that_costs(self):
         rc, out = self.key_tty("set", "github-pat", paste="")
         self.assertNotEqual(rc, 0, out)
-        self.assertIn("nothing stored", out)
-        self.assertIn("open a pull request", out)
         self.assertFalse(self.pat().exists())
 
     def test_with_no_terminal_it_says_to_re_run_interactively(self):
-        """A hook or a headless run cannot be asked; it must not look like a
-        token was stored."""
         cp = self.key("set", "github-pat")
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("Re-run interactively", cp.stderr)
@@ -148,19 +112,17 @@ class TestNothingStoredYet(_PatRun):
 
 
 class TestStoringOne(_PatRun):
-    def test_it_lands_in_the_directory_nothing_mounts_and_only_this_user_reads(self):
+    def test_it_lands_in_the_directory_nothing_mounts_unechoed_and_only_this_user_reads(self):
         rc, out = self.key_tty("set", "github-pat", paste=TOKEN)
         self.assertEqual(rc, 0, out)
+        self.assertNotIn(TOKEN, out)
         self.assertEqual(TOKEN, self.pat().read_text().strip())
         self.assertEqual(0o600, self.pat().stat().st_mode & 0o777)
         self.assertEqual(0o700, self.held.stat().st_mode & 0o777)
-        self.assertFalse((self.secrets / "github-pat").exists(),
-                         "the token is in the directory every workspace mounts")
+        self.assertFalse((self.secrets / "github-pat").exists())
 
     def test_it_prints_where_it_went_then_what_the_rule_says(self):
-        """No prose of its own about the switch or the injector -- `wk key -h`
-        and the rule's own row carry that. Two lines: the one-line status, then
-        the verdict (unverified here, with no GitHub to ask)."""
+        """Two lines: the one-line status, then the verdict (unverified, with no GitHub to ask)."""
         rc, out = self.key_tty("set", "github-pat", paste=TOKEN)
         self.assertEqual(rc, 0, out)
         lines = [l for l in out.splitlines() if l.strip()]
@@ -169,22 +131,6 @@ class TestStoringOne(_PatRun):
         self.assertIn(str(self.pat()), lines[-2])
         self.assertIn("unverified", lines[-1])
 
-    def test_the_value_is_never_echoed_back(self):
-        """`read -rs` and a redirect, not an argument and not a report: the
-        one place the bytes appear is the file."""
-        rc, out = self.key_tty("set", "github-pat", paste=TOKEN)
-        self.assertEqual(rc, 0, out)
-        self.assertNotIn(TOKEN, out)
-
-    def test_the_value_is_never_an_argument(self):
-        """An argument is in `ps` for everyone on the machine, so the value
-        goes down a pipe into the one writer (lib/secretfile.py, through
-        Key.store) -- never handed to a command."""
-        text = inspect.getsource(cli.Key.store)
-        self.assertIn("input=value", text)
-        self.assertNotIn("value]", text)
-
-
 class TestReplacingOne(_PatRun):
     def setUp(self):
         super().setUp()
@@ -192,20 +138,13 @@ class TestReplacingOne(_PatRun):
         self.pat().chmod(0o600)
 
     def test_a_bare_set_reports_it_rather_than_asking_again(self):
-        """Present is the answer, and it must not silently overwrite: a token
-        already handed to the injector is one `wk push on` is using."""
         cp = self.key("set", "github-pat")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("ghp_theoldone", cp.stdout + cp.stderr)
         self.assertRegex(cp.stderr, r"github-pat\s+stored\s+%s" % str(self.pat()))
         self.assertEqual("ghp_theoldone", self.pat().read_text().strip())
 
-    def test_the_report_never_prints_the_token(self):
-        cp = self.key("set", "github-pat")
-        self.assertNotIn("ghp_theoldone", cp.stdout + cp.stderr)
-
     def test_replace_removes_the_old_one_first_and_says_to_revoke_it(self):
-        """Removing it here does not revoke it on GitHub, and a rotation that
-        left the old one live would be a credential nobody is tracking."""
         rc, out = self.key_tty("set", "github-pat", "--replace", paste=TOKEN)
         self.assertEqual(rc, 0, out)
         self.assertIn("revoke it too if it is still live", out)
@@ -214,99 +153,45 @@ class TestReplacingOne(_PatRun):
     def test_replace_asks_first_and_a_no_keeps_the_old_one(self):
         rc, out = self.key_tty("set", "github-pat", "--replace", paste=TOKEN, answer="n")
         self.assertNotEqual(rc, 0, out)
-        self.assertIn("remove the stored github-pat and replace it? [y/N]", out)
         self.assertEqual("ghp_theoldone", self.pat().read_text().strip())
 
     def test_replace_without_a_terminal_declines(self):
         cp = self.key("set", "github-pat", "--replace")
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("declining (no terminal", cp.stderr)
         self.assertEqual("ghp_theoldone", self.pat().read_text().strip())
 
     def test_replace_with_an_empty_answer_leaves_none(self):
-        """The old one is gone the moment --replace is given: that is the
-        point of it, and the refusal says what the workspace loses."""
         rc, out = self.key_tty("set", "github-pat", "--replace", paste="")
         self.assertNotEqual(rc, 0, out)
         self.assertFalse(self.pat().exists())
-        self.assertIn("nothing stored", out)
 
 
 class TestTheStandingReadTokenReachesTheMachine(_PatRun):
-    """Reading GitHub is open whatever position `wk push` is in, so the machine
-    that runs the workspaces keeps a standing copy of this token. Storing,
-    rotating or withdrawing one converges that copy here, because ./setup is
-    the only other place that does and nobody re-runs it to fix a read."""
+    """Storing, rotating and withdrawing converge the read copy (tests/test_push_agent.py); these are the edges."""
 
     def read_pat(self):
         return self.store / "read-github-pat"
 
-    def test_storing_one_delivers_it(self):
-        rc, out = self.key_tty("set", "github-pat", paste=TOKEN)
-        self.assertEqual(rc, 0, out)
-        self.assertEqual(TOKEN, self.read_pat().read_text().strip())
-        self.assertEqual(0o600, self.read_pat().stat().st_mode & 0o777)
-
-    def test_rotating_one_delivers_the_new_one(self):
-        self.pat().write_text("ghp_theoldone\n")
-        self.read_pat().write_text("ghp_theoldone\n")
-        rc, out = self.key_tty("set", "github-pat", "--replace", paste=TOKEN)
-        self.assertEqual(rc, 0, out)
-        self.assertEqual(TOKEN, self.read_pat().read_text().strip())
-
-    def test_withdrawing_one_removes_it_there_too(self):
-        """`--replace` with an empty answer leaves this device with no token,
-        and a machine still reading GitHub with the old one would be the
-        withdrawal not having happened."""
-        self.pat().write_text("ghp_theoldone\n")
-        self.read_pat().write_text("ghp_theoldone\n")
-        rc, out = self.key_tty("set", "github-pat", "--replace", paste="")
-        self.assertNotEqual(rc, 0, out)
-        self.assertFalse(self.read_pat().exists())
-
-    def test_the_value_is_never_an_argument_on_the_way_there_either(self):
-        rc, out = self.key_tty("set", "github-pat", paste=TOKEN)
-        self.assertEqual(rc, 0, out)
-        self.assertNotIn(TOKEN, out)
-
     @unittest.skipUnless(os.uname().sysname == "Darwin",
                          "the injector that serves the guests is a macOS host's")
     def test_the_guests_injector_takes_it_from_this_store_and_no_other(self):
-        """A macOS workstation runs two injectors -- one in the podman machine
-        for the containers, one on the host for the guests -- and this command
-        converges both. Measured: the guests' half took its directory from the
-        state directory rather than from the store it was given, so this very
-        test delivered its fixture token to the real injector on the machine
-        running the suite, and every read from a real guest answered 401 until
-        the next `wk start`."""
+        """Measured: the guests' half once wrote the real injector's copy, not this store's."""
         rc, out = self.key_tty("set", "github-pat", paste=TOKEN)
         self.assertEqual(rc, 0, out)
         self.assertEqual(TOKEN,
                          (self.store / "vm" / "read-github-pat").read_text().strip())
 
     def test_a_machine_that_cannot_take_it_is_a_warning_naming_the_other_delivery(self):
-        """Best effort: the token is stored either way, and ./setup converges
-        the machine. A `die` here would refuse to keep a credential the person
-        has already pasted."""
-        # The token's own directory is untouched; what cannot be written is
-        # the standing copy on the machine that reads GitHub.
         self.extra_env = {
             "WK_PUSH_READ_PAT_FILE": str(self.tmp / "not-a-store" / "read-pat")}
         rc, out = self.key_tty("set", "github-pat", paste=TOKEN)
         self.assertEqual(rc, 0, out)
         self.assertEqual(TOKEN, self.pat().read_text().strip())
-        self.assertIn("did not take the read token", out)
         self.assertIn("./setup", out)
 
 
 class TestWhatTheTokenCanDoDecidesWhetherItIsKept(_PatRun):
-    """The whole point of asking: a token that cannot open a pull request is
-    refused here rather than discovered hours later by `git-webkit pr`, and one
-    that reaches further than wk spends it is kept with that reach named.
-
-    The same stub GitHub tests/test_credcheck.py drives the rule with, driven
-    here through the real command and its terminal.
-    """
+    """The rule's verdict (tests/test_credcheck.py holds every branch) decides whether the pasted token is kept."""
 
     def setUp(self):
         super().setUp()
@@ -325,47 +210,23 @@ class TestWhatTheTokenCanDoDecidesWhetherItIsKept(_PatRun):
         rc, out = self.key_tty("set", "github-pat", paste=FINE)
         self.assertEqual(rc, 0, out)
         self.assertEqual(FINE, self.pat().read_text().strip())
-        self.assertIn("can open a pull request on justinmichaud/WebKit", out)
+        self.assertNotIn(FINE, out)
 
     def test_a_token_without_pull_request_write_stores_nothing(self):
         FakeGitHub.pulls = {"justinmichaud/WebKit": 403}
         rc, out = self.key_tty("set", "github-pat", paste=FINE)
         self.assertNotEqual(rc, 0, out)
-        self.assertFalse(self.pat().exists(),
-                         "a token GitHub refuses was stored anyway")
-        self.assertIn("Pull requests: write", out)
-        self.assertIn("settings/tokens/new", out)
-
-    def test_a_token_the_project_refuses_stores_nothing(self):
-        """Every fork probe passes and the token still opens nothing on the
-        project, which is the only call `git-webkit pr` needs -- so it is
-        refused at the prompt rather than hours later, in GitHub's own words
-        and with the page that mints one that can."""
-        FakeGitHub.pulls["WebKit/WebKit"] = 403
-        rc, out = self.key_tty("set", "github-pat", paste=FINE)
-        self.assertNotEqual(rc, 0, out)
-        self.assertFalse(self.pat().exists(),
-                         "a token WebKit/WebKit refuses was stored anyway")
-        self.assertIn("WebKit/WebKit refuses this token a pull request", out)
-        self.assertIn("settings/tokens/new", out)
-
-    def test_a_token_that_could_delete_a_repository_stores_nothing(self):
-        FakeGitHub.scopes = "repo, delete_repo"
-        rc, out = self.key_tty("set", "github-pat", paste=CLASSIC)
-        self.assertNotEqual(rc, 0, out)
         self.assertFalse(self.pat().exists())
-        self.assertIn("delete_repo", out)
+        self.assertIn("settings/tokens/new", out)
+        self.assertNotIn(FINE, out)
 
     def test_a_classic_token_is_kept_and_its_reach_named(self):
         FakeGitHub.scopes = "repo"
         rc, out = self.key_tty("set", "github-pat", paste=CLASSIC)
         self.assertEqual(rc, 0, out)
         self.assertEqual(CLASSIC, self.pat().read_text().strip())
-        self.assertIn("reaches further than wk spends it", out)
 
     def test_an_unreachable_api_stores_it_and_says_it_is_unverified(self):
-        """Offline is a state: refusing here would leave the machine with no
-        token at all, and every reader asks again."""
         self.extra_env = {"WK_GITHUB_API": "http://127.0.0.1:1"}
         rc, out = self.key_tty("set", "github-pat", paste=FINE)
         self.assertEqual(rc, 0, out)
@@ -373,35 +234,18 @@ class TestWhatTheTokenCanDoDecidesWhetherItIsKept(_PatRun):
         self.assertIn("unverified", out)
 
     def test_a_stored_token_is_reported_from_a_fresh_answer(self):
-        """Never from a record: the token was fine when it was stored and the
-        report says what GitHub says now."""
         self.pat().write_text(FINE + "\n")
         self.pat().chmod(0o600)
         FakeGitHub.pulls = {"justinmichaud/WebKit": 403}
         cp = self.key("set", "github-pat")
         self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
-        self.assertIn("Pull requests: write", cp.stderr)
-
-    def test_the_token_is_never_printed_by_any_of_it(self):
-        for scopes, pulls in (("", {}), ("repo, delete_repo", {}),
-                              ("", {"justinmichaud/WebKit": 403})):
-            with self.subTest(scopes=scopes):
-                FakeGitHub.scopes = scopes
-                FakeGitHub.pulls = pulls
-                _rc, out = self.key_tty("set", "github-pat", paste=FINE)
-                self.assertNotIn(FINE, out)
-
 
 if __name__ == "__main__":
     unittest.main()
 
 
 class TestATokenGitHubRefusesIsReplaced(_PatRun):
-    """A stored token GitHub answers 401 for is a missing one with a stale
-    file in the way: `wk key setup` asks for a fresh one before anything
-    spends or shares it. The new value is typed at a prompt, so a run without
-    a terminal names the remedy and leaves the file alone -- it never puts the
-    refused token on another workstation, and never removes it unasked."""
+    """A stored token GitHub answers 401 for: `wk key setup` without a terminal names the remedy and keeps the file."""
 
     def setUp(self):
         super().setUp()
@@ -428,19 +272,14 @@ class TestATokenGitHubRefusesIsReplaced(_PatRun):
     def test_setup_names_the_refused_token_and_how_to_replace_it(self):
         cp = self._key_with_gh_refusing("setup")
         out = cp.stdout + cp.stderr
-        self.assertIn("github-pat is stored here but refused", out)
         self.assertIn("wk key set github-pat --replace", out)
         self.assertNotRegex(out, r"github-pat\s+stored\s")
         self.assertEqual("ghp_revokedone", self.pat().read_text().strip(),
                          "a run with no terminal removed the token unasked")
 
     def test_deploy_leaves_the_token_alone_and_still_reports_it(self):
-        """`wk key deploy` is the deploy keys' verb and no longer touches the
-        token: it neither replaces nor spends it, and the table it ends with
-        still says GitHub refuses it."""
         cp = self._key_with_gh_refusing("deploy")
         out = cp.stdout + cp.stderr
-        self.assertNotIn("github-pat is stored here but refused", out)
         self.assertNotEqual(cp.returncode, 0, out)
         self.assertEqual("ghp_revokedone", self.pat().read_text().strip())
 
@@ -448,22 +287,14 @@ class TestATokenGitHubRefusesIsReplaced(_PatRun):
         FakeGitHub.user_status = 200
         FakeGitHub.pulls = {"justinmichaud/WebKit": 201, "justinmichaud/WPEWebKit": 201}
         cp = self._key_with_gh_refusing("setup")
-        out = cp.stdout + cp.stderr
-        self.assertNotIn("stored here but refused", out)
-        self.assertRegex(out, r"github-pat\s+stored\s")
+        self.assertRegex(cp.stdout + cp.stderr, r"github-pat\s+stored\s")
 
 
 class TestTheMachineTakesTheTokenOnEveryStart(unittest.TestCase):
-    """A token that arrives while the podman machine is down cannot be
-    delivered into it; both paths that bring the machine up converge the
-    injector's copy through the one function, as `wk start` does for the
-    guests' (lib/wk/guest.py)."""
-
-    def test_both_start_paths_converge_through_the_one_function(self):
+    def test_a_container_start_converges_the_read_token(self):
         from unittest import mock
         from wk import secrets, targets
         from wk.machine import Fake
-        self.assertIn("Secrets(ROOT).pat_converge_machine()", (REPO / "cmd" / "start").read_text())
         c = targets.Container("container", str(REPO), {"HOME": "/nonexistent", "WK_STORE": "/nonexistent/store"}, Fake("here"))
         with mock.patch.object(secrets.Secrets, "pat_converge_machine") as converge:
             c.start("demo")

@@ -1,11 +1,4 @@
-"""The build configs as data (lib/wk/buildconf.py).
-
-`build.config_is_data`: `--cmakeargs` is refused (tests/test_wk_build.py), an
-ASan config builds instrumented into its own dir, a profile-guided config
-declares its disk need.
-
-Run: python3 tests/run.py -k test_buildconf
-"""
+"""The build configs as data (lib/wk/buildconf.py)."""
 import contextlib
 import io
 import sys
@@ -38,8 +31,6 @@ def env_of(c, env=None, jobs=4, nice=10, arch="native", **kw):
 
 
 class TestAllConfigDefaults(unittest.TestCase):
-    """The flags of how this repository builds WebKit: every CMake config starts with them, its own
-    flags come after and win, and the Xcode configs get neither -- xcodebuild takes no -D flags."""
 
     KINDS = {"container": "ON", "vm": "ON", "local": "ON", "remote": "OFF"}
 
@@ -75,8 +66,6 @@ class TestAllConfigDefaults(unittest.TestCase):
 
 
 class TestMacJscUsesXcode(unittest.TestCase):
-    """On macOS the three jsc-* configs build the Apple port's JavaScriptCore through build-jsc,
-    and an Apple config is refused anywhere else."""
 
     def test_macos_jsc_configs_build_with_xcode(self):
         for name in JSC_CONFIGS:
@@ -94,7 +83,6 @@ class TestMacJscUsesXcode(unittest.TestCase):
         self.assertEqual(cfg("jsc-release", "macos").build_dir(), cfg("mac-release", "macos").build_dir())
 
     def test_an_asan_config_builds_instrumented_into_its_own_dir(self):
-        """build-jsc takes ASAN=YES where build-webkit takes --asan; either way its own tree."""
         asan = cfg("jsc-release-asan", "macos")
         self.assertNotEqual(asan.build_dir(), cfg("jsc-release", "macos").build_dir())
         self.assertTrue(asan.build_dir().endswith("-asan"))
@@ -215,8 +203,6 @@ class TestLibcxxDefault(unittest.TestCase):
 
 
 class TestCcacheIsBlindToTheJobCount(unittest.TestCase):
-    """Two builds differing only in -j must be one ccache cache: the job count and nice level reach
-    only the four variables that carry them to the build driver, never a compiler or CCACHE_* setting."""
 
     MOVES = frozenset({"NUMBER_OF_PROCESSORS", "CMAKE_BUILD_PARALLEL_LEVEL", "WK_JOBS", "WK_NICE"})
 
@@ -249,12 +235,7 @@ class TestMbPerJob(unittest.TestCase):
         self.assertEqual(buildconf.mb_per_job(cfg("mac-release", "macos", "vm"), {"WK_MB_PER_JOB": "999"}), 999)
 
     def test_a_full_port_gets_the_xcode_figure(self):
-        """gtk-debug killed its own watchdog twice on a container target, at 1536MB/job (peak
-        14507MB/9) and again at 2048MB/job (peak 16600MB/8, one WebCore unified-sources TU alone
-        costing multiple GB) -- measured 2026-09-28. A full port's JSBindings unified sources cost
-        as much per job as an Apple full build's, so it gets that figure instead of jsc-only's."""
         self.assertEqual(buildconf.mb_per_job(cfg("gtk-debug"), {}), 3072)
-
 
 
 class TestCompilerAndMemoryOverrides(unittest.TestCase):

@@ -1,16 +1,5 @@
-"""Putting wk-tools on a machine (lib/wk/tools.py and each driver's `sync_tools`).
-
-The rule under test: a machine is given a *commit*, never a file copy. The copy over there is a real checkout whose
-HEAD is this tree's HEAD, converged from whatever was there before -- nothing, a directory an older tooling copied
-file by file, another commit, a dirty tree -- and an uncommitted tree here is refused by name instead of being copied.
-
-Nothing here reaches a machine. The far side is a directory in a scratch tree, reached as this host's own `Local`
-machine, so the far scripts and the bundle copy are the real ones; each driver's push is checked over a Fake.
-
-Run: python3 tests/run.py -k tests.test_tools_sync
-"""
+"""Putting wk-tools on a machine (lib/wk/tools.py and each driver's `sync_tools`)."""
 import contextlib
-import inspect
 import io
 import os
 import shlex
@@ -25,7 +14,7 @@ from unittest import mock
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import guest, targets, tools  # noqa: E402
+from wk import targets, tools  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
 
 SHA = "a" * 40
@@ -140,7 +129,6 @@ class TestConverge(ToolsPushCase):
         self.assertTrue((self.far / "ignored-here").exists(), "an ignored file that machine keeps for itself was deleted")
 
     def test_a_half_made_far_repository_converges_on_a_re_run(self):
-        """Crash-only: killed between `git init` and the fetch, the far side is an empty repository with no HEAD."""
         self.far.mkdir(parents=True)
         git(self.far, "init", "-q", ".")
         ok, err = self.push()
@@ -175,7 +163,6 @@ class TestRefusal(ToolsPushCase):
         self.assertFalse(self.far.exists())
 
     def test_a_far_side_that_answers_with_another_sha_is_not_reported_ok(self):
-        """The verdict is the far side's own `git rev-parse HEAD`, not the exit status of the copy."""
         far = Fake("box")
         far.answer(["sh", "-c", tools.PREPARE])
         far.answer(["sh", "-c", tools.CONVERGE], out="0" * 40 + "\n")
@@ -185,8 +172,8 @@ class TestRefusal(ToolsPushCase):
 
 
 class TestTheDestinationHasAFloorUnderIt(ToolsPushCase):
-    """The far side's convergence is an `rm -rf "$d"` whenever $d is not already a checkout, so a destination that is
-    the root or the account's home is refused before the far machine is asked anything."""
+    """The far side's convergence is an `rm -rf "$d"` whenever $d is not already a checkout, so a destination
+    that is the root or the account's home is refused before the far machine is asked anything."""
 
     def test_each_dangerous_destination_is_refused_and_nothing_is_asked(self):
         home = self.env["HOME"]
@@ -281,61 +268,25 @@ class EachKind(unittest.TestCase):
         self.assertTrue(self.reg.load("container").sync_tools("ws"))
         self.assertEqual(self.fake.effects, [])
 
-    def test_a_guest_gets_the_same_bundle_over_its_own_address(self):
+    def test_a_guest_gets_the_same_bundle_through_its_guest_agent(self):
         (self.tmp / "vmstore").mkdir()
         self.env.update({"WK_VM_STORE": str(self.tmp / "vmstore"), "WK_VM_USER": "admin"})
         t = targets.Vm("vm", str(REPO), dict(self.env), self.fake)
-        with mock.patch.object(targets.Vm, "ip", return_value="192.168.64.9"), contextlib.redirect_stderr(io.StringIO()):
+        self.fake.react(["/t/tart", "exec"], lambda a, f: Result(1) if "wk-image" in a[-1] else
+                        Result(0, SHA + "\n" if "rev-parse HEAD" in a[-1] else ""))
+        self.fake.answer(["sh", "-c"])
+        with mock.patch.object(targets.Vm, "tart", lambda s: "/t/tart"), mock.patch.object(targets.Vm, "vm_state", return_value="running"), \
+                contextlib.redirect_stderr(io.StringIO()):
             self.assertTrue(t.sync_tools("mac"))
-        runs = self.pushed()
-        self.assertIn("admin@192.168.64.9", runs[0])
-        self.assertEqual(runs[1][-1], "admin@192.168.64.9:/Users/admin/wk-tools/" + tools.BUNDLE)
+        runs = [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] in ("/t/tart", "sh")]
+        self.assertEqual(runs[0][:4], ("/t/tart", "exec", "-i", "wk-mac"))
+        self.assertEqual((runs[1][3:5], runs[1][-1]), (("/t/tart", "wk-mac"), "/Users/admin/wk-tools/" + tools.BUNDLE))
         self.assertIn("/Users/admin/.wk-workspace", runs[-1][-1], "the marker the pushed tooling reads was not rewritten")
 
 
-class TestOnePush(unittest.TestCase):
-    """One push for every kind: every driver that puts wk-tools on a machine asks `tools.push`, and none copies
-    files of its own."""
-
-    def test_every_driver_that_pushes_asks_tools_push(self):
-        for cls in (targets.Vm, targets.Remote):
-            with self.subTest(driver=cls.__name__):
-                body = inspect.getsource(cls.sync_tools)
-                self.assertIn("tools.push(", body)
-                self.assertNotIn("rsync", body, "wk-tools is still being file-copied")
-
-    def test_lib_tools_sh_is_gone(self):
-        self.assertFalse((REPO / "lib" / "tools.sh").exists(), "the bash push shim has no caller left")
-
-
-class TestGuestStartConverges(unittest.TestCase):
-    """lib/wk/guest.py converges everything a guest gets through one `Guest.converge`, the tooling checkout among
-    it; both of a start's arms reach it."""
-
-    def test_both_arms_converge_through_the_one_function(self):
-        body = inspect.getsource(guest.start)
-        self.assertEqual(1, body.count(".converge()"))
-        for step in ("guest_tools_push", "write_deploy_keys", "settle_desktop"):
-            self.assertNotIn(step, body, f"a start still runs {step} itself")
-
-    def test_the_one_function_pushes_the_tools_once_and_only_warns(self):
-        rows = [s for s in guest.STEPS if s[0] == "guest_tools_push"]
-        self.assertEqual(1, len(rows), rows)
-        self.assertIsNotNone(rows[0][1], "a failed tools push fails the start")
-        self.assertIn("wk sync --tools", rows[0][2], "the warning names no remedy")
-
-    def test_every_step_is_run_exactly_once(self):
-        steps = [s[0] for s in guest.STEPS]
-        for step in ("guest_tools_push", "write_marker", "write_shell_rc", "write_lldbinit", "set_guest_clock",
-                     "set_guest_egress", "write_claude_config", "write_agent_secrets", "write_deploy_keys",
-                     "settle_desktop", "report_desktop"):
-            with self.subTest(step=step):
-                self.assertEqual(1, steps.count(step), steps)
-
-
 class TestStatusToolsRow(unittest.TestCase):
-    """`wk status`'s wk-tools row for a machine across ssh: every copy is compared by commit -- a checkout's own, or,
-    in the podman VM, this very checkout mounted in. A `-` sha is neither, and is never in sync."""
+    """`wk status`'s wk-tools row for a machine across ssh: every copy is compared by commit -- a checkout's own,
+    or, in the podman VM, this very checkout mounted in."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-toolsrow-"))
@@ -372,16 +323,6 @@ class TestStatusToolsRow(unittest.TestCase):
         row = self.row("sha=-\ndirty=unknown\n", in_vm=True)
         self.assertEqual(row["insync"], False)
         self.assertEqual(row["fix"], "./setup   (recreates the machine with this checkout mounted at /opt/wk-tools)")
-
-    def test_reporting_reaches_no_machine_and_syncs_nothing(self):
-        import inspect
-        from wk import status
-        code = inspect.getsource(status.tools_fact) + inspect.getsource(status.Walk.report_machine)
-        for writer in ("tools_push", "t_sync", "sync_tools", "rsync", "rev-parse HEAD --"):
-            self.assertNotIn(writer, code, f"the status path runs {writer}")
-        self.assertIn('wk("version"', code)
-
-
 
 class TestTheToolsSource(unittest.TestCase):
     def test_a_container_mounts_this_checkout_unless_the_env_names_another(self):

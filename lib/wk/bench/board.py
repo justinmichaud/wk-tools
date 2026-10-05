@@ -6,7 +6,6 @@ boot of a system, and every leg re-reads what it runs on."""
 import json
 import os
 import shlex
-import subprocess
 
 from wk import act, fleet, images, job, pgo, record as progress, samply, slot as wkslot
 from wk.act import die, info, log, warn
@@ -266,9 +265,12 @@ class BoardSystem(System):
                              bool_fields=["software=" + ("1" if software else "")], update=True, machine=leg.machine)
 
     def session_up(self):
-        if not self.sh(self.ob("browsers-dead.sh"), mutates=True).ok:
-            die("the image's own browser on %s would not die, even to SIGKILL; a survivor holds the GPU and\n"
-                "    the vchiq service the run needs." % self.board)
+        r = self.sh(self.ob("clear.sh"), mutates=True)
+        for line in r.out.splitlines():
+            log("  " + line)
+        if not r.ok:
+            die("%s still runs a browser or a process another ssh login started, even after SIGKILL;\n"
+                "    a survivor holds the GPU and the memory the run measures.\n%s" % (self.board, r.err.rstrip()))
         if self.facts_.get("weston") != "yes":
             self.session, self.renderer = "rdk", "dispmanx"
             log("  session     rdk backend, dispmanx (%s)" % (self.display or "no display evidence"))
@@ -435,8 +437,8 @@ class BoardSystem(System):
 class BoardRun(pipeline.Run):
     """One leg on a board: its task and progress record live on this machine, where run-benchmark runs."""
 
-    def __init__(self, root, reg, system, clock, env=None, popen=subprocess.Popen, name=""):
-        super().__init__(root, reg, system, clock, env, popen)
+    def __init__(self, root, reg, system, clock, env=None, name=""):
+        super().__init__(root, reg, system, clock, env)
         self.name = name or self.ws or system.board
         self.kill_cmd = ("wk bench run %s --kill --system %s" % (self.ws, system.board)) if self.ws else "kill %d" % os.getpid()
 
@@ -573,7 +575,7 @@ class BoardRun(pipeline.Run):
     def watched(self, argv, cwd, path):
         if self.task is not None:
             self.task.set("log", path)
-        return job.watch(argv, path, self.here, self.clock, self.env, cwd, self.popen)
+        return job.watch(argv, path, self.here, self.clock, self.env, cwd)
 
     def run_browser(self, leg):
         s, o = self.system, leg.o

@@ -662,6 +662,10 @@ v_retarget() {
     case "$sig" in
         ''|*[!0-9a-fA-F]*) deny "'$dev' has no MBR disk signature, so a PARTUUID cannot name its partitions" ;;
     esac
+    case "$(with_mount -r "$(part "$dev" "$BOOTP")" _root_spec_probe)" in
+        root=PARTUUID=*) deny "'$dev' already boots by PARTUUID. A card whose PARTUUIDs name no partition on it
+    is re-provisioned, not rescued: 'wk status' prints each board's re-provisioning recipe" ;;
+    esac
     root=$(printf '%08x-%02d' "$((0x$sig))" "$ROOTP")
     boot=$(printf '%08x-%02d' "$((0x$sig))" "$BOOTP")
     with_mount "$(part "$dev" "$BOOTP")" _retarget_boot "$root"

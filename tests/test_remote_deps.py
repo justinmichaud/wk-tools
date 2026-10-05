@@ -1,18 +1,5 @@
-"""What a shared build machine needs, and the one root command that installs it
-(remote/deps.sh's table, remote/probe.sh, lib/wk/machine_cmd/deps.py's Deps).
-
-wk installs nothing on a build box -- provisioning never takes root
-(remote/provision.sh) -- so the whole of the help it can give is naming the
-exact command to run there or to hand to that machine's administrators. Three
-places ask: `wk machine setup`, provisioning itself, and `wk doctor --all`. One
-list answers all three, and these tests pin the list, the package names, the
-per-distro command, and what the findings say about a machine.
-
-The probe is exercised against a captured sample rather than a real machine:
-what it says about *this* fleet is a fact about the fleet, not about the code.
-
-Run: python3 -m unittest tests.test_remote_deps -v
-"""
+"""What a shared build machine needs and the one root command that installs it (remote/deps.sh, remote/probe.sh,
+lib/wk/machine_cmd/deps.py), with findings driven from captured probe samples."""
 import hashlib
 import os
 import sys
@@ -28,8 +15,7 @@ from wk.machine_cmd import deps as machine_deps  # noqa: E402
 DEPS = REPO / "remote" / "deps.sh"
 PROBE = REPO / "remote" / "probe.sh"
 
-# A machine with everything (moose's shape), and one missing ccache with a
-# junk git identity (buildbox4/devbox-arm64-2's, measured 2026-08-31).
+# A machine with everything, and one missing ccache with a junk git identity (both captured 2026-08-31).
 FULL = """host=fullbox
 os=Ubuntu 24.04
 family=debian
@@ -82,7 +68,6 @@ def _digest(value):
     return hashlib.sha256((value + "\n").encode()).hexdigest()[:16]
 
 
-# The store the findings compare a machine's credential copies with: a scratch one holding the two values FULL's digests are of.
 TOKEN, LITELLM = "sk-ant-oat01-placeholder", "sk-litellm-placeholder"
 FULL = FULL.replace("__TOKEN__", _digest(TOKEN)).replace("__LITELLM__", _digest(LITELLM))
 
@@ -109,20 +94,15 @@ class TestTheList(WkTest):
             self.assertIn(row[1], ("required", "wanted"), row)
         names = [r[0] for r in rows]
         self.assertEqual(len(names), len(set(names)), f"a tool listed twice: {names}")
-        # The ones a CMake build cannot start without, and the two that only
-        # make it slower or less pleasant.
         need = {r[0] for r in rows if r[1] == "required"}
         self.assertEqual(need, {"git", "cmake", "ninja", "clang", "python3"})
         self.assertEqual({r[0] for r in rows if r[1] == "wanted"}, {"ccache", "zsh"})
 
     def test_the_machine_reads_the_same_table(self):
-        """remote/probe.sh, on the machine, asks deps.sh's own function for the list the Python parses."""
         cp = self.bash(f'. "{DEPS}"\nwk_remote_deps\n')
         self.assertEqual([tuple(l.split(None, 2)) for l in cp.stdout.strip().splitlines()], machine_deps.deps(REPO))
 
     def test_a_derivative_resolves_to_its_parent_family(self):
-        """ID first, then ID_LIKE -- so Mint, Raspberry Pi OS and Rocky resolve
-        to the parent they declare without being named in the list."""
         cases = [
             ("debian", "", "debian"),
             ("ubuntu", "", "debian"),
@@ -148,10 +128,7 @@ class TestTheList(WkTest):
                          "sudo apt-get update && sudo apt-get install -y ccache zsh")
         self.assertEqual(machine_deps.install_cmd("fedora", ["ccache"]), "sudo dnf install -y ccache")
         self.assertEqual(machine_deps.install_cmd("arch", ["ccache"]), "sudo pacman -S --needed ccache")
-        self.assertIsNone(machine_deps.install_cmd("unknown", ["ccache"]),
-                          "an unknown package manager got a command invented for it")
-
-    def test_nothing_to_install_is_not_a_command(self):
+        self.assertIsNone(machine_deps.install_cmd("unknown", ["ccache"]))
         self.assertIsNone(machine_deps.install_cmd("debian", []))
 
 
@@ -196,12 +173,6 @@ class TestTheFindings(WkTest):
         self.assertEqual("note", state)
         self.assertIn("sha256sum", what)
 
-    def test_the_probe_reports_every_copy_by_digest_and_never_by_value(self):
-        text = PROBE.read_text()
-        self.assertIn('for _f in "$HOME"/.wk-*', text)
-        self.assertIn("sha256sum", text)
-        self.assertNotIn("cat \"$_f\"", text)
-
     def test_a_missing_wanted_tool_is_reported_with_one_root_command(self):
         f = findings(THIN)
         self.assertIn("wanted", [x[0] for x in f])
@@ -215,7 +186,6 @@ class TestTheFindings(WkTest):
         self.assertIn("thinbox", notes[0][1], "the command does not say which machine")
 
     def test_a_missing_required_tool_is_a_different_state(self):
-        """`required` is what stops provisioning; `wanted` never does."""
         f = findings(NO_GIT)
         self.assertIn(("required"), [x[0] for x in f])
         self.assertTrue(any("git --" in x[1] for x in f), f)
@@ -233,8 +203,6 @@ class TestTheFindings(WkTest):
         self.assertFalse(any("big checkout" in x[1] for x in findings(FULL)))
 
     def test_a_build_variable_the_machine_presets_is_said_out_loud(self):
-        """wk's build sets its own CC and ignores the machine's, which is a
-        surprise worth printing rather than a silence."""
         f = findings(THIN)
         cc = [x for x in f if x[1].startswith("CC is set")]
         self.assertTrue(cc, f)
@@ -251,22 +219,20 @@ class TestTheFindings(WkTest):
 
 class TestTheProbeItself(WkTest):
     def test_it_runs_against_this_machine_and_answers_every_key(self):
-        """The probe is self-contained: deps.sh then probe.sh, into a bare
-        shell, with no wk-tools on the far side. Run here, where 'the far side'
-        is this machine -- what it *says* about a build box is a fact about
-        that box, not about this code."""
-        cp = bash(f'cat "{DEPS}" "{PROBE}" | bash -s')
+        home = Path(tempfile.mkdtemp(prefix="wk-test-probe-home-"))
+        self.addCleanup(bash, 'rm -rf "%s"' % home)
+        (home / ".wk-agent-token").write_text("sk-the-value\n")
+        cp = bash(f'cat "{DEPS}" "{PROBE}" | bash -s', env={"HOME": str(home)})
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         keys = {l.split("=", 1)[0] for l in cp.stdout.splitlines() if "=" in l}
         for want in ("host", "os", "family", "arch", "cores", "marker"):
             self.assertIn(want, keys, cp.stdout)
-        # One line per declared tool, present or not, so a reader never has to
-        # know the list to notice one missing.
         for t in (row[0] for row in machine_deps.deps(REPO)):
             self.assertIn(f"tool.{t}", keys, f"the probe said nothing about {t}")
+        self.assertIn("cred..wk-agent-token", keys, "a credential copy is reported by digest")
+        self.assertNotIn("sk-the-value", cp.stdout)
 
     def test_it_sources_nothing(self):
-        """A machine that has never been provisioned has no wk-tools to source."""
         text = PROBE.read_text()
         for bad in ("lib/common.sh", "$WK_ROOT", "wk_state_dir"):
             self.assertNotIn(bad, text, f"remote/probe.sh reaches for {bad}")

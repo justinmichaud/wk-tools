@@ -11,7 +11,6 @@ import json
 import os
 import re
 import shlex
-import subprocess
 import sys
 
 from wk import act, buildconf, job, kv, record, sshalias
@@ -21,7 +20,7 @@ from wk.pr import checkout as pr_checkout, parse_spec
 from wk.store import Bases, no_such_workspace
 from wk.targets import show
 
-PLAN = ("checking", "wipe", "base", "create", "init", "fetch", "register")
+PLAN = ("checking", "wipe", "base", "create", "init", "agents", "fetch", "register")
 NEW_TIMEOUT = 3600
 NAME = re.compile(r"^[a-zA-Z0-9._][a-zA-Z0-9._-]*$")
 
@@ -79,13 +78,14 @@ def remove_task_records(records, name):
 
 
 def creation_state(target, records, name):
-    """`Target.state`, except that a present workspace whose creation driver died without a verdict is still
+    """`Target.state`, except that a present workspace whose creation driver failed or died without a verdict is still
     creating: it was never announced ready, so nothing in it is worth keeping and "already exists" is not the answer."""
     state = target.state(name)
     if state != "present":
         return state
     t = records.find("new", name)
-    if t is not None and t.raw("exit") is None and t.holder_gone():
+    rc = None if t is None else t.raw("exit")
+    if t is not None and (t.holder_gone() if rc is None else rc.isdigit() and rc != "0"):
         return "creating"
     return state
 
@@ -343,9 +343,11 @@ def _create(target, records, task, clock, name, base, arch, state):
     stage("init")
     if not act.dry_run() and not target.ready(name, clock):
         die("'%s' was created but never finished initialising -- the push\n"
-            "    keys, the Claude CLI, the lldb config and the shell rc are set up at first\n"
+            "    keys, the lldb config and the shell rc are set up at first\n"
             "    start, and something above went wrong before the end of it.\n"
             "    Nothing here is worth repairing:  wk new %s    (destroys it and retries)" % (name, name))
+    stage("agents")
+    target.install_agents(name)
     stage("fetch")
     freshen(target, name, here)
     stage("register")
@@ -582,9 +584,8 @@ def rm_all(reg, records):
     confirm_destroy(len(rows), "\n".join("    %s@%s" % (n, t) for t, n in rows))
     worst = 0
     for t, n in rows:
-        cp = act.act(["env", "WK_TARGET=%s" % t, wk_of(reg.root), "rm", n, "--yes"], stdin=subprocess.DEVNULL)
-        if cp is not None:
-            worst = max(worst, cp.returncode)
+        worst = max(worst, reg.machine.act_run(["env", "WK_TARGET=%s" % t, wk_of(reg.root), "rm", n, "--yes"],
+                                               input="", stream=True).rc)
     return worst
 
 

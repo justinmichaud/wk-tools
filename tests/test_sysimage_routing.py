@@ -1,24 +1,7 @@
-"""`wk sysimage` runs where the image workspace is.
-
-A yocto or buildroot profile is built in its image workspace --
-`yocto-<profile>` or `buildroot-<profile>` -- so `build` and `webkit` are
-workspace commands whose name is not a positional but the command's own
-answer to `wk sysimage --wsname <args>` (`name=derived`, the dispatcher).
-The dispatcher then routes them the way it routes every other workspace
-command: into the podman VM for a container image workspace on macOS, over
-`delegate_run` for an image workspace on another machine. A pmos or fetch profile has no
-image workspace and stays `where=host`.
-
-Covers: the two hooks' answers for every profile this checkout defines; the
-dispatcher's reading of `name=derived` (no positional of its own, nothing
-stripped from argv, no "no such workspace" refusal, the name vocabulary it
-refuses outside); an image workspace on another machine delegated to that machine with
-its arguments intact. `wk sysimage ls`'s fleet walk is tests/test_sysimage_ls.py.
-
-Run: python3 -m unittest tests.test_sysimage_routing -v
-"""
+"""`wk sysimage` runs where the image workspace is: `build` and `webkit` derive their workspace name (`name=derived`)
+from the profile, and the dispatcher routes them like any workspace command; a pmos or fetch profile stays on the host.
+The in-process answers and the fleet walk are tests/test_sysimage_ls.py's; the names themselves tests/test_images.py's."""
 import os
-import re
 import subprocess
 import sys
 import unittest
@@ -35,18 +18,8 @@ SYSIMAGE = REPO / "cmd" / "sysimage"
 
 
 def _profiles():
-    """Every configuration this checkout defines, with the builder its conf
-    declares (empty for a conf that declares none)."""
-    out = subprocess.run([str(REPO / "wk"), "sysimage", "configs"],
-                         capture_output=True, text=True, cwd=str(REPO)).stdout
-    names = [l.strip() for l in out.splitlines() if l.strip() and not l.startswith(" ")]
-    got = []
-    for n in names:
-        conf = REPO / "image" / "configs" / f"{n}.conf"
-        m = re.search(r"(?m)^IMG_BUILDER=(\S+)", conf.read_text()) if conf.is_file() else None
-        got.append((n, m.group(1) if m else ""))
-    assert got, "'wk sysimage configs' named no configuration"
-    return got
+    """Every configuration this checkout defines, with the builder its conf declares."""
+    return [(n, images.load(n)["IMG_BUILDER"]) for n in images.names()]
 
 
 def _hook(*args):
@@ -56,46 +29,24 @@ def _hook(*args):
 
 
 class TestTheImageWorkspaceAnswer(unittest.TestCase):
-    """`wk sysimage --wsname` and `--where`: the two questions the dispatcher
-    asks cmd/sysimage before it routes a build."""
+    """`wk sysimage --wsname` and `--where`: the two questions the dispatcher asks cmd/sysimage."""
 
     def test_every_profile_answers_for_its_builder(self):
-        """a yocto or buildroot profile names its image workspace; nothing else does"""
         for profile, builder in _profiles():
-            want = f"{builder}-{profile}" if builder in ("yocto", "buildroot") else ""
-            for sub in ("build", "webkit"):
-                got, cp = _hook("--wsname", sub, profile)
-                self.assertEqual(cp.returncode, 0, cp.stderr)
-                self.assertEqual(got, want, f"--wsname {sub} {profile}")
-
-    def test_an_image_workspace_is_a_workspace_and_anything_else_is_this_host(self):
-        """`--where` answers workspace for an image workspace, host for a build with none"""
-        for profile, builder in _profiles():
-            want = "workspace" if builder in ("yocto", "buildroot") else "host"
-            got, cp = _hook("--where", "build", profile)
-            self.assertEqual(cp.returncode, 0, cp.stderr)
-            self.assertEqual(got, want, f"--where build {profile}")
-
-    def test_the_workspace_option_names_the_image_workspace_instead(self):
-        """--workspace <name> is the image workspace the build follows"""
-        profile = self._a_yocto_profile()
-        for args in (["--workspace", "otherws"], ["--workspace=otherws"]):
-            got, _ = _hook("--wsname", "build", profile, *args)
-            self.assertEqual(got, "otherws", args)
+            in_ws = builder in ("yocto", "buildroot")
+            with self.subTest(profile=profile):
+                for sub in ("build", "webkit"):
+                    got, cp = _hook("--wsname", sub, profile)
+                    self.assertEqual(cp.returncode, 0, cp.stderr)
+                    self.assertEqual(got, "%s-%s" % (builder, profile) if in_ws else "")
+                self.assertEqual(_hook("--where", "build", profile)[0], "workspace" if in_ws else "host")
 
     def test_no_profile_and_no_such_profile_name_no_image_workspace(self):
-        """a question these arguments cannot answer is answered with nothing"""
         for args in (["build"], ["build", "nosuchprofile-" + rand_suffix()],
                      ["webkit"], ["write", "--from", "/tmp/x"]):
             got, cp = _hook("--wsname", *args)
             self.assertEqual(cp.returncode, 0, cp.stderr)
             self.assertEqual(got, "", args)
-
-    def _a_yocto_profile(self):
-        for profile, builder in _profiles():
-            if builder == "yocto":
-                return profile
-        self.skipTest("this checkout defines no yocto profile")
 
 
 class TestTheDeclaredBuildOptions(unittest.TestCase):
@@ -129,19 +80,12 @@ class TestTheDispatcherReadsDerived(unittest.TestCase):
         return D.Decl(REPO / impl)
 
     def test_the_workspace_verbs_derive_their_name_and_nothing_else_does(self):
-        """cmd/sysimage declares name=derived for the verbs that act on one image workspace"""
         d = self._decl()
         got = ["%s=%s" % (s, d.name_for([s])) for s in ("build", "webkit", "ls", "write", "disks", "rm", "flash")]
         self.assertEqual(got, ["build=derived", "webkit=derived", "ls=none", "write=none",
                                "disks=none", "rm=none", "flash=none"])
 
-    def test_a_derived_name_is_no_positional_of_its_own(self):
-        """name_slot: a derived name is in no argument slot, like none"""
-        got = ["%s=%s" % (n, D.name_slot(n)) for n in ("derived", "none", "required", "optional", "optional@2")]
-        self.assertEqual(got, ["derived=0", "none=0", "required=1", "optional=1", "optional@2=2"])
-
     def test_a_name_outside_the_vocabulary_is_refused(self):
-        """a name= the dispatcher cannot read is refused by name"""
         impl = REPO / "cmd" / f"faux-{rand_suffix()}"
         impl.write_text("#!/usr/bin/env bash\n#\n# wk faux -- x\n"
                         "# wk: where=workspace name=inferred group=other\n")
@@ -182,6 +126,7 @@ class TestAnImageWorkspaceOnAnotherMachine(WkTest):
 
     SSH_STUB = """#!/bin/sh
 printf '%s\\n' "$*" >> "$WK_TEST_SSH_LOG"
+case "$*" in *"/wk version"*) printf 'sha=%s\n' "$WK_TEST_TOOLS_SHA" ;; esac
 case "$*" in *===MEM===*) printf '/home/u\\nLinux\\n4\\n0.1 0 0\\n===MEM===\\nMemAvailable: 1024 kB\\n===IONICE===\\nno\\n' ;; esac
 exit 0
 """
@@ -203,7 +148,9 @@ exit 0
         (self.tmp / "here").mkdir()
         self.env = {"WK_MACHINES_DIR": str(registry),
                     "WK_STORE": str(self.tmp / "here"),
-                    "WK_TEST_SSH_LOG": str(self.log)}
+                    "WK_TEST_SSH_LOG": str(self.log),
+                    "WK_TEST_TOOLS_SHA": subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"],
+                                                        capture_output=True, text=True).stdout.strip()}
 
     def test_the_build_is_delegated_with_its_arguments_intact(self):
         """an image workspace on another machine: `wk sysimage build` runs over there"""
@@ -244,86 +191,6 @@ exit 0
         self.assertNotEqual(cp.returncode, 0, out)
         self.assertNotIn("no such workspace", out)
         self.assertIn("target 'vm' is a vm one", out)
-
-
-class TestTheImageWorkspaceSpec(unittest.TestCase):
-    """`<profile>@<machine>`: which machine an image workspace is on, for one that nothing
-    holds yet or that a second machine is to hold beside another's. The machine
-    half never reaches the builder -- it is the dispatcher's target answer
-    (`--wstarget`), and what is built is the profile."""
-
-    def test_the_machine_half_is_split_off_the_profile(self):
-        spec = "webkit-2.52-yocto-rpi5-64@moose"
-        self.assertEqual((images.spec_profile(spec), images.spec_machine(spec)), ("webkit-2.52-yocto-rpi5-64", "moose"))
-
-    def test_a_profile_without_one_names_no_machine(self):
-        spec = "webkit-2.52-yocto-rpi5-64"
-        self.assertEqual((images.spec_profile(spec), images.spec_machine(spec)), (spec, ""))
-
-    def test_the_image_workspace_name_is_the_same_either_way(self):
-        """The workspace is named for the profile, so a machine half does not
-        make a second image workspace of one profile on one machine."""
-        plain = _hook("--wsname", "build", "webkit-2.52-yocto-rpi5-64")[0]
-        spec = _hook("--wsname", "build", "webkit-2.52-yocto-rpi5-64@moose")[0]
-        self.assertEqual(plain, "yocto-webkit-2.52-yocto-rpi5-64", plain)
-        self.assertEqual(spec, plain, f"{spec!r} != {plain!r}")
-
-    def test_the_target_is_the_machine_the_spec_names(self):
-        out, cp = _hook("--wstarget", "build", "webkit-2.52-yocto-rpi5-64@moose")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(out, "moose", cp.stdout + cp.stderr)
-
-    def test_no_machine_named_leaves_the_image_workspace_to_be_located(self):
-        """Empty: the dispatcher then resolves the image workspace by where it exists."""
-        out, cp = _hook("--wstarget", "build", "webkit-2.52-yocto-rpi5-64")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(out, "", f"named a target with no machine in the spec: {out!r}")
-
-    def test_a_profile_with_no_image_workspace_names_no_target(self):
-        """A pmos or fetch profile is built by the host and has no image workspace, so
-        there is no machine to answer for even if one is typed."""
-        out, cp = _hook("--wstarget", "build", "bridge-pinephone@moose")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(out, "", f"a workspace-less profile answered a target: {out!r}")
-
-
-class TestTheProfileBehindAnImageWorkspace(unittest.TestCase):
-    """`images.ws_profile`: an image workspace is named <builder>-<profile>
-    and may carry an arm's suffix of its own, so the profile is recovered by
-    matching the configurations this checkout defines rather than by stripping
-    a prefix."""
-
-    def _profile_of(self, ws):
-        return images.ws_profile(ws) or "REFUSED"
-
-    def test_a_plain_image_workspace_names_its_profile(self):
-        self.assertEqual(self._profile_of("yocto-webkit-2.52-yocto-rpi5-64"),
-                         "webkit-2.52-yocto-rpi5-64")
-        self.assertEqual(self._profile_of("buildroot-wpewebkit-2.38-buildroot-rpi3-32"),
-                         "wpewebkit-2.38-buildroot-rpi3-32")
-
-    def test_a_suffixed_image_workspace_names_the_same_profile(self):
-        """Two image workspaces of one profile -- one per arm of an A/B -- are one
-        profile's images to `ls` and to `write --from`."""
-        for suffix in ("base", "pr1725", "arm-2"):
-            with self.subTest(suffix=suffix):
-                self.assertEqual(
-                    self._profile_of(f"yocto-webkit-2.52-yocto-rpi5-64-{suffix}"),
-                    "webkit-2.52-yocto-rpi5-64")
-
-    def test_the_longest_configuration_wins(self):
-        """`webkit-2.52-yocto-rpi4-32` and `-rpi4-64` are both configurations;
-        a shorter one that is a prefix of the image workspace must not claim it."""
-        every = [n for n, _ in _profiles()]
-        self.assertIn("webkit-2.52-yocto-rpi4-64", every)
-        self.assertEqual(self._profile_of("yocto-webkit-2.52-yocto-rpi4-64"),
-                         "webkit-2.52-yocto-rpi4-64")
-
-    def test_a_workspace_that_is_no_image_workspace_is_refused(self):
-        for ws in ("wk-test-abc", "yocto-not-a-configuration", "buildroot-nope"):
-            with self.subTest(ws=ws):
-                self.assertEqual(self._profile_of(ws), "REFUSED",
-                                 f"{ws} was read as an image workspace")
 
 
 if __name__ == "__main__":

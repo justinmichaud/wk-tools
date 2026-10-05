@@ -1,15 +1,5 @@
-"""Every credential's rule (lib/credcheck.py): what it must be able to do, and
-what it must not.
-
-Both halves are checked here, because both have cost a working day. A token
-that cannot do its job is discovered hours later at the one moment it is needed
--- `git-webkit pr` answered 403 -- and a token that can do far more than its job
-turns any escape from the boundary into the blast radius of a whole account.
-
-GitHub is a local HTTP server, the way tests/test_tailnet_retire.py stubs the
-tailnet: the real request-making code runs, the headers and the write-shaped
-probe included, and nothing leaves the machine. The one constant the module
-reads for its base URL is the seam.
+"""Every credential's rule (lib/credcheck.py): what it must be able to do, and what it must not. Each issuer is a
+local HTTP server, so the real request-making code runs and nothing leaves the machine.
 
 Run: python3 -m unittest tests.test_credcheck -v
 """
@@ -21,7 +11,6 @@ import urllib.parse
 import subprocess
 import tempfile
 import threading
-import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -277,16 +266,6 @@ class TestTheBugzillaKey(_Bugzilla):
         verdict, detail = self.bz_check(BZ_KEY, api="http://127.0.0.1:1")
         self.assertEqual("unverified", verdict, detail)
         self.assertIn("could not reach", detail)
-
-    def test_the_rule_names_the_injector_and_the_key_page(self):
-        cp = subprocess.run(["python3", str(CREDCHECK), "rule", "bugzilla-api-key",
-                             "--repos", FORKS], capture_output=True, text=True)
-        fields = dict(l.split("\t", 1) for l in cp.stdout.splitlines())
-        self.assertIn("github-inject.py", fields["spent_by"])
-        self.assertIn("api_key", fields["spent_by"])
-        self.assertEqual("https://bugs.webkit.org/userprefs.cgi?tab=apikey", fields["url"])
-        self.assertIn("whole account", fields["forbids"])
-
 
 # --- github-pat ---------------------------------------------------------------
 class TestTheTokenCanDoTheJob(_Rules):
@@ -609,20 +588,10 @@ class TestWhereTheseApisMayBePointed(_Rules):
 
 
 class FakeAnthropic(BaseHTTPRequestHandler):
-    """api.anthropic.com and platform.claude.com as the rules see them
-    (measured 2026-09-10 and 2026-09-14): `GET /v1/models` answers 200 for a
-    token Anthropic accepts and 401 for one it does not, with no model
-    inferred; `GET /api/oauth/profile` names the account and organization
-    behind a login; `GET /api/claude_code/policy_limits` is the organization's
-    restrictions, what the CLI reads before it starts remote control; `POST
-    /v1/oauth/token` renews a login, or answers 400 invalid_grant for a refresh
-    token it no longer knows."""
+    """api.anthropic.com as the rules see it (measured 2026-09-10): `GET /v1/models` answers 200 for a token
+    Anthropic accepts and 401 for one it does not, with no model inferred."""
 
-    status = 200             # /v1/models and /api/oauth/profile
-    policy_status = 200
-    policy = {"restrictions": {}, "compliance_taints": []}
-    refresh_status = 200
-    refresh_answer = None
+    status = 200
     seen = []
 
     def _send(self, status, body):
@@ -637,43 +606,14 @@ class FakeAnthropic(BaseHTTPRequestHandler):
         FakeAnthropic.seen.append(
             (self.command, self.path, self.headers.get("Authorization", ""),
              self.headers.get("anthropic-version", "")))
-        if self.path.startswith("/api/claude_code/policy_limits"):
-            return self._send(FakeAnthropic.policy_status, FakeAnthropic.policy)
         if FakeAnthropic.status != 200:
             return self._send(FakeAnthropic.status,
                               {"type": "error",
                                "error": {"type": "authentication_error"}})
-        if self.path.startswith("/api/oauth/profile"):
-            return self._send(200, {
-                "account": {"email": "someone@example.invalid"},
-                "organization": {"uuid": ORG, "name": "Example Org",
-                                 "subscription_status": "active"}})
         return self._send(200, {"data": [{"id": "claude-x"}]})
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        body = json.loads(self.rfile.read(length) or b"{}")
-        FakeAnthropic.seen.append(
-            (self.command, self.path, body.get("grant_type", ""),
-             body.get("refresh_token", "")))
-        if FakeAnthropic.refresh_status != 200:
-            return self._send(FakeAnthropic.refresh_status,
-                              {"error": "invalid_grant"})
-        answer = FakeAnthropic.refresh_answer or {
-            "access_token": RENEWED, "refresh_token": ROTATED,
-            "expires_in": 28800, "refresh_token_expires_in": 30 * 86400,
-            "scope": body.get("scope", "")}
-        return self._send(200, answer)
 
     def log_message(self, *a):
         pass
-
-
-ORG = "org-1111"
-RENEWED = "renewed-" + "a" * 20
-ROTATED = "rotated-" + "r" * 20
-RECORD = {"oauthAccount": {"organizationUuid": ORG,
-                           "organizationName": "Example"}}
 
 
 class _Anthropic(_Rules):
@@ -697,15 +637,11 @@ class _Anthropic(_Rules):
     def setUp(self):
         super().setUp()
         FakeAnthropic.status = 200
-        FakeAnthropic.policy_status = 200
-        FakeAnthropic.policy = {"restrictions": {}, "compliance_taints": []}
-        FakeAnthropic.refresh_status = 200
-        FakeAnthropic.refresh_answer = None
         FakeAnthropic.seen = []
 
     def anthropic_env(self, api=None):
         base = api if api is not None else self.anthropic_base
-        return {"WK_ANTHROPIC_API": base, "WK_CLAUDE_OAUTH": base}
+        return {"WK_ANTHROPIC_API": base}
 
 
 class FakeLiteLLM(BaseHTTPRequestHandler):
@@ -738,221 +674,6 @@ class FakeLiteLLM(BaseHTTPRequestHandler):
 
     def log_message(self, *a):
         pass
-
-
-# --- the claude.ai login -------------------------------------------------------
-def login(scopes=("user:profile", "user:inference"), refresh="r" * 20,
-          refresh_expires_days=29, subscription="team", access_expires_s=3600):
-    doc = {"accessToken": "a" * 20, "scopes": list(scopes),
-           "expiresAt": int((time.time() + access_expires_s) * 1000),
-           "subscriptionType": subscription}
-    if refresh:
-        doc["refreshToken"] = refresh
-    if refresh_expires_days is not None:
-        doc["refreshTokenExpiresAt"] = int(
-            (time.time() + refresh_expires_days * 86400) * 1000)
-    return json.dumps({"claudeAiOauth": doc})
-
-
-class TestTheClaudeLogin(_Anthropic):
-    def test_a_login_that_carries_what_an_agent_spends(self):
-        verdict, detail = self.check("claude-login", login())
-        self.assertEqual("ok", verdict, detail)
-        self.assertIn("user:profile", detail)
-        self.assertIn("subscription: team", detail)
-        self.assertIn("renewable until", detail)
-
-    def _stored(self, record=RECORD, doc=None):
-        """A login as the store holds it: the credential file, and beside it
-        the CLI's config file with (or without) the account record."""
-        d = self.tmp / "agent-rw"
-        d.mkdir(exist_ok=True)
-        (d / ".credentials.json").write_text(doc or login())
-        if record is not None:
-            (d / ".claude.json").write_text(json.dumps(record))
-        return d / ".credentials.json"
-
-    def stored(self, path, api=None):
-        return self.check("claude-login", path=path, env=self.anthropic_env(api))
-
-    def test_a_stored_login_is_judged_with_the_record_beside_it(self):
-        """Measured 2026-09-11: remote control reads organizationUuid from the
-        CLI's config file and refuses without it, so a stored login is judged
-        by the record `claude auth login` left beside the credential."""
-        verdict, detail = self.stored(self._stored())
-        self.assertEqual("ok", verdict, detail)
-        self.assertIn("organization: Example", detail)
-
-    def test_a_stored_login_with_no_record_is_refused_and_names_the_rotation(self):
-        for record in (None, {}, {"oauthAccount": {"emailAddress": "x"}}):
-            with self.subTest(record=record):
-                verdict, detail = self.stored(self._stored(record))
-                self.assertEqual("bad", verdict, detail)
-                self.assertIn("no account record", detail)
-                self.assertIn("organizationUuid", detail)
-                self.assertIn("wk key set claude-login --replace", detail)
-        self.assertEqual([], FakeAnthropic.seen, "asked before the record was read")
-
-    def test_a_stored_login_is_asked_about_and_the_answer_is_the_report(self):
-        """What Anthropic says now, not what the file says: the organization
-        and subscription from the profile, and the organization's policy on
-        remote control, published as a line a command can decide on."""
-        verdict, detail = self.stored(self._stored())
-        self.assertEqual("ok", verdict, detail)
-        self.assertIn("organization: Example Org", detail)
-        self.assertIn("subscription active", detail)
-        self.assertIn("remote control allowed", detail)
-        self.assertIn("\n    remote-control: allowed", detail)
-        paths = [seen[1] for seen in FakeAnthropic.seen]
-        self.assertTrue(any(p.startswith("/api/oauth/profile") for p in paths), paths)
-        self.assertTrue(any(p.startswith("/api/claude_code/policy_limits") for p in paths), paths)
-        self.assertNotIn("POST", [seen[0] for seen in FakeAnthropic.seen],
-                         "a current access token was renewed for nothing")
-
-    def test_an_expired_access_token_is_renewed_and_written_back(self):
-        """The one way to ask Anthropic anything about a login whose access
-        token has run out: the refresh token is posted the way the CLI posts
-        it, and the rotated pair written over the one file every holder reads,
-        the rest of the document kept."""
-        path = self._stored(doc=login(access_expires_s=-60))
-        verdict, detail = self.stored(path)
-        self.assertEqual("ok", verdict, detail)
-        posts = [seen for seen in FakeAnthropic.seen if seen[0] == "POST"]
-        self.assertEqual(1, len(posts), FakeAnthropic.seen)
-        self.assertEqual(("/v1/oauth/token", "refresh_token", "r" * 20), posts[0][1:])
-        after = json.loads(path.read_text())["claudeAiOauth"]
-        self.assertEqual(RENEWED, after["accessToken"])
-        self.assertEqual(ROTATED, after["refreshToken"])
-        self.assertGreater(after["expiresAt"], time.time() * 1000)
-        self.assertEqual("team", after["subscriptionType"])
-        self.assertEqual(["user:profile", "user:inference"], after["scopes"])
-        self.assertEqual(0o600, path.stat().st_mode & 0o777)
-        self.assertFalse((path.parent / ".oauth_refresh.lock").exists())
-        self.assertNotIn("r" * 20, detail)
-        self.assertNotIn(RENEWED, detail)
-
-    def test_a_refresh_anthropic_refuses_is_a_dead_login(self):
-        FakeAnthropic.refresh_status = 400
-        path = self._stored(doc=login(access_expires_s=-60))
-        before = path.read_text()
-        verdict, detail = self.stored(path)
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("refuses to renew it", detail)
-        self.assertIn("invalid_grant", detail)
-        self.assertIn("wk key set claude-login --replace", detail)
-        self.assertEqual(before, path.read_text(), "a refused refresh rewrote the file")
-
-    def test_a_login_anthropic_no_longer_accepts_is_refused(self):
-        FakeAnthropic.status = 401
-        verdict, detail = self.stored(self._stored())
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("does not accept this login", detail)
-
-    def test_a_refresh_lock_another_process_holds_is_respected(self):
-        """The CLI's own lock, beside the credential: a session mid-refresh is
-        left to finish, and the login is reported unverified rather than
-        refreshed twice -- which would rotate the token out from under it."""
-        path = self._stored(doc=login(access_expires_s=-60))
-        lock = path.parent / ".oauth_refresh.lock"
-        lock.mkdir()
-        before = path.read_text()
-        verdict, detail = self.stored(path)
-        self.assertEqual("unverified", verdict, detail)
-        self.assertIn("refresh lock", detail)
-        self.assertIn("\n    remote-control: unverified", detail)
-        self.assertEqual([], [seen for seen in FakeAnthropic.seen if seen[0] == "POST"])
-        self.assertEqual(before, path.read_text())
-        self.assertTrue(lock.is_dir(), "another process's lock was removed")
-
-    def test_a_lock_abandoned_over_a_minute_ago_is_taken(self):
-        path = self._stored(doc=login(access_expires_s=-60))
-        lock = path.parent / ".oauth_refresh.lock"
-        lock.mkdir()
-        stale = time.time() - 120
-        os.utime(lock, (stale, stale))
-        verdict, detail = self.stored(path)
-        self.assertEqual("ok", verdict, detail)
-        self.assertEqual(RENEWED, json.loads(path.read_text())["claudeAiOauth"]["accessToken"])
-        self.assertFalse(lock.exists())
-
-    def test_a_policy_that_denies_remote_control_is_said_with_the_remedy(self):
-        """The login is still a login -- every plain session works -- so the
-        verdict stays ok and the denial rides as the fact the two commands that
-        start remote control refuse on."""
-        FakeAnthropic.policy = {"restrictions": {"allow_remote_control": {"allowed": False}},
-                                "compliance_taints": []}
-        verdict, detail = self.stored(self._stored())
-        self.assertEqual("ok", verdict, detail)
-        self.assertIn("remote control DENIED", detail)
-        self.assertIn("\n    remote-control: denied", detail)
-        self.assertIn("fix: an owner of the Example Org organization", detail)
-        self.assertIn("until then `wk ai claude` sessions run without it", detail)
-
-    def test_a_hipaa_organization_is_denied_the_same_way(self):
-        FakeAnthropic.policy = {"restrictions": {}, "compliance_taints": ["hipaa"]}
-        verdict, detail = self.stored(self._stored())
-        self.assertEqual("ok", verdict, detail)
-        self.assertIn("\n    remote-control: denied", detail)
-        self.assertIn("HIPAA", detail)
-
-    def test_a_policy_the_api_does_not_serve_is_unverified_and_names_the_path(self):
-        """The CLI refuses remote control on a 404 for this path and says a
-        proxy is the usual cause; the verdict says the same, ahead of time."""
-        FakeAnthropic.policy_status = 404
-        verdict, detail = self.stored(self._stored())
-        self.assertEqual("ok", verdict, detail)
-        self.assertIn("\n    remote-control: unverified", detail)
-        self.assertIn("policy_limits", detail)
-        self.assertIn("404", detail)
-
-    def test_no_network_is_unverified_not_refused(self):
-        for doc, want in ((login(), "could not reach"),
-                          (login(access_expires_s=-60), "neither renewed nor asked about")):
-            with self.subTest(want=want):
-                path = self._stored(doc=doc)
-                verdict, detail = self.stored(path, api="http://127.0.0.1:1")
-                self.assertEqual("unverified", verdict, detail)
-                self.assertIn(want, detail)
-                self.assertIn("\n    remote-control: unverified", detail)
-                self.assertEqual(doc, path.read_text())
-
-    def test_a_login_on_stdin_alone_is_not_asked_for_a_record(self):
-        """Before anything is stored there is no directory to look beside."""
-        verdict, detail = self.check("claude-login", login())
-        self.assertEqual("ok", verdict, detail)
-        self.assertNotIn("organization:", detail)
-
-    def test_a_login_without_the_profile_scope_is_refused(self):
-        verdict, detail = self.check("claude-login",
-                                     login(scopes=("user:inference",)))
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("user:profile", detail)
-        self.assertIn("claude auth login", detail)
-
-    def test_a_login_that_cannot_run_inference_is_refused(self):
-        verdict, detail = self.check("claude-login",
-                                     login(scopes=("user:profile",)))
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("user:inference", detail)
-
-    def test_a_setup_token_document_is_not_a_login(self):
-        verdict, detail = self.check("claude-login", login(refresh=""))
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("setup-token", detail)
-
-    def test_a_login_whose_refresh_token_has_expired_is_refused(self):
-        verdict, detail = self.check("claude-login",
-                                     login(refresh_expires_days=-1))
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("cannot be renewed", detail)
-
-    def test_a_malformed_document(self):
-        for value, want in (("not json at all", "not JSON"),
-                            ('{"nope": 1}', "no claudeAiOauth")):
-            with self.subTest(value=value):
-                verdict, detail = self.check("claude-login", value)
-                self.assertEqual("bad", verdict, detail)
-                self.assertIn(want, detail)
 
 
 # --- the two pasted keys -------------------------------------------------------
@@ -1016,7 +737,7 @@ class TestTheAgentKeys(_Anthropic):
         self.assertIn("could not reach", detail)
 
     def test_a_token_refused_by_shape_costs_no_request(self):
-        for value in ("hunter2", "sk-ant-api03-abc", login()):
+        for value in ("hunter2", "sk-ant-api03-abc", json.dumps({"claudeAiOauth": {}})):
             with self.subTest(value=value[:12]):
                 self.claude(value)
         self.assertEqual([], FakeAnthropic.seen)
@@ -1025,11 +746,6 @@ class TestTheAgentKeys(_Anthropic):
         verdict, detail = self.claude("sk-ant-api03-abc")
         self.assertEqual("bad", verdict, detail)
         self.assertIn("bills the organization", detail)
-
-    def test_a_login_document_pasted_here_names_the_row_that_takes_one(self):
-        verdict, detail = self.claude(login())
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("wk key set claude-login", detail)
 
     def test_anything_else_is_refused_by_shape(self):
         verdict, detail = self.claude("hunter2")
@@ -1163,17 +879,12 @@ class TestOneTableForEveryCredential(_Rules):
                             capture_output=True, text=True)
         return cp.stdout.split()
 
-    def test_every_delivered_credential_has_a_rule(self):
-        """wk.secrets.AGENT_SECRETS is what delivers a credential into a
-        workspace; a row added there without a rule would be stored unchecked."""
+    def test_every_credential_wk_stores_has_a_rule(self):
+        """A file row is the Claude CLI's own, and wk stores none."""
         from wk import secrets
-        for row in [r[0] for r in secrets.AGENT_SECRETS]:
+        held = ["github-pat", "bugzilla-api-key", "tailnet", "tailnet-api", "deploy-key"]
+        for row in [r[0] for r in secrets.AGENT_SECRETS if r[4] == "value"] + held:
             self.assertIn(row, self.names(), row)
-
-    def test_the_credentials_held_beside_the_deploy_keys_have_rules_too(self):
-        for name in ("github-pat", "bugzilla-api-key", "tailnet", "tailnet-api",
-                     "deploy-key"):
-            self.assertIn(name, self.names())
 
     def rule(self, name, repos=FORKS):
         cp = subprocess.run(["python3", str(CREDCHECK), "rule", name,
@@ -1181,23 +892,14 @@ class TestOneTableForEveryCredential(_Rules):
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         return dict(l.split("\t", 1) for l in cp.stdout.splitlines())
 
-    def test_every_rule_names_where_the_credential_is_spent(self):
-        """The evidence for a rule is the code that spends it, so each row
-        carries that file rather than leaving it to a reader to find."""
-        for name in self.names():
-            fields = self.rule(name)
-            self.assertEqual({"spent_by", "needs", "forbids", "what", "url",
-                              "remedy", "store_with", "fix"}, set(fields), name)
-            self.assertRegex(fields["spent_by"], r"[\w.-]+/[\w.-]+",
-                             "%s: spent_by names no file" % name)
-
-    def test_every_rule_says_what_to_ask_for_and_where_to_get_it(self):
-        """`wk key` carries no prose of its own: the prompt, the page and the
-        choices left to make all come from here, so a credential nobody
-        described is a credential nobody can be asked for."""
+    def test_every_rule_names_where_it_is_spent_what_to_ask_for_and_where_to_get_it(self):
+        """`wk key`'s prompt, page and remedy all come from the rule."""
         for name in self.names():
             fields = self.rule(name)
             with self.subTest(name=name):
+                self.assertEqual({"spent_by", "needs", "forbids", "what", "url",
+                                  "remedy", "store_with", "fix"}, set(fields), name)
+                self.assertRegex(fields["spent_by"], r"[\w.-]+/[\w.-]+")
                 self.assertTrue(fields["what"].strip(), "%s: no `what`" % name)
                 self.assertTrue(fields["remedy"].strip(), name)
                 if fields["url"]:
@@ -1207,10 +909,7 @@ class TestOneTableForEveryCredential(_Rules):
                 self.assertIn(fields["remedy"], fields["fix"])
 
     def test_the_token_page_is_the_one_that_mints_a_token_that_works(self):
-        """The classic page, because a fine-grained token opens a pull request
-        on every fork and on no project (TestTheProjectRefusesIt). It carries
-        the scope; the expiry and the scope list are what a person is left to
-        get right, so the remedy names both."""
+        """The classic page: a fine-grained token opens a pull request on every fork and on no project."""
         fields = self.rule("github-pat")
         url = fields["url"]
         self.assertTrue(url.startswith(
@@ -1218,16 +917,13 @@ class TestOneTableForEveryCredential(_Rules):
         query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
         self.assertEqual(["public_repo"], query["scopes"])
         self.assertIn("wk", query["description"][0])
-        # The ceiling WebKit's policy states, not a preference: a remedy that
-        # asked for longer would ask for a token every project refuses.
+        # WebKit's stated ceiling.
         self.assertLessEqual(credcheck.MAX_PAT_DAYS, 366)
         self.assertGreater(credcheck.MAX_PAT_DAYS, 0)
         self.assertIn(str(credcheck.MAX_PAT_DAYS), fields["remedy"])
         self.assertIn("public_repo", fields["remedy"])
 
     def test_this_machine_knows_where_each_one_is_kept(self):
-        """One path table (Secrets.cred_path), so `wk key set`, `wk key check` and
-        `wk doctor` read the same bytes."""
         from wk.key.cli import Key
         k = Key(REPO)
         for name in k.settable():
@@ -1247,7 +943,7 @@ class TestOneTableForEveryCredential(_Rules):
 
 
 class TestTheModelsPiIsPointedAt(unittest.TestCase):
-    """`wk ai pi` writes the models /v1/model/info names for the key (measured on ai.igalia.com 2026-09-27:
+    """`wk new` writes the models /v1/model/info names for the key (measured on ai.igalia.com 2026-09-27:
     /v1/models lists the same names and no mode, and an access group like 'standard' is not a callable model)."""
 
     def test_chat_models_are_kept_in_order_and_an_embedding_model_is_not(self):

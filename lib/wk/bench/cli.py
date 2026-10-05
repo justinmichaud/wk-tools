@@ -272,15 +272,7 @@ class Bench:
         return ab.run(self.root, self.reg, self.clock, spec, o, kill)
 
     def mac(self):
-        """A tombstone: the trip it drove is `bench run --system`'s one pipeline (boot, deploy, run, collect)."""
-        act.die("""'wk bench mac' is gone -- it drove one bench system's whole trip (build, stage, arm,
-    reboot, run, come back) by hand; that trip is now the pipeline's own:
-
-        wk bench run <workspace> <plan> --system mbp
-
-    stages the workspace's build onto mbp, arms it, waits for the reboot into bench mode, runs the
-    plan there over ssh through its own 'wk bench staged' (5.27), collects the result, and reboots
-    back. 'wk bench ab --devices mbp' drives the unattended round trip.""")
+        act.die("'wk bench mac' is gone -- the Mac's round trip is:\n    wk bench ab --devices <mac> --systems <a>,<b> --workspace <ws>")
 
     def mac_ab(self):
         act.die("'wk bench mac-ab' is gone -- a Mac A/B is read back where it is planted:\n"

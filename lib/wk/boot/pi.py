@@ -6,8 +6,7 @@ from wk.kv import kv
 
 
 class PiSd(Driver):
-    """One SD card holds every system, the rescue on partitions 1-2. The firmware boots the first FAT partition only,
-    so arming is an `os_prefix=` line the card helper writes into the rescue's config.txt."""
+    """One SD card holds every system (rescue on partitions 1-2); the firmware boots the first FAT partition only, so arming is an `os_prefix=` line in the rescue's config.txt."""
 
     name = "pi-sd"
     arming = "medium"
@@ -245,102 +244,4 @@ class Rpi5Usb(Driver):
                 "wk boot %s\n    one shot; it reverts by itself" % (prof, name, dev, name, dev, name, name))
 
 
-class PiMbr(Driver):
-    """Two media, armed by one byte: the bench medium's partition 1 MBR type, 0x0c armed and 0x83 disarmed. Firmware
-    finding no FAT partition steps over the medium to the rescue; one finding it incomplete halts, so the byte moves."""
-
-    name = "pi-mbr"
-    arming = "medium"
-    failsafe = "pimbr-self-disarm.sh"
-    disarms = True
-    ARMED, DISARMED = "0c", "83"
-
-    def dev(self):
-        from wk.sysimage.disk import Disks   # the disk model is sysimage's; this is its one reader in boot
-        got = Disks(self.ch, self.conf).own_or_declared()
-        if not got:
-            act.die("cannot tell which disk on %s is its bench medium.\n    Its conf says %s, and the board does not agree or could not be\n"
-                    "    asked. Refusing to write a partition type byte to a disk chosen by name:\n"
-                    "    on this board that byte decides whether it comes back at all." % (self.c("name"), self.c("device") or "nothing"))
-        return got
-
-    @staticmethod
-    def word(dev):
-        return {"/dev/mm": "SD card", "/dev/sd": "USB stick"}.get(dev[:7], dev)
-
-    def rescue_disk(self):
-        return disk_of(self.c("root"))
-
-    def boot_part(self):
-        return part(self.dev(), 1)
-
-    def type(self):
-        return self.sudo("pimbr-type.sh", WK_DEV=self.dev()).out.replace(" ", "").strip()
-
-    def state(self):
-        t = self.type()
-        return {self.ARMED: "armed", self.DISARMED: "disarmed", "": None}.get(t, "foreign")
-
-    def set_type(self, hexbyte):
-        if not self.sudo("pimbr-set-type.sh", mutates=True, WK_DEV=self.dev(), WK_OCT="%03o" % int(hexbyte, 16)).ok:
-            act.die("could not write %s's partition type on %s" % (self.c("device"), self.c("name")))
-        got = self.type()
-        if got != hexbyte:
-            act.die("%s's partition type on %s still reads\n    0x%s after writing 0x%s. This byte is what decides whether the board's\n"
-                    "    firmware boots the %s or steps over it to the rescue, so a write\n    that did not take is not something to continue past.\n\n"
-                    "    The board has not been rebooted; it is still in whatever role it was in."
-                    % (self.c("device"), self.c("name"), got or "unreadable", hexbyte, self.word(self.c("device"))))
-
-    def arm(self, p, order=""):
-        dev, name = self.c("device"), self.c("name")
-        state = self.state()
-        if state is None:
-            act.die("could not read %s's partition table on %s.\n    Arming this machine means writing one byte of it, so the bench medium has to be\n"
-                    "    attached and readable from the rescue." % (dev, name))
-        if state == "armed":
-            act.debug("%s's %s is already armed" % (name, self.word(dev)))
-        elif state == "disarmed":
-            self.set_type(self.ARMED)
-        else:
-            act.die("%s on %s has partition type 0x%s on partition\n    1, which is neither 0x%s nor 0x%s. That is not a disk\n"
-                    "    this driver put an image on, and arming it would be a guess.\n\n    Write one first:  wk sysimage write <id> --disk %s:%s"
-                    % (dev, name, self.type(), self.ARMED, self.DISARMED, name, dev))
-        return 0
-
-    def disarm(self):
-        if self.state() == "armed":
-            self.set_type(self.DISARMED)
-        return 0
-
-    def disarm_note(self):
-        return ("  %s's partition 1 is typed 0x%s, so the firmware finds no\n  boot filesystem there and %s boots its rescue on %s. "
-                "'wk boot %s' puts it back." % (self.c("device"), self.DISARMED, self.c("name"), self.rescue_disk(), self.c("name")))
-
-    def evidence(self):
-        return "%s\nbench_medium=%s" % (self.run("eeprom-order.sh").out.rstrip("\n"), self.state() or "unreadable")
-
-    def media(self):
-        dev, mode = self.c("device"), self.mode
-        bench, rescue = self.word(dev), self.word(self.rescue_disk())
-        if mode.startswith("bench"):
-            return "booted from its %s (system %s); the %s is the rescue" % (bench, mode[6:], rescue)
-        if not (mode == "host" or mode.startswith("base")):
-            return "%s %s: state unknown (board unreachable); the %s is the rescue" % (bench, dev, rescue)
-        held = "%s %s holds %s, %s" % (bench, dev, self.device_image() or "no wk system (wk sysimage write puts one there)",
-                                      self.state() or "unreadable")
-        if mode.startswith("base"):
-            return "booted its rescue on the %s (%s); %s" % (rescue, mode[5:], held)
-        return "%s; the %s is the rescue" % (held, rescue)
-
-    def reprovision(self):
-        dev, name, rescue = self.c("device"), self.c("name"), self.rescue_disk()
-        return ("wk sysimage build %s\n    in a workspace; hours\n"
-                "wk sysimage write <id> --disk <reader>:%s --rescue\n    the %s -- the system this board falls back to\n"
-                "wk boot %s --boot-order %s\n    the %s first, the rescue behind it\n"
-                "wk sysimage write <id> --disk %s:%s\n    the %s -- the system it is measured on\n"
-                "wk boot %s\n    one shot; it reverts by itself"
-                % (self.c("profile"), rescue, self.word(rescue), name, "sd-first" if dev.startswith("/dev/mm") else "usb-first",
-                   self.word(dev), name, dev, self.word(dev), name))
-
-
-DRIVERS = {d.name: d for d in (PiSd, PiTryboot, Rpi5Usb, PiMbr)}
+DRIVERS = {d.name: d for d in (PiSd, PiTryboot, Rpi5Usb)}

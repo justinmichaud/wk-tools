@@ -1,19 +1,6 @@
 """`wk zed --url <ws>`: prints the ssh:// URL cmd/zed would hand to Zed,
 without invoking Zed itself. Each docstring is the phrase of the behaviour
-it checks.
-
-cmd/zed's --url path never calls zed_cli() (see the file: `Z` is left unset
-under --url, and `emit()` only ever execs it in the non-url branch), so a
-fake `zed` on PATH that fails loudly if invoked is a straightforward way to
-prove that -- and the URL itself has to come from a workspace whose route is
-real, since ssh_host asks the driver (a live sshd inside a container,
-installed on first use; see Container.ssh_transport, lib/wk/targets.py). Gated on the same running
-podman `wk` VM tests.test_container_workspace uses, and the same real
-container workspace, created and torn down the same way -- nothing here
-stands in for one.
-
-Run: python3 -m unittest tests.test_zed_url -v
-"""
+it checks."""
 import os
 import stat
 import unittest
@@ -41,7 +28,6 @@ class TestZedUrl(WkTest):
         super().tearDown()
 
     def test_url_prints_ssh_url_and_never_execs_zed(self):
-        """`wk zed --url <ws>` prints ssh://... and a pastable `zed '...'` line, without launching Zed"""
         cp = run("new", self.name, "--target", "container", timeout=600)
         self._created = cp.returncode == 0
         self.assertEqual(cp.returncode, 0, f"wk new failed: {cp.stdout + cp.stderr}")

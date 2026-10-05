@@ -3,7 +3,7 @@
 # wk bench run <workspace> <plan> [options] -- run a benchmark and keep the result defensible
 # wk: where=workspace name=required takes=1 values=plans config=--config verbs=plans,run,seed,ls,compare,report,export,precision,stage,staged,mac,mac-volume,mac-ab,ab-summary,ab,deploy ready=yes group=workspaces needs python3 dryrun run,stage,staged,deploy,seed,report,compare,ab-summary readonly plans,ls,precision,mac,mac-volume,mac-ab
 # wk: sub plans where=store name=none
-# wk: sub run,deploy name=required@2 takes=1 opts=--config=,--count=,--browser=,--subtests=,--software,--browser-args=,--cores=,--kill,--system=,--slot=,--ab=,--ab-systems=,--rounds=,--max-rounds=,--detect=,--task=,--timeout=,--exclude-subtests=,--no-warmup-profile,--jit-tiers,--collect
+# wk: sub run,deploy name=required@2 takes=1 opts=--config=,--count=,--browser=,--subtests=,--software,--browser-args=,--cores=,--kill,--system=,--slot=,--ab=,--ab-systems=,--rounds=,--max-rounds=,--detect=,--task=,--timeout=,--exclude-subtests=,--no-warmup-profile,--jit-tiers,--collect,--a-args=,--b-args=
 # wk: sub seed where=dynamic name=required@2 takes=1 opts=
 # wk: sub ls where=dynamic name=none takes=1 opts=--continued
 # wk: sub compare,report where=host name=none takes=4 opts=--html,--text
@@ -33,10 +33,6 @@
 #                                          Refused on a macOS guest or host:
 #                                          there is no per-run pin there, only
 #                                          the vCPU count chosen at boot.
-#       --system <machine>                 measure a fleet Mac's benchmark volume instead of the
-#                                          workspace's own container or guest: stage the build onto
-#                                          it, arm and reboot into it, run there over ssh through its
-#                                          own `wk bench staged`, collect the result, reboot back
 #       --system <board> [--slot name]     measure the slot a board (machines/, kind=board) holds
 #                                          (default a), in its booted bench system: run-benchmark
 #                                          runs here and drives the board's browser over ssh; the
@@ -58,6 +54,11 @@
 #           [--no-warmup-profile]          no sampler in the warmup round, the rest of its evidence kept
 #           [--jit-tiers]                  per-tier compile counts in the warmup round; the JSC
 #                                          options behind them crash the web process on some builds
+#       --a-args "X" --b-args "Y" [--rounds N]   an A/B of the one build in the workspace, each arm
+#                                          its own arguments: jsc options before cli.js under a JSCOnly
+#                                          config, MiniBrowser's under a browser one; either may be ''.
+#                                          Rounds alternate which arm leads, and the task's report is
+#                                          the per-subtest comparison (--max-rounds/--detect as for ab)
 #       --system <board> --slot <s>-instr --collect   one iteration of an instrumented slot, its
 #                                          PGO profile written into <workspace>'s build directory
 #                                          for the next build phase; not a measurement
@@ -139,9 +140,7 @@
 #       --force                            record it despite a preflight fail
 #                                          (still refuses to run outside bench
 #                                          mode -- nothing does)
-#   wk bench mac                           tombstone -- it only chained the commands --system
-#                                          now runs as the one pipeline: wk bench run
-#                                          <ws> <plan> --system mbp
+#   wk bench mac                           tombstone -- wk bench ab --devices <mac>
 #   wk bench mac-volume                    tombstone -- the benchmark install
 #                                          is an image: wk sysimage build
 #                                          perf-macos-tolken, on the Mac
@@ -246,7 +245,6 @@
 #             image (a bootable bench system) -- not comparable with each other.
 
 import os
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
@@ -272,15 +270,16 @@ def report_args(args):
     return positional, html or "", args.flag("--text")
 
 
-def run_arm(args, reg, clock, popen=subprocess.Popen):
+def run_arm(args, reg, clock):
     o = {"config": store.build_config(), "count": args.value("--count"), "browser": args.value("--browser"),
          "subtests": args.value("--subtests"), "cores": args.value("--cores"), "browser_args": args.value("--browser-args"),
          "software": args.flag("--software"), "system": args.value("--system"), "slot": args.value("--slot"),
          "ab": args.value("--ab"), "ab_systems": args.value("--ab-systems"), "rounds": args.value("--rounds"), "task": args.value("--task"),
          "timeout": args.value("--timeout"), "exclude_subtests": args.value("--exclude-subtests"), "collect": args.flag("--collect"),
          "max_rounds": args.value("--max-rounds"), "detect": args.value("--detect"),
+         "a_args": args.value("--a-args"), "b_args": args.value("--b-args"),
          "no_warmup_profile": "1" if args.flag("--no-warmup-profile") else "", "jit_tiers": "1" if args.flag("--jit-tiers") else ""}
-    return pipeline.run(ROOT, reg, args.positionals[1:], o, args.flag("--kill"), clock, popen)
+    return pipeline.run(ROOT, reg, args.positionals[1:], o, args.flag("--kill"), clock)
 
 
 def staged_options(args):

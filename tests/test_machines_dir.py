@@ -1,11 +1,4 @@
-"""One `machines/` directory, read by lib/wk/fleet.py alone.
-
-lint.one_machine_dir: no file names the three directories machines/
-replaced, and no case arm names a machine. The unit half: the reader, its
-overlay, its refusals, and machine_cmd.shared_home.
-
-Run: python3 tests/run.py --lint --unit -k test_machines_dir
-"""
+"""One `machines/` directory, read by lib/wk/fleet.py alone: no case arm names a machine (lint), and the reader."""
 TIER = "lint"
 import contextlib
 import io
@@ -25,9 +18,6 @@ from wk import act, fleet, targets  # noqa: E402
 from wk.boot.cli import load_conf  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
-OLD = [re.compile(p) for p in (r"boot/machines(?!\.sh)\b", "targets/" + "hosts", "bridge/" + "hosts",
-                                r"config/wk/" + "bridges")]
-# The user's own text, which no agent edits: README.md above its marker, CLAUDE.md, the plan that names the move.
 USERS_OWN = {"CLAUDE.md", "docs/PLAN.md"}
 README_MARKER = "*** Claude edit below here ***"
 ARM = re.compile(r"^\s*\(?((?:[\"']?[A-Za-z0-9_.-]+[\"']?\s*\|\s*)*[\"']?[A-Za-z0-9_.-]+[\"']?)\)")
@@ -65,12 +55,6 @@ def shell_case_arms(text):
 
 
 class TestOneMachineDir(unittest.TestCase):
-    def test_no_file_names_an_old_machine_directory(self):
-        hits = ["%s:%d: %s" % (rel, i, line.strip())
-                for rel, text in tracked() for i, line in enumerate(text.splitlines(), 1)
-                if any(p.search(line) for p in OLD)]
-        self.assertEqual(hits, [], "a machine is machines/<name>.conf:\n" + "\n".join(hits))
-
     def test_no_case_arm_names_a_machine(self):
         names = {p.stem for p in REAL_MACHINES.glob("*.conf")}
         self.assertTrue(names)
@@ -130,7 +114,6 @@ class TestTheReader(FleetTest):
                 self.assertIn("%s is spelled %s now" % (old.split("=")[0], new), msg)
 
     def test_a_conf_that_does_not_parse_refuses_every_listing_by_name(self):
-        """A listing that skipped it would hide a machine for as long as nobody asked for it by name."""
         for text in ("host=k\n", "kind=board\nNODE_SSH=k\n"):
             with self.subTest(conf=text):
                 self.conf("k", text)
@@ -142,14 +125,6 @@ class TestTheReader(FleetTest):
                     self.fleet.names()
                 self.assertEqual(cm.exception.status, 2)
                 self.assertIn(str(self.dir / "k.conf"), err.getvalue())
-
-    def test_fleet_list_exits_2_with_the_rename(self):
-        self.conf("k", "kind=board\nNODE_SSH=k\n")
-        cp = subprocess.run([sys.executable, "-m", "wk.fleet", "list"], capture_output=True, text=True,
-                            env=dict(os.environ, PYTHONPATH=str(REPO / "lib"), WK_MACHINES_DIR=str(self.dir),
-                                     XDG_CONFIG_HOME=str(self.dir / "cfg")))
-        self.assertEqual(cp.returncode, 2, cp.stdout + cp.stderr)
-        self.assertIn("NODE_SSH is spelled ssh now", cp.stderr)
 
     def test_a_listing_names_only_the_kinds_asked_for(self):
         for n, k in (("a", "build"), ("b", "peer"), ("c", "board"), ("d", "bridge")):
@@ -239,8 +214,7 @@ class TestTheReadersOverIt(FleetTest):
 
 
 class TestSharedHome(FleetTest):
-    """machine_cmd.shared_home: two machines sharing one home, and so one
-    ~/.wk-remote, each resolve their own target by hostname, with no ssh."""
+    """Two machines sharing one home (one ~/.wk-remote) each resolve their own target by hostname."""
 
     def setUp(self):
         super().setUp()

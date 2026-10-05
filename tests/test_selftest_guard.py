@@ -1,8 +1,4 @@
-"""cmd/selftest's guard: the lock applies to `--live` alone, so the tiers
-that need no machine run beside anything, and two default runs run at once.
-
-Run: python3 -m unittest tests.test_selftest_guard -v
-"""
+"""cmd/selftest's guard: the lock applies to `--live` alone, so the tiers"""
 import subprocess
 import sys
 import unittest
@@ -50,7 +46,6 @@ class TestOneLiveSelftestAtATime(WkTest):
         self.assertIn("tiers: lint,unit  tests: 1 ", out, out)
 
     def test_the_run_is_not_execd_so_the_lock_is_dropped(self):
-        """An exec'd runner keeps the pid and so the lock, with nothing left to release it."""
         out = self.selftest("--live", "nosuchtestzz")
         self.assertIn("tests/run.py --live -k nosuchtestzz", out, out)
         locks = self.tmp / "locks"

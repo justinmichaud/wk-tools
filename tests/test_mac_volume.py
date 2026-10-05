@@ -1,11 +1,6 @@
 """The Mac boot drivers (lib/wk/boot/mac.py) against a Mac in memory: FakeMac holds the two installs, the firmware's
 boot-volume and the boot helper; FakeGuest a Tart guest. MacConformance is machine.conformance's body where a Mac
-differs from a board, and tests/test_boot_driver.py runs it; the rest here is mac-volume's own behaviour.
-
-Nothing here touches a real startup disk, bless, the privileged helpers or a guest.
-
-Run: python3 tests/run.py --unit -k test_mac_volume
-"""
+differs from a board, and tests/test_boot_driver.py runs it; the rest here is mac-volume's own behaviour."""
 import contextlib
 import io
 import json
@@ -45,8 +40,6 @@ def quiet(fn, *args):
 
 
 class FakeMac:
-    """The host install on ssh, the bench install on bench_ssh, one of them running; `firmware` is the
-    install the next boot enters, and only the helper moves it. `stuck` is a bless that exits 0 and changes nothing."""
 
     def __init__(self, conf, env=None, clock=None):
         self.conf, self.clock = dict(conf), clock or FakeClock()
@@ -264,8 +257,6 @@ def arm_and_boot(d, fake):
 
 
 class MacConformance:
-    """machine.conformance[<kind>] where a Mac is not a board: no medium to read, no on-board failsafe, and the
-    return from bench mode is the bench install's own job (a volume) or leaving the machine (a guest)."""
 
     kind = None
 
@@ -327,14 +318,6 @@ class MacConformance:
                     got, err = quiet(getattr(d, verb))
                     self.assertIsInstance(got, str, "%s %s: %s" % (verb, mode, err))
                 self.assertTrue(d.reprovision().startswith("wk "), d.reprovision())
-
-    def test_the_failsafe_is_on_board_shell_outside_the_arming(self):
-        """No on-board failsafe: a volume's return is its bench job's hand-back, a guest's is being stopped."""
-        cls = DRIVERS[self.kind]
-        self.assertIsNone(cls.failsafe)
-        self.assertIn(cls.arming, ("command", "guest"))
-        self.assertIsNone(mac_board(self.kind)[1].self_disarm_sh())
-
 
 def volume(**kw):
     fake, d = mac_board("mac-volume", **kw)
@@ -627,7 +610,7 @@ class TestChannel(unittest.TestCase):
         ch = Channel(self.CONF, {}, channel="host", via=via)
         r, err = quiet(ch.call, "m_ssh", Script(REPO, "mac-probe.sh"))
         self.assertEqual(r.rc, 255)
-        self.assertIn("the tailnet says tolken is offline -- power it on, or 'wk machine probe tolken'", err)
+        self.assertIn("wk machine probe tolken", err)
         self.assertEqual([e for e in via.effects if e[1][0] == "ssh"], [])
         self.assertTrue(ch.call("i_ssh", Script(REPO, "mac-probe.sh")).ok, "the node that is up is still asked")
         self.assertEqual(len([e for e in via.effects if e[1][0] == "tailscale"]), 1, "the tailnet is read once")

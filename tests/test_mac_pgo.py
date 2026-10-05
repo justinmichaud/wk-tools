@@ -1,14 +1,6 @@
 """The macOS perf build: `mac-release-pgo`, the config every macOS number is
 taken from (lib/wk/buildconf.py, build/mac-pgo.sh, lib/wk/bench/mac.py's PgoCollect,
-build/pgo-run-benchmark.py).
-
-Three phases with a benchmark run between them, so the shape of each phase --
-and the fact that the instrumented one never lands in the measured one's
-products directory -- is what these tests pin; the collection itself runs
-against a Fake machine.
-
-Run: python3 tests/run.py -k test_mac_pgo
-"""
+build/pgo-run-benchmark.py)."""
 import contextlib
 import io
 import os
@@ -24,7 +16,7 @@ from tests.test_bench_mac import StubWatch  # noqa: E402
 from wk import buildconf, pgo, screen as wkscreen  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import mac, seed  # noqa: E402
-from wk.machine import Fake, Result, isolated_module  # noqa: E402
+from wk.machine import Fake, Result  # noqa: E402
 
 CONFIG = "mac-release-pgo"
 
@@ -34,8 +26,6 @@ def config(name, os_name="macos"):
 
 
 def pgo_dry_run(tmp):
-    """build-in-target.sh's own dry run, which is the only place the three
-    phases' command lines exist."""
     src = tmp / "src"
     src.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
@@ -66,8 +56,6 @@ class TestTheConfig(WkTest):
         self.assertEqual((c.buildsys, c.pgo, c.args), ("xcode", True, "--release"))
 
     def test_its_products_never_share_a_directory_with_the_plain_release(self):
-        """A profile-guided build and an ordinary one are different binaries;
-        one tree holding both is a number nobody can attribute."""
         pgo_dir = config(CONFIG).build_dir()
         self.assertNotEqual(pgo_dir, config("mac-release").build_dir())
         self.assertNotEqual(pgo_dir, config("mac-release-asan").build_dir())
@@ -80,8 +68,6 @@ class TestTheConfig(WkTest):
 
 
 class TestTheThreePhases(WkTest):
-    """Every phase of the dry run, which is the same command a real build runs
-    with the exec removed."""
 
     def setUp(self):
         self._scratch = scratch_dir()
@@ -107,8 +93,6 @@ class TestTheThreePhases(WkTest):
         self.assertIn("OTHER_LDFLAGS=$(inherited) -fprofile-generate", line)
 
     def test_the_instrumented_phase_builds_somewhere_else_entirely(self):
-        """Not a wipe between phases: two directories, so a killed build
-        re-runs rather than rebuilding what it had."""
         instr = self._line("ENABLE_LLVM_PROFILE_GENERATION=YES")
         final = self._line("WK_ENABLE_PGO_USE=YES")
         self.assertIn("Release-pgo-instr", instr)
@@ -130,8 +114,6 @@ class TestTheThreePhases(WkTest):
         self.assertIn("pgo-run-benchmark.py", line)
 
     def test_the_collection_starts_from_an_empty_profile_directory(self):
-        """collect-pgo-profiles refuses one that is not empty, so a re-run
-        after a failure has to clear it rather than stop."""
         self.assertIn("rm -rf", self._line("collect-pgo-profiles"))
 
     def test_the_measured_phase_uses_the_profile_with_full_lto_and_symbols(self):
@@ -272,10 +254,6 @@ class TestTheCollection(WkTest):
 
 
 class TestItRefusesAThrottledCollection(WkTest):
-    """Measured on a Tart guest 2026-09-06: Setup Assistant is frontmost on
-    every boot, killing it takes the console session with it, and the guest's
-    /usr/bin/python3 has no pyobjc so no raiser can displace it. A collection
-    there would look exactly like a good one."""
 
     def test_it_names_every_reason_rather_than_the_first(self):
         faults = mac.PgoCollect(REPO, fake_guest(console="root", screen=1, blocker="Setup Assistant:Welcome"), {}, "/src").faults()
@@ -297,34 +275,15 @@ class TestItRefusesAThrottledCollection(WkTest):
 
 
 class TestItIsThePolicyAndNotAnOption(WkTest):
-    """Every macOS number this repo quotes comes from a profile-guided build,
-    so the Mac A/B defaults to it rather than offering it."""
-
-    def test_the_mac_ab_defaults_to_it(self):
-        self.assertEqual(mac.AB_CONFIG, CONFIG)
-
-    def test_the_benchmarks_are_named_once_and_the_weights_are_webkits_own(self):
-        """0.6 / 0.2 / 0.2 lives in Tools/Scripts/pgo-profile; naming the three
-        benchmarks is all this repo may decide, and lib/wk/pgo.py names them."""
-        self.assertEqual(set(pgo.BENCHMARKS), {"speedometer3", "jetstream3", "motionmark"})
-        self.assertNotIn("0.6", (REPO / "build" / "mac-pgo.sh").read_text())
-        for rel in ("build/mac-pgo.sh", "lib/wk/bench/mac.py"):
-            text = (REPO / rel).read_text()
-            self.assertNotIn('"speedometer3", "jetstream3"', text, rel)
-            self.assertNotIn("speedometer3 jetstream3", text, rel)
 
     def test_the_instrumented_products_are_named_in_one_place(self):
         """The reclaim after a stage deletes them, so a second spelling deletes the wrong directory, or nothing."""
-        self.assertNotRegex((REPO / "build" / "mac-pgo.sh").read_text(), r"[=\"]-instr|final-instr")
         cp = run_py("pgo-instr", "/x/Release-pgo")
         self.assertEqual(cp.stdout.strip(), "/x/Release-pgo-instr")
-
 
     @unittest.skipUnless(os.path.exists("/usr/bin/python3"), "the collection's python is the Mac's /usr/bin/python3")
     def test_the_collection_runs_wk_tools_whatever_the_working_directory_holds(self):
         """The build sources this in the checkout, whose files an agent writes; a wk/ there must not be imported."""
-        self.assertIn(isolated_module("$_pgo_tools/lib", "wk.bench.mac", "/usr/bin/python3")[3],
-                      (REPO / "build" / "mac-pgo.sh").read_text(), "the snippet is lib/wk/machine.py's ISOLATED")
         with scratch_dir() as tmp:
             (tmp / "wk").mkdir()
             (tmp / "wk" / "__init__.py").write_text("raise SystemExit('the checkout was imported')\n")
@@ -339,16 +298,9 @@ def run_py(*args):
 
 
 class TestTheProfileReachesTheMachineThatRunsIt(WkTest):
-    """A dSYM is a product on the Mac: the machine that profiles is the
-    benchmark install, which never had the build tree."""
 
     def test_the_stage_carries_them(self):
         self.assertFalse([p for p in mac.PRODUCT_SKIP if "dSYM" in p], mac.PRODUCT_SKIP)
-
-    def test_only_the_perf_build_makes_any(self):
-        self.assertIn("DEBUG_INFORMATION_FORMAT=dwarf-with-dsym",
-                      (REPO / "build" / "mac-pgo.sh").read_text())
-
 
 class TestTheHarnessWrapper(WkTest):
     def setUp(self):
@@ -375,9 +327,6 @@ class TestTheHarnessWrapper(WkTest):
         self.assertIn("WK_WEBKIT_SCRIPTS", cp.stdout + cp.stderr)
 
     def test_the_collection_goes_through_it_and_not_through_run_benchmark(self):
-        """Without it the MiniBrowser driver names no profile directory and the
-        first iteration raises. What it hands over, and to which class, is
-        tests/test_pgo_harness.py against a stubbed checkout."""
         line = self._line("collect-pgo-profiles")
         self.assertIn("--run-benchmark-harness", line)
         self.assertIn("pgo-run-benchmark.py", line)

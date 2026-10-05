@@ -1,10 +1,4 @@
-"""The yocto build as it runs inside a workspace (lib/wk/sysimage/yocto_target.py) against a Fake machine: the
-environment bitbake is handed, local.conf and bblayers.conf and their convergence on a re-run, a target derived
-for a branch that lacks it, the git index the toolchains can open, the slot's commit, the image moved aside and
-checked for freshness, the SDK asked for before a slot, and each stage's commands.
-
-Run: python3 tests/run.py -k test_yocto_target
-"""
+"""The yocto build as it runs inside a workspace (lib/wk/sysimage/yocto_target.py) against a Fake machine."""
 import configparser
 import contextlib
 import io

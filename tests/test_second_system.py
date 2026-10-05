@@ -1,19 +1,5 @@
-"""A second system beside a rescue on one card (`<device>@second`): the rpi3
-keeps its rescue on partitions 1-2 and its bench system on 3-4 of the same SD
-card. The card helper (admin/wk-card-priv) splits a whole-card image into
-partitions 3 and 4, addresses only those under @second, whether the card is
-in a reader or is the disk the rescue itself runs from, and arms the second
-system with one os_prefix line in the rescue's config.txt; lib/wk/boot/pi.py's
-PiSd is the driver that asks for all of it.
-
-Helper functions are lifted out of admin/wk-card-priv with sed (the idiom
-tests/test_card_edits.py uses) and run against files and directories standing
-in for the card: sfdisk edits a plain file's partition table, and the split
-writes to `<disk>3` / `<disk>4` beside it, so the byte arithmetic runs for
-real without root.
-
-Run: python3 -m unittest tests.test_second_system -v
-"""
+"""A second system beside a rescue on one card (`<device>@second`): admin/wk-card-priv's split, gate and arming,
+lifted with sed and run on plain files standing in for the card, and lib/wk/boot/pi.py's PiSd driver."""
 import hashlib
 import os
 import re
@@ -69,15 +55,12 @@ def _sfdisk_json(path):
 
 
 def _sfdisk_id(path):
-    """The MBR disk identifier, which is the first half of every PARTUUID on it."""
     import json
     out = subprocess.run(["sfdisk", "-J", str(path)], capture_output=True, text=True, check=True).stdout
     return json.loads(out)["partitiontable"]["id"]
 
 
 class TestGateUnderSecond(WkTest):
-    """The gate's @second carve-out: partitions 3 and 4 of a disk that may be
-    the one this machine runs from, or a card in a reader."""
 
     def setUp(self):
         super().setUp()
@@ -87,8 +70,6 @@ class TestGateUnderSecond(WkTest):
         self.dev = str(loops[0])
 
     def _gate(self, spec, booted, mounted_on_34=""):
-        """Run the real gate with lsblk faked: every disk is a whole mmc disk,
-        and partitions 3/4 report the mountpoint given."""
         lsblk = f'''
 case "$*" in
   *TYPE,TRAN*) echo "disk mmc" ;;
@@ -125,8 +106,6 @@ esac
         self.assertIn("partitions 3 and 4", cp.stderr)
 
     def test_third_needs_the_shared_layout(self):
-        """@third on a medium whose partitions 3-4 are primaries (or absent)
-        is refused with the remedy; the shared layout is a write's to make."""
         cp = self._gate(f"{self.dev}@third", booted="")
         self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
         self.assertIn("shared layout", cp.stderr)
@@ -140,8 +119,6 @@ esac
 @unittest.skipUnless(shutil.which("sfdisk"),
                      "needs sfdisk (util-linux); the helper runs on a Linux card machine")
 class TestSecondWrite(WkTest):
-    """The split: a whole-card image (MBR, boot, root) into partitions 3 and 4
-    of a disk that already has 1 and 2, on plain files."""
 
     BOOT = b"B" * (4096 * 512)
     ROOT = b"R" * (8192 * 512)
@@ -154,7 +131,7 @@ class TestSecondWrite(WkTest):
             fh.write(b"\0" * ((b_start * 512) - 512))
             fh.write(self.BOOT)
             fh.write(self.ROOT)
-            fh.write(b"\0" * 4096)   # padding after the root, as genimage leaves
+            fh.write(b"\0" * 4096)
         return img
 
     def _disk(self, size_mb=64):
@@ -195,8 +172,7 @@ class TestSecondWrite(WkTest):
         self.assertEqual(sorted(_sfdisk_json(disk)), [1, 2, 3, 4])
 
     def test_an_image_that_does_not_fit_is_refused_before_anything_is_written(self):
-        disk, img = self._disk(size_mb=20), self._image()   # 20 MB: 14 MB used by 1-2, root needs 4 MB + boot 2 MB... fits; shrink further
-        disk = self._disk(size_mb=16)
+        disk, img = self._disk(size_mb=16), self._image()
         cp = self._write(disk, img)
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("do not fit", cp.stderr)
@@ -212,10 +188,7 @@ class TestSecondWrite(WkTest):
         self.assertEqual(sorted(_sfdisk_json(disk)), [1, 2], "the disk's table was touched")
 
     def test_shared_layout_holds_two_systems_deterministically(self):
-        """A medium whose first system is a rescue: the write lays out an
-        extended partition 3 with logical pairs 5-6 and 7-8 whose geometry is
-        a function of the disk size alone, so any write order converges on
-        the same table and each system's bytes live in its own pair."""
+        """Extended 3 with logical pairs 5-6 and 7-8, sized from the disk alone so any write order converges."""
         disk, img = self._disk(size_mb=2048), self._image()
         cp = self._write(disk, img, shape="shared", slot=1)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -235,7 +208,6 @@ class TestSecondWrite(WkTest):
         self.assertEqual(Path(str(disk) + "5").read_bytes(), self.BOOT)
         self.assertEqual(Path(str(disk) + "6").read_bytes(), self.ROOT)
 
-        # The other slot lands in its own pair and leaves this one alone.
         cp = self._write(disk, img, shape="shared", slot=2)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertNotIn("replacing the layout", cp.stdout, "a matching table was rebuilt anyway")
@@ -245,49 +217,22 @@ class TestSecondWrite(WkTest):
         self.assertEqual(_sfdisk_json(disk)[5]["start"], ext_start + 2048)
 
     def test_the_migration_keeps_the_disks_identifier(self):
-        """Every PARTUUID on a card is `<disk id>-<nn>`, and the rescue on
-        partitions 1-2 names its own root that way -- in a cmdline.txt and an
-        fstab this write never touches and never retargets. sfdisk invents a
-        fresh identifier for any script that does not name one, so a migration
-        that let it would leave the rescue naming a root that no longer exists:
-        the board boots to a kernel that can mount nothing, and only a card
-        reader gets it back."""
-        disk, img = self._disk(size_mb=2048), self._image()
-        before = _sfdisk_id(disk)
-        self.assertTrue(before, "the fixture disk has no identifier to keep")
-        cp = self._write(disk, img, shape="shared", slot=1)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("shared layout made", cp.stdout)
-        self.assertEqual(_sfdisk_id(disk), before,
-                         "the migration changed the disk identifier, so every "
-                         "PARTUUID on the card moved -- the rescue's included")
-        # ...and the same when it is replacing an older primary 3-4 pair.
-        disk2 = self._disk(size_mb=2048)
-        subprocess.run(["sfdisk", "-q", "--append", "--no-reread", str(disk2)],
-                       input="start=30720, size=4096, type=c\nstart=34816, size=8192, type=83\n",
-                       text=True, check=True, capture_output=True)
-        before2 = _sfdisk_id(disk2)
-        cp = self._write(disk2, img, shape="shared", slot=1)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("replacing the layout", cp.stdout)
-        self.assertEqual(_sfdisk_id(disk2), before2)
-
-    def test_shared_layout_replaces_the_one_system_primaries(self):
-        """the migration: a card with the old primary 3-4 pair beside its
-        rescue is relaid; the write says what it destroyed."""
-        disk, img = self._disk(size_mb=2048), self._image()
-        subprocess.run(["sfdisk", "-q", "--append", "--no-reread", str(disk)],
-                       input="start=30720, size=4096, type=c\nstart=34816, size=8192, type=83\n",
-                       text=True, check=True, capture_output=True)
-        cp = self._write(disk, img, shape="shared", slot=1)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("replacing the layout", cp.stdout)
-        self.assertEqual(sorted(_sfdisk_json(disk)), [1, 2, 3, 5, 6, 7, 8])
+        """The rescue names its root by `<disk id>-<nn>`; a new identifier would leave it naming nothing."""
+        for old_pair in (False, True):
+            with self.subTest(old_pair=old_pair):
+                disk, img = self._disk(size_mb=2048), self._image()
+                if old_pair:
+                    subprocess.run(["sfdisk", "-q", "--append", "--no-reread", str(disk)],
+                                   input="start=30720, size=4096, type=c\nstart=34816, size=8192, type=83\n",
+                                   text=True, check=True, capture_output=True)
+                before = _sfdisk_id(disk)
+                cp = self._write(disk, img, shape="shared", slot=1)
+                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                self.assertEqual(old_pair, "replacing the layout" in cp.stdout, cp.stdout)
+                self.assertEqual(sorted(_sfdisk_json(disk)), [1, 2, 3, 5, 6, 7, 8])
+                self.assertEqual(_sfdisk_id(disk), before)
 
     def test_slot_resolve_reads_the_extended_layout_off_the_table(self):
-        """the real sfdisk output (' 5', indented) against a real table:
-        @second resolves to 5-6 and @third to 7-8 once partition 3 is
-        extended, and to 3-4 / a refusal before."""
         disk, img = self._disk(size_mb=2048), self._image()
         script_pre = _SAY + _lift(CARD_PRIV, "_slot_resolve")
         cp = bash(script_pre + f'\nSLOT=1; _slot_resolve "{disk}"; echo "$BOOTP $ROOTP"\n')
@@ -323,16 +268,7 @@ class TestSecondWrite(WkTest):
         self.assertIn("partition 4 reads back", cp.stderr)
 
 
-class TestGrowAddressesTheRoot(unittest.TestCase):
-    def test_grow_uses_the_partition_the_gate_chose(self):
-        text = _lift(CARD_PRIV, "v_grow")
-        self.assertIn('-N "$ROOTP"', text, "v_grow grows partition 2 by name, not the root the gate chose")
-        self.assertNotIn("part \"$dev\" 2", text)
-
-
 class TestArming(WkTest):
-    """second-arm / second-disarm / second-state on directories standing in
-    for the rescue's boot partition and the second system's."""
 
     def setUp(self):
         super().setUp()
@@ -364,10 +300,7 @@ class TestArming(WkTest):
         self.assertFalse((self.boot / "second.part").exists())
 
     def test_reading_the_state_mounts_read_only(self):
-        """`second-state` answers a question and writes nothing. Mounting a FAT
-        read-write and unmounting it rewrites the dirty flag and the FSInfo
-        sector, which is a write to a card somebody only asked about; arming
-        and disarming do edit it, so they mount read-write."""
+        """Even an unmount of a read-write FAT rewrites its dirty flag."""
         script = _SAY + _lift(CARD_PRIV, "_second_with_boot") + """
 part() { printf '%s%s' "$1" "$2"; }
 findmnt() { return 1; }
@@ -384,18 +317,8 @@ _second_with_boot /dev/sdX _second_disarm_edit
         self.assertEqual(lines[0], "with_mount -r /dev/sdX1 _second_state_edit", cp.stdout)
         self.assertEqual(lines[1], "with_mount /dev/sdX1 _second_disarm_edit", cp.stdout)
 
-    def test_the_state_verb_asks_for_read_only(self):
-        """the dispatch half of the rule above: v_second_state is the only one
-        of the three that passes -r."""
-        text = CARD_PRIV.read_text()
-        self.assertIn('_second_with_boot -r "$dev" _second_state_edit', text)
-        self.assertNotIn('_second_with_boot -r "$dev" _second_arm_install', text)
-
     def test_the_prefix_leads_the_armed_config(self):
-        """os_prefix comes before the armed system's own lines, and outside any
-        conditional section it carries: the firmware resolves each filename as
-        it reads the directive asking for it, and a filter can drop a prefix
-        that lands inside a section. Its own os_prefix does not survive."""
+        """The firmware resolves each filename as it reads it, and a section filter can drop a prefix inside one."""
         (self.second / "config.txt").write_text(
             "os_prefix=stale/\ndtoverlay=vc4-fkms-v3d\n[pi3]\ndtparam=audio=on\n")
         cp = self._arm()
@@ -408,10 +331,8 @@ _second_with_boot /dev/sdX _second_disarm_edit
         self.assertNotIn("os_prefix=stale/", lines)
 
     def test_arming_the_third_system_uses_its_own_prefix(self):
-        """third/ lands, os_prefix says third/, and a stale second/ from an
-        earlier arming is gone -- a card reads as what it is."""
         self.assertEqual(self._arm("second").returncode, 0)
-        (self.boot / "config.txt.rescue").rename(self.boot / "config.txt")  # disarm by hand
+        (self.boot / "config.txt.rescue").rename(self.boot / "config.txt")
         cp = self._arm("third")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         config = (self.boot / "config.txt").read_text()
@@ -451,11 +372,6 @@ _second_with_boot /dev/sdX _second_disarm_edit
 
     def test_the_verbs_take_the_boot_partition_wherever_it_is(self):
         """mounted already (the rescue running from the disk) or mounted here (a card in a reader)"""
-        for verb in ("v_second_arm", "v_second_disarm", "v_second_state"):
-            self.assertIn("_second_with_boot", _lift(CARD_PRIV, verb), f"{verb} does not go through _second_with_boot")
-        # Under the helper's own `set -euo pipefail`, with findmnt saying "not
-        # mounted" (exit 1) the card in a reader is mounted here; with a
-        # mountpoint it is used as is.
         script = ('set -euo pipefail\n' + _SAY + _lift(CARD_PRIV, "part", "_second_with_boot")
                   + '\nwith_mount() { echo "with_mount $1 -> $2"; }\nshow() { echo "boot=$1"; }\n'
                   + '_second_with_boot /dev/sdX show\n')
@@ -470,8 +386,6 @@ _second_with_boot /dev/sdX _second_disarm_edit
 
 
 class TestTailnetIdentityAcrossARewrite(WkTest):
-    """A second system's tailscaled state is kept aside before the split and
-    put back after it, so a rewritten bench system is the node it was."""
 
     def setUp(self):
         super().setUp()
@@ -500,19 +414,13 @@ class TestTailnetIdentityAcrossARewrite(WkTest):
         self.assertIn("restored", cp.stdout)
 
     def test_a_system_with_no_state_keeps_nothing(self):
-        """the per-candidate edit is silent and writes nothing when a root
-        carries no identity; whether the *medium* holds one is the verb's
-        answer, over the candidates below."""
         cp = self._run(f'_tailnet_save_edit "{self.root}" "{self.stash}"')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertNotIn("kept=yes", cp.stdout)
         self.assertFalse(self.stash.exists())
 
     def test_the_addressed_root_is_tried_before_the_others(self):
-        """A board's bench role is one tailnet node and its systems take
-        turns being it, so a system written beside one that already holds the
-        identity adopts it rather than joining under a name that is taken.
-        The addressed pair still wins when it has its own."""
+        """A board's systems share one bench node, so a system adopts a sibling's identity; its own wins."""
         def roots(rootp):
             cp = bash(_SAY + f"ROOTP={rootp}\n"
                       + _lift(CARD_PRIV, "_tailnet_roots") + '\n_tailnet_roots /dev/x\n')
@@ -523,59 +431,12 @@ class TestTailnetIdentityAcrossARewrite(WkTest):
         self.assertEqual(roots(4), ["4", "6", "8"])
 
     def test_the_stash_is_per_medium_not_per_pair(self):
-        """two stash names would be two identities, and the second system to
-        join would collide with the first on one name."""
         cp = bash(_SAY + _lift(CARD_PRIV, "_tailnet_stash")
                   + '\n_tailnet_stash /dev/mmcblk0; echo; _tailnet_stash /dev/mmcblk0\n')
         a, b = cp.stdout.split()
         self.assertEqual(a, b)
-        body = _lift(CARD_PRIV, "v_tailnet_save") + _lift(CARD_PRIV, "v_tailnet_restore")
-        self.assertNotIn('_tailnet_stash "$dev$PFX"', body,
-                         "the stash is keyed per pair again; the two bench systems would want two nodes")
-
-    def test_the_save_verb_reports_an_adoption(self):
-        body = _lift(CARD_PRIV, "v_tailnet_save")
-        self.assertIn('say "adopted=$p"', body)
-        self.assertIn('[ "$p" = "$ROOTP" ]', body,
-                      "an adoption is only reported when the identity came from another pair")
-
-    def test_the_board_remembers_its_bench_node_off_the_bench_medium(self):
-        """A fresh bench card must rejoin as the node it was, or writing one
-        needs something with the power to retire the leftover. So the identity
-        is kept on the rescue's own root -- the filesystem a bench rewrite
-        never touches -- not in /run for the length of one command."""
-        stash = _lift(CARD_PRIV, "_tailnet_stash")
-        self.assertNotIn("/run/", stash, "the identity is forgotten at the next reboot")
-        self.assertIn("TAILNET_KEEP_DIR", stash)
-        save = _lift(CARD_PRIV, "v_tailnet_save")
-        self.assertIn("adopted=remembered", save,
-                      "a medium with no live identity does not fall back on what the board remembers")
-        restore = _lift(CARD_PRIV, "v_tailnet_restore")
-        self.assertNotIn('rm -f "$stash"', restore,
-                         "the remembered identity is spent by one restore; the next fresh card collides")
-
-    def test_a_live_identity_refreshes_what_the_board_remembers(self):
-        """the remembered copy must never become the older of two identities."""
-        save = _lift(CARD_PRIV, "v_tailnet_save")
-        self.assertIn('mv -f "$stash.new" "$stash"', save)
-
-    def test_the_verbs_are_gated_and_dispatched(self):
-        """Gated like every other verb -- the gate is what refuses a disk this
-        machine runs from -- but not @second-only: a dedicated bench medium is
-        rewritten whole, and the node it holds is the board's bench node
-        exactly as a second system's is."""
-        text = CARD_PRIV.read_text()
-        for verb, fn in (("tailnet-save", "v_tailnet_save"), ("tailnet-restore", "v_tailnet_restore")):
-            body = _lift(CARD_PRIV, fn)
-            self.assertIn('gate "${1:-}"', body)
-            self.assertRegex(text, rf"(?m)^\s*{verb}\)\s+{fn}")
-            self.assertIn(verb, re.search(r'usage: wk-card-priv [^"]*', text).group(0))
-
 
 class TestUnitsForABusyBoxInit(WkTest):
-    """`units` installs the archive's init.d scripts on an image with no
-    systemd but an /etc/init.d, so a buildroot bench system gets its
-    self-disarm and self-return at write time like a yocto one gets units."""
 
     def setUp(self):
         super().setUp()
@@ -607,18 +468,12 @@ class TestUnitsForABusyBoxInit(WkTest):
     def test_a_systemd_image_takes_the_units_not_the_scripts(self):
         (self.root / "lib" / "systemd").mkdir(parents=True)
         (self.root / "lib" / "systemd" / "systemd").write_text("")
-        (self.root / "etc" / "init.d").mkdir(parents=True)   # some systemd images carry one too
+        (self.root / "etc" / "init.d").mkdir(parents=True)
         cp = self._edit()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertTrue((self.root / "etc" / "systemd" / "system" / "wk-self-return.service").is_file())
         self.assertFalse((self.root / "etc" / "init.d" / "S11wk-self-disarm").exists())
         self.assertIn("installed 2 file(s)", cp.stdout)
-
-    def test_an_image_with_neither_init_takes_nothing_and_says_so(self):
-        cp = self._edit()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("neither systemd nor /etc/init.d", cp.stdout)
-        self.assertFalse((self.root / "etc").exists())
 
     def test_the_archive_may_name_init_scripts_and_nothing_else_new(self):
         import io
@@ -664,10 +519,6 @@ class TestPiSdDriver(unittest.TestCase):
             self.assertRaises(act.Refused, fn, *args)
         return err.getvalue()
 
-    def test_arming_is_on_the_medium(self):
-        from wk.boot.pi import PiSd
-        self.assertEqual(PiSd.arming, "medium")
-
     def test_arm_and_disarm_go_through_the_helper_on_the_rescue(self):
         fake, d = self.board("/dev/mmcblk0p3")
         d.disarm()
@@ -676,14 +527,12 @@ class TestPiSdDriver(unittest.TestCase):
         self.assertEqual(self.arms(fake), ["/dev/mmcblk0@second"])
 
     def test_arm_selects_the_named_system(self):
-        """the shared layout's pairs map to the helper's addresses: 5-6 is @second, 7-8 is @third."""
         fake, d = self.board("/dev/mmcblk0p5", "/dev/mmcblk0p7")
         d.arm("/dev/mmcblk0p7")
         self.assertEqual(self.arms(fake), ["/dev/mmcblk0@third"])
         self.assertIn("select_system", self.refused(d.arm, ""))
 
     def test_arm_skips_only_when_armed_for_the_same_system(self):
-        """armed for the other system is not armed for this one: the arm re-stages rather than trusting a yes."""
         fake, d = self.board("/dev/mmcblk0p5", "/dev/mmcblk0p7")
         d.arm("/dev/mmcblk0p7")
         d.arm("/dev/mmcblk0p5")

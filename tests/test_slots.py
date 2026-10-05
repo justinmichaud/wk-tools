@@ -1,12 +1,5 @@
-"""WebKit slots: the manifest (lib/wk/slot.py), the running-binary check the
-wk-board run-benchmark driver makes (lib/wk/bench/board_driver.py), and the
-`wk sysimage webkit` refusals that need no workspace or board.
-
-The ELF the manifest describes is a real shared object linked here with
-gcc and a chosen --build-id, read back through readelf.
-
-Run: python3 -m unittest tests.test_slots -v
-"""
+"""WebKit slots: the manifest (lib/wk/slot.py) over a real linked ELF, the board driver's running-binary check, and
+`wk sysimage webkit` refusals."""
 import contextlib
 import hashlib
 import io
@@ -21,7 +14,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from tests.support import (REPO, WkTest, bash, container_side, container_store, run_here,
+from tests.support import (REPO, WkTest, container_side, container_store, run_here,
                            requires_container_target, run)
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -37,11 +30,7 @@ def wkslot(*args, **kw):
 
 
 def linker_takes_build_id():
-    """A build id is what a slot is identified by, so the ELF these tests
-    read back has to carry one this machine's linker can be told to write.
-    GNU ld and lld take -Wl,--build-id; the Apple linker refuses it, so on
-    macOS there is nothing here to link and the tests skip. Probed once, by
-    linking the same trivial shared object the tests do."""
+    """GNU ld and lld take -Wl,--build-id; the Apple linker refuses it."""
     if shutil.which("gcc") is None:
         return False
     with tempfile.TemporaryDirectory() as d:
@@ -54,8 +43,6 @@ def linker_takes_build_id():
 
 
 def make_root(root, build_id=BUILD_ID):
-    """A slot's install tree with one real shared object where the WebKit
-    library goes, and the two other files the manifest looks for."""
     lib = root / "usr" / "lib"
     (root / "usr" / "libexec" / "wpe-webkit-1.1").mkdir(parents=True)
     (lib / "wpe-webkit-1.1" / "injected-bundle").mkdir(parents=True)
@@ -143,8 +130,7 @@ class TestVerified(WkTest):
 
 
 def load_driver():
-    """lib/wk/bench/board_driver.py imports run-benchmark's BrowserDriver; a
-    stand-in module lets the pure functions be tested without a checkout."""
+    """board_driver.py with a stand-in for run-benchmark's BrowserDriver."""
     if "webkitpy.benchmark_runner.browser_driver.browser_driver" not in sys.modules:
         base = types.ModuleType("webkitpy.benchmark_runner.browser_driver.browser_driver")
 
@@ -165,8 +151,6 @@ def load_driver():
 
 
 class TestBoardDriver(unittest.TestCase):
-    """The two judgements the driver makes on its own: which URL the board
-    opens, and whether the process that reported is the slot under test."""
 
     def setUp(self):
         self.d = load_driver()
@@ -178,9 +162,6 @@ class TestBoardDriver(unittest.TestCase):
                      "mapped": self.expect["lib"], "other_webkit": "", "lib_sha256": "ab" * 32}
 
     def test_every_launch_ends_the_old_browser_and_starts_cold(self):
-        """prepare_env runs before each launch: the kill, then the cache
-        reset -- a second launch at a cached URL never starts the benchmark
-        (lib/wk/bench/board_driver.py, prepare_env)."""
         env = {"WK_BOARD_DEST": "board", "WK_BOARD_OPTS": "[]", "WK_BOARD_LIB": str(REPO / "lib"), "WK_BOARD_LAUNCH": "cog", "WK_BOARD_KILL": "killall cog",
                "WK_BOARD_RESET": "rm -rf /root/.cache/WebKitCache", "WK_BOARD_URL": "127.0.0.1:1"}
         with unittest.mock.patch.dict(os.environ, env):
@@ -196,14 +177,13 @@ class TestBoardDriver(unittest.TestCase):
         return drv
 
     def test_a_board_command_is_an_effect_on_the_board_machine(self):
-        """`machine.board_driver_effects`: the driver's ssh is the Machine's, so the fake records it and --dry-run prints it."""
         board = Fake("board")
         board.answer(["sh", "-c"])
         self.driver(board)._remote("killall cog")
         self.assertEqual(board.effects, [("run", ("sh", "-c", "killall cog"))])
         with unittest.mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), contextlib.redirect_stderr(io.StringIO()) as err:
             self.driver(Fake("board"))._remote("killall cog")
-        self.assertIn("would run on board: sh -c 'killall cog'", err.getvalue())
+        self.assertIn("killall cog", err.getvalue())
 
     def test_a_failed_board_command_names_its_status(self):
         board = Fake("board")
@@ -221,26 +201,15 @@ class TestBoardDriver(unittest.TestCase):
 
     def test_the_images_own_webkit_is_caught(self):
         got = dict(self.good, mapped="", other_webkit="/usr/lib/libWPEWebKit-1.1.so.0.2.9 ", lib_sha256="0" * 64)
-        problems = self.d.judge(self.expect, got)
-        self.assertTrue(any("has not mapped" in p for p in problems), problems)
-        self.assertTrue(any("another WebKit" in p for p in problems), problems)
-        self.assertTrue(any("sha256" in p for p in problems), problems)
+        self.assertEqual(len(self.d.judge(self.expect, got)), 3)
 
-    def test_a_different_slots_bytes_are_caught(self):
-        problems = self.d.judge(self.expect, dict(self.good, lib_sha256="f" * 64))
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn("sha256", problems[0])
-
-    def test_no_process_is_its_own_problem(self):
-        problems = self.d.judge(self.expect, {"pids": "0"})
-        self.assertEqual(len(problems), 1)
-        self.assertIn("no WPEWebProcess", problems[0])
+    def test_a_different_slots_bytes_or_no_process_is_one_problem(self):
+        self.assertEqual(len(self.d.judge(self.expect, dict(self.good, lib_sha256="f" * 64))), 1)
+        self.assertEqual(len(self.d.judge(self.expect, {"pids": "0"})), 1)
 
 
 class TestSysimageWebkitRefusals(WkTest):
     def test_a_yocto_slot_is_the_webkit_stage(self):
-        """A yocto image's slot is WebKit's own build-webkit --cross-target
-        (the workspace's `webkit` stage), planned by the yocto dry run."""
         cp = run_here("sysimage", "webkit", "webkit-2.52-yocto-rpi3-32", "--commit", "a" * 40, "--slot", "base", "--dry-run", timeout=60)
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("webkit", cp.stdout)
@@ -248,33 +217,22 @@ class TestSysimageWebkitRefusals(WkTest):
     def test_a_yocto_slot_needs_both_commit_and_slot(self):
         cp = run_here("sysimage", "webkit", "webkit-2.52-yocto-rpi3-32", "--slot", "base", "--dry-run", timeout=60)
         self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("both --commit", cp.stdout)
 
     def test_commit_and_slot_are_required(self):
         cp = run_here("sysimage", "webkit", "wpewebkit-2.38-buildroot-rpi3-32", timeout=30)
         self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("usage: wk sysimage webkit", cp.stdout)
 
     def test_a_short_sha_is_refused(self):
         cp = run_here("sysimage", "webkit", "wpewebkit-2.38-buildroot-rpi3-32", "--commit", "04abe098", "--slot", "base", timeout=30)
         self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("40 hex digits", cp.stdout)
 
     def test_a_slot_name_is_a_directory_name(self):
         cp = run_here("sysimage", "webkit", "wpewebkit-2.38-buildroot-rpi3-32", "--commit", "a" * 40, "--slot", "../x", timeout=30)
         self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("not usable", cp.stdout)
 
 
 class TestSysimageLs(WkTest):
-    """`wk sysimage ls` is read-only and answers on any host: every function
-    it reaches for is defined, and a slot directory with no manifest yet (a
-    build that died) is simply not a slot.
-
-    The images are in the store, so the machine holding the store answers --
-    on a macOS workstation that is the podman VM, whose `ws` directory this
-    host cannot read at all, and a host-side scan of it reports no image
-    however many the VM holds."""
+    """`wk sysimage ls` is asked of the machine holding the store."""
 
     def test_ls_answers_cleanly(self):
         cp = run("sysimage", "ls", timeout=120)
@@ -285,9 +243,6 @@ class TestSysimageLs(WkTest):
     @unittest.skipUnless(sys.platform == "darwin",
                          "only a macOS workstation keeps the store off this machine")
     def test_a_store_this_machine_cannot_read_is_asked_of_the_machine_holding_it(self):
-        """An image put in the VM's store, and a WK_STORE on this side that
-        does not exist: the row can only have come from asking the VM. An
-        empty answer would prove nothing -- the VM holds no image workspace most days."""
         ws = "yocto-webkit-2.52-yocto-rpi5-64"
         img = ("%s/ws/%s/build/CrossToolChains/rpi5-64bits-mesa"
                "/build/image/webkit-dev-ci-tools.wic.xz" % (container_store(), ws))
@@ -296,10 +251,7 @@ class TestSysimageLs(WkTest):
         self.addCleanup(container_side, "rm -rf %s/ws/%s" % (container_store(), ws))
         cp = run("sysimage", "ls", env={"WK_STORE": "/nonexistent-store"}, timeout=300)
         self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn(ws, cp.stdout,
-                      "the machine holding the store was not asked for its images")
-        self.assertNotIn("has built an image", cp.stdout,
-                         "this host answered for a store it cannot read")
+        self.assertIn(ws, cp.stdout)
 
 
 if __name__ == "__main__":

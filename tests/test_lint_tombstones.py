@@ -1,6 +1,4 @@
-"""lint.no_tombstone_remedy: no string in the Python sources sends the user to
-a command the dispatcher refuses as a tombstone; only the TOMBSTONES table
-itself names one."""
+"""lint.no_tombstone_remedy: no string in the Python sources sends the user to"""
 TIER = "lint"
 import ast
 import re

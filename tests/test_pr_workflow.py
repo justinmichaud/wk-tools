@@ -1,26 +1,11 @@
 """`wk pr` / `wk new --pr`: the spec parser and the mirror fetches underneath
-them (lib/wk/pr.py's parse_spec, sync.fetch_into_mirror and fetch_pull_into_mirror).
-
-The fetches run against temporary git repositories standing in for a fork,
-an upstream, and the mirror -- git accepts a plain path as a URL, so no
-network and no real WK_STORE is ever touched. WK_LOCK_DIR is pointed at a
-scratch directory too: the fetches take the real 'store' lock name (the same
-one `wk sync` takes), and without this a test run here would contend with a
-real `wk sync` on this machine, or vice versa.
-
-'wk pr open' -- the fifth form, which pushes a branch to its fork and opens
-it with `gh pr create` -- is covered further down by TestPrOpenTarget and
-TestPrOpenGhArgs (pr_open_target/pr_open_gh_args, imported straight out of
-the Python cmd/pr) and by TestPrOpenRefusals (the two refusals that happen
-before either of those ever runs, through the real dispatcher).
-
-Run: python3 -m unittest tests.test_pr_workflow -v
-"""
+them (lib/wk/pr.py's parse_spec, sync.fetch_into_mirror and fetch_pull_into_mirror)."""
 import contextlib
 import importlib.machinery
 import importlib.util
 import io
 import os
+import shlex
 import subprocess
 import types
 import unittest
@@ -34,8 +19,6 @@ CMD_PR = REPO / "cmd" / "pr"
 
 
 def _load_cmd_pr():
-    """cmd/pr as a module, the way its own `#!/usr/bin/env python3` runs it --
-    a real file with no extension needs its loader spelled out."""
     loader = importlib.machinery.SourceFileLoader("wk_cmd_pr", str(CMD_PR))
     spec = importlib.util.spec_from_file_location("wk_cmd_pr", str(CMD_PR), loader=loader)
     m = importlib.util.module_from_spec(spec)
@@ -43,8 +26,6 @@ def _load_cmd_pr():
     return m
 
 
-# The real git.REMOTES and wk.secrets.forks: pr_open_target never fetches or pushes over them (it
-# only reads remote *names* and URLs already configured in the test's own local-path repo).
 CMD_PR_MODULE = _load_cmd_pr()
 KEY_LOADED = lambda: 0
 
@@ -73,10 +54,6 @@ def _make_repo(dir_, branch, filename="f.txt"):
 
 
 class GitWorld(Fake):
-    """`killpoints[pr]`: a git+gh model behind pr.checkout/pr_rebase/pr_open,
-    just real enough that a kill can land between any two of their mutations
-    and a rerun has real state to converge from -- not a real git process,
-    since what is under test is `wk pr`'s own recovery, not git's."""
 
     def __init__(self):
         super().__init__("host")
@@ -88,7 +65,6 @@ class GitWorld(Fake):
         self.dirty = 0
         self.upstream = {}         # branch -> {"remote": r, "merge": ref}
         self.pushed = set()        # (fork, branch)
-        self.opened = 0
         self.target = SimTarget(self)
 
     @property
@@ -113,8 +89,6 @@ class GitWorld(Fake):
         return Result(0)
 
     def git(self, sub):
-        """One `git -C <src>` subcommand, as pr.checkout/pr_rebase/pr_open shape it:
-        a read answers from state, a write goes through `effect()` first."""
         if sub[:2] == ["status", "--porcelain"]:
             return Result(0, "M x\n" * self.dirty)
         if sub[:3] == ["rev-parse", "--verify", "--quiet"]:
@@ -198,9 +172,6 @@ class GitWorld(Fake):
 
 
 class SimTarget(targets.Target):
-    """A workspace whose checkout is a GitWorld: `src`/`mirror_dir`/`exec` are
-    pr.py's whole contract with a target, so this is the smallest thing that
-    satisfies it."""
 
     def __init__(self, world, src="/src/WebKit", mirror=""):
         super().__init__("ws", REPO, {}, world)
@@ -222,9 +193,6 @@ class SimTarget(targets.Target):
 
 
 class RecordingTarget(SimTarget):
-    """Every act_exec call, wet or dry -- act_exec's own dry-run gate decides
-    whether `exec` (and so a GitWorld mutation) ever runs, so this is the one
-    place a dry run's plan and a wet run's argv are the same list to compare."""
 
     def __init__(self, world, **kw):
         super().__init__(world, **kw)
@@ -236,11 +204,6 @@ class RecordingTarget(SimTarget):
 
 
 class TestPrCheckoutKillPoints(unittest.TestCase):
-    """`killpoints[pr]`: pr.checkout onto a fork's branch -- the path that adds
-    a remote -- killed after any effect and rerun converging. The add is its
-    own fire-and-forget act_exec precisely so a kill between it and the url
-    fix-up cannot strand a half-wired remote: `_source`'s own config read
-    finds the remote either way and skips re-adding it."""
 
     URL = "https://github.com/alice/WebKit.git"
     WPE_URL = "https://github.com/alice/WPEWebKit.git"
@@ -264,8 +227,6 @@ class TestPrCheckoutKillPoints(unittest.TestCase):
 
 
 class TestPrRebaseKillPoints(unittest.TestCase):
-    """`killpoints[pr]`: pr_rebase's fetch and rebase, killed after either and
-    rerun converging on the same rebased tip."""
 
     def make_world(self):
         w = GitWorld()
@@ -286,34 +247,47 @@ class TestPrRebaseKillPoints(unittest.TestCase):
 
 
 class TestPrOpenKillPoints(unittest.TestCase):
-    """`killpoints[pr]`: 'wk pr open's push and the `gh pr create` after it,
-    killed after either and rerun converging -- a second push is a
-    fast-forward no-op and a second `gh pr create` a harmless retry with
-    GitHub, neither a half-made thing `wk` owns the recovery of."""
 
     def make_world(self):
         return GitWorld()
 
     def run_once(self, w):
-        def fake_exec(argv):
-            w.effect(("gh",) + tuple(argv))
-            w.opened += 1
         with mock.patch.object(CMD_PR_MODULE, "pr_open_target",
                                return_value=("WebKit/WebKit", "alice:eng/x", "fork", "eng/x")), \
-                mock.patch.object(CMD_PR_MODULE.act, "exec_into", fake_exec), \
                 contextlib.redirect_stderr(io.StringIO()):
             CMD_PR_MODULE.pr_open(w.target, "ws", False, False, push_status=KEY_LOADED)
 
     def state(self, w):
-        return (set(w.pushed), w.opened > 0)
+        return (set(w.pushed), any(e[0] == "exec" for e in w.effects))
 
     def test_an_open_killed_after_any_effect_and_rerun_converges(self):
         converges(self, self.make_world, self.run_once, self.state)
 
 
+class AgentKeys:
+    """Secrets as `push_from_here` reads it: one fork, its public half, and an agent holding `keys`."""
+    macos = False
+
+    def __init__(self, keys=("256 SHA256:k fork (ED25519)",), sock="/run/agent.sock"):
+        self.keys, self.sock = list(keys), sock
+
+    def forks(self):
+        return [("fork", "alice/WebKit", "")]
+
+    def machine_sock(self):
+        return self.sock
+
+    def agent_list(self, sock):
+        return self.keys if sock == self.sock else []
+
+    def pub_path(self, fork):
+        return "/s/build_key_%s.pub" % fork
+
+    def agent_argv(self, line):
+        return ["sh", "-c", line]
+
+
 class TestPrOpenFromABoxKillPoints(unittest.TestCase):
-    """`killpoints[pr]`: `push_from_here`'s fetch into the mirror, the push and the delete of the temporary ref,
-    killed after any of them and rerun converging on the pushed branch and no ref left in the mirror."""
 
     MIRROR = "/h/mirror"
     REF = "refs/wk/push/box/eng/x"
@@ -327,19 +301,30 @@ class TestPrOpenFromABoxKillPoints(unittest.TestCase):
         def git_in_mirror(argv, fake):
             if "fetch" in argv:
                 fake.refs.add(argv[-1].split(":", 1)[1])
-            elif "push" in argv:
-                fake.pushed.add(argv[-1])
             elif "update-ref" in argv:
                 fake.refs.discard(argv[-1])
             return Result(0)
+
+        def push(argv, fake):
+            words = shlex.split(argv[-1])
+            if words[words.index("-C") + 1] == self.MIRROR and "push" in words:
+                fake.pushed.add(words[-1])
+            return Result(0)
         w.react(["git", "-C", self.MIRROR], git_in_mirror)
+        w.react(["sh", "-c"], push)
         return w
 
-    def run_once(self, w):
+    def run_once(self, w, keys=None):
         target = types.SimpleNamespace(here=w, env={"HOME": "/h"}, name="box", ssh_host=lambda _: "box")
-        keys = mock.Mock(forks=lambda: [("fork", "alice/WebKit", "")], push_key_path=lambda f: "/k")
+        keys = keys or AgentKeys()
+
+        @contextlib.contextmanager
+        def held(resource):
+            w.effects.append(("hold", resource))
+            yield
+            w.effects.append(("release", resource))
         with mock.patch.object(CMD_PR_MODULE, "Store", lambda env: mock.Mock(mirror=lambda: self.MIRROR)), \
-                mock.patch.object(CMD_PR_MODULE, "Lock", lambda *a: mock.Mock(held=lambda r: contextlib.nullcontext())), \
+                mock.patch.object(CMD_PR_MODULE, "Lock", lambda *a: mock.Mock(held=held)), \
                 mock.patch.object(CMD_PR_MODULE.secrets, "Secrets", lambda *a: keys), \
                 mock.patch.object(sync, "in_vm", lambda env: False), \
                 contextlib.redirect_stderr(io.StringIO()):
@@ -354,11 +339,42 @@ class TestPrOpenFromABoxKillPoints(unittest.TestCase):
         self.run_once(w)
         self.assertEqual(self.state(w), (set(), {"%s:refs/heads/eng/x" % self.REF}))
 
+    def test_the_temporary_ref_is_locked_from_its_fetch_until_its_delete(self):
+        """`wk gc` keeps a ref whose lock is held, so it cannot delete one between this fetch and this push."""
+        w = self.make_world()
+        self.run_once(w)
+        locks = [i for i, e in enumerate(w.effects) if e == ("hold", pr.push_lock(self.REF)) or e == ("release", pr.push_lock(self.REF))]
+        work = [i for i, e in enumerate(w.effects) if e[0] == "run"]
+        self.assertEqual(2, len(locks))
+        self.assertTrue(locks[0] < min(work) and max(work) < locks[1], w.effects)
+
+    def test_the_push_goes_through_the_agent_and_names_the_forks_public_half(self):
+        w = self.make_world()
+        self.run_once(w)
+        (line,) = [e[1][-1] for e in w.effects if e[0] == "run" and e[1][:2] == ("sh", "-c")]
+        self.assertTrue(line.startswith("SSH_AUTH_SOCK=/run/agent.sock exec git"), line)
+        self.assertIn("-i /s/build_key_fork", line)
+        self.assertNotIn(".pub", line)
+
+    def test_an_empty_agent_refuses_naming_the_switch_before_any_effect(self):
+        w = self.make_world()
+        with self.assertRaises(act.Refused), mock.patch.object(CMD_PR_MODULE, "die", side_effect=act.Refused(1)) as die:
+            self.run_once(w, AgentKeys(keys=()))
+        self.assertIn("wk push on", die.call_args[0][0])
+        self.assertEqual((set(), set()), self.state(w))
+
+    def test_a_macos_host_pushes_through_the_agent_it_runs_for_its_guests(self):
+        mac, guests = AgentKeys(keys=()), AgentKeys(sock="/g/agent.sock")
+        mac.macos = True
+        w = self.make_world()
+        with mock.patch.object(CMD_PR_MODULE.guest, "push_agent", lambda root, machine, env: (guests, "/g/agent.sock")):
+            self.run_once(w, mac)
+        self.assertEqual(self.state(w), (set(), {"%s:refs/heads/eng/x" % self.REF}))
+        (line,) = [e[1][-1] for e in w.effects if e[0] == "run" and e[1][:2] == ("sh", "-c")]
+        self.assertTrue(line.startswith("SSH_AUTH_SOCK=/g/agent.sock "), line)
+
 
 class TestPrCheckoutDryRunEqualsWetRun(unittest.TestCase):
-    """Every mutation of pr.checkout, pr_rebase and pr_open goes through
-    Target.act_exec -- the one place --dry-run intercepts it -- so a dry run's
-    plan is the wet run's argv list, in order, and a dry run touches no state."""
 
     URL = "https://github.com/alice/WebKit.git"
     WPE_URL = "https://github.com/alice/WPEWebKit.git"
@@ -427,50 +443,23 @@ class TestPrCheckoutDryRunEqualsWetRun(unittest.TestCase):
 
 
 class TestPrParseSpec(unittest.TestCase):
-    """parse_spec maps the three spellings 'wk pr' accepts."""
+    def test_the_three_spellings(self):
+        for spec, want in (("alice:eng/frame-fix", ["user", "alice", "eng/frame-fix", "", ""]),
+                           ("1234", ["pull", "", "", "origin", "1234"]),
+                           ("wpe:5678", ["pull", "", "", "wpe", "5678"]),
+                           ("wpe:somebranch", ["user", "wpe", "somebranch", "", ""])):
+            got = pr.parse_spec(spec)
+            self.assertEqual([got[k] for k in ("kind", "user", "branch", "remote", "n")], want, spec)
 
-    def _fields(self, spec):
-        got = pr.parse_spec(spec)
-        return [got[k] for k in ("kind", "user", "branch", "remote", "n")]
-
-    def _refused(self, spec):
-        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
-            pr.parse_spec(spec)
-        return err.getvalue()
-
-    def test_user_branch(self):
-        """'user:branch' is a fork's branch"""
-        self.assertEqual(self._fields("alice:eng/frame-fix"), ["user", "alice", "eng/frame-fix", "", ""])
-
-    def test_bare_number(self):
-        """a bare number is a pull request against origin (WebKit/WebKit)"""
-        self.assertEqual(self._fields("1234"), ["pull", "", "", "origin", "1234"])
-
-    def test_wpe_number(self):
-        """'wpe:<n>' is a pull request against the wpe remote"""
-        self.assertEqual(self._fields("wpe:5678"), ["pull", "", "", "wpe", "5678"])
-
-    def test_wpe_non_numeric_falls_back_to_a_fork_spec(self):
-        """'wpe:somebranch' is not wpe:<n> (non-digits), so it is a fork spec
-        for a user literally named 'wpe' -- the same disambiguation
-        <user>:<branch> already gets, not a second special case"""
-        self.assertEqual(self._fields("wpe:somebranch"), ["user", "wpe", "somebranch", "", ""])
-
-    def test_garbage_is_refused(self):
-        self.assertIn("not a PR spec", self._refused("not-a-spec"))
-
-    def test_bad_pull_number_is_refused(self):
-        """digits followed by anything else is refused rather than silently truncated"""
-        self.assertIn("not a pull request number", self._refused("1234x"))
-        self.assertIn("not a pull request number", self._refused("wpe:12x"))
-
-    def test_an_empty_half_is_refused(self):
-        self.assertIn("expected <user>:<branch>", self._refused(":b"))
+    def test_a_bad_spec_is_refused(self):
+        for spec, why in (("not-a-spec", "not a PR spec"), ("1234x", "not a pull request number"),
+                          ("wpe:12x", "not a pull request number"), (":b", "expected <user>:<branch>")):
+            with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
+                pr.parse_spec(spec)
+            self.assertIn(why, err.getvalue(), spec)
 
 
 class TestMirrorFetch(unittest.TestCase):
-    """sync.fetch_into_mirror and fetch_pull_into_mirror, against real (local-path) git
-    repositories standing in for a fork and an upstream."""
 
     def setUp(self):
         self._scratch = scratch_dir(prefix="wk-pr-test-")
@@ -521,9 +510,6 @@ class TestMirrorFetch(unittest.TestCase):
 
 
 class TestMirrorFetchIsARecorderUnderADryRun(unittest.TestCase):
-    """dispatch.dry_run_is_the_recorder: fetch_into_mirror's git init/config/fetch all run through
-    act_run, so a dry run leaves the mirror untouched even if a caller reaches this directly;
-    resolved_or_planned is the one place that decides whether to, and never calls it under one."""
 
     def setUp(self):
         self._scratch = scratch_dir(prefix="wk-pr-dryrun-")
@@ -564,156 +550,62 @@ class TestMirrorFetchIsARecorderUnderADryRun(unittest.TestCase):
 
 
 class TestPrOpenTarget(unittest.TestCase):
-    """pr_open_target: which project a branch belongs to and what it opens
-    as, read off a real (local-path) git checkout -- no network, no gh."""
+    """pr_open_target, read off a real (local-path) git checkout."""
 
     def setUp(self):
         self._scratch = scratch_dir(prefix="wk-pr-open-test-")
         self.tmp = self._scratch.__enter__()
         self.addCleanup(self._scratch.__exit__, None, None, None)
 
-    def _tracked_branch(self, project, remote_name, fork_remote, branch, user="testuser"):
-        """A working checkout with <branch> checked out tracking
-        <remote_name>/main (an 'upstream' repo whose basename is <project>
-        -- 'WebKit' or 'WPEWebKit', the same suffix wk.secrets.forks matches),
-        plus a <fork_remote> remote pointing at a github fork. Mirrors how
-        `wk pr rebase` leaves a branch tracking origin/main or wpe/main."""
-        upstream = self.tmp / project
-        _make_repo(upstream, "main")
+    def _checkout(self, project, remote, fork_remote, branch, tracks_fork):
+        upstream = self.tmp / f"{project}-{rand_suffix()}" / project
+        _make_repo(upstream, branch if tracks_fork else "main")
         work = self.tmp / f"work-{rand_suffix()}"
         work.mkdir()
         _git("init", "-q", "-b", "main", cwd=work)
-        _git("remote", "add", remote_name, str(upstream), cwd=work)
-        _git("fetch", "-q", remote_name, cwd=work)
-        _git("checkout", "-q", "-b", branch, f"{remote_name}/main", cwd=work)
-        _git("remote", "add", fork_remote, f"https://github.com/{user}/{project}.git", cwd=work)
+        source = fork_remote if tracks_fork else remote
+        _git("remote", "add", source, str(upstream), cwd=work)
+        _git("fetch", "-q", source, cwd=work)
+        _git("checkout", "-q", "-b", branch, f"{source}/{branch if tracks_fork else 'main'}", cwd=work)
+        url = f"https://github.com/testuser/{project}.git"
+        _git("remote", "set-url" if tracks_fork else "add", fork_remote, url, cwd=work)
         return work
 
-    def _target(self, src):
-        return CMD_PR_MODULE.pr_open_target(src)
+    def test_which_project_a_branch_opens_against(self):
+        for project, remote, fork, base in (("WebKit", "origin", "fork", "WebKit/WebKit"),
+                                            ("WPEWebKit", "wpe", "forkwpe", "WebPlatformForEmbedded/WPEWebKit")):
+            for tracks_fork in (False, True):
+                with self.subTest(project=project, tracks_fork=tracks_fork):
+                    work = self._checkout(project, remote, fork, "eng/x", tracks_fork)
+                    self.assertEqual(CMD_PR_MODULE.pr_open_target(work), (base, "testuser:eng/x", fork, "eng/x"))
 
-    def test_webkit_branch(self):
-        """a branch tracking origin/main opens against WebKit/WebKit, head
-        <fork's github user>:<branch>, pushed to the 'fork' remote"""
-        work = self._tracked_branch("WebKit", "origin", "fork", "eng/my-feature")
-        self.assertEqual(
-            self._target(work),
-            ("WebKit/WebKit", "testuser:eng/my-feature", "fork", "eng/my-feature"),
-        )
-
-    def test_wpe_branch(self):
-        """a branch tracking wpe/main opens against WPEWebKit's real owner
-        (WebPlatformForEmbedded, not the fork's), pushed to 'forkwpe'"""
-        work = self._tracked_branch("WPEWebKit", "wpe", "forkwpe", "eng/wpe-feature")
-        self.assertEqual(
-            self._target(work),
-            ("WebPlatformForEmbedded/WPEWebKit", "testuser:eng/wpe-feature", "forkwpe", "eng/wpe-feature"),
-        )
-
-    def _branch_tracking_its_fork(self, project, fork_remote, branch, user="testuser"):
-        """What `wk pr <user>:<branch>` leaves behind: the branch tracks the
-        *fork* it came from, not an upstream's main."""
-        fork = self.tmp / f"{project}-fork-{rand_suffix()}"
-        _make_repo(fork, branch)
-        work = self.tmp / f"work-{rand_suffix()}"
-        work.mkdir()
-        _git("init", "-q", "-b", "main", cwd=work)
-        _git("remote", "add", fork_remote, str(fork), cwd=work)
-        _git("fetch", "-q", fork_remote, cwd=work)
-        _git("checkout", "-q", "-b", branch, f"{fork_remote}/{branch}", cwd=work)
-        # The URL the real wiring records, which is what names the project.
-        _git("remote", "set-url", fork_remote, f"https://github.com/{user}/{project}.git", cwd=work)
-        return work
-
-    def test_a_branch_tracking_the_fork_opens_against_the_project(self):
-        """Not against the fork itself: `wk pr` leaves the branch tracking
-        `fork/<branch>`, and a pull request against that is one against you."""
-        work = self._branch_tracking_its_fork("WebKit", "fork", "eng/my-feature")
-        self.assertEqual(
-            self._target(work),
-            ("WebKit/WebKit", "testuser:eng/my-feature", "fork", "eng/my-feature"),
-        )
-
-    def test_a_wpe_branch_tracking_its_fork_opens_against_wpewebkit(self):
-        work = self._branch_tracking_its_fork("WPEWebKit", "forkwpe", "eng/wpe-feature")
-        self.assertEqual(
-            self._target(work),
-            ("WebPlatformForEmbedded/WPEWebKit", "testuser:eng/wpe-feature",
-             "forkwpe", "eng/wpe-feature"),
-        )
-
-    def test_refuses_on_main(self):
-        """opening 'main' itself as a pull request is refused by name"""
-        work = self.tmp / "on-main"
-        work.mkdir()
-        _git("init", "-q", "-b", "main", cwd=work)
-        with self.assertRaises(CMD_PR_MODULE.PrOpenError) as ctx:
-            self._target(work)
-        self.assertIn("cannot open 'main'", str(ctx.exception))
-
-    def test_refuses_detached_head(self):
-        """a detached HEAD has no branch to push, so it is refused by name"""
-        work = self.tmp / "detached"
-        _make_repo(work, "main")
-        _git("checkout", "-q", "--detach", "HEAD", cwd=work)
-        with self.assertRaises(CMD_PR_MODULE.PrOpenError) as ctx:
-            self._target(work)
-        self.assertIn("detached HEAD", str(ctx.exception))
-
-    def test_refuses_dirty_tree(self):
-        """an uncommitted change is named before anything is pushed, the
-        same rule the PR-checkout form applies (cmd/pr's own header)"""
-        work = self._tracked_branch("WebKit", "origin", "fork", "eng/dirty")
-        (work / "untracked.txt").write_text("scratch\n")
-        with self.assertRaises(CMD_PR_MODULE.PrOpenError) as ctx:
-            self._target(work)
-        msg = str(ctx.exception)
-        self.assertIn("uncommitted changes", msg)
-        self.assertIn("git", msg)
-
-    def test_refuses_a_branch_with_no_upstream(self):
-        """a fresh local branch with no tracking ref cannot be told apart
-        as WebKit's or WPEWebKit's, and is refused rather than guessed at"""
-        work = self.tmp / "no-upstream"
-        _make_repo(work, "main")
-        _git("checkout", "-q", "-b", "eng/untracked", cwd=work)
-        with self.assertRaises(CMD_PR_MODULE.PrOpenError) as ctx:
-            self._target(work)
-        self.assertIn("no upstream", str(ctx.exception))
+    def test_what_cannot_be_opened_is_refused_by_name(self):
+        main = self.tmp / "on-main"
+        main.mkdir()
+        _git("init", "-q", "-b", "main", cwd=main)
+        detached = self.tmp / "detached"
+        _make_repo(detached, "main")
+        _git("checkout", "-q", "--detach", "HEAD", cwd=detached)
+        dirty = self._checkout("WebKit", "origin", "fork", "eng/dirty", False)
+        (dirty / "untracked.txt").write_text("scratch\n")
+        loose = self.tmp / "no-upstream"
+        _make_repo(loose, "main")
+        _git("checkout", "-q", "-b", "eng/untracked", cwd=loose)
+        for work, why in ((main, "cannot open 'main'"), (detached, "detached HEAD"),
+                          (dirty, "uncommitted changes"), (loose, "no upstream")):
+            with self.assertRaises(CMD_PR_MODULE.PrOpenError) as ctx:
+                CMD_PR_MODULE.pr_open_target(work)
+            self.assertIn(why, str(ctx.exception))
 
 
 class TestPrOpenGhArgs(unittest.TestCase):
-    """pr_open_gh_args: the exact argv 'gh pr create' gets -- what a stub gh
-    actually receives in TestPrOpenRefusals-style use."""
-
-    def _args(self, base, head, *flags):
-        return CMD_PR_MODULE.pr_open_gh_args(base, head, *flags)
-
-    def test_plain(self):
-        """no flags: --repo, --head, --fill, nothing else"""
-        self.assertEqual(
-            self._args("WebKit/WebKit", "alice:eng/x"),
-            ["--repo", "WebKit/WebKit", "--head", "alice:eng/x", "--fill"],
-        )
-
-    def test_draft_and_web_pass_through_in_order(self):
-        self.assertEqual(
-            self._args("WebKit/WebKit", "alice:eng/x", "--draft", "--web"),
-            ["--repo", "WebKit/WebKit", "--head", "alice:eng/x", "--fill", "--draft", "--web"],
-        )
-
-    def test_unknown_flag_is_dropped(self):
-        """anything but --draft/--web is not gh's business and is not passed"""
-        self.assertEqual(
-            self._args("WebKit/WebKit", "alice:eng/x", "--bogus"),
-            ["--repo", "WebKit/WebKit", "--head", "alice:eng/x", "--fill"],
-        )
+    def test_draft_and_web_pass_through_and_nothing_else(self):
+        base = ["--repo", "WebKit/WebKit", "--head", "alice:eng/x", "--fill"]
+        for flags, extra in (((), []), (("--draft", "--web"), ["--draft", "--web"]), (("--bogus",), [])):
+            self.assertEqual(CMD_PR_MODULE.pr_open_gh_args("WebKit/WebKit", "alice:eng/x", *flags), base + extra)
 
 
 class _FakeRebaseTarget:
-    """A duck-typed Target: pr_rebase only ever calls src/mirror_dir/exec on
-    it, so a fake answering those three, from a scripted list of Results, is
-    the whole of what a unit test needs -- no container, guest or ssh driver."""
 
     kind = targets.Target.kind
 
@@ -721,6 +613,7 @@ class _FakeRebaseTarget:
         self._mirror = mirror
         self._responses = list(responses)
         self.calls = []
+        self.here = Fake()
 
     def src(self, ws):
         return "/src/WebKit"
@@ -736,9 +629,6 @@ class _FakeRebaseTarget:
 
 
 class TestPrRebase(unittest.TestCase):
-    """pr_rebase: fetch from the mirror when the target has one and it is
-    there, the network otherwise, then rebase -- one round trip per fact,
-    each through Target.exec, none of it inline bash."""
 
     def _run(self, mirror, responses):
         target = _FakeRebaseTarget(mirror, responses)
@@ -803,21 +693,20 @@ class TestPrOpenStatus(unittest.TestCase):
     def test_the_command_execs_into_gh(self):
         target = _FakeRebaseTarget("", [Result(0)])   # the push
         with mock.patch.object(CMD_PR_MODULE, "pr_open_target", return_value=("WebKit/WebKit", "me:b", "fork", "b")), \
-                mock.patch.object(CMD_PR_MODULE.os, "execvp") as execvp, contextlib.redirect_stderr(io.StringIO()):
+                contextlib.redirect_stderr(io.StringIO()):
             CMD_PR_MODULE.pr_open(target, "myws", draft=True, web=False, push_status=KEY_LOADED)
-        execvp.assert_called_once_with("gh", ["gh", "pr", "create", "--repo", "WebKit/WebKit", "--head", "me:b", "--fill", "--draft"])
+        self.assertEqual([("exec", ("gh", "pr", "create", "--repo", "WebKit/WebKit", "--head", "me:b", "--fill", "--draft"), None)],
+                         target.here.effects)
 
 
 class TestPrOpenPushesFromWhereTheKeyIs(unittest.TestCase):
-    """A build box's branch is pushed from here, with this machine's deploy key; a peer workstation pushes its own,
-    with its own key and push switch, as every other target does in the workspace."""
 
     def _open(self, peer):
         target = _FakeRebaseTarget("", [Result(0)])
         target.kind, target.is_local, target.peer = "remote", False, peer
         with mock.patch.object(CMD_PR_MODULE, "pr_open_target", return_value=("WebKit/WebKit", "me:b", "fork", "b")), \
                 mock.patch.object(CMD_PR_MODULE, "push_from_here", return_value=Result(0)) as from_here, \
-                mock.patch.object(CMD_PR_MODULE.os, "execvp"), contextlib.redirect_stderr(io.StringIO()):
+                contextlib.redirect_stderr(io.StringIO()):
             CMD_PR_MODULE.pr_open(target, "myws", draft=False, web=False, push_status=KEY_LOADED)
         return from_here.called, target.calls
 
@@ -829,42 +718,9 @@ class TestPrOpenPushesFromWhereTheKeyIs(unittest.TestCase):
 
 
 class TestPrOpenRefusals(unittest.TestCase):
-    """'wk pr open', through the real dispatcher: the two refusals that
-    must happen before any git or gh runs. cmd/pr declares 'sub open
-    where=host needs=gh,gh-auth' rather than re-checking either itself
-    (CLAUDE.md: a concern the dispatcher already owns is a bug to re-decide
-    in a command, even when it decides the same) -- so what is under test
-    here is the declaration wired to the framework the rest of `wk` reuses
-    (cmd/push, cmd/key, cmd/bench's own 'sub ... where=host' subverbs)."""
 
-    def test_refuses_inside_a_workspace(self):
-        """where=host + in_workspace is refused by the dispatcher itself,
-        before cmd/pr runs at all -- the same mechanism 'wk push status'
-        and 'wk bench stage' rely on inside a workspace."""
-        with fake_workspace() as ws:
-            cp = ws.run("pr", "open")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("host", cp.stdout)
-
-    def test_refuses_without_gh_login(self):
-        """a stub gh that cannot call the API is refused naming 'gh auth
-        login' -- check_needs('gh-auth'), the same check cmd/key relies on.
-        This fires before cmd/pr looks for a workspace at all, so none of
-        --draft/--web/a real name is needed to reach it."""
-        with stub_path({
-            "gh": '#!/bin/sh\ncase "$1 $2" in\n"api user") exit 1 ;;\nesac\nexit 0\n',
-        }) as binp:
-            cp = run("pr", "open", "some-workspace",
-                     env={"PATH": f"{binp}:{os.environ['PATH']}"})
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("gh auth login", cp.stdout)
 
     def test_refuses_when_the_stored_token_is_dead(self):
-        """`gh auth status` exits 0 for an account whose token has expired
-        or been revoked -- it answers "is an account configured", not "can
-        this machine call the API" -- so gh_authenticated (lib/wk/shell.py)
-        asks the API instead, and the refusal comes before the command
-        starts rather than part-way through its own report."""
         with stub_path({
             "gh": '#!/bin/sh\ncase "$1 $2" in\n'
                   '"auth status") exit 0 ;;\n'
@@ -878,19 +734,6 @@ class TestPrOpenRefusals(unittest.TestCase):
 
 
 class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
-    """`git-webkit pr` inside a workspace is the one thing that has to reach
-    GitHub's API, and it authenticates with GITHUB_COM_USERNAME/GITHUB_COM_TOKEN
-    from its environment (webkitcorepy; the keyring is unusable in a container).
-    A token in the environment is one the agent in that workspace can read, so
-    the workspace holds a placeholder and the injector outside it puts the real
-    token in the Authorization header.
-
-    This drives the whole mechanism for real -- a TLS handshake against the
-    injector's own leaf certificate, a requests-shaped request head over the
-    wire, and a fake upstream that reports what arrived -- with no network and
-    no GitHub. INJECT_PORT is pointed at that upstream, which is the one thing
-    a local run cannot do by configuration.
-    """
 
     @classmethod
     def setUpClass(cls):
@@ -904,7 +747,6 @@ class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
         spec.loader.exec_module(cls.m)
 
     def _run(self, token):
-        """Returns (what the upstream received, what the client got back)."""
         import asyncio
         import ssl
         import tempfile
@@ -940,15 +782,8 @@ class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
                                             ssl=up_ctx)
             port = up.sockets[0].getsockname()[1]
 
-            # The upstream leg of the injector verifies against the system
-            # trust store, which cannot know about a certificate made two
-            # lines ago; pointing it at this CA keeps the leg verified -- and
-            # the name it verifies stays api.github.com, which is why the
-            # connection is redirected by address below rather than by name.
             client_ctx = ssl.create_default_context(cafile=str(d / "ca.pem"))
             m.INJECT_PORT = port
-            # No standing read token here: this drives the write half, whose
-            # only credential is the switch's.
             injector = m.Injector(str(pat), str(d / "read-pat"), str(d / "bz-key"),
                                   client_ctx)
 
@@ -958,8 +793,6 @@ class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
             server = await asyncio.start_unix_server(injector.handle, path=sock,
                                                      ssl=srv_ctx)
 
-            # The workspace's side: it trusts the CA (REQUESTS_CA_BUNDLE,
-            # container/proxy/ensure-bridge.sh) and sends the placeholder.
             ws_ctx = ssl.create_default_context(cafile=str(d / "ca.pem"))
             reader, writer = await asyncio.open_unix_connection(
                 sock, ssl=ws_ctx, server_hostname="api.github.com")
@@ -977,10 +810,7 @@ class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
             up.close()
             return body
 
-        # The injector connects to api.github.com by name, because that is the
-        # only host it ever talks to; the fake upstream is on loopback. Sending
-        # the connection there by address keeps the certificate name -- and so
-        # the verification -- exactly as it is in production.
+        # The injector dials api.github.com by name; the fake upstream is on loopback.
         real_open = asyncio.open_connection
 
         async def to_loopback(host, port, **kw):
@@ -996,51 +826,14 @@ class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
         self.assertNotIn(b"Basic", head)
         self.assertNotIn(b"wk-injects-this", head)
         self.assertIn(b"200 OK", got)
-        # The request itself is otherwise untouched.
         self.assertIn(b"GET /user HTTP/1.1", head)
         self.assertIn(b"Accept: application/vnd.github.v3+json", head)
 
     def test_with_the_switch_off_the_call_goes_unauthenticated(self):
-        """`wk push off` removes the token file, so GitHub answers for itself:
-        401 on an endpoint that needs an account. Nothing is fabricated here,
-        and nothing the workspace sent is forwarded."""
         head, got = self._run("")
         self.assertNotIn(b"Authorization", head)
         self.assertNotIn(b"wk-injects-this", head)
         self.assertIn(b"GET /user HTTP/1.1", head)
         self.assertIn(b"200 OK", got)
 
-    def test_the_workspace_is_told_to_send_that_placeholder(self):
-        text = (REPO / "container" / "proxy" / "ensure-bridge.sh").read_text()
-        self.assertIn("export GITHUB_COM_TOKEN=wk-injects-this", text)
 
-
-@unittest.skip(
-    "a real end-to-end run ('wk new wk-test-<rnd>' then 'wk pr <it> <spec>' "
-    "against a local fork) needs an isolated WK_STORE, but on this machine "
-    "'where=workspace' commands for a container workspace are forwarded "
-    "whole into the podman VM (forward_to_vm, wk:522-596) and only a fixed "
-    "list of variables crosses that ssh (WK_IN_VM/WK_DEBUG/WK_QUIET/WK_YES/WK_FORCE/"
-    "WK_ROW_LABEL/WK_HOST_SELF/WK_CONFIG -- WK_STORE is not "
-    "one of them), so there is no way to point the forwarded command at a "
-    "scratch mirror without writing PR refs into this machine's real one. "
-    "TestPrParseSpec and TestMirrorFetch above cover the same code with a "
-    "real (if local-path) fork/origin/mirror instead."
-)
-class TestPrEndToEnd(unittest.TestCase):
-    def test_new_then_pr_against_a_local_fork(self):
-        pass
-
-
-class TestTheMirrorHasOneWriter(unittest.TestCase):
-    """The mirror is written by `wk sync` alone: pr.py has no fetch into it, and `wk bench ab` reaches it through sync."""
-
-    def test_pr_has_no_mirror_fetch(self):
-        self.assertFalse([n for n in dir(pr) if n.startswith("mirror_fetch")])
-
-    def test_bench_ab_fetches_through_sync(self):
-        from wk.bench import ab
-        src = (REPO / "lib" / "wk" / "bench" / "ab.py").read_text()
-        self.assertNotIn("pr.mirror_fetch", src)
-        self.assertIn("sync.fetch_into_mirror", src)
-        self.assertIs(ab.sync, sync)

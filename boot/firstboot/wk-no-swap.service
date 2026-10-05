@@ -1,9 +1,9 @@
 [Unit]
-Description=Refuse to carry swap, so a benchmark cannot page
-After=local-fs.target
+Description=Refuse to carry disk swap, so a benchmark cannot page to storage; a zram device the image carries stays
+After=local-fs.target swap.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/sbin/swapoff -a
+ExecStart=/bin/sh -c "awk 'NR > 1 && $$1 !~ /zram/ { print $$1 }' /proc/swaps | xargs -r -n1 swapoff"
 [Install]
 WantedBy=multi-user.target

@@ -1,12 +1,6 @@
-"""`wk doctor <workspace>` and `wk doctor` inside one (lib/wk/wall.py): every
-check of the sandbox is a method returning doctor rows, driven here against a
-fake machine whose workspace answers each probe from a table keyed by a
-substring of the command it runs. The defaults are a healthy container with the
-switch off; a test overrides one answer and asserts the check fails -- a check
-that cannot fail is not a check.
-
-Run: python3 tests/run.py --unit -k test_doctor_wall
-"""
+"""`wk doctor <workspace>` and `wk doctor` inside one (lib/wk/wall.py): every check of the sandbox is a method
+returning doctor rows, driven here against a fake machine whose workspace answers each probe from a table
+keyed by a substring of the command it runs."""
 import contextlib
 import importlib.machinery
 import importlib.util
@@ -72,7 +66,7 @@ HEALTHY = [
     ("webkitscmpy.setup", "true"),
     ("rest/version", "200"),
     ("http_code}' -X POST -H", "412"),
-    ("curl -sS -m 40 -X POST -H", '{"code": 50, "message": "a product is required"}'),
+    ("-D - -X POST -H", 'HTTP/1.1 400 Bad Request\r\n\r\n{"code": 50, "message": "a product is required"}'),
     ("gpu-probe.sh", Result(0, "renderer=NVIDIA Tegra | vendor=NVIDIA\n", "")),
     ("touch /opt/wk-tools/.wk-write-probe", "touch: cannot touch '/opt/wk-tools/.wk-write-probe': Read-only file system"),
     ("rm -f /opt/wk-tools", ""),
@@ -123,10 +117,12 @@ class _Wall(unittest.TestCase):
         return self._answer(argv[-1])
 
     def _answer(self, cmd):
+        """curl's `-D -` through the workspace's https_proxy prints the proxy's CONNECT reply first, unless suppressed."""
         self.asked.append(cmd)
+        connect = "HTTP/1.0 200 Connection established\r\n\r\n" if "curl" in cmd and "-D -" in cmd and "--suppress-connect-headers" not in cmd else ""
         for key, value in self.answers.items():
             if key in cmd:
-                return value if isinstance(value, Result) else Result(0, value, "")
+                return value if isinstance(value, Result) else Result(0, connect + value, "")
         return Result(0, "", "")
 
     def set(self, key, value):
@@ -258,8 +254,8 @@ class TestNoCredentialsInside(_Wall):
 
 
 class TestTheKeyScanRunsForReal(WkTest):
-    """The scan against a real tree shaped like a guest's home, whose checkout
-    (with WebKit's PEM fixtures) is inside it: what it does not walk is the point."""
+    """The scan against a real tree shaped like a guest's home, whose checkout (with WebKit's PEM fixtures) is
+    inside it: what it does not walk is the point."""
 
     PEM = "-----BEGIN OPENSSH PRIVATE KEY-----\nnot a real key\n"
 
@@ -375,25 +371,34 @@ class TestGitHubRead(_Wall):
 
 
 class TestAnInjectorFaultIsNotAnUpstreamOutage(_Wall):
-    """The injector's 598 (TLS or DNS toward the host failed) is a miss naming the injector."""
+    """A 502 carrying the injector's `X-Wk-Injector` header (TLS or DNS toward the host failed) is a miss naming the injector."""
+
+    FAULT = "HTTP/1.1 502 Bad Gateway\r\nX-Wk-Injector: SSLCertVerificationError\r\nContent-Length: 5\r\n\r\n502"
 
     def assertInjectorFault(self, rows, name):
         self.assertEqual(MISS, rows[0][0])
-        self.assertIn("%s: the injector failed to verify or resolve the host (HTTP 598)" % name, rows[0][1])
+        self.assertIn("%s: the injector failed to verify or resolve the host (SSLCertVerificationError)" % name, rows[0][1])
         self.assertIn("wk-github-inject", rows[0][2])
         self.assertNotIn("upstream outage", rows[0][1])
 
-    def test_a_github_598_is_a_miss(self):
-        self.set("api.github.com/user", "598")
+    def test_a_github_fault_is_a_miss(self):
+        self.set("api.github.com/user", self.FAULT)
         self.assertInjectorFault(self.check("github_read"), "GitHub")
 
-    def test_a_bugzilla_598_is_a_miss_for_read_and_write(self):
-        self.set("rest/version", "598")
+    def test_a_bugzilla_fault_is_a_miss_for_read_and_write(self):
+        self.set("rest/version", self.FAULT)
         self.assertInjectorFault(self.check("bugzilla_read"), "Bugzilla")
-        self.set("http_code}' -X POST -H", "598")
+        self.set("http_code}' -X POST -H", self.FAULT)
         self.assertInjectorFault(self.check("bugzilla_write"), "Bugzilla")
-        self.set("curl -sS -m 40 -X POST -H", "the wk credential injector failed to verify or resolve bugs.webkit.org (SSLCertVerificationError)\r\n")
+        body = "the wk credential injector failed to verify or resolve bugs.webkit.org (SSLCertVerificationError)\r\n"
+        self.set("-D - -X POST -H", self.FAULT.rsplit("\r\n\r\n", 1)[0] + "\r\n\r\n" + body)
         self.assertInjectorFault(self.check("bugzilla_write", push_on=1), "Bugzilla")
+
+    def test_a_502_without_the_header_is_the_upstream(self):
+        self.set("api.github.com/user", "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 5\r\n\r\n502")
+        rows = self.check("github_read")
+        self.assertEqual(NOTE, rows[0][0])
+        self.assertIn("an upstream outage", rows[0][1])
 
 
 class TestAnUpstreamOutageIsNotTheSandbox(_Wall):
@@ -418,7 +423,7 @@ class TestAnUpstreamOutageIsNotTheSandbox(_Wall):
         self.assertNoted(self.check("bugzilla_read"), "Bugzilla")
         self.set("http_code}' -X POST -H", "504")
         self.assertNoted(self.check("bugzilla_write"), "Bugzilla")
-        self.set("curl -sS -m 40 -X POST -H", "bugs.webkit.org did not answer within 12 seconds; the wk credential injector is up\r\n")
+        self.set("-D - -X POST -H", "HTTP/1.1 504 Gateway Timeout\r\n\r\nbugs.webkit.org did not answer within 12 seconds; the wk credential injector is up\r\n")
         self.assertNoted(self.check("bugzilla_write", push_on=1), "Bugzilla")
 
     def test_a_000_stays_a_miss(self):
@@ -470,7 +475,7 @@ class TestAgentCredential(_Wall):
 
     def test_not_logged_in_names_the_targets_remedy(self):
         self.set("claude auth status", '{"loggedIn": false}')
-        self.assertFails(self.check("agent_credential"), "not logged in", "usable claude-login")
+        self.assertFails(self.check("agent_credential"), "not logged in", "/login in a 'wk ai claude' session")
 
     def test_an_unreadable_answer_is_quoted(self):
         self.set("claude auth status", "")
@@ -517,7 +522,7 @@ class TestBugzilla(_Wall):
                             ('{"code": 306}', ("does not know it", "--replace")),
                             ("<html>", ("nothing Bugzilla-shaped",))):
             with self.subTest(body=body):
-                self.set("curl -sS -m 40 -X POST -H", body)
+                self.set("-D - -X POST -H", "HTTP/1.1 200 OK\r\n\r\n" + body)
                 self.assertFails(self.check("bugzilla_write", push_on=1), *words)
 
 
@@ -574,7 +579,6 @@ class TestTheContainersHostSide(_Wall):
 
 class TestTheChecksRunAtOnce(unittest.TestCase):
     def test_every_check_runs_at_once_and_the_order_is_kept(self):
-        """Each check answers only once all six are running: checks run in turn break the barrier and read as unmeasured."""
         met = threading.Barrier(6, timeout=10)
 
         def meets(n):
@@ -630,7 +634,7 @@ class TestFromTheHost(_Wall):
         self.set("test -s", Result(1, "", ""))
         _, out = self.report()
         self.assertIn("remote control refuses to start without one", out)
-        self.assertIn("usable claude-login", out)
+        self.assertIn("/login in a 'wk ai claude' session", out)
         self.assertIn('test -s "$CLAUDE_SECURESTORAGE_CONFIG_DIR/.credentials.json"', self.asked)
 
     def test_a_stopped_workspace_fails(self):
@@ -756,7 +760,7 @@ class TestTheDriversAnswer(_Wall):
     def test_a_guest_without_the_share_is_told_to_boot_with_it(self):
         vm = self.load("vm")
         vm.exec = self._direct
-        self.assertIn("usable claude-login", vm.agent_secret_remedy("demo", "claude-login"))
+        self.assertIn("/login in a 'wk ai claude' session", vm.agent_secret_remedy("demo", "claude-login"))
         self.set("test -d", Result(1, "", ""))
         self.assertIn("the agent-rw share is not mounted in 'demo'", vm.agent_secret_remedy("demo", "claude-login"))
         self.assertIn("usable litellm", vm.agent_secret_remedy("demo", "litellm"))
@@ -779,6 +783,26 @@ class TestTheCommand(WkTest):
         self.assertEqual("workspace", self.run_doctor("--where", "demo", "--gpu").stdout.strip())
         self.assertEqual("local", self.run_doctor("--where", "--all").stdout.strip())
 
+    def machines(self):
+        (self.tmp / "machines").mkdir(exist_ok=True)
+        (self.tmp / "machines" / "pi.conf").write_text("kind=board\n")
+        return {"WK_MACHINES_DIR": str(self.tmp / "machines")}
+
+    def test_a_machine_name_is_asked_here(self):
+        self.assertEqual("local", self.run_doctor("--where", "pi", env=self.machines()).stdout.strip())
+
+    def test_a_machine_takes_no_option(self):
+        cp = self.run_doctor("pi", "--all", env=self.machines())
+        self.assertEqual(1, cp.returncode, cp.stderr)
+        self.assertIn("is not asked of a machine", cp.stderr)
+
+    def test_a_machine_is_not_asked_inside_a_workspace(self):
+        marker = self.tmp / "marker"
+        marker.write_text("name=demo\nsrc=/src\n")
+        cp = self.run_doctor("pi", env=dict(self.machines(), WK_MARKER=str(marker)))
+        self.assertEqual(1, cp.returncode, cp.stderr)
+        self.assertIn("asks a machine from the host", cp.stderr)
+
     def test_gpu_is_a_workspaces_question(self):
         cp = self.run_doctor("--gpu")
         self.assertEqual(1, cp.returncode, cp.stderr)
@@ -796,12 +820,6 @@ class TestTheCommand(WkTest):
         self.assertEqual(1, cp.returncode, cp.stderr)
         self.assertIn("'wk doctor' here checks this one", cp.stderr)
 
-    def test_verify_is_a_tombstone_naming_doctor(self):
-        cp = subprocess.run([str(REPO / "wk"), "verify", "demo"], capture_output=True, text=True, env=clean_env())
-        self.assertEqual(1, cp.returncode)
-        self.assertIn("'wk verify' is merged into doctor: wk doctor <workspace>", cp.stderr)
-        self.assertFalse((REPO / "cmd" / "verify").exists())
-
 
 def sim_registry(in_ws):
     """Just enough of a Registry for `inside`/`workspace`'s own exit-code translation: a report's `.missing` and
@@ -814,9 +832,8 @@ def sim_registry(in_ws):
 
 
 class TestExitCodes(unittest.TestCase):
-    """`inside`/`workspace` (cmd/doctor) turn a Report -- and, inside, whether
-    an agent could publish -- into 0 intact | 1 broken | 3 publishing; nothing
-    here drives a real check."""
+    """`inside`/`workspace` (cmd/doctor) turn a Report -- and, inside, whether an agent could publish -- into 0
+    intact | 1 broken | 3 publishing; nothing here drives a real check."""
 
     def _inside(self, missing, publishing):
         def fake_from_inside(root, target, ws, machine, rep):

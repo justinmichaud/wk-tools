@@ -42,3 +42,7 @@
     algorithm = histogram
 [gc]
     auto = 6700
+# No `process`: a long-running filter git cannot start is fatal, and a workspace has no git-lfs.
+[filter "lfs"]
+    clean = git-lfs clean -- %f
+    smudge = git-lfs smudge -- %f

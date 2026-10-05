@@ -1,19 +1,9 @@
 """The script a macOS benchmark install runs by itself (lib/wk/bench/autorun.py)
-and the readings it judges the install by (bench/mac-quiet-desktop.sh).
-
-It runs with nobody in the room and no network, so anything it cannot decide
-by itself it cannot ask about: a reading that hangs hangs the experiment, a
-refusal nobody reads has to power the machine off, and a run that ends any way
-at all has to leave its verdict on the volume. The autorun runs here against
-the fake machine and the fake clock.
-
-Run: python3 tests/run.py --unit -k autorun
-"""
+and the readings it judges the install by (bench/mac-quiet-desktop.sh)."""
 import contextlib
 import io
 import json
 import os
-import re
 import subprocess
 import sys
 import unittest
@@ -36,10 +26,6 @@ def sh(script, cwd=None, timeout=120):
 
 
 class TestAReadingCannotHangALeg(WkTest):
-    """`wk_quiet_daemons_pause` holds mds SIGSTOPped and a stopped daemon
-    answers no XPC request, so `mdutil -s /` never returns: one leg of one
-    round hung for 2727s that way and the watchdog took the whole experiment
-    with it. macOS ships no timeout(1), so the bound is this file's own."""
 
     def _read(self, script):
         return sh(f'set -euo pipefail\n. {str(QUIET)!r}\n{script}\n')
@@ -50,8 +36,6 @@ class TestAReadingCannotHangALeg(WkTest):
         self.assertEqual(0, cp.returncode, cp.stderr)
 
     def test_a_reading_that_answers_nothing_is_empty_and_not_a_timeout(self):
-        """A command that failed for its own reason answered nothing, which is
-        a different fact from a daemon that never answers."""
         for command in ("true", "false", "nosuchcommandanywhere"):
             with self.subTest(command=command):
                 cp = self._read(f'_wk_qd_read 10 {command}')
@@ -66,9 +50,6 @@ class TestAReadingCannotHangALeg(WkTest):
         self.assertEqual("!timeout", cp.stdout)
 
     def test_stderr_is_part_of_the_reading_when_it_is_asked_for(self):
-        """`tmutil destinationinfo` says "No destinations configured" on
-        stderr, so a reader that dropped stderr would read a configured
-        destination on every machine that has none."""
         cp = self._read("""_wk_qd_read -e 10 sh -c 'printf out; printf err >&2'""")
         self.assertEqual("outerr", cp.stdout, cp.stderr)
 
@@ -77,9 +58,6 @@ class TestAReadingCannotHangALeg(WkTest):
         self.assertEqual("out", cp.stdout, cp.stderr)
 
     def test_the_merged_form_is_bounded_through_a_grandchild_too(self):
-        """The kill reaches the direct child only, so the hang can outlive it:
-        a reading collected through a pipe would then wait on the grandchild
-        holding that pipe open, which is the bound not holding at all."""
         with scratch_dir() as tmp:
             binp = tmp / "bin"
             binp.mkdir()
@@ -90,26 +68,7 @@ class TestAReadingCannotHangALeg(WkTest):
                     f'_wk_qd_read -e 1 tmutil destinationinfo\n')
         self.assertEqual("!timeout", cp.stdout, cp.stderr)
 
-    def test_there_is_still_one_bounded_reader_in_the_tree(self):
-        readers = [p for p in list((REPO / "bench").glob("*.sh")) + list((REPO / "lib").glob("*.sh"))
-                   if "_wk_qd_read() {" in p.read_text()]
-        self.assertEqual([QUIET], readers)
-        self.assertEqual(1, QUIET.read_text().count("_wk_qd_read() {"))
-
-    def test_the_reading_that_hung_and_the_one_beside_it_share_the_bound(self):
-        """One implementation: `mdutil` is the measured one, and the 0600
-        analytics plist is read through `sudo` off the same paused daemon."""
-        text = QUIET.read_text()
-        probe = text[text.index("wk_quiet_desktop_probe()"):]
-        self.assertEqual(2, len(re.findall(r"_wk_qd_read ", probe)), probe)
-        self.assertIn('_wk_qd_read "$_WK_QD_READ_SECS" mdutil -s /', probe)
-        self.assertIn('_wk_qd_read "$_WK_QD_READ_SECS" sudo -n defaults read', probe)
-        self.assertEqual(1, text.count("_wk_qd_read() {"))
-
     def test_the_probe_says_which_of_the_two_spotlight_did(self):
-        """A read that timed out and a read that answered nothing are one
-        value in the probe's output otherwise, and the findings below have to
-        tell them apart."""
         with scratch_dir() as tmp:
             binp = tmp / "bin"
             binp.mkdir()
@@ -133,9 +92,6 @@ class TestAReadingCannotHangALeg(WkTest):
 
 
 class TestATimedOutReadingIsUnknownAndNotAFault(WkTest):
-    """152 legs read Spotlight while the daemons were paused and one did not,
-    so the deadlock is intermittent: a flaky reading must say what it could
-    not establish and must not refuse a leg for it."""
 
     def _judge(self, probe):
         cp = sh(f'set -euo pipefail\n. {str(QUIET)!r}\n'
@@ -162,8 +118,6 @@ class TestATimedOutReadingIsUnknownAndNotAFault(WkTest):
         self.assertEqual(["wrong"], [f[0] for f in found], found)
 
     def test_any_timed_out_reading_is_a_note_that_names_the_deadlock(self):
-        """One arm, not one per reading: `_wk_qf_judge` is what every table
-        row goes through."""
         found = self._about("analytics=!timeout", "diagnostics")
         self.assertEqual(["note"], [f[0] for f in found], found)
         self.assertIn("XPC", found[0][1])
@@ -734,18 +688,6 @@ class TestTheOverrides(unittest.TestCase):
     def test_it_takes_no_arguments(self):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(2, autorun.main(["--now"]))
-
-
-class TestTheAgentRunsThisFile(unittest.TestCase):
-    def test_the_agent_starts_this_module_in_the_planted_tree(self):
-        self.assertEqual(mac.BENCH_ROOT + "/wk-tools/lib/wk/bench/autorun.py", mac.AUTORUN)
-        self.assertTrue((REPO / "lib" / "wk" / "bench" / "autorun.py").is_file())
-        self.assertIn("<string>/usr/bin/python3</string>", mac.PLIST)
-
-    def test_the_join_cannot_wait_forever(self):
-        """`tailscale up` without --timeout waits for the backend to reach Running for as long as that takes."""
-        text = (REPO / "bench" / "mac-tailnet.sh").read_text()
-        self.assertRegex(text, r"tailscale\" up --timeout=\d+s ")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
-import os
-import subprocess
 import sys
+
+from wk.machine import Local
 
 LIBEXEC = "/usr/local/libexec"
 HELPERS = (("wk-quiesce-priv", "any", "wk quiesce / wk session"),
@@ -21,9 +21,9 @@ def helpers():
     return [(n, w, what, path(n), sudoers(n)) for n, w, what in HELPERS]
 
 
-def answers(helper_path, env=None):
+def answers(helper_path, machine=None):
     # `sudo -l`, never a run: `sudo -n <helper>` succeeds for anything while ./setup holds a timestamp open.
-    out = subprocess.run(["sudo", "-n", "-l"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env).stdout
+    out = (machine or Local()).run(["sudo", "-n", "-l"]).out
     return any("NOPASSWD:" in line and helper_path in line.split() for line in out.splitlines())
 
 

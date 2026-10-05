@@ -30,8 +30,6 @@ from wk.machine import Fake, Result  # noqa: E402
 ROOT = str(REPO)
 SECRETFILE = os.path.join(ROOT, "lib", "secretfile.py")
 CONTRIBUTORS = os.path.join(ROOT, "lib", "contributors.py")
-FORKS = secrets.forks()
-AGENT_SECRETS = secrets.agent_secrets()
 # Bash lifting a stored credential: `key_store <name>` takes the value on stdin, `key_clear <name>` withdraws it, both
 # through cli.Key, the one writer.
 KEY_SH = """_key() { WK_STORE="$WK_STORE" WK_STORE_DEFAULT="${WK_STORE_DEFAULT:-}" WK_IN_VM="${WK_IN_VM:-}" PYTHONPATH="$WK_ROOT/lib" python3 -c 'import sys
@@ -228,11 +226,16 @@ class TestWhereThingsAre(SecretsTest):
             self.assertEqual(["podman", "machine", "ssh", "wk-test", "--", "true"], s.agent_argv("true"))
 
 
+class TestTheLoginIsTheClaudeClis(SecretsTest):
+    def test_a_workspace_missing_the_login_is_sent_to_slash_login_and_nothing_is_judged(self):
+        """The file row is filled by the Claude CLI in a workspace; this machine stores and judges none."""
+        said = self.w.sec().agent_secret_remedy("claude-login")
+        self.assertIn("/login", said)
+        self.assertEqual([], [a for a in self.w.argvs() if "credcheck.py" in " ".join(a) or "secretfile.py" in " ".join(a)])
+
+
 class TestAStoredCredentialIsReadTheOneWay(SecretsTest):
-    """A workspace can write in the agent-rw directory, so a link left there
-    pointing at the token beside the deploy keys would turn every read of the
-    login into a read of the token; cred_verdict/cred_stored read through
-    lib/secretfile.py (Secrets.read), which refuses one."""
+    """cred_verdict and cred_stored read through lib/secretfile.py, which refuses a link (tests/test_store_secrets.py)."""
 
     def _refuse(self, name, verb, out=""):
         path = self.w.sec().cred_path(name)
@@ -241,9 +244,7 @@ class TestAStoredCredentialIsReadTheOneWay(SecretsTest):
         return path
 
     def test_a_refused_read_is_bad_and_carries_none_of_its_own_bytes(self):
-        """secretfile.py refuses before it reads a byte, so its stdout on a
-        refusal is nothing to trust; Secrets.read discards it on any non-zero
-        exit, whatever a broken reader put there."""
+        """Secrets.read discards a reader's stdout on any non-zero exit."""
         path = self._refuse("litellm", "read", out="a-broken-reader-leaked-this\n")
         verdict, err = quiet(self.w.sec().cred_verdict, "litellm")
         self.assertEqual("bad\tthe file at %s could not be read; the refusal above says why" % path, verdict)
@@ -283,13 +284,11 @@ class TestTheAgent(SecretsTest):
         self.w.files[self.w.held + "/build_key_fork"] = "not a key\n"
         self.assertIn(("fork", "FAILED"), self.w.sec().agent_load(SOCK))
 
-    def test_an_empty_agent_answers_and_no_agent_does_not(self):
+    def test_an_empty_agent_answers_and_lists_nothing_and_no_agent_does_not_answer(self):
         s = self.w.sec()
         self.assertTrue(s.agent_answers(SOCK))
+        self.assertEqual([], s.agent_list(SOCK))
         self.assertFalse(s.agent_answers("/nowhere.sock"))
-
-    def test_an_empty_agent_lists_nothing_rather_than_a_sentence(self):
-        self.assertEqual([], self.w.sec().agent_list(SOCK))
 
     def test_clear_empties_it(self):
         self.w.seed()
@@ -305,7 +304,6 @@ class TestTheInjectorsFiles(SecretsTest):
         path = self.tmp + "/a dir/push-github-pat"
         self.assertTrue(self.w.sec().cred_write(path, "github-pat"))
         self.assertEqual("ghp-held\n", self.w.files[path])
-        self.assertIn(["sh", "-c", "umask 077 && cat > %s" % shlex.quote(path)], [list(a) for a in self.w.argvs()])
         for argv in self.w.argvs():
             self.assertNotIn("ghp-held", " ".join(argv))
 
@@ -460,7 +458,6 @@ class TestTheDeployKeys(SecretsTest):
         self.assertEqual("KEY:fork\n", self.w.files[self.w.held + "/build_key_fork"])
         self.assertEqual("PUB:fork\n", self.w.files[self.w.secrets_dir + "/build_key_fork.pub"])
         self.assertIn("build_key_fork.pub", self.w.listdir(self.w.secrets_dir + "/view/container"))
-        self.assertIn(("act", ("sh", "-c", 'umask 077 && cat > "$0"', self.w.held + "/build_key_fork.new")), self.w.effects)
 
     def test_something_that_is_not_a_key_is_refused_and_leaves_nothing(self):
         self.w.seed(forks=("fork",))

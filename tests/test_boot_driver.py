@@ -15,7 +15,7 @@ sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act, fleet  # noqa: E402
 from wk.boot import driver_class  # noqa: E402
-from wk.boot.driver import Channel, Driver, Onboard, interface, part  # noqa: E402
+from wk.boot.driver import Channel, Driver, Onboard, disk_of, interface, part, partno  # noqa: E402
 from tests.fake_boot import FakeBoard  # noqa: E402
 from wk.boot import drivers, open_driver  # noqa: E402
 from wk.machine import Fake  # noqa: E402
@@ -24,8 +24,8 @@ from tests.test_mac_volume import FAKES, MacConformance, mac_board, conf_for as 
 DRIVERS = drivers()
 
 ONBOARD = REPO / "boot" / "onboard"
-BOARDS = {"pi-sd": "rpi3", "pi-tryboot": "rpi4", "rpi5-usb": "rpi5", "pi-mbr": "rpi4"}
-SLOTS_OF = {"pi-sd": (5, 7), "pi-tryboot": (1, 3), "rpi5-usb": (1, 3), "pi-mbr": (1,)}
+BOARDS = {"pi-sd": "rpi3", "pi-tryboot": "rpi4", "rpi5-usb": "rpi5"}
+SLOTS_OF = {"pi-sd": (5, 7), "pi-tryboot": (1, 3), "rpi5-usb": (1, 3)}
 
 
 def conf_for(kind):
@@ -167,6 +167,12 @@ class Conformance:
     def test_the_failsafe_is_on_board_shell_outside_the_arming(self):
         """boot.arming_exact: a failsafe lives outside the script it guards."""
         cls = DRIVERS[self.kind]
+        if self.kind in FAKES:
+            # A volume's return is its bench job's hand-back, a guest's is being stopped.
+            self.assertIsNone(cls.failsafe)
+            self.assertIn(cls.arming, ("command", "guest"))
+            self.assertIsNone(board(self.kind)[1].self_disarm_sh())
+            return
         if not cls.failsafe:
             self.assertEqual(cls.arming, "one-shot", "no failsafe file, and the firmware does not revert either")
             return
@@ -194,8 +200,14 @@ class TestConformanceRpi5Usb(Conformance, unittest.TestCase):
     kind = "rpi5-usb"
 
 
-class TestConformancePiMbr(Conformance, unittest.TestCase):
-    kind = "pi-mbr"
+class TestDiskOfPart(unittest.TestCase):
+    def test_partition_to_disk_for_every_transport(self):
+        """disk_of inverts part for sd, mmc and nvme names"""
+        for p, disk in (("/dev/sda2", "/dev/sda"), ("/dev/mmcblk0p2", "/dev/mmcblk0"),
+                        ("/dev/nvme0n1p2", "/dev/nvme0n1"), ("/dev/sdb1", "/dev/sdb")):
+            with self.subTest(part=p):
+                self.assertEqual(disk_of(p), disk)
+                self.assertEqual(part(disk, partno(p)), p)
 
 
 class TestConformanceMacVolume(MacConformance, Conformance, unittest.TestCase):

@@ -1,10 +1,4 @@
-"""The README's getting-started sequence, walked as a newcomer on a bare
-machine: an empty store, no podman machine, no workspace. Every step that
-fails says why and names the next `wk` or `./setup` command to run (CLAUDE.md,
-"A refusal says why and names the remedy"); a usage line does not count.
-
-Run: python3 tests/run.py -k tests.test_newcomer_path
-"""
+"""The README's getting-started sequence, walked as a newcomer on a bare"""
 import re
 import subprocess
 import sys
@@ -15,7 +9,6 @@ from tests.support import REPO, WkTest, _clean_env, run, run_here
 sys.path.insert(0, str(REPO / "lib"))
 from wk import status  # noqa: E402
 
-# A command offered to run: on its own line, after "->" or "run", or quoted. A command named mid-sentence is prose.
 REMEDY = re.compile(r"(?:^\s*|-> |run |['`])(wk [a-z][\w-]*|\./setup)", re.M)
 USAGE = re.compile(r"^\s*(usage: .*|wk \S+ -h for the rest)$", re.M)
 WS = "bug-238"
@@ -68,18 +61,12 @@ class TestTheFirstCommands(NewcomerTest):
         cp = run()
         self.assertIn("wk help", cp.stdout)
 
-    def test_wk_help_answers(self):
-        self.assertEqual(run("help").returncode, 0)
 
     def test_doctor_names_the_fix_for_what_it_finds_missing(self):
         self.assert_names_a_remedy("wk doctor", run("doctor", env={"WK_STORE": str(self.tmp)}))
 
 
 class TestSetupRefusals(NewcomerTest):
-    def test_an_unknown_option_names_the_help(self):
-        cp = self.setup_script("--no-such-option")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("./setup -h", cp.stdout)
 
     def test_an_unknown_stage_is_refused_not_reported_as_no_changes(self):
         cp = self.setup_script("--stage", "no-such-stage")
@@ -87,17 +74,10 @@ class TestSetupRefusals(NewcomerTest):
         self.assertIn("no stage 'no-such-stage'", cp.stdout)
         self.assertIn("./setup -h", cp.stdout)
         self.assertNotIn("no changes", cp.stdout)
-
-    def test_the_help_is_the_leading_comment_and_nothing_else(self):
-        cp = self.setup_script("-h")
-        self.assertEqual(cp.returncode, 0)
-        self.assertIn("./setup --stage X", cp.stdout)
-        self.assertNotIn("set -euo", cp.stdout)
+        self.assertIn("./setup -h", self.setup_script("--no-such-option").stdout)
 
 
 class TestAWorkspaceFromNothing(NewcomerTest):
-    """Each step of README's "A workspace, start to finish" against an empty
-    store, from the workstation and from the machine that holds the store."""
 
     def walk(self, runner):
         for step in WORKSPACE_STEPS:

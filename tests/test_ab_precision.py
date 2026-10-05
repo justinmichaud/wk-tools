@@ -1,15 +1,6 @@
 """The rule an unattended A/B stops on: `wkdata ab-precision` / `wk bench
 precision` (lib/wk/bench/report.py `t_crit`, `mde_pct`, `headline_score`,
-`precision`).
-
-A macOS A/B is told what difference it has to be able to see -- 0.3% by
-default -- and keeps alternating until the rounds it has resolve that. These
-tests pin the arithmetic against hand computation, the headline score against
-the three shapes run-benchmark writes, and the CLI the autorun calls
-(lib/wk/bench/autorun.py's plan_resolves).
-
-Run: python3 -m unittest tests.test_ab_precision -v
-"""
+`precision`)."""
 import json
 import math
 import subprocess
@@ -133,8 +124,6 @@ def fields(stdout):
 
 
 class TestTheDistribution(WkTest):
-    """The t comes out of the same incomplete beta the p-value goes into, so
-    the stopping rule and the verdict cannot disagree about the distribution."""
 
     def test_t_critical_matches_the_published_table(self):
         for df, want in ((5, 2.571), (10, 2.228), (30, 2.042), (100, 1.984)):
@@ -146,8 +135,6 @@ class TestTheDistribution(WkTest):
         self.assertAlmostEqual(report.t_crit(100000, 0.40), 0.8416, places=3)
 
     def test_it_agrees_with_scipy_where_scipy_is_installed(self):
-        """The stdlib implementation is the one that runs on a benchmark
-        install; scipy is the reference it is checked against here."""
         try:
             from scipy import stats
         except ImportError:
@@ -185,10 +172,6 @@ class TestTheArithmetic(WkTest):
 
 
 class TestTheHeadlineScore(WkTest):
-    """One number per run, out of the three shapes the Mac bench path records. Two of
-    the three never write their overall score into the file at all: they declare
-    it as the geometric mean of their first-level children's Scores, and a
-    stopping rule that reads nothing from them can never fire."""
 
     def test_speedometer3_is_the_mean_of_its_materialised_values(self):
         self.assertAlmostEqual(report.headline_score(speedometer_doc()),
@@ -203,8 +186,6 @@ class TestTheHeadlineScore(WkTest):
         self.assertAlmostEqual(report.headline_score(doc), JETSTREAM3_HEADLINE, places=6)
 
     def test_a_child_carrying_its_own_subtests_is_not_walked_into(self):
-        """JetStream3's children each hold First/Worst/Average Times. The
-        headline is the aggregate of the children, not of their leaves."""
         children = {"zlib-wasm": {"metrics": {"Score": {"current": [4.0]},
                                               "Time": ["Geometric"]},
                                   "tests": {"First": {"metrics": {"Time": {"current": [62.6]}}}}},
@@ -213,9 +194,6 @@ class TestTheHeadlineScore(WkTest):
         self.assertAlmostEqual(report.headline_score(doc), 6.0, places=9)
 
     def test_it_aggregates_per_iteration_rather_than_over_the_pooled_set(self):
-        """Two iterations, two subtests scoring 1 then 4. Each iteration's
-        geometric mean is 1 and 4, averaging 2.5; the geometric mean of all
-        four values pooled is 2.0, which is nobody's score."""
         doc = aggregate_doc("JetStream3.0", "Geometric",
                             {"x": [1.0, 4.0], "y": [1.0, 4.0]})
         got = report.headline_score(doc)
@@ -234,8 +212,6 @@ class TestTheHeadlineScore(WkTest):
 
 
 class TestAnUnreadableAggregateIsRefusedByName(WkTest):
-    """A silent empty answer is what kept this defect invisible for a whole
-    run, so every shape the aggregate cannot be taken from says which one it is."""
 
     def _refusal(self, doc):
         with self.assertRaises(SystemExit) as caught:
@@ -270,9 +246,6 @@ class TestAnUnreadableAggregateIsRefusedByName(WkTest):
 
 
 class TestARunIsADirectory(WkTest):
-    """`ab-precision` names run directories, the way `wk bench report` does, and
-    appends result.json itself: three callers each spelling that append is three
-    implementations of one convention."""
 
     def test_it_takes_directories_and_finds_the_result_json_inside(self):
         with scratch_dir() as tmp:
@@ -357,9 +330,6 @@ class TestTheCommand(WkTest):
             self.assertEqual(f["rounds_needed"], "")
 
     def test_two_arms_scoring_identically_still_report_a_verdict(self):
-        """The A/A control the A/B summary warns about: with no spread at all
-        Welch has no p-value, and a traceback after met=yes exits non-zero,
-        which the autorun reads as "this plan does not resolve yet"."""
         with scratch_dir() as tmp:
             a = write_runs(tmp, "a", [100.0, 100.0])
             b = write_runs(tmp, "b", [100.0, 100.0])
@@ -383,11 +353,6 @@ class TestTheCommand(WkTest):
             self.assertEqual(strict["mde_pct"], loose["mde_pct"])
 
     def test_the_speedometer3_verdict_the_first_mac_ab_reached_is_unchanged(self):
-        """The one plan whose stopping rule could already fire. The rounds are
-        constructed to the means and spread that run reported -- mean_a=58.9816,
-        mean_b=58.9853, mde_pct=0.2254 over 16 rounds -- so reading the headline
-        out of the suite's materialised values rather than out of the subtest
-        table is proved not to move the verdict."""
         with scratch_dir() as tmp:
             spread = 0.1257
             a = write_runs(tmp, "a", [58.9816 + spread] * 8 + [58.9816 - spread] * 8)
@@ -405,8 +370,6 @@ class TestTheCommand(WkTest):
             self.assertEqual(f["rounds_needed"], "")
 
     def test_jetstream3_rounds_reach_a_verdict_at_all(self):
-        """The defect: sixteen JetStream3 rounds a side printed met=no from
-        n_a=0, so no A/B on it could ever stop on precision."""
         with scratch_dir() as tmp:
             def doc(scale):
                 return aggregate_doc("JetStream3.0", "Geometric",
@@ -424,8 +387,6 @@ class TestTheCommand(WkTest):
 
 
 class TestThroughTheCLI(WkTest):
-    """`wk bench precision <run-a> <run-b>` -- run directories, not result
-    files, because that is what a task's runs.tsv holds."""
 
     def test_it_takes_run_directories_and_pools_the_comma_separated_ones(self):
         with scratch_dir() as tmp:

@@ -1,14 +1,4 @@
-"""A container benchmark from nothing, the way a person takes one: a fresh `wk new` of the test's own, a
-jsc-release build, two runs of the shortest plan a JavaScript shell drives (one JetStream3 subtest; a plan with no
-cli.js, SunSpider's, is a browser's), the second pinned, then the two-run and the task report from this host, the
-export, and `wk rm` -- refused while a task is unexported, allowed once both are.
-
-Every step goes through ./wk, which forwards the build and the runs into the podman machine. Gated on
-WK_TEST_SLOW=1 as well as the container target: the build is minutes with a warm ccache, tens of them cold. The
-preflight's cpu governor is unknown in the podman machine, so the runs are --force'd, which they record.
-
-Run: WK_TEST_SLOW=1 python3 tests/run.py --live -k TestBenchContainerRun
-"""
+"""A container benchmark from nothing: `wk new`, a jsc-release build, two runs, the reports, the export, `wk rm`."""
 import json
 import os
 import sys
@@ -95,8 +85,6 @@ class TestBenchContainerRun(WkTest):
 
 
 class TestTheWatchIsInertInAContainer(unittest.TestCase):
-    """The pipeline brackets every browser run with lib/wk/screen.py's Watch
-    (tests/test_bench_pipeline.py); where there is no window server it must record nothing."""
 
     def watch(self, system):
         """Run against a real ps and window probe this would fail on the
@@ -115,13 +103,11 @@ class TestTheWatchIsInertInAContainer(unittest.TestCase):
         return w.stop(), [e[1][0] for e in m.effects]
 
     def test_a_container_is_never_asked(self):
-        """Every container run goes through the same line, and the watcher records nothing rather than refuse."""
         seen, ran = self.watch("Linux")
         self.assertEqual([], seen)
         self.assertEqual(["uname"], ran)
 
     def test_a_mac_whose_window_server_cannot_be_asked_says_so(self):
-        """The probe answers `?` there: not "nothing is there", so it is a finding of its own."""
         seen, ran = self.watch("Darwin")
         self.assertEqual([screen.UNASKED], [l.split("\t", 1)[1] for l in seen])
         self.assertIn("ps", ran, "the watch never looked")

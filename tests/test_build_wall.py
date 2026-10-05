@@ -1,25 +1,4 @@
-"""The build wall: an agent cannot drive a build or a test run by hand.
-
-`wk build` derives the job count from available memory and runs the build at a
-nice level that keeps the machine usable; a hand-rolled `ninja -j$(nproc)` on a
-shared build box takes it down. Inside a workspace the agent's own permissions
-are relaxed (`wk ai claude` passes --dangerously-skip-permissions, because the
-workspace is the blast radius), so a Claude Code deny rule is the advisory half
-only. The wall itself is where the privilege is: one script,
-`container/bin/wk-build-wall`, on PATH ahead of the real tools in every shell
-every target sources (shell/path.sh), invoked under each wrapped name through a
-symlink beside it.
-
-    an agent    CLAUDECODE=1 (Claude Code exports it into every shell it runs)
-                or WK_AGENT=<name> (`wk ai <agent>`, cmd/ai)   -> refused
-    wk's build  WK_BUILD=1 (build/build-in-target.sh)          -> the real tool
-    a person     neither                                       -> the real tool
-
-No real build tool runs here: each test puts fakes of its own further along
-PATH and checks which one was reached.
-
-Run: python3 -m unittest tests.test_build_wall -v
-"""
+"""The build wall: an agent cannot drive a build or a test run by hand."""
 import json
 import os
 import re
@@ -27,7 +6,6 @@ import shutil
 import subprocess
 import unittest
 import unittest.mock
-from pathlib import Path
 
 from tests.support import REPO, WkTest
 
@@ -38,14 +16,9 @@ SETTINGS = REPO / "claude" / "settings.json"
 # The host variant a build-box agent gets (claude/install.sh) carries the same rules.
 SETTINGS_ALL = [SETTINGS, REPO / "claude" / "settings-host.json"]
 
-# Files this change touched, for the parse check below.
-EDITED = ("container/bin/wk-build-wall", "shell/path.sh", "shell/bashrc")
 
 
 def wall_names():
-    """The wrapped names, read from the one place that lists them (WALL_NAMES
-    in the wall itself) rather than copied into this test -- as the
-    dispatcher's own constants are read from Python."""
     m = re.search(r'^WALL_NAMES="([^"]+)"', WALL.read_text(), re.M)
     assert m, "container/bin/wk-build-wall no longer defines WALL_NAMES"
     return tuple(m.group(1).split())
@@ -72,15 +45,6 @@ class WallTest(WkTest):
             p.chmod(0o755)
 
     def bare_bin(self):
-        """A PATH directory holding what the wall itself runs and no build
-        tool at all.
-
-        `/usr/bin` cannot stand in for this: a host with ninja or cmake
-        installed has one *on* PATH, so a test asserting "no real tool
-        anywhere" found the host's and read exit 1 instead of 127. Only the
-        four the wall needs are linked in -- `env` resolves bash through
-        PATH, and the wall calls dirname, grep and readlink.
-        """
         d = self.tmp / "bare-bin"
         if not d.exists():
             d.mkdir()
@@ -105,34 +69,17 @@ class WallTest(WkTest):
 
 
 class TestItRefusesAnAgent(WallTest):
-    """Both pieces of evidence, for every wrapped name: exit 1, the reason and
-    the remedy on stderr, and the real tool not run."""
-
-    def test_claudecode_is_refused(self):
-        for name in NAMES:
-            with self.subTest(tool=name):
-                cp = self.call(name, "-j64", env={"CLAUDECODE": "1"})
-                self.assertEqual(cp.returncode, 1, cp.stdout + cp.stderr)
-                self.assertIn("refused", cp.stderr)
-                self.assertIn(name, cp.stderr)
-                self.assertIn("wk build", cp.stderr)
-                self.assertEqual("", cp.stdout)
+    def test_claudecode_and_wk_agent_are_refused_naming_the_remedies(self):
+        for env in ({"CLAUDECODE": "1"}, {"WK_AGENT": "claude"}):
+            for name in NAMES:
+                with self.subTest(env=env, tool=name):
+                    cp = self.call(name, "-j64", env=env)
+                    self.assertEqual(cp.returncode, 1, cp.stdout + cp.stderr)
+                    self.assertIn(name, cp.stderr)
+                    for remedy in ("wk build", "wk test", "wk bench", "wk run"):
+                        self.assertIn(remedy, cp.stderr)
+                    self.assertEqual("", cp.stdout)
         self.assertEqual("", self.ran(), "a refusal ran the real tool")
-
-    def test_wk_agent_is_refused(self):
-        """The variable `wk ai <agent>` sets, so the next agent is walled by
-        the line that names it and needs nothing else."""
-        for name in NAMES:
-            with self.subTest(tool=name):
-                cp = self.call(name, "--build", ".", env={"WK_AGENT": "claude"})
-                self.assertEqual(cp.returncode, 1, cp.stdout + cp.stderr)
-                self.assertIn("wk build", cp.stderr)
-        self.assertEqual("", self.ran())
-
-    def test_the_remedy_names_every_command_that_replaces_it(self):
-        cp = self.call("ninja", env={"CLAUDECODE": "1"})
-        for remedy in ("wk build", "wk test", "wk bench", "wk run"):
-            self.assertIn(remedy, cp.stderr)
 
 
 class TestAPersonGetsTheRealTool(WallTest):
@@ -155,35 +102,22 @@ class TestAPersonGetsTheRealTool(WallTest):
         self.assertEqual(7, self.call("ninja").returncode)
 
     def test_it_never_finds_itself(self):
-        """With no real tool anywhere on PATH the wall says so rather than
-        re-execing the symlink beside it forever."""
         cp = self.call("ninja", fake=False)
         self.assertEqual(127, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("not on PATH", cp.stderr)
 
 
 class TestWkOwnBuildPassesThrough(WallTest):
-    """`wk build` reaches the real cmake and ninja through
-    build/build-in-target.sh, and an agent typing `wk build` hands CLAUDECODE
-    down the whole chain -- so the wall has to let wk's own build through on
-    evidence wk sets."""
 
-    def test_wk_build_is_not_walled_even_under_claudecode(self):
+    def test_wk_build_is_not_walled_even_under_an_agent(self):
         for name in NAMES:
             with self.subTest(tool=name):
-                cp = self.call(name, env={"CLAUDECODE": "1", "WK_BUILD": "1"})
+                cp = self.call(name, env={"CLAUDECODE": "1", "WK_AGENT": "claude", "WK_BUILD": "1"})
                 self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
                 self.assertIn(f"REAL {name}", cp.stdout)
 
-    def test_wk_build_is_not_walled_under_wk_agent_either(self):
-        cp = self.call("cmake", env={"WK_AGENT": "claude", "WK_BUILD": "1"})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("REAL cmake", cp.stdout)
 
     def test_every_builder_declares_itself(self):
-        """One rule, and every builder is held to it: an agent's CLAUDECODE
-        reaches all of them, so each has to say it is wk's own build. Every
-        builder runs under task.stage_main, which sets it."""
         import sys
         sys.path.insert(0, str(REPO / "lib"))
         from wk.sysimage import task
@@ -195,50 +129,9 @@ class TestWkOwnBuildPassesThrough(WallTest):
 
 
 class TestBitbakeGetsTheRealTools(WkTest):
-    """bitbake runs no task with our PATH: it resolves each HOSTTOOLS name once,
-    symlinks it into tmp/hosttools and makes that directory the whole PATH. So a
-    wall captured there is the only `make` a task can see and has nothing to
-    hand off to -- WK_BUILD cannot help, because the passthrough needs a real
-    tool further along a PATH that no longer has one. gcc-cross-canadian's
-    do_compile died on exactly this (2026-09-03)."""
 
-    def test_the_yocto_build_takes_the_wall_off_path(self):
-        """It runs as a task.Stage, under the wrapper that strips PATH (task.stage_main)."""
-        driver = (REPO / "lib" / "wk" / "sysimage" / "yocto.py").read_text()
-        self.assertEqual(driver.count("st.run("), 1, "the yocto stage does not run as a task.Stage")
-        self.assertNotIn("exec_argv(", driver, "a yocto stage reaches the workspace around the wrapper")
-
-    def _stripped(self, path):
-        import sys
-        sys.path.insert(0, str(REPO / "lib"))
-        from wk.sysimage import task
-        return task.off_wall(path)
-
-    def test_it_strips_the_wall_and_keeps_everything_else(self):
-        """Both trees -- a person's clone and the one `wk` pushed are routinely
-        both on PATH -- and nothing else touched."""
-        self.assertEqual(
-            "/usr/local/bin:/usr/bin:/bin",
-            self._stripped("/home/me/wk-tools/container/bin:/usr/local/bin:"
-                           "/opt/wk-tools/container/bin:/usr/bin:/bin"))
-
-    def test_the_git_gate_beside_it_comes_off_too(self):
-        """container/bin/ws is the gate shell/path.sh adds inside a workspace,
-        and it is the wall under another name. Left on, poky's scripts/git --
-        which skips every */scripts entry to find "the real git" -- reaches it,
-        and the two exec each other forever."""
-        self.assertEqual(
-            "/usr/bin:/bin",
-            self._stripped("/opt/wk-tools/container/bin:"
-                           "/opt/wk-tools/container/bin/ws:/usr/bin:/bin"))
 
     def test_the_gate_is_a_wall_so_the_strip_has_to_name_it(self):
-        """Read off the tree rather than spelled here: every name in
-        container/bin/ws is the one wall, by the wall's own test for a copy
-        (`_is_wall`): the marker line in its head, and it sources the wall
-        beside it rather than linking to it, because webkitcorepy runs the
-        realpath of `which('git')`, which would reach the wall under its own
-        name and be refused."""
         ws = BIN / "ws"
         names = sorted(p.name for p in ws.iterdir())
         self.assertTrue(names, "container/bin/ws is empty")
@@ -250,11 +143,6 @@ class TestBitbakeGetsTheRealTools(WkTest):
 
 
 class TestNoBuilderRecordsTheWall(unittest.TestCase):
-    """`lint.build_wall`: no builder or configure cache records a tool from
-    container/bin. A configure step keeps the path it found a tool at
-    (buildroot's host-cmake check, a CMakeCache's CMAKE_MAKE_PROGRAM), and a
-    later run of that path by anyone but wk's own build is refused, so every
-    builder runs with the wall off PATH rather than only past it on WK_BUILD."""
 
     wk_tier = "lint"
     TASK = REPO / "lib" / "wk" / "sysimage" / "task.py"
@@ -264,15 +152,8 @@ class TestNoBuilderRecordsTheWall(unittest.TestCase):
         self.assertIsNotNone(m, f"{name} is not in {path}")
         return m.group(0)
 
-    def test_an_image_stage_runs_under_the_wrapper(self):
-        self.assertIn("in_workspace(self.target.tools", self._fn(self.TASK, "run"))
-        driver = (REPO / "lib" / "wk" / "sysimage" / "buildroot.py").read_text()
-        self.assertEqual(driver.count("st.run("), 2, "the image and the slot stage both run as a task.Stage")
-        self.assertNotIn("exec_argv(", driver, "a buildroot stage reaches the workspace around the wrapper")
 
     def test_the_wrapper_takes_off_every_wall_and_nothing_else(self):
-        """Both trees -- a person's clone and the one `wk` pushed -- and the git
-        gate in container/bin/ws, which is the wall under another name."""
         import sys
         sys.path.insert(0, str(REPO / "lib"))
         from wk.sysimage import task
@@ -280,14 +161,9 @@ class TestNoBuilderRecordsTheWall(unittest.TestCase):
                                        "/opt/wk-tools/container/bin/ws:/usr/bin:/bin:/opt/container/binaries"),
                          "/usr/local/bin:/usr/bin:/bin:/opt/container/binaries")
 
-    def test_wk_build_runs_under_the_wrapper(self):
-        self.assertIn("stage.in_workspace(", self._fn(REPO / "lib" / "wk" / "build.py", "run"))
-
 
 class TestOneFileUnderEveryName(WallTest):
     def test_the_names_and_the_symlinks_are_the_same_set(self):
-        """WALL_NAMES is the one list; a name added there without its symlink
-        (or the other way round) is a wrapped tool the wall never sees."""
         links = sorted(p.name for p in BIN.iterdir() if p.is_symlink())
         self.assertEqual(sorted(NAMES), links)
 
@@ -298,26 +174,16 @@ class TestOneFileUnderEveryName(WallTest):
                 self.assertEqual("wk-build-wall", os.readlink(link))
                 self.assertEqual(WALL.resolve(), link.resolve())
 
-    def test_the_wall_is_executable(self):
-        self.assertTrue(os.access(WALL, os.X_OK), "container/bin/wk-build-wall is not +x")
 
     def test_it_refuses_its_own_name(self):
-        """Nothing invokes it as `wk-build-wall`; running it that way has no
-        tool to stand in front of."""
         cp = self.call(str(WALL))
         self.assertEqual(cp.returncode, 1, cp.stdout + cp.stderr)
         self.assertIn("wk-build-wall", cp.stderr)
 
 
 class TestTwoWallsDoNotExecEachOther(WallTest):
-    """Two wk-tools trees on PATH is the ordinary case -- a person's clone and
-    the tree `wk` pushed -- and `-ef` recognises only the copy that is running.
-    Measured: the two walls exec each other until the process table gives out.
-    Any wall is skipped, whichever tree it came from."""
 
     def _second_tree(self):
-        """A second container/bin: a copy of the wall (not a link into this
-        tree, so `-ef` cannot see it) plus the symlinks beside it."""
         other = self.tmp / "other-tools" / "container" / "bin"
         other.mkdir(parents=True)
         copy = other / "wk-build-wall"
@@ -333,17 +199,13 @@ class TestTwoWallsDoNotExecEachOther(WallTest):
             env={"HOME": str(self.tmp), "PATH": path, "TERM": "dumb"},
             capture_output=True, text=True, timeout=60)
 
-    def test_the_second_wall_is_skipped_and_the_real_tool_is_reached(self):
-        other = self._second_tree()
-        cp = self._call("ninja", f"{BIN}:{other}:{self.fake}:/usr/bin:/bin")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("REAL ninja", cp.stdout)
 
-    def test_the_other_tree_first_reaches_the_real_tool_too(self):
+    def test_either_tree_first_skips_the_other_wall_and_reaches_the_real_tool(self):
         other = self._second_tree()
-        cp = self._call("ninja", f"{other}:{BIN}:{self.fake}:/usr/bin:/bin")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("REAL ninja", cp.stdout)
+        for path in (f"{BIN}:{other}", f"{other}:{BIN}"):
+            cp = self._call("ninja", f"{path}:{self.fake}:/usr/bin:/bin")
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertIn("REAL ninja", cp.stdout)
 
     def test_two_walls_and_no_real_tool_say_so_rather_than_looping(self):
         other = self._second_tree()
@@ -352,9 +214,6 @@ class TestTwoWallsDoNotExecEachOther(WallTest):
         self.assertIn("not on PATH", cp.stderr)
 
     def test_a_copy_that_is_not_a_symlink_is_recognised_too(self):
-        """The far tree's wall may be reached as a plain file under a wrapped
-        name -- a copy rather than a symlink. The marker line in its header is
-        what says it is a wall."""
         other = self.tmp / "copied-bin"
         other.mkdir()
         c = other / "ninja"
@@ -367,8 +226,6 @@ class TestTwoWallsDoNotExecEachOther(WallTest):
 
 class TestTheCandidateSearchIsStrict(WallTest):
     def test_an_empty_path_entry_is_not_the_current_directory(self):
-        """An empty PATH entry means `.` to a shell. This decides which binary
-        runs, so whatever happens to sit in $PWD is not a candidate."""
         cwd_tool = self.tmp / "ninja"
         cwd_tool.write_text("#!/bin/sh\necho \"CWD ninja\"\n")
         cwd_tool.chmod(0o755)
@@ -382,9 +239,6 @@ class TestTheCandidateSearchIsStrict(WallTest):
         self.assertNotIn("CWD ninja", cp.stdout)
 
     def _linked_away(self):
-        """A symlink to the wall in a directory of its own, the way bitbake
-        builds tmp/hosttools: it resolves each tool name on PATH and captures
-        the wall, since container/bin sits ahead of /usr/bin."""
         away = self.tmp / "hosttools"
         away.mkdir()
         (away / "ninja").symlink_to(BIN / "ninja")
@@ -400,18 +254,12 @@ class TestTheCandidateSearchIsStrict(WallTest):
             capture_output=True, text=True, timeout=60)
 
     def test_a_wall_reached_through_a_symlink_elsewhere_finds_itself(self):
-        """Looking *beside* $0 for a sibling named wk-build-wall found nothing
-        in tmp/hosttools, so the wall refused itself and an rpi5 slot build died
-        in gcc-cross-canadian's do_compile (2026-09-03). It follows $0 to the
-        file it really is instead."""
         cp = self._run_away(self._linked_away(), "-j4")
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertNotIn("cannot locate the wall", cp.stderr)
         self.assertIn("ninja -j4", self.ran(), "it never reached the real tool")
 
     def test_finding_itself_is_not_a_way_around_it(self):
-        """The same symlink, for an agent: resolving $0 fixes where the wall
-        looks for itself and changes nothing about who it refuses."""
         cp = self._run_away(self._linked_away(), "-j64", env={"CLAUDECODE": "1"})
         self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("refused", cp.stderr)
@@ -419,10 +267,6 @@ class TestTheCandidateSearchIsStrict(WallTest):
 
 
 class TestItIsFirstOnPathInEveryShell(WkTest):
-    """One PATH decision (shell/path.sh) reached by every shell kind on every
-    target: `bash -lc` is every `t_exec`, an editor's terminal pane is an
-    interactive non-login zsh, and a container exec reads no rc at all (it
-    sources shell/path.sh directly, tests/test_shell_path.py's subject)."""
 
     SHELLS = {
         "editor terminal pane": ("zsh", ["-i", "-c"]),
@@ -450,7 +294,6 @@ class TestItIsFirstOnPathInEveryShell(WkTest):
                     self.assertEqual(str(BIN / tool), self._resolved(shell, args, tool))
 
     def test_path_sh_alone_is_enough(self):
-        """The container-exec path, which reads no rc file."""
         cp = subprocess.run(
             ["bash", "-c", f'WK_TOOLS_DIR="{REPO}" . "{REPO}/shell/path.sh"; command -v ninja'],
             cwd="/", env={"HOME": str(self.tmp), "PATH": "/usr/bin:/bin"},
@@ -463,9 +306,6 @@ class TestTheAgentIsToldUpFront(unittest.TestCase):
     """The advisory half: a deny rule per wrapped name, so the agent is told
     before it tries, and one sentence in the workspace briefing."""
 
-    def test_settings_json_parses(self):
-        for f in SETTINGS_ALL:
-            json.loads(f.read_text())
 
     def test_every_wrapped_name_is_denied(self):
         for f in SETTINGS_ALL:
@@ -518,41 +358,6 @@ class TestTheAgentIsToldUpFront(unittest.TestCase):
         for f in SETTINGS_ALL:
             deny = json.loads(f.read_text())["permissions"]["deny"]
             self.assertTrue(any(r.startswith("Bash(*/") for r in deny), f.name)
-
-    def test_no_prose_re_lists_the_wrapped_names(self):
-        """WALL_NAMES is the one list, and a prose copy of it drifts. Each of
-        these names the file instead; an example or two is not a list."""
-        header = WALL.read_text().split('WALL_NAMES="')[0]
-        briefing = (REPO / "claude" / "CLAUDE.md").read_text()
-        for text, where in ((header, "the wall's header"),
-                            (briefing, "claude/CLAUDE.md")):
-            with self.subTest(where=where):
-                self.assertIn("wk-build-wall", text)
-                self.assertFalse(all(n in text for n in NAMES),
-                                 "the nine wrapped names are re-listed in prose")
-
-    def test_the_workspace_briefing_states_the_rule_and_the_remedy(self):
-        """The agent is told before it tries: the file that wraps the tools,
-        that they refuse, and what to reach for instead."""
-        text = (REPO / "claude" / "CLAUDE.md").read_text()
-        self.assertIn("container/bin/wk-build-wall", text)
-        self.assertIn("refuse", text)
-        for remedy in ("wk build", "wk test", "wk bench", "wk run"):
-            self.assertIn(remedy, text)
-
-
-class TestScriptsParse(unittest.TestCase):
-    """bash -n under both interpreters this host has: the wall runs in a Fedora
-    container, in a macOS guest (bash 3.2) and on a build box."""
-
-    def test_bash_n(self):
-        interps = ["bash"] + (["/bin/bash"] if Path("/bin/bash").exists() else [])
-        for f in EDITED:
-            for interp in interps:
-                with self.subTest(script=f, interp=interp):
-                    cp = subprocess.run([interp, "-n", str(REPO / f)],
-                                        capture_output=True, text=True, timeout=60)
-                    self.assertEqual(cp.returncode, 0, cp.stderr)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,4 @@
-"""lib/wk/gc.py: `wk gc` over a fake machine. `unit gc.reclaims_or_names[<kind>]`: for every kind of rubble a plain run
-either takes it or names the flag or command that does, and that flag takes it. `unit killpoints[gc]`: a run killed after
-any effect and re-run converges. The dry run records the wet run's effects; one question covers the whole run, the VM's
-half included; a refused flag changes nothing; a failing removal ends none of the rest.
-
-Run: python3 tests/run.py --unit -k test_owed_gc
-"""
+"""lib/wk/gc.py: `wk gc` over a fake machine. `unit gc.reclaims_or_names[<kind>]`: for every kind of rubble a plain run"""
 import contextlib
 import io
 import json
@@ -21,7 +15,7 @@ from tests.killpoints import converges
 from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, gc, record, rubble, targets  # noqa: E402
+from wk import act, gc, pr, record, rubble, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
@@ -33,7 +27,6 @@ MUTATIONS = ("act", "write", "mkdir", "remove")
 
 
 class Host(Fake):
-    """A fake machine whose act_run is an effect whether or not the run is dry, and whose `ls -1A`/`ls -1t` answer from its dirs."""
 
     def __init__(self, name):
         super().__init__(name)
@@ -58,7 +51,6 @@ class Host(Fake):
 
 
 class World(Host):
-    """One store in memory, the container target on this fake, and every far machine a fake."""
 
     def __init__(self, tmp):
         super().__init__("here")
@@ -78,6 +70,7 @@ class World(Host):
         self.react(["podman", "volume", "ls"], lambda a, f: Result(0, "".join(v + "\n" for v in f.volumes)))
         self.react(["podman", "volume", "prune"], lambda a, f: self._no_volumes())
         self.react(["env"], self._env)
+        self.answer(["git", "-C", self.store.mirror(), "for-each-ref"])
         self.container = targets.Container("container", str(REPO), self.env, self)
         self.vm = None
         self.remotes, self.boards, self.offline, self.pmos_hosts = [], [], {}, []
@@ -102,7 +95,6 @@ class World(Host):
         return Result(0)
 
     def _env(self, argv, f):
-        """`env WK_TARGET=<t> wk rm <n> --yes`: the workspace goes; `env CCACHE_DIR=... ccache ...`: nothing moves."""
         if argv[2:4] == [WK, "rm"]:
             n = argv[4]
             f.containers.discard(n)
@@ -194,7 +186,6 @@ class FakeGc(gc.Gc):
 
 
 class FakeVm(targets.Vm):
-    """The vm target over the fake: tart answers from `guests`, and its store is a directory of the world's."""
 
     def __init__(self, w, guests):
         env = dict(w.env, TART_HOME="/tart", WK_VM_STORE=str(w.tmp / "vmstore"))
@@ -359,6 +350,14 @@ def _box_record(w, pid=999999):
     return lambda: not w.exists(str(t.path)) and not w.exists(t.field("log"))
 
 
+def _push_ref(w):
+    mirror, w.refs = w.store.mirror(), {"refs/wk/push/box/eng/x"}
+    w.mkdirs(mirror)
+    w.react(["git", "-C", mirror, "for-each-ref"], lambda a, f: Result(0, "".join(r + "\n" for r in sorted(f.refs))))
+    w.react(["git", "-C", mirror, "update-ref"], lambda a, f: f.refs.discard(a[-1]) or Result(0))
+    return lambda: not w.refs
+
+
 def _half_made(w):
     w.workspace("hm", base="")
     return lambda: "hm" not in w.containers
@@ -374,7 +373,6 @@ def _creation_record(w):
     return lambda: not w.exists(d)
 
 
-# kind -> (make the rubble, returning "is it gone"; what takes it: "" a plain run, a --purge flag, or a command elsewhere)
 KINDS = {
     "snapshot": (_snapshot, ""),
     "mirror": (_mirror, "--purge-mirror"),
@@ -397,6 +395,7 @@ KINDS = {
     "board-slot-instrumented": (lambda w: _board(w, "a-instr"), "--purge-rubble"),
     "remote-mirror": (_remote_mirror, "wk machine rm box"),
     "box-record": (_box_record, "--purge-rubble"),
+    "push-ref": (_push_ref, ""),
     "half-made": (_half_made, "--purge-rubble"),
     "selftest-ws": (_selftest, ""),
     "creation-record": (_creation_record, ""),
@@ -405,7 +404,6 @@ KINDS = {
 
 class TestReclaimsOrNames(GcTest):
     def test_every_kind_is_taken_by_a_plain_run_or_named_with_what_takes_it(self):
-        """`gc.reclaims_or_names[<kind>]`."""
         for kind, (make, taker) in KINDS.items():
             with self.subTest(kind=kind):
                 w = World(self.tmp)
@@ -423,7 +421,6 @@ class TestReclaimsOrNames(GcTest):
                     self.assertTrue(gone(), err)
 
     def test_a_box_record_whose_driver_still_runs_here_is_named_with_its_kill(self):
-        """`gc.reclaims_or_names[box-record]`: a box's builds are recorded on the box, and one this end still drives is kept."""
         self.w.pids.add(4242)
         gone = _box_record(self.w, pid=4242)
         rc, err = self.run_gc()
@@ -445,7 +442,6 @@ class TestReclaimsOrNames(GcTest):
 
 
 class TestAMeasurementIsNeverRubble(GcTest):
-    """A task left in <store>/bench, outside any workspace, is named with the move into its workspace's bench/ and never taken."""
 
     def task(self, *workspaces):
         d = os.path.join(self.w.store.record_dir(), "bench", "20260101T000000Z-rpi5-a")
@@ -513,6 +509,23 @@ class TestWhatWasNotLookedAt(GcTest):
         self.assertEqual([(r.kb, bool(r.why)) for r in rows if r.kind == "container-image"], [(None, True)])
 
 
+    def test_a_push_ref_a_live_pr_open_holds_is_kept_and_named(self):
+        _push_ref(self.w)
+        self.w.symlink("pid=4242 tok=x at=t cmd=wk", self.w.store.lock_path(pr.push_lock("refs/wk/push/box/eng/x")))
+        self.w.pids.add(4242)
+        rc, err = self.run_gc()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual({"refs/wk/push/box/eng/x"}, self.w.refs)
+        self.assertIn("kept -- the 'wk pr open' (pid 4242) pushing it holds it", err)
+
+    def test_a_failed_ref_listing_in_the_mirror_is_named(self):
+        _push_ref(self.w)
+        self.w.answer(["git", "-C", self.w.store.mirror(), "for-each-ref"], rc=128, err="fatal: not a git repository")
+        rc, err = self.run_gc()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("not looked at -- git for-each-ref failed: fatal: not a git repository", err)
+
+
 class TestOneQuestion(GcTest):
     def test_nothing_to_take_asks_nothing(self):
         os.environ.pop("WK_YES")
@@ -547,7 +560,6 @@ class TestOneQuestion(GcTest):
 
 
 class TestTheVmHalf(GcTest):
-    """A macOS host: the VM's rows join the plan before the one question, and its wk acts with the answer."""
 
     def mac(self, rows, running=True):
         g = self.w.gc()
@@ -598,7 +610,6 @@ class TestCrashOnly(GcTest):
         return w
 
     def test_a_run_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[gc]`."""
         def run_once(w):
             os.environ.pop("WK_CONFIRMED", None)
             with contextlib.redirect_stderr(io.StringIO()):
@@ -606,7 +617,6 @@ class TestCrashOnly(GcTest):
         converges(self, self.world, run_once, World.state)
 
     def test_the_dry_run_records_the_wet_runs_effects_and_changes_nothing(self):
-        """`dispatch.dry_run_is_the_recorder[gc]`."""
         def mutations(w):
             locks = w.env["WK_LOCK_DIR"]
             return [tuple(str(x).replace(str(w.tmp), "") for x in e) for e in w.effects + w.board.effects
@@ -625,9 +635,6 @@ class TestCrashOnly(GcTest):
 
 
 class TestWhatGcKeepsWhenNothingVerifies(WkTest):
-    """`wk gc` removes every snapshot no workspace is overlaid on except the newest finished one (lib/wk/store.py's Bases).
-    That one is the newest complete snapshot, not the current one: `current` also requires the branch record `verify`
-    reads, so a machine whose snapshots predate that record would otherwise be left with none to make a workspace from."""
 
     def _bases(self, ids, complete=(), branch=()):
         store = self.tmp / "store"

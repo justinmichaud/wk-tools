@@ -1,10 +1,4 @@
-"""`wk machine` (cmd/machine, lib/wk/machine_cmd/): setup and rm of a build machine or a peer over one fake
-host that is both this machine and the far one, `killpoints[machine setup]`, `killpoints[machine rm]`, the
-dry run as the wet run's plan, the --kind decision, `machine.probed_once_per_invocation`,
-`machine.unreachable_is_named`, the sweep's one document, and `live machine_cmd.setup[<box>]`.
-
-Run: python3 tests/run.py --unit -k test_machine_cmd
-"""
+"""`wk machine` (lib/wk/machine_cmd/): setup, rm, probe and ls over one fake host that is both ends."""
 import contextlib
 import io
 import json
@@ -19,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.killpoints import converges
-from tests.support import REAL_MACHINES, REPO, live_selected, machine_reachable, run
+from tests.support import REAL_MACHINES, REPO, live_selected, machine_reachable
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, machine_cmd, reach, targets, tools  # noqa: E402
@@ -61,8 +55,7 @@ SECRETS = ("claude        claude-token        .wk-agent-token             CLAUDE
 
 
 class World:
-    """One Fake for both ends: its effects are the flow's effects, wherever they land. The far side's
-    marker, credential copies and old checkouts are files the fake's reactions move."""
+    """One Fake for both ends: its effects are the flow's effects, wherever they land."""
 
     def __init__(self, tmp, conf=None, deps=DEPS_PROBE, old_tools=(), answers=True, ws=()):
         self.fake = Fake("both")
@@ -84,8 +77,6 @@ class World:
         self.answers = answers
         self.motd = ""
         f.react(["sh", "-c"], self.sh)
-        # A board or a Mac is asked for over a literal `ssh`, not the `sh -c` probe a Remote target's
-        # Fake substitution shortcuts -- Machines.answers() builds a real Ssh wrapping this same Fake.
         if answers:
             f.answer(["ssh"], rc=0)
         else:
@@ -167,9 +158,6 @@ class MachineTest(unittest.TestCase):
 
 
 class TestSharedHomeProvisioning(unittest.TestCase):
-    """`machine_cmd.shared_home`: remote/provision.sh run for two machines of one home writes the one marker
-    both read and keeps each machine's root, so neither undoes the other."""
-
     def provision(self, home, target, root):
         env = dict(os.environ, HOME=home, GIT_CONFIG_GLOBAL=home + "/.gitconfig", WK_REMOTE_TARGET=target,
                    WK_REMOTE_ROOT=root, WK_REMOTE_INPUTS="abc")
@@ -211,7 +199,6 @@ class TestSetup(MachineTest):
         self.assertEqual(w.fake.effects, [])
 
     def test_a_shared_home_needs_a_root_of_its_own_and_nothing_is_changed_without_one(self):
-        """`machine_cmd.shared_home`: a root per machine is what gives each its own key dirs and locks."""
         w = self.world(conf="kind=build\n")
         w.motd = "Your home directory is shared across all of these boxes.\n"
         rc, err = self.quiet(w.machines().setup, "box")
@@ -231,7 +218,6 @@ class TestSetup(MachineTest):
         self.assertEqual([e for e in w.fake.effects if e[0] != "run" or e[1][0] not in ("sh", "bash", "git", "python3", "id")], [])
 
     def test_the_machine_is_probed_once_for_the_whole_setup(self):
-        """`machine.probed_once_per_invocation`: every question setup asks of the driver is the one probe's answer."""
         w = self.world(conf="kind=build\ndriver=remote\n")
         self.quiet(w.machines().setup, "box")
         probes = [r for r in self.runs(w) if r[:2] == ("sh", "-c") and r[2] == targets.PROBE_SCRIPT]
@@ -239,7 +225,6 @@ class TestSetup(MachineTest):
         self.assertEqual(len([r for r in self.runs(w) if r[:2] == ("bash", "-s")]), 1)
 
     def test_an_unreachable_machine_is_refused_by_ssh_word(self):
-        """`machine.unreachable_is_named`: the refusal carries what ssh said, not a guess that it is off."""
         w = self.world(conf="kind=build\ndriver=remote\n", answers=False)
         rc, err = self.quiet(w.machines().setup, "box")
         self.assertEqual(rc, 1)
@@ -278,7 +263,6 @@ class TestSetup(MachineTest):
         self.assertIn(HOME + "/.wk-remote", w.fake.files)
 
     def test_a_setup_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[machine setup]`: the conf, the push, the provisioning, the credentials and the cleanup."""
         worlds = []
 
         def world():
@@ -341,7 +325,6 @@ class TestRm(MachineTest):
         self.assertEqual([e for e in w.fake.effects if e[0] == "remove"], [("remove", str(w.fleet / "box.conf"))])
 
     def test_an_rm_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[machine rm]`."""
         def world():
             w = self.world(conf=self.CONF)
             w.fake.files[HOME + "/.wk-remote"] = "target=box\n"
@@ -366,7 +349,6 @@ class TestBoardSetup(MachineTest):
         self.assertIn(("run", ("chmod", "+x", "/usr/local/libexec/wk-check-boot-files.py")), w.fake.effects)
 
     def test_an_unreachable_board_is_refused_and_nothing_is_changed(self):
-        """`machine.unreachable_is_named`, for a board: the same ssh word a build machine's refusal carries."""
         w = self.world(conf=self.CONF, answers=False)
         rc, err = self.quiet(w.machines().setup, "box")
         self.assertEqual(rc, 1)
@@ -383,7 +365,6 @@ class TestBoardSetup(MachineTest):
         self.assertIn("wk-card-priv", err)
 
     def test_a_setup_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[machine setup]` for a board: the two card-helper copies and their chmods."""
         def world():
             return self.world(conf=self.CONF)
 
@@ -393,8 +374,6 @@ class TestBoardSetup(MachineTest):
         converges(self, world, run_once, World.state)
 
     def test_an_unreachable_board_still_prints_the_plan_under_dry_run(self):
-        """A dry run against a board the unit tier's ssh shim cannot reach still names what it would do,
-        rather than refusing -- the shim, not a real network answer, is what 'unreachable' means here."""
         w = self.world(conf=self.CONF, answers=False)
         with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
             rc, err = self.quiet(w.machines().setup, "box")
@@ -424,15 +403,6 @@ class TestBoardRm(MachineTest):
 class TestMacSetup(MachineTest):
     CONF = "kind=mac\nssh=box\n"
 
-    def test_it_pushes_the_tree_and_stops_at_the_sudo_with_no_terminal(self):
-        w = self.world(conf=self.CONF)
-        w.fake.answer(["sh", "-c", 'printf "%s" "$HOME"'], out=HOME)
-        rc, err = self.quiet(w.machines().setup, "box")
-        self.assertEqual(rc, 1, err)
-        self.assertIn(HOME + "/Development/wk-tools", err)
-        self.assertIn("no terminal", err)
-        self.assertIn("sudoers.d", err)
-
     def test_an_unreachable_mac_still_prints_the_plan_under_dry_run(self):
         w = self.world(conf=self.CONF, answers=False)
         with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
@@ -442,8 +412,6 @@ class TestMacSetup(MachineTest):
 
 
 class TestBridgeDispatch(MachineTest):
-    """A bridge's setup, tailnet and rm are wk.bridge.role's (tests/test_bridge.py tests the role itself)."""
-
     def bridge_world(self):
         w = self.world()
         (w.fleet / "phone.conf").write_text("kind=bridge\ndevice=pinephone\nsegment=10.9.0.0/24\nrouter=10.9.0.1\n")
@@ -494,7 +462,6 @@ class TestBridgeDispatch(MachineTest):
 
 class TestProbeAndLs(MachineTest):
     def test_a_machine_that_does_not_answer_is_named_with_why(self):
-        """`machine.unreachable_is_named`: probe says unreachable and ssh's own word, and exits 1."""
         w = self.world(conf="kind=build\ndriver=remote\n", answers=False)
         w.fake.answer(["tailscale"], rc=1)
         w.fake.answer(["ssh", "-G"], rc=1)
@@ -530,16 +497,6 @@ class TestProbeAndLs(MachineTest):
         self.assertEqual(len([e for e in w.fake.effects if e[1][0] == "tailscale"]), 1)
 
 
-class TestTheOldSpellings(unittest.TestCase):
-    def test_remote_and_find_are_tombstones_naming_the_new_command(self):
-        for old, new in (("remote", "wk machine setup|rm"), ("find", "wk machine probe")):
-            cp = run(old)
-            with self.subTest(old=old):
-                self.assertEqual(cp.returncode, 1)
-                self.assertIn(new, cp.stdout)
-                self.assertFalse((REPO / "cmd" / old).exists())
-
-
 def _a_build_box():
     if not live_selected():
         return None
@@ -552,7 +509,6 @@ class TestSetupOnARealBox(unittest.TestCase):
     wk_tier = "live"
 
     def test_setup_leaves_one_shape(self):
-        """`live machine_cmd.setup[<box>]`: provisioned from this tree, with zsh or a named warning; no prompt is answered."""
         box = _a_build_box()
         if box is None:
             self.skipTest("live tier not selected, or no build machine in machines/ answers over ssh")

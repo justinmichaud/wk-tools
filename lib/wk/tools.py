@@ -8,7 +8,7 @@ from wk import act
 
 BUNDLE = ".git/wk-tools-push.bundle"
 
-NOT_A_CHECKOUT = 3   # PREPARE's exit when `dest` holds files and is no checkout
+NOT_A_CHECKOUT = 3
 PREPARE = r'''set -e
 d=$1
 command -v git >/dev/null 2>&1 || {
@@ -53,6 +53,11 @@ def committed(root, here):
         return ""
     return ("wk-tools here has uncommitted changes, so there is no commit to put on a machine.\n%s"
             "    Commit them and re-run:\n        git -C %s status --short\n        git -C %s commit -a" % (NOT_A_COMMIT, root, root))
+
+
+def sha_matches(a, b):
+    """`git rev-parse --short` picks its own length per repository, so one abbreviation can be a prefix of the other."""
+    return bool(a and b and (a.startswith(b) or b.startswith(a)))
 
 
 def dest_ok(dest, home):

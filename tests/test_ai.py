@@ -2,10 +2,7 @@
 checks are `wk doctor <ws>`'s own (lib/wk/wall.py), run against the healthy
 container tests/test_doctor_wall.py answers for, and each refusal is driven by
 taking one answer away. The session itself is never started: `foreground` is
-replaced, and what it would have run is what is asserted.
-
-Run: python3 tests/run.py --unit -k test_ai
-"""
+replaced, and what it would have run is what is asserted."""
 import contextlib
 import importlib.machinery
 import importlib.util
@@ -43,8 +40,6 @@ WK = os.path.join(AI.ROOT, "wk")
 
 
 class SimTarget(targets.Target):
-    """A workspace whose exec answers from `answers`, keyed by a substring of the command line (the first key found
-    answers; a callable is given the argv), every command line in `asked`."""
 
     def __init__(self, machine, env, kind="container", name=None):
         super().__init__(name or kind, str(REPO), env, machine)
@@ -119,7 +114,6 @@ class _Flow(unittest.TestCase):
         self.addCleanup(self.terminal.stop)
 
     def ai(self, *argv, force=False):
-        """(status, stderr)."""
         if force:
             os.environ["WK_FORCE"] = "1"
         err = io.StringIO()
@@ -135,7 +129,6 @@ class _Flow(unittest.TestCase):
         return [" ".join(e[1][1:]) for e in self.fake.effects if e[0] == "run" and e[1][:2] == (WK, "push")]
 
     def line(self):
-        """The login-shell text the session was handed."""
         self.assertEqual(1, len(self.handed), self.handed)
         return self.handed[0][-1]
 
@@ -154,6 +147,9 @@ class _Host(_Flow, _Wall):
         self.fake.answer([WK, "push"])
         self.fake.answer(["podman", "info"], out="true\n")
         self.fake.answer(["systemctl", "--user"])
+        p = mock.patch.object(AI.Ai, "agent_bin", return_value="claude")
+        p.start()
+        self.addCleanup(p.stop)
 
 
 class TestItVerifiesTheWall(_Host):
@@ -242,17 +238,6 @@ class TestItVerifiesTheWall(_Host):
         self.assertIn("the commit wall needs bwrap in the workspace image, and 'demo' has none", err)
         self.assertEqual([], self.handed)
 
-    def test_the_session_records_claudes_answers_first(self):
-        self.ai("claude")
-        self.assertTrue([a for a in self.asked if "claude/workspace-config.py /src/WebKit" in a])
-
-    def test_answers_that_cannot_be_recorded_refuse_the_session(self):
-        self.set("workspace-config.py", Result(1, "", "not readable as JSON"))
-        status, err = self.ai("claude")
-        self.assertEqual(1, status, err)
-        self.assertIn("could not record Claude's start-up answers in 'demo'", err)
-        self.assertIn("    not readable as JSON", err)
-        self.assertEqual([], self.handed)
 
 class TestRemoteControl(_Host):
     """A Claude session a person is at starts with Remote Control named after the workspace (`unit ai.remote_control`)."""
@@ -271,14 +256,12 @@ class TestRemoteControl(_Host):
         self.assertEqual(["claude", "--dangerously-skip-permissions", "--remote-control", "demo", "-r"], words[words.index("claude"):])
 
     def test_a_headless_session_has_none(self):
-        """The babysitter's `-p` fix attempt has no terminal and no one to join it."""
         self.ai("claude", "-p", "fix it")
         self.assertNotIn("--remote-control", shlex.split(self.line()))
 
     def test_pi_has_none(self):
         self.on_a_terminal()
-        with mock.patch.object(AI.Ai, "pi_ensure", return_value="/home/u/.local/bin/pi"):
-            status, err = self.ai("pi")
+        status, err = self.ai("pi")
         self.assertEqual(0, status, err)
         self.assertNotIn("--remote-control", shlex.split(self.line()))
 
@@ -308,8 +291,6 @@ class TestThePushSwitch(_Host):
         self.assertIn("git push turned back on", err)
 
     def test_a_sigterm_during_the_session_still_restores_the_push_switch(self):
-        """SIGTERM has no Python-level default (unlike SIGINT's KeyboardInterrupt) and
-        would otherwise end the process before `finally` runs and turns the switch back on."""
         self.terminal.stop()
 
         def killed_mid_session(machine, argv, cwd):
@@ -330,9 +311,16 @@ class TestThePushSwitch(_Host):
         self.assertIn("git push stays off (headless session", err)
 
     def test_a_refused_session_after_the_switch_still_says_where_push_is(self):
-        self.set("workspace-config.py", Result(1, "", "boom"))
-        _, err = self.ai("claude")
+        self.set("bwrap", Result(1, "", ""))
+        _, err = self.ai("claude", force=True)
         self.assertIn("git push stays off", err)
+
+    def test_a_workspace_without_the_agent_refuses_before_the_switch_is_touched(self):
+        with mock.patch.object(AI.Ai, "agent_bin", side_effect=Refused(1)):
+            status, err = self.ai("claude")
+        self.assertEqual(1, status, err)
+        self.assertEqual([], self.pushes())
+        self.assertTrue(self.push_on)
 
     def test_a_switch_that_would_not_go_off_refuses(self):
         self.fake.answer([WK, "push", "status"], rc=0)
@@ -362,7 +350,6 @@ class TestWhatIsWkTheAgentNever(_Flow):
         self.reg = sim_registry(self.env, self.fake, SimTarget(self.fake, self.env))
 
     def test_each_refusal(self):
-        """the dispatcher's, before the command runs"""
         for argv, said in (((), "'wk ai' needs one of: claude, pi"),
                            (("gpt", "demo"), "unknown verb: gpt (one of claude, pi)")):
             with self.subTest(argv=argv):
@@ -385,7 +372,7 @@ class TestABuildBox(_Flow):
         self.fake.answer([WK, "push"], rc=1)
         self.env = {"WK_NAME": "demo", "WK_TARGET": "box"}
         self.target = SimTarget(self.fake, self.env, kind="remote", name="box")
-        self.target.answers["command -v claude"] = Result(0, "/home/u/.local/bin/claude\r\n")
+        self.target.answers["find claude"] = Result(0, "/home/u/.local/bin/claude\r\n")
         self.target.answers["gh auth status"] = Result(1)
         self.reg = sim_registry(self.env, self.fake, self.target)
 
@@ -400,24 +387,16 @@ class TestABuildBox(_Flow):
         self.assertEqual(0, status, err)
         self.assertEqual(["push status --target box"], self.pushes())
         self.assertIn("'wk doctor demo' is not run for 'box'", err)
-        self.assertIn("using /home/u/.local/bin/claude on box, in auto mode", err)
+        self.assertIn("Claude on box runs in auto mode", err)
         self.assertIn("exec /home/u/.local/bin/claude --permission-mode auto", self.line())
         self.assertNotIn("bwrap", self.line())
 
-    def test_the_inference_token_there_starts_the_session_without_remote_control_and_says_why(self):
-        self.target.answers['"${CLAUDE_CODE_OAUTH_TOKEN:+set}"'] = Result(0, "set\r\n")
+    def test_the_setup_token_it_is_given_starts_the_session_without_remote_control_and_says_why(self):
         with mock.patch.object(AI, "on_a_terminal", return_value=True):
             status, err = self.ai("claude", force=True)
         self.assertEqual(0, status, err)
-        self.assertIn("Remote Control is off for this session: $CLAUDE_CODE_OAUTH_TOKEN authenticates it", err)
+        self.assertIn("Remote Control is off for this session", err)
         self.assertNotIn("--remote-control", self.line())
-
-    def test_a_login_there_gets_remote_control(self):
-        with mock.patch.object(AI, "on_a_terminal", return_value=True):
-            status, err = self.ai("claude", force=True)
-        self.assertEqual(0, status, err)
-        self.assertIn("--permission-mode auto --remote-control demo", self.line())
-        self.assertNotIn("Remote Control is off", err)
 
     def test_a_gh_login_there_is_a_refusal_force_does_not_cross(self):
         self.target.answers["gh auth status"] = Result(0)
@@ -427,28 +406,18 @@ class TestABuildBox(_Flow):
         self.assertIn("Remedy, on box:  gh auth logout", err)
         self.assertEqual([], self.handed)
 
-    def test_no_claude_there_is_installed_and_asked_again(self):
-        found = iter([Result(1), Result(0, "/home/u/.local/bin/claude\n")])
-        del self.target.answers["command -v claude"]
-        self.target.answers["command -v claude 2>/dev/null)\"; do"] = lambda argv: next(found)
-        self.target.answers["install.sh"] = Result(0, "installed\n")
-        status, err = self.ai("claude", force=True)
-        self.assertEqual(0, status, err)
-        self.assertIn("there is no Claude CLI on box that runs", err)
-        self.assertIn("installing the Claude CLI on box", err)
-        self.assertIn("ssh box claude --version", [a for a in self.target.asked if "on PATH" in a][0])
-
-    def test_an_installer_that_fails_refuses_with_the_command(self):
-        del self.target.answers["command -v claude"]
-        self.target.answers["command -v claude 2>/dev/null)\"; do"] = Result(1)
-        self.target.answers["install.sh"] = Result(1)
+    def test_a_workspace_made_without_the_agent_is_refused_naming_the_remedy(self):
+        self.target.answers["find claude"] = Result(1)
         status, err = self.ai("claude", force=True)
         self.assertEqual(1, status, err)
-        self.assertIn("the installer failed on box. By hand:\n    ssh box 'curl -fsSL https://claude.ai/install.sh | bash'", err)
+        self.assertIn("there is no claude in 'demo' that runs", err)
+        self.assertIn("wk rm demo && wk new demo", err)
+        self.assertEqual([], self.handed)
+        self.assertFalse([a for a in self.target.asked if "install.sh" in a and "find" not in a])
 
 
 class TestTheSessionIsAnEffect(_Flow):
-    """The session starts through the Machine, so --dry-run prints it with the install and the switch it would make."""
+    """The session starts through the Machine, so --dry-run prints it with the switch it would make."""
 
     def setUp(self):
         self.setUpFlow()
@@ -459,7 +428,7 @@ class TestTheSessionIsAnEffect(_Flow):
         self.fake.answer(["exec"])
         self.env = {"WK_NAME": "demo", "WK_TARGET": "box"}
         self.target = SimTarget(self.fake, self.env, kind="remote", name="box")
-        self.target.answers["command -v claude 2>/dev/null)\"; do"] = Result(1)
+        self.target.answers["find claude"] = Result(0, "/home/u/.local/bin/claude\n")
         self.target.answers["gh auth status"] = Result(1)
         self.reg = sim_registry(self.env, self.fake, self.target)
 
@@ -467,7 +436,6 @@ class TestTheSessionIsAnEffect(_Flow):
         return [e for e in self.fake.effects if e[0] == "run_tty"]
 
     def test_a_wet_run_starts_the_session_as_an_effect_and_gives_ctrl_c_back(self):
-        self.target.answers["command -v claude 2>/dev/null)\"; do"] = Result(0, "/home/u/.local/bin/claude\n")
         before = signal.getsignal(signal.SIGINT)
         status, err = self.ai("claude", force=True)
         self.assertEqual(0, status, err)
@@ -477,16 +445,13 @@ class TestTheSessionIsAnEffect(_Flow):
         self.assertEqual(["push status --target box", "push off --target box"], self.pushes())
         self.assertIs(before, signal.getsignal(signal.SIGINT))
 
-    def test_a_dry_run_prints_the_install_the_switch_and_the_session_and_does_none(self):
+    def test_a_dry_run_prints_the_switch_and_the_session_and_does_neither(self):
         os.environ["WK_DRY_RUN"] = "1"
         status, err = self.ai("claude", force=True)
         self.assertEqual(0, status, err)
-        self.assertIn("would run in demo: bash -lc 'curl -fsSL https://claude.ai/install.sh | bash'", err)
-        self.assertIn("would run in demo: bash -lc 'for c in", err, "the probe of the install is planned")
         self.assertIn("would run on fake: %s push off --target box" % WK, err)
-        self.assertRegex(err, r"would run on fake: exec demo no-tty .*exec claude --permission-mode auto")
-        self.assertFalse([a for a in self.target.asked if "install.sh" in a])
-        self.assertEqual(1, sum("command -v claude 2>/dev/null)\"; do" in a for a in self.target.asked))
+        self.assertRegex(err, r"would run on fake: exec demo no-tty .*exec /home/u/.local/bin/claude --permission-mode auto")
+        self.assertNotIn("would run in demo", err)
         self.assertEqual(["push status --target box"], self.pushes())
         self.assertEqual([], self.sessions())
 
@@ -501,6 +466,7 @@ class TestAGuest(_Flow):
         self.fake.answer(["test", "-x"])
         self.env = {"WK_NAME": "demo", "WK_TARGET": "vm"}
         self.target = SimTarget(self.fake, self.env, kind="vm")
+        self.target.answers["find claude"] = Result(0, "claude\n")
         self.reg = sim_registry(self.env, self.fake, self.target)
         p = mock.patch.object(AI.Ai, "checks")
         p.start()

@@ -1,4 +1,3 @@
-systemctl stop netdata 2>/dev/null
 case "$WK_BACKEND" in
   (systemd) systemctl start --no-block weston ;;
   (drm)

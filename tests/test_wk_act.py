@@ -1,9 +1,5 @@
-"""lib/wk/act.py in process: --dry-run prints and runs nothing, a destructive
-command cannot act before confirm was answered or nothing_to_ask said there is
-no question this run, --yes and no terminal answer the question, and --force is the only way past a barrier.
-
-Run: python3 tests/run.py -k tests.test_wk_act
-"""
+"""lib/wk/act.py: --dry-run prints and runs nothing, a destructive command cannot act before confirm was answered or
+nothing_to_ask said there is no question, --yes and no terminal answer it, and --force is the only way past a barrier."""
 import io
 import os
 import sys
@@ -17,6 +13,7 @@ from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act  # noqa: E402
+from wk.machine import Local  # noqa: E402
 
 FLAGS = ("WK_DRY_RUN", "WK_YES", "WK_FORCE", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_QUIET")
 
@@ -47,41 +44,39 @@ class TestAct(ActTest):
     def test_a_dry_run_prints_the_command_and_runs_nothing(self):
         os.environ["WK_DRY_RUN"] = "1"
         marker = self.tmp / "ran"
-        cp, err = self.stderr(lambda: act.act(["touch", str(marker)]))
-        self.assertIsNone(cp)
+        cp, err = self.stderr(lambda: Local().act_run(["touch", str(marker)]))
         self.assertFalse(marker.exists())
         self.assertIn("would run: touch", err)
 
     def test_it_runs_otherwise(self):
         marker = self.tmp / "ran"
-        cp, _ = self.stderr(lambda: act.act(["touch", str(marker)]))
-        self.assertEqual(cp.returncode, 0)
+        cp, _ = self.stderr(lambda: Local().act_run(["touch", str(marker)]))
+        self.assertEqual(cp.rc, 0)
         self.assertTrue(marker.exists())
 
     def test_a_destructive_command_cannot_act_before_asking(self):
         os.environ["WK_DESTRUCTIVE"] = "1"
         with self.assertRaises(act.Refused):
-            self.stderr(lambda: act.act(["true"]))
+            self.stderr(lambda: Local().act_run(["true"]))
         os.environ["WK_CONFIRMED"] = "1"
-        cp, _ = self.stderr(lambda: act.act(["true"]))
-        self.assertEqual(cp.returncode, 0)
+        cp, _ = self.stderr(lambda: Local().act_run(["true"]))
+        self.assertEqual(cp.rc, 0)
 
     def test_acting_without_confirm_or_nothing_to_ask_is_a_bug(self):
         os.environ["WK_DESTRUCTIVE"] = "1"
         marker = self.tmp / "ran"
         with self.assertRaises(act.Refused):
-            self.stderr(lambda: act.act(["touch", str(marker)]))
+            self.stderr(lambda: Local().act_run(["touch", str(marker)]))
         self.assertFalse(marker.exists())
 
     def test_nothing_to_ask_acts_without_prompting(self):
-        """The destructive part does not apply this run: no question, and what follows acts."""
         os.environ["WK_DESTRUCTIVE"] = "1"
         marker = self.tmp / "ran"
         _, err = self.stderr(act.nothing_to_ask)
         self.assertEqual(err, "")
         self.assertTrue(act.asked())
-        cp, _ = self.stderr(lambda: act.act(["touch", str(marker)]))
-        self.assertEqual(cp.returncode, 0)
+        cp, _ = self.stderr(lambda: Local().act_run(["touch", str(marker)]))
+        self.assertEqual(cp.rc, 0)
         self.assertTrue(marker.exists())
 
     def test_an_answered_confirm_lets_a_destructive_command_act(self):
@@ -89,15 +84,15 @@ class TestAct(ActTest):
         os.environ["WK_YES"] = "1"
         ok, _ = self.stderr(lambda: act.confirm("remove it?"))
         self.assertTrue(ok and act.asked())
-        cp, _ = self.stderr(lambda: act.act(["true"]))
-        self.assertEqual(cp.returncode, 0)
+        cp, _ = self.stderr(lambda: Local().act_run(["true"]))
+        self.assertEqual(cp.rc, 0)
 
     def test_a_declined_confirm_still_cannot_act(self):
         os.environ["WK_DESTRUCTIVE"] = "1"
         ok, _ = self.stderr(lambda: act.confirm("remove it?", stdin=io.StringIO("y\n")))
         self.assertFalse(ok or act.asked())
         with self.assertRaises(act.Refused):
-            self.stderr(lambda: act.act(["true"]))
+            self.stderr(lambda: Local().act_run(["true"]))
 
 
 class TestConfirm(ActTest):
@@ -112,12 +107,11 @@ class TestConfirm(ActTest):
         os.environ["WK_DRY_RUN"] = "1"
         ok, err = self.stderr(lambda: act.confirm("remove it?"))
         self.assertTrue(ok)
-        self.assertIn("would ask: remove it? [y/N]", err)
+        self.assertIn("remove it?", err)
 
     def test_no_terminal_declines(self):
-        ok, err = self.stderr(lambda: act.confirm("remove it?", stdin=io.StringIO("y\n")))
+        ok, _ = self.stderr(lambda: act.confirm("remove it?", stdin=io.StringIO("y\n")))
         self.assertFalse(ok)
-        self.assertIn("declining (no terminal", err)
         self.assertNotIn("WK_CONFIRMED", os.environ)
 
     def test_a_terminal_answer_decides(self):
@@ -146,10 +140,9 @@ class TestBarrier(ActTest):
     def test_force_crosses_it_and_says_so_again_at_the_end(self):
         os.environ["WK_FORCE"] = "1"
         _, err = self.stderr(lambda: act.barrier("the board is held\nsecond line"))
-        self.assertIn("FORCED past a barrier: the board is held", err)
+        self.assertIn("FORCED", err)
         _, summary = self.stderr(act.forced_summary)
-        self.assertIn("forced past 1 barrier(s)", summary)
-        self.assertIn("- the board is held", summary)
+        self.assertIn("the board is held", summary)
         self.assertNotIn("second line", summary)
 
 

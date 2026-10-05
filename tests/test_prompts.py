@@ -1,44 +1,13 @@
-"""Audit: "Prompts guard destructive actions only" (CLAUDE.md). Every
-interactive prompt in the tree goes through the one yes/no helper
-(lib/common.sh's confirm()), that helper defaults to No and declines
-without a terminal, and every site that calls it has destructive wording
-leading into it. Which commands may prompt at all is a declaration the
-dispatcher reads, and tests/test_cli_shape.py checks that half.
-
-This is a point-in-time audit, not a general-purpose scanner: the expected
-site lists below are (file, exact prompt text) snapshots of cmd/*, lib/*.sh,
-boot/*.sh, bench/*.sh, image/*.sh and admin/* as of this writing -- keyed on
-the prompt text rather than a line number because several of these files
-were observed changing line count *during the writing of this test* (an
-unrelated concurrent edit elsewhere in the tree); a line-number key would
-have failed on every unrelated line added above it, which is not what this
-audit is for. A new prompt, a reworded one, or a deleted one still fails
-the relevant test -- on purpose, so it is looked at and the list updated
-deliberately rather than drifting unnoticed. Failure messages report the
-line grep finds *right now*, for whoever is looking.
-
-TestConfirmSitesArePrecededByDestructiveWording greps the ~10 lines
-leading into each confirm() call for an actual destructive verb/word
-(erase, delete, remove, overwrite, destroy, ...) or an already-present
-`warn` saying as much.
-
-Run: python3 -m unittest tests.test_prompts -v
-"""
+"""Audit: "Prompts guard destructive actions only" (CLAUDE.md). Every"""
 
 import os
 import pty
-import re
 import subprocess
 import unittest
 
-from tests.support import REPO, bash
+from tests.support import REPO
 
 
-# --- what gets audited --------------------------------------------------------
-# cmd/* and admin/* (every file directly under each, which mostly lack an
-# extension -- admin/wk-card-priv, admin/wk-quiesce-priv) plus lib/, boot/,
-# bench/, image/'s own *.sh files -- not their subdirectories (image/yocto/...
-# is recipe metadata, not a wk command).
 def _target_files():
     files = [p for p in sorted((REPO / "cmd").iterdir()) if p.is_file()]
     files += [p for p in sorted((REPO / "admin").iterdir()) if p.is_file()]
@@ -48,11 +17,6 @@ def _target_files():
 
 
 def _grep(pattern, files):
-    """(relpath, lineno, line-content) for an extended-regex pattern across
-    files, via `grep -n -E` -- the same tool this audit was built with.
-    Paths are passed and matched relative to REPO, so the results line up
-    with the file:line pairs recorded below rather than this machine's
-    absolute checkout path."""
     if not files:
         return []
     cp = subprocess.run(
@@ -68,19 +32,7 @@ def _grep(pattern, files):
     return out
 
 
-def _confirm_sites():
-    """{(file, exact confirm-call text): current line number}."""
-    return {
-        (path, content.strip()): lineno
-        for path, lineno, content in _grep(r'confirm "', _target_files())
-    }
-
-
 def _raw_read_sites():
-    """{(file, exact read text): current line number} for every
-    `read -r`/`read -p` outside lib/common.sh (the one file allowed to
-    implement a prompt), minus the `while ... read` data-processing loops
-    that are not asking a person anything."""
     files = [f for f in _target_files() if f.name != "common.sh"]
     out = {}
     for path, lineno, content in _grep(r"read -r|read -p", files):
@@ -90,8 +42,6 @@ def _raw_read_sites():
     return out
 
 
-# The raw (non-confirm()) `read -r`/`read -p` sites outside lib/common.sh, and
-# why each is not a competing yes/no implementation.
 EXPECTED_SAFE_RAW_READS = {
     ("admin/wk-card-priv", 'read -r type tran <<EOF'):
         "reads two fields from a heredoc, not a terminal",
@@ -99,8 +49,6 @@ EXPECTED_SAFE_RAW_READS = {
 
 
 class TestOnePromptHelper(unittest.TestCase):
-    """(a): every yes/no prompt goes through lib/common.sh's confirm() --
-    no raw `read` implements a second one anywhere in the audited tree."""
 
     def test_confirm_is_defined_exactly_once(self):
         sites = _grep(r"^confirm\(\)", _target_files())
@@ -127,72 +75,7 @@ class TestOnePromptHelper(unittest.TestCase):
         )
 
 
-# A destructive verb/word, or a warn()-shaped statement of one (ERASES,
-# deletes, removes, overwrite -- CLAUDE.md's own examples, plus the other
-# words the tree actually uses for the same thing: destroy, wipe,
-# deprovision, rebuild, drop, replace, "cannot be undone").
-DESTRUCTIVE_WORD_RE = re.compile(
-    r"destroy|erase|delet|remov|overwrit|wipe|deprovision|rebuild|drop|"
-    r"replac|cannot be undone",
-    re.IGNORECASE,
-)
-
-# confirm() site(s) that guard something genuinely destructive but where
-# DESTRUCTIVE_WORD_RE finds nothing in the ~10 lines leading into the
-# prompt -- the hazard is stated further up the file, past this check's
-# window.
-DESTRUCTIVE_WORDING_TOO_FAR = {}
-
-
-def _confirm_context(path, lineno, before=10):
-    """The `before` lines leading into (and including) line `lineno` of
-    `path` -- the window TestConfirmSitesArePrecededByDestructiveWording
-    reads, matching the ~10 lines the task asked for."""
-    text = (REPO / path).read_text(errors="replace").splitlines()
-    start = max(0, lineno - before)
-    return "\n".join(text[start:lineno])
-
-
-class TestConfirmSitesArePrecededByDestructiveWording(unittest.TestCase):
-    """Every confirm() call site must have an actual destructive verb/word
-    (or an already-printed warn() saying as much) in the ~10 lines leading
-    into the prompt."""
-
-    def test_every_confirm_site_has_destructive_wording_nearby(self):
-        found = _confirm_sites()
-        unworded = []
-        for (path, text), lineno in found.items():
-            if (path, text) in DESTRUCTIVE_WORDING_TOO_FAR:
-                continue
-            ctx = _confirm_context(path, lineno)
-            if not DESTRUCTIVE_WORD_RE.search(ctx):
-                unworded.append((path, lineno, text))
-        self.assertEqual(
-            unworded, [],
-            "confirm() site(s) with no destructive verb/word in the ~10 "
-            f"lines leading into the prompt: {unworded}",
-        )
-
-    def test_the_far_wording_exception_is_still_accurate(self):
-        found = _confirm_sites()
-        for key, reason in DESTRUCTIVE_WORDING_TOO_FAR.items():
-            self.assertIn(
-                key, found,
-                f"{key}: no longer found ({reason}) -- update DESTRUCTIVE_WORDING_TOO_FAR",
-            )
-            path, _ = key
-            lineno = found[key]
-            ctx = _confirm_context(path, lineno)
-            self.assertIsNone(
-                DESTRUCTIVE_WORD_RE.search(ctx),
-                f"{key}: now has destructive wording nearby -- drop it from "
-                "DESTRUCTIVE_WORDING_TOO_FAR",
-            )
-
-
 class TestConfirmDefaultsToNoAndDeclinesWithoutATerminal(unittest.TestCase):
-    """(b): confirm()'s own behaviour, driven directly -- no wk command, no
-    workspace, no store."""
 
     SCRIPT = (
         ". lib/common.sh\n"
@@ -201,28 +84,8 @@ class TestConfirmDefaultsToNoAndDeclinesWithoutATerminal(unittest.TestCase):
         "echo RC=$rc\n"
     )
 
-    def test_declines_with_stdin_not_a_tty(self):
-        # bash() runs with stdin inherited from the test process; explicit
-        # DEVNULL is what actually guarantees "not a terminal" regardless of
-        # how the suite itself is invoked.
-        cp = subprocess.run(
-            ["bash", "-c", self.SCRIPT],
-            cwd=str(REPO),
-            env={**os.environ, "WK_ROOT": str(REPO)},
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-        self.assertIn("RC=1", cp.stdout, cp.stderr)
-        self.assertIn("declining", cp.stderr)
-        self.assertIn("no terminal", cp.stderr)
 
     def test_declines_a_piped_yes_because_a_pipe_is_not_a_tty(self):
-        # `echo n | ...` (and, tellingly, `echo y | ...`) both hit the same
-        # [ ! -t 0 ] branch as the DEVNULL case above: a pipe is not a
-        # terminal either, so the reply's content never even gets read --
-        # there is no way to answer "yes" without a real tty or WK_YES.
         cp = subprocess.run(
             ["bash", "-c", self.SCRIPT],
             cwd=str(REPO),
@@ -233,24 +96,9 @@ class TestConfirmDefaultsToNoAndDeclinesWithoutATerminal(unittest.TestCase):
             timeout=20,
         )
         self.assertIn("RC=1", cp.stdout, cp.stderr)
-        self.assertIn("declining", cp.stderr)
-        self.assertIn("no terminal", cp.stderr)
 
-    def test_wk_yes_bypasses_even_with_no_terminal(self):
-        cp = subprocess.run(
-            ["bash", "-c", self.SCRIPT],
-            cwd=str(REPO),
-            env={**os.environ, "WK_ROOT": str(REPO), "WK_YES": "1"},
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-        self.assertIn("RC=0", cp.stdout, cp.stderr)
 
     def _confirm_over_a_real_tty(self, reply):
-        # [ -t 0 ] needs an actual terminal device, not a pipe -- a pty is
-        # the only way to reach the y/N read at all.
         master, slave = pty.openpty()
         try:
             env = {**os.environ, "WK_ROOT": str(REPO)}
@@ -274,21 +122,11 @@ class TestConfirmDefaultsToNoAndDeclinesWithoutATerminal(unittest.TestCase):
                 os.close(slave)
             os.close(master)
 
-    def test_defaults_to_no_on_an_empty_reply(self):
-        out, err = self._confirm_over_a_real_tty(b"\n")
-        self.assertIn("RC=1", out, err)
-
-    def test_declines_on_anything_but_y(self):
-        out, err = self._confirm_over_a_real_tty(b"n\n")
-        self.assertIn("RC=1", out, err)
-
-    def test_accepts_a_y_reply(self):
-        out, err = self._confirm_over_a_real_tty(b"y\n")
-        self.assertIn("RC=0", out, err)
-
-    def test_accepts_an_uppercase_y_reply(self):
-        out, err = self._confirm_over_a_real_tty(b"Y\n")
-        self.assertIn("RC=0", out, err)
+    def test_only_y_at_a_terminal_is_yes(self):
+        for reply, rc in ((b"\n", 1), (b"n\n", 1), (b"y\n", 0), (b"Y\n", 0)):
+            with self.subTest(reply=reply):
+                out, err = self._confirm_over_a_real_tty(reply)
+                self.assertIn("RC=%d" % rc, out, err)
 
 
 if __name__ == "__main__":

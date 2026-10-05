@@ -10,7 +10,7 @@
 # wk: sub backup opts=--candidates
 # wk: gone register deploy
 # wk: gone share setup   (it elects the credential the fleet holds rather than pushing this machine's)
-# wk: gone claude set claude   (the account login beside it is 'wk key set claude-login')
+# wk: gone claude set claude
 # wk: gone tailnet set tailnet
 # wk: gone tailnet-api set tailnet-api
 #
@@ -18,8 +18,8 @@
 #                     credential of each kind on every workstation. The one
 #                     command a new machine needs, and the one that keeps the
 #                     fleet holding the same keys:
-#                       the deploy keys and every credential but the claude.ai
-#                       login are elected. Every workstation is asked what it
+#                       the deploy keys and every credential are elected.
+#                       Every workstation is asked what it
 #                       holds and whether its issuer still accepts it, at that
 #                       moment, and the best working answer wins -- age counts
 #                       for nothing. The winner is put on every workstation
@@ -27,9 +27,6 @@
 #                       so a fleet that already agrees is left alone.
 #                       When no workstation holds one that works, this machine
 #                       mints or is asked for one, and that one is fanned out.
-#                       The claude.ai login is the one never copied: a
-#                       workstation without a usable one is logged in for here
-#                       and sent only its own.
 #                     A build machine is sent nothing: it keeps no credential at
 #                     rest and reaches the elected deploy key through an
 #                     ssh-agent forwarded from whoever drives the push. One line
@@ -76,16 +73,6 @@
 #                       claude        the Claude Code token a build box's agent
 #                                     starts authenticated with (`claude
 #                                     setup-token` prints one); inference only
-#                       claude-login  the claude.ai login every container and
-#                                     guest here shares,
-#                                     made once here in a browser with the
-#                                     shared directory as the CLI's config home,
-#                                     so the credential and the account record
-#                                     remote control reads land beside each
-#                                     other; separate from this machine's own
-#                                     login so neither refresh invalidates the
-#                                     other. The second of Claude's two, and
-#                                     what a session's Remote Control needs
 #                       litellm       the API key `wk ai pi` reaches your
 #                                     LiteLLM endpoint with
 #                       tailnet       the fleet's tailnet auth key, seeded onto
@@ -108,9 +95,8 @@
 #                     one takes it. --rotate removes the old keys from GitHub
 #                     and mints fresh ones instead of electing. Asks once, first
 #   wk key check      what every credential this machine holds can do and how
-#                     far it reaches, what each other workstation holds of each
-#                     of them, and whether each holds a claude.ai login of its
-#                     own -- every line asked again at that moment.
+#                     far it reaches and what each other workstation holds of
+#                     each of them -- every line asked again at that moment.
 #                     One row each: a state, the name, and what its issuer
 #                     just said; a workstation holding the same credential as
 #                     this one says so rather than repeating its reach.
@@ -180,14 +166,10 @@
 #                            `check` prints them, on one tab-separated line,
 #                            with the fingerprint an election compares
 #   wk key adopt <fork>      take a shared deploy key's private half on stdin
-#   wk key adopt claude-login
-#                            take a login made for this workstation: a tar of
-#                            its two files on stdin, judged before it is kept
 #   wk key give <fork>|<name>
 #                            print that credential, for the workstation running
 #                            `wk key setup` to take -- the other half of
-#                            `adopt`. Never the claude.ai login: that one is
-#                            made per machine and never copied
+#                            `adopt`
 #
 # <fork> is one of the short names in lib/wk/secrets.py's FORKS.
 #

@@ -4,11 +4,10 @@ the stage script's own marker whatever its exit status says; and the pinned down
 import hashlib
 import os
 import re
-import subprocess
 import sys
 
 from wk import act, build, decl, images, job
-from wk.machine import isolated_module
+from wk.machine import Local, isolated_module
 from wk.act import Refused, die, info, log, warn
 from wk.buildconf import disk_gb
 from wk.lock import Lock
@@ -126,14 +125,14 @@ def options(rest, flags, valued, usage):
 class Stage:
     """`kind` is the builder and the record's kind (one of build.EXCLUSIVE); `stage` names the log and the marker."""
 
-    def __init__(self, reg, target, ws, kind, stage, kill, clock, popen=subprocess.Popen):
+    def __init__(self, reg, target, ws, kind, stage, kill, clock):
         self.reg, self.target, self.ws, self.kind, self.stage, self.kill = reg, target, ws, kind, stage, kill
-        self.here, self.env, self.clock, self.popen = reg.machine, reg.env, clock, popen
+        self.here, self.env, self.clock = reg.machine, reg.env, clock
         self.recs = build.records_of(target, clock, self.here)
         self.ws_dir = target.store.ws_dir(ws)
         self.log = os.path.join(self.ws_dir, "home", "%s-%s.log" % (kind, stage))
         self.label = kind
-        self.watchdog = {}   # job.watch's abort and wedge, where a builder's silence is not a failure
+        self.watchdog = {}
 
     def refuse_busy(self):
         busy = build.busy_reason(self.target, self.recs, self.ws)
@@ -191,7 +190,7 @@ class Stage:
         watcher.start()
         try:
             cmd, cwd = self.target.build_argv(self.ws, in_workspace(self.target.tools(self.ws), self.label, argv))
-            rc = job.watch(cmd, self.log, self.here, self.clock, self.env, cwd, self.popen, **self.watchdog)
+            rc = job.watch(cmd, self.log, self.here, self.clock, self.env, cwd, **self.watchdog)
         except job.Interrupted as e:
             watcher.stop()
             warn("interrupted -- stopping the %s build in '%s'" % (self.stage, self.ws))
@@ -238,8 +237,8 @@ class ContainerBuilder:
     KIND = TITLE = SPEC = BASE_IMAGE = BASE_VAR = ""
     NEEDS = NOT_HERE = IMAGE_NOTE = SURVIVES = ""
 
-    def __init__(self, reg, profile, spec, clock, popen=subprocess.Popen):
-        self.reg, self.p, self.spec, self.clock, self.popen = reg, profile, spec, clock, popen
+    def __init__(self, reg, profile, spec, clock):
+        self.reg, self.p, self.spec, self.clock = reg, profile, spec, clock
         self.name = profile["IMG_PROFILE"]
         self.here, self.env, self.root = reg.machine, reg.env, str(reg.root)
         self.store = Store(self.env)
@@ -292,8 +291,7 @@ def stage_main(label, argv, environ=None):
     env["PATH"] = off_wall(env.get("PATH", ""))
     env["WK_BUILD"] = "1"
     sys.stderr.write("wk: %s pid %d\n" % (label, os.getpid()))
-    sys.stderr.flush()
-    os.execvpe(argv[0], argv, env)
+    Local().exec(argv, env=env)
 
 
 def main(argv):

@@ -33,7 +33,7 @@ STEP_BUDGET = 1800.0      # tests/run.py's live budget, per step
 MARGIN = 90.0             # what a step keeps back from the budget for the calls after its wait
 REPLY = "WK-INTEG-OK"
 PROMPT = "Reply with exactly the text %s and nothing else." % REPLY
-CREDENTIALS = ("claude-login", "claude", "litellm", "github-pat", "bugzilla-api-key")
+CREDENTIALS = ("claude", "litellm", "github-pat", "bugzilla-api-key")
 PROBE_BRANCH = "refs/heads/wk-integ-probe"
 
 # The first `git status` in the checkout, cold: measured once per target on 2026-09-27.
@@ -424,6 +424,8 @@ class TargetSteps:
         self.assertEqual("none", workspace_action(rec), "'%s' is not running and ready: %r" % (self.ws, rec))
         if not made:    # a workspace this run joined fetches what the mirror gained since, as a returning developer does
             self.wk_ok("sync", self.ws, timeout=900)
+        claude = self.inside('"$HOME/.local/bin/claude" --version || claude --version', timeout=120)
+        self.assertEqual(0, claude.rc, "'%s' was made without a Claude CLI that runs:\n%s" % (self.ws, tail(claude.out)))
 
     @step(3)
     def test_03_git_is_fast_and_current(self):
@@ -535,8 +537,10 @@ class TargetSteps:
     def test_13_zed_connects(self):
         if sys.platform != "darwin":
             self.skipTest("Zed is driven on the Mac this suite runs on")
-        if zed_pids():
-            self.skipTest("Zed is already running here, and the test could not close only the window it opened")
+        if under_zed():
+            self.skipTest("this test runs inside Zed's terminal, and quitting Zed would kill the test itself")
+        quit_zed()
+        self.assertEqual([], zed_pids(), "the person's Zed did not quit, so the test cannot tell its own window apart")
         try:
             self.wk_ok("zed", self.ws, timeout=300)
             deadline = time.monotonic() + 120
@@ -545,7 +549,7 @@ class TargetSteps:
             self.assertTrue(zed_pids(), "no Zed process after 'wk zed %s'" % self.ws)
             self.assertTrue(self.zed_servers(), "Zed never connected to '%s' (no zed-remote-server in it)" % self.ws)
         finally:
-            subprocess.run(["osascript", "-e", 'quit app "Zed"'], capture_output=True, timeout=60)
+            quit_zed()
             self.inside("pkill -f '[z]ed-remote-server'; true", timeout=120)
         self.assertEqual([], zed_pids(), "Zed did not quit")
 
@@ -559,6 +563,26 @@ class TargetSteps:
             self.skipTest("the workspace stays until steps 1-13 all pass in one run (passed: %s)" % passed)
         self.wk_ok("rm", self.ws, "--yes", timeout=900)
         self.assertIsNone(self.record(), "'%s' is still there after 'wk rm'" % self.ws)
+
+
+def under_zed():
+    pid = os.getppid()
+    while pid > 1:
+        r = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True, text=True)
+        ppid, _, comm = r.stdout.strip().partition(" ")
+        if not ppid.isdigit():
+            return False
+        if comm.strip().endswith("Zed.app/Contents/MacOS/zed"):
+            return True
+        pid = int(ppid)
+    return False
+
+
+def quit_zed():
+    subprocess.run(["osascript", "-e", 'quit app "Zed"'], capture_output=True, timeout=60)
+    deadline = time.monotonic() + 30
+    while zed_pids() and time.monotonic() < deadline:
+        time.sleep(1)
 
 
 def zed_pids():
@@ -650,17 +674,15 @@ credentials
   \x1b[32mok\x1b[0m    bugzilla-api-key -- https://bugs.webkit.org accepts it
   \x1b[32mok\x1b[0m    claude -- a Claude Code OAuth token, which is inference-only
   \x1b[33m??\x1b[0m    litellm: nothing stored   -> wk key setup
-  \x1b[32mok\x1b[0m    claude-login -- scopes: user:inference
 workspaces store
   \x1b[31m--\x1b[0m    fork push key                                  -> wk key deploy  (needs gh auth)
 """
 
 
 class TestTheEvidence(unittest.TestCase):
-    def test_doctor_rows_are_read_by_name_and_claude_is_not_claude_login(self):
+    def test_doctor_rows_are_read_by_name(self):
         rows = credential_rows(DOCTOR)
         self.assertEqual("ok", rows["claude"][0])
-        self.assertIn("claude-login -- scopes", rows["claude-login"][1])
         self.assertEqual(["??    litellm: nothing stored   -> wk key setup",
                           "--    fork push key                                  -> wk key deploy  (needs gh auth)"],
                          credential_problems(rows, CREDENTIALS + ("fork push key",)))

@@ -63,6 +63,21 @@ PLIST
 sudo -n launchctl bootout system/org.wk.nosleep 2>/dev/null || true
 sudo -n launchctl bootstrap system /Library/LaunchDaemons/org.wk.nosleep.plist 2>/dev/null || true
 
+: "${WK_MIRROR_TAG:?}" "${WK_MIRROR_MOUNT:?}" "${WK_MOUNT_MIRROR:?}"
+sudo -n mkdir -p "$(dirname "$WK_MOUNT_MIRROR")"
+sudo -n install -m 0755 "$WK_TOOLS_DIR/vm/mount-mirror.sh" "$WK_MOUNT_MIRROR"
+sudo -n tee /Library/LaunchDaemons/org.wk.mirror.plist >/dev/null <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>org.wk.mirror</string>
+  <key>ProgramArguments</key>
+  <array><string>$WK_MOUNT_MIRROR</string><string>$WK_MIRROR_TAG</string><string>$WK_MIRROR_MOUNT</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+</dict></plist>
+PLIST
+
 # A login agent, because the CoreGraphics mode-picking call errors against a sleeping display. Do not raise the size: it is a floor on the tart window, and a large one makes the window unresizable.
 mkdir -p "$HOME/.local/bin"
 cat > "$HOME/.local/bin/wk-set-display.m" <<'OBJC'

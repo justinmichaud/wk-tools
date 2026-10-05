@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 #
 # wk selftest [--lint] [--unit] [--live] [-v] [<pattern>] -- run the test suite in tests/
-# wk: where=local name=none group=hosts needs python3 takes=1 opts --lint,--unit,--live,--quick,-v
+# wk: where=local name=none group=hosts needs python3 takes=1 opts --lint,--unit,--live,--quick,-v nodryrun
 #
 # Three tiers, any combination; with none named, lint then unit run. A test
 # over WK_TEST_BUDGET seconds (30) fails; the summary prints the owed count and
-# the slowest tests.
+# the slowest tests. Exempt from --dry-run: it runs tests, whose own effects
+# are against fakes or are the live tier's purpose.
 #
 #   --lint        the static rules: one pass over the tree
 #   --unit        every test that needs no VM, machine or board
@@ -16,7 +17,6 @@
 #   <pattern>     only tests whose name matches (unittest -k)
 
 import os
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
@@ -58,7 +58,7 @@ def main(argv):
         run += ["-k", p]
     if args.flag("--live"):
         refuse_live_beside(Lock(Store(), here(), Clock()))
-    return subprocess.call([sys.executable, os.path.join(ROOT, "tests", "run.py")] + run, cwd=ROOT)
+    return here().run_tty([sys.executable, os.path.join(ROOT, "tests", "run.py")] + run, cwd=ROOT).rc
 
 
 if __name__ == "__main__":

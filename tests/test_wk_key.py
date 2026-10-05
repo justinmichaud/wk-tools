@@ -24,10 +24,9 @@ from wk.act import Refused  # noqa: E402
 from wk.machine import Result  # noqa: E402
 
 CREDCHECK = os.path.join(ROOT, "lib", "credcheck.py")
-NAMES = ("github-pat", "claude-login", "litellm", "ntfy", "deploy-key")
+NAMES = ("github-pat", "litellm", "ntfy", "deploy-key")
 GOOD, OTHER_GOOD, STALE, UNJUDGED = "good-token", "good-token-2", "stale-token", "offline-token"
 TOPIC = "topic-minted-here"
-LOGIN_OK = "ok\tscopes: user:inference user:profile"
 REPOS = {"fork": "justinmichaud/WebKit", "forkwpe": "justinmichaud/WPEWebKit"}
 
 
@@ -52,22 +51,18 @@ def judge(name, value, path, ev):
                 % (" --replace" if path else ""))
     if name == "litellm":
         return "ok\tai.igalia.com accepts it" if v.startswith("sk-") else "bad\tnot a virtual key"
-    if name == "ntfy":
-        return "ok\tntfy.sh serves it" if v.startswith("topic") else "bad\tnot one word of letters"
-    return LOGIN_OK if v.startswith("{") else "bad\tnot a login"
+    return "ok\tntfy.sh serves it" if v.startswith("topic") else "bad\tnot one word of letters"
 
 
 class Peer:
-    def __init__(self, name, creds=None, keys=None, login=LOGIN_OK, answers=True):
-        self.name, self.creds, self.keys, self.login, self.answers = name, dict(creds or {}), dict(keys or {}), login, answers
+    def __init__(self, name, creds=None, keys=None, answers=True):
+        self.name, self.creds, self.keys, self.answers = name, dict(creds or {}), dict(keys or {}), answers
         self.asked = []
 
     def state(self):
-        return sorted(self.creds.items()), sorted(self.keys.items()), self.login
+        return sorted(self.creds.items()), sorted(self.keys.items())
 
     def verdict(self, name):
-        if name == common.LOGIN:
-            return self.login
         v = self.creds.get(name, "")
         return judge(name, v, "path", {}) + ("\n    fingerprint: fp-%s" % v if v else "")
 
@@ -78,7 +73,6 @@ class KeyWorld(World):
         self.peers = {p.name: p for p in peers}
         self.github = {r: {} for r in REPOS.values()}
         self.gen = {}
-        self.claude = False
         self.react(["python3", CREDCHECK], self._credcheck)
         self.react(["python3", SECRETFILE, "present"], lambda a, f: Result(0 if f.files.get(a[3], "") else 1))
         self.react(["python3", SECRETFILE, "write"], self._write)
@@ -173,8 +167,6 @@ class KeyWorld(World):
 
     def _sh(self, argv, f):
         line = argv[2]
-        if line.startswith("command -v claude"):
-            return Result(0 if self.claude else 1)
         if not line.startswith("PEER "):
             return super()._sh(argv, f)
         words = shlex.split(line)[1:]
@@ -190,9 +182,6 @@ class KeyWorld(World):
             return Result(0, "Hi justinmichaud/WebKit!\n") if arg in p.keys else Result(1, "no key\n")
         if verb == "give":
             return Result(0, p.keys.get(arg) or p.creds.get(arg, ""))
-        if verb == "adopt" and arg == common.LOGIN:
-            p.login = LOGIN_OK
-            return Result(0, LOGIN_OK + "\n")
         if verb == "adopt":
             p.keys[arg] = inp.rstrip("\n")
             return Result(0)
@@ -238,7 +227,6 @@ class KeyTest(SecretsTest):
         w.register()
         w.holds("github-pat", pat)
         w.holds("ntfy", TOPIC)
-        w.holds("claude-login", "{login}")
         os.environ["WK_YES"] = "1"
         return w
 
@@ -361,33 +349,10 @@ class TestAValueTravelsOnStdin(KeyTest):
         self.assertIn(GOOD + "\n", [i for _, i in w.inputs])
 
 
-class TestTheLoginCrossesAsATar(KeyTest):
-    def test_a_login_made_here_is_adopted_there_whole(self):
-        w = self.world()
-        d = self.tmp + "/made"
-        w._set_file(d + "/.credentials.json", "{login}\n")
-        w._set_file(d + "/.claude.json", '{"oauthAccount": {}}\n')
-        k = self.key()
-        rc, line = k.login_adopt(k.login_pack(d).encode())
-        rw = w.sec().store.agent_rw_dir()
-        self.assertEqual((0, LOGIN_OK), (rc, line))
-        self.assertEqual("{login}\n", w.files[rw + "/.credentials.json"])
-        self.assertEqual('{"oauthAccount": {}}\n', w.files[rw + "/.claude.json"])
-
-    def test_something_that_is_not_the_two_files_is_refused_and_nothing_moves(self):
-        w = self.world()
-        w.holds("claude-login", "{mine}")
-        rc, line = self.key().login_adopt(b"not a tar")
-        self.assertEqual(1, rc)
-        self.assertIn("not a login bundle", line)
-        self.assertEqual("{mine}\n", w.files[w.sec().cred_path("claude-login")])
-
-
 class TestCrashOnlyAndDryRun(KeyTest):
     def fleet_world(self):
         w = KeyWorld(self.tmp, [Peer("peerbox", creds={"github-pat": STALE})])
         w.holds("github-pat", GOOD)
-        w.holds("claude-login", "{login}")
         return w
 
     def setup_once(self, w):
@@ -476,14 +441,6 @@ class TestTheStoringVerbsHaveADryRun(KeyTest):
 
     def test_adopt_a_deploy_key(self):
         self.dry_equals_wet(lambda: KeyWorld(self.tmp), lambda k: k.adopt_verb("fork", lambda: b"KEY:taken\n"), minted=True)
-
-    def test_adopt_a_login(self):
-        def make():
-            w = KeyWorld(self.tmp)
-            w._set_file(self.tmp + "/made/.credentials.json", "{login}\n")
-            w._set_file(self.tmp + "/made/.claude.json", "{}\n")
-            return w
-        self.dry_equals_wet(make, lambda k: k.adopt_verb(common.LOGIN, lambda: k.login_pack(self.tmp + "/made").encode()))
 
 
 class TestTheFleetQuestion(KeyTest):

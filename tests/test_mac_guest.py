@@ -1,9 +1,6 @@
 """mac-guest (lib/wk/boot/mac.py): a Tart guest standing in for a Mac in bench mode, against FakeGuest
 (tests/test_mac_volume.py) and GuestChannel over a vm target in memory. It conforms like the real driver, and a
-reading from it is refused as a measurement.
-
-Run: python3 tests/run.py --unit -k test_mac_guest
-"""
+reading from it is refused as a measurement."""
 import os
 import sys
 import unittest

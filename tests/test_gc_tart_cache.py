@@ -1,10 +1,5 @@
-"""`wk gc` trims tart's pulled-image cache (lib/wk/sysimage/guestbase.py's rubble): the guests are pulled from an OCI
-registry, so what tart keeps beside them is re-downloadable and belongs to a budget the way ccache does. A local VM is
-a workspace and goes with `wk rm`, so the prune is tart's own default, caches only; the golden base is named with the
-command that erases it. Driven over the fake machine and fake vm target of tests/test_owed_gc.py.
-
-Run: python3 tests/run.py --unit -k test_gc_tart_cache
-"""
+"""`wk gc` prunes tart's pulled-image cache to its budget (caches only), and names the golden base with the command
+that erases it. Over tests/test_owed_gc.py's fake machine and vm target."""
 import unittest
 
 from tests.test_owed_gc import FakeVm, GcTest, _seed

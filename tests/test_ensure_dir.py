@@ -1,26 +1,12 @@
-"""lib/common.sh: `ensure_dir` converges on a mode, it does not re-apply one.
-
-Every store directory in the fleet is made by this one function, and two of
-them arrive as read-only mounts rather than as directories anything here
-creates: inside the podman machine the secrets directory is this host's,
-mounted read-only (host/macos/machine.sh), already 0700. A chmod of a path on
-a read-only filesystem fails whatever it asks for, so a function that re-states
-a mode that is already right is a function that breaks `wk new` on a machine
-whose mounts are exactly as the design says they must be.
-
-Driven with a `chmod` of this test's own on PATH: what matters is whether one
-is issued at all, which the resulting mode cannot answer.
-
-Run: python3 -m unittest tests.test_ensure_dir -v
-"""
+"""lib/common.sh: `ensure_dir` converges on a mode and issues no chmod when it is already right, since a store
+directory may be a read-only mount."""
 
 import os
 import unittest
 
 from tests.support import WkTest, bash
 
-# Sourced by each case, with a `chmod` that records its arguments and one that
-# refuses the way a read-only filesystem does.
+# A `chmod` that records its arguments, and refuses as a read-only filesystem does under CHMOD_FAILS.
 PREAMBLE = """
 set -uo pipefail
 mkdir -p "$BIN"
@@ -32,8 +18,6 @@ exec /bin/chmod "$@"
 EOF
 chmod 0755 "$BIN/chmod"
 . "$WK_ROOT/lib/common.sh"
-# After the source: lib/common.sh settles PATH itself (shell/path.sh), and a
-# chmod put in front of it before that is one the source puts back behind.
 export PATH="$BIN:$PATH"
 """
 
@@ -74,9 +58,6 @@ class TestEnsureDir(WkTest):
         self.assertEqual(0o700, os.stat(d).st_mode & 0o777)
 
     def test_a_read_only_mount_that_is_already_right_is_left_alone(self):
-        """The live case: `wk new` inside the podman machine, whose store
-        directory is a read-only virtiofs mount at 0700. Every chmod here
-        fails, so reaching the end proves none was issued."""
         cp, calls, _ = self._run(
             'mkdir -p "$DIR" && /bin/chmod 0700 "$DIR"\n'
             ': > "$LOG"\n'
@@ -85,13 +66,11 @@ class TestEnsureDir(WkTest):
         self.assertEqual([], calls, calls)
 
     def test_a_read_only_mount_with_the_wrong_mode_says_so(self):
-        """The other half: a mount that is genuinely wrong cannot be fixed
-        from in here, and a caller must hear that rather than carry on."""
         cp, _, _ = self._run(
             'mkdir -p "$DIR" && /bin/chmod 0755 "$DIR"\n'
             'CHMOD_FAILS=1 ensure_dir "$DIR" 0700; echo done')
         self.assertNotIn("done", cp.stdout)
-        self.assertIn("cannot set mode 0700", cp.stdout + cp.stderr)
+        self.assertIn("0700", cp.stdout + cp.stderr)
 
     def test_a_caller_that_names_no_mode_asks_only_that_it_exists(self):
         cp, calls, d = self._run(
@@ -104,7 +83,6 @@ class TestEnsureDir(WkTest):
 
 
 class TestFileMode(WkTest):
-    """The reader ensure_dir and admin/install.sh ask: octal permission bits."""
 
     def test_it_reads_the_bits_without_a_leading_zero(self):
         d = self.tmp

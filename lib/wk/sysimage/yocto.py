@@ -23,8 +23,8 @@ COOKER_KILL_WAIT = 5
 WEDGE_BEATS = 48     # 4 h of heartbeats naming one task; a wedged image stage has run 22800 s before anyone noticed
 TASK_NAMED = re.compile(r"Running task \d+ of \d+ \(([^)]+)\)|recipe (\S+): task (do_\w+): Started|^\s*\d+: (\S+ do_\w+)", re.M)
 CROSS = {"wpe-cross": "the release branch's own flags and nothing else",
-         "wpe-cross-pgo-collect": "clang and LLVM profile generation -- the collection build, which nothing measures",
-         "wpe-cross-pgo-use": "clang and a collected profile -- the build every number from a 2.52+ board is taken from"}
+         "wpe-cross-pgo-collect": "clang, thin LTO and LLVM profile generation -- the collection build, which nothing measures",
+         "wpe-cross-pgo-use": "clang, full LTO and a collected profile -- the build every number from a 2.52+ board is taken from"}
 USAGE = ("usage: wk sysimage build %s [--dry-run|--workspace <name>|--stage <name>|\n    --detach|--stop|--keep-work|--chromium|"
          "--no-local-layer|--no-tailnet]\n    'wk sysimage webkit %s' adds --commit, --slot, --config and --pgo-profile.")
 STAGE_HELP = """unknown stage '%s'. One of, each including the ones above it:
@@ -82,12 +82,12 @@ def cross_config(name, profile):
     if name == "wpe-cross-pgo-collect":
         if profile:
             die("--pgo-profile names a profile to build against, and '%s' does not\n    build against one. That is 'wpe-cross-pgo-use'." % name)
-        return "clang", "clang++", ("-DENABLE_LLVM_PROFILE_GENERATION=ON -DUSE_PGO_PROFILE=OFF -DPGO_PROFILE_DIR=%s"
+        return "clang", "clang++", ("-DLTO_MODE=thin -DENABLE_LLVM_PROFILE_GENERATION=ON -DUSE_PGO_PROFILE=OFF -DPGO_PROFILE_DIR=%s"
                                     % pgo.BOARD_DIR), "collect"
     if not profile:
         die("wpe-cross-pgo-use: no profile given. The measured build reads one merged .profdata,\n"
             "    and cmake refuses without it (PGO_PROFILE_PATH); 'wk sysimage webkit' collects one first.")
-    return "clang", "clang++", "-DENABLE_LLVM_PROFILE_GENERATION=OFF -DUSE_PGO_PROFILE=ON -DPGO_PROFILE_PATH=" + profile, "use"
+    return "clang", "clang++", "-DLTO_MODE=full -DENABLE_LLVM_PROFILE_GENERATION=OFF -DUSE_PGO_PROFILE=ON -DPGO_PROFILE_PATH=" + profile, "use"
 
 
 def task_named(path):
@@ -131,7 +131,7 @@ class Yocto(task.ContainerBuilder):
         return "wk sysimage build %s --stage %s%s --stop" % (self.spec, stage, self.ws_flag(ws))
 
     def stage(self, target, ws, stage):
-        st = task.Stage(self.reg, target, ws, "yocto", stage, self.kill_cmd(ws, stage), self.clock, self.popen)
+        st = task.Stage(self.reg, target, ws, "yocto", stage, self.kill_cmd(ws, stage), self.clock)
         env = {k: v for k, v in target.env.items() if k != "WK_ABORT_SECONDS"}
         st.recs = record.of_target(target, self.clock, self.here, env)   # a record with no deadline: silence is not a failure
         st.env = dict(self.env, WK_KILL_WAIT=str(job.kill_wait(self.env, KILL_WAIT)))

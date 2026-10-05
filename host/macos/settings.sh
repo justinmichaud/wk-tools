@@ -48,8 +48,9 @@ apply_default() {
 
 _dock_changed=""
 if [ -f "$_defaults_conf" ]; then
-    while read -r domain key type value; do
+    while read -r domain key type value reason; do
         case "$domain" in ''|'#'*) continue ;; esac
+        [ -n "$reason" ] || die "defaults.conf: $domain $key records no reason, and a setting persists only with one -- add it after the value"
         apply_default "$domain" "$key" "$type" "$value"
     done < "$_defaults_conf"
 fi

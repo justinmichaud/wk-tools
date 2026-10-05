@@ -1,14 +1,5 @@
-"""INT/TERM/HUP handling: lib/wk/job.py's `Signals` and `watch`, and the
-`kill_tree` walk both the stall path and the interrupt path end a job with.
-Each docstring is the phrase of the behaviour it checks.
-
-Every test here sends the signal to the driver's own pid, not its process
-group -- exactly what a supervisor tracking one pid does (an agent's own
-tool cancellation, or `kill -INT <pid>`), and the case default
-process-group delivery from a real terminal does not exercise.
-
-Run: python3 -m unittest tests.test_interrupt -v
-"""
+"""INT/TERM/HUP: job.Signals and watch, and the kill_tree walk the stall and interrupt paths share. Each signal goes
+to the driver's own pid, as a supervisor tracking one pid sends it."""
 import os
 import signal
 import subprocess
@@ -23,7 +14,7 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import job  # noqa: E402
 from wk.machine import Fake, Local  # noqa: E402
 
-# The driver as lib/wk/build.py runs a watched job: under Signals, an Interrupted converges and exits by its signal.
+# A watched job as lib/wk/build.py runs one: under Signals, an Interrupted exits by its signal.
 DRIVER = '''
 import sys
 sys.path.insert(0, %(lib)r)
@@ -58,7 +49,6 @@ def _interrupt_driver(tmp, sig):
     The watch polls every 600s, so a signal that did not cut the poll short outlives the runner's budget."""
     pidfile, marker = os.path.join(tmp, "child.pid"), os.path.join(tmp, "cancelled")
     script = DRIVER % {"lib": str(REPO / "lib"), "pidfile": pidfile, "log": os.path.join(tmp, "build.log"), "marker": marker}
-    # Its own session, so cleanup can kill the whole group; the signal still goes to the driver pid alone.
     proc = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, start_new_session=True)
     try:
@@ -94,8 +84,6 @@ class TestWatchInterrupt(unittest.TestCase):
 
 
 class TestKillingAJobKillsWhatItStarted(unittest.TestCase):
-    """The stall path and the interrupt path both walk the descendants through kill_tree, so a child the job
-    started does not outlive it."""
 
     def test_a_grandchild_does_not_outlive_the_job(self):
         with tempfile.TemporaryDirectory(prefix="wk-interrupt-test-") as tmp:

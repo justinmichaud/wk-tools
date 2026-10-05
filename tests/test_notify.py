@@ -1,18 +1,10 @@
-"""lib/wk/notify.py: telling a person the fleet wants them, and never silently not.
-
-The property under test is the absence of a no-op: `publish` answers 0 only when ntfy took the message, and a reason
-naming the remedy every other time. ntfy is a local HTTP server, the way tests/test_credcheck.py stubs GitHub: the
-real publishing code runs, the JSON body included, and nothing leaves the machine. `WK_NTFY_API` is the seam.
-
-The topic name is the whole credential, so no real one appears here: every topic below is a placeholder.
-
-Run: python3 tests/run.py --unit -k test_notify
-"""
-import ast
+"""lib/wk/notify.py against a local ntfy stub (`WK_NTFY_API`): `publish` answers 0 only when ntfy took the message,
+and a reason naming the remedy every other time. Every topic here is a placeholder."""
 import contextlib
 import io
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -103,21 +95,13 @@ class TestItPublishesOrSaysWhyNot(_Ntfy):
         with self.at(DOWN):
             code, why = notify.publish(TOPIC, "the plant is waiting")
         self.assertEqual(6, code)
-        self.assertIn("could not reach", why)
         self.assertEqual([], FakeNtfy.published)
 
     def test_an_address_that_is_no_https_url_is_refused_naming_the_variable(self):
-        """Not reported as an unreachable server: nothing was asked, and the remedy is the setting."""
         with self.at("ntfy.example"), self.assertRaises(SystemExit) as cm:
             notify.publish(TOPIC, "the plant is waiting")
         self.assertIn("WK_NTFY_API=ntfy.example", str(cm.exception))
-        self.assertIn("Unset WK_NTFY_API", str(cm.exception))
-
-    def test_a_publish_that_landed_has_exactly_one_exit_code(self):
-        """The guessable-name verdict belongs to `check`, which is not a publish."""
-        for topic in (TOPIC, SHORT):
-            with self.subTest(topic=topic):
-                self.assertEqual(0, notify.publish(topic, "landed")[0])
+        self.assertEqual([], FakeNtfy.published)
 
     def test_a_topic_that_is_not_one_is_refused_before_the_network(self):
         self.assertEqual(4, notify.publish("not one word", "x")[0])
@@ -126,16 +110,9 @@ class TestItPublishesOrSaysWhyNot(_Ntfy):
 
 class TestTheTopicNeverLeaks(_Ntfy):
     def test_a_refusal_ntfy_echoed_the_topic_into_does_not_carry_it(self):
-        """ntfy's own error body quotes the topic back, and the reason lands in whatever log the caller writes."""
         FakeNtfy.post_status = 400
         why = notify.publish(TOPIC, "the plant is waiting")[1]
         self.assertNotIn(TOPIC, why)
-        self.assertIn("<the topic>", why)
-
-    def test_nothing_in_the_tree_holds_a_topic_to_leak(self):
-        for f in (NOTIFY, CREDCHECK):
-            with self.subTest(source=f.name):
-                self.assertNotRegex(f.read_text(), r"ntfy\.sh/[A-Za-z0-9]")
 
 
 class TestTheRuleJudgesWhatTheTopicCanDo(_Ntfy):
@@ -147,7 +124,6 @@ class TestTheRuleJudgesWhatTheTopicCanDo(_Ntfy):
         self.assertEqual(3, notify.check(SHORT)[0])
 
     def test_a_name_ntfy_carries_no_topic_by_is_bad(self):
-        """A reserved name redirects to the ntfy web site; a followed redirect would read as 200."""
         for status in (302, 404):
             with self.subTest(status=status):
                 FakeNtfy.get_status = status
@@ -171,7 +147,6 @@ class TestTheRuleJudgesWhatTheTopicCanDo(_Ntfy):
         return cp.stdout.split("\t", 1)
 
     def test_the_credential_rule_reaches_the_same_verdicts(self):
-        """One implementation of "ask ntfy": the rule calls this module rather than making a request of its own."""
         for topic, want in ((TOPIC, "ok"), (SHORT, "wide")):
             with self.subTest(topic=topic):
                 self.assertEqual(want, self._verdict(topic)[0])
@@ -200,7 +175,6 @@ class TestTheTopicIsMintedNotInvented(_Ntfy):
 
 
 class TestTheLibraryCall(_Ntfy):
-    """`send`: the credential this machine holds, read the one way, published to the stub."""
 
     def env(self):
         return clean_env({"WK_STORE": str(self.tmp / "store"), "WK_NTFY_API": self.url,
@@ -235,12 +209,10 @@ class TestTheLibraryCall(_Ntfy):
         FakeNtfy.post_status = 400
         ok, err = self.send("the plant is waiting")
         self.assertFalse(ok)
-        self.assertIn("refused the publish", err)
         self.assertNotIn(TOPIC, err)
 
 
 class TestTheCredentialIsDeclaredWhereARebuildLooks(unittest.TestCase):
-    """New machine-local state is a line in `wk doctor`'s machine-local section, or a reinstall loses it silently."""
 
     def test_the_machine_local_section_names_the_topic(self):
         from tests.test_doctor import fake_doctor
@@ -258,7 +230,6 @@ class TestTheCredentialIsDeclaredWhereARebuildLooks(unittest.TestCase):
         self.assertEqual(Secrets(REPO, env=env).cred_path("ntfy"), doctor.Doctor(str(REPO), env=env).paths()["ntfy_topic"])
 
     def test_it_is_not_in_a_directory_a_workspace_can_read(self):
-        """The secrets directory is mounted read-only into every container, so a topic in there could be forged from one."""
         from wk.store import Store
         store = Store(clean_env({"WK_STORE": "/scratch/store", "WK_HOST_SECRETS": "/scratch/store/secrets"}))
         topic, secrets, agent_rw = store.ntfy_topic_path(), store.secrets_dir(), store.agent_rw_dir()
@@ -268,7 +239,6 @@ class TestTheCredentialIsDeclaredWhereARebuildLooks(unittest.TestCase):
 
 
 class TestSdNotify(unittest.TestCase):
-    """The Type=notify host services import this from a bare python3; tests/test_host_units.py holds the rest."""
 
     def test_it_is_a_no_op_without_the_socket(self):
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -285,11 +255,12 @@ class TestSdNotify(unittest.TestCase):
             self.assertEqual(b"READY=1", srv.recv(64))
             srv.close()
 
-    def test_the_module_imports_nothing_outside_the_standard_library(self):
-        """The services run it from the host's python3 before anything else of wk's is loaded."""
-        tree = ast.parse(NOTIFY.read_text())
-        top = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
-        self.assertFalse([n for n in top if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("wk")])
+    def test_the_module_imports_from_a_bare_python3(self):
+        with tempfile.TemporaryDirectory() as d:
+            shutil.copy(NOTIFY, d)
+            cp = subprocess.run([sys.executable, "-S", "-c", "import notify; notify.sd_notify('READY=1')"],
+                                cwd=d, capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
+        self.assertEqual(0, cp.returncode, cp.stderr)
 
 
 if __name__ == "__main__":

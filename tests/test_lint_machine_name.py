@@ -1,13 +1,4 @@
-"""lint.one_machine_name_reader: this host's name is read in one place,
-lib/wk/record.py's `host_name` (the primitive `record.machine_name`, the lock
-path and `lib/wk/doctor.py`'s `Doctor.hostname` all build on); no other Python
-source under lib/wk or cmd reads it, and no bash that runs beside wk-tools on a
-host (lib/, cmd/, host/, setup) runs `hostname` -- lib/common.sh's
-wk_machine_name asks record.machine_name. What runs elsewhere (a build box
-being probed, a board's first boot, the prompt) names that machine, not this one.
-
-Run: python3 tests/run.py --lint -k test_lint_machine_name
-"""
+"""lint.one_machine_name_reader: this host's name is read in one place,"""
 TIER = "lint"
 import ast
 import re
@@ -19,7 +10,6 @@ READER = ("lib/wk/record.py", "host_name")
 
 
 def python_sources():
-    """Every lib/wk module, plus every cmd/* file that is Python (its shebang says so)."""
     yield from sorted((REPO / "lib" / "wk").rglob("*.py"))
     for p in sorted((REPO / "cmd").iterdir()):
         if p.is_file() and p.read_text(errors="replace").startswith("#!/usr/bin/env python3"):
@@ -27,9 +17,6 @@ def python_sources():
 
 
 class _Runs(ast.NodeVisitor):
-    """The enclosing function of every hostname-reading call or literal:
-    `socket.gethostname()`, `os.uname().nodename`, `["hostname", ...]`,
-    `platform.node()`."""
 
     def __init__(self):
         self.where = ["<module>"]

@@ -1,19 +1,10 @@
-"""lint.no_addresses: a node is reached by its tailnet name, and how to reach it
-is written down nowhere. dotfiles/ssh/config, machines/*.conf and lib/ hold no
-MAC address or `.local` name; the ssh config also holds no IP-address HostName,
-HostKeyAlias or ProxyJump, except the stanzas of the two nodes the tailnet
-cannot name: moose's BMC behind its bridge phone, and Igalia's build boxes
-behind the gateway.
-
-Run: python3 tests/run.py --lint -k test_lint_no_addresses
-"""
+"""lint.no_addresses: a node is reached by its tailnet name, and how to reach it"""
 TIER = "lint"
 import re
 import unittest
 
 from tests.support import REPO, owed
 
-# Host stanzas allowed to name a jump host or an address.
 EXCEPTED_HOSTS = {"moosebmc", "buildbox4", "devbox-arm64-2", "devbox-armhf-2"}
 MAC = re.compile(r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f:])")
 LOCAL_NAME = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9-]*\.local\b(?![/\w])")
@@ -25,7 +16,6 @@ def is_placeholder(mac):
 
 
 def text_hits(text):
-    """(line number, what) for each MAC (all-zero placeholders excepted) and each `.local` name."""
     hits = []
     for n, line in enumerate(text.splitlines(), 1):
         hits += [(n, "MAC " + m) for m in MAC.findall(line) if not is_placeholder(m)]
@@ -34,7 +24,6 @@ def text_hits(text):
 
 
 def ssh_config_hits(text):
-    """(line number, what) for each address, HostKeyAlias and ProxyJump outside the excepted stanzas."""
     hits, hosts = [], []
     for n, raw in enumerate(text.splitlines(), 1):
         parts = raw.split("#", 1)[0].split()

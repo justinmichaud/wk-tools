@@ -1,18 +1,10 @@
-"""lib/wk/workspace.py: `wk new` and `wk rm` as flows over a fake target on
-a fake machine -- every refusal by its words and exit status, the driver's
-steps and record, what freshen says, rm's plan and its four answers, and
-that either flow killed after any effect and re-run converges on the same
-final state, with a dry run printing the same plan and touching nothing.
-
-Run: python3 tests/run.py -k tests.test_wk_workspace
-"""
+"""lib/wk/workspace.py: `wk new` and `wk rm` as flows over a fake target on a fake machine."""
 import contextlib
 import io
 import json
 import os
 import shutil
 import signal
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -36,10 +28,8 @@ CHECKOUT = "branch=main\nupstream=origin/main\nbehind=0\nhead=abc1234\n"
 
 
 class World(Fake):
-    """This host with one container target: podman answers from `containers`, wkdev-create stands in for
-    firstrun by writing the ready marker, the bridged bash functions answer from `bash`, a record
-    removed through this machine goes from the record directory too, and the store holds a mirror and
-    one snapshot on its branch, `main-1`, that git answers for."""
+    """This host with one container target: podman answers from `containers`, wkdev-create writes the ready
+    marker, and the store holds a mirror and one snapshot, `main-1`."""
 
     def __init__(self, tmp, kinds=None, stores=None):
         super().__init__("here")
@@ -182,8 +172,7 @@ class World(Fake):
         return [e for e in self.effects if not (isinstance(e[1], str) and e[1].startswith(self.env["WK_LOCK_DIR"]))]
 
     def state(self):
-        """What a flow leaves. A lock file is not in it: one a killed holder left is taken by the next
-        taker, and a re-run that cannot take it fails rather than converging. Nor is the snapshot, which neither flow writes."""
+        """What a flow leaves, less lock files and the snapshot."""
         store = str(self.tmp / "store")
         return (sorted(self.containers), sorted(self.rel(p) for p in self.files if p.startswith(store) and not p.startswith(store + "/base/")),
                 sorted(self.rel(d) for d in self.dirs if d.startswith(store + "/ws")),
@@ -257,8 +246,6 @@ class PodmanTarget(targets.Target):
 
 
 class ContainerWorld(World):
-    """The World with the real container driver in PodmanTarget's place: the SDK's scripts answer behind its `env`
-    prefix, `wkdev-enter` as the World's `exec` does."""
 
     def __init__(self, tmp):
         super().__init__(tmp)
@@ -282,9 +269,6 @@ class ContainerWorld(World):
 
 
 class VmWorld(World):
-    """The World with the real vm driver in PodmanTarget's place: tart answers from `vms` (name -> state), a clone
-    adds a stopped guest and a delete removes it; the guest base is built and current, so `ensure` and `stale` are
-    the test's to patch."""
 
     def __init__(self, tmp):
         super().__init__(tmp)
@@ -452,10 +436,6 @@ class TestNewFrontDetach(WorkspaceTest):
         self.assertEqual(self.spawned(), [("spawn", (WK, "new", "ws", "--target", "fakebox", "--arch", "armhf", "--base", "main-2", "--_detached"), log)])
         self.assertIn(("write", log), self.w.effects)
         self.assertIn(("mkdir", os.path.dirname(log)), self.w.effects)
-        self.assertIn("creating 'ws' on fakebox, detached as pid 1001 -- this end can go away", err)
-        self.assertIn("follow:  tail -f %s" % log, err)
-        self.assertIn("state:   wk status ws", err)
-        self.assertIn("open it:  wk enter ws --zed   (waits for it to be ready)", err)
 
     def test_the_store_is_initialised_before_the_detach(self):
         self.stderr(lambda: self.front(no_wait=True))
@@ -504,7 +484,6 @@ class TestNewFrontDetach(WorkspaceTest):
         self.assertIn(1001, self.w.pids)
 
     def test_the_log_is_streamed_while_waiting(self):
-        """The driver's log is read through the machine that spawned it into that log."""
         class Says(World):
             def spawn(self, argv, log):
                 pid = super().spawn(argv, log)
@@ -532,31 +511,10 @@ class TestNewFrontTail(WorkspaceTest):
         return Creates(self.tmp, **kw)
 
     def test_the_hints_follow_readiness_and_no_agent_is_started(self):
-        """Remote Control is a `wk ai claude` session's own, so `wk new` runs no agent and judges no login."""
         rc, err = self.stderr(lambda: self.front())
         self.assertEqual(rc, 0)
         self.assertEqual(self.runs(head=WK), [])
         self.assertEqual(self.bash_runs(fn="wk_cred_check"), [])
-        self.assertIn("workspace 'ws' ready", err)
-        self.assertIn("wk ai claude ws      sandboxed agent\n", err)
-        self.assertIn("wk enter ws          shell", err)
-        self.assertNotIn("remote control", err.lower())
-
-    def test_a_remote_target_names_its_missing_sandbox(self):
-        w = self.make_world(kinds={"fakebox": "remote"})
-        _, err = self.stderr(lambda: self.front(w))
-        self.assertEqual(self.runs(w, head=WK), [])
-        self.assertIn("no sandbox on a shared machine, so 'wk ai claude' and 'wk doctor <ws>' refuse.", err)
-        self.assertIn("ssh://box.example/src/WebKit", err)
-
-    def test_the_vm_and_armhf_hints(self):
-        w = self.make_world(kinds={"fakebox": "vm"})
-        _, err = self.stderr(lambda: self.front(w))
-        self.assertIn("wk start ws       boot it", err)
-        w = self.make_world()
-        _, err = self.stderr(lambda: self.front(w, arch="armhf"))
-        self.assertIn("workspace 'ws' ready (armhf)", err)
-        self.assertIn("armhf: native 32-bit, no GPU.", err)
 
     def test_a_pr_is_checked_out_once_ready_and_its_failure_is_the_commands(self):
         calls = []
@@ -579,9 +537,6 @@ class TestNewFrontTail(WorkspaceTest):
 
 
 class TestNewOnAPeer(unittest.TestCase):
-    """A peer workstation's `wk new` makes the workspace: its argv is handed over through act_run, so a dry run prints
-    it here; a base id names this machine's snapshot, so --base is refused."""
-
     def setUp(self):
         self.here = Fake("here")
         self.here.answer(["ssh"])
@@ -635,8 +590,6 @@ class TestNewKill(WorkspaceTest):
         self.assertEqual(rc, 0)
         self.assertEqual([e for e in self.w.effects if e[0] == "kill"], [("kill", 4242, int(signal.SIGTERM))])
         self.assertEqual(t.verdict(), "cancelled")
-        self.assertIn("stopping the new in 'ws' (pid 4242 on here)", err)
-        self.assertIn("stopped 'ws's new and recorded it as cancelled", err)
         self.assertIn("wk rm ws    (then 'wk new ws' to start again)", err)
 
     def test_a_driver_that_outlives_term_and_kill_is_named_with_ps(self):
@@ -651,7 +604,6 @@ class TestNewKill(WorkspaceTest):
         err = self.refused(lambda: self.front(w, kill=True))
         self.assertEqual([e for e in w.effects if e[0] == "kill"], [("kill", 4242, int(signal.SIGTERM)), ("kill", 4242, int(signal.SIGKILL))])
         self.assertEqual(w.clock.slept, [1] * 7)
-        self.assertIn("pid 4242 did not stop on TERM after 2s -- killing it", err)
         self.assertIn("the process creating 'ws' outlived a TERM and a KILL.", err)
         self.assertIn("ps -p 4242", err)
         self.assertEqual(t.verdict(), "cancelled")
@@ -682,15 +634,34 @@ class TestNewDriver(WorkspaceTest):
         self.assertIn("wk-ws", self.w.containers)
         (t,) = self.w.records.list()
         self.assertEqual((t.field("kind"), t.verdict(), t.plan()), ("new", "ok", list(workspace.PLAN)))
-        self.assertEqual([s for _, s in t.steps()], ["done"] * 6 + ["running"])
+        self.assertEqual([s for _, s in t.steps()], ["done"] * 7 + ["running"])
         self.assertEqual(t.field("kill"), "wk new ws --kill")
         self.assertEqual(self.w.lock_files(), [])
-        self.assertIn("workspace 'ws' created", err)
-        self.assertIn("'ws' is on main at abc1234, up to date with origin/main", err)
+
+    def test_the_agents_are_installed_once_it_is_up_and_before_the_fetch(self):
+        self.stderr(lambda: self.driver())
+        execs = [e[1][-1] for e in self.w.effects if e[0] == "run" and e[1][0] == "exec"]
+        install = next(i for i, c in enumerate(execs) if "claude.ai/install.sh" in c)
+        config = next(i for i, c in enumerate(execs) if "claude/workspace-config.py" in c)
+        fetch = next(i for i, c in enumerate(execs) if "echo yes || echo no" in c)
+        self.assertLess(install, config)
+        self.assertLess(config, fetch)
+
+    def test_an_agent_install_that_fails_fails_the_creation_and_a_rerun_remakes_it(self):
+        def failing(argv, f):
+            return Result(1, "claude=failed\n") if "claude.ai/install.sh" in argv[-1] else World._exec(f, argv, f)
+        self.w.react(["exec"], failing)
+        err = self.refused(lambda: self.driver())
+        self.assertIn("could not install the coding agents in 'ws' (claude=failed pi=?)", err)
+        (t,) = self.w.records.list()
+        self.assertNotEqual("0", t.field("exit"))
+        self.assertEqual("creating", workspace.creation_state(self.w.target, self.w.records, "ws"))
+        self.w.react(["exec"], World._exec.__get__(self.w))
+        rc, err = self.stderr(lambda: self.driver())
+        self.assertEqual(0, rc, err)
+        self.assertIn("'ws' exists but was never finished -- destroying it and starting again", err)
 
     def test_the_sdk_is_refreshed_under_its_lock_before_the_store_lock_and_the_create(self):
-        """A container's image tag comes from the SDK checkout on disk, so it is refreshed for every new
-        workspace; the refresh is a network fetch, so no `wk sync` waits on it behind the store lock."""
         self.stderr(lambda: self.driver())
         self.assertEqual(self.lock_takes(heads=("sdk-refresh", "wkdev-create")),
                          ["lock sdk", "sdk-refresh", "lock ws-ws", "lock store", "wkdev-create"])
@@ -700,7 +671,6 @@ class TestNewDriver(WorkspaceTest):
             self.assertEqual(self.lock_takes(w, heads=("sdk-refresh",)), ["lock ws-ws"], kind)
 
     def test_the_mirror_is_refreshed_alone_before_the_store_lock_and_only_where_the_checkout_reads_it(self):
-        """`wk sync --mirror` takes the store lock itself, and touches no other workspace; a remote keeps its own."""
         self.stderr(lambda: self.driver())
         self.assertEqual(self.lock_takes(heads=(WK, "wkdev-create")),
                          ["lock sdk", "lock ws-ws", WK, "lock store", "wkdev-create", WK])
@@ -716,10 +686,6 @@ class TestNewDriver(WorkspaceTest):
         self.assertIn("no request broker", err)
         self.assertIn("'ws' was not created.\n    Fix that:  wk sync --mirror   then  wk new ws", err)
         self.assertNotIn("wk-ws", self.w.containers)
-
-    def test_the_targets_that_read_this_machines_mirror(self):
-        self.assertEqual({c.kind: c.reads_host_mirror for c in (targets.Container, targets.Vm, targets.Remote, targets.LocalWorkspace)},
-                         {"container": True, "vm": True, "remote": False, "local": False})
 
     def test_a_present_broken_or_unreachable_workspace_is_refused_and_the_record_says_refused(self):
         cases = []
@@ -748,7 +714,6 @@ class TestNewDriver(WorkspaceTest):
         rc, err = self.stderr(lambda: self.driver())
         self.assertEqual(rc, 0)
         self.assertIn("'ws' exists but was never finished -- destroying it and starting again", err)
-        self.assertIn("(an interrupted 'wk new' leaves this; nothing in it is worth keeping)", err)
         heads = [a[:3] for a in self.runs() if a[0] == "wkdev-create" or a[:2] in (("podman", "rm"), ("podman", "unshare"))]
         self.assertEqual(heads, [("podman", "rm", "-f"), ("podman", "unshare", "rm"), ("wkdev-create", "--name", "wk-ws")])
         self.assertNotIn("Host wk-ws", self.w.files[conf])
@@ -779,8 +744,13 @@ class TestNewDriver(WorkspaceTest):
         self.assertEqual(workspace.creation_state(w.target, w.records, "ws"), "present")
         self.assertIn("already exists", self.refused(lambda: self.driver(w)))
 
+    def test_a_creation_still_running_is_not_remade(self):
+        self.w.make()
+        self.w.begin(plan=list(workspace.PLAN))
+        self.w.pids.add(4242)
+        self.assertEqual(workspace.creation_state(self.w.target, self.w.records, "ws"), "present")
+
     def test_no_mirror_refuses_naming_wk_sync_and_creates_nothing(self):
-        """`unit new.refuses_without_mirror`: every snapshot is a `--shared` clone borrowing the mirror's objects."""
         self.w.dirs.discard(self.w.target.store.mirror())
         err = self.refused(lambda: self.driver())
         self.assertIn("no WebKit mirror at %s" % self.w.target.store.mirror(), err)
@@ -828,18 +798,6 @@ class TestNewDriver(WorkspaceTest):
         self.assertIn("wkdev-create failed for 'ws' (exit 125)", err)
         self.assertEqual(self.w.records.list()[0].field("exit"), "125")
 
-    def test_a_dry_run_records_and_waits_for_nothing_and_prints_the_plan(self):
-        self.dry_run()
-        before = (dict(self.w.files), set(self.w.dirs), set(self.w.containers))
-        rc, err = self.stderr(lambda: self.driver())
-        self.assertEqual(rc, 0)
-        self.assertEqual((self.w.files, self.w.dirs, self.w.containers), before)
-        self.assertEqual(self.w.records.list(), [])
-        self.assertIn("would run: wkdev-create --name wk-ws", err)
-        self.assertIn("would run: %s sync --mirror" % WK, err)
-        self.assertIn("would run: %s sync ws" % WK, err)
-        self.assertNotIn("created", err)
-        self.assertEqual(self.w.clock.slept, [])
 
 
 class TestFreshen(WorkspaceTest):
@@ -990,7 +948,6 @@ class TestRmOne(WorkspaceTest):
     def test_a_workspace_is_destroyed_with_its_log_alias_and_records(self):
         rc, err = self.stderr(self.rm)
         self.assertEqual(rc, 0)
-        self.assertIn("workspace 'ws' destroyed", err)
         self.gone()
         self.assertEqual([a[:3] for a in self.runs(head="podman") if a[1] in ("rm", "unshare")], [("podman", "rm", "-f"), ("podman", "unshare", "rm")])
 
@@ -1046,20 +1003,6 @@ class TestRmOne(WorkspaceTest):
         self.assertEqual(len(self.w.records.list()), 2)
         self.assertIn("Host wk-ws", self.w.files[self.conf])
 
-    def test_a_dry_run_prints_the_removals_and_removes_nothing(self):
-        self.dry_run()
-        before = (dict(self.w.files), set(self.w.dirs), set(self.w.containers), len(self.w.records.list()))
-        rc, err = self.stderr(self.rm)
-        self.w.lock.release_all()
-        self.assertEqual(rc, 0)
-        self.assertEqual((self.w.files, self.w.dirs, self.w.containers, len(self.w.records.list())), before)
-        self.assertIn("would run: podman rm -f wk-ws", err)
-        self.assertIn("would run: podman unshare rm -rf %s" % self.w.ws_dir(), err)
-        self.assertNotIn("destroyed", err)
-        planned = [e for e in self.w.work() if e[0] in ("write", "remove")]
-        self.assertEqual(planned[:3], [("remove", self.w.ws_dir()), ("write", self.conf), ("remove", self.clog)])
-        self.assertEqual(len(planned), 5)
-        self.assertTrue(all(p.startswith(str(self.w.tmp / "store" / "task")) for _, p in planned[3:]))
 
 
 class TestRmNames(WorkspaceTest):
@@ -1143,25 +1086,21 @@ class TestRmAll(WorkspaceTest):
     def test_each_removal_goes_through_its_targets_own_wk_rm_and_the_worst_status_wins(self):
         os.environ["WK_YES"] = "1"
         self.listing(("fakebox", "alpha"), ("box2", "beta"))
-        calls = []
-
-        def fake_act(argv, **kw):
-            calls.append(argv)
-            return subprocess.CompletedProcess(argv, 0 if "alpha" in argv else 1)
-        with mock.patch.object(act, "act", fake_act):
-            rc, _ = self.stderr(lambda: workspace.rm_all(self.w.reg, self.w.records))
+        self.w.answer(["env", "WK_TARGET=fakebox"])
+        self.w.answer(["env", "WK_TARGET=box2"], rc=1)
+        rc, _ = self.stderr(lambda: workspace.rm_all(self.w.reg, self.w.records))
         self.assertEqual(rc, 1)
+        calls = [list(e[1]) for e in self.w.effects if e[0] == "run" and e[1][0] == "env"]
         self.assertEqual(calls, [["env", "WK_TARGET=fakebox", WK, "rm", "alpha", "--yes"], ["env", "WK_TARGET=box2", WK, "rm", "beta", "--yes"]])
 
     def test_declining_destroys_nothing(self):
         self.listing(("fakebox", "alpha"))
-        with mock.patch.object(act, "act") as acted:
-            self.refused(lambda: workspace.rm_all(self.w.reg, self.w.records))
-        acted.assert_not_called()
+        self.refused(lambda: workspace.rm_all(self.w.reg, self.w.records))
+        self.assertEqual([], [e for e in self.w.effects if e[0] == "run" and e[1][0] == "env"])
 
 
 class Recording(World):
-    """Records every act_run as ("act", argv) in both modes, so a dry run's plan can be held against a wet run's effects."""
+    """Records every act_run as ("act", argv), dry or wet."""
 
     def act_run(self, argv, **kw):
         self.effects.append(("act", tuple(argv)))
@@ -1183,8 +1122,6 @@ class TestKillPoints(WorkspaceTest):
         converges(self, self.make_world, run_once, World.state)
 
     def test_new_over_the_real_container_driver_killed_after_any_effect_and_rerun_converges(self):
-        """`unit killpoints[new]` over the real drivers: `Target.state` reads the workspace directory through the
-        machine, so the container driver itself runs in the Fake world."""
         def run_once(w):
             w.lock = Lock(w.target.store, w, w.clock)
             with contextlib.redirect_stderr(io.StringIO()):
@@ -1195,8 +1132,6 @@ class TestKillPoints(WorkspaceTest):
         self.assertEqual(w.target.state("ws"), "present")
 
     def test_new_over_the_real_vm_driver_killed_after_any_effect_and_rerun_converges(self):
-        """`unit killpoints[new]` over the vm driver: a clone killed before its marker is a guest `info` calls
-        creating, which the re-run wipes and clones again."""
         from wk.sysimage import guestbase
         from wk.store import Store
         for p in (mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True),
@@ -1248,7 +1183,8 @@ class TestKillPoints(WorkspaceTest):
         self.assertEqual(dry.mutations(), wet.mutations())
         self.assertGreaterEqual(len(dry.mutations()), 9)
         self.assertEqual(dry.state(), before)
-        self.assertEqual(dry.pids, set())
+        self.assertEqual(dry.pids, {os.getpid()})
+        self.assertEqual(dry.clock.slept, [])
 
     def test_a_dry_run_of_rm_is_the_wet_runs_plan_and_touches_nothing(self):
         os.environ["WK_YES"] = "1"

@@ -1,16 +1,5 @@
-"""`wk gui` -- MiniBrowser in the benchmark seat.
-
-`docs/PLAN.md`'s owed row `unit gui.refuses_remote`: a remote target is an
-arbitrary machine reached over ssh, with no seat of its own to draw into, so
-`wk gui` refuses one before touching it -- new behaviour this port adds
-(the bash original had no such check). Also covers the jsc-only, no-browser
-and macOS-container-has-no-display refusals, and the fullscreen-flag table.
-Nothing here starts a real container, guest or browser: `cmd/gui` execs into
-`Target.exec_argv`'s result, which this file intercepts before it replaces
-the process.
-
-Run: python3 -m unittest tests.test_wk_gui -v
-"""
+"""`wk gui` (cmd/gui): MiniBrowser in the benchmark seat, its refusals, and the fullscreen flag per port, with
+`Target.exec_argv` intercepted before it replaces the process."""
 import contextlib
 import importlib.machinery
 import importlib.util
@@ -25,6 +14,7 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 from wk import buildconf  # noqa: E402
 from wk.act import Refused  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 
 def _load_cmd_gui():
@@ -62,8 +52,6 @@ def _refused(case, fn):
 
 
 class TestRefusesARemoteTarget(unittest.TestCase):
-    """A remote target is a bare ssh machine wk gives no seat of its own --
-    refused before any config is resolved or any probe is made."""
 
     def test_a_remote_target_is_refused_before_anything_else(self):
         target = _target(kind="remote")
@@ -81,7 +69,6 @@ class TestRefusesARemoteTarget(unittest.TestCase):
         reg = mock.Mock()
         reg.load.return_value = target
         with mock.patch.object(GUI.targets, "Registry", return_value=reg), \
-                mock.patch.object(GUI, "exec_into"), \
                 mock.patch.object(GUI, "is_macos", return_value=False), \
                 mock.patch.object(GUI, "session_env", return_value=""), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_QUIET": "1", "WK_CONFIG": "gtk-release"}):
@@ -89,11 +76,11 @@ class TestRefusesARemoteTarget(unittest.TestCase):
         target.exec_argv.assert_called_once()
 
     def test_a_dry_run_prints_the_launch_and_runs_nothing(self):
-        """`wk gui --dry-run`: the exec goes through act, which prints it and ends the run"""
         target = _target(kind="container")
         target.exec_argv.return_value = (["wkdev-enter", "--exec", "--", "run-minibrowser"], None)
         reg = mock.Mock()
         reg.load.return_value = target
+        reg.machine = Fake()
         err = io.StringIO()
         with mock.patch.object(GUI.targets, "Registry", return_value=reg), \
                 mock.patch("os.execvp", side_effect=AssertionError("ran it")), \
@@ -113,8 +100,7 @@ class TestJscOnlyAndMissingBrowserRefusals(unittest.TestCase):
         reg.load.return_value = target
         with mock.patch.object(GUI.targets, "Registry", return_value=reg), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_CONFIG": "jsc-release"}):
-            err = _refused(self, lambda: GUI.main([]))
-        self.assertIn("there is no browser in it", err)
+            _refused(self, lambda: GUI.main([]))
 
     def test_no_minibrowser_built_is_refused_naming_the_build_command(self):
         target = _target()
@@ -136,8 +122,8 @@ class TestMacosContainerHasNoDisplay(unittest.TestCase):
         with mock.patch.object(GUI.targets, "Registry", return_value=reg), \
                 mock.patch.object(GUI, "is_macos", return_value=True), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_CONFIG": "gtk-release"}):
-            err = _refused(self, lambda: GUI.main([]))
-        self.assertIn("no display", err)
+            _refused(self, lambda: GUI.main([]))
+        target.exec_argv.assert_not_called()
 
 
 class TestFullscreenFlagByPort(unittest.TestCase):

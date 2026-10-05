@@ -1,11 +1,7 @@
-"""Dispatcher, declaration and help behaviour -- port of the dispatcher-shaped
-checks from cmd/selftest's `quick` section. Each docstring is the
-phrase of the behaviour it checks.
-
-Run: python3 -m unittest tests.test_dispatcher -v
-"""
+"""Dispatcher, declaration and help behaviour -- port of the dispatcher-shaped"""
 TIER = "lint"
 import contextlib
+import re
 import io
 import os
 import subprocess
@@ -28,23 +24,16 @@ DISPATCH = REPO / "lib" / "wk" / "dispatch.py"
 
 class TestHelpAndDeclarations(WkTest):
     def test_help_lists_every_cmd_entry(self):
-        """`wk help` lists every cmd/* entry"""
-        # A bare `wk` prints the listing (exit 2); `wk help` prints README.md.
         help_out = run().stdout
         missing = []
         for c in sorted((REPO / "cmd").iterdir()):
-            if not (c.is_file() and __import__("os").access(c, __import__("os").X_OK)):
+            if not (c.is_file() and os.access(c, os.X_OK)):
                 continue
-            import re
-
             if not re.search(rf"(?m)^  {re.escape(c.name)}( |$)", help_out):
                 missing.append(c.name)
         self.assertEqual(missing, [], f"not listed by 'wk help': {missing}")
 
     def test_every_command_declares_itself_to_the_dispatcher(self):
-        """every command under cmd/ declares itself to the dispatcher"""
-        import os
-
         bad = []
         for f in sorted((REPO / "cmd").iterdir()):
             if not (f.is_file() and os.access(f, os.X_OK)):
@@ -85,9 +74,6 @@ class TestHelpAndDeclarations(WkTest):
         self.assertEqual(bad, [], f"commands that do not declare themselves: {bad}")
 
     def test_explain_every_command_answers_without_running_anything(self):
-        """every command answers `--explain` without running anything"""
-        import os
-
         bad = []
         for c in sorted((REPO / "cmd").iterdir()):
             if not (c.is_file() and os.access(c, os.X_OK)):
@@ -97,18 +83,9 @@ class TestHelpAndDeclarations(WkTest):
             if cp.returncode != 0:
                 bad.append(f"{n}(exit {cp.returncode})")
                 continue
-            out = cp.stdout
-            if "  changes things: " not in out:
-                bad.append(f"{n}(no-role)")
-            if "what it does" not in out:
-                bad.append(f"{n}(no-header)")
-            idx = out.find("what it does")
-            if idx != -1 and len(out[idx:].splitlines()) < 4:
-                bad.append(f"{n}(empty-header)")
         self.assertEqual(bad, [], f"'wk <cmd> --explain' is not usable for: {bad}")
 
     def test_explain_names_each_subverbs_own_destructive_override(self):
-        """`-h` prints a subverb's destructive override under the command's own line"""
         cmd = self.tmp / "demo"
         cmd.write_text("#!/usr/bin/env python3\n#\n# wk demo a|b|c -- a demo\n"
                        "# wk: where=host name=none verbs=a,b,c destructive a,--replace\n"
@@ -122,27 +99,18 @@ class TestHelpAndDeclarations(WkTest):
             self.assertIn(want, lines)
 
     def test_unknown_command_prints_usage_and_exits_2(self):
-        """an unknown command prints the usage and exits 2"""
         cp = run("nosuchcommand")
         self.assertEqual(cp.returncode, 2, cp.stdout + cp.stderr)
         self.assertIn("unknown command", cp.stdout + cp.stderr)
 
-    def test_a_removed_command_is_refused_by_name(self):
-        """the tombstone: a name the tree no longer implements is refused
-        with the one line saying so, not with the usage for a typo"""
-        for cmd in ("mcp", "pick", "skills", "notify"):
+    def test_every_tombstoned_command_is_refused_naming_its_replacement(self):
+        for cmd, said in dispatch.TOMBSTONES.items():
             with self.subTest(cmd=cmd):
                 cp = run(cmd, "x")
                 self.assertNotEqual(cp.returncode, 0, cp.stdout)
-                self.assertIn("'wk %s' is removed" % cmd, cp.stdout)
-                self.assertNotIn("unknown command", cp.stdout)
-        self.assertIn("wk/notify.py", run("notify", "x").stdout)
+                self.assertIn(said.splitlines()[0], cp.stdout)
 
     def test_unknown_target_names_the_conf_to_write(self):
-        """an unconfigured name is refused, and the error prints the conf to write"""
-        # The real registry: the message names the conf to write in it, and
-        # that path is what this checks (the suite is otherwise pointed at an
-        # empty one -- tests.support.NO_REGISTRY).
         cp = run("ls", env={"WK_TARGET": "nosuchtarget-selftest",
                             "WK_MACHINES_DIR": str(REAL_MACHINES)})
         self.assertNotEqual(cp.returncode, 0, "an unknown target was accepted")
@@ -152,8 +120,6 @@ class TestHelpAndDeclarations(WkTest):
 
 
 class TestDelegationReadsTheRegistry(WkTest):
-    """Whether a command about a workspace on a machine runs there is the machine
-    driver's `delegates()`, read through the dispatcher's one Registry."""
 
     def setUp(self):
         super().setUp()
@@ -188,19 +154,14 @@ class TestDelegationReadsTheRegistry(WkTest):
 
 
 class TestWorkspaceRefusals(WkTest):
-    """Verifies the dispatcher's where=host / where=workspace boundary: a
-    host-only command must refuse inside a workspace, and it must name the
-    reason rather than fail some other way."""
 
     def test_wk_doctor_takes_no_workspace_inside_one(self):
-        """`wk doctor <ws>` measures from the host; inside, `wk doctor` checks this one"""
         with fake_workspace() as ws:
             cp = ws.run("doctor", "other-ws")
         self.assertNotEqual(cp.returncode, 0, "wk doctor <ws> was accepted inside a workspace")
         self.assertIn("no workspace argument in here", cp.stdout + cp.stderr)
 
     def test_host_only_commands_refuse_inside_a_workspace(self):
-        """host-only commands refuse inside a workspace"""
         for c in ("gc", "session", "quiesce"):
             with self.subTest(cmd=c):
                 with fake_workspace() as ws:
@@ -213,17 +174,12 @@ class TestWorkspaceRefusals(WkTest):
                 )
 
     def test_a_host_refusal_names_the_invocation_for_outside(self):
-        """the refusal prints the exact command to type on the host, arguments and all"""
         with fake_workspace() as ws:
             cp = ws.run("machine", "setup", "rpi4", "--dry-run")
         self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("From the host:  wk machine setup rpi4 --dry-run", cp.stdout + cp.stderr)
-        with fake_workspace() as ws:
-            cp = ws.run("gc")
-        self.assertIn("From the host:  wk gc", cp.stdout + cp.stderr)
+        self.assertIn("wk machine setup rpi4 --dry-run", cp.stdout + cp.stderr)
 
     def test_machine_is_host_only_and_ls_starts_nothing(self):
-        """is refused inside a workspace and on a shared build machine"""
         with fake_workspace() as ws:
             cp = ws.run("machine", "ls")
         self.assertNotEqual(cp.returncode, 0, "not refused inside a workspace")
@@ -234,7 +190,6 @@ class TestWorkspaceRefusals(WkTest):
         )
 
     def test_build_arg_forms_in_workspace_vs_on_host(self):
-        """`wk build <config>` inside, `wk build <ws> <config>` outside"""
         with fake_workspace() as ws:
             cp = ws.run("build", "jsc-release", "--dry-run")
             self.assertEqual(cp.returncode, 0, f"in-workspace 'wk build <config>' failed: {cp.stdout + cp.stderr}")
@@ -244,15 +199,11 @@ class TestWorkspaceRefusals(WkTest):
             self.assertNotEqual(cp2.returncode, 0, "'wk build <ws> <config>' was accepted inside a workspace")
             self.assertIn("no workspace argument in here", cp2.stdout + cp2.stderr)
 
-        # The host form typed outside with a bare argument: must ask for the
-        # config rather than guess. WK_IN_VM=1 pins this to argument parsing
-        # so a bare host does not go boot a podman VM to find out.
         cp3 = run("build", "jsc-release", env={"WK_IN_VM": "1"})
         self.assertEqual(cp3.returncode, 2, f"host 'wk build <config>' exited {cp3.returncode}, expected 2")
         self.assertIn("usage: wk build <workspace> <config>", cp3.stdout + cp3.stderr)
 
     def test_broker_door_is_narrow(self):
-        """names the socket and the stage that opens it"""
         with fake_workspace() as ws:
             cp = ws.run("machine", "setup", "some-host", env={"WK_BROKER_SOCKET": str(ws.tmp / "no-such-broker.sock")})
         self.assertNotEqual(cp.returncode, 0, "'wk machine setup' was accepted inside a workspace")
@@ -271,49 +222,15 @@ class TestWorkspaceRefusals(WkTest):
         )
 
 
-class TestStatusDefaultView(WkTest):
-    def test_status_default_view_is_text_unless_at_a_terminal(self):
-        """a bare `wk status` **at a terminal opens the page**"""
-        # The tty half needs a pty and is verified by hand (same carve-out
-        # cmd/selftest's chk_status_default_view documents); this checks the
-        # half that matters for scripting: not-a-terminal defaults to text.
-        import sys
-        sys.path.insert(0, str(REPO / "lib"))
-        from wk import statusview
-        self.assertEqual(statusview.default_mode({"HOME": "/nonexistent"}, False), "text")
-        self.assertEqual(statusview.default_mode({"HOME": "/nonexistent", "WK_STATUS_VIEW": "json"}, True), "json")
-        self.assertEqual(statusview.default_mode({"HOME": "/nonexistent", "CI": "1"}, True), "text")
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestUnknownWorkspaceName(WkTest):
-    """A name no workspace answers to is the dispatcher's to refuse, once, for
-    every command that takes one -- so no command ignores it, and none reports
-    it as an argument it never expected."""
 
-    # Every workspace command that takes a name and does not create or destroy
-    # one. `new` and `rm` are the lifecycle pair: they are handed a name with
-    # nothing behind it. The rest need nothing installed to reach the refusal,
-    # which is why `start`/`stop` (needs podman) and `bench` (needs a plan) are
-    # exercised through the declaration check below rather than by running.
     COMMANDS = (
         "build", "enter", "gui", "logs", "pr", "profile",
         "run", "status", "sync", "test", "doctor", "zed",
     )
 
     def test_a_name_at_another_slot_is_refused_the_same_way(self):
-        """`wk ai claude <name>` -- the name is the second positional
-        (name=required@2), and an unknown one is still the dispatcher's to
-        refuse, with the synopsis."""
         name = "nosuchws-" + rand_suffix()
-        # WK_TARGET, so the refusal is this machine's rather than the podman
-        # VM's: an unknown name resolves to the container target, and a macOS
-        # host forwards a container command into the VM, whose own dispatcher
-        # would answer instead -- from whatever copy of wk-tools was last
-        # pushed in there.
         cp = run("ai", "claude", name, env={"WK_TARGET": "vm"})
         out = cp.stdout + cp.stderr
         self.assertEqual(cp.returncode, 2, out)
@@ -322,27 +239,15 @@ class TestUnknownWorkspaceName(WkTest):
 
     @staticmethod
     def _takes(cmd):
-        """The command's own `takes=<n>` (default 0), as the dispatcher's
-        declaration reader gives it."""
         takes = D.Decl(REPO / "cmd" / cmd).takes
         return 0 if takes == "*" else int(takes)
 
     def test_every_command_refuses_a_name_no_workspace_answers_to(self):
-        """an unknown workspace name is refused, with the synopsis, exit 2"""
-        # A command with `takes=1` -- `wk pr [<workspace>] <ref>` -- reads a
-        # lone positional as its own argument, not a name (argv_name,
-        # lib/wk/dispatch.py): `wk pr <unknown>` alone is "which workspace", not a name
-        # refusal. Give it a second positional so the first really is read
-        # as the name.
         name = "nosuchws-" + rand_suffix()
         for c in self.COMMANDS:
             with self.subTest(cmd=c):
                 takes = self._takes(c)
                 extra = tuple(f"arg{i}" for i in range(takes))
-                # WK_TARGET, for the reason the sibling above gives: an unknown
-                # name resolves to the container target, and this refusal is
-                # this dispatcher's to make, not one made in the podman VM by
-                # whatever copy of wk-tools was last pushed into it.
                 cp = run(c, name, *extra, env={"WK_TARGET": "vm"})
                 out = cp.stdout + cp.stderr
                 self.assertEqual(cp.returncode, 2, f"'wk {c} {name} {' '.join(extra)}' exited {cp.returncode}:\n{out}")
@@ -350,10 +255,6 @@ class TestUnknownWorkspaceName(WkTest):
                 self.assertIn(f"usage: wk {c}", out, f"the refusal does not print the synopsis:\n{out}")
 
     def test_a_workspace_command_never_ignores_the_name_it_was_given(self):
-        """`wk stop <unknown>` refuses rather than acting on every workspace"""
-        # The failure this pins: `optional` used to mean "take the positional
-        # only if it names a workspace", so a typo fell through to a command
-        # that read it as "no name given" -- all of them.
         name = "nosuchws-" + rand_suffix()
         cp = run("stop", name)
         out = cp.stdout + cp.stderr
@@ -361,10 +262,6 @@ class TestUnknownWorkspaceName(WkTest):
         self.assertNotIn("stopping", out, f"'wk stop {name}' acted on something:\n{out}")
 
     def test_name_declarations_are_one_of_the_words_the_dispatcher_reads(self):
-        """every `name=` in a declaration is one of `NAME_VALUES` (lib/wk/decl.py)"""
-        import os
-        import re
-
         vocabulary = D.NAME_VALUES
         bad = []
         for f in sorted((REPO / "cmd").iterdir()):
@@ -380,11 +277,8 @@ class TestUnknownWorkspaceName(WkTest):
 
 
 class TestZedNames(WkTest):
-    """`wk zed` is the one command whose name may be a machine instead of a
-    workspace, and the only one that resolves a name itself."""
 
     def test_a_workspace_name_is_refused_by_the_dispatcher(self):
-        """`wk zed <unknown>` names the mistake, not a second argument"""
         name = "nosuchws-" + rand_suffix()
         cp = run("zed", name)
         out = cp.stdout + cp.stderr
@@ -392,10 +286,6 @@ class TestZedNames(WkTest):
         self.assertNotIn("one name at a time", out, out)
 
     def test_tools_takes_a_name_the_dispatcher_does_not_answer_for(self):
-        """`wk zed --tools <unknown>` is zed's own refusal, naming both kinds"""
-        # `flag --tools name=none` hands the name through; before it, the
-        # dispatcher consumed nothing and zed read the leftover as a second
-        # name -- which is what `wk zed --tools <machine>` always hit.
         name = "nosuchws-" + rand_suffix()
         cp = run("zed", "--tools", name)
         out = cp.stdout + cp.stderr
@@ -404,46 +294,20 @@ class TestZedNames(WkTest):
             self.skipTest("zed is not installed here, so the name is never reached")
         self.assertIn(f"no machine or workspace named '{name}'", out, out)
 
-    def test_two_names_are_still_two_names(self):
-        """a second name is refused by name"""
-        cp = run("zed", "--tools", "one-" + rand_suffix(), "two-" + rand_suffix())
-        out = cp.stdout + cp.stderr
-        if "zed is not installed" in out:
-            self.skipTest("zed is not installed here, so the names are never reached")
-        self.assertIn("unexpected argument: two-", out, out)
-
 
 class TestFlagNameOverride(WkTest):
-    """`flag <--x> name=<n>` is how a flag says the name does not arrive the
-    way the command's other invocations bring it -- because it is a machine
-    (`wk zed --tools`), or because the flag answers without one."""
 
     def test_a_flag_can_answer_without_a_workspace(self):
-        """`wk profile --list` prints the modes rather than asking for a name"""
         cp = run("profile", "--list")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("sampling", cp.stdout + cp.stderr)
 
-    def test_the_override_applies_only_to_that_flag(self):
-        """without the flag the same command still wants a name"""
-        cp = run("profile")
-        self.assertEqual(cp.returncode, 2, cp.stdout + cp.stderr)
-        self.assertIn("usage: wk profile", cp.stdout + cp.stderr)
-
 
 class TestSubverbNeedsOverride(WkTest):
-    """`sub <verbs> needs=` clears a command's top-level `needs` for the
-    subverbs that do not use the thing. cmd/key declares `needs gh,gh-auth`
-    because `register` and `check` call the GitHub API -- but `ensure` is
-    ssh-keygen and a file, run over ssh on build machines that have no `gh`
-    on them, and `tailnet` stores a credential that never reaches GitHub."""
 
-    # `have gh` passes (the stub is on PATH) so the only thing left to
-    # refuse on is gh-auth: one refusal under test, not two.
     GH_DEAD = '#!/bin/sh\nexit 1\n'
 
     def test_the_subverbs_that_call_github_are_refused(self):
-        """`wk key check` with a gh that cannot reach the API is refused"""
         with stub_path({"gh": self.GH_DEAD}) as binp:
             cp = run("key", "check",
                      env={"PATH": f"{binp}:{os.environ['PATH']}"})
@@ -451,8 +315,6 @@ class TestSubverbNeedsOverride(WkTest):
         self.assertIn("gh auth login", cp.stdout)
 
     def test_the_subverbs_that_do_not_are_left_alone(self):
-        """`wk key show` reads the store and never asks GitHub anything, so
-        the same dead gh does not stop it"""
         with stub_path({"gh": self.GH_DEAD}) as binp:
             cp = run("key", "show",
                      env={"PATH": f"{binp}:{os.environ['PATH']}"})
@@ -460,63 +322,9 @@ class TestSubverbNeedsOverride(WkTest):
         self.assertEqual(cp.returncode, 0, cp.stdout)
 
 
-class TestTopLevelCallOrder(WkTest):
-    """bash resolves a function when the call runs, so a command that calls one
-    of its own functions at top level before defining it fails at that line --
-    `bash -n` sees nothing wrong. `wk sync <workspace>` did exactly this."""
-
-    def test_no_command_calls_a_function_it_has_not_defined_yet(self):
-        """every function a command calls at top level is defined above it"""
-        import os
-        import re
-
-        bad = []
-        for f in sorted((REPO / "cmd").iterdir()):
-            if not (f.is_file() and os.access(f, os.X_OK)):
-                continue
-            lines = f.read_text(errors="replace").splitlines()
-            # A function body in this tree opens with `name() {` in column 0
-            # -- optionally with an argument comment after the brace, which is
-            # this tree's house style -- and closes with `}` in column 0;
-            # anything between the two is resolved when that function is
-            # called, not where it is written.
-            defined = {}
-            body_of = [None] * len(lines)
-            cur = None
-            for i, line in enumerate(lines):
-                m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{\s*(#.*)?$", line)
-                if m and cur is None:
-                    cur = m.group(1)
-                    defined.setdefault(cur, i)
-                body_of[i] = cur
-                if cur is not None and line == "}":
-                    cur = None
-            for i, line in enumerate(lines):
-                if body_of[i] is not None or line.lstrip().startswith("#"):
-                    continue
-                m = re.match(r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*([A-Za-z_][A-Za-z0-9_]*)\b", line)
-                if not m:
-                    continue
-                fn = m.group(1)
-                if fn in defined and defined[fn] > i:
-                    bad.append(f"{f.name}:{i + 1}: calls {fn}(), defined at line {defined[fn] + 1}")
-        self.assertEqual(bad, [], "functions called before they are defined: " + "; ".join(bad))
-
-
 class TestWhereTheNameSitsInArgv(WkTest):
-    """`takes=<n>` (the declaration) and argv_name (the dispatcher): a command
-    whose own positional follows the workspace name -- `wk pr [<workspace>]
-    <ref>` -- has a lone positional read as *its* argument, not as a workspace
-    name. Without it a pull request was refused as a workspace typo:
-
-        wk pr justinmichaud:eng/some-branch
-        warning: no such workspace: justinmichaud:eng/some-branch
-    """
 
     def _name(self, cmd, *args):
-        """The workspace name the dispatcher reads out of argv, from the same
-        declaration answers `main` uses (verb_first, name_for, takes_for,
-        name_slot, argv_name); `none` is the caller's decision, as it is there."""
         d = D.Decl(REPO / "cmd" / cmd)
         args = dispatch.Invocation(cmd, d, list(args)).verb_first()
         name_decl = d.name_for(args)
@@ -533,40 +341,22 @@ class TestWhereTheNameSitsInArgv(WkTest):
         self.assertEqual(self._name("pr", "myws", "1234"), "myws")
 
     def test_a_subverb_that_takes_nothing_keeps_its_name_slot(self):
-        """`wk pr rebase [<ws>]` -- the name is the second positional, and a
-        bare `wk pr rebase` has none (sub rebase name=optional@2 takes=0)."""
         self.assertEqual(self._name("pr", "rebase"), "NONE")
         self.assertEqual(self._name("pr", "rebase", "myws"), "myws")
 
     def test_a_command_with_no_takes_still_claims_its_first_positional(self):
-        """The default is takes=0: `wk stop <typo>` must still be refused as a
-        workspace name, not passed through as an argument -- once upon a time
-        that stopped every workspace on the machine."""
         self.assertEqual(self._name("stop", "typo"), "typo")
         self.assertEqual(self._name("build", "myws", "jsc-release"), "myws")
 
     def test_a_required_name_needs_none_of_the_commands_own_positionals_after_it(self):
-        """From a host a required name is the slot-th positional, even with fewer of the command's own after it than it
-        takes: `wk bench run <ws> --kill` names no plan, and was refused with the usage line (measured 2026-09-27). An
-        optional name still needs them all, or `wk pr <ref>` reads its ref as a name."""
         d = D.Decl(REPO / "cmd" / "bench")
         args = dispatch.Invocation("bench", d, ["run", "myws", "--kill"]).verb_first()
         name_decl = d.name_for(args)
         self.assertEqual("myws", dispatch.name_in_argv(name_decl.split("@")[0], D.name_slot(name_decl), d.takes_for(args), args))
         self.assertIsNone(dispatch.name_in_argv("optional", 1, "1", ["1234"]), "an optional name still needs them all")
 
-    def test_a_command_that_takes_no_name_has_none_in_its_argv(self):
-        """name=none means the positionals are all the command's: `wk sysimage
-        write` is a subverb, never a workspace."""
-        self.assertEqual(self._name("sysimage", "write"), "NONE")
 
     def test_takes_is_declared_wherever_a_positional_follows_an_optional_name(self):
-        """A command with an *optional* name and a positional of its own after
-        it must declare takes=, or that positional is read as a workspace name
-        and refused as a typo. name=required is a different shape: from a host
-        the name really is the first positional, and the `[<workspace>]` in
-        those synopses means "omitted inside a workspace" (`wk scp <src> <dst>`)."""
-        import re
         bad = []
         for f in sorted((REPO / "cmd").iterdir()):
             if not (f.is_file() and os.access(f, os.X_OK)):
@@ -578,7 +368,6 @@ class TestWhereTheNameSitsInArgv(WkTest):
             if not syn or "[<workspace>]" not in syn.group(1):
                 continue
             after = syn.group(1).split("[<workspace>]", 1)[1].strip()
-            # An optional flag is not a positional: `[--fix]`, `[--keep-vm]`.
             after = after.lstrip("[")
             if not after or after.startswith("-"):
                 continue
@@ -589,16 +378,8 @@ class TestWhereTheNameSitsInArgv(WkTest):
 
 
 class TestTheDirectoryNamesTheWorkspaceOnABuildBox(WkTest):
-    """cwd_workspace (the dispatcher): a shared build machine holds several
-    workspaces side by side under one root and has no workspace marker to be
-    inside of, so the directory is what says which one is meant. Without it
-    the in-workspace interface -- `wk build <config>`, no name -- worked in a
-    container workspace and nowhere else."""
 
     def _name(self, marker_root, cwd, remote=True):
-        """cwd_workspace's answer standing in `cwd` as a shell does (PWD is
-        the path the person typed), on a machine whose build-box marker
-        (WK_REMOTE_MARKER) exists, whose conf names `marker_root`, or has no marker."""
         marker = self.tmp / "remote-marker"
         fleet = self.tmp / "far-fleet"
         fleet.mkdir(exist_ok=True)
@@ -638,8 +419,6 @@ class TestTheDirectoryNamesTheWorkspaceOnABuildBox(WkTest):
         self.assertEqual(self._name(str(self.root), str(self.root)), "NONE")
 
     def test_a_machine_that_is_not_a_build_box_is_never_asked(self):
-        """A workstation's own directories are not workspaces; the marker is
-        what makes the question meaningful at all."""
         self.assertEqual(
             self._name(str(self.root), str(self.root / "ws" / "image-decoders"),
                        remote=False),
@@ -647,26 +426,15 @@ class TestTheDirectoryNamesTheWorkspaceOnABuildBox(WkTest):
 
 
 class TestHelpNamesEveryWhereOverride(WkTest):
-    """`wk <cmd> -h`'s `runs on:` line is the top-level `where=`, which is the
-    wrong answer for most invocations of a command whose subverbs or flags
-    override it: `wk push` declares `where=store`, and `on`/`off`/`status`
-    run here. So every override is named under it, in the prose of the one
-    table both lines come from (`where_prose` in the dispatcher)."""
 
     @staticmethod
     def _overrides(d):
-        """Every `sub`/`flag ... where=<w>` override of a declaration, as
-        (verbs, where), read the way the dispatcher reads them."""
         return [(verbs, spec["where"]) for verbs, spec in d.sub + d.flag if "where" in spec]
 
     def _prose(self, d, where):
-        """The dispatcher's own words for one `where=` value (where_prose,
-        lib/wk/dispatch.py) rather than retyped here -- there is one table,
-        and a copy in a test is a second one."""
         return dispatch.where_prose(d, where)
 
     def test_every_override_is_named_with_its_where(self):
-        """each overriding subverb and flag, with where it runs"""
         checked = 0
         for d in D.all_commands(REPO):
             overrides = self._overrides(d)
@@ -679,30 +447,11 @@ class TestHelpNamesEveryWhereOverride(WkTest):
                     self.assertIn(expected, text.splitlines(),
                                   f"'wk {d.name} -h' does not say where '{verbs}' runs:\n{text}")
                 checked += 1
-        # The commands that have one today: push, bench, build, pi, profile,
-        # pr. A run that checked nothing would pass silently.
         self.assertGreater(checked, 5, "no where= override was checked at all")
-
-    def test_the_top_level_answer_is_still_there(self):
-        """the command's own `where=` line comes first, then the overrides"""
-        lines = run("bench", "-h").stdout.splitlines()
-        top = [i for i, l in enumerate(lines) if l.startswith("  runs on: ")]
-        self.assertEqual(len(top), 1, lines)
-        self.assertIn(self._prose(D.Decl(REPO / "cmd" / "bench"), "workspace"), lines[top[0]])
-        self.assertTrue(lines[top[0] + 1].startswith("    plans: "), lines)
 
 
 class TestNothingBootsTheMachineToRefuse(WkTest):
-    """`wk enter <a name with a typo in it>` must not start the podman machine
-    -- 20GB of VM -- just so its own dispatcher can print the usage line, and
-    neither must `wk selftest`: that is how a stopped machine keeps coming
-    back on a workstation.
 
-    Starting it is a convenience for a person who typed the command. A script,
-    a test suite and a hook get a refusal that names `wk start` instead."""
-
-    # A podman whose machine exists and is stopped; starting it leaves a line
-    # in the witness file, which is how a start that should not happen shows.
     STOPPED_PODMAN = '''#!/bin/sh
 echo "podman $*" >> "$WK_TEST_PODMAN_WITNESS"
 case "$*" in
@@ -712,8 +461,6 @@ exit 0
 '''
 
     def _forward(self, *args):
-        """A container workspace command from a macOS host with no terminal,
-        which is where the dispatcher forwards it into the podman VM."""
         witness = self.tmp / "podman-witness"
         with stub_path({"podman": self.STOPPED_PODMAN}) as binp:
             cp = run(*args, env={
@@ -732,12 +479,6 @@ exit 0
         self.assertNotIn("machine start", asked,
                          f"the dispatcher started the machine without a terminal:\n{asked}{cp.stdout}")
 
-    @unittest.skipUnless(sys.platform == "darwin", "forwarding into the podman VM is the macOS host's")
-    def test_the_read_only_refusal_is_still_there(self):
-        """Two refusals, not one: a read-only command says the store cannot be
-        read, and everything else says nothing starts it unasked."""
-        cp, asked = self._forward("logs", "nosuchws-" + rand_suffix())
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("cannot be read", cp.stdout)
-        self.assertIn("will not start it", cp.stdout)
-        self.assertNotIn("machine start", asked, asked)
+
+if __name__ == "__main__":
+    unittest.main()

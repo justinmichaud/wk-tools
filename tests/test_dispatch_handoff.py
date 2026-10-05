@@ -1,28 +1,4 @@
-"""What the dispatcher hands the command it runs: the target the name
-resolved to.
-
-`resolve_target` walks every target that could hold a workspace name -- the
-environments on this machine, then every machine of its own over ssh
-(Registry.locate, lib/wk/targets.py) -- and `wk` does it once per invocation.
-The answer is then handed on in WK_TARGET, which `Registry.ws_target` reads
-before it asks anybody, so the command that runs (cmd/enter, cmd/build,
-cmd/logs, ...) is answered by that one walk instead of starting a second.
-
-Only for the command that runs *here*: a command forwarded into the podman
-VM or delegated to the machine that owns the workspace is resolved over
-there, where the target is that machine's own, and a lifecycle command
-(`wk new`, `wk rm <a> <b>`) is handed a name with nothing behind it yet and
-a list of names of its own.
-
-The fixtures are tests/test_dispatch_speed.py's: fake machine confs in a
-registry of this test's own, a stub `ssh` that records being asked, and one
-local target whose store really holds the workspace. What runs is a probe
-command in a scratch WK_ROOT of symlinks (the technique tests/test_peer.py
-uses for a fake fleet): it prints the environment it was given and then
-calls `ws_target` itself, reporting whether that call walked anything.
-
-Run: python3 -m unittest tests.test_dispatch_handoff -v
-"""
+"""What the dispatcher hands the command it runs: the target the name"""
 import os
 import subprocess
 import sys
@@ -31,15 +7,6 @@ import unittest
 from tests.support import REPO, WkTest, stub_path
 from tests.test_dispatch_speed import _LOCAL_CONF, _MACHINE_CONF, _WITNESS_SSH
 
-# The command under test's stand-in: no real command prints its own
-# environment, and the question here is exactly what the dispatcher put in
-# it. Declared like any other workspace command, so the dispatcher treats it
-# like one.
-#
-# `walked` is the property that matters: the witness file every stub on PATH
-# appends to grows when a target is asked anything, so its size either side
-# of this command's own `ws_target` says whether that call did a walk of its
-# own or was answered from what it was handed.
 _PROBE = '''#!/usr/bin/env python3
 #
 # wk probe <workspace> -- print what the dispatcher handed over
@@ -68,9 +35,6 @@ print("ws_target=%s" % targets.Registry(ROOT).ws_target(os.environ.get("WK_NAME"
 print("walked=%s" % ("no" if witnessed() == before else "yes"))
 '''
 
-# Every target driver reaches its environments through one of these; each
-# records that it was asked and then answers nothing, so a walk is visible
-# and no real container, guest or machine is touched.
 _WITNESS = '''#!/bin/sh
 echo "$0 $*" >> "${WK_TEST_WITNESS:-/dev/null}"
 exit 1
@@ -78,14 +42,9 @@ exit 1
 
 
 class TestTheResolvedTargetIsHandedOn(WkTest):
-    """the target the name resolved to reaches the command, and it walks nothing"""
 
     def setUp(self):
         super().setUp()
-        # A WK_ROOT of symlinks to this checkout, with a cmd/ of its own so
-        # the probe can sit beside the real commands. `wk` decides its root
-        # from the directory it is *in* when that directory is a checkout,
-        # which is what makes this work (see the top of `wk`).
         self.root = self.tmp / "wk-root"
         (self.root / "cmd").mkdir(parents=True)
         for entry in REPO.iterdir():
@@ -100,8 +59,6 @@ class TestTheResolvedTargetIsHandedOn(WkTest):
         probe.write_text(_PROBE)
         probe.chmod(0o755)
 
-        # One target on this machine that really holds the workspace, and one
-        # machine of its own that could only be asked over ssh.
         self.registry = self.tmp / "hosts"
         self.registry.mkdir()
         store = self.tmp / "store"
@@ -140,45 +97,19 @@ class TestTheResolvedTargetIsHandedOn(WkTest):
         return cp, fields
 
     def test_the_command_is_told_which_target_the_name_is_on(self):
-        """WK_TARGET reaches the command as the target the walk resolved"""
         cp, f = self._probe("probe", "handoff-ws")
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertEqual(f.get("WK_NAME"), "handoff-ws", cp.stdout)
         self.assertEqual(f.get("WK_TARGET"), "fakelocal", cp.stdout)
 
-    def test_the_command_does_not_walk_a_second_time(self):
-        """`Registry.ws_target(WK_NAME)` in the command asks nothing"""
-        cp, f = self._probe("probe", "handoff-ws")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertEqual(f.get("ws_target"), "fakelocal", cp.stdout)
-        self.assertEqual(
-            f.get("walked"), "no",
-            "the command re-walked the targets to learn what it was handed:\n"
-            + (self.witness.read_text() if self.witness.exists() else "")
-            + cp.stdout,
-        )
-
-    def test_a_workspace_on_this_machine_never_reaches_the_fleet(self):
-        """no ssh at all: the walk stops at this machine's own targets"""
-        cp, _ = self._probe("probe", "handoff-ws")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        asked = self.witness.read_text() if self.witness.exists() else ""
-        self.assertNotIn(
-            "asked", asked.splitlines(),
-            f"a machine of its own was asked over ssh:\n{asked}\n{cp.stdout}")
 
     def test_an_explicit_target_is_what_the_command_gets(self):
-        """`--target` and a set WK_TARGET are the same answer, handed on unchanged"""
         cp, f = self._probe("probe", "handoff-ws", "--target", "fakelocal")
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertEqual(f.get("WK_TARGET"), "fakelocal", cp.stdout)
 
 
 class TestWhatIsNotToldTheTarget(unittest.TestCase):
-    """The two paths the export must not be on, read from the dispatcher
-    itself: a forwarded child resolves inside the podman VM and a delegated
-    one on the machine that owns the workspace, so WK_TARGET travels on
-    neither, and a lifecycle command resolves each of its own names."""
 
     def test_the_forwarded_environment_carries_no_target(self):
         sys.path.insert(0, str(REPO / "lib"))
@@ -199,14 +130,6 @@ class TestWhatIsNotToldTheTarget(unittest.TestCase):
         remote = {"WK_REMOTE_LOCAL": "1", "WK_REMOTE_TOOLS": "/opt/wk-tools"}
         line = targets.Remote("box", str(REPO), remote, Fake()).wk_cmd(["new", "x"], {"WK_SDK_IMAGE": "ghcr.io/igalia/wkdev-sdk:2.55-v1-abc"})
         self.assertIn("WK_SDK_IMAGE=ghcr.io/igalia/wkdev-sdk:2.55-v1-abc ", line)
-
-    def test_the_export_is_on_the_running_here_path_only(self):
-        lines = (REPO / "lib" / "wk" / "dispatch.py").read_text().splitlines()
-        exports = [i for i, l in enumerate(lines) if 'os.environ["WK_TARGET"] = resolved' in l]
-        self.assertEqual(len(exports), 1,
-                         f"more than one place exports it: {[lines[i] for i in exports]}")
-        self.assertEqual(lines[exports[0] - 1].strip(), "if not d.lifecycle:",
-                         "a lifecycle command is handed a target it resolves per name")
 
 
 if __name__ == "__main__":

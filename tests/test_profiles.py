@@ -1,8 +1,5 @@
 """The image profiles as they stand in image/configs: each is data the fleet
-accounts for, and rpi5's overclock is one of them.
-
-Run: python3 -m unittest tests.test_profiles -v
-"""
+accounts for, and rpi5's overclock is one of them."""
 import re
 import sys
 import unittest
@@ -95,7 +92,6 @@ class TestProfilesAreData(unittest.TestCase):
 
 class TestSysimage(unittest.TestCase):
     def test_oc_profile_in_image(self):
-        """rpi5's overclock is a profile of its own, carried onto the card by the write."""
         oc, stock = images.load(OC, ENV), images.load(STOCK, ENV)
         same = lambda p: {k: v for k, v in p.items() if k not in ("IMG_PROFILE", "IMG_SPEC_DIR")}
         self.assertEqual(same(oc), same(stock), "the -oc profile is the same image as the stock one")

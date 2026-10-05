@@ -1,9 +1,4 @@
-"""A task's results: where a task lives (its workspace's directory, and nowhere else), what its
-report confirms (the commit each arm measured, each check's verdict, how to restart it), and `wk bench export`,
-the deliverables as one zip (lib/wk/bench/record.py, report.py, cli.py).
-
-Run: python3 tests/run.py -k test_bench_results
-"""
+"""A task's results: where it lives, what its report confirms, and `wk bench export` (lib/wk/bench/record.py, report.py, cli.py)."""
 import contextlib
 import io
 import json
@@ -226,7 +221,6 @@ class TestAOneArmReportNamesRunsWhereTheTaskIs(ExportTest):
 
 class TestExportKillPoints(ExportTest):
     def test_an_export_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[bench export]`: the archive is written whole or not at all, and a re-run replaces a partial one."""
         d = complete_task(self.tmp / "store" / "ws" / "w" / "bench")
         dest = str(self.tmp / "home" / "Downloads" / (TASK + ".zip"))
         os.environ["WK_YES"] = "1"
@@ -272,7 +266,6 @@ class FarBox(Fake, Ssh):
 
 
 class TestWhereALegRecords(WkTest):
-    """record.leg_home: a leg records into its workspace's bench/, a named task there, and on this machine."""
 
     def reg(self, far):
         d = complete_task(Path(tempfile.mkdtemp(dir=str(self.tmp))))
@@ -304,7 +297,6 @@ class TestWhereALegRecords(WkTest):
 
 
 class TestExportReachesATaskOnAnotherMachine(ExportTest):
-    """A task in the podman VM's store or on a build box: read through that machine's read_tree, the zip built here."""
 
     def far(self):
         d = complete_task(self.tmp / "disk")
@@ -332,8 +324,6 @@ class TestExportReachesATaskOnAnotherMachine(ExportTest):
         self.assertEqual([e for e in far.effects if e[0].startswith("copy")], [], "nothing is copied out of that machine")
 
     def test_a_report_reaches_it_the_same_way(self):
-        """`wk bench report <task>` runs on this host, and a Mac's container task is in the podman machine's store:
-        it was 'no such task' about a task `wk bench ls` listed one line up (measured 2026-09-27)."""
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = self.bench_with(far_target("container", self.far())).task_report(TASK, False, True)
@@ -341,7 +331,6 @@ class TestExportReachesATaskOnAnotherMachine(ExportTest):
         self.assertIn("data      /var/lib/wk/ws/w/bench/" + TASK, out.getvalue())
 
     def test_two_of_its_runs_compare_from_here(self):
-        """The run directories `wk bench ls` prints are that machine's paths; the two-run form reads them the same way."""
         far = self.far()
         runs = sorted({p.split("/runs/")[1].split("/")[0] for p in far.files if "/runs/" in p})
         a, b = ("/var/lib/wk/ws/w/bench/%s/runs/%s" % (TASK, r) for r in runs[:2])
@@ -367,8 +356,6 @@ SECRET = b"-----BEGIN OPENSSH PRIVATE KEY-----\n"
 
 
 class PlantedTest(ExportTest):
-    """An agent in a workspace writes its own tasks (the workspace directory is mounted read-write), so a link it
-    plants there must never make this host read a file of its own into a report or a zip, nor write through one."""
 
     def setUp(self):
         super().setUp()
@@ -522,7 +509,6 @@ class TestTheSeamReadsATree(PlantedTest):
         vm = PodmanVm("wk", via=via)
         with self.assertRaises(OSError):
             vm.read_tree("/var/lib/wk/ws/w", "bench/t", ("*",))
-        self.assertIn("tar -cf", via.effects[-1][1][-1])
         with self.assertRaises(NotImplementedError):
             vm.copy_tree_out("/f", str(self.tmp / "x"))
 
@@ -554,7 +540,6 @@ class TestTheSeamReadsATree(PlantedTest):
         return p, far
 
     def test_a_peer_names_its_tasks_home_through_the_hops_its_own_wk_reaches_it_by(self):
-        """A Mac peer's container workspace keeps its tasks in that Mac's podman machine, reached through the Mac."""
         p, far = self.peer(out=json.dumps({"via": [["podman", "wk"]], "path": "/var/lib/wk/ws/w/bench"}))
         m, path = p.results("w")
         self.assertEqual((type(m), m.dest, m.via, path), (PodmanVm, "wk", far, "/var/lib/wk/ws/w/bench"))

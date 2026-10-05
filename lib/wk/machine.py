@@ -175,6 +175,19 @@ class Machine:
     def spawn(self, argv, log):
         raise NotImplementedError
 
+    def start(self, argv, out, cwd=None):
+        raise NotImplementedError
+
+    def exec(self, argv, cwd=None, env=None):
+        """Replaces this process, so the far side's tty and job control are the caller's own; a dry run prints it and ends."""
+        if act.dry_run():
+            sys.stderr.write("would run: %s%s\n" % ("cd %s && " % shlex.quote(cwd) if cwd else "", shlex.join(argv)))
+            raise SystemExit(0)
+        self._exec(argv, cwd, env)
+
+    def _exec(self, argv, cwd, env):
+        raise NotImplementedError
+
     # -- copy: the one path for moving bytes in or out of a workspace, a board or a card
     def copy_in(self, src, dest):
         raise NotImplementedError
@@ -370,6 +383,19 @@ class Local(Machine):
             p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
                                  start_new_session=True)
         return p.pid
+
+    def start(self, argv, out, cwd=None):
+        return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, cwd=cwd)
+
+    def _exec(self, argv, cwd, env):
+        if cwd is not None:
+            os.chdir(cwd)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        if env is None:
+            os.execvp(argv[0], argv)
+        else:
+            os.execvpe(argv[0], argv, env)
 
     # Both ends are this host's own filesystem, so a real copy needs no transport.
     def copy_in(self, src, dest):
@@ -704,8 +730,59 @@ class PodmanVm(Ssh):
     run_tty = forward = copy_in = copy_out = copy_tree_in = copy_tree_out = _refused
 
 
+class TartExec(Ssh):
+    """A macOS guest through `tart exec`, the guest agent's channel: no network, so macOS local-network privacy never applies."""
+
+    def __init__(self, tart, vm, via=None):
+        super().__init__(vm, via=via)
+        self.tart = tart
+
+    def argv(self, remote, tty=False):
+        return [self.tart, "exec", "-i"] + (["-t"] if tty else []) + [self.dest, "/bin/zsh", "-lc", remote]
+
+    def _pipe(self, line, src, dest, *args):
+        if act.dry_run():
+            sys.stderr.write("would copy on %s: %s -> %s\n" % (self.dest, src, dest))
+            return
+        r = self.via.run(["sh", "-c", "set -o pipefail; " + line, self.tart, self.dest, src, dest, *args])
+        if not r.ok:
+            raise OSError(r.err.strip() or "copy between here and %s failed" % self.dest)
+
+    def copy_in(self, src, dest):
+        self._pipe('"$0" exec -i "$1" /bin/sh -c \'cat > "$0"\' "$3" < "$2"', src, dest)
+
+    def copy_out(self, src, dest):
+        self._pipe('"$0" exec "$1" /bin/cat "$2" > "$3"', src, dest)
+
+    def copy_tree_in(self, src, dest):
+        self._pipe('tar -C "$2" -cf - . | "$0" exec -i "$1" /bin/sh -c \'rm -rf "$0" && mkdir -p "$0" && tar -C "$0" -xf -\' "$3"',
+                   src, dest)
+
+    def copy_tree_out(self, src, dest, exclude=()):
+        """bsdtar matches an --exclude unanchored, so a pattern without a slash names a path at any depth, as rsync's does."""
+        self._pipe('t=$0 g=$1 s=$2 d=$3; shift 3; "$t" exec "$g" /usr/bin/tar -cf - -C "$s" "$@" . '
+                   '| { rm -rf "$d" && mkdir -p "$d" && tar -C "$d" -xf -; }',
+                   src, dest, *excludes(exclude))
+
+    def _refused(self, *a, **kw):
+        raise NotImplementedError("a port forward into %s goes over its sshd (Vm.ssh_transport), not tart exec" % self.dest)
+
+    forward = _refused
+
+
 def excludes(patterns):
     return [w for x in patterns for w in ("--exclude", x)]
+
+
+class Exited:
+    def __init__(self, pid, rc):
+        self.pid, self.returncode = pid, rc
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self):
+        return self.returncode
 
 
 class Killed(Exception):
@@ -724,7 +801,7 @@ class Fake(Machine):
         self.dirs = set()
         self.links = set()
         self.mtimes = {}
-        self.pids = set()
+        self.pids = {os.getpid()}
         self.answers = []
         self.effects = []
         self.next_pid = 1000
@@ -928,6 +1005,16 @@ class Fake(Machine):
         self.pids.add(self.next_pid)
         self.files.setdefault(log, "")
         return self.next_pid
+
+    def start(self, argv, out, cwd=None):
+        self.effect(("start", tuple(argv)))
+        r = self._answer(argv)
+        out.write((r.out + r.err).encode())
+        self.next_pid += 1
+        return Exited(self.next_pid, r.rc)
+
+    def _exec(self, argv, cwd, env):
+        self.effect(("exec", tuple(argv), cwd))
 
     def forward(self, port, log=os.devnull):
         from contextlib import contextmanager

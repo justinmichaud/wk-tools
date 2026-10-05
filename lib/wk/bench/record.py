@@ -148,8 +148,10 @@ def task_runs(taskdir, machine=None):
 
 
 def task_arms(doc):
-    """(the two things a task compares, what to call them): a systems A/B is one slot in two images."""
+    """(the two things a task compares, what to call them): one slot in two images, one build under two argument sets."""
     subj = doc.get("subject", {})
+    if subj.get("kind") == "options":
+        return [subj.get("a") or "(none)", subj.get("b") or "(none)"], "options"
     if subj.get("kind") == "systems":
         spec = [x for x in subj.get("spec", "").split(",") if x]
         if len(spec) == 2:
@@ -167,7 +169,7 @@ def subject_line(doc):
         what = "A/B %s: %s vs base %s" % (subj.get("spec", "?"), (subj.get("head") or "?")[:10], (subj.get("base") or "?")[:10])
     elif kind == "workspace":
         what = "%s %s" % (subj.get("spec", "?"), doc["devices"][0].get("profile", ""))
-    elif kind == "systems":
+    elif kind in ("systems", "options"):
         arms, _ = task_arms(doc)
         what = "%s vs %s" % (arms[0], arms[1]) if len(arms) == 2 else "systems"
     elif len(slots) == 2:
@@ -179,7 +181,7 @@ def subject_line(doc):
         parts.append(devices)
     parts.append(plans)
     rounds = doc.get("rounds", 1)
-    if len(slots) == 2 or rounds > 1:
+    if len(slots) == 2 or rounds > 1 or kind == "options":
         parts.append("%d round%s" % (rounds, "" if rounds == 1 else "s"))
     return " · ".join(p for p in parts if p)
 

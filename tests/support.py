@@ -24,13 +24,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 WK = REPO / "wk"
 
-# The suite is fleet-blind: every run()/bash() below points WK_MACHINES_DIR
-# (lib/wk/fleet.py) at BLIND_FLEET, this repo's machines less every build
-# machine and peer, so target_all knows only container and vm and no test ever
-# ssh's to one of the maintainer's real targets or finds a workspace that
-# happens to live there. A test that wants a fleet passes its own directory --
-# fake machine confs of its own, NO_REGISTRY for none at all, or REAL_MACHINES
-# when it is deliberately auditing the machines this repo ships.
+# The suite is fleet-blind: BLIND_FLEET is this repo's machines less every build machine and peer, so no test
+# reaches a real target. A test that wants a fleet passes its own directory, NO_REGISTRY, or REAL_MACHINES.
 REAL_MACHINES = REPO / "machines"
 NO_REGISTRY = tempfile.mkdtemp(prefix="wk-test-no-registry-")
 BLIND_FLEET = tempfile.mkdtemp(prefix="wk-test-blind-fleet-")
@@ -39,8 +34,7 @@ for _conf in REAL_MACHINES.glob("*.conf"):
         os.symlink(_conf, os.path.join(BLIND_FLEET, _conf.name))
 atexit.register(shutil.rmtree, NO_REGISTRY, True)
 atexit.register(shutil.rmtree, BLIND_FLEET, True)
-# This machine's config home less its `wk`, so no test sees the ~/.config/wk/machines/ overlay
-# (lib/wk/fleet.py); the rest stays, since git and podman read their own config there.
+# This machine's config home less its `wk` (git and podman read theirs there).
 NO_CONFIG = tempfile.mkdtemp(prefix="wk-test-no-config-")
 _REAL_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
 for _entry in (_REAL_CONFIG.iterdir() if _REAL_CONFIG.is_dir() else ()):
@@ -57,44 +51,25 @@ def real_confs(*kinds):
     return sorted(p for p in REAL_MACHINES.glob("*.conf")
                   if re.search(r"^kind=(%s)$" % "|".join(kinds), p.read_text(), re.M))
 
-# Same reasoning, for the secrets directory (lib/wk/store.py): on a macOS host it reads
-# WK_HOST_SECRETS rather than $WK_STORE, so without a default of its own a
-# test would read and write the real ~/.config/wk/secrets. A test that wants
-# a populated store passes its own directory.
+# Scratch secrets, state and API endpoints, so no test reads or writes the real ones; port 1 refuses at once.
 NO_SECRETS = tempfile.mkdtemp(prefix="wk-test-no-secrets-")
 atexit.register(shutil.rmtree, NO_SECRETS, True)
 
-# Same reasoning, for wk_state_dir (lib/common.sh): on a macOS workstation
-# that is where a task record goes and where the mirror lives,
-# so a suite that merely popped XDG_STATE_HOME wrote into the real one -- 85
-# task records under ~/.local/state/wk/task, from tests about commands that
-# record a task. A test that wants this machine's own passes REAL_STATE.
 NO_STATE = tempfile.mkdtemp(prefix="wk-test-no-state-")
 REAL_STATE = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
 atexit.register(shutil.rmtree, NO_STATE, True)
 
-# The credential rules (lib/credcheck.py) ask GitHub what a token can do, so
-# without a default of its own a test that stores one would spend a request
-# against the real API. Port 1 refuses at once, which is the same answer a
-# machine with no network gives and the branch that reports a credential
-# unverified. A test that wants answers points this at a stub of its own.
 NO_GITHUB = "http://127.0.0.1:1"
 
-# A tailnet that lists no peer, for stub_path: Reach.offline (lib/wk/reach.py) then
-# refuses nothing and the stubbed `ssh` decides reachability, whatever the real
-# coordinator says about a board of that name.
+# A tailnet that lists no peer, so a stubbed `ssh` decides reachability.
 TAILSCALE_KNOWS_NOTHING = "echo '{}'\n"
 os.environ["WK_GITHUB_API"] = NO_GITHUB
 os.environ["WK_TAILNET_API"] = NO_GITHUB
 os.environ["WK_NTFY_API"] = NO_GITHUB
 os.environ["WK_ANTHROPIC_API"] = NO_GITHUB
-os.environ["WK_CLAUDE_OAUTH"] = NO_GITHUB
 os.environ["WK_LITELLM_API"] = NO_GITHUB
 os.environ["WK_BUGZILLA_API"] = NO_GITHUB
 
-# The tailnet keys are the two credentials whose paths are not under
-# Store.secrets_dir (lib/wk/store.py reads them from ~/.config/wk), so without these
-# a test would read the maintainer's real ones and put them to the tailnet.
 os.environ["WK_TS_AUTHKEY"] = os.path.join(NO_SECRETS, "tailscale-authkey")
 os.environ["WK_TS_API_SECRET"] = os.path.join(NO_SECRETS, "tailscale-api-key")
 
@@ -103,11 +78,7 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk.dispatch import DISPATCH_VARS  # noqa: E402
 
 
-# The dispatcher's variables and those wk sets for its own child processes and
-# scripts (onboard script parameters, the board driver's environment, the holds
-# a driver passes to the tasks it starts): a protocol between wk's own
-# processes, so no README line or test of its own is owed. Each is still read
-# in one function.
+# Variables wk sets for its own child processes: a protocol between wk's processes, owed no README line.
 INTERNAL_VARS = DISPATCH_VARS + (
     "WK_AB_ROOT", "WK_MIRROR", "WK_DEV", "WK_DEVICE_HELD", "WK_DO", "WK_FILE", "WK_OCT", "WK_PART", "WK_PATH", "WK_SRC",
     "WK_TASK_HELD", "WK_TASK_PARENT", "WK_TS_API_SECRET_FILE",
@@ -116,22 +87,11 @@ INTERNAL_VARS = DISPATCH_VARS + (
     "WK_BOARD_DEST", "WK_BOARD_OPTS", "WK_BOARD_LIB", "WK_BOARD_URL",
 )
 
-# A shell started from `wk zed`/`wk enter` inherits those variables and keeps
-# them, so a test that inherits one is a test about whatever that person last
-# worked on. They go at import as well as in _clean_env below: _clean_env is
-# the door most tests use, and this is what the ones that build an environment
-# out of os.environ themselves get. A test that wants one sets it through
-# `env=`, which still wins.
+# A shell from `wk enter` inherits the dispatcher's variables; they go here and in _clean_env.
 for _leaked in DISPATCH_VARS:
     os.environ.pop(_leaked, None)
 
-# Every subprocess a test starts inherits this process's stdin, and a bash
-# built with SSH_SOURCE_BASHRC (Debian and Ubuntu ship one) sources ~/.bashrc
-# in a *non-interactive* shell whose stdin is a connected socket and whose
-# SHLVL is below 2 -- so a `bash -c` or a `./wk` handed a hand-built env
-# (which drops SHLVL) had the machine's rc rewrite its PATH, whenever the
-# runner itself was started with a socketpair on stdin. /dev/null is not a
-# socket. A test that wants to feed a command bytes passes `input=`.
+# Debian's bash (SSH_SOURCE_BASHRC) sources ~/.bashrc when stdin is a socket; /dev/null is not one.
 with open(os.devnull, "rb") as _devnull:
     os.dup2(_devnull.fileno(), 0)
 
@@ -153,14 +113,7 @@ def _clean_env(extra=None, wk_root=False):
     or peer (BLIND_FLEET above) so nothing reaches a real target, and a scratch
     secrets directory (NO_SECRETS above) so nothing reads or writes the real
     ~/.config/wk/secrets, plus whatever the caller adds -- including a
-    WK_MACHINES_DIR or WK_HOST_SECRETS of its own.
-
-    wk_root=True also sets WK_ROOT: every sourced lib in this tree that
-    needs it (lib/common.sh, bench/*.sh, ...) gets it for free
-    from lib/common.sh's own `WK_ROOT="${WK_ROOT:-$(cd ... )}"`, but a
-    bash snippet that sources a lib *without* lib/common.sh first (as some
-    of cmd/selftest's lifted checks do) needs it set explicitly.
-    """
+    WK_MACHINES_DIR or WK_HOST_SECRETS of its own."""
     env = dict(os.environ)
     for var in DISPATCH_VARS:
         env.pop(var, None)
@@ -175,7 +128,6 @@ def _clean_env(extra=None, wk_root=False):
     env["WK_TAILNET_API"] = NO_GITHUB
     env["WK_NTFY_API"] = NO_GITHUB
     env["WK_ANTHROPIC_API"] = NO_GITHUB
-    env["WK_CLAUDE_OAUTH"] = NO_GITHUB
     env["WK_LITELLM_API"] = NO_GITHUB
     env["WK_BUGZILLA_API"] = NO_GITHUB
     env["WK_TS_AUTHKEY"] = os.environ["WK_TS_AUTHKEY"]
@@ -229,13 +181,7 @@ def clean_env(extra=None, wk_root=True):
 
 
 def run(*args, env=None, check=False, timeout=120, input=None):
-    """Run ./wk <args> and return a CompletedProcess with text output.
-
-    stdout and stderr are merged into .stdout (.stderr is always ""),
-    mirroring cmd/selftest's `out=$(fn 2>&1)`: most of wk's reporting
-    (dry runs, refusals) goes to stderr, and every check ported from that
-    file greps the combined blob rather than one stream or the other.
-    """
+    """Run ./wk <args> and return a CompletedProcess with text output."""
     cp = subprocess.run(
         [str(WK), *args],
         cwd=str(REPO),
@@ -334,10 +280,7 @@ def rand_suffix(n=6):
 
 
 def repo_files():
-    """Every file git does not ignore, tracked or not, as absolute paths: what a commit would hold.
-
-    `git ls-files`, not a directory walk, so a build directory, a scratch file or an
-    agent's worktree under the ignored .claude/ is never counted."""
+    """Every file git does not ignore, tracked or not, as absolute paths: what a commit would hold."""
     out = subprocess.run(["git", "-C", str(REPO), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                          capture_output=True, text=True, check=True).stdout
     return [REPO / name for name in out.split("\0")
@@ -364,23 +307,9 @@ def shell_files():
     return out
 
 
-def assert_guest_start_converges(case, step):
-    """A guest start converges it through one `Guest.converge` over `lib/wk/guest.py`'s STEPS, from both arms --
-    the guest that was already running and the one this start booted. `step` names it as the bash guest driver did
-    (`_set_guest_egress "$name" "$ip"`): the step is in STEPS once, and `start` converges once, after both arms."""
-    import inspect
-    sys.path.insert(0, str(REPO / "lib"))
-    from wk import guest
-    name = step.split()[0].lstrip("_")
-    case.assertEqual(1, [s[0] for s in guest.STEPS].count(name), f"a guest start does not run {name!r} exactly once")
-    body = inspect.getsource(guest.start)
-    case.assertEqual(1, body.count(".converge()"), "a guest start no longer converges once, after both arms")
-    case.assertIn('if state == "running":', body)
-
-
-def guest_step(env, step, ws="demo", ip="1.2.3.4", secrets=None):
+def guest_step(env, step, ws="demo", secrets=None):
     """One of lib/wk/guest.py's converge steps run on this host, as a macOS host drives a guest: `env` over the
-    clean environment is the whole of os.environ, so stubs first on its PATH stand in for ssh. `secrets` patches
+    clean environment is the whole of os.environ, so stubs first on its PATH stand in for tart. `secrets` patches
     Secrets methods (`{"bugzilla_user": fn}`). A CompletedProcess's returncode and stderr."""
     import io
     import types
@@ -398,7 +327,7 @@ def guest_step(env, step, ws="demo", ip="1.2.3.4", secrets=None):
         stack.enter_context(contextlib.redirect_stderr(err))
         vm = targets.Registry(str(REPO), env=dict(os.environ)).load("vm")
         try:
-            rc = 0 if getattr(guest.Guest(guest.Host(vm), ws, ip), step)() else 1
+            rc = 0 if getattr(guest.Guest(guest.Host(vm), ws, vm.guest_of(vm.vm(ws))), step)() else 1
         except act.Refused as e:
             rc = e.status
     return types.SimpleNamespace(returncode=rc, stdout="", stderr=err.getvalue())
@@ -648,8 +577,7 @@ def stub_path(scripts):
     `podman`/`tart`/`sfdisk`/`lsblk` rather than real hardware or a real VM.
     `body` is wrapped in a `#!/bin/sh` shebang unless it supplies its own.
     Yields the bin directory; the caller puts it first on PATH, e.g.
-        env={"PATH": f"{binp}:{os.environ['PATH']}"}
-    """
+        env={"PATH": f"{binp}:{os.environ['PATH']}"}"""
     d = tempfile.mkdtemp(prefix="wk-test-stub-bin-")
     try:
         for name, body in scripts.items():

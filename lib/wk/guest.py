@@ -1,6 +1,6 @@
 """A macOS guest's start, stop and convergence, what its desktop and its load say about it, and the host daemons every
-guest shares: the egress proxy, the credential injector behind it, and the ssh-agent a guest's push reaches. A pidfile
-is a lock, never a record."""
+guest shares: the egress proxy, the credential injector behind it, the ssh-agent a guest's push reaches and the request
+broker its `wk sync` asks. A pidfile is a lock, never a record."""
 
 import os
 import re
@@ -9,18 +9,19 @@ import signal
 import sys
 import time
 
-from wk import act, git, secrets, tools
+from wk import act, agents, git, secrets, tools
 from wk.act import Refused, debug, die, info, log, warn
 from wk.clock import Clock
 from wk.lock import Lock
-from wk.store import Store, no_such_workspace
+from wk.store import GUEST_BROKER_SOCKET, Store, no_such_workspace
 
 SUBNET = "192.168.2"   # Softnet's own network, not vmnet's 192.168.64
 PROXY_PORT = "3128"
 SOFTNET = "/usr/local/bin/softnet"
-CLOCK_SKEW = "30"      # not zero: the reading is taken over ssh, so a round trip is in every compare
+CLOCK_SKEW = "30"      # not zero: the reading is taken through the guest agent, so a round trip is in every compare
 BOOT_WAIT = 180
 FORWARD_WAIT = 4
+FORWARDS = ("agent", "broker")
 
 # An `nc -z -U` answers 1 for a served socket on macOS, so the connect is made in python.
 SOCKET_ANSWERS = """import socket, sys
@@ -327,34 +328,33 @@ class Host:
 
     def lock(self):
         if self._lock is None:
-            self._lock = Lock(self.vm.store, self.machine, self.clock)
+            self._lock = Lock(Store(self.env), self.machine, self.clock)
         return self._lock
 
-    def forward_pidfile(self, ws):
-        return self.path(ws + ".agent-forward.pid")
+    def forward_pidfile(self, ws, what):
+        return self.path("%s.%s-forward.pid" % (ws, what))
 
-    def forward_start(self, ws, guest):
-        """`wk push off` ends it whoever started it: it clears the agent, and a converge with none stops this."""
-        with self.lock().held("vm-agent-forward-" + ws):
-            pidfile = self.forward_pidfile(ws)
+    def forward_start(self, ws, guest, what, far, near):
+        """`ssh -R far:near` over the guest's sshd on tart exec (Vm.ssh_argv): a guest cannot see a unix socket across the hypervisor."""
+        with self.lock().held("vm-%s-forward-%s" % (what, ws)):
+            pidfile = self.forward_pidfile(ws, what)
             if self.daemon_pid(pidfile) is not None:
                 return True
-            sock = self.vm.agent_sock()
-            if not guest.act_run(["rm", "-f", sock]).ok:
+            if not guest.act_run(["rm", "-f", far]).ok:
                 return False
-            argv = ["ssh", *guest.opts, "-N", "-R", "%s:%s" % (sock, self.agent_sock()), guest.dest]
-            log = self.path(ws + ".agent-forward.log")
-            pid = self.spawn(argv, log, pidfile)
-            if act.dry_run() or self.clock.wait_until(lambda: guest.run(["test", "-S", sock]).ok, FORWARD_WAIT, 0.2):
+            ssh = self.vm.ssh_argv(ws)
+            log = self.path("%s.%s-forward.log" % (ws, what))
+            pid = self.spawn(ssh[:-1] + ["-N", "-o", "ExitOnForwardFailure=yes", "-R", "%s:%s" % (far, near), ssh[-1]], log, pidfile)
+            if act.dry_run() or self.clock.wait_until(lambda: guest.run(["test", "-S", far]).ok, FORWARD_WAIT, 0.2):
                 return True
             self.machine.kill(pid)
             self.machine.remove(pidfile)
-            warn("the agent forward into '%s' did not come up, so it cannot push;\n  see %s" % (ws, log))
+            warn("the %s forward into '%s' did not come up; see %s" % (what, ws, log))
             return False
 
-    def forward_stop(self, ws):
-        with self.lock().held("vm-agent-forward-" + ws):
-            pidfile = self.forward_pidfile(ws)
+    def forward_stop(self, ws, what):
+        with self.lock().held("vm-%s-forward-%s" % (what, ws)):
+            pidfile = self.forward_pidfile(ws, what)
             pid = self.daemon_pid(pidfile)
             if pid is not None:
                 self.machine.kill(pid)
@@ -370,11 +370,12 @@ STEPS = (
     ("set_guest_clock", warn, "could not set {ws}'s clock; TLS in there will fail as CERT_NOT_YET_VALID"),
     ("set_guest_egress", warn, "could not set {ws}'s egress; nothing in there will reach the outside"),
     ("write_checkout", warn, "{ws}'s WebKit checkout is not wired and set up (above); 'wk sync {ws} --fix' once it is up"),
-    ("install_claude_cli", warn, "could not install the Claude CLI in {ws}; 'wk ai claude {ws}' will not work there"),
+    ("install_agents", warn, "{ws} has no working coding agents (above); 'wk rm {ws}' and 'wk new' remake it"),
     ("write_claude_config", warn, "could not link ~/.claude in {ws}; an agent in there would have no instructions"),
     ("write_agent_secrets", warn, "could not write the agent credentials into {ws}; an agent in there will ask you to log in"),
     ("write_deploy_keys", warn, "could not write {ws}'s ssh config and public key halves; a push from in there is refused ('wk push status')"),
     ("agent_converge_guest", warn, "could not converge {ws}'s ssh-agent forward; 'wk push status' says what it can reach"),
+    ("broker_forward", warn, "could not reach the request broker from {ws}; 'wk sync' in there refreshes no mirror"),
     ("settle_desktop", warn, "could not settle {ws}'s desktop; 'wk doctor {ws}' says what is in front of the window"),
     ("report_desktop", None, ""),
 )
@@ -382,9 +383,8 @@ STEPS = (
 
 class Guest:
 
-    def __init__(self, host, ws, ip):
-        self.host, self.vm, self.ws, self.ip = host, host.vm, ws, ip
-        self.m = host.vm.guest_at(ip)
+    def __init__(self, host, ws, m):
+        self.host, self.vm, self.ws, self.m = host, host.vm, ws, m
         self.secrets = host.secrets
 
     def converge(self):
@@ -430,11 +430,13 @@ class Guest:
             sys.stderr.write("".join("    %s\n" % l for l in out.splitlines()[-5:]))
         return r.ok
 
-    def install_claude_cli(self):
-        r = self.m.act_run(["sh", "-s"], input=tree(self.host.root, "container/claude-cli.sh"))
-        if r.ok and "claude=installed" in r.out:
-            info("Claude CLI installed in %s" % self.ws)
-        return r.ok
+    def install_agents(self):
+        try:
+            agents.install(self.host.root, self.host.env, self.host.machine, self.m.act_run, self.ws, self.vm.tools(self.ws),
+                           self.vm.src(self.ws))
+        except Refused:
+            return False
+        return True
 
     def write_claude_config(self):
         return self._said(self.m.act_run(["sh", "-c", CLAUDE_CONFIG, "sh", self.vm.tools(self.ws)]))
@@ -537,9 +539,14 @@ class Guest:
 
     def agent_converge_guest(self):
         if self.secrets.agent_list(self.host.agent_sock()):
-            return self.host.forward_start(self.ws, self.m)
-        self.host.forward_stop(self.ws)
+            return self.host.forward_start(self.ws, self.m, "agent", self.vm.agent_sock(), self.host.agent_sock())
+        self.host.forward_stop(self.ws, "agent")
         return self.m.act_run(["rm", "-f", self.vm.agent_sock()]).ok
+
+    def broker_forward(self):
+        """The host broker's socket at the one a workspace's broker client dials; a broker that starts later is reached then."""
+        return self.host.forward_start(self.ws, self.m, "broker", self.vm.home() + "/" + GUEST_BROKER_SOCKET,
+                                       Store(self.host.env).broker_socket())
 
 
 def is_unfiltered(env):
@@ -612,7 +619,7 @@ def password(env):
 
 def login_note(env):
     log("  the guest's own window logs in as %s / %s" % (vm_user(env), password(env)))
-    log("  (wk itself uses an ssh key; this is for a prompt on the screen)")
+    log("  (wk itself goes through the tart guest agent; this is for a prompt on the screen)")
     log("  wk doctor <name>     what is in front of that window, and what is piling up in it")
 
 
@@ -714,7 +721,7 @@ class Desktop:
                    row("note", "SecurityAgent is up, which the frontmost-application reading above cannot see. Every login has "
                        "one for a moment", "wk doctor <name>  -- still up means something in there is waiting for a password"))
         out.append(row("note", "the guest's own window logs in as %s" % v("user"),
-                       "wk itself uses an ssh key; 'wk start' and 'wk enter' state that account's password"))
+                       "wk itself goes through the tart guest agent; 'wk start' and 'wk enter' state that account's password"))
         return "".join(out)
 
     def updates(self):
@@ -801,7 +808,7 @@ def load_findings(probe, env):
                        RESTART + "; a build in there is otherwise paging, and every number it produces is about the paging"))
     else:
         out.append(row("ok", "%s%% of the %s MB in that guest is free" % (free, total)))
-    m = re.search(r"used = ([0-9.]+)M", vals.get("swapusage", ""))   # sysctl vm.swapusage, raw
+    m = re.search(r"used = ([0-9.]+)M", vals.get("swapusage", ""))
     if m and float(m.group(1)) > swap_warn:
         out.append(row("note", "the guest is using %d MB of swap" % float(m.group(1)),
                        "it holds a fixed allocation, so this is the guest paging inside itself: a build here is slower "
@@ -813,10 +820,9 @@ def check_rows(vm, ws):
     from wk import doctor
     from wk.sysimage import guestbase
     rows = doctor.findings(guestbase.Base(vm).findings())
-    ip = vm.ip(ws)
-    if not ip:
+    g = vm.guest(ws)
+    if g is None:
         return rows + [doctor.unk("'%s' is not running, so its desktop and its load cannot be read" % ws, "wk start %s" % ws)]
-    g = vm.guest_at(ip)
     probe = desktop_probe(vm.root, vm.machine, g)
     rows += doctor.findings(Desktop(vm.root, vm.machine, probe).findings().replace("<name>", ws)) if probe else \
         [doctor.unk("'%s' did not answer the desktop probe" % ws, "wk doctor %s  -- again, once it is reachable" % ws)]
@@ -833,7 +839,7 @@ def setup_assistant(g):
 
 
 def unblock_desktop(root, g):
-    """Driven over the Accessibility API, which answers a plain ssh session because the guest runs with SIP disabled:
+    """Driven over the Accessibility API, which answers a session off the console because the guest runs with SIP disabled:
     no preference the guest can write stops the pane (vm/desktop.sh)."""
     if setup_assistant(g) != "up":
         return True
@@ -948,7 +954,7 @@ def boot(host, ws, wait=BOOT_WAIT):
         path = "%s:%s" % (os.path.dirname(host.softnet()), host.env.get("PATH") or os.environ.get("PATH", ""))
         m.remove(runlog)
         m.spawn(["env", "PATH=" + path, vm.tart_or_die(), "run", *flags, "--dir=%s:%s" % (vm.agent_rw_share, agent_rw),
-                 "--dir=%s:%s:ro" % (vm.mirror_share, os.path.dirname(vm.store.mirror())), vm.vm(ws)], runlog)
+                 "--dir=%s:%s:ro,tag=%s" % (vm.mirror_share, os.path.dirname(vm.store.mirror()), vm.mirror_tag), vm.vm(ws)], runlog)
         info("booting %s (log: %s)" % (vm.vm(ws), runlog))
         if act.dry_run():
             return ""   # a guest this run did not boot has no address, nor anything to converge
@@ -958,9 +964,9 @@ def boot(host, ws, wait=BOOT_WAIT):
     if not ip:
         die("%s did not come up within %ds. Its run log says:\n%s" % (vm.vm(ws), wait, runlog_tail(m, runlog)))
     host.start_proxy()
-    guest = vm.guest_at(ip)
-    if not host.clock.wait_until(lambda: guest.run(["true"]).ok, 120, 2):
-        die("%s is up at %s but ssh never answered. Its run log says:\n%s" % (vm.vm(ws), ip, runlog_tail(m, runlog)))
+    g = vm.guest_of(vm.vm(ws))
+    if not host.clock.wait_until(lambda: g.run(["true"]).ok, 120, 2):
+        die("%s is up at %s but its tart guest agent never answered. Its run log says:\n%s" % (vm.vm(ws), ip, runlog_tail(m, runlog)))
     return ip
 
 
@@ -979,16 +985,17 @@ def start(vm, ws, clock=None):
             admit(host, vm.vm(ws), vm.mem_mb(ws))
             ip = boot(host, ws)
         if ip:
-            Guest(host, ws, ip).converge()
+            Guest(host, ws, vm.guest_of(vm.vm(ws))).converge()
     login_note(vm.env)
     return ip
 
 
 def stop(vm, ws, clock=None):
-    """The forward first: one left holding a socket in a guest that is gone is a process nothing would reap."""
+    """The forwards first: one left holding a socket in a guest that is gone is a process nothing would reap."""
     host = Host(vm, clock)
     with host.lock().held("guest-" + ws):
-        host.forward_stop(ws)
+        for what in FORWARDS:
+            host.forward_stop(ws, what)
         if vm.vm_state(ws) != "running":
             info("%s is not running" % ws)
             return True
@@ -1005,22 +1012,21 @@ def _vm(root, machine, env):
     return targets.Registry(root, env=os.environ if env is None else env, machine=machine).load("vm")
 
 
-def _guests(root, machine, env):
-    vm = _vm(root, machine, env)
-    return vm if vm.vm_store() else None
-
-
 def pat_converge(root, env, machine):
     """The guests' injector serves every guest on a macOS host, wherever the vm target's store is."""
     vm = _vm(root, machine, env)
     return not Store(vm.env).macos_host or Host(vm).pat_converge()
 
 
+def push_agent(root, machine, env=None):
+    """(Secrets, socket) of the agent `wk push on` loads on this host for its own pushes and its guests."""
+    host = Host(_vm(root, machine, env))
+    return host.secrets, host.agent_sock()
+
+
 def vm_push_keys_converge(root, machine, action, env=None):
-    """`wk push on|off` for the guests; each running guest that did not converge is named, and fails it."""
-    vm = _guests(root, machine, env)
-    if vm is None:
-        return True
+    """`wk push on|off` for push_agent's agent, then each running guest; one that did not converge fails it."""
+    vm = _vm(root, machine, env)
     host = Host(vm)
     sec, sock, ok = host.secrets, host.agent_sock(), True
     creds = ((host.path("push-github-pat"), "github-pat"), (host.path("push-bugzilla-api-key"), "bugzilla-api-key"))
@@ -1039,15 +1045,10 @@ def vm_push_keys_converge(root, machine, action, env=None):
         if left:
             sys.stderr.write("  %-24s still holds %d identity/identities at %s\n" % ("the guests' agent", left, sock))
             ok = False
-    for g in vm.workspaces():
+    for g in vm.workspaces() if vm.vm_store() else ():
         if vm.info(g) != "running":
             continue
-        ip = vm.ip(g)
-        if not ip:
-            sys.stderr.write("  %-24s running, no address yet -- not converged\n" % g)
-            ok = False
-            continue
-        guest = Guest(host, g, ip)
+        guest = Guest(host, g, vm.guest_of(vm.vm(g)))
         if not guest.write_deploy_keys():
             sys.stderr.write("  %-24s FAILED -- its ssh config was not rewritten\n" % g)
             ok = False
@@ -1061,27 +1062,23 @@ def vm_push_keys_converge(root, machine, action, env=None):
 
 
 def vm_push_agent_keys(root, machine, env=None):
-    vm = _guests(root, machine, env)
-    if vm is None:
-        return None
-    host = Host(vm)
+    host = Host(_vm(root, machine, env))
     return len(host.secrets.agent_list(host.agent_sock()))
 
 
 def vm_push_keys_state(root, machine, env=None):
     """(guest, state, what it reaches) per guest; a stopped one is reported, never started."""
-    vm = _guests(root, machine, env)
-    if vm is None:
+    vm = _vm(root, machine, env)
+    if not vm.vm_store():
         return []
     host = Host(vm)
     n = len(host.secrets.agent_list(host.agent_sock()))
     rows = []
     for g in vm.workspaces():
         state = vm.info(g) or "unknown"
-        ip = vm.ip(g) if state == "running" else None
-        if not ip:
+        if state != "running":
             rows.append((g, state, ""))
-        elif n and vm.guest_at(ip).run(["test", "-S", vm.agent_sock()]).ok:
+        elif n and vm.guest_of(vm.vm(g)).run(["test", "-S", vm.agent_sock()]).ok:
             rows.append((g, "running", "%d key(s) through the agent on this host" % n))
         else:
             rows.append((g, "running", ""))

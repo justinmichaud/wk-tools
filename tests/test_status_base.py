@@ -1,11 +1,7 @@
-"""The base a workspace tracks: the upstream WebKit line a checkout's HEAD
-descends from (targets.UPSTREAM_LINE, run inside the workspace by `wk ls`
-and `wk status`), against real disposable repositories; an image
-workspace's base from the profile conf this checkout ships; and the SDK
-image's freshness as the renderer words it.
-
-Run: python3 tests/run.py -k tests.test_status_base
-"""
+"""The base a workspace tracks: the upstream WebKit line a checkout's HEAD descends from (targets.UPSTREAM_LINE,
+run inside the workspace by `wk ls` and `wk status`), against real disposable repositories; an image
+workspace's base from the profile conf this checkout ships; and the SDK image's freshness as the renderer
+words it."""
 import json
 import re
 import subprocess
@@ -44,77 +40,56 @@ def upstream_line(repo):
     return cp.stdout.strip()
 
 
-class TestUpstreamLineFromATrackingBranch(unittest.TestCase):
+class TestUpstreamLine(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="wk-base-")
+        self.addCleanup(tmp.cleanup)
+        self.repo = Path(tmp.name) / "r"
+        _init_repo(self.repo)
+
+    def track(self, branch, remote, ref):
+        _git(self.repo, "checkout", "-qB", branch)
+        _git(self.repo, "remote", "add", remote, "https://example.invalid/%s.git" % remote)
+        _git(self.repo, "update-ref", "refs/remotes/%s/%s" % (remote, ref), "HEAD")
+        _git(self.repo, "branch", "--set-upstream-to=%s/%s" % (remote, ref), branch)
+
     def test_tracking_origin_main_is_main(self):
-        with tempfile.TemporaryDirectory(prefix="wk-base-") as tmp:
-            repo = Path(tmp) / "r"
-            _init_repo(repo)
-            _git(repo, "remote", "add", "origin", "https://example.invalid/WebKit.git")
-            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
-            _git(repo, "branch", "--set-upstream-to=origin/main", "main")
-            self.assertEqual(upstream_line(repo), "main")
+        self.track("main", "origin", "main")
+        self.assertEqual(upstream_line(self.repo), "main")
 
     def test_tracking_a_release_branch_through_a_fork_remote_is_the_release(self):
-        with tempfile.TemporaryDirectory(prefix="wk-base-") as tmp:
-            repo = Path(tmp) / "r"
-            _init_repo(repo)
-            _git(repo, "checkout", "-qb", "work")
-            _git(repo, "remote", "add", "wpe", "https://example.invalid/wpe.git")
-            _git(repo, "update-ref", "refs/remotes/wpe/webkitglib/2.52", "HEAD")
-            _git(repo, "branch", "--set-upstream-to=wpe/webkitglib/2.52", "work")
-            self.assertEqual(upstream_line(repo), "2.52")
-
-
-class TestUpstreamLineWithoutATrackingBranch(unittest.TestCase):
-    def test_detached_with_nothing_reachable_is_unknown(self):
-        with tempfile.TemporaryDirectory(prefix="wk-base-") as tmp:
-            repo = Path(tmp) / "r"
-            _init_repo(repo)
-            _git(repo, "checkout", "-q", "--detach", "HEAD")
-            self.assertEqual(upstream_line(repo), "?")
-
-    def test_detached_but_reachable_from_two_releases_picks_the_newer(self):
-        with tempfile.TemporaryDirectory(prefix="wk-base-") as tmp:
-            repo = Path(tmp) / "r"
-            _init_repo(repo)
-            base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
-            (repo / "f").write_text("two\n")
-            _git(repo, "commit", "-qam", "second")
-            _git(repo, "update-ref", "refs/remotes/origin/webkitglib/2.46", base)
-            (repo / "f").write_text("three\n")
-            _git(repo, "commit", "-qam", "third")
-            _git(repo, "update-ref", "refs/remotes/origin/webkitglib/2.52", "HEAD")
-            _git(repo, "checkout", "-q", "--detach", base)
-            self.assertEqual(upstream_line(repo), "2.52")
+        self.track("work", "wpe", "webkitglib/2.52")
+        self.assertEqual(upstream_line(self.repo), "2.52")
 
     def test_a_personal_fork_branch_with_nothing_reachable_is_unknown(self):
-        with tempfile.TemporaryDirectory(prefix="wk-base-") as tmp:
-            repo = Path(tmp) / "r"
-            _init_repo(repo)
-            _git(repo, "checkout", "-qb", "eng/stringimpl-2.38")
-            _git(repo, "remote", "add", "fork", "https://example.invalid/fork.git")
-            _git(repo, "update-ref", "refs/remotes/fork/eng/stringimpl-2.38", "HEAD")
-            _git(repo, "branch", "--set-upstream-to=fork/eng/stringimpl-2.38", "eng/stringimpl-2.38")
-            self.assertEqual(upstream_line(repo), "?")
+        self.track("eng/stringimpl-2.38", "fork", "eng/stringimpl-2.38")
+        self.assertEqual(upstream_line(self.repo), "?")
+
+    def test_detached_with_nothing_reachable_is_unknown(self):
+        _git(self.repo, "checkout", "-q", "--detach", "HEAD")
+        self.assertEqual(upstream_line(self.repo), "?")
+
+    def test_detached_but_reachable_from_two_releases_picks_the_newer(self):
+        repo = self.repo
+        base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        (repo / "f").write_text("two\n")
+        _git(repo, "commit", "-qam", "second")
+        _git(repo, "update-ref", "refs/remotes/origin/webkitglib/2.46", base)
+        (repo / "f").write_text("three\n")
+        _git(repo, "commit", "-qam", "third")
+        _git(repo, "update-ref", "refs/remotes/origin/webkitglib/2.52", "HEAD")
+        _git(repo, "checkout", "-q", "--detach", base)
+        self.assertEqual(upstream_line(repo), "2.52")
 
 
 class TestImageBase(unittest.TestCase):
     """An image workspace's base is its profile's own CFG_RELEASE, read from the real conf this checkout ships."""
 
-    def _release_of(self, conf_name):
-        conf = CONFIGS / conf_name
-        self.assertTrue(conf.exists(), "fixture profile missing: %s" % conf)
-        m = re.search(r"^CFG_RELEASE=(\S+)", conf.read_text(), re.M)
-        self.assertIsNotNone(m, "%s has no CFG_RELEASE any more" % conf)
-        return m.group(1)
-
-    def test_a_buildroot_workspace_reads_its_profiles_release(self):
-        profile = "webkit-2.52-buildroot-rpi3-32"
-        self.assertEqual(targets.image_base(str(REPO), "buildroot-" + profile), self._release_of(profile + ".conf"))
-
-    def test_a_yocto_workspace_reads_its_profiles_release(self):
-        profile = "wpewebkit-2.46-yocto-rpi3-32"
-        self.assertEqual(targets.image_base(str(REPO), "yocto-" + profile), self._release_of(profile + ".conf"))
+    def test_an_image_workspace_reads_its_profiles_release(self):
+        for kind, profile in (("buildroot", "webkit-2.52-buildroot-rpi3-32"), ("yocto", "wpewebkit-2.46-yocto-rpi3-32")):
+            with self.subTest(kind=kind):
+                release = re.search(r"^CFG_RELEASE=(\S+)", (CONFIGS / (profile + ".conf")).read_text(), re.M).group(1)
+                self.assertEqual(targets.image_base(str(REPO), "%s-%s" % (kind, profile)), release)
 
     def test_a_plain_checkout_name_is_not_an_image_workspace(self):
         self.assertIsNone(targets.image_base(str(REPO), "stringimpl238"))

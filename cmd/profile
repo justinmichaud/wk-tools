@@ -18,6 +18,9 @@
 #   samply      native sampling with the Firefox Profiler UI: C++ frames, every
 #               thread, the GC and the compiler. Precise about the engine, poor
 #               about JS -- `--jit-dump` gives it JS frame names too.
+#   sysprof     the whole system through sysprof-cli, with JSC's JIT dump and
+#               text markers always on so JS frames are named and phases
+#               marked (Linux ports only).
 #   instruments Apple's Time Profiler through xctrace: samply's job on a Mac,
 #               needing nothing installed. `--mode native` picks this on the
 #               Apple ports and samply everywhere else.
@@ -43,8 +46,8 @@
 #                     the hook `wk gui --lldb ui` uses); web/network/gpu launch
 #                     and attach once the named process appears -- first cut: a
 #                     fixed wait, so it may not be mid-load. Only --mode samply
-#                     attaches; sampling/bytecode set environment the whole tree
-#                     inherits and refuse --process; heaptrack/massif are not
+#                     attaches; sampling/bytecode/sysprof cover the whole tree
+#                     and refuse --process; heaptrack/massif are not
 #                     wired up for a browser (docs/Urgent/HANDOFF-linux-minibrower.md).
 #   --attach <pid|name>
 #                     profile something already running in the workspace
@@ -69,13 +72,11 @@ ROOT = images.root()
 
 from wk import buildconf, decl, targets  # noqa: E402
 from wk.act import Refused, die, dry_run, info, log, warn  # noqa: E402
-from wk.ldpath import prelude  # noqa: E402
-from wk.machine import HAVE, Local, is_linux  # noqa: E402
+from wk.ldpath import perf_events, prelude, require_tool  # noqa: E402
 from wk.store import Store  # noqa: E402
-from wk.sudo import QUIESCE_PRIV as PRIV  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
 
-MODES = ("sampling", "bytecode", "samply", "instruments", "heaptrack", "massif")
+MODES = ("sampling", "bytecode", "samply", "sysprof", "instruments", "heaptrack", "massif")
 
 
 def parse(argv):
@@ -133,10 +134,9 @@ def browser_target(cfg, url, process, process_explicit, mode, args, outdir):
             "    WEBKIT_MINI_BROWSER_PREFIX needs. Owed --\n"
             "    docs/Urgent/HANDOFF-linux-minibrower.md. Use --mode samply against the\n"
             "    browser, or profile the jsc shell instead." % (mode, mode, mode))
-    if process_explicit and mode in ("sampling", "bytecode"):
-        die("--process is meaningless with --mode %s: it sets environment\n"
-            "    variables the whole browser process tree inherits, not a wrapper pointed at\n"
-            "    one process. Drop --process, or use --mode samply to pick one." % mode)
+    if process_explicit and mode in ("sampling", "bytecode", "sysprof"):
+        die("--process is meaningless with --mode %s: it covers the whole browser\n"
+            "    process tree, not one process. Drop --process, or use --mode samply to pick one." % mode)
 
     type_flag = "--%s" % cfg.type.lower()
     launch_env = "WPE_BROWSER=minibrowser"
@@ -163,8 +163,8 @@ def browser_target(cfg, url, process, process_explicit, mode, args, outdir):
 
     subject = "MiniBrowser %s" % url
     mb_prefix = False
-    if mode == "samply":
-        subject += " (process: ui, samply prefixed via WEBKIT_MINI_BROWSER_PREFIX)"
+    if mode in ("samply", "sysprof"):
+        subject += " (process: ui, %s prefixed via WEBKIT_MINI_BROWSER_PREFIX)" % mode
         mb_prefix = True
     return subject, "%s %s" % (launch_env, launch_cmd), mb_prefix
 
@@ -238,6 +238,8 @@ def main(argv, reg=None):
         # jsc takes its options *before* the script: a `--sample` after the file name is silently handed to the script as an argument.
         target_cmd = ""
 
+    if mode == "sysprof":
+        o["markers"] = o["jitdump"] = True
     jsc_env = []
     if o.get("markers"):
         jsc_env.append("JSC_useTextMarkers=1")
@@ -297,6 +299,15 @@ def main(argv, reg=None):
                     "    wk enter %s -- pgrep -f %s" % (name, attach))
         else:
             wrap = "samply record --save-only -o %s --" % shlex.quote(artifact)
+    elif mode == "sysprof":
+        if cfg.xcode():
+            die("sysprof profiles Linux; '%s' is an Apple-port build. Use --mode instruments there." % config)
+        if attach:
+            die("sysprof-cli records a command it launches, and samples the whole system while it\n"
+                "    runs; there is no attach. Use --mode samply to attach to a pid.")
+        needs = "sysprof-cli"
+        artifact = os.path.join(outdir, "capture.syscap")
+        wrap = "sysprof-cli --force %s --" % shlex.quote(artifact)
     elif mode == "instruments":
         if not cfg.xcode():
             die("xctrace profiles Mach-O processes on macOS; '%s' is a %s\n"
@@ -339,16 +350,9 @@ def main(argv, reg=None):
                 "    Build it first:  wk build %s %s" % (os.path.basename(bin_path), bin_path, name, config))
 
     if needs and not dry_run():
-        if not target.exec(name, list(HAVE) + [needs]).ok:
-            die("%s is not installed in '%s'.\n"
-                "    It is provisioning, not a per-run step -- see the provisioning half of\n"
-                "    docs/Urgent/HANDOFF-profile.md. Until that lands:\n"
-                "        wk enter %s     and install it there, or\n"
-                "        wk profile %s --mode sampling   which needs no tools at all." % (needs, name, name, name))
-
-    # samply reads the kernel's perf events, refused by the default paranoia level; the sysctl is not namespaced, so a container cannot set it, which reads from inside as a samply permission problem.
-    if mode == "samply" and not dry_run():
-        _check_perf_paranoid(target, name)
+        require_tool(target, name, needs)
+    if mode in ("samply", "sysprof") and not dry_run():
+        perf_events(target, name, mode)
 
     if not target_cmd:
         target_cmd = shlex.quote(bin_path) + (" " + jsc_flags if jsc_flags else "")
@@ -400,32 +404,6 @@ def main(argv, reg=None):
     return 0
 
 
-def _check_perf_paranoid(target, name):
-    r = target.exec(name, ["cat", "/proc/sys/kernel/perf_event_paranoid"])
-    par = "".join(c for c in r.out if c.isdigit())
-    if par and int(par) > 1 and is_linux() and os.access(PRIV, os.X_OK):
-        info("perf_event_paranoid is %s on this host -- asking the quiesce helper to unrestrict it" % par)
-        Local().act_run(["sudo", "-n", PRIV, "perf-on"])
-        r = target.exec(name, ["cat", "/proc/sys/kernel/perf_event_paranoid"])
-        par = "".join(c for c in r.out if c.isdigit())
-    if par and int(par) > 1:
-        if not is_linux():
-            die("perf_event_paranoid is %s in '%s', and samply needs 1 or less.\n"
-                "    It is a host setting and cannot be written from inside a workspace (the\n"
-                "    sysctl is not namespaced -- sudo in there fails with 'permission denied on\n"
-                "    key'). On the machine that runs the workspace:\n"
-                "        echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid\n"
-                "    On a booted benchmark image it is set already." % (par, name))
-        if not os.access(PRIV, os.X_OK):
-            die("perf_event_paranoid is %s in '%s', and samply needs 1 or less.\n"
-                "    The privileged helper that can lower it is not installed on this host.\n"
-                "    Remedy:  ./setup --stage quiesce" % (par, name))
-        die("perf_event_paranoid is %s in '%s', and samply needs 1 or less.\n"
-            "    Asking the quiesce helper ('%s perf-on') did not bring it down --\n"
-            "    passwordless sudo is likely not set up for it.\n"
-            "    Remedy:  ./setup --stage quiesce" % (par, name, PRIV))
-
-
 def info_lines_dry(name, tname, config, subject, bin_path, bin_present, outdir, cmd, post, mode):
     info("dry run -- nothing was profiled")
     built = ("built: " if bin_present else "NOT BUILT: ") + bin_path if bin_path else ""
@@ -446,6 +424,9 @@ def closing_lines(mode, artifact, name):
         log("  view it:  samply load %s          (in the workspace)" % artifact)
         log("            or --fetch it here and open it at profiler.firefox.com --")
         log("            the file is self-contained and the site uploads nothing")
+    elif mode == "sysprof":
+        log("  view it:  sysprof %s            (in the workspace), or --fetch it" % artifact)
+        log("            and open it in Sysprof here; JS frames are named from the JIT dump beside it")
     elif mode == "instruments":
         log("  view it:  open %s                 (on the machine that has it)" % artifact)
         log("            --fetch brings the whole .trace bundle here (pull_dir")

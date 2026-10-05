@@ -94,6 +94,7 @@ def linux_backup(machine, root):
 
 def _refreshed_defaults_line(machine, line):
     domain, key, kind = line.split()[:3]
+    reason = line.split(None, 4)[4:]
     r = machine.run(["defaults", "read", domain, key])
     cur = r.out.strip() if r.ok else ""
     if not cur:
@@ -101,7 +102,7 @@ def _refreshed_defaults_line(machine, line):
         return line
     if kind == "bool":
         cur = {"1": "true", "0": "false"}.get(cur, cur)
-    return "%s %s %s %s" % (domain, key, kind, cur)
+    return " ".join([domain, key, kind, cur] + reason)
 
 
 def macos_backup(machine, root):

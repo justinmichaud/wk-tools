@@ -57,6 +57,9 @@ BR2_PACKAGE_BITSTREAM_VERA=y
 BR2_PACKAGE_RPI_BT_FIRMWARE=y
 BR2_PACKAGE_RPI_FIRMWARE=y
 BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI4=y
+# The fork's newest firmware (raspberrypi/firmware 52185fdd, 2023-03-06; tree-patches/0002 opens the knob to the Pi 4),
+# not the 2020 one its .mk picks with libdrm: this image boots a rev 1.4/1.5 board on its own firmware.
+BR2_PACKAGE_RPI_FIRMWARE_3BPLUSNEW=y
 # No gst-omx and no vcdbg: each drags in rpi-userland, whose libEGL.so and
 # libGLESv2.so are real files in /usr/lib that collide with mesa's symlinks
 # (the build dies at mesa's staging install), and the firmware media/GL

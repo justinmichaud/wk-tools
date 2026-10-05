@@ -147,7 +147,10 @@ class Secrets:
         return self.check_value(name, value, "--path", path)
 
     def agent_secret_remedy(self, name):
-        """What this machine's store owes a workspace missing <name>."""
+        """What this machine's store owes a workspace missing <name>; a `file` row is the Claude CLI's own login, made in a workspace."""
+        if any(r[0] == name and r[4] == "file" for r in self.agent_secrets()):
+            return ("no claude.ai login in the directory every workspace here shares: /login in a 'wk ai claude' session "
+                    "makes it, and the Claude CLI renews it")
         if not self.cred_stored(name):
             return "this machine's store holds no %s: 'wk key set %s' puts one there" % (name, name)
         verdict, _, detail = self.cred_verdict(name).partition("\t")

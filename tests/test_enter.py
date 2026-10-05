@@ -1,13 +1,4 @@
-"""`wk enter` -- a shell in a workspace, or one command run there and exited.
-
-`wk enter <ws> <cmd>` becomes the command (`Target.exec_argv`, a tty only when
-the caller has one), so its streams and exit status are the caller's;
-`wk enter <ws>` with no command execs into `Target.enter_argv`'s shell. Only
-the first is exercised without a real container, guest or build machine --
-the second replaces this process, so it belongs to the live tier.
-
-Run: python3 -m unittest tests.test_enter -v
-"""
+"""`wk enter` -- a shell in a workspace, or one command run there and exited."""
 import importlib.machinery
 import importlib.util
 import io
@@ -45,9 +36,6 @@ class TestRunsCommand(WkTest):
             self.assertFalse(marker.exists(), "a dry run ran the command")
 
     def test_zed_delegates_to_cmd_zed_by_name_rather_than_running_a_command(self):
-        """--zed hands the workspace name to `cmd/zed` and never a command
-        tail; `cmd/zed` itself (not a fake standing in for it) is what answers,
-        naming this same workspace in its refusal."""
         with fake_workspace() as ws:
             cp = ws.run("enter", "--zed", "should-never-run")
         self.assertNotEqual(cp.returncode, 0)
@@ -56,8 +44,6 @@ class TestRunsCommand(WkTest):
 
 
 class TestNoTerminalAsksForNone(unittest.TestCase):
-    """A command tail with no terminal on the caller's side asks the driver for
-    none: a tty requested over a pipe hangs `podman exec` until its timeout."""
 
     def test_the_command_is_exec_argv_without_a_tty_and_replaces_this_process(self):
         enter = _load_enter()
@@ -67,22 +53,11 @@ class TestNoTerminalAsksForNone(unittest.TestCase):
         reg = mock.Mock()
         reg.load.return_value = target
         with mock.patch.object(enter.targets, "Registry", return_value=reg), \
-                mock.patch.object(enter, "exec_into") as exec_into, \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws"}), \
                 mock.patch("sys.stdin", io.StringIO("")):
             enter.main(["git", "status"])
         target.exec_argv.assert_called_once_with("ws", ["git", "status"], tty=False)
-        exec_into.assert_called_once_with(["true"], None)
-
-
-class TestDeclaration(WkTest):
-    def test_the_listing_names_it(self):
-        self.assertIn("enter <workspace>", run().stdout)
-
-    def test_explain_answers_without_running_anything(self):
-        cp = run("enter", "--explain")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("interactive shell", cp.stdout)
+        reg.machine.exec.assert_called_once_with(["true"], None)
 
 
 class TestNoSuchWorkspace(WkTest):

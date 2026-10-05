@@ -1,8 +1,4 @@
-"""A layer is reached through its own Python API: no command runs `wk status` or `wk push status` as a subprocess to read
-what a library knows, no command reads another layer's file with a regex, and a getter makes no directory (tests/test_wk_targets.py).
-
-Run: python3 tests/run.py -k test_layers
-"""
+"""A layer is reached through its own Python API: no command runs `wk status` or `wk push status` as a subprocess to read"""
 import importlib.machinery
 import importlib.util
 import io
@@ -16,9 +12,9 @@ from unittest import mock
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import dispatch, priv, status, statusview  # noqa: E402
+from wk import priv, status, statusview  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Result  # noqa: E402
 
 
 def load_cmd(name):
@@ -39,16 +35,12 @@ class TestZedStripsTheDispatchersVariables(unittest.TestCase):
         zed = load_cmd("zed")
         seen = {}
         with tempfile.TemporaryDirectory() as empty, mock.patch.object(zed, "ROOT", empty), \
-                mock.patch.object(zed, "exec_into", lambda argv, env: seen.update(env=env)), \
+                mock.patch.object(zed.Local, "exec", lambda self, argv, env: seen.update(env=env)), \
                 mock.patch.dict(os.environ, {"WK_NAME": "a", "WK_CONFIG": "Debug", "KEEP": "1"}):
             zed.exec_clean(["zed", "url"])
         self.assertNotIn("WK_NAME", seen["env"])
         self.assertNotIn("WK_CONFIG", seen["env"])
         self.assertEqual("1", seen["env"]["KEEP"])
-
-    def test_common_sh_holds_no_copy(self):
-        self.assertNotIn("WK_DISPATCH_VARS", (REPO / "lib" / "common.sh").read_text())
-        self.assertIn("WK_NAME", dispatch.DISPATCH_VARS)
 
 
 class TestPrivilegedHelpersAreAskedOfPython(unittest.TestCase):

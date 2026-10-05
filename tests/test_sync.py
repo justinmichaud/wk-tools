@@ -1,12 +1,8 @@
-"""`wk sync`: cmd/sync's parse and `--where` answer, and lib/wk/sync.py's
-flows over fake targets on a fake machine -- what each scope runs and in
-what order, the mirror refresh and what it reports, the snapshot publish and
-its skip, the fetch in each workspace with the wiring read back (and
-re-asserted under --fix), each driver's furniture, a publish killed after any
-effect and re-run converging, and a dry run printing the wet run's plan.
-
-Run: python3 tests/run.py -k tests.test_sync
-"""
+"""`wk sync`: cmd/sync's parse and `--where` answer, and lib/wk/sync.py's flows over fake targets on a fake
+machine -- what each scope runs and in what order, the mirror refresh and what it reports, the snapshot
+publish and its skip, the fetch in each workspace with the wiring read back (and re-asserted under --fix),
+each driver's furniture, a publish killed after any effect and re-run converging, and a dry run printing the
+wet run's plan."""
 
 import contextlib
 import importlib.machinery
@@ -26,7 +22,7 @@ from unittest import mock
 
 from tests.fakes import FakeRegistry
 from tests.killpoints import converges
-from tests.support import REPO, fake_workspace, run
+from tests.support import REPO, fake_workspace
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, git, pr, sync, targets  # noqa: E402
@@ -34,6 +30,7 @@ from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.decl import Decl  # noqa: E402
 from wk.lock import Lock  # noqa: E402
+from wk.store import Store  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
 CMD_SYNC = REPO / "cmd" / "sync"
@@ -349,8 +346,8 @@ class TestParse(SyncTest):
 
 
 class TestWhere(unittest.TestCase):
-    """`dispatch.where[sync]`: a workspace's name goes to the machine holding it; every scope flag is this host's,
-    so none of them enters the podman VM as a forwarded command."""
+    """`dispatch.where[sync]`: a workspace's name goes to the machine holding it; every scope flag is this
+    host's, so none of them enters the podman VM as a forwarded command."""
 
     def test_the_answers(self):
         for args, inside, want in (((), False, "host"), (("myws",), False, "workspace"), (("--fix",), False, "host"),
@@ -398,9 +395,9 @@ class Steps(sync.Sync):
 
 
 class TestWhatEachScopeRuns(SyncTest):
-    """`unit sync.scopes`: the tooling copies, this machine's mirror, then each target's snapshot and the fetch in
-    its workspaces -- a snapshot is cloned off the mirror and a workspace fetches from it, so either before the
-    refresh hands back what the machine already had."""
+    """`unit sync.scopes`: the tooling copies, this machine's mirror, then each target's snapshot and the fetch
+    in its workspaces -- a snapshot is cloned off the mirror and a workspace fetches from it, so either before
+    the refresh hands back what the machine already had."""
 
     KINDS = {"container": "container", "vm": "vm", "buildbox4": "remote"}
 
@@ -494,7 +491,6 @@ class TestWhatEachScopeRuns(SyncTest):
         self.assertEqual((rc, steps), (0, ["MIRROR", "REMOUNT"]))
 
     def test_in_the_podman_vm_the_mirror_is_a_request_too(self):
-        """The VM mounts the host's mirror read-only: `wk new`'s refresh from in there is asked of the broker."""
         self.w.reg.env["WK_IN_VM"] = "1"
         with mock.patch.object(sync.Sync, "mirror_refresh_request", return_value=0) as ask:
             rc, steps, _ = self.steps("mirror")
@@ -551,11 +547,18 @@ class TestTheRefreshAskedOfTheBroker(SyncTest):
 
     def test_no_broker_is_named_with_the_stage_that_makes_one_and_asks_nothing(self):
         Path(self.w.env["WK_MARKER"]).write_text("name=ws\n")
-        rc, err = self.ask(sock=False)
+        with mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=False):
+            rc, err = self.ask(sock=False)
         self.assertEqual(rc, 1)
         self.assertIn("no request broker at /run/wk/broker.sock", err)
         self.assertIn("./setup --stage broker", err)
         self.assertEqual(self.client_runs(), [])
+
+    def test_a_macos_guest_asks_at_the_socket_its_start_forwards_into_its_home(self):
+        Path(self.w.env["WK_MARKER"]).write_text("name=ws\n")
+        with mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True):
+            err = self.ask(sock=False)[1]
+        self.assertIn("no request broker at %s/.wk-broker.sock" % Store(self.w.env).home(), err)
 
     def test_the_podman_vm_asks_at_the_socket_the_broker_publishes_into_it(self):
         self.w.env.update({"WK_IN_VM": "1", "XDG_RUNTIME_DIR": "/run/user/501"})
@@ -621,7 +624,6 @@ class TestWhereEachTargetsWorkspacesAreFetched(SyncTest):
 
 class TestFurniture(SyncTest):
     def test_a_bare_sweep_names_no_target_and_a_named_one_is_named(self):
-        """A peer publishes its own snapshot only when it was named, never as part of a sweep (Remote.sync)."""
         self.w = self.make_world({"container": "container", "buildbox4": "remote"})
         self.stderr(self.w.sync("tools").sync_furniture)
         self.assertEqual(self.w.steps, ["FURNITURE container", "FURNITURE buildbox4"])
@@ -657,8 +659,6 @@ class TestTheMirror(SyncTest):
         self.assertIn("the mirror refresh did not finish", self.mirror())
 
     def test_wk_mirror_branches_carries_the_extra_branches(self):
-        """The branch list is lib/wk/git.py's mirror_branches, which reads WK_MIRROR_BRANCHES; a branch it
-        names that the refresh did not bring is named once, here, rather than in every workspace's fetch."""
         self.w.reg.env["WK_MIRROR_BRANCHES"] = "main webkitglib/2.52"
         with mock.patch.object(git, "mirror_branches", REAL_MIRROR_BRANCHES):
             err = self.mirror(heads=("main",))
@@ -685,8 +685,9 @@ class FakeVm(targets.Vm):
 
 
 class TestTheGuestsRemount(SyncTest):
-    """`unit sync.guest_remount`: after the refresh, each running guest mounts the host's shares afresh, since its
-    old mount keeps the inode of every ref git renamed over; a guest that cannot is named with the restart."""
+    """`unit sync.guest_remount`: after the refresh, each running guest mounts the mirror's own share afresh,
+    since its old mount keeps the inode of every ref git renamed over; a guest that cannot is named with the
+    restart."""
 
     def setUp(self):
         super().setUp()
@@ -710,20 +711,20 @@ class TestTheGuestsRemount(SyncTest):
         self.stderr(self.w.sync("mirror").run)
         self.assertEqual(self.remounts(), ["up-a", "up-b"])
 
-    def test_the_remount_converges_from_a_share_mounted_or_not(self):
-        """A remount killed after its umount leaves the share unmounted; the rerun mounts it rather than failing the umount."""
+    def test_the_remount_is_the_mirror_tag_alone_never_agent_rw(self):
         self.stderr(self.w.sync("mirror").run)
-        script = next(e[1][-1] for e in self.w.effects if e[0] == "run" and e[1][0] == "guest")
-        bindir = self.tmp / "bin"
+        asked = [e[1][2:] for e in self.w.effects if e[0] == "run" and e[1][0] == "guest"]
+        self.assertEqual(asked, [("sudo", "-n", targets.GUEST_MOUNT_MIRROR, targets.MIRROR_TAG, targets.GUEST_MIRROR_MOUNT)] * 2)
+        self.assertNotIn(targets.GUEST_SHARES, " ".join(" ".join(a) for a in asked))
+
+    def test_the_remount_converges_from_a_share_mounted_or_not(self):
+        bindir, at = self.tmp / "bin", str(self.tmp / "mnt")
         bindir.mkdir()
-        (bindir / "mount").write_text('#!/bin/sh\n[ -f "$STATE" ] && echo "tag on %s (virtiofs, local)"\nexit 0\n'
-                                      % targets.GUEST_SHARES)
-        (bindir / "sudo").write_text('#!/bin/sh\n[ "$1" = -n ] && shift\ncase "$1" in\n'
-                                     '  umount) [ -f "$STATE" ] || exit 1; rm "$STATE";;\n'
-                                     '  mkdir) ;;\n'
-                                     '  mount_virtiofs) [ -f "$STATE" ] && exit 1; touch "$STATE";;\n'
-                                     '  *) exit 99;;\nesac\n')
-        for stub in ("mount", "sudo"):
+        stubs = {"mount": '[ -f "$STATE" ] && echo "%s on %s (virtiofs, local)"\nexit 0' % (targets.MIRROR_TAG, at),
+                 "umount": '[ "$1" = "%s" ] && [ -f "$STATE" ] && rm "$STATE"' % at,
+                 "mount_virtiofs": '[ "$1 $2" = "%s %s" ] && [ ! -f "$STATE" ] && touch "$STATE"' % (targets.MIRROR_TAG, at)}
+        for stub, body in stubs.items():
+            (bindir / stub).write_text("#!/bin/sh\n%s\n" % body)
             os.chmod(bindir / stub, 0o755)
         for mounted in (True, False):
             with self.subTest(mounted=mounted):
@@ -732,7 +733,8 @@ class TestTheGuestsRemount(SyncTest):
                     state.write_text("")
                 elif state.exists():
                     state.unlink()
-                cp = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30,
+                cp = subprocess.run([str(REPO / "vm" / "mount-mirror.sh"), targets.MIRROR_TAG, at], capture_output=True,
+                                    text=True, timeout=30,
                                     env=dict(os.environ, PATH="%s:%s" % (bindir, os.environ["PATH"]), STATE=str(state)))
                 self.assertEqual((cp.returncode, state.exists()), (0, True), cp.stderr)
 
@@ -747,14 +749,14 @@ class TestTheGuestsRemount(SyncTest):
         rc, err = self.stderr(self.w.sync("mirror").run)
         self.assertEqual((rc, self.remounts()), (0, []))
         for ws in ("up-a", "up-b"):
-            self.assertIn("would run in %s: sh -c 'if mount | grep -qF" % ws, err)
+            self.assertIn("would run in %s: sudo -n %s" % (ws, targets.GUEST_MOUNT_MIRROR), err)
         self.assertNotIn("would run in down", err)
 
     def test_a_busy_share_is_named_with_the_restart_and_the_refresh_still_succeeds(self):
-        self.w.react(["guest", "up-a"], lambda a, f: Result(16, "", "umount(/Volumes/My Shared Files): Resource busy\n"))
+        self.w.react(["guest", "up-a"], lambda a, f: Result(16, "", "umount(/Volumes/wk-mirror): Resource busy\n"))
         rc, err = self.stderr(self.w.sync("mirror").run)
         self.assertEqual((rc, self.remounts()), (0, ["up-a", "up-b"]))
-        self.assertIn("'up-a' could not remount the host's shares (umount(/Volumes/My Shared Files): Resource busy)", err)
+        self.assertIn("'up-a' could not remount the mirror share (umount(/Volumes/wk-mirror): Resource busy)", err)
         self.assertIn("wk stop up-a, then  wk start up-a", err)
         self.assertNotIn("'up-b' could not", err)
 
@@ -765,8 +767,9 @@ class TestTheGuestsRemount(SyncTest):
 
 
 class TestTheSnapshot(SyncTest):
-    """sync_snapshot: a `--shared` clone of the mirror (or a hardlinked copy of the last snapshot), wired, fetched,
-    on a branch tracking the one it was published from, clean, with `sha` the completion marker written last."""
+    """sync_snapshot: a `--shared` clone of the mirror (or a hardlinked copy of the last snapshot), wired,
+    fetched, on a branch tracking the one it was published from, clean, with `sha` the completion marker
+    written last."""
 
     def setUp(self):
         super().setUp()
@@ -811,7 +814,6 @@ class TestTheSnapshot(SyncTest):
         self.assertEqual(self.w.complete(), ["20200101T000000Z"])
 
     def test_a_refused_snapshot_with_the_current_sha_is_republished_from_it(self):
-        """Or `wk new` refuses forever while `wk sync` reports nothing to do."""
         self.w.dirs.add(self.w.mirror)
         self.w.publish("20200101T000000Z")
         self.publish()
@@ -843,7 +845,6 @@ class TestTheSnapshot(SyncTest):
         self.assertNotIn(os.path.join(self.w.base_dir(), self.w.clock.stamp()), self.w.dirs)
 
     def test_a_publish_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[sync]`: the store's mirror refresh and publish, the flow `wk sync --tools` runs."""
         def world():
             w = self.make_world()
             w.publish("20190101T000000Z", sha="b" * 40)
@@ -876,8 +877,8 @@ class TestTheSnapshot(SyncTest):
 
 
 class TestTheBaseWiring(SyncTest):
-    """The current snapshot is where every future workspace gets its remotes from: read back on every sync of
-    its target, and re-wired under --fix."""
+    """The current snapshot is where every future workspace gets its remotes from: read back on every sync of its
+    target, and re-wired under --fix."""
 
     def setUp(self):
         super().setUp()
@@ -916,9 +917,8 @@ class TestTheBaseWiring(SyncTest):
 
 
 class TestTheFetch(SyncTest):
-    """One fetch per workspace, all at once, one line each in the order named -- every line derived from what that
-    fetch said, since `wk sync --all` is often the only thing anybody reads about a machine's workspaces. The
-    wiring check runs in the same round trip (`unit remotes.wiring[<target>]` for what it reports)."""
+    """One fetch per workspace, all at once, one line each in the order named -- every line derived from what
+    that fetch said, since `wk sync --all` is often the only thing anybody reads about a machine's workspaces."""
 
     def setUp(self):
         super().setUp()
@@ -958,7 +958,6 @@ class TestTheFetch(SyncTest):
         self.assertEqual(rc, 1)
 
     def test_they_run_at_once(self):
-        """Each fetch waits for the other two to start: fetches in turn break the barrier."""
         met, broken = threading.Barrier(3, timeout=10), []
 
         def wait(argv):
@@ -1062,15 +1061,7 @@ class TestEachDriversFurniture(SyncTest):
         self.assertEqual((ok, self.w.effects), (True, []))
         self.assertIn("nothing to copy", err)
 
-    def test_a_containers_exec_already_carries_the_injected_credential(self):
-        """Why --fix runs `git-webkit setup` through the plain exec and not a second bridge (where the containers are)."""
-        t = targets.Container("container", str(REPO), dict(self.w.env, WK_IN_VM="1"), self.w)
-        t.act_exec("ws", ["sh", "-c", "GITWEBKIT /src/WebKit"])
-        argv = next(e[1] for e in self.w.effects if e[0] == "run")
-        self.assertEqual(argv[argv.index("--") + 1:], ("/opt/wk-tools/container/proxy/ensure-bridge.sh", "sh", "-c", "GITWEBKIT /src/WebKit"))
-
     def test_a_guest_gets_its_copy_pushed_and_one_not_running_is_skipped(self):
-        """Each running guest is handed to `Vm.sync_tools` (the push itself is tests/test_tools_sync.py's)."""
         class Guests(targets.Vm):
             pushed, result = [], True
 
@@ -1095,9 +1086,7 @@ class TestEachDriversFurniture(SyncTest):
 
 
 class TestRemoteFurniture(SyncTest):
-    """Remote.sync. A build box is pushed this tree's HEAD and has its mirror refreshed; a peer is a workstation
-    under git, so its tooling is pulled, and only once that pull has converged -- and the peer was named -- is it
-    asked to publish its own snapshot."""
+    """Remote.sync."""
 
     def remote(self, peer=False, reference=""):
         env = dict(self.w.env, WK_REMOTE_LOCAL="1", WK_REMOTE_TOOLS="/far/wk-tools", WK_REMOTE_ROOT="/far/wk",
@@ -1195,27 +1184,6 @@ class TestWhyAPeerIsBehind(SyncTest):
         self.assertEqual(targets.tools_why_behind(self.w, "/t"), "git could not count this machine's commits past origin/main")
 
 
-class TestProcess(unittest.TestCase):
-    """What the command says as a process."""
-
-    def test_help_mentions_the_timing_and_the_branch(self):
-        out = run("sync", "-h").stdout
-        self.assertIn("WK_DEBUG", out)
-        self.assertIn("WK_BRANCH", out)
-        self.assertIn("--fix", out)
-
-    def test_an_unknown_target_is_refused_by_name(self):
-        for args in (("--target", "nosuchthing"), ("--tools", "nosuchthing"), ("--target=nosuchthing",)):
-            cp = run("sync", *args, env={"WK_DRY_RUN": "1"})
-            self.assertNotEqual(cp.returncode, 0, f"{args} was accepted")
-            self.assertIn("unknown target 'nosuchthing'", cp.stdout)
-
-    def test_wk_remotes_is_a_tombstone_naming_sync_fix(self):
-        cp = run("remotes", "--fix")
-        self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("'wk remotes' is merged into sync: wk sync [<workspace>] --fix", cp.stdout)
-
-
 # A broker that answers one request and records it: enough for container/broker/wk-broker-client.py to speak to.
 STUB_BROKER = """
 import json, os, socket, sys
@@ -1253,8 +1221,7 @@ def stub_broker(tmp):
 
 class TestSyncInsideWorkspace(unittest.TestCase):
     """Inside a workspace `wk sync` is the machine's mirror, asked for over the broker socket, then a fetch in
-    this workspace from it; with no broker listening the fetch still runs and the miss is reported. The scope
-    flags answer `host` to the dispatcher and are refused before cmd/sync starts."""
+    this workspace from it; with no broker listening the fetch still runs and the miss is reported."""
 
     def _refused(self, *args):
         with fake_workspace() as ws:

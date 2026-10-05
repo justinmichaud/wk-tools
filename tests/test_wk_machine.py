@@ -1,10 +1,4 @@
-"""lib/wk/machine.py: the seam every effect goes through. The fake answers
-as told and records each effect; the local machine does the real thing; both
-honour --dry-run by printing and changing nothing; and every transport
-implements the whole interface.
-
-Run: python3 tests/run.py -k tests.test_wk_machine
-"""
+"""lib/wk/machine.py: the seam every effect goes through, over the local, fake, ssh and tart transports."""
 import io
 import os
 import re
@@ -61,9 +55,7 @@ class MachineTest(unittest.TestCase):
 
 
 class LockEffectsConformance:
-    """symlink/readlink/rename/remove_now/mkdir_now, over whatever `self.m`
-    and `self.path` a subclass gives: the primitives `Lock` takes its
-    exclusion from, real under --dry-run since a lock is not workspace mutation."""
+    """The primitives `Lock` takes its exclusion from, real under --dry-run, over a subclass's `self.m`/`self.path`."""
 
     def test_symlink_is_atomic_create_or_fail_and_readlink_reads_it_back(self):
         p = self.path("a")
@@ -97,10 +89,7 @@ class LockEffectsConformance:
 
 
 class CopyConformance:
-    """copy_in/copy_out/copy_tree_in/copy_tree_out, over whatever `self.m`,
-    `self.path` (a path as this machine sees it) and `self.real_tmp` (a real
-    directory on the driving host) a subclass gives: the one `Machine` copy
-    a workspace, a board and a card all move bytes through."""
+    """The copies, over a subclass's `self.m`, `self.path` (on that machine) and `self.real_tmp` (on this host)."""
 
     def test_a_file_round_trips_byte_for_byte(self):
         blob = os.urandom(4096)
@@ -149,8 +138,7 @@ class CopyConformance:
 
 
 class LogReadConformance:
-    """mtime/read_bytes, over the `self.m`, `self.path` and `self.put(path, data, mtime)` a subclass gives: how a
-    task's log is read on the machine that holds it."""
+    """mtime/read_bytes, over a subclass's `self.m`, `self.path` and `self.put(path, data, mtime)`."""
 
     def test_read_bytes_is_the_slice_from_start(self):
         p = self.path("log")
@@ -196,6 +184,16 @@ class TestLocal(MachineTest, LockEffectsConformance, CopyConformance, LogReadCon
     def put(self, path, data, mtime):
         Path(path).write_bytes(data)
         os.utime(path, (mtime, mtime))
+
+    def test_a_started_child_is_watched_to_its_status(self):
+        with open(self.path("log"), "wb") as out:
+            p = self.m.start(["sh", "-c", "echo hi; exit 3"], out)
+        self.assertEqual((p.wait(), Path(self.path("log")).read_text()), (3, "hi\n"))
+
+    def test_exec_replaces_this_process_with_the_command(self):
+        with mock.patch("os.execvp") as ex:
+            self.m.exec(["true", "x"])
+        ex.assert_called_once_with("true", ["true", "x"])
 
     def test_run_captures_status_and_both_streams(self):
         r = self.m.run(["sh", "-c", "echo out; echo err >&2; exit 3"])
@@ -263,7 +261,6 @@ class TestLocal(MachineTest, LockEffectsConformance, CopyConformance, LogReadCon
         self.assertFalse(self.m.kill(999999))
 
     def test_a_spawned_driver_that_exited_is_not_alive(self):
-        """`wk new`'s front follows the driver it spawned; its unreaped zombie answered kill(pid, 0) for an hour."""
         import time
         pid = self.m.spawn(["true"], os.path.join(self.tmp, "log"))
         deadline = time.monotonic() + 0.4
@@ -292,7 +289,6 @@ class TestLocal(MachineTest, LockEffectsConformance, CopyConformance, LogReadCon
         self.assertTrue(r.ok)
 
     def test_a_streamed_effect_reaches_stderr_while_it_runs(self):
-        """`unit machine.streams_long_effects`: the child waits for its own output to be seen, so a capture that prints at the end never lets it finish."""
         log, flag, done = self.path("log"), self.path("flag"), threading.Event()
         script = ('echo out; echo err >&2; i=0; while [ ! -e "$1" ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done; test -e "$1"')
 
@@ -333,6 +329,22 @@ class TestFake(MachineTest, LockEffectsConformance, CopyConformance, LogReadConf
         self.m.files[path] = data
         self.m.mtimes[path] = mtime
 
+    def test_a_started_child_writes_its_answer_and_has_finished(self):
+        self.m.answer(["make"], rc=2, out="built\n")
+        out = io.BytesIO()
+        p = self.m.start(["make", "all"], out)
+        self.assertEqual((p.poll(), p.wait(), out.getvalue()), (2, 2, b"built\n"))
+        self.assertEqual([("start", ("make", "all"))], self.m.effects)
+
+    def test_an_exec_is_an_effect_and_a_dry_run_prints_it_and_ends(self):
+        self.m.exec(["gh", "pr"], "/src")
+        self.assertEqual([("exec", ("gh", "pr"), "/src")], self.m.effects)
+        os.environ["WK_DRY_RUN"] = "1"
+        buf = io.StringIO()
+        with redirect_stderr(buf), self.assertRaises(SystemExit):
+            self.m.exec(["gh", "pr"], "/src")
+        self.assertEqual(("would run: cd /src && gh pr\n", 1), (buf.getvalue(), len(self.m.effects)))
+
     def test_the_longest_registered_prefix_answers(self):
         self.m.answer(["podman"], rc=1, err="generic")
         self.m.answer(["podman", "ps"], rc=0, out="wk-a\n")
@@ -362,8 +374,6 @@ class TestFake(MachineTest, LockEffectsConformance, CopyConformance, LogReadConf
         self.assertEqual([e[0] for e in self.m.effects], ["write", "spawn", "kill", "remove"])
 
     def test_copy_in_is_one_effect_not_two(self):
-        """copy_in used to also call `write`, so one copy was two kill points a --dry-run
-        rerun could land between; it sets `self.files` directly instead."""
         src = os.path.join(self.real_tmp, "in.dat")
         with open(src, "wb") as f:
             f.write(b"payload")
@@ -427,6 +437,29 @@ class TestFake(MachineTest, LockEffectsConformance, CopyConformance, LogReadConf
         self.assertEqual(self.m.applied, 0)
 
 
+class TestTartExec(MachineTest, CopyConformance):
+    """tar or cat on both ends of `tart exec -i`, against a tart that runs the guest's half on this host."""
+
+    def setUp(self):
+        super().setUp()
+        self.real_tmp = tempfile.mkdtemp(prefix="wk-test-tart-copy-")
+        self.addCleanup(subprocess.run, ["rm", "-rf", self.real_tmp])
+        tart = Path(self.real_tmp) / "tart"
+        tart.write_text('#!/bin/sh\n[ "$1" = exec ] || exit 2; shift\nwhile [ "${1#-}" != "$1" ]; do shift; done\nshift\nexec "$@"\n')
+        tart.chmod(0o755)
+        os.makedirs(os.path.join(self.real_tmp, "guest"))
+        self.m = machine.TartExec(str(tart), "wk-demo", via=machine.Local())
+
+    def path(self, *parts):
+        return os.path.join(self.real_tmp, "guest", *parts)
+
+    def test_a_failed_copy_raises_and_a_port_forward_is_refused(self):
+        with self.assertRaises(OSError):
+            self.m.copy_out(self.path("absent"), os.path.join(self.real_tmp, "out"))
+        with self.assertRaises(NotImplementedError):
+            self.m.forward(1234)
+
+
 class TestHave(MachineTest):
     def test_here_a_tool_is_one_on_path(self):
         self.assertTrue(machine.Local().have("sh"))
@@ -459,8 +492,6 @@ class TestReplaceFile(unittest.TestCase):
 
 
 class TestSshLogReads(MachineTest, LogReadConformance):
-    """The far-side commands, run by this host's own sh: what the login shell on the far side is handed."""
-
     def setUp(self):
         super().setUp()
         self.tmp = tempfile.mkdtemp(prefix="wk-test-machine-ssh-")
@@ -497,8 +528,18 @@ class TestSsh(MachineTest):
         self.assertIn("kill -0 42", shlex.split(seen[2][-1])[-1])
         self.assertIn("nohup sleep 9 > /tmp/log", shlex.split(seen[3][-1])[-1])
 
+    def test_every_probe_runs_under_a_login_shell(self):
+        """A non-interactive ssh's PATH lacks what a login shell finds (tart in ~/.local/bin)."""
+        for name, call in (("run", lambda m: m.run(["tart", "list"])), ("have", lambda m: m.have("tart")),
+                           ("exists", lambda m: m.exists("/x"))):
+            with self.subTest(call=name):
+                via = machine.Fake("here")
+                via.react(["ssh"], lambda argv, f: machine.Result(0, ""))
+                call(machine.Ssh("box", via=via))
+                sent = [e[1][-1] for e in via.effects if e[0] == "run"]
+                self.assertTrue(sent and all(s.startswith('"$SHELL" -lc ') for s in sent), sent)
+
     def test_an_effect_over_ssh_is_an_effect_on_the_machine_that_drives_it(self):
-        """`unit machine.ssh_effects_are_effects`: a kill point on `via` lands inside a remote flow, and never on a read."""
         via = machine.Fake("here")
         via.answer(["ssh"])
         m = machine.Ssh("box.example", timeout=3, via=via)
@@ -607,8 +648,6 @@ class TestSsh(MachineTest):
 
 
 class TestForward(MachineTest):
-    """`forward(port)`: the far side's 127.0.0.1:<port> is this host's for exactly as long as the context is held."""
-
     def test_ssh_holds_one_reverse_forward_and_kills_it_on_the_way_out(self):
         via = machine.Fake("here")
         m = machine.Ssh("box.example", opts=["-l", "root"], timeout=3, via=via)
@@ -645,7 +684,7 @@ class TestForward(MachineTest):
         with self.assertRaises(RuntimeError):
             with f.forward(4567):
                 raise RuntimeError("the run died")
-        self.assertEqual(f.pids, set())
+        self.assertEqual(f.pids, {os.getpid()})
 
 
 # A copy's transport named outside the seam: an argv headed scp or rsync, a shell line starting one, podman's cp, shutil's copies.
@@ -659,8 +698,6 @@ COPIES_ELSEWHERE = {
 
 class TestOneCopyPath(unittest.TestCase):
     def test_nothing_outside_the_machine_copies(self):
-        """`unit machine.one_copy_path`: copying out of a workspace, onto a board or onto a card is a Machine's
-        copy_in/copy_out/copy_tree_in/copy_tree_out; a file that names a transport itself is listed with why."""
         files = list((REPO / "lib" / "wk").rglob("*.py"))
         files += [p for p in (REPO / "cmd").iterdir()
                   if p.is_file() and p.read_text(errors="replace").startswith("#!/usr/bin/env python3")]

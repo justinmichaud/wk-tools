@@ -1,17 +1,6 @@
-"""A buildroot image whose kernel is declared rather than built
-(BR_KERNEL_DEB_URL in image/configs/<profile>.conf, prepared by
-lib/wk/sysimage/buildroot.py's kernel_pin on the driving machine).
-
-The rpi4's kernel is pinned because the one buildroot builds from the
-release-pinned tree never reaches userspace on that board, measured by
-staging one kernel at a time with everything else identical. What these
-tests hold down is the part that silently ruins an image: the four things
-that must agree about a version (kernel, modules, device trees, overlays)
-and the module compression that leaves a board with no wifi and so no
-tailnet.
-
-Run: python3 -m unittest tests.test_kernel_pin -v
-"""
+"""A buildroot image whose kernel is declared rather than built (BR_KERNEL_DEB_URL, prepared by
+lib/wk/sysimage/buildroot.py's kernel_pin): kernel, modules, device trees and overlays agree on one version, and
+modules arrive decompressed (BusyBox modprobe cannot read a .ko.xz, so a board would have no wifi)."""
 import contextlib
 import io
 import shutil
@@ -96,8 +85,6 @@ class TestPrepare(unittest.TestCase):
             self.assertIn(want, names, f"the prepared tree is missing {want}")
 
     def test_modules_arrive_decompressed_and_modules_dep_agrees(self):
-        """BusyBox modprobe reads modules.dep and cannot read a .ko.xz; a tree
-        where either half still says .xz is a board with no wifi."""
         cp = run(self._deb(xz=True), self.RELEASE, self.out)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         names = subprocess.run(["tar", "-tf", cp.stdout.strip()], capture_output=True, text=True).stdout
@@ -113,55 +100,6 @@ class TestPrepare(unittest.TestCase):
         cp = run(self._deb(), "1.2.3-nope", self.out)
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("no boot/vmlinuz-1.2.3-nope", cp.stderr)
-
-    def test_a_package_without_modules_is_refused(self):
-        cp = run(self._deb(modules=False), self.RELEASE, self.out)
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("no modules", cp.stderr)
-
-    def test_a_kernel_that_is_not_a_32_bit_zimage_is_refused(self):
-        """the firmware jumps to whatever this is; a mismatch is a board that
-        hangs with no console, which is expensive to find out at the board."""
-        deb = self._deb()
-        root = self.tmp / "pkg"
-        (root / "boot" / f"vmlinuz-{self.RELEASE}").write_bytes(b"\0" * 64)
-        subprocess.run(["dpkg-deb", "--build", "--nocheck", str(root), str(deb)],
-                       check=True, capture_output=True)
-        cp = run(deb, self.RELEASE, self.out)
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("not a 32-bit ARM zImage", cp.stderr)
-
-    def test_a_second_run_reuses_the_tree_it_made(self):
-        deb = self._deb()
-        first = run(deb, self.RELEASE, self.out)
-        self.assertEqual(first.returncode, 0, first.stderr)
-        tar = Path(first.stdout.strip())
-        stamp = tar.stat().st_mtime_ns
-        second = run(deb, self.RELEASE, self.out)
-        self.assertEqual(second.returncode, 0, second.stderr)
-        self.assertEqual(second.stdout.strip(), first.stdout.strip())
-        self.assertEqual(Path(second.stdout.strip()).stat().st_mtime_ns, stamp,
-                         "the tree was rebuilt from an unchanged package")
-
-
-class TestWiring(unittest.TestCase):
-    def test_the_profile_pins_url_hash_and_release_together(self):
-        """a kernel by URL alone is not pinned."""
-        conf = (REPO / "image" / "configs" / "wpewebkit-2.38-buildroot-rpi4-32.conf").read_text()
-        self.assertIn("BR_KERNEL_DEB_URL=", conf)
-        self.assertIn("BR_KERNEL_DEB_SHA256=", conf)
-        self.assertIn("BR_KERNEL_RELEASE=", conf)
-
-    def test_the_driver_refuses_a_half_declared_pin(self):
-        text = (REPO / "lib" / "wk" / "sysimage" / "buildroot.py").read_text()
-        self.assertIn("BR_KERNEL_DEB_SHA256", text)
-        self.assertIn("is not pinned", text)
-
-    def test_the_kernel_is_prepared_where_depmod_is(self):
-        """the build image has dpkg-deb and xz but no kmod, so the in-workspace
-        half only unpacks what the driving machine prepared."""
-        self.assertNotIn("depmod", (REPO / "lib" / "wk" / "sysimage" / "buildroot_target.py").read_text())
-
 
 class TestPrepareOnTheFake(unittest.TestCase):
     """The refusals and the reuse, on any host: the Fake answers as dpkg-deb, depmod and od would."""

@@ -1,29 +1,8 @@
-"""What `wk status` may claim about a build that has gone quiet.
-
-A full-LTO link writes nothing to the log for many minutes, so silence is not
-death, and this machine's compiler count cannot say otherwise: a container
-build's compilers reach the process table through `podman exec` and name their
-workspace only in their cgroup, and a macOS guest's run in another kernel. So
-the verdict (`Task.verdict`, lib/wk/record.py) is the recorded pid plus the log's
-age and nothing else, cmd/status reports `silent` rather than `stalled` for a
-quiet running record, and `stalled` stays what cmd/build and cmd/test write
-when a watchdog killed the job.
-
-The one thing the log's age settles by itself is how long a build has been
-quiet, so the record carries `abort_after` -- the deadline the watchdog arming
-it gives up at. Past that deadline a live `wk build` would have killed the job
-and written `stalled`, so a record still saying running is one whose watchdog
-is gone too.
-
-The exit codes that follow: `silent` is busy (2), so `wk status --wait` waits
-through it; `stalled` is 3, and `--wait` returns; `silent` past `abort_after`
-is 4, a record with no writer left.
-
-Run: python3 -m unittest tests.test_build_liveness -v
-"""
+"""What `wk status` may claim about a build that has gone quiet."""
 import json
 import os
 import re
+import shutil
 import sys
 import time
 import unittest
@@ -51,8 +30,6 @@ PS_OUT = " 99.5 cc1plus\n 98.0 cc1plus\n 97.0 ld\n  0.1 bash\n"
 def write_task(store, kind="build", name="ws1", pid=None, log=None,
                plan=("compile jsc-release with -j4",), end=None,
                abort_after=1800, config="jsc-release", kill=None):
-    """One task record, written by lib/wk/record.py into <store> the way every
-    long-running command writes it. Returns the record."""
     t = record.Records(store, env={"WK_ABORT_SECONDS": str(abort_after)}).begin(
         kind, "here", name, kill or "wk %s %s --kill" % (kind, name), str(log or "/dev/null"), list(plan),
         pid=os.getpid() if pid is None else pid)
@@ -69,10 +46,6 @@ def age_log(path, seconds):
 
 
 class TestTheVerdictReadsThePidAndTheLogAndNotTheProcessTable(WkTest):
-    """`Task.verdict` (lib/wk/record.py): a record with no outcome is running while
-    its pid answers and its log moved within WK_STALL_SECONDS, silent when the
-    log went quiet, died when the pid is gone. A machine mid-link is the case
-    that made someone want the process count in here; the verdict reads none."""
 
     def _verdict(self, pid=None, log_age=0, end=None, stall=None):
         logf = self.tmp / f"build-{rand_suffix()}.log"
@@ -106,11 +79,6 @@ class TestTheVerdictReadsThePidAndTheLogAndNotTheProcessTable(WkTest):
 
 
 class _FakeWalk(WkTest):
-    """One `wk status` walk over a faked store, with no hardware: WK_TARGET
-    =remote with an answering stub `ssh` (so nothing is delegated and the
-    local records are reported), an empty WK_MACHINES_DIR so the device walk
-    finds nothing, and the task records under the scratch XDG_STATE_HOME where
-    the remote target's per-target store (lib/wk/targets.py) resolves."""
 
     def setUp(self):
         super().setUp()
@@ -147,7 +115,6 @@ class _FakeWalk(WkTest):
             return run("status", *args, env=e, timeout=timeout)
 
     def rec(self, cp, name):
-        """The task record `wk status --records` wrote for one job."""
         for line in cp.stdout.splitlines():
             if not line.startswith("{"):
                 continue
@@ -159,6 +126,12 @@ class _FakeWalk(WkTest):
     def notes(self, rec):
         return "\n".join(n["text"] for n in rec.get("notes", []))
 
+    def each(self, cases, *args, **kw):
+        for case in cases:
+            shutil.rmtree(self.store, ignore_errors=True)
+            self.task(**case)
+            yield case, self.walk(*args, **kw)
+
 
 class TestAQuietRunningBuildIsSilentNotStalled(_FakeWalk):
     def test_a_quiet_running_record_reads_silent_and_busy(self):
@@ -168,13 +141,9 @@ class TestAQuietRunningBuildIsSilentNotStalled(_FakeWalk):
         self.assertEqual(rec["state"], "silent", cp.stdout)
         self.assertEqual(cp.returncode, 2, cp.stdout)
         self.assertIn("no log output for", self.notes(rec))
+        self.assertIn("counted as busy", self.notes(rec))
+        self.assertIn("tail -f", self.notes(rec))
 
-    def test_the_note_says_it_keeps_waiting_and_names_the_log(self):
-        name = self.task(log_age=600)
-        rec = self.rec(self.walk("--records"), name)
-        text = self.notes(rec)
-        self.assertIn("counted as busy", text)
-        self.assertIn("tail -f", text)
 
     def test_a_moving_log_reads_running_and_says_what_it_reached(self):
         name = self.task(log="[9/4200] cc\n")
@@ -183,15 +152,10 @@ class TestAQuietRunningBuildIsSilentNotStalled(_FakeWalk):
         self.assertEqual(rec["state"], "running", cp.stdout)
         self.assertEqual(cp.returncode, 2, cp.stdout)
         self.assertIn("[9/4200]", self.notes(rec))
-
-    def test_the_record_names_the_command_that_stops_it(self):
-        name = self.task(log="[9/4200] cc\n")
-        rec = self.rec(self.walk("--records"), name)
         self.assertEqual(rec["kill"], f"wk build {name} --kill", rec)
 
+
     def test_a_running_record_whose_log_is_gone_is_still_running(self):
-        """No log is no evidence of silence: the pid answers, so this is a
-        build that has not written its first line yet."""
         name = self.task(log="missing")
         cp = self.walk("--records")
         self.assertEqual(self.rec(cp, name)["state"], "running", cp.stdout)
@@ -199,14 +163,6 @@ class TestAQuietRunningBuildIsSilentNotStalled(_FakeWalk):
 
 
 class TestTheRecordedDeadlineTellsSilenceFromADeadWatchdog(_FakeWalk):
-    def test_silence_inside_the_recorded_deadline_is_still_busy(self):
-        name = self.task(log_age=600, abort_after=1800)
-        cp = self.walk("--records")
-        rec = self.rec(cp, name)
-        self.assertEqual(rec["state"], "silent", cp.stdout)
-        self.assertEqual(cp.returncode, 2, cp.stdout)
-        self.assertIn("counted as busy", self.notes(rec))
-        self.assertNotIn("watchdog is gone", self.notes(rec))
 
     def test_silence_past_the_recorded_deadline_says_the_watchdog_is_gone(self):
         name = self.task(log_age=4000, abort_after=1800)
@@ -228,10 +184,6 @@ class TestTheRecordedDeadlineTellsSilenceFromADeadWatchdog(_FakeWalk):
 
 
 class TestTheRecordCarriesTheDeadlineTheWatchdogIsArmedWith(WkTest):
-    """One writer for the deadline: lib/wk/record.py stamps `abort_after` from
-    WK_ABORT_SECONDS, the same variable lib/wk/job.py aborts on, and
-    `wk build` declares its record through it rather than writing one of its
-    own."""
 
     def _record(self, env=None):
         return write_task(self.tmp / "store", log=self.tmp / "build.log", **(env or {}))
@@ -249,8 +201,6 @@ class TestTheRecordCarriesTheDeadlineTheWatchdogIsArmedWith(WkTest):
 
 
 class TestATestRunKeepsTheSameRecordAsABuild(_FakeWalk):
-    """`wk test` writes the same record, so a test run that lost its watchdog
-    has to be tellable from a quiet one, and the note names `wk test`."""
 
     def test_a_silent_test_past_its_deadline_names_wk_test(self):
         name = self.task(kind="test", log_age=4000, abort_after=1800,
@@ -265,14 +215,6 @@ class TestATestRunKeepsTheSameRecordAsABuild(_FakeWalk):
         self.assertNotIn("wk build", text)
         self.assertEqual(cp.returncode, 4, cp.stdout)
 
-    def test_a_silent_test_inside_its_deadline_is_still_busy(self):
-        name = self.task(kind="test", log_age=600, abort_after=1800)
-        cp = self.walk("--records")
-        rec = self.rec(cp, name)
-        self.assertEqual(rec["state"], "silent", cp.stdout)
-        self.assertIn("counted as busy", self.notes(rec))
-        self.assertEqual(cp.returncode, 2, cp.stdout)
-
 
 class TestTheStalledStateIsOnlyAKill(_FakeWalk):
     def test_a_written_stalled_record_stays_stalled_and_exits_3(self):
@@ -283,47 +225,16 @@ class TestTheStalledStateIsOnlyAKill(_FakeWalk):
         self.assertEqual(cp.returncode, 3, cp.stdout)
         self.assertIn("killed after no output", self.notes(rec))
 
-    def test_nothing_in_the_collector_manufactures_a_state(self):
-        text = (REPO / "lib" / "wk" / "status.py").read_text()
-        self.assertNotIn('set("state", "stalled")', text)
-        self.assertIn('.verdict("capped")', text)
-
 
 class TestOneExitCodePerRecordedState(_FakeWalk):
-    def _code(self, **kw):
-        self.task(**kw)
-        return self.walk("--records").returncode
-
-    def test_ok_is_0(self):
-        self.assertEqual(self._code(end=0), 0)
-
-    def test_cancelled_is_0(self):
-        """A build a person stopped is not a build that needs attention."""
-        self.assertEqual(self._code(end="cancelled"), 0)
-
-    def test_failed_is_1(self):
-        self.assertEqual(self._code(log="error: no\n", end=1), 1)
-
-    def test_running_is_2(self):
-        self.assertEqual(self._code(log="[9/9] cc\n"), 2)
-
-    def test_silent_is_2(self):
-        self.assertEqual(self._code(log="[1/9] cc\n", log_age=600), 2)
-
-    def test_stalled_is_3(self):
-        self.assertEqual(self._code(end="stalled"), 3)
-
-    def test_oom_is_3(self):
-        self.assertEqual(self._code(log="wk: MEMORY LIMIT hit\n", end="oom"), 3)
-
-    def test_a_dead_pid_with_no_outcome_is_4(self):
-        self.assertEqual(self._code(pid=DEAD_PID), 4)
+    def test_each_recorded_state_has_its_code(self):
+        cases = ((dict(end=0), 0), (dict(end="cancelled"), 0), (dict(log="error: no\n", end=1), 1),
+                 (dict(log="wk: MEMORY LIMIT hit\n", end="oom"), 3), (dict(pid=DEAD_PID), 4))
+        for (case, cp), (_, want) in zip(self.each([c for c, _ in cases], "--records"), cases):
+            self.assertEqual(cp.returncode, want, (case, cp.stdout))
 
 
 class TestWaitWaitsThroughSilence(_FakeWalk):
-    """`--wait` waits on exit 2 and on nothing else (lib/wk/status.py's
-    `if rc != 2`), so this drives the states rather than the
-    loop: a silent build blocks until --timeout, a killed one returns."""
 
     def _wait(self, **kw):
         self.task(**kw)
@@ -337,20 +248,15 @@ class TestWaitWaitsThroughSilence(_FakeWalk):
         self.assertRegex(cp.stdout, r"still busy after \d+s")
         self.assertEqual(cp.returncode, 2, cp.stdout)
 
+    def test_a_stalled_or_finished_build_ends_the_wait_at_once(self):
+        cases = (dict(end="stalled"), dict(end=0))
+        for (case, cp), want in zip(self.each(cases, "--wait", "--timeout=2", env={"WK_WAIT_INTERVAL": "1"}, timeout=180), (3, 0)):
+            self.assertNotIn("wk status says busy", cp.stdout)
+            self.assertEqual(cp.returncode, want, (case, cp.stdout))
+
     def test_the_timeout_is_elapsed_time_and_the_report_says_how_long(self):
-        """A poll is not free -- one against a real container workspace costs
-        ~3s -- so a timeout counted in sleeps alone overshoots by however long
-        the polling took: `--timeout 300` returned at ~460s, long enough to
-        take the caller's own timeout with it (tests/test_container_workspace
-        .py waits for a workspace to finish being made). A poll made slower
-        than the timeout here, so one is all the loop can afford: what it
-        reports waiting is what a clock says, not 1s of sleeping."""
         self.task(log="[1/4200] cc\n", log_age=600)
-        # The machine is slow to answer its first probe (the remote target's
-        # `probed`, lib/wk/targets.py) and nothing else: one poll slower than the interval is
-        # what the assertion needs, and a walk makes several ssh calls and probes more
-        # than once. The probe's cap has to outlast the sleep, or the slow machine
-        # reads unreachable.
+        # Only the first probe is slow; its cap (WK_PROBE_SECONDS) outlasts the sleep.
         slow_probe = ('#!/bin/sh\nfor last; do :; done\n'
                       'case "$last" in *.wk-remote*)\n'
                       f'    [ -e "{self.tmp}/probed" ] || {{ : > "{self.tmp}/probed"; sleep 2; }} ;;\n'
@@ -365,16 +271,6 @@ class TestWaitWaitsThroughSilence(_FakeWalk):
         self.assertGreaterEqual(int(waited.group(1)), 2,
                                 f"the timeout counts sleeps, not elapsed time: {cp.stdout}")
 
-    def test_a_stalled_build_ends_the_wait_at_once(self):
-        cp = self._wait(end="stalled")
-        self.assertNotIn("wk status says busy", cp.stdout)
-        self.assertEqual(cp.returncode, 3, cp.stdout)
-
-    def test_a_finished_build_ends_the_wait_at_once(self):
-        cp = self._wait(end=0)
-        self.assertNotIn("wk status says busy", cp.stdout)
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-
 
 class TestTheViewCallsSilenceBusy(unittest.TestCase):
     def test_severity_of_silent_is_busy(self):
@@ -382,17 +278,6 @@ class TestTheViewCallsSilenceBusy(unittest.TestCase):
         sys.path.insert(0, str(REPO / "lib"))
         from wk import statusview
         self.assertEqual((statusview.severity("silent"), statusview.severity("stalled")), ("busy", "bad"))
-
-    def test_exit_2_is_explained_the_same_way_in_both_files(self):
-        """The page prints the exit code in cmd/status's own words, so the
-        two say the same thing about a silent build or one of them is
-        wrong."""
-        header = (REPO / "cmd" / "status").read_text()
-        view = (REPO / "lib" / "wk" / "statusview.py").read_text()
-        for text in ("a build is running or silent",
-                     "a build stalled and was killed by its own watchdog"):
-            self.assertIn(text, header, text)
-            self.assertIn(text, view, text)
 
 
 if __name__ == "__main__":

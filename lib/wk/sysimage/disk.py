@@ -84,31 +84,6 @@ class Disks:
             self._whose[dev] = (kv(text).get("machine", ""), BOOTED in text)
         return self._whose[dev]
 
-    def resolve_own(self):
-        """device's transport less disks marked for another machine, so a blank medium needs no marker; "" if not one."""
-        want = tran_of_name(self.device)
-        same = [d.name for d in self.candidates() if d.tran == want] if want else []
-        if len(same) < 2:
-            return "".join(same)
-        left = []
-        for dev in same:
-            owner = self.whose(dev)[0]
-            if owner == self.name:
-                return dev
-            if not owner:
-                left.append(dev)
-        return left[0] if len(left) == 1 else ""
-
-    def own_or_declared(self):
-        got = self.resolve_own()
-        if not got:
-            act.debug("could not resolve %s's own medium from the machine; using %s as declared" % (self.name, self.device or "none"))
-            return self.device
-        if got != self.device:
-            act.warn("%s's conf says %s, but its own medium is %s right now.\n  Kernel names move; this is using %s, "
-                     "which is what the machine says." % (self.name, self.device, got, got))
-        return got
-
     def for_machine(self, want):
         return next((d.name for d in self.candidates() if want and self.whose(d.name)[0] == want), "")
 

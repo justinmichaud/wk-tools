@@ -1,9 +1,4 @@
-"""The buildroot image and slot builds as they run inside a workspace (lib/wk/sysimage/buildroot_target.py) against
-a Fake machine: argument refusals, the caches, the tree and its patches, the three overlays, the pinned kernel's
-post-image hook, the .config additions, BR2_EXTERNAL on every make, the image's freshness, and the slot.
-
-Run: python3 tests/run.py -k test_buildroot_target
-"""
+"""The buildroot image and slot builds as they run inside a workspace (lib/wk/sysimage/buildroot_target.py)."""
 import contextlib
 import io
 import sys
@@ -91,27 +86,15 @@ def quiet(fn, *a):
 
 
 class TestArguments(unittest.TestCase):
-    def refused(self, argv):
-        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
-            bt.parse(argv)
-        return cm.exception.code
-
-    def test_a_slot_takes_a_full_sha(self):
-        self.assertEqual(self.refused(["webkit", "--name", NAME, "--commit", "abc123", "--slot", "base"]), 2)
-
-    def test_every_argument_is_required(self):
-        self.assertEqual(self.refused(["webkit", "--commit", COMMIT, "--slot", "base"]), 2)
-        self.assertEqual(self.refused(["image", "--name", NAME, "--tree-url", "u"]), 2)
-
-    def test_an_unknown_option_is_a_usage_error(self):
-        self.assertEqual(self.refused(["image", "--bogus"]), 2)
-
-    def test_a_pinned_kernel_names_its_release(self):
-        self.assertEqual(self.refused(["image", "--name", NAME, "--tree-url", "u", "--defconfig", "d", "--kernel-tar", "/k.tar"]), 2)
-
-    def test_a_pinned_kernel_names_its_device_tree(self):
-        self.assertEqual(self.refused(["image", "--name", NAME, "--tree-url", "u", "--defconfig", "d", "--kernel-tar", "/k.tar",
-                                       "--kernel-release", "6.1"]), 2)
+    def test_each_incomplete_or_malformed_call_is_a_usage_error(self):
+        image = ["image", "--name", NAME, "--tree-url", "u", "--defconfig", "d", "--kernel-tar", "/k.tar"]
+        for argv in (["webkit", "--name", NAME, "--commit", "abc123", "--slot", "base"],
+                     ["webkit", "--commit", COMMIT, "--slot", "base"], ["image", "--name", NAME, "--tree-url", "u"],
+                     ["image", "--bogus"], image, image + ["--kernel-release", "6.1"]):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as cm:
+                bt.parse(argv)
+            self.assertEqual(cm.exception.code, 2)
 
 
 class TestTheImage(unittest.TestCase):
@@ -181,16 +164,10 @@ class TestFreshness(unittest.TestCase):
         w.mtime = mtime
         return quiet(w.build(image_args()).verify_fresh, img, 1000)[1]
 
-    def test_an_image_newer_than_the_start_passes(self):
+    def test_an_image_from_the_start_or_later_passes_and_a_stale_or_missing_one_is_refused(self):
         self.assertIsNone(self.check(1005))
-
-    def test_an_image_from_the_same_second_passes(self):
         self.assertIsNone(self.check(1000))
-
-    def test_a_stale_image_is_refused(self):
         self.assertIn("older", self.check(900))
-
-    def test_a_missing_image_is_refused(self):
         self.assertIn("does not exist", self.check(1005, exists=False))
 
     def test_an_image_make_left_untouched_fails_the_stage(self):
@@ -270,8 +247,6 @@ class TestPinnedKernel(unittest.TestCase):
         self.assertIn("other.dtb", err)
 
     def test_no_br2_linux_kernel_line_reaches_the_config(self):
-        """This defconfig builds no kernel: DEFCONFIG (the fake `.config` a real one would produce) carries
-        no BR2_LINUX_KERNEL, and post_image reads the device tree name from --kernel-dts, never from it."""
         w = self.world()
         quiet(w.build(self.args()).run)
         self.assertNotIn("BR2_LINUX_KERNEL", w.files[WORK + "/.config"])

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# wk doctor [<workspace> [--gpu]] [--all] -- what is provisioned on this machine, or whether a workspace's wall holds
+# wk doctor [<workspace> [--gpu] | <machine>] [--all] -- what is provisioned on this machine, a machine's facts, or whether a workspace's wall holds
 # wk: where=dynamic name=optional readonly group=hosts opts --all,--probe-store,--gpu
 #
 # The reinstall companion: `./setup` is the automated path, but several pieces
@@ -17,6 +17,10 @@
 #           could publish, reads and writes through the credential injector
 #           against the host's push switch, the agent's login, and the GPU. A
 #           remote target has no sandbox, and is refused.
+#   wk doctor <machine>     a machine in machines/, asked from here: its tailnet
+#           names, whether it answers, a bench device's system, media and arm,
+#           and a board's cpu governor and temperature. A name that is both a
+#           machine and a workspace is the machine.
 #   wk doctor               inside a workspace: the half it answers about itself,
 #           with the push switch measured rather than read (what `wk ai claude`
 #           runs in here before a session)
@@ -24,8 +28,7 @@
 #   --gpu   fail if the workspace has no hardware-accelerated GPU (informational otherwise)
 #
 #   --all   also ask every configured machine (machines/*.conf) what it
-#           has. A peer workstation: whether its own claude.ai login is one
-#           Anthropic accepts and may run remote control. A build machine: the
+#           has. A build machine: the
 #           tools a build needs there, the identity a commit made there would
 #           carry, any build variable that machine's own profile sets, whether
 #           the credential copies it holds are the ones stored here, and
@@ -51,18 +54,34 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, wall  # noqa: E402
+from wk import decl, fleet, wall  # noqa: E402
 from wk.act import Refused, die, info, log, warn  # noqa: E402
-from wk.doctor import Doctor, Report  # noqa: E402
+from wk.doctor import Doctor, Report, device  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.targets import Registry  # noqa: E402
 
 ALLOWED = ("--all", "--probe-store", "--gpu")
 
 
-def where(argv):
-    """The dispatcher's `where=dynamic` question: a workspace's name goes to the machine holding it."""
+def machine_named(argv, env):
+    """The machines/*.conf name among the positionals, or None."""
+    return next((a for a in argv if not a.startswith("-") and fleet.Fleet(ROOT, env).kind(a)), None)
+
+
+def where(argv, env=None):
+    """The dispatcher's `where=dynamic` question: a workspace's name goes to the machine holding it; a machine's is asked here."""
+    env = os.environ if env is None else env
+    if machine_named(argv, env):
+        return "local"
     return "workspace" if any(not a.startswith("-") for a in argv) else "local"
+
+
+def about_machine(name, env):
+    info("asking machine '%s' from here" % name)
+    rep = Report(sys.stderr)
+    rep.rows(device(ROOT, name, env, Local()))
+    sys.stderr.write("\n")
+    return rep.exit_status()
 
 
 def only(args, allowed, why):
@@ -105,10 +124,16 @@ def workspace(reg, name, argv):
 def main(argv, env=None, reg=None):
     env = os.environ if env is None else env
     if argv[:1] == ["--where"]:
-        print(where(argv[1:]))
+        print(where(argv[1:], env))
         return 0
     args = decl.Args(decl.Decl(__file__), argv)
     reg = reg or Registry(ROOT, env, Local())
+    named = machine_named(args.positionals, env)
+    if named:
+        if reg.in_workspace():
+            die("'wk doctor %s' asks a machine from the host; in here 'wk doctor' checks this workspace" % named)
+        only(args, (), "is not asked of a machine: wk doctor %s" % named)
+        return about_machine(named, env)
     if reg.in_workspace():
         only(args, (), "is not asked inside a workspace: 'wk doctor' here checks this one")
         return inside(reg)
@@ -132,7 +157,7 @@ def main(argv, env=None, reg=None):
         return rep.exit_status()
     warn("%d item(s) missing -- each line above names its fix; the order that" % rep.missing)
     log("works from bare metal: ./setup -> the interactive stages it lists ->")
-    log("gh auth login -> claude setup-token and claude auth login -> wk key setup")
+    log("gh auth login -> claude setup-token -> wk key setup")
     log("-> wk sync -> (optional) wk machine setup <board>, wk sysimage build macos-guest-base. See README.md.")
     return rep.exit_status()
 

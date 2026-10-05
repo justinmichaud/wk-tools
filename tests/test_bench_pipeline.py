@@ -1,12 +1,4 @@
-"""`wk bench run` as a flow (lib/wk/bench/pipeline.py over lib/wk/bench/systems.py) against a Fake world:
-each system through boot, deploy, run and collect, the refusals, the record a run writes, a dry run as the
-recorder, and a run killed after any effect.
-
-Rows landed here: `unit bench.pipeline_conformance[container|guest|board]`, `unit record.progress_shape[bench]`,
-`unit dispatch.dry_run_is_the_recorder[bench]`, `unit killpoints[bench]`.
-
-Run: python3 tests/run.py -k test_bench_pipeline
-"""
+"""`wk bench run` as a flow (lib/wk/bench/pipeline.py over lib/wk/bench/systems.py) against a Fake world."""
 import contextlib
 import importlib.machinery
 import importlib.util
@@ -26,11 +18,10 @@ from tests.killpoints import converges
 from tests.support import REPO, as_dispatched
 
 sys.path.insert(0, str(REPO / "lib"))
-from tests.test_bench_mac import Drv, StubWatch  # noqa: E402
-from tests.test_mac_volume import FakeMac  # noqa: E402
-from wk import act, decl, dispatch, fleet, job, record, screen, targets  # noqa: E402
+from tests.test_bench_mac import StubWatch  # noqa: E402
+from wk import decl, dispatch, job, record, screen, targets  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import mac, pipeline, record as brecord, systems  # noqa: E402
+from wk.bench import pipeline, record as brecord, systems  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Local, Result, Ssh  # noqa: E402
 
@@ -112,14 +103,14 @@ class World(Fake):
         self.effects.append(("act", tuple(argv)))
         return super().act_run(argv, **kw)
 
-    def popen(self, argv, stdin=None, stdout=None, stderr=None, cwd=None):
+    def start(self, argv, out, cwd=None):
         """What the benchmark leaves: its log, and run-benchmark's --output-file where the system put it."""
         self.watched.append(list(argv))
         script = argv[-1]
         if "cli.js" in script:
-            stdout.write(JSC_LOG)
+            out.write(JSC_LOG)
         else:
-            stdout.write(b"wk: bench pid 77\nScore: 30\n")
+            out.write(b"wk: bench pid 77\nScore: 30\n")
             out = shlex.split(script.split("exec ", 1)[1])
             dest = out[out.index("--output-file") + 1]
             if self.kind == "container":
@@ -158,7 +149,7 @@ def registry(w, target=None):
 def invoke(w, argv):
     """cmd/bench's run arm: its options read off the declaration, then the pipeline."""
     argv = as_dispatched("bench", argv, os.environ)
-    return CMD.run_arm(decl.Args(decl.Decl(REPO / "cmd" / "bench"), argv), registry(w), w.clock, w.popen)
+    return CMD.run_arm(decl.Args(decl.Decl(REPO / "cmd" / "bench"), argv), registry(w), w.clock)
 
 
 class BenchTest(unittest.TestCase):
@@ -209,7 +200,6 @@ class BenchTest(unittest.TestCase):
 
 class TestConformance(BenchTest):
     def test_each_system_runs_the_one_pipeline_into_the_one_record(self):
-        """`bench.pipeline_conformance[container|guest]`: boot, deploy, run, collect, and the result in the store."""
         for kind, plan, config, host in (("container", "jetstream3", "jsc-release", "container"),
                                          ("container", "speedometer3", "wpe-release", "container"),
                                          ("vm", "jetstream3", "jsc-release", "guest"),
@@ -223,17 +213,6 @@ class TestConformance(BenchTest):
                 env = self.env_json(w)
                 self.assertEqual((env["bench_host"], env["config"], env["plan"], env["webkit_sha"]), (host, config, plan, SHA))
                 self.assertTrue((self.run_dir(w) / "result.json").is_file(), err)
-
-    def test_a_board_runs_the_one_pipeline_into_the_one_record(self):
-        """`bench.pipeline_conformance[board]`: `--system <board>` through the same run arm, boot to collect."""
-        from tests.test_bench_board import BoardWorld
-        w = BoardWorld(self.tmp)
-        self.assertEqual(w.invoke(), 0, w.err)
-        self.assertIn("BENCH OK  jetstream3", w.err)
-        self.assertEqual(w.state(), ("complete", 1, "0"))
-        env = w.env_json()
-        self.assertEqual((env["bench_host"], env["config"], env["plan"], env["webkit_sha"]), ("image", "buildroot-rpi5-64", "jetstream3", SHA))
-        self.assertTrue((w.run_dir() / "result.json").is_file(), w.err)
 
     def test_a_guest_run_is_collected_from_the_guest_through_its_copy(self):
         w = World(self.tmp, "vm")
@@ -269,7 +248,6 @@ class TestConformance(BenchTest):
 
 class TestTheRecord(BenchTest):
     def test_a_run_writes_the_one_progress_record(self):
-        """`record.progress_shape[bench]`: step n of m, the log, how to stop it, and how it ended."""
         rc, err = self.run_()
         self.assertEqual(rc, 0, err)
         (t,) = self.w.recs().list()
@@ -306,7 +284,6 @@ class TestTheRecord(BenchTest):
 
 class TestInterrupted(BenchTest):
     def test_an_interrupt_stops_the_benchmark_where_it_runs_and_the_record_reads_cancelled(self):
-        """`unit machine.interrupt_stops_remote_process[bench]`: the benchmark's announced pid is TERMed in the workspace."""
         class Interrupting(FakeProc):
             def poll(self):
                 raise job.Interrupted(signal.SIGINT)
@@ -322,7 +299,7 @@ class TestInterrupted(BenchTest):
         self.w.answer(["exec", "ws", "ps", "-o", "args=", "-p", "77"], out="jsc cli.js\n")
         self.w.react(["exec", "ws", "kill", "-TERM"], lambda a, f: (f.pids.discard(77), Result(0))[1])
         self.w.react(["exec", "ws", "kill", "-0"], lambda a, f: Result(0 if int(a[-1]) in f.pids else 1))
-        self.w.popen = lambda argv, **kw: Interrupting(0)
+        self.w.start = lambda argv, out, cwd=None: Interrupting(0)
         with mock.patch.object(record.Records, "begin", begin):
             e = self.refused()
         self.assertEqual(e.status, 130)
@@ -334,7 +311,6 @@ class TestInterrupted(BenchTest):
 
 
 class TestARestart(BenchTest):
-    """`--task` into a one-run task: nothing when it holds its run ok, else one run more into the same task."""
 
     ARGV = ("run", "jetstream3", "--config", "jsc-release")
 
@@ -380,7 +356,6 @@ class TestARestart(BenchTest):
 
 class TestWhereTheLegRecords(BenchTest):
     def test_a_workspace_whose_tasks_are_on_another_machine_is_refused_before_anything_is_written(self):
-        """run-benchmark writes its log and result where it runs, so the task has to be on this machine."""
         with mock.patch.object(BenchTarget, "results", lambda t, ws: (Ssh("box", via=self.w), str(self.tmp / "far" / "bench"))):
             err = self.said()
         self.assertIn("run it on box", err)
@@ -411,6 +386,9 @@ class TestRefusals(BenchTest):
         w = World(self.tmp, "remote")
         self.assertIn("a container workspace or a macOS guest", self.said("run", "jetstream3", w=w))
 
+    def test_a_mac_is_not_a_system_of_run(self):
+        self.assertIn("wk bench staged", self.said("run", "jetstream3", "--system", "mbp"))
+
     def test_a_failed_preflight_refuses_and_force_records_it(self):
         self.w.files[systems.GOVERNOR] = "powersave\n"
         self.assertIn("1 preflight check(s) failed", self.said("run", "jetstream3", "--config", "jsc-release"))
@@ -427,7 +405,6 @@ class TestRefusals(BenchTest):
         self.assertIn("load 5.00, no wk builds", err)
 
     def test_the_load_is_rounded_before_it_is_compared(self):
-        """printf '%.0f' in the bash it replaces: 4.6 is 5, over the default of 4; 4.4 is 4, not over it."""
         self.w.files["/proc/loadavg"] = "4.60 4.00 3.00 1/100 1\n"
         self.assertIn("1-minute load average is 4.60", self.said())
         w = World(self.tmp)
@@ -459,7 +436,6 @@ class TestRefusals(BenchTest):
 
 
 class TestAMeasuredRunIsWatchedThroughout(BenchTest):
-    """The preflight reads the screen once and a run is minutes long: a dialog that draws mid-run covers every leg after it."""
 
     def test_the_run_is_bracketed_by_the_watch(self):
         self.run_(None, "run", "speedometer3", "--config", "wpe-release")
@@ -523,7 +499,6 @@ class TestKill(BenchTest):
 
 class TestDryRun(BenchTest):
     def test_the_plan_is_the_runs_mutations(self):
-        """`dispatch.dry_run_is_the_recorder[bench]`: the dry run prints the wet run's effects and its benchmark line, and writes no record."""
         def mutations(w):
             locks = w.env["WK_LOCK_DIR"]
             return [e for e in w.effects if e[0] in ("act", "write", "mkdir", "remove", "copy_in", "copy_out", "copy_tree_in", "spawn", "kill")
@@ -546,7 +521,6 @@ class TestDryRun(BenchTest):
 
 class TestKillPoints(BenchTest):
     def test_a_run_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[bench]`: each run is its own task; whatever a killed one held goes with it."""
         def run_once(w):
             w.clock.t += 1
             with contextlib.redirect_stderr(io.StringIO()):
@@ -554,200 +528,6 @@ class TestKillPoints(BenchTest):
         for kind in ("container", "vm"):
             with self.subTest(kind=kind):
                 converges(self, lambda: World(self.tmp, kind), run_once, World.state)
-
-
-MBP_CONF = ('kind=mac\nssh="tolken"\nbench_ssh="tolken-bench"\ndriver=mac-volume\n'
-            'volume="WK Bench"\nprofile=perf-macos-tolken\n')
-
-
-class MacBenchTarget(BenchTarget):
-    """A macOS VM workspace with a build already present -- `needs_base` is a golden-base concern
-    `Stage.run()`'s `wait_ready` does not need to re-ask of a fake that is already 'running'; `Stage`
-    is the only caller that pulls a whole tree out of it, so the pull is an effect here, as it is on
-    5.27's own `Target` double (tests/test_bench_mac.py) -- nothing stages a real build tree."""
-    needs_base = False
-
-    def pull_dir(self, ws, src, dest, exclude=()):
-        self.machine.effect(("copy_tree_out", src, dest) + tuple(exclude))
-
-
-class MacWorld(Fake):
-    """The driving machine for `wk bench run <ws> <plan> --system mbp`: its own store, a macOS
-    workspace target to stage from, and a fake Mac (5.12's `FakeMac`, over its own `Channel`
-    protocol) it reaches to arm, run over ssh and bring back. `wk bench staged` on the install is
-    not re-simulated (5.27 already tests it): the ssh invocation is answered directly, the way any
-    remote command is faked here."""
-
-    RESULT_ID = "20260924T000000Z-speedometer3-ws"
-
-    def __init__(self, tmp):
-        super().__init__("here")
-        self.fake, self.kind, self.rc = self, "vm", 0
-        self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
-        machines = self.tmp / "machines"
-        machines.mkdir()
-        (machines / "mbp.conf").write_text(MBP_CONF)
-        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"), "WK_LOCK_DIR": str(self.tmp / "locks"),
-                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_NAME": "ws", "WK_MACHINES_DIR": str(machines),
-                    "WK_MAC_BENCH_TOOLS": "/tools", "WK_POLL_SECONDS": "1", "WK_JOB_PID_TRIES": "0"}
-        self.clock = FakeClock()
-        os.makedirs(os.path.join(self.env["WK_STORE"], "ws", "ws"))
-        self.home = "/var/wk"
-        conf = dict(fleet.Fleet(str(REPO), self.env).load("mbp"), name="mbp")
-        self.mac = FakeMac(conf, env=self.env, clock=self.clock)
-        self.mac.write_system(conf["profile"])   # the bench install's own /etc/wk-image id, read back by mac-probe.sh
-        for prefix, out in ((["exec", "ws", "test"], ""), (["exec", "ws", "git"], SHA + "\n"),
-                            (["exec", "ws", "cat"], PLAN_JSON), ([str(REPO / "cmd" / "version")], "sha=abc\ndirty=no\n"),
-                            (["git", "ls-remote"], SHA + "\trefs/heads/main\n"), (["rsync"], "")):
-            self.answer(prefix, out=out)
-        # Pinned already, so the seed step neither clones for real nor differs between a wet and a dry run.
-        self.seed_dest = os.path.join(self.env["WK_STORE"], "cache", "bench", "speedometer3-" + SHA[:12])
-        self.dirs.add(self.seed_dest)
-        self.dirs.add(os.path.join(self.seed_dest, ".wk-seeded"))
-        self.watched = []
-
-    def act_run(self, argv, **kw):
-        self.effects.append(("act", tuple(argv)))
-        return super().act_run(argv, **kw)
-
-    def run(self, argv, input=None, timeout=None):
-        if argv[:1] == ["ssh"]:
-            self.record_run(argv)
-            return self._ssh_answer(shlex.split(argv[-1])[-1])
-        if argv[:1] == ["scp"]:
-            self.record_run(argv)
-            return Result(0)
-        return super().run(argv, input=input, timeout=timeout)
-
-    def _ssh_answer(self, cmd):
-        if "test -x /tools/wk" in cmd:
-            return Result(0, "/tools\n")
-        if cmd == "test -d %s" % (self.home + "/results"):
-            return Result(0)
-        if cmd == "ls -1A %s" % (self.home + "/results"):
-            return Result(0, self.RESULT_ID + "\n")
-        return Result(127, "", "MacWorld: no answer for: %s" % cmd)
-
-    def popen(self, argv, stdin=None, stdout=None, stderr=None, cwd=None):
-        self.watched.append(list(argv))
-        if "wk bench staged" in argv[-1]:
-            stdout.write(("wk: bench pid 77\nBENCH OK  speedometer3 -> %s/results/%s/result.json\n"
-                          % (self.home, self.RESULT_ID)).encode())
-        return FakeProc(self.rc)
-
-    def system(self, target_kind="vm"):
-        self.kind = target_kind
-        target = MacBenchTarget("ws", str(REPO), dict(self.env), self, target_kind)
-        # Stage.run() re-resolves the workspace target through the registry, so a `--system mbp` run's target is this one.
-        reg = registry(self, MacBenchTarget)
-        conf = dict(fleet.Fleet(str(REPO), self.env).load("mbp"), name="mbp")
-        return mac.MacHostSystem(str(REPO), reg, target, "ws", self.clock, "mbp", conf,
-                                  channel_factory=lambda conf, env, ch, via, root: self.mac,
-                                  stage_driver=lambda root, conf: Drv(self, False))
-
-    def go(self, plan="speedometer3", config="mac-release", popen=None):
-        system = self.system()
-        r = mac.HostRun(str(REPO), system.reg, system, self.clock, self.env, popen or self.popen)
-        return r.go(plan, {"config": config})
-
-    def bench_dir(self):
-        return Path(self.env["WK_STORE"]) / "ws" / "ws" / "bench"
-
-    def tasks(self):
-        return brecord.tasks(str(self.bench_dir()))
-
-    def recs(self):
-        return record.Records(self.env["WK_STORE"], clock=self.clock, env=self.env, machine=self)
-
-
-class MacHostTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-bench-mac-host-"))
-        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, True))
-        self._env = dict(os.environ)
-        for v in ("WK_DRY_RUN", "WK_FORCE"):
-            os.environ.pop(v, None)
-        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self._env)))
-        self.w = MacWorld(self.tmp)
-
-    def run_dir(self, w=None):
-        w = w or self.w
-        (task,) = w.tasks()
-        (run,) = os.listdir(w.bench_dir() / task / "runs")
-        return w.bench_dir() / task / "runs" / run
-
-
-class TestMacHostConformance(MacHostTest):
-    def test_the_pipeline_runs_boot_deploy_run_and_collect_into_the_one_record(self):
-        """`bench.pipeline_conformance[mac-volume]`: staged, armed, run over ssh, collected, and left in
-        bench mode -- the fake Mac's own driver (5.11/5.12) refuses to bless itself back from there,
-        which the fleet install faces too (only the host install carries the boot helper)."""
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            rc = self.w.go()
-        out = err.getvalue()
-        self.assertEqual(rc, 0, out)
-        self.assertIn("BENCH OK", out)
-        self.assertEqual(self.w.mac.running, "bench", "arm() put it in bench mode")
-        self.assertIn("cannot bless itself back", out)
-        (copy,) = [e for e in self.w.effects if e[0] == "run" and e[1][:1] == ("scp",)]
-        self.assertTrue(copy[1][-2].endswith(self.w.RESULT_ID + "/result.json"), copy)
-        env = json.loads((self.run_dir() / "env.json").read_text())
-        self.assertEqual(env["remote"]["run"], self.w.RESULT_ID)
-
-
-class TestMacHostRecord(MacHostTest):
-    def test_a_run_writes_the_one_progress_record(self):
-        """`record.progress_shape[bench]`: the same task record a container or guest run writes."""
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.w.go()
-        (t,) = self.w.recs().list()
-        self.assertEqual((t.field("kind"), t.field("where"), t.field("name")), ("bench", "here", "ws"))
-        self.assertEqual(t.steps(), [(1, "done"), (2, "done"), (3, "running")])
-
-
-class TestMacHostDryRun(MacHostTest):
-    def test_the_plan_is_the_runs_mutations(self):
-        """`dispatch.dry_run_is_the_recorder[bench]`, `--system mbp`: the dry run's mutations are the
-        wet run's (5.27's own `Stage` dry-run parity), and it never arms or reboots the real machine
-        -- `Boot.arm()`'s own dry-run branch returns before either bless call reaches it."""
-        def mutations(w):
-            locks = w.env["WK_LOCK_DIR"]
-            return [e for e in w.effects if e[0] in ("act", "write", "mkdir", "remove", "bench_put", "bench_put_file")
-                    and not (isinstance(e[1], str) and e[1].startswith(locks))]
-        wet, dry = MacWorld(self.tmp), MacWorld(self.tmp)
-        with contextlib.redirect_stderr(io.StringIO()):
-            wet.go()
-        os.environ["WK_DRY_RUN"] = "1"
-        try:
-            err = io.StringIO()
-            with contextlib.redirect_stderr(err):
-                rc = dry.go()
-        finally:
-            del os.environ["WK_DRY_RUN"]
-        out = err.getvalue()
-        strip = [[tuple(str(x).replace(str(w.tmp), "") for x in e) for e in mutations(w)] for w in (wet, dry)]
-        self.assertEqual(strip[0], strip[1])
-        self.assertIn("dry run -- nothing was benchmarked", out)
-        self.assertEqual(dry.mac.running, "host", "a dry run must not arm or reboot the real machine")
-        self.assertEqual((dry.tasks(), dry.recs().list()), ([], []))
-
-
-class TestMacHostKillPoints(MacHostTest):
-    def test_a_run_killed_while_staging_and_rerun_converges(self):
-        """`killpoints[bench]`, `--system mbp`'s own new caller of 5.27's crash-only `Stage`: every
-        effect up to the reboot converges on a rerun, from a fresh world, the same as any other kill
-        point in this tree. A kill after the machine is told to reboot is not resumable this way --
-        `Boot.arm()` refuses an already-armed machine by design (only `wk boot mbp --back` undoes an
-        arming), so nothing past that point is exercised here; a person, not a rerun, notices it."""
-        def run_once(w):
-            w.clock.t += 1
-            with contextlib.redirect_stderr(io.StringIO()):
-                w.go()
-        probe = MacWorld(self.tmp)
-        run_once(probe)
-        cleanup = [i for i, e in enumerate(probe.effects) if e[0] == "remove" and "/bench-stage/" in e[1] and not e[1].endswith(".stage.json")]
-        converges(self, lambda: MacWorld(self.tmp), run_once, lambda w: w.mac.running, max_effects=cleanup[-1] + 1)
 
 
 if __name__ == "__main__":

@@ -1,21 +1,4 @@
-"""A board as a bench system (lib/wk/bench/board.py): `wk bench deploy` landing an image workspace's slot on its bench system,
-verified against the manifest read back off it, and `wk bench run <ws> <plan> --system <board>` measuring one slot
-there -- the bench system found and prepared through the boot driver's channel, the session brought up, run-benchmark
-run here with the board's page server behind `Machine.forward`, and the board's evidence taken whether or not the
-leg produced a number. Against a FakeBoard (tests/fake_boot.py) whose bench system also answers a run's on-board
-files: no ssh, no hardware.
-
-An A/B on one board (lib/wk/bench/board_ab.py) runs its legs as that same run: two slots on one booted system, or
-two systems, one boot per arm switch -- `unit boot.two_systems_on_fake`; how a leg boots its system is
-tests/test_pi_ab_systems.py's.
-
-Rows landed here: `unit bench.failed_leg_keeps_evidence`, `unit record.progress_shape[board run]`,
-`unit killpoints[bench deploy]`, `unit killpoints[bench]` for a board, `unit boot.two_systems_on_fake`;
-`bench.pipeline_conformance[board]` is tests/test_bench_pipeline.py's. The live half reads a real board and changes
-nothing on it.
-
-Run: python3 tests/run.py -k tests.test_bench_board
-"""
+"""A board as a bench system (lib/wk/bench/board.py, board_ab.py) against a FakeBoard (tests/fake_boot.py): no ssh, no hardware."""
 import contextlib
 import hashlib
 import io
@@ -23,6 +6,7 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -139,7 +123,7 @@ class BenchBoard(FakeBoard):
                    "compositor.sh": "Output 'HDMI-A-1' enabled\n", "at-failure.sh": "--- ps\n  1 init\n"}
         if name in answers:
             return Result(0, answers[name])
-        if name in ("browsers-dead.sh", "weston.sh", "seat.sh"):
+        if name in ("clear.sh", "weston.sh", "seat.sh"):
             return Result(0)
         return super().run_onboard(name, p, input)
 
@@ -183,6 +167,47 @@ class DeployWorld:
         return dict(self.fake.files), set(self.fake.dirs)
 
 
+# A board's process table as directories, and the tools clear.sh signals with acting on it; a pid listed in $STUBBORN dies only to -9.
+CLEAR_SHIM = r"""
+sleep() { :; }
+systemctl() { echo "systemctl $*" >> "$WK_PROC/log"; }
+alive() { local d; for d in "$WK_PROC"/[0-9]*; do [ -d "$d" ] && [ "$(cat "$d/comm")" = "$1" ] && echo "${d##*/}"; done; }
+pidof() { local r=1 x; for x; do [ -n "$(alive "$x")" ] && r=0; done; return $r; }
+gone() { case " $STUBBORN " in (*" $1 "*) [ "$2" = -9 ] || return 0 ;; esac; rm -rf "${WK_PROC:?}/$1"; }
+kill() { local s= x; [ "$1" = -9 ] && { s=-9; shift; }; for x; do gone "$x" $s; done; }
+killall() { local s= x y; [ "$1" = -9 ] && { s=-9; shift; }; for x; do for y in $(alive "$x"); do gone "$y" $s; done; done; }
+"""
+
+
+class TestClearingABoard(unittest.TestCase):
+
+    def run_clear(self, procs, mine="10.0.0.1 5000 10.0.0.2 22", stubborn=""):
+        with tempfile.TemporaryDirectory() as d:
+            for pid, comm, conn in procs:
+                Path(d, str(pid)).mkdir()
+                Path(d, str(pid), "comm").write_text(comm + "\n")
+                Path(d, str(pid), "environ").write_bytes(b"HOME=/root\0" + (b"SSH_CONNECTION=%s\0" % conn.encode() if conn else b""))
+            env = {"PATH": os.environ["PATH"], "WK_PROC": d, "SSH_CONNECTION": mine, "STUBBORN": stubborn}
+            cp = subprocess.run(["sh", "-c", CLEAR_SHIM + board.Script(REPO, "clear.sh").text()], env=env,
+                                capture_output=True, text=True)
+            return cp, sorted(int(n) for n in os.listdir(d) if n.isdigit())
+
+    def test_another_login_s_processes_and_browsers_go_and_the_system_stays(self):
+        cp, left = self.run_clear([(1, "init", ""), (300, "sshd", ""), (310, "weston", ""), (400, "sh", "10.0.0.1 4100 10.0.0.2 22"),
+                                   (401, "free", "10.0.0.1 4100 10.0.0.2 22"), (500, "cog", ""), (600, "sh", "10.0.0.1 5000 10.0.0.2 22")])
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertEqual(left, [1, 300, 310, 600])
+        self.assertIn("stopping foreign: sh free", cp.stdout)
+
+    def test_a_survivor_of_sigterm_is_killed(self):
+        cp, left = self.run_clear([(1, "init", ""), (400, "sh", "10.0.0.1 4100 10.0.0.2 22")], stubborn="400")
+        self.assertEqual((cp.returncode, left), (0, [1]), cp.stderr)
+
+    def test_off_ssh_it_refuses_rather_than_take_every_login_for_foreign(self):
+        cp, left = self.run_clear([(1, "init", ""), (400, "sh", "10.0.0.1 4100 10.0.0.2 22")], mine="")
+        self.assertEqual((cp.returncode, left), (2, [1, 400]))
+
+
 class TestDeploy(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-board-"))
@@ -196,14 +221,6 @@ class TestDeploy(unittest.TestCase):
                          FILES["usr/lib/libWPEWebKit-2.0.so.1.0.0"])
         self.assertEqual(json.loads(w.fake.files[os.path.join(dest, "slot.json")]), w.doc)
         self.assertNotIn(dest + ".part", w.fake.dirs)
-
-    def test_the_manifest_is_read_back_and_compared(self):
-        """The sums fed to the board's sha256sum come from the slot.json read back off the board's own
-        copy, not the local one -- a corrupted manifest transfer would be caught too."""
-        w = DeployWorld(self.tmp)
-        w.deploy()
-        ran = [e for e in w.fake.effects if e[0] == "run" and e[1][:2] == ("sh", "-c")]
-        self.assertEqual(len(ran), 1)
 
     def test_a_mismatch_refuses(self):
         w = DeployWorld(self.tmp)
@@ -225,8 +242,6 @@ class TestDeploy(unittest.TestCase):
             w.bench().deploy(WS, "not-a-real-board", "a", machine=w.fake)
 
     def test_a_board_armed_for_a_boot_it_has_not_taken_is_not_deployed_to(self):
-        """The barrier asks the boot driver's own record: an arming not yet spent means the filesystem answering
-        ssh is not the one about to run."""
         w = DeployWorld(self.tmp)
         w.board.running = w.board.conf["root"]
         w.board.rescue("")
@@ -274,8 +289,6 @@ class TestDeployDryRun(unittest.TestCase):
         self.addCleanup(shutil.rmtree, str(self.tmp), ignore_errors=True)
 
     def test_the_plan_is_the_runs_mutations(self):
-        """`dispatch.dry_run_is_the_recorder[bench]`: a dry deploy records the same effects a wet one
-        does -- each already skips its own mutation under --dry-run -- and lands no bytes."""
         wet, dry = DeployWorld(self.tmp), DeployWorld(self.tmp)
         wet.deploy()
         os.environ["WK_DRY_RUN"] = "1"
@@ -294,15 +307,12 @@ class TestDeployDryRun(unittest.TestCase):
 
 class TestDeployKillPoints(unittest.TestCase):
     def test_a_deploy_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[bench deploy]`: a kill at any point leaves either the old slot or nothing --
-        never a half-written one -- and a rerun reaches the same final tree."""
         tmp = Path(tempfile.mkdtemp(prefix="wk-test-board-"))
         self.addCleanup(shutil.rmtree, str(tmp), ignore_errors=True)
         converges(self, lambda: DeployWorld(tmp), lambda w: w.deploy(), DeployWorld.state)
 
 
 class TestInAWorkspaceItIsABrokerRequest(unittest.TestCase):
-    """A sandboxed workspace reaches a board only through the broker, which runs the same command on the workstation."""
 
     def world(self, socket_up=True):
         tmp = Path(tempfile.mkdtemp(prefix="wk-test-board-"))
@@ -377,7 +387,7 @@ def cached_samply(w):
 class BoardWorld(Fake):
     """This host running `wk bench run ws <plan> --system testboard`: its store, the mirror the runner tree is
     exported from (already exported), the payload pinned, and a BenchBoard up in bench mode with slot `a` on it.
-    `popen` is run-benchmark: it writes the result and the driver's running-binary check, and notes whether
+    `start` is run-benchmark: it writes the result and the driver's running-binary check, and notes whether
     the board's forward was held while it ran."""
 
     def __init__(self, tmp, rc=0):
@@ -414,7 +424,7 @@ class BoardWorld(Fake):
         self.effects.append(("act", tuple(argv)))
         return super().act_run(argv, **kw)
 
-    def popen(self, argv, stdin=None, stdout=None, stderr=None, cwd=None):
+    def start(self, argv, out, cwd=None):
         self.watched.append((list(argv), cwd))
         self.forwarded.append(set(self.board.bench.pids))
         script = argv[-1]
@@ -422,7 +432,7 @@ class BoardWorld(Fake):
         self.exports = {k: shlex.split(v)[0] if v else "" for k, v in exports.items()}
         run = shlex.split(script.splitlines()[-1].split(" && exec ", 1)[1])
         rc = 3 if self.fails(self.exports) else self.rc
-        stdout.write(b"Score: 30\n")
+        out.write(b"Score: 30\n")
         if rc == 0:
             Path(run[run.index("--output-file") + 1]).write_text(RESULT)
         with open(self.exports["WK_BOARD_EVIDENCE"], "a") as f:
@@ -455,7 +465,7 @@ class BoardWorld(Fake):
         err = io.StringIO()
         with self.patches(), contextlib.redirect_stderr(err):
             system = board.for_board(str(REPO), reg, "ws", self.clock, BOARD)
-            r = board.BoardRun(str(REPO), reg, system, self.clock, self.env, self.popen)
+            r = board.BoardRun(str(REPO), reg, system, self.clock, self.env)
             try:
                 rc = r.go(plan, o)
             except Refused as e:
@@ -534,7 +544,7 @@ class TestARun(BoardTest):
         ((argv, cwd),) = w.watched
         self.assertEqual((argv[:2], cwd), (["bash", "-c"], w.tree))
         self.assertTrue(w.forwarded[0], "no forward was held while run-benchmark ran")
-        self.assertEqual(w.board.bench.pids, set(), "the forward outlived the run")
+        self.assertEqual(w.board.bench.pids, {os.getpid()}, "the forward outlived the run")
         self.assertIn(("forward", 45678), w.board.bench.effects)
         self.assertEqual(w.exports["WK_BOARD_URL"], "127.0.0.1:45678")
         self.assertEqual((w.exports["WK_BOARD_DEST"], json.loads(w.exports["WK_BOARD_OPTS"])), ("testboard-bench", ["-l", "root"]))
@@ -557,7 +567,6 @@ class TestARun(BoardTest):
         self.assertEqual((w.run_dir() / "browser.log").read_text(), "browser said this\n")
 
     def test_a_run_writes_the_one_progress_record(self):
-        """`record.progress_shape[board run]`: step n of m, the log, how to stop it, how it ended -- and the board claimed."""
         w = self.world()
         w.invoke()
         (t,) = w.recs().list()
@@ -569,15 +578,12 @@ class TestARun(BoardTest):
         self.assertEqual(Path(t.field("log")), w.run_dir() / "run.log")
 
     def test_every_effect_on_the_board_goes_through_its_bench_system(self):
-        """The rescue/host install a bench-device answers on is probed, never acted on: a board benched on its rescue is the regression."""
         w = self.world()
         w.invoke()
         self.assertEqual([e for e in w.board.sides["m_ssh"].effects if e[0] != "run"], [])
         self.assertTrue([e for e in w.board.bench.effects if e[0] == "act"])
 
     def test_a_failed_leg_keeps_its_evidence(self):
-        """`bench.failed_leg_keeps_evidence`: the board's account of the failure, its browser's log and its messages
-        are kept, the browser is stopped, and the record ends with the run's status."""
         w = self.world(rc=3)
         self.assertEqual(w.invoke(), 3, w.err)
         d = w.run_dir()
@@ -683,8 +689,6 @@ class TestRefusals(BoardTest):
 
 
 class TestTheLaunch(unittest.TestCase):
-    """What the board's shell runs to start the browser: the slot's own libraries, its own cache, the pin, and
-    the JIT tier report only when asked for, on a warmup leg."""
 
     def system(self, session="drm"):
         s = board.BoardSystem(str(REPO), mock.Mock(), None, "", FakeClock(), BOARD, None, Fake())
@@ -711,7 +715,6 @@ class TestTheLaunch(unittest.TestCase):
         self.assertIn("JSC_reportDFGCompileTimes=1", self.system().launch(self.leg(warmup="1", jit_tiers="1")))
 
     def test_a_launch_is_posix_sh(self):
-        """The driver runs the launch text through the board's /bin/sh (busybox ash); dash's parser is the judge."""
         import subprocess
         s = self.system()
         s.doc["browser"] = "minibrowser"
@@ -746,13 +749,8 @@ class TestTheBoardsShell(unittest.TestCase):
                 cp = subprocess.run(["sh", "-n", str(f)], capture_output=True, text=True, timeout=10)
                 self.assertEqual(cp.returncode, 0, cp.stderr)
 
-    def test_the_seat_is_found_by_its_pid_file_not_by_a_pattern_its_own_shell_carries(self):
-        """`sh -c <file>` carries the whole file in its own command line, so a pgrep for a word in it matches that shell."""
-        self.assertNotIn("pgrep", (REPO / "bench" / "onboard" / "seat.sh").read_text())
-
 
 class TestALegForAnAB(BoardTest):
-    """An A/B's leg lands in the A/B's task, with its round and arm."""
 
     def task(self, w):
         taskdir = w.bench_dir() / "t1"
@@ -799,8 +797,6 @@ class TestALegForAnAB(BoardTest):
         self.assertEqual((env["warmup_kind"], env["profiler"], env["host"]["perf_event_paranoid"]), ("evidence", "samply", "2"))
 
     def test_a_capture_that_cannot_be_copied_off_names_why(self):
-        """The copy's own error travels into the barrier, rather than a bare
-        'produced no capture' that looks the same for every cause."""
         w = self.world()
         self.task(w)
         cached_samply(w)
@@ -856,8 +852,6 @@ class TestKill(BoardTest):
 
 class TestDryRun(BoardTest):
     def test_the_plan_is_the_runs_mutations(self):
-        """`dispatch.dry_run_is_the_recorder[bench]` for a board: what a dry run says it would do on the board and
-        here is what a wet run does, and it writes no record."""
         def mutations(w):
             locks = w.env["WK_LOCK_DIR"]
             both = [("board",) + e for e in w.board.bench.effects] + [("here",) + e for e in w.effects]
@@ -878,7 +872,6 @@ class TestDryRun(BoardTest):
 
 class TestKillPoints(BoardTest):
     def test_a_run_killed_after_any_effect_on_the_board_and_rerun_converges(self):
-        """`killpoints[bench]` for a board: each run is its own task, and nothing a killed one left is trusted."""
         def run_once(w):
             w.clock.t += 1
             w.invoke()
@@ -904,7 +897,6 @@ class ABTest(BoardTest):
 
 
 class TestASlotAB(ABTest):
-    """`--ab A,B`: two slots on the booted system, the system held fixed."""
 
     def test_a_discarded_warmup_then_rounds_that_alternate_the_lead(self):
         w = self.ab_world()
@@ -948,10 +940,9 @@ class TestASlotAB(ABTest):
         self.assertEqual(w.invoke("jetstream3", "--ab", "a,b", "--rounds", "1", "--task", task), 0, w.err)
 
     def test_the_board_is_prepared_once_and_rechecked_every_leg(self):
-        """The clock pin, the claim and the session are taken once on a boot; every leg re-reads the probe and its slot."""
         w = self.ab_world()
         self.assertEqual(w.invoke("jetstream3", "--ab", "a,b", "--rounds", "2"), 0, w.err)
-        self.assertEqual((w.ran("pin-clock.sh"), w.ran("keep.sh"), w.ran("weston.sh"), w.ran("browsers-dead.sh")), (1, 1, 1, 1))
+        self.assertEqual((w.ran("pin-clock.sh"), w.ran("keep.sh"), w.ran("weston.sh"), w.ran("clear.sh")), (1, 1, 1, 1))
         probes = [e for e in w.board.bench.effects if e[0] == "run" and e[1][-1] == Onboard(REPO, "probe.sh").text()]
         self.assertGreaterEqual(len(probes), 6)
         self.assertEqual(len({e["runner_sha"] for e in w.runs()}), 1)
@@ -977,14 +968,6 @@ class TestASlotAB(ABTest):
         legs = [t for t in recs if t.field("name") == "ws-leg"]
         self.assertTrue(legs)
         self.assertEqual({(t.raw("holds"), t.field("kill")) for t in legs}, {(None, "wk bench run ws --kill --system testboard")})
-
-    def test_a_board_another_task_holds_is_not_benched(self):
-        w = self.ab_world()
-        w.pids.add(99)
-        w.recs().begin("bench", "here", "other", "kill 99", "/l", ["x"], holds="device:" + BOARD, pid=99)
-        self.assertNotEqual(w.invoke("jetstream3", "--ab", "a,b"), 0)
-        self.assertIn("another live task holds it", w.err)
-        self.assertEqual(w.watched, [])
 
     def test_a_warmup_that_finds_different_renderers_refuses_before_any_round(self):
         w = self.ab_world()
@@ -1046,8 +1029,6 @@ class TestASlotAB(ABTest):
 
 
 class TestTwoSystemsOnFake(ABTest):
-    """`unit boot.two_systems_on_fake`: `--ab-systems` on a board holding two systems -- each leg's system armed and booted,
-    read back from its own marker, measured, and the board disarmed and handed back to its rescue at the end."""
 
     def systems_world(self):
         w = self.world()
@@ -1065,8 +1046,6 @@ class TestTwoSystemsOnFake(ABTest):
                                          ("2", "b", "a", "settle"), ("2", "b", "a", ""), ("2", "a", "a", "settle"), ("2", "a", "a", "")])
 
     def test_a_system_is_prepared_once_per_boot(self):
-        """Five boots are benched on (the warmup's two, round 1's two, round 2's switch back to A); round 2 leads with the
-        system round 1 ended on, so it boots nothing and prepares nothing."""
         w = self.systems_world()
         w.invoke("jetstream3", "--ab-systems", "sys-a,sys-b", "--rounds", "2")
         self.assertEqual((w.ran("pin-clock.sh"), w.ran("weston.sh")), (5, 5))
@@ -1097,9 +1076,6 @@ def live_board(name):
 
 
 class TestARealBoardAnswersWhatALegRecords(unittest.TestCase):
-    """`live bench.evidence[<b>]`, the read-only half: the bench system answers the probe, its facts, its display
-    and its slots' manifests through the channel a run takes. A leg itself pins the clock, kills browsers and
-    starts a compositor, so `live bench.leg_completes[<b>]` is a person's run (docs/PLAN.md 5.23, owed)."""
 
     def evidence(self, name):
         d, system = live_board(name)

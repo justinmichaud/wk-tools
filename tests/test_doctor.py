@@ -1,10 +1,4 @@
-"""`wk doctor` (lib/wk/doctor.py): every check is a row (state, what, remedy)
-and one renderer prints them, so each test calls the function that makes the
-rows -- with a dict, a string, a fake machine or a stub of the bash bridge --
-and asserts on the rows. Nothing here reaches podman, tart, ssh or a phone.
-
-Run: python3 -m unittest tests.test_doctor -v
-"""
+"""`wk doctor` (lib/wk/doctor.py): every check is a row (state, what, remedy)"""
 import io
 import json
 import os
@@ -19,8 +13,8 @@ from http.server import HTTPServer
 from pathlib import Path
 from unittest import mock
 
-from tests.support import NO_REGISTRY, REPO, WkTest, clean_env, stub_path
-from tests.test_credcheck import FakeAnthropic, FakeLiteLLM, RECORD, login
+from tests.support import NO_REGISTRY, REPO, WkTest, clean_env
+from tests.test_credcheck import FakeAnthropic, FakeLiteLLM
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import doctor, fleet  # noqa: E402
@@ -49,19 +43,16 @@ def boom(*a, **kw):
 
 def stub_shell(**over):
     """Every question a Doctor asks outside Python (doctor.Host), answered with nothing unless the test says otherwise."""
-    base = dict(gh_authenticated=lambda root, env=None: False,
+    base = dict(gh_authenticated=lambda root, machine: False,
                 priv_helpers=lambda root, env=None: [],
-                priv_answers=lambda root, path, env=None: False)
+                priv_answers=lambda root, path, machine: False)
     base.update(over)
     return types.SimpleNamespace(**base)
 
 
-def stub_keys(peers=None, verdict=None):
-    """`wk key`'s answers (lib/wk/key/): nothing stored here, and the given peers."""
-    k = types.SimpleNamespace(settable=lambda: [], stored_verdict=lambda n: "",
-                              cred_verdict_of=verdict or (lambda p, n: ""))
-    k.resolve = peers or (lambda: types.SimpleNamespace(peers=[]))
-    return k
+def stub_keys():
+    """`wk key`'s answers (lib/wk/key/): nothing stored here."""
+    return types.SimpleNamespace(settable=lambda: [], stored_verdict=lambda n: "")
 
 
 def stub_mc(**over):
@@ -112,9 +103,8 @@ class TestTheRenderer(unittest.TestCase):
 
 
 class TestHostToolsZed(unittest.TestCase):
-    """`wk doctor`'s zed row and `cmd/zed`'s own "is zed installed" check
-    read the one answer, `targets.zed_cli` -- they used to disagree (doctor
-    took the app bundle's presence, `cmd/zed` the cli's)."""
+    """`wk doctor`'s zed row and `cmd/zed`'s own "is zed installed" check read the one answer, `targets.zed_cli`
+    -- they used to disagree (doctor took the app bundle's presence, `cmd/zed` the cli's)."""
 
     def _zed_row(self, fake):
         d = fake_doctor(True, machine=fake)
@@ -131,11 +121,121 @@ class TestHostToolsZed(unittest.TestCase):
         self.assertEqual(self._zed_row(fake)[0], OK)
 
     def test_the_bundle_directory_alone_with_no_executable_cli_is_missing(self):
-        """The bundle folder existing is not enough: the same binary `cmd/zed` execs has to answer."""
         fake = Fake()
         fake.dirs.add("/Applications/Zed.app")
         fake.answer(["test", "-x", "/Applications/Zed.app/Contents/MacOS/cli"], rc=1)
         self.assertEqual(self._zed_row(fake)[0], MISS)
+
+
+class TestHostToolsGitLfs(unittest.TestCase):
+    """git-lfs is on every host: its absence is a miss naming the setup stage, on either OS."""
+
+    def _row(self, macos, fake):
+        return next(r for r in fake_doctor(macos, machine=fake).host_tools() if r[1] == "git-lfs")
+
+    def test_absent_is_a_miss_with_the_remedy(self):
+        for macos in (True, False):
+            fake = Fake()
+            fake.answer(HAVE + ("git-lfs",), rc=1)
+            fake.answer(["test", "-x", "/h/.local/bin/git-lfs"], rc=1)
+            self.assertEqual((MISS, "git-lfs", "./setup --stage tools"), self._row(macos, fake))
+
+    def test_the_one_tools_sh_installs_off_path_is_ok(self):
+        fake = Fake()
+        fake.answer(HAVE + ("git-lfs",), rc=1)
+        fake.answer(["test", "-x", "/h/.local/bin/git-lfs"])
+        self.assertEqual(OK, self._row(True, fake)[0])
+
+    def test_present_is_ok(self):
+        fake = Fake()
+        fake.answer(HAVE + ("git-lfs",))
+        self.assertEqual(OK, self._row(False, fake)[0])
+
+    def test_the_shared_gitconfig_runs_the_filter_and_a_place_without_git_lfs_still_adds(self):
+        tmp = tempfile.mkdtemp(prefix="wk-test-lfs-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        with open(os.path.join(tmp, "gitconfig"), "w") as f:
+            f.write("[include]\n\tpath = %s\n" % (REPO / "dotfiles" / "gitconfig"))
+        bare = os.path.join(tmp, "bin")
+        os.mkdir(bare)
+        os.symlink(shutil.which("git"), os.path.join(bare, "git"))
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=os.path.join(tmp, "gitconfig"), GIT_CONFIG_NOSYSTEM="1", PATH=bare + ":/bin")
+        git = lambda *a: subprocess.run(["git", "-C", tmp + "/r"] + list(a), env=env, capture_output=True, text=True)
+        subprocess.run(["git", "init", "-q", tmp + "/r"], env=env, check=True)
+        self.assertEqual("git-lfs clean -- %f", git("config", "filter.lfs.clean").stdout.strip())
+        Path(tmp, "r", ".gitattributes").write_text("* filter=lfs\n")
+        Path(tmp, "r", "a").write_text("a\n")
+        self.assertEqual(0, git("add", "a").returncode)
+
+
+PEERS = json.dumps({"Peer": {"a": {"DNSName": "pi-rescue.tail.ts.net.", "TailscaleIPs": ["100.1.1.1"], "Online": True},
+                             "b": {"DNSName": "pi-bench.tail.ts.net.", "TailscaleIPs": ["100.1.1.2"], "Online": False}}})
+
+
+def probed(mode="host", armed="", **over):
+    f = dict(role="bench-device", probeable="yes", mode=mode, bridge="", armed=armed, armed_by="me",
+             armed_at="2099-01-01T00:00:00Z", armed_boot="", boot_id="", media="sd")
+    f.update(over)
+    return f
+
+
+class TestDeviceRows(unittest.TestCase):
+    """`wk doctor <machine>`: rows from the tailnet, the fleet probe and a board's sysfs, asked through a fake."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="wk-test-doctor-device-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        for name, text in (("pi", "kind=board\nssh=pi-rescue\nbench_ssh=pi-bench\n"),
+                           ("box", "kind=build\ndriver=remote\n")):
+            Path(self.dir, name + ".conf").write_text(text)
+        self.env = {"WK_MACHINES_DIR": self.dir, "HOME": self.dir, "PATH": os.environ["PATH"]}
+        self.fake = Fake()
+        self.fake.answer(["tailscale", "status", "--json"], out=PEERS)
+        self.fake.answer(["ssh"], out="performance\n51234\n")
+
+    def rows(self, name, fields=None, answers=None):
+        return list(doctor.device(str(REPO), name, self.env, self.fake, probe=lambda *a: fields, answers=answers))
+
+    def row(self, rows, word):
+        return next(r for r in rows if word in r[1])
+
+    def test_each_tailnet_name_is_a_row_and_an_offline_one_is_missing(self):
+        rows = self.rows("pi", probed())
+        self.assertEqual(OK, self.row(rows, "pi-rescue on the tailnet")[0])
+        self.assertEqual(MISS, self.row(rows, "pi-bench on the tailnet")[0])
+
+    def test_a_board_answering_in_host_mode_reports_its_governor_and_temperature(self):
+        rows = self.rows("pi", probed())
+        self.assertEqual(OK, self.row(rows, "answers in host mode")[0])
+        self.assertEqual(OK, self.row(rows, "not armed")[0])
+        self.assertIn("performance", self.row(rows, "cpu governor on pi-rescue")[1])
+        self.assertIn("51C", self.row(rows, "temperature on pi-rescue")[1])
+
+    def test_bench_mode_reads_the_bench_name(self):
+        self.assertTrue(any("on pi-bench" in r[1] for r in self.rows("pi", probed(mode="bench"))))
+
+    def test_unreachable_is_missing_and_asks_nothing_further(self):
+        rows = self.rows("pi", probed(mode=""))
+        self.assertEqual(MISS, self.row(rows, "unreachable")[0])
+        self.assertFalse(any("governor" in r[1] for r in rows))
+
+    def test_no_answer_within_the_ceiling_is_unknown(self):
+        self.assertEqual(UNK, self.row(self.rows("pi", None), "did not answer")[0])
+
+    def test_a_current_arm_is_a_note_and_a_stale_one_is_missing(self):
+        self.assertEqual(doctor.NOTE, self.row(self.rows("pi", probed(armed="bench")), "armed for bench")[0])
+        stale = probed(armed="bench", armed_boot="b1", boot_id="b2")
+        self.assertEqual(MISS, self.row(self.rows("pi", stale), "armed for bench")[0])
+
+    def test_a_name_the_tailnet_lacks_and_a_failed_probe_are_unknown(self):
+        self.fake.answer(["tailscale", "status", "--json"], out="{}")
+        rows = self.rows("pi", {"error": "no driver"})
+        self.assertEqual(UNK, self.row(rows, "pi-rescue is not a tailnet node")[0])
+        self.assertEqual(UNK, self.row(rows, "failed: no driver")[0])
+
+    def test_a_build_machine_is_asked_whether_it_answers(self):
+        self.assertEqual(OK, self.row(self.rows("box", answers=lambda n, c: (True, "")), "box answers")[0])
+        self.assertEqual(MISS, self.row(self.rows("box", answers=lambda n, c: (False, "timed out")), "timed out")[0])
 
 
 class TestGitConfigFindings(unittest.TestCase):
@@ -243,9 +343,9 @@ class TestProbeStoreGit(unittest.TestCase):
 
 
 class TestProbeStoreMirror(unittest.TestCase):
-    """The mirror is reported by the branches it carries: a workspace asks it for
-    a head per declared branch (wk_fetch_refspecs), so one it lacks fails every
-    fetch, and a directory that exists says nothing about that."""
+    """The mirror is reported by the branches it carries: a workspace asks it for a head per declared branch
+    (wk_fetch_refspecs), so one it lacks fails every fetch, and a directory that exists says nothing about
+    that."""
 
     def _store(self, heads):
         d = Path(tempfile.mkdtemp(prefix="wk-test-doctor-mirror-"))
@@ -273,7 +373,6 @@ class TestProbeStoreMirror(unittest.TestCase):
         self.assertEqual("mirror=gap webkitglib/2.52", self._mirror_line(["main", "webkitglib/2.52"], ["main"]))
 
     def test_the_probe_subverb_runs_where_the_store_is(self):
-        """`cmd/doctor --probe-store` is what the macOS host runs inside the podman VM."""
         d = tempfile.mkdtemp(prefix="wk-test-doctor-nomirror-")
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         cp = subprocess.run([str(CMD_DOCTOR), "--probe-store"], capture_output=True, text=True, timeout=60,
@@ -303,8 +402,6 @@ class TestReportStore(unittest.TestCase):
         self.assertNotIn("git user.name", text)
 
     def test_a_mirror_missing_a_branch_is_a_row_naming_it_and_the_refresh(self):
-        """Not `wk sync`, which fetches in a workspace against the mirror as it
-        is: the branch arrives only where the mirror is refreshed."""
         rows = self.rows(FULL_STORE_BLOB.replace("mirror=ok", "mirror=gap webkitglib/2.52"), "")
         self.assertEqual((MISS, "WebKit mirror carries no webkitglib/2.52", "wk sync --mirror"), rows[0])
 
@@ -354,8 +451,8 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
 
 
 class TestTheCredentialsSection(unittest.TestCase):
-    """Each row is one verdict of lib/credcheck.py's rules, taken through the
-    `wk key`'s own reading of it (Key.stored_verdict) from what is in a scratch store."""
+    """Each row is one verdict of lib/credcheck.py's rules, taken through the `wk key`'s own reading of it
+    (Key.stored_verdict) from what is in a scratch store."""
 
     @classmethod
     def setUpClass(cls):
@@ -375,8 +472,6 @@ class TestTheCredentialsSection(unittest.TestCase):
 
     def setUp(self):
         FakeAnthropic.status = 200
-        FakeAnthropic.policy_status = 200
-        FakeAnthropic.policy = {"restrictions": {}, "compliance_taints": []}
         FakeLiteLLM.models_status = 200
         FakeLiteLLM.info_status = 403
 
@@ -391,18 +486,16 @@ class TestTheCredentialsSection(unittest.TestCase):
                "WK_TS_AUTHKEY": str(tmp / "tailscale-authkey"), "WK_TS_API_SECRET": str(tmp / "tailscale-api-key"),
                "WK_GITHUB_API": "http://127.0.0.1:1", "WK_TAILNET_API": "http://127.0.0.1:1"}
         if online:
-            env.update({"WK_ANTHROPIC_API": self.anthropic, "WK_CLAUDE_OAUTH": self.anthropic, "WK_LITELLM_API": self.litellm})
+            env.update({"WK_ANTHROPIC_API": self.anthropic, "WK_LITELLM_API": self.litellm})
         e = clean_env(env)
         with mock.patch.dict(os.environ, e, clear=True):   # Local's processes inherit this one's environment
             k = Key(str(REPO), env=e, machine=Local())
             return doctor.credentials_section(k.settable(), k.stored_verdict)
 
-    LOGIN = {"agent-rw/.credentials.json": login(), "agent-rw/.claude.json": json.dumps(RECORD)}
-
     def test_nothing_stored_is_reported_and_is_not_a_fault(self):
         rows = self.rows({})
         text = text_of(rows)
-        for name in ("github-pat", "bugzilla-api-key", "claude", "litellm", "claude-login", "tailnet", "tailnet-api"):
+        for name in ("github-pat", "bugzilla-api-key", "claude", "litellm", "tailnet", "tailnet-api"):
             self.assertIn(name, text)
         self.assertIn("nothing stored", text)
         self.assertEqual([], [r for r in rows if r[0] == MISS], text)
@@ -415,7 +508,6 @@ class TestTheCredentialsSection(unittest.TestCase):
         self.assertIn("login.tailscale.com", row[2])
 
     def test_a_credential_that_could_not_be_judged_is_reported_unverified(self):
-        """No network: the token is there, nothing about it was established, and the next run asks again."""
         row = [r for r in self.rows({"push-keys/github-pat": "github_pat_11ABC_x"}) if r[1].startswith("github-pat")][0]
         self.assertEqual(UNK, row[0], row)
         self.assertIn("could not reach", row[1])
@@ -425,83 +517,14 @@ class TestTheCredentialsSection(unittest.TestCase):
         self.assertTrue(any(r[0] == OK and "restricted to the LLM API routes" in r[1] for r in rows), text_of(rows))
         self.assertEqual([], [r for r in rows if r[0] == MISS], text_of(rows))
 
-    def test_a_login_the_policy_allows_remote_control_has_an_ok_row_for_it(self):
-        rows = self.rows(self.LOGIN)
-        self.assertTrue(any(r[0] == OK and r[1].startswith("claude-login -- scopes:") for r in rows), text_of(rows))
-        self.assertIn((OK, "remote control in the workspaces this login reaches: allowed by the organization's policy", ""), rows)
-
-    def test_a_login_the_policy_denies_remote_control_is_a_red_row_with_the_remedy(self):
-        """The credential is fine and every plain session works, so its own row
-        stays green; the thing `wk new` will refuse on gets a row of its own,
-        red, naming who can change it."""
-        FakeAnthropic.policy = {"restrictions": {"allow_remote_control": {"allowed": False}}, "compliance_taints": []}
-        rows = self.rows(self.LOGIN)
-        row = [r for r in rows if r[1].startswith("remote control in the workspaces this login reaches")][0]
-        self.assertEqual(MISS, row[0], row)
-        self.assertIn("denied by the organization's policy", row[1])
-        self.assertIn("an owner of the Example Org organization", row[2])
-
-    def test_a_login_nobody_could_ask_about_says_so_on_both_rows(self):
-        rows = self.rows(self.LOGIN, online=False)
-        self.assertTrue(any(r[0] == UNK and r[1].startswith("claude-login: could not reach") for r in rows), text_of(rows))
-        self.assertTrue(any(r[0] == UNK and r[1] == "remote control in the workspaces this login reaches: unverified" for r in rows), text_of(rows))
-
-    def test_a_dead_login_is_red_with_the_replacement_and_no_policy_row(self):
-        FakeAnthropic.status = 401
-        rows = self.rows(self.LOGIN)
-        row = [r for r in rows if r[1].startswith("claude-login:")][0]
-        self.assertEqual(MISS, row[0], row)
-        self.assertIn("Anthropic does not accept this login", row[1])
-        self.assertIn("wk key set claude-login --replace", row[2])
-        self.assertFalse(any("remote control in the workspaces" in r[1] for r in rows), text_of(rows))
-
     def test_nothing_stored_is_ever_printed(self):
         secret = "sk-ant-oat01-do-not-print-this"
         self.assertNotIn(secret, text_of(self.rows({"secrets/claude-token": secret})))
 
 
-class TestTheOtherWorkstationsLogins(unittest.TestCase):
-    """`wk doctor --all` asks each peer workstation for its own login's verdict, and renders it as rows."""
-
-    VERDICTS = {
-        "goodbox": "ok\tscopes: user:profile; organization: Example Org; remote control allowed by the organization's policy.\n    remote-control: allowed",
-        "deniedbox": "ok\tscopes: user:profile; remote control DENIED: allow_remote_control is off.\n    remote-control: denied\n    fix: an owner of the Example Org organization turns Remote Control on",
-        "emptybox": "bad\tno accessToken.",
-        "newbox": "absent\tnothing stored -- wk key set claude-login",
-        "farbox": "unverified\tfarbox did not answer: unreachable",
-    }
-
-    def rows(self, *peers):
-        return doctor.fleet_logins_section(peers, self.VERDICTS.__getitem__)
-
-    def test_a_peer_with_a_usable_login_is_ok_and_its_policy_is_a_row(self):
-        rows = self.rows("goodbox")
-        self.assertEqual(OK, rows[0][0])
-        self.assertTrue(rows[0][1].startswith("goodbox: scopes: user:profile"), rows)
-        self.assertEqual((OK, "remote control in the workspaces goodbox makes: allowed by the organization's policy", ""), rows[1])
-
-    def test_a_peer_whose_organization_denies_remote_control_is_red_with_the_owner_named(self):
-        rows = self.rows("deniedbox")
-        self.assertEqual(MISS, rows[1][0], rows)
-        self.assertEqual("remote control in the workspaces deniedbox makes: denied by the organization's policy", rows[1][1])
-        self.assertIn("an owner of the Example Org", rows[1][2])
-        self.assertEqual(1, len([r for r in rows if r[0] == MISS]))
-
-    def test_a_peer_without_a_usable_login_is_red_with_the_one_command(self):
-        rows = self.rows("emptybox", "newbox")
-        self.assertEqual([MISS, MISS], [r[0] for r in rows])
-        self.assertEqual("emptybox: no accessToken.", rows[0][1])
-        self.assertEqual("newbox: nothing stored -- wk key set claude-login", rows[1][1])
-        self.assertTrue(all("wk key setup" in r[2] for r in rows), rows)
-
-    def test_a_peer_that_does_not_answer_is_unknown_never_broken(self):
-        self.assertEqual([(UNK, "farbox: farbox did not answer: unreachable", "wk key check")], self.rows("farbox"))
-
-
 class TestTheFleetIsWalkedOnlyWhenAsked(unittest.TestCase):
     def _run(self, macos, everything):
-        return [(title, list(rows)) for title, rows in fake_doctor(macos, mc=stub_mc(probe=boom, findings=boom, stale=boom),
-                                                                   keys=stub_keys(peers=boom, verdict=boom)).sections(everything)]
+        return [(title, list(rows)) for title, rows in fake_doctor(macos, mc=stub_mc(probe=boom, findings=boom, stale=boom)).sections(everything)]
 
     def test_without_all_no_machine_is_asked(self):
         for macos in (True, False):
@@ -509,11 +532,10 @@ class TestTheFleetIsWalkedOnlyWhenAsked(unittest.TestCase):
                 titles = [t for t, _ in self._run(macos, False)]
                 self.assertIn("host tools", titles)
                 self.assertNotIn("battery", titles)
-                self.assertFalse(any(t.startswith("claude.ai login") for t in titles), titles)
 
     def test_with_all_the_fleet_is_asked(self):
         with self.assertRaises(AssertionError):
-            self._run(True, True)
+            [list(rows) for _, rows in build_doctor(probe=boom).sections(True)]
 
 
 class TestAMachineThatDoesNotAnswer(unittest.TestCase):
@@ -551,7 +573,6 @@ class TestAMachineThatDoesNotAnswer(unittest.TestCase):
 
 class TestRootAccess(unittest.TestCase):
     def test_sudo_is_asked_quietly_through_the_environment(self):
-        """The dispatcher strips --quiet into WK_QUIET for every other caller; a direct call sets it the same way."""
         fake = Fake()
         key = str(REPO / "cmd" / "key")
         fake.answer(["env", "WK_QUIET=1", key, "sudo", "status"], 1, "a password is required, but sudo keeps a timestamp\n")
@@ -561,19 +582,14 @@ class TestRootAccess(unittest.TestCase):
 
 
 class TestPrivilegedHelpers(unittest.TestCase):
-    """A helper whose sudoers rule is out-ranked is installed, executable and
-    useless, so the property asked is whether it answers -- of every helper,
-    on the platform each applies to."""
+    """A helper whose sudoers rule is out-ranked is installed, executable and useless, so the property asked is
+    whether it answers -- of every helper, on the platform each applies to."""
 
     def setUp(self):
         self.helpers = doctor.Host.priv_helpers(str(REPO), env=clean_env())
 
     def test_the_table_names_all_three(self):
         self.assertEqual(["wk-quiesce-priv", "wk-card-priv", "wk-boot-priv"], [h[0] for h in self.helpers])
-
-    def test_only_the_card_helper_is_platform_bound(self):
-        bound = {h[0]: h[1] for h in self.helpers}
-        self.assertEqual({"wk-card-priv": "linux", "wk-boot-priv": "any", "wk-quiesce-priv": "any"}, bound)
 
     def test_the_sudoers_name_is_derived_from_the_helper(self):
         for name, path, sudoers in ((h[0], h[3], h[4]) for h in self.helpers):
@@ -585,7 +601,7 @@ class TestPrivilegedHelpers(unittest.TestCase):
         if executable:
             for h in self.helpers:
                 fake.answer(["test", "-x", h[3]], 0)
-        sh = stub_shell(priv_helpers=lambda root, env=None: self.helpers, priv_answers=lambda root, path, env=None: answers)
+        sh = stub_shell(priv_helpers=lambda root, env=None: self.helpers, priv_answers=lambda root, path, machine: answers)
         return list(fake_doctor(True, machine=fake, sh=sh).privileged_helpers())
 
     def test_a_helper_whose_grant_does_not_answer_is_missing_with_the_rule_named(self):
@@ -608,18 +624,16 @@ class TestPrivilegedHelpers(unittest.TestCase):
 
 
 class ACachedCredentialIsNotAGrant(WkTest):
-    """`./setup` authenticates once and holds the sudo window open, so `sudo -n
-    <helper>` succeeds for anything while it runs. The rule is the evidence, so
-    `sudo -l` is what wk_priv_answers reads."""
+    """`./setup` authenticates once and holds the sudo window open, so `sudo -n <helper>` succeeds for anything
+    while it runs."""
 
     HELPER = "/usr/local/libexec/wk-boot-priv"
 
     def _answers(self, listing, run_succeeds=True):
-        with stub_path({"sudo": '#!/bin/sh\n'
-                                'for a in "$@"; do [ "$a" = -l ] && { cat <<EOF\n'
-                                + listing + '\nEOF\nexit 0; }; done\n'
-                                'exit %d\n' % (0 if run_succeeds else 1)}) as binp:
-            return doctor.Host.priv_answers(str(REPO), self.HELPER, env=clean_env({"PATH": "%s:%s" % (binp, os.environ["PATH"])}))
+        fake = Fake()
+        fake.answer(["sudo", "-n", "-l"], out=listing + "\n")
+        fake.answer(["sudo", "-n", self.HELPER], rc=0 if run_succeeds else 1)
+        return doctor.Host.priv_answers(str(REPO), self.HELPER, fake)
 
     def test_a_listing_without_the_path_is_no_grant_even_though_it_runs(self):
         listing = ("User justinmichaud may run the following commands on Tolken:\n"
@@ -634,14 +648,12 @@ class ACachedCredentialIsNotAGrant(WkTest):
         self.assertTrue(self._answers(listing))
 
     def test_a_blanket_all_is_not_a_grant(self):
-        """`(ALL) ALL` lets the helper run with a password, which is exactly what an unattended bench run cannot do."""
         self.assertFalse(self._answers("    (ALL) ALL"))
 
     def test_the_path_must_match_exactly(self):
         self.assertFalse(self._answers("    (root) NOPASSWD: /usr/local/libexec/wk-boot-priv-old"))
 
     def test_no_listing_at_all_is_reported_as_no_grant(self):
-        """Unknown must not read as working -- the safe direction is to refuse."""
         self.assertFalse(self._answers(""))
 
 

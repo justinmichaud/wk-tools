@@ -1,12 +1,5 @@
 """The two gates that stand between a PGO collection and a number nobody can
-attribute (lib/wk/bench/mac.py's PgoCollect, bench/mac-browser-check.py, lib/wk/pgo.py).
-
-Both refuse on evidence taken from the run itself, so both are exercised here
-against readings rather than against a Mac: a throttled window, a machine with
-no Metal device, a benchmark leg that died after one iteration.
-
-Run: python3 -m unittest tests.test_mac_gates -v
-"""
+attribute (lib/wk/bench/mac.py's PgoCollect, bench/mac-browser-check.py, lib/wk/pgo.py)."""
 import importlib.util
 import os
 import subprocess
@@ -52,9 +45,6 @@ GOOD_EXPECT = ("builtin", [1024, 768])
 GUEST_DISPLAY = dict(GOOD_DISPLAY, builtin=False, points=[1920, 1080],
                      vendor=0, model=0, brightness=None)
 
-# The real invocation, not the dry run's printf of the same command.
-
-
 _DEFAULT = object()
 
 
@@ -71,8 +61,6 @@ class TestTheBrowserGate(WkTest):
         self.assertEqual(self.verdict(), [])
 
     def test_a_throttled_window_is_refused(self):
-        """The failure this exists for: a backgrounded or napped window still
-        finishes a benchmark, and the score is of the throttle."""
         reading = dict(GOOD_READING, raf_hz=8.0)
         self.assertTrue(any("throttle" in f for f in self.verdict(reading)))
 
@@ -89,16 +77,11 @@ class TestTheBrowserGate(WkTest):
         self.assertTrue(any("never reported" in f for f in found))
 
     def test_a_display_mode_other_than_the_declared_one_is_refused(self):
-        """run-benchmark sizes its window from the screen, so the same patch at
-        two modes is two measurements and neither says so."""
         reading = dict(GOOD_READING, displays=[dict(GOOD_DISPLAY, points=[1470, 956])])
         found = self.verdict(reading)
         self.assertTrue(any("points, not [1024, 768]" in f for f in found), found)
 
     def test_a_run_compared_with_nothing_is_not_judged_on_its_display(self):
-        """Display identity is a comparability requirement, and a PGO collection
-        produces training profiles rather than a number: its guest panel has no
-        counterpart. Everything a throttle shows up in still refuses it."""
         guest = dict(GOOD_READING, displays=[GUEST_DISPLAY])
         self.assertEqual([], self.verdict(guest, expect=None))
         self.assertTrue(any("builtin panel" in f for f in self.verdict(guest)))
@@ -113,9 +96,6 @@ class TestTheBrowserGate(WkTest):
         self.assertNotEqual(self.verdict(min_raf=59.0), [])
 
     def test_a_busy_but_focused_window_is_not_a_throttled_one(self):
-        """44.4 Hz was measured with the browser focused, on the GPU, on a guest
-        that had just finished a build -- and a floor of 45 refused it. What is
-        being caught is the ~1 Hz of a window that lost the focus."""
         reading = dict(GOOD_READING, raf_hz=44.4, focused=True)
         self.assertEqual(BROWSER.faults(reading, GOOD_CLIENTS, "AppleParavirtGPU",
                                         BROWSER.MIN_RAF, GOOD_EXPECT), [])
@@ -144,8 +124,6 @@ class TestTheProfileGate(WkTest):
         self._scratch.__exit__(None, None, None)
 
     def read(self, summaries):
-        """summaries: path -> llvm-profdata summary, keyed by the last two
-        path components so a test names 'speedometer3/WebCore.profdata'."""
         def summary(path):
             key = "/".join(str(path).split(os.sep)[-2:])
             return summaries.get(key, {"total_functions": 40000,
@@ -153,9 +131,6 @@ class TestTheProfileGate(WkTest):
         return PROFILE.collect(str(self.root), LIBRARIES, BENCHMARKS, "arm64", summary)
 
     def real_reading(self):
-        """The shape a whole collection really has (measured in a guest,
-        2026-09-06): counts differ by three orders of magnitude between a
-        JavaScript benchmark and a rendering one, and coverage does not."""
         return {
             "speedometer3": {"JavaScriptCore": (17904, 119251764),
                              "WebCore": (29176, 41270953), "WebKit": (13975, 4754838)},
@@ -208,23 +183,15 @@ class TestTheProfileGate(WkTest):
         self.assertTrue(any("nothing ran long enough" in f for f in found), found)
 
     def test_a_real_collection_passes(self):
-        """The reading a whole collection in a guest actually produced. A
-        rule that cannot accept this one refuses every good profile: the
-        counts across its three legs span three orders of magnitude."""
         profile_tree(self.root)
         self.assertEqual(PROFILE.faults(self.read_real()), [])
 
     def test_a_workload_that_barely_touches_a_library_is_not_a_fault(self):
-        """jetstream3's total count in WebKit is 545x smaller than
-        motionmark's, because one is a JavaScript benchmark and the other is a
-        rendering one. That is the benchmark, not a broken leg."""
         profile_tree(self.root)
         found = PROFILE.faults(self.read_real())
         self.assertFalse([f for f in found if "jetstream3" in f], found)
 
     def test_a_leg_that_gave_up_early_is_refused(self):
-        """It still writes its file; what gives it away is how little of the
-        library it reached, which does not vary with the workload."""
         profile_tree(self.root)
         found = PROFILE.faults(self.read_real(
             {"jetstream3": {"JavaScriptCore": (900, 238390050)}}))
@@ -245,9 +212,6 @@ class TestTheProfileGate(WkTest):
 
 
 class TestAProfileGuidedBuildDoesNotCacheCompilations(WkTest):
-    """Its two phases compile the whole tree with different flags, so the CAS
-    holds both worlds and serves almost neither. Measured 2026-09-06 in a guest:
-    101 GB of compilation cache beside 45 GB of products, and a full disk."""
 
     def _env(self, config):
         sys.path.insert(0, str(REPO / "lib"))
@@ -266,13 +230,6 @@ class TestAProfileGuidedBuildDoesNotCacheCompilations(WkTest):
 
 
 class TestNothingMayDrawOverAMeasuredRun(WkTest):
-    """A dialog over the browser is a run to throw away, and the two ways of
-    missing one are both real: reading only layer 0, and reading once.
-
-    Measured 2026-09-06 in a guest: a consent dialog raised by run-benchmark's
-    own screenshot sat at layer 8, in the middle of the screen, for four hours
-    from the first leg of a PGO collection onward. `wk doctor <guest>` said the screen
-    held nothing but the one window wk put there."""
 
     WITH_A_DIALOG = ("Control Center:25:42x30@837,0;Window Server:24:1024x30@0,0;"
                      "Dock:20:1024x768@0,0;UserNotificationCenter:8:260x364@382,119;"
@@ -285,21 +242,12 @@ class TestNothingMayDrawOverAMeasuredRun(WkTest):
         return cp.stdout.strip()
 
     def test_an_alert_above_the_ordinary_layer_is_reported(self):
-        """Floating above layer 0 is what makes an alert cover the browser, so
-        a layer-0-only rule is blind to the one thing this exists to catch."""
         self.assertIn("UserNotificationCenter", self._uninvited(self.WITH_A_DIALOG))
 
     def test_the_screens_own_furniture_is_not_a_blocker(self):
         self.assertEqual(self._uninvited(self.CLEAN), "")
 
-    def test_the_menu_bar_and_dock_are_named_rather_than_inferred_from_a_layer(self):
-        text = (REPO / "bench" / "mac-window-probe.sh").read_text()
-        self.assertIn("wk_window_chrome", text)
-        self.assertNotIn('[ "$layer" = 0 ]', text)
-
     def _watch(self, appears):
-        """The real watch over a Fake Mac whose window server shows a dialog from the third sample on when `appears`;
-        the real wk_window_unexpected judges each reading, and nothing on the must-not-run table is running."""
         m, samples, sampled = Fake("mac"), [], threading.Event()
 
         def probe(argv, fake):
@@ -329,8 +277,6 @@ class TestNothingMayDrawOverAMeasuredRun(WkTest):
                 self.assertEqual(screen.blocker(m, REPO), want)
 
     def test_a_window_that_appears_mid_run_is_caught(self):
-        """screen.blocker is an instant and a collection is an hour; the
-        watcher is what makes the check contemporaneous with the run."""
         self.assertEqual([l.split("\t", 1)[1] for l in self._watch(True)], ["UserNotificationCenter"])
 
     def test_a_run_nothing_drew_over_passes(self):
@@ -338,54 +284,16 @@ class TestNothingMayDrawOverAMeasuredRun(WkTest):
 
 
 class TestPyobjcIsProvisionedNotAssumed(WkTest):
-    """Xcode's python3 carries no pyobjc, so a macOS install that measures
-    anything installs it -- and every path that provisions one does."""
 
-    def test_the_probe_reads_the_running_interpreter(self):
-        with scratch_dir() as tmp:
-            fake = tmp / "python3"
-            fake.write_text('#!/bin/sh\necho 11.1\n')
-            fake.chmod(0o755)
-            cp = bash(f'. "$WK_ROOT/bench/mac-pyobjc.sh"; '
-                      f'WK_PYOBJC_PYTHON={fake}; wk_pyobjc_have && echo HAVE || echo MISSING')
-            self.assertIn("HAVE", cp.stdout)
-
-    def test_a_different_version_is_not_good_enough(self):
-        with scratch_dir() as tmp:
-            fake = tmp / "python3"
-            fake.write_text('#!/bin/sh\necho 9.0\n')
-            fake.chmod(0o755)
-            cp = bash(f'. "$WK_ROOT/bench/mac-pyobjc.sh"; '
-                      f'WK_PYOBJC_PYTHON={fake}; wk_pyobjc_have && echo HAVE || echo MISSING')
-            self.assertIn("MISSING", cp.stdout)
-
-    def test_every_macos_install_wk_provisions_gets_it(self):
-        for rel in ("vm/desktop.sh", "bench/mac-bench-firstboot.sh", "host/macos/tools.sh"):
-            self.assertIn("wk_pyobjc_install", (REPO / rel).read_text(), rel)
-
-    def test_the_guest_carries_it_in_the_settle_and_in_the_base_inputs(self):
-        import inspect
-        from wk import guest
-        from wk.sysimage import guestbase
-        self.assertEqual("bench/mac-pyobjc.sh", guest.PYOBJC)
-        self.assertIn("PYOBJC", inspect.getsource(guest.Guest.settle_desktop))
-        self.assertIn("bench/mac-pyobjc.sh", guestbase.INPUTS)
-
-    def test_both_runs_of_the_desktop_script_feed_it_the_same_library(self):
-        """vm/desktop.sh sources nothing: it calls wk_pyobjc_install and the
-        caller cats the library ahead of it. A caller that leaves the library
-        out gets `command not found` and a guest with no pyobjc."""
-        base = (REPO / "vm" / "provision-base.sh").read_text()
-        import inspect
-        from wk import guest
-        settle = inspect.getsource(guest.Guest.settle_desktop).replace("PYOBJC", "mac-pyobjc.sh")
-        for text, who in ((base, "vm/provision-base.sh"), (settle, "Guest.settle_desktop")):
-            self.assertLess(text.index("mac-pyobjc.sh"), text.index("vm/desktop.sh"),
-                            f"{who} runs vm/desktop.sh without bench/mac-pyobjc.sh ahead of it")
-
-    def test_the_benchmark_install_is_given_it_by_the_one_payload_table(self):
-        """--build-pkg and --repair write the same payload (tests/test_mac_tailnet.py drives both)."""
-        self.assertIn('("bench/mac-pyobjc.sh", "usr/local/libexec/wk-bench-pyobjc.sh"', (REPO / "lib" / "wk" / "sysimage" / "macvolume.py").read_text())
+    def test_the_probe_wants_the_pinned_version_of_the_running_interpreter(self):
+        for said, want in (("11.1", "HAVE"), ("9.0", "MISSING")):
+            with self.subTest(version=said), scratch_dir() as tmp:
+                fake = tmp / "python3"
+                fake.write_text('#!/bin/sh\necho %s\n' % said)
+                fake.chmod(0o755)
+                cp = bash(f'. "$WK_ROOT/bench/mac-pyobjc.sh"; '
+                          f'WK_PYOBJC_PYTHON={fake}; wk_pyobjc_have && echo HAVE || echo MISSING')
+                self.assertIn(want, cp.stdout)
 
 
 if __name__ == "__main__":

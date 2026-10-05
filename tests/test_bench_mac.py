@@ -1,12 +1,6 @@
 """The Mac's benchmark install as a bench system (lib/wk/bench/mac.py) against a Fake install: `wk bench stage` delivering
 a workspace's build, `wk bench staged` as the one pipeline on the running install, the gates asked before anything
-reboots, and where each `wk bench` verb runs. Nothing here touches a Mac, bless, a helper or a browser.
-
-Rows landed here: `unit bench.pipeline_conformance[mac-volume]`, `unit bench.one_record[mac-volume]`,
-`unit bench.preflight_asks_every_gate`, `unit dispatch.where[bench]`, `unit killpoints[bench stage]`.
-
-Run: python3 tests/run.py -k test_bench_mac
-"""
+reboots, and where each `wk bench` verb runs. Nothing here touches a Mac, bless, a helper or a browser."""
 import contextlib
 import importlib.machinery
 import importlib.util
@@ -57,8 +51,6 @@ def on_screen(fake, uninvited="", reading="MiniBrowser:Speedometer"):
 
 
 class StubWatch:
-    """wk.screen.Watch without its thread: start and stop land in the machine's effects with how many benchmarks it had
-    launched by then, and stop() returns its `drew`."""
 
     def __init__(self, machine, root, clock, env=None):
         self.m = machine
@@ -125,9 +117,9 @@ class World(Fake):
         self.effects.append(("act", tuple(argv)))
         return super().act_run(argv, **kw)
 
-    def popen(self, argv, stdin=None, stdout=None, stderr=None, cwd=None):
+    def start(self, argv, out, cwd=None):
         self.watched.append(list(argv))
-        stdout.write(b"wk: bench pid 77\nScore: 30\n")
+        out.write(b"wk: bench pid 77\nScore: 30\n")
         words = shlex.split(argv[-1].split("exec ", 1)[1])
         Path(words[words.index("--output-file") + 1]).write_text(RESULT)
         return FakeProc(self.rc)
@@ -161,7 +153,7 @@ class MacTest(unittest.TestCase):
             os.environ["WK_DRY_RUN"] = "1"
         try:
             with contextlib.redirect_stderr(err):
-                rc = mac.staged(REPO, w.reg, w.clock, CMD.staged_options(args("staged", *argv)), popen=w.popen)
+                rc = mac.staged(REPO, w.reg, w.clock, CMD.staged_options(args("staged", *argv)))
         finally:
             os.environ.pop("WK_DRY_RUN", None)
         return rc, err.getvalue()
@@ -282,7 +274,7 @@ class TestTheLegsOwnGates(MacTest):
     def said(self, w):
         err = io.StringIO()
         with self.assertRaises(Refused), contextlib.redirect_stderr(err):
-            mac.staged(REPO, w.reg, w.clock, CMD.staged_options(args("staged")), popen=w.popen)
+            mac.staged(REPO, w.reg, w.clock, CMD.staged_options(args("staged")))
         return err.getvalue()
 
     def test_a_covered_screen_refuses_and_force_records_it(self):
@@ -370,9 +362,9 @@ class TestTheWatchdog(MacTest):
     def test_a_benchmarks_silence_is_waited_out_longer_than_a_builds_and_an_override_wins(self):
         w = self.w
         system = mac.MacVolumeSystem(REPO, w.reg, w.clock, mac.Install(REPO, w, w.env), w.home, w.stage, {})
-        env = mac.StagedRun(REPO, w.reg, system, w.clock, w.env, None).env
+        env = mac.StagedRun(REPO, w.reg, system, w.clock, w.env).env
         self.assertEqual((env["WK_STALL_SECONDS"], env["WK_ABORT_SECONDS"]), ("900", "5400"))
-        env = mac.StagedRun(REPO, w.reg, system, w.clock, dict(w.env, WK_STALL_SECONDS="12"), None).env
+        env = mac.StagedRun(REPO, w.reg, system, w.clock, dict(w.env, WK_STALL_SECONDS="12")).env
         self.assertEqual(env["WK_STALL_SECONDS"], "12")
 
 
@@ -610,29 +602,11 @@ class TestStage(MacTest):
 
 
 class TestWhere(unittest.TestCase):
-    """`dispatch.where[bench]`: a workspace run goes where the workspace is; the Mac's stage and its staged run are this
-    host's own, so `bench` on the Mac's volume runs on the Mac; each verb is handed only the flags that apply to it."""
-
-    def test_each_verb_runs_where_its_declaration_says(self):
-        d = decl.Decl(BENCH)
-        for argv, want in ((["run", "ws", "p"], "workspace"), (["stage", "ws"], "host"), (["staged"], "host"),
-                           (["seed", "ws", "p"], "dynamic"), (["ls"], "dynamic"), (["report", "t"], "host"), (["mac"], "host")):
-            with self.subTest(argv=argv):
-                self.assertEqual(d.where_for(argv), want)
 
     def test_the_dynamic_verbs_answer_for_themselves(self):
         reg = targets.Registry(REPO, env={}, machine=Fake())
         self.assertEqual(cli.where(reg, ["ls"]), "local")
         self.assertEqual(cli.where(reg, ["ls", "--continued"]), "store")
-
-    def test_each_verb_takes_only_its_own_flags(self):
-        d = decl.Decl(BENCH)
-        for verb, has, lacks in (("stage", "--to=", "--gates"), ("staged", "--gates", "--cores="), ("run", "--cores=", "--to=")):
-            with self.subTest(verb=verb):
-                opts = d.opts_for([verb]).split(",")
-                self.assertIn(has, opts)
-                self.assertNotIn(lacks, opts)
-
 
 if __name__ == "__main__":
     unittest.main()

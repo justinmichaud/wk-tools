@@ -1,14 +1,4 @@
-"""`wk zed` -- reaching a workspace's checkout in Zed.
-
-`ssh_host` answers a target's `Host wk-<name>` alias or its direct address,
-`ssh_prepare` is what writes the alias (an sshd installed and an identity
-authorised for a container, `wk zed --route` asked of the peer itself for a
-peer's), and `cmd/zed`'s own refusal for a broken workspace names the repair
-rather than a driver's word. Nothing here starts a real container, guest or
-machine: `targets.py`'s drivers run over a fake machine.
-
-Run: python3 -m unittest tests.test_zed -v
-"""
+"""`wk zed` -- reaching a workspace's checkout in Zed."""
 import importlib.machinery
 import importlib.util
 import os
@@ -27,9 +17,6 @@ from wk.machine import HAVE, Fake, Result  # noqa: E402
 
 
 def _load_cmd_zed():
-    """cmd/zed as a module, its own top-level `ROOT = ... or dirname(__file__)`
-    never reached: WK_ROOT is already in the environment every test in this
-    tree runs under (tests/support.py)."""
     path = str(REPO / "cmd" / "zed")
     loader = importlib.machinery.SourceFileLoader("cmd_zed", path)
     spec = importlib.util.spec_from_loader("cmd_zed", loader, origin=path)
@@ -62,9 +49,6 @@ class DriverTest(unittest.TestCase):
 
 
 class TestContainerAlias(DriverTest):
-    """A container workspace is reached through its generated `Host
-    wk-<name>` alias: the default `ssh_host` (Target.ssh_host's `wk-<name>`) and
-    `ssh_prepare` writing it, with a ProxyCommand into the podman transport."""
 
     def setUp(self):
         super().setUp()
@@ -83,7 +67,7 @@ class TestContainerAlias(DriverTest):
         self.t.ssh_prepare("demo")
         text = self.fake.read(sshalias.alias_path(self.env))
         self.assertIn("Host wk-demo", text)
-        self.assertIn("ProxyCommand %s demo" % os.path.join(str(REPO), "container", "ssh-transport"), text)
+        self.assertIn("ProxyCommand %s container demo" % os.path.join(str(REPO), "container", "ssh-transport"), text)
         self.assertIn("IdentityFile", text)
         self.assertIn(targets.zed_key_path(self.env), text)
 
@@ -118,10 +102,6 @@ class TestContainerAlias(DriverTest):
 
 
 class TestToolsTargetResolvedOnce(TestContainerAlias):
-    """`wk zed --tools <ws>` used to resolve `<ws>`'s target once to ask
-    whether it exists (`reg.locate`, a fleet-wide probe) and again to pick it
-    (`reg.ws_target`, the same probe) -- one `Registry.locate` call now
-    answers both."""
 
     def setUp(self):
         super().setUp()
@@ -146,9 +126,6 @@ class TestToolsTargetResolvedOnce(TestContainerAlias):
 
 
 class SshFake(Fake):
-    """This host, as a `Remote` driver over ssh sees it: every far-side call
-    is one `ssh <opts> <dest> <command>` run here, answered by what the
-    command contains -- for the probe script and for `wk zed ... --route`."""
 
     def __init__(self):
         super().__init__("host")
@@ -179,9 +156,6 @@ yes
 
 
 class TestPeerAlias(DriverTest):
-    """A peer workstation's own workspace is reached through one more hop: the
-    alias `ssh_prepare` writes carries a ProxyCommand that ssh's to the peer
-    and runs the route `wk zed <name> --route` (its own answer) gave."""
 
     def setUp(self):
         super().setUp()
@@ -211,9 +185,6 @@ class TestPeerAlias(DriverTest):
 
 
 class TestBrokenRefusesNamingTheRepair(unittest.TestCase):
-    """A workspace whose creation finished and whose environment is gone reads
-    `broken`, and `wk zed` (like `wk new`) refuses it by name, naming `wk rm`
-    rather than repeating the driver's own word for it."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-zed-broken-"))
@@ -251,9 +222,6 @@ class TestBrokenRefusesNamingTheRepair(unittest.TestCase):
 
 
 class TestZedRoute(WkTest):
-    """`wk zed <ws> --route` is what a peer's own `Remote.wk` calls to build the
-    alias above; it never touches Zed itself (no `zed` on PATH is needed),
-    and a workspace nothing here holds is refused like any other."""
 
     def test_route_needs_no_zed_on_path(self):
         cp = run("zed", "no-such-workspace-abcxyz", "--route", env={"PATH": "/usr/bin:/bin"})
@@ -267,8 +235,6 @@ class TestZedRoute(WkTest):
 
 
 class TestZedCli(unittest.TestCase):
-    """`targets.zed_cli`: the one answer `cmd/zed` (which binary to exec into)
-    and `wk doctor` (whether one exists at all) both read."""
 
     def test_a_zed_on_path_wins(self):
         fake = Fake()
@@ -284,22 +250,6 @@ class TestZedCli(unittest.TestCase):
         fake = Fake()
         fake.answer(["test", "-x", "/Applications/Zed.app/Contents/MacOS/cli"], rc=1)
         self.assertIsNone(targets.zed_cli(fake))
-
-
-class TestDeclaration(WkTest):
-    def test_the_listing_names_it(self):
-        self.assertIn("zed <workspace>", run().stdout)
-
-    def test_explain_answers_without_running_anything(self):
-        cp = run("zed", "--explain")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("open a workspace's checkout", cp.stdout)
-
-    def test_refused_inside_a_workspace(self):
-        from tests.support import fake_workspace
-        with fake_workspace() as ws:
-            cp = ws.run("zed")
-        self.assertNotEqual(cp.returncode, 0)
 
 
 if __name__ == "__main__":

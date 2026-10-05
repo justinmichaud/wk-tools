@@ -334,8 +334,9 @@ class Invocation:
     # -- questions the command answers for itself
 
     def _impl(self, *args):
-        cp = subprocess.run([str(self.decl.path), *args], stdout=subprocess.PIPE, text=True)
-        return cp.returncode, cp.stdout.strip()
+        r = Local().run([str(self.decl.path), *args])
+        sys.stderr.write(r.err)
+        return r.rc, r.out.strip()
 
     def where(self):
         w = self.decl.where_for(self.args)
@@ -369,9 +370,7 @@ class Invocation:
                     missing.append("tailnet    this machine is not on the tailnet: tailscale up")
             elif n == "quiesce-helper":
                 from wk.sudo import QUIESCE_PRIV
-                ok = os.access(QUIESCE_PRIV, os.X_OK) and subprocess.call(
-                    ["sudo", "-n", QUIESCE_PRIV, "status"], stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL) == 0
+                ok = os.access(QUIESCE_PRIV, os.X_OK) and (machine or Local()).run(["sudo", "-n", QUIESCE_PRIV, "status"]).ok
                 if not ok:
                     missing.append("quiesce-helper    the privileged quiesce/session helper is not set up: ./setup --stage quiesce")
             elif not shutil.which(n):
@@ -425,7 +424,7 @@ def usage():
 def dump_declarations():
     for d in D.all_commands(ROOT):
         print("\t".join([d.name, d.where, d.name_decl, d.group, d.synopsis_line(), d.takes,
-                         d.opts or "-", d.destructive or "-", d.dryrun or "no",
+                         d.opts or "-", d.destructive or "-", d.dryrun or ("exempt" if d.nodryrun else "no"),
                          d.passthrough or "-", d.readonly or "-"]))
     raise Exit(0)
 
@@ -513,6 +512,8 @@ def explain(cmd, d, args=()):
         out.write(preview(cmd, d, list(args)))
     if d.is_readonly():
         out.write("  changes things: no -- starts nothing, writes nothing, repairs nothing\n")
+    elif d.nodryrun:
+        out.write("  changes things: yes -- and is exempt from --dry-run (the help says why)\n")
     elif d.dryrun == "yes":
         out.write("  changes things: yes -- wk %s ... --dry-run prints what it would run and runs none of it\n" % cmd)
     elif d.dryrun:
@@ -541,9 +542,8 @@ def explain(cmd, d, args=()):
     if d.values:
         out.write("\nvalid values (wk %s %s):\n" % (cmd, d.values))
         out.flush()
-        cp = subprocess.run([str(ROOT / "wk"), cmd, d.values], stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True)
-        out.write("".join("  " + l + "\n" for l in cp.stdout.splitlines()))
+        r = Local().run([str(ROOT / "wk"), cmd, d.values])
+        out.write("".join("  " + l + "\n" for l in (r.out + r.err).splitlines()))
     raise Exit(0)
 
 
@@ -646,8 +646,8 @@ def delegate_target(target):
     return t if t.delegates() else None
 
 
-def delegate_run(target, cmd, args):
-    argv = target.hand_over(cmd, args, tty=os.isatty(0) and os.isatty(1))
+def delegate_run(target, cmd, args, readonly=False):
+    argv = target.hand_over(cmd, args, tty=os.isatty(0) and os.isatty(1), readonly=readonly)
     sys.stdout.flush()
     sys.stderr.flush()
     os.execvp(argv[0], argv)
@@ -811,6 +811,8 @@ def main(argv):
     inv.verb_given()
     inv.refuse_inherited_config(inherited_config)
     sub = args[0] if args else ""
+    if act.dry_run() and d.nodryrun:
+        inv.usage_die("'wk %s' is exempt from --dry-run (wk %s -h says why)" % (cmd, cmd))
     if act.dry_run() and not d.honours_dryrun(args) and not d.is_readonly(sub):
         inv.usage_die("'wk %s' has no dry run yet: not every change it makes goes through\n"
                       "    the one path --dry-run intercepts (owed, docs/PLAN.md)" % cmd)
@@ -848,7 +850,7 @@ def main(argv):
         os.execv(line[0], line)
 
     if delegate is not None:
-        delegate_run(delegate, cmd, inv.typed)
+        delegate_run(delegate, cmd, inv.typed, readonly=d.is_readonly(sub))
 
     name = ""
     if not in_workspace() and name_decl.split("@")[0] == "required":

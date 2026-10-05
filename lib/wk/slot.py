@@ -5,8 +5,9 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
+
+from wk.machine import Local
 
 
 def sha256_file(path):
@@ -19,10 +20,10 @@ def sha256_file(path):
 
 
 def build_id_of(path, readelf):
-    cp = subprocess.run([readelf, "-n", path], capture_output=True, text=True)
-    if cp.returncode != 0:
-        sys.exit("%s -n %s failed: %s" % (readelf, path, cp.stderr.strip()))
-    m = re.search(r"Build ID:\s*([0-9a-f]+)", cp.stdout)
+    r = Local().run([readelf, "-n", path])
+    if not r.ok:
+        sys.exit("%s -n %s failed: %s" % (readelf, path, r.err.strip()))
+    m = re.search(r"Build ID:\s*([0-9a-f]+)", r.out)
     if not m:
         sys.exit("%s carries no build-id note; the image's BR2_TARGET_LDFLAGS sets --build-id" % path)
     return m.group(1)

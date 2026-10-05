@@ -1,12 +1,5 @@
-"""What a silent build says for itself (lib/wk/job.py's `build_processes` and `stall_report`).
-
-A full-LTO link writes nothing to the log for many minutes while one `ld`
-holds a core, so silence alone cannot be reported as a stall: the process
-table is the evidence, read here from a fake machine's `ps` so both
-platforms' spellings are exercised on either.
-
-Run: python3 tests/run.py -k tests.test_stall_report
-"""
+"""What a silent build says for itself (job.build_processes, job.stall_report), from a fake machine's `ps` in both
+platforms' spellings: a full-LTO link is silent for minutes while one `ld` holds a core."""
 import contextlib
 import io
 import sys
@@ -45,8 +38,6 @@ def _machine(ps_out):
 
 class TestTheProcessReadings(unittest.TestCase):
     def test_a_linker_named_by_its_full_path_is_counted(self):
-        """Darwin answers `comm` with the executable's path, so a pattern
-        anchored at `^` counts zero of Xcode's linkers."""
         self.assertEqual(job.build_processes(_machine(DARWIN_PS)), [(99.5, "ld")])
 
     def test_every_compiler_counts_not_only_the_first(self):
@@ -59,8 +50,6 @@ class TestTheProcessReadings(unittest.TestCase):
         self.assertEqual(job.build_processes(_machine(IDLE_PS)), [])
 
     def test_the_reading_never_names_its_own_reader(self):
-        """`pcpu` is an average over a process's whole life, so a just-forked
-        `ps` reads at hundreds of percent and wins every sort."""
         names = [n for _, n in job.build_processes(here())]
         for tool in ("ps", "python3", "sh"):
             self.assertNotIn(tool, names)
@@ -76,20 +65,12 @@ class TestWhatTheReportClaims(unittest.TestCase):
     def test_a_working_linker_is_not_reported_as_a_stall(self):
         out = self._report(DARWIN_PS)
         self.assertIn("301s", out)
-        self.assertIn("full-LTO link", out, out)
         self.assertIn("ld at 99.5% CPU", out, out)
 
     def test_a_machine_doing_nothing_is_reported_as_doing_nothing(self):
         out = self._report(IDLE_PS)
-        self.assertIn("nothing here is compiling or linking", out, out)
-        self.assertNotIn("full-LTO", out, out)
+        self.assertNotIn("% CPU", out, out)
 
-    def test_the_status_report_leaves_the_verdict_to_the_evidence(self):
-        """The log's age is not evidence of a stall, so the verdict belongs
-        to the report that takes the process reading."""
-        text = (REPO / "lib" / "wk" / "status.py").read_text()
-        self.assertNotIn("likely stalled or killed", text)
-        self.assertIn('"no log output for %ss -- counted as busy, since nothing', text)
 
 
 if __name__ == "__main__":

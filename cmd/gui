@@ -2,7 +2,7 @@
 #
 # wk gui <workspace> [<url>] [flags] -- run MiniBrowser in the benchmark seat
 # wk: where=workspace name=required ready=yes forward=no group=workspaces takes=1 passthrough config=--config dryrun
-# wk: opts --config=,--no-fullscreen,--lldb=
+# wk: opts --config=,--no-fullscreen,--lldb=,--rr
 # wk: gone --wpe --config wpe-release
 # wk: gone --gtk --config gtk-release
 # wk: gone --mac --config mac-release
@@ -17,6 +17,8 @@
 #                          GTK: --full-screen; the Apple port has neither)
 #   --lldb <ui|web>        run under lldb: "ui" stops before start; "web"
 #                          attaches to the web process once it starts
+#   --rr                   record the browser and every process it starts with rr
+#                          into ~/wk-rr (GTK/WPE); `wk run --replay` replays it
 #   -- <args>              extra arguments passed straight to the browser
 
 import os
@@ -29,8 +31,8 @@ from wk import images, store  # noqa: E402
 ROOT = images.root()
 
 from wk import buildconf, decl, session, targets  # noqa: E402
-from wk.ldpath import LLDB_PIN_OPTS, LLDB_PRELUDE, lldb_waiting  # noqa: E402
-from wk.act import Refused, die, exec_into, info, log, warn  # noqa: E402
+from wk.ldpath import LLDB_PIN_OPTS, LLDB_PRELUDE, lldb_waiting, rr_ready, rr_trace_dir  # noqa: E402
+from wk.act import Refused, die, info, log, warn  # noqa: E402
 from wk.machine import is_macos  # noqa: E402
 
 
@@ -39,9 +41,11 @@ def parse(argv):
     debug = args.value("--lldb") or ""
     if debug and debug not in ("ui", "web"):
         die("--lldb takes ui or web, not '%s'" % debug)
+    if debug and args.flag("--rr"):
+        die("--rr records the browser and --lldb debugs it live; pick one")
     fullscreen = not args.flag("--no-fullscreen")
     url = args.positionals[0] if args.positionals else ""
-    return {"url": url, "fullscreen": fullscreen, "tail": args.tail, "debug": debug}
+    return {"url": url, "fullscreen": fullscreen, "tail": args.tail, "debug": debug, "rr": args.flag("--rr")}
 
 
 def gui_default_config(reg, name):
@@ -132,12 +136,21 @@ def main(argv):
         launch_cmd = "Tools/Scripts/run-minibrowser %s %s -- %s %s %s" % (cfg.port, type_flag, fs_flag, shlex.quote(url), extra_q)
         ui_prefix = 'WEBKIT_MINI_BROWSER_PREFIX="$LLDB %s %s --"' % (target.lldb_opts(), LLDB_PIN_OPTS)
 
+    if opts["rr"]:
+        rr_ready(target, name)
+        info("MiniBrowser (%s) in '%s' under rr -> %s" % (config, name, url))
+        log("  every process it starts is recorded; 'wk run %s --replay -- -p <pid>' replays one" % name)
+        cmd = "%s; cd %s && %s WEBKIT_MINI_BROWSER_PREFIX='rr record' %s" % (rr_trace_dir(target), src, launch_env, launch_cmd)
+        argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=False)
+        reg.machine.exec(argv_, cwd)
+        return
+
     if opts["debug"] == "":
         info("MiniBrowser (%s) in '%s' -> %s" % (config, name, url))
         log("  ctrl-c here closes it")
         cmd = "cd %s && %s %s" % (src, launch_env, launch_cmd)
         argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=False)
-        exec_into(argv_, cwd)
+        reg.machine.exec(argv_, cwd)
         return
 
     if opts["debug"] == "ui":
@@ -150,7 +163,7 @@ def main(argv):
             run = "cd %s && %s %s exec %s" % (src, launch_env, ui_prefix, launch_cmd)
         cmd = "%s\n%s" % (LLDB_PRELUDE, run)
         argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=True)
-        exec_into(argv_, cwd)
+        reg.machine.exec(argv_, cwd)
         return
 
     web_proc = cfg.web_process_name()
@@ -167,7 +180,7 @@ def main(argv):
                        "command alias follow-page wk-follow-page %s" % web_proc,
                        "command alias reattach process attach --name %s --waitfor" % web_proc)
     argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=True)
-    exec_into(argv_, cwd)
+    reg.machine.exec(argv_, cwd)
 
 
 if __name__ == "__main__":

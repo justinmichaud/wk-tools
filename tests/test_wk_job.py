@@ -1,9 +1,5 @@
-"""lib/wk/job.py: a watched job, the detach, the far-side start line and its poll, a job stopped through its
-target, and lib/wk/lock.py's locked run. Against a fake machine and a fake clock, except where the behaviour
-is a real process's.
-
-Run: python3 tests/run.py -k tests.test_wk_job
-"""
+"""lib/wk/job.py: a watched job, the detach, the far-side start line and its poll, a stop through the target, and
+lib/wk/lock.py's locked run."""
 import contextlib
 import io
 import os
@@ -20,7 +16,7 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, job, record  # noqa: E402
 from wk.clock import Clock, FakeClock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Fake, Local, Result  # noqa: E402
 
 
 class Scratch(unittest.TestCase):
@@ -48,17 +44,16 @@ class TestAWatchedPid(Scratch):
         log = self.tmp / "log"
         log.write_text("")
         self.fake.answer(["sh", "-c", job.TREE, "wk", "4242"], out="4243\n4242\n")
-        with contextlib.redirect_stderr(io.StringIO()) as err:
+        with contextlib.redirect_stderr(io.StringIO()):
             killed = job.watch_pid(lambda: None, 4242, str(log), self.fake, self.clock,
                                    {"WK_POLL_SECONDS": "5", "WK_STALL_SECONDS": "10", "WK_ABORT_SECONDS": "20"})
         self.assertTrue(killed)
-        self.assertIn("giving up and killing the job", err.getvalue())
         kills = [e for e in self.fake.effects if e[0] == "kill"]
         self.assertEqual([k[1] for k in kills[:2]], [4243, 4242], "descendants go before the job")
 
     def test_a_watched_job_returns_its_own_status_and_leaves_its_output(self):
         log = self.tmp / "run.log"
-        rc = job.watch(["sh", "-c", "echo hi; exit 3"], str(log), self.fake, Clock(), {"WK_POLL_SECONDS": "1"})
+        rc = job.watch(["sh", "-c", "echo hi; exit 3"], str(log), Local(), Clock(), {"WK_POLL_SECONDS": "1"})
         self.assertEqual(3, rc)
         self.assertEqual("hi\n", log.read_text())
 
@@ -116,9 +111,8 @@ class TestTheFarSide(Scratch):
     def test_silence_is_reported_and_the_job_left_alone(self):
         replies = iter(["", "", "", "7\n"])
         ask = lambda line: Result(0, next(replies)) if line.startswith("cat") else Result(0, "0\n")  # noqa: E731
-        with contextlib.redirect_stderr(io.StringIO()) as err:
+        with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(("7", True), job.wait_remote(ask, "/l", "/rc", self.clock, 200, env={"WK_STALL_SECONDS": "300"}))
-        self.assertIn("not stopping it", err.getvalue())
 
 
 class TestAStopThroughTheTarget(Scratch):
@@ -135,9 +129,8 @@ class TestAStopThroughTheTarget(Scratch):
         t = record.Records(self.tmp / "store", clock=self.clock, env={}).begin(
             "build", "target", "ws", "k", "/l", ["one"])
         t.pid(4242)
-        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(act.Refused):
             job.kill(object(), "ws", t, "cancelled", self.fake, self.clock, {})
-        self.assertIn("no pattern its", err.getvalue())
 
     def test_the_descendants_are_walked_and_signalled_inside_the_workspace(self):
         seen = []

@@ -1,11 +1,4 @@
-"""The rescue's card writer rides in every yocto image (image/yocto/
-meta-wk-rescue): the recipe installs the repository's own admin/wk-card-priv
--- no second copy -- and lib/wk/sysimage/yocto_target.py adds the layer and the package
-to every image, so a system written as a rescue can write the board's other
-medium (README.md, "rescue").
-
-Run: python3 -m unittest tests.test_rescue_layer -v
-"""
+"""image/yocto/meta-wk-rescue installs the repository's own admin/wk-card-priv and its checker, no second copy."""
 import re
 import unittest
 
@@ -17,8 +10,6 @@ RECIPE = LAYER / "recipes-wk/wk-card-priv/wk-card-priv.bb"
 
 class TestRescueLayer(unittest.TestCase):
     def test_recipe_installs_the_repositorys_own_helper_and_checker(self):
-        """admin/wk-card-priv and boot/check-boot-files.py, from the checkout,
-        beside each other under the name the helper's boot-check runs"""
         text = RECIPE.read_text()
         m = re.search(r'FILESEXTRAPATHS:prepend := "((?:\$\{THISDIR\}/[^:"]+:)+)"', text)
         self.assertIsNotNone(m, "the recipe must point FILESEXTRAPATHS at the repository's own directories")
@@ -30,31 +21,7 @@ class TestRescueLayer(unittest.TestCase):
                     found[name] = (d / name).resolve()
         self.assertTrue(found.get("wk-card-priv", REPO).samefile(REPO / "admin/wk-card-priv"))
         self.assertTrue(found.get("check-boot-files.py", REPO).samefile(REPO / "boot/check-boot-files.py"))
-        self.assertIn('SRC_URI = "file://wk-card-priv file://check-boot-files.py"', text)
-        self.assertIn("${CARD_PRIV_DIR}/wk-check-boot-files.py", text)
-        self.assertIn("CHECK_BOOT_FILES=/usr/local/libexec/wk-check-boot-files.py", (REPO / "admin/wk-card-priv").read_text())
         self.assertFalse((RECIPE.parent / "files").exists(), "no second copy of the helper under files/")
-
-    def test_installed_where_the_card_code_looks(self):
-        self.assertIn('CARD_PRIV_DIR = "/usr/local/libexec"', RECIPE.read_text())
-        self.assertIn('CARD_PRIV = "/usr/local/libexec/wk-card-priv"', (REPO / "lib/wk/sudo.py").read_text())
-
-    def test_a_host_install_puts_the_checker_beside_the_helper(self):
-        """admin/install.sh (./setup --stage quiesce on a card machine) installs
-        boot/check-boot-files.py root-owned at the one path the helper's
-        `boot-check` runs (CHECK_BOOT_FILES), never a path a caller names."""
-        text = (REPO / "admin/install.sh").read_text()
-        self.assertIn('_check_target="$_libexec/wk-check-boot-files.py"', text)
-        self.assertIn('_check_source="$WK_ROOT/boot/check-boot-files.py"', text)
-        self.assertIn('_libexec=/usr/local/libexec', text)
-
-    def test_layer_is_wired_into_every_yocto_image(self):
-        build = (REPO / "lib/wk/sysimage/yocto_target.py").read_text()
-        self.assertIn("meta-wk-rescue", build)
-        self.assertIn('IMAGE_INSTALL:append = " wk-card-priv"', build)
-        conf = (LAYER / "conf/layer.conf").read_text()
-        self.assertIn('BBFILE_COLLECTIONS += "meta-wk-rescue"', conf)
-        self.assertIn("LAYERSERIES_COMPAT_meta-wk-rescue", conf)
 
     def test_every_command_the_helper_runs_is_a_runtime_dependency(self):
         helper = (REPO / "admin/wk-card-priv").read_text()

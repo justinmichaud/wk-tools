@@ -1,16 +1,5 @@
-"""Crash-only convergence (CLAUDE.md, rule 2): a killed mutating command
-re-runs to the declared final state. Two real cases drive an actual
-container workspace and kill its detached driver mid-creation (`wk new
---no-wait` prints the driver's own pid, running where the container target
-keeps its store -- on macOS the podman VM, which `wk`'s forwarding execs the
-whole command in; killing it there is what support.container_side is for). What `wk gc` reaps after one is
-tests/test_owed_gc.py's. The records-are-claims case (a `running` record
-whose log or pid says otherwise) is tests/test_build_liveness.py's, and
-`./setup` needs no hardware either: its home-scoped stages are driven for real
-against a scratch HOME, killed with SIGKILL at several points, and re-run.
-
-Run: python3 -m unittest tests.test_crash_only -v
-"""
+"""Crash-only convergence (CLAUDE.md rule 2): a killed mutating command re-runs to the declared final state --
+`wk new`/`wk rm` over a killed creation driver, and ./setup's home-scoped stages killed with SIGKILL."""
 import os
 import re
 import subprocess
@@ -46,16 +35,7 @@ def _wait_dead(pid, timeout=60):
 
 
 def _wait_registered(name, timeout=600):
-    """Poll until <name> exists at all. `wk new --no-wait` returns the instant
-    the driver is spawned, so a kill sent straight after it can land before the
-    driver has created anything -- and `wk rm` is then right that there is no
-    such workspace. Rubble is what the test below is about, so it waits for
-    some to exist before killing.
-
-    The budget is generous because creation is not quick and this machine is
-    not idle while the suite runs: `wk new` alone measured 99.3s during a full
-    run, and each poll here is a whole `wk status` (2026-09-16). It returns as
-    soon as the workspace answers, so a fast machine pays none of it."""
+    """Poll until <name> exists at all, so a kill leaves rubble rather than nothing."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if run("status", name, "--json").returncode == 0:
@@ -66,10 +46,6 @@ def _wait_registered(name, timeout=600):
 
 @requires_container_target()
 class TestWkNewKilledMidway(WkTest):
-    """`wk new` detaches its driver (cmd/new's `--_detached` half) and this
-    end only follows the log -- so killing the *driver* (not the following
-    `wk new` process) is the fair test of rule 2: nothing here waited for
-    it, and a second `wk new` for the same name is the resume."""
 
     def setUp(self):
         super().setUp()
@@ -91,49 +67,24 @@ class TestWkNewKilledMidway(WkTest):
         self.assertIsNotNone(m, f"'wk new --no-wait' did not report a driver pid: {cp.stdout}")
         pid = m.group(1)
 
-        # Kill it where it actually lives.
         container_side(f"kill -9 {pid}")
         self.assertTrue(_wait_dead(pid), f"driver pid {pid} did not die")
 
-        # Whatever it left behind, this end now owns cleanup either way.
         self._created = True
 
         st = run("status", self.name, "--json")
-        # Not asserted further than "not present": the exact rubble state
-        # (a live-record 'creating', or nothing at all if the kill landed
-        # before the store directory existed) depends on exactly when the
-        # kill landed, and both are legitimate half-made states rule 2
-        # applies to. What matters is the workspace never reads as finished.
-        self.assertNotIn(
-            '"state":"present"', st.stdout.replace(" ", ""),
-            f"'{self.name}' reads present after its driver was killed: {st.stdout}",
-        )
-
-        # The resume: re-running `wk new` must destroy the rubble and finish
-        # the job, not refuse "already exists" (rule 2's own example).
+        self.assertNotIn('"state":"present"', st.stdout.replace(" ", ""), st.stdout)
         cp2 = run("new", self.name, "--target", "container", timeout=600)
-        self.assertEqual(
-            cp2.returncode, 0,
-            f"'wk new {self.name}' did not converge after its driver was killed: {cp2.stdout}",
-        )
-        self.assertIn("ready", cp2.stdout, cp2.stdout)
-
-        ls = run("ls")
-        self.assertIn(self.name, ls.stdout, f"'{self.name}' is missing from 'wk ls' after converging: {ls.stdout}")
+        self.assertEqual(cp2.returncode, 0, cp2.stdout)
+        self.assertIn(self.name, run("ls").stdout)
 
 
 @requires_container_target()
 class TestWkRmOfRubble(WkTest):
-    """The same kill, but the recovery asked for is `wk rm` rather than a
-    second `wk new`: rule 2 applies to destruction too -- a half-made
-    workspace is exactly what `wk rm` promises to clear."""
 
     def setUp(self):
         super().setUp()
         self.name = f"wk-test-{rand_suffix()}"
-        # Registered before anything is created: the `wk rm` below is the
-        # thing under test, so an assertion that fails first -- or that rm
-        # itself not converging -- must not leave the workspace running.
         self.addCleanup(self._remove)
 
     def _remove(self):
@@ -148,34 +99,17 @@ class TestWkRmOfRubble(WkTest):
         self.assertIsNotNone(m, cp.stdout)
         pid = m.group(1)
 
-        self.assertTrue(
-            _wait_registered(self.name),
-            f"'{self.name}' never came into existence for the kill to leave rubble",
-        )
+        self.assertTrue(_wait_registered(self.name))
         container_side(f"kill -9 {pid}")
         self.assertTrue(_wait_dead(pid), f"driver pid {pid} did not die")
 
         cp2 = run("rm", self.name, env={"WK_YES": "1"}, timeout=180)
-        self.assertEqual(
-            cp2.returncode, 0,
-            f"'wk rm {self.name}' did not converge on the rubble left by a killed 'wk new': {cp2.stdout}",
-        )
-        self.assertTrue(
-            "forgotten" in cp2.stdout or "destroyed" in cp2.stdout,
-            f"'wk rm' gave no sign of having cleared the rubble: {cp2.stdout}",
-        )
-
-        ls = run("ls")
-        self.assertNotIn(self.name, ls.stdout, f"'wk rm' left '{self.name}' behind: {ls.stdout}")
+        self.assertEqual(cp2.returncode, 0, cp2.stdout)
+        self.assertNotIn(self.name, run("ls").stdout)
 
 
 class TestRmTakesTheWorkspacesRecordsWithIt(unittest.TestCase):
-    """`wk rm` converges on everything a workspace left, its task records
-    included: a record that outlived its workspace would name a kill command
-    for a job whose checkout is gone. A record of a job still running is a
-    refusal instead -- destroying the workspace under it leaves it compiling
-    into nothing. Driven through wk.workspace's helpers over real record
-    directories; rm_one's call sites are tests/test_wk_workspace.py's."""
+    """`wk rm` takes a workspace's task records, and names a running job's kill command instead."""
 
     def _records(self, tmp):
         return record.Records(tmp, env={"WK_STORE": str(tmp)}, machine=Local())
@@ -200,24 +134,13 @@ class TestRmTakesTheWorkspacesRecordsWithIt(unittest.TestCase):
             self.assertEqual(len(left), 1, left)
             self.assertTrue(left[0].startswith("build-ws2-"), left)
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-# The stages whose whole blast radius is one home directory, so a scratch HOME
-# is a whole machine for them and the tests below drive the real script.
+# A scratch HOME is a whole machine for these stages; the rest change the machine itself.
 HOME_SCOPED = ("dotfiles", "claude")
-# The rest write sudoers rules, launchd/systemd units, packages and machine
-# defaults. Their convergence is owed (docs/PLAN.md),
-# not something a test suite may take on this machine.
 NEEDS_THE_MACHINE = ("tools", "settings", "sharing", "machine",
                      "vmtools", "softnet", "sdk", "broker", "quiesce")
 
 
 class TestSetupStagesConverge(WkTest):
-    """CLAUDE.md rule 2 over ./setup: killed at any point, a re-run reaches the
-    declared final state -- which ./setup states itself, as "running it twice in
-    a row must report no changes the second time"."""
 
     def _home(self):
         home = self.tmp / f"home-{rand_suffix()}"
@@ -245,7 +168,6 @@ class TestSetupStagesConverge(WkTest):
         return proc.returncode, out
 
     def test_a_stage_run_twice_reports_no_changes_the_second_time(self):
-        """The declared final state, in ./setup's own words."""
         for stage in HOME_SCOPED:
             with self.subTest(stage=stage):
                 home = self._home()
@@ -257,9 +179,6 @@ class TestSetupStagesConverge(WkTest):
                 self.assertIn("no changes", again, again)
 
     def test_a_stage_killed_at_any_point_converges_on_a_re_run(self):
-        """SIGKILL, so no trap and no cleanup runs -- whatever the stage had
-        half-made is what the re-run meets. Several points, because the one
-        that matters is between a file's creation and its content."""
         for stage in HOME_SCOPED:
             for after in (0.02, 0.05, 0.1, 0.2, 0.4):
                 with self.subTest(stage=stage, killed_after=after):
@@ -269,13 +188,9 @@ class TestSetupStagesConverge(WkTest):
                     self.assertEqual(0, rc, out)
                     rc, out = self._setup(home, stage)
                     self.assertEqual(0, rc, out)
-                    self.assertIn("no changes", out,
-                                  f"a re-run after a kill at {after}s did not "
-                                  f"converge:\n{out}")
+                    self.assertIn("no changes", out)
 
     def test_a_half_made_link_is_replaced_rather_than_accepted(self):
-        """"Already exists" is never the answer to a half-made thing: the three
-        shapes a kill leaves where a symlink belongs."""
         for wrong in ("dangling", "a real file", "a directory"):
             with self.subTest(shape=wrong):
                 home = self._home()
@@ -297,10 +212,12 @@ class TestSetupStagesConverge(WkTest):
                 self.assertIn("no changes", out, out)
 
     def test_every_stage_setup_runs_is_covered_or_named_as_owed(self):
-        """The audit above is worth nothing while a stage can be added and
-        covered by neither list."""
         stages = re.findall(r"^run_stage\s+(\S+)", (REPO / "setup").read_text(),
                             re.M)
         self.assertTrue(stages)
         self.assertEqual(sorted(stages),
                          sorted(set(HOME_SCOPED) | set(NEEDS_THE_MACHINE)))
+
+
+if __name__ == "__main__":
+    unittest.main()

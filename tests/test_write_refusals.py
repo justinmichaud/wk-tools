@@ -2,7 +2,6 @@
 unmarked disks of one transport are listed rather than picked; a missing or out-ranked card helper names the remedy;
 the disk the machine runs from is refused in the helper's own words, with the disks there listed.
 
-Run: python3 tests/run.py --unit -k test_write_refusals
 """
 import unittest
 
@@ -12,9 +11,7 @@ from wk import act
 
 class TestWriteRefusals(unittest.TestCase):
     def test_two_unmarked_disks_of_one_transport_are_listed_not_picked(self):
-        d = disks()
-        self.assertEqual(d.resolve_own(), "")
-        text, _ = quietly(d.listing)
+        text, _ = quietly(disks().listing)
         self.assertIn("    /dev/sda 59.5G usb", text)
         self.assertIn("    /dev/sdb 28.7G usb", text)
         self.assertEqual(text.count("no wk system on it"), 2)

@@ -67,12 +67,6 @@ if [ -d "$SRC/.git" ]; then             # an old snapshot's remotes are stale
     fi
 fi
 
-if _out=$("$WK_TOOLS/container/proxy/ensure-bridge.sh" sh "$WK_TOOLS/container/claude-cli.sh" </dev/null); then
-    log "Claude CLI: $_out"
-else
-    log "claude install failed -- check egress; run the installer by hand"
-fi
-
 install -d "$HOME/.claude"
 
 for f in settings.json hooks CLAUDE.md; do    # read-only, from the synced tree
@@ -90,7 +84,7 @@ while read -r _sname _sfile _shome _svar _skind _sdelivery; do
     if [ "$_skind" = file ]; then       # rewritten in place: /agent-rw
         [ "$_sdelivered" = 1 ] || continue
         [ -s "/agent-rw/$_sfile" ] \
-            || log "no $_sname credential yet -- 'wk key set $_sname' on the host stores one"
+            || log "no claude.ai login yet -- /login in a 'wk ai claude' session makes the one every workspace here shares"
         continue
     fi
     if [ "$_sdelivered" = 0 ]; then
@@ -263,10 +257,9 @@ if ! command -v lazygit >/dev/null 2>&1; then
 fi
 if ! command -v npm >/dev/null 2>&1; then
     if sudo apt-get install -y --no-install-recommends nodejs npm >/dev/null 2>&1; then
-        log "node $(node -v) and npm installed (Ubuntu's archive), for 'wk ai pi' to install pi with"
+        log "node $(node -v) and npm installed (Ubuntu's archive), for 'wk new' to install pi with"
     else
-        warn "apt install of nodejs/npm failed -- check egress. 'wk ai pi' refuses by name until
-         sudo apt-get install nodejs npm"
+        warn "apt install of nodejs/npm failed -- check egress; this workspace is made without pi"
     fi
 fi
 

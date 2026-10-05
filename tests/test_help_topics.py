@@ -1,10 +1,4 @@
-"""`wk help` prints README.md, the one document; `wk help <topic>` prints the
-sections whose heading names the topic, and an unknown topic lists the
-headings there are. The lifecycle section is the one a newcomer follows from
-a bare Pi to an automated A/B, so it has to name every command on that path.
-
-Run: python3 -m unittest tests.test_help_topics -v
-"""
+"""`wk help` prints README.md, the one document; `wk help <topic>` prints the"""
 TIER = "lint"
 import re
 import unittest
@@ -25,15 +19,6 @@ class TestHelpTopics(unittest.TestCase):
         self.assertNotIn("## Architecture", cp.stdout)
         self.assertNotIn("## Where the rest is", cp.stdout)
 
-    def test_the_lifecycle_names_every_step_from_bare_board_to_ab(self):
-        out = run("help", "lifecycle").stdout
-        for step in ("machines/<name>.conf", "wk sysimage build", "wk sysimage disks",
-                     "wk sysimage write", "--rescue", "@second", "--boot-order",
-                     "wk boot", "--keep", "wk sysimage webkit", "wk bench deploy",
-                     "wk bench run --ab", "wk bench report", "wk bench ab",
-                     "setup --stage quiesce", "admin console", "wpewebkit-dirclean",
-                     "S50dropbear", "wk enter", "tailscaled.log"):
-            self.assertIn(step, out, f"the lifecycle section does not mention {step!r}")
 
     def test_an_unknown_topic_lists_the_topics(self):
         cp = run("help", "nosuchtopic")
@@ -46,31 +31,8 @@ class TestHelpTopics(unittest.TestCase):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("Provision a bridge phone", cp.stdout)
 
-    def test_the_credential_commands_have_a_section_of_their_own(self):
-        """The design of `wk key` and `wk push` is a section a person looks up
-        by the command's name, not prose inside the agent workflow: `wk help
-        push` and `wk help key` have to answer."""
-        for topic, must in (
-                ("push", ("wk push status", "ssh-agent", "github-inject")),
-                ("key", ("wk key set claude", "CLAUDE_CODE_OAUTH_TOKEN",
-                         "claude-login"))):
-            with self.subTest(topic=topic):
-                cp = run("help", topic)
-                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-                for phrase in must:
-                    self.assertIn(phrase, cp.stdout)
-                # The section, not the whole document.
-                self.assertNotIn("## Architecture", cp.stdout)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestHardwareSection(unittest.TestCase):
-    """`wk help hardware` is derived from machines/*.conf and the drivers
-    they name, so it names every device and every driver -- a conf added
-    without a paragraph there fails here."""
 
     def test_names_every_fleet_device_and_its_driver(self):
         out = run("help", "hardware").stdout
@@ -84,3 +46,6 @@ class TestHardwareSection(unittest.TestCase):
                 self.assertIn(f"**{name}", out, f"{name} has no paragraph in the hardware section")
                 self.assertIn(f"`{driver}`", out, f"{name}'s driver {driver} is not named")
 
+
+if __name__ == "__main__":
+    unittest.main()

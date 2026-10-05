@@ -1,14 +1,4 @@
-"""Target-kind dispatch and the small pure classifiers a target driver is
-picked from: `Registry.kind` (lib/wk/targets.py: container|vm|remote|local
-are built in, anything else needs a conf and falls through to `remote` when
-the conf names no kind), `Remote.is_local` (is this process running on the
-remote machine itself), and `root_class` (lib/wk/sysimage/write.py: what kind
-of device a kernel cmdline's `root=` names). Each is driven directly, with no
-target loaded and no network -- these are the pure decisions the rest of the
-driver machinery calls through.
-
-Run: python3 -m unittest tests.test_owed_dispatch -v
-"""
+"""Target-kind dispatch and the small pure classifiers a target driver is"""
 import sys
 import unittest
 

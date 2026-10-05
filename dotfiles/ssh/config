@@ -1,6 +1,5 @@
 # BatchMode/StrictHostKeyChecking/ConnectTimeout live here because ssh does not pass command-line options to a ProxyJump child, and this gateway offers publickey,password and asks three times if a hop's key is missing -- BatchMode yes refuses instead of blocking a read-only probe on a prompt.
 Host igalia.com
-  ForwardAgent yes
   User jmichaud
   Port 6789
   BatchMode yes

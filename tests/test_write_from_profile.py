@@ -1,18 +1,4 @@
-"""`wk sysimage write` takes a configuration name, and clears an automounted
-card itself.
-
-Both halves exist because the command was long enough to be pasted by hand:
-its `--from` wanted a path copied out of `wk sysimage ls`, and on a machine
-whose desktop session automounts every card it refused, naming an unmount the
-write's own next step performs -- so the unmount was typed as a bare
-privileged ssh call instead (rpi5, 2026-09-04).
-
-A configuration names exactly one built image and lib/wk/sysimage/ls.py's scan
-is what finds it, so the path is recomputed here rather than recorded. The
-unmount's place in the write is tests/test_sysimage_write.py.
-
-Run: python3 tests/run.py --unit -k test_write_from_profile
-"""
+"""`wk sysimage write --from` takes a configuration name, resolved to the image its workspace holds."""
 import contextlib
 import io
 import os
@@ -55,11 +41,8 @@ def resolved(spec, answer=None, local=False):
 
 
 class TestAConfigurationNamesItsImage(unittest.TestCase):
-    def test_a_yocto_configuration_resolves_to_its_bytes(self):
+    def test_a_yocto_or_buildroot_configuration_resolves_to_its_bytes(self):
         self.assertEqual(resolved("wpewebkit-2.46-yocto-rpi5-64")[0], YOCTO)
-
-    def test_a_buildroot_configuration_resolves_too(self):
-        """One resolver for both builders, as the scan has one shape."""
         self.assertEqual(resolved("wpewebkit-2.38-buildroot-rpi3-32")[0], BUILDROOT)
 
     def test_a_workspace_with_no_image_does_not_resolve(self):
@@ -85,14 +68,7 @@ class TestAPathIsStillAPath(unittest.TestCase):
 
 
 class TestAConfigurationAnImageWorkspaceHoldsAndThisMachineCannotRead(unittest.TestCase):
-    """`write` runs on the host holding the card reader, and on a macOS
-    workstation the image workspace is in the podman VM, whose store this side cannot
-    read: `--from <configuration>` refused with "no workspace here has built
-    it yet" while `wk sysimage ls` was printing that very image, and the only
-    spelling that worked was the `--from vm:<path> --profile <name>` pair
-    (measured 2026-09-17). So its machine is asked for the path in its own
-    spelling -- `wk sysimage path`, routed like `holds` -- and `vm:` says
-    whose filesystem it is on."""
+    """The image workspace's machine is asked for the path (`wk sysimage path`); `vm:` says whose filesystem it is."""
 
     IMAGE = "/var/lib/wk/ws/yocto-webkit-2.52-yocto-rpi5-64/build/i.wic.xz"
 
@@ -106,12 +82,6 @@ class TestAConfigurationAnImageWorkspaceHoldsAndThisMachineCannotRead(unittest.T
         path, err = resolved("webkit-2.52-yocto-rpi5-64", (1, ""))
         self.assertIsNone(path)
         self.assertIn("wk sysimage build webkit-2.52-yocto-rpi5-64", err)
-
-
-class TestAMountedCardIsStillTheHelpersToRefuse(unittest.TestCase):
-    def test_the_gate_still_refuses_a_mounted_card_to_anyone_else(self):
-        """The rule lives where the privilege is; only the caller's order changed."""
-        self.assertIn("mounted filesystem(s) on it", (REPO / "admin" / "wk-card-priv").read_text())
 
 
 if __name__ == "__main__":

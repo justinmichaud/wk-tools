@@ -1,15 +1,5 @@
-"""The remote driver's probe (lib/wk/targets.py): `parse_probe` turns the raw
-text the far machine answers with into cores/load/memory/ionice/os, and the
-one round trip that fetches it runs under a ceiling of its own.
-
-Tested on captured samples for both shapes the probe has to understand:
-Linux (`nproc`, `/proc/loadavg`, `/proc/meminfo`) and Darwin
-(`sysctl -n hw.ncpu`, `sysctl -n vm.loadavg`, `vm_stat`) -- the same shape a
-macOS or BSD remote target answers with, which is otherwise unverifiable
-without one in hand.
-
-Run: python3 -m unittest tests.test_remote_driver -v
-"""
+"""The remote driver's probe (lib/wk/targets.py): `parse_probe` over captured Linux and Darwin samples, and the
+one round trip that fetches it, under a ceiling of its own."""
 import os
 import sys
 import tempfile
@@ -63,9 +53,6 @@ def fields(parsed):
 
 class TestRemoteProbeParseLinux(unittest.TestCase):
     def test_parses_cores_load_mem_ionice_os_from_proc(self):
-        """cores, load and MemAvailable come out of /proc/loadavg and
-        /proc/meminfo, ionice is reported yes when present, and the platform
-        the sample's `uname -s` named comes back out as os()'s answer"""
         p = targets.parse_probe(LINUX_SAMPLE)
         self.assertEqual(fields(p), (8, 0, 20000, "yes", "linux"))   # int(0.52); int(20480000 / 1024)
         self.assertEqual((p["home"], p["root"]), ("/home/t", "/home/t/wk"))
@@ -73,8 +60,6 @@ class TestRemoteProbeParseLinux(unittest.TestCase):
 
 
 class TestTheDefaultRoot(unittest.TestCase):
-    """A far end with no `root=` in its conf keeps its store at one default under its home, however it is asked."""
-
     def test_the_probe_the_far_end_and_the_driver_agree(self):
         self.assertEqual(targets.parse_probe(LINUX_SAMPLE)["root"], targets.default_root("/home/t"))
         env = {"HOME": "/h", "WK_REMOTE_MARKER": "/nonexistent/.wk-remote"}
@@ -87,10 +72,6 @@ class TestTheDefaultRoot(unittest.TestCase):
 
 class TestRemoteProbeParseDarwin(unittest.TestCase):
     def test_parses_cores_load_mem_ionice_os_from_sysctl_vm_stat(self):
-        """cores, load and free memory come out of `sysctl -n hw.ncpu`,
-        `sysctl -n vm.loadavg` and `vm_stat`, ionice is reported no --
-        util-linux has no Darwin equivalent -- and the platform is macos,
-        which is what decides the build system a config uses there"""
         # int(1.23), the 2nd field of "{ ... }"; (123456 free + 345678 inactive
         # + 45678 speculative) pages * 16384 bytes/page, in MB.
         self.assertEqual(fields(targets.parse_probe(DARWIN_SAMPLE)), (10, 1, 8043, "no", "macos"))
@@ -103,8 +84,6 @@ class TestRemoteProbeParseDarwin(unittest.TestCase):
 
 class TestRemoteProbeParseRobustness(unittest.TestCase):
     def test_trailing_blank_line_does_not_erase_ionice(self):
-        """a sample whose last line is a bare newline must not clobber the
-        ionice answer that came before it"""
         p = targets.parse_probe(LINUX_SAMPLE + "\n")
         self.assertEqual((p["ionice"], p["os"]), ("yes", "linux"))
 
@@ -130,13 +109,7 @@ class TimingFake(Fake):
 
 
 class TestTheProbeIsBounded(unittest.TestCase):
-    """Every report of the fleet waits on one ssh round trip, and
-    ConnectTimeout bounds the TCP connect and nothing after it: a machine
-    that accepts the connection and then answers nothing -- a wedged sshd, a
-    box deep in swap -- held `wk status <ws>` and `wk logs <ws>` past a 300s
-    wait (measured 2026-09-17, with moose down). So the probe runs under a
-    ceiling of its own (WK_PROBE_SECONDS), the way lib/wk/reach.py reads the
-    tailnet."""
+    """ConnectTimeout bounds only the connect, so the probe runs under WK_PROBE_SECONDS of its own."""
 
     def remote(self, fake, seconds):
         tmp = Path(tempfile.mkdtemp(prefix="wk-test-probe-"))
@@ -155,9 +128,6 @@ class TestTheProbeIsBounded(unittest.TestCase):
         self.assertEqual(fake.timeouts, [2])   # one round trip, under the ceiling; nothing asked again
 
     def test_the_ceiling_is_not_reached_when_the_machine_answers(self):
-        """A bound that also delays a machine that does answer would make
-        every report slower than the thing it reports on: the answer is taken
-        as it comes, and the machine is not asked a second time."""
         fake = TimingFake(Result(0, LINUX_SAMPLE))
         t = self.remote(fake, "20")
         self.assertEqual(t.answers(), (True, ""))

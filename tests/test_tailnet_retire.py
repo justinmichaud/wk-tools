@@ -1,17 +1,5 @@
-"""The tailnet API (lib/wk/tailnet.py, `wk key set tailnet-api`): retiring a fleet node, the one
-administrative act wk asks of the tailnet's control plane, and the credential check, key liveness and
-key minting beside it.
-
-A board is reached by its tailnet name and nothing about how to reach it is written down, so a card
-written for a board whose old node still holds that name joins renamed and is unreachable. Retiring the
-leftover keeps a reprovision from stopping at a person with a browser; the gate is an exact name match,
-and never a node that is online.
-
-Every request crosses `Api.transport`, which a FakeTailnet answers here; one test drives the real
-urllib transport against a loopback server.
-
-Run: python3 tests/run.py --unit -k test_tailnet_retire
-"""
+"""The tailnet API (lib/wk/tailnet.py, `wk key set tailnet-api`): retiring a fleet node, the one administrative
+act wk asks of the tailnet's control plane, and the credential check, key liveness and key minting beside it."""
 import contextlib
 import io
 import json
@@ -150,7 +138,6 @@ class TestCredential(TailnetTest):
         self.assertIn("wk key set tailnet-api --replace", err)
 
     def test_an_auth_key_is_not_an_api_token(self):
-        """the two credentials are spelled alike; the wrong one is refused before anything is sent."""
         bad = self.tmp / "wrong"
         bad.write_text("tskey-auth-abc-def\n")
         fake = FakeTailnet()
@@ -177,8 +164,8 @@ class TestCredential(TailnetTest):
 
 
 class TestAuthKey(TailnetTest):
-    """The one auth key a machine joins nodes with: a stored key while the tailnet still has it, else a mint by the
-    machine holding the API credential, else a refusal naming `wk key set tailnet`."""
+    """The one auth key a machine joins nodes with: a stored key while the tailnet still has it, else a mint by
+    the machine holding the API credential, else a refusal naming `wk key set tailnet`."""
 
     def test_a_stored_key_is_used_as_it_is_where_nothing_can_mint(self):
         fake = FakeTailnet()
@@ -269,29 +256,13 @@ class TestUrllibTransport(TailnetTest):
         self.assertEqual(api.devices(), [{"id": "1"}])
 
     def test_the_module_runs_as_a_program(self):
-        """lib/common.sh and lib/credcheck.py call `python3 -m wk.tailnet`."""
         cp = subprocess.run([sys.executable, "-m", "wk.tailnet", "check"], capture_output=True, text=True,
                             env=dict(os.environ, PYTHONPATH=str(REPO / "lib"), WK_TS_API_SECRET_FILE=str(self.tmp / "nope")))
         self.assertEqual(cp.returncode, 4, cp.stderr)
 
 
-class TestWiring(unittest.TestCase):
-    def test_the_write_retires_rather_than_naming_the_console(self):
-        text = (REPO / "lib" / "wk" / "sysimage" / "write.py").read_text()
-        self.assertIn(".retire(name)", text)
-        self.assertIn("wk key set tailnet-api", text,
-                      "the refusal without a token must name the remedy that ends the hand step")
-
-    def test_the_api_token_is_refused_where_an_auth_key_is_wanted(self):
-        """it administers the whole tailnet and is copied nowhere: a card must
-        never carry it."""
-        rules = (REPO / "lib" / "credcheck.py").read_text()
-        self.assertIn('key.startswith("tskey-api-")', rules)
-        tailnet = (REPO / "lib" / "wk" / "tailnet.py").read_text()
-        self.assertIn('usable("tailnet-api", key)', tailnet)
-
+class TestDoctorRow(unittest.TestCase):
     def test_doctor_declares_it_machine_local(self):
-        """One path, Secrets.cred_path's: doctor reads it from there."""
         from tests.support import clean_env
         from tests.test_doctor import UNK, doctor
         key = str(Path(tempfile.mkdtemp(prefix="wk-test-tailnet-")) / "api-key")

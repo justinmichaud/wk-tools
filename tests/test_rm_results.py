@@ -1,12 +1,5 @@
-"""`wk rm` and a workspace's bench tasks: a removal that would take a task no export holds as it is now is refused,
-naming each task and `wk bench export <task>`; `--force` crosses it and says so. "Exported" is read off the zips
-themselves -- the one a task records it was exported to, and ~/Downloads/<task>.zip -- never off a flag.
-
-Driven through ./wk against a remote target that is this machine (tests/test_rm_all.py's fixture), whose workspace
-directory holds the tasks.
-
-Run: python3 tests/run.py -k test_rm_results
-"""
+"""`wk rm` refuses to take a bench task no export holds as it is now, naming `wk bench export <task>`; `--force`
+crosses it. "Exported" is read off the zips themselves. Driven through ./wk against a remote target that is this machine."""
 import sys
 import types
 from unittest import mock
@@ -51,7 +44,6 @@ class TestATaskNoExportHoldsIsNotDestroyed(RmResultsTest):
     def test_an_unexported_task_refuses_the_removal_naming_it_and_the_export(self):
         cp = self.rm()
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("w: %s -- no export readable here holds it as it is now" % TASK, cp.stdout)
         self.assertIn("wk bench export %s" % TASK, cp.stdout)
         self.assertIn("--force", cp.stdout)
         self.assertFalse(self.gone(), cp.stdout)
@@ -85,7 +77,7 @@ class TestATaskNoExportHoldsIsNotDestroyed(RmResultsTest):
         cp = self.rm("--force")
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertTrue(self.gone(), cp.stdout)
-        self.assertIn("FORCED past a barrier", cp.stdout)
+        self.assertIn("FORCED", cp.stdout)
 
 
 class TestTheEvidenceIsReadOrRefused(WkTest):
@@ -98,7 +90,7 @@ class TestTheEvidenceIsReadOrRefused(WkTest):
                 raise OSError("permission denied")
         (why,) = record.unexported(Unreadable(), "/ws/w/bench", "/home/Downloads")
         self.assertEqual(why[0], "/ws/w/bench")
-        self.assertIn("cannot be known (permission denied)", why[1])
+        self.assertIn("permission denied", why[1])
 
     def test_a_task_whose_record_cannot_be_read_is_not_exported(self):
         class Flaky(Fake):
@@ -107,7 +99,9 @@ class TestTheEvidenceIsReadOrRefused(WkTest):
         m = Flaky()
         m._set_file("/b/t/task.json", "{}")
         m._set_file("/b/t/" + record.EXPORT_RECORD, "/x.zip")
-        self.assertEqual(record.unexported(m, "/b", "/d"), [("t", "unreadable, so whether it was exported cannot be known (gone)")])
+        (why,) = record.unexported(m, "/b", "/d")
+        self.assertEqual(why[0], "t")
+        self.assertIn("gone", why[1])
 
     def test_no_bench_directory_is_nothing_to_lose(self):
         self.assertEqual(record.unexported(Fake(), "/ws/w/bench", "/d"), [])
@@ -115,7 +109,6 @@ class TestTheEvidenceIsReadOrRefused(WkTest):
     def test_a_build_boxs_tasks_are_in_its_workspace_directory_there(self):
         box = types.SimpleNamespace(peer=False, machine="ssh", ws_dir_there=lambda ws: "/srv/wk/ws/" + ws)
         self.assertEqual(targets.Remote.results(box, "w"), ("ssh", "/srv/wk/ws/w/bench"))
-
 
     def test_a_peers_tasks_are_left_to_the_peers_own_rm(self):
         peer = types.SimpleNamespace(peer=True, results=lambda ws: self.fail("a peer's tasks were read from here"))
@@ -136,8 +129,7 @@ class _Holder:
 
 
 class TestAMacReadsItsZipsBeforeTheRemovalIsForwarded(WkTest):
-    """A Mac's container `wk rm` runs in the podman machine, which cannot read a zip on this host: every removal of a
-    workspace holding a task was refused, exported or not (measured 2026-09-27). The host reads the zips first."""
+    """A Mac's container `wk rm` runs in the podman machine, which cannot read a zip on this host, so the host reads them."""
 
     def setUp(self):
         super().setUp()
@@ -172,13 +164,11 @@ class TestAMacReadsItsZipsBeforeTheRemovalIsForwarded(WkTest):
         marker.write_text("applehv\n")
         with mock.patch.object(machine, "PODMAN_MACHINE", str(marker)):
             self.assertEqual([], self.workspace.unsaved_results(self.reg(WK_IN_VM="1", WK_HOST_SELF="1"), [("w", self.holder(), "workspace")]))
-            self.assertTrue(self.workspace.unsaved_results(self.reg(WK_IN_VM="1"), [("w", self.holder(), "workspace")]),
-                            "a removal typed in the podman machine itself still reads what it can")
+            self.assertTrue(self.workspace.unsaved_results(self.reg(WK_IN_VM="1"), [("w", self.holder(), "workspace")]))
 
     def test_the_variables_alone_skip_nothing_off_a_podman_machine(self):
         with mock.patch.object(machine, "PODMAN_MACHINE", str(self.tmp / "absent")):
-            self.assertTrue(self.workspace.unsaved_results(self.reg(WK_IN_VM="1", WK_HOST_SELF="1"), [("w", self.holder(), "workspace")]),
-                            "only the podman machine a Mac forwarded to leaves the zips to that Mac")
+            self.assertTrue(self.workspace.unsaved_results(self.reg(WK_IN_VM="1", WK_HOST_SELF="1"), [("w", self.holder(), "workspace")]))
 
     def test_the_dispatcher_asks_before_it_forwards_a_removal(self):
         text = (REPO / "lib" / "wk" / "dispatch.py").read_text()

@@ -201,7 +201,9 @@ class TestStoreOverrides(unittest.TestCase):
         self.assertEqual(Store({"WK_BROKER_SOCKET": "/s"}).broker_socket(), "/s")
         self.assertEqual(Store({"WK_BROKER_SOCKET": "/s"}).workspace_broker_socket(), "/s")
         self.assertEqual(Store({"XDG_RUNTIME_DIR": "/run/u"}).broker_socket(), "/run/u/wk/broker.sock")
-        self.assertEqual(Store({}).workspace_broker_socket(), "/run/wk/broker.sock")
+        for mac, sock in ((False, "/run/wk/broker.sock"), (True, "/h/.wk-broker.sock")):
+            with mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=mac):
+                self.assertEqual(Store({"HOME": "/h"}).workspace_broker_socket(), sock, "a macOS workspace is a guest, with no /run")
 
     def test_a_disk_admission_measures_the_named_store_else_home(self):
         self.assertEqual(Store({"WK_STORE": "/st", "HOME": "/h"}).admission_dir(), "/st")

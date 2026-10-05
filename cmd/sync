@@ -21,7 +21,7 @@
 #                              and what 'wk new' runs first; in the podman VM
 #                              it is asked of the broker the same way.
 #                              On a Mac, a refresh that moves a ref remounts
-#                              the host's shares in each running guest.
+#                              the mirror share in each running guest.
 #   wk sync --target <target>  that target's furniture, then its workspaces
 #   wk sync --all              every target's furniture, then its workspaces
 #   wk sync --tools [<target>] the furniture alone: a machine's copy of

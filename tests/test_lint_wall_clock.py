@@ -1,11 +1,4 @@
-"""lint.no_wall_clock_assertions: no unit test asserts a wall-clock bound of its
-own. The runner's budget (tests/run.py) is the one bound on how long a test
-takes, and a test that proves an ordering does it with a fake clock
-(lib/wk/clock.py) or a handshake; a live test, which measures a real machine,
-may time it.
-
-Run: python3 tests/run.py --lint -k test_lint_wall_clock
-"""
+"""lint.no_wall_clock_assertions: no unit test asserts a wall-clock bound of its"""
 TIER = "lint"
 import ast
 import inspect
@@ -38,7 +31,6 @@ def is_live(node):
 
 
 def is_duration(node):
-    """A clock reading taken from another: how long something took."""
     return any(isinstance(n, ast.BinOp) and isinstance(n.op, ast.Sub) and (reads_clock(n.left) or reads_clock(n.right))
                for n in ast.walk(node))
 
@@ -48,7 +40,6 @@ def names_in(node):
 
 
 def timers(tree):
-    """Each function returning a duration, with the positions of its returned tuple that hold one (None: the whole value)."""
     out = {}
     for f in ast.walk(tree):
         if isinstance(f, ast.FunctionDef):
@@ -60,7 +51,6 @@ def timers(tree):
 
 
 def durations_bound(assign, timed):
-    """The names `assign` binds to a duration."""
     if is_duration(assign.value):
         return {n.id for t in assign.targets for n in ast.walk(t) if isinstance(n, ast.Name)}
     call = assign.value if isinstance(assign.value, ast.Call) else None
@@ -87,7 +77,6 @@ def fails(stmts):
 
 
 def deadlines(fn):
-    """A test failing because a deadline passed: `if <clock>: fail`, or a `while <clock>:` loop that fails once it ends."""
     for n in ast.walk(fn):
         if isinstance(n, ast.If) and reads_clock(n.test) and fails(n.body):
             yield n
@@ -104,7 +93,6 @@ def start(fn):
 
 
 def static_units(tree):
-    """Where no runner is asked: every test_* function not under a live gate, in a module that is not live."""
     if any(isinstance(n, ast.Assign) and any(getattr(t, "id", "") == "TIER" for t in n.targets)
            and getattr(n.value, "value", "") == "live" for n in tree.body):
         return set()
@@ -125,8 +113,6 @@ def referenced(fn):
 
 
 def offences(source, path="<test>", units=None):
-    """Each wall-clock bound a unit test asserts, in the test or in a helper it calls; `units` holds the first lines of
-    the unit-tier tests the runner selects in this file."""
     tree = ast.parse(source)
     funcs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
     units = static_units(tree) if units is None else units
@@ -154,7 +140,6 @@ def offences(source, path="<test>", units=None):
 
 
 def unit_tests_by_file():
-    """The first line of every unit-tier test the runner selects, by file: the tier is the runner's answer."""
     from tests.run import flatten, test_tier
     found = unittest.TestLoader().discover(str(REPO / "tests"), top_level_dir=str(REPO))
     out = {}

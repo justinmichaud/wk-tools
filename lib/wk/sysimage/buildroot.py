@@ -86,7 +86,7 @@ class Buildroot(task.ContainerBuilder):
         return "wk sysimage build %s%s --stop" % (self.spec, self.ws_flag(ws))
 
     def stage(self, target, ws, stage):
-        return task.Stage(self.reg, target, ws, "buildroot", stage, self.kill_cmd(ws), self.clock, self.popen)
+        return task.Stage(self.reg, target, ws, "buildroot", stage, self.kill_cmd(ws), self.clock)
 
     def kernel(self):
         """Fetched and prepared here, where the network and depmod are; its path in the download cache both sides share."""

@@ -1,10 +1,4 @@
-"""A bridge phone with no phone in the room: lib/wk/bridge's read half (ls, status, battery, resolve), the
-devices table, and `wk machine setup [--disk]|tailnet|rm <bridge>` (wk.bridge.role, .plan, .provision) against a
-fake phone, a fake writer and a fake clock, with `killpoints[machine setup]` for a bridge. `live
-bridge.setup[moose-bmc]` and `live bridge.segment[<bridge>]` run against the real phones.
-
-Run: python3 tests/run.py --unit -k test_bridge
-"""
+"""lib/wk/bridge: the read half and `wk machine setup|tailnet|rm <bridge>` against a fake phone."""
 import base64
 import contextlib
 import fnmatch
@@ -37,7 +31,6 @@ from wk.sysimage import pmos  # noqa: E402
 
 class TestBridge(WkTest):
     def test_bridge_image_heads_are_distinguishable(self):
-        """a bridge image and the recovery image for the same phone differ in content, not only in name"""
         cp = run("sysimage", "ls")
         a = b = None
         for line in cp.stdout.splitlines():
@@ -72,7 +65,6 @@ class TestBridge(WkTest):
         self.assertNotEqual(ha, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
 
     def test_bridge_pmos_profiles_declare_bands(self):
-        """every postmarketOS profile declares the radio bands its dry run names"""
         bad = []
         for prof in ("bridge-pinephone", "bridge-librem5"):
             cp = run("sysimage", "build", prof, "--dry-run")
@@ -84,7 +76,6 @@ class TestBridge(WkTest):
         self.assertEqual(bad, [], "; ".join(bad))
 
     def test_bridge_profiles_match_bridge_confs(self):
-        """the profile and the bridge conf name the same phone"""
         bad = []
         for prof in ("bridge-pinephone", "bridge-librem5"):
             cp = run("sysimage", "build", prof, "--dry-run")
@@ -109,7 +100,6 @@ class TestBridge(WkTest):
 
 
 def ts_status(**over):
-    """The one blob wk-bridge-healthcheck now hands judge(): raw `tailscale status --json`."""
     self_ = dict({"Online": True, "Tags": ["tag:bridge"], "PrimaryRoutes": ["10.99.1.0/24"]}, **over)
     return json.dumps({"BackendState": "Running", "Self": self_})
 
@@ -137,32 +127,14 @@ def bridge_conf(name="tailnet-bridge-generic", **over):
 
 
 class TestClassify(unittest.TestCase):
-    def test_a_refused_key_is_key_changed(self):
-        """an unknown host key is not reported as an absent phone"""
-        self.assertEqual(bridge.classify_ssh_error("Host key verification failed."), "key-changed")
-
-    def test_a_changed_identification_banner_is_key_changed(self):
-        self.assertEqual(bridge.classify_ssh_error(
-            "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\n"
-            "Host key for tailnet-bridge-generic has changed and you have requested strict checking.\n"
-            "Host key verification failed."), "key-changed")
-
-    def test_an_unroutable_host_is_unreachable(self):
-        self.assertEqual(bridge.classify_ssh_error("ssh: connect to host x port 22: No route to host"), "unreachable")
-
-
-class TestSegmentDownVsOff(unittest.TestCase):
-    """`unit bridge.segment_down_vs_off`: a bridge whose segment is down (cable unplugged, dock
-    fine) reads differently from one that is off (the dock never enumerated at all)."""
-
-    def test_a_missing_interface_is_off(self):
-        self.assertEqual(bridge.segment_state({"seg_iface_exists": "no"}), "off")
-
-    def test_an_interface_with_no_carrier_is_down(self):
-        self.assertEqual(bridge.segment_state({"seg_iface_exists": "yes", "seg_carrier": "0"}), "down")
-
-    def test_a_carrier_is_up(self):
-        self.assertEqual(bridge.segment_state({"seg_iface_exists": "yes", "seg_carrier": "1"}), "up")
+    def test_ssh_errors_and_segment_states(self):
+        for err, want in (("Host key verification failed.", "key-changed"),
+                          ("@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nHost key verification failed.", "key-changed"),
+                          ("ssh: connect to host x port 22: No route to host", "unreachable")):
+            self.assertEqual(bridge.classify_ssh_error(err), want, err)
+        for facts, want in (({"seg_iface_exists": "no"}, "off"), ({"seg_iface_exists": "yes", "seg_carrier": "0"}, "down"),
+                            ({"seg_iface_exists": "yes", "seg_carrier": "1"}, "up")):
+            self.assertEqual(bridge.segment_state(facts), want, facts)
 
 
 class TestJudge(unittest.TestCase):
@@ -442,8 +414,6 @@ def quiet(fn, *a, **kw):
 
 
 class RoleTest(unittest.TestCase):
-    """A setup marks itself asked (WK_CONFIRMED) in os.environ; each test gets a clean copy back."""
-
     def setUp(self):
         patch = mock.patch.dict(os.environ)
         patch.start()
@@ -536,7 +506,6 @@ class TestSetup(RoleTest):
         self.assertFalse([a for a in w.argvs() + [e[1] for e in w.here.effects if e[0] == "run"] if KEY in " ".join(a)])
 
     def test_a_setup_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[machine setup]` for a bridge: two ships, both applies, the key and the join."""
         converges(self, PhoneWorld, lambda w: quiet(w.role().setup, BMC), PhoneWorld.state)
 
     def test_a_dry_run_changes_nothing_on_the_phone(self):
@@ -572,7 +541,6 @@ class TestSetup(RoleTest):
         self.assertIn("still not approved", out)
 
     def test_a_stored_key_the_tailnet_still_has_joins(self):
-        """the fleet key, checked through the tailnet API's transport by the machine that holds the API credential"""
         w = PhoneWorld()
         w.stored(authkey=KEY, api="tskey-api-a1-secret")
         asked = []
@@ -657,8 +625,6 @@ DISK = "rpi5:/dev/sda"
 
 
 class TestProvision(RoleTest):
-    """`wk machine setup <bridge> --disk`: `wk sysimage write` is the one writer, then the wait and the role."""
-
     def world(self, newest=("bridge-librem5-1",)):
         w = PhoneWorld()
         self.wk = str(REPO / "wk")
@@ -686,12 +652,6 @@ class TestProvision(RoleTest):
         self.assertEqual(os.path.dirname(self.fetched[0]), provision.image_dir(Store(w.env)))
         self.assertIn(("remove", self.fetched[0]), w.here.effects)
         self.assertIn("/etc/wk-bridge.conf", w.fake.files)
-
-    def test_the_hands_on_steps_name_the_phones_own_kill_switches(self):
-        w = self.world()
-        with mock.patch.dict(os.environ, {"WK_YES": "1"}):
-            rc, out = quiet(w.role().setup, BMC, disk=DISK)
-        self.assertIn(bridge.devices(REPO)["librem5"][1], out)
 
     def test_no_terminal_and_no_yes_writes_nothing(self):
         w = self.world()

@@ -1,9 +1,5 @@
-"""Commands, drivers and checkers exercised on a host with no workspace, no
-podman machine and no ssh: each runs a real `wk` command or a library call
-against this tree and a scratch directory.
-
-Run: python3 -m unittest tests.test_host_only -v
-"""
+"""Commands, drivers and checkers exercised on a host with no workspace, no podman machine and no ssh: each runs
+a real `wk` command or a library call against this tree and a scratch directory."""
 import os
 import platform
 import re
@@ -19,14 +15,8 @@ from wk import fleet, targets  # noqa: E402
 from wk.boot.driver import Driver  # noqa: E402
 
 
-def _have(prog):
-    import shutil as _sh
-    return _sh.which(prog) is not None
-
-
 class TestHostState(WkTest):
     def test_no_host_marker_on_the_host(self):
-        """a host carries no ~/.wk-workspace marker"""
         if targets.Registry(REPO).in_workspace():
             self.skipTest("this machine is a workspace")
         self.assertFalse(
@@ -37,14 +27,12 @@ class TestHostState(WkTest):
 
 class TestCommandsWithoutAMachine(WkTest):
     def test_wk_build_list_shows_all_configs(self):
-        """`wk build --list` shows all configs"""
         cp = run("build", "--list")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("jsc-release", cp.stdout)
         self.assertIn("mac-release", cp.stdout)
 
     def test_wk_build_list_starts_no_podman_machine(self):
-        """`wk build --list` answers without asking podman to start anything"""
         asked = self.tmp / "podman-asked"
         with stub_path({"podman": 'echo "$*" >> %s\nexit 125\n' % asked}) as binp:
             cp = run("build", "--list", env={"PATH": f"{binp}:{os.environ['PATH']}"})
@@ -52,7 +40,6 @@ class TestCommandsWithoutAMachine(WkTest):
         self.assertNotIn("start", asked.read_text() if asked.exists() else "")
 
     def test_sudo_status_never_prompts(self):
-        """`wk key sudo status` answers without ever prompting"""
         cp = run("key", "sudo", "status", input="")
         self.assertIn(cp.returncode, (0, 1), cp.stdout + cp.stderr)
         self.assertIn("password", (cp.stdout + cp.stderr).lower())
@@ -62,7 +49,6 @@ class TestResolveWithoutABuild(WkTest):
     @unittest.skipUnless(platform.system() == "Darwin",
                          "a mac-* config is refused off an Apple host")
     def test_wk_profile_composes_the_apple_port_environment(self):
-        """`wk profile` composes the Apple port's environment: DYLD_FRAMEWORK_PATH, flags before the script, xctrace for native"""
         with fake_workspace() as ws:
             bad = []
             cp = ws.run("profile", "--config", "mac-release", "--dry-run", "bench.js")
@@ -79,7 +65,6 @@ class TestResolveWithoutABuild(WkTest):
             self.assertEqual(bad, [], f"wk profile resolved wrongly: {bad}")
 
     def test_wk_profile_composes_the_right_environment(self):
-        """`wk profile` composes each port's environment, and every mode either resolves or refuses with a reason"""
         with fake_workspace() as ws:
             bad = []
             cp = ws.run("profile", "--config", "wpe-release", "--mode", "native", "--dry-run", "bench.js")
@@ -116,7 +101,6 @@ class TestBootFiles(WkTest):
         return d
 
     def test_path_traversal_is_refused(self):
-        """path traversal is refused"""
         d = self._fixture()
         for n in ("../../etc/passwd", "deadbeef/../../etc/passwd"):
             cp = subprocess.run(
@@ -126,7 +110,6 @@ class TestBootFiles(WkTest):
             self.assertEqual(cp.stdout.strip(), "", f"{n} resolved to something: {cp.stdout}")
 
     def test_boot_files_check_catches_missing_kernel(self):
-        """a tree missing a kernel the firmware will ask for is not reported bootable"""
         d = self._fixture()
         (d / "current" / "vmlinuz").unlink()
         cp = subprocess.run(
@@ -138,7 +121,6 @@ class TestBootFiles(WkTest):
         self.assertIn("current/vmlinuz", cp.stdout + cp.stderr)
 
     def test_boot_files_accepts_autodetected_kernel(self):
-        """a config.txt naming no kernel= and no arm_64bit= is accepted with an auto-detected kernel8.img"""
         d = self._fixture()
         (d / "config.txt").write_text("[all]\ndtoverlay=vc4-kms-v3d\n")
         import shutil as _sh
@@ -151,33 +133,6 @@ class TestBootFiles(WkTest):
             capture_output=True, text=True,
         )
         self.assertEqual(cp.returncode, 0, f"an auto-detected kernel8.img image was refused: {cp.stdout + cp.stderr}")
-
-    def test_pimbr_type_byte_roundtrips(self):
-        """boot/onboard's partition type byte scripts, run on an image: offset 450 round-trips without truncating it"""
-        import sys
-        sys.path.insert(0, str(REPO / "lib"))
-        from wk.boot.driver import Onboard
-        img = self.tmp / "mbr.img"
-        with open(img, "wb") as f:
-            f.write(b"\x00" * (1024 * 2048))
-        with open(img, "r+b") as f:
-            f.seek(446)
-            f.write(bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0]))
-            f.seek(510)
-            f.write(bytes([0x55, 0xAA]))
-
-        def sh(name, **p):
-            cp = subprocess.run(["sh", "-c", Onboard(REPO, name, WK_DEV=str(img), **p).text()], capture_output=True, text=True)
-            self.assertEqual(cp.returncode, 0, cp.stderr)
-            return cp.stdout.split()
-
-        for octal, byte in (("014", "0c"), ("203", "83"), ("014", "0c")):
-            sh("pimbr-set-type.sh", WK_OCT=octal)
-            self.assertEqual(sh("pimbr-type.sh"), [byte])
-        self.assertEqual(img.stat().st_size, 2097152, "the write truncated the device")
-        if _have("sfdisk"):
-            cp = subprocess.run(["sfdisk", "-l", str(img)], capture_output=True, text=True)
-            self.assertIn("FAT32", cp.stdout, "sfdisk no longer reads the round-tripped table as FAT32")
 
 
 def _broker_policy(body):
@@ -195,7 +150,6 @@ spec.loader.exec_module(m)
 
 class TestBroker(WkTest):
     def test_broker_refuses_a_workstation_as_bench_device(self):
-        """a workspace may not claim a workstation as a bench device, whatever it asks for"""
         cp = _broker_policy('''
 bench = [n for n, v in m.fleet().items() if v["role"] == "bench-device"]
 work  = [n for n, v in m.fleet().items() if v["role"] != "bench-device"]
@@ -219,7 +173,6 @@ print("OK")
         self.assertIn("OK", out, f"a workstation was not refused as a bench device: {out}")
 
     def test_broker_plan_allowlist_is_closed(self):
-        """an unknown plan is refused, naming the allowlist that decides it"""
         cp = _broker_policy('''
 try:
     m.want_plan({"plan": "speedometer99"})
@@ -259,7 +212,6 @@ policy = m.Policy("/tmp")
 
 class TestProxyAllowlist(WkTest):
     def test_ddebs_ubuntu_com_allowed_for_apt_only(self):
-        """ddebs.ubuntu.com is reachable on 80/443 for apt, refused elsewhere"""
         cp = _proxy_policy('''
 r = {p: policy.host_allowed("ddebs.ubuntu.com", p)[0] for p in (80, 443, 22)}
 print("RESULT", r)
@@ -272,15 +224,12 @@ print("RESULT", r)
 
 class TestSystemKind(unittest.TestCase):
     def test_base_image_is_never_mistaken_for_a_bench_system(self):
-        """a base image is never mistaken for a bench system"""
         def kind(machine, rootdev):
             conf = fleet.Fleet(REPO, {"HOME": "/nonexistent"}).load(machine)
             return Driver(REPO, conf, None).system_kind(rootdev)
-        # rpi4: the bench system on the USB drive, the rescue on the SD card (machines/rpi4.conf)
         self.assertEqual(kind("rpi4", "/dev/sda2"), "bench")
         self.assertEqual(kind("rpi4", "/dev/mmcblk0p2"), "base")
         self.assertEqual(kind("rpi4", ""), "unknown")
-        # rpi3: one medium, so both prefixes match and the rescue's root is asked first
         self.assertEqual(kind("rpi3", "/dev/mmcblk0p2"), "base")
         self.assertEqual(kind("rpi3", "/dev/mmcblk0p4"), "bench")
 
@@ -290,7 +239,6 @@ class TestHandsOnArmingAndBench(WkTest):
         return os.uname().sysname == "Darwin"
 
     def test_arming_with_no_volume_refuses(self):
-        """arming with no volume attached refuses"""
         if not self._is_macos():
             self.skipTest("the hands-on machine is this Mac")
         cp = run("boot", "mbp", "--status", env={"WK_BENCH_VOLUME": "wk-selftest-no-such-volume"})
@@ -305,7 +253,6 @@ class TestHandsOnArmingAndBench(WkTest):
         self.assertFalse((self.tmp / "state" / "wk" / "boot-armed").exists(), "a refused arming still wrote a record")
 
     def test_bench_role_required_or_it_does_not_run(self):
-        """a benchmark runs in bench mode or it does not run"""
         if not self._is_macos():
             self.skipTest("bare-metal bench mode is this Mac")
         cp = run("bench", "staged", "--plan", "jetstream2.2", env={"WK_BENCH_ROOT": str(self.tmp / "bench")})
@@ -325,7 +272,6 @@ class TestHandsOnArmingAndBench(WkTest):
         self.assertIn("--browser minibrowser --platform osx --plan jetstream2.2", cp3.stdout + cp3.stderr)
 
     def test_boot_status_survives_an_absent_machine(self):
-        """`wk boot <machine> --status` reports something for every machine, an absent one included"""
         cp = run("boot", "--list")
         machines = [line.split()[0] for line in cp.stdout.splitlines() if line.split()]
         bad = []

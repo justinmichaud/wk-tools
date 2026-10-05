@@ -8,7 +8,6 @@ import os
 import re
 import shlex
 import statistics
-import subprocess
 import sys
 import threading
 
@@ -16,9 +15,8 @@ from wk import act, buildconf, fleet, images, job, notify, pgo, record as wkreco
 from wk.act import Refused, die, info, log, warn
 from wk.bench import ab, board_ab, pipeline, record, report, seed
 from wk.bench.systems import System, first_line, root_device
-from wk.store import no_such_workspace
-from wk.boot import cli as bootcli, driver_class, open_driver
-from wk.boot.mac import BENCH_ROOT, TOOLS, Channel, Script
+from wk.boot import driver_class, open_driver
+from wk.boot.mac import BENCH_ROOT, Script
 from wk.clock import Clock
 from wk.kv import kv
 from wk.lock import Lock
@@ -372,8 +370,8 @@ class Capture(threading.Thread):
 class StagedRun(pipeline.Run):
     """The pipeline on the running install: no workspace, no task (the host install's task collects the run directory)."""
 
-    def __init__(self, root, reg, system, clock, env, popen):
-        self.root, self.reg, self.system, self.clock, self.popen = str(root), reg, system, clock, popen
+    def __init__(self, root, reg, system, clock, env):
+        self.root, self.reg, self.system, self.clock = str(root), reg, system, clock
         self.env = dict(env)
         wkrecord.default_watchdog(self.env, pipeline.STALL_SECONDS, pipeline.ABORT_SECONDS)
         self.here, self.ws, self.target = reg.machine, system.ws, None
@@ -458,7 +456,7 @@ def listing(m, home):
     return 0
 
 
-def staged(root, reg, clock, o, popen=None, driver=machine_driver):
+def staged(root, reg, clock, o, driver=machine_driver):
     """`wk bench staged`: this install's newest (or --id) stage, run through the pipeline."""
     if not reg.machine.run(["uname", "-s"]).out.startswith("Darwin"):
         die("'wk bench staged' is macOS bench mode. The Linux systems run their benchmark\n"
@@ -483,12 +481,12 @@ def staged(root, reg, clock, o, popen=None, driver=machine_driver):
             "    is here, and Tools/Scripts/run-benchmark --list-plans what it can run)")
     if o.get("gates"):
         return gates(root, reg, clock, system, plan)
-    return StagedRun(root, reg, system, clock, reg.env, popen or subprocess.Popen).go(plan, o)
+    return StagedRun(root, reg, system, clock, reg.env).go(plan, o)
 
 
 def gates(root, reg, clock, system, plan):
     expect = system.o.get("expect_display") or (install_display(system) or "")
-    leg = StagedRun(root, reg, system, clock, reg.env, None).leg(plan, system.o)
+    leg = StagedRun(root, reg, system, clock, reg.env).leg(plan, system.o)
     rows = Gates(root, reg.machine, clock, reg.env, plan, expect, system.build_dir(leg), system.py).ask()
     for name, ok, detail in rows:
         pipeline.Run.check(ok, name, detail)
@@ -643,183 +641,6 @@ def plans(order, names, payloads):
 
 def stage(root, reg, clock, words, machine, config, pairs, driver=machine_driver):
     return Stage(root, reg, clock, driver).run(words, machine, config, pairs)
-
-
-HOST_BENCH_TIMEOUT = "2700"   # the first run after a stage is legitimately slow
-HOST_BOOT_WAIT = 3600         # somebody choosing the volume at the startup manager
-HOST_BACK_WAIT = 600
-HOST_POLL = 10
-HOST_TOOLS = (TOOLS, "wk-tools")
-
-
-class MacHostSystem(System):
-    """`--system mbp`, the Mac's benchmark volume, driven from wherever this runs: `boot()` stages the build and
-    reboots into it, `run()` is `wk bench staged` over the bench-mode ssh alias, `after()` reboots back."""
-
-    kind = "mac-volume"
-    bench_host = "image"
-    host_os = "macos"
-
-    def __init__(self, root, reg, target, ws, clock, name, conf, channel_factory=None, stage_driver=None):
-        super().__init__(root, reg, target, ws, clock)
-        self.name, self.conf, self.env = name, dict(conf, name=name), reg.env
-        self.pending = None   # stashed by HostRun.leg(): System.boot() itself takes no leg
-        self.channel_factory = channel_factory or (lambda conf, env, ch, via, root: Channel(conf, env=env, channel=ch, via=via, root=root))
-        self.stage_driver = stage_driver or self.make_driver
-
-    def make_driver(self, root, conf):
-        return driver_class(conf.get("driver", ""))(root, conf, self.channel_factory(conf, self.env, "none", self.here, root))
-
-    def driver(self):
-        return self.make_driver(self.root, self.conf)
-
-    def boot_obj(self):
-        return bootcli.Boot(self.root, self.conf, self.driver(), env=self.env)
-
-    def bench_channel(self):
-        return self.channel_factory(self.conf, self.env, "bench", self.here, self.root)
-
-    def bench_machine(self):
-        ch = self.bench_channel()
-        dest = ch.dest("i_ssh")
-        if not dest:
-            die("%s (machines/%s.conf) sets no bench_ssh -- needed to reach its bench-mode install" % (self.name, self.name))
-        return self.here if ch.here() else Ssh(dest, via=self.here)
-
-    def cores_refusal(self):
-        return "no pin exists on macOS"
-
-    def aslr_prefix(self):
-        die("WK_BENCH_ASLR=off: ASLR cannot be turned off on Apple Silicon; the run records the slide it got")
-
-    def has_gpu(self, arch):
-        return True
-
-    def headless_reason(self, arch):
-        return ""
-
-    def default_browser(self, cfg):
-        return "minibrowser"
-
-    def build_present(self, leg):
-        return True, "staged fresh during boot"
-
-    def checks(self, leg):   # the real gates run inside the `wk bench staged` this run() invokes there
-        return [], []
-
-    def src(self):
-        return self.target.src(self.ws)
-
-    def facts(self, leg):
-        return ["role=" + self.conf.get("profile", ""), "system=" + self.conf.get("profile", ""), "machine=" + self.name]
-
-    def deploy(self, leg):   # already crossed: boot() stages it before the reboot into bench mode
-        pass
-
-    def boot(self):
-        if self.target.info(self.ws) in ("absent", "unreachable"):
-            die(no_such_workspace(self.ws))
-        leg = self.pending
-        if leg is None:
-            die("internal: %s.boot() reached with no leg pending (HostRun.leg() sets it)" % type(self).__name__)
-        Stage(self.root, self.reg, self.clock, driver=self.stage_driver).run([self.ws], self.name, leg.cfg.name, [(leg.plan, leg.payload)])
-        self.boot_obj().arm()
-        self._wait_for("bench", HOST_BOOT_WAIT)
-
-    def _wait_for(self, want, timeout):
-        if act.dry_run():
-            log("  would wait up to %ss for %s mode" % (timeout, want))
-            return
-        driver = self.driver()
-        if not self.clock.wait_until(lambda: driver.probe().startswith(want), timeout, HOST_POLL):
-            die("gave up after %ss waiting for %s to answer in %s mode" % (timeout, self.name, want))
-
-    def remote_tools(self, m):
-        for rel in (self.env.get("WK_MAC_BENCH_TOOLS") or "",) + HOST_TOOLS:
-            if not rel:
-                continue
-            path = rel if rel.startswith("/") else "$HOME/" + rel
-            r = m.run(["sh", "-c", "test -x %s/wk && cd %s && pwd" % (path, path)])
-            if r.ok and r.out.strip():
-                return r.out.strip()
-        die("no wk-tools checkout found on %s's benchmark install.\n"
-            "    'wk bench staged' runs from it, so the benchmark install needs this repository\n"
-            "    (clone it there); WK_MAC_BENCH_TOOLS names it directly." % self.name)
-
-    def bench_argv(self, leg):
-        m = self.bench_machine()
-        tools = self.remote_tools(m)
-        cmd = "cd %s && ./wk bench staged --plan %s --timeout %s" % (
-            shlex.quote(tools), shlex.quote(leg.plan), shlex.quote(str(leg.o.get("timeout") or HOST_BENCH_TIMEOUT)))
-        if leg.count:
-            cmd += " --count %s" % shlex.quote(leg.count)
-        if m is self.here:
-            return ["bash", "-c", cmd]
-        return m.argv(cmd)
-
-    def collect(self, leg):
-        if act.dry_run():
-            log("  would collect the newest run in %s/results on %s" % (BENCH_ROOT, self.name))
-            return
-        m = self.bench_machine()
-        results = BENCH_ROOT + "/results"
-        newest = sorted(m.listdir(results)) if m.isdir(results) else []
-        if not newest:
-            warn("no result appeared in %s on %s" % (results, self.name))
-            return
-        remote_dir = results + "/" + newest[-1]
-        m.copy_out(remote_dir + "/result.json", os.path.join(leg.out, "result.json"))
-        record.write_env(os.path.join(leg.out, "env.json"), ["remote.run=" + newest[-1], "remote.dir=" + remote_dir], update=True,
-                         machine=leg.machine)
-        log("  collected from %s:%s" % (self.name, remote_dir))
-
-    def after(self, leg):
-        try:
-            self.boot_obj().back()
-        except Refused:
-            warn("%s cannot bless itself back to host mode from its own benchmark install -- only the\n"
-                 "  host install carries the boot helper. The result is already collected; shut %s down,\n"
-                 "  hold the power button until 'Loading startup options', and pick the host install."
-                 % (self.name, self.name))
-            return []
-        self._wait_for("host", HOST_BACK_WAIT)
-        return []
-
-
-class HostRun(pipeline.Run):
-    """`--system mbp`'s task record and steps; the measurement itself is `wk bench staged`, over ssh."""
-
-    def leg(self, plan, o):
-        leg = super().leg(plan, o)
-        self.seed(leg)   # before boot(), which stages leg.payload
-        self.system.pending = leg
-        return leg
-
-    def seed(self, leg):
-        if leg.payload:
-            return
-        def read(path):
-            r = self.target.exec(self.ws, ["cat", "%s/Tools/Scripts/%s" % (self.system.src(), path)])
-            return r.out.replace("\r", "") if r.ok else None
-        seeder = seed.Seeder(self.here, self.lock, os.path.join(self.reg.store.artifact_dir(), "bench"), self.reg.store.mirror())
-        leg.payload = seeder.seed(leg.plan, seed.plan_json(read, leg.plan))
-
-    def idle_rows(self):
-        """The install's own gates judge it quiet; this machine's own load is not the measurement."""
-        return []
-
-    def run_jsc(self, leg):
-        return self.run_remote(leg)
-
-    def run_browser(self, leg):
-        return self.run_remote(leg)
-
-    def run_remote(self, leg):
-        argv = self.system.bench_argv(leg)
-        path = os.path.join(leg.out, "run.log")
-        rc = self.watched(argv, None, path)
-        return rc, "wk bench staged (over ssh) exited %d" % rc, path
-
 
 
 def rubble(install):

@@ -52,6 +52,12 @@ rather than invented; the last two are what this repository needs of any image.
                                             without this the build reaches
                                             genimage and dies on a missing
                                             rpi-firmware/fixup4.dat
+  RPI_FIRMWARE_3BPLUSNEW                    the fork's newest rpi-firmware
+                                            (52185fdd, 2023-03-06) instead of
+                                            the 2020 one: a rev 1.4/1.5 board
+                                            boots this image's own firmware;
+                                            tree-patches/0002 lets the Pi 4
+                                            variant select it
   BR2_PACKAGE_WPA_SUPPLICANT*               wifi, see the defconfig
   BR2_TARGET_ROOTFS_EXT2*                   the rpi3 2.38 defconfig emits a
                                             tarball only, which leaves genimage

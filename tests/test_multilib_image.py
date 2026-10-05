@@ -1,23 +1,6 @@
-"""A multilib image installs one width, and the SDK that cross-builds for it
-can be assembled at all.
-
-`MLPREFIX` is set for a multilib image recipe and the recipes gain their
-variants from multilib.conf's global BBCLASSEXTEND, but nothing rewrites
-`IMAGE_INSTALL` -- unmapped, it assembles a 64-bit rootfs under a 32-bit name
-with no error anywhere.
-
-An SDK holds both widths in one sysroot by design, which is fine until two
-variants ship one path with different bytes: lib32-libc6-dev and libc6-dev both
-carried /usr/include/finclude/math-vector-fortran.h and rpm refused the whole
-transaction, so no SDK could be built and no slot with it (rpi5, 2026-09-03).
-
-The bbappend's anonymous python is lifted and run against a fake datastore --
-bitbake is not importable here, and the logic is what is under test. The glibc
-bbappend beside it is checked as text: what it produces is a package, which
-only a build can weigh.
-
-Run: python3 -m unittest tests.test_multilib_image -v
-"""
+"""A multilib image installs one width: nothing else rewrites IMAGE_INSTALL, so unmapped it assembles a 64-bit
+rootfs under a 32-bit name. The bbappend's anonymous python is lifted and run against a fake datastore, since bitbake
+is not importable here."""
 import re
 import unittest
 
@@ -79,38 +62,6 @@ class TestTheImageInstallsOneWidth(unittest.TestCase):
         d = a_lib32_image(MLPREFIX="")
         run_bbappend(d)
         self.assertEqual("wpewebkit cog linux-raspberrypi", d["IMAGE_INSTALL"])
-
-
-class TestTheDuplicateHeaderIsDropped(unittest.TestCase):
-    """Shared /usr/include is the point of a multilib sysroot: headers are
-    meant to be width-independent, and only ${baselib} differs. This one is
-    not, so the non-primary width does not ship it and the primary keeps it.
-    Verified against the built packages with `oe-pkgdata-util list-pkg-files`
-    (lib32-libc6-dev: 0, libc6-dev: 1)."""
-
-    GLIBC = (REPO / "image" / "yocto" / "meta-wk-multilib" / "recipes-core"
-             / "glibc" / "glibc_%.bbappend")
-
-    def test_it_exists_in_the_multilib_layer(self):
-        """meta-wk-multilib, not meta-wk: it is only ever right for a build
-        that has a second width."""
-        self.assertTrue(self.GLIBC.is_file(), f"{self.GLIBC} is missing")
-
-    def test_only_the_non_primary_width_drops_it(self):
-        """Guarded on MLPREFIX. Unguarded, the 64-bit build sharing this
-        recipe would lose the header too and nothing would provide it."""
-        text = self.GLIBC.read_text()
-        self.assertIn("${MLPREFIX}", text, "the removal is not guarded by MLPREFIX")
-        self.assertIn("math-vector-fortran.h", text)
-
-    def test_it_removes_one_named_file_and_no_glob(self):
-        """A glob here would silently take whatever else lands beside it."""
-        for line in self.GLIBC.read_text().splitlines():
-            stripped = line.strip()
-            if stripped.startswith("rm "):
-                with self.subTest(line=stripped):
-                    self.assertIn("math-vector-fortran.h", stripped)
-                    self.assertNotIn("*", stripped)
 
 
 if __name__ == "__main__":

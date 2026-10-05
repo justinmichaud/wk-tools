@@ -5,15 +5,14 @@ renderer prints the rows and counts the misses."""
 import os
 import re
 import shlex
-import shutil
-import subprocess
 
-from wk import bridge, fleet, git, guest, priv, record, secrets, targets
+from wk import bridge, fleet, git, guest, priv, reach, record, secrets, status, targets
 from wk.bench import record as bench_record
+from wk.clock import Clock
 from wk.key.cli import Key
 from wk.kv import kv
-from wk.machine import Local
-from wk.machine_cmd import deps as machine_deps
+from wk.machine import Local, Ssh
+from wk.machine_cmd import Machines, deps as machine_deps
 from wk.status import machine_confs
 from wk.store import Store, in_vm
 
@@ -105,17 +104,6 @@ def cred_fact(line, key):
     return m.group(1) if m else ""
 
 
-def remote_control_row(where, line):
-    fact = cred_fact(line, "remote-control")
-    if fact == "allowed":
-        return [ok("remote control in %s: allowed by the organization's policy" % where)]
-    if fact == "denied":
-        return [miss("remote control in %s: denied by the organization's policy" % where, cred_fact(line, "fix"))]
-    if not fact:
-        return []
-    return [unk("remote control in %s: unverified" % where, cred_first(line))]
-
-
 def credentials_section(names, verdict_of):
     rows = []
     for name in names:
@@ -131,23 +119,6 @@ def credentials_section(names, verdict_of):
             rows.append(unk("%s: %s" % (name, why), "wk key setup"))
         else:
             rows.append(unk("%s: %s" % (name, why), "wk key check"))
-        if name == "claude-login":
-            rows += remote_control_row("the workspaces this login reaches", line)
-    return rows
-
-
-def fleet_logins_section(peers, verdict_of):
-    rows = []
-    for peer in peers:
-        line = verdict_of(peer)
-        v, what = cred_verdict(line), "%s: %s" % (peer, cred_first(line))
-        if v in ("ok", "wide"):
-            rows.append(ok(what))
-            rows += remote_control_row("the workspaces %s makes" % peer, line)
-        elif v in ("absent", "bad"):
-            rows.append(miss(what, "wk key setup  (from a terminal here: it logs in for %s)" % peer))
-        else:
-            rows.append(unk(what, "wk key check"))
     return rows
 
 
@@ -265,28 +236,70 @@ def mac_battery_line(out):
     return "%s, %s%% -- no OS limit exists" % ("plugged in" if "'AC Power'" in lines[0] else "on battery", m.group(1))
 
 
-def gh_authenticated(env=None):
+PERF = """cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown
+cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo"""
+
+
+def device(root, name, env, machine, probe=status.fleet_probe, answers=None):
+    """`wk doctor <machine>`: its tailnet names, whether it answers, a bench device's system and arm, and a
+    board's governor and temperature, each a row. Nothing is changed and nothing is started."""
+    conf = fleet.Fleet(root, env).load(name)
+    r = reach.Reach(machine, env)
+    for n in r.names(name):
+        p = r.peer(n)
+        if p is None:
+            yield unk("%s is not a tailnet node" % n, "wk machine probe %s" % name)
+        else:
+            yield check("%s on the tailnet at %s" % (n, p[1]), "power it on, or: wk machine probe %s" % name, p[2] == "up")
+    if conf["kind"] not in fleet.BENCH_KINDS:
+        up, why = (answers or Machines(root, env, here=machine).answers)(name, conf)
+        yield check("%s answers" % name if up else "%s does not answer: %s" % (name, why), "wk machine probe %s" % name, up)
+        return
+    cap = status.fleet_timeout(env)
+    fields = probe(root, name, cap, env)
+    if not fields or "error" in fields:
+        yield unk("%s: the fleet probe %s" % (name, "failed: " + fields["error"] if fields else "did not answer within %ss" % cap),
+                  "wk machine probe %s" % name)
+        return
+    mode = status.fleet_mode(fields["probeable"], fields["mode"], fields["bridge"])
+    yield check("%s answers in %s" % (name, mode) if fields["mode"] else "%s is %s" % (name, mode), "wk machine probe %s" % name,
+                bool(fields["mode"]) and not mode.startswith("unreachable"))
+    if fields.get("armed"):
+        what = "armed for %s by %s since %s" % (fields["armed"], fields.get("armed_by") or "?", fields.get("armed_at") or "?")
+        yield miss(what + ", and the record was never cleared", "wk boot %s --status" % name) if status.armed_desync(
+            fields, Clock()) else note(what)
+    else:
+        yield ok("not armed")
+    yield note("media: %s" % fields.get("media", "unknown"))
+    if conf["kind"] != "board" or not fields["mode"]:
+        return
+    dest = conf.get("bench_ssh") if fields["mode"].startswith("bench") else conf.get("ssh") or name
+    out = Ssh(dest, timeout=reach.ssh_timeout(env), via=machine).run(["sh", "-c", PERF]).out.replace("\r", "").split("\n")
+    gov, temp = (out + ["", ""])[:2]
+    yield note("cpu governor on %s: %s" % (dest, gov.strip() or "unknown"))
+    if temp.strip().isdigit():
+        yield note("temperature on %s: %dC" % (dest, int(temp) // 1000))
+
+
+def gh_authenticated(machine=None):
     """`gh auth status` exits 0 for a configured account whose token has expired, so the api call is the one that means anything."""
-    env = os.environ if env is None else env
-    exe = shutil.which("gh", path=env.get("PATH") or "")
-    return bool(exe) and subprocess.run([exe, "api", "user"], stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL, env=env).returncode == 0
+    return (machine or Local()).run(["gh", "api", "user"]).ok
 
 
 class Host:
     """What a Doctor asks of the host that tests replace: gh's token and the privileged helpers' table and grants."""
 
     @staticmethod
-    def gh_authenticated(root, env=None):
-        return gh_authenticated(env)
+    def gh_authenticated(root, machine):
+        return gh_authenticated(machine)
 
     @staticmethod
     def priv_helpers(root, env=None):
         return priv.helpers()
 
     @staticmethod
-    def priv_answers(root, path, env=None):
-        return priv.answers(path, env=env)
+    def priv_answers(root, path, machine):
+        return priv.answers(path, machine)
 
 
 class Doctor:
@@ -359,8 +372,6 @@ class Doctor:
             yield "macOS VM target (optional -- Apple ports)", self.vm_target()
         if not everything:
             return
-        yield "claude.ai login on the other workstations (each its own)", fleet_logins_section(
-            self.keys().resolve().peers, lambda p: self.keys().cred_verdict_of(p, "claude-login"))
         for t in self.reg.all():
             if t != "container" and self.reg.kind(t) == "remote":
                 yield "build machine: %s" % t, self.build_machine(t)
@@ -381,9 +392,11 @@ class Doctor:
         else:
             yield unk("nmap absent -- only 'wk machine probe' needs it", "nmap.org, the .dmg" if self.macos else "./setup  (host/linux/apt.txt)")
         yield check("jq (claude hook)", "./setup --stage tools", self.machine.have("jq"))
+        yield check("git-lfs", "./setup --stage tools", self.machine.have("git-lfs")
+                    or self.machine.run(["test", "-x", os.path.join(self.home, ".local", "bin", "git-lfs")]).ok)
         yield check("gh", "install gh, then: gh auth login", self.machine.have("gh"))
         if self.machine.have("gh"):
-            yield check("gh authenticated", "gh auth login   (then: wk key deploy)", self.sh.gh_authenticated(self.root, env=self.env))
+            yield check("gh authenticated", "gh auth login   (then: wk key deploy)", self.sh.gh_authenticated(self.root, self.machine))
 
     def root_access(self):
         r = self.machine.run(["env", "WK_QUIET=1", os.path.join(self.root, "cmd", "key"), "sudo", "status"])
@@ -516,7 +529,7 @@ class Doctor:
                 continue
             if not self.machine.run(["test", "-x", path]).ok:
                 yield miss("%s (%s)" % (name, what), "./setup --stage quiesce  (interactive sudo)")
-            elif self.sh.priv_answers(self.root, path, env=self.env):
+            elif self.sh.priv_answers(self.root, path, self.machine):
                 yield ok("%s (%s)" % (name, what))
             else:
                 yield miss("%s: installed, and sudo -n still asks for a password" % name,

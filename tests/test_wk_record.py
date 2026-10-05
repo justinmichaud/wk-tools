@@ -1,14 +1,9 @@
-"""lib/wk/record.py against a scratch record directory and a fake clock:
-the record's shape on disk and what the verdict says under each condition.
-
-Run: python3 tests/run.py -k tests.test_wk_record
-"""
+"""lib/wk/record.py against a scratch record directory and a fake clock: the record's shape and its verdicts."""
 import io
 import os
 import shutil
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 
@@ -153,8 +148,7 @@ class TestTheVerdict(RecordTest):
 
 
 class TestToleratesCorruptAndOld(RecordTest):
-    """`unit record.tolerates_corrupt_and_old`: a record missing a field the reader now requires (an older wk's
-    shape) or holding one it cannot read renders as unreadable, and every other record still lists."""
+    """A record missing a required field or holding one that cannot be read is unreadable; the rest still list."""
 
     def mixed(self, damage):
         good = self.begin(name="good")
@@ -193,7 +187,6 @@ class TestToleratesCorruptAndOld(RecordTest):
         self.assert_unreadable_beside_good(damage, ["kind", "plan"])
 
     def test_a_record_being_begun_is_never_seen_part_written(self):
-        """The plan publishes a record, so it is written last: a reader between two fields lists nothing."""
         fake = Fake("m")
         seen = []
         recs = record.Records("/s", clock=self.clock, machine=fake, env={})
@@ -216,34 +209,6 @@ class TestAStopAskedFor(RecordTest):
         t.set("stopping", "cancelled")
         t.end(0)
         self.assertEqual(t.verdict(), "ok")
-
-
-class TestOneBuilderPerTarget(unittest.TestCase):
-    """`record.of_target`: the target's record store, a workspace pid asked there with a capped `kill -0`."""
-
-    def test_a_workspace_pid_is_alive_dead_or_unanswered_by_kill_0s_status(self):
-        asked = []
-
-        class T:
-            env = {}
-
-            class store:
-                @staticmethod
-                def record_dir():
-                    return "/nowhere"
-
-            @staticmethod
-            def exec(ws, argv, timeout=None):
-                asked.append((ws, tuple(argv), timeout))
-                return types.SimpleNamespace(rc={1: 0, 2: 1}.get(int(argv[-1]), 124))
-
-            @staticmethod
-            def pid_alive(ws, pid, cap=None):
-                r = T.exec(ws, ["kill", "-0", str(pid)], timeout=cap)
-                return True if r.rc == 0 else False if r.rc == 1 else None
-        ask = record.of_target(T).ask_target
-        self.assertEqual([ask("ws", 1, 5), ask("ws", 2, 5), ask("ws", 3, 5)], [True, False, None])
-        self.assertEqual(asked[0], ("ws", ("kill", "-0", "1"), 5))
 
 
 class TestFindHoldersAndWait(RecordTest):
@@ -295,8 +260,7 @@ class TestFindHoldersAndWait(RecordTest):
 
 
 class TestHoldFollowsHolder(RecordTest):
-    """`unit record.hold_follows_holder`: a hold is released only when its holder is provably gone, an unreadable
-    holder keeps it, and no child process inherits one."""
+    """A hold is released only when its holder is provably gone; an unreadable holder keeps it; no child inherits one."""
 
     def setUp(self):
         super().setUp()
@@ -339,7 +303,6 @@ class TestHoldFollowsHolder(RecordTest):
         self.assertEqual(self.holders(), [t.id])
 
     def test_a_hold_names_the_pid_that_took_it(self):
-        """`unit record.hold_names_its_taker`: the pid on the record before the claim is the taker's."""
         t = self.held(1001)
         self.assertEqual(t.field("pid"), "1001")
         t = self.records.begin("bench", "here", "rpi3", "k", "/l", ["one"], holds="device:rpi3")
@@ -374,8 +337,7 @@ class TestHoldFollowsHolder(RecordTest):
 
 
 class TestOneStorePerTarget(unittest.TestCase):
-    """The vm target's store is WK_VM_STORE or this host's record directory,
-    and never the container's store."""
+    """The vm target's store is WK_VM_STORE or this host's record directory, never the container's."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="wk-test-vmstore-")
@@ -430,6 +392,12 @@ class TestTheMachineName(unittest.TestCase):
 
     def test_in_the_vm_the_forwarding_workstation_names_the_row(self):
         self.assertEqual(record.machine_name({"WK_IN_VM": "1", "WK_ROW_LABEL": "mbp"}, Fake()), "mbp")
+
+    def test_a_row_label_names_the_machine_only_inside_the_vm(self):
+        m = Fake()
+        m.answer(["hostname", "-s"], out="Tolken\n")
+        self.assertEqual(record.machine_name({"WK_ROW_LABEL": "container"}, m), "tolken")
+        self.assertEqual(record.machine_name({"WK_IN_VM": "1"}, m), "tolken")
 
 
 

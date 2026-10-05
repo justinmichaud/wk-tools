@@ -1,19 +1,12 @@
-"""`wk bench run --cores`: the cpu-list syntax, the pin a run is exec'd through and records
-(lib/wk/bench/pipeline.py), which systems refuse one (lib/wk/bench/systems.py), and the warning
-`wk bench compare` gives two runs pinned differently.
-
-Rows landed here: `unit bench.pins_cores`; `live bench.pins_cores[container]` is tests/test_bench_container_run.py's.
-
-Run: python3 tests/run.py -k test_bench_cores
-"""
+"""`wk bench run --cores`: the cpu-list syntax, the pin a run records, and the warning for two runs pinned differently."""
 import json
 import unittest
 
-from tests.support import WkTest, run, scratch_dir
+from tests.support import WkTest, scratch_dir
 from tests.test_bench_pipeline import BenchTest, World
 from tests.test_bench_report import rep
 
-from wk.bench import pipeline, record, systems
+from wk.bench import pipeline, record
 
 
 def env_record(path, *fields):
@@ -21,22 +14,15 @@ def env_record(path, *fields):
 
 
 class TestCoresValid(unittest.TestCase):
-    """The syntax `--cores` accepts, checked before a preflight is spent on it; a cpu the machine does
-    not have is taskset's to refuse."""
 
-    def test_accepts_every_documented_shape(self):
-        for spec in ("0-3", "2,3", "0-1,4", "7"):
+    def test_the_documented_shapes_and_nothing_else(self):
+        for spec, ok in (("0-3", True), ("2,3", True), ("0-1,4", True), ("7", True),
+                         ("", False), ("a", False), ("1-", False), ("-1", False), ("1,,2", False)):
             with self.subTest(spec=spec):
-                self.assertTrue(pipeline.cores_valid(spec))
-
-    def test_refuses_garbage(self):
-        for spec in ("", "a", "1-", "-1", "1,,2"):
-            with self.subTest(spec=spec):
-                self.assertFalse(pipeline.cores_valid(spec))
+                self.assertEqual(bool(pipeline.cores_valid(spec)), ok)
 
 
 class TestAPinnedRun(BenchTest):
-    """`bench.pins_cores`: the run is exec'd through the pin it records."""
 
     def test_a_container_run_is_exec_d_under_taskset_and_records_it(self):
         rc, err = self.run_(None, "run", "jetstream3", "--config", "jsc-release", "--cores", "0-3")
@@ -60,15 +46,8 @@ class TestAPinnedRun(BenchTest):
         self.assertIn("is not a valid Linux cpu list", self.said("run", "jetstream3", "--cores", "a-b"))
         self.assertEqual(self.w.effects, [])
 
-    def test_only_the_container_pins(self):
-        self.assertEqual(systems.ContainerSystem.cores_refusal(None), "")
-        self.assertIn("no pin exists on macOS", systems.GuestSystem.cores_refusal(None))
-
 
 class TestCoresAxisWarning(WkTest):
-    """`wk bench compare` (lib/wk/bench/report.py's axis check) warns when two
-    runs' `cores.set` differ, the same way it already warns on a runner or
-    session-mode mismatch -- and stays quiet when they agree."""
 
     def _pair(self, tmp, a_cores, b_cores):
         a_dir, b_dir = tmp / "a", tmp / "b"
@@ -84,36 +63,15 @@ class TestCoresAxisWarning(WkTest):
         env_record(b_dir / "env.json", *base, *b_extra)
         return a_dir, b_dir
 
-    def test_different_core_sets_warn(self):
-        with scratch_dir() as tmp:
-            a, b = self._pair(tmp, "0-3", "4-7")
-            cp = rep(a, b)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("different core pins", cp.stdout)
-            self.assertIn("0-3", cp.stdout)
-            self.assertIn("4-7", cp.stdout)
-
-    def test_equal_core_sets_do_not_warn(self):
-        with scratch_dir() as tmp:
-            a, b = self._pair(tmp, "0-3", "0-3")
-            cp = rep(a, b)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertNotIn("different core pins", cp.stdout)
-
-    def test_unpinned_vs_pinned_warns(self):
-        with scratch_dir() as tmp:
-            a, b = self._pair(tmp, None, "0-3")
-            cp = rep(a, b)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("different core pins", cp.stdout)
-            self.assertIn("unpinned", cp.stdout)
-
-    def test_both_unpinned_does_not_warn(self):
-        with scratch_dir() as tmp:
-            a, b = self._pair(tmp, None, None)
-            cp = rep(a, b)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertNotIn("different core pins", cp.stdout)
+    def test_two_runs_pinned_differently_warn(self):
+        for a_cores, b_cores, warns in (("0-3", "4-7", ("0-3", "4-7")), ("0-3", "0-3", None),
+                                        (None, "0-3", ("unpinned",)), (None, None, None)):
+            with self.subTest(a=a_cores, b=b_cores), scratch_dir() as tmp:
+                cp = rep(*self._pair(tmp, a_cores, b_cores))
+                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                self.assertEqual("different core pins" in cp.stdout, bool(warns), cp.stdout)
+                for word in warns or ():
+                    self.assertIn(word, cp.stdout)
 
 
 if __name__ == "__main__":

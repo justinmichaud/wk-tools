@@ -1,12 +1,4 @@
-"""`unit report.readonly[<cmd>]`: a reporting command starts, boots or repairs
-nothing, here or on the far machine. Each one runs for real, as the machine
-holding the store and as a workstation, against a fleet with a build machine;
-every tool that reaches a machine records what it was asked and answers as an
-unreachable one does, and nothing under the scratch home, state or store
-changes.
-
-Run: python3 tests/run.py -k test_report_readonly
-"""
+"""A reporting command starts, boots or repairs nothing, here or on the far machine, and writes nothing locally."""
 import os
 import re
 import shlex

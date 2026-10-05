@@ -273,16 +273,16 @@ class Sync:
         return self.here.run(["git", "-C", mirror, "for-each-ref", "--format=%(objectname) %(refname)"]).out
 
     def remount_guests(self):
-        """A running guest's share holds the inode of each ref the refresh renamed over; one that cannot remount is named."""
+        """A running guest's mirror share holds the inode of each ref the refresh renamed over; one that cannot remount is named."""
         if "vm" not in self.reg.all():
             return 0
         vm = self.load("vm")
         for ws, st in vm.list():
             if st != "running":
                 continue
-            why = vm.remount_shares(ws)
+            why = vm.remount_mirror(ws)
             if why:
-                warn("'%s' could not remount the host's shares (%s), so it reads the mirror as it\n"
+                warn("'%s' could not remount the mirror share (%s), so it reads the mirror as it\n"
                      "    was before this refresh and every fetch in it fails:  wk stop %s, then  wk start %s" % (ws, why, ws, ws))
         return 0
 

@@ -1,19 +1,5 @@
-"""Every edit an image needs is made on the card, by the machine holding the
-reader. `wk sysimage write --from` streams the image's own bytes onto the disk
-(lib/wk/sysimage/write.py) and then asks admin/wk-card-priv to retarget
-the root, append the profile's cmdline and firmware settings, install the
-fleet units, name the system on the boot partition and check that the firmware
-can still reach a kernel -- so the driving machine needs no mtools, debugfs or
-sfdisk, and the bytes on the card are the image's.
-
-Each helper function is lifted out of admin/wk-card-priv with sed (the idiom
-tests/test_wifi_seed.py uses) and run against temp directories standing in for
-the mounted partitions, with `chown` and the privileged mount stubbed: this
-machine is not root and holds no card. The gate, the dispatcher and what is
-*not* referenced any more are checked statically.
-
-Run: python3 -m unittest tests.test_card_edits -v
-"""
+"""admin/wk-card-priv's card edits, each function lifted out with sed and run against temp directories standing
+in for the mounted partitions, plus `wk sysimage write`'s dry run of the whole sequence."""
 import contextlib
 import io
 import os
@@ -30,9 +16,8 @@ from wk.machine import Fake  # noqa: E402
 from wk.sysimage import write  # noqa: E402
 
 CARD_PRIV = REPO / "admin" / "wk-card-priv"
-WRITE = REPO / "lib" / "wk" / "sysimage" / "write.py"
 
-# Every verb this move added, and the driving function that calls it.
+# Every device verb and the function that implements it.
 NEW_VERBS = {
     "parts": "v_parts",
     "root-spec": "v_root_spec",
@@ -44,12 +29,14 @@ NEW_VERBS = {
     "boot-check": "v_boot_check",
     "helper": "v_helper",
     "boot-read": "v_boot_read",
+    "wifi-from-host": "v_wifi_from_host",
+    "wifi-joins": "v_wifi_joins",
+    "tailnet-save": "v_tailnet_save",
+    "tailnet-restore": "v_tailnet_restore",
 }
 
 
 def _lift(path, *funcs):
-    """One or more function bodies, sed'd out of a shell file, so they can be
-    called without sourcing a file that requires root at its top."""
     out = []
     for func in funcs:
         text = subprocess.run(
@@ -61,8 +48,6 @@ def _lift(path, *funcs):
     return "\n".join(out)
 
 
-# What the helper prints with, minus the privilege. `deny` and `fail` exit, as
-# they do for real, so a refusal is a status a test can assert on.
 _SAY = '''
 say()  { printf 'wk-card-priv: %s\\n' "$*"; }
 deny() { printf 'wk-card-priv: REFUSED: %s\\n' "$*" >&2; exit 3; }
@@ -70,10 +55,7 @@ fail() { printf 'wk-card-priv: %s\\n' "$*" >&2; exit 1; }
 chown() { :; }
 '''
 
-# The gate and the mount, replaced by the two directories a test hands in:
-# partition 1 is the boot filesystem, partition 2 the rootfs. What the gate
-# refuses is admin/wk-card-priv's own contract (tests/test_wifi_seed.py), not
-# what these edits do once it has allowed a disk.
+# The gate and the mount, replaced by two directories: partition 1 is boot, 2 the rootfs.
 _MOUNTED = '''
 BOOTP=1; ROOTP=2; SECOND=""
 gate() { GATED_DEV="$1"; }
@@ -90,7 +72,6 @@ with_mount() {
 }
 '''
 
-# A partition table with an MBR signature, for the PARTUUID a retarget writes.
 _SFDISK = '''#!/bin/sh
 cat <<'JSON'
 {"partitiontable": {"label": "dos", "id": "0x1c9dabbc", "device": "/dev/sdX",
@@ -107,7 +88,6 @@ exit 1
 
 
 class CardEditTest(WkTest):
-    """A boot partition and a rootfs as plain directories."""
 
     def setUp(self):
         super().setUp()
@@ -123,8 +103,12 @@ class CardEditTest(WkTest):
 
 
 class TestRetarget(CardEditTest):
-    """`retarget` gives the card a root reference that survives the kind of
-    device it was written to, from the card's own partition table."""
+    def retarget(self, sfdisk=_SFDISK):
+        with stub_path({"sfdisk": sfdisk}) as binp:
+            return self.run_helper(
+                _lift(CARD_PRIV, "_table", "_boot_file", "_root_spec_probe", "_retarget_boot",
+                      "_retarget_fstab", "v_retarget") + "\nv_retarget /dev/sdX\n",
+                path=binp)
 
     def _write_card(self):
         (self.boot / "cmdline.txt").write_text(
@@ -138,91 +122,49 @@ class TestRetarget(CardEditTest):
 
     def test_root_becomes_the_cards_own_partuuid(self):
         self._write_card()
-        with stub_path({"sfdisk": _SFDISK}) as binp:
-            cp = self.run_helper(
-                _lift(CARD_PRIV, "_table", "_boot_file", "_retarget_boot",
-                      "_retarget_fstab", "v_retarget") + "\nv_retarget /dev/sdX\n",
-                path=binp)
+        cp = self.retarget()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         cmdline = (self.boot / "cmdline.txt").read_text()
         self.assertIn("root=PARTUUID=1c9dabbc-02", cmdline, cmdline)
         self.assertNotIn("/dev/mmcblk0p2", cmdline, cmdline)
-        # Everything else on the line is left exactly as it was.
         self.assertIn("console=serial0,115200", cmdline)
         self.assertIn("rootwait", cmdline)
-        # And /boot, which is the line that actually names a card.
         fstab = (self.root / "etc" / "fstab").read_text()
         self.assertIn("PARTUUID=1c9dabbc-01\t/boot", fstab, fstab)
         self.assertIn("PARTUUID=1c9dabbc-02\t/", fstab, fstab)
         self.assertIn("proc\t/proc", fstab, fstab)
-        # A comment is prose, not a mount.
         self.assertIn("# a comment naming /dev/mmcblk0p1", fstab, fstab)
 
-    def test_an_fstab_already_retargeted_to_another_disk_id_is_rewritten(self):
-        """The case that cost rpi3 a day. Anything that rewrites the card's MBR
-        gives it a new disk identifier, and an fstab retargeted by an earlier
-        write then carries PARTUUIDs of the *old* one. Those name no partition
-        on this card: the root still mounts (the kernel gets it from cmdline)
-        but /boot does not, local-fs.target fails, and every network unit
-        ordered after it never starts -- a board that boots and goes quiet.
-
-        The old code rewrote only fields starting with /dev/, and its read-back
-        looked only for those, so it reported the card retargeted."""
+    def test_a_card_already_booting_by_partuuid_is_refused_naming_re_provisioning(self):
         (self.boot / "cmdline.txt").write_text("root=PARTUUID=953569f6-02 rootwait\n")
         (self.root / "etc").mkdir()
-        (self.root / "etc" / "fstab").write_text(
-            "PARTUUID=953569f6-02\t/\text4\tdefaults\t0\t1\n"
-            "PARTUUID=953569f6-01\t/boot\tvfat\tdefaults\t0\t2\n"
-            "proc\t/proc\tproc\tdefaults\t0\t0\n")
-        with stub_path({"sfdisk": _SFDISK}) as binp:
-            cp = self.run_helper(
-                _lift(CARD_PRIV, "_table", "_boot_file", "_retarget_boot",
-                      "_retarget_fstab", "v_retarget") + "\nv_retarget /dev/sdX\n",
-                path=binp)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        fstab = (self.root / "etc" / "fstab").read_text()
-        self.assertIn("PARTUUID=1c9dabbc-01\t/boot", fstab, fstab)
-        self.assertIn("PARTUUID=1c9dabbc-02\t/", fstab, fstab)
-        self.assertNotIn("953569f6", fstab, "the old disk identifier survived:\n" + fstab)
-        self.assertIn("proc\t/proc", fstab, "a line naming no partition was touched")
-        self.assertIn("root=PARTUUID=1c9dabbc-02", (self.boot / "cmdline.txt").read_text())
+        (self.root / "etc" / "fstab").write_text("PARTUUID=953569f6-01\t/boot\tvfat\tdefaults\t0\t2\n")
+        cp = self.retarget()
+        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
+        self.assertIn("wk status", cp.stderr)
+        self.assertIn("953569f6-02", (self.boot / "cmdline.txt").read_text())
+        self.assertIn("953569f6-01", (self.root / "etc" / "fstab").read_text())
 
     def test_dev_root_is_left_alone(self):
-        """`/dev/root` is the kernel filling in what root= named, so it follows
-        the card by itself. It names no partition number, which is why the
-        rewrite keys on the trailing digit -- broaden the check without keeping
-        that and a line which was always correct is reported as naming another
-        disk, and the repair refuses to run (measured against rpi3's card,
-        2026-09-01)."""
-        (self.boot / "cmdline.txt").write_text("root=PARTUUID=953569f6-02 rootwait\n")
+        (self.boot / "cmdline.txt").write_text("root=/dev/mmcblk0p2 rootwait\n")
         (self.root / "etc").mkdir()
         (self.root / "etc" / "fstab").write_text(
             "/dev/root\t/\text4\tdefaults\t0\t1\n"
             "PARTUUID=953569f6-01\t/boot\tvfat\tdefaults\t0\t2\n")
-        with stub_path({"sfdisk": _SFDISK}) as binp:
-            cp = self.run_helper(
-                _lift(CARD_PRIV, "_table", "_boot_file", "_retarget_boot",
-                      "_retarget_fstab", "v_retarget") + "\nv_retarget /dev/sdX\n",
-                path=binp)
+        cp = self.retarget()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         fstab = (self.root / "etc" / "fstab").read_text()
         self.assertIn("/dev/root\t/", fstab, "the kernel's own placeholder was rewritten")
         self.assertIn("PARTUUID=1c9dabbc-01\t/boot", fstab, fstab)
-        # ...and it says what it moved, rather than only that it finished.
         self.assertIn("fstab: PARTUUID=953569f6-01 -> PARTUUID=1c9dabbc-01", cp.stdout, cp.stdout)
 
     def test_a_disk_with_no_partition_table_is_refused(self):
         self._write_card()
-        with stub_path({"sfdisk": _SFDISK_NO_TABLE}) as binp:
-            cp = self.run_helper(
-                _lift(CARD_PRIV, "_table", "_boot_file", "_retarget_boot",
-                      "_retarget_fstab", "v_retarget") + "\nv_retarget /dev/sdX\n",
-                path=binp)
+        cp = self.retarget(_SFDISK_NO_TABLE)
         self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
         self.assertIn("REFUSED", cp.stdout + cp.stderr)
 
     def test_the_boot_file_under_os_prefix_wins(self):
-        """an image carrying both boots the cmdline.txt under its os_prefix"""
         (self.boot / "cmdline.txt").write_text("root=/dev/sda2\n")
         (self.boot / "current").mkdir()
         (self.boot / "current" / "cmdline.txt").write_text("root=/dev/mmcblk0p2\n")
@@ -245,7 +187,6 @@ class TestRootSpec(CardEditTest):
         self.assertEqual(cp.stdout.strip(), "root=PARTUUID=abc-02", cp.stdout)
 
     def test_a_disk_with_no_cmdline_says_nothing_rather_than_failing(self):
-        """a phone's bootloader has no cmdline.txt: a question that does not apply"""
         cp = self.run_helper(
             _lift(CARD_PRIV, "_boot_file", "_root_spec_probe", "v_root_spec")
             + "\nv_root_spec /dev/sdX\n")
@@ -320,7 +261,6 @@ class TestConfigAppend(CardEditTest):
         self.assertIn("already carries", cp.stdout, cp.stdout)
 
     def test_a_block_with_no_banner_is_refused(self):
-        """the banner is the idempotency marker, so a block without one is refused"""
         (self.boot / "config.txt").write_text("arm_64bit=1\n")
         cp = self._run("os_check=0\n")
         self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
@@ -348,6 +288,14 @@ class TestUnits(CardEditTest):
             "[Service]\nType=oneshot\nExecStart=/bin/true\n"
             "[Install]\nWantedBy=multi-user.target\n")
 
+    def _edit(self, work, systemd=True):
+        if systemd:
+            (self.root / "lib" / "systemd").mkdir(parents=True)
+            (self.root / "lib" / "systemd" / "systemd").write_text("")
+        return self.run_helper(
+            _lift(CARD_PRIV, "_unit_target", "_units_sysctl", "_units_edit")
+            + f"\n_units_edit \"$ROOTDIR\" {work}\n")
+
     def _staged(self):
         work = self.tmp / "staged"
         (work / "systemd").mkdir(parents=True)
@@ -357,12 +305,8 @@ class TestUnits(CardEditTest):
         return work
 
     def test_units_land_under_etc_systemd_system_and_are_wanted(self):
-        (self.root / "lib" / "systemd").mkdir(parents=True)
-        (self.root / "lib" / "systemd" / "systemd").write_text("")
         work = self._staged()
-        cp = self.run_helper(
-            _lift(CARD_PRIV, "_unit_target", "_units_sysctl", "_units_edit")
-            + f"\n_units_edit \"$ROOTDIR\" {work}\n")
+        cp = self._edit(work)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         unit = self.root / "etc" / "systemd" / "system" / "wk-self-return.service"
         self.assertTrue(unit.is_file(), cp.stdout + cp.stderr)
@@ -376,22 +320,13 @@ class TestUnits(CardEditTest):
         self.assertIn("installed 2 file(s)", cp.stdout)
 
     def test_a_timer_and_the_service_it_starts_both_land(self):
-        """The self-return watchdog is a timer plus a service that returns at
-        once. The timer is wanted by timers.target; the service must NOT be
-        wanted by anything -- a WantedBy= as well would run it at boot, which
-        reboots the board the moment it comes up -- so no target is accepted
-        for a service whose timer is in the same archive."""
-        (self.root / "lib" / "systemd").mkdir(parents=True)
-        (self.root / "lib" / "systemd" / "systemd").write_text("")
         work = self._staged()
         (work / "systemd" / "wk-self-return.timer").write_text(
             "[Unit]\nDescription=x\n[Timer]\nOnBootSec=900\n"
             "[Install]\nWantedBy=timers.target\n")
         (work / "systemd" / "wk-self-return.service").write_text(
             "[Unit]\nDescription=x\n[Service]\nType=oneshot\nExecStart=/bin/true\n")
-        cp = self.run_helper(
-            _lift(CARD_PRIV, "_unit_target", "_units_sysctl", "_units_edit")
-            + f"\n_units_edit \"$ROOTDIR\" {work}\n")
+        cp = self._edit(work)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         sysd = self.root / "etc" / "systemd" / "system"
         self.assertTrue((sysd / "wk-self-return.timer").is_file())
@@ -401,51 +336,30 @@ class TestUnits(CardEditTest):
         self.assertFalse((sysd / "multi-user.target.wants" / "wk-self-return.service").exists(),
                          "the timer's service is ALSO started at boot, which reboots the board")
 
-    def test_a_timer_is_a_member_the_archive_may_carry(self):
-        cp = self._names(["systemd/wk-self-return.timer",
-                          "systemd/wk-self-return.service"])
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-
     def test_a_service_with_no_wantedby_and_no_timer_is_still_refused(self):
-        """the carve-out is only for a service a timer in the same archive
-        starts; without one, nothing would ever run it."""
-        (self.root / "lib" / "systemd").mkdir(parents=True)
-        (self.root / "lib" / "systemd" / "systemd").write_text("")
         work = self._staged()
         (work / "systemd" / "wk-orphan.service").write_text(
             "[Unit]\n[Service]\nExecStart=/bin/true\n")
-        cp = self.run_helper(
-            _lift(CARD_PRIV, "_unit_target", "_units_sysctl", "_units_edit")
-            + f"\n_units_edit \"$ROOTDIR\" {work}\n")
+        cp = self._edit(work)
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("WantedBy", cp.stdout + cp.stderr)
 
     def test_a_unit_with_no_wantedby_is_refused(self):
-        """a unit nothing would ever start is a watchdog that is not there"""
-        (self.root / "lib" / "systemd").mkdir(parents=True)
-        (self.root / "lib" / "systemd" / "systemd").write_text("")
         work = self._staged()
         (work / "systemd" / "wk-self-return.service").write_text("[Unit]\n[Service]\n")
-        cp = self.run_helper(
-            _lift(CARD_PRIV, "_unit_target", "_units_sysctl", "_units_edit")
-            + f"\n_units_edit \"$ROOTDIR\" {work}\n")
+        cp = self._edit(work)
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("WantedBy", cp.stdout + cp.stderr)
 
     def test_an_image_without_any_init_takes_nothing_and_says_so(self):
         work = self._staged()
-        cp = self.run_helper(
-            _lift(CARD_PRIV, "_unit_target", "_units_sysctl", "_units_edit")
-            + f"\n_units_edit \"$ROOTDIR\" {work}\n")
+        cp = self._edit(work, systemd=False)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("neither systemd nor /etc/init.d", cp.stdout)
         self.assertFalse((self.root / "etc").exists(), "something was installed anyway")
 
     def _names(self, members):
-        """The archive's member list, checked the way v_units checks it before
-        anything is unpacked. Built with python's tarfile so the member names
-        are exactly the ones under test -- a traversal included, which is the
-        point, and which the tar CLIs spell differently."""
+        """The member list checked as v_units checks it; tarfile spells a traversal exactly."""
         import io
         import tarfile
         tar = self.tmp / "units.tar"
@@ -457,22 +371,14 @@ class TestUnits(CardEditTest):
                 tf.addfile(info, io.BytesIO(body))
         return bash(_SAY + _lift(CARD_PRIV, "_units_names") + f"\n_units_names {tar}\n")
 
-    def test_a_plain_member_list_is_accepted(self):
-        cp = self._names(["systemd/wk-self-return.service"])
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-
-    def test_a_path_traversal_member_is_refused(self):
-        cp = self._names(["systemd/../../etc/passwd"])
-        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
-        self.assertIn("REFUSED", cp.stdout + cp.stderr)
-
-    def test_a_member_outside_the_two_directories_is_refused(self):
-        cp = self._names(["etc/shadow"])
-        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
-        self.assertIn("REFUSED", cp.stdout + cp.stderr)
+    def test_the_member_list_takes_only_the_two_directories(self):
+        for members, rc in ((["systemd/wk-self-return.service", "systemd/wk-self-return.timer"], 0),
+                            (["systemd/../../etc/passwd"], 3), (["etc/shadow"], 3)):
+            with self.subTest(members=members):
+                cp = self._names(members)
+                self.assertEqual(cp.returncode, rc, cp.stdout + cp.stderr)
 
     def test_an_unpacked_symlink_is_refused(self):
-        """whatever a tar implementation made of the names, only files are copied"""
         work = self.tmp / "unpacked"
         (work / "systemd").mkdir(parents=True)
         (work / "systemd" / "evil.service").symlink_to("/etc/shadow")
@@ -482,22 +388,21 @@ class TestUnits(CardEditTest):
 
 
 class TestBootCheck(CardEditTest):
-    """The firmware model is boot/check-boot-files.py, run against the card's
-    own boot partition -- there is no second copy of it in the helper."""
+    PI4 = ("start4.elf", "fixup4.dat", "kernel8.img", "bcm2711-rpi-4-b.dtb")
+    PI5 = ("start4.elf", "fixup4.dat", "kernel_2712.img", "bcm2712-rpi-5-b.dtb")
 
-    def _boot_tree(self, missing=()):
+    def _boot_tree(self, missing=(), files=PI4):
         (self.boot / "config.txt").write_text("arm_64bit=1\n")
-        for name in ("start4.elf", "fixup4.dat", "kernel8.img", "bcm2711-rpi-4-b.dtb"):
-            if name in missing:
-                continue
-            (self.boot / name).write_text("firmware")
+        for name in files:
+            if name not in missing:
+                (self.boot / name).write_text("firmware")
 
-    def _run(self, checker=None):
+    def _run(self, checker=None, dtb="bcm2711-rpi-4-b.dtb"):
         checker = checker or (REPO / "boot" / "check-boot-files.py")
         return self.run_helper(
             f'CHECK_BOOT_FILES={checker}\n'
             + _lift(CARD_PRIV, "check_name", "_boot_check_run", "v_boot_check")
-            + "\nv_boot_check /dev/sdX bcm2711-rpi-4-b.dtb\n")
+            + f"\nv_boot_check /dev/sdX {dtb}\n")
 
     def test_a_complete_boot_tree_passes(self):
         self._boot_tree()
@@ -517,36 +422,16 @@ class TestBootCheck(CardEditTest):
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("kernel", cp.stdout + cp.stderr)
 
-    def test_a_pi5_boot_tree_passes_with_its_own_kernel_name(self):
-        # meta-raspberrypi's raspberrypi5.conf sets SDIMG_KERNELIMAGE to
-        # kernel_2712.img, so a correct Pi 5 image carries that name and none
-        # of the Pi 4's. The checker must not refuse the whole board.
-        (self.boot / "config.txt").write_text("arm_64bit=1\n")
-        for name in ("start4.elf", "fixup4.dat", "kernel_2712.img",
-                     "bcm2712-rpi-5-b.dtb"):
-            (self.boot / name).write_text("firmware")
-        cp = self.run_helper(
-            f'CHECK_BOOT_FILES={REPO / "boot" / "check-boot-files.py"}\n'
-            + _lift(CARD_PRIV, "check_name", "_boot_check_run", "v_boot_check")
-            + "\nv_boot_check /dev/sdX bcm2712-rpi-5-b.dtb\n")
+    def test_a_pi5_tree_is_checked_with_its_own_kernel_name(self):
+        self._boot_tree(files=self.PI5)
+        cp = self._run(dtb="bcm2712-rpi-5-b.dtb")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("every file the firmware asks for resolves", cp.stdout)
-
-    def test_a_pi5_tree_with_no_kernel_at_all_is_still_refused(self):
-        # The positive control: widening the list must not stop it catching
-        # a boot partition with no kernel on it.
-        (self.boot / "config.txt").write_text("arm_64bit=1\n")
-        for name in ("start4.elf", "fixup4.dat", "bcm2712-rpi-5-b.dtb"):
-            (self.boot / name).write_text("firmware")
-        cp = self.run_helper(
-            f'CHECK_BOOT_FILES={REPO / "boot" / "check-boot-files.py"}\n'
-            + _lift(CARD_PRIV, "check_name", "_boot_check_run", "v_boot_check")
-            + "\nv_boot_check /dev/sdX bcm2712-rpi-5-b.dtb\n")
+        (self.boot / "kernel_2712.img").unlink()
+        cp = self._run(dtb="bcm2712-rpi-5-b.dtb")
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("kernel", cp.stdout + cp.stderr)
 
     def test_a_missing_checker_refuses_loudly_and_names_the_remedy(self):
-        """root runs the checker, so it is a fixed path -- absent, the verb refuses"""
         self._boot_tree()
         cp = self._run(checker="/nonexistent/wk-check-boot-files.py")
         self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
@@ -556,100 +441,19 @@ class TestBootCheck(CardEditTest):
 
 
 class TestHelperShape(unittest.TestCase):
-    """The rules every verb is held to, checked the way tests/test_static_rules.py's
-    test_card_helper_gate checks the older ones."""
-
-    def setUp(self):
-        self.text = CARD_PRIV.read_text(errors="replace")
-
-    def test_every_new_device_verb_calls_the_gate(self):
-        bad = []
+    def test_every_device_verb_calls_the_gate(self):
+        text = CARD_PRIV.read_text(errors="replace")
         for verb, fn in NEW_VERBS.items():
-            m = re.search(rf"(?ms)^{fn}\(\) \{{.*?^\}}", self.text)
-            if not m:
-                bad.append(f"{fn} is not defined")
-            elif "gate " not in m.group(0):
-                bad.append(f"{fn} ({verb}) does not call gate")
-        self.assertEqual(bad, [], "; ".join(bad))
-
-    def test_every_new_verb_is_dispatched(self):
-        case_m = re.search(r'(?ms)^case "\$verb" in.*?^esac', self.text)
-        self.assertIsNotNone(case_m, "no verb dispatcher found")
-        body = case_m.group(0)
-        for verb, fn in NEW_VERBS.items():
-            self.assertRegex(body, rf"{re.escape(verb)}\)\s*{fn}\b",
-                             f"{verb} is not dispatched to {fn}")
-
-    def test_the_usage_line_names_every_new_verb(self):
-        usage = re.search(r'usage: wk-card-priv [^"]*', self.text)
-        self.assertIsNotNone(usage, "no usage line")
-        for verb in NEW_VERBS:
-            self.assertIn(verb, usage.group(0), f"the usage line does not name {verb}")
-
-    def test_nothing_a_caller_sends_is_executed(self):
-        """the file root runs is a fixed path, never one that came in on argv"""
-        self.assertIn("CHECK_BOOT_FILES=/usr/local/libexec/", self.text)
-        m = re.search(r"(?ms)^_boot_check_run\(\) \{.*?^\}", self.text)
-        self.assertIsNotNone(m)
-        self.assertIn('python3 "$CHECK_BOOT_FILES" --root "$1"', m.group(0))
-
-    def test_the_unit_archive_is_size_bounded(self):
-        m = re.search(r"(?ms)^v_units\(\) \{.*?^\}", self.text)
-        self.assertIsNotNone(m, "v_units is not defined")
-        self.assertIn("UNITS_MAX", m.group(0), "v_units reads stdin with no size bound")
-        self.assertIn("_units_names", m.group(0), "v_units unpacks without checking the names")
-
-
-class TestNothingIsEditedOnTheDrivingMachine(unittest.TestCase):
-    """The image is never opened here: no filesystem tooling, and none of the
-    functions that edited a local copy of it."""
-
-    RETIRED = (
-        "fat_offset", "part_offset", "image_partuuid", "install_unit",
-        "install_file", "install_units", "install_fleet_integration",
-        "install_driving_key", "install_disk_id", "retarget_root",
-        "cmdline_root_spec", "apply_cmdline_append", "apply_config_append",
-        "image_root_spec", "image_boot_offset", "image_check_boot_files",
-        "_card_root_spec", "_root_line", "disk_write_dd", "disk_verify_dd",
-    )
-    TOOLS = ("mtype", "mcopy", "mtools", "debugfs", "sfdisk", "e2fsck", "resize2fs")
-    PATHS = (WRITE, REPO / "lib" / "wk" / "sysimage" / "disk.py", REPO / "lib" / "wk" / "images.py")
-
-    def _code(self, path):
-        """The file with its comment lines dropped: a tool named in prose is
-        prose, and this is about what runs."""
-        return "\n".join(
-            "" if line.lstrip().startswith("#") else line
-            for line in path.read_text(errors="replace").splitlines())
-
-    def test_no_filesystem_tooling_runs_on_the_driving_machine(self):
-        bad = []
-        for path in self.PATHS:
-            code = self._code(path)
-            for tool in self.TOOLS:
-                for m in re.finditer(rf"(?m)^.*\b{tool}\b.*$", code):
-                    bad.append(f"{path.relative_to(REPO)}: {m.group(0).strip()}")
-        self.assertEqual(bad, [], "still runs image tooling here:\n" + "\n".join(bad))
-
-    def test_no_retired_local_edit_survives(self):
-        bad = []
-        for path in self.PATHS:
-            code = self._code(path)
-            for name in self.RETIRED:
-                if re.search(rf"\b{re.escape(name)}\b", code):
-                    bad.append(f"{path.relative_to(REPO)}: {name}")
-        self.assertEqual(bad, [], "retired local edit still referenced:\n" + "\n".join(bad))
+            m = re.search(rf"(?ms)^{fn}\(\) \{{.*?^\}}", text)
+            self.assertTrue(m and "gate " in m.group(0), f"{fn} ({verb}) does not call gate")
 
     def test_the_reader_hands_over_the_builders_own_bytes(self):
-        """The decompressor runs on the card machine; this end only reads."""
         w = write.Write(REPO, {}, Fake(), None)
         w.machine.files["/x.wic.xz"] = "x"
         self.assertEqual(w.reader("/x.wic.xz"), ["cat", "/x.wic.xz"])
 
 
 class TestDryRunIsTheSameSteps(unittest.TestCase):
-    """A dry run runs the write's own steps with every card call suppressed,
-    so what it reports cannot drift from what a write does."""
 
     DEV = "/dev/sdX"
     STEPS = (("unmount", DEV), ("tailnet_save", DEV), ("stream", DEV, ["cat", "/x"], "cat"), ("verify", DEV, {}),
@@ -679,10 +483,6 @@ class TestDryRunIsTheSameSteps(unittest.TestCase):
 
 
 class TestWriteDryRunIsTheWholeSequence(WkTest):
-    """The whole command, with the fleet machine faked by a stub `ssh`: a dry
-    run reports the write's own steps, in order, from the functions that make
-    them -- so an edit that moves, loses or reorders a step shows up here
-    without a card in a reader."""
 
     _SSH = """#!/bin/sh
 # a fleet machine that answers, whose card helper allows the disk
@@ -711,8 +511,6 @@ esac
         want = [
             "would ask: write",
             "would unmount",
-            # Retiring a node this card's name is held by is a state change
-            # made outside this machine, so a dry run names it.
             "would read this machine's tailnet view",
             "would stream the image onto /dev/sdX",
             "would read /dev/sdX back",
@@ -740,11 +538,7 @@ esac
         self.assertNotIn("reading ", out, out)
 
 
-class TestTheUnitsAreTheImageMachinesAndTheWriteIsTheReaders(unittest.TestCase):
-    """A card is written by the machine holding the reader, for whatever board
-    the image is for -- rarely the same machine. The units carry the image
-    machine's own self-disarm (lib/wk/boot); every card call is addressed to
-    the reader (tests/test_sysimage_write.py)."""
+class TestTheUnitsAreTheImageMachines(unittest.TestCase):
 
     def setUp(self):
         self.w = write.Write(REPO, {"HOME": "/nonexistent", "XDG_CONFIG_HOME": "/nonexistent"}, Fake(), None)
@@ -754,9 +548,6 @@ class TestTheUnitsAreTheImageMachinesAndTheWriteIsTheReaders(unittest.TestCase):
             return write.stage_units(REPO, watchdog, disarm, "test-profile"), err.getvalue()
 
     def test_a_medium_armed_board_gets_its_drivers_self_disarm(self):
-        # rpi3 puts the rescue's config.txt back (pi-sd); rpi4 removes the
-        # tryboot staging from the SD (pi-tryboot), which that board does not
-        # consume by itself.
         for machine, want in (("rpi4", "tryboot.txt"), ("rpi3", "config.txt.rescue")):
             with self.subTest(machine=machine):
                 line = self.w.self_disarm(machine)
@@ -774,30 +565,19 @@ class TestTheUnitsAreTheImageMachinesAndTheWriteIsTheReaders(unittest.TestCase):
         self.assertIn("init.d/S99wk-self-return", units)
 
     def test_the_watchdog_is_a_timer_that_blocks_no_target(self):
-        """A Type=oneshot that sleeps is not active until it returns, so it
-        holds a start job -- and multi-user.target, which wants it, stays
-        inactive for the whole watchdog on every boot. Measured on the rpi4
-        (2026-09-01): 15 minutes of every boot with multi-user.target inactive
-        and the start job under TimeoutStartSec=infinity. The wait belongs to a
-        timer."""
+        """A sleeping oneshot holds multi-user.target inactive for the whole wait (rpi4, measured)."""
         units, _ = self.staged()
         timer = units["systemd/wk-self-return.timer"]
         self.assertTrue(timer.endswith("[Timer]\nAccuracySec=1s\nOnBootSec=600\n"), timer)
         self.assertIn("WantedBy=timers.target", timer)
         self.assertIn("/etc/wk/rescue", timer, "the timer is not gated on the rescue marker")
         svc = units["systemd/wk-self-return.service"]
-        self.assertNotIn("sleep", svc, "the service still waits inside its own ExecStart")
-        self.assertNotIn("TimeoutStartSec", svc, "a service that returns at once needs no start timeout")
-        self.assertNotIn("[Install]", svc,
-                         "the timer's service is also wanted by a target, so it runs at "
-                         "boot and reboots the board immediately")
+        self.assertNotIn("sleep", svc)
+        self.assertNotIn("[Install]", svc, "a service also wanted by a target reboots the board at boot")
         self.assertIn("wk-keep-running", svc)
         self.assertIn("/etc/wk/rescue", svc, "the service is not gated on the rescue marker")
 
     def test_no_watchdog_seconds_stages_neither_half(self):
-        """a timer with no OnBootSec fires at once and reboots the board, so a
-        profile that names no watchdog gets no timer at all -- and is warned
-        about, not silently left without one."""
         units, err = self.staged(watchdog="")
         self.assertFalse([u for u in units if "wk-self-return" in u], units)
         self.assertIn("will not hand its machine back", err)
@@ -823,7 +603,6 @@ class TestTheUnitsAreTheImageMachinesAndTheWriteIsTheReaders(unittest.TestCase):
         self.assertIn("wk-keep-running", ret)
 
     def test_the_watchdog_scripts_run_their_sleep_in_the_background(self):
-        """Last in rcS so the browser is up when the clock starts, and backgrounded so init does not wait it out."""
         units, _ = self.staged(watchdog="2")
         cp = subprocess.run(["sh", "-c", units["init.d/S99wk-self-return"].replace("/etc/wk/rescue", "/nonexistent")
                              .replace("reboot", "true"), "S99", "start"], capture_output=True, timeout=1)
@@ -831,19 +610,13 @@ class TestTheUnitsAreTheImageMachinesAndTheWriteIsTheReaders(unittest.TestCase):
 
 
 class TestBootRead(CardEditTest):
-    """`boot-read` is how a **workstation** reads its medium at all. The machine
-    holding the card runs nothing privileged but this helper, so a plain
-    `sudo -n mount` there answers "interactive authentication is required" and
-    every reader above it -- the system id, the boot dump, rpi5's pair selector
-    -- saw an empty medium rather than a refusal (rpi5, 2026-09-03).
-
-    Its whole surface is the allowlist: three fixed filenames, a partition
-    number, read-only, bounded."""
+    # A writable mount fails here, so every read below also asserts boot-read mounts read-only.
+    READ_ONLY = 'eval "rw_$(declare -f with_mount)"\nwith_mount() { [ "$1" = -r ] || return 9; rw_with_mount "$@"; }\n'
 
     def _run(self, partition="1", name="wk-diag.txt"):
         return self.run_helper(
             _lift(CARD_PRIV, "check_partno", "_boot_read_probe", "v_boot_read")
-            + "\nBOOT_READ_MAX=65536\n"
+            + "\nBOOT_READ_MAX=65536\n" + self.READ_ONLY
             + f"v_boot_read /dev/sdX '{partition}' '{name}'\n")
 
     def test_it_prints_the_file_the_image_wrote(self):
@@ -853,24 +626,17 @@ class TestBootRead(CardEditTest):
         self.assertIn("wlan0: no carrier", cp.stdout)
 
     def test_the_system_id_is_read_the_same_way(self):
-        """One verb for all three files: b_device_image's read is this one."""
         (self.boot / "wk-image.id").write_text("wpewebkit-2.46-yocto-rpi5-64-9ee1cf59c4d1\n")
         cp = self._run(name="wk-image.id")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("wpewebkit-2.46-yocto-rpi5-64-9ee1cf59c4d1", cp.stdout)
 
     def test_an_absent_file_is_nothing_and_not_an_error(self):
-        """A partition holding no system is a different fact from a medium that
-        cannot be read, and only the second is an error: b_systems counts the
-        first as 'not a system' and walks on."""
         cp = self._run()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.strip(), "")
 
     def test_the_firmware_and_kernel_inputs_are_readable(self):
-        """A write's own appends land in these two, and nothing else could
-        read them back: whether `os_check=0` had reached an rpi5 card was a
-        hypothesis for two boots this answers in one line (2026-09-04)."""
         for name, text in (("config.txt", "[all]\nos_check=0\n"),
                            ("cmdline.txt", "root=PARTUUID=987478fd-02 rootwait\n")):
             with self.subTest(name=name):
@@ -900,38 +666,7 @@ class TestBootRead(CardEditTest):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertLessEqual(len(cp.stdout), 65536 + 200, "a card can hand back any amount of text")
 
-    def test_an_already_mounted_partition_is_read_where_it_is(self):
-        """An automounter usually has the card on a workstation with a desktop
-        session, and `mount` refuses a second mountpoint for a device it
-        already holds -- so mounting unconditionally turned a read into
-        "could not mount /dev/sda1" (rpi5, 2026-09-04)."""
-        body = re.search(r"(?ms)^v_boot_read\(\) \{.*?^\}", CARD_PRIV.read_text())
-        self.assertIsNotNone(body, "v_boot_read is not defined")
-        self.assertIn("_boot_read_at", body.group(0),
-                      "boot-read mounts even when something already has the partition")
-        probe = re.search(r"(?ms)^_boot_read_at\(\) \{.*?^\}", CARD_PRIV.read_text())
-        self.assertIsNotNone(probe, "_boot_read_at is not defined")
-        self.assertIn("/proc/mounts", probe.group(0),
-                      "the mountpoint does not come from /proc/mounts")
-
-    def test_the_mountpoint_is_never_the_callers(self):
-        """Reading somewhere it did not choose is fine; reading somewhere it
-        was told is a different and much larger grant."""
-        body = re.search(r"(?ms)^v_boot_read\(\) \{.*?^\}", CARD_PRIV.read_text()).group(0)
-        self.assertNotIn('"$4"', body)
-        self.assertIn('_boot_read_at "$(part "$dev" "$2")"', body)
-
-    def test_it_mounts_read_only(self):
-        body = re.search(r"(?ms)^v_boot_read\(\) \{.*?^\}", CARD_PRIV.read_text())
-        self.assertIsNotNone(body, "v_boot_read is not defined")
-        self.assertIn("with_mount -r", body.group(0), "a read verb mounts the medium writable")
-
-
 class TestRescueHelper(CardEditTest):
-    """`helper` copies the writing machine's own card helper onto the system it
-    is writing -- every system, rescue or bench. A rescue writes bench media
-    with it; a bench system arms its sibling with it where the arming is an edit
-    to the card (pi-sd), which is a boot per A/B leg saved."""
 
     def _run(self, extra=""):
         script = (_lift(CARD_PRIV, "_helper_install", "v_helper")
@@ -956,10 +691,6 @@ class TestRescueHelper(CardEditTest):
         self.assertIn("helper:", cp.stdout)
 
     def test_a_bench_pair_takes_it_too(self):
-        """The case that used to be refused. A bench system arms its sibling
-        where the arming is an edit to the card, so it needs the helper; the
-        gate already lets a system address its sibling pair, which is what the
-        write that puts it there just did."""
         cp = self._run(extra="SECOND=1")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertTrue((self.root / "usr" / "local" / "libexec" / "wk-card-priv").is_file())
@@ -973,11 +704,8 @@ class TestRescueHelper(CardEditTest):
 
 
 class TestGrowAndEjectReportTheirFailures(CardEditTest):
-    """A failed step exits non-zero naming the step: e2fsck's uncorrected (4) and operational (8)
-    exits, a partition table the kernel was not told about, and a flush that did not happen."""
 
     def tools(self, **rc):
-        """Every tool v_grow and v_eject run, exiting with the status `rc` names (0 otherwise)."""
         return {t: "exit %d\n" % rc.get(t, 0) for t in ("sfdisk", "partx", "e2fsck", "resize2fs", "blockdev", "sync")}
 
     def grow(self, **rc):

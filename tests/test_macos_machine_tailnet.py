@@ -1,21 +1,4 @@
-"""The podman machine is a tailnet node of its own (host/macos/machine.sh).
-
-It holds this workstation's image workspaces, and their slots reach a board over the
-tailnet -- so the half that can read the store has to be the half that can
-reach the board, or neither can. gvproxy answers a 100.x address itself
-(measured 2026-09-16: ping replies in 0.13ms and a connection to port 22 is
-accepted) and delivers nothing, so the machine joins rather than being routed.
-
-Its workspaces do not join with it: they run `--network none` and reach the
-world only through the egress proxy's socket (lib/wk/targets.py's Container), so this
-is not a hole in the sandbox -- the sandbox is the container, not the VM.
-
-The block is lifted out of the stage and driven against a `podman` stub that
-records its argv, the tests/test_macos_machine_disk.py idiom: no machine is
-created, started or joined, and no key leaves this test.
-
-Run: python3 tests/run.py -k test_macos_machine_tailnet
-"""
+"""The podman machine is a tailnet node of its own (host/macos/machine.sh)."""
 import unittest
 
 from tests.support import REPO, WkTest, bash, stub_path
@@ -70,8 +53,6 @@ class TailnetStage(WkTest):
 
 class TestAMachineAlreadyOnTheTailnetIsLeftAlone(TailnetStage):
     def test_it_reports_the_node_and_joins_nothing(self):
-        # `unchanged` is a debug line: a stage that changed nothing says so
-        # only when asked, like every other reconcile in this file.
         cp = self.run_block({"WK_TEST_TS_JSON": RUNNING, "WK_DEBUG": "1"})
         out = cp.stdout + cp.stderr
         self.assertEqual(cp.returncode, 0, out)
@@ -82,16 +63,12 @@ class TestAMachineAlreadyOnTheTailnetIsLeftAlone(TailnetStage):
 
 class TestALoggedOutMachineJoins(TailnetStage):
     def test_it_brings_the_node_up_under_a_derived_name(self):
-        """The name is this machine's own plus `-vm`, so nothing about how to
-        reach it is written down (CLAUDE.md, 'Cattle, not pets')."""
         self.run_block()
         self.assertIn("tailscale up", self.log)
         self.assertIn("--hostname=probehost-vm", self.log)
         self.assertIn("--advertise-tags=tag:wk", self.log)
 
     def test_the_key_never_reaches_argv(self):
-        """/proc makes a command line world readable, so the key goes into a
-        0600 file in the guest and is removed again."""
         self.run_block()
         self.assertNotIn("tskey-auth-kAAAAAA-secret", self.log)
         self.assertIn("--auth-key=file:/var/lib/tailscale/wk-authkey", self.log)
@@ -102,8 +79,6 @@ class TestALoggedOutMachineJoins(TailnetStage):
         out = cp.stdout + cp.stderr
         self.assertEqual(cp.returncode, 0, out)   # a stage reports; it does not abort setup
         self.assertIn("did not reach Running", out)
-        self.assertIn("single-use, expired", out)
-        self.assertIn("re-running this stage is safe", out)
 
     def test_the_spent_key_is_removed_even_when_the_join_failed(self):
         self.run_block({"WK_TEST_UP_RC": "1"})

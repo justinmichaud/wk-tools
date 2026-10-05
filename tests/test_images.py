@@ -1,8 +1,4 @@
-"""lib/wk/images.py: the profile loader, and every name derived from a profile --
-the spec, the image workspace, its slots and collections.
-
-Run: python3 -m unittest tests.test_images -v
-"""
+"""lib/wk/images.py: the profile loader, and every name derived from a profile."""
 import contextlib
 import io
 import sys

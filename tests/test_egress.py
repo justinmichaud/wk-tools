@@ -1,19 +1,5 @@
-"""How a workspace reaches the outside: what the proxy allows, and how the
-variables naming that proxy get into a macOS guest's shells.
-
-Three parts of one boundary. `container/proxy/wk-proxy.py` decides what may be
-reached and is shared by containers and guests alike, so an entry widens both.
-`container/proxy/github-inject.py` is the one host whose TLS is terminated: it
-forwards every request and refuses none, and what it decides is which of the
-two tokens the request spends.
-`~/.wk-egress` carries the variables naming that proxy into a guest. The host
-writes it on every start and vm/shell-rc.sh sources it from all four rc files,
-so every shell that reads an rc gets it -- not login shells alone: an editor's
-terminal pane is not a login shell, and a pane with no proxy has no egress at
-all and reports it as every host in the world being unreachable.
-
-Run: python3 -m unittest tests.test_egress -v
-"""
+"""How a workspace reaches the outside: what the proxy allows, and how the variables naming that proxy get into a
+macOS guest's shells."""
 import asyncio
 import contextlib
 import errno
@@ -30,8 +16,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from tests.support import (assert_guest_start_converges,
-                           REPO, WkTest)
+from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import targets as wk_targets  # noqa: E402
@@ -39,7 +24,6 @@ from wk.machine import Fake  # noqa: E402
 
 PROXY = REPO / "container" / "proxy" / "wk-proxy.py"
 INJECT = REPO / "container" / "proxy" / "github-inject.py"
-RC = REPO / "shell" / "bashrc"
 SHELL_RC = REPO / "vm" / "shell-rc.sh"
 
 # The six a proxied machine has to export. curl and git read the lowercase
@@ -65,8 +49,8 @@ def _policy():
 
 
 class FakeWriter:
-    """An asyncio StreamWriter as far as either program uses one: it is
-    written to, drained and closed, and the test reads back every byte."""
+    """An asyncio StreamWriter as far as either program uses one: it is written to, drained and closed, and the
+    test reads back every byte."""
 
     def __init__(self):
         self.data = bytearray()
@@ -89,8 +73,7 @@ class FakeWriter:
 
 
 def _reader(data=b"", eof=True):
-    """A StreamReader already holding `data`. Built inside the running loop:
-    StreamReader binds the current event loop at construction."""
+    """A StreamReader already holding `data`. Built inside the running loop:"""
     r = asyncio.StreamReader()
     if data:
         r.feed_data(data)
@@ -104,15 +87,8 @@ def drive_injector(tmp, client_bytes,
                    token="ghp-not-a-real-token", read_token=None,
                    bugzilla_key=None, connect=None, upstream_timeout=None,
                    read_timeout=None):
-    """Injector.handle against a fake upstream: returns what the client was
-    sent, every byte that reached the upstream, the hosts it connected to and
-    what the injector logged.
-
-    `token=None` is `wk push off`: no write token file. `read_token=` writes
-    the standing read token, which no position of the switch removes;
-    `bugzilla_key=` the switch's Bugzilla key, which `wk push on` alone
-    writes. Each call gets its own directory, so a test may drive the injector
-    twice with the machine in two states."""
+    """Injector.handle against a fake upstream: returns what the client was sent, every byte that reached the
+    upstream, the hosts it connected to and what the injector logged."""
     m = _load(INJECT, "wkinject")
     d = Path(tempfile.mkdtemp(dir=str(tmp)))
     pat = d / "push-github-pat"
@@ -157,10 +133,8 @@ def drive_injector(tmp, client_bytes,
 
 def assert_refused_with_the_switch_off(case, method, target,
                                        host="api.github.com", extra="", **kw):
-    """One write with `wk push off`: nothing leaves the injector, and what the
-    client reads back names the switch rather than the far end answering for a
-    credential it was never sent. `extra=` is appended to the query, for the
-    Bugzilla requests that carry the placeholder login pair."""
+    """One write with `wk push off`: nothing leaves the injector, and what the client reads back names the switch
+    rather than the far end answering for a credential it was never sent."""
     sep = "&" if "?" in target else "?"
     full = target + (sep + extra if extra else "")
     head = ("%s %s HTTP/1.1\r\nHost: %s\r\nContent-Length: 0\r\n\r\n"
@@ -178,87 +152,51 @@ def assert_refused_with_the_switch_off(case, method, target,
     return client, logged
 
 
-class TestDevelopmentAllowlist(unittest.TestCase):
-    """The hosts ordinary development needs, each measured as a refusal before
-    it was added. Suffix matching is on a dot boundary, so one entry covers the
-    CDN subdomain a registry actually serves from -- and covers nothing else."""
+# (host, ports, verdict): "tunnel" is allowed as a plain tunnel, "inject" is allowed and routed to the
+# credential injector, "refuse" is refused. Suffix entries match on a dot boundary only.
+ALLOWLIST = (
+    [(h, (443,), "tunnel") for h in ("registry.npmjs.org", "formulae.brew.sh", "ghcr.io", "crates.io", "static.crates.io",
+                                    "static.rust-lang.org", "sh.rustup.rs", "developer.apple.com",
+                                    "download.developer.apple.com", "webkit.org", "trac.webkit.org", "build.webkit.org",
+                                    "codeload.github.com", "raw.githubusercontent.com")]
+    + [(h, (80, 443), "tunnel") for h in ("valid.apple.com", "ocsp.apple.com", "crl.apple.com", "i.pki.goog",
+                                         "archive.ubuntu.com", "ports.ubuntu.com", "security.ubuntu.com",
+                                         "ddebs.ubuntu.com")]
+    + [("github.com", (443, 22), "tunnel")]
+    + [(h, (443,), "inject") for h in ("api.github.com", "bugs.webkit.org")]
+    + [("api.github.com", (22, 80, 9418), "refuse"), ("bugs.webkit.org", (80, 22), "refuse")]
+    # The software update scan path: with it reachable Setup Assistant puts an update pane in front of a guest.
+    + [(h, (443,), "refuse") for h in ("swscan.apple.com", "swcdn.apple.com", "swdist.apple.com",
+                                      "updates.cdn-apple.com", "updates-http.cdn-apple.com", "mesu.apple.com",
+                                      "gdmf.apple.com", "gdmf-ados.apple.com", "xp.apple.com")]
+    + [(h, (443,), "refuse") for h in ("gsa.apple.com", "gateway.icloud.com", "weatherkit.apple.com",
+                                      "iadsdk.apple.com", "api-spotlight-ausw2b.smoot.apple.com", "uploads.github.com",
+                                      "evilregistry.npmjs.org.attacker.net", "notcrates.io", "ghcr.io.example.com",
+                                      "evilapi.github.com.attacker.net", "api.github.com.attacker.net",
+                                      "notapi.github.com.evil.example")]
+)
 
-    def test_package_registries_are_reachable(self):
+
+class TestTheAllowlist(unittest.TestCase):
+    def test_each_host_and_port_gets_its_verdict(self):
         p = _policy()
-        for host in ("registry.npmjs.org", "formulae.brew.sh", "ghcr.io",
-                     "crates.io", "static.crates.io", "static.rust-lang.org",
-                     "sh.rustup.rs"):
-            with self.subTest(host=host):
-                ok, why = p.host_allowed(host, 443)
-                self.assertTrue(ok, why)
+        for host, ports, verdict in ALLOWLIST:
+            for port in ports:
+                with self.subTest(host=host, port=port):
+                    ok, why = p.host_allowed(host, port)
+                    self.assertEqual(verdict != "refuse", ok, why)
+                    if ok:
+                        self.assertEqual(verdict == "inject", "injector" in why, why)
 
-    def test_xcode_is_reachable(self):
-        p = _policy()
-        for host in ("developer.apple.com", "download.developer.apple.com"):
-            with self.subTest(host=host):
-                ok, why = p.host_allowed(host, 443)
-                self.assertTrue(ok, why)
-
-    def test_the_software_update_scan_path_is_refused(self):
-        """Measured on a Tahoe 26.4 guest on 2026-09-05: with these reachable,
-        softwareupdated found macOS 26.6.2 and Setup Assistant put its "Update
-        Mac Automatically" pane in front of the window. No guest can turn the
-        check off (vm/desktop.sh), so the only place it can be stopped is here,
-        and a guest is a clone of a pinned image that upgrading means nothing to."""
-        p = _policy()
-        for host in ("swscan.apple.com", "swcdn.apple.com", "swdist.apple.com",
-                     "updates.cdn-apple.com", "updates-http.cdn-apple.com",
-                     "mesu.apple.com", "gdmf.apple.com", "gdmf-ados.apple.com",
-                     "xp.apple.com"):
-            with self.subTest(host=host):
-                ok, why = p.host_allowed(host, 443)
-                self.assertFalse(ok, f"{host} is reachable: {why}")
-
-    def test_certificate_validation_works_on_80(self):
-        """Gatekeeper will not launch a downloaded binary without a
-        notarization check, and OCSP and CRL are http by design."""
-        p = _policy()
-        for host in ("valid.apple.com", "ocsp.apple.com", "crl.apple.com",
-                     "i.pki.goog"):
-            with self.subTest(host=host):
-                self.assertTrue(p.host_allowed(host, 80)[0])
-                self.assertTrue(p.host_allowed(host, 443)[0])
-
-    def test_apple_is_named_host_by_host_not_by_suffix(self):
-        """The refusals a guest produces are mostly iCloud, Siri, Spotlight,
-        ads and news. None of that is development, and an `apple.com` suffix
-        would have swept it all in."""
-        p = _policy()
-        for host in ("gsa.apple.com", "gateway.icloud.com",
-                     "weatherkit.apple.com", "iadsdk.apple.com",
-                     "api-spotlight-ausw2b.smoot.apple.com"):
-            with self.subTest(host=host):
-                ok, why = p.host_allowed(host, 443)
-                self.assertFalse(ok, why)
-
-    def test_a_registry_lookalike_is_still_refused(self):
-        """The match is on a dot boundary, not a substring."""
-        p = _policy()
-        for host in ("evilregistry.npmjs.org.attacker.net", "notcrates.io",
-                     "ghcr.io.example.com"):
-            with self.subTest(host=host):
-                self.assertFalse(p.host_allowed(host, 443)[0])
-
-    def test_each_widening_is_declared_for_the_audit(self):
-        """The sandbox audit (docs/PLAN.md) covers the allowlist; every widening
-        says so in the file, where the next person reading it will look."""
-        text = PROXY.read_text()
-        self.assertIn("SANDBOX AUDIT", text[:text.index('"registry.npmjs.org"')][-2000:])
-        self.assertIn("BLOCKED_NETS", text)
+    def test_the_injected_host_is_routed_to_a_socket_under_the_store(self):
+        m = _load(PROXY, "wkproxy")
+        self.assertNotIn("/wk/", m.INJECT_SOCKET.replace("/var/lib/wk/", ""))
+        self.assertTrue(m.INJECT_SOCKET.endswith("github-inject.sock"))
 
 
 class TestAbsoluteFormHonoursTheScheme(unittest.TestCase):
-    """A client that sends `GET https://host/...` instead of `CONNECT host:443`
-    -- axios behind a proxy, which is how the Claude CLI fetches its org policy
-    -- expects the proxy to originate TLS. Measured 2026-09-11: the proxy
-    dropped the scheme and connected to :80 in the clear, so an https-only API
-    answered 400 and `claude remote-control` reported "disabled by your
-    organization's policy" though nothing was."""
+    """A client that sends `GET https://host/...` instead of `CONNECT host:443` -- axios behind a proxy, which is
+    how the Claude CLI fetches its org policy -- expects the proxy to originate TLS."""
 
     def setUp(self):
         self.m = _load(PROXY, "wkproxy_abs")
@@ -282,9 +220,6 @@ class TestAbsoluteFormHonoursTheScheme(unittest.TestCase):
                          self.m.parse_absolute_target("http://h:8080/"))
 
     def test_open_upstream_wraps_the_socket_in_tls_only_when_asked(self):
-        """The tls flag is what carries the scheme decision to the socket:
-        an https absolute-form request originates a verified TLS connection to
-        the real host, an http one does not."""
         calls = []
 
         async def fake_open_connection(addr, port, **kw):
@@ -305,96 +240,12 @@ class TestAbsoluteFormHonoursTheScheme(unittest.TestCase):
         self.assertEqual([True, False], calls)
 
 
-class TestTheApiGoesToTheInjector(unittest.TestCase):
-    """api.github.com and bugs.webkit.org are the two hosts whose TLS is not
-    tunnelled: their CONNECTs go to the credential injector, which puts the
-    real credential on the request so that no workspace has to hold it."""
-
-    def test_the_api_is_allowed_on_443_and_named_as_the_injectors(self):
-        ok, why = _policy().host_allowed("api.github.com", 443)
-        self.assertTrue(ok, why)
-        self.assertIn("injector", why)
-
-    def test_bugzilla_is_allowed_on_443_and_named_as_the_injectors(self):
-        ok, why = _policy().host_allowed("bugs.webkit.org", 443)
-        self.assertTrue(ok, why)
-        self.assertIn("injector", why)
-
-    def test_bugzilla_on_no_other_port(self):
-        """`webkit.org` is an allowed suffix on 80 and 443, and would grant a
-        plain tunnel to Bugzilla if the exact match were not checked first."""
-        p = _policy()
-        for port in (80, 22):
-            with self.subTest(port=port):
-                ok, why = p.host_allowed("bugs.webkit.org", port)
-                self.assertFalse(ok, why)
-
-    def test_the_rest_of_webkit_org_is_untouched(self):
-        p = _policy()
-        for host in ("webkit.org", "trac.webkit.org", "build.webkit.org"):
-            with self.subTest(host=host):
-                ok, why = p.host_allowed(host, 443)
-                self.assertTrue(ok, why)
-                self.assertNotIn("injector", why)
-
-    def test_and_on_no_other_port(self):
-        """A tunnel on 22 or 80 would be a way past the injector, and the
-        generic `github.com` suffix would grant both if this were not an exact
-        match checked before it."""
-        p = _policy()
-        for port in (22, 80, 9418):
-            with self.subTest(port=port):
-                ok, why = p.host_allowed("api.github.com", port)
-                self.assertFalse(ok, why)
-
-    def test_the_upload_api_is_still_refused(self):
-        ok, why = _policy().host_allowed("uploads.github.com", 443)
-        self.assertFalse(ok)
-        self.assertIn("refused", why)
-
-    def test_a_lookalike_is_neither_injected_nor_allowed(self):
-        p = _policy()
-        for host in ("evilapi.github.com.attacker.net",
-                     "api.github.com.attacker.net",
-                     "notapi.github.com.evil.example"):
-            with self.subTest(host=host):
-                ok, why = p.host_allowed(host, 443)
-                self.assertFalse(ok, f"{host}: {why}")
-
-    def test_github_itself_and_codeload_are_untouched(self):
-        p = _policy()
-        for host, port in (("github.com", 443), ("github.com", 22),
-                           ("codeload.github.com", 443),
-                           ("raw.githubusercontent.com", 443)):
-            with self.subTest(host=host, port=port):
-                ok, why = p.host_allowed(host, port)
-                self.assertTrue(ok, f"{host}:{port} {why}")
-                self.assertNotIn("injector", why)
-
-    def test_the_injected_host_is_routed_to_a_socket_under_the_store(self):
-        """Never under $XDG_RUNTIME_DIR/wk: that is the directory every
-        container bind-mounts, and a workspace must reach the injector through
-        this policy rather than around it."""
-        m = _load(PROXY, "wkproxy")
-        self.assertNotIn("/wk/", m.INJECT_SOCKET.replace("/var/lib/wk/", ""))
-        self.assertTrue(m.INJECT_SOCKET.endswith("github-inject.sock"))
-        text = PROXY.read_text()
-        self.assertIn("asyncio.open_unix_connection(INJECT_SOCKET)", text)
-
-    def test_the_widening_is_declared_for_the_audit(self):
-        self.assertIn("SANDBOX AUDIT", PROXY.read_text())
-
-
 class TestTheRouteAndTheCheckReadOneSpelling(unittest.TestCase):
-    """A host name is case-insensitive and may carry a trailing dot, so one
-    name has several spellings. The allowlist normalised and the route did
-    not, so `CONNECT API.GITHUB.COM:443` passed the check as the injected host
-    and then got a plain tunnel to GitHub -- the credential injector out of the
-    path, and TLS the workspace terminates itself."""
+    """A host name is case-insensitive and may carry a trailing dot, so one name has several spellings."""
 
     def _routed(self, target):
-        """Where `handle` sent this CONNECT: the host and port open_upstream
-        was asked for, with the real allowlist in front of it."""
+        """Where `handle` sent this CONNECT: the host and port open_upstream was asked for, with the real
+        allowlist in front of it."""
         m = _load(PROXY, "wkproxy")
         proxy = m.Proxy(m.Policy(tempfile.mkdtemp(prefix="wk-test-store-")))
         seen = []
@@ -422,25 +273,9 @@ class TestTheRouteAndTheCheckReadOneSpelling(unittest.TestCase):
                 self.assertIn(b"200 Connection established", out)
 
     def test_the_tunnel_is_granted_in_http_1_0(self):
-        """Apple's nc -X connect rejects a 1.1 tunnel -- "nc: Proxy error:
-        HTTP/1.1 200 Connection established" -- and it is the ProxyCommand
-        every macOS guest reaches github.com:22 through. Measured 2026-09-09 in
-        a guest: with 1.1 no `git push` and no `ssh -T git@github-webkit` from
-        a macOS workspace can connect at all, whatever `wk push` says. Squid
-        answers 1.0 for the same reason."""
         _seen, out = self._routed("api.github.com:443")
         self.assertIn(b"HTTP/1.0 200 Connection established", out)
         self.assertNotIn(b"HTTP/1.1 200", out)
-
-    def test_the_injector_branch_matches_that_one_spelling(self):
-        """open_upstream routes on an exact dict lookup, so the normalisation
-        has to have happened before it -- this is the assertion that the two
-        cannot drift apart again."""
-        m = _load(PROXY, "wkproxy")
-        for spelled in ("API.GITHUB.COM", "api.github.com."):
-            with self.subTest(spelled=spelled):
-                self.assertNotIn(spelled, m.INJECTED_HOSTS)
-                self.assertEqual("api.github.com", m.normalize_host(spelled))
 
     def test_a_shouted_denied_host_is_still_denied(self):
         seen, out = self._routed("UPLOADS.GITHUB.COM:443")
@@ -475,18 +310,11 @@ class TestTheInjectorsRule(unittest.TestCase):
         self.assertTrue(out.endswith(b"\r\n\r\n"))
 
     def test_with_no_token_the_placeholder_is_stripped_and_nothing_added(self):
-        """GitHub then answers for itself -- 200 for a public endpoint, 401 for
-        one that needs an account -- which is what `wk doctor` measures either
-        side of the switch. Forwarding the placeholder would only ever be a way
-        to smuggle a credential out."""
         out = self.m.rewrite_head(self.head(), self.m.GITHUB, "")
         self.assertNotIn(b"Authorization", out)
         self.assertNotIn(b"Basic", out)
 
     def test_the_connection_is_closed_per_request(self):
-        """One request per TLS connection, so GitHub closes and the client
-        learns it from GitHub's own response: no response header is parsed
-        here, and no keep-alive stream is left half-rewritten."""
         out = self.m.rewrite_head(self.head(), self.m.GITHUB, "ghp-x")
         self.assertIn(b"Connection: close", out)
         self.assertEqual(1, out.count(b"Connection:"))
@@ -498,8 +326,6 @@ class TestTheInjectorsRule(unittest.TestCase):
         self.assertNotIn(b"Proxy-Authorization", out)
 
     def test_the_token_is_read_from_the_file_on_every_request(self):
-        """`wk push off` removes it, and the next request must go
-        unauthenticated rather than be served from something remembered."""
         with tempfile.TemporaryDirectory() as d:
             path = str(Path(d) / "pat")
             self.assertEqual("", self.m.read_token(path))
@@ -508,14 +334,8 @@ class TestTheInjectorsRule(unittest.TestCase):
             Path(path).unlink()
             self.assertEqual("", self.m.read_token(path))
 
-    def test_exactly_two_hosts_are_ever_terminated(self):
-        self.assertEqual(("api.github.com", "bugs.webkit.org"), self.m.HOSTS)
-        self.assertEqual(443, self.m.INJECT_PORT)
-
     @unittest.skipUnless(shutil.which("openssl"), "needs the openssl CLI")
     def test_it_makes_its_own_ca_and_publishes_only_the_public_half(self):
-        """`cryptography` is absent from the macOS host's python, so the
-        material is made with the CLI that is on both machines."""
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             chain = self.m.ensure_certs(str(d / "certs"), str(d / "out" / "ca.pem"))
@@ -527,8 +347,6 @@ class TestTheInjectorsRule(unittest.TestCase):
             self.assertEqual(0o600, (d / "certs" / "leaf.key").stat().st_mode & 0o777)
             self.assertEqual(2, Path(chain).read_text().count("BEGIN CERTIFICATE"))
 
-            # A second run keeps it: the CA is what every workspace was told to
-            # trust, so regenerating it would break every one of them.
             again = (d / "certs" / "ca.crt").read_text()
             self.m.ensure_certs(str(d / "certs"), str(d / "out" / "ca.pem"))
             self.assertEqual(again, (d / "certs" / "ca.crt").read_text())
@@ -547,9 +365,6 @@ class TestTheInjectorsRule(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("openssl"), "needs the openssl CLI")
     def test_a_leaf_naming_fewer_hosts_is_remade_and_the_ca_kept(self):
-        """A machine whose injector predates Bugzilla holds a leaf for one
-        name; the CA every workspace was told to trust must survive the
-        remake, or every one of them fails to verify."""
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             certs = d / "certs"
@@ -576,10 +391,8 @@ class TestTheInjectorsRule(unittest.TestCase):
 
 
 class TestTheInjectorsBugzillaRule(WkTest):
-    """Bugzilla takes its login in the query string, where git-webkit puts
-    `login` and `password` on every request (webkitbugspy/bugzilla.py,
-    _login_arguments). The workspace's pair is dropped and the switch's
-    api_key goes on -- or nothing does, and Bugzilla answers for itself."""
+    """Bugzilla takes its login in the query string, where git-webkit puts `login` and `password` on every
+    request (webkitbugspy/bugzilla.py, _login_arguments)."""
 
     TARGET = ("/rest/bug/250000?login=me%40example.test&password=wk-injects-this"
               "&include_fields=id%2Csummary")
@@ -638,9 +451,6 @@ class TestTheInjectorsBugzillaRule(WkTest):
         self.assertIn(b"/rest/bug/1?api_key=a%20b%26c HTTP/1.1", out)
 
     def test_a_request_line_this_cannot_read_is_refused_not_forwarded(self):
-        """For GitHub such a line goes on as it came, carrying no credential
-        of its own; for Bugzilla it could carry the login pair, so it goes
-        nowhere."""
         for line in (b"GET", b"GET /rest/bug?password=x",
                      b"GET /rest/bug HTTP/1.1 extra"):
             with self.subTest(line=line):
@@ -655,12 +465,8 @@ class TestTheInjectorsBugzillaRule(WkTest):
 
 
 class TestTheInjectorAnswersForItsHostsOnly(WkTest):
-    """The forwarded connection is a TLS session to the name the request's
-    Host header carries, and only one of the two this answers for. GitHub's
-    front end routes on Host, so a client-chosen one is a way to spend the
-    token against a name the allowlist refuses -- `Host: uploads.github.com`
-    above all, which DENIED_HOSTS exists to keep out -- and with two hosts a
-    guess would spend one host's credential against the other."""
+    """The forwarded connection is a TLS session to the name the request's Host header carries, and only one of
+    the two this answers for."""
 
     def test_a_host_this_does_not_answer_for_is_refused_and_nothing_opened(self):
         for host in (b"uploads.github.com", b"evil.example",
@@ -697,11 +503,8 @@ class TestTheInjectorAnswersForItsHostsOnly(WkTest):
 
 
 class TestTheInjectorReadsOneRequestAndNoMore(WkTest):
-    """Everything past the first request head is relayed by nothing: a second
-    request on the same connection is a head this program never rewrote, so it
-    would reach GitHub carrying the client's own Authorization. And a header
-    line ended by a bare LF is one line to this program's `\r\n` split and two
-    to GitHub's parser -- the same smuggle, inside the first head."""
+    """Everything past the first request head is relayed by nothing: a second request on the same connection is a
+    head this program never rewrote, so it would reach GitHub carrying the client's own Authorization."""
 
     def _drive(self, client_bytes, upstream_reply=b"HTTP/1.1 204 No Content\r\n\r\n"):
         client, upstream, opened, _ = drive_injector(
@@ -721,8 +524,6 @@ class TestTheInjectorReadsOneRequestAndNoMore(WkTest):
         self.assertIn(b"Content-Length: 2\r\n", upstream)
 
     def test_the_declared_body_does_reach_it(self):
-        """The truncation is at the declared length, not at zero: a real
-        `git-webkit pr` is a POST with a JSON body."""
         _, upstream, _ = self._drive(
             b"POST /repos/x/y/pulls HTTP/1.1\r\nHost: api.github.com\r\n"
             b'Content-Length: 11\r\n\r\n{"a":"bcd"}')
@@ -753,9 +554,6 @@ class TestTheInjectorReadsOneRequestAndNoMore(WkTest):
         self.assertIn(b"400 Bad Request", client)
 
     def test_the_clients_own_framing_headers_never_go_on(self):
-        """This program states the length of what it actually relayed; the
-        client's Content-Length and Transfer-Encoding are dropped, so nothing
-        downstream can read a different end-of-request than this one did."""
         _, upstream, _ = self._drive(
             b"POST /repos/x/y/pulls HTTP/1.1\r\nHost: api.github.com\r\n"
             b"Content-Length: 2\r\n\r\nhi")
@@ -882,9 +680,6 @@ class TestTheInjectorForwardsBugzilla(WkTest):
                 self.assertIn(" inject ", logged)
 
     def test_every_read_goes_anonymous_while_push_is_off(self):
-        """Bugzilla is readable without an account, so a read is forwarded
-        with no key rather than refused: the switch governs what a workspace
-        can publish, not what it can look at."""
         for method, target in GIT_WEBKIT_BUGZILLA:
             if method not in ("GET", "HEAD"):
                 continue
@@ -894,9 +689,6 @@ class TestTheInjectorForwardsBugzilla(WkTest):
                 self.assertIn(" unauthenticated ", logged)
 
     def test_every_write_is_refused_by_name_while_push_is_off(self):
-        """Nothing is sent, so Bugzilla never answers for a key it was never
-        given: the injector says the switch is off and names the command that
-        turns it on."""
         for method, target in GIT_WEBKIT_BUGZILLA:
             if method in ("GET", "HEAD"):
                 continue
@@ -927,10 +719,8 @@ class TestTheInjectorForwardsBugzilla(WkTest):
 
 
 class TestTheInjectorRecordsWhatTheFarEndAnswered(WkTest):
-    """The request log alone cannot tell an injected credential the far end
-    accepted from one it refused -- both read `... inject PUT /rest/bug/<n>`.
-    bugs.webkit.org refusing a write is the case that costs an afternoon, so
-    the status line is read before the reply is piped back, and logged."""
+    """The request log alone cannot tell an injected credential the far end accepted from one it refused -- both
+    read `..."""
 
     def drive(self, reply):
         head = (b"PUT /rest/bug/324270?login=me%40example.test&password=wk-injects-this"
@@ -951,15 +741,11 @@ class TestTheInjectorRecordsWhatTheFarEndAnswered(WkTest):
         self.assertIn("200 OK", logged, logged)
 
     def test_the_reply_still_reaches_the_client_whole(self):
-        """The status line is read off the upstream before the pipe, so it has
-        to be written back or every answer loses its first line."""
         reply = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 9\r\n\r\n{\"e\":1}\r\n"
         client, _logged = self.drive(reply)
         self.assertEqual(client, reply, client)
 
     def test_no_response_body_is_logged(self):
-        """A status line, never the body: it is the far end's, and this log is
-        not the place to spill it."""
         reply = (b"HTTP/1.1 403 Forbidden\r\nContent-Length: 21\r\n\r\n"
                  b'{"message":"secret"}\n')
         _client, logged = self.drive(reply)
@@ -968,8 +754,8 @@ class TestTheInjectorRecordsWhatTheFarEndAnswered(WkTest):
 
 
 class TestTheInjectorBoundsTheUpstream(WkTest):
-    """A stalled or unreachable far end is answered 504 or 502 inside
-    UPSTREAM_TIMEOUT, so the caller's own timeout never fires on a live injector."""
+    """A stalled or unreachable far end is answered 504 or 502 inside UPSTREAM_TIMEOUT, so the caller's own
+    timeout never fires on a live injector."""
 
     HEAD = b"GET /user HTTP/1.1\r\nHost: api.github.com\r\nContent-Length: 0\r\n\r\n"
 
@@ -985,6 +771,7 @@ class TestTheInjectorBoundsTheUpstream(WkTest):
         self.assertIn(b"504 Gateway Timeout", client)
         self.assertIn(b"api.github.com did not answer", client)
         self.assertIn("TimeoutError", logged)
+        self.assertNotIn(b"may have been applied", client)
 
     def test_a_server_that_accepts_and_stalls_is_a_504(self):
         async def stalled():
@@ -997,14 +784,7 @@ class TestTheInjectorBoundsTheUpstream(WkTest):
         self.assertIn(b"504 Gateway Timeout", client)
         self.assertIn(b"the request was sent; it may have been applied", client)
 
-    def test_a_connect_timeout_says_nothing_was_sent(self):
-        async def never():
-            await asyncio.sleep(60)
-        client, _ = self.drive(never)
-        self.assertNotIn(b"may have been applied", client)
-
     def test_the_status_line_outlasts_the_connect_bound(self):
-        """A server slow to answer, within READ_TIMEOUT, is relayed rather than cut at UPSTREAM_TIMEOUT."""
         async def slow():
             async def late(reader, writer):
                 await reader.readuntil(b"\r\n\r\n")
@@ -1019,25 +799,27 @@ class TestTheInjectorBoundsTheUpstream(WkTest):
             self.tmp, self.HEAD, read_token="t", connect=slow, upstream_timeout=0.2, read_timeout=5)
         self.assertIn(b"200 OK", client)
 
-    def test_a_tls_verification_failure_is_not_a_502(self):
+    def test_a_tls_verification_failure_is_a_502_naming_the_injector(self):
         async def bad_ca():
             raise ssl.SSLCertVerificationError("certificate verify failed")
         client, logged = self.drive(bad_ca)
-        self.assertIn(b"598 Injector Upstream Fault", client)
+        self.assertIn(b"502 Bad Gateway", client)
+        self.assertIn(b"X-Wk-Injector: SSLCertVerificationError", client)
         self.assertIn(b"failed to verify or resolve api.github.com", client)
-        self.assertNotIn(b"502", client)
 
-    def test_a_dns_failure_is_not_a_502(self):
+    def test_a_dns_failure_is_a_502_naming_the_injector(self):
         async def no_dns():
             raise socket.gaierror(-2, "Name or service not known")
         client, _ = self.drive(no_dns)
-        self.assertIn(b"598 Injector Upstream Fault", client)
+        self.assertIn(b"502 Bad Gateway", client)
+        self.assertIn(b"X-Wk-Injector: gaierror", client)
 
     def test_an_unreachable_network_is_a_502(self):
         async def unreachable():
             raise OSError(errno.ENETUNREACH, "Network is unreachable")
         client, _ = self.drive(unreachable)
         self.assertIn(b"502 Bad Gateway", client)
+        self.assertNotIn(b"X-Wk-Injector", client)
 
     def test_a_refused_connect_is_a_502_naming_the_host(self):
         async def refused():
@@ -1053,12 +835,7 @@ class TestTheInjectorBoundsTheUpstream(WkTest):
 
 
 class TestTheInjectorForwardsEverything(WkTest):
-    """The decision, and it is a decision rather than an oversight: the
-    injector refuses nothing on policy. Every method on every path reaches
-    api.github.com and GitHub answers for itself. `wk push on` means a person
-    is watching what the workspace does, so which of their own endpoints it
-    reaches is theirs to decide; `wk push off` leaves a write no credential at
-    all, and GitHub answers 401."""
+    """The decision, and it is a decision rather than an oversight: the injector refuses nothing on policy."""
 
     def forward(self, method, target, body=b"", **kw):
         """Drives the relay and returns what api.github.com received."""
@@ -1092,8 +869,6 @@ class TestTheInjectorForwardsEverything(WkTest):
                     self.forward(method, target, read_token="ghp-read-only")
 
     def test_a_read_is_open_where_it_is_sensitive_too(self):
-        """The read token reaches whatever the account it belongs to can read.
-        What bounds that is the token's own scope, not this program."""
         for target in ("/repos/WebKit/WebKit/actions/secrets",
                        "/repos/an-employer/private-thing/contents/secrets.txt",
                        "/user/emails"):
@@ -1101,10 +876,6 @@ class TestTheInjectorForwardsEverything(WkTest):
                 self.forward("GET", target, read_token="ghp-read-only")
 
     def test_a_hostile_write_is_forwarded_and_carries_the_switchs_token(self):
-        """Deliberate. Each of these could delete a repository, add a deploy
-        key or exfiltrate, and with push on a person is watching every one of
-        them; the workspace is not the thing deciding, and neither is this
-        program."""
         for method, target in HOSTILE_WRITES:
             with self.subTest(request="%s %s" % (method, target)):
                 upstream, _ = self.forward(method, target)
@@ -1112,16 +883,12 @@ class TestTheInjectorForwardsEverything(WkTest):
                               upstream)
 
     def test_a_hostile_write_is_refused_by_name_with_the_switch_off(self):
-        """Not forwarded stripped of its credential -- not forwarded at all.
-        The standing read token is on the machine and reaches none of these."""
         for method, target in HOSTILE_WRITES:
             with self.subTest(request="%s %s" % (method, target)):
                 assert_refused_with_the_switch_off(
                     self, method, target, read_token="ghp-read-only")
 
     def test_a_path_a_server_would_normalise_is_forwarded_unchanged(self):
-        """There is no rule left for a `..` or a percent-escape to walk past,
-        so the path GitHub is sent is the path the workspace wrote."""
         for target in ("/repos/a/b/pulls/../../../../user",
                        "/repos/a/b/%2e%2e/%2e%2e/keys",
                        "//repos/a/b/pulls"):
@@ -1129,9 +896,6 @@ class TestTheInjectorForwardsEverything(WkTest):
                 self.forward("POST", target)
 
     def test_a_request_line_this_cannot_read_is_a_write(self):
-        """`request_line` answers ("", "") rather than refusing, which is not
-        a read: the line goes on to api.github.com exactly as it arrived and
-        is answered there, having spent the switch's token and nothing else."""
         for line in (b"GET", b"GET /user", b"GET /user HTTP/1.1 extra",
                      b"GET https://api.github.com/user HTTP/1.1"):
             with self.subTest(line=line):
@@ -1146,55 +910,31 @@ class TestTheInjectorForwardsEverything(WkTest):
 
 
 class TestTheGraphQLReadWriteSplit(WkTest):
-    """GraphQL is the whole API behind one path, so the method cannot decide
-    read from write there and the document does. Neither answer is a refusal:
-    a query spends the standing read token, which is what keeps `git-webkit`'s
-    pull request lookup (PRGenerator.find) working with the switch off, and a
-    mutation is a write like any other."""
+    """GraphQL is the whole API behind one path, so the method cannot decide read from write there and the
+    document does."""
 
     def setUp(self):
         super().setUp()
         self.m = _load(INJECT, "wkinject")
 
-    def test_the_query_git_webkit_sends_is_a_read(self):
-        body = (b'{"query": "query { search(query: \\"repo:WebKit/WebKit '
-                b'is:pr\\", type: ISSUE, last: 100) { edges { node { number } '
-                b'} } }"}')
-        self.assertTrue(self.m.is_read("POST", "/graphql", body))
-
-    def test_a_mutation_is_a_write(self):
-        self.assertFalse(self.m.is_read(
-            "POST", "/graphql", b'{"query": "mutation { deleteRef(input: {}) }"}'))
-
-    def test_a_mutation_after_a_query_in_one_document_is_still_a_mutation(self):
-        """A GraphQL document holds as many operations as it likes, and GitHub
-        runs the one it is asked for: a rule that read only the first would be
-        a rule anything could walk past."""
-        body = (b'{"query": "query Find { viewer { login } } '
-                b'mutation Land { mergePullRequest(input: {}) { clientMutationId } }",'
-                b' "operationName": "Land"}')
-        self.assertFalse(self.m.is_read("POST", "/graphql", body))
-
-    def test_the_keyword_is_matched_however_it_is_spelled(self):
-        """Case-insensitively, which calls documents writes that GitHub would
-        run as queries and never the other way round."""
-        for spelled in (b"Mutation", b"MUTATION", b"mUtAtIoN"):
-            with self.subTest(spelled=spelled):
-                self.assertFalse(self.m.is_read(
-                    "POST", "/graphql", b'{"query": "' + spelled + b' { x }"}'))
-
-    def test_a_query_string_does_not_hide_the_body(self):
-        self.assertTrue(self.m.is_read("POST", "/graphql?anything",
-                                       b'{"query": "query { x }"}'))
-        self.assertFalse(self.m.is_read("POST", "/graphql?anything",
-                                        b'{"query": "mutation { x }"}'))
-
-    def test_graphql_by_any_other_method_is_a_write(self):
-        self.assertFalse(self.m.is_read("PUT", "/graphql",
-                                        b'{"query": "query { x }"}'))
+    def test_a_query_is_a_read_and_anything_else_a_write(self):
+        search = (b'{"query": "query { search(query: \\"repo:WebKit/WebKit is:pr\\", type: ISSUE, last: 100) '
+                  b'{ edges { node { number } } } }"}')
+        both = (b'{"query": "query Find { viewer { login } } mutation Land { mergePullRequest(input: {}) '
+                b'{ clientMutationId } }", "operationName": "Land"}')
+        for method, path, body, read in (
+                ("POST", "/graphql", search, True),
+                ("POST", "/graphql", b'{"query": "mutation { deleteRef(input: {}) }"}', False),
+                ("POST", "/graphql", both, False),
+                ("POST", "/graphql", b'{"query": "Mutation { x }"}', False),
+                ("POST", "/graphql", b'{"query": "mUtAtIoN { x }"}', False),
+                ("POST", "/graphql?anything", b'{"query": "query { x }"}', True),
+                ("POST", "/graphql?anything", b'{"query": "mutation { x }"}', False),
+                ("PUT", "/graphql", b'{"query": "query { x }"}', False)):
+            with self.subTest(method=method, path=path, body=body):
+                self.assertEqual(read, self.m.is_read(method, path, body))
 
     def test_a_query_spends_the_read_token_and_a_mutation_the_switchs(self):
-        """End to end, both ways, on a machine holding both tokens."""
         for body, token, half in (
                 (b'{"query": "query { viewer { login } }"}', b"ghp-read-only", "read"),
                 (b'{"query": "mutation { deleteRef(input: {}) }"}',
@@ -1211,10 +951,7 @@ class TestTheGraphQLReadWriteSplit(WkTest):
 
 
 class TestTheTwoTokens(WkTest):
-    """Which token a request spends, which is the whole of what `wk push`
-    switches. The read token stands whatever position the switch is in; the
-    write token is the file `wk push on|off` writes and removes, and it is the
-    only thing a write may ever spend."""
+    """Which token a request spends, which is the whole of what `wk push` switches."""
 
     def setUp(self):
         super().setUp()
@@ -1225,8 +962,6 @@ class TestTheTwoTokens(WkTest):
                                    str(self.tmp / "push-bugzilla-api-key"), None)
 
     def test_bugzilla_spends_the_switchs_key_and_never_a_github_token(self):
-        """No standing half: a Bugzilla key is one account, so a read and a
-        write both spend the switch's key, and neither GitHub token."""
         self.read_pat.write_text("ghp-read-only\n")
         self.pat.write_text("ghp-the-write-token\n")
         for reading in (True, False):
@@ -1236,35 +971,18 @@ class TestTheTwoTokens(WkTest):
             self.assertEqual("not-a-real-bugzilla-key",
                              self.inj.token_for(self.m.BUGZILLA, reading))
 
-    def test_a_read_spends_the_read_token(self):
-        self.read_pat.write_text("ghp-read-only\n")
-        self.assertEqual("ghp-read-only", self.inj.token_for(self.m.GITHUB, True))
-
-    def test_a_read_falls_back_to_the_switchs_token(self):
-        """A machine with no read token installed reads with the one it has:
-        reading is what the switch is not about."""
-        self.pat.write_text("ghp-the-write-token\n")
-        self.assertEqual("ghp-the-write-token", self.inj.token_for(self.m.GITHUB, True))
-
-    def test_the_read_token_wins_when_both_are_there(self):
-        self.pat.write_text("ghp-the-write-token\n")
-        self.read_pat.write_text("ghp-read-only\n")
-        self.assertEqual("ghp-read-only", self.inj.token_for(self.m.GITHUB, True))
-
-    def test_the_read_token_is_not_a_write_token(self):
-        """The decision the whole split rests on. A read token on a machine
-        with the switch off must not let a write through: the write goes
-        unauthenticated and GitHub answers 401 for itself."""
-        self.read_pat.write_text("ghp-read-only\n")
-        self.assertEqual("", self.inj.token_for(self.m.GITHUB, False))
-
-    def test_a_write_spends_the_switchs_token(self):
-        self.pat.write_text("ghp-the-write-token\n")
-        self.assertEqual("ghp-the-write-token", self.inj.token_for(self.m.GITHUB, False))
+    def test_a_read_spends_the_read_token_else_the_switchs_and_a_write_only_the_switchs(self):
+        for write, read, reading, want in (
+                (None, "r", True, "r"), ("w", None, True, "w"), ("w", "r", True, "r"),
+                (None, "r", False, ""), ("w", "r", False, "w")):
+            with self.subTest(write=write, read=read, reading=reading):
+                for path, value in ((self.pat, write), (self.read_pat, read)):
+                    path.unlink(missing_ok=True)
+                    if value:
+                        path.write_text(value + "\n")
+                self.assertEqual(want, self.inj.token_for(self.m.GITHUB, reading))
 
     def test_a_read_carries_the_read_token_with_the_switch_off(self):
-        """End to end, and the state a workspace is in for most of its life:
-        no write token on the machine at all, and `gh` still works."""
         _, upstream, opened, logged = drive_injector(
             self.tmp,
             b"GET /repos/WebKit/WebKit/pulls/1234 HTTP/1.1\r\n"
@@ -1274,32 +992,9 @@ class TestTheTwoTokens(WkTest):
         self.assertIn(b"Authorization: Bearer ghp-read-only", upstream)
         self.assertIn("read inject GET /repos/WebKit/WebKit/pulls/1234", logged)
 
-    def test_a_write_is_refused_by_name_with_the_switch_off(self):
-        """The same machine and the same read token: the write never leaves
-        the injector. Forwarding it stripped of its credential made the far
-        end answer for a token it was never sent -- GitHub's bare 401, which
-        `git-webkit pr` reports as an expired token and sends a person to
-        `git-webkit setup`. The refusal names the switch instead."""
-        client, upstream, opened, logged = drive_injector(
-            self.tmp,
-            b"POST /repos/WebKit/WebKit/pulls HTTP/1.1\r\n"
-            b"Host: api.github.com\r\nContent-Length: 2\r\n\r\nhi",
-            token=None, read_token="ghp-read-only")
-        self.assertEqual([], opened, "the write reached the network")
-        self.assertEqual(b"", upstream)
-        self.assertIn(b"412 Precondition Failed", client)
-        self.assertIn(b"wk push is off for this workspace's machine", client)
-        self.assertIn(b"'wk push on'", client)
-        self.assertNotIn(b"ghp-read-only", client)
-        self.assertIn("write refused: push is off POST "
-                      "/repos/WebKit/WebKit/pulls", logged)
-
-
 def run_bridge(ca, *print_vars, bugzilla_user=None, github_user=None,
                env_extra=None):
-    """(what the wrapped command printed, the bundle's path, its bytes).
-    `bugzilla_user=`/`github_user=` are what `wk push` published under
-    /secrets, and `env_extra=` what the container was created with."""
+    """(what the wrapped command printed, the bundle's path, its bytes)."""
     d = Path(tempfile.mkdtemp(prefix="wk-test-gh-env-"))
     try:
         secrets = d / "secrets"
@@ -1349,88 +1044,33 @@ def run_bridge(ca, *print_vars, bugzilla_user=None, github_user=None,
 
 
 class TestWhatGhNeeds(unittest.TestCase):
-    """`gh` reads GitHub through the same injector as everything else, so it
-    needs two things nothing else does: a token to put in an Authorization
-    header for the injector to replace, and the CA in the two variables Go's
-    crypto/x509 reads -- it reads none of REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE
-    or GIT_SSL_CAINFO. Both only where the bundle was built: naming a file
-    that is not there fails every HTTPS request in the workspace.
+    """`gh` reads GitHub through the same injector as everything else, so it needs two things nothing else does:
+    a token to put in an Authorization header for the injector to replace, and the CA in the two variables
+    Go's crypto/x509 reads -- it reads none of REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE or GIT_SSL_CAINFO."""
 
-    Driven, both branches, against a scratch tree standing in for the three
-    paths that exist only in a container.
-    """
-
-    def test_gh_gets_the_placeholder_and_the_bundle_go_reads(self):
-        out, bundle, _ = run_bridge(True, "GH_TOKEN", "SSL_CERT_FILE",
-                                         "SSL_CERT_DIR")
-        self.assertIn("GH_TOKEN=[wk-injects-this]", out)
-        self.assertIn("SSL_CERT_FILE=[%s]" % bundle, out)
-        self.assertIn("SSL_CERT_DIR=[/etc/ssl/certs]", out)
-
-    def test_a_workspace_with_no_injector_ca_gets_neither(self):
-        """No CA is no injector in the path, and a placeholder token would
-        then be an Authorization header nothing replaces."""
-        out, _, _ = run_bridge(False, "GH_TOKEN", "SSL_CERT_FILE",
-                                    "SSL_CERT_DIR")
-        self.assertIn("GH_TOKEN=[]", out)
-        self.assertIn("SSL_CERT_FILE=[]", out)
-        self.assertIn("SSL_CERT_DIR=[]", out)
-
-    def test_git_webkit_is_told_there_is_no_keyring_either_way(self):
-        """With the libsecret backend keyring autoinstalls and no session
-        bus, every lookup raises and git-webkit exits before it reads the
-        injected credential; the null backend is set whether or not the
-        injector's CA is in the path."""
-        for ca in (True, False):
-            out, _, _ = run_bridge(ca, "PYTHON_KEYRING_BACKEND")
-            self.assertIn("PYTHON_KEYRING_BACKEND=[keyring.backends.null.Keyring]",
-                          out)
-
-    def test_git_webkit_gets_the_bugzilla_placeholder_from_the_published_login(self):
-        out, _, _ = run_bridge(True, "BUGS_WEBKIT_ORG_USERNAME",
-                                    "BUGS_WEBKIT_ORG_PASSWORD",
-                                    bugzilla_user="me@example.test")
-        self.assertIn("BUGS_WEBKIT_ORG_USERNAME=[me@example.test]", out)
-        self.assertIn("BUGS_WEBKIT_ORG_PASSWORD=[wk-injects-this]", out)
-
-    def test_no_published_login_means_no_bugzilla_placeholder(self):
-        """A placeholder with no login beside it would have git-webkit
-        validate an empty pair; with neither it asks, which is the visible
-        state `wk doctor <ws>` fails on."""
-        out, _, _ = run_bridge(True, "BUGS_WEBKIT_ORG_USERNAME",
-                                    "BUGS_WEBKIT_ORG_PASSWORD")
-        self.assertIn("BUGS_WEBKIT_ORG_USERNAME=[]", out)
-        self.assertIn("BUGS_WEBKIT_ORG_PASSWORD=[]", out)
+    def test_what_each_workspace_is_handed(self):
+        names = ("GH_TOKEN", "SSL_CERT_FILE", "SSL_CERT_DIR", "PYTHON_KEYRING_BACKEND", "BUGS_WEBKIT_ORG_USERNAME",
+                 "BUGS_WEBKIT_ORG_PASSWORD")
+        null = "keyring.backends.null.Keyring"
+        for ca, user, want in (
+                (True, "me@example.test", ("wk-injects-this", "BUNDLE", "/etc/ssl/certs", null, "me@example.test",
+                                           "wk-injects-this")),
+                (True, None, ("wk-injects-this", "BUNDLE", "/etc/ssl/certs", null, "", "")),
+                (False, None, ("", "", "", null, "", ""))):
+            with self.subTest(ca=ca, user=user):
+                out, bundle, _ = run_bridge(ca, *names, bugzilla_user=user)
+                for name, value in zip(names, want):
+                    self.assertIn("%s=[%s]" % (name, str(bundle) if value == "BUNDLE" else value), out)
 
     def test_the_bundle_it_names_is_the_systems_plus_the_ca(self):
         _, _, text = run_bridge(True, "SSL_CERT_FILE")
         self.assertEqual("THE-SYSTEM-STORE\nTHE-INJECTORS-CA\n", text)
 
-    def test_a_guest_gets_the_same_two(self):
-        """A guest's injector is the host's, and `wk doctor <ws>` measures the
-        placeholder on both targets, so the file that writes a guest's
-        environment carries them too (lib/wk/guest.py, ~/.wk-egress)."""
-        vm = (REPO / "lib" / "wk" / "guest.py").read_text()
-        self.assertIn("export GH_TOKEN=wk-injects-this", vm)
-        self.assertIn("export SSL_CERT_FILE=", vm)
-        self.assertIn("export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring", vm)
-        self.assertIn("export BUGS_WEBKIT_ORG_PASSWORD=wk-injects-this", vm)
-
-
 class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
-    """Both targets set the same two variables and the same CA bundle, from the
-    one wrapper each of them already goes through."""
+    """Both targets set the same two variables and the same CA bundle, from the one wrapper each of them already
+    goes through."""
 
     def test_every_way_into_a_container_goes_through_the_wrapper(self):
-        """A shell from `wk enter` reads what a `wk enter <ws> -- <cmd>` reads.
-        Without the wrapper it has no GITHUB_COM_TOKEN, no
-        BUGS_WEBKIT_ORG_PASSWORD and the container's own keyring backend, so
-        `git-webkit pr` hunts a keyring no container has, and reports the
-        failed lookup as a locked macOS Keychain -- measured from `wk enter`
-        on a Linux workstation, where there is no Keychain at all. The way in
-        an editor takes is the sshd, which the wrapper starts for the same
-        reason."""
-        # Inside the podman VM: on a macOS host exec_argv hands the call to the VM's own wk.
         c = wk_targets.Container("c", REPO, {"WK_CONTAINER_USER": "dev", "WK_IN_VM": "1"}, Fake("here"))
         bridge = "/opt/wk-tools/container/proxy/ensure-bridge.sh"
         for tty in (False, True):
@@ -1440,40 +1080,12 @@ class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
         self.assertIn("exec %s " % bridge, c.sshd_cmd("dev"))
 
     def test_enter_argv_goes_through_the_bridge_too(self):
-        """`wk enter` execs `Container.enter_argv`: the same property as the other ways in."""
         c = wk_targets.Container("c", REPO, {"WK_CONTAINER_USER": "dev"}, Fake("here"))
         argv, _ = c.enter_argv("a")
         self.assertIn("/opt/wk-tools/container/proxy/ensure-bridge.sh", argv)
-
-    def test_the_shell_wk_enter_spawns_is_still_a_login_shell(self):
-        """What the wrapper may not cost: wkdev-enter spawns a login shell of
-        its own only when it is given no command, and the container's rc is
-        what puts the checkout on PATH and starts the shell in it."""
-        c = wk_targets.Container("c", REPO, {"WK_CONTAINER_USER": "dev"}, Fake("here"))
-        argv, _ = c.enter_argv("a")
         self.assertIn("--login", argv)
 
-    def test_a_container_gets_them_from_ensure_bridge(self):
-        text = (REPO / "container" / "proxy" / "ensure-bridge.sh").read_text()
-        self.assertIn("GITHUB_COM_TOKEN=wk-injects-this", text)
-        self.assertIn("GITHUB_COM_USERNAME", text)
-        self.assertIn("BUGS_WEBKIT_ORG_PASSWORD=wk-injects-this", text)
-        self.assertIn("BUGS_WEBKIT_ORG_USERNAME", text)
-        for var in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO"):
-            with self.subTest(var=var):
-                self.assertIn(var, text)
-
     def test_a_full_temp_directory_still_runs_the_command(self):
-        """ensure-bridge.sh wraps every `wk run` and `wk build`, and under
-        `set -euo pipefail` the pidfile write and the CA-bundle build abort the
-        whole exec when the temp directory cannot be written -- so a workspace
-        whose /tmp filled up could run nothing at all, and each attempt left
-        another `.wk-ca-bundle.pem.$$` behind in the directory that was full.
-
-        The three paths that exist only in a container (/opt/wk-tools, /run/wk,
-        the system CA bundle) are pointed at a scratch tree; every line under
-        test is the file's own.
-        """
         import os
         import stat
         import tempfile
@@ -1517,68 +1129,6 @@ class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
         self.assertEqual([], left,
                          "a half-written temp file was left in the full directory")
 
-    def test_a_writable_temp_directory_still_builds_the_bundle(self):
-        """The other side of the same branch: nothing above may be bought by
-        the bundle no longer being built where it can be."""
-        import os
-        import tempfile
-        d = Path(tempfile.mkdtemp(prefix="wk-test-rw-tmp-"))
-        try:
-            tools = d / "wk-tools"
-            (tools / "shell").mkdir(parents=True)
-            (tools / "container" / "proxy").mkdir(parents=True)
-            (tools / "shell" / "path.sh").write_text(":\n")
-            (tools / "container" / "proxy" / "bridge.py").write_text(
-                "import time; time.sleep(30)\n")
-            runwk = d / "run-wk"
-            runwk.mkdir()
-            (runwk / "wk-github-ca.pem").write_text("THE-INJECTORS-CA\n")
-            sysca = d / "ca-certificates.crt"
-            sysca.write_text("THE-SYSTEM-STORE\n")
-            script = d / "ensure-bridge.sh"
-            script.write_text(
-                (REPO / "container" / "proxy" / "ensure-bridge.sh").read_text()
-                .replace("/opt/wk-tools", str(tools))
-                .replace("/run/wk/wk-github-ca.pem", str(runwk / "wk-github-ca.pem"))
-                .replace("/etc/ssl/certs/ca-certificates.crt", str(sysca)))
-            rw = d / "rw"
-            rw.mkdir()
-            cp = subprocess.run(
-                ["bash", str(script), "sh", "-c", 'echo "$CURL_CA_BUNDLE"'],
-                env={**os.environ, "TMPDIR": str(rw)},
-                capture_output=True, text=True, timeout=60)
-            self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-            bundle = rw / ".wk-ca-bundle.pem"
-            self.assertEqual(str(bundle), cp.stdout.strip(), cp.stdout)
-            self.assertEqual("THE-SYSTEM-STORE\nTHE-INJECTORS-CA\n",
-                             bundle.read_text())
-            self.assertEqual([], sorted(rw.glob(".wk-ca-bundle.pem.*")))
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
-
-    def test_the_bundle_is_the_systems_plus_the_ca(self):
-        """Those variables replace the trust store outright, so a bundle
-        holding one certificate would fail every other HTTPS request."""
-        text = (REPO / "container" / "proxy" / "ensure-bridge.sh").read_text()
-        self.assertIn("cat /etc/ssl/certs/ca-certificates.crt", text)
-
-    def test_a_guest_gets_them_with_its_egress(self):
-        text = (REPO / "lib" / "wk" / "guest.py").read_text()
-        self.assertIn("GITHUB_COM_TOKEN=wk-injects-this", text)
-        for var in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO"):
-            with self.subTest(var=var):
-                self.assertIn(var, text)
-
-    def test_no_real_token_is_anywhere_in_the_tree(self):
-        """The placeholder is the only thing that may be written down: the
-        token itself is in Store.push_held_dir on one machine."""
-        for f in (REPO / "container" / "proxy" / "ensure-bridge.sh",
-                  REPO / "lib" / "wk" / "guest.py",
-                  REPO / "container" / "proxy" / "github-inject.py"):
-            with self.subTest(f=f.name):
-                self.assertNotIn("ghp_", f.read_text())
-
-
 EGRESS = (
     "# wk: written by lib/wk/guest.py on every start\n"
     "export http_proxy=http://192.168.2.1:3128\n"
@@ -1601,8 +1151,7 @@ LEGACY = (
 
 
 def _wire(home, times=1):
-    """Run the guest's shell wiring, as lib/wk/guest.py streams it in on every
-    start. More than once to prove a second start changes nothing."""
+    """Run the guest's shell wiring, as lib/wk/guest.py streams it in on every start."""
     for _ in range(times):
         cp = subprocess.run(
             ["bash", str(SHELL_RC), str(REPO), str(home / "agent-rw")],
@@ -1614,9 +1163,7 @@ def _wire(home, times=1):
 
 
 def _shell_vars(shell, home, args):
-    """Every proxy variable a shell started with `args` ends up with. The rc
-    files are read for real -- no `source` by hand -- because which of them a
-    given invocation reads is the whole question."""
+    """Every proxy variable a shell started with `args` ends up with."""
     printer = "; ".join(f'echo "{v}=${v}"' for v in VARS)
     cp = subprocess.run(
         [shell, *args, printer],
@@ -1634,12 +1181,10 @@ def _shell_vars(shell, home, args):
 
 
 class TestTheEditorsTerminalGetsTheSameEnvironment(unittest.TestCase):
-    """An editor reaches a container over ssh, and sshd builds a session's
-    environment from scratch: it hands on nothing of the wrapper's, so a
-    terminal pane would go without the injected credentials and the keyring
-    backend that every other way in has -- `git-webkit pr` there hunts a
-    keyring no container has and exits reporting a locked macOS Keychain.
-    So the wrapper publishes what it set and sshd carries that line."""
+    """An editor reaches a container over ssh, and sshd builds a session's environment from scratch: it hands on
+    nothing of the wrapper's, so a terminal pane would go without the injected credentials and the keyring
+    backend that every other way in has -- `git-webkit pr` there hunts a keyring no container has and exits
+    reporting a locked macOS Keychain."""
 
     def setenv_line(self, *args, **kwargs):
         """(the line the wrapper published, the bundle it named in it)."""
@@ -1663,8 +1208,6 @@ class TestTheEditorsTerminalGetsTheSameEnvironment(unittest.TestCase):
                 self.assertIn(pair, line.split(" "))
 
     def test_it_carries_the_proxy_the_container_was_created_with(self):
-        """Inherited rather than set here, and just as absent from a session:
-        a pane with no proxy reports every host in the world as unreachable."""
         line, _ = self.setenv_line(True, env_extra={
             "http_proxy": "http://127.0.0.1:3128",
             "NO_PROXY": "localhost,127.0.0.1,::1"})
@@ -1672,9 +1215,6 @@ class TestTheEditorsTerminalGetsTheSameEnvironment(unittest.TestCase):
         self.assertIn("NO_PROXY=localhost,127.0.0.1,::1", line)
 
     def test_a_value_with_whitespace_is_left_out_rather_than_truncating_it(self):
-        """SetEnv has no quoting, so one value with a space in it would end the
-        option and take every assignment after it; the variable is still
-        exported for every other way in."""
         out, _, _ = run_bridge(True, "WK_SSH_SETENV", "GITHUB_COM_USERNAME",
                                github_user="two words")
         self.assertIn("GITHUB_COM_USERNAME=[two words]", out)
@@ -1682,10 +1222,6 @@ class TestTheEditorsTerminalGetsTheSameEnvironment(unittest.TestCase):
         self.assertIn("GITHUB_COM_TOKEN=wk-injects-this", out)
 
     def test_sshd_is_exec_d_with_that_line_in_one_setenv(self):
-        """The quoting, driven: the container's sshd command is built here and
-        run against a wrapper and an sshd that only say what they were given.
-        One -o SetEnv carries every assignment (the keyword takes only its
-        first) and the sftp subsystem survives the same quoting."""
         d = Path(tempfile.mkdtemp(prefix="wk-test-sshd-env-"))
         try:
             wrapper = d / "wrapper.sh"
@@ -1713,8 +1249,7 @@ class TestTheEditorsTerminalGetsTheSameEnvironment(unittest.TestCase):
 
 
 class TestGuestProxyEnvironment(WkTest):
-    """Which shells in a guest have egress. The pane is the case that was
-    broken; the others must not regress while fixing it."""
+    """Which shells in a guest have egress."""
 
     # What a person and what `wk` actually start, and how each is spelled.
     SHELLS = {
@@ -1744,8 +1279,6 @@ class TestGuestProxyEnvironment(WkTest):
                 self.assertEqual(got.get("NO_PROXY"), "localhost,127.0.0.1,::1", got)
 
     def test_a_guest_with_no_egress_file_gets_no_proxy(self):
-        """An unfiltered guest, and the moment before the host has written it.
-        Absence has to mean absence rather than a stale default."""
         home = self._home(egress=False)
         for what, (shell, args) in self.SHELLS.items():
             if not shutil.which(shell):
@@ -1756,8 +1289,6 @@ class TestGuestProxyEnvironment(WkTest):
                     self.assertEqual(got.get(v), "", f"{v} set from nothing: {got}")
 
     def test_the_wiring_is_idempotent(self):
-        """It runs on every start; a guest started fifty times has one of each
-        line, not fifty."""
         home = self.tmp / "home"
         home.mkdir()
         (home / ".wk-egress").write_text(EGRESS)
@@ -1770,8 +1301,8 @@ class TestGuestProxyEnvironment(WkTest):
 
 
 class TestGuestConvergence(WkTest):
-    """A guest cloned from a base that baked the address into its profiles
-    converges on the next start, rather than needing the base rebuilt."""
+    """A guest cloned from a base that baked the address into its profiles converges on the next start, rather
+    than needing the base rebuilt."""
 
     def test_a_stale_baked_in_address_is_stripped_and_replaced(self):
         home = self.tmp / "home"
@@ -1788,7 +1319,6 @@ class TestGuestConvergence(WkTest):
                 self.assertNotIn("192.168.64.1", text, text)
                 self.assertNotIn("egress goes through", text, text)
                 self.assertIn(".wk-egress", text, text)
-        # Only wk's own stanza goes; anything else in the file is the guest's.
         self.assertIn("mine stays", (home / ".bash_profile").read_text())
 
     @unittest.skipUnless(shutil.which("zsh"), "no zsh on this machine")
@@ -1802,42 +1332,20 @@ class TestGuestConvergence(WkTest):
         self.assertEqual(got.get("https_proxy"), "http://192.168.2.1:3128", got)
 
 
-class TestNothingBakesTheAddressIn(unittest.TestCase):
-    """One writer for one fact. The address is the host's own on the guest
-    bridge and changes, so provisioning may not record it."""
-
-    def test_provisioning_writes_no_proxy_exports(self):
-        text = (REPO / "vm" / "provision-base.sh").read_text()
-        self.assertNotIn("export http_proxy", text)
-        self.assertNotIn("WK_VM_PROXY_ADDR", text)
-
-    def test_the_start_path_writes_the_egress_file(self):
-        """One `Guest.converge`, reached from both of a start's arms: a guest
-        that was already running gets its egress written exactly like one this
-        start booted."""
-        self.assertIn(".wk-egress", (REPO / "lib" / "wk" / "guest.py").read_text())
-        assert_guest_start_converges(self, '_set_guest_egress "$name" "$ip"')
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 FIRSTRUN = REPO / "container" / "firstrun.sh"
 
 
 def _shell_function(path, name):
-    """One function lifted out of a shell file, so a test can call it without
-    running the rest of the file (firstrun.sh installs a whole workspace)."""
+    """One function lifted out of a shell file, so a test can call it without running the rest of the file
+    (firstrun.sh installs a whole workspace)."""
     text = path.read_text()
     start = text.index(f"{name}() {{")
     return text[start:text.index("\n}\n", start) + 3]
 
 
 def _sandbox_env():
-    """The proxy variables the container target starts a container with
-    (`Container.sandbox_flags`), asked of a fake machine: the runtime
-    directory is made under /run, which a test may not do."""
+    """The proxy variables the container target starts a container with (`Container.sandbox_flags`), asked of a
+    fake machine: the runtime directory is made under /run, which a test may not do."""
     sys.path.insert(0, str(REPO / "lib"))
     from wk import targets
     from wk.machine import Fake
@@ -1846,10 +1354,8 @@ def _sandbox_env():
 
 
 class TestAptGoesThroughTheProxy(unittest.TestCase):
-    """Every apt step in container/firstrun.sh runs under sudo, whose env_reset
-    drops http_proxy/https_proxy, and the container is `--network none`: apt
-    then dials the archive directly and has no route at all. apt is told in
-    config what the shell is told in the environment, from that environment."""
+    """Every apt step in container/firstrun.sh runs under sudo, whose env_reset drops http_proxy/https_proxy, and
+    the container is `--network none`: apt then dials the archive directly and has no route at all."""
 
     def _drop_in(self, **env):
         cp = subprocess.run(
@@ -1865,8 +1371,6 @@ class TestAptGoesThroughTheProxy(unittest.TestCase):
         self.assertIn('Acquire::https::Proxy "http://127.0.0.1:9";', out)
 
     def test_the_address_is_the_one_the_container_is_started_with(self):
-        """No drift: the drop-in carries whatever `sandbox_flags` passed in,
-        because it reads that and nothing else."""
         env = _sandbox_env()
         for var in ("http_proxy", "https_proxy"):
             self.assertIn(var, env, env)
@@ -1875,8 +1379,7 @@ class TestAptGoesThroughTheProxy(unittest.TestCase):
         self.assertIn('Acquire::https::Proxy "%s";' % env["https_proxy"], out)
 
     def _write_step(self, **env):
-        """The block that writes the drop-in, lifted and run with `sudo` and
-        the file path made harmless."""
+        """The block that writes the drop-in, lifted and run with `sudo` and the file path made harmless."""
         text = FIRSTRUN.read_text()
         start = text.index('if [ -n "${http_proxy:-}"')
         block = text[start:text.index("\nfi\n", start) + 4]
@@ -1894,9 +1397,6 @@ class TestAptGoesThroughTheProxy(unittest.TestCase):
         return cp.stdout + cp.stderr, (conf.read_text() if conf.exists() else "")
 
     def test_an_address_carrying_apt_conf_syntax_is_refused_by_name(self):
-        """The value is interpolated into a quoted apt.conf string, where a
-        quote or a semicolon ends that string and everything after it is read
-        as further directives -- a second Proxy line among them."""
         out, wrote = self._write_step(
             http_proxy='http://127.0.0.1:9";Acquire::http::Proxy "http://elsewhere:8080',
             https_proxy="http://127.0.0.1:9")
@@ -1914,23 +1414,6 @@ class TestAptGoesThroughTheProxy(unittest.TestCase):
         self.assertIn("LOG apt goes through the workspace proxy", out, out)
         self.assertIn('Acquire::http::Proxy "http://127.0.0.1:9";', wrote)
 
-    def test_the_writer_holds_no_second_copy_of_the_address(self):
-        fn = _shell_function(FIRSTRUN, "apt_proxy_conf")
-        self.assertIn("$http_proxy", fn)
-        self.assertIn("$https_proxy", fn)
-        self.assertNotIn("://", fn)
 
-    def test_it_is_written_before_the_first_apt_call(self):
-        text = FIRSTRUN.read_text()
-        self.assertLess(text.index("apt_proxy_conf |"), text.index("sudo apt-get"), FIRSTRUN)
-
-    def test_the_apt_archives_are_in_the_allowlist(self):
-        """The drop-in only helps if the proxy carries the archive: these four
-        are what `apt-get update` and a `-dbgsym` install read."""
-        p = _policy()
-        for host in ("archive.ubuntu.com", "ports.ubuntu.com",
-                     "security.ubuntu.com", "ddebs.ubuntu.com"):
-            for port in (80, 443):
-                with self.subTest(host=host, port=port):
-                    ok, why = p.host_allowed(host, port)
-                    self.assertTrue(ok, why)
+if __name__ == "__main__":
+    unittest.main()

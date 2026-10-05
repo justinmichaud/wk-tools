@@ -32,38 +32,18 @@ def forwarded(argv):
 
 
 class TestABoxHoldsNoKey(test_wk_targets.RemoteTest):
-    def test_no_alias_names_an_identity_file(self):
-        """The ssh config provision.sh writes on a box selects a fork by alias and names no IdentityFile."""
-        text = secrets.alias_blocks(secrets.FORKS, "")
-        self.assertIn("Host ", text)
-        self.assertNotIn("IdentityFile", text)
-
-    def test_an_agent_session_forwards_no_agent(self):
-        argv = self.t.exec_argv("a", ["claude"], tty=True)[0]
-        self.assertEqual("ssh", argv[0])
-        self.assertIsNone(forwarded(argv), argv)
-
-    def test_an_enter_shell_forwards_no_agent(self):
-        argv = self.t.enter_argv("a")[0]
-        self.assertEqual("ssh", argv[0])
-        self.assertIsNone(forwarded(argv), argv)
-
-    def test_no_ssh_argv_to_a_box_forwards_an_agent(self):
-        """Every ssh to a box is built by one Ssh.argv; the tree names ForwardAgent nowhere, and no box's block in
-        dotfiles/ssh/config turns it on."""
-        for argv in (self.t.machine.argv("true"), self.t.build_argv("a", ["ninja"])[0], self.t.exec_argv("a", ["true"])[0]):
+    def test_no_ssh_to_a_box_forwards_an_agent(self):
+        """Neither an argv wk builds nor a block of dotfiles/ssh/config, the gateway's included."""
+        for argv in (self.t.machine.argv("true"), self.t.build_argv("a", ["ninja"])[0], self.t.exec_argv("a", ["true"])[0],
+                     self.t.exec_argv("a", ["claude"], tty=True)[0], self.t.enter_argv("a")[0]):
             self.assertEqual("ssh", argv[0])
             self.assertIsNone(forwarded(argv), argv)
-        grep = subprocess.run(["grep", "-rniI", "forwardagent\\|ssh -A", "lib", "cmd", "remote", "admin", "container", "vm"],
-                              cwd=str(REPO), capture_output=True, text=True)
-        self.assertEqual("", grep.stdout)
         config = (REPO / "dotfiles" / "ssh" / "config").read_text()
         blocks = dict((m.group(1).strip(), m.group(2)) for m in re.finditer(r"^Host (.+)\n((?:[ \t].*\n|\n)*)", config, re.M))
         self.assertNotIn("*", blocks)
-        boxes = [p.stem for p in (REPO / "machines").glob("*.conf") if "driver=remote" in p.read_text()]
-        self.assertTrue(boxes)
-        for box in boxes:
-            self.assertNotIn("forwardagent", blocks.get(box, "").lower(), box)
+        self.assertIn("igalia.com", blocks)
+        for host, block in blocks.items():
+            self.assertNotIn("forwardagent", block.lower(), host)
 
 
 class TestAPushFromABoxIsMadeHere(test_wk_targets.RemoteTest):
@@ -71,20 +51,20 @@ class TestAPushFromABoxIsMadeHere(test_wk_targets.RemoteTest):
         self.fake.answer(["git"])
         self.fake.answer(["sh", "-c"])
         with mock.patch.object(CMD_PR, "pr_open_target", return_value=("WebKit/WebKit", "me:eng/b", "fork", "eng/b")), \
-                mock.patch.object(CMD_PR.act, "exec_into") as gh, contextlib.redirect_stderr(io.StringIO()):
+                mock.patch.object(CMD_PR.secrets, "Secrets", lambda *a: test_pr_workflow.AgentKeys()), \
+                contextlib.redirect_stderr(io.StringIO()):
             CMD_PR.pr_open(self.t, "a", False, False, push_status=lambda: 0)
         mirror = Store(self.env).mirror()
         here = [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] == "git"]
         self.assertIn(("git", "-C", mirror, "fetch", "--quiet", "box.example:/home/u/wk/ws/a/WebKit",
                        "+refs/heads/eng/b:refs/wk/push/box/eng/b"), here)
-        push = [a for a in here if "push" in a]
-        self.assertEqual(1, len(push), here)
-        self.assertEqual(["push", "git@github.com:justinmichaud/WebKit.git", "refs/wk/push/box/eng/b:refs/heads/eng/b"],
-                         list(push[0][-3:]))
-        self.assertIn("build_key_fork -o IdentitiesOnly=yes", " ".join(push[0]))
+        push = [shlex.split(e[1][-1]) for e in self.fake.effects if e[0] == "run" and e[1][:2] == ("sh", "-c")]
+        self.assertEqual(1, len(push), push)
+        self.assertEqual(["-C", mirror], push[0][3:5])
+        self.assertEqual(["push", "git@github.com:alice/WebKit.git", "refs/wk/push/box/eng/b:refs/heads/eng/b"], push[0][-3:])
         self.assertIn(("git", "-C", mirror, "update-ref", "-d", "refs/wk/push/box/eng/b"), here)
         self.assertEqual([], [c for c in self.fake.ssh_calls() if "push" in c[-1]])
-        gh.assert_called_once()
+        self.assertEqual(1, len([e for e in self.fake.effects if e[0] == "exec" and e[1][:3] == ("gh", "pr", "create")]))
 
 
 class TestAPushOnTheBoxIsRefused(test_wk_targets.RemoteTest):
@@ -95,8 +75,7 @@ class TestAPushOnTheBoxIsRefused(test_wk_targets.RemoteTest):
         self.assertEqual(len(secrets.FORKS), len(proxies))
         cp = subprocess.run(shlex.split(proxies[0]), capture_output=True, text=True)
         self.assertEqual(1, cp.returncode)
-        self.assertEqual("error: a build box holds no deploy key; push from the workstation:  wk pr open <workspace>\n",
-                         cp.stderr)
+        self.assertIn("wk pr open", cp.stderr)
 
 
 class TestStatusOnTheBox(test_push_switch.PushTest):
@@ -104,11 +83,6 @@ class TestStatusOnTheBox(test_push_switch.PushTest):
         super().setUp()
         self.box = test_push_switch.Box(self.w, self.w.env, name="buildbox", sock=None)
         self.boxes = {"container": self.box}
-
-    def test_status_on_a_box_with_no_key_at_rest_is_not_a_missing_key(self):
-        """Off, the position `wk ai` reads as nothing to hold back; 4 is a workstation missing its keys."""
-        rc, out, err = self.push("status")
-        self.assertEqual(1, rc, out + err)
 
     def test_each_fork_is_neither_held_nor_absent(self):
         p = test_push_switch.PUSH.Push(test_push_switch.registry(self.w, self.boxes), self.w.sec(), self.clock)

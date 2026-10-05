@@ -1,11 +1,5 @@
-"""`wk boot --status`'s quiet siblings (lib/wk/boot/cli.py's Boot.quiet_siblings): a board is unreachable for two
-very different reasons -- the board, or the thing that carries it -- and when every fleet device sharing one network
-is quiet at once, the network is the suspect.
-
-The tailnet view is given, so these run with no tailnet and no boards.
-
-Run: python3 -m unittest tests.test_quiet_siblings -v
-"""
+"""`wk boot --status`'s quiet siblings (Boot.quiet_siblings): when every fleet device sharing one network is quiet at
+once, the network is the suspect. The tailnet view is given."""
 import shutil
 import sys
 import tempfile

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# `ProxyCommand <this> <ws>`: lib/wk/targets.py's Container.ssh_transport.
+# `ProxyCommand <this> <container|vm> <ws>`: that driver's ssh_transport in lib/wk/targets.py.
 import os
 import sys
 
@@ -9,10 +9,10 @@ sys.path.insert(0, os.path.join(ROOT, "lib"))
 from wk import act, targets  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
 
-if len(sys.argv) != 2:
-    sys.exit("usage: ssh-transport <workspace>   (as an ssh ProxyCommand)")
+if len(sys.argv) != 3 or sys.argv[1] not in ("container", "vm"):
+    sys.exit("usage: ssh-transport <container|vm> <workspace>   (as an ssh ProxyCommand)")
 try:
-    require_name(sys.argv[1])
-    targets.Registry(ROOT).load("container").ssh_transport(sys.argv[1])
+    require_name(sys.argv[2])
+    targets.Registry(ROOT).load(sys.argv[1]).ssh_transport(sys.argv[2])
 except act.Refused as e:
     sys.exit(e.status)

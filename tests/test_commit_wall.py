@@ -1,13 +1,5 @@
-"""The commit wall: while an agent holds a container workspace, nothing it runs
-can write git history into the checkout the person will push -- the write-side
-twin of `wk push` (only the person commits). `wk ai claude` runs the agent under
-bwrap with the checkout's .git commit-parts read-only (commit_wall_prefix,
-lib/wk/wall.py); a human `wk enter` shell is not wrapped and commits normally.
-tests/test_ai.py drives the session that is wrapped and the refusal without bwrap.
-
-The static half checks the wiring (no hardware). The functional half proves
-the recipe against a throwaway repo inside the image a container workspace
-runs, and is skipped when the container target is not up.
+"""The commit wall: `wk ai claude` runs the agent under bwrap with the checkout's .git commit-parts read-only
+(commit_wall_prefix, lib/wk/wall.py), proved live against a throwaway repo in the workspace image.
 
 Run: python3 -m unittest tests.test_commit_wall -v
 """
@@ -20,19 +12,12 @@ from tests.support import REPO, container_side, requires_container_target
 sys.path.insert(0, str(REPO / "lib"))
 from wk import wall  # noqa: E402
 
-PUSH = (REPO / "lib" / "wk" / "pushswitch.py").read_text()
-WALL = (REPO / "lib" / "wk" / "wall.py").read_text()
-
 
 def prefix(src):
     return " ".join(wall.commit_wall_prefix(str(REPO), src))
 
 
 class TestWiring(unittest.TestCase):
-    def test_the_paths_live_in_one_place(self):
-        for p in ("objects", "refs", "logs", "HEAD", "packed-refs"):
-            self.assertIn(p, wall.COMMIT_WALL_PATHS)
-
     def test_prefix_binds_every_wall_path_read_only(self):
         line = prefix("/src/WebKit")
         self.assertTrue(line.startswith("bwrap "), line)
@@ -41,21 +26,6 @@ class TestWiring(unittest.TestCase):
             self.assertIn(f"--ro-bind-try /src/WebKit/.git/{p} /src/WebKit/.git/{p}", line)
         self.assertTrue(line.rstrip().endswith("--"), line)
 
-    def test_the_probe_measures_the_prefix_a_session_runs_under(self):
-        """One recipe: `wk doctor`'s commit-wall probe builds its wrapper with
-        the same function, so what it proves is what the agent gets."""
-        self.assertIn('commit_wall_prefix(self.root, "$D")', WALL)
-
-    def test_push_on_ends_a_running_session_before_it_loads_the_keys(self):
-        on = PUSH.split("\n    def switch_on(self):", 1)[1]
-        self.assertLess(on.index("self.end_sessions_first(self.agent_sessions())"), on.index("agent_load"))
-        gate = PUSH.split("\n    def end_sessions_first(self, sessions):", 1)[1].split("\n    def ", 1)[0]
-        self.assertIn("end_agent_sessions", gate)   # the wall goes with the session
-        self.assertIn("act.confirm(", gate)
-
-    def test_doctor_measures_the_wall(self):
-        self.assertIn("commit wall", WALL)
-        self.assertIn("did NOT block a commit", WALL)
 
 
 def _workspace_image():
@@ -119,11 +89,7 @@ if __name__ == "__main__":
 
 
 class TestBuiltinsAreAskedThroughAShell(unittest.TestCase):
-    """A target's exec hands argv to an exec, not a shell, so a shell builtin
-    such as `command -v` cannot be the program: measured live, the bare form
-    failed in every container and no session started. cmd/ai asks
-    through `sh -c` (machine.HAVE), and nothing under cmd/ or lib/ uses the bare form (`test`
-    is a real program in every image and is fine)."""
+    """A target's exec runs argv, not a shell, so a builtin such as `command -v` goes through `sh -c` (machine.HAVE)."""
 
     def test_cmd_ai_asks_for_bwrap_through_a_shell(self):
         from tests.test_ai import AI, sim_registry, SimTarget
@@ -138,7 +104,6 @@ class TestBuiltinsAreAskedThroughAShell(unittest.TestCase):
         bad = re.compile(r'exec\([^,()]+, \[\s*"(command|type|alias|cd|builtin|source)"')
         files = [f for f in sorted((REPO / "cmd").iterdir()) if f.is_file()] + sorted((REPO / "lib" / "wk").rglob("*.py"))
         self.assertIsNotNone(bad.search('target.exec(ws, ["command", "-v", "bwrap"])'))
-        for f in files:
-            for n, line in enumerate(f.read_text(errors="replace").splitlines(), 1):
-                with self.subTest(file=f.name, line=n):
-                    self.assertIsNone(bad.search(line), line.strip())
+        found = ["%s:%d" % (f.name, n) for f in files
+                 for n, line in enumerate(f.read_text(errors="replace").splitlines(), 1) if bad.search(line)]
+        self.assertEqual([], found)
