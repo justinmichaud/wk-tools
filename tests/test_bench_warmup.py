@@ -15,7 +15,7 @@ from tests.test_slots import load_driver
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import samply  # noqa: E402
-from wk.bench import record, report  # noqa: E402
+from wk.bench import record, report, scores  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
 def tmpdir(case):
@@ -26,7 +26,7 @@ def tmpdir(case):
 
 def warmup_check(a, b, same_width=False):
     """What the A/B's warmup gate (lib/wk/bench/board_ab.py) is told refuses it, one reason per line."""
-    return "\n".join(report.warmup_check(str(a), str(b), same_width))
+    return "\n".join(scores.warmup_check(str(a), str(b), same_width))
 
 
 # A 32-bit ARM web process on the v3d hardware driver with the JIT warm, as the

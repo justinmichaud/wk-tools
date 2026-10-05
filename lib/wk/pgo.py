@@ -10,9 +10,10 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import sys
 
-from wk import act, fleet, images, job, record as progress, sched
+from wk import act, fleet, images, job, record as progress, sched, webkit
 from wk.act import Refused, die, info, log, warn
 
 BENCHMARKS = ("speedometer3", "jetstream3", "motionmark")   # the weights are upstream's (Tools/Scripts/pgo-profile); `mix` refuses one it does not weigh
@@ -20,7 +21,7 @@ COLLECT_TIMEOUT = 7200   # an instrumented run is several times slower than the 
 GLIB_LIB = "WPEWebKit"   # a GLib port links one shared library, where the Apple ports carry three (PROFILED_DYLIBS)
 BOARD_DIR = "/var/wk/pgo"   # baked in as PGO_PROFILE_DIR, so a browser started by hand still writes somewhere writable
 BOARD_FILE = BOARD_DIR + "/" + GLIB_LIB + "_%p.profraw"   # one file per process: the browser's and each web process's counters merge as peers
-COLLECT, USE = "wpe-cross-pgo-collect", "wpe-cross-pgo-use"
+COLLECT, USE = webkit.PGO_COLLECT, webkit.PGO_USE
 PRESETS = ("wpe-cross", COLLECT, USE)
 MIN_FUNCTIONS = 1000
 MIN_COVERAGE = 0.25   # of the combined profile's, per library; the thinnest leg measured was 53%
@@ -28,12 +29,54 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 USAGE = "usage: wk sysimage webkit %s --commit <sha> --slot <name> [--workspace <ws>] [--preset <p>] [--detach|--stop]"
 
 
+# The readings travel beside the products (lib/wk/bench/mac_pgo.py's `PgoCollect.evidence`), read from the build
+# the workspace holds now, on the machine holding it, each verdict re-derived by its own checker.
+GATES = r'''
+set -u
+shopt -s nullglob
+seen=0
+for f in "$SRC"/WebKitBuild/*/wk-browser-check.json; do
+    seen=1; printf 'browser check %s\n' "$f"
+    python3 "$TOOLS/bench/mac-browser-check.py" --read "$f" 2>&1 | sed 's/^/  /'
+done
+for f in "$SRC"/WebKitBuild/*/wk-profile-check.json "$SRC"/WebKitBuild/wk-pgo/*/profile-check.json; do
+    [ -f "$f" ] || continue
+    seen=1; printf 'profile check %s\n' "$f"
+    PYTHONPATH="$TOOLS/lib" python3 -m wk wk.pgo check --read "$f" 2>&1 | sed 's/^/  /'
+done
+for f in "$SRC"/WebKitBuild/*/wk-payload-pins; do
+    seen=1; printf 'benchmark payloads %s\n' "$f"
+    sed 's/^/  /' "$f"
+done
+[ "$seen" = 1 ] || printf 'no readings under %s/WebKitBuild -- only a profile-guided build
+collects them (build/mac-pgo.sh beside the products, a board cycle under
+wk-pgo/); every other build has no gates.\n' "$SRC"
+'''
+
+
+def show_gates(driver, name):
+    r = driver.exec(name, ["bash", "-c", "SRC=%s TOOLS=%s\n%s" % (shlex.quote(driver.src(name)), shlex.quote(driver.tools(name)), GATES)])
+    sys.stdout.write(r.out)
+    sys.stderr.write(r.err)
+    return r.rc
+
+
 def collect_timeout(env):
     return env.get("WK_PGO_COLLECT_TIMEOUT") or str(COLLECT_TIMEOUT)
 
 
+def pgo_dir_in(slot):
+    return "%s/%s/%s/%s" % (webkit.SRC, webkit.BUILD_DIR, images.PGO_SUBDIR, slot)
+
+
+def board_collection(ws, slot, env, timeout=None):
+    """A board's `--collect`: where its one iteration's profile lands, and how long it may take."""
+    return {"pgo_dir": images.pgo_dir(ws, slot, env), "pgo_board": BOARD_DIR, "pgo_file": BOARD_FILE,
+            "count": "1", "timeout": timeout or collect_timeout(env)}
+
+
 def profile_path(slot):
-    return "%s/output/%s.profdata" % (images.pgo_dir_in(slot), GLIB_LIB)
+    return "%s/output/%s.profdata" % (pgo_dir_in(slot), GLIB_LIB)
 
 
 def steps(step, holds, board, ws, spec, on, place, commit, slot, needs):

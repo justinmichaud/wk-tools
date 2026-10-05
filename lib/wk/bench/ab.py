@@ -648,8 +648,4 @@ def run(root, reg, clock, spec, o, kill_it=False):
         if not spec:
             die(USAGE)
         return kill(reg, clock, spec)
-    if o.get("devices") and machine_kind(root, reg.env, o["devices"]) in ("mac", "guest"):
-        from wk.bench import mac   # it builds on this module
-        m = mac.MacAB(root, reg, clock, spec, o)
-        return m.back() if any(o.get(k) for k in mac.READS) else m.go()
     return AB(root, reg, clock, spec, o).go()

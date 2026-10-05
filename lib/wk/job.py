@@ -17,6 +17,7 @@ TOOLS = {"cc1", "cc1plus", "lto1", "clang", "clang++", "gcc", "g++", "cc", "c++"
          "ld64.lld", "ld.lld", "lld", "ninja", "xcodebuild", "swift-frontend"}
 KILL_WAIT = 15
 ABORT_SECONDS = 1800
+EXCLUSIVE = ("build", "babysit", "yocto", "buildroot")   # jobs that hold a checkout: two at once corrupt it
 EXIT_OF = {sig.SIGINT: 130, sig.SIGTERM: 143, sig.SIGHUP: 129}
 # Depth first, children before parents: ninja's children reparent to init once it is gone.
 TREE = '_d() { for k in $(pgrep -P "$1"); do _d "$k"; done; echo "$1"; }; _d "$1"'
@@ -365,3 +366,66 @@ def stop(driver, records, ws, kind, machine, clock, env=None):
     if ok:
         info("stopped '%s's %s and recorded it as cancelled" % (ws, kind))
     return 0 if ok else 1
+
+
+def records_of(driver, clock, machine):
+    env = dict(driver.env)
+    record.default_watchdog(env, abort=ABORT_SECONDS)
+    return record.of_driver(driver, clock, machine, env)
+
+
+def busy_reason(driver, records, name, skip=""):
+    """What holds the checkout: a live record of an EXCLUSIVE kind, else a live pid file in the workspace's home no record names."""
+    recorded = set()
+    for t in records.list():
+        if skip and os.path.realpath(str(t.path)) == os.path.realpath(skip):
+            continue
+        if t.field("name") != name:
+            continue
+        if t.field("where") == "place":
+            recorded.add(t.field("pid"))
+        if t.field("kind") in EXCLUSIVE and t.alive(None):
+            return "%s (pid %s, %s)  stop it: %s" % (t.field("kind"), t.field("pid"), t.field("machine"), t.field("kill"))
+    home = os.path.join(driver.store.ws_dir(name), "home")
+    here = records.machine
+    if not here.isdir(home):
+        return None
+    for n in here.listdir(home):
+        if not n.endswith(".pid"):
+            continue
+        try:
+            pid = re.sub(r"[^0-9]", "", here.read(os.path.join(home, n)))
+        except OSError:
+            continue
+        if pid and pid not in recorded and driver.exec(name, ["kill", "-0", pid]).ok:
+            return "%s (pid %s in the workspace)" % (n[:-4], pid)
+    return None
+
+
+def holder_alive(reg):
+    """A budget record's holder, `pid:<n>` on this machine (Budget.record's callers write no other kind)."""
+    return lambda h: h.startswith("pid:") and h[4:].isdigit() and reg.machine.alive(int(h[4:]))
+
+
+def detached(here, recs, clock, kind, name, argv, path, what):
+    since = clock.stamp()
+    pid = detach(here, argv, path)
+    offset = [0]
+
+    def pump():
+        try:
+            data = here.read_bytes(path, offset[0])
+        except OSError:
+            return
+        offset[0] += len(data)
+        sys.stderr.write(data.decode(errors="replace"))
+
+    while True:
+        pump()
+        t = recs.find(kind, name, floor=since)
+        if t is not None and t.id.endswith("-%d" % pid):
+            return pid
+        if not here.alive(pid):
+            pump()
+            die("the detached %s of '%s' ended before it started -- what it said is\n    above, in full in %s" % (what, name, path))
+        clock.sleep(1)

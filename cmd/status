@@ -47,11 +47,12 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import webkit  # noqa: E402,F401  first: the WebKit names lab code is handed (wk.project)
 from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, places, record, statusview  # noqa: E402
+from wk import decl, pgo, places, record, statusview  # noqa: E402
 from wk.act import Refused, die, info, warn  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.record import Records  # noqa: E402
@@ -87,6 +88,8 @@ def show_log(args):
         driver = reg.load(reg.ws_place(name))
     except LookupError as e:
         die(str(e))
+    if modes == ["gates"]:
+        return pgo.show_gates(driver, name)
     return record.show_log(driver, name, modes[0] if modes else "", "" if reg.in_workspace() else " " + name)
 
 

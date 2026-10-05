@@ -13,10 +13,9 @@ import re
 import shlex
 import sys
 
-from wk import act, job, kv, presets, record, sshalias
+from wk import act, job, kv, project, record, resources, sshalias
 from wk.act import Refused, die, info, log, warn
 from wk.machine import Killed, in_podman_machine
-from wk.pr import checkout as pr_checkout, parse_spec
 from wk.store import Snapshots, no_such_workspace
 from wk.places import show
 
@@ -97,12 +96,12 @@ def new_front(reg, records, name, opts):
     pr = opts.get("pr")
     if pr is not None and not pr:
         die("--pr needs a spec: <user>:<branch>, <n>, or wpe:<n>")
-    arch = presets.arch_canon(opts.get("arch") or "native")
+    arch = resources.arch_canon(opts.get("arch") or "native")
     if pr:
         if opts.get("no_wait"):
             die("--pr needs the workspace to be ready, and --no-wait returns before it is.\n"
                 "    Drop --no-wait, or check it out afterwards:  wk pr %s %s" % (name, pr))
-        parse_spec(pr)
+        project.check_pr_spec(pr)
     tname = opts.get("place") or reg.default()
     try:
         driver = reg.load(tname)
@@ -166,7 +165,7 @@ def new_front(reg, records, name, opts):
             "    A re-run destroys what is there and starts again:  wk new %s --on %s" % (name, st, log_path, name, tname))
     info("workspace '%s' ready%s" % (name, "" if arch == "native" else " (%s)" % arch))
     if pr:
-        pr_checkout(driver, here, name, pr)
+        project.pr_checkout(driver, here, name, pr)
     new_hints(driver, name, arch)
     zed_after(here, root, name, opts)
     return 0
@@ -323,8 +322,8 @@ def _create(driver, records, task, clock, name, base, arch, state):
         stage("base")
         mirror = driver.store.mirror_dir()
         if not here.isdir(mirror):
-            die("no WebKit mirror at %s, and every snapshot borrows its objects:\n"
-                "    wk sync    makes it, then publishes a snapshot to build a workspace from." % mirror)
+            die("no %s mirror at %s, and every snapshot borrows its objects:\n"
+                "    wk sync    makes it, then publishes a snapshot to build a workspace from." % (project.CHECKOUT, mirror))
         bases = Snapshots(driver.store, here)
         base = base or bases.current()
         if not base:

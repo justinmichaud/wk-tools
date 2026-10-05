@@ -2,7 +2,7 @@
 
 import re
 
-from wk import act, build, fleet, images, pgo, record
+from wk import act, fleet, images, job, pgo, record
 from wk.kv import ConfError
 from wk.sysimage import buildroot, disk, guestbase, macvolume, pmos, task, write as writemod, yocto
 from wk.sysimage import ls as lsmod
@@ -44,7 +44,7 @@ class Sysimage:
     def building(self, ws):
         try:
             place = self.reg.load(self.reg.ws_place(ws))
-            return build.busy_reason(place, build.records_of(place, self.clock, self.machine), ws) is not None
+            return job.busy_reason(place, job.records_of(place, self.clock, self.machine), ws) is not None
         except (LookupError, OSError):
             return None
 

@@ -25,6 +25,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import webkit  # noqa: E402,F401  first: the WebKit names lab code is handed (wk.project)
 from wk import images  # noqa: E402
 
 ROOT = images.root()

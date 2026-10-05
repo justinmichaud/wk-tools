@@ -6,7 +6,7 @@ import re
 import shlex
 import sys
 
-from wk import act, places, secrets, sudo
+from wk import act, places, project, secrets, sudo
 from wk.act import die, info, log, warn
 from wk.kv import kv
 from wk.machine_cmd.deps import Deps, inputs_hash, probe
@@ -76,10 +76,10 @@ class BuildMachines:
                 "    then re-run 'wk machine setup %s'. Nothing has been changed." % (host, name))
         ref = t.reference()
         if ref:
-            info("this machine publishes a WebKit repository: %s" % ref)
+            info("this machine publishes a %s repository: %s" % (project.CHECKOUT, ref))
             log("  workspaces will be cloned from it (hardlinked objects), not from a mirror of ours")
         else:
-            log("  no shared WebKit repository advertised -- a mirror under the root will be kept instead")
+            log("  no shared %s repository advertised -- a mirror under the root will be kept instead" % project.CHECKOUT)
         if re.search(r"home *(dir|directory)?.*shared", t._sh(MOTD).out, re.I) and not t.conf_root:
             die("this machine says its home directory is shared with other boxes. Each needs a root of its\n"
                 "    own, or they share one set of workspaces, key dirs and locks, and one build tree\n"

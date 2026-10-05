@@ -2,7 +2,7 @@ import os
 import signal
 import sys
 
-from wk import act, guest, images, job, record, secrets, status, store
+from wk import act, guest, images, job, project, record, secrets, status, store
 from wk.act import Refused, changed, die, info, log, warn
 
 ROOT = images.root()
@@ -158,10 +158,10 @@ class Push:
                  "files and updates the bug as that login", "cannot file or update a bug", "")):
             if sec.cred_write(path, name):
                 changed("the %s is where the injector reads it (%s)" % (what, who))
-                log("  'git-webkit pr' in a workspace %s; the %s stays here" % (does, what.split()[-1]))
+                log("  '%s pr' in a workspace %s; the %s stays here" % (project.PR_TOOL, does, what.split()[-1]))
             else:
                 sec.cred_clear(path)
-                warn("there is no %s here, so 'git-webkit pr' in a workspace %s" % (what, lacks))
+                warn("there is no %s here, so '%s pr' in a workspace %s" % (what, project.PR_TOOL, lacks))
                 log("  'wk key set %s' stores one (%sit never enters a workspace)" % (name, scope))
         log("  a push also needs this machine's key registered:  wk key check")
         return 0
@@ -172,7 +172,7 @@ class Push:
         sec.agent_clear(self.sock)
         sec.cred_clear(self.pat)
         sec.cred_clear(self.bz)
-        # It names public halves and a socket, not a credential, and an unresolvable `github-webkit` fails with a hostname error.
+        # It names public halves and a socket, not a credential, and an unresolvable fork alias fails with a hostname error.
         sec.publish()
         if act.dry_run():
             changed("push is OFF -- nothing was cleared, so nothing is read back")
@@ -225,8 +225,8 @@ class Push:
 
         cred_live = False
         for what, path, name, allowed, held_path in (
-                ("api", self.pat, "github-pat", "'git-webkit pr' allowed (token at %s)", sec.github_pat_path()),
-                ("bugzilla", self.bz, "bugzilla-api-key", "'git-webkit pr' can file the bug (key at %s)", sec.bugzilla_key_path())):
+                ("api", self.pat, "github-pat", "'%s pr' allowed (token at %%s)" % project.PR_TOOL, sec.github_pat_path()),
+                ("bugzilla", self.bz, "bugzilla-api-key", "'%s pr' can file the bug (key at %%s)" % project.PR_TOOL, sec.bugzilla_key_path())):
             if sec.cred_present(path):
                 cred_live = True
                 self.say(what, allowed % path)

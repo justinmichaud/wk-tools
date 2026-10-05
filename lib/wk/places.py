@@ -14,7 +14,7 @@ import shutil
 import stat
 import sys
 
-from wk import act, agents, fleet, git, guest, images, kv, presets, reach, record, secrets, sshalias, tools
+from wk import act, agents, fleet, guest, images, kv, project, reach, record, secrets, sshalias, tools
 from wk.machine import TIMED_OUT, Local, PodmanVm, Result, Ssh, TartExec, isolated_module, lib_argv
 from wk.resources import Resources, arch_has_gpu, workspace_marker_path
 from wk.store import Store, dispatch_place, in_vm, no_such_workspace
@@ -29,15 +29,16 @@ WK_CARRIED = ("WK_ROW_LABEL", "WK_ZED_PUBKEY", "WK_SDK_IMAGE", "WK_NEW_TIMEOUT",
 GUEST_SHARES = "/Volumes/My Shared Files"
 MIRROR_TAG = "wk-mirror"
 GUEST_MIRROR_MOUNT = "/Volumes/" + MIRROR_TAG
-GUEST_MIRROR = GUEST_MIRROR_MOUNT + "/mirror/WebKit.git"
 GUEST_MOUNT_MIRROR = "/usr/local/libexec/wk-mount-mirror"
 TOOLS = "/opt/wk-tools"
 BRIDGE = TOOLS + "/container/proxy/ensure-bridge.sh"
 PROXY = "http://127.0.0.1:3128"
+# Pinned, arm64 with armhf multiarch: `wkdev-create --arch` would hand podman the aarch64 image with --arch=arm.
+IMAGE_ARMHF = "ghcr.io/igalia/wkdev-sdk:24.04_arm32"
 NO_PROXY = "localhost,127.0.0.1,::1"
 MOTD_REFERENCE = '''
         cat /etc/motd /etc/motd.d/* /run/motd.dynamic 2>/dev/null \\
-        | grep -oE "/[A-Za-z0-9._/-]*[Ww]eb[Kk]it(\\.git)?" | sort -u \\
+        | grep -oiE "/[A-Za-z0-9._/-]*%s(\\.git)?" | sort -u \\
         | while read -r p; do
               git -C "$p" rev-parse --verify -q refs/heads/main >/dev/null 2>&1 || continue
               echo "$p"; break
@@ -51,18 +52,29 @@ if [ -n "$_u" ]; then
     _br=${_u#*/}
     case "$_br" in
         main) _b=main ;;
-        webkitglib/*) _b=${_br#webkitglib/} ;;
+        @REL@/*) _b=${_br#@REL@/} ;;
     esac
 fi
 if [ -z "$_b" ]; then
-    _rel=$(git for-each-ref --format='%(refname)' --contains HEAD 'refs/remotes/*/webkitglib/*' 2>/dev/null \
-        | sed 's#.*/webkitglib/##' | sort -t. -k1,1n -k2,2n | tail -1)
+    _rel=$(git for-each-ref --format='%(refname)' --contains HEAD 'refs/remotes/*/@REL@/*' 2>/dev/null \
+        | sed 's#.*/@REL@/##' | sort -t. -k1,1n -k2,2n | tail -1)
     if [ -n "$_rel" ]; then _b=$_rel
     elif git for-each-ref --format='%(refname)' --contains HEAD 'refs/remotes/*/main' 2>/dev/null | grep -q .; then _b=main
     fi
 fi
 '''
-UPSTREAM_LINE = UPSTREAM_LINE_BODY + "printf '%s' \"${_b:-?}\"\n"
+
+
+def upstream_line_body():
+    return UPSTREAM_LINE_BODY.replace("@REL@", project.RELEASES)
+
+
+def upstream_line():
+    return upstream_line_body() + "printf '%s' \"${_b:-?}\"\n"
+
+
+def guest_mirror():
+    return GUEST_MIRROR_MOUNT + "/mirror/" + project.MIRROR
 
 
 def image_base(root, ws):
@@ -75,7 +87,7 @@ def image_base(root, ws):
 def git_base(driver, ws):
     if driver.info(ws) in STATES_NOT_THERE:
         return None
-    r = driver.exec(ws, ["sh", "-c", "cd %s 2>/dev/null || exit 0\n%s" % (shlex.quote(driver.src(ws)), UPSTREAM_LINE)])
+    r = driver.exec(ws, ["sh", "-c", "cd %s 2>/dev/null || exit 0\n%s" % (shlex.quote(driver.src(ws)), upstream_line())])
     out = r.out.replace("\r", "").strip().splitlines()
     return out[-1] if r.ok and out else None
 
@@ -147,7 +159,7 @@ def conf_key(k):
         return CONF_ENV[k]
     for stem in PER_PRESET:
         preset_name = k[len(stem) + 1:]
-        if k.startswith(stem + "_") and preset_name.replace("_", "-") in presets.PRESETS:
+        if k.startswith(stem + "_") and preset_name.replace("_", "-") in project.preset_names():
             return "%s_%s" % (CONF_ENV[stem], preset_name)
     return None
 
@@ -356,16 +368,6 @@ class Registry:
             act.die(no_such_workspace(name))
         return driver
 
-    def default_preset(self, name):
-        """The last build's preset, from its task record; else the place's own platform default."""
-        driver = self.load(self.ws_place(name))
-        rec = record.Records(driver.store.records_dir(), env=driver.env).find("build", name)
-        preset_name = rec.field("preset") if rec else ""
-        if preset_name:
-            act.info("preset: %s -- what '%s' was last built with" % (preset_name, name))
-            return preset_name
-        return "mac-release" if driver.os() == "macos" else "jsc-release"
-
 
 class Driver:
     """The contract. `info` answers absent | creating | unreachable | the driver's own word for one that exists."""
@@ -399,7 +401,7 @@ class Driver:
         return bool(t and t.alive(None))
 
     def src(self, ws):
-        return "/src/WebKit"
+        return project.SRC
 
     def tools(self, ws):
         return TOOLS
@@ -743,7 +745,7 @@ def tart_path(env):
 
 
 def arch_image(arch):
-    return presets.IMAGE_ARMHF if arch == "armhf" else ""
+    return IMAGE_ARMHF if arch == "armhf" else ""
 
 
 def podman_vm(machine, name, timeout=None):
@@ -819,8 +821,8 @@ class Container(Driver):
         return self.store.mirror_dir()
 
     def sdk(self):
-        return self.env.get("WK_SDK") or ("/opt/webkit-container-sdk" if in_vm(self.env) else os.path.join(
-            self.env.get("XDG_DATA_HOME") or os.path.join(self.env.get("HOME", ""), ".local", "share"), "webkit-container-sdk"))
+        return self.env.get("WK_SDK") or ("/opt/" + project.SDK if in_vm(self.env) else os.path.join(
+            self.env.get("XDG_DATA_HOME") or os.path.join(self.env.get("HOME", ""), ".local", "share"), project.SDK))
 
     def sdk_env(self):
         """The environment every SDK script reads, and refuses to run without (`env` prefix for an argv)."""
@@ -957,8 +959,8 @@ class Container(Driver):
     def sdk_refresh(self):
         r = self.machine.act_run(["bash", os.path.join(self.root, "container", "sdk-refresh.sh"), self.sdk()], stream=True)
         if not r.ok:
-            act.die("refreshing the webkit-container-sdk checkout failed (above); wkdev-create\n"
-                    "    would otherwise ask for whatever image tag was current when this checkout\n    was last fetched.")
+            act.die("refreshing the %s checkout failed (above); wkdev-create\n"
+                    "    would otherwise ask for whatever image tag was current when this checkout\n    was last fetched." % project.SDK)
         return True
 
     # podman makes a missing mount destination as container root: the mirror's is inside the home where this machine's store is under $HOME.
@@ -987,8 +989,8 @@ class Container(Driver):
         mirror_dir = os.path.dirname(mirror)
         res = Resources(self.machine, self.env, self.os())
         flags = ["--volume", "%s:%s:ro" % (self.tools_src(), TOOLS), "--volume", "%s:%s:ro" % (mirror_dir, mirror_dir), "--env", "WK_MIRROR=%s" % mirror,
-                 "--volume", "%s:/src/WebKit:O,upperdir=%s/changes,workdir=%s/overlay-work" % (self.store.snapshot_tree(base), ws_dir, ws_dir),
-                 "--volume", "%s/build:/src/WebKit/WebKitBuild" % ws_dir,
+                 "--volume", "%s:%s:O,upperdir=%s/changes,workdir=%s/overlay-work" % (self.store.snapshot_tree(base), project.SRC, ws_dir, ws_dir),
+                 "--volume", "%s/build:%s/%s" % (ws_dir, project.SRC, project.BUILD_DIR),
                  "--volume", "%s:/var/lib/wk/ws/%s" % (ws_dir, ws)]
         for sub, dest in (("cache/ccache", "/ccache"), ("cache/yocto", "/cache/yocto"), ("cache/buildroot", "/cache/buildroot"),
                           ("cache/bench", "/cache/bench"), ("skills", "/skills")):
@@ -996,7 +998,7 @@ class Container(Driver):
         flags += ["--volume", "%s:/secrets:ro" % self.store.keyring_view_dir("container"),
                   "--volume", "%s/agent-rw:/agent-rw" % store,
                   "--memory", "%dm" % res.envelope_mem_mb(), "--cpus", str(res.envelope_cores())]
-        for pair in ("CCACHE_DIR=/ccache", "CCACHE_MAXSIZE=%s" % self.ccache_maxsize(), "CCACHE_BASEDIR=/src/WebKit",
+        for pair in ("CCACHE_DIR=/ccache", "CCACHE_MAXSIZE=%s" % self.ccache_maxsize(), "CCACHE_BASEDIR=" + project.SRC,
                    "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime", "CCACHE_PCH_EXTSUM=true",
                    "CCACHE_DEPEND=true", "CCACHE_NOHASHDIR=true", "DL_DIR=/cache/yocto/downloads", "SSTATE_DIR=/cache/yocto/sstate",
                    "BR2_DL_DIR=/cache/buildroot/dl", "BR2_CCACHE_DIR=/cache/buildroot/ccache", "WK_WORKSPACE=%s" % ws,
@@ -1041,7 +1043,7 @@ class Container(Driver):
             self.check_sdk_tag()
         for d in (ws_dir, "changes", "overlay-work", "home", "build"):
             self.machine.mkdir(d if d == ws_dir else os.path.join(ws_dir, d))
-        self._ensure_home_mountpoint(ws_dir, os.path.dirname(self.store.mirror_dir()))
+        self._ensure_home_mountpoint(ws_dir, self.store.mirror_parent())
         self.machine.write(os.path.join(ws_dir, "arch"), arch + "\n")
         argv = self.create_argv(ws, base, arch)
         if self.sdk_image():
@@ -1091,7 +1093,7 @@ class Container(Driver):
 
     def enter_argv(self, ws):
         """Spelled out rather than wkdev-enter's own login shell: without the token/keyring
-        bridge, `git-webkit pr` reports a locked macOS Keychain instead of a missing token."""
+        bridge, the PR tool reports a locked macOS Keychain instead of a missing token."""
         return (self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", "wkdev-enter"),
                                   "--name", self.ctr(ws), "--exec", "--",
                                   BRIDGE,
@@ -1220,7 +1222,7 @@ class Vm(Driver):
         return guest.vm_user(self.env)
 
     def src(self, ws):
-        return "/Users/%s/WebKit" % self.user()
+        return "/Users/%s/%s" % (self.user(), project.CHECKOUT)
 
     def tools(self, ws):
         return "/Users/%s/wk-tools" % self.user()
@@ -1229,7 +1231,7 @@ class Vm(Driver):
         return "/Users/" + self.user()
 
     def mirror_dir(self):
-        return GUEST_MIRROR
+        return guest_mirror()
 
     def os(self):
         return "macos"
@@ -1493,7 +1495,7 @@ class Vm(Driver):
         if self.vm_state(ws) != "absent":
             act.die("workspace '%s' already exists" % ws)
         if not self.machine.isdir(mirror):
-            act.die("no WebKit mirror on this machine for '%s' to clone its checkout from\n    (%s does not exist):  wk sync    makes it" % (ws, mirror))
+            act.die("no %s mirror on this machine for '%s' to clone its checkout from\n    (%s does not exist):  wk sync    makes it" % (project.CHECKOUT, ws, mirror))
         from wk.sysimage import guestbase
         base = guestbase.Base(self)
         with base.host.lock().held("guest-base"):
@@ -1583,7 +1585,7 @@ class LocalWorkspace(Driver):
 
     def mirror_dir(self):
         if self.os() == "macos":
-            return GUEST_MIRROR
+            return guest_mirror()
         return self.store.container_mirror_dir() or self.store.mirror_dir()
 
     def arch(self, ws):
@@ -1765,7 +1767,7 @@ class Remote(Driver):
     def src(self, ws):
         if self.peer and ws:
             return self._peer_route(ws)[1]
-        return self.ws_dir_there(ws) + "/WebKit"
+        return self.ws_dir_there(ws) + "/" + project.CHECKOUT
 
     def tools(self, ws):
         t = self.env.get("WK_REMOTE_TOOLS", "")
@@ -1951,11 +1953,11 @@ class Remote(Driver):
         self.here.mkdir(os.path.join(self.store.store_dir(), "ws"))
 
     def reference(self):
-        """A shared WebKit checkout this machine's admins keep (named in the conf, or by its MOTD), verified to hold main."""
+        """A shared checkout this machine's admins keep (named in the conf, or by its MOTD), verified to hold main."""
         if self._reference is None:
             ref = self.env.get("WK_REMOTE_REFERENCE", "")
             if not ref:
-                r = self._sh(MOTD_REFERENCE)
+                r = self._sh(MOTD_REFERENCE % project.CHECKOUT)
                 ref = r.out.strip() if r.ok else ""
             self._reference = ref
         return self._reference
@@ -1974,13 +1976,13 @@ class Remote(Driver):
 
     def _wire(self, src):
         n, u, c = self.wiring_args()
-        script = git.wiring_script(src, self.mirror_dir(), self._forks(), git.mirror_branches(self.env), n, u, c)
+        script = project.wiring_script(src, self.mirror_dir(), self._forks(), images.mirror_branches(self.env), n, u, c)
         if not self._sh_act(script).ok:
             act.warn("could not wire the remotes in %s" % src)
 
     def _mirror_update(self, root):
-        act.info("updating the WebKit mirror on %s (first run clones it)" % self.label())
-        script = git.mirror_refresh_script(self.mirror_dir(), git.mirror_branches(self.env))
+        act.info("updating the %s mirror on %s (first run clones it)" % (project.CHECKOUT, self.label()))
+        script = project.mirror_refresh_script(self.mirror_dir(), images.mirror_branches(self.env))
         r = self._sh_act("set -e\n mkdir -p %s %s\n %s" % (shlex.quote(root + "/ws"), shlex.quote(root + "/cache/ccache"),
                                                           script))
         for line in r.out.splitlines():
@@ -1988,7 +1990,7 @@ class Remote(Driver):
             if len(f) == 3 and f[0] == "mirror-fetch":
                 act.log("  %-8s %s" % (f[1], f[2]))
         if not r.ok:
-            act.die("could not update the WebKit mirror on %s" % self.label())
+            act.die("could not update the %s mirror on %s" % (project.CHECKOUT, self.label()))
 
     def sync(self, named=False):
         """A peer pulls, and publishes its own snapshot only once it matches this checkout and was named."""
@@ -2022,7 +2024,7 @@ class Remote(Driver):
             act.log("  nothing of ours to fetch: no mirror is kept on %s" % host)
             return ok
         self._mirror_update(self.root_there())
-        act.info("the WebKit mirror on %s is up to date" % host)
+        act.info("the %s mirror on %s is up to date" % (project.CHECKOUT, host))
         return ok
 
     def create(self, ws, base=None, arch="native"):
@@ -2038,17 +2040,17 @@ class Remote(Driver):
             act.die("workspace '%s' already exists on %s" % (ws, host))
         ref = self.reference()
         if ref:
-            act.info("cloning from %s (this machine's shared WebKit, hardlinked)" % ref)
+            act.info("cloning from %s (this machine's shared %s, hardlinked)" % (ref, project.CHECKOUT))
             r = self._sh_act("set -e\n mkdir -p %s %s\n git clone --quiet -b main %s %s"
-                             % (shlex.quote(root + "/ws"), shlex.quote(root + "/cache/ccache"), shlex.quote(ref), shlex.quote(wsd + "/WebKit")))
+                             % (shlex.quote(root + "/ws"), shlex.quote(root + "/cache/ccache"), shlex.quote(ref), shlex.quote(wsd + "/" + project.CHECKOUT)))
             if not r.ok:
                 act.die("could not clone %s on %s" % (ref, host))
         else:
             self._mirror_update(root)
-            r = self._sh_act("git clone --quiet --shared -b main %s %s" % (shlex.quote(root + "/mirror"), shlex.quote(wsd + "/WebKit")))
+            r = self._sh_act("git clone --quiet --shared -b main %s %s" % (shlex.quote(root + "/mirror"), shlex.quote(wsd + "/" + project.CHECKOUT)))
             if not r.ok:
                 act.die("could not create the checkout on %s" % host)
-        self._wire(wsd + "/WebKit")
+        self._wire(wsd + "/" + project.CHECKOUT)
         conf = shlex.quote(root + "/cache/ccache/ccache.conf")
         self._sh_act("[ -f %s ] || printf %%s %s > %s" % (conf, shlex.quote(self.ccache_conf()), conf))
         self.here.mkdir(self.store.ws_dir(ws))

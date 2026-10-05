@@ -4,7 +4,6 @@
 import glob
 import os
 import re
-import shlex
 import sys
 from pathlib import Path
 
@@ -90,31 +89,6 @@ def first_error(path, machine=None):
     return out
 
 
-# The readings travel beside the products (lib/wk/bench/mac.py's `PgoCollect.evidence`), read from the build
-# the workspace holds now, on the machine holding it, each verdict re-derived by its own checker.
-GATES = r'''
-set -u
-shopt -s nullglob
-seen=0
-for f in "$SRC"/WebKitBuild/*/wk-browser-check.json; do
-    seen=1; printf 'browser check %s\n' "$f"
-    python3 "$TOOLS/bench/mac-browser-check.py" --read "$f" 2>&1 | sed 's/^/  /'
-done
-for f in "$SRC"/WebKitBuild/*/wk-profile-check.json "$SRC"/WebKitBuild/wk-pgo/*/profile-check.json; do
-    [ -f "$f" ] || continue
-    seen=1; printf 'profile check %s\n' "$f"
-    PYTHONPATH="$TOOLS/lib" python3 -m wk.pgo check --read "$f" 2>&1 | sed 's/^/  /'
-done
-for f in "$SRC"/WebKitBuild/*/wk-payload-pins; do
-    seen=1; printf 'benchmark payloads %s\n' "$f"
-    sed 's/^/  /' "$f"
-done
-[ "$seen" = 1 ] || printf 'no readings under %s/WebKitBuild -- only a profile-guided build
-collects them (build/mac-pgo.sh beside the products, a board cycle under
-wk-pgo/); every other build has no gates.\n' "$SRC"
-'''
-
-
 def workspace_log(driver, name):
     """(path, whether it is an image-stage log): build.log, else the newest log an image builder wrote under home/."""
     ws_dir = driver.store.ws_dir(name)
@@ -128,11 +102,6 @@ def workspace_log(driver, name):
 
 
 def show_log(driver, name, mode, hint):
-    if mode == "gates":
-        r = driver.exec(name, ["bash", "-c", "SRC=%s TOOLS=%s\n%s" % (shlex.quote(driver.src(name)), shlex.quote(driver.tools(name)), GATES)])
-        sys.stdout.write(r.out)
-        sys.stderr.write(r.err)
-        return r.rc
     path, stage = workspace_log(driver, name)
     if stage:
         act.info("showing %s" % path)

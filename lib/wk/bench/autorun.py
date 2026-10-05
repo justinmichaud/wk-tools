@@ -15,9 +15,11 @@ import threading
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+from wk import webkit  # noqa: E402,F401  first: the WebKit names lab code is handed (wk.project)
 from wk import act, images, screen  # noqa: E402
 from wk.bench.board_ab import interleave  # noqa: E402
-from wk.bench.mac import AGENT, CHECK, MARKER, WKMAC  # noqa: E402
+from wk.bench.mac import CHECK, MARKER, WKMAC  # noqa: E402
+from wk.bench.mac_ab import AGENT  # noqa: E402
 from wk.bench.pipeline import VARIANCE  # noqa: E402
 from wk.boot.mac import BENCH_ROOT  # noqa: E402
 from wk.clock import Clock  # noqa: E402

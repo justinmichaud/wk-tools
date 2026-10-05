@@ -161,6 +161,13 @@ never one below.
 of `wk bench` and `wk sysimage` are the CLI over every layer, and no layer
 imports them.
 
+What `lab` needs of WebKit -- the checkout, mirror and build-tree names, the
+PR tool, the browser, a plan's runner, and the steps that wire a checkout or
+pin a payload -- `wk` hands in through `wk.project`, which `lib/wk/webkit.py`
+fills, and no `lab` module reads at import. Every entry point imports it
+first: the dispatcher, each `cmd/*`, and `python3 -m wk <module>`, which runs
+a `lib/wk` module's own entry as a script.
+
 ## Setup
 
 **macOS** — Xcode command line tools, podman (the official installer, not

@@ -3,25 +3,33 @@
 import json
 import os
 import re
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
-from wk import reach, secrets
+from wk import project, reach, secrets
 from wk.store import no_such_workspace
 from wk.act import die
 from wk.doctor import MISS, miss, note, ok
 from wk.resources import arch_has_gpu
 
-# Named places, never the checkout: WebKit ships PEM fixtures.
+# Named places, never the checkout: it ships PEM fixtures.
 KEY_SCAN = ("{ grep -rl 'PRIVATE KEY' $HOME/.ssh $HOME/.claude /secrets /run/wk;\n"
             "  grep -l  'PRIVATE KEY' $HOME/* ; } 2>/dev/null | head -5")
-# git-webkit sends two of these (webkitcorepy), gh the other.
-PLACEHOLDERS = ("GITHUB_COM_TOKEN", "GH_TOKEN", "BUGS_WEBKIT_ORG_PASSWORD")
 HOST_PATHS = ("/host/home", "/host/run", "/run/user/*/bus", "/run/dbus/system_bus_socket")
 PUBLISHING = ("push-keys", "github-write", "bugzilla-write")
 CSI = re.compile(r"\x1b\[[0-9;?<>=]*[A-Za-z]|\x1b[78]|\x1b\([A-Z]|\x0f")
 COMMIT_WALL_PATHS = ("objects", "refs", "logs", "HEAD", "packed-refs", "index.lock", "ORIG_HEAD")
 
 CURL = "curl -sS -m 40 --suppress-connect-headers -D -"
+
+
+def placeholders():
+    """The PR tool sends two of these, gh the other."""
+    return ("GITHUB_COM_TOKEN", "GH_TOKEN", project.BUGZILLA_ENV[1])
+
+
+def bugzilla_host():
+    return urllib.parse.urlsplit(project.BUGZILLA).hostname
 
 
 def http(url, extra=""):
@@ -177,7 +185,7 @@ class Wall:
             rows.append(miss("private key material inside the workspace: %s" % " ".join(material.splitlines()), "remove it"))
         else:
             rows.append(ok("no private key material in the workspace (~/.ssh, ~/.claude, the top of home, /secrets, /run/wk)"))
-        for var in PLACEHOLDERS:
+        for var in placeholders():
             # Whether it is set, never its value.
             tok = self.inside('printf %%s "${%s:-}"' % var)
             if tok == "wk-injects-this":
@@ -259,10 +267,10 @@ class Wall:
                          "sees public GitHub at 60 requests an hour ('wk key set github-pat', then './setup')")]
         if root == "401":
             return [note("GitHub refused the standing read token the injector holds (HTTP 401), so every API read in here is refused "
-                         "with it -- 'gh', and 'git-webkit pr', which reports it as a token of its own being out of date. A token this "
+                         "with it -- 'gh', and '%s pr', which reports it as a token of its own being out of date. A token this "
                          "machine holds and GitHub still accepts ('wk key check github-pat') means the injector was handed an older one: "
                          "'wk start %s' converges a guest's copy and './setup' the podman machine's. One refused there too is "
-                         "'wk key set github-pat --replace'" % self.ws)]
+                         "'wk key set github-pat --replace'" % (project.PR_TOOL, self.ws))]
         if root == "200":
             return [miss("a read answered '%s' rather than 200 or 401" % (user or "nothing"),
                          "the injector is in the path but not answering for api.github.com/user")]
@@ -332,23 +340,24 @@ class Wall:
                              self.driver.agent_secret_remedy(self.ws, secret)))
         return rows
 
-    def gitwebkit_setup(self):
-        if self.inside("git -C %s config --get webkitscmpy.setup" % self.driver.src(self.ws)) == "true":
-            return [ok("git-webkit is set up in '%s' (hooks, fork remote verified)" % self.ws)]
-        return [miss("'git-webkit setup' has not completed in '%s' (webkitscmpy.setup is not true): `git-webkit pr` prompts or refuses" % self.ws,
+    def pr_tool_setup(self):
+        tool, key = project.PR_TOOL, project.PR_TOOL_SETUP
+        if self.inside("git -C %s config --get %s" % (self.driver.src(self.ws), key)) == "true":
+            return [ok("%s is set up in '%s' (hooks, fork remote verified)" % (tool, self.ws))]
+        return [miss("'%s setup' has not completed in '%s' (%s is not true): `%s pr` prompts or refuses" % (tool, self.ws, key, tool),
                      "'wk sync %s --fix' re-asserts the remotes and runs it" % self.ws)]
 
     def gap(self, name, *replies):
         return upstream_gap(name, self.driver.daemon_remedy(self.ws, "inject"), *replies)
 
     def bugzilla_read(self):
-        reply = self.inside(http("https://bugs.webkit.org/rest/version"))
+        reply = self.inside(http(project.BUGZILLA + "/rest/version"))
         if gap := self.gap("Bugzilla", reply):
             return gap
         code = status_of(reply)
         if code == "200":
-            return [ok("bugs.webkit.org reachable through the injector (HTTP %s)" % code)]
-        return [miss("bugs.webkit.org answered '%s' -- the injector is not in the path for it" % (code or "nothing"),
+            return [ok("%s reachable through the injector (HTTP %s)" % (bugzilla_host(), code))]
+        return [miss("%s answered '%s' -- the injector is not in the path for it" % (bugzilla_host(), code or "nothing"),
                      self.driver.daemon_remedy(self.ws, "inject"))]
 
     def bugzilla_write(self):
@@ -356,7 +365,7 @@ class Wall:
         post = "-X POST -H 'Content-Type: application/json' -d '{}' "
         if self.push_on != 1:
             # Nothing reaches Bugzilla here, so the status is the injector's own.
-            reply = self.inside(http("https://bugs.webkit.org/rest/bug", post))
+            reply = self.inside(http(project.BUGZILLA + "/rest/bug", post))
             if gap := self.gap("Bugzilla", reply):
                 return gap
             code = status_of(reply)
@@ -366,7 +375,7 @@ class Wall:
                          % (code or "nothing"),
                          "Bugzilla's own 'log in first' is an injector still running older code, which 'wk status' reports and "
                          "'./setup' on that machine restarts; anything else is a Bugzilla key still on the machine:  wk key push off")]
-        reply = self.inside("%s %shttps://bugs.webkit.org/rest/bug 2>/dev/null" % (CURL, post))
+        reply = self.inside("%s %s%s/rest/bug 2>/dev/null" % (CURL, post, project.BUGZILLA))
         headers, _, body = reply.partition("\n\n") if reply.startswith("HTTP/") else ("", "", reply)
         if "wk credential injector" in body or fault_of(headers):
             return self.gap("Bugzilla", headers + "\n" + ("504" if "did not answer" in body else "502"))
@@ -381,7 +390,7 @@ class Wall:
             return [miss("push is ON and the key reached Bugzilla, which does not know it (306)",
                          "'wk key set bugzilla-api-key --replace', then 'wk key push on' again")]
         if not code:
-            return [miss("POST /rest/bug answered nothing Bugzilla-shaped", "the injector is in the path but not answering for bugs.webkit.org")]
+            return [miss("POST /rest/bug answered nothing Bugzilla-shaped", "the injector is in the path but not answering for " + bugzilla_host())]
         return [ok("a Bugzilla write is authenticated (error %s: an empty bug, nothing filed), and push is on" % code)]
 
     def gpu(self):
@@ -435,14 +444,14 @@ class Wall:
         return checks + [("no-credentials-inside", self.no_credentials_inside), ("secrets-view", self.secrets_view),
                          ("agent-identities", self.agent_identities), ("github-read", self.github_read),
                          ("github-write", self.github_write), ("bugzilla-read", self.bugzilla_read),
-                         ("bugzilla-write", self.bugzilla_write), ("gitwebkit-setup", self.gitwebkit_setup),
+                         ("bugzilla-write", self.bugzilla_write), ("pr-tool-setup", self.pr_tool_setup),
                          ("agent-credential", self.agent_credential), ("gpu", self.gpu)]
 
     def from_inside(self):
         checks = [("push-keys", self.push_here), ("github-read", self.github_read), ("github-write", self.github_write),
                   ("bugzilla-read", self.bugzilla_read), ("bugzilla-write", self.bugzilla_write), ("egress-github", self.github),
                   ("egress-allowlist", self.allowlist), ("egress-off-allowlist", self.off_allowlist),
-                  ("no-credentials", self.no_credentials_inside), ("gitwebkit-setup", self.gitwebkit_setup)]
+                  ("no-credentials", self.no_credentials_inside), ("pr-tool-setup", self.pr_tool_setup)]
         if commit_walled(self.driver):
             checks.append(("commit-wall", self.commit_wall))
         return checks

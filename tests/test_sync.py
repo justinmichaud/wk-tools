@@ -23,7 +23,7 @@ from tests.killpoints import converges
 from tests.support import REPO, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, git, places, pr, sync  # noqa: E402
+from wk import act, git, images, places, pr, sync  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.decl import Decl  # noqa: E402
@@ -38,7 +38,7 @@ MAIN_SHA = "a" * 40
 
 
 cmd = load_cmd("sync")
-REAL_MIRROR_BRANCHES = git.mirror_branches
+REAL_MIRROR_BRANCHES = images.mirror_branches
 
 
 def fake_retarget(driver, ws, src, forks, branches):
@@ -55,7 +55,7 @@ GENERATORS = {
     (git, "gitwebkit_setup_script"): lambda src, forks: "GITWEBKIT %s" % src,
     (git, "mirror_refresh_script"): lambda mirror, branches: "REFRESH %s" % mirror,
     (git, "REMOTES"): (("origin", "u1"), ("wpe", "u2"), ("fork", "u3"), ("forkwpe", "u4")),
-    (git, "mirror_branches"): lambda env=None: ["main"],
+    (images, "mirror_branches"): lambda env=None: ["main"],
     (pr, "retarget"): fake_retarget,
     (pr, "converge"): lambda driver, ws, src, forks: [],
 }
@@ -630,7 +630,7 @@ class TestTheMirror(SyncTest):
 
     def test_wk_mirror_branches_carries_the_extra_branches(self):
         self.w.reg.env["WK_MIRROR_BRANCHES"] = "main webkitglib/2.52"
-        with mock.patch.object(git, "mirror_branches", REAL_MIRROR_BRANCHES):
+        with mock.patch.object(images, "mirror_branches", REAL_MIRROR_BRANCHES):
             err = self.mirror(heads=("main",))
             self.assertIn("(origin: main webkitglib/2.52)", err)
             self.assertIn("advertises no webkitglib/2.52", err)

@@ -9,7 +9,7 @@ import signal
 import sys
 import time
 
-from wk import act, agents, git, secrets, tools
+from wk import act, agents, images, project, secrets, tools
 from wk.act import Refused, debug, die, info, log, warn
 from wk.clock import Clock
 from wk.lock import Lock
@@ -41,7 +41,7 @@ sudo -n date -u "$WK_NOW_SET" >/dev/null || exit 1
 echo "$skew"
 """
 
-# WebKit's network process reads no http_proxy, so the system proxy is set too. The CA bundle is the system's
+# The browser's network process reads no http_proxy, so the system proxy is set too. The CA bundle is the system's
 # plus the injector's: these variables replace the trust store outright.
 EGRESS = """set -u
 addr=$WK_ADDR port=$WK_PORT ghuser=$WK_GHUSER bzuser=$WK_BZUSER
@@ -73,8 +73,8 @@ export SSL_CERT_FILE=$HOME/.wk-ca-bundle.pem
 export GH_TOKEN=wk-injects-this
 WKCAENV
     [ -z "$bzuser" ] || cat >> "$HOME/.wk-egress" <<WKBZENV
-export BUGS_WEBKIT_ORG_USERNAME=$bzuser
-export BUGS_WEBKIT_ORG_PASSWORD=wk-injects-this
+export @BZUSER@=$bzuser
+export @BZPASSWORD@=wk-injects-this
 WKBZENV
 else
     rm -f /tmp/.wk-github-ca.new "$HOME/.wk-github-ca.pem" "$HOME/.wk-ca-bundle.pem"
@@ -299,7 +299,7 @@ class Host:
         if act.dry_run() or self.clock.wait_until(self.inject_running, 10, 0.25):
             info("GitHub API injector on %s" % sock)
             return True
-        warn("the GitHub API injector did not start, so 'git-webkit pr' in a guest\n  will fail; see %s" % log)
+        warn("the GitHub API injector did not start, so '%s pr' in a guest\n  will fail; see %s" % (project.PR_TOOL, log))
         return False
 
     def agent_sock(self):
@@ -369,7 +369,7 @@ STEPS = (
     ("write_lldbinit", debug, "could not write .lldbinit in {ws}"),
     ("set_guest_clock", warn, "could not set {ws}'s clock; TLS in there will fail as CERT_NOT_YET_VALID"),
     ("set_guest_egress", warn, "could not set {ws}'s egress; nothing in there will reach the outside"),
-    ("write_checkout", warn, "{ws}'s WebKit checkout is not wired and set up (above); 'wk sync {ws} --fix' once it is up"),
+    ("write_checkout", warn, "{ws}'s checkout is not wired and set up (above); 'wk sync {ws} --fix' once it is up"),
     ("install_agents", warn, "{ws} has no working coding agents (above); 'wk rm {ws}' and 'wk new' remake it"),
     ("write_claude_config", warn, "could not link ~/.claude in {ws}; an agent in there would have no instructions"),
     ("write_agent_secrets", warn, "could not write the agent credentials into {ws}; an agent in there will ask you to log in"),
@@ -410,22 +410,22 @@ class Guest:
                                          input=tree(self.host.root, "vm/shell-rc.sh")))
 
     def write_lldbinit(self):
-        text = LLDB_HEADER + "command script import %s/Tools/lldb/lldb_webkit.py\n" % self.vm.src(self.ws) \
+        text = LLDB_HEADER + "command script import %s/%s\n" % (self.vm.src(self.ws), project.LLDB_SCRIPT) \
             + tree(self.host.root, "dotfiles/lldbinit")
         return self._said(self.m.act_run(["sh", "-c", 'cat > "$HOME/.lldbinit"'], input=text))
 
     def write_checkout(self):
         src, mirror, forks = self.vm.src(self.ws), self.vm.mirror_dir(), self.secrets.forks()
-        script = CHECKOUT + git.wiring_script(src, mirror, forks, git.mirror_branches(self.host.env)) \
-            + git.gitwebkit_setup_script(src, forks)
+        script = CHECKOUT + project.wiring_script(src, mirror, forks, images.mirror_branches(self.host.env)) \
+            + project.setup_script(src, forks)
         t0 = self.host.clock.now()
         r = self.m.act_run(["env", "WK_SRC=" + src, "WK_MIRROR=" + mirror, "WK_TOOLS=" + self.vm.tools(self.ws), "bash", "-s"],
                            input=script)
         out = (r.out + r.err).replace("\r", "")
         if "checkout=cloned" in out:
-            info("%s's WebKit checkout made from its mirror in %ds" % (self.ws, self.host.clock.now() - t0))
+            info("%s's %s checkout made from its mirror in %ds" % (self.ws, project.CHECKOUT, self.host.clock.now() - t0))
         if "setup=ok" in out:
-            info("git-webkit is set up in %s" % self.ws)
+            info("%s is set up in %s" % (project.PR_TOOL, self.ws))
         if not r.ok:
             sys.stderr.write("".join("    %s\n" % l for l in out.splitlines()[-5:]))
         return r.ok
@@ -487,7 +487,8 @@ class Guest:
             except OSError:
                 ca = ""
         debug("guest egress in %s: %s" % (self.ws, addr or "off"))
-        script = "cat > /tmp/.wk-github-ca.new <<'WKCA'\n%s\nWKCA\n" % ca.rstrip("\n") + EGRESS
+        script = "cat > /tmp/.wk-github-ca.new <<'WKCA'\n%s\nWKCA\n" % ca.rstrip("\n") \
+            + EGRESS.replace("@BZUSER@", project.BUGZILLA_ENV[0]).replace("@BZPASSWORD@", project.BUGZILLA_ENV[1])
         return self.m.act_run(["env", "WK_ADDR=" + addr, "WK_PORT=" + h.port(), "WK_GHUSER=" + self.secrets.github_user(),
                                "WK_BZUSER=" + (self.secrets.bugzilla_user() or ""), "bash", "-s"], input=script).ok
 
@@ -699,8 +700,8 @@ class Desktop:
         if py and py == self.pin:
             out.append(row("ok", "pyobjc %s: a browser can be driven and held in front here" % py))
         elif py in ("", "?"):
-            out.append(row("wrong", "no pyobjc: run-benchmark cannot size the screen and nothing can keep MiniBrowser frontmost, "
-                           "so a benchmark here measures a throttled browser", RESTART + "  (the settle installs it)"))
+            out.append(row("wrong", "no pyobjc: run-benchmark cannot size the screen and nothing can keep %s frontmost, "
+                           "so a benchmark here measures a throttled browser" % project.BROWSER, RESTART + "  (the settle installs it)"))
         else:
             out.append(row("wrong", "pyobjc here is %s and this fleet measures with %s" % (py, self.pin), RESTART))
         lock = v("screenlock")
@@ -950,7 +951,7 @@ def boot(host, ws, wait=BOOT_WAIT):
         path = "%s:%s" % (os.path.dirname(host.softnet()), host.env.get("PATH") or os.environ.get("PATH", ""))
         m.remove(runlog)
         m.spawn(["env", "PATH=" + path, vm.tart_or_die(), "run", *flags, "--dir=%s:%s" % (vm.agent_rw_share, agent_rw),
-                 "--dir=%s:%s:ro,tag=%s" % (vm.mirror_share, os.path.dirname(vm.store.mirror_dir()), vm.mirror_tag), vm.vm(ws)], runlog)
+                 "--dir=%s:%s:ro,tag=%s" % (vm.mirror_share, vm.store.mirror_parent(), vm.mirror_tag), vm.vm(ws)], runlog)
         info("booting %s (log: %s)" % (vm.vm(ws), runlog))
         if act.dry_run():
             return ""   # a guest this run did not boot has no address, nor anything to converge

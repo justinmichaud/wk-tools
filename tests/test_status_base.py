@@ -1,4 +1,4 @@
-"""The base a workspace tracks: the upstream WebKit line a checkout's HEAD descends from (places.UPSTREAM_LINE,
+"""The base a workspace tracks: the upstream WebKit line a checkout's HEAD descends from (places.upstream_line(),
 run inside the workspace by `wk ls` and `wk status`), against real disposable repositories; an image
 workspace's base from the profile conf this checkout ships; and the SDK image's freshness as the renderer
 words it."""
@@ -35,7 +35,7 @@ def _init_repo(repo):
 
 def upstream_line(repo):
     """The script `wk status` runs inside a workspace, run with $PWD inside `repo`."""
-    cp = bash(places.UPSTREAM_LINE, cwd=str(repo))
+    cp = bash(places.upstream_line(), cwd=str(repo))
     assert cp.returncode == 0, cp.stderr
     return cp.stdout.strip()
 

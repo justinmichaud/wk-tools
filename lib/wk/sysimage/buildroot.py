@@ -4,9 +4,10 @@ TODO: whether the rpi3 defconfig compiles wpa_supplicant at all is unverified.""
 
 import os
 
-from wk import act, fleet, images, slot
+from wk import act, fleet, images
 from wk.act import die, info, log
 from wk.sysimage import task
+from wk.sysimage.ls import slot_doc
 from wk.sysimage.write import wants_wifi
 
 BASE_IMAGE = "docker.io/library/ubuntu:22.04"   # the host the wiki recipe was driven on (container/buildroot/Containerfile)
@@ -229,7 +230,7 @@ class Buildroot(task.ContainerBuilder):
         _, _, jobs = st.size(WEBKIT_JOBS)
         sj = os.path.join(slotdir, "slot.json")
         try:
-            held = "slot '%s' holds %s -- rebuilt incrementally in the same build directory" % (name, slot.load(sj).get("commit", "")[:12])
+            held = "slot '%s' holds %s -- rebuilt incrementally in the same build directory" % (name, slot_doc(sj).get("commit", "")[:12])
         except (OSError, ValueError):
             held = "none"
         log("would build a WebKit slot for image %s (builder: buildroot)" % self.name)

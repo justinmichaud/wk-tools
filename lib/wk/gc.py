@@ -5,10 +5,10 @@ import json
 import os
 import sys
 
-from wk import act, images, pr, reach, rubble as rb, workspace
+from wk import act, images, project, reach, rubble as rb, workspace
 from wk.bridge import provision as bridge_provision
 from wk.act import die, info, log, warn
-from wk.bench import mac as benchmac, seed
+from wk.bench import mac as benchmac
 from wk.bench.board import SLOTS_DIR
 from wk.clock import Clock
 from wk.lock import Lock
@@ -84,12 +84,12 @@ class Gc:
         rows = store_rubble(self.store, self.here, self.host_half)
         if self.store_half:
             rows += self.image_rows() + self.ccache_rows()
-        rows += seed.rubble(self.here, lock, os.path.join(self.store.cache_dir(), "bench"))
+        rows += project.payload_rubble(self.here, lock, os.path.join(self.store.cache_dir(), "bench"))
         rows += bridge_provision.rubble(self.store, self.here, lock)
         rows += self.runner_rows() + self.build_output_rows()
         rows += workspace.rubble(listed, stored, self.here, self.root, pid is not None and self.here.alive(pid), self.clock)
         if self.host_half:
-            rows += pr.rubble(self.store, self.here, lock)
+            rows += project.pr_rubble(self.store, self.here, lock)
             rows += (guestbase.rubble(vm) if vm else []) + self.board_rows() + self.remote_rows()
             rows += pmos.rubble(self.pmos_hosts(), self.pmos_machine, self.env)
             if self.mac_host:
@@ -150,7 +150,7 @@ class Gc:
                                          self.here.act_run(argv + ["--cleanup"]).ok]))]
 
     def runner_rows(self):
-        """Tools/Scripts trees exported per WebKit commit: the newest stays, the rest are re-exported on demand."""
+        """Benchmark runner trees exported per commit: the newest stays, the rest are re-exported on demand."""
         d = os.path.join(self.store.cache_dir(), "bench-runner")
         if not self.here.isdir(d):
             return []
@@ -200,7 +200,7 @@ class Gc:
                 rows.append(rb.row("remote-mirror", "%s: its store's mirror" % t.name, None,
                                    why="not looked at -- %s did not answer: %s" % (t.name, why)))
                 continue
-            kb = rb.du_kb(t.machine, t.root_there() + "/git/WebKit.git")
+            kb = rb.du_kb(t.machine, t.root_there() + "/git/" + project.MIRROR)
             if kb is not None:
                 rows.append(rb.row("remote-mirror", "%s: its store's mirror" % t.name, kb, "wk machine rm %s" % t.name))
         return rows

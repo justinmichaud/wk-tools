@@ -16,7 +16,7 @@ from tests.fakes import WsDriver
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, git, machine, places, presets, record, secrets  # noqa: E402
+from wk import act, git, machine, places, record, secrets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import TIMED_OUT, Fake, Result, lib_argv  # noqa: E402
@@ -655,7 +655,7 @@ class TestContainerWrite(DriversTest):
     def test_an_armhf_workspace_names_the_arm_image_and_gets_no_gpu(self):
         self.stderr_of(lambda: self.t.create("new", self.base, "armhf"))
         argv = self.wkdev_create()
-        image = presets.IMAGE_ARMHF
+        image = places.IMAGE_ARMHF
         self.assertEqual(argv[argv.index("--arch"):argv.index("--name")], ("--arch", "arm", "--image", image))
         self.assertNotIn(("--device", "/dev/dri"), self.flag_pairs(argv))
         self.assertIn(("--env", "WK_ARCH=armhf"), self.flag_pairs(argv))

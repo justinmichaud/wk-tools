@@ -32,8 +32,7 @@ class TestTheDefaultsAreThePythons(WkTest):
         cp = bash(f'. "{REPO}/lib/common.sh"\nWK_RESERVE_MB=7\neval "$(wk_py wk.resources --os linux defaults)"\n'
                   'echo "$WK_RESERVE_MB $WK_RESERVE_CORES $WK_MB_PER_JOB $WK_BUILD_DISK_GB"')
         self.assertEqual(cp.returncode, 0, cp.stderr)
-        from wk.presets import DISK_GB
-        self.assertEqual(cp.stdout.split(), ["7", str(resources.RESERVE_CORES), str(resources.MB_PER_JOB), str(DISK_GB)])
+        self.assertEqual(cp.stdout.split(), ["7", str(resources.RESERVE_CORES), str(resources.MB_PER_JOB), str(resources.DISK_GB)])
 
 
 class TestTheLoadCoresAndJobCount(unittest.TestCase):

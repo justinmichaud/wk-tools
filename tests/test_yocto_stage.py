@@ -17,7 +17,7 @@ from tests.support import REPO
 from tests.test_sysimage_task import Box
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import build, images, job, record, resources  # noqa: E402
+from wk import images, job, record, resources  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result, isolated_module  # noqa: E402
@@ -97,7 +97,7 @@ class World(Fake):
         return yocto.Yocto(self.reg, self.profile(), PROFILE, self.clock)
 
     def recs(self):
-        return build.records_of(self.reg.load("box"), self.clock, self)
+        return job.records_of(self.reg.load("box"), self.clock, self)
 
     def budget_files(self):
         d = os.path.join(self.env["XDG_STATE_HOME"], "wk", "builds")

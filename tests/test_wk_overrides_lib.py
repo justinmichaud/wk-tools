@@ -9,7 +9,7 @@ from tests.fakes import FakeRegistry
 from tests.support import REAL_MACHINES, REPO, WkTest, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import git, places, reach, resources, screen  # noqa: E402
+from wk import images, places, reach, resources, screen  # noqa: E402
 from wk.boot.mac import GuestChannel  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
@@ -114,8 +114,8 @@ class TestStoreLib(unittest.TestCase):
         self.assertEqual(t.ccache_conf(), "max_size = 12G\n")
 
     def test_wk_mirror_branches_replaces_the_derived_list(self):
-        self.assertIn("main", git.mirror_branches({"HOME": "/nonexistent"}))
-        self.assertEqual(git.mirror_branches({"WK_MIRROR_BRANCHES": "main release/1.0"}), ["main", "release/1.0"])
+        self.assertIn("main", images.mirror_branches({"HOME": "/nonexistent"}))
+        self.assertEqual(images.mirror_branches({"WK_MIRROR_BRANCHES": "main release/1.0"}), ["main", "release/1.0"])
 
 
 class TestPlaceLib(WkTest):

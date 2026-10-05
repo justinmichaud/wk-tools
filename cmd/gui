@@ -23,6 +23,7 @@ import shlex
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import webkit  # noqa: E402,F401  first: the WebKit names lab code is handed (wk.project)
 from wk import images, store  # noqa: E402
 
 ROOT = images.root()
@@ -47,7 +48,7 @@ def parse(argv):
 
 def gui_default_preset(reg, name):
     if reg.in_workspace():
-        return reg.default_preset(name)
+        return presets.default_preset(reg, name)
     return "mac-release" if is_macos() else "wpe-release"
 
 

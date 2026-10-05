@@ -91,7 +91,7 @@ _wk_completion() {
         [ "$slot" -eq 0 ] || slot=$((slot - shift))
     fi
     if [ "$slot" -gt 0 ] && [ "$typed" -eq $((slot - 1)) ]; then
-        words=$(PYTHONPATH="$_wk_root/lib" python3 -m wk.completion --list-workspaces 2>/dev/null)
+        words=$(PYTHONPATH="$_wk_root/lib" python3 -m wk wk.completion --list-workspaces 2>/dev/null)
     fi
     if [ -n "$_wk_vslots" ]; then
         [ "$typed" -ne 0 ] || words="$words $_wk_subverbs"

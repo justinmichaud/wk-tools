@@ -1,4 +1,4 @@
-"""`wk bench`'s verbs that are not the pipeline -- ls, report, export, compare, precision, seed, deploy, ab, plans -- over one registry."""
+"""`wk bench`'s verbs -- run, ls, report, export, compare, precision, seed, deploy, ab, plans -- over one registry."""
 
 import contextlib
 import io
@@ -7,9 +7,11 @@ import tempfile
 import zipfile
 
 from wk import act, record as wkrecord
-from wk.bench import ab, board, record, report, seed
+from wk.act import die, info
+from wk.bench import ab, board, board_ab, mac_ab, pipeline, record, report, seed, systems
 from wk.lock import Lock, holder_pid
 from wk.machine import Local, Planted, matches
+from wk.store import ws_name
 
 REPORT_USAGE = ("usage: wk bench report <task> [--html] [--text]\n"
                 "       wk bench report <run-a> <run-b> [--html out.html] [--text]; see wk bench -h")
@@ -276,6 +278,9 @@ class Bench:
         return 0
 
     def ab(self, spec, o, kill):
+        if not kill and o.get("devices") and ab.machine_kind(self.root, self.reg.env, o["devices"]) in ("mac", "guest"):
+            m = mac_ab.MacAB(self.root, self.reg, self.clock, spec, o, self)
+            return m.back() if any(o.get(k) for k in mac_ab.READS) else m.go()
         return ab.run(self.root, self.reg, self.clock, spec, o, kill)
 
     def ab_summary(self, runs, root, out):
@@ -305,3 +310,62 @@ def archive(taskdir, running, shown=None):
             for rel in sorted(r for r in tree if matches(r, (pattern,))):
                 z.writestr(os.path.join(name, rel), tree.pop(rel))
     return buf.getvalue()
+
+
+BOARD_AB_ONLY = ("exclude_subtests", "no_warmup_profile", "jit_tiers")
+AB_ONLY = ("rounds",) + BOARD_AB_ONLY
+
+
+def nothing_left(reg, ws, plan, task):
+    """A one-run task restarted with --task: whether it already holds its run ok. An A/B restarts through its own command."""
+    d = os.path.join(record.leg_home(reg, ws, task)[1], task)
+    doc = record.task_doc(d)
+    if len(record.task_arms(doc)[0]) != 1:
+        die("task %s is an A/B; restart it with its own command:\n    %s" % (task, doc.get("restart") or doc.get("commands", ["?"])[-1]))
+    if plan not in doc.get("plans", []):
+        die("task %s measures %s, not %s" % (task, ", ".join(doc.get("plans", [])), plan))
+    st = record.task_state(d, False)
+    if st["ok"] < st["planned"]:
+        return False
+    info("task %s already holds its run ok (%s); nothing is left to run" % (task, st["summary"]))
+    return True
+
+
+def ab_report(taskdir):
+    report.task_report(taskdir, False, html=True, text=True)
+
+
+def run(root, reg, words, o, kill, clock):
+    """`wk bench run <ws> <plan>`: the dispatcher resolved the workspace (WK_NAME) and dropped it from `words`."""
+    ws, plan = ws_name(reg.env), (words[0] if words else "")
+    if not ws or not (plan or kill):
+        die("usage: wk bench run <workspace> <plan> [options]; see wk bench -h")
+    ab = not kill and (o.get("ab") or o.get("ab_systems"))
+    options = not kill and (o.get("a_args") is not None or o.get("b_args") is not None)
+    if options and (ab or o.get("system")):
+        die("--a-args and --b-args are an A/B of one build in this workspace; on a board the arms are\n"
+            "    slots (--ab) or systems (--ab-systems)")
+    alone = [k for k in (BOARD_AB_ONLY if options else () if ab else AB_ONLY) if o.get(k)]
+    if alone:
+        die("--%s belongs to an A/B on a board (--ab or --ab-systems)" % alone[0].replace("_", "-"))
+    if options:
+        return board_ab.ArgsAB(root, reg, ws, plan, o, clock, ab_report).go()
+    if o.get("system") and reg.in_workspace() and (ab or o.get("collect")):
+        die("an A/B or a collection on a board is not a request a workspace can make; run it on the workstation:\n"
+            "    wk bench run %s %s --system %s ..." % (ws, plan, o["system"]))
+    if ab:
+        return board_ab.run(root, reg, ws, plan, o, clock, ab_report)
+    if o.get("system") and reg.in_workspace():
+        return board.request(root, reg, "run", ["machine=" + o["system"], "workspace=" + ws, "plan=" + plan, "slot=" + (o.get("slot") or ""),
+                                                "count=" + (o.get("count") or "")], "wk bench run %s %s --system %s" % (ws, plan, o["system"]))
+    if o.get("task") and not kill and nothing_left(reg, ws, plan, o["task"]):
+        return 0
+    system = systems.for_workspace(root, reg, ws, clock, o.get("system") or "")
+    if o.get("collect") and system.kind != "board":
+        die("--collect takes a PGO profile from a board's instrumented slot: --system <board> --slot <name>-instr")
+    r = pipeline.run_class(system)(root, reg, system, clock, reg.env)
+    if kill:
+        return r.stop()
+    if o.get("task") and not act.dry_run():
+        r.lock.hold("bench-task-" + o["task"], timeout=5)
+    return r.go(plan, o)

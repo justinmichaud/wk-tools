@@ -1,4 +1,4 @@
-"""The rule an unattended A/B stops on: `wk bench precision` (lib/wk/bench/report.py `t_crit`, `mde_pct`,
+"""The rule an unattended A/B stops on: `wk bench precision` (lib/wk/bench/scores.py `t_crit`, `mde_pct`,
 `headline_score`, `precision`)."""
 import contextlib
 import io
@@ -11,7 +11,7 @@ import unittest
 from tests.support import REPO, WkTest, run, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk.bench import report  # noqa: E402
+from wk.bench import report, scores  # noqa: E402
 
 # Speedometer-3's suite Score, verbatim from the run tolken recorded at
 # 20260908T013816Z: one iteration holding the suite's ten internal repeats.
@@ -134,12 +134,12 @@ class TestTheDistribution(WkTest):
 
     def test_t_critical_matches_the_published_table(self):
         for df, want in ((5, 2.571), (10, 2.228), (30, 2.042), (100, 1.984)):
-            self.assertAlmostEqual(report.t_crit(df, 0.05), want, places=2,
+            self.assertAlmostEqual(scores.t_crit(df, 0.05), want, places=2,
                                    msg=f"t(0.975, {df})")
 
     def test_the_power_point_is_the_one_80_percent_power_needs(self):
         # One-tailed 0.80 is the two-tailed 0.40 point; z is 0.8416.
-        self.assertAlmostEqual(report.t_crit(100000, 0.40), 0.8416, places=3)
+        self.assertAlmostEqual(scores.t_crit(100000, 0.40), 0.8416, places=3)
 
     def test_it_agrees_with_scipy_where_scipy_is_installed(self):
         try:
@@ -148,14 +148,14 @@ class TestTheDistribution(WkTest):
             self.skipTest("scipy is not installed here")
         for df in (3, 5, 10, 30, 100, 1000):
             with self.subTest(df=df):
-                self.assertAlmostEqual(report.t_crit(df, 0.05), stats.t.ppf(0.975, df), places=5)
-                self.assertAlmostEqual(report.t_crit(df, 0.40), stats.t.ppf(0.80, df), places=5)
+                self.assertAlmostEqual(scores.t_crit(df, 0.05), stats.t.ppf(0.975, df), places=5)
+                self.assertAlmostEqual(scores.t_crit(df, 0.40), stats.t.ppf(0.80, df), places=5)
 
     def test_no_spread_resolves_anything(self):
-        self.assertEqual(report.mde_pct([100.0] * 4, [100.0] * 4), 0.0)
+        self.assertEqual(scores.mde_pct([100.0] * 4, [100.0] * 4), 0.0)
 
     def test_one_round_a_side_resolves_nothing_at_all(self):
-        self.assertIsNone(report.mde_pct([100.0], [101.0]))
+        self.assertIsNone(scores.mde_pct([100.0], [101.0]))
 
 
 class TestTheArithmetic(WkTest):
@@ -168,12 +168,12 @@ class TestTheArithmetic(WkTest):
         vb = sum((x - mb) ** 2 for x in b) / (nb - 1)
         se2 = va / na + vb / nb
         df = se2 * se2 / ((va / na) ** 2 / (na - 1) + (vb / nb) ** 2 / (nb - 1))
-        want = (report.t_crit(df, 0.05) + report.t_crit(df, 0.40)) * math.sqrt(se2) / ma * 100
-        self.assertAlmostEqual(report.mde_pct(a, b), want, places=6)
+        want = (scores.t_crit(df, 0.05) + scores.t_crit(df, 0.40)) * math.sqrt(se2) / ma * 100
+        self.assertAlmostEqual(scores.mde_pct(a, b), want, places=6)
 
     def test_it_shrinks_as_the_square_root_of_the_rounds(self):
-        few = report.mde_pct([100.0, 101.0, 99.0, 100.0] * 1, [100.0, 101.0, 99.0, 100.0] * 1)
-        many = report.mde_pct([100.0, 101.0, 99.0, 100.0] * 4, [100.0, 101.0, 99.0, 100.0] * 4)
+        few = scores.mde_pct([100.0, 101.0, 99.0, 100.0] * 1, [100.0, 101.0, 99.0, 100.0] * 1)
+        many = scores.mde_pct([100.0, 101.0, 99.0, 100.0] * 4, [100.0, 101.0, 99.0, 100.0] * 4)
         self.assertLess(many, few)
         self.assertAlmostEqual(many / few, 0.5, delta=0.15)
 
@@ -186,12 +186,12 @@ class TestTheHeadlineScore(WkTest):
                                   "tests": {"First": {"metrics": {"Time": {"current": [62.6]}}}}},
                     "WSL": {"metrics": {"Score": {"current": [9.0]}}}}
         doc = {"JetStream3.0": {"metrics": {"Score": ["Geometric"]}, "tests": children}}
-        self.assertAlmostEqual(report.headline_score(doc), 6.0, places=9)
+        self.assertAlmostEqual(scores.headline_score(doc), 6.0, places=9)
 
     def test_it_aggregates_per_iteration_rather_than_over_the_pooled_set(self):
         doc = aggregate_doc("JetStream3.0", "Geometric",
                             {"x": [1.0, 4.0], "y": [1.0, 4.0]})
-        got = report.headline_score(doc)
+        got = scores.headline_score(doc)
         self.assertAlmostEqual(got, 2.5, places=9)
         self.assertNotAlmostEqual(got, 2.0, places=3)
 
@@ -199,10 +199,10 @@ class TestTheHeadlineScore(WkTest):
         for aggregator, want in (("Total", 7.5), ("Arithmetic", 3.75)):
             with self.subTest(aggregator=aggregator):
                 doc = aggregate_doc("Suite", aggregator, {"x": [1.0, 4.0], "y": [2.0, 8.0]})
-                self.assertAlmostEqual(report.headline_score(doc), want, places=9)
+                self.assertAlmostEqual(scores.headline_score(doc), want, places=9)
 
     def test_a_suite_with_no_score_metric_at_all_yields_nothing(self):
-        self.assertIsNone(report.headline_score(
+        self.assertIsNone(scores.headline_score(
             {"JetStream3.0": {"tests": {"t": {"metrics": {"Score": {"current": [1.0]}}}}}}))
 
 
@@ -210,7 +210,7 @@ class TestAnUnreadableAggregateIsRefusedByName(WkTest):
 
     def _refusal(self, doc):
         with self.assertRaises(SystemExit) as caught:
-            report.headline_score(doc)
+            scores.headline_score(doc)
         return str(caught.exception)
 
     def test_an_aggregator_this_file_does_not_implement_is_named(self):

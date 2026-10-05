@@ -7,7 +7,9 @@ import re
 import sys
 
 from treehash import sha256_file
-from wk.machine import Local
+from wk.machine import Local, isolated_module
+from wk.sysimage import fail
+from wk.sysimage.ls import slot_doc
 
 
 def build_id_of(path, readelf):
@@ -53,11 +55,6 @@ def cmd_manifest(args):
     os.replace(tmp, args.out)
 
 
-def load(path):
-    with open(path) as f:
-        return json.load(f)
-
-
 def recorded_build_id(machine, path):
     try:
         bid = json.loads(machine.read(path)).get("build_id")
@@ -68,8 +65,21 @@ def recorded_build_id(machine, path):
     return bid
 
 
+def write_manifest(build, root, slotdir, fields, readelf=()):
+    """slot.json for `root` as an in-workspace builder (a WsBuild) writes it; the build-id it recorded."""
+    rev = build.m.run(["git", "-C", build.tools, "rev-parse", "--short", "HEAD"])
+    fields = dict(fields, built_at=build.clock.iso(), wk_tools=rev.out.strip() if rev.ok else "unknown")
+    sj = os.path.join(slotdir, "slot.json")
+    build.ok(isolated_module(os.path.join(build.tools, "lib"), "wk.slot") + ["manifest"] + list(readelf) + [root, sj]
+             + ["%s=%s" % kv for kv in sorted(fields.items())], "could not write %s" % sj)
+    try:
+        return recorded_build_id(build.m, sj)
+    except ValueError as e:
+        fail(str(e))
+
+
 def cmd_sums(args):
-    doc = load(args.slot_json)
+    doc = slot_doc(args.slot_json)
     prefix = args.prefix.rstrip("/") + "/" if args.prefix else ""
     for rel, digest in sorted(doc["files"].items()):
         print("%s  %s%s" % (digest, prefix, rel))

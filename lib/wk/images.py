@@ -115,6 +115,13 @@ def origin_branches(env=None):
     return sorted(got)
 
 
+def mirror_branches(env=None):
+    env = os.environ if env is None else env
+    if env.get("WK_MIRROR_BRANCHES"):
+        return env["WK_MIRROR_BRANCHES"].split()
+    return ["main"] + origin_branches(env)
+
+
 def version(text):
     return tuple(int(x) for x in re.findall(r"\d+", text or ""))
 
@@ -169,7 +176,7 @@ def ws_arg(args, env=None):
 
 
 def slot_dir(ws, slot, env=None):
-    """A slot is one WebKit built beside the image in the workspace that built it, placed where its builder puts output."""
+    """A slot is one build of the project beside the image in the workspace that built it, placed where its builder puts output."""
     profile = ws_profile(ws, env)
     if profile is None:
         return None
@@ -194,10 +201,6 @@ def pgo_dir(ws, slot, env=None):
     return os.path.join(Store(env).ws_dir(ws), "build", PGO_SUBDIR, slot)
 
 
-def pgo_dir_in(slot):
-    return "/src/WebKit/WebKitBuild/%s/%s" % (PGO_SUBDIR, slot)
-
-
 def instr_slot(slot):
     return slot + INSTR_SUFFIX
 
@@ -215,22 +218,6 @@ def ws_machine(named, place, here):
 
 def build_resource(machine):
     return "machine:" + machine
-
-
-CONFIG_WORDS = {
-    "wpe-cross-pgo-collect": "instrumented, to collect a profile from -- not a measurement",
-    "wpe-cross-pgo-use": "the measured build, against the mixed profile",
-    "wpe-cross": "built without a profile",
-    "": "the image itself",
-}
-
-
-def build_subject(ws, stage, slot, commit, cross_preset):
-    if stage == "webkit":
-        return "slot %s in %s at %.12s -- %s" % (slot, ws, commit, CONFIG_WORDS.get(cross_preset, cross_preset))
-    if stage == "pgo-mix":
-        return "mixing slot %s's collection in %s" % (slot, ws)
-    return "%s stage of %s" % (stage or "build", ws)
 
 
 def check_slot_name(slot):

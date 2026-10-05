@@ -3,9 +3,10 @@
 import os
 import sys
 
-from wk import act
+from wk import act, project
 from wk.act import Refused, die, info, log, warn
 from wk.key.common import cred_print, detail, verdict
+from wk.machine import isolated_module
 
 
 class Creds:
@@ -16,7 +17,7 @@ class Creds:
         return [f[0] for f in self.forks()]
 
     def _cc(self, *args, input=""):
-        r = self.machine.run(["python3", os.path.join(self.root, "lib", "credcheck.py")] + list(args), input=input)
+        r = self.machine.run(isolated_module(os.path.join(self.root, "lib"), "credcheck") + list(args), input=input)
         sys.stderr.write(r.err)
         return r
 
@@ -92,8 +93,8 @@ class Creds:
         else:
             return
         if not self.sec.switch_cred_converge(self.sec.machine_sock(), target, name):
-            warn("the injector on this machine is still writing with the %s stored\n    before this one, so 'git-webkit pr' in a "
-                 "workspace spends that: 'wk key push off'\n    then 'wk key push on' hands it the one stored here." % name)
+            warn("the injector on this machine is still writing with the %s stored\n    before this one, so '%s pr' in a "
+                 "workspace spends that: 'wk key push off'\n    then 'wk key push on' hands it the one stored here." % (name, project.PR_TOOL))
 
     def set(self, name, replace=False, paste=False, value=None):
         """0 when what is stored can do its job."""

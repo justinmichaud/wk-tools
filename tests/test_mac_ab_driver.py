@@ -1,4 +1,4 @@
-"""The Mac A/B's front half (lib/wk/bench/mac.py's MacAB) against FakeMac; the back half is test_mac_ab_rounds."""
+"""The Mac A/B's front half (lib/wk/bench/mac_ab.py's MacAB) against FakeMac; the back half is test_mac_ab_rounds."""
 import contextlib
 import io
 import json
@@ -16,7 +16,7 @@ from tests.test_mac_volume import BENCH_GROUP, FakeGuest, FakeMac, conf_for
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, places, sched  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import ab, mac, record  # noqa: E402
+from wk.bench import ab, cli, mac, mac_ab, record  # noqa: E402
 from wk.boot.mac import DRIVERS, HELPER, Channel  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
@@ -173,7 +173,7 @@ def world(kind="mac-volume", env=None, **o):
         driver = DRIVERS[kind](REPO, conf, fake)
         reg = ManagerReg(str(tree / "manager"), env=e, machine=here)
         opts = dict({"devices": "mbp" if kind == "mac-volume" else "benchvm", "systems": "sid-a,sid-b", "workspace": "mac-rel"}, **o)
-        m = mac.MacAB(tree, reg, clock, "", opts, driver=lambda root, c: driver)
+        m = mac_ab.MacAB(tree, reg, clock, "", opts, cli.Bench(tree, reg, clock), driver=lambda root, c: driver)
         m.fake, m.here_fake, m.manager_fake, m.store, m.clock_ = fake, here, manager, store["path"], clock
         def sent(root, headline, *a, **k):
             here.notified.append(headline)
@@ -234,7 +234,7 @@ class TestOnlyTheDeclaredDisplay(WkTest):
                                     ({"displays": [BENCH_DISPLAY["displays"][0], dict(ext, online=False)]}, "builtin", True, ""),
                                     ("", "builtin", None, "answered nothing"), ("not json", "builtin", None, "did not print JSON")):
             with self.subTest(said=said, doc=doc):
-                got, detail = mac.display_verdict(doc if isinstance(doc, str) else json.dumps(doc), want)
+                got, detail = mac_ab.display_verdict(doc if isinstance(doc, str) else json.dumps(doc), want)
                 self.assertEqual(ok, got)
                 self.assertIn(said, detail)
 
@@ -447,7 +447,7 @@ class TestThePlant(WkTest):
     def test_the_agent_runs_the_tree_the_plant_verified(self):
         with world() as m:
             self.plant(m)
-            plist = m.here_fake.files[os.path.join(m.logs, mac.AGENT + ".plist")]
+            plist = m.here_fake.files[os.path.join(m.logs, mac_ab.AGENT + ".plist")]
         self.assertIn("/var/wk/wk-tools/lib/wk/bench/autorun.py", plist)
         self.assertNotIn("KeepAlive", plist)
 
@@ -656,7 +656,8 @@ class TestTheLiveRows(unittest.TestCase):
 
     def preflight(self, machine):
         reg = places.Registry(REPO, machine=None)
-        m = mac.MacAB(REPO, reg, FakeClock(), "", {"devices": machine})
+        clock = FakeClock()
+        m = mac_ab.MacAB(REPO, reg, clock, "", {"devices": machine}, cli.Bench(REPO, reg, clock))
         m.resolve()
         n, err = said(m.preflight)
         self.assertIsInstance(n, int, err)

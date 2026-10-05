@@ -6,12 +6,11 @@ import os
 import re
 import sys
 
-from wk import act, build, decl, images, job
+from wk import act, decl, images, job
 from wk.machine import Local, isolated_module
 from wk.act import Refused, die, info, log, warn
-from wk.presets import disk_gb
 from wk.lock import Lock
-from wk.resources import Budget, Resources, build_jobs
+from wk.resources import Budget, Resources, build_jobs, disk_gb
 from wk.store import Store, dispatch_place
 from wk.sysimage.ls import human_bytes
 
@@ -132,25 +131,25 @@ def options(rest, flags, valued, usage):
 
 
 class Stage:
-    """`kind` is the builder and the record's kind (one of build.EXCLUSIVE); `stage` names the log and the marker."""
+    """`kind` is the builder and the record's kind (one of job.EXCLUSIVE); `stage` names the log and the marker."""
 
     def __init__(self, reg, driver, ws, kind, stage, kill, clock):
         self.reg, self.driver, self.ws, self.kind, self.stage, self.kill = reg, driver, ws, kind, stage, kill
         self.here, self.env, self.clock = reg.machine, reg.env, clock
-        self.recs = build.records_of(driver, clock, self.here)
+        self.recs = job.records_of(driver, clock, self.here)
         self.ws_dir = driver.store.ws_dir(ws)
         self.log = os.path.join(self.ws_dir, "home", "%s-%s.log" % (kind, stage))
         self.label = kind
         self.watchdog = {}
 
     def refuse_busy(self):
-        busy = build.busy_reason(self.driver, self.recs, self.ws)
+        busy = job.busy_reason(self.driver, self.recs, self.ws)
         if busy:
             die("a build is still running in '%s': %s.\n    Follow it:  wk status %s --log -f\n    Stop it:    %s"
                 % (self.ws, busy, self.ws, self.kill))
 
     def detach(self, argv, what):
-        pid = build.detached(self.here, self.recs, self.clock, self.kind, self.ws, argv,
+        pid = job.detached(self.here, self.recs, self.clock, self.kind, self.ws, argv,
                              os.path.join(self.ws_dir, "detached-%s.log" % self.stage), what)
         info("running detached in '%s' as pid %d -- this end can go away" % (self.ws, pid))
         log("  follow:  wk status %s --log -f" % self.ws)
@@ -162,7 +161,7 @@ class Stage:
         """(budget, running, jobs); self.res is the machine's envelope those were sized against."""
         env = dict(self.env, WK_MB_PER_JOB=str(mb), **({"WK_MAX_JOBS": str(max_jobs)} if max_jobs else {}))
         budget, self.res = Budget(self.here, env, self.clock), Resources(self.here, env)
-        running = budget.running(build.holder_alive(self.reg))
+        running = budget.running(job.holder_alive(self.reg))
         return budget, running, build_jobs(self.res, budget, running)
 
     def admit(self, budget, running, jobs, need_gb=None, what=None):

@@ -13,6 +13,7 @@ import sys
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+from wk import slot as wkslot  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import here, isolated_module  # noqa: E402
 from wk.sysimage import TOOLS, WsBuild, fail  # noqa: E402
@@ -375,7 +376,7 @@ class Build(WsBuild):
         self.m.mkdir(root)
         if not self.m.act_run(["cp", "-a", os.path.join(b, "bin"), os.path.join(b, "lib"), root + "/"]).ok:
             fail("could not copy the build into %s" % slotdir)
-        bid = self.manifest(root, slotdir, dict(slot=a.slot, profile=a.profile, commit=a.commit, target=a.target,
+        bid = wkslot.write_manifest(self, root, slotdir, dict(slot=a.slot, profile=a.profile, commit=a.commit, target=a.target,
                                                 build_preset=a.cross_preset, browser="minibrowser", lib_dir="lib", exec_dir="bin",
                                                 bundle_dir="lib", jobs=str(jobs)))
         self.say("slot ready: %s (build-id %s)" % (slotdir, bid))

@@ -1,7 +1,7 @@
 """An A/B's rounds and its back half: the stopping rule every system asks between rounds (--rounds the floor,
---detect the precision to resolve, --max-rounds the ceiling; lib/wk/bench/board_ab.py and report.py), the A/B summary
+--detect the precision to resolve, --max-rounds the ceiling; lib/wk/bench/board_ab.py and scores.py), the A/B summary
 a Mac's benchmark install writes (report.ab_summary), and a planted Mac A/B read back -- --status, --progress,
---collect (lib/wk/bench/mac.py's MacAB) -- against FakeMac and the fake clock."""
+--collect (lib/wk/bench/mac_ab.py's MacAB) -- against FakeMac and the fake clock."""
 import base64
 import contextlib
 import io
@@ -19,7 +19,7 @@ from tests.test_mac_ab_driver import ready, said, world
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import ab, board_ab, mac, record, report  # noqa: E402
+from wk.bench import ab, board_ab, cli, mac_ab, record, report, scores  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
@@ -43,8 +43,8 @@ class TestTheStoppingRule(WkTest):
         self.assertEqual(board_ab.stopping({"detect": "0.3", "max_rounds": "12"}, 5), (12, 0.3))
 
     def test_a_mac_resolves_a_third_of_a_per_cent_by_default_and_0_turns_it_off(self):
-        self.assertEqual(board_ab.stopping({}, 5, mac.DETECT), (board_ab.MAX_ROUNDS, 0.3))
-        self.assertEqual(board_ab.stopping({"detect": "0.0"}, 5, mac.DETECT), (5, 0.0))
+        self.assertEqual(board_ab.stopping({}, 5, mac_ab.DETECT), (board_ab.MAX_ROUNDS, 0.3))
+        self.assertEqual(board_ab.stopping({"detect": "0.0"}, 5, mac_ab.DETECT), (5, 0.0))
 
     def test_a_ceiling_below_the_floor_and_a_non_percentage_are_refused(self):
         self.assertIn("below --rounds", refused(board_ab.stopping, {"detect": "0.3", "max_rounds": "4"}, 9))
@@ -118,12 +118,12 @@ class TestTheRoundsStopWhenTheyResolve(WkTest):
 class TestResolvedIsThePrecisionRule(WkTest):
     def test_quiet_rounds_resolve_and_noisy_ones_do_not(self):
         with scratch_dir() as tmp:
-            self.assertTrue(report.resolved(write_runs(tmp, "qa", QUIET), write_runs(tmp, "qb", QUIET[::-1]), 0.3))
-            self.assertFalse(report.resolved(write_runs(tmp, "na", NOISY), write_runs(tmp, "nb", [v + 0.5 for v in NOISY]), 0.3))
+            self.assertTrue(scores.resolved(write_runs(tmp, "qa", QUIET), write_runs(tmp, "qb", QUIET[::-1]), 0.3))
+            self.assertFalse(scores.resolved(write_runs(tmp, "na", NOISY), write_runs(tmp, "nb", [v + 0.5 for v in NOISY]), 0.3))
 
     def test_rounds_with_no_score_resolve_nothing(self):
         with scratch_dir() as tmp:
-            self.assertFalse(report.resolved([str(tmp / "absent")], [str(tmp / "absent")], 0.3))
+            self.assertFalse(scores.resolved([str(tmp / "absent")], [str(tmp / "absent")], 0.3))
 
     def test_a_board_asks_it_of_its_own_task(self):
         """Paired the way the report pairs them: a round both arms finished, from this task's runs."""
@@ -390,7 +390,8 @@ class TestTheLiveRows(unittest.TestCase):
 
     def back(self, reading):
         reg = places.Registry(REPO, machine=None)
-        m = mac.MacAB(REPO, reg, FakeClock(), "", {"devices": "mbp", reading: True})
+        clock = FakeClock()
+        m = mac_ab.MacAB(REPO, reg, clock, "", {"devices": "mbp", reading: True}, cli.Bench(REPO, reg, clock))
         got, err = said(m.back)
         self.assertIn(got, (0, 1, Refused), err)
         return err

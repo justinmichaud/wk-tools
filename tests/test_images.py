@@ -8,7 +8,8 @@ from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act  # noqa: E402
-from wk import images  # noqa: E402
+from wk import images, pgo  # noqa: E402
+from wk.sysimage import yocto  # noqa: E402
 
 PROFILE = "webkit-2.52-yocto-rpi5-64"
 WS = "yocto-" + PROFILE
@@ -161,7 +162,7 @@ class TestEveryPathIsKeyedOnTheWorkspace(unittest.TestCase):
 
     def test_a_collection(self):
         self.assertEqual(images.pgo_dir(WS + "-base", "pr", STORE), "/store/ws/%s-base/build/wk-pgo/pr" % WS)
-        self.assertEqual(images.pgo_dir_in("pr"), "/src/WebKit/WebKitBuild/wk-pgo/pr")
+        self.assertEqual(pgo.pgo_dir_in("pr"), "/src/WebKit/WebKitBuild/wk-pgo/pr")
 
     def test_the_instrumented_slot_is_the_measured_slots_name_and_the_suffix(self):
         self.assertEqual(images.instr_slot("base"), "base-instr")
@@ -206,11 +207,11 @@ class TestNames(unittest.TestCase):
                     images.check_slot_name(bad)
 
     def test_a_build_says_which_build_it_is(self):
-        self.assertEqual(images.build_subject(WS, "webkit", "base", "a" * 40, "wpe-cross-pgo-collect"),
+        self.assertEqual(yocto.build_subject(WS, "webkit", "base", "a" * 40, "wpe-cross-pgo-collect"),
                          "slot base in %s at %s -- instrumented, to collect a profile from -- not a measurement"
                          % (WS, "a" * 12))
-        self.assertEqual(images.build_subject(WS, "pgo-mix", "base", "", ""), "mixing slot base's collection in " + WS)
-        self.assertEqual(images.build_subject(WS, "", "", "", ""), "build stage of " + WS)
+        self.assertEqual(yocto.build_subject(WS, "pgo-mix", "base", "", ""), "mixing slot base's collection in " + WS)
+        self.assertEqual(yocto.build_subject(WS, "", "", "", ""), "build stage of " + WS)
 
 
 if __name__ == "__main__":

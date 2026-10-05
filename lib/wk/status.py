@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import secretfile
 import shlex
-from wk import bridge, fleet, images, places, reach, record, secrets, statusview, tools
+from wk import bridge, fleet, images, places, project, reach, record, secrets, statusview, tools
 from wk.bench import record as bench_record
 from wk.clock import Clock
 from wk.lock import holder_pid
@@ -32,12 +32,9 @@ TASK_EXIT = {"running": 2, "starting": 2, "silent": 2, "died": 4, "unreadable": 
              "failed": 1, "gave-up": 1, "error": 1, "stalled": 3, "oom": 3}
 METHOD = {"container": "container", "vm": "macOS guest"}
 RANK = {"container": 0, "vm": 1, "local": 2}
-UPSTREAM_ORIGIN = "https://github.com/WebKit/WebKit.git"
 SDK_TAG = re.compile(r"^(.+)-v(\d+)-[0-9a-f]+$")
 # An arm is consumed by the reboot that follows it within moments; one unconsumed this long was not followed.
 ARM_STALE_SECONDS = 5 * 60
-SERVICES = (("wk-proxy.service", "egress proxy", "workspaces have no network without it"),
-            ("wk-github-inject.service", "credential injector", "'git-webkit pr' and 'gh' in a workspace get no credential"))
 
 WS_PROBE = r'''cd @SRC@ 2>/dev/null || exit 0
 printf 'origin=%s\n' "$(git config --get remote.origin.url 2>/dev/null)"
@@ -339,12 +336,17 @@ def unit_stale(root, unit, run=None):
         return False
 
 
+def services():
+    return (("wk-proxy.service", "egress proxy", "workspaces have no network without it"),
+            ("wk-github-inject.service", "credential injector", "'%s pr' and 'gh' in a workspace get no credential" % project.PR_TOOL))
+
+
 def service_records(root, machine, run=None):
     run = run or Local().run
     out = []
     if not shutil.which("systemctl"):
         return out
-    for unit, label, cost in SERVICES:
+    for unit, label, cost in services():
         if not run(["systemctl", "--user", "cat", unit]).ok:
             continue
         r = Rec("service", machine=machine, name=label)
@@ -465,7 +467,7 @@ def fleet_probe(root, name, cap, env=None):
     """The board's boot driver (wk.boot.cli fleet-probe) asked under a ceiling: None when it did not answer in `cap` seconds."""
     env = os.environ if env is None else env
     r = Local().run(["env", "PYTHONPATH=" + os.path.join(str(root), "lib"), "WK_SSH_TIMEOUT=" + str(fleet_timeout(env)),
-                     sys.executable, "-m", "wk.boot.cli", "fleet-probe", name], input="", timeout=cap)
+                     sys.executable, "-m", "wk", "wk.boot.cli", "fleet-probe", name], input="", timeout=cap)
     if r.rc == TIMED_OUT:
         return None
     if not r.ok:
@@ -831,10 +833,10 @@ class Walk:
         r.opt("branch", driver.branch(ws))
         probe = {}
         if st == "present":
-            script = WS_PROBE.replace("@SRC@", shlex.quote(driver.src(ws))).replace("@BASE@", places.UPSTREAM_LINE_BODY)
+            script = WS_PROBE.replace("@SRC@", shlex.quote(driver.src(ws))).replace("@BASE@", places.upstream_line_body())
             probe = kv(driver.exec(ws, ["sh", "-c", script]).out)
             origin = probe.get("origin", "")
-            if origin and origin != UPSTREAM_ORIGIN:
+            if origin and origin != project.ORIGIN:
                 r.warn("origin is %s, not upstream -- 'wk sync %s --fix'" % (origin, ws))
             for f in ("dirty", "untracked", "unpushed", "upstream", "behind", "ahead"):
                 if probe.get(f) and probe[f] != "0":

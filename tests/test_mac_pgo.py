@@ -1,5 +1,5 @@
 """The macOS perf build: `mac-release-pgo`, the preset every macOS number is
-taken from (lib/wk/presets.py, build/mac-pgo.sh, lib/wk/bench/mac.py's PgoCollect,
+taken from (lib/wk/presets.py, build/mac-pgo.sh, lib/wk/bench/mac_pgo.py's PgoCollect,
 build/pgo-run-benchmark.py)."""
 import contextlib
 import io
@@ -15,7 +15,7 @@ sys.path.insert(0, str(REPO / "lib"))
 from tests.test_bench_mac import StubWatch  # noqa: E402
 from wk import presets, screen as wkscreen  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import mac, seed  # noqa: E402
+from wk.bench import mac, mac_pgo, seed  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
 PRESET = "mac-release-pgo"
@@ -151,8 +151,8 @@ def fake_guest(check_rc=0, drew=(), profile_rc=0, blocker="", console="admin", p
 
 
 def collect(m, pins=(("speedometer3", "/seed/s"), ("jetstream3", "/seed/j"), ("motionmark", "/seed/m"))):
-    c = mac.PgoCollect(REPO, m, {"HOME": "/Users/admin"}, "/src")
-    with mock.patch.object(mac.PgoCollect, "pins", lambda self: list(pins)), mock.patch.object(wkscreen, "Watch", StubWatch), \
+    c = mac_pgo.PgoCollect(REPO, m, {"HOME": "/Users/admin"}, "/src")
+    with mock.patch.object(mac_pgo.PgoCollect, "pins", lambda self: list(pins)), mock.patch.object(wkscreen, "Watch", StubWatch), \
             mock.patch.dict(os.environ), \
             contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()):
         os.environ.pop("WK_DRY_RUN", None)
@@ -230,7 +230,7 @@ class TestTheCollection(WkTest):
     def test_a_payload_it_could_not_pin_stops_the_collection(self):
         m = fake_guest()
         m.files["/src/Tools/Scripts/webkitpy/benchmark_runner/data/plans/speedometer3.plan"] = '{"git_repository": {"url": "u"}}'
-        c = mac.PgoCollect(REPO, m, {"HOME": "/Users/admin", "WK_STORE": "/store"}, "/src")
+        c = mac_pgo.PgoCollect(REPO, m, {"HOME": "/Users/admin", "WK_STORE": "/store"}, "/src")
         with mock.patch.object(seed.Seeder, "seed", return_value=""), contextlib.redirect_stderr(io.StringIO()) as err:
             with self.assertRaises(Refused):
                 c.pins()
@@ -243,7 +243,7 @@ class TestTheCollection(WkTest):
             m.files[f] = "x"
         with mock.patch.dict(os.environ):
             os.environ.pop("WK_DRY_RUN", None)
-            mac.PgoCollect(REPO, m, {"HOME": "/Users/admin"}, "/src").evidence("/final", "/p")
+            mac_pgo.PgoCollect(REPO, m, {"HOME": "/Users/admin"}, "/src").evidence("/final", "/p")
         self.assertEqual(sorted(f for f in m.files if f.startswith("/final/")),
                          ["/final/wk-browser-check.json", "/final/wk-payload-pins", "/final/wk-profile-check.json"])
 
@@ -251,14 +251,14 @@ class TestTheCollection(WkTest):
 class TestItRefusesAThrottledCollection(WkTest):
 
     def test_it_names_every_reason_rather_than_the_first(self):
-        faults = mac.PgoCollect(REPO, fake_guest(console="root", screen=1, blocker="Setup Assistant:Welcome"), {}, "/src").faults()
+        faults = mac_pgo.PgoCollect(REPO, fake_guest(console="root", screen=1, blocker="Setup Assistant:Welcome"), {}, "/src").faults()
         self.assertEqual(len(faults), 3, faults)
         self.assertIn("nowhere to draw", faults[0])
         self.assertIn("no main screen", faults[1])
         self.assertIn("Setup Assistant", faults[2])
 
     def test_without_pyobjc_nothing_can_raise_the_browser(self):
-        faults = mac.PgoCollect(REPO, fake_guest(pyobjc=1), {}, "/src").faults()
+        faults = mac_pgo.PgoCollect(REPO, fake_guest(pyobjc=1), {}, "/src").faults()
         self.assertEqual(["no pyobjc: run-benchmark cannot size the screen and no raiser can hold the browser in front"], faults)
 
     def test_a_fault_stops_the_collection_before_the_raiser(self):
@@ -288,7 +288,7 @@ class TestItIsThePolicyAndNotAnOption(WkTest):
 
 
 def run_py(*args):
-    return subprocess.run(["python3", "-m", "wk.bench.mac"] + list(args), capture_output=True, text=True, timeout=30,
+    return subprocess.run(["python3", "-m", "wk", "wk.bench.mac_pgo"] + list(args), capture_output=True, text=True, timeout=30,
                           env=dict(os.environ, PYTHONPATH=str(REPO / "lib")))
 
 

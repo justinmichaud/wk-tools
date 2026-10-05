@@ -1,11 +1,12 @@
 """The images a workspace holds, found as each builder's outputs on every read; `wk sysimage ls` walks every machine that answers for a store of its own."""
 
 import fnmatch
+import json
 import os
 import time
 from collections import namedtuple
 
-from wk import act, fleetwalk, images, slot
+from wk import act, fleetwalk, images
 from wk.clock import Clock
 
 Image = namedtuple("Image", "builder ws path")   # path None: an image workspace holding none right now
@@ -31,9 +32,14 @@ class Builder:
         return sorted(_glob(machine, ws_dir, self.pattern.split("/")))
 
 
-# Under ws/<name>/build, which lib/wk/places.py's Container bind-mounts as /src/WebKit/WebKitBuild.
+# Under ws/<name>/build, which lib/wk/places.py's Container bind-mounts as the checkout's build tree.
 BUILDERS = (Builder("yocto", "build/CrossToolChains/*/build/image/*.wic.xz"),
             Builder("buildroot", "build/buildroot/*/output/images/*.img"))
+
+
+def slot_doc(path):
+    with open(path) as f:
+        return json.load(f)
 
 
 def _glob(machine, base, parts):
@@ -122,14 +128,14 @@ def slot_docs(ws, env):
     for n in names:
         sj = os.path.join(parent, n, "slot.json")
         if os.path.isfile(sj):
-            out.append((os.path.dirname(sj), slot.load(sj)))
+            out.append((os.path.dirname(sj), slot_doc(sj)))
     return out
 
 
 def slot_is(ws, name, commit, preset, env):
     d = images.slot_dir(ws, name, env)
     try:
-        doc = slot.load(os.path.join(d, "slot.json")) if d else None
+        doc = slot_doc(os.path.join(d, "slot.json")) if d else None
     except (OSError, ValueError):
         return False
     if doc is None or doc.get("commit") != commit:

@@ -56,7 +56,7 @@ class TestContainerWorkspaceLifecycle(WkTest):
                         "@{u}").stdout.strip(),
             "origin/main", "main tracks origin/main, so `git pull` has an upstream")
 
-        from wk.git import mirror_branches
+        from wk.images import mirror_branches
         self.assertEqual(
             self._config("--get-all", "remote.origin.fetch").split("\n"),
             ["+refs/heads/%s:refs/remotes/origin/%s" % (b, b)

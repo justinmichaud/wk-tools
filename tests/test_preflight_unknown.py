@@ -10,7 +10,7 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 from wk import guest, resources  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import board, mac, pipeline, record, report  # noqa: E402
+from wk.bench import board, mac_ab, pipeline, record, report  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
 
@@ -77,12 +77,12 @@ class TestAnUnmeasuredPreflightIsUnknownNotFailure(unittest.TestCase):
         d = types.SimpleNamespace(mode="host", bench_root=lambda: "")
         run = types.SimpleNamespace(d=d, name="m", guest=False)
         with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(1, mac.MacAB.preflight(run))
+            self.assertEqual(1, mac_ab.MacAB.preflight(run))
         m = types.SimpleNamespace(test=lambda *a: True)
         d = types.SimpleNamespace(mode="host", bench_root=lambda: "/r", bench_home=lambda: "", c=lambda k: "")
         run = types.SimpleNamespace(d=d, name="m", guest=False, mac=m, provisioned=lambda root: True)
         with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(1, mac.MacAB.preflight(run))
+            self.assertEqual(1, mac_ab.MacAB.preflight(run))
 
     def test_a_reboot_stops_on_a_display_or_firmware_default_it_could_not_read(self):
         for guest, display, firmware in ((True, (record.UNKNOWN, "no JSON"), None),
@@ -93,7 +93,7 @@ class TestAnUnmeasuredPreflightIsUnknownNotFailure(unittest.TestCase):
                                         d=types.SimpleNamespace(boot_id=lambda: self.fail("rebooted")))
             with self.subTest(guest=guest, display=display, firmware=firmware), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(Refused):
-                    mac.MacAB.restart(run)
+                    mac_ab.MacAB.restart(run)
 
     def test_gates_and_preflight_count_the_rows_not_measured(self):
         self.assertEqual("", record.not_measured(0))

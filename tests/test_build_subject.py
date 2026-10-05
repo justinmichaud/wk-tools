@@ -7,7 +7,7 @@ import unittest
 from tests.support import REPO, WkTest, bash, builds_on_the_books_env, func_body, run
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import images  # noqa: E402
+from wk.sysimage import yocto  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 
 SHA = "a" * 40
@@ -15,20 +15,20 @@ WS = "yocto-p"
 
 
 class TestABuildSaysWhatItIsOf(WkTest):
-    """images.build_subject; the instrumented slot and the mix stage are tests/test_images.py's."""
+    """yocto.build_subject; the instrumented slot and the mix stage are tests/test_images.py's."""
 
 
     def test_the_two_are_not_the_same_words(self):
-        self.assertNotEqual(images.build_subject(WS, "webkit", "base-instr", SHA, "wpe-cross-pgo-collect"),
-                            images.build_subject(WS, "webkit", "base", SHA, "wpe-cross-pgo-use"))
+        self.assertNotEqual(yocto.build_subject(WS, "webkit", "base-instr", SHA, "wpe-cross-pgo-collect"),
+                            yocto.build_subject(WS, "webkit", "base", SHA, "wpe-cross-pgo-use"))
 
     def test_an_image_stage_says_the_stage_and_the_image_workspace(self):
-        self.assertEqual(images.build_subject(WS, "image", "", "", ""), "image stage of " + WS)
+        self.assertEqual(yocto.build_subject(WS, "image", "", "", ""), "image stage of " + WS)
 
     def test_the_image_workspace_is_named_every_time(self):
         for stage in ("webkit", "pgo-mix", "image"):
             with self.subTest(stage=stage):
-                self.assertIn(WS, images.build_subject(WS, stage, "s", SHA, "wpe-cross"))
+                self.assertIn(WS, yocto.build_subject(WS, stage, "s", SHA, "wpe-cross"))
 
 
 class TestTheRecordCarriesIt(WkTest):

@@ -19,6 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from wk import project
 from wk.machine import Local
 
 OK, WIDE, BAD, UNVERIFIED, ABSENT = ("ok", "wide", "bad",
@@ -39,8 +40,15 @@ def api_base(var, default):
 
 
 GITHUB_API = api_base("WK_GITHUB_API", "https://api.github.com")
-BUGZILLA_API = api_base("WK_BUGZILLA_API", "https://bugs.webkit.org")
-BUGZILLA_KEYS = "https://bugs.webkit.org/userprefs.cgi?tab=apikey"
+BUGZILLA_API = api_base("WK_BUGZILLA_API", "")   # checked here; unset is the project's own (bugzilla())
+
+
+def bugzilla():
+    return BUGZILLA_API or project.BUGZILLA
+
+
+def bugzilla_host():
+    return urllib.parse.urlsplit(project.BUGZILLA).hostname
 TIMEOUT = 20
 PER_PAGE = 100
 
@@ -62,7 +70,7 @@ def fix_of(rule):
     return " -- ".join(x for x in (rule.url, rule.remedy) if x)
 
 
-# The longest lifetime an organization's token policy allows; a token minted to never expire is refused every call to every repository the organization owns (measured against WebKit/WebKit, 2026-09-15).
+# The longest lifetime an organization's token policy allows; a token minted to never expire is refused every call to every repository the organization owns (measured against the upstream project, 2026-09-15).
 MAX_PAT_DAYS = 365
 
 # Classic: a fine-grained token reaches only its owner's repositories, so it opens a pull request on no upstream project.
@@ -191,11 +199,11 @@ def _github_pat(value, repos, path, evidence):
     except Unreachable as e:
         return UNVERIFIED, ("could not ask %s which project each fork belongs "
                             "to (%s); 'wk doctor' asks again." % (GITHUB_API, e))
-    for project in projects:
-        verdict, why = _github_pr_verdict(token, kind, project, True)
+    for upstream in projects:
+        verdict, why = _github_pr_verdict(token, kind, upstream, True)
         if verdict != OK:
             return verdict, why
-        facts.append("can open a pull request on %s" % project)
+        facts.append("can open a pull request on %s" % upstream)
     if kind == "classic":
         reach = ("every repository this account can write, public and private"
                  if "repo" in scopes else
@@ -232,32 +240,32 @@ def _bugzilla_api_key(value, repos, path, evidence):
     if not login:
         return UNVERIFIED, ("no Bugzilla login to check it against: the login is "
                             "the first email of this GitHub account's entry in "
-                            "WebKit's metadata/contributors.json, read from the "
-                            "mirror here ('wk sync' makes one).")
-    url = BUGZILLA_API + "/rest/valid_login?" + urllib.parse.urlencode(
+                            "%s's metadata/contributors.json, read from the "
+                            "mirror here ('wk sync' makes one)." % project.CHECKOUT)
+    url = bugzilla() + "/rest/valid_login?" + urllib.parse.urlencode(
         {"login": login, "api_key": key})
     try:
         status, _headers, raw = _http("GET", url, None)
     except Unreachable as e:
         return UNVERIFIED, ("could not reach %s (%s), so whether it accepts this "
                             "key is not known here; 'wk doctor' asks again."
-                            % (BUGZILLA_API, e))
+                            % (bugzilla(), e))
     doc = _json(raw)
     if status == 400 and doc.get("code") == 306:
         return BAD, ("%s does not accept this key (error 306): revoked, mistyped "
-                     "or never valid." % BUGZILLA_API)
+                     "or never valid." % bugzilla())
     if status != 200:
         return UNVERIFIED, ("GET /rest/valid_login at %s answered HTTP %d rather "
                             "than 200 or 400, so nothing about this key was "
-                            "established." % (BUGZILLA_API, status))
+                            "established." % (bugzilla(), status))
     if doc.get("result") is not True:
         return BAD, ("%s accepts this key, but not as %s: it belongs to another "
-                     "account, and `git-webkit pr` would file and assign as that "
-                     "one." % (BUGZILLA_API, login))
+                     "account, and `%s pr` would file and assign as that "
+                     "one." % (bugzilla(), login, project.PR_TOOL))
     # Bugzilla discloses no group membership to a caller without editusers, so editbugs is not knowable here.
     return OK, ("%s accepts it as %s; whether that account has editbugs is not "
-                "knowable from here.\n    spent on every bugs.webkit.org request "
-                "a workspace makes while push is on" % (BUGZILLA_API, login))
+                "knowable from here.\n    spent on every %s request "
+                "a workspace makes while push is on" % (bugzilla(), login, bugzilla_host()))
 
 
 def _some(names, n=3):
@@ -294,7 +302,7 @@ def _pull_request_probe(token, repo):
 
 
 def _github_pr_bases(token, repos):
-    """`git-webkit pr` posts to each fork's `parent`, so that project has to accept the token too."""
+    """The PR tool posts to each fork's `parent`, so that project has to accept the token too."""
     bases = []
     for repo in repos:
         status, _headers, body = _http("GET", "%s/repos/%s" % (GITHUB_API, repo),
@@ -307,7 +315,7 @@ def _github_pr_bases(token, repos):
     return bases
 
 
-def _github_pr_verdict(token, kind, repo, project):
+def _github_pr_verdict(token, kind, repo, upstream):
     """A project's two 403s differ only by GitHub's message: an organization's token policy, or a fine-grained token
     outside its resource owner."""
     try:
@@ -317,7 +325,7 @@ def _github_pr_verdict(token, kind, repo, project):
                             "request can be opened on %s." % (GITHUB_API, e, repo))
     if status == 422:
         return OK, ""
-    if status == 403 and project:
+    if status == 403 and upstream:
         why = ("%s refuses this token a pull request (HTTP 403). GitHub says: %s"
                % (repo, message or "nothing at all."))
         if kind == "fine-grained":
@@ -330,9 +338,9 @@ def _github_pr_verdict(token, kind, repo, project):
         return BAD, why
     if status == 403:
         return BAD, ("GitHub refused it: no 'Pull requests: write' on %s, so "
-                     "'git-webkit pr' in a workspace cannot open one (HTTP 403): "
+                     "'%s pr' in a workspace cannot open one (HTTP 403): "
                      "the token was not granted that repository, or was granted "
-                     "it without that permission." % repo)
+                     "it without that permission." % (repo, project.PR_TOOL))
     if status == 404:
         return BAD, ("this token cannot see %s at all (HTTP 404): no repository "
                      "of that name is visible to it." % repo)
@@ -474,7 +482,7 @@ def _tailnet_api(value, repos, path, evidence):
         return OK, ("an API access token; whether the tailnet still accepts it "
                     "is asked as soon as it is stored.")
     probe = Local().run(["env", "WK_TS_API_SECRET_FILE=" + path, "PYTHONPATH=" + os.path.dirname(os.path.abspath(__file__)),
-                         sys.executable, "-m", "wk.tailnet", "check"])
+                         sys.executable, "-m", "wk", "wk.tailnet", "check"])
     detail = (probe.out + probe.err).strip().splitlines()
     detail = detail[-1] if detail else "no answer"
     if probe.rc == 0:
@@ -550,101 +558,104 @@ def _ntfy_topic(value, repos, path, evidence):
     return BAD, detail
 
 
-RULES = collections.OrderedDict((
-    ("github-pat", Rule(
-        needs="open a pull request from each fork wk pushes to, on the "
-              "project it is a fork of",
-        forbids="delete a repository, or administer a repository, an "
-                "organization or the site",
-        what="a GitHub personal access token, so `git-webkit pr` in a "
-             "workspace can open a pull request",
-        url=CLASSIC_TOKEN_PAGE,
-        remedy=("the two fields that link cannot carry: tick nothing but the "
-                "'public_repo' it preselects ('repo' adds every private "
-                "repository this account can write), and set an expiry of at "
-                "most %d days -- an organization refuses a token that outlives "
-                "its policy" % MAX_PAT_DAYS),
-        store_with="wk key set github-pat",
-        check=_github_pat)),
-    ("bugzilla-api-key", Rule(
-        needs="be accepted by bugs.webkit.org as the login WebKit's "
-              "metadata/contributors.json gives this GitHub account",
-        forbids="rest where a workspace reads, or be spent while push is off: "
-                "a Bugzilla key is the whole account",
-        what="a bugs.webkit.org API key, so `git-webkit pr` in a workspace can "
-             "file the bug and post the pull request to it",
-        url=BUGZILLA_KEYS,
-        remedy="'New API key' there, described as this machine; the key is "
-               "shown once",
-        store_with="wk key set bugzilla-api-key",
-        check=_bugzilla_api_key)),
-    ("claude", Rule(
-        needs="authenticate Claude Code for inference",
-        forbids="read the account, bill the organization, or mint further "
-                "credentials",
-        what="a Claude Code token, so a guest or a build box starts "
-             "authenticated instead of asking for /login",
-        url="",
-        remedy="run `claude setup-token` here and paste what it prints",
-        store_with="wk key set claude",
-        check=_claude_token)),
-    ("litellm", Rule(
-        needs="reach your own LiteLLM endpoint",
-        forbids="reach the upstream provider account directly",
-        what="your LiteLLM API key, so `wk ai pi` in a workspace can reach "
-             "that endpoint",
-        url=LITELLM_KEYS,
-        remedy="'+ Create New Key' there; the key is shown once",
-        store_with="wk key set litellm",
-        check=_litellm_key)),
-    ("tailnet", Rule(
-        needs="enroll a node on the tailnet",
-        forbids="administer the tailnet or mint further keys",
-        what="the fleet's tailnet auth key, so a card written here boots onto "
-             "the tailnet under its own name",
-        url=TAILSCALE_KEYS,
-        remedy="Generate auth key: tagged tag:wk, Reusable on, Ephemeral OFF, "
-               "longest expiry",
-        store_with="wk key set tailnet",
-        check=_tailnet_authkey)),
-    ("tailnet-api", Rule(
-        needs="list and delete devices on this tailnet",
-        forbids="be written to a card or reach a workspace: it administers "
-                "the whole tailnet",
-        what="the tailnet API access token a workstation retires a stale fleet "
-             "node with",
-        url=TAILSCALE_KEYS,
-        remedy="Generate access token: the tag:wk devices scope is enough",
-        store_with="wk key set tailnet-api",
-        check=_tailnet_api)),
-    ("deploy-key", Rule(
-        needs="push to exactly one fork",
-        forbids="reach any other repository, or be read-only",
-        what="an ed25519 key per fork, generated here and never pasted",
-        url="",
-        remedy="wk key deploy  (it registers with read_only=false)",
-        store_with="wk key deploy",
-        check=_deploy_key)),
-    ("ntfy", Rule(
-        needs="publish a notification a person sees",
-        forbids="be a name someone could arrive at by guessing: the topic is "
-                "the whole credential, so anyone holding it reads every "
-                "notification and can send one",
-        what="the ntfy.sh topic this machine's notifications go to, so the "
-             "fleet can tell you it wants you",
-        url="https://ntfy.sh/",
-        remedy="subscribe ntfy's iOS or Android app to that topic URL",
-        store_with="wk key set ntfy",
-        check=_ntfy_topic,
-        mint=_ntfy_mint)),
-))
+def rules():
+    return collections.OrderedDict((
+        ("github-pat", Rule(
+            needs="open a pull request from each fork wk pushes to, on the "
+                  "project it is a fork of",
+            forbids="delete a repository, or administer a repository, an "
+                    "organization or the site",
+            what="a GitHub personal access token, so `%s pr` in a "
+                 "workspace can open a pull request" % project.PR_TOOL,
+            url=CLASSIC_TOKEN_PAGE,
+            remedy=("the two fields that link cannot carry: tick nothing but the "
+                    "'public_repo' it preselects ('repo' adds every private "
+                    "repository this account can write), and set an expiry of at "
+                    "most %d days -- an organization refuses a token that outlives "
+                    "its policy" % MAX_PAT_DAYS),
+            store_with="wk key set github-pat",
+            check=_github_pat)),
+        ("bugzilla-api-key", Rule(
+            needs="be accepted by %s as the login %s's "
+                  "metadata/contributors.json gives this GitHub account"
+                  % (bugzilla_host(), project.CHECKOUT),
+            forbids="rest where a workspace reads, or be spent while push is off: "
+                    "a Bugzilla key is the whole account",
+            what="a %s API key, so `%s pr` in a workspace can "
+                 "file the bug and post the pull request to it"
+                 % (bugzilla_host(), project.PR_TOOL),
+            url=project.BUGZILLA + "/userprefs.cgi?tab=apikey",
+            remedy="'New API key' there, described as this machine; the key is "
+                   "shown once",
+            store_with="wk key set bugzilla-api-key",
+            check=_bugzilla_api_key)),
+        ("claude", Rule(
+            needs="authenticate Claude Code for inference",
+            forbids="read the account, bill the organization, or mint further "
+                    "credentials",
+            what="a Claude Code token, so a guest or a build box starts "
+                 "authenticated instead of asking for /login",
+            url="",
+            remedy="run `claude setup-token` here and paste what it prints",
+            store_with="wk key set claude",
+            check=_claude_token)),
+        ("litellm", Rule(
+            needs="reach your own LiteLLM endpoint",
+            forbids="reach the upstream provider account directly",
+            what="your LiteLLM API key, so `wk ai pi` in a workspace can reach "
+                 "that endpoint",
+            url=LITELLM_KEYS,
+            remedy="'+ Create New Key' there; the key is shown once",
+            store_with="wk key set litellm",
+            check=_litellm_key)),
+        ("tailnet", Rule(
+            needs="enroll a node on the tailnet",
+            forbids="administer the tailnet or mint further keys",
+            what="the fleet's tailnet auth key, so a card written here boots onto "
+                 "the tailnet under its own name",
+            url=TAILSCALE_KEYS,
+            remedy="Generate auth key: tagged tag:wk, Reusable on, Ephemeral OFF, "
+                   "longest expiry",
+            store_with="wk key set tailnet",
+            check=_tailnet_authkey)),
+        ("tailnet-api", Rule(
+            needs="list and delete devices on this tailnet",
+            forbids="be written to a card or reach a workspace: it administers "
+                    "the whole tailnet",
+            what="the tailnet API access token a workstation retires a stale fleet "
+                 "node with",
+            url=TAILSCALE_KEYS,
+            remedy="Generate access token: the tag:wk devices scope is enough",
+            store_with="wk key set tailnet-api",
+            check=_tailnet_api)),
+        ("deploy-key", Rule(
+            needs="push to exactly one fork",
+            forbids="reach any other repository, or be read-only",
+            what="an ed25519 key per fork, generated here and never pasted",
+            url="",
+            remedy="wk key deploy  (it registers with read_only=false)",
+            store_with="wk key deploy",
+            check=_deploy_key)),
+        ("ntfy", Rule(
+            needs="publish a notification a person sees",
+            forbids="be a name someone could arrive at by guessing: the topic is "
+                    "the whole credential, so anyone holding it reads every "
+                    "notification and can send one",
+            what="the ntfy.sh topic this machine's notifications go to, so the "
+                 "fleet can tell you it wants you",
+            url="https://ntfy.sh/",
+            remedy="subscribe ntfy's iOS or Android app to that topic URL",
+            store_with="wk key set ntfy",
+            check=_ntfy_topic,
+            mint=_ntfy_mint)),
+    ))
 
 
 def check(name, repos, path, evidence):
-    rule = RULES.get(name)
+    rule = rules().get(name)
     if rule is None:
         sys.stderr.write("credcheck: no rule for '%s'; there are: %s\n"
-                         % (name, " ".join(RULES)))
+                         % (name, " ".join(rules())))
         return 2
     value = sys.stdin.read()
     if path and not value.strip():
@@ -660,7 +671,7 @@ def check(name, repos, path, evidence):
 
 
 def mint(name):
-    r = RULES.get(name)
+    r = rules().get(name)
     if r is None or not r.mint:
         sys.stderr.write("credcheck: nothing here mints a '%s' credential; "
                          "wk mints: %s\n" % (name, " ".join(_minted())))
@@ -670,11 +681,11 @@ def mint(name):
 
 
 def _minted():
-    return [n for n, r in RULES.items() if r.mint]
+    return [n for n, r in rules().items() if r.mint]
 
 
 def rule(name):
-    r = RULES.get(name)
+    r = rules().get(name)
     if r is None:
         return 2
     for field in FIELDS:
@@ -697,7 +708,7 @@ def main(argv):
     v.add_argument("--evidence", action="append", default=[], metavar="KEY=VALUE")
     a = p.parse_args(argv)
     if a.verb in ("names", "minted"):
-        sys.stdout.write("".join(n + "\n" for n in (RULES if a.verb == "names" else _minted())))
+        sys.stdout.write("".join(n + "\n" for n in (rules() if a.verb == "names" else _minted())))
         return 0
     if a.verb == "mint":
         return mint(a.name)

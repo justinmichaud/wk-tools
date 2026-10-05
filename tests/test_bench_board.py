@@ -19,7 +19,7 @@ from tests.support import REPO, requires_machine
 
 sys.path.insert(0, str(REPO / "lib"))
 from tests.test_bench_pipeline import PLAN_JSON, RESULT, SHA, registry as pipeline_registry, invoke  # noqa: E402
-from wk import act, images, pgo, record, samply  # noqa: E402
+from wk import act, images, pgo, record, samply, webkit  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import board, board_ab, cli, record as brecord  # noqa: E402
 from wk.boot import cli as bootcli  # noqa: E402
@@ -337,9 +337,8 @@ class TestInAWorkspaceItIsABrokerRequest(unittest.TestCase):
         return cli.Bench(str(REPO), reg, FakeClock()).deploy(WS, BOARD, "b")
 
     def test_a_board_run_is_a_run_request(self):
-        from wk.bench import pipeline
         here, reg = self.world()
-        rc = pipeline.run(str(REPO), reg, ["jetstream3"], {"system": BOARD, "count": "2"}, False, FakeClock())
+        rc = cli.run(str(REPO), reg, ["jetstream3"], {"system": BOARD, "count": "2"}, False, FakeClock())
         self.assertEqual(rc, 0)
         (call,) = [e for e in here.effects if e[0] == "run_tty"]
         self.assertEqual(call[1][-5:], ("run", "machine=" + BOARD, "workspace=" + WS, "plan=jetstream3", "count=2"))
@@ -624,7 +623,7 @@ class TestRefusals(BoardTest):
 
     def test_an_instrumented_slot_is_never_measured(self):
         w = self.world()
-        w.board.bench.files[board.slot_path("a") + "/slot.json"] = json.dumps(dict(SLOT_DOC, build_preset=board.INSTRUMENTED))
+        w.board.bench.files[board.slot_path("a") + "/slot.json"] = json.dumps(dict(SLOT_DOC, build_preset=pgo.COLLECT))
         self.assertIn("is an instrumented build", self.refused(w))
 
     def test_a_leg_on_the_wrong_system_is_refused_before_anything_runs(self):
@@ -637,7 +636,7 @@ class TestRefusals(BoardTest):
 
     def collecting(self):
         w = self.world()
-        w.board.bench.files[board.slot_path("a-instr") + "/slot.json"] = json.dumps(dict(SLOT_DOC, build_preset=board.INSTRUMENTED))
+        w.board.bench.files[board.slot_path("a-instr") + "/slot.json"] = json.dumps(dict(SLOT_DOC, build_preset=pgo.COLLECT))
         return w
 
     def test_a_collection_needs_an_instrumented_slot(self):
@@ -814,7 +813,7 @@ class TestTheRunnerTree(BoardTest):
         self.assertEqual((tree, sha), (w.tree, SHA))
         order = [e[1][:2] if e[0] == "act" else e[:2] for e in w.effects if e[0] in ("act", "remove", "mkdir")]
         self.assertEqual(order, [("remove", w.tree + ".tmp"), ("mkdir", w.tree + ".tmp"), ("sh", "-c"), ("remove", w.tree), ("mv", "-f")])
-        self.assertIn(("copy_in", str(REPO / board.DRIVER), os.path.join(w.tree, board.DRIVERS, "wk_board_driver.py")), w.effects)
+        self.assertIn(("copy_in", str(REPO / board.DRIVER), os.path.join(w.tree, webkit.BENCH_DRIVERS, "wk_board_driver.py")), w.effects)
         self.assertIn(("copy_tree_in", str(REPO / "lib" / "wk"), os.path.join(w.tree, board.WKLIB, "wk")), w.effects)
 
     def test_no_mirror_names_wk_sync(self):

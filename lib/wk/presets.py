@@ -2,7 +2,7 @@
 
 import shlex
 
-from wk import act, fleet, images, resources
+from wk import act, fleet, images, record, resources
 from wk.store import dispatch_place
 
 LIST_TEXT = """\
@@ -31,7 +31,6 @@ DEFAULT_CMAKE = "-DDEVELOPER_MODE=ON -DUSE_VULKAN=OFF -DENABLE_THUNDER=OFF"
 LIBCXX_CMAKE = ("-DCMAKE_CXX_FLAGS=-stdlib=libc++ -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++"
                 " -DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++")
 LIBBACKTRACE = {"container": "ON", "vm": "ON", "local": "ON", "remote": "OFF"}   # buildbox4 has no libbacktrace package
-DISK_GB = 25
 PGO_DISK_GB = 60   # two phases' products, 45 GB measured 2026-09-06 with the compilation cache off
 CCACHE_SLOPPINESS = "pch_defines,time_macros,include_file_mtime,include_file_ctime"
 
@@ -68,22 +67,6 @@ def names():
     return list(PRESETS)
 
 
-ARCHES = ("native", "armhf")
-ARCH_NAMES = {"": "native", "native": "native", "host": "native", "arm64": "native", "aarch64": "native", "64": "native",
-              "armhf": "armhf", "arm32": "armhf", "armv7": "armhf", "arm": "armhf", "32": "armhf"}
-# Pinned, arm64 with armhf multiarch: `wkdev-create --arch` would hand podman the aarch64 image with --arch=arm.
-IMAGE_ARMHF = "ghcr.io/igalia/wkdev-sdk:24.04_arm32"
-
-
-def arch_canon(arch):
-    if arch in ARCH_NAMES:
-        return ARCH_NAMES[arch]
-    act.die("unknown architecture '%s' (one of: %s)\n"
-            "    A workspace's --arch is what it runs *natively*. To build for something\n"
-            "    this machine cannot execute, that is a cross build -- see\n"
-            "    docs/Nice to have/HANDOFF-cross-compile.md." % (arch, " ".join(ARCHES)))
-
-
 def arch_label(arch):
     return "" if arch in ("", "native") else arch
 
@@ -104,10 +87,6 @@ def build_args(env, preset=None):
     return env.get("WK_BUILD_ARGS", "") if preset is None else machine_var(env, "WK_BUILD_ARGS", preset)
 
 
-def disk_gb(env):
-    return int(env.get("WK_BUILD_DISK_GB") or DISK_GB)
-
-
 class Preset:
     def __init__(self, name, os_name, kind, spec, env):
         self.name, self.os, self.kind = name, os_name, kind
@@ -123,7 +102,7 @@ class Preset:
         self.script = spec.get("script", "Tools/Scripts/build-webkit")
         self.cc = "" if apple else (env.get("WK_CC") or "clang")
         self.cxx = "" if apple else (env.get("WK_CXX") or "clang++")
-        self.disk_gb = spec.get("disk_gb") or disk_gb(env)
+        self.disk_gb = spec.get("disk_gb") or resources.disk_gb(env)
 
     def build_subdir(self):
         """The build tree under the checkout; the variant suffix keeps a sanitized or profile-guided Apple build out of the shared one."""
@@ -187,6 +166,16 @@ class Preset:
 
     def cmake_summary(self):
         return self.cmake or "the flags it sets"
+
+
+def default_preset(reg, name):
+    driver = reg.load(reg.ws_place(name))
+    rec = record.Records(driver.store.records_dir(), env=driver.env).find("build", name)
+    preset_name = rec.field("preset") if rec else ""
+    if preset_name:
+        act.info("preset: %s -- what '%s' was last built with" % (preset_name, name))
+        return preset_name
+    return "mac-release" if driver.os() == "macos" else "jsc-release"
 
 
 def resolve(name, os_name, kind, env):

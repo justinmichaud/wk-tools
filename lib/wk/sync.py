@@ -7,7 +7,7 @@ import shlex
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-from wk import act, git, kv, pr, secrets
+from wk import act, git, images, kv, pr, secrets
 from wk.act import Refused, debug, die, info, log, warn
 from wk.store import Snapshots, Store, in_vm
 
@@ -82,7 +82,7 @@ class Sync:
         self.reg, self.clock, self.lock = reg, clock, lock
         self.here, self.root, self.env = reg.machine, reg.root, reg.env
         self.scope, self.only, self.place, self.fix = scope, only, place, fix
-        self.branches = git.mirror_branches(self.env)
+        self.branches = images.mirror_branches(self.env)
         self._forks = None
 
     def forks(self):

@@ -16,7 +16,6 @@ from wk.sysimage import task as stage
 from wk.store import dispatch_place
 
 PID_MATCH = "*build-in-workspace.sh* *Tools/Scripts/build-*"   # build-in-workspace.sh execs the port's script; a PGO preset stays in it across phases
-EXCLUSIVE = ("build", "babysit", "yocto", "buildroot")   # jobs that hold a checkout: two at once corrupt it
 BABYSIT_MODEL = "haiku"
 BABYSIT_ATTEMPTS = 5
 
@@ -25,44 +24,8 @@ def babysit_settings(env):
     return env.get("WK_BABYSIT_MODEL") or BABYSIT_MODEL, int(env.get("WK_BABYSIT_ATTEMPTS") or BABYSIT_ATTEMPTS)
 
 
-def records_of(driver, clock, machine):
-    """The place's records, each begun with the watchdog's deadline, so `wk status` tells a quiet job from one whose watchdog is gone."""
-    env = dict(driver.env)
-    record.default_watchdog(env, abort=job.ABORT_SECONDS)
-    return record.of_driver(driver, clock, machine, env)
-
-
 def kill_cmd(in_ws, name):
     return "wk build --kill" if in_ws else "wk build %s --kill" % name
-
-
-def busy_reason(driver, records, name, skip=""):
-    """What already holds the checkout: a record by its kind alone, else a pid file in the workspace's home
-    whose pid no place-side record names and which is alive in there."""
-    recorded = set()
-    for t in records.list():
-        if skip and os.path.realpath(str(t.path)) == os.path.realpath(skip):
-            continue
-        if t.field("name") != name:
-            continue
-        if t.field("where") == "place":
-            recorded.add(t.field("pid"))
-        if t.field("kind") in EXCLUSIVE and t.alive(None):
-            return "%s (pid %s, %s)  stop it: %s" % (t.field("kind"), t.field("pid"), t.field("machine"), t.field("kill"))
-    home = os.path.join(driver.store.ws_dir(name), "home")
-    here = records.machine
-    if not here.isdir(home):
-        return None
-    for n in here.listdir(home):
-        if not n.endswith(".pid"):
-            continue
-        try:
-            pid = re.sub(r"[^0-9]", "", here.read(os.path.join(home, n)))
-        except OSError:
-            continue
-        if pid and pid not in recorded and driver.exec(name, ["kill", "-0", pid]).ok:
-            return "%s (pid %s in the workspace)" % (n[:-4], pid)
-    return None
 
 
 def forward(argv, drop=(), drop_valued=(), add=()):
@@ -81,36 +44,6 @@ def forward(argv, drop=(), drop_valued=(), add=()):
     return out + list(add) + argv[i:]
 
 
-def holder_alive(reg):
-    """A budget record's holder, `pid:<n>` on this machine (Budget.record's callers write no other kind)."""
-    return lambda h: h.startswith("pid:") and h[4:].isdigit() and reg.machine.alive(int(h[4:]))
-
-
-def detached(here, recs, clock, kind, name, argv, path, what):
-    """`argv` detached, its log echoed here until the child's own `kind` record exists; its pid."""
-    since = clock.stamp()
-    pid = job.detach(here, argv, path)
-    offset = [0]
-
-    def pump():
-        try:
-            data = here.read_bytes(path, offset[0])
-        except OSError:
-            return
-        offset[0] += len(data)
-        sys.stderr.write(data.decode(errors="replace"))
-
-    while True:
-        pump()
-        t = recs.find(kind, name, floor=since)
-        if t is not None and t.id.endswith("-%d" % pid):
-            return pid
-        if not here.alive(pid):
-            pump()
-            die("the detached %s of '%s' ended before it started -- what it said is\n    above, in full in %s" % (what, name, path))
-        clock.sleep(1)
-
-
 def size_for(reg, driver, name, preset, clock):
     """(budget, jobs running, jobs, MB a job, nice) from a remote place's own numbers, else this machine's free memory under the place's envelope."""
     cores, mem, load = driver.build_size(name)
@@ -122,7 +55,7 @@ def size_for(reg, driver, name, preset, clock):
     else:
         avail = Resources(reg.machine, reg.env).avail_mem_mb(cgroup_mb=mem)
     budget = Budget(reg.machine, benv, clock)
-    running = budget.running(holder_alive(reg))
+    running = budget.running(job.holder_alive(reg))
     mbpj = presets.mb_per_job(preset, reg.env)
     max_jobs = Resources(reg.machine, driver.env).max_jobs()
     jobs = budget.explain(cores, avail, mbpj, load if polite else None, max_jobs, running)
@@ -143,7 +76,7 @@ class Build:
         if not self.driver.is_here():
             self.driver.far_wk_or_die("build")
             die("'%s' is on %s, whose own wk runs its builds; 'wk build %s' hands it there" % (name, self.driver.name, name))
-        self.recs = records_of(self.driver, self.clock, self.here)
+        self.recs = job.records_of(self.driver, self.clock, self.here)
         self.ws_dir = self.driver.store.ws_dir(name)
         self.preset = None
 
@@ -197,7 +130,7 @@ class Build:
                 + forward(self.argv, drop, drop_valued, add))
 
     def detach(self):
-        pid = detached(self.here, self.recs, self.clock, "build", self.name, self.child_argv(("--detach",)),
+        pid = job.detached(self.here, self.recs, self.clock, "build", self.name, self.child_argv(("--detach",)),
                        os.path.join(self.ws_dir, "detached.log"), "build")
         info("building %s in '%s', detached as pid %d -- this end can go away" % (self.preset.name, self.name, pid))
         log("  follow:  wk status %s --log -f" % self.name)
@@ -334,7 +267,7 @@ class Build:
             die("'%s' is already building -- its detached run holds the ws-%s lock.\n    Follow it:  wk status %s --log -f\n    Stop it:    %s"
                 % (name, name, name, self.kill))
         lock.hold("ws-" + name, timeout=0)
-        busy = busy_reason(self.driver, self.recs, name, self.env.get("WK_TASK_PARENT", ""))
+        busy = job.busy_reason(self.driver, self.recs, name, self.env.get("WK_TASK_PARENT", ""))
         if busy:
             act.barrier("'%s' already has a job running in it: %s\n    Two builds in one checkout corrupt both, and this one would be the second.\n"
                         "    See what it is:  wk status %s --log --all" % (name, busy, name))

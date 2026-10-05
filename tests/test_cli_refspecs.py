@@ -5,7 +5,7 @@ import unittest
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import git  # noqa: E402
+from wk import git, images  # noqa: E402
 
 FIFTH = git.REMOTES + (("fifth", "https://example.com/fifth/WebKit.git"),)
 
@@ -26,7 +26,7 @@ class TestFetchRefspecs(unittest.TestCase):
 
 
     def test_the_mirrored_branches_are_the_one_list(self):
-        self.assertEqual(git.fetch_refspecs("origin", "/m", git.mirror_branches({"WK_MIRROR_BRANCHES": "main wpe-2.46"})),
+        self.assertEqual(git.fetch_refspecs("origin", "/m", images.mirror_branches({"WK_MIRROR_BRANCHES": "main wpe-2.46"})),
                          ["+refs/heads/main:refs/remotes/origin/main",
                           "+refs/heads/wpe-2.46:refs/remotes/origin/wpe-2.46"])
 

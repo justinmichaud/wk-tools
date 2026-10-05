@@ -7,7 +7,7 @@ import os
 import plistlib
 import shlex
 
-from wk import fleet
+from wk import fleet, project
 from wk.act import die
 from wk.resources import Resources, arch_has_gpu
 from wk.session import Session
@@ -17,7 +17,7 @@ GOVERNOR = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
 DRM = "/sys/class/drm"
 THERMAL = "/sys/class/thermal"
 # __EGL_VENDOR_LIBRARY_FILENAMES is what decides it: the other two steer Mesa, and glvnd would still load the NVIDIA vendor.
-SOFTWARE_ENV = ("WAYLAND_DISPLAY=", "WEBKIT_DISABLE_DMABUF_RENDERER=1", "LIBGL_ALWAYS_SOFTWARE=1",
+SOFTWARE_ENV = ("WAYLAND_DISPLAY=", "LIBGL_ALWAYS_SOFTWARE=1",
                 "GALLIUM_DRIVER=llvmpipe", "__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json")
 
 
@@ -92,12 +92,12 @@ class System:
 
     def build_present(self, leg):
         build = leg.preset.build_dir(self.src())
-        if leg.runner == "jsc":
-            jsc = leg.preset.jsc_path(self.src())
-            return (True, jsc) if self.exec_ok("test", "-x", jsc) else (False, "no jsc in %s -- wk build %s %s" % (build, self.ws, leg.preset.name))
+        if leg.runner == project.SHELL:
+            shell = leg.preset.jsc_path(self.src())
+            return (True, shell) if self.exec_ok("test", "-x", shell) else (False, "no %s in %s -- wk build %s %s" % (project.SHELL, build, self.ws, leg.preset.name))
         if any(self.exec_ok("test", "-x", p) for p in self.browser_products(leg)):
             return True, build
-        return False, "no MiniBrowser in %s -- wk build %s %s" % (build, self.ws, leg.preset.name)
+        return False, "no %s in %s -- wk build %s %s" % (project.BROWSER, build, self.ws, leg.preset.name)
 
     def link(self, path, link):
         self.ws_driver.act_exec(self.ws, ["mkdir", "-p", os.path.dirname(link)])
@@ -138,14 +138,14 @@ class ContainerSystem(System):
         return ""
 
     def default_browser(self, preset):
-        b = {"--wpe": "minibrowser-wpe", "--gtk": "minibrowser-gtk"}.get(preset.port)
+        b = project.BENCH_BROWSERS.get(preset.port)
         if not b:
             die("no benchmark browser for port %s" % (preset.port or preset.name))
         return b
 
     def browser_products(self, leg):
         build = leg.preset.build_dir(self.src())
-        return [build + "/bin/MiniBrowser", build + "/bin/WPEWebProcess"]
+        return [build + "/" + p for p in project.BROWSER_PRODUCTS]
 
     def run_dir(self, leg):
         return os.path.join("/var/lib/wk/ws", self.ws, os.path.relpath(leg.out, self.ws_driver.store.ws_dir(self.ws)))
@@ -154,10 +154,10 @@ class ContainerSystem(System):
         return "/cache/bench/" + os.path.basename(leg.payload) if leg.payload else ""
 
     def run_env(self, leg):
-        return list(SOFTWARE_ENV) if leg.software else []
+        return list(SOFTWARE_ENV) + list(project.SOFTWARE_ENV) if leg.software else []
 
     def runner_argv(self, leg):
-        return ["Tools/Scripts/run-benchmark", "--browser", leg.browser]
+        return [project.BENCH_RUNNER, "--browser", leg.browser]
 
     def deploy(self, leg):
         """The build is the workspace's own, and the payload is on the store's /cache/bench mount."""
@@ -263,7 +263,7 @@ class GuestSystem(System):
         return ""
 
     def default_browser(self, preset):
-        return "minibrowser"
+        return project.BENCH_BROWSERS["macos"]
 
     def browser_products(self, leg):
         return [leg.preset.browser_path(self.src())]
@@ -281,7 +281,7 @@ class GuestSystem(System):
         return []
 
     def runner_argv(self, leg):
-        return ["Tools/Scripts/run-benchmark", "--browser", leg.browser, "--platform", "osx"]
+        return [project.BENCH_RUNNER, "--browser", leg.browser, "--platform", "osx"]
 
     def deploy(self, leg):
         """The pinned payload, copied in: the guest cannot see this store."""

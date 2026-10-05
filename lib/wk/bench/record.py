@@ -6,7 +6,7 @@ import re
 import sys
 import zipfile
 
-from wk import fleetwalk
+from wk import fleetwalk, project
 from wk.act import die
 from wk.kv import kv_file
 from wk.machine import Local, PodmanVm, Ssh
@@ -385,6 +385,12 @@ def running_tasks(found, lock_path, alive):
     return {t for t in found if alive(lock_path("bench-task-" + t))}
 
 
+def map_row(line):
+    """One line of the autorun's runs.tsv: (round, label, staged, run, clean, plan)."""
+    r = (line.rstrip("\n").split("\t") + [""] * 6)[:6]
+    return tuple(r[:5]) + (r[5] or "unnamed",)
+
+
 def ls_rows(found, running=(), where=""):
     out = []
     for name, taskdir in found.items():
@@ -394,7 +400,7 @@ def ls_rows(found, running=(), where=""):
         for r in st["runs"]:
             m = r["env"]
             axes = "/".join([m.get("runner", "browser")] + [m[k] for k, d in (("arch", "native"), ("bench_host", "container")) if m.get(k, d) != d])
-            out.append("      %s  %s %s %s %s %s%s" % (r["dir"], m.get("plan", "?"), m.get("preset", "?"), axes, (m.get("webkit_sha") or "?")[:10],
+            out.append("      %s  %s %s %s %s %s%s" % (r["dir"], m.get("plan", "?"), m.get("preset", "?"), axes, (m.get(project.SHA_FIELD) or "?")[:10],
                                                      r["state"], "  [FORCED]" if m.get("forced") else ""))
     return out
 

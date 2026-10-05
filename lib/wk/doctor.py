@@ -6,7 +6,7 @@ import os
 import re
 import shlex
 
-from wk import bridge, fleet, git, guest, places, priv, reach, record, secrets, status
+from wk import bridge, fleet, guest, images, places, priv, project, reach, record, secrets, status
 from wk.bench import record as bench_record
 from wk.clock import Clock
 from wk.key.cli import Key
@@ -179,13 +179,13 @@ def probe_store(store, machine, branches, env):
 def report_store(out, gitremedy, fork_key, macos, want):
     """`gitremedy` only when the probe came from another machine; on the same one the config section already checked git."""
     f = kv(out)
-    mirror = f.get("mirror", "")
+    mirror, what = f.get("mirror", ""), "%s mirror" % project.CHECKOUT
     if mirror == "ok":
-        rows = [ok("WebKit mirror")]
+        rows = [ok(what)]
     elif mirror.startswith("gap"):
-        rows = [miss("WebKit mirror carries no %s" % mirror[4:], "wk sync --mirror")]
+        rows = [miss("%s carries no %s" % (what, mirror[4:]), "wk sync --mirror")]
     else:
-        rows = [miss("WebKit mirror", "wk sync")]
+        rows = [miss(what, "wk sync")]
     rows.append(check("snapshot", "wk sync", f.get("base") == "ok"))
     rows.append(check("fork push key", "wk key deploy  (needs gh auth)", fork_key))
     rows.append(check("shared skills seeded", "./setup --stage vmtools" if macos else "./setup --stage machine", f.get("skills") == "ok"))
@@ -334,7 +334,7 @@ class Doctor:
         return r.out.strip() if r.ok else None
 
     def probe_store(self):
-        return probe_store(self.store, self.machine, git.mirror_branches(self.env), self.env)
+        return probe_store(self.store, self.machine, images.mirror_branches(self.env), self.env)
 
     def sections(self, everything):
         yield "host tools", self.host_tools()
@@ -414,7 +414,7 @@ class Doctor:
             yield self.local_state(bench_record.outside(store), "backed-up", "bench tasks outside any workspace, which no command reads "
                                    "until each is moved into its workspace's bench/: wk gc names each one's move")
         yield self.local_state(store.mirror_dir(), "regenerable",
-                               "wk sync clones WebKit into it again (the one copy here; the podman VM and every tart guest read it)")
+                               "wk sync clones %s into it again (the one copy here; the podman VM and every tart guest read it)" % project.CHECKOUT)
         yield self.local_state(store.keyring_dir(), "regenerable", "wk key deploy makes new deploy keys (revoke the old ones on GitHub)")
         yield self.local_state(p["push_held"], "regenerable",
                                "wk key deploy makes new deploy keys; wk key set github-pat and wk key set bugzilla-api-key store new ones "

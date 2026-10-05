@@ -7,9 +7,9 @@ import os
 import re
 import shlex
 
-from wk import act, images, job, record as progress
+from wk import act, images, job, record as progress, webkit
 from wk.act import Refused, die, info, log, warn
-from wk.bench import board, pipeline, record, report, systems
+from wk.bench import board, pipeline, record, scores, systems
 from wk.boot import cli as bootcli
 from wk.lock import Lock
 
@@ -84,7 +84,7 @@ def rounds_of(o, default="3"):
 
 
 def stopping(o, rounds, detect="0"):
-    """(max_rounds, detect): past --rounds the rounds go on until report.resolved says they resolve --detect percent,
+    """(max_rounds, detect): past --rounds the rounds go on until scores.resolved says they resolve --detect percent,
     up to --max-rounds; --detect 0 runs --rounds exactly."""
     pct = o.get("detect") or detect
     try:
@@ -121,8 +121,8 @@ class AB:
     def arm_word(self):
         return "system" if self.systems else "slot"
 
-    def __init__(self, root, reg, ws, plan, o, clock, driver=None, machine=None):
-        self.systems = bool(o.get("ab_systems"))
+    def __init__(self, root, reg, ws, plan, o, clock, reporter, driver=None, machine=None):
+        self.systems, self.reporter = bool(o.get("ab_systems")), reporter
         a, b = pair(o.get("ab_systems") or o.get("ab"), "ab-systems" if self.systems else "ab")
         self.setup(root, reg, ws, plan, o, clock, (a, b))
         self.name = o["system"]
@@ -262,7 +262,7 @@ class AB:
         if act.dry_run():
             return
         d = os.path.join(self.taskdir, "warmup")
-        problems = report.warmup_check(*report.evidence_paths(self.taskdir, self.name), not self.systems)
+        problems = scores.warmup_check(*scores.evidence_paths(self.taskdir, self.name), not self.systems)
         if problems:
             act.barrier("the warmup round says these two arms are not what the A/B claims:\n" + "\n".join("    " + p for p in problems))
             return
@@ -274,7 +274,7 @@ class AB:
 
     def resolved(self):
         a_dirs, b_dirs, _ = record.paired(self.byround(), self.labels)
-        return report.resolved(a_dirs, b_dirs, self.detect)
+        return scores.resolved(a_dirs, b_dirs, self.detect)
 
     def round(self, i, of):
         done = {}
@@ -372,7 +372,7 @@ class AB:
             log("  report:  wk bench report %s" % self.task)
             return
         try:
-            report.task_report(self.taskdir, False, html=True, text=True)
+            self.reporter(self.taskdir)
         except (Refused, SystemExit, OSError, ValueError) as e:
             warn("the report did not complete (%s); the runs are recorded:  wk bench report %s" % (e, self.task))
 
@@ -383,8 +383,8 @@ class ArgsAB(AB):
 
     arm_word = "options"
 
-    def __init__(self, root, reg, ws, plan, o, clock):
-        self.args = (o.get("a_args") or "", o.get("b_args") or "")
+    def __init__(self, root, reg, ws, plan, o, clock, reporter):
+        self.args, self.reporter = (o.get("a_args") or "", o.get("b_args") or ""), reporter
         if self.args[0] == self.args[1]:
             die("--a-args and --b-args are the same ('%s'). Two runs of one arm measure it twice,\n"
                 "    which is a repeatability check rather than an A/B -- '--count N' asks for that." % self.args[0])
@@ -404,7 +404,7 @@ class ArgsAB(AB):
     def body(self):
         self.base = dict(self.o, slot_a=self.labels[0], slot_b=self.labels[1], task=self.task)
         if not self.claimed():
-            preset = self.o.get("preset") or pipeline.DEFAULT_PRESET
+            preset = self.o.get("preset") or webkit.BENCH_PRESET
             measured = "".join(" --%s %s" % (k.replace("_", "-"), shlex.quote(self.o[k])) for k in ARGS_AB_MEASURED if self.o.get(k))
             self.create("%s-%s-options" % (self.clock.stamp(), self.ws), [
                 "subject.kind=options", "subject.a=" + self.args[0], "subject.b=" + self.args[1], "devices=%s=%s" % (self.ws, preset),
@@ -420,7 +420,7 @@ class ArgsAB(AB):
         return self.finish()
 
 
-def run(root, reg, ws, plan, o, clock, driver=None, machine=None):
+def run(root, reg, ws, plan, o, clock, reporter, driver=None, machine=None):
     if o.get("ab") and o.get("ab_systems"):
         die("--ab compares two slots in one booted system, --ab-systems two systems -- they are different comparisons; pick one.")
     if not o.get("system"):
@@ -431,4 +431,4 @@ def run(root, reg, ws, plan, o, clock, driver=None, machine=None):
         die("--slot names the one slot a system A/B holds fixed; a slot A/B names its two slots in --ab")
     if o.get("cores") and not pipeline.cores_valid(o["cores"]):
         die("--cores '%s' is not a valid Linux cpu list (e.g. 0-3, 2,3, 0-1,4, 7)" % o["cores"])
-    return AB(root, reg, ws, plan, o, clock, driver=driver, machine=machine).go()
+    return AB(root, reg, ws, plan, o, clock, reporter, driver=driver, machine=machine).go()

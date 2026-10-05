@@ -11,7 +11,7 @@ from tests.killpoints import converges
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import build, dispatch, record, status  # noqa: E402
+from wk import build, dispatch, job, record, status  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
@@ -23,7 +23,7 @@ class TestAGuestsBuildShowsOnTheHost(test_wk_places.VmTest):
         clock = FakeClock()
         self.fake.pids.add(os.getpid())
         log = str(self.tmp / "vmstore" / "ws" / "mac" / "build.log")
-        build.records_of(self.t, clock, self.fake).begin("build", "here", "mac", "wk build mac --kill", log, ["compile"])
+        job.records_of(self.t, clock, self.fake).begin("build", "here", "mac", "wk build mac --kill", log, ["compile"])
         recs, worst = status.task_records(self.t.records(clock), "mac", clock)
         self.assertEqual([("mac", "running")], [(r["name"], r["state"]) for r in recs])
         self.assertEqual(2, worst)

@@ -138,7 +138,7 @@ def main(args, cmd, reg=None):
             "    at, and without --browser there is no MiniBrowser to name one of.")
     reg = reg or places.Registry(images.root())
 
-    preset_name = store.build_preset() or reg.default_preset(name)
+    preset_name = store.build_preset() or presets.default_preset(reg, name)
     try:
         tname = reg.ws_place(name)
         driver = reg.load(tname)

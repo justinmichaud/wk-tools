@@ -28,6 +28,7 @@ import shlex
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import webkit  # noqa: E402,F401  first: the WebKit names lab code is handed (wk.project)
 from wk import images, store  # noqa: E402
 
 ROOT = images.root()
@@ -35,7 +36,7 @@ ROOT = images.root()
 from wk import decl, job, places, presets, profile, record, session  # noqa: E402
 from wk.ldpath import LLDB_PIN_OPTS, lldb_waiting  # noqa: E402
 from wk.act import Refused, die, dry_run, info, log, warn  # noqa: E402
-from wk.build import records_of, size_for  # noqa: E402
+from wk.build import size_for  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 
 # The suite runner, in the announcing shell's own -lc text.
@@ -115,7 +116,7 @@ def main(argv, reg=None, clock=None):
         driver = reg.load(tname)
     except LookupError as e:
         die(str(e))
-    recs = records_of(driver, clock, reg.machine)
+    recs = job.records_of(driver, clock, reg.machine)
 
     kill_cmd = "wk test%s --kill" % ("" if reg.in_workspace() else " " + name)
 
@@ -126,7 +127,7 @@ def main(argv, reg=None, clock=None):
                 "    Look at it:  wk enter %s  and then  pgrep -af run-" % (name, name))
         return 0
 
-    preset_name = store.build_preset() or reg.default_preset(name)
+    preset_name = store.build_preset() or presets.default_preset(reg, name)
     try:
         preset = presets.resolve(preset_name, driver.os(), driver.kind, driver.env)
     except LookupError:

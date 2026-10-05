@@ -65,6 +65,7 @@ import shlex
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import webkit  # noqa: E402,F401  first: the WebKit names lab code is handed (wk.project)
 from wk import images, store  # noqa: E402
 
 ROOT = images.root()
@@ -163,7 +164,7 @@ def main(argv):
     except LookupError as e:
         die(str(e))
 
-    preset_name = store.build_preset() or reg.default_preset(name)
+    preset_name = store.build_preset() or presets.default_preset(reg, name)
     try:
         preset = presets.resolve(preset_name, driver.os(), driver.kind, driver.env)
     except LookupError:

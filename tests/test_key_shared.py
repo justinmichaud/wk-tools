@@ -9,7 +9,7 @@ from tests.support import REPO, WkTest, stub_path
 from tests.test_credcheck import FakeGitHub, serve
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk.secrets import FORKS  # noqa: E402
+from wk.webkit import FORKS  # noqa: E402
 
 KEY = REPO / "cmd" / "key"
 

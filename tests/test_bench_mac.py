@@ -19,7 +19,7 @@ from tests.killpoints import converges
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import decl, places, samply as wksamply, screen  # noqa: E402
+from wk import decl, places, samply as wksamply, screen, webkit  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import cli, mac, record as brecord, report  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
@@ -330,7 +330,7 @@ class TestTheProfile(MacTest):
         """samply is already in the cache, or it is not and no fetch can start."""
         w = World(self.tmp)
         w.answer(["test", "-x", self.samply()], rc=0 if cached else 1)
-        w.answer(["pgrep", "-n", "-f", mac.WEB_PROCESS], rc=0 if web else 1, out=web)
+        w.answer(["pgrep", "-n", "-f", webkit.MAC_WEB_PROCESS], rc=0 if web else 1, out=web)
         rundir = self.tmp / ("run-%d" % len(os.listdir(self.tmp)))
         rundir.mkdir()
         c = mac.Capture(self.CACHE, w, w.clock, "/tmp/p.json", str(rundir))
@@ -353,7 +353,7 @@ class TestTheProfile(MacTest):
 
     def test_a_staged_run_records_where_its_profile_is(self):
         self.w.answer(["test", "-x", self.samply(self.w.reg.store.cache_dir())])
-        self.w.answer(["pgrep", "-n", "-f", mac.WEB_PROCESS], out="321\n")
+        self.w.answer(["pgrep", "-n", "-f", webkit.MAC_WEB_PROCESS], out="321\n")
         rc, err = self.staged("--profile", "/tmp/p.json")
         self.assertEqual(rc, 0, err)
         self.assertEqual(self.w.env_json()["profile"], "/tmp/p.json")

@@ -18,7 +18,7 @@ from tests.support import REPO
 from tests.test_wk_places import LINUX_PROBE
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, places, record, secrets, workspace  # noqa: E402
+from wk import act, places, pr, record, secrets, workspace  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
@@ -529,12 +529,12 @@ class TestNewFrontTail(WorkspaceTest):
 
     def test_a_pr_is_checked_out_once_ready_and_its_failure_is_the_commands(self):
         calls = []
-        with mock.patch.object(workspace, "pr_checkout", lambda t, here, name, spec: calls.append((t.name, name, spec))):
+        with mock.patch.object(pr, "checkout", lambda t, here, name, spec: calls.append((t.name, name, spec))):
             rc, err = self.stderr(lambda: self.front(pr="u:b"))
         self.assertEqual((rc, calls), (0, [("fakebox", "ws", "u:b")]))
         self.assertLess(err.index("workspace 'ws' ready"), len(err))
         w = self.make_world()
-        with mock.patch.object(workspace, "pr_checkout", lambda *a: act.die("no branch 'b'", 3)):
+        with mock.patch.object(pr, "checkout", lambda *a: act.die("no branch 'b'", 3)):
             self.assertIn("no branch", self.refused(lambda: self.front(w, pr="u:b"), 3))
 
     def test_zed_opens_the_checkout_and_its_failure_only_warns(self):

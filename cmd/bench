@@ -121,13 +121,14 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from wk import webkit  # noqa: E402,F401  first: the WebKit names lab code is handed (wk.project)
 from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
 from wk import decl, places  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import cli, mac, pipeline  # noqa: E402
+from wk.bench import cli, mac  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import Local  # noqa: E402
 
@@ -144,7 +145,7 @@ def report_args(args):
 
 
 def run_arm(args, reg, clock):
-    return pipeline.run(ROOT, reg, args.positionals[1:], cli.options(args, cli.RUN, preset=store.build_preset()), args.flag("--kill"), clock)
+    return cli.run(ROOT, reg, args.positionals[1:], cli.options(args, cli.RUN, preset=store.build_preset()), args.flag("--kill"), clock)
 
 
 def staged_options(args):

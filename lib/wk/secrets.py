@@ -6,17 +6,15 @@ import os
 import shlex
 import sys
 
-from wk import act, images
+from wk import act, images, project
 from wk.act import debug, die, warn
-from wk.machine import Local
+from wk.machine import Local, isolated_module
 from wk.store import Store, in_vm
 
 AGENT_SOCK = "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/ssh-agent.sock"
 CONTAINER_SOCK = "/run/wk/ssh-agent.sock"
 PUBLIC = ("ssh_config", "github-user", "bugzilla-user")
 PUBLISHED = ("ssh_config", "github-user", "view/container/ssh_config")
-FORKS = (("fork", "justinmichaud/WebKit", "github-webkit"),
-         ("forkwpe", "justinmichaud/WPEWebKit", "github-wpe"))
 AGENT_SECRETS = (("claude", "claude-token", ".wk-agent-token", "CLAUDE_CODE_OAUTH_TOKEN", "value", "remote"),
                  ("litellm", "litellm-key", ".wk-litellm-key", "LITELLM_API_KEY", "value", "container,vm,remote"),
                  ("claude-login", ".credentials.json", ".claude/.credentials.json", "-", "file", "container,vm"))
@@ -27,7 +25,7 @@ CONFIG_HEADER = """# wk: written by 'wk key push on|off' (lib/wk/secrets.py). On
 
 
 def forks():
-    return [list(r) for r in FORKS]
+    return [list(r) for r in project.FORKS]
 
 
 def agent_secrets():
@@ -129,7 +127,7 @@ class Secrets:
         args = ["check", name, "--repos", "".join(r[1] + " " for r in self.forks())] + list(extra)
         if name == "bugzilla-api-key":
             args += ["--evidence", "login=" + (self.bugzilla_user() or "")]
-        r = self.machine.run(["python3", os.path.join(self.root, "lib", "credcheck.py")] + args, input=value)
+        r = self.machine.run(isolated_module(os.path.join(self.root, "lib"), "credcheck") + args, input=value)
         sys.stderr.write(r.err)
         return r.out.rstrip("\n")
 
@@ -305,7 +303,7 @@ class Secrets:
         else:
             self.drop(os.path.join(d, "bugzilla-user"))
             warn("no Bugzilla login for %s: metadata/contributors.json in the\n    mirror (%s) has no entry for that account, or there "
-                 "is no mirror\n    ('wk sync'). git-webkit in a workspace asks for one instead" % (self.github_user(), self.store.mirror_dir()))
+                 "is no mirror\n    ('wk sync'). %s in a workspace asks for one instead" % (self.github_user(), self.store.mirror_dir(), project.PR_TOOL))
 
     def publish(self):
         self.publish_config(self.store.keyring_dir(), CONTAINER_SOCK)
@@ -393,7 +391,7 @@ def main(argv):
     if a.verb == "pat-converge":
         s = Secrets(images.root())
         return 0 if s.cred_sync(s.machine_read_pat(), "github-pat") else 1
-    sys.stdout.write(box_alias_blocks(FORKS) if a.verb == "box-alias-blocks" else rows(FORKS if a.verb == "forks" else AGENT_SECRETS))
+    sys.stdout.write(box_alias_blocks(project.FORKS) if a.verb == "box-alias-blocks" else rows(project.FORKS if a.verb == "forks" else AGENT_SECRETS))
     return 0
 
 

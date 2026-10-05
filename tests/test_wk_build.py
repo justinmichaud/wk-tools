@@ -584,9 +584,9 @@ class TestBusyReason(BuildTest):
         self.w.dirs.add(home)
         self.w.files[os.path.join(home, "buildroot-image.pid")] = "77\n"
         self.w.answer(["exec", "ws", "kill", "-0", "77"])
-        self.assertEqual(build.busy_reason(self.driver(), self.w.recs(), "ws"), "buildroot-image (pid 77 in the workspace)")
+        self.assertEqual(job.busy_reason(self.driver(), self.w.recs(), "ws"), "buildroot-image (pid 77 in the workspace)")
         self.w.answer(["exec", "ws", "kill", "-0", "77"], rc=1)
-        self.assertIsNone(build.busy_reason(self.driver(), self.w.recs(), "ws"))
+        self.assertIsNone(job.busy_reason(self.driver(), self.w.recs(), "ws"))
 
     def test_a_pid_a_target_record_names_is_judged_by_its_kind_alone(self):
         home = os.path.join(self.w.ws_dir, "home")
@@ -594,12 +594,12 @@ class TestBusyReason(BuildTest):
         self.w.begin("test", pid=88, where="place")
         self.w.pids.add(88)
         self.w.answer(["exec", "ws", "kill", "-0", "88"])
-        self.assertIsNone(build.busy_reason(self.driver(), self.w.recs(), "ws"))
+        self.assertIsNone(job.busy_reason(self.driver(), self.w.recs(), "ws"))
 
     def test_another_workspaces_job_is_not_this_ones(self):
         self.w.begin("build", name="other", pid=4242)
         self.w.pids.add(4242)
-        self.assertIsNone(build.busy_reason(self.driver(), self.w.recs(), "ws"))
+        self.assertIsNone(job.busy_reason(self.driver(), self.w.recs(), "ws"))
 
 
 class TestJob(BuildTest):

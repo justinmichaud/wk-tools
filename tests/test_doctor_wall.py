@@ -17,9 +17,9 @@ from tests.fakes import FakeRegistry
 from tests.support import REPO, WkTest, bash, clean_env, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import doctor, places, secrets, wall  # noqa: E402
+from wk import doctor, places, wall, webkit  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Fake, Result, isolated_module  # noqa: E402
 
 
 def _load_cmd_doctor():
@@ -29,7 +29,7 @@ def _load_cmd_doctor():
 DOCTOR_CMD = _load_cmd_doctor()
 
 OK, MISS, NOTE = doctor.OK, doctor.MISS, doctor.NOTE
-FORK = secrets.FORKS[0][1]
+FORK = webkit.FORKS[0][1]
 
 # Most specific first: the first key found in the command answers it.
 HEALTHY = [
@@ -87,7 +87,7 @@ class _Wall(unittest.TestCase):
         self.fake.react(["bash", "-lc"], self._exec)
         self.fake.answer(["python3", os.path.join(str(REPO), "lib", "secretfile.py"), "present"])
         self.fake.answer(["python3", os.path.join(str(REPO), "lib", "secretfile.py"), "read"], out="stored-value")
-        self.fake.answer(["python3", os.path.join(str(REPO), "lib", "credcheck.py")], out="ok\tit works")
+        self.fake.answer(isolated_module(os.path.join(str(REPO), "lib"), "credcheck"), out="ok\tit works")
         self.reg = places.Registry(str(REPO), env=self.env, machine=self.fake)
         self.driver = self.load(self.kind)
 
@@ -212,7 +212,7 @@ class TestNoCredentialsInside(_Wall):
     def test_a_healthy_workspace_passes(self):
         rows = self.check("no_credentials_inside")
         self.assertPasses(rows)
-        for var in wall.PLACEHOLDERS:
+        for var in wall.placeholders():
             self.assertIn("%s in the workspace is the placeholder" % var, rows_text(rows))
 
     def test_private_key_material_fails_by_path(self):
@@ -220,14 +220,14 @@ class TestNoCredentialsInside(_Wall):
         self.assertFails(self.check("no_credentials_inside"), "private key material inside the workspace", "id_fork")
 
     def test_an_unset_placeholder_names_what_exports_it(self):
-        for var in wall.PLACEHOLDERS:
+        for var in wall.placeholders():
             with self.subTest(var=var):
                 self.set(var, "")
                 self.assertFails(self.check("no_credentials_inside"), "%s is unset in here" % var, "container/proxy/ensure-bridge.sh")
                 self.set(var, "wk-injects-this")
 
     def test_a_real_token_fails_and_is_never_printed(self):
-        for var in wall.PLACEHOLDERS:
+        for var in wall.placeholders():
             with self.subTest(var=var):
                 self.set(var, "ghp-a-real-one")
                 rows = self.check("no_credentials_inside")
@@ -478,14 +478,14 @@ class TestAgentCredential(_Wall):
 
 class TestGitWebkitSetup(_Wall):
     def test_the_marker_true_passes_and_is_asked_of_the_checkout(self):
-        self.assertPasses(self.check("gitwebkit_setup"))
+        self.assertPasses(self.check("pr_tool_setup"))
         self.assertIn("git -C /src/WebKit config --get webkitscmpy.setup", self.asked)
 
     def test_anything_else_fails_with_the_converging_command(self):
         for answer in ("", "false"):
             with self.subTest(answer=answer):
                 self.set("webkitscmpy.setup", answer)
-                self.assertFails(self.check("gitwebkit_setup"), "has not completed", "wk sync demo --fix")
+                self.assertFails(self.check("pr_tool_setup"), "has not completed", "wk sync demo --fix")
 
 
 class TestBugzilla(_Wall):

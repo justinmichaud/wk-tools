@@ -1,15 +1,14 @@
-"""The upstreams, and the scripts wiring a checkout or a mirror to them; a fork row is lib/wk/secrets.py's FORKS."""
+"""The upstreams, and the scripts wiring a checkout or a mirror to them; a fork row is lib/wk/webkit.py's FORKS."""
 
 import argparse
-import os
 import re
 import sys
 from shlex import quote as q
 
-from wk import images, secrets
+from wk import images, webkit
 
 REMOTES = (
-    ("origin", "https://github.com/WebKit/WebKit.git"),
+    ("origin", webkit.ORIGIN),
     ("wpe", "https://github.com/WebPlatformForEmbedded/WPEWebKit.git"),
     ("fork", "https://github.com/justinmichaud/WebKit.git"),
     ("forkwpe", "https://github.com/justinmichaud/WPEWebKit.git"),
@@ -34,13 +33,6 @@ def pr_repos(remotes=REMOTES):
 # Spelled so no url.<mirror>.insteadOf catches it: those are keyed on the `.git` form, and a mirror holds no PR head.
 def direct_url(url):
     return url[:-4] if url.endswith(".git") else url
-
-
-def mirror_branches(env=None):
-    env = os.environ if env is None else env
-    if env.get("WK_MIRROR_BRANCHES"):
-        return env["WK_MIRROR_BRANCHES"].split()
-    return ["main"] + images.origin_branches(env)
 
 
 def upstreams(forks, remotes=REMOTES):
@@ -141,7 +133,7 @@ def hook_levels(forks):
     return " ".join(["--level %s=0" % NO_PUSH] + ["--level %s:%s=0" % (alias, repo) for _, repo, alias in forks])
 
 
-GITWEBKIT_SETUP = '''if [ "$(git config --get webkitscmpy.setup 2>/dev/null)" = true ]; then
+GITWEBKIT_SETUP = '''if [ "$(git config --get %s 2>/dev/null)" = true ]; then
     state=already
 else
     Tools/Scripts/git-webkit setup --defaults </dev/null >&2 || { echo setup=failed; exit 1; }
@@ -149,7 +141,7 @@ else
 fi
 Tools/Scripts/git-webkit install-hooks $WK_HOOK_LEVELS </dev/null >&2 || { echo setup=hooks-failed; exit 1; }
 echo "setup=$state"
-'''
+''' % webkit.PR_TOOL_SETUP
 
 
 def gitwebkit_setup_script(src, forks):
@@ -267,9 +259,9 @@ def main(argv):
     sub.add_parser("gitwebkit-setup-script").add_argument("src")
     a = parser.parse_args(argv)
     if a.verb == "wiring-script":
-        sys.stdout.write(wiring_script(a.src, a.mirror, secrets.FORKS, mirror_branches()))
+        sys.stdout.write(wiring_script(a.src, a.mirror, webkit.FORKS, images.mirror_branches()))
     else:
-        sys.stdout.write(gitwebkit_setup_script(a.src, secrets.FORKS))
+        sys.stdout.write(gitwebkit_setup_script(a.src, webkit.FORKS))
     return 0
 
 

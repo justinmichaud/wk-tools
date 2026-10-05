@@ -504,7 +504,7 @@ class LocalGuest(Local):
         self.home = home
 
     def _map(self, text):
-        return text.replace(os.path.dirname(places.GUEST_MIRROR), self.home + "/share").replace("/Users/admin", self.home)
+        return text.replace(os.path.dirname(places.guest_mirror()), self.home + "/share").replace("/Users/admin", self.home)
 
     def run(self, argv, input=None, timeout=None):
         env = dict(os.environ, HOME=self.home)

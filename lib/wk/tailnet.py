@@ -47,7 +47,7 @@ def secret(value, path):
 
 
 def usable(rule, value):
-    verdict, why = credcheck.RULES[rule].check(value, [], "", {})
+    verdict, why = credcheck.rules()[rule].check(value, [], "", {})
     return verdict != credcheck.BAD, why
 
 

@@ -16,7 +16,7 @@ from tests import test_pr_workflow, test_push_switch, test_wk_places
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import pushswitch, secrets  # noqa: E402
+from wk import pushswitch, secrets, webkit  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 CMD_PR = test_pr_workflow.CMD_PR_MODULE
@@ -70,9 +70,9 @@ class TestAPushFromABoxIsMadeHere(test_wk_places.RemoteTest):
 class TestAPushOnTheBoxIsRefused(test_wk_places.RemoteTest):
     def test_every_fork_alias_on_a_box_stops_on_the_refusal_naming_wk_pr_open(self):
         """remote/provision.sh writes these blocks; the ProxyCommand ssh would run for `git push` is run here as ssh runs it."""
-        text = secrets.box_alias_blocks(secrets.FORKS)
+        text = secrets.box_alias_blocks(webkit.FORKS)
         proxies = re.findall(r"^    ProxyCommand (.+)$", text, re.M)
-        self.assertEqual(len(secrets.FORKS), len(proxies))
+        self.assertEqual(len(webkit.FORKS), len(proxies))
         cp = subprocess.run(shlex.split(proxies[0]), capture_output=True, text=True)
         self.assertEqual(1, cp.returncode)
         self.assertIn("wk pr open", cp.stderr)
@@ -86,4 +86,4 @@ class TestStatusOnTheBox(test_push_switch.PushTest):
 
     def test_each_fork_is_neither_held_nor_absent(self):
         p = pushswitch.Push(test_push_switch.registry(self.w, self.boxes), self.w.sec(), self.clock)
-        self.assertEqual({"forwarded"}, {p.where(f, set()) for f, _, _ in secrets.FORKS})
+        self.assertEqual({"forwarded"}, {p.where(f, set()) for f, _, _ in webkit.FORKS})

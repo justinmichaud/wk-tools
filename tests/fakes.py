@@ -201,5 +201,4 @@ class JobWorld(Fake):
         return FakeProc(self.rc, None if self.hang else 0, self.interrupt)
 
     def recs(self):
-        from wk import build
-        return build.records_of(self.reg.load("box"), self.clock, self)
+        return job.records_of(self.reg.load("box"), self.clock, self)

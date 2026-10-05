@@ -195,11 +195,11 @@ class TestABranchIsTakenFromTheMirrorFirst(MirrorFixture):
         self.assertEqual(step.strip(), "git fetch -q origin main")
 
 class TestWhatTheMirrorCarries(WkTest):
-    """mirror_branches (lib/wk/git.py) is what origin is narrowed to, and the narrowing is the point:
+    """mirror_branches (lib/wk/images.py) is what origin is narrowed to, and the narrowing is the point:
     WebKit/WebKit advertises 924 heads."""
 
     def _branches(self, env=None):
-        return git.mirror_branches(dict(env or {}, WK_ROOT=str(REPO)))
+        return images.mirror_branches(dict(env or {}, WK_ROOT=str(REPO)))
 
     def _configured(self):
         return images.origin_branches({"WK_ROOT": str(REPO)})

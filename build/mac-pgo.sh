@@ -18,8 +18,8 @@ _pgo_run() {   # <phase label> <products dir> ; the remaining arguments are buil
       guard_run "$jobs" -- $wrapper "$script" "$@" "${XC[@]}" )
 }
 
-_pgo_py() {   # the collection and its evidence are lib/wk/bench/mac.py's PgoCollect
-    WK_ROOT="$_pgo_tools" /usr/bin/python3 -I -c 'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module(sys.argv.pop(1), run_name=__name__, alter_sys=True)' "$_pgo_tools/lib" wk.bench.mac "$@"
+_pgo_py() {   # the collection and its evidence are lib/wk/bench/mac_pgo.py's PgoCollect
+    WK_ROOT="$_pgo_tools" /usr/bin/python3 -I -c 'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module("wk", run_name=__name__, alter_sys=True)' "$_pgo_tools/lib" wk.bench.mac_pgo "$@"
 }
 
 pgo_build() {

@@ -9,7 +9,7 @@ import unittest
 from tests.support import REPO, fake_workspace
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import places  # noqa: E402
+from wk import places, presets  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 from wk.record import Records  # noqa: E402
 from wk.store import Store  # noqa: E402
@@ -49,7 +49,7 @@ class TestTheDefaultConfigIsDerived(unittest.TestCase):
             reg.ws_place = lambda name: "t"
             reg.load = lambda name: _Target(os_, store)
             with contextlib.redirect_stderr(io.StringIO()) as err:
-                return reg.default_preset("demo"), err.getvalue()
+                return presets.default_preset(reg, "demo"), err.getvalue()
 
     def test_the_last_build_wins(self):
         self.assertEqual(self._default("mac-debug", "macos")[0], "mac-debug")

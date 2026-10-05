@@ -12,10 +12,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-CREDCHECK = REPO / "lib" / "credcheck.py"
-
 sys.path.insert(0, str(REPO / "lib"))
+from wk import webkit  # noqa: E402,F401  hands credcheck its names before it is imported
 import credcheck   # noqa: E402
+from wk.machine import isolated_module  # noqa: E402
+
+CREDCHECK = isolated_module(str(REPO / "lib"), "credcheck")
 
 FORKS = "wkuser/WebKit wkuser/WPEWebKit"
 PROJECTS = {"wkuser/WebKit": "WebKit/WebKit",
@@ -130,7 +132,7 @@ class _Rules(unittest.TestCase):
 
     def check(self, name, value=None, repos=FORKS, path=None, evidence=(),
               api=None, env=None):
-        args = ["python3", str(CREDCHECK), "check", name, "--repos", repos]
+        args = CREDCHECK + ["check", name, "--repos", repos]
         if path is not None:
             args += ["--path", str(path)]
             if value is None and Path(path).exists():
@@ -448,7 +450,7 @@ class TestWhereTheseApisMayBePointed(_Rules):
         e = dict(os.environ)
         e.update(env)
         return subprocess.run(
-            ["python3", str(CREDCHECK), "names"],
+            CREDCHECK + ["names"],
             capture_output=True, text=True, env=e, timeout=60)
 
     def test_an_http_host_that_is_not_loopback_is_refused_by_name(self):
@@ -703,7 +705,7 @@ class TestADeployKey(_Rules):
 # --- the table itself ----------------------------------------------------------
 class TestOneTableForEveryCredential(_Rules):
     def names(self):
-        cp = subprocess.run(["python3", str(CREDCHECK), "names"],
+        cp = subprocess.run(CREDCHECK + ["names"],
                             capture_output=True, text=True)
         return cp.stdout.split()
 
@@ -714,7 +716,7 @@ class TestOneTableForEveryCredential(_Rules):
             self.assertIn(row, self.names(), row)
 
     def rule(self, name):
-        cp = subprocess.run(["python3", str(CREDCHECK), "rule", name], capture_output=True, text=True)
+        cp = subprocess.run(CREDCHECK + ["rule", name], capture_output=True, text=True)
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         return dict(l.split("\t", 1) for l in cp.stdout.splitlines())
 
@@ -756,7 +758,7 @@ class TestOneTableForEveryCredential(_Rules):
         self.assertIn("wk key set litellm", detail)
 
     def test_an_unknown_name_is_refused_rather_than_admitted(self):
-        cp = subprocess.run(["python3", str(CREDCHECK), "check", "nosuchthing"],
+        cp = subprocess.run(CREDCHECK + ["check", "nosuchthing"],
                             input="x", capture_output=True, text=True)
         self.assertEqual(2, cp.returncode)
         self.assertIn("no rule for", cp.stderr)

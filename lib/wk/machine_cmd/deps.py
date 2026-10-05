@@ -105,7 +105,7 @@ class Deps:
         if (p.get("git.fsmonitor"), p.get("git.manyfiles")) == ("true", "true"):
             out.append(("ok", "git speed settings (fsmonitor, manyFiles)", ""))
         else:
-            out.append(("wanted", "git there is unconfigured for a big checkout, so `git status` in WebKit walks the whole tree"
+            out.append(("wanted", "git there is unconfigured for a big checkout, so `git status` in it walks the whole tree"
                         " -- which an editor over ssh asks on every keystroke",
                         "wk machine setup <name>  (dotfiles/gitconfig, through the include)"))
         for k, v in p.items():

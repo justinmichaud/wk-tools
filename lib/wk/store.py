@@ -5,7 +5,7 @@ import os
 import shlex
 import sys
 
-from wk import record
+from wk import project, record
 
 BROKER_SOCKET = "/run/wk/broker.sock"
 GUEST_BROKER_SOCKET = ".wk-broker.sock"
@@ -111,10 +111,11 @@ class Store:
             return self.state_dir()
         return self.store_dir()
 
+    def mirror_parent(self):
+        return os.path.join(self.state_dir() if self.macos_host else self.store_dir(), "git")
+
     def mirror_dir(self):
-        if self.macos_host:
-            return os.path.join(self.state_dir(), "git", "WebKit.git")
-        return os.path.join(self.store_dir(), "git", "WebKit.git")
+        return os.path.join(self.mirror_parent(), project.MIRROR)
 
     def snapshots_dir(self):
         return os.path.join(self.store_dir(), "base")
@@ -123,7 +124,7 @@ class Store:
         return os.path.join(self.snapshots_dir(), bid)
 
     def snapshot_tree(self, bid):
-        return os.path.join(self.snapshot_dir(bid), "WebKit")
+        return os.path.join(self.snapshot_dir(bid), project.CHECKOUT)
 
     def snapshot_sha_file(self, bid):
         return os.path.join(self.snapshot_dir(bid), "sha")
@@ -299,7 +300,7 @@ def main(argv):
     p.parse_args(argv)
     s = Store()
     for k, v in (("WK_STORE", s.store_dir()), ("keyring_dir", s.keyring_dir()), ("keyring_agent_rw_dir", s.keyring_agent_rw_dir()),
-                 ("keyring_push_dir", s.keyring_push_dir()), ("mirror_parent", os.path.dirname(s.mirror_dir()))):
+                 ("keyring_push_dir", s.keyring_push_dir()), ("mirror_parent", s.mirror_parent())):
         print("%s=%s" % (k, shlex.quote(v)))
     return 0
 

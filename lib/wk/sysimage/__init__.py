@@ -1,11 +1,8 @@
-"""`wk sysimage`: build, find, write and remove the images a machine boots for one run. WsBuild is what the
-in-workspace halves (yocto_ws.py, buildroot_ws.py) share."""
+"""`wk sysimage`'s machinery; WsBuild is what the in-workspace builders (yocto_ws.py, buildroot_ws.py) share."""
 
 import os
 import sys
 
-from wk import slot
-from wk.machine import isolated_module
 from wk.store import Store
 
 TOOLS = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -66,17 +63,6 @@ class WsBuild:
             fail("the build reported success but left nothing at %s" % path)
         if int(max(stamps)) < int(start):
             fail("the build reported success but nothing at %s is newer than this stage" % path)
-
-    def manifest(self, root, slotdir, fields, readelf=()):
-        rev = self.m.run(["git", "-C", self.tools, "rev-parse", "--short", "HEAD"])
-        fields = dict(fields, built_at=self.clock.iso(), wk_tools=rev.out.strip() if rev.ok else "unknown")
-        sj = os.path.join(slotdir, "slot.json")
-        self.ok(isolated_module(os.path.join(self.tools, "lib"), "wk.slot") + ["manifest"] + list(readelf) + [root, sj]
-                + ["%s=%s" % kv for kv in sorted(fields.items())], "could not write %s" % sj)
-        try:
-            return slot.recorded_build_id(self.m, sj)
-        except ValueError as e:
-            fail(str(e))
 
     def main(self):
         try:

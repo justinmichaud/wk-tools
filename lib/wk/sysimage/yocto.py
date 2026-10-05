@@ -8,7 +8,7 @@ import shlex
 
 from wk import act, fleet, images, job, pgo, record
 from wk.act import die, info, log, warn
-from wk.presets import disk_gb
+from wk.resources import disk_gb
 from wk.sysimage import task
 from wk.sysimage.write import wants_wifi
 
@@ -112,6 +112,22 @@ def running_stage(t):
 def last_of(rest, on, off):
     got = [a for a in rest if a in (on, off)]
     return (got[-1] == on) if got else None
+
+
+CONFIG_WORDS = {
+    "wpe-cross-pgo-collect": "instrumented, to collect a profile from -- not a measurement",
+    "wpe-cross-pgo-use": "the measured build, against the mixed profile",
+    "wpe-cross": "built without a profile",
+    "": "the image itself",
+}
+
+
+def build_subject(ws, stage, slot, commit, cross_preset):
+    if stage == "webkit":
+        return "slot %s in %s at %.12s -- %s" % (slot, ws, commit, CONFIG_WORDS.get(cross_preset, cross_preset))
+    if stage == "pgo-mix":
+        return "mixing slot %s's collection in %s" % (slot, ws)
+    return "%s stage of %s" % (stage or "build", ws)
 
 
 class Yocto(task.ContainerBuilder):
@@ -284,7 +300,7 @@ class Yocto(task.ContainerBuilder):
                 + opt("--multilib-tune", p["YOC_MULTILIB_TUNE"])
                 + ["--chromium", "1" if q["chromium"] else "0", "--cross-preset", q["preset"]]
                 + opt("--cross-cc", q["cc"]) + opt("--cross-cxx", q["cxx"]) + (["--cross-cmake=" + q["cmake"]] if q["cmake"] else [])
-                + (["--pgo-dir", images.pgo_dir_in(q["slot"]), "--pgo-lib", pgo.GLIB_LIB] if q["stage"] == "pgo-mix" else [])
+                + (["--pgo-dir", pgo.pgo_dir_in(q["slot"]), "--pgo-lib", pgo.GLIB_LIB] if q["stage"] == "pgo-mix" else [])
                 + ["--local-layer", "1" if q["local"] else "0", "--tailnet", "1" if q["tailnet"] else "0",
                    "--webkit-jobs", str(webkit_jobs), "--sstate-ns", re.sub(r"[:/]", "-", tag.rsplit("/", 1)[-1])]
                 + opt("--commit", q["commit"])
@@ -312,7 +328,7 @@ class Yocto(task.ContainerBuilder):
         lock = st.admit(budget, running, jobs, disk_need(o["stage"], o["chromium"], o["rm_work"], self.env), what)
         try:
             t = st.begin(list(STAGES))
-            t.set("subject", images.build_subject(ws, o["stage"], o["slot"], o["commit"], o["preset"] if o["stage"] == "webkit" else ""))
+            t.set("subject", build_subject(ws, o["stage"], o["slot"], o["commit"], o["preset"] if o["stage"] == "webkit" else ""))
             try:
                 self.ensure_ws(driver, ws, base, tag)
                 self.check_target(driver, ws)
@@ -330,7 +346,7 @@ class Yocto(task.ContainerBuilder):
         info("stage '%s' ok" % o["stage"])
         if o["stage"] == "pgo-mix":
             info("the collection is mixed; the measured build reads it as\n    %s/output/%s.profdata"
-                 % (images.pgo_dir_in(o["slot"]), pgo.GLIB_LIB))
+                 % (pgo.pgo_dir_in(o["slot"]), pgo.GLIB_LIB))
             return 0
         if o["stage"] != "image":
             info("stage '%s' builds no disk image, so there is nothing more to report" % o["stage"])
@@ -349,9 +365,9 @@ class Yocto(task.ContainerBuilder):
         if stage == "pgo-mix":
             log("would mix the collection for slot '%s' of %s" % (o["slot"], self.name))
             log("  collection  %s" % images.pgo_dir(ws, o["slot"], self.env))
-            log("              %s as the builder sees it -- one directory, two sides of the bind mount" % images.pgo_dir_in(o["slot"]))
+            log("              %s as the builder sees it -- one directory, two sides of the bind mount" % pgo.pgo_dir_in(o["slot"]))
             log("  benchmarks  %s, at WebKit's own weights (Tools/Scripts/pgo-profile)" % " ".join(pgo.BENCHMARKS))
-            log("  into        %s/output/%s.profdata" % (images.pgo_dir_in(o["slot"]), pgo.GLIB_LIB))
+            log("  into        %s/output/%s.profdata" % (pgo.pgo_dir_in(o["slot"]), pgo.GLIB_LIB))
             log("  where       inside %s's cross toolchain -- the clang that wrote the profiles is the only one that reads them" % ws)
             log("dry run -- nothing was mixed.")
             return 0

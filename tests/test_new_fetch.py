@@ -9,15 +9,15 @@ from pathlib import Path
 from tests.support import REPO, GitMirror, bash, git_commit, git_run, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import git, places, secrets, sync, workspace  # noqa: E402
+from wk import git, places, sync, webkit, workspace  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.store import Snapshots, Store  # noqa: E402
 
 
 def _forks():
-    """secrets.FORKS, the fork table's one home, as (remote, repo, alias) tuples."""
-    return list(secrets.FORKS)
+    """webkit.FORKS, the fork table's one home, as (remote, repo, alias) tuples."""
+    return list(webkit.FORKS)
 
 # Nothing here may reach github.com: the wiring points the four remotes at
 # their real URLs and rewrites them to a local mirror, so a fetch that ignored

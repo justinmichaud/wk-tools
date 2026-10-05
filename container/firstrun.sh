@@ -43,7 +43,7 @@ else
     log "         from here cannot resolve one -- 'wk key push on' (or 'off') writes it"
 fi
 
-_git_py() { PYTHONPATH="$WK_TOOLS/lib" WK_ROOT="$WK_TOOLS" python3 -m wk.git "$@"; }
+_git_py() { PYTHONPATH="$WK_TOOLS/lib" WK_ROOT="$WK_TOOLS" python3 -m wk wk.git "$@"; }
 
 if [ -d "$SRC/.git" ]; then             # an old snapshot's remotes are stale
     _mirror="${WK_MIRROR:-}"
@@ -75,7 +75,7 @@ done
 
 ln -sfn /skills "$HOME/.claude/skills"  # one mutable dir, shared by every ws
 
-_agent_secrets() { PYTHONPATH="$WK_TOOLS/lib" python3 -m wk.secrets agent-secrets 2>/dev/null; }
+_agent_secrets() { PYTHONPATH="$WK_TOOLS/lib" python3 -m wk wk.secrets agent-secrets 2>/dev/null; }
 while read -r _sname _sfile _shome _svar _skind _sdelivery; do
     [ -n "$_sname" ] || continue
     # Taken away where it is not delivered: a token beside the login wins over it.
@@ -139,7 +139,7 @@ _install_profilers() {                  # wrapped: not load-bearing
         return 0
     fi
     local release ver sarch sum url tmp got  # samply ships no .deb
-    if ! release=$(PYTHONPATH="$WK_TOOLS/lib" python3 -m wk.samply release "$(uname -m)"); then
+    if ! release=$(PYTHONPATH="$WK_TOOLS/lib" python3 -m wk wk.samply release "$(uname -m)"); then
         warn "samply: no linux/$(uname -m) release published upstream (github.com/mstange/samply), skipping"
         return 0
     fi

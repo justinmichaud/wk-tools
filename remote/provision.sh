@@ -48,7 +48,7 @@ write_file "$ROOT/ssh/config" 0600 <<EOF
 # one deploy key per repository and both forks live on github.com -- so the key
 # is selected by alias, never by hostname. No IdentityFile: no key is ever a
 # file here, and every alias refuses, naming the workstation's \`wk pr open\`.
-$(PYTHONPATH="$TOOLS/lib" WK_ROOT="$TOOLS" python3 -m wk.secrets box-alias-blocks)
+$(PYTHONPATH="$TOOLS/lib" WK_ROOT="$TOOLS" python3 -m wk wk.secrets box-alias-blocks)
 EOF
 rm -rf "$ROOT/push-keys" || die "could not remove $ROOT/push-keys, so deploy keys are still at rest on this machine"
 

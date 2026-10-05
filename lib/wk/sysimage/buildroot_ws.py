@@ -11,6 +11,7 @@ import sys
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+from wk import slot as wkslot  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import here  # noqa: E402
 from wk.sysimage import TOOLS, WsBuild, fail  # noqa: E402
@@ -356,7 +357,7 @@ class Build(WsBuild):
         cc = re.search(r'(?m)^set\(CMAKE_C_COMPILER .*bin/(.*)-gcc"\)$', self.m.read(self.tcf))
         if not cc:
             fail("%s names no cross gcc, so there is no readelf to read the build-id with" % self.tcf)
-        bid = self.manifest(root, slotdir, dict(slot=a.slot, profile=a.name, commit=a.commit, browser="cog", lib_dir="usr/lib",
+        bid = wkslot.write_manifest(self, root, slotdir, dict(slot=a.slot, profile=a.name, commit=a.commit, browser="cog", lib_dir="usr/lib",
                                                 exec_dir=os.path.relpath(execdir, root), bundle_dir=os.path.relpath(bundle, root),
                                                 jobs=str(self.jobs)),
                             ["--readelf", os.path.join(self.out, "host", "bin", cc.group(1) + "-readelf")])

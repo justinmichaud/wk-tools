@@ -7,7 +7,7 @@ import unittest
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import presets  # noqa: E402
+from wk import presets, resources  # noqa: E402
 from wk.act import Refused  # noqa: E402
 
 CMAKE_PRESETS = ("jsc-debug", "jsc-release", "jsc-release-asan", "gtk-debug", "gtk-release", "gtk-release-asan", "wpe-release")
@@ -121,9 +121,9 @@ class TestMacJscUsesXcode(unittest.TestCase):
 
 class TestADiskNeedIsDeclared(unittest.TestCase):
     def test_a_profile_guided_config_declares_more_than_the_default(self):
-        self.assertEqual(preset("mac-release", "macos").disk_gb, presets.DISK_GB)
+        self.assertEqual(preset("mac-release", "macos").disk_gb, resources.DISK_GB)
         self.assertEqual(preset("mac-release-pgo", "macos").disk_gb, presets.PGO_DISK_GB)
-        self.assertGreater(presets.PGO_DISK_GB, presets.DISK_GB)
+        self.assertGreater(presets.PGO_DISK_GB, resources.DISK_GB)
         self.assertEqual(preset("jsc-release", env={"WK_BUILD_DISK_GB": "40"}).disk_gb, 40)
 
     def test_a_profile_guided_build_runs_without_a_compilation_cache(self):

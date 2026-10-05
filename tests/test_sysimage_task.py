@@ -17,7 +17,7 @@ from tests.killpoints import converges
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import build, images, job, record  # noqa: E402
+from wk import images, job, record  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result, isolated_module  # noqa: E402
@@ -92,7 +92,7 @@ class World(Fake):
         return buildroot.Buildroot(self.reg, self.profile(), PROFILE, self.clock)
 
     def recs(self):
-        return build.records_of(self.reg.load("box"), self.clock, self)
+        return job.records_of(self.reg.load("box"), self.clock, self)
 
     def budget_files(self):
         d = os.path.join(self.env["XDG_STATE_HOME"], "wk", "builds")
@@ -288,7 +288,7 @@ class TestRefusals(TaskTest):
         from wk.resources import Budget
         Budget(self.w, self.w.env, self.w.clock).record("wk build other", 4, 8192, "pid:66")
         self.w.pids.add(66)
-        with mock.patch.object(build, "holder_alive", return_value=lambda h: True):
+        with mock.patch.object(job, "holder_alive", return_value=lambda h: True):
             err = self.refused(None, status=75)
         self.assertIn("is already building", err)
 

@@ -9,7 +9,7 @@ from tests.support import REPO
 from tests.test_bench_board import BOARD, BoardTest, pipeline_registry
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk.bench import board_ab  # noqa: E402
+from wk.bench import board_ab, cli  # noqa: E402
 from wk.boot.driver import part  # noqa: E402
 from wk.boot.pi import Rpi5Usb  # noqa: E402
 from wk.machine import Result  # noqa: E402
@@ -42,7 +42,7 @@ class SystemBootTest(BoardTest):
         self.w = w
         with w.patches():
             return board_ab.AB(str(REPO), pipeline_registry(w), "ws", "jetstream3", {"system": BOARD, "ab_systems": "sys-a,sys-b"},
-                               w.clock, driver=d)
+                               w.clock, cli.ab_report, driver=d)
 
     def boot(self, ab, want):
         err = io.StringIO()

@@ -15,6 +15,7 @@ RESERVE_MB = 12288
 HEADLESS_RESERVE_CORES = 0
 HEADLESS_RESERVE_MB = 2048
 MB_PER_JOB = 1536
+DISK_GB = 25
 MIN_ENVELOPE_MB = 2048
 CGROUP_MEM_MAX = "/sys/fs/cgroup/memory.max"
 
@@ -22,6 +23,20 @@ CGROUP_MEM_MAX = "/sys/fs/cgroup/memory.max"
 def arch_has_gpu(arch):
     """The NVIDIA userspace is aarch64-only."""
     return (arch or "native") != "armhf"
+
+
+ARCHES = ("native", "armhf")
+ARCH_NAMES = {"": "native", "native": "native", "host": "native", "arm64": "native", "aarch64": "native", "64": "native",
+              "armhf": "armhf", "arm32": "armhf", "armv7": "armhf", "arm": "armhf", "32": "armhf"}
+
+
+def arch_canon(arch):
+    if arch in ARCH_NAMES:
+        return ARCH_NAMES[arch]
+    act.die("unknown architecture '%s' (one of: %s)\n"
+            "    A workspace's --arch is what it runs *natively*. To build for something\n"
+            "    this machine cannot execute, that is a cross build -- see\n"
+            "    docs/Nice to have/HANDOFF-cross-compile.md." % (arch, " ".join(ARCHES)))
 
 
 def workspace_marker_path(env):
@@ -261,8 +276,11 @@ def build_jobs(res, budget, running):
     return budget.jobs(res.cores(), res.avail_mem_mb(), res.mb_per_job(), None, res.max_jobs(), running)
 
 
+def disk_gb(env):
+    return int(env.get("WK_BUILD_DISK_GB") or DISK_GB)
+
+
 def defaults():
-    from wk.presets import DISK_GB
     return "".join(': "${%s:=%s}"\n' % pair for pair in (
         ("WK_RESERVE_CORES", RESERVE_CORES), ("WK_RESERVE_MB", RESERVE_MB),
         ("WK_HEADLESS_RESERVE_CORES", HEADLESS_RESERVE_CORES), ("WK_HEADLESS_RESERVE_MB", HEADLESS_RESERVE_MB),
