@@ -301,18 +301,17 @@ def _wk(*args, timeout=300):
 
 
 def _workspace(case):
-    names = [ln.split()[0] for ln in _wk("ls", timeout=120).stdout.splitlines()[1:] if ln.split()]
+    names = [f[0] for f in (ln.split() for ln in _wk("ls", timeout=120).stdout.splitlines()[1:])
+             if len(f) > 2 and f[1].split(":")[-1] == "container" and f[2] == "running"]
     if not names:
-        case.skipTest("no workspace here ('wk new <name>')")
+        case.skipTest("no running container workspace here ('wk new <name>')")
     return names[0]
 
 
 @requires_container_place()
 class TestLiveTheInjectorHoldsTheLogin(unittest.TestCase):
-    """Read-only against the first running container `wk ls` names; it makes and removes nothing."""
+    """Read-only against the first running container workspace `wk ls` names; it makes and removes nothing."""
 
-    @owed("live inject.claude_login[container]: the CLI accepting the placeholder and the injector's swap are measured "
-          "only against the real CLI and api.anthropic.com")
     def test_inject_claude_login(self):
         ws = _workspace(self)
         doctor = _wk("doctor", ws).stdout
