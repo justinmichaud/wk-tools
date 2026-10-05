@@ -12,16 +12,16 @@ machines and Raspberry Pi/Mac benchmark boards connected by tailnet.
 
 `wk new`, `wk rm`
 
-Credentials required for git, git-webkit, github, claude, etc are shared or revoked using `wk push`.
+Credentials required for git, git-webkit, github, claude, etc are shared or revoked using `wk key push`.
 
-**target** — How to execute a workspace
+**place** — where a workspace lives, named with `--on`; a **driver** makes and runs one
 
 - `container` (rootless podman or podman VM on macOS)
 - `vm` (a macOS guest under Tart)
 - `remote` (a shared build machine or unsandboxed computer, borrowed but not managed by wk)
 - `local` (used for routing commands only when already inside a workspace)
 
-**build machine** — a computer `wk` drives as a build target, declared once in
+**build machine** — a computer `wk` drives as a place for workspaces, declared once in
 `machines/<name>.conf`
 
 **bench machine** - a board or Mac that can be booted into a system for perf testing, in `machines/<name>.conf`
@@ -35,7 +35,7 @@ boot by `wk boot`
 
 **rescue** — what a bench machine falls back to, and is reached by, whenever its bench
 system is disarmed, unbootable, or was never written. On a workstation the
-rescue is the host install itself; on a bench-device it is a system `wk` owns
+rescue is the host install itself; on a bench machine it is a system `wk` owns
 on its own medium.
 
 A rescue must provide a way to write, arm and boot the bench system.
@@ -72,17 +72,17 @@ before the command runs. `wk <cmd> -h` prints what those declarations say.
   follow the name, `passthrough` where the rest belongs to another program
   (after `--`, or `=tail` after the last positional). Anything else is refused
   with the usage line, once, in the dispatcher.
-- **Verbs and build configs are the dispatcher's too.** `verbs=` names a
+- **Verbs and build presets are the dispatcher's too.** `verbs=` names a
   command's subverbs: an unknown one is refused, and the command gets a
   declared one as its first argument wherever it was typed; `default=` is
   the verb a bare invocation stands for (`wk quiesce` is `wk quiesce
   status`), and a first word that is no verb is its argument when it takes
-  one (`wk pr 1234`). A `gone <word> <replacement>` line retires a flag or a
-  verb, refused naming what replaced it. `config=--config` (or `config=arg`,
-  `wk build`'s positional) says the command takes a build config: `-h` lists
-  every name in lib/wk/buildconf.py, one it does not hold is refused, and the
-  config reaches the command as `WK_CONFIG`, never in argv; an exported
-  `WK_CONFIG` the arguments do not name is refused. `passthrough=all` is
+  one (`wk pr 1234`). A removed flag or verb is refused like any unknown
+  word. `preset=--preset` (or `preset=arg`, `wk build`'s positional) says the
+  command takes a build preset: `-h` lists every name in lib/wk/presets.py,
+  one it does not hold is refused, and the preset reaches the command as
+  `WK_PRESET`, never in argv; an exported `WK_PRESET` the arguments do not
+  name is refused. `passthrough=all` is
   `=tail` with nothing in the tail read by wk, not even `-h` or `--force`
   (`wk ai pi <ws> --help` is pi's).
 - **`--force`, `--quiet`** are the dispatcher's too: `--force` crosses a
@@ -98,32 +98,31 @@ before the command runs. `wk <cmd> -h` prints what those declarations say.
 Every `wk <cmd> -h` prints a `runs on:` line, and commands fall into three
 groups:
 
-- **The workspace's target.** `build`, `run`, `test`, `claude`, `bench`,
-  `profile`, `status`, `ls`, `sync`, `enter`, `logs`, `gui`, `zed`. A workspace
+- **The workspace's place.** `new`, `rm`, `start`, `stop`, `build`, `run`,
+  `test`, `ai`, `bench`, `status`, `ls`, `enter`, `scp`, `pr`, `gui`, `zed`,
+  and `sync` and `doctor` when they name a workspace. A workspace
   lives on exactly one machine, and the command goes to that machine: on a
   macOS host a `container` workspace's command is forwarded into the podman VM
   over `podman machine ssh`, and a workspace on a machine that runs `wk` for
   itself — a build box, or a peer workstation — is handed over whole, so that
   machine's own `wk` resolves the name and does the work. The dispatcher
-  exports `WK_NAME`, `WK_TARGET` and `WK_CONFIG` to the command it runs. Either
+  exports `WK_NAME`, `WK_PLACE` and `WK_PRESET` to the command it runs. Either
   hop carries the global flags as environment (`WK_QUIET`, `WK_FORCE`,
   `WK_YES`, `WK_DRY_RUN`, `WK_DEBUG`), with `WK_ROW_LABEL` (the
   machine its rows name), `WK_NO_DELEGATE` (answer for itself, hand nothing
   on), `WK_ZED_PUBKEY` (the asking machine's zed key) and `WK_SDK_IMAGE`
   (the workspace image override), and never
-  `WK_TARGET` or `WK_STORE`, which the far side resolves for itself; the
+  `WK_PLACE` or `WK_STORE`, which the far side resolves for itself; the
   podman VM is also told `WK_IN_VM` and `WK_HOST_SELF`, since it is part of
   this machine and its records name it. `wk zed` is the one
   exception, since the editor runs where you typed the command: it asks the
   machine holding the workspace for a route and opens that from here.
 - **This host's own hardware, refused inside a workspace and on a
-  build machine.** `remote`, `key`, `push`, `sudo`, `quiesce`, `session`,
-  `boot`, `pi`, `sysimage`, `bridge`, `vm`, `find`, `backup`, `start`, `stop`,
-  `gc`. These act on fleet devices, bridges, or this machine's own
+  build machine.** `machine`, `key`, `quiesce`, `boot`, `sysimage`, `gc`. These act on fleet devices, bridges, or this machine's own
   provisioning, so they never run against a checkout inside a sandbox, and a
   shared build box refuses them too — a build box builds, it does not own
   fleet hardware.
-- **This machine, never forwarded.** `disk`, `doctor`, `version`, `selftest` —
+- **This machine, never forwarded.** `doctor`, `selftest` —
   read-only reports about the machine you typed the command on.
 
 # Tailnet
