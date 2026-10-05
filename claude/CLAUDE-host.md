@@ -31,7 +31,7 @@ Consequences:
   machinery around a fault nobody has measured.
 - **No in-place upgrades.** A guest, golden base or image that is wrong is
   fixed by changing the input that produces it (`WK_VM_IMAGE`,
-  `vm/provision-base.sh`, an image config) and rebuilding. Hand-patching a
+  `vm/provision-base.sh`, an image preset) and rebuilding. Hand-patching a
   live guest is how to discover the fix, never how to deliver it.
 - **Do not mutate the host or the fleet unprompted.** `wk sync --tools`,
   `wk quiesce on`, `wk stop`, `wk boot`, card writes and provisioning change

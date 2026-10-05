@@ -43,7 +43,7 @@ def staged_python(m, env):
 
 
 class Install:
-    """This machine as its running install says: the marker is bench mode, and its profile names the machine."""
+    """This machine as its running install says: the marker is bench mode, and the image preset it names (its `profile=`) names the machine."""
 
     def __init__(self, root, here, env, driver=open_driver):
         self.root, self.here, self.env, self.make_driver = str(root), here, env, driver
@@ -68,7 +68,7 @@ class Install:
         f, want = fleet.Fleet(self.root, self.env), self.fields()
         for name in f.names(("mac", "guest")):
             conf = f.load(name)
-            if conf.get("profile") and conf["profile"] == (want.get("profile") or want.get("id")):
+            if conf.get("image_preset") and conf["image_preset"] == (want.get("profile") or want.get("id")):
                 return name, dict(conf, name=name)
         return "", None
 
@@ -257,7 +257,7 @@ class MacVolumeSystem(System):
             if self.install.faked():
                 warn("WK_IMAGE_MARKER points at %s, not %s -- recorded as a workstation number" % (self.install.marker, MARKER))
             rows.append((True, "the machine", self.machine + ("" if self.measures else " -- a rehearsal: its reading is no measurement"))
-                        if self.conf else (False, "the machine", "the marker names no machine in machines/ (profile)"))
+                        if self.conf else (False, "the machine", "the marker names no machine in machines/ (image_preset)"))
         else:
             rows.append((False, "bench mode", "this is host mode -- a real run refuses"))
         runner = os.path.join(self.dir, project.get("BENCH_RUNNER"))

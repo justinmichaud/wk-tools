@@ -4,7 +4,7 @@
 # image's own copy is what makes it bootable.
 #
 # What is in here is what this *board* needs in order to be measured, so it
-# belongs to whichever profile is measured on it.
+# belongs to whichever image preset is measured on it.
 
 [all]
 # Pin the ARM clock, because a benchmark measures whatever the clock was doing.

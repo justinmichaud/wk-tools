@@ -73,11 +73,11 @@ class PiSd(Driver):
         return "SD card %s holds every system: rescue on p1-p2, bench system(s) on p3-p4 or 5-6 and 7-8" % self.c("device")
 
     def reprovision(self):
-        dev, name, prof = self.c("device"), self.c("name"), self.c("profile")
+        dev, name, prof = self.c("device"), self.c("name"), self.c("image_preset")
         return ("wk sysimage build %s\n"
-                "wk sysimage write --from <path> --disk <reader>:%s --rescue --profile %s\n"
-                "wk sysimage write --from <path> --disk <reader>:%s@second --profile <bench profile>\n"
-                "wk sysimage write --from <path> --disk <reader>:%s@third --profile <bench profile>\n"
+                "wk sysimage write --from <path> --disk <reader>:%s --rescue --image-preset %s\n"
+                "wk sysimage write --from <path> --disk <reader>:%s@second --image-preset <bench image preset>\n"
+                "wk sysimage write --from <path> --disk <reader>:%s@third --image-preset <bench image preset>\n"
                 "    optional: a second bench system\nwk boot %s" % (prof, dev, prof, dev, dev, name))
 
 
@@ -139,12 +139,12 @@ class PiTryboot(Driver):
         return "%s holds the bench system(s) on 1-2 and 3-4; the armed kernel is tryboot-staged onto the SD" % self.c("device")
 
     def reprovision(self):
-        dev, name, prof = self.c("device"), self.c("name"), self.c("profile")
+        dev, name, prof = self.c("device"), self.c("name"), self.c("image_preset")
         return ("wk sysimage build %s\n"
-                "wk sysimage write --from <path> --disk <reader>:%s --rescue --profile %s\n"
+                "wk sysimage write --from <path> --disk <reader>:%s --rescue --image-preset %s\n"
                 "wk boot %s --boot-order sd-first\n"
-                "wk sysimage write --from <path> --disk %s:%s --profile <bench profile>\n"
-                "wk sysimage write --from <path> --disk %s:%s@second --profile <bench profile>\n"
+                "wk sysimage write --from <path> --disk %s:%s --image-preset <bench image preset>\n"
+                "wk sysimage write --from <path> --disk %s:%s@second --image-preset <bench image preset>\n"
                 "    optional: a second system\nwk boot %s"
                 % (prof, disk_of(self.c("root")), prof, name, name, dev, name, dev, name))
 
@@ -205,7 +205,7 @@ class Rpi5Usb(Driver):
             dev, self.device_image() or "no wk system (wk sysimage write puts one there)", " (eeprom %s)" % order if order else "")
 
     def reprovision(self):
-        dev, name, prof = self.c("device"), self.c("name"), self.c("profile")
+        dev, name, prof = self.c("device"), self.c("name"), self.c("image_preset")
         return ("wk sysimage build %s\nwk sysimage write --from <path> --disk %s:%s\n"
                 "wk sysimage write --from <path> --disk %s:%s@second\n    optional: a second system\nwk boot %s"
                 % (prof, name, dev, name, dev, name))

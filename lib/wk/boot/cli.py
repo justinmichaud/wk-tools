@@ -217,7 +217,7 @@ class Boot:
         return 0
 
     def record_write(self, image, device, order):
-        rc = self.d.record_write(image, self.c("profile"), device, order)
+        rc = self.d.record_write(image, self.c("image_preset"), device, order)
         if rc:
             act.die("could not write the arming record on %s" % self.name, rc)
 
@@ -241,7 +241,7 @@ class Boot:
             part, image = self.d.select_system(want)
         watchdog = ""
         if arming in ("one-shot", "medium"):
-            watchdog = (images.quiet_load(self.c("profile"), self.env) or {}).get("IMG_WATCHDOG", "")
+            watchdog = (images.quiet_load(self.c("image_preset"), self.env) or {}).get("IMG_WATCHDOG", "")
         if act.dry_run():
             act.log(self.arm_plan(image, watchdog) + "\ndry run -- nothing was armed.")
             return 0
@@ -307,8 +307,8 @@ def fleet_probe(root, name, env):
         out["media"] = d.media()
     except act.Refused:
         out.setdefault("media", "unknown")
-    if not conf.get("profile"):
-        out["reprovision"] = "missing profile in machines/%s.conf" % name
+    if not conf.get("image_preset"):
+        out["reprovision"] = "missing image_preset in machines/%s.conf" % name
     else:
         try:
             out["reprovision"] = d.reprovision()

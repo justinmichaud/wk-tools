@@ -92,7 +92,7 @@ def collides(name, peers):
 
 
 def appended(root, p, name):
-    """The board's file first -- `os_check=0` is a Pi 5 firmware fact every image needs -- then the profile's."""
+    """The board's file first -- `os_check=0` is a Pi 5 firmware fact every image needs -- then the preset's."""
     machine, spec_dir = p.get("IMG_MACHINE", ""), p.get("IMG_SPEC_DIR", "")
     text = ""
     for path in (os.path.join(str(root), "image", "boards", machine, name) if machine else "",
@@ -141,12 +141,12 @@ def init_script(root, name, **params):
         return "#!/bin/sh\n" + "".join("%s=%s\n" % (k, shlex.quote(v)) for k, v in params.items()) + f.read()
 
 
-def stage_units(root, watchdog, disarm, profile=""):
+def stage_units(root, watchdog, disarm, preset=""):
     """{archive path: text}. The units that hand a machine back are gated at runtime on /etc/wk/rescue, so one artifact
     serves both roles; a timer, since a sleeping oneshot holds its systemd target inactive for the whole watchdog."""
     out = {}
     if not watchdog:
-        act.warn("%s sets no IMG_WATCHDOG, so this image will not hand its machine back" % (profile or "this image"))
+        act.warn("%s sets no IMG_WATCHDOG, so this image will not hand its machine back" % (preset or "this image"))
     else:
         out["systemd/wk-self-return.timer"] = unit(root, "wk-self-return.timer", OnBootSec=watchdog)
         out["systemd/wk-self-return.service"] = unit(root, "wk-self-return.service")
@@ -226,20 +226,20 @@ class Write:
         if spec.startswith(("vm:", "/", "./", "../")):
             return spec
         found = lsmod.scan(self.machine, self.store)
-        path = next((i.path for i in found if i.path and images.ws_profile(i.ws, self.env) == spec), "")
+        path = next((i.path for i in found if i.path and images.ws_preset(i.ws, self.env) == spec), "")
         if not path and images.quiet_load(spec, self.env):
             r = self.machine.run([os.path.join(self.root, "wk"), "sysimage", "path", spec])
             path = r.out.replace("\r", "").strip() if r.ok else ""
             if not path:
-                act.die("'%s' is a configuration whose image workspace holds no image:\n        wk sysimage build %s"
+                act.die("'%s' is an image preset whose image workspace holds no image:\n        wk sysimage build %s"
                         % (spec, spec))
             # The image workspace's machine answers in its own spelling; on a macOS workstation, the podman VM's.
             path = path if Store(self.env).is_local() else "vm:" + path
         if path:
-            act.info("'%s' is a configuration; its image is at %s" % (spec, path))
+            act.info("'%s' is an image preset; its image is at %s" % (spec, path))
             return path
-        built = sorted({images.ws_profile(i.ws, self.env) for i in found if i.path} - {None})
-        act.die("'%s' is neither a path nor a configuration this checkout defines.\n    Configurations with an image here:\n%s"
+        built = sorted({images.ws_preset(i.ws, self.env) for i in found if i.path} - {None})
+        act.die("'%s' is neither a path nor an image preset this checkout defines.\n    Image presets with an image here:\n%s"
                 % (spec, "\n".join("      " + b for b in built)))
 
     def reader(self, src):
@@ -251,10 +251,10 @@ class Write:
             act.die("no image at %s\n    An image inside this machine's podman VM is --from vm:%s" % (src, src))
         return ["cat", src]
 
-    def profile(self, name, src):
+    def image_preset(self, name, src):
         if not name:
             m = re.search(r"/ws/([^/]*)/", bare(src))
-            name = (images.ws_profile(m.group(1), self.env) if m else None) or ""
+            name = (images.ws_preset(m.group(1), self.env) if m else None) or ""
         if not name:
             return "", {}
         try:
@@ -262,7 +262,7 @@ class Write:
         except ConfError as e:
             act.die(str(e))
         except LookupError:
-            act.warn("no configuration '%s', so there is no firmware check and no tailnet name to seed; pass --profile"
+            act.warn("no image preset '%s', so there is no firmware check and no tailnet name to seed; pass --image-preset"
                      % name)
             return name, {}
 
@@ -523,10 +523,10 @@ class Write:
         else:
             act.log("  (could not power off %s; it is synced, so it is safe to pull anyway)" % dev)
 
-    def run(self, src, spec, grow, profile, role, mach):
+    def run(self, src, spec, grow, preset, role, mach):
         src = self.resolve(src)
         reader, filt = self.reader(src), from_filter(bare(src))
-        profile, p = self.profile(profile, src)
+        preset, p = self.image_preset(preset, src)
         img_machine = mach or p.get("IMG_MACHINE", "")
         disk_machine, dev = disk.parse_spec(spec)
         asked_dev = dev
@@ -548,7 +548,7 @@ class Write:
         name = os.path.basename(bare(src))
         for ext in (".xz", ".zst", ".gz", ".wic", ".img"):
             name = name[:-len(ext)] if name.endswith(ext) else name
-        name = profile or name
+        name = preset or name
         tailnet = tailnet_name(self.fleet, img_machine, role)
 
         if act.dry_run():
@@ -584,7 +584,7 @@ class Write:
 
         ident = image_id(name, rep.get("stream_sha", ""))
         wk_tools = self.machine.run(["git", "-C", self.root, "rev-parse", "--short", "HEAD"])
-        marker = "\n".join(["id=" + ident, "profile=" + (profile or "unknown"), "machine=" + img_machine,
+        marker = "\n".join(["id=" + ident, "profile=" + (preset or "unknown"), "machine=" + img_machine,
                             "builder=" + p.get("IMG_BUILDER", ""), "role=" + role,
                             "built_by=" + record.host_name(self.machine),
                             "wk_tools=" + (wk_tools.out.strip() if wk_tools.ok else "unknown"), "source=" + src])
@@ -596,7 +596,7 @@ class Write:
                             why="could not append to %s's kernel command line (%s)." % (dev, cmdline))
             if config:
                 # A firmware setting that fails to land fails nothing and makes every number worse.
-                self.simple("append this profile's firmware block to %s's config.txt" % dev, "config-append", dev,
+                self.simple("append this preset's firmware block to %s's config.txt" % dev, "config-append", dev,
                             b64(config), why="could not append the firmware block to %s's config.txt." % dev)
             self.simple("name the system on %s's boot partition by its image id" % dev, "boot-id", dev, ident,
                         why="could not name the system on %s's boot partition; 'wk boot' refuses a disk it cannot name." % dev)
@@ -606,7 +606,7 @@ class Write:
                     "fleet", dev, b64(marker), b64(self.driving_key()),
                     why="could not install the identity marker and driving key on %s; nothing here could reach it." % dev)
         if fleet_edit:
-            self.put_units(dev, stage_units(self.root, p.get("IMG_WATCHDOG", ""), self.self_disarm(img_machine), profile))
+            self.put_units(dev, stage_units(self.root, p.get("IMG_WATCHDOG", ""), self.self_disarm(img_machine), preset))
             if img_machine == disk_machine:
                 if not self.c("dtb"):
                     act.die("'%s' (machines/%s.conf) sets no dtb" % (disk_machine, disk_machine))
@@ -652,7 +652,7 @@ class Write:
                 "  wifi      %s" % (
                     src, dev, disk_machine, image_id(name, ""),
                     "a fleet system: identity marker, driving key, units, retargeted root" if fleet_edit else
-                    "as built (%s); identity marker and driving key only" % (p.get("IMG_BUILDER") or "unknown profile"),
+                    "as built (%s); identity marker and driving key only" % (p.get("IMG_BUILDER") or "unknown image preset"),
                     "auth key present" if key else "NO auth key -- the real write refuses here (wk key set tailnet)", wifi))
         act.log("then, in order:")
 

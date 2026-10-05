@@ -225,7 +225,7 @@ def render_hit(h, out):
             ("  (%s)" % h["uname"] if h["uname"] else ""))
         if h["wk_image_id"]:
             row("running", h["wk_image_id"])
-            row("  profile", (h["wk_profile"] or "not in its marker") + (", built by " + h["wk_builder"] if h["wk_builder"] else ""))
+            row("  image preset", (h["wk_image_preset"] or "not in its marker") + (", built by " + h["wk_builder"] if h["wk_builder"] else ""))
             row("  role", (h["wk_role"] or "not in its marker -- a card written before roles existed; rewrite it") +
                 (" (the card carries the rescue marker)" if h["marker"] == "rescue" else ""))
         else:

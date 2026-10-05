@@ -264,7 +264,7 @@ class TestSysimageWriteDryRun(WkTest):
             img.flush()
             cp = run(
                 "sysimage", "write", "--from", img.name,
-                "--profile", "wpewebkit-2.46-yocto-rpi3-32",
+                "--image-preset", "wpewebkit-2.46-yocto-rpi3-32",
                 "--disk", "rpi3:/dev/sdX", "--dry-run",
                 env={"WK_STORE": store},
             )
@@ -272,11 +272,11 @@ class TestSysimageWriteDryRun(WkTest):
             self.assertRegex(out, r"(?m)^\s*wifi\s+(NO --|rpi3 is on WiFi)", out)
 
     def test_build_dry_run_shows_wifi_wired_into_yocto_and_buildroot(self):
-        for profile in ("wpewebkit-2.46-yocto-rpi3-32", "wpewebkit-2.46-buildroot-rpi3-32"):
-            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as store:
-                cp = run_here("sysimage", "build", profile, "--dry-run", env={"WK_STORE": store})
+        for preset in ("wpewebkit-2.46-yocto-rpi3-32", "wpewebkit-2.46-buildroot-rpi3-32"):
+            with self.subTest(preset=preset), tempfile.TemporaryDirectory() as store:
+                cp = run_here("sysimage", "build", preset, "--dry-run", env={"WK_STORE": store})
                 self.assertEqual(cp.returncode, 0, cp.stdout)
-                self.assertIn("wk-wifi-join", cp.stdout, f"{profile}: {cp.stdout}")
+                self.assertIn("wk-wifi-join", cp.stdout, f"{preset}: {cp.stdout}")
 
 
 def _name_preflight(name, tmp, peers_json="{}", role="bench", machine="rpi3", env=None):

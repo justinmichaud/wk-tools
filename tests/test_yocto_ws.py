@@ -369,15 +369,15 @@ class TestTheStages(unittest.TestCase):
 
     def test_a_slot_is_built_with_the_branch_s_flags_and_ours_after_and_described(self):
         w = self.slot_world()
-        rc, out, err = self.run_stage(w, "--stage", "webkit", "--commit", "c" * 40, "--slot", "pr", "--profile", "p",
+        rc, out, err = self.run_stage(w, "--stage", "webkit", "--commit", "c" * 40, "--slot", "pr", "--image-preset", "p",
                                       "--webkit-jobs", "6", "--cross-preset", "wpe-cross-pgo-collect", "--cross-cc", "clang",
-                                      "--cross-cxx", "clang++", "--cross-cmake=-DENABLE_LLVM_PROFILE_GENERATION=ON")
+                                      "--cross-cxx", "clang++", "--cross-cmake=-DENABLE_LLVM_PRESET_GENERATION=ON")
         self.assertEqual(rc, 0, out + err)
         (bw,) = [a for a in w.ran("env", "WK_MB_PER_JOB=2560") if "build-webkit" in " ".join(a)]
         self.assertEqual(bw[5], "6")
         self.assertIn("--no-bubblewrap-sandbox", bw)
         self.assertIn("--makeargs=-j6", bw)
-        self.assertEqual(bw[-1], "--cmakeargs=-DENABLE_X=OFF -DUSE_Y=ON %s -DENABLE_LLVM_PROFILE_GENERATION=ON" % yt.WEBKIT_CMAKE)
+        self.assertEqual(bw[-1], "--cmakeargs=-DENABLE_X=OFF -DUSE_Y=ON %s -DENABLE_LLVM_PRESET_GENERATION=ON" % yt.WEBKIT_CMAKE)
         self.assertIn(("env", "CC=clang", "CXX=clang++"), [tuple(bw[6:9])])
         (manifest,) = w.ran(*isolated_module(TOOLS + "/lib", "wk.slot"), "manifest")
         self.assertIn("build_preset=wpe-cross-pgo-collect", manifest)
@@ -386,7 +386,7 @@ class TestTheStages(unittest.TestCase):
 
     def test_a_slot_whose_manifest_records_no_build_id_is_refused(self):
         w = self.slot_world('{"slot": "pr"}')
-        rc, out, err = self.run_stage(w, "--stage", "webkit", "--commit", "c" * 40, "--slot", "pr", "--profile", "p")
+        rc, out, err = self.run_stage(w, "--stage", "webkit", "--commit", "c" * 40, "--slot", "pr", "--image-preset", "p")
         self.assertEqual(rc, 1, out + err)
         self.assertIn("records no build_id", err)
         self.assertNotIn("slot ready", out)

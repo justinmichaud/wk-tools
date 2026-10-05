@@ -25,7 +25,7 @@ SHA = "a" * 40
 
 
 def registry(store_dir, drivers=(), machine=None):
-    # A blind fleet: host_profiles()'s mac-volume check reads machines/<IMG_MACHINE>.conf through this env, and this
+    # A blind fleet: host_presets()'s mac-volume check reads machines/<IMG_MACHINE>.conf through this env, and this
     # repo's real one names a real Mac's real volume. WK_IN_VM=1 keeps the fetch builder's cache in this store too.
     env = {"WK_MACHINES_DIR": NO_REGISTRY, "WK_IN_VM": "1", "WK_STORE": str(store_dir)}
     ts = {t.name: t for t in drivers}
@@ -91,7 +91,7 @@ class TestTheBuildersConform(unittest.TestCase):
         self.assertEqual(ls.scan(f, Store({"WK_STORE": "/st"})),
                          [ls.Image("yocto", YWS, "/st/ws/%s/build/CrossToolChains/t/build/image/a.wic.xz" % YWS)])
 
-    def test_every_builder_a_profile_names_has_outputs(self):
+    def test_every_builder_a_preset_names_has_outputs(self):
         named = {images.load(n)["IMG_BUILDER"] for n in images.names()}
         reachable = {b.kind for b in ls.BUILDERS} | set(ls.HOST_BUILDERS)
         self.assertLessEqual(named, reachable)
@@ -299,7 +299,7 @@ class TestHolds(WkTest):
             (tc / "environment-setup-cortexa7").write_text("")
             self.assertEqual(self.holds(d, YOCTO, None, None, None, None, True).out, "yes\n")
 
-    def test_a_slot_on_a_profile_guided_release_is_its_measured_build(self):
+    def test_a_slot_on_a_preset_guided_release_is_its_measured_build(self):
         with scratch_dir() as d:
             slot(d, YWS, "base", preset="wpe-cross-pgo-collect")
             self.assertEqual(self.holds(d, YOCTO, None, "base", SHA, None, False).out, "no\n")
@@ -333,7 +333,7 @@ class TestPath(WkTest):
             self.assertEqual((cp.rc, cp.out), (1, ""))
             p = yocto_image(d)
             self.assertEqual(ran(s.path, YOCTO, None).out, "%s\n" % p)
-            self.assertEqual(ran(s.path, "bridge-pinephone", None).rc, 1, "a host-built profile has no workspace")
+            self.assertEqual(ran(s.path, "bridge-pinephone", None).rc, 1, "a host-built preset has no workspace")
             self.assertIn("usage: wk sysimage path", ran(s.path, "", None).err)
 
 

@@ -303,7 +303,7 @@ class MacVolume(MacDriver):
         return "%s: neither %s nor %s answers" % (what, self.c("ssh"), self.bench_name())
 
     def reprovision(self):
-        build = "wk sysimage build %s" % self.c("profile")
+        build = "wk sysimage build %s" % self.c("image_preset")
         return "%s --create\n%s --install\n%s --provision\nwk boot %s" % (build, build, build, self.who())
 
     def systems(self):
@@ -445,7 +445,7 @@ class MacGuest(MacDriver):
         if st == "absent":
             act.die("%s has no guest '%s'.\n    Make one from the golden base and mark it as a benchmark install:\n"
                     "        wk new %s --on vm && wk start %s\n        then, in it:  sudo tee /etc/wk-image <<<'id=%s'"
-                    % (name, g, g, g, self.c("profile") or "perf-macos-benchvm"))
+                    % (name, g, g, g, self.c("image_preset") or "perf-macos-benchvm"))
         if st != "running":
             act.info("starting guest '%s'" % g)
             self.ch.start()

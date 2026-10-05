@@ -23,8 +23,8 @@ from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result, isolated_module  # noqa: E402
 from wk.sysimage import buildroot, task  # noqa: E402
 
-PROFILE = "wpewebkit-2.46-buildroot-rpi3-32"
-WS = "buildroot-" + PROFILE
+PRESET = "wpewebkit-2.46-buildroot-rpi3-32"
+WS = "buildroot-" + PRESET
 SHA = "a" * 40
 
 
@@ -74,14 +74,14 @@ class World(Fake):
         return self
 
     def tag(self):
-        return buildroot.Buildroot(self.reg, self.profile(), PROFILE, self.clock).host_image()[1]
+        return buildroot.Buildroot(self.reg, self.preset(), PRESET, self.clock).host_image()[1]
 
     def _new(self, argv, f):
         self.made = True
         return Result(0)
 
-    def profile(self):
-        return images.load(PROFILE, self.env)
+    def preset(self):
+        return images.load(PRESET, self.env)
 
     def start(self, argv, out, cwd=None):
         self.effect(("watch", tuple(argv)))
@@ -89,7 +89,7 @@ class World(Fake):
         return FakeProc(self.rc, None if self.hang else 0, self.interrupt)
 
     def driver(self):
-        return buildroot.Buildroot(self.reg, self.profile(), PROFILE, self.clock)
+        return buildroot.Buildroot(self.reg, self.preset(), PRESET, self.clock)
 
     def recs(self):
         return job.records_of(self.reg.load("box"), self.clock, self)
@@ -136,13 +136,13 @@ class TestTheRecordAStageWrites(TaskTest):
         """`record.progress_shape[sysimage]`: step n of m, since when, the log, how to stop it."""
         rc, err = self.build()
         self.assertEqual(rc, 0, err)
-        self.assertIn("built %s in '%s'" % (PROFILE, WS), err)
+        self.assertIn("built %s in '%s'" % (PRESET, WS), err)
         (t,) = self.w.recs().list()
         self.assertEqual((t.field("kind"), t.field("name"), t.field("stage"), t.field("exit")), ("buildroot", WS, "image", "0"))
         self.assertEqual(t.plan(), ["the workspace '%s' on %s" % (WS, self.w.tag()), "sync wk-tools into '%s'" % WS,
-                                    "build %s with -j8" % PROFILE])
+                                    "build %s with -j8" % PRESET])
         self.assertEqual(t.steps(), [(1, "done"), (2, "done"), (3, "running")])
-        self.assertEqual((t.field("log"), t.field("kill")), (self.w.log, "wk sysimage build %s --stop" % PROFILE))
+        self.assertEqual((t.field("log"), t.field("kill")), (self.w.log, "wk sysimage build %s --stop" % PRESET))
         self.assertTrue(t.field("started"))
         self.assertEqual(Path(self.w.log).read_bytes(), self.w.out)
 
@@ -185,7 +185,7 @@ class TestTheRecordAStageWrites(TaskTest):
         self.w.answer(["podman", "container", "inspect"], out="localhost/wk-buildroot-host:22.04-old\n")
         err = self.refused()
         self.assertIn("was made from localhost/wk-buildroot-host:22.04-old", err)
-        self.assertIn("wk rm %s && wk sysimage build %s" % (WS, PROFILE), err)
+        self.assertIn("wk rm %s && wk sysimage build %s" % (WS, PRESET), err)
         self.assertEqual(self.w.recs().list()[0].field("exit"), "1")
 
 
@@ -202,7 +202,7 @@ class TestWhatItBuildsWith(TaskTest):
         self.assertIn(":24.04-", tag)
 
     def test_a_pinned_kernel_is_prepared_here_and_handed_over_through_the_download_cache(self):
-        p = dict(self.w.profile(), BR_KERNEL_DEB_URL="https://x/k.deb", BR_KERNEL_DEB_SHA256="d" * 64, BR_KERNEL_RELEASE="6.1.0-rpi")
+        p = dict(self.w.preset(), BR_KERNEL_DEB_URL="https://x/k.deb", BR_KERNEL_DEB_SHA256="d" * 64, BR_KERNEL_RELEASE="6.1.0-rpi")
         self.w.answer(["sha256sum"], out="d" * 64 + "  x\n")
         self.w.answer(["curl"])
         self.w.answer(["mv"])
@@ -212,7 +212,7 @@ class TestWhatItBuildsWith(TaskTest):
             m.act_run(["kernel_pin", deb, release, out])
             return os.path.join(out, "wk-kernel-%s.tar" % release)
         with contextlib.redirect_stderr(io.StringIO()) as err, mock.patch.object(buildroot, "kernel_pin", pin):
-            rc = buildroot.Buildroot(self.w.reg, p, PROFILE, self.w.clock).build([])
+            rc = buildroot.Buildroot(self.w.reg, p, PRESET, self.w.clock).build([])
         self.assertEqual(rc, 0, err.getvalue())
         (t,) = self.w.recs().list()
         self.assertEqual(t.plan()[0], "prepare the pinned kernel 6.1.0-rpi")
@@ -223,21 +223,21 @@ class TestWhatItBuildsWith(TaskTest):
                         self.w.effects.index(w))
 
 
-class TestTheBuilderIsTheProfiles(TaskTest):
+class TestTheBuilderIsTheImagePresets(TaskTest):
     """cli.py's dispatch: what cannot be built is refused by name, and each builder gets the tail."""
 
     def sysimage(self):
         from wk.sysimage import cli
         return cli.Sysimage(self.w.reg, self.w.clock)
 
-    def test_a_profile_whose_conf_does_not_parse_is_refused_by_its_line_not_called_unknown(self):
+    def test_a_preset_whose_conf_does_not_parse_is_refused_by_its_line_not_called_unknown(self):
         with mock.patch.object(images, "load", side_effect=images.ConfError("bad.conf:3: not a KEY=value line: x")), \
                 self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
-            self.sysimage().profile("bad")
+            self.sysimage().image_preset("bad")
         self.assertIn("bad.conf:3:", err.getvalue())
-        self.assertNotIn("unknown profile", err.getvalue())
+        self.assertNotIn("unknown image preset", err.getvalue())
 
-    def test_a_profile_that_needs_something_says_what(self):
+    def test_a_preset_that_needs_something_says_what(self):
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
             self.sysimage().build("wpewebkit-2.38-buildroot-rpi5-64", [])
         self.assertIn("cannot be built yet:\n\n    no defconfig for rpi5", err.getvalue())
@@ -262,11 +262,11 @@ class TestTheBuilderIsTheProfiles(TaskTest):
 
 class TestRefusals(TaskTest):
     def test_a_running_stage_is_refused_by_name(self):
-        t = self.w.recs().begin("buildroot", "here", WS, "wk sysimage build %s --stop" % PROFILE, self.w.log, ["a"], pid=77)
+        t = self.w.recs().begin("buildroot", "here", WS, "wk sysimage build %s --stop" % PRESET, self.w.log, ["a"], pid=77)
         self.w.pids.add(77)
         err = self.refused()
         self.assertIn("a build is still running in '%s': buildroot (pid 77, here)" % WS, err)
-        self.assertIn("Stop it:    wk sysimage build %s --stop" % PROFILE, err)
+        self.assertIn("Stop it:    wk sysimage build %s --stop" % PRESET, err)
         self.assertEqual(t.field("exit"), "")
 
     def test_a_pid_file_a_killed_build_left_is_not_busy_and_a_live_one_is(self):
@@ -303,9 +303,9 @@ class TestRefusals(TaskTest):
                 self.assertIn("%s is not an option of this build" % args[0], self.refused(None, *args))
 
     def test_a_half_declared_kernel_pin_is_refused(self):
-        p = dict(self.w.profile(), BR_KERNEL_DEB_URL="https://x/k.deb")
+        p = dict(self.w.preset(), BR_KERNEL_DEB_URL="https://x/k.deb")
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
-            buildroot.Buildroot(self.w.reg, p, PROFILE, self.w.clock).build([])
+            buildroot.Buildroot(self.w.reg, p, PRESET, self.w.clock).build([])
         self.assertIn("a kernel by URL alone is not pinned", err.getvalue())
 
 
@@ -394,7 +394,7 @@ class TestDetach(TaskTest):
         rc, err = self.build(w, "--detach")
         self.assertEqual(rc, 0, err)
         (sp,) = [e for e in w.effects if e[0] == "spawn"]
-        self.assertEqual(list(sp[1]), [str(REPO / "wk"), "sysimage", "build", PROFILE])
+        self.assertEqual(list(sp[1]), [str(REPO / "wk"), "sysimage", "build", PRESET])
         self.assertEqual(sp[2], os.path.join(w.ws_dir, "detached-image.log"))
         self.assertIn("running detached in '%s' as pid 1001 -- this end can go away" % WS, err)
         self.assertIn("  follow:  wk status %s --log -f" % WS, err)
@@ -402,7 +402,7 @@ class TestDetach(TaskTest):
 
     def test_a_child_that_ends_before_its_record_is_named(self):
         err = self.refused(Detaching(self.tmp, starts=False), "--detach")
-        self.assertIn("the detached build of %s of '%s' ended before it started" % (PROFILE, WS), err)
+        self.assertIn("the detached build of %s of '%s' ended before it started" % (PRESET, WS), err)
 
 
 class TestDryRun(TaskTest):
@@ -410,7 +410,7 @@ class TestDryRun(TaskTest):
         os.environ["WK_DRY_RUN"] = "1"
         rc, err = self.build()
         self.assertEqual(rc, 0, err)
-        self.assertIn("would build image %s (builder: buildroot)" % PROFILE, err)
+        self.assertIn("would build image %s (builder: buildroot)" % PRESET, err)
         self.assertIn("  jobs         -j8 (memory-sized at 2048 MB/job)", err)
         self.assertEqual(self.w.recs().list(), [])
         self.assertFalse([e for e in self.w.effects if e[0] not in ("run",)])
@@ -424,7 +424,7 @@ class TestDryRun(TaskTest):
 class TestWebkitSlot(TaskTest):
     def setUp(self):
         super().setUp()
-        image = os.path.join(self.w.ws_dir, "build", "buildroot", PROFILE, "output", "images", "sdcard.img")
+        image = os.path.join(self.w.ws_dir, "build", "buildroot", PRESET, "output", "images", "sdcard.img")
         self.w.files[image] = ""
         self.slotdir = images.slot_dir(WS, "base", self.w.env)
         self.w.out = b"wk-buildroot-webkit: stage 'webkit-base' done\n"
@@ -447,7 +447,7 @@ class TestWebkitSlot(TaskTest):
         (t,) = self.w.recs().list()
         self.assertEqual((t.field("stage"), t.field("exit")), ("webkit-base", "0"))
         self.assertEqual(t.field("log"), os.path.join(self.w.ws_dir, "home", "buildroot-webkit-base.log"))
-        self.assertIn("slot 'base' of %s holds aaaaaaaaaaaa" % PROFILE, err)
+        self.assertIn("slot 'base' of %s holds aaaaaaaaaaaa" % PRESET, err)
 
     def test_done_without_a_manifest_is_refused(self):
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
@@ -536,7 +536,7 @@ class TestFetch(TaskTest):
 
     def test_the_fetch_builder_s_dry_run_fetches_nothing(self):
         os.environ["WK_DRY_RUN"] = "1"
-        p = dict(images.FIELDS, IMG_PROFILE="f", FET_URL=self.URL, FET_SHA256=self.PIN, FET_NOTE="an image")
+        p = dict(images.FIELDS, IMG_PRESET="f", FET_URL=self.URL, FET_SHA256=self.PIN, FET_NOTE="an image")
         with contextlib.redirect_stderr(io.StringIO()) as err:
             task.Fetch(self.w, p, self.w.env).build([])
         self.assertIn("would fetch image f\n  from        %s\n              not cached -- would download" % self.URL, err.getvalue())

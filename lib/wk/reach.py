@@ -196,7 +196,7 @@ UNPINNED = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/nul
 OUI = {"b8:27:eb": "Raspberry Pi (pre-4)", "d8:3a:dd": "Raspberry Pi", "dc:a6:32": "Raspberry Pi",
        "e4:5f:01": "Raspberry Pi", "2c:cf:67": "Raspberry Pi", "00:00:00": "synthesised (USB adapter, no EEPROM)"}
 HIT_KEYS = ("ip", "mac", "state", "machine", "vendor", "lease", "bridge", "hostname", "tailnet_peer", "wk_image_id",
-            "wk_role", "wk_profile", "wk_builder", "tailscale", "marker", "uname")
+            "wk_role", "wk_image_preset", "wk_builder", "tailscale", "marker", "uname")
 
 
 class Survey:
@@ -280,7 +280,7 @@ class Survey:
                 break
         h = dict(ip=ip, mac=mac, state=state, machine=machine, vendor=OUI.get(mac[:8], ""),
                  lease=lease[1] if lease else "", bridge=bridge, hostname=seen.get("host", ""), tailnet_peer=peer,
-                 wk_image_id=seen.get("id", ""), wk_role=seen.get("role", ""), wk_profile=seen.get("profile", ""),
+                 wk_image_id=seen.get("id", ""), wk_role=seen.get("role", ""), wk_image_preset=seen.get("profile", ""),
                  wk_builder=seen.get("builder", ""), tailscale=seen.get("tailscale", ""), marker=seen.get("marker", ""),
                  uname=seen.get("uname", ""))
         h["_lease"] = "%s (%s pins %s)" % (lease[1], lease[2], lease[0]) if lease else ""

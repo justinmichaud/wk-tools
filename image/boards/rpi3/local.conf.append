@@ -1,5 +1,5 @@
 # --- wk sysimage: every image built for the rpi3 -------------------------------
-# Appended to the target's local.conf by `wk sysimage build`, last, so bitbake takes it. What the board requires of any image built for it; what a measurement wants belongs to the profile.
+# Appended to the target's local.conf by `wk sysimage build`, last, so bitbake takes it. What the board requires of any image built for it; what a measurement wants belongs to the image preset.
 
 # Compressed swap in RAM (meta-oe's zram), so Speedometer 3 fits the board's 931 MB: during Speedometer 2.1 the web process alone held 74% of the 623 MB free (2026-08-30), and 3 did not finish. wk-no-swap.service spares a zram device.
 IMAGE_INSTALL:append = " zram"

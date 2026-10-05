@@ -443,7 +443,7 @@ class Autorun:
         installed = "yes" if self.m.exists(FB_PLIST) or self.m.exists(FB_SELF) else "no"
         self.say("this volume is not set up as a measured Mac (first-boot daemon installed: %s):" % installed, *("  " + w for w in wrong))
         self.say("  Every leg would be refused for these. From host mode: wk sysimage build %s --repair, then boot this volume once"
-                 % images.mac_profile(self.env))
+                 % images.mac_preset(self.env))
         self.quit("this volume is not set up as a measured Mac")
 
     def refuse_throttled_browser(self):

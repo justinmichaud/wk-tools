@@ -2,7 +2,7 @@
 #
 # wk sysimage <sub> [args] -- build and manage bootable systems
 #
-# wk: where=host name=none values=configs group=hosts takes=1 verbs=configs,build,webkit,disks,write,ls,list,holds,path dryrun build,webkit,write outside readonly ls,list,disks,holds,path,configs
+# wk: where=host name=none values=presets group=hosts takes=1 verbs=presets,build,webkit,disks,write,ls,list,holds,path dryrun build,webkit,write outside readonly ls,list,disks,holds,path,presets
 # wk: destructive write,--install,--all,--rebuild,--rm
 # wk: sub ls,list where=dynamic opts=--continued
 # wk: sub build,webkit,holds,path where=dynamic name=derived
@@ -11,18 +11,23 @@
 # wk: sub path opts=--workspace=
 # wk: sub build opts=--workspace=,--detach,--stop,--resume,--stage=,--commit=,--slot=,--preset=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet,--create,--fetch,--install,--provision,--repair,--build-pkg,--all,--version=,--refresh,--rebuild,--rm
 # wk: sub webkit opts=--workspace=,--detach,--stop,--commit=,--slot=,--preset=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet
-# wk: sub write opts=--from=,--disk=,--profile=,--machine=,--rescue,--grow,--no-grow
+# wk: sub write opts=--from=,--disk=,--image-preset=,--machine=,--rescue,--grow,--no-grow
 #
-# An image is a whole machine built from a spec in this repo. Its bytes stay
-# where its builder put them (there is no image store); `write --from` streams
-# them onto a card, and every per-card edit is made on the card afterwards.
+# An image is a whole machine built from an image preset in this repo
+# (image/presets/<image-preset>.conf). Its bytes stay where its builder put
+# them (there is no image store); `write --from` streams them onto a card, and
+# every per-card edit is made on the card afterwards. --preset names a build
+# preset, never an image preset.
 #
-#   A yocto or buildroot profile is built in its image workspace,
-#   <builder>-<profile>, and build, webkit, holds and path run on the machine
-#   holding it. <profile>@<machine> names that machine; --workspace <name>
-#   names another image workspace there (e.g. <builder>-<profile>-<arm>).
+#   A yocto or buildroot image preset is built in its image workspace,
+#   <builder>-<image-preset>, and build, webkit, holds and path run on the
+#   machine holding it. <image-preset>@<machine> names that machine;
+#   --workspace <name> names another image workspace there (e.g.
+#   <builder>-<image-preset>-<arm>).
 #
-#   build <profile> [options]    build from the spec. Per builder:
+#   presets                      every image preset, and what it builds
+#   build <image-preset> [options]
+#                                build from the spec. Per builder:
 #       yocto       --workspace, --detach, --stop, --keep-work, --chromium,
 #                   --local-layer|--no-local-layer, --tailnet|--no-tailnet,
 #                   --stage layers|fetch|image|toolchain|webkit|pgo-mix
@@ -37,29 +42,29 @@
 #       guest       the golden macOS base vm workspaces clone: built if
 #                   missing; --refresh re-provisions it, --rebuild deletes and
 #                   rebuilds it, --rm erases it
-#   webkit <profile> --commit <sha> --slot <name> [--detach]
+#   webkit <image-preset> --commit <sha> --slot <name> [--detach]
 #                                build one WebKit commit into a named slot beside
-#                                the image. A yocto profile at 2.52+ runs the PGO
+#                                the image. A yocto image preset at 2.52+ runs the PGO
 #                                cycle: instrumented slot, collection on the
 #                                board, measured build. --stop with --slot stops
 #                                that slot's build or cycle
 #       --preset <name>          one build of the cycle: wpe-cross (no profile),
 #                                wpe-cross-pgo-collect or wpe-cross-pgo-use
-#   holds <profile> [--toolchain | --slot <name> --commit <sha> [--preset <p>]]
+#   holds <image-preset> [--toolchain | --slot <name> --commit <sha> [--preset <p>]]
 #                                `yes` or `no`: whether that workspace holds the
 #                                image, the cross SDK, or the slot at that commit
-#   path <profile>               the path of that workspace's image (exit 1: none)
+#   path <image-preset>          the path of that workspace's image (exit 1: none)
 #   ls | list                    every image a workspace in the fleet has built,
 #                                its slots, and the machine holding it (WHERE)
 #   disks <machine>              removable disks attached to that machine
-#   write --from <configuration|path|vm:path> --disk <machine>:<device>[@second|@third]
+#   write --from <image-preset|path|vm:path> --disk <machine>:<device>[@second|@third]
 #                                write that image to that disk and make it a fleet
 #                                system. @second/@third write it beside the system
 #                                on partitions 1-2. A machine's own system disk is
 #                                never touched
-#       --profile <name>         which configuration the image is, when the path
+#       --image-preset <name>    which image preset the image is, when the path
 #                                does not say
-#       --machine <name>         the machine the card is for, when --profile does
+#       --machine <name>         the machine the card is for, when --image-preset does
 #                                not say
 #       --rescue                 write it as the board's rescue system
 #       --grow | --no-grow       fill the disk with the root partition, or not
@@ -93,7 +98,7 @@ def main(argv):
     args = decl.Args(d, argv)
     spec = args.positionals[1] if len(args.positionals) > 1 else ""
     s = cli.Sysimage(reg, Clock())
-    if hook == "configs":
+    if hook == "presets":
         sys.stdout.write(images.listing(reg.env))
         return 0
     if hook in ("ls", "list"):
@@ -109,7 +114,7 @@ def main(argv):
             del rest[next(i for i, a in enumerate(rest) if a == spec and (i == 0 or rest[i - 1] not in valued))]
         return getattr(s, hook)(spec, rest)
     if hook == "write":
-        return s.write(args.value("--from") or "", args.value("--disk") or "", args.value("--profile") or "",
+        return s.write(args.value("--from") or "", args.value("--disk") or "", args.value("--image-preset") or "",
                        args.value("--machine"), args.flag("--rescue"),
                        cli.grow(args.flag("--grow"), args.flag("--no-grow"), args.order))
     if hook == "disks":

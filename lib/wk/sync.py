@@ -261,8 +261,8 @@ class Sync:
         gap = [b for b in branches if not has(b)]
         if gap:
             warn("origin advertises no %s, so the mirror carries none of it and every\n"
-                 "    workspace wired to ask for it fails its fetch. An image configuration names\n"
-                 "    it (image/configs, CFG_BRANCH); 'wk doctor' reports the mirror the same way." % " ".join(gap))
+                 "    workspace wired to ask for it fails its fetch. An image preset names\n"
+                 "    it (image/presets, CFG_BRANCH); 'wk doctor' reports the mirror the same way." % " ".join(gap))
         return self.mirror_refs(mirror) != refs
 
     def mirror_refs(self, mirror):

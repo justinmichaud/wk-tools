@@ -17,7 +17,7 @@ BR2_ROOTFS_POST_IMAGE_SCRIPT="board/raspberrypi4/post-image.sh"
 # vc4-kms-v3d-pi4), and only the 76 MB of GPU memory a KMS system needs: the
 # firmware composits nothing here, the kernel's vc4/v3d do.
 BR2_ROOTFS_POST_SCRIPT_ARGS="--tvmode-720 --gpu_mem_1024=76 --add-vc4-kms-v3d-overlay --silent"
-# No BR2_LINUX_KERNEL: BR_KERNEL_DEB_URL (image/configs/wpewebkit-2.38-buildroot-rpi4-32.conf) pins the
+# No BR2_LINUX_KERNEL: BR_KERNEL_DEB_URL (image/presets/wpewebkit-2.38-buildroot-rpi4-32.conf) pins the
 # running kernel from Raspberry Pi OS's own package, so buildroot builds none. Its device tree name comes
 # from machines/rpi4.conf's dtb= (buildroot.py's kernel_dts), not a second, buildroot-derived one.
 BR2_PACKAGE_BUSYBOX_SHOW_OTHERS=y

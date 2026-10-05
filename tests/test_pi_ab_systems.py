@@ -146,7 +146,7 @@ class TestTheLegsSystem(SystemBootTest):
 
 class TestTheWidth(unittest.TestCase):
 
-    def test_a_system_id_or_a_profile_name_reads_its_profiles_width(self):
+    def test_a_system_id_or_a_preset_name_reads_its_presets_width(self):
         for name, bits in (("webkit-2.52-yocto-rpi3-32-ebb646f3bf67", 32), ("webkit-2.52-yocto-rpi5-64-cddf63dc0d4b", 64),
                            ("webkit-2.52-yocto-rpi4-32", 32)):
             self.assertEqual(board_ab.width(name, os.environ), bits, name)

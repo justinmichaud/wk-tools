@@ -26,11 +26,11 @@ from wk.store import Store  # noqa: E402
 from wk.sysimage import pmos  # noqa: E402
 
 
-class TestImageProfiles(unittest.TestCase):
-    def test_each_bridge_image_profile_builds_for_its_bridges_device_and_declares_its_bands(self):
+class TestImagePresets(unittest.TestCase):
+    def test_each_bridge_image_preset_builds_for_its_bridges_device_and_declares_its_bands(self):
         env = dict(os.environ, WK_ROOT=str(REPO))
-        profiles = [images.quiet_load(n, env) for n in images.names(env)]
-        bridged = [p for p in profiles if p and p["IMG_BUILDER"] == "pmos" and p["PMO_BRIDGE"]]
+        presets = [images.quiet_load(n, env) for n in images.names(env)]
+        bridged = [p for p in presets if p and p["IMG_BUILDER"] == "pmos" and p["PMO_BRIDGE"]]
         self.assertTrue(bridged)
         for p in bridged:
             with self.subTest(bridge=p["PMO_BRIDGE"]):

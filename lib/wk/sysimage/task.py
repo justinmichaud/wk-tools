@@ -62,8 +62,8 @@ def fetch_base(machine, url, sha, env):
 
 
 class Fetch:
-    def __init__(self, machine, profile, env):
-        self.machine, self.p, self.env = machine, profile, env
+    def __init__(self, machine, preset, env):
+        self.machine, self.p, self.env = machine, preset, env
 
     def path(self):
         return os.path.join(cache_dir(self.env), os.path.basename(self.p["FET_URL"]))
@@ -73,10 +73,10 @@ class Fetch:
 
     def build(self, rest):
         p = self.p
-        options(rest, (), (), "usage: wk sysimage build %s [--dry-run]" % p["IMG_PROFILE"])
+        options(rest, (), (), "usage: wk sysimage build %s [--dry-run]" % p["IMG_PRESET"])
         if act.dry_run():
             cached = self.machine.exists(self.path())
-            log("would fetch image %s" % p["IMG_PROFILE"])
+            log("would fetch image %s" % p["IMG_PRESET"])
             log("  from        %s" % p["FET_URL"])
             log("              %s" % ("cached" if cached else "not cached -- would download"))
             log("  pinned to   %s" % p["FET_SHA256"])
@@ -246,9 +246,9 @@ class ContainerBuilder:
     KIND = TITLE = SPEC = BASE_IMAGE = BASE_VAR = ""
     NEEDS = NOT_HERE = IMAGE_NOTE = SURVIVES = ""
 
-    def __init__(self, reg, profile, spec, clock):
-        self.reg, self.p, self.spec, self.clock = reg, profile, spec, clock
-        self.name = profile["IMG_PROFILE"]
+    def __init__(self, reg, preset, spec, clock):
+        self.reg, self.p, self.spec, self.clock = reg, preset, spec, clock
+        self.name = preset["IMG_PRESET"]
         self.here, self.env, self.root = reg.machine, reg.env, str(reg.root)
         self.store = Store(self.env)
 

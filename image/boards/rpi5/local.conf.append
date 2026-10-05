@@ -1,5 +1,5 @@
 # --- wk sysimage: every image built for the rpi5 -------------------------------
-# Appended to the target's local.conf by `wk sysimage build`, last, so bitbake takes it. What the board requires of any image built for it; what a measurement wants belongs to the profile.
+# Appended to the target's local.conf by `wk sysimage build`, last, so bitbake takes it. What the board requires of any image built for it; what a measurement wants belongs to the image preset.
 
 # The firmware loads one base tree for both Pi 5 steppings and adapts D0 with this overlay: narrower GPIO banks, both pinctrl nodes moved to brcm,bcm2712d0-* with a smaller register window, vc4 to brcm,bcm2712d0-vc6. Without it the kernel drives D0 through bcm2712_c0_plat_data and the first pull-config write aborts -- an SError, and a panic in bcm2712_pull_config_set before rootfs. The pinned kernel builds it; meta-raspberrypi installs a hand-curated 52 of the 367 overlays it compiles and this is not among them. Shipping the D0 *base* tree instead does nothing: the firmware never asks for it by name (measured, 2026-09-04).
 RPI_KERNEL_DEVICETREE_OVERLAYS:append = " overlays/bcm2712d0.dtbo"

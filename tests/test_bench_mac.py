@@ -31,9 +31,9 @@ BENCH = REPO / "cmd" / "bench"
 SHA = "0123456789abcdef0123456789abcdef01234567"
 RESULT = json.dumps({"Speedometer-3": {"metrics": {"Score": {"current": [30.0, 31.0]}}}})
 MARKERS = {"mbp": "id=perf-macos-tolken-2026-09\nprofile=perf-macos-tolken\n", "benchvm": "id=perf-macos-benchvm\n"}
-CONFS = {"mbp": 'kind=mac\nssh="tolken"\ndriver=mac-volume\nprofile=perf-macos-tolken\n'
+CONFS = {"mbp": 'kind=mac\nssh="tolken"\ndriver=mac-volume\nimage_preset=perf-macos-tolken\n'
                 'volume="WK Bench"\ndisplay="builtin 1280x832"\n',
-         "benchvm": "kind=guest\ndriver=mac-guest\nprofile=perf-macos-benchvm\n"}
+         "benchvm": "kind=guest\ndriver=mac-guest\nimage_preset=perf-macos-benchvm\n"}
 STAGE_ID = "20260901T000000Z-mac-release"
 PROBE = lib_argv(str(REPO), screen.WINDOWS, "wk_window_probe")
 UNEXPECTED = lib_argv(str(REPO), screen.WINDOWS, "wk_window_unexpected")

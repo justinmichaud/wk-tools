@@ -119,7 +119,7 @@ class TestTheVerbIsTheDispatchers(unittest.TestCase):
         self.assertEqual(first("pr", "rebase", "ws"), ["rebase", "ws"])
         self.assertEqual(first("quiesce"), ["status"])
         self.assertEqual(first("pr", "ws", "1234"), ["checkout", "ws", "1234"])
-        self.assertEqual(first("sysimage", "configs"), ["configs"])
+        self.assertEqual(first("sysimage", "presets"), ["presets"])
 
     def test_an_option_before_the_verb_is_refused(self):
         for argv in (("key", "--on", "box", "push"), ("key", "--rotate", "setup"), ("pr", "--draft", "open")):

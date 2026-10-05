@@ -19,7 +19,7 @@ from wk.boot.pi import PiTryboot  # noqa: E402
 from wk.machine import Result  # noqa: E402
 
 CONF = {"name": "rpi4", "driver": "pi-tryboot", "device": "/dev/sda", "root": "/dev/mmcblk0p2",
-        "dtb": "bcm2711-rpi-4-b.dtb", "role": "bench-device", "profile": "p"}
+        "dtb": "bcm2711-rpi-4-b.dtb", "role": "bench-device", "image_preset": "p"}
 
 
 class Channel:

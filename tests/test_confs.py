@@ -1,4 +1,4 @@
-"""Shape and consistency of the two conf registries, image/configs and machines/, against the loaders that read them."""
+"""Shape and consistency of the two conf registries, image/presets and machines/, against the loaders that read them."""
 
 import re
 import sys
@@ -10,7 +10,7 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import fleet, images, places  # noqa: E402
 
 REGISTRIES = {
-    "image/configs": REPO / "image" / "configs",
+    "image/presets": REPO / "image" / "presets",
     "machines": REAL_MACHINES,
 }
 
@@ -95,7 +95,7 @@ class TestConfFieldSets(unittest.TestCase):
         optional = {"CFG_NEEDS", "BR_KERNEL_DEB_URL", "BR_KERNEL_DEB_SHA256", "BR_KERNEL_RELEASE",
                     "YOC_PORT_TARGET_FROM", "YOC_MACHINE", "YOC_MULTILIB", "YOC_MULTILIB_TUNE"}
         by_builder = {}
-        for p in conf_files("image/configs"):
+        for p in conf_files("image/presets"):
             by_builder.setdefault(assigned(p).get("IMG_BUILDER"), []).append(p)
         self.assertNotIn(None, by_builder)
         for builder, files in by_builder.items():

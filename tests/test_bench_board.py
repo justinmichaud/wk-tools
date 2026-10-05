@@ -335,7 +335,7 @@ class TestTheBrokerRunsTheSameCommandOnTheWorkstation(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("wk_broker", REPO / "container" / "broker" / "wk-broker.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        mod.fleet = lambda: {BOARD: {"name": BOARD, "role": "bench-device", "os": "any", "profile": "", "note": ""}}
+        mod.fleet = lambda: {BOARD: {"name": BOARD, "role": "bench-device", "os": "any", "image_preset": "", "note": ""}}
         return mod
 
     def test_stage_is_a_deploy_and_run_a_board_run_of_the_named_workspace(self):

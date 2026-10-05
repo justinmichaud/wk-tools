@@ -1,7 +1,7 @@
 # --- wk sysimage: webkit-2.52-yocto-rpi5-64-oc ------------------------------
-# Appended by `wk sysimage write --profile webkit-2.52-yocto-rpi5-64-oc` to the
+# Appended by `wk sysimage write --image-preset webkit-2.52-yocto-rpi5-64-oc` to the
 # card's own config.txt, after image/boards/rpi5/config.txt.append. The
-# overclock is a property of this measurement, so it lives in this profile and
+# overclock is a property of this measurement, so it lives in this image preset and
 # nowhere else: the board file is every image's, and the EEPROM (BOOT_ORDER,
 # SDRAM_BANKLOW) is firmware state the workstation boots from too.
 #

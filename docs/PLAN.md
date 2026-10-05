@@ -633,7 +633,7 @@ exist.
      one byte formatter; `cmd/sysimage`'s `# wk:` line takes `outside`, so
      the dispatcher refuses `wk sysimage` inside any workspace.
      `ls` also lists the mac-volume and guest builders (5.32, 5.34), through
-     `ls.host_profiles`/`ls.builder_outputs` -- the one `builder_outputs`
+     `ls.host_presets`/`ls.builder_outputs` -- the one `builder_outputs`
      `cli.Sysimage` delegates to -- shown only once found, since neither has a
      workspace to anchor a placeholder row at. Owed: `live sysimage.build[vm]`
      has no body.
@@ -938,7 +938,7 @@ exist.
      guest.
 
    5.34 **Guest create and destroy, and the base as a builder.** *Landed* (`lib/wk/sysimage/guestbase.py`, the `guest` builder of
-     `image/configs/macos-guest-base.conf`; every converge step, the admission, the
+     `image/presets/macos-guest-base.conf`; every converge step, the admission, the
      desktop and load findings and `wk doctor <guest>`'s rows in `lib/wk/guest.py`;
      `Vm.start` writes the alias; `vm` is a dispatcher tombstone). Owed:
      `vm/desktop.sh`, `vm/provision-base.sh` and `bench/mac-pyobjc.sh` still

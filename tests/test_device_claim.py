@@ -245,7 +245,7 @@ MACHINE_CONF = '''kind=board
 ssh=fakeboard
 driver=no-such-driver
 device=/dev/null
-profile=webkit-2.52-yocto-rpi5-64
+image_preset=webkit-2.52-yocto-rpi5-64
 role=bench-device
 note="a board that is not there"
 '''

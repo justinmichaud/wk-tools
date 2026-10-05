@@ -67,7 +67,7 @@ _report_survivors() {
     [ -n "$left" ] && [ "$left" -gt 256 ] || return 0
     echo "wk: ${left}MB is still held in this workspace's cgroup after the kill: a build" >&2
     echo "wk: that detached from its own process tree (bitbake's cooker does) outlives it." >&2
-    echo "wk: stop it by name -- wk sysimage build <profile> --stop -- or remake the workspace." >&2
+    echo "wk: stop it by name -- wk sysimage build <image-preset> --stop -- or remake the workspace." >&2
 }
 
 while _alive; do

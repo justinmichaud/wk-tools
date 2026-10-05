@@ -123,7 +123,7 @@ class TestWhichProfilesAreProfileGuided(unittest.TestCase):
 
     def wanted(self, glob):
         seen = {}
-        for conf in sorted((REPO / "image" / "configs").glob(glob)):
+        for conf in sorted((REPO / "image" / "presets").glob(glob)):
             p = images.load(conf.stem)
             seen[conf.stem] = images.pgo_wanted(p["IMG_BUILDER"], p["CFG_RELEASE"])
         self.assertTrue(seen)

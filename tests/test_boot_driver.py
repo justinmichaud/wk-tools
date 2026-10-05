@@ -155,7 +155,7 @@ class Conformance:
                 for verb in ("media", "evidence", "reprovision"):
                     got, err = quiet(getattr(d, verb))
                     self.assertIsInstance(got, str, "%s %s: %s" % (verb, mode, err))
-                self.assertTrue(d.reprovision().startswith("wk sysimage build " + fake.conf["profile"]))
+                self.assertTrue(d.reprovision().startswith("wk sysimage build " + fake.conf["image_preset"]))
 
     def test_the_failsafe_is_on_board_shell_outside_the_arming(self):
         """boot.arming_exact: a failsafe lives outside the script it guards."""

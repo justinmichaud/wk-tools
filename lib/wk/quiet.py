@@ -157,7 +157,7 @@ class Quiesce:
         """Only the clock is judged on a workstation: the rest is what a bench install is and a workstation never will be."""
         probe = self._findings("wk_quiet_desktop_probe")
         bad = self.render(self._findings("wk_quiet_cpu_findings", probe))
-        provision = "wk sysimage build %s --provision" % images.mac_profile(self.env)
+        provision = "wk sysimage build %s --provision" % images.mac_preset(self.env)
         if self.bench:
             bad += self.render(self._findings("wk_quiet_desktop_findings", probe, provision)
                                + self._findings("wk_quiet_daemons_findings", probe, "wk quiesce on"))

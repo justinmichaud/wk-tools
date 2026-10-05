@@ -304,7 +304,7 @@ class TestTheCommits(ABTest):
 
     def test_a_pull_request_reads_its_release_off_its_base_branch(self):
         a, _ = self.graph(self.world(pr_base="wpe-2.38"), "wpe:990", release="")
-        self.assertEqual(a.devices[0].profile, R38)
+        self.assertEqual(a.devices[0].image_preset, R38)
 
     def test_a_pull_request_whose_base_branch_names_no_release_is_refused(self):
         self.assertIn("--release", self.refused(self.world(pr_base="main"), "990", release=""))
@@ -335,7 +335,7 @@ class TestTheImages(ABTest):
     def test_a_device_carries_its_own_width(self):
         w = self.world(boards={"rpi3": "webkit-2.52-yocto-rpi3-32", "rpi4": "webkit-2.52-yocto-rpi4-64"})
         a, _ = self.graph(w, release="2.52", builder="yocto", devices="rpi3-32,rpi4-64")
-        self.assertEqual([d.profile for d in a.devices], ["webkit-2.52-yocto-rpi3-32", "webkit-2.52-yocto-rpi4-64"])
+        self.assertEqual([d.image_preset for d in a.devices], ["webkit-2.52-yocto-rpi3-32", "webkit-2.52-yocto-rpi4-64"])
 
 
 class TestTheGraph(ABTest):

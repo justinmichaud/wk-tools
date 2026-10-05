@@ -79,7 +79,7 @@ def outputs(machine, store, ws):
     return [p for b in BUILDERS for p in b.outputs(machine, store.ws_dir(ws))]
 
 
-def host_profiles(env):
+def host_presets(env):
     for name in images.names(env):
         p = images.quiet_load(name, env)
         if p and p["IMG_BUILDER"] in HOST_BUILDERS:
@@ -144,7 +144,7 @@ def slot_is(ws, name, commit, preset, env):
 
 def slot_holds(ws, name, commit, env):
     """On a profile-guided release a slot holds a commit only as its measured build."""
-    p = images.quiet_load(images.ws_profile(ws, env) or "", env)
+    p = images.quiet_load(images.ws_preset(ws, env) or "", env)
     if p is None:
         return False
     return slot_is(ws, name, commit, project.get("PGO_USE") if images.pgo_wanted(p["IMG_BUILDER"], p["CFG_RELEASE"]) else None, env)
@@ -160,14 +160,14 @@ class Listing:
         ws, env = image.ws, self.reg.env
         building = self.building(ws)
         state = "unknown" if building is None else "building" if building else "none" if image.path is None else "ready"
-        prof = images.ws_profile(ws, env)
+        prof = images.ws_preset(ws, env)
         board, note = "", ""
         if prof:
             board = (images.quiet_load(prof, env) or {}).get("IMG_MACHINE", "")
             note = "" if board else "this checkout does not define '%s'" % prof
         if image.path is None:
             out = [ROW % (ws, board or "?", self.label, image.builder, state, "-", "-"),
-                   "    no image yet; 'wk sysimage build %s' builds one" % (prof or "<profile>")]
+                   "    no image yet; 'wk sysimage build %s' builds one" % (prof or "<image-preset>")]
         else:
             out = [ROW % (ws, board or "?", self.label, image.builder, state, human_bytes(os.stat(image.path).st_size),
                           stamp(image.path)), "    " + image.path]
@@ -181,8 +181,8 @@ class Listing:
 
     def host_rows(self):
         rows = []
-        for p in host_profiles(self.reg.env):
-            name, builder, board = p["IMG_PROFILE"], p["IMG_BUILDER"], p["IMG_MACHINE"] or "-"
+        for p in host_presets(self.reg.env):
+            name, builder, board = p["IMG_PRESET"], p["IMG_BUILDER"], p["IMG_MACHINE"] or "-"
             try:
                 found = builder_outputs(self.reg, self.clock, p) or []
             except Unknown as e:

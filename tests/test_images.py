@@ -1,4 +1,4 @@
-"""lib/wk/images.py: the profile loader, and every name derived from a profile."""
+"""lib/wk/images.py: the preset loader, and every name derived from a preset."""
 import contextlib
 import io
 import sys
@@ -11,10 +11,10 @@ from wk import act  # noqa: E402
 from wk import images, pgo  # noqa: E402
 from wk.sysimage import yocto  # noqa: E402
 
-PROFILE = "webkit-2.52-yocto-rpi5-64"
-WS = "yocto-" + PROFILE
-BUILDROOT_PROFILE = "wpewebkit-2.38-buildroot-rpi3-32"
-BUILDROOT_WS = "buildroot-" + BUILDROOT_PROFILE
+PRESET = "webkit-2.52-yocto-rpi5-64"
+WS = "yocto-" + PRESET
+BUILDROOT_PRESET = "wpewebkit-2.38-buildroot-rpi3-32"
+BUILDROOT_WS = "buildroot-" + BUILDROOT_PRESET
 STORE = {"WK_STORE": "/store", "WK_ROOT": str(REPO)}
 
 
@@ -23,16 +23,16 @@ class ScratchRoot(WkTest):
 
     def setUp(self):
         super().setUp()
-        (self.tmp / "image" / "configs").mkdir(parents=True)
+        (self.tmp / "image" / "presets").mkdir(parents=True)
         self.env = {"WK_ROOT": str(self.tmp)}
 
     def conf(self, name, text):
-        (self.tmp / "image" / "configs" / (name + ".conf")).write_text(text)
+        (self.tmp / "image" / "presets" / (name + ".conf")).write_text(text)
 
 
 class TestTheLoader(ScratchRoot):
     def test_a_field_the_conf_leaves_out_is_its_default(self):
-        self.conf("p", "# p -- a profile\nIMG_BUILDER=yocto\n")
+        self.conf("p", "# p -- a preset\nIMG_BUILDER=yocto\n")
         p = images.load("p", self.env)
         self.assertEqual(p["IMG_BUILDER"], "yocto")
         self.assertEqual(p["IMG_WATCHDOG"], "300")
@@ -67,18 +67,18 @@ class TestTheLoader(ScratchRoot):
                     images.load("p", self.env)
 
 
-class TestABrokenProfileIsNoWorkspaceQuestion(ScratchRoot):
+class TestABrokenPresetIsNoWorkspaceQuestion(ScratchRoot):
     def test_a_conf_that_does_not_parse_is_refused_rather_than_read_as_building_on_the_host(self):
         self.conf("p", "IMG_BUILDER=yocto\nIMG_NOPE=1\n")
         err = io.StringIO()
         with contextlib.redirect_stderr(err), self.assertRaises(act.Refused):
             images.image_ws("p", self.env)
-        self.assertIn("p.conf:2: IMG_NOPE is not a profile field", err.getvalue())
+        self.assertIn("p.conf:2: IMG_NOPE is not an image preset field", err.getvalue())
         self.assertEqual(images.image_ws("nosuch", self.env), "")
 
 
 class TestTheListing(ScratchRoot):
-    def test_each_profile_is_listed_with_its_header_and_what_it_needs(self):
+    def test_each_preset_is_listed_with_its_header_and_what_it_needs(self):
         self.conf("a", "# a -- the first\nIMG_BUILDER=yocto\n")
         self.conf("b", '# b -- the second\nCFG_NEEDS="a defconfig"\n')
         self.assertEqual(images.listing(self.env).splitlines(), [
@@ -86,7 +86,7 @@ class TestTheListing(ScratchRoot):
             "b", "            the second",
             "            -- not buildable yet; 'wk sysimage build b' says what it needs"])
 
-    def test_origins_branches_are_those_an_origin_profile_tracks(self):
+    def test_origins_branches_are_those_an_origin_preset_tracks(self):
         self.conf("a", "CFG_REMOTE=origin\nCFG_BRANCH=webkitglib/2.52\n")
         self.conf("b", "CFG_REMOTE=origin\nCFG_BRANCH=webkitglib/2.52\n")
         self.conf("c", "CFG_REMOTE=wpe\nCFG_BRANCH=wpe-2.46\n")
@@ -94,7 +94,7 @@ class TestTheListing(ScratchRoot):
 
 
 class TestPgoWanted(unittest.TestCase):
-    def test_a_yocto_profile_from_2_52_is_profile_guided_and_nothing_else_is(self):
+    def test_a_yocto_preset_from_2_52_is_profile_guided_and_nothing_else_is(self):
         for builder, release, wanted in (("yocto", "2.52", True), ("yocto", "2.60", True), ("yocto", "2.46", False),
                                          ("buildroot", "2.52", False), ("yocto", "", False)):
             with self.subTest(builder=builder, release=release):
@@ -102,10 +102,10 @@ class TestPgoWanted(unittest.TestCase):
 
 
 class TestTheSpec(unittest.TestCase):
-    def test_the_machine_half_is_split_off_the_profile(self):
-        self.assertEqual(images.spec_profile(PROFILE + "@moose"), PROFILE)
-        self.assertEqual(images.spec_machine(PROFILE + "@moose"), "moose")
-        self.assertEqual(images.spec_machine(PROFILE), "")
+    def test_the_machine_half_is_split_off_the_preset(self):
+        self.assertEqual(images.spec_preset(PRESET + "@moose"), PRESET)
+        self.assertEqual(images.spec_machine(PRESET + "@moose"), "moose")
+        self.assertEqual(images.spec_machine(PRESET), "")
 
     def test_this_machines_own_name_is_its_default_place(self):
         self.assertEqual(images.spec_place("here", "here", "container"), "container")
@@ -113,45 +113,45 @@ class TestTheSpec(unittest.TestCase):
 
 
 class TestTheImageWorkspace(unittest.TestCase):
-    def test_it_is_its_builder_and_its_profile(self):
-        self.assertEqual(images.image_ws(PROFILE, STORE), WS)
-        self.assertEqual(images.image_ws(BUILDROOT_PROFILE, STORE), BUILDROOT_WS)
+    def test_it_is_its_builder_and_its_preset(self):
+        self.assertEqual(images.image_ws(PRESET, STORE), WS)
+        self.assertEqual(images.image_ws(BUILDROOT_PRESET, STORE), BUILDROOT_WS)
 
     def test_the_machine_half_is_no_part_of_the_name(self):
-        self.assertEqual(images.image_ws(PROFILE + "@moose", STORE), WS)
+        self.assertEqual(images.image_ws(PRESET + "@moose", STORE), WS)
 
-    def test_a_host_builder_or_no_profile_names_none(self):
+    def test_a_host_builder_or_no_preset_names_none(self):
         for spec in ("bridge-pinephone", "recovery-pinephone", "nosuch"):
             with self.subTest(spec=spec):
                 self.assertEqual(images.image_ws(spec, STORE), "")
 
-    def test_the_profile_comes_back_out_of_the_name_by_longest_match(self):
-        self.assertEqual(images.ws_profile(WS, STORE), PROFILE)
-        self.assertEqual(images.ws_profile(WS + "-base", STORE), PROFILE)
-        self.assertEqual(images.ws_profile(WS + "-oc", STORE), PROFILE + "-oc")
-        self.assertIsNone(images.ws_profile("jsc-release", STORE))
-        self.assertIsNone(images.ws_profile("yocto-nosuch", STORE))
+    def test_the_preset_comes_back_out_of_the_name_by_longest_match(self):
+        self.assertEqual(images.ws_preset(WS, STORE), PRESET)
+        self.assertEqual(images.ws_preset(WS + "-base", STORE), PRESET)
+        self.assertEqual(images.ws_preset(WS + "-oc", STORE), PRESET + "-oc")
+        self.assertIsNone(images.ws_preset("jsc-release", STORE))
+        self.assertIsNone(images.ws_preset("yocto-nosuch", STORE))
 
     def test_the_workspace_option_names_another(self):
-        self.assertEqual(images.ws_arg([PROFILE, "--workspace", WS + "-b"], STORE), WS + "-b")
-        self.assertEqual(images.ws_arg([PROFILE, "--slot", "x", "--workspace=" + WS + "-c"], STORE), WS + "-c")
-        self.assertEqual(images.ws_arg([PROFILE, "--slot", "base"], STORE), WS)
+        self.assertEqual(images.ws_arg([PRESET, "--workspace", WS + "-b"], STORE), WS + "-b")
+        self.assertEqual(images.ws_arg([PRESET, "--slot", "x", "--workspace=" + WS + "-c"], STORE), WS + "-c")
+        self.assertEqual(images.ws_arg([PRESET, "--slot", "base"], STORE), WS)
         self.assertEqual(images.ws_arg(["--slot", "base"], STORE), "")
         self.assertEqual(images.ws_arg([], STORE), "")
 
 
 class TestEveryPathIsKeyedOnTheWorkspace(unittest.TestCase):
-    """One profile may have a workspace per arm, and a slot or a collection in
+    """One image preset may have a workspace per arm, and a slot or a collection in
     one is not the other's."""
 
     def test_a_yocto_slot(self):
         self.assertEqual(images.slot_dir(WS + "-pr", "base", STORE),
                          "/store/ws/%s-pr/build/wk-slots/base" % WS)
 
-    def test_a_buildroot_slot_keeps_the_profile_inside(self):
+    def test_a_buildroot_slot_keeps_the_preset_inside(self):
         self.assertEqual(images.slot_dir(BUILDROOT_WS + "-pr", "base", STORE),
                          "/store/ws/%s-pr/build/buildroot/%s/output/wk-slots/base"
-                         % (BUILDROOT_WS, BUILDROOT_PROFILE))
+                         % (BUILDROOT_WS, BUILDROOT_PRESET))
 
     def test_no_image_workspace_has_no_slot(self):
         self.assertIsNone(images.slot_dir("jsc-release", "base", STORE))

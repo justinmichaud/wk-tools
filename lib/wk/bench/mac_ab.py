@@ -228,7 +228,7 @@ class MacAB:
             ck(done, "provisioned", "'%s' has finished a first boot" % self.d.c("volume") if done
                else "no 'provisioning complete' in %s" % self.firstboot_log(root),
                "every leg is refused on an unquieted desktop; on the Mac: wk sysimage build %s --repair, then boot it once"
-               % (self.d.c("profile") or "<profile>"))
+               % (self.d.c("image_preset") or "<image-preset>"))
         ck(self.mac.test("-w", root), "writable", "%s takes a plant without sudo" % root)
         bh = self.d.bench_home() or ""
         ck(self.mac.test("-d", bh) and self.mac.test("-w", bh + "/Library") if bh else False, "bench home",
@@ -784,11 +784,11 @@ class MacAB:
             return 0
         root = self.d.bench_root() or ""
         if not self.guest:
-            profile = self.d.c("profile") or "<profile>"
+            image_preset = self.d.c("image_preset") or "<image-preset>"
             version = self.mac.out("mac-version.sh", WK_PATH=self.d.volume() + "/System/Library/CoreServices/SystemVersion.plist")
             step("yes" if version else "no", "the benchmark volume exists", "'%s', macOS %s" % (vol, version) if version else
                  "'%s' is not mounted here (a shutdown unmounts it; --all makes one that is not there at all)" % vol,
-                 "wk sysimage build %s --all   (on the Mac)" % profile, "wk boot %s --status" % n)
+                 "wk sysimage build %s --all   (on the Mac)" % image_preset, "wk boot %s --status" % n)
             if not version:
                 return 0
             marker = kv(self.mac.read(self.d.volume() + MARKER)).get("id", "")
@@ -796,7 +796,7 @@ class MacAB:
             done = bool(root) and self.provisioned(root)
             step("yes" if done else "no", "it is provisioned", ("first boot completed; marker %s, pyobjc %s" if done else
                  "its first-boot log has no completion line (marker %s, pyobjc %s)") % (marker or "none", pyobjc),
-                 "wk sysimage build %s --repair   (on the Mac), then boot it once" % profile, "wk bench ab --devices %s --preflight" % n)
+                 "wk sysimage build %s --repair   (on the Mac), then boot it once" % image_preset, "wk bench ab --devices %s --preflight" % n)
         arms = self.staged_arms(root) if root else []
         shown = "; ".join("%s (%s) gated=%s" % (i, sha[:12], "yes" if g else "no") for i, sha, g in arms) or "nothing staged"
         step("yes" if len(arms) > 1 else "part" if arms else "no", "two arms are built and staged", shown,

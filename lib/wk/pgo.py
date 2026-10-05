@@ -101,12 +101,12 @@ def steps(step, holds, board, ws, spec, on, place, commit, slot, needs):
 
 
 class Cycle:
-    """`wk sysimage webkit` of a 2.52+ yocto profile; `build`, `mode_of` and `pool` are injectable."""
+    """`wk sysimage webkit` of a 2.52+ yocto image preset; `build`, `mode_of` and `pool` are injectable."""
 
     def __init__(self, reg, p, spec, clock, build=None, mode_of=None, pool=futures.ThreadPoolExecutor):
         self.reg, self.p, self.spec, self.clock = reg, p, spec, clock
         self.here, self.env, self.store, self.root = reg.machine, reg.env, reg.store, str(reg.root)
-        self.name = p["IMG_PROFILE"]
+        self.name = p["IMG_PRESET"]
         self.wk = os.path.join(self.root, "wk")
         self.build, self.mode_of, self.pool = build or self.yocto_build, mode_of or self.board_mode, pool
         self.log = ""

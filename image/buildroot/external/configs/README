@@ -34,7 +34,7 @@ dlopen it as the default.
 
 Kernel: the fork's rpi34-linux-5.15.config is a Pi 2/3 config (no MMC_SDHCI_IPROC, PCIE_BRCMSTB, XHCI,
 LPAE or HIGHMEM; it hangs before init on an rpi4). RPi OS's gzip kernel7l 5.15.84 boots in 90 s
-(measured 2026-08-31), so the profile pins that package and buildroot_ws.py installs its zImage and
+(measured 2026-08-31), so the image preset pins that package and buildroot_ws.py installs its zImage and
 device tree ahead of the board's post-image script.
 
 TODO: a full bench run on the rpi4 2.38 image is unmeasured; its weston/mesa session has not yet drawn

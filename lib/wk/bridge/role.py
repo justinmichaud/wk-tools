@@ -93,7 +93,7 @@ class Role:
 
     def password(self, name):
         """PMO_PASSWORD is not a secret: pmbootstrap handles it in plain text, and it is the phone's console login."""
-        _, p = provision.bridge_profile(name, dict(self.env, WK_ROOT=self.root))
+        _, p = provision.bridge_preset(name, dict(self.env, WK_ROOT=self.root))
         return p["PMO_PASSWORD"] if p else ""
 
     def bootstrap_root(self, bc, dest):
@@ -101,7 +101,7 @@ class Role:
         if not pw:
             return None
         info("giving root the same ssh key, so provisioning needs no password")
-        log("  pmbootstrap installs the key for '%s' only; this uses PMO_PASSWORD from its image profile." % bc.user)
+        log("  pmbootstrap installs the key for '%s' only; this uses PMO_PASSWORD from its image preset." % bc.user)
         keys = "/home/%s/.ssh/authorized_keys" % bc.user
         install = "install -d -o root -g root -m 700 /root/.ssh && install -o root -g root -m 600 %s /root/.ssh/authorized_keys" % keys
         # -tt: doas reads its password from a tty.

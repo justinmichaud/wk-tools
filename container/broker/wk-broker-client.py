@@ -92,7 +92,7 @@ def report(ev, rc):
         out("  machines it will act on:")
         for name, m in (ev.get("machines") or {}).items():
             out(f"    {name:<10} {m.get('note')}")
-            out(f"    {'':<10} profile {m.get('profile')}; {m.get('reach')}")
+            out(f"    {'':<10} image preset {m.get('image_preset')}; {m.get('reach')}")
         refused = ev.get("not_bench_devices") or {}
         if refused:
             out("  refused by role (a workspace may not reboot a workstation):")

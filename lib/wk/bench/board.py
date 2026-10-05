@@ -155,7 +155,7 @@ class BoardSystem(System):
         doc_path = os.path.join(d, "slot.json")
         if not os.path.isfile(doc_path):
             die("'%s' has no slot '%s' built.\n    Build one first:\n"
-                "        %s <profile> --workspace %s --commit <sha> --slot %s" % (self.ws, name, project.get("SLOT_COMMAND"), self.ws, name))
+                "        %s <image-preset> --workspace %s --commit <sha> --slot %s" % (self.ws, name, project.get("SLOT_COMMAND"), self.ws, name))
         with open(doc_path) as f:
             doc = json.load(f)
         self.barrier("Landing slot '%s' now would put it on the system that boot is about to leave." % name)

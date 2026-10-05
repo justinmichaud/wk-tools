@@ -471,7 +471,7 @@ class TestUnitsForABusyBoxInit(WkTest):
 
 class TestPiSdDriver(unittest.TestCase):
     CONF = {"name": "rpi3", "driver": "pi-sd", "device": "/dev/mmcblk0", "root": "/dev/mmcblk0p2",
-            "role": "bench-device", "profile": "webkit-2.52-yocto-rpi3-32"}
+            "role": "bench-device", "image_preset": "webkit-2.52-yocto-rpi3-32"}
 
     def board(self, *boots):
         fake = FakeBoard(self.CONF)

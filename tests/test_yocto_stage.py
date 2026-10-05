@@ -1,4 +1,4 @@
-"""`wk sysimage build` of a yocto profile (lib/wk/sysimage/yocto.py) as a task against a Fake world."""
+"""`wk sysimage build` of a yocto preset (lib/wk/sysimage/yocto.py) as a task against a Fake world."""
 import contextlib
 import io
 import os
@@ -21,16 +21,16 @@ from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result, isolated_module  # noqa: E402
 from wk.sysimage import yocto  # noqa: E402
 
-PROFILE = "wpewebkit-2.46-yocto-rpi4-64"
-WS = "yocto-" + PROFILE
+PRESET = "wpewebkit-2.46-yocto-rpi4-64"
+WS = "yocto-" + PRESET
 CROSS_TARGET = "rpi4-64bits-mesa"
 SHA = "a" * 40
 TASK_LINE = "NOTE: Running task 7658 of 13213 (virtual:native:/w/sources/meta-clang/recipes-devtools/clang/clang_git.bb:do_compile)\n"
 
 
 class World(Fake):
-    """This machine holding `WS` on its container place `box`, the workspace on the profile's branch and its
-    targets.conf holding the profile's section; a stage writes `out` to its log and exits `rc` after `polls`."""
+    """This machine holding `WS` on its container place `box`, the workspace on the preset's branch and its
+    targets.conf holding the preset's section; a stage writes `out` to its log and exits `rc` after `polls`."""
 
     def __init__(self, tmp):
         super().__init__("here")
@@ -83,8 +83,8 @@ class World(Fake):
         self.made = True
         return Result(0)
 
-    def profile(self):
-        return images.load(PROFILE, self.env)
+    def preset(self):
+        return images.load(PRESET, self.env)
 
     def start(self, argv, out, cwd=None):
         self.effect(("watch", tuple(argv)))
@@ -92,7 +92,7 @@ class World(Fake):
         return FakeProc(self.rc, self.polls, grow=self.grow)
 
     def driver(self):
-        return yocto.Yocto(self.reg, self.profile(), PROFILE, self.clock)
+        return yocto.Yocto(self.reg, self.preset(), PRESET, self.clock)
 
     def recs(self):
         return job.records_of(self.reg.load("box"), self.clock, self)
@@ -109,7 +109,7 @@ class World(Fake):
         return ([(t.field("kind"), t.field("exit")) for t in self.recs().list()], len(self.budget_files()))
 
     def running(self, stage, pid=77):
-        t = self.recs().begin("yocto", "here", WS, "wk sysimage build %s --stage %s --stop" % (PROFILE, stage), self.log,
+        t = self.recs().begin("yocto", "here", WS, "wk sysimage build %s --stage %s --stop" % (PRESET, stage), self.log,
                               list(yocto.STAGES), pid=pid)
         t.step_state(yocto.stage_index(stage), "running")
         self.pids.add(pid)
@@ -209,12 +209,12 @@ class TestTheRecordAStageWrites(YoctoTest):
     def test_a_stage_that_says_it_is_done_ends_ok_stepping_only_its_own_index(self):
         rc, err = self.build()
         self.assertEqual(rc, 0, err)
-        self.assertIn("built %s-" % PROFILE, err)
+        self.assertIn("built %s-" % PRESET, err)
         (t,) = self.w.recs().list()
         self.assertEqual((t.field("kind"), t.field("name"), t.field("stage"), t.field("exit")), ("yocto", WS, "image", "0"))
         self.assertEqual(t.plan(), list(yocto.STAGES))
         self.assertEqual(t.steps(), [(1, "pending"), (2, "pending"), (3, "running"), (4, "pending"), (5, "pending"), (6, "pending")])
-        self.assertEqual((t.field("log"), t.field("kill")), (self.w.log, "wk sysimage build %s --stage image --stop" % PROFILE))
+        self.assertEqual((t.field("log"), t.field("kill")), (self.w.log, "wk sysimage build %s --stage image --stop" % PRESET))
         self.assertEqual(t.field("subject"), "image stage of %s" % WS)
 
     def test_the_record_holds_no_deadline_since_silence_is_not_a_failure(self):
@@ -241,7 +241,7 @@ class TestTheRecordAStageWrites(YoctoTest):
         self.assertIn("\njobs=%d\n" % self.cores(), self.w.files[f])
         self.assertIn("budget_mb=%s\n" % argv[argv.index("--mem-budget") + 1], self.w.files[f])
 
-    def test_the_flags_override_the_profile(self):
+    def test_the_flags_override_the_preset(self):
         self.build("--keep-work", "--chromium", "--no-local-layer", "--local-layer", "--no-tailnet")
         argv = self.w.watched()
         self.assertEqual([argv[argv.index(f) + 1] for f in ("--rm-work", "--chromium", "--local-layer", "--tailnet")],
@@ -253,8 +253,8 @@ class TestTheRecordAStageWrites(YoctoTest):
             rc = self.w.driver().webkit(["--commit", SHA, "--slot", "base"])
         self.assertEqual(rc, 0, err.getvalue())
         argv = self.w.watched()
-        self.assertEqual([argv[argv.index(f) + 1] for f in ("--stage", "--commit", "--slot", "--profile")],
-                         ["webkit", SHA, "base", PROFILE])
+        self.assertEqual([argv[argv.index(f) + 1] for f in ("--stage", "--commit", "--slot", "--image-preset")],
+                         ["webkit", SHA, "base", PRESET])
         (f,) = self.w.budget_files()
         jobs = int(argv[argv.index("--webkit-jobs") + 1])
         self.assertIn("jobs=%d\nbudget_mb=%d\n" % (jobs, jobs * yocto.WEBKIT_MB_PER_JOB), self.w.files[f])
@@ -290,11 +290,11 @@ class TestTheWorkspace(YoctoTest):
         self.w.sections = Result(1)
         self.assertIn("could not read Tools/yocto/targets.conf", self.refused())
 
-    def test_a_profile_that_derives_its_target_is_not_asked_for_one(self):
+    def test_a_preset_that_derives_its_target_is_not_asked_for_one(self):
         self.w.sections = Result(0, "")
-        p = dict(self.w.profile(), YOC_PORT_TARGET_FROM="rpi3-32bits-mesa", YOC_MACHINE="raspberrypi4-64")
+        p = dict(self.w.preset(), YOC_PORT_TARGET_FROM="rpi3-32bits-mesa", YOC_MACHINE="raspberrypi4-64")
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = yocto.Yocto(self.w.reg, p, PROFILE, self.w.clock).build([])
+            rc = yocto.Yocto(self.w.reg, p, PRESET, self.w.clock).build([])
         self.assertEqual(rc, 0, err.getvalue())
         argv = self.w.watched()
         self.assertEqual(argv[argv.index("--port-target-from") + 1:argv.index("--port-target-from") + 4],
@@ -306,7 +306,7 @@ class TestRefusals(YoctoTest):
         t = self.w.running("toolchain")
         err = self.refused("--stage", "fetch")
         self.assertIn("a 'toolchain' build is already running in '%s'" % WS, err)
-        self.assertIn("Stop it:    wk sysimage build %s --stage toolchain --stop" % PROFILE, err)
+        self.assertIn("Stop it:    wk sysimage build %s --stage toolchain --stop" % PRESET, err)
         self.assertEqual(t.field("exit"), "")
 
     def test_a_slot_s_arguments_belong_to_the_webkit_stage(self):
@@ -435,7 +435,7 @@ class TestDryRun(YoctoTest):
         os.environ["WK_DRY_RUN"] = "1"
         rc, err = self.build()
         self.assertEqual(rc, 0, err)
-        self.assertIn("would build image %s (builder: yocto)" % PROFILE, err)
+        self.assertIn("would build image %s (builder: yocto)" % PRESET, err)
         self.assertIn("  cross-target %s  (verified on wpe-2.46)" % CROSS_TARGET, err)
         self.assertIn("  wifi        wk-wifi-join in the image", err)
         self.assertEqual(self.w.recs().list(), [])

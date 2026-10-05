@@ -1,5 +1,5 @@
 #!/bin/sh
-# Matched by the device's own MODALIAS from sysfs, so it works across kernels; the PinePhone's sun50i-a64-wdt is a module only because its image/configs/<profile>.conf sets CONFIG_SUNXI_WATCHDOG=m. No watchdog is a valid state, so this always exits 0.
+# Matched by the device's own MODALIAS from sysfs, so it works across kernels; the PinePhone's sun50i-a64-wdt is a module only because its image/presets/<image-preset>.conf sets CONFIG_SUNXI_WATCHDOG=m. No watchdog is a valid state, so this always exits 0.
 set -u
 
 [ -e /dev/watchdog ] && exit 0

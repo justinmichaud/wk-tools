@@ -69,7 +69,7 @@ def fleet():
         c = bootcli.load_conf(WK_ROOT, name, env)
         if c:
             out[name] = {"name": name, "role": c["role"], "os": c["os"],
-                         "profile": c.get("profile", ""), "note": c["note"]}
+                         "image_preset": c.get("image_preset", ""), "note": c["note"]}
     return out
 
 
@@ -338,7 +338,7 @@ class Broker:
         where = await asyncio.gather(*(asyncio.to_thread(reach, n) for n in names))
         benches = {
             n: {
-                "profile": machines[n]["profile"],
+                "image_preset": machines[n]["image_preset"],
                 "note": machines[n]["note"],
                 "reach": r,
                 "os": machines[n]["os"],

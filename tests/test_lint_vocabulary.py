@@ -52,6 +52,8 @@ RETIRED = {
     "say 'bench machine'; `bench-device` is only the role value machines/*.conf declares":
         re.compile(r"(?i)\bbench devices?\b|(?<![\w\"'=-])bench-devices?(?![\w\"'-])"),
     "say 'A/B task'": Unless(r"(?i)\bexperiments?\b", r"Apple's experiment|\bexperiments(?==|\s+com\.apple)"),
+    "say 'image preset' (image/presets, `wk sysimage presets`)":
+        re.compile(r"(?i)\bimage[ -](?:profiles?|configs?|configurations?)\b|\bsysimage configs\b|\bimage/configs\b"),
 }
 EXEMPT = ("docs/", "claude/skills/", ".claude/")   # .claude/ is the Claude Code harness's own local settings
 README_MARKER = "*** Claude edit below here ***"
@@ -81,7 +83,7 @@ def hits():
 
 class TestVocabulary(unittest.TestCase):
     def test_the_patterns_catch_the_retired_words(self):
-        word, long, tgt, cfg = "la" + "ne", "bench" + "mark task", "tar" + "get", "con" + "fig"
+        word, long, tgt, cfg, prof = "la" + "ne", "bench" + "mark task", "tar" + "get", "con" + "fig", "pro" + "file"
         cases = [  # (the rule, retired spellings, spellings that stay)
             ("image workspace", ["each %s builds" % word, "two %ss" % word.upper(), "<%s>" % word], ["a plane, %sway" % word]),
             ("bench task", ["a " + long, ("a " + long + "s").title(), "the bench" + " job hands back"],
@@ -106,6 +108,10 @@ class TestVocabulary(unittest.TestCase):
              ["a bench machine", "role=bench" + "-device", 'v["role"] == "bench' + '-device"']),
             ("'A/B task'", ["an older " + "experiment's rounds", "the whole " + "experiment"],
              ["Apple's " + "experiment configurations", "experiment" + "s=off", "experimental branches"]),
+            ("'image preset'", ["an image " + prof, "Image-%ss" % prof, "wk sysimage %ss" % cfg, "every image %suration" % cfg,
+                                "image/%ss/x.conf" % cfg],
+             ["an image preset", "wk sysimage presets", "a samply %s of the image" % prof, "image/buildroot/external/%ss/" % cfg,
+              "the image's network %suration" % cfg, "--pgo-%s" % prof]),
         ]
         for key, bad, good in cases:
             pattern = next(p for why, p in RETIRED.items() if key in why)

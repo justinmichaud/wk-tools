@@ -109,10 +109,10 @@ class TestMachineRegistry(WkTest):
                 bad.append("%s: bad role" % n)
             if conf["os"] not in ("any", "macos", "linux"):
                 bad.append("%s: bad os" % n)
-            if not conf.get("profile"):
-                bad.append("%s: no profile" % n)
-            elif conf["os"] != "macos" and images.quiet_load(conf["profile"]) is None:
-                bad.append("%s: profile '%s' does not resolve" % (n, conf["profile"]))
+            if not conf.get("image_preset"):
+                bad.append("%s: no image_preset" % n)
+            elif conf["os"] != "macos" and images.quiet_load(conf["image_preset"]) is None:
+                bad.append("%s: image_preset '%s' does not resolve" % (n, conf["image_preset"]))
         self.assertEqual(bad, [], "machine confs that do not stand alone")
         listed = sorted(line.split()[0] for line in cli.listing(REPO, env).splitlines())
         self.assertEqual(listed, sorted(names), "wk boot's listing and machines/ disagree")
@@ -137,10 +137,10 @@ class TestBridgeDeclarations(WkTest):
         self.assertIsNotNone(req_m, "could not read the package lists out of bridge/provision.sh")
         required = req_m.group(1).split()
         bridges = [p for p in map(images.load, images.names()) if p["IMG_BUILDER"] == "pmos"]
-        self.assertTrue(bridges, "no pmos profile in image/configs")
+        self.assertTrue(bridges, "no pmos image preset in image/presets")
         for p in bridges:
             missing = [r for r in required if r not in p["PMO_PACKAGES"].split(",")]
-            self.assertEqual(missing, [], f"bridge/provision.sh needs these and {p['IMG_PROFILE']} does not carry them: {missing}")
+            self.assertEqual(missing, [], f"bridge/provision.sh needs these and {p['IMG_PRESET']} does not carry them: {missing}")
 
 
 class TestTailnetHygiene(WkTest):
@@ -170,7 +170,7 @@ class TestBuildLocations(WkTest):
 
     def test_buildroot_external_exists(self):
         d = REPO / "image" / "buildroot" / "external"
-        users = [f for f in (REPO / "image" / "configs").glob("*.conf")
+        users = [f for f in (REPO / "image" / "presets").glob("*.conf")
                  if re.search(r"(?m)^BR_EXTERNAL=1", f.read_text(errors="replace"))]
         if not users:
             self.skipTest("no configuration sets BR_EXTERNAL=1")

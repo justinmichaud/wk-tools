@@ -1,4 +1,4 @@
-"""`wk sysimage` runs where the image workspace is: `build` and `webkit` derive their workspace name from the profile."""
+"""`wk sysimage` runs where the image workspace is: `build` and `webkit` derive their workspace name from the preset."""
 import os
 import subprocess
 import sys
@@ -14,10 +14,10 @@ from wk import images  # noqa: E402
 from wk.sysimage import cli  # noqa: E402
 
 SYSIMAGE = REPO / "cmd" / "sysimage"
-PROFILE = "webkit-2.52-yocto-rpi5-64"
+PRESET = "webkit-2.52-yocto-rpi5-64"
 
 
-def _profiles():
+def _presets():
     return [(n, images.load(n)["IMG_BUILDER"]) for n in images.names()]
 
 
@@ -30,16 +30,16 @@ def _hook(*args):
 class TestTheImageWorkspaceAnswer(WkTest):
     """`wk sysimage --wsname` and `--where`: the two questions the dispatcher asks cmd/sysimage."""
 
-    def test_every_profile_answers_for_its_builder(self):
-        for profile, builder in _profiles():
+    def test_every_preset_answers_for_its_builder(self):
+        for preset, builder in _presets():
             in_ws = builder in ("yocto", "buildroot")
-            with self.subTest(profile=profile):
+            with self.subTest(preset=preset):
                 for sub in ("build", "webkit", "holds", "path"):
-                    self.assertEqual(cli.wsname([sub, profile]), "%s-%s" % (builder, profile) if in_ws else "")
-                self.assertEqual(cli.where(["build", profile]), "workspace" if in_ws else "host")
+                    self.assertEqual(cli.wsname([sub, preset]), "%s-%s" % (builder, preset) if in_ws else "")
+                self.assertEqual(cli.where(["build", preset]), "workspace" if in_ws else "host")
 
-    def test_the_hook_answers_and_no_profile_names_no_image_workspace(self):
-        self.assertEqual(_hook("--wsname", "holds", PROFILE, "--workspace", "arm-b")[0], "arm-b")
+    def test_the_hook_answers_and_no_preset_names_no_image_workspace(self):
+        self.assertEqual(_hook("--wsname", "holds", PRESET, "--workspace", "arm-b")[0], "arm-b")
         for args in (["build"], ["build", "nosuchprofile-" + rand_suffix()],
                      ["webkit"], ["write", "--from", "/tmp/x"]):
             got, cp = _hook("--wsname", *args)
@@ -48,7 +48,7 @@ class TestTheImageWorkspaceAnswer(WkTest):
 
     def test_an_image_nothing_has_built_is_no_on_stdout_and_exit_0(self):
         """A readonly command forwarded to a stopped podman machine exits 0, so the verdict is what is printed."""
-        cp = run_here("sysimage", "holds", PROFILE, "--workspace", "yocto-%s-selftest" % PROFILE, timeout=240)
+        cp = run_here("sysimage", "holds", PRESET, "--workspace", "yocto-%s-selftest" % PRESET, timeout=240)
         self.assertEqual((cp.returncode, cp.stdout.strip()), (0, "no"), cp.stdout)
 
 
@@ -125,9 +125,9 @@ exit 0
 
     def setUp(self):
         super().setUp()
-        self.profile = next((p for p, b in _profiles() if b == "yocto"), "")
-        if not self.profile:
-            self.skipTest("this checkout defines no yocto profile")
+        self.preset = next((p for p, b in _presets() if b == "yocto"), "")
+        if not self.preset:
+            self.skipTest("this checkout defines no yocto preset")
         self.ws = "noimage-" + rand_suffix()
         self.log = self.tmp / "ssh.log"
         self.log.write_text("")
@@ -148,29 +148,29 @@ exit 0
         with stub_path({"ssh": self.SSH_STUB}) as binp:
             env = dict(self.env, PATH=f"{binp}:{os.environ['PATH']}",
                        WK_PLACE="fakebox")
-            cp = run("sysimage", "build", self.profile,
+            cp = run("sysimage", "build", self.preset,
                      "--workspace", self.ws, "--detach", env=env)
         sent = self.log.read_text()
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn(
-            f"sysimage build {self.profile} --workspace {self.ws} --detach",
+            f"sysimage build {self.preset} --workspace {self.ws} --detach",
             sent)
 
     def test_the_spec_names_the_machine_with_no_target_set(self):
         with stub_path({"ssh": self.SSH_STUB}) as binp:
             env = dict(self.env, PATH=f"{binp}:{os.environ['PATH']}")
             self.assertNotIn("WK_PLACE", env)
-            cp = run("sysimage", "build", f"{self.profile}@fakebox",
+            cp = run("sysimage", "build", f"{self.preset}@fakebox",
                      "--workspace", self.ws, "--detach", env=env)
         sent = self.log.read_text()
         self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn(f"sysimage build {self.profile}@fakebox", sent,
+        self.assertIn(f"sysimage build {self.preset}@fakebox", sent,
                       f"not delegated to fakebox: {sent!r}")
 
     def test_an_image_workspace_that_does_not_exist_yet_is_not_refused(self):
         # `vm` is a place the yocto builder refuses, so this stops one line into the command.
         with stub_path({"tart": "exit 0\n"}) as binp:
-            cp = run("sysimage", "build", self.profile, "--workspace", self.ws,
+            cp = run("sysimage", "build", self.preset, "--workspace", self.ws,
                      env=dict(self.env, WK_PLACE="vm",
                               PATH=f"{binp}:{os.environ['PATH']}"))
         out = cp.stdout + cp.stderr

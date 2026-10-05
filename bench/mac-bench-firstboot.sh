@@ -10,7 +10,7 @@ DAEMON=/Library/LaunchDaemons/com.wk.bench-firstboot.plist
 SELF=/usr/local/libexec/wk-bench-firstboot.sh
 
 BENCH_USER="${WK_BENCH_USER:-bench}"
-PROFILE=perf-macos-tolken
+IMAGE_PRESET=perf-macos-tolken
 
 exec >>"$LOG" 2>&1
 echo "=== wk-bench first boot: $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
@@ -168,7 +168,7 @@ install -d -o "$BENCH_USER" -g staff -m 0755 /var/wk 2>/dev/null \
     || say "WARNING: could not create /var/wk -- staging will fail from host mode"
 
 if [ ! -f /etc/wk-image ]; then
-    printf 'id=%s-%s\nprofile=%s\n' "$PROFILE" "$(date -u +%Y-%m)" "$PROFILE" > /etc/wk-image
+    printf 'id=%s-%s\nprofile=%s\n' "$IMAGE_PRESET" "$(date -u +%Y-%m)" "$IMAGE_PRESET" > /etc/wk-image
     say "wrote /etc/wk-image"
 fi
 

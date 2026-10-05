@@ -20,8 +20,8 @@ from wk.clock import FakeClock  # noqa: E402
 from wk.machine import HAVE, Fake, Result  # noqa: E402
 from wk.sysimage import pmos, pmos_build  # noqa: E402
 
-PROFILE = {
-    "IMG_PROFILE": "test-profile", "IMG_BUILDER": "pmos", "IMG_HOSTNAME": "test-host", "IMG_ARCH": "aarch64",
+PRESET = {
+    "IMG_PRESET": "test-preset", "IMG_BUILDER": "pmos", "IMG_HOSTNAME": "test-host", "IMG_ARCH": "aarch64",
     "PMO_DEVICE": "purism-librem5", "PMO_BRIDGE": "", "PMO_UI": "phosh", "PMO_CHANNEL": "v25.12",
     "PMO_PMB_VERSION": "3.9.0", "PMO_USER": "user", "PMO_PASSWORD": "147147", "PMO_PACKAGES": "",
     "PMO_EXTRA_SPACE": "512", "PMO_BUILD_HOST": "buildhost1", "PMO_WIFI_BANDS": "", "PMO_KERNEL_APORT": "",
@@ -34,9 +34,9 @@ def registry(machine, env):
     return FakeRegistry(dict({"WK_MACHINES_DIR": BLIND_FLEET}, **env), machine)
 
 
-def make(env=None, profile=None):
+def make(env=None, preset=None):
     machine = Fake("buildhost1")
-    return pmos.Pmos(registry(machine, env or {}), dict(profile or PROFILE), "test-profile", FakeClock()), machine
+    return pmos.Pmos(registry(machine, env or {}), dict(preset or PRESET), "test-preset", FakeClock()), machine
 
 
 def sh_react(handlers):
@@ -57,7 +57,7 @@ class TestPmosFollowReportsAFailure(unittest.TestCase):
         p, machine = make()
         with contextlib.redirect_stderr(io.StringIO()) as err:
             with self.assertRaises(Refused):
-                p._report_follow(machine, "/home/x/wk-pmos/out/test-profile-20260101T000000Z", "1", True)
+                p._report_follow(machine, "/home/x/wk-pmos/out/test-preset-20260101T000000Z", "1", True)
         out = err.getvalue()
         self.assertIn("the build failed on buildhost1", out)
         self.assertIn("exit 1", out)
@@ -101,11 +101,11 @@ class TestPmosRefusesASecondConcurrentBuild(unittest.TestCase):
 
 
 class TestPmosHostResolution(unittest.TestCase):
-    def test_the_profile_names_the_host_wk_pmos_host_overrides_and_neither_refuses(self):
-        self.assertEqual("buildhost1", pmos.host_for(PROFILE, {}))
-        self.assertEqual("override-host", pmos.host_for(PROFILE, {"WK_PMOS_HOST": "override-host"}))
+    def test_the_preset_names_the_host_wk_pmos_host_overrides_and_neither_refuses(self):
+        self.assertEqual("buildhost1", pmos.host_for(PRESET, {}))
+        self.assertEqual("override-host", pmos.host_for(PRESET, {"WK_PMOS_HOST": "override-host"}))
         with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(Refused):
-            pmos.host_for(dict(PROFILE, PMO_BUILD_HOST=""), {})
+            pmos.host_for(dict(PRESET, PMO_BUILD_HOST=""), {})
         self.assertIn("no PMO_BUILD_HOST", err.getvalue())
 
 
@@ -120,25 +120,25 @@ class TestPmosOutputs(unittest.TestCase):
         return machine
 
     def test_the_newest_finished_build_s_image_is_found(self):
-        machine = self.world("test-profile-20260102T000000Z\ntest-profile-20260101T000000Z\n")
-        self.assertEqual(pmos.finished_image(machine, {"WK_PMOS_ROOT": "/p"}, "test-profile"),
-                         ["/p/out/test-profile-20260102T000000Z/disk.wic.xz"])
+        machine = self.world("test-preset-20260102T000000Z\ntest-preset-20260101T000000Z\n")
+        self.assertEqual(pmos.finished_image(machine, {"WK_PMOS_ROOT": "/p"}, "test-preset"),
+                         ["/p/out/test-preset-20260102T000000Z/disk.wic.xz"])
 
     def test_no_finished_build_is_no_image(self):
         machine = self.world("")
-        self.assertEqual(pmos.finished_image(machine, {"WK_PMOS_ROOT": "/p"}, "test-profile"), [])
+        self.assertEqual(pmos.finished_image(machine, {"WK_PMOS_ROOT": "/p"}, "test-preset"), [])
 
     def test_a_finished_build_whose_image_is_no_longer_there_is_not_claimed(self):
         machine = Fake("buildhost1")
-        machine.react(("sh", "-c"), sh_react([("ls -1t", Result(0, "test-profile-20260101T000000Z\n")),
+        machine.react(("sh", "-c"), sh_react([("ls -1t", Result(0, "test-preset-20260101T000000Z\n")),
                                               ("result", Result(0))]))
-        self.assertEqual(pmos.finished_image(machine, {"WK_PMOS_ROOT": "/p"}, "test-profile"), [])
+        self.assertEqual(pmos.finished_image(machine, {"WK_PMOS_ROOT": "/p"}, "test-preset"), [])
 
     def test_outputs_resolves_the_build_host_and_asks_it(self):
-        machine = self.world("test-profile-20260101T000000Z\n")
+        machine = self.world("test-preset-20260101T000000Z\n")
         reg = registry(Fake("here"), {"WK_PMOS_ROOT": "/p"})
         with mock.patch.object(pmos, "ssh_machine", return_value=machine) as ssh_mock:
-            self.assertEqual(pmos.outputs(reg, PROFILE), ["/p/out/test-profile-20260101T000000Z/disk.wic.xz"])
+            self.assertEqual(pmos.outputs(reg, PRESET), ["/p/out/test-preset-20260101T000000Z/disk.wic.xz"])
         self.assertEqual(ssh_mock.call_args[0][-1], "buildhost1")
 
 
@@ -150,9 +150,9 @@ class TestPmosImageKey(WkTest):
 
 
 class TestPmosBuildHostsAndCacheProbe(unittest.TestCase):
-    """What `wk doctor` and `wk gc` read: every unique build host a pmos profile names, and what each holds."""
+    """What `wk doctor` and `wk gc` read: every unique build host a pmos preset names, and what each holds."""
 
-    def test_build_hosts_is_the_pmos_profiles_own_build_host(self):
+    def test_build_hosts_is_the_pmos_presets_own_build_host(self):
         self.assertIn("rpi5", pmos.build_hosts({}))
 
     def test_rows_carry_the_probe_numbers_whatever_they_are_called(self):

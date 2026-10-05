@@ -22,7 +22,7 @@ ensure_pi5_line(){ # $1 = exact line
   sudo sed -i "/^\[pi5\]\$/a $1" "$CFG"; ok "added: $1"
 }
 
-# arm_freq/v3d_freq/over_voltage_delta belong to the -oc image profile, not this script.
+# arm_freq/v3d_freq/over_voltage_delta belong to the -oc image preset, not this script.
 log "1  PCIe / GPU overlay in $CFG"
 if [ -f "$CFG" ]; then
   if ! grep -q "rpi5-tune" "$CFG"; then

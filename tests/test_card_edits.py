@@ -445,7 +445,7 @@ class TestTheUnitsAreTheImageMachines(unittest.TestCase):
 
     def staged(self, watchdog="600", disarm=""):
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            return write.stage_units(REPO, watchdog, disarm, "test-profile"), err.getvalue()
+            return write.stage_units(REPO, watchdog, disarm, "test-preset"), err.getvalue()
 
     def test_a_medium_armed_board_gets_its_drivers_self_disarm(self):
         for machine, want in (("rpi4", "tryboot.txt"), ("rpi3", "config.txt.rescue")):

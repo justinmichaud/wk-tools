@@ -75,9 +75,9 @@ def guest_mirror():
 
 
 def image_base(root, ws):
-    """CFG_RELEASE of an image workspace's profile, or None."""
+    """CFG_RELEASE of an image workspace's image preset, or None."""
     prefix = next((p for p in ("yocto-", "buildroot-") if ws.startswith(p)), None)
-    conf = prefix and os.path.join(root, "image", "configs", ws[len(prefix):] + ".conf")
+    conf = prefix and os.path.join(root, "image", "presets", ws[len(prefix):] + ".conf")
     return (kv.conf_file(conf).get("CFG_RELEASE") or None) if conf and os.path.isfile(conf) else None
 
 

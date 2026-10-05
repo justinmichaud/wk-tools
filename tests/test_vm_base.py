@@ -360,9 +360,9 @@ class TestTheBuilderConforms(BaseTest):
         seen = []
         reg = places.Registry(str(REPO), env=self.w.env, machine=self.w)
         with mock.patch.object(guestbase.Base, "build", lambda b, rest: seen.append((b.name, rest)) or 0):
-            self.assertEqual(0, cli.Sysimage(reg, self.clock).build(guest.BASE_PROFILE, ["--refresh"]))
+            self.assertEqual(0, cli.Sysimage(reg, self.clock).build(guest.BASE_PRESET, ["--refresh"]))
         self.assertEqual([("wk-base", ["--refresh"])], seen)
-        self.assertEqual("host", cli.where(["build", guest.BASE_PROFILE, "--rm"], self.w.env))
+        self.assertEqual("host", cli.where(["build", guest.BASE_PRESET, "--rm"], self.w.env))
 
     def out(self, fn, *a):
         buf = io.StringIO()
@@ -373,20 +373,20 @@ class TestTheBuilderConforms(BaseTest):
     def test_path_and_holds_reach_the_sealed_base_marker(self):
         reg = places.Registry(str(REPO), env=self.w.env, machine=self.w)
         s = cli.Sysimage(reg, self.clock)
-        self.assertEqual(self.out(s.path, guest.BASE_PROFILE, None), (1, ""))
-        self.assertEqual(self.out(s.holds, guest.BASE_PROFILE, None, None, None, None, False)[1], "no\n")
+        self.assertEqual(self.out(s.path, guest.BASE_PRESET, None), (1, ""))
+        self.assertEqual(self.out(s.holds, guest.BASE_PRESET, None, None, None, None, False)[1], "no\n")
         self.build()
-        self.assertEqual(self.out(s.path, guest.BASE_PROFILE, None), (0, self.base().marker() + "\n"))
-        self.assertEqual(self.out(s.holds, guest.BASE_PROFILE, None, None, None, None, False)[1], "yes\n")
+        self.assertEqual(self.out(s.path, guest.BASE_PRESET, None), (0, self.base().marker() + "\n"))
+        self.assertEqual(self.out(s.holds, guest.BASE_PRESET, None, None, None, None, False)[1], "yes\n")
 
     def test_ls_lists_it_only_once_sealed(self):
         reg = places.Registry(str(REPO), env=self.w.env, machine=self.w)
         s = cli.Sysimage(reg, self.clock)
-        self.assertNotIn(guest.BASE_PROFILE, self.out(lambda: s.ls(False))[1])
+        self.assertNotIn(guest.BASE_PRESET, self.out(lambda: s.ls(False))[1])
         self.build()
         _rc, out = self.out(lambda: s.ls(False))
-        line = next(l for l in out.splitlines() if l.startswith(guest.BASE_PROFILE))
-        self.assertEqual(line.split()[:4], [guest.BASE_PROFILE, "-", "guest", "ready"])
+        line = next(l for l in out.splitlines() if l.startswith(guest.BASE_PRESET))
+        self.assertEqual(line.split()[:4], [guest.BASE_PRESET, "-", "guest", "ready"])
         self.assertIn("    " + self.base().marker(), out)
 
 

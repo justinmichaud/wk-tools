@@ -57,7 +57,7 @@ v_reboot_tryboot() {
 
 # `bless --help` (macOS 26.6.2) lists --user/--stdinpass only under Snapshot options, so
 # this blesses with root alone. The gate is the volume, not an argument: the one mounted
-# macOS system volume, not the running one, whose /etc/wk-image names a perf-macos profile.
+# macOS system volume, not the running one, whose /etc/wk-image names a perf-macos image preset.
 bench_install() {
     local v found="" n=0
     for v in /Volumes/*; do

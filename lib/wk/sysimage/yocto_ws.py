@@ -42,7 +42,7 @@ WEBKIT_CMAKE = "-DENABLE_WPE_PLATFORM=ON -DENABLE_WPE_1_1_API=OFF"
 
 def parse(argv):
     ap = argparse.ArgumentParser(prog="yocto_ws.py")
-    for flag in ("--image", "--jobs", "--mem-budget", "--commit", "--slot", "--profile", "--sstate-ns",
+    for flag in ("--image", "--jobs", "--mem-budget", "--commit", "--slot", "--image-preset", "--sstate-ns",
                  "--port-target-from", "--port-machine", "--board", "--multilib", "--multilib-tune", "--cross-cc",
                  "--cross-cxx", "--cross-cmake", "--pgo-dir", "--pgo-lib", "--webkit-jobs"):
         ap.add_argument(flag, default="")
@@ -200,7 +200,7 @@ class Build(WsBuild):
         if not a.port_target_from:
             return
         if not a.port_machine:
-            fail("this profile names a target to derive [%s] from but no YOC_MACHINE for it to select" % a.target)
+            fail("this image preset names a target to derive [%s] from but no YOC_MACHINE for it to select" % a.target)
         self.say("porting       [%s] from [%s] (MACHINE=%s) -- this branch has no such section" % (a.target, a.port_target_from, a.port_machine))
 
         def local(rel):
@@ -253,7 +253,7 @@ class Build(WsBuild):
         text = strip_block(self.m.read(f), BB_MARKER).rstrip("\n") + "\n"
         if self.a.local_layer == "0":
             self.m.write(f, text)
-            self.say("no local layer: this profile builds the branch's own configuration unmodified")
+            self.say("no local layer: this image preset builds the branch's own configuration unmodified")
             return
         lines = ["", BB_MARKER]
         for name in LAYERS + (("meta-wk-multilib",) if self.a.multilib else ()):
@@ -296,7 +296,7 @@ class Build(WsBuild):
             setup = next((os.path.join(d, n) for n in self.m.listdir(d) if n.startswith("environment-setup-")), "")
         if not setup:
             fail("no cross toolchain at %s; build it first, a stage that books the whole machine:\n"
-                 "        wk sysimage build <profile> --stage toolchain" % d)
+                 "        wk sysimage build <image-preset> --stage toolchain" % d)
         self.say("SDK           %s" % setup)
 
     def move(self, src, dst):
@@ -376,7 +376,7 @@ class Build(WsBuild):
         self.m.mkdir(root)
         if not self.m.act_run(["cp", "-a", os.path.join(b, "bin"), os.path.join(b, "lib"), root + "/"]).ok:
             fail("could not copy the build into %s" % slotdir)
-        bid = wkslot.write_manifest(self, root, slotdir, dict(slot=a.slot, profile=a.profile, commit=a.commit, target=a.target,
+        bid = wkslot.write_manifest(self, root, slotdir, dict(slot=a.slot, profile=a.image_preset, commit=a.commit, target=a.target,
                                                 build_preset=a.cross_preset, browser="minibrowser", lib_dir="lib", exec_dir="bin",
                                                 bundle_dir="lib", jobs=str(jobs)))
         self.say("slot ready: %s (build-id %s)" % (slotdir, bid))
@@ -398,7 +398,7 @@ class Build(WsBuild):
         if not self.m.isdir(self.src):
             fail("no checkout at %s" % self.src)
         if a.multilib and not a.multilib_tune:
-            fail("this profile asks for the '%s' multilib but names no YOC_MULTILIB_TUNE for it" % a.multilib)
+            fail("this image preset asks for the '%s' multilib but names no YOC_MULTILIB_TUNE for it" % a.multilib)
         self.check_host()
         self.refresh_git_index(self.src)
         if a.stage == "webkit" and a.commit:

@@ -91,9 +91,9 @@ class Base:
         return "ok\tgolden base '%s' matches its provisioning inputs\t\n" % self.name
 
     def build(self, rest):
-        got = task.options(rest, MODES, (), USAGE % guest.BASE_PROFILE)
+        got = task.options(rest, MODES, (), USAGE % guest.BASE_PRESET)
         if len(got) > 1:
-            die("%s -- one of them" % (USAGE % guest.BASE_PROFILE))
+            die("%s -- one of them" % (USAGE % guest.BASE_PRESET))
         if not Store(self.env).macos_host:
             die("a macOS guest needs a macOS host (Virtualization.framework)")
         mode = next(iter(got), "")

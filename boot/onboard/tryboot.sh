@@ -22,7 +22,7 @@ wk_stage() {
     if [ -z "$kernel" ]; then
         for k in kernel8.img kernel7l.img kernel7.img kernel.img; do
             [ -f "$src/$k" ] || continue
-            [ -z "$kernel" ] || { echo "the bench system names no kernel= and its boot partition holds $kernel and $k: which one the firmware picks is not this staging's guess to make. Name it with kernel= in the profile's config.txt.append." >&2; umount "$src"; exit 9; }
+            [ -z "$kernel" ] || { echo "the bench system names no kernel= and its boot partition holds $kernel and $k: which one the firmware picks is not this staging's guess to make. Name it with kernel= in the image preset's config.txt.append." >&2; umount "$src"; exit 9; }
             kernel=$k
         done
     fi

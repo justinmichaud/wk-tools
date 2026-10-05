@@ -70,8 +70,8 @@ def duration(seconds):
 
 
 class Device:
-    def __init__(self, name, profile, p):
-        self.name, self.profile, self.p = name, profile, p
+    def __init__(self, name, image_preset, p):
+        self.name, self.image_preset, self.p = name, image_preset, p
         self.arm_ws, self.mode, self.slots = [], "unreachable", []
 
     @property
@@ -79,7 +79,7 @@ class Device:
         return images.pgo_wanted(self.p["IMG_BUILDER"], self.p["CFG_RELEASE"])
 
     def booted(self):
-        return self.mode.startswith("bench %s-" % self.profile)
+        return self.mode.startswith("bench %s-" % self.image_preset)
 
 
 class AB:
@@ -156,7 +156,7 @@ class AB:
         self.pr = dict(kind="commit", n="", remote="") if SHA.match(s) else pr.parse_spec(s)
         if not self.o.get("release") and self.pr["kind"] != "pull":
             die("--release is required for a commit or a branch: only a pull request\n"
-                "    has a base branch saying which image it is for ('wk sysimage configs' has\n"
+                "    has a base branch saying which image it is for ('wk sysimage presets' has\n"
                 "    every release; --release 2.52).")
         self.mirror = self.store.mirror_dir()
         if not self.here.isdir(self.mirror):
@@ -199,7 +199,7 @@ class AB:
             if not r.ok or not r.out.strip():
                 die("could not read pull request %s's base branch from %s (gh auth login signs gh in):\n    %s\n"
                     "    Say both of the things it answers yourself:\n"
-                    "        --release <x.y>   which image to measure on (wk sysimage configs)\n"
+                    "        --release <x.y>   which image to measure on (wk sysimage presets)\n"
                     "        --base <sha>      the unpatched side, usually the head's own parent"
                     % (self.pr["n"], repo, (r.err or r.out).strip()))
             self._base_branch = r.out.strip()
@@ -211,7 +211,7 @@ class AB:
         m = RELEASE_OF.match(self.pr_base_branch())
         if not m:
             die("pull request %s is against '%s', which names no release.\n    Say which image to measure on: --release 2.38 "
-                "(wk sysimage configs)" % (self.pr["n"], self.pr_base_branch()))
+                "(wk sysimage presets)" % (self.pr["n"], self.pr_base_branch()))
         return m.group(2)
 
     def narrow(self, dev, matches, release):
@@ -223,13 +223,13 @@ class AB:
             widths += ["%s-%s" % (dev, w)] if "%s-%s" % (dev, w) not in widths else []
         said = (["--builder " + " or ".join(builders)] if len(builders) > 1 else []) + (["--devices " + " or ".join(widths)] if len(widths) > 1 else [])
         return ", and ".join(said) or ("nothing -- they differ in neither builder nor width, so no option here tells them apart,\n"
-                                       "    and two such configurations at one release is a bug in image/configs")
+                                       "    and two such image presets at one release is a bug in image/presets")
 
-    def profile_for(self, dev, bits, release):
+    def image_preset_for(self, dev, bits, release):
         pattern = "*-%s-%s-%s-%s" % (release, self.o.get("builder") or "*", dev, bits or "*")
         matches = [c for c in images.names(self.env) if fnmatchcase(c, pattern)]
         if not matches:
-            die("no image configuration for %s at release %s%s%s.\n    'wk sysimage configs' has every configuration this checkout "
+            die("no image preset for %s at release %s%s%s.\n    'wk sysimage presets' has every image preset this checkout "
                 "defines." % (dev, release, " (%s)" % self.o["builder"] if self.o.get("builder") else "", ", %s-bit" % bits if bits else ""))
         if len(matches) > 1:
             die("%s has more than one image at release %s:\n%s\n    Say which: %s"
@@ -242,20 +242,20 @@ class AB:
             if tok[-3:] in ("-32", "-64"):
                 dev, bits = tok[:-3], tok[-2:]
             board.require_board(self.root, self.env, dev)
-            profile = self.profile_for(dev, bits, release)
-            p = images.load(profile, self.env)
+            image_preset = self.image_preset_for(dev, bits, release)
+            p = images.load(image_preset, self.env)
             if p["CFG_NEEDS"]:
-                die("%s cannot be built yet: %s\n    (%s)" % (profile, p["CFG_NEEDS"], images.conf_path(profile, self.env)))
+                die("%s cannot be built yet: %s\n    (%s)" % (image_preset, p["CFG_NEEDS"], images.conf_path(image_preset, self.env)))
             if p["IMG_BUILDER"] not in images.WS_BUILDERS:
-                die("%s is built by %s, which has no WebKit slots" % (profile, p["IMG_BUILDER"] or "nothing"))
-            self.devices.append(Device(dev, profile, p))
+                die("%s is built by %s, which has no WebKit slots" % (image_preset, p["IMG_BUILDER"] or "nothing"))
+            self.devices.append(Device(dev, image_preset, p))
         first = self.devices[0].p
         for d in self.devices[1:]:
             if (d.p["CFG_BRANCH"], d.p["CFG_REMOTE"]) != (first["CFG_BRANCH"], first["CFG_REMOTE"]):
                 die("%s tracks %s/%s while %s tracks %s/%s;\n    one A/B measures one branch. Run them as two."
-                    % (d.profile, d.p["CFG_REMOTE"], d.p["CFG_BRANCH"], self.devices[0].profile, first["CFG_REMOTE"], first["CFG_BRANCH"]))
+                    % (d.image_preset, d.p["CFG_REMOTE"], d.p["CFG_BRANCH"], self.devices[0].image_preset, first["CFG_REMOTE"], first["CFG_BRANCH"]))
         if not first["CFG_BRANCH"] or not first["CFG_REMOTE"]:
-            die("%s declares no CFG_BRANCH/CFG_REMOTE, so there is no branch to take a base from" % self.devices[0].profile)
+            die("%s declares no CFG_BRANCH/CFG_REMOTE, so there is no branch to take a base from" % self.devices[0].image_preset)
 
     def resolve_base(self):
         """Off the branch the change was written against -- a pull request's own base branch -- not the image's, which
@@ -305,14 +305,14 @@ class AB:
         pr_slot = "pr" + self.pr["n"] if self.pr.get("n") else "pr"
         self.arms = [("", "base"), ("", pr_slot)]
         for d in self.devices:
-            ws = images.image_ws(d.profile, self.env)
+            ws = images.image_ws(d.image_preset, self.env)
             for named in on:
                 try:
                     where = images.ws_machine(named, "" if named else self.reg.ws_place(ws), self.me)
                 except LookupError as e:
                     die(str(e))
                 place = named if named and named != self.me else ""
-                d.arm_ws.append((ws, "%s@%s" % (d.profile, named) if named else d.profile, where, place))
+                d.arm_ws.append((ws, "%s@%s" % (d.image_preset, named) if named else d.image_preset, where, place))
 
     def holds(self, spec, ws, *rest):
         return sched.wk_yes(self.here, [self.wk, "sysimage", "holds", spec, "--workspace", ws] + list(rest))
@@ -479,12 +479,12 @@ class AB:
             log("  cost      " + line)
         log("")
         for d in self.devices:
-            log("  %s: %s" % (d.name, "board %s" % d.mode if self.systems else "image %s" % d.profile))
+            log("  %s: %s" % (d.name, "board %s" % d.mode if self.systems else "image %s" % d.image_preset))
             if not self.systems:
                 for (_, slot), (ws, _, on, _) in zip(self.arms, d.arm_ws):
                     log("        slot %-7s %s on %s" % (slot, ws, on))
                 log("        board      %s%s" % (d.mode, "  (slots there: %s)" % (" ".join(d.slots) or "none") if d.booted()
-                                                  else "  <-- not booted into %s" % d.profile))
+                                                  else "  <-- not booted into %s" % d.image_preset))
                 log("        build      %s" % ("profile-guided: each slot is instrument, collect on %s, rebuild -- so %s has to be in this "
                                                "image before the builds" % (d.name, d.name) if d.pgo
                                                else "plain: %s predates upstream cmake PGO support" % d.p["CFG_RELEASE"]))
@@ -493,7 +493,7 @@ class AB:
         for d in self.devices:
             if not self.systems and not d.booted():
                 log("\n  %s is not booted into %s -- by hand, before the steps above:\n    wk sysimage write --from %s --disk %s:<device>\n"
-                    "    wk boot %s" % (d.name, d.profile, d.profile, d.name, d.name))
+                    "    wk boot %s" % (d.name, d.image_preset, d.image_preset, d.name, d.name))
 
     def argv(self):
         words = [self.spec] if self.spec else []
@@ -524,7 +524,7 @@ class AB:
             subj = ["subject.kind=" + ("pull" if self.pr.get("n") else "commit"), "subject.spec=" + self.spec, "subject.remote=" + self.pr["remote"],
                     "subject.number=" + self.pr["n"], "subject.head=" + self.head, "subject.base=" + self.base, "subject.base_how=" + self.base_how,
                     "subject.release=" + self.devices[0].p["CFG_RELEASE"], "subject.branch=%s/%s" % (self.devices[0].p["CFG_REMOTE"], self.devices[0].p["CFG_BRANCH"])]
-            devices = ",".join("%s=%s" % (d.name, d.profile) for d in self.devices)
+            devices = ",".join("%s=%s" % (d.name, d.image_preset) for d in self.devices)
         return (["task=" + self.task, "requested=" + self.clock.iso(), "devices=" + devices, "plans=" + ",".join(self.plans),
                  "rounds=%d" % self.rounds, "slots=" + ",".join(dict.fromkeys(s for _, s in self.arms))] + subj
                 + ["%s=%s" % (k, self.o[k]) for k in ("count", "timeout") if self.o.get(k)]

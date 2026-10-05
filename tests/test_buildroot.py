@@ -13,7 +13,7 @@ from wk.act import Refused  # noqa: E402
 from wk.sysimage import buildroot, buildroot_ws  # noqa: E402
 
 EXTERNAL_DIR = REPO / "image" / "buildroot" / "external"
-PROFILES = ["wpewebkit-2.38-buildroot-rpi3-32", "wpewebkit-2.38-buildroot-rpi4-32"]
+PRESETS = ["wpewebkit-2.38-buildroot-rpi3-32", "wpewebkit-2.38-buildroot-rpi4-32"]
 
 
 def driver(name, p, env=None):
@@ -24,19 +24,19 @@ def driver(name, p, env=None):
 
 class TestDryRun(WkTest):
     def test_names_workspace_defconfig_and_the_container_s_cache_paths(self):
-        for profile in PROFILES:
-            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as store:
-                cp = run_here("sysimage", "build", profile, "--dry-run", env={"WK_STORE": store})
+        for preset in PRESETS:
+            with self.subTest(preset=preset), tempfile.TemporaryDirectory() as store:
+                cp = run_here("sysimage", "build", preset, "--dry-run", env={"WK_STORE": store})
                 out = cp.stdout
                 self.assertEqual(cp.returncode, 0, out)
-                self.assertIn("buildroot-" + profile, out)
+                self.assertIn("buildroot-" + preset, out)
                 self.assertRegex(out, r"(?m)^\s*defconfig\s+\S+cog_defconfig")
                 for words in (store + "/cache/buildroot/dl", "BR2_DL_DIR", store + "/cache/buildroot/ccache",
                               "BR2_CCACHE_DIR"):
                     self.assertIn(words, out)
 
     def test_the_driver_s_argv_is_one_the_target_half_parses(self):
-        br = driver(PROFILES[0], {"BR_TREE_URL": "u", "BR_TREE_BRANCH": "b", "BR_TREE_COMMIT": "c",
+        br = driver(PRESETS[0], {"BR_TREE_URL": "u", "BR_TREE_BRANCH": "b", "BR_TREE_COMMIT": "c",
                                   "BR_DEFCONFIG": "d_defconfig", "BR_EXTERNAL": "1", "BR_IMAGE": "sdcard.img",
                                   "BR_OVERLAY_TAILSCALE": "arm", "BR_KERNEL_RELEASE": "6.1"})
         argv = br.image_argv("/opt/wk-tools", 8, True, "/cache/buildroot/dl/k.tar", "bcm2711-rpi-4-b")

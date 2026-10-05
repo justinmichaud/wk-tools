@@ -1,8 +1,8 @@
 # --- wk sysimage: every image written for the rpi5 -----------------------------
 # Appended to the card's own config.txt by `wk sysimage write`, ahead of
-# whatever the profile appends. What belongs here is what the *board's firmware*
+# whatever the image preset appends. What belongs here is what the *board's firmware*
 # requires of any image at all; what a particular measurement wants belongs to
-# the profile.
+# the image preset.
 
 [all]
 # The firmware's OS-compatibility check refuses an OS it judges too old for the
@@ -24,6 +24,6 @@ os_check=0
 # The overclock deliberately does NOT live here, and must never be written to
 # the EEPROM either: SDRAM_BANKLOW and BOOT_ORDER are firmware state shared by
 # both roles, so an overclock written there overclocks the workstation too --
-# the exact split this whole design exists to preserve. When an `oc` profile
-# arrives it sets arm_freq/over_voltage in that *profile's* config.txt.append,
+# the exact split this whole design exists to preserve. When an `oc` image preset
+# arrives it sets arm_freq/over_voltage in that *image preset's* config.txt.append,
 # because it is a property of the measurement and not of the board.

@@ -32,7 +32,7 @@ NEVER_ANSWERED = """%(name)s never answered in %(minutes)d minutes, on its conf 
         wk machine setup %(name)s"""
 
 
-def profile_where(env, builder, key, value):
+def preset_where(env, builder, key, value):
     for n in images.names(env):
         p = images.quiet_load(n, env)
         if p and value and p["IMG_BUILDER"] == builder and p[key] == value:
@@ -40,8 +40,8 @@ def profile_where(env, builder, key, value):
     return None, None
 
 
-def bridge_profile(name, env):
-    return profile_where(env, "pmos", "PMO_BRIDGE", name)
+def bridge_preset(name, env):
+    return preset_where(env, "pmos", "PMO_BRIDGE", name)
 
 
 def image_dir(store):
@@ -81,20 +81,20 @@ class Write:
             return True
         return self.r.here.run_tty(argv).ok
 
-    def image(self, name, profile, p, rebuild):
+    def image(self, name, preset, p, rebuild):
         host = pmos.ssh_machine(fleet.Fleet(self.r.root, self.env), self.env, self.r.here, pmos.host_for(p, self.env))
-        found = None if rebuild else pmos.newest_out(host, self.env, profile)
+        found = None if rebuild else pmos.newest_out(host, self.env, preset)
         if found:
             info("using %s from %s (--rebuild builds a fresh one)" % (found, host.name))
         else:
-            info("building %s on %s" % (profile, host.name) + (" (--rebuild)" if rebuild else ", which has no finished one"))
-            if not self.child("sysimage", "build", profile):
-                die("the %s build failed -- nothing was written to any disk" % profile)
+            info("building %s on %s" % (preset, host.name) + (" (--rebuild)" if rebuild else ", which has no finished one"))
+            if not self.child("sysimage", "build", preset):
+                die("the %s build failed -- nothing was written to any disk" % preset)
             if act.dry_run():
-                return "<the new %s build>" % profile
-            found = pmos.newest_out(host, self.env, profile)
+                return "<the new %s build>" % preset
+            found = pmos.newest_out(host, self.env, preset)
             if not found:
-                die("the %s build reported success and left no finished build on %s" % (profile, host.name))
+                die("the %s build reported success and left no finished build on %s" % (preset, host.name))
         if act.dry_run():
             return "<%s, copied off %s>" % (found, host.name)
         path = os.path.join(image_dir(Store(self.env)), name + ".img")
@@ -109,14 +109,14 @@ class Write:
         machine, _, dev = disk.partition(":")
         if not (machine and dev):
             die("--disk takes <machine>:<device>, e.g. rpi5:/dev/sda -- 'wk sysimage disks <machine>' lists them")
-        profile, p = bridge_profile(bc.name, self.env)
-        if not (image or profile):
-            die("no image profile builds %s.\n"
-                "    A pmos profile in image/configs claims a bridge by setting PMO_BRIDGE to its\n"
+        preset, p = bridge_preset(bc.name, self.env)
+        if not (image or preset):
+            die("no image preset builds %s.\n"
+                "    A pmos image preset in image/presets claims a bridge by setting PMO_BRIDGE to its\n"
                 "    name, and none names this one: add one, or pass --image <path>." % bc.name)
-        # The fetch profile that boots this phone from a card and exports its internal storage (Jumpdrive).
-        service = profile_where(self.env, "fetch", "FET_DEVICE", p["PMO_DEVICE"])[0] if p else None
-        log("  write:    %s to %s" % (image or "the newest %s build" % profile, disk))
+        # The fetch image preset that boots this phone from a card and exports its internal storage (Jumpdrive).
+        service = preset_where(self.env, "fetch", "FET_DEVICE", p["PMO_DEVICE"])[0] if p else None
+        log("  write:    %s to %s" % (image or "the newest %s build" % preset, disk))
         if service:
             log("            the phone's internal storage as %s exports it from a card\n"
                 "            ('wk sysimage build %s', then 'wk sysimage write' it to a card), or a card" % (service, service))
@@ -126,7 +126,7 @@ class Write:
             self.write(image, disk)
         else:
             with Lock(Store(self.env), self.r.here, self.r.clock).held(image_lock(bc.name), timeout=0):
-                fetched = self.image(bc.name, profile, p, rebuild)
+                fetched = self.image(bc.name, preset, p, rebuild)
                 try:
                     self.write(fetched, disk)
                 finally:

@@ -8,7 +8,7 @@ from wk.sysimage import buildroot, disk, guestbase, macvolume, pmos, task, write
 from wk.sysimage import ls as lsmod
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
-UNKNOWN = "unknown profile '%s'.\n    'wk sysimage configs' has every configuration."
+UNKNOWN = "unknown image preset '%s'.\n    'wk sysimage presets' lists every one."
 BUILDERS = ("yocto", "buildroot", "pmos", "fetch", "mac-volume", "guest")
 
 
@@ -48,8 +48,8 @@ class Sysimage:
         except (LookupError, OSError):
             return None
 
-    def profile(self, spec):
-        name = images.spec_profile(spec)
+    def image_preset(self, spec):
+        name = images.spec_preset(spec)
         try:
             return images.load(name, self.env)
         except ConfError as e:
@@ -64,23 +64,23 @@ class Sysimage:
         try:
             host = self.builder_outputs(p) if p is not None else None
         except lsmod.Unknown as e:
-            act.die("cannot tell whether %s is built: %s" % (p["IMG_PROFILE"], e))
+            act.die("cannot tell whether %s is built: %s" % (p["IMG_PRESET"], e))
         found = host if host is not None else (lsmod.outputs(self.machine, self.reg.store, ws) if ws else [])
         return found[0] if found else None
 
     def buildable(self, spec):
-        p = self.profile(spec)
-        name = p["IMG_PROFILE"]
+        p = self.image_preset(spec)
+        name = p["IMG_PRESET"]
         if p["CFG_NEEDS"]:
             act.die("'%s' cannot be built yet:\n\n    %s\n\n    (declared in %s)" % (name, p["CFG_NEEDS"], images.conf_path(name, self.env)))
         if p["IMG_BUILDER"] not in BUILDERS:
-            act.die("profile '%s' names builder '%s', which does not exist; there are: %s."
+            act.die("image preset '%s' names builder '%s', which does not exist; there are: %s."
                     % (name, p["IMG_BUILDER"], ", ".join(BUILDERS)))
         return p
 
     def build(self, spec, rest):
         if not spec:
-            act.die("usage: wk sysimage build <profile> [options]; see wk sysimage -h")
+            act.die("usage: wk sysimage build <image-preset> [options]; see wk sysimage -h")
         p = self.buildable(spec)
         make = {"fetch": lambda: task.Fetch(self.machine, p, self.env),
                 "mac-volume": lambda: macvolume.MacVolume(self.machine, p, self.env, self.clock),
@@ -92,8 +92,8 @@ class Sysimage:
 
     def webkit(self, spec, rest):
         if not spec:
-            act.die("usage: wk sysimage webkit <profile> --commit <sha> --slot <name> [--detach]; see wk sysimage -h")
-        p = self.profile(spec)
+            act.die("usage: wk sysimage webkit <image-preset> --commit <sha> --slot <name> [--detach]; see wk sysimage -h")
+        p = self.image_preset(spec)
         if p["IMG_BUILDER"] == "buildroot":
             return buildroot.Buildroot(self.reg, p, spec, self.clock).webkit(rest)
         if p["IMG_BUILDER"] == "yocto" and images.pgo_wanted("yocto", p["CFG_RELEASE"]):
@@ -101,7 +101,7 @@ class Sysimage:
         if p["IMG_BUILDER"] == "yocto":
             return yocto.Yocto(self.reg, p, spec, self.clock).webkit(rest)
         act.die("'%s' is built by %s, and only a buildroot or yocto image takes WebKit slots"
-                % (p["IMG_PROFILE"], p["IMG_BUILDER"] or "no builder"))
+                % (p["IMG_PRESET"], p["IMG_BUILDER"] or "no builder"))
 
     def ls(self, continued):
         here = record.machine_name(self.env)
@@ -114,26 +114,26 @@ class Sysimage:
             return 0
         n = sum(1 for r in rows if not r[:1].isspace())
         if n == 0:
-            act.log("no workspace on any machine this one knows has built an image; 'wk sysimage build <profile>' builds one.")
+            act.log("no workspace on any machine this one knows has built an image; 'wk sysimage build <image-preset>' builds one.")
             return 0
-        act.log("\n%d image%s. To write one:  wk sysimage write --from <configuration> --disk <machine>:<device> [--rescue]"
+        act.log("\n%d image%s. To write one:  wk sysimage write --from <image-preset> --disk <machine>:<device> [--rescue]"
                 % (n, "" if n == 1 else "s"))
         return 0
 
     def holds(self, spec, ws, slot, commit, preset, toolchain):
         """The verdict is on stdout: a readonly command forwarded to a stopped podman machine exits 0 having said so."""
         if not spec:
-            act.die("usage: wk sysimage holds <profile> [--toolchain|--slot <name> --commit <sha>]; see wk sysimage -h")
+            act.die("usage: wk sysimage holds <image-preset> [--toolchain|--slot <name> --commit <sha>]; see wk sysimage -h")
         if slot is not None:
             images.check_slot_name(slot)
-        p = self.profile(spec)
-        name = p["IMG_PROFILE"]
+        p = self.image_preset(spec)
+        name = p["IMG_PRESET"]
         ws = ws or images.image_ws(name, self.env)
         if toolchain:
             if slot is not None or commit or preset:
                 act.die("usage: wk sysimage holds %s --toolchain   (it takes nothing else)" % name)
             if not p["YOC_TARGET"]:
-                act.die("%s is built by %s, and only a yocto profile installs a cross toolchain (YOC_TARGET)"
+                act.die("%s is built by %s, and only a yocto image preset installs a cross toolchain (YOC_TARGET)"
                         % (name, p["IMG_BUILDER"] or "no builder"))
             return self.say(images.toolchain_holds(ws, p["YOC_TARGET"], self.env))
         if slot is None:
@@ -154,22 +154,22 @@ class Sysimage:
 
     def path(self, spec, ws):
         if not spec:
-            act.die("usage: wk sysimage path <profile>; see wk sysimage -h")
-        p = self.profile(spec)
-        ws = ws or images.image_ws(p["IMG_PROFILE"], self.env)
+            act.die("usage: wk sysimage path <image-preset>; see wk sysimage -h")
+        p = self.image_preset(spec)
+        ws = ws or images.image_ws(p["IMG_PRESET"], self.env)
         found = self.image_path(ws, p)
         if found is None:
             return 1
         print(found)
         return 0
 
-    def write(self, src, spec, profile, mach, rescue, grow):
+    def write(self, src, spec, image_preset, mach, rescue, grow):
         """`grow` None is the default: a second system fills the disk, a whole-disk write keeps its built size."""
         fl = fleet.Fleet(images.root(self.env), self.env)
         if mach is not None and not writemod.load_machine(fl, mach):
             act.die("unknown machine '%s' for --machine\n    machines:\n%s" % (mach, writemod.machine_list(fl)))
         if not src:
-            act.die("usage: wk sysimage write --from <configuration|path|vm:path> --disk <machine>:<device>[@second|@third]\n"
+            act.die("usage: wk sysimage write --from <image-preset|path|vm:path> --disk <machine>:<device>[@second|@third]\n"
                     "    'wk sysimage ls' lists every image with the path to pass to --from.")
         if not spec:
             act.die("usage: wk sysimage write --from %s --disk <machine>:<device>[@second|@third]\n"
@@ -180,7 +180,7 @@ class Sysimage:
             act.die("a rescue is the system on partitions 1 and 2, and @second/@third the systems beside it:\n"
                     "    drop --rescue or the @-suffix.")
         w = writemod.Write(images.root(self.env), self.env, self.machine, self.reg.store)
-        return w.run(src, spec, grow, profile, "rescue" if rescue else "bench", mach or "")
+        return w.run(src, spec, grow, image_preset, "rescue" if rescue else "bench", mach or "")
 
     def disks(self, name):
         fl = fleet.Fleet(images.root(self.env), self.env)

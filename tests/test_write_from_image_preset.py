@@ -1,4 +1,4 @@
-"""`wk sysimage write --from` takes a configuration name, resolved to the image its workspace holds."""
+"""`wk sysimage write --from` takes an image preset name, resolved to the image its workspace holds."""
 import contextlib
 import io
 import os
@@ -25,7 +25,7 @@ class Store:
 
 def resolved(spec, answer=None, local=False):
     """(path or None, stderr): one yocto and one buildroot workspace with an image, a yocto one with none, and the
-    image workspace's own answer to `wk sysimage path` for a configuration this machine's scan does not find."""
+    image workspace's own answer to `wk sysimage path` for an image preset this machine's scan does not find."""
     m = Fake()
     for path in (YOCTO, BUILDROOT):
         m._set_file(path, "image")
@@ -40,8 +40,8 @@ def resolved(spec, answer=None, local=False):
             return None, err.getvalue()
 
 
-class TestAConfigurationNamesItsImage(unittest.TestCase):
-    def test_a_yocto_or_buildroot_configuration_resolves_to_its_bytes(self):
+class TestAnImagePresetNamesItsImage(unittest.TestCase):
+    def test_a_yocto_or_buildroot_image_preset_resolves_to_its_bytes(self):
         self.assertEqual(resolved("wpewebkit-2.46-yocto-rpi5-64")[0], YOCTO)
         self.assertEqual(resolved("wpewebkit-2.38-buildroot-rpi3-32")[0], BUILDROOT)
 
@@ -50,24 +50,24 @@ class TestAConfigurationNamesItsImage(unittest.TestCase):
         self.assertIsNone(path)
         self.assertIn("wk sysimage build webkit-2.52-yocto-rpi3-32", err)
 
-    def test_an_unknown_configuration_is_refused_listing_what_has_been_built(self):
+    def test_an_unknown_image_preset_is_refused_listing_what_has_been_built(self):
         path, err = resolved("nonsense")
         self.assertIsNone(path)
-        self.assertIn("neither a path nor a configuration", err)
+        self.assertIn("neither a path nor an image preset", err)
         self.assertIn("      wpewebkit-2.46-yocto-rpi5-64\n", err)
         self.assertIn("      wpewebkit-2.38-buildroot-rpi3-32\n", err)
-        self.assertNotIn("webkit-2.52-yocto-rpi3-32", err, "a configuration with no image is offered as writable")
+        self.assertNotIn("webkit-2.52-yocto-rpi3-32", err, "an image preset with no image is offered as writable")
 
 
 class TestAPathIsStillAPath(unittest.TestCase):
-    """A path must never be looked up as a configuration: it passes through untouched, vm: prefix included."""
+    """A path must never be looked up as an image preset: it passes through untouched, vm: prefix included."""
 
     def test_every_spelling_of_a_path(self):
         for spec in ("/tmp/some.wic.xz", "vm:/var/lib/x.img", "./out.img", "../out.img"):
             self.assertEqual(resolved(spec)[0], spec)
 
 
-class TestAConfigurationAnImageWorkspaceHoldsAndThisMachineCannotRead(unittest.TestCase):
+class TestAnImagePresetAnImageWorkspaceHoldsAndThisMachineCannotRead(unittest.TestCase):
     """The image workspace's machine is asked for the path (`wk sysimage path`); `vm:` says whose filesystem it is."""
 
     IMAGE = "/var/lib/wk/ws/yocto-webkit-2.52-yocto-rpi5-64/build/i.wic.xz"

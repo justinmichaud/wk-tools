@@ -156,7 +156,7 @@ class World:
     def state(self):
         return self.card.state(), sorted(set(self.fake.files) - self.initial)
 
-    def run(self, spec=None, grow=False, profile="webkit-2.52-yocto-rpi5-64", role="bench", mach="", src=IMAGE, env=None,
+    def run(self, spec=None, grow=False, preset="webkit-2.52-yocto-rpi5-64", role="bench", mach="", src=IMAGE, env=None,
             rand=True):
         rand = (lambda: "%08x" % (len(self.calls) + 1)) if rand is True else rand
         w = write.Write(REPO, dict(ENV, **(env or {})), self.fake, None, rand=rand)
@@ -164,7 +164,7 @@ class World:
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             try:
-                w.run(src, spec or "rpi5:" + self.dev, grow, profile, role, mach)
+                w.run(src, spec or "rpi5:" + self.dev, grow, preset, role, mach)
                 e = None
             except act.Refused as refused:
                 e = refused
@@ -238,7 +238,7 @@ class TestTheWholeWrite(WriteTest):
         self.assertLess(calls.index(("card_priv", "unmount")), calls.index(("card_priv", "check")))
 
     def test_an_image_the_checkout_does_not_know_gets_the_marker_and_key_only(self):
-        e = self.w.run(profile="", mach="rpi5", src=IMAGE)
+        e = self.w.run(preset="", mach="rpi5", src=IMAGE)
         self.assertIsNone(e, self.w.err)
         c = self.w.card
         self.assertIsNotNone(c.marker)
@@ -267,7 +267,7 @@ class TestTheWholeWrite(WriteTest):
         self.assertIn(("card_priv", "boot-check", "/dev/sdX", "bcm2712-rpi-5-b.dtb"), self.w.calls)
         w = World()
         w.fake.files["/imgs/rpi3.wic"] = "x"
-        self.assertIsNone(w.run(profile="webkit-2.52-yocto-rpi3-32", src="/imgs/rpi3.wic"), w.err)
+        self.assertIsNone(w.run(preset="webkit-2.52-yocto-rpi3-32", src="/imgs/rpi3.wic"), w.err)
         self.assertIn("this is rpi3's image, so this card goes elsewhere", w.err)
         self.assertFalse([c for c in w.calls if c[1:2] == ("boot-check",)])
 
@@ -314,19 +314,19 @@ class TestTheBenchNode(WriteTest):
 
 
 class TestWhatTheImageSays(WriteTest):
-    def test_a_workspace_path_names_its_profile(self):
+    def test_a_workspace_path_names_its_preset(self):
         w = write.Write(REPO, ENV, Fake(), None)
         with contextlib.redirect_stderr(io.StringIO()):
-            name, p = w.profile("", "vm:/var/lib/wk/ws/yocto-webkit-2.52-yocto-rpi5-64-armb/build/x.wic.xz")
+            name, p = w.image_preset("", "vm:/var/lib/wk/ws/yocto-webkit-2.52-yocto-rpi5-64-armb/build/x.wic.xz")
         self.assertEqual((name, p["IMG_MACHINE"]), ("webkit-2.52-yocto-rpi5-64", "rpi5"))
         with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(w.profile("", "/tmp/x.img"), ("", {}))
+            self.assertEqual(w.image_preset("", "/tmp/x.img"), ("", {}))
 
-    def test_a_named_profile_whose_conf_does_not_parse_refuses_the_write(self):
+    def test_a_named_preset_whose_conf_does_not_parse_refuses_the_write(self):
         w = write.Write(REPO, ENV, Fake(), None)
         with mock.patch.object(write.images, "load", side_effect=write.images.ConfError("bad.conf:3: not a KEY=value line")), \
                 self.assertRaises(act.Refused), contextlib.redirect_stderr(io.StringIO()) as err:
-            w.profile("bad", "/tmp/x.img")
+            w.image_preset("bad", "/tmp/x.img")
         self.assertIn("bad.conf:3:", err.getvalue())
 
     def test_the_board_fact_leads_the_overclock(self):

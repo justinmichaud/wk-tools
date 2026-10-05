@@ -689,7 +689,7 @@ v_config_append() {
     marker=$(printf '%s\n' "$block" | head -1)
     case "$marker" in
         "# --- wk sysimage: "*) ;;
-        *) deny "a config.txt block starts with its own '# --- wk sysimage: <profile> ---' line" ;;
+        *) deny "a config.txt block starts with its own '# --- wk sysimage: <image-preset> ---' line" ;;
     esac
     with_mount "$(part "$dev" "$BOOTP")" _config_append_edit "$block" "$marker"
     say "config.txt on $dev carries $marker"

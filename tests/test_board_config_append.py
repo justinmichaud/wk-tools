@@ -12,15 +12,15 @@ from wk import images  # noqa: E402
 from wk.sysimage import write  # noqa: E402
 
 BOARDS = REPO / "image" / "boards"
-CONFIGS = sorted((REPO / "image" / "configs").glob("*.conf"))
+CONFIGS = sorted((REPO / "image" / "presets").glob("*.conf"))
 
 
-def resolved_append(profile):
-    return write.config_add(REPO, images.load(profile))
+def resolved_append(preset):
+    return write.config_add(REPO, images.load(preset))
 
 
-def resolved_cmdline(profile):
-    return write.cmdline_add(REPO, images.load(profile))
+def resolved_cmdline(preset):
+    return write.cmdline_add(REPO, images.load(preset))
 
 
 def machine_of(conf):
@@ -34,7 +34,7 @@ class TestEveryRpi5ImageCanBoot(unittest.TestCase):
     def test_every_one_of_them_gets_os_check(self):
         self.assertTrue(self.RPI5)
         for conf in self.RPI5:
-            with self.subTest(profile=conf.stem):
+            with self.subTest(preset=conf.stem):
                 active = [l.strip() for l in resolved_append(conf.stem).splitlines()
                           if l.strip() and not l.strip().startswith("#")]
                 self.assertIn("os_check=0", active,
@@ -42,19 +42,19 @@ class TestEveryRpi5ImageCanBoot(unittest.TestCase):
 
 
 class TestTheSplitIsKept(unittest.TestCase):
-    def test_the_board_is_appended_before_the_profile(self):
+    def test_the_board_is_appended_before_the_preset(self):
         with tempfile.TemporaryDirectory() as d:
             board, spec = Path(d, "image", "boards", "b"), Path(d, "spec")
             board.mkdir(parents=True)
             spec.mkdir()
-            for where, text in ((board, "board"), (spec, "profile")):
+            for where, text in ((board, "board"), (spec, "preset")):
                 (where / "config.txt.append").write_text(text + "=1\n")
                 (where / "cmdline.txt.append").write_text("# a comment\n" + text + "=1\n\n")
             p = {"IMG_MACHINE": "b", "IMG_SPEC_DIR": str(spec)}
-            self.assertEqual(write.config_add(d, p), "board=1\nprofile=1\n")
-            self.assertEqual(write.cmdline_add(d, p), "board=1 profile=1")
+            self.assertEqual(write.config_add(d, p), "board=1\npreset=1\n")
+            self.assertEqual(write.cmdline_add(d, p), "board=1 preset=1")
 
-    def test_a_measurement_choice_stays_with_the_profile(self):
+    def test_a_measurement_choice_stays_with_the_preset(self):
         rpi4 = resolved_append("webkit-2.52-yocto-rpi4-64")
         self.assertIn("force_turbo=1", rpi4)
 

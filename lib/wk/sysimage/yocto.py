@@ -1,4 +1,4 @@
-"""The yocto builder's driving half: one stage of `wk sysimage build <a yocto profile>` as a task through
+"""The yocto builder's driving half: one stage of `wk sysimage build <a yocto image preset>` as a task through
 task.Stage, around lib/wk/sysimage/yocto_ws.py in the workspace. The spec is WebKit's own Tools/yocto on
 the release branch, so an image pins the same commits as the WebKit that runs on the board."""
 
@@ -202,7 +202,7 @@ class Yocto(task.ContainerBuilder):
         if t in have:
             return
         die("%s has no [%s] section in Tools/yocto/targets.conf. Add it and its local.conf upstream, or have\n"
-            "    the profile derive them (YOC_PORT_TARGET_FROM, YOC_MACHINE; see image/configs/wpewebkit-2.46-yocto-rpi5-64.conf).\n"
+            "    the image preset derive them (YOC_PORT_TARGET_FROM, YOC_MACHINE; see image/presets/wpewebkit-2.46-yocto-rpi5-64.conf).\n"
             "    The sections here are:\n%s" % (branch, t, "".join("      %s\n" % s for s in have)))
 
     def target_note(self, driver, ws):
@@ -304,7 +304,7 @@ class Yocto(task.ContainerBuilder):
                 + ["--local-layer", "1" if q["local"] else "0", "--tailnet", "1" if q["tailnet"] else "0",
                    "--webkit-jobs", str(webkit_jobs), "--sstate-ns", re.sub(r"[:/]", "-", tag.rsplit("/", 1)[-1])]
                 + opt("--commit", q["commit"])
-                + (["--slot", q["slot"], "--profile", self.name] if q["slot"] and q["stage"] == "webkit" else []))
+                + (["--slot", q["slot"], "--image-preset", self.name] if q["slot"] and q["stage"] == "webkit" else []))
 
     def webkit(self, rest):
         return self.build(["--stage", "webkit"] + list(rest))

@@ -17,7 +17,7 @@ WEBKIT_JOBS = 64   # WebKit links large; capped where the link steps stop gainin
 PATTERN = "*buildroot_ws.py*"
 DL_IN_WS = "/cache/buildroot/dl"
 BUILD_USAGE = "usage: wk sysimage build %s [--dry-run|--workspace <name>|--detach|--stop]"
-WEBKIT_USAGE = "usage: wk sysimage webkit <profile> --commit <sha> --slot <name> [--detach] [--dry-run]"
+WEBKIT_USAGE = "usage: wk sysimage webkit <image-preset> --commit <sha> --slot <name> [--detach] [--dry-run]"
 ZIMAGE_MAGIC = "016f2818"   # at offset 36 of a 32-bit ARM zImage
 PIN_TOOLS = ("dpkg-deb", "xz", "depmod", "tar")
 
@@ -112,7 +112,7 @@ class Buildroot(task.ContainerBuilder):
         o = task.options(rest, ("--detach", "--stop"), ("--workspace",), BUILD_USAGE % self.name)
         p = self.p
         if not p["BR_DEFCONFIG"]:
-            die("'%s' names no defconfig, so there is nothing to\n    build. Its configuration is %s." % (self.name, images.conf_path(self.name, self.env)))
+            die("'%s' names no defconfig, so there is nothing to\n    build. Its image preset is %s." % (self.name, images.conf_path(self.name, self.env)))
         if p["BR_KERNEL_DEB_URL"] and not (p["BR_KERNEL_DEB_SHA256"] and p["BR_KERNEL_RELEASE"]):
             die("%s pins a kernel but not its sha256 and release\n    (BR_KERNEL_DEB_SHA256, BR_KERNEL_RELEASE): a kernel by URL alone is not pinned." % self.name)
         driver = self.driver()

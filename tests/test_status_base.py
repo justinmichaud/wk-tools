@@ -1,6 +1,6 @@
 """The base a workspace tracks: the upstream WebKit line a checkout's HEAD descends from (places.upstream_line(),
 run inside the workspace by `wk ls` and `wk status`), against real disposable repositories; an image
-workspace's base from the profile conf this checkout ships; and the SDK image's freshness as the renderer
+workspace's base from the preset conf this checkout ships; and the SDK image's freshness as the renderer
 words it."""
 import json
 import re
@@ -16,7 +16,7 @@ from tests.test_status import machine_rec, render
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places  # noqa: E402
 
-CONFIGS = REPO / "image" / "configs"
+CONFIGS = REPO / "image" / "presets"
 
 
 def _git(repo, *args):
@@ -80,17 +80,17 @@ class TestUpstreamLine(unittest.TestCase):
 
 
 class TestImageBase(unittest.TestCase):
-    """An image workspace's base is its profile's own CFG_RELEASE, read from the real conf this checkout ships."""
+    """An image workspace's base is its preset's own CFG_RELEASE, read from the real conf this checkout ships."""
 
-    def test_an_image_workspace_reads_its_profiles_release(self):
-        for kind, profile in (("buildroot", "webkit-2.52-buildroot-rpi3-32"), ("yocto", "wpewebkit-2.46-yocto-rpi3-32")):
+    def test_an_image_workspace_reads_its_presets_release(self):
+        for kind, preset in (("buildroot", "webkit-2.52-buildroot-rpi3-32"), ("yocto", "wpewebkit-2.46-yocto-rpi3-32")):
             with self.subTest(kind=kind):
-                release = re.search(r"^CFG_RELEASE=(\S+)", (CONFIGS / (profile + ".conf")).read_text(), re.M).group(1)
-                self.assertEqual(places.image_base(str(REPO), "%s-%s" % (kind, profile)), release)
+                release = re.search(r"^CFG_RELEASE=(\S+)", (CONFIGS / (preset + ".conf")).read_text(), re.M).group(1)
+                self.assertEqual(places.image_base(str(REPO), "%s-%s" % (kind, preset)), release)
 
     def test_a_plain_checkout_name_is_not_an_image_workspace(self):
         self.assertIsNone(places.image_base(str(REPO), "stringimpl238"))
-        self.assertIsNone(places.image_base(str(REPO), "yocto-no-such-profile"))
+        self.assertIsNone(places.image_base(str(REPO), "yocto-no-such-preset"))
 
 
 def sdk_rec(machine, **extra):

@@ -384,12 +384,12 @@ class Driver:
     def record(self, name, input=None, mutates=False):
         return self.ch.call("m_ssh", self.ob(name, WK_RECORD=RECORD), input=input, mutates=mutates)
 
-    def record_write(self, image, profile, device, order):
+    def record_write(self, image, image_preset, device, order):
         if self.ch.channel != "host":
             act.debug("%s answered as its bench system; the arming is on its medium and no record is written" % self.c("name"))
             return 0
-        body = "image=%s\nprofile=%s\ndevice=%s\norder=%s\narmed_by=%s\narmed_boot_id=%s\n" % (
-            image, profile, device, order, wkrecord.host_name(), self.boot_id())
+        body = "image=%s\nimage_preset=%s\ndevice=%s\norder=%s\narmed_by=%s\narmed_boot_id=%s\n" % (
+            image, image_preset, device, order, wkrecord.host_name(), self.boot_id())
         return self.record("record-write.sh", input=body, mutates=True).rc
 
     def record_read(self):

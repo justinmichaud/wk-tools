@@ -1,5 +1,5 @@
 """There is no image store: a build's output lives where its builder left it, and every reader finds it there
-(`wk boot` reads the device, a write derives the profile from the path)."""
+(`wk boot` reads the device, a write derives the preset from the path)."""
 import contextlib
 import io
 import sys
@@ -44,8 +44,8 @@ class TestBootArmDefaultsToDeviceImage(WkTest):
             self.assertIn(words, cp.stdout)
 
 
-class TestProfileFromWorkspacePath(unittest.TestCase):
-    def test_a_full_path_names_its_profile(self):
+class TestPresetFromWorkspacePath(unittest.TestCase):
+    def test_a_full_path_names_its_preset(self):
         w = write.Write(REPO, {"WK_ROOT": str(REPO)}, Local(), None)
         for path, want in (
                 ("/var/lib/wk/ws/yocto-webkit-2.52-yocto-rpi5-64/build/CrossToolChains/rpi5/build/image/"
@@ -53,7 +53,7 @@ class TestProfileFromWorkspacePath(unittest.TestCase):
                 ("/var/lib/wk/ws/buildroot-webkit-2.52-buildroot-rpi5-64/build/buildroot/rpi5/output/images/sdcard.img",
                  "webkit-2.52-buildroot-rpi5-64")):
             with self.subTest(path=path), contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(w.profile("", path)[0], want)
+                self.assertEqual(w.image_preset("", path)[0], want)
 
 
 class TestScanFindsWhatTheBuildersLeave(unittest.TestCase):

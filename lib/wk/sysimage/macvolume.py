@@ -100,11 +100,11 @@ def load_plist(text):
 class MacVolume:
     kind = "mac-volume"
 
-    def __init__(self, machine, profile, env, clock=None, root=None):
-        self.m, self.p, self.env = machine, profile, env
+    def __init__(self, machine, preset, env, clock=None, root=None):
+        self.m, self.p, self.env = machine, preset, env
         self.clock = clock or Clock()
         self.root = str(root or images.root(env))
-        self.name, self.machine = profile["IMG_PROFILE"], profile["IMG_MACHINE"]
+        self.name, self.machine = preset["IMG_PRESET"], preset["IMG_MACHINE"]
         self.volume = (fleet.Fleet(self.root, env).load(self.machine) or {}).get("volume", "")
         self.tailnet = Tailnet(machine, env, self.root)
         self.need_gb = int(env.get("WK_BENCH_NEED_GB") or NEED_GB)

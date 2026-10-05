@@ -1,4 +1,4 @@
-"""Image profiles (image/configs/<name>.conf), their workspaces `<builder>-<profile>[-<arm>]`, slots and PGO."""
+"""Image presets (image/presets/<name>.conf), their workspaces `<builder>-<preset>[-<arm>]`, slots and PGO."""
 
 import os
 import re
@@ -47,23 +47,23 @@ def marker(env=None):
     return env.get("WK_IMAGE_MARKER") or MARKER
 
 
-def config_dir(env=None):
-    return os.path.join(root(env), "image", "configs")
+def preset_dir(env=None):
+    return os.path.join(root(env), "image", "presets")
 
 
 def conf_path(name, env=None):
-    return os.path.join(config_dir(env), name + ".conf")
+    return os.path.join(preset_dir(env), name + ".conf")
 
 
 def names(env=None):
     try:
-        return sorted(f[:-5] for f in os.listdir(config_dir(env)) if f.endswith(".conf"))
+        return sorted(f[:-5] for f in os.listdir(preset_dir(env)) if f.endswith(".conf"))
     except OSError:
         return []
 
 
 def _field(key):
-    return None if key in FIELDS else "%s is not a profile field" % key
+    return None if key in FIELDS else "%s is not an image preset field" % key
 
 
 def parse(path):
@@ -74,14 +74,14 @@ def load(name, env=None):
     path = conf_path(name, env)
     if not NAME.match(name or "") or not os.path.isfile(path):
         raise LookupError(name)
-    profile = dict(FIELDS)
-    profile.update(parse(path))
-    profile["IMG_PROFILE"] = name
-    profile["IMG_SPEC_DIR"] = os.path.join(root(env), "image", name)
-    return profile
+    preset = dict(FIELDS)
+    preset.update(parse(path))
+    preset["IMG_PRESET"] = name
+    preset["IMG_SPEC_DIR"] = os.path.join(root(env), "image", name)
+    return preset
 
 
-def mac_profile(env=None):
+def mac_preset(env=None):
     return next((n for n in names(env) if (quiet_load(n, env) or {}).get("IMG_BUILDER") == "mac-volume"), "")
 
 
@@ -109,7 +109,7 @@ def listing(env=None):
 
 
 def origin_branches(env=None):
-    """origin's branches a profile tracks: a mirror carries these and main, and every other upstream whole."""
+    """origin's branches a preset tracks: a mirror carries these and main, and every other upstream whole."""
     got = {p["CFG_BRANCH"] for p in map(lambda n: quiet_load(n, env), names(env))
            if p and p["CFG_REMOTE"] == "origin" and p["CFG_BRANCH"]}
     return sorted(got)
@@ -130,7 +130,7 @@ def pgo_wanted(builder, release):
     return builder == "yocto" and bool(release) and version(release) >= PGO_FROM
 
 
-def spec_profile(spec):
+def spec_preset(spec):
     return spec.split("@", 1)[0]
 
 
@@ -143,19 +143,19 @@ def spec_place(machine, here, default):
 
 
 def image_ws(spec, env=None):
-    """`<builder>-<profile>`, or "" for a builder that builds on the host, or no profile at all."""
-    profile = spec_profile(spec)
+    """`<builder>-<preset>`, or "" for a builder that builds on the host, or no preset at all."""
+    preset = spec_preset(spec)
     try:
-        builder = load(profile, env)["IMG_BUILDER"]
+        builder = load(preset, env)["IMG_BUILDER"]
     except LookupError:
         return ""
     except ConfError as e:
         act.die(str(e))
-    return "%s-%s" % (builder, profile) if builder in WS_BUILDERS else ""
+    return "%s-%s" % (builder, preset) if builder in WS_BUILDERS else ""
 
 
-def ws_profile(ws, env=None):
-    """The profile an image workspace builds, by longest match, so an arm's `-<arm>` still names it."""
+def ws_preset(ws, env=None):
+    """The preset an image workspace builds, by longest match, so an arm's `-<arm>` still names it."""
     builder = next((b for b in WS_BUILDERS if ws.startswith(b + "-")), None)
     if builder is None:
         return None
@@ -177,12 +177,12 @@ def ws_arg(args, env=None):
 
 def slot_dir(ws, slot, env=None):
     """A slot is one build of the project beside the image in the workspace that built it, placed where its builder puts output."""
-    profile = ws_profile(ws, env)
-    if profile is None:
+    preset = ws_preset(ws, env)
+    if preset is None:
         return None
     d = Store(env).ws_dir(ws)
     if ws.startswith("buildroot-"):
-        return os.path.join(d, "build", "buildroot", profile, "output", "wk-slots", slot)
+        return os.path.join(d, "build", "buildroot", preset, "output", "wk-slots", slot)
     return os.path.join(d, "build", "wk-slots", slot)
 
 

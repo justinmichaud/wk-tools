@@ -187,7 +187,7 @@ class TestWhatTheMirrorCarries(WkTest):
         return images.origin_branches({"WK_ROOT": str(REPO)})
 
     def test_it_carries_main_and_every_configurations_branch_and_nothing_else(self):
-        self.assertTrue(self._configured(), "no image configuration names an origin branch")
+        self.assertTrue(self._configured(), "no image preset names an origin branch")
         self.assertEqual(sorted(self._branches()),
                          sorted({"main", *self._configured()}))
 

@@ -35,7 +35,7 @@ TS_VERSION = re.search(r'^TS_VERSION = "(.*)"$', (REPO / mactailnet.REL).read_te
 ART = Tailnet(Fake(), ENV).artifacts()
 OUT = "%s/darwin-arm64-%s" % (ART, TS_VERSION)
 VOL, DATA = "/Volumes/WK Bench", "/Volumes/WK Bench - Data"
-PROFILE = images.load("perf-macos-tolken")
+PRESET = images.load("perf-macos-tolken")
 SCRUB = ("WK_DRY_RUN", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_YES", "WK_QUIET", "WK_BENCH_WIRED", "WK_BENCH_VOLUME")
 
 
@@ -224,7 +224,7 @@ def tailnet(mac, go=None):
 
 
 def volume(mac, clock=None, **env):
-    return MacVolume(mac, PROFILE, dict(ENV, **env), clock or FakeClock(), root=REPO)
+    return MacVolume(mac, PRESET, dict(ENV, **env), clock or FakeClock(), root=REPO)
 
 
 def source_sha(mac, sha):
@@ -653,7 +653,7 @@ class TheProvision(unittest.TestCase):
         self.assertIn("Boot 'WK Bench' first", err)
         self.assertNotIn(macvolume.MARKER, mac.files)
 
-    def test_it_writes_the_marker_naming_the_profile_and_the_month(self):
+    def test_it_writes_the_marker_naming_the_preset_and_the_month(self):
         mac = self.mac()
         clock = FakeClock(start=1788000000.0)   # 2026-08
         with clean_env():
@@ -704,8 +704,8 @@ class TheProvisionedVolume(unittest.TestCase):
     def test_the_volume_is_built(self):
         from wk import fleet
         from wk.machine import Ssh
-        m = Ssh(fleet.Fleet(REPO).load(PROFILE["IMG_MACHINE"])["ssh"])
-        self.assertTrue(MacVolume(m, PROFILE, dict(os.environ)).outputs(), "no marker on an installed bench volume")
+        m = Ssh(fleet.Fleet(REPO).load(PRESET["IMG_MACHINE"])["ssh"])
+        self.assertTrue(MacVolume(m, PRESET, dict(os.environ)).outputs(), "no marker on an installed bench volume")
 
 
 if __name__ == "__main__":

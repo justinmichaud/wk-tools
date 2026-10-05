@@ -38,7 +38,7 @@ def build_host(p, env):
 def host_for(p, env):
     h = build_host(p, env)
     if not h:
-        die("this pmos profile sets no PMO_BUILD_HOST (image/configs/<profile>.conf)")
+        die("this pmos image preset sets no PMO_BUILD_HOST (image/presets/<image-preset>.conf)")
     return h
 
 
@@ -74,15 +74,15 @@ def out_dir(root, id_):
     return "%s/out/%s" % (root, id_)
 
 
-def builds(machine, root, profile_name):
-    """The profile's build ids on the build host, newest first."""
-    return [d for d in ask(machine, "ls -1t %s" % shlex.quote(os.path.join(root, "out"))).splitlines() if d.startswith(profile_name + "-")]
+def builds(machine, root, preset_name):
+    """The preset's build ids on the build host, newest first."""
+    return [d for d in ask(machine, "ls -1t %s" % shlex.quote(os.path.join(root, "out"))).splitlines() if d.startswith(preset_name + "-")]
 
 
-def newest_out(machine, env, profile_name):
+def newest_out(machine, env, preset_name):
     """The newest build with a result block: "finished" is that block, not merely an rc file (a resumed build has an rc but no result yet)."""
     root = root_dir(machine, env)
-    return next((d for d in builds(machine, root, profile_name)
+    return next((d for d in builds(machine, root, preset_name)
                  if sh(machine, "test -f %s" % shlex.quote(os.path.join(root, "out", d, "result"))).ok), None)
 
 
@@ -126,7 +126,7 @@ def outputs(reg, p):
     machine = ssh_machine(fleet.Fleet(images.root(reg.env), reg.env), reg.env, reg.machine, host_for(p, reg.env))
     if not sh(machine, "true").ok:
         raise Unknown("%s, the build host, does not answer over ssh" % machine.name)
-    return finished_image(machine, reg.env, p["IMG_PROFILE"])
+    return finished_image(machine, reg.env, p["IMG_PRESET"])
 
 
 def build_hosts(env):
@@ -155,7 +155,7 @@ def cache_probe(machine, env):
 
 
 def prune(machine, env, host):
-    """No rc file is an interrupted build that cannot be resumed, so it goes; a finished one is kept, newest per profile."""
+    """No rc file is an interrupted build that cannot be resumed, so it goes; a finished one is kept, newest per preset."""
     root = root_dir(machine, env)
     seen = set()
     for d in ask(machine, "ls -1t %s" % shlex.quote(os.path.join(root, "out"))).splitlines():
@@ -167,13 +167,13 @@ def prune(machine, env, host):
             info("removing an interrupted build on %s: %s" % (host, d))
             act_sh(machine, "rm -rf %s" % shlex.quote(entry))
             continue
-        profile = d.rsplit("-", 1)[0]
-        if profile in seen:
+        preset = d.rsplit("-", 1)[0]
+        if preset in seen:
             size = ask(machine, "du -sh %s | cut -f1" % shlex.quote(entry)).strip()
             info("removing an old build on %s: %s (%s)" % (host, d, size))
             act_sh(machine, "rm -rf %s" % shlex.quote(entry))
         else:
-            seen.add(profile)
+            seen.add(preset)
 
 
 def purge_work(machine, env, host, kb):
@@ -190,7 +190,7 @@ def purge_work(machine, env, host, kb):
 
 
 def rubble(hosts, machine_for, env):
-    """Per build host: its builds (a plain `wk gc` prunes all but the newest finished one per profile) and its chroots."""
+    """Per build host: its builds (a plain `wk gc` prunes all but the newest finished one per preset) and its chroots."""
     rows = []
     for host in hosts:
         m = machine_for(host)
@@ -199,7 +199,7 @@ def rubble(hosts, machine_for, env):
             rows.append(row("pmos", "%s: pmos build host" % host, None, why="not looked at -- %s did not answer" % host))
             continue
         if "out" in kb:
-            rows.append(row("pmos-builds", "%s: pmos builds, the newest per profile stays" % host, kb["out"],
+            rows.append(row("pmos-builds", "%s: pmos builds, the newest per image preset stays" % host, kb["out"],
                             take=lambda m=m, h=host: prune(m, env, h)))
         if kb.get("work"):
             rows.append(row("pmos-work", "%s: pmbootstrap chroots, refetched by the next build" % host, kb["work"], "--purge-pmos",
@@ -208,9 +208,9 @@ def rubble(hosts, machine_for, env):
 
 
 class Pmos:
-    def __init__(self, reg, profile, spec, clock):
-        self.reg, self.p, self.spec, self.clock = reg, profile, spec, clock
-        self.name = profile["IMG_PROFILE"]
+    def __init__(self, reg, preset, spec, clock):
+        self.reg, self.p, self.spec, self.clock = reg, preset, spec, clock
+        self.name = preset["IMG_PRESET"]
         self.here, self.env, self.fleet = reg.machine, reg.env, reg.fleet
 
     def host(self):
@@ -225,7 +225,7 @@ class Pmos:
     def dry_run(self):
         p, machine = self.p, self.machine()
         log("would build image %s" % self.name)
-        log("  profile     %s (pmos builder)" % self.name)
+        log("  preset      %s (an image preset, pmos builder)" % self.name)
         log("  device      %s (%s), pmOS channel %s, UI %s" % (p["PMO_DEVICE"], p["IMG_ARCH"], p["PMO_CHANNEL"], p["PMO_UI"]))
         log("  for bridge  %s" % (p["PMO_BRIDGE"] or "none"))
         log("  hostname    %s" % p["IMG_HOSTNAME"])
@@ -257,7 +257,7 @@ class Pmos:
     def check_uplink_band(self, machine, root):
         bands = self.p["PMO_WIFI_BANDS"]
         if not bands:
-            act.debug("profile declares no PMO_WIFI_BANDS -- not checking the uplink band")
+            act.debug("the image preset declares no PMO_WIFI_BANDS -- not checking the uplink band")
             return
         ssid = machine.run(pmos_build.argv_for(root, "wifi-ssid")).out.strip()
         if not ssid:
@@ -304,7 +304,7 @@ class Pmos:
             return self.dry_run()
         machine = self.machine()
         if not sh(machine, "true").ok:
-            die("cannot ssh to %s, this profile's build host.\n    Another machine: WK_PMOS_HOST=<name> wk sysimage build %s"
+            die("cannot ssh to %s, this image preset's build host.\n    Another machine: WK_PMOS_HOST=<name> wk sysimage build %s"
                 % (machine.name, self.name))
         root = root_dir(machine, self.env)
         if o.get("--resume"):

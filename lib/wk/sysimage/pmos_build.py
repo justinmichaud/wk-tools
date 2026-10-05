@@ -165,7 +165,7 @@ class Build:
     def config(self):
         a = self.a
         info("Config")
-        self.m.write(self.cfg, "# Written by %s for %s. Edit the profile, not this.\n[pmbootstrap]\n"
+        self.m.write(self.cfg, "# Written by %s for %s. Edit the image preset, not this.\n[pmbootstrap]\n"
                                "device = %s\nui = %s\nuser = %s\nhostname = %s\nwork = %s\naports = %s\n"
                                "ssh_keys = True\nssh_key_glob = %s\nsystemd = never\n"
                      % (MODULE, a.id, a.device, a.ui, a.user, a.hostname, self.work, self.aports, a.keyfile))

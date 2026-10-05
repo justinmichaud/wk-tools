@@ -389,10 +389,14 @@ slot's board run carries the reading of its image workspace's collection.
 
 **A bench machine: build, write, arm, measure**
 
+An **image preset** (`image/presets/<image-preset>.conf`, listed by `wk sysimage
+presets`) declares one bootable system: its builder, board, release and base
+branch. It names the base image, never a WebKit build; that is a build preset.
+
 ```sh
 wk sysimage build wpewebkit-2.38-buildroot-rpi3-32 --detach   # hours
 wk sysimage disks <writer>                                     # which /dev the card is
-wk sysimage write --from <img> --disk <writer>:/dev/sdX --profile <profile>
+wk sysimage write --from <img> --disk <writer>:/dev/sdX --image-preset <image-preset>
 # carry the card to the board
 wk boot rpi3                            # armed for one boot; the system disarms itself as it comes up
 wk boot rpi3 --keep                     # claim it past the watchdog
@@ -404,12 +408,12 @@ system disk. A write refuses without the tailnet key or the board's WiFi
 credentials, and when a node of that name already exists on the tailnet.
 
 The image is the runtime and is built once, in its **image workspace**
-(`<builder>-<profile>[-<arm>]`, which `wk ls` lists). A **slot** is one WebKit
+(`<builder>-<image-preset>[-<arm>]`, which `wk ls` lists). A **slot** is one WebKit
 built against it, deployed onto the booted board without a reflash:
 
 ```sh
-wk sysimage webkit <profile> --commit <sha> --slot base --detach   # at 2.52+ this is instrument,
-                                                                   # collect on the board, rebuild
+wk sysimage webkit <image-preset> --commit <sha> --slot base --detach   # at 2.52+ this is instrument,
+                                                                        # collect on the board, rebuild
 wk bench deploy <image-ws> rpi3 --slot base                        # verified byte for byte
 wk bench run <image-ws> speedometer3 --system rpi3 --slot base     # run-benchmark here, the browser there
 wk bench run <image-ws> speedometer3 --system rpi3 --ab base,pr --rounds 5   # two slots, no reboot between
@@ -459,8 +463,8 @@ Subtests one arm cannot run are dropped from both
 **An A/B of two systems** — two releases resident on one medium, a boot per leg:
 
 ```sh
-wk sysimage write --from <2.38 img> --disk rpi3:/dev/mmcblk0@second --profile <2.38 profile>
-wk sysimage write --from <2.52 img> --disk rpi3:/dev/mmcblk0@third  --profile <2.52 profile>
+wk sysimage write --from <2.38 img> --disk rpi3:/dev/mmcblk0@second --image-preset <2.38 image preset>
+wk sysimage write --from <2.52 img> --disk rpi3:/dev/mmcblk0@third  --image-preset <2.52 image preset>
 wk boot rpi3 --system <id>              # then wk bench deploy into each
 wk bench run <image-ws> speedometer3 --system rpi3 --ab-systems <a>,<b> --slot base --rounds 5
 ```
@@ -492,7 +496,7 @@ collection through the three benchmarks, then the measured build, per arm.
 The collection is gated: a WebGL context, the GPU process on the accelerator,
 an unthrottled frame rate; then the profile is read back and judged
 (`lib/wk/pgo.py`). A board's WebKit at 2.52 or later is built the same way:
-`wk sysimage webkit <profile> --commit <sha> --slot <s>` instruments, collects
+`wk sysimage webkit <image-preset> --commit <sha> --slot <s>` instruments, collects
 with `wk bench run --collect` on the board, mixes and rebuilds.
 
 The display mode is declared (`display`), held, and checked before the
@@ -514,7 +518,7 @@ wk quiesce off && wk quiesce session off
 
 ```sh
 $EDITOR machines/<name>.conf            # kind=board (or mac, guest), ssh, bench_ssh,
-                                        # driver, device, root, profile,
+                                        # driver, device, root, image_preset,
                                         # net, dtb, role
 git add machines/<name>.conf && git commit
 wk boot --list
@@ -662,7 +666,7 @@ fallback is in place. Two systems on the stick are the firmware's own A/B: a
 static `autoboot.txt` selects the second pair under `[tryboot]`. As a
 workstation it is tuned by `host/linux/rpi5/rpi5-setup.sh` (run by `./setup`),
 which holds the settings. A bench system runs a stock kernel, since customers ship one; an
-overclock belongs to an `-oc` image profile's `config.txt.append`, never the
+overclock belongs to an `-oc` image preset's `config.txt.append`, never the
 EEPROM, which both modes share.
 
 Reading a medium the board is not booted from goes through the card helper
@@ -697,8 +701,8 @@ From a bare board to an automated A/B. The boards differ only in the
    first; the write refuses the collision.
    ```sh
    wk sysimage disks rpi5
-   wk sysimage write --from <rescue.wic.xz> --disk rpi5:/dev/mmcblk0 --rescue --profile webkit-2.52-yocto-rpi3-32
-   wk sysimage write --from <sdcard.img>    --disk rpi5:/dev/mmcblk0@second --profile wpewebkit-2.38-buildroot-rpi3-32
+   wk sysimage write --from <rescue.wic.xz> --disk rpi5:/dev/mmcblk0 --rescue --image-preset webkit-2.52-yocto-rpi3-32
+   wk sysimage write --from <sdcard.img>    --disk rpi5:/dev/mmcblk0@second --image-preset wpewebkit-2.38-buildroot-rpi3-32
    ```
 4. **Boot the rescue.** Carry the card, power on; `<board>-rescue` joins the
    tailnet. On two media, `wk boot <board> --boot-order <order>` and the
@@ -711,10 +715,10 @@ From a bare board to an automated A/B. The boards differ only in the
    --keep`, `wk bench deploy` twice, `wk bench run --ab`, `wk bench report`.
 
 **A buildroot configuration of your own** is an external defconfig under
-`image/buildroot/external/configs/`, named by the profile's `BR_DEFCONFIG`.
+`image/buildroot/external/configs/`, named by the image preset's `BR_DEFCONFIG`.
 A bench image needs `wpa_supplicant`, OpenSSH (dropbear refuses ed25519) and
 a kernel with TUN and netfilter; copy a 2.38 defconfig. A 32-bit userspace on
-a 64-bit machine is a yocto multilib profile (`YOC_MULTILIB`).
+a 64-bit machine is a yocto multilib image preset (`YOC_MULTILIB`).
 
 **Build interventions.** `wk sysimage build` is re-runnable and rebuilds
 what changed. Two things cost more than they look: a rebuild after slot
@@ -796,7 +800,7 @@ inside a container).
 - `WK_MAC_BENCH_HOLD` seconds the Mac bench autorun stays up after its last job (default 900).
 - `WK_MAC_BENCH_SSH` the ssh destination of the Mac's bench install, over the conf's `bench_ssh`.
 - `WK_MAC_BENCH_TOOLS` where the wk-tools checkout is on the Mac's bench install.
-- `WK_PMOS_HOST` the postmarketOS build host, over the profile's `PMO_BUILD_HOST`.
+- `WK_PMOS_HOST` the postmarketOS build host, over the image preset's `PMO_BUILD_HOST`.
 - `WK_PMOS_ROOT` the postmarketOS build root on that host (default `~/wk-pmos`).
 - `WK_QUIESCE_STATE` the directory quiesce records live in (default `~/.local/state/wk/quiesce`).
 - `WK_NTFY_API` the ntfy server notifications are published to (default `https://ntfy.sh`).

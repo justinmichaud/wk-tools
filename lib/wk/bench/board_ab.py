@@ -24,7 +24,7 @@ INTERRUPTED = set(job.EXIT_OF.values())
 
 
 def width(ident, env):
-    """A system id is <profile>-<hash>, and the profile declares the image's word size."""
+    """A system id is <image-preset>-<hash>, and the image preset declares the image's word size."""
     name = ident.rsplit("-", 1)[0] if re.search(r"-[0-9a-f]{8}", ident) else ident
     return 32 if (images.quiet_load(name, env) or {}).get("IMG_ARCH") in NARROW else 64
 
