@@ -54,9 +54,10 @@ def number(text):
 
 
 class Autorun:
-    def __init__(self, m, clock, env, tools=TREE, out=None, thread=threading.Thread):
+    def __init__(self, m, clock, env, tools=TREE, out=None, background=None):
         self.m, self.clock, self.env, self.tools = m, clock, env, tools
-        self.out, self.thread = out or sys.stdout, thread
+        self.out = out or sys.stdout
+        self.background = background or (lambda fn: threading.Thread(target=fn, daemon=True).start())
         self.root = ab_root(env)
         self.job_path, self.state_path = self.root + "/job.json", self.root + "/autorun.state"
         self.log_path = self.root + "/autorun.log"
@@ -303,7 +304,7 @@ class Autorun:
     def arm(self):
         self.stall = self.timeout + STALL_GRACE
         self.say("watchdog: %ds of silence" % self.stall)
-        self.thread(target=self.watchdog, daemon=True).start()
+        self.background(self.watchdog)
         self.armed = True
 
     def dim_display(self):
@@ -539,7 +540,7 @@ class Autorun:
         a, b = self.arm_results(plan, "A"), self.arm_results(plan, "B")
         if not (a and b):
             return False
-        r = self.m.run(["/usr/bin/python3", self.tool("lib/wkdata.py"), "ab-precision", "--a", a, "--b", b, "--target", self.detect])
+        r = self.m.run(["/usr/bin/python3", self.tool("lib/wkdata.py"), "ab-precision", "--a", a, "--b", b, "--goal", self.detect])
         if not r.ok:
             return False
         self.say("  %s: %s" % (plan, " ".join(r.out.split())))
@@ -573,7 +574,7 @@ class Autorun:
                 return self.state_set("outcome", "all-failed-round-%d" % r)
             self.state_set("rounds_done", r)
             if r >= self.rounds and not self.detect_off():
-                self.say("precision after round %d (target %s%%):" % (r, self.detect))
+                self.say("precision after round %d (goal %s%%):" % (r, self.detect))
                 unresolved = [p for p in self.plans if not self.plan_resolves(p)]
                 if not unresolved:
                     self.say("every plan resolves %s%% -- stopping at round %d" % (self.detect, r))
@@ -581,7 +582,7 @@ class Autorun:
                 self.say("  still coarser than %s%%: %s" % (self.detect, " ".join(unresolved)))
             r += 1
         if self.detect_off():
-            self.say("ran the %d round(s) asked for; no precision target was set, so what" % self.rounds)
+            self.say("ran the %d round(s) asked for; no precision goal was set, so what" % self.rounds)
             self.say("these numbers resolve is whatever 'wk bench precision' says of them.")
             return self.state_set("outcome", "rounds-done")
         self.say("reached the ceiling of %d rounds without resolving %s%% on every plan." % (self.max_rounds, self.detect))

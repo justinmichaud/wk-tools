@@ -77,7 +77,7 @@ a question the build records, so an agent that wants one invents it, and
 reports it wrong. The single reading taken outside `wk` is the kill check
 below, where the record is known to lag.
 
-`wk setup` and the other provisioning commands are minutes, not seconds: run
+`./setup`, `wk machine setup` and the other provisioning commands are minutes, not seconds: run
 them in the background too rather than watching a tool call time out.
 
 `wk status` reporting `alive: [N/M] (last output Xs ago)` just after a kill is

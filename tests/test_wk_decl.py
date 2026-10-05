@@ -45,7 +45,7 @@ class TestDeclarations(unittest.TestCase):
         self.assertEqual(d.where, "host")
         self.assertEqual(d.name_decl, "required@2")
         self.assertTrue(d.ready and d.lifecycle and d.outside and not d.forward)
-        self.assertTrue(d.is_readonly("ls") and not d.is_readonly("rm"))
+        self.assertTrue(d.is_readonly(["ls"]) and not d.is_readonly(["rm"]))
         self.assertTrue(d.is_destructive(["rm"]) and d.is_destructive(["--purge=x"]))
         self.assertFalse(d.is_destructive(["ls"]))
         self.assertTrue(d.honours_dryrun(["anything"]))
@@ -94,6 +94,15 @@ class TestDeclarations(unittest.TestCase):
         self.assertEqual(d.where_for(["run"]), "workspace")
         self.assertEqual(d.where_for(["ls"]), "store")
         self.assertEqual(d.takes_for(["ls"]), "0")
+
+    def test_a_second_word_override_beats_its_verbs(self):
+        d = declare(self.tmp, "probe", "# wk: where=host needs helper verbs=push,check readonly check",
+                    "# wk: sub push needs=", "# wk: sub push on,off needs=helper", "# wk: sub push status readonly=yes")
+        self.assertTrue(d.is_readonly(["push", "--all", "status"]) and d.is_readonly(["check"]))
+        self.assertFalse(d.is_readonly(["push", "on"]) or d.is_readonly(["push"]))
+        self.assertEqual([d.needs_for(a) for a in (["push", "on"], ["push", "status"], ["push"], ["check"])],
+                         ["helper", "", "", "helper"])
+        self.assertIn(("push on,off", {"needs": "helper"}), d.overrides())
 
     def test_a_subverb_overrides_destructive_and_dryrun(self):
         d = declare(self.tmp, "probe",

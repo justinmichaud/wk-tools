@@ -190,10 +190,10 @@ class TestPeerDelegation(PeerFixture):
         self.assertFalse((self.tmp / "remote-root").exists(), "a checkout was made here for the peer")
 
     def test_zed_opens_the_peers_new_workspace_from_here(self):
-        cp = self._wk("new", "newws", "--on", "peerbox", "--no-wait", "--zed", "--dry-run")
+        cp = self._wk("new", "newws", "--on", "peerbox", "--zed", "--dry-run")
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertEqual(self.peer_calls(), [], "a dry run hands nothing over")
-        self.assertRegex(cp.stdout, r"would run: .* new newws --no-wait")
+        self.assertRegex(cp.stdout, r"would run: .* new newws'")
         self.assertRegex(cp.stdout, r"would run: \S*/cmd/zed newws")
 
     def test_a_refused_creation_is_the_peers_refusal(self):

@@ -1,6 +1,6 @@
-"""The pmos build as it runs on the build host (lib/wk/sysimage/pmos.py is the driving half). The driver copies
+"""The pmos build as it runs on the build host (lib/wk/sysimage/pmos.py is the driving half). The driving half copies
 lib/wk there and runs `PYTHONPATH=<root>/lib python3 -m wk.sysimage.pmos_build remote-build|wifi-ssid ...`, so both
-halves are one tree. Its output is the build log the driver follows."""
+halves are one tree. Its output is the build log the driving half follows."""
 
 import argparse
 import glob

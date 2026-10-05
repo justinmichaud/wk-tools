@@ -85,7 +85,7 @@ class System:
         return self.ws_driver.src(self.ws)
 
     def build_dir(self, leg):
-        return leg.cfg.build_dir(self.src())
+        return leg.preset.build_dir(self.src())
 
     def after(self, leg):
         return []
@@ -97,13 +97,13 @@ class System:
         return first_line(self.ws_driver.exec(self.ws, ["git", "-C", self.src(), "rev-parse", "HEAD"]))
 
     def build_present(self, leg):
-        build = leg.cfg.build_dir(self.src())
+        build = leg.preset.build_dir(self.src())
         if leg.runner == "jsc":
-            jsc = leg.cfg.jsc_path(self.src())
-            return (True, jsc) if self.exec_ok("test", "-x", jsc) else (False, "no jsc in %s -- wk build %s %s" % (build, self.ws, leg.cfg.name))
+            jsc = leg.preset.jsc_path(self.src())
+            return (True, jsc) if self.exec_ok("test", "-x", jsc) else (False, "no jsc in %s -- wk build %s %s" % (build, self.ws, leg.preset.name))
         if any(self.exec_ok("test", "-x", p) for p in self.browser_products(leg)):
             return True, build
-        return False, "no MiniBrowser in %s -- wk build %s %s" % (build, self.ws, leg.cfg.name)
+        return False, "no MiniBrowser in %s -- wk build %s %s" % (build, self.ws, leg.preset.name)
 
     def link(self, path, link):
         self.ws_driver.act_exec(self.ws, ["mkdir", "-p", os.path.dirname(link)])
@@ -143,14 +143,14 @@ class ContainerSystem(System):
             return "cpu-class, session not on the GPU"
         return ""
 
-    def default_browser(self, cfg):
-        b = {"--wpe": "minibrowser-wpe", "--gtk": "minibrowser-gtk"}.get(cfg.port)
+    def default_browser(self, preset):
+        b = {"--wpe": "minibrowser-wpe", "--gtk": "minibrowser-gtk"}.get(preset.port)
         if not b:
-            die("no benchmark browser for port %s" % (cfg.port or cfg.name))
+            die("no benchmark browser for port %s" % (preset.port or preset.name))
         return b
 
     def browser_products(self, leg):
-        build = leg.cfg.build_dir(self.src())
+        build = leg.preset.build_dir(self.src())
         return [build + "/bin/MiniBrowser", build + "/bin/WPEWebProcess"]
 
     def run_dir(self, leg):
@@ -268,11 +268,11 @@ class GuestSystem(System):
     def headless_reason(self, arch):
         return ""
 
-    def default_browser(self, cfg):
+    def default_browser(self, preset):
         return "minibrowser"
 
     def browser_products(self, leg):
-        return [leg.cfg.browser_path(self.src())]
+        return [leg.preset.browser_path(self.src())]
 
     def home(self):
         return os.path.join(self.ws_driver.home(), self.ROOT)

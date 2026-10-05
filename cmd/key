@@ -9,6 +9,7 @@
 # wk: sub sudo takes=2 opts=--on=,--all destructive=
 # wk: sub backup opts=--candidates
 # wk: sub push where=local takes=2 needs= opts=--on=,--all destructive=on dryrun=yes
+# wk: sub push status readonly=yes
 #
 #   wk key setup      every credential this machine needs, and one working
 #                     credential of each kind on every workstation. The one

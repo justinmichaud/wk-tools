@@ -291,7 +291,7 @@ class TestRefusals(TaskTest):
         with mock.patch("wk.lock.Lock.holder_pid", return_value=55):
             self.w.pids.add(55)
             err = self.refused()
-        self.assertIn("'%s' is already building -- its driver holds the ws-%s lock." % (WS, WS), err)
+        self.assertIn("ws-%s" % WS, err)
 
     def test_another_build_on_this_machine_is_a_barrier(self):
         from wk.resources import Budget

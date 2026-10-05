@@ -224,12 +224,12 @@ class MacVolumeSystem(System):
         return self.here.run(list(argv)).ok
 
     def build_dir(self, leg):
-        return os.path.join(self.dir, "WebKitBuild", os.path.basename(leg.cfg.build_dir()))
+        return os.path.join(self.dir, "WebKitBuild", os.path.basename(leg.preset.build_dir()))
 
     def build_present(self, leg):
         build = self.build_dir(leg)
         if not self.exec_ok("test", "-x", os.path.join(build, "MiniBrowser.app/Contents/MacOS/MiniBrowser")):
-            return False, "no MiniBrowser.app in %s -- the stage's %s is not on the disk" % (build, leg.cfg.name)
+            return False, "no MiniBrowser.app in %s -- the stage's %s is not on the disk" % (build, leg.preset.name)
         if not any(n.endswith(".framework") for n in self.here.listdir(build)):
             return False, "no *.framework in %s -- the driver refuses it" % build
         return True, "%s @%s" % (os.path.basename(build), self.sha()[:10])
@@ -386,7 +386,7 @@ class StagedRun(pipeline.Run):
         s, leg = self.system, pipeline.Leg(plan, o)
         name = s.manifest.get("preset", "")
         try:
-            leg.cfg = presets.resolve(name, "macos", s.manifest.get("workspace_place") or "vm", self.env)
+            leg.preset = presets.resolve(name, "macos", s.manifest.get("workspace_place") or "vm", self.env)
         except LookupError:
             die("%s names preset '%s', which this wk-tools does not know -- stage it again" % (s.dir, name))
         leg.klass, leg.arch, leg.runner, leg.browser = pipeline.bench_class(plan), "native", "browser", "minibrowser"
@@ -405,7 +405,7 @@ class StagedRun(pipeline.Run):
         s = self.system
         leg.id = "%s-%s-%s" % (self.clock.stamp(), leg.plan, os.path.basename(s.dir))
         leg.rel, leg.out = leg.id, os.path.join(self.bench_dir, leg.id)
-        steps = ["run %s from %s (%s)" % (leg.plan, s.dir, leg.cfg.name), "record into %s" % leg.out]
+        steps = ["run %s from %s (%s)" % (leg.plan, s.dir, leg.preset.name), "record into %s" % leg.out]
         if leg.o.get("profile"):
             steps.append("profile the web process into %s" % leg.o["profile"])
         leg.machine = Local()
@@ -413,12 +413,12 @@ class StagedRun(pipeline.Run):
             return steps
         leg.machine.mkdir(leg.out)
         record.write_env(os.path.join(leg.out, "env.json"), [
-            "plan=" + leg.plan, "workspace=" + s.ws, "preset=" + leg.cfg.name, "browser=" + leg.browser, "webkit_sha=" + s.sha(),
+            "plan=" + leg.plan, "workspace=" + s.ws, "preset=" + leg.preset.name, "browser=" + leg.browser, "webkit_sha=" + s.sha(),
             "count=" + leg.count, "local_copy=" + leg.payload, "preflight_notes=" + leg.notes, "class=" + leg.klass,
             "runner=browser", "arch=native", "bench_host=" + s.bench_host] + s.facts(leg) + pipeline.configuration_fields(self.env),
             bool_fields=["forced=" + act.forced(self.env)] + s.bool_facts())
         self.carry_reading(leg)
-        info("%s on %s, from '%s' (%s @%s)" % (leg.plan, s.sysctl("hw.model"), s.ws, leg.cfg.name, s.sha()[:10]))
+        info("%s on %s, from '%s' (%s @%s)" % (leg.plan, s.sysctl("hw.model"), s.ws, leg.preset.name, s.sha()[:10]))
         return steps
 
     def carry_reading(self, leg):
@@ -513,7 +513,7 @@ class Stage:
         said = tools.identity(self.root, self.here)
         return (said.get("sha") or "unknown") + ("+dirty" if said.get("dirty") == "yes" else "")
 
-    def run(self, words, machine, preset, plans):
+    def run(self, words, machine, preset_name, plans):
         if len(words) != 1:
             die("usage: wk bench stage <workspace> --to <machine> [--preset P] [--plan P [--payload <dir>]]...; see wk bench -h")
         ws = words[0]
@@ -534,27 +534,27 @@ class Stage:
         except LookupError as e:
             die(str(e))
         ws_driver.wait_ready(ws, self.clock)
-        preset = preset or self.reg.default_preset(ws)
+        preset_name = preset_name or self.reg.default_preset(ws)
         try:
-            cfg = presets.resolve(preset, ws_driver.os(), ws_driver.kind, ws_driver.env)
+            preset = presets.resolve(preset_name, ws_driver.os(), ws_driver.kind, ws_driver.env)
         except LookupError:
-            die("unknown preset '%s' (wk build --list)" % preset)
+            die("unknown preset '%s' (wk build --list)" % preset_name)
         src = ws_driver.src(ws)
-        build = cfg.build_dir(src)
+        build = preset.build_dir(src)
         if not ws_driver.exec(ws, ["test", "-d", build]).ok:
-            die("'%s' has no %s build to stage (%s).\n    Build it first:  wk build %s %s" % (ws, preset, build, ws, preset))
+            die("'%s' has no %s build to stage (%s).\n    Build it first:  wk build %s %s" % (ws, preset_name, build, ws, preset_name))
         for plan, payload in plans:
             if payload and not self.here.isdir(payload):
                 die("no such payload directory: %s\n    Nothing has been staged. 'wk bench seed <ws> %s' makes one, and it is read\n"
                     "    on the machine that stages, not the one that asked." % (payload, plan))
         sha = first_line(ws_driver.exec(ws, ["git", "-C", src, "rev-parse", "HEAD"]))
         stamp = self.clock.stamp()
-        dest = os.path.join(home, "staged", "%s-%s" % (stamp, preset))
+        dest = os.path.join(home, "staged", "%s-%s" % (stamp, preset_name))
         vol = drv.c("volume")
-        info("staging %s from '%s' onto %s%s" % (preset, ws, machine, " (%s)" % vol if vol else ""))
+        info("staging %s from '%s' onto %s%s" % (preset_name, ws, machine, " (%s)" % vol if vol else ""))
         assemble = os.path.join(self.reg.store.state_dir(), "bench-stage", os.path.basename(dest)) if deliver else dest
         manifest = {"staged_at": self.clock.iso(), "staged_by": wkrecord.host_name(self.here), "workspace": ws,
-                    "workspace_place": ws_driver.name, "preset": preset, "webkit_sha": sha, "plans": ",".join(p for p, _ in plans),
+                    "workspace_place": ws_driver.name, "preset": preset_name, "webkit_sha": sha, "plans": ",".join(p for p, _ in plans),
                     "payloads_pinned": ", ".join(p for p, d in plans if d), "machine": machine, "volume": vol,
                     "wk_tools": self.tools_version(), "bench_host": "image"}
         done = False
@@ -639,8 +639,8 @@ def plans(order, names, payloads):
     return out
 
 
-def stage(root, reg, clock, words, machine, preset, pairs, driver=machine_driver):
-    return Stage(root, reg, clock, driver).run(words, machine, preset, pairs)
+def stage(root, reg, clock, words, machine, preset_name, pairs, driver=machine_driver):
+    return Stage(root, reg, clock, driver).run(words, machine, preset_name, pairs)
 
 
 def rubble(install):
@@ -799,7 +799,7 @@ class MacAB:
         for key in ("count", "settle"):
             if not o[key].isdigit():
                 die("--%s takes a number (got '%s')" % (key, o[key]))
-        self.preset = o.get("preset") or AB_PRESET
+        self.preset_name = o.get("preset") or AB_PRESET
         if o.get("systems"):
             if o.get("patch") or o.get("base"):
                 die("--systems names two builds already staged; --patch and --base build them. One or the other.")
@@ -984,11 +984,11 @@ class MacAB:
         before = set(self.staged_ids(root))
         info("  building %s" % label)
         path = os.path.join(self.logs, "build-%s.log" % slug)
-        if not self.rwk("build", self.ws, self.preset, logged=path).ok:
+        if not self.rwk("build", self.ws, self.preset_name, logged=path).ok:
             die("the %s build failed; its log is %s" % (label, path))
         plans = self.stage_plans()
         info("  staging %s" % label)
-        if not self.rwk("bench", "stage", self.ws, "--to", self.name, "--preset", self.preset, *plans,
+        if not self.rwk("bench", "stage", self.ws, "--to", self.name, "--preset", self.preset_name, *plans,
                         logged=os.path.join(self.logs, "stage-%s.log" % slug)).ok:
             die("staging %s failed" % label)
         new = sorted(set(self.staged_ids(root)) - before)
@@ -1000,7 +1000,7 @@ class MacAB:
 
     def reclaim(self, label):
         """A profile-guided arm leaves ~100 GB of products in the guest, and once it is staged both trees are spent."""
-        measured = presets.resolve(self.preset, "macos", "vm", self.env).build_dir(self.guest_src())
+        measured = presets.resolve(self.preset_name, "macos", "vm", self.env).build_dir(self.guest_src())
         dirs = q(measured, measured + PGO_INSTR)
         said = self.guest_sh("du -sk %s 2>/dev/null | awk '{s+=$1} END {print int(s/1048576)}'\nrm -rf %s\n"
                              "df -g / | awk 'NR==2 {print $4}'" % (dirs, dirs), mutates=True).out.split() + ["?", "?"]
@@ -1072,7 +1072,7 @@ class MacAB:
         self.lock.hold("bench-task-" + self.task, timeout=5)
         self.here.mkdir_now(self.logs)
         slots = [self.a or "baseline %s" % (self.o.get("base") or "HEAD"), self.b or "patched %s" % self.o.get("patch")]
-        record.task_write(self.taskdir, ["task=" + self.task, "requested=" + self.clock.iso(), "devices=%s=%s" % (self.name, self.preset),
+        record.task_write(self.taskdir, ["task=" + self.task, "requested=" + self.clock.iso(), "devices=%s=%s" % (self.name, self.preset_name),
                                          "plans=" + ",".join(self.plans), "rounds=%d" % self.rounds, "slots=" + ",".join(slots)],
                           [self.command()], machine=self.home)
 
@@ -1111,7 +1111,7 @@ class MacAB:
     def show(self):
         o = self.o
         if float(o["detect"]) == 0:
-            info("plan: %s, exactly %d round(s), interleaved; no precision target" % (" ".join(self.plans), self.rounds))
+            info("plan: %s, exactly %d round(s), interleaved; no precision goal" % (" ".join(self.plans), self.rounds))
         else:
             info("plan: %s, %d-%s round(s), interleaved, until it resolves %s%%" % (" ".join(self.plans), self.rounds, o["max_rounds"], o["detect"]))
         if o.get("rehearse"):

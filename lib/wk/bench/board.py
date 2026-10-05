@@ -612,7 +612,7 @@ def require_board(root, env, board):
 
 
 def claim(root, env, board, what):
-    """A deploy's hold on the board, a record of its own; None under --dry-run or inside a driver that holds it."""
+    """A deploy's hold on the board, a record of its own; None under --dry-run or inside a run that holds it."""
     records = progress.Records(env=env)
     return progress.hold(records, lambda res: progress.fleet_holders(res, records, progress.fleet_stores(root, env, records.machine)), board, "bench", what,
                          "kill %d" % os.getpid(), "", [what], os.getpid(), env)

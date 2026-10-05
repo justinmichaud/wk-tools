@@ -16,7 +16,7 @@ else
 fi
 
 if [ -S /run/wk/broker.sock ]; then
-    log "fleet-request broker present -- wk boot / wk pi deploy|bench become requests"
+    log "fleet-request broker present -- 'wk boot' / 'wk bench' become requests"
 else
     log "no fleet-request broker at /run/wk/broker.sock -- no bench machine from here"
 fi

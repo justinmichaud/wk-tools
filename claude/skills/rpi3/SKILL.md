@@ -22,7 +22,7 @@ tailnet bridge that fronts these boards. Use the name: `SSH="ssh rpi3"`. Log in 
 password, key-based).
 
 **From inside a workspace this may not work at all, and that is the sandbox, not a fault.** A
-workspace reaches a board only if its address is in `$WK_STORE/pi-hosts`, which `wk pi setup`
+workspace reaches a board only if its address is in `$WK_STORE/pi-hosts`, which `wk machine setup`
 writes — and the rpi3 has not been provisioned. Do not go hunting for the address, do not scan the
 LAN: say the board is not reachable from here and let the host drive it (`wk bench deploy`,
 `wk bench run --system rpi3`).

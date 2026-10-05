@@ -79,7 +79,7 @@ def builtin_display(displays):
 PYOBJC_MISSING = ("mac-browser-check: no pyobjc here, so nothing can ask which application is "
                   "frontmost -- an unfocused window is rAF-throttled and a benchmark behind one "
                   "measures the throttle. bench/mac-pyobjc.sh installs it (wk_pyobjc_install); "
-                  "./setup or 'wk vm start <name>' runs that already")
+                  "./setup or 'wk start <name>' runs that already")
 
 
 def require_pyobjc():

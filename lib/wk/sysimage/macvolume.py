@@ -460,7 +460,7 @@ class MacVolume:
         log("  * one user, logged in AT THE CONSOLE. A browser driven over ssh with")
         log("    nobody at the screen has nowhere to draw.")
         log("  * this install's own ~/.ssh/authorized_keys -- two installs, two files.")
-        log("  then, from the driving machine:  wk bench mac <ws> --preflight")
+        log("  then, from the driving machine:  wk bench ab --devices <mac> --preflight")
         return 0
 
     def quiet(self):

@@ -10,7 +10,7 @@ WK_ROOT="$TOOLS"
 MACHINE="${WK_REMOTE_MACHINE:-}"
 ROOT="${WK_REMOTE_ROOT:-$HOME/wk}"
 
-[ -n "$MACHINE" ] || die "WK_REMOTE_MACHINE is not set (run this through 'wk remote setup')"
+[ -n "$MACHINE" ] || die "WK_REMOTE_MACHINE is not set (run this through 'wk machine setup <name>')"
 
 info "provisioning $(hostname) as '$MACHINE'"
 

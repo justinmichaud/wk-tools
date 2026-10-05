@@ -1,8 +1,8 @@
 # The tailscale release this fleet installs, in one place.
 #
-# Two things read this file and they must not drift: the recipe beside it, which
-# puts the binaries *in* an image, and `wk pi setup`, which puts the same bytes
-# on a board that is already running. A version in both places is two versions
+# Everything that installs tailscale reads this file, so nothing can drift: the
+# recipe beside it, which puts the binaries *in* a Yocto image, and the buildroot
+# and macOS image builds (lib/wk/sysimage). A version in two places is two versions
 # the day one of them is bumped -- and the failure that produces is a board
 # whose tailscale is not the tailscale anything else in the fleet is running.
 #

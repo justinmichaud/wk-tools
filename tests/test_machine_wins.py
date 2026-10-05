@@ -72,7 +72,7 @@ class TestMachineWins(RmFinalStateTest):
         base = w.driver.store.snapshots_dir()
         for given in ("", "main-1"):
             w.effects = []
-            self.refused(lambda: workspace.new_driver(w.driver, w.records, w.lock, w.clock, "ws", given, "native"))
+            self.refused(lambda: workspace.new_detached_run(w.driver, w.records, w.lock, w.clock, "ws", given, "native"))
             self.assertEqual([a for a in self.runs(w) if a[0] == "wkdev-create"], [])
             self.assertEqual([e for e in w.effects if e[0] in ("write", "remove", "mkdir") and e[1].startswith(base)], [])
             (t,) = w.records.list()

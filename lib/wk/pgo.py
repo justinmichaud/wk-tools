@@ -234,7 +234,7 @@ class Cycle:
             return 0
         info("stopping the cycle for '%s' (pid %s)" % (name, t.field("pid")))
         if not job.kill(None, ws, t, "cancelled", self.here, self.clock, self.env):
-            die("the driver of '%s' outlived a TERM and a KILL:\n    ps -p %s" % (name, t.field("pid")))
+            die("the detached run of '%s' outlived a TERM and a KILL:\n    ps -p %s" % (name, t.field("pid")))
         return 0
 
 

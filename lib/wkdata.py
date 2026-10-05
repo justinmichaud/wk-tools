@@ -115,17 +115,17 @@ def cmd_ab_legs(args):
 
 
 def cmd_ab_precision(args):
-    _bench().precision(args.a, args.b, args.target)
+    _bench().precision(args.a, args.b, args.goal)
 
 
 def main(argv):
     parser = argparse.ArgumentParser(prog="wkdata.py", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("ab-precision", help="how fine a difference the rounds so far resolve, and whether that meets --target")
+    p = sub.add_parser("ab-precision", help="how fine a difference the rounds so far resolve, and whether that meets --goal")
     p.add_argument("--a", required=True, help="comma-separated run directories for arm A")
     p.add_argument("--b", required=True, help="comma-separated run directories for arm B")
-    p.add_argument("--target", type=float, default=0.3, help="the effect the A/B has to be able to detect, in percent (default 0.3)")
+    p.add_argument("--goal", type=float, default=0.3, help="the effect the A/B has to be able to detect, in percent (default 0.3)")
     p.set_defaults(func=cmd_ab_precision)
 
     p = sub.add_parser("ab-legs", help="every leg an A/B has run so far, against what its job planned")

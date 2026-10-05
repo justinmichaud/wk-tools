@@ -151,7 +151,7 @@ class TestWhere(unittest.TestCase):
                         how, handed, env = dispatched([d.name, "--quiet", *argv], macos=macos, delegates=delegates)
                         self.assertEqual(how, want, "wk %s %s -> %s %s %s" % (d.name, " ".join(argv), how, handed, env))
                         if how == "delegate":
-                            self.assertEqual(HANDED[-1].readonly, d.is_readonly(argv[0] if argv else ""))
+                            self.assertEqual(HANDED[-1].readonly, d.is_readonly(argv))
                         self.assertFalse(GLOBAL_WORDS & set(handed), handed)
                         self.assertEqual(env.get("WK_QUIET"), "1")
                         for w in handed[:handed.index("--") if "--" in handed else len(handed)]:

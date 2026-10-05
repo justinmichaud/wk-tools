@@ -89,17 +89,17 @@ def stopping(o, rounds, detect="0"):
     up to --max-rounds; --detect 0 runs --rounds exactly."""
     pct = o.get("detect") or detect
     try:
-        target = float(pct)
+        goal = float(pct)
     except ValueError:
-        target = -1
-    if target < 0:
+        goal = -1
+    if goal < 0:
         die("--detect '%s' is not a percentage (0.3 is a third of one per cent; 0 runs --rounds exactly)" % pct)
-    top = o.get("max_rounds") or str(MAX_ROUNDS if target else rounds)
+    top = o.get("max_rounds") or str(MAX_ROUNDS if goal else rounds)
     if not top.isdigit():
         die("--max-rounds takes a number (got '%s')" % top)
     if int(top) < rounds:
         die("--max-rounds %s is below --rounds %d: --rounds is the floor it alternates from" % (top, rounds))
-    return int(top), target
+    return int(top), goal
 
 
 class AB:

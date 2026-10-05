@@ -62,16 +62,16 @@ def options(args):
     return o
 
 
-def browser_target(cfg, url, process, process_explicit, mode, args, outdir):
+def browser_target(preset, url, process, process_explicit, mode, args, outdir):
     """(subject, target_cmd, mb_prefix) for `--browser`: the Apple ports profile MiniBrowser
     directly, the CMake ports profile it through `run-minibrowser`, which is not itself the subject."""
-    if cfg.xcode():
+    if preset.xcode():
         if process_explicit:
             die("--process is not wired up for the Apple ports: MiniBrowser is profiled\n"
                 "    directly here, not through a process picker. '--attach\n"
-                "    %s' reaches the web process once it is up." % cfg.web_process_name())
+                "    %s' reaches the web process once it is up." % preset.web_process_name())
         subject = "MiniBrowser %s" % url
-        cmd = shlex.quote(cfg.browser_path("$SRC")) + " " + cfg.browser_url_flag() + " " + shlex.quote(url)
+        cmd = shlex.quote(preset.browser_path("$SRC")) + " " + preset.browser_url_flag() + " " + shlex.quote(url)
         if args:
             cmd += " " + shlex.join(args)
         return subject, cmd, False
@@ -87,18 +87,18 @@ def browser_target(cfg, url, process, process_explicit, mode, args, outdir):
         die("--process is meaningless with --profile=%s: it covers the whole browser\n"
             "    process tree, not one process. Drop --process, or use --profile=samply to pick one." % mode)
 
-    type_flag = "--%s" % cfg.type.lower()
+    type_flag = "--%s" % preset.type.lower()
     launch_env = "WPE_BROWSER=minibrowser"
-    launch_cmd = "Tools/Scripts/run-minibrowser %s %s -- %s" % (cfg.port, type_flag, shlex.quote(url))
+    launch_cmd = "Tools/Scripts/run-minibrowser %s %s -- %s" % (preset.port, type_flag, shlex.quote(url))
     if args:
         launch_cmd += " " + shlex.join(args)
 
     if mode == "samply" and process != "ui":
         # samply cannot be a prefix of a process the UI process spawns later, so it attaches instead: a fixed wait, then the newest process of that name.
-        proc_name = {"web": cfg.web_process_name(), "network": cfg.network_process_name(),
-                    "gpu": cfg.gpu_process_name()}.get(process, "")
+        proc_name = {"web": preset.web_process_name(), "network": preset.network_process_name(),
+                    "gpu": preset.gpu_process_name()}.get(process, "")
         if not proc_name:
-            die("no %s process for the resolved preset (%s:%s)" % (process, cfg.buildsys, cfg.port))
+            die("no %s process for the resolved preset (%s:%s)" % (process, preset.buildsys, preset.port))
         subject = "MiniBrowser %s, samply attaching to the newest %s after launch" % (url, proc_name)
         cmd = ("%s %s >%s 2>&1 &\n"
               "sleep 5\n"
@@ -138,25 +138,25 @@ def main(args, cmd, reg=None):
             "    at, and without --browser there is no MiniBrowser to name one of.")
     reg = reg or places.Registry(images.root())
 
-    preset = store.build_preset() or reg.default_preset(name)
+    preset_name = store.build_preset() or reg.default_preset(name)
     try:
         tname = reg.ws_place(name)
         driver = reg.load(tname)
     except LookupError as e:
         die(str(e))
     try:
-        cfg = presets.resolve(preset, driver.os(), driver.kind, driver.env)
+        preset = presets.resolve(preset_name, driver.os(), driver.kind, driver.env)
     except LookupError:
-        die("unknown preset '%s' (wk build --list)" % preset)
+        die("unknown preset '%s' (wk build --list)" % preset_name)
 
     mode = o["mode"]
     if mode == "native":
-        mode = "instruments" if cfg.xcode() else "samply"
+        mode = "instruments" if preset.xcode() else "samply"
     if mode not in MODES:
         die("no such mode '%s' -- there are: %s (and 'native')" % (mode, " ".join(MODES)))
 
     src = driver.src(name)
-    var, run_dir = cfg.run_var(), cfg.run_dir(src)
+    var, run_dir = preset.run_var(), preset.run_dir(src)
 
     # Not /tmp: a profile is worth more than the ten minutes it took to record, and /tmp on a container workspace is the first thing a restart takes away.
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -171,11 +171,11 @@ def main(args, cmd, reg=None):
         subject, target_cmd = "attach:%s" % attach, ""
     elif browser:
         url = url or "about:blank"
-        bin_path = cfg.browser_path(src)
-        cmake_browser = not cfg.xcode()
-        subject, target_cmd, mb_prefix = browser_target(cfg, url, o["process"], o.get("process_explicit"), mode, args, outdir)
+        bin_path = preset.browser_path(src)
+        cmake_browser = not preset.xcode()
+        subject, target_cmd, mb_prefix = browser_target(preset, url, o["process"], o.get("process_explicit"), mode, args, outdir)
     else:
-        bin_path = cfg.jsc_path(src)
+        bin_path = preset.jsc_path(src)
         subject = "jsc" + (" " + args[0] if args else "")
         # jsc takes its options *before* the script: a `--sample` after the file name is silently handed to the script as an argument.
         target_cmd = ""
@@ -189,7 +189,7 @@ def main(args, cmd, reg=None):
     if o.get("jitdump"):
         jsc_env.append("JSC_useJITDump=1")
         jsc_env.append("JSC_jitDumpDirectory=%s" % outdir)
-        if not cfg.xcode() and browser:
+        if not preset.xcode() and browser:
             warn("JSC_useJITDump=1 has been seen to crash the WebKitGTK UI process on startup")
             log("  (claude/skills/jsc-marker-trace). If the browser dies at once, that is why.")
     for e in o["extra_env"]:
@@ -242,8 +242,8 @@ def main(args, cmd, reg=None):
         else:
             wrap = "samply record --save-only -o %s --" % shlex.quote(artifact)
     elif mode == "sysprof":
-        if cfg.xcode():
-            die("sysprof profiles Linux; '%s' is an Apple-port build. Use --profile=instruments there." % preset)
+        if preset.xcode():
+            die("sysprof profiles Linux; '%s' is an Apple-port build. Use --profile=instruments there." % preset_name)
         if attach:
             die("sysprof-cli records a command it launches, and samples the whole system while it\n"
                 "    runs; there is no attach. Use --profile=samply to attach to a pid.")
@@ -251,9 +251,9 @@ def main(args, cmd, reg=None):
         artifact = os.path.join(outdir, "capture.syscap")
         wrap = "sysprof-cli --force %s --" % shlex.quote(artifact)
     elif mode == "instruments":
-        if not cfg.xcode():
+        if not preset.xcode():
             die("xctrace profiles Mach-O processes on macOS; '%s' is a %s\n"
-                "    build. Use --profile=samply there." % (preset, cfg.buildsys))
+                "    build. Use --profile=samply there." % (preset_name, preset.buildsys))
         needs = "xctrace"
         artifact = os.path.join(outdir, "trace.trace")
         if attach:
@@ -261,7 +261,7 @@ def main(args, cmd, reg=None):
         else:
             wrap = "xctrace record --template 'Time Profiler' --output %s --launch --" % shlex.quote(artifact)
     else:
-        if cfg.xcode():
+        if preset.xcode():
             die("%s is a Linux tool and this is an Apple-port build.\n"
                 "    For allocations on macOS use Instruments' Allocations template by hand --\n"
                 "    '--profile=instruments' records Time Profiler only." % mode)
@@ -289,7 +289,7 @@ def main(args, cmd, reg=None):
             bin_present = True
         elif not dry_run():
             die("nothing to profile: no %s at %s\n"
-                "    Build it first:  wk build %s %s" % (os.path.basename(bin_path), bin_path, name, preset))
+                "    Build it first:  wk build %s %s" % (os.path.basename(bin_path), bin_path, name, preset_name))
 
     if needs and not dry_run():
         require_tool(driver, name, needs)
@@ -305,24 +305,24 @@ def main(args, cmd, reg=None):
     if tee:
         target_cmd = "set -o pipefail; %s 2>&1 | tee %s" % (target_cmd, shlex.quote(tee))
 
-    cmd = prelude(var, run_dir) + "\nmkdir -p %s\n" % shlex.quote(outdir)
+    script = prelude(var, run_dir) + "\nmkdir -p %s\n" % shlex.quote(outdir)
     if pre:
-        cmd += pre + "\n"
+        script += pre + "\n"
     if jsc_env:
-        cmd += "export " + " ".join(jsc_env) + "\n"
+        script += "export " + " ".join(jsc_env) + "\n"
     if wrap:
-        cmd += wrap + " "
-    cmd += target_cmd
+        script += wrap + " "
+    script += target_cmd
 
     if dry_run():
-        info_lines_dry(name, tname, preset, subject, bin_path, bin_present, outdir, cmd, post, mode)
+        info_lines_dry(name, tname, preset_name, subject, bin_path, bin_present, outdir, script, post, mode)
         return 0
 
-    info("%s: %s in '%s' (%s)" % (mode, subject, name, preset))
+    info("%s: %s in '%s' (%s)" % (mode, subject, name, preset_name))
     log("  output: %s" % outdir)
 
     # exec_tty inherits this stdio, so reports and a crash's text print here, and xctrace/samply still get ctrl-c.
-    r = driver.exec_tty(name, ["bash", "-lc", "cd %s && %s" % (src, cmd)])
+    r = driver.exec_tty(name, ["bash", "-lc", "cd %s && %s" % (src, script)])
     if not r.ok:
         raise Refused(r.rc)
 
@@ -344,14 +344,14 @@ def main(args, cmd, reg=None):
     return 0
 
 
-def info_lines_dry(name, tname, preset, subject, bin_path, bin_present, outdir, cmd, post, mode):
+def info_lines_dry(name, tname, preset_name, subject, bin_path, bin_present, outdir, script, post, mode):
     info("dry run -- nothing was profiled")
     built = ("built: " if bin_present else "NOT BUILT: ") + bin_path if bin_path else ""
-    log("  workspace: %s (%s), preset: %s, mode: %s" % (name, tname, preset, mode))
+    log("  workspace: %s (%s), preset: %s, mode: %s" % (name, tname, preset_name, mode))
     log("  subject:   %s%s" % (subject, " (%s)" % built if built else ""))
     log("  output:    %s" % outdir)
     log("  in the workspace:")
-    for line in cmd.splitlines():
+    for line in script.splitlines():
         log("    " + line)
     if post:
         log("  and afterwards:")

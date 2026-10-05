@@ -6,6 +6,8 @@
 # wk: readonly status
 # wk: sub status needs=
 # wk: sub session takes=2 needs= opts=--bmc,--mirror dryrun=yes
+# wk: sub session on,gdm,off needs=quiesce-helper
+# wk: sub session status readonly=yes
 #
 # Privileged actions go through the sudoers-allowlisted helper (wk-quiesce-priv);
 # everything else stays here.

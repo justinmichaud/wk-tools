@@ -147,7 +147,7 @@ class Leg:
         self.plan, self.o = plan, o
         self.count, self.subtests, self.cores = o.get("count") or "", o.get("subtests") or "", o.get("cores") or ""
         self.software, self.software_reason, self.browser = bool(o.get("software")), "", o.get("browser") or ""
-        self.cfg = self.runner = self.klass = self.arch = None
+        self.preset = self.runner = self.klass = self.arch = None
         self.payload = self.id = self.task = self.rel = self.out = ""
         self.machine = None   # what holds `out`: each Run's begin names it
         self.notes = ""
@@ -183,11 +183,11 @@ class Run:
                 die("--cores: " + s.cores_refusal())
         name = o.get("preset") or DEFAULT_PRESET
         try:
-            leg.cfg = presets.resolve(name, self.ws_driver.os(), self.ws_driver.kind, self.ws_driver.env)
+            leg.preset = presets.resolve(name, self.ws_driver.os(), self.ws_driver.kind, self.ws_driver.env)
         except LookupError:
             die("unknown preset '%s' (wk build --list)" % name)
         leg.klass, leg.arch = bench_class(plan), self.ws_driver.arch(self.ws)
-        leg.runner = "jsc" if leg.cfg.jsc_only else "browser"
+        leg.runner = "jsc" if leg.preset.jsc_only else "browser"
         if leg.runner == "jsc" and leg.klass == "gpu":
             die("%s is a gpu-class benchmark and %s builds no browser.\n    Either build a browser port (wk build %s wpe-release) and pass\n"
                 "    --preset wpe-release, or run a cpu-class plan -- jetstream3, octane,\n    kraken, sunspider, ares6 -- which the jsc shell can drive directly."
@@ -196,7 +196,7 @@ class Run:
             die("%s is gpu-class and '%s' is an %s workspace, which has no GPU.\n    cpu-class plans (jetstream3, octane, kraken, sunspider) do run in here,\n"
                 "    with either a browser or a JSCOnly preset. For a 32-bit rendering number\n    measure a board:  wk bench run %s %s --system <board>" % (plan, self.ws, leg.arch, self.ws, plan))
         if leg.runner == "browser":
-            leg.browser = leg.browser or s.default_browser(leg.cfg)
+            leg.browser = leg.browser or s.default_browser(leg.preset)
         if leg.software:
             leg.software_reason = "--software"
         elif leg.runner == "browser" and leg.klass == "cpu":
@@ -268,7 +268,7 @@ class Run:
         leg.machine, bench = record.leg_home(self.reg, self.ws, given)
         taskdir = os.path.join(bench, leg.task)
         leg.out = os.path.join(taskdir, "runs", leg.id)
-        steps = ["deploy %s to the %s '%s'" % (leg.cfg.name, self.system.kind, self.ws),
+        steps = ["deploy %s to the %s '%s'" % (leg.preset.name, self.system.kind, self.ws),
                  "run %s (%s, %s iteration(s))" % (leg.plan, leg.runner, leg.count or "default"), "collect into %s" % leg.out]
         if act.dry_run():
             return steps
@@ -277,15 +277,15 @@ class Run:
         if not task_held(self.env, leg.task):
             self.lock.hold("bench-task-" + leg.task, timeout=5)
         count = ["count=" + leg.count] if leg.count else []
-        command = "wk bench run %s %s --preset %s%s" % (self.ws, leg.plan, leg.cfg.name, " --count " + leg.count if leg.count else "")
+        command = "wk bench run %s %s --preset %s%s" % (self.ws, leg.plan, leg.preset.name, " --count " + leg.count if leg.count else "")
         if not given:
             record.task_write(taskdir, ["task=" + leg.task, "requested=" + self.clock.iso(), "subject.kind=workspace",
-                                        "subject.spec=" + self.ws, "devices=%s=%s" % (self.system.kind, leg.cfg.name),
+                                        "subject.spec=" + self.ws, "devices=%s=%s" % (self.system.kind, leg.preset.name),
                                         "plans=" + leg.plan, "rounds=1", "slots=" + self.ws, "restart=%s --task %s" % (command, leg.task)] + count,
                               [command], machine=leg.machine)
         leg.machine.mkdir(leg.out)
         record.write_env(os.path.join(leg.out, "env.json"), [
-            "plan=" + leg.plan, "workspace=" + self.ws, "preset=" + leg.cfg.name, "browser=" + leg.browser, "task=" + leg.task,
+            "plan=" + leg.plan, "workspace=" + self.ws, "preset=" + leg.preset.name, "browser=" + leg.browser, "task=" + leg.task,
             "webkit_sha=" + self.system.sha(), "count=" + leg.count, "local_copy=" + leg.payload,
             "software_reason=" + leg.software_reason, "class=" + leg.klass, "runner=" + leg.runner, "arch=" + leg.arch,
             "bench_host=" + self.system.bench_host, "preflight_notes=" + leg.notes, "cores.set=" + leg.cores]
@@ -335,11 +335,11 @@ class Run:
         return head + env_pad_prelude(self.env) + "cd %s && exec %s%s" % (shlex.quote(cwd), self.prefix(leg), " ".join(argv))
 
     def run_jsc(self, leg):
-        s, cfg = self.system, leg.cfg
-        jsc, var, lib = self.through_pad(cfg.jsc_path(s.src())), cfg.run_var(), cfg.run_dir(s.src())
+        s, preset = self.system, leg.preset
+        jsc, var, lib = self.through_pad(preset.jsc_path(s.src())), preset.run_var(), preset.run_dir(s.src())
         cli = ["--dump-json-results"] + (["--test=" + ",".join(leg.subtests.split())] if leg.subtests else [])
         n = int(leg.count or 1)
-        info("running %s in '%s' (%s, jsc shell, %d iteration(s))" % (leg.plan, self.ws, cfg.name, n))
+        info("running %s in '%s' (%s, jsc shell, %d iteration(s))" % (leg.plan, self.ws, preset.name, n))
         log("  results: %s" % leg.out)
         logs = []
         for i in range(1, n + 1):
@@ -363,7 +363,7 @@ class Run:
         args += ["--subtests"] + leg.subtests.split() if leg.subtests else []
         extra = (["--headless"] if leg.software else []) + (leg.o.get("browser_args") or "").split() + leg.args
         args += ["--"] + extra if extra else []
-        info("running %s in '%s' (%s, %s)" % (leg.plan, self.ws, leg.cfg.name, leg.browser))
+        info("running %s in '%s' (%s, %s)" % (leg.plan, self.ws, leg.preset.name, leg.browser))
         log("  results: %s" % leg.out)
         path = os.path.join(leg.out, "run.log")
         # For as long as the browser is up: a dialog that draws mid-run covers every leg after it.

@@ -1,9 +1,9 @@
 """`wk new` and `wk rm` as flows over a Driver, a Records, a Lock and a Clock.
 
-`new` is two halves: the front refuses on the terminal, detaches the driver
-and follows its record; the driver does everything that changes anything,
+`new` is two halves: the front refuses on the terminal, starts the detached run
+and follows its record; the detached run does everything that changes anything,
 under the workspace lock, stepping its record as it goes. Under --dry-run the
-front runs the driver inline against the recorder, so nothing is made or
+front runs it inline against the recorder, so nothing is made or
 waited for and the plan cannot differ from the run.
 """
 
@@ -78,7 +78,7 @@ def remove_task_records(records, name):
 
 
 def creation_state(driver, records, name):
-    """`Driver.state`, except that a present workspace whose creation driver failed or died without a verdict is still
+    """`Driver.state`, except that a present workspace whose detached run failed or died without a verdict is still
     creating: it was never announced ready, so nothing in it is worth keeping and "already exists" is not the answer."""
     state = driver.state(name)
     if state != "present":
@@ -91,7 +91,7 @@ def creation_state(driver, records, name):
 
 
 def new_front(reg, records, name, opts):
-    """Refuse, detach the driver, follow it, then the --pr / hints / --zed tail. 0, or Refused."""
+    """Refuse, start the detached run, follow it, then the --pr / hints / --zed tail. 0, or Refused."""
     here, root, env = reg.machine, reg.root, reg.env
     require_name(name)
     if opts.get("sysroot"):
@@ -104,6 +104,11 @@ def new_front(reg, records, name, opts):
     if pr is not None and not pr:
         die("--pr needs a spec: <user>:<branch>, <n>, or wpe:<n>")
     arch = presets.arch_canon(opts.get("arch") or "native")
+    if pr:
+        if opts.get("no_wait"):
+            die("--pr needs the workspace to be ready, and --no-wait returns before it is.\n"
+                "    Drop --no-wait, or check it out afterwards:  wk pr %s %s" % (name, pr))
+        parse_spec(pr)
     tname = opts.get("place") or reg.default()
     try:
         driver = reg.load(tname)
@@ -119,11 +124,6 @@ def new_front(reg, records, name, opts):
             "    32-bit ARM needs a host that can execute it: this Neoverse-N1 runs AArch32\n"
             "    at EL0, and Apple Silicon does not, which is why it lives on the Linux\n"
             "    workstation permanently." % (arch, tname))
-    if pr:
-        if opts.get("no_wait"):
-            die("--pr needs the workspace to be ready, and --no-wait returns before it is.\n"
-                "    Drop --no-wait, or check it out afterwards:  wk pr %s %s" % (name, pr))
-        parse_spec(pr)
     if driver.kind == "local":
         driver.create(name)
     driver.store_init()
@@ -143,7 +143,7 @@ def new_front(reg, records, name, opts):
     base = opts.get("base") or ""
     if act.dry_run():
         from wk.lock import Lock
-        new_driver(driver, recs, Lock(driver.store, here, recs.clock), recs.clock, name, base, arch)
+        new_detached_run(driver, recs, Lock(driver.store, here, recs.clock), recs.clock, name, base, arch)
         return 0
     since = recs.clock.stamp()
     here.mkdir(os.path.dirname(log_path))
@@ -154,8 +154,7 @@ def new_front(reg, records, name, opts):
         info("creating '%s' on %s, detached as pid %d -- this end can go away" % (name, tname, pid))
         log("  follow:  tail -f %s" % log_path)
         log("  state:   wk status %s" % name)
-        if opts.get("zed"):
-            log("  open it:  wk enter %s --zed   (waits for it to be ready)" % name)
+        zed_after(here, root, name, opts)
         return 0
     timeout = job._seconds(env, "WK_NEW_TIMEOUT", NEW_TIMEOUT)
     st = recs.wait("new", name, log_path, timeout=timeout, pid=pid, floor=since, stream=sys.stderr)
@@ -175,9 +174,17 @@ def new_front(reg, records, name, opts):
     if pr:
         pr_checkout(driver, here, name, pr)
     new_hints(driver, name, arch)
-    if opts.get("zed"):
-        open_zed(here, root, name)
+    zed_after(here, root, name, opts)
     return 0
+
+
+def zed_after(here, root, name, opts):
+    if not opts.get("zed"):
+        return
+    if opts.get("no_wait"):
+        log("  open it:  wk enter %s --zed   (waits for it to be ready)" % name)
+    else:
+        open_zed(here, root, name)
 
 
 def open_zed(here, root, name):
@@ -202,8 +209,7 @@ def new_handed_over(driver, here, root, name, arch, opts):
     r = here.act_run(driver.hand_over("new", args, tty=os.isatty(0) and os.isatty(1)), tty=True)
     if not r.ok:
         die("%s did not create '%s'; what its own wk said is above." % (driver.name, name), status=r.rc)
-    if opts.get("zed"):
-        open_zed(here, root, name)
+    zed_after(here, root, name, opts)
     return 0
 
 
@@ -243,7 +249,7 @@ def new_kill(driver, here, records, env, name, opts):
     return 0
 
 
-def new_driver(driver, records, lock, clock, name, base, arch):
+def new_detached_run(driver, records, lock, clock, name, base, arch):
     """PLAN's steps under the workspace lock: a refusal ends the record `refused`, any other failure 1."""
     here = records.machine
     if driver.kind == "container":
@@ -505,7 +511,7 @@ def confirm_destroy(count, lines):
 def unsaved_results(reg, found):
     """(workspace, task, why) for each bench task a removal would take that no export readable here holds."""
     from wk.bench import record as bench_record
-    if reg.in_remote_host() or in_podman_machine() and record.host_self(reg.env):
+    if reg.env.get("WK_EXPORTS_READ") or in_podman_machine() and record.host_self(reg.env):
         return []   # the workstation that handed `wk rm` over (refuse_unsaved_before_forward) read its own zips first
     out = []
     for n, driver, what in found:

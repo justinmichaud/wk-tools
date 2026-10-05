@@ -341,13 +341,13 @@ class TestTheCommand(WkTest):
             self.assertEqual(f["mde_pct"], "0.0000")
             self.assertEqual(f["p"], "")
 
-    def test_the_target_is_what_moves_the_verdict(self):
+    def test_the_goal_is_what_moves_the_verdict(self):
         with scratch_dir() as tmp:
             a = write_runs(tmp, "a", [99.0, 101.0, 99.0, 101.0])
             b = write_runs(tmp, "b", [99.0, 101.0, 99.0, 101.0])
             args = ["--a", ",".join(str(p) for p in a), "--b", ",".join(str(p) for p in b)]
-            strict = fields(wkd("ab-precision", "--target", "0.3", *args).stdout)
-            loose = fields(wkd("ab-precision", "--target", "10", *args).stdout)
+            strict = fields(wkd("ab-precision", "--goal", "0.3", *args).stdout)
+            loose = fields(wkd("ab-precision", "--goal", "10", *args).stdout)
             self.assertEqual(strict["met"], "no")
             self.assertEqual(loose["met"], "yes")
             self.assertEqual(strict["mde_pct"], loose["mde_pct"])
@@ -357,7 +357,7 @@ class TestTheCommand(WkTest):
             spread = 0.1257
             a = write_runs(tmp, "a", [58.9816 + spread] * 8 + [58.9816 - spread] * 8)
             b = write_runs(tmp, "b", [58.9853 + spread] * 8 + [58.9853 - spread] * 8)
-            cp = wkd("ab-precision", "--target", "0.3",
+            cp = wkd("ab-precision", "--goal", "0.3",
                      "--a", ",".join(str(p) for p in a),
                      "--b", ",".join(str(p) for p in b))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -376,7 +376,7 @@ class TestTheCommand(WkTest):
                                      {k: [v[0] * scale] for k, v in JETSTREAM3_CHILDREN.items()})
             a = write_docs(tmp, "a", [doc(1.0 + i * 1e-4) for i in range(-3, 3)])
             b = write_docs(tmp, "b", [doc(1.0 + i * 1e-4) for i in range(-3, 3)])
-            cp = wkd("ab-precision", "--target", "0.3",
+            cp = wkd("ab-precision", "--goal", "0.3",
                      "--a", ",".join(str(p) for p in a),
                      "--b", ",".join(str(p) for p in b))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -400,14 +400,14 @@ class TestThroughTheCLI(WkTest):
             self.assertEqual(f["n_b"], "4")
             self.assertAlmostEqual(float(f["delta_pct"]), 0.2, places=2)
 
-    def test_detect_is_the_target_the_verdict_is_read_against(self):
+    def test_detect_is_the_goal_the_verdict_is_read_against(self):
         with scratch_dir() as tmp:
             a = write_runs(tmp, "a", [99.0, 101.0, 99.0, 101.0])
             b = write_runs(tmp, "b", [99.0, 101.0, 99.0, 101.0])
             cp = run("bench", "precision", ",".join(str(p) for p in a), ",".join(str(p) for p in b),
                      "--detect", "10")
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual(fields(cp.stdout)["target_pct"], "10.0000")
+            self.assertEqual(fields(cp.stdout)["goal_pct"], "10.0000")
             self.assertEqual(fields(cp.stdout)["met"], "yes")
 
     def test_it_refuses_anything_but_two_sides(self):

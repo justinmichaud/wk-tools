@@ -20,7 +20,7 @@ from tests.killpoints import converges
 from tests.support import REPO, WkTest, as_dispatched, bash, func_body, requires_machine, run
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, fleet, quiet  # noqa: E402
+from wk import act, decl, fleet, quiet  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import TIMED_OUT, Fake, Result  # noqa: E402
@@ -470,6 +470,15 @@ class TestTheCommand(QuiesceTest):
                 cp = run("quiesce", *bad)
                 self.assertEqual(2, cp.returncode, cp.stdout)
                 self.assertIn("usage: wk quiesce", cp.stdout)
+
+
+    def test_a_session_change_needs_the_helper_and_its_status_only_reads(self):
+        d = decl.Decl(REPO / "cmd" / "quiesce")
+        for verb in ("on", "gdm", "off"):
+            self.assertEqual("quiesce-helper", d.needs_for(["session", verb]), verb)
+            self.assertFalse(d.is_readonly(["session", verb]), verb)
+        self.assertEqual("", d.needs_for(["session", "status"]))
+        self.assertTrue(d.is_readonly(["session", "status"]))
 
 
 class APrivilegedVerbNeverBlocksOnAStoppedDaemon(unittest.TestCase):

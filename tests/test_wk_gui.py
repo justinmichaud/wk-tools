@@ -133,14 +133,14 @@ class TestFullscreenFlagByPort(unittest.TestCase):
                  ("mac-release", "macos", "vm", ""))
         for name, os_name, kind, want in cases:
             with self.subTest(config=name):
-                cfg = presets.resolve(name, os_name, kind, {})
-                self.assertEqual(GUI.fullscreen_flag(cfg), want)
+                preset = presets.resolve(name, os_name, kind, {})
+                self.assertEqual(GUI.fullscreen_flag(preset), want)
 
     def test_a_config_with_no_browser_is_refused(self):
-        cfg = presets.resolve("ios-sim-release", "macos", "vm", {})
+        preset = presets.resolve("ios-sim-release", "macos", "vm", {})
         with self.assertRaises(Refused):
             with contextlib.redirect_stderr(io.StringIO()):
-                GUI.fullscreen_flag(cfg)
+                GUI.fullscreen_flag(preset)
 
 
 if __name__ == "__main__":

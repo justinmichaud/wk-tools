@@ -17,11 +17,11 @@ class Unless:
         return self.bad.search(self.ok.sub(lambda m: " " * len(m.group(0)), line))
 
 
-TARGET_OK = (r"(?i)\b(?:build|cmake|make|ninja|cross(?:-build)?|systemd|precision)[- ]targets?\b"
+TARGET_OK = (r"(?i)\b(?:build|cmake|make|ninja|cross(?:-build)?|systemd)[- ]targets?\b"
              r"|\btargets? (?:triple|tuple|device)\b|\btargets\.conf\b|\bcross-target\b|\bport-target\b|\btarget-finalize\b"
              r"|\b(?:multi-user|default|local-fs|network(?:-online|-pre)?|sysinit|basic|timers|swap|sleep|suspend|hibernate|hybrid-sleep)\.target\b"
              r"|WantedBy=\S*|settings set target\.\S*|\btarget\.process\b|invalid target|\b(?:assign|n)\.targets\b"
-             r"|\bhread\(target=|(?:^|[(,])\s*target=\w+(?:\.\w+)+|\b(?:pip install|rustc|cargo|findmnt|yocto_ws\.py)\b.*--target\b")
+             r"|\bThread\(target=|(?:^|[(,])\s*target=\w+(?:\.\w+)+|\b(?:pip install|rustc|cargo|findmnt|yocto_ws\.py)\b.*--target\b")
 # Where "target" is another domain's own word for something that is neither a place nor a driver.
 TARGET_DOMAINS = {
     "a symlink's target": ("wk", "bin/wk", "lib/wk/machine.py", "lib/wk/lock.py", "tests/test_wk_machine.py", "tests/test_wk_lock.py"),
@@ -29,9 +29,6 @@ TARGET_DOMAINS = {
     "lldb's target": ("container/lldb/",),
     "a mount point or disk": ("lib/wk/mac.py", "lib/wk/sysimage/macvolume.py", "host/macos/machine.sh", "host/macos/vmtools.sh",
                               "tests/test_machine_mounts.py", "admin/wk-card-priv"),
-    "the precision an A/B is asked to resolve": ("lib/wkdata.py", "lib/wk/bench/report.py", "lib/wk/bench/autorun.py",
-                                                 "lib/wk/bench/board_ab.py", "tests/test_ab_precision.py",
-                                                 "tests/test_bench_report.py", "tests/test_mac_autorun.py"),
     "the cross target an image is built for": ("lib/wk/sysimage/yocto_ws.py", "lib/wk/sysimage/buildroot_ws.py", "image/",
                                                "container/yocto/", "container/buildroot/", "tests/test_yocto_ws.py",
                                                "tests/test_yocto_stage.py", "tests/test_board_local_conf.py",
@@ -56,7 +53,7 @@ RETIRED = {
         re.compile(r"(?i)\bbench devices?\b|(?<![\w\"'=-])bench-devices?(?![\w\"'-])"),
     "say 'A/B task'": Unless(r"(?i)\bexperiments?\b", r"Apple's experiment|\bexperiments(?==|\s+com\.apple)"),
 }
-EXEMPT = ("docs/", "claude/skills/")
+EXEMPT = ("docs/", "claude/skills/", ".claude/")   # .claude/ is the Claude Code harness's own local settings
 README_MARKER = "*** Claude edit below here ***"
 
 
@@ -95,11 +92,12 @@ class TestVocabulary(unittest.TestCase):
             ("part's name", ["store." + "record_dir()", "s." + "agent_rw_dir()", "Store." + "broker_socket"],
              ["store.records_dir()", "store.keyring_agent_rw_dir()", "runtime_socket", "GUEST_BROKER_SOCKET"]),
             ("'place'", ["wk new foo --%s vm" % tgt, "the workspace's %s" % tgt, "WK_%s=vm wk ls" % tgt.upper(),
-                         "WK_%s_KIND" % tgt.upper(), "unknown %s 'x'" % tgt, "every %s here" % tgt, "%ss: container, vm" % tgt.title()],
+                         "WK_%s_KIND" % tgt.upper(), "unknown %s 'x'" % tgt, "every %s here" % tgt, "%ss: container, vm" % tgt.title(),
+                         "the precision %s was met" % tgt],
              ["wk new foo --on vm", "the place's driver", "a CMake %s" % tgt, "the build %s tuple" % tgt, "--cross-%s=rpi4" % tgt,
               "rustc --%s=aarch64-unknown-linux-gnu" % tgt, "WantedBy=multi-user.%s" % tgt, "Tools/yocto/%ss.conf" % tgt,
               "settings set %s.process.follow-fork-mode child" % tgt, "threading.Thread(%s=self.run)" % tgt, "retargeted",
-              "YOC_PORT_%s_FROM" % tgt.upper(), "the precision %s was met" % tgt]),
+              "YOC_PORT_%s_FROM" % tgt.upper()]),
             ("'build preset'", ["wk run ws --%s gtk-release" % cfg, "a build " + cfg, "Build %ss" % cfg, "WK_%s=jsc-release" % cfg.upper(),
                                 "%s=--%s" % (cfg, cfg), "%s=arg" % cfg],
              ["wk run ws --preset gtk-release", "rpi-eeprom-%s --%s boot.conf" % (cfg, cfg), "git %s --get user.name" % cfg,

@@ -25,8 +25,8 @@ READY_MARKER = ".wk-ready"
 FIRSTRUN_MARKER = ".wk-firstrun-complete"   # TODO: drop once no pre-marker workspace is left
 STATES_NOT_THERE = ("absent", "creating", "broken", "unreachable")
 READY_TIMEOUT = 300
-WK_FLAGS = ("WK_DEBUG", "WK_QUIET", "WK_YES", "WK_FORCE", "WK_DRY_RUN", "WK_NO_DELEGATE")
-WK_CARRIED = ("WK_ROW_LABEL", "WK_ZED_PUBKEY", "WK_SDK_IMAGE")
+WK_FLAGS = ("WK_DEBUG", "WK_QUIET", "WK_YES", "WK_FORCE", "WK_DRY_RUN", "WK_NO_DELEGATE", "WK_EXPORTS_READ")
+WK_CARRIED = ("WK_ROW_LABEL", "WK_ZED_PUBKEY", "WK_SDK_IMAGE", "WK_NEW_TIMEOUT", "WK_READY_TIMEOUT")
 GUEST_SHARES = "/Volumes/My Shared Files"
 MIRROR_TAG = "wk-mirror"
 GUEST_MIRROR_MOUNT = "/Volumes/" + MIRROR_TAG
@@ -151,9 +151,9 @@ def conf_key(k):
     if k in CONF_ENV:
         return CONF_ENV[k]
     for stem in PER_PRESET:
-        cfg = k[len(stem) + 1:]
-        if k.startswith(stem + "_") and cfg.replace("_", "-") in presets.PRESETS:
-            return "%s_%s" % (CONF_ENV[stem], cfg)
+        preset_name = k[len(stem) + 1:]
+        if k.startswith(stem + "_") and preset_name.replace("_", "-") in presets.PRESETS:
+            return "%s_%s" % (CONF_ENV[stem], preset_name)
     return None
 
 
@@ -375,10 +375,10 @@ class Registry:
         """The last build's preset, from its task record; else the place's own platform default."""
         driver = self.load(self.ws_place(name))
         rec = record.Records(driver.store.records_dir(), env=driver.env).find("build", name)
-        cfg = rec.field("preset") if rec else ""
-        if cfg:
-            act.info("preset: %s -- what '%s' was last built with" % (cfg, name))
-            return cfg
+        preset_name = rec.field("preset") if rec else ""
+        if preset_name:
+            act.info("preset: %s -- what '%s' was last built with" % (preset_name, name))
+            return preset_name
         return "mac-release" if driver.os() == "macos" else "jsc-release"
 
 
@@ -579,7 +579,7 @@ class Driver:
         def ready():
             st = self.state(ws)
             now = self.creating_now(ws) if st in ("present", "creating") else False
-            if st == "present" and now:   # the marker is down at `init`, and the driver holds the lock through the stages after it
+            if st == "present" and now:   # the marker is down at `init`, and the detached run holds the lock through the stages after it
                 st = "creating"
             seen["st"] = st
             if st == "present":
@@ -611,7 +611,7 @@ class Driver:
 
         if not clock.wait_until(ready, timeout, 2):
             act.die("'%s' was still %s after %ds.\n    Creation is detached, so it may still be going: 'wk status %s' says\n"
-                    "    whether the driver is alive, and %s says what it is doing." % (ws, seen["st"], timeout, ws, self.create_log(ws)))
+                    "    whether the detached run is alive, and %s says what it is doing." % (ws, seen["st"], timeout, ws, self.create_log(ws)))
         if seen["said"]:
             act.info("'%s' is ready" % ws)
         self.converge(ws, clock)
@@ -1989,7 +1989,7 @@ class Remote(Driver):
 
     def tools_level_or_refuse(self, cmd, readonly):
         theirs = kv.kv(self.wk("doctor", "--probe-tools", quiet=True)[1]).get("sha", "")
-        mine = self.here.run(["git", "-C", self.root, "rev-parse", "HEAD"]).out.strip()
+        mine = tools.head(self.root, self.here)
         if tools.sha_matches(theirs, mine):
             return
         why = ("wk-tools on %s is at %s, and this workstation's at %s.\n    Bring it level:  wk sync --tools %s"
@@ -2082,7 +2082,7 @@ class Remote(Driver):
             return rc == 0
         ok = self.sync_tools("")
         if ok:
-            sys.stderr.write("  %-24s pushed %s\n" % (self.name, self.here.run(["git", "-C", self.root, "rev-parse", "HEAD"]).out.strip()))
+            sys.stderr.write("  %-24s pushed %s\n" % (self.name, tools.head(self.root, self.here)))
         if self.reference():
             act.info("workspaces here clone from %s, which this machine's admins keep up to date" % self.reference())
             act.log("  nothing of ours to fetch: no mirror is kept on %s" % host)
@@ -2148,7 +2148,12 @@ class Remote(Driver):
         host = self.label()
         if not self.is_local:
             self._probe_or_die()
-            r = self.here.act_run(self.hand_over("rm", [ws], tty=False, env=dict(os.environ, WK_YES="1")))
+            if self.info(ws) == "absent":
+                self.here.remove(self.store.ws_dir(ws))
+                act.info("'%s' is already gone from %s; its record here is removed" % (ws, host))
+                return
+            exports_read_here = {} if self.peer else {"WK_EXPORTS_READ": "1"}
+            r = self.here.act_run(self.hand_over("rm", [ws], tty=False, env=dict(os.environ, WK_YES="1", **exports_read_here)))
             show(r)
             if not r.ok:
                 act.die("%s did not destroy '%s'; what its own wk said is above.\n    Nothing here was changed -- re-run 'wk rm %s' once that is settled." % (host, ws, ws))

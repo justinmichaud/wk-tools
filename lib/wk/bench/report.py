@@ -878,8 +878,8 @@ def _headline_scores(dirs):
     return scores, empty
 
 
-def precision_lines(a_dirs, b_dirs, target, warn=None):
-    """The stopping rule's verdict as key=value lines: how fine a difference these rounds resolve, against `target`
+def precision_lines(a_dirs, b_dirs, goal, warn=None):
+    """The stopping rule's verdict as key=value lines: how fine a difference these rounds resolve, against `goal`
     percent. ValueError names a side with no scores."""
     a, a_empty = _headline_scores(a_dirs)
     b, b_empty = _headline_scores(b_dirs)
@@ -893,32 +893,32 @@ def precision_lines(a_dirs, b_dirs, target, warn=None):
     delta = (mean_b - mean_a) / mean_a * 100.0 if mean_a else None
     p = welch_p(a, b)
     # The half-width scales as 1/sqrt(n), so the rounds still owed at this spread is what the operator wants to know before committing the machine.
-    need = "%d" % math.ceil(len(a) * (mde / target) ** 2) if mde is not None and target and mde > target else ""
+    need = "%d" % math.ceil(len(a) * (mde / goal) ** 2) if mde is not None and goal and mde > goal else ""
     lines = ["n_a=%d" % len(a), "n_b=%d" % len(b), "mean_a=%.4f" % mean_a, "mean_b=%.4f" % mean_b,
              "delta_pct=%s" % ("%.4f" % delta if delta is not None else ""),
              "mde_pct=%s" % ("%.4f" % mde if mde is not None else ""),
-             "target_pct=%.4f" % target,
-             "met=%s" % ("yes" if mde is not None and mde <= target else "no"),
+             "goal_pct=%.4f" % goal,
+             "met=%s" % ("yes" if mde is not None and mde <= goal else "no"),
              "rounds_needed=%s" % need,
              "p=%s" % ("%.6f" % p if p is not None else "")]
-    # Each arm's noise floor as a share of its own mean, and the delta read against what the rounds resolve: `met` answers --target, these answer the delta just measured.
+    # Each arm's noise floor as a share of its own mean, and the delta read against what the rounds resolve: `met` answers --goal, these answer the delta just measured.
     for side, vals, mean in (("a", a, mean_a), ("b", b, mean_b)):
         lines.append("sd_%s_pct=%s" % (side, "%.4f" % (_sd(vals) / mean * 100.0) if mean else ""))
     lines.append("delta_vs_mde=%s" % ("%.1f" % (mde / abs(delta)) if mde and delta else ""))
     return lines
 
 
-def resolved(a_dirs, b_dirs, target):
-    """--detect's stopping rule, asked between rounds on every system: these rounds resolve `target` percent."""
+def resolved(a_dirs, b_dirs, goal):
+    """--detect's stopping rule, asked between rounds on every system: these rounds resolve `goal` percent."""
     try:
-        return "met=yes" in precision_lines(a_dirs, b_dirs, target, warn=lambda m: None)
+        return "met=yes" in precision_lines(a_dirs, b_dirs, goal, warn=lambda m: None)
     except (ValueError, SystemExit):
         return False
 
 
-def precision(a_spec, b_spec, target, out=None):
+def precision(a_spec, b_spec, goal, out=None):
     try:
-        lines = precision_lines(split_paths(a_spec), split_paths(b_spec), target)
+        lines = precision_lines(split_paths(a_spec), split_paths(b_spec), goal)
     except ValueError as e:
         sys.exit("ab-precision: %s" % e)
     (out or sys.stdout).write("\n".join(lines) + "\n")

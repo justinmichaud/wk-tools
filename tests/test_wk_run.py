@@ -41,9 +41,9 @@ class TestFindsBinaryOnEveryPort(unittest.TestCase):
                                               ("wpe-release", "linux", "container", "LD_LIBRARY_PATH", "/bin/jsc"),
                                               ("mac-release", "macos", "vm", "DYLD_FRAMEWORK_PATH", "/jsc")):
             with self.subTest(config=name):
-                cfg = presets.resolve(name, os_name, kind, {})
-                self.assertEqual(cfg.run_var(), var)
-                self.assertTrue(cfg.jsc_path("/src/WebKit").endswith(jsc))
+                preset = presets.resolve(name, os_name, kind, {})
+                self.assertEqual(preset.run_var(), var)
+                self.assertTrue(preset.jsc_path("/src/WebKit").endswith(jsc))
                 cp = subprocess.run(["sh", "-c", RUN.prelude(var, "/new") + '; printf %s "$' + var + '"'],
                                     env={var: "/old"}, capture_output=True, text=True)
                 self.assertEqual(cp.stdout, "/new:/old")
@@ -59,14 +59,14 @@ class TestFindsBinaryOnEveryPort(unittest.TestCase):
                 driver.exec_argv.return_value = (["true"], None)
                 reg = mock.Mock()
                 reg.load.return_value = driver
-                cfg = presets.resolve(name, os_name, kind, {})
+                preset = presets.resolve(name, os_name, kind, {})
                 with mock.patch.object(RUN.places, "Registry", return_value=reg), \
                         mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": name}):
                     RUN.main(["--", "x.js"])
                 call_args = driver.exec_argv.call_args[0]
                 cmd = call_args[1][2]
-                self.assertIn('export %s="%s' % (cfg.run_var(), cfg.run_dir("/src/WebKit")), cmd)
-                self.assertIn(cfg.jsc_path("/src/WebKit"), cmd)
+                self.assertIn('export %s="%s' % (preset.run_var(), preset.run_dir("/src/WebKit")), cmd)
+                self.assertIn(preset.jsc_path("/src/WebKit"), cmd)
 
 
 class TestLldbGetsAPty(unittest.TestCase):

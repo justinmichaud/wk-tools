@@ -233,7 +233,7 @@ class TestCancellingARealBuild(WkTest):
         self.assertIn("--kill", cp.stdout, "the detach names how to stop it")
 
         second = None
-        for _ in range(30):   # the detached driver takes the lock as it starts
+        for _ in range(30):   # the detached run takes the lock as it starts
             second = run("build", self.name, "jsc-debug", timeout=300)
             if second.returncode != 0 and "already building" in second.stdout:
                 break

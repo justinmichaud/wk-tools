@@ -215,7 +215,7 @@ class Gc:
                 continue
             what = "%s: a %s record of '%s' kept here, not on the box" % (t.name, task.field("kind"), task.field("name"))
             pid, paths = task.field("pid"), [str(task.path)] + ([task.field("log")] if task.field("log") else [])
-            why = "kept -- its driver, pid %s, still runs here: 'kill %s' ends it" % (pid, pid) if task.alive(None) else ""
+            why = "kept -- its detached run, pid %s, still runs here: 'kill %s' ends it" % (pid, pid) if task.alive(None) else ""
             rows.append(rb.row("box-record", what, rb.du_kb(self.here, str(task.path)), "--purge-rubble",
                                rb.remover(self.here, *paths), why))
         return rows

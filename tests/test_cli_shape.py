@@ -137,7 +137,7 @@ class TestTheGlobalFlagsBelongToTheDispatcher(WkTest):
             if d["readonly"] != "-" or d["dryrun"] in ("yes", "exempt"):
                 continue
             decl = D.Decl(REPO / "cmd" / cmd)
-            verb = [v for v in decl.verbs.split(",") if not decl.honours_dryrun([v]) and not decl.is_readonly(v)][:1] \
+            verb = [v for v in decl.verbs.split(",") if not decl.honours_dryrun([v]) and not decl.is_readonly([v])][:1] \
                 if decl.verbs else []
             if decl.verbs and not verb:
                 continue
@@ -159,7 +159,7 @@ class TestTheGlobalFlagsBelongToTheDispatcher(WkTest):
             if d.nodryrun:
                 continue
             for v in (d.verbs.split(",") if d.verbs else [""]):
-                if not d.is_readonly(v) and not d.honours_dryrun([v] if v else []):
+                if not d.is_readonly([v] if v else []) and not d.honours_dryrun([v] if v else []):
                     missing.append(("%s %s" % (d.name, v)).strip())
         self.assertEqual(missing, [])
 

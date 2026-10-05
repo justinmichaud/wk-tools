@@ -206,7 +206,7 @@ class World:
 
     def autorun(self):
         return autorun.Autorun(self.fake, self.clock, self.env, tools=TOOLS, out=self.out,
-                               thread=lambda target, daemon: type("T", (), {"start": lambda s: self.armed.append(target)})())
+                               background=self.armed.append)
 
     def run(self):
         with contextlib.redirect_stderr(io.StringIO()) as self.err:
@@ -262,7 +262,7 @@ class TestTheJobRuns(unittest.TestCase):
         w.run()
         ask = [a for a in w.calls() if "ab-precision" in a][0]
         self.assertEqual("%s/results/r003,%s/results/r006" % (ROOT, ROOT), ask[ask.index("--a") + 1])
-        self.assertEqual("0.3", ask[ask.index("--target") + 1])
+        self.assertEqual("0.3", ask[ask.index("--goal") + 1])
 
     def test_detect_zero_runs_exactly_the_rounds_asked_for(self):
         for zero in (0, 0.0, "0"):
@@ -272,7 +272,7 @@ class TestTheJobRuns(unittest.TestCase):
             self.assertEqual("rounds-done", w.state()["outcome"])
             self.assertFalse([a for a in w.calls() if "ab-precision" in a])
 
-    def test_a_target_it_cannot_reach_stops_at_the_ceiling(self):
+    def test_a_goal_it_cannot_reach_stops_at_the_ceiling(self):
         w = World()
         w.fake.answer(["/usr/bin/python3", TOOLS + "/lib/wkdata.py"], out="met=no\n")
         w.run()

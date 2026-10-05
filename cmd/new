@@ -6,10 +6,10 @@
 #
 # Other places take minutes (a guest clone, a git clone over ssh), so creation is
 # *detached*: a dropped connection does not take it with it, and re-running `wk
-# new` resumes it. This end refuses what should be refused, starts the driver and
-# follows its log; the driver (`--_detached`) does everything that changes
+# new` resumes it. This end refuses what should be refused, starts the detached
+# run and follows its log; the detached run (`--_detached`) does everything that changes
 # anything, under the workspace lock, stepping its task record as it goes.
-# --dry-run runs the driver here instead and prints what it would change.
+# --dry-run runs it here instead and prints what it would change.
 #
 #   --on <place|machine> container, vm, or a machine named in
 #                        machines/<name>.conf (default: container); a build
@@ -26,9 +26,9 @@
 #   --pr <spec>          check it out onto a PR head once ready -- the same
 #                        spec `wk pr` takes: <user>:<branch>, <n>, or wpe:<n>
 #
-#   WK_NEW_TIMEOUT=<s>   how long this end waits for the driver before giving
-#                        up (default 3600); the driver itself is unaffected
-#   WK_READY_TIMEOUT=<s> how long the driver waits for the workspace to finish
+#   WK_NEW_TIMEOUT=<s>   how long this end waits for the detached run before
+#                        giving up (default 3600); the run itself is unaffected
+#   WK_READY_TIMEOUT=<s> how long the detached run waits for the workspace to finish
 #                        initialising (default 300)
 #   WK_KILL_WAIT=<s>     how long --kill waits after TERM before KILL (default 15)
 #
@@ -64,7 +64,7 @@ def detached(reg, records, name, opts):
     except LookupError as e:
         die(str(e))
     recs = record.of_driver(driver, records.clock, reg.machine)
-    return workspace.new_driver(driver, recs, Lock(driver.store, reg.machine, recs.clock), recs.clock,
+    return workspace.new_detached_run(driver, recs, Lock(driver.store, reg.machine, recs.clock), recs.clock,
                                 name, opts.get("base") or "", opts.get("arch") or "native")
 
 

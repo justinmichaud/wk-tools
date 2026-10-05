@@ -43,24 +43,33 @@ NOT_A_COMMIT = ("    A machine is given a commit and nothing else -- that is wha
                 "    'wk status' compare the copy over there with this one by sha.\n")
 
 
+def head(root, here):
+    r = here.run(["git", "-C", root, "rev-parse", "HEAD"])
+    return r.out.strip() if r.ok else ""
+
+
+def clean(root, here):
+    """No tracked change: an ignored or untracked file is none."""
+    r = here.run(["git", "-C", root, "status", "--porcelain", "--untracked-files=no"])
+    return r.ok and not r.out.strip()
+
+
 def committed(root, here):
-    """Why this checkout has no commit to give a machine, or "": tracked changes only, so an ignored or untracked file is none."""
+    """Why this checkout has no commit to give a machine, or ""."""
     if not here.run(["git", "-C", root, "rev-parse", "--git-dir"]).ok:
         return ("%s is not a git checkout, so there is no commit to put on a machine.\n%s"
                 "    Run wk from a clone:  git clone https://github.com/justinmichaud/wk-tools" % (root, NOT_A_COMMIT))
-    r = here.run(["git", "-C", root, "status", "--porcelain", "--untracked-files=no"])
-    if r.ok and not r.out.strip():
+    if clean(root, here):
         return ""
     return ("wk-tools here has uncommitted changes, so there is no commit to put on a machine.\n%s"
             "    Commit them and re-run:\n        git -C %s status --short\n        git -C %s commit -a" % (NOT_A_COMMIT, root, root))
 
 
 def identity(root, here):
-    head = here.run(["git", "-C", root, "rev-parse", "HEAD"])
-    if not head.ok:
+    sha = head(root, here)
+    if not sha:
         return {"sha": "-", "dirty": "unknown"}
-    status = here.run(["git", "-C", root, "status", "--porcelain", "--untracked-files=no"])
-    return {"sha": head.out.strip(), "dirty": "no" if status.ok and not status.out.strip() else "yes"}
+    return {"sha": sha, "dirty": "no" if clean(root, here) else "yes"}
 
 
 def identity_text(ident):
@@ -95,9 +104,8 @@ def push(root, here, far, dest, env):
     if why:
         act.warn(why)
         return False
-    r = here.run(["git", "-C", root, "rev-parse", "HEAD"])
-    sha = r.out.strip()
-    if not r.ok or not sha:
+    sha = head(root, here)
+    if not sha:
         act.warn("cannot read HEAD in %s" % root)
         return False
     fd, bundle = tempfile.mkstemp(prefix="wk-tools-push.")

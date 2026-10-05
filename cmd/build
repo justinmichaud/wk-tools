@@ -17,7 +17,7 @@
 #   --no-defaults          skip the build machine's build_args conf default
 #   --detach                hand the build to the machine that runs it, and return
 #                           once it has started; a foreground build is cancelled if
-#                           its terminal or its ssh goes away (the driver takes the HUP)
+#                           its terminal or its ssh goes away (the detached run takes the HUP)
 #   --kill                  stop the build running in this workspace, wherever it
 #                           runs, and record it as cancelled; takes no preset
 #   --babysit               run under a Claude fix loop until it builds or gives up

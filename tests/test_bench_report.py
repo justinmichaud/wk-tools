@@ -442,7 +442,7 @@ class TestSpreadWithinAndBetweenRuns(WkTest):
 
 class TestPrecisionCarriesTheNoiseFloor(WkTest):
 
-    def _precision(self, a, b, target="0.3"):
+    def _precision(self, a, b, goal="0.3"):
         with scratch_dir() as tmp:
             dirs = {}
             for side, vals in (("a", a), ("b", b)):
@@ -454,8 +454,8 @@ class TestPrecisionCarriesTheNoiseFloor(WkTest):
                         {"Speedometer-3": {"metrics": {"Score": {"current": [[v]]}}}}))
                     paths.append(str(d))
                 dirs[side] = ",".join(paths)
-            cp = self.bash('python3 "$WK_ROOT/lib/wkdata.py" ab-precision --a %s --b %s --target %s'
-                           % (json.dumps(dirs["a"]), json.dumps(dirs["b"]), target))
+            cp = self.bash('python3 "$WK_ROOT/lib/wkdata.py" ab-precision --a %s --b %s --goal %s'
+                           % (json.dumps(dirs["a"]), json.dumps(dirs["b"]), goal))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             return dict(l.split("=", 1) for l in cp.stdout.splitlines() if "=" in l)
 

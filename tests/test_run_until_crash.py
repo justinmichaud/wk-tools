@@ -16,8 +16,8 @@ from wk import presets  # noqa: E402
 def _jsc_layout(src):
     """Where jsc-release puts its binary and its libraries under `src`, from
     lib/wk/presets.py itself -- the same resolve `wk run` calls."""
-    cfg = presets.resolve("jsc-release", "macos" if sys.platform == "darwin" else "linux", "local", {})
-    return Path(cfg.jsc_path(str(src))), Path(cfg.run_dir(str(src)))
+    preset = presets.resolve("jsc-release", "macos" if sys.platform == "darwin" else "linux", "local", {})
+    return Path(preset.jsc_path(str(src))), Path(preset.run_dir(str(src)))
 
 
 def _plant_fake_jsc(ws, script_body):

@@ -340,7 +340,7 @@ class WorkspaceTest(unittest.TestCase):
 
     def detached(self, w=None, name="ws", base="", arch="native", driver=None):
         w = w or self.w
-        return workspace.new_driver(driver or w.driver, w.records, w.lock, w.clock, name, base, arch)
+        return workspace.new_detached_run(driver or w.driver, w.records, w.lock, w.clock, name, base, arch)
 
     def runs(self, w=None, head=None):
         w = w or self.w
@@ -497,7 +497,7 @@ class TestNewFrontDetach(WorkspaceTest):
 
 
 class Creates(World):
-    """A host whose spawned driver makes the workspace at once and records it done."""
+    """A host whose spawned detached run makes the workspace at once and records it done."""
 
     def spawn(self, argv, log):
         pid = super().spawn(argv, log)

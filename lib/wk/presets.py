@@ -105,12 +105,12 @@ def arch_cmake(arch, port):
     return a["cmake"] + (" " + extra if extra else "")
 
 
-def machine_cmake(env, cfg=None):
-    return env.get("WK_REMOTE_CMAKE", "") if cfg is None else machine_var(env, "WK_REMOTE_CMAKE", cfg)
+def machine_cmake(env, preset=None):
+    return env.get("WK_REMOTE_CMAKE", "") if preset is None else machine_var(env, "WK_REMOTE_CMAKE", preset)
 
 
-def build_args(env, cfg=None):
-    return env.get("WK_BUILD_ARGS", "") if cfg is None else machine_var(env, "WK_BUILD_ARGS", cfg)
+def build_args(env, preset=None):
+    return env.get("WK_BUILD_ARGS", "") if preset is None else machine_var(env, "WK_BUILD_ARGS", preset)
 
 
 def disk_gb(env):
@@ -211,19 +211,19 @@ def resolve(name, os_name, kind=None, env=None):
     spec = PRESETS[name]
     if os_name == "macos" and "macos" in spec:
         spec = dict(spec, **spec["macos"])
-    cfg = Preset(name, os_name, kind, spec, env)
-    if cfg.xcode() and os_name != "macos":
+    preset = Preset(name, os_name, kind, spec, env)
+    if preset.xcode() and os_name != "macos":
         act.die("'%s' is an Apple-port preset and builds with Xcode, which this\n    workspace has no way to run (it is %s). The presets that build here\n"
                 "    are the CMake ports:  wk build --list" % (name, os_name))
-    if cfg.buildsys == "cmake":
+    if preset.buildsys == "cmake":
         if kind not in LIBBACKTRACE:
             act.die("presets.resolve: unknown driver '%s'" % kind)
-        cfg.args = DEFAULT_ARGS + (" " + cfg.args if cfg.args else "")
+        preset.args = DEFAULT_ARGS + (" " + preset.args if preset.args else "")
         default = "%s -DUSE_LIBBACKTRACE=%s" % (DEFAULT_CMAKE, LIBBACKTRACE[kind])
         if libcxx(env):
             default += " " + LIBCXX_CMAKE
-        cfg.cmake = default + (" " + cfg.cmake if cfg.cmake else "")
-    return cfg
+        preset.cmake = default + (" " + preset.cmake if preset.cmake else "")
+    return preset
 
 
 def libcxx(env):
@@ -237,8 +237,8 @@ def libcxx(env):
             % (v, fleet.Fleet(images.root(env), env).path(dispatch_place(env) or "<place>")))
 
 
-def machine_var(env, stem, cfg):
-    return env.get("%s_%s" % (stem, cfg.name.replace("-", "_")), "")
+def machine_var(env, stem, preset):
+    return env.get("%s_%s" % (stem, preset.name.replace("-", "_")), "")
 
 
 def _requote(flag):
@@ -257,32 +257,32 @@ def merge_cxx_flags(text):
     return " ".join(out)
 
 
-def mb_per_job(cfg, env):
-    return resources.mb_per_job_setting(env, cfg.mb_per_job())
+def mb_per_job(preset, env):
+    return resources.mb_per_job_setting(env, preset.mb_per_job())
 
 
-def build_env(cfg, src, jobs, nice, arch, ccache_dir, env, extra_cmake="", extra_env=(), machine_build_args=""):
+def build_env(preset, src, jobs, nice, arch, ccache_dir, env, extra_cmake="", extra_env=(), machine_build_args=""):
     """What build/build-in-workspace.sh runs under, narrowest last: `env` applies left to right."""
-    cmake = [cfg.cmake, arch_cmake(arch, cfg.port), machine_cmake(env), machine_cmake(env, cfg), extra_cmake]
-    cfgargs = build_args(env, cfg)
-    args = "%s %s%s%s" % (cfg.port, cfg.args, " " + machine_build_args if machine_build_args else "", " " + cfgargs if cfgargs else "")
+    cmake = [preset.cmake, arch_cmake(arch, preset.port), machine_cmake(env), machine_cmake(env, preset), extra_cmake]
+    preset_args = build_args(env, preset)
+    args = "%s %s%s%s" % (preset.port, preset.args, " " + machine_build_args if machine_build_args else "", " " + preset_args if preset_args else "")
     out = ["CCACHE_DIR=" + ccache_dir, "CCACHE_BASEDIR=" + src, "CCACHE_SLOPPINESS=" + CCACHE_SLOPPINESS,
            "CCACHE_NOHASHDIR=true", "NUMBER_OF_PROCESSORS=%s" % jobs, "CMAKE_BUILD_PARALLEL_LEVEL=%s" % jobs,
-           "WK_JOBS=%s" % jobs, "WK_NICE=%s" % nice, "WK_SRC=" + src, "WK_BUILDSYS=" + cfg.buildsys,
-           "WK_BUILD_SCRIPT=" + cfg.script, "WK_BUILD_ARGS=" + args,
+           "WK_JOBS=%s" % jobs, "WK_NICE=%s" % nice, "WK_SRC=" + src, "WK_BUILDSYS=" + preset.buildsys,
+           "WK_BUILD_SCRIPT=" + preset.script, "WK_BUILD_ARGS=" + args,
            "WK_BUILD_CMAKE=" + merge_cxx_flags(" ".join(c for c in cmake if c)),
-           "WK_BUILD_DIR=" + cfg.build_dir(src), "WK_MB_PER_JOB=%d" % mb_per_job(cfg, env)]
-    if cfg.cc:
-        out += ["CC=" + cfg.cc, "CXX=" + cfg.cxx]
-    if cfg.port == "--jsc-only":
+           "WK_BUILD_DIR=" + preset.build_dir(src), "WK_MB_PER_JOB=%d" % mb_per_job(preset, env)]
+    if preset.cc:
+        out += ["CC=" + preset.cc, "CXX=" + preset.cxx]
+    if preset.port == "--jsc-only":
         out.append("WK_USE_CCACHE=YES")   # WebKitCCache.cmake reads it; without it every JSC build goes cold silently
     if arch in ARCH:
         a = ARCH[arch]
         out += ["WK_ARCH=" + arch, "WK_ARCH_WRAPPER=" + a["wrapper"], "WK_ARCH_CFLAGS=" + a["cflags"], "WK_ARCH_LDFLAGS=" + a["ldflags"]]
-    out_dir = cfg.build_dir(src) if cfg.xcode() else ""   # Xcode's DerivedData is per user, shared by every workspace on a machine
+    out_dir = preset.build_dir(src) if preset.xcode() else ""   # Xcode's DerivedData is per user, shared by every workspace on a machine
     if out_dir:
         out += ["WEBKIT_OUTPUTDIR=" + out_dir, "WK_DERIVED_DATA=%s/WebKitBuild/DerivedData" % src]
-    if cfg.pgo:
+    if preset.pgo:
         out += ["WK_PGO=1", "WK_PGO_DIR=%s-profile" % out_dir, "WK_NO_COMPILE_COMMANDS=1", "WK_NO_COMPILATION_CACHE=1"]
     for v in ("WK_MEM_BUDGET_MB", "WK_MEM_FLOOR_MB", "WK_MEM_INTERVAL"):
         if env.get(v):

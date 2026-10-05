@@ -496,7 +496,11 @@ class TestTheDeclaration(unittest.TestCase):
         self.assertTrue(self.d.honours_dryrun(["sudo", "setup"]) and self.d.honours_dryrun(["sudo"]))
         self.assertTrue(self.d.honours_dryrun(["backup"]) and self.d.honours_dryrun(["backup", "--candidates"]))
         for v in ("check", "show", "pub", "sshtest", "fingerprints", "verdict", "give"):
-            self.assertTrue(self.d.is_readonly(v), v)
+            self.assertTrue(self.d.is_readonly([v]), v)
+
+    def test_push_status_only_reads(self):
+        self.assertTrue(self.d.is_readonly(["push", "status"]))
+        self.assertFalse(self.d.is_readonly(["push", "on"]) or self.d.is_readonly(["push", "off"]))
 
     def test_each_subverb_takes_its_own_options(self):
         self.assertEqual(["sudo", "status", "--on=box"], self.check("sudo", "status", "--on", "box"))

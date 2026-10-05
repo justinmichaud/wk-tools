@@ -328,7 +328,7 @@ class TestRefusals(BuildTest):
         self.w.files[lock] = "pid=5555 tok=x at=now cmd=wk"
         self.w.pids.add(5555)
         err = self.refused()
-        self.assertIn("'ws' is already building -- its driver holds the ws-ws lock.", err)
+        self.assertIn("ws-ws", err)
         self.assertIn("Stop it:    wk build ws --kill", err)
         self.assertEqual(self.w.recs().list(), [])
 

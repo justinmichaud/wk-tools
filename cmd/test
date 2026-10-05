@@ -78,11 +78,11 @@ def missing_layout_paths(runner, src, paths):
     return [l for l in r.out.replace("\r", "").splitlines() if l]
 
 
-def size_and_admit(reg, driver, name, cfg, clock):
+def size_and_admit(reg, driver, name, preset, clock):
     """`wk build`'s sizing: one machine's jobs and disk are spoken for the same way whether the job compiles or runs tests."""
-    budget, running, jobs, mbpj, _ = size_for(reg, driver, name, cfg, clock)
+    budget, running, jobs, mbpj, _ = size_for(reg, driver, name, preset, clock)
     admission = reg.store.admission_dir()
-    budget.disk_admit("this test run", cfg.disk_gb, budget.free_gb(admission), "%s's filesystem" % admission)
+    budget.disk_admit("this test run", preset.disk_gb, budget.free_gb(admission), "%s's filesystem" % admission)
     budget.admit("this test run", jobs, running)
     if not dry_run():
         budget.record("wk test %s" % name, jobs, jobs * mbpj, "pid:%d" % os.getpid())
@@ -126,32 +126,32 @@ def main(argv, reg=None, clock=None):
                 "    Look at it:  wk enter %s  and then  pgrep -af run-" % (name, name))
         return 0
 
-    preset = store.build_preset() or reg.default_preset(name)
+    preset_name = store.build_preset() or reg.default_preset(name)
     try:
-        cfg = presets.resolve(preset, driver.os(), driver.kind, driver.env)
+        preset = presets.resolve(preset_name, driver.os(), driver.kind, driver.env)
     except LookupError:
-        die("unknown preset '%s' (wk build --list)" % preset)
+        die("unknown preset '%s' (wk build --list)" % preset_name)
 
-    # Asked of the preset, not of cfg.port: on macOS a jsc-* preset is an Apple-port build with no port flag.
-    if opts["suite"] == "layout" and cfg.jsc_only:
+    # Asked of the preset, not of preset.port: on macOS a jsc-* preset is an Apple-port build with no port flag.
+    if opts["suite"] == "layout" and preset.jsc_only:
         die("'%s' builds JavaScriptCore alone, which has no layout tests -- no\n"
             "    WebKitTestRunner and no ImageDiff are built by it. Name a full-port preset\n"
             "    that has been built in '%s':\n"
             "        wk test %s --layout --preset gtk-release-asan\n"
             "    ('wk status %s' says what it was last built with; 'wk build --list' has\n"
-            "    the presets.)" % (preset, name, name, name))
+            "    the presets.)" % (preset_name, name, name, name))
 
     ws_state = driver.state(name) if dry_run() else "present"
 
-    lower = cfg.type.lower()
+    lower = preset.type.lower()
     src = driver.src(name)
 
     # The same personality wrapper the build ran under: without it `uname -m` in an armhf container answers aarch64.
     arch = driver.arch(name)
     wrap = presets.ARCH.get(arch, {}).get("wrapper", "")
-    jobs = size_and_admit(reg, driver, name, cfg, clock)
+    jobs = size_and_admit(reg, driver, name, preset, clock)
 
-    if cfg.buildsys == "xcode":
+    if preset.buildsys == "xcode":
         render_env, render_desc = "", "the guest's GPU"
         if opts.get("gpu"):
             warn("--gpu has no meaning for an Apple port; ignoring")
@@ -177,33 +177,33 @@ def main(argv, reg=None, clock=None):
     if opts.get("lldb"):
         if opts["suite"] != "layout":
             die("--lldb debugs a layout test; for jsc use 'wk run --lldb'")
-        attach = cfg.web_process_name() if opts["lldb"] == "web" else cfg.test_runner_name()
+        attach = preset.web_process_name() if opts["lldb"] == "web" else preset.test_runner_name()
         if not attach:
-            die("'%s' builds no layout-test binaries to debug -- use a wpe-*, gtk-* or mac-* preset" % preset)
+            die("'%s' builds no layout-test binaries to debug -- use a wpe-*, gtk-* or mac-* preset" % preset_name)
         if not opts["pass"]:
             die("--lldb needs a test to debug, e.g. fast/dom/Comment")
         jobs = 1   # one driver, so exactly one process of either kind to catch
 
     # mac-release-asan builds into Release-asan/, and only WEBKIT_OUTPUTDIR tells webkitdirs so.
-    out_env = "WEBKIT_OUTPUTDIR=%s" % cfg.build_dir(src) if cfg.buildsys == "xcode" else ""
+    out_env = "WEBKIT_OUTPUTDIR=%s" % preset.build_dir(src) if preset.buildsys == "xcode" else ""
 
     debug_flags = ""
     if opts["suite"] == "layout" and opts.get("lldb"):
         debug_flags = "--no-timeout"
         if opts["lldb"] == "web":
-            debug_flags += " --additional-env-var=%s" % cfg.web_process_pause_env()
+            debug_flags += " --additional-env-var=%s" % preset.web_process_pause_env()
 
     if opts["suite"] == "jsc":
-        info("JSC tests (%s, -j%d)" % (preset, jobs))
+        info("JSC tests (%s, -j%d)" % (preset_name, jobs))
     else:
-        info("layout tests (%s, %s, %d processes)" % (preset, render_desc, jobs))
-    cmd = build_cmd(opts["suite"], src, out_env, render_env, wrap, lower, cfg.port, jobs, debug_flags, opts["pass"])
+        info("layout tests (%s, %s, %d processes)" % (preset_name, render_desc, jobs))
+    cmd = build_cmd(opts["suite"], src, out_env, render_env, wrap, lower, preset.port, jobs, debug_flags, opts["pass"])
 
     if dry_run():
         log("dry run -- nothing was run.")
         arch_label = presets.arch_label(arch)
         log("  workspace: %s (%s, %s%s)" % (name, driver.name, ws_state, ", " + arch_label if arch_label else ""))
-        log("  suite:     %s (%s)" % (opts["suite"], preset))
+        log("  suite:     %s (%s)" % (opts["suite"], preset_name))
         log("  would run: bash -lc %s" % shlex.quote(cmd))
         if opts.get("lldb"):
             log("  in front of: lldb %s -o 'process attach --name %s --waitfor'" % (LLDB_PIN_OPTS, attach))
@@ -214,7 +214,7 @@ def main(argv, reg=None, clock=None):
 
     # The watchdog kills a silent job after WK_ABORT_SECONDS, and a process at a breakpoint is silent by definition. The running record carries that deadline, so cmd/status can tell a quiet run from one whose watchdog is gone.
     if opts.get("lldb"):
-        info("debugging %s (%s) in '%s', lldb waiting for %s" % (" ".join(opts["pass"]), preset, name, attach))
+        info("debugging %s (%s) in '%s', lldb waiting for %s" % (" ".join(opts["pass"]), preset_name, name, attach))
         log("  it attaches as that process starts; 'continue' runs the test")
         log("  test output: /tmp/wk-test-lldb.log (in the workspace)")
         driver.exec_tty(name, ["bash", "-lc", lldb_waiting(cmd, "/tmp/wk-test-lldb.log", attach)])
@@ -224,7 +224,7 @@ def main(argv, reg=None, clock=None):
     log_path = os.path.join(ws_dir, "test.log")
     start = clock.now()
 
-    task = recs.begin("test", "here", name, kill_cmd, log_path, ["%s/%s in %s" % (opts["suite"], preset, name)])
+    task = recs.begin("test", "here", name, kill_cmd, log_path, ["%s/%s in %s" % (opts["suite"], preset_name, name)])
     task.step(1)
 
     watcher = None
@@ -258,20 +258,20 @@ def main(argv, reg=None, clock=None):
     sys.stderr.write("\n")
     if rc != 0 and task.field("stopping"):
         task.end(rc)
-        warn("TESTS STOPPED  %s/%s in '%s'  (by '%s' after %dm%ds)" % (opts["suite"], preset, name, kill_cmd, mins, secs))
+        warn("TESTS STOPPED  %s/%s in '%s'  (by '%s' after %dm%ds)" % (opts["suite"], preset_name, name, kill_cmd, mins, secs))
         raise Refused(rc)
     if rc == 0:
         task.end(0)
-        info("TESTS OK  %s/%s in '%s'  (%dm%ds)" % (opts["suite"], preset, name, mins, secs))
+        info("TESTS OK  %s/%s in '%s'  (%dm%ds)" % (opts["suite"], preset_name, name, mins, secs))
         for l in summary:
             log("  " + l)
         return 0
     if rc == 124:
         task.end("stalled")
         die("TESTS STALLED  %s/%s in '%s' (killed after %dm%ds with no output)\n"
-            "    log: %s" % (opts["suite"], preset, name, mins, secs, log_path))
+            "    log: %s" % (opts["suite"], preset_name, name, mins, secs, log_path))
     task.end(rc)
-    warn("TESTS FAILED  %s/%s in '%s'  (exit %d after %dm%ds)" % (opts["suite"], preset, name, rc, mins, secs))
+    warn("TESTS FAILED  %s/%s in '%s'  (exit %d after %dm%ds)" % (opts["suite"], preset_name, name, rc, mins, secs))
     for l in summary:
         log("  " + l)
     log("failures:")

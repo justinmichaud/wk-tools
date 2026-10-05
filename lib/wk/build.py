@@ -1,5 +1,5 @@
 """`wk build` as a flow over a Driver, its Records, a Lock and a Clock: the front refuses, stops, or detaches;
-the driver sizes, admits, and runs build/build-in-workspace.sh in the workspace under the watchdog, stepping
+the detached run sizes, admits, and runs build/build-in-workspace.sh in the workspace under the watchdog, stepping
 its record; the babysitter re-runs the build with a Claude fix between failures."""
 
 import os
@@ -111,7 +111,7 @@ def detached(here, recs, clock, kind, name, argv, path, what):
         clock.sleep(1)
 
 
-def size_for(reg, driver, name, cfg, clock):
+def size_for(reg, driver, name, preset, clock):
     """(budget, jobs running, jobs, MB a job, nice) from a remote place's own numbers, else this machine's free memory under the place's envelope."""
     cores, mem, load = driver.build_size(name)
     polite = driver.kind == "remote"
@@ -123,7 +123,7 @@ def size_for(reg, driver, name, cfg, clock):
         avail = Resources(reg.machine, reg.env).avail_mem_mb(cgroup_mb=mem)
     budget = Budget(reg.machine, benv, clock)
     running = budget.running(holder_alive(reg))
-    mbpj = presets.mb_per_job(cfg, reg.env)
+    mbpj = presets.mb_per_job(preset, reg.env)
     max_jobs = Resources(reg.machine, driver.env).max_jobs()
     jobs = budget.explain(cores, avail, mbpj, load if polite else None, max_jobs, running)
     return budget, running, jobs, mbpj, (19 if polite else 10)
@@ -145,7 +145,7 @@ class Build:
             die("'%s' is on %s, whose own wk runs its builds; 'wk build %s' hands it there" % (name, self.driver.name, name))
         self.recs = records_of(self.driver, self.clock, self.here)
         self.ws_dir = self.driver.store.ws_dir(name)
-        self.cfg = None
+        self.preset = None
 
     # -- the front
 
@@ -158,7 +158,7 @@ class Build:
             for line in presets.LIST_TEXT.splitlines():
                 log("  " + line)
             raise Refused(2)
-        self.cfg = presets.resolve(o["preset"], self.driver.os(), self.driver.kind, self.driver.env)
+        self.preset = presets.resolve(o["preset"], self.driver.os(), self.driver.kind, self.driver.env)
         for e in o.get("env", []):
             if not re.match(r"^[A-Za-z_][^=]*=", e):
                 die("--env takes NAME=VALUE, got %s" % shlex.quote(e))
@@ -166,8 +166,8 @@ class Build:
             act.barrier("--cmakeargs would replace the preset's CMake flags rather than add to\n"
                         "    them: build-webkit takes one --cmakeargs, so the last one on the command\n"
                         "    line wins and '%s' would lose %s.\n    Use --cmake instead, which is added to them:\n"
-                        "        wk build%s %s --cmake %s" % (self.cfg.name, self.cfg.cmake_summary(), "" if self.in_ws else " " + name,
-                                                           self.cfg.name, shlex.quote(o["cmakeargs"])))
+                        "        wk build%s %s --cmake %s" % (self.preset.name, self.preset.cmake_summary(), "" if self.in_ws else " " + name,
+                                                           self.preset.name, shlex.quote(o["cmakeargs"])))
             o.setdefault("pass", []).insert(0, "--cmakeargs=" + o["cmakeargs"])
         if o.get("sysroot") is not None:
             die("--sysroot is not implemented (docs/Nice to have/HANDOFF-cross-compile.md).\n"
@@ -199,13 +199,13 @@ class Build:
         return 0
 
     def child_argv(self, drop, drop_valued=(), add=()):
-        return ([os.path.join(self.root, "wk"), "build"] + ([] if self.in_ws else [self.name]) + [self.cfg.name]
+        return ([os.path.join(self.root, "wk"), "build"] + ([] if self.in_ws else [self.name]) + [self.preset.name]
                 + forward(self.argv, drop, drop_valued, add))
 
     def detach(self):
         pid = detached(self.here, self.recs, self.clock, "build", self.name, self.child_argv(("--detach",)),
                        os.path.join(self.ws_dir, "detached.log"), "build")
-        info("building %s in '%s', detached as pid %d -- this end can go away" % (self.cfg.name, self.name, pid))
+        info("building %s in '%s', detached as pid %d -- this end can go away" % (self.preset.name, self.name, pid))
         log("  follow:  wk status %s --log -f" % self.name)
         log("  state:   wk status %s" % self.name)
         log("  stop it: %s" % self.kill)
@@ -235,7 +235,7 @@ class Build:
             return 0
         pid = job.detach(self.here, argv, blog)
         branch = self.opts.get("branch")
-        info("babysitter started for %s in '%s' (pid %d, model %s%s)" % (self.cfg.name, name, pid, model, ", branch " + branch if branch else ""))
+        info("babysitter started for %s in '%s' (pid %d, model %s%s)" % (self.preset.name, name, pid, model, ", branch " + branch if branch else ""))
         log("  it survives this terminal; up to %d fixes, then it closes itself" % attempts)
         log("  state:   wk status %s" % name)
         log("  follow:  tail -f %s" % blog)
@@ -245,11 +245,11 @@ class Build:
 
     def babysit(self):
         """The detached loop: build; on a failure a Claude fix from inside the workspace, then build again."""
-        name, cfg, here, env = self.name, self.cfg, self.here, self.env
+        name, preset, here, env = self.name, self.preset, self.here, self.env
         model, most = babysit_settings(env)
         report, blog = os.path.join(self.ws_dir, "babysit.report"), os.path.join(self.ws_dir, "build.log")
         here.write(report, "")
-        plan = ["build %s" % cfg.name] + ["fix %d of %d, build again" % (i, most) for i in range(1, most + 1)]
+        plan = ["build %s" % preset.name] + ["fix %d of %d, build again" % (i, most) for i in range(1, most + 1)]
         task = self.recs.begin("babysit", "here", name, "wk build %s --kill" % name, os.path.join(self.ws_dir, "babysit.log"), plan)
 
         def note(title, body):
@@ -266,7 +266,7 @@ class Build:
 
         with job.Signals():
             try:
-                info("babysitting '%s' in '%s' (model %s, up to %d fixes)" % (cfg.name, name, model, most))
+                info("babysitting '%s' in '%s' (model %s, up to %d fixes)" % (preset.name, name, model, most))
                 task.step(1)
                 branch = self.opts.get("branch")
                 if branch:   # once, before the loop: a checkout would take a fix from under the model that made it
@@ -321,9 +321,9 @@ class Build:
                 "Rules: make the smallest change that fixes the build, following the\nrepository's house rules. Do not run the full build -- the babysitter reruns\n"
                 "it when you finish -- but you may syntax-check or compile a single file. If\nthe failure is not fixable from inside the workspace (toolchain, disk,\n"
                 "network), say so plainly and change nothing.\n\nEnd your reply with a short paragraph: what failed, what you changed, and\n"
-                "which files you touched.\n\nBuild errors (classified):\n%s\n\nLog tail:\n%s" % (self.cfg.name, rc, attempt, most, errs, tail))
+                "which files you touched.\n\nBuild errors (classified):\n%s\n\nLog tail:\n%s" % (self.preset.name, rc, attempt, most, errs, tail))
 
-    # -- the driver
+    # -- the detached run
 
     def checkout(self, branch):
         q = shlex.quote
@@ -337,7 +337,7 @@ class Build:
         lock = Lock(self.driver.store, here, self.clock)
         holder = lock.holder_pid("ws-" + name)
         if holder is not None and here.alive(holder):   # refused, not queued: an hour on a lock names no remedy
-            die("'%s' is already building -- its driver holds the ws-%s lock.\n    Follow it:  wk status %s --log -f\n    Stop it:    %s"
+            die("'%s' is already building -- its detached run holds the ws-%s lock.\n    Follow it:  wk status %s --log -f\n    Stop it:    %s"
                 % (name, name, name, self.kill))
         lock.hold("ws-" + name, timeout=0)
         busy = busy_reason(self.driver, self.recs, name, self.env.get("WK_TASK_PARENT", ""))
@@ -345,10 +345,10 @@ class Build:
             act.barrier("'%s' already has a job running in it: %s\n    Two builds in one checkout corrupt both, and this one would be the second.\n"
                         "    See what it is:  wk status %s --log --all" % (name, busy, name))
         store = self.reg.store.admission_dir()
-        budget.disk_admit("this build", self.cfg.disk_gb, budget.free_gb(store), "%s's filesystem" % store)
+        budget.disk_admit("this build", self.preset.disk_gb, budget.free_gb(store), "%s's filesystem" % store)
         if self.driver.kind == "vm":   # the guest's disk, and the host image it grows, both fill
             free = parse_df(self.driver.exec(name, ["df", "-Pk", self.driver.src(name)]).out)
-            budget.disk_admit("this build", self.cfg.disk_gb, free, "the disk inside '%s'" % name)
+            budget.disk_admit("this build", self.preset.disk_gb, free, "the disk inside '%s'" % name)
         budget.admit("this build", jobs, running)
         return lock
 
@@ -360,36 +360,36 @@ class Build:
             tenv["WK_MEM_FLOOR_MB"] = o["mem_floor"]
         defaults = "" if o.get("no_defaults") else presets.build_args(tenv)
         return tenv, defaults, presets.build_env(
-            self.cfg, self.driver.src(self.name), jobs, nice, self.driver.arch(self.name), self.driver.ccache_dir(self.name),
+            self.preset, self.driver.src(self.name), jobs, nice, self.driver.arch(self.name), self.driver.ccache_dir(self.name),
             tenv, " ".join(o.get("cmake", [])), o.get("env", []), defaults)
 
     def detached(self):
-        name, cfg, here, o = self.name, self.cfg, self.here, self.opts
-        budget, running, jobs, mbpj, nice = size_for(self.reg, self.driver, self.name, self.cfg, self.clock)
-        tenv, defaults, cfg_env = self.build_env(jobs, nice)
+        name, preset, here, o = self.name, self.preset, self.here, self.opts
+        budget, running, jobs, mbpj, nice = size_for(self.reg, self.driver, self.name, self.preset, self.clock)
+        tenv, defaults, preset_env = self.build_env(jobs, nice)
         budget_mb = int(tenv.get("WK_MEM_BUDGET_MB") or jobs * mbpj)
         bit = self.driver.tools(name) + "/build/build-in-workspace.sh"
         passthru = o.get("pass", [])
         lock = None
         if act.dry_run():
-            self.report(tenv, defaults, cfg_env, jobs, nice, budget_mb, bit, passthru)
+            self.report(tenv, defaults, preset_env, jobs, nice, budget_mb, bit, passthru)
         else:
             lock = self.admit(budget, running, jobs)
         try:
-            return self.run(budget, jobs, nice, budget_mb, cfg_env, bit, passthru)
+            return self.run(budget, jobs, nice, budget_mb, preset_env, bit, passthru)
         finally:
             if lock is not None:
                 lock.release_all()
 
-    def report(self, tenv, defaults, cfg_env, jobs, nice, budget_mb, bit, passthru):
-        name, cfg, o, t = self.name, self.cfg, self.opts, self.driver
+    def report(self, tenv, defaults, preset_env, jobs, nice, budget_mb, bit, passthru):
+        name, preset, o, t = self.name, self.preset, self.opts, self.driver
         arch = t.arch(name)
         label = presets.arch_label(arch)
         log("dry run -- nothing was built.")
         log("  workspace: %s (%s, %s%s)" % (name, t.name, t.state(name), ", " + label if label else ""))
         if o.get("branch"):
             log("  branch:    %s (would be checked out first)" % o["branch"])
-        log("  preset:    %s (%s%s%s)" % (cfg.name, cfg.buildsys, " " + cfg.port if cfg.port else "", " " + cfg.args if cfg.args else ""))
+        log("  preset:    %s (%s%s%s)" % (preset.name, preset.buildsys, " " + preset.port if preset.port else "", " " + preset.args if preset.args else ""))
         if presets.machine_cmake(tenv):
             log("  machine:   %s (cmake, from %s's conf)" % (presets.machine_cmake(tenv), t.name))
         if defaults:
@@ -404,31 +404,31 @@ class Build:
             a = presets.ARCH[arch]
             log("  arch:      %s, native (%s %s)" % (label, a["wrapper"], a["cflags"]))
         log("  src:       %s" % t.src(name))
-        log("  build dir: %s" % cfg.build_dir(t.src(name)))
+        log("  build dir: %s" % preset.build_dir(t.src(name)))
         log("  jobs:      %d (nice %d)" % (jobs, nice))
         log("  memory:    budget %dMB, floor %sMB, watched every %ss"
             % (budget_mb, tenv.get("WK_MEM_FLOOR_MB") or 2048, self.env.get("WK_MEM_INTERVAL") or 30))
-        log(("  would run: env %s %s %s" % (" ".join(cfg_env), bit, " ".join(passthru))).rstrip())
+        log(("  would run: env %s %s %s" % (" ".join(preset_env), bit, " ".join(passthru))).rstrip())
         if not t.exec(name, ["grep", "-q", "WK_DRY_RUN", bit]).ok:
             warn("  the wk-tools in '%s' predates --dry-run's place half, so the commands" % name)
             log("  it would run cannot be asked for without risking a real build.")
             log("  push this tree there first:  wk sync --tools %s" % t.name)
             return
-        line = self.far_line(cfg_env, bit, passthru)
+        line = self.far_line(preset_env, bit, passthru)
         if line is not None:
             log("  running:   %s" % line)
         else:
             warn("  could not ask '%s' itself what it would run -- the lines above are" % name)
             log("  this side's half of it. Is the workspace up? (wk status %s)" % name)
 
-    def far_line(self, cfg_env, bit, passthru):
+    def far_line(self, preset_env, bit, passthru):
         """The command line the place half resolves, asked of it under WK_DRY_RUN; it knows ionice and the cgroup clamp."""
-        r = self.driver.exec(self.name, ["env"] + cfg_env + ["WK_DRY_RUN=1", bit] + passthru)
+        r = self.driver.exec(self.name, ["env"] + preset_env + ["WK_DRY_RUN=1", bit] + passthru)
         return r.out.replace("\r", "").strip() if r.ok else None
 
-    def run(self, budget, jobs, nice, budget_mb, cfg_env, bit, passthru):
+    def run(self, budget, jobs, nice, budget_mb, preset_env, bit, passthru):
         """The steps: the log is truncated before the record says running, so a reader of the record reads this build's log."""
-        name, cfg, here, o, t = self.name, self.cfg, self.here, self.opts, self.driver
+        name, preset, here, o, t = self.name, self.preset, self.here, self.opts, self.driver
         dry = act.dry_run()
         path = os.path.join(self.ws_dir, "build.log")
         here.mkdir(self.ws_dir)
@@ -436,7 +436,7 @@ class Build:
         start = self.clock.now()
         label = presets.arch_label(t.arch(name))
         plan = (["check out %s" % o["branch"]] if o.get("branch") else []) + [
-            "sync wk-tools into '%s'" % name, "compile %s%s with -j%d" % (cfg.name, " (%s)" % label if label else "", jobs)]
+            "sync wk-tools into '%s'" % name, "compile %s%s with -j%d" % (preset.name, " (%s)" % label if label else "", jobs)]
         task = None if dry else self.recs.begin("build", "here", name, self.kill, path, plan)
         step = [0]
 
@@ -450,7 +450,7 @@ class Build:
                 task.end(word)
 
         if task is not None:
-            task.set("preset", cfg.name)
+            task.set("preset", preset.name)
         watcher = None
         with job.Signals():
             try:
@@ -463,20 +463,20 @@ class Build:
                 if not t.sync_tools(name):
                     die("pushing wk-tools into '%s' failed -- the reason is above" % name)
                 advance()
-                info("building %s%s in '%s' with -j%d (nice %d)" % (cfg.name, " (%s)" % label if label else "", name, jobs, nice))
+                info("building %s%s in '%s' with -j%d (nice %d)" % (preset.name, " (%s)" % label if label else "", name, jobs, nice))
                 log("  log: %s" % path)
                 log("  stop: %s" % self.kill)
                 log("  stall warning after %ss of silence; abort after %ss"
                     % (record.watchdog_stall(self.env), record.watchdog_abort(self.env, job.ABORT_SECONDS)))
                 if not dry:
-                    line = self.far_line(cfg_env, bit, passthru)
+                    line = self.far_line(preset_env, bit, passthru)
                     if line is not None:
                         log("running:   %s" % line)
-                budget.record("wk build %s (%s)" % (name, cfg.name), jobs, budget_mb, "pid:%d" % os.getpid())
+                budget.record("wk build %s (%s)" % (name, preset.name), jobs, budget_mb, "pid:%d" % os.getpid())
                 if task is not None:
                     watcher = job.PidWatch(t, name, task, path, "build", PID_MATCH, job.pid_tries(self.env))
                     watcher.start()
-                argv, cwd = t.build_argv(name, stage.in_workspace(t.tools(name), "build", ["env"] + cfg_env + [bit] + passthru))
+                argv, cwd = t.build_argv(name, stage.in_workspace(t.tools(name), "build", ["env"] + preset_env + [bit] + passthru))
                 rc = job.watch(argv, path, here, self.clock, self.env, cwd)
             except job.Interrupted as e:
                 if watcher is not None:
@@ -502,7 +502,7 @@ class Build:
             warn("it is still running; stop it with:  %s" % self.kill)
 
     def verdict(self, rc, path, start, end, task):
-        name, cfg = self.name, self.cfg
+        name, preset = self.name, self.preset
         try:
             text = record.normalised(path)
         except OSError:
@@ -515,26 +515,26 @@ class Build:
         sys.stderr.write("\n")
         if rc == 0:
             end(0)
-            info("BUILD OK  %s%s in '%s'  (%s)" % (cfg.name, " (%s)" % label if label else "", name, took))
+            info("BUILD OK  %s%s in '%s'  (%s)" % (preset.name, " (%s)" % label if label else "", name, took))
             return 0
         if task is not None and task.field("stopping"):
             end(rc)
-            warn("BUILD STOPPED  %s in '%s'  (by '%s' after %s)" % (cfg.name, name, self.kill, took))
+            warn("BUILD STOPPED  %s in '%s'  (by '%s' after %s)" % (preset.name, name, self.kill, took))
             raise Refused(rc)
         if rc == 124:
             end("stalled")
             die("BUILD STALLED  %s in '%s'  (killed after %s with no output)\n    log: %s\n"
-                "    A stall is usually memory pressure -- check 'wk status %s' for OOM kills." % (cfg.name, name, took, path, name))
+                "    A stall is usually memory pressure -- check 'wk status %s' for OOM kills." % (preset.name, name, took, path, name))
         if limits:
             end("oom")
-            warn("BUILD KILLED FOR MEMORY  %s in '%s'  (after %s)" % (cfg.name, name, took))
+            warn("BUILD KILLED FOR MEMORY  %s in '%s'  (after %s)" % (preset.name, name, took))
             for l in limits[-2:]:
                 sys.stderr.write(l.replace("wk: ", "  ", 1) + "\n")
-            log("  peak %sMB. Fewer jobs: WK_MB_PER_JOB=3072 wk build %s %s" % (peaks[-1] if peaks else "?", name, cfg.name))
+            log("  peak %sMB. Fewer jobs: WK_MB_PER_JOB=3072 wk build %s %s" % (peaks[-1] if peaks else "?", name, preset.name))
             log("  full log: %s" % path)
             raise Refused(rc)
         end(rc)
-        warn("BUILD FAILED  %s in '%s'  (exit %d after %s)" % (cfg.name, name, rc, took))
+        warn("BUILD FAILED  %s in '%s'  (exit %d after %s)" % (preset.name, name, rc, took))
         log("first error(s):")
         for e in record.first_error(path):
             log("  " + e)
@@ -544,8 +544,8 @@ class Build:
             log("  It is derived, and an interrupted build can leave it unusable.")
             log("  The products survive; only the plan has to be rebuilt:")
             log("    wk enter %s rm -rf %s/WebKitBuild/%s/XCBuildData"
-                % (name, self.driver.src(name), os.path.basename(cfg.build_dir(self.driver.src(name)))))
-            log("    wk build %s %s" % (name, cfg.name))
+                % (name, self.driver.src(name), os.path.basename(preset.build_dir(self.driver.src(name)))))
+            log("    wk build %s %s" % (name, preset.name))
         log("")
         log("  full log: %s" % path)
         raise Refused(rc)

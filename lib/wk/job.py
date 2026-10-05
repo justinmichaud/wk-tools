@@ -333,7 +333,7 @@ def signal_name(signum):
 
 
 def kill(driver, ws, task, word, machine, clock, env=None, me=None):
-    """TERM, KILL after WK_KILL_WAIT, the record ended `word`; `stopping` first, so the driver ends it `word` too."""
+    """TERM, KILL after WK_KILL_WAIT, the record ended `word`; `stopping` first, so the detached run ends it `word` too."""
     env = os.environ if env is None else env
     pid, wait = task.field("pid"), kill_wait(env)
     if act.dry_run():

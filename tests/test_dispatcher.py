@@ -423,7 +423,7 @@ class TestHelpNamesEveryWhereOverride(WkTest):
 
     @staticmethod
     def _overrides(d):
-        return [(verbs, spec["where"]) for verbs, spec in d.sub + d.flag if "where" in spec]
+        return [(verbs, spec["where"]) for verbs, spec in d.overrides() if "where" in spec]
 
     def _prose(self, d, where):
         return dispatch.where_prose(d, where)

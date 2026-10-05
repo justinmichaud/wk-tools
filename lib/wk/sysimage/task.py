@@ -160,7 +160,7 @@ class Stage:
         lock = Lock(self.driver.store, self.here, self.clock)
         holder = lock.holder_pid("ws-" + self.ws)
         if holder is not None and self.here.alive(holder):
-            die("'%s' is already building -- its driver holds the ws-%s lock.\n    Follow it:  wk status %s --log -f\n    Stop it:    %s"
+            die("'%s' is already building -- its detached run holds the ws-%s lock.\n    Follow it:  wk status %s --log -f\n    Stop it:    %s"
                 % (self.ws, self.ws, self.ws, self.kill))
         lock.hold("ws-" + self.ws, timeout=0)
         try:

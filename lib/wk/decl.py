@@ -2,7 +2,7 @@
 `# wk <name> ... -- <summary>` synopsis. Keys: where=, name= (with @N for the slot), takes=,
 ready=yes, group=, lifecycle, readonly, destructive, dryrun, nodryrun, opts, passthrough[=tail|=all], broker,
 outside, forward=no, here, bare=merged, post=, values=, preset=, verbs=, default=, needs;
-`sub` lines override per verb (a command with verbs= keeps its opts on them), `flag` lines per flag of a command without.
+`sub <verbs> [<second words>]` lines override per verb or verb pair (opts live on verbs), `flag` lines per flag.
 An option declared both bare and with `=` (`--x,--x=`) takes a value only as `--x=v`."""
 
 import re
@@ -68,7 +68,7 @@ class Decl:
         self.passthrough = ""
         self.dryrun = ""
         self.nodryrun = False
-        self.sub = []    # (verbs, {key: value})
+        self.sub = []    # (verbs, second words, {key: value})
         self.flag = []   # (flags, {key: value})
         self.synopsis = ""
         self._load()
@@ -84,7 +84,10 @@ class Decl:
                 continue
             body = line[len("# wk:"):].strip()
             if body.startswith("sub "):
-                self.sub.append(self._override(body[4:]))
+                words = body[4:].split()
+                seconds = words.pop(1) if len(words) > 1 and "=" not in words[1] else ""
+                verbs, spec = self._override(" ".join(words))
+                self.sub.append((verbs, seconds, spec))
                 continue
             if body.startswith("flag "):
                 self.flag.append(self._override(body[5:]))
@@ -97,10 +100,10 @@ class Decl:
         if self.default and not in_list(self.default, self.verbs):
             raise DeclError("%s: default=%s is not one of verbs=%s" % (self.name, self.default, self.verbs))
         if not self.verbs:
-            for verbs, _ in self.sub:
+            for verbs, _, _ in self.sub:
                 raise DeclError("%s: 'sub %s' but the command declares no verbs=" % (self.name, verbs))
             return
-        for verbs, _ in self.sub:
+        for verbs, _, _ in self.sub:
             for v in verbs.split(","):
                 if not in_list(v, self.verbs):
                     raise DeclError("%s: 'sub %s' names no verb in verbs=%s" % (self.name, v, self.verbs))
@@ -204,16 +207,25 @@ class Decl:
                     found = spec[key]
         return found
 
-    def _sub_override(self, key, sub):
-        for verbs, spec in self.sub:
-            if in_list(sub, verbs) and key in spec:
-                return spec[key]
-        return None
+    def _sub_override(self, key, args):
+        first = args[0] if args else ""
+        second = next((a for a in args[1:] if not a.startswith("-")), "")
+        found = None
+        for verbs, seconds, spec in self.sub:
+            if key in spec and in_list(first, verbs):
+                if seconds and in_list(second, seconds):
+                    return spec[key]
+                if not seconds and found is None:
+                    found = spec[key]
+        return found
+
+    def overrides(self):
+        return [(" ".join(filter(None, (v, s))), spec) for v, s, spec in self.sub] + self.flag
 
     def _answer(self, key, default, args):
         v = self._flag_override(key, args)
         if v is None:
-            v = self._sub_override(key, args[0] if args else "")
+            v = self._sub_override(key, args)
         return default if v is None else v
 
     def name_for(self, args):
@@ -237,19 +249,18 @@ class Decl:
         return self.forward if v is None else v != "yes"
 
     def passthrough_for(self, args):
-        v = self._sub_override("passthrough", args[0] if args else "")
+        v = self._sub_override("passthrough", args)
         return self.passthrough if v is None else v
 
     def needs_for(self, args):
-        v = self._sub_override("needs", args[0] if args else "")
+        v = self._sub_override("needs", args)
         return self.needs if v is None else v
 
-    def is_readonly(self, sub=""):
-        if not self.readonly:
-            return False
-        if self.readonly == "yes":
-            return True
-        return in_list(sub, self.readonly)
+    def is_readonly(self, args=()):
+        v = self._sub_override("readonly", args)
+        if v is not None:
+            return v == "yes"
+        return self.readonly == "yes" or in_list(args[0] if args else "", self.readonly)
 
     def _in_argv_list(self, spec, args):
         if not spec:
@@ -265,7 +276,7 @@ class Decl:
         return self._in_argv_list(self._answer("dryrun", self.dryrun, args), args)
 
     def valued_opts(self):
-        specs = [self.opts] + [spec.get("opts") or "" for _, spec in self.sub + self.flag]
+        specs = [self.opts] + [spec.get("opts") or "" for _, spec in self.overrides()]
         return {x[:-1] for spec in specs for x in spec.split(",") if x.endswith("=") and not in_list(x[:-1], spec)}
 
     def synopsis_line(self):

@@ -280,7 +280,7 @@ exist.
      `Driver.workspaces`, and the one remaining inline copy of its union is
      `cmd/ls`.
    - *`build`.* `cmd/build` is a Python entry point over `lib/wk/build.py`
-     (front, driver, `--detach`, `--kill`, the babysitter), `lib/wk/job.py`
+     (front, detached run, `--detach`, `--kill`, the babysitter), `lib/wk/job.py`
      (the watched run, the announced pid, the one job stop) and
      `lib/wk/presets.py` (the presets as data, the cross presets
      included); each driver's `ccache_dir`, `build_argv` and

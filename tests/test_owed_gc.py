@@ -427,7 +427,7 @@ class TestReclaimsOrNames(GcTest):
         rc, err = self.run_gc()
         self.assertEqual(rc, 0, err)
         self.assertIn("box: a build record of 'a' kept here, not on the box", err)
-        self.assertIn("kept -- its driver, pid 4242, still runs here: 'kill 4242' ends it", err)
+        self.assertIn("kept -- its detached run, pid 4242, still runs here: 'kill 4242' ends it", err)
         with self.assertRaises(Refused):
             self.run_gc("--purge-rubble")
         self.assertFalse(gone())

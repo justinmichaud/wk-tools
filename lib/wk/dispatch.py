@@ -27,7 +27,8 @@ ROOT = Path(images.root())
 MACHINE = Store().podman_machine()
 _registry = None
 DISPATCH_VARS = ("WK_NAME", "WK_PLACE", "WK_DRIVER", "WK_ROOT", "WK_FORCE", "WK_QUIET", "WK_DRY_RUN", "WK_DESTRUCTIVE",
-                 "WK_CONFIRMED", "WK_ROW_LABEL", "WK_HOST_SELF", "WK_IN_VM", "WK_PRESET")
+                 "WK_CONFIRMED", "WK_ROW_LABEL", "WK_HOST_SELF", "WK_IN_VM", "WK_PRESET",
+                 "WK_EXPORTS_READ")
 GLOBALS = {"--force": "WK_FORCE", "--quiet": "WK_QUIET", "--dry-run": "WK_DRY_RUN",
            "-n": "WK_DRY_RUN", "--yes": "WK_YES", "-y": "WK_YES"}
 
@@ -181,7 +182,6 @@ class Invocation:
         option (`--x=v`), so the name arithmetic never takes a value for a
         positional."""
         d, args = self.decl, self.args
-        sub = args[0] if args else ""
         opts = d.opts_for(args)
         passthrough = d.passthrough_for(args)
         name_decl = d.name_for(args)
@@ -500,11 +500,11 @@ def explain(cmd, d, args=()):
     if not d.is_readonly():
         if d.destructive:
             out.write("  destructive: %s\n" % destructive_prose(d.destructive))
-        for verbs, spec in d.sub + d.flag:
+        for verbs, spec in d.overrides():
             if "destructive" in spec:
                 out.write("    %s: %s\n" % (verbs.replace(",", ", "), destructive_prose(spec["destructive"])))
     out.write("  runs on: %s\n" % where_prose(d, d.where))
-    for verbs, spec in d.sub + d.flag:
+    for verbs, spec in d.overrides():
         if "where" in spec:
             out.write("    %s: %s\n" % (verbs.replace(",", ", "), where_prose(d, spec["where"])))
     if d.verbs:
@@ -584,7 +584,7 @@ def forward_to_vm(inv, cmd, args):
     if rec is None:
         die("podman machine '%s' does not exist -- run ./setup first" % MACHINE)
     if rec.get("State") != "running":
-        if inv.decl.is_readonly(args[0] if args else ""):
+        if inv.decl.is_readonly(args):
             warn("the podman machine '%s' is stopped, so its store cannot be read" % MACHINE)
             log("  'wk start' to bring it up -- 'wk %s' will not start it" % cmd)
             raise Exit(0)
@@ -774,10 +774,9 @@ def main(argv):
     inv.args = args
     inv.verb_given()
     inv.refuse_inherited_preset(inherited_preset)
-    sub = args[0] if args else ""
     if act.dry_run() and d.nodryrun:
         inv.usage_die("'wk %s' is exempt from --dry-run (wk %s -h says why)" % (cmd, cmd))
-    if act.dry_run() and not d.honours_dryrun(args) and not d.is_readonly(sub):
+    if act.dry_run() and not d.honours_dryrun(args) and not d.is_readonly(args):
         inv.usage_die("'wk %s' has no dry run yet: not every change it makes goes through\n"
                       "    the one path --dry-run intercepts (owed, docs/PLAN.md)" % cmd)
     if d.is_destructive(args):
@@ -814,7 +813,7 @@ def main(argv):
         os.execv(line[0], line)
 
     if delegate is not None:
-        delegate_run(delegate, cmd, inv.typed, readonly=d.is_readonly(sub))
+        delegate_run(delegate, cmd, inv.typed, readonly=d.is_readonly(args))
 
     name = ""
     if not in_workspace() and name_decl.split("@")[0] == "required":
@@ -850,7 +849,7 @@ def main(argv):
             raise Exit(0)
         if d.bare == "merged" and not positionals(args):
             bare_report(inv, cmd, args)
-        if d.is_readonly(sub) and not shutil.which("podman"):
+        if d.is_readonly(args) and not shutil.which("podman"):
             warn("podman is not installed, so there are no container workspaces to read")
             log("  './setup' installs it; 'WK_PLACE=vm wk ls' lists the macOS guests, which do not need it")
             raise Exit(0)

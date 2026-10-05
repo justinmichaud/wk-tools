@@ -511,7 +511,7 @@ def fleet_stores(root, env, machine):
 
 
 def hold(records, fleet, machine, kind, name, kill, log, plan, pid, env):
-    """A hold on the holder's own record, or None under --dry-run or a driver's own claim (WK_DEVICE_HELD)."""
+    """A hold on the holder's own record, or None under --dry-run or the claim a holding parent passed down (WK_DEVICE_HELD)."""
     res = "device:%s" % machine
     if env.get("WK_DEVICE_HELD") == res:
         return None

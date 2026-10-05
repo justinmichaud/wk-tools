@@ -3,6 +3,7 @@ destroys it and keeps its record, and a clone from the box's mirror is present o
 import contextlib
 import io
 import os
+import shlex
 import sys
 from unittest import mock
 
@@ -42,7 +43,12 @@ class TestTheBoxReadsItsWorkspace(BoxTest):
         self.assertEqual(self.t.state("integ"), "present")
 
     def test_creating_on_the_box_needs_no_snapshot(self):
-        self.assertFalse(self.on_the_box().needs_base or self.t.needs_base)
+        me = self.on_the_box()
+        records = record.Records(root=str(self.tmp / "records"), clock=FakeClock(), machine=self.fake)
+        with mock.patch.object(me, "create") as create, mock.patch.object(me, "ready", lambda ws, clock: True), \
+                mock.patch.object(me, "install_agents"), mock.patch.object(workspace, "freshen"):
+            workspace._create(me, records, None, FakeClock(), "fresh", None, "native", "absent")
+        create.assert_called_once_with("fresh", None, "native")
 
 
 class TestTheWorkstationHandsTheLifecycleOver(BoxTest):
@@ -64,6 +70,14 @@ class TestTheWorkstationHandsTheLifecycleOver(BoxTest):
         self.assertEqual([e for e in self.fake.effects if e[0] == "spawn" or e[1:] and str(e[1]).startswith(self.t.store.store_dir())], [])
         self.assertEqual(self.t.records().list(), [])
 
+    def test_a_detached_new_on_a_box_opens_no_zed_and_carries_its_timeouts(self):
+        os.environ.update(WK_NEW_TIMEOUT="7", WK_READY_TIMEOUT="9")
+        rc, err = self.front(no_wait=True, zed=True)
+        self.assertEqual(rc, 0, err)
+        handed = [shlex.split(shlex.split(e[1][-1])[-1]) for e in self.fake.effects if e[0] == "run_tty"]
+        self.assertLessEqual({"WK_NEW_TIMEOUT=7", "WK_READY_TIMEOUT=9"}, set(handed[0]))
+        self.assertEqual([e for e in self.fake.effects if "cmd/zed" in str(e)], [])
+
     def test_a_box_at_another_wk_tools_commit_is_refused_the_new(self):
         self.tools_at("0000stale000")
         rc, err = self.front()
@@ -73,9 +87,12 @@ class TestTheWorkstationHandsTheLifecycleOver(BoxTest):
 
     def test_rm_on_a_box_is_its_own_wk_rm(self):
         self.fake.dirs.add(self.t.store.ws_dir("a"))
+        self.fake.answer_remote("ws/a ]", out="present\n")
         self.fake.answer_remote("wk rm a", out="==> workspace 'a' destroyed\n")
         _, err = self.stderr_of(lambda: self.t.destroy("a"))
-        self.assertIn("WK_YES=1 WK_ROW_LABEL=box /home/u/wk/tools/wk rm a", self.fake.ssh_calls("wk rm a")[0][-1])
+        line = shlex.split(self.fake.ssh_calls("wk rm a")[0][-1])
+        self.assertEqual(line[-2:], ["rm", "a"])
+        self.assertLessEqual({"WK_YES=1", "WK_EXPORTS_READ=1"}, set(line))
         self.assertEqual(self.fake.effects[-1], ("remove", self.t.store.ws_dir("a")))
         self.assertEqual(self.fake.ssh_calls("rm -rf"), [])
         self.fake.answer_remote("wk rm a", rc=1, out="error: 'a' has work running in it\n")
@@ -83,6 +100,14 @@ class TestTheWorkstationHandsTheLifecycleOver(BoxTest):
         err = self.refused(lambda: self.t.destroy("a"))
         self.assertIn("box.example did not destroy 'a'", err)
         self.assertEqual([e for e in self.fake.effects if e[0] == "remove"], [])
+
+    def test_rm_of_a_checkout_already_gone_from_the_box_drops_the_record_here(self):
+        self.fake.dirs.add(self.t.store.ws_dir("a"))
+        self.fake.answer_remote("ws/a ]", out="absent\n")
+        self.fake.answer_remote("wk rm a", rc=1, out="error: no such workspace: a\n")
+        self.stderr_of(lambda: self.t.destroy("a"))
+        self.assertEqual(self.fake.ssh_calls("wk rm a"), [])
+        self.assertEqual(self.fake.effects[-1], ("remove", self.t.store.ws_dir("a")))
 
     def test_rm_on_the_box_itself_removes_the_checkout(self):
         me = self.on_the_box()
@@ -97,4 +122,6 @@ class TestTheWorkstationHandsTheLifecycleOver(BoxTest):
             marker = self.tmp / "wk-remote"
             marker.write_text("")
             self.env["WK_REMOTE_MARKER"] = str(marker)
+            self.assertEqual(len(workspace.unsaved_results(places.Registry(REPO, env=self.env, machine=self.fake), found)), 1)
+            self.env["WK_EXPORTS_READ"] = "1"
             self.assertEqual(workspace.unsaved_results(places.Registry(REPO, env=self.env, machine=self.fake), found), [])

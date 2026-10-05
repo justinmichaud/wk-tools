@@ -31,7 +31,7 @@ else
     echo "warning: only ${_free}G free on the data volume, need ~${NEED_FREE_GB}G." >&2
     echo "         The APFS container may not span the whole disk. resizeContainer said:" >&2
     printf '         %s\n' "${_out:-no physical store found}" >&2
-    echo "         Grow it with:  WK_VM_DISK_GB=<bigger> wk vm base --refresh" >&2
+    echo "         Grow it with:  WK_VM_DISK_GB=<bigger> wk sysimage build macos-guest-base --rebuild" >&2
 fi
 
 sudo pmset -a disablesleep 1 >/dev/null 2>&1 || true

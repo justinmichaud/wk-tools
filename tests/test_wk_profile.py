@@ -212,6 +212,11 @@ class TestOutputReachesTheTerminal(ProfileTest):
         self.assertEqual(rc, 0, err)
         self.assertTrue([e for e in self.w.effects if e[0] == "run_tty" and e[1][:2] == ("exec-tty", "ws")], self.w.effects)
 
+    def test_the_next_step_it_names_is_the_command_that_ran(self):
+        self.w.answer(["exec-tty", "ws", "bash", "-lc"], out="")
+        _, err = self.run_("--preset", "gtk-release", "--profile=sampling", "--", "x.js")
+        self.assertIn("wk run ws --profile=bytecode", err)
+
 
 class TestRunAndTestHandItOver(ProfileTest):
     """`wk run --profile` and `wk test --profile` are one profiler; a profiler flag needs --profile, and --profile runs alone."""

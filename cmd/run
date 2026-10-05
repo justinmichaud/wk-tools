@@ -163,16 +163,16 @@ def main(argv):
     except LookupError as e:
         die(str(e))
 
-    preset = store.build_preset() or reg.default_preset(name)
+    preset_name = store.build_preset() or reg.default_preset(name)
     try:
-        cfg = presets.resolve(preset, driver.os(), driver.kind, driver.env)
+        preset = presets.resolve(preset_name, driver.os(), driver.kind, driver.env)
     except LookupError:
-        die("unknown preset '%s'" % preset)
+        die("unknown preset '%s'" % preset_name)
 
     src = driver.src(name)
-    jsc = cfg.jsc_path(src)
-    var = cfg.run_var()
-    pre = prelude(var, cfg.run_dir(src))
+    jsc = preset.jsc_path(src)
+    var = preset.run_var()
+    pre = prelude(var, preset.run_dir(src))
     tail_q = shlex.join(opts["tail"])
 
     if opts["rr"] or opts["replay"]:
