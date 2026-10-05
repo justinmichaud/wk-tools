@@ -119,6 +119,8 @@ Answered 2026-10-04 (third batch): `pi-mbr` is deleted; `wk selftest` is exempt 
 
 Answered 2026-10-05: the flag that names where a workspace lives is `--on <place|machine>`; every named build (gtk-debug, mac-release, yocto-2.54-debug-pgo) is a *build preset*; the layers section goes below README's marker; the `$WK_STORE` parts are the *store* (a place's data: `ws/`, `base/`, `cache/`), the *records* (`task/`, `log/`, locks), the *mirror*, the *snapshots* (`base/<id>`), the *keyring* (secrets, agent-rw, push keys) and the *runtime* (the broker socket); the cut deletes no feature: tests test behaviour, branches are fewer, comments earn their place; `version` and `disk` become `doctor` sections, `logs` becomes `status --log`, `session` becomes `quiesce session`, `push` becomes `key push`, `profile` becomes `run`/`test --profile`; every tombstone goes and none is added; `wk pr` stays as it is; Claude commits the green tree (never pushes), syncs the boxes' wk-tools, rebuilds the macOS guest base and runs every lane.
 
+Answered 2026-10-05 (second batch): rotation allows one holder of the claude.ai credential, so the host-side injector holds and refreshes it and adds the bearer token to Anthropic and claude.ai requests, Remote Control's included, and no workspace holds it; `wk machine setup` installs a pinned node into a build box user's `~/.local` so pi installs there; the size budgets are targets, met by cutting under the four rules; Claude pushed `python-core` once (fast-forward) so moose could sync.
+
 ## Cutting it down
 
 40k lines of bash is the problem, not the raw material. It is that big
