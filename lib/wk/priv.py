@@ -28,7 +28,10 @@ def answers(helper_path, machine=None):
 
 
 def main(argv):
-    verb, rest = argv[0], argv[1:]
+    verb, rest = (argv or [""])[0], argv[1:]
+    if verb not in ("rows", "path", "sudoers", "answers") or len(rest) != (verb != "rows"):
+        sys.stderr.write("usage: python3 -m wk.priv rows | path <name> | sudoers <name> | answers <helper path>\n")
+        return 2
     if verb == "rows":
         for n, w, what in HELPERS:
             print(n, w, what)

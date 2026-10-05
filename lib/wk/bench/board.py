@@ -45,11 +45,36 @@ def slot_path(name):
 
 
 def cache_dir():
-    return "/tmp/wk-%s-cache" % project.CHECKOUT.lower()
+    return "/tmp/wk-%s-cache" % project.get("CHECKOUT").lower()
+
+
+def slot_env(doc, prefix):
+    return ["%s=%s/%s" % (var, prefix.rstrip("/"), doc[key]) for var, key in project.get("SLOT_ENV")]
+
+
+def slot_expect(doc, prefix):
+    p, proc = prefix.rstrip("/"), project.get("BOARD_HELPERS")[0]
+    return {"process": proc, "exe": "%s/%s/%s" % (p, doc["exec_dir"], proc), "lib": "%s/%s" % (p, doc["lib_file"]),
+            "lib_sha256": doc["files"][doc["lib_file"]], "build_id": doc["build_id"]}
+
+
+def slot_verified(path):
+    n = 0
+    try:
+        with open(path) as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                n += 1
+                if not json.loads(line).get("ok"):
+                    return 0
+    except (OSError, ValueError):
+        return 0
+    return n
 
 
 def kill_cmd(browser):
-    names = " ".join((project.BOARD_BROWSERS[browser],) + project.BOARD_HELPERS)
+    names = " ".join((project.get("BOARD_BROWSERS")[browser],) + project.get("BOARD_HELPERS"))
     return "killall %s 2>/dev/null; sleep 1; killall -9 %s 2>/dev/null; true" % (names, names)
 
 
@@ -72,9 +97,9 @@ def runner_tree(reg, here, root):
     sha = r.out.strip()
     if not r.ok or not sha:
         die("the mirror has no '%s' to export a runner from ('wk sync' fetches main)" % ref)
-    tree, scripts = os.path.join(reg.store.cache_dir(), "bench-runner", sha[:12]), os.path.dirname(project.BENCH_RUNNER)
-    if not here.exists(os.path.join(tree, project.BENCH_RUNNER)):
-        info("exporting %s from the mirror at %s (%s only)" % (os.path.basename(project.BENCH_RUNNER), sha[:12], scripts))
+    tree, scripts = os.path.join(reg.store.cache_dir(), "bench-runner", sha[:12]), os.path.dirname(project.get("BENCH_RUNNER"))
+    if not here.exists(os.path.join(tree, project.get("BENCH_RUNNER"))):
+        info("exporting %s from the mirror at %s (%s only)" % (os.path.basename(project.get("BENCH_RUNNER")), sha[:12], scripts))
         tmp = tree + ".tmp"   # renamed into place, so a kill mid-export leaves nothing the next run reads
         here.remove(tmp)
         here.mkdir(tmp)
@@ -83,7 +108,7 @@ def runner_tree(reg, here, root):
         here.remove(tree)
         if not here.act_run(["mv", "-f", tmp, tree]).ok:
             die("could not move the exported runner into place at %s" % tree)
-    here.copy_in(os.path.join(root, DRIVER), os.path.join(tree, project.BENCH_DRIVERS, "wk_board_driver.py"))
+    here.copy_in(os.path.join(root, DRIVER), os.path.join(tree, project.get("BENCH_DRIVERS"), "wk_board_driver.py"))
     here.copy_tree_in(os.path.join(root, "lib", "wk"), os.path.join(tree, WKLIB, "wk"))
     return tree, sha
 
@@ -130,12 +155,12 @@ class BoardSystem(System):
         doc_path = os.path.join(d, "slot.json")
         if not os.path.isfile(doc_path):
             die("'%s' has no slot '%s' built.\n    Build one first:\n"
-                "        %s <profile> --workspace %s --commit <sha> --slot %s" % (self.ws, name, project.SLOT_COMMAND, self.ws, name))
+                "        %s <profile> --workspace %s --commit <sha> --slot %s" % (self.ws, name, project.get("SLOT_COMMAND"), self.ws, name))
         with open(doc_path) as f:
             doc = json.load(f)
         self.barrier("Landing slot '%s' now would put it on the system that boot is about to leave." % name)
         m, dest, part = self.bench(), slot_path(name), slot_path(name) + ".part"
-        info("deploying slot '%s' to %s (%s, %s %s)" % (name, self.board, doc.get("browser", "?"), project.CHECKOUT, doc.get("commit", "")[:12]))
+        info("deploying slot '%s' to %s (%s, %s %s)" % (name, self.board, doc.get("browser", "?"), project.get("CHECKOUT"), doc.get("commit", "")[:12]))
         m.remove(part)
         m.mkdir(part)
         m.copy_tree_in(os.path.join(d, "root"), os.path.join(part, "root"))
@@ -150,7 +175,7 @@ class BoardSystem(System):
             return
         log("deployed to %s" % self.board)
         log("  slot      %s (%s)" % (name, dest))
-        log("  %-9s %s" % (project.CHECKOUT.lower(), doc.get("commit", "")))
+        log("  %-9s %s" % (project.get("CHECKOUT").lower(), doc.get("commit", "")))
         log("  build-id  %s  (what a run reads back out of the running process)" % doc.get("build_id", ""))
         log("  next:     wk bench run %s <plan> --system %s --slot %s" % (self.ws, self.board, name))
 
@@ -186,8 +211,8 @@ class BoardSystem(System):
             die("%s answered as system '%s', not the '%s' this leg is for.\n    Nothing was measured; 'wk boot %s --status' says what "
                 "it is running." % (name, self.sysid, want, name))
         self.doc = self.manifest(leg.slot)
-        if self.doc.get("browser") not in project.BOARD_BROWSERS:
-            die("slot '%s' names browser '%s', which a board run cannot launch (%s)" % (leg.slot, self.doc.get("browser"), ", ".join(project.BOARD_BROWSERS)))
+        if self.doc.get("browser") not in project.get("BOARD_BROWSERS"):
+            die("slot '%s' names browser '%s', which a board run cannot launch (%s)" % (leg.slot, self.doc.get("browser"), ", ".join(project.get("BOARD_BROWSERS"))))
         self.instrumented(leg)
         self.probed = kv(self.sh(self.driver.ob("probe.sh")).out)
         self.facts_ = kv(self.sh(self.ob("facts.sh")).out)
@@ -218,10 +243,10 @@ class BoardSystem(System):
     def instrumented(self, leg):
         """An instrumented build writes a profile as each process exits and is several times slower for it: collected from, never measured."""
         was = self.doc.get("build_preset", "")
-        if leg.o.get("pgo_dir") and was != project.PGO_COLLECT:
+        if leg.o.get("pgo_dir") and was != project.get("PGO_COLLECT"):
             die("a collection reads an instrumented build and slot '%s' is '%s', so it would write no profile at all.\n"
-                "    The instrumented slot is the middle phase of '%s' and is named <slot>-instr." % (leg.slot, was or "not one", project.SLOT_COMMAND))
-        if not leg.o.get("pgo_dir") and was == project.PGO_COLLECT:
+                "    The instrumented slot is the middle phase of '%s' and is named <slot>-instr." % (leg.slot, was or "not one", project.get("SLOT_COMMAND")))
+        if not leg.o.get("pgo_dir") and was == project.get("PGO_COLLECT"):
             die("slot '%s' on %s is an instrumented build: a number taken from it is not this engine's.\n"
                 "    The measured slot is the one without '-instr'." % (leg.slot, self.board))
 
@@ -230,7 +255,7 @@ class BoardSystem(System):
         return "throttled=0x" + t if t else ""
 
     def build_present(self, leg):
-        return True, "slot '%s' at %s (%s %s, build-id %s)" % (leg.slot, slot_path(leg.slot), project.CHECKOUT, self.doc.get("commit", "")[:12],
+        return True, "slot '%s' at %s (%s %s, build-id %s)" % (leg.slot, slot_path(leg.slot), project.get("CHECKOUT"), self.doc.get("commit", "")[:12],
                                                                self.doc.get("build_id", "")[:12])
 
     def checks(self, leg):
@@ -342,11 +367,13 @@ class BoardSystem(System):
 
     def launch(self, leg):
         root = slot_path(leg.slot) + "/root"
-        env = project.slot_env(self.doc, root) + ["XDG_CACHE_HOME=" + cache_dir()]
+        env = slot_env(self.doc, root) + ["XDG_CACHE_HOME=" + cache_dir()]
         env += ["LLVM_PROFILE_FILE=" + leg.o["pgo_file"]] if leg.o.get("pgo_dir") else []
-        env += list(project.JIT_TIERS) if leg.o.get("warmup") and leg.o.get("jit_tiers") else []
-        exe = "/usr/bin/cog" if self.doc["browser"] == "cog" else root + "/" + project.BROWSER_PRODUCTS[0]
-        return "cd /tmp && %sexec %senv %s %s" % ("" if self.session == "rdk" else WAYLAND + project.BOARD_BACKEND,
+        # One line per optimizing compile, dumped from the compiler thread, which SIGSEGVs the JIT worker on some builds.
+        env += list(project.get("JIT_TIERS")) if leg.o.get("warmup") and leg.o.get("jit_tiers") else []
+        exe = "/usr/bin/cog" if self.doc["browser"] == "cog" else root + "/" + project.get("BROWSER_PRODUCTS")[0]
+        # rdk's cmake claims libWPEBackend-default.so, so the default backend would be its stub: BOARD_BACKEND names fdo's.
+        return "cd /tmp && %sexec %senv %s %s" % ("" if self.session == "rdk" else WAYLAND + project.get("BOARD_BACKEND"),
                                                  "taskset -c %s " % leg.cores if leg.cores else "", " ".join(env), exe)
 
     def warm_file(self, leg, what):
@@ -358,7 +385,7 @@ class BoardSystem(System):
                 ("WK_BOARD_LAUNCH", self.launch(leg)),
                 ("WK_BOARD_KILL", kill_cmd(self.doc["browser"])), ("WK_BOARD_RESET", "rm -rf %s && mkdir -p %s" % (cache_dir(), cache_dir())),
                 ("WK_BOARD_URL", "127.0.0.1:%d" % leg.port),
-                ("WK_BOARD_EXPECT", json.dumps(project.slot_expect(self.doc, slot_path(leg.slot) + "/root"))),
+                ("WK_BOARD_EXPECT", json.dumps(slot_expect(self.doc, slot_path(leg.slot) + "/root"))),
                 ("WK_BOARD_EVIDENCE", os.path.join(leg.out, "verify.jsonl")),
                 ("WK_BOARD_WARMUP", self.warm_file(leg, "evidence.json") if leg.o.get("warmup") else ""),
                 ("WK_BOARD_CLASS", leg.klass), ("WK_BOARD_JIT_TIERS", "1" if leg.o.get("jit_tiers") else ""),
@@ -374,7 +401,7 @@ class BoardSystem(System):
                 if not m.via.alive(pid):
                     text = open(tunnel).read() if os.path.isfile(tunnel) else ""
                     die("could not open the forward to %s (port %d):\n%s" % (self.board, leg.port, "".join("    " + l for l in text.splitlines(True))))
-            log("  tunnel      127.0.0.1:%d on %s -> %s here" % (leg.port, self.board, os.path.basename(project.BENCH_RUNNER)))
+            log("  tunnel      127.0.0.1:%d on %s -> %s here" % (leg.port, self.board, os.path.basename(project.get("BENCH_RUNNER"))))
             return watched(["bash", "-c", script], self.runner_dir, log_path)
 
     def collect(self, leg):
@@ -399,7 +426,7 @@ class BoardSystem(System):
             return
         leg.machine.write(os.path.join(out, "browser.log"), browser_log)
         leg.machine.write(os.path.join(out, "board.log"), m.run(["tail", "-n", "300", "/tmp/messages"]).out)
-        n = project.slot_verified(os.path.join(out, "verify.jsonl"))
+        n = slot_verified(os.path.join(out, "verify.jsonl"))
         fields, bools = [], ["verified=" + ("1" if n else "")]
         if leg.o.get("settle") or leg.o.get("warmup"):
             bools.append("warmup=1")
@@ -408,7 +435,7 @@ class BoardSystem(System):
             fields += ["profiler=" + (self.profiler or self.unmeasured or "none"), "host.perf_event_paranoid=" + self.paranoid]
         record.write_env(os.path.join(out, "env.json"), fields, bool_fields=bools, update=True, machine=leg.machine)
         if n:
-            log("  verified    the reporting %s ran slot '%s' (%d check(s), build-id %s)" % (project.BOARD_HELPERS[0], leg.slot, n, self.doc.get("build_id", "")[:12]))
+            log("  verified    the reporting %s ran slot '%s' (%d check(s), build-id %s)" % (project.get("BOARD_HELPERS")[0], leg.slot, n, self.doc.get("build_id", "")[:12]))
 
     def pull_profile(self, leg):
         if not self.capture:
@@ -432,10 +459,10 @@ class BoardSystem(System):
 
 
 class BoardRun(pipeline.Run):
-    """One leg on a board: its task and progress record live on this machine, where run-benchmark runs."""
+    """One leg on a board: its task and progress record live on this machine, where the benchmark runner runs."""
 
-    def __init__(self, root, reg, system, clock, env=None, name=""):
-        super().__init__(root, reg, system, clock, env)
+    def __init__(self, root, reg, system, clock, kit, env=None, name=""):
+        super().__init__(root, reg, system, clock, kit, env)
         self.name = name or self.ws or system.board
         self.kill_cmd = ("wk bench run %s --kill --system %s" % (self.ws, system.board)) if self.ws else "kill %d" % os.getpid()
 
@@ -468,16 +495,16 @@ class BoardRun(pipeline.Run):
         task = o.get("task") or ""
         if task and not o.get("pgo_dir"):
             record.leg_home(self.reg, self.ws, task)
-        leg.klass, leg.runner, leg.browser = project.bench_class(plan), "browser", ""
+        leg.klass, leg.runner, leg.browser = pipeline.bench_class(plan), "browser", ""
         leg.port = 0
         self.system.pending = leg
         return leg
 
     def collection(self, o):
-        """`--collect`: one iteration of an instrumented slot into the image workspace's build directory, where and how long as handed in."""
+        """`--collect`: one iteration of an instrumented slot into the image workspace's build directory, where and how long as the kit says."""
         if o.get("count") not in (None, "", "1"):
             die("--collect runs one iteration, as upstream collects: every further one overwrites the last one's profile")
-        return project.pgo_collection(self.ws, images.measured_slot(o.get("slot") or "a"), self.reg.env, o.get("timeout"))
+        return self.kit.board_collection(self.ws, images.measured_slot(o.get("slot") or "a"), self.reg.env, o.get("timeout"))
 
     def idle_rows(self):
         """This host serves pages to the board; its own load is not the measurement."""
@@ -489,14 +516,14 @@ class BoardRun(pipeline.Run):
         if s.runner_dir:
             return s.plan_text
         s.runner_dir, s.runner_sha = runner_tree(self.reg, self.here, self.root)
-        log("  runner      %s @ %s (%s)" % (os.path.basename(project.BENCH_RUNNER), s.runner_sha[:12], s.runner_dir))
+        log("  runner      %s @ %s (%s)" % (os.path.basename(project.get("BENCH_RUNNER")), s.runner_sha[:12], s.runner_dir))
 
         def read(path):
             try:
-                return self.here.read(os.path.join(s.runner_dir, os.path.dirname(project.BENCH_RUNNER), path))
+                return self.here.read(os.path.join(s.runner_dir, os.path.dirname(project.get("BENCH_RUNNER")), path))
             except OSError:
                 return None
-        s.plan_text, s.payload = project.pin_plan(self.here, self.lock, self.reg.store, read, plan)
+        s.plan_text, s.payload = self.kit.pin_plan(self.here, self.lock, self.reg.store, read, plan)
         return s.plan_text
 
     def seed(self, leg):
@@ -516,7 +543,7 @@ class BoardRun(pipeline.Run):
             leg.machine, bench = record.leg_home(self.reg, self.ws, "" if new else leg.task)
             taskdir = os.path.join(bench, leg.task)
             leg.out = os.path.join(taskdir, "runs", leg.id)
-        steps = ["bring up the session on %s for slot '%s' (%s %s)" % (s.board, leg.slot, project.CHECKOUT, s.doc.get("commit", "")[:12]),
+        steps = ["bring up the session on %s for slot '%s' (%s %s)" % (s.board, leg.slot, project.get("CHECKOUT"), s.doc.get("commit", "")[:12]),
                  "run %s (browser, %s iteration(s)) on %s" % (leg.plan, leg.count or "default", s.board), "collect into %s" % leg.out]
         if act.dry_run():
             return steps
@@ -542,7 +569,7 @@ class BoardRun(pipeline.Run):
         """A PGO slot's profile reading, from its image workspace's collection, goes with the run it measured."""
         doc = self.system.doc
         check = os.path.join(images.pgo_dir(doc.get("workspace") or self.ws, leg.slot, self.reg.env), "profile-check.json")
-        if doc.get("build_preset") == project.PGO_USE and not leg.o.get("pgo_dir") and self.here.exists(check):
+        if doc.get("build_preset") == project.get("PGO_USE") and not leg.o.get("pgo_dir") and self.here.exists(check):
             leg.machine.write(os.path.join(leg.out, "profile-check.json"), self.here.read(check))
 
     def write_env(self, leg):
@@ -553,7 +580,7 @@ class BoardRun(pipeline.Run):
             "plan=" + leg.plan, "workspace=" + doc.get("workspace", ""), "preset=" + doc.get("profile", ""), "browser=" + doc.get("browser", ""),
             "count=" + leg.count, "class=" + leg.klass, "runner=browser", "arch=" + (s.facts_.get("arch") or "native"), "bench_host=" + s.bench_host,
             "display=" + s.display, "machine=" + s.board, "system=" + s.sysid, "build_slot=" + leg.slot,
-            "build_preset=" + doc.get("build_preset", ""), project.SHA_FIELD + "=" + doc.get("commit", ""), "build_id=" + doc.get("build_id", ""),
+            "build_preset=" + doc.get("build_preset", ""), project.get("SHA_FIELD") + "=" + doc.get("commit", ""), "build_id=" + doc.get("build_id", ""),
             "runner_sha=" + s.runner_sha, "local_copy=" + leg.payload, "host.kernel=" + s.facts_.get("kernel", ""),
             "host.kernel_arch=" + s.facts_.get("arch", ""), "host.governor=" + s.clk.get("governor", ""), "host.throttled=" + s.throttled(),
             "host.root_device=" + s.probed.get("rootdev", ""), "host.cpu_khz=" + lo, "cores.set=" + leg.cores,
@@ -572,11 +599,11 @@ class BoardRun(pipeline.Run):
         port = first_line(self.here.run(["python3", "-c", FREE_PORT]))
         if not port.isdigit():
             die("could not find a free port on this host for the runner's page server")
-        leg.port, runner = int(port), os.path.basename(project.BENCH_RUNNER)
-        args = ["python3"] + project.board_runner_args(leg, port, os.path.join(leg.out, "diagnose"), os.path.join(leg.out, "result.json"))
+        leg.port, runner = int(port), os.path.basename(project.get("BENCH_RUNNER"))
+        args = ["python3"] + self.kit.board_runner_args(leg, port, os.path.join(leg.out, "diagnose"), os.path.join(leg.out, "result.json"))
         script = "".join("export %s=%s\n" % (k, shlex.quote(v)) for k, v in s.board_env(leg))
         script += "cd %s && exec %s" % (shlex.quote(s.runner_dir), shlex.join(args))
-        info("running %s on %s from slot '%s' (%s %s)" % (leg.plan, s.board, leg.slot, project.CHECKOUT, s.doc.get("commit", "")[:12]))
+        info("running %s on %s from slot '%s' (%s %s)" % (leg.plan, s.board, leg.slot, project.get("CHECKOUT"), s.doc.get("commit", "")[:12]))
         log("  results: %s" % leg.out)
         path = os.path.join(leg.out, "run.log")
         rc = s.run(leg, script, self.watched, path)

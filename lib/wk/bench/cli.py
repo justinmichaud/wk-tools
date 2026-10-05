@@ -8,7 +8,7 @@ import zipfile
 
 from wk import act, record as wkrecord
 from wk.act import die, info
-from wk.bench import ab, board, board_ab, mac_ab, pipeline, record, report, seed, systems
+from wk.bench import ab, board, board_ab, mac_ab, pipeline, plans, record, report, seed, systems
 from wk.lock import Lock, holder_pid
 from wk.machine import Local, Planted, matches
 from wk.store import ws_name
@@ -363,7 +363,7 @@ def run(root, reg, words, o, kill, clock):
     system = systems.for_workspace(root, reg, ws, clock, o.get("system") or "")
     if o.get("collect") and system.kind != "board":
         die("--collect takes a PGO profile from a board's instrumented slot: --system <board> --slot <name>-instr")
-    r = pipeline.run_class(system)(root, reg, system, clock, reg.env)
+    r = pipeline.run_class(system)(root, reg, system, clock, plans, reg.env)
     if kill:
         return r.stop()
     if o.get("task") and not act.dry_run():

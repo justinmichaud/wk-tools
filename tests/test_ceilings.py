@@ -23,10 +23,11 @@ class TestCeilings(WkTest):
 
 
     def test_no_fleet_probe_can_outlive_its_ceiling(self):
-        wk = self.tmp / "lib" / "wk"
-        wk.mkdir(parents=True)
-        (wk / "__init__.py").write_text("")
-        (wk / "__main__.py").write_text("import time\ntime.sleep(600)\n")
+        boot = self.tmp / "lib" / "wk" / "boot"
+        boot.mkdir(parents=True)
+        (boot.parent / "__init__.py").write_text("")
+        (boot / "__init__.py").write_text("")
+        (boot / "cli.py").write_text("import time\ntime.sleep(600)\n")
         self.assertIsNone(status.fleet_probe(self.tmp, "rpi4", 0.5, env={}))
         rec = status.fleet_record("rpi4", {"role": "bench-device"}, None, 0)
         self.assertEqual((rec["machine"], rec["mode"]), ("rpi4", "no answer within 0s"))

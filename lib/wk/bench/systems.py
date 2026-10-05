@@ -92,12 +92,12 @@ class System:
 
     def build_present(self, leg):
         build = leg.preset.build_dir(self.src())
-        if leg.runner == project.SHELL:
+        if leg.runner == project.get("SHELL"):
             shell = leg.preset.jsc_path(self.src())
-            return (True, shell) if self.exec_ok("test", "-x", shell) else (False, "no %s in %s -- wk build %s %s" % (project.SHELL, build, self.ws, leg.preset.name))
+            return (True, shell) if self.exec_ok("test", "-x", shell) else (False, "no %s in %s -- wk build %s %s" % (project.get("SHELL"), build, self.ws, leg.preset.name))
         if any(self.exec_ok("test", "-x", p) for p in self.browser_products(leg)):
             return True, build
-        return False, "no %s in %s -- wk build %s %s" % (project.BROWSER, build, self.ws, leg.preset.name)
+        return False, "no %s in %s -- wk build %s %s" % (project.get("BROWSER"), build, self.ws, leg.preset.name)
 
     def link(self, path, link):
         self.ws_driver.act_exec(self.ws, ["mkdir", "-p", os.path.dirname(link)])
@@ -105,7 +105,7 @@ class System:
 
 
 class ContainerSystem(System):
-    """run-benchmark in the container, into the task in its workspace's directory (mounted at /var/lib/wk/ws/<ws>): nothing to collect."""
+    """The runner in the container, into the task in its workspace's directory (mounted at /var/lib/wk/ws/<ws>): nothing to collect."""
 
     kind = "container"
     bench_host = "container"
@@ -138,14 +138,14 @@ class ContainerSystem(System):
         return ""
 
     def default_browser(self, preset):
-        b = project.BENCH_BROWSERS.get(preset.port)
+        b = project.get("BENCH_BROWSERS").get(preset.port)
         if not b:
             die("no benchmark browser for port %s" % (preset.port or preset.name))
         return b
 
     def browser_products(self, leg):
         build = leg.preset.build_dir(self.src())
-        return [build + "/" + p for p in project.BROWSER_PRODUCTS]
+        return [build + "/" + p for p in project.get("BROWSER_PRODUCTS")]
 
     def run_dir(self, leg):
         return os.path.join("/var/lib/wk/ws", self.ws, os.path.relpath(leg.out, self.ws_driver.store.ws_dir(self.ws)))
@@ -154,10 +154,10 @@ class ContainerSystem(System):
         return "/cache/bench/" + os.path.basename(leg.payload) if leg.payload else ""
 
     def run_env(self, leg):
-        return list(SOFTWARE_ENV) + list(project.SOFTWARE_ENV) if leg.software else []
+        return list(SOFTWARE_ENV) + list(project.get("SOFTWARE_ENV")) if leg.software else []
 
     def runner_argv(self, leg):
-        return [project.BENCH_RUNNER, "--browser", leg.browser]
+        return [project.get("BENCH_RUNNER"), "--browser", leg.browser]
 
     def deploy(self, leg):
         """The build is the workspace's own, and the payload is on the store's /cache/bench mount."""
@@ -243,7 +243,7 @@ class ContainerSystem(System):
 
 
 class GuestSystem(System):
-    """run-benchmark in the macOS guest, into a run directory there; `collect` copies its result out through the guest's copy."""
+    """The runner in the macOS guest, into a run directory there; `collect` copies its result out through the guest's copy."""
 
     kind = "guest"
     bench_host = "guest"
@@ -263,7 +263,7 @@ class GuestSystem(System):
         return ""
 
     def default_browser(self, preset):
-        return project.BENCH_BROWSERS["macos"]
+        return project.get("BENCH_BROWSERS")["macos"]
 
     def browser_products(self, leg):
         return [leg.preset.browser_path(self.src())]
@@ -281,7 +281,7 @@ class GuestSystem(System):
         return []
 
     def runner_argv(self, leg):
-        return [project.BENCH_RUNNER, "--browser", leg.browser, "--platform", "osx"]
+        return [project.get("BENCH_RUNNER"), "--browser", leg.browser, "--platform", "osx"]
 
     def deploy(self, leg):
         """The pinned payload, copied in: the guest cannot see this store."""
@@ -301,7 +301,7 @@ class GuestSystem(System):
             return [], []
         ok = self.exec_ok("python3", "-c", "import objc")
         return [(True, "python with PyObjC", "the guest's python3") if ok else
-                (False, "python with PyObjC", "the guest's python3 cannot 'import objc'; run-benchmark's driver needs it")], []
+                (False, "python with PyObjC", "the guest's python3 cannot 'import objc'; %s's driver needs it" % os.path.basename(project.get("BENCH_RUNNER")))], []
 
     def sysctl(self, key):
         return first_line(self.ws_driver.exec(self.ws, ["sysctl", "-n", key]))

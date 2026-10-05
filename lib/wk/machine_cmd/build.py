@@ -76,10 +76,10 @@ class BuildMachines:
                 "    then re-run 'wk machine setup %s'. Nothing has been changed." % (host, name))
         ref = t.reference()
         if ref:
-            info("this machine publishes a %s repository: %s" % (project.CHECKOUT, ref))
+            info("this machine publishes a %s repository: %s" % (project.get("CHECKOUT"), ref))
             log("  workspaces will be cloned from it (hardlinked objects), not from a mirror of ours")
         else:
-            log("  no shared %s repository advertised -- a mirror under the root will be kept instead" % project.CHECKOUT)
+            log("  no shared %s repository advertised -- a mirror under the root will be kept instead" % project.get("CHECKOUT"))
         if re.search(r"home *(dir|directory)?.*shared", t._sh(MOTD).out, re.I) and not t.conf_root:
             die("this machine says its home directory is shared with other boxes. Each needs a root of its\n"
                 "    own, or they share one set of workspaces, key dirs and locks, and one build tree\n"
@@ -172,7 +172,7 @@ class BuildMachines:
         if not src:
             t._mirror_update(t.root_there())
             src = t.mirror_dir()
-        dirs = "Tools/gtk" + (" Tools/wpe" if t.env.get("WK_REMOTE_WPE") else "")
+        dirs = " ".join(project.get("DEPS_DIRS")[:2 if t.env.get("WK_REMOTE_WPE") else 1])
         script = ('set -e; tmp=$(mktemp -d); trap \'rm -rf "$tmp"\' 0\n'
                   'git -C %s archive main -- %s | tar -x -C "$tmp"\n'
                   'for d in %s; do "$tmp/$d/install-dependencies"; done' % (shlex.quote(src), dirs, dirs))

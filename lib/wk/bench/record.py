@@ -7,7 +7,7 @@ import sys
 import zipfile
 
 from wk import fleetwalk, project
-from wk.act import die
+from wk.act import Refused, die
 from wk.kv import kv_file
 from wk.machine import Local, PodmanVm, Ssh
 
@@ -135,7 +135,7 @@ def not_a_measurement(env):
 
 
 def run_state(env, has_result):
-    """ok has a non-empty result.json; failed has none but the wall_time_s written when run-benchmark returned; running has neither."""
+    """ok has a non-empty result.json; failed has none but the wall_time_s written when the runner returned; running has neither."""
     if has_result:
         return "rehearsal" if not_a_measurement(env) else "ok"
     return "failed" if "wall_time_s" in env else "running"
@@ -370,7 +370,7 @@ def homes(store):
 
 
 def leg_home(reg, ws, task=""):
-    """(machine, bench) of `ws`, holding `task` when named: run-benchmark writes a leg's log and result where it runs."""
+    """(machine, bench) of `ws`, holding `task` when named: the runner writes a leg's log and result where it runs."""
     home = ws_home(reg, ws)
     if isinstance(home[0], Ssh):
         die("workspace '%s' keeps its tasks in %s on %s, and a leg writes its log and result where it runs: run it on %s"
@@ -400,7 +400,7 @@ def ls_rows(found, running=(), where=""):
         for r in st["runs"]:
             m = r["env"]
             axes = "/".join([m.get("runner", "browser")] + [m[k] for k, d in (("arch", "native"), ("bench_host", "container")) if m.get(k, d) != d])
-            out.append("      %s  %s %s %s %s %s%s" % (r["dir"], m.get("plan", "?"), m.get("preset", "?"), axes, (m.get(project.SHA_FIELD) or "?")[:10],
+            out.append("      %s  %s %s %s %s %s%s" % (r["dir"], m.get("plan", "?"), m.get("preset", "?"), axes, (m.get(project.get("SHA_FIELD")) or "?")[:10],
                                                      r["state"], "  [FORCED]" if m.get("forced") else ""))
     return out
 
@@ -436,4 +436,7 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as e:
+        sys.exit(e.status)

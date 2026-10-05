@@ -3,9 +3,9 @@
 import json
 import os
 import re
-import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
+import credcheck
 from wk import project, reach, secrets
 from wk.store import no_such_workspace
 from wk.act import die
@@ -25,11 +25,7 @@ CURL = "curl -sS -m 40 --suppress-connect-headers -D -"
 
 def placeholders():
     """The PR tool sends two of these, gh the other."""
-    return ("GITHUB_COM_TOKEN", "GH_TOKEN", project.BUGZILLA_ENV[1])
-
-
-def bugzilla_host():
-    return urllib.parse.urlsplit(project.BUGZILLA).hostname
+    return ("GITHUB_COM_TOKEN", "GH_TOKEN", project.get("BUGZILLA_ENV")[1])
 
 
 def http(url, extra=""):
@@ -270,7 +266,7 @@ class Wall:
                          "with it -- 'gh', and '%s pr', which reports it as a token of its own being out of date. A token this "
                          "machine holds and GitHub still accepts ('wk key check github-pat') means the injector was handed an older one: "
                          "'wk start %s' converges a guest's copy and './setup' the podman machine's. One refused there too is "
-                         "'wk key set github-pat --replace'" % (project.PR_TOOL, self.ws))]
+                         "'wk key set github-pat --replace'" % (project.get("PR_TOOL"), self.ws))]
         if root == "200":
             return [miss("a read answered '%s' rather than 200 or 401" % (user or "nothing"),
                          "the injector is in the path but not answering for api.github.com/user")]
@@ -341,7 +337,7 @@ class Wall:
         return rows
 
     def pr_tool_setup(self):
-        tool, key = project.PR_TOOL, project.PR_TOOL_SETUP
+        tool, key = project.get("PR_TOOL"), project.get("PR_TOOL_SETUP")
         if self.inside("git -C %s config --get %s" % (self.driver.src(self.ws), key)) == "true":
             return [ok("%s is set up in '%s' (hooks, fork remote verified)" % (tool, self.ws))]
         return [miss("'%s setup' has not completed in '%s' (%s is not true): `%s pr` prompts or refuses" % (tool, self.ws, key, tool),
@@ -351,13 +347,13 @@ class Wall:
         return upstream_gap(name, self.driver.daemon_remedy(self.ws, "inject"), *replies)
 
     def bugzilla_read(self):
-        reply = self.inside(http(project.BUGZILLA + "/rest/version"))
+        reply = self.inside(http(project.get("BUGZILLA") + "/rest/version"))
         if gap := self.gap("Bugzilla", reply):
             return gap
         code = status_of(reply)
         if code == "200":
-            return [ok("%s reachable through the injector (HTTP %s)" % (bugzilla_host(), code))]
-        return [miss("%s answered '%s' -- the injector is not in the path for it" % (bugzilla_host(), code or "nothing"),
+            return [ok("%s reachable through the injector (HTTP %s)" % (credcheck.bugzilla_host(), code))]
+        return [miss("%s answered '%s' -- the injector is not in the path for it" % (credcheck.bugzilla_host(), code or "nothing"),
                      self.driver.daemon_remedy(self.ws, "inject"))]
 
     def bugzilla_write(self):
@@ -365,7 +361,7 @@ class Wall:
         post = "-X POST -H 'Content-Type: application/json' -d '{}' "
         if self.push_on != 1:
             # Nothing reaches Bugzilla here, so the status is the injector's own.
-            reply = self.inside(http(project.BUGZILLA + "/rest/bug", post))
+            reply = self.inside(http(project.get("BUGZILLA") + "/rest/bug", post))
             if gap := self.gap("Bugzilla", reply):
                 return gap
             code = status_of(reply)
@@ -375,7 +371,7 @@ class Wall:
                          % (code or "nothing"),
                          "Bugzilla's own 'log in first' is an injector still running older code, which 'wk status' reports and "
                          "'./setup' on that machine restarts; anything else is a Bugzilla key still on the machine:  wk key push off")]
-        reply = self.inside("%s %s%s/rest/bug 2>/dev/null" % (CURL, post, project.BUGZILLA))
+        reply = self.inside("%s %s%s/rest/bug 2>/dev/null" % (CURL, post, project.get("BUGZILLA")))
         headers, _, body = reply.partition("\n\n") if reply.startswith("HTTP/") else ("", "", reply)
         if "wk credential injector" in body or fault_of(headers):
             return self.gap("Bugzilla", headers + "\n" + ("504" if "did not answer" in body else "502"))
@@ -390,7 +386,7 @@ class Wall:
             return [miss("push is ON and the key reached Bugzilla, which does not know it (306)",
                          "'wk key set bugzilla-api-key --replace', then 'wk key push on' again")]
         if not code:
-            return [miss("POST /rest/bug answered nothing Bugzilla-shaped", "the injector is in the path but not answering for " + bugzilla_host())]
+            return [miss("POST /rest/bug answered nothing Bugzilla-shaped", "the injector is in the path but not answering for " + credcheck.bugzilla_host())]
         return [ok("a Bugzilla write is authenticated (error %s: an empty bug, nothing filed), and push is on" % code)]
 
     def gpu(self):

@@ -67,7 +67,7 @@ def lib_argv(root, rel, fn, *args):
     return ["bash", "-c", '. "$0"; %s "$@"' % fn, os.path.join(str(root), rel), *args]
 
 
-ISOLATED = "import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module('wk', run_name=__name__, alter_sys=True)"
+ISOLATED = "import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module(sys.argv.pop(1), run_name=__name__, alter_sys=True)"
 
 
 def isolated_module(lib, module, python="python3"):

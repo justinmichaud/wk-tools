@@ -14,13 +14,12 @@ import shutil
 import stat
 import sys
 
-from wk import act, agents, fleet, guest, images, kv, project, reach, record, secrets, sshalias, tools
+from wk import act, agents, fleet, git, guest, images, kv, project, reach, record, secrets, sshalias, tools
 from wk.machine import TIMED_OUT, Local, PodmanVm, Result, Ssh, TartExec, isolated_module, lib_argv
 from wk.resources import Resources, arch_has_gpu, workspace_marker_path
 from wk.store import Store, dispatch_place, in_vm, no_such_workspace
 
 BUILTIN = ("container", "vm", "remote", "local")
-SDK_REPO = "ghcr.io/igalia/wkdev-sdk"
 READY_MARKER = ".wk-ready"
 STATES_NOT_THERE = ("absent", "creating", "broken", "unreachable")
 READY_TIMEOUT = 300
@@ -33,8 +32,6 @@ GUEST_MOUNT_MIRROR = "/usr/local/libexec/wk-mount-mirror"
 TOOLS = "/opt/wk-tools"
 BRIDGE = TOOLS + "/container/proxy/ensure-bridge.sh"
 PROXY = "http://127.0.0.1:3128"
-# Pinned, arm64 with armhf multiarch: `wkdev-create --arch` would hand podman the aarch64 image with --arch=arm.
-IMAGE_ARMHF = "ghcr.io/igalia/wkdev-sdk:24.04_arm32"
 NO_PROXY = "localhost,127.0.0.1,::1"
 MOTD_REFERENCE = '''
         cat /etc/motd /etc/motd.d/* /run/motd.dynamic 2>/dev/null \\
@@ -66,7 +63,7 @@ fi
 
 
 def upstream_line_body():
-    return UPSTREAM_LINE_BODY.replace("@REL@", project.RELEASES)
+    return UPSTREAM_LINE_BODY.replace("@REL@", project.get("RELEASES"))
 
 
 def upstream_line():
@@ -74,7 +71,7 @@ def upstream_line():
 
 
 def guest_mirror():
-    return GUEST_MIRROR_MOUNT + "/mirror/" + project.MIRROR
+    return GUEST_MIRROR_MOUNT + "/mirror/" + project.get("MIRROR")
 
 
 def image_base(root, ws):
@@ -159,7 +156,7 @@ def conf_key(k):
         return CONF_ENV[k]
     for stem in PER_PRESET:
         preset_name = k[len(stem) + 1:]
-        if k.startswith(stem + "_") and preset_name.replace("_", "-") in project.preset_names():
+        if k.startswith(stem + "_") and preset_name.replace("_", "-") in project.get("PRESETS"):
             return "%s_%s" % (CONF_ENV[stem], preset_name)
     return None
 
@@ -401,7 +398,7 @@ class Driver:
         return bool(t and t.alive(None))
 
     def src(self, ws):
-        return project.SRC
+        return project.get("SRC")
 
     def tools(self, ws):
         return TOOLS
@@ -745,7 +742,8 @@ def tart_path(env):
 
 
 def arch_image(arch):
-    return IMAGE_ARMHF if arch == "armhf" else ""
+    """Pinned, arm64 with armhf multiarch: the SDK's create script with --arch would hand podman the aarch64 image with --arch=arm."""
+    return project.get("SDK_IMAGE_ARMHF") if arch == "armhf" else ""
 
 
 def podman_vm(machine, name, timeout=None):
@@ -821,25 +819,26 @@ class Container(Driver):
         return self.store.mirror_dir()
 
     def sdk(self):
-        return self.env.get("WK_SDK") or ("/opt/" + project.SDK if in_vm(self.env) else os.path.join(
-            self.env.get("XDG_DATA_HOME") or os.path.join(self.env.get("HOME", ""), ".local", "share"), project.SDK))
+        return self.env.get("WK_SDK") or ("/opt/" + project.get("SDK") if in_vm(self.env) else os.path.join(
+            self.env.get("XDG_DATA_HOME") or os.path.join(self.env.get("HOME", ""), ".local", "share"), project.get("SDK")))
 
     def sdk_env(self):
         """The environment every SDK script reads, and refuses to run without (`env` prefix for an argv)."""
-        return ["env", "WKDEV_SDK=%s" % self.sdk(), "WKDEV_CONTAINER_UID=%d" % os.getuid(), "WKDEV_CONTAINER_GID=%d" % os.getgid(),
-                "WKDEV_CONTAINER_USER=%s" % self.user(), "WKDEV_CONTAINER_SHELL=/bin/bash"]
+        p = project.get("SDK_ENV")
+        return ["env", "%sSDK=%s" % (p, self.sdk()), "%sCONTAINER_UID=%d" % (p, os.getuid()), "%sCONTAINER_GID=%d" % (p, os.getgid()),
+                "%sCONTAINER_USER=%s" % (p, self.user()), p + "CONTAINER_SHELL=/bin/bash"]
 
     def sdk_local(self):
         """The pulled SDK image and its pull date, or None with none pulled; sdk_upstream's registry tags, or None past `timeout`."""
         r = self.machine.run(self.podman() + ["images", "--format", "{{.Repository}}:{{.Tag}}"])
-        img = next((l for l in r.out.splitlines() if l.startswith(SDK_REPO + ":")), None) if r.ok else None
+        img = next((l for l in r.out.splitlines() if l.startswith(project.get("SDK_IMAGE") + ":")), None) if r.ok else None
         if not img:
             return None
         c = self.machine.run(self.podman() + ["image", "inspect", img, "--format", "{{.Created}}"])
         return {"image": img, "created": c.out.strip()[:10] if c.ok else ""}
 
     def sdk_upstream(self, timeout=None):
-        r = self.machine.run(self.podman() + ["search", "--list-tags", SDK_REPO, "--limit", "100"], timeout=timeout)
+        r = self.machine.run(self.podman() + ["search", "--list-tags", project.get("SDK_IMAGE"), "--limit", "100"], timeout=timeout)
         if not r.ok:
             return None
         return [parts[1] for parts in (line.split() for line in r.out.splitlines()[1:]) if len(parts) > 1]
@@ -891,7 +890,7 @@ class Container(Driver):
         if not self.is_here():
             env = {k: v for k, v in os.environ.items() if k != "WK_DRY_RUN"}
             return ["podman", "machine", "ssh", self.podman_machine(), "--", self.wk_cmd(["enter", ws, "--", *argv], env)], None
-        cmd = self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", "wkdev-enter"), "--quiet", "--name", self.ctr(ws)]
+        cmd = self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", project.get("SDK_ENTER")), "--quiet", "--name", self.ctr(ws)]
         if not tty:
             cmd.append("--no-tty")
         return cmd + ["--exec", "--", BRIDGE, *argv], None
@@ -959,8 +958,8 @@ class Container(Driver):
     def sdk_refresh(self):
         r = self.machine.act_run(["bash", os.path.join(self.root, "container", "sdk-refresh.sh"), self.sdk()], stream=True)
         if not r.ok:
-            act.die("refreshing the %s checkout failed (above); wkdev-create\n"
-                    "    would otherwise ask for whatever image tag was current when this checkout\n    was last fetched." % project.SDK)
+            act.die("refreshing the %s checkout failed (above); %s\n"
+                    "    would otherwise ask for whatever image tag was current when this checkout\n    was last fetched." % (project.get("SDK"), project.get("SDK_CREATE")))
         return True
 
     # podman makes a missing mount destination as container root: the mirror's is inside the home where this machine's store is under $HOME.
@@ -989,8 +988,8 @@ class Container(Driver):
         mirror_dir = os.path.dirname(mirror)
         res = Resources(self.machine, self.env, self.os())
         flags = ["--volume", "%s:%s:ro" % (self.tools_src(), TOOLS), "--volume", "%s:%s:ro" % (mirror_dir, mirror_dir), "--env", "WK_MIRROR=%s" % mirror,
-                 "--volume", "%s:%s:O,upperdir=%s/changes,workdir=%s/overlay-work" % (self.store.snapshot_tree(base), project.SRC, ws_dir, ws_dir),
-                 "--volume", "%s/build:%s/%s" % (ws_dir, project.SRC, project.BUILD_DIR),
+                 "--volume", "%s:%s:O,upperdir=%s/changes,workdir=%s/overlay-work" % (self.store.snapshot_tree(base), project.get("SRC"), ws_dir, ws_dir),
+                 "--volume", "%s/build:%s/%s" % (ws_dir, project.get("SRC"), project.get("BUILD_DIR")),
                  "--volume", "%s:/var/lib/wk/ws/%s" % (ws_dir, ws)]
         for sub, dest in (("cache/ccache", "/ccache"), ("cache/yocto", "/cache/yocto"), ("cache/buildroot", "/cache/buildroot"),
                           ("cache/bench", "/cache/bench"), ("skills", "/skills")):
@@ -998,11 +997,11 @@ class Container(Driver):
         flags += ["--volume", "%s:/secrets:ro" % self.store.keyring_view_dir("container"),
                   "--volume", "%s/agent-rw:/agent-rw" % store,
                   "--memory", "%dm" % res.envelope_mem_mb(), "--cpus", str(res.envelope_cores())]
-        for pair in ("CCACHE_DIR=/ccache", "CCACHE_MAXSIZE=%s" % self.ccache_maxsize(), "CCACHE_BASEDIR=" + project.SRC,
+        for pair in ("CCACHE_DIR=/ccache", "CCACHE_MAXSIZE=%s" % self.ccache_maxsize(), "CCACHE_BASEDIR=" + project.get("SRC"),
                    "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime", "CCACHE_PCH_EXTSUM=true",
                    "CCACHE_DEPEND=true", "CCACHE_NOHASHDIR=true", "DL_DIR=/cache/yocto/downloads", "SSTATE_DIR=/cache/yocto/sstate",
                    "BR2_DL_DIR=/cache/buildroot/dl", "BR2_CCACHE_DIR=/cache/buildroot/ccache", "WK_WORKSPACE=%s" % ws,
-                   "WK_ARCH=%s" % arch, "WKDEV_OFFLINE=1", "WK_LOCAL_STORE=/var/lib/wk"):
+                   "WK_ARCH=%s" % arch, project.get("SDK_ENV") + "OFFLINE=1", "WK_LOCAL_STORE=/var/lib/wk"):
             flags += ["--env", pair]
         return flags + self.sandbox_flags(arch)
 
@@ -1020,11 +1019,11 @@ class Container(Driver):
                      key=lambda t: int(t[len(series):].split("-")[0]), default="<tag>")
         act.die("the SDK checkout asks for image %s:%s, which upstream has not published.\n"
                 "    The newest published tag of that series is %s.\n"
-                "    Use it:  WK_SDK_IMAGE=%s:%s wk new ..." % (SDK_REPO, tag, newest, SDK_REPO, newest))
+                "    Use it:  WK_SDK_IMAGE=%s:%s wk new ..." % (project.get("SDK_IMAGE"), tag, newest, project.get("SDK_IMAGE"), newest))
 
     def create_argv(self, ws, base, arch):
         u = self.user()
-        argv = self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", "wkdev-create"), "--network", "none", "--isolated"]
+        argv = self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", project.get("SDK_CREATE")), "--network", "none", "--isolated"]
         if arch != "native":
             argv += ["--arch", "arm"]
         image = self.sdk_image() or arch_image(arch)
@@ -1051,12 +1050,12 @@ class Container(Driver):
         act.info("creating workspace '%s' from base %s (rootless-proxy, %s)" % (ws, base, arch))
         r = self.machine.act_run(argv, stream=True)
         if not r.ok:
-            act.die("wkdev-create failed for '%s' (exit %d); what it said is above" % (ws, r.rc), r.rc)
+            act.die("%s failed for '%s' (exit %d); what it said is above" % (project.get("SDK_CREATE"), ws, r.rc), r.rc)
         r = self.machine.act_run(["install", "-m", "0755", os.path.join(self.root, "container", "firstrun.sh"),
-                                  os.path.join(ws_dir, "home", ".wkdev-firstrun")])
+                                  os.path.join(ws_dir, "home", project.get("SDK_FIRSTRUN"))])
         if not r.ok:
-            act.die("installing firstrun.sh into '%s' failed (exit %d); wkdev-create made the container "
-                     "but it is not usable -- run 'wk rm %s' and retry" % (ws, r.rc, ws), r.rc)
+            act.die("installing firstrun.sh into '%s' failed (exit %d); %s made the container "
+                     "but it is not usable -- run 'wk rm %s' and retry" % (ws, r.rc, project.get("SDK_CREATE"), ws), r.rc)
         # Last: create() reads this file's presence as "the workspace finished setting up".
         self.machine.write(os.path.join(ws_dir, "base-id"), base + "\n")
 
@@ -1092,9 +1091,9 @@ class Container(Driver):
         return None
 
     def enter_argv(self, ws):
-        """Spelled out rather than wkdev-enter's own login shell: without the token/keyring
+        """Spelled out rather than the SDK enter script's own login shell: without the token/keyring
         bridge, the PR tool reports a locked macOS Keychain instead of a missing token."""
-        return (self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", "wkdev-enter"),
+        return (self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", project.get("SDK_ENTER")),
                                   "--name", self.ctr(ws), "--exec", "--",
                                   BRIDGE,
                                   "/usr/bin/env", "USER=%s" % self.user(), "/bin/bash", "--login"], None)
@@ -1222,7 +1221,7 @@ class Vm(Driver):
         return guest.vm_user(self.env)
 
     def src(self, ws):
-        return "/Users/%s/%s" % (self.user(), project.CHECKOUT)
+        return "/Users/%s/%s" % (self.user(), project.get("CHECKOUT"))
 
     def tools(self, ws):
         return "/Users/%s/wk-tools" % self.user()
@@ -1441,7 +1440,7 @@ class Vm(Driver):
             return True
         self.ssh_prepare(ws)
         act.info("%s is up at %s (ssh alias wk-%s)" % (ws, ip, ws))
-        act.log("  wk build %s mac-release\n  zed ssh://wk-%s%s" % (ws, ws, self.src(ws)))
+        act.log("  wk build %s %s\n  zed ssh://wk-%s%s" % (ws, project.get("MAC_PRESET"), ws, self.src(ws)))
         return True
 
     def tart_or_die(self):
@@ -1495,7 +1494,7 @@ class Vm(Driver):
         if self.vm_state(ws) != "absent":
             act.die("workspace '%s' already exists" % ws)
         if not self.machine.isdir(mirror):
-            act.die("no %s mirror on this machine for '%s' to clone its checkout from\n    (%s does not exist):  wk sync    makes it" % (project.CHECKOUT, ws, mirror))
+            act.die("no %s mirror on this machine for '%s' to clone its checkout from\n    (%s does not exist):  wk sync    makes it" % (project.get("CHECKOUT"), ws, mirror))
         from wk.sysimage import guestbase
         base = guestbase.Base(self)
         with base.host.lock().held("guest-base"):
@@ -1767,7 +1766,7 @@ class Remote(Driver):
     def src(self, ws):
         if self.peer and ws:
             return self._peer_route(ws)[1]
-        return self.ws_dir_there(ws) + "/" + project.CHECKOUT
+        return self.ws_dir_there(ws) + "/" + project.get("CHECKOUT")
 
     def tools(self, ws):
         t = self.env.get("WK_REMOTE_TOOLS", "")
@@ -1957,7 +1956,7 @@ class Remote(Driver):
         if self._reference is None:
             ref = self.env.get("WK_REMOTE_REFERENCE", "")
             if not ref:
-                r = self._sh(MOTD_REFERENCE % project.CHECKOUT)
+                r = self._sh(MOTD_REFERENCE % project.get("CHECKOUT"))
                 ref = r.out.strip() if r.ok else ""
             self._reference = ref
         return self._reference
@@ -1976,13 +1975,13 @@ class Remote(Driver):
 
     def _wire(self, src):
         n, u, c = self.wiring_args()
-        script = project.wiring_script(src, self.mirror_dir(), self._forks(), images.mirror_branches(self.env), n, u, c)
+        script = git.wiring_script(src, self.mirror_dir(), self._forks(), images.mirror_branches(self.env), n, u, c)
         if not self._sh_act(script).ok:
             act.warn("could not wire the remotes in %s" % src)
 
     def _mirror_update(self, root):
-        act.info("updating the %s mirror on %s (first run clones it)" % (project.CHECKOUT, self.label()))
-        script = project.mirror_refresh_script(self.mirror_dir(), images.mirror_branches(self.env))
+        act.info("updating the %s mirror on %s (first run clones it)" % (project.get("CHECKOUT"), self.label()))
+        script = git.mirror_refresh_script(self.mirror_dir(), images.mirror_branches(self.env))
         r = self._sh_act("set -e\n mkdir -p %s %s\n %s" % (shlex.quote(root + "/ws"), shlex.quote(root + "/cache/ccache"),
                                                           script))
         for line in r.out.splitlines():
@@ -1990,7 +1989,7 @@ class Remote(Driver):
             if len(f) == 3 and f[0] == "mirror-fetch":
                 act.log("  %-8s %s" % (f[1], f[2]))
         if not r.ok:
-            act.die("could not update the %s mirror on %s" % (project.CHECKOUT, self.label()))
+            act.die("could not update the %s mirror on %s" % (project.get("CHECKOUT"), self.label()))
 
     def sync(self, named=False):
         """A peer pulls, and publishes its own snapshot only once it matches this checkout and was named."""
@@ -2024,7 +2023,7 @@ class Remote(Driver):
             act.log("  nothing of ours to fetch: no mirror is kept on %s" % host)
             return ok
         self._mirror_update(self.root_there())
-        act.info("the %s mirror on %s is up to date" % (project.CHECKOUT, host))
+        act.info("the %s mirror on %s is up to date" % (project.get("CHECKOUT"), host))
         return ok
 
     def create(self, ws, base=None, arch="native"):
@@ -2040,17 +2039,17 @@ class Remote(Driver):
             act.die("workspace '%s' already exists on %s" % (ws, host))
         ref = self.reference()
         if ref:
-            act.info("cloning from %s (this machine's shared %s, hardlinked)" % (ref, project.CHECKOUT))
+            act.info("cloning from %s (this machine's shared %s, hardlinked)" % (ref, project.get("CHECKOUT")))
             r = self._sh_act("set -e\n mkdir -p %s %s\n git clone --quiet -b main %s %s"
-                             % (shlex.quote(root + "/ws"), shlex.quote(root + "/cache/ccache"), shlex.quote(ref), shlex.quote(wsd + "/" + project.CHECKOUT)))
+                             % (shlex.quote(root + "/ws"), shlex.quote(root + "/cache/ccache"), shlex.quote(ref), shlex.quote(wsd + "/" + project.get("CHECKOUT"))))
             if not r.ok:
                 act.die("could not clone %s on %s" % (ref, host))
         else:
             self._mirror_update(root)
-            r = self._sh_act("git clone --quiet --shared -b main %s %s" % (shlex.quote(root + "/mirror"), shlex.quote(wsd + "/" + project.CHECKOUT)))
+            r = self._sh_act("git clone --quiet --shared -b main %s %s" % (shlex.quote(root + "/mirror"), shlex.quote(wsd + "/" + project.get("CHECKOUT"))))
             if not r.ok:
                 act.die("could not create the checkout on %s" % host)
-        self._wire(wsd + "/" + project.CHECKOUT)
+        self._wire(wsd + "/" + project.get("CHECKOUT"))
         conf = shlex.quote(root + "/cache/ccache/ccache.conf")
         self._sh_act("[ -f %s ] || printf %%s %s > %s" % (conf, shlex.quote(self.ccache_conf()), conf))
         self.here.mkdir(self.store.ws_dir(ws))

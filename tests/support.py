@@ -481,7 +481,7 @@ def glob_bait(patterns):
 def podman_vm_running(machine="wk"):
     try:
         cp = subprocess.run(
-            [sys.executable, "-m", "wk", "wk.places", "podman-vm", "State"],
+            [sys.executable, "-m", "wk.places", "podman-vm", "State"],
             capture_output=True, text=True, timeout=15,
             env=dict(os.environ, PYTHONPATH=str(REPO / "lib"), WK_MACHINE=machine),
         )

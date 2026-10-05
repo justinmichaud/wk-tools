@@ -9,7 +9,7 @@ from tests.support import REPO, WkTest, stub_path
 from tests.test_credcheck import FakeGitHub, serve
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk.webkit import FORKS  # noqa: E402
+from wk import project  # noqa: E402
 
 KEY = REPO / "cmd" / "key"
 
@@ -154,7 +154,7 @@ class _Fleet(_Shared):
         super().setUp()
         GitHubKnowsOnePat.good = GOOD_PAT
         self.api = serve(GitHubKnowsOnePat, self.addCleanup)
-        self.forks = [r[1] for r in FORKS]
+        self.forks = [r[1] for r in project.get("FORKS")]
         FakeGitHub.reset(repos=list(self.forks),
                          pulls=dict.fromkeys(self.forks, 422))
         self.gh_log = self.tmp / "gh.log"

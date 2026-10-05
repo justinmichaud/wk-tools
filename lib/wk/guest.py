@@ -9,7 +9,7 @@ import signal
 import sys
 import time
 
-from wk import act, agents, images, project, secrets, tools
+from wk import act, agents, git, images, project, secrets, tools
 from wk.act import Refused, debug, die, info, log, warn
 from wk.clock import Clock
 from wk.lock import Lock
@@ -299,7 +299,7 @@ class Host:
         if act.dry_run() or self.clock.wait_until(self.inject_running, 10, 0.25):
             info("GitHub API injector on %s" % sock)
             return True
-        warn("the GitHub API injector did not start, so '%s pr' in a guest\n  will fail; see %s" % (project.PR_TOOL, log))
+        warn("the GitHub API injector did not start, so '%s pr' in a guest\n  will fail; see %s" % (project.get("PR_TOOL"), log))
         return False
 
     def agent_sock(self):
@@ -410,22 +410,22 @@ class Guest:
                                          input=tree(self.host.root, "vm/shell-rc.sh")))
 
     def write_lldbinit(self):
-        text = LLDB_HEADER + "command script import %s/%s\n" % (self.vm.src(self.ws), project.LLDB_SCRIPT) \
+        text = LLDB_HEADER + "command script import %s/%s\n" % (self.vm.src(self.ws), project.get("LLDB_SCRIPT")) \
             + tree(self.host.root, "dotfiles/lldbinit")
         return self._said(self.m.act_run(["sh", "-c", 'cat > "$HOME/.lldbinit"'], input=text))
 
     def write_checkout(self):
         src, mirror, forks = self.vm.src(self.ws), self.vm.mirror_dir(), self.secrets.forks()
-        script = CHECKOUT + project.wiring_script(src, mirror, forks, images.mirror_branches(self.host.env)) \
-            + project.setup_script(src, forks)
+        script = CHECKOUT + git.wiring_script(src, mirror, forks, images.mirror_branches(self.host.env)) \
+            + git.pr_tool_setup_script(src, forks)
         t0 = self.host.clock.now()
         r = self.m.act_run(["env", "WK_SRC=" + src, "WK_MIRROR=" + mirror, "WK_TOOLS=" + self.vm.tools(self.ws), "bash", "-s"],
                            input=script)
         out = (r.out + r.err).replace("\r", "")
         if "checkout=cloned" in out:
-            info("%s's %s checkout made from its mirror in %ds" % (self.ws, project.CHECKOUT, self.host.clock.now() - t0))
+            info("%s's %s checkout made from its mirror in %ds" % (self.ws, project.get("CHECKOUT"), self.host.clock.now() - t0))
         if "setup=ok" in out:
-            info("%s is set up in %s" % (project.PR_TOOL, self.ws))
+            info("%s is set up in %s" % (project.get("PR_TOOL"), self.ws))
         if not r.ok:
             sys.stderr.write("".join("    %s\n" % l for l in out.splitlines()[-5:]))
         return r.ok
@@ -488,7 +488,7 @@ class Guest:
                 ca = ""
         debug("guest egress in %s: %s" % (self.ws, addr or "off"))
         script = "cat > /tmp/.wk-github-ca.new <<'WKCA'\n%s\nWKCA\n" % ca.rstrip("\n") \
-            + EGRESS.replace("@BZUSER@", project.BUGZILLA_ENV[0]).replace("@BZPASSWORD@", project.BUGZILLA_ENV[1])
+            + EGRESS.replace("@BZUSER@", project.get("BUGZILLA_ENV")[0]).replace("@BZPASSWORD@", project.get("BUGZILLA_ENV")[1])
         return self.m.act_run(["env", "WK_ADDR=" + addr, "WK_PORT=" + h.port(), "WK_GHUSER=" + self.secrets.github_user(),
                                "WK_BZUSER=" + (self.secrets.bugzilla_user() or ""), "bash", "-s"], input=script).ok
 
@@ -700,8 +700,8 @@ class Desktop:
         if py and py == self.pin:
             out.append(row("ok", "pyobjc %s: a browser can be driven and held in front here" % py))
         elif py in ("", "?"):
-            out.append(row("wrong", "no pyobjc: run-benchmark cannot size the screen and nothing can keep %s frontmost, "
-                           "so a benchmark here measures a throttled browser" % project.BROWSER, RESTART + "  (the settle installs it)"))
+            out.append(row("wrong", "no pyobjc: %s cannot size the screen and nothing can keep %s frontmost, "
+                           "so a benchmark here measures a throttled browser" % (os.path.basename(project.get("BENCH_RUNNER")), project.get("BROWSER")), RESTART + "  (the settle installs it)"))
         else:
             out.append(row("wrong", "pyobjc here is %s and this fleet measures with %s" % (py, self.pin), RESTART))
         lock = v("screenlock")

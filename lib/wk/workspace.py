@@ -89,8 +89,8 @@ def creation_state(driver, records, name):
     return state
 
 
-def new_front(reg, records, name, opts):
-    """Refuse, start the detached run, follow it, then the --pr / hints / --zed tail. 0, or Refused."""
+def new_front(reg, records, name, opts, prflow):
+    """Refuse, start the detached run, follow it, then the --pr (`prflow`: lib/wk/pr.py) / hints / --zed tail. 0, or Refused."""
     here, root, env = reg.machine, reg.root, reg.env
     require_name(name)
     pr = opts.get("pr")
@@ -101,7 +101,7 @@ def new_front(reg, records, name, opts):
         if opts.get("no_wait"):
             die("--pr needs the workspace to be ready, and --no-wait returns before it is.\n"
                 "    Drop --no-wait, or check it out afterwards:  wk pr %s %s" % (name, pr))
-        project.check_pr_spec(pr)
+        prflow.parse_spec(pr)
     tname = opts.get("place") or reg.default()
     try:
         driver = reg.load(tname)
@@ -165,7 +165,7 @@ def new_front(reg, records, name, opts):
             "    A re-run destroys what is there and starts again:  wk new %s --on %s" % (name, st, log_path, name, tname))
     info("workspace '%s' ready%s" % (name, "" if arch == "native" else " (%s)" % arch))
     if pr:
-        project.pr_checkout(driver, here, name, pr)
+        prflow.checkout(driver, here, name, pr)
     new_hints(driver, name, arch)
     zed_after(here, root, name, opts)
     return 0
@@ -213,7 +213,7 @@ def new_hints(driver, name, arch):
     if driver.kind == "vm":
         log("  wk start %s       boot it (its ssh alias is written then)" % name)
         log("  wk zed %s            the checkout, in Zed (once it is up)" % name)
-        log("  wk build %s mac-release" % name)
+        log("  wk build %s %s" % (name, project.get("MAC_PRESET")))
     elif driver.kind == "remote":
         log("  wk build %s <preset> build (polite: sized from that machine's load)" % name)
         log("  wk enter %s          shell, in the checkout" % name)
@@ -323,7 +323,7 @@ def _create(driver, records, task, clock, name, base, arch, state):
         mirror = driver.store.mirror_dir()
         if not here.isdir(mirror):
             die("no %s mirror at %s, and every snapshot borrows its objects:\n"
-                "    wk sync    makes it, then publishes a snapshot to build a workspace from." % (project.CHECKOUT, mirror))
+                "    wk sync    makes it, then publishes a snapshot to build a workspace from." % (project.get("CHECKOUT"), mirror))
         bases = Snapshots(driver.store, here)
         base = base or bases.current()
         if not base:

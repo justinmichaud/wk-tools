@@ -41,12 +41,11 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import webkit  # noqa: E402,F401  first: the WebKit names lab code is handed (wk.project)
 from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, places, record, workspace  # noqa: E402
+from wk import decl, places, pr, record, workspace  # noqa: E402
 from wk.act import Refused, die  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 
@@ -76,7 +75,7 @@ def main(argv):
     records = record.Records(machine=reg.machine)
     if opts.get("detached"):
         return detached(reg, records, name, opts)
-    return workspace.new_front(reg, records, name, opts)
+    return workspace.new_front(reg, records, name, opts, pr)
 
 
 if __name__ == "__main__":

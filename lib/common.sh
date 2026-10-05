@@ -132,7 +132,7 @@ try: print(pwd.getpwuid(os.stat(sys.argv[1]).st_uid).pw_name)
 except (OSError, KeyError): pass' "$1"
 }
 
-wk_py() { env ${WK_STORE:+"WK_STORE=$WK_STORE"} PYTHONPATH="$WK_ROOT/lib" WK_ROOT="$WK_ROOT" python3 -m wk "$@"; }   # <module> <args...>: lib/wk's answer to a setup stage
+wk_py() { env ${WK_STORE:+"WK_STORE=$WK_STORE"} PYTHONPATH="$WK_ROOT/lib" WK_ROOT="$WK_ROOT" python3 -m "$@"; }   # <module> <args...>: lib/wk's answer to a setup stage
 # `eval "$(...)"` returns 0 for a failed substitution under bash 3.2's set -e, so the assignments are taken apart from the eval.
 wk_eval() { local _o; _o=$(wk_py "$@") || die "python3 -m $* failed (above), so this stage cannot know what it acts on"; eval "$_o"; }
 wk_fleet() { wk_py wk.fleet "$@"; }   # machines/<name>.conf, read by lib/wk/fleet.py alone

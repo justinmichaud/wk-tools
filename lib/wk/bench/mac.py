@@ -34,12 +34,12 @@ HOST_MODE = ("this is host mode, and a benchmark does not run here: its number w
 
 
 def staged_python(m, env):
-    """run-benchmark's driver does a bare `import objc`, which nothing autoinstalls."""
+    """The benchmark runner's driver does a bare `import objc`, which nothing autoinstalls."""
     for p in (env.get("WK_BENCH_PYTHON", ""),) + PYTHONS:
         if p and m.run([p, "-c", "import objc"]).ok:
             return p
-    die("no python3 here can 'import objc', and run-benchmark drives the browser through PyObjC.\n"
-        "    ./setup installs it (bench/mac-pyobjc.sh), or WK_BENCH_PYTHON names a python3 that has it")
+    die("no python3 here can 'import objc', and %s drives the browser through PyObjC.\n"
+        "    ./setup installs it (bench/mac-pyobjc.sh), or WK_BENCH_PYTHON names a python3 that has it" % os.path.basename(project.get("BENCH_RUNNER")))
 
 
 class Install:
@@ -100,7 +100,7 @@ def screen_row(m, root):
 
 
 def display_row(m, root, py, expect, build=""):
-    """Asked per leg: a panel attached between two legs resizes run-benchmark's window, and MotionMark scores the area."""
+    """Asked per leg: a panel attached between two legs resizes the runner's window, and a rendering benchmark scores the area."""
     argv = [py, os.path.join(root, CHECK)] + (["--build-directory", build] if build else ["--displays-only"])
     r = m.run(argv + (["--expect-display", expect] if expect else []))
     said = (r.out + r.err).strip().replace("\n", "; ")
@@ -192,18 +192,18 @@ class MacVolumeSystem(System):
         return self.dir
 
     def sha(self):
-        return self.manifest.get(project.SHA_FIELD, "")
+        return self.manifest.get(project.get("SHA_FIELD"), "")
 
     def exec_ok(self, *argv):
         return self.here.run(list(argv)).ok
 
     def build_dir(self, leg):
-        return os.path.join(self.dir, project.BUILD_DIR, os.path.basename(leg.preset.build_dir()))
+        return os.path.join(self.dir, project.get("BUILD_DIR"), os.path.basename(leg.preset.build_dir()))
 
     def build_present(self, leg):
         build = self.build_dir(leg)
-        if not self.exec_ok("test", "-x", os.path.join(build, project.BROWSER + ".app", "Contents", "MacOS", project.BROWSER)):
-            return False, "no %s.app in %s -- the stage's %s is not on the disk" % (project.BROWSER, build, leg.preset.name)
+        if not self.exec_ok("test", "-x", os.path.join(build, project.get("BROWSER") + ".app", "Contents", "MacOS", project.get("BROWSER"))):
+            return False, "no %s.app in %s -- the stage's %s is not on the disk" % (project.get("BROWSER"), build, leg.preset.name)
         if not any(n.endswith(".framework") for n in self.here.listdir(build)):
             return False, "no *.framework in %s -- the driver refuses it" % build
         return True, "%s @%s" % (os.path.basename(build), self.sha()[:10])
@@ -224,7 +224,7 @@ class MacVolumeSystem(System):
         return ["DYLD_SHARED_REGION=avoid"] if pipeline.shared_cache_avoided(self.env) else []
 
     def runner_argv(self, leg):
-        return [self.py, os.path.join(self.dir, project.BENCH_RUNNER), "--browser", leg.browser, "--platform", "osx"]
+        return [self.py, os.path.join(self.dir, project.get("BENCH_RUNNER")), "--browser", leg.browser, "--platform", "osx"]
 
     def link(self, path, link):
         self.here.mkdir(os.path.dirname(link))
@@ -260,7 +260,7 @@ class MacVolumeSystem(System):
                         if self.conf else (False, "the machine", "the marker names no machine in machines/ (profile)"))
         else:
             rows.append((False, "bench mode", "this is host mode -- a real run refuses"))
-        runner = os.path.join(self.dir, project.BENCH_RUNNER)
+        runner = os.path.join(self.dir, project.get("BENCH_RUNNER"))
         rows.append((True, os.path.basename(runner), runner) if self.exec_ok("test", "-x", runner) else
                     (False, os.path.basename(runner), "not in the staged tree: " + runner))
         rows.append((True, "python with PyObjC", self.py))
@@ -300,7 +300,7 @@ class MacVolumeSystem(System):
 
     def after(self, leg):
         """ASLR cannot be turned off on Apple Silicon, so what is recorded is the load address slide that happened."""
-        pid = first_line(self.here.run(["pgrep", "-n", project.BROWSER]))
+        pid = first_line(self.here.run(["pgrep", "-n", project.get("BROWSER")]))
         slide = next((l.split(":", 1)[1].strip() for l in self.here.run(["vmmap", "-slide", pid]).out.splitlines()
                       if l.startswith("Load Address Slide:")), "") if pid else ""
         return ["configuration.aslr=" + (slide or "os-randomised")]
@@ -320,7 +320,7 @@ class Capture(threading.Thread):
             warn("no samply for this machine, so the leg carries no profile")
             return
         def web_process():
-            return first_line(self.here.run(["pgrep", "-n", "-f", project.MAC_WEB_PROCESS]))
+            return first_line(self.here.run(["pgrep", "-n", "-f", project.get("MAC_WEB_PROCESS")]))
         if not self.clock.wait_until(lambda: bool(web_process()), WEB_PROCESS_WAIT, 1):
             warn("no web process appeared, so nothing was profiled")
             return
@@ -341,8 +341,8 @@ class Capture(threading.Thread):
 class StagedRun(pipeline.Run):
     """The pipeline on the running install: no workspace, no task (the host install's task collects the run directory)."""
 
-    def __init__(self, root, reg, system, clock, env):
-        self.root, self.reg, self.system, self.clock = str(root), reg, system, clock
+    def __init__(self, root, reg, system, clock, kit, env):
+        self.root, self.reg, self.system, self.clock, self.kit = str(root), reg, system, clock, kit
         self.env = dict(env)
         wkrecord.default_watchdog(self.env, pipeline.STALL_SECONDS, pipeline.ABORT_SECONDS)
         self.here, self.ws, self.ws_driver = reg.machine, system.ws, None
@@ -357,10 +357,10 @@ class StagedRun(pipeline.Run):
         s, leg = self.system, pipeline.Leg(plan, o)
         name = s.manifest.get("preset", "")
         try:
-            leg.preset = project.resolve_preset(name, "macos", s.manifest.get("workspace_place") or "vm", self.env)
+            leg.preset = self.kit.resolve_preset(name, "macos", s.manifest.get("workspace_place") or "vm", self.env)
         except LookupError:
             die("%s names preset '%s', which this wk-tools does not know -- stage it again" % (s.dir, name))
-        leg.klass, leg.arch, leg.runner, leg.browser = project.bench_class(plan), "native", "browser", project.BENCH_BROWSERS["macos"]
+        leg.klass, leg.arch, leg.runner, leg.browser = pipeline.bench_class(plan), "native", "browser", project.get("BENCH_BROWSERS")["macos"]
         return leg
 
     def seed(self, leg):
@@ -369,7 +369,7 @@ class StagedRun(pipeline.Run):
         leg.payload = leg.o.get("payload") or (pinned if self.here.isdir(pinned) else "")
         if not leg.payload and self.here.isdir(os.path.dirname(pinned)):
             warn("nothing pinned for '%s' in this staged tree (it holds: %s)" % (leg.plan, ", ".join(self.here.listdir(os.path.dirname(pinned)))))
-            log("  run-benchmark will fetch %s itself, which needs the network. To pin it:" % leg.plan)
+            log("  %s will fetch %s itself, which needs the network. To pin it:" % (os.path.basename(project.get("BENCH_RUNNER")), leg.plan))
             log('    wk bench stage <ws> --to <machine> --plan %s --payload "$(wk bench seed <ws> %s)"' % (leg.plan, leg.plan))
 
     def begin(self, leg):
@@ -384,7 +384,7 @@ class StagedRun(pipeline.Run):
             return steps
         leg.machine.mkdir(leg.out)
         record.write_env(os.path.join(leg.out, "env.json"), [
-            "plan=" + leg.plan, "workspace=" + s.ws, "preset=" + leg.preset.name, "browser=" + leg.browser, project.SHA_FIELD + "=" + s.sha(),
+            "plan=" + leg.plan, "workspace=" + s.ws, "preset=" + leg.preset.name, "browser=" + leg.browser, project.get("SHA_FIELD") + "=" + s.sha(),
             "count=" + leg.count, "local_copy=" + leg.payload, "preflight_notes=" + leg.notes, "class=" + leg.klass,
             "runner=browser", "arch=native", "bench_host=" + s.bench_host] + s.facts(leg) + pipeline.configuration_fields(self.env),
             bool_fields=["forced=" + act.forced(self.env)] + s.bool_facts())
@@ -394,7 +394,7 @@ class StagedRun(pipeline.Run):
 
     def carry_reading(self, leg):
         """The staged build's PGO reading goes with the run it measured, so the task's report can judge it."""
-        build = os.path.join(self.system.dir, project.BUILD_DIR)
+        build = os.path.join(self.system.dir, project.get("BUILD_DIR"))
         for sub in sorted(self.here.listdir(build)) if self.here.isdir(build) else []:
             check = os.path.join(build, sub, "wk-profile-check.json")
             if self.here.exists(check):
@@ -418,7 +418,7 @@ def listing(m, home):
         except (OSError, ValueError):
             log("  %-34s (incomplete)" % d)
             continue
-        log("  %-34s %s %s" % (d, doc.get("preset", ""), doc.get(project.SHA_FIELD, "")[:10]))
+        log("  %-34s %s %s" % (d, doc.get("preset", ""), doc.get(project.get("SHA_FIELD"), "")[:10]))
     if m.isdir(results):
         log("")
         log("  results:")
@@ -427,7 +427,7 @@ def listing(m, home):
     return 0
 
 
-def staged(root, reg, clock, o, driver=open_driver):
+def staged(root, reg, clock, o, kit, driver=open_driver):
     if not reg.machine.run(["uname", "-s"]).out.startswith("Darwin"):
         die("'wk bench staged' is macOS bench mode. The Linux systems run their benchmark\n"
             "    from the machine that drives them -- wk bench run.")
@@ -441,20 +441,20 @@ def staged(root, reg, clock, o, driver=open_driver):
     d = pick(reg.machine, home, o.get("id") or "")
     if d is None:
         die("nothing staged on this machine's benchmark volume%s.\n    Stage a build from the workspace that built it:\n"
-            "        wk bench stage <workspace> --to mbp --preset mac-release" % (" under '%s'" % o["id"] if o.get("id") else ""))
+            "        wk bench stage <workspace> --to mbp --preset %s" % (" under '%s'" % o["id"] if o.get("id") else "", project.get("MAC_PRESET")))
     system = MacVolumeSystem(root, reg, clock, install, home, d, o)
     plan = o.get("plan") or (system.manifest.get("plans") or "").split(",")[0]
     if not plan:
         die("which benchmark? --plan <name>\n    (the staged payload does not name one; 'wk bench staged --ls' shows what\n"
-            "    is here, and %s --list-plans what it can run)" % project.BENCH_RUNNER)
+            "    is here, and %s --list-plans what it can run)" % project.get("BENCH_RUNNER"))
     if o.get("gates"):
-        return gates(root, reg, clock, system, plan)
-    return StagedRun(root, reg, system, clock, reg.env).go(plan, o)
+        return gates(root, reg, clock, system, plan, kit)
+    return StagedRun(root, reg, system, clock, kit, reg.env).go(plan, o)
 
 
-def gates(root, reg, clock, system, plan):
+def gates(root, reg, clock, system, plan, kit):
     expect = system.o.get("expect_display") or (install_display(system) or "")
-    leg = StagedRun(root, reg, system, clock, reg.env).leg(plan, system.o)
+    leg = StagedRun(root, reg, system, clock, kit, reg.env).leg(plan, system.o)
     rows = gates_rows(root, reg.machine, clock, reg.env, plan, expect, system.build_dir(leg), system.py)
     for name, ok, detail in rows:
         pipeline.Run.check(ok, name, detail)
@@ -473,8 +473,8 @@ def install_display(system):
 class Stage:
     """`wk bench stage <ws> --to <machine>`: the products, Tools/ and each pinned payload, delivered with the manifest last."""
 
-    def __init__(self, root, reg, clock, driver=open_driver):
-        self.root, self.reg, self.clock, self.here, self.env = str(root), reg, clock, reg.machine, reg.env
+    def __init__(self, root, reg, clock, kit, driver=open_driver):
+        self.root, self.reg, self.clock, self.here, self.env, self.kit = str(root), reg, clock, reg.machine, reg.env, kit
         self.install = Install(root, reg.machine, reg.env, driver)
 
     def tools_version(self):
@@ -502,9 +502,9 @@ class Stage:
         except LookupError as e:
             die(str(e))
         ws_driver.wait_ready(ws, self.clock)
-        preset_name = preset_name or project.default_preset(self.reg, ws)
+        preset_name = preset_name or self.kit.default_preset(self.reg, ws)
         try:
-            preset = project.resolve_preset(preset_name, ws_driver.os(), ws_driver.kind, ws_driver.env)
+            preset = self.kit.resolve_preset(preset_name, ws_driver.os(), ws_driver.kind, ws_driver.env)
         except LookupError:
             die("unknown preset '%s' (wk build --list)" % preset_name)
         src = ws_driver.src(ws)
@@ -522,7 +522,7 @@ class Stage:
         info("staging %s from '%s' onto %s%s" % (preset_name, ws, machine, " (%s)" % vol if vol else ""))
         assemble = os.path.join(self.reg.store.state_dir(), "bench-stage", os.path.basename(dest)) if deliver else dest
         manifest = {"staged_at": self.clock.iso(), "staged_by": wkrecord.host_name(self.here), "workspace": ws,
-                    "workspace_place": ws_driver.name, "preset": preset_name, project.SHA_FIELD: sha, "plans": ",".join(p for p, _ in plans),
+                    "workspace_place": ws_driver.name, "preset": preset_name, project.get("SHA_FIELD"): sha, "plans": ",".join(p for p, _ in plans),
                     "payloads_pinned": ", ".join(p for p, d in plans if d), "machine": machine, "volume": vol,
                     "wk_tools": self.tools_version(), "bench_host": "image"}
         done = False
@@ -540,13 +540,13 @@ class Stage:
     def assemble(self, ws_driver, ws, build, src, into, plans):
         """Products, not the build tree: what the driver launches, what DYLD_FRAMEWORK_PATH resolves, and the dSYMs."""
         self.here.remove(into)
-        self.here.mkdir(os.path.join(into, project.BUILD_DIR))
-        log("  the build product (frameworks, %s.app and dSYMs; no intermediates)" % project.BROWSER)
-        products = os.path.join(into, project.BUILD_DIR, os.path.basename(build))
+        self.here.mkdir(os.path.join(into, project.get("BUILD_DIR")))
+        log("  the build product (frameworks, %s.app and dSYMs; no intermediates)" % project.get("BROWSER"))
+        products = os.path.join(into, project.get("BUILD_DIR"), os.path.basename(build))
         self.here.mkdir(products)
         ws_driver.pull_dir(ws, build, products, exclude=PRODUCT_SKIP)
-        tools_dir = project.BENCH_RUNNER.split("/")[0]
-        log("  %s/ -- %s, its harness and the plans" % (tools_dir, os.path.basename(project.BENCH_RUNNER)))
+        tools_dir = project.get("BENCH_RUNNER").split("/")[0]
+        log("  %s/ -- %s, its harness and the plans" % (tools_dir, os.path.basename(project.get("BENCH_RUNNER"))))
         ws_driver.pull_dir(ws, os.path.join(src, tools_dir), os.path.join(into, tools_dir))
         for plan, payload in plans:
             if not payload:
@@ -601,8 +601,8 @@ def plans(order, names, payloads):
     return out
 
 
-def stage(root, reg, clock, words, machine, preset_name, pairs, driver=open_driver):
-    return Stage(root, reg, clock, driver).run(words, machine, preset_name, pairs)
+def stage(root, reg, clock, words, machine, preset_name, pairs, kit, driver=open_driver):
+    return Stage(root, reg, clock, kit, driver).run(words, machine, preset_name, pairs)
 
 
 def rubble(install):

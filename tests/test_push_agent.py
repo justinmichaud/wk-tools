@@ -28,8 +28,8 @@ FORKS = ("fork", "forkwpe")
 
 
 def store_init(env, extra=""):
-    """`python3 -m wk wk.places store-init`, then `extra` (bash with KEY_SH's key_store)."""
-    return bash('PYTHONPATH="$WK_ROOT/lib" python3 -m wk wk.places store-init || exit\n' + KEY_SH + extra, env=env)
+    """`python3 -m wk.places store-init`, then `extra` (bash with KEY_SH's key_store)."""
+    return bash('PYTHONPATH="$WK_ROOT/lib" python3 -m wk.places store-init || exit\n' + KEY_SH + extra, env=env)
 
 
 @unittest.skipUnless(shutil.which("ssh-agent") and shutil.which("ssh-add"), "needs ssh-agent and ssh-add")

@@ -56,7 +56,7 @@ class WsBuild:
         self.say("source        %s @ %s" % (src, self.m.run(["git", "-C", src, "log", "-1", "--format=%h (%s)"]).out.strip()[:80]))
 
     def verify_fresh(self, path, start):
-        """make and cross-toolchain-helper both exit 0 having done nothing, so the output must postdate the stage."""
+        """make and the cross toolchain helper both exit 0 having done nothing, so the output must postdate the stage."""
         r = self.m.run(["find", path, "-maxdepth", "1", "-type", "f", "-printf", "%T@\n"])
         stamps = [float(x) for x in r.out.split()] if r.ok else []
         if not stamps:

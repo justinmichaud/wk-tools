@@ -52,7 +52,7 @@ def fake_retarget(driver, ws, src, forks, branches):
 GENERATORS = {
     (git, "wiring_script"): lambda src, mirror, forks, branches, n="", u="", c="": "WIRING %s %s %s %s %s" % (src, mirror, n, u, c),
     (git, "wiring_check_script"): lambda src, mirror, forks, branches, skip="": "CHECK %s %s %s" % (src, mirror, skip),
-    (git, "gitwebkit_setup_script"): lambda src, forks: "GITWEBKIT %s" % src,
+    (git, "pr_tool_setup_script"): lambda src, forks: "GITWEBKIT %s" % src,
     (git, "mirror_refresh_script"): lambda mirror, branches: "REFRESH %s" % mirror,
     (git, "REMOTES"): (("origin", "u1"), ("wpe", "u2"), ("fork", "u3"), ("forkwpe", "u4")),
     (images, "mirror_branches"): lambda env=None: ["main"],

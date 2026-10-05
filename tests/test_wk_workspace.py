@@ -347,7 +347,7 @@ class WorkspaceTest(unittest.TestCase):
 
     def front(self, w=None, name="ws", **opts):
         w = w or self.w
-        return workspace.new_front(w.reg, w.records, name, opts)
+        return workspace.new_front(w.reg, w.records, name, opts, pr)
 
     def detached(self, w=None, name="ws", base="", arch="native", driver=None):
         w = w or self.w

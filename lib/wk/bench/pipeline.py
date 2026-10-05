@@ -1,5 +1,4 @@
-"""`wk bench run`: one plan on one System -- the refusals, the preflight, the pinned payload, the task and
-its progress record, the watched run, the collect and the verdict."""
+"""`wk bench run`: one plan on one System -- refusals, preflight, pinned payload, task and progress record, the watched run, collect, verdict."""
 
 import os
 import re
@@ -17,6 +16,11 @@ CORES_TOKEN = re.compile(r"^[0-9]+(-[0-9]+)?$")
 STALL_SECONDS, ABORT_SECONDS = "900", "5400"
 MAX_LOAD = 4
 SCORE = re.compile(r"^(Score|Total|.*Score:)", re.I)
+
+
+def bench_class(plan):
+    """gpu by default: guessing gpu fails as an easy refusal, guessing cpu as a rendering score off llvmpipe."""
+    return "cpu" if plan.startswith(project.get("CPU_PLANS")) else "gpu"
 
 
 def cores_valid(spec):
@@ -99,8 +103,8 @@ class Leg:
 
 
 class Run:
-    def __init__(self, root, reg, system, clock, env=None):
-        self.root, self.reg, self.system, self.clock = str(root), reg, system, clock
+    def __init__(self, root, reg, system, clock, kit, env=None):
+        self.root, self.reg, self.system, self.clock, self.kit = str(root), reg, system, clock, kit
         self.env = dict(os.environ if env is None else env)
         progress.default_watchdog(self.env, STALL_SECONDS, ABORT_SECONDS)
         self.here, self.ws, self.ws_driver = reg.machine, system.ws, system.ws_driver
@@ -125,21 +129,21 @@ class Run:
                 die("--cores '%s' is not a valid Linux cpu list (e.g. 0-3, 2,3, 0-1,4, 7)" % leg.cores)
             if s.cores_refusal():
                 die("--cores: " + s.cores_refusal())
-        name, shell, browser_preset = o.get("preset") or project.BENCH_PRESET, project.SHELL, project.BENCH_PRESET
+        name, shell, browser_preset = o.get("preset") or project.get("BENCH_PRESET"), project.get("SHELL"), project.get("BENCH_PRESET")
         try:
-            leg.preset = project.resolve_preset(name, self.ws_driver.os(), self.ws_driver.kind, self.ws_driver.env)
+            leg.preset = self.kit.resolve_preset(name, self.ws_driver.os(), self.ws_driver.kind, self.ws_driver.env)
         except LookupError:
             die("unknown preset '%s' (wk build --list)" % name)
-        leg.klass, leg.arch = project.bench_class(plan), self.ws_driver.arch(self.ws)
+        leg.klass, leg.arch, cpu = bench_class(plan), self.ws_driver.arch(self.ws), ", ".join(project.get("CPU_PLANS"))
         leg.runner = shell if leg.preset.jsc_only else "browser"
         if leg.runner == shell and leg.klass == "gpu":
             die("%s is a gpu-class benchmark and %s builds no browser.\n    Either build a browser port (wk build %s %s) and pass\n"
-                "    --preset %s, or run a cpu-class plan -- jetstream3, octane,\n    kraken, sunspider, ares6 -- which the %s shell can drive directly."
-                % (plan, name, self.ws, browser_preset, browser_preset, shell))
+                "    --preset %s, or run a cpu-class plan -- %s -- which the %s shell can drive directly."
+                % (plan, name, self.ws, browser_preset, browser_preset, cpu, shell))
         if leg.klass == "gpu" and not s.has_gpu(leg.arch):
-            die("%s is gpu-class and '%s' is an %s workspace, which has no GPU.\n    cpu-class plans (jetstream3, octane, kraken, sunspider) do run in here,\n"
+            die("%s is gpu-class and '%s' is an %s workspace, which has no GPU.\n    cpu-class plans (%s) do run in here,\n"
                 "    with either a browser or a %s preset. For a 32-bit rendering number\n    measure a board:  wk bench run %s %s --system <board>"
-                % (plan, self.ws, leg.arch, project.SHELL_PORT, self.ws, plan))
+                % (plan, self.ws, leg.arch, cpu, project.get("SHELL_PORT"), self.ws, plan))
         if leg.runner == "browser":
             leg.browser = leg.browser or s.default_browser(leg.preset)
         if leg.software:
@@ -190,16 +194,16 @@ class Run:
                         "    a forced run is recorded as forced, and is not comparable with a clean run." % len(fails), env=self.env)
 
     def seed(self, leg):
-        leg.payload = project.pin_payload(self.here, self.lock, self.reg.store, self.ws_driver, self.ws, leg.plan)
-        if leg.runner != project.SHELL:
+        leg.payload = self.kit.pin_payload(self.here, self.lock, self.reg.store, self.ws_driver, self.ws, leg.plan)
+        if leg.runner != project.get("SHELL"):
             return
         if not leg.payload:
             die("%s has no seeded payload, and the %s runner has nothing to run without one.\n    'wk bench seed %s %s' fetches it; "
-                "a plan whose source cannot be pre-seeded can only be run with a browser preset." % (leg.plan, project.SHELL, self.ws, leg.plan))
-        if not act.dry_run() and not self.here.exists(os.path.join(leg.payload, project.SHELL_DRIVER)):
+                "a plan whose source cannot be pre-seeded can only be run with a browser preset." % (leg.plan, project.get("SHELL"), self.ws, leg.plan))
+        if not act.dry_run() and not self.here.exists(os.path.join(leg.payload, project.get("SHELL_DRIVER"))):
             die("%s has no %s, so %s cannot be driven from a JavaScript shell. Run it with a browser preset\n"
                 "    instead (--preset %s), which is the official number for every plan anyway."
-                % (leg.payload, project.SHELL_DRIVER, leg.plan, project.BENCH_PRESET))
+                % (leg.payload, project.get("SHELL_DRIVER"), leg.plan, project.get("BENCH_PRESET")))
 
     def begin(self, leg):
         """The task (task.json, under its lock) and its run directory, the env.json the report reads, and the progress record."""
@@ -225,7 +229,7 @@ class Run:
         leg.machine.mkdir(leg.out)
         record.write_env(os.path.join(leg.out, "env.json"), [
             "plan=" + leg.plan, "workspace=" + self.ws, "preset=" + leg.preset.name, "browser=" + leg.browser, "task=" + leg.task,
-            project.SHA_FIELD + "=" + self.system.sha(), "count=" + leg.count, "local_copy=" + leg.payload,
+            project.get("SHA_FIELD") + "=" + self.system.sha(), "count=" + leg.count, "local_copy=" + leg.payload,
             "software_reason=" + leg.software_reason, "class=" + leg.klass, "runner=" + leg.runner, "arch=" + leg.arch,
             "bench_host=" + self.system.bench_host, "preflight_notes=" + leg.notes, "cores.set=" + leg.cores]
             + (["ab.round=" + rnd, "ab.arm=" + leg.o.get("arm", ""), "ab.slot_a=" + leg.o.get("slot_a", ""),
@@ -249,7 +253,7 @@ class Run:
         watcher = None
         if self.task is not None:
             self.task.set("log", path)
-            watcher = job.PidWatch(self.ws_driver, self.ws, self.task, path, "bench", project.BENCH_PID_MATCH, job.pid_tries(self.env))
+            watcher = job.PidWatch(self.ws_driver, self.ws, self.task, path, "bench", project.get("BENCH_PID_MATCH"), job.pid_tries(self.env))
             watcher.start()
         try:
             return job.watch(argv, path, self.here, self.clock, self.env, cwd)
@@ -277,7 +281,7 @@ class Run:
         s, preset = self.system, leg.preset
         shell, var, lib = self.through_pad(preset.jsc_path(s.src())), preset.run_var(), preset.run_dir(s.src())
         n = int(leg.count or 1)
-        info("running %s in '%s' (%s, %s shell, %d iteration(s))" % (leg.plan, self.ws, preset.name, project.SHELL, n))
+        info("running %s in '%s' (%s, %s shell, %d iteration(s))" % (leg.plan, self.ws, preset.name, project.get("SHELL"), n))
         log("  results: %s" % leg.out)
         logs = []
         for i in range(1, n + 1):
@@ -285,17 +289,17 @@ class Run:
                 info("iteration %d/%d" % (i, n))
             logs.append(os.path.join(leg.out, "run-%d.log" % i))
             exports = ['%s="%s${%s:+:${%s}}"' % (var, lib, var, var)]
-            argv = project.shell_argv(shlex.quote(shell), [shlex.quote(a) for a in leg.args], leg.subtests)
+            argv = self.kit.shell_argv(shlex.quote(shell), [shlex.quote(a) for a in leg.args], leg.subtests)
             rc = s.run(leg, self.script(leg, exports, s.payload_dir(leg), argv), self.watched, logs[-1])
             if rc != 0:
-                return rc, "%s exited %d on iteration %d" % (project.SHELL, rc, i), logs[-1]
+                return rc, "%s exited %d on iteration %d" % (project.get("SHELL"), rc, i), logs[-1]
         if not act.dry_run():
-            project.merge_shell_results(os.path.join(leg.out, "result.json"), logs)
+            self.kit.merge_jsc_logs(os.path.join(leg.out, "result.json"), logs)
         return 0, "", logs[0]
 
     def run_browser(self, leg):
         s, src = self.system, self.system.src()
-        args = s.runner_argv(leg) + project.browser_args(leg, os.path.join(s.run_dir(leg), "result.json"), s.payload_dir(leg) if leg.payload else "",
+        args = s.runner_argv(leg) + self.kit.browser_args(leg, os.path.join(s.run_dir(leg), "result.json"), s.payload_dir(leg) if leg.payload else "",
                                                          self.through_pad(s.build_dir(leg)))
         info("running %s in '%s' (%s, %s)" % (leg.plan, self.ws, leg.preset.name, leg.browser))
         log("  results: %s" % leg.out)
@@ -314,7 +318,7 @@ class Run:
                 act.barrier("something drew over this run, so its number is one to distrust", env=self.env)
             except act.Refused:
                 rc = rc or 1
-        return rc, "%s exited %d" % (os.path.basename(project.BENCH_RUNNER), rc), path
+        return rc, "%s exited %d" % (os.path.basename(project.get("BENCH_RUNNER")), rc), path
 
     def go(self, plan, o):
         leg = self.leg(plan, o)
@@ -328,7 +332,7 @@ class Run:
                 self.step(1)
                 self.system.deploy(leg)
                 self.step(2)
-                rc, why, path = (self.run_shell if leg.runner == project.SHELL else self.run_browser)(leg)
+                rc, why, path = (self.run_shell if leg.runner == project.get("SHELL") else self.run_browser)(leg)
                 if rc == 0:
                     self.step(3)
                     self.system.collect(leg)

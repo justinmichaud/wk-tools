@@ -85,35 +85,6 @@ def cmd_sums(args):
         print("%s  %s%s" % (digest, prefix, rel))
 
 
-def env(doc, prefix):
-    p = prefix.rstrip("/")
-    return ["LD_LIBRARY_PATH=%s/%s" % (p, doc["lib_dir"]), "WEBKIT_EXEC_PATH=%s/%s" % (p, doc["exec_dir"]),
-            "WEBKIT_INJECTED_BUNDLE_PATH=%s/%s" % (p, doc["bundle_dir"])]
-
-
-def expect(doc, prefix):
-    """The running-binary check for a deployed slot, read as WK_BOARD_EXPECT by lib/wk/bench/board_driver.py."""
-    p = prefix.rstrip("/")
-    return {"process": "WPEWebProcess", "exe": "%s/%s/WPEWebProcess" % (p, doc["exec_dir"]), "lib": "%s/%s" % (p, doc["lib_file"]),
-            "lib_sha256": doc["files"][doc["lib_file"]], "build_id": doc["build_id"]}
-
-
-def verified(path):
-    """How many running-binary checks the driver's evidence file (one JSON check per line) holds; 0 unless every one passed."""
-    n = 0
-    try:
-        with open(path) as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                n += 1
-                if not json.loads(line).get("ok"):
-                    return 0
-    except (OSError, ValueError):
-        return 0
-    return n
-
-
 def main(argv):
     parser = argparse.ArgumentParser(prog="wk.slot", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)

@@ -288,7 +288,7 @@ class TestItIsThePolicyAndNotAnOption(WkTest):
 
 
 def run_py(*args):
-    return subprocess.run(["python3", "-m", "wk", "wk.bench.mac_pgo"] + list(args), capture_output=True, text=True, timeout=30,
+    return subprocess.run(["python3", "-m", "wk.bench.mac_pgo"] + list(args), capture_output=True, text=True, timeout=30,
                           env=dict(os.environ, PYTHONPATH=str(REPO / "lib")))
 
 

@@ -187,7 +187,7 @@ def slot_dir(ws, slot, env=None):
 
 
 def toolchain_holds(ws, cross_target, env=None):
-    """cross-toolchain-helper's own test of an installed SDK, which lib/wk/sysimage/yocto_ws.py reads too."""
+    """The cross toolchain helper's own test of an installed SDK, which lib/wk/sysimage/yocto_ws.py reads too."""
     d = os.path.join(Store(env).ws_dir(ws), "build", "CrossToolChains", cross_target, "build", "toolchain")
     if not os.path.isfile(os.path.join(d, ".toolchain_path_configured")):
         return False

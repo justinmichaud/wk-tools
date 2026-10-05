@@ -179,7 +179,7 @@ def probe_store(store, machine, branches, env):
 def report_store(out, gitremedy, fork_key, macos, want):
     """`gitremedy` only when the probe came from another machine; on the same one the config section already checked git."""
     f = kv(out)
-    mirror, what = f.get("mirror", ""), "%s mirror" % project.CHECKOUT
+    mirror, what = f.get("mirror", ""), "%s mirror" % project.get("CHECKOUT")
     if mirror == "ok":
         rows = [ok(what)]
     elif mirror.startswith("gap"):
@@ -414,7 +414,7 @@ class Doctor:
             yield self.local_state(bench_record.outside(store), "backed-up", "bench tasks outside any workspace, which no command reads "
                                    "until each is moved into its workspace's bench/: wk gc names each one's move")
         yield self.local_state(store.mirror_dir(), "regenerable",
-                               "wk sync clones %s into it again (the one copy here; the podman VM and every tart guest read it)" % project.CHECKOUT)
+                               "wk sync clones %s into it again (the one copy here; the podman VM and every tart guest read it)" % project.get("CHECKOUT"))
         yield self.local_state(store.keyring_dir(), "regenerable", "wk key deploy makes new deploy keys (revoke the old ones on GitHub)")
         yield self.local_state(p["push_held"], "regenerable",
                                "wk key deploy makes new deploy keys; wk key set github-pat and wk key set bugzilla-api-key store new ones "

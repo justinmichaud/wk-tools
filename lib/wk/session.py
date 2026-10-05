@@ -86,7 +86,7 @@ class Session:
         m = self.mode()
         if m == "bmc":
             warn("SLOW SESSION: SOFTWARE RENDERING -- the BMC display chip, no GPU at all")
-            log("  nothing measured here means anything (MotionMark differs ~400x).\n"
+            log("  nothing measured here means anything (a rendering score differs ~400x).\n"
                 "  measurable session again:  wk quiesce session on")
         elif m == "off":
             warn("SESSION IS OFF -- this socket is the screen-off placeholder, not a session")
@@ -254,7 +254,7 @@ class Session:
         if live:
             known = self.m.have("wayland-info")
             rows.append(("outputs", " ".join(self.outputs()) if known else "unknown (wayland-utils missing)"))
-            # MotionMark scores scale with surface size, so runs on different display modes are not comparable.
+            # Rendering scores scale with surface size, so runs on different display modes are not comparable.
             shown = self.display_mode() if known else "unknown (wayland-utils missing)"
             if shown:
                 rows.append(("display", shown))

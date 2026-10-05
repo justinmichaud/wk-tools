@@ -19,9 +19,9 @@ from tests.support import REPO, requires_machine
 
 sys.path.insert(0, str(REPO / "lib"))
 from tests.test_bench_pipeline import PLAN_JSON, RESULT, SHA, registry as pipeline_registry, invoke  # noqa: E402
-from wk import act, images, pgo, record, samply, webkit  # noqa: E402
+from wk import act, images, pgo, project, record, samply  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import board, board_ab, cli, record as brecord  # noqa: E402
+from wk.bench import board, board_ab, cli, plans, record as brecord  # noqa: E402
 from wk.boot import cli as bootcli  # noqa: E402
 from wk.boot.driver import Driver, Onboard, part  # noqa: E402
 from tests.fake_boot import FakeBoard, Side  # noqa: E402
@@ -464,7 +464,7 @@ class BoardWorld(Fake):
         err = io.StringIO()
         with self.patches(), contextlib.redirect_stderr(err):
             system = board.for_board(str(REPO), reg, "ws", self.clock, BOARD)
-            r = board.BoardRun(str(REPO), reg, system, self.clock, self.env)
+            r = board.BoardRun(str(REPO), reg, system, self.clock, plans, self.env)
             try:
                 rc = r.go(plan, o)
             except Refused as e:
@@ -813,7 +813,7 @@ class TestTheRunnerTree(BoardTest):
         self.assertEqual((tree, sha), (w.tree, SHA))
         order = [e[1][:2] if e[0] == "act" else e[:2] for e in w.effects if e[0] in ("act", "remove", "mkdir")]
         self.assertEqual(order, [("remove", w.tree + ".tmp"), ("mkdir", w.tree + ".tmp"), ("sh", "-c"), ("remove", w.tree), ("mv", "-f")])
-        self.assertIn(("copy_in", str(REPO / board.DRIVER), os.path.join(w.tree, webkit.BENCH_DRIVERS, "wk_board_driver.py")), w.effects)
+        self.assertIn(("copy_in", str(REPO / board.DRIVER), os.path.join(w.tree, project.get("BENCH_DRIVERS"), "wk_board_driver.py")), w.effects)
         self.assertIn(("copy_tree_in", str(REPO / "lib" / "wk"), os.path.join(w.tree, board.WKLIB, "wk")), w.effects)
 
     def test_no_mirror_names_wk_sync(self):

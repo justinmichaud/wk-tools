@@ -13,7 +13,7 @@ import re
 import shlex
 import sys
 
-from wk import act, fleet, images, job, record as progress, sched, webkit
+from wk import act, fleet, images, job, project, record as progress, sched
 from wk.act import Refused, die, info, log, warn
 
 BENCHMARKS = ("speedometer3", "jetstream3", "motionmark")   # the weights are upstream's (Tools/Scripts/pgo-profile); `mix` refuses one it does not weigh
@@ -21,7 +21,7 @@ COLLECT_TIMEOUT = 7200   # an instrumented run is several times slower than the 
 GLIB_LIB = "WPEWebKit"   # a GLib port links one shared library, where the Apple ports carry three (PROFILED_DYLIBS)
 BOARD_DIR = "/var/wk/pgo"   # baked in as PGO_PROFILE_DIR, so a browser started by hand still writes somewhere writable
 BOARD_FILE = BOARD_DIR + "/" + GLIB_LIB + "_%p.profraw"   # one file per process: the browser's and each web process's counters merge as peers
-COLLECT, USE = webkit.PGO_COLLECT, webkit.PGO_USE
+COLLECT, USE = project.get("PGO_COLLECT"), project.get("PGO_USE")
 PRESETS = ("wpe-cross", COLLECT, USE)
 MIN_FUNCTIONS = 1000
 MIN_COVERAGE = 0.25   # of the combined profile's, per library; the thinnest leg measured was 53%
@@ -42,7 +42,7 @@ done
 for f in "$SRC"/WebKitBuild/*/wk-profile-check.json "$SRC"/WebKitBuild/wk-pgo/*/profile-check.json; do
     [ -f "$f" ] || continue
     seen=1; printf 'profile check %s\n' "$f"
-    PYTHONPATH="$TOOLS/lib" python3 -m wk wk.pgo check --read "$f" 2>&1 | sed 's/^/  /'
+    PYTHONPATH="$TOOLS/lib" python3 -m wk.pgo check --read "$f" 2>&1 | sed 's/^/  /'
 done
 for f in "$SRC"/WebKitBuild/*/wk-payload-pins; do
     seen=1; printf 'benchmark payloads %s\n' "$f"
@@ -66,7 +66,7 @@ def collect_timeout(env):
 
 
 def pgo_dir_in(slot):
-    return "%s/%s/%s/%s" % (webkit.SRC, webkit.BUILD_DIR, images.PGO_SUBDIR, slot)
+    return "%s/%s/%s/%s" % (project.get("SRC"), project.get("BUILD_DIR"), images.PGO_SUBDIR, slot)
 
 
 def board_collection(ws, slot, env, timeout=None):

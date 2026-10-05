@@ -40,15 +40,11 @@ def api_base(var, default):
 
 
 GITHUB_API = api_base("WK_GITHUB_API", "https://api.github.com")
-BUGZILLA_API = api_base("WK_BUGZILLA_API", "")   # checked here; unset is the project's own (bugzilla())
-
-
-def bugzilla():
-    return BUGZILLA_API or project.BUGZILLA
+BUGZILLA_API = api_base("WK_BUGZILLA_API", project.get("BUGZILLA"))
 
 
 def bugzilla_host():
-    return urllib.parse.urlsplit(project.BUGZILLA).hostname
+    return urllib.parse.urlsplit(project.get("BUGZILLA")).hostname
 TIMEOUT = 20
 PER_PAGE = 100
 
@@ -241,31 +237,31 @@ def _bugzilla_api_key(value, repos, path, evidence):
         return UNVERIFIED, ("no Bugzilla login to check it against: the login is "
                             "the first email of this GitHub account's entry in "
                             "%s's metadata/contributors.json, read from the "
-                            "mirror here ('wk sync' makes one)." % project.CHECKOUT)
-    url = bugzilla() + "/rest/valid_login?" + urllib.parse.urlencode(
+                            "mirror here ('wk sync' makes one)." % project.get("CHECKOUT"))
+    url = BUGZILLA_API + "/rest/valid_login?" + urllib.parse.urlencode(
         {"login": login, "api_key": key})
     try:
         status, _headers, raw = _http("GET", url, None)
     except Unreachable as e:
         return UNVERIFIED, ("could not reach %s (%s), so whether it accepts this "
                             "key is not known here; 'wk doctor' asks again."
-                            % (bugzilla(), e))
+                            % (BUGZILLA_API, e))
     doc = _json(raw)
     if status == 400 and doc.get("code") == 306:
         return BAD, ("%s does not accept this key (error 306): revoked, mistyped "
-                     "or never valid." % bugzilla())
+                     "or never valid." % BUGZILLA_API)
     if status != 200:
         return UNVERIFIED, ("GET /rest/valid_login at %s answered HTTP %d rather "
                             "than 200 or 400, so nothing about this key was "
-                            "established." % (bugzilla(), status))
+                            "established." % (BUGZILLA_API, status))
     if doc.get("result") is not True:
         return BAD, ("%s accepts this key, but not as %s: it belongs to another "
                      "account, and `%s pr` would file and assign as that "
-                     "one." % (bugzilla(), login, project.PR_TOOL))
+                     "one." % (BUGZILLA_API, login, project.get("PR_TOOL")))
     # Bugzilla discloses no group membership to a caller without editusers, so editbugs is not knowable here.
     return OK, ("%s accepts it as %s; whether that account has editbugs is not "
                 "knowable from here.\n    spent on every %s request "
-                "a workspace makes while push is on" % (bugzilla(), login, bugzilla_host()))
+                "a workspace makes while push is on" % (BUGZILLA_API, login, bugzilla_host()))
 
 
 def _some(names, n=3):
@@ -340,7 +336,7 @@ def _github_pr_verdict(token, kind, repo, upstream):
         return BAD, ("GitHub refused it: no 'Pull requests: write' on %s, so "
                      "'%s pr' in a workspace cannot open one (HTTP 403): "
                      "the token was not granted that repository, or was granted "
-                     "it without that permission." % (repo, project.PR_TOOL))
+                     "it without that permission." % (repo, project.get("PR_TOOL")))
     if status == 404:
         return BAD, ("this token cannot see %s at all (HTTP 404): no repository "
                      "of that name is visible to it." % repo)
@@ -482,7 +478,7 @@ def _tailnet_api(value, repos, path, evidence):
         return OK, ("an API access token; whether the tailnet still accepts it "
                     "is asked as soon as it is stored.")
     probe = Local().run(["env", "WK_TS_API_SECRET_FILE=" + path, "PYTHONPATH=" + os.path.dirname(os.path.abspath(__file__)),
-                         sys.executable, "-m", "wk", "wk.tailnet", "check"])
+                         sys.executable, "-m", "wk.tailnet", "check"])
     detail = (probe.out + probe.err).strip().splitlines()
     detail = detail[-1] if detail else "no answer"
     if probe.rc == 0:
@@ -566,7 +562,7 @@ def rules():
             forbids="delete a repository, or administer a repository, an "
                     "organization or the site",
             what="a GitHub personal access token, so `%s pr` in a "
-                 "workspace can open a pull request" % project.PR_TOOL,
+                 "workspace can open a pull request" % project.get("PR_TOOL"),
             url=CLASSIC_TOKEN_PAGE,
             remedy=("the two fields that link cannot carry: tick nothing but the "
                     "'public_repo' it preselects ('repo' adds every private "
@@ -578,13 +574,13 @@ def rules():
         ("bugzilla-api-key", Rule(
             needs="be accepted by %s as the login %s's "
                   "metadata/contributors.json gives this GitHub account"
-                  % (bugzilla_host(), project.CHECKOUT),
+                  % (bugzilla_host(), project.get("CHECKOUT")),
             forbids="rest where a workspace reads, or be spent while push is off: "
                     "a Bugzilla key is the whole account",
             what="a %s API key, so `%s pr` in a workspace can "
                  "file the bug and post the pull request to it"
-                 % (bugzilla_host(), project.PR_TOOL),
-            url=project.BUGZILLA + "/userprefs.cgi?tab=apikey",
+                 % (bugzilla_host(), project.get("PR_TOOL")),
+            url=project.get("BUGZILLA") + "/userprefs.cgi?tab=apikey",
             remedy="'New API key' there, described as this machine; the key is "
                    "shown once",
             store_with="wk key set bugzilla-api-key",

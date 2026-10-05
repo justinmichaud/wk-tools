@@ -1,18 +1,16 @@
-"""The project lab code checks out, builds and measures, as names the wk layer hands in before any is read."""
+"""The names of the project lab code checks out, builds and measures: project.json beside this file, which the wk layer owns."""
+import json
+import os
 
-_HANDED = {}
-
-
-def hand_in(**names):
-    _HANDED.update(names)
+PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "project.json")
 
 
-def source():
-    return "from wk import project\nproject.hand_in(**%r)\n" % {k: v for k, v in _HANDED.items() if not callable(v)}
+def _frozen(v):
+    if isinstance(v, list):
+        return tuple(_frozen(x) for x in v)
+    return {k: _frozen(x) for k, x in v.items()} if isinstance(v, dict) else v
 
 
-def __getattr__(name):
-    try:
-        return _HANDED[name]
-    except KeyError:
-        raise AttributeError("wk.project.%s has not been handed in: run lib/wk modules as `python3 -m wk <module>`" % name) from None
+def get(key):
+    with open(PATH) as f:
+        return _frozen(json.load(f)[key])

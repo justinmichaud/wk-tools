@@ -9,19 +9,22 @@ from tests.support import REPO
 # Longest prefix wins. cli is cmd/* and the lib modules only a command runs: the CLI over every layer.
 LAYERS = {
     "lab": ("lib/common.sh", "lib/credcheck.py", "lib/secretfile.py", "lib/treehash.py", "lib/wkdata.py", "lib/wk/"),
-    "wk": ("lib/contributors.py", "lib/wk/build.py", "lib/wk/git.py", "lib/wk/pgo.py", "lib/wk/pr.py", "lib/wk/presets.py",
-           "lib/wk/profile.py", "lib/wk/slot.py", "lib/wk/webkit.py", "lib/wk/bench/ab.py", "lib/wk/bench/autorun.py",
+    "wk": ("lib/contributors.py", "lib/wk/build.py", "lib/wk/pgo.py", "lib/wk/pr.py", "lib/wk/presets.py",
+           "lib/wk/profile.py", "lib/wk/slot.py", "lib/wk/bench/ab.py", "lib/wk/bench/autorun.py",
            "lib/wk/bench/board_ab.py", "lib/wk/bench/board_driver.py", "lib/wk/bench/mac_ab.py", "lib/wk/bench/mac_pgo.py",
            "lib/wk/bench/plans.py", "lib/wk/bench/scores.py", "lib/wk/bench/seed.py",
            # The image recipes: WebKit's own Tools/yocto and cross-toolchain-helper, and buildroot's wpewebkit package.
            "lib/wk/sysimage/buildroot.py", "lib/wk/sysimage/buildroot_ws.py", "lib/wk/sysimage/yocto.py", "lib/wk/sysimage/yocto_ws.py",
-           # `wk sync`: the mirror, its snapshots, each checkout's upstream and fork wiring, PR heads and git-webkit setup.
+           # `wk sync`: the mirror, its snapshots, PR heads and the PR tool's setup.
            "lib/wk/sync.py"),
     "field": ("lib/wk/bench/report.py",),
-    "cli": ("cmd/", "lib/wk/__main__.py", "lib/wk/dispatch.py", "lib/wk/completion.py", "lib/wk/bench/cli.py", "lib/wk/sysimage/cli.py"),
+    "cli": ("cmd/", "lib/wk/dispatch.py", "lib/wk/completion.py", "lib/wk/disk.py", "lib/wk/gc.py", "lib/wk/bench/cli.py",
+            "lib/wk/sysimage/cli.py"),
 }
 
-WEBKIT = re.compile(r"webkit|javascriptcore|minibrowser|tools/scripts|\bjsc\b", re.I)
+# The project's own names, its benchmarks, its build presets and its SDK's: what lib/wk/project.json holds for lab.
+WEBKIT = re.compile(r"webkit|javascriptcore|minibrowser|tools/scripts|tools/(gtk|wpe)\b|\bjsc\b|run-benchmark|cross-toolchain-helper|wkdev"
+                    r"|motionmark|speedometer|jetstream|octane|kraken|sunspider|ares6|jsbench|\b(mac|ios-sim|gtk|wpe|jsc)-(debug|release|cross)", re.I)
 
 
 def layer_of(rel):
@@ -93,7 +96,7 @@ class Layering(unittest.TestCase):
     def test_no_module_uses_a_layer_below_it(self):
         found = violations()
         self.assertEqual(["%s %s: %s" % (rel, rule, found[(rel, rule)]) for rel, rule in sorted(found)], [],
-                         "move the WebKit knowledge or the import into a wk module, and hand it in (README.md, Layers)")
+                         "move the name into lib/wk/project.json, or the step into a wk module the CLI hands in (README.md, Layers)")
 
 
 if __name__ == "__main__":

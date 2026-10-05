@@ -138,9 +138,9 @@ class Quiesce:
         log("  daemons:    'quiesce on' paused them; each one's state is measured below"
             if self.m.exists(self._at("daemons_paused")) else "  daemons:    not paused")
         if self.macos:
-            log("  raiser:     running (%s kept frontmost)" % project.BROWSER if self._running("raiser.pid") else "  raiser:     no")
-            nap = self.m.run(["defaults", "read", project.BROWSER_BUNDLE, "NSAppSleepDisabled"]).out.strip()
-            log("  app nap:    disabled for %s" % project.BROWSER if nap == "1"
+            log("  raiser:     running (%s kept frontmost)" % project.get("BROWSER") if self._running("raiser.pid") else "  raiser:     no")
+            nap = self.m.run(["defaults", "read", project.get("BROWSER_BUNDLE"), "NSAppSleepDisabled"]).out.strip()
+            log("  app nap:    disabled for %s" % project.get("BROWSER") if nap == "1"
                 else "  app nap:    default (rAF can be throttled when backgrounded)")
             self.noise()
         return 0

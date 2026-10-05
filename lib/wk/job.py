@@ -287,7 +287,7 @@ def pid_args(driver, ws, pid):
 
 
 def adopt(driver, ws, t, pid, want):
-    """A pid out of a workspace is its own claim, and a wkdev container shares the host's PID namespace
+    """A pid out of a workspace is its own claim, and an SDK container shares the host's PID namespace
     (--pid host): it is adopted, and later signalled, only while its command line there matches `want`."""
     args = pid_args(driver, ws, pid)
     if match_any(args, want):

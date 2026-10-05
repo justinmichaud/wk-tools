@@ -17,9 +17,9 @@ from tests.fakes import FakeRegistry
 from tests.support import REPO, WkTest, bash, clean_env, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import doctor, places, wall, webkit  # noqa: E402
+from wk import doctor, places, project, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Fake, Result, isolated_module  # noqa: E402
+from wk.machine import Fake, Result  # noqa: E402
 
 
 def _load_cmd_doctor():
@@ -29,7 +29,7 @@ def _load_cmd_doctor():
 DOCTOR_CMD = _load_cmd_doctor()
 
 OK, MISS, NOTE = doctor.OK, doctor.MISS, doctor.NOTE
-FORK = webkit.FORKS[0][1]
+FORK = project.get("FORKS")[0][1]
 
 # Most specific first: the first key found in the command answers it.
 HEALTHY = [
@@ -87,7 +87,7 @@ class _Wall(unittest.TestCase):
         self.fake.react(["bash", "-lc"], self._exec)
         self.fake.answer(["python3", os.path.join(str(REPO), "lib", "secretfile.py"), "present"])
         self.fake.answer(["python3", os.path.join(str(REPO), "lib", "secretfile.py"), "read"], out="stored-value")
-        self.fake.answer(isolated_module(os.path.join(str(REPO), "lib"), "credcheck"), out="ok\tit works")
+        self.fake.answer(["python3", os.path.join(str(REPO), "lib", "credcheck.py")], out="ok\tit works")
         self.reg = places.Registry(str(REPO), env=self.env, machine=self.fake)
         self.driver = self.load(self.kind)
 

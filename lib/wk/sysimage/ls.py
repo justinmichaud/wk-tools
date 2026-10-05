@@ -6,14 +6,13 @@ import os
 import time
 from collections import namedtuple
 
-from wk import act, fleetwalk, images
+from wk import act, fleetwalk, images, project
 from wk.clock import Clock
 
 Image = namedtuple("Image", "builder ws path")   # path None: an image workspace holding none right now
 
 ROW = "%-40s %-8s %-10s %-10s %-9s %-8s %s"
 HEADER = ("WORKSPACE", "BOARD", "WHERE", "BUILDER", "STATE", "SIZE", "BUILT")
-PGO_USE = "wpe-cross-pgo-use"
 HOST_BUILDERS = ("mac-volume", "guest", "fetch", "pmos")
 
 
@@ -148,7 +147,7 @@ def slot_holds(ws, name, commit, env):
     p = images.quiet_load(images.ws_profile(ws, env) or "", env)
     if p is None:
         return False
-    return slot_is(ws, name, commit, PGO_USE if images.pgo_wanted(p["IMG_BUILDER"], p["CFG_RELEASE"]) else None, env)
+    return slot_is(ws, name, commit, project.get("PGO_USE") if images.pgo_wanted(p["IMG_BUILDER"], p["CFG_RELEASE"]) else None, env)
 
 
 class Listing:

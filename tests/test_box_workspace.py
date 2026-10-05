@@ -11,7 +11,7 @@ from tests.support import REPO
 from tests.test_wk_places import LINUX_PROBE, RemoteTest
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import places, record, workspace  # noqa: E402
+from wk import places, pr, record, workspace  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 
@@ -57,7 +57,7 @@ class TestTheWorkstationHandsTheLifecycleOver(BoxTest):
         self.fake.answer(["ssh"])
         with mock.patch("os.isatty", lambda fd: False), contextlib.redirect_stderr(io.StringIO()) as err:
             try:
-                return workspace.new_front(self.reg, records, "integ", dict(opts, place="box")), err.getvalue()
+                return workspace.new_front(self.reg, records, "integ", dict(opts, place="box"), pr), err.getvalue()
             except Refused as e:
                 return e.status, err.getvalue()
 

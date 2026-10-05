@@ -1,18 +1,13 @@
-"""The plans and what runs them: a plan's class, run-benchmark's arguments, the jsc shell's, and the pinned payload."""
+"""A bench run's `kit`, which the CLI hands the pipeline: the build preset, run-benchmark's and the jsc shell's arguments, the payload."""
 
 import json
 
-from wk import record as progress, webkit
+from wk import pgo, presets, project, record as progress
 from wk.act import die, warn
 from wk.bench import seed
 from wk.machine import replace_file
 
-# gpu by default: guessing gpu fails as an easy refusal, guessing cpu as a MotionMark score off llvmpipe.
-CPU_PLANS = ("jetstream", "octane", "kraken", "sunspider", "ares6", "jsbench")
-
-
-def bench_class(plan):
-    return "cpu" if plan.startswith(CPU_PLANS) else "gpu"
+resolve_preset, default_preset, board_collection, pin_plan = presets.resolve, presets.default_preset, pgo.board_collection, seed.pin
 
 
 def measure_args(leg, output, payload):
@@ -28,7 +23,7 @@ def browser_args(leg, output, payload, build):
 
 def board_runner_args(leg, port, diagnose, output):
     """run-benchmark driving a board's browser (lib/wk/bench/board_driver.py) from this host's page server."""
-    return ([webkit.BENCH_RUNNER, "--browser", "wk-board", "--platform", "linux", "--driver", "webserver", "--http-server-type", "builtin",
+    return ([project.get("BENCH_RUNNER"), "--browser", "wk-board", "--platform", "linux", "--driver", "webserver", "--http-server-type", "builtin",
              "--http-server-port", port, "--diagnose-directory", diagnose] + measure_args(leg, output, leg.payload)
             + (["--generate-pgo-profiles"] if leg.o.get("pgo_dir") else []))
 

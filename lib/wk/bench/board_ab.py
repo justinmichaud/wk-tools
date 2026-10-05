@@ -7,9 +7,9 @@ import os
 import re
 import shlex
 
-from wk import act, images, job, record as progress, webkit
+from wk import act, images, job, project, record as progress
 from wk.act import Refused, die, info, log, warn
-from wk.bench import board, pipeline, record, scores, systems
+from wk.bench import board, pipeline, plans, record, scores, systems
 from wk.boot import cli as bootcli
 from wk.lock import Lock
 
@@ -143,7 +143,7 @@ class AB:
         self.lock = Lock(reg.store, reg.machine, clock)
 
     def run(self):
-        return board.BoardRun(self.root, self.reg, self.system, self.clock, self.env, name=self.ws + "-leg")
+        return board.BoardRun(self.root, self.reg, self.system, self.clock, plans, self.env, name=self.ws + "-leg")
 
     def leg(self, o):
         """One leg; False when it produced nothing, which loses its round but not the A/B."""
@@ -393,7 +393,7 @@ class ArgsAB(AB):
         self.system = systems.for_workspace(self.root, reg, ws, clock, "")
 
     def run(self):
-        return pipeline.Run(self.root, self.reg, self.system, self.clock, dict(self.env, WK_TASK_HELD=self.task))
+        return pipeline.Run(self.root, self.reg, self.system, self.clock, plans, dict(self.env, WK_TASK_HELD=self.task))
 
     def arm_leg(self, arm, o):
         return self.leg(dict(o, arm_args=self.args[arm]))
@@ -404,7 +404,7 @@ class ArgsAB(AB):
     def body(self):
         self.base = dict(self.o, slot_a=self.labels[0], slot_b=self.labels[1], task=self.task)
         if not self.claimed():
-            preset = self.o.get("preset") or webkit.BENCH_PRESET
+            preset = self.o.get("preset") or project.get("BENCH_PRESET")
             measured = "".join(" --%s %s" % (k.replace("_", "-"), shlex.quote(self.o[k])) for k in ARGS_AB_MEASURED if self.o.get(k))
             self.create("%s-%s-options" % (self.clock.stamp(), self.ws), [
                 "subject.kind=options", "subject.a=" + self.args[0], "subject.b=" + self.args[1], "devices=%s=%s" % (self.ws, preset),

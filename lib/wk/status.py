@@ -338,7 +338,7 @@ def unit_stale(root, unit, run=None):
 
 def services():
     return (("wk-proxy.service", "egress proxy", "workspaces have no network without it"),
-            ("wk-github-inject.service", "credential injector", "'%s pr' and 'gh' in a workspace get no credential" % project.PR_TOOL))
+            ("wk-github-inject.service", "credential injector", "'%s pr' and 'gh' in a workspace get no credential" % project.get("PR_TOOL")))
 
 
 def service_records(root, machine, run=None):
@@ -467,7 +467,7 @@ def fleet_probe(root, name, cap, env=None):
     """The board's boot driver (wk.boot.cli fleet-probe) asked under a ceiling: None when it did not answer in `cap` seconds."""
     env = os.environ if env is None else env
     r = Local().run(["env", "PYTHONPATH=" + os.path.join(str(root), "lib"), "WK_SSH_TIMEOUT=" + str(fleet_timeout(env)),
-                     sys.executable, "-m", "wk", "wk.boot.cli", "fleet-probe", name], input="", timeout=cap)
+                     sys.executable, "-m", "wk.boot.cli", "fleet-probe", name], input="", timeout=cap)
     if r.rc == TIMED_OUT:
         return None
     if not r.ok:
@@ -836,7 +836,7 @@ class Walk:
             script = WS_PROBE.replace("@SRC@", shlex.quote(driver.src(ws))).replace("@BASE@", places.upstream_line_body())
             probe = kv(driver.exec(ws, ["sh", "-c", script]).out)
             origin = probe.get("origin", "")
-            if origin and origin != project.ORIGIN:
+            if origin and origin != project.get("REMOTES"):
                 r.warn("origin is %s, not upstream -- 'wk sync %s --fix'" % (origin, ws))
             for f in ("dirty", "untracked", "unpushed", "upstream", "behind", "ahead"):
                 if probe.get(f) and probe[f] != "0":

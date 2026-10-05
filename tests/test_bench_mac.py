@@ -19,9 +19,9 @@ from tests.killpoints import converges
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import decl, places, samply as wksamply, screen, webkit  # noqa: E402
+from wk import decl, places, project, samply as wksamply, screen  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import cli, mac, record as brecord, report  # noqa: E402
+from wk.bench import cli, mac, plans, record as brecord, report  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 from wk.machine import lib_argv  # noqa: E402
@@ -154,7 +154,7 @@ class MacTest(unittest.TestCase):
             os.environ["WK_DRY_RUN"] = "1"
         try:
             with contextlib.redirect_stderr(err):
-                rc = mac.staged(REPO, w.reg, w.clock, staged_options(*argv))
+                rc = mac.staged(REPO, w.reg, w.clock, staged_options(*argv), plans)
         finally:
             os.environ.pop("WK_DRY_RUN", None)
         return rc, err.getvalue()
@@ -275,7 +275,7 @@ class TestTheLegsOwnGates(MacTest):
     def said(self, w):
         err = io.StringIO()
         with self.assertRaises(Refused), contextlib.redirect_stderr(err):
-            mac.staged(REPO, w.reg, w.clock, staged_options())
+            mac.staged(REPO, w.reg, w.clock, staged_options(), plans)
         return err.getvalue()
 
     def test_a_covered_screen_refuses_and_force_records_it(self):
@@ -330,7 +330,7 @@ class TestTheProfile(MacTest):
         """samply is already in the cache, or it is not and no fetch can start."""
         w = World(self.tmp)
         w.answer(["test", "-x", self.samply()], rc=0 if cached else 1)
-        w.answer(["pgrep", "-n", "-f", webkit.MAC_WEB_PROCESS], rc=0 if web else 1, out=web)
+        w.answer(["pgrep", "-n", "-f", project.get("MAC_WEB_PROCESS")], rc=0 if web else 1, out=web)
         rundir = self.tmp / ("run-%d" % len(os.listdir(self.tmp)))
         rundir.mkdir()
         c = mac.Capture(self.CACHE, w, w.clock, "/tmp/p.json", str(rundir))
@@ -353,7 +353,7 @@ class TestTheProfile(MacTest):
 
     def test_a_staged_run_records_where_its_profile_is(self):
         self.w.answer(["test", "-x", self.samply(self.w.reg.store.cache_dir())])
-        self.w.answer(["pgrep", "-n", "-f", webkit.MAC_WEB_PROCESS], out="321\n")
+        self.w.answer(["pgrep", "-n", "-f", project.get("MAC_WEB_PROCESS")], out="321\n")
         rc, err = self.staged("--profile", "/tmp/p.json")
         self.assertEqual(rc, 0, err)
         self.assertEqual(self.w.env_json()["profile"], "/tmp/p.json")
@@ -363,9 +363,9 @@ class TestTheWatchdog(MacTest):
     def test_a_benchmarks_silence_is_waited_out_longer_than_a_builds_and_an_override_wins(self):
         w = self.w
         system = mac.MacVolumeSystem(REPO, w.reg, w.clock, mac.Install(REPO, w, w.env), w.home, w.stage, {})
-        env = mac.StagedRun(REPO, w.reg, system, w.clock, w.env).env
+        env = mac.StagedRun(REPO, w.reg, system, w.clock, plans, w.env).env
         self.assertEqual((env["WK_STALL_SECONDS"], env["WK_ABORT_SECONDS"]), ("900", "5400"))
-        env = mac.StagedRun(REPO, w.reg, system, w.clock, dict(w.env, WK_STALL_SECONDS="12")).env
+        env = mac.StagedRun(REPO, w.reg, system, w.clock, plans, dict(w.env, WK_STALL_SECONDS="12")).env
         self.assertEqual(env["WK_STALL_SECONDS"], "12")
 
 
@@ -492,7 +492,7 @@ class StageWorld(World):
         with contextlib.redirect_stderr(err):
             a = args("stage", "ws", "--to", "mbp", "--preset", "mac-release", *argv)
             rc = mac.stage(REPO, self.reg, self.clock, a.positionals[1:], a.value("--to"), a.value("--preset"),
-                           mac.plans(a.order, a.values("--plan"), a.values("--payload")), driver=lambda root, conf: self.drv)
+                           mac.plans(a.order, a.values("--plan"), a.values("--payload")), plans, driver=lambda root, conf: self.drv)
         return rc, err.getvalue()
 
     def stages(self):

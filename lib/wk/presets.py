@@ -2,23 +2,10 @@
 
 import shlex
 
-from wk import act, fleet, images, record, resources
+from wk import act, fleet, images, project, record, resources
 from wk.store import dispatch_place
 
-LIST_TEXT = """\
-jsc-debug          JSCOnly, Debug, assertions on
-jsc-release        JSCOnly, Release, the default for benchmarking
-jsc-release-asan   JSCOnly, Release + AddressSanitizer
-gtk-debug          GTK port, Debug, developer mode
-gtk-release        GTK port, Release
-gtk-release-asan   GTK port, Release + AddressSanitizer
-wpe-release        WPE port, Release
-mac-debug          macOS (Apple port), Debug, Xcode
-mac-release        macOS (Apple port), Release, Xcode
-mac-release-pgo    macOS (Apple port), Release + PGO and full LTO -- the perf build
-mac-release-asan   macOS (Apple port), Release + AddressSanitizer
-ios-sim-release    iOS Simulator, Release, Xcode
-
+LIST_TEXT = "".join("%-18s %s\n" % row for row in project.get("PRESETS").items()) + """
 In a macOS workspace the three jsc-* presets build the Apple port's
 JavaScriptCore with Xcode instead: there is no JSCOnly port there.
 """
@@ -175,7 +162,7 @@ def default_preset(reg, name):
     if preset_name:
         act.info("preset: %s -- what '%s' was last built with" % (preset_name, name))
         return preset_name
-    return "mac-release" if driver.os() == "macos" else "jsc-release"
+    return project.get("MAC_PRESET") if driver.os() == "macos" else "jsc-release"
 
 
 def resolve(name, os_name, kind, env):

@@ -17,7 +17,7 @@ from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from tests.test_bench_mac import StubWatch  # noqa: E402
-from wk import decl, dispatch, job, record, screen, webkit  # noqa: E402
+from wk import decl, dispatch, job, record, project, screen  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import record as brecord, systems  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
@@ -269,7 +269,7 @@ class TestInterrupted(BenchTest):
 
         def begin(recs, *a, **kw):
             t = real(recs, *a, **kw)
-            t.set("pid_match", webkit.BENCH_PID_MATCH)
+            t.set("pid_match", project.get("BENCH_PID_MATCH"))
             t.pid(77)
             t.set("where", "place")
             return t

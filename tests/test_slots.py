@@ -18,7 +18,7 @@ from tests.support import (REPO, WkTest, container_side, container_store, run_he
                            requires_container_place, run)
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import slot as wkslot_lib  # noqa: E402
+from wk.bench import board  # noqa: E402
 from wk.machine import Fake, isolated_module  # noqa: E402
 
 BUILD_ID = "3dca0e504a7438009c3eadf6113833fcc6297428"
@@ -89,11 +89,11 @@ class TestManifest(WkTest):
 
     def test_env_and_expect_describe_the_deployed_prefix(self):
         doc = json.loads(self.slot.read_text())
-        env = wkslot_lib.env(doc, "/var/wk/slots/pr/root")
+        env = board.slot_env(doc, "/var/wk/slots/pr/root")
         self.assertIn("LD_LIBRARY_PATH=/var/wk/slots/pr/root/usr/lib", env)
         self.assertIn("WEBKIT_EXEC_PATH=/var/wk/slots/pr/root/usr/libexec/wpe-webkit-1.1", env)
         self.assertIn("WEBKIT_INJECTED_BUNDLE_PATH=/var/wk/slots/pr/root/usr/lib/wpe-webkit-1.1/injected-bundle", env)
-        expect = wkslot_lib.expect(doc, "/var/wk/slots/pr/root/")
+        expect = board.slot_expect(doc, "/var/wk/slots/pr/root/")
         self.assertEqual(expect["process"], "WPEWebProcess")
         self.assertEqual(expect["exe"], "/var/wk/slots/pr/root/usr/libexec/wpe-webkit-1.1/WPEWebProcess")
         self.assertEqual(expect["lib"], "/var/wk/slots/pr/root/usr/lib/libWPEWebKit-1.1.so.0.2.9")
@@ -116,7 +116,7 @@ class TestVerified(WkTest):
     def _verified(self, lines):
         f = self.tmp / "verify.jsonl"
         f.write_text("".join(json.dumps(l) + "\n" for l in lines))
-        return wkslot_lib.verified(str(f))
+        return board.slot_verified(str(f))
 
     def test_all_ok_passes_and_counts(self):
         self.assertEqual(self._verified([{"ok": True}, {"ok": True}]), 2)
@@ -126,7 +126,7 @@ class TestVerified(WkTest):
 
     def test_no_evidence_is_not_verified(self):
         self.assertEqual(self._verified([]), 0)
-        self.assertEqual(wkslot_lib.verified(str(self.tmp / "missing")), 0)
+        self.assertEqual(board.slot_verified(str(self.tmp / "missing")), 0)
 
 
 def load_driver():

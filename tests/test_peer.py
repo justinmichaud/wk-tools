@@ -12,7 +12,7 @@ from unittest import mock
 from tests.support import REPO, WkTest, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import places, workspace  # noqa: E402
+from wk import places, pr, workspace  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
@@ -199,7 +199,7 @@ class TestPeerDelegation(PeerFixture):
         (self.root / "machines" / "me.conf").write_text("kind=peer\npeer=1\nlocal=1\n")
         reg = places.Registry(self.root, env=dict(os.environ, **self.env()), machine=Fake("host"))
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
-            workspace.new_front(reg, None, "newws", {"place": "me"})
+            workspace.new_front(reg, None, "newws", {"place": "me"}, pr)
         self.assertIn("'me' is this machine, and its workspaces are made at its own default", err.getvalue())
         self.assertEqual(reg.machine.effects, [])
 

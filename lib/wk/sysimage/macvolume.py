@@ -11,7 +11,7 @@ import sys
 import time
 from xml.parsers.expat import ExpatError
 
-from wk import act, fleet, images
+from wk import act, fleet, images, project
 from wk.act import Refused, die, info, log, warn
 from wk.clock import Clock
 from wk.images import MARKER
@@ -403,7 +403,7 @@ class MacVolume:
         else:
             warn("  hosts: could not deny update endpoints in /etc/hosts (see above)")
         if not self.m.run(["/usr/bin/python3", "-c", "import objc"]).ok:   # Apple's python3 has pyobjc; a Homebrew one has not
-            warn("/usr/bin/python3 cannot 'import objc' -- run-benchmark's prepare_env will fail")
+            warn("/usr/bin/python3 cannot 'import objc' -- %s's prepare_env will fail" % os.path.basename(project.get("BENCH_RUNNER")))
             log("  xcode-select --install   (Command Line Tools; it is a GUI prompt)")
         if not self.m.run(["/usr/bin/python3", "-c", "import scipy"]).ok:
             log("scipy absent -- 'wk bench compare' in bench mode needs: /usr/bin/python3 -m pip install --user scipy")

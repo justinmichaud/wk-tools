@@ -121,14 +121,13 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import webkit  # noqa: E402,F401  first: the WebKit names lab code is handed (wk.project)
 from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
 from wk import decl, places  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import cli, mac  # noqa: E402
+from wk.bench import cli, mac, plans  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import Local  # noqa: E402
 
@@ -179,9 +178,9 @@ def main(argv):
         return bench.deploy(store.ws_name(), word, args.value("--slot") or "a")
     if verb == "stage":
         pairs = mac.plans(args.order, args.values("--plan"), args.values("--payload"))
-        return mac.stage(ROOT, reg, Clock(), args.positionals[1:], args.value("--to") or "", store.build_preset(), pairs)
+        return mac.stage(ROOT, reg, Clock(), args.positionals[1:], args.value("--to") or "", store.build_preset(), pairs, plans)
     if verb == "staged":
-        return mac.staged(ROOT, reg, Clock(), staged_options(args))
+        return mac.staged(ROOT, reg, Clock(), staged_options(args), plans)
     if verb == "ab":
         return bench.ab(word, cli.options(args, cli.AB, plans=args.values("--plan"), preset=store.build_preset()), args.flag("--kill"))
     if verb == "ab-summary":

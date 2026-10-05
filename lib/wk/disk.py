@@ -62,7 +62,7 @@ class Report:
 
 def probe_store(store):
     """kb<TAB>label<TAB>note per store row; on macOS this runs in the VM and renders out here."""
-    rows = [(kb(store.mirror_dir()), "the %s mirror" % project.CHECKOUT, "git/%s -- refetchable (wk sync)" % project.MIRROR)]
+    rows = [(kb(store.mirror_dir()), "the %s mirror" % project.get("CHECKOUT"), "git/%s -- refetchable (wk sync)" % project.get("MIRROR"))]
     bases = len(os.listdir(store.snapshots_dir())) if os.path.isdir(store.snapshots_dir()) else 0
     rows.append((kb(store.snapshots_dir()), "snapshots", "%d of them; unreferenced ones go with wk gc" % bases))
     for ws in store.workspaces():
@@ -84,9 +84,9 @@ def workspace_report(reg):
     src = marker.get("src", "")
     rep.section("workspace '%s'" % marker.get("name", ""))
     rep.row(kb(os.path.join(src, ".git")), "the checkout's .git")
-    for d in sorted(glob.glob(os.path.join(src, project.BUILD_DIR, "*", "*"))):
+    for d in sorted(glob.glob(os.path.join(src, project.get("BUILD_DIR"), "*", "*"))):
         if os.path.isdir(d):
-            rep.row(kb(d), "build tree %s" % os.path.relpath(d, os.path.join(src, project.BUILD_DIR)))
+            rep.row(kb(d), "build tree %s" % os.path.relpath(d, os.path.join(src, project.get("BUILD_DIR"))))
     for d in (os.path.join(HOME, "Library/Developer/Xcode/DerivedData"), os.path.join(HOME, "Library/Caches/clang")):
         if os.path.isdir(d):
             rep.row(kb(d), os.path.basename(d), "compilation cache")
@@ -125,7 +125,7 @@ def machine_report(root, reg):
         if ctr.machine_state() == "running":
             with open(__file__) as me:   # this file, not the VM's copy, which is only as new as `wk sync --tools container`
                 cp = here.run(["podman", "machine", "ssh", vm_name, "--",
-                               "WK_STORE=/var/lib/wk python3 -c %s" % shlex.quote(RUN_AS_VM_COPY)], input=project.source() + me.read())
+                               "WK_STORE=/var/lib/wk python3 -c %s" % shlex.quote(RUN_AS_VM_COPY)], input=me.read())
             if cp.out.strip():
                 rep.render(cp.out, add=False)
             else:

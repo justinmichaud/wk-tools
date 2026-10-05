@@ -15,9 +15,9 @@ from tests.test_wk_secrets import ROOT, SECRETFILE, SecretsTest, World
 from wk import act  # noqa: E402
 from wk.key import cli, common  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Result, isolated_module  # noqa: E402
+from wk.machine import Result  # noqa: E402
 
-CREDCHECK = isolated_module(os.path.join(ROOT, "lib"), "credcheck")
+CREDCHECK = os.path.join(ROOT, "lib", "credcheck.py")
 NAMES = ("github-pat", "litellm", "ntfy", "deploy-key")
 GOOD, OTHER_GOOD, STALE, UNJUDGED = "good-token", "good-token-2", "stale-token", "offline-token"
 TOPIC = "topic-minted-here"
@@ -67,7 +67,7 @@ class KeyWorld(World):
         self.peers = {p.name: p for p in peers}
         self.github = {r: {} for r in REPOS.values()}
         self.gen = {}
-        self.react(CREDCHECK, self._credcheck)
+        self.react(["python3", CREDCHECK], self._credcheck)
         self.react(["python3", SECRETFILE, "present"], lambda a, f: Result(0 if f.files.get(a[3], "") else 1))
         self.react(["python3", SECRETFILE, "write"], self._write)
         self.react(["python3", SECRETFILE, "fingerprint"],
@@ -105,8 +105,7 @@ class KeyWorld(World):
         return [e[1][2] for e in self.effects if e[0] == "act" and e[1][:2] == ("sh", "-c") and e[1][2].startswith("PEER ")]
 
     def _credcheck(self, argv, f):
-        args = argv[len(CREDCHECK):]
-        verb = args[0]
+        verb = argv[2]
         if verb == "names":
             return Result(0, "\n".join(NAMES) + "\n")
         if verb == "minted":
@@ -114,8 +113,8 @@ class KeyWorld(World):
         if verb == "mint":
             return Result(0, TOPIC + "\n")
         if verb == "rule":
-            return Result(0, "what\tthe %s\nurl\thttps://example.invalid/\nremedy\tsubscribe to it\nneeds\tdo its job\n" % args[1])
-        rest, path, ev = args[2:], "", {}
+            return Result(0, "what\tthe %s\nurl\thttps://example.invalid/\nremedy\tsubscribe to it\nneeds\tdo its job\n" % argv[3])
+        rest, path, ev = argv[4:], "", {}
         while rest:
             flag, value, rest = rest[0], rest[1], rest[2:]
             if flag == "--path":
@@ -124,7 +123,7 @@ class KeyWorld(World):
                 ev[value.partition("=")[0]] = value.partition("=")[2]
             else:
                 ev["repos"] = value
-        return Result(0, judge(args[1], f.last_input, path, ev) + "\n")
+        return Result(0, judge(argv[3], f.last_input, path, ev) + "\n")
 
     def _write(self, argv, f):
         self._set_file(argv[3], f.last_input)

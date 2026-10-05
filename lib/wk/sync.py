@@ -448,7 +448,7 @@ class Sync:
         notes.extend("    " + l for l in pr.retarget(driver, ws, src, self.forks(), self.branches) + pr.converge(driver, ws, src, self.forks()))
         if driver.kind not in ("container", "vm"):
             return True
-        r = driver.act_exec(ws, ["sh", "-c", git.gitwebkit_setup_script(src, self.forks())])
+        r = driver.act_exec(ws, ["sh", "-c", git.pr_tool_setup_script(src, self.forks())])
         said = (r.out.replace("\r", "").strip().splitlines() or [""])[-1]
         if not r.ok:
             notes.extend("    " + l for l in r.err.replace("\r", "").splitlines() if l.strip())

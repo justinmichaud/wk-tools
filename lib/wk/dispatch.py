@@ -15,7 +15,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from wk import webkit  # noqa: F401  hands lab code its WebKit names (wk.project) before any runs
 from wk import completion as C
 from wk import decl as D
 from wk import act, clock, guest, images, places, presets, record, sshalias

@@ -157,16 +157,17 @@ never one below.
 | `stock` | the pristine environment plus onboarding (`./setup`) | a profile of `lab`, not a codebase of its own |
 
 `lint.layering` holds the rule: a `lab` module names no WebKit and imports no
-`wk` or `field` module. `cmd/*`, the dispatcher, completion and the verb tables
-of `wk bench` and `wk sysimage` are the CLI over every layer, and no layer
-imports them.
+`wk` or `field` module. `cmd/*`, the dispatcher, completion, `wk gc`, `wk
+doctor`'s disk section and the verb tables of `wk bench` and `wk sysimage` are
+the CLI over every layer, and no layer imports them.
 
-What `lab` needs of WebKit -- the checkout, mirror and build-tree names, the
-PR tool, the browser, a plan's runner, and the steps that wire a checkout or
-pin a payload -- `wk` hands in through `wk.project`, which `lib/wk/webkit.py`
-fills, and no `lab` module reads at import. Every entry point imports it
-first: the dispatcher, each `cmd/*`, and `python3 -m wk <module>`, which runs
-a `lib/wk` module's own entry as a script.
+What `lab` needs of WebKit by name -- the checkout, mirror and build-tree
+names, the upstreams and forks, the PR tool, the build presets, the SDK, the
+browser and a plan's runner -- is `lib/wk/project.json`, which `wk` owns and
+`lab` reads through `wk.project.get`. A WebKit step a `lab` mechanism runs is
+handed in by the command that calls it: `lib/wk/bench/plans.py` as a bench
+run's `kit` (the build preset, the runner's arguments, the pinned payload, a
+board's PGO collection), `lib/wk/pr.py` to `wk new --pr`.
 
 ## Setup
 
