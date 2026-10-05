@@ -1,4 +1,4 @@
-"""Every `WK_*` override read with a default under wk/lib/cmd/build"""
+"""Every `WK_*` override read with a default under wk/lib/cmd/build is documented."""
 TIER = "lint"
 import re
 import unittest

@@ -9,33 +9,18 @@ import unittest
 
 from tests.support import REPO, WkTest, bash
 
-UNITS = ("wk-proxy.service", "wk-ssh-agent.service", "wk-github-inject.service",
-         "wk-broker.service")
-
-
-def unit_program(name):
-    """The same derivation host/units.sh makes, asked of the shell that owns it rather than repeated here."""
-    cp = bash(f'. "$WK_ROOT/host/units.sh"; unit_program {name}')
-    assert cp.returncode == 0, cp.stdout + cp.stderr
-    return cp.stdout.strip()
+# Each unit and the file of this tree it runs; a system binary names none.
+UNITS = {"wk-proxy.service": "container/proxy/wk-proxy.py", "wk-ssh-agent.service": "",
+         "wk-github-inject.service": "container/proxy/github-inject.py", "wk-broker.service": "container/broker/wk-broker.py"}
 
 
 class TestTheProgramAUnitRuns(unittest.TestCase):
-    def test_a_service_that_runs_this_tree_names_its_file(self):
-        self.assertEqual("container/proxy/wk-proxy.py", unit_program("wk-proxy.service"))
-        self.assertEqual("container/proxy/github-inject.py",
-                         unit_program("wk-github-inject.service"))
-        self.assertEqual("container/broker/wk-broker.py", unit_program("wk-broker.service"))
-
-    def test_a_service_that_runs_a_system_binary_names_nothing(self):
-        self.assertEqual("", unit_program("wk-ssh-agent.service"))
-
-    def test_every_named_file_exists(self):
-        for name in UNITS:
-            rel = unit_program(name)
-            if rel:
-                with self.subTest(unit=name):
-                    self.assertTrue((REPO / rel).is_file(), rel)
+    def test_a_service_names_the_file_of_this_tree_it_runs(self):
+        for name, rel in UNITS.items():
+            with self.subTest(unit=name):
+                cp = bash(f'. "$WK_ROOT/host/units.sh"; unit_program {name}')
+                self.assertEqual((0, rel), (cp.returncode, cp.stdout.strip()), cp.stderr)
+                self.assertTrue(not rel or (REPO / rel).is_file(), rel)
 
 
 class TestRenderingSubstitutesBothEnds(unittest.TestCase):
@@ -44,16 +29,18 @@ class TestRenderingSubstitutesBothEnds(unittest.TestCase):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         return cp.stdout
 
-    def test_the_podman_machines_spelling(self):
-        out = self._render("wk-proxy.service", "/opt/wk-tools", "/var/lib/wk")
-        self.assertIn("ExecStart=/usr/bin/python3 /opt/wk-tools/container/proxy/wk-proxy.py", out)
-        self.assertIn("Environment=WK_STORE=/var/lib/wk", out)
-        self.assertIn("RequiresMountsFor=/opt/wk-tools", out)
-
-    def test_a_workstations_spelling(self):
-        out = self._render("wk-github-inject.service", "/home/x/wk-tools", "/home/x/.local/share/wk")
-        self.assertIn("ExecStart=/usr/bin/python3 /home/x/wk-tools/container/proxy/github-inject.py", out)
-        self.assertIn("ReadWritePaths=/home/x/.local/share/wk", out)
+    def test_the_tree_and_the_store_reach_the_unit(self):
+        for name, root, store, lines in (
+                ("wk-proxy.service", "/opt/wk-tools", "/var/lib/wk",
+                 ("ExecStart=/usr/bin/python3 /opt/wk-tools/container/proxy/wk-proxy.py",
+                  "Environment=WK_STORE=/var/lib/wk", "RequiresMountsFor=/opt/wk-tools")),
+                ("wk-github-inject.service", "/home/x/wk-tools", "/home/x/.local/share/wk",
+                 ("ExecStart=/usr/bin/python3 /home/x/wk-tools/container/proxy/github-inject.py",
+                  "ReadWritePaths=/home/x/.local/share/wk"))):
+            out = self._render(name, root, store)
+            for line in lines:
+                with self.subTest(unit=name, line=line):
+                    self.assertIn(line, out)
 
     def test_no_placeholder_survives_any_render(self):
         for name in UNITS:
@@ -74,8 +61,6 @@ class TestRenderingSubstitutesBothEnds(unittest.TestCase):
 
 
 class TestTheInstallerConverges(WkTest):
-    """Driven with `sh -c` against a scratch HOME, so the writes, the compare and the daemon-reload are the real
-    ones."""
 
     def _install(self, name="wk-proxy.service"):
         home = self.tmp / "home"
@@ -89,7 +74,7 @@ class TestTheInstallerConverges(WkTest):
                   env={"HOME": str(home), "PATH": f"{binp}:{os.environ['PATH']}"})
         return cp, home / ".config" / "systemd" / "user" / name, log
 
-    def test_a_first_run_writes_it_and_reloads(self):
+    def test_a_first_run_writes_it_alone_and_reloads(self):
         cp, unit, log = self._install()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("installed wk-proxy.service", cp.stdout + cp.stderr)
@@ -97,6 +82,7 @@ class TestTheInstallerConverges(WkTest):
                       unit.read_text())
         self.assertEqual(0o644, unit.stat().st_mode & 0o777)
         self.assertIn("--user daemon-reload", log.read_text())
+        self.assertEqual([unit.name], [p.name for p in unit.parent.iterdir()])
 
     def test_a_second_run_changes_nothing_and_does_not_reload(self):
         self._install()
@@ -104,11 +90,6 @@ class TestTheInstallerConverges(WkTest):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertNotIn("installed", cp.stdout + cp.stderr)
         self.assertEqual(1, log.read_text().count("daemon-reload"))
-
-    def test_nothing_is_left_beside_the_live_unit(self):
-        cp, unit, _ = self._install()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual([unit.name], [p.name for p in unit.parent.iterdir()])
 
     def test_an_edited_unit_is_replaced_and_reloaded(self):
         _cp, unit, _log = self._install()
@@ -119,8 +100,6 @@ class TestTheInstallerConverges(WkTest):
         self.assertEqual(2, log.read_text().count("daemon-reload"))
 
 
-# A systemctl that answers as told. Every branch of unit_start turns on what
-# systemd says, so the fake is what systemd says and nothing else.
 FAKE_SYSTEMCTL = """#!/bin/sh
 echo "$*" >> "$WK_FAKE_LOG"
 case "$*" in
@@ -133,8 +112,6 @@ exit 0
 
 
 class TestTheStartVerdictComesFromSystemd(WkTest):
-    """`unit_start` against a scripted systemctl and a scratch store: one test per state a machine can be in when
-    ./setup reaches it."""
 
     UNIT = "wk-proxy.service"
     STAMP = ".wk-proxy.program"
@@ -260,9 +237,7 @@ def _has_user_systemd():
 
 @unittest.skipUnless(_has_user_systemd(), "no systemd --user bus here")
 class TestAServiceRunningOlderCodeThanTheTree(WkTest):
-    """`wk status` reports it, because a tools sync replaces a program under a long-lived service and systemd
-    goes on running what it exec'd: the egress allowlist and the credential injector both live in files a sync
-    moves, and a host added to either reaches nothing until the service is restarted."""
+    """systemd goes on running what it exec'd after a tools sync replaces the program under it."""
 
     UNIT = "wk-test-unit-stale.service"
 
@@ -272,9 +247,7 @@ class TestAServiceRunningOlderCodeThanTheTree(WkTest):
         (self.root / "host" / "units").mkdir(parents=True)
         self.prog = self.root / "sleeper.sh"
         self.prog.write_text("exec sleep 300\n")
-        # The real bodies name an interpreter and then the program, which is
-        # the field unit_program picks out; a body of another shape resolves
-        # to no program at all and every verdict below would read `current`.
+        # unit_program picks the field after the interpreter; another shape would read `current` throughout.
         (self.root / "host" / "units" / self.UNIT).write_text(
             "[Service]\nExecStart=/bin/bash @WK_ROOT@/sleeper.sh\n")
         self.assertEqual("sleeper.sh", self.program())

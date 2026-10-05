@@ -1,4 +1,4 @@
-"""`preset=` (the declaration): a command that takes a build preset says so to"""
+"""`preset=` (the declaration): a command that takes a build preset says so to the dispatcher."""
 import os
 import sys
 import unittest
@@ -35,18 +35,14 @@ class TestTheDispatcherHandsItOver(unittest.TestCase):
             rest = inv.take_preset(list(args))
             return rest, os.environ.get("WK_PRESET")
 
-    def test_the_option_is_lifted_into_wk_config(self):
-        self.assertEqual(self.take("run", "--preset=gtk-release", "--lldb", "--", "--preset=x"),
-                         (["--lldb", "--", "--preset=x"], "gtk-release"))
-
-    def test_builds_argument_is_lifted_into_wk_config(self):
-        self.assertEqual(self.take("build", "--detach", "jsc-debug", "--", "x"), (["--detach", "--", "x"], "jsc-debug"))
-
-    def test_a_flag_that_takes_no_argument_leaves_argv_alone(self):
-        self.assertEqual(self.take("build", "--kill"), (["--kill"], None))
-
-    def test_no_config_named_hands_none_over(self):
-        self.assertEqual(self.take("test", "--layout"), (["--layout"], None))
+    def test_the_option_or_builds_argument_is_lifted_into_wk_preset(self):
+        for argv, want in ((("run", "--preset=gtk-release", "--lldb", "--", "--preset=x"),
+                            (["--lldb", "--", "--preset=x"], "gtk-release")),
+                           (("build", "--detach", "jsc-debug", "--", "x"), (["--detach", "--", "x"], "jsc-debug")),
+                           (("build", "--kill"), (["--kill"], None)),
+                           (("test", "--layout"), (["--layout"], None))):
+            with self.subTest(argv=argv):
+                self.assertEqual(want, self.take(*argv))
 
     def test_a_name_presets_does_not_hold_is_refused(self):
         with mock.patch("sys.stderr"), self.assertRaises(dispatch.Exit) as cm:

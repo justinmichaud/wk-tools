@@ -1,5 +1,6 @@
 """Static rules over the tree's sources and confs."""
 TIER = "lint"
+import collections
 import re
 import subprocess
 import sys
@@ -9,7 +10,9 @@ from pathlib import Path
 from tests.support import REPO, WK, WkTest, shell_files
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import images  # noqa: E402
+from wk import boot, fleet, gc, images  # noqa: E402
+from wk.boot import cli  # noqa: E402
+from wk.store import Store  # noqa: E402
 
 SYSTEM_SSH = "/usr/bin/ssh"
 
@@ -36,10 +39,7 @@ class TestParsing(WkTest):
                 text = f.read_text(errors="replace")
             except OSError:
                 continue
-            names = re.findall(r"(?m)^([a-zA-Z_][a-zA-Z0-9_]*)\(\)", text)
-            seen = {}
-            for n in names:
-                seen[n] = seen.get(n, 0) + 1
+            seen = collections.Counter(re.findall(r"(?m)^([a-zA-Z_][a-zA-Z0-9_]*)\(\)", text))
             twice = [n for n, c in seen.items() if c > 1]
             if twice:
                 dups.append(f"{f.name}: {' '.join(twice)}")
@@ -94,8 +94,6 @@ class TestExitTrapOwnership(WkTest):
 
 class TestMachineRegistry(WkTest):
     def test_machine_registry_every_machine_is_a_conf(self):
-        from wk import boot, fleet
-        from wk.boot import cli
         env = {"XDG_CONFIG_HOME": str(self.tmp / "no-config")}
         names = fleet.Fleet(REPO, env).names(fleet.BENCH_KINDS)
         self.assertTrue(names, "no bench machines at all")
@@ -146,7 +144,6 @@ class TestBridgeDeclarations(WkTest):
 
 
 class TestTailnetHygiene(WkTest):
-
     def test_no_authkey_in_argv(self):
         cp = subprocess.run(
             ["grep", "-rnI", "-e", r"--auth-\{0,1\}key",
@@ -167,8 +164,6 @@ class TestTailnetHygiene(WkTest):
 
 class TestBuildLocations(WkTest):
     def test_gc_searches_every_build_location(self):
-        from wk import gc
-        from wk.store import Store
         builders = {images.load(n)["IMG_BUILDER"] for n in images.names()}
         declared = set(gc.build_outputs(Store({"WK_STORE": "/s"}), {"WK_STORE": "/s"}))
         self.assertEqual(sorted(b for b in builders if b and b not in declared), [])
@@ -184,8 +179,7 @@ class TestBuildLocations(WkTest):
             if not (d / f).exists():
                 bad.append(f"{len(users)} configuration(s) set BR_EXTERNAL=1 and {d}/{f} does not exist")
         self.assertEqual(bad, [], "; ".join(bad))
-        if not bad:
-            self.assertRegex((d / "external.desc").read_text(), r"(?m)^name: ")
+        self.assertRegex((d / "external.desc").read_text(), r"(?m)^name: ")
 
     def test_card_helper_gate(self):
         f = REPO / "admin" / "wk-card-priv"

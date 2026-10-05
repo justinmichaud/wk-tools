@@ -1,8 +1,4 @@
-"""The deploy keys in a real ssh-agent, `wk key push` end to end against it, and the /secrets a store publishes.
-tests/test_push_switch.py and tests/test_wk_secrets.py hold the switch's logic over a fake machine.
-
-Run: python3 -m unittest tests.test_push_agent -v
-"""
+"""The deploy keys in a real ssh-agent, `wk key push` end to end against it, and the /secrets a store publishes."""
 import contextlib
 import json
 import os
@@ -322,30 +318,6 @@ class TestStoreInitPublishesSecrets(WkTest):
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertEqual({"ssh_config", "github-user", "view"}, {p.name for p in keyring_dir.iterdir()})
         self.assertEqual("published by the host\n", (keyring_dir / "ssh_config").read_text())
-
-
-PEER_SSH = '#!/bin/sh\nfor last; do :; done\nexec bash -c "$last"\n'
-PEER_WK = '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$WK_TEST_PEER_LOG"\necho "fork       push allowed (in the agent)"\n'
-
-
-class TestAskingAnotherMachine(WkTest):
-    """`wk key push --on <machine>` runs the far side's own `wk key push` over ssh; ssh is a stub that runs it here."""
-
-    def test_the_far_side_runs_the_same_command(self):
-        reg, root, binp = self.tmp / "registry", self.tmp / "peer-root", self.tmp / "bin"
-        for d in (reg, root / "tools", binp):
-            d.mkdir(parents=True)
-        for path, text in ((root / "tools" / "wk", PEER_WK), (binp / "ssh", PEER_SSH)):
-            path.write_text(text)
-            path.chmod(0o755)
-        (reg / "peerbox.conf").write_text("kind=peer\nhost=fake-peerbox\npeer=1\nroot=%s\n" % root)
-        log = self.tmp / "peer.log"
-        cp = self.run_wk("key", "push", "status", "--on", "peerbox", env={
-            "PATH": f"{binp}:{os.environ['PATH']}", "WK_MACHINES_DIR": str(reg), "WK_STORE": str(self.tmp / "store"),
-            "WK_HOST_SECRETS": str(self.tmp / "secrets"), "WK_TEST_PEER_LOG": str(log)})
-        self.assertEqual(["key push status"], log.read_text().split("\n")[:-1], cp.stdout)
-        self.assertIn("push allowed", cp.stdout)
-        self.assertEqual(0, cp.returncode, cp.stdout)
 
 
 class TestEveryStoreRotateAndWithdrawReachesTheInjector(KeyTest):

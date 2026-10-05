@@ -4,13 +4,9 @@ import unittest
 
 from tests.support import WkTest, scratch_dir
 from tests.test_bench_pipeline import BenchTest, World
-from tests.test_bench_report import rep
+from tests.test_bench_report import env_record, rep
 
-from wk.bench import pipeline, record
-
-
-def env_record(path, *fields):
-    record.write_env(str(path), list(fields))
+from wk.bench import pipeline
 
 
 class TestCoresValid(unittest.TestCase):
@@ -51,16 +47,12 @@ class TestCoresAxisWarning(WkTest):
 
     def _pair(self, tmp, a_cores, b_cores):
         a_dir, b_dir = tmp / "a", tmp / "b"
-        a_dir.mkdir()
-        b_dir.mkdir()
         doc = {"JetStream3.0": {"tests": {"t": {"metrics": {"Score": {"current": [1.0, 2.0]}}}}}}
-        (a_dir / "result.json").write_text(json.dumps(doc))
-        (b_dir / "result.json").write_text(json.dumps(doc))
-        base = ["plan=jetstream3", "class=cpu", "runner=jsc", "bench_host=container"]
-        a_extra = [f"cores.set={a_cores}"] if a_cores is not None else []
-        b_extra = [f"cores.set={b_cores}"] if b_cores is not None else []
-        env_record(a_dir / "env.json", *base, *a_extra)
-        env_record(b_dir / "env.json", *base, *b_extra)
+        for d, cores in ((a_dir, a_cores), (b_dir, b_cores)):
+            d.mkdir()
+            (d / "result.json").write_text(json.dumps(doc))
+            env_record(d / "env.json", "plan=jetstream3", "class=cpu", "runner=jsc", "bench_host=container",
+                       *([f"cores.set={cores}"] if cores is not None else []))
         return a_dir, b_dir
 
     def test_two_runs_pinned_differently_warn(self):

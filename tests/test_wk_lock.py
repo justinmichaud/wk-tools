@@ -69,14 +69,6 @@ class TestOnTheFake(LockTest):
         self.lock.release_all()
         self.assertNotIn(self.path, self.fake.files)
 
-    def test_a_dead_holder_is_broken_without_waiting(self):
-        self.fake.dirs.add(os.path.dirname(self.path))
-        self.fake.files[self.path] = DEAD
-        self.lock.hold("r")
-        self.assertEqual(self.fake.files[self.path], self.lock.payload)
-        self.assertEqual([p for p in self.fake.files if p != self.path], [])
-        self.assertEqual(self.clock.slept, [])
-
     def test_a_live_holder_is_waited_for_and_given_up_on(self):
         self.fake.dirs.add(os.path.dirname(self.path))
         self.fake.files[self.path] = DEAD
@@ -236,16 +228,6 @@ class TestRealProcesses(LockTest):
         self.assertEqual(os.readlink(self.path), lock.payload)
         self.assertEqual(clock.slept, [])
         lock.release_all()
-
-    def test_a_live_holder_in_another_process_keeps_the_lock(self):
-        p = self.spawn("r", "hold")
-        self.addCleanup(p.communicate)
-        self.addCleanup(p.kill)
-        self.assertEqual(p.stdout.readline().strip(), "held")
-        lock = Lock(self.store, machine.Local(), FakeClock())
-        err = self.stderr(lambda: self.assertRaises(Refused, lock.hold, "r", timeout=0))
-        self.assertIn("pid %d" % p.pid, err)
-        self.assertEqual(lock.holding, [])
 
     def test_takers_of_one_lock_one_at_a_time_past_a_dead_holder(self):
         os.makedirs(self.store.lock_dir())

@@ -64,7 +64,6 @@ class FakeMac:
         self.reboot()
 
     def leave_bench(self):
-        """The bench install's own job ending (lib/wk/bench/autorun.py's leave): the host blessed back, a reboot."""
         self.firmware = "host"
         self.reboot()
 
@@ -319,9 +318,10 @@ class MacConformance:
                     self.assertIsInstance(got, str, "%s %s: %s" % (verb, mode, err))
                 self.assertTrue(d.reprovision().startswith("wk "), d.reprovision())
 
+
+
 def volume(**kw):
-    fake, d = mac_board("mac-volume", **kw)
-    return fake, d
+    return mac_board("mac-volume", **kw)
 
 
 class TestProbe(unittest.TestCase):
@@ -385,14 +385,10 @@ class TestArm(unittest.TestCase):
         self.assertIn("bless exited 1", err)
 
     def test_a_return_the_firmware_does_not_confirm_arms_nothing(self):
-        fake, d = volume()
-        fake.firmware = "bench"
-        fake.said = {"boot-host": (0, "wk-boot-priv: blessed /\n")}
-        d.probe()
-        got, err = quiet(d.arm)
+        _, got, err, verbs = self.arm(firmware="bench", said={"boot-host": (0, "wk-boot-priv: blessed /\n")})
         self.assertIs(got, act.Refused)
         self.assertIn("Nothing was armed", err)
-        self.assertNotIn("boot-volume", [a[2].get("WK_VERB") for a in fake.asked])
+        self.assertNotIn("boot-volume", verbs)
 
     def test_an_arming_the_firmware_does_not_confirm_is_reported(self):
         fake, got, err, _ = self.arm(stuck=True)

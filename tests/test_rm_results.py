@@ -11,6 +11,7 @@ from tests.test_rm_remote import _LOCAL_CONF
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import machine, places, workspace  # noqa: E402
+from wk.act import Refused  # noqa: E402
 from wk.bench import cli, record  # noqa: E402
 from wk.machine import Fake, Local  # noqa: E402
 
@@ -133,28 +134,24 @@ class TestAMacReadsItsZipsBeforeTheRemovalIsForwarded(WkTest):
 
     def setUp(self):
         super().setUp()
-        from wk import workspace
-        self.workspace = workspace
         self.task = complete_task(self.tmp / "vm" / "ws" / "w" / "bench")
         self.home = self.tmp / "home"
 
     def reg(self, **env):
         from tests.test_bench_task import registry
-        from wk.machine import Local
         reg = registry(self.tmp / "store", env=dict(env, HOME=str(self.home)))
-        reg.load = lambda name: _Holder(Local(), str(self.tmp / "vm" / "ws" / "w" / "bench"))
+        reg.load = lambda name: self.holder()
         return reg
 
     def test_the_host_refuses_an_unexported_task_before_forwarding(self):
-        from wk.act import Refused
         with self.assertRaises(Refused):
-            self.workspace.refuse_unsaved_before_forward(self.reg(), ["w"])
+            workspace.refuse_unsaved_before_forward(self.reg(), ["w"])
 
     def test_the_host_lets_an_exported_one_go(self):
         dest = self.home / "Downloads" / (TASK + ".zip")
         dest.parent.mkdir(parents=True)
         dest.write_bytes(cli.archive(str(self.task), False))
-        self.workspace.refuse_unsaved_before_forward(self.reg(), ["w"])
+        workspace.refuse_unsaved_before_forward(self.reg(), ["w"])
 
     def holder(self):
         return _Holder(Local(), str(self.tmp / "vm" / "ws" / "w" / "bench"))
@@ -163,12 +160,12 @@ class TestAMacReadsItsZipsBeforeTheRemovalIsForwarded(WkTest):
         marker = self.tmp / "podman-machine"
         marker.write_text("applehv\n")
         with mock.patch.object(machine, "PODMAN_MACHINE", str(marker)):
-            self.assertEqual([], self.workspace.unsaved_results(self.reg(WK_IN_VM="1", WK_HOST_SELF="1"), [("w", self.holder(), "workspace")]))
-            self.assertTrue(self.workspace.unsaved_results(self.reg(WK_IN_VM="1"), [("w", self.holder(), "workspace")]))
+            self.assertEqual([], workspace.unsaved_results(self.reg(WK_IN_VM="1", WK_HOST_SELF="1"), [("w", self.holder(), "workspace")]))
+            self.assertTrue(workspace.unsaved_results(self.reg(WK_IN_VM="1"), [("w", self.holder(), "workspace")]))
 
     def test_the_variables_alone_skip_nothing_off_a_podman_machine(self):
         with mock.patch.object(machine, "PODMAN_MACHINE", str(self.tmp / "absent")):
-            self.assertTrue(self.workspace.unsaved_results(self.reg(WK_IN_VM="1", WK_HOST_SELF="1"), [("w", self.holder(), "workspace")]))
+            self.assertTrue(workspace.unsaved_results(self.reg(WK_IN_VM="1", WK_HOST_SELF="1"), [("w", self.holder(), "workspace")]))
 
     def test_the_dispatcher_asks_before_it_forwards_a_removal(self):
         text = (REPO / "lib" / "wk" / "dispatch.py").read_text()

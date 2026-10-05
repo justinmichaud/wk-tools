@@ -1,5 +1,4 @@
-"""Every closed-set value a command's argument parser accepts must appear in"""
-TIER = "lint"
+"""Every closed-set value a command declares appears in its `-h`."""
 import subprocess
 import sys
 from pathlib import Path
@@ -12,12 +11,12 @@ from wk.completion import values_cmd  # noqa: E402
 from wk.decl import all_commands, leading_block  # noqa: E402
 from wk.store import Store  # noqa: E402
 
+TIER = "lint"
 
 DECLARED_VALUES = {d.name: d for d in all_commands(REPO) if values_cmd(d)}
 
 
 class TestDeclaredValuesReachTheHelp(unittest.TestCase):
-
     def test_the_help_prints_what_the_flag_prints(self):
         self.assertTrue(DECLARED_VALUES)
         for cmd, d in DECLARED_VALUES.items():
@@ -40,8 +39,6 @@ class TestDeclaredValuesReachTheHelp(unittest.TestCase):
 
 
 class TestBenchListPlans(unittest.TestCase):
-
-
     def test_lists_plan_names_from_a_fake_mirror(self):
         with scratch_dir("wk-test-bench-src-") as src, temp_store() as store:
             plans = src / "Tools/Scripts/webkitpy/benchmark_runner/data/plans"

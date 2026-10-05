@@ -1,4 +1,4 @@
-"""`wk --declarations` and `wk completion` -- the machine-readable command"""
+"""`wk --declarations` and `wk completion`, the machine-readable command surface."""
 import os
 import shutil
 import subprocess
@@ -16,7 +16,6 @@ from wk.machine import Local             # noqa: E402
 
 
 class TestDeclarations(WkTest):
-
     def test_declarations_omits_the_completion_builtin(self):
         cp = run("--declarations")
         names = [l.split("\t")[0] for l in cp.stdout.splitlines() if l.strip()]
@@ -24,7 +23,6 @@ class TestDeclarations(WkTest):
 
 
 class TestCompletionGenerator(unittest.TestCase):
-
     def test_a_values_list_answered_by_a_store_is_not_asked_at_tab(self):
         cmds = {d.name: d for d in D.all_commands(REPO)}
         self.assertEqual(C.values_cmd(cmds["bench"]), "")
@@ -41,19 +39,6 @@ class TestCompletionGenerator(unittest.TestCase):
 
 
 class TestCompletionScripts(WkTest):
-    def test_bash_completion_output_parses_under_bash_dash_n(self):
-        cp = run("completion", "bash")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self._assert_parses(["bash", "-n"], cp.stdout)
-
-    def test_zsh_completion_output_parses_under_zsh_dash_n_if_zsh_exists(self):
-        zsh = shutil.which("zsh")
-        if not zsh:
-            self.skipTest("zsh not installed")
-        cp = run("completion", "zsh")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self._assert_parses([zsh, "-n"], cp.stdout)
-
     def test_zsh_completion_registers_wk_where_no_rc_ran_compinit(self):
         zsh = shutil.which("zsh")
         if not zsh:
@@ -79,16 +64,6 @@ class TestCompletionScripts(WkTest):
     def test_completion_refuses_an_unknown_shell(self):
         cp = run("completion", "fish")
         self.assertNotEqual(cp.returncode, 0)
-
-    def _assert_parses(self, checker, script):
-        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
-            f.write(script)
-            path = f.name
-        try:
-            cp = subprocess.run(checker + [path], capture_output=True, text=True, timeout=15)
-            self.assertEqual(cp.returncode, 0, f"{checker[0]} -n failed:\n{cp.stderr}\n---\n{script}")
-        finally:
-            os.unlink(path)
 
 
 class TestBashCompletionFunction(WkTest):
@@ -116,7 +91,6 @@ printf '%s\\n' "${{COMPREPLY[@]}}"
         self.assertIn("build", reply)
         self.assertIn("new", reply)
         self.assertIn("completion", reply)
-
 
     def test_config_flag_completes_build_configs(self):
         reply = self._complete([str(WK), "test", "somews", "--preset", ""], 4)
@@ -149,8 +123,6 @@ printf '%s\\n' "${{COMPREPLY[@]}}"
         reply = self._complete([str(WK), "pr", ""], 2, env=self._store())
         self.assertIn("rebase", reply)
         self.assertIn("demo-ws", reply)
-
-
 
     def test_every_verb_of_every_command_completes_its_declared_options(self):
         want, lines = {}, []

@@ -132,7 +132,7 @@ class TheCommandRunsOnTheMachineTheConfNames(WkTest):
     """Channel's `m_ssh` runs here only when `hostname -s` is the conf's destination (case-insensitively)."""
 
     def _m_ssh(self, conf, hostname="moose"):
-        """(what ran here, the ssh argvs issued) for `m_ssh "echo RAN-HERE"` under `conf`."""
+        """(what ran here, the ssh argvs issued) for `m_ssh "echo RAN-HERE"`."""
         via = Fake("here")
         via.answer(["hostname", "-s"], out=hostname + "\n")
         via.answer(["tailscale"], rc=1)
@@ -141,28 +141,19 @@ class TheCommandRunsOnTheMachineTheConfNames(WkTest):
         runs = [list(e[1]) for e in via.effects if e[0] == "run"]
         return [r for r in runs if r[:2] == ["sh", "-c"]], [r for r in runs if r[0] == "ssh"]
 
-    def mbp(self):
-        return load_conf(REPO, "mbp", {"WK_MACHINES_DIR": str(REPO / "machines")})
-
-    def test_a_command_for_another_machine_goes_over_ssh(self):
-        here, sshed = self._m_ssh({"ssh": "othermach"})
-        self.assertEqual(here, [])
-        self.assertEqual([r[-2:-1] + [shlex.split(r[-1])[-1]] for r in sshed], [["othermach", "sh -c 'echo RAN-HERE'"]], sshed)
-
-    def test_a_command_for_this_machine_runs_here(self):
-        here, sshed = self._m_ssh({"ssh": "moose"}, hostname="MOOSE")
-        self.assertEqual(here, [["sh", "-c", "echo RAN-HERE"]])
-        self.assertEqual(sshed, [])
-
-    def test_the_mac_is_reached_over_ssh_from_a_machine_that_is_not_it(self):
-        here, sshed = self._m_ssh(self.mbp())
-        self.assertEqual(here, [])
-        self.assertEqual([r[-2] for r in sshed], ["tolken"], sshed)
-
-    def test_the_mac_runs_it_here_when_this_is_the_mac(self):
-        here, sshed = self._m_ssh(self.mbp(), hostname="tolken")
-        self.assertEqual(here, [["sh", "-c", "echo RAN-HERE"]])
-        self.assertEqual(sshed, [])
+    def test_it_runs_here_on_the_named_machine_and_over_ssh_from_any_other(self):
+        mbp = load_conf(REPO, "mbp", {"WK_MACHINES_DIR": str(REPO / "machines")})
+        for conf, hostname, over in (({"ssh": "othermach"}, "moose", "othermach"), ({"ssh": "moose"}, "MOOSE", None),
+                                     (mbp, "moose", "tolken"), (mbp, "tolken", None)):
+            with self.subTest(ssh=conf["ssh"], hostname=hostname):
+                here, sshed = self._m_ssh(conf, hostname)
+                if over:
+                    self.assertEqual(here, [])
+                    self.assertEqual([(r[-2], shlex.split(r[-1])[-1]) for r in sshed],
+                                     [(over, "sh -c 'echo RAN-HERE'")], sshed)
+                else:
+                    self.assertEqual(here, [["sh", "-c", "echo RAN-HERE"]])
+                    self.assertEqual(sshed, [])
 
     def test_a_machine_with_no_ssh_destination_is_never_this_one(self):
         here, sshed = self._m_ssh({"ssh": ""}, hostname="")

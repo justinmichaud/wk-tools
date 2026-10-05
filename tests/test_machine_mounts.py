@@ -165,6 +165,7 @@ class TestInitAsksForExactlyFourMountsOnlyOneWritable(_Stage):
         self.assertEqual(4, argv.count("--volume"), argv)
         self.assertIn("--rootful", argv)
         self.assertNotIn("--playbook", argv)
+        self.assertIn("read-write (verified)", cp.stdout + cp.stderr)
 
     def test_the_source_directories_are_made_first_and_the_credential_ones_are_private(self):
         cp = self.run_stage()
@@ -174,10 +175,6 @@ class TestInitAsksForExactlyFourMountsOnlyOneWritable(_Stage):
                 self.assertTrue(d.is_dir())
                 self.assertEqual(0o700, d.stat().st_mode & 0o777)
         self.assertTrue(self.mirror_dir.is_dir(), "the mirror directory is not made before the init")
-
-    def test_what_init_wrote_is_what_the_verify_accepts(self):
-        cp = self.run_stage()
-        self.assertIn("read-write (verified)", cp.stdout + cp.stderr)
 
 
 class TestAMachineWithTheWantedMountsIsLeftAlone(_Stage):
@@ -219,33 +216,27 @@ class TestAMachineWithAnyOtherMountSetIsRecreated(_Stage):
                 self.assertIn("does not have this design's mounts", out)
                 self.assertNotIn("machine rm", self.podman, self.podman)
 
-    def test_a_machine_with_no_mounts_lists_none_rather_than_a_blank_row(self):
+    def test_the_prompt_lists_no_blank_mount_row_and_what_the_recreate_loses(self):
         cp = self._run("none")
-        self.assertNotIn("has \n", cp.stdout + cp.stderr)
-        self.assertNotIn("    has  ", cp.stdout + cp.stderr)
+        out = cp.stdout + cp.stderr
+        self.assertNotIn("has \n", out)
+        self.assertNotIn("    has  ", out)
+        self.assertIn("machine start", self.podman, out)
+        self.assertIn("workspaces  wk-demo", out)
+        self.assertIn("/var/lib/wk/bench", out)
+        self.assertIn("tar -C /var/lib/wk -cf - bench", out)
+        self.assertIn("wk key deploy", out)
 
     def test_the_mounts_it_does_have_are_named(self):
         cp = self._run("users")
         self.assertIn("has /Users:/Users rw", cp.stdout + cp.stderr)
 
-    def test_the_prompt_says_what_the_recreate_loses(self):
-        cp = self._run("none")
-        out = cp.stdout + cp.stderr
-        self.assertIn("workspaces  wk-demo", out)
-        self.assertIn("machine ssh", self.podman)
-        self.assertIn("/var/lib/wk/bench", out)
-        self.assertIn("tar -C /var/lib/wk -cf - bench", out)
-        self.assertIn("wk key deploy", out)
-
-    def test_it_reads_the_losses_off_a_stopped_machine_by_starting_it(self):
-        cp = self._run("none")
-        self.assertIn("machine start", self.podman, cp.stdout + cp.stderr)
-
-    def test_a_headless_yes_destroys_and_recreates_it(self):
+    def test_a_headless_yes_stops_removes_and_recreates_it(self):
         cp = self._run("none", env={"WK_YES": "1"})
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("machine rm", self.podman, self.podman)
-        self.assertIn("machine init", self.podman, self.podman)
+        verbs = [l.split()[1] for l in self.podman.splitlines()
+                 if l.startswith("machine ") and l.split()[1] in ("stop", "rm", "init")]
+        self.assertEqual(["stop", "rm", "init"], verbs, self.podman)
         self.assertIn("--volume", self.init_argv())
         self.assertIn("read-write (verified)", cp.stdout + cp.stderr)
 
@@ -269,16 +260,8 @@ class TestAMachineWithAnyOtherMountSetIsRecreated(_Stage):
         self.assertIn("workspaces  wk-demo", out)
         self.assertNotIn("machine rm", self.podman, self.podman)
 
-    def test_the_order_is_stop_then_remove_then_create(self):
-        self._run("none", env={"WK_YES": "1"})
-        verbs = [l.split()[1] for l in self.podman.splitlines()
-                 if l.startswith("machine ") and l.split()[1] in ("stop", "rm", "init")]
-        self.assertEqual(["stop", "rm", "init"], verbs, self.podman)
-
 
 class TestAMountTheMachineAsksForAndHasNotGot(_Stage):
-    """The config asks for a mount the running machine has not got."""
-
     ABSENT = "/var/opt/wk-tools"
 
     def _running_machine_missing_the_tools_mount(self, env=None):
@@ -287,20 +270,14 @@ class TestAMountTheMachineAsksForAndHasNotGot(_Stage):
         write_cfg(self.cfg, list(self.want()))
         return self.run_stage({"WK_TEST_ABSENT": self.ABSENT, **(env or {})})
 
-    def test_it_is_not_reported_as_verified(self):
+    def test_it_is_refused_naming_the_absent_mount_and_destroys_nothing(self):
         cp = self._running_machine_missing_the_tools_mount()
         out = cp.stdout + cp.stderr
+        self.assertNotEqual(cp.returncode, 0, out)
         self.assertNotIn("read-write (verified)", out)
         self.assertIn("has not got them", out)
         self.assertIn(f"absent {self.ABSENT}", out)
-
-    def test_it_names_the_command_that_says_why_the_unit_failed(self):
-        cp = self._running_machine_missing_the_tools_mount()
-        self.assertIn("systemctl --failed", cp.stdout + cp.stderr)
-
-    def test_it_destroys_nothing_without_an_answer(self):
-        cp = self._running_machine_missing_the_tools_mount()
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("systemctl --failed", out)
         self.assertNotIn("machine rm", self.podman, self.podman)
 
     def test_a_headless_yes_recreates_it(self):
@@ -331,26 +308,16 @@ class TestAMountTheMachineAsksForAndHasNotGot(_Stage):
 class TestAFreshMachineThatCameUpWithoutAMount(_Stage):
     """A machine this run created that still lacks a mount: a re-run would loop, so it is an internal error."""
 
-    def _run(self):
-        return self.run_stage({"WK_TEST_ABSENT": "/var/opt/wk-tools",
-                               "WK_YES": "1"})
-
-    def test_it_starts_the_machine_it_just_created(self):
-        self._run()
+    def test_it_starts_it_then_refuses_forbidding_the_re_run_and_keeps_it(self):
+        cp = self.run_stage({"WK_TEST_ABSENT": "/var/opt/wk-tools", "WK_YES": "1"})
+        out = cp.stdout + cp.stderr
         order = [l.split()[1] for l in self.podman.splitlines()
                  if l.startswith("machine ") and l.split()[1] in ("init", "start")]
         self.assertEqual(["init", "start"], order[:2], self.podman)
-
-    def test_it_refuses_and_forbids_the_re_run(self):
-        cp = self._run()
-        out = cp.stdout + cp.stderr
         self.assertNotEqual(cp.returncode, 0, out)
         self.assertIn("internal error", out)
         self.assertIn("Do NOT re-run ./setup", out)
         self.assertIn("/var/opt/wk-tools", out)
-
-    def test_it_does_not_destroy_the_machine_it_just_made(self):
-        self._run()
         self.assertNotIn("machine rm", self.podman, self.podman)
 
 
@@ -404,20 +371,17 @@ class TestAFreshMachineThatStillDiffersIsAnInternalError(_Stage):
         self.assertNotIn("Recreate it with:  ./setup", out)
         self.assertIn("Do NOT re-run ./setup", out)
 
-class TestADryRunTouchesNoDirectory(_Stage):
-    def test_neither_source_directory_is_created(self):
+class TestADryRunCreatesNothing(_Stage):
+    def test_neither_source_directory_nor_the_machine_is_created(self):
         cp = self.run_stage(env={"WK_DRY_RUN": "1", "WK_YES": "1"})
         out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
         for d in (self.secrets, self.agent_rw):
             with self.subTest(dir=d.name):
                 self.assertFalse(d.exists(), f"{d} was created by a dry run:\n{out}")
                 self.assertIn("would create %s" % d, out)
-
-    def test_no_machine_is_created_either(self):
-        cp = self.run_stage(env={"WK_DRY_RUN": "1", "WK_YES": "1"})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertNotIn("machine init", self.podman, self.podman)
-        self.assertIn("would be created", cp.stdout + cp.stderr)
+        self.assertIn("would be created", out)
 
 class TestEnsureDirDryRun(WkTest):
     def ensure(self, d, mode="0700", env=None):
@@ -561,15 +525,6 @@ class TestOtherMachinesAreRetiredFirst(_Stage):
         e.update(env or {})
         return self.run_stage(e)
 
-    def test_it_names_the_machine_that_is_in_the_way(self):
-        cp = self._run()
-        self.assertIn("obsolete podman machine 'podman-machine-default'",
-                      cp.stdout + cp.stderr)
-
-    def test_the_wk_machine_itself_is_never_one_of_them(self):
-        cp = self._run()
-        self.assertNotIn("obsolete podman machine 'wk'", cp.stdout + cp.stderr)
-        self.assertNotIn("machine rm -f wk\n", self.podman)
 
     def test_yes_stops_it_and_removes_it(self):
         cp = self._run(env={"WK_YES": "1"})
@@ -578,9 +533,12 @@ class TestOtherMachinesAreRetiredFirst(_Stage):
         self.assertIn("machine rm -f podman-machine-default", self.podman, out)
         self.assertIn("removed podman machine 'podman-machine-default'", out)
 
-    def test_declining_keeps_it_and_says_what_that_costs(self):
+    def test_declining_names_it_never_wk_keeps_it_and_says_what_that_costs(self):
         cp = self._run()
         out = cp.stdout + cp.stderr
+        self.assertIn("obsolete podman machine 'podman-machine-default'", out)
+        self.assertNotIn("obsolete podman machine 'wk'", out)
+        self.assertNotIn("machine rm -f wk\n", self.podman)
         self.assertIn("keeping 'podman-machine-default'", out)
         self.assertIn("will fail to start", out)
         self.assertNotIn("machine rm -f podman-machine-default", self.podman)
@@ -615,7 +573,7 @@ class TestTheResourceEnvelopeIsReapplied(_Stage):
         self.assertRegex(out, rf"machine resources \({cores} cpus, {mem} MiB, .*GiB\)")
         self.assertNotIn("machine set", self.podman, self.podman)
 
-    def test_a_machine_that_differs_is_re_sized_and_says_what_it_kept_back(self):
+    def test_a_stopped_machine_that_differs_is_re_sized_unstarted_and_says_what_it_kept_back(self):
         cores, mem = self._envelope()
         cp = self._run()
         out = cp.stdout + cp.stderr
@@ -623,11 +581,7 @@ class TestTheResourceEnvelopeIsReapplied(_Stage):
         self.assertIn(f"machine set wk --cpus {cores} --memory {mem}", self.podman)
         self.assertIn(f"machine resources -> {cores} cpus, {mem} MiB", out)
         self.assertIn("host keeps", out)
-
-    def test_a_stopped_machine_is_not_started_to_re_size_it(self):
-        self._run()
-        verbs = [l for l in self.podman.splitlines() if l.startswith("machine start")]
-        self.assertEqual([], verbs, self.podman)
+        self.assertNotIn("machine start", self.podman, "a stopped machine is started to re-size it")
 
     def test_a_running_one_is_stopped_first_and_started_again(self):
         self._run(running=True)

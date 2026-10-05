@@ -255,8 +255,7 @@ class TestPreflight(WkTest):
     def pf(self, m, setup=lambda m: None):
         ready(m)
         setup(m)
-        n, err = said(m.preflight)
-        return n, err
+        return said(m.preflight)
 
     def test_a_ready_mac_is_clean_and_changes_nothing(self):
         with world() as m:
@@ -547,18 +546,12 @@ class TestTheWaitReadsBothNodes(WkTest):
         m.boot_before = m.d.boot_id() if same_boot else "1"
         return said(m.wait)
 
-    def test_a_bench_answer_is_the_run(self):
-        with world() as m:
-            m.fake.enter_bench()
-            self.assertEqual(self.wait(m)[0], "bench")
-
-    def test_a_host_answer_on_a_new_boot_is_the_way_back(self):
-        with world() as m:
-            self.assertEqual(self.wait(m)[0], "host")
-
-    def test_a_host_answer_on_the_same_boot_never_rebooted(self):
-        with world() as m:
-            self.assertEqual(self.wait(m, same_boot=True)[0], "noreboot")
+    def test_the_answer_and_the_boot_name_the_outcome(self):
+        for bench, same_boot, came in ((True, False, "bench"), (False, False, "host"), (False, True, "noreboot")):
+            with self.subTest(came=came), world() as m:
+                if bench:
+                    m.fake.enter_bench()
+                self.assertEqual(self.wait(m, same_boot)[0], came)
 
     def test_silence_on_both_nodes_is_bounded_by_the_clock(self):
         with world() as m:
@@ -676,7 +669,7 @@ class TestTheLiveRows(unittest.TestCase):
 
 class TestStatusCarriesTheLegs(WkTest):
 
-    def _legs(self, started="2026-09-09T18:08:20Z", tsv=None, older=True):
+    def _legs(self, started="2026-09-09T18:08:20Z"):
         with scratch_dir() as root:
             (root / "job.json").write_text(json.dumps({
                 "plans": ["speedometer3", "jetstream3", "motionmark"],
@@ -687,13 +680,11 @@ class TestStatusCarriesTheLegs(WkTest):
                 state += "started_at=%s\n" % started
             state += "ok_speedometer3_A_0=1\nok_speedometer3_B_0=1\nok_speedometer3_A_1=1\n"
             (root / "autorun.state").write_text(state)
-            legs = [("20260909T181045Z-speedometer3-sid-a", 91),
-                    ("20260909T181218Z-speedometer3-sid-b", 92),
-                    ("20260909T181351Z-speedometer3-sid-a", 31),
-                    ("20260909T181500Z-motionmark-sid-b", None)]
-            if older:
-                legs.insert(0, ("20260101T000000Z-speedometer3-sid-a", 42))
-            for name, wall in legs:
+            for name, wall in (("20260101T000000Z-speedometer3-sid-a", 42),
+                               ("20260909T181045Z-speedometer3-sid-a", 91),
+                               ("20260909T181218Z-speedometer3-sid-b", 92),
+                               ("20260909T181351Z-speedometer3-sid-a", 31),
+                               ("20260909T181500Z-motionmark-sid-b", None)):
                 d = root / "results" / name
                 d.mkdir(parents=True)
                 env = {"plan": name.split("-")[1]}
@@ -702,39 +693,25 @@ class TestStatusCarriesTheLegs(WkTest):
                 (d / "env.json").write_text(json.dumps(env))
             runs = root / "ab" / "20260909T180544Z" / "runs.tsv"
             runs.parent.mkdir(parents=True)
-            runs.write_text(tsv if tsv is not None else
-                            "1\tA\tsid-a\t20260909T181351Z-speedometer3-sid-a\tclean\tspeedometer3\n")
+            runs.write_text("1\tA\tsid-a\t20260909T181351Z-speedometer3-sid-a\tclean\tspeedometer3\n")
             cp = bash('python3 "$WK_ROOT/lib/wkdata.py" ab-legs %s' % shlex.quote(str(root)))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             return cp.stdout
 
-    def test_it_counts_what_ran_against_what_the_job_planned(self):
-        self.assertIn("3 of 14 planned", self._legs())
-
-    def test_an_older_ab_tasks_results_are_not_this_jobs(self):
+    def test_each_leg_of_this_job_is_named_by_round_and_arm(self):
         out = self._legs()
-        self.assertNotIn("20260101", out)
+        self.assertIn("3 of 14 planned", out)
+        self.assertNotIn("20260101", out, "an older A/B task's results are not this job's")
         self.assertNotIn(" 42s", out)
-
-    def test_a_leg_the_map_names_carries_its_round_and_arm(self):
-        self.assertRegex(self._legs(), r"1\s+A\s+speedometer3\s+31s\s+clean")
-
-    def test_the_warmup_legs_are_the_ones_before_any_measured_round(self):
-        out = self._legs()
+        self.assertRegex(out, r"1\s+A\s+speedometer3\s+31s\s+clean")
         self.assertRegex(out, r"warmup\s+A\s+speedometer3\s+91s")
         self.assertRegex(out, r"warmup\s+B\s+speedometer3\s+92s")
-
-    def test_the_leg_in_flight_is_not_called_a_warmup(self):
-        out = self._legs()
         self.assertRegex(out, r"-\s+B\s+motionmark\s+running")
         self.assertEqual(2, len([l for l in out.splitlines() if re.match(r"warmup\s+[AB]\s", l)]))
+        self.assertRegex(out, r"warmup captures: none in .*/warmup")
 
     def test_a_job_that_has_not_started_says_so_rather_than_listing_the_volume(self):
-        out = self._legs(started="")
-        self.assertIn("no leg of this job", out)
-
-    def test_an_empty_warmup_directory_is_reported_and_not_passed_over(self):
-        self.assertRegex(self._legs(), r"warmup captures: none in .*/warmup")
+        self.assertIn("no leg of this job", self._legs(started=""))
 
     def test_a_capture_that_landed_is_named(self):
         with scratch_dir() as root:

@@ -1,7 +1,5 @@
 """How a machine is reached (lib/wk/reach.py): the tailnet read once per invocation, `ssh -G`'s answer, and the
 neighbour table as a sweep's answer.
-
-Run: python3 tests/run.py --unit -k test_reach
 """
 import json
 import sys

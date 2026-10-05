@@ -1,4 +1,4 @@
-"""Dispatcher, declaration and help behaviour -- port of the dispatcher-shaped"""
+"""Dispatcher, declaration and help behaviour."""
 TIER = "lint"
 import contextlib
 import re
@@ -60,7 +60,6 @@ class TestHelpAndDeclarations(WkTest):
         self.assertEqual(cp.returncode, 2, cp.stdout + cp.stderr)
         self.assertIn("unknown command", cp.stdout + cp.stderr)
 
-
     def test_unknown_target_names_the_conf_to_write(self):
         cp = run("ls", env={"WK_PLACE": "nosuchtarget-selftest",
                             "WK_MACHINES_DIR": str(REAL_MACHINES)})
@@ -112,33 +111,20 @@ class TestWorkspaceRefusals(WkTest):
         self.assertNotEqual(cp.returncode, 0, "wk doctor <ws> was accepted inside a workspace")
         self.assertIn("no workspace argument in here", cp.stdout + cp.stderr)
 
-    def test_host_only_commands_refuse_inside_a_workspace(self):
-        for c in ("gc", "quiesce"):
-            with self.subTest(cmd=c):
-                with fake_workspace() as ws:
-                    cp = ws.run(c)
-                self.assertNotEqual(cp.returncode, 0, f"'wk {c}' was accepted inside a workspace")
-                self.assertIn(
-                    "acts on a host",
-                    cp.stdout + cp.stderr,
-                    f"'wk {c}' refused for some other reason: {cp.stdout + cp.stderr}",
-                )
+    def test_host_only_commands_refuse_inside_a_workspace_even_with_the_broker_door(self):
+        for argv, broker in ((("gc",), False), (("quiesce",), False), (("machine", "ls"), False),
+                             (("machine", "setup", "some-host"), True)):
+            with self.subTest(argv=argv), fake_workspace() as ws:
+                env = {"WK_BROKER_SOCKET": str(ws.tmp / "no-such-broker.sock")} if broker else None
+                cp = ws.run(*argv, env=env)
+                self.assertNotEqual(cp.returncode, 0, f"'wk {' '.join(argv)}' was accepted inside a workspace")
+                self.assertIn("acts on a host", cp.stdout + cp.stderr)
 
     def test_a_host_refusal_names_the_invocation_for_outside(self):
         with fake_workspace() as ws:
             cp = ws.run("machine", "setup", "rpi4", "--dry-run")
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("wk machine setup rpi4 --dry-run", cp.stdout + cp.stderr)
-
-    def test_machine_is_host_only_and_ls_starts_nothing(self):
-        with fake_workspace() as ws:
-            cp = ws.run("machine", "ls")
-        self.assertNotEqual(cp.returncode, 0, "not refused inside a workspace")
-        self.assertIn(
-            "acts on a host",
-            cp.stdout + cp.stderr,
-            f"refused, but not as a host-only command: {cp.stdout + cp.stderr}",
-        )
 
     def test_build_arg_forms_in_workspace_vs_on_host(self):
         with fake_workspace() as ws:
@@ -154,12 +140,7 @@ class TestWorkspaceRefusals(WkTest):
         self.assertEqual(cp3.returncode, 2, f"host 'wk build <preset>' exited {cp3.returncode}, expected 2")
         self.assertIn("usage: wk build <workspace> <preset>", cp3.stdout + cp3.stderr)
 
-    def test_broker_door_is_narrow(self):
-        with fake_workspace() as ws:
-            cp = ws.run("machine", "setup", "some-host", env={"WK_BROKER_SOCKET": str(ws.tmp / "no-such-broker.sock")})
-        self.assertNotEqual(cp.returncode, 0, "'wk machine setup' was accepted inside a workspace")
-        self.assertIn("acts on a host", cp.stdout + cp.stderr)
-
+    def test_the_broker_door_names_its_stage_when_shut(self):
         with fake_workspace() as ws:
             cp2 = ws.run(
                 "boot", "rpi4", "--status",
@@ -284,20 +265,16 @@ class TestWhereTheNameSitsInArgv(WkTest):
         found = dispatch.argv_name(D.name_slot(name_decl), d.takes_for(args), args)
         return "NONE" if found is None else found
 
-    def test_a_lone_ref_is_the_commands_own_argument(self):
-        self.assertEqual(self._name("pr", "justinmichaud:eng/some-branch"), "NONE")
-        self.assertEqual(self._name("pr", "1234"), "NONE")
-
-    def test_a_workspace_in_front_of_the_ref_is_the_name(self):
-        self.assertEqual(self._name("pr", "myws", "1234"), "myws")
-
-    def test_a_subverb_that_takes_nothing_keeps_its_name_slot(self):
-        self.assertEqual(self._name("pr", "rebase"), "NONE")
-        self.assertEqual(self._name("pr", "rebase", "myws"), "myws")
-
-    def test_a_command_with_no_takes_still_claims_its_first_positional(self):
-        self.assertEqual(self._name("stop", "typo"), "typo")
-        self.assertEqual(self._name("build", "myws", "jsc-release"), "myws")
+    def test_the_name_slot_of_each_shape(self):
+        for argv, want in ((("pr", "justinmichaud:eng/some-branch"), "NONE"),   # a lone ref is the command's own
+                           (("pr", "1234"), "NONE"),
+                           (("pr", "myws", "1234"), "myws"),
+                           (("pr", "rebase"), "NONE"),                          # a subverb taking nothing keeps the slot
+                           (("pr", "rebase", "myws"), "myws"),
+                           (("stop", "typo"), "typo"),                          # no takes= still claims the first
+                           (("build", "myws", "jsc-release"), "myws")):
+            with self.subTest(argv=argv):
+                self.assertEqual(want, self._name(*argv))
 
     def test_a_required_name_needs_none_of_the_commands_own_positionals_after_it(self):
         d = D.Decl(REPO / "cmd" / "bench")
@@ -305,7 +282,6 @@ class TestWhereTheNameSitsInArgv(WkTest):
         name_decl = d.name_for(args)
         self.assertEqual("myws", dispatch.name_in_argv(name_decl.split("@")[0], D.name_slot(name_decl), d.takes_for(args), args))
         self.assertIsNone(dispatch.name_in_argv("optional", 1, "1", ["1234"]), "an optional name still needs them all")
-
 
     def test_takes_is_declared_wherever_a_positional_follows_an_optional_name(self):
         bad = []
@@ -338,6 +314,8 @@ class TestTheDirectoryNamesTheWorkspaceOnABuildBox(WkTest):
             marker.write_text("inputs=x\n")
             host = subprocess.run(["hostname", "-s"], capture_output=True, text=True).stdout.strip().lower()
             (fleet / "fake.conf").write_text(f"kind=build\nhostname={host}\nroot={marker_root}\n")
+        else:
+            marker.unlink(missing_ok=True)
         cp = subprocess.run(
             [sys.executable, "-c",
              f"import sys; sys.path.insert(0, {str(REPO / 'lib')!r})\n"
@@ -354,26 +332,13 @@ class TestTheDirectoryNamesTheWorkspaceOnABuildBox(WkTest):
         (self.root / "ws" / "image-decoders" / "WebKit" / "Source").mkdir(parents=True)
         (self.root / "cache").mkdir()
 
-    def test_standing_in_a_workspace_names_it(self):
-        self.assertEqual(
-            self._name(str(self.root), str(self.root / "ws" / "image-decoders")),
-            "image-decoders")
-
-    def test_standing_deep_inside_one_names_it_too(self):
-        self.assertEqual(
-            self._name(str(self.root),
-                       str(self.root / "ws" / "image-decoders" / "WebKit" / "Source")),
-            "image-decoders")
-
-    def test_standing_elsewhere_under_the_root_names_nothing(self):
-        self.assertEqual(self._name(str(self.root), str(self.root / "cache")), "NONE")
-        self.assertEqual(self._name(str(self.root), str(self.root)), "NONE")
-
-    def test_a_machine_that_is_not_a_build_box_is_never_asked(self):
-        self.assertEqual(
-            self._name(str(self.root), str(self.root / "ws" / "image-decoders"),
-                       remote=False),
-            "NONE")
+    def test_standing_in_or_under_a_workspace_names_it_and_anywhere_else_nothing(self):
+        ws = self.root / "ws" / "image-decoders"
+        for cwd, remote, want in ((ws, True, "image-decoders"), (ws / "WebKit" / "Source", True, "image-decoders"),
+                                  (self.root / "cache", True, "NONE"), (self.root, True, "NONE"),
+                                  (ws, False, "NONE")):   # a machine that is not a build box is never asked
+            with self.subTest(cwd=cwd, remote=remote):
+                self.assertEqual(want, self._name(str(self.root), str(cwd), remote=remote))
 
 
 class TestHelpNamesEveryWhereOverride(WkTest):
@@ -381,9 +346,6 @@ class TestHelpNamesEveryWhereOverride(WkTest):
     @staticmethod
     def _overrides(d):
         return [(verbs, spec["where"]) for verbs, spec in d.overrides() if "where" in spec]
-
-    def _prose(self, d, where):
-        return dispatch.where_prose(d, where)
 
     def test_every_override_is_named_with_its_where(self):
         checked = 0
@@ -393,7 +355,7 @@ class TestHelpNamesEveryWhereOverride(WkTest):
                 continue
             text = run(d.name, "-h").stdout
             for verbs, where in overrides:
-                expected = f"    {verbs.replace(',', ', ')}: {self._prose(d, where)}"
+                expected = f"    {verbs.replace(',', ', ')}: {dispatch.where_prose(d, where)}"
                 with self.subTest(cmd=d.name, verbs=verbs):
                     self.assertIn(expected, text.splitlines(),
                                   f"'wk {d.name} -h' does not say where '{verbs}' runs:\n{text}")

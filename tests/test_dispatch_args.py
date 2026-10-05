@@ -1,4 +1,4 @@
-"""wk.decl.Args: how a command, and resolve_place, read the options the"""
+"""wk.decl.Args: how a command, and resolve_place, read the options the dispatcher let through."""
 import os
 import sys
 import tempfile

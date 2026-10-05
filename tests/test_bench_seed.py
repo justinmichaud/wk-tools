@@ -1,8 +1,11 @@
 """`wk bench seed` (lib/wk/bench/seed.py): a plan's payload fetched once per
 upstream commit, pinned without its .git, against a fake machine and a fake clock."""
+import contextlib
+import io
 import json
 import os
 import sys
+import types
 from unittest import mock
 
 from tests.fakes import FakeRegistry
@@ -52,9 +55,13 @@ def fake(clone_ok=True):
     return m
 
 
-def seeder(m, clock=None, env=None):
-    store = Store(dict(env or {}, WK_LOCK_DIR="/locks"))
-    return seed.Seeder(m, Lock(store, m, clock or FakeClock()), SEEDS)
+def seeder(m, clock=None, mirror=None):
+    return seed.Seeder(m, Lock(Store({"WK_LOCK_DIR": "/locks"}), m, clock or FakeClock()), SEEDS, mirror=mirror)
+
+
+def quiet():
+    """Swallows stderr for a block, and hands it back."""
+    return contextlib.redirect_stderr(io.StringIO())
 
 
 def lock_path():
@@ -69,7 +76,7 @@ class TestAPayloadIsSeededOnce(WkTest):
 
     def test_the_first_seed_clones_and_pins_it_without_its_history(self):
         m = fake()
-        with in_process_ok():
+        with quiet():
             self.assertEqual(seeder(m).seed("jetstream3", PLAN), DEST)
         self.assertEqual(len(ran(m, "clone")), 1)
         self.assertIn(DEST + "/index.html", m.files)
@@ -79,7 +86,7 @@ class TestAPayloadIsSeededOnce(WkTest):
 
     def test_a_second_seed_reads_the_pinned_one(self):
         m = fake()
-        with in_process_ok():
+        with quiet():
             seeder(m).seed("jetstream3", PLAN)
             self.assertEqual(seeder(m).seed("jetstream3", PLAN), DEST)
         self.assertEqual(len(ran(m, "clone")), 1)
@@ -97,26 +104,24 @@ class TestAPayloadIsSeededOnce(WkTest):
                 m.dirs.add(DEST + "/.wk-seeded")
                 m.files.pop(lock, None)
 
-        with in_process_ok():
+        with quiet():
             self.assertEqual(seeder(m, OtherFinishes()).seed("jetstream3", PLAN), DEST)
         self.assertEqual(ran(m, "clone"), [], "the payload the other seed fetched is the one used")
 
     def test_the_fetch_holds_the_payloads_lock_and_lets_it_go(self):
         m = fake()
-        with in_process_ok():
+        with quiet():
             seeder(m).seed("jetstream3", PLAN)
         order = [e for e in m.effects if e[0] == "symlink" or (e[0] == "run" and "clone" in e[1])]
         self.assertEqual(order[0], ("symlink", lock_path()))
         self.assertNotIn(lock_path(), m.files)
 
     def test_a_seed_killed_after_any_effect_and_rerun_converges(self):
-        import types
-
         def world():
             return types.SimpleNamespace(fake=fake())
 
         def run_once(w):
-            with in_process_ok():
+            with quiet():
                 seeder(w.fake).seed("jetstream3", PLAN)
 
         def payload(w):
@@ -127,7 +132,7 @@ class TestAPayloadIsSeededOnce(WkTest):
     def test_a_dry_seed_prints_the_fetch_and_makes_nothing(self):
         m = fake()
         before = (dict(m.files), set(m.dirs))
-        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), in_process_ok() as err:
+        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), quiet() as err:
             seeder(m).seed("jetstream3", PLAN)
         self.assertIn("would run: git clone -q https://github.com/WebKit/JetStream.git", err.getvalue())
         self.assertIn("would run: mv ", err.getvalue())
@@ -137,7 +142,7 @@ class TestAPayloadIsSeededOnce(WkTest):
     def test_a_github_tree_pins_the_subdirectory_it_names(self):
         m = fake()
         plan = json.dumps({"github_source": "https://github.com/webkit/MotionMark/tree/be2a5fea89b6ef411b053ebeb95a6302b3dc0ecb/MotionMark"})
-        with in_process_ok():
+        with quiet():
             dest = seeder(m).seed("motionmark1.3.1", plan)
         self.assertEqual(dest, "%s/motionmark1.3.1-%s" % (SEEDS, SHA[:12]))
         self.assertIn(dest + "/index.html", m.files)
@@ -147,7 +152,7 @@ class TestAPayloadIsSeededOnce(WkTest):
         m = fake()
         m.answer(["git", "ls-remote"], rc=2)
         plan = json.dumps({"git_repository": {"url": "u", "branch": "fab09aef01c2a5560c22cdc1c1a2451c0d0f4cdc"}})
-        with in_process_ok():
+        with quiet():
             self.assertEqual(seeder(m).seed("octane", plan), "%s/octane-fab09aef01c2" % SEEDS)
 
 
@@ -169,7 +174,7 @@ class TestWhatCannotBeSeeded(WkTest):
 
     def test_a_clone_that_fails_leaves_nothing_and_says_so(self):
         m = fake(clone_ok=False)
-        with in_process_ok() as said:
+        with quiet() as said:
             self.assertEqual(seeder(m).seed("jetstream3", PLAN), "")
         self.assertIn("could not clone", said.getvalue())
         self.assertFalse(any(p.startswith(SEEDS + "/") for p in m.files))
@@ -191,17 +196,12 @@ def mirror_fake(has_sha=True):
     return m
 
 
-def mirror_seeder(m):
-    store = Store({"WK_LOCK_DIR": "/locks"})
-    return seed.Seeder(m, Lock(store, m, FakeClock()), SEEDS, mirror=MIRROR)
-
-
 class TestWebKitsOwnPayloadComesFromTheMirror(WkTest):
 
     def test_it_is_archived_out_of_the_mirror_and_nothing_is_cloned(self):
         m = mirror_fake()
-        with in_process_ok():
-            dest = mirror_seeder(m).seed("sunspider", SUNSPIDER)
+        with quiet():
+            dest = seeder(m, mirror=MIRROR).seed("sunspider", SUNSPIDER)
         self.assertEqual(dest, "%s/sunspider-%s" % (SEEDS, SHA[:12]))
         self.assertIn(dest + "/sunspider.html", m.files)
         self.assertEqual([], ran(m, "clone") + ran(m, "ls-remote"))
@@ -210,16 +210,16 @@ class TestWebKitsOwnPayloadComesFromTheMirror(WkTest):
 
     def test_a_commit_the_mirror_lacks_is_refused_naming_the_mirror_refresh(self):
         m = mirror_fake(has_sha=False)
-        with in_process_ok() as said, self.assertRaises(Refused):
-            mirror_seeder(m).seed("sunspider", SUNSPIDER)
+        with quiet() as said, self.assertRaises(Refused):
+            seeder(m, mirror=MIRROR).seed("sunspider", SUNSPIDER)
         self.assertIn("wk sync --mirror", said.getvalue())
         self.assertEqual([], ran(m, "clone"))
         self.assertFalse(any(p.startswith(SEEDS + "/") for p in m.files))
 
     def test_another_repository_is_still_cloned(self):
         m = mirror_fake()
-        with in_process_ok():
-            mirror_seeder(m).seed("jetstream3", PLAN)
+        with quiet():
+            seeder(m, mirror=MIRROR).seed("jetstream3", PLAN)
         self.assertEqual(1, len(ran(m, "clone")))
 
 
@@ -232,13 +232,13 @@ class TestThePlanIsRead(WkTest):
 
     def test_a_missing_plan_is_refused_by_name(self):
         with self.assertRaises(Refused):
-            with in_process_ok() as said:
+            with quiet() as said:
                 seed.plan_json(lambda p: None, "nosuch")
         self.assertIn("no such plan: nosuch", said.getvalue())
 
     def test_a_plan_that_never_resolves_is_refused(self):
         with self.assertRaises(Refused):
-            with in_process_ok():
+            with quiet():
                 seed.plan_json(lambda p: "loop.plan", "loop")
 
 
@@ -270,21 +270,6 @@ class TestTheVerb(WkTest):
     def test_it_needs_a_workspace_and_a_plan(self):
         b = cli.Bench(REPO, self.registry(self.Driver(), fake(), "/store"), FakeClock())
         with self.assertRaises(Refused):
-            with in_process_ok():
+            with quiet():
                 b.seed("w", "", True)
 
-
-class in_process_ok:
-    """Swallows stderr for a block, and hands it back."""
-
-    def __enter__(self):
-        import contextlib
-        import io
-        self.err = io.StringIO()
-        self._cm = contextlib.redirect_stderr(self.err)
-        self._cm.__enter__()
-        return self.err
-
-    def __exit__(self, *exc):
-        self._cm.__exit__(*exc)
-        return False

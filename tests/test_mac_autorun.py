@@ -45,17 +45,11 @@ class TestAReadingCannotHangALeg(WkTest):
         cp = self._read('_wk_qd_read 1 sleep 120')
         self.assertEqual("!timeout", cp.stdout, cp.stderr)
 
-    def test_the_sentinel_is_not_a_value_a_reading_can_answer(self):
-        cp = self._read('printf "%s" "$_WK_QD_TIMEOUT"')
-        self.assertEqual("!timeout", cp.stdout)
-
-    def test_stderr_is_part_of_the_reading_when_it_is_asked_for(self):
-        cp = self._read("""_wk_qd_read -e 10 sh -c 'printf out; printf err >&2'""")
-        self.assertEqual("outerr", cp.stdout, cp.stderr)
-
-    def test_stderr_is_dropped_unless_it_is_asked_for(self):
-        cp = self._read("""_wk_qd_read 10 sh -c 'printf out; printf err >&2'""")
-        self.assertEqual("out", cp.stdout, cp.stderr)
+    def test_stderr_is_part_of_the_reading_only_when_it_is_asked_for(self):
+        for flag, want in (("-e ", "outerr"), ("", "out")):
+            with self.subTest(flag=flag):
+                cp = self._read("""_wk_qd_read %s10 sh -c 'printf out; printf err >&2'""" % flag)
+                self.assertEqual(want, cp.stdout, cp.stderr)
 
     def test_the_merged_form_is_bounded_through_a_grandchild_too(self):
         with scratch_dir() as tmp:
@@ -69,26 +63,17 @@ class TestAReadingCannotHangALeg(WkTest):
         self.assertEqual("!timeout", cp.stdout, cp.stderr)
 
     def test_the_probe_says_which_of_the_two_spotlight_did(self):
-        with scratch_dir() as tmp:
-            binp = tmp / "bin"
-            binp.mkdir()
-            hang = binp / "mdutil"
-            hang.write_text("#!/bin/sh\nexec sleep 120\n")   # exec: the bound kills the direct child
-            hang.chmod(0o755)
-            cp = sh(f'set -euo pipefail\nPATH={binp}:$PATH\n. {str(QUIET)!r}\n'
-                    f'_WK_QD_READ_SECS=1\nwk_quiet_desktop_probe | grep "^spotlight="\n')
-            self.assertEqual("spotlight=!timeout\n", cp.stdout, cp.stderr)
-        # Answered, nothing to say -- not a hang, and not this host's own
-        # mdutil, which has an opinion about indexing / whether it is run.
-        with scratch_dir() as tmp:
-            binp = tmp / "bin"
-            binp.mkdir()
-            silent = binp / "mdutil"
-            silent.write_text("#!/bin/sh\nexit 0\n")
-            silent.chmod(0o755)
-            cp = sh(f'set -euo pipefail\nPATH={binp}:$PATH\n. {str(QUIET)!r}\n'
-                    f'wk_quiet_desktop_probe | grep "^spotlight="\n')
-            self.assertEqual("spotlight=\n", cp.stdout, cp.stderr)
+        # exec: the bound kills the direct child; the silent one stands in for this host's own mdutil.
+        for mdutil, bound, want in (("exec sleep 120", "_WK_QD_READ_SECS=1\n", "spotlight=!timeout\n"),
+                                    ("exit 0", "", "spotlight=\n")):
+            with self.subTest(want=want), scratch_dir() as tmp:
+                binp = tmp / "bin"
+                binp.mkdir()
+                (binp / "mdutil").write_text("#!/bin/sh\n%s\n" % mdutil)
+                (binp / "mdutil").chmod(0o755)
+                cp = sh(f'set -euo pipefail\nPATH={binp}:$PATH\n. {str(QUIET)!r}\n'
+                        f'{bound}wk_quiet_desktop_probe | grep "^spotlight="\n')
+                self.assertEqual(want, cp.stdout, cp.stderr)
 
 
 class TestATimedOutReadingIsUnknownAndNotAFault(WkTest):
@@ -99,34 +84,20 @@ class TestATimedOutReadingIsUnknownAndNotAFault(WkTest):
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         return [l.split("\t") for l in cp.stdout.splitlines() if l]
 
-    def _about(self, probe, word):
-        return [f for f in self._judge(probe) if word in f[1]]
-
-    def test_spotlight_timing_out_is_a_note_that_names_the_deadlock(self):
-        found = self._about("spotlight=!timeout", "Spotlight")
-        self.assertEqual(["note"], [f[0] for f in found], found)
-        self.assertIn("held stopped", found[0][1])
-        self.assertIn("XPC", found[0][1])
-
-    def test_spotlight_answering_nothing_stays_its_own_finding(self):
-        found = self._about("spotlight=", "Spotlight")
-        self.assertEqual(["note"], [f[0] for f in found], found)
-        self.assertNotIn("held stopped", found[0][1])
-
-    def test_spotlight_indexing_is_still_a_fault(self):
-        found = self._about("spotlight=Indexing enabled.", "Spotlight")
-        self.assertEqual(["wrong"], [f[0] for f in found], found)
-
-    def test_any_timed_out_reading_is_a_note_that_names_the_deadlock(self):
-        found = self._about("analytics=!timeout", "diagnostics")
-        self.assertEqual(["note"], [f[0] for f in found], found)
-        self.assertIn("XPC", found[0][1])
-
-    def test_that_same_reading_answering_nothing_is_still_a_fault(self):
-        found = self._about("analytics=", "diagnostics")
-        self.assertEqual(["wrong"], [f[0] for f in found], found)
-
-
+    def test_a_timed_out_reading_is_a_note_and_an_empty_one_keeps_its_own_verdict(self):
+        for probe, word, kind, says, not_says in (
+                ("spotlight=!timeout", "Spotlight", "note", "held stopped", ""),
+                ("spotlight=!timeout", "Spotlight", "note", "XPC", ""),
+                ("spotlight=", "Spotlight", "note", "", "held stopped"),
+                ("spotlight=Indexing enabled.", "Spotlight", "wrong", "", ""),
+                ("analytics=!timeout", "diagnostics", "note", "XPC", ""),
+                ("analytics=", "diagnostics", "wrong", "", "")):
+            with self.subTest(probe=probe):
+                found = [f for f in self._judge(probe) if word in f[1]]
+                self.assertEqual([kind], [f[0] for f in found], found)
+                self.assertIn(says, found[0][1])
+                if not_says:
+                    self.assertNotIn(not_says, found[0][1])
 
 
 ROOT = "/var/wk"

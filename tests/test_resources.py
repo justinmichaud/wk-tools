@@ -11,28 +11,21 @@ from tests.support import REPO, WkTest, bash, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places, resources  # noqa: E402
-from wk.act import Refused  # noqa: E402
+from wk.act import RETRY_EXIT, Refused  # noqa: E402
 from wk.machine import Fake, Local  # noqa: E402
 from wk.sysimage import guestbase, yocto  # noqa: E402
 
-from wk.act import RETRY_EXIT  # noqa: E402
-
 MB_PER_JOB = yocto.WEBKIT_MB_PER_JOB
-
-
-class TestTheRetryStatus(unittest.TestCase):
-    def test_the_two_languages_agree_on_the_retry_status(self):
-        cp = bash(f'. "{REPO}/lib/common.sh"\necho "$WK_RETRY_EXIT"')
-        self.assertEqual(cp.stdout.strip(), str(RETRY_EXIT), cp.stderr)
 
 
 class TestTheDefaultsAreThePythons(WkTest):
 
     def test_the_bash_variables_are_the_python_constants(self):
         cp = bash(f'. "{REPO}/lib/common.sh"\nWK_RESERVE_MB=7\neval "$(wk_py wk.resources --os linux defaults)"\n'
-                  'echo "$WK_RESERVE_MB $WK_RESERVE_CORES $WK_MB_PER_JOB $WK_BUILD_DISK_GB"')
+                  'echo "$WK_RESERVE_MB $WK_RESERVE_CORES $WK_MB_PER_JOB $WK_BUILD_DISK_GB $WK_RETRY_EXIT"')
         self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertEqual(cp.stdout.split(), ["7", str(resources.RESERVE_CORES), str(resources.MB_PER_JOB), str(resources.DISK_GB)])
+        self.assertEqual(cp.stdout.split(), ["7", str(resources.RESERVE_CORES), str(resources.MB_PER_JOB),
+                                             str(resources.DISK_GB), str(RETRY_EXIT)])
 
 
 class TestTheLoadCoresAndJobCount(unittest.TestCase):
@@ -129,10 +122,7 @@ class TestAReadingRefusalReachesItsCaller(WkTest):
     COMPOSITE = ("envelope-cores", "describe-cores")
 
     def _res(self, script, stubs=None, env=None):
-        e = {"XDG_STATE_HOME": str(self.tmp / "state"),
-             "WK_STORE": str(self.tmp / "store"),
-             }
-        e.update(env or {})
+        e = {"XDG_STATE_HOME": str(self.tmp / "state"), "WK_STORE": str(self.tmp / "store"), **(env or {})}
         body = f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n' + script
         with stub_path(stubs if stubs is not None else self.DEAF) as binp:
             e["PATH"] = f"{binp}:{os.environ['PATH']}"
@@ -162,7 +152,7 @@ class TestAReadingRefusalReachesItsCaller(WkTest):
         return vm, guestbase.Base(vm), fake
 
     def test_it_walks_out_through_the_target_drivers_wrappers(self):
-        vm, base, fake = self._guest()
+        vm, base, _ = self._guest()
         with self.assertRaises(Refused):
             vm.cores("g")
         with self.assertRaises(Refused):

@@ -86,7 +86,6 @@ class PeerFixture(WkTest):
         self.home.mkdir()
 
     def env(self, extra=None):
-        with_ssh = dict(extra or {})
         e = {
             "WK_ROOT": str(self.root),
             "WK_MACHINES_DIR": str(self.root / "machines"),
@@ -94,7 +93,7 @@ class PeerFixture(WkTest):
             "XDG_STATE_HOME": str(self.tmp / "state"),
             "WK_SSH_TIMEOUT": "5",
         }
-        e.update(with_ssh)
+        e.update(extra or {})
         return e
 
     def registry(self):
@@ -119,8 +118,6 @@ class PeerFixture(WkTest):
 
 
 class TestPeerResolution(PeerFixture):
-    """a workspace a peer owns resolves like any other"""
-
     @contextlib.contextmanager
     def faked_ssh(self):
         with stub_path({"ssh": _FAKE_SSH}) as binp, \
@@ -128,13 +125,10 @@ class TestPeerResolution(PeerFixture):
             yield
 
     def test_peer_workspace_resolves(self):
-        """ws_place finds a workspace only the peer's own `wk` knows"""
         with self.faked_ssh():
             self.assertEqual(self.registry().ws_place("peerws"), "peerbox")
 
     def test_only_a_workstation_keeps_its_own_records(self):
-        """a workstation's workspaces are its own, so a removal is its own `wk
-        rm`; a build box's are recorded on the workstation that made them"""
         (self.root / "machines" / "buildbox.conf").write_text(
             "kind=build\ndriver=remote\nhost=buildbox\n")
         reg = self.registry()
@@ -142,7 +136,6 @@ class TestPeerResolution(PeerFixture):
         self.assertFalse(reg.load("buildbox").peer)
 
     def test_peer_info_and_list(self):
-        """info answers present/absent for a peer, and list names what it holds"""
         with self.faked_ssh():
             t = self.registry().load("peerbox")
             self.assertEqual(t.info("peerws"), "present")
@@ -153,8 +146,6 @@ class TestPeerResolution(PeerFixture):
 class TestPeerDelegation(PeerFixture):
 
     def test_destroying_one_is_asked_of_the_peer(self):
-        """`wk rm <ws>` of a workspace a peer keeps the record of is that
-        peer's own `wk rm`, run over there with the answer given here"""
         cp = self._wk("rm", "peerws", extra_env={"WK_YES": "1"})
         self.assertEqual(cp.returncode, 0, cp.stdout)
         asked = [c for c in self.peer_calls() if c.startswith("rm ")]
@@ -164,9 +155,6 @@ class TestPeerDelegation(PeerFixture):
                       "the peer was left a question with no terminal to ask it on")
 
     def test_the_question_is_asked_here_and_names_the_machine(self):
-        """one confirmation, on the machine the person typed it on, naming the
-        workspace and the machine it is on -- nothing crosses until it is
-        answered"""
         cp = self._wk("rm", "peerws")
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("peerws@peerbox", cp.stdout, cp.stdout)
@@ -174,8 +162,6 @@ class TestPeerDelegation(PeerFixture):
                          self.peer_calls())
 
     def test_making_one_is_the_peers_own_wk_new(self):
-        """`wk new <ws> --on <peer>` is the peer's `wk new <ws>` at its own default
-        place: the driver here would make a plain checkout under ~/wk instead"""
         cp = self._wk("new", "newws", "--on", "peerbox", "--arch", "armhf", "--pr", "1234")
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("new newws --arch armhf --pr 1234 ", self.peer_calls())
@@ -204,8 +190,7 @@ class TestPeerDelegation(PeerFixture):
         self.assertEqual(reg.machine.effects, [])
 
     def test_every_command_the_integration_run_types_reaches_the_peer(self):
-        """tests/test_dev_integration.py's moose steps, typed here: each command about the
-        peer's workspace runs there, by its own wk, never against anything here"""
+        """tests/test_dev_integration.py's moose steps, typed here."""
         steps = [(("start", "peerws"), "start peerws "),
                 (("ai", "claude", "peerws", "-p", "hi"), "ai claude peerws -p hi "),
                 (("build", "peerws", "jsc-debug", "--detach"), "build peerws jsc-debug --detach "),
@@ -226,7 +211,6 @@ class TestPeerDelegation(PeerFixture):
         self.assertIn("ls --continued --json ", self.peer_calls())
 
     def test_a_here_command_stays_here(self):
-        """`wk zed` is declared `here`: it asks the peer for a route and opens it from this machine"""
         cp = self._wk("zed", "peerws", "--url")
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("ssh://wk-peerws/src/WebKit", cp.stdout)
@@ -242,7 +226,6 @@ class TestPeerDelegation(PeerFixture):
             alias)
 
     def test_the_peer_authorises_the_asking_machines_key(self):
-        """the key that travels with the route request is this machine's, not the peer's"""
         self._wk("zed", "peerws", "--url")
         pub = self.tmp / "state" / "wk" / "ssh" / "zed_ed25519.pub"
         self.assertTrue(pub.exists(), "no zed key was generated for this machine")

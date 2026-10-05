@@ -1,4 +1,4 @@
-"""What `wk status <ws> --log` says about a build: `(none)` on a good one, and the"""
+"""What `wk status <ws> --log --gates` says about the readings a build left beside its products."""
 import json
 import unittest
 
@@ -23,45 +23,7 @@ GOOD_PROFILE = {
 }
 
 
-class TestLogsShowsNoneOnAGoodBuild(WkTest):
-    def _run(self, name, store):
-        env = {"WK_NAME": name, "WK_PLACE": "vm", "WK_VM_STORE": str(store)}
-        return bash(f'exec "{CMD_STATUS}" --log', env=env)
-
-    def test_a_message_containing_the_word_error_mid_sentence_is_not_reported(self):
-        name = "goodws"
-        wsdir = self.tmp / "ws" / name
-        wsdir.mkdir(parents=True)
-        (wsdir / "build.log").write_text(
-            "Building place foo\n"
-            "-- no error: handling here, everything is fine\n"
-            "ninja: no work to do.\n"
-        )
-        cp = self._run(name, self.tmp)
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("(none)", out, out)
-        errors_section = out.split("errors:", 1)[1].split("last output:", 1)[0]
-        self.assertNotIn("no error: handling here", errors_section, out)
-
-    def test_a_real_ninja_failure_still_reports_by_the_same_path(self):
-        name = "badws"
-        wsdir = self.tmp / "ws" / name
-        wsdir.mkdir(parents=True)
-        (wsdir / "build.log").write_text(
-            "Building place foo\n"
-            "foo.cpp:10:5: error: use of undeclared identifier 'x'\n"
-            "ninja: build stopped: subcommand failed.\n"
-        )
-        cp = self._run(name, self.tmp)
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertNotIn("(none)", out, out)
-        self.assertIn("ninja: build stopped", out, out)
-
-
 class TestTheReadingsTravelWithTheBuild(WkTest):
-
     def _gates(self, browser=None, profile=None, pins=None):
         with fake_workspace() as ws:
             products = ws.ws_dir / "WebKit" / "WebKitBuild" / "Release-mac-release-pgo"

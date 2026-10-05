@@ -28,7 +28,6 @@ exit 0
 '''
 
 
-
 class _Shared(WkTest):
     def base_env(self):
         env = dict(os.environ)
@@ -93,10 +92,12 @@ class TestAdopt(_Shared):
         self.assertNotEqual(0, cp.returncode, cp.stdout)
         self.assertFalse((self.held / "build_key_fork").exists())
 
-    def test_an_unknown_fork_is_refused_by_name(self):
-        cp = self.key("adopt", "nope", input="x\n")
-        self.assertNotEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("nope", cp.stdout + cp.stderr)
+    def test_an_unknown_name_is_refused_by_name(self):
+        for verb in ("adopt", "give"):
+            with self.subTest(verb=verb):
+                cp = self.key(verb, "nope", input="x\n")
+                self.assertNotEqual(0, cp.returncode, cp.stdout)
+                self.assertIn("nope", cp.stderr)
 
 
 # Answers as github.com for `ssh git@github.com`, and runs any other far command here.
@@ -170,8 +171,6 @@ class _Fleet(_Shared):
             if key in files:
                 path.write_text(files[key])
             env["WK_TEST_PEER_" + key.upper()] = str(path)
-        self.peer_files = {k: self.tmp / ("peer." + k)
-                           for k in ("verdict", "give", "pub", "ssh")}
         env.update({"WK_TEST_GH_LOG": str(self.gh_log),
                     "WK_TEST_GH_KEYS": str(self.gh_keys),
                     "WK_GITHUB_API": self.api,
@@ -194,6 +193,13 @@ class _Fleet(_Shared):
         e = {"gh": GH_RECORDER, "ssh": FLEET_SSH}
         e.update(stubs)
         return self.key("setup", *args, stubs=e, env=env)
+
+    def check(self, pat=None, **files):
+        self.key("ensure")
+        if pat:
+            (self.held / "github-pat").write_text(pat + "\n")
+        env = self.fleet_env(**files)
+        return self.key("check", stubs={"ssh": FLEET_SSH, "gh": GH_RECORDER}, env=env)
 
     def calls(self):
         return [l for l in self.peer_log.read_text().splitlines() if l.strip()]
@@ -237,12 +243,6 @@ class TestEveryCredentialIsTheFleets(_Fleet):
 
 
 class TestCheckAsksEachWorkstationWhatItHolds(_Fleet):
-
-    def check(self, **files):
-        self.key("ensure")
-        env = self.fleet_env(**files)
-        return self.key("check", stubs={"ssh": FLEET_SSH, "gh": GH_RECORDER}, env=env)
-
     def test_what_a_peer_holds_of_each_credential_is_a_row(self):
         cp = self.check(verdict="ok\tit reaches exactly the forks\n")
         out = cp.stdout + cp.stderr
@@ -273,22 +273,16 @@ class TestCheckAsksEachWorkstationWhatItHolds(_Fleet):
 class TestTheFleetSettlesWhatThisMachineCannotUse(_Fleet):
     """A credential missing or refused here is settled by `wk key setup` when a peer holds a working one."""
 
-    def check(self, pat=None, **files):
-        self.key("ensure")
-        if pat:
-            (self.held / "github-pat").write_text(pat + "\n")
-        env = self.fleet_env(**files)
-        return self.key("check", stubs={"ssh": FLEET_SSH, "gh": GH_RECORDER}, env=env)
-
     def peer_holds_a_working_one(self, fingerprint="not-the-one-here"):
         return dict(verdict="ok\tit reaches exactly the forks\n"
                             "    fingerprint: %s\n" % fingerprint)
 
-    def test_one_this_machine_has_none_of_is_taken_rather_than_asked_for(self):
+    def test_one_this_machine_has_none_of_is_taken_rather_than_asked_for_in_one_line(self):
         cp = self.check(**self.peer_holds_a_working_one())
         needs = (cp.stdout + cp.stderr).split("needs you:")[1]
         self.assertRegex(needs, r"github-pat\s+wk key setup\s+\(peerbox holds one "
                                 r"its issuer accepts\)")
+        self.assertEqual(1, len([l for l in needs.splitlines() if "litellm" in l]), needs)
 
     def test_one_the_issuer_refuses_here_is_settled_by_the_fleet(self):
         cp = self.check(pat=OTHER_PAT, **self.peer_holds_a_working_one())
@@ -297,12 +291,6 @@ class TestTheFleetSettlesWhatThisMachineCannotUse(_Fleet):
         self.assertRegex(needs, r"github-pat\s+wk key setup\s+\(peerbox holds one "
                                 r"its issuer accepts\)")
         self.assertNotRegex(needs, r"\n\s+\d+\. github-pat\s+wk key set github-pat")
-
-    def test_one_credential_is_one_line_to_type(self):
-        cp = self.check(**self.peer_holds_a_working_one())
-        needs = (cp.stdout + cp.stderr).split("needs you:")[1]
-        self.assertEqual(1, len([l for l in needs.splitlines() if "litellm" in l]),
-                         needs)
 
     def test_a_peer_holding_the_same_one_sends_you_to_the_issuer(self):
         fp = self.held_pat(OTHER_PAT)
@@ -313,23 +301,14 @@ class TestTheFleetSettlesWhatThisMachineCannotUse(_Fleet):
 
 
 class TestGiveIsTheOtherHalfOfAdopt(_Shared):
-
-    def test_it_prints_the_private_half_of_a_deploy_key(self):
+    def test_it_prints_the_private_half_of_a_deploy_key_and_a_stored_credential(self):
         self.key("ensure")
         cp = self.key("give", "fork")
         self.assertEqual((self.held / "build_key_fork").read_text(), cp.stdout)
-
-    def test_it_prints_a_stored_credential(self):
-        self.key("ensure")
         (self.held / "github-pat").write_text(GOOD_PAT + "\n")
         (self.held / "github-pat").chmod(0o600)
         cp = self.key("give", "github-pat")
         self.assertEqual(GOOD_PAT, cp.stdout.strip())
-
-    def test_an_unknown_name_is_refused_by_name(self):
-        cp = self.key("give", "nope")
-        self.assertNotEqual(0, cp.returncode)
-        self.assertIn("nope", cp.stderr)
 
 
 if __name__ == "__main__":

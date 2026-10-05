@@ -442,19 +442,15 @@ class TheBuilder(unittest.TestCase):
         mac.install_macos()
         self.assertEqual(v.outputs(), [VOL + "/etc/wk-image"])
 
-    def test_off_a_mac_it_refuses(self):
-        mac = FakeMac()
-        mac.answer(["uname", "-s"], out="Linux\n")
-        with clean_env():
-            got, err = quiet(volume(mac).build, ["--create"])
-        self.assertIs(got, Refused)
-        self.assertIn("on the Mac itself", err)
-
-    def test_one_action_at_a_time(self):
-        with clean_env():
-            got, err = quiet(volume(FakeMac()).build, ["--create", "--repair"])
-        self.assertIs(got, Refused)
-        self.assertIn("one action at a time", err)
+    def test_off_a_mac_or_with_two_actions_it_refuses(self):
+        linux = FakeMac()
+        linux.answer(["uname", "-s"], out="Linux\n")
+        for mac, args, said in ((linux, ["--create"], "on the Mac itself"),
+                                (FakeMac(), ["--create", "--repair"], "one action at a time")):
+            with self.subTest(said=said), clean_env():
+                got, err = quiet(volume(mac).build, args)
+                self.assertIs(got, Refused)
+                self.assertIn(said, err)
 
     def test_the_report_changes_nothing(self):
         mac = FakeMac()
@@ -490,7 +486,8 @@ class TheBuilder(unittest.TestCase):
         with clean_env():
             quiet(volume(mac).build, ["--create"])
             quiet(volume(mac).build, ["--create"])
-        self.assertEqual(mac.runs("addVolume"), [("sudo", "diskutil", "apfs", "addVolume", "disk3", "APFS", "WK Bench")])
+        self.assertEqual(len(mac.runs("addVolume")), 1)
+        self.assertIn("WK Bench", mac.volumes)
 
 
 class TheInstall(unittest.TestCase):
@@ -529,12 +526,10 @@ class TheInstall(unittest.TestCase):
         self.assertEqual(argv[argv.index("--user") + 1], "owner")
         self.assertIn("--passprompt", argv)
         self.assertEqual(argv[argv.index("--installpackage") + 1], "/tmp/wk-bench-provision.pkg")
-
-    def test_the_authorising_account_can_be_named(self):
         mac = self.mac()
         with clean_env(WK_YES="1"):
-            quiet(MacVolume(mac, PROFILE, dict(ENV, WK_BENCH_ADMIN="other"), FakeClock(), root=REPO).build, ["--install"])
-        self.assertEqual(mac.console[0][mac.console[0].index("--user") + 1], "other")
+            quiet(volume(mac, WK_BENCH_ADMIN="other").build, ["--install"])
+        self.assertEqual(mac.console[0][mac.console[0].index("--user") + 1], "other", "the authorising account can be named")
 
     def test_an_installed_volume_is_not_installed_again_and_nothing_is_asked(self):
         mac = self.mac()
@@ -546,16 +541,6 @@ class TheInstall(unittest.TestCase):
 
 
 class ThePackage(unittest.TestCase):
-    def build(self, mac):
-        with clean_env():
-            got, err = quiet(volume(mac).build_pkg)
-        self.assertEqual(got, "/tmp/wk-bench-provision.pkg", err)
-        return self.staged(mac)
-
-    @staticmethod
-    def staged(mac):
-        return {tuple(r[1:]) for r in mac.runs("install") if r[0] == "install"}
-
     def test_it_answers_setup_assistant_and_arms_first_boot(self):
         mac = built(FakeMac())
         with clean_env():

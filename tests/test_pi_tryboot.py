@@ -1,9 +1,6 @@
 """The pi-tryboot boot driver (lib/wk/boot/pi.py, boot/onboard/tryboot.sh): a Pi 4 whose bench medium the
 bootloader will not boot. The firmware loads the bench kernel from the SD via a tryboot one-shot, staged at arm
-time from the medium's own boot partition, and the kernel mounts the bench root on the medium by PARTUUID.
-
-Run: python3 tests/run.py --unit -k test_pi_tryboot
-"""
+time from the medium's own boot partition, and the kernel mounts the bench root on the medium by PARTUUID."""
 import contextlib
 import io
 import shutil

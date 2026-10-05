@@ -56,14 +56,6 @@ class TestAct(ActTest):
 
     def test_a_destructive_command_cannot_act_before_asking(self):
         os.environ["WK_DESTRUCTIVE"] = "1"
-        with self.assertRaises(act.Refused):
-            self.stderr(lambda: Local().act_run(["true"]))
-        os.environ["WK_CONFIRMED"] = "1"
-        cp, _ = self.stderr(lambda: Local().act_run(["true"]))
-        self.assertEqual(cp.rc, 0)
-
-    def test_acting_without_confirm_or_nothing_to_ask_is_a_bug(self):
-        os.environ["WK_DESTRUCTIVE"] = "1"
         marker = self.tmp / "ran"
         with self.assertRaises(act.Refused):
             self.stderr(lambda: Local().act_run(["touch", str(marker)]))

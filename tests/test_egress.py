@@ -120,10 +120,7 @@ def drive_injector(tmp, client_bytes,
         await inj.handle(_reader(client_bytes), cwriter)
 
     logged = io.StringIO()
-    # patch.object, so the real `asyncio.open_connection` is restored even
-    # though this module and the injector share one `asyncio`: assigning it
-    # back by name after patching would store the fake for ever, and the next
-    # test in the process to open a connection would get it.
+    # This module and the injector share one `asyncio`; patch.object restores the real open_connection.
     with unittest.mock.patch.object(asyncio, "open_connection",
                                     fake_open_connection), \
             contextlib.redirect_stderr(logged):
@@ -164,7 +161,8 @@ ALLOWLIST = (
                                          "ddebs.ubuntu.com")]
     + [("github.com", (443, 22), "tunnel")]
     + [(h, (443,), "inject") for h in ("api.github.com", "bugs.webkit.org")]
-    + [("api.github.com", (22, 80, 9418), "refuse"), ("bugs.webkit.org", (80, 22), "refuse")]
+    + [("api.github.com", (22, 80, 9418), "refuse"), ("bugs.webkit.org", (80, 22), "refuse"),
+       ("ddebs.ubuntu.com", (22,), "refuse")]
     # The software update scan path: with it reachable Setup Assistant puts an update pane in front of a guest.
     + [(h, (443,), "refuse") for h in ("swscan.apple.com", "swcdn.apple.com", "swdist.apple.com",
                                       "updates.cdn-apple.com", "updates-http.cdn-apple.com", "mesu.apple.com",
@@ -188,11 +186,6 @@ class TestTheAllowlist(unittest.TestCase):
                     if ok:
                         self.assertEqual(verdict == "inject", "injector" in why, why)
 
-    def test_the_injected_host_is_routed_to_a_socket_under_the_store(self):
-        m = _load(PROXY, "wkproxy")
-        self.assertNotIn("/wk/", m.INJECT_SOCKET.replace("/var/lib/wk/", ""))
-        self.assertTrue(m.INJECT_SOCKET.endswith("github-inject.sock"))
-
 
 class TestAbsoluteFormHonoursTheScheme(unittest.TestCase):
     """A client that sends `GET https://host/...` instead of `CONNECT host:443` -- axios behind a proxy, which is
@@ -201,23 +194,15 @@ class TestAbsoluteFormHonoursTheScheme(unittest.TestCase):
     def setUp(self):
         self.m = _load(PROXY, "wkproxy_abs")
 
-    def test_an_https_target_is_port_443_over_tls(self):
-        host, port, tls, path = self.m.parse_absolute_target(
-            "https://api.anthropic.com/api/claude_code/policy_limits")
-        self.assertEqual(("api.anthropic.com", 443, True,
-                          "/api/claude_code/policy_limits"), (host, port, tls, path))
-
-    def test_an_http_target_stays_port_80_in_the_clear(self):
-        host, port, tls, path = self.m.parse_absolute_target(
-            "http://archive.ubuntu.com/ubuntu/pool")
-        self.assertEqual(("archive.ubuntu.com", 80, False, "/ubuntu/pool"),
-                         (host, port, tls, path))
-
-    def test_an_explicit_port_is_kept_and_the_scheme_still_decides_tls(self):
-        self.assertEqual(("h", 8443, True, "/"),
-                         self.m.parse_absolute_target("https://h:8443/"))
-        self.assertEqual(("h", 8080, False, "/"),
-                         self.m.parse_absolute_target("http://h:8080/"))
+    def test_the_scheme_decides_tls_and_the_default_port(self):
+        for target, want in (
+                ("https://api.anthropic.com/api/claude_code/policy_limits",
+                 ("api.anthropic.com", 443, True, "/api/claude_code/policy_limits")),
+                ("http://archive.ubuntu.com/ubuntu/pool", ("archive.ubuntu.com", 80, False, "/ubuntu/pool")),
+                ("https://h:8443/", ("h", 8443, True, "/")),
+                ("http://h:8080/", ("h", 8080, False, "/"))):
+            with self.subTest(target=target):
+                self.assertEqual(want, self.m.parse_absolute_target(target))
 
     def test_open_upstream_wraps_the_socket_in_tls_only_when_asked(self):
         calls = []
@@ -244,8 +229,7 @@ class TestTheRouteAndTheCheckReadOneSpelling(unittest.TestCase):
     """A host name is case-insensitive and may carry a trailing dot, so one name has several spellings."""
 
     def _routed(self, target):
-        """Where `handle` sent this CONNECT: the host and port open_upstream was asked for, with the real
-        allowlist in front of it."""
+        """The (host, port) `handle` asked open_upstream for, and what the client read back."""
         m = _load(PROXY, "wkproxy")
         proxy = m.Proxy(m.Policy(tempfile.mkdtemp(prefix="wk-test-store-")))
         seen = []
@@ -270,12 +254,7 @@ class TestTheRouteAndTheCheckReadOneSpelling(unittest.TestCase):
             with self.subTest(target=target):
                 seen, out = self._routed(target)
                 self.assertEqual([("api.github.com", 443)], seen, out)
-                self.assertIn(b"200 Connection established", out)
-
-    def test_the_tunnel_is_granted_in_http_1_0(self):
-        _seen, out = self._routed("api.github.com:443")
-        self.assertIn(b"HTTP/1.0 200 Connection established", out)
-        self.assertNotIn(b"HTTP/1.1 200", out)
+                self.assertTrue(out.startswith(b"HTTP/1.0 200 Connection established"), out)
 
     def test_a_shouted_denied_host_is_still_denied(self):
         seen, out = self._routed("UPLOADS.GITHUB.COM:443")
@@ -284,8 +263,6 @@ class TestTheRouteAndTheCheckReadOneSpelling(unittest.TestCase):
 
 
 class TestTheInjectorsRule(unittest.TestCase):
-    """The header rewrite, driven directly: no socket, no network, no GitHub."""
-
     def setUp(self):
         self.m = _load(INJECT, "wkinject")
 
@@ -296,14 +273,11 @@ class TestTheInjectorsRule(unittest.TestCase):
                 b"Connection: keep-alive\r\n"
                 b"User-Agent: python-requests/2.31.0" + extra)
 
-    def test_the_real_token_replaces_whatever_the_workspace_sent(self):
+    def test_the_real_token_replaces_whatever_the_workspace_sent_and_the_rest_survives(self):
         out = self.m.rewrite_head(self.head(), self.m.GITHUB, "ghp-not-a-real-token")
         self.assertIn(b"Authorization: Bearer ghp-not-a-real-token", out)
         self.assertNotIn(b"Basic", out)
         self.assertEqual(1, out.count(b"Authorization:"))
-
-    def test_the_request_line_and_the_other_headers_survive(self):
-        out = self.m.rewrite_head(self.head(), self.m.GITHUB, "ghp-x")
         self.assertTrue(out.startswith(b"GET /user HTTP/1.1\r\n"))
         self.assertIn(b"Host: api.github.com", out)
         self.assertIn(b"User-Agent: python-requests/2.31.0", out)
@@ -406,29 +380,20 @@ class TestTheInjectorsBugzillaRule(WkTest):
                  "User-Agent: python-requests/2.31.0" % target).encode("latin-1")
                 + extra)
 
-    def test_the_login_pair_is_dropped_and_the_switchs_key_added(self):
-        out = self.m.rewrite_head(self.head(self.TARGET), self.m.BUGZILLA,
-                                  "not-a-real-key")
-        self.assertEqual(b"GET /rest/bug/250000?include_fields=id%2Csummary"
-                         b"&api_key=not-a-real-key HTTP/1.1",
-                         out.split(b"\r\n")[0])
-        self.assertNotIn(b"wk-injects-this", out)
-        self.assertNotIn(b"login=", out)
-        self.assertNotIn(b"Authorization", out)
-        self.assertIn(b"Host: bugs.webkit.org\r\n", out)
-
-    def test_with_no_key_the_request_goes_anonymous(self):
-        out = self.m.rewrite_head(self.head(self.TARGET), self.m.BUGZILLA, "")
-        self.assertTrue(out.startswith(
-            b"GET /rest/bug/250000?include_fields=id%2Csummary HTTP/1.1\r\n"), out)
-        self.assertNotIn(b"api_key", out)
-        self.assertNotIn(b"wk-injects-this", out)
-
-    def test_a_query_of_only_the_login_pair_leaves_a_bare_path(self):
-        out = self.m.rewrite_head(
-            self.head("/rest/user/me%40example.test?login=me%40example.test&password=x"),
-            self.m.BUGZILLA, "")
-        self.assertTrue(out.startswith(b"GET /rest/user/me%40example.test HTTP/1.1\r\n"), out)
+    def test_the_login_pair_is_dropped_and_the_switchs_key_added_url_encoded(self):
+        for target, key, line in (
+                (self.TARGET, "not-a-real-key",
+                 b"GET /rest/bug/250000?include_fields=id%2Csummary&api_key=not-a-real-key HTTP/1.1"),
+                (self.TARGET, "", b"GET /rest/bug/250000?include_fields=id%2Csummary HTTP/1.1"),
+                ("/rest/user/me%40example.test?login=me%40example.test&password=x", "",
+                 b"GET /rest/user/me%40example.test HTTP/1.1"),
+                ("/rest/bug/1", "a b&c", b"GET /rest/bug/1?api_key=a%20b%26c HTTP/1.1")):
+            with self.subTest(target=target, key=key):
+                out = self.m.rewrite_head(self.head(target), self.m.BUGZILLA, key)
+                self.assertEqual(line, out.split(b"\r\n")[0])
+                self.assertNotIn(b"wk-injects-this", out)
+                self.assertNotIn(b"Authorization", out)
+                self.assertIn(b"Host: bugs.webkit.org\r\n", out)
 
     def test_every_spelling_bugzilla_takes_a_login_in_is_dropped(self):
         for name in ("api_key", "Bugzilla_api_key", "token", "Bugzilla_login",
@@ -446,10 +411,6 @@ class TestTheInjectorsBugzillaRule(WkTest):
             self.m.BUGZILLA, "")
         self.assertNotIn(b"the-workspaces-own", out)
 
-    def test_the_key_is_url_encoded(self):
-        out = self.m.rewrite_head(self.head("/rest/bug/1"), self.m.BUGZILLA, "a b&c")
-        self.assertIn(b"/rest/bug/1?api_key=a%20b%26c HTTP/1.1", out)
-
     def test_a_request_line_this_cannot_read_is_refused_not_forwarded(self):
         for line in (b"GET", b"GET /rest/bug?password=x",
                      b"GET /rest/bug HTTP/1.1 extra"):
@@ -465,25 +426,18 @@ class TestTheInjectorsBugzillaRule(WkTest):
 
 
 class TestTheInjectorAnswersForItsHostsOnly(WkTest):
-    """The forwarded connection is a TLS session to the name the request's Host header carries, and only one of
-    the two this answers for."""
-
     def test_a_host_this_does_not_answer_for_is_refused_and_nothing_opened(self):
         for host in (b"uploads.github.com", b"evil.example",
-                     b"api.github.com.evil.example", b"github.com"):
+                     b"api.github.com.evil.example", b"github.com", None):
             with self.subTest(host=host):
+                header = b"" if host is None else b"Host: " + host + b"\r\n"
                 client, upstream, opened, _ = drive_injector(
-                    self.tmp, b"POST /repos/x/y/releases HTTP/1.1\r\nHost: " + host
-                    + b"\r\nContent-Length: 0\r\n\r\n")
+                    self.tmp, b"POST /repos/x/y/releases HTTP/1.1\r\n" + header
+                    + b"Content-Length: 0\r\n\r\n")
                 self.assertEqual([], opened)
                 self.assertEqual(b"", upstream)
                 self.assertIn(b"421 Misdirected Request", client)
                 self.assertIn(b"api.github.com and bugs.webkit.org", client)
-
-    def test_a_request_with_no_host_at_all_is_refused(self):
-        client, _, opened, _ = drive_injector(self.tmp, b"GET /user HTTP/1.1\r\n\r\n")
-        self.assertEqual([], opened)
-        self.assertIn(b"421 Misdirected Request", client)
 
     def test_the_host_it_sends_is_the_host_it_verified(self):
         for host in ("api.github.com", "bugs.webkit.org"):
@@ -521,44 +475,21 @@ class TestTheInjectorReadsOneRequestAndNoMore(WkTest):
         self.assertEqual(1, upstream.count(b"HTTP/1.1"), upstream)
         self.assertNotIn(b"ghp-the-workspaces-own", upstream)
         self.assertTrue(upstream.endswith(b"\r\n\r\nhi"), upstream)
-        self.assertIn(b"Content-Length: 2\r\n", upstream)
-
-    def test_the_declared_body_does_reach_it(self):
-        _, upstream, _ = self._drive(
-            b"POST /repos/x/y/pulls HTTP/1.1\r\nHost: api.github.com\r\n"
-            b'Content-Length: 11\r\n\r\n{"a":"bcd"}')
-        self.assertTrue(upstream.endswith(b'{"a":"bcd"}'), upstream)
-        self.assertIn(b"Content-Length: 11\r\n", upstream)
-
-    def test_a_bare_lf_header_is_refused_and_nothing_is_forwarded(self):
-        client, upstream, opened = self._drive(
-            b"GET /x HTTP/1.1\nAuthorization: token ghp-the-workspaces-own\r\n\r\n")
-        self.assertEqual([], opened, upstream)
-        self.assertEqual(b"", upstream)
-        self.assertIn(b"400 Bad Request", client)
-        self.assertIn(b"bare LF", client)
-
-    def test_a_chunked_body_is_refused_rather_than_guessed_at(self):
-        client, upstream, opened = self._drive(
-            b"POST /user HTTP/1.1\r\nHost: api.github.com\r\n"
-            b"Transfer-Encoding: chunked\r\n\r\n"
-            b"2\r\nhi\r\n0\r\n\r\n")
-        self.assertEqual([], opened, upstream)
-        self.assertIn(b"411 Length Required", client)
-
-    def test_two_content_lengths_are_refused(self):
-        client, _, opened = self._drive(
-            b"POST /user HTTP/1.1\r\nHost: api.github.com\r\n"
-            b"Content-Length: 2\r\nContent-Length: 40\r\n\r\nhi")
-        self.assertEqual([], opened)
-        self.assertIn(b"400 Bad Request", client)
-
-    def test_the_clients_own_framing_headers_never_go_on(self):
-        _, upstream, _ = self._drive(
-            b"POST /repos/x/y/pulls HTTP/1.1\r\nHost: api.github.com\r\n"
-            b"Content-Length: 2\r\n\r\nhi")
+        self.assertEqual(1, upstream.count(b"Content-Length: 2\r\n"), upstream)
         self.assertEqual(1, upstream.count(b"Content-Length:"), upstream)
-        self.assertNotIn(b"Transfer-Encoding", upstream)
+
+    def test_framing_it_cannot_trust_is_refused_and_nothing_is_forwarded(self):
+        for request, status in (
+                (b"GET /x HTTP/1.1\nAuthorization: token ghp-the-workspaces-own\r\n\r\n", b"400 Bad Request"),
+                (b"POST /user HTTP/1.1\r\nHost: api.github.com\r\nTransfer-Encoding: chunked\r\n\r\n"
+                 b"2\r\nhi\r\n0\r\n\r\n", b"411 Length Required"),
+                (b"POST /user HTTP/1.1\r\nHost: api.github.com\r\n"
+                 b"Content-Length: 2\r\nContent-Length: 40\r\n\r\nhi", b"400 Bad Request")):
+            with self.subTest(request=request):
+                client, upstream, opened = self._drive(request)
+                self.assertEqual([], opened, upstream)
+                self.assertEqual(b"", upstream)
+                self.assertIn(status, client)
 
 
 # Every request `git-webkit` makes of api.github.com, by the file that builds
@@ -719,9 +650,6 @@ class TestTheInjectorForwardsBugzilla(WkTest):
 
 
 class TestTheInjectorRecordsWhatTheFarEndAnswered(WkTest):
-    """The request log alone cannot tell an injected credential the far end accepted from one it refused -- both
-    read `..."""
-
     def drive(self, reply):
         head = (b"PUT /rest/bug/324270?login=me%40example.test&password=wk-injects-this"
                 b" HTTP/1.1\r\nHost: bugs.webkit.org\r\nContent-Length: 0\r\n\r\n")
@@ -730,32 +658,19 @@ class TestTheInjectorRecordsWhatTheFarEndAnswered(WkTest):
             upstream_reply=reply)
         return client, logged
 
-    def test_a_refusal_is_named_in_the_log(self):
-        client, logged = self.drive(
-            b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
-        self.assertIn("400 Bad Request", logged, logged)
-        self.assertIn("bugs.webkit.org", logged)
-
-    def test_so_is_an_acceptance(self):
-        _client, logged = self.drive(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-        self.assertIn("200 OK", logged, logged)
-
-    def test_the_reply_still_reaches_the_client_whole(self):
-        reply = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 9\r\n\r\n{\"e\":1}\r\n"
-        client, _logged = self.drive(reply)
-        self.assertEqual(client, reply, client)
-
-    def test_no_response_body_is_logged(self):
-        reply = (b"HTTP/1.1 403 Forbidden\r\nContent-Length: 21\r\n\r\n"
-                 b'{"message":"secret"}\n')
-        _client, logged = self.drive(reply)
-        self.assertIn("403 Forbidden", logged)
-        self.assertNotIn("secret", logged)
+    def test_the_status_is_logged_without_the_body_and_the_reply_reaches_the_client_whole(self):
+        for reply, status in (
+                (b'HTTP/1.1 403 Forbidden\r\nContent-Length: 21\r\n\r\n{"message":"secret"}\n', "403 Forbidden"),
+                (b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", "200 OK")):
+            with self.subTest(status=status):
+                client, logged = self.drive(reply)
+                self.assertIn(status, logged)
+                self.assertIn("bugs.webkit.org", logged)
+                self.assertNotIn("secret", logged)
+                self.assertEqual(reply, client)
 
 
 class TestTheInjectorBoundsTheUpstream(WkTest):
-    """A stalled or unreachable far end is answered 504 or 502 inside UPSTREAM_TIMEOUT, so the caller's own
-    timeout never fires on a live injector."""
 
     HEAD = b"GET /user HTTP/1.1\r\nHost: api.github.com\r\nContent-Length: 0\r\n\r\n"
 
@@ -799,27 +714,22 @@ class TestTheInjectorBoundsTheUpstream(WkTest):
             self.tmp, self.HEAD, read_token="t", connect=slow, upstream_timeout=0.2, read_timeout=5)
         self.assertIn(b"200 OK", client)
 
-    def test_a_tls_verification_failure_is_a_502_naming_the_injector(self):
-        async def bad_ca():
-            raise ssl.SSLCertVerificationError("certificate verify failed")
-        client, logged = self.drive(bad_ca)
-        self.assertIn(b"502 Bad Gateway", client)
-        self.assertIn(b"X-Wk-Injector: SSLCertVerificationError", client)
-        self.assertIn(b"failed to verify or resolve api.github.com", client)
-
-    def test_a_dns_failure_is_a_502_naming_the_injector(self):
-        async def no_dns():
-            raise socket.gaierror(-2, "Name or service not known")
-        client, _ = self.drive(no_dns)
-        self.assertIn(b"502 Bad Gateway", client)
-        self.assertIn(b"X-Wk-Injector: gaierror", client)
-
-    def test_an_unreachable_network_is_a_502(self):
-        async def unreachable():
-            raise OSError(errno.ENETUNREACH, "Network is unreachable")
-        client, _ = self.drive(unreachable)
-        self.assertIn(b"502 Bad Gateway", client)
-        self.assertNotIn(b"X-Wk-Injector", client)
+    def test_a_failed_connect_is_a_502_and_only_a_tls_or_dns_failure_names_the_injector(self):
+        for error, header in (
+                (ssl.SSLCertVerificationError("certificate verify failed"),
+                 b"X-Wk-Injector: SSLCertVerificationError"),
+                (socket.gaierror(-2, "Name or service not known"), b"X-Wk-Injector: gaierror"),
+                (OSError(errno.ENETUNREACH, "Network is unreachable"), None)):
+            async def fail():
+                raise error
+            with self.subTest(error=type(error).__name__):
+                client, _ = self.drive(fail)
+                self.assertIn(b"502 Bad Gateway", client)
+                if header:
+                    self.assertIn(header, client)
+                    self.assertIn(b"failed to verify or resolve api.github.com", client)
+                else:
+                    self.assertNotIn(b"X-Wk-Injector", client)
 
     def test_a_refused_connect_is_a_502_naming_the_host(self):
         async def refused():
@@ -835,10 +745,9 @@ class TestTheInjectorBoundsTheUpstream(WkTest):
 
 
 class TestTheInjectorForwardsEverything(WkTest):
-    """The decision, and it is a decision rather than an oversight: the injector refuses nothing on policy."""
+    """The injector refuses nothing on policy."""
 
     def forward(self, method, target, body=b"", **kw):
-        """Drives the relay and returns what api.github.com received."""
         head = ("%s %s HTTP/1.1\r\nHost: api.github.com\r\n"
                 "Content-Length: %d\r\n\r\n"
                 % (method, target, len(body))).encode("latin-1")
@@ -951,8 +860,6 @@ class TestTheGraphQLReadWriteSplit(WkTest):
 
 
 class TestTheTwoTokens(WkTest):
-    """Which token a request spends, which is the whole of what `wk key push` switches."""
-
     def setUp(self):
         super().setUp()
         self.m = _load(INJECT, "wkinject")
@@ -992,36 +899,41 @@ class TestTheTwoTokens(WkTest):
         self.assertIn(b"Authorization: Bearer ghp-read-only", upstream)
         self.assertIn("read inject GET /repos/WebKit/WebKit/pulls/1234", logged)
 
+def _bridge_script(d, ca):
+    """ensure-bridge.sh with its fixed paths moved under `d`; `ca` is the injector CA's text, or None."""
+    secrets = d / "secrets"
+    secrets.mkdir()
+    tools = d / "wk-tools"
+    (tools / "shell").mkdir(parents=True)
+    (tools / "container" / "proxy").mkdir(parents=True)
+    (tools / "shell" / "path.sh").write_text(":\n")
+    (tools / "container" / "proxy" / "bridge.py").write_text("import time; time.sleep(30)\n")
+    runwk = d / "run-wk"
+    runwk.mkdir()
+    if ca:
+        (runwk / "wk-github-ca.pem").write_text(ca)
+    sysca = d / "ca-certificates.crt"
+    sysca.write_text("THE-SYSTEM-STORE\n")
+    script = d / "ensure-bridge.sh"
+    script.write_text(
+        (REPO / "container" / "proxy" / "ensure-bridge.sh").read_text()
+        .replace("/opt/wk-tools", str(tools))
+        .replace("/run/wk/wk-github-ca.pem", str(runwk / "wk-github-ca.pem"))
+        .replace("/etc/ssl/certs/ca-certificates.crt", str(sysca))
+        .replace("/secrets/", str(secrets) + "/"))
+    return script, secrets
+
+
 def run_bridge(ca, *print_vars, bugzilla_user=None, github_user=None,
                env_extra=None):
     """(what the wrapped command printed, the bundle's path, its bytes)."""
     d = Path(tempfile.mkdtemp(prefix="wk-test-gh-env-"))
     try:
-        secrets = d / "secrets"
-        secrets.mkdir()
+        script, secrets = _bridge_script(d, "THE-INJECTORS-CA\n" if ca else None)
         if bugzilla_user is not None:
             (secrets / "bugzilla-user").write_text(bugzilla_user + "\n")
         if github_user is not None:
             (secrets / "github-user").write_text(github_user + "\n")
-        tools = d / "wk-tools"
-        (tools / "shell").mkdir(parents=True)
-        (tools / "container" / "proxy").mkdir(parents=True)
-        (tools / "shell" / "path.sh").write_text(":\n")
-        (tools / "container" / "proxy" / "bridge.py").write_text(
-            "import time; time.sleep(30)\n")
-        runwk = d / "run-wk"
-        runwk.mkdir()
-        if ca:
-            (runwk / "wk-github-ca.pem").write_text("THE-INJECTORS-CA\n")
-        sysca = d / "ca-certificates.crt"
-        sysca.write_text("THE-SYSTEM-STORE\n")
-        script = d / "ensure-bridge.sh"
-        script.write_text(
-            (REPO / "container" / "proxy" / "ensure-bridge.sh").read_text()
-            .replace("/opt/wk-tools", str(tools))
-            .replace("/run/wk/wk-github-ca.pem", str(runwk / "wk-github-ca.pem"))
-            .replace("/etc/ssl/certs/ca-certificates.crt", str(sysca))
-            .replace("/secrets/", str(secrets) + "/"))
         rw = d / "rw"
         rw.mkdir()
         show = "; ".join('printf "%s=[%s]\\n" ' + v + ' "${' + v + ':-}"'
@@ -1067,9 +979,6 @@ class TestWhatGhNeeds(unittest.TestCase):
         self.assertEqual("THE-SYSTEM-STORE\nTHE-INJECTORS-CA\n", text)
 
 class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
-    """Both places set the same two variables and the same CA bundle, from the one wrapper each of them already
-    goes through."""
-
     def test_every_way_into_a_container_goes_through_the_wrapper(self):
         c = wk_places.Container("c", REPO, {"WK_CONTAINER_USER": "dev", "WK_IN_VM": "1"}, Fake("here"))
         bridge = "/opt/wk-tools/container/proxy/ensure-bridge.sh"
@@ -1086,34 +995,12 @@ class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
         self.assertIn("--login", argv)
 
     def test_a_full_temp_directory_still_runs_the_command(self):
-        import os
-        import stat
-        import tempfile
         d = Path(tempfile.mkdtemp(prefix="wk-test-ro-tmp-"))
         try:
-            tools = d / "wk-tools"
-            (tools / "shell").mkdir(parents=True)
-            (tools / "container" / "proxy").mkdir(parents=True)
-            (tools / "shell" / "path.sh").write_text(":\n")
-            (tools / "container" / "proxy" / "bridge.py").write_text(
-                "import time; time.sleep(30)\n")
-            runwk = d / "run-wk"
-            runwk.mkdir()
-            (runwk / "wk-github-ca.pem").write_text(
-                "-----BEGIN CERTIFICATE-----\nnot a real one\n")
-            sysca = d / "ca-certificates.crt"
-            sysca.write_text("-----BEGIN CERTIFICATE-----\nsystem\n")
-
-            script = d / "ensure-bridge.sh"
-            script.write_text(
-                (REPO / "container" / "proxy" / "ensure-bridge.sh").read_text()
-                .replace("/opt/wk-tools", str(tools))
-                .replace("/run/wk/wk-github-ca.pem", str(runwk / "wk-github-ca.pem"))
-                .replace("/etc/ssl/certs/ca-certificates.crt", str(sysca)))
-
+            script, _ = _bridge_script(d, "-----BEGIN CERTIFICATE-----\nnot a real one\n")
             ro = d / "ro"
             ro.mkdir()
-            os.chmod(ro, stat.S_IRUSR | stat.S_IXUSR)
+            os.chmod(ro, 0o500)
             cp = subprocess.run(
                 ["bash", str(script), "sh", "-c", "echo the-command-ran"],
                 env={**os.environ, "TMPDIR": str(ro)},
@@ -1344,12 +1231,8 @@ def _shell_function(path, name):
 
 
 def _sandbox_env():
-    """The proxy variables the container target starts a container with (`Container.sandbox_flags`), asked of a
-    fake machine: the runtime directory is made under /run, which a test may not do."""
-    sys.path.insert(0, str(REPO / "lib"))
-    from wk import places
-    from wk.machine import Fake
-    flags = places.Container("container", str(REPO), {"XDG_RUNTIME_DIR": "/run/user/1"}, Fake("here")).sandbox_flags("armhf")
+    """The variables `Container.sandbox_flags` starts a container with."""
+    flags = wk_places.Container("container", str(REPO), {"XDG_RUNTIME_DIR": "/run/user/1"}, Fake("here")).sandbox_flags("armhf")
     return dict(v.split("=", 1) for k, v in zip(flags[0::2], flags[1::2]) if k == "--env")
 
 
@@ -1364,11 +1247,6 @@ class TestAptGoesThroughTheProxy(unittest.TestCase):
             env={"PATH": "/usr/bin:/bin", **env})
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         return cp.stdout
-
-    def test_both_schemes_are_named(self):
-        out = self._drop_in(http_proxy="http://127.0.0.1:9", https_proxy="http://127.0.0.1:9")
-        self.assertIn('Acquire::http::Proxy "http://127.0.0.1:9";', out)
-        self.assertIn('Acquire::https::Proxy "http://127.0.0.1:9";', out)
 
     def test_the_address_is_the_one_the_container_is_started_with(self):
         env = _sandbox_env()

@@ -40,54 +40,43 @@ class TestPrepare(unittest.TestCase):
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)]))
         self.out = self.tmp / "out"
 
-    def _deb(self, *, zimage=True, modules=True, dtbs=True, xz=True):
+    def _deb(self):
         root = self.tmp / "pkg"
         shutil.rmtree(root, ignore_errors=True)
         (root / "DEBIAN").mkdir(parents=True)
         (root / "DEBIAN" / "control").write_text(
             f"Package: linux-image-test\nVersion: 1\nArchitecture: armhf\n"
             f"Maintainer: t <t@t>\nDescription: test\n")
-        if zimage:
-            (root / "boot").mkdir(parents=True)
-            # A 32-bit ARM zImage is recognised by its magic at offset 36.
-            blob = bytearray(b"\0" * 64)
-            blob[36:40] = (0x016f2818).to_bytes(4, "little")
-            (root / "boot" / f"vmlinuz-{self.RELEASE}").write_bytes(bytes(blob))
-        if modules:
-            md = root / "lib" / "modules" / self.RELEASE / "kernel" / "drivers" / "net"
-            md.mkdir(parents=True)
-            ko = md / "brcmfmac.ko"
-            ko.write_bytes(b"\x7fELF" + b"\0" * 64)
-            if xz:
-                subprocess.run(["xz", str(ko)], check=True)
-            for f in ("modules.order", "modules.builtin"):
-                (root / "lib" / "modules" / self.RELEASE / f).write_text("")
-        if dtbs:
-            dd = root / "usr" / "lib" / f"linux-image-{self.RELEASE}"
-            (dd / "overlays").mkdir(parents=True)
-            (dd / "bcm2711-rpi-4-b.dtb").write_bytes(b"\xd0\x0d\xfe\xed")
-            (dd / "overlays" / "vc4-kms-v3d-pi4.dtbo").write_bytes(b"\xd0\x0d\xfe\xed")
+        (root / "boot").mkdir(parents=True)
+        # A 32-bit ARM zImage is recognised by its magic at offset 36.
+        blob = bytearray(b"\0" * 64)
+        blob[36:40] = (0x016f2818).to_bytes(4, "little")
+        (root / "boot" / f"vmlinuz-{self.RELEASE}").write_bytes(bytes(blob))
+        md = root / "lib" / "modules" / self.RELEASE / "kernel" / "drivers" / "net"
+        md.mkdir(parents=True)
+        ko = md / "brcmfmac.ko"
+        ko.write_bytes(b"\x7fELF" + b"\0" * 64)
+        subprocess.run(["xz", str(ko)], check=True)
+        for f in ("modules.order", "modules.builtin"):
+            (root / "lib" / "modules" / self.RELEASE / f).write_text("")
+        dd = root / "usr" / "lib" / f"linux-image-{self.RELEASE}"
+        (dd / "overlays").mkdir(parents=True)
+        (dd / "bcm2711-rpi-4-b.dtb").write_bytes(b"\xd0\x0d\xfe\xed")
+        (dd / "overlays" / "vc4-kms-v3d-pi4.dtbo").write_bytes(b"\xd0\x0d\xfe\xed")
         deb = self.tmp / "k.deb"
         subprocess.run(["dpkg-deb", "--build", "--nocheck", str(root), str(deb)],
                        check=True, capture_output=True)
         return deb
 
-    def test_the_prepared_tree_carries_all_four_halves(self):
+    def test_the_prepared_tree_carries_all_four_halves_with_modules_decompressed(self):
         cp = run(self._deb(), self.RELEASE, self.out)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        tar = Path(cp.stdout.strip())
-        self.assertTrue(tar.is_file(), cp.stdout + cp.stderr)
-        names = subprocess.run(["tar", "-tf", str(tar)], capture_output=True, text=True).stdout
+        names = subprocess.run(["tar", "-tf", cp.stdout.strip()], capture_output=True, text=True).stdout
         for want in ("./boot/zImage",
                      f"./lib/modules/{self.RELEASE}/modules.dep",
                      "./dtb/bcm2711-rpi-4-b.dtb",
                      "./dtb/overlays/vc4-kms-v3d-pi4.dtbo"):
             self.assertIn(want, names, f"the prepared tree is missing {want}")
-
-    def test_modules_arrive_decompressed_and_modules_dep_agrees(self):
-        cp = run(self._deb(xz=True), self.RELEASE, self.out)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        names = subprocess.run(["tar", "-tf", cp.stdout.strip()], capture_output=True, text=True).stdout
         self.assertIn("brcmfmac.ko", names)
         self.assertNotIn("brcmfmac.ko.xz", names, "a module was left compressed")
         dep = subprocess.run(["tar", "-xOf", cp.stdout.strip(),
@@ -95,7 +84,6 @@ class TestPrepare(unittest.TestCase):
                              capture_output=True, text=True).stdout
         self.assertIn("brcmfmac.ko", dep)
         self.assertNotIn(".ko.xz", dep, "modules.dep still names the compressed paths")
-
 
 
 class TestPrepareOnTheFake(unittest.TestCase):
@@ -139,24 +127,17 @@ class TestPrepareOnTheFake(unittest.TestCase):
         self.assertEqual(cp.stdout, self.TAR)
         self.assertFalse([e for e in w.effects if e[0] == "run" and e[1][0] == "dpkg-deb"])
 
-    def test_a_kernel_that_is_not_a_32_bit_zimage_is_refused(self):
-        cp = run(self.DEB, self.R, self.OUT, self.world(magic="00000000"))
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("not a 32-bit ARM zImage", cp.stderr)
-
-    def test_a_package_without_modules_is_refused(self):
-        cp = run(self.DEB, self.R, self.OUT, self.world(modules=False))
-        self.assertIn("no modules", cp.stderr)
-
-    def test_a_modules_dep_that_still_names_xz_is_refused(self):
-        cp = run(self.DEB, self.R, self.OUT, self.world(dep="kernel/brcmfmac.ko.xz:\n"))
-        self.assertIn("still names .xz", cp.stderr)
-
-    def test_a_missing_tool_is_named(self):
-        w = self.world()
-        w.answer(["sh", "-c"], out="depmod\n")
-        cp = run(self.DEB, self.R, self.OUT, w)
-        self.assertIn("depmod", cp.stderr)
+    def test_each_refusal_names_what_is_wrong(self):
+        tool_missing = self.world()
+        tool_missing.answer(["sh", "-c"], out="depmod\n")
+        for world, why in ((self.world(magic="00000000"), "not a 32-bit ARM zImage"),
+                           (self.world(modules=False), "no modules"),
+                           (self.world(dep="kernel/brcmfmac.ko.xz:\n"), "still names .xz"),
+                           (tool_missing, "depmod")):
+            with self.subTest(why=why):
+                cp = run(self.DEB, self.R, self.OUT, world)
+                self.assertNotEqual(cp.returncode, 0)
+                self.assertIn(why, cp.stderr)
 
 
 if __name__ == "__main__":

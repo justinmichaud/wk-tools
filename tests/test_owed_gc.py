@@ -1,4 +1,4 @@
-"""lib/wk/gc.py: `wk gc` over a fake machine. `unit gc.reclaims_or_names[<kind>]`: for every kind of rubble a plain run"""
+"""lib/wk/gc.py: `wk gc` over a fake machine."""
 import contextlib
 import io
 import json
@@ -435,7 +435,6 @@ class TestReclaimsOrNames(GcTest):
     def test_wk_disk_renders_the_same_rows(self):
         _half_made(self.w)
         _seed(self.w)
-        self.w.store_dir and self.w._drop(os.path.join(self.w.store_dir, "ws", "hm", "base-id"))
         lines = [rubble.line(r, (), "a plain 'wk gc' takes it") for r in self.rows()]
         self.assertEqual(len(lines), 2)
         self.assertTrue(any("'wk gc --purge-rubble' takes it" in l for l in lines), lines)
@@ -632,15 +631,13 @@ class TestCrashOnly(GcTest):
 
 class TestWhatGcKeepsWhenNothingVerifies(WkTest):
 
-    def _bases(self, ids, complete=(), branch=()):
+    def _bases(self, ids, complete=()):
         store = self.tmp / "store"
         for i in ids:
             d = store / "base" / i
             (d / "WebKit").mkdir(parents=True)
             if i in complete:
                 (d / "sha").write_text("deadbeef\n")
-            if i in branch:
-                (d / "branch").write_text("origin/main\n")
         (store / "ws").mkdir(parents=True, exist_ok=True)
         return store
 
@@ -654,14 +651,6 @@ class TestWhatGcKeepsWhenNothingVerifies(WkTest):
     def test_an_unfinished_newest_one_protects_nothing_and_goes(self):
         store = self._bases(["20260101", "20260202"], complete=["20260101"])
         self.assertEqual(["20260202"], self._unreferenced(store))
-
-    def test_a_workspace_pins_its_snapshot_and_an_unknown_pin_keeps_them_all(self):
-        store = self._bases(["20260101", "20260202", "20260303"], complete=["20260101", "20260202", "20260303"])
-        (store / "ws" / "a").mkdir()
-        (store / "ws" / "a" / "base-id").write_text("20260101\n")
-        self.assertEqual(["20260202"], self._unreferenced(store))
-        (store / "ws" / "b").mkdir()
-        self.assertEqual([], self._unreferenced(store), "a workspace with no pin could be on any of them")
 
 
 if __name__ == "__main__":

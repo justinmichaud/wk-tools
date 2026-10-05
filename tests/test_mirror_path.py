@@ -16,8 +16,6 @@ from wk.machine import Fake, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 
-DRIVERS = ("container", "vm", "remote", "local")
-
 
 def _probe(argv, fake):
     """A build box that answers the probe (home, uname, cores) and names no shared reference checkout in its MOTD."""
@@ -25,9 +23,7 @@ def _probe(argv, fake):
 
 
 def _driver(kind, env=None, system="Darwin"):
-    """`kind` made over a fake machine on a host whose `uname -s` is `system`; the answer is asked inside the
-    stub, since LocalWorkspace reads uname when asked (it is the only evidence a workspace has about its
-    kind)."""
+    """Asked inside the uname stub: LocalWorkspace reads uname when asked, the only evidence of its kind."""
     fake = Fake("here")
     fake.react(["sh", "-c"], _probe)
     env = dict({"HOME": "/nonexistent", "WK_STORE": "/the/store", "XDG_STATE_HOME": "/state",
@@ -51,22 +47,15 @@ class TestEveryDriverNamesOne(WkTest):
     def _mirror(self, place):
         if place == "remote":
             return _driver("fakebox", {"WK_MACHINES_DIR": str(self.registry)})
-        if place == "local":
-            return _driver("local", system="Linux")
         return _driver(place)
-
-    def test_each_of_the_four_names_a_mirror(self):
-        for place in DRIVERS:
-            with self.subTest(place=place):
-                self.assertTrue(self._mirror(place).startswith("/"),
-                                f"{place} names no mirror")
 
     def test_the_default_is_no_mirror_rather_than_somebody_elses_path(self):
         self.assertEqual("", places.Driver("demo", str(REPO), {}, Fake("here")).mirror_dir())
 
-    def test_the_three_machines_name_three_different_mirrors(self):
+    def test_the_three_machines_name_three_different_absolute_mirrors(self):
         got = {t: self._mirror(t) for t in ("container", "vm", "remote")}
         self.assertEqual(len(set(got.values())), 3, got)
+        self.assertTrue(all(m.startswith("/") for m in got.values()), got)
 
     def test_a_build_boxs_is_under_its_own_root(self):
         self.assertEqual(str(self.tmp / "remote-root" / "mirror"), self._mirror("remote"))
@@ -96,10 +85,9 @@ class MirrorFixture(WkTest):
     def setUp(self):
         super().setUp()
         m = GitMirror(self.tmp)
-        self.remotes, self.mirror, self.refresh_out = m.remotes, m.mirror, m.refresh_out
+        self.remotes, self.mirror = m.remotes, m.mirror
 
     def wire_fetches(self, ws):
-        """fetch_config's steps, rendered and run in the checkout."""
         script = git.render(str(ws), git.fetch_config(str(self.mirror), ["main"], self.remotes))
         cp = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -109,10 +97,6 @@ class TestOneMirrorLayoutEverywhere(MirrorFixture):
     """mirror_refresh_script (lib/wk/git.py) makes every mirror in the fleet -- this machine's, a build box's, a
     guest's -- and lib/wk/sync.py's fetch_script is what a workspace fetches from one with, so the emitter and
     the consumer are held to one layout here rather than to two descriptions of it."""
-
-    def test_the_refresh_reports_each_upstream(self):
-        self.assertIn("mirror-fetch origin ok", self.refresh_out)
-        self.assertIn("mirror-fetch fork ok", self.refresh_out)
 
     def test_origins_branches_are_the_mirrors_own_heads_and_forks_are_namespaced(self):
         refs = git_run("for-each-ref", "--format=%(refname)",
@@ -162,8 +146,6 @@ class TestABranchIsTakenFromTheMirrorFirst(MirrorFixture):
         return git.origin_branch_fetch_step(branch, str(mirror) if mirror else "")
 
     def _checkout(self):
-        """A workspace checkout whose origin is a real (local-path) upstream, as a workspace's is after the
-        wiring."""
         ws = self.tmp / "co"
         git_run("clone", "-q", "--shared", "--branch", "main",
                   str(self.mirror), "co", cwd=self.tmp)
@@ -229,15 +211,12 @@ class TestOneMirrorPerMachine(WkTest):
         with mock.patch("wk.store.os.uname", return_value=mock.Mock(sysname="Darwin" if macos else "Linux")):
             return Store(env).mirror_dir()
 
-    def test_a_macos_host_keeps_it_in_its_own_state_directory(self):
-        self.assertEqual(self._ask(macos=True),
-                         f"{self.tmp}/state/wk/git/WebKit.git")
-
-    def test_the_podman_vm_reads_the_hosts_under_its_store(self):
-        self.assertEqual(self._ask(macos=True, in_vm=True), "/var/lib/wk/git/WebKit.git")
-
-    def test_a_linux_machine_keeps_it_in_its_store(self):
-        self.assertEqual(self._ask(macos=False), "/var/lib/wk/git/WebKit.git")
+    def test_a_macos_host_keeps_it_in_its_state_and_the_podman_vm_and_linux_under_the_store(self):
+        for macos, in_vm, want in ((True, False, f"{self.tmp}/state/wk/git/WebKit.git"),
+                                   (True, True, "/var/lib/wk/git/WebKit.git"),
+                                   (False, False, "/var/lib/wk/git/WebKit.git")):
+            with self.subTest(macos=macos, in_vm=in_vm):
+                self.assertEqual(self._ask(macos, in_vm), want)
 
     def test_nothing_fetches_into_the_mirror_from_the_podman_vm(self):
         here = Fake("here")

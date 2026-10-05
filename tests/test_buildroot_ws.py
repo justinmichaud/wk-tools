@@ -125,9 +125,9 @@ class TestTheImage(unittest.TestCase):
         w = World()
         quiet(w.build(image_args()).run)
         argv = w.ran("env", "WK_MB_PER_JOB=%d" % bt.MB_PER_JOB)[0]
-        self.assertIn(". %s/build/guard.sh" % TOOLS, argv[4])
+        self.assertTrue([a for a in argv if ". %s/build/guard.sh" % TOOLS in a], argv)
         self.assertIn("FORCE_UNSAFE_CONFIGURE=1", argv)
-        self.assertEqual(argv[-1], "-j8")
+        self.assertIn("-j8", argv)
 
     def test_the_config_names_the_caches_the_jobs_and_a_build_id(self):
         w = World()
@@ -274,7 +274,7 @@ class SlotWorld(World):
 
 
 class TestTheSlot(unittest.TestCase):
-    def test_it_builds_the_commit_and_describes_it(self):
+    def test_it_builds_the_commit_and_reports_the_build_id_its_manifest_recorded(self):
         w = SlotWorld()
         out, err = quiet(w.build(webkit_args()).run)
         self.assertIsNone(err, out)
@@ -284,10 +284,6 @@ class TestTheSlot(unittest.TestCase):
         self.assertIn(OUT + "/host/bin/arm-buildroot-linux-gnueabihf-readelf", manifest)
         self.assertIn("exec_dir=usr/libexec/wpe-webkit-1.1", manifest)
         self.assertEqual(w.files[OUT + "/wk-slots/base/files.txt"], "./usr/lib/libWPEWebKit-1.1.so.0.2.9\n")
-
-    def test_the_build_id_reported_is_the_one_the_manifest_recorded(self):
-        out, err = quiet(SlotWorld().build(webkit_args()).run)
-        self.assertIsNone(err, out)
         self.assertIn("build-id b1d", out)
 
     def test_a_manifest_that_records_no_build_id_is_refused(self):

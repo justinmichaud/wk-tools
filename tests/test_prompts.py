@@ -1,4 +1,4 @@
-"""Audit: "Prompts guard destructive actions only" (CLAUDE.md). Every"""
+"""Audit: "Prompts guard destructive actions only" (CLAUDE.md): one confirm(), no competing raw read."""
 
 import os
 import pty
@@ -84,7 +84,6 @@ class TestConfirmDefaultsToNoAndDeclinesWithoutATerminal(unittest.TestCase):
         "echo RC=$rc\n"
     )
 
-
     def test_declines_a_piped_yes_because_a_pipe_is_not_a_tty(self):
         cp = subprocess.run(
             ["bash", "-c", self.SCRIPT],
@@ -96,7 +95,6 @@ class TestConfirmDefaultsToNoAndDeclinesWithoutATerminal(unittest.TestCase):
             timeout=20,
         )
         self.assertIn("RC=1", cp.stdout, cp.stderr)
-
 
     def _confirm_over_a_real_tty(self, reply):
         master, slave = pty.openpty()
@@ -115,8 +113,7 @@ class TestConfirmDefaultsToNoAndDeclinesWithoutATerminal(unittest.TestCase):
             os.close(slave)
             slave = -1
             os.write(master, reply)
-            out, err = proc.communicate(timeout=20)
-            return out, err
+            return proc.communicate(timeout=20)
         finally:
             if slave != -1:
                 os.close(slave)

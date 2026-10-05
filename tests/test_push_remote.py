@@ -1,9 +1,6 @@
 """`unit push.remote_forwarding`: a build box holds no deploy key at rest and nothing forwards one to it, so a push is made
 from the workstation (`wk pr open`, which fetches the box's branch into this machine's mirror) and `wk key push status` on the
-box says off.
-
-Run: python3 tests/run.py -k tests.test_push_remote
-"""
+box says off."""
 import contextlib
 import io
 import re

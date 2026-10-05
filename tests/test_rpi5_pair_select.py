@@ -72,15 +72,12 @@ class TestTheHelperTakesAPair(unittest.TestCase):
             + f"\nv_autoboot {args}\n")
         return bash(script)
 
-    def test_pair_three_is_written(self):
-        cp = self._run("/dev/sdX 3")
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        self.assertIn("boot_partition=3", cp.stdout)
-
-    def test_pair_one_is_the_default(self):
-        cp = self._run("/dev/sdX")
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        self.assertIn("boot_partition=1", cp.stdout)
+    def test_pair_three_is_written_and_pair_one_is_the_default(self):
+        for args, pair in (("/dev/sdX 3", "3"), ("/dev/sdX", "1")):
+            with self.subTest(args=args):
+                cp = self._run(args)
+                self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+                self.assertIn("boot_partition=" + pair, cp.stdout)
 
     def test_any_other_pair_is_refused(self):
         for bad in ("2", "4", "0", "1;rm -rf /"):

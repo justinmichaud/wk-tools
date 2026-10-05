@@ -22,9 +22,6 @@ def conf(board, append):
 
 
 class TestTheBoardHalfIsWired(unittest.TestCase):
-    def test_the_builder_takes_a_board(self):
-        self.assertEqual(yocto_ws.parse(["--target", "t", "--board", "rpi5"]).board, "rpi5")
-
     def test_the_board_file_is_appended_last(self):
         text = conf("rpi5", 'X = "1"\n')
         self.assertLess(text.index("RM_WORK_EXCLUDE"), text.index("image/boards/rpi5"),

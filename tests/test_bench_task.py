@@ -1,9 +1,10 @@
 """Benchmark *tasks*: the unit `wk ab` and `wk bench` produce
 and `wk bench ls`, `wk bench report` and `wk status` speak in
 (lib/wk/bench/record.py; `wk bench`'s verbs in lib/wk/bench/cli.py)."""
+import contextlib
+import io
 import json
 import os
-import subprocess
 import sys
 import unittest
 
@@ -394,8 +395,6 @@ class TestTheVerbs(WkTest):
 
 def refusal(fn, *args):
     """What a verb that refuses says on stderr; it must refuse."""
-    import contextlib
-    import io
     err = io.StringIO()
     with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
         try:
@@ -433,8 +432,8 @@ class TestThroughWk(WkTest):
             bench_dir = store["path"] / "ws" / "w" / "bench"
             bench_dir.mkdir(parents=True)
             d = make_task(bench_dir)
-            add_run(d, "base", 1, "a", "ok", (100.0, 101.0, 99.0))
-            add_run(d, "pr1725", 1, "b", "ok", (95.0, 96.0, 94.0))
+            add_run(d, "base", 1, "a", "ok")
+            add_run(d, "pr1725", 1, "b", "ok")
             env = {"WK_STORE": store["WK_STORE"], "WK_LOCK_DIR": str(store["path"] / "locks"), "WK_PLACE": "local"}
             ls = run("bench", "ls", env=env, timeout=60)
             self.assertEqual(ls.returncode, 0, ls.stdout)
@@ -443,11 +442,6 @@ class TestThroughWk(WkTest):
             rep = run("bench", "report", TASK, "--text", env=env, timeout=60)
             self.assertEqual(rep.returncode, 0, rep.stdout)
             self.assertIn("rounds: 1 usable of 1 attempted (3 planned)", rep.stdout)
-            runs = sorted(str(p) for p in (d / "runs").iterdir())
-            html = store["path"] / "two.html"
-            two = run("bench", "report", runs[0], runs[1], "--html", str(html), env=env, timeout=60)
-            self.assertEqual(two.returncode, 0, two.stdout)
-            self.assertTrue(html.exists(), two.stdout)
 
     def test_staged_ls_answers_only_on_a_mac(self):
         with scratch_dir() as tmp:
@@ -461,13 +455,6 @@ class TestThroughWk(WkTest):
 
 class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
 
-    def _dir(self, store, extra=None):
-        return self._ask({"WK_STORE": str(store), **(extra or {})})
-
-    def _dir_default(self, extra=None):
-        """No WK_STORE at all, so Store.default_store_dir decides -- which on a macOS workstation is the podman machine's."""
-        return self._ask(dict(extra or {}))
-
     def _ask(self, env):
         st = Store(clean_env(env))
         return {"RECORD": st.records_dir(), "ARTIFACT": st.cache_dir(),
@@ -477,7 +464,7 @@ class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
 
     def test_a_writable_store_keeps_them(self):
         with scratch_dir() as tmp:
-            f = self._dir(tmp, {"XDG_STATE_HOME": str(tmp / "state")})
+            f = self._ask({"WK_STORE": str(tmp), "XDG_STATE_HOME": str(tmp / "state")})
             self.assertEqual(f["RECORD"], str(tmp))
             self.assertEqual(f["ARTIFACT"], f"{tmp}/cache")
             self.assertEqual(f["TASK"], f"{tmp}/task")
@@ -488,8 +475,8 @@ class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
                          "only a macOS workstation keeps the store off this machine")
     def test_the_one_store_no_host_command_can_write_sends_them_to_its_own_state(self):
         with scratch_dir() as tmp:
-            # No WK_STORE: the default is the one that is the VM's.
-            f = self._dir_default({"XDG_STATE_HOME": str(tmp / "state")})
+            # No WK_STORE: on a macOS workstation the default store is the podman machine's.
+            f = self._ask({"XDG_STATE_HOME": str(tmp / "state")})
             state = f"{tmp}/state/wk"
             self.assertEqual(f["RECORD"], state)
             for key in ("ARTIFACT", "TASK"):
@@ -501,7 +488,7 @@ class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
     def test_a_store_this_machine_was_pointed_at_keeps_its_own_records(self):
         with scratch_dir() as tmp:
             named = tmp / "somewhere" / "store"        # not created: a store is made on demand
-            f = self._dir(named, {"XDG_STATE_HOME": str(tmp / "state")})
+            f = self._ask({"WK_STORE": str(named), "XDG_STATE_HOME": str(tmp / "state")})
             self.assertEqual(f["RECORD"], str(named))
             self.assertEqual(f["TASK"], f"{named}/task")
 

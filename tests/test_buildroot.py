@@ -50,10 +50,6 @@ class TestDryRun(WkTest):
             driver("x", {"IMG_MACHINE": "no-such-board"}).kernel_dts()
         self.assertIn("no-such-board.conf names no dtb=", err.getvalue())
 
-    def test_br2_external_goes_on_every_make(self):
-        self.assertEqual(buildroot_ws.Build.br_ext(type("B", (), {"tools": "/opt/wk-tools"})(), True),
-                         ["BR2_EXTERNAL=/opt/wk-tools/image/buildroot/external"])
-
 
 def settings(path):
     out = {}

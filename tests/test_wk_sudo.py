@@ -1,11 +1,4 @@
-"""`wk key sudo`: lib/wk/sudo.py's Sudo (the status verdict read from `sudo -n -l`
-under sudoers' last-match rule, and the drop-in write with its before/after
-`visudo -c` validation and cleared-timestamp property test), cmd/key's argv for
-it and the --on/--all fan-out. Every sudo/visudo call is a Fake answer;
-nothing here runs a real one.
-
-Run: python3 tests/run.py -k tests.test_wk_sudo
-"""
+"""`wk key sudo` (lib/wk/sudo.py, cmd/key) against Fake sudo and visudo answers."""
 
 import os
 import sys
@@ -19,17 +12,10 @@ from tests.support import REPO, load_cmd
 sys.path.insert(0, str(REPO / "lib"))
 from wk import sudo  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import HAVE, Fake  # noqa: E402
+from wk.machine import HAVE, Fake, Result  # noqa: E402
 from wk.sudo import Sudo  # noqa: E402
 
-CMD_KEY = REPO / "cmd" / "key"
-
-
-def _load_cmd():
-    return load_cmd("key")
-
-
-cmd = _load_cmd()
+cmd = load_cmd("key")
 
 
 def key_sudo(argv, env=None, reg=None):
@@ -76,76 +62,35 @@ class TestArgv(unittest.TestCase):
 class TestVerdict(unittest.TestCase):
     """0 exactly when a password is required and the window is 30s or less."""
 
-    def test_a_password_required_with_our_window_passes(self):
-        f = _fake(free=False, listing="    timestamp_timeout=0.5\n\n" + LISTING_UNSET)
-        rc, msg = Sudo(f, {"WK_SUDO_TIMEOUT_MIN": "0.5"}).verdict()
-        self.assertEqual(rc, 0, msg)
-        self.assertIn("30 seconds", msg)
-
-    def test_a_password_required_with_a_longer_window_fails(self):
-        f = _fake(free=False, listing="    timestamp_timeout=15\n\n" + LISTING_UNSET)
-        rc, msg = Sudo(f, {"WK_SUDO_TIMEOUT_MIN": "0.5"}).verdict()
-        self.assertEqual(rc, 1)
-        self.assertIn("wanted 30 seconds", msg)
-
-    def test_zero_timeout_is_stricter_and_passes(self):
-        f = _fake(free=False, listing="    timestamp_timeout=0\n\n" + LISTING_UNSET)
-        rc, msg = Sudo(f, {"WK_SUDO_TIMEOUT_MIN": "0.5"}).verdict()
-        self.assertEqual(rc, 0)
-        self.assertIn("stricter", msg)
-
-    def test_a_never_expiring_timestamp_fails(self):
-        f = _fake(free=False, listing="    timestamp_timeout=-1\n\n" + LISTING_UNSET)
-        self.assertEqual(Sudo(f, {"WK_SUDO_TIMEOUT_MIN": "0.5"}).verdict()[0], 1)
-
-    def test_unset_timeout_fails(self):
-        f = _fake(free=False, listing=LISTING_UNSET)
-        rc, msg = Sudo(f, {}).verdict()
-        self.assertEqual(rc, 1)
-        self.assertIn("sudo's default", msg)
-
-    def test_nopasswd_last_match_wins_over_an_earlier_plain_all(self):
-        """sudoers' last-match rule: an earlier untagged ALL is overridden by
-        a later blanket NOPASSWD, so the verdict reads the drop-in has not
-        taken (root costs nothing), not merely a cached timestamp."""
-        listing = ("User justinmichaud may run the following commands on tolken:\n"
-                   "    (ALL : ALL) ALL\n"
-                   "    (root) NOPASSWD: ALL\n")
-        f = _fake(free=True, listing=listing)
-        rc, msg = Sudo(f, {}).verdict()
-        self.assertEqual(rc, 1)
-        self.assertIn("NOPASSWD: ALL is granted", msg)
-
-    def test_a_scoped_nopasswd_does_not_count_as_blanket(self):
-        """A NOPASSWD grant naming one program is a deliberate exception, not
-        the blanket the last-match check looks for."""
-        listing = ("User justinmichaud may run the following commands on tolken:\n"
-                   "    (root) NOPASSWD: /usr/local/libexec/wk-quiesce-priv\n"
-                   "    (ALL : ALL) ALL\n")
-        f = _fake(free=True, listing=listing)
-        rc, msg = Sudo(f, {}).verdict()
-        self.assertEqual(rc, 1)
-        self.assertIn("a timestamp is cached", msg)
-
-    def test_unreadable_with_the_dropin_installed_passes(self):
-        f = _fake(free=False, rc_l=1)
-        s = Sudo(f, {})
-        f.files[s.dropin()] = "..."
-        rc, msg = s.verdict()
-        self.assertEqual(rc, 0)
-        self.assertIn("is installed", msg)
-
-    def test_unreadable_without_the_dropin_fails(self):
-        f = _fake(free=False, rc_l=1)
-        rc, msg = Sudo(f, {}).verdict()
-        self.assertEqual(rc, 1)
-        self.assertIn("sudo's default", msg)
+    def test_each_listing_s_verdict(self):
+        half = {"WK_SUDO_TIMEOUT_MIN": "0.5"}
+        timeout = lambda t: "    timestamp_timeout=%s\n\n" % t + LISTING_UNSET  # noqa: E731
+        head = "User justinmichaud may run the following commands on tolken:\n"
+        # sudoers' last match wins: a later blanket NOPASSWD overrides an earlier ALL; one naming a program is no blanket.
+        for name, free, listing, rc_l, dropin, env, want, msg in (
+                ("our window", False, timeout("0.5"), 0, False, half, 0, "30 seconds"),
+                ("longer window", False, timeout("15"), 0, False, half, 1, "wanted 30 seconds"),
+                ("zero", False, timeout("0"), 0, False, half, 0, "stricter"),
+                ("never expires", False, timeout("-1"), 0, False, half, 1, ""),
+                ("unset", False, LISTING_UNSET, 0, False, {}, 1, "sudo's default"),
+                ("blanket last", True, head + "    (ALL : ALL) ALL\n    (root) NOPASSWD: ALL\n", 0, False, {}, 1,
+                 "NOPASSWD: ALL is granted"),
+                ("scoped", True, head + "    (root) NOPASSWD: /usr/local/libexec/wk-quiesce-priv\n    (ALL : ALL) ALL\n",
+                 0, False, {}, 1, "a timestamp is cached"),
+                ("unreadable, drop-in", False, LISTING_UNSET, 1, True, {}, 0, "is installed"),
+                ("unreadable, none", False, LISTING_UNSET, 1, False, {}, 1, "sudo's default")):
+            with self.subTest(name):
+                f = _fake(free=free, listing=listing, rc_l=rc_l)
+                s = Sudo(f, env)
+                if dropin:
+                    f.files[s.dropin()] = "..."
+                rc, got = s.verdict()
+                self.assertEqual(rc, want, got)
+                self.assertIn(msg, got)
 
 
 def _setup_fake(free_before=True, install_ok=True, post_check_ok=True, property_holds=True):
-    """A machine on which verdict() fails at first (nopasswd granted), and
-    every command Sudo.setup() runs in order answers -- the last `sudo -n
-    true`, asked after `sudo -k`, is the property test."""
+    """Every command Sudo.setup() runs answers; the last `sudo -n true`, asked after `sudo -k`, is the property test."""
     f = Fake("here")
     f.answer(["id", "-un"], 0, "justinmichaud\n")
     f.answer(["hostname", "-s"], 0, "tolken\n")
@@ -157,7 +102,6 @@ def _setup_fake(free_before=True, install_ok=True, post_check_ok=True, property_
     calls = {"n": 0}
 
     def sudo_true(argv, fake):
-        from wk.machine import Result
         calls["n"] += 1
         if calls["n"] == 1:
             return Result(0 if free_before else 1)
@@ -216,10 +160,6 @@ class TestSetup(unittest.TestCase):
 
 
 class TestSetupConvergesAndDryRun(unittest.TestCase):
-    """setup() is idempotent: verdict() fails the same way on a fresh or a
-    partially-applied machine, so re-running the whole flow after a kill at
-    any point converges on the same result -- there is no partial resume to get wrong."""
-
     class World:
         def __init__(self):
             self.fake = _setup_fake(free_before=False, property_holds=True)
@@ -285,8 +225,6 @@ class TestPlaceAndAll(unittest.TestCase):
         self.assertEqual(rc, 0)
 
     def test_all_setup_never_sets_up_the_local_machine(self):
-        """`--all` always reports the local machine's own status, whatever the action -- only
-        'wk key sudo setup' bare or --on actually sets a machine up."""
         local = _fake(free=False, listing="    timestamp_timeout=0.5\n\n" + LISTING_UNSET)
         box = Fake("box")
         box.answer(["sh", "-c"])

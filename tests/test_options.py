@@ -3,7 +3,6 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 from tests.support import REPO, WkTest, run, temp_store
 
@@ -68,10 +67,7 @@ class TestLsJson(WkTest):
                            env={"WK_STORE": store["WK_STORE"], "WK_PLACE": "container"})
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(len(cp.stdout.strip().splitlines()), 1, cp.stdout)
-        doc = json.loads(cp.stdout)
-        self.assertIsInstance(doc, dict)
-        self.assertIsInstance(doc["workspaces"], list)
-        for row in doc["workspaces"]:
+        for row in json.loads(cp.stdout)["workspaces"]:
             self.assertEqual(
                 set(row.keys()),
                 {"name", "place", "state", "base", "snap", "arch", "changes"},

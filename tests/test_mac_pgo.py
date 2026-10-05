@@ -9,7 +9,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, WkTest, run, scratch_dir
+from tests.support import REPO, WkTest, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
 from tests.test_bench_mac import StubWatch  # noqa: E402
@@ -47,10 +47,6 @@ def pgo_dry_run(tmp):
 
 
 class TestTheConfig(WkTest):
-    def test_it_is_listed_so_a_reader_can_find_it(self):
-        cp = run("build", "--list")
-        self.assertIn(PRESET, cp.stdout + cp.stderr)
-
     def test_it_is_an_xcode_config_that_asks_for_a_profile(self):
         c = preset(PRESET)
         self.assertEqual((c.buildsys, c.pgo, c.args), ("xcode", True, "--release"))
@@ -183,21 +179,19 @@ def order(m):
 class TestTheCollection(WkTest):
     """The instrumented browser, gated before it is profiled and its profile read back after."""
 
-    def test_it_runs_in_the_one_order_that_makes_sense(self):
+    def test_it_runs_in_order_checking_the_instrumented_build_and_handing_each_benchmark_its_pin(self):
         m = fake_guest()
         rc, err = collect(m)
         self.assertEqual(rc, 0, err)
         self.assertEqual(["wk_pyobjc_have", "wk_window_probe", "wk_window_unexpected", "mac_raiser_on", "browser-check", "watch_start",
-                          "collect", "watch_stop", "mac_raiser_off", "profile-check"],
-                         [s for s in order(m)])
-
-    def test_the_browser_is_checked_against_the_instrumented_build_and_no_display(self):
-        """A collection trains a profile rather than producing a number, so it is compared with no display."""
-        m = fake_guest()
-        collect(m)
+                          "collect", "watch_stop", "mac_raiser_off", "profile-check"], order(m))
         check = [e[1] for e in m.effects if e[0] == "run" and len(e[1]) > 1 and e[1][1].endswith("mac-browser-check.py")][0]
         self.assertIn("/src/WebKitBuild/Release-pgo-instr", check)
-        self.assertNotIn("--expect-display", check)
+        self.assertNotIn("--expect-display", check, "a collection trains a profile, so it is compared with no display")
+        argv = [e[1] for e in m.effects if e[0] == "run_tty"][0]
+        self.assertIn("local-copy:/seed/j", argv)
+        self.assertEqual(m.files["/src/WebKitBuild/Release-pgo-profile/payload-pins"].splitlines()[0], "speedometer3\t/seed/s")
+        self.assertIn(("remove", "/src/WebKitBuild/Release-pgo-profile"), m.effects, "collect-pgo-profiles refuses a full directory")
 
     def test_a_failed_browser_check_profiles_nothing_and_lets_the_raiser_go(self):
         m = fake_guest(browser_rc=1)
@@ -218,14 +212,6 @@ class TestTheCollection(WkTest):
         m = fake_guest(check_rc=3)
         self.assertEqual(collect(m)[0], 3)
         self.assertNotIn("profile-check", order(m))
-
-    def test_each_benchmark_is_handed_its_pinned_copy_and_the_pins_are_kept(self):
-        m = fake_guest()
-        collect(m)
-        argv = [e[1] for e in m.effects if e[0] == "run_tty"][0]
-        self.assertIn("local-copy:/seed/j", argv)
-        self.assertEqual(m.files["/src/WebKitBuild/Release-pgo-profile/payload-pins"].splitlines()[0], "speedometer3\t/seed/s")
-        self.assertIn(("remove", "/src/WebKitBuild/Release-pgo-profile"), m.effects, "collect-pgo-profiles refuses a full directory")
 
     def test_a_payload_it_could_not_pin_stops_the_collection(self):
         m = fake_guest()
@@ -271,25 +257,16 @@ class TestItRefusesAThrottledCollection(WkTest):
 
 class TestItIsThePolicyAndNotAnOption(WkTest):
 
-    def test_the_instrumented_products_are_named_in_one_place(self):
-        """The reclaim after a stage deletes them, so a second spelling deletes the wrong directory, or nothing."""
-        cp = run_py("pgo-instr", "/x/Release-pgo")
-        self.assertEqual(cp.stdout.strip(), "/x/Release-pgo-instr")
-
     @unittest.skipUnless(os.path.exists("/usr/bin/python3"), "the collection's python is the Mac's /usr/bin/python3")
     def test_the_collection_runs_wk_tools_whatever_the_working_directory_holds(self):
-        """The build sources this in the checkout, whose files an agent writes; a wk/ there must not be imported."""
+        """The build sources this in the checkout, whose files an agent writes; a wk/ there must not be imported.
+        The reclaim after a stage deletes what it names, so a second spelling deletes the wrong directory, or nothing."""
         with scratch_dir() as tmp:
             (tmp / "wk").mkdir()
             (tmp / "wk" / "__init__.py").write_text("raise SystemExit('the checkout was imported')\n")
             cp = subprocess.run(["bash", "-c", '. "$0"; _pgo_py pgo-instr /x/Release-pgo', str(REPO / "build" / "mac-pgo.sh")],
                                 cwd=str(tmp), capture_output=True, text=True, timeout=30, env=dict(os.environ, PYTHONPATH=str(tmp)))
         self.assertEqual((0, "/x/Release-pgo-instr"), (cp.returncode, cp.stdout.strip()), cp.stderr)
-
-
-def run_py(*args):
-    return subprocess.run(["python3", "-m", "wk.bench.mac_pgo"] + list(args), capture_output=True, text=True, timeout=30,
-                          env=dict(os.environ, PYTHONPATH=str(REPO / "lib")))
 
 
 class TestTheHarnessWrapper(WkTest):

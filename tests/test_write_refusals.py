@@ -1,8 +1,6 @@
 """`unit sysimage.write_refusals`: a write refuses by name before anything is erased (lib/wk/sysimage/disk.py). Two
 unmarked disks of one transport are listed rather than picked; a missing or out-ranked card helper names the remedy;
-the disk the machine runs from is refused in the helper's own words, with the disks there listed.
-
-"""
+the disk the machine runs from is refused in the helper's own words, with the disks there listed."""
 import unittest
 
 from tests.test_disk_logic import BOOTED_REFUSAL, Writer, disks, quietly

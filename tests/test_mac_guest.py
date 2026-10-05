@@ -32,24 +32,18 @@ class TestTheRehearsalIsNotAMeasurement(unittest.TestCase):
 class TestArming(unittest.TestCase):
     """Arming a guest is starting it, and what makes it a benchmark install is its marker."""
 
-    def test_no_guest_names_the_commands_that_make_one(self):
-        fake, d = guest(st="absent")
-        got, err = quiet(d.arm)
-        self.assertIs(got, act.Refused)
-        self.assertIn("wk new wk-bench --on vm", err)
-        self.assertEqual(fake.effects, [])
-
-    def test_a_stopped_guest_is_started(self):
+    def test_a_stopped_guest_is_started_and_an_absent_or_unmarked_one_is_refused(self):
         fake, d = guest()
         self.assertEqual(quiet(d.arm)[0], 0)
         self.assertEqual(fake.effects, [("start",)])
-
-    def test_a_running_guest_with_no_marker_is_a_workstation_guest(self):
-        fake, d = guest(st="running", marked=False)
-        got, err = quiet(d.arm)
-        self.assertIs(got, act.Refused)
-        self.assertIn("carries no /etc/wk-image", err)
-        self.assertEqual(fake.effects, [])
+        for state, says in (({"st": "absent"}, "wk new wk-bench --on vm"),
+                            ({"st": "running", "marked": False}, "carries no /etc/wk-image")):
+            with self.subTest(says):
+                fake, d = guest(**state)
+                got, err = quiet(d.arm)
+                self.assertIs(got, act.Refused)
+                self.assertIn(says, err)
+                self.assertEqual(fake.effects, [])
 
     def test_leaving_the_role_is_stopping_the_guest(self):
         fake, d = guest(st="running")

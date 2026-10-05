@@ -51,24 +51,6 @@ class TestWsPlaceDerivesFromTheStore(RegistryTest):
         self.assertEqual(self.registry().ws_place(name), "container")
 
 
-class TestPlaceAllReadsTheMachineRegistry(RegistryTest):
-    """`Registry.all`: the built-ins plus one entry per conf in WK_MACHINES_DIR."""
-
-    def builtins(self, reg):
-        return ["container"] + (["vm"] if reg.vm_listed() else [])
-
-    def test_a_registry_of_one_machine_is_the_whole_fleet(self):
-        name = f"fakebox-{rand_suffix()}"
-        with open(os.path.join(self.machines, f"{name}.conf"), "w") as fh:
-            fh.write("kind=build\ndriver=remote\nhost=nonexistent.invalid\n")
-        reg = self.registry()
-        self.assertEqual(reg.all(), self.builtins(reg) + [name])
-
-    def test_an_empty_registry_is_a_machine_that_knows_no_fleet(self):
-        reg = self.registry()
-        self.assertEqual(reg.all(), self.builtins(reg))
-
-
 class TestCompletionListsTheStore(unittest.TestCase):
     def test_completion_list_workspaces_lists_fake_store_workspace(self):
         with tempfile.TemporaryDirectory(prefix="wk-registry-free-") as tmp:

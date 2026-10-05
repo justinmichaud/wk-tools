@@ -6,13 +6,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from tests.support import (
-    REPO, WkTest, fake_workspace, run, stub_path,
-)
+from tests.support import REPO, WkTest, fake_workspace, run, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places  # noqa: E402
+from wk.act import Refused  # noqa: E402
+from wk.store import Store  # noqa: E402
 from wk.machine import Fake, Local  # noqa: E402
 
 def _tart(kind="absent"):
@@ -52,8 +53,7 @@ class TestUsage(WkTest):
                 self.assertIn(why, cp.stdout)
 
 
-class TestTheBytesArrive(WkTest):
-
+class ScpTest(WkTest):
     def setUp(self):
         super().setUp()
         self._cm = fake_workspace()
@@ -66,6 +66,8 @@ class TestTheBytesArrive(WkTest):
     def scp(self, *args):
         return self.ws.run("scp", *args)
 
+
+class TestTheBytesArrive(ScpTest):
     def _tree(self, root):
         (root / "sub").mkdir(parents=True)
         (root / "a").write_bytes(b"a\n")
@@ -121,22 +123,12 @@ class TestTheBytesArrive(WkTest):
         self.assertEqual((drop / "bin.dat").read_bytes(), b"x")
 
 
-class TestRefusals(WkTest):
-
+class TestRefusals(ScpTest):
     def setUp(self):
         super().setUp()
-        self._cm = fake_workspace()
-        self.ws = self._cm.__enter__()
-        self.addCleanup(self._cm.__exit__, None, None, None)
-        self.src = self.ws.ws_dir / "WebKit"
-        self.here = self.tmp / "here"
-        self.here.mkdir()
         (self.src / "tree").mkdir()
         (self.src / "tree" / "a").write_bytes(b"a\n")
         (self.src / "file.txt").write_bytes(b"f\n")
-
-    def scp(self, *args):
-        return self.ws.run("scp", *args)
 
     def test_a_directory_needs_r(self):
         cp = self.scp(":tree", str(self.here / "tree"))
@@ -311,8 +303,6 @@ class TestVmCopy(DriverCopyTest):
         (self.tmp / "bin" / "tart").write_text("")
         (self.tmp / "bin" / "tart").chmod(0o755)
         self.env["PATH"] = str(self.tmp / "bin")
-        from unittest import mock
-        from wk.store import Store
         p = mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True)
         p.start()
         self.addCleanup(p.stop)
@@ -336,7 +326,6 @@ class TestVmCopy(DriverCopyTest):
         self.assertEqual(self.t.path_kind("demo", "/Users/admin/WebKit/a.txt"), "file")
 
     def test_a_guest_that_is_not_running_dies_naming_start(self):
-        from wk.act import Refused
         with self.assertRaises(Refused):
             self.t.pull("gone", "/x", "/y")
 

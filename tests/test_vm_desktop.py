@@ -144,7 +144,6 @@ UPDATE_ON = (SETTLED
                       "setupassistant_seen_product=26.3"))
 
 
-
 def desktop(probe):
     return guest.Desktop(str(REPO), BenchHere(), probe)
 
@@ -220,10 +219,6 @@ class TestTheFindings(unittest.TestCase):
 class TestWhatIsInFrontOfTheDesktop(unittest.TestCase):
     def test_a_settled_guest_has_nothing_in_front(self):
         self.assertEqual([], desktop(SETTLED).blockers())
-
-    def test_a_pane_and_an_empty_login_window_each_block(self):
-        self.assertTrue([b for b in desktop(AS_FOUND).blockers() if "Setup Assistant:0:800x600" in b])
-        self.assertTrue([b for b in desktop(LOGIN_WINDOW).blockers() if "nobody is logged in" in b])
 
     def test_the_wrong_pyobjc_does_not_block(self):
         self.assertEqual([], desktop(SETTLED.replace("pyobjc=" + PYOBJC_VERSION, "pyobjc=9.0")).blockers())

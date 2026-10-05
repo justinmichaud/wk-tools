@@ -22,9 +22,6 @@ from wk import act, places, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
-
-
-
 AI = load_cmd("ai")
 WK = os.path.join(AI.ROOT, "wk")
 
@@ -345,18 +342,23 @@ class TestWhatIsWkTheAgentNever(_Flow):
         self.assertIn("invalid name '-x'", self.ai("claude")[1])
 
 
-class TestABuildBox(_Flow):
-    """No sandbox at all: a barrier, the switch thrown on its own store, and a gh login there a refusal."""
+class _Box(_Flow):
+    push_status = 1
 
     def setUp(self):
         self.setUpFlow()
         self.fake = Fake()
-        self.fake.answer([WK, "key", "push"], rc=1)
+        self.fake.answer([WK, "key", "push", "status"], rc=self.push_status)
+        self.fake.answer([WK, "key", "push"])
         self.env = {"WK_NAME": "demo", "WK_PLACE": "box"}
         self.driver = SimDriver(self.fake, self.env, kind="remote", name="box")
         self.driver.answers["find claude"] = Result(0, "/home/u/.local/bin/claude\r\n")
         self.driver.answers["gh auth status"] = Result(1)
         self.reg = sim_registry(self.env, self.fake, self.driver)
+
+
+class TestABuildBox(_Box):
+    """No sandbox at all: a barrier, the switch thrown on its own store, and a gh login there a refusal."""
 
     def test_it_is_a_barrier(self):
         status, err = self.ai("claude")
@@ -404,21 +406,15 @@ class TestABuildBox(_Flow):
         self.assertFalse([a for a in self.driver.asked if "install.sh" in a and "find" not in a])
 
 
-class TestTheSessionIsAnEffect(_Flow):
+class TestTheSessionIsAnEffect(_Box):
     """The session starts through the Machine, so --dry-run prints it with the switch it would make."""
 
+    push_status = 0
+
     def setUp(self):
-        self.setUpFlow()
+        super().setUp()
         self.fg.stop()
-        self.fake = Fake()
-        self.fake.answer([WK, "key", "push", "status"], rc=0)
-        self.fake.answer([WK, "key", "push"])
         self.fake.answer(["exec"])
-        self.env = {"WK_NAME": "demo", "WK_PLACE": "box"}
-        self.driver = SimDriver(self.fake, self.env, kind="remote", name="box")
-        self.driver.answers["find claude"] = Result(0, "/home/u/.local/bin/claude\n")
-        self.driver.answers["gh auth status"] = Result(1)
-        self.reg = sim_registry(self.env, self.fake, self.driver)
 
     def sessions(self):
         return [e for e in self.fake.effects if e[0] == "run_tty"]

@@ -35,16 +35,12 @@ def refused(fn, *args):
 
 
 class TestTheStoppingRule(WkTest):
-    def test_a_board_runs_its_rounds_exactly_unless_told_a_precision(self):
-        self.assertEqual(board_ab.stopping({}, 5), (5, 0.0))
-
-    def test_a_precision_asked_for_goes_on_up_to_the_ceiling(self):
-        self.assertEqual(board_ab.stopping({"detect": "0.3"}, 5), (board_ab.MAX_ROUNDS, 0.3))
-        self.assertEqual(board_ab.stopping({"detect": "0.3", "max_rounds": "12"}, 5), (12, 0.3))
-
-    def test_a_mac_resolves_a_third_of_a_per_cent_by_default_and_0_turns_it_off(self):
-        self.assertEqual(board_ab.stopping({}, 5, mac_ab.DETECT), (board_ab.MAX_ROUNDS, 0.3))
-        self.assertEqual(board_ab.stopping({"detect": "0.0"}, 5, mac_ab.DETECT), (5, 0.0))
+    def test_rounds_are_exact_unless_a_precision_is_asked_for_and_then_go_on_to_the_ceiling(self):
+        for o, default, want in (({}, "0", (5, 0.0)), ({"detect": "0.3"}, "0", (board_ab.MAX_ROUNDS, 0.3)),
+                                 ({"detect": "0.3", "max_rounds": "12"}, "0", (12, 0.3)),
+                                 ({}, mac_ab.DETECT, (board_ab.MAX_ROUNDS, 0.3)), ({"detect": "0.0"}, mac_ab.DETECT, (5, 0.0))):
+            with self.subTest(o=o, default=default):
+                self.assertEqual(board_ab.stopping(o, 5, default), want)
 
     def test_a_ceiling_below_the_floor_and_a_non_percentage_are_refused(self):
         self.assertIn("below --rounds", refused(board_ab.stopping, {"detect": "0.3", "max_rounds": "4"}, 9))
@@ -177,15 +173,12 @@ class TestTheSummary(WkTest):
             written = {p.name: p.read_text() for p in root.iterdir() if p.is_file()}
             return rc, buf.getvalue(), written
 
-    def test_each_plan_reports_its_precision_and_the_comparison(self):
+    def test_each_plan_reports_its_precision_and_the_comparison_without_the_warmup(self):
         rc, text, _ = self.summary(ab_legs(QUIET, QUIET[::-1]))
         self.assertEqual(rc, 0)
         self.assertIn("================ speedometer3 ================", text)
         self.assertIn("    met=yes", text)
         self.assertIn("comparing arm A against arm B", text)
-
-    def test_the_warmup_round_is_left_out(self):
-        _, text, _ = self.summary(ab_legs(QUIET, QUIET[::-1]))
         self.assertIn("arm A: 6 run(s)", text)
         self.assertIn("    n_a=6", text)
 
@@ -260,18 +253,14 @@ class TestTheCollectRecordsOntoTheTask(WkTest):
         recorded = {d: record.load(os.path.join(runs, d, "env.json")) for d in sorted(os.listdir(runs)) if os.path.isdir(os.path.join(runs, d))}
         return rc, recorded, err, out.getvalue()
 
-    def test_each_clean_leg_lands_as_a_run_paired_with_its_round_and_arm(self):
+    def test_each_clean_leg_lands_as_a_run_paired_with_its_round_and_arm_beside_the_warmup_captures(self):
         with planted(ab_legs(QUIET[:2], QUIET[:2])) as m:
             rc, recorded, err, _ = self.collect(m)
+            self.assertEqual(os.listdir(os.path.join(m.taskdir, "warmup")), ["speedometer3-A.json.gz"], err)
         self.assertEqual(rc, 0, err)
         self.assertEqual(sorted(recorded), ["a1", "a2", "b1", "b2"])
         self.assertEqual(recorded["a1"]["ab"], {"round": "1", "arm": "a", "staged": "sid-a"})
         self.assertEqual((recorded["b2"]["machine"], recorded["b2"]["plan"]), ("mbp", "speedometer3"))
-
-    def test_the_warmup_rounds_captures_land_on_the_task(self):
-        with planted(ab_legs(QUIET[:2], QUIET[:2])) as m:
-            _, _, err, _ = self.collect(m)
-            self.assertEqual(os.listdir(os.path.join(m.taskdir, "warmup")), ["speedometer3-A.json.gz"], err)
 
     def test_the_warmup_round_and_a_contaminated_leg_are_not_recorded(self):
         legs = ab_legs(QUIET[:2], QUIET[:2])
@@ -383,7 +372,6 @@ class TestTheReadingsAreOneAtATime(WkTest):
             reg = places.Registry(REPO, env={"WK_STORE": store["WK_STORE"], "HOME": "/nonexistent"}, machine=Fake())
             err = refused(ab.run, REPO, reg, FakeClock(), "", {"devices": "rpi5", "systems": "a,b", "status": True})
         self.assertIn("--status is a Mac A/B's", err)
-
 
 
 class TestTheLiveRows(unittest.TestCase):

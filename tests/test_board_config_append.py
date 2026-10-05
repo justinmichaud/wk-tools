@@ -16,12 +16,10 @@ CONFIGS = sorted((REPO / "image" / "configs").glob("*.conf"))
 
 
 def resolved_append(profile):
-    """What the write appends to the card's config.txt for that configuration."""
     return write.config_add(REPO, images.load(profile))
 
 
 def resolved_cmdline(profile):
-    """What the write appends to the card's kernel command line for that configuration."""
     return write.cmdline_add(REPO, images.load(profile))
 
 
@@ -65,12 +63,9 @@ class TestTheSplitIsKept(unittest.TestCase):
         self.assertIn("panic=10", out)
         self.assertIn("rootwait=30", out)
 
-    def test_a_board_with_nothing_to_say_appends_no_command_line(self):
-        self.assertEqual("", resolved_cmdline("webkit-2.52-yocto-rpi4-64").strip())
-
     def test_a_board_with_nothing_to_say_appends_nothing(self):
-        out = resolved_append("webkit-2.52-yocto-rpi3-32")
-        self.assertEqual("", out.strip(), out)
+        self.assertEqual("", resolved_cmdline("webkit-2.52-yocto-rpi4-64").strip())
+        self.assertEqual("", resolved_append("webkit-2.52-yocto-rpi3-32").strip())
 
     def test_every_board_directory_belongs_to_a_real_machine(self):
         for d in sorted(BOARDS.glob("*")):

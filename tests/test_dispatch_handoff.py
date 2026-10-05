@@ -1,4 +1,4 @@
-"""What the dispatcher hands the command it runs: the place the name"""
+"""What the dispatcher hands the command it runs: the place the name resolved to."""
 import os
 import subprocess
 import sys
@@ -6,6 +6,10 @@ import unittest
 
 from tests.support import REPO, WkTest, stub_path
 from tests.test_dispatch_speed import _LOCAL_CONF, _MACHINE_CONF, _WITNESS_SSH
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import places  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
 _PROBE = '''#!/usr/bin/env python3
 #
@@ -102,7 +106,6 @@ class TestTheResolvedPlaceIsHandedOn(WkTest):
         self.assertEqual(f.get("WK_NAME"), "handoff-ws", cp.stdout)
         self.assertEqual(f.get("WK_PLACE"), "fakelocal", cp.stdout)
 
-
     def test_an_explicit_target_is_what_the_command_gets(self):
         cp, f = self._probe("probe", "handoff-ws", "--on", "fakelocal")
         self.assertEqual(cp.returncode, 0, cp.stdout)
@@ -112,9 +115,6 @@ class TestTheResolvedPlaceIsHandedOn(WkTest):
 class TestWhatIsNotToldThePlace(unittest.TestCase):
 
     def test_the_forwarded_environment_carries_no_place(self):
-        sys.path.insert(0, str(REPO / "lib"))
-        from wk import places
-        from wk.machine import Fake
         env = {"WK_PLACE": "box", "WK_STORE": "/here", "WK_ROW_LABEL": "host", "WK_YES": "1"}
         remote = {"WK_REMOTE_LOCAL": "1", "WK_REMOTE_TOOLS": "/opt/wk-tools"}
         for t in (places.Container("container", str(REPO), {}, Fake()), places.Remote("box", str(REPO), remote, Fake())):
@@ -124,9 +124,6 @@ class TestWhatIsNotToldThePlace(unittest.TestCase):
                 self.assertNotIn("WK_STORE", line, "the far side's store is its own")
 
     def test_the_sdk_image_override_is_carried_to_the_far_side(self):
-        sys.path.insert(0, str(REPO / "lib"))
-        from wk import places
-        from wk.machine import Fake
         remote = {"WK_REMOTE_LOCAL": "1", "WK_REMOTE_TOOLS": "/opt/wk-tools"}
         line = places.Remote("box", str(REPO), remote, Fake()).wk_cmd(["new", "x"], {"WK_SDK_IMAGE": "ghcr.io/igalia/wkdev-sdk:2.55-v1-abc"})
         self.assertIn("WK_SDK_IMAGE=ghcr.io/igalia/wkdev-sdk:2.55-v1-abc ", line)

@@ -7,7 +7,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -81,7 +80,7 @@ class TwoClonesCase(unittest.TestCase):
         with mock.patch.dict(os.environ, {"WK_ROOT": ""}), contextlib.redirect_stderr(io.StringIO()) as err:
             os.environ.pop("WK_ROOT")
             ok = t.sync()
-        return types.SimpleNamespace(returncode=0 if ok else 1, stdout="", stderr=err.getvalue())
+        return ok, err.getvalue()
 
 
 class TestMachineLocalFilesDoNotDiffer(TwoClonesCase):
@@ -92,6 +91,7 @@ class TestMachineLocalFilesDoNotDiffer(TwoClonesCase):
         (self.a / "__pycache__").mkdir()
         (self.a / "__pycache__" / "x.pyc").write_bytes(b"\x00\x01")
         (self.a / "local.conf").write_text("machine-local\n")
+        (self.a / "new.sh").write_text("untracked, not ignored\n")
 
     def test_cmd_version_agrees_on_sha_and_dirty(self):
         va, vb = version(self.a), version(self.b)
@@ -101,8 +101,8 @@ class TestMachineLocalFilesDoNotDiffer(TwoClonesCase):
         self.assertEqual(vb["dirty"], "no", vb)
 
     def test_the_peer_branch_reports_in_sync(self):
-        cp = self._peer_sync(self.a, self.b)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        ok, err = self._peer_sync(self.a, self.b)
+        self.assertTrue(ok, err)
 
 
 class TestATrackedModificationDiffers(TwoClonesCase):
@@ -114,17 +114,9 @@ class TestATrackedModificationDiffers(TwoClonesCase):
 
     def test_the_peer_branch_reports_differs_and_fails(self):
         (self.b / "f").write_text("two\n")
-        cp = self._peer_sync(self.a, self.b)
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("+dirty", cp.stderr)
-
-
-class TestUntrackedNonIgnoredFileIsNotDirty(TwoClonesCase):
-
-    def test_cmd_version_reports_clean(self):
-        (self.a / "new.sh").write_text("not added yet\n")
-        va = version(self.a)
-        self.assertEqual(va["dirty"], "no", va)
+        ok, err = self._peer_sync(self.a, self.b)
+        self.assertFalse(ok)
+        self.assertIn("+dirty", err)
 
 
 if __name__ == "__main__":

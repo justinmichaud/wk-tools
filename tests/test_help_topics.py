@@ -1,9 +1,10 @@
-"""`wk help` prints README.md, the one document; `wk help <topic>` prints the"""
-TIER = "lint"
+"""`wk help` prints README.md, the one document; `wk help <topic>` prints the section that topic names."""
 import re
 import unittest
 
 from tests.support import REPO, run
+
+TIER = "lint"
 
 
 class TestHelpTopics(unittest.TestCase):
@@ -19,7 +20,6 @@ class TestHelpTopics(unittest.TestCase):
         self.assertNotIn("## Architecture", cp.stdout)
         self.assertNotIn("## Where the rest is", cp.stdout)
 
-
     def test_an_unknown_topic_lists_the_topics(self):
         cp = run("help", "nosuchtopic")
         self.assertNotEqual(cp.returncode, 0)
@@ -33,7 +33,6 @@ class TestHelpTopics(unittest.TestCase):
 
 
 class TestHardwareSection(unittest.TestCase):
-
     def test_names_every_fleet_device_and_its_driver(self):
         out = run("help", "hardware").stdout
         self.assertTrue(out.startswith("## Hardware"), out[:200])

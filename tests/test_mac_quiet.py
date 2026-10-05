@@ -10,15 +10,13 @@ import subprocess
 import tempfile
 import threading
 import unittest
-from pathlib import Path
 
-from tests.support import bash
-from wk import screen
+from tests.support import REPO, WkTest, bash
+from wk import reach, screen
 from wk.clock import FakeClock
 from wk.machine import Fake, Result, lib_argv
 from wk.quiet import Quiesce
 
-REPO = Path(__file__).resolve().parent.parent
 QUIET_HOSTS = REPO / "bench" / "mac-quiet-hosts.sh"
 
 # The markers the script itself writes into /etc/hosts, read from it: a second
@@ -53,10 +51,9 @@ def is_present(path):
     return _run("wk_bench_hosts_present", path)
 
 
-class ApplyHostsBlockTest(unittest.TestCase):
+class ApplyHostsBlockTest(WkTest):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-quiet-hosts-"))
-        self.addCleanup(__import__("shutil").rmtree, self.tmp, ignore_errors=True)
+        super().setUp()
         self.hosts = self.tmp / "hosts"
 
     def assert_one_block(self, text):
@@ -118,23 +115,19 @@ class ApplyHostsBlockTest(unittest.TestCase):
         try:
             cp = apply_block(self.hosts)
             self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            # the file must be exactly what it was -- the write never landed
             self.assertEqual(self.hosts.read_text(), original)
         finally:
             self.hosts.chmod(0o644)
 
 
-class NoSecondWriterTest(unittest.TestCase):
+class NoSecondWriterTest(WkTest):
 
     # A shell redirect or `tee` aimed at /etc/hosts, wherever it appears.
     WRITE_PATTERN = re.compile(r'(>{1,2}\s*"?\$?\{?\w*\}?/etc/hosts)|(\btee\b[^|;\n]*\/etc\/hosts)')
 
     def test_the_denial_can_be_lifted_and_put_back(self):
-        import tempfile
-        with tempfile.NamedTemporaryFile("w", suffix=".hosts", delete=False) as fh:
-            fh.write("127.0.0.1 localhost\n")
-            hosts = fh.name
-        self.addCleanup(lambda: __import__("os").unlink(hosts))
+        hosts = self.tmp / "hosts"
+        hosts.write_text("127.0.0.1 localhost\n")
         script = (f'. "{QUIET_HOSTS}"\n'
                   f'wk_bench_hosts_apply {hosts} >/dev/null && echo applied\n'
                   f'wk_bench_hosts_present {hosts} && echo present\n'
@@ -159,6 +152,7 @@ class NoSecondWriterTest(unittest.TestCase):
                     offenders.append(f"{path.name}:{lineno}: {line.strip()}")
         self.assertEqual(offenders, [], "a second /etc/hosts writer exists:\n" + "\n".join(offenders))
 
+
 class TestTheDaemonsEnvironment(unittest.TestCase):
 
     SOURCED = ("mac-pyobjc.sh", "mac-quiet-desktop.sh", "mac-quiet-hosts.sh")
@@ -173,17 +167,8 @@ class TestTheDaemonsEnvironment(unittest.TestCase):
                           f"bench/{name} dies when sourced by a daemon: "
                           f"{cp.stdout}{cp.stderr}")
 
+
 class TestWhatIsStoppedIsWhatIsJudged(unittest.TestCase):
-
-    TABLE = REPO / "bench" / "mac-quiet-desktop.sh"
-
-    def test_that_list_holds_both_halves_of_the_machine(self):
-        cp = bash(f'. "{self.TABLE}"\nwk_quiet_desktop_stopped\n')
-        listed = {l.split()[1] for l in cp.stdout.splitlines() if l.split()}
-        for proc in ("NotificationCenter", "usernoted", "chronod"):
-            self.assertIn(proc, listed, "an agent is missing from the list")
-        for proc in ("softwareupdated", "backupd", "ReportCrash"):
-            self.assertIn(proc, listed, "a daemon is missing from the list")
 
     def test_the_findings_renderer_still_changes_nothing(self):
         m = Fake("mac")
@@ -200,27 +185,16 @@ class TestWhatIsStoppedIsWhatIsJudged(unittest.TestCase):
             if argv[:1] == ("sudo",):
                 self.assertIn("defaults read", " ".join(argv), argv)
 
+
 class TestASweepCanNameABenchInstall(unittest.TestCase):
 
-    def test_the_sweep_tries_the_bench_account(self):
-        """lib/wk/reach.py's Survey.identify, driven: this account first, then the bench install's."""
-        from wk import reach
-        from wk.machine import Fake, Result
+    def test_the_sweep_tries_this_account_then_the_bench_one_and_says_which_answered(self):
         via = Fake("here")
         via.answer(["id", "-un"], out="me\n")
-        via.answer(["ssh"], rc=255)
-        reach.Survey(reach.Reach(via, {}, peers=[])).identify("10.0.0.9", "")
-        dests = [e[1][-2] for e in via.effects if e[1][0] == "ssh"]
-        self.assertEqual(dests, ["me@10.0.0.9", "bench@10.0.0.9"])
-
-    def test_it_says_which_account_answered(self):
-        from wk import reach
-        from wk.machine import Fake, Result
-        via = Fake("here")
-        via.answer(["id", "-un"], out="me\n")
-        via.answer(["ssh"], rc=255)
         via.react(["ssh"], lambda a, f: Result(0, "host=benchbox\n") if "bench@10.0.0.9" in a else Result(255))
         self.assertEqual(reach.Survey(reach.Reach(via, {}, peers=[])).identify("10.0.0.9", "")["account"], "bench")
+        self.assertEqual([e[1][-2] for e in via.effects if e[1][0] == "ssh"], ["me@10.0.0.9", "bench@10.0.0.9"])
+
 
 class TestTheWatchSeesAPausedAgentComeBack(unittest.TestCase):
 
@@ -237,25 +211,16 @@ class TestTheWatchSeesAPausedAgentComeBack(unittest.TestCase):
     def _restarted(self, ps_output):
         return screen.restarted(self._mac(ps_output), REPO)
 
-    def test_a_machine_where_they_are_all_stopped_records_nothing(self):
-        self.assertEqual([], self._restarted(
-            "T   /System/Library/x/NotificationCenter\n"
-            "T   usernoted\n"))
-
-    def test_a_banner_daemon_running_again_is_recorded(self):
-        self.assertEqual(["NotificationCenter", "usernoted"], self._restarted(
-            "S   /System/Library/CoreServices/NotificationCenter\n"
-            "S   /usr/sbin/usernoted\n"))
-
-    def test_a_process_the_kernel_will_not_stop_is_not_a_finding(self):
-        unstoppable = bash(". %r\nwk_quiet_desktop_unstoppable\n"
-                           % str(REPO / "bench" / "mac-quiet-desktop.sh")).stdout.split()
+    def test_only_a_process_on_the_list_that_can_be_stopped_and_runs_again_is_recorded(self):
+        unstoppable = bash(". %r\nwk_quiet_desktop_unstoppable\n" % str(REPO / "bench" / "mac-quiet-desktop.sh")).stdout.split()
         self.assertTrue(unstoppable)
-        self.assertEqual([], self._restarted(
-            "".join("S   %s\n" % p for p in unstoppable)))
-
-    def test_a_process_that_is_not_on_the_list_is_not_a_finding(self):
-        self.assertEqual([], self._restarted("S   MiniBrowser\nS   bash\n"))
+        for ps, want in (("T   /System/Library/x/NotificationCenter\nT   usernoted\n", []),
+                         ("S   /System/Library/CoreServices/NotificationCenter\nS   /usr/sbin/usernoted\n",
+                          ["NotificationCenter", "usernoted"]),
+                         ("".join("S   %s\n" % p for p in unstoppable), []),
+                         ("S   MiniBrowser\nS   bash\n", [])):
+            with self.subTest(ps=ps):
+                self.assertEqual(want, self._restarted(ps))
 
     def test_the_watch_records_it_where_the_leg_reads_it(self):
         m, sampled = self._mac(""), threading.Event()

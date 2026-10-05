@@ -53,13 +53,9 @@ def files_matching(pattern, files):
     return found
 
 
-def acting_files():
-    return files_matching(EFFECT, python_files("lib/wk"))
-
-
 class TestEffectsGoThroughMachine(unittest.TestCase):
     def test_every_direct_effect_is_named(self):
-        found = acting_files()
+        found = files_matching(EFFECT, python_files("lib/wk"))
         self.assertEqual(sorted(found - set(NOT_STATE)), [],
                          "acts outside lib/wk/machine.py: route it through the Machine or act, or name why it is no state change")
         self.assertEqual(sorted(set(NOT_STATE) - found), [], "named here but no longer acts directly: remove it")

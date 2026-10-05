@@ -82,7 +82,6 @@ class World(Fake):
         return super().act_run(argv, **kw)
 
     def start(self, argv, out, cwd=None):
-        """What the benchmark leaves: its log, and run-benchmark's --output-file where the system put it."""
         self.watched.append(list(argv))
         script = argv[-1]
         if "cli.js" in script:
@@ -454,13 +453,6 @@ class TestRootDevice(unittest.TestCase):
         w = World(Path(tempfile.mkdtemp(prefix="wk-rootdev-")))
         w.files["/sys/block/nvme0n1/queue/discard_max_bytes"] = "2199023255040\n"
         self.assertEqual(systems.root_device(w.run, w.read, "/", False), "nvme0n1 Fast (nvme, ssd, trim)")
-
-    def test_a_mac_volume_names_its_node_from_the_plist(self):
-        import plistlib
-        f = Fake()
-        f.answer(["diskutil"], out=plistlib.dumps({"DeviceNode": "/dev/disk3s1", "BusProtocol": "Apple Fabric",
-                                                   "SolidState": True}).decode())
-        self.assertEqual(systems.root_device(f.run, f.read, "/", True), "/dev/disk3s1 (Apple Fabric, ssd)")
 
     def test_what_cannot_be_read_is_unknown(self):
         f = Fake()

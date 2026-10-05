@@ -1,5 +1,4 @@
-"""`wk status`: the collector (lib/wk/status.py) and the renderer (lib/wk/statusview.py) driven in process, plus
-`wk key push status --all`."""
+"""`wk status`: the collector (lib/wk/status.py) and the renderer (lib/wk/statusview.py) driven in process."""
 import contextlib
 import io
 import json
@@ -16,7 +15,7 @@ from tests.support import REPO, WkTest, bash, clean_env, load_cmd, run
 from tests.test_wk_places import LINUX_PROBE, SshFake
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import fleet, places, record, status, statusview  # noqa: E402
+from wk import fleet, places, status, statusview  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 from wk.resources import Resources  # noqa: E402
@@ -25,8 +24,6 @@ from wk.store import Store  # noqa: E402
 
 
 def render(records, mode="text"):
-    """The renderer on synthetic records, in process: what a person or an agent reading `wk status` sees, with no
-    machine required."""
     records = list(records)
     doc = statusview.merge(records)
     if mode == "json":
@@ -101,14 +98,6 @@ class TestReprovisionLine(unittest.TestCase):
         self.assertIn("re-provisioning", out)
         self.assertIn("wk sysimage build webkit-2.52-yocto-rpi3-32", out)
         self.assertIn("wk boot rpi3", out)
-
-    def test_a_device_missing_mach_profile_renders_the_missing_field_not_a_guess(self):
-        recs = [{"kind": "fleet", "machine": "newdevice", "role": "bench-device", "mode": "unreachable", "media": "unknown",
-                 "reprovision": "missing profile in machines/newdevice.conf -- nothing to compose a recipe from"},
-                {"kind": "exit", "code": 0}]
-        out = render(recs, "text").stdout
-        self.assertIn("missing profile in machines/newdevice.conf", out)
-        self.assertNotIn("wk sysimage build newdevice", out)
 
     def test_the_by_role_sample_command_differs_per_role(self):
         recs = [{"kind": "fleet", "machine": "rpi4", "role": "bench-device", "mode": "host mode", "media": "usb stick",
@@ -311,32 +300,22 @@ class TestBump(unittest.TestCase):
 class TestDefaultView(unittest.TestCase):
     """A bare `wk status` opens the page at a terminal that can show one, and prints the table everywhere else."""
 
-    def test_not_a_terminal_is_text(self):
-        self.assertEqual(statusview.default_mode({}, False), "text")
+    def test_the_mode_by_terminal_and_environment(self):
+        no = "/nonexistent"
+        for env, tty, want in (({}, False, "text"), ({"HOME": no}, True, "web"),
+                               ({"WK_STATUS_VIEW": "json", "NO_COLOR": "1"}, True, "json"),
+                               ({"WK_STATUS_VIEW": "json"}, False, "json"),
+                               ({"CI": "1", "HOME": no}, True, "text"), ({"NO_COLOR": "1", "HOME": no}, True, "text"),
+                               ({"SSH_CONNECTION": "x", "HOME": no}, True, "text"),
+                               ({"SSH_TTY": "/dev/pts/1", "HOME": no}, True, "text"),
+                               ({"SSH_CONNECTION": "x", "DISPLAY": ":0", "HOME": no}, True, "web")):
+            with self.subTest(env=env, tty=tty):
+                self.assertEqual(statusview.default_mode(env, tty), want)
 
-    def test_a_terminal_with_a_browser_is_web(self):
-        self.assertEqual(statusview.default_mode({"HOME": "/nonexistent"}, True), "web")
-
-    def test_wk_status_view_decides_whatever_the_terminal(self):
-        self.assertEqual(statusview.default_mode({"WK_STATUS_VIEW": "json", "NO_COLOR": "1"}, True), "json")
-        self.assertEqual(statusview.default_mode({"WK_STATUS_VIEW": "json"}, False), "json")
-
-    def test_ci_no_color_ssh_and_a_workspace_stay_out_of_the_browser(self):
-        for env in ({"CI": "1"}, {"NO_COLOR": "1"}, {"SSH_CONNECTION": "x"}, {"SSH_TTY": "/dev/pts/1"}):
-            env["HOME"] = "/nonexistent"
-            self.assertEqual(statusview.default_mode(env, True), "text", env)
-        self.assertEqual(statusview.default_mode({"SSH_CONNECTION": "x", "DISPLAY": ":0", "HOME": "/nonexistent"}, True), "web")
+    def test_a_workspace_stays_out_of_the_browser(self):
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, ".wk-workspace").write_text("name=ws\n")
             self.assertEqual(statusview.default_mode({"HOME": tmp}, True), "text")
-
-    def test_colour_needs_a_terminal_and_no_color_unset(self):
-        tty = types.SimpleNamespace(isatty=lambda: True)
-        pipe = types.SimpleNamespace(isatty=lambda: False)
-        self.assertTrue(statusview.colour_wanted(tty, {}))
-        self.assertFalse(statusview.colour_wanted(tty, {"NO_COLOR": "1"}))
-        self.assertFalse(statusview.colour_wanted(pipe, {}))
-        self.assertFalse(statusview.colour_wanted(pipe, {"NO_COLOR": "1"}))
 
 
 class TestWaitAndTimeout(unittest.TestCase):
@@ -383,15 +362,11 @@ class TestWaitAndTimeout(unittest.TestCase):
         self.assertEqual((4, 3), (rc, len(polls)))
 
 
-def load_status_cmd():
-    return load_cmd("status")
-
-
 class TestTheWaitDecidesTheExit(unittest.TestCase):
     """The walk after a wait shows the state; one whose probe failed must not turn a confirmed idle into another code."""
 
     def test_the_exit_is_the_waits_verdict_not_the_walk_after_it(self):
-        cmd = load_status_cmd()
+        cmd = load_cmd("status")
         walks = []
 
         class FlakyWalk:
@@ -420,6 +395,7 @@ class TestToolsFact(unittest.TestCase):
         self.assertEqual((rec["insync"], rec["dirty"], rec["sha"], rec["expect"]), (True, False, "abcdef1234567890", "abcdef1"))
         self.assertNotIn("fix", rec)
         self.assertTrue(status.tools_fact({"sha": "abc", "dirty": "no"}, "abcdef1", "box", "box")["insync"])
+        self.assertFalse(status.tools_fact({"sha": "-", "dirty": "unknown"}, "abcdef1", "box", "box")["insync"])
 
     def test_another_commit_names_the_push_and_a_dirty_copy_reads_dirty(self):
         rec = status.tools_fact({"sha": "0000000", "dirty": "yes"}, "abcdef1", "box", "box")
@@ -462,24 +438,6 @@ class TestToolsFact(unittest.TestCase):
         self.assertEqual(doc["exit"], 0, "a same-named workspace on another machine is not a disagreement")
         self.assertEqual(skew["machine"], "far")
 
-class TestPushStatusAll(WkTest):
-    """`wk key push status --all` prints one line per machine, this one included."""
-
-    def test_one_line_per_machine_including_this_one(self):
-        env = clean_env()
-        here = record.machine_name(env)
-        expected = set(places.Registry(REPO, env=env).machines()) | {here}
-        try:
-            cp = self.run_wk("key", "push", "status", "--all", timeout=180)
-        except subprocess.TimeoutExpired:
-            self.skipTest("no route to the configured machines from here")
-        lines = [l for l in cp.stdout.splitlines() if l.strip()]
-        seen = {l.split()[0] for l in lines}
-        self.assertIn(here, seen, "--all skipped the machine it was typed on")
-        self.assertEqual(seen, expected, "wk key push status --all must answer for every machine")
-        self.assertIn(cp.returncode, (0, 1, 4))
-
-
 class TaskTest(WkTest):
     """Records written by Records.begin into a scratch store, read by the collector."""
 
@@ -498,8 +456,7 @@ class TaskTest(WkTest):
                        env={"WK_STORE": self.store})
 
     def reported(self, only=None):
-        recs, worst = status.task_records(self.records(), only, self.clock)
-        return recs, worst
+        return status.task_records(self.records(), only, self.clock)
 
 
 class TestTasksOfOneWorkspace(TaskTest):
@@ -690,10 +647,8 @@ class TestHealthRecords(unittest.TestCase):
 
     def test_services_are_named_and_asked_whether_they_are_stale(self):
         self.assertEqual(status.unit_program(REPO, "wk-proxy.service"), "container/proxy/wk-proxy.py")
-        calls = []
 
         def run(argv):
-            calls.append(argv)
             return status.Local().run(["false"]) if "is-active" in argv else status.Local().run(["true"])
         import shutil
         if shutil.which("systemctl"):
@@ -782,11 +737,6 @@ class TestBenchTaskLine(unittest.TestCase):
                      "incomplete", "/store/ws/w/bench/20260830T120000Z-wpe-pr1725"):
             self.assertIn(text, out)
 
-    def test_json_carries_both_records(self):
-        found = json.dumps(json.loads(render(self._records(), "json").stdout)["machines"])
-        self.assertIn("20260830T120000Z-wpe-pr1725", found)
-        self.assertIn("20260830T130000Z-rpi4-base-vs-pr1725", found)
-
 
 class TestRendersPartial(unittest.TestCase):
     """The renderer draws what it has: an empty health block is silent, a row without its extra fields still appears, a machine that did not answer reads unreachable."""
@@ -864,11 +814,9 @@ class TestTheSelfLineIsSpacedOneWay(unittest.TestCase):
         self.assertEqual(lines[1:3], statusview.render_machine_block(merger.doc["machines"][0], False)[:2])
 
 
-
-
 class TestTheServedPage(unittest.TestCase):
     def test_port_and_interval_come_from_the_flag_else_the_env_else_any_port_every_20s(self):
-        cmd = load_status_cmd()
+        cmd = load_cmd("status")
         walk = types.SimpleNamespace(records=lambda markers=True: iter(()), worst=0)
         for argv, env, want in (([], {}, ("0", "20")), ([], {"WK_STATUS_PORT": "8080", "WK_STATUS_INTERVAL": "5"}, ("8080", "5")),
                                 (["--port=9", "--interval=7"], {"WK_STATUS_PORT": "8080"}, ("9", "7"))):

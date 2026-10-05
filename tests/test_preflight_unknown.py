@@ -1,4 +1,4 @@
-"""A preflight whose measurement cannot be taken reports unknown and lets the command go on: only a"""
+"""A preflight whose measurement cannot be taken reports unknown and lets the command go on; a measured shortfall refuses."""
 import contextlib
 import io
 import sys

@@ -2,8 +2,6 @@
 are Store's, under every environment they are read in: a Linux machine, a macOS
 host, the podman VM, and a test's scratch store; and its Snapshots say which
 snapshot a workspace may be made from, over a fake machine.
-
-Run: python3 tests/run.py -k tests.test_wk_store
 """
 import os
 import sys
@@ -25,7 +23,6 @@ PAIRS = (
     ("keyring_push_dir", lambda s: s.keyring_push_dir()),
     ("mirror_parent", lambda s: os.path.dirname(s.mirror_dir())),
 )
-
 
 
 class TestAStageAsksPython(unittest.TestCase):
@@ -60,6 +57,7 @@ class TestStoreInitSaysWhatItChanged(unittest.TestCase):
         first = self.run_init(tmp)
         self.assertIn(tmp + "/store/cache/ccache/ccache.conf", first)
         self.assertEqual([], self.run_init(tmp))
+
 
 class TestTheStagesReadTheStore(unittest.TestCase):
     def envs(self):
@@ -121,17 +119,11 @@ class TestRecords(unittest.TestCase):
             s = Store(dict({"HOME": "/h", "XDG_STATE_HOME": "/state"}, **env))
             return s.records_dir(), s.cache_dir()
 
-    def test_a_named_store_holds_them(self):
-        for system in ("Linux", "Darwin"):
-            with self.subTest(system=system):
-                self.assertEqual(("/s", "/s/cache"), self.paths({"WK_STORE": "/s"}, system))
-
-    def test_a_macos_hosts_default_store_leaves_them_on_the_host(self):
-        self.assertEqual(("/state/wk", "/state/wk/cache"), self.paths({}, "Darwin"))
-
-    def test_in_the_podman_vm_they_are_the_stores(self):
-        self.assertEqual(("/var/lib/wk", "/var/lib/wk/cache"), self.paths({"WK_IN_VM": "1"}, "Darwin"))
-
+    def test_where_each_store_keeps_them(self):
+        for env, system, want in (({"WK_STORE": "/s"}, "Linux", "/s"), ({"WK_STORE": "/s"}, "Darwin", "/s"),
+                                  ({}, "Darwin", "/state/wk"), ({"WK_IN_VM": "1"}, "Darwin", "/var/lib/wk")):
+            with self.subTest(env=env, system=system):
+                self.assertEqual((want, want + "/cache"), self.paths(env, system))
 
 
 class TestSnapshots(unittest.TestCase):

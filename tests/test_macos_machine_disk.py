@@ -34,7 +34,8 @@ def reconcile_block():
 
 
 class TestTheDiskIsGrownToTheDeclaredSize(WkTest):
-    def _run(self, cur_disk, want_disk="500", cpus="9", mem="20480", dry=False):
+    def _run(self, cur_disk, dry=False):
+        cpus, mem = "9", "20480"
         block = reconcile_block()
         log = self.tmp / "podman.log"
         log.write_text("")
@@ -42,7 +43,7 @@ class TestTheDiskIsGrownToTheDeclaredSize(WkTest):
             cp = subprocess.run(
                 ["bash", "-c",
                  f'. "{REPO}/lib/common.sh"\n'
-                 f'WK_MACHINE=wk; export WK_MACHINE; _cores={cpus}; _mem={mem}; _disk={want_disk}\n'
+                 f'WK_MACHINE=wk; export WK_MACHINE; _cores={cpus}; _mem={mem}; _disk=500\n'
                  + ("WK_DRY_RUN=1\n" if dry else "")
                  + 'WK_RESERVE_CORES=1; WK_RESERVE_MB=1024\n'
                  + block + "\ntrue\n"],
@@ -53,17 +54,20 @@ class TestTheDiskIsGrownToTheDeclaredSize(WkTest):
                      "WK_TEST_MEM": mem, "WK_TEST_DISK": cur_disk})
         return cp, log.read_text()
 
-    def test_a_smaller_disk_is_grown(self):
+    def test_a_smaller_disk_is_grown_and_the_guest_filesystem_with_it(self):
         cp, sent = self._run(cur_disk="200")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertRegex(sent, r"machine set wk .*--disk-size 500",
-                         f"the disk was not grown: {sent!r}")
+        self.assertRegex(sent, r"machine set wk .*--disk-size 500", f"the disk was not grown: {sent!r}")
+        self.assertIn("growpart", sent, "the partition was never grown")
+        self.assertIn("xfs_growfs", sent, "the filesystem was never grown")
+        self.assertRegex(cp.stdout + cp.stderr, r"filesystem grew to \d+ GiB")
 
-    def test_a_disk_already_the_right_size_is_left_alone(self):
+    def test_a_disk_already_the_right_size_is_left_alone_and_its_filesystem_still_checked(self):
         cp, sent = self._run(cur_disk="500")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertNotIn("machine set", sent, f"an unchanged machine was set: {sent!r}")
         self.assertIn("500", cp.stdout + cp.stderr, "the size it kept is not reported")
+        self.assertIn("growpart", sent, "a machine at its size is never checked")
 
     def test_a_bigger_disk_is_reported_not_shrunk(self):
         """podman refuses to shrink one, and nothing here silently degrades."""
@@ -73,18 +77,6 @@ class TestTheDiskIsGrownToTheDeclaredSize(WkTest):
         out = cp.stdout + cp.stderr
         self.assertIn("800", out)
         self.assertIn("only grows", out, "the refusal does not say why")
-
-    def test_the_guest_filesystem_is_grown_to_the_disk(self):
-        cp, sent = self._run(cur_disk="200")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("growpart", sent, "the partition was never grown")
-        self.assertIn("xfs_growfs", sent, "the filesystem was never grown")
-        self.assertRegex(cp.stdout + cp.stderr, r"filesystem grew to \d+ GiB")
-
-    def test_the_filesystem_is_checked_even_when_the_disk_is_unchanged(self):
-        _, sent = self._run(cur_disk="500")
-        self.assertNotIn("machine set", sent)
-        self.assertIn("growpart", sent, "a machine at its size is never checked")
 
     def test_a_dry_run_changes_nothing(self):
         cp, sent = self._run(cur_disk="200", dry=True)

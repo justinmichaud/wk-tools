@@ -17,7 +17,6 @@ WS = "yocto-p"
 class TestABuildSaysWhatItIsOf(WkTest):
     """yocto.build_subject; the instrumented slot and the mix stage are tests/test_images.py's."""
 
-
     def test_the_two_are_not_the_same_words(self):
         self.assertNotEqual(yocto.build_subject(WS, "webkit", "base-instr", SHA, "wpe-cross-pgo-collect"),
                             yocto.build_subject(WS, "webkit", "base", SHA, "wpe-cross-pgo-use"))
@@ -32,8 +31,6 @@ class TestABuildSaysWhatItIsOf(WkTest):
 
 
 class TestTheRecordCarriesIt(WkTest):
-
-
     def test_a_reader_sees_it_against_the_running_build(self):
         subject = ("slot base in yocto-p at 6f7bb97a3e06 -- instrumented, "
                    "to collect a profile from -- not a measurement")
@@ -81,8 +78,6 @@ class TestTheWatchdogMeasuresWhatDetached(WkTest):
 
 
 class TestSelftestRefusesBesideABuild(WkTest):
-
-
     def test_a_live_run_is_a_barrier_naming_the_build_and_the_way_on(self):
         env = builds_on_the_books_env(self.tmp, "wk-test-fake-build")
         cp = run("selftest", "--live", "nosuchtestzz", env=env)

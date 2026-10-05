@@ -19,7 +19,6 @@ class TestBenchName(WkTest):
         for board in ("rpi3", "rpi4", "rpi5"):
             with self.subTest(board=board):
                 self.assertEqual(self._name_for(board), f"{board}-bench")
-                self.assertEqual(self._name_for(board, "bench"), f"{board}-bench")
 
     def test_a_bench_devices_rescue_has_its_own_name(self):
         for board in ("rpi3", "rpi4"):

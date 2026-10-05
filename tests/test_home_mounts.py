@@ -32,15 +32,10 @@ class TestTheMountpointsInsideTheHomeAreMadeHere(WkTest):
                          (self.ws / "home").owner(),
                          "the mountpoint's parents are not the home's owner's")
 
-    def test_a_destination_outside_the_home_is_left_to_podman(self):
-        for dest in ("/var/lib/wk/git", "/ccache", "/opt/wk-tools", "/home/someone-else/git"):
-            with self.subTest(dest=dest):
-                _ensure(self.ws, dest)
-        self.assertEqual(sorted(p.name for p in (self.ws / "home").iterdir()), [])
-
-    def test_the_home_itself_is_not_a_destination_it_acts_on(self):
-        _ensure(self.ws, self.HOME)
-        self.assertEqual(sorted(p.name for p in (self.ws / "home").iterdir()), [])
+    def test_a_destination_outside_the_home_or_the_home_itself_is_left_to_podman(self):
+        for dest in ("/var/lib/wk/git", "/ccache", "/opt/wk-tools", "/home/someone-else/git", self.HOME):
+            _ensure(self.ws, dest)
+        self.assertEqual([], list((self.ws / "home").iterdir()))
 
 
 if __name__ == "__main__":

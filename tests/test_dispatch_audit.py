@@ -1,4 +1,4 @@
-"""What a command still parses for itself -- the audit of the shape `wk zed"""
+"""What a command still parses for itself, and what the dispatcher decides instead."""
 TIER = "lint"
 import os
 import re
@@ -97,7 +97,7 @@ class TestWhatTheDispatcherAlreadyDecides(unittest.TestCase):
 
 
 class TestTheVerbIsTheDispatchers(unittest.TestCase):
-    def test_an_unknown_verb_is_refused_by_the_dispatcher(self):
+    def test_an_unknown_or_missing_verb_is_refused_by_the_dispatcher(self):
         for c in commands():
             if not decl_value(c, "verbs") or decl_value(c, "default"):
                 continue
@@ -106,12 +106,6 @@ class TestTheVerbIsTheDispatchers(unittest.TestCase):
                 self.assertEqual(cp.returncode, 2, cp.stdout)
                 self.assertIn("unknown verb: zz-no-such-verb", cp.stdout)
                 self.assertIn("usage: wk %s" % c.name, cp.stdout)
-
-    def test_a_missing_verb_is_refused_by_the_dispatcher(self):
-        for c in commands():
-            if not decl_value(c, "verbs") or decl_value(c, "default"):
-                continue
-            with self.subTest(cmd=c.name):
                 cp = run(c.name)
                 self.assertEqual(cp.returncode, 2, cp.stdout)
                 self.assertIn("'wk %s' needs one of:" % c.name, cp.stdout)
@@ -145,7 +139,6 @@ class TestTheVerbIsTheDispatchers(unittest.TestCase):
                 cp = run(*argv)
                 self.assertEqual(cp.returncode, 2, cp.stdout)
                 self.assertIn("unknown verb: %s (one of" % argv[1], cp.stdout)
-
 
     def test_the_far_machine_is_handed_argv_as_typed(self):
         inv = dispatch.Invocation("pr", D.Decl(REPO / "cmd" / "pr"), ["ws", "1234"])

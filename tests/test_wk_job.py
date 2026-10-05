@@ -149,8 +149,6 @@ class TestAStopThroughThePlace(Scratch):
 
 
 class TestTheLockedRun(Scratch):
-    """`python3 -m wk.lock run`: the command runs holding the lock, and its status comes back."""
-
     def test_the_command_runs_under_the_lock_and_the_lock_goes_with_it(self):
         env = dict(os.environ, XDG_STATE_HOME=str(self.tmp))
         env.pop("WK_LOCK_DIR", None)
@@ -160,7 +158,6 @@ class TestTheLockedRun(Scratch):
         self.assertEqual(7, cp.returncode, cp.stderr)
         self.assertIn("demo@", cp.stdout)
         self.assertEqual([], os.listdir(self.tmp / "wk" / "locks"))
-
 
 
 class TestJobSettings(unittest.TestCase):

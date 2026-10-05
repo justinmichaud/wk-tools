@@ -31,14 +31,6 @@ class TestTheBenchChannelIsAlwaysRoot(unittest.TestCase):
                 self.assertIn("StrictHostKeyChecking=no", " ".join(self._machine(role).opts))
 
 
-class TestTheHostChannelStillAsksTheRole(unittest.TestCase):
-    def test_a_bench_device_in_host_mode_is_root(self):
-        self.assertEqual(channel("bench-device", "host").opts("m_ssh")[:2], ["-l", "root"])
-
-    def test_a_workstation_in_host_mode_is_the_driving_user(self):
-        self.assertEqual(channel("workstation", "host").opts("m_ssh"), [])
-
-
 class TestPrivilegeFollowsTheChannel(unittest.TestCase):
 
     def _argv(self, name, role, fn="card_priv", *args):
@@ -50,16 +42,14 @@ class TestPrivilegeFollowsTheChannel(unittest.TestCase):
     def _root(self, name, role):
         return "USER" if self._argv(name, role, "card_priv", "status")[-1].startswith("sudo -n ") else "ROOT"
 
-    def test_a_bench_system_is_root_whatever_the_host_role(self):
-        for role in ("bench-device", "workstation", ""):
-            with self.subTest(role=role):
-                self.assertEqual("ROOT", self._root("bench", role))
-
-    def test_a_bench_device_in_host_mode_is_root(self):
-        self.assertEqual("ROOT", self._root("host", "bench-device"))
-
-    def test_a_workstation_in_host_mode_is_a_person(self):
-        self.assertEqual("USER", self._root("host", "workstation"))
+    def test_a_bench_system_is_root_and_host_mode_asks_the_role(self):
+        for name, role, who, login in (("bench", "bench-device", "ROOT", None), ("bench", "workstation", "ROOT", None),
+                                       ("bench", "", "ROOT", None), ("host", "bench-device", "ROOT", ["-l", "root"]),
+                                       ("host", "workstation", "USER", [])):
+            with self.subTest(name=name, role=role):
+                self.assertEqual(who, self._root(name, role))
+                if login is not None:
+                    self.assertEqual(channel(role, name).opts("m_ssh")[:2], login)
 
     def test_the_boot_helper_follows_the_channel_too(self):
         self.assertIn("vcmailbox", self._argv("bench", "workstation", "boot_priv", "order", "0xf64")[-1])

@@ -32,25 +32,16 @@ class TestTheEmptyNoteIsDecidedOnce(unittest.TestCase):
                 "PATH": f"{binp}:/usr/bin:/bin",
             })
 
-    def test_the_first_half_never_prints_the_note(self):
-        cp = self._ls("--more-follows")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("NAME", cp.stdout)
-        self.assertNotIn("no workspaces", cp.stdout)
-
-    def test_the_second_half_prints_it_only_when_nothing_came_before(self):
-        cp = self._ls("--continued", "--empty-so-far")
-        self.assertIn("no workspaces", cp.stdout)
-        cp = self._ls("--continued")
-        self.assertNotIn("no workspaces", cp.stdout)
-        self.assertNotIn("NAME", cp.stdout)
-
-    def test_a_bare_ls_still_prints_the_note_alone(self):
-        cp = self._ls()
-        self.assertIn("no workspaces", cp.stdout)
+    def test_only_a_bare_ls_or_a_second_half_after_nothing_prints_the_note(self):
+        for flags, note, header in ((("--more-follows",), False, True), (("--continued", "--empty-so-far"), True, False),
+                                    (("--continued",), False, False), ((), True, True)):
+            with self.subTest(flags=flags):
+                cp = self._ls(*flags)
+                self.assertEqual(cp.returncode, 0, cp.stdout)
+                self.assertEqual(note, "no workspaces" in cp.stdout, cp.stdout)
+                self.assertEqual(header, "NAME" in cp.stdout, cp.stdout)
 
     def _halves(self, first_half_lines):
-        """The arguments `bare_report` hands each half when the first prints `first_half_lines`."""
         with tempfile.TemporaryDirectory(prefix="wk-test-halves-") as tmp:
             stub, argv = Path(tmp) / "ls", Path(tmp) / "argv"
             stub.write_text("#!/bin/sh\n# wk ls -- a stub\n# wk: where=workspace name=none bare=merged readonly\n"

@@ -1,32 +1,20 @@
 """The real mbp reached, and a sysimage write dry run on a Mac."""
 import os
 import platform
-import sys
 import unittest
 
-from tests.support import (REPO, TAILSCALE_KNOWS_NOTHING, WkTest, rand_suffix, requires_machine,
-                           run, scratch_dir, stub_path)
-
-sys.path.insert(0, str(REPO / "lib"))
-
-
-def _is_macos():
-    return platform.system() == "Darwin"
-
-
+from tests.support import TAILSCALE_KNOWS_NOTHING, WkTest, rand_suffix, requires_machine, run, scratch_dir, stub_path
 
 
 class TestBenchReachesTheRealMbp(unittest.TestCase):
-
     @requires_machine("tolken")
     def test_wk_boot_reaches_mbp(self):
         cp = run("boot", "mbp", "--status")
         self.assertIn(cp.returncode, (0, 2, 3), cp.stdout)
 
 
-@unittest.skipUnless(_is_macos(), "the GNU-tool risk this guards against is specific to a macOS driver")
+@unittest.skipUnless(platform.system() == "Darwin", "the GNU-tool risk this guards against is specific to a macOS driver")
 class TestSysimageWriteDryRunOnAMac(WkTest):
-
     _SSH = '''#!/bin/sh
 case "$*" in
   *card-priv*status*) exit 0 ;;

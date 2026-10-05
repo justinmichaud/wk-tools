@@ -17,7 +17,6 @@ SETTINGS = REPO / "claude" / "settings.json"
 SETTINGS_ALL = [SETTINGS, REPO / "claude" / "settings-host.json"]
 
 
-
 def wall_names():
     m = re.search(r'^WALL_NAMES="([^"]+)"', WALL.read_text(), re.M)
     assert m, "container/bin/wk-build-wall no longer defines WALL_NAMES"
@@ -108,14 +107,12 @@ class TestAPersonGetsTheRealTool(WallTest):
 
 
 class TestWkOwnBuildPassesThrough(WallTest):
-
     def test_wk_build_is_not_walled_even_under_an_agent(self):
         for name in NAMES:
             with self.subTest(tool=name):
                 cp = self.call(name, env={"CLAUDECODE": "1", "WK_AGENT": "claude", "WK_BUILD": "1"})
                 self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
                 self.assertIn(f"REAL {name}", cp.stdout)
-
 
     def test_every_builder_declares_itself(self):
         import sys
@@ -129,8 +126,6 @@ class TestWkOwnBuildPassesThrough(WallTest):
 
 
 class TestBitbakeGetsTheRealTools(WkTest):
-
-
     def test_the_gate_is_a_wall_so_the_strip_has_to_name_it(self):
         ws = BIN / "ws"
         names = sorted(p.name for p in ws.iterdir())
@@ -145,13 +140,6 @@ class TestBitbakeGetsTheRealTools(WkTest):
 class TestNoBuilderRecordsTheWall(unittest.TestCase):
 
     wk_tier = "lint"
-    TASK = REPO / "lib" / "wk" / "sysimage" / "task.py"
-
-    def _fn(self, path, name):
-        m = re.search(r"(?ms)^    def %s\(.*?(?=^    def |\Z)" % name, path.read_text())
-        self.assertIsNotNone(m, f"{name} is not in {path}")
-        return m.group(0)
-
 
     def test_the_wrapper_takes_off_every_wall_and_nothing_else(self):
         import sys
@@ -163,17 +151,10 @@ class TestNoBuilderRecordsTheWall(unittest.TestCase):
 
 
 class TestOneFileUnderEveryName(WallTest):
-    def test_the_names_and_the_symlinks_are_the_same_set(self):
-        links = sorted(p.name for p in BIN.iterdir() if p.is_symlink())
-        self.assertEqual(sorted(NAMES), links)
-
-    def test_every_symlink_is_the_wall(self):
+    def test_every_name_is_a_symlink_to_the_wall_and_nothing_else_is(self):
+        self.assertEqual(sorted(NAMES), sorted(p.name for p in BIN.iterdir() if p.is_symlink()))
         for name in NAMES:
-            with self.subTest(tool=name):
-                link = BIN / name
-                self.assertEqual("wk-build-wall", os.readlink(link))
-                self.assertEqual(WALL.resolve(), link.resolve())
-
+            self.assertEqual("wk-build-wall", os.readlink(BIN / name), name)
 
     def test_it_refuses_its_own_name(self):
         cp = self.call(str(WALL))
@@ -182,7 +163,6 @@ class TestOneFileUnderEveryName(WallTest):
 
 
 class TestTwoWallsDoNotExecEachOther(WallTest):
-
     def _second_tree(self):
         other = self.tmp / "other-tools" / "container" / "bin"
         other.mkdir(parents=True)
@@ -198,7 +178,6 @@ class TestTwoWallsDoNotExecEachOther(WallTest):
             [name], cwd=str(self.tmp),
             env={"HOME": str(self.tmp), "PATH": path, "TERM": "dumb"},
             capture_output=True, text=True, timeout=60)
-
 
     def test_either_tree_first_skips_the_other_wall_and_reaches_the_real_tool(self):
         other = self._second_tree()
@@ -305,7 +284,6 @@ class TestItIsFirstOnPathInEveryShell(WkTest):
 class TestTheAgentIsToldUpFront(unittest.TestCase):
     """The advisory half: a deny rule per wrapped name, so the agent is told
     before it tries, and one sentence in the workspace briefing."""
-
 
     def test_every_wrapped_name_is_denied(self):
         for f in SETTINGS_ALL:

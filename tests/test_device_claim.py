@@ -109,14 +109,10 @@ class TestTheFleetIsAsked(unittest.TestCase):
         self.records = mock.Mock()
         self.records.holders.return_value = []
 
-    def test_a_peer_is_asked_and_its_rows_are_the_answer(self):
-        rows = record.fleet_holders("device:rpi5", self.records, [("moose", lambda r: ("\t".join(ROW) + "\r\n", ""))])
-        self.assertEqual([ROW], rows)
-
     def test_this_machine_and_the_peers_are_both_the_answer(self):
         here = ("id", "tolken", "bench rpi5/jetstream3", "kill 1")
         self.records.holders.return_value = [here]
-        rows = record.fleet_holders("device:rpi5", self.records, [("moose", lambda r: ("\t".join(ROW), ""))])
+        rows = record.fleet_holders("device:rpi5", self.records, [("moose", lambda r: ("\t".join(ROW) + "\r\n", ""))])
         self.assertEqual([here, ROW], rows)
 
     def test_a_store_that_could_not_be_asked_is_a_row_of_its_own(self):
@@ -194,11 +190,13 @@ class TestTheBarrier(unittest.TestCase):
         self.assertEqual(["device:rpi5"], self.fleet_asked)
 
     def test_a_held_board_refuses_naming_the_machine_the_task_and_the_remedy(self):
-        e, out = self.hold(rows=[ROW])
-        self.assertIsInstance(e, act.Refused)
-        for want in ("rpi5", "bench rpi5/speedometer3", "moose", "kill 4242", "--force"):
-            self.assertIn(want, out)
-        self.assertEqual([], self.tasks(), "a refused claim wrote a record anyway")
+        for env, os_env in (({}, {}), ({"WK_DEVICE_HELD": "device:rpi4"}, {}), ({}, {"WK_DRY_RUN": "1"})):
+            with self.subTest(env=env, os_env=os_env):
+                e, out = self.hold(rows=[ROW], env=env, **os_env)
+                self.assertIsInstance(e, act.Refused)
+                for want in ("rpi5", "bench rpi5/speedometer3", "moose", "kill 4242", "--force"):
+                    self.assertIn(want, out)
+                self.assertEqual([], self.tasks(), "a refused claim wrote a record anyway")
 
     def test_force_crosses_it_records_the_forcing_and_takes_the_claim(self):
         with mock.patch.object(act, "_forced", []):
@@ -218,19 +216,11 @@ class TestTheBarrier(unittest.TestCase):
         self.assertEqual([], self.fleet_asked)
         self.assertEqual([], self.tasks())
 
-    def test_an_inherited_claim_on_another_board_still_refuses(self):
-        e, _ = self.hold(rows=[ROW], env={"WK_DEVICE_HELD": "device:rpi4"})
-        self.assertIsInstance(e, act.Refused)
-
     def test_a_dry_run_reads_the_claim_and_takes_none(self):
         t, _ = self.hold(WK_DRY_RUN="1")
         self.assertIsNone(t)
         self.assertEqual(["device:rpi5"], self.fleet_asked)
         self.assertEqual([], self.tasks())
-
-    def test_a_dry_run_still_refuses_a_held_board(self):
-        e, _ = self.hold(rows=[ROW], WK_DRY_RUN="1")
-        self.assertIsInstance(e, act.Refused)
 
 
 class TestStatusHolds(ClaimTest):

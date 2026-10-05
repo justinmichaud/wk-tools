@@ -1,5 +1,5 @@
 """`wk status <ws> --log` (cmd/status, driven directly with WK_NAME/WK_PLACE/WK_VM_STORE): build.log, else the image stage
-log its builder wrote under home/."""
+log its builder wrote under home/, and the errors it names."""
 import unittest
 
 from tests.support import REPO, WkTest, bash
@@ -47,6 +47,37 @@ class TestLogsPicksTheRightFile(WkTest):
         self.assertNotEqual(cp.returncode, 0, out)
         self.assertIn("wk build", out, out)
         self.assertIn("wk sysimage build", out, out)
+
+    def test_a_message_containing_the_word_error_mid_sentence_is_not_reported(self):
+        name = "goodws"
+        wsdir = self.tmp / "ws" / name
+        wsdir.mkdir(parents=True)
+        (wsdir / "build.log").write_text(
+            "Building place foo\n"
+            "-- no error: handling here, everything is fine\n"
+            "ninja: no work to do.\n"
+        )
+        cp = self._run(name, self.tmp)
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("(none)", out, out)
+        errors_section = out.split("errors:", 1)[1].split("last output:", 1)[0]
+        self.assertNotIn("no error: handling here", errors_section, out)
+
+    def test_a_real_ninja_failure_still_reports_by_the_same_path(self):
+        name = "badws"
+        wsdir = self.tmp / "ws" / name
+        wsdir.mkdir(parents=True)
+        (wsdir / "build.log").write_text(
+            "Building place foo\n"
+            "foo.cpp:10:5: error: use of undeclared identifier 'x'\n"
+            "ninja: build stopped: subcommand failed.\n"
+        )
+        cp = self._run(name, self.tmp)
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertNotIn("(none)", out, out)
+        self.assertIn("ninja: build stopped", out, out)
 
 
 if __name__ == "__main__":

@@ -75,11 +75,12 @@ class TestConverge(ToolsPushCase):
         self.assertEqual((self.far / "wk").read_text(), "#!/bin/sh\necho one\n")
         self.assertFalse((self.far / tools.BUNDLE).exists(), "the bundle was left behind")
 
-    def test_a_second_push_changes_nothing_and_still_reports_ok(self):
+    def test_a_second_push_changes_nothing_says_nothing_about_replacing_and_still_reports_ok(self):
         self.assertTrue(self.push()[0])
         ok, err = self.push()
         self.assertTrue(ok, err)
         self.assertEqual(self.far_head(), self.sha)
+        self.assertNotIn("replacing", err)
 
     def test_a_far_checkout_at_another_commit_is_reset_to_the_pushed_one(self):
         self.assertTrue(self.push()[0])
@@ -112,10 +113,6 @@ class TestConverge(ToolsPushCase):
         self.assertFalse((self.far / "gone.sh").exists(), "the file copy was merged into, not replaced")
         self.assertIn("replacing", err)
         self.assertIn("not a git checkout", err)
-
-    def test_converging_a_checkout_says_nothing_about_replacing(self):
-        self.assertTrue(self.push()[0])
-        self.assertNotIn("replacing", self.push()[1])
 
     def test_a_dirty_far_tree_is_overwritten_and_its_ignored_files_kept(self):
         self.assertTrue(self.push()[0])
@@ -283,37 +280,6 @@ class EachKind(unittest.TestCase):
         self.assertEqual((runs[1][3:5], runs[1][-1]), (("/t/tart", "wk-mac"), "/Users/admin/wk-tools/" + tools.BUNDLE))
         self.assertIn("/Users/admin/.wk-workspace", runs[-1][-1], "the marker the pushed tooling reads was not rewritten")
 
-
-class TestStatusToolsRow(unittest.TestCase):
-    """`wk status`'s wk-tools row for a machine across ssh: every copy is compared by commit -- a checkout's own,
-    or, in the podman VM, this very checkout mounted in."""
-
-    full = "4f1c2b9e0d3a5c7e9b1d3f5a7c9e1b3d5f7a9c1e"
-    short = full[:7]
-
-    def row(self, ver, in_vm=False):
-        from wk import status
-        fields = dict(l.split("=", 1) for l in ver.splitlines() if "=" in l)
-        return status.tools_fact(fields, self.short, "fakebox", "fakebox", in_vm=in_vm)
-
-    def test_a_checkout_at_this_trees_commit_reads_in_sync(self):
-        row = self.row(f"sha={self.full}\ndirty=no\n")
-        self.assertEqual((row["sha"], row["expect"], row["insync"]), (self.full, self.short, True))
-        self.assertNotIn("fix", row)
-
-    def test_a_checkout_at_another_commit_differs_and_names_the_push(self):
-        row = self.row("sha=0000000\ndirty=no\n")
-        self.assertEqual((row["sha"], row["expect"], row["insync"]), ("0000000", self.short, False))
-        self.assertEqual(row["fix"], "wk sync --tools fakebox")
-
-    def test_a_dirty_checkout_over_there_is_reported_as_dirty(self):
-        row = self.row(f"sha={self.short}\ndirty=yes\n")
-        self.assertEqual((row["dirty"], row["insync"]), (True, True))
-
-    def test_a_copy_with_no_commit_is_never_in_sync(self):
-        row = self.row("sha=-\ndirty=unknown\n", in_vm=True)
-        self.assertEqual(row["insync"], False)
-        self.assertEqual(row["fix"], "./setup   (recreates the machine with this checkout mounted at /opt/wk-tools)")
 
 class TestTheToolsSource(unittest.TestCase):
     def test_a_container_mounts_this_checkout_unless_the_env_names_another(self):

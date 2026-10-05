@@ -54,14 +54,10 @@ class TestTheDefaultConfigIsDerived(unittest.TestCase):
     def test_the_last_build_wins(self):
         self.assertEqual(self._default("mac-debug", "macos")[0], "mac-debug")
 
-    def test_a_macos_target_with_no_build_defaults_to_the_apple_port(self):
-        preset, _ = self._default("", "macos")
-        self.assertEqual(preset, "mac-release")
-
-    def test_a_linux_target_with_no_build_defaults_to_jsc(self):
-        preset, _ = self._default("", "linux")
-        self.assertEqual(preset, "jsc-release")
-
+    def test_with_no_build_the_platform_decides(self):
+        for os_, want in (("macos", "mac-release"), ("linux", "jsc-release")):
+            with self.subTest(os_):
+                self.assertEqual(self._default("", os_)[0], want)
 
 
 if __name__ == "__main__":

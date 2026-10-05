@@ -152,23 +152,20 @@ class TestGpuClaimMatchesWhatTheDriverCanSay(WkTest):
                 "jit": {"exec_mappings": 1, "tiers": {"FTL": 3}},
                 "gpu": {"measured": measured, "busy_ms": busy, "driver": "v3d"}}
 
-    def test_no_counters_but_a_held_render_node_is_a_note_not_a_refusal(self):
-        r = self.rec(False, 0, ["/dev/dri/renderD128"])
-        self.assertEqual(self.d.warmup_problems(r), [])
-        self.assertTrue(any("unreadable on this driver" in n for n in r["notes"]))
-
-    def test_no_counters_and_no_render_node_still_refuses(self):
-        r = self.rec(False, 0, [])
-        self.assertIn("nothing evidences a GPU path", " ".join(self.d.warmup_problems(r)))
-
-    def test_counters_that_exist_and_read_zero_still_refuse(self):
-        r = self.rec(True, 0, ["/dev/dri/renderD128"])
-        self.assertIn("billed no engine time", " ".join(self.d.warmup_problems(r)))
-
-    def test_a_software_rasterizer_refuses_whatever_the_counters_say(self):
-        r = self.rec(False, 0, ["/dev/dri/renderD128"],
-                     mapped=("swrast_dri.so",), software=True)
-        self.assertIn("software rasterizer", " ".join(self.d.warmup_problems(r)))
+    def test_a_gpu_claim_needs_engine_time_or_a_render_node_and_no_software_rasterizer(self):
+        node = ["/dev/dri/renderD128"]
+        for measured, busy, nodes, software, problem in ((False, 0, node, False, None),
+                                                          (False, 0, [], False, "nothing evidences a GPU path"),
+                                                          (True, 0, node, False, "billed no engine time"),
+                                                          (False, 0, node, True, "software rasterizer")):
+            with self.subTest(measured=measured, nodes=nodes, software=software):
+                r = self.rec(measured, busy, nodes, ("swrast_dri.so",) if software else ("v3d_dri.so",), software)
+                problems = " ".join(self.d.warmup_problems(r))
+                if problem:
+                    self.assertIn(problem, problems)
+                else:
+                    self.assertEqual(problems, "")
+                    self.assertTrue(any("unreadable on this driver" in n for n in r["notes"]))
 
 
 class TestJitTierIsConfirmed(WkTest):
@@ -185,20 +182,18 @@ class TestJitTierIsConfirmed(WkTest):
         counts = self.d.tier_counts("tier=FTL 12\ntier=DFG 340\ntier=Baseline 5011\n")
         self.assertEqual(counts, {"FTL": 12, "DFG": 340, "Baseline": 5011})
 
-    def test_a_64_bit_arm_needs_an_ftl_compilation(self):
-        self.assertEqual(self.d.warmup_problems(self.record(64, {"FTL": 1, "DFG": 90})), [])
-        self.assertIn("reached no FTL compilation",
-                      " ".join(self.d.warmup_problems(
-                          self.record(64, {"FTL": 0, "DFG": 90, "Baseline": 500}))))
-
-    def test_a_32_bit_arm_needs_a_dfg_compilation_and_never_an_ftl_one(self):
-        self.assertEqual(self.d.warmup_problems(self.record(32, {"DFG": 44, "FTL": 0})), [])
-        self.assertIn("reached no DFG compilation",
-                      " ".join(self.d.warmup_problems(self.record(32, {"DFG": 0}))))
-
-    def test_no_report_at_all_refuses_rather_than_passing(self):
-        self.assertIn("no JSC compile-time report",
-                      " ".join(self.d.warmup_problems(self.record(64, {}))))
+    def test_a_64_bit_arm_needs_ftl_and_a_32_bit_one_dfg(self):
+        for bits, tiers, problem in ((64, {"FTL": 1, "DFG": 90}, None),
+                                     (64, {"FTL": 0, "DFG": 90, "Baseline": 500}, "reached no FTL compilation"),
+                                     (32, {"DFG": 44, "FTL": 0}, None),
+                                     (32, {"DFG": 0}, "reached no DFG compilation"),
+                                     (64, {}, "no JSC compile-time report")):
+            with self.subTest(bits=bits, tiers=tiers):
+                problems = " ".join(self.d.warmup_problems(self.record(bits, tiers)))
+                if problem:
+                    self.assertIn(problem, problems)
+                else:
+                    self.assertEqual(problems, "")
 
     def test_not_probed_is_a_note_and_not_a_problem(self):
         rec = self.record(64, None)
@@ -249,7 +244,6 @@ class TestWarmupCheck(WkTest):
 class TestWarmupEvidenceIsPerBoard(WkTest):
 
     def test_each_board_reads_back_its_own_evidence(self):
-        wk = report
         d = tmpdir(self)
         (d / "warmup").mkdir()
         for board, bits in (("rpi3", 32), ("rpi5", 64)):
@@ -258,8 +252,8 @@ class TestWarmupEvidenceIsPerBoard(WkTest):
                     {"elf": {"bits": bits, "machine": "ARM"},
                      "gl": {"driver": "/usr/lib/dri/v3d_dri.so", "software": False},
                      "jit": {"exec_mappings": 1, "exec_bytes": 4096, "verdict": "JIT active"}}))
-        self.assertIn("32-bit", " ".join(wk.warmup_lines(wk.warmup_load(str(d), "rpi3"))))
-        self.assertIn("64-bit", " ".join(wk.warmup_lines(wk.warmup_load(str(d), "rpi5"))))
+        self.assertIn("32-bit", " ".join(report.warmup_lines(report.warmup_load(str(d), "rpi3"))))
+        self.assertIn("64-bit", " ".join(report.warmup_lines(report.warmup_load(str(d), "rpi5"))))
 
 
 class TestWarmupNeverEntersTheStatistics(WkTest):
@@ -304,7 +298,7 @@ class TestRunOrderAndSettling(WkTest):
         """order is the arm of each run in time order, e.g. 'ABBA'."""
         a, b = [], []
         for i, arm in enumerate(order):
-            entry = ("/t/runs/2026090%d" % i, {}, {})   # a run is named by its directory
+            entry = ("/t/runs/2026090%d" % i, {}, {})
             (a if arm == "A" else b).append(entry)
         return a, b
 
@@ -384,16 +378,11 @@ class TestSamplyFetchUnderADryRun(unittest.TestCase):
             found = samply.fetch(m, "/cache", "x86_64")
         return found, binary, err.getvalue()
 
-    def test_it_carries_on_and_returns_what_it_would_install(self):
+    def test_it_returns_what_it_would_install_and_unpacks_nothing(self):
         found, binary, err = self.fetch()
-        self.assertEqual(binary, found, "a dry run must not send board.py's profiler_stage "
-                         "into the 'could not be fetched' barrier")
+        self.assertEqual(binary, found)
         self.assertIn("would run", err)
         self.assertIn("curl", err)
-
-    def test_it_never_tries_to_unpack_what_curl_never_really_fetched(self):
-        found, _, err = self.fetch()
-        self.assertTrue(found)
         self.assertNotIn("would not unpack", err)
 
 

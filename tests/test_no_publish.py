@@ -21,37 +21,23 @@ def _policy():
 
 
 class TestProxyRefusesGitHubsApi(unittest.TestCase):
-    def test_uploads_is_refused(self):
-        self.assertFalse(_policy().host_allowed("uploads.github.com", 443)[0])
-
     def test_the_api_is_allowed_only_on_443_and_only_through_the_injector(self):
-        p = _policy()
-        ok, why = p.host_allowed("api.github.com", 443)
+        ok, why = _policy().host_allowed("api.github.com", 443)
         self.assertTrue(ok, why)
         self.assertIn("injector", why)
-        for port in (22, 80):
-            with self.subTest(port=port):
-                ok, why = p.host_allowed("api.github.com", port)
-                self.assertFalse(ok, why)
 
-    def test_a_lookalike_is_not_the_injected_host(self):
+    def test_uploads_other_api_ports_and_lookalikes_are_refused_and_github_itself_stays_allowed(self):
         p = _policy()
-        for host in ("evilapi.github.com.attacker.net", "api.github.com.attacker.net"):
-            with self.subTest(host=host):
-                ok, _ = p.host_allowed(host, 443)
-                self.assertFalse(ok, host)
-
-    def test_github_itself_and_codeload_stay_allowed(self):
-        p = _policy()
-        for host, port in (("github.com", 443), ("github.com", 22), ("codeload.github.com", 443),
-                           ("raw.githubusercontent.com", 443)):
+        for host, port, allowed in (("uploads.github.com", 443, False), ("api.github.com", 22, False),
+                                    ("api.github.com", 80, False), ("evilapi.github.com.attacker.net", 443, False),
+                                    ("api.github.com.attacker.net", 443, False), ("github.com", 443, True),
+                                    ("github.com", 22, True), ("codeload.github.com", 443, True),
+                                    ("raw.githubusercontent.com", 443, True)):
             with self.subTest(host=host, port=port):
-                ok, _ = p.host_allowed(host, port)
-                self.assertTrue(ok, host)
+                self.assertEqual(p.host_allowed(host, port)[0], allowed)
 
 
 class TestPushOnEndsAnyRunningAgent(PushTest):
-
     def setUp(self):
         super().setUp()
         self.w.seed()
@@ -89,6 +75,7 @@ class TestPushOnEndsAnyRunningAgent(PushTest):
         self.push("on")
         acts = [e[1] for e in self.w.acts() if e[0] == "act"]
         self.assertIn(("exec", "b", "sh", "-c", "kill 4242 2>/dev/null; exit 0"), acts)
+        self.assertFalse([a for a in acts if "reboot" in " ".join(a) or "$(id)" in " ".join(a)], acts)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -236,7 +237,6 @@ class TestLocal(MachineTest, LockEffectsConformance, CopyConformance, LogReadCon
             for _ in range(50):
                 if "started" in self.m.read(log):
                     break
-                import time
                 time.sleep(0.05)
             self.assertIn("started", self.m.read(log))
             self.assertTrue(self.m.kill(pid, signal.SIGKILL))
@@ -248,7 +248,6 @@ class TestLocal(MachineTest, LockEffectsConformance, CopyConformance, LogReadCon
         self.assertFalse(self.m.kill(999999))
 
     def test_a_spawned_driver_that_exited_is_not_alive(self):
-        import time
         pid = self.m.spawn(["true"], os.path.join(self.tmp, "log"))
         deadline = time.monotonic() + 0.4
         while self.m.alive(pid) and time.monotonic() < deadline:
@@ -595,7 +594,7 @@ class TestSsh(MachineTest):
         self.assertEqual(seen[0][-2:], ["/local/a", "box.example:/remote/a"])
         self.assertEqual(seen[1][-2:], ["box.example:/remote/b", "/local/b"])
 
-    def test_copy_tree_in_and_out_are_rsync_over_this_sshs_own_opts(self):
+    def test_copy_tree_in_and_out_are_rsync_over_this_sshs_own_opts_and_out_hands_it_each_exclusion(self):
         m = machine.Ssh("box.example", opts=["-i", "key"], timeout=3)
         seen = []
 
@@ -604,7 +603,7 @@ class TestSsh(MachineTest):
             return machine.Result(0)
         with mock.patch.object(machine.Local, "run", fake_run):
             m.copy_tree_in("/local/tree", "/remote/tree")
-            m.copy_tree_out("/remote/tree", "/local/tree")
+            m.copy_tree_out("/remote/tree", "/local/tree", exclude=("*.a", "DerivedSources"))
         for argv in seen:
             self.assertEqual(argv[0], "rsync")
             self.assertIn("--chmod=go-w", argv)
@@ -612,13 +611,7 @@ class TestSsh(MachineTest):
             self.assertIn("-i key", argv[argv.index("-e") + 1])
         self.assertEqual(seen[0][-2:], ["/local/tree/", "box.example:/remote/tree/"])
         self.assertEqual(seen[1][-2:], ["box.example:/remote/tree/", "/local/tree/"])
-
-    def test_copy_tree_out_hands_rsync_each_exclusion(self):
-        m = machine.Ssh("box.example", timeout=3)
-        seen = []
-        with mock.patch.object(machine.Local, "run", lambda self_, argv, input=None, timeout=None: seen.append(argv) or machine.Result(0)):
-            m.copy_tree_out("/remote/tree", "/local/tree", exclude=("*.a", "DerivedSources"))
-        self.assertIn(["--exclude", "*.a", "--exclude", "DerivedSources"], [seen[0][i:i + 4] for i in range(len(seen[0]))])
+        self.assertIn(["--exclude", "*.a", "--exclude", "DerivedSources"], [seen[1][i:i + 4] for i in range(len(seen[1]))])
 
     def test_a_copy_that_fails_raises(self):
         m = machine.Ssh("box.example", timeout=3)
@@ -696,10 +689,6 @@ class TestOneCopyPath(unittest.TestCase):
                 found.add(rel)
         self.assertEqual(sorted(found - set(COPIES_ELSEWHERE)), [], "copies outside lib/wk/machine.py")
         self.assertEqual(sorted(set(COPIES_ELSEWHERE) - found), [], "listed, and no longer copying")
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestADetachedJobIsInitsChild(unittest.TestCase):

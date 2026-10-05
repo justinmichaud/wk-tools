@@ -1,6 +1,4 @@
-"""`wk sysimage` runs where the image workspace is: `build` and `webkit` derive their workspace name (`name=derived`)
-from the profile, and the dispatcher routes them like any workspace command; a pmos or fetch profile stays on the host.
-The fleet walk is tests/test_sysimage_ls.py's; the names themselves tests/test_images.py's."""
+"""`wk sysimage` runs where the image workspace is: `build` and `webkit` derive their workspace name from the profile."""
 import os
 import subprocess
 import sys
@@ -20,7 +18,6 @@ PROFILE = "webkit-2.52-yocto-rpi5-64"
 
 
 def _profiles():
-    """Every configuration this checkout defines, with the builder its conf declares."""
     return [(n, images.load(n)["IMG_BUILDER"]) for n in images.names()]
 
 
@@ -56,8 +53,6 @@ class TestTheImageWorkspaceAnswer(WkTest):
 
 
 class TestTheDeclaredBuildOptions(unittest.TestCase):
-    """build and webkit take the options cmd/sysimage declares, and the dispatcher refuses any other"""
-
     def check(self, *args):
         inv = dispatch.Invocation("sysimage", D.Decl(REPO / "cmd" / "sysimage"), list(args))
         with mock.patch.object(dispatch, "in_workspace", lambda: False), \
@@ -79,9 +74,6 @@ class TestTheDeclaredBuildOptions(unittest.TestCase):
 
 
 class TestTheDispatcherReadsDerived(unittest.TestCase):
-    """`name=derived` in the dispatcher: what it declares, what it refuses,
-    and the three places it is not the same as a positional name."""
-
     def _decl(self, impl="cmd/sysimage"):
         return D.Decl(REPO / impl)
 
@@ -103,9 +95,6 @@ class TestTheDispatcherReadsDerived(unittest.TestCase):
         self.assertIn("name=inferred is not one of", str(cm.exception))
 
     def _resolve(self, *, wsplace, derived, args):
-        """resolve_place with its two collaborators answering as told: what
-        the command names as the place, and what a located workspace
-        resolves to."""
         inv = dispatch.Invocation("sysimage", self._decl(), args)
         with mock.patch.object(dispatch.Invocation, "named_place", lambda self: wsplace), \
                 mock.patch.object(dispatch, "registry", lambda: mock.Mock(ws_place=lambda name: "place-of:" + name)), \
@@ -114,21 +103,18 @@ class TestTheDispatcherReadsDerived(unittest.TestCase):
             return dispatch.resolve_place(inv, "derived", 0, "2", derived)
 
     def test_the_derived_name_decides_the_place(self):
-        """resolve_place asks the command, not the argument list"""
         self.assertEqual(self._resolve(wsplace="", derived="yocto-demo", args=["build", "demo"]),
                          "place-of:yocto-demo")
         self.assertEqual(self._resolve(wsplace="", derived="", args=["build", "demo"]), "container")
 
     def test_a_target_the_command_names_outright_wins(self):
-        """A spec that names its machine is not located: that machine
-        holds the image workspace whether or not another one holds its name."""
+        """A spec that names its machine is not located, whether or not another one holds its name."""
         self.assertEqual(self._resolve(wsplace="moose", derived="yocto-demo", args=["build", "demo@moose"]),
                          "moose")
 
 
 class TestAnImageWorkspaceOnAnotherMachine(WkTest):
-    """Where the build ends up. `fakebox` is a machine conf and a stubbed
-    ssh, so an image workspace on it is driven there and nothing is built anywhere."""
+    """`fakebox` is a machine conf and a stubbed ssh: nothing is built anywhere."""
 
     SSH_STUB = """#!/bin/sh
 printf '%s\\n' "$*" >> "$WK_TEST_SSH_LOG"
@@ -159,7 +145,6 @@ exit 0
                                                         capture_output=True, text=True).stdout.strip()}
 
     def test_the_build_is_delegated_with_its_arguments_intact(self):
-        """an image workspace on another machine: `wk sysimage build` runs over there"""
         with stub_path({"ssh": self.SSH_STUB}) as binp:
             env = dict(self.env, PATH=f"{binp}:{os.environ['PATH']}",
                        WK_PLACE="fakebox")
@@ -172,9 +157,6 @@ exit 0
             sent)
 
     def test_the_spec_names_the_machine_with_no_target_set(self):
-        """`<profile>@<machine>`: the machine a new image workspace goes on, said in the
-        argument rather than in WK_PLACE. Nothing here holds this image workspace, so
-        without the machine half there would be nothing to route by."""
         with stub_path({"ssh": self.SSH_STUB}) as binp:
             env = dict(self.env, PATH=f"{binp}:{os.environ['PATH']}")
             self.assertNotIn("WK_PLACE", env)
@@ -186,9 +168,7 @@ exit 0
                       f"not delegated to fakebox: {sent!r}")
 
     def test_an_image_workspace_that_does_not_exist_yet_is_not_refused(self):
-        """the build creates its image workspace, so the dispatcher does not refuse it"""
-        # `vm` is a place the yocto builder itself refuses, so this runs the
-        # whole dispatcher and stops one line into the command.
+        # `vm` is a place the yocto builder refuses, so this stops one line into the command.
         with stub_path({"tart": "exit 0\n"}) as binp:
             cp = run("sysimage", "build", self.profile, "--workspace", self.ws,
                      env=dict(self.env, WK_PLACE="vm",

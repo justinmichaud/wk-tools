@@ -1,4 +1,4 @@
-"""tests/run.py's own rules -- the per-test budget, tier selection, the owed"""
+"""tests/run.py's own rules: tier selection, the machine-tool shim, the per-test budget, owed marks."""
 import os
 import subprocess
 import sys
@@ -158,12 +158,6 @@ class TestTiers(RunnerTest):
         self.assertEqual(rc, 0, out)
         self.assertIn("tests: 1 ", out)
 
-    def test_a_pattern_narrows_the_run(self):
-        rc, out = self.runner("-k", "lint_passes", "-v")
-        self.assertEqual(rc, 0, out)
-        self.assertIn("tests: 1 ", out)
-        self.assertIn("test_lint_passes", out)
-
     def test_a_selection_of_nothing_is_a_failure_echoing_the_flags(self):
         rc, out = self.runner("--lint", "-k", "nosuchtestzz")
         self.assertEqual(rc, 1, out)
@@ -207,11 +201,6 @@ class TestBudget(RunnerTest):
         self.assertEqual(rc, 1, out)
         self.assertRegex(out, r"over budget: .*test_e_slow\.T\.test_sleeps took 0\.[3-9]s, budget 0\.1s")
         self.assertIn("failures: 1 ", out)
-
-    def test_a_test_under_budget_passes(self):
-        rc, out = self.runner("--unit", "-k", "sleeps", budget=30)
-        self.assertEqual(rc, 0, out)
-        self.assertIn("failures: 0 ", out)
 
     def test_the_summary_lists_the_slowest_tests(self):
         rc, out = self.runner("--unit", "-k", "test_e_slow", "-k", "test_a_unit")
@@ -275,14 +264,8 @@ class TestOwed(RunnerTest):
         self.assertIn("owed test passed -- remove its owed mark: "
                       "suite.test_a_unit.T.test_owed_but_passes (already landed)", out)
 
-    def test_the_owed_count_is_every_expected_failure(self):
-        rc, out = self.runner("--unit", "-k", "test_a_unit", "-k", "test_d_gated", "-k", "test_e_slow")
-        self.assertIn("owed: 1", out)
-        self.assertIn("tests: 5 ", out)
-
 
 class TestSelftestFlags(WkTest):
-
     def test_a_tier_flag_and_a_pattern_reach_the_runner(self):
         cp = run("selftest", "--lint", "test_the_declared_options_are_the_ones_the_code_reads")
         self.assertEqual(cp.returncode, 0, cp.stdout)

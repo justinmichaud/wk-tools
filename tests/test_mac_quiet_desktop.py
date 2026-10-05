@@ -5,7 +5,7 @@ import os
 import re
 import unittest
 
-from tests.support import REPO, WkTest, bash, func_body, stub_path
+from tests.support import REPO, WkTest, bash, func_body, scratch_dir, stub_path
 
 QUIET = REPO / "bench" / "mac-quiet-desktop.sh"
 TABLE = REPO / "bench" / "quiet" / "macos.tsv"
@@ -33,6 +33,19 @@ def _probe_only_keys():
     body = QUIET.read_text()
     probe = body[body.index("wk_quiet_desktop_probe()"):]
     return set(re.findall(r"printf '([a-z_]+)=", probe))
+
+
+def findings(func, probe, fix="the remedy"):
+    """Every line `func` prints for that probe, each split on tabs."""
+    cp = bash(f'''. {str(QUIET)!r}
+probe=$(cat <<'P'
+{probe}
+P
+)
+{func} "$probe" {fix!r}
+''')
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    return [tuple(l.split("\t")) for l in cp.stdout.splitlines()]
 
 
 class TestTheTables(unittest.TestCase):
@@ -78,15 +91,7 @@ class TestWhatMustKeepRunning(unittest.TestCase):
                 self.assertNotIn(row[1], stopped)
 
     def _judge(self, probe):
-        cp = bash(""". %r
-probe=$(cat <<'P'
-%s
-P
-)
-wk_quiet_daemons_findings "$probe" 'the remedy'
-""" % (str(QUIET), probe))
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        return [l.split("\t") for l in cp.stdout.splitlines() if "\t" in l]
+        return [f for f in findings("wk_quiet_daemons_findings", probe) if len(f) > 1]
 
     def _probe(self, state):
         rows = ["%s=%s" % (r[0], state) for r in _rows("expected")]
@@ -135,12 +140,18 @@ class TestApplyingIt(WkTest):
         _, calls = self._run("true")
         self.assertEqual("", calls)
 
-    def test_every_row_is_written(self):
+    def test_every_row_is_written_and_finder_and_the_dock_restarted_but_nothing_signalled(self):
         cp, calls = self._run("wk_quiet_desktop_user")
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         for name, domain, key, type_, value, _why in _rows("rows"):
             with self.subTest(setting=name):
+                if domain.startswith("@"):
+                    self.assertRegex(calls, rf"defaults -currentHost write {domain[1:]} {key}")
                 self.assertIn(f"write {domain.lstrip('@')} {key} -{type_} {value}", calls)
+        self.assertTrue([r for r in _rows("rows") if r[1].startswith("@")], "no per-hardware-UUID row left in the table")
+        self.assertRegex(calls, r"killall -u \S+ Finder Dock")
+        self.assertNotIn("bootout", calls)
+        self.assertNotRegex(calls, r"launchctl disable")
 
     def test_a_row_already_right_is_not_written_again(self):
         store = self.tmp / "defaults"
@@ -177,18 +188,6 @@ class TestApplyingIt(WkTest):
         self.assertNotIn("defaults write", again)
         self.assertNotIn("killall", again)
 
-    def test_finder_and_the_dock_are_restarted_when_a_row_moved(self):
-        _, calls = self._run("wk_quiet_desktop_user")
-        self.assertRegex(calls, r"killall -u \S+ Finder Dock")
-
-    def test_a_per_hardware_uuid_key_is_written_that_way(self):
-        _, calls = self._run("wk_quiet_desktop_user")
-        host = [r for r in _rows("rows") if r[1].startswith("@")]
-        self.assertTrue(host, "no per-hardware-UUID row left in the table")
-        for name, domain, key, _t, _v, _why in host:
-            with self.subTest(setting=name):
-                self.assertRegex(calls, rf"defaults -currentHost write {domain[1:]} {key}")
-
     def test_every_agent_is_on_the_list_that_gets_signalled(self):
         stopped = bash(f'. {str(QUIET)!r}\nwk_quiet_desktop_stopped\n').stdout
         listed = {line.split()[1] for line in stopped.splitlines() if line.split()}
@@ -199,17 +198,9 @@ class TestApplyingIt(WkTest):
             with self.subTest(daemon=row[1]):
                 self.assertIn(row[1], listed)
 
-    def test_applying_the_settings_signals_nothing_itself(self):
-        _, calls = self._run("wk_quiet_desktop_user")
-        self.assertNotIn("bootout", calls)
-        self.assertNotRegex(calls, r"launchctl disable")
-
-    def test_another_account_is_written_as_that_account(self):
-        _, calls = self._run("wk_quiet_desktop_user nosuchuser || true")
+    def test_another_account_is_written_as_that_account_and_one_that_does_not_exist_is_refused(self):
+        cp, calls = self._run("wk_quiet_desktop_user nosuchuser; echo rc=$?")
         self.assertIn("sudo -u nosuchuser defaults", calls)
-
-    def test_an_account_that_does_not_exist_is_refused(self):
-        cp, _ = self._run("wk_quiet_desktop_user nosuchuser; echo rc=$?")
         self.assertIn("rc=1", cp.stdout)
         self.assertIn("no such account", cp.stdout + cp.stderr)
 
@@ -266,32 +257,19 @@ class TestPausingTheDaemons(WkTest):
         skip = set(bash(f'. {str(QUIET)!r}\nwk_quiet_desktop_unstoppable\n').stdout.split())
         return [(i, row) for i, row in enumerate(_rows("daemons")) if row[1] not in skip]
 
-    def test_every_daemon_running_is_stopped(self):
+    def test_every_daemon_running_but_what_sip_refuses_is_stopped_from_one_listing(self):
         cp, calls = self._signal("wk_quiet_daemons_pause")
         self.assertIn("rc=0", cp.stdout)
-        for i, row in self._stoppable():
+        stoppable = self._stoppable()
+        for i, row in enumerate(_rows("daemons")):
             with self.subTest(daemon=row[1]):
-                self.assertIn("kill -STOP %d\n" % (100 + i), calls)
-
-    def test_resume_sends_the_other_signal_to_the_same_list(self):
+                (self.assertIn if (i, row) in stoppable else self.assertNotIn)("kill -STOP %d\n" % (100 + i), calls)
+        self.assertLess(len(stoppable), len(_rows("daemons")), "SIP refuses none of the table's daemons")
+        self.assertEqual(1, calls.count("ps "), calls)
         _, calls = self._signal("wk_quiet_daemons_resume")
-        for i, row in self._stoppable():
+        for i, row in stoppable:
             with self.subTest(daemon=row[1]):
                 self.assertIn("kill -CONT %d\n" % (100 + i), calls)
-
-    def test_what_sip_refuses_is_never_signalled(self):
-        _, calls = self._signal("wk_quiet_daemons_pause")
-        skip = bash(f'. {str(QUIET)!r}\nwk_quiet_desktop_unstoppable\n').stdout.split()
-        self.assertTrue(skip)
-        rows = {row[1]: 100 + i for i, row in enumerate(_rows("daemons"))}
-        for proc in skip:
-            if proc in rows:
-                with self.subTest(daemon=proc):
-                    self.assertNotIn("kill -STOP %d\n" % rows[proc], calls)
-
-    def test_the_machine_is_listed_once_and_never_asked_again(self):
-        _, calls = self._signal("wk_quiet_daemons_pause")
-        self.assertEqual(1, calls.count("ps "), calls)
 
     def test_a_daemon_that_is_not_running_is_not_signalled(self):
         cp, calls = self._signal("wk_quiet_daemons_pause", listing="1 /usr/sbin/nothing")
@@ -344,9 +322,18 @@ class TestDoNotDisturb(WkTest):
         """HOME a scratch directory: Apple's python3, first on this PATH, writes its bytecode cache under it."""
         return bash('. %r\n%s\n' % (str(QUIET), script), env={"PATH": "/usr/bin:/bin", "HOME": str(self.tmp)})
 
-    def test_no_file_is_not_off(self):
-        cp = self._dnd('wk_quiet_dnd_state %r' % str(self.tmp / "absent"))
-        self.assertEqual("?nofile", cp.stdout.strip(), cp.stdout + cp.stderr)
+    def test_each_assertions_file_reads_as_its_state(self):
+        for doc, want in ((None, "?nofile"), ("not json at all", "?malformed"),
+                          (json.dumps({"data": [{"storeAssertionRecords": [
+                              {"assertionEndDateTimestamp": 1.0, "assertionDetails": {}}]}]}), "off"),
+                          (json.dumps({"data": [], "header": {}}), "off")):
+            with self.subTest(want=want, doc=doc), scratch_dir() as home:
+                if doc is not None:
+                    path = home / "Library/DoNotDisturb/DB/Assertions.json"
+                    path.parent.mkdir(parents=True)
+                    path.write_text(doc)
+                cp = self._dnd('wk_quiet_dnd_state %r' % str(home))
+                self.assertEqual(want, cp.stdout.strip(), cp.stdout + cp.stderr)
 
     def test_a_file_it_may_not_read_says_so(self):
         db = self.tmp / "Library" / "DoNotDisturb" / "DB"
@@ -358,31 +345,16 @@ class TestDoNotDisturb(WkTest):
             self.skipTest("root reads a mode-0 file, so there is no denial to meet")
         self.assertEqual("?denied", cp.stdout.strip(), cp.stdout + cp.stderr)
 
-    def test_a_file_that_is_not_this_json_says_so(self):
-        db = self.tmp / "Library" / "DoNotDisturb" / "DB"
-        db.mkdir(parents=True)
-        (db / "Assertions.json").write_text("not json at all")
-        cp = self._dnd('wk_quiet_dnd_state %r' % str(self.tmp))
-        self.assertEqual("?malformed", cp.stdout.strip(), cp.stdout + cp.stderr)
-
-    def test_a_denied_read_is_left_out_of_the_probe_rather_than_refused(self):
-        script = (". %s\n" % QUIET
-                  + '_wk_qd_home() { printf "/nonexistent"; }\n'
-                  + 'wk_quiet_dnd_state() { printf "?denied"; }\n'
-                  + "probe() {%s}\nprobe tester\n"
-                  % func_body(QUIET.read_text(), "wk_quiet_desktop_probe"))
-        cp = bash(script, env={"PATH": "/usr/bin:/bin"})
-        self.assertNotIn("notifications_dnd", cp.stdout,
-                         "a row nothing can read refuses every leg:\n" + cp.stdout)
-
-    def test_a_reading_that_worked_is_still_judged(self):
-        script = (". %s\n" % QUIET
-                  + '_wk_qd_home() { printf "/nonexistent"; }\n'
-                  + 'wk_quiet_dnd_state() { printf "off"; }\n'
-                  + "probe() {%s}\nprobe tester\n"
-                  % func_body(QUIET.read_text(), "wk_quiet_desktop_probe"))
-        cp = bash(script, env={"PATH": "/usr/bin:/bin"})
-        self.assertIn("notifications_dnd=off", cp.stdout, cp.stdout + cp.stderr)
+    def test_a_denied_read_is_left_out_of_the_probe_and_one_that_worked_is_judged(self):
+        for state, want in (("?denied", None), ("off", "notifications_dnd=off")):
+            with self.subTest(state=state):
+                cp = bash(". %s\n_wk_qd_home() { printf /nonexistent; }\nwk_quiet_dnd_state() { printf %s; }\n"
+                          "probe() {%s}\nprobe tester\n" % (QUIET, state, func_body(QUIET.read_text(), "wk_quiet_desktop_probe")),
+                          env={"PATH": "/usr/bin:/bin"})
+                if want:
+                    self.assertIn(want, cp.stdout, cp.stdout + cp.stderr)
+                else:
+                    self.assertNotIn("notifications_dnd", cp.stdout, "a row nothing can read refuses every leg")
 
     def test_an_unreadable_row_is_unknown_and_not_wrong(self):
         """What the install's own preflight then does with it."""
@@ -401,34 +373,12 @@ class TestDoNotDisturb(WkTest):
                          record["assertionDetails"]["assertionDetailsModeIdentifier"])
         self.assertNotIn("assertionEndDateTimestamp", record)
 
-    def test_an_assertion_that_lapses_is_off(self):
-        path = self.tmp / "Library/DoNotDisturb/DB/Assertions.json"
-        path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({"data": [{"storeAssertionRecords": [
-            {"assertionEndDateTimestamp": 1.0, "assertionDetails": {}}]}]}))
-        cp = self._dnd('wk_quiet_dnd_state %r' % str(self.tmp))
-        self.assertEqual("off", cp.stdout.strip(), cp.stdout + cp.stderr)
 
-    def test_no_records_is_off(self):
-        path = self.tmp / "Library/DoNotDisturb/DB/Assertions.json"
-        path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({"data": [], "header": {}}))
-        cp = self._dnd('wk_quiet_dnd_state %r' % str(self.tmp))
-        self.assertEqual("off", cp.stdout.strip(), cp.stdout + cp.stderr)
 
 class TestTheFindings(WkTest):
 
-    def _judge(self, func, probe, fix="the remedy"):
-        cp = bash(f'''. {str(QUIET)!r}
-probe=$(cat <<'P'
-{probe}
-P
-)
-{func} "$probe" {fix!r}
-''')
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        return [tuple(l.split("\t")) for l in cp.stdout.splitlines()
-                if len(l.split("\t")) == 3]
+    def _judge(self, func, probe):
+        return [f for f in findings(func, probe) if len(f) == 3]
 
     def _settled(self):
         out = []
@@ -451,13 +401,28 @@ P
                 states = {f[0] for f in self._judge(func, self._settled())}
                 self.assertEqual({"ok"}, states, self._judge(func, self._settled()))
 
-    def test_a_setting_at_the_wrong_value_is_wrong_and_names_the_remedy(self):
-        probe = self._settled().replace("appnap=1", "appnap=0")
-        wrong = [f for f in self._judge("wk_quiet_desktop_findings", probe)
-                 if f[0] == "wrong"]
-        self.assertEqual(1, len(wrong), wrong)
-        self.assertIn("appnap", wrong[0][1])
-        self.assertEqual("the remedy", wrong[0][2])
+    def test_each_reading_off_the_settled_state_is_judged_by_its_own_row(self):
+        for func, old, new, word, kind, says, fix in (
+                ("wk_quiet_desktop_findings", "appnap=1\n", "appnap=0\n", "appnap", "wrong", (), "the remedy"),
+                ("wk_quiet_desktop_findings", "appnap=1\n", "", "appnap", "note", (), ""),
+                ("wk_quiet_desktop_findings", "appnap=1\n", "appnap=?\n", "appnap", "wrong", (), ""),
+                ("wk_quiet_daemons_findings", "notifications=stopped", "notifications=running", "banner", "wrong", (), ""),
+                ("wk_quiet_daemons_findings", "softwareupdate=stopped", "softwareupdate=running", "softwareupdated", "wrong",
+                 ("softwareupdated is running", "scans for updates"), ""),
+                ("wk_quiet_daemons_findings", "softwareupdate=stopped", "softwareupdate=absent", "softwareupdated", "ok", (), ""),
+                ("wk_quiet_cpu_findings", "power_source=AC Power", "power_source=Battery Power", "battery", "wrong", (), "plug it in"),
+                ("wk_quiet_cpu_findings", "cpu_speed_limit=100", "cpu_speed_limit=70", "70%", "wrong", (), ""),
+                ("wk_quiet_cpu_findings", "power_highpowermode=1", "power_highpowermode=", "highpowermode", "note", (), "")):
+            with self.subTest(new=new or "no " + old.strip()):
+                probe = self._settled() + "\n"
+                self.assertIn(old, probe)
+                judged = self._judge(func, probe.replace(old, new))
+                found = [f for f in judged if word in f[1]]
+                self.assertEqual([kind], [f[0] for f in found], judged)
+                self.assertEqual([], [f for f in judged if f[0] == "wrong" and f not in found])
+                for w in says:
+                    self.assertIn(w, found[0][1])
+                self.assertIn(fix, found[0][2])
 
     def test_a_row_macos_will_not_set_says_what_it_costs(self):
         unsettable = bash(f'. {str(QUIET)!r}\nwk_quiet_desktop_unsettable\n').stdout.split()
@@ -471,76 +436,11 @@ P
                 self.assertNotIn("wrong", states, f)
                 self.assertIn("note", states, f)
 
-    def test_a_key_the_probe_never_answered_is_unknown_not_off(self):
-        probe = "\n".join(l for l in self._settled().splitlines()
-                          if not l.startswith("appnap="))
-        f = [x for x in self._judge("wk_quiet_desktop_findings", probe)
-             if "appnap" in x[1]]
-        self.assertEqual(["note"], [x[0] for x in f], f)
-
-    def test_a_key_the_probe_asked_for_and_did_not_find_is_wrong(self):
-        """`?` is the probe asking macOS and being told there is no such key."""
-        probe = self._settled().replace("appnap=1", "appnap=?")
-        f = [x for x in self._judge("wk_quiet_desktop_findings", probe)
-             if "appnap" in x[1]]
-        self.assertEqual(["wrong"], [x[0] for x in f], f)
-
-    def test_an_agent_still_running_is_wrong_and_says_what_it_does(self):
-        probe = self._settled().replace("notifications=stopped", "notifications=running")
-        wrong = [f for f in self._judge("wk_quiet_daemons_findings", probe)
-                 if f[0] == "wrong"]
-        self.assertEqual(1, len(wrong), wrong)
-        self.assertIn("banner", wrong[0][1])
-
-    def test_a_daemon_still_running_is_wrong_and_says_what_it_costs(self):
-        probe = self._settled().replace("softwareupdate=stopped",
-                                        "softwareupdate=running")
-        wrong = [f for f in self._judge("wk_quiet_daemons_findings", probe)
-                 if f[0] == "wrong"]
-        self.assertEqual(1, len(wrong), wrong)
-        self.assertIn("softwareupdated is running", wrong[0][1])
-        self.assertIn("scans for updates", wrong[0][1])
-
-    def test_a_daemon_that_is_not_there_at_all_is_fine(self):
-        probe = self._settled().replace("softwareupdate=stopped",
-                                        "softwareupdate=absent")
-        self.assertEqual([], [f for f in self._judge("wk_quiet_daemons_findings", probe)
-                              if f[0] == "wrong"])
-
-    def test_a_machine_on_battery_is_refused(self):
-        probe = self._settled().replace("power_source=AC Power",
-                                        "power_source=Battery Power")
-        wrong = [f for f in self._judge("wk_quiet_cpu_findings", probe) if f[0] == "wrong"]
-        self.assertEqual(1, len(wrong), wrong)
-        self.assertIn("battery", wrong[0][1])
-        self.assertIn("plug it in", wrong[0][2])
-
-    def test_a_clock_already_held_down_is_refused(self):
-        probe = self._settled().replace("cpu_speed_limit=100", "cpu_speed_limit=70")
-        wrong = [f for f in self._judge("wk_quiet_cpu_findings", probe) if f[0] == "wrong"]
-        self.assertEqual(1, len(wrong), wrong)
-        self.assertIn("70%", wrong[0][1])
-
-    def test_a_lever_this_model_does_not_have_is_a_note_not_a_fault(self):
-        probe = self._settled().replace("power_highpowermode=1",
-                                        "power_highpowermode=")
-        f = [x for x in self._judge("wk_quiet_cpu_findings", probe)
-             if "highpowermode" in x[1]]
-        self.assertEqual(["note"], [x[0] for x in f], f)
-
     def test_no_finding_wraps_over_two_lines(self):
-        for func in ("wk_quiet_desktop_findings", "wk_quiet_cpu_findings",
-                     "wk_quiet_daemons_findings"):
-            cp = bash(f'''. {str(QUIET)!r}
-probe=$(cat <<'P'
-{self._settled().replace("appnap=1", "appnap=?")}
-P
-)
-{func} "$probe" "the remedy"
-''')
-            for line in cp.stdout.splitlines():
+        for func in ("wk_quiet_desktop_findings", "wk_quiet_cpu_findings", "wk_quiet_daemons_findings"):
+            for line in findings(func, self._settled().replace("appnap=1", "appnap=?")):
                 with self.subTest(findings=func, line=line):
-                    self.assertEqual(3, len(line.split("\t")), line)
+                    self.assertEqual(3, len(line), line)
 
 
 class TestBothKindsOfMeasuredMacGetIt(unittest.TestCase):

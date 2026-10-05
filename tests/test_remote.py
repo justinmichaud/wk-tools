@@ -4,7 +4,6 @@ import io
 import os
 import sys
 import unittest
-
 from unittest import mock
 
 from tests.support import REAL_MACHINES, REPO, WkTest, live_selected, machine_reachable, stub_path
@@ -71,7 +70,7 @@ class TestMachineAnswers(WkTest):
 
 
 def _configured_remote_machines():
-    """{name: kind} for every place conf in machines/ -- pure logic, no ssh."""
+    """{name: kind} for every place conf in machines/."""
     reg = places.Registry(REPO, env=dict(os.environ, WK_MACHINES_DIR=str(REAL_MACHINES)))
     return {n: reg.kind(n) for n in reg.known()}
 
@@ -96,7 +95,6 @@ class TestRemoteReachable(unittest.TestCase):
         for name in machines:
             with self.subTest(machine=name):
                 self.assertEqual(reg.load(name).info("selftest-nonexistent"), "absent")
-
 
 
 if __name__ == "__main__":

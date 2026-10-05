@@ -102,7 +102,6 @@ def ask(root, scripts):
 
 
 class TestTheHarness(WkTest):
-
     def setUp(self):
         self._scratch = scratch_dir()
         self.root = self._scratch.__enter__()
@@ -135,7 +134,6 @@ class TestTheHarness(WkTest):
 
 
 class TestUpstreamCarriesWhatTheMacPGOPatches(unittest.TestCase):
-
     @owed("upstream's OSXMiniDriver names no pgo_profile_output_directories, and webkitpy's locate_binary_xcrun "
           "still runs /usr/bin/xcrun off macOS")
     def test_the_mac_pgo_patches_nothing_upstream_owns(self):

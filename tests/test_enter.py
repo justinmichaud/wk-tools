@@ -7,8 +7,6 @@ from unittest import mock
 from tests.support import WkTest, fake_workspace, load_cmd, run
 
 
-
-
 class TestRunsCommand(WkTest):
     def test_it_runs_the_command_and_reports_both_streams_and_the_status(self):
         with fake_workspace() as ws:
@@ -35,7 +33,6 @@ class TestRunsCommand(WkTest):
 
 
 class TestNoTerminalAsksForNone(unittest.TestCase):
-
     def test_the_command_is_exec_argv_without_a_tty_and_replaces_this_process(self):
         enter = load_cmd("enter")
         driver = mock.Mock()
@@ -53,10 +50,7 @@ class TestNoTerminalAsksForNone(unittest.TestCase):
 
 class TestNoSuchWorkspace(WkTest):
     def test_refuses_by_name_without_landing_anywhere(self):
-        # WK_PLACE=vm: an absent name otherwise resolves to the container
-        # place, which a macOS host forwards into the podman VM -- what is
-        # under test here is the dispatcher's own resolution and refusal,
-        # needing no machine at all (test_lifecycle.py's own comment on this).
+        # WK_PLACE=vm: an absent name otherwise resolves to the container place, which a macOS host forwards to podman.
         cp = run("enter", "no-such-workspace-abcxyz", "true", env={"WK_PLACE": "vm"})
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("no such workspace", cp.stdout)

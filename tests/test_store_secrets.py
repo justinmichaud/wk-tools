@@ -1,8 +1,5 @@
 """The keyring is this device's own: `wk key` and `wk key push` read and write it with a `podman` on PATH that
-leaves a witness and fails, and every reader refuses a link a workspace could plant in agent-rw.
-
-Run: python3 -m unittest tests.test_store_secrets -v
-"""
+leaves a witness and fails, and every reader refuses a link a workspace could plant in agent-rw."""
 import contextlib
 import io
 import os
@@ -36,15 +33,8 @@ class _Here(WkTest):
         (self.store / "ws").mkdir(parents=True)
 
     def env(self, extra=None):
-        e = {
-            "WK_HOST_SECRETS": str(self.secrets),
-            "WK_STORE": str(self.store),
-            "WK_TEST_PODMAN_WITNESS": str(self.witness),
-            "XDG_STATE_HOME": str(self.tmp / "state"),
-        }
-        if extra:
-            e.update(extra)
-        return e
+        return {"WK_HOST_SECRETS": str(self.secrets), "WK_STORE": str(self.store),
+                "WK_TEST_PODMAN_WITNESS": str(self.witness), "XDG_STATE_HOME": str(self.tmp / "state"), **(extra or {})}
 
     def called(self):
         return self.witness.read_text() if self.witness.exists() else ""
@@ -159,29 +149,22 @@ class TestNothingButAFileIsReadOrWrittenThroughAgentRw(_Here):
         return {"cred_read": lambda: reader("cred_read"), "cred_stored": lambda: reader("cred_stored"),
                 "key_store": key_store}
 
-    def test_a_symlink_out_of_it_is_refused_by_every_entry_point(self):
+    def test_a_link_out_of_it_is_refused_by_every_entry_point(self):
         self.assertEqual(str(self.cred), self.sec().cred_path(self.NAME))
-        self.cred.symlink_to(self.token)
-        for name, run in self.entry_points().items():
-            with self.subTest(entry=name):
-                ok, out, err = run()
-                self.assertFalse(ok, out + err)
-                self.assertNotIn(self.REAL, out + err)
-                self.assertIn("not a file", err)
-                self.assertIn(str(self.cred), err)
-        self.assertEqual(self.REAL + "\n", self.token.read_text(),
-                         "the write went through the link to the token")
-
-    def test_a_hard_link_to_the_token_is_refused_by_every_entry_point(self):
-        """O_NOFOLLOW cannot see this one; only st_nlink says so."""
-        os.link(self.token, self.cred)
-        for name, run in self.entry_points().items():
-            with self.subTest(entry=name):
-                ok, out, err = run()
-                self.assertFalse(ok, out + err)
-                self.assertNotIn(self.REAL, out + err)
-                self.assertIn("hard links", err)
-        self.assertEqual(self.REAL + "\n", self.token.read_text())
+        # O_NOFOLLOW cannot see a hard link; only st_nlink says so.
+        for kind, plant, why in (("symlink", lambda: self.cred.symlink_to(self.token), "not a file"),
+                                 ("hard link", lambda: os.link(self.token, self.cred), "hard links")):
+            with self.subTest(kind):
+                plant()
+                for name, run in self.entry_points().items():
+                    with self.subTest(entry=name):
+                        ok, out, err = run()
+                        self.assertFalse(ok, out + err)
+                        self.assertNotIn(self.REAL, out + err)
+                        self.assertIn(why, err)
+                        self.assertIn(str(self.cred), err)
+                self.assertEqual(self.REAL + "\n", self.token.read_text(), "the write went through the link to the token")
+                self.cred.unlink()
 
     def test_a_directory_in_its_place_is_refused(self):
         self.cred.mkdir()

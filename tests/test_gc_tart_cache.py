@@ -14,15 +14,13 @@ class TestTheCacheIsTrimmedToItsBudget(GcTest):
         self.w.vm = FakeVm(self.w, [])
         self.w.mkdirs("/tart/cache")
 
-    def test_it_prunes_to_the_declared_budget(self):
-        self.with_cache(WK_TART_CACHE_GB="7")
-        rc, err = self.run_gc()
-        self.assertEqual((rc, self.prunes()), (0, [("/bin/tart", "prune", "--space-budget", "7")]), err)
-
-    def test_it_prunes_caches_and_never_the_guests(self):
-        self.with_cache()
-        self.run_gc()
-        self.assertEqual(self.prunes(), [("/bin/tart", "prune", "--space-budget", "20")])
+    def test_it_prunes_to_the_declared_budget_or_the_default(self):
+        for env, budget in (({"WK_TART_CACHE_GB": "7"}, "7"), ({}, "20")):
+            with self.subTest(budget=budget):
+                self.setUp()
+                self.with_cache(**env)
+                rc, err = self.run_gc()
+                self.assertEqual((rc, self.prunes()), (0, [("/bin/tart", "prune", "--space-budget", budget)]), err)
 
     def test_a_failing_tart_is_reported_and_the_rest_still_goes(self):
         self.with_cache()

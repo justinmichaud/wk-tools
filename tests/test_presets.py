@@ -31,17 +31,18 @@ def env_of(c, env=None, jobs=4, nice=10, arch="native", **kw):
 
 
 class TestAllConfigDefaults(unittest.TestCase):
-
     KINDS = {"container": "ON", "vm": "ON", "local": "ON", "remote": "OFF"}
 
-    def test_every_cmake_config_starts_with_them(self):
+    def test_every_cmake_config_starts_with_them_once(self):
         for name in CMAKE_PRESETS:
             for kind, bt in self.KINDS.items():
                 c = preset(name, kind=kind)
                 with self.subTest(config=name, kind=kind):
                     self.assertTrue(c.args.startswith("--no-fatal-warnings "), c.args)
-                    for flag in ("-DDEVELOPER_MODE=ON", "-DUSE_VULKAN=OFF", "-DENABLE_THUNDER=OFF", "-DUSE_LIBBACKTRACE=" + bt):
-                        self.assertIn(flag, c.cmake)
+                    self.assertEqual(c.args.count("--no-fatal-warnings"), 1)
+                    self.assertIn("-DUSE_LIBBACKTRACE=" + bt, c.cmake)
+                    for flag in ("-DDEVELOPER_MODE=ON", "-DUSE_VULKAN=OFF", "-DENABLE_THUNDER=OFF", "-DUSE_LIBBACKTRACE="):
+                        self.assertEqual(c.cmake.count(flag), 1, "%s states %s as well as the default" % (name, flag))
 
     def test_no_xcode_config_gets_them(self):
         for name in XCODE_PRESETS:
@@ -49,14 +50,6 @@ class TestAllConfigDefaults(unittest.TestCase):
             with self.subTest(config=name):
                 self.assertNotIn("--no-fatal-warnings", c.args)
                 self.assertEqual(c.cmake, "")
-
-    def test_no_config_repeats_a_default_it_agrees_with(self):
-        for name in CMAKE_PRESETS:
-            c = preset(name)
-            with self.subTest(config=name):
-                self.assertEqual(c.args.count("--no-fatal-warnings"), 1)
-                for flag in ("-DDEVELOPER_MODE=ON", "-DUSE_VULKAN=OFF", "-DENABLE_THUNDER=OFF", "-DUSE_LIBBACKTRACE="):
-                    self.assertEqual(c.cmake.count(flag), 1, "%s states %s as well as the default" % (name, flag))
 
     def test_an_unknown_name_is_a_lookup_error_and_the_list_names_every_config(self):
         with self.assertRaises(LookupError):
@@ -66,7 +59,6 @@ class TestAllConfigDefaults(unittest.TestCase):
 
 
 class TestMacJscUsesXcode(unittest.TestCase):
-
     def test_macos_jsc_configs_build_with_xcode(self):
         for name in JSC_PRESETS:
             c = preset(name, "macos", "vm")
@@ -195,30 +187,22 @@ class TestLibcxxDefault(unittest.TestCase):
 
 
 class TestCcacheIsBlindToTheJobCount(unittest.TestCase):
-
     MOVES = frozenset({"NUMBER_OF_PROCESSORS", "CMAKE_BUILD_PARALLEL_LEVEL", "WK_JOBS", "WK_NICE"})
 
-    def _only_job_and_nice_move(self, c):
-        low, high = env_of(c, jobs=1, nice=19), env_of(c, jobs=64, nice=0)
-        self.assertEqual(set(low), set(high))
-        self.assertFalse({k for k in low if low[k] != high[k]} - self.MOVES)
-
-    def test_cmake_port(self):
-        self._only_job_and_nice_move(preset("jsc-release"))
-
-    def test_apple_port(self):
-        self._only_job_and_nice_move(preset("mac-release", "macos", "vm"))
+    def test_only_the_job_count_and_nice_move_in_the_build_env(self):
+        for c in (preset("jsc-release"), preset("jsc-debug"), preset("mac-release", "macos", "vm")):
+            with self.subTest(config=c):
+                low, high = env_of(c, jobs=1, nice=19), env_of(c, jobs=64, nice=0)
+                self.assertEqual(set(low), set(high))
+                self.assertFalse({k for k in low if low[k] != high[k]} - self.MOVES)
 
     def test_a_jsc_config_asks_for_ccache_and_the_other_ports_do_not(self):
         for name in JSC_PRESETS:
             self.assertEqual(env_of(preset(name)).get("WK_USE_CCACHE"), "YES")
         self.assertNotIn("WK_USE_CCACHE", env_of(preset("gtk-release")))
-        self._only_job_and_nice_move(preset("jsc-debug"))
 
 
 class TestMbPerJob(unittest.TestCase):
-    """The memory a compile job is charged: the config's figure, unless WK_MB_PER_JOB names one."""
-
     def test_jsconly_is_charged_less_unless_WK_MB_PER_JOB_names_a_figure(self):
         self.assertEqual(presets.mb_per_job(preset("mac-release", "macos", "vm"), {}), 3072)
         self.assertEqual(presets.mb_per_job(preset("gtk-debug"), {}), 3072)

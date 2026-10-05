@@ -317,12 +317,14 @@ class TestRm(MachineTest):
         self.assertTrue((w.fleet / "box.conf").exists())
         self.assertIn("git rm machines/box.conf", err.replace(str(w.fleet), "machines"))
 
-    def test_an_unreachable_machine_only_loses_its_conf_here(self):
-        w = self.world(conf=self.CONF, answers=False)
-        rc, err = self.quiet(w.machines().rm, "box")
-        self.assertEqual(rc, 0, err)
-        self.assertIn("Connection refused", err)
-        self.assertEqual([e for e in w.fake.effects if e[0] == "remove"], [("remove", str(w.fleet / "box.conf"))])
+    def test_an_unreachable_machine_or_board_only_loses_its_conf_here(self):
+        for conf in (self.CONF, TestBoardRm.CONF):
+            with self.subTest(conf=conf):
+                w = self.world(conf=conf, answers=False)
+                rc, err = self.quiet(w.machines().rm, "box")
+                self.assertEqual(rc, 0, err)
+                self.assertIn("Connection refused", err)
+                self.assertEqual([e for e in w.fake.effects if e[0] == "remove"], [("remove", str(w.fleet / "box.conf"))])
 
     def test_an_rm_killed_after_any_effect_and_rerun_converges(self):
         def world():
@@ -373,12 +375,14 @@ class TestBoardSetup(MachineTest):
                 w.machines().setup("box")
         converges(self, world, run_once, World.state)
 
-    def test_an_unreachable_board_still_prints_the_plan_under_dry_run(self):
-        w = self.world(conf=self.CONF, answers=False)
-        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
-            rc, err = self.quiet(w.machines().setup, "box")
-        self.assertEqual(rc, 0, err)
-        self.assertIn("wk-card-priv", err)
+    def test_an_unreachable_board_or_mac_still_prints_the_plan_under_dry_run(self):
+        for conf, plan in ((self.CONF, "wk-card-priv"), ("kind=mac\nssh=box\n", "would push")):
+            with self.subTest(conf=conf):
+                w = self.world(conf=conf, answers=False)
+                with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
+                    rc, err = self.quiet(w.machines().setup, "box")
+                self.assertEqual(rc, 0, err)
+                self.assertIn(plan, err)
 
 
 class TestBoardRm(MachineTest):
@@ -391,24 +395,6 @@ class TestBoardRm(MachineTest):
         self.assertIn(("run", ("rm", "-f", "/usr/local/libexec/wk-card-priv")), w.fake.effects)
         self.assertIn(("run", ("rm", "-f", "/usr/local/libexec/wk-check-boot-files.py")), w.fake.effects)
         self.assertEqual([e for e in w.fake.effects if e[0] == "remove"], [("remove", str(w.fleet / "box.conf"))])
-
-    def test_an_unreachable_board_only_loses_its_conf_here(self):
-        w = self.world(conf=self.CONF, answers=False)
-        rc, err = self.quiet(w.machines().rm, "box")
-        self.assertEqual(rc, 0, err)
-        self.assertIn("Connection refused", err)
-        self.assertEqual([e for e in w.fake.effects if e[0] == "remove"], [("remove", str(w.fleet / "box.conf"))])
-
-
-class TestMacSetup(MachineTest):
-    CONF = "kind=mac\nssh=box\n"
-
-    def test_an_unreachable_mac_still_prints_the_plan_under_dry_run(self):
-        w = self.world(conf=self.CONF, answers=False)
-        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
-            rc, err = self.quiet(w.machines().setup, "box")
-        self.assertEqual(rc, 0, err)
-        self.assertIn("would push", err)
 
 
 class TestBridgeDispatch(MachineTest):

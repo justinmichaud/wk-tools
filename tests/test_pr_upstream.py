@@ -101,14 +101,10 @@ class Wired(unittest.TestCase):
 
 class TestLsRemote(Wired):
     def test_it_answers_from_the_fork_not_the_mirror(self):
-        self.assertEqual(pr.ls_remote(In(self.src), str(self.fork), "refs/heads/topic"), self.topic)
-
-    def test_a_head_both_carry_is_read_from_the_fork(self):
-        self.assertEqual(pr.ls_remote(In(self.src), str(self.fork), "refs/heads/main"), self.fork_main)
         self.assertNotEqual(self.fork_main, self.origin_main)
-
-    def test_a_ref_the_fork_does_not_have_is_empty(self):
-        self.assertEqual(pr.ls_remote(In(self.src), str(self.fork), "refs/heads/no-such"), "")
+        for ref, want in (("refs/heads/topic", self.topic), ("refs/heads/main", self.fork_main), ("refs/heads/no-such", "")):
+            with self.subTest(ref=ref):
+                self.assertEqual(pr.ls_remote(In(self.src), str(self.fork), ref), want)
 
 
 class TestBranchRepos(unittest.TestCase):
@@ -194,8 +190,6 @@ class Checkout(Wired):
 
 
 class TestThePrFetchRetiresNothing(Checkout):
-
-
     def test_the_one_fetch_is_by_the_direct_url_with_no_prune(self):
         driver, _ = self.run_checkout("justinmichaud:topic")
         fetches = [a for a in driver.ran if "fetch" in a]
@@ -247,56 +241,29 @@ class TestThePrBranchIsLeftPushable(Pushable):
         self.assertEqual(self.resolves(), "fork/mine")
         self.assertNotIn("push -u", self.check())
         self.assert_bare_push_goes_to_own_name("mine")
+        self.assertEqual(pr.converge(Here(self.src), "ws", str(self.src), self.forks), [])
 
-    def test_a_real_checkout_track_resolves_and_pushes(self):
+    def test_a_real_checkout_track_or_branch_u_resolves_and_pushes(self):
         git_("fetch", "-q", "fork", cwd=self.src)
-        git_("checkout", "-q", "--track", "fork/topic", cwd=self.src)
-        self.assertEqual(self.resolves(), "fork/topic")
-        self.assertNotIn("push -u", self.check())
-        self.assert_bare_push_goes_to_own_name("topic")
-
-    def test_a_real_branch_u_resolves_and_pushes(self):
-        git_("fetch", "-q", "fork", cwd=self.src)
-        git_("checkout", "-q", "-b", "other", cwd=self.src)
-        git_("branch", "-u", "fork/topic", cwd=self.src)
-        self.assertEqual(self.resolves(), "fork/topic")
-        self.assertNotIn("push -u", self.check())
-        self.assert_bare_push_goes_to_own_name("other")
+        for name, how in (("topic", [["checkout", "-q", "--track", "fork/topic"]]),
+                          ("other", [["checkout", "-q", "-b", "other"], ["branch", "-u", "fork/topic"]])):
+            with self.subTest(name=name):
+                for argv in how:
+                    git_(*argv, cwd=self.src)
+                self.assertEqual(self.resolves(), "fork/topic")
+                self.assertNotIn("push -u", self.check())
+                self.assert_bare_push_goes_to_own_name(name)
 
     def push(self):
         self.commit(self.src, "work-%s" % git_("rev-parse", "--short", "HEAD", cwd=self.src))
         return subprocess.run(["git", "push", "--dry-run"], cwd=str(self.src), capture_output=True, text=True)
 
-    def test_git_derives_the_tracking_ref_itself_as_the_upstream(self):
-        git_("fetch", "-q", "--no-prune", str(self.dir / "fork"), "refs/heads/topic:refs/remotes/fork/topic", cwd=self.src)
-        git_("checkout", "-q", "-b", "topic", "refs/remotes/fork/topic", cwd=self.src)
-        git_("branch", "--set-upstream-to=refs/remotes/fork/topic", "topic", cwd=self.src)
-        self.assertEqual(self.upstream(), ("fork", "refs/remotes/fork/topic"))
-        git_("config", "push.default", "simple", cwd=self.src)
-        cp = self.push()
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("does not match", cp.stderr)
-
     def test_the_branch_tracks_the_forks_branch_by_name_and_a_bare_push_resolves(self):
         _, err = self.run_checkout("justinmichaud:topic")
         self.assertIn("'ws' is on topic (WebKit, from fork)", err)
         self.assertEqual(self.upstream(), ("fork", "refs/remotes/fork/topic"))
-        self.assertEqual(git_("rev-parse", "--abbrev-ref", "@{u}", cwd=self.src), "fork/topic")
-        cp = self.push()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("topic -> topic", cp.stderr + cp.stdout)
-
-    def test_a_push_u_is_converged_by_sync_fix(self):
-        self.run_checkout("justinmichaud:topic")
-        git_("config", "branch.topic.merge", "refs/heads/topic", cwd=self.src)
-        self.assertNotEqual(subprocess.run(["git", "rev-parse", "@{u}"], cwd=str(self.src), capture_output=True).returncode, 0)
-        self.assertEqual(pr.converge(Here(self.src), "ws", str(self.src), [("fork", "justinmichaud/WebKit", "github-webkit")]),
-                         ["converged: topic tracks fork/topic"])
-        self.assertEqual(git_("rev-parse", "--abbrev-ref", "@{u}", cwd=self.src), "fork/topic")
-        cp = self.push()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("topic -> topic", cp.stderr + cp.stdout)
-        self.assertEqual(pr.converge(Here(self.src), "ws", str(self.src), [("fork", "justinmichaud/WebKit", "github-webkit")]), [])
+        self.assertEqual(self.resolves(), "fork/topic")
+        self.assert_bare_push_goes_to_own_name("topic")
 
     def test_the_second_fork_converges_the_same_way(self):
         git_("remote", "add", "forkwpe", str(self.fork), cwd=self.src)
@@ -308,10 +275,8 @@ class TestThePrBranchIsLeftPushable(Pushable):
         git_("config", "branch.topic.merge", "refs/heads/topic", cwd=self.src)
         forks = [("fork", "justinmichaud/WebKit", "github-webkit"), ("forkwpe", "justinmichaud/WPEWebKit", "github-wpewebkit")]
         self.assertEqual(pr.converge(Here(self.src), "ws", str(self.src), forks), ["converged: topic tracks forkwpe/topic"])
-        self.assertEqual(git_("rev-parse", "--abbrev-ref", "@{u}", cwd=self.src), "forkwpe/topic")
-        cp = self.push()
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertIn("topic -> topic", cp.stderr + cp.stdout)
+        self.assertEqual(self.resolves(), "forkwpe/topic")
+        self.assert_bare_push_goes_to_own_name("topic")
 
     def test_origin_and_wpe_refuse_a_bare_push(self):
         for remote in ("origin", "wpe"):

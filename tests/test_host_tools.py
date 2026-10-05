@@ -8,77 +8,30 @@ APT_TXT = REPO / "host" / "linux" / "apt.txt"
 
 
 def parse_apt_blocks(text):
-    """Group host/linux/apt.txt into (comment_lines, package_lines) blocks, split on blank lines."""
-    blocks = []
-    chunk = []
-    for raw in text.splitlines():
-        if raw.strip() == "":
-            if chunk:
-                blocks.append(chunk)
-                chunk = []
-            continue
-        chunk.append(raw)
-    if chunk:
-        blocks.append(chunk)
-
-    result = []
-    for lines in blocks:
-        comment = [l for l in lines if l.lstrip().startswith("#")]
-        pkgs = [l.strip() for l in lines if not l.lstrip().startswith("#")]
-        if pkgs:
-            result.append((comment, pkgs))
-    return result
+    """host/linux/apt.txt as (comment lines, package lines) per blank-line-separated block that has packages."""
+    blocks = [[l for l in chunk.splitlines() if l.strip()] for chunk in re.split(r"\n\s*\n", text)]
+    return [([l for l in b if l.lstrip().startswith("#")], [l.strip() for l in b if not l.lstrip().startswith("#")])
+            for b in blocks if any(not l.lstrip().startswith("#") for l in b)]
 
 
-# A `wk <cmd>` mention: "wk" followed by a bare word (stops at the first
-# non-word character, so "wk-tools" and "wk new/build" both parse sanely).
 WK_CMD_RE = re.compile(r"\bwk ([A-Za-z][A-Za-z0-9_-]*)")
-# A repo-relative path: at least one '/' joining word/dot/dash segments.
 PATH_RE = re.compile(r"\b[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\b")
 
 
 class TestAptTxtNamesItsConsumers(unittest.TestCase):
-    """Every host/linux/apt.txt block names the `wk` command or repo file that needs it, and that thing actually
-    exists (CLAUDE.md: 'no apt.txt line without earning its place')."""
-
-    def test_every_block_names_something_checkable(self):
-        text = APT_TXT.read_text()
-        blocks = parse_apt_blocks(text)
-        self.assertTrue(blocks, "host/linux/apt.txt parsed to no blocks at all")
-
+    def test_every_block_names_an_existing_wk_command_or_repo_file_that_needs_it(self):
+        blocks = parse_apt_blocks(APT_TXT.read_text())
+        self.assertTrue(blocks)
         unchecked = []
         for comment, pkgs in blocks:
-            comment_text = "\n".join(comment)
-            label = ", ".join(pkgs)
-
-            found_anything = False
-
-            if "./setup" in comment_text:
-                found_anything = True
-
-            for m in WK_CMD_RE.finditer(comment_text):
-                cmd = m.group(1)
-                found_anything = True
-                self.assertTrue(
-                    (REPO / "cmd" / cmd).is_file(),
-                    f"block '{label}' names 'wk {cmd}', but cmd/{cmd} does not exist",
-                )
-
-            for m in PATH_RE.finditer(comment_text):
-                path = m.group(0).rstrip(").,:;")
-                if (REPO / path).exists():
-                    found_anything = True
-
-            if not found_anything:
-                unchecked.append(label)
-
-        self.assertEqual(
-            unchecked,
-            [],
-            "host/linux/apt.txt block(s) name nothing checkable (no 'wk <cmd>', "
-            "'./setup' mention, or existing repo path) for: "
-            + "; ".join(unchecked),
-        )
+            text = "\n".join(comment)
+            cmds = [m.group(1) for m in WK_CMD_RE.finditer(text)]
+            for cmd in cmds:
+                self.assertTrue((REPO / "cmd" / cmd).is_file(), f"{pkgs} names 'wk {cmd}', which does not exist")
+            paths = [m.group(0).rstrip(").,:;") for m in PATH_RE.finditer(text)]
+            if not ("./setup" in text or cmds or any((REPO / p).exists() for p in paths)):
+                unchecked.append(", ".join(pkgs))
+        self.assertEqual([], unchecked, "no 'wk <cmd>', './setup' or existing repo path")
 
     def test_apt_txt_is_comment_blocks_and_bare_package_names(self):
         for line in APT_TXT.read_text().splitlines():
@@ -88,8 +41,7 @@ class TestAptTxtNamesItsConsumers(unittest.TestCase):
 
 
 class TestPersistentSettingsRecordAReason(unittest.TestCase):
-    """A host setting persists only with a recorded reason: every host/macos/defaults.conf entry is `domain key
-    type value reason`, the shape host/macos/settings.sh reads and refuses without the reason."""
+    """Every host/macos/defaults.conf entry is `domain key type value reason`, the shape host/macos/settings.sh reads."""
 
     def test_every_default_names_its_reason(self):
         bare = []

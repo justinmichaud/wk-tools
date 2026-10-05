@@ -1,4 +1,4 @@
-"""The dispatcher's two effects go through the one Machine seam: the `tailnet`"""
+"""The dispatcher's two effects, the `tailnet` need and starting the podman machine, go through the Machine seam."""
 import contextlib
 import io
 import os
@@ -36,13 +36,11 @@ class TestTailnetNeed(unittest.TestCase):
         fake.answer(("tailscale", "status", "--json"), out=SELF_ONLY)
         self.assertEqual(self._check(fake), "")
 
-    def test_a_machine_whose_tailscale_fails_is_not_on_the_tailnet(self):
-        fake = Fake()
-        fake.answer(("tailscale", "status", "--json"), rc=1)
-        self.assertIn("not on the tailnet", self._check(fake))
-
-    def test_a_machine_without_tailscale_is_not_on_the_tailnet(self):
-        self.assertIn("not on the tailnet", self._check(Fake()))
+    def test_a_machine_whose_tailscale_fails_or_is_absent_is_not_on_the_tailnet(self):
+        failing = Fake()
+        failing.answer(("tailscale", "status", "--json"), rc=1)
+        for fake in (failing, Fake()):
+            self.assertIn("not on the tailnet", self._check(fake))
 
 
 class TestPodmanMachineStart(unittest.TestCase):

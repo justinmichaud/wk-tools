@@ -1,5 +1,7 @@
 """The remote driver's probe (lib/wk/places.py): `parse_probe` over captured Linux and Darwin samples, and the
 one round trip that fetches it, under a ceiling of its own."""
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -10,6 +12,7 @@ from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places  # noqa: E402
+from wk.act import Refused  # noqa: E402
 from wk.machine import TIMED_OUT, Fake, Result  # noqa: E402
 
 # A real /proc/loadavg line and a real /proc/meminfo excerpt, after the
@@ -51,10 +54,11 @@ def fields(parsed):
     return tuple(parsed[k] for k in ("cores", "load", "mem_mb", "ionice", "os"))
 
 
-class TestRemoteProbeParseLinux(unittest.TestCase):
-    def test_parses_cores_load_mem_ionice_os_from_proc(self):
+class TestRemoteProbeParse(unittest.TestCase):
+    def test_parses_cores_load_mem_ionice_os_from_proc_past_a_trailing_blank_line(self):
         p = places.parse_probe(LINUX_SAMPLE)
         self.assertEqual(fields(p), (8, 0, 20000, "yes", "linux"))   # int(0.52); int(20480000 / 1024)
+        self.assertEqual(fields(places.parse_probe(LINUX_SAMPLE + "\n")), fields(p))
         self.assertEqual((p["home"], p["root"]), ("/home/t", "/home/t/wk"))
         self.assertEqual(places.parse_probe(LINUX_SAMPLE, "/srv/wk")["root"], "/srv/wk")
 
@@ -81,11 +85,6 @@ class TestRemoteProbeParseDarwin(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "vm_stat printed no page size"):
             places.parse_probe(sample)
 
-
-class TestRemoteProbeParseRobustness(unittest.TestCase):
-    def test_trailing_blank_line_does_not_erase_ionice(self):
-        p = places.parse_probe(LINUX_SAMPLE + "\n")
-        self.assertEqual((p["ionice"], p["os"]), ("yes", "linux"))
 
     def test_an_answer_missing_a_figure_is_refused_not_read_as_one_core_and_no_memory(self):
         with self.assertRaisesRegex(ValueError, "the core count is '', not a number"):
@@ -135,9 +134,6 @@ class TestTheProbeIsBounded(unittest.TestCase):
         self.assertEqual(fake.timeouts, [20])
 
     def test_an_unreadable_answer_is_no_answer_and_a_command_needing_it_says_why(self):
-        from wk.act import Refused
-        import contextlib
-        import io
         t = self.remote(TimingFake(Result(0, "/home/t\nLinux\neight\n")), "20")
         self.assertEqual(t.answers(), (False, "it answered the probe with what this end cannot read: the core count is 'eight', not a number"))
         with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(Refused):

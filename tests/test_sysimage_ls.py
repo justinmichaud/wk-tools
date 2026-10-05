@@ -16,7 +16,7 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import act, images, record  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
-from wk.sysimage import cli, ls, pmos  # noqa: E402
+from wk.sysimage import cli, ls, macvolume, pmos  # noqa: E402
 
 YOCTO = "webkit-2.52-yocto-rpi3-32"          # a profile-guided release
 BUILDROOT = "wpewebkit-2.38-buildroot-rpi3-32"
@@ -25,7 +25,6 @@ SHA = "a" * 40
 
 
 def registry(store_dir, drivers=(), machine=None):
-    """What cli.Sysimage and ls.Listing ask of the registry."""
     # A blind fleet: host_profiles()'s mac-volume check reads machines/<IMG_MACHINE>.conf through this env, and this
     # repo's real one names a real Mac's real volume. WK_IN_VM=1 keeps the fetch builder's cache in this store too.
     env = {"WK_MACHINES_DIR": NO_REGISTRY, "WK_IN_VM": "1", "WK_STORE": str(store_dir)}
@@ -101,20 +100,15 @@ class TestTheBuildersConform(unittest.TestCase):
 class TestPmosAndFetchImagesHaveAReader(unittest.TestCase):
     """A fetch image is left in this host's own cache; a pmos image on its build host."""
 
-    def test_a_fetched_image_is_found_in_this_host_s_cache(self):
-        with scratch_dir() as d:
-            reg = registry(d)
-            p = images.load("recovery-pinephone", reg.env)
-            cached = os.path.join(str(d), "cache", "images", "pine64-pinephone.img.xz")
-            os.makedirs(os.path.dirname(cached), exist_ok=True)
-            open(cached, "w").close()
-            self.assertEqual(ls.builder_outputs(reg, None, p), [cached])
-
-    def test_no_fetched_image_yet_is_no_marker(self):
+    def test_a_fetched_image_is_found_in_this_host_s_cache_and_none_yet_is_no_marker(self):
         with scratch_dir() as d:
             reg = registry(d)
             p = images.load("recovery-pinephone", reg.env)
             self.assertEqual(ls.builder_outputs(reg, None, p), [])
+            cached = os.path.join(str(d), "cache", "images", "pine64-pinephone.img.xz")
+            os.makedirs(os.path.dirname(cached), exist_ok=True)
+            open(cached, "w").close()
+            self.assertEqual(ls.builder_outputs(reg, None, p), [cached])
 
     def test_a_pmos_image_is_asked_of_its_build_host(self):
         with scratch_dir() as d:
@@ -185,33 +179,20 @@ class TestTheListing(NoPmosHost):
         self.assertEqual(lines[1].split()[:5], [YWS, "rpi3", "yocto", "ready", "1.0K"])
         self.assertEqual(lines[2].strip(), str(p))
 
-    def test_a_workspace_with_no_image_still_has_a_row(self):
-        """A yocto image stage removes the last image as it rebuilds, so this is normal for hours."""
-        with scratch_dir() as d:
-            (d / "ws" / YWS / "build").mkdir(parents=True)
-            cp = ran(sysimage(d).ls, False)
-        self.assertEqual(cp.out.splitlines()[1].split()[3], "none")
-
-    def test_a_running_build_is_stated_on_the_row(self):
-        with scratch_dir() as d:
-            (d / "ws" / YWS / "build").mkdir(parents=True)
-            cp = ran(sysimage(d, building={YWS}).ls, False)
-        self.assertEqual(cp.out.splitlines()[1].split()[3], "building")
-
-    def test_a_workspace_whose_build_state_cannot_be_read_says_unknown(self):
-        with scratch_dir() as d:
-            yocto_image(d)
-            s = sysimage(d)
-            s.building = lambda ws: None
-            cp = ran(s.ls, False)
-        self.assertEqual(cp.out.splitlines()[1].split()[3], "unknown")
-
-    def test_an_image_present_while_a_build_runs_says_both(self):
-        with scratch_dir() as d:
-            yocto_image(d)
-            cp = ran(sysimage(d, building={YWS}).ls, False)
-        self.assertEqual(cp.out.splitlines()[1].split()[3], "building")
-        self.assertIn(".wic.xz", cp.out)
+    def test_the_state_column_is_the_build_over_the_image(self):
+        """A yocto image stage removes the last image as it rebuilds, so a row with none is normal for hours."""
+        for has_image, building, want in ((False, lambda ws: False, "none"), (False, lambda ws: True, "building"),
+                                          (True, lambda ws: None, "unknown"), (True, lambda ws: True, "building")):
+            with self.subTest(has_image=has_image, want=want), scratch_dir() as d:
+                if has_image:
+                    yocto_image(d)
+                else:
+                    (d / "ws" / YWS / "build").mkdir(parents=True)
+                s = sysimage(d)
+                s.building = building
+                out = ran(s.ls, False).out
+                self.assertEqual(out.splitlines()[1].split()[3], want)
+                self.assertEqual(has_image, ".wic.xz" in out)
 
     def test_each_slot_is_listed_under_its_image(self):
         with scratch_dir() as d:
@@ -348,7 +329,8 @@ class TestPath(WkTest):
     def test_the_image_the_workspace_holds_or_nothing(self):
         with scratch_dir() as d:
             s = sysimage(d)
-            self.assertEqual((ran(s.path, YOCTO, None).rc, ran(s.path, YOCTO, None).out), (1, ""))
+            cp = ran(s.path, YOCTO, None)
+            self.assertEqual((cp.rc, cp.out), (1, ""))
             p = yocto_image(d)
             self.assertEqual(ran(s.path, YOCTO, None).out, "%s\n" % p)
             self.assertEqual(ran(s.path, "bridge-pinephone", None).rc, 1, "a host-built profile has no workspace")
@@ -359,7 +341,6 @@ class TestPathHoldsAndLsReachTheMacVolumeMarker(WkTest):
     """`unit sysimage.builders_conform[mac-volume]`: a builder with no workspace answers off the machine it builds on."""
 
     def test_each_answers_only_once_the_volume_is_installed_and_marked(self):
-        from wk.sysimage import macvolume
         with scratch_dir() as d:
             f = Fake()
             s = sysimage(d, machine=f)

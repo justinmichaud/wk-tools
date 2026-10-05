@@ -98,20 +98,14 @@ class TestItNeverChangesWhatTheCommandDoes(_Gate):
         self.assertNotEqual(cp.returncode, 0)
         self.assertNotIn("wk:", cp.stderr)
 
-    def test_gits_own_report_still_comes_first(self):
+
+class TestTheCommitWallExplainsItself(_Gate):
+    def test_a_commit_the_wall_blocked_names_the_remedy_after_gits_own_report(self):
         self.wall_on(staged=True)
         cp = self._git("commit", "-m", "two")
         self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("insufficient permission", cp.stderr)
-        self.assertLess(cp.stderr.index("insufficient permission"),
-                        cp.stderr.index("wk:"))
-
-
-class TestTheCommitWallExplainsItself(_Gate):
-    def test_a_commit_that_the_wall_blocked_names_the_wall_and_the_remedy(self):
-        self.wall_on(staged=True)
-        cp = self._git("commit", "-m", "two")
         self.assertIn("wk key push on", cp.stderr)
+        self.assertLess(cp.stderr.index("insufficient permission"), cp.stderr.index("wk:"))
 
     def test_an_unwalled_checkout_is_silent(self):
         cp = self._git("commit", "--allow-empty", "-m", "two")
@@ -128,31 +122,18 @@ class TestThePushSwitchExplainsItself(_Gate):
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("wk key push on", cp.stderr)
 
-    def test_an_agent_holding_a_key_is_not_the_switch_being_off(self):
-        self.agent(keys=1)
-        self._git("remote", "add", "fork", "ssh://git@github-webkit/x/y.git",
-                  wrapped=False)
-        cp = self._git("push", "fork", "HEAD")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertNotIn("wk:", cp.stderr)
-
-    def test_an_agent_that_cannot_be_asked_says_nothing(self):
-        (self.home / ".ssh" / "fork_config").write_text(
-            f"Host github-webkit\n    IdentityAgent {self.tmp}/nothing.sock\n")
-        (self.home / ".ssh" / "config").write_text(
-            f"Host *\n    Include {self.home}/.ssh/fork_config\n")
-        self._git("remote", "add", "fork", "ssh://git@github-webkit/x/y.git",
-                  wrapped=False)
-        cp = self._git("push", "fork", "HEAD")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertNotIn("wk:", cp.stderr)
-
-    def test_no_ssh_config_at_all_says_nothing(self):
-        self._git("remote", "add", "fork", "ssh://git@github-webkit/x/y.git",
-                  wrapped=False)
-        cp = self._git("push", "fork", "HEAD")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertNotIn("wk:", cp.stderr)
+    def test_a_push_whose_agent_holds_a_key_cannot_be_asked_or_is_not_configured_says_nothing(self):
+        def unreachable_agent():
+            (self.home / ".ssh" / "fork_config").write_text(f"Host github-webkit\n    IdentityAgent {self.tmp}/nothing.sock\n")
+            (self.home / ".ssh" / "config").write_text(f"Host *\n    Include {self.home}/.ssh/fork_config\n")
+        self._git("remote", "add", "fork", "ssh://git@github-webkit/x/y.git", wrapped=False)
+        for case, arrange in (("no ssh config", lambda: None), ("an agent with a key", lambda: self.agent(keys=1)),
+                              ("an agent that cannot be asked", unreachable_agent)):
+            with self.subTest(case):
+                arrange()
+                cp = self._git("push", "fork", "HEAD")
+                self.assertNotEqual(cp.returncode, 0)
+                self.assertNotIn("wk:", cp.stderr)
 
 
 class TestWhatAToolResolvesGitTo(_Gate):

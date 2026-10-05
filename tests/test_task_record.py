@@ -24,8 +24,6 @@ KILLS = {
 
 
 def in_order(plan, step):
-    """A plan whose steps run in order, stopped at `step`: the ones before it
-    have ended, it is running, the rest have not started."""
     return ["done" if i < step else "running" if i == step else "pending"
             for i in range(1, len(plan) + 1)]
 

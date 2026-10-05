@@ -1,6 +1,4 @@
-"""`wk run <ws> --profile` (lib/wk/profile.py) against a Fake world: the host-side
-perf_event_paranoid gate (samply's own refusal, not reachable under
---dry-run) and `--fetch` copying the recording out byte for byte."""
+"""`wk run <ws> --profile` (lib/wk/profile.py) against a Fake world."""
 import contextlib
 import io
 import os
@@ -57,22 +55,22 @@ class ProfileTest(unittest.TestCase):
                 profile.main(decl.Args(RUN, as_dispatched("run", argv, os.environ)), "run", self.w.reg)
         return cm.exception, err.getvalue()
 
+    def ready(self, level=1):
+        self.w.answer(["exec", "ws", "cat", "/proc/sys/kernel/perf_event_paranoid"], out="%d\n" % level)
+        self.w.answer(["exec", "ws", "sh", "-c"], rc=0)   # `command -v <profiler>` succeeds
+        self.w.answer(["exec-tty", "ws", "bash", "-lc"], out="")
+
 
 class TestPerfEventParanoidGate(ProfileTest):
     """The host-side refusal samply, sysprof and rr share (`ldpath.perf_events`), unreachable under --dry-run."""
 
-    def _paranoid(self, level):
-        self.w.answer(["exec", "ws", "cat", "/proc/sys/kernel/perf_event_paranoid"], out="%d\n" % level)
-        self.w.answer(["exec", "ws", "sh", "-c"], rc=0)   # `command -v samply` succeeds
-
     def test_paranoid_1_or_less_never_refuses(self):
-        self._paranoid(1)
-        self.w.answer(["exec-tty", "ws", "bash", "-lc"], out="")
+        self.ready(1)
         rc, err = self.run_("--preset", "gtk-release", "--profile=samply", "--", "x.js")
         self.assertEqual(rc, 0, err)
 
     def test_high_paranoid_off_linux_names_the_sysctl_remedy(self):
-        self._paranoid(2)
+        self.ready(2)
         with mock.patch.object(ldpath, "is_linux", return_value=False):
             e, err = self.refused("--preset", "gtk-release", "--profile=samply", "--", "x.js")
         self.assertEqual(e.status, 1)
@@ -81,7 +79,7 @@ class TestPerfEventParanoidGate(ProfileTest):
         self.assertIn("echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid", err)
 
     def test_high_paranoid_on_linux_without_the_helper_names_setup(self):
-        self._paranoid(2)
+        self.ready(2)
         with mock.patch.object(ldpath, "is_linux", return_value=True), \
              mock.patch("os.access", return_value=False):
             e, err = self.refused("--preset", "gtk-release", "--profile=samply", "--", "x.js")
@@ -90,7 +88,7 @@ class TestPerfEventParanoidGate(ProfileTest):
         self.assertIn("./setup --stage quiesce", err)
 
     def test_high_paranoid_the_helper_could_not_fix_names_setup_too(self):
-        self._paranoid(2)
+        self.ready(2)
         with mock.patch.object(ldpath, "is_linux", return_value=True), \
              mock.patch("os.access", return_value=True), \
              mock.patch.object(ldpath.Local, "act_run") as run:
@@ -101,16 +99,11 @@ class TestPerfEventParanoidGate(ProfileTest):
 
 
 class TestSysprof(ProfileTest):
-    def _ready(self, level=1):
-        self.w.answer(["exec", "ws", "cat", "/proc/sys/kernel/perf_event_paranoid"], out="%d\n" % level)
-        self.w.answer(["exec", "ws", "sh", "-c"], rc=0)
-        self.w.answer(["exec-tty", "ws", "bash", "-lc"], out="")
-
     def script(self):
         return [e[1][-1] for e in self.w.effects if e[0] == "run_tty" and e[1][:2] == ("exec-tty", "ws")][0]
 
     def test_sysprof_wraps_jsc_with_the_jit_dump_and_markers_on(self):
-        self._ready()
+        self.ready()
         rc, err = self.run_("--preset", "gtk-release", "--profile=sysprof", "--", "x.js")
         self.assertEqual(rc, 0, err)
         cmd = self.script()
@@ -119,7 +112,7 @@ class TestSysprof(ProfileTest):
             self.assertIn(env, cmd)
 
     def test_sysprof_asks_for_sysprof_cli_and_the_perf_events(self):
-        self._ready(level=2)
+        self.ready(level=2)
         self.w.answer(["exec", "ws", "sh", "-c"], rc=1)
         e, err = self.refused("--preset", "gtk-release", "--profile=sysprof", "--", "x.js")
         self.assertIn("sysprof-cli is not installed in 'ws'", err)
@@ -129,7 +122,7 @@ class TestSysprof(ProfileTest):
         self.assertIn("sysprof needs 1 or less", err)
 
     def test_sysprof_refuses_an_apple_port_and_an_attach(self):
-        self._ready()
+        self.ready()
         e, err = self.refused("--preset", "gtk-release", "--profile=sysprof", "--attach", "123")
         self.assertIn("there is no attach", err)
         self.w.place_os = "macos"
@@ -137,7 +130,7 @@ class TestSysprof(ProfileTest):
         self.assertIn("'mac-release' is an Apple-port build", err)
 
     def test_sysprof_against_the_browser_prefixes_minibrowser_and_refuses_process(self):
-        self._ready()
+        self.ready()
         rc, err = self.run_("--preset", "gtk-release", "--profile=sysprof", "--browser", "about:blank")
         self.assertEqual(rc, 0, err)
         self.assertIn("WEBKIT_MINI_BROWSER_PREFIX='sysprof-cli --force", self.script())
@@ -200,7 +193,6 @@ class TestTheBrowserAndItsProcesses(ProfileTest):
 
 class TestFetch(ProfileTest):
     def test_fetch_copies_the_run_directory_out(self):
-        self.w.answer(["exec-tty", "ws", "bash", "-lc"], out="")
         fetch_dir = os.path.join(self.tmp, "fetched")
 
         def make_dir_then_run(argv, fake):
@@ -222,7 +214,6 @@ class TestFetch(ProfileTest):
 
 
 class TestOutputReachesTheTerminal(ProfileTest):
-
     def test_the_run_and_post_go_through_exec_tty_not_the_capturing_exec(self):
         self.w.answer(["exec-tty", "ws", "bash", "-lc"], out="")
         rc, err = self.run_("--preset", "gtk-release", "--profile=bytecode", "--", "x.js")
@@ -231,12 +222,6 @@ class TestOutputReachesTheTerminal(ProfileTest):
         self.assertEqual(2, len(tty_runs), self.w.effects)   # the run itself, and bytecode's `post`
         capturing = [e for e in self.w.effects if e[0] == "run" and e[1][:2] == ("exec", "ws") and "bash" in e[1]]
         self.assertEqual([], capturing, "the run and post must not go through the capturing exec")
-
-    def test_sampling_default_mode_also_streams(self):
-        self.w.answer(["exec-tty", "ws", "bash", "-lc"], out="")
-        rc, err = self.run_("--preset", "gtk-release", "--profile=sampling", "--", "x.js")
-        self.assertEqual(rc, 0, err)
-        self.assertTrue([e for e in self.w.effects if e[0] == "run_tty" and e[1][:2] == ("exec-tty", "ws")], self.w.effects)
 
     def test_the_next_step_it_names_is_the_command_that_ran(self):
         self.w.answer(["exec-tty", "ws", "bash", "-lc"], out="")

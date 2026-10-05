@@ -1,4 +1,4 @@
-"""tests/support.py's own environment scrub: every test that shells out"""
+"""tests/support.py's own environment scrub: every test that shells out reaches no machine and no config."""
 TIER = "lint"
 import os
 import stat

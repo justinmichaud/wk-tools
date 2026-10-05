@@ -67,24 +67,16 @@ def _interrupt_driver(tmp, sig):
 
 
 class TestWatchInterrupt(unittest.TestCase):
-    def test_sigint_during_watch_kills_the_watched_child(self):
-        """SIGINT during `watch` kills the child it is watching, not just the watcher, and exits 130"""
-        with tempfile.TemporaryDirectory(prefix="wk-interrupt-test-") as tmp:
-            rc, out, child, _ = _interrupt_driver(tmp, signal.SIGINT)
-        self.assertEqual(rc, 130, out)
-        _wait_gone(child)
-
-    def test_sighup_during_watch_runs_the_cancel_path_and_exits_129(self):
-        """SIGHUP -- what a supervisor with no tty sends -- arrives as Interrupted, runs the cancel path and exits 129"""
-        with tempfile.TemporaryDirectory(prefix="wk-interrupt-test-") as tmp:
-            rc, out, child, cancelled = _interrupt_driver(tmp, signal.SIGHUP)
-        self.assertEqual(rc, 129, out)
-        self.assertTrue(cancelled, "the cancel path did not run on HUP:\n" + out)
-        _wait_gone(child)
+    def test_a_signal_during_watch_runs_the_cancel_path_kills_the_watched_child_and_exits_by_it(self):
+        for sig, exit_code in ((signal.SIGINT, 130), (signal.SIGHUP, 129)):   # HUP is what a supervisor with no tty sends
+            with self.subTest(sig=sig), tempfile.TemporaryDirectory(prefix="wk-interrupt-test-") as tmp:
+                rc, out, child, cancelled = _interrupt_driver(tmp, sig)
+                self.assertEqual(rc, exit_code, out)
+                self.assertTrue(cancelled, "the cancel path did not run:\n" + out)
+                _wait_gone(child)
 
 
 class TestKillingAJobKillsWhatItStarted(unittest.TestCase):
-
     def test_a_grandchild_does_not_outlive_the_job(self):
         with tempfile.TemporaryDirectory(prefix="wk-interrupt-test-") as tmp:
             marker = os.path.join(tmp, "kid")
@@ -102,7 +94,6 @@ class TestKillingAJobKillsWhatItStarted(unittest.TestCase):
                     p.wait()
 
     def test_it_never_signals_the_process_asking(self):
-        """The one walk skips its own pid."""
         m = Fake()
         me = os.getpid()
         m.answer(["sh", "-c", job.TREE, "wk", "10"], out="%d\n11\n10\n" % me)

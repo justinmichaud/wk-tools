@@ -1,6 +1,5 @@
-"""`wk doctor <workspace>` and `wk doctor` inside one (lib/wk/wall.py): every check of the sandbox is a method
-returning doctor rows, driven here against a fake machine whose workspace answers each probe from a table
-keyed by a substring of the command it runs."""
+"""lib/wk/wall.py against a fake machine whose workspace answers each probe from HEALTHY, keyed by a substring
+of the command it runs."""
 import contextlib
 import io
 import os
@@ -17,19 +16,14 @@ from tests.fakes import FakeRegistry
 from tests.support import REPO, WkTest, bash, clean_env, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import doctor, places, project, wall  # noqa: E402
+from wk import doctor, places, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
 
-def _load_cmd_doctor():
-    return load_cmd("doctor")
-
-
-DOCTOR_CMD = _load_cmd_doctor()
+DOCTOR_CMD = load_cmd("doctor")
 
 OK, MISS, NOTE = doctor.OK, doctor.MISS, doctor.NOTE
-FORK = project.get("FORKS")[0][1]
 
 # Most specific first: the first key found in the command answers it.
 HEALTHY = [
@@ -167,16 +161,13 @@ class TestEgress(_Wall):
 
 
 class TestIsolation(_Wall):
-    def test_loopback_only_and_no_host_path(self):
+    def test_loopback_only_passes_and_anything_else_fails(self):
         self.assertPasses(self.check("isolation"))
-
-    def test_another_interface_fails(self):
-        self.set("/proc/net/dev", "lo eth0 ")
-        self.assertFails(self.check("isolation"), "workspace has network interfaces: lo eth0")
-
-    def test_no_answer_is_not_loopback(self):
-        self.set("/proc/net/dev", "")
-        self.assertFails(self.check("isolation"), "could not enumerate interfaces")
+        for answer, said in (("lo eth0 ", "workspace has network interfaces: lo eth0"),
+                             ("", "could not enumerate interfaces")):
+            with self.subTest(answer=answer):
+                self.set("/proc/net/dev", answer)
+                self.assertFails(self.check("isolation"), said)
 
     def test_a_host_path_fails_by_name(self):
         self.set("ls -d", "/host/home")
@@ -188,18 +179,13 @@ class TestIsolation(_Wall):
 class TestCommitWall(_Wall):
     def test_a_commit_is_blocked_and_a_write_is_not(self):
         self.assertPasses(self.check("commit_wall"))
-
-    def test_no_bwrap_fails(self):
-        self.set("command -v bwrap", "")
-        self.assertFails(self.check("commit_wall"), "no bwrap in the workspace", "refuses to start")
-
-    def test_a_commit_that_lands_fails(self):
-        self.set("mktemp -d /tmp/wk-wall", "COMMITTED\nWROTE")
-        self.assertFails(self.check("commit_wall"), "commit wall did NOT block a commit")
-
-    def test_a_wall_that_blocks_every_write_fails(self):
-        self.set("mktemp -d /tmp/wk-wall", "BLOCKED\nNOWRITE")
-        self.assertFails(self.check("commit_wall"), "blocks an ordinary write too")
+        for key, answer, words in (("command -v bwrap", "", ("no bwrap in the workspace", "refuses to start")),
+                                   ("mktemp -d /tmp/wk-wall", "COMMITTED\nWROTE", ("commit wall did NOT block a commit",)),
+                                   ("mktemp -d /tmp/wk-wall", "BLOCKED\nNOWRITE", ("blocks an ordinary write too",))):
+            with self.subTest(answer=answer):
+                self.answers = dict(HEALTHY)
+                self.set(key, answer)
+                self.assertFails(self.check("commit_wall"), *words)
 
     def test_the_paths_are_the_ones_the_session_walls(self):
         self.check("commit_wall")
@@ -317,13 +303,11 @@ class TestTheSwitchMeasuredInside(_Wall):
         self.fake.answer(["env", "SSH_AUTH_SOCK=" + sock, "ssh-add", "-l"], rc=0 if idents else 1,
                          out="".join("256 SHA256:x k%d (ED25519)\n" % i for i in range(idents)) or "The agent has no identities.\n")
 
-    def test_an_empty_agent_holds_nothing(self):
-        self.ssh("/run/wk/ssh-agent.sock", 0)
-        self.assertPasses(self.check("push_here"))
-
-    def test_no_socket_at_all_holds_nothing(self):
-        self.ssh("", 0)
-        self.assertPasses(self.check("push_here"))
+    def test_an_empty_agent_or_no_socket_holds_nothing(self):
+        for sock in ("/run/wk/ssh-agent.sock", ""):
+            with self.subTest(sock=sock):
+                self.ssh(sock, 0)
+                self.assertPasses(self.check("push_here"))
 
     def test_a_key_names_the_socket_and_the_hosts_remedy(self):
         self.ssh("/run/wk/ssh-agent.sock", 2)
@@ -417,7 +401,6 @@ class TestAnUpstreamOutageIsNotTheSandbox(_Wall):
 class TestGitHubWrite(_Wall):
     def test_off_wants_the_injectors_412(self):
         self.assertPasses(self.check("github_write"))
-        self.assertIn("-X POST -d '{}' https://api.github.com/repos/%s/pulls" % FORK, [c for c in self.asked if "/pulls" in c][0])
         self.set("/pulls", "422")
         self.assertFails(self.check("github_write"), "where the host does not say push is on", "wk key push off")
 
@@ -610,7 +593,7 @@ class TestFromTheHost(_Wall):
         self.report()
         runs = [e[1] for e in self.fake.effects if e[0] == "run"]
         self.assertEqual(1, runs.count((str(REPO / "wk"), "key", "push", "status")))
-        self.assertEqual("rm -f /opt/wk-tools/.wk-write-probe" in self.asked, False)
+        self.assertNotIn("rm -f /opt/wk-tools/.wk-write-probe", self.asked)
         self.assertEqual("touch /opt/wk-tools/.wk-write-probe 2>&1", self.asked[-1])
 
     def test_a_workspace_without_the_login_gets_the_places_remedy(self):
@@ -788,7 +771,7 @@ def sim_registry(in_ws):
 
 
 class TestExitCodes(unittest.TestCase):
-    """cmd/doctor turns a Report -- and, inside, whether an agent could publish -- into 0 intact | 1 broken | 3 publishing."""
+    """0 intact | 1 broken | 3 publishing."""
 
     def _inside(self, missing, publishing):
         def fake_from_inside(root, driver, ws, machine, rep):

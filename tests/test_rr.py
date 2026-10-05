@@ -15,9 +15,6 @@ from wk import ldpath  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 from wk.act import Refused  # noqa: E402
 
-
-
-
 os.environ.setdefault("WK_ROOT", str(REPO))
 RUN, GUI = load_cmd("run"), load_cmd("gui")
 

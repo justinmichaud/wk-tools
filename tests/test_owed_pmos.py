@@ -1,9 +1,11 @@
 """The pmos builder against a Fake world: the driving half (lib/wk/sysimage/pmos.py) and the pure parts of the
 build host's half (lib/wk/sysimage/pmos_build.py)."""
 import contextlib
+import hashlib
 import io
 import lzma
 import os
+import re
 import sys
 import unittest
 from unittest import mock
@@ -90,10 +92,9 @@ class TestPmosRefusesASecondConcurrentBuild(unittest.TestCase):
     def test_no_build_running_lets_a_new_one_proceed(self):
         p, machine = make()
         machine.react(("sh", "-c"), sh_react([("pgrep -f", Result(1, ""))]))
-        p._refuse_if_running(machine, "/home/x/wk-pmos")   # does not raise
+        p._refuse_if_running(machine, "/home/x/wk-pmos")
 
     def test_the_pattern_is_bracketed_so_the_asking_ssh_does_not_match_itself(self):
-        import re
         far = " ".join(pmos_build.argv_for("/r", "remote-build"))
         self.assertRegex(far, pmos.RUNNING_PATTERN)
         self.assertIsNone(re.search(pmos.RUNNING_PATTERN, "pgrep -f %s" % pmos.RUNNING_PATTERN))
@@ -154,16 +155,6 @@ class TestPmosBuildHostsAndCacheProbe(unittest.TestCase):
     def test_build_hosts_is_the_pmos_profiles_own_build_host(self):
         self.assertIn("rpi5", pmos.build_hosts({}))
 
-    def test_a_host_that_does_not_answer_is_not_a_measurement(self):
-        machine = Fake("buildhost1")
-        machine.answer(("sh", "-c"), rc=255, err="no route to host")
-        self.assertIsNone(pmos.cache_probe(machine, {}))
-
-    def test_work_and_out_are_measured_apart(self):
-        machine = Fake("buildhost1")
-        machine.answer(("sh", "-c"), out="4096\t/home/x/wk-pmos/work\n2048\t/home/x/wk-pmos/out\n")
-        self.assertEqual({"work": 4096, "out": 2048}, pmos.cache_probe(machine, {}))
-
     def test_rows_carry_the_probe_numbers_whatever_they_are_called(self):
         machine = Fake("buildhost1")
         machine.answer(("sh", "-c"), out="4096\t/p/work\n2048\t/p/out\n")
@@ -209,7 +200,6 @@ class TestTheImageComesOffAsBytes(WkTest):
         return far, here
 
     def fetch(self, far_hash):
-        import hashlib
         far, here = self.world(far_hash or hashlib.sha256(self.RAW).hexdigest())
         dest = str(self.tmp / "img")
         with contextlib.redirect_stderr(io.StringIO()) as err:

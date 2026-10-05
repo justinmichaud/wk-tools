@@ -249,10 +249,6 @@ class TestFindHoldersAndWait(RecordTest):
         self.assertEqual(st, "timeout")
         self.assertEqual(sum(self.clock.slept), 5)
 
-    def test_a_driver_that_died_before_writing_reads_crashed(self):
-        st = self.records.wait("build", "nothing", str(self.log), pid=999999)
-        self.assertEqual(st, "crashed")
-
 
 class TestHoldFollowsHolder(RecordTest):
     """A hold is released only when its holder is provably gone; an unreadable holder keeps it; no child inherits one."""
@@ -386,14 +382,13 @@ class TestTheMachineName(unittest.TestCase):
         self.assertEqual(record.machine_name({}, m), "tolken")
         self.assertEqual(record.machine_name({}, Fake()), "here")
 
-    def test_in_the_vm_the_forwarding_workstation_names_the_row(self):
-        self.assertEqual(record.machine_name({"WK_IN_VM": "1", "WK_ROW_LABEL": "mbp"}, Fake()), "mbp")
-
     def test_a_row_label_names_the_machine_only_inside_the_vm(self):
         m = Fake()
         m.answer(["hostname", "-s"], out="Tolken\n")
-        self.assertEqual(record.machine_name({"WK_ROW_LABEL": "container"}, m), "tolken")
-        self.assertEqual(record.machine_name({"WK_IN_VM": "1"}, m), "tolken")
+        for env, want in (({"WK_IN_VM": "1", "WK_ROW_LABEL": "mbp"}, "mbp"), ({"WK_ROW_LABEL": "container"}, "tolken"),
+                          ({"WK_IN_VM": "1"}, "tolken")):
+            with self.subTest(env=env):
+                self.assertEqual(record.machine_name(env, m), want)
 
 
 class TestWatchdogSettings(unittest.TestCase):

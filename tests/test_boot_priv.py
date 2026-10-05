@@ -1,13 +1,23 @@
 """admin/wk-boot-priv's grant (a fixed verb list, a checked argument, a fixed mailbox tag, a bless of one mounted
 wk install) with its tools stubbed, and admin/install.sh's convergent install of all three helpers."""
+import contextlib
+import io
 import os
 import pwd
 import re
 import shutil
 import subprocess
+import sys
 import unittest
 
+from tests.fake_boot import FakeBoard
 from tests.support import REPO, WkTest, bash, stub_path
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import act  # noqa: E402
+from wk.boot.driver import Channel  # noqa: E402
+from wk.boot.pi import Rpi5Usb  # noqa: E402
+from wk.machine import Fake, Result  # noqa: E402
 
 HELPER = REPO / "admin" / "wk-boot-priv"
 INSTALL = REPO / "admin" / "install.sh"
@@ -216,16 +226,10 @@ class TestTheBlessGateIsTheVolumeAndNotAnArgument(WkTest):
         self.assertIn("blessed the running install", out)
 
 
-
 class TestTheDrivingEndAsksForTheOperationNotThePrivilege(unittest.TestCase):
 
     @staticmethod
     def _rpi5(require_ok=True):
-        import sys
-        sys.path.insert(0, str(REPO / "lib"))
-        from tests.fake_boot import FakeBoard
-        from wk.boot.pi import Rpi5Usb
-        from wk.machine import Result
         conf = {"name": "rpi5", "driver": "rpi5-usb", "device": "/dev/sda",
                 "root": "/dev/nvme0n1p2", "role": "workstation"}
         fake = FakeBoard(conf)
@@ -251,29 +255,18 @@ class TestTheDrivingEndAsksForTheOperationNotThePrivilege(unittest.TestCase):
         d, calls = self._rpi5()
         d.arm("/dev/sda1", d.order_image)
         self.assertLess(calls.index("boot_priv_require"), calls.index("boot_priv order"))
-        import contextlib
-        import io
-        from wk import act
         d, calls = self._rpi5(require_ok=False)
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertRaises(act.Refused, d.arm, "/dev/sda1", d.order_image)
         self.assertNotIn("boot_priv order", calls)
 
     def test_the_refusal_names_the_remedy(self):
-        import contextlib
-        import io
-        import sys
-        sys.path.insert(0, str(REPO / "lib"))
-        from wk import act
-        from wk.boot.driver import Channel
-        from wk.machine import Fake
         via = Fake()
         via.answer(("ssh",), rc=1, err="sudo: a password is required")
         ch = Channel(REPO, {"name": "rpi5", "ssh": "rpi5", "role": "workstation"}, "host", env={}, via=via)
         with contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertRaises(act.Refused, ch.call, "boot_priv_require")
         self.assertIn("./setup --stage quiesce", err.getvalue())
-
 
 
 class SetupRefusesRoot(WkTest):
@@ -362,7 +355,6 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
         (self.fake / "sudoers.d").mkdir(parents=True)
         self.me = pwd.getpwuid(os.getuid()).pw_name
 
-
     def target(self, name="wk-boot-priv"):
         return self.fake / "libexec" / name
 
@@ -396,10 +388,9 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
         p.chmod(0o440)
         return p
 
-
     def drive(self, script, nosudo=0, visudo=0, granted=None, macos=False,
               owner="root"):
-        """nosudo=1: no passwordless sudo and no terminal. `granted` forces wk_priv_answers; file_owner answers `owner`."""
+        """nosudo=1: no passwordless sudo and no terminal. `granted` forces wk_priv_answers."""
         pre = _FAKE % {"fake": _q(str(self.fake)), "nosudo": nosudo, "visudo": visudo,
                        "notlinux": 1 if macos else 0, "notmacos": 0 if macos else 1}
         if granted is not None:
@@ -422,7 +413,6 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         return cp.stdout.splitlines()[0].strip()
 
-
     def test_a_rule_that_names_another_user_is_detected_and_rewritten_to_the_grant_alone(self):
         self.plant_binary()
         self.plant_rule(user="root")
@@ -432,6 +422,7 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
         self.assertEqual("%s ALL=(root) NOPASSWD: %s\n" % (self.me, self.target()), self.sudoers().read_text())
         self.assertEqual("440", oct(self.sudoers().stat().st_mode)[-3:])
         self.assertGreaterEqual(cp.changes, 1, cp.said)
+        self.assertEqual(0, self.converge().changes)
 
     def test_the_installed_binary_is_a_copy_and_never_a_symlink_into_this_repo(self):
         cp = self.converge()
@@ -439,7 +430,6 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
         self.assertFalse(self.target().is_symlink())
         self.assertEqual((REPO / "admin" / "wk-boot-priv").read_bytes(),
                          self.target().read_bytes())
-
 
     def test_a_stale_binary_with_a_working_grant_is_detected_and_replaced(self):
         self.plant_binary(stale=True)
@@ -472,15 +462,6 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
         self.assertEqual(before,
                          (self.sudoers().stat().st_mtime_ns, self.target().stat().st_mtime_ns))
 
-    def test_the_repair_is_idempotent(self):
-        self.plant_binary()
-        self.plant_rule(user="root")
-        first = self.converge()
-        self.assertGreaterEqual(first.changes, 1, first.said)
-        second = self.converge()
-        self.assertEqual(0, second.changes, second.said)
-
-
     def test_a_kill_between_the_binary_and_its_rule_converges(self):
         self.plant_binary()
         self.assertEqual("ok silent", self.state())
@@ -488,6 +469,7 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
         self.assertEqual(0, cp.returncode, cp.said)
         self.assertEqual(self.rule(), self.sudoers().read_text())
         self.assertEqual("ok ok", self.state())
+        self.assertEqual([], sorted((self.fake / "rules").glob("*")))
 
     def test_a_kill_after_validation_and_before_the_install_converges(self):
         cand = self.fake / "rules" / "wk-boot-priv.rule"
@@ -499,12 +481,6 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
         self.assertEqual(0, cp.returncode, cp.said)
         self.assertEqual(self.rule(), self.sudoers().read_text())
         self.assertFalse(cand.exists(), "the candidate rule is left behind")
-
-    def test_a_converge_leaves_no_candidate_rule_behind(self):
-        self.plant_binary()
-        cp = self.converge()
-        self.assertEqual(0, cp.returncode, cp.said)
-        self.assertEqual([], sorted((self.fake / "rules").glob("*")))
 
     def test_a_kill_before_the_companion_leaves_a_state_that_converges(self):
         self.plant_binary("wk-card-priv", companion=False)
@@ -542,7 +518,6 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
             with self.subTest(retired=short):
                 self.assertIn(str(self.fake / "sudoers.d" / short), listed)
         self.assertIn(str(self.fake / "libexec" / "wk-tftpd"), listed)
-
 
     def test_visudo_refusing_installs_no_rule_and_leaves_an_existing_one(self):
         self.plant_binary()

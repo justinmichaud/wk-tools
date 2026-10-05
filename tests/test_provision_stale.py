@@ -16,12 +16,9 @@ from wk.machine import Fake  # noqa: E402
 
 class TestTheBuildMachineRecord(unittest.TestCase):
 
-    def _stale(self, marker_text=None):
+    def _stale(self, marker_text):
         far = Fake("box")
-        if marker_text is None:
-            far.answer(["sh", "-c"], rc=0, out="")
-        else:
-            far.answer(["sh", "-c"], out=marker_text)
+        far.answer(["sh", "-c"], out=marker_text)
         t = places.Remote("box", str(REPO), {"HOME": "/tmp/wk-test-unused", "XDG_STATE_HOME": "/tmp/wk-test-unused/state"}, far)
         t.machine = far
         return deps.stale(t, REPO)
@@ -29,14 +26,13 @@ class TestTheBuildMachineRecord(unittest.TestCase):
     def test_a_machine_provisioned_from_these_inputs_reads_fresh(self):
         self.assertIsNone(self._stale("place=otherbox\nroot=/home/x/wk\ninputs=%s\n" % deps.inputs_hash(REPO)))
 
-    def test_a_machine_provisioned_before_the_record_says_so(self):
-        self.assertTrue(self._stale("place=otherbox\nroot=/home/x/wk\n"))
+    def test_a_machine_provisioned_before_the_record_or_not_at_all_says_so(self):
+        for marker in ("place=otherbox\nroot=/home/x/wk\n", ""):
+            with self.subTest(marker=marker):
+                self.assertTrue(self._stale(marker))
 
     def test_a_changed_provisioning_script_makes_it_stale(self):
         self.assertIn("remote/provision.sh", self._stale("place=otherbox\nroot=/home/x/wk\ninputs=0000000000000000\n"))
-
-    def test_a_machine_with_no_marker_is_not_provisioned_at_all(self):
-        self.assertTrue(self._stale(None))
 
     def _copy(self, edit=None):
         root = Path(tempfile.mkdtemp(prefix="wk-test-inputs-"))

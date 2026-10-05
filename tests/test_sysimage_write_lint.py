@@ -1,8 +1,5 @@
 """`lint.one_wifi_reader`: a WiFi credential is read in one place, the card helper, as root on the machine holding
-the reader (admin/wk-card-priv's `_host_wifi`); every other seed takes its credential from there.
-
-Run: python3 tests/run.py --lint -k test_sysimage_write_lint
-"""
+the reader (admin/wk-card-priv's `_host_wifi`); every other seed takes its credential from there."""
 import re
 import unittest
 

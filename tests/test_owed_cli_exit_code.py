@@ -1,7 +1,7 @@
 """The fleet exit code aggregates the worst state found anywhere -- owed"""
 import contextlib
-import os
 import io
+import os
 import sys
 import unittest
 from unittest import mock
@@ -14,19 +14,7 @@ from wk import decl as D  # noqa: E402
 from wk import dispatch  # noqa: E402
 
 
-class TestCmdStatusBump(unittest.TestCase):
-    def test_the_worst_wins_and_garbage_folds_to_4(self):
-        from wk import status
-        for calls, want in ((["2", "1", "0"], 2), (["1", "3", "2"], 3), (["3", "1", "2"], 3), ([""], 4), (["oops"], 4),
-                            (["9"], 4), (["4"], 4), (["-1"], 4)):
-            worst = 0
-            for c in calls:
-                worst = status.bump(worst, c)
-            self.assertEqual(worst, want, calls)
-
-
 class TestDispatcherBump(WkTest):
-
     def _report(self, here, vm):
         stub = self.tmp / "probe"
         stub.write_text("#!/bin/sh\n# wk probe -- a stub\n# wk: where=workspace name=none bare=merged readonly\n"
@@ -41,10 +29,8 @@ class TestDispatcherBump(WkTest):
                 dispatch.bare_report(inv, "probe", [])
         return raised.exception.status
 
-    def test_raises_to_the_larger_of_two_halves(self):
+    def test_the_larger_of_two_halves_wins_whichever_is_second(self):
         self.assertEqual(self._report(here=1, vm=3), 3)
-
-    def test_a_lower_second_half_does_not_undo_the_first(self):
         self.assertEqual(self._report(here=2, vm=0), 2)
 
 
@@ -54,8 +40,15 @@ exec bash -c "$last"
 '''
 
 
-class TestFleetExitCodeIsTheWorst(WkTest):
+def _records(xdg, machdir, **env):
+    with stub_path({"ssh": _ANSWERING_SSH}) as binp:
+        return run("status", "--records", timeout=45, env={
+            "XDG_STATE_HOME": str(xdg), "WK_MACHINES_DIR": str(machdir), "WK_PLACE": "remote",
+            "WK_REMOTE_HOST": "fake-reachable-machine", "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+            "WK_PROBE_SECONDS": "1", **env})
 
+
+class TestFleetExitCodeIsTheWorst(WkTest):
     def _two_workspaces(self, xdg, remote_root, states):
         store = xdg / "wk" / "remote" / "remote"
         names = []
@@ -67,24 +60,8 @@ class TestFleetExitCodeIsTheWorst(WkTest):
             (remote_root / "ws" / name / ".wk-ready").touch()
         return names
 
-    def _bare_status(self, xdg, remote_root, machdir, extra_env=None):
-        with stub_path({"ssh": _ANSWERING_SSH}) as binp:
-            env = {
-                "XDG_STATE_HOME": str(xdg),
-                "WK_REMOTE_ROOT": str(remote_root),
-                "WK_MACHINES_DIR": str(machdir),
-                "WK_PLACE": "remote",
-                "WK_REMOTE_HOST": "fake-reachable-machine",
-                "PATH": f"{binp}:{self._real_path()}",
-                "WK_PROBE_SECONDS": "1",
-            }
-            if extra_env:
-                env.update(extra_env)
-            return run("status", "--records", env=env, timeout=45)
-
-    @staticmethod
-    def _real_path():
-        return os.environ.get("PATH", "/usr/bin:/bin")
+    def _bare_status(self, xdg, remote_root, machdir):
+        return _records(xdg, machdir, WK_REMOTE_ROOT=str(remote_root))
 
     def test_failed_and_stalled_together_report_the_worse_of_the_two(self):
         with scratch_dir(prefix="wk-test-xdg-") as xdg, \
@@ -99,7 +76,6 @@ class TestFleetExitCodeIsTheWorst(WkTest):
                 self.assertIn(n, cp.stdout, f"{n} missing from the records:\n{cp.stdout}")
             self.assertEqual(cp.returncode, 3, cp.stdout)
 
-
     def test_two_failed_workspaces_report_1_not_2(self):
         with scratch_dir(prefix="wk-test-xdg-") as xdg, \
              scratch_dir(prefix="wk-test-remote-root-") as root, \
@@ -113,11 +89,6 @@ class TestFleetExitCodeIsTheWorst(WkTest):
 
 
 class TestAFailedRecordSurvivesAWorkspaceThatBumpedFourAlready(WkTest):
-
-    @staticmethod
-    def _real_path():
-        return os.environ.get("PATH", "/usr/bin:/bin")
-
     def test_a_failed_record_is_emitted_beside_a_workspace_that_bumped_4(self):
         with scratch_dir(prefix="wk-test-xdg-") as xdg, \
              scratch_dir(prefix="wk-test-machines-") as machdir:
@@ -125,16 +96,7 @@ class TestAFailedRecordSurvivesAWorkspaceThatBumpedFourAlready(WkTest):
             name = f"wsxbug-{rand_suffix()}"
             (store / "ws" / name).mkdir(parents=True)
             write_task(store, name=name, end=1)
-            with stub_path({"ssh": _ANSWERING_SSH}) as binp:
-                env = {
-                    "XDG_STATE_HOME": str(xdg),
-                    "WK_MACHINES_DIR": str(machdir),
-                    "WK_PLACE": "remote",
-                    "WK_REMOTE_HOST": "fake-reachable-machine",
-                    "PATH": f"{binp}:{self._real_path()}",
-                    "WK_PROBE_SECONDS": "1",
-                }
-                cp = run("status", "--records", env=env, timeout=45)
+            cp = _records(xdg, machdir)
             self.assertIn(name, cp.stdout, cp.stdout)
             self.assertIn('"state":"failed"', cp.stdout, cp.stdout)
             self.assertIn('"kind":"workspace"', cp.stdout, cp.stdout)

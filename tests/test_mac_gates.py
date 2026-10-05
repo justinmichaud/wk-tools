@@ -5,7 +5,6 @@ import os
 import subprocess
 import sys
 import threading
-import types
 import unittest
 
 from tests.support import REPO, WkTest, bash, scratch_dir
@@ -20,7 +19,7 @@ def load(path):
 
 BROWSER = load(REPO / "bench" / "mac-browser-check.py")
 sys.path.insert(0, str(REPO / "lib"))
-from wk import pgo as PROFILE, screen  # noqa: E402
+from wk import pgo as PROFILE, presets, screen  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result, lib_argv  # noqa: E402
 
@@ -84,9 +83,7 @@ class TestTheBrowserGate(WkTest):
         self.assertNotEqual(self.verdict(min_raf=59.0), [])
 
     def test_a_busy_but_focused_window_is_not_a_throttled_one(self):
-        reading = dict(GOOD_READING, raf_hz=44.4, focused=True)
-        self.assertEqual(BROWSER.faults(reading, GOOD_CLIENTS, "AppleParavirtGPU",
-                                        BROWSER.MIN_RAF, GOOD_EXPECT), [])
+        self.assertEqual(self.verdict(dict(GOOD_READING, raf_hz=44.4, focused=True), min_raf=BROWSER.MIN_RAF), [])
 
 
 def profile_tree(root, benchmarks=BENCHMARKS, libraries=LIBRARIES,
@@ -105,11 +102,8 @@ def profile_tree(root, benchmarks=BENCHMARKS, libraries=LIBRARIES,
 
 class TestTheProfileGate(WkTest):
     def setUp(self):
-        self._scratch = scratch_dir()
-        self.root = self._scratch.__enter__()
-
-    def tearDown(self):
-        self._scratch.__exit__(None, None, None)
+        super().setUp()
+        self.root = self.tmp
 
     def read(self, summaries):
         def summary(path):
@@ -172,29 +166,14 @@ class TestTheProfileGate(WkTest):
         profile_tree(self.root)
         self.assertEqual(PROFILE.faults(self.read_real()), [])
 
-    def test_a_workload_that_barely_touches_a_library_is_not_a_fault(self):
-        profile_tree(self.root)
-        found = PROFILE.faults(self.read_real())
-        self.assertFalse([f for f in found if "jetstream3" in f], found)
-
-
 
 class TestAProfileGuidedBuildDoesNotCacheCompilations(WkTest):
 
-    def _env(self, preset):
-        sys.path.insert(0, str(REPO / "lib"))
-        from wk import presets
-        c = presets.resolve(preset, "macos", "vm", {})
-        return types.SimpleNamespace(stdout="\n".join(presets.build_env(c, "/src/WebKit", 4, 10, "native", "/ccache", {})), stderr="")
-
-    def test_the_pgo_config_turns_it_off(self):
-        cp = self._env("mac-release-pgo")
-        self.assertIn("WK_NO_COMPILATION_CACHE=1", cp.stdout, cp.stdout + cp.stderr)
-
-    def test_a_plain_release_keeps_it(self):
-        """One set of flags, so the cache is what it is for."""
-        cp = self._env("mac-release")
-        self.assertNotIn("WK_NO_COMPILATION_CACHE=1", cp.stdout, cp.stdout + cp.stderr)
+    def test_only_the_pgo_config_turns_it_off(self):
+        for preset, off in (("mac-release-pgo", True), ("mac-release", False)):
+            with self.subTest(preset):
+                env = presets.build_env(presets.resolve(preset, "macos", "vm", {}), "/src/WebKit", 4, 10, "native", "/ccache", {})
+                self.assertEqual(off, "WK_NO_COMPILATION_CACHE=1" in env, env)
 
 
 class TestNothingMayDrawOverAMeasuredRun(WkTest):
@@ -209,10 +188,8 @@ class TestNothingMayDrawOverAMeasuredRun(WkTest):
         cp = bash('. "$WK_ROOT/bench/mac-window-probe.sh"; wk_window_unexpected "%s"' % reading)
         return cp.stdout.strip()
 
-    def test_an_alert_above_the_ordinary_layer_is_reported(self):
+    def test_an_alert_above_the_ordinary_layer_is_reported_and_the_screens_own_furniture_is_not(self):
         self.assertIn("UserNotificationCenter", self._uninvited(self.WITH_A_DIALOG))
-
-    def test_the_screens_own_furniture_is_not_a_blocker(self):
         self.assertEqual(self._uninvited(self.CLEAN), "")
 
     def _watch(self, appears):

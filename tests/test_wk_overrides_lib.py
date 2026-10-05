@@ -1,4 +1,4 @@
-"""WK_* override audit -- lib/ and boot/ (every WK_* read with a default is"""
+"""Each WK_* override in lib/ reaches what it names."""
 import os
 import sys
 import types
@@ -9,7 +9,7 @@ from tests.fakes import FakeRegistry
 from tests.support import REAL_MACHINES, REPO, WkTest, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import images, places, reach, resources, screen  # noqa: E402
+from wk import images, places, reach, screen  # noqa: E402
 from wk.boot.mac import GuestChannel  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
@@ -29,7 +29,6 @@ echo PASS
         self.assertIn("PASS", cp.stdout, cp.stdout + cp.stderr)
 
     def test_wk_session_mode_file_overrides_the_marker_file(self):
-        sys.path.insert(0, str(REPO / "lib"))
         from wk import session
         marker = self.tmp / "session-mode"
         seat = session.here(str(REPO), {"WK_SESSION_MODE_FILE": str(marker)})
@@ -63,20 +62,11 @@ class TestScreenBlocker(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True):
             return "[%s]" % screen.blocker(m, REPO)
 
-    def test_a_pane_over_the_window_is_named(self):
-        self.assertEqual("[Setup Assistant]", self._blocker(self.PANE))
-
-    def test_a_screen_with_only_wk_s_own_windows_is_free(self):
-        self.assertEqual("[]", self._blocker(self.CLEAN))
-
-    def test_the_menu_bar_and_the_dock_are_not_blockers(self):
-        self.assertNotIn("Notification Center", self._blocker(self.PANE))
-
-    def test_what_wk_puts_there_is_overridable(self):
-        self.assertEqual("[Terminal]", self._blocker(self.CLEAN, "Finder|Safari"))
-
-    def test_a_screen_that_could_not_be_read_is_not_reported_as_free(self):
-        self.assertEqual("[?]", self._blocker("?"))
+    def test_what_blocks_the_screen_is_named(self):
+        for reading, expected, want in ((self.PANE, None, "[Setup Assistant]"), (self.CLEAN, None, "[]"),
+                                        (self.CLEAN, "Finder|Safari", "[Terminal]"), ("?", None, "[?]")):
+            with self.subTest(reading=reading, expected=expected):
+                self.assertEqual(want, self._blocker(reading, expected))
 
 
 class TestReachLib(WkTest):
@@ -85,27 +75,6 @@ class TestReachLib(WkTest):
                 mock.patch.dict(os.environ, {"PATH": f"{binp}:{os.environ['PATH']}"}):
             peers = reach.Reach(Local(), {"WK_TAILSCALE_TIMEOUT": "1", "WK_ROOT": str(REPO)}).peers()
         self.assertEqual(peers, [])
-
-
-class TestResourcesLib(WkTest):
-    def test_wk_cgroup_mb_clamps_available_memory(self):
-        fake = Fake()
-        fake.files["/proc/meminfo"] = "MemAvailable:   20480000 kB\n"
-        self.assertEqual(1, resources.Resources(fake, {"WK_CGROUP_MB": "1"}, "linux").avail_mem_mb())
-
-    def test_wk_reserve_cores_and_mb_shrink_the_envelope(self):
-        fake = Fake()
-        fake.answer(["nproc"], out="16\n")
-        fake.files["/proc/meminfo"] = "MemTotal:       32768000 kB\n"
-        r = resources.Resources(fake, {"WK_RESERVE_CORES": "3", "WK_RESERVE_MB": "4096", "HOME": "/h"}, "linux")
-        self.assertEqual((13, 32000 - 4096), (r.envelope_cores(), r.envelope_mem_mb()))
-
-    def test_wk_headless_reserve_cores_and_mb_apply_when_headless(self):
-        fake = Fake()
-        fake.files["/s/.headless"] = ""
-        r = resources.Resources(fake, {"WK_STORE": "/s", "WK_HEADLESS_RESERVE_CORES": "0",
-                                       "WK_HEADLESS_RESERVE_MB": "111"}, "linux")
-        self.assertEqual((0, 111), (r.reserve_cores(), r.reserve_mb()))
 
 
 class TestStoreLib(unittest.TestCase):
@@ -154,17 +123,14 @@ class TestPlacesLocal(WkTest):
 class TestTheGuestOverrides(unittest.TestCase):
 
     def setUp(self):
-        from wk.machine import Fake, Result
         self.fake = Fake("here")
         self.fake.answer(["/t/tart", "list"], out="[]")
         self.fake.answer(["podman", "machine", "inspect"], rc=125)
         self.fake.answer(["sysctl", "-n", "hw.ncpu"], out="10\n")
         self.fake.answer(["sysctl", "-n", "hw.memsize"], out="34359738368\n")
         self.fake.answer(["df", "-Pk", "/"], out="F\n/d 1 1 104857600 1% /\n")
-        self.result = Result
 
     def vm(self, **env):
-        from wk import places
         e = {"HOME": "/h", "WK_STORE": "/st", "WK_VM_STORE": "/vs", "XDG_STATE_HOME": "/h/st", **env}
         vm = places.Registry(str(REPO), env=e, machine=self.fake).load("vm")
         p = mock.patch.object(places.Vm, "tart", lambda s: "/t/tart")

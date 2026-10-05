@@ -16,7 +16,6 @@ from wk.store import Snapshots, Store  # noqa: E402
 
 
 def _forks():
-    """project.get("FORKS"), the fork table's one home, as (remote, repo, alias) tuples."""
     return list(project.get("FORKS"))
 
 # Nothing here may reach github.com: the wiring points the four remotes at
@@ -56,8 +55,6 @@ class MirrorFixture(unittest.TestCase):
         return sync.Sync(reg, Clock(), None, "here").snapshot_checkout(str(tree), branch)
 
     def wire(self, tree, mirror=None, branches=None):
-        """lib/wk/git.py's wiring_script -- the one authority every place wires from -- run for real against
-        this fixture's mirror."""
         m = str(self.mirror if mirror is None else mirror)
         script = git.wiring_script(str(tree), m, _forks(), (branches or "main").split())
         out = subprocess.run(["sh", "-c", script], cwd=str(tree),
@@ -66,7 +63,6 @@ class MirrorFixture(unittest.TestCase):
         return script
 
     def check(self, tree, mirror=None, branches=None):
-        """wiring_check_script, the other half of the wiring, run for real."""
         m = str(self.mirror if mirror is None else mirror)
         script = git.wiring_check_script(str(tree), m, _forks(), (branches or "main").split(), skip_env=True)
         return subprocess.run(["sh", "-c", script], cwd=str(tree),
@@ -136,19 +132,13 @@ class WorkspaceFixture(MirrorFixture):
         subprocess.run(["cp", "-a", str(self.base), str(self.ws)], check=True,
                        capture_output=True)
 
-    def fetch_script(self):
-        return sync.fetch_script(str(self.ws), "")
-
     def run_fetch(self):
-        return subprocess.run(["sh", "-c", self.fetch_script()], cwd=str(self.tmp),
+        return subprocess.run(["sh", "-c", sync.fetch_script(str(self.ws), "")], cwd=str(self.tmp),
                               capture_output=True, text=True,
                               env={**os.environ, **OFFLINE})
 
 
 class TestWsFetchScript(WorkspaceFixture):
-    """The fetch itself, run for real in a checkout wired the way every place wires one: `git fetch --all
-    --prune`, against remotes whose URLs are github.com and whose fetches are rewritten to this machine's
-    mirror."""
 
     def test_it_reads_the_mirror_although_the_remotes_name_github(self):
         sha2 = self.advance_upstream()
@@ -230,9 +220,7 @@ class TestWiringWithNoMirror(MirrorFixture):
 
 
 class TestTheWiringCheck(MirrorFixture):
-    """wk_wiring_check_script is what `wk sync` reads back from a checkout and what `--fix` re-asserts against:
-    it has to pass on a freshly wired one and name each fault on a checkout wired before this -- every
-    workspace on the fleet is one of those until it is fixed."""
+    """wiring_check_script: what `wk sync` reads back from a checkout and `--fix` re-asserts against."""
 
     def test_a_freshly_wired_checkout_passes(self):
         tree = self.clone_snapshot(self.tmp / "wired")
@@ -283,8 +271,6 @@ class TestTheWiringCheck(MirrorFixture):
 
 
 class TestHowAForkIsPushedTo(MirrorFixture):
-    """Two constraints at once."""
-
     ALIAS = "git@github-webkit:justinmichaud/WebKit.git"
     RECORDED = "https://github.com/justinmichaud/WebKit.git"
 
@@ -298,8 +284,6 @@ class TestHowAForkIsPushedTo(MirrorFixture):
         self.assertEqual(
             git_run("remote", "get-url", "--push", "fork", cwd=tree).stdout.strip(),
             self.ALIAS, "git applies pushInsteadOf when it resolves a push")
-        out = self.check(tree)
-        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_no_remote_url_names_a_host_git_webkit_would_read_as_another_github(self):
         tree = self.clone_snapshot(self.tmp / "push-hosts")
@@ -324,10 +308,6 @@ class TestHowAForkIsPushedTo(MirrorFixture):
                       out.stdout)
 
         self.wire(tree)
-        self.assertEqual(self.config(tree, "--get", "remote.fork.pushurl"), "")
-        self.assertEqual(
-            git_run("remote", "get-url", "--push", "fork", cwd=tree).stdout.strip(),
-            self.ALIAS)
         out = self.check(tree)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 

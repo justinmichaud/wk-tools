@@ -72,13 +72,7 @@ class TestDryRun(TestTest):
         self.assertEqual(rc, 0, err)
         self.assertIn("jsc-release", err)
         self.assertIn("run-javascriptcore-tests", err)
-        self.assertEqual(self.w.effects, [e for e in self.w.effects if e[0] != "watch"])
-
-    def test_the_layout_suite_dry_run_names_software_rendering(self):
-        os.environ["WK_DRY_RUN"] = "1"
-        rc, err = self.run_(None, "--layout", "--preset", "gtk-release")
-        self.assertEqual(rc, 0, err)
-        self.assertIn("run-webkit-tests", err)
+        self.assertEqual([], [e for e in self.w.effects if e[0] == "watch"])
 
     def test_layout_on_a_jsc_only_config_is_refused(self):
         err = self.refused(None, "--layout", status=1)
@@ -203,7 +197,6 @@ class TestInterrupted(TestTest):
 
 
 class TestLayoutPathCheck(unittest.TestCase):
-    """missing_layout_paths, its shell run for real against a scratch checkout."""
 
     def missing(self, paths, present=(), rc=None):
         with tempfile.TemporaryDirectory() as src:

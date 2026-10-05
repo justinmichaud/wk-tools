@@ -235,18 +235,12 @@ class ABTest(unittest.TestCase):
         return err
 
 
-class TestBoardStateNamesAConfigProblem(ABTest):
+class TestTheRefusals(ABTest):
 
     def test_a_board_machines_does_not_name_is_refused_not_called_unreachable(self):
-        w = self.world()
-        a = w.ab(devices="ghost")
-        rc, err = self.quiet(a.board_state, "ghost")
+        rc, err = self.quiet(self.world().ab(devices="ghost").board_state, "ghost")
         self.assertIsInstance(rc, Refused, err)
-        self.assertIn("ghost", err)
-        self.assertIn("names no board", err)
-
-
-class TestMachineKindNamesAMalformedConf(ABTest):
+        self.assertIn("'ghost' names no board", err)
 
     def test_a_malformed_conf_is_refused_not_treated_as_not_a_mac(self):
         w = self.world()
@@ -254,9 +248,6 @@ class TestMachineKindNamesAMalformedConf(ABTest):
         rc, err = self.quiet(ab.machine_kind, REPO, w.env, "broken")
         self.assertIsInstance(rc, Refused, err)
         self.assertIn("not a KEY=value line", err)
-
-
-class TestTheRefusals(ABTest):
 
     def test_a_bad_option_is_refused_by_name(self):
         for kw, named in (({"devices": ""}, "--devices"), ({"bits": "16"}, "--bits"), ({"rounds": "many"}, "--rounds"),

@@ -54,22 +54,14 @@ wk_atexit gone
 ''')
         self.assertEqual(cp.stdout.split().count("CLEANED"), 1, cp.stdout)
 
-    def test_the_exit_status_still_reaches_the_handlers(self):
+    def test_the_exit_status_reaches_the_handlers_and_is_not_replaced_by_theirs(self):
         cp = bash(COMMON + '''
-gone() { echo "STATUS=$WK_EXIT_STATUS"; }
+gone() { echo "STATUS=$WK_EXIT_STATUS"; false; }
 wk_atexit gone
 exit 3
 ''')
-        self.assertEqual(cp.returncode, 3)
+        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
         self.assertIn("STATUS=3", cp.stdout)
-
-    def test_the_exit_status_is_not_replaced_by_the_handlers_own(self):
-        cp = bash(COMMON + '''
-gone() { false; }
-wk_atexit gone
-exit 4
-''')
-        self.assertEqual(cp.returncode, 4, cp.stdout + cp.stderr)
 
 
 if __name__ == "__main__":

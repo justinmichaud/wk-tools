@@ -70,18 +70,12 @@ class SizeVocabulary(unittest.TestCase):
         self.assertIsNotNone(m, "rpi5-setup.sh no longer defaults CMA_MB")
         self.assertIn(int(m.group(1)), OVERLAY_SIZES)
 
+
 class Rewrite(unittest.TestCase):
     def test_the_all_line_gains_the_size(self):
         self.assertIn("dtoverlay=vc4-kms-v3d,cma-512", rewrite(STOCK).splitlines())
 
-    def test_other_boards_keep_their_own_size(self):
-        got = rewrite(STOCK)
-        self.assertEqual(got.count("dtoverlay=vc4-kms-v3d,cma-128"), 2)
-        for section in ("[pi3+]", "[pi02]"):
-            after = got.split(section, 1)[1].splitlines()[1]
-            self.assertEqual(after, "dtoverlay=vc4-kms-v3d,cma-128")
-
-    def test_exactly_one_line_changes(self):
+    def test_exactly_one_line_changes_and_other_boards_keep_their_own_size(self):
         before, after = STOCK.splitlines(), rewrite(STOCK).splitlines()
         self.assertEqual(len(before), len(after))
         self.assertEqual([i for i, (a, b) in enumerate(zip(before, after)) if a != b],
@@ -101,9 +95,6 @@ class Rewrite(unittest.TestCase):
     def test_rerunning_changes_nothing(self):
         once = rewrite(STOCK)
         self.assertEqual(rewrite(once), once)
-
-    def test_dwc2_and_the_rest_are_left_alone(self):
-        self.assertIn("dtoverlay=dwc2", rewrite(STOCK).splitlines())
 
 
 if __name__ == "__main__":

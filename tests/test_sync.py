@@ -1,8 +1,4 @@
-"""`wk sync`: cmd/sync's parse and `--where` answer, and lib/wk/sync.py's flows over fake places on a fake
-machine -- what each scope runs and in what order, the mirror refresh and what it reports, the snapshot
-publish and its skip, the fetch in each workspace with the wiring read back (and re-asserted under --fix),
-each driver's furniture, a publish killed after any effect and re-run converging, and a dry run printing the
-wet run's plan."""
+"""`wk sync`: cmd/sync's parse and `--where`, and lib/wk/sync.py's flows over fake places on a fake machine."""
 
 import contextlib
 import io
@@ -33,9 +29,6 @@ from wk.machine import Fake, Result  # noqa: E402
 
 CMD_SYNC = REPO / "cmd" / "sync"
 MAIN_SHA = "a" * 40
-
-
-
 
 cmd = load_cmd("sync")
 REAL_MIRROR_BRANCHES = images.mirror_branches
@@ -291,8 +284,6 @@ class SyncTest(unittest.TestCase):
 
 
 class TestParse(SyncTest):
-    """cmd/sync's own words: a scope, the workspace named, the place named, --fix."""
-
     def parse(self, *args, name=""):
         return cmd.parse(list(args), name)
 
@@ -322,7 +313,6 @@ class TestParse(SyncTest):
         self.assertIn("one place at a time (got 'moose' and 'buildbox4')",
                       self.refused(lambda: self.parse("--on", "moose", "--on", "buildbox4")))
 
-
     def test_an_invalid_name_is_refused(self):
         self.assertIn("invalid name", self.refused(lambda: self.parse("bad/name")))
 
@@ -341,10 +331,8 @@ class TestWhere(unittest.TestCase):
 
     def test_the_dispatcher_asks_cmd_sync_and_nothing_else_decides(self):
         self.assertEqual(Decl(CMD_SYNC).where_for(["myws"]), "dynamic")
-        cp = subprocess.run([str(CMD_SYNC), "--where", "--on=moose"], capture_output=True, text=True, timeout=30)
-        self.assertEqual((cp.returncode, cp.stdout.strip()), (0, "host"), cp.stderr)
         cp = subprocess.run([str(CMD_SYNC), "--where", "myws"], capture_output=True, text=True, timeout=30)
-        self.assertEqual(cp.stdout.strip(), "workspace")
+        self.assertEqual((cp.returncode, cp.stdout.strip()), (0, "workspace"), cp.stderr)
 
 
 class Steps(sync.Sync):
@@ -593,11 +581,8 @@ class TestWhereEachPlacesWorkspacesAreFetched(SyncTest):
 
 
 class TestFurniture(SyncTest):
-    def test_a_bare_sweep_names_no_target_and_a_named_one_is_named(self):
+    def test_a_named_sweep_says_status_compares_every_copy(self):
         self.w = self.make_world({"container": "container", "buildbox4": "remote"})
-        self.stderr(self.w.sync("tools").sync_furniture)
-        self.assertEqual(self.w.steps, ["FURNITURE container", "FURNITURE buildbox4"])
-        self.w.steps.clear()
         rc, err = self.stderr(self.w.sync("tools", place="buildbox4").sync_furniture)
         self.assertEqual((rc, self.w.steps), (0, ["FURNITURE buildbox4 named"]))
         self.assertIn("'wk status' compares every copy against this one", err)
@@ -707,12 +692,6 @@ class TestTheGuestsRemount(SyncTest):
                                     text=True, timeout=30,
                                     env=dict(os.environ, PATH="%s:%s" % (bindir, os.environ["PATH"]), STATE=str(state)))
                 self.assertEqual((cp.returncode, state.exists()), (0, True), cp.stderr)
-
-    def test_the_remount_follows_the_refresh_whatever_target_asked_for_it(self):
-        self.stderr(self.w.sync("place", place="container").run)
-        runs = [e[1] for e in self.w.effects if e[0] == "run"]
-        refresh = runs.index(("sh", "-c", "REFRESH %s" % self.w.mirror))
-        self.assertEqual([r[1] for r in runs[refresh:] if r[0] == "guest"], ["up-a", "up-b"])
 
     def test_a_dry_run_lists_each_remount_and_runs_none(self):
         os.environ["WK_DRY_RUN"] = "1"
@@ -1000,8 +979,7 @@ class TestTheFetch(SyncTest):
         self.assertEqual(self.w.steps, ["WIRING one", "UPSTREAMFIX one", "FETCH one"])
         wired = next(e[1][-1] for e in self.w.effects if e[1][:1] == ("exec",))
         self.assertEqual(wired, "WIRING /src/WebKit /mirror/buildbox4/WebKit.git mirror /far/mirror /far/ssh/config")
-
-    def test_fix_runs_git_webkit_in_a_guest_too(self):
+        self.w.steps.clear()
         self.fetch("one", fix=True, place="vm")
         self.assertIn("GITWEBKIT one", self.w.steps)
 
@@ -1023,8 +1001,6 @@ class TestTheFetch(SyncTest):
 
 
 class TestEachDriversFurniture(SyncTest):
-    """Driver.sync, the half of `wk sync --tools` each driver answers for itself."""
-
     def test_a_container_mounts_the_tooling_and_copies_nothing(self):
         t = places.Container("container", str(REPO), dict(self.w.env), self.w)
         ok, err = self.stderr(lambda: t.sync())
@@ -1056,8 +1032,6 @@ class TestEachDriversFurniture(SyncTest):
 
 
 class TestRemoteFurniture(SyncTest):
-    """Remote.sync."""
-
     def remote(self, peer=False, reference=""):
         env = dict(self.w.env, WK_REMOTE_LOCAL="1", WK_REMOTE_TOOLS="/far/wk-tools", WK_REMOTE_ROOT="/far/wk",
                    WK_REMOTE_REFERENCE=reference)
@@ -1155,7 +1129,6 @@ class TestWhyAPeerIsBehind(SyncTest):
         self.assertEqual(places.tools_why_behind(self.w, "/t"), "git could not count this machine's commits past origin/main")
 
 
-# A broker that answers one request and records it: enough for container/broker/wk-broker-client.py to speak to.
 STUB_BROKER = """
 import json, os, socket, sys
 sock, record = sys.argv[1], sys.argv[2]

@@ -1,4 +1,4 @@
-"""What resolving a workspace name costs: the walk that decides which place"""
+"""Resolving a workspace name: the walk over the fleet that decides which place holds it."""
 import os
 import subprocess
 import sys

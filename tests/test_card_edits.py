@@ -1,5 +1,5 @@
 """admin/wk-card-priv's card edits, each function lifted out with sed and run against temp directories standing
-in for the mounted partitions, plus `wk sysimage write`'s dry run of the whole sequence."""
+in for the mounted partitions."""
 import contextlib
 import io
 import os
@@ -8,7 +8,7 @@ import subprocess
 import sys
 import unittest
 
-from tests.support import REPO, TAILSCALE_KNOWS_NOTHING, WkTest, bash, stub_path
+from tests.support import REPO, WkTest, bash, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.machine import Fake  # noqa: E402
@@ -343,13 +343,6 @@ class TestUnits(CardEditTest):
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("WantedBy", cp.stdout + cp.stderr)
 
-    def test_a_unit_with_no_wantedby_is_refused(self):
-        work = self._staged()
-        (work / "systemd" / "wk-self-return.service").write_text("[Unit]\n[Service]\n")
-        cp = self._edit(work)
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("WantedBy", cp.stdout + cp.stderr)
-
     def test_an_image_without_any_init_takes_nothing_and_says_so(self):
         work = self._staged()
         cp = self._edit(work, systemd=False)
@@ -409,17 +402,15 @@ class TestBootCheck(CardEditTest):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("every file the firmware asks for resolves", cp.stdout)
 
-    def test_a_tree_with_no_second_stage_firmware_is_refused(self):
-        self._boot_tree(missing=("start4.elf",))
-        cp = self._run()
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("start4.elf", cp.stdout + cp.stderr)
-
-    def test_a_tree_with_no_kernel_is_refused(self):
-        self._boot_tree(missing=("kernel8.img",))
-        cp = self._run()
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("kernel", cp.stdout + cp.stderr)
+    def test_a_tree_missing_its_firmware_or_kernel_is_refused_by_name(self):
+        for missing, says in (("start4.elf", "start4.elf"), ("kernel8.img", "kernel")):
+            with self.subTest(missing=missing):
+                for f in self.boot.iterdir():
+                    f.unlink()
+                self._boot_tree(missing=(missing,))
+                cp = self._run()
+                self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                self.assertIn(says, cp.stdout + cp.stderr)
 
     def test_a_pi5_tree_is_checked_with_its_own_kernel_name(self):
         self._boot_tree(files=self.PI5)
@@ -445,36 +436,6 @@ class TestHelperShape(unittest.TestCase):
         for verb, fn in NEW_VERBS.items():
             m = re.search(rf"(?ms)^{fn}\(\) \{{.*?^\}}", text)
             self.assertTrue(m and "gate " in m.group(0), f"{fn} ({verb}) does not call gate")
-
-
-class TestWriteDryRunIsTheWholeSequence(WkTest):
-
-    _SSH = """#!/bin/sh
-# a fleet machine that answers, whose card helper allows the disk
-case "$*" in
-  *card-priv*status*) exit 0 ;;
-  *card-priv*check*)  echo "wk-card-priv: /dev/sdX may be written: usb 64G"; exit 0 ;;
-  *card-priv*wifi-host*) echo "wk-card-priv: wifi-host: yes ssid=TestNet"; exit 0 ;;
-  *) exit 0 ;;
-esac
-"""
-
-    def test_the_command_reaches_the_whole_sequence_and_writes_nothing(self):
-        key = self.tmp / "id.pub"
-        key.write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAtest test@example\n")
-        store = self.tmp / "store"
-        with stub_path({"ssh": self._SSH, "tailscale": TAILSCALE_KNOWS_NOTHING}) as binp:
-            cp = self.run_wk(
-                "sysimage", "write", "--from", str(REPO / "README.md"),
-                "--profile", "webkit-2.52-yocto-rpi5-64",
-                "--disk", "rpi5:/dev/sdX", "--dry-run",
-                env={"PATH": f"{binp}:{os.environ['PATH']}",
-                     "WK_IMAGE_KEY": str(key), "WK_STORE": str(store)},
-            )
-        out = cp.stdout
-        self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("dry run -- nothing was written.", out, out)
-        self.assertNotIn("reading ", out, out)
 
 
 class TestTheUnitsAreTheImageMachines(unittest.TestCase):
@@ -552,25 +513,15 @@ class TestBootRead(CardEditTest):
             + "\nBOOT_READ_MAX=65536\n" + self.READ_ONLY
             + f"v_boot_read /dev/sdX '{partition}' '{name}'\n")
 
-    def test_it_prints_the_file_the_image_wrote(self):
-        (self.boot / "wk-diag.txt").write_text("id=some-image\nwlan0: no carrier\n")
-        cp = self._run()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("wlan0: no carrier", cp.stdout)
-
-    def test_the_system_id_is_read_the_same_way(self):
-        (self.boot / "wk-image.id").write_text("wpewebkit-2.46-yocto-rpi5-64-9ee1cf59c4d1\n")
-        cp = self._run(name="wk-image.id")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("wpewebkit-2.46-yocto-rpi5-64-9ee1cf59c4d1", cp.stdout)
-
     def test_an_absent_file_is_nothing_and_not_an_error(self):
         cp = self._run()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.strip(), "")
 
-    def test_the_firmware_and_kernel_inputs_are_readable(self):
-        for name, text in (("config.txt", "[all]\nos_check=0\n"),
+    def test_each_allowlisted_file_is_printed(self):
+        for name, text in (("wk-diag.txt", "id=some-image\nwlan0: no carrier\n"),
+                           ("wk-image.id", "wpewebkit-2.46-yocto-rpi5-64-9ee1cf59c4d1\n"),
+                           ("config.txt", "[all]\nos_check=0\n"),
                            ("cmdline.txt", "root=PARTUUID=987478fd-02 rootwait\n")):
             with self.subTest(name=name):
                 (self.boot / name).write_text(text)

@@ -14,10 +14,10 @@ from unittest import mock
 
 from tests.fakes import BenchHere
 from tests.killpoints import converges
-from tests.support import REPO, live_selected
+from tests.support import REPO, live_selected, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, guest, places, tools  # noqa: E402
+from wk import act, dispatch, guest, places, tools  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Local, Result  # noqa: E402
@@ -246,10 +246,8 @@ class TestItIsSealedOnlyOnAClearScreen(BaseTest):
         self.w.sa = ["1", "0"]
         rc, err = self.build()
         self.assertEqual(0, rc, err)
-        drove = next(i for i, c in enumerate(self.w.guest_cmds) if c == "/usr/bin/python3 -")
-        stops = [i for i, e in enumerate(self.w.effects) if e[0] == "run" and e[1][:2] == (TART, "stop")]
-        self.assertTrue(stops)
-        self.assertLess(drove, len(self.w.guest_cmds))
+        self.assertIn("/usr/bin/python3 -", self.w.guest_cmds)
+        self.assertTrue([e for e in self.w.effects if e[0] == "run" and e[1][:2] == (TART, "stop")])
 
     def test_a_pane_that_comes_back_at_the_next_login_is_not_sealed(self):
         self.w.sa = ["0", "0", "1"]
@@ -318,13 +316,16 @@ class TestTheDestructiveModes(BaseTest):
         self.assertEqual([], self.prompts, "the prompt came before the check it would waste")
         self.assertEqual([], self.tart_acts())
 
-    def test_a_declined_rebuild_changes_nothing(self):
+    def test_a_declined_rebuild_or_first_rm_question_changes_nothing(self):
         self.build()
-        self.w.effects = []
-        rc, _ = self.build("--rebuild", answers=[False])
-        self.assertEqual(1, rc)
-        self.assertEqual([], self.tart_acts())
-        self.assertTrue(self.marker())
+        for mode in ("--rebuild", "--rm"):
+            with self.subTest(mode=mode):
+                self.w.effects = []
+                rc, _ = self.build(mode, answers=[False])
+                self.assertEqual(1, rc)
+                self.assertEqual([], self.tart_acts())
+                self.assertEqual("stopped", self.w.state)
+                self.assertTrue(self.marker())
 
     def test_vm_base_rm_asks_twice(self):
         self.build()
@@ -342,14 +343,6 @@ class TestTheDestructiveModes(BaseTest):
         self.build()
         rc, _ = self.build("--rm", answers=[True, True])
         self.assertIn(("prune", "--space-budget"), self.tart_acts())
-
-    def test_declining_the_first_question_erases_nothing(self):
-        self.build()
-        self.w.effects = []
-        rc, _ = self.build("--rm", answers=[False])
-        self.assertEqual(1, rc)
-        self.assertEqual("stopped", self.w.state)
-        self.assertEqual([], self.tart_acts())
 
     def test_erasing_or_refreshing_nothing_is_refused(self):
         self.assertEqual(1, self.build("--rm")[0])
@@ -445,7 +438,6 @@ class TestAGuestIsAdmittedOnlyWhereItFits(BaseTest):
 
 class TestThePodmanMachineIsNotStartedBesideAGuest(BaseTest):
     def start(self, pod_mb):
-        from wk import dispatch
         self.w.answer(["podman", "machine", "inspect"], out=json.dumps([{"State": "stopped", "Resources": {"Memory": pod_mb}}]))
         self.w.answer(["podman", "machine", "start"])
         err = io.StringIO()
@@ -476,7 +468,6 @@ class TestThePodmanMachineIsNotStartedBesideAGuest(BaseTest):
         self.assertEqual(2, len(self.started()))
 
     def test_wk_start_asks_the_same_rule(self):
-        from tests.support import load_cmd
         start = load_cmd("start")
         self.w.state = "running"
         self.w.answer(["podman", "machine", "inspect"], out=json.dumps([{"State": "stopped", "Resources": {"Memory": 16384}}]))

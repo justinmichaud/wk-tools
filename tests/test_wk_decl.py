@@ -1,4 +1,4 @@
-"""lib/wk/decl.py and the argv arithmetic in lib/wk/dispatch.py, driven in"""
+"""lib/wk/decl.py and the argv arithmetic in lib/wk/dispatch.py."""
 import os
 import sys
 import tempfile
@@ -55,17 +55,14 @@ class TestDeclarations(unittest.TestCase):
             declare(self.tmp, "probe", *lines)
         return str(cm.exception)
 
-    def test_a_command_with_verbs_declares_no_options_of_its_own(self):
-        self.assertIn("opts belong on the verbs", self._refused("# wk: verbs=a,b opts --x"))
+    def test_options_and_flags_of_a_command_with_verbs_belong_on_a_declared_verb(self):
         declare(self.tmp, "probe", "# wk: verbs=a,b", "# wk: sub a opts=--x")
-
-    def test_a_command_with_verbs_has_no_flag_that_stands_for_a_verb(self):
-        self.assertIn("no verb's", self._refused("# wk: verbs=a,b", "# wk: flag --list takes=0"))
-
-    def test_a_sub_line_names_a_declared_verb(self):
-        self.assertIn("names no verb", self._refused("# wk: verbs=a,b", "# wk: sub c opts=--x"))
-        self.assertIn("declares no verbs", self._refused("# wk: opts --x", "# wk: sub a opts=--x"))
-
+        for lines, words in ((["# wk: verbs=a,b opts --x"], "opts belong on the verbs"),
+                             (["# wk: verbs=a,b", "# wk: flag --list takes=0"], "no verb's"),
+                             (["# wk: verbs=a,b", "# wk: sub c opts=--x"], "names no verb"),
+                             (["# wk: opts --x", "# wk: sub a opts=--x"], "declares no verbs")):
+            with self.subTest(lines=lines):
+                self.assertIn(words, self._refused(*lines))
 
     def test_an_unknown_word_or_value_is_refused_by_name(self):
         self.assertIn("frobnicate", self._refused("# wk: where=host frobnicate"))
@@ -110,7 +107,6 @@ class TestDeclarations(unittest.TestCase):
     def test_a_wk_line_past_the_leading_comment_block_does_not_declare(self):
         d = declare(self.tmp, "probe", "import os", "# wk: where=host")
         self.assertEqual(d.where, "workspace")
-
 
     def test_the_synopsis_is_the_wk_line(self):
         d = declare(self.tmp, "probe", "# wk: group=other")
@@ -174,7 +170,6 @@ class TestArgvCheck(unittest.TestCase):
                            ("opts --count=", ["ws", "--count"]), ("takes=1", ["ws", "cfg", "extra"])):
             with self.subTest(args=args):
                 self.assertEqual(self._check(["# wk: name=required " + decl], args), (None, 2))
-
 
     def test_takes_star_takes_everything(self):
         out, rc = self._check(["# wk: name=required takes=*"], ["ws", "a", "b", "c"])

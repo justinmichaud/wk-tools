@@ -1,9 +1,6 @@
 """Driver.armed_barrier (lib/wk/boot/driver.py): the one check that stops a mutating command
 from racing a machine between `wk boot <machine>`, which leaves an arming record on it, and the reboot that record
-waits for -- driven with a stubbed probe, record and boot id.
-
-Run: python3 tests/run.py --unit -k test_boot_armed
-"""
+waits for -- driven with a stubbed probe, record and boot id."""
 import contextlib
 import io
 import os

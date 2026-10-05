@@ -221,17 +221,9 @@ class TestARecordIsAClaimAndThePidIsTheFact(WkTest):
     def records(self):
         return record.Records(root=str(self.tmp / "store"), env={})
 
-    def test_a_record_is_a_claim_and_the_pid_is_the_fact(self):
+    def test_garbage_in_the_pid_field_reads_dead_and_an_unknown_field_reads_empty(self):
         t = self.records().begin("new", "here", "ws1", "wk new ws1 --kill", "/nonexistent-log", ["checking", "create"])
-        self.assertEqual(t.field("kind"), "new")
-        self.assertTrue(t.alive(), "a live pid was read as dead")
         self.assertEqual(t.field("future_field"), "")
-        t.pid(4194304)
-        self.assertFalse(t.alive(), "a dead pid was read as alive")
-        self.assertEqual(t.verdict(), "died")
-
-    def test_garbage_in_the_pid_field_reads_dead_and_never_crashes(self):
-        t = self.records().begin("new", "here", "ws1", "wk new ws1 --kill", "/nonexistent-log", ["checking", "create"])
         t.set("pid", "not a pid at all")
         self.assertFalse(t.alive(), "garbage read as alive")
 

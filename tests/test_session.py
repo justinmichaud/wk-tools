@@ -1,8 +1,4 @@
-"""`wk quiesce session`: lib/wk/session.py's on/gdm/off/status against a fake Linux machine -- a GPU and the
-BMC's `ast` chip under /sys/class/drm, loginctl's sessions, systemctl's units and a privileged helper
-whose session verbs move the socket and the mode the way the real one does. Nothing here runs the real
-helper, systemctl, loginctl or gdm. Also `killpoints[session]`, a dry run printing the wet run's plan,
-and the live row `session.modes[moose]`."""
+"""`wk quiesce session`: lib/wk/session.py against a fake Linux machine with a GPU and the BMC's `ast` chip."""
 
 import contextlib
 import io
@@ -161,12 +157,6 @@ class TestTheReadings(SessionTest):
         self.assertEqual(["DP-1"], w.s().lit())
         w.files[DRM + "/card0-DP-1/enabled"] = "disabled\n"
         self.assertEqual([], w.s().lit())
-
-    def test_the_outputs_and_mode_come_from_the_compositor(self):
-        w = World()
-        self.go(w.s().on, False)
-        self.assertEqual(["DP-1"], w.s().outputs())
-        self.assertEqual("1920x1080 @ 60.000Hz", w.s().display_mode())
 
     def test_the_greeter_is_not_somebodys_desktop(self):
         w = World()

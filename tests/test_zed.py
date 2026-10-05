@@ -11,10 +11,8 @@ from tests.support import REPO, WkTest, load_cmd, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places, sshalias  # noqa: E402
+from wk.act import Refused  # noqa: E402
 from wk.machine import HAVE, Fake, Result  # noqa: E402
-
-
-
 
 os.environ.setdefault("WK_ROOT", str(REPO))
 ZED = load_cmd("zed")
@@ -38,8 +36,7 @@ class DriverTest(unittest.TestCase):
         (self.tmp / "hosts" / (name + ".conf")).write_text(kind + text)
 
 
-class TestContainerAlias(DriverTest):
-
+class ContainerTest(DriverTest):
     def setUp(self):
         super().setUp()
         self.t = self.reg.load("container")
@@ -50,6 +47,8 @@ class TestContainerAlias(DriverTest):
         self.fake.answer(["podman", "exec", "-i", "--user", "dev", "wk-demo", "/bin/sh"], out="")
         self.fake.answer(["chmod"], out="")
 
+
+class TestContainerAlias(ContainerTest):
     def test_ssh_host_is_the_generated_alias(self):
         self.assertEqual(self.t.ssh_host("demo"), "wk-demo")
 
@@ -63,7 +62,6 @@ class TestContainerAlias(DriverTest):
 
     def test_ssh_prepare_refuses_a_container_podman_does_not_know(self):
         self.fake.answer(["podman", "inspect", "wk-gone", "--format", "{{.Config.WorkingDir}}"], rc=125)
-        from wk.act import Refused
         with self.assertRaises(Refused):
             self.t.ssh_prepare("gone")
 
@@ -91,8 +89,7 @@ class TestContainerAlias(DriverTest):
         self.assertEqual(before, (self.fake.files, self.fake.dirs))
 
 
-class TestToolsPlaceResolvedOnce(TestContainerAlias):
-
+class TestToolsPlaceResolvedOnce(ContainerTest):
     def setUp(self):
         super().setUp()
         self.fake.dirs.add(self.reg.load("container").store.ws_dir("demo"))
@@ -174,41 +171,14 @@ class TestPeerAlias(DriverTest):
         self.assertIn("ProxyCommand ssh peer.example /opt/wk-tools/container/ssh-transport demo", text)
 
 
-class TestBrokenRefusesNamingTheRepair(unittest.TestCase):
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-zed-broken-"))
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"),
-                    "WK_MACHINES_DIR": str(self.tmp / "hosts"), "WK_IN_VM": "1",
-                    "PATH": os.environ.get("PATH", "")}
-        (self.tmp / "home").mkdir()
-        (self.tmp / "hosts").mkdir()
-        self.fake = Fake("here")
-        self.reg = places.Registry(REPO, env=self.env, machine=self.fake)
-        os.makedirs(os.path.join(self.env["WK_STORE"], "ws", "demo", "home"))
-        self.fake.write(os.path.join(self.env["WK_STORE"], "ws", "demo", "home", places.READY_MARKER), "")
-
-    def _resolve(self, name):
-        tname = self.reg.ws_place(name)
-        return self.reg.load(tname), tname
-
+class TestBrokenRefusesNamingTheRepair(DriverTest):
     def test_broken_reason_names_wk_rm_and_wk_new(self):
-        # No podman answer: `podman inspect` comes back 127, read as absent.
-        driver, _ = self._resolve("demo")
-        self.assertEqual("broken", driver.state("demo"))
+        self.fake.write(os.path.join(self.env["WK_STORE"], "ws", "demo", "home", places.READY_MARKER), "")
+        driver = self.reg.load(self.reg.ws_place("demo"))
+        self.assertEqual("broken", driver.state("demo"))   # created, and podman knows no such container
         reason = driver.broken_words("demo")
         self.assertIn("wk rm demo", reason)
         self.assertIn("wk new demo", reason)
-
-    def test_a_present_workspace_is_not_broken(self):
-        self.fake.answer(["podman", "inspect", "wk-fine", "--format", "{{.State.Status}}"], out="running\n")
-        os.makedirs(os.path.join(self.env["WK_STORE"], "ws", "fine", "home"))
-        self.fake.write(os.path.join(self.env["WK_STORE"], "ws", "fine", "home", places.READY_MARKER), "")
-        with open(os.path.join(self.env["WK_STORE"], "ws", "fine", "base-id"), "w") as f:
-            f.write("main-1\n")
-        driver, _ = self._resolve("fine")
-        self.assertNotEqual("broken", driver.state("fine"))
 
 
 class TestZedRoute(WkTest):

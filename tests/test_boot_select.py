@@ -1,9 +1,6 @@
 """Which system an arming boots (lib/wk/boot/driver.py): `systems` enumerates the medium's candidate partitions (a
 driver's system_parts), `select_system` resolves --system against that evidence, `medium_read` is the one reader of
-a boot partition's files, and the arming record needs no privilege.
-
-Run: python3 tests/run.py --unit -k test_boot_select
-"""
+a boot partition's files, and the arming record needs no privilege."""
 import contextlib
 import io
 import sys
@@ -89,17 +86,15 @@ class TestMediumRead(unittest.TestCase):
                                     ("card_priv", "boot-read", "/dev/mmcblk0", "12", "wk-diag.txt")])
 
 class TestSelection(unittest.TestCase):
-    def test_sole_system_is_the_default(self):
+    def test_sole_system_is_the_default_and_a_named_one_is_matched_against_the_medium(self):
         self.assertEqual(listing(("/dev/sda1", "alpha-1")).select_system(""), ("/dev/sda1", "alpha-1"))
+        d = listing(("/dev/sda1", "alpha-1"), ("/dev/sda3", "beta-2"))
+        self.assertEqual(d.select_system("beta-2"), ("/dev/sda3", "beta-2"))
 
     def test_two_systems_refuse_to_guess(self):
         err = refused(listing(("/dev/sda1", "alpha-1"), ("/dev/sda3", "beta-2")).select_system, "")
         for want in ("holds 2 systems", "alpha-1", "beta-2", "--system"):
             self.assertIn(want, err)
-
-    def test_named_system_is_matched_against_the_medium(self):
-        d = listing(("/dev/sda1", "alpha-1"), ("/dev/sda3", "beta-2"))
-        self.assertEqual(d.select_system("beta-2"), ("/dev/sda3", "beta-2"))
 
     def test_a_name_the_medium_does_not_hold_is_refused_with_the_list(self):
         err = refused(listing(("/dev/sda1", "alpha-1")).select_system, "gamma-3")

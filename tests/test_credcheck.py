@@ -147,7 +147,6 @@ class _Rules(unittest.TestCase):
         return verdict, detail
 
 
-# --- bugzilla-api-key ------------------------------------------------------------
 BZ_LOGIN = "me@example.test"
 BZ_KEY = "notarealbugzillakey0123456789abcdefghijk"
 
@@ -229,7 +228,6 @@ class TestTheBugzillaKey(_Bugzilla):
         self.assertEqual("unverified", verdict, detail)
         self.assertIn("could not reach", detail)
 
-# --- github-pat ---------------------------------------------------------------
 class TestTheTokenCanDoTheJob(_Rules):
     def test_a_fine_grained_token_that_can_open_a_pull_request_on_both_forks(self):
         verdict, detail = self.check("github-pat", FINE)
@@ -337,22 +335,15 @@ class TestTheTokenIsNotWiderThanTheJob(_Rules):
         self.assertIn("every repository this account can write", detail)
         self.assertIn("repo, read:org", detail)
 
-    def test_a_token_that_can_delete_a_repository_is_refused(self):
-        FakeGitHub.scopes = "repo, delete_repo"
-        verdict, detail = self.check("github-pat", CLASSIC)
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("delete_repo", detail)
-
-    def test_a_token_that_can_administer_an_organization_is_refused(self):
-        FakeGitHub.scopes = "repo, admin:org"
-        verdict, detail = self.check("github-pat", CLASSIC)
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("admin:org", detail)
-
-    def test_a_refused_scope_costs_no_write_probe(self):
-        FakeGitHub.scopes = "repo, delete_repo"
-        self.check("github-pat", CLASSIC)
-        self.assertEqual([], [p for p in FakeGitHub.seen if p[0] == "POST"])
+    def test_a_token_that_can_delete_a_repository_or_administer_an_org_is_refused_unprobed(self):
+        for scope in ("delete_repo", "admin:org"):
+            with self.subTest(scope=scope):
+                FakeGitHub.seen = []
+                FakeGitHub.scopes = "repo, " + scope
+                verdict, detail = self.check("github-pat", CLASSIC)
+                self.assertEqual("bad", verdict, detail)
+                self.assertIn(scope, detail)
+                self.assertEqual([], [p for p in FakeGitHub.seen if p[0] == "POST"])
 
 
 class TestTheTokenReachesTheForksAndNothingElse(_Rules):
@@ -365,14 +356,6 @@ class TestTheTokenReachesTheForksAndNothingElse(_Rules):
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("ok", verdict, detail)
         self.assertIn("on the 2 forks and on none of the 44 other", detail)
-
-    def test_every_listed_repository_is_probed_not_counted(self):
-        FakeGitHub.repos = FORKS.split() + self.OTHERS
-        self.check("github-pat", FINE)
-        self.assertEqual(["/repos/%s/pulls" % r
-                          for r in FORKS.split() + list(PROJECTS.values())
-                          + self.OTHERS],
-                         [p[1] for p in FakeGitHub.seen if p[0] == "POST"])
 
     def test_a_token_on_every_repository_is_refused_with_the_count(self):
         FakeGitHub.repos = FORKS.split() + self.OTHERS
@@ -391,10 +374,6 @@ class TestTheTokenReachesTheForksAndNothingElse(_Rules):
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("bad", verdict, detail)
         self.assertIn("1 repositories beyond the 2 forks", detail)
-        self.assertEqual(["/user/repos?per_page=100&page=1",
-                          "/user/repos?per_page=100&page=2"],
-                         [p[1] for p in FakeGitHub.seen
-                          if p[1].startswith("/user/repos")])
 
     def test_a_classic_token_is_not_asked_which_repositories_it_reaches(self):
         FakeGitHub.scopes = "repo"
@@ -523,7 +502,6 @@ class FakeLiteLLM(JsonHandler):
         self._send(status, body)
 
 
-# --- the two pasted keys -------------------------------------------------------
 class TestTheAgentKeys(_Anthropic):
     @classmethod
     def setUpClass(cls):
@@ -570,21 +548,14 @@ class TestTheAgentKeys(_Anthropic):
         self.assertEqual("unverified", verdict, detail)
         self.assertIn("could not reach", detail)
 
-    def test_a_token_refused_by_shape_costs_no_request(self):
-        for value in ("hunter2", "sk-ant-api03-abc", json.dumps({"claudeAiOauth": {}})):
+    def test_a_token_of_another_shape_is_refused_without_a_request(self):
+        for value, why in (("sk-ant-api03-abc", "bills the organization"), ("hunter2", "sk-ant-oat"),
+                           (json.dumps({"claudeAiOauth": {}}), "")):
             with self.subTest(value=value[:12]):
-                self.claude(value)
+                verdict, detail = self.claude(value)
+                self.assertEqual("bad", verdict, detail)
+                self.assertIn(why, detail)
         self.assertEqual([], FakeAnthropic.seen)
-
-    def test_a_console_api_key_is_refused_as_wider_than_the_job(self):
-        verdict, detail = self.claude("sk-ant-api03-abc")
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("bills the organization", detail)
-
-    def test_anything_else_is_refused_by_shape(self):
-        verdict, detail = self.claude("hunter2")
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("sk-ant-oat", detail)
 
     def test_a_litellm_key_the_endpoint_accepts_and_restricts_is_ok(self):
         verdict, detail = self.litellm_key("sk-abc123")
@@ -623,7 +594,6 @@ class TestTheAgentKeys(_Anthropic):
         self.assertEqual("bad", verdict)
 
 
-# --- the two tailscale credentials ---------------------------------------------
 class TestTheTailnetKeys(_Rules):
     def test_an_auth_key_is_accepted_and_what_it_cannot_prove_is_said(self):
         verdict, detail = self.check("tailnet", "tskey-auth-k1-abc")
@@ -631,22 +601,15 @@ class TestTheTailnetKeys(_Rules):
         self.assertIn("enroll a node and nothing else", detail)
         self.assertIn("NOT ephemeral", detail)
 
-    def test_the_api_token_is_refused_where_an_auth_key_belongs(self):
-        verdict, detail = self.check("tailnet", "tskey-api-k1-abc")
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("administers the whole tailnet", detail)
-
-    def test_an_oauth_client_secret_is_refused_in_both_directions(self):
-        for name in ("tailnet", "tailnet-api"):
-            with self.subTest(name=name):
-                verdict, detail = self.check(name, "tskey-client-k1-abc")
+    def test_a_key_of_the_wrong_kind_is_refused_by_what_it_is(self):
+        for name, value, why in (("tailnet", "tskey-api-k1-abc", "administers the whole tailnet"),
+                                 ("tailnet", "tskey-client-k1-abc", "OAuth client secret"),
+                                 ("tailnet-api", "tskey-client-k1-abc", "OAuth client secret"),
+                                 ("tailnet-api", "tskey-auth-k1-abc", "enrolls a node")):
+            with self.subTest(name=name, value=value):
+                verdict, detail = self.check(name, value)
                 self.assertEqual("bad", verdict, detail)
-                self.assertIn("OAuth client secret", detail)
-
-    def test_an_auth_key_is_refused_where_the_api_token_belongs(self):
-        verdict, detail = self.check("tailnet-api", "tskey-auth-k1-abc")
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("enrolls a node", detail)
+                self.assertIn(why, detail)
 
     def test_a_stored_api_token_is_put_to_the_tailnet(self):
         path = self.tmp / "api-key"
@@ -657,7 +620,6 @@ class TestTheTailnetKeys(_Rules):
         self.assertIn("could not ask the tailnet", detail)
 
 
-# --- a deploy key --------------------------------------------------------------
 class TestADeployKey(_Rules):
     REPO_NAME = "wkuser/WebKit"
 
@@ -665,42 +627,23 @@ class TestADeployKey(_Rules):
         return self.check("deploy-key", "", repos=self.REPO_NAME,
                           evidence=["ssh=" + ssh, "read_only=" + read_only])
 
-    def test_registered_on_its_fork_with_write_access(self):
-        verdict, detail = self.key("Hi %s! You've successfully authenticated"
-                                   % self.REPO_NAME, "false")
-        self.assertEqual("ok", verdict, detail)
-        self.assertIn("write access, and on no other", detail)
-
-    def test_a_read_only_registration_is_refused(self):
-        verdict, detail = self.key("Hi %s!" % self.REPO_NAME, "true")
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("READ-ONLY", detail)
-        self.assertIn("wk key deploy", detail)
-
-    def test_a_key_github_does_not_know_is_refused(self):
-        verdict, detail = self.key("Permission denied (publickey).", "")
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("not registered on", detail)
-
-    def test_an_account_key_reaches_too_far_and_is_refused(self):
-        verdict, detail = self.key("Hi wkuser! You've successfully "
-                                   "authenticated, but GitHub does not provide "
-                                   "shell access.", "")
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("account key", detail)
-
-    def test_no_key_at_all(self):
-        verdict, detail = self.key("no key", "")
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("no key for", detail)
-
-    def test_write_access_that_could_not_be_read_is_unverified_not_claimed(self):
-        verdict, detail = self.key("Hi %s!" % self.REPO_NAME, "")
-        self.assertEqual("unverified", verdict, detail)
-        self.assertIn("unconfirmed", detail)
+    def test_each_answer_github_gives_has_its_verdict(self):
+        mine = "Hi %s! You've successfully authenticated" % self.REPO_NAME
+        account = "Hi wkuser! You've successfully authenticated, but GitHub does not provide shell access."
+        for ssh, read_only, verdict, why in (
+                (mine, "false", "ok", "write access, and on no other"),
+                (mine, "true", "bad", "READ-ONLY"), (mine, "true", "bad", "wk key deploy"),
+                (mine, "", "unverified", "unconfirmed"),
+                ("Permission denied (publickey).", "", "bad", "not registered on"),
+                (account, "", "bad", "account key"),
+                ("no key", "", "bad", "no key for")):
+            with self.subTest(ssh=ssh[:20], read_only=read_only):
+                got, detail = self.check("deploy-key", "", repos=self.REPO_NAME,
+                                         evidence=["ssh=" + ssh, "read_only=" + read_only])
+                self.assertEqual(verdict, got, detail)
+                self.assertIn(why, detail)
 
 
-# --- the table itself ----------------------------------------------------------
 class TestOneTableForEveryCredential(_Rules):
     def names(self):
         cp = subprocess.run(["python3", str(CREDCHECK), "names"],

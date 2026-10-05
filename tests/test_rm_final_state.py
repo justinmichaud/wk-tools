@@ -1,9 +1,6 @@
 """`unit rm.final_state[<place>]`: `wk rm` over each real driver on the Fake machine leaves nothing of the
 workspace -- no environment, no directory, no record, no alias, no creation log, no guest file -- and its record
-is the last thing to go, so an rm killed after any effect and re-run converges on that.
-
-Run: python3 tests/run.py -k tests.test_rm_final_state
-"""
+is the last thing to go, so an rm killed after any effect and re-run converges on that."""
 import contextlib
 import io
 import os

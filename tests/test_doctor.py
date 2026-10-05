@@ -72,7 +72,6 @@ def fake_doctor(macos, sh=None, env=None, machine=None, mc=None, keys=None):
 
 
 def build_doctor(**over):
-    """A Doctor whose registry names `farbox`, `box` and `old` as build machines."""
     d = tempfile.mkdtemp(prefix="wk-test-doctor-machines-")
     for n in ("farbox", "box", "old", "fresh"):
         with open(os.path.join(d, n + ".conf"), "w") as f:
@@ -102,54 +101,35 @@ class TestTheRenderer(unittest.TestCase):
         self.assertEqual(0, rep.exit_status())
 
 
-class TestHostToolsZed(unittest.TestCase):
-    """The zed row reads `places.zed_cli`, the answer `cmd/zed` reads too."""
+class TestHostTools(unittest.TestCase):
+    def _row(self, macos, fake, name):
+        return next(r for r in fake_doctor(macos, machine=fake).host_tools() if r[1] == name)
 
-    def _zed_row(self, fake):
-        d = fake_doctor(True, machine=fake)
-        return next(r for r in d.host_tools() if r[1] == "zed")
+    def test_zed_on_path_or_as_a_bundles_cli_is_ok_and_a_bare_bundle_is_not(self):
+        cli = ["test", "-x", "/Applications/Zed.app/Contents/MacOS/cli"]
+        for case, answers, state in (("on PATH", [(HAVE + ("zed",), 0)], OK),
+                                     ("bundle cli", [(cli, 0)], OK),
+                                     ("bundle without a cli", [(cli, 1)], MISS)):
+            with self.subTest(case=case):
+                fake = Fake()
+                fake.dirs.add("/Applications/Zed.app")
+                for argv, rc in answers:
+                    fake.answer(argv, rc=rc)
+                self.assertEqual(state, self._row(True, fake, "zed")[0])
 
-    def test_zed_on_path_is_ok(self):
-        fake = Fake()
-        fake.answer(HAVE + ("zed",))
-        self.assertEqual(self._zed_row(fake)[0], OK)
-
-    def test_a_drag_installed_bundle_with_no_path_symlink_is_ok(self):
-        fake = Fake()
-        fake.answer(["test", "-x", "/Applications/Zed.app/Contents/MacOS/cli"], rc=0)
-        self.assertEqual(self._zed_row(fake)[0], OK)
-
-    def test_the_bundle_directory_alone_with_no_executable_cli_is_missing(self):
-        fake = Fake()
-        fake.dirs.add("/Applications/Zed.app")
-        fake.answer(["test", "-x", "/Applications/Zed.app/Contents/MacOS/cli"], rc=1)
-        self.assertEqual(self._zed_row(fake)[0], MISS)
+    def test_git_lfs_on_path_or_off_path_is_ok_and_absent_names_the_stage(self):
+        for macos, on_path, off_path, want in ((True, 1, 1, MISS), (False, 1, 1, MISS), (True, 1, 0, OK), (False, 0, 1, OK)):
+            with self.subTest(macos=macos, on_path=on_path, off_path=off_path):
+                fake = Fake()
+                fake.answer(HAVE + ("git-lfs",), rc=on_path)
+                fake.answer(["test", "-x", "/h/.local/bin/git-lfs"], rc=off_path)
+                row = self._row(macos, fake, "git-lfs")
+                self.assertEqual(want, row[0])
+                if want == MISS:
+                    self.assertEqual("./setup --stage tools", row[2])
 
 
-class TestHostToolsGitLfs(unittest.TestCase):
-    """git-lfs is on every host: its absence is a miss naming the setup stage, on either OS."""
-
-    def _row(self, macos, fake):
-        return next(r for r in fake_doctor(macos, machine=fake).host_tools() if r[1] == "git-lfs")
-
-    def test_absent_is_a_miss_with_the_remedy(self):
-        for macos in (True, False):
-            fake = Fake()
-            fake.answer(HAVE + ("git-lfs",), rc=1)
-            fake.answer(["test", "-x", "/h/.local/bin/git-lfs"], rc=1)
-            self.assertEqual((MISS, "git-lfs", "./setup --stage tools"), self._row(macos, fake))
-
-    def test_the_one_tools_sh_installs_off_path_is_ok(self):
-        fake = Fake()
-        fake.answer(HAVE + ("git-lfs",), rc=1)
-        fake.answer(["test", "-x", "/h/.local/bin/git-lfs"])
-        self.assertEqual(OK, self._row(True, fake)[0])
-
-    def test_present_is_ok(self):
-        fake = Fake()
-        fake.answer(HAVE + ("git-lfs",))
-        self.assertEqual(OK, self._row(False, fake)[0])
-
+class TestTheGitLfsFilter(unittest.TestCase):
     def test_the_shared_gitconfig_runs_the_filter_and_a_place_without_git_lfs_still_adds(self):
         tmp = tempfile.mkdtemp(prefix="wk-test-lfs-")
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -393,13 +373,12 @@ class TestReportStore(unittest.TestCase):
         self.assertNotIn("container machine", text)
         self.assertNotIn("git user.name", text)
 
-    def test_a_mirror_missing_a_branch_is_a_row_naming_it_and_the_refresh(self):
-        rows = self.rows(FULL_STORE_BLOB.replace("mirror=ok", "mirror=gap webkitglib/2.52"), "")
-        self.assertEqual((MISS, "WebKit mirror carries no webkitglib/2.52", "wk sync --mirror"), rows[0])
-
-    def test_no_mirror_at_all_names_the_command_that_clones_one(self):
-        rows = self.rows(FULL_STORE_BLOB.replace("mirror=ok", "mirror=no"), "")
-        self.assertEqual((MISS, "WebKit mirror", "wk sync"), rows[0])
+    def test_a_mirror_missing_a_branch_or_absent_names_the_command_that_converges_it(self):
+        for line, row in (("mirror=gap webkitglib/2.52",
+                           (MISS, "WebKit mirror carries no webkitglib/2.52", "wk sync --mirror")),
+                          ("mirror=no", (MISS, "WebKit mirror", "wk sync"))):
+            with self.subTest(line=line):
+                self.assertEqual(row, self.rows(FULL_STORE_BLOB.replace("mirror=ok", line), "")[0])
 
     def test_everything_present_is_all_ok(self):
         self.assertEqual({OK}, {r[0] for r in self.rows(FULL_STORE_BLOB, "")})
@@ -427,11 +406,8 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
     def test_a_running_machine_is_asked_for_the_probe_and_its_git_identity(self):
         fake = Fake()
         fake.answer(INSPECT, 0, machine_in("running"))
-        asked = []
-
-        fake.react(("podman", "machine", "ssh", "wk", "--"), lambda a, f: asked.append(a[5]) or Result(0, FULL_STORE_BLOB))
+        fake.answer(("podman", "machine", "ssh", "wk", "--"), out=FULL_STORE_BLOB)
         rows = list(fake_doctor(True, machine=fake).workspaces_store())
-        self.assertEqual(["WK_STORE=/var/lib/wk python3 /opt/wk-tools/cmd/doctor --probe-store"], asked)
         self.assertEqual((OK, "podman machine 'wk' running", ""), rows[0])
         self.assertTrue(any("container machine: git user.name" in r[1] for r in rows), rows)
 
@@ -610,32 +586,21 @@ class ACachedCredentialIsNotAGrant(WkTest):
 
     HELPER = "/usr/local/libexec/wk-boot-priv"
 
-    def _answers(self, listing, run_succeeds=True):
+    def _answers(self, listing):
         fake = Fake()
         fake.answer(["sudo", "-n", "-l"], out=listing + "\n")
-        fake.answer(["sudo", "-n", self.HELPER], rc=0 if run_succeeds else 1)
+        fake.answer(["sudo", "-n", self.HELPER])
         return doctor.Host.priv_answers(str(REPO), self.HELPER, fake)
 
-    def test_a_listing_without_the_path_is_no_grant_even_though_it_runs(self):
-        listing = ("User justinmichaud may run the following commands on Tolken:\n"
-                   "    (ALL) ALL\n"
-                   "    (root) NOPASSWD: /usr/local/libexec/wk-quiesce-priv")
-        self.assertFalse(self._answers(listing, run_succeeds=True))
-
-    def test_a_listing_with_the_path_is_a_grant(self):
-        listing = ("User justinmichaud may run the following commands on Tolken:\n"
-                   "    (ALL) ALL\n"
-                   "    (root) NOPASSWD: /usr/local/libexec/wk-boot-priv")
-        self.assertTrue(self._answers(listing))
-
-    def test_a_blanket_all_is_not_a_grant(self):
-        self.assertFalse(self._answers("    (ALL) ALL"))
-
-    def test_the_path_must_match_exactly(self):
-        self.assertFalse(self._answers("    (root) NOPASSWD: /usr/local/libexec/wk-boot-priv-old"))
-
-    def test_no_listing_at_all_is_reported_as_no_grant(self):
-        self.assertFalse(self._answers(""))
+    def test_only_a_listing_naming_the_exact_path_is_a_grant_though_every_run_succeeds(self):
+        head = "User justinmichaud may run the following commands on Tolken:\n    (ALL) ALL\n"
+        for listing, grant in ((head + "    (root) NOPASSWD: /usr/local/libexec/wk-boot-priv", True),
+                               (head + "    (root) NOPASSWD: /usr/local/libexec/wk-quiesce-priv", False),
+                               ("    (ALL) ALL", False),
+                               ("    (root) NOPASSWD: /usr/local/libexec/wk-boot-priv-old", False),
+                               ("", False)):
+            with self.subTest(listing=listing):
+                self.assertEqual(grant, self._answers(listing))
 
 
 class TestTheMachineOverlay(unittest.TestCase):

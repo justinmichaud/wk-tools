@@ -297,12 +297,10 @@ class TestRefusals(TaskTest):
         err = self.refused()
         self.assertIn("a buildroot image builds in a container workspace, and place 'box' is a remote one", err)
 
-    def test_an_unknown_option_is_a_usage_error(self):
-        self.assertIn("--stage is not an option of this build", self.refused(None, "--stage", "image"))
-
-    def test_another_builder_s_option_is_refused(self):
-        """cmd/sysimage declares every builder's options; a buildroot build refuses pmos's"""
-        self.assertIn("--resume is not an option of this build", self.refused(None, "--resume"))
+    def test_an_unknown_or_another_builder_s_option_is_a_usage_error(self):
+        for args in (["--stage", "image"], ["--resume"]):
+            with self.subTest(args[0]):
+                self.assertIn("%s is not an option of this build" % args[0], self.refused(None, *args))
 
     def test_a_half_declared_kernel_pin_is_refused(self):
         p = dict(self.w.profile(), BR_KERNEL_DEB_URL="https://x/k.deb")
@@ -497,7 +495,6 @@ class TestTheWrapperInTheWorkspace(unittest.TestCase):
                             env=dict(os.environ, PYTHONPATH=str(REPO / "lib")), capture_output=True, text=True, timeout=30)
         self.assertEqual(cp.returncode, 0, cp.stderr)
         self.assertEqual(cp.stdout, "1\n")
-        self.assertRegex(cp.stderr, r"^wk: buildroot pid \d+\n$")
 
 
 class TestFetch(TaskTest):

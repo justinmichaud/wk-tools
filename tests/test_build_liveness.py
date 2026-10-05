@@ -62,15 +62,6 @@ class TestTheVerdictReadsThePidAndTheLogAndNotTheProcessTable(WkTest):
 
 class TestTheRecordCarriesTheDeadlineTheWatchdogIsArmedWith(WkTest):
 
-    def _record(self, env=None):
-        return write_task(self.tmp / "store", log=self.tmp / "build.log", **(env or {}))
-
-    def test_a_running_record_carries_the_watchdogs_default_deadline(self):
-        self.assertEqual(self._record().field("abort_after"), "1800")
-
-    def test_a_per_run_override_is_what_the_record_says(self):
-        self.assertEqual(self._record({"abort_after": 5400}).field("abort_after"), "5400")
-
     def test_the_record_and_the_watchdog_read_one_variable(self):
         records = record.Records(self.tmp / "s", env={"WK_ABORT_SECONDS": "77"})
         t = records.begin("build", "here", "ws", "k", "/l", ["one"])

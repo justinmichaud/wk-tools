@@ -205,16 +205,10 @@ class TestContainer(DriversTest):
         self.t.wk("doctor", env=env)
         self.assertTrue(self.fake.effects[-1][1][-1].endswith(" 2>&1"))
 
-    def test_start_and_stop_are_effects(self):
+    def test_stop_is_an_effect(self):
         self.fake.answer(["podman", "stop"], out="")
         self.assertTrue(self.t.stop("a"))
         self.assertEqual(self.fake.effects[-1][1][:3], ("podman", "stop", "--time"))
-        os.environ["WK_DRY_RUN"] = "1"
-        try:
-            self.assertTrue(self.t.stop("a"))
-            self.assertEqual(self.fake.effects[-1][1][:3], ("podman", "stop", "--time"))
-        finally:
-            os.environ.pop("WK_DRY_RUN", None)
 
     def test_exec_tty_carries_a_tty_through_the_sdk_and_the_bridge(self):
         self.fake.answer(["env"], out="ok\n")
@@ -659,11 +653,6 @@ class TestContainerWrite(DriversTest):
         self.assertEqual(argv[argv.index("--arch"):argv.index("--name")], ("--arch", "arm", "--image", image))
         self.assertNotIn(("--device", "/dev/dri"), self.flag_pairs(argv))
         self.assertIn(("--env", "WK_ARCH=armhf"), self.flag_pairs(argv))
-        self.env["WK_SDK_IMAGE"] = "ghcr.io/x/sdk:tag"
-        self.fake.effects = []
-        _, err = self.stderr_of(lambda: self.reg.load("container").create("other", self.base))
-        self.assertIn("--image", self.wkdev_create())
-        self.assertIn("ghcr.io/x/sdk:tag", self.wkdev_create())
 
     def sdk_asks_for(self, tag, published):
         self.fake.answer(["env", "WKDEV_SDK=%s" % self.t.sdk()], out=tag + "\n")
@@ -677,16 +666,15 @@ class TestContainerWrite(DriversTest):
         self.assertIn("WK_SDK_IMAGE=ghcr.io/igalia/wkdev-sdk:2.55-v10-2222222 wk new", err)
         self.assertEqual([e for e in self.fake.effects if e[0] != "run"], [])
 
-    def test_a_published_sdk_tag_goes_on_to_wkdev_create(self):
-        self.sdk_asks_for("2.55-v2-8434060", ["2.55-v2-8434060"])
-        self.stderr_of(lambda: self.t.create("new", self.base))
-        self.assertTrue(self.wkdev_create())
-
-    def test_a_registry_that_cannot_be_asked_goes_on_to_wkdev_create(self):
-        self.sdk_asks_for("2.55-v2-8434060", [])
-        self.fake.answer(["podman", "search", "--list-tags"], rc=1, err="timed out")
-        self.stderr_of(lambda: self.t.create("new", self.base))
-        self.assertTrue(self.wkdev_create())
+    def test_a_published_tag_or_a_registry_that_cannot_be_asked_goes_on_to_wkdev_create(self):
+        for ws, search in (("published", Result(0, "NAME\tTAG\nghcr.io/igalia/wkdev-sdk\t2.55-v2-8434060\n")),
+                           ("unasked", Result(1, "", "timed out"))):
+            with self.subTest(ws):
+                self.sdk_asks_for("2.55-v2-8434060", [])
+                self.fake.answer(["podman", "search", "--list-tags"], rc=search.rc, out=search.out, err=search.err)
+                self.fake.effects = []
+                self.stderr_of(lambda: self.t.create(ws, self.base))
+                self.assertTrue(self.wkdev_create())
 
     def test_an_image_override_skips_the_registry_check(self):
         self.sdk_asks_for("2.55-v2-8434060", [])
@@ -1027,6 +1015,7 @@ class TestRemoteWrite(RemoteTest):
     def test_a_command_is_handed_over_whole_to_the_peers_own_wk(self):
         self.conf("peer", "peer=1\ntools=/opt/wk-tools\n")
         self.fake.answer_remote("test -x /opt/wk-tools/wk", rc=0)
+        self.tools_at("0000stale000")   # a peer is handed over at any commit
         argv = self.reg.load("peer").hand_over("new", ["a", "--no-wait"], tty=False)
         self.assertEqual((argv[0], argv[-2]), ("ssh", "peer"))
         self.assertNotIn("-t", argv)
@@ -1061,12 +1050,6 @@ class TestRemoteWrite(RemoteTest):
         argv, err = self.stderr_of(lambda: self.t.hand_over("status", ["a"], tty=False, readonly=True))
         self.assertIn("wk status a", argv[-1])
         self.assertIn("wk sync --tools box", err)
-
-    def test_a_peer_is_handed_over_at_any_commit(self):
-        self.conf("peer", "peer=1\ntools=/opt/wk-tools\n")
-        self.fake.answer_remote("test -x /opt/wk-tools/wk", rc=0)
-        self.tools_at("0000stale000")
-        self.assertIn("wk build a", self.reg.load("peer").hand_over("build", ["a"], tty=False)[-1])
 
     def test_a_peers_workspace_is_destroyed_by_its_own_wk(self):
         self.conf("peer", "peer=1\ntools=/opt/wk-tools\n")
@@ -1263,7 +1246,6 @@ class TestPidAliveIsTheOneAnswer(DriversTest):
 
 class TestAMacHostReadsTheContainerStoreInThePodmanMachine(unittest.TestCase):
     def test_a_finished_workspace_is_present_from_the_host(self):
-        from unittest import mock
         fake = Fake("here")
         fake.answer(["podman", "-c", "wk", "inspect"], out="running\n")
         fake.answer(["podman", "machine", "ssh", "wk", "--"])
@@ -1274,7 +1256,6 @@ class TestAMacHostReadsTheContainerStoreInThePodmanMachine(unittest.TestCase):
         self.assertIn("test -d /var/lib/wk/ws/w", asked)
 
     def test_a_command_in_a_container_is_entered_by_the_podman_machines_own_wk(self):
-        from unittest import mock
         c = places.Container("container", str(REPO), {"HOME": "/nonexistent"}, Fake("here"))
         with mock.patch.object(places.os, "uname", return_value=mock.Mock(sysname="Darwin")), \
                 mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):

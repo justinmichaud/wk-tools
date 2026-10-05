@@ -1,8 +1,5 @@
-"""cmd/key end to end against a scratch keyring: every subverb acts here, with a `podman` that fails on
-PATH. tests/test_wk_key.py holds the fleet election over a fake machine.
-
-Run: python3 -m unittest tests.test_key -v
-"""
+"""cmd/key end to end against a scratch keyring, with a `podman` that fails on PATH; tests/test_wk_key.py holds the
+fleet election over a fake machine."""
 
 import os
 import subprocess
@@ -57,14 +54,10 @@ class TestEnsureRunsHere(_KeyRun):
         self.assertEqual(0o700, secrets.stat().st_mode & 0o777)
         self.assertEqual(0o700, held.stat().st_mode & 0o777)
         self.assertEqual(0o600, (held / "build_key_fork").stat().st_mode & 0o777)
-
-    def test_a_second_run_generates_nothing_new(self):
-        _cp, secrets = self.key("ensure")
-        held = secrets.parent / "push-keys"
         before = (held / "build_key_fork").read_bytes()
         cp, _ = self.key("ensure")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(before, (held / "build_key_fork").read_bytes())
+        self.assertEqual(before, (held / "build_key_fork").read_bytes(), "a second run generated a new key")
 
     def test_the_public_half_is_the_private_ones_own_and_nothing_sits_beside_the_key(self):
         """ssh refuses an identity whose `.pub` beside it disagrees."""
@@ -114,23 +107,23 @@ GH_SAYS_NOTHING = '#!/bin/sh\nexit 0\n'
 
 
 class TestCheckAsksAboutEveryCredential(_KeyRun):
-
-    def test_a_machine_with_no_keys_names_the_remedy_for_each_fork(self):
-        cp, _secrets = self.key("check")
+    def test_a_bare_key_is_check_on_an_empty_machine_it_reports_every_credential_and_changes_nothing(self):
+        self.assertEqual(as_dispatched("key", [], {}), ["check"])
+        cp, secrets = self.key("check")
         self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
         for fork in ("WebKit", "WPEWebKit"):
             self.assertIn(fork, cp.stdout)
         actions = cp.stdout.partition("needs you:")[2]
         self.assertEqual(2, actions.count("wk key deploy"), "one line per fork: " + actions)
-
-    def test_every_credential_is_reported_and_absence_is_not_a_fault(self):
-        cp, _secrets = self.key("check")
         self.assertIn("credentials:", cp.stdout)
         for name in ("github-pat", "bugzilla-api-key", "claude", "litellm",
                      "tailnet", "tailnet-api", "ntfy"):
             with self.subTest(name=name):
                 self.assertIn(name, cp.stdout)
         self.assertIn("nothing stored", cp.stdout)
+        for word in ("sharing to", "registering", "minted"):
+            self.assertNotIn(word, cp.stdout + cp.stderr)
+        self.assertFalse((secrets.parent / "push-keys").exists())
 
     def test_a_broken_credential_fails_the_check_and_its_fix_leaves_the_table(self):
         cp, secrets = self.key("ensure")
@@ -173,11 +166,9 @@ class TestSetupDoesWhateverIsMissing(_KeyRun):
     def setup_run(self):
         home = self.tmp / "home"
         home.mkdir(exist_ok=True)
-        return self.key("setup",
-                        stubs={"gh": GH_REFUSES},
-                        env={"HOME": str(home)})
+        return self.key("setup", stubs={"gh": GH_REFUSES}, env={"HOME": str(home)})
 
-    def test_what_it_could_not_settle_is_named_and_the_rest_still_runs(self):
+    def test_what_it_could_not_settle_is_named_what_it_mints_is_made_and_the_rest_still_runs(self):
         cp, secrets = self.setup_run()
         self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertTrue((secrets.parent / "push-keys" / "build_key_fork").exists(), cp.stdout + cp.stderr)
@@ -187,9 +178,6 @@ class TestSetupDoesWhateverIsMissing(_KeyRun):
         for name in ("litellm", "tailnet-api"):
             with self.subTest(name=name):
                 self.assertIn(name, left[0])
-
-    def test_a_credential_wk_mints_is_made_rather_than_asked_for(self):
-        cp, secrets = self.setup_run()
         topic = secrets.parent / "notify" / "ntfy-topic"
         self.assertTrue(topic.exists(), cp.stdout + cp.stderr)
         self.assertTrue(topic.read_text().strip())
@@ -275,17 +263,13 @@ class TestTheTopicIsMintedNotAsked(_KeyRun):
                          self.topic_path(secrets).read_text().strip())
         self.assertNotIn(self.SHARED, cp.stdout + cp.stderr)
 
-    def test_a_topic_from_another_machine_is_put_to_the_same_rule(self):
-        cp, secrets = self.key("set", "ntfy", "--paste",
-                               input="not one word\n")
-        self.assertNotEqual(0, cp.returncode, cp.stdout)
-        self.assertFalse(self.topic_path(secrets).exists())
-
-    def test_nothing_on_stdin_stores_nothing_and_names_the_mint(self):
-        cp, secrets = self.key("set", "ntfy", "--paste", input="")
-        self.assertNotEqual(0, cp.returncode, cp.stdout)
+    def test_a_pasted_topic_is_put_to_the_same_rule_and_nothing_names_the_mint(self):
+        for given in ("not one word\n", ""):
+            with self.subTest(given=given):
+                cp, secrets = self.key("set", "ntfy", "--paste", input=given)
+                self.assertNotEqual(0, cp.returncode, cp.stdout)
+                self.assertFalse(self.topic_path(secrets).exists())
         self.assertIn("wk key set ntfy", cp.stdout + cp.stderr)
-        self.assertFalse(self.topic_path(secrets).exists())
 
 # GitHub with the deploy keys not yet registered, and with them registered; `false` answers the read_only query.
 GH_NO_KEYS_YET = ('#!/bin/sh\ncase "$*" in *read_only*) echo false ;; esac\nexit 0\n')
@@ -351,12 +335,9 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
             with self.subTest(name=name):
                 self.assertRegex(cp.stderr, r"%s\s+skipped\s+\S" % name)
 
-    def provision(self, secrets):
-        provision_credentials(secrets, self.tmp)
-
     def test_a_machine_that_holds_them_all_stays_under_its_budget(self):
         _cp, secrets = self.key("ensure")
-        self.provision(secrets)
+        provision_credentials(secrets, self.tmp)
         cp, _ = self.key("setup", stubs=self.stubs(GH_HAS_THE_KEYS),
                          env=self.env())
         lines = self.lines(cp)
@@ -368,21 +349,12 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
 
     def test_the_table_is_one_row_per_credential(self):
         _cp, secrets = self.key("ensure")
-        self.provision(secrets)
+        provision_credentials(secrets, self.tmp)
         cp, _ = self.key("check", stubs=self.stubs(GH_HAS_THE_KEYS),
                          env=self.env())
         rows = [l for l in cp.stdout.splitlines()
                 if l.startswith("    ") and l.strip()]
         self.assertEqual(9, len(rows), cp.stdout)
-
-
-class TestABareKeyChangesNothing(_KeyRun):
-    def test_it_is_check_and_prints_the_report_and_nothing_else(self):
-        self.assertEqual(as_dispatched("key", [], {}), ["check"])
-        check, _ = self.key("check")
-        self.assertIn("credentials:", check.stdout)
-        for word in ("sharing to", "registering", "minted"):
-            self.assertNotIn(word, check.stdout + check.stderr)
 
 
 class TestAnAuthKeyIsMintedNotOnlyHanded(WkTest):

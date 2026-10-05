@@ -14,41 +14,24 @@ class TestPlaceKind(unittest.TestCase):
     def _kind(self, name, registry):
         return places.Registry(REPO, env={"WK_MACHINES_DIR": str(registry), "HOME": "/nonexistent"}, machine=Fake()).kind(name)
 
-    def test_the_four_built_in_kinds_name_themselves(self):
-        with scratch_dir() as reg:
-            for kind in ("container", "vm", "remote", "local"):
-                with self.subTest(kind=kind):
-                    self.assertEqual(self._kind(kind, reg), kind)
-
-    def test_an_unregistered_name_fails_rather_than_guessing(self):
-        with scratch_dir() as reg:
-            self.assertIsNone(self._kind("nosuchtarget", reg))
-
-    def test_a_conf_that_names_a_kind_is_believed(self):
-        with scratch_dir() as reg:
-            (reg / "buildbox1.conf").write_text('kind=build\ndriver="remote"\n')
-            self.assertEqual(self._kind("buildbox1", reg), "remote")
-
-    def test_a_conf_that_names_no_kind_falls_through_to_remote(self):
-        with scratch_dir() as reg:
-            (reg / "plainbox.conf").write_text('kind=build\nhost="plainbox"\n')
-            self.assertEqual(self._kind("plainbox", reg), "remote")
+    def test_a_built_in_names_itself_a_conf_is_believed_and_nothing_is_guessed(self):
+        cases = [(k, None, k) for k in ("container", "vm", "remote", "local")]
+        cases += [("nosuchtarget", None, None), ("buildbox1", 'kind=build\ndriver="remote"\n', "remote"),
+                  ("plainbox", 'kind=build\nhost="plainbox"\n', "remote")]
+        for name, conf, want in cases:
+            with self.subTest(name=name), scratch_dir() as reg:
+                if conf:
+                    (reg / (name + ".conf")).write_text(conf)
+                self.assertEqual(self._kind(name, reg), want)
 
 
 class TestRemoteIsLocal(unittest.TestCase):
-    def _is_local(self, remote_local):
-        with scratch_dir() as state:
-            env = {"HOME": "/nonexistent", "XDG_STATE_HOME": str(state), "WK_REMOTE_MARKER": "/nonexistent/.wk-remote",
-                   "WK_REMOTE_HOST": "buildbox1"}
-            if remote_local:
-                env["WK_REMOTE_LOCAL"] = "1"
-            return places.Remote("buildbox1", str(REPO), env, Fake()).is_local
-
-    def test_true_once_the_remote_marker_says_this_is_the_machine(self):
-        self.assertTrue(self._is_local(True))
-
-    def test_false_for_a_plain_ssh_driven_place(self):
-        self.assertFalse(self._is_local(False))
+    def test_local_exactly_when_the_remote_marker_says_this_is_the_machine(self):
+        for remote_local in (True, False):
+            with self.subTest(remote_local=remote_local), scratch_dir() as state:
+                env = {"HOME": "/nonexistent", "XDG_STATE_HOME": str(state), "WK_REMOTE_MARKER": "/nonexistent/.wk-remote",
+                       "WK_REMOTE_HOST": "buildbox1", **({"WK_REMOTE_LOCAL": "1"} if remote_local else {})}
+                self.assertEqual(places.Remote("buildbox1", str(REPO), env, Fake()).is_local, remote_local)
 
 
 class TestImageRootClass(unittest.TestCase):

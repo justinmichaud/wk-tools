@@ -1,8 +1,5 @@
-"""container/sdk-refresh.sh -- the one place the webkit-container-sdk checkout
-is fetched and moved onto its remote's current default branch. The image tag
-`wkdev-create` asks for is read out of that checkout (the SDK's own
-`get_sdk_version`), so a checkout that never fetches pins every container this
-machine makes to whatever commit `./setup` first cloned."""
+"""container/sdk-refresh.sh: the webkit-container-sdk checkout is fetched and moved onto its remote's default
+branch, since the image tag `wkdev-create` asks for is read out of that checkout."""
 import os
 import subprocess
 import unittest
@@ -53,96 +50,62 @@ def refresh(checkout, timeout=30, patcher=None):
 
 
 class TestSdkRefresh(unittest.TestCase):
-    def test_a_fresh_checkout_lands_on_the_default_branch_tip(self):
-        with scratch_dir() as d:
-            upstream = make_upstream(d / "upstream")
-            git("clone", "-q", str(upstream), str(d / "checkout"), cwd=d)
-            checkout = d / "checkout"
-            tip = head(upstream)
-
-            cp = refresh(checkout)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual(head(checkout), tip)
+    def setUp(self):
+        self.d = self.enterContext(scratch_dir())
+        self.upstream = make_upstream(self.d / "upstream")
+        self.checkout = self.d / "checkout"
+        git("clone", "-q", str(self.upstream), str(self.checkout), cwd=self.d)
 
     def test_the_checkout_moves_when_upstream_advances(self):
-        with scratch_dir() as d:
-            upstream = make_upstream(d / "upstream")
-            git("clone", "-q", str(upstream), str(d / "checkout"), cwd=d)
-            checkout = d / "checkout"
-            old_tip = head(checkout)
-
-            new_tip = commit_more(upstream, "two")
-            self.assertNotEqual(old_tip, new_tip)
-
-            cp = refresh(checkout)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual(head(checkout), new_tip)
+        new_tip = commit_more(self.upstream, "two")
+        cp = refresh(self.checkout)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(head(self.checkout), new_tip)
 
     def test_a_renamed_default_branch_is_followed(self):
-        with scratch_dir() as d:
-            upstream = make_upstream(d / "upstream")
-            git("clone", "-q", str(upstream), str(d / "checkout"), cwd=d)
-            checkout = d / "checkout"
+        git("branch", "-m", "main", "master", cwd=self.upstream)
+        new_tip = commit_more(self.upstream, "two")
+        cp = refresh(self.checkout)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(head(self.checkout), new_tip)
+        self.assertEqual(git("symbolic-ref", "--short", "refs/remotes/origin/HEAD", cwd=self.checkout).stdout.strip(),
+                         "origin/master")
 
-            git("branch", "-m", "main", "master", cwd=upstream)
-            new_tip = commit_more(upstream, "two")
-
-            cp = refresh(checkout)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertEqual(head(checkout), new_tip)
-            self.assertEqual(
-                git("symbolic-ref", "--short", "refs/remotes/origin/HEAD",
-                    cwd=checkout).stdout.strip(),
-                "origin/master",
-            )
-
-    def test_an_unreachable_remote_refuses_with_the_remedy(self):
-        with scratch_dir() as d:
-            upstream = make_upstream(d / "upstream")
-            git("clone", "-q", str(upstream), str(d / "checkout"), cwd=d)
-            checkout = d / "checkout"
-            git("remote", "set-url", "origin", str(d / "no-such-remote"), cwd=checkout)
-            tip_before = head(checkout)
-
-            cp = refresh(checkout)
-            self.assertNotEqual(cp.returncode, 0)
-            self.assertIn("nothing useful to fall back to", cp.stdout + cp.stderr)
-            self.assertIn("Retry once the network is back", cp.stdout + cp.stderr)
-            # Refused, not half-moved: the checkout is exactly where it was.
-            self.assertEqual(head(checkout), tip_before)
+    def test_an_unreachable_remote_refuses_with_the_remedy_and_moves_nothing(self):
+        git("remote", "set-url", "origin", str(self.d / "no-such-remote"), cwd=self.checkout)
+        tip_before = head(self.checkout)
+        cp = refresh(self.checkout)
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("nothing useful to fall back to", cp.stdout + cp.stderr)
+        self.assertIn("Retry once the network is back", cp.stdout + cp.stderr)
+        self.assertEqual(head(self.checkout), tip_before)
 
     def test_the_patches_are_applied_after_the_reset(self):
-        with scratch_dir() as d:
-            upstream = make_upstream(d / "upstream")
-            git("clone", "-q", str(upstream), str(d / "checkout"), cwd=d)
-            cp = refresh(d / "checkout",
-                         patcher=SCRIPT.parent / "sdk-patches" / "apply.sh")
-            self.assertNotEqual(0, cp.returncode)
-            self.assertIn("not an SDK checkout", cp.stderr)
+        cp = refresh(self.checkout, patcher=SCRIPT.parent / "sdk-patches" / "apply.sh")
+        self.assertNotEqual(0, cp.returncode)
+        self.assertIn("not an SDK checkout", cp.stderr)
 
     def test_a_refresh_that_changes_nothing_says_nothing_about_the_patches(self):
-        with scratch_dir() as d:
-            upstream = make_upstream(d / "upstream")
-            git("clone", "-q", str(upstream), str(d / "checkout"), cwd=d)
-            patcher = d / "patcher.sh"
-            patcher.write_text('#!/bin/sh\necho patched > "$1/f"\necho "added --x" >&2\n')
-            first = refresh(d / "checkout", patcher=patcher)
-            again = refresh(d / "checkout", patcher=patcher)
-            self.assertIn("added --x", first.stdout + first.stderr)
-            self.assertEqual((0, ""), (again.returncode, again.stdout + again.stderr))
-            commit_more(upstream, "two")
-            moved = refresh(d / "checkout", patcher=patcher)
-            self.assertIn("added --x", moved.stdout + moved.stderr)
-            patcher.write_text('#!/bin/sh\necho patched > "$1/f"\necho "verify failed: x" >&2\nexit 1\n')
-            failed = refresh(d / "checkout", patcher=patcher)
-            self.assertNotEqual(0, failed.returncode)
-            self.assertIn("verify failed: x", failed.stdout + failed.stderr)
+        patcher = self.d / "patcher.sh"
+        patcher.write_text('#!/bin/sh\necho patched > "$1/f"\necho "added --x" >&2\n')
+        first = refresh(self.checkout, patcher=patcher)
+        again = refresh(self.checkout, patcher=patcher)
+        self.assertIn("added --x", first.stdout + first.stderr)
+        self.assertEqual((0, ""), (again.returncode, again.stdout + again.stderr))
+        commit_more(self.upstream, "two")
+        moved = refresh(self.checkout, patcher=patcher)
+        self.assertIn("added --x", moved.stdout + moved.stderr)
+        patcher.write_text('#!/bin/sh\necho patched > "$1/f"\necho "verify failed: x" >&2\nexit 1\n')
+        failed = refresh(self.checkout, patcher=patcher)
+        self.assertNotEqual(0, failed.returncode)
+        self.assertIn("verify failed: x", failed.stdout + failed.stderr)
 
     def test_not_a_checkout_at_all_refuses_by_name(self):
-        with scratch_dir() as d:
-            cp = refresh(d)
-            self.assertNotEqual(cp.returncode, 0)
-            self.assertIn("not an SDK checkout", cp.stdout + cp.stderr)
+        empty = self.d / "empty"
+        empty.mkdir()
+        cp = refresh(empty)
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("not an SDK checkout", cp.stdout + cp.stderr)
 
 
 if __name__ == "__main__":

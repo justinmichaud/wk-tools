@@ -109,8 +109,6 @@ class TestWhichVerdictsAreStillGoing(unittest.TestCase):
         self.assertEqual([w for w in going + over if w in record.RUNNING], list(going))
 
 
-
-
 class TestStopWorkspace(unittest.TestCase):
     """`wk stop <ws>` is the driver's stop and nothing else, on every kind: no session of its own to end first."""
 

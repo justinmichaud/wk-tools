@@ -54,42 +54,21 @@ _verify_mounts && echo VERIFIED
         self.assertEqual(cp.returncode, 0, out)
         self.assertIn("VERIFIED", cp.stdout)
 
-    def test_a_mirror_directory_that_is_not_a_mount_is_refused(self):
-        cp = self._run(git=0)
-        out = cp.stdout + cp.stderr
-        self.assertNotEqual(cp.returncode, 0, out)
-        self.assertIn("/var/lib/wk/git is not a mount", out)
-        self.assertIn("reaches no snapshot", out)
-
-    def test_no_tooling_mount_names_the_stage_that_makes_one(self):
-        cp = self._run(tools=0)
-        out = cp.stdout + cp.stderr
-        self.assertNotEqual(cp.returncode, 0, out)
-        self.assertIn("nothing in", out)
-        self.assertIn("./setup --stage machine", out)
-        self.assertNotIn("VERIFIED", cp.stdout)
-
-    def test_a_secrets_directory_that_is_not_a_mount_is_refused(self):
-        cp = self._run(secrets=0)
-        out = cp.stdout + cp.stderr
-        self.assertNotEqual(cp.returncode, 0, out)
-        self.assertIn("/var/lib/wk/secrets is not a mount", out)
-        self.assertIn("reach no workspace", out)
-
-    def test_no_agent_rw_mount_at_all_is_refused(self):
-        cp = self._run(rw_mount=0)
-        out = cp.stdout + cp.stderr
-        self.assertNotEqual(cp.returncode, 0, out)
-        self.assertIn("/var/lib/wk/agent-rw is not a mount", out)
-        self.assertIn("claude.ai", out)
-
-    def test_an_agent_rw_mount_that_is_read_only_is_refused_for_its_own_reason(self):
-        cp = self._run(rw_writable=0)
-        out = cp.stdout + cp.stderr
-        self.assertNotEqual(cp.returncode, 0, out)
-        self.assertIn("mounted read-only", out)
-        self.assertIn("logged", out)
-        self.assertNotIn("is not a mount", out)
+    def test_each_missing_mount_is_refused_for_its_own_reason(self):
+        for flags, said, unsaid in (({"git": 0}, ("/var/lib/wk/git is not a mount", "reaches no snapshot"), ()),
+                                    ({"tools": 0}, ("nothing in", "./setup --stage machine"), ()),
+                                    ({"secrets": 0}, ("/var/lib/wk/secrets is not a mount", "reach no workspace"), ()),
+                                    ({"rw_mount": 0}, ("/var/lib/wk/agent-rw is not a mount", "claude.ai"), ()),
+                                    ({"rw_writable": 0}, ("mounted read-only", "logged"), ("is not a mount",))):
+            with self.subTest(**flags):
+                cp = self._run(**flags)
+                out = cp.stdout + cp.stderr
+                self.assertNotEqual(cp.returncode, 0, out)
+                self.assertNotIn("VERIFIED", cp.stdout)
+                for words in said:
+                    self.assertIn(words, out)
+                for words in unsaid:
+                    self.assertNotIn(words, out)
 
     def test_a_read_only_mount_that_is_writable_is_refused(self):
         """podman 5.4 + applehv mounts a `:ro` volume read-write (measured)."""
@@ -101,6 +80,7 @@ _verify_mounts && echo VERIFIED
                 self.assertIn("is writable inside", out)
                 self.assertIn("host/macos/playbook.yaml", out)
                 self.assertNotIn("VERIFIED", cp.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

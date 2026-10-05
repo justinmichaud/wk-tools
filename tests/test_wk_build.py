@@ -1,6 +1,4 @@
-"""`wk build` as a flow (lib/wk/build.py, lib/wk/job.py) against a Fake world:
-the refusals, the record a run writes and how it ends, --kill, --detach, the
-babysitter, a dry run as the recorder, and a run killed after any effect."""
+"""`wk build` as a flow (lib/wk/build.py, lib/wk/job.py) against a Fake world."""
 import contextlib
 import io
 import os
@@ -53,10 +51,6 @@ class World(JobWorld):
         return ([(t.field("kind"), t.field("exit")) for t in self.recs().list()], len(self.budget_files()))
 
 
-def argv_of(preset="jsc-release", *more):
-    return [preset] + list(more)
-
-
 class BuildTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-build-"))
@@ -73,7 +67,7 @@ class BuildTest(unittest.TestCase):
 
     def make(self, w=None, *argv):
         w = w or self.w
-        argv = as_dispatched("build", list(argv) or argv_of(), os.environ)
+        argv = as_dispatched("build", list(argv) or ["jsc-release"], os.environ)
         return build.Build(w.reg, "ws", CMD.parse(argv), argv, w.clock)
 
     def run_(self, w=None, *argv):
@@ -200,7 +194,6 @@ class TestInterrupted(BuildTest):
 
 
 class TestStoppedByItsKill(BuildTest):
-
     def test_the_driver_that_saw_143_records_cancelled(self):
         real = self.w.start
 
@@ -450,16 +443,12 @@ class TestDetach(BuildTest):
         self.assertIn("building jsc-release in 'ws', detached as pid 1001 -- this end can go away", err)
         self.assertIn("  stop it: wk build ws --kill", err)
 
-    def test_a_child_that_ends_before_its_record_is_named(self):
+    def test_a_child_that_ends_before_its_record_is_named_by_the_machines_answer(self):
         w = Detaching(self.tmp, starts=False)
         w.begin("build", pid=4000).end(0)
-        err = self.refused(w, "jsc-release", "--detach")
-        self.assertIn("the detached build of 'ws' ended before it started", err)
-
-    def test_whether_the_child_lives_is_the_machines_answer_alone(self):
-        w = Detaching(self.tmp, starts=False)
         with mock.patch("os.waitpid", side_effect=AssertionError("asked this process, not the machine")):
-            self.assertIn("ended before it started", self.refused(w, "jsc-release", "--detach"))
+            err = self.refused(w, "jsc-release", "--detach")
+        self.assertIn("the detached build of 'ws' ended before it started", err)
 
     def test_inside_a_workspace_the_name_is_not_passed_on(self):
         w = Detaching(self.tmp)
@@ -491,7 +480,6 @@ class TestBabysitFront(BuildTest):
 
 
 class TestBabysitStates(BuildTest):
-    """`build.babysit_states`: one record, ended by name however it ends, and a killed one reads died."""
 
     def loop(self, builds, fixes=None, attempts="2"):
         w = self.w

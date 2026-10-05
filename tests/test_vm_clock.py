@@ -57,24 +57,20 @@ class TestGuestClock(WkTest):
             rc = 0 if g.set_guest_clock() else 1
         return "rc=%d\n%s" % (rc, err.getvalue()), log.read_text()
 
-    def test_a_stale_guest_is_set_from_the_host(self):
-        out, sudolog = self._drive(11 * 86400)
-        self.assertIn("rc=0", out, out)
-        self.assertIn("clock was", out, out)
-        self.assertIn("950400s", out, out)          # 11 days, to the second
-        self.assertIn("-n date -u ", sudolog, sudolog)
+    def test_a_guest_behind_or_ahead_of_the_host_is_set_from_it(self):
+        for skew, said in ((11 * 86400, "950400s"), (-3600, "3600s")):
+            with self.subTest(skew=skew):
+                out, sudolog = self._drive(skew)
+                self.assertIn("rc=0", out, out)
+                self.assertIn("clock was", out, out)
+                self.assertIn(said, out, out)
+                self.assertIn("-n date -u ", sudolog, sudolog)
 
     def test_a_guest_already_in_time_is_left_alone(self):
         out, sudolog = self._drive(0)
         self.assertIn("rc=0", out, out)
         self.assertNotIn("clock was", out, out)
         self.assertEqual("", sudolog.strip(), sudolog)
-
-    def test_a_guest_ahead_of_the_host_is_set_too(self):
-        out, sudolog = self._drive(-3600)
-        self.assertIn("rc=0", out, out)
-        self.assertIn("3600s", out, out)
-        self.assertIn("-n date -u ", sudolog, sudolog)
 
     def test_a_guest_that_refuses_the_write_fails(self):
         out, _ = self._drive(86400, sudo_rc=1)

@@ -1,4 +1,4 @@
-"""`wk new` over a workspace with no `base-id` remakes it, owed (docs/PLAN.md): "catches: 'already exists'"""
+"""`wk new`: a workspace with no `base-id` is still creating, and `--kill` stops only a creation."""
 import os
 import sys
 import unittest
@@ -28,8 +28,6 @@ class TestWorkspaceWithNoBaseIdIsStillCreating(unittest.TestCase):
 
 
 class TestNewKillStopsTheCreation(unittest.TestCase):
-
-
     @requires_container_place()
     def test_it_takes_nothing_that_belongs_to_a_creation(self):
         cp = run("new", "kill-probe-%s" % rand_suffix(), "--kill", "--no-wait")
@@ -41,6 +39,7 @@ class TestNewKillStopsTheCreation(unittest.TestCase):
         cp = run("new", "kill-probe-%s" % rand_suffix(), "--kill")
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("no new is running", cp.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

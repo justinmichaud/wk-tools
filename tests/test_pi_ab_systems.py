@@ -111,6 +111,7 @@ class TestTheLegsSystem(SystemBootTest):
         self.assertFalse(self.boot(ab, "sys-b"))
         self.assertIn("the leg is lost", self.err)
         self.assertEqual(self.armings(), board_ab.SYSTEM_TRIES)
+        self.assertFalse(self.w.board.kept)
 
     def test_an_arming_that_will_not_take_is_retried_after_a_pause_and_bounded(self):
         ab = self.ab(driver=ArmsFromBench)
@@ -129,12 +130,6 @@ class TestTheLegsSystem(SystemBootTest):
         self.assertIn("not answering yet", self.err)
         self.assertEqual((self.landed, self.armings()), ([], 0))
         self.assertIn(board_ab.POLL, self.w.clock.slept)
-
-    def test_a_leg_that_never_comes_up_is_never_claimed(self):
-        ab = self.ab(driver=ArmsFromBench)
-        self.misroute = 99
-        self.boot(ab, "sys-b")
-        self.assertFalse(self.w.board.kept)
 
     def test_a_dry_run_arms_nothing(self):
         for driver, said in ((ArmsFromBench, "would arm testboard"), (Rpi5Usb, "would reboot testboard back")):

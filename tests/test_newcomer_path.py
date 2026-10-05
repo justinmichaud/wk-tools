@@ -1,4 +1,4 @@
-"""The README's getting-started sequence, walked as a newcomer on a bare"""
+"""The README's getting-started sequence, walked as a newcomer on a bare machine: every failure names a remedy."""
 import re
 import subprocess
 import sys
@@ -33,9 +33,8 @@ class NewcomerTest(WkTest):
         self.assertTrue(offered, "'%s' exited %d naming no other command to run:\n%s" % (step, cp.returncode, cp.stdout))
 
     def setup_script(self, *args):
-        cp = subprocess.run([str(REPO / "setup"), *args], env=_clean_env({"WK_STORE": str(self.tmp)}),
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
-        return cp
+        return subprocess.run([str(REPO / "setup"), *args], env=_clean_env({"WK_STORE": str(self.tmp)}),
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
 
 
 class TestTheRemedyCheckIsStrict(NewcomerTest):
@@ -60,7 +59,6 @@ class TestTheFirstCommands(NewcomerTest):
     def test_bare_wk_names_wk_help(self):
         cp = run()
         self.assertIn("wk help", cp.stdout)
-
 
     def test_doctor_names_the_fix_for_what_it_finds_missing(self):
         self.assert_names_a_remedy("wk doctor", run("doctor", env={"WK_STORE": str(self.tmp)}))

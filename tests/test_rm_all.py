@@ -1,6 +1,4 @@
-"""`wk rm --all`: every workspace `wk ls` lists, named `<name>@<place>` in one question before anything is destroyed,
-each removed through the path a named `wk rm` takes. WK_PLACE pins one fake local remote place, so the listing can
-never reach this machine's own workspaces."""
+"""`wk rm --all` and a named `wk rm` over one fake local place WK_PLACE pins, so no real workspace is reached."""
 import unittest
 
 from tests.support import WkTest, fake_workspace, run
@@ -64,6 +62,7 @@ class TestItDestroysEveryWorkspaceItNamed(RmAllFixture):
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertEqual(self.remaining(), [], cp.stdout)
         self.assertEqual(sorted(p.name for p in (self.store / "ws").iterdir()), [])
+
 
 class TestWhatItRefuses(RmAllFixture):
     def test_a_name_and_all_together_are_refused(self):

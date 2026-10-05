@@ -1,4 +1,4 @@
-"""WK_* override coverage for cmd/bench, cmd/machine and cmd/build (the"""
+"""WK_* overrides read by `wk bench run` and `wk build`."""
 import unittest
 
 from tests.support import WkTest, fake_workspace
@@ -8,7 +8,6 @@ from wk.act import Refused  # noqa: E402
 
 
 class TestBenchRunKnobs(BenchTest):
-
     def _load(self, load, env=None):
         self.w = World(self.tmp)
         self.w.files["/proc/loadavg"] = "%s 1.00 1.00 1/100 1\n" % load

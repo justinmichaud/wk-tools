@@ -50,19 +50,11 @@ def steps(runs, *specs, done=()):
 
 
 class TestTheGraphIsChecked(unittest.TestCase):
-
-    def refused(self, graph):
-        with self.assertRaises(Refused):
-            sched.validate(graph)
-
-    def test_a_step_needing_one_nothing_declares_is_refused(self):
-        self.refused([step("a", "ghost")])
-
-    def test_an_id_names_one_step(self):
-        self.refused([step("a"), step("a")])
-
-    def test_steps_that_need_each_other_are_refused(self):
-        self.refused([step("a", "b"), step("b", "a")])
+    def test_a_missing_need_a_repeated_id_and_a_cycle_are_refused(self):
+        for why, graph in (("missing need", [step("a", "ghost")]), ("repeated id", [step("a"), step("a")]),
+                           ("cycle", [step("a", "b"), step("b", "a")])):
+            with self.subTest(why), self.assertRaises(Refused):
+                sched.validate(graph)
 
     def test_needs_and_holds_are_lists(self):
         s = step("c", "a,b", "machine:x device:d")
@@ -83,7 +75,6 @@ class TestWhatRunsAtOnce(unittest.TestCase):
         self.assertEqual(self.waves([step("a", holds="machine:x"), step("b", holds="machine:x")]), [["a"], ["b"]])
 
     def test_a_board_and_a_build_interleave(self):
-        """While one arm is deployed to the board the other arm is still building on the machine."""
         graph = [step("build-a", holds="machine:x"), step("build-b", holds="machine:x"), step("deploy-a", "build-a", "device:d")]
         self.assertEqual(self.waves(graph), [["build-a"], ["build-b", "deploy-a"]])
 
@@ -115,8 +106,6 @@ class TestWhatIsWorthRunning(unittest.TestCase):
 
 
 class TestTheScheduler(unittest.TestCase):
-    """What starts, what waits, what is never run at all, and what a failure or a refusal does to the rest."""
-
     def run_all(self, graph):
         s = sched.Scheduler(graph)
         return s, s.run_all()
@@ -197,7 +186,6 @@ class TestTheScheduler(unittest.TestCase):
 
 
 class TestAWkCommandStep(unittest.TestCase):
-
     def test_the_command_runs_through_the_machine_appending_to_its_log(self):
         f = Fake("here")
         f.answer(["sh", "-c", sched.LOGGED], rc=3)

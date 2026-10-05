@@ -23,7 +23,6 @@ CARD_PRIV = REPO / "admin" / "wk-card-priv"
 
 
 def have_gnu_stat():
-    """`_wifi_edit` reads a mode with GNU `stat -c`; the helper only runs on Linux."""
     return subprocess.run(["stat", "-c", "%a", "/"],
                           capture_output=True).returncode == 0
 
@@ -37,11 +36,18 @@ def _netplan_parser_source():
 
 
 def _lift(path, func):
-    text = subprocess.run(
-        ["sed", "-n", f"/^{func}()/,/^}}/p", str(path)],
-        capture_output=True, text=True,
-    ).stdout
-    return text
+    return subprocess.run(["sed", "-n", f"/^{func}()/,/^}}/p", str(path)], capture_output=True, text=True).stdout
+
+
+def _wifi_edit(mnt, ssid, psk):
+    script = f'''
+fail() {{ printf 'wk-card-priv: %s\\n' "$*" >&2; exit 1; }}
+chown() {{ :; }}
+{_lift(CARD_PRIV, "check_wifi_value")}
+{_lift(CARD_PRIV, "_wifi_edit")}
+_wifi_edit {mnt} {ssid!r} {psk!r}
+'''
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
 
 
 class TestCardHelperWifiGate(WkTest):
@@ -103,8 +109,8 @@ class TestNetplanWifiParser(unittest.TestCase):
             input=yaml_text, capture_output=True, text=True, timeout=10,
         )
 
-    def test_finds_a_bare_password(self):
-        yaml_text = '''
+    def test_finds_a_bare_or_a_networkmanager_auth_password(self):
+        bare = '''
 network:
   wifis:
     wlan0:
@@ -112,13 +118,7 @@ network:
         "TestNet":
           password: "hunter2"
 '''
-        cp = self._run(yaml_text)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout, "ssid=TestNet\npsk=hunter2\n")
-
-    def test_finds_a_networkmanager_style_auth_password(self):
-        """NetworkManager writes netplan with auth.password, not a bare password"""
-        yaml_text = '''
+        nm = '''
 network:
   wifis:
     NM-uuid:
@@ -128,41 +128,29 @@ network:
             key-management: psk
             password: "s3cret!"
 '''
-        cp = self._run(yaml_text)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout, "ssid=NMNet\npsk=s3cret!\n")
+        for yaml_text, want in ((bare, "ssid=TestNet\npsk=hunter2\n"), (nm, "ssid=NMNet\npsk=s3cret!\n")):
+            with self.subTest(want=want):
+                cp = self._run(yaml_text)
+                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                self.assertEqual(cp.stdout, want)
 
-    def test_no_password_anywhere_exits_3(self):
-        yaml_text = '''
+    def test_no_password_anywhere_or_no_input_exits_3(self):
+        open_net = '''
 network:
   wifis:
     wlan0:
       access-points:
         "OpenNet": {}
 '''
-        cp = self._run(yaml_text)
-        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout, "")
-
-    def test_empty_input_exits_3(self):
-        cp = self._run("")
-        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
+        for yaml_text in (open_net, ""):
+            cp = self._run(yaml_text)
+            self.assertEqual((cp.returncode, cp.stdout), (3, ""), cp.stderr)
 
 
 class TestWifiConfContent(WkTest):
-    def _wifi_edit(self, ssid, psk, mnt):
-        script = f'''
-fail() {{ printf 'wk-card-priv: %s\\n' "$*" >&2; exit 1; }}
-chown() {{ :; }}
-{_lift(CARD_PRIV, "check_wifi_value")}
-{_lift(CARD_PRIV, "_wifi_edit")}
-_wifi_edit {mnt} {ssid!r} {psk!r}
-'''
-        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
-
     def test_generated_wpa_supplicant_conf_is_well_formed(self):
         with tempfile.TemporaryDirectory() as d:
-            self._wifi_edit("My Test Net", "hunter2 pass", d)
+            _wifi_edit(d, "My Test Net", "hunter2 pass")
             conf = Path(d) / "etc" / "wpa_supplicant" / "wpa_supplicant-wlan0.conf"
             self.assertTrue(conf.exists(), "no conf file was written")
             text = conf.read_text()
@@ -171,7 +159,6 @@ _wifi_edit {mnt} {ssid!r} {psk!r}
             self.assertRegex(text, r"(?m)^network=\{$")
             self.assertIn('    ssid="My Test Net"', text)
             self.assertIn('    psk="hunter2 pass"', text)
-            self.assertIn("}", text)
 
     def test_check_wifi_value_rejects_what_would_break_the_conf(self):
         script = f'''
@@ -254,7 +241,6 @@ class TestWifiPreflight(unittest.TestCase):
         self.assertIn("stub-disk-machine", err, "the refusal does not name the disk machine")
 
     def test_refuses_when_card_priv_itself_fails(self):
-        """no answer is not a yes"""
         self.assertIsNotNone(refusal(writer(**{"wifi-host": (1, "connection refused")}).wifi_preflight, "rpi5"))
 
     def test_force_does_not_cross_the_wifi_barrier(self):
@@ -293,8 +279,6 @@ class TestSysimageWriteDryRun(WkTest):
                 self.assertIn("wk-wifi-join", cp.stdout, f"{profile}: {cp.stdout}")
 
 
-# The tailnet name a card joins under, checked against a stubbed `tailscale status --json`.
-
 def _name_preflight(name, tmp, peers_json="{}", role="bench", machine="rpi3", env=None):
     stub = tmp / "bin"
     stub.mkdir(exist_ok=True)
@@ -327,7 +311,6 @@ class TestTailnetNameCollision(WkTest):
         self.assertIsNone(_name_preflight("rpi5", self.tmp, self.PEERS))
 
     def test_case_insensitive_match_refuses(self):
-        """RPI4 on the tailnet still blocks a write for 'rpi4'"""
         self.assertIsNotNone(_name_preflight("rpi4", self.tmp, self.PEERS.replace('"rpi4.tail0', '"RPI4.tail0')))
 
     def test_a_peer_is_keyed_by_its_magicdns_label_not_its_os_hostname(self):
@@ -346,24 +329,16 @@ class TestTailnetNameCollision(WkTest):
                 self.assertIn("cannot be skipped", _name_preflight("rpi3", self.tmp, doc))
 
     def test_empty_name_is_a_no_op(self):
-        """no name to seed (no --profile, unresolved machine) is not this check's problem"""
         self.assertIsNone(_name_preflight("", self.tmp, self.PEERS))
 
-    def test_a_rescue_replacing_itself_is_a_barrier_that_force_crosses(self):
-        peers = self.PEERS.replace("rpi4.tail0", "stub-disk-machine.tail0")
-        args = ("stub-disk-machine", self.tmp, peers, "rescue", "stub-disk-machine")
-        self.assertIn("running rescue", _name_preflight(*args))
-        self.assertIsNone(_name_preflight(*args, env={"WK_FORCE": "1"}))
-
-    def test_the_exception_is_exactly_one_case_and_force_is_recorded(self):
+    def test_a_rescue_replacing_itself_is_the_one_barrier_force_crosses_and_it_is_recorded(self):
         """this board, its own rescue name, a rescue write; nothing else crosses, whatever --force says"""
         peers = self.PEERS.replace("rpi4.tail0", "stub-disk-machine.tail0")
-        w = writer()
+        self.assertIn("running rescue", _name_preflight("stub-disk-machine", self.tmp, peers, "rescue", "stub-disk-machine"))
         with mock.patch.dict(os.environ, {"PATH": f"{self.tmp}/bin:{os.environ['PATH']}", "WK_FORCE": "1",
                                           "WK_TS_API_SECRET": str(self.tmp / "none")}), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
-            _name_preflight("stub-disk-machine", self.tmp, peers)
-            w.name_preflight("stub-disk-machine", "rescue", "stub-disk-machine")
+            writer().name_preflight("stub-disk-machine", "rescue", "stub-disk-machine")
         self.assertIn("FORCED past a barrier", err.getvalue())
         for role, machine in (("bench", "stub-disk-machine"), ("rescue", "rpi3")):
             with self.subTest(role=role, machine=machine):
@@ -379,7 +354,6 @@ class TestTailnetNameCollision(WkTest):
 
 
 class TestTailnetKeyPreflight(WkTest):
-
     def _preflight(self, machine, key, force=False):
         env = {"WK_TS_AUTHKEY": str(key), "WK_TS_API_SECRET": str(self.tmp / "no-api-key")}
         if force:
@@ -404,7 +378,6 @@ class TestTailnetKeyPreflight(WkTest):
 
     def test_passes_with_a_resolved_machine_and_a_present_key(self):
         self.assertIsNone(self._preflight("rpi3", self.key()))
-
 
 
 TAILNET_JOIN_DIR = REPO / "image" / "yocto" / "meta-wk-tailnet" / "recipes-network" / "tailscale" / "files"
@@ -471,14 +444,7 @@ cat "$out"; rm -f "$out"
                          "the helper runs on a Linux card machine (GNU stat)")
     def test_reads_back_what_wifi_edit_wrote(self):
         with tempfile.TemporaryDirectory() as d:
-            script = f'''
-fail() {{ printf 'wk-card-priv: %s\\n' "$*" >&2; exit 1; }}
-chown() {{ :; }}
-{_lift(CARD_PRIV, "check_wifi_value")}
-{_lift(CARD_PRIV, "_wifi_edit")}
-_wifi_edit {d} 'My Test Net' 'hunter2 pass'
-'''
-            subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10, check=True)
+            self.assertEqual(_wifi_edit(d, "My Test Net", "hunter2 pass").returncode, 0)
             cp = self._read(Path(d) / "etc/wpa_supplicant/wpa_supplicant-wlan0.conf")
             self.assertEqual(cp.returncode, 0, cp.stderr)
             self.assertEqual(cp.stdout, "ssid=My Test Net\npsk=hunter2 pass\n")

@@ -1,8 +1,4 @@
-"""`wk key set github-pat` end to end, the arms that need a terminal under a pty (the value is read with `read -rs`).
-The token is held beside the private deploy-key halves, in the directory nothing mounts.
-
-Run: python3 -m unittest tests.test_key_github_pat -v
-"""
+"""`wk key set github-pat` end to end, the arms that need a terminal under a pty (the value is read with `read -rs`)."""
 import os
 import pty
 import select
@@ -50,8 +46,8 @@ class _PatRun(WkTest):
                           "PATH": f"{binp}:/usr/bin:/bin:/usr/sbin:/sbin",
                           **self.extra_env})
 
-    def key(self, *args):
-        with stub_path({"podman": PODMAN_TRAP}) as binp:
+    def key(self, *args, stubs=None):
+        with stub_path({"podman": PODMAN_TRAP, **(stubs or {})}) as binp:
             return subprocess.run([str(KEY), *args], cwd=str(REPO),
                                   env=self._env(binp), capture_output=True,
                                   text=True, timeout=120)
@@ -90,6 +86,13 @@ class _PatRun(WkTest):
     def pat(self):
         return self.held / "github-pat"
 
+    def github(self, user_status):
+        self.api = serve(FakeGitHub, self.addCleanup)
+        FakeGitHub.reset(user_status=user_status, repos=list(FORKS),
+                         pulls=dict.fromkeys(list(FORKS) + list(FORKS.values()), 422),
+                         parents=dict(FORKS), repo_message=POLICY)
+        self.extra_env = {"WK_GITHUB_API": self.api}
+
 
 class TestNothingStoredYet(_PatRun):
     def test_replace_with_nothing_to_replace_names_the_path(self):
@@ -110,7 +113,7 @@ class TestNothingStoredYet(_PatRun):
 
 
 class TestStoringOne(_PatRun):
-    def test_it_lands_in_the_directory_nothing_mounts_unechoed_and_only_this_user_reads(self):
+    def test_it_lands_unechoed_where_nothing_mounts_and_its_status_then_verdict_are_the_last_lines(self):
         rc, out = self.key_tty("set", "github-pat", paste=TOKEN)
         self.assertEqual(rc, 0, out)
         self.assertNotIn(TOKEN, out)
@@ -118,11 +121,6 @@ class TestStoringOne(_PatRun):
         self.assertEqual(0o600, self.pat().stat().st_mode & 0o777)
         self.assertEqual(0o700, self.held.stat().st_mode & 0o777)
         self.assertFalse((self.secrets / "github-pat").exists())
-
-    def test_it_prints_where_it_went_then_what_the_rule_says(self):
-        """Two lines: the one-line status, then the verdict (unverified, with no GitHub to ask)."""
-        rc, out = self.key_tty("set", "github-pat", paste=TOKEN)
-        self.assertEqual(rc, 0, out)
         lines = [l for l in out.splitlines() if l.strip()]
         self.assertIn("github-pat", lines[-2])
         self.assertIn("stored", lines[-2])
@@ -173,7 +171,6 @@ class TestTheStandingReadTokenReachesTheMachine(_PatRun):
     @unittest.skipUnless(os.uname().sysname == "Darwin",
                          "the injector that serves the guests is a macOS host's")
     def test_the_guests_injector_takes_it_from_this_store_and_no_other(self):
-        """Measured: the guests' half once wrote the real injector's copy, not this store's."""
         rc, out = self.key_tty("set", "github-pat", paste=TOKEN)
         self.assertEqual(rc, 0, out)
         self.assertEqual(TOKEN,
@@ -193,13 +190,7 @@ class TestWhatTheTokenCanDoDecidesWhetherItIsKept(_PatRun):
 
     def setUp(self):
         super().setUp()
-        self.api = serve(FakeGitHub, self.addCleanup)
-        FakeGitHub.reset(user_status=200, repos=list(FORKS),
-                         pulls=dict.fromkeys(
-                             list(FORKS) + list(FORKS.values()), 422),
-                         parents=dict(FORKS), repo_message=POLICY)
-        self.extra_env = {
-            "WK_GITHUB_API": self.api}
+        self.github(200)
 
     def test_a_token_that_can_open_a_pull_request_is_stored(self):
         rc, out = self.key_tty("set", "github-pat", paste=FINE)
@@ -241,22 +232,13 @@ class TestATokenGitHubRefusesIsReplaced(_PatRun):
 
     def setUp(self):
         super().setUp()
-        self.api = serve(FakeGitHub, self.addCleanup)
-        FakeGitHub.reset(user_status=401, repos=list(FORKS),
-                         pulls=dict.fromkeys(
-                             list(FORKS) + list(FORKS.values()), 422),
-                         parents=dict(FORKS), repo_message=POLICY)
-        self.extra_env = {
-            "WK_GITHUB_API": self.api}
+        self.github(401)
         self.pat().write_text("ghp_revokedone\n")
         self.pat().chmod(0o600)
 
     def _key_with_gh_refusing(self, *args):
         from tests.test_key import GH_REFUSES
-        with stub_path({"podman": PODMAN_TRAP, "gh": GH_REFUSES}) as binp:
-            return subprocess.run([str(KEY), *args], cwd=str(REPO),
-                                  env=self._env(binp), capture_output=True,
-                                  text=True, timeout=120)
+        return self.key(*args, stubs={"gh": GH_REFUSES})
 
     def test_setup_names_the_refused_token_and_how_to_replace_it(self):
         cp = self._key_with_gh_refusing("setup")

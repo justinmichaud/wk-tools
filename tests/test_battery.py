@@ -69,24 +69,14 @@ class TestBatteryVerdict(unittest.TestCase):
 
 class TestMacBatteryLine(unittest.TestCase):
 
-    PLUGGED_IN = (
-        "Now drawing from 'AC Power'\n"
-        " -InternalBattery-0 (id=4325193)\t87%; charging; 0:45 remaining present: true\n"
-    )
-    ON_BATTERY = (
-        "Now drawing from 'Battery Power'\n"
-        " -InternalBattery-0 (id=4325193)\t62%; discharging; 3:12 remaining present: true\n"
-    )
-    NO_BATTERY = "Now drawing from 'AC Power'\n"
-
-    def test_plugged_in(self):
-        self.assertEqual("plugged in, 87% -- no OS limit exists", doctor.mac_battery_line(self.PLUGGED_IN))
-
-    def test_on_battery(self):
-        self.assertEqual("on battery, 62% -- no OS limit exists", doctor.mac_battery_line(self.ON_BATTERY))
-
-    def test_no_battery_is_no_line(self):
-        self.assertIsNone(doctor.mac_battery_line(self.NO_BATTERY))
+    def test_the_power_source_and_charge_or_no_line_without_a_battery(self):
+        for pmset, line in (("Now drawing from 'AC Power'\n -InternalBattery-0 (id=4325193)\t87%; charging; 0:45 remaining present: true\n",
+                             "plugged in, 87% -- no OS limit exists"),
+                            ("Now drawing from 'Battery Power'\n -InternalBattery-0 (id=4325193)\t62%; discharging; 3:12 remaining present: true\n",
+                             "on battery, 62% -- no OS limit exists"),
+                            ("Now drawing from 'AC Power'\n", None)):
+            with self.subTest(line=line):
+                self.assertEqual(line, doctor.mac_battery_line(pmset))
 
 
 if __name__ == "__main__":

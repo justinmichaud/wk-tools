@@ -6,9 +6,9 @@ import sys
 import unittest
 
 from tests.support import REPO, WkTest, rand_suffix, run, scratch_dir, stub_path
+from tests.test_fleet_walk import FAKE_BOARD_CONF
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import images  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.sysimage import write  # noqa: E402
 from wk.store import Store  # noqa: E402
@@ -18,26 +18,7 @@ from wk.sysimage import ls  # noqa: E402
 _SSH_STUB = '''#!/bin/sh
 case "$*" in
   *"boot-read /dev/sda 1 wk-image.id"*) echo "{fake_id}" ;;
-  *wk-image.id*) : ;;
-  *) : ;;
 esac
-'''
-
-_FAKE_NODE_CONF = '''ssh={ssh}
-kind=board
-driver=rpi5-usb
-device=/dev/sda
-root=/dev/nvme0n1p2
-profile=webkit-2.52-yocto-rpi5-64
-mac=02:00:00:00:00:01
-bridge=""
-role=workstation
-os=any
-volume=""
-dtb=bcm2712-rpi-5-b.dtb
-bench_ssh=""
-net=wifi
-note="fake bench board"
 '''
 
 
@@ -48,7 +29,7 @@ class TestBootArmDefaultsToDeviceImage(WkTest):
         with scratch_dir(prefix="wk-test-machines-") as machdir, \
                 stub_path({"ssh": _SSH_STUB.format(fake_id=fake_id)}) as binp:
             name = "fakerpi5" + rand_suffix(3)
-            (machdir / (name + ".conf")).write_text(_FAKE_NODE_CONF.format(ssh=name))
+            (machdir / (name + ".conf")).write_text(FAKE_BOARD_CONF.format(ssh=name, mac="02:00:00:00:00:01", note="fake bench board"))
             return run("boot", name, *args, "--dry-run", timeout=30,
                        env={"WK_MACHINES_DIR": str(machdir), "PATH": "%s:/usr/bin:/bin" % binp})
 

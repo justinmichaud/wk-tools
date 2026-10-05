@@ -21,7 +21,6 @@ class FakeD(dict):
 
 
 def run_bbappend(d):
-    """The bbappend's `python () { ... }` body, run against `d`."""
     text = BBAPPEND.read_text()
     m = re.search(r"(?ms)^python \(\) \{\n(.*)^\}", text)
     assert m, "the bbappend no longer has an anonymous python function"
@@ -44,18 +43,10 @@ def a_lib32_image(**over):
 
 
 class TestTheImageInstallsOneWidth(unittest.TestCase):
-    def test_every_package_takes_the_prefix(self):
+    def test_every_package_takes_the_prefix_but_what_has_one_build_per_machine(self):
         d = a_lib32_image()
         run_bbappend(d)
-        self.assertIn("lib32-wpewebkit", d["IMAGE_INSTALL"].split())
-        self.assertIn("lib32-cog", d["IMAGE_INSTALL"].split())
-
-    def test_what_has_one_build_per_machine_does_not(self):
-        """The kernel, firmware and bootloader are per-machine, not per-width."""
-        d = a_lib32_image()
-        run_bbappend(d)
-        self.assertIn("linux-raspberrypi", d["IMAGE_INSTALL"].split())
-        self.assertNotIn("lib32-linux-raspberrypi", d["IMAGE_INSTALL"].split())
+        self.assertEqual(sorted(d["IMAGE_INSTALL"].split()), ["lib32-cog", "lib32-wpewebkit", "linux-raspberrypi"])
 
     def test_a_plain_image_is_left_alone(self):
         """No MLPREFIX, no rewriting -- the 64-bit build shares this recipe."""

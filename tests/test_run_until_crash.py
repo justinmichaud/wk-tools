@@ -14,15 +14,12 @@ from wk import presets  # noqa: E402
 
 
 def _jsc_layout(src):
-    """Where jsc-release puts its binary and its libraries under `src`, from
-    lib/wk/presets.py itself -- the same resolve `wk run` calls."""
+    """Where jsc-release puts its binary and its libraries under `src`, by the resolve `wk run` calls."""
     preset = presets.resolve("jsc-release", "macos" if sys.platform == "darwin" else "linux", "local", {})
     return Path(preset.jsc_path(str(src))), Path(preset.run_dir(str(src)))
 
 
 def _plant_fake_jsc(ws, script_body):
-    """A fake jsc at the path Config.jsc_path resolves for jsc-release,
-    relative to the FakeWorkspace's checkout."""
     src = ws.ws_dir / "WebKit"
     jsc, run_dir = _jsc_layout(src)
     jsc.parent.mkdir(parents=True, exist_ok=True)
@@ -33,9 +30,7 @@ def _plant_fake_jsc(ws, script_body):
 
 
 def _counting_script(counter_file, crash_at=None, crash_status=139):
-    """A fake jsc: counts its own invocations in `counter_file`, prints a
-    distinctive line naming the call number, and -- if `crash_at` is given --
-    exits non-zero on that call and 0 on every other one."""
+    """A fake jsc counting its calls in `counter_file`, exiting `crash_status` on call `crash_at`."""
     crash_clause = ""
     if crash_at is not None:
         crash_clause = f'if [ "$n" -eq {crash_at} ]; then exit {crash_status}; fi\n'
@@ -61,7 +56,6 @@ class TestUntilCrashLoopsToTheCrash(WkTest):
             self.assertEqual(cp.returncode, 139, cp.stdout)
             self.assertIn("until-crash: crashed on iteration 3 (exit 139)", cp.stdout)
             self.assertIn("until-crash: args:", cp.stdout)
-            # exactly 3 calls happened -- the loop did not run a 4th
             self.assertEqual(counter.read_text().strip(), "3")
 
             m = re.search(r"until-crash: log: (\S+)", cp.stdout)
@@ -69,7 +63,6 @@ class TestUntilCrashLoopsToTheCrash(WkTest):
             log_path = Path(m.group(1))
             self.assertTrue(log_path.is_file(), f"{log_path} was not written")
             self.assertIn("DISTINCTIVE-JSC-OUTPUT call=3", log_path.read_text())
-            # under the workspace's home (t_home), not /tmp
             self.assertEqual(log_path.parent, home / "until-crash")
 
     def test_max_caps_iterations_and_exits_zero(self):
@@ -95,7 +88,6 @@ class TestUntilCrashLoopsToTheCrash(WkTest):
 
 @unittest.skipUnless(shutil.which("lldb"), "no lldb on this host")
 class TestUntilCrashLldbCommandFile(unittest.TestCase):
-
     PATH = REPO / "container" / "lldb" / "until-crash-run-file"
 
     def test_commands_are_accepted_by_lldb(self):

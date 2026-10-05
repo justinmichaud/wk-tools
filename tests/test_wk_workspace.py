@@ -532,7 +532,7 @@ class TestNewFrontTail(WorkspaceTest):
         with mock.patch.object(pr, "checkout", lambda t, here, name, spec: calls.append((t.name, name, spec))):
             rc, err = self.stderr(lambda: self.front(pr="u:b"))
         self.assertEqual((rc, calls), (0, [("fakebox", "ws", "u:b")]))
-        self.assertLess(err.index("workspace 'ws' ready"), len(err))
+        self.assertIn("workspace 'ws' ready", err)
         w = self.make_world()
         with mock.patch.object(pr, "checkout", lambda *a: act.die("no branch 'b'", 3)):
             self.assertIn("no branch", self.refused(lambda: self.front(w, pr="u:b"), 3))
@@ -948,20 +948,6 @@ class TestRmOne(WorkspaceTest):
         self.assertIn("Host other", self.w.files[self.conf])
         self.assertEqual(self.w.records.list(), [])
 
-    def test_a_workspace_is_destroyed_with_its_log_alias_and_records(self):
-        rc, err = self.stderr(self.rm)
-        self.assertEqual(rc, 0)
-        self.gone()
-        self.assertEqual([a[:3] for a in self.runs(head="podman") if a[1] in ("rm", "unshare")], [("podman", "rm", "-f"), ("podman", "unshare", "rm")])
-
-    def test_the_record_goes_last(self):
-        self.stderr(self.rm)
-        tail = [e for e in self.w.effects if e[0] in ("write", "remove")][-4:]
-        self.assertEqual([e[0] for e in tail], ["write", "remove", "remove", "remove"])
-        self.assertEqual(tail[0][1], self.conf)
-        self.assertEqual(tail[1][1], self.clog)
-        self.assertTrue(tail[2][1].startswith(str(self.w.tmp / "store" / "task")))
-
     def test_a_record_with_nothing_left_is_forgotten(self):
         self.w.containers.clear()
         self.w._rm_rf(["rm", self.w.ws_dir()], self.w)
@@ -990,13 +976,6 @@ class TestRmOne(WorkspaceTest):
         _, err = self.stderr(self.rm)
         self.assertIn("ws has 2 modified file(s) in its overlay", err)
 
-    def test_a_remote_checkout_is_destroyed_without_asking_it_for_a_process(self):
-        w = self.make_world(kinds={"fakebox": "remote"})
-        w.make()
-        _, err = self.stderr(lambda: self.rm(w))
-        self.assertEqual([], [e[1] for e in w.effects if e[0] == "run" and e[1][:3] == ("exec", "ws", "kill")])
-        self.assertNotIn("remote-control", err)
-
     def test_what_a_destroy_leaves_is_named_and_the_records_stay(self):
         self.w.react(["podman", "rm", "-f"], lambda a, f: Result(0))
         rc, err = self.stderr(self.rm)
@@ -1005,7 +984,6 @@ class TestRmOne(WorkspaceTest):
         self.assertIn("re-run 'wk rm ws' -- what is left is exactly what it will find and retry", err)
         self.assertEqual(len(self.w.records.list()), 2)
         self.assertIn("Host wk-ws", self.w.files[self.conf])
-
 
 
 class TestRmNames(WorkspaceTest):

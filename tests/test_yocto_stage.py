@@ -1,6 +1,4 @@
-"""`wk sysimage build` of a yocto profile (lib/wk/sysimage/yocto.py) as a task against a Fake world. What the task base
-(lib/wk/sysimage/task.py) does for every driver -- the workspace, its image, the driver, options, done marker,
---detach -- is tests/test_sysimage_task.py's."""
+"""`wk sysimage build` of a yocto profile (lib/wk/sysimage/yocto.py) as a task against a Fake world."""
 import contextlib
 import io
 import os

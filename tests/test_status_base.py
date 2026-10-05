@@ -42,28 +42,25 @@ def upstream_line(repo):
 
 class TestUpstreamLine(unittest.TestCase):
     def setUp(self):
+        self.repo = self.new_repo()
+
+    def new_repo(self):
         tmp = tempfile.TemporaryDirectory(prefix="wk-base-")
         self.addCleanup(tmp.cleanup)
-        self.repo = Path(tmp.name) / "r"
-        _init_repo(self.repo)
+        repo = Path(tmp.name) / "r"
+        _init_repo(repo)
+        return repo
 
-    def track(self, branch, remote, ref):
-        _git(self.repo, "checkout", "-qB", branch)
-        _git(self.repo, "remote", "add", remote, "https://example.invalid/%s.git" % remote)
-        _git(self.repo, "update-ref", "refs/remotes/%s/%s" % (remote, ref), "HEAD")
-        _git(self.repo, "branch", "--set-upstream-to=%s/%s" % (remote, ref), branch)
-
-    def test_tracking_origin_main_is_main(self):
-        self.track("main", "origin", "main")
-        self.assertEqual(upstream_line(self.repo), "main")
-
-    def test_tracking_a_release_branch_through_a_fork_remote_is_the_release(self):
-        self.track("work", "wpe", "webkitglib/2.52")
-        self.assertEqual(upstream_line(self.repo), "2.52")
-
-    def test_a_personal_fork_branch_with_nothing_reachable_is_unknown(self):
-        self.track("eng/stringimpl-2.38", "fork", "eng/stringimpl-2.38")
-        self.assertEqual(upstream_line(self.repo), "?")
+    def test_the_line_a_tracked_branch_names(self):
+        for branch, remote, ref, want in (("main", "origin", "main", "main"), ("work", "wpe", "webkitglib/2.52", "2.52"),
+                                          ("eng/stringimpl-2.38", "fork", "eng/stringimpl-2.38", "?")):
+            with self.subTest(ref=ref):
+                repo = self.new_repo()
+                _git(repo, "checkout", "-qB", branch)
+                _git(repo, "remote", "add", remote, "https://example.invalid/%s.git" % remote)
+                _git(repo, "update-ref", "refs/remotes/%s/%s" % (remote, ref), "HEAD")
+                _git(repo, "branch", "--set-upstream-to=%s/%s" % (remote, ref), branch)
+                self.assertEqual(upstream_line(repo), want)
 
     def test_detached_with_nothing_reachable_is_unknown(self):
         _git(self.repo, "checkout", "-q", "--detach", "HEAD")
@@ -97,32 +94,24 @@ class TestImageBase(unittest.TestCase):
 
 
 def sdk_rec(machine, **extra):
-    r = {"kind": "sdk", "machine": machine}
-    r.update(extra)
-    return r
+    return dict(kind="sdk", machine=machine, tag="2.53-v9-abc0000", pulled="2026-08-01", **extra)
 
 
 class TestSdkImageRendering(unittest.TestCase):
     """The renderer's wording for the three verdicts the collector's sdk_record decides (tests.test_status.TestSdkDecision)."""
 
-    def test_no_upstream_answer_renders_unknown_with_the_reason(self):
-        recs = [machine_rec("moose"), sdk_rec("moose", tag="2.53-v9-abc0000", pulled="2026-08-01", unknown="registry did not answer within 1s")]
-        self.assertIn("unknown -- registry did not answer within 1s", render(recs).stdout)
-
-    def test_a_matching_upstream_tag_renders_current(self):
-        out = render([machine_rec("moose"), sdk_rec("moose", tag="2.53-v9-abc0000", pulled="2026-08-01", upstream="2.53-v9-abc0000")]).stdout
-        self.assertIn("current", out)
-        self.assertIn("2.53-v9-abc0000", out)
-
-    def test_a_newer_upstream_tag_renders_behind_and_names_it(self):
-        out = render([machine_rec("moose"), sdk_rec("moose", tag="2.53-v9-abc0000", pulled="2026-08-01", upstream="2.53-v11-def0000")]).stdout
-        self.assertIn("behind (2.53-v11-def0000)", out)
+    def test_each_verdict_s_words(self):
+        for extra, words in (({"unknown": "registry did not answer within 1s"}, ["unknown -- registry did not answer within 1s"]),
+                             ({"upstream": "2.53-v9-abc0000"}, ["current", "2.53-v9-abc0000"]),
+                             ({"upstream": "2.53-v11-def0000"}, ["behind (2.53-v11-def0000)"])):
+            with self.subTest(extra=extra):
+                out = render([machine_rec("moose"), sdk_rec("moose", **extra)]).stdout
+                for w in words:
+                    self.assertIn(w, out)
 
 
 def workspace_rec(machine, name, **extra):
-    r = {"kind": "workspace", "machine": machine, "method": "container", "name": name}
-    r.update(extra)
-    return r
+    return dict(kind="workspace", machine=machine, method="container", name=name, **extra)
 
 
 class TestJsonCarriesBaseAndSdk(unittest.TestCase):
@@ -136,7 +125,7 @@ class TestJsonCarriesBaseAndSdk(unittest.TestCase):
         self.assertEqual(moose["methods"][0]["workspaces"][0]["base"], "?")
 
     def test_sdk_record_survives_into_json(self):
-        recs = [machine_rec("moose"), sdk_rec("moose", tag="2.53-v9-abc0000", pulled="2026-08-01", upstream="2.53-v11-def0000"), {"kind": "exit", "code": 0}]
+        recs = [machine_rec("moose"), sdk_rec("moose", upstream="2.53-v11-def0000"), {"kind": "exit", "code": 0}]
         moose = next(m for m in json.loads(render(recs, "json").stdout)["machines"] if m["name"] == "moose")
         self.assertEqual((moose["sdk"][0]["tag"], moose["sdk"][0]["upstream"]), ("2.53-v9-abc0000", "2.53-v11-def0000"))
 

@@ -1,4 +1,4 @@
-"""The refspecs follow the layout of whatever a checkout fetches from:"""
+"""The refspecs follow the layout of whatever a checkout fetches from: a mirror or the upstreams."""
 import sys
 import unittest
 
@@ -23,7 +23,6 @@ class TestFetchRefspecs(unittest.TestCase):
     def test_origin_is_narrowed_to_the_mirrored_branches_wherever_it_comes_from(self):
         for mirror in ("/mirror/WebKit.git", ""):
             self.assertEqual(git.fetch_refspecs("origin", mirror, ["main"]), ["+refs/heads/main:refs/remotes/origin/main"])
-
 
     def test_the_mirrored_branches_are_the_one_list(self):
         self.assertEqual(git.fetch_refspecs("origin", "/m", images.mirror_branches({"WK_MIRROR_BRANCHES": "main wpe-2.46"})),

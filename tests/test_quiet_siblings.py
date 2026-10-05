@@ -34,17 +34,13 @@ class TestQuietSiblings(unittest.TestCase):
         b = cli.Boot(REPO, cli.load_conf(REPO, me, env), None, env=env, peers=types.SimpleNamespace(peers=lambda: rows))
         return b.quiet_siblings()
 
-    def test_every_sibling_quiet_is_reported_as_all_of_all(self):
+    def test_the_quiet_siblings_are_counted_of_all_of_them(self):
         for n in ("rpi3", "rpi4", "rpi5"):
             self._machine(n)
-        got = self._run("rpi4", [("rpi3-rescue", False), ("rpi3-bench", False), ("rpi5-rescue", False), ("rpi5-bench", False)])
-        self.assertEqual(got, (2, 2))
-
-    def test_a_sibling_that_answers_clears_the_network(self):
-        for n in ("rpi3", "rpi4", "rpi5"):
-            self._machine(n)
-        got = self._run("rpi4", [("rpi3-rescue", False), ("rpi3-bench", False), ("rpi5-rescue", True), ("rpi5-bench", False)])
-        self.assertEqual(got, (1, 2))
+        for rpi5_up, want in ((False, (2, 2)), (True, (1, 2))):
+            with self.subTest(rpi5_up=rpi5_up):
+                got = self._run("rpi4", [("rpi3-rescue", False), ("rpi3-bench", False), ("rpi5-rescue", rpi5_up), ("rpi5-bench", False)])
+                self.assertEqual(got, want)
 
     def test_either_of_a_boards_two_names_counts_as_up(self):
         self._machine("rpi3")

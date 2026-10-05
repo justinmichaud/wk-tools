@@ -74,17 +74,9 @@ class FakeCG:
 class FakeDS:
 
     def __init__(self, value=0.4375, can_change=True, set_rc=0, get_rc=0, sticks=True,
-                 has_als=True, als=False, als_rc=0, als_set_rc=0, als_sticks=True):
-        self.value = value
-        self.can_change = can_change
-        self.set_rc = set_rc
-        self.get_rc = get_rc
-        self.sticks = sticks
-        self.has_als = has_als
-        self.als = als
-        self.als_rc = als_rc
-        self.als_set_rc = als_set_rc
-        self.als_sticks = als_sticks
+                 has_als=True, als=False, als_sticks=True):
+        self.value, self.can_change, self.set_rc, self.get_rc, self.sticks = value, can_change, set_rc, get_rc, sticks
+        self.has_als, self.als, self.als_sticks = has_als, als, als_sticks
 
     def DisplayServicesGetBrightness(self, ident, out):
         if self.get_rc:
@@ -106,14 +98,10 @@ class FakeDS:
         return self.has_als
 
     def DisplayServicesAmbientLightCompensationEnabled(self, ident, out):
-        if self.als_rc:
-            return self.als_rc
         out.contents.value = self.als
         return 0
 
     def DisplayServicesEnableAmbientLightCompensation(self, ident, enable):
-        if self.als_set_rc:
-            return self.als_set_rc
         if self.als_sticks:
             self.als = bool(enable)
         return 0
@@ -177,7 +165,7 @@ class WkmacDisplayMode(WkmacHandles):
         self.assertEqual(0, rc)
         self.assertEqual("1280x832", out.strip())
 
-    def test_declaring_a_mode_rewrites_every_row_of_that_panel(self):
+    def test_declaring_a_mode_rewrites_that_panels_size_in_every_row_and_nothing_else(self):
         config = self._config(wide=1470, high=956)
         rc, out = self.mode(FakeCG([PANEL]), declare=(1280, 832), config=config)
         self.assertEqual(0, rc, out)
@@ -185,22 +173,11 @@ class WkmacDisplayMode(WkmacHandles):
         rows = self._rows(config, self.UUID)
         self.assertEqual(4, len(rows), rows)   # two Configs x CurrentInfo + UnmirrorInfo
         for row in rows:
-            self.assertEqual((1280, 832, 2), (row["Wide"], row["High"], row["Scale"]))
-
-    def test_it_leaves_another_panels_rows_alone(self):
-        config = self._config()
-        self.mode(FakeCG([PANEL]), declare=(1280, 832), config=config)
+            self.assertEqual((1280, 832, 2, 60.0, 8), (row["Wide"], row["High"], row["Scale"], row["Hz"], row["Depth"]))
         other = self._rows(config, "AN-EXTERNAL-PANEL")
         self.assertEqual(2, len(other), other)
         for row in other:
             self.assertEqual((1920, 1080, 1), (row["Wide"], row["High"], row["Scale"]))
-
-    def test_it_keeps_what_it_was_not_asked_about(self):
-        config = self._config()
-        self.mode(FakeCG([PANEL]), declare=(1280, 832), config=config)
-        for row in self._rows(config, self.UUID):
-            self.assertEqual(60.0, row["Hz"])
-            self.assertEqual(8, row["Depth"])
 
     def test_a_mode_it_cannot_place_is_refused_printing_nothing(self):
         self.assertEqual((1, ""), self.mode(FakeCG([PANEL, EXTERNAL])))
@@ -336,14 +313,19 @@ class TheScreenTheReadingWasTakenOn(WkTest):
     def test_what_is_recorded_and_not_judged_raises_nothing(self):
         for why, over in (("the declared display", {}), ("brightness", {"brightness": 0.9, "displays": [dict(PANEL, brightness=0.9)]}),
                           ("the screen reading", {"screen": [0, 0]}),
+                          ("a panel with no ambient-light sensor", {"displays": [dict(PANEL, auto_brightness=None)]}),
                           ("an external panel declared", {"expect": "external 1470x956", "displays": [dict(EXTERNAL, points=[1470, 956])]})):
             with self.subTest(why):
                 cp = self.check(**over)
                 self.assertEqual((0, ""), (cp.returncode, cp.stderr), cp.stdout)
 
-    def test_a_window_that_is_not_frontmost_or_not_focused_is_refused(self):
+    def test_a_window_that_is_not_frontmost_or_not_focused_is_refused_each_for_its_own_reason(self):
         self.assertFault("not org.webkit.MiniBrowser", frontmost="com.apple.Terminal")
-        self.assertFault("did not have the focus", focused=False)
+        cp = self.check(focused=False)
+        self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("did not have the focus", cp.stderr)
+        self.assertNotIn("org.webkit.MiniBrowser: ", cp.stderr)
+        self.assertIn("focused=False", cp.stdout)
 
     def test_a_machine_without_pyobjc_is_refused(self):
         with mock.patch.dict(sys.modules, {"AppKit": None}):
@@ -351,14 +333,10 @@ class TheScreenTheReadingWasTakenOn(WkTest):
                 BROWSER.frontmost_bundle()
         self.assertIn("pyobjc", str(cm.exception))
 
-    def test_focus_and_frontmost_answer_different_questions(self):
-        cp = self.check(focused=False)
-        self.assertNotIn("org.webkit.MiniBrowser: ", cp.stderr)
-        self.assertIn("focused=False", cp.stdout)
-
     def test_the_new_readings_reach_the_log(self):
         cp = self.check()
         self.assertIn("frontmost=org.webkit.MiniBrowser", cp.stdout)
+        self.assertIn("auto_brightness=None", cp.stdout)
         self.assertIn("brightness=0.0", cp.stdout)
         self.assertIn("displays=count=1 builtin=1 points=[1470, 956] "
                       "mirrored=False asleep=True", cp.stdout)
@@ -475,51 +453,17 @@ class TheDisplayRuleAskedOnItsOwn(WkTest):
                 self.assertTrue([f for f in found if "ambient-light" in f], found)
 
 
-class AmbientLightControl(WkTest):
+class AmbientLightControl(WkmacHandles):
 
-    def check(self, auto, **overrides):
-        panel = dict(PANEL, auto_brightness=auto)
-        reading = dict(GOOD, displays=[panel], **overrides)
-        path = self.tmp / "reading.json"
-        path.write_text(json.dumps(reading))
-        return subprocess.run(
-            [sys.executable, str(REPO / "bench" / "mac-browser-check.py"),
-             "--read", str(path), "--expect-display", EXPECT],
-            capture_output=True, text=True)
+    def test_the_verb_reads_it_and_with_off_holds_it_off_and_reads_it_back(self):
+        for why, ds, off, rc, out, after in (("held off", FakeDS(als=True), True, 0, "off\n", False),
+                                             ("ignored the write", FakeDS(als=True, als_sticks=False), True, 1, "on\n", True),
+                                             ("no sensor", FakeDS(has_als=False), True, 0, "none\n", False),
+                                             ("a read", FakeDS(als=True), False, 0, "on\n", True)):
+            with self.subTest(why):
+                self.assertEqual((rc, out), self.call(WKMAC.cmd_auto_brightness, FakeCG([PANEL]), ds, off=off))
+                self.assertEqual(after, ds.als)
 
-    def test_a_panel_with_no_sensor_to_ask_is_reported_not_refused(self):
-        cp = self.check(None)
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        self.assertIn("auto_brightness=None", cp.stdout)
-
-    def test_the_verb_that_holds_it_off_reads_it_back(self):
-        ds = FakeDS(als=True)
-        rc, out = WkmacHandles.call(self, WKMAC.cmd_auto_brightness,
-                                    FakeCG([PANEL]), ds, off=True)
-        self.assertEqual(0, rc, out)
-        self.assertEqual("off\n", out)
-        self.assertFalse(ds.als)
-
-    def test_a_panel_that_ignores_the_write_exits_nonzero(self):
-        rc, out = WkmacHandles.call(self, WKMAC.cmd_auto_brightness,
-                                    FakeCG([PANEL]), FakeDS(als=True, als_sticks=False),
-                                    off=True)
-        self.assertEqual(1, rc, out)
-        self.assertEqual("on\n", out)
-
-    def test_a_panel_with_no_sensor_answers_none_and_is_not_a_refusal(self):
-        rc, out = WkmacHandles.call(self, WKMAC.cmd_auto_brightness,
-                                    FakeCG([PANEL]), FakeDS(has_als=False), off=True)
-        self.assertEqual(0, rc, out)
-        self.assertEqual("none\n", out)
-
-    def test_reading_it_without_off_changes_nothing(self):
-        ds = FakeDS(als=True)
-        rc, out = WkmacHandles.call(self, WKMAC.cmd_auto_brightness,
-                                    FakeCG([PANEL]), ds, off=False)
-        self.assertEqual(0, rc, out)
-        self.assertEqual("on\n", out)
-        self.assertTrue(ds.als, "a read turned it off")
 
 if __name__ == "__main__":
     unittest.main()

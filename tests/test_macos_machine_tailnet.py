@@ -62,50 +62,30 @@ class TestAMachineAlreadyOnTheTailnetIsLeftAlone(TailnetStage):
 
 
 class TestALoggedOutMachineJoins(TailnetStage):
-    def test_it_brings_the_node_up_under_a_derived_name(self):
+    def test_it_brings_the_node_up_under_a_derived_name_and_the_key_never_reaches_argv(self):
         self.run_block()
-        self.assertIn("tailscale up", self.log)
-        self.assertIn("--hostname=probehost-vm", self.log)
-        self.assertIn("--advertise-tags=tag:wk", self.log)
-
-    def test_the_key_never_reaches_argv(self):
-        self.run_block()
+        for word in ("tailscale up", "--hostname=probehost-vm", "--advertise-tags=tag:wk",
+                     "--auth-key=file:/var/lib/tailscale/wk-authkey", "rm -f /var/lib/tailscale/wk-authkey"):
+            self.assertIn(word, self.log)
         self.assertNotIn("tskey-auth-kAAAAAA-secret", self.log)
-        self.assertIn("--auth-key=file:/var/lib/tailscale/wk-authkey", self.log)
-        self.assertIn("rm -f /var/lib/tailscale/wk-authkey", self.log)
 
-    def test_a_join_that_did_not_take_says_what_fails_exactly_there(self):
+    def test_a_join_that_did_not_take_says_what_fails_and_still_removes_the_spent_key(self):
         cp = self.run_block({"WK_TEST_UP_RC": "1"})
         out = cp.stdout + cp.stderr
         self.assertEqual(cp.returncode, 0, out)   # a stage reports; it does not abort setup
         self.assertIn("did not reach Running", out)
-
-    def test_the_spent_key_is_removed_even_when_the_join_failed(self):
-        self.run_block({"WK_TEST_UP_RC": "1"})
         self.assertIn("rm -f /var/lib/tailscale/wk-authkey", self.log)
 
 
 class TestWhatItWillNotDo(TailnetStage):
-    def test_no_key_is_reported_rather_than_guessed_at(self):
-        cp = self.run_block(key="")
-        out = cp.stdout + cp.stderr
-        self.assertIn("wk key set tailnet", out)
-        self.assertNotIn("tailscale up", self.log)
-
-    def test_a_stopped_machine_is_not_started_to_ask(self):
-        cp = self.run_block({"WK_TEST_STATE": "stopped"})
-        self.assertIn("not running", cp.stdout + cp.stderr)
-        self.assertNotIn("machine start", self.log)
-
-    def test_a_machine_without_tailscale_says_what_that_costs(self):
-        cp = self.run_block({"WK_TEST_NO_TS": "1"})
-        self.assertIn("cannot be deployed", cp.stdout + cp.stderr)
-        self.assertNotIn("tailscale up", self.log)
-
-    def test_a_dry_run_joins_nothing(self):
-        cp = self.run_block({"WK_DRY_RUN": "1"})
-        self.assertIn("dry run", cp.stdout + cp.stderr)
-        self.assertNotIn("tailscale up", self.log)
+    def test_each_reason_not_to_join_is_reported_and_nothing_joins_or_starts(self):
+        for env, key, says in (({}, "", "wk key set tailnet"), ({"WK_TEST_STATE": "stopped"}, None, "not running"),
+                               ({"WK_TEST_NO_TS": "1"}, None, "cannot be deployed"), ({"WK_DRY_RUN": "1"}, None, "dry run")):
+            with self.subTest(says):
+                cp = self.run_block(env, **({} if key is None else {"key": key}))
+                self.assertIn(says, cp.stdout + cp.stderr)
+                self.assertNotIn("tailscale up", self.log)
+                self.assertNotIn("machine start", self.log)
 
 
 if __name__ == "__main__":

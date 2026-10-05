@@ -1,9 +1,6 @@
 """`wk boot` (lib/wk/boot/cli.py, lib/wk/boot/eeprom.py) against a board in memory: what --status reads back, each
 transition, the EEPROM boot order, killpoints[boot], and what `wk status` shows of an armed machine, in text and on
-the --web page.
-
-Run: python3 tests/run.py --unit -k test_boot_cmd
-"""
+the --web page."""
 import contextlib
 import hashlib
 import io
@@ -308,16 +305,11 @@ class EepromTest(unittest.TestCase):
 
 
 class TestTheOrderArithmetic(unittest.TestCase):
-    def test_the_named_nibble_moves_last_which_is_first(self):
-        self.assertEqual(eeprom.first("0xf412", "4"), "0xf14")
-        self.assertEqual(eeprom.first("0xf14", "1"), "0xf41")
-        self.assertEqual(eeprom.first("0xf41", "4"), "0xf14")
-
-    def test_an_entry_it_does_not_name_keeps_its_place(self):
-        self.assertEqual(eeprom.first("0xf641", "4"), "0xf614")
-
-    def test_local_drops_the_network_only(self):
-        self.assertEqual(eeprom.first("0xf421", ""), "0xf41")
+    def test_the_named_nibble_moves_last_which_is_first_and_the_rest_keep_their_place(self):
+        for order, nibble, want in (("0xf412", "4", "0xf14"), ("0xf14", "1", "0xf41"), ("0xf41", "4", "0xf14"),
+                                    ("0xf641", "4", "0xf614"), ("0xf421", "", "0xf41")):
+            with self.subTest(order=order, nibble=nibble):
+                self.assertEqual(eeprom.first(order, nibble), want)
 
     def test_the_network_settings_go_and_a_missing_order_is_added(self):
         self.assertEqual(eeprom.reorder("TFTP_IP=1.2.3.4\nX=1\nBOOT_ORDER=0xf41", "usb-first"), "X=1\nBOOT_ORDER=0xf14")

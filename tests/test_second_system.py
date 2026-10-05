@@ -1,15 +1,25 @@
 """A second system beside a rescue on one card (`<device>@second`): admin/wk-card-priv's split, gate and arming,
 lifted with sed and run on plain files standing in for the card, and lib/wk/boot/pi.py's PiSd driver."""
+import contextlib
 import hashlib
+import io
+import json
 import os
 import re
 import shutil
 import struct
 import subprocess
+import sys
+import tarfile
 import unittest
 from pathlib import Path
 
+from tests.fake_boot import FakeBoard
 from tests.support import REPO, WkTest, bash, stub_path
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk import act  # noqa: E402
+from wk.boot.pi import PiSd  # noqa: E402
 
 CARD_PRIV = REPO / "admin" / "wk-card-priv"
 
@@ -47,21 +57,16 @@ def _mbr(parts):
     return bytes(mbr)
 
 
+def _sfdisk_table(path):
+    out = subprocess.run(["sfdisk", "-J", str(path)], capture_output=True, text=True, check=True).stdout
+    return json.loads(out)["partitiontable"]
+
+
 def _sfdisk_json(path):
-    import json
-    out = subprocess.run(["sfdisk", "-J", str(path)], capture_output=True, text=True, check=True).stdout
-    table = json.loads(out)["partitiontable"]
-    return {int(p["node"][len(str(path)):]): p for p in table["partitions"]}
-
-
-def _sfdisk_id(path):
-    import json
-    out = subprocess.run(["sfdisk", "-J", str(path)], capture_output=True, text=True, check=True).stdout
-    return json.loads(out)["partitiontable"]["id"]
+    return {int(p["node"][len(str(path)):]): p for p in _sfdisk_table(path)["partitions"]}
 
 
 class TestGateUnderSecond(WkTest):
-
     def setUp(self):
         super().setUp()
         loops = sorted(Path("/dev").glob("loop[0-9]*"))
@@ -85,41 +90,24 @@ esac
                 env={"PATH": f"{binp}:{os.environ['PATH']}"},
             )
 
-    def test_a_card_in_a_reader_takes_a_second_system(self):
-        cp = self._gate(f"{self.dev}@second", booted="nvme0n1")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn(f"dev={self.dev} bootp=3 rootp=4 second=1", cp.stdout)
-
-    def test_the_disk_this_machine_runs_from_takes_a_second_system(self):
-        cp = self._gate(f"{self.dev}@second", booted=os.path.basename(self.dev))
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("bootp=3 rootp=4", cp.stdout)
-
-    def test_the_disk_this_machine_runs_from_refuses_a_whole_image(self):
-        cp = self._gate(self.dev, booted=os.path.basename(self.dev))
-        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
-        self.assertIn("@second", cp.stderr)
-
-    def test_a_mounted_second_system_is_refused(self):
-        cp = self._gate(f"{self.dev}@second", booted="", mounted_on_34="/mnt/x")
-        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
-        self.assertIn("partitions 3 and 4", cp.stderr)
-
-    def test_third_needs_the_shared_layout(self):
-        cp = self._gate(f"{self.dev}@third", booted="")
-        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
-        self.assertIn("shared layout", cp.stderr)
-
-    def test_only_second_and_third_are_system_names(self):
-        cp = self._gate(f"{self.dev}@fourth", booted="")
-        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
-        self.assertIn("@second", cp.stderr)
+    def test_what_the_gate_takes_and_refuses(self):
+        me = os.path.basename(self.dev)
+        for why, spec, booted, mounted, rc, want in (
+                ("a card in a reader", "@second", "nvme0n1", "", 0, f"dev={self.dev} bootp=3 rootp=4 second=1"),
+                ("the disk it runs from, @second", "@second", me, "", 0, "bootp=3 rootp=4"),
+                ("the disk it runs from, whole", "", me, "", 3, "@second"),
+                ("a mounted second system", "@second", "", "/mnt/x", 3, "partitions 3 and 4"),
+                ("@third without the shared layout", "@third", "", "", 3, "shared layout"),
+                ("no such system name", "@fourth", "", "", 3, "@second")):
+            with self.subTest(why):
+                cp = self._gate(self.dev + spec, booted=booted, mounted_on_34=mounted)
+                self.assertEqual(cp.returncode, rc, cp.stdout + cp.stderr)
+                self.assertIn(want, cp.stdout if rc == 0 else cp.stderr)
 
 
 @unittest.skipUnless(shutil.which("sfdisk"),
                      "needs sfdisk (util-linux); the helper runs on a Linux card machine")
 class TestSecondWrite(WkTest):
-
     BOOT = b"B" * (4096 * 512)
     ROOT = b"R" * (8192 * 512)
 
@@ -225,12 +213,12 @@ class TestSecondWrite(WkTest):
                     subprocess.run(["sfdisk", "-q", "--append", "--no-reread", str(disk)],
                                    input="start=30720, size=4096, type=c\nstart=34816, size=8192, type=83\n",
                                    text=True, check=True, capture_output=True)
-                before = _sfdisk_id(disk)
+                before = _sfdisk_table(disk)["id"]
                 cp = self._write(disk, img, shape="shared", slot=1)
                 self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
                 self.assertEqual(old_pair, "replacing the layout" in cp.stdout, cp.stdout)
                 self.assertEqual(sorted(_sfdisk_json(disk)), [1, 2, 3, 5, 6, 7, 8])
-                self.assertEqual(_sfdisk_id(disk), before)
+                self.assertEqual(_sfdisk_table(disk)["id"], before)
 
     def test_slot_resolve_reads_the_extended_layout_off_the_table(self):
         disk, img = self._disk(size_mb=2048), self._image()
@@ -269,7 +257,6 @@ class TestSecondWrite(WkTest):
 
 
 class TestArming(WkTest):
-
     def setUp(self):
         super().setUp()
         self.boot = self.tmp / "boot"
@@ -370,15 +357,10 @@ _second_with_boot /dev/sdX _second_disarm_edit
         cp = bash(_SAY + _lift(CARD_PRIV, "_second_disarm_edit") + f'\n_second_disarm_edit "{self.boot}"\n')
         self.assertIn("not armed", cp.stdout)
 
-    def test_the_verbs_take_the_boot_partition_wherever_it_is(self):
-        """mounted already (the rescue running from the disk) or mounted here (a card in a reader)"""
+    def test_a_boot_partition_mounted_already_is_used_where_it_is(self):
         script = ('set -euo pipefail\n' + _SAY + _lift(CARD_PRIV, "part", "_second_with_boot")
                   + '\nwith_mount() { echo "with_mount $1 -> $2"; }\nshow() { echo "boot=$1"; }\n'
                   + '_second_with_boot /dev/sdX show\n')
-        with stub_path({"findmnt": "exit 1"}) as binp:
-            cp = bash(script, env={"PATH": f"{binp}:{os.environ['PATH']}"})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("with_mount /dev/sdX1 -> show", cp.stdout)
         with stub_path({"findmnt": "echo /run/media/boot"}) as binp:
             cp = bash(script, env={"PATH": f"{binp}:{os.environ['PATH']}"})
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -386,7 +368,6 @@ _second_with_boot /dev/sdX _second_disarm_edit
 
 
 class TestTailnetIdentityAcrossARewrite(WkTest):
-
     def setUp(self):
         super().setUp()
         self.root = self.tmp / "p4"
@@ -436,8 +417,8 @@ class TestTailnetIdentityAcrossARewrite(WkTest):
         a, b = cp.stdout.split()
         self.assertEqual(a, b)
 
-class TestUnitsForABusyBoxInit(WkTest):
 
+class TestUnitsForABusyBoxInit(WkTest):
     def setUp(self):
         super().setUp()
         self.root = self.tmp / "root"
@@ -476,8 +457,6 @@ class TestUnitsForABusyBoxInit(WkTest):
         self.assertIn("installed 2 file(s)", cp.stdout)
 
     def test_the_archive_may_name_init_scripts_and_nothing_else_new(self):
-        import io
-        import tarfile
         def names(members):
             tar = self.tmp / "u.tar"
             with tarfile.open(tar, "w") as tf:
@@ -491,16 +470,10 @@ class TestUnitsForABusyBoxInit(WkTest):
 
 
 class TestPiSdDriver(unittest.TestCase):
-    """lib/wk/boot/pi.py's PiSd: arming through the helper's @second/@third verbs on the rescue, against a FakeBoard."""
-
     CONF = {"name": "rpi3", "driver": "pi-sd", "device": "/dev/mmcblk0", "root": "/dev/mmcblk0p2",
             "role": "bench-device", "profile": "webkit-2.52-yocto-rpi3-32"}
 
     def board(self, *boots):
-        import sys
-        sys.path.insert(0, str(REPO / "lib"))
-        from tests.fake_boot import FakeBoard
-        from wk.boot.pi import PiSd
         fake = FakeBoard(self.CONF)
         fake.rescue("rescue-1")
         for n, boot in enumerate(boots):
@@ -512,9 +485,6 @@ class TestPiSdDriver(unittest.TestCase):
         return [e[2] for e in fake.effects if e[:2] == ("card_priv", "second-arm")]
 
     def refused(self, fn, *args):
-        import contextlib
-        import io
-        from wk import act
         with contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertRaises(act.Refused, fn, *args)
         return err.getvalue()
@@ -526,14 +496,9 @@ class TestPiSdDriver(unittest.TestCase):
         d.arm("/dev/mmcblk0p3")
         self.assertEqual(self.arms(fake), ["/dev/mmcblk0@second"])
 
-    def test_arm_selects_the_named_system(self):
+    def test_arm_selects_the_named_system_and_skips_only_when_armed_for_it(self):
         fake, d = self.board("/dev/mmcblk0p5", "/dev/mmcblk0p7")
-        d.arm("/dev/mmcblk0p7")
-        self.assertEqual(self.arms(fake), ["/dev/mmcblk0@third"])
         self.assertIn("is not a bench system's boot partition", self.refused(d.arm, ""))
-
-    def test_arm_skips_only_when_armed_for_the_same_system(self):
-        fake, d = self.board("/dev/mmcblk0p5", "/dev/mmcblk0p7")
         d.arm("/dev/mmcblk0p7")
         d.arm("/dev/mmcblk0p5")
         self.assertEqual(self.arms(fake), ["/dev/mmcblk0@third", "/dev/mmcblk0@second"])

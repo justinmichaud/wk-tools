@@ -1,6 +1,4 @@
-"""`wk zed --url <ws>`: prints the ssh:// URL cmd/zed would hand to Zed,
-without invoking Zed itself. Each docstring is the phrase of the behaviour
-it checks."""
+"""`wk zed --url <ws>`: prints the ssh:// URL cmd/zed would hand to Zed, without invoking Zed itself."""
 import os
 import stat
 import unittest

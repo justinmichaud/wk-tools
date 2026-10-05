@@ -1,4 +1,4 @@
-"""Every command has the same shape, declared once in its `# wk:` lines and"""
+"""Every command has the same shape, declared once in its `# wk:` lines and enforced by the dispatcher."""
 TIER = "lint"
 import itertools
 import re

@@ -180,17 +180,12 @@ class WriteTest(unittest.TestCase):
         for v in OS_ENV:
             os.environ.pop(v, None)
         os.environ.update(WK_YES="1", WK_DESTRUCTIVE="1")
-        for name, value in (("key_present", True), ("api_present", False)):
-            p = mock.patch.object(tailnet.Fleet, name, lambda fl, v=value: v)
-            p.start()
-            self.addCleanup(p.stop)
         self.retired = []
-        p = mock.patch.object(reach.Reach, "peers", lambda r: self.w.peers)
-        p.start()
-        self.addCleanup(p.stop)
-        for name, fn in (("authkey", lambda fl: AUTHKEY),
-                         ("retire", lambda fl, n: self.retired.append(n) or Result(0, "retired\n"))):
-            p = mock.patch.object(tailnet.Fleet, name, fn)
+        for p in (mock.patch.object(tailnet.Fleet, "key_present", lambda fl: True),
+                  mock.patch.object(tailnet.Fleet, "api_present", lambda fl: False),
+                  mock.patch.object(tailnet.Fleet, "authkey", lambda fl: AUTHKEY),
+                  mock.patch.object(tailnet.Fleet, "retire", lambda fl, n: self.retired.append(n) or Result(0, "retired\n")),
+                  mock.patch.object(reach.Reach, "peers", lambda r: self.w.peers)):
             p.start()
             self.addCleanup(p.stop)
         self.w = World()
@@ -442,7 +437,6 @@ class TestTheStream(WriteTest):
         with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
             w.verify("/dev/sdX@second", {"stream_bytes": "1", "stream_sha": "a"})
         self.assertIn("did not report what it split", err.getvalue())
-
 
 
 class Channel:

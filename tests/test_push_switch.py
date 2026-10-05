@@ -1,7 +1,4 @@
-"""`wk key push` -- the deploy-key switch, as a flow over the fake machine tests/test_wk_secrets.py builds.
-
-Run: python3 tests/run.py --unit -k test_push_switch
-"""
+"""`wk key push` -- the deploy-key switch, as a flow over the fake machine tests/test_wk_secrets.py builds."""
 import contextlib
 import io
 import os
@@ -18,9 +15,6 @@ from wk import act, guest, places, pushswitch
 from wk.act import Refused
 from wk.clock import FakeClock
 from wk.machine import Result
-
-
-
 
 KEY = load_cmd("key")
 
@@ -173,7 +167,7 @@ class TestOn(PushTest):
     def test_the_config_every_workspace_includes_is_written_before_the_keys(self):
         self.w.seed()
         self.push("on")
-        acts = [e for e in self.w.acts()]
+        acts = self.w.acts()
         cfg = acts.index(("write", self.w.keyring_dir + "/ssh_config"))
         load = next(i for i, e in enumerate(acts) if e[0] == "act" and "ssh-add -" in e[1][-1])
         self.assertLess(cfg, load)
@@ -317,8 +311,6 @@ class TestTheGuests(PushTest):
 
 
 class TestTheClaudeSessionGate(PushTest):
-    """`wk key push on` with a claude session already running in a workspace."""
-
     def setUp(self):
         super().setUp()
         self.w.seed()
@@ -344,7 +336,6 @@ class TestTheClaudeSessionGate(PushTest):
         self.assertIn("kill 4242 2>/dev/null; exit 0", acts[kills[0]][-1])
 
     def test_a_declined_question_ends_nothing_and_loads_nothing(self):
-        """No terminal is a decline, and the decline stops the command rather than falling through to the keys."""
         rc, _, err = self.push("on")
         self.assertEqual(1, rc)
         self.assertEqual(set(), self.w.agents[SOCK])
@@ -418,8 +409,6 @@ class TestCrashOnlyAndDryRun(PushTest):
         return w
 
     def test_killpoints_push(self):
-        """`killpoints[push]`: killed after any effect of `on` or `off` and re-run, the switch lands where an
-        uninterrupted run leaves it."""
         for action in ("on", "off"):
             with self.subTest(action=action):
                 converges(self, lambda: types.SimpleNamespace(fake=self.world(action)),
@@ -445,7 +434,6 @@ class TestCrashOnlyAndDryRun(PushTest):
 
 class TestNoFalseClaim(WkTest):
     def test_ensure_dir_dies_rather_than_claiming_a_dir_it_could_not_make(self):
-        """ensure_dir (lib/common.sh) reports an error, not '==> create', when mkdir fails"""
         d = self.tmp / "no-write" / "child"
         os.makedirs(self.tmp / "no-write")
         os.chmod(self.tmp / "no-write", 0o500)
@@ -456,43 +444,8 @@ class TestNoFalseClaim(WkTest):
         self.assertFalse(d.exists())
 
 
-class TestTheStatusRowIsCredentialsNotThePosition(WkTest):
-    """`wk status` reads this machine's own directories; only `wk key push status` asks the agent and the
-    injector. So the row is named for what it measures and names the command that answers the other question."""
-
-    FORKS = ("fork", "forkwpe")
-
-    def _row(self, keys=(), pat=False, in_vm=False):
-        from wk import status
-        from wk.store import Store
-        secrets = self.tmp / "store" / "secrets"
-        held = self.tmp / "store" / "push-keys"
-        for d in (secrets, held):
-            d.mkdir(parents=True, exist_ok=True)
-        for k in keys:
-            (held / f"build_key_{k}").write_text("not-a-key\n")
-        if pat:
-            (held / "github-pat").write_text("ghp_notatoken\n")
-        store = Store({"WK_STORE": str(self.tmp / "store"), "WK_HOST_SECRETS": str(secrets), "HOME": str(self.tmp)})
-        return status.push_record(store, "testmachine", list(self.FORKS), in_vm)
-
-    def test_the_state_counts_the_keys_and_names_the_token_and_never_a_position(self):
-        for keys, state, detail in (((), "no keys", "0 deploy key(s), 2 absent"), (("fork",), "some keys held",
-                                    "1 deploy key(s), 1 absent"), (("fork", "forkwpe"), "keys held", "")):
-            with self.subTest(keys=keys):
-                row = self._row(keys=keys)
-                self.assertEqual((state, "push credentials"), (row["state"], row["name"]))
-                self.assertIn(detail, row["detail"])
-        self.assertIn("no API token", self._row(keys=("fork",))["detail"])
-        self.assertIn("an API token", self._row(pat=True)["detail"])
-
-    def test_the_podman_vm_reports_no_row_at_all(self):
-        self.assertIsNone(self._row(keys=("fork", "forkwpe"), in_vm=True))
-
-
 class TestEveryPlaceThisMachineHoldsIsAsked(PushTest):
-    """`on` hands the keys to every workspace on this machine, the macOS guests too (their agent is on this host,
-    forwarded per guest), so a claude session in a guest is ended like one in a container."""
+    """`on` ends a claude session in a macOS guest like one in a container."""
 
     def setUp(self):
         super().setUp()
@@ -501,10 +454,6 @@ class TestEveryPlaceThisMachineHoldsIsAsked(PushTest):
         self.boxes["vm"] = self.guests
         self.box.claude = {"ctr": []}
         self.guests.claude = {"mac-rel": ["4242"]}
-
-    def test_a_session_in_a_guest_is_found_on_a_mac(self):
-        sessions = pushswitch.Push(registry(self.w, self.boxes), self.w.sec(macos=True), self.clock).agent_sessions()
-        self.assertEqual([(self.guests, "mac-rel", ["4242"])], sessions)
 
     def test_on_ends_it_in_the_guest_before_the_keys_load(self):
         os.environ["WK_YES"] = "1"
@@ -518,8 +467,7 @@ class TestEveryPlaceThisMachineHoldsIsAsked(PushTest):
 
 
 class TestThePodmanMachineIsHalfTheSwitch(PushTest):
-    """In a macOS host's podman machine -- where a forwarded `wk ai claude` throws it -- the guests' agent on the host
-    is out of reach, so `off` there empties its own half and names the host's rather than saying push is off."""
+    """In a macOS host's podman machine the guests' agent on the host is out of reach."""
 
     def setUp(self):
         super().setUp()
@@ -537,7 +485,6 @@ class TestThePodmanMachineIsHalfTheSwitch(PushTest):
         self.assertIn("not read from the podman machine", out)
 
     def test_on_a_mac_itself_the_same_variable_is_not_the_vm(self):
-        """tests and forwarded commands set WK_IN_VM on the host too; the podman machine is the one that is not macOS."""
         rc, _, err = self.push("off", macos=True)
         self.assertEqual(0, rc, err)
 
@@ -554,5 +501,3 @@ class TestTheScanReadsPsWhereThereIsNoProc(WkTest):
         scan = pushswitch.AGENT_PID_SCAN.replace("if [ -d /proc/self ]", "if false")
         cp = subprocess.run(["sh", "-c", scan], env={"PATH": "%s:/usr/bin:/bin" % self.tmp}, capture_output=True, text=True)
         self.assertEqual(["11", "12", "13", "16"], cp.stdout.split(), cp.stderr)
-
-

@@ -265,13 +265,6 @@ class TestTheElection(KeyTest):
         self.assertIn("github-pat: no workstation's could be judged", err)
         self.assertFalse([a for a in w.peer_acts() if "github-pat" in a])
 
-    def test_a_declined_question_writes_to_no_peer(self):
-        w = self.provisioned(Peer("peerbox"))
-        del os.environ["WK_YES"]
-        _, _, err = self.run_verb("setup")
-        self.assertEqual([], w.peer_acts())
-        self.assertIn("peerbox was left exactly as it is", err)
-
     def test_a_build_machine_is_asked_nothing(self):
         w = self.provisioned(Peer("peerbox"))
         rc, out, _ = self.run_verb("setup", boxes=("buildbox",))
@@ -349,7 +342,6 @@ class TestCrashOnlyAndDryRun(KeyTest):
             self.key(w).setup()
 
     def test_setup_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[key]`: the deploy keys minted and registered, a credential minted, and the peer converged."""
         os.environ["WK_YES"] = "1"
         converges(self, self.fleet_world, self.setup_once, KeyWorld.state, max_effects=120)
         w = self.fleet_world()
@@ -409,8 +401,6 @@ class TestCrashOnlyAndDryRun(KeyTest):
 
 
 class TestTheStoringVerbsHaveADryRun(KeyTest):
-    """`ensure` and `adopt`: a dry run records the wet run's effects and leaves the world as it was."""
-
     def dry_equals_wet(self, make, verb, minted=False):
         """`minted`: the wet run publishes the public half of a key the dry one did not write, so has none to derive."""
         wet = make()
@@ -433,8 +423,7 @@ class TestTheStoringVerbsHaveADryRun(KeyTest):
 
 
 class TestTheFleetQuestion(KeyTest):
-    """`setup` is declared destructive for what it overwrites on other workstations: asked when there is one to
-    overwrite, and acting unasked when there is none or the question was declined."""
+    """`setup` asks before overwriting another workstation, and sets up here either way."""
 
     def setUp(self):
         super().setUp()

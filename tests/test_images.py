@@ -58,7 +58,6 @@ class TestTheLoader(ScratchRoot):
                 with self.assertRaises(LookupError):
                     images.load(name, self.env)
 
-
     def test_a_conf_is_literals_of_known_fields(self):
         for text in ("IMG_BUILDER=$HOME\n", "IMG_NOPE=1\n", "IMG_ARCH=a b\n",
                      'CFG_NEEDS="never closed\n', "just prose\n"):
@@ -95,14 +94,11 @@ class TestTheListing(ScratchRoot):
 
 
 class TestPgoWanted(unittest.TestCase):
-    def test_a_yocto_profile_from_2_52_is_profile_guided(self):
-        self.assertTrue(images.pgo_wanted("yocto", "2.52"))
-        self.assertTrue(images.pgo_wanted("yocto", "2.60"))
-
-    def test_an_older_release_or_another_builder_is_not(self):
-        self.assertFalse(images.pgo_wanted("yocto", "2.46"))
-        self.assertFalse(images.pgo_wanted("buildroot", "2.52"))
-        self.assertFalse(images.pgo_wanted("yocto", ""))
+    def test_a_yocto_profile_from_2_52_is_profile_guided_and_nothing_else_is(self):
+        for builder, release, wanted in (("yocto", "2.52", True), ("yocto", "2.60", True), ("yocto", "2.46", False),
+                                         ("buildroot", "2.52", False), ("yocto", "", False)):
+            with self.subTest(builder=builder, release=release):
+                self.assertEqual(wanted, images.pgo_wanted(builder, release))
 
 
 class TestTheSpec(unittest.TestCase):
@@ -183,15 +179,11 @@ class TestTheToolchain(WkTest):
 
 
 class TestWhichMachineHoldsIt(unittest.TestCase):
-    def test_a_spec_that_names_one_is_believed(self):
-        self.assertEqual(images.ws_machine("moose", "elsewhere", "here"), "moose")
-
-    def test_otherwise_the_workspaces_place(self):
-        self.assertEqual(images.ws_machine("", "elsewhere", "here"), "elsewhere")
-
-    def test_container_and_local_are_this_machine(self):
-        for t in ("container", "local"):
-            self.assertEqual(images.ws_machine("", t, "here"), "here")
+    def test_the_spec_then_the_workspaces_place_and_container_or_local_is_this_machine(self):
+        for spec, place, machine in (("moose", "elsewhere", "moose"), ("", "elsewhere", "elsewhere"),
+                                     ("", "container", "here"), ("", "local", "here")):
+            with self.subTest(spec=spec, place=place):
+                self.assertEqual(machine, images.ws_machine(spec, place, "here"))
 
     def test_the_scheduler_serialises_by_machine_alone(self):
         self.assertEqual(images.build_resource("moose"), "machine:moose")

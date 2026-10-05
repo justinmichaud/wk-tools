@@ -87,10 +87,7 @@ class TestBenchContainerRun(WkTest):
 class TestTheWatchIsInertInAContainer(unittest.TestCase):
 
     def watch(self, system):
-        """Run against a real ps and window probe this would fail on the
-        maintainer's own desktop -- open windows and daemons this host never
-        paused are exactly what a container has none of, so both are answered
-        the way one does; the must-not-run table is bench/mac-quiet-desktop.sh's own."""
+        """ps and the window probe answer as a container's would; the must-not-run table is bench/mac-quiet-desktop.sh's own."""
         m = Fake()
         m.answer(["uname", "-s"], out=system + "\n")
         m.answer(lib_argv(REPO, screen.WINDOWS, "wk_window_probe"), out="windows=?\n")

@@ -1,4 +1,4 @@
-"""Streaming behaviour of `wk status --text`: the renderer (wk.statusview)"""
+"""Streaming behaviour of `wk status --text`: the renderer (wk.statusview)."""
 import contextlib
 import io
 import json
@@ -12,20 +12,16 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import statusview  # noqa: E402
 
 
-def _rec(**kw):
-    return kw
-
-
 def _plan(*jobs):
     """<(job, machine)...>: a job with no machine completes nobody's block."""
-    return _rec(kind="plan", jobs=[{"job": j, "machine": m} if m else {"job": j} for j, m in jobs])
+    return dict(kind="plan", jobs=[{"job": j, "machine": m} if m else {"job": j} for j, m in jobs])
 
 
 def _machine_lines(name):
     """One job's records: its machine, one workspace, and the flush that ends it."""
-    return [_rec(kind="machine", name=name, self=(name == "alpha")),
-            _rec(kind="workspace", machine=name, method="container", name="ws-" + name, state="present", ws="present"),
-            _rec(kind="flush", job=name)]
+    return [dict(kind="machine", name=name, self=(name == "alpha")),
+            dict(kind="workspace", machine=name, method="container", name="ws-" + name, state="present", ws="present"),
+            dict(kind="flush", job=name)]
 
 
 class _Tap:
@@ -65,7 +61,7 @@ def _render(records):
 
 class TestTextStreamsAsRecordsArrive(unittest.TestCase):
     def test_first_machine_prints_before_second_machines_records_are_consumed(self):
-        records = [_plan(("alpha", "alpha"), ("beta", "beta"))] + _machine_lines("alpha") + _machine_lines("beta") + [_rec(kind="exit", code=0)]
+        records = [_plan(("alpha", "alpha"), ("beta", "beta"))] + _machine_lines("alpha") + _machine_lines("beta") + [dict(kind="exit", code=0)]
         tap, err = _render(records)
         alpha_at = tap.when(lambda l: l.startswith("alpha"))
         self.assertLessEqual(alpha_at, 4, "alpha's block waited for beta's records -- not streaming")
@@ -73,17 +69,17 @@ class TestTextStreamsAsRecordsArrive(unittest.TestCase):
         self.assertEqual(err, "")
 
     def test_a_planned_machine_shows_as_probing_before_it_answers(self):
-        records = [_plan(("slowbox", "slowbox"))] + _machine_lines("slowbox") + [_rec(kind="exit", code=0)]
+        records = [_plan(("slowbox", "slowbox"))] + _machine_lines("slowbox") + [dict(kind="exit", code=0)]
         tap, _ = _render(records)
         self.assertEqual(tap.when(lambda l: "probing slowbox" in l), 1)
         self.assertGreater(tap.when(lambda l: l.strip() == "slowbox"), 1)
 
     def test_a_delegated_machines_heading_comes_before_its_rows_even_when_its_rows_lead_or_its_job_never_flushes(self):
-        for records in ([_plan(("far", "far")), _rec(kind="workspace", machine="far", method="native", name="ws-far", state="present", ws="present"),
-                         _rec(kind="machine", name="far"), _rec(kind="flush", job="far"), _rec(kind="exit", code=0)],
-                        [_plan(("far", "far")), _rec(kind="machine", name="far"),
-                         _rec(kind="workspace", machine="far", method="native", name="ws-far", state="present", ws="present"),
-                         _rec(kind="exit", code=0)]):
+        for records in ([_plan(("far", "far")), dict(kind="workspace", machine="far", method="native", name="ws-far", state="present", ws="present"),
+                         dict(kind="machine", name="far"), dict(kind="flush", job="far"), dict(kind="exit", code=0)],
+                        [_plan(("far", "far")), dict(kind="machine", name="far"),
+                         dict(kind="workspace", machine="far", method="native", name="ws-far", state="present", ws="present"),
+                         dict(kind="exit", code=0)]):
             tap, _ = _render(records)
             out = [l for _, l in tap.lines]
             heading = next(i for i, l in enumerate(out) if l.strip() == "far")
@@ -96,12 +92,12 @@ class TestABlockWaitsForEveryPlannedJob(unittest.TestCase):
     def test_the_first_job_flushing_empty_does_not_draw_the_machine(self):
         tap, err = _render([
             _plan(("container", "host"), ("vm", "host")),
-            _rec(kind="machine", name="host", self=True),
-            _rec(kind="flush", job="container"),
-            _rec(kind="machine", name="host", self=True),
-            _rec(kind="workspace", machine="host", method="macOS guest", name="ws-v", state="stopped", ws="present"),
-            _rec(kind="flush", job="vm"),
-            _rec(kind="exit", code=0)])
+            dict(kind="machine", name="host", self=True),
+            dict(kind="flush", job="container"),
+            dict(kind="machine", name="host", self=True),
+            dict(kind="workspace", machine="host", method="macOS guest", name="ws-v", state="stopped", ws="present"),
+            dict(kind="flush", job="vm"),
+            dict(kind="exit", code=0)])
         out = "\n".join(l for _, l in tap.lines)
         self.assertEqual(err, "")
         self.assertEqual(len([l for l in out.splitlines() if l.startswith("host ")]), 1, out)
@@ -112,19 +108,19 @@ class TestABlockWaitsForEveryPlannedJob(unittest.TestCase):
     def test_a_flush_for_a_job_outside_the_plan_is_reported_and_draws_nothing(self):
         tap, err = _render([
             _plan(("container", "host")),
-            _rec(kind="machine", name="host", self=True),
-            _rec(kind="flush", job="vm"),
-            _rec(kind="workspace", machine="host", method="container", name="ws-c", state="present", ws="present"),
-            _rec(kind="flush", job="container"),
-            _rec(kind="exit", code=0)])
+            dict(kind="machine", name="host", self=True),
+            dict(kind="flush", job="vm"),
+            dict(kind="workspace", machine="host", method="container", name="ws-c", state="present", ws="present"),
+            dict(kind="flush", job="container"),
+            dict(kind="exit", code=0)])
         out = "\n".join(l for _, l in tap.lines)
         self.assertIn("'vm' ended without being in the plan", err)
         self.assertIn("ws-c", out)
         self.assertNotIn("no workspaces", out)
 
     def test_a_job_with_no_machine_completes_no_block(self):
-        tap, _ = _render([_plan(("alpha", "alpha"), ("devices", None)), _rec(kind="flush", job="devices"), *_machine_lines("alpha"),
-                          _rec(kind="exit", code=0)])
+        tap, _ = _render([_plan(("alpha", "alpha"), ("devices", None)), dict(kind="flush", job="devices"), *_machine_lines("alpha"),
+                          dict(kind="exit", code=0)])
         out = "\n".join(l for _, l in tap.lines)
         self.assertEqual(len([l for l in out.splitlines() if l.startswith("alpha")]), 1, out)
         self.assertIn("ws-alpha", out)
@@ -133,7 +129,7 @@ class TestABlockWaitsForEveryPlannedJob(unittest.TestCase):
 class TestJsonModeUnchangedByStreamMarkers(unittest.TestCase):
     def test_json_output_equals_the_merge_of_the_same_stream_without_markers(self):
         records = ([_plan(("alpha", "alpha"), ("beta", "beta"))] + _machine_lines("alpha") + _machine_lines("beta")
-                   + [_rec(kind="fleet", machine="rpi3", role="bench-device", mode="bench mode", media="sd"), _rec(kind="exit", code=2)])
+                   + [dict(kind="fleet", machine="rpi3", role="bench-device", mode="bench mode", media="sd"), dict(kind="exit", code=2)])
         with_markers = statusview.merge(records)
         without = statusview.merge([r for r in records if r["kind"] not in ("plan", "flush")])
         self.assertEqual(with_markers, without)

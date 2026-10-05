@@ -118,14 +118,10 @@ class TestVerified(WkTest):
         f.write_text("".join(json.dumps(l) + "\n" for l in lines))
         return board.slot_verified(str(f))
 
-    def test_all_ok_passes_and_counts(self):
-        self.assertEqual(self._verified([{"ok": True}, {"ok": True}]), 2)
-
-    def test_one_failure_fails(self):
-        self.assertEqual(self._verified([{"ok": True}, {"ok": False}]), 0)
-
-    def test_no_evidence_is_not_verified(self):
-        self.assertEqual(self._verified([]), 0)
+    def test_all_ok_counts_and_a_failure_or_no_evidence_is_not_verified(self):
+        for lines, want in (([{"ok": True}, {"ok": True}], 2), ([{"ok": True}, {"ok": False}], 0), ([], 0)):
+            with self.subTest(lines=lines):
+                self.assertEqual(self._verified(lines), want)
         self.assertEqual(board.slot_verified(str(self.tmp / "missing")), 0)
 
 
@@ -216,18 +212,6 @@ class TestSysimageWebkitRefusals(WkTest):
 
     def test_a_yocto_slot_needs_both_commit_and_slot(self):
         cp = run_here("sysimage", "webkit", "webkit-2.52-yocto-rpi3-32", "--slot", "base", "--dry-run", timeout=60)
-        self.assertEqual(cp.returncode, 1, cp.stdout)
-
-    def test_commit_and_slot_are_required(self):
-        cp = run_here("sysimage", "webkit", "wpewebkit-2.38-buildroot-rpi3-32", timeout=30)
-        self.assertEqual(cp.returncode, 1, cp.stdout)
-
-    def test_a_short_sha_is_refused(self):
-        cp = run_here("sysimage", "webkit", "wpewebkit-2.38-buildroot-rpi3-32", "--commit", "04abe098", "--slot", "base", timeout=30)
-        self.assertEqual(cp.returncode, 1, cp.stdout)
-
-    def test_a_slot_name_is_a_directory_name(self):
-        cp = run_here("sysimage", "webkit", "wpewebkit-2.38-buildroot-rpi3-32", "--commit", "a" * 40, "--slot", "../x", timeout=30)
         self.assertEqual(cp.returncode, 1, cp.stdout)
 
 

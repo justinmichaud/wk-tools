@@ -3,6 +3,10 @@
 import contextlib
 import io
 import os
+import plistlib
+import shutil
+import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -11,7 +15,6 @@ from tests.killpoints import converges
 from tests.support import REAL_MACHINES, REPO
 from tests.test_doctor import fake_doctor
 
-import sys
 sys.path.insert(0, str(REPO / "lib"))
 from wk import backup  # noqa: E402
 from wk.act import Refused  # noqa: E402
@@ -72,8 +75,6 @@ class TestWritePipelineNeverTruncates(unittest.TestCase):
     """A write that cannot complete (a read-only directory fails as a full disk would) leaves the old file, byte for byte."""
 
     def setUp(self):
-        import shutil
-        import tempfile
         self.d = tempfile.mkdtemp(prefix="wk-test-backup-atomicity-")
         self.addCleanup(lambda: (os.chmod(self.d, 0o755), shutil.rmtree(self.d, ignore_errors=True)))
 
@@ -84,10 +85,9 @@ class TestWritePipelineNeverTruncates(unittest.TestCase):
             f.write(original)
         before = os.stat(target)
 
-        os.chmod(self.d, 0o555)  # read+execute only: the tmp file cannot be created
-        local = Local()
+        os.chmod(self.d, 0o555)
         with self.assertRaises(OSError):
-            backup.atomic_update(local, target, "new content\n", "config.dconf")
+            backup.atomic_update(Local(), target, "new content\n", "config.dconf")
 
         os.chmod(self.d, 0o755)
         after = os.stat(target)
@@ -148,8 +148,6 @@ class TestLinuxBackup(unittest.TestCase):
 
 
 class TestKillpointsKeyBackup(unittest.TestCase):
-    """`killpoints[key backup]`: killed after any effect and re-run, a backup reaches the files an uninterrupted one writes, each whole or unchanged."""
-
     def world(self, macos):
         f = Fake("here")
         if macos:
@@ -208,7 +206,6 @@ class TestRpi5TuningIsBackedUp(unittest.TestCase):
 
 class TestCandidates(unittest.TestCase):
     def test_keeps_real_settings_drops_noise_and_known_entries(self):
-        import plistlib
         f = Fake("here")
         f.answer(["defaults", "domains"], 0, "com.example.testapp")
         f.answer(["defaults", "export", "com.example.testapp", "-"], 0,

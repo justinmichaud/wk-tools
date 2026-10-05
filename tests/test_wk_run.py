@@ -15,11 +15,31 @@ from wk import presets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
-
-
-
 os.environ.setdefault("WK_ROOT", str(REPO))
 RUN = load_cmd("run")
+
+
+def a_driver(os_name="linux", kind="container"):
+    driver = mock.Mock()
+    driver.os.return_value = os_name
+    driver.kind = kind
+    driver.env = {}
+    driver.src.return_value = "/src/WebKit"
+    driver.home.return_value = "/home/u"
+    driver.tools.return_value = "/opt/wk-tools"
+    driver.lldb_opts.return_value = ""
+    driver.exec_argv.return_value = (["true"], None)
+    return driver
+
+
+def run_on(driver, argv, preset="gtk-release"):
+    """The (args, kwargs) `wk run <argv>` handed `exec_argv`."""
+    reg = mock.Mock()
+    reg.load.return_value = driver
+    with mock.patch.object(RUN.places, "Registry", return_value=reg), \
+            mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": preset}):
+        RUN.main(argv)
+    return driver.exec_argv.call_args
 
 
 class TestFindsBinaryOnEveryPort(unittest.TestCase):
@@ -41,20 +61,8 @@ class TestFindsBinaryOnEveryPort(unittest.TestCase):
     def test_the_direct_run_embeds_the_prelude_and_the_right_jsc_path(self):
         for name, os_name, kind in (("gtk-release", "linux", "container"), ("mac-release", "macos", "vm")):
             with self.subTest(config=name):
-                driver = mock.Mock()
-                driver.os.return_value = os_name
-                driver.kind = kind
-                driver.env = {}
-                driver.src.return_value = "/src/WebKit"
-                driver.exec_argv.return_value = (["true"], None)
-                reg = mock.Mock()
-                reg.load.return_value = driver
                 preset = presets.resolve(name, os_name, kind, {})
-                with mock.patch.object(RUN.places, "Registry", return_value=reg), \
-                        mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": name}):
-                    RUN.main(["--", "x.js"])
-                call_args = driver.exec_argv.call_args[0]
-                cmd = call_args[1][2]
+                cmd = run_on(a_driver(os_name, kind), ["--", "x.js"], name)[0][1][2]
                 self.assertIn('export %s="%s' % (preset.run_var(), preset.run_dir("/src/WebKit")), cmd)
                 self.assertIn(preset.jsc_path("/src/WebKit"), cmd)
 
@@ -62,28 +70,8 @@ class TestFindsBinaryOnEveryPort(unittest.TestCase):
 class TestLldbGetsAPty(unittest.TestCase):
     """Whichever place answers, `--lldb` asks it for a tty and a plain run does not."""
 
-    def _driver(self):
-        driver = mock.Mock()
-        driver.os.return_value = "linux"
-        driver.kind = "container"
-        driver.env = {}
-        driver.src.return_value = "/src/WebKit"
-        driver.home.return_value = "/home/u"
-        driver.tools.return_value = "/opt/wk-tools"
-        driver.lldb_opts.return_value = ""
-        driver.exec_argv.return_value = (["true"], None)
-        return driver
-
-    def _run(self, driver, argv):
-        reg = mock.Mock()
-        reg.load.return_value = driver
-        with mock.patch.object(RUN.places, "Registry", return_value=reg), \
-                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "gtk-release"}):
-            RUN.main(argv)
-        return driver.exec_argv.call_args
-
     def test_a_dry_run_prints_the_command_and_runs_nothing(self):
-        driver = self._driver()
+        driver = a_driver()
         driver.exec_argv.return_value = (["ssh", "box", "bash -lc 'jsc x.js'"], None)
         reg = mock.Mock()
         reg.load.return_value = driver
@@ -100,7 +88,7 @@ class TestLldbGetsAPty(unittest.TestCase):
     def test_only_lldb_asks_for_a_tty(self):
         for argv, tty in ((["--lldb"], True), ([], False), (["--until-crash", "--lldb"], True), (["--until-crash"], False)):
             with self.subTest(argv=argv):
-                self.assertEqual(self._run(self._driver(), argv + ["--", "x.js"])[1]["tty"], tty)
+                self.assertEqual(run_on(a_driver(), argv + ["--", "x.js"])[1]["tty"], tty)
 
 
 class TestMaxValidation(unittest.TestCase):

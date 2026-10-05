@@ -56,11 +56,8 @@ class TailnetTest(unittest.TestCase):
     def run_main(self, fake, *args, key=None):
         out, err = io.StringIO(), io.StringIO()
         env = {"WK_TS_API_SECRET_FILE": str(self.key if key is None else key)}
-        stderr, sys.stderr = sys.stderr, err
-        try:
+        with contextlib.redirect_stderr(err):
             rc = tailnet.main(list(args), env=env, out=out, transport=fake)
-        finally:
-            sys.stderr = stderr
         return rc, out.getvalue(), err.getvalue()
 
     def fleet(self, fake, api=True, authkey=None, **more):
@@ -72,12 +69,9 @@ class TailnetTest(unittest.TestCase):
         return tailnet.Fleet(REPO, env, transport=fake)
 
     def quiet(self, fn, *args):
-        err = io.StringIO()
-        stderr, sys.stderr = sys.stderr, err
-        try:
-            return fn(*args), err.getvalue()
-        finally:
-            sys.stderr = stderr
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            result = fn(*args)
+        return result, err.getvalue()
 
 
 class TestRetire(TailnetTest):
@@ -97,20 +91,18 @@ class TestRetire(TailnetTest):
         self.assertEqual(self.retire(fake, "rpi3-bench").rc, 3)
         self.assertEqual(fake.deleted, [])
 
-    def test_a_prefix_is_not_a_match(self):
-        fake = FakeTailnet([node("111", "rpi3-bench", "rpi3-bench"), node("222", "rpi3-rescue", "rpi3-rescue")])
-        self.assertEqual(self.retire(fake, "rpi3").rc, 2)
-        self.assertEqual(fake.deleted, [])
+    def test_a_prefix_or_no_such_node_is_not_a_match_and_deletes_nothing(self):
+        for devices, name in (([node("111", "rpi3-bench", "rpi3-bench"), node("222", "rpi3-rescue", "rpi3-rescue")], "rpi3"),
+                              ([], "rpi9-bench")):
+            with self.subTest(name=name):
+                fake = FakeTailnet(devices)
+                self.assertEqual(self.retire(fake, name).rc, 2)
+                self.assertEqual(fake.deleted, [])
 
     def test_a_renamed_node_is_found_by_either_label(self):
         fake = FakeTailnet([node("333", "rpi3-bench", "buildroot")])
         self.assertEqual(self.retire(fake, "rpi3-bench").rc, 0)
         self.assertEqual(fake.deleted, ["333"])
-
-    def test_no_such_node_deletes_nothing(self):
-        fake = FakeTailnet()
-        self.assertEqual(self.retire(fake, "rpi9-bench").rc, 2)
-        self.assertEqual(fake.deleted, [])
 
     def test_without_the_api_credential_nothing_is_asked(self):
         fake = FakeTailnet([node("111", "rpi3-bench", "rpi3-bench")])
@@ -136,15 +128,14 @@ class TestCredential(TailnetTest):
         self.assertEqual(rc, 5, err)
         self.assertIn("wk key set tailnet-api --replace", err)
 
-    def test_an_auth_key_is_not_an_api_token(self):
+    def test_an_auth_key_or_no_key_is_no_api_token_and_nothing_is_asked(self):
         bad = self.tmp / "wrong"
         bad.write_text("tskey-auth-abc-def\n")
-        fake = FakeTailnet()
-        self.assertEqual(self.run_main(fake, "check", key=bad)[0], 4)
-        self.assertEqual(fake.asked, [])
-
-    def test_a_missing_credential_is_its_own_exit_code(self):
-        self.assertEqual(self.run_main(FakeTailnet(), "check", key=self.tmp / "nope")[0], 4)
+        for key in (bad, self.tmp / "nope"):
+            with self.subTest(key=key.name):
+                fake = FakeTailnet()
+                self.assertEqual(self.run_main(fake, "check", key=key)[0], 4)
+                self.assertEqual(fake.asked, [])
 
     def test_an_unreachable_api_is_its_own_exit_code(self):
         def down(*_a):

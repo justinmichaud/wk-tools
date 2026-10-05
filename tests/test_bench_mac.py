@@ -159,15 +159,15 @@ class MacTest(unittest.TestCase):
             os.environ.pop("WK_DRY_RUN", None)
         return rc, err.getvalue()
 
-    def refused(self, *argv, w=None, dry=False):
-        with self.assertRaises(Refused) as cm:
-            self.staged(*argv, w=w, dry=dry)
-        return cm.exception
+    def refused(self, w):
+        err = io.StringIO()
+        with self.assertRaises(Refused), contextlib.redirect_stderr(err):
+            mac.staged(REPO, w.reg, w.clock, staged_options(), plans)
+        return err.getvalue()
 
 
 class TestConformance(MacTest):
     def test_the_staged_run_is_the_one_pipeline_into_the_one_record(self):
-        """`bench.pipeline_conformance[mac-volume]`: boot, deploy, run, collect -- the result in the run directory on the volume."""
         rc, err = self.staged("--plan", "speedometer3")
         self.assertEqual(rc, 0, err)
         self.assertIn("BENCH OK  speedometer3", err)
@@ -192,7 +192,6 @@ class TestConformance(MacTest):
 
 class TestTheRecord(MacTest):
     def test_a_staged_run_records_its_provenance(self):
-        """`bench.one_record[mac-volume]`: kernel, arch, profile, root device, cores, the stage it ran and the machine."""
         self.staged()
         env = self.w.env_json()
         self.assertEqual((env["bench_host"], env["machine"], env["measures"], env["profile"], env["preset"], env["webkit_sha"]),
@@ -266,21 +265,15 @@ class TestTheRecord(MacTest):
 class TestTheLegsOwnGates(MacTest):
     def test_host_mode_refuses_and_its_dry_run_says_so(self):
         w = World(self.tmp, bench=False)
-        self.assertIn("this is host mode", str(self.said(w)))
+        self.assertIn("this is host mode", self.refused(w))
         rc, err = self.staged(w=World(self.tmp, bench=False), dry=True)
         self.assertEqual(rc, 1, err)
         self.assertIn("would fail -- a real run would stop here", err)
         self.assertIn("would run: bash -lc", err)
 
-    def said(self, w):
-        err = io.StringIO()
-        with self.assertRaises(Refused), contextlib.redirect_stderr(err):
-            mac.staged(REPO, w.reg, w.clock, staged_options(), plans)
-        return err.getvalue()
-
     def test_a_covered_screen_refuses_and_force_records_it(self):
         on_screen(self.w, "UserNotificationCenter:Notification;UserNotificationCenter:Banner")
-        self.assertIn("1 preflight check(s) failed", self.said(self.w))
+        self.assertIn("1 preflight check(s) failed", self.refused(self.w))
         self.assertEqual(self.w.results(), [])
         w = World(self.tmp)
         on_screen(w, "UserNotificationCenter:Notification")
@@ -303,12 +296,12 @@ class TestTheLegsOwnGates(MacTest):
     def test_an_unknown_machine_is_a_failed_gate(self):
         w = World(self.tmp)
         w._set_file(mac.MARKER, "id=someone-else\n")
-        self.assertIn("the marker names no machine", self.said(w))
+        self.assertIn("the marker names no machine", self.refused(w))
 
     def test_nothing_staged_names_the_stage_command(self):
         w = World(self.tmp)
         w._drop(os.path.join(w.home, "staged"))
-        self.assertIn("wk bench stage <workspace> --to mbp", self.said(w))
+        self.assertIn("wk bench stage <workspace> --to mbp", self.refused(w))
 
     def test_the_listing_names_each_stage_and_result(self):
         self.staged()
@@ -319,8 +312,6 @@ class TestTheLegsOwnGates(MacTest):
 
 
 class TestTheProfile(MacTest):
-    """--profile: samply waits for the web process and records it for the length of the run."""
-
     CACHE = "/cache"
 
     def samply(self, cache=CACHE):
@@ -370,8 +361,6 @@ class TestTheWatchdog(MacTest):
 
 
 class TestPreflightAsksEveryGate(MacTest):
-    """`bench.preflight_asks_every_gate`: each gate asked over the running install, in order, reading only."""
-
     def ask(self, w=None):
         w = w or self.w
         with contextlib.redirect_stderr(io.StringIO()):
@@ -571,7 +560,6 @@ class TestStage(MacTest):
                 self.assertEqual(dry.stages(), [])
 
     def test_a_stage_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[bench stage]`: a rerun is a new stage, and what a killed one left has no manifest."""
         def run_once(w):
             w.clock.t += 1
             with contextlib.redirect_stderr(io.StringIO()):

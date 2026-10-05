@@ -68,14 +68,13 @@ class TestPath(WkTest):
         self.home = str(self.tmp)
         os.makedirs(os.path.join(self.home, ".local", "bin"))
 
-    def test_bashrc_puts_bin_and_local_bin_on_path(self):
+    def test_bashrc_puts_bin_and_local_bin_on_path_never_the_root_and_keeps_the_rest_in_order(self):
         got = path_from(REPO / "shell" / "bashrc", self.home)
         for want in (str(REPO / "bin"), str(REPO / "container" / "bin"),
                      os.path.join(self.home, ".local", "bin")):
             self.assertIn(want, got)
-
-    def test_the_checkout_root_never_goes_on_path(self):
-        self.assertNotIn(str(REPO), path_from(REPO / "shell" / "bashrc", self.home))
+        self.assertNotIn(str(REPO), got)
+        self.assertLess(got.index("/usr/bin"), got.index("/bin"), got)
 
     def test_path_is_added_once(self):
         cp = subprocess.run(
@@ -97,10 +96,6 @@ class TestPath(WkTest):
         self.assertEqual(1, entries.count(binp), cp.stdout)
         self.assertLess(entries.index(binp), entries.index("/usr/bin"), cp.stdout)
         self.assertEqual(binp + "/ninja", ninja)
-
-    def test_the_rest_of_the_path_keeps_its_order(self):
-        got = path_from(REPO / "shell" / "bashrc", self.home)
-        self.assertLess(got.index("/usr/bin"), got.index("/bin"), got)
 
     def test_local_bin_absent_is_not_added(self):
         shutil.rmtree(os.path.join(self.home, ".local"))

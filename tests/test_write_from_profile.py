@@ -10,7 +10,7 @@ from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 from wk.sysimage import write  # noqa: E402
 
 STORE = "/store"

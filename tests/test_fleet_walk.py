@@ -32,7 +32,7 @@ class TestFleetWalkNamedFormRendersAFakedMachine(WkTest):
                 "WK_PLACE": "remote",
                 "WK_REMOTE_HOST": "fake-reachable-machine",
                 "WK_REMOTE_ROOT": str(root),
-                "PATH": f"{binp}:{self._real_path()}",
+                "PATH": f"{binp}:{os.environ['PATH']}",
                 "WK_PROBE_SECONDS": "1",
             }
             cp = run("status", name, "--text", env=env, timeout=30)
@@ -47,24 +47,17 @@ class TestFleetWalkNamedFormRendersAFakedMachine(WkTest):
             env = {
                 "WK_PLACE": "remote",
                 "WK_REMOTE_HOST": "fake-down-machine",
-                "PATH": f"{binp}:{self._real_path()}",
+                "PATH": f"{binp}:{os.environ['PATH']}",
                 "WK_SSH_TIMEOUT": "2",
                 "WK_PROBE_SECONDS": "1",
             }
             cp = run("status", name, "--text", env=env, timeout=30)
             self.assertEqual(cp.returncode, 4, cp.stdout)
             self.assertIn("unreachable", cp.stdout, cp.stdout)
-            self.assertIn(
-                "remote", cp.stdout,
-                f"the unreachable machine should be named, not just reported blind: {cp.stdout}",
-            )
-
-    @staticmethod
-    def _real_path():
-        return os.environ.get("PATH", "/usr/bin:/bin")
+            self.assertIn("remote", cp.stdout, "the unreachable place is named")
 
 
-_FAKE_NODE_CONF = '''ssh={ssh}
+FAKE_BOARD_CONF = '''ssh={ssh}
 kind=board
 driver=rpi5-usb
 device=/dev/sda
@@ -90,13 +83,13 @@ class TestFleetWalkBareFormMultiMachine(WkTest):
             names = [f"f{i}{suffix}" for i in range(2)]
             for i, n in enumerate(names):
                 (machdir / f"{n}.conf").write_text(
-                    _FAKE_NODE_CONF.format(ssh=n, mac=f"02:00:00:00:00:0{i}", note=f"fake bench board {n}")
+                    FAKE_BOARD_CONF.format(ssh=n, mac=f"02:00:00:00:00:0{i}", note=f"fake bench board {n}")
                 )
             env = {
                 "WK_MACHINES_DIR": str(machdir),
                 "WK_PLACE": "remote",
                 "WK_REMOTE_HOST": "fake-reachable-machine",
-                "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+                "PATH": f"{binp}:{os.environ['PATH']}",
                 "WK_PROBE_SECONDS": "1",
             }
             cp = run("status", "--text", env=env, timeout=45)

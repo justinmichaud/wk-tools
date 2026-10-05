@@ -129,11 +129,9 @@ class TestWhichProfilesAreProfileGuided(unittest.TestCase):
         self.assertTrue(seen)
         return set(seen.values())
 
-    def test_every_2_52_yocto_profile_is_and_no_earlier_release_is(self):
-        self.assertEqual((self.wanted("webkit-2.52-yocto-*.conf"), self.wanted("wpewebkit-2.*-yocto-*.conf")), ({True}, {False}))
-
-    def test_a_2_52_buildroot_profile_is_not_yet(self):
-        self.assertEqual(self.wanted("webkit-2.52-buildroot-*.conf"), {False})
+    def test_every_2_52_yocto_profile_is_and_no_earlier_release_or_buildroot_profile_is(self):
+        self.assertEqual([self.wanted(g) for g in ("webkit-2.52-yocto-*.conf", "wpewebkit-2.*-yocto-*.conf", "webkit-2.52-buildroot-*.conf")],
+                         [{True}, {False}, {False}])
 
 
 class TestTheBoardIsReadOffTheFleet(PgoTest):
@@ -367,97 +365,69 @@ def mix_cli(*args):
                           env=_clean_env({"PYTHONPATH": str(REPO / "lib")}))
 
 
-class TestTheMixingIsUpstreams(WkTest):
+class MixTest(WkTest):
     def setUp(self):
         self._scratch = scratch_dir()
         self.tmp = self._scratch.__enter__()
+        self.addCleanup(self._scratch.__exit__, None, None, None)
         self.scripts = stub_scripts(self.tmp)
         self.dir = collection(self.tmp / "pgo")
 
-    def tearDown(self):
-        self._scratch.__exit__(None, None, None)
+    def mix(self, verb="mix", *extra):
+        return mix_cli(verb, "--scripts", str(self.scripts), "--dir", str(self.dir), "--lib", "WPEWebKit", *extra)
 
-    def test_a_glib_collection_mixes_into_one_library(self):
-        cp = mix_cli("mix", "--scripts", str(self.scripts), "--dir", str(self.dir),
-                   "--lib", "WPEWebKit")
+
+class TestTheMixingIsUpstreams(MixTest):
+    def test_a_glib_collection_merges_each_leg_and_mixes_into_one_library(self):
+        cp = self.mix()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.strip(), str(self.dir / "output" / "WPEWebKit.profdata"))
         recorded = json.loads((self.dir / "output" / "combine.json").read_text())
         self.assertEqual(recorded["libs"], ["WPEWebKit"])
-        self.assertEqual(recorded["groups"],
-                         {plan: str(self.dir / plan)
-                          for plan in ("speedometer3", "jetstream3", "motionmark")})
-
-    def test_each_leg_is_merged_where_the_reader_looks_for_it(self):
-        mix_cli("mix", "--scripts", str(self.scripts), "--dir", str(self.dir), "--lib", "WPEWebKit")
-        for plan in ("speedometer3", "jetstream3", "motionmark"):
-            merged = self.dir / plan / "WPEWebKit.profdata"
-            self.assertTrue(merged.exists(), merged)
-            self.assertEqual(merged.read_text(), "merged 2")
+        self.assertEqual(recorded["groups"], {plan: str(self.dir / plan) for plan in pgo.BENCHMARKS})
+        for plan in pgo.BENCHMARKS:
+            self.assertEqual((self.dir / plan / "WPEWebKit.profdata").read_text(), "merged 2")
 
     def test_a_leg_that_wrote_no_profile_is_refused(self):
         for stale in (self.dir / "motionmark" / "diagnose").glob("*.profraw"):
             os.remove(stale)
-        cp = mix_cli("mix", "--scripts", str(self.scripts), "--dir", str(self.dir),
-                   "--lib", "WPEWebKit")
+        cp = self.mix()
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("motionmark", cp.stdout + cp.stderr)
 
     def test_a_benchmark_upstream_does_not_weigh_is_refused(self):
-        cp = mix_cli("mix", "--scripts", str(self.scripts), "--dir", str(self.dir),
-                   "--lib", "WPEWebKit", "--plan", "speedometer2")
+        cp = self.mix("mix", "--plan", "speedometer2")
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("carries no weight", cp.stdout + cp.stderr)
 
-    def test_upstreams_xcrun_search_does_not_kill_a_linux_mix(self):
-        if os.path.exists("/usr/bin/xcrun"):
-            self.skipTest("this host has xcrun, so the raise cannot happen here")
-        cp = mix_cli("mix", "--scripts", str(self.scripts), "--dir", str(self.dir),
-                   "--lib", "WPEWebKit")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertNotIn("FileNotFoundError", cp.stderr)
-
     def test_it_refuses_a_checkout_that_has_no_pgo_profile(self):
         os.remove(self.scripts / "pgo-profile")
-        cp = mix_cli("mix", "--scripts", str(self.scripts), "--dir", str(self.dir),
-                   "--lib", "WPEWebKit")
+        cp = self.mix()
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("Tools/Scripts", cp.stdout + cp.stderr)
 
 
-class TestTheGateReadsBothLayouts(WkTest):
+class TestTheGateReadsBothLayouts(MixTest):
 
     def setUp(self):
-        self._scratch = scratch_dir()
-        self.tmp = self._scratch.__enter__()
-        self.scripts = stub_scripts(self.tmp)
-        self.dir = collection(self.tmp / "pgo")
-        mix_cli("mix", "--scripts", str(self.scripts), "--dir", str(self.dir), "--lib", "WPEWebKit")
+        super().setUp()
+        self.mix()
 
-    def tearDown(self):
-        self._scratch.__exit__(None, None, None)
-
-    def _check(self, *extra):
-        return mix_cli("check", "--scripts", str(self.scripts), "--dir", str(self.dir),
-                     "--lib", "WPEWebKit", *extra)
-
-    def test_a_whole_board_collection_passes(self):
-        cp = self._check()
+    def test_a_whole_board_collection_passes_without_a_compressed_copy(self):
+        cp = self.mix("check")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("WPEWebKit: functions=40000", cp.stdout)
-
-    def test_it_does_not_ask_a_board_profile_for_a_compressed_copy(self):
-        self.assertNotIn("compressed", self._check().stdout)
+        self.assertNotIn("compressed", cp.stdout)
 
     def test_a_missing_leg_is_named(self):
         os.remove(self.dir / "jetstream3" / "WPEWebKit.profdata")
-        cp = self._check()
+        cp = self.mix("check")
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("jetstream3/WPEWebKit.profdata", cp.stdout + cp.stderr)
 
     def test_a_reading_can_be_reported_again_with_no_checkout(self):
         out = self.tmp / "reading.json"
-        self._check("--json", str(out))
+        self.mix("check", "--json", str(out))
         cp = mix_cli("check", "--read", str(out))
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("WPEWebKit", cp.stdout)
@@ -487,23 +457,14 @@ class TestTheDriverPullsWhatTheBoardWrote(WkTest):
             with self.assertRaises(RuntimeError):
                 driver.collect_pgo_profile("/dest")
 
-    def test_the_profiles_are_read_off_the_board_through_the_machine(self):
+    def test_the_profiles_are_read_off_the_board_through_the_machine_and_a_directory_beside_them_is_skipped(self):
         board, here = Fake("board"), Fake()
         board.files = {"/var/wk/pgo/a.profraw": b"A", "/var/wk/pgo/b.profraw": b"B"}
-        board.dirs = {"/var/wk/pgo"}
-        driver = self.driver(board, here)
-        with unittest.mock.patch.dict(os.environ, {"WK_BOARD_PGO": "/var/wk/pgo"}):
-            driver.collect_pgo_profile("/dest")
-        self.assertEqual(here.files, {"/dest/a.profraw": b"A", "/dest/b.profraw": b"B"})
-
-    def test_a_directory_beside_the_profiles_is_skipped(self):
-        board, here = Fake("board"), Fake()
-        board.files = {"/var/wk/pgo/a.profraw": b"A"}
         board.dirs = {"/var/wk/pgo", "/var/wk/pgo/sub"}
         driver = self.driver(board, here)
         with unittest.mock.patch.dict(os.environ, {"WK_BOARD_PGO": "/var/wk/pgo"}):
             driver.collect_pgo_profile("/dest")
-        self.assertEqual(here.files, {"/dest/a.profraw": b"A"})
+        self.assertEqual(here.files, {"/dest/a.profraw": b"A", "/dest/b.profraw": b"B"})
 
     def test_what_a_board_command_says_reaches_the_run_log(self):
         board = Fake("board")

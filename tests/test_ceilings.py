@@ -1,4 +1,4 @@
-"""Every wait in a probe has a ceiling, and the ceiling reaches the whole"""
+"""Every wait in a probe has a ceiling, and the ceiling reaches the whole process tree."""
 import subprocess
 import sys
 import time
@@ -20,7 +20,6 @@ class TestCeilings(WkTest):
         if left:
             subprocess.run(["pkill", "-f", r"^sleep 131\.5$"])
         self.assertEqual(left, [], "the ceiling killed the child and left a grandchild running")
-
 
     def test_no_fleet_probe_can_outlive_its_ceiling(self):
         boot = self.tmp / "lib" / "wk" / "boot"

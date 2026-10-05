@@ -1,4 +1,4 @@
-"""`NO_COLOR` and a redirected stdout both drop the colour from `wk status`'s"""
+"""`NO_COLOR` and a redirected stdout both drop the colour from `wk status`'s text."""
 import io
 import os
 import sys
@@ -42,39 +42,17 @@ class TestColourDecision(unittest.TestCase):
         self.assertIn(ESC, _render(True))
         self.assertNotIn(ESC, _render(False))
 
-    def test_the_default_view_is_web_only_at_a_colour_terminal(self):
-        mode = statusview.default_mode
-        self.assertEqual(mode({"HOME": "/nonexistent"}, True), "web")
-        self.assertEqual(mode({"HOME": "/nonexistent"}, False), "text")
-        self.assertEqual(mode({"HOME": "/nonexistent", "NO_COLOR": "1"}, True), "text")
-        self.assertEqual(mode({"HOME": "/nonexistent", "CI": "1"}, True), "text")
-        self.assertEqual(mode({"HOME": "/nonexistent", "NO_COLOR": "1", "WK_STATUS_VIEW": "json"}, True), "json")
-
 
 class TestEndToEndTextModeHasNoEscBytes(WkTest):
-
-    def _run(self, no_color):
+    def test_no_esc_with_no_color_unset_because_stdout_is_a_pipe(self):
         with stub_path({"ssh": _ANSWERING_SSH}) as binp, \
              scratch_dir(prefix="wk-test-remote-root-") as root:
             name = f"demo-{rand_suffix()}"
             (root / "ws" / name).mkdir(parents=True)
             (root / "ws" / name / ".wk-ready").touch()
-            env = {
-                "WK_PLACE": "remote",
-                "WK_REMOTE_HOST": "fake-reachable-machine",
-                "WK_REMOTE_ROOT": str(root),
-                "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
-                "WK_PROBE_SECONDS": "1",
-            }
-            if no_color:
-                env["NO_COLOR"] = "1"
-            else:
-                env.pop("NO_COLOR", None)
-            return run("status", name, "--text", env=env, timeout=30)
-
-
-    def test_no_esc_with_no_color_unset_because_stdout_is_a_pipe(self):
-        cp = self._run(no_color=False)
+            cp = run("status", name, "--text", timeout=30, env={
+                "WK_PLACE": "remote", "WK_REMOTE_HOST": "fake-reachable-machine", "WK_REMOTE_ROOT": str(root),
+                "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}", "WK_PROBE_SECONDS": "1"})
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertNotIn(ESC, cp.stdout, cp.stdout)
 

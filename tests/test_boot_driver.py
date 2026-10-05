@@ -1,8 +1,7 @@
 """The boot-driver core (lib/wk/boot): every Pi driver against a FakeBoard holding its media, a firmware one-shot
-and a clock -- machine.conformance[<kind>] over one test body, boot.arming_exact and the on-board files.
-
-Run: python3 tests/run.py --unit -k test_boot_driver
-"""
+and a clock -- machine.conformance[<kind>] over one test body, boot.arming_exact and the on-board files."""
+import contextlib
+import io
 import re
 import shlex
 import subprocess
@@ -50,8 +49,6 @@ def board(kind, ids=("sys-a",)):
 
 
 def quiet(fn, *args):
-    import contextlib
-    import io
     with contextlib.redirect_stderr(io.StringIO()) as err:
         try:
             return fn(*args), err.getvalue()
@@ -81,8 +78,8 @@ class Conformance:
         self.assertIs(driver_class(self.kind), cls)
 
     def test_the_production_transport_is_machines_and_no_bash(self):
-        """machine.conformance[<kind>] over wk.machine.Fake: the driver as `wk boot` builds it reaches its machine
-        through Machine.run alone -- ssh, or the vm place for a guest -- and never through a shell library."""
+        """The driver as `wk boot` builds it reaches its machine through Machine.run alone -- ssh, or the vm place
+        for a guest -- and never through a shell library."""
         via = Fake()
         conf = conf_for(self.kind) if self.kind not in FAKES else mac_conf(self.kind)
         d = open_driver(REPO, conf, env={"HOME": "/nonexistent", "WK_MACHINES_DIR": str(REPO / "machines")}, via=via)
@@ -198,7 +195,6 @@ class TestConformanceRpi5Usb(Conformance, unittest.TestCase):
 
 class TestDiskOfPart(unittest.TestCase):
     def test_partition_to_disk_for_every_transport(self):
-        """disk_of inverts part for sd, mmc and nvme names"""
         for p, disk in (("/dev/sda2", "/dev/sda"), ("/dev/mmcblk0p2", "/dev/mmcblk0"),
                         ("/dev/nvme0n1p2", "/dev/nvme0n1"), ("/dev/sdb1", "/dev/sdb")):
             with self.subTest(part=p):
@@ -217,7 +213,7 @@ class TestConformanceMacGuest(MacConformance, Conformance, unittest.TestCase):
 class TestArmingExact(unittest.TestCase):
     """boot.arming_exact: two systems with one image id told apart by slot, the leg verified after the last arm."""
 
-    KINDS = ("pi-sd", "pi-tryboot", "rpi5-usb")
+    KINDS = tuple(SLOTS_OF)
 
     def test_one_id_in_two_slots_is_named_by_slot(self):
         for kind in self.KINDS:

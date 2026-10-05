@@ -1,9 +1,6 @@
 """The agents' credentials (AGENT_SECRETS): shell/bashrc exports the token, a container links the read-only
 /secrets mount, a macOS guest is written a copy on every start, a build box at `wk machine setup`; the Claude CLI's
-login is one shared file and is never copied. Values here are placeholders.
-
-Run: python3 -m unittest tests.test_agent_token -v
-"""
+login is one shared file and is never copied. Values here are placeholders."""
 import contextlib
 import io
 import os
@@ -52,6 +49,7 @@ class TestTheShellExportsIt(WkTest):
     def _home(self, contents=None):
         h = self.tmp / "home"
         h.mkdir(exist_ok=True)
+        (h / ".wk-agent-token").unlink(missing_ok=True)
         if contents is not None:
             (h / ".wk-agent-token").write_text(contents)
         return h
@@ -70,21 +68,13 @@ class TestTheShellExportsIt(WkTest):
                 return v
         return None
 
-    def test_every_shell_exports_it(self):
-        home = self._home(PLACEHOLDER + "\n")
-        for what, (shell, args) in self.SHELLS.items():
-            if not shutil.which(shell):
-                continue
-            with self.subTest(shell=what):
-                self.assertEqual(self._value(shell, args, home), PLACEHOLDER)
-
-    def test_no_file_means_no_variable(self):
-        home = self._home()
-        for what, (shell, args) in self.SHELLS.items():
-            if not shutil.which(shell):
-                continue
-            with self.subTest(shell=what):
-                self.assertEqual(self._value(shell, args, home), "")
+    def test_every_shell_exports_it_and_no_file_means_no_variable(self):
+        for contents, want in ((PLACEHOLDER + "\n", PLACEHOLDER), (None, "")):
+            home = self._home(contents)
+            for what, (shell, args) in self.SHELLS.items():
+                if shutil.which(shell):
+                    with self.subTest(shell=what, contents=contents):
+                        self.assertEqual(self._value(shell, args, home), want)
 
     def test_a_dangling_symlink_means_no_token(self):
         home = self._home()
@@ -254,9 +244,12 @@ class _Delivery(WkTest):
     def _ssh_lines(self):
         return [l for l in self.log.read_text().splitlines() if l.strip()]
 
-
-class TestAGuestGetsThemOnStart(_Delivery):
-    """write_agent_secrets: a guest holds a copy of every value row, withdrawn when the store has none."""
+    def _store_with_login(self):
+        d = self._store()
+        for row in FILE_ROWS:
+            store_path(d, row).write_text(FAKE_LOGIN)
+            store_path(d, row).chmod(0o600)
+        return d
 
     def _write(self, store, home):
         with stub_path({"ssh": FAKE_SSH, "tart": FAKE_TART}) as binp:
@@ -264,6 +257,27 @@ class TestAGuestGetsThemOnStart(_Delivery):
                             {"PATH": f"{binp}:{os.environ['PATH']}",
                              "WK_VM_STORE": str(self.tmp / "vmstore")})
             return guest_step(env, "write_agent_secrets")
+
+    def _rc(self, home, *share):
+        return subprocess.run(["bash", str(REPO / "vm" / "shell-rc.sh"), str(REPO), *share],
+                              env={"HOME": str(home), "PATH": os.environ["PATH"]},
+                              capture_output=True, text=True, timeout=120)
+
+    def _guest(self, login=None, mounted=True):
+        """A guest whose rc names its share; `mounted` makes the share, `login` writes the login into it."""
+        home = self._home()
+        store = home / "agent-rw"
+        cp = self._rc(home, str(store))
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        if mounted:
+            store.mkdir(exist_ok=True)
+        if login is not None:
+            (store / FILE_ROWS[0][1]).write_text(login)
+        return home
+
+
+class TestAGuestGetsThemOnStart(_Delivery):
+    """write_agent_secrets: a guest holds a copy of every value row, withdrawn when the store has none."""
 
     def test_every_value_row_in_the_store_lands_in_the_guest_at_mode_600(self):
         home = self._home()
@@ -273,6 +287,7 @@ class TestAGuestGetsThemOnStart(_Delivery):
             with self.subTest(name=name):
                 self.assertEqual((home / shome).read_text(), f"{PLACEHOLDER}-{name}\n")
                 self.assertEqual(0o600, (home / shome).stat().st_mode & 0o777)
+        self.assertNotIn(PLACEHOLDER, self.log.read_text(), "a value is never an argument")
 
     def test_a_store_with_none_withdraws_what_the_guest_holds(self):
         home = self._home()
@@ -291,11 +306,6 @@ class TestAGuestGetsThemOnStart(_Delivery):
         self.assertEqual((home / last[2]).read_text(),
                          f"{PLACEHOLDER}-{last[0]}\n")
         self.assertEqual(len(TABLE), len(self._ssh_lines()), self.log.read_text())
-
-    def test_the_value_is_never_an_argument(self):
-        self._write(self._store(values=[n for n, *_ in TABLE]), self._home())
-        text = self.log.read_text()
-        self.assertNotIn(PLACEHOLDER, text, text)
 
 
 class TestABuildBoxGetsThemAtSetup(_Delivery):
@@ -320,6 +330,7 @@ class TestABuildBoxGetsThemAtSetup(_Delivery):
             with self.subTest(name=name):
                 self.assertEqual((home / shome).read_text(), f"{PLACEHOLDER}-{name}\n")
                 self.assertEqual(0o600, (home / shome).stat().st_mode & 0o777)
+        self.assertNotIn(PLACEHOLDER, self.log.read_text(), "a value is never an argument")
 
     def test_a_store_with_none_takes_the_copy_off_the_machine(self):
         home = self._home()
@@ -348,11 +359,6 @@ class TestABuildBoxGetsThemAtSetup(_Delivery):
                 self.assertFalse((home / row[2]).exists(), row[2])
                 self.assertNotIn(row[1], log, log)
 
-    def test_the_value_is_never_an_argument(self):
-        self._setup(self._store(values=[n for n, *_ in TABLE]), self._home())
-        text = self.log.read_text()
-        self.assertNotIn(PLACEHOLDER, text, text)
-
 
 # Two lines, so a reader that took only the first would be caught.
 FAKE_LOGIN = ('{"claudeAiOauth":{"accessToken":"' + PLACEHOLDER + '",\n'
@@ -365,9 +371,7 @@ class TestAGuestMountsTheShare(_Delivery):
     def test_the_rc_refuses_to_guess_the_share(self):
         home = self.tmp / "rc-home"
         home.mkdir()
-        cp = subprocess.run(["bash", str(REPO / "vm" / "shell-rc.sh"), str(REPO)],
-                            env={"HOME": str(home), "PATH": os.environ["PATH"]},
-                            capture_output=True, text=True, timeout=60)
+        cp = self._rc(home)
         self.assertNotEqual(0, cp.returncode)
         self.assertIn("lib/wk/guest.py", cp.stderr)
         self.assertFalse((home / ".zshrc").exists(), "it wrote an rc with no directory to name")
@@ -379,59 +383,25 @@ class TestAGuestMountsTheShare(_Delivery):
                 home = self.tmp / ("old-home" + str(len(old)))
                 home.mkdir()
                 (home / ".zshrc").write_text("\n# wk-tools: the Claude credential, not a Keychain\n" + old)
-                cp = subprocess.run(["bash", str(REPO / "vm" / "shell-rc.sh"), str(REPO), "/mnt/share"],
-                                    env={"HOME": str(home), "PATH": os.environ["PATH"]},
-                                    capture_output=True, text=True, timeout=60)
+                cp = self._rc(home, "/mnt/share")
                 self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
                 exports = [l for l in (home / ".zshrc").read_text().splitlines()
                            if "CLAUDE_SECURESTORAGE_CONFIG_DIR" in l]
                 self.assertEqual(['export CLAUDE_SECURESTORAGE_CONFIG_DIR="/mnt/share"'], exports)
 
-    def _write(self, store, home):
-        with stub_path({"ssh": FAKE_SSH, "tart": FAKE_TART}) as binp:
-            env = self._env(store, home,
-                            {"PATH": f"{binp}:{os.environ['PATH']}",
-                             "WK_VM_STORE": str(self.tmp / "vmstore")})
-            return guest_step(env, "write_agent_secrets")
-
-    def _wired_home(self, mounted):
-        home = self._home()
-        store = home / "agent-rw"
-        cp = subprocess.run(["bash", str(REPO / "vm" / "shell-rc.sh"), str(REPO), str(store)],
-                            env={"HOME": str(home), "PATH": os.environ["PATH"]},
-                            capture_output=True, text=True, timeout=60)
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        if mounted:
-            store.mkdir()
-        return home
-
     def test_a_start_without_the_share_says_so_and_names_the_reboot(self):
-        cp = self._write(self._store(), self._wired_home(mounted=False))
+        cp = self._write(self._store(), self._guest(mounted=False))
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("wk start demo", cp.stderr)
 
     def test_a_start_with_the_share_is_quiet(self):
-        cp = self._write(self._store(), self._wired_home(mounted=True))
+        cp = self._write(self._store(), self._guest())
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertNotIn("not mounted", cp.stderr)
 
 
 class TestAGuestIsNeverGivenACopyOfTheFileRow(_Delivery):
     """A credential its tool rewrites in place is never copied into a guest; an older copy is withdrawn."""
-
-    def _store_with_login(self):
-        d = self._store()
-        for row in FILE_ROWS:
-            store_path(d, row).write_text(FAKE_LOGIN)
-            store_path(d, row).chmod(0o600)
-        return d
-
-    def _write(self, store, home):
-        with stub_path({"ssh": FAKE_SSH, "tart": FAKE_TART}) as binp:
-            env = self._env(store, home,
-                            {"PATH": f"{binp}:{os.environ['PATH']}",
-                             "WK_VM_STORE": str(self.tmp / "vmstore")})
-            return guest_step(env, "write_agent_secrets")
 
     def test_a_store_that_holds_one_sends_none_of_its_bytes(self):
         home = self._home()
@@ -461,20 +431,6 @@ class TestAGuestIsNeverGivenACopyOfTheFileRow(_Delivery):
 class TestWhoIsAskedWhetherAWorkspaceCanAuthenticate(_Delivery):
     """Driver.agent_secret_present asks the machine that will run the agent, through its own login shell."""
 
-    def _guest(self, login=None, mounted=True):
-        home = self.tmp / "guest-home"
-        home.mkdir(exist_ok=True)
-        store = home / "agent-rw"   # where the share would be mounted
-        cp = subprocess.run(["bash", str(REPO / "vm" / "shell-rc.sh"), str(REPO), str(store)],
-                            env={"HOME": str(home), "PATH": os.environ["PATH"]},
-                            capture_output=True, text=True, timeout=120)
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        if mounted:
-            store.mkdir(exist_ok=True)
-        if login is not None:
-            (store / FILE_ROWS[0][1]).write_text(login)
-        return home
-
     def _ask(self, store, home, fn, secret):
         with stub_path({"ssh": FAKE_SSH, "tart": FAKE_TART}) as binp:
             env = dict(os.environ, **self._env(store, home, {"PATH": f"{binp}:{os.environ['PATH']}",
@@ -489,11 +445,7 @@ class TestWhoIsAskedWhetherAWorkspaceCanAuthenticate(_Delivery):
         self.assertIn("YES", cp.stdout, cp.stdout + cp.stderr)
 
     def test_a_guest_that_has_not_answers_no_however_full_this_store_is(self):
-        store = self._store()
-        for row in FILE_ROWS:
-            store_path(store, row).write_text(FAKE_LOGIN)
-            store_path(store, row).chmod(0o600)
-        cp = self._ask(store, self._guest(), "present",
+        cp = self._ask(self._store_with_login(), self._guest(), "present",
                        FILE_ROWS[0][0])
         self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
 
@@ -555,11 +507,7 @@ class TestTheDefaultAsksThePlace(_Delivery):
         self.assertIn("YES", cp.stdout, cp.stdout + cp.stderr)
 
     def test_a_full_store_the_workspace_never_got_is_a_no(self):
-        store = self._store()
-        for row in FILE_ROWS:
-            store_path(store, row).write_text(FAKE_LOGIN)
-            store_path(store, row).chmod(0o600)
-        cp = self._ask(store, self._driver(), "present",
+        cp = self._ask(self._store_with_login(), self._driver(), "present",
                        FILE_ROWS[0][0])
         self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
 

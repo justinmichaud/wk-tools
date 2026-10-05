@@ -236,59 +236,40 @@ class TestDeploy(unittest.TestCase):
             w.deploy(name="never-built")
         self.assertEqual(w.fake.effects, [])
 
-    def test_an_unknown_board_refuses(self):
-        w = DeployWorld(self.tmp)
-        with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()):
-            w.bench().deploy(WS, "not-a-real-board", "a", machine=w.fake)
+    def refused(self, w, name=BOARD):
+        err = io.StringIO()
+        with self.assertRaises(Refused), contextlib.redirect_stderr(err), local_holders():
+            w.bench().deploy(WS, name, "a", machine=w.fake, driver=Driver(REPO, board_conf(), w.board) if name == BOARD else None)
+        return err.getvalue()
+
+    def test_an_unknown_board_and_one_that_declares_no_driver_are_refused(self):
+        for name in ("not-a-real-board", "bare"):
+            with self.subTest(name=name):
+                w = DeployWorld(self.tmp)
+                (Path(w.env["WK_MACHINES_DIR"]) / "bare.conf").write_text("kind=board\nssh=bare\n")
+                self.refused(w, name)
 
     def test_a_board_armed_for_a_boot_it_has_not_taken_is_not_deployed_to(self):
         w = DeployWorld(self.tmp)
         w.board.running = w.board.conf["root"]
         w.board.rescue("")
         w.board.record = "image=sys-b\narmed_boot_id=boot-%d\n" % w.board.boots
-        err = io.StringIO()
-        with self.assertRaises(Refused), contextlib.redirect_stderr(err), local_holders():
-            w.bench().deploy(WS, BOARD, "a", machine=w.fake, driver=Driver(REPO, board_conf(), w.board))
-        self.assertIn("armed for system 'sys-b'", err.getvalue())
+        self.assertIn("armed for system 'sys-b'", self.refused(w))
         self.assertEqual([e for e in w.fake.effects if e[0] != "run"], [])
-
-    def test_a_board_that_declares_no_driver_is_refused(self):
-        w = DeployWorld(self.tmp)
-        (Path(w.env["WK_MACHINES_DIR"]) / "bare.conf").write_text("kind=board\nssh=bare\n")
-        with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()), local_holders():
-            w.bench().deploy(WS, "bare", "a", machine=w.fake)
-
-
-class TestADeployClaimsTheBoard(unittest.TestCase):
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-board-"))
-        self.addCleanup(shutil.rmtree, str(self.tmp), ignore_errors=True)
-
-    def records(self, w):
-        return record.Records(env=w.env)
 
     def test_the_claim_is_held_while_it_lands_and_ended_after(self):
         w = DeployWorld(self.tmp)
         w.deploy()
-        (t,) = self.records(w).list()
+        (t,) = record.Records(env=w.env).list()
         self.assertEqual((t.raw("holds"), t.field("exit")), ("device:" + BOARD, "0"))
 
     def test_a_board_another_task_holds_is_not_deployed_to(self):
         w = DeployWorld(self.tmp)
-        self.records(w).begin("bench", "here", "other", "kill 1", "", ["x"], holds="device:" + BOARD, pid=os.getpid())
-        err = io.StringIO()
-        with self.assertRaises(Refused), contextlib.redirect_stderr(err), local_holders():
-            w.bench().deploy(WS, BOARD, "a", machine=w.fake, driver=Driver(REPO, board_conf(), w.board))
-        self.assertIn("another live task holds it", err.getvalue())
+        record.Records(env=w.env).begin("bench", "here", "other", "kill 1", "", ["x"], holds="device:" + BOARD, pid=os.getpid())
+        self.assertIn("another live task holds it", self.refused(w))
         self.assertEqual(w.fake.effects, [])
 
-
-class TestDeployDryRun(unittest.TestCase):
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-board-"))
-        self.addCleanup(shutil.rmtree, str(self.tmp), ignore_errors=True)
-
-    def test_the_plan_is_the_runs_mutations(self):
+    def test_the_deploy_plan_is_its_mutations(self):
         wet, dry = DeployWorld(self.tmp), DeployWorld(self.tmp)
         wet.deploy()
         os.environ["WK_DRY_RUN"] = "1"
@@ -304,12 +285,8 @@ class TestDeployDryRun(unittest.TestCase):
         self.assertEqual(dry.fake.files, {})
         self.assertNotIn(board.slot_path("a"), dry.fake.dirs)
 
-
-class TestDeployKillPoints(unittest.TestCase):
     def test_a_deploy_killed_after_any_effect_and_rerun_converges(self):
-        tmp = Path(tempfile.mkdtemp(prefix="wk-test-board-"))
-        self.addCleanup(shutil.rmtree, str(tmp), ignore_errors=True)
-        converges(self, lambda: DeployWorld(tmp), lambda w: w.deploy(), DeployWorld.state)
+        converges(self, lambda: DeployWorld(self.tmp), lambda w: w.deploy(), DeployWorld.state)
 
 
 class TestInAWorkspaceItIsABrokerRequest(unittest.TestCase):

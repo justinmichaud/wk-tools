@@ -74,13 +74,9 @@ class TestEveryWorkspaceATestMakesIsRemoved(unittest.TestCase):
                          + "\n".join(missing))
 
     def test_this_rule_is_about_classes_that_exist(self):
-        """A reader of the rule above can check it found them: the creators
-        are the real integration tests, and there are some."""
         self.assertTrue(list(creators()))
 
     def test_a_class_that_only_stops_a_creation_creates_nothing(self):
-        """`wk new <name> --kill` and `wk new -h` are not creation, so a class
-        that only calls those owes no removal."""
         tree = ast.parse(
             'class T(unittest.TestCase):\n'
             '    def test_a(self):\n'

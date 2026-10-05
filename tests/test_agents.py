@@ -51,9 +51,12 @@ class TestTheScript(unittest.TestCase):
         path.write_text("#!/bin/sh\n" + body)
         path.chmod(0o755)
 
+    def script(self, *args, **env):
+        return subprocess.run([shutil.which("bash"), str(REPO / agents.SCRIPT), *args], env=dict(self.env, **env),
+                              capture_output=True, text=True, timeout=60)
+
     def run_script(self, *args, **env):
-        cp = subprocess.run([shutil.which("bash"), str(REPO / agents.SCRIPT), *args], env=dict(self.env, **env),
-                            capture_output=True, text=True, timeout=60)
+        cp = self.script(*args, **env)
         said = dict(l.split("=", 1) for l in cp.stdout.splitlines() if "=" in l)
         return cp.returncode, said
 
@@ -99,12 +102,9 @@ class TestTheScript(unittest.TestCase):
         self.assertEqual("yes", self.run_script()[1]["models"])
 
     def test_find_names_the_one_that_runs_and_fails_without_one(self):
-        cp = subprocess.run([shutil.which("bash"), str(REPO / agents.SCRIPT), "find", "claude"], env=self.env,
-                            capture_output=True, text=True, timeout=60)
-        self.assertEqual(1, cp.returncode)
+        self.assertEqual(1, self.script("find", "claude").returncode)
         self.run_script()
-        cp = subprocess.run([shutil.which("bash"), str(REPO / agents.SCRIPT), "find", "claude"], env=self.env,
-                            capture_output=True, text=True, timeout=60)
+        cp = self.script("find", "claude")
         self.assertEqual((0, "%s/.local/bin/claude\n" % self.home), (cp.returncode, cp.stdout))
         self.assertEqual([], [l for l in self.log() if "find" in l])
 
@@ -217,7 +217,6 @@ class TestADryRun(unittest.TestCase):
         with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), contextlib.redirect_stderr(err):
             t.install_agents("demo")
         self.assertEqual([], t.machine.effects)
-        self.assertIn("would run in demo: bash -lc", err.getvalue())
         self.assertIn("would run in demo: bash -lc 'python3 /opt/wk-tools/claude/workspace-config.py /src/WebKit'", err.getvalue())
 
 

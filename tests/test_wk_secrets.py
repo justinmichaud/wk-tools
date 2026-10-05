@@ -210,7 +210,7 @@ class TestTheLoginIsTheClaudeClis(SecretsTest):
 class TestAStoredCredentialIsReadTheOneWay(SecretsTest):
     def _refuse(self, name, verb, out=""):
         path = self.w.sec().cred_path(name)
-        self.w.react(["python3", os.path.join(ROOT, "lib", "secretfile.py"), verb, path],
+        self.w.react(["python3", SECRETFILE, verb, path],
                      lambda a, f: Result(2, out, "wk: refusing to read %s: it is not a regular file.\n" % path))
         return path
 
@@ -400,7 +400,6 @@ class TestSecretsIsPublished(SecretsTest):
 
     def test_in_the_podman_vm_nothing_is_written_and_what_is_there_is_read(self):
         self.w.env["WK_IN_VM"] = "1"
-        self.w.env["WK_STORE"] = self.w.env["WK_STORE_DEFAULT"] = self.tmp + "/store"
         d = self.w.sec().store.keyring_dir()
         for f in secrets.PUBLISHED:
             self.w.files[os.path.join(d, f)] = "published by the host\n"

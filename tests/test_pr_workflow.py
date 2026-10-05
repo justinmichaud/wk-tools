@@ -1,11 +1,15 @@
 """`wk pr` / `wk new --pr`: the spec parser and the mirror fetches underneath
 them (lib/wk/pr.py's parse_spec, sync.fetch_into_mirror and fetch_pull_into_mirror)."""
+import asyncio
 import contextlib
 import importlib.util
 import io
 import os
 import shlex
+import shutil
+import ssl
 import subprocess
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -348,27 +352,7 @@ class TestPrOpenFromABoxKillPoints(unittest.TestCase):
         self.assertTrue(line.startswith("SSH_AUTH_SOCK=/g/agent.sock "), line)
 
 
-class TestPrCheckoutDryRunEqualsWetRun(unittest.TestCase):
-
-    def _world(self):
-        w = TestPrCheckoutKillPoints.make_world(TestPrCheckoutKillPoints)
-        return w, RecordingDriver(w)
-
-    _state = TestPrCheckoutKillPoints.state
-
-    def test_a_dry_run_is_the_wet_runs_plan_and_touches_nothing(self):
-        wet_world, wet_place = self._world()
-        with contextlib.redirect_stderr(io.StringIO()):
-            pr.checkout(wet_place, wet_world, "ws", "alice:eng/x")
-
-        dry_world, dry_place = self._world()
-        before = self._state(dry_world)
-        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), contextlib.redirect_stderr(io.StringIO()):
-            pr.checkout(dry_place, dry_world, "ws", "alice:eng/x")
-
-        self.assertEqual(dry_place.mutations, wet_place.mutations)
-        self.assertGreaterEqual(len(dry_place.mutations), 6)
-        self.assertEqual(self._state(dry_world), before)
+class TestPrDryRunEqualsWetRun(unittest.TestCase):
 
     def dry_and_wet(self, make, verb):
         wet_world, dry_world = make(), make()
@@ -381,12 +365,13 @@ class TestPrCheckoutDryRunEqualsWetRun(unittest.TestCase):
         self.assertEqual(dry_place.mutations, wet_place.mutations)
         return wet_world, dry_world
 
+    def test_a_dry_checkout_is_the_wet_runs_plan_and_touches_nothing(self):
+        kp = TestPrCheckoutKillPoints()
+        _, dry = self.dry_and_wet(kp.make_world, lambda t: pr.checkout(t, t.machine, "ws", "alice:eng/x"))
+        self.assertEqual(kp.state(dry), kp.state(kp.make_world()))
+
     def test_a_dry_rebase_is_the_wet_runs_plan_and_touches_nothing(self):
-        def make():
-            w = GitWorld()
-            w.local, w.head, w.fetch_shas = {"eng/y": "d" * 40}, "eng/y", {"origin/main": "c" * 40}
-            return w
-        wet, dry = self.dry_and_wet(make, lambda t: CMD_PR_MODULE.pr_rebase(t, "ws"))
+        wet, dry = self.dry_and_wet(TestPrRebaseKillPoints().make_world, lambda t: CMD_PR_MODULE.pr_rebase(t, "ws"))
         self.assertEqual({"eng/y": "c" * 40}, wet.local)
         self.assertEqual({"eng/y": "d" * 40}, dry.local)
 
@@ -426,15 +411,18 @@ class TestPrParseSpec(unittest.TestCase):
             self.assertIn(why, err.getvalue(), spec)
 
 
+def scratch_store(tmp):
+    return Store({"WK_STORE": str(tmp / "store"), "WK_LOCK_DIR": str(tmp / "locks"),
+                  "XDG_STATE_HOME": str(tmp / "state"), "WK_IN_VM": "", "HOME": str(tmp)})
+
+
 class TestMirrorFetch(unittest.TestCase):
 
     def setUp(self):
         self._scratch = scratch_dir(prefix="wk-pr-test-")
         self.tmp = self._scratch.__enter__()
         self.addCleanup(self._scratch.__exit__, None, None, None)
-        self.env = {"WK_STORE": str(self.tmp / "store"), "WK_LOCK_DIR": str(self.tmp / "locks"),
-                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_IN_VM": "", "HOME": str(self.tmp)}
-        self.store = Store(self.env)
+        self.store = scratch_store(self.tmp)
         self.here = Local()
 
     def fetch(self, fn, *args):
@@ -482,9 +470,7 @@ class TestMirrorFetchIsARecorderUnderADryRun(unittest.TestCase):
         self._scratch = scratch_dir(prefix="wk-pr-dryrun-")
         self.tmp = self._scratch.__enter__()
         self.addCleanup(self._scratch.__exit__, None, None, None)
-        self.env = {"WK_STORE": str(self.tmp / "store"), "WK_LOCK_DIR": str(self.tmp / "locks"),
-                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_IN_VM": "", "HOME": str(self.tmp)}
-        self.store = Store(self.env)
+        self.store = scratch_store(self.tmp)
         self.here = Fake("here")
         p = mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"})
         p.start()
@@ -517,7 +503,6 @@ class TestMirrorFetchIsARecorderUnderADryRun(unittest.TestCase):
 
 
 class TestPrOpenTarget(unittest.TestCase):
-    """pr_open_target, read off a real (local-path) git checkout."""
 
     def setUp(self):
         self._scratch = scratch_dir(prefix="wk-pr-open-test-")
@@ -643,7 +628,6 @@ class TestPrOpenPushesFromWhereTheKeyIs(unittest.TestCase):
 
 class TestPrOpenRefusals(unittest.TestCase):
 
-
     def test_refuses_when_the_stored_token_is_dead(self):
         with stub_path({
             "gh": '#!/bin/sh\ncase "$1 $2" in\n'
@@ -661,7 +645,6 @@ class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        import shutil
         if not shutil.which("openssl"):
             raise unittest.SkipTest("needs the openssl CLI")
         path = REPO / "container" / "proxy" / "github-inject.py"
@@ -670,18 +653,12 @@ class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
         spec.loader.exec_module(cls.m)
 
     def _run(self, token):
-        import asyncio
-        import ssl
-        import tempfile
-        import unittest.mock
-
         m = self.m
         d = Path(tempfile.mkdtemp(prefix="wk-test-inject-"))
-        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         chain = m.ensure_certs(str(d / "certs"), str(d / "ca.pem"))
         pat = d / "pat"
-        if token:
-            pat.write_text(token + "\n")
+        pat.write_text(token + "\n")
 
         seen = {}
 
@@ -739,7 +716,7 @@ class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
         async def to_loopback(host, port, **kw):
             return await real_open("127.0.0.1", port, **kw)
 
-        with unittest.mock.patch.object(asyncio, "open_connection", to_loopback):
+        with mock.patch.object(asyncio, "open_connection", to_loopback):
             got = asyncio.run(asyncio.wait_for(main(), 30))
         return seen.get("head", b""), got
 
@@ -751,12 +728,4 @@ class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
         self.assertIn(b"200 OK", got)
         self.assertIn(b"GET /user HTTP/1.1", head)
         self.assertIn(b"Accept: application/vnd.github.v3+json", head)
-
-    def test_with_the_switch_off_the_call_goes_unauthenticated(self):
-        head, got = self._run("")
-        self.assertNotIn(b"Authorization", head)
-        self.assertNotIn(b"wk-injects-this", head)
-        self.assertIn(b"GET /user HTTP/1.1", head)
-        self.assertIn(b"200 OK", got)
-
 

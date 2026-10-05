@@ -1,8 +1,4 @@
-"""`wk quiesce`: lib/wk/quiet.py's on/off/status and the readings it judges a Mac by, against a fake
-machine whose privileged helper, `sudo`, `defaults`, `tmutil` and in-place bash calls answer as a
-real one would -- nothing here runs the real helper or signals a real daemon. Also the one state
-directory, the helper's bound on a stopped daemon, `killpoints[quiesce]`, a dry run printing the
-wet run's plan, and the live rows `quiesce.readback[<m>]` and `quiesce.classified[<m>]`."""
+"""`wk quiesce`: lib/wk/quiet.py against a fake Mac, the privileged helper's shell, and live readbacks."""
 
 import contextlib
 import io
@@ -10,8 +6,10 @@ import os
 import pty
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from tests.killpoints import converges
@@ -191,13 +189,6 @@ class TestOn(QuiesceTest):
         self.assertEqual("running", w.files["/daemons"])
         self.assertNotIn(STATE + "/daemons_paused", w.files)
 
-    def test_quiesce_keeps_no_list_of_its_own(self):
-        w = World()
-        self.quiet_run(w.q().on)
-        self.quiet_run(w.q().off)
-        self.assertTrue(w.ran(PAUSE) and w.ran(RESUME))
-        self.assertEqual([], [e for e in w.effects if e[0] == "kill"])
-
 
 class TestOff(QuiesceTest):
     def test_off_undoes_what_on_did(self):
@@ -209,6 +200,7 @@ class TestOff(QuiesceTest):
         self.assertEqual("running", w.files["/daemons"])
         self.assertNotIn(STATE + "/daemons_paused", w.files)
         self.assertNotIn(STATE + "/caffeinate.pid", w.files)
+        self.assertEqual([], [e for e in w.effects if e[0] == "kill"], "quiesce keeps no list of its own to kill")
 
     def test_off_with_nothing_paused_resumes_nothing(self):
         w = World()
@@ -238,7 +230,6 @@ class TestThePrivilegedHalf(QuiesceTest):
         self.assertIn("passwordless sudo is not set up", self.refused(w.q().on))
 
     def test_a_helper_that_failed_under_a_working_grant_is_named_as_the_helper(self):
-        """Reporting the grant for both sent an operator to ./setup for a helper killed mid-verb."""
         w = World()
         w.answer(("sudo", "-n", PRIV), 1)
         err = self.refused(w.q().off)
@@ -258,8 +249,9 @@ class TestStatus(QuiesceTest):
         self.assertEqual(before, w.state())
         self.assertEqual([], [e for e in w.effects if e[0] not in ("run", "run_tty")])
 
-    def test_a_dead_pid_file_is_not_running(self):
+    def test_a_dead_or_missing_pid_file_is_not_running(self):
         w = World()
+        self.assertIn("caffeinate: no", self.status(w))
         w._set_file(STATE + "/caffeinate.pid", "999\n")
         w._set_file(STATE + "/raiser.pid", "998\n")
         out = self.status(w)
@@ -272,9 +264,6 @@ class TestStatus(QuiesceTest):
         out = self.status(w)
         self.assertIn("caffeinate: running", out)
         self.assertIn("'quiesce on' paused them", out)
-
-    def test_no_pid_file_is_not_running(self):
-        self.assertIn("caffeinate: no", self.status(World()))
 
     def test_the_helpers_own_account_is_shown(self):
         out = self.status(World())
@@ -302,7 +291,6 @@ class TestStatus(QuiesceTest):
 
 
 class TestTheReadings(QuiesceTest):
-
     def noise(self, w):
         with contextlib.redirect_stderr(io.StringIO()) as err:
             bad = w.q().noise()
@@ -355,7 +343,6 @@ class TestTheReadings(QuiesceTest):
         self.assertEqual([RENDER + ("ok\ton AC\t\n",)], drawn)
 
     def test_the_renderer_colours_only_a_terminal(self):
-        """Drawn on the real stderr, so colour follows what reads it."""
         argv = quiet.lib_argv(ROOT, quiet.COMMON, quiet.RENDER, "wrong\tbad\tfix\n")
         cp = subprocess.run(argv, capture_output=True, text=True)
         self.assertEqual(1, cp.returncode, cp.stderr)
@@ -441,7 +428,6 @@ class TestTheCommand(QuiesceTest):
         return load_cmd("quiesce")
 
     def test_bare_is_status_and_anything_else_is_refused(self):
-        """the dispatcher hands a bare `wk quiesce` over as status, and refuses any other word"""
         m = self.load()
         with mock.patch.object(m.quiet, "Quiesce") as q, mock.patch.object(m.act, "terminate_as_interrupt"):
             m.main(as_dispatched("quiesce", [], {}))
@@ -453,7 +439,6 @@ class TestTheCommand(QuiesceTest):
                 self.assertEqual(2, cp.returncode, cp.stdout)
                 self.assertIn("usage: wk quiesce", cp.stdout)
 
-
     def test_a_session_change_needs_the_helper_and_its_status_only_reads(self):
         d = decl.Decl(REPO / "cmd" / "quiesce")
         for verb in ("on", "gdm", "off"):
@@ -464,7 +449,6 @@ class TestTheCommand(QuiesceTest):
 
 
 class APrivilegedVerbNeverBlocksOnAStoppedDaemon(unittest.TestCase):
-
     PRIV = REPO / "admin" / "wk-quiesce-priv"
 
     def _bounded(self, script, timeout=30):
@@ -492,15 +476,12 @@ class APrivilegedVerbNeverBlocksOnAStoppedDaemon(unittest.TestCase):
 
 
 class ALinuxQuiesceIsReadBack(unittest.TestCase):
-
     PRIV = REPO / "admin" / "wk-quiesce-priv"
     FUNCS = ("put_sys", "put_sysctl", "can_boost", "tune", "linux_on", "linux_off")
     FILES = ("devices/system/cpu/cpu0/cpufreq/scaling_governor", "devices/system/cpu/cpu1/cpufreq/scaling_governor",
              "devices/system/cpu/intel_pstate/no_turbo", "devices/system/cpu/cpufreq/boost")
 
     def setUp(self):
-        import tempfile
-        from pathlib import Path
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-quiesce-"))
         self.addCleanup(subprocess.run, ["rm", "-rf", str(self.tmp)])
         self.sys = self.tmp / "sys"
@@ -544,6 +525,7 @@ class ALinuxQuiesceIsReadBack(unittest.TestCase):
         self.assertIn("quiesced: performance governor", cp.stdout)
         self.assertEqual("performance", self.read(self.FILES[1]))
         self.assertEqual(("1", "0"), (self.read(self.FILES[2]), self.read(self.FILES[3])))
+        self.assertNotIn("boost left alone", cp.stdout)
         self.assertEqual("0", (self.tmp / "sysctl" / "kernel.randomize_va_space").read_text().strip())
 
     def test_off_restores_every_knob(self):
@@ -590,12 +572,6 @@ class ALinuxQuiesceIsReadBack(unittest.TestCase):
         self.assertNotIn("boost left alone", cp.stdout)
         self.assertEqual("1", self.read(self.FILES[3]))
 
-    def test_a_non_cppc_driver_keeps_writing_boost_as_before(self):
-        cp = self.helper("linux_on")
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        self.assertNotIn("boost left alone", cp.stdout)
-        self.assertEqual("0", self.read(self.FILES[3]))
-
 
 def _ssh(dest, command, input=None, timeout=300):
     return subprocess.run(["ssh", "-o", "BatchMode=yes", dest, command], input=input,
@@ -607,7 +583,6 @@ def _tools(name):
 
 
 class TestOnRealMachines(WkTest):
-
     def _readback(self, name):
         cp = _ssh(name, "cd %s && ./wk quiesce status" % _tools(name))
         out = cp.stdout + cp.stderr

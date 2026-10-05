@@ -259,13 +259,11 @@ class TestOnePodmanWrapper(unittest.TestCase):
         with mock.patch("wk.places.os.uname", return_value=mock.Mock(sysname=system)):
             return places.Container("container", str(REPO), env, Fake("here")).podman()
 
-    def test_from_a_macos_host_it_names_the_machines_connection(self):
-        self.assertEqual(["podman", "-c", "wk"], self.container({}, "Darwin"))
-        self.assertEqual(["podman", "-c", "other"], self.container({"WK_MACHINE": "other"}, "Darwin"))
-
-    def test_where_the_daemon_is_local_it_is_plain(self):
-        self.assertEqual(["podman"], self.container({"WK_IN_VM": "1"}, "Darwin"))
-        self.assertEqual(["podman"], self.container({}, "Linux"))
+    def test_a_macos_host_names_the_machines_connection_and_a_local_daemon_is_plain(self):
+        for env, system, want in (({}, "Darwin", ["podman", "-c", "wk"]),
+                                  ({"WK_MACHINE": "other"}, "Darwin", ["podman", "-c", "other"]),
+                                  ({"WK_IN_VM": "1"}, "Darwin", ["podman"]), ({}, "Linux", ["podman"])):
+            self.assertEqual(want, self.container(env, system), (env, system))
 
     def test_the_driver_names_no_bare_podman_of_its_own(self):
         import inspect

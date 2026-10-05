@@ -1,4 +1,4 @@
-"""cmd/selftest's guard: the lock applies to `--live` alone, so the tiers"""
+"""cmd/selftest's guard: the lock applies to `--live` alone."""
 import subprocess
 import sys
 import unittest

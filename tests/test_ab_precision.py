@@ -126,6 +126,10 @@ def write_runs(root, name, values):
     return write_docs(root, name, [speedometer_doc([[v]]) for v in values])
 
 
+def joined(runs):
+    return ",".join(map(str, runs))
+
+
 def fields(stdout):
     return dict(l.split("=", 1) for l in stdout.strip().splitlines() if "=" in l)
 
@@ -242,41 +246,24 @@ class TestAnUnreadableAggregateIsRefusedByName(WkTest):
 
 class TestARunIsADirectory(WkTest):
 
-    def test_a_directory_with_no_result_json_says_exactly_that(self):
-        with scratch_dir() as tmp:
-            empty = tmp / "nothing"
-            empty.mkdir()
-            cp = precision("--a", str(empty), "--b", str(empty))
-            self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("no result.json in this directory", cp.stdout + cp.stderr)
-            self.assertIn("side A", cp.stdout + cp.stderr)
-            self.assertNotIn("met=", cp.stdout)
-
-    def test_a_result_json_that_is_not_json_is_reported_as_such(self):
-        with scratch_dir() as tmp:
-            d = tmp / "junk"
-            d.mkdir()
-            (d / "result.json").write_text("not json at all")
-            cp = precision("--a", str(d), "--b", str(d))
-            self.assertNotEqual(cp.returncode, 0)
-            self.assertIn("not valid JSON", cp.stdout + cp.stderr)
-
-    def test_a_result_json_carrying_no_suite_is_reported_as_such(self):
-        with scratch_dir() as tmp:
-            d = tmp / "bare"
-            d.mkdir()
-            (d / "result.json").write_text(json.dumps({"debugOutput": [None]}))
-            cp = precision("--a", str(d), "--b", str(d))
-            self.assertNotEqual(cp.returncode, 0)
-            self.assertIn("no single suite carrying a Score metric", cp.stdout + cp.stderr)
+    def test_a_round_whose_result_json_is_missing_or_unreadable_says_which(self):
+        for text, said in ((None, "no result.json in this directory"), ("not json at all", "not valid JSON"),
+                           (json.dumps({"debugOutput": [None]}), "no single suite carrying a Score metric")):
+            with self.subTest(said=said), scratch_dir() as tmp:
+                if text is not None:
+                    (tmp / "result.json").write_text(text)
+                cp = precision("--a", str(tmp), "--b", str(tmp))
+                self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                self.assertIn(said, cp.stdout + cp.stderr)
+                self.assertIn("side A", cp.stdout + cp.stderr)
+                self.assertNotIn("met=", cp.stdout)
 
     def test_one_unreadable_round_among_good_ones_is_warned_about_not_hidden(self):
         with scratch_dir() as tmp:
             a = write_runs(tmp, "a", [100.0, 100.5, 99.5])
             (a[2] / "result.json").unlink()
             b = write_runs(tmp, "b", [100.2, 100.7, 99.7])
-            cp = precision("--a", ",".join(str(p) for p in a),
-                     "--b", ",".join(str(p) for p in b))
+            cp = precision("--a", joined(a), "--b", joined(b))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertEqual(fields(cp.stdout)["n_a"], "2")
             self.assertIn("warning: side A", cp.stderr)
@@ -292,8 +279,7 @@ class TestTheCommand(WkTest):
         with scratch_dir() as tmp:
             a = write_runs(tmp, "a", [99.0, 101.0, 99.0, 101.0, 99.0, 101.0])
             b = write_runs(tmp, "b", [99.5, 101.5, 99.5, 101.5, 99.5, 101.5])
-            cp = precision("--a", ",".join(str(p) for p in a),
-                     "--b", ",".join(str(p) for p in b))
+            cp = precision("--a", joined(a), "--b", joined(b))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             f = fields(cp.stdout)
             self.assertEqual(f["met"], "no")
@@ -307,8 +293,7 @@ class TestTheCommand(WkTest):
         with scratch_dir() as tmp:
             a = write_runs(tmp, "a", [100.0, 100.02, 99.98, 100.0, 100.01, 99.99])
             b = write_runs(tmp, "b", [100.0, 100.01, 99.99, 100.0, 100.02, 99.98])
-            cp = precision("--a", ",".join(str(p) for p in a),
-                     "--b", ",".join(str(p) for p in b))
+            cp = precision("--a", joined(a), "--b", joined(b))
             f = fields(cp.stdout)
             self.assertEqual(f["met"], "yes", cp.stdout)
             self.assertEqual(f["rounds_needed"], "")
@@ -317,8 +302,7 @@ class TestTheCommand(WkTest):
         with scratch_dir() as tmp:
             a = write_runs(tmp, "a", [100.0, 100.0])
             b = write_runs(tmp, "b", [100.0, 100.0])
-            cp = precision("--a", ",".join(str(p) for p in a),
-                     "--b", ",".join(str(p) for p in b))
+            cp = precision("--a", joined(a), "--b", joined(b))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             f = fields(cp.stdout)
             self.assertEqual(f["met"], "yes")
@@ -329,7 +313,7 @@ class TestTheCommand(WkTest):
         with scratch_dir() as tmp:
             a = write_runs(tmp, "a", [99.0, 101.0, 99.0, 101.0])
             b = write_runs(tmp, "b", [99.0, 101.0, 99.0, 101.0])
-            args = ["--a", ",".join(str(p) for p in a), "--b", ",".join(str(p) for p in b)]
+            args = ["--a", joined(a), "--b", joined(b)]
             strict = fields(precision("--goal", "0.3", *args).stdout)
             loose = fields(precision("--goal", "10", *args).stdout)
             self.assertEqual(strict["met"], "no")
@@ -341,9 +325,7 @@ class TestTheCommand(WkTest):
             spread = 0.1257
             a = write_runs(tmp, "a", [58.9816 + spread] * 8 + [58.9816 - spread] * 8)
             b = write_runs(tmp, "b", [58.9853 + spread] * 8 + [58.9853 - spread] * 8)
-            cp = precision("--goal", "0.3",
-                     "--a", ",".join(str(p) for p in a),
-                     "--b", ",".join(str(p) for p in b))
+            cp = precision("--goal", "0.3", "--a", joined(a), "--b", joined(b))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             f = fields(cp.stdout)
             self.assertEqual(f["n_a"], "16")
@@ -360,9 +342,7 @@ class TestTheCommand(WkTest):
                                      {k: [v[0] * scale] for k, v in JETSTREAM3_CHILDREN.items()})
             a = write_docs(tmp, "a", [doc(1.0 + i * 1e-4) for i in range(-3, 3)])
             b = write_docs(tmp, "b", [doc(1.0 + i * 1e-4) for i in range(-3, 3)])
-            cp = precision("--goal", "0.3",
-                     "--a", ",".join(str(p) for p in a),
-                     "--b", ",".join(str(p) for p in b))
+            cp = precision("--goal", "0.3", "--a", joined(a), "--b", joined(b))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             f = fields(cp.stdout)
             self.assertEqual(f["n_a"], "6")
@@ -376,8 +356,7 @@ class TestThroughTheCLI(WkTest):
         with scratch_dir() as tmp:
             a = write_runs(tmp, "a", [100.0, 100.5, 99.5, 100.0])
             b = write_runs(tmp, "b", [100.2, 100.7, 99.7, 100.2])
-            cp = run("bench", "precision",
-                     ",".join(str(p) for p in a), ",".join(str(p) for p in b))
+            cp = run("bench", "precision", joined(a), joined(b))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             f = fields(cp.stdout)
             self.assertEqual(f["n_a"], "4")
@@ -388,7 +367,7 @@ class TestThroughTheCLI(WkTest):
         with scratch_dir() as tmp:
             a = write_runs(tmp, "a", [99.0, 101.0, 99.0, 101.0])
             b = write_runs(tmp, "b", [99.0, 101.0, 99.0, 101.0])
-            cp = run("bench", "precision", ",".join(str(p) for p in a), ",".join(str(p) for p in b),
+            cp = run("bench", "precision", joined(a), joined(b),
                      "--detect", "10")
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertEqual(fields(cp.stdout)["goal_pct"], "10.0000")

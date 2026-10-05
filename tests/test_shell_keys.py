@@ -1,8 +1,5 @@
 """shell/bashrc's line editor: Home/End, the delete keys and word movement stay bound whichever keymap zsh starts in
-(viins when $EDITOR contains "vi"), and bash binds word movement too.
-
-Run: python3 -m unittest tests.test_shell_keys -v
-"""
+(viins when $EDITOR contains "vi"), and bash binds word movement too."""
 import re
 import shutil
 import subprocess
@@ -24,10 +21,7 @@ WANTED = {
     "forward-word":  ["^[[1;3C", "^[^[[C", "^[[1;5C"],
 }
 
-# The same encodings, as raw bytes, for the bash counterpart test -- `bind -p`
-# renders the leading ESC of a two-byte lead-in as either `\e` or `\M-`
-# depending on the terminal's meta setting, so comparison happens on decoded
-# bytes rather than on that text.
+# Raw bytes: `bind -p` renders a leading ESC as `\e` or `\M-` depending on the terminal's meta setting.
 BASH_WANTED = {
     "backward-word": ["\x1b[1;3D", "\x1b\x1b[D", "\x1b[1;5D"],
     "forward-word":  ["\x1b[1;3C", "\x1b\x1b[C", "\x1b[1;5C"],
@@ -35,9 +29,7 @@ BASH_WANTED = {
 
 
 def decode_bind_p_keyseq(seq):
-    """Turn a `bind -p` quoted key spec (\\C-, \\M-, \\e, backslash escapes)
-    into the raw bytes it represents, so two textual renderings of the same
-    lead-in byte compare equal."""
+    """The raw bytes a `bind -p` quoted key spec represents."""
     out = bytearray()
     i = 0
     while i < len(seq):
@@ -48,7 +40,7 @@ def decode_bind_p_keyseq(seq):
             elif nxt == "C" and seq[i + 2:i + 3] == "-":
                 out.append(ord(seq[i + 3].upper()) & 0x1F); i += 4
             elif nxt == "M" and seq[i + 2:i + 3] == "-":
-                out.append(0x1B); i += 3   # Meta = ESC prefix; rest decodes recursively
+                out.append(0x1B); i += 3
             else:
                 out.append(ord(nxt)); i += 2
         else:
@@ -57,9 +49,7 @@ def decode_bind_p_keyseq(seq):
 
 
 def bindkeys(editor, home):
-    """Every binding an interactive zsh has after sourcing the rc, with
-    $EDITOR/$VISUAL set to `editor` -- which is what decides whether zsh's
-    startup keymap is emacs or viins."""
+    """Every binding an interactive zsh has after sourcing the rc; `editor` decides its startup keymap."""
     cp = subprocess.run(
         ["zsh", "-f", "-i", "-c", f'source "{RC}"; bindkey'],
         cwd=str(REPO),
@@ -87,6 +77,7 @@ class TestZshKeys(WkTest):
                         self.assertEqual(
                             binds.get(seq), action,
                             f"EDITOR={editor}: {seq} is not bound to {action}")
+
 
 @unittest.skipUnless(shutil.which("bash"), "no bash on this machine")
 class TestBashKeys(WkTest):

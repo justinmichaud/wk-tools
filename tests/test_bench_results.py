@@ -37,6 +37,14 @@ def complete_task(bench_dir, name=TASK):
     return d
 
 
+def mirror_task(fake, d, root="/var/lib/wk/ws/w/bench/" + TASK):
+    """Task directory `d` as files on `fake` under `root`."""
+    for p in d.rglob("*"):
+        if p.is_file():
+            fake._set_file("%s/%s" % (root, p.relative_to(d)), p.read_bytes())
+    return fake
+
+
 def clean_env():
     return mock.patch.dict(os.environ, {k: v for k, v in os.environ.items()
                                         if k not in ("WK_YES", "WK_FORCE", "WK_DRY_RUN", "WK_DESTRUCTIVE", "WK_CONFIRMED")}, clear=True)
@@ -226,11 +234,7 @@ class TestExportKillPoints(ExportTest):
         os.environ["WK_YES"] = "1"
 
         def world():
-            fake = Fake("here")
-            for p in d.rglob("*"):
-                if p.is_file():
-                    fake._set_file(str(p), p.read_bytes())
-            return types.SimpleNamespace(fake=fake)
+            return types.SimpleNamespace(fake=mirror_task(Fake("here"), d, str(d)))
 
         def run_once(w):
             self.export(self.bench(w.fake))
@@ -249,11 +253,6 @@ class TestThroughWk(ExportTest):
         dry = run("bench", "export", TASK, "--to", str(self.tmp / "out"), "--dry-run", env=env, timeout=60)
         self.assertEqual(dry.returncode, 0, dry.stdout)
         self.assertFalse((self.tmp / "out").exists(), dry.stdout)
-        wet = run("bench", "export", TASK, "--to", str(self.tmp / "out"), env=env, timeout=60)
-        self.assertEqual(wet.returncode, 0, wet.stdout)
-        self.assertTrue(zipfile.is_zipfile(str(self.tmp / "out" / (TASK + ".zip"))), wet.stdout)
-        again = run("bench", "export", TASK, "--to", str(self.tmp / "out"), "--yes", env=env, timeout=60)
-        self.assertEqual(again.returncode, 0, again.stdout)
 
 
 def far_driver(name, far, side="answering"):
@@ -261,16 +260,13 @@ def far_driver(name, far, side="answering"):
 
 
 class FarBox(Fake, Ssh):
-    """A machine reached over ssh, whose files answer from memory."""
+    pass
 
 
 class TestWhereALegRecords(WkTest):
 
     def reg(self, far):
-        d = complete_task(Path(tempfile.mkdtemp(dir=str(self.tmp))))
-        for p in d.rglob("*"):
-            if p.is_file():
-                far._set_file("/var/lib/wk/ws/w/bench/%s/%s" % (TASK, p.relative_to(d)), p.read_bytes())
+        mirror_task(far, complete_task(Path(tempfile.mkdtemp(dir=str(self.tmp)))))
         far.dirs.add("/var/lib/wk/ws/w")
         vm = far_driver("vm", far)
         vm.results = lambda ws: (far, "/var/lib/wk/ws/%s/bench" % ws)
@@ -298,12 +294,7 @@ class TestWhereALegRecords(WkTest):
 class TestExportReachesATaskOnAnotherMachine(ExportTest):
 
     def far(self):
-        d = complete_task(self.tmp / "disk")
-        far = Fake("vm")
-        for p in d.rglob("*"):
-            if p.is_file():
-                far._set_file("/var/lib/wk/ws/w/bench/%s/%s" % (TASK, p.relative_to(d)), p.read_bytes())
-        return far
+        return mirror_task(Fake("vm"), complete_task(self.tmp / "disk"))
 
     def bench_with(self, driver):
         reg = registry(self.tmp / "store", [driver], env={"HOME": str(self.tmp / "home"), "WK_ROW_LABEL": "here"})

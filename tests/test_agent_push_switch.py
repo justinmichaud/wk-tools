@@ -46,8 +46,7 @@ class TestTheSwitchIsThrownForEveryPlace(_AiRun):
             with self.subTest(place=place):
                 status, err = self._ai(place)
                 self.assertEqual(self.CALLS[place], self.calls)
-                # The `off` was made to fail, so cmd/ai refuses to run at all
-                # rather than handing over an agent that can publish.
+                # The `off` was made to fail: cmd/ai refuses rather than hand over an agent that can publish.
                 self.assertNotEqual(status, 0, err)
                 self.assertIn("refusing to run", err)
 
@@ -59,23 +58,16 @@ class TestTheSwitchIsThrownForEveryPlace(_AiRun):
                 self.assertTrue(any(c.startswith("push off") for c in self.calls),
                                 f"{place}: {self.calls}")
 
-    def test_a_switch_already_off_is_left_alone(self):
+    def test_a_switch_already_off_or_with_no_keys_anywhere_is_left_alone(self):
+        """4 is `wk key deploy` never having been run here: nothing to hold back, so no refusal."""
         for place in PLACES:
-            with self.subTest(place=place):
-                self._ai(place, push_status=1)
-                self.assertEqual(self.CALLS[place][:1], self.calls)
+            for st in (1, 4):
+                with self.subTest(place=place, status=st):
+                    _, err = self._ai(place, push_status=st)
+                    self.assertEqual(self.CALLS[place][:1], self.calls)
+                    self.assertNotIn("refusing to run", err)
 
 
-class TestAnUnmeasuredSwitchIsARefusal(_AiRun):
-    """4 (no keys anywhere) is a measured off; 3 and 5 refuse (tests/test_ai.py)."""
-
-    def test_no_keys_and_no_token_anywhere_is_a_measured_off(self):
-        """4 is `wk key deploy` never having been run here: there is nothing
-        to hold back, and refusing would stop every session on a machine that
-        cannot publish at all."""
-        _, err = self._ai("container", push_status=4)
-        self.assertEqual(["push status"], self.calls, self.calls)
-        self.assertNotIn("refusing to run", err)
 
 
 class TestOneShapeAndNoPlaceNames(unittest.TestCase):

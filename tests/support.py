@@ -450,7 +450,6 @@ class GitMirror:
         cp = subprocess.run(["sh", "-c", git.mirror_refresh_script(str(self.mirror), ["main"], self.remotes)],
                             capture_output=True, text=True)
         assert cp.returncode == 0, cp.stdout + cp.stderr
-        self.refresh_out = cp.stdout
 
     def fetch(self):
         git_run("fetch", "--prune", "-q", "origin", cwd=self.mirror)

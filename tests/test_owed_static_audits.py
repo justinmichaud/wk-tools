@@ -13,7 +13,6 @@ DELIBERATE_PREDICATES = {
     ("container/proxy/ensure-bridge.sh", "bridge_alive"),
 }
 
-
 SHELL_ROOTS = ("admin", "bench", "boot", "bridge", "build", "cmd", "container",
                "host", "image", "lib", "vm")
 SHELL_SHEBANG_LINE = re.compile(r'^#!.*\b(bash|sh|dash|ksh)\b')
@@ -350,16 +349,8 @@ SCRIPT_ROOTS = (
 SET_EUO_PIPEFAIL_RE = re.compile(r'(?m)^\s*set\s+-euo\s+pipefail\s*$')
 
 DELIBERATE_EXCLUSIONS = {
-    "bench/mac-quiet-hosts.sh":
-        "sourced, not run: its own header says it is `.`-read by "
-        "lib/wk/sysimage/macvolume.py's provision and by mac-bench-firstboot.sh; "
-        "the shebang is for a person reading the file, not an exec path",
-    "build/mem-watchdog.sh":
-        "a background watchdog that loops for the life of a build "
-        "(`while kill -0 \"$PID\"; do ... sleep; done`) -- a daemon, not a "
-        "one-shot command. `-e` would let one transient `ps`/awk reading "
-        "kill the safety net silently instead of the polite failure its own "
-        "header describes, so it deliberately keeps `set -uo pipefail`",
+    "bench/mac-quiet-hosts.sh": "sourced, not run",
+    "build/mem-watchdog.sh": "a watchdog loop: under -e one transient ps/awk reading would kill the safety net",
 }
 
 
@@ -396,7 +387,6 @@ class TestEveryScriptSetsEuoPipefail(unittest.TestCase):
 
 
 class TestEveryCrossMachinePushNormalisesTheMode(unittest.TestCase):
-
     REMOTE = re.compile(r'rsync\s[^\n]*(-e\s+"ssh|\$\w+:|@\$)')
 
     def test_no_cross_machine_rsync_carries_the_local_umask(self):

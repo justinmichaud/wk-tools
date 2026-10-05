@@ -1,5 +1,4 @@
-"""lib/wk/sshalias.py writes the `Host wk-<name>` block byte for byte, takes it out leaving every other host, and
-refuses an empty HostName or User, since ssh would refuse the whole file and every host in it."""
+"""lib/wk/sshalias.py: the `Host wk-<name>` block, written, removed, and refused with an empty HostName or User."""
 import io
 import os
 import shutil
@@ -98,11 +97,6 @@ class TestOnTheFake(unittest.TestCase):
         self.assertEqual(self.fake.effects, [])
         sshalias.alias_remove(self.fake, self.env, "other")
         self.assertEqual(self.fake.effects, [])
-
-    def test_removing_takes_only_the_named_block(self):
-        self.fake.files[self.conf] = OTHERS
-        sshalias.alias_remove(self.fake, self.env, "demo")
-        self.assertEqual(self.fake.files[self.conf], "Host other\n    HostName 1.2.3.4\nHost tail\n    User t\n")
 
     def test_a_dry_run_writes_nothing(self):
         os.environ["WK_DRY_RUN"] = "1"

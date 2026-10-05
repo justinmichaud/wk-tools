@@ -35,8 +35,11 @@ environment[BUILD_WEBKIT_ARGS] = --no-bubblewrap-sandbox --cmakeargs="-DENABLE_X
 LOCAL = 'DISTRO = "webkitdevci"\n# Machine selection\nMACHINE = "raspberrypi4-64"\nBB_DISKMON_DIRS ??= "HALT,${TMPDIR},100M,1K"\n'
 
 
+ARGS = ["--target", TARGET, "--jobs", "16", "--image", "webkit-dev-ci-tools"]
+
+
 def args(*more):
-    return yt.parse(["--target", TARGET, "--jobs", "16", "--image", "webkit-dev-ci-tools"] + list(more))
+    return yt.parse(ARGS + list(more))
 
 
 class World(Fake):
@@ -305,10 +308,9 @@ class TestTheImageDirectory(unittest.TestCase):
 
 
 class TestTheStages(unittest.TestCase):
-    def run_stage(self, w, *more):
+    def run_stage(self, w, *more, environ=ENV):
         with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = yt.main(["--target", TARGET, "--jobs", "16", "--image", "webkit-dev-ci-tools"] + list(more),
-                         environ=dict(ENV), machine=w, clock=w.clock, tools=TOOLS)
+            rc = yt.main(ARGS + list(more), environ=dict(environ), machine=w, clock=w.clock, tools=TOOLS)
         return rc, out.getvalue(), err.getvalue()
 
     def test_the_image_stage_bitbakes_through_the_helper_under_the_guard_and_says_done(self):
@@ -356,10 +358,7 @@ class TestTheStages(unittest.TestCase):
         w = World()
         w.answer(["id", "-u"], out="0\n")
         self.assertIn("refuses to run as root", self.run_stage(w)[2])
-        w = World()
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
-            yt.main(["--target", TARGET, "--jobs", "4"], environ={"DL_DIR": "/d"}, machine=w, clock=w.clock, tools=TOOLS)
-        self.assertIn("DL_DIR/SSTATE_DIR are not set", err.getvalue())
+        self.assertIn("DL_DIR/SSTATE_DIR are not set", self.run_stage(World(), environ={"DL_DIR": "/d"})[2])
 
     def test_a_slot_needs_the_sdk_first(self):
         w = World()

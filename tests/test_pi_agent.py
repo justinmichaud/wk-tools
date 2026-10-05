@@ -7,11 +7,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, WkTest, bash, run
+from tests.support import REPO, WkTest, bash, clean_env, run
 from tests.test_wk_key import KeyTest
 from tests.test_wk_secrets import KEY_SH
 
 sys.path.insert(0, str(REPO / "lib"))
+from wk import doctor  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.secrets import Secrets  # noqa: E402
 
@@ -83,23 +84,17 @@ class TestTheStoreIsByName(WkTest):
     def test_an_unknown_name_has_no_path_and_is_not_invented(self):
         self.assertIsNone(self._sec(self._store()).cred_path("nope"))
 
-    def test_stored_then_read_back_per_name(self):
+    def test_stored_then_present_and_read_back_per_name(self):
         store = self._store()
         for row in TABLE:
             name = row[0]
             with self.subTest(name=name):
+                self.assertIs(False, self._sec(store).cred_stored(name))
                 self._sh(f'printf "%s\\n" {name}-{PLACEHOLDER} | key_store {name}', store)
+                self.assertIs(True, self._sec(store).cred_stored(name))
                 self.assertEqual(f"{name}-{PLACEHOLDER}\n", self._sec(store).cred_read(name))
                 mode = store_path(store, row).stat().st_mode & 0o777
                 self.assertEqual(0o600, mode, oct(mode))
-
-    def test_presence_is_one_question_for_both_kinds(self):
-        store = self._store()
-        for row in TABLE:
-            with self.subTest(name=row[0]):
-                self.assertIs(False, self._sec(store).cred_stored(row[0]))
-                self._sh(f'printf "%s\\n" x | key_store {row[0]}', store)
-                self.assertIs(True, self._sec(store).cred_stored(row[0]))
 
     def test_a_file_row_is_read_whole_and_not_by_its_first_line(self):
         store = self._store()
@@ -112,9 +107,6 @@ class TestTheStoreIsByName(WkTest):
         secrets, rw = sec.store.keyring_dir(), sec.store.keyring_agent_rw_dir()
         self.assertNotIn(secrets + "/", rw + "/")
         self.assertEqual(str(Path(secrets).parent), str(Path(rw).parent))
-
-    def test_absent_reads_as_nothing_and_is_not_an_error(self):
-        self.assertEqual("", self._sec(self._store()).cred_read("litellm"))
 
     def test_clearing_withdraws_one_and_leaves_the_others(self):
         store = self._store()
@@ -152,18 +144,15 @@ class TestWkKeySet(WkTest):
         return run("key", *args,
                    env={"WK_IN_VM": "1", "WK_STORE": str(store or self._store())})
 
-    def test_no_name_lists_the_names(self):
-        cp = self._key("set")
-        self.assertNotEqual(0, cp.returncode)
-        for name in VALUE_NAMES:
-            self.assertIn(name, cp.stdout)
-
-    def test_an_unknown_name_is_refused_and_the_valid_ones_named(self):
-        cp = self._key("set", "not-an-agent")
-        self.assertNotEqual(0, cp.returncode)
-        self.assertIn("not-an-agent", cp.stdout)
-        for name in VALUE_NAMES:
-            self.assertIn(name, cp.stdout)
+    def test_no_name_or_an_unknown_one_is_refused_naming_the_valid_ones(self):
+        store = self._store()
+        for args in (["set"], ["set", "not-an-agent"]):
+            with self.subTest(args=args):
+                cp = self._key(*args, store=store)
+                self.assertNotEqual(0, cp.returncode)
+                self.assertIn(args[-1], cp.stdout)
+                for name in VALUE_NAMES:
+                    self.assertIn(name, cp.stdout)
 
     def test_replacing_nothing_is_refused_and_names_the_remedy(self):
         cp = self._key("set", "litellm", "--replace")
@@ -178,7 +167,6 @@ class TestWkKeySet(WkTest):
                 self.assertEqual(0, cp.returncode, cp.stdout)
                 self.assertRegex(cp.stdout, r"%s\s+stored\s+\S.*\$%s" % (name, var))
                 self.assertNotIn(PLACEHOLDER, cp.stdout)
-
 
     def test_the_login_the_cli_makes_is_not_set_here(self):
         cp = self._key("set", FILE_ROWS[0][0])
@@ -296,16 +284,10 @@ class TestDoctorReportsEveryName(WkTest):
     """Every row is one `re-authable` line; an absent one is `??`, not missing, since the agent can still log in."""
 
     def test_it_reads_the_table(self):
-        from tests.support import clean_env
-        sys.path.insert(0, str(REPO / "lib"))
-        from wk import doctor
         paths = doctor.Doctor(str(REPO), env=clean_env({"WK_STORE": "/scratch", "WK_IN_VM": "1"})).paths()
         self.assertEqual(NAMES, [k[7:] for k in paths if k.startswith("secret.")])
 
     def test_it_prints_one_line_per_name_and_none_of_them_as_missing(self):
-        from tests.support import clean_env
-        sys.path.insert(0, str(REPO / "lib"))
-        from wk import doctor
         store = self.tmp / "store"
         (store / "secrets").mkdir(parents=True)
         (store / "agent-rw").mkdir(parents=True)

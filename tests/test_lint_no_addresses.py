@@ -40,16 +40,13 @@ def ssh_config_hits(text):
     return hits
 
 
-def lib_files():
-    return [p for p in sorted((REPO / "lib").rglob("*")) if p.is_file() and "__pycache__" not in p.parts]
-
-
 def tree_hits():
     hits = []
     conf = REPO / "dotfiles" / "ssh" / "config"
     hits += ["%s:%d: %s" % (conf.relative_to(REPO), n, w) for n, w in ssh_config_hits(conf.read_text())]
     hits += ["%s:%d: %s" % (conf.relative_to(REPO), n, w) for n, w in text_hits(conf.read_text())]
-    for p in sorted((REPO / "machines").glob("*.conf")) + lib_files():
+    for p in sorted((REPO / "machines").glob("*.conf")) + [
+            p for p in sorted((REPO / "lib").rglob("*")) if p.is_file() and "__pycache__" not in p.parts]:
         text = p.read_text(errors="replace")
         hits += ["%s:%d: %s" % (p.relative_to(REPO), n, w) for n, w in text_hits(text)]
     return hits
