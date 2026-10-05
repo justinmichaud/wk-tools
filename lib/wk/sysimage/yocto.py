@@ -6,10 +6,9 @@ import os
 import re
 import shlex
 
-from wk import act, build, fleet, images, job, pgo, record
+from wk import act, fleet, images, job, pgo, record
 from wk.act import die, info, log, warn
 from wk.presets import disk_gb
-from wk.resources import Budget, Resources, build_jobs
 from wk.sysimage import task
 from wk.sysimage.write import wants_wifi
 
@@ -75,18 +74,15 @@ def cross_preset(name, profile):
     """(cc, cxx, cmake, pgo). The PGO pair share a build directory, so each states both options (WEBKIT_OPTION_CONFLICT)."""
     if name not in CROSS:
         die("no such cross preset '%s'. They are:\n%s" % (name, "".join("      %-22s %s\n" % kv for kv in CROSS.items())))
+    if name != "wpe-cross-pgo-use" and profile:
+        die("--pgo-profile names a profile to build against, and only 'wpe-cross-pgo-use' does")
     if name == "wpe-cross":
-        if profile:
-            die("--pgo-profile names a profile to build against, and 'wpe-cross' does not\n    build against one. That is 'wpe-cross-pgo-use'.")
         return "", "", "", ""
     if name == "wpe-cross-pgo-collect":
-        if profile:
-            die("--pgo-profile names a profile to build against, and '%s' does not\n    build against one. That is 'wpe-cross-pgo-use'." % name)
         return "clang", "clang++", ("-DLTO_MODE=thin -DENABLE_LLVM_PROFILE_GENERATION=ON -DUSE_PGO_PROFILE=OFF -DPGO_PROFILE_DIR=%s"
                                     % pgo.BOARD_DIR), "collect"
     if not profile:
-        die("wpe-cross-pgo-use: no profile given. The measured build reads one merged .profdata,\n"
-            "    and cmake refuses without it (PGO_PROFILE_PATH); 'wk sysimage webkit' collects one first.")
+        die("wpe-cross-pgo-use needs --pgo-profile, the merged .profdata cmake reads (PGO_PROFILE_PATH)")
     return "clang", "clang++", "-DLTO_MODE=full -DENABLE_LLVM_PROFILE_GENERATION=OFF -DUSE_PGO_PROFILE=ON -DPGO_PROFILE_PATH=" + profile, "use"
 
 
@@ -142,9 +138,8 @@ class Yocto(task.ContainerBuilder):
         t = st.recs.find("yocto", ws)
         if t is not None and t.alive(None):
             live = running_stage(t) or t.field("stage")
-            die("a '%s' build is already running in '%s', and the stages share one\n    bitbake build directory -- two cookers "
-                "in it is what bitbake's own lock\n    exists to prevent.\n    Follow it:  wk status %s --log -f\n    Stop it:    %s"
-                % (live, ws, ws, t.field("kill")))
+            die("a '%s' build is already running in '%s', and the stages share one bitbake build directory.\n"
+                "    Follow it:  wk status %s --log -f\n    Stop it:    %s" % (live, ws, ws, t.field("kill")))
         st.refuse_busy()
 
     def ws_head(self, driver, ws):
@@ -153,7 +148,6 @@ class Yocto(task.ContainerBuilder):
         return lines[-1].strip() if r.ok and lines else ""
 
     def ensure_ws(self, driver, ws, base, tag):
-        """The branch is the version pin."""
         super().ensure_ws(driver, ws, base, tag)
         self.checkout(driver, ws)
 
@@ -168,10 +162,9 @@ class Yocto(task.ContainerBuilder):
         line = ("cd /src/WebKit && { git checkout -q %s 2>/dev/null || { git fetch -q %s %s && git checkout -q %s; }; }"
                 % (q(branch), q(remote), q(branch + ":" + branch), q(branch)))
         if not driver.act_exec(ws, ["bash", "-c", line]).ok:
-            die("could not check out '%s' from '%s' in '%s'.\n    That fetch reads this machine's mirror and no upstream, and "
-                "the mirror\n    carries every branch an image workspace checks out -- %s of origin, every head of\n    the other upstreams "
-                "-- so a missing one means the mirror is behind this\n    checkout:\n        wk sync\n    If the mirror does "
-                "have it, 'wk sync %s' reports the workspace's remotes\n    and '--fix' re-asserts them."
+            die("could not check out '%s' from '%s' in '%s'. The fetch reads this machine's mirror, which\n"
+                "    carries %s of origin and every head of the other upstreams; if it is behind:  wk sync\n"
+                "    If it is not, 'wk sync %s --fix' re-asserts the workspace's remotes."
                 % (branch, remote, ws, " ".join(["main"] + images.origin_branches(self.env)), ws))
 
     def sections(self, driver, ws):
@@ -188,17 +181,13 @@ class Yocto(task.ContainerBuilder):
             return
         have = self.sections(driver, ws)
         if have is None:
-            die("could not read Tools/yocto/targets.conf in '%s', so whether %s has a\n    [%s] section is unknown -- and a "
-                "build configured from a section that is\n    not there fails inside bitbake, hours later. Check the "
-                "workspace is up:  wk status %s" % (ws, branch, t, ws))
+            die("could not read Tools/yocto/targets.conf in '%s' to check %s has a [%s] section.\n"
+                "    Check the workspace is up:  wk status %s" % (ws, branch, t, ws))
         if t in have:
             return
-        die("%s has no [%s] section in Tools/yocto/targets.conf, so there is nothing\n    for bitbake to configure from. "
-            "The machine is not what is missing -- the\n    meta-raspberrypi these manifests pin carries it -- but WebKit's "
-            "own glue is:\n    the section and the local.conf it names. Add both upstream, or have the\n    profile derive them "
-            "(YOC_PORT_TARGET_FROM=<a cross target this branch has>,\n    YOC_MACHINE=<the MACHINE it selects>; "
-            "image/configs/wpewebkit-2.46-yocto-rpi5-64.conf\n    is the worked example). The sections here are:\n%s"
-            % (branch, t, "".join("      %s\n" % s for s in have)))
+        die("%s has no [%s] section in Tools/yocto/targets.conf. Add it and its local.conf upstream, or have\n"
+            "    the profile derive them (YOC_PORT_TARGET_FROM, YOC_MACHINE; see image/configs/wpewebkit-2.46-yocto-rpi5-64.conf).\n"
+            "    The sections here are:\n%s" % (branch, t, "".join("      %s\n" % s for s in have)))
 
     def target_note(self, driver, ws):
         t = self.p["YOC_TARGET"]
@@ -268,8 +257,7 @@ class Yocto(task.ContainerBuilder):
                 die("--commit/--slot belong to the webkit stage (wk sysimage webkit %s)" % self.name)
             if not (commit and slot):
                 die("a slot needs both --commit <sha> and --slot <name>")
-            if not re.match(r"^[0-9a-f]{40}$", commit):
-                die("--commit takes a full sha (40 hex digits), got '%s'" % commit)
+            task.check_commit(commit)
         preset = o.get("--preset") or "wpe-cross"
         if stage != "webkit" and (preset != "wpe-cross" or o.get("--pgo-profile")):
             die("--preset and --pgo-profile belong to the webkit stage; '%s' builds no WebKit" % stage)
@@ -281,18 +269,13 @@ class Yocto(task.ContainerBuilder):
                     local=(self.p["YOC_LOCAL_LAYER"] != "0") if local is None else local,
                     tailnet=True if tail is None else tail)
 
-    def sizes(self):
-        env = dict(self.env, WK_MB_PER_JOB=str(WEBKIT_MB_PER_JOB))
-        res, budget = Resources(self.here, env), Budget(self.here, env, self.clock)
-        running = budget.running(build.holder_alive(self.reg))
-        return res.envelope_cores(), res.envelope_mem_mb(), build_jobs(res, budget, running), budget, running
+    @staticmethod
+    def sizes(st):
+        budget, running, webkit_jobs = st.size(mb=WEBKIT_MB_PER_JOB)
+        return st.res.envelope_cores(), st.res.envelope_mem_mb(), webkit_jobs, budget, running
 
     def argv(self, driver, ws, o, cores, stage_mb, webkit_jobs, tag):
-        p, q = self.p, o
-
-        def opt(flag, value):
-            return [flag, value] if value else []
-
+        p, q, opt = self.p, o, task.opt
         return (["python3", driver.tools(ws) + "/lib/wk/sysimage/yocto_ws.py", "--target", p["YOC_TARGET"],
                  "--image", p["YOC_IMAGE"], "--stage", q["stage"], "--jobs", str(cores), "--mem-budget", str(stage_mb),
                  "--rm-work", "1" if q["rm_work"] else "0"]
@@ -313,18 +296,17 @@ class Yocto(task.ContainerBuilder):
     def build(self, rest):
         o = self.parse(rest)
         driver = self.driver()
-        ws = o.get("--workspace") or images.image_ws(self.name, self.env)
+        ws = self.ws_of(o)
         st = self.stage(driver, ws, o["stage"])
         if act.dry_run():
-            return self.report(driver, ws, o)
+            return self.report(driver, st, ws, o)
         if o.get("--stop"):
             return self.stop(driver, st, ws, o["stage"])
         self.refuse_running(st, ws)
         if o.get("--detach"):
-            return st.detach([os.path.join(self.root, "wk"), "sysimage", "build", self.spec] + [a for a in rest if a != "--detach"],
-                             "'%s' stage of %s" % (o["stage"], self.name))
+            return self.detach(st, "build", rest, "'%s' stage of %s" % (o["stage"], self.name))
         base, tag = self.host_image()
-        cores, mem, webkit_jobs, budget, running = self.sizes()
+        cores, mem, webkit_jobs, budget, running = self.sizes(st)
         jobs, stage_mb = stage_budget(o["stage"], cores, mem, webkit_jobs)
         what = {"pgo-mix": "mixing this collection", "webkit": "this WebKit cross build"}.get(o["stage"], "this image build")
         lock = st.admit(budget, running, jobs, disk_need(o["stage"], o["chromium"], o["rm_work"], self.env), what)
@@ -362,11 +344,7 @@ class Yocto(task.ContainerBuilder):
         log("  build is:  wk sysimage build %s --stage webkit" % self.spec)
         return 0
 
-    def du(self, path):
-        words = self.here.run(["du", "-sh", path]).out.split()
-        return words[0] if words else "not created yet"
-
-    def report(self, driver, ws, o):
+    def report(self, driver, st, ws, o):
         p, stage = self.p, o["stage"]
         if stage == "pgo-mix":
             log("would mix the collection for slot '%s' of %s" % (o["slot"], self.name))
@@ -378,7 +356,7 @@ class Yocto(task.ContainerBuilder):
             log("dry run -- nothing was mixed.")
             return 0
         at = "not created" if driver.info(ws) == "absent" else self.ws_head(driver, ws)
-        cores, mem, webkit_jobs, budget, _ = self.sizes()
+        cores, mem, webkit_jobs, budget, _ = self.sizes(st)
         cache = os.path.join(self.store.store_dir(), "cache", "yocto")
         wifi = wants_wifi(fleet.Fleet(images.root(self.env), self.env), p["IMG_MACHINE"])
         free = budget.free_gb(self.store.admission_dir())

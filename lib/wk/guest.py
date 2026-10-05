@@ -849,10 +849,6 @@ def unblock_desktop(root, g):
     return r.ok and setup_assistant(g) == "gone"
 
 
-def running_rows(vm):
-    return "".join("      %s\n" % n for n in vm.running_vms())
-
-
 def admit(host, name, mine):
     """Virtualization.framework counts every VM on the host, the podman machine too, against one limit."""
     vm, env = host.vm, host.env
@@ -861,7 +857,7 @@ def admit(host, name, mine):
         die("%d VM(s) are already running on this host:\n%s    Virtualization.framework permits %d and refuses the next one "
             "with\n    VZErrorDomain code 6, in that guest's run log and nowhere else. Free a slot\n    with 'wk stop <name>', "
             "or with 'podman machine stop %s' -- that machine\n    carries the container workspaces, which survive it being down."
-            % (len(running), running_rows(vm), most, vm.podman_machine()))
+            % (len(running), "".join("      %s\n" % n for n in running), most, vm.podman_machine()))
     memory_budget(host, name, mine)
     host_disk(host)
 

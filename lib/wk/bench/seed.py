@@ -112,6 +112,18 @@ class Seeder:
         return dest
 
 
+def pin(machine, lock, store, read, plan):
+    text = plan_json(read, plan)
+    return text, Seeder(machine, lock, os.path.join(store.cache_dir(), "bench"), store.mirror_dir()).seed(plan, text)
+
+
+def ws_reader(driver, ws):
+    def read(path):
+        r = driver.exec(ws, ["cat", "%s/Tools/Scripts/%s" % (driver.src(ws), path)])
+        return r.out.replace("\r", "") if r.ok else None
+    return read
+
+
 def rubble(machine, lock, seed_dir):
     """A `.tmp-` assembly nobody holds the lock of, and a payload a newer seed of its plan supersedes."""
     from wk.rubble import du_kb, remover, row

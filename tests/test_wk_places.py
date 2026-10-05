@@ -64,36 +64,21 @@ class DriversTest(unittest.TestCase):
 
 
 class TestSessionSocket(unittest.TestCase):
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-session-socket-"))
-        self.addCleanup(lambda: os.system("rm -rf %s" % self.tmp))
-        self.env = {"XDG_RUNTIME_DIR": str(self.tmp)}
-
-    def sock_path(self):
-        return Path(places.session_socket_path(self.env))
-
-    def test_the_path_is_under_the_runtime_dir(self):
-        self.assertEqual(self.sock_path(), self.tmp / "wk" / "display" / "wayland-0")
-
-    def test_absent_is_not_present(self):
-        self.assertFalse(places.session_socket_present(self.env))
-
-    def test_a_real_socket_is_present(self):
+    def test_only_a_real_socket_under_the_runtime_dir_is_present(self):
         import socket
-        self.sock_path().parent.mkdir(parents=True)
+        tmp = Path(tempfile.mkdtemp(prefix="wk-test-session-socket-"))
+        self.addCleanup(lambda: os.system("rm -rf %s" % tmp))
+        env = {"XDG_RUNTIME_DIR": str(tmp)}
+        path = Path(places.session_socket_path(env))
+        self.assertFalse(places.session_socket_present(env))
+        path.parent.mkdir(parents=True)
+        path.write_text("")
+        self.assertFalse(places.session_socket_present(env))
+        path.unlink()
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.addCleanup(s.close)
-        s.bind(str(self.sock_path()))
-        self.assertTrue(places.session_socket_present(self.env))
-
-    def test_a_plain_file_of_the_same_name_is_not_present(self):
-        self.sock_path().parent.mkdir(parents=True)
-        self.sock_path().write_text("")
-        self.assertFalse(places.session_socket_present(self.env))
-
-    def test_no_xdg_runtime_dir_falls_back_to_run_user_uid(self):
-        self.assertEqual(places.session_socket_path({}),
-                         os.path.join("/run/user/%d" % os.getuid(), "wk", "display", "wayland-0"))
+        s.bind(str(path))
+        self.assertTrue(places.session_socket_present(env))
 
 
 class TestRegistry(DriversTest):
@@ -563,6 +548,7 @@ class DriverConformance:
     cls = None
     ws = "ws"
     down = None
+    platform = "linux"
 
     def test_the_driver_implements_the_whole_interface(self):
         for name, fn in inspect.getmembers(places.Driver, inspect.isfunction):
@@ -575,6 +561,7 @@ class DriverConformance:
         self.assertIs(type(t), self.cls)
         self.assertEqual(t.info(self.ws), self.down)
         self.assertEqual(t.state(self.ws), "present")
+        self.assertEqual(t.os(), self.platform)
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertTrue(t.start(self.ws))
         self.assertTrue(self.brought_up(t))
@@ -608,7 +595,7 @@ class TestRemoteConformance(RemoteTest, DriverConformance):
 
 
 class TestLocalConformance(DriversTest, DriverConformance):
-    cls, down = places.LocalWorkspace, "running"
+    cls, down, platform = places.LocalWorkspace, "running", "macos" if IS_MACOS else "linux"
 
     def stopped(self):
         marker = self.tmp / "marker"
@@ -641,34 +628,16 @@ class TestContainerWrite(DriversTest):
         flags = argv[argv.index("--additional-flags") + 1].split()
         return list(zip(flags[0::2], flags[1::2]))
 
-    def expected_flag_pairs(self, ws, arch, mem, cpus, gpu):
-        st, ws_dir, mirror = self.t.store, self.t.store.ws_dir(ws), self.t.store.mirror_dir()
-        root, proxy = st.store_dir(), "http://127.0.0.1:3128"
-        pairs = [("--volume", "%s:/opt/wk-tools:ro" % self.t.tools_src()),
-                 ("--volume", "%s:%s:ro" % (os.path.dirname(mirror), os.path.dirname(mirror))), ("--env", "WK_MIRROR=%s" % mirror),
-                 ("--volume", "%s:/src/WebKit:O,upperdir=%s/changes,workdir=%s/overlay-work" % (st.snapshot_tree(self.base), ws_dir, ws_dir)),
-                 ("--volume", "%s/build:/src/WebKit/WebKitBuild" % ws_dir), ("--volume", "%s:/var/lib/wk/ws/%s" % (ws_dir, ws))]
-        pairs += [("--volume", "%s/%s:%s" % (root, sub, dest)) for sub, dest in (
-            ("cache/ccache", "/ccache"), ("cache/yocto", "/cache/yocto"), ("cache/buildroot", "/cache/buildroot"),
-            ("cache/bench", "/cache/bench"), ("skills", "/skills"))]
-        pairs += [("--volume", "%s:/secrets:ro" % st.keyring_view_dir("container")), ("--volume", "%s/agent-rw:/agent-rw" % root),
-                  ("--memory", "%dm" % mem), ("--cpus", str(cpus))]
-        pairs += [("--env", kv) for kv in (
-            "CCACHE_DIR=/ccache", "CCACHE_MAXSIZE=40G", "CCACHE_BASEDIR=/src/WebKit",
-            "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime", "CCACHE_PCH_EXTSUM=true",
-            "CCACHE_DEPEND=true", "CCACHE_NOHASHDIR=true", "DL_DIR=/cache/yocto/downloads", "SSTATE_DIR=/cache/yocto/sstate",
-            "BR2_DL_DIR=/cache/buildroot/dl", "BR2_CCACHE_DIR=/cache/buildroot/ccache", "WK_WORKSPACE=%s" % ws, "WK_ARCH=%s" % arch,
-            "WKDEV_OFFLINE=1", "WK_LOCAL_STORE=/var/lib/wk")]
-        pairs += [("--volume", "%s:/run/wk" % self.t.runtime_dir()), ("--env", "WK_PROXY_SOCKET=/run/wk/proxy.sock")]
-        pairs += [("--env", "%s=%s" % (v, proxy)) for v in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")]
-        pairs += [("--env", "%s=localhost,127.0.0.1,::1" % v) for v in ("no_proxy", "NO_PROXY")]
-        return pairs + [("--env", "WAYLAND_DISPLAY=/run/wk/display/wayland-0")] + gpu
-
     def test_create_hands_wkdev_create_every_flag_a_workspace_needs(self):
         _, err = self.stderr_of(lambda: self.t.create("new", self.base))
         argv = self.wkdev_create()
-        self.assertEqual(self.flag_pairs(argv), self.expected_flag_pairs("new", "native", 19749, 7, [("--device", "/dev/dri")]))
         u, ws_dir = self.t.user(), self.t.store.ws_dir("new")
+        pairs = self.flag_pairs(argv)
+        for pair in (("--volume", "%s:/src/WebKit:O,upperdir=%s/changes,workdir=%s/overlay-work" % (self.t.store.snapshot_tree(self.base), ws_dir, ws_dir)),
+                     ("--volume", "%s:/opt/wk-tools:ro" % self.t.tools_src()), ("--memory", "19749m"), ("--cpus", "7"),
+                     ("--volume", "%s:/secrets:ro" % self.t.store.keyring_view_dir("container")), ("--env", "WK_WORKSPACE=new"),
+                     ("--env", "https_proxy=http://127.0.0.1:3128"), ("--device", "/dev/dri")):
+            self.assertIn(pair, pairs)
         head = argv[argv.index("--network"):argv.index("--additional-flags")]
         self.assertEqual(head, ("--network", "none", "--isolated", "--name", "wk-new", "--shell", "/bin/bash", "--user", u, "--group", u,
                                 "--home", os.path.join(ws_dir, "home")))
@@ -1282,12 +1251,6 @@ class TestBuildSize(DriversTest):
             self.assertEqual(vm.build_size("g"), (3, 4096, None))
 
 
-class TestBuildBridges(DriversTest):
-    def test_a_branch_fetch_asks_the_mirror_first_or_origin_alone(self):
-        self.assertEqual(git.origin_branch_fetch_step("b", "").strip(), "git fetch -q origin b")
-        self.assertIn("git fetch -q /m +refs/heads/b:refs/remotes/origin/b", git.origin_branch_fetch_step("b", "/m"))
-
-
 class _KillExecTarget(places.Driver):
     def __init__(self, result):
         super().__init__("t", str(REPO), {}, Fake("here"))
@@ -1329,12 +1292,6 @@ class TestAMacHostReadsTheContainerStoreInThePodmanMachine(unittest.TestCase):
         self.assertEqual(["podman", "machine", "ssh", "wk", "--"], argv[:5])
         self.assertIn("/opt/wk-tools/wk enter w -- sh -c 'echo $0' 'a b'", argv[5])
         self.assertNotIn("WK_DRY_RUN", argv[5], "a read in a dry run is still a read; the far wk would refuse --dry-run")
-
-    def test_the_podman_machine_is_not_a_copy_path(self):
-        from wk.machine import PodmanVm
-        with self.assertRaises(NotImplementedError):
-            PodmanVm("wk", via=Fake()).copy_in("/a", "/b")
-
 
 class TestThePodmanMachineRecord(DriversTest):
     def test_the_record_and_its_ssh(self):

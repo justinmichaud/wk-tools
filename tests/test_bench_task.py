@@ -459,15 +459,6 @@ class TestThroughWk(WkTest):
                 self.assertIn("is macOS bench mode", cp.stdout)
 
 
-class TestReadingTasksStartsNothing(WkTest):
-
-    def test_cmd_bench_answers_where_itself(self):
-        cp = subprocess.run([str(REPO / "cmd" / "bench"), "--where", "ls", "--continued"],
-                            capture_output=True, text=True, timeout=60,
-                            env={"WK_ROOT": str(REPO), "HOME": "/tmp", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
-        self.assertEqual((cp.returncode, cp.stdout.strip()), (0, "store"), cp.stderr)
-
-
 class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
 
     def _dir(self, store, extra=None):

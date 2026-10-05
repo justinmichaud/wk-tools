@@ -37,16 +37,9 @@ def _machine(ps_out):
 
 
 class TestTheProcessReadings(unittest.TestCase):
-    def test_a_linker_named_by_its_full_path_is_counted(self):
+    def test_every_compiler_and_linker_counts_busiest_first_by_either_spelling(self):
         self.assertEqual(job.build_processes(_machine(DARWIN_PS)), [(99.5, "ld")])
-
-    def test_every_compiler_counts_not_only_the_first(self):
-        self.assertEqual(len(job.build_processes(_machine(LINUX_PS))), 3)
-
-    def test_the_busiest_comes_first(self):
-        self.assertEqual(job.build_processes(_machine(LINUX_PS))[0], (12.0, "cc1plus"))
-
-    def test_a_machine_building_nothing_counts_nothing(self):
+        self.assertEqual(job.build_processes(_machine(LINUX_PS)), [(12.0, "cc1plus"), (11.5, "cc1plus"), (9.0, "clang++")])
         self.assertEqual(job.build_processes(_machine(IDLE_PS)), [])
 
     def test_the_reading_never_names_its_own_reader(self):
@@ -70,7 +63,6 @@ class TestWhatTheReportClaims(unittest.TestCase):
     def test_a_machine_doing_nothing_is_reported_as_doing_nothing(self):
         out = self._report(IDLE_PS)
         self.assertNotIn("% CPU", out, out)
-
 
 
 if __name__ == "__main__":

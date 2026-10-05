@@ -1,10 +1,4 @@
-"""`wk key backup`: lib/wk/backup.py's dconf junk filter, the atomic (write only
-when content differs) writer, the macOS and Linux flows, and the --candidates
-scanner -- all against a Fake machine, so nothing here runs a real `defaults`,
-`dconf` or `plutil`.
-
-Run: python3 -m unittest tests.test_backup -v
-"""
+"""`wk key backup` (lib/wk/backup.py) against a Fake machine: nothing here runs a real `defaults`, `dconf` or `plutil`."""
 
 import contextlib
 import io
@@ -22,8 +16,6 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import backup  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
-
-# --- dconf_filter -------------------------------------------------------------
 
 FAKE_DUMP = """\
 [org/gnome/desktop/interface]
@@ -54,73 +46,30 @@ last-used=int64 1782745000
 
 
 class TestDconfFilter(unittest.TestCase):
-    def test_strips_the_four_known_junk_kinds(self):
-        out = backup.dconf_filter(FAKE_DUMP)
-        self.assertNotIn("weather", out, "weather location not stripped")
-        self.assertNotIn("Edmonton", out, "weather location not stripped")
-        self.assertNotIn("nm-applet", out, "WiFi 802.1X UUID section not stripped")
-        self.assertNotIn("2adb305e", out, "WiFi UUID not stripped")
-        self.assertNotIn("last-folder-path", out, "GTK last-folder not stripped")
-        self.assertNotIn("Ptyxis/Profiles", out, "Ptyxis profile UUID not stripped")
-        self.assertNotIn("491ed247", out, "Ptyxis profile UUID not stripped")
-        self.assertNotIn("last-used", out, "Ptyxis profile timestamp not stripped")
+    def test_the_junk_goes_and_the_settings_stay(self):
+        out = backup.dconf_filter(FAKE_DUMP + "\n[org/gnome/shell]\nwelcome-dialog-last-shown-version='46.0'\n"
+                                  "last-selected-power-profile='performance'\nfavorite-apps=['firefox_firefox.desktop']\n"
+                                  "\n[org/gnome/shell/looking-glass]\nlooking-glass-history=['1 + 1']\n")
+        for junk in ("weather", "Edmonton", "nm-applet", "2adb305e", "last-folder-path", "Ptyxis/Profiles", "491ed247", "last-used",
+                     "welcome-dialog-last-shown-version", "last-selected-power-profile", "looking-glass-history"):
+            self.assertNotIn(junk, out)
+        for kept in ("org/gnome/desktop/interface", "color-scheme='prefer-dark'", "two-finger-scrolling-enabled=true",
+                     "org/gnome/Ptyxis/Shortcuts", "copy-clipboard=", "favorite-apps="):
+            self.assertIn(kept, out)
 
-    def test_keeps_real_settings(self):
-        out = backup.dconf_filter(FAKE_DUMP)
-        self.assertIn("org/gnome/desktop/interface", out)
-        self.assertIn("color-scheme='prefer-dark'", out)
-        self.assertIn("two-finger-scrolling-enabled=true", out)
-        self.assertIn("org/gnome/Ptyxis/Shortcuts", out)
-        self.assertIn("copy-clipboard=", out)
-
-    def test_known_line_level_junk_still_filtered(self):
-        dump = (
-            "[org/gnome/shell]\n"
-            "welcome-dialog-last-shown-version='46.0'\n"
-            "last-selected-power-profile='performance'\n"
-            "favorite-apps=['firefox_firefox.desktop']\n"
-            "\n"
-            "[org/gnome/shell/looking-glass]\n"
-            "looking-glass-history=['1 + 1']\n"
-        )
-        out = backup.dconf_filter(dump)
-        self.assertNotIn("welcome-dialog-last-shown-version", out)
-        self.assertNotIn("last-selected-power-profile", out)
-        self.assertNotIn("looking-glass-history", out)
-        self.assertIn("favorite-apps=", out)
-
-
-# --- atomic_update ----------------------------------------------------------
 
 class TestAtomicUpdate(unittest.TestCase):
-    def test_identical_content_leaves_target_untouched(self):
+    def test_it_writes_only_what_differs(self):
         f = Fake("here")
-        f.files["/conf/target"] = "same content\n"
-        changed = backup.atomic_update(f, "/conf/target", "same content\n", "label")
-        self.assertFalse(changed)
-        self.assertEqual(f.files["/conf/target"], "same content\n")
-        self.assertEqual([e for e in f.effects if e[0] == "write"], [])
-
-    def test_different_content_replaces_target(self):
-        f = Fake("here")
-        f.files["/conf/target"] = "old content\n"
-        changed = backup.atomic_update(f, "/conf/target", "new content\n", "label")
-        self.assertTrue(changed)
-        self.assertEqual(f.files["/conf/target"], "new content\n")
-
-    def test_missing_target_is_created(self):
-        f = Fake("here")
-        changed = backup.atomic_update(f, "/conf/target", "brand new\n", "label")
-        self.assertTrue(changed)
-        self.assertEqual(f.files["/conf/target"], "brand new\n")
+        f.files["/conf/same"], f.files["/conf/old"] = "same\n", "old\n"
+        self.assertEqual([False, True, True], [backup.atomic_update(f, "/conf/" + n, c, "label")
+                                               for n, c in (("same", "same\n"), ("old", "new\n"), ("absent", "brand new\n"))])
+        self.assertEqual(["/conf/old", "/conf/absent"], [e[1] for e in f.effects if e[0] == "write"])
+        self.assertEqual((f.files["/conf/old"], f.files["/conf/absent"]), ("new\n", "brand new\n"))
 
 
 class TestWritePipelineNeverTruncates(unittest.TestCase):
-    """`Machine.write` (lib/wk/machine.py) is itself a tmp-file-then-`os.replace`
-    on the same filesystem, so a write that cannot complete -- simulated here
-    with a read-only directory, which fails exactly the way a full disk or a
-    permission error would in the field -- must never touch the target: it is
-    the old file, byte for byte, or the new one, never a partial write."""
+    """A write that cannot complete (a read-only directory fails as a full disk would) leaves the old file, byte for byte."""
 
     def setUp(self):
         import shutil
@@ -147,63 +96,36 @@ class TestWritePipelineNeverTruncates(unittest.TestCase):
             self.assertEqual(f.read(), original, "target was touched despite the failure")
 
 
-# --- macos_backup / linux_backup --------------------------------------------
+def mac(conf, reads, hotkeys=None):
+    """A Mac whose defaults.conf is `conf` and whose `defaults read <domain> <key>` answers `reads`."""
+    f = Fake("here")
+    f.files["/root/host/macos/defaults.conf"] = conf
+    for (domain, key), (rc, out) in reads.items():
+        f.answer(["defaults", "read", domain, key], rc, out)
+    f.answer(["defaults", "export", "com.apple.symbolichotkeys"], 0)
+    f.answer(["plutil", "-convert", "xml1"], 0)
+    f.files["/tmp/wk-backup-hotkeys.%d" % os.getpid()] = "<plist/>\n"
+    if hotkeys:
+        f.files["/root/host/macos/symbolichotkeys.plist"] = hotkeys
+    return f
+
 
 class TestMacosBackup(unittest.TestCase):
-    def test_refreshes_values_and_keeps_comments_and_ordering(self):
-        f = Fake("here")
-        conf = "# a comment\n\nNSGlobalDomain AppleShowAllExtensions bool true\ncom.apple.dock tilesize int 36\n"
-        f.files["/root/host/macos/defaults.conf"] = conf
-        f.answer(["defaults", "read", "NSGlobalDomain", "AppleShowAllExtensions"], 0, "0\n")
-        f.answer(["defaults", "read", "com.apple.dock", "tilesize"], 0, "48\n")
-        f.answer(["defaults", "export", "com.apple.symbolichotkeys"], 0)
-        f.answer(["plutil", "-convert", "xml1"], 0)
-        f.files["/tmp/wk-backup-hotkeys.%d" % os.getpid()] = "<plist/>\n"
-
-        n = backup.macos_backup(f, "/root")
-        self.assertEqual(n, 2)
-        new_conf = f.files["/root/host/macos/defaults.conf"]
-        self.assertIn("# a comment", new_conf)
-        self.assertIn("NSGlobalDomain AppleShowAllExtensions bool false", new_conf)
-        self.assertIn("com.apple.dock tilesize int 48", new_conf)
-        # order preserved: the comment line is still first, the dock line still last
-        lines = [l for l in new_conf.splitlines() if l]
-        self.assertEqual(lines[0], "# a comment")
-        self.assertEqual(lines[-1], "com.apple.dock tilesize int 48")
-
-    def test_a_refreshed_value_keeps_its_reason(self):
-        f = Fake("here")
-        f.files["/root/host/macos/defaults.conf"] = "com.apple.dock tilesize int 36 the person's choice: icon size\n"
-        f.answer(["defaults", "read", "com.apple.dock", "tilesize"], 0, "48\n")
-        f.answer(["defaults", "export", "com.apple.symbolichotkeys"], 0)
-        f.answer(["plutil", "-convert", "xml1"], 0)
-        f.files["/tmp/wk-backup-hotkeys.%d" % os.getpid()] = "<plist/>\n"
-        backup.macos_backup(f, "/root")
-        self.assertIn("com.apple.dock tilesize int 48 the person's choice: icon size", f.files["/root/host/macos/defaults.conf"])
+    def test_refreshes_values_and_keeps_comments_ordering_and_reasons(self):
+        f = mac("# a comment\n\nNSGlobalDomain AppleShowAllExtensions bool true\ncom.apple.dock tilesize int 36 the person's choice\n",
+                {("NSGlobalDomain", "AppleShowAllExtensions"): (0, "0\n"), ("com.apple.dock", "tilesize"): (0, "48\n")})
+        self.assertEqual(2, backup.macos_backup(f, "/root"))
+        self.assertEqual(["# a comment", "NSGlobalDomain AppleShowAllExtensions bool false", "com.apple.dock tilesize int 48 the person's choice"],
+                         [l for l in f.files["/root/host/macos/defaults.conf"].splitlines() if l])
 
     def test_a_value_no_longer_set_keeps_the_recorded_one(self):
-        f = Fake("here")
-        f.files["/root/host/macos/defaults.conf"] = "com.example.app somekey string was\n"
-        f.answer(["defaults", "read", "com.example.app", "somekey"], 1, "")
-        f.answer(["defaults", "export", "com.apple.symbolichotkeys"], 0)
-        f.answer(["plutil", "-convert", "xml1"], 0)
-        f.files["/tmp/wk-backup-hotkeys.%d" % os.getpid()] = "<plist/>\n"
-
+        f = mac("com.example.app somekey string was\n", {("com.example.app", "somekey"): (1, "")})
         backup.macos_backup(f, "/root")
         self.assertIn("com.example.app somekey string was", f.files["/root/host/macos/defaults.conf"])
 
     def test_no_changes_reports_unchanged(self):
-        f = Fake("here")
-        f.files["/root/host/macos/defaults.conf"] = "com.example.app flag bool true\n"
-        f.answer(["defaults", "read", "com.example.app", "flag"], 0, "1\n")
-        f.answer(["defaults", "export", "com.apple.symbolichotkeys"], 0)
-        f.answer(["plutil", "-convert", "xml1"], 0)
-        hk_path = "/root/host/macos/symbolichotkeys.plist"
-        f.files[hk_path] = "<plist/>\n"
-        f.files["/tmp/wk-backup-hotkeys.%d" % os.getpid()] = "<plist/>\n"
-
-        n = backup.macos_backup(f, "/root")
-        self.assertEqual(n, 0)
+        f = mac("com.example.app flag bool true\n", {("com.example.app", "flag"): (0, "1\n")}, hotkeys="<plist/>\n")
+        self.assertEqual(0, backup.macos_backup(f, "/root"))
 
 
 class TestLinuxBackup(unittest.TestCase):
@@ -252,7 +174,6 @@ class TestKillpointsKeyBackup(unittest.TestCase):
                     backup.main("/root", False, w.fake, macos)
             converges(self, lambda: self.world(macos), run_once, lambda w: dict(w.fake.files))
 
-
     def test_a_dry_run_records_the_wet_runs_writes_and_makes_none(self):
         for macos in (False, True):
             with self.subTest(macos=macos):
@@ -285,8 +206,6 @@ class TestRpi5TuningIsBackedUp(unittest.TestCase):
         self.assertNotIn("kbuild", text)
 
 
-# --- --candidates -------------------------------------------------------------
-
 class TestCandidates(unittest.TestCase):
     def test_keeps_real_settings_drops_noise_and_known_entries(self):
         import plistlib
@@ -312,25 +231,13 @@ class TestCandidates(unittest.TestCase):
         for noisy in ("NSWindow Frame calculator", "LastCheckDate", "SomeUUID",
                       "SUEnableAutomaticChecks", "AlreadyTracked", "NestedThing"):
             self.assertNotIn(noisy, keys, "%r should have been filtered" % noisy)
-
-    def test_read_only_makes_no_effect(self):
-        """Every call `candidates` makes is a read (`defaults domains`/`export`): no write, install or removal."""
-        f = Fake("here")
-        f.answer(["defaults", "domains"], 0, "")
-        backup.candidates(f, "")
-        self.assertEqual([e for e in f.effects if e[0] != "run"], [])
+        self.assertEqual([e for e in f.effects if e[0] != "run"], [], "it only reads")
 
 
 class TestBackupMain(unittest.TestCase):
     def test_candidates_refuses_off_macos(self):
         with self.assertRaises(Refused):
             backup.main("/root", True, Fake("here"), macos=False)
-
-    def test_dispatches_to_linux_backup_off_macos(self):
-        f = Fake("here")
-        f.answer(["dconf", "dump", "/"], 0, "[a]\nb=1\n")
-        self.assertEqual(backup.main("/root", False, f, macos=False), 0)
-        self.assertIn("/root/host/linux/config.dconf", f.files)
 
 
 if __name__ == "__main__":

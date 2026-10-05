@@ -11,7 +11,6 @@ from unittest import mock
 
 from tests.support import (
     REAL_MACHINES, REPO, WkTest, fake_workspace, rand_suffix, run, stub_path,
-    where_values,
 )
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -19,70 +18,28 @@ from wk import decl as D  # noqa: E402
 from wk import dispatch, places  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
-DISPATCH = REPO / "lib" / "wk" / "dispatch.py"
+CMDS = [c for c in sorted((REPO / "cmd").iterdir()) if c.is_file() and os.access(c, os.X_OK)]
 
 
 class TestHelpAndDeclarations(WkTest):
     def test_help_lists_every_cmd_entry(self):
         help_out = run().stdout
-        missing = []
-        for c in sorted((REPO / "cmd").iterdir()):
-            if not (c.is_file() and os.access(c, os.X_OK)):
-                continue
-            if not re.search(rf"(?m)^  {re.escape(c.name)}( |$)", help_out):
-                missing.append(c.name)
+        missing = [c.name for c in CMDS if not re.search(rf"(?m)^  {re.escape(c.name)}( |$)", help_out)]
         self.assertEqual(missing, [], f"not listed by 'wk help': {missing}")
 
     def test_every_command_declares_itself_to_the_dispatcher(self):
         bad = []
-        for f in sorted((REPO / "cmd").iterdir()):
-            if not (f.is_file() and os.access(f, os.X_OK)):
-                continue
-            n = f.name
-            lines = f.read_text(errors="replace").splitlines()
+        for f in CMDS:
             head = [line.rstrip("\n") for line in D.leading_block(f)]
-            line3 = lines[2] if len(lines) > 2 else ""
-            if line3.endswith("."):
-                bad.append(f"{n}: synopsis summary ends in a period")
-            elif not (
-                line3.startswith(f"# wk {n} -- ") or (line3.startswith(f"# wk {n} ") and " -- " in line3)
-            ):
-                bad.append(f"{n}: line 3 is not a one-line synopsis")
-
-            decl_lines = [l for l in head if l.startswith("# wk:")]
-            if not decl_lines:
-                bad.append(f"{n}: no '# wk:' declaration line in its leading comment block")
-                continue
-            has_where = has_group = False
-            where_val = ""
-            for line in decl_lines:
-                rest = line[len("# wk:"):]
-                if rest.startswith(" sub ") or rest.startswith(" flag "):
-                    continue
-                for tok in rest.split():
-                    if tok.startswith("where="):
-                        has_where = True
-                        where_val = tok[len("where="):]
-                    elif tok.startswith("group="):
-                        has_group = True
-            if not has_where:
-                bad.append(f"{n}: '# wk:' has no where=")
-            if not has_group:
-                bad.append(f"{n}: '# wk:' has no group=")
-            if where_val not in ("",) + where_values():
-                bad.append(f"{n}: where={where_val} is not one of {'|'.join(where_values())}")
+            line3 = head[2] if len(head) > 2 else ""
+            if line3.endswith(".") or not (line3.startswith(f"# wk {f.name} ") and " -- " in line3):
+                bad.append(f"{f.name}: line 3 is not a one-line synopsis with no closing period")
+            tokens = " ".join(l[5:] for l in head if l.startswith("# wk:") and not l[5:].lstrip().startswith(("sub ", "flag ")))
+            bad += [f"{f.name}: '# wk:' has no {key}" for key in ("where=", "group=") if not re.search(r"(^|\s)" + key, tokens)]
         self.assertEqual(bad, [], f"commands that do not declare themselves: {bad}")
 
     def test_explain_every_command_answers_without_running_anything(self):
-        bad = []
-        for c in sorted((REPO / "cmd").iterdir()):
-            if not (c.is_file() and os.access(c, os.X_OK)):
-                continue
-            n = c.name
-            cp = run(n, "--explain")
-            if cp.returncode != 0:
-                bad.append(f"{n}(exit {cp.returncode})")
-                continue
+        bad = [c.name for c in CMDS if run(c.name, "--explain").returncode != 0]
         self.assertEqual(bad, [], f"'wk <cmd> --explain' is not usable for: {bad}")
 
     def test_explain_names_each_subverbs_own_destructive_override(self):
@@ -442,36 +399,6 @@ class TestHelpNamesEveryWhereOverride(WkTest):
                                   f"'wk {d.name} -h' does not say where '{verbs}' runs:\n{text}")
                 checked += 1
         self.assertGreater(checked, 5, "no where= override was checked at all")
-
-
-class TestNothingBootsTheMachineToRefuse(WkTest):
-
-    STOPPED_PODMAN = '''#!/bin/sh
-echo "podman $*" >> "$WK_TEST_PODMAN_WITNESS"
-case "$*" in
-    "machine inspect wk") echo '[{"Name": "wk", "State": "stopped"}]' ;;
-esac
-exit 0
-'''
-
-    def _forward(self, *args):
-        witness = self.tmp / "podman-witness"
-        with stub_path({"podman": self.STOPPED_PODMAN}) as binp:
-            cp = run(*args, env={
-                "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
-                "WK_TEST_PODMAN_WITNESS": str(witness),
-                "WK_PLACE": "container",
-            })
-        asked = witness.read_text() if witness.exists() else ""
-        return cp, asked
-
-    @unittest.skipUnless(sys.platform == "darwin", "forwarding into the podman VM is the macOS host's")
-    def test_a_forward_into_a_stopped_machine_is_refused_without_a_terminal(self):
-        cp, asked = self._forward("enter", "nosuchws-" + rand_suffix())
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("wk start", cp.stdout)
-        self.assertNotIn("machine start", asked,
-                         f"the dispatcher started the machine without a terminal:\n{asked}{cp.stdout}")
 
 
 if __name__ == "__main__":

@@ -79,16 +79,8 @@ class TestLsJson(WkTest):
 
 
     def test_json_merge_list_merges_concatenated_documents(self):
-        with temp_store() as store:
-            d = Path(store["WK_STORE"])
-            (d / "a.json").write_text('{"workspaces": [{"name": "a"}]}\n')
-            (d / "b.json").write_text(
-                '{"workspaces": [{"name": "b"}]}{"workspaces": [{"name": "c"}]}\n'
-            )
-            (d / "empty.json").write_text("")
-            doc = dispatch.json_merge_list("workspaces", [
-                str(d / "a.json"), str(d / "b.json"),
-                str(d / "empty.json"), str(d / "does-not-exist.json")])
+        doc = dispatch.json_merge_list("workspaces", [
+            '{"workspaces": [{"name": "a"}]}\n', '{"workspaces": [{"name": "b"}]}{"workspaces": [{"name": "c"}]}\n', ""])
         names = sorted(w["name"] for w in doc["workspaces"])
         self.assertEqual(names, ["a", "b", "c"])
 

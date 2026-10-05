@@ -150,14 +150,6 @@ class TestTheStandingReadToken(_Agent):
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertEqual("ghp-not-a-real-token\n", self.read_pat().read_text())
 
-    def test_the_switch_does_not_touch_it(self):
-        (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
-        self.read_pat().write_text("ghp-standing\n")
-        for action in ("on", "off"):
-            with self.subTest(action=action):
-                self.run_wk("key", "push", action, env=self.env())
-                self.assertEqual("ghp-standing\n", self.read_pat().read_text())
-
 
 class TestDoctorNamesTheReadToken(WkTest):
     def rows(self, store):

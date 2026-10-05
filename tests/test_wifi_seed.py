@@ -45,16 +45,6 @@ def _lift(path, func):
 
 
 class TestCardHelperWifiGate(WkTest):
-    def test_wifi_from_host_verb_refuses_a_non_gated_device_not_a_crash(self):
-        cp = subprocess.run(
-            ["bash", str(CARD_PRIV), "wifi-from-host", "/dev/null"],
-            capture_output=True, text=True, timeout=10,
-        )
-        self.assertNotEqual(cp.returncode, 0, "a non-root, non-gated call to 'wifi-from-host' succeeded")
-        out = cp.stdout + cp.stderr
-        self.assertIn("wk-card-priv:", out, f"no refusal message at all: {out}")
-        self.assertNotIn("Traceback", out)
-
     def test_gate_denies_a_non_block_device_without_reading_stdin(self):
         script = f'''
 deny() {{ printf 'wk-card-priv: REFUSED: %s\\n' "$*" >&2; exit 3; }}

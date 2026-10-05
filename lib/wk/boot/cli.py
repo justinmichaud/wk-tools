@@ -58,12 +58,10 @@ class Boot:
         return self.conf.get(key, "")
 
     def read_state(self):
-        """Spent is decided by boot id, not by clocks: host and machine can disagree about the time without either being wrong.
-        With either boot id missing, spent is None: unknown."""
+        """Spent is decided by boot id, not by clocks; with either boot id missing, spent is None: unknown."""
         self.d.probe()
         self.booted, self.boot_id = self.d.booted_at(), self.d.boot_id()
-        text = self.d.record_read()
-        rec = kv(text)
+        rec = kv(self.d.record_read())
         self.rec = {k: rec.get(k, "") for k in ("armed_at", "image", "armed_by", "armed_boot_id")}
         armed_boot = self.rec["armed_boot_id"]
         self.spent = armed_boot != self.boot_id if armed_boot and self.boot_id else None
@@ -78,22 +76,19 @@ class Boot:
             act.log("  " + line)
 
     def gate(self):
-        """Probing a machine its driver cannot reach reads the driving host and answers about the wrong computer."""
         if self.d.probeable():
             return
         here = "macos" if is_macos() else "linux"
         os_ = self.c("os")
         if os_ != "any" and os_ != here:
-            act.die("%s is driven from a %s host only (os=%s in\n    machines/%s.conf) and this is a %s host -- run this over there."
+            act.die("%s is driven from a %s host only (os=%s in machines/%s.conf) and this is a %s host."
                     % (self.name, os_, os_, self.name, here))
-        act.die("the '%s' driver cannot reach %s from here, so nothing about it\n    can be read. This host is the one machines/%s.conf\n"
-                "    names (os=%s), so what is missing is on this host rather than the machine:\n    'wk doctor' names it -- a machine "
-                "driven as a local guest needs tart and the\n    guest itself." % (self.c("driver"), self.name, self.name, os_))
+        act.die("the '%s' driver cannot reach %s from here; 'wk doctor' names what this host is missing." % (self.c("driver"), self.name))
 
     # -- status
 
     def quiet_siblings(self):
-        """(quiet, total) of the other fleet machines on this one's net and bridge, by what the tailnet says of their names."""
+        """(quiet, total) of the other fleet machines on this one's net and bridge, by the tailnet."""
         rows = (self.peers or reach.Reach(env=self.env)).peers()
         if not rows:
             return 0, 0
@@ -117,31 +112,27 @@ class Boot:
             if image:
                 act.log("  the record says it was armed for system %s" % image)
             elif self.c("bridge"):
-                act.log("  no arming record could be read either -- but this machine is behind\n  %s, so rule the segment out before "
-                        "the board:\n      wk machine status %s" % (self.c("bridge"), self.c("bridge")))
+                act.log("  no arming record could be read; it is behind %s, so rule that out first:  wk machine status %s"
+                        % (self.c("bridge"), self.c("bridge")))
             else:
-                act.log("  no arming record could be read either, so this is a plain outage\n"
-                        "  or the machine is in a bench system that answers somewhere else.")
+                act.log("  no arming record could be read: an outage, or a bench system answering elsewhere.")
                 quiet, total = self.quiet_siblings()
                 if total and quiet == total:
-                    act.log("  but every other %s device is quiet as well (%d of %d),\n  so rule the network out before the board -- "
-                            "one of them may be a\n  machine nobody has touched, which no board fault explains."
+                    act.log("  every other %s device is quiet as well (%d of %d), so rule the network out first."
                             % (self.c("net") or "fleet", total, total))
             return 3
         if mode.startswith("bench"):
             act.log("%s: bench mode -- system %s (booted %s)" % (name, mode[6:], self.booted))
             self.evidence()
             if self.d.arming == "command":
-                act.log("  the firmware default above is what the next boot enters; the job it was\n"
-                        "  armed for hands the machine back when it ends.")
+                act.log("  the job it was armed for hands the machine back when it ends.")
             else:
                 act.log("  a plain reboot returns it to host mode: wk boot %s --back" % name)
             return 0
         if mode.startswith("base"):
             act.log("%s: base image -- system %s on %s (booted %s)" % (name, mode[5:], self.c("root"), self.booted))
             self.evidence()
-            act.log("  this is the fallback helper, not a bench system. To measure something,\n"
-                    "  arm a system on %s:  wk boot %s --system <id>" % (self.c("device"), name))
+            act.log("  this is the rescue, not a bench system:  wk boot %s --system <id>" % name)
             return 0
         act.log("%s: %s, host mode (booted %s)" % (name, self.c("role"), self.booted))
         self.evidence()
@@ -149,8 +140,8 @@ class Boot:
             return 0
         who = "(by %s at %s)" % (rec["armed_by"], rec["armed_at"])
         if self.spent:
-            act.log("  a spent arming record remains (system %s, armed by %s at %s)\n  it was consumed by the boot at %s; "
-                    "clear it with: wk boot %s --disarm" % (image, rec["armed_by"], rec["armed_at"], self.booted, name))
+            act.log("  a spent arming record remains (system %s %s), consumed by the boot at %s;\n"
+                    "  clear it with: wk boot %s --disarm" % (image, who, self.booted, name))
             return 0
         if self.spent is None:
             act.warn("%s has an arming record for system %s %s, and whether a boot has spent it is unknown:\n  %s"
@@ -159,11 +150,10 @@ class Boot:
             return 2
         if self.d.arming == "command":
             act.warn("%s is ARMED for '%s' %s" % (name, image, who))
-            act.log("  the firmware was told, so a plain reboot enters bench mode.\n  cancel with: wk boot %s --disarm" % name)
+            act.log("  a plain reboot enters bench mode; cancel with: wk boot %s --disarm" % name)
             return 0
         act.warn("%s is ARMED to reboot into system %s %s" % (name, image, who))
-        act.log("  it is still in host mode, so the one-shot has not been spent.\n  do not start work on it: the next reboot "
-                "leaves host mode.\n  cancel with: wk boot %s --disarm" % name)
+        act.log("  the next reboot leaves host mode; cancel with: wk boot %s --disarm" % name)
         return 2
 
     # -- the transitions
@@ -171,18 +161,16 @@ class Boot:
     def diag(self):
         mode = self.d.probe()
         if mode != "host":
-            act.die("%s is in '%s'. The diagnostics dump is read off the\n    bench system's boot device from host mode -- ask the bench "
-                    "system\n    directly, or 'wk boot %s --back' first." % (self.name, mode, self.name))
+            act.die("%s is in '%s', and the dump is read from host mode:  wk boot %s --back" % (self.name, mode, self.name))
         print(self.d.diag())
         return 0
 
     def keep(self):
         mode = self.read_state()
         if not mode.startswith("bench"):
-            act.die("%s is not in bench mode right now (%s), so there is no\n    watchdog to cancel." % (self.name, mode))
+            act.die("%s is not in bench mode (%s), so there is no watchdog to cancel." % (self.name, mode))
         if not self.d.watchdog_present():
-            act.die("%s's bench system carries no self-return watchdog, so there is nothing\n    to claim: what ends its run is the job "
-                    "itself. 'wk boot %s --status'\n    says what it is doing." % (self.name, self.name))
+            act.die("%s's bench system carries no self-return watchdog; its job ends its run." % self.name)
         if act.dry_run():
             act.log("would create /run/wk-keep-running on %s" % self.name)
             return 0
@@ -200,8 +188,7 @@ class Boot:
     def back(self):
         mode = self.read_state()
         if mode == "unreachable":
-            act.die("%s is not answering, so nothing here can reboot it.\n    The one-shot is spent by any boot, so a power cycle "
-                    "returns it." % self.name)
+            act.die("%s is not answering; a power cycle returns it, since any boot spends the one-shot." % self.name)
         if act.dry_run():
             act.log("would reboot %s back to host mode and clear the record" % self.name)
             return 0
@@ -219,14 +206,13 @@ class Boot:
         if act.dry_run():
             act.log("would disarm %s (its normal boot order, or its medium parked) and clear the record" % self.name)
             return 0
-        if self.d.arming == "one-shot":
-            if not self.spent:
-                self.d.arm("", self.d.order_normal)
-        elif self.d.disarms:
+        if self.d.arming != "one-shot":
             self.d.disarm()
+        elif not self.spent:
+            self.d.arm("", self.d.order_normal)
         self.d.record_clear()
         act.info("%s disarmed; its next reboot is a normal one" % self.name)
-        if self.d.disarms and self.d.disarm_note():
+        if self.d.disarm_note():
             act.log(self.d.disarm_note())
         return 0
 
@@ -238,10 +224,10 @@ class Boot:
     def arm(self, want=""):
         mode, arming, name = self.read_state(), self.d.arming, self.name
         if mode == "unreachable" and arming != "guest":
-            act.die("%s is not reachable over ssh in host mode.\n    Arming is an ssh command, so there is nothing to arm from here." % name)
+            act.die("%s is not reachable over ssh in host mode, so there is nothing to arm." % name)
         if mode.startswith("bench") and not self.d.arm_from_bench:
-            act.die("%s is already in bench mode (system %s).\n    Arming it is an edit only its rescue can make, so it goes back "
-                    "first:\n        wk boot %s --back" % (name, mode[6:], name))
+            act.die("%s is already in bench mode (system %s), and only its rescue arms it:  wk boot %s --back"
+                    % (name, mode[6:], name))
         part = ""
         if arming == "command":
             image = want or self.c("volume")
@@ -263,8 +249,7 @@ class Boot:
         if arming == "guest":
             self.d.arm(part, "")
             act.info("%s is in bench mode: guest '%s' is running and carries its marker" % (name, image))
-            act.log("  'wk boot %s --back' stops it -- for a guest, leaving the role\n  is leaving the machine, so there is nothing "
-                    "to hand back afterwards." % name)
+            act.log("  'wk boot %s --back' stops it." % name)
             return 0
         if arming == "one-shot":
             self.record_write(image, self.c("device"), self.d.order_image)
@@ -281,8 +266,7 @@ class Boot:
             act.log("  it returns by itself in %ss unless claimed:\n    wk boot %s --keep     claim it\n"
                     "    wk boot %s --back     hand it back now" % (watchdog, name, name))
         else:
-            act.log("  nothing on this side returns it: the job it was armed for does, when it ends.\n"
-                    "    wk boot %s --status   what it is doing, over its own node" % name)
+            act.log("  the job it was armed for returns it:  wk boot %s --status" % name)
         act.log("  if it never appears, its own account of that boot says why: wk boot %s --diag" % name)
         return 0
 
@@ -290,21 +274,16 @@ class Boot:
         d, name, arming = self.d, self.name, self.d.arming
         head = "would arm %s\n" % name
         if arming == "guest":
-            return head + ("  guest        %s (%s)\n  boot order   nothing in firmware; arming a guest is starting it\n"
-                           "  record       none; the guest either answers with a marker or it does not\n"
-                           "  then         start the guest and wait for its marker. Nothing reboots this\n"
-                           "               machine -- the rehearsal is a VM, which is the whole point."
-                           % (image, d.ch.state() or "unknown"))
+            return head + "  guest        %s (%s)\n  then         start the guest and wait for its marker" % (image, d.ch.state() or "unknown")
         record_at = d.facts()["record"]
         if arming == "command":
             attached = "(attached)" if d.volume_present() else "(NOT attached -- arming would refuse)"
-            return head + ("  volume       %s %s\n  boot order   the firmware's own boot-volume, through the privileged helper\n"
-                           "  record       %s\n  then         prove the way back, tell the firmware, read it back, and reboot.\n"
-                           "               Now: %s" % (image, attached, record_at, d.firmware_default()))
+            return head + ("  volume       %s %s\n  record       %s\n  then         prove the way back, bless it, read it back, reboot\n"
+                           "  now          %s" % (image, attached, record_at, d.firmware_default()))
         order = ("untouched; the arming is %s's own boot partition" % self.c("device") if arming == "medium"
                  else "%s (one-shot; the normal order %s is untouched)" % (d.order_image, d.order_normal))
-        return head + ("  system       %s (verified present on %s)\n  boot order   %s\n  record       %s on %s\n"
-                       "  then         reboot, and the image's watchdog returns it in\n               %ss unless claimed"
+        return head + ("  system       %s (on %s)\n  boot order   %s\n  record       %s on %s\n"
+                       "  then         reboot; the watchdog returns it in %ss unless claimed"
                        % (image, self.c("device"), order, record_at, name, watchdog or "?"))
 
 
@@ -320,8 +299,7 @@ def fleet_probe(root, name, env):
         if d.probeable():
             out["mode"] = d.probe()
             if d.mode == "host":
-                text = d.record_read()
-                rec = kv(text)
+                rec = kv(d.record_read())
                 out.update(armed=rec.get("image", ""), armed_by=rec.get("armed_by", ""), armed_at=rec.get("armed_at", ""),
                            armed_boot=rec.get("armed_boot_id", ""), boot_id=d.boot_id())
         else:
@@ -330,7 +308,7 @@ def fleet_probe(root, name, env):
     except act.Refused:
         out.setdefault("media", "unknown")
     if not conf.get("profile"):
-        out["reprovision"] = "missing profile in machines/%s.conf -- nothing to compose a recipe from" % name
+        out["reprovision"] = "missing profile in machines/%s.conf" % name
     else:
         try:
             out["reprovision"] = d.reprovision()
@@ -344,14 +322,10 @@ def fleet_probe(root, name, env):
 def broker(root, name, action, system, env, machine=None):
     """A sandboxed `wk boot` is a request over the one socket a workspace sees; only the action word and the machine cross it."""
     from wk.places import workspace_marker_path
-    if action == "diag":
-        act.die("'wk boot %s --diag' mounts that machine's boot partition on the\n    workstation to read the system's own account of its last "
-                "boot. That is a\n    disk read, not a mode transition, and it is not in the request broker's\n    vocabulary -- a workspace "
-                "has no business mounting a filesystem out there.\n    Run it on the workstation:  wk boot %s --diag" % (name, name))
     if action not in BROKER_VERBS:
-        act.die("'wk boot' acts on a host and its hardware, and this is workspace '%s'.\n    The request broker does not serve "
-                "--%s -- what it does serve, it will say:\n    wk-broker-client.py capabilities\n    Run it on the workstation:  wk boot %s"
-                % (kv_file(workspace_marker_path(env)).get("name", ""), action, name))
+        act.die("this is workspace '%s', and the request broker does not serve --%s (wk-broker-client.py capabilities).\n"
+                "    Run it on the workstation:  wk boot %s --%s"
+                % (kv_file(workspace_marker_path(env)).get("name", ""), action, name, action))
     words = ["machine=" + name] + (["system=" + system] if system and action == "arm" else [])
     words += ["dry_run=1"] if act.dry_run() and action != "status" else []
     return broker_request(root, BROKER_VERBS[action], words, env, machine or Local(), "wk boot %s" % name)
@@ -361,13 +335,11 @@ def broker_request(root, verb, words, env, machine, typed):
     """One request over the socket a workspace sees, `words` its key=value arguments; `typed` is what to run on the workstation instead."""
     sock = Store(env).workspace_runtime_socket()
     if not machine.run(["test", "-S", sock]).ok:
-        act.die("No request broker is listening at %s, so there is no door\n    from this workspace for '%s'. Somebody with the "
-                "workstation opens it with:\n    ./setup --stage broker   ('wk doctor' then says it is reachable from in here).\n"
+        act.die("No request broker is listening at %s for '%s'. On the workstation:  ./setup --stage broker\n"
                 "    Or run it on the workstation:  %s" % (sock, typed, typed))
     client = os.path.join(root, "container", "broker", "wk-broker-client.py")
     if not machine.exists(client):
-        act.die("this workspace's copy of wk-tools has no broker client\n    (%s). Refresh it:  wk sync --tools container   on the "
-                "workstation." % client)
+        act.die("this workspace's wk-tools has no broker client (%s):  wk sync --tools container   on the workstation" % client)
     return machine.run_tty(["env", "WK_BROKER_SOCKET=" + sock, "python3", client, verb] + words).rc
 
 

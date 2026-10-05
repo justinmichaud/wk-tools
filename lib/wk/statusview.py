@@ -1,8 +1,6 @@
-"""`wk status` rendering: one merged document from the record stream the
-collector (wk.status) produces, drawn as text, JSON, a static page or a
-served one. Two records are the stream's own: `plan` names every job and
-its machine, `flush` ends one, so a machine's block is drawn when its last
-job has flushed."""
+"""`wk status` rendering: wk.status's record stream merged into one document, drawn as text, JSON, a static page
+or a served one. `plan` names every job and its machine and `flush` ends one, so a machine is drawn when its
+last job has flushed."""
 
 import http.server
 import json
@@ -19,8 +17,7 @@ MARKERS = ("plan", "flush")
 
 
 def default_mode(env, isatty):
-    """The view a bare `wk status` gets: the page at a terminal that has a
-    browser to open, the table everywhere else."""
+    """The page at a terminal that has a browser to open, the table everywhere else."""
     if env.get("WK_STATUS_VIEW"):
         return env["WK_STATUS_VIEW"]
     if not isatty or env.get("CI") or env.get("NO_COLOR"):
@@ -30,10 +27,6 @@ def default_mode(env, isatty):
     if (env.get("SSH_CONNECTION") or env.get("SSH_TTY")) and not env.get("DISPLAY"):
         return "text"
     return "web"
-
-
-def web_defaults(env):
-    return env.get("WK_STATUS_PORT") or "0", env.get("WK_STATUS_INTERVAL") or "20"
 
 
 def colour_wanted(stdout=None, env=None):
@@ -46,30 +39,15 @@ def colour_wanted(stdout=None, env=None):
     return bool(tty and not env.get("NO_COLOR"))
 
 
-def dumps(rec):
-    return json.dumps(rec, separators=(",", ":"))
-
-
-def parse_record(line):
-    line = line.strip()
-    if not line or not line.startswith("{"):
-        return None
-    try:
-        return json.loads(line)
-    except json.JSONDecodeError as exc:
-        raise ValueError(line[:120]) from exc
-
-
 def records_from_lines(lines):
     """Records out of JSON lines; an unreadable line is reported and skipped."""
     for line in lines:
-        try:
-            r = parse_record(line)
-        except ValueError as exc:
-            print("wk status: unreadable record: %s" % exc, file=sys.stderr)
-            continue
-        if r is not None:
-            yield r
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                print("wk status: unreadable record: %s" % line[:120], file=sys.stderr)
 
 
 def strip_markers(records):
@@ -81,20 +59,18 @@ def strip_markers(records):
 class Merger:
     """Records -> one document, grouped machine / method / workspace, in arrival order."""
 
-    PER_MACHINE = ("fact", "raw", "disk", "service", "lock", "switch", "capacity", "bench", "task", "sdk")
     LISTS = {"fact": "facts", "raw": "raw", "disk": "disk", "service": "services", "lock": "locks",
              "switch": "switches", "capacity": "capacity", "bench": "bench", "task": "tasks", "sdk": "sdk"}
 
     def __init__(self):
         self.doc = {"machines": [], "fleet": [], "bridges": [], "exit": 0}
         self.index = {}
-        self.ws_index = {}   # (id(group), workspace name) -> its row; not part of the document itself
+        self.ws_index = {}
 
     def machine(self, name):
         if name not in self.index:
-            m = {"name": name, "self": False, "methods": [], "facts": [], "raw": [],
-                 "disk": [], "services": [], "locks": [], "switches": [],
-                 "capacity": [], "bench": [], "sdk": [], "tasks": []}
+            m = {"name": name, "self": False, "methods": []}
+            m.update((k, []) for k in self.LISTS.values())
             self.index[name] = m
             self.doc["machines"].append(m)
         return self.index[name]
@@ -108,9 +84,8 @@ class Merger:
         return g
 
     def merge_workspace(self, g, r):
-        """One row per workspace name: a second record naming a different state is not a second row, it
-        is the first view learning the fleet disagrees -- the worst state anywhere still owns the exit
-        code, so a disagreement is never quieter than the state it hides."""
+        """One row per workspace name; a second view naming another state marks the row `disagree` and
+        is exit 4, so a disagreement is never quieter than the state it hides."""
         key = (id(g), r.get("name", "?"))
         existing = self.ws_index.get(key)
         if existing is None:
@@ -122,7 +97,6 @@ class Merger:
             self.doc["exit"] = max(self.doc["exit"], 4)
 
     def feed(self, r):
-        """The machine the record belongs to, or None."""
         kind = r.get("kind")
         if kind == "machine":
             m = self.machine(r["name"])
@@ -130,22 +104,16 @@ class Merger:
             for k in ("tailnet", "direct", "conf"):
                 if r.get(k) and not m.get(k):
                     m[k] = r[k]
-            return m["name"]
-        if kind == "workspace":
-            name = r.get("machine", "?")
-            self.merge_workspace(self.method(self.machine(name), r.get("method", "?")), r)
-            return name
-        if kind in self.PER_MACHINE:
-            name = r.get("machine", "?")
-            self.machine(name)[self.LISTS[kind]].append(r)
-            return name
-        if kind == "fleet":
+        elif kind == "workspace":
+            self.merge_workspace(self.method(self.machine(r.get("machine", "?")), r.get("method", "?")), r)
+        elif kind in self.LISTS:
+            self.machine(r.get("machine", "?"))[self.LISTS[kind]].append(r)
+        elif kind == "fleet":
             self.doc["fleet"].append(r)
         elif kind == "bridge":
             self.doc["bridges"].append(r)
         elif kind == "exit":
             self.doc["exit"] = max(self.doc["exit"], int(r.get("code", 0)))
-        return None
 
 
 def merge(records):
@@ -282,8 +250,9 @@ def sdk_line(s, colour):
                                           paint(*sdk_verdict(s), colour))
 
 
-def where_word(obj):
-    return (obj.get("where") or "").replace("in the ", "").replace("the ", "")
+def where_tag(obj):
+    w = (obj.get("where") or "").replace("in the ", "").replace("the ", "")
+    return " (%s)" % w if w else ""
 
 
 def paint(text, key, colour):
@@ -304,7 +273,6 @@ def row(cells, widths, hues, colour):
 
 
 class Writer:
-    """A heading, label/value lines `align` squares up, reachability, notes."""
 
     def __init__(self, colour):
         self.colour = colour
@@ -419,7 +387,7 @@ def render_machine_block(m, colour):
             tail = "  ·  %s snapshot%s" % (d["snapshots"], "" if d["snapshots"] == "1" else "s")
             if d.get("reclaimable") and d["reclaimable"] != "0":
                 tail += paint(", %s reclaimable (wk gc)" % d["reclaimable"], "busy", colour)
-        wr.kv("disk" + (" (%s)" % where_word(d) if where_word(d) else ""),
+        wr.kv("disk" + where_tag(d),
               "%s used   %s free of %s%s" % (paint((d.get("used_pct", "?") or "?") + "%", disk_hue(d.get("used_pct")), colour),
                                             gb(d.get("free_mb")), gb(d.get("total_mb")), tail))
     for s in m.get("sdk") or []:
@@ -429,11 +397,11 @@ def render_machine_block(m, colour):
         if sv.get("fix"):
             wr.kv("", paint(sv["fix"], "busy", colour))
     for sw in m.get("switches") or []:
-        wr.kv(sw.get("name", "?") + (" (%s)" % where_word(sw) if where_word(sw) else ""),
+        wr.kv(sw.get("name", "?") + where_tag(sw),
               paint(sw.get("state", "?"), "good" if sw.get("state") == "on" else "busy", colour)
               + paint("   " + sw.get("detail", ""), "dim", colour))
     for cap in m.get("capacity") or []:
-        label = "load" + (" (%s)" % where_word(cap) if where_word(cap) else "")
+        label = "load" + where_tag(cap)
         if not cap.get("cores"):
             if cap.get("note"):
                 wr.kv(label, paint(cap["note"], "bad", colour))
@@ -481,8 +449,6 @@ def render_machine_block(m, colour):
 def render_fleet_and_bridges(doc, colour):
     wr = Writer(colour)
     out = wr.out
-    # The self machine's row already led the whole document (self_line_text); the board table is for the
-    # other devices wk owns, not a second look at the one just named.
     fleet = [f for f in doc["fleet"] if f.get("machine") != self_machine_name(doc)]
 
     if fleet:
@@ -628,8 +594,6 @@ PAGE = """<!doctype html>
 <meta charset="utf-8">
 <title>wk status</title>
 <style>
-  /* Light is the base and dark redefines only the tokens, so no colour has its
-     single definition inside a media query. */
   :root {
     color-scheme: light dark;
     --bg:#f7f7f5; --fg:#1b1b19; --dim:#6d6d67; --faint:#8e8e87;
@@ -652,7 +616,6 @@ PAGE = """<!doctype html>
          font:13.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
   .wrap { max-width:1400px; margin:0 auto; padding:1.5rem 1.75rem; }
 
-  /* --- the top: the verdict, then only what is wrong --- */
   .top { border-bottom:1px solid var(--line); background:var(--card); }
   .top .wrap { padding-bottom:1rem; }
   .title { display:flex; align-items:baseline; gap:.9rem; flex-wrap:wrap; }
@@ -662,7 +625,6 @@ PAGE = """<!doctype html>
   .attn:empty { display:none; }
   .allclear { margin-top:.7rem; color:var(--good); }
 
-  /* --- chips: one shape for every state word in the listing --- */
   .chip { display:inline-block; padding:.08rem .5rem; border-radius:999px;
           font-size:.8rem; font-weight:600; white-space:nowrap;
           background:var(--idle-bg); color:var(--idle); }
@@ -680,7 +642,6 @@ PAGE = """<!doctype html>
            border-bottom:2px solid var(--line); padding-bottom:.45rem; margin-bottom:.75rem; }
   .mhead .spacer { flex:1; }
 
-  /* --- the tiles: what a machine is, apart from the workspaces on it --- */
   .tiles { display:grid; gap:.55rem; margin:0 0 1rem;
            grid-template-columns:repeat(auto-fill,minmax(15rem,1fr)); }
   .tile { background:var(--card); border:1px solid var(--line); border-radius:7px;
@@ -690,15 +651,12 @@ PAGE = """<!doctype html>
   .tile .tv { font-size:.92rem; }
   .tile .tv b { font-variant-numeric:tabular-nums; font-weight:700; }
   .tile .sub { color:var(--faint); font-size:.8rem; }
-  /* A ratio, drawn as a ratio: "92%" and "1.32" are numbers whose whole
-     meaning is what they are a fraction of. */
   .meter { height:5px; border-radius:3px; background:var(--sunk); margin-top:.4rem;
            overflow:hidden; }
   .meter i { display:block; height:100%; background:var(--idle); }
   .meter.good i{background:var(--good)} .meter.busy i{background:var(--busy)}
   .meter.bad  i{background:var(--bad)}
 
-  /* --- the workspace tables --- */
   .method { margin:0 0 1.1rem; }
   .method > h3 { font-size:.75rem; text-transform:uppercase; letter-spacing:.09em;
                  color:var(--dim); margin:0 0 .35rem; font-weight:700; }
@@ -712,8 +670,6 @@ PAGE = """<!doctype html>
   tr.sub td, tr.note td { border-top:none; padding-top:0; }
   td.wide { white-space:normal; }
   td.name { font-weight:700; }
-  /* The row of a workspace that needs a person, marked on the row itself: a
-     coloured word in one cell is a thing to find, and this is a thing to see. */
   tr.attention td { background:var(--bad-bg); }
   tr.attention td.name { box-shadow:inset 3px 0 0 var(--bad); }
   tr.working td { background:var(--busy-bg); }
@@ -730,14 +686,11 @@ PAGE = """<!doctype html>
   pre.raw { background:var(--card); border:1px solid var(--line); border-radius:7px;
             padding:.7rem; overflow-x:auto; margin:.4rem 0 0; font-size:.85em; }
 
-  /* --- the fleet board --- */
   .board { display:grid; gap:.6rem; grid-template-columns:repeat(auto-fill,minmax(17rem,1fr)); }
   .dev { background:var(--card); border:1px solid var(--line); border-left:4px solid var(--idle);
          border-radius:7px; padding:.6rem .75rem; }
   .dev.good{border-left-color:var(--good)} .dev.busy{border-left-color:var(--busy)}
   .dev.bad {border-left-color:var(--bad)}
-  /* A board actually running a bench system is the one state on this board
-     that changes what you may do with the machine, so it is the loud one. */
   .dev.bench { border-left-color:var(--accent); background:var(--accent-bg); }
   .dev .dn { font-weight:700; font-size:.95rem; }
   .dev .dr { color:var(--dim); font-size:.8rem; }
@@ -750,9 +703,6 @@ PAGE = """<!doctype html>
            background:var(--card); border:1px solid var(--line);
            padding:.3rem .6rem; border-radius:999px; }
   footer .spin { color:var(--busy); font-weight:600; }
-  /* The server has gone away -- the page is still showing the last listing it
-     had, and every word of it may be hours old. Grey and a red frame, because
-     the danger here is reading a stale fleet as a current one. */
   body.gone { filter:grayscale(1) opacity(.55); }
   body.gone::after { content:""; position:fixed; inset:0; pointer-events:none;
                      border:6px solid var(--bad); }
@@ -768,8 +718,6 @@ PAGE = """<!doctype html>
 <footer id="foot">loading…</footer>
 <script>
 const ESC = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-// The state vocabulary, from wk.statusview -- one list, not a second copy
-// that drifts from it.
 const SEV = __SEV__;
 function sev(w) {
   w = String(w || "").split(" ")[0].toLowerCase();
@@ -779,12 +727,9 @@ function sev(w) {
 const chip = (w, k) => `<span class="chip ${k === undefined ? sev(w) : k}">${ESC(w)}</span>`;
 function subText(s) {
   let out = `${s.kind}=${s.state}`;
-  if (s.config) out += ` (${s.config})`;
+  if (s.preset) out += ` (${s.preset})`;
   return out;
 }
-// How a machine is reached and where it was declared -- calculated, never
-// stored (lib/wk/reach.py), and shown faint: it is what somebody wants when
-// something above it is wrong.
 function meta(o) {
   const rows = [];
   if (o.tailnet) rows.push(`<div><span class="k">reached</span>${ESC(o.tailnet)}</div>`);
@@ -793,15 +738,10 @@ function meta(o) {
   return rows.length ? `<div class="meta">${rows.join("")}</div>` : "";
 }
 const GB = mb => { const n = parseInt(mb, 10); return isNaN(n) ? "?" : (n >= 1024 ? Math.round(n/1024) + "G" : n + "M"); };
-// The thresholds are "will the next build fit", not tidiness: a WebKit build
-// tree is tens of gigabytes, so 90% of a disk this size is already a build that
-// may not finish.
 function diskHue(p) { const n = parseInt(p,10); return isNaN(n) ? "" : n >= 90 ? "bad" : n >= 75 ? "busy" : "good"; }
 function loadHue(l, c) { l = parseFloat(l); c = parseInt(c,10);
   return (isNaN(l) || !c) ? "" : l > c ? "bad" : l > c/2 ? "busy" : "good"; }
 const where = o => (o.where || "").replace("in the ","").replace("the ","");
-// Same verdict as wk.statusview's sdk_verdict/sdk_line -- one wording,
-// used by both the terminal and the page.
 function sdkVerdict(s) {
   if (s.upstream) return s.upstream === s.tag ? chip("current", "good") : chip(`behind (${s.upstream})`, "busy");
   return chip(`unknown -- ${s.unknown || "registry did not answer"}`, "");
@@ -814,9 +754,6 @@ function meter(pct, hue) {
 function tile(k, v, m) { return `<div class="tile"><div class="tk">${ESC(k)}</div>
   <div class="tv">${v}</div>${m || ""}</div>`; }
 
-// What the machine is, apart from the workspaces on it: the things that break a
-// build or cost work, each as one tile, each with its number against the
-// ceiling that number means anything relative to.
 function tiles(m) {
   const t = [];
   for (const d of m.disk || []) {
@@ -832,15 +769,10 @@ function tiles(m) {
   for (const c of m.capacity || []) {
     const label = "load" + (where(c) ? " · " + where(c) : "");
     if (!c.cores) {
-      // A probe that did not answer says so on the tile rather than the
-      // tile vanishing, which reads as "nothing is using this machine".
       if (c.note) t.push(tile(label, chip(c.note, "bad")));
       continue;
     }
     const hue = loadHue(c.load, c.cores), pct = (parseFloat(c.load) / parseInt(c.cores,10)) * 100;
-    // A remote place's free memory has no total beside it (t_mem_mb there
-    // is MemAvailable, not a size, lib/wk/places.py's Remote) -- print one only when
-    // there is one.
     const free = c.mem_mb ? `${GB(c.free_mb)} free of ${GB(c.mem_mb)}` : `${GB(c.free_mb)} free`;
     t.push(tile(label,
       `<b class="${hue}">${ESC(c.load || "?")}</b> of ${ESC(c.cores)} cores
@@ -855,8 +787,6 @@ function tiles(m) {
       chip(sw.state, sw.state === "on" ? "good" : "busy") +
       ` <span class="sub">${ESC(sw.detail || "")}</span>`));
   for (const lk of m.locks || [])
-    // A lock whose holder is gone is not a lock: the next taker breaks it, and
-    // it looks exactly like one that is held.
     t.push(tile("lock · " + ESC(lk.resource),
       chip(lk.alive ? "held" : "stale", lk.alive ? "busy" : "bad") +
       ` <span class="sub">pid ${ESC(lk.pid || "?")} ${ESC(lk.cmd || "")}</span>`));
@@ -884,8 +814,6 @@ function tiles(m) {
   return t.length ? `<div class="tiles">${t.join("")}</div>` : "";
 }
 
-// The exit code, in cmd/status's own words -- this command's whole contract,
-// otherwise invisible on a page.
 const VERDICT = {
   0: ["good", "idle, or the last build succeeded"],
   1: ["bad",  "a build failed"],
@@ -893,8 +821,6 @@ const VERDICT = {
   3: ["bad",  "a build stalled and was killed by its own watchdog"],
   4: ["bad",  "a workspace needs a person"],
 };
-// Only what is wrong, and only when it is: a listing with nothing to say shows
-// nothing here rather than a row of zeroes to read past.
 function summary(doc) {
   let ws = 0, attn = 0, running = 0, failed = 0, stale = 0, full = 0, drift = 0,
       unpushed = 0, away = 0, oldrole = 0, bench = 0;
@@ -961,7 +887,6 @@ function render(doc) {
         let branch = w.branch || "-";
         if (w.behind) branch += ` ↓${w.behind}`;
         if (w.ahead) branch += ` ↑${w.ahead}`;
-        // The row itself carries the verdict, not only one cell of it.
         const needs = ["creating","broken","unreachable"].includes(w.ws);
         const busy = subs.some(x => x.state === "running" || x.state === "building");
         const cls = needs ? "attention" : busy ? "working" : "";
@@ -1023,8 +948,6 @@ function render(doc) {
       <span class="tag">probed: the segment, the role, and its own health check</span></div>
       <table><tr><th>bridge</th><th>device</th><th>segment</th><th>state</th><th>role</th><th>health</th></tr>`);
     for (const b of doc.bridges) {
-      // A role older than this repository's is the one thing here that has a
-      // command attached to it, so it is a chip and not a sentence to find.
       const role = b.role_insync === undefined ? ""
         : b.role_insync ? chip("this repository's", "good")
         : chip("older — wk machine setup " + b.name, "bad");
@@ -1056,8 +979,6 @@ else {
         ? '<span class="spin">walking the fleet…</span>'
         : `updated ${age}s ago · every ${p.interval}s`;
     } catch (e) {
-      // Not a footer note: a page that stopped updating looks exactly like one
-      // that is up to date, and this listing is the thing people act on.
       document.body.classList.add("gone");
       document.getElementById("foot").textContent = "wk status --web has stopped — this listing is frozen";
     }
@@ -1082,8 +1003,7 @@ def write_page(doc, out):
 
 
 class Live:
-    """Re-walked on a timer, one walk at a time; `lock` guards the document
-    mid-swap and `busy` the right to walk."""
+    """Re-walked on a timer; `lock` guards the document mid-swap and `busy` the right to walk."""
 
     def __init__(self, root, interval):
         self.root = root

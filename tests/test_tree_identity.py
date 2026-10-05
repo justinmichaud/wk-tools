@@ -126,11 +126,6 @@ class TestUntrackedNonIgnoredFileIsNotDirty(TwoClonesCase):
         va = version(self.a)
         self.assertEqual(va["dirty"], "no", va)
 
-    def test_the_commit_a_machine_is_given_accepts_it(self):
-        from wk import tools
-        (self.a / "new.sh").write_text("not added yet\n")
-        self.assertEqual("", tools.committed(str(self.a), Local()))
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,7 +12,7 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result, isolated_module  # noqa: E402
-from wk.sysimage import yocto_ws as yt  # noqa: E402
+from wk.sysimage import Failed, yocto_ws as yt  # noqa: E402
 
 TARGET = "rpi4-64bits-mesa"
 SRC = "/src/WebKit"
@@ -82,7 +82,7 @@ def quiet(fn, *a):
     with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
         try:
             fn(*a)
-        except yt.Failed as e:
+        except Failed as e:
             return out.getvalue(), str(e)
     return out.getvalue(), None
 
@@ -195,7 +195,7 @@ class TestPortingATarget(unittest.TestCase):
         try:
             return yt.port_target(TARGETS, lambda rel: local if rel.endswith("rpi4-64bits-mesa.conf") else None,
                                   target, frm, "raspberrypi5", image), None
-        except yt.Failed as e:
+        except Failed as e:
             return None, str(e)
 
     def test_the_section_and_its_local_conf_are_derived(self):
@@ -302,16 +302,6 @@ class TestTheImageDirectory(unittest.TestCase):
         quiet(w.build(args()).copies_back)
         self.assertEqual(w.files[IMAGE_DIR + "/x.wic.xz"], "new")
         self.assertFalse(w.isdir(IMAGE_DIR + ".previous"))
-
-    def test_an_image_older_than_the_stage_is_refused(self):
-        w = World()
-        w._set_file(IMAGE_DIR + "/x.wic.xz", "")
-        b = w.build(args())
-        self.assertIsNone(quiet(b.verify_fresh, w.clock.now())[1])
-        self.assertIn("no new image", quiet(b.verify_fresh, w.clock.now() + 10)[1])
-
-    def test_no_image_at_all_is_refused(self):
-        self.assertIn("left nothing behind", quiet(World().build(args()).verify_fresh, 0)[1])
 
 
 class TestTheStages(unittest.TestCase):

@@ -15,15 +15,10 @@ from wk.store import Store
 from wk.sysimage import task
 
 # No darwin tailscaled is published, and the packaged clients tunnel through NetworkExtension, whose consent panel
-# only a person answers. A bump sets TS_SRC_FOR to tailscale-release.inc's TS_VERSION and TS_SRC_SHA256 from
-#   curl -fsSL https://proxy.golang.org/tailscale.com/@v/v$v.zip | sha256sum
-PIN = {
-    "TS_SRC_FOR": "1.102.2",
-    "TS_SRC_SHA256": "a08de49e71ba4d1e8d329847c4f026b1ee696ef31697607a1c8a1c36f551fed0",
-    "GO_VERSION": "1.26.8",
-    "GO_SHA256": {"darwin_arm64": "a012b25b571bd0138a03dcd25375ceba866fe5ca822f426d2c66a4de56fd3f4b",
-                  "linux_arm64": "211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971bdda0"},
-}
+# only a person answers. The tailscale version and its source checksum are REL's.
+GO = {"version": "1.26.8",
+      "darwin_arm64": "a012b25b571bd0138a03dcd25375ceba866fe5ca822f426d2c66a4de56fd3f4b",
+      "linux_arm64": "211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971bdda0"}
 REL = "image/yocto/meta-wk-tailnet/recipes-network/tailscale/tailscale-release.inc"
 MACHO_ARM64 = "cf fa ed fe 0c 00 00 01"   # MH_MAGIC_64 and CPU_TYPE_ARM64, little-endian
 
@@ -38,21 +33,14 @@ PAYLOAD_TOOLS = "/usr/local/share/wk-bench/wk-tools"
 PAYLOAD = ("tailscaled", "tailscale", "authkey", "tailnet.conf", DAEMON_LABEL + ".plist", JOIN_LABEL + ".plist")
 
 
-def daemon_plist():
-    return plistlib.dumps({"Label": DAEMON_LABEL,
-                           "ProgramArguments": [TS_BIN + "/tailscaled", "--state=%s/tailscaled.state" % TS_STATE_DIR,
-                                                "--tun=utun"],
-                           "RunAtLoad": True, "KeepAlive": True,
-                           "StandardOutPath": "/var/log/wk-tailscaled.log",
-                           "StandardErrorPath": "/var/log/wk-tailscaled.log"}).decode()
+def launchd_plist(label, argv, log, keep_alive=False):
+    doc = {"Label": label, "ProgramArguments": argv, "RunAtLoad": True, "StandardOutPath": log, "StandardErrorPath": log}
+    return plistlib.dumps(dict(doc, KeepAlive=True) if keep_alive else doc).decode()
 
 
-def join_plist():
-    return plistlib.dumps({"Label": JOIN_LABEL,
-                           "ProgramArguments": ["/bin/bash", PAYLOAD_TOOLS + "/bench/mac-tailnet.sh", "join"],
-                           "RunAtLoad": True,
-                           "StandardOutPath": "/var/log/wk-tailnet-join.log",
-                           "StandardErrorPath": "/var/log/wk-tailnet-join.log"}).decode()
+DAEMON_PLIST = launchd_plist(DAEMON_LABEL, [TS_BIN + "/tailscaled", "--state=%s/tailscaled.state" % TS_STATE_DIR, "--tun=utun"],
+                             "/var/log/wk-tailscaled.log", keep_alive=True)
+JOIN_PLIST = launchd_plist(JOIN_LABEL, ["/bin/bash", PAYLOAD_TOOLS + "/bench/mac-tailnet.sh", "join"], "/var/log/wk-tailnet-join.log")
 
 
 def volume_state(root):
@@ -61,10 +49,10 @@ def volume_state(root):
 
 
 class Tailnet:
-    def __init__(self, machine, env, root=None, pin=None):
+    def __init__(self, machine, env, root=None, go=None):
         self.m, self.env = machine, env
         self.root = str(root or images.root(env))
-        self.pin = PIN if pin is None else pin
+        self.go_pin = GO if go is None else go
 
     def run(self, argv, what):
         if not self.m.act_run(argv).ok:
@@ -73,46 +61,43 @@ class Tailnet:
     def artifacts(self):
         return os.path.join(task.image_root(self.env), "cache", "mac-tailnet")
 
-    def version(self):
+    def release(self):
         text = self.m.read(os.path.join(self.root, REL))
-        m = re.search(r'^TS_VERSION = "(.*)"$', text, re.M)
-        v, s = (m.group(1) if m else ""), self.pin["TS_SRC_FOR"]
-        if not v:
-            die("no TS_VERSION in %s" % REL)
-        if v != s:
-            die("%s pins tailscale %s and the source checksum in lib/wk/sysimage/mactailnet.py is\n    for %s. "
-                "The Mac runs the same tailscale as every board, so these cannot differ.\n"
-                "    Remedy: set TS_SRC_FOR to %s and replace TS_SRC_SHA256 with\n"
-                "      curl -fsSL https://proxy.golang.org/tailscale.com/@v/v%s.zip | sha256sum" % (REL, v, s, v, v))
-        return v
+        got = dict(re.findall(r'^(TS_VERSION|TS_SRC_SHA256) = "(.*)"$', text, re.M))
+        if len(got) != 2:
+            die("%s declares no TS_VERSION or no TS_SRC_SHA256" % REL)
+        return got["TS_VERSION"], got["TS_SRC_SHA256"]
 
     def host(self):
         system = self.m.run(["uname", "-s"]).out.strip().lower()
         arch = self.m.run(["uname", "-m"]).out.strip()
         return "%s_%s" % (system, {"aarch64": "arm64"}.get(arch, arch))
 
-    def is_darwin_arm64(self, path):
-        return self.m.run(["od", "-An", "-tx1", "-N8", path]).out.split() == MACHO_ARM64.split()
+    def runnable(self, d):
+        return all(self.m.run(["od", "-An", "-tx1", "-N8", d + "/" + n]).out.split() == MACHO_ARM64.split()
+                   for n in ("tailscaled", "tailscale"))
+
+    def fresh(self, path):
+        self.m.act_run(["rm", "-rf", path])
+        self.m.mkdir(path)
 
     def fetch(self, url, dest, sha, what):
         why = task.fetch_pinned(self.m, url, dest, sha)
         if why:
-            die("%s: %s\n    The pins are in lib/wk/sysimage/mactailnet.py; no daemon is built out of unverified bytes." % (what, why))
+            die("%s: %s\n    No daemon is built out of unverified bytes." % (what, why))
 
     def unpack(self, argv, final, what):
-        self.m.act_run(["rm", "-rf", final + ".part", final])
-        self.m.mkdir(final + ".part")
+        self.m.act_run(["rm", "-rf", final])
+        self.fresh(final + ".part")
         self.run(argv + [final + ".part"], "could not unpack %s" % what)
         self.run(["mv", final + ".part", final], "could not keep %s" % final)
 
     def go(self):
-        ver, host = self.pin["GO_VERSION"], self.host()
-        sha = self.pin["GO_SHA256"].get(host)
+        ver, host = self.go_pin["version"], self.host()
+        sha = self.go_pin.get(host)
         if not sha:
-            die("lib/wk/sysimage/mactailnet.py pins no Go toolchain for %s, so this machine cannot build the\n"
-                "    darwin tailscaled the benchmark install needs.\n    Remedy: add GO_SHA256[\"%s\"] with go.dev's "
-                "published checksum for\n      go%s.%s.tar.gz, or stage the volume from a host that has one."
-                % (host, host, ver, host.replace("_", "-")))
+            die("lib/wk/sysimage/mactailnet.py pins no Go toolchain for %s.\n    Remedy: add GO[\"%s\"] with go.dev's "
+                "published checksum for go%s.%s.tar.gz" % (host, host, ver, host.replace("_", "-")))
         art = self.artifacts()
         go = os.path.join(art, "go-" + ver, "go", "bin", "go")
         if self.m.exists(go):
@@ -124,43 +109,42 @@ class Tailnet:
         self.unpack(["tar", "xzf", tgz, "-C"], os.path.join(art, "go-" + ver), tgz)
         return go
 
-    def source(self, ver):
+    def source(self, ver, sha):
         art = self.artifacts()
         src = os.path.join(art, "src-" + ver, "tailscale.com@v" + ver)
         if self.m.exists(os.path.join(src, "go.mod")):
             return src
         self.m.mkdir(art)
         zipf = os.path.join(art, "tailscale-%s.zip" % ver)
-        self.fetch("https://proxy.golang.org/tailscale.com/@v/v%s.zip" % ver, zipf, self.pin["TS_SRC_SHA256"],
-                   "the tailscale %s source" % ver)
+        self.fetch("https://proxy.golang.org/tailscale.com/@v/v%s.zip" % ver, zipf, sha, "the tailscale %s source" % ver)
         self.unpack(["python3", "-m", "zipfile", "-e", zipf], os.path.join(art, "src-" + ver), zipf)
-        if not act.dry_run() and not self.m.exists(os.path.join(src, "go.mod")):
-            die("the tailscale module zip holds no %s/go.mod" % src)
         return src
 
     def build(self):
-        ver = self.version()
+        ver, sha = self.release()
         art = self.artifacts()
         out = os.path.join(art, "darwin-arm64-" + ver)
-        if self.is_darwin_arm64(out + "/tailscaled") and self.is_darwin_arm64(out + "/tailscale"):
+        if self.runnable(out):
             return out
-        go, src = self.go(), self.source(ver)
+        go, src = self.go(), self.source(ver, sha)
         info("building tailscaled %s for darwin/arm64" % ver)
         part = out + ".part"
-        self.m.act_run(["rm", "-rf", part])
-        self.m.mkdir(part)
+        self.fresh(part)
         stamp = "-X tailscale.com/version.longStamp=%s -X tailscale.com/version.shortStamp=%s" % (ver, ver)
         self.run(["env", "GOPATH=%s/gopath" % art, "GOMODCACHE=%s/gopath/pkg/mod" % art, "GOCACHE=%s/gocache" % art,
                   "GOTOOLCHAIN=local", "CGO_ENABLED=0", "GOOS=darwin", "GOARCH=arm64",
                   go, "-C", src, "build", "-trimpath", "-ldflags", stamp, "-o", part + "/", "./cmd/tailscaled",
                   "./cmd/tailscale"], "could not build tailscaled for darwin/arm64")
-        if not act.dry_run() and not (self.is_darwin_arm64(part + "/tailscaled") and self.is_darwin_arm64(part + "/tailscale")):
-            die("the build produced something that is not a Mach-O arm64 executable.\n    Refusing to stage it: a "
-                "binary the benchmark install cannot run is a\n    machine that comes back unreachable.")
+        self.refuse_unrunnable(part)
         self.run(["chmod", "0755", part + "/tailscaled", part + "/tailscale"], "could not mark %s executable" % part)
         self.m.act_run(["rm", "-rf", out])
         self.run(["mv", part, out], "could not keep %s" % out)
         return out
+
+    def refuse_unrunnable(self, d):
+        if not act.dry_run() and not self.runnable(d):
+            die("%s holds something that is not a Mach-O arm64 executable.\n    Refusing it: a binary the benchmark "
+                "install cannot run is a\n    machine that comes back unreachable." % d)
 
     def node_name(self, machine):
         name = (fleet.Fleet(self.root, self.env).load(machine) or {}).get("bench_ssh", "")
@@ -186,13 +170,12 @@ class Tailnet:
                 "    Set one first:  wk key set tailnet")
         out = self.build()
         part = dest + ".part"
-        self.m.act_run(["rm", "-rf", part])
-        self.m.mkdir(part)
+        self.fresh(part)
         self.run(["install", "-m", "0755", out + "/tailscaled", out + "/tailscale", part + "/"], "could not collect the daemon")
         self.run(["install", "-m", "0600", keyfile, part + "/authkey"], "could not collect the auth key")
         self.m.write(part + "/tailnet.conf", "hostname=%s\ntag=%s\n" % (name, tailnet.fleet_tag(self.env)))
-        self.m.write(part + "/%s.plist" % DAEMON_LABEL, daemon_plist())
-        self.m.write(part + "/%s.plist" % JOIN_LABEL, join_plist())
+        self.m.write(part + "/%s.plist" % DAEMON_LABEL, DAEMON_PLIST)
+        self.m.write(part + "/%s.plist" % JOIN_LABEL, JOIN_PLIST)
         kept = self.remembered(name)
         if self.m.exists(kept) and self.m.read(kept):
             self.run(["install", "-m", "0600", kept, part + "/tailscaled.state"], "could not collect %s" % kept)
@@ -208,9 +191,7 @@ class Tailnet:
         for f in () if act.dry_run() else PAYLOAD:
             if not self.m.exists(os.path.join(src, f)):
                 die("%s carries no %s, so it is not a collected tailnet payload" % (src, f))
-        if not act.dry_run() and not (self.is_darwin_arm64(src + "/tailscaled") and self.is_darwin_arm64(src + "/tailscale")):
-            die("%s holds something that is not a Mach-O arm64 executable.\n    Refusing to install it: a binary the "
-                "benchmark install cannot run is a\n    machine that comes back unreachable." % src)
+        self.refuse_unrunnable(src)
         pre = ["sudo"] if sudo else []
         # BSD install -d applies -m to every directory it creates, so the parents come first at 0755.
         steps = [["-d", "-m", "0755", root + TS_BIN, root + LAUNCHD],

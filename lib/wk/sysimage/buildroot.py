@@ -15,7 +15,6 @@ IMAGE_JOBS = 16    # 2009-era tarballs are where broken parallel rules live
 WEBKIT_JOBS = 64   # WebKit links large; capped where the link steps stop gaining
 PATTERN = "*buildroot_ws.py*"
 DL_IN_WS = "/cache/buildroot/dl"
-SHA_LEN = 40
 BUILD_USAGE = "usage: wk sysimage build %s [--dry-run|--workspace <name>|--detach|--stop]"
 WEBKIT_USAGE = "usage: wk sysimage webkit <profile> --commit <sha> --slot <name> [--detach] [--dry-run]"
 ZIMAGE_MAGIC = "016f2818"   # at offset 36 of a 32-bit ARM zImage
@@ -101,20 +100,12 @@ class Buildroot(task.ContainerBuilder):
         return os.path.splitext(dtb)[0]
 
     def image_argv(self, tools, jobs, wifi, kernel_tar, kernel_dts=""):
-        p = self.p
-
-        def opt(flag, value):
-            return [flag, value] if value else []
-
+        p, opt = self.p, task.opt
         return (["python3", tools + "/lib/wk/sysimage/buildroot_ws.py", "image", "--name", self.name, "--tree-url", p["BR_TREE_URL"]]
                 + opt("--tree-branch", p["BR_TREE_BRANCH"]) + opt("--tree-commit", p["BR_TREE_COMMIT"])
                 + ["--defconfig", p["BR_DEFCONFIG"], "--external", p["BR_EXTERNAL"] or "0"] + opt("--image", p["BR_IMAGE"])
                 + ["--jobs", str(jobs)] + opt("--overlay-arch", p["BR_OVERLAY_TAILSCALE"]) + opt("--overlay-wifi", "1" if wifi else "")
                 + opt("--kernel-tar", kernel_tar) + opt("--kernel-release", p["BR_KERNEL_RELEASE"]) + opt("--kernel-dts", kernel_dts))
-
-    def du(self, path):
-        words = self.here.run(["du", "-sh", path]).out.split()
-        return words[0] if words else "not created yet"
 
     def build(self, rest):
         o = task.options(rest, ("--detach", "--stop"), ("--workspace",), BUILD_USAGE % self.name)
@@ -124,7 +115,7 @@ class Buildroot(task.ContainerBuilder):
         if p["BR_KERNEL_DEB_URL"] and not (p["BR_KERNEL_DEB_SHA256"] and p["BR_KERNEL_RELEASE"]):
             die("%s pins a kernel but not its sha256 and release\n    (BR_KERNEL_DEB_SHA256, BR_KERNEL_RELEASE): a kernel by URL alone is not pinned." % self.name)
         driver = self.driver()
-        ws = o.get("--workspace") or images.image_ws(self.name, self.env)
+        ws = self.ws_of(o)
         st = self.stage(driver, ws, "image")
         if o.get("--stop"):
             return st.stop()
@@ -134,8 +125,7 @@ class Buildroot(task.ContainerBuilder):
             return self.build_report(driver, ws, base, wifi)
         st.refuse_busy()
         if o.get("--detach"):
-            return st.detach([os.path.join(self.root, "wk"), "sysimage", "build", self.spec] + [a for a in rest if a != "--detach"],
-                             "build of %s" % self.name)
+            return self.detach(st, "build", rest, "build of %s" % self.name)
         budget, running, jobs = st.size(IMAGE_JOBS)
         lock = st.admit(budget, running, jobs)
         try:
@@ -199,10 +189,9 @@ class Buildroot(task.ContainerBuilder):
         if not commit or not name:
             die(WEBKIT_USAGE + "; see wk sysimage -h")
         images.check_slot_name(name)
-        if len(commit) != SHA_LEN or any(c not in "0123456789abcdef" for c in commit):
-            die("--commit takes a full sha (40 hex digits), got '%s'.\n    'git rev-parse' in the mirror or the workspace expands a short one." % commit)
+        task.check_commit(commit)
         driver = self.driver()
-        ws = o.get("--workspace") or images.image_ws(self.name, self.env)
+        ws = self.ws_of(o)
         image = os.path.join(driver.store.ws_dir(ws), "build", "buildroot", self.name, "output", "images", self.p["BR_IMAGE"] or "sdcard.img")
         slotdir = images.slot_dir(ws, name, self.env)
         st = self.stage(driver, ws, "webkit-" + name)
@@ -211,12 +200,10 @@ class Buildroot(task.ContainerBuilder):
         if driver.info(ws) == "absent":
             die("no workspace '%s', so there is no image to build against.\n    Build the image first:  wk sysimage build %s" % (ws, self.spec))
         if not self.here.exists(image):
-            die("'%s' has no finished image (%s).\n    A slot is built against the image's toolchain, so the image comes first:\n"
-                "        wk sysimage build %s" % (ws, image, self.spec))
+            die("'%s' has no finished image (%s) for a slot to build against:  wk sysimage build %s" % (ws, image, self.spec))
         st.refuse_busy()
         if o.get("--detach"):
-            return st.detach([os.path.join(self.root, "wk"), "sysimage", "webkit", self.spec] + [a for a in rest if a != "--detach"],
-                             "slot build of %s" % self.name)
+            return self.detach(st, "webkit", rest, "slot build of %s" % self.name)
         budget, running, jobs = st.size(WEBKIT_JOBS)
         lock = st.admit(budget, running, jobs)
         try:

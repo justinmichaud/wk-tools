@@ -391,7 +391,7 @@ class TestArm(unittest.TestCase):
         d.probe()
         got, err = quiet(d.arm)
         self.assertIs(got, act.Refused)
-        self.assertIn("a return this cannot see", err)
+        self.assertIn("Nothing was armed", err)
         self.assertNotIn("boot-volume", [a[2].get("WK_VERB") for a in fake.asked])
 
     def test_an_arming_the_firmware_does_not_confirm_is_reported(self):
@@ -430,7 +430,7 @@ class TestReturn(unittest.TestCase):
         d.probe()
         got, err = quiet(d.disarm)
         self.assertIs(got, act.Refused)
-        for remedy in ("wk machine setup mbp", "wk boot mbp --disarm", "Startup Disk"):
+        for remedy in ("wk machine setup mbp", "wk boot mbp --disarm"):
             self.assertIn(remedy, err)
 
     def test_the_restart_is_ready_only_when_the_helper_names_its_detach(self):
@@ -450,7 +450,6 @@ class TestReports(unittest.TestCase):
         fake.enter_bench()
         d.probe()
         self.assertIn("tolken-bench is running from it", d.media())
-        self.assertIn("under no /Volumes path", d.media())
 
     def test_silence_on_both_nodes_names_both_of_them(self):
         fake, d = volume()
@@ -491,14 +490,6 @@ class TestReports(unittest.TestCase):
         self.assertEqual(d.systems(), [])
         fake.up = False
         self.assertIsNone(d.systems())
-
-    def test_the_facts_a_bash_caller_reads(self):
-        _, d = volume()
-        facts = d.facts()
-        self.assertEqual(facts["arming"], "command")
-        self.assertEqual(facts["record"], "${XDG_STATE_HOME:-$HOME/.local/state}/wk/boot-armed")
-        self.assertEqual(facts["helper"], HELPER)
-        self.assertEqual(facts["measures"], "yes")
 
 
 class TestStaging(unittest.TestCase):

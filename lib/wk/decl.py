@@ -1,19 +1,25 @@
-"""A command's declaration: the `# wk:` lines in the leading comment block of cmd/<name> and the
-`# wk <name> ... -- <summary>` synopsis. Keys: where=, name= (with @N for the slot), takes=,
-ready=yes, group=, lifecycle, readonly, destructive, dryrun, nodryrun, opts, passthrough[=tail|=all], broker,
-outside, forward=no, here, bare=merged, post=, values=, preset=, verbs=, default=, needs;
-`sub <verbs> [<second words>]` lines override per verb or verb pair (opts live on verbs), `flag` lines per flag.
-An option declared both bare and with `=` (`--x,--x=`) takes a value only as `--x=v`."""
+"""A command's declaration: the `# wk:` lines in the leading comment block of cmd/<name> (keys in VALUED and
+FLAGS) and the `# wk <name> ... -- <summary>` synopsis. `sub <verbs> [<second words>]` lines override per verb
+or verb pair (opts live on verbs), `flag` lines per flag. An option declared both bare and with `=` (`--x,--x=`)
+takes a value only as `--x=v`."""
 
 import re
 from pathlib import Path
 
 WHERE_VALUES = ("host", "store", "local", "workspace", "dynamic")
 NAME_VALUES = ("required", "optional", "none", "derived")
-FLAGS = ("lifecycle", "readonly", "destructive", "broker", "needs", "opts",
-         "passthrough", "dryrun", "nodryrun", "passthrough=tail", "passthrough=all", "forward=no", "here",
-         "outside", "bare=merged")
 PRESET_VALUES = ("--preset", "arg")
+VALUED = {"where": WHERE_VALUES, "name": NAME_VALUES, "preset": PRESET_VALUES, "takes": (), "ready": (), "group": (),
+          "values": (), "post": (), "verbs": (), "default": ()}
+FLAGS = {"lifecycle": {"lifecycle": True}, "readonly": {"readonly": "yes"}, "destructive": {"destructive": "yes"},
+         "broker": {"broker": "*"}, "needs": {}, "opts": {}, "passthrough": {"passthrough": "yes"},
+         "passthrough=tail": {"passthrough": "tail"}, "passthrough=all": {"passthrough": "all"},
+         "dryrun": {"dryrun": "yes"}, "nodryrun": {"nodryrun": True}, "forward=no": {"forward": False},
+         "here": {"here": True, "forward": False}, "outside": {"outside": True}, "bare=merged": {"bare": "merged"}}
+DEFAULTS = {"where": "workspace", "name_decl": "none", "ready": False, "group": "other", "lifecycle": False,
+            "readonly": "", "broker": "", "forward": True, "bare": "", "post": "", "outside": False, "needs": "",
+            "here": False, "takes": "0", "values": "", "preset": "", "verbs": "", "default": "", "destructive": "",
+            "opts": "", "passthrough": "", "dryrun": "", "nodryrun": False, "synopsis": ""}
 LIST_KEYS = ("needs", "opts", "readonly", "destructive", "dryrun", "broker")
 
 
@@ -22,7 +28,6 @@ class DeclError(Exception):
 
 
 def leading_block(path):
-    """The lines of `path` up to its first that is not a comment: where its declaration and its help live."""
     out = []
     with open(path, errors="replace") as f:
         for line in f:
@@ -33,7 +38,6 @@ def leading_block(path):
 
 
 def in_list(word, spec):
-    """`word` is in the comma list `spec`; `*` is everything, empty is nothing."""
     if not spec:
         return False
     if spec == "*":
@@ -45,32 +49,9 @@ class Decl:
     def __init__(self, path):
         self.path = Path(path)
         self.name = self.path.name
-        self.where = "workspace"
-        self.name_decl = "none"
-        self.ready = False
-        self.group = "other"
-        self.lifecycle = False
-        self.readonly = ""
-        self.broker = ""
-        self.forward = True
-        self.bare = ""
-        self.post = ""
-        self.outside = False
-        self.needs = ""
-        self.here = False
-        self.takes = "0"
-        self.values = ""
-        self.preset = ""
-        self.verbs = ""
-        self.default = ""
-        self.destructive = ""
-        self.opts = ""
-        self.passthrough = ""
-        self.dryrun = ""
-        self.nodryrun = False
+        self.__dict__.update(DEFAULTS)
         self.sub = []    # (verbs, second words, {key: value})
         self.flag = []   # (flags, {key: value})
-        self.synopsis = ""
         self._load()
 
     def _load(self):
@@ -124,78 +105,20 @@ class Decl:
         pending = ""
         for tok in tokens:
             key, eq, value = tok.partition("=")
-            if key in ("where", "name", "takes", "ready", "group", "values", "post", "preset", "verbs", "default") and eq:
+            if eq and key in VALUED:
                 pending = ""
-                if key == "where":
-                    if value not in WHERE_VALUES:
-                        raise DeclError("%s: where=%s is not one of %s"
-                                        % (self.name, value, "|".join(WHERE_VALUES)))
-                    self.where = value
-                elif key == "name":
-                    if value.split("@")[0] not in NAME_VALUES:
-                        raise DeclError("%s: name=%s is not one of %s"
-                                        % (self.name, value, "|".join(NAME_VALUES)))
-                    self.name_decl = value
-                elif key == "takes":
-                    self.takes = value
-                elif key == "ready":
-                    self.ready = value == "yes"
-                elif key == "group":
-                    self.group = value
-                elif key == "values":
-                    self.values = value
-                elif key == "post":
-                    self.post = value
-                elif key == "preset":
-                    if value not in PRESET_VALUES:
-                        raise DeclError("%s: preset=%s is not one of %s"
-                                        % (self.name, value, "|".join(PRESET_VALUES)))
-                    self.preset = value
-                elif key == "verbs":
-                    self.verbs = value
-                elif key == "default":
-                    self.default = value
+                allowed = VALUED[key]
+                if allowed and (value.split("@")[0] if key == "name" else value) not in allowed:
+                    raise DeclError("%s: %s=%s is not one of %s" % (self.name, key, value, "|".join(allowed)))
+                setattr(self, "name_decl" if key == "name" else key, value == "yes" if key == "ready" else value)
             elif tok in FLAGS:
-                pending = ""
-                if tok == "lifecycle":
-                    self.lifecycle = True
-                elif tok == "readonly":
-                    self.readonly = "yes"
-                    pending = "readonly"
-                elif tok == "destructive":
-                    self.destructive = "yes"
-                    pending = "destructive"
-                elif tok == "broker":
-                    self.broker = "*"
-                    pending = "broker"
-                elif tok == "needs":
-                    pending = "needs"
-                elif tok == "opts":
-                    pending = "opts"
-                elif tok == "passthrough":
-                    self.passthrough = "yes"
-                elif tok == "nodryrun":
-                    self.nodryrun = True
-                elif tok == "dryrun":
-                    self.dryrun = "yes"
-                    pending = "dryrun"
-                elif tok in ("passthrough=tail", "passthrough=all"):
-                    self.passthrough = tok.split("=")[1]
-                elif tok == "forward=no":
-                    self.forward = False
-                elif tok == "here":
-                    self.here = True
-                    self.forward = False
-                elif tok == "outside":
-                    self.outside = True
-                elif tok == "bare=merged":
-                    self.bare = "merged"
-            elif pending in LIST_KEYS:
+                self.__dict__.update(FLAGS[tok])
+                pending = tok if tok in LIST_KEYS else ""
+            elif pending:
                 setattr(self, pending, tok)
                 pending = ""
             else:
-                raise DeclError("%s: '%s' is not a declaration this dispatcher knows"
-                                % (self.name, tok))
+                raise DeclError("%s: '%s' is not a declaration this dispatcher knows" % (self.name, tok))
 
     # -- per-invocation answers: a flag override wins, then the subverb's, then the command's
 
@@ -286,24 +209,14 @@ class Decl:
         return self.synopsis.split(" -- ", 1)[1] if " -- " in self.synopsis else ""
 
     def leading_comment(self):
-        """The comment block after the header, what `wk <cmd> -h` prints."""
         out = []
-        seen = False
-        with open(self.path, errors="replace") as f:
-            lines = f.read().splitlines()
-        for line in lines[1:]:
-            if line.startswith("# wk:"):
+        for line in leading_block(self.path)[1:]:
+            line = line.rstrip("\n")
+            if line.startswith("# wk:") or (re.match(r"^# wk [a-z]", line) and not out):
                 continue
-            if re.match(r"^# wk [a-z]", line) and not seen:
-                continue
-            if line.startswith("#"):
-                text = re.sub(r"^# ?", "", line)
-                if text == "" and not seen:
-                    continue
-                seen = True
+            text = re.sub(r"^# ?", "", line)
+            if text or out:
                 out.append("  " + text)
-                continue
-            break
         return "\n".join(out)
 
 

@@ -5,7 +5,6 @@ import io
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,7 +15,7 @@ from tests.test_slots import load_driver
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import samply  # noqa: E402
-from wk.bench import board, record, report  # noqa: E402
+from wk.bench import record, report  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
 def tmpdir(case):
@@ -292,29 +291,15 @@ class TestWarmupNeverEntersTheStatistics(WkTest):
 class TestSubtestExclusions(WkTest):
 
     def test_an_excluded_run_says_so_in_the_report(self):
-        cp = subprocess.run(
-            ["python3", "-c",
-             "import sys; sys.path.insert(0, 'lib'); from wk.bench import report;"
-             "print(chr(10).join(report.axis_check_lines("
-             "{'subtests_excluded': 'argon2-wasm,dotnet-aot-wasm'},"
-             "{'subtests_excluded': 'argon2-wasm,dotnet-aot-wasm'})))"],
-            cwd=str(REPO), capture_output=True, text=True, timeout=15)
-        self.assertIn("2 subtest(s) excluded from both arms", cp.stdout)
+        ex = {"subtests_excluded": "argon2-wasm,dotnet-aot-wasm"}
+        self.assertIn("note: 2 subtest(s) excluded from both arms", "\n".join(report.axis_check_lines(ex, dict(ex))))
 
     def test_arms_with_different_sets_are_a_warning_not_a_note(self):
-        cp = subprocess.run(
-            ["python3", "-c",
-             "import sys; sys.path.insert(0, 'lib'); from wk.bench import report;"
-             "print(chr(10).join(report.axis_check_lines("
-             "{'subtests_excluded': 'argon2-wasm'}, {'plan': 'jetstream3'})))"],
-            cwd=str(REPO), capture_output=True, text=True, timeout=15)
-        self.assertIn("warning: the arms ran different subtest sets", cp.stdout)
+        lines = report.axis_check_lines({"subtests_excluded": "argon2-wasm"}, {"plan": "jetstream3"})
+        self.assertTrue([l for l in lines if l.startswith("warning: the arms ran different subtest sets")])
 
 
 class TestRunOrderAndSettling(WkTest):
-    def wkd(self):
-        return report
-
     def runs(self, order):
         """order is the arm of each run in time order, e.g. 'ABBA'."""
         a, b = [], []
@@ -325,25 +310,22 @@ class TestRunOrderAndSettling(WkTest):
 
     def test_always_leading_with_a_is_reported(self):
         a, b = self.runs("ABABABABAB")
-        lines = self.wkd().order_lines(a, b)
+        lines = report.order_lines(a, b)
         self.assertTrue(lines)
         self.assertIn("not counterbalanced", lines[0])
         self.assertIn("B runs 1.0 position", lines[0])
 
     def test_a_counterbalanced_order_is_not_flagged(self):
         a, b = self.runs("ABBAABBA")
-        self.assertEqual(self.wkd().order_lines(a, b), [])
+        self.assertEqual(report.order_lines(a, b), [])
 
     def test_blocked_runs_are_flagged_hardest(self):
         a, b = self.runs("AAAAABBBBB")
-        lines = self.wkd().order_lines(a, b)
+        lines = report.order_lines(a, b)
         self.assertIn("5.0 position", lines[0])
 
 
 class TestScoreAgainstItsOwnSubtests(WkTest):
-
-    def wkd(self):
-        return report
 
     def rows(self, score_a, score_b, time_a, time_b, n=12):
         rows = [{"name": "Speedometer-2",
@@ -356,18 +338,18 @@ class TestScoreAgainstItsOwnSubtests(WkTest):
         return rows
 
     def test_less_work_and_a_higher_score_is_consistent(self):
-        lines = self.wkd().consistency_lines(self.rows(100.0, 105.0, 1000.0, 950.0))
+        lines = report.consistency_lines(self.rows(100.0, 105.0, 1000.0, 950.0))
         self.assertTrue(lines[0].startswith("note:"))
         self.assertFalse([l for l in lines if l.startswith("warning:")])
 
     def test_less_work_and_a_lower_score_disagrees_in_sign(self):
-        lines = self.wkd().consistency_lines(self.rows(100.0, 99.2, 1000.0, 953.5))
+        lines = report.consistency_lines(self.rows(100.0, 99.2, 1000.0, 953.5))
         joined = " ".join(lines)
         self.assertIn("disagree in SIGN", joined)
         self.assertIn("do not quote either", joined)
 
     def test_a_shape_it_cannot_read_says_nothing_rather_than_guessing(self):
-        self.assertEqual(self.wkd().consistency_lines([]), [])
+        self.assertEqual(report.consistency_lines([]), [])
 
 
 class TestProfilerChoice(WkTest):

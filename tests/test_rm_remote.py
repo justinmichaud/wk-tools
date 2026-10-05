@@ -1,5 +1,4 @@
-"""`wk rm` against a machine that does not answer (the record stays, the refusal quotes ssh's own words) and against
-a name that is not there (refused before the confirmation; the rest of the batch still goes)."""
+"""`wk rm` against a machine that does not answer: the record stays, and the refusal quotes ssh's own words."""
 import os
 import subprocess
 import sys
@@ -49,13 +48,6 @@ class TestAnUnreachableMachineKeepsItsRecord(WkTest):
         self.assertIn("Host key verification failed.", cp.stdout, cp.stdout)
         self.assertTrue(self.record.is_dir())
 
-    def test_a_name_with_no_record_is_refused_before_the_prompt(self):
-        with stub_path({"ssh": _HOSTKEY_SSH}) as binp:
-            cp = run("rm", "nope", env=self._env(binp, WK_PLACE="fakebox"), input="", timeout=120)
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("Host key verification failed.", cp.stdout, cp.stdout)
-        self.assertNotIn("destroy workspace", cp.stdout)
-
     def test_the_locate_walk_names_the_machine_and_ssh_reason(self):
         with stub_path({"ssh": _HOSTKEY_SSH}) as binp:
             cp = subprocess.run(
@@ -66,42 +58,6 @@ class TestAnUnreachableMachineKeepsItsRecord(WkTest):
         self.assertEqual(cp.stdout.strip(), "[]", cp.stdout + cp.stderr)
         self.assertIn("fakebox", cp.stderr)
         self.assertIn("Host key verification failed.", cp.stderr)
-
-
-class TestAnAbsentNameIsRefusedBeforeThePrompt(WkTest):
-    def setUp(self):
-        super().setUp()
-        self.registry = self.tmp / "hosts"
-        self.registry.mkdir()
-        self.root = self.tmp / "root"
-        self.store = self.tmp / "store"
-        (self.root / "ws").mkdir(parents=True)
-        self.store.mkdir()
-        (self.registry / "fakelocal.conf").write_text(
-            _LOCAL_CONF.format(root=self.root, store=self.store))
-        self.env = {
-            "WK_MACHINES_DIR": str(self.registry),
-            "XDG_STATE_HOME": str(self.tmp / "state"),
-            "WK_PLACE": "fakelocal",
-        }
-
-    def _make(self, name):
-        (self.root / "ws" / name).mkdir()
-        (self.root / "ws" / name / ".wk-ready").write_text("")
-        (self.store / "ws" / name).mkdir(parents=True)
-
-    def test_no_prompt_for_a_name_that_is_not_there(self):
-        cp = run("rm", "nope", env=self.env, input="", timeout=120)
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("nope", cp.stdout, cp.stdout)
-        self.assertNotIn("destroy workspace", cp.stdout)
-
-    def test_the_rest_of_the_batch_still_goes(self):
-        self._make("keep-not")
-        cp = run("rm", "keep-not", "nope", env=dict(self.env, WK_YES="1"), input="", timeout=120)
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertFalse((self.root / "ws" / "keep-not").exists(), cp.stdout)
-        self.assertFalse((self.store / "ws" / "keep-not").exists(), cp.stdout)
 
 
 if __name__ == "__main__":

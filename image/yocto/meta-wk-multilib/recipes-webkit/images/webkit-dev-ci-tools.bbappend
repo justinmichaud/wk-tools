@@ -1,16 +1,6 @@
-# A multilib image installs multilib packages.
-#
-# `MLPREFIX` is set for a multilib image recipe, and the recipes themselves
-# gain their variants from multilib.conf's global BBCLASSEXTEND -- but nothing
-# rewrites IMAGE_INSTALL. So `bitbake lib32-webkit-dev-ci-tools` would
-# assemble the 64-bit rootfs under a 32-bit name: a whole image whose width is
-# not the one it is named for, and no error anywhere. This maps the list.
-#
-# What must not take the prefix is what has one build per machine rather than
-# one per userspace width -- the kernel and its modules, the firmware, the
-# bootloader. WK_MULTILIB_KEEP names those, and every name in it is there
-# because bitbake could not resolve its prefixed form: the list is derived
-# from `bitbake -n`, not guessed.
+# Nothing rewrites IMAGE_INSTALL for a multilib image, so lib32-webkit-dev-ci-tools would be the 64-bit
+# rootfs under a 32-bit name. WK_MULTILIB_KEEP names what has one build per machine (kernel, firmware,
+# bootloader): the names whose prefixed form `bitbake -n` cannot resolve.
 WK_MULTILIB_KEEP ?= ""
 
 python () {

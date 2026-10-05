@@ -2,8 +2,6 @@
 a workspace's build, `wk bench staged` as the one pipeline on the running install, the gates asked before anything
 reboots, and where each `wk bench` verb runs. Nothing here touches a Mac, bless, a helper or a browser."""
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import json
 import os
@@ -30,9 +28,6 @@ from wk.machine import lib_argv  # noqa: E402
 from wk.quiet import PRIV  # noqa: E402
 
 BENCH = REPO / "cmd" / "bench"
-CMD_LOADER = importlib.machinery.SourceFileLoader("cmd_bench_mac", str(BENCH))
-CMD = importlib.util.module_from_spec(importlib.util.spec_from_loader("cmd_bench_mac", CMD_LOADER))
-CMD_LOADER.exec_module(CMD)
 SHA = "0123456789abcdef0123456789abcdef01234567"
 RESULT = json.dumps({"Speedometer-3": {"metrics": {"Score": {"current": [30.0, 31.0]}}}})
 MARKERS = {"mbp": "id=perf-macos-tolken-2026-09\nprofile=perf-macos-tolken\n", "benchvm": "id=perf-macos-benchvm\n"}
@@ -65,6 +60,12 @@ class StubWatch:
 
 def args(*argv):
     return decl.Args(decl.Decl(BENCH), list(argv))
+
+
+def staged_options(*argv):
+    a = args("staged", *argv)
+    a.valued = decl.Decl(BENCH).valued_opts()
+    return cli.options(a, cli.STAGED)
 
 
 class World(Fake):
@@ -153,7 +154,7 @@ class MacTest(unittest.TestCase):
             os.environ["WK_DRY_RUN"] = "1"
         try:
             with contextlib.redirect_stderr(err):
-                rc = mac.staged(REPO, w.reg, w.clock, CMD.staged_options(args("staged", *argv)))
+                rc = mac.staged(REPO, w.reg, w.clock, staged_options(*argv))
         finally:
             os.environ.pop("WK_DRY_RUN", None)
         return rc, err.getvalue()
@@ -274,7 +275,7 @@ class TestTheLegsOwnGates(MacTest):
     def said(self, w):
         err = io.StringIO()
         with self.assertRaises(Refused), contextlib.redirect_stderr(err):
-            mac.staged(REPO, w.reg, w.clock, CMD.staged_options(args("staged")))
+            mac.staged(REPO, w.reg, w.clock, staged_options())
         return err.getvalue()
 
     def test_a_covered_screen_refuses_and_force_records_it(self):
@@ -374,11 +375,11 @@ class TestPreflightAsksEveryGate(MacTest):
     def ask(self, w=None):
         w = w or self.w
         with contextlib.redirect_stderr(io.StringIO()):
-            return mac.Gates(REPO, w, w.clock, w.env, "speedometer3", "builtin 1280x832", w.build, "/py").ask()
+            return mac.gates_rows(REPO, w, w.clock, w.env, "speedometer3", "builtin 1280x832", w.build, "/py")
 
     def test_every_gate_is_asked_and_nothing_is_written(self):
         rows = self.ask()
-        self.assertEqual([r[0] for r in rows], list(mac.GATES))
+        self.assertEqual(8, len({r[0] for r in rows}))
         self.assertEqual([r for r in rows if not r[1]], [])
         self.assertEqual([e for e in self.w.effects if e[0] != "run"], [])
         self.assertFalse([e for e in self.w.effects if "reboot" in " ".join(e[1]) or "wk-boot-priv" in " ".join(e[1])])

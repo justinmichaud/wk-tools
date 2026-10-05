@@ -13,122 +13,64 @@
 # wk: sub webkit opts=--workspace=,--detach,--stop,--commit=,--slot=,--preset=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet
 # wk: sub write opts=--from=,--disk=,--profile=,--machine=,--rescue,--grow,--no-grow
 #
-# An image is a whole machine, built from a spec in this repo, that a machine can
-# be put into for one boot and taken out of again.
-# There is no image store (`wk help`): a build leaves its bytes wherever its
-# builder put them, and `write --from` streams those bytes onto a card in one
-# pass; every edit an image needs is made afterwards, on the card, by the
-# machine holding the reader (admin/wk-card-priv).
+# An image is a whole machine built from a spec in this repo. Its bytes stay
+# where its builder put them (there is no image store); `write --from` streams
+# them onto a card, and every per-card edit is made on the card afterwards.
 #
-#   A yocto or buildroot profile is built in its image workspace -- the one
-#   named yocto-<profile> or buildroot-<profile> -- and 'build', 'webkit' and 'holds'
-#   run on the machine holding that workspace, whichever machine they are typed
-#   on ('wk ls' names it). <profile>@<machine> says which machine instead: a
-#   workspace nothing holds yet, or a second machine's workspace of a profile
-#   another machine already has one of. --workspace <name> names a different
-#   image workspace on that machine -- <builder>-<profile>-<arm> is one of its
-#   own, so two arms build at once -- and the command follows that one.
+#   A yocto or buildroot profile is built in its image workspace,
+#   <builder>-<profile>, and build, webkit, holds and path run on the machine
+#   holding it. <profile>@<machine> names that machine; --workspace <name>
+#   names another image workspace there (e.g. <builder>-<profile>-<arm>).
 #
-#   build <profile> [options]    build from the spec in this repo. A yocto
-#                                profile also takes --workspace, --detach,
-#                                --stop, --keep-work, --chromium,
-#                                --local-layer|--no-local-layer,
-#                                --tailnet|--no-tailnet and --stage
-#                                <layers|fetch|image|toolchain|webkit|pgo-mix>
-#                                (default image; pgo-mix takes --slot, and mixes
-#                                what 'wk bench run --collect' collected for it);
-#                                buildroot takes --workspace, --detach,
-#                                --stop; pmos takes --detach and --resume and
-#                                builds on a Linux aarch64 machine over ssh;
-#                                fetch takes no options. mac-volume runs on the
-#                                Mac and takes one of --create, --fetch
-#                                [--version <v>], --install (erases the volume
-#                                and reboots), --provision (in bench mode),
-#                                --repair, --build-pkg or --all, and with none
-#                                reports the volume's state. guest (the golden
-#                                macOS base every vm workspace is cloned from)
-#                                builds it if missing; --refresh re-provisions it
-#                                in place, --rebuild deletes and rebuilds it, and
-#                                --rm erases it and asks again about the pulled
-#                                image cache. Guests already cloned are unaffected
-#                                WK_BUILDROOT_BASE=<image> builds the buildroot
-#                                workspace on another host image than ubuntu:22.04
+#   build <profile> [options]    build from the spec. Per builder:
+#       yocto       --workspace, --detach, --stop, --keep-work, --chromium,
+#                   --local-layer|--no-local-layer, --tailnet|--no-tailnet,
+#                   --stage layers|fetch|image|toolchain|webkit|pgo-mix
+#                   (default image; pgo-mix takes --slot)
+#       buildroot   --workspace, --detach, --stop
+#       pmos        --detach, --resume (on a Linux aarch64 machine over ssh)
+#       fetch       no options
+#       mac-volume  on the Mac, one of --create, --fetch [--version <v>],
+#                   --install (erases the volume, reboots), --provision (in
+#                   bench mode), --repair, --build-pkg, --all [--version <v>];
+#                   none reports the volume's state
+#       guest       the golden macOS base vm workspaces clone: built if
+#                   missing; --refresh re-provisions it, --rebuild deletes and
+#                   rebuilds it, --rm erases it
 #   webkit <profile> --commit <sha> --slot <name> [--detach]
-#                                build one WebKit commit into a named slot
-#                                beside the image, the way its builder builds
-#                                WebKit. A board carries any number of slots and
-#                                'wk bench run --ab' alternates two of them with
-#                                no reflash and no reboot.
-#                                On a yocto profile at release 2.52 or later this
-#                                is a profile-guided build and takes three
-#                                phases, not one: an instrumented slot, a
-#                                collection on the board that carries the image,
-#                                and the measured build against the mixed
-#                                profile. There is no plain build of such a
-#                                profile -- every number one produces is a
-#                                profile-guided build's.
-#                                --stop, with --slot and nothing else, stops the
-#                                build or cycle running for that slot
-#       --preset <name>          which of the builds the profile's toolchain
-#                                makes: wpe-cross (no profile, for measuring
-#                                against one), or one phase of the cycle by
-#                                itself -- wpe-cross-pgo-collect (instrumented)
-#                                or wpe-cross-pgo-use (against the mixed
-#                                profile). Without it a 2.52 profile runs all
-#                                three phases in order
+#                                build one WebKit commit into a named slot beside
+#                                the image. A yocto profile at 2.52+ runs the PGO
+#                                cycle: instrumented slot, collection on the
+#                                board, measured build. --stop with --slot stops
+#                                that slot's build or cycle
+#       --preset <name>          one build of the cycle: wpe-cross (no profile),
+#                                wpe-cross-pgo-collect or wpe-cross-pgo-use
 #   holds <profile> [--toolchain | --slot <name> --commit <sha> [--preset <p>]]
-#                                prints `yes` when that workspace already holds what
-#                                is named -- the built image, the cross SDK
-#                                (--toolchain), or the slot at that commit
-#                                built the way this release builds it -- and
-#                                `no` when it does not. Routed to the
-#                                workspace like build and webkit, so a step asks the
-#                                machine that would do the work rather than
-#                                this one (lib/wk/sched.py's done predicate)
-#   path <profile>               the path of the image that workspace built, as
-#                                the machine holding it spells it, and
-#                                nothing (exit 1) when it has none. What
-#                                'write --from <configuration>' resolves
-#                                through
-#   ls | list                    every image a workspace in this fleet has built,
-#                                its slots, and where each one is: this
-#                                machine's store, then every machine it knows
-#                                that answers for a store of its own. WHERE is
-#                                the machine holding the workspace, blank for
-#                                this one; BOARD is the machine the image is for
-#   disks <machine>             removable disks attached to that machine
-#   write --from <configuration|path> --disk <machine>:<device>[@second|@third]
-#                                write that image to that disk and make it a
-#                                fleet system on the card. --from takes a
-#                                configuration name and finds the image the
-#                                workspace built, or a path 'wk sysimage ls'
-#                                printed (or vm:<path>, inside this machine's
-#                                podman VM). An automounted card is unmounted
-#                                first. Never touches a machine's own system
-#                                disk, and writing does not make anything boot
-#                                it ('wk boot' does).
-#                                @second / @third write the image in beside the
-#                                system on partitions 1-2; the card helper
-#                                resolves which partitions each name is.
-#       --profile <name>         which configuration this image is, when the
-#                                path does not already say (a yocto path does)
-#       --machine <name>         the fleet machine (machines/<name>.conf)
-#                                the card is for, when --profile does not
-#                                already say -- the tailnet name the card
-#                                joins under comes from here
-#       --rescue                 write it as the board's rescue system: the
-#                                units that hand a machine back stay inert
-#       --grow | --no-grow       fill the disk with the root partition, or
-#                                leave it at its built size
+#                                `yes` or `no`: whether that workspace holds the
+#                                image, the cross SDK, or the slot at that commit
+#   path <profile>               the path of that workspace's image (exit 1: none)
+#   ls | list                    every image a workspace in the fleet has built,
+#                                its slots, and the machine holding it (WHERE)
+#   disks <machine>              removable disks attached to that machine
+#   write --from <configuration|path|vm:path> --disk <machine>:<device>[@second|@third]
+#                                write that image to that disk and make it a fleet
+#                                system. @second/@third write it beside the system
+#                                on partitions 1-2. A machine's own system disk is
+#                                never touched
+#       --profile <name>         which configuration the image is, when the path
+#                                does not say
+#       --machine <name>         the machine the card is for, when --profile does
+#                                not say
+#       --rescue                 write it as the board's rescue system
+#       --grow | --no-grow       fill the disk with the root partition, or not
+#                                (default: grow only @second/@third)
+#   WK_BUILDROOT_BASE=<image> builds a buildroot workspace on another host image
+#   than ubuntu:22.04.
 
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images  # noqa: E402
-
-ROOT = images.root()
-
 from wk import act, decl, images, places  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import Clock  # noqa: E402
@@ -136,14 +78,13 @@ from wk.machine import Local  # noqa: E402
 from wk.sysimage import cli  # noqa: E402
 
 
-# The dispatcher's routing questions (lib/wk/dispatch.py), answered before anything else.
 HOOKS = {"--wsname": lambda rest, reg: cli.wsname(rest, reg.env),
          "--wsplace": cli.wsplace,
          "--where": lambda rest, reg: cli.where(rest, reg.env)}
 
 
 def main(argv):
-    reg = places.Registry(ROOT, machine=Local())
+    reg = places.Registry(images.root(), machine=Local())
     hook, rest = argv[0], argv[1:]
     if hook in HOOKS:
         print(HOOKS[hook](rest, reg))

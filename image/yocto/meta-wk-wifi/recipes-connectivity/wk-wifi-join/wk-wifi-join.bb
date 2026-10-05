@@ -17,11 +17,7 @@ REQUIRED_DISTRO_FEATURES = "systemd"
 
 SYSTEMD_SERVICE:${PN} = "wk-wifi-join.service"
 
-# wpa_supplicant is oe-core's own recipe; this package only carries what oe-
-# core does not -- the join script and its unit. A DHCP client is not named
-# here because the script detects what the image already carries (udhcpc or
-# dhclient) rather than pulling a second one in for images that ship neither
-# yet either.
+# The script uses whichever DHCP client the image carries (udhcpc or dhclient).
 RDEPENDS:${PN} += "wpa-supplicant"
 
 do_install() {

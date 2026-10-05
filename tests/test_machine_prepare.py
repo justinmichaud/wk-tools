@@ -123,7 +123,7 @@ class TheHostOsGateAsksWhetherTheDriverCanReachIt(WkTest):
             cp = self._boot("benchvm", "--dry-run", env={"HOME": str(tmp), "PATH": no_tart})
         out = cp.stdout + cp.stderr
         self.assertIn("cannot reach benchvm from here", out, out)
-        self.assertIn("what is missing is on this host", out, out)
+        self.assertIn("what this host is missing", out, out)
         self.assertNotIn("run this over there", out,
                          "this is over there: a macOS host and a macOS-only machine")
 

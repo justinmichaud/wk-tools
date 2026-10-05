@@ -332,22 +332,18 @@ class Invocation:
 
     def check_needs(self, machine=None):
         needs = self.decl.needs_for(self.args)
-        if not needs:
-            return
-        missing = []
-        for n in needs.split(","):
+        machine, missing = machine or Local(), []
+        for n in needs.split(",") if needs else ():
             if n == "gh-auth":
                 from wk.doctor import gh_authenticated
-                ok = gh_authenticated()
-                if not ok:
+                if not gh_authenticated():
                     missing.append("gh-auth    gh cannot reach the GitHub API (not logged in, or the token expired): gh auth login")
             elif n == "tailnet":
-                if not Reach(machine or Local()).peers():
+                if not Reach(machine).peers():
                     missing.append("tailnet    this machine is not on the tailnet: tailscale up")
             elif n == "quiesce-helper":
                 from wk.sudo import QUIESCE_PRIV
-                ok = os.access(QUIESCE_PRIV, os.X_OK) and (machine or Local()).run(["sudo", "-n", QUIESCE_PRIV, "status"]).ok
-                if not ok:
+                if not (os.access(QUIESCE_PRIV, os.X_OK) and machine.run(["sudo", "-n", QUIESCE_PRIV, "status"]).ok):
                     missing.append("quiesce-helper    the privileged quiesce/session helper is not set up: ./setup --stage quiesce")
             elif not shutil.which(n):
                 missing.append("%s    not installed here" % n)
@@ -426,15 +422,16 @@ def completion_cmd(args):
     raise Exit(0)
 
 
+WHERE_PROSE = {
+    "host": "this host's own hardware; refused inside a workspace and on a build machine",
+    "store": "the machine holding the store -- the podman VM on macOS, this machine otherwise; refused inside a workspace",
+    "local": "this machine, never forwarded",
+    "dynamic": "whichever the command itself answers for the rest of the arguments"}
+
+
 def where_prose(d, where):
-    if where == "host":
-        return "this host's own hardware; refused inside a workspace and on a build machine"
-    if where == "store":
-        return "the machine holding the store -- the podman VM on macOS, this machine otherwise; refused inside a workspace"
-    if where == "local":
-        return "this machine, never forwarded"
-    if where == "dynamic":
-        return "whichever the command itself answers for the rest of the arguments"
+    if where in WHERE_PROSE:
+        return WHERE_PROSE[where]
     if d.here:
         return "the machine you type it on"
     if d.lifecycle:
@@ -590,12 +587,16 @@ def forward_to_vm(inv, cmd, args):
             raise Exit(0)
         start_podman_machine(Local(), cmd, os.isatty(0) and os.isatty(1))
     line = registry().load("container").wk_cmd([cmd, *args], os.environ)
-    sys.stdout.flush()
-    sys.stderr.flush()
     if os.isatty(0) and os.isatty(1):
         opts, dest = places.podman_vm_route(rec)
-        os.execvp("ssh", ["ssh", "-t", *opts, dest, line])
-    os.execvp("podman", ["podman", "machine", "ssh", MACHINE, "--", line])
+        exec_flushed(["ssh", "-t", *opts, dest, line])
+    exec_flushed(["podman", "machine", "ssh", MACHINE, "--", line])
+
+
+def exec_flushed(argv):
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execvp(argv[0], argv)
 
 
 def forward_status(inv, cmd, args, env=None):
@@ -623,29 +624,16 @@ def delegate_driver(place):
 
 
 def delegate_run(driver, cmd, args, readonly=False):
-    argv = driver.hand_over(cmd, args, tty=os.isatty(0) and os.isatty(1), readonly=readonly)
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os.execvp(argv[0], argv)
+    exec_flushed(driver.hand_over(cmd, args, tty=os.isatty(0) and os.isatty(1), readonly=readonly))
 
 
-def json_merge_list(key, paths):
-    """{"<key>": [...]} merged from N files, each zero or more JSON documents concatenated with no
-    delimiter -- the shape a per-place `--json` listing (or a missing/empty file) produces."""
-    items = []
-    dec = json.JSONDecoder()
-    for path in paths:
-        try:
-            with open(path) as f:
-                text = f.read()
-        except OSError:
-            continue
-        i, n = 0, len(text)
-        while i < n:
-            while i < n and text[i] in " \t\r\n":
-                i += 1
-            if i >= n:
-                break
+def json_merge_list(key, texts):
+    """{"<key>": [...]} merged from texts of zero or more concatenated JSON documents, as a per-place `--json` listing prints."""
+    items, dec = [], json.JSONDecoder()
+    for text in texts:
+        i = 0
+        while text[i:].strip():
+            i = len(text) - len(text[i:].lstrip())
             obj, i = dec.raw_decode(text, i)
             items.extend(obj.get(key, []))
     return {key: items}
@@ -654,50 +642,36 @@ def json_merge_list(key, paths):
 def bare_report(inv, cmd, args):
     """A report with no subject, merged over every place here and the VM."""
     hosts = [t for t in registry().all() if t != "container"]
-    worst = 0
     ls_json = cmd == "ls" and "--json" in args
-    ls_local = ls_vm = None
-    ls_empty = []
-    import tempfile
+    vm = machine_running()
+    worst, docs, empty = 0, [], []
     if hosts:
-        env = dict(os.environ, WK_PLACE=" ".join(hosts))
+        more = ["--more-follows"] if cmd == "ls" and vm and not ls_json else []
+        cp = subprocess.run([str(inv.decl.path), *more, *args], stdout=subprocess.PIPE if ls_json or more else None,
+                            text=True, env=dict(os.environ, WK_PLACE=" ".join(hosts)))
+        worst = cp.returncode
         if ls_json:
-            ls_local = tempfile.NamedTemporaryFile(delete=False)
-            rc = subprocess.call([str(inv.decl.path), *args], stdout=ls_local, env=env)
-            ls_local.close()
-        elif cmd == "ls" and machine_running():
-            cp = subprocess.run([str(inv.decl.path), "--more-follows", *args], stdout=subprocess.PIPE,
-                                text=True, env=env)
-            rc = cp.returncode
+            docs.append(cp.stdout)
+        elif more:
             sys.stdout.write(cp.stdout)
             sys.stdout.flush()
-            if len(cp.stdout.splitlines()) <= 1:
-                ls_empty = ["--empty-so-far"]
-        else:
-            rc = subprocess.call([str(inv.decl.path), *args], env=env)
-        worst = max(worst, rc)
-    if machine_running():
+            empty = ["--empty-so-far"] if len(cp.stdout.splitlines()) <= 1 else []
+    if vm:
         env = dict(os.environ, WK_ROW_LABEL=record.machine_name())
-        if cmd == "ls" and hosts:
-            if ls_json:
-                ls_vm = tempfile.NamedTemporaryFile(delete=False)
-                cp = subprocess.run([sys.executable, str(ROOT / "wk"), "--forward", cmd, "--continued", *args],
-                                    stdout=ls_vm, env=env)
-                ls_vm.close()
-                rc = cp.returncode
-            else:
-                rc = forward_status(inv, cmd, ["--continued", *ls_empty, *args], env=env)
+        cont = ["--continued"] if cmd == "ls" and hosts else []
+        if ls_json:
+            cp = subprocess.run([sys.executable, str(ROOT / "wk"), "--forward", cmd, *cont, *args],
+                                stdout=subprocess.PIPE, text=True, env=env)
+            docs.append(cp.stdout)
+            rc = cp.returncode
         else:
-            rc = forward_status(inv, cmd, args, env=env)
+            rc = forward_status(inv, cmd, [*cont, *empty, *args], env=env)
         worst = max(worst, rc)
     elif shutil.which("podman"):
         warn("the podman machine '%s' is stopped, so container workspaces are not included" % MACHINE)
         log("  'wk start' to bring it up")
     if ls_json:
-        files = [f.name for f in (ls_local, ls_vm) if f is not None]
-        print(json.dumps(json_merge_list("workspaces", files)))
-        for f in files:
-            os.unlink(f)
+        print(json.dumps(json_merge_list("workspaces", docs)))
     raise Exit(worst)
 
 
@@ -787,15 +761,16 @@ def main(argv):
         name_decl = d.name_for(args)
         slot = D.name_slot(name_decl)
         takes = d.takes_for(args)
-        if name_decl.split("@")[0] == "derived":
-            derived = inv.derived_name()
+    base = name_decl.split("@")[0]
+    if base == "derived":
+        derived = inv.derived_name()
 
     resolved = ""
     if where == "workspace" and not in_workspace():
         resolved = resolve_place(inv, name_decl, slot, takes, derived)
 
     delegate = None
-    if (where == "workspace" and name_decl.split("@")[0] != "none" and not in_workspace()
+    if (where == "workspace" and base != "none" and not in_workspace()
             and not in_vm() and not d.here_for(args) and not d.lifecycle):
         delegate = delegate_driver(resolved)
 
@@ -804,9 +779,8 @@ def main(argv):
     if not forwards and delegate is None:
         inv.check_needs()
 
-    if where == "store" and not in_vm():
-        if not registry().store.is_local():
-            forward_to_vm(inv, cmd, args)
+    if where == "store" and not in_vm() and not registry().store.is_local():
+        forward_to_vm(inv, cmd, args)
 
     if where != "workspace":
         line = command_line(inv, args)
@@ -816,14 +790,14 @@ def main(argv):
         delegate_run(delegate, cmd, inv.typed, readonly=d.is_readonly(args))
 
     name = ""
-    if not in_workspace() and name_decl.split("@")[0] == "required":
+    if not in_workspace() and base == "required":
         if name_in_argv("required", slot, takes, args) is None and not cwd_workspace():
             inv.usage_die()
     if in_workspace():
         resolved = dispatch_place(default="local")
-        os.environ.update({"WK_PLACE": resolved})
+        os.environ["WK_PLACE"] = resolved
         name = wk_self()
-        if name_decl.split("@")[0] != "none" and argv_name(slot, takes, args) == name:
+        if base != "none" and argv_name(slot, takes, args) == name:
             die("this is workspace '%s', and there is no workspace argument in here --\n"
                 "    every command acts on this one. Drop the name: wk %s%s"
                 % (name, cmd, args_before_name(slot, args)))
@@ -855,7 +829,6 @@ def main(argv):
             raise Exit(0)
         forward_to_vm(inv, cmd, args)
 
-    base = name_decl.split("@")[0]
     if base == "derived":
         name = name or derived
     elif base in ("required", "optional") and not name:
@@ -885,27 +858,16 @@ def ask_place(inv, resolved, name, exists, ready):
         die(str(e))
 
 
-def decl_name(inv, name_decl, slot, takes, derived):
-    if name_decl.split("@")[0] == "derived":
-        return derived
-    if slot > 0:
-        return name_in_argv(name_decl.split("@")[0], slot, takes, inv.args) or cwd_workspace() or ""
-    return ""
-
-
 def resolve_place(inv, name_decl, slot, takes, derived):
-    inherited = dispatch_place()
-    if inherited:
-        return inherited
-    args = inv.args
-    named = D.Args(inv.decl, argv_split(inv.decl.opts_for(args), args)).value("--on")
+    args, base = inv.args, name_decl.split("@")[0]
+    named = dispatch_place() or D.Args(inv.decl, argv_split(inv.decl.opts_for(args), args)).value("--on")
+    if base == "derived":
+        named = named or inv.named_place()
+        name = derived
+    else:
+        name = slot > 0 and (name_in_argv(base, slot, takes, args) or cwd_workspace())
     if named:
         return named
-    if name_decl.split("@")[0] == "derived":
-        t = inv.named_place()
-        if t:
-            return t
-    name = decl_name(inv, name_decl, slot, takes, derived)
     if name:
         try:
             return registry().ws_place(name)

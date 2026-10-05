@@ -175,43 +175,30 @@ def main(argv):
     pre = prelude(var, preset.run_dir(src))
     tail_q = shlex.join(opts["tail"])
 
+    jsc_q = shlex.quote(jsc)
+    logdir_q = shlex.quote(driver.home() + "/until-crash") if opts["until_crash"] else ""
+    if opts["lldb"]:
+        runfile = driver.tools(name) + "/container/lldb/" + ("until-crash-run-file" if opts["until_crash"] else "run-file")
+        lldb = dict(lldb_prelude=LLDB_PRELUDE, prelude=pre, lldb_opts=driver.lldb_opts(), runfile_q=shlex.quote(runfile),
+                    jsc_q=jsc_q, tail_q=tail_q)
     if opts["rr"] or opts["replay"]:
         rr_ready(driver, name)
         if opts["replay"]:
             cmd = RR_REPLAY.format(lldb_prelude=LLDB_PRELUDE, trace_dir=rr_trace_dir(driver), tail_q=tail_q)
         else:
-            cmd = RR_RECORD.format(prelude=pre, trace_dir=rr_trace_dir(driver), jsc_q=shlex.quote(jsc), tail_q=tail_q)
-        argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=opts["replay"])
-        reg.machine.exec(argv_, cwd)
-        return
-
-    if opts["until_crash"]:
-        home = driver.home()
-        if opts["lldb"]:
-            cmd = LLDB_UNTIL_CRASH.format(
-                lldb_prelude=LLDB_PRELUDE, prelude=pre, logdir_q=shlex.quote(home + "/until-crash"),
-                max=opts["max"], lldb_opts=driver.lldb_opts(),
-                runfile_q=shlex.quote(driver.tools(name) + "/container/lldb/until-crash-run-file"),
-                jsc_q=shlex.quote(jsc), tail_q=tail_q)
-            argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=True)
-        else:
-            cmd = PLAIN_UNTIL_CRASH.format(
-                prelude=pre, logdir_q=shlex.quote(home + "/until-crash"), core_dir_q=shlex.quote(home + "/wk-cores"),
-                max=opts["max"], jsc_invoke="%s --validateOptions=1 %s" % (shlex.quote(jsc), tail_q), tail_q=tail_q)
-            argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=False)
-        reg.machine.exec(argv_, cwd)
-        return
-
-    if opts["lldb"]:
-        cmd = DIRECT_LLDB.format(
-            lldb_prelude=LLDB_PRELUDE, prelude=pre, lldb_opts=driver.lldb_opts(),
-            runfile_q=shlex.quote(driver.tools(name) + "/container/lldb/run-file"), jsc_q=shlex.quote(jsc), tail_q=tail_q)
-        argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=True)
+            cmd = RR_RECORD.format(prelude=pre, trace_dir=rr_trace_dir(driver), jsc_q=jsc_q, tail_q=tail_q)
+    elif opts["until_crash"] and opts["lldb"]:
+        cmd = LLDB_UNTIL_CRASH.format(logdir_q=logdir_q, max=opts["max"], **lldb)
+    elif opts["until_crash"]:
+        cmd = PLAIN_UNTIL_CRASH.format(
+            prelude=pre, logdir_q=logdir_q, core_dir_q=shlex.quote(driver.home() + "/wk-cores"),
+            max=opts["max"], jsc_invoke="%s --validateOptions=1 %s" % (jsc_q, tail_q), tail_q=tail_q)
+    elif opts["lldb"]:
+        cmd = DIRECT_LLDB.format(**lldb)
     else:
-        cmd = DIRECT_PLAIN.format(prelude=pre, jsc_q=shlex.quote(jsc), tail_q=tail_q)
-        argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=False)
+        cmd = DIRECT_PLAIN.format(prelude=pre, jsc_q=jsc_q, tail_q=tail_q)
+    argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=opts["lldb"] or opts["replay"])
     reg.machine.exec(argv_, cwd)
-
 
 if __name__ == "__main__":
     try:

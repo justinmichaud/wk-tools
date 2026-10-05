@@ -1,5 +1,5 @@
-"""`wk doctor`'s disk section: the bytes in the places no single `du` reaches -- the podman VM's disk image, the Tart
-guests, the store. Run as a script (in the VM, against its own lib/), the store's rows as probe_store writes them."""
+"""`wk doctor`'s disk section: the podman VM's disk image, the Tart guests, the store. Run as a script (in the VM), the
+store's rows as probe_store writes them."""
 
 import glob
 import os
@@ -46,15 +46,17 @@ class Report:
         self.total += k
         self.line(human_bytes(k * 1024), what, note)
 
-    def note(self, k, what, note=""):
+    def note(self, k, what, note):
         self.noted = True
         self.line("(%s)" % human_bytes(k * 1024), what, note)
 
-    def unknown(self, what, note):
-        self.line("??", what, note)
-
     def section(self, title):
         sys.stderr.write("\n%s\n" % title)
+
+    def df(self, path):
+        log("")
+        sys.stderr.write("".join("  " + l + "\n" for l in here.run(["df", "-h", path]).out.splitlines()))
+        log("")
 
     def render(self, rows, add):
         for line in rows.splitlines():
@@ -104,10 +106,7 @@ def workspace_report(reg):
     sys.stderr.write("  %7s  %s\n" % (human_bytes(rep.total * 1024), "this workspace"))
     if rep.noted:
         log("           parenthesised rows are shared and not this workspace's")
-    log("")
-    df = here.run(["df", "-h", src])
-    sys.stderr.write("".join("  " + l + "\n" for l in df.out.splitlines()))
-    log("")
+    rep.df(src)
     log("  This workspace is disposable: 'wk rm %s' on the host reclaims" % marker.get("name", ""))
     log("  all of it at once. 'wk help' is the whole-machine picture.")
 
@@ -126,7 +125,7 @@ def machine_report(root, reg):
         for f in images:
             rep.row(kb(f), "disk image", "sparse, %s GB ceiling; grows, never shrinks" % ceiling)
         if not images:
-            rep.unknown("disk image", "not found under %s" % mdir)
+            rep.line("??", "disk image", "not found under %s" % mdir)
         for f in glob.glob(os.path.join(mdir, "*", "cache")):
             k = kb(f)
             if k > 0:
@@ -139,9 +138,9 @@ def machine_report(root, reg):
             if cp.out.strip():
                 rep.render(cp.out, add=False)
             else:
-                rep.unknown("the store inside the VM", "the VM answered nothing; its tooling may be missing: wk sync --tools container")
+                rep.line("??", "the store inside the VM", "the VM answered nothing; its tooling may be missing: wk sync --tools container")
         else:
-            rep.unknown("the store inside the VM", "the machine is stopped: 'wk start', then re-run")
+            rep.line("??", "the store inside the VM", "the machine is stopped: 'wk start', then re-run")
     else:
         rep.section("the store (%s)" % store.store_dir())
         rep.render(probe_store(store), add=True)
@@ -175,16 +174,9 @@ def machine_report(root, reg):
     sys.stderr.write("  %7s  %s\n" % (human_bytes(rep.total * 1024), "wk's storage on this machine"))
     if rep.noted:
         log("           parenthesised rows are not in the total: they are inside a row above")
-    if os.uname().sysname == "Darwin":
-        log("           du counts allocated blocks; APFS clones share them, so this is")
-        log("           an upper bound -- df below is the filesystem's own answer")
-    else:
-        log("           du counts allocated blocks, and hardlinked snapshots are counted")
-        log("           once -- df below is the filesystem's own answer")
-    log("")
-    df = here.run(["df", "-h", store.store_dir() if os.path.isdir(store.store_dir()) else HOME])
-    sys.stderr.write("".join("  " + l + "\n" for l in df.out.splitlines()))
-    log("")
+    log("           du counts allocated blocks (%s) -- df below is the filesystem's own answer"
+        % ("APFS clones share them: an upper bound" if os.uname().sysname == "Darwin" else "hardlinked snapshots once"))
+    rep.df(store.store_dir() if os.path.isdir(store.store_dir()) else HOME)
     rep.section("what 'wk gc' reclaims or names (inside the rows above, or on another machine)")
     for r in sorted(gc.Gc(root, reg).rows(), key=lambda r: r.kind):
         sys.stderr.write(rubble.line(r, (), "a plain 'wk gc' takes it") + "\n")

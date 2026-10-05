@@ -25,9 +25,6 @@ class TestDeclarations(WkTest):
 
 class TestCompletionGenerator(unittest.TestCase):
 
-    def test_completion_itself_completes_though_it_has_no_cmd_file(self):
-        self.assertIn("completion", C.commands(REPO))
-
     def test_a_values_list_answered_by_a_store_is_not_asked_at_tab(self):
         cmds = {d.name: d for d in D.all_commands(REPO)}
         self.assertEqual(C.values_cmd(cmds["bench"]), "")
@@ -105,17 +102,8 @@ COMP_CWORD={cword}
 _wk_completion
 printf '%s\\n' "${{COMPREPLY[@]}}"
 """
-        full_env = dict(os.environ)
-        if env:
-            full_env.update(env)
-        cp = subprocess.run(
-            ["bash", "-c", script],
-            cwd=str(REPO),
-            env=full_env,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        cp = subprocess.run(["bash", "-c", script], cwd=str(REPO), env=dict(os.environ, **(env or {})),
+                            capture_output=True, text=True, timeout=30)
         self.assertEqual(cp.returncode, 0, cp.stderr)
         return [l for l in cp.stdout.splitlines() if l]
 

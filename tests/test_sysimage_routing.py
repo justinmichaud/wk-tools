@@ -1,20 +1,22 @@
 """`wk sysimage` runs where the image workspace is: `build` and `webkit` derive their workspace name (`name=derived`)
 from the profile, and the dispatcher routes them like any workspace command; a pmos or fetch profile stays on the host.
-The in-process answers and the fleet walk are tests/test_sysimage_ls.py's; the names themselves tests/test_images.py's."""
+The fleet walk is tests/test_sysimage_ls.py's; the names themselves tests/test_images.py's."""
 import os
 import subprocess
 import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, WkTest, rand_suffix, run, stub_path
+from tests.support import REPO, WkTest, rand_suffix, run, run_here, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import decl as D  # noqa: E402
 from wk import dispatch  # noqa: E402
 from wk import images  # noqa: E402
+from wk.sysimage import cli  # noqa: E402
 
 SYSIMAGE = REPO / "cmd" / "sysimage"
+PROFILE = "webkit-2.52-yocto-rpi5-64"
 
 
 def _profiles():
@@ -28,25 +30,29 @@ def _hook(*args):
     return cp.stdout.strip(), cp
 
 
-class TestTheImageWorkspaceAnswer(unittest.TestCase):
+class TestTheImageWorkspaceAnswer(WkTest):
     """`wk sysimage --wsname` and `--where`: the two questions the dispatcher asks cmd/sysimage."""
 
     def test_every_profile_answers_for_its_builder(self):
         for profile, builder in _profiles():
             in_ws = builder in ("yocto", "buildroot")
             with self.subTest(profile=profile):
-                for sub in ("build", "webkit"):
-                    got, cp = _hook("--wsname", sub, profile)
-                    self.assertEqual(cp.returncode, 0, cp.stderr)
-                    self.assertEqual(got, "%s-%s" % (builder, profile) if in_ws else "")
-                self.assertEqual(_hook("--where", "build", profile)[0], "workspace" if in_ws else "host")
+                for sub in ("build", "webkit", "holds", "path"):
+                    self.assertEqual(cli.wsname([sub, profile]), "%s-%s" % (builder, profile) if in_ws else "")
+                self.assertEqual(cli.where(["build", profile]), "workspace" if in_ws else "host")
 
-    def test_no_profile_and_no_such_profile_name_no_image_workspace(self):
+    def test_the_hook_answers_and_no_profile_names_no_image_workspace(self):
+        self.assertEqual(_hook("--wsname", "holds", PROFILE, "--workspace", "arm-b")[0], "arm-b")
         for args in (["build"], ["build", "nosuchprofile-" + rand_suffix()],
                      ["webkit"], ["write", "--from", "/tmp/x"]):
             got, cp = _hook("--wsname", *args)
             self.assertEqual(cp.returncode, 0, cp.stderr)
             self.assertEqual(got, "", args)
+
+    def test_an_image_nothing_has_built_is_no_on_stdout_and_exit_0(self):
+        """A readonly command forwarded to a stopped podman machine exits 0, so the verdict is what is printed."""
+        cp = run_here("sysimage", "holds", PROFILE, "--workspace", "yocto-%s-selftest" % PROFILE, timeout=240)
+        self.assertEqual((cp.returncode, cp.stdout.strip()), (0, "no"), cp.stdout)
 
 
 class TestTheDeclaredBuildOptions(unittest.TestCase):

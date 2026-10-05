@@ -17,7 +17,7 @@ from tests.support import REPO
 from tests.test_sysimage_task import Box
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import build, images, job, record  # noqa: E402
+from wk import build, images, job, record, resources  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result, isolated_module  # noqa: E402
@@ -133,7 +133,7 @@ class YoctoTest(unittest.TestCase):
         self.w = World(self.tmp)
 
     def cores(self):
-        return yocto.Resources(self.w, self.w.env).envelope_cores()
+        return resources.Resources(self.w, self.w.env).envelope_cores()
 
     def build(self, *rest, w=None):
         w = w or self.w
@@ -151,10 +151,6 @@ class YoctoTest(unittest.TestCase):
 
 
 class TestTheStages(unittest.TestCase):
-    def test_a_stage_s_index_is_its_place_in_the_order(self):
-        self.assertEqual([yocto.stage_index(s) for s in yocto.STAGES], [1, 2, 3, 4, 5, 6])
-        self.assertEqual(yocto.stage_index("image"), 3)
-
     def test_an_unknown_stage_is_refused_naming_every_stage(self):
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
             yocto.stage_index("all")
@@ -208,7 +204,7 @@ class TestTheCrossConfigs(unittest.TestCase):
 
     def test_an_unknown_one_is_refused_listing_them_and_a_profile_needs_the_measured_one(self):
         self.assertIn("wpe-cross-pgo-use", self.cross("wpe-cross-pgo")[1])
-        self.assertIn("That is 'wpe-cross-pgo-use'", self.cross("wpe-cross", "/x.profdata")[1])
+        self.assertIn("only 'wpe-cross-pgo-use'", self.cross("wpe-cross", "/x.profdata")[1])
 
 
 class TestTheRecordAStageWrites(YoctoTest):
@@ -268,15 +264,6 @@ class TestTheRecordAStageWrites(YoctoTest):
 
 
 class TestTheWorkspace(YoctoTest):
-    def test_the_host_image_is_tagged_by_its_base_and_its_containerfile(self):
-        self.assertRegex(self.w.tag(), r"^localhost/wk-yocto-host:24\.04-[0-9a-f]{8}$")
-
-    def test_wk_yocto_base_names_another_host(self):
-        self.w.env["WK_YOCTO_BASE"] = "docker.io/library/ubuntu:26.04"
-        base, tag = self.w.driver().host_image()
-        self.assertEqual(base, "docker.io/library/ubuntu:26.04")
-        self.assertIn(":26.04-", tag)
-
     def test_a_workspace_on_another_branch_is_checked_out_from_the_mirror(self):
         self.w.head = "main\n"
         rc, err = self.build()
@@ -288,7 +275,7 @@ class TestTheWorkspace(YoctoTest):
         self.w.head, self.w.checkout_rc = "main\n", 1
         err = self.refused()
         self.assertIn("could not check out 'wpe-2.46' from 'wpe'", err)
-        self.assertIn("        wk sync\n", err)
+        self.assertIn("wk sync", err)
 
     def test_a_workspace_on_the_branch_is_left_alone(self):
         self.build()

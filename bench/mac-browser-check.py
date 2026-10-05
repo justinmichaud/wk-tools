@@ -72,14 +72,8 @@ def of_kind(displays, kind):
     return next((d for d in (displays or []) if display_kind(d) == kind), None)
 
 
-def builtin_display(displays):
-    return of_kind(displays, "builtin")
-
-
-PYOBJC_MISSING = ("mac-browser-check: no pyobjc here, so nothing can ask which application is "
-                  "frontmost -- an unfocused window is rAF-throttled and a benchmark behind one "
-                  "measures the throttle. bench/mac-pyobjc.sh installs it (wk_pyobjc_install); "
-                  "./setup or 'wk start <name>' runs that already")
+PYOBJC_MISSING = ("mac-browser-check: no pyobjc here, so nothing can ask which application is frontmost; "
+                  "bench/mac-pyobjc.sh installs it (wk_pyobjc_install), as ./setup and 'wk start <name>' do")
 
 
 def require_pyobjc():
@@ -112,7 +106,7 @@ def parse_expect_display(spec):
 def display_faults(displays, expect, topology):
     found = []
     # Judged whatever either argument says: brightness ambient light can raise again is not a held setting, and power is thermal headroom. Absent is unknown and reported, never refused -- a guest panel has no sensor to ask.
-    if (builtin_display(displays) or {}).get("auto_brightness"):
+    if (of_kind(displays, "builtin") or {}).get("auto_brightness"):
         found.append("the built-in display is under ambient-light control, so the "
                      "brightness this run pinned can rise again mid-measurement and the "
                      "thermal headroom with it")
@@ -243,7 +237,7 @@ def faults(reading, clients, device, min_raf, expect):
 def display_summary(displays):
     if displays is None:
         return "?"
-    builtin = builtin_display(displays)
+    builtin = of_kind(displays, "builtin")
     return (f"count={len(displays)} builtin={builtin.get('id') if builtin else None} "
             f"points={builtin.get('points') if builtin else None} "
             f"mirrored={any(d.get('mirrored') for d in displays)} "
@@ -283,7 +277,7 @@ def take_reading(args):
 
         reading["frontmost"] = frontmost_bundle()
         reading["displays"] = display_list()
-        builtin = builtin_display(reading["displays"])
+        builtin = of_kind(reading["displays"], "builtin")
         reading["brightness"] = builtin.get("brightness") if builtin else None
     finally:
         browser.terminate()
@@ -301,26 +295,13 @@ def main():
     parser = argparse.ArgumentParser(prog="mac-browser-check", allow_abbrev=False)
     parser.add_argument("--build-directory",
                         help="the products directory holding MiniBrowser.app")
-    parser.add_argument("--read", metavar="JSON",
-                        help="report a reading already taken (what --json wrote) "
-                             "instead of taking one; needs no Mac and no browser")
+    parser.add_argument("--read", metavar="JSON", help="report a reading already taken (what --json wrote) instead of taking one")
     parser.add_argument("--displays-only", action="store_true",
-                        help="judge the displays alone, launching no browser: the "
-                             "same rule every leg's preflight is held to, asked "
-                             "again per leg because a panel plugged in between two "
-                             "legs moves the number and nothing downstream can say so. "
-                             "Exactly one online panel of the declared kind -- the "
-                             "built-in one where nothing is declared -- unmirrored, is "
-                             "required whether or not --expect-display names a mode")
+                        help="judge the displays alone, launching no browser: exactly one online, unmirrored panel "
+                             "of the declared kind (builtin where none is declared)")
     parser.add_argument("--expect-display", metavar="SPEC",
-                        help="the display this reading must be taken on, as "
-                             "'<kind> <w>x<h>', kind being builtin or external "
-                             "(machines/<node>.conf's display, or whatever "
-                             "the machine's driver derives it from). "
-                             "Display identity is what makes two runs "
-                             "comparable; without it the display is recorded and "
-                             "judged against nothing, which is what a run compared "
-                             "with nothing -- a PGO collection -- wants")
+                        help="the display this reading must be taken on, as '<kind> <w>x<h>' (builtin or external); "
+                             "without it the display is recorded and judged against nothing")
     parser.add_argument("--json", help="write the whole reading here")
     parser.add_argument("--min-raf", type=float, default=MIN_RAF,
                         help=f"the rate below which the window is throttled (default {MIN_RAF})")
@@ -351,7 +332,6 @@ def main():
     if spec:
         reading["expect_display"] = spec
 
-    # Derived on every report, never stored in the reading: one place holds the floors.
     clients = {str(k): v for k, v in (reading.get("webkit_gpu_clients") or {}).items()}
     if args.displays_only:
         found = display_faults(reading.get("displays"), expect, topology=True)

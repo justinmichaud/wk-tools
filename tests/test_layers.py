@@ -1,6 +1,4 @@
 """A layer is reached through its own Python API: no command runs `wk status` or `wk key push status` as a subprocess to read"""
-import importlib.machinery
-import importlib.util
 import io
 import os
 import subprocess
@@ -9,21 +7,12 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tests.support import REPO
+from tests.support import REPO, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import priv, status, statusview  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Result  # noqa: E402
-
-
-def load_cmd(name):
-    path = str(REPO / "cmd" / name)
-    loader = importlib.machinery.SourceFileLoader("wk_cmd_" + name, path)
-    spec = importlib.util.spec_from_file_location("wk_cmd_" + name, path, loader=loader)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
 
 
 def no_subprocess(*a, **kw):
@@ -76,7 +65,7 @@ class TestStatusIsReadFromTheLibrary(unittest.TestCase):
         reg.load.return_value = ctr
         walk = mock.Mock()
         walk.records.return_value = ["rec"]
-        with mock.patch.object(start, "here", lambda: False), mock.patch.object(start.secrets, "Secrets"), \
+        with mock.patch.object(start.Store, "macos_host", False), mock.patch.object(start.secrets, "Secrets"), \
                 mock.patch.object(subprocess, "run", no_subprocess), mock.patch.object(subprocess, "call", no_subprocess), \
                 mock.patch.object(start.status, "Walk", return_value=walk) as W, \
                 mock.patch.object(start.statusview, "render_text_stream") as render, \

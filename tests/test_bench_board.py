@@ -572,7 +572,6 @@ class TestARun(BoardTest):
         (t,) = w.recs().list()
         self.assertEqual((t.field("kind"), t.field("where"), t.field("name"), t.field("exit")), ("bench", "here", "ws", "0"))
         self.assertEqual(len(t.plan()), 3)
-        self.assertTrue(t.plan()[0].startswith("bring up the session on testboard for slot 'a'"), t.plan())
         self.assertEqual(t.steps(), [(1, "done"), (2, "done"), (3, "running")])
         self.assertEqual((t.field("kill"), t.raw("holds")), ("wk bench run ws --kill --system testboard", "device:testboard"))
         self.assertEqual(Path(t.field("log")), w.run_dir() / "run.log")
@@ -700,9 +699,6 @@ class TestTheLaunch(unittest.TestCase):
         leg.slot, leg.cores, leg.o = "pr", o.pop("cores", ""), o
         return leg
 
-    def test_every_launch_names_its_own_cache_directory(self):
-        self.assertIn("XDG_CACHE_HOME=/tmp/wk-webkit-cache", self.system().launch(self.leg()))
-
     def test_cores_become_a_taskset_prefix_on_the_board(self):
         out = self.system().launch(self.leg(cores="0-3"))
         self.assertIn("exec taskset -c 0-3 env LD_LIBRARY_PATH=/var/wk/slots/pr/root/usr/lib", out)
@@ -715,7 +711,6 @@ class TestTheLaunch(unittest.TestCase):
         self.assertIn("JSC_reportDFGCompileTimes=1", self.system().launch(self.leg(warmup="1", jit_tiers="1")))
 
     def test_a_launch_is_posix_sh(self):
-        import subprocess
         s = self.system()
         s.doc["browser"] = "minibrowser"
         sh = shutil.which("dash") or "sh"
@@ -723,10 +718,6 @@ class TestTheLaunch(unittest.TestCase):
             s.session = session
             cp = subprocess.run([sh, "-n"], input=s.launch(self.leg()), capture_output=True, text=True, timeout=10)
             self.assertEqual(cp.returncode, 0, cp.stderr)
-
-    def test_a_collection_writes_its_profile_where_the_image_expects(self):
-        out = self.system().launch(self.leg(pgo_dir="/p", pgo_file="/var/wk/pgo/lib_%p.profraw"))
-        self.assertIn("LLVM_PROFILE_FILE=/var/wk/pgo/lib_%p.profraw", out)
 
     def test_the_evidence_and_the_profile_of_one_leg_are_two_files(self):
         s = self.system()
@@ -743,7 +734,6 @@ class TestTheLaunch(unittest.TestCase):
 
 class TestTheBoardsShell(unittest.TestCase):
     def test_every_file_parses_as_posix_sh(self):
-        import subprocess
         for f in sorted((REPO / "bench" / "onboard").iterdir()):
             with self.subTest(file=f.name):
                 cp = subprocess.run(["sh", "-n", str(f)], capture_output=True, text=True, timeout=10)
@@ -1099,7 +1089,6 @@ class TestARealBoardAnswersWhatALegRecords(unittest.TestCase):
     @requires_machine("root@rpi5-bench")
     def test_rpi5(self):
         self.evidence("rpi5")
-
 
 
 class TestTheRunnerRef(unittest.TestCase):

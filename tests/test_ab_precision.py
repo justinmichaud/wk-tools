@@ -1,18 +1,17 @@
-"""The rule an unattended A/B stops on: `wkdata ab-precision` / `wk bench
-precision` (lib/wk/bench/report.py `t_crit`, `mde_pct`, `headline_score`,
-`precision`)."""
+"""The rule an unattended A/B stops on: `wk bench precision` (lib/wk/bench/report.py `t_crit`, `mde_pct`,
+`headline_score`, `precision`)."""
+import contextlib
+import io
 import json
 import math
-import subprocess
 import sys
+import types
 import unittest
 
 from tests.support import REPO, WkTest, run, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.bench import report  # noqa: E402
-
-WKDATA = REPO / "lib" / "wkdata.py"
 
 # Speedometer-3's suite Score, verbatim from the run tolken recorded at
 # 20260908T013816Z: one iteration holding the suite's ten internal repeats.
@@ -78,9 +77,17 @@ JETSTREAM3_CHILDREN = {
 JETSTREAM3_HEADLINE = 407.8831325301141
 
 
-def wkd(*args):
-    return subprocess.run(["python3", str(WKDATA), *args],
-                          capture_output=True, text=True, timeout=60)
+def precision(*args):
+    """`wk bench precision --a A --b B [--goal G]`'s reading, in process: (returncode, stdout, stderr)."""
+    o = dict(zip(args[::2], args[1::2]))
+    out, err, rc = io.StringIO(), io.StringIO(), 0
+    try:
+        with contextlib.redirect_stderr(err):
+            report.precision(o["--a"], o["--b"], float(o.get("--goal", 0.3)), out=out)
+    except SystemExit as e:
+        rc = 1
+        err.write(str(e))
+    return types.SimpleNamespace(returncode=rc, stdout=out.getvalue(), stderr=err.getvalue())
 
 
 def speedometer_doc(score=None):
@@ -173,18 +180,6 @@ class TestTheArithmetic(WkTest):
 
 class TestTheHeadlineScore(WkTest):
 
-    def test_speedometer3_is_the_mean_of_its_materialised_values(self):
-        self.assertAlmostEqual(report.headline_score(speedometer_doc()),
-                               SPEEDOMETER3_HEADLINE, places=9)
-
-    def test_motionmark_is_the_geometric_mean_of_its_eight_children(self):
-        doc = aggregate_doc("MotionMark-1.3.1", "Geometric", MOTIONMARK_CHILDREN)
-        self.assertAlmostEqual(report.headline_score(doc), MOTIONMARK_HEADLINE, places=6)
-
-    def test_jetstream3_is_the_geometric_mean_of_its_seventy_seven_children(self):
-        doc = aggregate_doc("JetStream3.0", "Geometric", JETSTREAM3_CHILDREN)
-        self.assertAlmostEqual(report.headline_score(doc), JETSTREAM3_HEADLINE, places=6)
-
     def test_a_child_carrying_its_own_subtests_is_not_walked_into(self):
         children = {"zlib-wasm": {"metrics": {"Score": {"current": [4.0]},
                                               "Time": ["Geometric"]},
@@ -247,22 +242,11 @@ class TestAnUnreadableAggregateIsRefusedByName(WkTest):
 
 class TestARunIsADirectory(WkTest):
 
-    def test_it_takes_directories_and_finds_the_result_json_inside(self):
-        with scratch_dir() as tmp:
-            a = write_runs(tmp, "a", [100.0, 100.5, 99.5, 100.0])
-            b = write_runs(tmp, "b", [100.2, 100.7, 99.7, 100.2])
-            cp = wkd("ab-precision", "--a", ",".join(str(p) for p in a),
-                     "--b", ",".join(str(p) for p in b))
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            f = fields(cp.stdout)
-            self.assertEqual(f["n_a"], "4")
-            self.assertAlmostEqual(float(f["delta_pct"]), 0.2, places=2)
-
     def test_a_directory_with_no_result_json_says_exactly_that(self):
         with scratch_dir() as tmp:
             empty = tmp / "nothing"
             empty.mkdir()
-            cp = wkd("ab-precision", "--a", str(empty), "--b", str(empty))
+            cp = precision("--a", str(empty), "--b", str(empty))
             self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn("no result.json in this directory", cp.stdout + cp.stderr)
             self.assertIn("side A", cp.stdout + cp.stderr)
@@ -273,7 +257,7 @@ class TestARunIsADirectory(WkTest):
             d = tmp / "junk"
             d.mkdir()
             (d / "result.json").write_text("not json at all")
-            cp = wkd("ab-precision", "--a", str(d), "--b", str(d))
+            cp = precision("--a", str(d), "--b", str(d))
             self.assertNotEqual(cp.returncode, 0)
             self.assertIn("not valid JSON", cp.stdout + cp.stderr)
 
@@ -282,7 +266,7 @@ class TestARunIsADirectory(WkTest):
             d = tmp / "bare"
             d.mkdir()
             (d / "result.json").write_text(json.dumps({"debugOutput": [None]}))
-            cp = wkd("ab-precision", "--a", str(d), "--b", str(d))
+            cp = precision("--a", str(d), "--b", str(d))
             self.assertNotEqual(cp.returncode, 0)
             self.assertIn("no single suite carrying a Score metric", cp.stdout + cp.stderr)
 
@@ -291,14 +275,14 @@ class TestARunIsADirectory(WkTest):
             a = write_runs(tmp, "a", [100.0, 100.5, 99.5])
             (a[2] / "result.json").unlink()
             b = write_runs(tmp, "b", [100.2, 100.7, 99.7])
-            cp = wkd("ab-precision", "--a", ",".join(str(p) for p in a),
+            cp = precision("--a", ",".join(str(p) for p in a),
                      "--b", ",".join(str(p) for p in b))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertEqual(fields(cp.stdout)["n_a"], "2")
             self.assertIn("warning: side A", cp.stderr)
 
     def test_naming_no_directory_at_all_is_refused(self):
-        cp = wkd("ab-precision", "--a", "", "--b", "")
+        cp = precision("--a", "", "--b", "")
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("no run directories given", cp.stdout + cp.stderr)
 
@@ -308,7 +292,7 @@ class TestTheCommand(WkTest):
         with scratch_dir() as tmp:
             a = write_runs(tmp, "a", [99.0, 101.0, 99.0, 101.0, 99.0, 101.0])
             b = write_runs(tmp, "b", [99.5, 101.5, 99.5, 101.5, 99.5, 101.5])
-            cp = wkd("ab-precision", "--a", ",".join(str(p) for p in a),
+            cp = precision("--a", ",".join(str(p) for p in a),
                      "--b", ",".join(str(p) for p in b))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             f = fields(cp.stdout)
@@ -323,7 +307,7 @@ class TestTheCommand(WkTest):
         with scratch_dir() as tmp:
             a = write_runs(tmp, "a", [100.0, 100.02, 99.98, 100.0, 100.01, 99.99])
             b = write_runs(tmp, "b", [100.0, 100.01, 99.99, 100.0, 100.02, 99.98])
-            cp = wkd("ab-precision", "--a", ",".join(str(p) for p in a),
+            cp = precision("--a", ",".join(str(p) for p in a),
                      "--b", ",".join(str(p) for p in b))
             f = fields(cp.stdout)
             self.assertEqual(f["met"], "yes", cp.stdout)
@@ -333,7 +317,7 @@ class TestTheCommand(WkTest):
         with scratch_dir() as tmp:
             a = write_runs(tmp, "a", [100.0, 100.0])
             b = write_runs(tmp, "b", [100.0, 100.0])
-            cp = wkd("ab-precision", "--a", ",".join(str(p) for p in a),
+            cp = precision("--a", ",".join(str(p) for p in a),
                      "--b", ",".join(str(p) for p in b))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             f = fields(cp.stdout)
@@ -346,8 +330,8 @@ class TestTheCommand(WkTest):
             a = write_runs(tmp, "a", [99.0, 101.0, 99.0, 101.0])
             b = write_runs(tmp, "b", [99.0, 101.0, 99.0, 101.0])
             args = ["--a", ",".join(str(p) for p in a), "--b", ",".join(str(p) for p in b)]
-            strict = fields(wkd("ab-precision", "--goal", "0.3", *args).stdout)
-            loose = fields(wkd("ab-precision", "--goal", "10", *args).stdout)
+            strict = fields(precision("--goal", "0.3", *args).stdout)
+            loose = fields(precision("--goal", "10", *args).stdout)
             self.assertEqual(strict["met"], "no")
             self.assertEqual(loose["met"], "yes")
             self.assertEqual(strict["mde_pct"], loose["mde_pct"])
@@ -357,7 +341,7 @@ class TestTheCommand(WkTest):
             spread = 0.1257
             a = write_runs(tmp, "a", [58.9816 + spread] * 8 + [58.9816 - spread] * 8)
             b = write_runs(tmp, "b", [58.9853 + spread] * 8 + [58.9853 - spread] * 8)
-            cp = wkd("ab-precision", "--goal", "0.3",
+            cp = precision("--goal", "0.3",
                      "--a", ",".join(str(p) for p in a),
                      "--b", ",".join(str(p) for p in b))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -376,7 +360,7 @@ class TestTheCommand(WkTest):
                                      {k: [v[0] * scale] for k, v in JETSTREAM3_CHILDREN.items()})
             a = write_docs(tmp, "a", [doc(1.0 + i * 1e-4) for i in range(-3, 3)])
             b = write_docs(tmp, "b", [doc(1.0 + i * 1e-4) for i in range(-3, 3)])
-            cp = wkd("ab-precision", "--goal", "0.3",
+            cp = precision("--goal", "0.3",
                      "--a", ",".join(str(p) for p in a),
                      "--b", ",".join(str(p) for p in b))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)

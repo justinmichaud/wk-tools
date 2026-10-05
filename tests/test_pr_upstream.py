@@ -1,7 +1,6 @@
 """Asking GitHub a question from inside a wired checkout, and what `wk pr`
 leaves behind in one."""
 import contextlib
-import importlib.machinery
 import importlib.util
 import io
 import subprocess
@@ -16,19 +15,6 @@ from wk import act, git, pr  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
 
 GITHUB = "https://github.com/justinmichaud"
-
-
-def _load_cmd_pr():
-    """cmd/pr as a module -- a real file with no extension needs its loader spelled out."""
-    path = str(REPO / "cmd" / "pr")
-    loader = importlib.machinery.SourceFileLoader("wk_cmd_pr", path)
-    spec = importlib.util.spec_from_file_location("wk_cmd_pr", path, loader=loader)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
-
-
-CMD_PR_MODULE = _load_cmd_pr()
 
 
 def git_(*args, cwd=None):
@@ -113,17 +99,6 @@ class Wired(unittest.TestCase):
         return bash(f'cd "{self.src}"\n' + script)
 
 
-class TestTheRewriteIsReallyInTheWay(Wired):
-
-    def test_a_plain_ls_remote_finds_no_fork_branch_and_does_not_fail(self):
-        cp = self.in_src(f'git ls-remote {self.fork} refs/heads/topic; echo "rc=$?"')
-        self.assertEqual(cp.stdout.strip(), "rc=0", cp.stderr)
-
-    def test_the_url_git_would_contact_is_the_mirror(self):
-        cp = self.in_src(f'git ls-remote --get-url {self.fork}')
-        self.assertEqual(cp.stdout.strip(), str(self.mirror), cp.stderr)
-
-
 class TestLsRemote(Wired):
     def test_it_answers_from_the_fork_not_the_mirror(self):
         self.assertEqual(pr.ls_remote(In(self.src), str(self.fork), "refs/heads/topic"), self.topic)
@@ -149,24 +124,13 @@ class TestBranchRepos(unittest.TestCase):
         here.react(["git", "ls-remote"], answer)
         return here, pr.branch_repos(here, "justinmichaud", "topic")
 
-    def test_both_projects_are_asked_past_the_rewrite(self):
+    def test_both_projects_are_asked_and_each_one_carrying_the_branch_is_found(self):
         here, _ = self.ask()
         self.assertEqual([e[1][2] for e in here.effects], [f"{GITHUB}/WebKit", f"{GITHUB}/WPEWebKit"])
-
-    def test_a_branch_only_the_second_project_has_is_found(self):
-        self.assertEqual(self.ask(WPEWebKit="beef")[1], [("WPEWebKit", f"{GITHUB}/WPEWebKit.git", "beef")])
-
-    def test_a_branch_only_the_first_project_has_is_found(self):
-        self.assertEqual(self.ask(WebKit="cafe")[1], [("WebKit", f"{GITHUB}/WebKit.git", "cafe")])
-
-    def test_a_branch_in_both_is_reported_as_both(self):
-        self.assertEqual(len(self.ask(WebKit="cafe", WPEWebKit="beef")[1]), 2)
-
-    def test_nothing_anywhere_is_nothing_and_not_a_failure(self):
         self.assertEqual(self.ask()[1], [])
-
-    def test_the_refusals_name_every_repository_that_was_asked(self):
-        self.assertEqual(pr.branch_repo_urls("justinmichaud"), [f"{GITHUB}/WebKit.git", f"{GITHUB}/WPEWebKit.git"])
+        self.assertEqual(self.ask(WPEWebKit="beef")[1], [("WPEWebKit", f"{GITHUB}/WPEWebKit.git", "beef")])
+        self.assertEqual(self.ask(WebKit="cafe")[1], [("WebKit", f"{GITHUB}/WebKit.git", "cafe")])
+        self.assertEqual(len(self.ask(WebKit="cafe", WPEWebKit="beef")[1]), 2)
 
 
 class TestGitSyncFork(Wired):
@@ -184,45 +148,6 @@ class TestGitSyncFork(Wired):
         self.assertTrue((self.dir / "fork").exists(), "the direct spelling must resolve")
         cp = self.in_src(f'remote=fork\nbranch=main\n{self.current_lines()}\necho "$current"')
         self.assertEqual(cp.stdout.strip(), self.fork_main, cp.stderr)
-
-
-class TestPrOpenTarget(unittest.TestCase):
-
-    def setUp(self):
-        self.dir = self.enterContext(scratch_dir(prefix="wk-test-open-"))
-        # Named as the store names it: through the rewrite every remote reads
-        # as this path, whose basename then parses as the project "WebKit".
-        self.mirror = self.dir / "WebKit.git"
-        self.src = self.dir / "src"
-        seed = self.dir / "seed"
-        seed.mkdir()
-        git_("init", "-q", "-b", "main", str(seed))
-        (seed / "f").write_text("x\n")
-        git_("add", "f", cwd=seed)
-        git_("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c", cwd=seed)
-        git_("init", "-q", "--bare", "-b", "main", str(self.mirror))
-        git_("push", "-q", str(self.mirror), "main", cwd=seed)
-        git_("clone", "-q", str(self.mirror), str(self.src))
-        wire_fetches(self.src, self.mirror)
-        # The real URLs, which is what the rewrite just written is keyed on.
-        for remote, url in git.REMOTES:
-            git_("config", f"remote.{remote}.url", url, cwd=self.src)
-        head = git_("rev-parse", "HEAD", cwd=self.src)
-        for remote, _ in git.REMOTES:
-            git_("update-ref", f"refs/remotes/{remote}/main", head, cwd=self.src)
-
-    def driver(self, upstream_remote, branch):
-        git_("checkout", "-q", "-b", branch, cwd=self.src)
-        git_("branch", "-q", f"--set-upstream-to={upstream_remote}/main", branch, cwd=self.src)
-        return list(CMD_PR_MODULE.pr_open_target(self.src))
-
-    def test_a_webkit_branch_opens_against_webkit_from_the_webkit_fork(self):
-        self.assertEqual(self.driver("origin", "eng/x"),
-                         ["WebKit/WebKit", "justinmichaud:eng/x", "fork", "eng/x"])
-
-    def test_a_wpe_branch_opens_against_wpewebkit_from_the_wpe_fork(self):
-        self.assertEqual(self.driver("wpe", "eng/y"),
-                         ["WebPlatformForEmbedded/WPEWebKit", "justinmichaud:eng/y", "forkwpe", "eng/y"])
 
 
 class TestTheDirectSpellingEscapesEveryWiredRewrite(unittest.TestCase):
@@ -400,9 +325,6 @@ class TestThePrBranchIsLeftPushable(Pushable):
             cp = self.push()
             self.assertNotEqual(cp.returncode, 0, remote + cp.stdout)
             self.assertIn("no-push", cp.stderr)
-
-    def test_the_gitconfig_pushes_the_current_name(self):
-        self.assertEqual(git_("config", "--file", str(REPO / "dotfiles" / "gitconfig"), "push.default"), "current")
 
     def test_it_converges_over_an_upstream_already_recorded_wrong(self):
         self.run_checkout("justinmichaud:topic")

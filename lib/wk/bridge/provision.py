@@ -1,5 +1,5 @@
-"""`wk machine setup <bridge> --disk <machine>:<device>`: the bridge's system written to a named disk by
-`wk sysimage write` and nothing else, the hands-on steps, and the wait for the phone; then wk.bridge.role."""
+"""`wk machine setup <bridge> --disk <machine>:<device>`: the bridge's system written by `wk sysimage write`,
+the hands-on steps, and the wait for the phone; then wk.bridge.role."""
 
 import os
 import shlex
@@ -16,37 +16,32 @@ TICK = 5
 DISCOVER_EVERY = 60    # a subnet sweep loads the link the phone is joining on
 STEPS = """
 the system is on %(disk)s. Now the part no script can do:
-   1. power the phone OFF -- not reboot. A card wins a boot, so a service card
-      left in it boots that card again rather than the system just written.
+   1. power the phone OFF, not reboot: a service card left in it wins the boot.
    2. take out any card that is not this system, and unplug the phone from %(machine)s.
       If %(disk)s is a card, it goes into the phone now.
-   3. power the phone from a WALL CHARGER, never from the machine it exists to
-      rescue: fed from that machine the out-of-band path dies exactly when it is
-      needed, and on mains the battery is a UPS instead.
+   3. power the phone from a WALL CHARGER, never from the machine it rescues.
    4. kill switches: WiFi ON. %(kill)s
-   5. plug in the USB-C Ethernet dock, powered BEFORE it meets the phone: the
-      phone defaults to USB device mode, and only a powered dock swaps the data
-      role, without which %(iface)s never appears.
+   5. plug in the USB-C Ethernet dock, powered BEFORE it meets the phone: only a
+      powered dock swaps the data role, without which %(iface)s never appears.
    6. power the phone on.
 """
 NEVER_ANSWERED = """%(name)s never answered in %(minutes)d minutes, on its conf name or a sweep of this machine's segments.
-    In order of likelihood:
-      - the WiFi kill switch is off, so the phone is up and on no network
-      - a service card is still in it, so it booted that rather than the system
-        just written: power it off, not reboot, with the card out
-      - the image carries the wrong WiFi credential: it is copied from the build
-        host's own connection when it is built
-    The phone's own screen is the way in when none of that is it; 'wk help' has the
-    console user and password. Nothing is lost: once it answers,
+    Most likely: the WiFi kill switch is off; a service card is still in it (power off, card out);
+    or the image carries the wrong WiFi credential (copied from the build host's connection).
+    The phone's own screen is the way in otherwise ('wk help' has the console login). Once it answers:
         wk machine setup %(name)s"""
 
 
-def bridge_profile(name, env):
+def profile_where(env, builder, key, value):
     for n in images.names(env):
         p = images.quiet_load(n, env)
-        if p and p["IMG_BUILDER"] == "pmos" and p["PMO_BRIDGE"] == name:
+        if p and value and p["IMG_BUILDER"] == builder and p[key] == value:
             return n, p
     return None, None
+
+
+def bridge_profile(name, env):
+    return profile_where(env, "pmos", "PMO_BRIDGE", name)
 
 
 def image_dir(store):
@@ -72,15 +67,6 @@ def rubble(store, machine, lock):
     return rows
 
 
-def service_profile(device, env):
-    """The fetch profile that boots this phone from a card and exports its internal storage (Jumpdrive)."""
-    for n in images.names(env):
-        p = images.quiet_load(n, env)
-        if p and p["IMG_BUILDER"] == "fetch" and device and p["FET_DEVICE"] == device:
-            return n
-    return None
-
-
 class Write:
     def __init__(self, role):
         self.r = role
@@ -88,7 +74,7 @@ class Write:
         self.wk = os.path.join(role.root, "wk")
 
     def child(self, *args):
-        """A wk command with this terminal, so its own progress and refusals reach the person as they happen."""
+        """A wk command on this terminal, so its progress and refusals reach the person."""
         argv = [self.wk] + list(args)
         if act.dry_run():
             log("would run: %s" % shlex.join(argv))
@@ -128,7 +114,8 @@ class Write:
             die("no image profile builds %s.\n"
                 "    A pmos profile in image/configs claims a bridge by setting PMO_BRIDGE to its\n"
                 "    name, and none names this one: add one, or pass --image <path>." % bc.name)
-        service = service_profile(p["PMO_DEVICE"], self.env) if p else None
+        # The fetch profile that boots this phone from a card and exports its internal storage (Jumpdrive).
+        service = profile_where(self.env, "fetch", "FET_DEVICE", p["PMO_DEVICE"])[0] if p else None
         log("  write:    %s to %s" % (image or "the newest %s build" % profile, disk))
         if service:
             log("            the phone's internal storage as %s exports it from a card\n"

@@ -60,26 +60,14 @@ class TestTheBrowserGate(WkTest):
     def test_an_accelerated_unthrottled_run_passes(self):
         self.assertEqual(self.verdict(), [])
 
-    def test_a_throttled_window_is_refused(self):
-        reading = dict(GOOD_READING, raf_hz=8.0)
-        self.assertTrue(any("throttle" in f for f in self.verdict(reading)))
-
-    def test_a_machine_with_no_metal_device_is_refused(self):
-        reading = dict(GOOD_READING, webgl=None)
-        self.assertTrue(any("no WebGL" in f for f in self.verdict(reading)))
-
-    def test_a_run_no_webkit_gpu_process_touched_is_refused(self):
-        self.assertTrue(any("did not reach that device" in f
-                            for f in self.verdict(clients={})))
-
-    def test_a_page_that_never_reported_is_refused(self):
-        found = self.verdict(reading={}, clients={})
-        self.assertTrue(any("never reported" in f for f in found))
-
-    def test_a_display_mode_other_than_the_declared_one_is_refused(self):
-        reading = dict(GOOD_READING, displays=[dict(GOOD_DISPLAY, points=[1470, 956])])
-        found = self.verdict(reading)
-        self.assertTrue(any("points, not [1024, 768]" in f for f in found), found)
+    def test_each_fault_is_refused_by_name(self):
+        for said, reading, clients in (("throttle", dict(GOOD_READING, raf_hz=8.0), None),
+                                       ("no WebGL", dict(GOOD_READING, webgl=None), None), ("did not reach that device", None, {}),
+                                       ("never reported", {}, {}),
+                                       ("points, not [1024, 768]", dict(GOOD_READING, displays=[dict(GOOD_DISPLAY, points=[1470, 956])]), None)):
+            with self.subTest(said):
+                found = self.verdict(reading, clients)
+                self.assertTrue(any(said in f for f in found), found)
 
     def test_a_run_compared_with_nothing_is_not_judged_on_its_display(self):
         guest = dict(GOOD_READING, displays=[GUEST_DISPLAY])
@@ -167,20 +155,18 @@ class TestTheProfileGate(WkTest):
         found = PROFILE.faults(self.read({}))
         self.assertTrue(any("the measured build reads" in f for f in found), found)
 
-    def test_an_all_zero_profile_is_refused(self):
+    def test_each_unusable_profile_is_refused_by_name(self):
         profile_tree(self.root)
-        found = PROFILE.faults(self.read(
-            {f"output/{lib}.profdata": {"total_functions": 40000,
-                                        "maximum_function_count": 0}
-             for lib in LIBRARIES}))
-        self.assertTrue(any("every counter in it is zero" in f for f in found), found)
-
-    def test_a_profile_with_almost_no_functions_is_refused(self):
-        profile_tree(self.root)
-        found = PROFILE.faults(self.read(
-            {"output/JavaScriptCore.profdata": {"total_functions": 12,
-                                                "maximum_function_count": 3}}))
-        self.assertTrue(any("nothing ran long enough" in f for f in found), found)
+        for said, reading in (
+                ("every counter in it is zero", lambda: self.read({f"output/{lib}.profdata": {"total_functions": 40000, "maximum_function_count": 0}
+                                                                  for lib in LIBRARIES})),
+                ("nothing ran long enough", lambda: self.read({"output/JavaScriptCore.profdata": {"total_functions": 12, "maximum_function_count": 3}})),
+                ("llvm-profdata cannot read", lambda: self.read({"output/WebKit.profdata": {"error": ["not a profile"]}})),
+                ("jetstream3 touched 900", lambda: self.read_real({"jetstream3": {"JavaScriptCore": (900, 238390050)}})),
+                ("no counter above zero", lambda: self.read_real({"motionmark": {"WebCore": (19266, 0)}}))):
+            with self.subTest(said):
+                found = PROFILE.faults(reading())
+                self.assertTrue(any(said in f for f in found), found)
 
     def test_a_real_collection_passes(self):
         profile_tree(self.root)
@@ -191,24 +177,6 @@ class TestTheProfileGate(WkTest):
         found = PROFILE.faults(self.read_real())
         self.assertFalse([f for f in found if "jetstream3" in f], found)
 
-    def test_a_leg_that_gave_up_early_is_refused(self):
-        profile_tree(self.root)
-        found = PROFILE.faults(self.read_real(
-            {"jetstream3": {"JavaScriptCore": (900, 238390050)}}))
-        self.assertTrue(any("jetstream3 touched 900" in f and "gave up early" in f
-                            for f in found), found)
-
-    def test_a_leg_that_wrote_a_file_and_ran_nothing_is_refused(self):
-        profile_tree(self.root)
-        found = PROFILE.faults(self.read_real(
-            {"motionmark": {"WebCore": (19266, 0)}}))
-        self.assertTrue(any("no counter above zero" in f for f in found), found)
-
-    def test_an_unreadable_profile_is_refused(self):
-        profile_tree(self.root)
-        found = PROFILE.faults(self.read(
-            {"output/WebKit.profdata": {"error": ["not a profile"]}}))
-        self.assertTrue(any("llvm-profdata cannot read" in f for f in found), found)
 
 
 class TestAProfileGuidedBuildDoesNotCacheCompilations(WkTest):

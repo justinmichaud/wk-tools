@@ -1,18 +1,10 @@
 #!/usr/bin/env python3
-"""Structured-data reads for `wk bench`, stdlib only, for whatever python3 a macOS host or a bare-metal board has: a job's legs against its plan, and the A/B stopping rule as a CLI."""
+"""A Mac A/B's legs against its job, stdlib only: `MacAB.read_status` hands this file alone to the bench install's python3."""
 
-import argparse
 import json
 import os
 import re
 import sys
-
-
-def _bench():
-    # lib/wk/bench, imported on use: bench/mac.py's Remote.py hands this file alone to a Mac's `python3 -c` for `ab-legs`, where __file__ does not even exist, so nothing above this line may import wk.*; only `ab-precision`, always run as a file, needs it.
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from wk.bench import report
-    return report
 
 
 def _load(path):
@@ -47,8 +39,7 @@ def _elapsed(start, end=None):
     return "%dm%02ds" % (int(secs) // 60, int(secs) % 60)
 
 
-def cmd_ab_legs(args):
-    root = args.root
+def ab_legs(root):
     job = _load(os.path.join(root, "job.json")) or {}
     state = _state_lines(os.path.join(root, "autorun.state"))
     plans = job.get("plans") or []
@@ -114,26 +105,11 @@ def cmd_ab_legs(args):
         print("warmup captures: none in %s" % warmup)
 
 
-def cmd_ab_precision(args):
-    _bench().precision(args.a, args.b, args.goal)
-
-
 def main(argv):
-    parser = argparse.ArgumentParser(prog="wkdata.py", description=__doc__)
-    sub = parser.add_subparsers(dest="cmd", required=True)
-
-    p = sub.add_parser("ab-precision", help="how fine a difference the rounds so far resolve, and whether that meets --goal")
-    p.add_argument("--a", required=True, help="comma-separated run directories for arm A")
-    p.add_argument("--b", required=True, help="comma-separated run directories for arm B")
-    p.add_argument("--goal", type=float, default=0.3, help="the effect the A/B has to be able to detect, in percent (default 0.3)")
-    p.set_defaults(func=cmd_ab_precision)
-
-    p = sub.add_parser("ab-legs", help="every leg an A/B has run so far, against what its job planned")
-    p.add_argument("root", help="the bench root holding job.json, autorun.state, ab/ and results/")
-    p.set_defaults(func=cmd_ab_legs)
-
-    args = parser.parse_args(argv)
-    args.func(args)
+    if len(argv) != 2 or argv[0] != "ab-legs":
+        sys.stderr.write("usage: python3 wkdata.py ab-legs <bench root holding job.json, autorun.state, ab/ and results/>\n")
+        return 2
+    ab_legs(argv[1])
     return 0
 
 

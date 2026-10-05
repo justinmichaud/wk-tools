@@ -29,10 +29,6 @@ class Step:
 def validate(steps):
     ids = [s.id for s in steps]
     for s in steps:
-        if not s.id:
-            die("a step declared no id")
-        if s.run is None:
-            die("step '%s' declares no command" % s.id)
         if ids.count(s.id) > 1:
             die("step '%s' is declared %d times; an id names one step" % (s.id, ids.count(s.id)))
         for need in s.needs:
@@ -57,7 +53,7 @@ def validate(steps):
 
 
 def waves(steps, done=()):
-    """What runs at once, in order, if every step took the same time; the scheduler itself is event-driven."""
+    """What runs at once if every step took the same time; the scheduler itself is event-driven."""
     finished, left, out = set(done), [s for s in steps if s.id not in done], []
     while left:
         wave, held = [], set()

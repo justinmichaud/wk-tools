@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runs on the phone as root from `wk machine setup <bridge>`, beside what the host rendered for it (lib/wk/bridge/render.py): role.env, manifest and files/. It renders nothing; busybox ash only.
+# Runs on the phone as root from `wk machine setup <bridge>`, beside what lib/wk/bridge/plan.py rendered: role.env, manifest and files/. Busybox ash only.
 #   provision.sh base   the configuration files, the packages and the scripts, before the phone is asked its facts
 #   provision.sh role   every manifest line, then what only the phone can do in place
 set -eu

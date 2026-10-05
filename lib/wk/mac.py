@@ -17,7 +17,7 @@ CF_FRAMEWORK = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundati
 MAX_DISPLAYS = 16
 SET_TOLERANCE = 0.01
 
-# WindowServer reads the mode it comes up at from here, and it is the only way in: CGDisplayCopyAllDisplayModes lists the 1:1 modes alone on an Apple Silicon panel, with or without kCGDisplayShowDuplicateLowResolutionModes, so the scaled mode a bench install is measured at is not one CGDisplaySetDisplayMode can reach (measured 2026-09-08 on Mac16,12: five modes, none of them the running 1280x832@2).
+# WindowServer's boot mode lives here; CGDisplayCopyAllDisplayModes lists only the 1:1 modes on an Apple Silicon panel (Mac16,12), so a scaled mode is reachable no other way.
 WINDOWSERVER_CONFIG = "/Library/Preferences/com.apple.windowserver.displays.plist"
 BUILTIN_SCALE = 2   # a scaled mode's backing store: 1280x832 points over the 2560x1664 panel
 kCFStringEncodingUTF8 = 0x08000100
@@ -31,58 +31,42 @@ _NUMBERS = {"vendor": "CGDisplayVendorNumber", "model": "CGDisplayModelNumber",
 
 def _plist_of(argv):
     try:
-        out = subprocess.run(argv, capture_output=True, check=True).stdout
-    except (OSError, subprocess.CalledProcessError):
-        return None
-    try:
-        return plistlib.loads(out)
+        return plistlib.loads(subprocess.run(argv, capture_output=True, check=True).stdout)
     except Exception:
         return None
 
 
-def cmd_volume_name(args):
-    info = _plist_of(["diskutil", "info", "-plist", args.target])
-    name = info.get("VolumeName") if info else None
-    if not name:
+def _print(value):
+    if not value:
         return 1
-    print(name)
+    print(value)
     return 0
+
+
+def _diskutil(target):
+    return _plist_of(["diskutil", "info", "-plist", target]) or {}
+
+
+def cmd_volume_name(args):
+    return _print(_diskutil(args.target).get("VolumeName"))
 
 
 def cmd_volume_group(args):
-    info = _plist_of(["diskutil", "info", "-plist", args.target])
-    grp = info.get("APFSVolumeGroupID") if info else None
-    if not grp:
-        return 1
-    print(grp)
-    return 0
+    return _print(_diskutil(args.target).get("APFSVolumeGroupID"))
 
 
 def cmd_boot_volume(args):
-    pl = _plist_of(["nvram", "-xp"])
-    val = pl.get("boot-volume") if pl else None
-    if isinstance(val, bytes):
-        try:
-            val = val.decode("utf-8")
-        except UnicodeDecodeError:
-            return 1
-    if not val:
+    val = (_plist_of(["nvram", "-xp"]) or {}).get("boot-volume")
+    try:
+        return _print(val.decode("utf-8") if isinstance(val, bytes) else val)
+    except UnicodeDecodeError:
         return 1
-    print(val)
-    return 0
 
 
 def cmd_physical_store(args):
     # Via `target`'s own container: a Mac can have several APFS containers.
-    info = _plist_of(["diskutil", "info", "-plist", args.target])
-    stores = info.get("APFSPhysicalStores") if info else None
-    if not stores:
-        return 1
-    dev = stores[0].get("APFSPhysicalStore")
-    if not dev:
-        return 1
-    print(dev)
-    return 0
+    stores = _diskutil(args.target).get("APFSPhysicalStores")
+    return _print(stores and stores[0].get("APFSPhysicalStore"))
 
 
 def _declare(lib, name, restype):
@@ -147,7 +131,7 @@ def _brightness_of(ds, ident):
     return round(value.value, 4)
 
 
-# DisplayServices, the same private framework the brightness itself goes through: `DisplayServicesAmbientLightCompensationEnabled` reads it and `DisplayServicesEnableAmbientLightCompensation` sets it, both measured on tolken (26.6.2, `Mac16,12`) against `dyld_info -exports`. None where a panel has no sensor or the call did not answer -- absent is not off.
+# None where a panel has no sensor or the call did not answer: absent is not off.
 def _auto_brightness(ds, ident):
     if ds is None or ident is None:
         return None
@@ -209,7 +193,7 @@ def _builtin_uuid(cs, cf, ident):
 
 
 def _mode_rows(node, uuid):
-    """Every declared mode of one panel, wherever WindowServer keeps it. Walked rather than reached by a fixed key path, so a shape that gains a level of nesting is converged rather than silently half-written."""
+    """Every declared mode of one panel, walked so a shape that gains a level of nesting is still written whole."""
     rows = []
     if isinstance(node, dict):
         if node.get("UUID") == uuid:
@@ -295,19 +279,19 @@ def cmd_displays(args):
     return 0
 
 
+def _builtin_handles():
+    cg, ds = _coregraphics(), _display_services()
+    ident = _builtin_id(cg) if cg is not None and ds is not None else None
+    return ds, ident
+
+
 def cmd_brightness(args):
-    cg = _coregraphics()
-    ds = _display_services()
-    if cg is None or ds is None:
-        return 1
-    ident = _builtin_id(cg)
+    ds, ident = _builtin_handles()
     if ident is None:
         return 1
-    if args.set is not None:
-        if not ds.DisplayServicesCanChangeBrightness(ident):
-            return 1
-        if ds.DisplayServicesSetBrightness(ident, args.set) != 0:
-            return 1
+    if args.set is not None and (not ds.DisplayServicesCanChangeBrightness(ident)
+                                 or ds.DisplayServicesSetBrightness(ident, args.set) != 0):
+        return 1
     value = _brightness_of(ds, ident)
     if value is None:
         return 1
@@ -317,13 +301,8 @@ def cmd_brightness(args):
     return 0
 
 
-# Held rather than declined: a brightness ambient light can raise again is a load that varies, and the gate that refuses a run under it is the same rule either way -- this is what lets a machine pass it instead of being sent away.
 def cmd_auto_brightness(args):
-    cg = _coregraphics()
-    ds = _display_services()
-    if cg is None or ds is None:
-        return 1
-    ident = _builtin_id(cg)
+    ds, ident = _builtin_handles()
     if ident is None:
         return 1
     if not ds.DisplayServicesHasAmbientLightCompensation(ident):
@@ -353,34 +332,26 @@ def main():
     sp = sub.add_parser("boot-volume", help="the firmware's boot-volume NVRAM value (colon-separated UUIDs)")
     sp.set_defaults(func=cmd_boot_volume)
 
-    sp = sub.add_parser("displays", help="every online display as JSON: id, builtin, "
-                                        "main, active, online, mirrored, asleep, "
-                                        "points, vendor, model, unit, brightness")
+    sp = sub.add_parser("displays", help="every online display as JSON")
     sp.set_defaults(func=cmd_displays)
 
     sp = sub.add_parser("display-mode", help="the built-in display's mode in points, "
                                             "as <wide>x<high>")
     sp.add_argument("--declare", metavar="WxH", type=_points,
-                    help="declare WxH as the mode WindowServer comes up at, by rewriting "
-                         "every row of the built-in panel in "
-                         + WINDOWSERVER_CONFIG + " (root, and it takes effect at the next "
-                         "boot -- what is printed is what the file now declares, not the "
-                         "running mode); exit 1 printing nothing when the file does not "
-                         "read back as asked")
+                    help="declare WxH as the mode WindowServer comes up at next boot (root); "
+                         "prints what the file now declares")
     sp.set_defaults(func=cmd_display_mode)
 
     sp = sub.add_parser("brightness", help="the built-in display's brightness, 0.0 to 1.0")
     sp.add_argument("--set", metavar="V", type=_fraction,
-                    help="set it to V, then print the value read back; exit 1 printing "
-                         "nothing when the read-back is not V")
+                    help="set it to V, then print the value read back")
     sp.set_defaults(func=cmd_brightness)
 
     sp = sub.add_parser("auto-brightness", help="whether the built-in panel is under "
                                                 "ambient-light control: on, off, or none "
                                                 "for a panel with no sensor")
     sp.add_argument("--off", action="store_true",
-                    help="turn it off first, then print what it reads back; exit 1 "
-                         "when it still reads on")
+                    help="turn it off first, then print what it reads back")
     sp.set_defaults(func=cmd_auto_brightness)
 
     sp = sub.add_parser("physical-store", help="device identifier of the physical store backing a volume's APFS container")

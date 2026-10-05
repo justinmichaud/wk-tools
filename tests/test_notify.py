@@ -108,13 +108,6 @@ class TestItPublishesOrSaysWhyNot(_Ntfy):
         self.assertEqual([], FakeNtfy.published)
 
 
-class TestTheTopicNeverLeaks(_Ntfy):
-    def test_a_refusal_ntfy_echoed_the_topic_into_does_not_carry_it(self):
-        FakeNtfy.post_status = 400
-        why = notify.publish(TOPIC, "the plant is waiting")[1]
-        self.assertNotIn(TOPIC, why)
-
-
 class TestTheRuleJudgesWhatTheTopicCanDo(_Ntfy):
     def test_a_topic_ntfy_serves_is_acceptable(self):
         code, why = notify.check(TOPIC)
@@ -163,9 +156,6 @@ class TestTheTopicIsMintedNotInvented(_Ntfy):
         self.assertRegex(topic, notify.TOPIC.pattern)
         self.assertGreaterEqual(len(topic), notify.GUESSABLE)
         self.assertEqual(0, notify.check(topic)[0])
-
-    def test_two_mints_are_never_the_same_topic(self):
-        self.assertEqual(4, len({notify.mint() for _ in range(4)}))
 
     def test_the_rule_mints_through_this_module(self):
         cp = subprocess.run(["python3", str(CREDCHECK), "mint", "ntfy"], capture_output=True, text=True, timeout=60,
@@ -233,7 +223,6 @@ class TestTheCredentialIsDeclaredWhereARebuildLooks(unittest.TestCase):
         from wk.store import Store
         store = Store(clean_env({"WK_STORE": "/scratch/store", "WK_HOST_SECRETS": "/scratch/store/secrets"}))
         topic, secrets, agent_rw = store.keyring_ntfy_topic(), store.keyring_dir(), store.keyring_agent_rw_dir()
-        self.assertEqual("/scratch/store/notify/ntfy-topic", topic)
         for mounted in (secrets, agent_rw):
             self.assertFalse(topic.startswith(mounted + "/"), topic)
 

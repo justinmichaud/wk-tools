@@ -31,18 +31,13 @@ MAC_ONLY = ("patch", "preset", "settle", "a_args", "b_args", "plant", "rehearse"
             "preflight", "progress", "status", "collect")
 
 
-def _or(words):
-    return " or ".join(words)
-
-
 def legs_per_plan(rounds, systems):
     """A warmup leg per arm, then each round one leg per arm; a system arm settles on each fresh boot first."""
     return 2 + rounds * (4 if systems else 2)
 
 
 def leg_seconds(reg, homes, device, plan, count):
-    """Seconds at `count` of every measured leg of `plan` on `device` in the tasks of `homes` ((workspace, place) pairs): a leg at
-    another count scales by the ratio, and one at the plan's own default count stands only for that default."""
+    """Seconds at `count` of each measured leg in `homes`' tasks: another count scales, the default count stands only for itself."""
     out = []
     for m, bench in (record.ws_home(reg, *h) for h in dict.fromkeys(homes)):
         for r in (r for t in record.tasks(bench, m) for r in record.task_runs(os.path.join(bench, t), m)):
@@ -58,10 +53,7 @@ def leg_seconds(reg, homes, device, plan, count):
 
 
 def check_plan(o, default_plans):
-    """(rounds, plans): the refusals every A/B's plan shares, a board's and a Mac's."""
-    rounds = o.get("rounds") or ROUNDS
-    if not rounds.isdigit() or int(rounds) < 1:
-        die("--rounds takes a number of at least 1 (got '%s')" % rounds)
+    rounds = board_ab.rounds_of(o, ROUNDS)
     for key, what in (("count", "a number"), ("timeout", "seconds")):
         if o.get(key) and not o[key].isdigit():
             die("--%s takes %s (got '%s')" % (key, what, o[key]))
@@ -69,7 +61,7 @@ def check_plan(o, default_plans):
     for p in plans:
         if not NAME.match(p):
             die("--plan '%s' is not a plan name (letters, digits, '.', '_' and '-')" % p)
-    return int(rounds), plans
+    return rounds, plans
 
 
 def duration(seconds):
@@ -85,10 +77,6 @@ class Device:
     @property
     def pgo(self):
         return images.pgo_wanted(self.p["IMG_BUILDER"], self.p["CFG_RELEASE"])
-
-    @property
-    def sdk(self):
-        return self.p["IMG_BUILDER"] == "yocto"
 
     def booted(self):
         return self.mode.startswith("bench %s-" % self.profile)
@@ -156,8 +144,11 @@ class AB:
         r = self.git("rev-parse", "--verify", "--quiet", ref + "^{commit}")
         return r.out.strip() if r.ok else ""
 
-    def _resolved_or_planned(self, dest, what, fetch):
-        return pr.resolved_or_planned(self.here, self.mirror, dest, what, fetch)
+    def fetched(self, dest, what, fetch):
+        sha = pr.resolved_or_planned(self.here, self.mirror, dest, what, fetch)
+        if not sha:
+            die("the mirror has no %s after fetching it" % what)
+        return sha
 
     def resolve_head(self):
         """Which of the three the spec is settles before the mirror is required, so a malformed spec is refused as the argument error it is."""
@@ -179,10 +170,7 @@ class AB:
         else:
             remote, n = self.pr["remote"], self.pr["n"]
             dest = "refs/remotes/pr/" + pr.pull_refname(remote, n)
-            self.head = self._resolved_or_planned(dest, "pull request %s" % n,
-                                                  lambda: sync.fetch_pull_into_mirror(self.here, self.store, self.lock, remote, n))
-            if not self.head:
-                die("the mirror has no head for pull request %s after fetching it" % n)
+            self.head = self.fetched(dest, "pull request %s" % n, lambda: sync.fetch_pull_into_mirror(self.here, self.store, self.lock, remote, n))
             self.head_desc = "%s (pull request %s on %s)" % (s, n, remote)
 
     def head_branch(self):
@@ -198,10 +186,8 @@ class AB:
         repo, url, _ = found[0]
         ref = pr.pr_refname(user, repo, branch)
         dest = "refs/remotes/pr/" + ref
-        self.head = self._resolved_or_planned(dest, "%s:%s from %s" % (user, branch, url),
-                                              lambda: sync.fetch_into_mirror(self.here, self.store, self.lock, url, "refs/heads/" + branch, dest))
-        if not self.head:
-            die("the mirror has no head for '%s' after fetching it from %s" % (branch, url))
+        self.head = self.fetched(dest, "%s:%s from %s" % (user, branch, url),
+                                 lambda: sync.fetch_into_mirror(self.here, self.store, self.lock, url, "refs/heads/" + branch, dest))
         self.head_desc = "%s:%s (branch of %s/%s)" % (user, branch, user, repo)
 
     def pr_base_branch(self):
@@ -235,7 +221,7 @@ class AB:
             b, w = c.split("-%s-" % release, 1)[1].split("-", 1)[0], c.rsplit("-", 1)[1]
             builders += [b] if b not in builders else []
             widths += ["%s-%s" % (dev, w)] if "%s-%s" % (dev, w) not in widths else []
-        said = (["--builder " + _or(builders)] if len(builders) > 1 else []) + (["--devices " + _or(widths)] if len(widths) > 1 else [])
+        said = (["--builder " + " or ".join(builders)] if len(builders) > 1 else []) + (["--devices " + " or ".join(widths)] if len(widths) > 1 else [])
         return ", and ".join(said) or ("nothing -- they differ in neither builder nor width, so no option here tells them apart,\n"
                                        "    and two such configurations at one release is a bug in image/configs")
 
@@ -282,10 +268,8 @@ class AB:
         if not url:
             die("no upstream remote '%s' (lib/wk/git.py REMOTES) to fetch %s from" % (remote, branch))
         dest = "refs/remotes/%s/%s" % (remote, branch)
-        tip = self._resolved_or_planned(dest, "%s/%s" % (remote, branch),
-                                        lambda: sync.fetch_into_mirror(self.here, self.store, self.lock, url, "refs/heads/" + branch, dest))
-        if not tip:
-            die("the mirror has no %s/%s after fetching it" % (remote, branch))
+        tip = self.fetched(dest, "%s/%s" % (remote, branch),
+                           lambda: sync.fetch_into_mirror(self.here, self.store, self.lock, url, "refs/heads/" + branch, dest))
         self.branch = "%s/%s" % (remote, branch)
         if self.o.get("base"):
             self.base = self.rev(self.o["base"])
@@ -338,25 +322,23 @@ class AB:
         return sched.wk_step(self.here, self.wk, lambda s: os.path.join(self.logdir(), sched.log_name(s)), sid, on, needs, holds,
                              done, words, place, env=["WK_TASK_HELD=" + self.task] if self.task else [])
 
-    def pgo_steps(self, d, ws, spec, on, place, commit, slot, need):
-        return pgo.steps(self.wk_step, self.holds, d.name, ws, spec, on, place, commit, slot, (need,))
-
     def build_steps(self, d, imaged):
         out = []
         for a, (_, slot) in enumerate(self.arms):
             commit = self.head if a else self.base
             ws, spec, on, place = d.arm_ws[a]
             key, res = "%s@%s" % (ws, on), images.build_resource(on)
-            built = ("toolchain:" if d.sdk else "image:") + key
+            sdk = d.p["IMG_BUILDER"] == "yocto"
+            built = ("toolchain:" if sdk else "image:") + key
             if key not in imaged:
                 imaged.add(key)
                 out.append(self.wk_step("image:" + key, on, (), (res,), self.holds(spec, ws),
                                         ["sysimage", "build", spec, "--workspace", ws]))
-                if d.sdk:   # the nativesdk stack does not fit the webkit stage's booking, so the SDK is machine-sized and its own step
+                if sdk:   # the nativesdk stack does not fit the webkit stage's booking, so the SDK is machine-sized and its own step
                     out.append(self.wk_step("toolchain:" + key, on, ("image:" + key,), (res,), self.holds(spec, ws, "--toolchain"),
                                             ["sysimage", "build", spec, "--workspace", ws, "--stage", "toolchain"]))
             if d.pgo:
-                out += self.pgo_steps(d, ws, spec, on, place, commit, slot, built)
+                out += pgo.steps(self.wk_step, self.holds, d.name, ws, spec, on, place, commit, slot, (built,))
             else:
                 out.append(self.wk_step("slot:%s:%s" % (ws, slot), on, (built,), (res,), self.holds(spec, ws, "--slot", slot, "--commit", commit),
                                         ["sysimage", "webkit", spec, "--workspace", ws, "--commit", commit, "--slot", slot]))
@@ -426,15 +408,11 @@ class AB:
 
     def bench_words(self, d, plan):
         ws, o = self.bench_options(d)
-        flag = ["--ab-systems", o["ab_systems"], "--slot", o["slot"]] if self.systems else ["--ab", o["ab"]]
-        return (["bench", "run", ws, plan, "--system", d.name] + flag + ["--rounds", o["rounds"]]
-                + [w for k in ("max_rounds", "detect", "count", "timeout") if o[k] for w in ("--" + k.replace("_", "-"), o[k])]
+        return (["bench", "run", ws, plan, "--system", d.name] + [w for k, v in o.items() if v for w in ("--" + k.replace("_", "-"), v)]
                 + ["--task", self.task or "<task>"])
 
     def board_state(self, name):
-        """(mode, slots): what the board answers it is running now, and the slots its bench system holds.
-        A config problem (an unresolvable name, a malformed conf) is refused by name, not folded into
-        'unreachable' -- only the ssh round trip to a board already probed as reachable is that."""
+        """(mode, slots) the board answers now; a config problem is refused by name, never folded into 'unreachable'."""
         s = board.for_board(self.root, self.reg, "", self.clock, name)
         mode = s.driver.probe()
         if not mode.startswith("bench "):
@@ -445,7 +423,7 @@ class AB:
             return "unreachable", []
 
     def cost(self):
-        """{(device, plan): (legs, seconds or None, legs measured)}: the plan's cost from this store's measured legs."""
+        """{(device, plan): (legs, seconds or None, legs measured)}"""
         out = {}
         for d in self.devices:
             for plan in self.plans:
@@ -518,7 +496,6 @@ class AB:
                     "    wk boot %s" % (d.name, d.profile, d.profile, d.name, d.name))
 
     def argv(self):
-        """This A/B as a command, for the process --detach hands it to."""
         words = [self.spec] if self.spec else []
         for key in ("devices", "release", "builder", "bits", "base", "build_on", "systems", "workspace", "slot", "count", "timeout", "max_rounds", "detect"):
             if self.o.get(key):

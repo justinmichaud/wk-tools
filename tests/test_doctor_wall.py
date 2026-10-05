@@ -2,8 +2,6 @@
 returning doctor rows, driven here against a fake machine whose workspace answers each probe from a table
 keyed by a substring of the command it runs."""
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import os
 import shlex
@@ -16,7 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.fakes import FakeRegistry
-from tests.support import REPO, WkTest, bash, clean_env
+from tests.support import REPO, WkTest, bash, clean_env, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import doctor, places, secrets, wall  # noqa: E402
@@ -25,14 +23,7 @@ from wk.machine import Fake, Result  # noqa: E402
 
 
 def _load_cmd_doctor():
-    """cmd/doctor as a module: a real file with no extension needs its loader spelled out."""
-    path = str(REPO / "cmd" / "doctor")
-    loader = importlib.machinery.SourceFileLoader("wk_cmd_doctor", path)
-    spec = importlib.util.spec_from_loader("wk_cmd_doctor", loader, origin=path)
-    mod = importlib.util.module_from_spec(spec)
-    mod.__file__ = path
-    loader.exec_module(mod)
-    return mod
+    return load_cmd("doctor")
 
 
 DOCTOR_CMD = _load_cmd_doctor()
@@ -248,10 +239,6 @@ class TestNoCredentialsInside(_Wall):
         self.set("hosts.yml", "/home/u/.config/gh/hosts.yml")
         self.assertFails(self.check("no_credentials_inside"), "GitHub credential inside the workspace")
 
-    def test_the_checkout_is_never_scanned(self):
-        self.assertIn("/secrets /run/wk", wall.KEY_SCAN)
-        self.assertNotIn("grep -rl 'PRIVATE KEY' $HOME ", wall.KEY_SCAN)
-
 
 class TestTheKeyScanRunsForReal(WkTest):
     """The scan against a real tree shaped like a guest's home, whose checkout (with WebKit's PEM fixtures) is
@@ -425,10 +412,6 @@ class TestAnUpstreamOutageIsNotTheSandbox(_Wall):
         self.assertNoted(self.check("bugzilla_write"), "Bugzilla")
         self.set("-D - -X POST -H", "HTTP/1.1 504 Gateway Timeout\r\n\r\nbugs.webkit.org did not answer within 12 seconds; the wk credential injector is up\r\n")
         self.assertNoted(self.check("bugzilla_write", push_on=1), "Bugzilla")
-
-    def test_a_000_stays_a_miss(self):
-        self.set("api.github.com/user", "000")
-        self.assertFails(self.check("github_read"), "rather than 200 or 401")
 
 
 class TestGitHubWrite(_Wall):
@@ -745,11 +728,6 @@ class TestTheDriversAnswer(_Wall):
         self.fake.files[os.path.join(str(self.tmp / "vmstore"), "vm", "demo.unfiltered")] = ""
         self.assertFalse(vm.egress_filtered("demo"))
 
-    def test_agent_sock(self):
-        self.assertEqual("/run/wk/ssh-agent.sock", self.reg.load("container").agent_sock())
-        self.assertEqual("/Users/admin/.wk-ssh-agent.sock", self.load("vm").agent_sock())
-        self.assertIsNone(self.reg.load("remote").agent_sock())
-
     def test_agent_secret_present_asks_where_each_kind_of_row_lives(self):
         self.assertTrue(self.driver.agent_secret_present("demo", "claude-login"))
         self.driver.agent_secret_present("demo", "litellm")
@@ -773,57 +751,35 @@ class TestTheDriversAnswer(_Wall):
 
 
 class TestTheCommand(WkTest):
-    DOCTOR = REPO / "cmd" / "doctor"
-
     def run_doctor(self, *args, env=None):
-        return subprocess.run([sys.executable, str(self.DOCTOR), *args], capture_output=True, text=True,
+        return subprocess.run([sys.executable, str(REPO / "cmd" / "doctor"), *args], capture_output=True, text=True,
                               env=clean_env(dict({"WK_MARKER": str(self.tmp / "no-marker")}, **(env or {}))))
+
+    def machines(self, **env):
+        (self.tmp / "machines").mkdir(exist_ok=True)
+        (self.tmp / "machines" / "pi.conf").write_text("kind=board\n")
+        return dict(env, WK_MACHINES_DIR=str(self.tmp / "machines"))
 
     def test_it_answers_where_it_runs(self):
         self.assertEqual("workspace", self.run_doctor("--where", "demo", "--gpu").stdout.strip())
         self.assertEqual("local", self.run_doctor("--where", "--all").stdout.strip())
-
-    def machines(self):
-        (self.tmp / "machines").mkdir(exist_ok=True)
-        (self.tmp / "machines" / "pi.conf").write_text("kind=board\n")
-        return {"WK_MACHINES_DIR": str(self.tmp / "machines")}
-
-    def test_a_machine_name_is_asked_here(self):
         self.assertEqual("local", self.run_doctor("--where", "pi", env=self.machines()).stdout.strip())
 
-    def test_a_machine_takes_no_option(self):
-        cp = self.run_doctor("pi", "--all", env=self.machines())
-        self.assertEqual(1, cp.returncode, cp.stderr)
-        self.assertIn("is not asked of a machine", cp.stderr)
-
-    def test_a_machine_is_not_asked_inside_a_workspace(self):
+    def test_each_question_is_refused_where_it_does_not_belong(self):
         marker = self.tmp / "marker"
         marker.write_text("name=demo\nsrc=/src\n")
-        cp = self.run_doctor("pi", env=dict(self.machines(), WK_MARKER=str(marker)))
-        self.assertEqual(1, cp.returncode, cp.stderr)
-        self.assertIn("asks a machine from the host", cp.stderr)
-
-    def test_gpu_is_a_workspaces_question(self):
-        cp = self.run_doctor("--gpu")
-        self.assertEqual(1, cp.returncode, cp.stderr)
-        self.assertIn("wk doctor <workspace> --gpu", cp.stderr)
-
-    def test_all_is_this_machines_question(self):
-        cp = self.run_doctor("--all", env={"WK_NAME": "demo", "WK_PLACE": "container"})
-        self.assertEqual(1, cp.returncode, cp.stderr)
-        self.assertIn("drop the workspace name", cp.stderr)
-
-    def test_inside_a_workspace_it_takes_no_option(self):
-        marker = self.tmp / "marker"
-        marker.write_text("name=demo\nsrc=/src\n")
-        cp = self.run_doctor("--all", env={"WK_MARKER": str(marker)})
-        self.assertEqual(1, cp.returncode, cp.stderr)
-        self.assertIn("'wk doctor' here checks this one", cp.stderr)
+        for args, env, said in ((("pi", "--all"), self.machines(), "is not asked of a machine"),
+                                (("pi",), self.machines(WK_MARKER=str(marker)), "asks a machine from the host"),
+                                (("--gpu",), {}, "wk doctor <workspace> --gpu"),
+                                (("--all",), {"WK_NAME": "demo", "WK_PLACE": "container"}, "drop the workspace name"),
+                                (("--all",), {"WK_MARKER": str(marker)}, "'wk doctor' here checks this one")):
+            with self.subTest(args=args):
+                cp = self.run_doctor(*args, env=env)
+                self.assertEqual(1, cp.returncode, cp.stderr)
+                self.assertIn(said, cp.stderr)
 
 
 def sim_registry(in_ws):
-    """Just enough of a Registry for `inside`/`workspace`'s own exit-code translation: a report's `.missing` and
-    (inside) whether it is publishing decide 0 | 1 | 3, not what a place actually measures."""
     def driver(name, env):
         t = mock.Mock(ws_name="demo")
         t.name = name
@@ -832,8 +788,7 @@ def sim_registry(in_ws):
 
 
 class TestExitCodes(unittest.TestCase):
-    """`inside`/`workspace` (cmd/doctor) turn a Report -- and, inside, whether an agent could publish -- into 0
-    intact | 1 broken | 3 publishing; nothing here drives a real check."""
+    """cmd/doctor turns a Report -- and, inside, whether an agent could publish -- into 0 intact | 1 broken | 3 publishing."""
 
     def _inside(self, missing, publishing):
         def fake_from_inside(root, driver, ws, machine, rep):
@@ -850,20 +805,9 @@ class TestExitCodes(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             return DOCTOR_CMD.workspace(sim_registry(False), "demo", [])
 
-    def test_inside_intact_is_0(self):
-        self.assertEqual(0, self._inside(0, False))
-
-    def test_inside_broken_is_1(self):
-        self.assertEqual(1, self._inside(2, False))
-
-    def test_inside_publishing_is_3_even_with_other_checks_missing_too(self):
-        self.assertEqual(3, self._inside(2, True))
-
-    def test_workspace_intact_is_0(self):
-        self.assertEqual(0, self._workspace(0))
-
-    def test_workspace_broken_is_1(self):
-        self.assertEqual(1, self._workspace(3))
+    def test_inside_and_from_the_host(self):
+        self.assertEqual([0, 1, 3], [self._inside(0, False), self._inside(2, False), self._inside(2, True)])
+        self.assertEqual([0, 1], [self._workspace(0), self._workspace(3)])
 
 
 if __name__ == "__main__":

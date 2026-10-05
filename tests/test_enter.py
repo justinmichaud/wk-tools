@@ -51,7 +51,7 @@ class TestNoTerminalAsksForNone(unittest.TestCase):
         driver.info.return_value = "present"
         driver.exec_argv.return_value = (["true"], None)
         reg = mock.Mock()
-        reg.load.return_value = driver
+        reg.present.return_value = driver
         with mock.patch.object(enter.places, "Registry", return_value=reg), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws"}), \
                 mock.patch("sys.stdin", io.StringIO("")):

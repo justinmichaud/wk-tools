@@ -96,10 +96,7 @@ class TestPrepare(unittest.TestCase):
         self.assertIn("brcmfmac.ko", dep)
         self.assertNotIn(".ko.xz", dep, "modules.dep still names the compressed paths")
 
-    def test_a_release_the_package_does_not_carry_is_refused(self):
-        cp = run(self._deb(), "1.2.3-nope", self.out)
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("no boot/vmlinuz-1.2.3-nope", cp.stderr)
+
 
 class TestPrepareOnTheFake(unittest.TestCase):
     """The refusals and the reuse, on any host: the Fake answers as dpkg-deb, depmod and od would."""

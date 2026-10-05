@@ -1,7 +1,6 @@
 """`preset=` (the declaration): a command that takes a build preset says so to"""
 import os
 import sys
-import tempfile
 import unittest
 from unittest import mock
 
@@ -12,32 +11,18 @@ from wk import presets                 # noqa: E402
 from wk import decl as D                 # noqa: E402
 from wk import dispatch                  # noqa: E402
 
-TAKERS = ("bench", "build", "gui", "run", "test")
-
-
 def _decl(cmd):
     return D.Decl(REPO / "cmd" / cmd)
 
 
-class TestTheCommandsThatTakeABuildConfigDeclareIt(unittest.TestCase):
-    def test_each_declares_it(self):
-        self.assertEqual(sorted(d.name for d in D.all_commands(REPO) if d.preset), list(TAKERS))
-
-
-    def test_a_config_that_is_not_one_is_a_declaration_error(self):
-        with tempfile.NamedTemporaryFile("w", suffix="-cmd") as f:
-            f.write("#!/bin/sh\n# wk x -- y\n# wk: config=--cfg\n")
-            f.flush()
-            with self.assertRaises(D.DeclError):
-                D.Decl(f.name)
-
-
-class TestTheHelpListsEveryConfig(unittest.TestCase):
-    def test_every_taker_lists_every_config(self):
-        for cmd in TAKERS:
-            text = run(cmd, "-h", timeout=30).stdout
-            with self.subTest(cmd=cmd):
-                self.assertIn("valid values (%s):" % ("<preset>" if cmd == "build" else "--preset"), text)
+class TestTheHelpListsEveryPreset(unittest.TestCase):
+    def test_every_taker_lists_every_preset(self):
+        takers = [d for d in D.all_commands(REPO) if d.preset]
+        self.assertTrue(takers)
+        for d in takers:
+            text = run(d.name, "-h", timeout=30).stdout
+            with self.subTest(cmd=d.name):
+                self.assertIn("valid values (%s):" % ("<preset>" if d.preset == "arg" else "--preset"), text)
                 for name in presets.names():
                     self.assertIn(name, text)
 

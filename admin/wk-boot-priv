@@ -18,21 +18,10 @@ fail() { printf 'wk-boot-priv: %s\n' "$*" >&2; exit 1; }
 MAILBOX_TAG=0x0003808b
 
 check_order() {
-    case "${1:-}" in
-        0x[0-9a-fA-F]) ;;
-        0x[0-9a-fA-F][0-9a-fA-F]) ;;
-        0x[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;;
-        0x[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;;
-        0x[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;;
-        0x[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;;
-        0x[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;;
-        0x[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;;
-        *) deny "'${1:-}' is not a boot order (0x and up to eight hex digits)" ;;
-    esac
+    [[ "${1:-}" =~ ^0x[0-9a-fA-F]{1,8}$ ]] || deny "'${1:-}' is not a boot order (0x and up to eight hex digits)"
 }
 
-# What this machine can be asked: a Pi has no `bless`, a Mac has neither
-# vcmailbox nor /run/systemd. `detach` names the mechanism the reboot verbs use.
+# A Pi has no `bless`, a Mac has neither vcmailbox nor /run/systemd.
 v_status() {
     say "ok"
     command -v vcmailbox >/dev/null 2>&1 && say "order=yes" || say "order=no (no vcmailbox here)"
@@ -42,7 +31,6 @@ v_status() {
     command -v bless >/dev/null 2>&1 && say "bless=yes" || say "bless=no (not a Mac)"
 }
 
-# One-shot: the firmware clears the register after one use.
 v_order() {
     check_order "${1:-}"
     command -v vcmailbox >/dev/null 2>&1 \
@@ -58,7 +46,6 @@ v_reboot() {
     say "rebooting in 3s"
 }
 
-# Only systemd can pass the tryboot flag (/run/systemd/reboot-param).
 v_reboot_tryboot() {
     [ $# -eq 0 ] || deny "reboot-tryboot takes no arguments"
     [ -d /run/systemd ] \
@@ -68,13 +55,10 @@ v_reboot_tryboot() {
     say "rebooting into tryboot in 3s"
 }
 
-# macOS: `bless --help` (26.6.2) lists --user/--stdinpass only under Snapshot
-# options, so this blesses with root alone and quotes what bless answered. The
-# gate is the volume, not an argument: the only volume `boot-volume` blesses is a
-# mounted macOS system volume, not the running one, whose /etc/wk-image names a
-# perf-macos profile.
-
-bench_install() {   # the one wk benchmark install mounted here, or a refusal
+# `bless --help` (macOS 26.6.2) lists --user/--stdinpass only under Snapshot options, so
+# this blesses with root alone. The gate is the volume, not an argument: the one mounted
+# macOS system volume, not the running one, whose /etc/wk-image names a perf-macos profile.
+bench_install() {
     local v found="" n=0
     for v in /Volumes/*; do
         [ -f "$v/System/Library/CoreServices/SystemVersion.plist" ] || continue

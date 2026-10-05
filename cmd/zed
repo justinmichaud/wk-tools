@@ -119,9 +119,8 @@ def main(argv):
         driver = reg.load(tname)
     except LookupError as e:
         die(str(e))
-    broken = broken_reason(driver, tname, name)
-    if broken:
-        die(broken)
+    if driver.state(name) == "broken":
+        die(driver.broken_words(name))
 
     driver.ssh_prepare(name)
 
@@ -145,15 +144,6 @@ def main(argv):
 
     emit(url_only, zed, "ssh://%s%s" % (host, driver.src(name)))
     return 0
-
-
-def broken_reason(driver, tname, name):
-    """None, or why `name` is a record without an environment -- naming the repair, not a driver's word."""
-    if driver.state(name) != "broken":
-        return None
-    return ("'%s' exists as a record and not as a %s workspace: creation\n"
-            "    finished, and the environment is gone -- something outside wk removed it.\n"
-            "    Repair:  wk rm %s    (then 'wk new %s' if you still want it)" % (name, tname, name, name))
 
 
 if __name__ == "__main__":

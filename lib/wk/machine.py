@@ -94,54 +94,23 @@ HAVE = ("sh", "-c", 'command -v "$1" >/dev/null', "sh")
 
 
 class Machine:
+    """What every transport implements beyond these: run (`stream` sends the output to stderr as it arrives), run_tty,
+    read, read_tree ({path: bytes} under anchor/rel matching `patterns`; Planted names a link met), exists, isdir,
+    listdir, alive, readlink, mtime, read_bytes, and the effects --dry-run prints. write_own/remove_own (the task
+    record) and symlink/rename/remove_now/mkdir_now (a lock) run whatever --dry-run says, with no destructive gate."""
 
     name = "machine"
-
-    def run(self, argv, input=None, timeout=None, stream=False):
-        """`stream`: the output goes to this process's stderr as it arrives, and the Result carries only the status."""
-        raise NotImplementedError
-
-    def run_tty(self, argv, cwd=None, timeout=None):
-        """Blocking, with this process's own stdio inherited (a real pty for lldb/samply/xctrace)."""
-        raise NotImplementedError
-
-    def read(self, path):
-        raise NotImplementedError
-
-    def read_tree(self, anchor, rel, patterns, depth=3):
-        """{path under anchor/rel: bytes} of each regular file there matching `patterns` (fnmatch), `depth` levels
-        down at most. Planted names a symbolic link or a special file among `rel`'s components or anywhere read."""
-        raise NotImplementedError
-
-    def exists(self, path):
-        raise NotImplementedError
-
-    def isdir(self, path):
-        raise NotImplementedError
-
-    def listdir(self, path):
-        raise NotImplementedError
-
-    def alive(self, pid):
-        raise NotImplementedError
-
-    def readlink(self, path):
-        raise NotImplementedError
-
-    def mtime(self, path):
-        raise NotImplementedError
-
-    def read_bytes(self, path, start=0):
-        """The bytes from `start` on; a negative start counts back from the end, as a slice does."""
-        raise NotImplementedError
 
     def have(self, tool):
         return self.run(list(HAVE) + [tool]).ok
 
-    # -- effects
-    def act_run(self, argv, **kw):
+    def _would(self, verb, what):
         if act.dry_run():
-            sys.stderr.write("would run%s: %s\n" % (self._where(), shlex.join(argv)))
+            sys.stderr.write("would %s%s: %s\n" % (verb, self._where(), what))
+        return act.dry_run()
+
+    def act_run(self, argv, **kw):
+        if self._would("run", shlex.join(argv)):
             return Result(0)
         if act.destructive() and not act.asked():
             act.die("BUG: this command is declared destructive and acted before asking:\n    %s"
@@ -153,30 +122,16 @@ class Machine:
     def _effect_run(self, argv, **kw):
         return self.run(argv, **kw)
 
-    def write(self, path, text):
-        raise NotImplementedError
-
-    # -- the command's own task record: not a state change, so written whatever --dry-run says and never an effect
-    def write_own(self, path, text):
-        raise NotImplementedError
+    def remove(self, path):
+        if not self._would("remove", path):
+            self.remove_now(path)
 
     def remove_own(self, path):
-        raise NotImplementedError
-
-    def remove(self, path):
-        raise NotImplementedError
+        self.remove_now(path)
 
     def mkdir(self, path):
-        raise NotImplementedError
-
-    def kill(self, pid, sig=signal.SIGTERM):
-        raise NotImplementedError
-
-    def spawn(self, argv, log):
-        raise NotImplementedError
-
-    def start(self, argv, out, cwd=None):
-        raise NotImplementedError
+        if not self._would("create", path):
+            self.mkdir_now(path)
 
     def exec(self, argv, cwd=None, env=None):
         """Replaces this process, so the far side's tty and job control are the caller's own; a dry run prints it and ends."""
@@ -185,40 +140,8 @@ class Machine:
             raise SystemExit(0)
         self._exec(argv, cwd, env)
 
-    def _exec(self, argv, cwd, env):
-        raise NotImplementedError
-
-    # -- copy: the one path for moving bytes in or out of a workspace, a board or a card
-    def copy_in(self, src, dest):
-        raise NotImplementedError
-
-    def copy_out(self, src, dest):
-        raise NotImplementedError
-
-    def copy_tree_in(self, src, dest):
-        raise NotImplementedError
-
-    def copy_tree_out(self, src, dest, exclude=()):
-        """`exclude` holds rsync patterns: one without a slash names a file or directory at any depth."""
-        raise NotImplementedError
-
-    # -- lock effects: a resource lock is process coordination, not workspace
-    # mutation, so these run whatever --dry-run says and take no destructive gate
-    def symlink(self, target, path):
-        raise NotImplementedError
-
-    def rename(self, path, dst):
-        raise NotImplementedError
-
-    def remove_now(self, path):
-        raise NotImplementedError
-
-    def mkdir_now(self, path):
-        raise NotImplementedError
-
     def _where(self):
         return "" if self.name == "here" else " on " + self.name
-
 
 class Local(Machine):
     name = "here"
@@ -311,23 +234,12 @@ class Local(Machine):
             return f.read()
 
     def write(self, path, text):
-        if act.dry_run():
-            sys.stderr.write("would write: %s\n" % path)
-            return
-        replace_file(path, text)
+        if not self._would("write", path):
+            replace_file(path, text)
 
     def write_own(self, path, text):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         replace_file(path, text)
-
-    def remove_own(self, path):
-        self.remove_now(path)
-
-    def remove(self, path):
-        if act.dry_run():
-            sys.stderr.write("would remove: %s\n" % path)
-            return
-        self.remove_now(path)
 
     def remove_now(self, path):
         if os.path.isdir(path) and not os.path.islink(path):
@@ -342,11 +254,8 @@ class Local(Machine):
             os.unlink(path)
 
     def mkdir(self, path):
-        if act.dry_run():
-            if not os.path.isdir(path):
-                sys.stderr.write("would create: %s\n" % path)
-            return
-        self.mkdir_now(path)
+        if not (act.dry_run() and os.path.isdir(path)):
+            super().mkdir(path)
 
     def mkdir_now(self, path):
         os.makedirs(path, exist_ok=True)
@@ -366,8 +275,7 @@ class Local(Machine):
             return False
 
     def kill(self, pid, sig=signal.SIGTERM):
-        if act.dry_run():
-            sys.stderr.write("would signal: %d %s\n" % (pid, signal.Signals(sig).name))
+        if self._would("signal", "%d %s" % (pid, signal.Signals(sig).name)):
             return True
         try:
             os.kill(pid, sig)
@@ -376,8 +284,7 @@ class Local(Machine):
             return False
 
     def spawn(self, argv, log):
-        if act.dry_run():
-            sys.stderr.write("would start: %s > %s\n" % (shlex.join(argv), log))
+        if self._would("start", "%s > %s" % (shlex.join(argv), log)):
             return 0
         with open(log, "ab") as f:
             p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
@@ -399,10 +306,8 @@ class Local(Machine):
 
     # Both ends are this host's own filesystem, so a real copy needs no transport.
     def copy_in(self, src, dest):
-        if act.dry_run():
-            sys.stderr.write("would copy: %s -> %s\n" % (src, dest))
-            return
-        shutil.copyfile(src, dest)
+        if not self._would("copy", "%s -> %s" % (src, dest)):
+            shutil.copyfile(src, dest)
 
     copy_out = copy_in
 
@@ -410,8 +315,7 @@ class Local(Machine):
         self.copy_tree_out(src, dest)
 
     def copy_tree_out(self, src, dest, exclude=()):
-        if act.dry_run():
-            sys.stderr.write("would copy: %s -> %s/\n" % (src, dest))
+        if self._would("copy", "%s -> %s/" % (src, dest)):
             return
         cp = subprocess.run(["rsync", "-a", "--delete", *excludes(exclude), src.rstrip("/") + "/", dest.rstrip("/") + "/"],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -601,35 +505,16 @@ class Ssh(Machine):
         return base64.b64decode(self._far("test -r %s && tail -c %s %s | base64" % (q, cut, q), path))
 
     def write(self, path, text):
-        if act.dry_run():
-            sys.stderr.write("would write on %s: %s\n" % (self.dest, path))
-            return
-        r = self._ssh(shlex.join(("sh", "-c", FAR_WRITE, "sh", path)), input=text)
+        if not self._would("write", path):
+            self.write_own(path, text, "")
+
+    def write_own(self, path, text, mkdir='mkdir -p "$(dirname "$1")"\n'):
+        r = self._ssh(shlex.join(("sh", "-c", mkdir + FAR_WRITE, "sh", path)), input=text)
         if not r.ok:
             raise OSError(r.err.strip())
-
-    def write_own(self, path, text):
-        r = self._ssh(shlex.join(("sh", "-c", 'mkdir -p "$(dirname "$1")"\n' + FAR_WRITE, "sh", path)), input=text)
-        if not r.ok:
-            raise OSError(r.err.strip())
-
-    def remove_own(self, path):
-        self.remove_now(path)
-
-    def remove(self, path):
-        if act.dry_run():
-            sys.stderr.write("would remove on %s: %s\n" % (self.dest, path))
-            return
-        self.remove_now(path)
 
     def remove_now(self, path):
         self._ssh("rm -rf %s" % shlex.quote(path))
-
-    def mkdir(self, path):
-        if act.dry_run():
-            sys.stderr.write("would create on %s: %s\n" % (self.dest, path))
-            return
-        self.mkdir_now(path)
 
     def mkdir_now(self, path):
         self._ssh("mkdir -p %s" % shlex.quote(path))
@@ -641,15 +526,13 @@ class Ssh(Machine):
         return self._ssh("mv -f %s %s" % (shlex.quote(path), shlex.quote(dst))).ok
 
     def kill(self, pid, sig=signal.SIGTERM):
-        if act.dry_run():
-            sys.stderr.write("would signal on %s: %d %s\n" % (self.dest, pid, signal.Signals(sig).name))
+        if self._would("signal", "%d %s" % (pid, signal.Signals(sig).name)):
             return True
         return self._ssh("kill -%d %d" % (sig, pid)).ok
 
     def spawn(self, argv, log):
         line = far_side_start(shlex.join(argv), log, "echo $!")
-        if act.dry_run():
-            sys.stderr.write("would start on %s: %s\n" % (self.dest, line))
+        if self._would("start", line):
             return 0
         r = self._ssh(line)
         if not r.ok or not r.out.strip().isdigit():
@@ -672,50 +555,31 @@ class Ssh(Machine):
                     self.via.kill(pid)
         return held()
 
-    # scp/rsync, run by `via` (this host) reaching `self.dest`: a byte pipe
-    # through this Machine's own `run` would corrupt binary data both ways.
-    def _dest(self, path):
-        return "%s:%s" % (self.dest, path)
+    # scp/rsync, run by `via` (this host) reaching `self.dest`: a byte pipe through this Machine's own `run` would
+    # corrupt binary data both ways. --chmod=go-w: a tree crossing machines does not carry the pushing machine's umask.
+    def _copy(self, argv, src, dest, tree=""):
+        if self._would("copy", "%s -> %s%s" % (src, dest, tree)):
+            return
+        self._up()
+        r = self.via.run(argv)
+        if not r.ok:
+            raise OSError(r.err.strip() or "copy between here and %s failed" % self.dest)
+
+    def _rsync(self, src, dest, exclude=()):
+        return ["rsync", "-a", "--chmod=go-w", "--delete", *excludes(exclude), "-e", "ssh " + shlex.join(self.opts),
+                src.rstrip("/") + "/", dest.rstrip("/") + "/"]
 
     def copy_in(self, src, dest):
-        if act.dry_run():
-            sys.stderr.write("would copy on %s: %s -> %s\n" % (self.dest, src, dest))
-            return
-        self._up()
-        r = self.via.run(["scp", "-q", *self.opts, src, self._dest(dest)])
-        if not r.ok:
-            raise OSError(r.err.strip() or "copy to %s failed" % self.dest)
+        self._copy(["scp", "-q", *self.opts, src, "%s:%s" % (self.dest, dest)], src, dest)
 
     def copy_out(self, src, dest):
-        if act.dry_run():
-            sys.stderr.write("would copy on %s: %s -> %s\n" % (self.dest, src, dest))
-            return
-        self._up()
-        r = self.via.run(["scp", "-q", *self.opts, self._dest(src), dest])
-        if not r.ok:
-            raise OSError(r.err.strip() or "copy from %s failed" % self.dest)
+        self._copy(["scp", "-q", *self.opts, "%s:%s" % (self.dest, src), dest], src, dest)
 
-    # --chmod=go-w: a tree crossing machines does not carry the pushing
-    # machine's umask.
     def copy_tree_in(self, src, dest):
-        if act.dry_run():
-            sys.stderr.write("would copy on %s: %s -> %s/\n" % (self.dest, src, dest))
-            return
-        self._up()
-        r = self.via.run(["rsync", "-a", "--chmod=go-w", "--delete", "-e", "ssh " + shlex.join(self.opts),
-                          src.rstrip("/") + "/", self._dest(dest.rstrip("/") + "/")])
-        if not r.ok:
-            raise OSError(r.err.strip() or "copy to %s failed" % self.dest)
+        self._copy(self._rsync(src, "%s:%s" % (self.dest, dest)), src, dest, "/")
 
     def copy_tree_out(self, src, dest, exclude=()):
-        if act.dry_run():
-            sys.stderr.write("would copy on %s: %s -> %s/\n" % (self.dest, src, dest))
-            return
-        self._up()
-        r = self.via.run(["rsync", "-a", "--chmod=go-w", "--delete", *excludes(exclude), "-e", "ssh " + shlex.join(self.opts),
-                          self._dest(src.rstrip("/") + "/"), dest.rstrip("/") + "/"])
-        if not r.ok:
-            raise OSError(r.err.strip() or "copy from %s failed" % self.dest)
+        self._copy(self._rsync("%s:%s" % (self.dest, src), dest, exclude), src, dest, "/")
 
 
 class PodmanVm(Ssh):
@@ -741,8 +605,7 @@ class TartExec(Ssh):
         return [self.tart, "exec", "-i"] + (["-t"] if tty else []) + [self.dest, "/bin/zsh", "-lc", remote]
 
     def _pipe(self, line, src, dest, *args):
-        if act.dry_run():
-            sys.stderr.write("would copy on %s: %s -> %s\n" % (self.dest, src, dest))
+        if self._would("copy", "%s -> %s" % (src, dest)):
             return
         r = self.via.run(["sh", "-c", "set -o pipefail; " + line, self.tart, self.dest, src, dest, *args])
         if not r.ok:

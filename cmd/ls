@@ -21,7 +21,6 @@
 
 import json
 import os
-import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
@@ -59,24 +58,21 @@ def row(driver, ws, label, as_json):
     size = NOT_APPLICABLE if inside else changes_of(driver, ws)
     arch = driver.arch(ws)
     fields = (ws, col(label, driver.name), state, base, snap, arch, size)
-    if as_json:
-        return json.dumps({"workspaces": [dict(zip(("name", "place", "state", "base", "snap", "arch", "changes"), fields))]})
-    return FORMAT % fields
+    return dict(zip(("name", "place", "state", "base", "snap", "arch", "changes"), fields)) if as_json else FORMAT % fields
 
 
 def place_rows(reg, name, label, as_json):
-    """The rows one place contributes: its own machine's `wk ls` when it has one."""
+    """The rows one place contributes (table lines, or --json's dicts): its own machine's `wk ls` when it has one."""
     driver = reg.load(name)
     if driver.has_wk() and driver.kind == "remote":
-        args = ["ls", "--continued"] + (["--json"] if as_json else [])
         os.environ["WK_ROW_LABEL"] = name
         os.environ["WK_NO_DELEGATE"] = "1"
-        rc, out = driver.wk(*args)
-        return out.rstrip("\n")
-    names = sorted(set(driver.store.workspaces()) | {n for n, _ in driver.list()})
+        rc, out = driver.wk("ls", "--continued", *(["--json"] if as_json else []))
+        if as_json:
+            return json.loads(out).get("workspaces", []) if out.strip() else []
+        return [out.rstrip("\n")] if out.strip() else []
     with ThreadPoolExecutor(max_workers=8) as pool:
-        rows = list(pool.map(lambda ws: row(driver, ws, label, as_json), names))
-    return "\n".join(rows)
+        return list(pool.map(lambda ws: row(driver, ws, label, as_json), driver.workspaces()))
 
 
 def footer(reg, names):
@@ -116,25 +112,13 @@ def main(argv):
             outputs = list(pool.map(lambda n: place_rows(reg, n, label, as_json), names))
     except LookupError as e:
         die(str(e))
-    found = False
-    docs = []
-    for out in outputs:
-        if not out:
-            continue
-        found = True
-        if as_json:
-            docs.append(out)
-        else:
-            print(out)
+    rows = [r for out in outputs for r in out]
     if as_json:
-        items = []
-        for doc in docs:
-            for chunk in re.split(r"(?<=})\s*(?={)", doc.strip()):
-                if chunk.strip():
-                    items.extend(json.loads(chunk).get("workspaces", []))
-        print(json.dumps({"workspaces": items}))
+        print(json.dumps({"workspaces": rows}))
         return 0
-    if not found and not more_follows and (not continued or empty_so_far):
+    for r in rows:
+        print(r)
+    if not rows and not more_follows and (not continued or empty_so_far):
         if reg.in_remote_host():
             log("(no workspaces here -- from the workstation: wk new <name> --on %s)" % reg.self_place())
         else:

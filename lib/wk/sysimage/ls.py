@@ -146,7 +146,6 @@ def slot_holds(ws, name, commit, env):
 
 
 class Listing:
-    """This store's images, then each place whose machine answers for a store of its own, through its own wk."""
 
     def __init__(self, reg, label, here_label, building, warn=act.warn, clock=None):
         self.reg, self.label, self.here_label, self.building, self.warn = reg, label, here_label, building, warn
@@ -162,15 +161,13 @@ class Listing:
             board = (images.quiet_load(prof, env) or {}).get("IMG_MACHINE", "")
             note = "" if board else "this checkout does not define '%s'" % prof
         if image.path is None:
-            out = [ROW % (ws, board or "?", self.label, image.builder, state, "-", "-"), "    no image here yet",
-                   "    a build is running here -- 'wk status %s --log' follows it" % ws if state == "building"
-                   else "    'wk sysimage build %s' builds one" % (prof or "<profile>")]
+            out = [ROW % (ws, board or "?", self.label, image.builder, state, "-", "-"),
+                   "    no image yet; 'wk sysimage build %s' builds one" % (prof or "<profile>")]
         else:
-            st = os.stat(image.path)
-            out = [ROW % (ws, board or "?", self.label, image.builder, state, human_bytes(st.st_size), stamp(image.path)),
-                   "    " + image.path]
-            if state == "building":
-                out.append("    a build is running here -- these bytes are the previous image; 'wk status %s --log' follows it" % ws)
+            out = [ROW % (ws, board or "?", self.label, image.builder, state, human_bytes(os.stat(image.path).st_size),
+                          stamp(image.path)), "    " + image.path]
+        if state == "building":
+            out.append("    building now; 'wk status %s --log' follows it" % ws)
         for d, doc in slot_docs(ws, env):
             out.append("    slot %-12s %s  %s  built %s  (%s)" % (
                 doc.get("slot", ""), doc.get("commit", "")[:12], doc.get("build_preset", "?"),
@@ -193,11 +190,7 @@ class Listing:
                 rows += [ROW % (name, board, self.label, builder, "ready", "-", "-"), "    " + found[0]]
         return rows
 
-    def store_rows(self):
-        return [row for image in scan(self.reg.machine, self.reg.store) for row in self.image_rows(image)] + self.host_rows()
-
-    def _label(self, driver, name):
-        return self.here_label if driver.is_here() else name
-
     def rows(self):
-        return self.store_rows() + fleetwalk.fleet_rows(self.reg, "sysimage", "images", self._label, self.warn)
+        mine = [row for image in scan(self.reg.machine, self.reg.store) for row in self.image_rows(image)] + self.host_rows()
+        return mine + fleetwalk.fleet_rows(self.reg, "sysimage", "images",
+                                           lambda d, name: self.here_label if d.is_here() else name, self.warn)

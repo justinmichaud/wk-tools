@@ -8,53 +8,35 @@ import unittest
 from tests.support import REPO, run_here, scratch_dir, temp_store
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk.decl import leading_block  # noqa: E402
+from wk.completion import values_cmd  # noqa: E402
+from wk.decl import all_commands, leading_block  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 
-def help_text(cmd):
-    cp = subprocess.run(
-        [str(REPO / "wk"), cmd, "-h"],
-        cwd=str(REPO), capture_output=True, text=True, timeout=30,
-    )
-    return cp.stdout + cp.stderr
-
-
-DECLARED_VALUES = {
-    "boot": "--list",
-    "sysimage": "configs",
-}
+DECLARED_VALUES = {d.name: d for d in all_commands(REPO) if values_cmd(d)}
 
 
 class TestDeclaredValuesReachTheHelp(unittest.TestCase):
 
-
     def test_the_help_prints_what_the_flag_prints(self):
-        for cmd, flag in DECLARED_VALUES.items():
-            listed = subprocess.run(
-                [str(REPO / "wk"), cmd, flag],
-                cwd=str(REPO), capture_output=True, text=True, timeout=60)
-            self.assertEqual(listed.returncode, 0,
-                             f"wk {cmd} {flag} failed: {listed.stdout}{listed.stderr}")
-            values = [l.split()[0] for l in (listed.stdout + listed.stderr).splitlines()
-                      if l[:1].isalnum()]
-            self.assertTrue(values, f"wk {cmd} {flag} listed nothing")
-            text = help_text(cmd)
+        self.assertTrue(DECLARED_VALUES)
+        for cmd, d in DECLARED_VALUES.items():
+            listed = subprocess.run([str(REPO / "wk"), cmd, d.values], cwd=str(REPO), capture_output=True, text=True, timeout=60)
+            self.assertEqual(listed.returncode, 0, f"wk {cmd} {d.values} failed: {listed.stdout}{listed.stderr}")
+            values = [l.split()[0] for l in (listed.stdout + listed.stderr).splitlines() if l[:1].isalnum()]
+            self.assertTrue(values, f"wk {cmd} {d.values} listed nothing")
+            cp = subprocess.run([str(REPO / "wk"), cmd, "-h"], cwd=str(REPO), capture_output=True, text=True, timeout=30)
             with self.subTest(cmd=cmd):
-                self.assertIn("valid values", text,
-                              f"wk {cmd} -h does not print its value list")
+                self.assertIn("valid values", cp.stdout + cp.stderr)
                 for v in values:
-                    self.assertIn(v, text, f"wk {cmd} -h omits '{v}'")
+                    self.assertIn(v, cp.stdout + cp.stderr, f"wk {cmd} -h omits '{v}'")
 
     def test_a_value_flag_is_read_only(self):
-        for cmd, flag in DECLARED_VALUES.items():
-            head = "".join(leading_block(REPO / "cmd" / cmd))
+        for cmd, d in DECLARED_VALUES.items():
             with self.subTest(cmd=cmd):
-                self.assertTrue(
-                    f"readonly" in head or f"flag {flag} where=local" in head
-                    or f"{flag} where=local" in head,
-                    f"cmd/{cmd}'s {flag} is neither readonly nor local, and "
-                    f"`wk {cmd} -h` runs it")
+                head = "".join(leading_block(d.path))
+                self.assertTrue("readonly" in head or f"{d.values} where=local" in head,
+                                f"cmd/{cmd}'s {d.values} is neither readonly nor local, and `wk {cmd} -h` runs it")
 
 
 class TestBenchListPlans(unittest.TestCase):

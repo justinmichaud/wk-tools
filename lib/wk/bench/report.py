@@ -2,192 +2,113 @@
 
 import math
 import os
+import statistics
 import sys
+from html import escape
 
 from wk import pgo, presets
 from wk.bench import record
 from wk.machine import Local
 
 
+AXES = (("plan", "plans", None, ""), ("preset", "build presets", None, ""),
+        ("runner", "runners", "browser", " -- the jsc shell and MiniBrowser are not the same measurement"),
+        ("bench_host", "benchmark hosts", "container", " -- a container shares a kernel and a desktop with everything else on the machine; an image does not"),
+        ("arch", "architectures", "native", ""), ("local_copy", "benchmark payloads", None, ""))
+BOTH = (("class", "benchmark classes", ""), ("machine", "machines", " -- these are two computers, not two states of one"),
+        ("host.kernel_arch", "kernel widths", " -- a 32-bit system and a 32-bit process on a 64-bit kernel are not the same measurement"),
+        ("host.root_device", "root storage", " -- cheap flash contributes variance, not a bias that can be subtracted afterwards"))
+
+
 def axis_check_lines(a, b):
-    lines = []
     if not a or not b:
-        return lines
-
-    if a.get("plan") != b.get("plan"):
-        lines.append("warning: different plans (%s vs %s)" % (a.get("plan"), b.get("plan")))
-    if a.get("preset") != b.get("preset"):
-        lines.append("warning: different build presets (%s vs %s)" % (a.get("preset"), b.get("preset")))
-
-    # A runner or host mismatch is not a caveat: it is two machines doing different work, and the statistics below will still produce a p-value for them.
-    if a.get("runner", "browser") != b.get("runner", "browser"):
-        lines.append(
-            "warning: different runners (%s vs %s) -- the jsc shell and MiniBrowser "
-            "are not the same measurement" % (a.get("runner", "browser"), b.get("runner", "browser"))
-        )
-    if a.get("bench_host", "container") != b.get("bench_host", "container"):
-        lines.append(
-            "warning: different benchmark hosts (%s vs %s) -- a container shares a kernel "
-            "and a desktop with everything else on the machine; an image does not"
-            % (a.get("bench_host", "container"), b.get("bench_host", "container"))
-        )
-    if a.get("arch", "native") != b.get("arch", "native"):
-        lines.append("warning: different architectures (%s vs %s)" % (a.get("arch", "native"), b.get("arch", "native")))
-
-    # No default: a run predating the field says nothing, and absent is not different.
-    if a.get("class") and b.get("class") and a["class"] != b["class"]:
-        lines.append("warning: different benchmark classes (%s vs %s)" % (a["class"], b["class"]))
-
-    # Only evidence for a gpu-class run: "no renderer" about a jsc-shell JetStream run is noise, and noise in front of real warnings is how those stop being read.
-    gpu_class = a.get("class") != "cpu" and b.get("class") != "cpu"
-    if gpu_class and a.get("gpu_renderer") != b.get("gpu_renderer"):
-        lines.append("warning: different renderers (%s vs %s)" % (a.get("gpu_renderer"), b.get("gpu_renderer")))
-    if gpu_class and a.get("session_mode") != b.get("session_mode"):
-        lines.append(
-            "warning: different session modes (%s vs %s) -- only 'gpu' is a measurable display path"
-            % (a.get("session_mode"), b.get("session_mode"))
-        )
+        return []
+    lines = ["warning: different %s (%s vs %s)%s" % (label, a.get(k, d), b.get(k, d), why)
+             for k, label, d, why in AXES[:5] if a.get(k, d) != b.get(k, d)]
+    got = [(record.get_nested(a, k), record.get_nested(b, k), label, why) for k, label, why in BOTH]
+    lines += ["warning: different %s (%s vs %s)%s" % (label, x, y, why) for x, y, label, why in got[:1] if x and y and x != y]
+    # Only evidence for a gpu-class run: "no renderer" about a jsc-shell JetStream run is noise in front of real warnings.
+    if a.get("class") != "cpu" and b.get("class") != "cpu":
+        if a.get("gpu_renderer") != b.get("gpu_renderer"):
+            lines.append("warning: different renderers (%s vs %s)" % (a.get("gpu_renderer"), b.get("gpu_renderer")))
+        if a.get("session_mode") != b.get("session_mode"):
+            lines.append("warning: different session modes (%s vs %s) -- only 'gpu' is a measurable display path"
+                         % (a.get("session_mode"), b.get("session_mode")))
     if bool(a.get("software")) != bool(b.get("software")):
         lines.append("warning: one run is software-rendered and the other is not -- these are not comparable")
-    # A restricted run is a different measurement from a whole one, and the number carries no mark of it otherwise.
     ex_a, ex_b = a.get("subtests_excluded") or "", b.get("subtests_excluded") or ""
     if ex_a != ex_b:
-        lines.append("warning: the arms ran different subtest sets (%s vs %s)"
-                     % (ex_a or "none excluded", ex_b or "none excluded"))
+        lines.append("warning: the arms ran different subtest sets (%s vs %s)" % (ex_a or "none excluded", ex_b or "none excluded"))
     elif ex_a:
-        lines.append("note: %d subtest(s) excluded from both arms -- %s"
-                     % (len(ex_a.split(",")), ex_a))
+        lines.append("note: %d subtest(s) excluded from both arms -- %s" % (len(ex_a.split(",")), ex_a))
     if a.get("forced") or b.get("forced"):
         lines.append("warning: at least one run was taken with failing preflight checks (--force)")
-
-    # Bench mode asserted by an override rather than by having booted the image: the number came off a workstation however it is labelled.
     if a.get("role_marker_overridden") or b.get("role_marker_overridden"):
-        lines.append(
-            "warning: at least one run only *claimed* bench mode "
-            "(WK_IMAGE_MARKER was overridden) -- it was measured on a workstation"
-        )
-    if a.get("local_copy") != b.get("local_copy"):
-        lines.append("warning: different benchmark payloads (%s vs %s)" % (a.get("local_copy"), b.get("local_copy")))
-
-    cores_a = (a.get("cores") or {}).get("set") or ""
-    cores_b = (b.get("cores") or {}).get("set") or ""
-    if cores_a != cores_b:
-        lines.append(
-            "warning: different core pins (%s vs %s)"
-            % (cores_a or "unpinned", cores_b or "unpinned")
-        )
-
-    # A warning where the kernel below is not: nobody sets out to compare two boards.
-    if a.get("machine") and b.get("machine") and a["machine"] != b["machine"]:
-        lines.append(
-            "warning: different machines (%s vs %s) -- these are two computers, not "
-            "two states of one" % (a["machine"], b["machine"])
-        )
-
-    # The kernel and system are reported, not warned about: for a kernel A/B their differing is the whole A/B. Width, which `arch` does not answer, is a warning -- that is two measurements.
-    kaa = (a.get("host") or {}).get("kernel_arch")
-    kab = (b.get("host") or {}).get("kernel_arch")
-    if kaa and kab and kaa != kab:
-        lines.append(
-            "warning: different kernel widths (%s vs %s) -- a 32-bit system and a "
-            "32-bit process on a 64-bit kernel are not the same measurement" % (kaa, kab)
-        )
-
-    # Cheap flash contributes variance rather than a subtractable bias, so a stick run and an SSD run are two series.
-    ra = (a.get("host") or {}).get("root_device")
-    rb = (b.get("host") or {}).get("root_device")
-    if ra and rb and ra != rb:
-        lines.append(
-            "warning: different root storage (%s vs %s) -- cheap flash contributes "
-            "variance, not a bias that can be subtracted afterwards" % (ra, rb)
-        )
-
-    for key, label in (("system", "system"), ("profile", "profile")):
-        if a.get(key) and b.get(key) and a[key] != b[key]:
-            lines.append("note: %s differs -- %s vs %s" % (label, a[key], b[key]))
-
-    ka = (a.get("host") or {}).get("kernel")
-    kb = (b.get("host") or {}).get("kernel")
+        lines.append("warning: at least one run only *claimed* bench mode (WK_IMAGE_MARKER was overridden) -- it was measured on a workstation")
+    k, label, d, why = AXES[5]
+    if a.get(k, d) != b.get(k, d):
+        lines.append("warning: different %s (%s vs %s)%s" % (label, a.get(k, d), b.get(k, d), why))
+    cores = [(r.get("cores") or {}).get("set") or "unpinned" for r in (a, b)]
+    if cores[0] != cores[1]:
+        lines.append("warning: different core pins (%s vs %s)" % tuple(cores))
+    lines += ["warning: different %s (%s vs %s)%s" % (label, x, y, why) for x, y, label, why in got[1:] if x and y and x != y]
+    # The kernel and system are reported, not warned about: for a kernel A/B their differing is the whole A/B.
+    lines += ["note: %s differs -- %s vs %s" % (k, a[k], b[k]) for k in ("system", "profile") if a.get(k) and b.get(k) and a[k] != b[k]]
+    ka, kb = record.get_nested(a, "host.kernel"), record.get_nested(b, "host.kernel")
     if ka and kb and ka != kb:
         lines.append("note: kernel differs -- %s vs %s" % (ka, kb))
-    elif ka and kb and ka == kb and a.get("system") != b.get("system"):
-        lines.append(
-            "note: same kernel release (%s) on both sides. If this was meant to be a "
-            "kernel A/B, the patched build needs its own LOCALVERSION -- otherwise "
-            "the two are indistinguishable here and their modules collide on disk." % ka
-        )
-
+    elif ka and kb and a.get("system") != b.get("system"):
+        lines.append("note: same kernel release (%s) on both sides. If this was meant to be a kernel A/B, the patched build needs its own "
+                     "LOCALVERSION -- otherwise the two are indistinguishable here and their modules collide on disk." % ka)
     return lines
 
 
-# The one place that turns two saved runs into a judgement, so this repo has one score reader and one significance test. Welch and Benjamini-Hochberg are pure stdlib rather than Tools/Scripts/compare-results, which needs scipy, is off the PYTHONPATH outside a workspace, and computes one metric per benchmark type rather than both per subtest.
-# math.lgamma gives the regularized incomplete beta function, of which a t statistic's two-tailed p-value is a closed form: the same test, no dependency.
+# Welch and Benjamini-Hochberg in stdlib: Tools/Scripts/compare-results needs scipy, is off the PYTHONPATH outside a workspace, and
+# computes one metric per benchmark type. A t's two-tailed p is the regularized incomplete beta (Lentz's continued fraction).
 def _betacf(a, b, x):
-    maxit, eps, fpmin = 200, 3e-12, 1e-300
-    qab, qap, qam = a + b, a + 1.0, a - 1.0
-    c = 1.0
-    d = 1.0 - qab * x / qap
-    if abs(d) < fpmin:
-        d = fpmin
-    d = 1.0 / d
+    def clamp(v):
+        return v if abs(v) >= 1e-300 else 1e-300
+    c, d = 1.0, 1.0 / clamp(1.0 - (a + b) * x / (a + 1.0))
     h = d
-    for m in range(1, maxit + 1):
-        m2 = 2 * m
-        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
-        d = 1.0 + aa * d
-        if abs(d) < fpmin:
-            d = fpmin
-        c = 1.0 + aa / c
-        if abs(c) < fpmin:
-            c = fpmin
-        d = 1.0 / d
-        h *= d * c
-        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
-        d = 1.0 + aa * d
-        if abs(d) < fpmin:
-            d = fpmin
-        c = 1.0 + aa / c
-        if abs(c) < fpmin:
-            c = fpmin
-        d = 1.0 / d
-        delta = d * c
-        h *= delta
-        if abs(delta - 1.0) < eps:
+    for m in range(1, 201):
+        for aa in (m * (b - m) * x / ((a - 1.0 + 2 * m) * (a + 2 * m)), -(a + m) * (a + b + m) * x / ((a + 2 * m) * (a + 1.0 + 2 * m))):
+            d, c = 1.0 / clamp(1.0 + aa * d), clamp(1.0 + aa / c)
+            h *= d * c
+        if abs(d * c - 1.0) < 3e-12:
             break
     return h
 
 
 def _betai(a, b, x):
-    if x <= 0.0:
-        return 0.0
-    if x >= 1.0:
-        return 1.0
-    bt = math.exp(
-        math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log(1.0 - x)
-    )
+    if x <= 0.0 or x >= 1.0:
+        return max(0.0, min(1.0, x))
+    bt = math.exp(math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log(1.0 - x))
     if x < (a + 1.0) / (a + b + 2.0):
         return bt * _betacf(a, b, x) / a
     return 1.0 - bt * _betacf(b, a, 1.0 - x) / b
 
 
-# Two-sided Welch's t-test: unequal variance, Welch-Satterthwaite degrees of freedom.
-def welch_p(a, b):
-    na, nb = len(a), len(b)
-    if na < 2 or nb < 2:
+def _welch(a, b):
+    """(mean_a, mean_b, se2, Welch-Satterthwaite df), or None under two values a side."""
+    if len(a) < 2 or len(b) < 2:
         return None
-    mean_a, mean_b = sum(a) / na, sum(b) / nb
-    var_a = sum((x - mean_a) ** 2 for x in a) / (na - 1)
-    var_b = sum((x - mean_b) ** 2 for x in b) / (nb - 1)
-    se2 = var_a / na + var_b / nb
+    va, vb = statistics.variance(a) / len(a), statistics.variance(b) / len(b)
+    se2 = va + vb
+    return statistics.fmean(a), statistics.fmean(b), se2, (se2 * se2 / (va * va / (len(a) - 1) + vb * vb / (len(b) - 1)) if se2 > 0 else 0)
+
+
+def welch_p(a, b):
+    w = _welch(a, b)
+    if w is None:
+        return None
+    mean_a, mean_b, se2, df = w
     if se2 <= 0:
         return None if mean_a == mean_b else 0.0
     t = (mean_a - mean_b) / math.sqrt(se2)
-    df = se2 * se2 / ((var_a / na) ** 2 / (na - 1) + (var_b / nb) ** 2 / (nb - 1))
     return _betai(df / 2.0, 0.5, df / (df + t * t))
 
 
-# Benjamini-Hochberg as compare-results spells it (computeMultipleHypothesesSignificance): ranked largest to smallest, a rank is significant once it or a larger one clears rank*0.05/n, and every smaller p-value inherits that.
-# A run stops when it can *resolve* the effect asked of it, not when it has found one: stopping on precision is a legitimate sequential design where stopping on a p-value is not. The t comes back out of the same incomplete beta the p-value goes into, by bisection, so this file holds one distribution.
+# Stopping on precision is a sequential design where stopping on a p-value is not; t comes back out of the same beta by bisection.
 def t_crit(df, two_tailed_area):
     if df <= 0:
         return None
@@ -201,27 +122,19 @@ def t_crit(df, two_tailed_area):
     return (lo + hi) / 2.0
 
 
-# The smallest relative difference this many rounds of this much spread resolve, at two-sided 95% confidence and 80% power, as a percentage of A's mean.
+# The smallest relative difference these rounds resolve at two-sided 95% confidence and 80% power, as a percentage of A's mean.
 def mde_pct(a, b):
-    na, nb = len(a), len(b)
-    if na < 2 or nb < 2:
+    w = _welch(a, b)
+    if w is None or w[0] <= 0:
         return None
-    mean_a, mean_b = sum(a) / na, sum(b) / nb
-    if mean_a <= 0:
-        return None
-    var_a = sum((x - mean_a) ** 2 for x in a) / (na - 1)
-    var_b = sum((x - mean_b) ** 2 for x in b) / (nb - 1)
-    se2 = var_a / na + var_b / nb
+    mean_a, _, se2, df = w
     if se2 <= 0:
         return 0.0
-    df = se2 * se2 / ((var_a / na) ** 2 / (na - 1) + (var_b / nb) ** 2 / (nb - 1))
-    t_alpha = t_crit(df, 0.05)
-    t_beta = t_crit(df, 0.40)   # one-tailed 0.80 is the two-tailed 0.40 point
-    if t_alpha is None or t_beta is None:
-        return None
+    t_alpha, t_beta = t_crit(df, 0.05), t_crit(df, 0.40)   # one-tailed 0.80 is the two-tailed 0.40 point
     return (t_alpha + t_beta) * math.sqrt(se2) / mean_a * 100.0
 
 
+# Benjamini-Hochberg as compare-results spells it: a rank is significant once it or a larger one clears rank*0.05/n.
 def bh_significant(pvalues):
     result = {k: False for k in pvalues}
     keys = sorted((k for k, p in pvalues.items() if p is not None), key=lambda k: pvalues[k])
@@ -235,15 +148,10 @@ def bh_significant(pvalues):
     return result
 
 
-def _flatten(x, acc=None):
-    if acc is None:
-        acc = []
+def _flatten(x):
     if isinstance(x, list):
-        for i in x:
-            _flatten(i, acc)
-    elif isinstance(x, (int, float)):
-        acc.append(float(x))
-    return acc
+        return [v for i in x for v in _flatten(i)]
+    return [float(x)] if isinstance(x, (int, float)) else []
 
 
 # However many modifier levels sit above it: none in a merged jsc log, a null one in run-benchmark's JetStream output, "Total" in Speedometer's Time. One rule, not a name per shape.
@@ -260,35 +168,22 @@ def _first_current(node):
 
 
 # A metric holds either its values or a declaration of how to aggregate its subtests' -- ["Geometric"] for JetStream3 and MotionMark, whose overall score is never written into the file at all -- and the list's first name is the primary one.
-_AGGREGATORS = {
-    "Arithmetic": lambda vals: sum(vals) / len(vals),
-    "Geometric": lambda vals: math.exp(sum(math.log(v) for v in vals) / len(vals)),
-    "Total": sum,
-}
+_AGGREGATORS = {"Arithmetic": statistics.fmean, "Geometric": lambda vals: math.exp(sum(math.log(v) for v in vals) / len(vals)), "Total": sum}
 
 
 def _iteration_values(metric):
     """One value per iteration; Speedometer's entry is itself that iteration's internal repeats."""
     cur = _first_current(metric)
-    if not isinstance(cur, list):
-        return None
-    out = []
-    for item in cur:
-        vals = _flatten(item)
-        if not vals:
-            return None
-        out.append(sum(vals) / len(vals))
-    return out or None
+    out = [_mean(_flatten(item)) for item in cur] if isinstance(cur, list) else []
+    return out if out and None not in out else None
 
 
-# A declaration is a list where values would be; any metric may carry one, at any depth.
 def _declared_metric(node, key="Score"):
     metrics = node.get("metrics") if isinstance(node, dict) else None
     metric = metrics.get(key) if isinstance(metrics, dict) else None
     return metric if isinstance(metric, list) else None
 
 
-# One aggregate per iteration, because pooling every subtest's every iteration mixes them into one number that is nobody's score. Returns the per-iteration aggregates, or the reason there are none -- a reader that refuses and one that reports both need it, and neither computes it twice.
 # A child that declares its own aggregate rather than writing one is resolved first: Speedometer's Time is a Total of Totals three levels deep, and a level that answered "no Time" would make every level above it silent.
 def _declared_aggregate(suite, node, metric, key="Score"):
     name = metric[0] if metric else ""
@@ -329,7 +224,6 @@ def _declared_aggregate(suite, node, metric, key="Score"):
 
 
 # The one result walker, ({name: {"Score": [floats], "Time": [floats]}}, [why a row is absent]), because the shapes disagree about depth: a merged jsc log and run-benchmark's JetStream keep numbers one "tests" level down, while Speedometer-2 on a board keeps the total at the suite root and the numbers three down, with bare descriptor lists between.
-# A node becomes a row where a metric has a "current" array, or where the suite declares an aggregate instead of writing one; either way it is named by its full path, so the suite is the only row whose name holds no "/".
 def subtest_metrics(doc):
     out, absent = {}, []
 
@@ -372,18 +266,13 @@ def subtest_metrics(doc):
 
 
 def _mean(vals):
-    return sum(vals) / len(vals) if vals else None
+    return statistics.fmean(vals) if vals else None
 
 
 def _sd(vals):
-    n = len(vals)
-    if n < 2:
-        return 0.0
-    m = sum(vals) / n
-    return (sum((v - m) ** 2 for v in vals) / (n - 1)) ** 0.5
+    return statistics.stdev(vals) if len(vals) > 1 else 0.0
 
 
-# A run is named by the directory a benchmark wrote; the files inside it are derived here and nowhere else.
 def run_result(rundir):
     path = os.path.join(rundir, "result.json")
     if not os.path.isfile(path):
@@ -432,56 +321,37 @@ def _config_label(key):
 
 def consistency_lines(rows):
     """A score and the subtest times it is built from move opposite ways; when they do not, neither is to be quoted."""
-    tops = [r for r in rows if r["Score"]["a_mean"] and r["Score"]["b_mean"]
-            and "/" not in r["name"]]
-    leaves = [r for r in rows if r["Time"]["a_mean"] and r["Time"]["b_mean"]
-              and "/" in r["name"]]
+    tops = [r for r in rows if r["Score"]["a_mean"] and r["Score"]["b_mean"] and "/" not in r["name"]]
+    leaves = [r for r in rows if r["Time"]["a_mean"] and r["Time"]["b_mean"] and "/" in r["name"]]
     if len(tops) != 1 or len(leaves) < 8:
         return []
     sa, sb = tops[0]["Score"]["a_mean"], tops[0]["Score"]["b_mean"]
-    ta = sum(r["Time"]["a_mean"] for r in leaves)
-    tb = sum(r["Time"]["b_mean"] for r in leaves)
-    if not (sa and ta):
-        return []
-    score_delta = (sb - sa) / sa * 100.0
-    time_delta = (tb - ta) / ta * 100.0
-    lines = ["note: B scores %+.2f%% on %+.2f%% subtest time (%d subtests, A %.0f ms, B %.0f ms)"
-             % (score_delta, time_delta, len(leaves), ta, tb)]
+    ta, tb = sum(r["Time"]["a_mean"] for r in leaves), sum(r["Time"]["b_mean"] for r in leaves)
+    score_delta, time_delta = (sb - sa) / sa * 100.0, (tb - ta) / ta * 100.0
+    lines = ["note: B scores %+.2f%% on %+.2f%% subtest time (%d subtests, A %.0f ms, B %.0f ms)" % (score_delta, time_delta, len(leaves), ta, tb)]
     if abs(score_delta) < 0.2 and abs(time_delta) < 0.2:
         return lines
     if (score_delta > 0) == (time_delta > 0):
-        lines.append(
-            "warning: the score and the subtest times it is made of disagree in "
-            "SIGN -- B does %+.2f%% work and scores %+.2f%%. One of the two is "
-            "wrong; do not quote either until they are reconciled."
-            % (time_delta, score_delta))
+        lines.append("warning: the score and the subtest times it is made of disagree in SIGN -- B does %+.2f%% work and scores %+.2f%%. "
+                     "One of the two is wrong; do not quote either until they are reconciled." % (time_delta, score_delta))
     elif abs(score_delta + time_delta) > 5.0:
-        lines.append(
-            "warning: the score moved %+.2f%% where the subtest times imply about "
-            "%+.2f%% -- the aggregate weights subtests very differently from their "
-            "cost, so the headline and the table answer different questions."
-            % (score_delta, -time_delta))
+        lines.append("warning: the score moved %+.2f%% where the subtest times imply about %+.2f%% -- the aggregate weights subtests very "
+                     "differently from their cost, so the headline and the table answer different questions." % (score_delta, -time_delta))
     return lines
 
 
 def order_lines(a_runs, b_runs):
     """Alternating is not counterbalanced: if one arm always goes first, monotonic drift lands on the other."""
-    order = sorted([(os.path.basename(p), "A") for p, _, _ in a_runs]
-                   + [(os.path.basename(p), "B") for p, _, _ in b_runs])
+    order = sorted([(os.path.basename(p), "A") for p, _, _ in a_runs] + [(os.path.basename(p), "B") for p, _, _ in b_runs])
     if len(order) < 4:
         return []
-    pos = {"A": [], "B": []}
-    for i, (_, arm) in enumerate(order, 1):
-        pos[arm].append(i)
-    ma = sum(pos["A"]) / len(pos["A"])
-    mb = sum(pos["B"]) / len(pos["B"])
+    pos = {"A": [i for i, (_, arm) in enumerate(order, 1) if arm == "A"], "B": [i for i, (_, arm) in enumerate(order, 1) if arm == "B"]}
+    ma, mb = statistics.fmean(pos["A"]), statistics.fmean(pos["B"])
     if abs(ma - mb) < 0.25:
         return []
-    late, gap = ("B", mb - ma) if mb > ma else ("A", ma - mb)
-    return ["warning: the arms alternate but are not counterbalanced -- %s runs "
-            "%.1f position(s) later on average (A at %s, B at %s), so monotonic "
-            "drift lands on %s rather than cancelling"
-            % (late, gap, pos["A"], pos["B"], late)]
+    late = "B" if mb > ma else "A"
+    return ["warning: the arms alternate but are not counterbalanced -- %s runs %.1f position(s) later on average (A at %s, B at %s), "
+            "so monotonic drift lands on %s rather than cancelling" % (late, abs(mb - ma), pos["A"], pos["B"], late)]
 
 
 def build_report(a_dirs, b_dirs, header=(), warmup=()):
@@ -534,7 +404,6 @@ def build_report(a_dirs, b_dirs, header=(), warmup=()):
             out.setdefault(_config_key(env), []).append(doc)
         return out
 
-    # Speedometer has no Score at all: the same rule _row_primary applies per subtest.
     def primary_vals(entry):
         return entry["Score"] if "Score" in entry else entry.get("Time", [])
 
@@ -580,151 +449,68 @@ def _row_primary(row):
     return "Time", row["Time"]["a_vals"], row["Time"]["b_vals"]
 
 
-def _xml_escape(s):
-    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
-
-
-# Overlaid rather than side by side: the overlap is what shows two distributions occupying the same range or not. No plotting library; this is the whole chart.
+# Overlaid rather than side by side: the overlap is what shows two distributions occupying the same range or not.
 def _svg_histogram(name, a_vals, b_vals, width=420, height=140, buckets=12):
-    vals = a_vals + b_vals
+    vals, svg = a_vals + b_vals, '<svg viewBox="0 0 %d %d" width="%d" height="%d"' % (width, height, width, height)
     if not vals:
-        return '<svg viewBox="0 0 %d %d" width="%d" height="%d"></svg>' % (width, height, width, height)
+        return svg + "></svg>"
     lo, hi = min(vals), max(vals)
-    if lo == hi:
-        lo, hi = lo - 0.5, hi + 0.5
-    span = hi - lo
-
-    def bucket_counts(vs):
-        counts = [0] * buckets
+    lo, hi = (lo - 0.5, hi + 0.5) if lo == hi else (lo, hi)
+    counts = [[0] * buckets, [0] * buckets]
+    for side, vs in enumerate((a_vals, b_vals)):
         for v in vs:
-            idx = min(buckets - 1, max(0, int((v - lo) / span * buckets)))
-            counts[idx] += 1
-        return counts
+            counts[side][min(buckets - 1, max(0, int((v - lo) / (hi - lo) * buckets)))] += 1
+    peak, margin, plot_h = max(max(counts[0]), max(counts[1]), 1), 24, height - 40
+    bw = (width - 2 * margin) / buckets
+    bars = ['<rect x="%.2f" y="%.2f" width="%.2f" height="%.2f" fill="%s" fill-opacity="0.55" />'
+            % (margin + i * bw, margin + plot_h - c[i] / peak * plot_h, bw * 0.9, c[i] / peak * plot_h, colour)
+            for i in range(buckets) for c, colour in zip(counts, ("#4c78a8", "#e45756"))]
+    axis = '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="currentColor" stroke-opacity="0.35" />' % (margin, margin + plot_h, width - margin, margin + plot_h)
+    return svg + ' role="img" aria-label="%s histogram"><title>%s</title>%s%s</svg>' % (escape(name), escape(name), "".join(bars), axis)
 
-    ca, cb = bucket_counts(a_vals), bucket_counts(b_vals)
-    peak = max(max(ca, default=0), max(cb, default=0), 1)
-    margin, plot_w = 24, width - 48
-    plot_h = height - 40
-    bw = plot_w / buckets
-    bars = []
-    for i in range(buckets):
-        x = margin + i * bw
-        ha, hb = (ca[i] / peak) * plot_h, (cb[i] / peak) * plot_h
-        bars.append(
-            '<rect x="%.2f" y="%.2f" width="%.2f" height="%.2f" fill="#4c78a8" fill-opacity="0.55" />'
-            % (x, margin + plot_h - ha, bw * 0.9, ha)
-        )
-        bars.append(
-            '<rect x="%.2f" y="%.2f" width="%.2f" height="%.2f" fill="#e45756" fill-opacity="0.55" />'
-            % (x, margin + plot_h - hb, bw * 0.9, hb)
-        )
-    title = _xml_escape(name)
-    axis = '<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="currentColor" stroke-opacity="0.35" />' % (
-        margin, margin + plot_h, width - margin, margin + plot_h,
-    )
-    return (
-        '<svg viewBox="0 0 %d %d" width="%d" height="%d" role="img" aria-label="%s histogram">'
-        "<title>%s</title>%s%s</svg>"
-    ) % (width, height, width, height, title, title, "".join(bars), axis)
+
+def _cells(m, pm=" +- "):
+    return (("%.3f" + pm + "%.3f") % (m["a_mean"], m["a_sd"]) if m["a_mean"] is not None else "-",
+            ("%.3f" + pm + "%.3f") % (m["b_mean"], m["b_sd"]) if m["b_mean"] is not None else "-",
+            "%+.2f%%" % m["delta_pct"] if m["delta_pct"] is not None else "-", "%.4f" % m["p"] if m["p"] is not None else "-",
+            "yes" if m.get("significant") else ("no" if m["p"] is not None else "-"))
+
+
+def _metric_rows(report):
+    return [(row["name"], key, row[key]) for row in report["rows"] for key in ("Score", "Time")
+            if row[key]["a_mean"] is not None or row[key]["b_mean"] is not None]
 
 
 def render_text(report):
-    out = list(report.get("header", []))
-    if out:
-        out.append("")
+    out = list(report.get("header", [])) + ([""] if report.get("header") else [])
     if report.get("warmup_lines"):
-        out.append("warmup round (not measured):")
-        out += ["  " + l for l in report["warmup_lines"]]
-        out.append("")
-    out.append("axis check:")
-    out += ["  " + l for l in report["axis_lines"]] or ["  (no warnings)"]
-    out.append("")
-    fmt = "%%-%ds %%-6s %%14s %%14s %%10s %%9s %%5s" % max(
-        [len("subtest")] + [len(r["name"]) for r in report["rows"]])
+        out += ["warmup round (not measured):"] + ["  " + l for l in report["warmup_lines"]] + [""]
+    out += ["axis check:"] + (["  " + l for l in report["axis_lines"]] or ["  (no warnings)"]) + [""]
+    fmt = "%%-%ds %%-6s %%14s %%14s %%10s %%9s %%5s" % max([len("subtest")] + [len(r["name"]) for r in report["rows"]])
     header = fmt % ("subtest", "metric", "A mean+-sd", "B mean+-sd", "delta %", "p", "sig")
-    out += ["subtests:", header, "-" * len(header)]
-    for row in report["rows"]:
-        for key in ("Score", "Time"):
-            m = row[key]
-            if m["a_mean"] is None and m["b_mean"] is None:
-                continue
-            out.append(
-                fmt
-                % (
-                    row["name"], key,
-                    ("%.3f+-%.3f" % (m["a_mean"], m["a_sd"])) if m["a_mean"] is not None else "-",
-                    ("%.3f+-%.3f" % (m["b_mean"], m["b_sd"])) if m["b_mean"] is not None else "-",
-                    ("%+.2f%%" % m["delta_pct"]) if m["delta_pct"] is not None else "-",
-                    ("%.4f" % m["p"]) if m["p"] is not None else "-",
-                    "yes" if m.get("significant") else ("no" if m["p"] is not None else "-"),
-                )
-            )
-    out.append("")
-    out.append("variance by configuration:")
-    if not report["variance"]:
-        out.append("  (A and B share no configuration group)")
-    for v in report["variance"]:
-        flag = "  ** B sd exceeds A sd by >20% **" if v["flagged"] else ""
-        out.append(
-            "  %s: A sd=%.4f (n=%d), B sd=%.4f (n=%d)%s"
-            % (v["config"], v["a_sd"], v["a_n"], v["b_sd"], v["b_n"], flag)
-        )
-    out.append("")
-    out.append("spread, within a run and between runs:")
-    out += ["  " + l for l in report["spread"]] or ["  (no suite row)"]
+    out += ["subtests:", header, "-" * len(header)] + [fmt % ((name, key) + _cells(m, "+-")) for name, key, m in _metric_rows(report)]
+    out += ["", "variance by configuration:"] + (["  %s: A sd=%.4f (n=%d), B sd=%.4f (n=%d)%s" % (
+        v["config"], v["a_sd"], v["a_n"], v["b_sd"], v["b_n"], "  ** B sd exceeds A sd by >20% **" if v["flagged"] else "")
+        for v in report["variance"]] or ["  (A and B share no configuration group)"])
+    out += ["", "spread, within a run and between runs:"] + (["  " + l for l in report["spread"]] or ["  (no suite row)"])
     return "\n".join(out) + "\n"
 
 
 def render_html(report, title="wk bench report"):
-    rows_html = []
-    for row in report["rows"]:
-        for key in ("Score", "Time"):
-            m = row[key]
-            if m["a_mean"] is None and m["b_mean"] is None:
-                continue
-            rows_html.append(
-                "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
-                % (
-                    _xml_escape(row["name"]), key,
-                    ("%.3f &plusmn; %.3f" % (m["a_mean"], m["a_sd"])) if m["a_mean"] is not None else "-",
-                    ("%.3f &plusmn; %.3f" % (m["b_mean"], m["b_sd"])) if m["b_mean"] is not None else "-",
-                    ("%+.2f%%" % m["delta_pct"]) if m["delta_pct"] is not None else "-",
-                    ("%.4f" % m["p"]) if m["p"] is not None else "-",
-                    "yes" if m.get("significant") else ("no" if m["p"] is not None else "-"),
-                )
-            )
+    def ul(lines, empty=""):
+        return "".join("<li>%s</li>" % escape(l) for l in lines) or (empty and "<li>%s</li>" % empty)
 
-    hist_html = []
-    for row in report["rows"]:
-        metric, av, bv = _row_primary(row)
-        hist_html.append(
-            '<div class="hist"><h3>%s <span class="metric">(%s)</span></h3>%s</div>'
-            % (_xml_escape(row["name"]), metric, _svg_histogram(row["name"], av, bv))
-        )
-
-    axis_html = "".join("<li>%s</li>" % _xml_escape(l) for l in report["axis_lines"]) or "<li>(no warnings)</li>"
-
-    var_rows = []
-    for v in report["variance"]:
-        var_rows.append(
-            '<tr%s><td>%s</td><td>%.4f (n=%d)</td><td>%.4f (n=%d)</td><td>%s</td></tr>'
-            % (
-                ' class="flag"' if v["flagged"] else "",
-                _xml_escape(v["config"]), v["a_sd"], v["a_n"], v["b_sd"], v["b_n"],
-                "B sd &gt; A sd by &gt;20%" if v["flagged"] else "",
-            )
-        )
-    if not var_rows:
-        var_rows.append('<tr><td colspan="4">A and B share no configuration group</td></tr>')
-
-    header_html = "".join("<li>%s</li>" % _xml_escape(l) for l in report.get("header", []))
-    if header_html:
-        header_html = "<ul>%s</ul>" % header_html
-
-    warmup_html = ""
-    if report.get("warmup_lines"):
-        warmup_html = "<h2>warmup round (not measured)</h2><ul>%s</ul>" % "".join(
-            "<li>%s</li>" % _xml_escape(l) for l in report["warmup_lines"])
+    rows_html = ["<tr>%s</tr>" % "".join("<td>%s</td>" % c for c in (escape(name), key) + _cells(m, " &plusmn; "))
+                 for name, key, m in _metric_rows(report)]
+    hist_html = ['<div class="hist"><h3>%s <span class="metric">(%s)</span></h3>%s</div>'
+                 % (escape(row["name"]), metric, _svg_histogram(row["name"], av, bv)) for row in report["rows"] for metric, av, bv in [_row_primary(row)]]
+    var_rows = ['<tr%s><td>%s</td><td>%.4f (n=%d)</td><td>%.4f (n=%d)</td><td>%s</td></tr>'
+                % (' class="flag"' if v["flagged"] else "", escape(v["config"]), v["a_sd"], v["a_n"], v["b_sd"], v["b_n"],
+                   "B sd &gt; A sd by &gt;20%" if v["flagged"] else "") for v in report["variance"]]
+    var_rows = var_rows or ['<tr><td colspan="4">A and B share no configuration group</td></tr>']
+    header_html = "<ul>%s</ul>" % ul(report["header"]) if report.get("header") else ""
+    warmup_html = "<h2>warmup round (not measured)</h2><ul>%s</ul>" % ul(report["warmup_lines"]) if report.get("warmup_lines") else ""
+    axis_html = ul(report["axis_lines"], "(no warnings)")
     return """<!doctype html>
 <html><head><meta charset="utf-8"><title>%s</title>
 <style>
@@ -756,66 +542,37 @@ def render_html(report, title="wk bench report"):
 <ul>%s</ul>
 </body></html>
 """ % (
-        _xml_escape(title), _xml_escape(title), header_html, warmup_html, axis_html,
-        "".join(rows_html), "".join(hist_html), "".join(var_rows),
-        "".join("<li>%s</li>" % _xml_escape(l) for l in report["spread"]) or "<li>(no suite row)</li>",
-    )
+        escape(title), escape(title), header_html, warmup_html, axis_html, "".join(rows_html), "".join(hist_html), "".join(var_rows),
+        ul(report["spread"], "(no suite row)"))
 
 
-# The warmup round's evidence, and the judgement on it. What counts as a problem within one arm is decided where it is measured (lib/wk/bench/board_driver.py) and recorded in the file; this adds only what needs both arms side by side.
+# What counts as a problem within one arm is decided where it is measured (board_driver.py); this adds what needs both arms.
+def evidence_paths(taskdir, device):
+    return [os.path.join(taskdir, "warmup", "%s-%s.evidence.json" % (device, arm)) for arm in "ab"]
+
+
 def warmup_load(taskdir, device):
-    out = {}
-    for arm in ("a", "b"):
-        doc = record.load(os.path.join(taskdir, "warmup",
-                                "%s-%s.evidence.json" % (device, arm)))
-        if doc:
-            out[arm] = doc
-    return out
-
-
-def warmup_cross_problems(a, b, same_width_expected):
-    problems = []
-    ga, gb = a.get("gl", {}), b.get("gl", {})
-    if ga.get("driver") and gb.get("driver") and ga["driver"] != gb["driver"]:
-        problems.append("the arms rendered through different drivers (%s vs %s)"
-                        % (ga["driver"], gb["driver"]))
-    ea, eb = a.get("elf", {}), b.get("elf", {})
-    if same_width_expected and ea.get("bits") and eb.get("bits") and ea["bits"] != eb["bits"]:
-        problems.append("the arms are %d-bit and %d-bit, and this A/B varies neither the "
-                        "image nor the width" % (ea["bits"], eb["bits"]))
-    return problems
+    return {arm: doc for arm, doc in zip("ab", map(record.load, evidence_paths(taskdir, device))) if doc}
 
 
 def warmup_lines(evidence):
     lines = []
-    for arm in ("a", "b"):
+    for arm in "ab":
         rec = evidence.get(arm)
         if not rec:
             lines.append("%s: no warmup evidence" % arm.upper())
             continue
-        elf, gl, jit = rec.get("elf", {}), rec.get("gl", {}), rec.get("jit", {})
-        gpu = rec.get("gpu") or {}
-        lines.append("%s: %s-bit %s, renderer %s%s" % (
-            arm.upper(), elf.get("bits", "?"), elf.get("machine", "?"),
-            os.path.basename(gl.get("driver") or "unknown"),
-            " [SOFTWARE]" if gl.get("software") else ""))
-        lines.append("   GPU busy %s ms on %s%s" % (
-            gpu.get("busy_ms", "?"), gpu.get("driver") or "unknown",
-            (" (" + ", ".join("%s %d ms" % kv for kv in
-                              list((gpu.get("by_process_ms") or {}).items())[:3]) + ")")
-            if gpu.get("by_process_ms") else ""))
-        lines.append("   JIT %s, %s executable in %d mapping(s)%s" % (
-            jit.get("verdict", "?"), _bytes_label(jit.get("exec_bytes", 0)),
-            jit.get("exec_mappings", 0),
-            ("; compiles " + ", ".join("%s=%d" % kv for kv in sorted(
-                (jit.get("tiers") or {}).items()))) if jit.get("tiers") else ""))
-        for note in rec.get("notes", []):
-            lines.append("   %s" % note)
-        if rec.get("problems"):
-            lines.extend("   %s" % p for p in rec["problems"])
+        elf, gl, jit, gpu = rec.get("elf", {}), rec.get("gl", {}), rec.get("jit", {}), rec.get("gpu") or {}
+        by_process = list((gpu.get("by_process_ms") or {}).items())[:3]
+        lines += ["%s: %s-bit %s, renderer %s%s" % (arm.upper(), elf.get("bits", "?"), elf.get("machine", "?"),
+                                                    os.path.basename(gl.get("driver") or "unknown"), " [SOFTWARE]" if gl.get("software") else ""),
+                  "   GPU busy %s ms on %s%s" % (gpu.get("busy_ms", "?"), gpu.get("driver") or "unknown",
+                                                 " (%s)" % ", ".join("%s %d ms" % kv for kv in by_process) if by_process else ""),
+                  "   JIT %s, %s executable in %d mapping(s)%s" % (jit.get("verdict", "?"), _bytes_label(jit.get("exec_bytes", 0)), jit.get("exec_mappings", 0),
+                                                                   "; compiles " + ", ".join("%s=%d" % kv for kv in sorted(jit["tiers"].items())) if jit.get("tiers") else "")]
+        lines += ["   %s" % n for n in rec.get("notes", []) + rec.get("problems", [])]
         if rec.get("profile"):
-            lines.append("   profile: %s (%s)" % (rec["profile"].get("file", "?"),
-                                                  rec["profile"].get("tool", "?")))
+            lines.append("   profile: %s (%s)" % (rec["profile"].get("file", "?"), rec["profile"].get("tool", "?")))
     return lines
 
 
@@ -831,81 +588,70 @@ def warmup_check(a_path, b_path, same_width):
     a, b = record.load(a_path), record.load(b_path)
     problems = []
     for arm, rec, path in (("A", a, a_path), ("B", b, b_path)):
+        missing = [k for k in ("elf", "gl", "jit", "problems") if k not in rec]
         if not rec:
             problems.append("arm %s produced no warmup evidence (%s)" % (arm, path))
-            continue
-        missing = [k for k in ("elf", "gl", "jit", "problems") if k not in rec]
-        if missing:
-            problems.append(
-                "arm %s's evidence file is not warmup evidence -- it parses as JSON but "
-                "has no %s (%s)" % (arm, "/".join(missing), path))
-            continue
-        problems.extend("arm %s: %s" % (arm, p) for p in rec.get("problems", []))
+        elif missing:
+            problems.append("arm %s's evidence file is not warmup evidence -- it parses as JSON but has no %s (%s)" % (arm, "/".join(missing), path))
+        else:
+            problems += ["arm %s: %s" % (arm, p) for p in rec["problems"]]
     if a and b:
-        problems.extend(warmup_cross_problems(a, b, same_width))
+        ga, gb, ea, eb = a.get("gl", {}), b.get("gl", {}), a.get("elf", {}), b.get("elf", {})
+        if ga.get("driver") and gb.get("driver") and ga["driver"] != gb["driver"]:
+            problems.append("the arms rendered through different drivers (%s vs %s)" % (ga["driver"], gb["driver"]))
+        if same_width and ea.get("bits") and eb.get("bits") and ea["bits"] != eb["bits"]:
+            problems.append("the arms are %d-bit and %d-bit, and this A/B varies neither the image nor the width" % (ea["bits"], eb["bits"]))
     return problems
 
 
 def headline_score(doc):
-    roots = [(str(k), v) for k, v in doc.items()
-             if isinstance(v, dict) and isinstance(v.get("metrics"), dict)
-             and "Score" in v["metrics"]]
+    roots = [(str(k), v) for k, v in doc.items() if isinstance(v, dict) and isinstance(v.get("metrics"), dict) and "Score" in v["metrics"]]
     if len(roots) != 1:
         return None
     suite, node = roots[0]
     declared = _declared_metric(node)
-    if declared is None:
-        vals = _iteration_values(node["metrics"]["Score"])
-    else:
-        vals, why = _declared_aggregate(suite, node, declared)
-        if why:
-            sys.exit("ab-precision: " + why)
-    return sum(vals) / len(vals) if vals else None
+    vals, why = (_iteration_values(node["metrics"]["Score"]), None) if declared is None else _declared_aggregate(suite, node, declared)
+    if why:
+        sys.exit("precision: " + why)
+    return _mean(vals) if vals else None
 
 
 def _headline_scores(dirs):
     scores, empty = [], []
     for d in dirs:
         path, doc, why = run_result(d)
-        if why:
-            empty.append(why)
-            continue
-        score = headline_score(doc)
+        score = None if why else headline_score(doc)
         if score is None:
-            empty.append("%s: no single suite carrying a Score metric" % path)
-            continue
-        scores.append(score)
+            empty.append(why or "%s: no single suite carrying a Score metric" % path)
+        else:
+            scores.append(score)
     return scores, empty
 
 
 def precision_lines(a_dirs, b_dirs, goal, warn=None):
-    """The stopping rule's verdict as key=value lines: how fine a difference these rounds resolve, against `goal`
-    percent. ValueError names a side with no scores."""
-    a, a_empty = _headline_scores(a_dirs)
-    b, b_empty = _headline_scores(b_dirs)
-    for scores, empty, side in ((a, a_empty, "A"), (b, b_empty, "B")):
+    """The stopping rule's verdict as key=value lines: how fine a difference these rounds resolve, against `goal` percent."""
+    sides = []
+    for dirs, side in ((a_dirs, "A"), (b_dirs, "B")):
+        scores, empty = _headline_scores(dirs)
         if not scores:
             raise ValueError("no scores on side %s:\n%s" % (side, "\n".join("  " + l for l in empty) or "  no run directories given"))
         for line in empty:
             (warn or (lambda m: print(m, file=sys.stderr)))("warning: side %s: %s" % (side, line))
-    mde = mde_pct(a, b)
-    mean_a, mean_b = sum(a) / len(a), sum(b) / len(b)
+        sides.append(scores)
+    a, b = sides
+    mde, p, mean_a, mean_b = mde_pct(a, b), welch_p(a, b), _mean(a), _mean(b)
     delta = (mean_b - mean_a) / mean_a * 100.0 if mean_a else None
-    p = welch_p(a, b)
-    # The half-width scales as 1/sqrt(n), so the rounds still owed at this spread is what the operator wants to know before committing the machine.
+
+    def f(fmt, v):
+        return fmt % v if v is not None else ""
+    # The half-width scales as 1/sqrt(n), so the rounds still owed at this spread is what the operator wants to know first.
     need = "%d" % math.ceil(len(a) * (mde / goal) ** 2) if mde is not None and goal and mde > goal else ""
-    lines = ["n_a=%d" % len(a), "n_b=%d" % len(b), "mean_a=%.4f" % mean_a, "mean_b=%.4f" % mean_b,
-             "delta_pct=%s" % ("%.4f" % delta if delta is not None else ""),
-             "mde_pct=%s" % ("%.4f" % mde if mde is not None else ""),
-             "goal_pct=%.4f" % goal,
-             "met=%s" % ("yes" if mde is not None and mde <= goal else "no"),
-             "rounds_needed=%s" % need,
-             "p=%s" % ("%.6f" % p if p is not None else "")]
-    # Each arm's noise floor as a share of its own mean, and the delta read against what the rounds resolve: `met` answers --goal, these answer the delta just measured.
-    for side, vals, mean in (("a", a, mean_a), ("b", b, mean_b)):
-        lines.append("sd_%s_pct=%s" % (side, "%.4f" % (_sd(vals) / mean * 100.0) if mean else ""))
-    lines.append("delta_vs_mde=%s" % ("%.1f" % (mde / abs(delta)) if mde and delta else ""))
-    return lines
+    return ["n_a=%d" % len(a), "n_b=%d" % len(b), "mean_a=%.4f" % mean_a, "mean_b=%.4f" % mean_b, "delta_pct=" + f("%.4f", delta),
+            "mde_pct=" + f("%.4f", mde), "goal_pct=%.4f" % goal, "met=%s" % ("yes" if mde is not None and mde <= goal else "no"),
+            "rounds_needed=" + need, "p=" + f("%.6f", p),
+            # Each arm's noise floor against its own mean, and the delta against what the rounds resolve.
+            "sd_a_pct=" + f("%.4f", _sd(a) / mean_a * 100.0 if mean_a else None), "sd_b_pct=" + f("%.4f", _sd(b) / mean_b * 100.0 if mean_b else None),
+            "delta_vs_mde=" + f("%.1f", mde / abs(delta) if mde and delta else None)]
 
 
 def resolved(a_dirs, b_dirs, goal):
@@ -920,13 +666,12 @@ def precision(a_spec, b_spec, goal, out=None):
     try:
         lines = precision_lines(split_paths(a_spec), split_paths(b_spec), goal)
     except ValueError as e:
-        sys.exit("ab-precision: %s" % e)
+        sys.exit("precision: %s" % e)
     (out or sys.stdout).write("\n".join(lines) + "\n")
 
 
 def map_row(line):
-    """One line of runs.tsv, the autorun's record of which result is which round, arm and plan:
-    (round, label, staged, run, clean, plan)."""
+    """One line of the autorun's runs.tsv: (round, label, staged, run, clean, plan)."""
     r = (line.rstrip("\n").split("\t") + [""] * 6)[:6]
     return tuple(r[:5]) + (r[5] or "unnamed",)
 
@@ -937,26 +682,21 @@ def runs_map(path):
 
 
 def ab_summary(runs, root, now, out_path="", out=None, machine=None):
-    """A Mac A/B's verdict off its run map, per plan: precision, then arm A against arm B. The warmup round is left out;
-    a leg a software-update scan ran across is kept and named."""
+    """A Mac A/B's verdict per plan off its run map, warmup left out; a leg a software-update scan crossed is kept and named."""
     out, machine = out or sys.stdout, machine or Local()
-    rows = runs_map(runs)
-    sink = []
+    rows, sink = runs_map(runs), []
 
-    def emit(line=""):
-        out.write(line + "\n")
-        sink.append(line + "\n")
+    def emit(text=""):
+        out.write(text + "\n")
+        sink.append(text + "\n")
 
     try:
         labels = list(dict.fromkeys(r[1] for r in rows))
-        emit("A/B summary -- %s" % now)
-        emit("run map: %s" % runs)
-        emit()
+        emit("A/B summary -- %s\nrun map: %s\n" % (now, runs))
         scanned = ["    round %s arm %s" % (r[0], r[1]) for r in rows if r[4] == "scanned"]
         if scanned:
-            for line in ["  WARNING: a software-update scan ran during these arms:"] + scanned + [
-                    "  Their numbers are included below. Treat a difference that depends on", "  them as unproven.", ""]:
-                emit(line)
+            emit("\n".join(["  WARNING: a software-update scan ran during these arms:"] + scanned)
+                 + "\n  Their numbers are included below. Treat a difference that depends on\n  them as unproven.\n")
         if len(labels) < 2:
             emit("only one arm ('%s') -- nothing to compare. Its runs are listed above." % (labels or [""])[0])
             return 0
@@ -964,34 +704,27 @@ def ab_summary(runs, root, now, out_path="", out=None, machine=None):
         if len(labels) > 2:
             emit("note: %d arms; comparing '%s' against '%s' only" % (len(labels), a, b))
         if {r[2] for r in rows if r[1] == a} & {r[2] for r in rows if r[1] == b}:
-            for line in ("  both arms ran the SAME staged build. This is an A/A control: what it",
-                         "  measures is the noise floor of this bench path, not a difference between",
-                         "  builds. A significant result here means the bench path is not yet quiet",
-                         "  enough to trust a real A/B at that magnitude.", ""):
-                emit(line)
+            emit("  both arms ran the SAME staged build. This is an A/A control: what it\n  measures is the noise floor of this bench path, "
+                 "not a difference between\n  builds. A significant result here means the bench path is not yet quiet\n"
+                 "  enough to trust a real A/B at that magnitude.\n")
         for plan in dict.fromkeys(r[5] for r in rows):
             dirs = {l: [os.path.join(root, "results", r[3]) for r in rows if r[5] == plan and r[1] == l and r[0] != "0"] for l in labels}
             emit("================ %s ================" % plan)
-            for l in labels:
-                emit("  arm %s: %d run(s)" % (l, len(dirs[l])))
-            emit("  precision:")
+            emit("\n".join("  arm %s: %d run(s)" % (l, len(dirs[l])) for l in labels) + "\n  precision:")
             try:
                 for line in precision_lines(dirs[a], dirs[b], 0.3, warn=lambda m: emit("    " + m)):
                     emit("    " + line)
             except (ValueError, SystemExit) as e:
-                emit("    ab-precision: %s" % e)
-            emit("    mde_pct is the smallest difference these rounds resolve; below it,")
-            emit("    'not significant' means 'under this threshold', not 'absent'.")
-            emit()
-            emit("  comparing arm %s against arm %s" % (a, b))
+                emit("    precision: %s" % e)
+            emit("    mde_pct is the smallest difference these rounds resolve; below it,\n"
+                 "    'not significant' means 'under this threshold', not 'absent'.\n\n  comparing arm %s against arm %s" % (a, b))
             if dirs[a] and dirs[b]:
                 report = build_report(dirs[a], dirs[b])
                 if out_path:
                     html = "%s-%s.html" % (os.path.splitext(out_path)[0], plan)
                     machine.write(html, render_html(report, title="A/B summary: %s" % plan))
                     emit("wrote %s" % html)
-                for line in render_text(report).splitlines():
-                    emit(line)
+                emit(render_text(report).rstrip("\n"))
             emit()
         return 0
     finally:
@@ -1061,7 +794,7 @@ def checks(taskdir, doc, runs, arm_kind):
     if rehearsed:
         out.append(("FAIL", "measured", "%d of %d runs are rehearsals, not measurements" % (len(rehearsed), len(runs))))
     for d in doc.get("devices", []):
-        paths = [os.path.join(taskdir, "warmup", "%s-%s.evidence.json" % (d["device"], x)) for x in "ab"]
+        paths = evidence_paths(taskdir, d["device"])
         if any(os.path.isfile(p) for p in paths):
             problems = warmup_check(paths[0], paths[1], arm_kind != "system")
             out.append(("FAIL", "warmup", "%s: %s" % (d["device"], "; ".join(problems))) if problems else ("ok", "warmup", "%s: both arms are what the A/B claims" % d["device"]))

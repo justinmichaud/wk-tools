@@ -94,12 +94,6 @@ def new_front(reg, records, name, opts):
     """Refuse, start the detached run, follow it, then the --pr / hints / --zed tail. 0, or Refused."""
     here, root, env = reg.machine, reg.root, reg.env
     require_name(name)
-    if opts.get("sysroot"):
-        die("--sysroot is not implemented (docs/Nice to have/HANDOFF-cross-compile.md).\n"
-            "    It is also not this flag: --arch makes the workspace itself another\n"
-            "    architecture, executed natively. A sysroot cross build stays in a native\n"
-            "    workspace and is a property of the build, so it will be 'wk build\n"
-            "    --sysroot', not 'wk new --sysroot'.")
     pr = opts.get("pr")
     if pr is not None and not pr:
         die("--pr needs a spec: <user>:<branch>, <n>, or wpe:<n>")
@@ -268,12 +262,8 @@ def new_detached_run(driver, records, lock, clock, name, base, arch):
         _create(driver, records, task, clock, name, base, arch, state)
     except Killed:
         raise
-    except Refused as e:
-        _end(task, e.status)
-        lock.release_all()
-        raise
-    except Exception:
-        _end(task, 1)
+    except Exception as e:
+        _end(task, e.status if isinstance(e, Refused) else 1)
         lock.release_all()
         raise
     _end(task, 0)
@@ -359,14 +349,6 @@ def _create(driver, records, task, clock, name, base, arch, state):
     stage("register")
 
 
-def fetch_from(probe):
-    if probe == "yes":
-        return "mirror"
-    if probe == "no":
-        return "network"
-    return "unreachable"
-
-
 def checkout_script(src):
     return "cd %s || exit 2\n" % shlex.quote(src) + CHECKOUT_SCRIPT
 
@@ -380,7 +362,7 @@ def freshen(driver, name, here):
     mirror = shlex.quote(driver.mirror_dir())
     r = driver.exec(name, ["sh", "-c", "[ -n %s ] && [ -d %s ] && echo yes || echo no" % (mirror, mirror)])
     lines = r.out.replace("\r", "").splitlines() if r.ok else []
-    source = fetch_from(lines[-1].strip() if lines else "")
+    source = {"yes": "mirror", "no": "network"}.get(lines[-1].strip() if lines else "", "unreachable")
     if source == "mirror":
         r = here.act_run([wk, "sync", name])
         show(r)

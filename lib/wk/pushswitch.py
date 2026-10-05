@@ -151,20 +151,18 @@ class Push:
             log("  %d fork(s) have no key here ('wk key deploy')" % rows.count("no-key"))
         log("  every workspace can push to the forks now, including any agent in one.")
         log("  'wk key push off' when you are done; 'wk ai claude' turns it off by itself.")
-        if sec.cred_write(self.pat, "github-pat"):
-            changed("the GitHub API token is where the injector reads it (%s)" % sec.github_user())
-            log("  'git-webkit pr' in a workspace posts as that account; the token stays here")
-        else:
-            sec.cred_clear(self.pat)
-            warn("there is no GitHub API token here, so 'git-webkit pr' in a workspace gets 401")
-            log("  'wk key set github-pat' stores one (repo scope; it never enters a workspace)")
-        if sec.cred_write(self.bz, "bugzilla-api-key"):
-            changed("the Bugzilla API key is where the injector reads it (%s)" % (sec.bugzilla_user() or "no login in the mirror"))
-            log("  'git-webkit pr' in a workspace files and updates the bug as that login; the key stays here")
-        else:
-            sec.cred_clear(self.bz)
-            warn("there is no Bugzilla API key here, so 'git-webkit pr' in a workspace cannot file or update a bug")
-            log("  'wk key set bugzilla-api-key' stores one (it never enters a workspace)")
+        for path, name, what, who, does, lacks, scope in (
+                (self.pat, "github-pat", "GitHub API token", sec.github_user(), "posts as that account",
+                 "gets 401", "repo scope; "),
+                (self.bz, "bugzilla-api-key", "Bugzilla API key", sec.bugzilla_user() or "no login in the mirror",
+                 "files and updates the bug as that login", "cannot file or update a bug", "")):
+            if sec.cred_write(path, name):
+                changed("the %s is where the injector reads it (%s)" % (what, who))
+                log("  'git-webkit pr' in a workspace %s; the %s stays here" % (does, what.split()[-1]))
+            else:
+                sec.cred_clear(path)
+                warn("there is no %s here, so 'git-webkit pr' in a workspace %s" % (what, lacks))
+                log("  'wk key set %s' stores one (%sit never enters a workspace)" % (name, scope))
         log("  a push also needs this machine's key registered:  wk key check")
         return 0
 

@@ -45,18 +45,13 @@ def main(argv):
     zed, cmd = parse(argv)
 
     reg = places.Registry(ROOT)
-    try:
-        tname = reg.ws_place(name)
-        driver = reg.load(tname)
-    except LookupError as e:
-        die(str(e))
-
     if zed:
         reg.machine.exec([os.path.join(ROOT, "cmd", "zed"), name])
         return
-
-    if driver.info(name) == "absent":
-        die(store.no_such_workspace(name))
+    try:
+        driver = reg.present(name)
+    except LookupError as e:
+        die(str(e))
 
     if cmd:
         tty = sys.stdin.isatty() and sys.stdout.isatty()

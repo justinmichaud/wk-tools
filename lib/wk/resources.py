@@ -20,7 +20,6 @@ CGROUP_MEM_MAX = "/sys/fs/cgroup/memory.max"
 
 
 def workspace_marker_path(env):
-    """Where a workspace's own marker file lives; `Registry.marker_path` asks the same question."""
     return env.get("WK_MARKER") or os.path.join(env.get("HOME", os.path.expanduser("~")), ".wk-workspace")
 
 
@@ -90,25 +89,20 @@ class Resources:
     def host_load(self):
         """Whole cores; `{ 1.23 1.20 1.10 }` on a Mac, where the average is second."""
         if self.os_name == "macos":
-            text, index, what = self._sysctl("vm.loadavg"), 1, "the load average (sysctl vm.loadavg)"
+            fields, what = self._sysctl("vm.loadavg").split()[1:], "sysctl vm.loadavg"
         else:
             try:
-                text = self.machine.read("/proc/loadavg")
+                fields = self.machine.read("/proc/loadavg").split()
             except OSError:
-                text = ""
-            index, what = 0, "the load average (/proc/loadavg)"
-        fields = text.split()
-        try:
-            value = str(int(float(fields[index])))
-        except (IndexError, ValueError):
-            value = ""
-        return self._reading(value, what)
+                fields = []
+            what = "/proc/loadavg"
+        whole = fields[0].split(".")[0] if fields else ""
+        return self._reading(whole, "the load average (%s)" % what)
 
     def cores(self):
         return self._setting("WK_CGROUP_CORES", None) or self.host_cores()
 
     def load(self):
-        """A remote place's, measured by whoever can reach it, else this machine's."""
         v = self.env.get("WK_LOAD")
         return int(v) if v else self.host_load()
 
@@ -128,7 +122,7 @@ class Resources:
         return self._setting("WK_MAX_JOBS", None) or None
 
     def avail_mem_mb(self, cgroup_mb=None):
-        """What a build here may take: free memory under any cgroup limit, since MemAvailable inside a container is the whole machine's."""
+        """Under any cgroup limit, since MemAvailable inside a container is the whole machine's."""
         if self.avail_override() is not None:
             return self.avail_override()
         if self.os_name == "linux":
@@ -136,14 +130,11 @@ class Resources:
         else:
             avail = self.host_mem_mb() - self.reserve_mb()
         cg = cgroup_mb if cgroup_mb is not None else self._setting("WK_CGROUP_MB", None)
-        if cg is not None and cg < avail:
-            avail = cg
-        if self.machine.exists(CGROUP_MEM_MAX):
-            limit = self.machine.read(CGROUP_MEM_MAX).strip()
-            if limit != "max":
-                limit = self._reading(limit, "the cgroup memory limit (%s)" % CGROUP_MEM_MAX) // 1024 // 1024
-                if limit < avail:
-                    avail = limit
+        if cg is not None:
+            avail = min(avail, cg)
+        limit = self.machine.read(CGROUP_MEM_MAX).strip() if self.machine.exists(CGROUP_MEM_MAX) else "max"
+        if limit != "max":
+            avail = min(avail, self._reading(limit, "the cgroup memory limit (%s)" % CGROUP_MEM_MAX) // 1024 // 1024)
         return avail
 
     def envelope_cores(self):
@@ -156,7 +147,7 @@ class Resources:
 
 
 class Budget:
-    """Each build's memory and jobs, one record per build under <state>/builds."""
+    """One record per build under <state>/builds."""
 
     def __init__(self, machine, env=None, clock=None):
         self.machine = machine
@@ -208,10 +199,7 @@ class Budget:
             if by_mem >= cores and load > cores // 2:
                 load //= 2   # memory-idle under a high load average is a killed build's decaying average
             by_cpu = min(cores - load, cores // 2)
-        jobs = min(by_mem, by_cpu)
-        if max_jobs and jobs > max_jobs:
-            jobs = max_jobs
-        return max(1, jobs)
+        return max(1, min(by_mem, by_cpu, max_jobs or by_cpu))
 
     def explain(self, cores, avail_mb, mb_per_job, load=None, max_jobs=None, running=()):
         jobs = self.jobs(cores, avail_mb, mb_per_job, load, max_jobs, running)
@@ -233,21 +221,17 @@ class Budget:
         return jobs
 
     def free_gb(self, path):
-        """`df -Pk` is the one spelling both dfs have."""
         return parse_df(self.machine.run(["df", "-Pk", path]).out)
 
     def disk_admit(self, what, need, free, where):
         if free is None:
             act.warn("cannot tell how much is free on %s; %s wants about %d GB, so this is not checked." % (where, what, need))
-            return
-        if free >= need:
-            return
-        act.barrier("%d GB free on %s; %s wants about %d GB.\n    It would halt part-built rather than fill the disk. 'wk gc' reclaims what\n"
-                    "    nothing references, 'wk gc --purge-builds' the build trees images come out\n    of, and 'wk doctor' says where the rest went."
-                    % (free, where, what, need))
+        elif free < need:
+            act.barrier("%d GB free on %s; %s wants about %d GB.\n    It would halt part-built rather than fill the disk. 'wk gc' reclaims what\n"
+                        "    nothing references, 'wk gc --purge-builds' the build trees images come out\n    of, and 'wk doctor' says where the rest went."
+                        % (free, where, what, need))
 
     def admit(self, what, jobs, running):
-        """One machine builds one thing at a time, whatever would be left over."""
         if not running:
             return
         rows = "".join("      %s (%s jobs, %s MB)\n" % r for r in running)
@@ -269,7 +253,6 @@ def parse_df(out):
 
 
 def build_jobs(res, budget, running):
-    """From the memory not already spoken for, since a link out of RAM hangs a machine; clamped by cores."""
     return budget.jobs(res.cores(), res.avail_mem_mb(), res.mb_per_job(), None, res.max_jobs(), running)
 
 
@@ -292,8 +275,7 @@ def main(argv, env=None):
     p.add_argument("reading", choices=sorted(READINGS))
     a = p.parse_args(argv)
     res = Resources(here(), os.environ if env is None else env, a.os)
-    out = str(getattr(res, READINGS[a.reading])() if READINGS[a.reading] else defaults())
-    sys.stdout.write(out if a.reading in ("describe-cores", "headless-marker", "defaults") else out + "\n")
+    print(getattr(res, READINGS[a.reading])() if READINGS[a.reading] else defaults())
     return 0
 
 

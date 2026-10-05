@@ -1,5 +1,4 @@
-"""wk quiesce session. The kernel driver tells the GPU from the BMC's `ast` chip, never the card number: card1 is
-the ast on moose only because of PCI enumeration order."""
+"""wk quiesce session. The kernel driver tells the GPU from the BMC's `ast` chip, never the card number (PCI order)."""
 
 import os
 import re
@@ -7,7 +6,7 @@ import sys
 
 from wk import act
 from wk.act import die, info, log, warn
-from wk.quiet import PRIV, said
+from wk.quiet import PRIV, require_helper, said
 
 SYS_DRM = "/sys/class/drm"
 MODE_FILE = "/run/wk-session-mode"
@@ -26,8 +25,7 @@ class Session:
 
     def priv(self, verb):
         """Whether sudo needs a password is asked once, with a read-only verb, because session-on-bmc may fail."""
-        if not self.m.exists(PRIV):
-            die("%s is not installed -- run: ./setup --stage quiesce" % PRIV)
+        require_helper(self.m)
         if self.sudo is None:
             self.sudo = ["sudo", "-n"] if self.m.run(["sudo", "-n", PRIV, "session-status"]).ok else ["sudo"]
             if self.sudo == ["sudo"]:
@@ -91,13 +89,11 @@ class Session:
         m = self.mode()
         if m == "bmc":
             warn("SLOW SESSION: SOFTWARE RENDERING -- the BMC display chip, no GPU at all")
-            log("  llvmpipe is not a slow GPU, it is a different measurement: MotionMark\n"
-                "  differs by ~400x. Nothing measured here means anything.\n"
+            log("  nothing measured here means anything (MotionMark differs ~400x).\n"
                 "  measurable session again:  wk quiesce session on")
         elif m == "off":
             warn("SESSION IS OFF -- this socket is the screen-off placeholder, not a session")
-            log("  its outputs are modeset off on purpose and it has no head to draw on;\n"
-                "  nothing rendered into it will show up anywhere.\n"
+            log("  nothing rendered into it shows anywhere.\n"
                 "  a real session:  wk quiesce session on")
 
     def bmc_drm_device(self):
@@ -141,9 +137,15 @@ class Session:
                 return "%s %s" % (sid, typ)
         return ""
 
+    def seated(self):
+        seated = self.foreign()
+        if seated:
+            info("a graphical session is already active on seat0 (session %s)" % seated)
+            log("  leaving it alone; 'wk quiesce session off' first for a clean start")
+        return seated
+
     def on(self, bmc):
         if self.m.exists(self.socket) and self.active(UNIT):
-            # "already running" answered for a software session is an afternoon of numbers that measured llvmpipe.
             wanted, running = ("bmc" if bmc else "gpu"), self.mode()
             if wanted == running:
                 info("wk quiesce session already running (%s, mode %s)" % (self.socket, running))
@@ -154,11 +156,7 @@ class Session:
         elif self.m.exists(self.socket):
             warn("stale compositor socket at %s -- starting a new session" % self.socket)
 
-        seated = self.foreign()
-        if seated:
-            info("a graphical session is already active on seat0 (session %s)" % seated)
-            log("  leaving it alone; run 'wk quiesce session off' first if you want a clean")
-            log("  benchmark compositor instead of a full desktop")
+        if self.seated():
             return 0
         if not self.m.have("wayland-info"):
             die("wayland-info missing -- a session nobody can verify is real is not started; "
@@ -190,10 +188,7 @@ class Session:
         return 0
 
     def gdm(self, bmc):
-        seated = self.foreign()
-        if seated:
-            info("a graphical session is already active on seat0 (session %s)" % seated)
-            log("  leaving it alone; run 'wk quiesce session off' first if you want a clean start")
+        if self.seated():
             return 0
         if self.active(UNIT):
             info("stopping the benchmark compositor to start a desktop instead")
@@ -216,14 +211,8 @@ class Session:
             log("  journalctl -u gdm")
         else:
             warn("the greeter came up on %s, not wayland -- the mode is not enforced" % greeter)
-            log("  hiding a device from seat0 constrains a compositor that asks logind for\n"
-                "  its devices. NVIDIA's Xorg driver doesn't: it drives the card through\n"
-                "  /dev/nvidia0 and /dev/nvidia-modeset, character devices with no udev\n"
-                "  properties and no seat tags for the hide to remove. So the desktop is\n"
-                "  wherever that driver put it, whichever mode was asked for.\n"
-                "  gdm chose Xorg via 61-gdm.rules (nvidia_drm + modeset=Y falls through\n"
-                "  to gdm_prefer_xorg); wk overrides it, so this means the override\n"
-                "  didn't take -- check: sudo %s session-status" % PRIV)
+            log("  NVIDIA's Xorg driver ignores seat tags, so wk's wayland override for gdm\n"
+                "  did not take -- check: sudo %s session-status" % PRIV)
         if bmc:
             log("  or over the BMC's KVM-over-IP console")
         return 0
@@ -236,15 +225,10 @@ class Session:
         lit = self.lit("not-ast")
         if lit:
             warn("the screen is black but still lit: %s" % " ".join(lit))
-            log("  a compositor holding an output and painting it black is not an\n"
-                "  output that is off -- the CRTC keeps scanning out, so the monitor\n"
-                "  keeps its signal. The modeset that darkens it needs wlr-randr:\n"
+            log("  the modeset that darkens it needs wlr-randr:\n"
                 "    ./setup --stage tools   (then: wk quiesce session off)")
         else:
             info("screen off -- outputs modeset off, placeholder compositor holding the seat")
-            log("  both halves are load-bearing: disabling the outputs is what darkens\n"
-                "  the monitor, holding the device is what stops fbcon repainting the\n"
-                "  console over the top of it")
         bmc_lit = self.lit("ast")
         if bmc_lit:
             log("  still lit on the BMC's chip: %s (its console keeps its last frame)" % " ".join(bmc_lit))

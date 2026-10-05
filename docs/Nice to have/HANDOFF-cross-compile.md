@@ -9,8 +9,6 @@
       the flags sit beside `ARCH` (lib/wk/presets.py), keyed
       by sysroot -- a sysroot is not an `arch` and `arch_canon` keeps refusing
       `riscv64` as one
-- [ ] `wk new --sysroot` and `wk build --sysroot` stop refusing (`cmd/new`,
-      `cmd/build`) once the above exists
 - [ ] transfer and run: `wk pi deploy` onto a board running the target
       distribution; `wk run`/`wk gui --lldb` against the deployed copy
 - [ ] clangd against the cross build tree (docs/Urgent/HUMAN-clangd.md)

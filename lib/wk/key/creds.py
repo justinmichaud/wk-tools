@@ -10,20 +10,10 @@ from wk.key.common import cred_print, detail, verdict
 
 class Creds:
     def forks(self):
-        if self._forks is None:
-            self._forks = self.sec.forks()
-        return self._forks
+        return self.sec.forks()
 
     def fork_names(self):
         return [f[0] for f in self.forks()]
-
-    def repos(self):
-        return "".join(f[1] + " " for f in self.forks())
-
-    def agent_rows(self):
-        if self._rows is None:
-            self._rows = self.sec.agent_secrets()
-        return self._rows
 
     def _cc(self, *args, input=""):
         r = self.machine.run(["python3", os.path.join(self.root, "lib", "credcheck.py")] + list(args), input=input)
@@ -36,20 +26,17 @@ class Creds:
         return self._names
 
     def rule(self, name, field):
-        for line in self._cc("rule", name, "--repos", self.repos()).out.splitlines():
+        for line in self._cc("rule", name).out.splitlines():
             k, _, v = line.partition("\t")
             if k == field:
                 return v
         return ""
 
-    def check_value(self, name, value, *extra):
-        return self.sec.check_value(name, value, *extra)
-
     def path(self, name):
         return self.sec.cred_path(name)
 
-    def _secretfile(self, verb, path, input=""):
-        return self.machine.run(["python3", os.path.join(self.root, "lib", "secretfile.py"), verb, path], input=input)
+    def _secretfile(self, verb, path, input="", run=None):
+        return (run or self.machine.run)(["python3", os.path.join(self.root, "lib", "secretfile.py"), verb, path], input=input)
 
     def present(self, name):
         return bool(self.sec.cred_stored(name))
@@ -62,7 +49,6 @@ class Creds:
         return self.sec.cred_verdict(name)
 
     def verdict_text(self, name):
-        """The `verdict` subverb: what an election on another workstation compares."""
         fp = self.fingerprint(name)
         return self.stored_verdict(name) + ("\n    fingerprint: %s" % fp if fp else "")
 
@@ -76,7 +62,7 @@ class Creds:
     def store(self, name, value):
         p = self.path(name)
         self.private_dir(os.path.dirname(p))
-        r = self.machine.act_run(["python3", os.path.join(self.root, "lib", "secretfile.py"), "write", p], input=value + "\n")
+        r = self._secretfile("write", p, value + "\n", run=self.machine.act_run)
         sys.stderr.write(r.err)
         if not r.ok:
             return False
@@ -87,7 +73,7 @@ class Creds:
         self.sec.publish_view("container")
 
     def cred_line(self, name, state, where):
-        var = next((r[3] for r in self.agent_rows() if r[0] == name), "-")
+        var = next((r[3] for r in self.sec.agent_secrets() if r[0] == name), "-")
         return "%-13s %-8s %s%s" % (name, state, where or "", "  ($%s in a workspace)" % var if var != "-" else "")
 
     def cred_report(self, name):
@@ -95,7 +81,6 @@ class Creds:
         return cred_print(name, self.stored_verdict(name))
 
     def deliver(self, name):
-        """Only the credential injector, on the machine that runs the workspaces, ever reads these two."""
         if name == "github-pat":
             target = self.sec.machine_pat()
             if not self.sec.pat_deliver():
@@ -111,7 +96,7 @@ class Creds:
                  "workspace spends that: 'wk key push off'\n    then 'wk key push on' hands it the one stored here." % name)
 
     def set(self, name, replace=False, paste=False, value=None):
-        """`wk key set`: 0 when what is stored can do its job."""
+        """0 when what is stored can do its job."""
         names = self.settable()
         if not name:
             die("usage: wk key set <name> [--replace] [--paste]\n    names: %s " % " ".join(names))
@@ -143,7 +128,7 @@ class Creds:
             val = self.prompt(self.rule(name, "what"), self.rule(name, "url"), self.rule(name, "remedy"), self.tty) or ""
             if not val:
                 die(self.cred_line(name, "skipped", "nothing stored, so nothing here can " + self.rule(name, "needs")))
-        line = self.check_value(name, val)
+        line = self.sec.check_value(name, val)
         if verdict(line) == "bad":
             die(self.cred_line(name, "refused", detail(line)))
         if not self.store(name, val):

@@ -509,7 +509,6 @@ class TestWhatWasNotLookedAt(GcTest):
         rows = self.rows()
         self.assertEqual([(r.kb, bool(r.why)) for r in rows if r.kind == "container-image"], [(None, True)])
 
-
     def test_a_push_ref_a_live_pr_open_holds_is_kept_and_named(self):
         _push_ref(self.w)
         self.w.symlink("pid=4242 tok=x at=t cmd=wk", self.w.store.lock_path(pr.push_lock("refs/wk/push/box/eng/x")))
@@ -597,10 +596,6 @@ class TestTheVmHalf(GcTest):
         with contextlib.redirect_stderr(io.StringIO()):
             rows = g.rows()
         self.assertEqual({r.kind: bool(r.why) for r in rows}, {"mirror": True, "store": True})
-
-    def test_a_row_survives_the_trip_as_text(self):
-        r = rubble.row("half-made", "workspace 'a'", None, "--purge-rubble", lambda: None)
-        self.assertEqual(rubble.from_line(rubble.to_line(r), "vm"), r._replace(what="vm: workspace 'a'", take=rubble.FAR))
 
 
 class TestCrashOnly(GcTest):

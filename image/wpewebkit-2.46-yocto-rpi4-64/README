@@ -1,56 +1,9 @@
-Spec dir for wpewebkit-2.46-yocto-rpi4-64 (WPEWebKit's wpe-2.46 on the rpi4,
-64-bit).
+cmdline.txt.append.disabled forces a display the headless rpi4 lacks (both HDMI connectors read
+`disconnected`, so weston's DRM backend has no output). `video=HDMI-A-1:1920x1080M@60D` drives the
+connector with no EDID, like a dummy plug, on the real vc4/v3d GPU. A run made this way proves the
+path, not a comparable number: the mode is invented, and results record `display_forced`.
 
-cmdline.txt.append.disabled -- forces a display that is not physically there.
-**Disabled. Do not enable it by writing it straight to the bench stick**; the
-last section says what to do instead.
-
-The rpi4 is headless: both HDMI connectors read `disconnected`, so weston's DRM
-backend has no output and weston.service fails. Speedometer is gpu-class by
-this repo's own definition (cmd/bench: "a rendering measurement [that] needs a
-real compositor on a real GPU"), so there is nothing to run it on.
-
-`video=HDMI-A-1:1920x1080M@60D` is the KMS way to say "drive this connector at
-this mode even with no EDID" -- the trailing `D` forces digital output. It is
-what a dummy HDMI plug does, in software, and the important part is *what it
-does not change*: the compositor is still weston on the real vc4/v3d GPU
-through the real DRM/KMS path, not a software renderer and not RDP. The legacy
-`hdmi_force_hotplug=1` in config.txt does not do this under
-`dtoverlay=vc4-kms-v3d`, which is why the setting is here and not there.
-
-**A run made this way is a proof that the path works, not a comparable
-number.** The mode is invented rather than negotiated, so it is not the mode a
-real panel would give, and MotionMark and Speedometer both scale with the
-surface being drawn (cmd/bench records `display` for exactly that reason).
-Recorded as `display_forced` in the manifest so no result from it can be
-mistaken for one taken against real hardware. Delete this file when a dummy
-plug or a monitor is attached, and the image goes back to negotiating a mode.
-
-
-## Why it is disabled, and how to enable it safely
-
-Forcing a mode on a connector with nothing attached leaves vc4's KMS driver
-waiting on hardware that will not answer, and a driver that hangs in probe hangs
-the boot. "A display setting cannot stop userspace" is false when the setting is
-handled by a driver that boot waits on. The board comes up pingable for a minute
-or two, resets ssh mid-key-exchange, and then leaves the neighbour table; it
-needs a person to pull the stick.
-
-Three things make that unrecoverable, and each is worth knowing on its own:
-
-- **An armed stick that boots but hangs is sticky.** Firmware finds
-  `start4.elf`, so it keeps choosing the stick; a power cycle re-enters the same
-  hang rather than falling through to the SD rescue. The self-disarm lives in
-  the rootfs and never runs.
-- **These images carry no `panic=10`,** so a Yocto image that cannot find its
-  root hangs where one that sets it would reboot. It would not help here on its
-  own -- the reboot re-enters the same stick -- but the asymmetry is worth
-  knowing.
-- **There is no console.** moose's BMC would show the boot; the rpi4 has no such
-  path, and `docs/Urgent/HANDOFF-moose-bench.md`'s "get the console working
-  before the first risky boot" applies to every board.
-
-So: put `video=` on the **SD** system first, where a bad kernel argument still
-leaves the stick as an unarmed fall-through, and bake it into the stick only
-once it has booted something. Re-enable this file by dropping the `.disabled`
-suffix, and do it in that order.
+It is disabled because a forced mode with nothing attached can hang vc4's probe, and so the boot;
+an armed stick that hangs is chosen again on every power cycle, these images carry no `panic=`, and
+the rpi4 has no console. Enable it on the SD system first, where the stick stays an unarmed
+fall-through, and on the stick only once that has booted: drop the `.disabled` suffix.

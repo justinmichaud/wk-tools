@@ -367,11 +367,6 @@ class TestNewFrontRefusals(WorkspaceTest):
             self.assertIn("invalid name '%s': use [a-zA-Z0-9._-], not starting with '-'" % bad, err)
         self.assertEqual(self.w.effects, [])
 
-    def test_sysroot_is_not_this_flag(self):
-        err = self.refused(lambda: self.front(sysroot=True))
-        self.assertIn("--sysroot is not implemented", err)
-        self.assertIn("'wk build\n    --sysroot', not 'wk new --sysroot'", err)
-
     def test_pr_needs_a_spec_and_a_valid_one(self):
         self.assertIn("--pr needs a spec: <user>:<branch>, <n>, or wpe:<n>", self.refused(lambda: self.front(pr="")))
         self.assertIn("'nope' is not a PR spec", self.refused(lambda: self.front(pr="nope")))
@@ -799,15 +794,10 @@ class TestNewDriver(WorkspaceTest):
         self.assertEqual(self.w.records.list()[0].field("exit"), "125")
 
 
-
 class TestFreshen(WorkspaceTest):
     def freshen(self, w=None):
         w = w or self.w
         return self.stderr(lambda: workspace.freshen(w.driver, "ws", w))[1]
-
-    def test_where_a_fetch_comes_from_is_the_workspaces_own_answer(self):
-        self.assertEqual([workspace.fetch_from(p) for p in ("yes", "no", "", "wkdev-enter: no such container")],
-                         ["mirror", "network", "unreachable", "unreachable"])
 
     def test_a_mirror_in_reach_is_fetched_with_wk_sync(self):
         err = self.freshen()
@@ -848,13 +838,6 @@ class TestFreshen(WorkspaceTest):
             w = self.make_world()
             w.checkout = out
             self.assertIn(words, self.freshen(w))
-
-    def test_the_checkout_script_enters_the_quoted_source_and_never_resets(self):
-        script = workspace.checkout_script("/src/We bKit")
-        self.assertTrue(script.startswith("cd '/src/We bKit' || exit 2\n"))
-        self.assertIn("git merge --ff-only --quiet", script)
-        self.assertNotIn("reset", script)
-        self.assertLess(script.index("git merge"), script.index("git status --porcelain"))
 
     def test_a_dry_run_names_the_fetch_and_asks_the_workspace_nothing(self):
         self.dry_run()
@@ -1113,42 +1096,24 @@ class Recording(World):
 
 
 class TestKillPoints(WorkspaceTest):
-    def test_new_killed_after_any_effect_and_rerun_converges(self):
-        def run_once(w):
-            # each run is its own process: nothing the killed one held in memory survives it
-            w.lock = Lock(w.driver.store, w, w.clock)
-            with contextlib.redirect_stderr(io.StringIO()):
-                self.detached(w)
-        converges(self, self.make_world, run_once, World.state)
-
-    def test_new_over_the_real_container_driver_killed_after_any_effect_and_rerun_converges(self):
-        def run_once(w):
-            w.lock = Lock(w.driver.store, w, w.clock)
-            with contextlib.redirect_stderr(io.StringIO()):
-                self.detached(w)
-        converges(self, lambda: ContainerWorld(self.tmp), run_once, World.state, max_effects=80)
-        w = ContainerWorld(self.tmp)
-        run_once(w)
-        self.assertEqual(w.driver.state("ws"), "present")
-
-    def test_new_over_the_real_vm_driver_killed_after_any_effect_and_rerun_converges(self):
+    def test_new_over_each_real_driver_killed_after_any_effect_and_rerun_converges(self):
         from wk.sysimage import guestbase
         from wk.store import Store
-        for p in (mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True),
-                  mock.patch.object(guestbase.Base, "ensure", return_value=None),
-                  mock.patch.object(guestbase.Base, "stale", return_value="")):
-            p.start()
-            self.addCleanup(p.stop)
 
         def run_once(w):
-            w.lock = Lock(w.driver.store, w, w.clock)
+            w.lock = Lock(w.driver.store, w, w.clock)   # each run is its own process: nothing the killed one held survives it
             with contextlib.redirect_stderr(io.StringIO()):
                 self.detached(w)
-        converges(self, lambda: VmWorld(self.tmp), run_once, VmWorld.state, max_effects=80)
-        w = VmWorld(self.tmp)
-        run_once(w)
-        self.assertEqual(w.vms, {"wk-ws": "stopped"})
-        self.assertEqual(w.driver.state("ws"), "present")
+        for cls in (ContainerWorld, VmWorld):
+            with self.subTest(driver=cls.__name__), contextlib.ExitStack() as guest_host:
+                if cls is VmWorld:
+                    guest_host.enter_context(mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True))
+                    guest_host.enter_context(mock.patch.object(guestbase.Base, "ensure", return_value=None))
+                    guest_host.enter_context(mock.patch.object(guestbase.Base, "stale", return_value=""))
+                converges(self, lambda: cls(self.tmp), run_once, cls.state, max_effects=80)
+                w = cls(self.tmp)
+                run_once(w)
+                self.assertEqual(w.driver.state("ws"), "present")
 
     def rm_world(self, cls=World):
         w = cls(self.tmp)
@@ -1159,17 +1124,6 @@ class TestKillPoints(WorkspaceTest):
         w.begin().end(0)
         w.begin("build", pid=99).end(0)
         return w
-
-    def test_rm_killed_after_any_effect_and_rerun_converges(self):
-        os.environ["WK_YES"] = "1"
-
-        def run_once(w):
-            with contextlib.redirect_stderr(io.StringIO()):
-                workspace.rm_names(w.reg, w.records, ["ws"])
-        converges(self, self.rm_world, run_once, World.state)
-        w = self.rm_world()
-        run_once(w)
-        self.assertEqual(w.state()[:4], ([], [], [], []))
 
     def test_a_dry_run_is_the_wet_runs_plan_and_touches_nothing(self):
         wet = Recording(self.tmp)

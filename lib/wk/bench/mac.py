@@ -5,6 +5,7 @@
 import base64
 import json
 import os
+import plistlib
 import re
 import shlex
 import statistics
@@ -35,16 +36,8 @@ WKMAC = "lib/wk/mac.py"
 VM_PROCESS = "com.apple.Virtualization.VirtualMachine"
 WEB_PROCESS = "com.apple.WebKit.WebContent"
 WEB_PROCESS_WAIT = 600
-GATES = ("quiet desktop", "quiesce readback", "brightness", "display mode", "browser check", "staged dry run",
-         "window in front", "no other machine running")
-HOST_MODE = ("this is host mode, and a benchmark does not run here.\n"
-             "    Nothing about a run on this machine-as-workstation is comparable with one\n"
-             "    on the benchmark install -- same command, same plan, same shape of result,\n"
-             "    a different machine underneath it -- and there is no way to tell the two\n"
-             "    apart afterwards. So it does not run.\n"
-             "        wk boot mbp        arm it; it prints the two clicks\n"
-             "        ... boot the benchmark volume, then run this there ...\n"
-             "    'wk bench staged --dry-run' still shows what it would do from here.")
+HOST_MODE = ("this is host mode, and a benchmark does not run here: its number would be a workstation's.\n"
+             "    wk boot mbp arms the benchmark volume; run this there. 'wk bench staged --dry-run' shows the plan from here.")
 
 
 def staged_python(m, env):
@@ -56,14 +49,10 @@ def staged_python(m, env):
         "    ./setup installs it (bench/mac-pyobjc.sh), or WK_BENCH_PYTHON names a python3 that has it")
 
 
-def machine_driver(root, conf):
-    return open_driver(root, conf)
-
-
 class Install:
     """This machine as its running install says: the marker is bench mode, and its profile names the machine."""
 
-    def __init__(self, root, here, env, driver=machine_driver):
+    def __init__(self, root, here, env, driver=open_driver):
         self.root, self.here, self.env, self.make_driver = str(root), here, env, driver
         self.marker = images.marker(env)
 
@@ -125,6 +114,14 @@ def display_row(m, root, py, expect, build=""):
     return r.ok, (said[len("displays="):] if said.startswith("displays=") else said) + ("  (declared: %s)" % expect if expect else "")
 
 
+def console_row(m):
+    console, me = first_line(m.run(["stat", "-f", "%Su", "/dev/console"])), first_line(m.run(["id", "-un"]))
+    if not (console and me):
+        return record.UNKNOWN, "could not read %s" % ("the console owner" if me else "the user this runs as")
+    return console == me, ("%s is logged in at the screen" % me if console == me else
+                           "the screen belongs to '%s', not %s -- the browser has nowhere to draw" % (console, me))
+
+
 def auth_row(m):
     """SecurityAgent draws a modal sheet above the browser, never becomes frontmost, and ignores SIGTERM."""
     if m.run(["pgrep", "-x", "SecurityAgent"]).ok:
@@ -141,53 +138,37 @@ def quiet_row(root, m, clock, env):
     return (True, "every setting read back") if not bad else (False, "%d setting(s) above are not a measured Mac's; each names its remedy" % bad)
 
 
-class Gates:
+def gates_rows(root, m, clock, env, plan, expect, build, py):
     """Every gate a bench run needs, asked over `m` (the running install, its tree at `root`); nothing here writes."""
-
-    def __init__(self, root, m, clock, env, plan, expect, build, py):
-        self.root, self.m, self.clock, self.env = str(root), m, clock, env
-        self.plan, self.expect, self.build, self.py = plan, expect, build, py
-
-    def quiet_desktop(self):
-        return quiet_row(self.root, self.m, self.clock, self.env)
-
-    def quiesce_readback(self):
-        r = self.m.run(["sudo", "-n", PRIV, "status"])
-        return r.ok, (r.out + r.err).strip().replace("\n", "; ") or "wk quiesce on"
-
-    def brightness(self):
-        if self.expect.split()[:1] == ["external"]:
+    def brightness():
+        if expect.split()[:1] == ["external"]:
             return True, "no built-in panel to hold"
-        level = first_line(self.m.run(["python3", os.path.join(self.root, WKMAC), "brightness"]))
-        ambient = first_line(self.m.run(["python3", os.path.join(self.root, WKMAC), "auto-brightness"]))
+        level, ambient = (first_line(m.run(["python3", os.path.join(root, WKMAC), k])) for k in ("brightness", "auto-brightness"))
         try:
             dim = float(level) <= SET_TOLERANCE
         except ValueError:
             dim = False
-        return (record.UNKNOWN if not (level and ambient) else dim and ambient in ("off", "none")), "brightness %s, ambient-light compensation %s" % (level or "unread", ambient or "unread")
+        return (record.UNKNOWN if not (level and ambient) else dim and ambient in ("off", "none")), \
+            "brightness %s, ambient-light compensation %s" % (level or "unread", ambient or "unread")
 
-    def display_mode(self):
-        return display_row(self.m, self.root, self.py, self.expect)
+    def readback():
+        r = m.run(["sudo", "-n", PRIV, "status"])
+        return r.ok, (r.out + r.err).strip().replace("\n", "; ") or "wk quiesce on"
 
-    def browser_check(self):
-        if not self.build:
-            return False, "nothing staged to check the browser with"
-        return display_row(self.m, self.root, self.py, self.expect, self.build)
-
-    def staged_dry_run(self):
-        argv = [os.path.join(self.root, "wk"), "bench", "staged", "--dry-run", "--plan", self.plan]
-        r = self.m.run(argv + (["--expect-display", self.expect] if self.expect else []))
+    def dry_run():
+        argv = [os.path.join(root, "wk"), "bench", "staged", "--dry-run", "--plan", plan] + (["--expect-display", expect] if expect else [])
+        r = m.run(argv)
         return r.ok, "every leg check passes" if r.ok else "a leg would be refused: " + " ".join(argv[1:])
 
-    def window_in_front(self):
-        return screen_row(self.m, self.root)
-
-    def no_other_machine_running(self):
-        r = self.m.run(["pgrep", "-x", VM_PROCESS])
+    def no_vm():
+        r = m.run(["pgrep", "-x", VM_PROCESS])
         return (False, "a virtual machine is running beside the measurement (pid %s)" % first_line(r)) if r.ok else (True, "no virtual machine")
 
-    def ask(self):
-        return [(name,) + getattr(self, name.replace(" ", "_"))() for name in GATES]
+    asks = {"quiet desktop": lambda: quiet_row(root, m, clock, env), "quiesce readback": readback, "brightness": brightness,
+            "display mode": lambda: display_row(m, root, py, expect),
+            "browser check": lambda: display_row(m, root, py, expect, build) if build else (False, "nothing staged to check the browser with"),
+            "staged dry run": dry_run, "window in front": lambda: screen_row(m, root), "no other machine running": no_vm}
+    return [(name,) + ask() for name, ask in asks.items()]
 
 
 class MacVolumeSystem(System):
@@ -290,10 +271,7 @@ class MacVolumeSystem(System):
         rows.append((True, "run-benchmark", runner) if self.exec_ok("test", "-x", runner) else
                     (False, "run-benchmark", "not in the staged tree: " + runner))
         rows.append((True, "python with PyObjC", self.py))
-        console, me = first_line(self.here.run(["stat", "-f", "%Su", "/dev/console"])), first_line(self.here.run(["id", "-un"]))
-        rows.append((console == me if console and me else record.UNKNOWN, "the console session", "%s is logged in at the screen" % me if console == me else
-                     "the screen belongs to '%s', not %s -- MiniBrowser has nowhere to draw" % (console, me) if console and me else
-                     "could not read %s" % ("the console owner" if me else "the user this runs as")))
+        rows.append(named("the console session", console_row(self.here)))
         rows.append(named("the screen is free", screen_row(self.here, self.root)))
         rows.append(named("the display", display_row(self.here, self.root, self.py, self.o.get("expect_display") or "")))
         rows.append(named("no auth panel", auth_row(self.here)))
@@ -456,18 +434,15 @@ def listing(m, home):
     return 0
 
 
-def staged(root, reg, clock, o, driver=machine_driver):
-    """`wk bench staged`: this install's newest (or --id) stage, run through the pipeline."""
+def staged(root, reg, clock, o, driver=open_driver):
     if not reg.machine.run(["uname", "-s"]).out.startswith("Darwin"):
         die("'wk bench staged' is macOS bench mode. The Linux systems run their benchmark\n"
             "    from the machine that drives them -- wk bench run.")
     install = Install(root, reg.machine, reg.env, driver)
     home = install.staging_root()
     if not home:
-        die("this machine has no benchmark volume to read.\n"
-            "    In host mode, set WK_BENCH_MACHINE to which fleet machine this is (mbp or\n"
-            "    benchvm -- 'wk boot --list') and make sure its volume is attached ('wk boot\n"
-            "    mbp --status'); in bench mode /etc/wk-image says which system is running.")
+        die("this machine has no benchmark volume to read. In host mode WK_BENCH_MACHINE names which fleet machine this is\n"
+            "    (wk boot --list), its volume attached (wk boot <machine> --status); in bench mode /etc/wk-image says it.")
     if o.get("ls"):
         return listing(reg.machine, home)
     d = pick(reg.machine, home, o.get("id") or "")
@@ -487,7 +462,7 @@ def staged(root, reg, clock, o, driver=machine_driver):
 def gates(root, reg, clock, system, plan):
     expect = system.o.get("expect_display") or (install_display(system) or "")
     leg = StagedRun(root, reg, system, clock, reg.env).leg(plan, system.o)
-    rows = Gates(root, reg.machine, clock, reg.env, plan, expect, system.build_dir(leg), system.py).ask()
+    rows = gates_rows(root, reg.machine, clock, reg.env, plan, expect, system.build_dir(leg), system.py)
     for name, ok, detail in rows:
         pipeline.Run.check(ok, name, detail)
     fails = record.failed(rows, 1)
@@ -505,7 +480,7 @@ def install_display(system):
 class Stage:
     """`wk bench stage <ws> --to <machine>`: the products, Tools/ and each pinned payload, delivered with the manifest last."""
 
-    def __init__(self, root, reg, clock, driver=machine_driver):
+    def __init__(self, root, reg, clock, driver=open_driver):
         self.root, self.reg, self.clock, self.here, self.env = str(root), reg, clock, reg.machine, reg.env
         self.install = Install(root, reg.machine, reg.env, driver)
 
@@ -608,20 +583,13 @@ class Stage:
 
     def next_steps(self, drv, machine, dest, plans):
         first = " --plan " + plans[0][0] if plans else ""
-        arming = drv.facts().get("arming", "")
-        if arming == "guest":
-            arm, go = ("wk boot %s        start the guest -- for a guest that *is* the transition" % machine,
-                       "wk enter %s -- wk bench staged%s" % (drv.facts().get("guest", "<guest>"), first))
+        if drv.facts().get("arming", "") == "guest":
+            arm, go = "start the guest: for a guest that *is* the transition", "wk enter %s -- wk bench staged%s" % (drv.facts().get("guest", "<guest>"), first)
         else:
-            arm, go = ("wk boot %s        arm the one-shot and reboot into it" % machine,
-                       "wk bench staged%s       on the machine, once it is up" % first)
+            arm, go = "arm the one-shot and reboot into it", "wk bench staged%s       on the machine, once it is up" % first
         info("staged: %s" % dest)
-        log("")
-        log("  next:")
-        log("    " + arm)
-        log("    " + go)
-        log("    wk boot %s --back   leave the role again; the result stays" % machine)
-        log("                              on the machine that took it")
+        log("\n  next:\n    wk boot %s        %s\n    %s\n    wk boot %s --back   leave the role again; the result stays on the machine"
+            % (machine, arm, go, machine))
 
 
 def plans(order, names, payloads):
@@ -639,7 +607,7 @@ def plans(order, names, payloads):
     return out
 
 
-def stage(root, reg, clock, words, machine, preset_name, pairs, driver=machine_driver):
+def stage(root, reg, clock, words, machine, preset_name, pairs, driver=open_driver):
     return Stage(root, reg, clock, driver).run(words, machine, preset_name, pairs)
 
 
@@ -677,25 +645,10 @@ BOARD_ONLY = ("release", "builder", "bits", "build_on", "slot", "detach", "task"
 SITE = "Library/Python/3.9/lib/python/site-packages"
 AGENT = "com.wk.bench-ab"
 AUTORUN = BENCH_ROOT + "/wk-tools/lib/wk/bench/autorun.py"
-PLIST = """<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>%(agent)s</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/bin/python3</string>
-    <string>%(autorun)s</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>ProcessType</key><string>Interactive</string>
-  <key>StandardOutPath</key><string>%(root)s/autorun.agent.log</string>
-  <key>StandardErrorPath</key><string>%(root)s/autorun.agent.log</string>
-  <key>EnvironmentVariables</key>
-  <dict><key>WK_AB_ROOT</key><string>%(root)s</string></dict>
-</dict>
-</plist>
-"""   # RunAtLoad alone: KeepAlive would restart a finished benchmark, and the agent removes itself when its job is done
+# RunAtLoad alone: KeepAlive would restart a finished benchmark, and the agent removes itself when its job is done.
+PLIST = plistlib.dumps({"Label": AGENT, "ProgramArguments": ["/usr/bin/python3", AUTORUN], "RunAtLoad": True, "ProcessType": "Interactive",
+                        "StandardOutPath": BENCH_ROOT + "/autorun.agent.log", "StandardErrorPath": BENCH_ROOT + "/autorun.agent.log",
+                        "EnvironmentVariables": {"WK_AB_ROOT": BENCH_ROOT}}).decode()
 DOWN_WAIT, DOWN_POLL = 150, 5
 BOOT_SETTLE, BOOT_POLL, BOOT_WAIT = 45, 20, 600   # for its first seconds a restarting machine still answers
 PGO_INSTR = "-instr"
@@ -776,7 +729,7 @@ class MacAB:
 
     boot_wait = BOOT_WAIT
 
-    def __init__(self, root, reg, clock, spec, o, driver=machine_driver):
+    def __init__(self, root, reg, clock, spec, o, driver=open_driver):
         self.root, self.reg, self.clock, self.spec, self.o = str(root), reg, clock, spec or "", dict(o)
         self.here, self.env, self.make_driver = reg.machine, reg.env, driver
         self.name = self.o.get("devices") or ""
@@ -852,7 +805,6 @@ class MacAB:
         return sorted(self.mac.out("mac-ls.sh", WK_PATH=root + "/staged").split())
 
     def preflight(self):
-        """Every check is something that, if wrong, is discovered after the reboot on a machine nobody can reach."""
         info("preflight for an unattended A/B on %s" % self.name)
         fails, unknown = [], []
 
@@ -886,8 +838,8 @@ class MacAB:
             done = self.provisioned(root)
             ck(done, "provisioned", "'%s' has finished a first boot" % self.d.c("volume") if done
                else "no 'provisioning complete' in %s" % self.firstboot_log(root),
-               "so the desktop was never quieted, and every leg is refused after the reboot. On the Mac:",
-               "  wk sysimage build %s --repair    then boot it once" % (self.d.c("profile") or "<profile>"))
+               "every leg is refused on an unquieted desktop; on the Mac: wk sysimage build %s --repair, then boot it once"
+               % (self.d.c("profile") or "<profile>"))
         ck(self.mac.test("-w", root), "writable", "%s takes a plant without sudo" % root)
         bh = self.d.bench_home() or ""
         ck(self.mac.test("-d", bh) and self.mac.test("-w", bh + "/Library") if bh else False, "bench home",
@@ -907,20 +859,15 @@ class MacAB:
         ck(bool(staged or self.o.get("patch")), "staged builds", " ".join(staged) or
            ("none yet; --patch stages both arms" if self.o.get("patch") else "nothing on the volume, and no --patch to build from"))
         ok, said = self.display_check()
-        ck(ok, "one display", said, "Disconnect it: a second panel changes the compositing, the refresh rate and which",
-           "GPU the window lands on, and MotionMark scores the area it draws. No --force crosses it.")
+        ck(ok, "one display", said, "Disconnect it: a second panel changes what MotionMark draws. No --force crosses it.")
         if self.guest:
             ck(True, "enters bench mode", "starting the guest is the transition")
         else:
             ck(self.firmware_is_bench(), "firmware default", self.fw_detail,
-               "This restarts %s and expects benchmarking to begin with nobody at the keyboard:" % n,
-               "  wk boot %s            arms it; or the startup manager: hold the power button," % n,
-               "  pick '%s'. --plant leaves the job on the volume and reboots nothing." % self.d.c("volume"))
+               "wk boot %s arms it (or pick '%s' in the startup manager); --plant reboots nothing." % (n, self.d.c("volume")))
         ready = self.d.restart_ready()
         ck(ready, "restartable", "this restarts %s itself" % n if ready else self.d.restart_detail(),
-           "A graceful restart is refusable by any application, so an unattended one uses the helper:",
-           "  wk machine setup %s    (one password prompt there). Crossing this leaves the job planted and" % n,
-           "  correct: reboot %s by any means and the A/B runs by itself." % n)
+           "any application can refuse a graceful restart, so an unattended one uses the helper: wk machine setup %s" % n)
         log("")
         if fails:
             warn("%d preflight check(s) failed" % len(fails))
@@ -973,10 +920,8 @@ class MacAB:
                      "  benchmark install needs a network and the two arms could get different revisions of it." % p)
                 words += ["--plan", p]
             else:
-                die("the %s payload could not be pinned, so nothing may be staged: that leg would clone the benchmark\n"
-                    "    over a network the benchmark install may not have, and fail after the reboot where nothing can say so.\n"
-                    "    Pin it here:  wk bench seed %s %s    then re-run; its error is the thing to fix.\n"
-                    "    To go ahead anyway (a benchmark install with a route out):  --allow-network-fetch" % (p, self.ws, p))
+                die("the %s payload could not be pinned, so that leg would need a network after the reboot. Pin it:\n"
+                    "    wk bench seed %s %s   then re-run; or, for an install with a route out, --allow-network-fetch" % (p, self.ws, p))
         return words
 
     def build_and_stage(self, label, slug):
@@ -1067,14 +1012,11 @@ class MacAB:
         if act.dry_run():
             return
         record.held((self.home, bench), self.ws)
-        if self.home.exists(self.taskdir):
-            die("task %s already exists (%s); a task is one request, made once" % (self.task, self.taskdir))
-        self.lock.hold("bench-task-" + self.task, timeout=5)
-        self.here.mkdir_now(self.logs)
         slots = [self.a or "baseline %s" % (self.o.get("base") or "HEAD"), self.b or "patched %s" % self.o.get("patch")]
-        record.task_write(self.taskdir, ["task=" + self.task, "requested=" + self.clock.iso(), "devices=%s=%s" % (self.name, self.preset_name),
-                                         "plans=" + ",".join(self.plans), "rounds=%d" % self.rounds, "slots=" + ",".join(slots)],
-                          [self.command()], machine=self.home)
+        record.new_task(self.home, bench, self.task, self.lock, self.clock.iso(), [
+            "devices=%s=%s" % (self.name, self.preset_name), "plans=" + ",".join(self.plans), "rounds=%d" % self.rounds,
+            "slots=" + ",".join(slots)], self.command())
+        self.here.mkdir_now(self.logs)
 
     def put_file(self, src, dest):
         """The driver delivers and what landed is judged here: a transport that wrote nothing still exits 0."""
@@ -1085,6 +1027,12 @@ class MacAB:
         if not want or want != got:
             warn("put_file: %s is %s bytes, expected %s" % (dest, got or "unreadable", want or "unreadable"))
         return bool(want) and want == got
+
+    def deliver(self, name, text, dest, what):
+        local = os.path.join(self.logs, name)
+        self.here.write(local, text)
+        if not self.put_file(local, dest):
+            die("could not " + what)
 
     def put_tree(self, src, dest):
         """Every file verified, not a sentinel: a tree stale in one file behaves as an older build, after the reboot."""
@@ -1115,8 +1063,7 @@ class MacAB:
         else:
             info("plan: %s, %d-%s round(s), interleaved, until it resolves %s%%" % (" ".join(self.plans), self.rounds, o["max_rounds"], o["detect"]))
         if o.get("rehearse"):
-            warn("  --rehearse: every leg is forced past its own preflight and every number recorded as forced. This\n"
-                 "  rehearses the path; it measures nothing comparable with a clean run.")
+            warn("  --rehearse: every leg is forced past its preflight and recorded as forced; it measures the path, not the machine")
         log("  arm A: %s%s" % (self.a or "built from %s" % (o.get("base") or "HEAD"), "  args: " + o["a_args"] if o.get("a_args") else ""))
         log("  arm B: %s%s" % (self.b or "built with %s" % o.get("patch"), "  args: " + o["b_args"] if o.get("b_args") else ""))
         for i, p in enumerate(self.plans):
@@ -1129,13 +1076,11 @@ class MacAB:
     def plant(self):
         declared = self.d.display()
         if not declared:
-            die("%s declares no display, so nothing here knows what the measured install must read.\n"
-                "    Add its own mode to machines/%s.conf, in points, kind first:\n        display=\"builtin 1470x956\"\n"
-                "    ('python3 lib/wk/mac.py displays' on that install prints both.)" % (self.name, self.name))
-        root, bh = self.d.bench_root(), self.d.bench_home()
-        if not root or not bh:
-            die("nothing on %s is readable right now: it answers on neither node, or its volume is not attached.\n"
-                "    'wk boot %s --status' says which." % (self.name, self.name))
+            die("%s declares no display: add its mode to machines/%s.conf, in points, kind first, e.g. display=\"builtin 1470x956\"\n"
+                "    ('python3 lib/wk/mac.py displays' on that install prints both)" % (self.name, self.name))
+        root, bh = self.staging_root(), self.d.bench_home()
+        if not bh:
+            die("%s's driver names no bench home, so nothing can be planted for its account" % self.name)
         if not self.o.get("patch"):
             self.check_arms(root)
         stamp = self.task.split("-", 1)[0]
@@ -1163,20 +1108,13 @@ class MacAB:
         if not self.mac.test("-r", root + "/wk-tools/lib/wk/bench/autorun.py"):
             die("the planted tree carries no lib/wk/bench/autorun.py, so the launch agent has nothing to start.")
         info("  writing the job")
-        job_json = os.path.join(self.logs, "job.json")
-        self.here.write(job_json, json.dumps(self.job(declared, stamp), indent=2) + "\n")
-        if not self.put_file(job_json, root + "/job.json"):
-            die("could not write the job onto the volume")
-        state = os.path.join(self.logs, "planted.state")   # reset here and nowhere else: the autorun only advances it
-        self.here.write(state, "phase=planted\njob_stamp=%s\nattempts=0\nplanted_at=%s\n" % (stamp, self.clock.iso()))
-        if not self.put_file(state, root + "/autorun.state"):
-            die("could not reset the autorun's state on the volume")
+        self.deliver("job.json", json.dumps(self.job(declared, stamp), indent=2) + "\n", root + "/job.json", "write the job onto the volume")
+        # reset here and nowhere else: the autorun only advances it
+        self.deliver("planted.state", "phase=planted\njob_stamp=%s\nattempts=0\nplanted_at=%s\n" % (stamp, self.clock.iso()),
+                     root + "/autorun.state", "reset the autorun's state on the volume")
         self.mac.run("mac-mkdir.sh", mutates=True, WK_PATH="%s/ab/%s" % (root, stamp))
         info("  installing the launch agent")
-        agent = os.path.join(self.logs, AGENT + ".plist")
-        self.here.write(agent, PLIST % {"agent": AGENT, "autorun": AUTORUN, "root": BENCH_ROOT})
-        if not self.put_file(agent, "%s/Library/LaunchAgents/%s.plist" % (bh, AGENT)):
-            die("could not install the launch agent")
+        self.deliver(AGENT + ".plist", PLIST, "%s/Library/LaunchAgents/%s.plist" % (bh, AGENT), "install the launch agent")
         info("planted: %s" % stamp)
         log("  task   %s   ('wk status' lists it; 'wk bench report %s' reads it)" % (self.taskdir, self.task))
         log("  log    %s/autorun.log   ('wk bench ab --devices %s --status' tails it, in either mode)" % (root, self.name))
@@ -1192,15 +1130,14 @@ class MacAB:
         if idle == "0":
             log("  screen lock: screensaver disabled on the volume (idleTime=0, verified)")
         else:
-            act.barrier("could not disable the screensaver on %s -- idleTime reads '%s'. A benchmark makes no input, so the\n"
-                        "    idle timer runs as on an abandoned machine and the screen lock behind it ends a run in silence.\n"
-                        "    Nothing has been rebooted." % (self.name, idle or "unreadable"), env=self.env)
+            act.barrier("could not disable the screensaver on %s -- idleTime reads '%s', and a benchmark makes no input, so the\n"
+                        "    screen lock would end a run in silence. Nothing has been rebooted." % (self.name, idle or "unreadable"), env=self.env)
         dnd = (self.mac.run("mac-dnd.sh", mutates=True, WK_TOOLS=root + "/wk-tools", WK_HOME=bh).out.split() or [""])[-1]
         if dnd == "on":
             log("  notifications: Do Not Disturb on for the bench account (verified)")
         else:
-            act.barrier("could not turn Do Not Disturb on for the bench account -- it reads '%s'. A banner is drawn over\n"
-                        "    the browser and no gate downstream sees one. Nothing has been rebooted." % (dnd or "unreadable"), env=self.env)
+            act.barrier("could not turn Do Not Disturb on for the bench account -- it reads '%s', and no later gate sees a banner.\n"
+                        "    Nothing has been rebooted." % (dnd or "unreadable"), env=self.env)
 
     def plant_samply(self, root):
         """No network over there, so the warmup round's profiler goes in now, where samply.fetch will look for it."""
@@ -1250,9 +1187,8 @@ class MacAB:
                 "  nobody has to be at the keyboard." % self.d.c("volume"))
         self.d.reboot()
         if not self.clock.wait_until(lambda: not self.mac.test("-d", "/"), DOWN_WAIT, DOWN_POLL):
-            die("could not reboot %s -- it is still answering. The helper exits 0 without acting when the reboot is\n"
-                "    refused, so this is checked rather than trusted. Nothing is lost: reboot it by hand, or from the\n"
-                "    startup manager, and the planted job runs." % self.name)
+            die("could not reboot %s -- it is still answering (a refused reboot exits 0). Reboot it by hand or from the\n"
+                "    startup manager and the planted job runs." % self.name)
         info("  %s is going down" % self.name)
         if self.guest:
             self.d.arm()   # a guest's reboot is its stop, and starting it again is the transition
@@ -1283,29 +1219,21 @@ class MacAB:
             self.clock.sleep(BOOT_POLL)
 
     def notify(self, headline, detail):
-        """A notification that did not go out must never cost a measurement."""
         if not notify.send(self.root, headline, detail, "mac-ab", env=self.env, machine=self.here):
             warn("  could not send the notification '%s'" % headline)
 
     def outcome(self, came):
         n, vol = self.name, self.d.c("volume") or "the benchmark install"
         if came == "bench":
-            info("%s answers in BENCH mode -- the A/B is running there. 'wk bench ab --devices %s --status' follows it,\n"
-                 "  and the machine powers itself off when the job ends." % (n, n))
-        elif came == "host":
-            warn("%s rebooted and came back in HOST mode, so the A/B has not run: the firmware default is not '%s'\n"
-                 "  after all. The job is planted and still valid:  wk boot %s   arms it." % (n, vol, n))
-            self.notify("mac-ab: %s came back to host mode" % n, "the A/B has not run -- the reboot did not enter '%s'. The job is "
-                        "planted and still valid; 'wk boot %s' arms the firmware." % (vol, n))
-        elif came == "noreboot":
-            warn("%s never rebooted, so the A/B has not run. The job is planted and still valid: reboot it by any means\n"
-                 "  (the startup manager works too) and it runs by itself; 'wk bench ab --devices %s --collect' reads it after." % (n, n))
-            self.notify("mac-ab: %s never rebooted" % n, "the A/B has not run. The job is planted and still valid: reboot %s by "
-                        "any means, including the startup manager, and it runs by itself." % n)
-        else:
-            info("%s answers on neither node. A measuring install answers as its own, so this is not the run: it is still\n"
-                 "  restarting, it halted, or its join did not come up. Nothing is lost -- each leg is written to the volume\n"
-                 "  as it ends:  wk bench ab --devices %s --status   once one answers;  --collect   reads it." % (n, n))
+            return info("%s answers in BENCH mode -- the A/B is running there. 'wk bench ab --devices %s --status' follows it,\n"
+                        "  and the machine powers itself off when the job ends." % (n, n))
+        if came == "silent":
+            return info("%s answers on neither node: still restarting, halted, or its join did not come up. Each leg is written\n"
+                        "  to the volume as it ends:  wk bench ab --devices %s --status   once one answers;  --collect   reads it." % (n, n))
+        why, fix = {"host": ("came back to host mode", "the reboot did not enter '%s'; 'wk boot %s' arms the firmware" % (vol, n)),
+                    "noreboot": ("never rebooted", "reboot %s by any means, the startup manager too, and it runs by itself" % n)}[came]
+        warn("%s %s, so the A/B has not run. The job is planted and still valid: %s." % (n, why, fix))
+        self.notify("mac-ab: %s %s" % (n, why), "the A/B has not run. The job is planted and still valid: %s." % fix)
 
     def go(self):
         self.check()
@@ -1350,7 +1278,6 @@ class MacAB:
 
     # -- the back half: a planted job read back, over whichever install answers
     def back(self):
-        """--preflight, --progress, --status or --collect, one at a time, and nothing but --devices beside it."""
         verbs = [k for k in READS if self.o.get(k)]
         if len(verbs) > 1:
             die("--%s: one reading at a time" % " and --".join(verbs))
@@ -1384,7 +1311,7 @@ class MacAB:
         return 0
 
     def read_collect(self):
-        """The volume's result directories carry the env.json `wk bench staged` wrote beside each, so they are copied rather than recomposed; the run map adds which round and arm each is. A contaminated leg is not compared, so not copied."""
+        """Each clean leg's result directory copied as `wk bench staged` wrote it, its round and arm added from the run map."""
         root = self.staging_root()
         info("collect: reading the A/B off %s" % (self.d.c("volume") or self.name))
         st = self.mac.read(root + "/autorun.state")
@@ -1418,7 +1345,6 @@ class MacAB:
         return 0
 
     def collect_tree(self, m, parent, name, into):
-        """`parent`/`name` on the volume, copied under `into` on `m`; False when it did not land."""
         got, packed = self.mac.run("mac-tar.sh", WK_PATH=parent, WK_DIR=name), os.path.join(into, name + ".tar.b64")
         if got.ok:
             m.write(packed, got.out)
@@ -1451,7 +1377,6 @@ class MacAB:
         return n
 
     def read_progress(self):
-        """Every step of a Mac A/B: what it is, the command that does it, and the one that proves it."""
         info("the A/B on %s, step by step" % self.name)
         n, mode, vol, status = self.name, self.d.mode, self.d.c("volume"), "wk bench ab --devices %s --status" % self.name
         steps = []
@@ -1493,20 +1418,13 @@ class MacAB:
              "%d of %d carry their readings" % (gated, len(arms)), "rebuild it: wk build <ws> mac-release-pgo",
              "cat .../staged/<id>/WebKitBuild/*/wk-profile-check.json   (on the Mac)")
         armed = not self.guest and self.firmware_is_bench()
-        can = armed and self.d.restart_ready()
-        if self.guest:
-            step("no", "the machine is in bench mode", "the guest carries no marker", "wk boot %s" % n, "wk boot %s --status" % n)
-        elif can:
-            step("no", "the machine is in bench mode", "it is in host mode, and '%s' is the firmware default with a helper that answers -- "
-                 "so this needs no arming, only the restart" % vol, "wk bench ab --devices %s --systems <a>,<b>   (plants and restarts)" % n,
-                 "wk boot %s --status" % n)
-        elif armed:
-            step("no", "the machine is in bench mode", "it is in host mode. '%s' is the firmware default, so any reboot enters it; what is "
-                 "missing is a restart this can make -- %s" % (vol, self.d.restart_detail()), "wk machine setup %s   (one password prompt there)" % n,
-                 "wk boot %s --status" % n)
-        else:
-            step("no", "the machine is in bench mode", "it is in host mode, and " + self.fw_detail,
-                 "wk boot %s   (arms the firmware and reboots)" % n, "wk boot %s --status" % n)
+        detail, do = (("the guest carries no marker", "wk boot %s" % n) if self.guest else
+                      ("it is in host mode, and '%s' is the firmware default with a helper that answers: only the restart is missing"
+                       % vol, "wk bench ab --devices %s --systems <a>,<b>   (plants and restarts)" % n) if armed and self.d.restart_ready() else
+                      ("it is in host mode; '%s' is the firmware default, and no restart this can make -- %s" % (vol, self.d.restart_detail()),
+                       "wk machine setup %s   (one password prompt there)" % n) if armed else
+                      ("it is in host mode, and " + self.fw_detail, "wk boot %s   (arms the firmware and reboots)" % n))
+        step("no", "the machine is in bench mode", detail, do, "wk boot %s --status" % n)
         job = self.read_json(root + "/job.json") if root else None
         job_arms = [a.get("id", "") for a in (job or {}).get("arms") or []]
         fresh = bool(job_arms) and set(job_arms) <= {a[0] for a in arms}
@@ -1561,10 +1479,8 @@ class PgoCollect:
 
     def faults(self):
         """Every reason, not the first: a throttled collection looks exactly like a good one."""
-        out = []
-        console, me = first_line(self.m.run(["stat", "-f", "%Su", "/dev/console"])), first_line(self.m.run(["id", "-un"]))
-        if console != me:
-            out.append("the screen belongs to '%s', not %s -- a browser driven over ssh has nowhere to draw" % (console or "nobody", me))
+        ok, said = console_row(self.m)
+        out = [] if ok is True else [said]
         if not self.m.run(lib_argv(self.root, "bench/mac-pyobjc.sh", "wk_pyobjc_have")).ok:
             return out + ["no pyobjc: run-benchmark cannot size the screen and no raiser can hold the browser in front"]
         if not self.m.run(["/usr/bin/python3", "-c", "import AppKit, sys; sys.exit(0 if AppKit.NSScreen.mainScreen() else 1)"]).ok:
@@ -1582,10 +1498,9 @@ class PgoCollect:
         """speedometer3 and jetstream3 name a moving branch, so each benchmark is pinned by its upstream commit first."""
         from wk.store import Store
         store = Store(self.env)
-        seeder = seed.Seeder(self.m, Lock(store, self.m, self.clock or Clock()), os.path.join(store.cache_dir(), "bench"), store.mirror_dir())
-        out = []
+        lock, out = Lock(store, self.m, self.clock or Clock()), []
         for plan in pgo.BENCHMARKS:
-            d = seeder.seed(plan, seed.plan_json(self.read, plan))
+            d = seed.pin(self.m, lock, store, self.read, plan)[1]
             if not d or not self.m.isdir(d):
                 die("could not pin the %s payload, so the collection could profile an unpinned revision of it" % plan)
             out.append((plan, d))

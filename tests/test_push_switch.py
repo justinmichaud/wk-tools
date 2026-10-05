@@ -552,28 +552,16 @@ class TestThePodmanMachineIsHalfTheSwitch(PushTest):
 
 
 class TestTheScanReadsPsWhereThereIsNoProc(WkTest):
-    """A macOS guest has no /proc: its `ps` names the executable, and only Claude Code's is a session."""
+    """A macOS guest has no /proc: its `ps` names the executable, and only Claude Code's, from any install, is a session."""
 
     def test_only_claude_codes_executable_is_a_session(self):
-        ps = ("#!/bin/sh\necho '12 /Users/admin/.local/bin/claude'\necho '13 /Users/admin/.local/share/claude/versions/2.1.270'\n"
-              "echo '14 /Applications/Claude.app/Contents/MacOS/Claude'\necho '15 node'\necho '16 claude'\n")
+        ps = ("#!/bin/sh\nprintf '%s\\n' '11 /opt/homebrew/Caskroom/claude-code/2.1.236/claude' '12 /Users/admin/.local/bin/claude' "
+              "'13 /Users/admin/.local/share/claude/versions/2.1.270' '14 /Applications/Claude.app/Contents/MacOS/Claude' "
+              "'15 node' '16 claude' '17 /bin/zsh' '18 /usr/bin/claudette'\n")
         (self.tmp / "ps").write_text(ps)
         (self.tmp / "ps").chmod(0o755)
-        scan = pushswitch.AGENT_PID_SCAN.replace("[ -d /proc/self ]", "false")
+        scan = pushswitch.AGENT_PID_SCAN.replace("if [ -d /proc/self ]", "if false")
         cp = subprocess.run(["sh", "-c", scan], env={"PATH": "%s:/usr/bin:/bin" % self.tmp}, capture_output=True, text=True)
-        self.assertEqual(["12", "13", "16"], cp.stdout.split(), cp.stderr)
+        self.assertEqual(["11", "12", "13", "16"], cp.stdout.split(), cp.stderr)
 
 
-class TestTheScanFindsEveryClaude(WkTest):
-    def test_a_claude_from_any_install_is_found_and_nothing_else(self):
-        """A macOS guest's claude is the image's Homebrew cask, not ~/.local/bin's."""
-        from wk import pushswitch
-        bin_dir = self.tmp / "bin"
-        bin_dir.mkdir()
-        ps = bin_dir / "ps"
-        ps.write_text("#!/bin/sh\nprintf '%s\\n' '11 /opt/homebrew/Caskroom/claude-code/2.1.236/claude' "
-                      "'12 /Users/u/.local/share/claude/versions/2.1.300' '13 /bin/zsh' '14 /usr/bin/claudette'\n")
-        ps.chmod(0o755)
-        script = pushswitch.AGENT_PID_SCAN.replace("if [ -d /proc/self ]", "if false")
-        cp = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=dict(os.environ, PATH="%s:/usr/bin:/bin" % bin_dir))
-        self.assertEqual(["11", "12"], cp.stdout.split())

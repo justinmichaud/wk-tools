@@ -14,7 +14,6 @@ PUSH_REFS = "refs/wk/push/"
 
 
 def push_lock(ref):
-    """The lock a box push holds on its temporary ref from the fetch into the mirror until the ref is deleted."""
     return "push-ref-" + ref[len(PUSH_REFS):].replace("/", "%")
 
 
@@ -40,14 +39,11 @@ def rubble(store, machine, lock):
 
 def parse_spec(spec):
     out = dict(kind="", user="", branch="", remote="", n="")
-    if spec[:1].isdigit():
-        if not DIGITS.match(spec):
+    remote, _, n = spec.rpartition(":") if spec.startswith("wpe:") else ("origin", "", spec)
+    if n[:1].isdigit():
+        if not DIGITS.match(n):
             die("'%s' is not a pull request number (digits only)" % spec)
-        return dict(out, kind="pull", remote="origin", n=spec)
-    if spec.startswith("wpe:") and spec[4:5].isdigit():
-        if not DIGITS.match(spec[4:]):
-            die("'%s' is not a pull request number (digits only)" % spec)
-        return dict(out, kind="pull", remote="wpe", n=spec[4:])
+        return dict(out, kind="pull", remote=remote, n=n)
     if ":" in spec:
         user, _, branch = spec.partition(":")
         if not user or not branch:
@@ -111,7 +107,7 @@ def _out(r):
 
 
 def retarget(driver, ws, src, forks, branches, remotes=git.REMOTES):
-    """Point the checked-out branch at the fork it can be pushed to: the lines to report, none when it is already right."""
+    """Point the checked-out branch at the fork it can be pushed to; the lines to report."""
     b = _out(driver.exec(ws, ["git", "-C", src, "symbolic-ref", "--quiet", "--short", "HEAD"]))
     if not b:
         return []
@@ -234,7 +230,7 @@ def mirror_rev(machine, mirror, ref):
 
 
 def resolved_or_planned(machine, mirror, dest, what, fetch):
-    """A dry run is the recorder: it answers `dest` from the mirror already there, or plans `fetch` unrun."""
+    """Under a dry run, `dest` from the mirror already there, or `fetch` planned unrun."""
     if act.dry_run():
         sha = mirror_rev(machine, mirror, dest)
         if sha:

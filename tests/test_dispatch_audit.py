@@ -87,10 +87,6 @@ def audit(path):
         own.append("subverb")
     if parses_flag(path, "--on"):
         own.append("--on")
-    if parses_flag(path, "--force"):
-        own.append("--force")
-    if parses_flag(path, "--quiet"):
-        own.append("--quiet")
     return own
 
 

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Will the firmware find everything it needs in this boot filesystem? Once start4.elf runs, BOOT_ORDER is spent: a
-missing kernel halts a Pi 4 rather than trying the next device."""
+"""Does this boot filesystem hold every file its config.txt's `[all]` asks for? A missing kernel halts a Pi 4."""
 
 import argparse
 import os
@@ -15,88 +14,49 @@ def resolve(root, filename):
 
 
 def parse_config(text):
-    """The assignments a Pi 4 acts on: only `[all]`'s; `[tryboot]`'s belong to a boot path this is not checking."""
-    config = {}
-    live = True
+    config, live = {}, True
     for raw in text.splitlines():
         line = raw.split("#", 1)[0].strip()
-        if not line:
-            continue
         if line.startswith("[") and line.endswith("]"):
             live = line.lower() == "[all]"
-            continue
-        if not live:
-            continue
-        if "=" in line:
+        elif live and "=" in line:
             key, _, value = line.partition("=")
             config[key.strip()] = value.strip()
-        else:
-            words = line.split()
-            if len(words) >= 2:
-                directive, filename = words[0], words[1]
-                config[directive] = filename
+        elif live and len(line.split()) >= 2:
+            config[line.split()[0]] = line.split()[1]
     return config
 
 
 def wanted_files(config, model_dtb):
     prefix = config.get("os_prefix", "")
-
-    if "kernel" in config:
-        kernels = [prefix + config["kernel"]]
-    else:
-        # The firmware takes whichever is present; kernel_2712.img is the only name meta-raspberrypi gives a Pi 5's.
-        kernels = [prefix + k for k in
-                   ("kernel8.img", "kernel_2712.img",
-                    "kernel7l.img", "kernel7.img", "kernel.img")]
-
-    files = [
-        ("second-stage firmware", ["start4.elf"]),
-        ("firmware fixup", ["fixup4.dat"]),
-        ("kernel", kernels),
-        ("device tree", [prefix + model_dtb]),
-    ]
+    # The firmware takes whichever is present; kernel_2712.img is the only name meta-raspberrypi gives a Pi 5's.
+    kernels = [config["kernel"]] if "kernel" in config else \
+        ["kernel8.img", "kernel_2712.img", "kernel7l.img", "kernel7.img", "kernel.img"]
+    files = [("second-stage firmware", ["start4.elf"]), ("firmware fixup", ["fixup4.dat"]),
+             ("kernel", [prefix + k for k in kernels]), ("device tree", [prefix + model_dtb])]
     if "initramfs" in config:
         files.append(("initramfs", [prefix + config["initramfs"]]))
     if "cmdline" in config:
-        files.append(("kernel command line",
-                      [prefix + config["cmdline"], config["cmdline"]]))
+        files.append(("kernel command line", [prefix + config["cmdline"], config["cmdline"]]))
     return files
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", required=True, help="the boot filesystem to check")
-    ap.add_argument("--dtb", default="bcm2711-rpi-4-b.dtb",
-                    help="the device tree the place board will ask for")
-    ap.add_argument("--resolve", metavar="NAME",
-                    help="print the file this name resolves to, relative to the root, or nothing")
+    ap.add_argument("--dtb", default="bcm2711-rpi-4-b.dtb", help="the device tree the board will ask for")
     args = ap.parse_args()
-
     root = os.path.realpath(args.root)
-
-    if args.resolve is not None:
-        path = resolve(root, args.resolve)
-        print(os.path.relpath(path, root) if path else "")
-        return 0
-
-    config_path = os.path.join(root, "config.txt")
-    if not os.path.isfile(config_path):
+    try:
+        with open(os.path.join(root, "config.txt"), errors="replace") as fh:
+            config = parse_config(fh.read())
+    except FileNotFoundError:
         print("no config.txt in the boot filesystem", file=sys.stderr)
         return 1
-
-    with open(config_path, "r", errors="replace") as fh:
-        config = parse_config(fh.read())
-
-    missing = []
-    for what, candidates in wanted_files(config, args.dtb):
-        for name in candidates:
-            if resolve(root, name) is not None:
-                break
-        else:
-            missing.append((what, candidates))
-
-    for what, candidates in missing:
-        print(f"{what}: {' or '.join(candidates)}", file=sys.stderr)
+    missing = [(what, names) for what, names in wanted_files(config, args.dtb)
+               if not any(resolve(root, n) for n in names)]
+    for what, names in missing:
+        print("%s: %s" % (what, " or ".join(names)), file=sys.stderr)
     return 1 if missing else 0
 
 

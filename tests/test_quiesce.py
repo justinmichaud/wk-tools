@@ -5,8 +5,6 @@ directory, the helper's bound on a stopped daemon, `killpoints[quiesce]`, a dry 
 wet run's plan, and the live rows `quiesce.readback[<m>]` and `quiesce.classified[<m>]`."""
 
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import os
 import pty
@@ -17,7 +15,7 @@ import unittest
 from unittest import mock
 
 from tests.killpoints import converges
-from tests.support import REPO, WkTest, as_dispatched, bash, func_body, requires_machine, run
+from tests.support import REPO, WkTest, as_dispatched, bash, func_body, load_cmd, requires_machine, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, decl, fleet, quiet  # noqa: E402
@@ -286,17 +284,6 @@ class TestStatus(QuiesceTest):
     def test_a_missing_helper_is_its_account(self):
         self.assertIn("is not installed", self.status(World(helper=False)))
 
-    def test_an_older_wk_tools_state_is_named_and_not_read(self):
-        w = World()
-        w._set_file("/tmp/wk-quiesce/caffeinate.pid", "4242\n")
-        w.pids.add(4242)
-        out = self.status(w)
-        self.assertIn("stale: /tmp/wk-quiesce", out)
-        self.assertIn("caffeinate: no", out)
-
-    def test_no_stale_directory_names_nothing(self):
-        self.assertNotIn("stale", self.status(World()))
-
     def test_app_nap_is_read_from_the_browsers_domain(self):
         w = World()
         self.assertIn("disabled for MiniBrowser", self.status(w))
@@ -451,12 +438,7 @@ class TestCrashOnly(QuiesceTest):
 
 class TestTheCommand(QuiesceTest):
     def load(self):
-        path = str(REPO / "cmd" / "quiesce")
-        loader = importlib.machinery.SourceFileLoader("wk_cmd_quiesce", path)
-        spec = importlib.util.spec_from_file_location("wk_cmd_quiesce", path, loader=loader)
-        m = importlib.util.module_from_spec(spec)
-        loader.exec_module(m)
-        return m
+        return load_cmd("quiesce")
 
     def test_bare_is_status_and_anything_else_is_refused(self):
         """the dispatcher hands a bare `wk quiesce` over as status, and refuses any other word"""

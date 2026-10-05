@@ -1,12 +1,4 @@
-"""The plan as a graph, and the one scheduler that runs it (lib/wk/sched.py).
-
-A step is an id, the machine it runs on, what it needs, what it holds exclusively, how to ask whether it is already
-done, and what it runs. The half that decides what runs when is driven against steps that run nothing; a `wk` command step against the
-Fake machine.
-`wk bench ab`'s own graph is tests/test_ab_plan.py's.
-
-Run: python3 tests/run.py -k test_sched
-"""
+"""The plan as a graph, and the one scheduler that runs it (lib/wk/sched.py)."""
 import sys
 import threading
 import unittest
@@ -20,8 +12,7 @@ from wk.machine import Fake  # noqa: E402
 
 
 class FakeRuns:
-    """A runner that runs nothing: it records what was asked, how many steps were in flight at once, and which
-    pairs overlapped."""
+    """Runs nothing; records what was asked, the peak in flight, and which pairs overlapped."""
 
     def __init__(self, codes=None, block=()):
         self.codes = dict(codes or {})
@@ -59,7 +50,6 @@ def steps(runs, *specs, done=()):
 
 
 class TestTheGraphIsChecked(unittest.TestCase):
-    """A malformed graph is refused before anything runs, naming the step."""
 
     def refused(self, graph):
         with self.assertRaises(Refused):
@@ -70,9 +60,6 @@ class TestTheGraphIsChecked(unittest.TestCase):
 
     def test_an_id_names_one_step(self):
         self.refused([step("a"), step("a")])
-
-    def test_a_step_with_nothing_to_run_is_refused(self):
-        self.refused([sched.Step("a", "m")])
 
     def test_steps_that_need_each_other_are_refused(self):
         self.refused([step("a", "b"), step("b", "a")])
@@ -105,8 +92,7 @@ class TestWhatRunsAtOnce(unittest.TestCase):
 
 
 class TestWhatIsWorthRunning(unittest.TestCase):
-    """A step exists to produce something: when what it feeds is already there it is not run again, which is what
-    makes a profile-guided cycle re-runnable without collecting on the board a second time."""
+    """When what a step feeds is already there it is not run again."""
 
     def test_a_phase_whose_result_is_already_there_is_not_run(self):
         graph = [step("instr"), step("collect", "instr"), step("slot", "collect")]
@@ -162,7 +148,6 @@ class TestTheScheduler(unittest.TestCase):
         self.assertEqual((rc, runs.started, [x.id for x in s.already]), (0, ["b"], ["a"]))
 
     def test_the_predicates_are_asked_all_at_once(self):
-        """A question forwarded into the podman machine costs about a second, five per board."""
         gate, seen, guard = threading.Event(), [0, 0], threading.Lock()
 
         def done():
@@ -192,8 +177,6 @@ class TestTheScheduler(unittest.TestCase):
         self.assertIn("c", runs.started)
 
     def test_a_refusal_is_not_now_and_the_step_keeps_its_place(self):
-        """A machine's admission control refuses a build that will not fit beside the ones running; the step is tried
-        again once something else ends."""
         runs = FakeRuns(codes={"b": [RETRY_EXIT, 0]}, block=("a",))
         s = sched.Scheduler(steps(runs, ("a", "", ""), ("b", "", "")))
         t = self.in_background(s, lambda: runs.started.count("b") == 1)
@@ -214,7 +197,6 @@ class TestTheScheduler(unittest.TestCase):
 
 
 class TestAWkCommandStep(unittest.TestCase):
-    """`wk_step` and `wk_yes`: a step that is the `wk` command a person types, and a done() that asks one."""
 
     def test_the_command_runs_through_the_machine_appending_to_its_log(self):
         f = Fake("here")

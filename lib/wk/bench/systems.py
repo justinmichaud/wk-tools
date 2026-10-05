@@ -71,15 +71,9 @@ class System:
         if self.ws_driver.info(self.ws) in ("absent", "unreachable"):
             die(no_such_workspace(self.ws))
 
-    def deploy(self, leg):
-        raise NotImplementedError
-
     def run(self, leg, script, watched, log):
         argv, cwd = self.ws_driver.exec_argv(self.ws, ["bash", "-lc", script])
         return watched(argv, cwd, log)
-
-    def collect(self, leg):
-        raise NotImplementedError
 
     def src(self):
         return self.ws_driver.src(self.ws)

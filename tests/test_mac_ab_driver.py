@@ -126,18 +126,13 @@ class PlantGuest(Shell, FakeGuest):
 
 
 def here_fake():
-    """This machine: its own digest of the tree, a samply, and a notifier that is told what went out."""
+    """This machine: its own digest of the tree, a cached samply, and a notifier that is told what went out."""
     here = Fake("here")
     here.answer(["hostname", "-s"], out="moose\n")
     here.answer(["python3"], out=DIGEST + "\n")
     here.answer(["sh", "-c", 'wc -c < "$1"'], out="42\n")
+    here.answer(["test", "-x"])   # samply.fetch finds it in the cache
     here.notified = []
-
-    def bash_fn(argv, fake):
-        if "samply" in argv[2]:
-            return Result(0, "0.13.1\naarch64-apple-darwin\n/cache/samply\n")
-        return Result(1)
-    here.react(["bash", "-c"], bash_fn)
     return here
 
 
@@ -212,74 +207,36 @@ def mutations(m):
 
 class TestTheFirmwareDefaultIsAsserted(WkTest):
 
-    def _fw(self, firmware=None, blank=False):
-        with world() as m:
-            ready(m)
-            if firmware:
-                m.fake.firmware = firmware
-            if blank:
-                m.fake.answer(r"^boot-volume", Result(1))
-            return m.firmware_is_bench(), m.fw_detail
-
-    def test_the_bench_volume_group_as_the_default_passes(self):
-        ok, detail = self._fw()
-        self.assertTrue(ok, detail)
-        self.assertIn(BENCH_GROUP, detail)
-
-    def test_the_host_install_as_the_default_fails(self):
-        ok, detail = self._fw("host")
-        self.assertFalse(ok)
-        self.assertIn("the host install", detail)
-
-    def test_a_default_matching_neither_install_fails(self):
-        with world() as m:
-            ready(m)
-            m.fake.answer(r"^boot-volume", Result(0, "a:b:11111111-2222-3333-4444-555555555555\n"))
-            self.assertFalse(m.firmware_is_bench())
-            self.assertIn("neither install", m.fw_detail)
-
-    def test_an_unreadable_boot_volume_fails(self):
-        ok, detail = self._fw(blank=True)
-        self.assertFalse(ok)
-        self.assertIn("no boot-volume", detail)
+    def test_only_the_bench_volume_group_as_the_default_passes(self):
+        for boot, ok, said in ((None, True, BENCH_GROUP), ("host", False, "the host install"),
+                               (Result(0, "a:b:11111111-2222-3333-4444-555555555555\n"), False, "neither install"),
+                               (Result(1), record.UNKNOWN, "no boot-volume")):
+            with self.subTest(said=said), world() as m:
+                ready(m)
+                if isinstance(boot, str):
+                    m.fake.firmware = boot
+                elif boot is not None:
+                    m.fake.answer(r"^boot-volume", boot)
+                self.assertEqual(ok, m.firmware_is_bench())
+                self.assertIn(said, m.fw_detail)
 
 
 class TestOnlyTheDeclaredDisplay(WkTest):
 
-    def v(self, doc, want="builtin"):
-        return mac.display_verdict(doc if isinstance(doc, str) else json.dumps(doc), want)
-
-    def test_the_measured_reading_passes(self):
-        ok, detail = self.v(BENCH_DISPLAY)
-        self.assertTrue(ok)
-        self.assertIn("builtin 1470x956", detail)
-
-    def test_the_host_installs_own_reading_passes_too(self):
-        self.assertTrue(self.v(HOST_DISPLAY)[0])
-
-    def test_two_online_displays_fail(self):
-        doc = {"displays": [BENCH_DISPLAY["displays"][0], {"builtin": False, "online": True, "points": [3840, 2160]}]}
-        ok, detail = self.v(doc)
-        self.assertFalse(ok)
-        self.assertIn("2 online display(s)", detail)
-        self.assertIn("external 3840x2160", detail)
-
-    def test_a_display_that_is_not_the_declared_kind_fails(self):
-        ok, detail = self.v({"displays": [{"builtin": False, "online": True, "points": [2560, 1440]}]})
-        self.assertFalse(ok)
-        self.assertIn("not the builtin panel", detail)
-
-    def test_a_guest_is_measured_on_the_paravirtual_panel_it_declares(self):
-        self.assertTrue(self.v({"displays": [{"online": True, "points": [1280, 800]}]}, "external")[0])
-
-    def test_no_display_and_an_offline_one(self):
-        self.assertIn("0 online display(s)", self.v({"displays": []})[1])
-        doc = {"displays": [BENCH_DISPLAY["displays"][0], {"builtin": False, "online": False}]}
-        self.assertTrue(self.v(doc)[0])
-
-    def test_a_reading_that_could_not_be_taken_fails(self):
-        self.assertIn("answered nothing", self.v("")[1])
-        self.assertIn("did not print JSON", self.v("not json")[1])
+    def test_one_online_display_of_the_declared_kind(self):
+        ext = {"builtin": False, "online": True, "points": [3840, 2160]}
+        for doc, want, ok, said in ((BENCH_DISPLAY, "builtin", True, "builtin 1470x956"), (HOST_DISPLAY, "builtin", True, ""),
+                                    ({"displays": [BENCH_DISPLAY["displays"][0], ext]}, "builtin", False, "2 online display(s)"),
+                                    ({"displays": [BENCH_DISPLAY["displays"][0], ext]}, "builtin", False, "external 3840x2160"),
+                                    ({"displays": [ext]}, "builtin", False, "not the builtin panel"),
+                                    ({"displays": [{"online": True, "points": [1280, 800]}]}, "external", True, ""),
+                                    ({"displays": []}, "builtin", False, "0 online display(s)"),
+                                    ({"displays": [BENCH_DISPLAY["displays"][0], dict(ext, online=False)]}, "builtin", True, ""),
+                                    ("", "builtin", None, "answered nothing"), ("not json", "builtin", None, "did not print JSON")):
+            with self.subTest(said=said, doc=doc):
+                got, detail = mac.display_verdict(doc if isinstance(doc, str) else json.dumps(doc), want)
+                self.assertEqual(ok, got)
+                self.assertIn(said, detail)
 
 
 class TestThePinnedDisplayIsConfig(WkTest):
@@ -368,21 +325,14 @@ class TestItSharesTheBoardABsRefusals(WkTest):
         self.assertIs(got, Refused, err)
         return err
 
-    def test_the_two_arms_are_two_different_staged_builds(self):
-        self.assertIn("two different arms", self.refused(systems="sid-a,sid-a"))
-
-    def test_a_change_to_resolve_in_the_mirror_is_not_a_macs_arm(self):
-        self.assertIn("staged builds", self.refused(spec="wpe:1725"))
-
-    def test_a_board_only_option_is_refused(self):
-        self.assertIn("--slot is a board A/B's", self.refused(slot="a"))
-
-    def test_the_plan_refusals_are_the_board_ones(self):
-        self.assertIn("--rounds takes a number", self.refused(rounds="0"))
-        self.assertIn("is not a plan name", self.refused(plans=["a b"]))
-
-    def test_the_ceiling_is_not_below_the_floor(self):
-        self.assertIn("below --rounds", self.refused(rounds="9", max_rounds="4"))
+    def test_each_refusal_names_its_reason(self):
+        for said, o in (("two different arms", {"systems": "sid-a,sid-a"}), ("staged builds", {"spec": "wpe:1725"}),
+                        ("--slot is a board A/B's", {"slot": "a"}), ("--rounds takes a number", {"rounds": "0"}),
+                        ("is not a plan name", {"plans": ["a b"]}), ("below --rounds", {"rounds": "9", "max_rounds": "4"}),
+                        ("--workspace <ws>", {"systems": "", "patch": "HEAD", "workspace": ""}), ("--workspace <ws>", {"workspace": ""}),
+                        ("One or the other", {"patch": "HEAD", "workspace": "mac-rel"})):
+            with self.subTest(said=said, o=o):
+                self.assertIn(said, self.refused(**o))
 
     def test_the_task_is_written_in_its_workspace_on_the_machine_holding_it(self):
         with world() as m:
@@ -397,11 +347,6 @@ class TestItSharesTheBoardABsRefusals(WkTest):
             got, err = said(m.create_task, "20260101T000000Z")
         self.assertIs(got, Refused)
         self.assertIn("no workspace 'gone'", err)
-
-    def test_the_task_lives_in_a_workspace_and_patch_excludes_systems(self):
-        self.assertIn("--workspace <ws>", self.refused(systems="", patch="HEAD", workspace=""))
-        self.assertIn("--workspace <ws>", self.refused(workspace=""))
-        self.assertIn("One or the other", self.refused(patch="HEAD", workspace="mac-rel"))
 
     def test_a_board_is_refused_a_macs_option(self):
         with temp_store() as store:
@@ -493,6 +438,11 @@ class TestThePlant(WkTest):
             got, err = self.plant(m, lambda m: m.fake.answer(r"wk_quiet_dnd_on", Result(0, "off\n")))
         self.assertIs(got, Refused)
         self.assertIn("Do Not Disturb", err)
+
+    def test_the_planted_samply_is_made_executable_over_there(self):
+        with world() as m:
+            self.plant(m)
+        self.assertTrue([c for c in m.fake.ran if re.match(r"chmod 0755 .*/cache/samply/.*/samply$", c)], m.fake.ran)
 
     def test_the_agent_runs_the_tree_the_plant_verified(self):
         with world() as m:

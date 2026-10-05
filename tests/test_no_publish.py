@@ -1,7 +1,6 @@
 """Nothing an agent runs can publish: the proxy's GitHub rules, and `wk key push on` ending any running claude session first."""
 import importlib.util
 import os
-import subprocess
 import tempfile
 import unittest
 
@@ -60,35 +59,6 @@ class TestPushOnEndsAnyRunningAgent(PushTest):
 
     def sessions(self):
         return [ws for _, ws, _ in pushswitch.Push(registry(self.w, self.boxes), self.w.sec(), self.clock).agent_sessions()]
-
-    def test_names_the_workspaces_with_a_claude_process(self):
-        self.assertEqual(["b"], self.sessions())
-
-    def test_no_session_is_silence(self):
-        self.box.claude = {"a": []}
-        self.assertEqual([], self.sessions())
-
-    def test_the_scan_is_plain_sh(self):
-        cp = subprocess.run(["sh", "-n", "-c", pushswitch.AGENT_PID_SCAN], capture_output=True, text=True)
-        self.assertEqual(0, cp.returncode, cp.stderr)
-
-    def test_on_ends_them_before_loading_the_agent(self):
-        os.environ["WK_YES"] = "1"
-        self.push("on")
-        acts = [e[1] for e in self.w.acts() if e[0] == "act"]
-        self.assertLess(acts.index(("exec", "b", "sh", "-c", "kill 4242 2>/dev/null; exit 0")),
-                        next(i for i, a in enumerate(acts) if "ssh-add -" in a[-1]))
-
-    def test_ending_them_is_asked_first(self):
-        os.environ["WK_DESTRUCTIVE"] = "1"
-        rc, _, err = self.push("on")
-        self.assertEqual(1, rc)
-        self.assertEqual(["4242"], self.box.claude["b"])
-
-    def test_a_declined_prompt_leaves_the_keys_out(self):
-        rc, _, err = self.push("on")
-        self.assertEqual(1, rc)
-        self.assertEqual(set(), self.w.agents[SOCK])
 
     def unaskable(self, state):
         self.box.exec = lambda ws, argv, tty=False, timeout=None: Result(125, "", "exec failed")

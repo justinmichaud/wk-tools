@@ -451,7 +451,7 @@ class TestUnitsForABusyBoxInit(WkTest):
         (self.work / "init.d" / "S11wk-self-disarm").write_text("#!/bin/sh\nexit 0\n")
 
     def _edit(self):
-        return bash(_SAY + "SYSCTL_N=0\n" + _lift(CARD_PRIV, "_unit_target", "_units_sysctl", "_units_edit")
+        return bash(_SAY + "SYSCTL_N=0\n" + _lift(CARD_PRIV, "_put", "_unit_target", "_units_sysctl", "_units_edit")
                     + f'\n_units_edit "{self.root}" "{self.work}"\n')
 
     def test_a_busybox_image_takes_the_init_scripts_and_the_sysctls(self):
@@ -530,7 +530,7 @@ class TestPiSdDriver(unittest.TestCase):
         fake, d = self.board("/dev/mmcblk0p5", "/dev/mmcblk0p7")
         d.arm("/dev/mmcblk0p7")
         self.assertEqual(self.arms(fake), ["/dev/mmcblk0@third"])
-        self.assertIn("select_system", self.refused(d.arm, ""))
+        self.assertIn("is not a bench system's boot partition", self.refused(d.arm, ""))
 
     def test_arm_skips_only_when_armed_for_the_same_system(self):
         fake, d = self.board("/dev/mmcblk0p5", "/dev/mmcblk0p7")

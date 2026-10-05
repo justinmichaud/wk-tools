@@ -32,53 +32,28 @@ def usage(why):
     raise Refused(2)
 
 
-def is_ws_side(p):
-    return p.startswith(":") and len(p) > 1
-
-
 def ws_path(driver, name, p):
-    p = p[1:]
-    if p.startswith("/"):
-        return p
-    return posixpath.join(driver.src(name), p)
+    return p[1:] if p.startswith(":/") else posixpath.join(driver.src(name), p[1:])
 
 
 def kind_here(p):
-    if os.path.isdir(p):
-        return "dir"
-    if os.path.exists(p):
-        return "file"
-    return "absent"
+    return "dir" if os.path.isdir(p) else "file" if os.path.exists(p) else "absent"
 
 
-def kind_or_die(kind, what, name):
-    if kind in ("dir", "file", "absent"):
-        return
-    die("could not tell what %s is: workspace '%s' did not answer.\n"
-        "    'wk status %s' says whether it is up." % (what, name, name))
-
-
-def ask_to_replace(dst_kind, where):
-    if dst_kind == "absent":
-        nothing_to_ask()
-    elif not confirm("%s already exists; replace it%s?" % (where, " (a directory's whole contents, not a merge)" if dst_kind == "dir" else "")):
-        die("not copied")
+WORD = {"dir": "directory", "file": "file"}
 
 
 def main(argv):
     name = store.ws_name()
     args = decl.Args(decl.Decl(__file__), argv)
-    recurse = args.flag("-r")
     operands = args.positionals
     if len(operands) != 2:
         usage("needs exactly two paths, a source and a destination")
     src, dst = operands
-
-    src_is_ws, dst_is_ws = is_ws_side(src), is_ws_side(dst)
-    if src_is_ws and dst_is_ws:
-        usage("both paths are in the workspace -- exactly one side carries the ':'")
-    if not src_is_ws and not dst_is_ws:
-        usage("neither path is in the workspace -- mark that side with a leading ':', as in :Tools/foo.js")
+    src_is_ws, dst_is_ws = [p.startswith(":") and len(p) > 1 for p in operands]
+    if src_is_ws == dst_is_ws:
+        usage("both paths are in the workspace -- exactly one side carries the ':'" if src_is_ws else
+              "neither path is in the workspace -- mark that side with a leading ':', as in :Tools/foo.js")
 
     reg = places.Registry(ROOT)
     try:
@@ -86,52 +61,45 @@ def main(argv):
     except LookupError as e:
         die(str(e))
 
+    in_ws = lambda p: driver.path_kind(name, p)  # noqa: E731
     if src_is_ws:
-        src_path, src_pfx = ws_path(driver, name, src), name + ":"
-        dst_path, dst_pfx = dst, ""
-        kind_src = lambda p: driver.path_kind(name, p)  # noqa: E731
-        kind_dst = kind_here
-        copy_file = lambda: driver.pull(name, src_path, dst_path)  # noqa: E731
-        copy_dir = lambda: driver.pull_dir(name, src_path, dst_path)  # noqa: E731
+        src_path, src_pfx, kind_src = ws_path(driver, name, src), name + ":", in_ws
+        dst_path, dst_pfx, kind_dst = dst, "", kind_here
+        copies = driver.pull, driver.pull_dir
     else:
-        src_path, src_pfx = src, ""
-        dst_path, dst_pfx = ws_path(driver, name, dst), name + ":"
-        kind_src = kind_here
-        kind_dst = lambda p: driver.path_kind(name, p)  # noqa: E731
-        copy_file = lambda: driver.push(name, src_path, dst_path)  # noqa: E731
-        copy_dir = lambda: driver.push_dir(name, src_path, dst_path)  # noqa: E731
+        src_path, src_pfx, kind_src = src, "", kind_here
+        dst_path, dst_pfx, kind_dst = ws_path(driver, name, dst), name + ":", in_ws
+        copies = driver.push, driver.push_dir
 
-    src_kind = kind_src(src_path)
-    kind_or_die(src_kind, src_pfx + src_path, name)
+    def kind(of, path, pfx):
+        k = of(path)
+        if k not in ("dir", "file", "absent"):
+            die("could not tell what %s%s is: workspace '%s' did not answer.\n"
+                "    'wk status %s' says whether it is up." % (pfx, path, name, name))
+        return k
+
+    src_kind = kind(kind_src, src_path, src_pfx)
     if src_kind == "absent":
         die("no such file or directory: %s%s" % (src_pfx, src_path))
-
-    dst_kind = kind_dst(dst_path)
-    kind_or_die(dst_kind, dst_pfx + dst_path, name)
+    if src_kind == "dir" and not args.flag("-r"):
+        die("%s%s is a directory -- 'wk scp -r' copies one" % (src_pfx, src_path))
+    dst_kind = kind(kind_dst, dst_path, dst_pfx)
     if dst_kind == "dir":
         # An existing directory receives the copy under the source's own name, as cp does.
         dst_path = posixpath.join(dst_path, posixpath.basename(src_path.rstrip("/")))
-        dst_kind = kind_dst(dst_path)
-        kind_or_die(dst_kind, dst_pfx + dst_path, name)
-
+        dst_kind = kind(kind_dst, dst_path, dst_pfx)
+    if dst_kind not in ("absent", src_kind):
+        die("%s%s is a %s, and a %s cannot replace it.\n    Name a path for the copy, or remove that %s first."
+            % (dst_pfx, dst_path, WORD[dst_kind], WORD[src_kind], WORD[dst_kind]))
+    if dst_kind == "absent":
+        nothing_to_ask()
+    elif not confirm("%s%s already exists; replace it%s?" % (dst_pfx, dst_path, " (a directory's whole contents, not a merge)"
+                                                            if dst_kind == "dir" else "")):
+        die("not copied")
     try:
-        if src_kind == "dir":
-            if not recurse:
-                die("%s%s is a directory -- 'wk scp -r' copies one" % (src_pfx, src_path))
-            if dst_kind == "file":
-                die("%s%s is a file, and a directory cannot replace it.\n"
-                    "    Name a path for the copy, or remove that file first." % (dst_pfx, dst_path))
-            ask_to_replace(dst_kind, dst_pfx + dst_path)
-            copy_dir()
-        else:
-            if dst_kind == "dir":
-                die("%s%s is a directory, and a file cannot replace it.\n"
-                    "    Name a path for the copy, or remove that directory first." % (dst_pfx, dst_path))
-            ask_to_replace(dst_kind, dst_pfx + dst_path)
-            copy_file()
+        copies[src_kind == "dir"](name, src_path, dst_path)
     except OSError as e:
         die("copying %s%s to %s%s failed%s" % (src_pfx, src_path, dst_pfx, dst_path, ": %s" % e if str(e) else ""))
-
     if not dry_run():
         info("copied %s%s to %s%s" % (src_pfx, src_path, dst_pfx, dst_path))
     return 0

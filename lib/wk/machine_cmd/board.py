@@ -37,13 +37,7 @@ class BoardMachines:
         dest = conf.get("ssh") or name
         ok, why = self.answers(name, conf)
         if not ok:
-            warn("cannot reach %s (%s) -- the card helper stays on it." % (dest, why))
-            log("  (re-run this when it is reachable to remove it properly)")
-            if not act.confirm("remove the local conf %s anyway?" % self.rel(path)):
-                die("aborted -- nothing was changed")
-            self.here.remove(path)
-            info("removed %s" % self.rel(path))
-            return 0
+            return self.forget_unreached(dest, why, "the card helper stays on it", path)
         helper = ", ".join(r for _s, r in CARD_HELPER_FILES)
         if not act.confirm("deprovision %s: remove the card helper (%s)?" % (dest, helper)):
             die("aborted -- nothing was changed")
@@ -53,7 +47,4 @@ class BoardMachines:
         info("removed the card helper from %s" % dest)
         self.here.remove(path)
         info("removed %s" % self.rel(path))
-        log("  it is still a machine here, because the registry names it:")
-        log("      git rm %s && git commit" % self.rel(path))
-        log("  that forgets it on every device. 'wk machine setup %s' brings it back." % name)
-        return 0
+        return self.still_named(name, path)

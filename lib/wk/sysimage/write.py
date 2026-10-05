@@ -18,14 +18,11 @@ from wk.sysimage import ls as lsmod
 
 CARD_PRIV = disk.CARD_PRIV
 FILTERS = ((".xz", "xz -dc"), (".zst", "zstd -dc"), (".gz", "gzip -dc"))
-ROOT_WORDS = {"mmc": "an SD card (/dev/mmcblk*)", "usb": "a USB or SCSI disk (/dev/sd*)", "nvme": "an NVMe disk",
-              "portable": "any device it is written to", "network": "a network root, not a local device"}
-OLD_HELPER = "usage: wk-card-priv"
-UPDATE = ("Remedy, from a terminal on %s (its sudo asks for a password, which\n    is why this end cannot do it): "
-          "update its wk-tools checkout, then\n        ./setup --stage quiesce")
+ROOT_WORDS = {"mmc": "an SD card (/dev/mmcblk*)", "usb": "a USB or SCSI disk (/dev/sd*)", "nvme": "an NVMe disk"}
+UPDATE = "Remedy, from a terminal on %s: update its wk-tools checkout, then  ./setup --stage quiesce"
+REPORT = ("stream_bytes", "stream_sha", "boot_bytes", "boot_sha", "root_bytes", "root_sha")
 
-# stdin to stdout unchanged; the byte count and sha256 go to fd 3 in one write, so they cannot interleave with the
-# helper's own report on the fd they share.
+# stdin to stdout unchanged; the count and sha256 go to fd 3 in one write, so they cannot interleave with the helper's.
 METER = """import hashlib, os, sys
 out, digest, n = sys.stdout.buffer, hashlib.sha256(), 0
 while True:
@@ -62,39 +59,22 @@ def root_class(spec):
         return "portable"
     if spec == "/dev/nfs" or "nfsroot" in spec:
         return "network"
-    return device_class(spec) if spec else "unknown"
-
-
-def device_class(dev):
-    return disk.tran_of_name(dev) or "unknown"
-
-
-def word(cls):
-    return ROOT_WORDS.get(cls, "an unrecognised kind of device")
+    return (disk.tran_of_name(spec) or "unknown") if spec else "unknown"
 
 
 def check_root(spec, dev, what, env):
     """A system whose kernel looks for its root on another kind of device than the one it is on never boots."""
-    cls, want = root_class(spec), device_class(dev)
-    if cls in ("portable", "network", "unknown") or cls == want:
+    cls, want = root_class(spec), disk.tran_of_name(dev) or "unknown"
+    if cls not in ROOT_WORDS or cls == want:
         return
+    c, w = ROOT_WORDS[cls], ROOT_WORDS.get(want, "an unrecognised kind of device")
     if env.get("WK_ANY_ROOT"):
-        act.warn("this system expects %s and %s is %s;\n  left as written (WK_ANY_ROOT). It will not boot -- this proves "
-                 "the transfer only." % (word(cls), dev, word(want)))
+        act.warn("this system expects %s and %s is %s;\n  left as written (WK_ANY_ROOT): it proves the transfer only."
+                 % (c, dev, w))
         return
-    act.die("""the system on {dev} expects to boot from {c}, and {dev} is
-    {w}.
-
-    Its kernel command line says `root={spec}`. The firmware would load the
-    kernel from {dev} and the kernel would then look for its root filesystem on
-    {c} -- which is either absent or somebody else's
-    disk. Nothing about the write failed; the board would.
-
-    Either write it to {c} on {what}, or rebuild the
-    image for this device -- a wic image's root device comes from the recipe's
-    wks file, not from anything this repo sets. Set WK_ANY_ROOT=1 to write it
-    anyway (for testing the transfer, which is all it can prove).""".format(
-        dev=dev, c=word(cls), w=word(want), spec=spec, what=what))
+    act.die("the system on %s expects to boot from %s, and %s is %s (its cmdline says root=%s).\n"
+            "    Write it to %s on %s, or rebuild the image for this device (a wic image's root comes from its wks file);\n"
+            "    WK_ANY_ROOT=1 writes it anyway, to test the transfer." % (dev, c, dev, w, spec, c, what))
 
 
 def collides(name, peers):
@@ -111,8 +91,9 @@ def collides(name, peers):
     return ""
 
 
-def appended(root, machine, spec_dir, name):
+def appended(root, p, name):
     """The board's file first -- `os_check=0` is a Pi 5 firmware fact every image needs -- then the profile's."""
+    machine, spec_dir = p.get("IMG_MACHINE", ""), p.get("IMG_SPEC_DIR", "")
     text = ""
     for path in (os.path.join(str(root), "image", "boards", machine, name) if machine else "",
                  os.path.join(spec_dir, name) if spec_dir else ""):
@@ -123,18 +104,15 @@ def appended(root, machine, spec_dir, name):
 
 
 def cmdline_add(root, p):
-    """One line: the helper refuses a second."""
-    text = appended(root, p.get("IMG_MACHINE", ""), p.get("IMG_SPEC_DIR", ""), "cmdline.txt.append")
-    lines = [l for l in text.splitlines() if l.strip() and not l.lstrip().startswith("#")]
+    lines = [l for l in appended(root, p, "cmdline.txt.append").splitlines() if l.strip() and not l.lstrip().startswith("#")]
     return " ".join(" ".join(lines).split())
 
 
 def config_add(root, p):
-    return appended(root, p.get("IMG_MACHINE", ""), p.get("IMG_SPEC_DIR", ""), "config.txt.append")
+    return appended(root, p, "config.txt.append")
 
 
 def load_machine(fl, name):
-    """A bench machine's conf, the one reader `wk boot` uses; None when it is not one."""
     return bootcli.load_conf(fl.root, name, fl.env) if name else None
 
 
@@ -143,19 +121,17 @@ def machine_list(fl):
 
 
 def wants_wifi(fl, name):
-    """A board wk writes a card for that has no cable: device too, since a Mac reaches the bench over WiFi."""
     conf = load_machine(fl, name)
     return bool(conf and conf.get("device") and conf.get("net") == "wifi")
 
 
 def tailnet_name(fl, name, role):
     """A bench system joins as bench_ssh, a rescue as ssh: a second join under an existing name comes up renamed."""
-    conf = load_machine(fl, name) or {}
-    return conf.get("ssh" if role == "rescue" else "bench_ssh", "")
+    return (load_machine(fl, name) or {}).get("ssh" if role == "rescue" else "bench_ssh", "")
 
 
 def unit(root, name, **lines):
-    """A first-boot unit, boot/firstboot/<name> verbatim; its parameters are KEY=value lines in the file's last section."""
+    """boot/firstboot/<name> verbatim; its parameters are KEY=value lines in the file's last section."""
     with open(os.path.join(str(root), "boot", "firstboot", name)) as f:
         return f.read() + "".join("%s=%s\n" % kv for kv in lines.items())
 
@@ -166,8 +142,8 @@ def init_script(root, name, **params):
 
 
 def stage_units(root, watchdog, disarm, profile=""):
-    """{archive path: text}. The two units that hand a machine back are gated at runtime on /etc/wk/rescue, so one
-    artifact serves both roles; a timer, since a sleeping oneshot holds its systemd target inactive for the whole watchdog."""
+    """{archive path: text}. The units that hand a machine back are gated at runtime on /etc/wk/rescue, so one artifact
+    serves both roles; a timer, since a sleeping oneshot holds its systemd target inactive for the whole watchdog."""
     out = {}
     if not watchdog:
         act.warn("%s sets no IMG_WATCHDOG, so this image will not hand its machine back" % (profile or "this image"))
@@ -176,7 +152,6 @@ def stage_units(root, watchdog, disarm, profile=""):
         out["systemd/wk-self-return.service"] = unit(root, "wk-self-return.service")
         out["init.d/S99wk-self-return"] = init_script(root, "S99wk-self-return", WK_WATCHDOG=watchdog)
     if disarm:
-        act.info("staging the self-disarm (the medium stops booting once this image is up)")
         out["systemd/wk-self-disarm.service"] = unit(root, "wk-self-disarm.service",
                                                      ExecStart="/bin/sh -c '%s'" % disarm.replace("$", "$$"))
         out["init.d/S11wk-self-disarm"] = init_script(root, "S11wk-self-disarm", WK_DISARM=disarm)
@@ -184,6 +159,18 @@ def stage_units(root, watchdog, disarm, profile=""):
     for name in ("wk-cpu-governor.service", "wk-no-swap.service", "wk-diag.service"):
         out["systemd/" + name] = unit(root, name)
     return out
+
+
+def b64(text):
+    return base64.b64encode(text.encode()).decode()
+
+
+def said(r):
+    return (r.out + r.err).replace("\r", "").rstrip("\n")
+
+
+def indent(text, by="    "):
+    return "\n".join(by + l for l in text.splitlines())
 
 
 class Piped:
@@ -222,9 +209,8 @@ class Write:
 
     def attach(self, conf):
         self.conf = conf
-        cls = driver_class(conf["driver"])
         self.ch = Channel(self.root, conf, "none", env=self.env, via=self.machine)
-        self.drv = cls(self.root, conf, self.ch)
+        self.drv = driver_class(conf["driver"])(self.root, conf, self.ch)
         self.disks = disk.Disks(self.ch, conf)
 
     def card(self, *args, input=None, mutates=True):
@@ -236,54 +222,39 @@ class Write:
     def ssh(self, command, mutates=False):
         return self.ch.call("m_ssh", command, input="", mutates=mutates)
 
-    @staticmethod
-    def said(r):
-        return (r.out + r.err).replace("\r", "").rstrip("\n")
-
-    @staticmethod
-    def indent(text, by="    "):
-        return "\n".join(by + l for l in text.splitlines())
-
     def resolve(self, spec):
         if spec.startswith(("vm:", "/", "./", "../")):
             return spec
-        for img in lsmod.scan(self.machine, self.store):
-            if img.path and images.ws_profile(img.ws, self.env) == spec:
-                act.info("'%s' is a configuration; its image is at %s" % (spec, img.path))
-                return img.path
-        if images.quiet_load(spec, self.env):
+        found = lsmod.scan(self.machine, self.store)
+        path = next((i.path for i in found if i.path and images.ws_profile(i.ws, self.env) == spec), "")
+        if not path and images.quiet_load(spec, self.env):
             r = self.machine.run([os.path.join(self.root, "wk"), "sysimage", "path", spec])
             path = r.out.replace("\r", "").strip() if r.ok else ""
-            if path:
-                # The image workspace's machine answers in its own spelling; on a macOS workstation that is the podman VM's filesystem.
-                path = path if Store(self.env).is_local() else "vm:" + path
-                act.info("'%s' is a configuration; its image is at %s" % (spec, path))
-                return path
-            act.die("'%s' is a configuration this checkout defines, and the image workspace that\n    would build it holds no image:\n"
-                    "        wk sysimage build %s\n    'wk sysimage ls' lists every image this fleet has built, with its path."
-                    % (spec, spec))
-        built = sorted({images.ws_profile(i.ws, self.env) for i in lsmod.scan(self.machine, self.store) if i.path} - {None})
-        act.die("'%s' is neither a path nor a configuration this checkout defines.\n    Configurations with an image on "
-                "this machine:\n%s\n    'wk sysimage ls' prints them with their paths and sizes."
+            if not path:
+                act.die("'%s' is a configuration whose image workspace holds no image:\n        wk sysimage build %s"
+                        % (spec, spec))
+            # The image workspace's machine answers in its own spelling; on a macOS workstation, the podman VM's.
+            path = path if Store(self.env).is_local() else "vm:" + path
+        if path:
+            act.info("'%s' is a configuration; its image is at %s" % (spec, path))
+            return path
+        built = sorted({images.ws_profile(i.ws, self.env) for i in found if i.path} - {None})
+        act.die("'%s' is neither a path nor a configuration this checkout defines.\n    Configurations with an image here:\n%s"
                 % (spec, "\n".join("      " + b for b in built)))
 
     def reader(self, src):
         if src.startswith("vm:"):
             if not is_macos():
-                act.die("--from vm:<path> is for reading a container workspace's\n    output out of this machine's podman VM, "
-                        "and this is not a macOS host. Give a\n    plain path.")
+                act.die("--from vm:<path> reads out of a macOS host's podman VM; give a plain path here.")
             return ["podman", "machine", "ssh", Store(self.env).podman_machine(), "--", "sudo", "cat", bare(src)]
         if not self.machine.exists(src):
-            act.die("no image at %s\n    An image lives where the workspace that built it put it (wk help). If\n"
-                    "    that is inside this machine's podman VM, say so: --from vm:%s" % (src, src))
+            act.die("no image at %s\n    An image inside this machine's podman VM is --from vm:%s" % (src, src))
         return ["cat", src]
 
     def profile(self, name, src):
         if not name:
             m = re.search(r"/ws/([^/]*)/", bare(src))
             name = (images.ws_profile(m.group(1), self.env) if m else None) or ""
-            if name:
-                act.debug("profile '%s' derived from the path" % name)
         if not name:
             return "", {}
         try:
@@ -291,19 +262,17 @@ class Write:
         except ConfError as e:
             act.die(str(e))
         except LookupError:
-            act.warn("this write cannot tell which machine the card is for, so there is no\n  firmware check and no "
-                     "tailnet name to seed. Pass --profile with a\n  configuration this checkout defines.")
+            act.warn("no configuration '%s', so there is no firmware check and no tailnet name to seed; pass --profile"
+                     % name)
             return name, {}
 
     def key_preflight(self, img_machine, role):
         if not tailnet_name(self.fleet, img_machine, role):
-            act.die("this image joins the tailnet on first boot, and nothing here\n    knows what name it should answer to "
-                    "-- the image records no machine, so the\n    card would join under the image's own hostname and come "
-                    "up unreachable by\n    its fleet name.\n    Give it one:  --machine <name>")
+            act.die("this image joins the tailnet on first boot, and the image records no machine to name it after:\n"
+                    "    it would come up unreachable by its fleet name. Give it one:  --machine <name>")
         if not tailnet.Fleet(self.root, self.env, self.machine).key_present():
-            act.die("there is no tailnet auth key on this machine, so the card this is about\n    to write would boot with no "
-                    "tailnet identity -- reachable only over whatever\n    LAN it lands on, unreachable by its fleet name, "
-                    "which is the state the fleet\n    rule exists to end.\n    Set one first:  wk key set tailnet")
+            act.die("there is no tailnet auth key here, so the card would boot with no tailnet identity.\n"
+                    "    Set one first:  wk key set tailnet")
 
     def wifi_preflight(self, img_machine):
         """No --force: a board with no uplink is unreachable, which is worse than refusing."""
@@ -311,59 +280,45 @@ class Write:
             return
         name = self.c("name")
         r = self.card("wifi-host", mutates=False)
-        if not r.ok:
-            act.die("could not tell whether %s is on WiFi:\n%s\n    A board with no uplink is unreachable, which is worse "
-                    "than refusing, so\n    there is no --force past this." % (name, self.indent(self.said(r))))
-        if "wifi-host: yes" in r.out + r.err:
+        if r.ok and "wifi-host: yes" in r.out + r.err:
             return
-        act.die("%s has no cable at the bench, and its rescue/bench images bring up WiFi\n    from a credential taken from "
-                "%s's own connection -- %s\n    is not on WiFi. A board with no uplink is unreachable, which is worse than\n"
-                "    refusing, so there is no --force past this.\n    Join %s to the WiFi the board will use; the card takes "
-                "its\n    credential from that machine's own connection." % (img_machine, name, name, name))
+        act.die("%s has no cable, and its card takes its WiFi credential from %s's own connection, which %s.\n"
+                "    A board with no uplink is unreachable, so there is no --force: join %s to the board's WiFi."
+                % (img_machine, name, "is not WiFi" if r.ok else "could not be read:\n" + indent(said(r)), name))
 
     def name_preflight(self, name, role, img_machine):
         if not name:
             return
         peers = reach.Reach(self.machine, self.env).peers()
         if not peers:
-            if self.step("read this machine's tailnet view and retire whatever node holds\n              '%s', so the "
-                         "card can join under it (the real write refuses\n              when that view cannot be read)" % name):
+            if self.step("read this machine's tailnet view and retire whatever node holds '%s'" % name):
                 return
-            act.die("could not read this machine's tailnet view (tailscale status --json\n    returned nothing -- no CLI, "
-                    "not logged in, or the daemon did not answer), so\n    there is no way to tell whether '%s' is already "
-                    "on the tailnet. This\n    check cannot be skipped: writing anyway could join renamed to '%s-1',\n"
-                    "    and everything here reaches a board by its tailnet name." % (name, name))
+            act.die("could not read this machine's tailnet view (tailscale status --json returned nothing), so whether\n"
+                    "    '%s' is taken is unknown. This check cannot be skipped: a collision joins renamed '%s-1'."
+                    % (name, name))
         hit = collides(name, peers)
         if not hit:
             return
         if role == "rescue" and hit.startswith("exact:") and img_machine == self.c("name") and name == self.c("ssh"):
-            act.barrier("'%s' is %s's running rescue -- the system this card replaces.\n    The card joins under that name "
-                        "only if the old node is gone by its first\n    boot: after this write, remove '%s' from the tailnet "
-                        "admin console\n    (https://login.tailscale.com/admin/machines -> %s -> Remove) before\n    rebooting; "
-                        "a card that boots while the node exists joins renamed '%s-1'\n    and nothing here can find it."
-                        % (name, self.c("name"), name, name, name))
+            act.barrier("'%s' is %s's running rescue, the system this card replaces. Remove '%s' at\n"
+                        "    https://login.tailscale.com/admin/machines before rebooting, or the card joins renamed '%s-1'."
+                        % (name, self.c("name"), name, name))
             return
-        if not tailnet.Fleet(self.root, self.env, self.machine).api_present():
-            if self.step("retire the stale tailnet node '%s' -- which the real write\n              refuses to do without a "
-                         "stored token (wk key set tailnet-api)" % name):
+        fl = tailnet.Fleet(self.root, self.env, self.machine)
+        if not fl.api_present():
+            if self.step("retire the stale tailnet node '%s' (the real write needs wk key set tailnet-api)" % name):
                 return
-            act.die("'%s' is already on the tailnet (%s), online or offline.\n    Joining under it again does not keep the "
-                    "name -- Tailscale renames the\n    collision to '%s-1', and everything here reaches a board by its\n"
-                    "    tailnet name, so a card that joins renamed is a card nothing here can find.\n    There is no --force: "
-                    "the one exception is a board's own rescue replacing\n    itself, and this write is not that. Two "
-                    "remedies:\n      wk key set tailnet-api  store a token, and this command retires the\n"
-                    "                              stale node itself on the re-run\n      the admin console       remove '%s' "
-                    "by hand at\n                              https://login.tailscale.com/admin/machines"
+            act.die("'%s' is already on the tailnet (%s); a card joining under it comes up renamed '%s-1',\n"
+                    "    and nothing here finds it. There is no --force. Remedy: wk key set tailnet-api (this command\n"
+                    "    then retires the node), or remove '%s' at the admin console."
                     % (name, hit.split(":", 1)[1], name, name))
         if self.step("retire the stale tailnet node '%s' so this card can join under it" % name):
             return
-        act.info("'%s' is held by a node this board is not running; retiring it so the card can join under it" % name)
-        r = tailnet.Fleet(self.root, self.env, self.machine).retire(name)
+        act.info("retiring the stale tailnet node '%s' so the card can join under it" % name)
+        r = fl.retire(name)
         if not r.ok:
-            act.die("could not retire the stale tailnet node '%s':\n%s\n    Nothing was written. A node that is online is a "
-                    "running board, not a\n    leftover -- check what is answering to that name before writing this card."
-                    % (name, self.indent(self.said(r))))
-        act.log(self.indent(self.said(r), "    "))
+            act.die("could not retire the stale tailnet node '%s':\n%s\n    Nothing was written." % (name, indent(said(r))))
+        act.log(indent(said(r)))
 
     def unmount(self, dev):
         if self.step("unmount whatever is mounted from %s on %s" % (dev, self.c("name"))):
@@ -372,38 +327,25 @@ class Write:
             raise act.Refused(1)
 
     def tailnet_save(self, dev):
-        """tailscaled's state on partition 4, kept aside by the helper and put back after, so the new system comes up
-        as the node the old one was."""
+        """tailscaled's state, kept aside by the helper and put back after: the new system comes up as the old node."""
         if self.step("keep %s's bench tailnet identity aside, if it holds one" % dev):
             return False
-        name = self.c("name")
         if "tailnet-keep=yes" not in self.card("status", mutates=False).out:
-            act.warn("%s's card helper cannot keep a node's tailnet identity across a rewrite,\n  so the new system joins "
-                     "fresh; a stale node of the same name on the tailnet\n  refuses the write. The helper is the rescue "
-                     "image's: a rebuilt rescue, written\n  from a reader, has the current one." % name)
+            act.warn("%s's card helper cannot keep a node's tailnet identity across a rewrite, so the new system\n"
+                     "  joins fresh. A rebuilt rescue has the current helper." % self.c("name"))
             return False
         r = self.card("tailnet-save", dev)
-        out = self.said(r)
+        out = said(r)
         if not r.ok:
-            act.die("could not look for a tailnet identity on %s's partition 4:\n%s" % (dev, self.indent(out)))
+            act.die("could not look for a tailnet identity on %s:\n%s" % (dev, indent(out)))
         if "kept=yes" in out:
-            if "adopted=remembered" in out:
-                act.info("this board remembers its bench tailnet node, so the card written now\n  rejoins as that node "
-                         "rather than colliding with it -- nothing has to retire\n  a leftover, and no credential that can "
-                         "administer the tailnet is needed")
-            elif "adopted=" in out:
-                act.info("taking the board's bench tailnet identity from the system beside this one:\n  the two bench "
-                         "systems take turns being one node, so the new one is reachable\n  under the name the board's "
-                         "bench role already holds")
-            else:
-                act.info("keeping the node's tailnet identity aside: the rewritten system comes back as the same node")
+            act.info("keeping the board's bench tailnet identity%s: the rewritten system comes back as that node"
+                     % (" from the system beside this one" if "adopted=" in out and "remembered" not in out else ""))
             return True
         if "kept=no" in out:
-            act.debug("%s holds no bench tailnet identity yet; the new system joins fresh" % dev)
             return False
-        act.die("%s's card helper did not say whether %s's partition 4 holds a\n    tailnet identity (it said: %s). Refusing "
-                "to guess: a system that\n    joins under a name it already holds comes up renamed and unreachable."
-                % (name, dev, out or "nothing"))
+        act.die("%s's card helper did not say whether %s holds a tailnet identity (it said: %s). Refusing to guess."
+                % (self.c("name"), dev, out or "nothing"))
 
     def stream(self, dev, reader, filt):
         name = self.c("name")
@@ -411,21 +353,19 @@ class Write:
             return {}
         tool = filt.split()[0]
         if filt != "cat" and not self.ssh(shlex.join(HAVE + (tool,))).ok:
-            act.die("%s has no %s, and the image being sent to it is compressed\n    with it -- the card machine is what "
-                    "decompresses the stream, so this end\n    never has to have the tool for a format it is only passing "
-                    "through.\n    Remedy: install %s on %s (apt spells xz 'xz-utils')." % (name, tool, tool, name))
+            act.die("%s has no %s, and it decompresses the stream it is sent.\n    Remedy: install %s on %s "
+                    "(apt spells xz 'xz-utils')." % (name, tool, tool, name))
         act.info("writing to %s on %s (streamed; decompressed there with %s)" % (dev, name, filt))
         far = "exec 3>&1; %s | python3 -c %s | sudo -n %s write %s" % (filt, shlex.quote(METER), CARD_PRIV, shlex.quote(dev))
         r = self.piped(reader).call("m_ssh", far, mutates=True)
         if not r.ok:
             size = self.ssh("lsblk -dno SIZE %s" % shlex.quote(base(dev))).out.replace("\r", "").strip()
-            act.die("could not write the image onto %s on %s.\n    It was read through:  %s\n    %s is %s; an image larger "
-                    "than that runs out of space\n    part-written, and the read that fed it can fail on its own account."
-                    % (dev, name, shlex.join(reader), dev, size))
+            act.die("could not write the image onto %s (%s) on %s; it was read through:  %s"
+                    % (dev, size, name, shlex.join(reader)))
         report = r.out.replace("\r", "")
-        act.log(self.indent(report.rstrip("\n")))
+        act.log(indent(report.rstrip("\n")))
         d = kv(report)
-        return {k: d.get(k, "") for k in ("stream_bytes", "stream_sha", "boot_bytes", "boot_sha", "root_bytes", "root_sha")}
+        return {k: d.get(k, "") for k in REPORT}
 
     def verify(self, dev, rep):
         if self.step("read %s back and compare it with the image streamed to it" % dev):
@@ -433,55 +373,45 @@ class Write:
         act.info("verifying %s against the image that was streamed to it" % dev)
         if disk.is_second(dev):
             if not rep.get("root_sha"):
-                act.die("the write onto %s did not report what it split the image into,\n    so there is nothing to read the "
-                        "card back against." % dev)
-            if not self.card("verify", dev, rep["boot_bytes"], rep["boot_sha"], rep["root_bytes"], rep["root_sha"],
-                             mutates=False).ok:
+                act.die("the write onto %s did not report what it split the image into, so nothing can verify it." % dev)
+            if not self.card("verify", dev, *[rep[k] for k in REPORT[2:]], mutates=False).ok:
                 act.die("%s does not read back as the image's boot and root." % dev)
             return
         lines = self.card("verify", dev, rep["stream_bytes"], mutates=False).out.replace("\r", "").split()
         got = lines[-1] if lines else ""
-        if not got:
-            act.die("could not read %s back on %s" % (dev, self.c("name")))
         if got != rep["stream_sha"]:
-            act.die("%s does not match the image that was streamed to it\n    image: %s\n    disk:  %s"
-                    % (dev, rep["stream_sha"], got))
-
-    def parts_present(self, dev):
-        """A card that took a stream with a shell banner ahead of it hashes perfectly and has no partition table."""
-        if self.step("check that %s came out of this with a partition table" % dev):
-            return
-        r = self.card("parts", dev, mutates=False)
-        if not r.ok:
-            act.die("%s has no readable partition table after the write:\n%s\n    Something was written ahead of the image "
-                    "bytes on the way out, or the\n    source is not a disk image at all." % (dev, self.indent(self.said(r))))
+            act.die("%s does not read back as the image streamed to it\n    image: %s\n    disk:  %s"
+                    % (dev, rep["stream_sha"], got or "(unreadable)"))
 
     def root_spec(self, dev):
         return kv(self.card("root-spec", dev, mutates=False).out).get("root", "")
 
-    def simple(self, sentence, *verb, why):
+    def simple(self, sentence, *verb, why, mutates=True):
         if self.step(sentence):
             return
-        if not self.card(*verb).ok:
-            act.die(why)
+        r = self.card(*verb, mutates=mutates)
+        if r.ok:
+            return
+        if "usage: wk-card-priv" in r.out + r.err:
+            act.die("%s's card helper is older than this checkout: it has no '%s' verb.\n    %s"
+                    % (self.c("name"), verb[0], UPDATE % self.c("name")))
+        act.die("%s\n%s" % (why, indent(said(r))))
 
     def retarget(self, dev):
         if self.step("retarget %s's root= to a PARTUUID of %s, so it boots from any device" % (dev, dev)):
             return
         spec = self.root_spec(dev)
         if not spec:
-            act.die("%s has no cmdline.txt to read a root from, and this image was\n    written as one that boots by firmware "
-                    "and cmdline.txt." % dev)
-        # LABEL= and UUID= boot from any device, and name every disk written from this image: only a PARTUUID names one.
+            act.die("%s has no cmdline.txt to read a root from." % dev)
+        # LABEL= and UUID= name every disk written from this image: only a PARTUUID names one.
         if spec.startswith("PARTUUID="):
             return
         if root_class(spec) == "network":
             act.die("%s names a network root (%s). Nothing here boots that way." % (dev, spec))
-        act.info("retargeting %s's root: %s -> a PARTUUID of this disk (this disk, from any device)" % (dev, spec))
+        act.info("retargeting %s's root: %s -> a PARTUUID of this disk" % (dev, spec))
         if not self.card("retarget", dev).ok:
-            act.die("could not retarget %s's root.\n    The image is written; its kernel command line still says root=%s, "
-                    "which\n    is a promise about a device rather than about a filesystem -- in another\n    reader it names "
-                    "somebody else's disk." % (dev, spec))
+            act.die("could not retarget %s's root; its cmdline still says root=%s, which names a device, not this disk."
+                    % (dev, spec))
 
     def unique_identity(self, dev):
         """The old identity is read off the card: every reference to it there is rewritten from it."""
@@ -494,24 +424,13 @@ class Write:
         if not spec.startswith("PARTUUID="):
             return
         old, new = spec[len("PARTUUID="):].rsplit("-", 1)[0], self.rand()
-        act.info("stamping a unique identity on %s (0x%s -> 0x%s), so it cannot be confused with another copy" % (dev, old, new))
+        act.info("stamping a unique identity on %s (0x%s -> 0x%s)" % (dev, old, new))
         if not self.card("identity", dev, old, new).ok:
-            act.die("could not stamp a unique identity on %s.\n    The image is written and verified, but its root is still "
-                    "PARTUUID=%s-2 --\n    the same as any other disk written from this image. Booted next to one of\n"
-                    "    them, the kernel may mount the wrong root." % (dev, old))
+            act.die("could not stamp a unique identity on %s: its root is still PARTUUID=%s-2, like every other card\n"
+                    "    written from this image, and booted beside one the kernel may mount the wrong root." % (dev, old))
         got = self.ssh("lsblk -no PARTUUID %s" % shlex.quote(part(dev, 2))).out.replace("\r", "").split()
         if new + "-02" not in got:
             act.die("%s did not take the new identity; refusing to leave it ambiguous" % dev)
-
-    def fleet_install(self, dev, marker, key):
-        """root's authorized_keys: a Yocto image ships `PermitRootLogin yes` with an empty password, which BatchMode cannot use."""
-        if self.step("install the identity marker and the driving ssh key on %s" % dev):
-            return
-        act.info("installing the identity marker and the driving key on %s" % dev)
-        if not self.card("fleet", dev, b64(marker), b64(key)).ok:
-            act.die("could not install the fleet integration on %s.\n    The image is written, but the board would boot with "
-                    "no /etc/wk-image and no\n    key in root's authorized_keys: unreachable by anything here, and\n"
-                    "    indistinguishable from the machine's host mode." % dev)
 
     def put_units(self, dev, staged):
         if self.step("install the fleet units and the profiling knobs into %s's rootfs" % dev):
@@ -526,106 +445,43 @@ class Write:
                 "card_priv", "units", dev, mutates=True)
         finally:
             self.machine.remove(seed)
-        out = self.said(r)
+        out = said(r)
         if not r.ok:
-            act.die("could not install the fleet units on %s:\n%s\n    The image is written; a run that wedges the board "
-                    "would not hand it back." % (dev, self.indent(out)))
+            act.die("could not install the fleet units on %s:\n%s\n    A run that wedges the board would not hand it back."
+                    % (dev, indent(out)))
         if "no systemd on this disk; nothing installed" in out:
-            act.die("%s's card helper predates BusyBox init scripts, so this image got\n    neither its self-disarm nor its "
-                    "self-return: a board booted into it would not\n    hand itself back. The image is written. Update the "
-                    "helper (on a workstation,\n    ./setup --stage quiesce from a terminal there; on a rescue, rebuild the\n"
-                    "    rescue image) and write the card again." % self.c("name"))
+            act.die("%s's card helper predates BusyBox init scripts, so this card has no self-return or self-disarm.\n"
+                    "    %s (on a rescue, rebuild the rescue image), and write again." % (self.c("name"), UPDATE % self.c("name")))
         if "neither systemd nor /etc/init.d" in out:
-            act.warn("this image has neither systemd nor a BusyBox init, so the self-return\n  watchdog and the self-disarm "
-                     "were NOT installed. The card carries its identity\n  marker and the driving key and nothing else: a "
-                     "run that wedges the board will\n  not hand it back, and on a medium-armed machine the medium stays "
-                     "armed until\n  something disarms it.")
+            act.warn("this image has neither systemd nor a BusyBox init, so the self-return watchdog and the self-disarm\n"
+                     "  were NOT installed: a run that wedges the board will not hand it back.")
 
     def check_boot_files(self, dev, machine, dtb):
         """Firmware that cannot find a kernel halts: no retry, no fall-through, no way back over the wire."""
         if self.step("check that every file a %s's firmware asks for resolves on %s" % (machine, dev)):
             return
         r = self.card("boot-check", dev, dtb, mutates=False)
-        out = self.said(r)
         if r.ok:
             return
+        out = said(r)
         if "no boot-file checker" in out:
-            act.warn("%s's boot files were NOT checked: %s's card helper has no boot-file\n  checker beside it. If the "
-                     "firmware cannot find a kernel it halts, and that costs\n  a trip to the board. The checker is "
-                     "installed with the helper (./setup --stage\n  quiesce on a workstation; a rebuilt rescue image "
-                     "carries it)." % (dev, self.c("name")))
+            act.warn("%s's boot files were NOT checked: %s's card helper has no boot-file checker beside it\n"
+                     "  (./setup --stage quiesce installs it; a rebuilt rescue carries it)." % (dev, self.c("name")))
             return
-        act.die("%s is missing files a %s needs to reach its kernel:\n\n%s\n\n    Firmware that cannot find a kernel halts. "
-                "It does not move on to the next\n    BOOT_ORDER entry and it does not come back, so booting this card would "
-                "cost\n    a trip to the board rather than a reboot.\n\n    The image is the problem, not the disk: rebuild "
-                "it, or check what its\n    config.txt names against what its boot partition holds, and write again."
-                % (dev, machine, self.indent(out, "      ")))
-
-    def check_root(self, dev, what):
-        if self.step("check that the system on %s names a root it can find on %s" % (dev, dev)):
-            return
-        check_root(self.root_spec(dev), base(dev), what, self.env)
-
-    def old_helper(self, out, verb, what):
-        if OLD_HELPER in out:
-            act.die("%s's card helper is older than this checkout: it has no\n    '%s' verb, so %s.\n    %s"
-                    % (self.c("name"), verb, what, UPDATE % self.c("name")))
-
-    def seed_role(self, dev, role):
-        """The only difference between a rescue and a bench system: every unit checks `ConditionPathExists=!/etc/wk/rescue`."""
-        if self.step("mark %s a %s system" % (dev, role)):
-            return
-        if role == "rescue":
-            act.info("marking %s a rescue system -- no self-return watchdog, no self-disarm" % dev)
-            act.log("  it is what a board falls back to, so there is nothing to hand it back to")
-        r = self.card("role", dev, role)
-        if r.ok:
-            return
-        self.old_helper(self.said(r), "role", "the rescue marker cannot be written and this card would boot\n    carrying a "
-                        "live self-return watchdog.\n    The image is written; the role is not set")
-        act.die("could not set the role on %s:\n%s\n    The image is written, and the role decides whether this system "
-                "reboots\n    itself every few minutes. Refusing to leave that unknown: a rescue that\n    carries a live "
-                "self-return watchdog reboots the helper in the middle of\n    whatever card it is writing."
-                % (dev, self.indent(self.said(r))))
-
-    def install_helper(self, dev):
-        """Onto every system, so a board whose arming is an edit to the card can arm the next system where it stands."""
-        if self.step("put this machine's card helper on %s" % dev):
-            return
-        r = self.card("helper", dev)
-        out = self.said(r)
-        if r.ok:
-            act.log("  " + "".join(l[len("wk-card-priv: helper: "):] for l in out.splitlines()
-                                   if l.startswith("wk-card-priv: helper: ")))
-            return
-        self.old_helper(out, "helper", "the system being written would carry whatever its image\n    was built with, and a "
-                        "fix made here would never reach the board.\n    The image is written; the helper is not")
-        act.die("could not put the card helper on %s:\n%s" % (dev, out))
-
-    def install_autoboot(self, dev):
-        """Without the firmware's own selector the tryboot flag is ignored and the first pair boots."""
-        if self.step("write the firmware's two-system selector (autoboot.txt) onto %s" % dev):
-            return
-        r = self.card("autoboot", dev)
-        if r.ok:
-            return
-        self.old_helper(self.said(r), "autoboot", "this medium would hold two systems with no way for the firmware to\n"
-                        "    choose the second")
-        act.die("could not write the two-system selector onto %s:\n%s" % (dev, self.said(r)))
+        act.die("%s is missing files a %s needs to reach its kernel:\n\n%s\n\n    Firmware that cannot find a kernel halts "
+                "and does not come back. Rebuild the image, or check its\n    config.txt against its boot partition."
+                % (dev, machine, indent(out, "      ")))
 
     def joins(self, dev, verb, what, yes, no):
         """Whether the image carries a first-boot joiner: a guess either way strands a card or a credential."""
         r = self.card(verb, dev, mutates=False)
-        out = self.said(r)
-        if not r.ok:
-            act.die("could not tell whether %s %s on first boot:\n%s\n    The image is written. Refusing to guess."
-                    % (dev, what, self.indent(out)))
-        if yes in out:
+        out = said(r)
+        if r.ok and yes in out:
             return True
-        if no in out:
+        if r.ok and no in out:
             return False
-        act.die("%s's card helper did not say whether %s %s\n    (it said: %s). Refusing to guess."
-                % (self.c("name"), dev, what, out or "nothing"))
+        act.die("could not tell whether %s %s on first boot (%s's helper said: %s). Refusing to guess."
+                % (dev, what, self.c("name"), out or "nothing"))
 
     def seed_tailnet(self, dev, name):
         """Onto the card just written, never baked into the image: wk-tailnet-join deletes it once spent."""
@@ -636,15 +492,13 @@ class Write:
             return
         keyfile = tailnet.Fleet(self.root, self.env, self.machine).authkey()
         if not keyfile:
-            act.die("the tailnet auth key present moments ago at the write preflight is\n    gone now, and %s is already "
-                    "erased. Set one and retry:  wk key set tailnet" % dev)
+            act.die("the tailnet auth key present at the preflight is gone, and %s is already erased.\n"
+                    "    Set one and retry:  wk key set tailnet" % dev)
         act.info("seeding the tailnet identity onto %s -- it joins as '%s' (%s) on first boot" % (dev, name, tag))
         if not self.card("tailnet", dev, name, tag, input=self.machine.read(keyfile)).ok:
-            act.die("could not seed the tailnet identity onto %s.\n    The image is written; it would boot with no tailnet "
-                    "identity and be\n    reachable only over whatever LAN it lands on." % dev)
+            act.die("could not seed the tailnet identity onto %s; it would be reachable only over its LAN." % dev)
 
     def seed_wifi(self, dev, img_machine):
-        """The card takes its credential from the disk machine's own WiFi connection, read by the card helper as root."""
         name = self.c("name")
         if self.step("seed %s's own WiFi credential on %s, for a board with no cable" % (name, dev)):
             return
@@ -654,17 +508,15 @@ class Write:
             return
         act.info("seeding %s's own WiFi credential onto %s" % (name, dev))
         if not self.card("wifi-from-host", dev).ok:
-            act.die("could not seed WiFi credentials onto %s.\n    The image is written; %s has no cable at the bench, so it "
-                    "would boot with\n    no way to reach a network at all." % (dev, img_machine))
+            act.die("could not seed WiFi credentials onto %s; %s has no cable, so it would reach no network." % (dev, img_machine))
 
     def eject(self, dev):
         name = self.c("name")
         if self.step("flush and power off %s" % dev):
             return
         if not self.ssh(shlex.join(HAVE + ("udisksctl",))).ok:
-            act.warn("%s has no udisksctl, so %s is left powered on. The write is\n  complete and the card is synced -- it is "
-                     "safe to pull. To have the card\n  powered off instead, install udisks2 on %s ('./setup' does, on a "
-                     "wk host)." % (name, dev, name))
+            act.warn("%s has no udisksctl, so %s is left powered on (synced, safe to pull).\n  To power it off, install "
+                     "udisks2 on %s." % (name, dev, name))
             return
         if self.ssh("udisksctl power-off -b %s" % shlex.quote(dev), mutates=True).ok:
             act.info("powered off %s -- safe to remove" % dev)
@@ -684,18 +536,15 @@ class Write:
         self.attach(conf)
         if not self.ssh("true").ok:
             act.die("%s is not reachable over ssh, and the disk is attached to it." % disk_machine)
-        self.drv.armed_barrier("Writing a disk now would overwrite the medium that boot is aimed at,\n    and the machine "
-                               "would come up on whatever this write left behind.")
+        self.drv.armed_barrier("Writing a disk now would overwrite the medium that boot is aimed at.")
         if not dev and img_machine:
             dev = self.disks.for_machine(img_machine)
             if dev:
-                act.info("%s's medium is %s on %s (matched by serial, not by name)" % (img_machine, dev, disk_machine))
+                act.info("%s's medium is %s on %s (matched by its marker, not by name)" % (img_machine, dev, disk_machine))
         if not dev:
-            act.log("disks attached to %s:" % disk_machine)
-            act.log(self.disks.listing())
+            act.log("disks attached to %s:\n%s" % (disk_machine, self.disks.listing()))
             act.die("say which one: --disk %s:<device>" % disk_machine)
         fleet_edit = p.get("IMG_BUILDER") in images.WS_BUILDERS
-        cmdline, config = (cmdline_add(self.root, p), config_add(self.root, p)) if fleet_edit else ("", "")
         name = os.path.basename(bare(src))
         for ext in (".xz", ".zst", ".gz", ".wic", ".img"):
             name = name[:-len(ext)] if name.endswith(ext) else name
@@ -726,11 +575,12 @@ class Write:
         if not act.dry_run() and int(rep.get("stream_bytes") or 0) <= 0:
             act.die("%s read as 0 bytes through: %s" % (src, shlex.join(reader)))
         self.verify(dev, rep)
-        self.parts_present(dev)
+        # A stream with a shell banner ahead of it hashes perfectly and has no partition table.
+        self.simple("check that %s came out of this with a partition table" % dev, "parts", dev, mutates=False,
+                    why="%s has no readable partition table after the write: the source is not a disk image." % dev)
         if kept:
-            self.simple("put the kept tailnet identity back on %s's partition 4" % dev, "tailnet-restore", dev,
-                        why="could not put the kept tailnet identity back on %s.\n    The image is written; booted, it would "
-                        "join as a new node under a name the\n    old one still holds, and come up renamed." % dev)
+            self.simple("put the kept tailnet identity back on %s" % dev, "tailnet-restore", dev,
+                        why="could not put the kept tailnet identity back on %s; it would come up renamed." % dev)
 
         ident = image_id(name, rep.get("stream_sha", ""))
         wk_tools = self.machine.run(["git", "-C", self.root, "rev-parse", "--short", "HEAD"])
@@ -740,45 +590,47 @@ class Write:
                             "wk_tools=" + (wk_tools.out.strip() if wk_tools.ok else "unknown"), "source=" + src])
         if fleet_edit:
             self.retarget(dev)
+            cmdline, config = cmdline_add(self.root, p), config_add(self.root, p)
             if cmdline:
                 self.simple("append to %s's kernel command line: %s" % (dev, cmdline), "cmdline-append", dev, b64(cmdline),
-                            why="could not append to %s's kernel command line (%s).\n    The image is written; the board "
-                            "would boot without what this profile asks\n    its kernel for." % (dev, cmdline))
+                            why="could not append to %s's kernel command line (%s)." % (dev, cmdline))
             if config:
                 # A firmware setting that fails to land fails nothing and makes every number worse.
                 self.simple("append this profile's firmware block to %s's config.txt" % dev, "config-append", dev,
-                            b64(config), why="could not append the firmware block to %s's config.txt.\n    The image is "
-                            "written; the board would come up at whatever clock it felt\n    like, and nothing later would "
-                            "say so." % dev)
+                            b64(config), why="could not append the firmware block to %s's config.txt." % dev)
             self.simple("name the system on %s's boot partition by its image id" % dev, "boot-id", dev, ident,
-                        why="could not write the identity onto %s's boot partition.\n    The image is written, but 'wk boot' "
-                        "refuses a disk it cannot name." % dev)
+                        why="could not name the system on %s's boot partition; 'wk boot' refuses a disk it cannot name." % dev)
         self.unique_identity(dev)
-        self.fleet_install(dev, marker, self.driving_key())
+        # root's authorized_keys: a Yocto image ships `PermitRootLogin yes` with an empty password, which BatchMode cannot use.
+        self.simple("install the identity marker and the driving ssh key on %s" % dev,
+                    "fleet", dev, b64(marker), b64(self.driving_key()),
+                    why="could not install the identity marker and driving key on %s; nothing here could reach it." % dev)
         if fleet_edit:
             self.put_units(dev, stage_units(self.root, p.get("IMG_WATCHDOG", ""), self.self_disarm(img_machine), profile))
-            if img_machine and img_machine == disk_machine:
+            if img_machine == disk_machine:
                 if not self.c("dtb"):
                     act.die("'%s' (machines/%s.conf) sets no dtb" % (disk_machine, disk_machine))
                 self.check_boot_files(dev, disk_machine, self.c("dtb"))
-            elif img_machine:
-                act.log("  (not checking %s's boot files: this is %s's image, so this card goes elsewhere)"
-                        % (disk_machine, img_machine))
             else:
-                act.log("  (not checking %s's boot files: no machine is known for this image)" % disk_machine)
-            self.check_root(dev, disk_machine)
-        self.seed_role(dev, role)
-        self.install_helper(dev)
+                act.log("  (not checking %s's boot files: this is %s's image, so this card goes elsewhere)"
+                        % (disk_machine, img_machine or "an unknown machine"))
+            if not self.step("check that the system on %s names a root it can find on %s" % (dev, dev)):
+                check_root(self.root_spec(dev), base(dev), disk_machine, self.env)
+        # The only difference between a rescue and a bench system: every unit checks `ConditionPathExists=!/etc/wk/rescue`.
+        self.simple("mark %s a %s system" % (dev, role), "role", dev, role,
+                    why="could not set the role on %s; a rescue carrying a live self-return watchdog reboots mid-write." % dev)
+        # Onto every system, so a board whose arming is an edit to the card can arm the next system where it stands.
+        self.simple("put this machine's card helper on %s" % dev, "helper", dev,
+                    why="could not put the card helper on %s." % dev)
         if disk.is_second(asked_dev) and self.selects_by_partition(img_machine):
-            self.install_autoboot(dev)
+            self.simple("write the firmware's two-system selector (autoboot.txt) onto %s" % dev, "autoboot", dev,
+                        why="could not write the two-system selector onto %s." % dev)
         self.seed_tailnet(dev, tailnet)
         self.seed_wifi(dev, img_machine)
         if grow:
-            self.simple("grow the last partition to fill %s" % dev, "grow", dev,
-                        why="could not grow the root partition on %s" % dev)
+            self.simple("grow the last partition to fill %s" % dev, "grow", dev, why="could not grow the root partition on %s" % dev)
         else:
-            act.log("  the root partition is left at its built size, so the rest of the card\n"
-                    "  is free for a second system. --grow fills it instead.")
+            act.log("  the root partition is left at its built size, leaving room for a second system (--grow fills it).")
         self.eject(dev)
         if act.dry_run():
             act.log("dry run -- nothing was written.")
@@ -789,24 +641,19 @@ class Write:
 
     def dry_preamble(self, src, dev, name, fleet_edit, p, img_machine):
         disk_machine = self.c("name")
-        if wants_wifi(self.fleet, img_machine):
-            wifi = ("%s is on WiFi -- the card brings up WiFi on every boot, from its credential" % disk_machine
-                    if "wifi-host: yes" in self.said(self.card("wifi-host", mutates=False))
-                    else "NO -- %s is not on WiFi; the real write refuses here (no --force)" % disk_machine)
-        else:
+        if not wants_wifi(self.fleet, img_machine):
             wifi = "not needed -- this board has a cable"
-        act.log("would write\n  image     %s\n            streamed as it is read: the card takes the image's own bytes, "
-                "and\n            every edit is made afterwards, on the card\n  onto      %s attached to %s\n  identity  %s\n"
-                "  as        %s\n  tailnet   %s\n  wifi      %s" % (
+        elif "wifi-host: yes" in said(self.card("wifi-host", mutates=False)):
+            wifi = "%s is on WiFi -- the card brings up WiFi on every boot, from its credential" % disk_machine
+        else:
+            wifi = "NO -- %s is not on WiFi; the real write refuses here (no --force)" % disk_machine
+        key = tailnet.Fleet(self.root, self.env, self.machine).key_present()
+        act.log("would write\n  image     %s\n  onto      %s attached to %s\n  identity  %s\n  as        %s\n  tailnet   %s\n"
+                "  wifi      %s" % (
                     src, dev, disk_machine, image_id(name, ""),
-                    "a fleet system: identity marker, driving key, systemd units, retargeted root" if fleet_edit else
-                    "written as built -- not a fleet board build (%s); identity marker and driving key only"
-                    % (p.get("IMG_BUILDER") or "unknown profile"),
-                    "auth key present -- the card joins as this board on first boot"
-                    if tailnet.Fleet(self.root, self.env, self.machine).key_present()
-                    else "NO auth key -- the real write refuses here (wk key set tailnet)", wifi))
-        if dev == self.c("device"):
-            act.log("  note      %s is configured to boot from this disk (wk boot %s)" % (disk_machine, disk_machine))
+                    "a fleet system: identity marker, driving key, units, retargeted root" if fleet_edit else
+                    "as built (%s); identity marker and driving key only" % (p.get("IMG_BUILDER") or "unknown profile"),
+                    "auth key present" if key else "NO auth key -- the real write refuses here (wk key set tailnet)", wifi))
         act.log("then, in order:")
 
     def after(self, dev, disk_machine):
@@ -814,17 +661,13 @@ class Write:
             # A medium-armed machine's arming is firmware the image brings its own copy of, so it would boot it next.
             if self.drv.arming == "medium":
                 self.drv.disarm()
-                act.debug("%s's %s was left disarmed" % (disk_machine, dev))
-            act.log("  %s is configured to boot from this disk, but writing it\n  did not arm anything. To boot it -- once, "
-                    "reverting by itself:\n      wk boot %s" % (disk_machine, disk_machine))
+            act.log("  %s is configured to boot from this disk; writing it armed nothing. To boot it once:  wk boot %s"
+                    % (disk_machine, disk_machine))
         elif self.c("root") and dev == disk_of(self.c("root")):
-            act.log("  this is %s's rescue medium: it boots whenever %s is\n  disarmed. To boot it now:  wk boot %s --disarm "
-                    "  then power-cycle the board\n  (if this write was forced past the running rescue's name, remove that "
-                    "node\n  from the admin console between the two)." % (
-                        disk_machine, self.c("device") or "the bench medium", disk_machine))
+            act.log("  this is %s's rescue medium: it boots whenever %s is disarmed.\n  To boot it now:  wk boot %s --disarm"
+                    "   then power-cycle the board." % (disk_machine, self.c("device") or "the bench medium", disk_machine))
         else:
-            act.log("  nothing boots this yet. Move it to the board it is for, or point a\n  machine at it; 'wk boot "
-                    "<machine>' is the one-shot.")
+            act.log("  nothing boots this yet: move it to its board; 'wk boot <machine>' is the one-shot.")
 
     def image_driver(self, name):
         conf = load_machine(self.fleet, name)
@@ -845,10 +688,4 @@ class Write:
         try:
             return self.machine.read(path)
         except OSError:
-            act.die("no public key at %s\n    The image has to accept an ssh key on first boot, or it comes up\n"
-                    "    unreachable. Set WK_IMAGE_KEY to the one this machine should use." % path)
-
-
-def b64(text):
-    """The helper checks a value against a character set before decoding it."""
-    return base64.b64encode(text.encode()).decode()
+            act.die("no public key at %s; the image would come up unreachable. Set WK_IMAGE_KEY to this machine's." % path)

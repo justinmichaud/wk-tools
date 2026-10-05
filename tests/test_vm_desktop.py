@@ -1,7 +1,6 @@
 """A macOS guest's desktop and load, as `wk doctor <guest>` and every start read them from captured probe output;
 the writer (vm/desktop.sh) kills nothing and the probes change nothing."""
 import contextlib
-import functools
 import inspect
 import io
 import os
@@ -10,13 +9,14 @@ import sys
 import unittest
 from unittest import mock
 
+from tests.fakes import BenchHere
 from tests.support import REPO, live_selected, repo_files
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import doctor, guest, places  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Local, Result  # noqa: E402
+from wk.machine import Fake, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 DESKTOP = REPO / "vm" / "desktop.sh"
@@ -145,21 +145,8 @@ UPDATE_ON = (SETTLED
 
 
 
-@functools.lru_cache(maxsize=None)
-def _bench(argv):
-    return Local().run(list(argv))
-
-
-class Here(Fake):
-    """This host: the bench libraries run for real, and nothing else answers."""
-
-    def __init__(self):
-        super().__init__("here")
-        self.react(["bash", "-c"], lambda a, f: _bench(tuple(a)))
-
-
 def desktop(probe):
-    return guest.Desktop(str(REPO), Here(), probe)
+    return guest.Desktop(str(REPO), BenchHere(), probe)
 
 
 def findings(probe):
@@ -307,8 +294,8 @@ class TestWhatIsResidentInThere(unittest.TestCase):
         self.assertTrue(any("2 shells resident" in x[1] for x in f))
 
     def test_the_thresholds_are_the_documented_overrides(self):
-        f = load_findings(_load_sample(), {"WK_VM_SHELLS_WARN": "100", "WK_VM_MEM_FREE_WARN_PCT": "1"})
-        self.assertFalse([x for x in f if "shells are resident" in x[1] or "macOS calls that pressure" in x[1]], f)
+        f = load_findings(_load_sample(), {"WK_VM_SHELLS_WARN": "100", "WK_VM_MEM_FREE_WARN_PCT": "1", "WK_VM_SWAP_WARN_MB": "100000"})
+        self.assertFalse([x for x in f if "shells are resident" in x[1] or "macOS calls that pressure" in x[1] or "swap" in x[1]], f)
 
     def test_nothing_wk_runs_in_a_guest_leaves_a_shell_behind(self):
         with mock.patch.object(places.Vm, "tart", lambda s: "/t/tart"):
@@ -334,7 +321,7 @@ class TestARehearsalGuestIsNotAlsoAWorkspace(unittest.TestCase):
         self.assertIn("name=demo", text)
 
 
-class GuestAt(Here):
+class GuestAt(BenchHere):
     """This host with one guest behind tart exec, answering each probe streamed in with the capture it is given."""
 
     def __init__(self, desktop, load=None):
@@ -455,18 +442,6 @@ class TestTheLiveDesktop(unittest.TestCase):
         d = guest.Desktop(vm.root, vm.machine, probe)
         self.assertEqual([], d.blockers())
         self.assertEqual("off", d.v("screenlock"))
-
-
-
-class TestGuestSizeOverrides(unittest.TestCase):
-    def test_the_swap_threshold_is_the_documented_override(self):
-        f = load_findings(_load_sample(), {"WK_VM_SWAP_WARN_MB": "100000"})
-        self.assertFalse([x for x in f if "swap" in x[1]], f)
-        self.assertTrue([x for x in load_findings(_load_sample()) if "swap" in x[1]])
-
-    def test_the_guest_disk_is_the_override_else_the_base_size(self):
-        self.assertEqual(guest.vm_disk_gb({}), guest.DISK_GB)
-        self.assertEqual(guest.vm_disk_gb({"WK_VM_DISK_GB": "100"}), 100)
 
 
 if __name__ == "__main__":

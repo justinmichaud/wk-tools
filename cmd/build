@@ -2,7 +2,7 @@
 #
 # wk build <workspace> <preset> -- build WebKit or JSC
 # wk: where=workspace name=required takes=1 preset=arg ready=yes group=workspaces dryrun passthrough
-# wk: opts --list,--no-defaults,--detach,--kill,--babysit,--_babysit,--branch=,--mem-budget=,--mem-floor=,--cmake=,--env=,--cmakeargs=,--sysroot=
+# wk: opts --list,--no-defaults,--detach,--kill,--babysit,--_babysit,--branch=,--mem-budget=,--mem-floor=,--cmake=,--env=,--cmakeargs=
 # wk: flag --list where=local name=none takes=0
 # wk: flag --kill takes=0 opts=--kill
 #
@@ -56,7 +56,7 @@ def parse(argv):
          "no_defaults": a.flag("--no-defaults"), "babysit": a.flag("--babysit"),
          "babysit_driver": a.flag("--_babysit"), "branch": a.value("--branch"),
          "mem_budget": a.value("--mem-budget"), "mem_floor": a.value("--mem-floor"),
-         "cmakeargs": a.value("--cmakeargs"), "sysroot": a.value("--sysroot"),
+         "cmakeargs": a.value("--cmakeargs"),
          "cmake": a.values("--cmake"), "env": a.values("--env"), "pass": a.tail, "preset": store.build_preset()}
     return o
 

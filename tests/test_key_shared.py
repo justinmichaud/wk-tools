@@ -1,19 +1,12 @@
-"""`wk key` across workstations, end to end: adopt and give, the election `wk key setup` runs, and what `wk key
-check` says about each peer. `gh` and `ssh` are recording stubs; tests/test_wk_key.py holds the election's every
-branch over a fake machine.
-
-Run: python3 -m unittest tests.test_key_shared -v
-"""
+"""`wk key` across workstations, end to end, with recording `gh` and `ssh` stubs; tests/test_wk_key.py holds the
+election's every branch over a fake machine."""
 import os
 import subprocess
 import sys
 import unittest
 
-import threading
-from http.server import HTTPServer
-
 from tests.support import REPO, WkTest, stub_path
-from tests.test_credcheck import FakeGitHub
+from tests.test_credcheck import FakeGitHub, serve
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.secrets import FORKS  # noqa: E402
@@ -160,10 +153,7 @@ class _Fleet(_Shared):
     def setUp(self):
         super().setUp()
         GitHubKnowsOnePat.good = GOOD_PAT
-        self.server = HTTPServer(("127.0.0.1", 0), GitHubKnowsOnePat)
-        self.addCleanup(self.server.server_close)
-        self.addCleanup(self.server.shutdown)
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.api = serve(GitHubKnowsOnePat, self.addCleanup)
         self.forks = [r[1] for r in FORKS]
         FakeGitHub.reset(repos=list(self.forks),
                          pulls=dict.fromkeys(self.forks, 422))
@@ -184,7 +174,7 @@ class _Fleet(_Shared):
                            for k in ("verdict", "give", "pub", "ssh")}
         env.update({"WK_TEST_GH_LOG": str(self.gh_log),
                     "WK_TEST_GH_KEYS": str(self.gh_keys),
-                    "WK_GITHUB_API": "http://127.0.0.1:%d" % self.server.server_port,
+                    "WK_GITHUB_API": self.api,
                     "WK_BUGZILLA_API": "http://127.0.0.1:1",
                     "WK_ANTHROPIC_API": "http://127.0.0.1:1",
                     "WK_TAILNET_API": "http://127.0.0.1:1",
@@ -207,6 +197,14 @@ class _Fleet(_Shared):
 
     def calls(self):
         return [l for l in self.peer_log.read_text().splitlines() if l.strip()]
+
+    def held_pat(self, value):
+        """Store `value` here and answer its fingerprint."""
+        self.base_env()
+        self.held.mkdir(parents=True, exist_ok=True)
+        (self.held / "github-pat").write_text(value + "\n")
+        return subprocess.run(["python3", str(REPO / "lib" / "secretfile.py"), "fingerprint", str(self.held / "github-pat")],
+                              capture_output=True, text=True, check=True).stdout.strip()
 
 
 class TestEveryCredentialIsTheFleets(_Fleet):
@@ -265,13 +263,7 @@ class TestCheckAsksEachWorkstationWhatItHolds(_Fleet):
 
     def test_a_peer_holding_the_same_one_does_not_repeat_its_reach(self):
         """A peer holding the very credential this machine holds is reported as that, its reach once."""
-        self.base_env()
-        self.held.mkdir(parents=True, exist_ok=True)
-        (self.held / "github-pat").write_text(GOOD_PAT + "\n")
-        fp = subprocess.run(
-            ["python3", str(REPO / "lib" / "secretfile.py"), "fingerprint",
-             str(self.held / "github-pat")],
-            capture_output=True, text=True, check=True).stdout.strip()
+        fp = self.held_pat(GOOD_PAT)
         cp = self.check(verdict="ok\tit reaches exactly the forks\n"
                                 "    fingerprint: %s\n" % fp)
         out = cp.stdout + cp.stderr
@@ -313,13 +305,7 @@ class TestTheFleetSettlesWhatThisMachineCannotUse(_Fleet):
                          needs)
 
     def test_a_peer_holding_the_same_one_sends_you_to_the_issuer(self):
-        self.base_env()
-        self.held.mkdir(parents=True, exist_ok=True)
-        (self.held / "github-pat").write_text(OTHER_PAT + "\n")
-        fp = subprocess.run(
-            ["python3", str(REPO / "lib" / "secretfile.py"), "fingerprint",
-             str(self.held / "github-pat")],
-            capture_output=True, text=True, check=True).stdout.strip()
+        fp = self.held_pat(OTHER_PAT)
         cp = self.check(pat=OTHER_PAT, **self.peer_holds_a_working_one(fp))
         needs = (cp.stdout + cp.stderr).split("needs you:")[1]
         self.assertRegex(needs, r"github-pat\s+wk key set github-pat")

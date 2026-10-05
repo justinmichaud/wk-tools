@@ -25,19 +25,8 @@ from wk.store import Store  # noqa: E402
 MACHINE = Store().podman_machine()
 
 
-def here():
-    return os.uname().sysname == "Darwin" and not store.in_vm()
-
-
-def start_workspace(reg, name):
-    driver = reg.load(reg.ws_place(name))
-    if driver.info(name) == "absent":
-        die(store.no_such_workspace(name))
-    return 0 if driver.start(name) else 1
-
-
 def start_everything(reg):
-    if here():
+    if Store().macos_host:
         state = reg.load("container").machine_state()
         if state == "absent":
             die("no machine '%s' -- run ./setup" % MACHINE)
@@ -56,7 +45,7 @@ def start_everything(reg):
         info("started %d container(s)" % len(stopped))
     else:
         info("no stopped containers")
-    if here():
+    if Store().macos_host:
         try:
             vm = reg.load("vm")
             guests = [n for n, state in vm.list() if state != "running"]
@@ -73,7 +62,7 @@ def main(argv):
     reg = places.Registry(ROOT)
     name = store.ws_name()
     try:
-        return start_workspace(reg, name) if name else start_everything(reg)
+        return (0 if reg.present(name).start(name) else 1) if name else start_everything(reg)
     except LookupError as e:
         die(str(e))
 

@@ -40,7 +40,6 @@ def exclusions(root, plan, bits):
 
 
 def kept(plan_doc, drop):
-    """The plan's own subtests minus `drop`, so both arms cover the same set."""
     listed = [s for group in (plan_doc.get("subtests") or {}).values() for s in group]
     unknown = sorted(set(drop) - set(listed))
     if unknown:
@@ -77,8 +76,8 @@ def pair(spec, what):
     return a, b
 
 
-def rounds_of(o):
-    rounds = o.get("rounds") or "3"
+def rounds_of(o, default="3"):
+    rounds = o.get("rounds") or default
     if not rounds.isdigit() or int(rounds) < 1:
         die("--rounds takes a number of at least 1 (got '%s')" % rounds)
     return int(rounds)
@@ -102,30 +101,46 @@ def stopping(o, rounds, detect="0"):
     return int(top), goal
 
 
+def interleave(first, top, detect, play, resolved, lost_limit):
+    """(outcome, kept, lost): rounds until `first` without `detect`, else until resolved(i) past `first` or `top`."""
+    kept = lost = 0
+    for i in range(1, (top if detect else first) + 1):
+        if play(i):
+            kept += 1
+        else:
+            lost += 1
+            if lost >= lost_limit:
+                return "lost-at-round-%d" % i, kept, lost
+        if detect and i >= first and resolved(i):
+            return "resolved-at-round-%d" % i, kept, lost
+    return ("hit-max-rounds" if detect else "rounds-done"), kept, lost
+
+
 class AB:
     @property
     def arm_word(self):
         return "system" if self.systems else "slot"
 
     def __init__(self, root, reg, ws, plan, o, clock, driver=None, machine=None):
-        self.root, self.reg, self.ws, self.plan, self.o, self.clock = str(root), reg, ws, plan, o, clock
-        self.name, self.here = o["system"], reg.machine
         self.systems = bool(o.get("ab_systems"))
         a, b = pair(o.get("ab_systems") or o.get("ab"), "ab-systems" if self.systems else "ab")
+        self.setup(root, reg, ws, plan, o, clock, (a, b))
+        self.name = o["system"]
         slot = o.get("slot") or "a"
         self.arms = [(a, slot), (b, slot)] if self.systems else [("", a), ("", b)]
         for _, s in self.arms:
             images.check_slot_name(s)
-        self.labels = (a, b)
+        self.env = dict(reg.env, WK_DEVICE_HELD="device:" + self.name)
+        self.system = board.for_board(self.root, reg, ws, clock, self.name, machine=machine, driver=driver)
+
+    def setup(self, root, reg, ws, plan, o, clock, labels):
+        self.root, self.reg, self.ws, self.plan, self.o, self.clock, self.labels = str(root), reg, ws, plan, o, clock, labels
         self.rounds = rounds_of(o)
         self.max_rounds, self.detect = stopping(o, self.rounds)
-        self.env = dict(reg.env, WK_DEVICE_HELD="device:" + self.name)
-        self.task, self.taskdir, self.owned, self.held = o.get("task") or "", "", False, None
+        self.task, self.taskdir, self.owned = o.get("task") or "", "", False
         if self.task:
             self.taskdir = os.path.join(record.leg_home(reg, ws, self.task)[1], self.task)
-        self.system = board.for_board(self.root, reg, ws, clock, self.name, machine=machine, driver=driver)
-        self.recs = progress.Records(reg.store.records_dir(), clock=clock, env=reg.env, machine=self.here)
-        self.lock = Lock(reg.store, self.here, clock)
+        self.lock = Lock(reg.store, reg.machine, clock)
 
     def run(self):
         return board.BoardRun(self.root, self.reg, self.system, self.clock, self.env, name=self.ws + "-leg")
@@ -154,7 +169,7 @@ class AB:
             return False
 
     def boot(self, want):
-        """The board running `want`, read from the marker the running system serves; False when it will not come up so."""
+        """The board running `want`, read from its own marker; False when it will not come up so."""
         d, name = self.system.driver, self.name
         tries = 0
         while tries <= SYSTEM_TRIES:
@@ -212,28 +227,30 @@ class AB:
         excluded = subtests(self.root, self.reg.env, self.plan, plan_doc, idents, self.o.get("subtests") or "", self.o.get("exclude_subtests") or "")
         self.base = {k: self.o.get(k) or "" for k in ("count", "timeout", "cores", "no_warmup_profile", "jit_tiers")}
         self.base.update(subtests=excluded[0], excluded=excluded[1], slot_a=a, slot_b=b, task=self.task)
-        if self.task and not act.dry_run() and not pipeline.task_held(self.reg.env, self.task):
-            self.lock.hold("bench-task-" + self.task, timeout=5)
-        if self.task or act.dry_run():
+        if self.claimed():
             return
         stamp, flag = self.clock.stamp(), "--ab-systems" if self.systems else "--ab"
-        self.task = "%s-%s-systems" % (stamp, self.name) if self.systems else "%s-%s-%s-vs-%s" % (stamp, self.name, a, b)
-        m, bench = record.leg_home(self.reg, self.ws)
-        self.taskdir = os.path.join(bench, self.task)
-        if m.exists(self.taskdir):
-            die("task %s already exists (%s); a task is one request, made once" % (self.task, self.taskdir))
-        self.lock.hold("bench-task-" + self.task, timeout=5)
         device = self.name if self.systems else "%s=%s" % (self.name, self.system.manifest(a).get("profile", ""))
-        extra = ["%s=%s" % (k, self.base[k]) for k in ("count", "timeout") if self.base[k]]
-        command = "wk bench run %s %s --system %s %s %s%s --rounds %d%s%s" % (
-            self.ws, self.plan, self.name, flag, "%s,%s" % (a, b), " --slot " + self.arms[0][1] if self.systems else "", self.rounds,
-            " --max-rounds %d --detect %g" % (self.max_rounds, self.detect) if self.detect else "",
-            "".join(" --%s %s" % (k, self.base[k]) for k in ("count", "timeout") if self.base[k]))
-        record.task_write(self.taskdir, ["task=" + self.task, "requested=" + self.clock.iso(), "subject.kind=" + ("systems" if self.systems else "slots"),
-                                         "subject.spec=%s,%s" % (a, b), "devices=" + device, "plans=" + self.plan, "rounds=%d" % self.rounds,
-                                         "slots=" + ",".join(dict.fromkeys(s for _, s in self.arms)),
-                                         "restart=%s --task %s" % (command, self.task)] + extra, [command], machine=m)
-        self.base["task"], self.owned = self.task, True
+        given = ["--%s %s" % (k, self.base[k]) for k in ("count", "timeout") if self.base[k]]
+        command = " ".join(["wk bench run %s %s --system %s %s %s,%s" % (self.ws, self.plan, self.name, flag, a, b)]
+                           + (["--slot " + self.arms[0][1]] if self.systems else []) + [self.rounds_words()] + given)
+        self.create("%s-%s-systems" % (stamp, self.name) if self.systems else "%s-%s-%s-vs-%s" % (stamp, self.name, a, b), [
+            "subject.kind=" + ("systems" if self.systems else "slots"), "subject.spec=%s,%s" % (a, b), "devices=" + device, "plans=" + self.plan,
+            "rounds=%d" % self.rounds, "slots=" + ",".join(dict.fromkeys(s for _, s in self.arms))]
+            + [w.replace(" ", "=", 1)[2:] for w in given], command)
+
+    def claimed(self):
+        if self.task and not act.dry_run() and not pipeline.task_held(self.reg.env, self.task):
+            self.lock.hold("bench-task-" + self.task, timeout=5)
+        return bool(self.task) or act.dry_run()
+
+    def create(self, task, fields, command):
+        self.task = task
+        self.taskdir = record.new_task(*record.leg_home(self.reg, self.ws), task, self.lock, self.clock.iso(), fields, command)
+        self.base["task"], self.owned = task, True
+
+    def rounds_words(self):
+        return "--rounds %d%s" % (self.rounds, " --max-rounds %d --detect %g" % (self.max_rounds, self.detect) if self.detect else "")
 
     def warmup(self):
         """Round 0, thrown away: what the rounds cannot read -- the GL driver, the width, the JIT tier -- and the profile."""
@@ -245,7 +262,7 @@ class AB:
         if act.dry_run():
             return
         d = os.path.join(self.taskdir, "warmup")
-        problems = report.warmup_check(*[os.path.join(d, "%s-%s.evidence.json" % (self.name, x)) for x in "ab"], not self.systems)
+        problems = report.warmup_check(*report.evidence_paths(self.taskdir, self.name), not self.systems)
         if problems:
             act.barrier("the warmup round says these two arms are not what the A/B claims:\n" + "\n".join("    " + p for p in problems))
             return
@@ -256,7 +273,6 @@ class AB:
         return record.task_rounds(doc, record.task_runs(self.taskdir)).get((self.name, self.plan), {})
 
     def resolved(self):
-        """The rounds this task holds for this board and plan, paired as the report pairs them."""
         a_dirs, b_dirs, _ = record.paired(self.byround(), self.labels)
         return report.resolved(a_dirs, b_dirs, self.detect)
 
@@ -270,37 +286,36 @@ class AB:
 
     def measured(self):
         """Each round not already in the task with both arms ok, so a restarted A/B takes up where it stopped."""
-        kept = lost = 0
         of = "%d-%d" % (self.rounds, self.max_rounds) if self.detect else str(self.rounds)
         have = {rnd for rnd, arms in self.byround().items() if all(arms.get(x, {}).get("state") == "ok" for x in "ab")}
-        for i in range(1, self.max_rounds + 1):
+
+        def play(i):
             log("")
             if i in have:
                 log("round %d/%s -- recorded already" % (i, of))
-                done = {0: True, 1: True}
-            else:
-                done = self.round(i, of)
-            if done[0] and done[1]:
-                kept += 1
-            else:
-                lost += 1
+                return True
+            done = self.round(i, of)
+            if not (done[0] and done[1]):
                 warn("round %d produced %sonly -- the report drops it" % (i, "".join(self.labels[a] + " " for a in (0, 1) if done[a])))
-                if lost >= LOST_ROUNDS:
-                    warn("%d rounds lost; stopping early" % LOST_ROUNDS)
-                    break
-            if i >= self.rounds and not self.detect:
-                break
-            if i >= self.rounds and self.resolved():
-                log("  resolved    %g%% at round %d" % (self.detect, i))
-                break
-        else:
+            return done[0] and done[1]
+
+        outcome, kept, lost = interleave(self.rounds, self.max_rounds, self.detect, play, lambda i: self.resolved(), LOST_ROUNDS)
+        if outcome.startswith("lost"):
+            warn("%d rounds lost; stopping early" % LOST_ROUNDS)
+        elif outcome.startswith("resolved"):
+            log("  resolved    %g%% at round %d" % (self.detect, kept + lost))
+        elif outcome == "hit-max-rounds":
             warn("--max-rounds %d reached without resolving %g%%; the report says what these rounds do resolve" % (self.max_rounds, self.detect))
         return kept, lost
 
+    def hold(self):
+        recs = progress.Records(self.reg.store.records_dir(), clock=self.clock, env=self.reg.env, machine=self.reg.machine)
+        return progress.hold(recs, lambda r: progress.fleet_holders(r, recs, progress.fleet_stores(self.root, self.reg.env, recs.machine)), self.name,
+                             "bench", self.ws, "wk bench run %s --kill --system %s" % (self.ws, self.name), "",
+                             ["%s on %s, %s" % (self.plan, self.name, " vs ".join(self.labels))], os.getpid(), self.reg.env)
+
     def go(self):
-        self.held = progress.hold(self.recs, lambda r: progress.fleet_holders(r, self.recs, progress.fleet_stores(self.root, self.reg.env, self.recs.machine)), self.name, "bench",
-                                  self.ws, "wk bench run %s --kill --system %s" % (self.ws, self.name), "",
-                                  ["%s on %s, %s" % (self.plan, self.name, " vs ".join(self.labels))], os.getpid(), self.reg.env)
+        self.held = self.hold()
         rc = 1
         try:
             with job.Signals():
@@ -369,20 +384,13 @@ class ArgsAB(AB):
     arm_word = "options"
 
     def __init__(self, root, reg, ws, plan, o, clock):
-        self.root, self.reg, self.ws, self.plan, self.o, self.clock = str(root), reg, ws, plan, o, clock
         self.args = (o.get("a_args") or "", o.get("b_args") or "")
         if self.args[0] == self.args[1]:
             die("--a-args and --b-args are the same ('%s'). Two runs of one arm measure it twice,\n"
                 "    which is a repeatability check rather than an A/B -- '--count N' asks for that." % self.args[0])
-        self.labels = tuple(a or "(none)" for a in self.args)
+        self.setup(root, reg, ws, plan, o, clock, tuple(a or "(none)" for a in self.args))
         self.name, self.systems, self.env = ws, False, reg.env
-        self.rounds = rounds_of(o)
-        self.max_rounds, self.detect = stopping(o, self.rounds)
-        self.task, self.taskdir, self.owned = o.get("task") or "", "", False
-        if self.task:
-            self.taskdir = os.path.join(record.leg_home(reg, ws, self.task)[1], self.task)
         self.system = systems.for_workspace(self.root, reg, ws, clock, "")
-        self.lock = Lock(reg.store, reg.machine, clock)
 
     def run(self):
         return pipeline.Run(self.root, self.reg, self.system, self.clock, dict(self.env, WK_TASK_HELD=self.task))
@@ -390,44 +398,26 @@ class ArgsAB(AB):
     def arm_leg(self, arm, o):
         return self.leg(dict(o, arm_args=self.args[arm]))
 
-    def begin(self):
-        self.base = dict(self.o, slot_a=self.labels[0], slot_b=self.labels[1], task=self.task)
-        if self.task and not act.dry_run():
-            self.lock.hold("bench-task-" + self.task, timeout=5)
-        if self.task or act.dry_run():
-            return
-        self.task = "%s-%s-options" % (self.clock.stamp(), self.ws)
-        m, bench = record.leg_home(self.reg, self.ws)
-        self.taskdir = os.path.join(bench, self.task)
-        if m.exists(self.taskdir):
-            die("task %s already exists (%s); a task is one request, made once" % (self.task, self.taskdir))
-        self.lock.hold("bench-task-" + self.task, timeout=5)
-        preset = self.o.get("preset") or pipeline.DEFAULT_PRESET
-        measured = "".join(" --%s %s" % (k.replace("_", "-"), shlex.quote(self.o[k])) for k in ARGS_AB_MEASURED if self.o.get(k))
-        command = "wk bench run %s %s --preset %s --a-args %s --b-args %s --rounds %d%s%s%s" % (
-            self.ws, self.plan, preset, shlex.quote(self.args[0]), shlex.quote(self.args[1]), self.rounds,
-            " --max-rounds %d --detect %g" % (self.max_rounds, self.detect) if self.detect else "", measured,
-            " --software" if self.o.get("software") else "")
-        record.task_write(self.taskdir, ["task=" + self.task, "requested=" + self.clock.iso(), "subject.kind=options",
-                                         "subject.a=" + self.args[0], "subject.b=" + self.args[1], "devices=%s=%s" % (self.ws, preset),
-                                         "plans=" + self.plan, "rounds=%d" % self.rounds, "slots=" + self.ws,
-                                         "restart=%s --task %s" % (command, self.task)], [command], machine=m)
-        self.base["task"], self.owned = self.task, True
+    def hold(self):
+        return None
 
-    def go(self):
-        try:
-            with job.Signals():
-                self.begin()
-                log("interleaving %d round(s) of %s vs %s in '%s'" % (self.rounds, self.labels[0], self.labels[1], self.ws))
-                if act.dry_run():
-                    self.round(1, str(self.rounds))
-                    info("dry run -- then the rest of %d round(s), each arm once per round, the lead alternating" % self.rounds)
-                    return 0
-                return self.finish()
-        except job.Interrupted as e:
-            raise Refused(job.EXIT_OF.get(e.signum, 130))
-        finally:
-            self.lock.release_all()
+    def body(self):
+        self.base = dict(self.o, slot_a=self.labels[0], slot_b=self.labels[1], task=self.task)
+        if not self.claimed():
+            preset = self.o.get("preset") or pipeline.DEFAULT_PRESET
+            measured = "".join(" --%s %s" % (k.replace("_", "-"), shlex.quote(self.o[k])) for k in ARGS_AB_MEASURED if self.o.get(k))
+            self.create("%s-%s-options" % (self.clock.stamp(), self.ws), [
+                "subject.kind=options", "subject.a=" + self.args[0], "subject.b=" + self.args[1], "devices=%s=%s" % (self.ws, preset),
+                "plans=" + self.plan, "rounds=%d" % self.rounds, "slots=" + self.ws],
+                "wk bench run %s %s --preset %s --a-args %s --b-args %s %s%s%s" % (
+                    self.ws, self.plan, preset, shlex.quote(self.args[0]), shlex.quote(self.args[1]), self.rounds_words(), measured,
+                    " --software" if self.o.get("software") else ""))
+        log("interleaving %d round(s) of %s vs %s in '%s'" % (self.rounds, self.labels[0], self.labels[1], self.ws))
+        if act.dry_run():
+            self.round(1, str(self.rounds))
+            info("dry run -- then the rest of %d round(s), each arm once per round, the lead alternating" % self.rounds)
+            return 0
+        return self.finish()
 
 
 def run(root, reg, ws, plan, o, clock, driver=None, machine=None):

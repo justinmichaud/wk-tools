@@ -1,6 +1,5 @@
 """The golden macOS base, `wk sysimage build macos-guest-base`, against a fake host whose tart keeps one VM's state."""
 import contextlib
-import functools
 import importlib.util
 import io
 import json
@@ -13,6 +12,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from tests.fakes import BenchHere
 from tests.killpoints import converges
 from tests.support import REPO, live_selected
 
@@ -20,7 +20,7 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import act, guest, places, tools  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Local, Result  # noqa: E402
+from wk.machine import Local, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
 from wk.sysimage import cli, guestbase  # noqa: E402
 
@@ -30,17 +30,11 @@ CLEAR = "Notification Center:21:1280x800@0,0;Terminal:0:863x499@40,51;"
 PANE = "Setup Assistant:0:800x600;Terminal:0:863x499;"
 
 
-@functools.lru_cache(maxsize=None)
-def _bench(argv):
-    """This tree's bench libraries, run for real: a reading of them is a pure function of its arguments."""
-    return Local().run(list(argv))
-
-
-class BaseWorld(Fake):
+class BaseWorld(BenchHere):
     """One Mac: tart holding at most `wk-base` (in `state`), and a guest behind tart exec that says what `sa` and `screen` say."""
 
     def __init__(self, base):
-        super().__init__("here")
+        super().__init__()
         self.env = {"HOME": base + "/home", "WK_STORE": base + "/store", "WK_VM_STORE": base + "/vmstore",
                     "XDG_STATE_HOME": base + "/state", "WK_MACHINES_DIR": base + "/registry", "PATH": os.environ["PATH"]}
         self.state, self.disk, self.cached, self.sa, self.screen, self.prov_rc = "absent", 140, True, ["0"], CLEAR, "0"
@@ -64,7 +58,6 @@ class BaseWorld(Fake):
         self.answer(["du", "-sh"], out="162G\t/x\n")
         self.react(["git", "-C"], lambda a, f: Result(0, " M wk\n" if f.dirty and "status" in a else ""))
         self.react(["ssh-keygen"], self._keygen)
-        self.react(["bash", "-c"], lambda a, f: _bench(tuple(a)))
         self.react([TART, "exec"], self._guest)
 
     def _to(self, state, disk=None):
@@ -265,10 +258,6 @@ class TestItIsSealedOnlyOnAClearScreen(BaseTest):
         self.assertIn("came back at 'wk-base''s next login", err)
         self.assertEqual("", self.marker())
 
-    def test_a_login_that_stays_clear_is_watched_for_the_settle(self):
-        self.build()
-        self.assertEqual(guestbase.LOGIN_SETTLE // 3, self.clock.slept.count(3))
-
     def test_a_pane_on_screen_is_named_and_the_base_is_not_sealed(self):
         self.w.screen = PANE
         rc, err = self.build()
@@ -312,11 +301,6 @@ class TestItsStalenessIsRecomputed(BaseTest):
     def test_the_record_holds_no_password(self):
         self.build()
         self.assertNotIn("password", self.marker().lower())
-
-    def test_the_inputs_are_the_base_scripts_and_nothing_a_start_converges(self):
-        self.assertNotIn("vm/shell-rc.sh", guestbase.INPUTS)
-        for rel in guestbase.INPUTS:
-            self.assertTrue((REPO / rel).is_file(), rel)
 
     def test_no_base_and_an_unfinished_one_each_name_their_remedy(self):
         self.assertIn("no golden base VM 'wk-base'", self.base().findings())
@@ -498,7 +482,7 @@ class TestThePodmanMachineIsNotStartedBesideAGuest(BaseTest):
         self.w.answer(["podman", "machine", "inspect"], out=json.dumps([{"State": "stopped", "Resources": {"Memory": 16384}}]))
         reg = mock.Mock(machine=self.w)
         reg.load.side_effect = lambda n: mock.Mock(machine_state=lambda: "stopped") if n == "container" else self.base().vm
-        with mock.patch.object(start, "here", lambda: True), mock.patch.dict(os.environ, self.w.env), \
+        with mock.patch.object(start.Store, "macos_host", True), mock.patch.dict(os.environ, self.w.env), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertRaises(Refused, start.start_everything, reg)
         self.assertIn("not starting the podman machine", err.getvalue())

@@ -1,6 +1,5 @@
-"""`wk machine setup|tailnet|rm <bridge>`: this end renders the role (wk.bridge.plan) and ships it with
-bridge/'s scripts, bridge/provision.sh applies it on the phone, and the tailnet join and the policy are
-this end's again. `setup --disk` writes the phone's system first (wk.bridge.provision)."""
+"""`wk machine setup|tailnet|rm <bridge>`: the role rendered here (wk.bridge.plan), applied on the phone by
+bridge/provision.sh, then the tailnet join. `setup --disk` writes the phone's system first (wk.bridge.provision)."""
 
 import os
 import shlex
@@ -11,7 +10,7 @@ from wk.act import die, info, log, warn
 from wk.bridge import ACCEPT_NEW, HEALTHCHECK, Bridge, NeedsPassword, Unreachable, devices, judge, kv, render
 from wk.bridge import plan as plans
 from wk.bridge import provision
-from wk.bridge.plan import AUTHKEY, LIB
+from wk.bridge.plan import AUTHKEY, LIB, SSHD_DROPIN
 from wk.clock import Clock
 from wk.machine import HAVE, Machine, Ssh
 
@@ -40,7 +39,6 @@ fi
 tailscale logout >/dev/null 2>&1 || printf 'note: tailscale logout failed (already logged out?)\\n'
 printf 'the bridge role is gone; postmarketOS and the packages are untouched\\n'
 """
-SSHD_DROPIN = "/etc/ssh/sshd_config.d/10-wk-bridge.conf"
 POLICY = """
 Remaining manual step -- the tailnet policy, in the admin console.
 
@@ -55,14 +53,9 @@ Remaining manual step -- the tailnet policy, in the admin console.
       "dst": ["%(segment)s"], "ip": ["*"] }
   ]
 
-autoApprovers is what makes the route live without a console click; without it
-the node is up, the segment is advertised, and nothing behind it is reachable.
-
-The grant is the real access control for everything behind this bridge -- the
-devices on the segment have none of their own worth relying on (a BMC reverts
-to factory credentials on a power loss). Grant %(tag)s itself nothing: it
-routes, it never initiates, and root on it is equivalent to whatever is behind
-it.
+Without autoApprovers the segment is advertised and nothing behind it is reachable. The grant is the
+only access control for the segment (a BMC reverts to factory credentials on power loss); grant
+%(tag)s itself nothing: root on it is equivalent to whatever is behind it.
 """
 
 
@@ -108,8 +101,8 @@ class Role:
         if not pw:
             return None
         info("giving root the same ssh key, so provisioning needs no password")
-        log("  pmbootstrap installs the key for '%s' only; this uses PMO_PASSWORD from its image profile." % bc.user())
-        keys = "/home/%s/.ssh/authorized_keys" % bc.user()
+        log("  pmbootstrap installs the key for '%s' only; this uses PMO_PASSWORD from its image profile." % bc.user)
+        keys = "/home/%s/.ssh/authorized_keys" % bc.user
         install = "install -d -o root -g root -m 700 /root/.ssh && install -o root -g root -m 600 %s /root/.ssh/authorized_keys" % keys
         # -tt: doas reads its password from a tty.
         Ssh(dest, opts=["-tt"] + ACCEPT_NEW, timeout=15, via=Paused(self.here)).act_run(["doas", "sh", "-c", install],
@@ -146,8 +139,6 @@ class Role:
     def ship(self, phone, prefix, plan, dest):
         self.act(phone, prefix + ["sh", "-c", SHIP], "could not copy the role to %s" % dest, input=plans.bundle(self.root, plan))
 
-    # -- setup and tailnet
-
     def setup(self, name, at=None, no_tailnet=False, disk=None, image=None, rebuild=False):
         bc, note, kill = self.conf(name)
         if (image or rebuild) and not disk:
@@ -156,15 +147,15 @@ class Role:
             die("--rebuild and --image contradict each other: one builds a new image, the other names a file")
         c = bc.conf
         info("%s -- %s, %s via %s" % (name, note, bc.segment, bc.iface))
-        log("  tailnet:  %s, %s, advertising %s" % (bc.hostname(), c["tag"], bc.segment))
+        log("  tailnet:  %s, %s, advertising %s" % (bc.hostname, c["tag"], bc.segment))
         log("  egress:   %s, camera: %s, battery cap %s%%" % (bc.egress, bc.camera, c["battery_limit"]))
-        if not disk:
+        if disk:
+            w = provision.Write(self)
+            if not w.run(bc, kill, disk, image, rebuild):
+                return 0
+            w.wait(bc, at)
+        else:
             act.nothing_to_ask()
-            return self.apply(bc, kill, self.connect(bc, at), no_tailnet)
-        w = provision.Write(self)
-        if not w.run(bc, kill, disk, image, rebuild):
-            return 0
-        w.wait(bc, at)
         return self.apply(bc, kill, self.connect(bc, at), no_tailnet)
 
     def tailnet(self, name, at=None):
@@ -213,7 +204,6 @@ class Role:
         return bc.segment in ((self.b.ts_status(phone, prefix).get("Self") or {}).get("PrimaryRoutes") or [])
 
     def join(self, bc, phone, prefix, no_tailnet):
-        """True once the node is on the tailnet, tagged and advertising the segment."""
         self.clock.wait_until(lambda: self.tailscale_up(phone, prefix), TAILSCALED_WAIT, 1)
         ts = self.b.ts_status(phone, prefix)
         seg, tag = bc.segment, bc.conf["tag"]
@@ -235,12 +225,12 @@ class Role:
         self.act(phone, prefix + ["sh", "-c", "umask 077; cat > " + AUTHKEY], "could not hand the auth key over", input=key + "\n")
         # --advertise-tags is settable only at login, and a tagged node never key-expires.
         r = phone.act_run(prefix + ["tailscale", "up", "--auth-key=file:" + AUTHKEY, "--advertise-routes=" + seg,
-                                    "--advertise-tags=" + tag, "--hostname=" + bc.hostname(), "--accept-dns=false",
+                                    "--advertise-tags=" + tag, "--hostname=" + bc.hostname, "--accept-dns=false",
                                     "--accept-routes=false", "--ssh=true"], timeout=120)
         phone.act_run(prefix + ["rm", "-f", AUTHKEY])
         if not r.ok:
             die("tailscale up failed on the phone: %s" % (r.err.strip() or r.out.strip()))
-        info("joined the tailnet as %s (%s)" % (bc.hostname(), tag))
+        info("joined the tailnet as %s (%s)" % (bc.hostname, tag))
         return True
 
     def readvertise(self, bc, phone, prefix):
@@ -257,8 +247,6 @@ class Role:
 
     def authkey(self):
         return tailnet.Fleet(self.root, self.env, self.here, self.transport).key()
-
-    # -- rm
 
     def deprovision(self, bc):
         paths = [p for p in plans.every_path(bc.name, bc.conf) if p != SSHD_DROPIN]

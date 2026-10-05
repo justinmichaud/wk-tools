@@ -94,6 +94,15 @@ class Fetch:
         return 0
 
 
+def check_commit(commit):
+    if not re.match(r"^[0-9a-f]{40}$", commit):
+        die("--commit takes a full sha (40 hex digits), got '%s'" % commit)
+
+
+def opt(flag, value):
+    return [flag, value] if value else []
+
+
 def off_wall(path):
     """PATH without every directory under container/bin, so no configure step records a wall as the tool it found."""
     keep = [d for d in path.split(":") if d and not re.search(r"/container/bin(/|$)", d)]
@@ -137,8 +146,8 @@ class Stage:
     def refuse_busy(self):
         busy = build.busy_reason(self.driver, self.recs, self.ws)
         if busy:
-            die("a build is still running in '%s': %s.\n    One job per workspace: both move the checkout and the tree's output.\n"
-                "    Follow it:  wk status %s --log -f\n    Stop it:    %s" % (self.ws, busy, self.ws, self.kill))
+            die("a build is still running in '%s': %s.\n    Follow it:  wk status %s --log -f\n    Stop it:    %s"
+                % (self.ws, busy, self.ws, self.kill))
 
     def detach(self, argv, what):
         pid = build.detached(self.here, self.recs, self.clock, self.kind, self.ws, argv,
@@ -149,11 +158,12 @@ class Stage:
         log("  stop it: %s" % self.kill)
         return 0
 
-    def size(self, max_jobs):
-        env = dict(self.env, WK_MB_PER_JOB=str(MB_PER_JOB), WK_MAX_JOBS=str(max_jobs))
-        budget = Budget(self.here, env, self.clock)
+    def size(self, max_jobs=None, mb=MB_PER_JOB):
+        """(budget, running, jobs); self.res is the machine's envelope those were sized against."""
+        env = dict(self.env, WK_MB_PER_JOB=str(mb), **({"WK_MAX_JOBS": str(max_jobs)} if max_jobs else {}))
+        budget, self.res = Budget(self.here, env, self.clock), Resources(self.here, env)
         running = budget.running(build.holder_alive(self.reg))
-        return budget, running, build_jobs(Resources(self.here, env), budget, running)
+        return budget, running, build_jobs(self.res, budget, running)
 
     def admit(self, budget, running, jobs, need_gb=None, what=None):
         """The workspace's lock, refused rather than queued, then its jobs and this machine's budget."""
@@ -262,6 +272,16 @@ class ContainerBuilder:
     def ws_flag(self, ws):
         return "" if ws == images.image_ws(self.name, self.env) else " --workspace " + ws
 
+    def ws_of(self, o):
+        return o.get("--workspace") or images.image_ws(self.name, self.env)
+
+    def detach(self, st, verb, rest, what):
+        return st.detach([os.path.join(self.root, "wk"), "sysimage", verb, self.spec] + [a for a in rest if a != "--detach"], what)
+
+    def du(self, path):
+        words = self.here.run(["du", "-sh", path]).out.split()
+        return words[0] if words else "not created yet"
+
     def ensure_ws(self, driver, ws, base, tag):
         """The image first, so an edited Containerfile changes the wanted tag on every run."""
         podman = driver.podman()
@@ -272,8 +292,7 @@ class ContainerBuilder:
             log(self.IMAGE_NOTE % {"spec": self.SPEC})
             spec = os.path.join(self.root, self.SPEC)
             if not self.here.run_tty(podman + ["build", "--build-arg", "BASE=" + base, "-t", tag, "-f", spec, os.path.dirname(spec)]).ok:
-                die("could not build %s.\n    This runs on the host, where there is a network; if apt or the pull failed,\n"
-                    "    that is a host-side problem and not the workspace boundary." % tag)
+                die("could not build %s (on the host, so a failed apt or pull is not the workspace boundary)" % tag)
         if driver.info(ws) == "absent":
             info("creating workspace '%s' for the %s build" % (ws, self.TITLE))
             if not self.here.run_tty(["env", "WK_SDK_IMAGE=" + tag, os.path.join(self.root, "wk"), "new", ws, "--on", driver.name]).ok:
@@ -281,9 +300,8 @@ class ContainerBuilder:
             return
         was = self.here.run(podman + ["container", "inspect", driver.ctr(ws), "--format", "{{.ImageName}}"])
         if was.ok and was.out.strip() and was.out.strip() != tag:
-            die("workspace '%s' was made from %s, and the spec now wants\n    %s. A container cannot be moved between images, "
-                "so this build\n    would use host packages %s no longer describes.\n    Remake it -- %s:\n"
-                "        wk rm %s && wk sysimage build %s" % (ws, was.out.strip(), tag, self.SPEC, self.SURVIVES, ws, self.spec))
+            die("workspace '%s' was made from %s, and %s now wants %s.\n    Remake it -- %s:\n"
+                "        wk rm %s && wk sysimage build %s" % (ws, was.out.strip(), self.SPEC, tag, self.SURVIVES, ws, self.spec))
 
 
 def stage_main(label, argv, environ=None):

@@ -27,22 +27,20 @@ class Election:
             rc, pub = self.fleet.ask(m, "pub", fork)
             pub = pub.rstrip("\n")
             if rc not in (0, 1):
-                return "unverified\t%s did not answer: unreachable, or an older wk-tools there (wk sync --tools %s)" % (m, m)
+                return "unverified\t%s did not answer (wk sync --tools %s if its wk-tools differs)" % (m, m)
         if not pub:
             return "absent\tno key for this fork\n    fix: wk key deploy"
         b64 = (pub.split() + ["", ""])[1]
         ssh = self.sshtest(fork)[1] if m == LOCAL else self.fleet.ask(m, "sshtest", fork)[1]
-        line = self.check_value("deploy-key", "", "--repos", repo, "--evidence", "ssh=" + ssh.rstrip("\n"),
+        line = self.sec.check_value("deploy-key", "", "--repos", repo, "--evidence", "ssh=" + ssh.rstrip("\n"),
                                 "--evidence", "read_only=" + self.gh.read_only(repo, b64))
         return "%s\n    fingerprint: %s" % (line, self.pub_fingerprint(pub))
 
     def cred_verdict_of(self, m, name):
-        """A peer that cannot be asked says so rather than looking empty."""
         if m == LOCAL:
             return self.verdict_text(name)
         line = self.fleet.ask(m, "verdict", name)[1].rstrip("\n")
-        return line or ("unverified\t%s did not answer: unreachable, or an older wk-tools there without the verdict subverb "
-                        "(wk sync --tools %s)" % (m, m))
+        return line or "unverified\t%s did not answer (wk sync --tools %s if its wk-tools differs)" % (m, m)
 
     def elect(self, fn, *args):
         """(winner, held, fingerprint per machine): `ok` over `wide`, one that cannot do its job never travels, and a tie
@@ -74,8 +72,7 @@ class Election:
             if winner and winner != LOCAL:
                 info("%s: %s holds the deploy key GitHub accepts -- taking it" % (repo, winner))
                 if not self.sec.push_key_adopt(fork, self.fleet.ask(winner, "give", fork)[1]):
-                    warn("%s: %s's deploy key did not arrive, so nothing was changed (an older wk-tools there has no 'give': "
-                         "wk sync --tools %s)" % (repo, winner, winner))
+                    warn("%s: %s's deploy key did not arrive, so nothing was changed" % (repo, winner))
                     return False
                 log("  an ssh-agent already holding the old key keeps offering it:  wk key push off && wk key push on")
         ok = self.register_fork(fork, repo)
@@ -113,8 +110,7 @@ class Election:
                 with contextlib.redirect_stdout(io.StringIO()):
                     taken = self._set(name, paste=True, value=self.fleet.ask(winner, "give", name)[1])
                 if not taken:
-                    warn("%s: what %s sent was not stored, so nothing here was changed (an older wk-tools there has no 'give': "
-                         "wk sync --tools %s)" % (name, winner, winner))
+                    warn("%s: what %s sent was not stored, so nothing here was changed" % (name, winner))
                     return False
                 log(self.cred_line(name, "taken", self.path(name)))
             elif not winner:

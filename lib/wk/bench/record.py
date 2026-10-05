@@ -110,6 +110,16 @@ def task_write(taskdir, fields, commands, machine=None):
     m.write_own(os.path.join(taskdir, "task.json"), json.dumps(doc, indent=2, sort_keys=True) + "\n")
 
 
+def new_task(m, bench, task, lock, requested, fields, command, held=False):
+    taskdir = os.path.join(bench, task)
+    if m.exists(taskdir):
+        die("task %s already exists (%s); a task is one request, made once" % (task, taskdir))
+    if not held:
+        lock.hold("bench-task-" + task, timeout=5)
+    task_write(taskdir, ["task=" + task, "requested=" + requested, "restart=%s --task %s" % (command, task)] + fields, [command], machine=m)
+    return taskdir
+
+
 def task_doc(taskdir):
     doc = load(os.path.join(taskdir, "task.json"))
     if not doc:
@@ -160,27 +170,17 @@ def task_arms(doc):
 
 
 def subject_line(doc):
-    subj = doc.get("subject", {})
-    kind = subj.get("kind", "")
-    devices = ", ".join(d["device"] for d in doc.get("devices", []))
-    plans = ", ".join(doc.get("plans", []))
-    slots = doc.get("slots", [])
+    subj, slots, rounds = doc.get("subject", {}), doc.get("slots", []), doc.get("rounds", 1)
+    kind, arms = subj.get("kind", ""), task_arms(doc)[0]
     if kind in ("pull", "commit"):
         what = "A/B %s: %s vs base %s" % (subj.get("spec", "?"), (subj.get("head") or "?")[:10], (subj.get("base") or "?")[:10])
     elif kind == "workspace":
         what = "%s %s" % (subj.get("spec", "?"), doc["devices"][0].get("profile", ""))
-    elif kind in ("systems", "options"):
-        arms, _ = task_arms(doc)
-        what = "%s vs %s" % (arms[0], arms[1]) if len(arms) == 2 else "systems"
-    elif len(slots) == 2:
-        what = "%s vs %s" % (slots[0], slots[1])
+    elif kind in ("systems", "options") or len(slots) == 2:
+        what = "%s vs %s" % tuple(arms) if len(arms) == 2 else "systems"
     else:
         what = "slot %s" % "/".join(slots)
-    parts = [what]
-    if kind != "workspace":
-        parts.append(devices)
-    parts.append(plans)
-    rounds = doc.get("rounds", 1)
+    parts = [what, "" if kind == "workspace" else ", ".join(d["device"] for d in doc.get("devices", [])), ", ".join(doc.get("plans", []))]
     if len(slots) == 2 or rounds > 1 or kind == "options":
         parts.append("%d round%s" % (rounds, "" if rounds == 1 else "s"))
     return " · ".join(p for p in parts if p)
@@ -206,8 +206,7 @@ PINS = ("runner_sha", "local_copy")
 
 
 def paired(byround, names):
-    """(a runs, b runs, dropped): the rounds both arms finished on one payload pin -- the runner commit and the
-    benchmark copy -- and why each other round is left out, since arms on two pins measure two benchmarks."""
+    """(a runs, b runs, dropped): the rounds both arms finished on one payload pin (runner commit and benchmark copy)."""
     a_dirs, b_dirs, dropped = [], [], []
     for rnd in sorted(byround):
         arms = byround[rnd]
@@ -236,46 +235,30 @@ def progress_line(log):
 
 
 def task_state(taskdir, running):
-    doc = task_doc(taskdir)
-    runs = task_runs(taskdir)
-    arm_names, _ = task_arms(doc)
+    doc, runs = task_doc(taskdir), task_runs(taskdir)
+    arm_names = task_arms(doc)[0]
     planned = len(doc.get("devices", [])) * len(doc.get("plans", [])) * doc.get("rounds", 1) * len(arm_names)
-    ok = [r for r in runs if r["state"] == "ok"]
-    failed = [r for r in runs if r["state"] == "failed"]
-    rehearsed = [r for r in runs if r["state"] == "rehearsal"]
-    live = [r for r in runs if r["state"] == "running"]
-    ended = len(ok) + len(failed) + len(rehearsed)
-    if running:
-        state = "running"
-    elif ended >= planned:
-        state = "complete"
-    else:
-        state = "incomplete"
-    usable = 0
-    for byround in task_rounds(doc, runs).values():
-        for byarm in byround.values():
-            if len(arm_names) == 2 and all(byarm.get(a, {}).get("state") == "ok" for a in ("a", "b")):
-                usable += 1
+    by = {k: [r for r in runs if r["state"] == k] for k in ("ok", "failed", "rehearsal", "running")}
+    ended = len(by["ok"]) + len(by["failed"]) + len(by["rehearsal"])
+    state = "running" if running else "complete" if ended >= planned else "incomplete"
+    usable = sum(1 for byround in task_rounds(doc, runs).values() for byarm in byround.values()
+                 if len(arm_names) == 2 and all(byarm.get(a, {}).get("state") == "ok" for a in "ab"))
     status = kv_file(os.path.join(taskdir, "status"))
-    current = live[0] if (running and live) else None
-    summary = "%d/%d runs ended, %d ok, %d failed" % (ended, planned, len(ok), len(failed))
-    if rehearsed:
-        summary += ", %d rehearsed (no measurement)" % len(rehearsed)
+    current = by["running"][0] if running and by["running"] else None
+    summary = "%d/%d runs ended, %d ok, %d failed" % (ended, planned, len(by["ok"]), len(by["failed"]))
+    if by["rehearsal"]:
+        summary += ", %d rehearsed (no measurement)" % len(by["rehearsal"])
     if len(arm_names) == 2:
         summary += ", %d round%s usable" % (usable, "" if usable == 1 else "s")
     if current:
-        env = current["env"]
-        summary += "; now %s %s %s" % (env.get("plan", "?"), env.get("machine", "?"), env.get("build_slot", "?"))
-        progress = progress_line(os.path.join(current["dir"], "run.log"))
-        if progress:
-            summary += " (%s)" % progress
+        env, progress = current["env"], progress_line(os.path.join(current["dir"], "run.log"))
+        summary += "; now %s %s %s%s" % (env.get("plan", "?"), env.get("machine", "?"), env.get("build_slot", "?"), " (%s)" % progress if progress else "")
     elif running and status.get("stage"):
         summary += "; " + status["stage"]
-    elif state == "incomplete" and live:
-        summary += "; %d run(s) died with their driver" % len(live)
-    return {"doc": doc, "runs": runs, "state": state, "planned": planned, "ended": ended,
-            "ok": len(ok), "failed": len(failed), "usable": usable, "current": current,
-            "stage": status.get("stage", ""), "summary": summary}
+    elif state == "incomplete" and by["running"]:
+        summary += "; %d run(s) died with their driver" % len(by["running"])
+    return {"doc": doc, "runs": runs, "state": state, "planned": planned, "ended": ended, "ok": len(by["ok"]), "failed": len(by["failed"]),
+            "usable": usable, "current": current, "stage": status.get("stage", ""), "summary": summary}
 
 
 def tasks(bench_dir, machine=None):
@@ -403,24 +386,16 @@ def running_tasks(found, lock_path, alive):
 
 
 def ls_rows(found, running=(), where=""):
-    """One store's rows (`found` is its homes()): each task, its state, its directory and each run's; `where` names the machine holding the store."""
     out = []
     for name, taskdir in found.items():
         st = task_state(taskdir, name in running)
-        out.append("%s  %s%s" % (name, subject_line(st["doc"]), "  [%s]" % where if where else ""))
-        out.append("    %s  %s" % (st["state"], st["summary"]))
-        out.append("    %s" % taskdir)
+        out += ["%s  %s%s" % (name, subject_line(st["doc"]), "  [%s]" % where if where else ""), "    %s  %s" % (st["state"], st["summary"]),
+                "    %s" % taskdir]
         for r in st["runs"]:
             m = r["env"]
-            axes = m.get("runner", "browser")
-            if m.get("arch", "native") != "native":
-                axes += "/" + m["arch"]
-            if m.get("bench_host", "container") != "container":
-                axes += "/" + m["bench_host"]
-            out.append("      %s  %s %s %s %s %s%s" % (
-                r["dir"], m.get("plan", "?"), m.get("preset", "?"), axes,
-                (m.get("webkit_sha") or "?")[:10], r["state"],
-                "  [FORCED]" if m.get("forced") else ""))
+            axes = "/".join([m.get("runner", "browser")] + [m[k] for k, d in (("arch", "native"), ("bench_host", "container")) if m.get(k, d) != d])
+            out.append("      %s  %s %s %s %s %s%s" % (r["dir"], m.get("plan", "?"), m.get("preset", "?"), axes, (m.get("webkit_sha") or "?")[:10],
+                                                     r["state"], "  [FORCED]" if m.get("forced") else ""))
     return out
 
 

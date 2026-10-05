@@ -22,7 +22,6 @@ PROGRESS = (re.compile(r"\[[0-9]+/[0-9]+\]"),
 STEP_EVENTS = {"start": "running", "ok": "done", "already": "done", "failed": "failed",
                "skipped": "skipped", "unneeded": "skipped", "refused": "pending"}
 REQUIRED = ("kind", "where", "name")
-_STAMP = re.compile(r"^\d{8}T\d{6}Z$")
 UNREADABLE = object()
 
 
@@ -165,18 +164,13 @@ def progress_line(path, machine=None):
         tail = (machine or here()).read_bytes(path, -65536).decode(errors="replace").replace("\r", "\n")
     except OSError:
         return ""
-    m = None
-    for m in PROGRESS[0].finditer(tail):
-        pass
-    if m:
-        return m.group(0)
-    for m in PROGRESS[1].finditer(tail):
-        pass
-    if m:
-        return "iteration %s/%s" % (m.group(1), m.group(2))
-    for m in PROGRESS[2].finditer(tail):
-        pass
-    return "%s %s" % (m.group(1), os.path.basename(m.group(2))) if m else ""
+    shown = (lambda m: m.group(0), lambda m: "iteration %s/%s" % m.groups(),
+             lambda m: "%s %s" % (m.group(1), os.path.basename(m.group(2))))
+    for pattern, show in zip(PROGRESS, shown):
+        found = list(pattern.finditer(tail))
+        if found:
+            return show(found[-1])
+    return ""
 
 
 def log_age(path, clock, machine=None):
@@ -217,11 +211,6 @@ class Task:
     def set(self, name, value):
         self.machine.write_own(self._at(name), str(value) + "\n")
 
-    def pid(self, pid, machine=None):
-        self.set("pid", pid)
-        if machine:
-            self.set("machine", machine)
-
     def unreadable(self):
         """What keeps this record from a verdict: a required field absent (an older shape), unreadable or unknown, or an unreadable plan."""
         out = [f for f in REQUIRED if not self.field(f)]
@@ -230,6 +219,11 @@ class Task:
         if self.raw("plan") is UNREADABLE:
             out.append("plan")
         return out
+
+    def pid(self, pid, machine=None):
+        self.set("pid", pid)
+        if machine:
+            self.set("machine", machine)
 
     def plan(self):
         plan = self.raw("plan")
@@ -258,10 +252,7 @@ class Task:
         return [(i + 1, self.field("steps/%d" % (i + 1)) or "pending") for i in range(len(self.plan()))]
 
     def step_now(self):
-        for i, state in self.steps():
-            if state == "running":
-                return i
-        return None
+        return next((i for i, state in self.steps() if state == "running"), None)
 
     def stage(self):
         plan = self.plan()
@@ -326,9 +317,6 @@ class Task:
         stall = float(stall_seconds if stall_seconds is not None else watchdog_stall(self.env))
         return "running" if age <= stall else "silent"
 
-    def running(self, how="capped"):
-        return self.verdict(how) in RUNNING
-
 
 def of_driver(driver, clock=None, machine=None, env=None):
     """`place`'s records; a pid in a workspace is asked there, None where the workspace does not answer in time."""
@@ -354,17 +342,8 @@ class Records:
         return [t for t in tasks if t.has("plan")]
 
     def stamp_of(self, record_id, kind, name):
-        prefix = "%s-%s-" % (slug(kind), slug(name))
-        if not record_id.startswith(prefix):
-            return None
-        rest = record_id[len(prefix):]
-        stamp = rest.split("-")[0]
-        if not _STAMP.match(stamp):
-            return None
-        tail = rest[len(stamp):]
-        if tail and not re.match(r"^-\d+$", tail):
-            return None
-        return stamp
+        m = re.fullmatch(r"%s-%s-(\d{8}T\d{6}Z)(-\d+)?" % (re.escape(slug(kind)), re.escape(slug(name))), record_id)
+        return m.group(1) if m else None
 
     def find(self, kind, name, floor=""):
         last = None
@@ -472,8 +451,7 @@ class Records:
 
 
 def fleet_holders(resource, records, stores):
-    """This store's live holders of `resource`, then every other store's; one that could not be asked is a row
-    of its own (`unknown`), since an unread machine is not a free board."""
+    """This store's live holders of `resource`, then every other store's; an unread machine is an `unknown` row."""
     rows = list(records.holders(resource))
     for name, ask in stores:
         got, why = ask(resource)

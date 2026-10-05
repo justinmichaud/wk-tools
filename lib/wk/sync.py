@@ -25,10 +25,6 @@ def where(in_workspace, args):
     return "workspace" if in_workspace else "host"
 
 
-def snapshot_current(recorded, mirror_sha):
-    return bool(recorded) and recorded == mirror_sha
-
-
 def publish_branch(env):
     return env.get("WK_BRANCH") or "origin/main"
 
@@ -327,7 +323,7 @@ class Sync:
                 recorded = here.read(store.snapshot_sha_file(prev)).strip()
             except OSError:
                 recorded = ""
-            if snapshot_current(recorded, main_sha):
+            if recorded and recorded == main_sha:
                 debug("ok: mirror unchanged; base %s is already %s" % (prev, main_sha[:10]))
                 return
 

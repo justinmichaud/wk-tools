@@ -251,7 +251,7 @@ def main(argv, reg=None, clock=None):
         text = record.normalised(log_path)
     except OSError:
         text = ""
-    summary = _SUMMARY.findall(text) and [l for l in text.split("\n") if _SUMMARY.match(l)][-4:] or []
+    summary = [l for l in text.split("\n") if _SUMMARY.match(l)][-4:]
     elapsed = int(clock.now() - start)
     mins, secs = elapsed // 60, elapsed % 60
 

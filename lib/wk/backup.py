@@ -1,4 +1,4 @@
-"""wk key backup: the dconf filter, the atomic writer and the --candidates scanner, through the Machine passed in so a Fake proves it without the real tools."""
+"""wk key backup: the dconf filter, the write-if-changed writer and the --candidates scanner."""
 
 import os
 import plistlib
@@ -13,34 +13,9 @@ SYMBOLICHOTKEYS = os.path.join("host", "macos", "symbolichotkeys.plist")
 DCONF_CONF = os.path.join("host", "linux", "config.dconf")
 
 # Dropped from a live `dconf dump /`: WiFi 802.1X UUIDs, a weather location, terminal profile UUIDs, a GTK last-folder path -- all differ on every run.
-_DCONF_SECTION_NOISE = (
-    re.compile(r"nm-applet"),
-    re.compile(r"Ptyxis.*Profiles"),
-    re.compile(r"org/gnome/shell/weather"),
-)
-_DCONF_LINE_NOISE = (
-    "last-folder-path=",
-    "welcome-dialog-last-shown-version=",
-    "last-selected-power-profile=",
-    "looking-glass-history=",
-    "command-history=",
-)
-
-# Matched case-sensitively against Apple's own PascalCase naming: a case-insensitive "date" would also catch "Update".
-_CANDIDATE_NOISE = (
-    (lambda k: k.startswith("NSWindow Frame"), "a saved window position/size"),
-    (lambda k: "NSNavLastRootDirectory" in k, "the last folder used in an Open/Save panel"),
-    (lambda k: "Recent" in k, "a recently-used-items list"),
-    (lambda k: "Date" in k, "a timestamp, not a choice"),
-    (lambda k: "UUID" in k, "a machine- or install-specific identifier"),
-    (lambda k: k.startswith("TB Default Item Identifiers"), "a toolbar customization snapshot"),
-    (lambda k: k.startswith("NSToolbar"), "toolbar layout state"),
-    (lambda k: k == "SUEnableAutomaticChecks", "Sparkle's own per-app update-check toggle"),
-    (lambda k: "WindowFrame" in k or "Position" in k or "Bounds" in k,
-     "a window, dock or Finder position"),
-    (lambda k: k.startswith(("NSSplitView", "NSStatusItem", "NSTableView")),
-     "AppKit-restored UI layout state"),
-)
+_DCONF_SECTION_NOISE = re.compile(r"nm-applet|Ptyxis.*Profiles|org/gnome/shell/weather")
+_DCONF_LINE_NOISE = ("last-folder-path=", "welcome-dialog-last-shown-version=", "last-selected-power-profile=",
+                     "looking-glass-history=", "command-history=")
 
 
 def read_or_empty(machine, path):
@@ -64,12 +39,9 @@ def dconf_filter(text):
     skip = False
     for line in text.splitlines():
         if line.startswith("["):
-            skip = any(p.search(line) for p in _DCONF_SECTION_NOISE)
-        if skip:
-            continue
-        if line.startswith(_DCONF_LINE_NOISE):
-            continue
-        out.append(line)
+            skip = bool(_DCONF_SECTION_NOISE.search(line))
+        if not skip and not line.startswith(_DCONF_LINE_NOISE):
+            out.append(line)
     return "\n".join(out) + ("\n" if out else "")
 
 
@@ -107,13 +79,8 @@ def _refreshed_defaults_line(machine, line):
 
 def macos_backup(machine, root):
     conf = os.path.join(root, DEFAULTS_CONF)
-    lines = []
-    for line in read_or_empty(machine, conf).splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            lines.append(line)
-        else:
-            lines.append(_refreshed_defaults_line(machine, line))
+    lines = [l if not l.strip() or l.strip().startswith("#") else _refreshed_defaults_line(machine, l)
+             for l in read_or_empty(machine, conf).splitlines()]
     new_conf = "\n".join(lines) + ("\n" if lines else "")
     n = 1 if atomic_update(machine, conf, new_conf, "defaults.conf") else 0
 
@@ -131,19 +98,14 @@ def macos_backup(machine, root):
 
 
 def _known_pairs(conf_text):
-    known = set()
-    for line in conf_text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split()
-        if len(parts) >= 2:
-            known.add((parts[0], parts[1]))
-    return known
+    return {tuple(l.split()[:2]) for l in conf_text.splitlines() if len(l.split()) >= 2 and not l.strip().startswith("#")}
 
 
-def _is_candidate_noise(key):
-    return any(match(key) for match, _why in _CANDIDATE_NOISE)
+def _is_candidate_noise(k):
+    """Window, toolbar and panel state, timestamps and identifiers; case-sensitive, since "date" would catch "Update"."""
+    return (k == "SUEnableAutomaticChecks"
+            or k.startswith(("NSWindow Frame", "TB Default Item Identifiers", "NSToolbar", "NSSplitView", "NSStatusItem", "NSTableView"))
+            or any(w in k for w in ("NSNavLastRootDirectory", "Recent", "Date", "UUID", "WindowFrame", "Position", "Bounds")))
 
 
 def candidates(machine, conf_text):

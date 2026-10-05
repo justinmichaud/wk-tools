@@ -2,7 +2,7 @@
 #
 # wk new <name> -- create a workspace named after the task it is for
 # wk: where=workspace name=required lifecycle post=zed group=workspaces dryrun
-# wk: opts --on=,--base=,--arch=,--zed,--no-wait,--kill,--pr=,--sysroot,--_detached
+# wk: opts --on=,--base=,--arch=,--zed,--no-wait,--kill,--pr=,--_detached
 #
 # Other places take minutes (a guest clone, a git clone over ssh), so creation is
 # *detached*: a dropped connection does not take it with it, and re-running `wk
@@ -54,7 +54,7 @@ def parse(argv):
     a = decl.Args(decl.Decl(__file__), argv)
     return {"place": a.value("--on"), "base": a.value("--base"), "arch": a.value("--arch"),
             "pr": a.value("--pr"), "zed": a.flag("--zed"), "no_wait": a.flag("--no-wait"),
-            "kill": a.flag("--kill"), "sysroot": a.flag("--sysroot"), "detached": a.flag("--_detached")}
+            "kill": a.flag("--kill"), "detached": a.flag("--_detached")}
 
 
 def detached(reg, records, name, opts):

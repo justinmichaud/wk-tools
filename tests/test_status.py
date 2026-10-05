@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, WkTest, bash, clean_env, run
+from tests.support import REPO, WkTest, bash, clean_env, load_cmd, run
 from tests.test_wk_places import LINUX_PROBE, SshFake
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -58,17 +58,6 @@ class TestLoadLine(unittest.TestCase):
         self.assertIn("8", out)
         self.assertIn("128 cores", out)
         self.assertIn("free", out)
-
-    def test_json_carries_the_same_capacity_record_as_text(self):
-        recs = [machine_rec("moose"),
-                {"kind": "capacity", "machine": "moose", "cores": "80", "load": "3", "free_mb": "121000"},
-                {"kind": "exit", "code": 0}]
-        text_out = render(recs, "text").stdout
-        json_out = json.loads(render(recs, "json").stdout)
-        self.assertIn("80 cores", text_out)
-        moose = next(m for m in json_out["machines"] if m["name"] == "moose")
-        cap = moose["capacity"][0]
-        self.assertEqual((cap["cores"], cap["load"], cap["free_mb"]), ("80", "3", "121000"))
 
     def test_a_machine_that_did_not_answer_says_so_not_a_number(self):
         recs = [machine_rec("devbox-arm64-2"),
@@ -166,34 +155,16 @@ class TestFleetDeviceRecord(unittest.TestCase):
     ARMED_FIELDS = dict(role="workstation", probeable="yes", mode="host", bridge="", armed="img-1", media="usb",
                         reprovision="", tailnet="", direct="", armed_by="tolken", armed_at="2026-01-01T00:00:00Z")
 
-    def test_the_arming_record_carries_who_and_when(self):
+    def test_an_arm_is_desync_once_consumed_stale_or_unreadable(self):
         clock = FakeClock()
-        rec = status.fleet_record("rpi5", self.CONF, dict(self.ARMED_FIELDS, armed_at=clock.iso(), armed_boot="a", boot_id="a"),
-                                  4, clock=clock)
+        fresh = dict(self.ARMED_FIELDS, armed_at=clock.iso(), armed_boot="a", boot_id="a")
+        rec = status.fleet_record("rpi5", self.CONF, fresh, 4, clock=clock)
         self.assertEqual((rec["armed_by"], rec["armed_at"]), ("tolken", clock.iso()))
         self.assertNotIn("armed_desync", rec)
-
-    def test_a_boot_id_mismatch_is_desync_the_arm_was_consumed_and_never_cleared(self):
-        rec = status.fleet_record("rpi5", self.CONF, dict(self.ARMED_FIELDS, armed_boot="before", boot_id="after"), 4)
-        self.assertTrue(rec["armed_desync"])
-
-    def test_an_arm_older_than_the_threshold_is_desync_even_with_a_matching_boot_id(self):
-        clock = FakeClock()
-        stamp = clock.iso()
+        for fields in (dict(fresh, boot_id="after"), dict(fresh, armed_at="garbage")):
+            self.assertTrue(status.fleet_record("rpi5", self.CONF, fields, 4, clock=clock)["armed_desync"], fields)
         clock.t += status.ARM_STALE_SECONDS + 1
-        rec = status.fleet_record("rpi5", self.CONF, dict(self.ARMED_FIELDS, armed_at=stamp, armed_boot="a", boot_id="a"),
-                                  4, clock=clock)
-        self.assertTrue(rec["armed_desync"])
-
-    def test_a_fresh_arm_with_a_matching_boot_id_is_not_desync(self):
-        clock = FakeClock()
-        rec = status.fleet_record("rpi5", self.CONF, dict(self.ARMED_FIELDS, armed_at=clock.iso(), armed_boot="a", boot_id="a"),
-                                  4, clock=clock)
-        self.assertNotIn("armed_desync", rec)
-
-    def test_an_unreadable_arm_stamp_is_desync_not_current(self):
-        rec = status.fleet_record("rpi5", self.CONF, dict(self.ARMED_FIELDS, armed_at="garbage", armed_boot="a", boot_id="a"), 4)
-        self.assertTrue(rec["armed_desync"])
+        self.assertTrue(status.fleet_record("rpi5", self.CONF, fresh, 4, clock=clock)["armed_desync"])
 
     def test_fleet_probe_carries_the_arming_fields(self):
         said = dict(self.ARMED_FIELDS, armed_boot="boot-a", boot_id="boot-b")
@@ -273,26 +244,15 @@ class TestSelfRoleAndMode(unittest.TestCase):
     def tearDown(self):
         subprocess.run(["rm", "-rf", str(self.tmp)])
 
-    def test_a_machine_with_no_conf_defaults_to_workstation(self):
+    def test_role_from_its_own_conf_else_workstation_and_mode_from_the_marker(self):
         self.assertEqual(status.self_role(str(self.tmp), "here"), "workstation")
-
-    def test_a_declared_role_is_read_from_its_own_conf(self):
         (self.tmp / "machines").mkdir(parents=True)
         (self.tmp / "machines" / "here.conf").write_text("kind=board\nrole=bench-device\n")
         self.assertEqual(status.self_role(str(self.tmp), "here"), "bench-device")
-
-    def test_no_marker_file_reads_host(self):
         self.assertEqual(status.self_mode_word({"WK_IMAGE_MARKER": str(self.tmp / "no-marker")}), "host")
-
-    def test_a_marker_with_an_id_reads_bench(self):
         marker = self.tmp / "wk-image"
         marker.write_text("id=bench-2026-01\nprofile=p\n")
         self.assertEqual(status.self_mode_word({"WK_IMAGE_MARKER": str(marker)}), "bench bench-2026-01")
-
-    def test_the_fleet_record_carries_both_as_the_renderer_reads_them(self):
-        rec = status.self_fleet_record(str(self.tmp), {"WK_IMAGE_MARKER": str(self.tmp / "no-marker")}, "here")
-        self.assertEqual((rec["kind"], rec["machine"], rec["role"], rec["mode"], rec["self"]),
-                         ("fleet", "here", "workstation", "host mode", True))
 
 
 class TestWalkLeadsWithSelf(unittest.TestCase):
@@ -339,19 +299,11 @@ class TestWalkLeadsWithSelf(unittest.TestCase):
 class TestBump(unittest.TestCase):
     """The walk's exit code only rises, and anything outside 0-4 reads as 4, never as all clear."""
 
-    def test_only_raises_never_lowers(self):
+    def test_the_worst_wins_and_garbage_reads_4(self):
         w = 0
-        for c in ("2", "1", "0"):
+        for c in ("2", 1, "0"):
             w = status.bump(w, c)
         self.assertEqual(w, 2)
-
-    def test_the_worst_wins_regardless_of_order(self):
-        w = 0
-        for c in (1, 3, 2):
-            w = status.bump(w, c)
-        self.assertEqual(w, 3)
-
-    def test_garbage_and_out_of_range_fold_to_4(self):
         for c in ("", "abc", "7", "-1", "255"):
             self.assertEqual(status.bump(0, c), 4, c)
 
@@ -432,13 +384,7 @@ class TestWaitAndTimeout(unittest.TestCase):
 
 
 def load_status_cmd():
-    import importlib.machinery
-    import importlib.util
-    path = str(REPO / "cmd" / "status")
-    loader = importlib.machinery.SourceFileLoader("wk_cmd_status", path)
-    m = importlib.util.module_from_spec(importlib.util.spec_from_file_location("wk_cmd_status", path, loader=loader))
-    loader.exec_module(m)
-    return m
+    return load_cmd("status")
 
 
 class TestTheWaitDecidesTheExit(unittest.TestCase):
@@ -870,7 +816,6 @@ class TestRendersPartial(unittest.TestCase):
 
     def test_an_unreadable_record_is_reported_and_the_rest_still_render(self):
         err = io.StringIO()
-        import contextlib
         with contextlib.redirect_stderr(err):
             recs = list(statusview.records_from_lines(['{"kind":"machine","name":"m"}', "{not json", "", '{"kind":"exit","code":1}']))
         self.assertEqual([r["kind"] for r in recs], ["machine", "exit"])
@@ -892,18 +837,12 @@ class TestFleetIsOne(unittest.TestCase):
         self.assertEqual(out.count(" ws "), 1)
         self.assertNotIn("disagree", out)
 
-    def test_two_views_disagreeing_name_both_states_once(self):
+    def test_two_views_disagreeing_name_both_states_once_and_exit_4(self):
         out = render(self._recs("present", "absent")).stdout
         self.assertEqual(out.count(" ws "), 1)
         self.assertIn("disagree (present vs absent)", out)
-
-    def test_a_disagreement_is_the_worst_state_even_when_every_view_reported_a_clean_exit(self):
-        doc = json.loads(render(self._recs("present", "absent"), "json").stdout)
-        self.assertEqual(doc["exit"], 4)
-
-    def test_agreement_never_invents_a_disagreement_or_raises_the_exit(self):
-        doc = json.loads(render(self._recs("present", "present"), "json").stdout)
-        self.assertEqual(doc["exit"], 0)
+        self.assertEqual(json.loads(render(self._recs("present", "absent"), "json").stdout)["exit"], 4)
+        self.assertEqual(json.loads(render(self._recs("present", "present"), "json").stdout)["exit"], 0)
 
 
 class TestHelpLeadsWithTheSelfLine(unittest.TestCase):
@@ -926,10 +865,17 @@ class TestTheSelfLineIsSpacedOneWay(unittest.TestCase):
 
 
 
-class TestTheWebViewDefaults(unittest.TestCase):
-    def test_the_port_and_interval_come_from_the_env_else_any_port_every_20s(self):
-        self.assertEqual(statusview.web_defaults({}), ("0", "20"))
-        self.assertEqual(statusview.web_defaults({"WK_STATUS_PORT": "8080", "WK_STATUS_INTERVAL": "5"}), ("8080", "5"))
+
+class TestTheServedPage(unittest.TestCase):
+    def test_port_and_interval_come_from_the_flag_else_the_env_else_any_port_every_20s(self):
+        cmd = load_status_cmd()
+        walk = types.SimpleNamespace(records=lambda markers=True: iter(()), worst=0)
+        for argv, env, want in (([], {}, ("0", "20")), ([], {"WK_STATUS_PORT": "8080", "WK_STATUS_INTERVAL": "5"}, ("8080", "5")),
+                                (["--port=9", "--interval=7"], {"WK_STATUS_PORT": "8080"}, ("9", "7"))):
+            with mock.patch.object(cmd, "Walk", return_value=walk), mock.patch.object(cmd.statusview, "serve", return_value=0) as serve, \
+                    mock.patch.dict(os.environ, env):
+                self.assertEqual(0, cmd.main(["--web"] + argv))
+            self.assertEqual(serve.call_args[0][2:], want, argv)
 
 
 if __name__ == "__main__":

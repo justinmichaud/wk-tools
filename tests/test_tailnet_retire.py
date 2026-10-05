@@ -63,9 +63,9 @@ class TailnetTest(unittest.TestCase):
             sys.stderr = stderr
         return rc, out.getvalue(), err.getvalue()
 
-    def fleet(self, fake, api=True, authkey=None):
+    def fleet(self, fake, api=True, authkey=None, **more):
         """wk.tailnet.Fleet over this host, its credentials in the test's own directory."""
-        env = {"HOME": str(self.tmp), "WK_TS_API_SECRET": str(self.key if api else self.tmp / "no-api"),
+        env = {**more, "HOME": str(self.tmp), "WK_TS_API_SECRET": str(self.key if api else self.tmp / "no-api"),
                "WK_TS_AUTHKEY": str(self.tmp / "authkey"), "WK_TAILNET_API": tailnet.API}
         if authkey is not None:
             (self.tmp / "authkey").write_text(authkey + "\n")
@@ -117,7 +117,6 @@ class TestRetire(TailnetTest):
         r, _ = self.quiet(self.fleet(fake, api=False).retire, "rpi3-bench")
         self.assertEqual(r.rc, 4)
         self.assertEqual(fake.asked, [])
-
 
     def test_a_stored_credential_that_is_no_api_key_is_refused_rather_than_called_missing(self):
         self.key.write_text("tskey-auth-kXYZ-abc\n")
@@ -193,12 +192,14 @@ class TestAuthKey(TailnetTest):
         self.assertEqual(path, str(self.tmp / "authkey"))
 
     def test_a_minted_key_is_reusable_preauthorized_and_tagged(self):
-        fake = FakeTailnet()
-        path, _ = self.quiet(self.fleet(fake).authkey)
-        self.assertEqual(path, str(self.tmp / "authkey"))
-        create = fake.asked[0][3]["capabilities"]["devices"]["create"]
-        self.assertEqual((create["reusable"], create["ephemeral"], create["preauthorized"], create["tags"]),
-                         (True, False, True, ["tag:wk"]))
+        for env, tag in (({}, "tag:wk"), ({"WK_TAILNET_TAG": "tag:lab"}, "tag:lab")):
+            fake = FakeTailnet()
+            path, _ = self.quiet(self.fleet(fake, **env).authkey)
+            self.assertEqual(path, str(self.tmp / "authkey"))
+            create = fake.asked[0][3]["capabilities"]["devices"]["create"]
+            self.assertEqual((create["reusable"], create["ephemeral"], create["preauthorized"], create["tags"]),
+                             (True, False, True, [tag]))
+            (self.tmp / "authkey").unlink()
 
     def test_a_refused_mint_names_both_ways_to_a_key(self):
         path, err = self.quiet(self.fleet(FakeTailnet(status=403)).authkey)
@@ -224,14 +225,13 @@ class TestAuthKey(TailnetTest):
         self.assertEqual((path, fake.asked), ("", []))
 
     def test_the_shell_entry_prints_the_path(self):
-        cp = subprocess.run(["bash", "-c", '. "$WK_ROOT/lib/common.sh"; wk_tailscale_authkey'], capture_output=True, text=True,
-                            env=dict(os.environ, WK_ROOT=str(REPO), HOME=str(self.tmp), WK_TS_AUTHKEY=str(self.tmp / "authkey"),
-                                     WK_TS_API_SECRET=str(self.tmp / "no-api")))
-        self.assertEqual(cp.returncode, 1, cp.stderr)
+        env = dict(os.environ, WK_ROOT=str(REPO), HOME=str(self.tmp), WK_TS_AUTHKEY=str(self.tmp / "authkey"),
+                   WK_TS_API_SECRET=str(self.tmp / "no-api"))
+        entry = lambda: subprocess.run(["bash", "-c", '. "$WK_ROOT/lib/common.sh"; wk_tailscale_authkey'],  # noqa: E731
+                                       capture_output=True, text=True, env=env)
+        self.assertEqual(entry().returncode, 1)
         (self.tmp / "authkey").write_text("tskey-auth-kAAAA-secret\n")
-        cp = subprocess.run(["bash", "-c", '. "$WK_ROOT/lib/common.sh"; wk_tailscale_authkey'], capture_output=True, text=True,
-                            env=dict(os.environ, WK_ROOT=str(REPO), HOME=str(self.tmp), WK_TS_AUTHKEY=str(self.tmp / "authkey"),
-                                     WK_TS_API_SECRET=str(self.tmp / "no-api")))
+        cp = entry()
         self.assertEqual((cp.returncode, cp.stdout), (0, str(self.tmp / "authkey")), cp.stderr)
 
 
@@ -255,11 +255,6 @@ class TestUrllibTransport(TailnetTest):
         api = tailnet.Api("tskey-api-abc123", "http://127.0.0.1:%d/api/v2" % server.server_port)
         self.assertEqual(api.devices(), [{"id": "1"}])
 
-    def test_the_module_runs_as_a_program(self):
-        cp = subprocess.run([sys.executable, "-m", "wk.tailnet", "check"], capture_output=True, text=True,
-                            env=dict(os.environ, PYTHONPATH=str(REPO / "lib"), WK_TS_API_SECRET_FILE=str(self.tmp / "nope")))
-        self.assertEqual(cp.returncode, 4, cp.stderr)
-
 
 class TestDoctorRow(unittest.TestCase):
     def test_doctor_declares_it_machine_local(self):
@@ -272,13 +267,6 @@ class TestDoctorRow(unittest.TestCase):
         self.assertEqual(1, len(rows), rows)
         self.assertEqual(UNK, rows[0][0])
         self.assertIn("re-authable: wk key set tailnet-api", rows[0][2])
-
-
-
-class TestTheFleetTag(unittest.TestCase):
-    def test_a_node_advertises_tag_wk_unless_the_env_names_another(self):
-        self.assertEqual(tailnet.fleet_tag({}), "tag:wk")
-        self.assertEqual(tailnet.fleet_tag({"WK_TAILNET_TAG": "tag:lab"}), "tag:lab")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,4 @@
-"""The wall around a workspace, measured from inside it rather than read from the config that was supposed to produce it:
-each check runs at once, so the wall clock is the slowest of them rather than their sum."""
+"""The wall around a workspace, measured from inside it; every check runs at once."""
 
 import json
 import os
@@ -20,7 +19,6 @@ HOST_PATHS = ("/host/home", "/host/run", "/run/user/*/bus", "/run/dbus/system_bu
 PUBLISHING = ("push-keys", "github-write", "bugzilla-write")
 CSI = re.compile(r"\x1b\[[0-9;?<>=]*[A-Za-z]|\x1b[78]|\x1b\([A-Z]|\x0f")
 COMMIT_WALL_PATHS = ("objects", "refs", "logs", "HEAD", "packed-refs", "index.lock", "ORIG_HEAD")
-
 
 CURL = "curl -sS -m 40 --suppress-connect-headers -D -"
 
@@ -450,21 +448,12 @@ class Wall:
 
 
 def verdict(rep, publishing=False):
-    """publishing | broken | intact: the one three-way reading of a Report every caller renders its own way."""
-    if publishing:
-        return "publishing"
-    if rep.missing:
-        return "broken"
-    return "intact"
+    return "publishing" if publishing else "broken" if rep.missing else "intact"
 
 
 def push_verdict(rc):
-    """push_on (1, 0 or None) from `wk key push status`'s exit code: 0 on, 1|4 off, else unmeasured."""
-    if rc == 0:
-        return 1
-    if rc in (1, 4):
-        return 0
-    return None
+    """push_on (1, 0 or None, unmeasured) from `wk key push status`'s exit code."""
+    return {0: 1, 1: 0, 4: 0}.get(rc)
 
 
 def push_switch(root, machine):

@@ -75,15 +75,7 @@ class Lock:
         while True:
             opid = None
             unreadable = False
-            if self.machine.isdir(path):
-                try:
-                    opid = _pid_of("pid=" + self.machine.read(os.path.join(path, "pid")).strip())
-                except OSError:
-                    opid = None
-                if opid is None or not self.machine.alive(opid):
-                    self.machine.remove_now(path)
-                    continue
-            elif self._link(path):
+            if self._link(path):
                 break
             else:
                 raw = self.machine.readlink(path)

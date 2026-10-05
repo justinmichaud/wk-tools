@@ -18,15 +18,6 @@ def _argvs(steps):
     return [tuple(s[0]) for s in steps if not isinstance(s, str)]
 
 
-class TestRemotesIsTheOneList(unittest.TestCase):
-
-
-    def test_the_mirror_fetches_every_one_and_a_fifth_with_no_other_change(self):
-        script = git.mirror_refresh_script("/m", ["main"], FIFTH)
-        self.assertIn("for r in origin wpe fork forkwpe fifth; do", script)
-        self.assertIn("git -C \"$M\" config --replace-all remote.fifth.fetch '+refs/heads/*:refs/remotes/fifth/*'", script)
-
-
 class TestFetchRefspecs(unittest.TestCase):
 
     def test_origin_is_narrowed_to_the_mirrored_branches_wherever_it_comes_from(self):
@@ -40,15 +31,10 @@ class TestFetchRefspecs(unittest.TestCase):
                           "+refs/heads/wpe-2.46:refs/remotes/origin/wpe-2.46"])
 
     def test_every_other_upstream_from_a_mirror_is_namespaced_on_both_sides(self):
-        for remote in ("wpe", "fork", "forkwpe"):
+        for remote in ("wpe", "fork", "forkwpe", "fifth"):
             with self.subTest(remote=remote):
                 self.assertEqual(git.fetch_refspecs(remote, "/m", ["main"]), [_namespaced(remote)])
                 self.assertEqual(git.fetch_refspecs(remote, "", ["main"]), [f"+refs/heads/*:refs/remotes/{remote}/*"])
-
-
-    def test_a_fifth_upstream_needs_no_change_here(self):
-        self.assertEqual(git.fetch_refspecs("fifth", "/m", ["main"]), [_namespaced("fifth")])
-        self.assertEqual(git.fetch_refspecs("fifth", "", ["main"]), ["+refs/heads/*:refs/remotes/fifth/*"])
 
 
 class TestTheWiringWritesThoseRefspecs(unittest.TestCase):

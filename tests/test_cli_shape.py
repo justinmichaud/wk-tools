@@ -30,12 +30,6 @@ def declarations():
     return rows
 
 
-def name_slot(decl):
-    if decl.split("@")[0] in ("none", "derived"):
-        return 0
-    return int(decl.split("@")[1]) if "@" in decl else 1
-
-
 def declared_opts(path):
     opts = set()
     for line in itertools.takewhile(lambda l: l.startswith("#"), path.read_text().splitlines()):
@@ -103,7 +97,7 @@ class TestArgumentsAreRefusedOnce(WkTest):
                 d = dict(d, name=decl.name_for(first), takes=decl.takes_for(first), passthrough="")
             if d["takes"] == "*" or d["passthrough"] in ("tail", "all"):
                 continue
-            n = name_slot(d["name"]) + int(d["takes"]) + 1
+            n = D.name_slot(d["name"]) + int(d["takes"]) + 1
             args = first + [f"zz{i}" for i in range(len(first) + 1, n + 1)]
             with self.subTest(cmd=cmd, args=args):
                 cp = run(cmd, *args)

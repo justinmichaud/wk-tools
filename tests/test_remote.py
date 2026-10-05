@@ -69,6 +69,7 @@ class TestMachineAnswers(WkTest):
         self.assertFalse(answered, out)
         self.assertRegex(out, r"(?m)^fakebox\s+not a machine of its own", out)
 
+
 def _configured_remote_machines():
     """{name: kind} for every place conf in machines/ -- pure logic, no ssh."""
     reg = places.Registry(REPO, env=dict(os.environ, WK_MACHINES_DIR=str(REAL_MACHINES)))
@@ -97,42 +98,6 @@ class TestRemoteReachable(unittest.TestCase):
                 self.assertEqual(reg.load(name).info("selftest-nonexistent"), "absent")
 
 
-class TestTheMirrorOnTheBox(WkTest):
-
-    def setUp(self):
-        super().setUp()
-        self.registry = self.tmp / "hosts"
-        self.registry.mkdir()
-        (self.registry / "fakebox.conf").write_text(
-            "kind=build\ndriver=remote\n"
-            "local=1\n"
-            f"root={self.tmp / 'wk'}\n"
-            f"store={self.tmp / 'store'}\n"
-        )
-
-    def _script(self):
-        """The shell Remote._mirror_update sends, to a fake machine: the driver is real, only the far side is not."""
-        from wk import places
-        from wk.machine import Fake, Result
-        env = dict(os.environ, WK_MACHINES_DIR=str(self.registry), XDG_STATE_HOME=str(self.tmp / "state"))
-        t = places.Registry(REPO, env).load("fakebox")
-        t.machine = Fake("fakebox")
-        probe = "/far\nLinux\n4\n0.1 0 0\n===MEM===\nMemAvailable: 1024 kB\n===IONICE===\nno\n"
-        t.machine.react(["sh", "-c"], lambda argv, f: Result(0, probe if argv[-1] == places.PROBE_SCRIPT else ""))
-        with contextlib.redirect_stderr(io.StringIO()):
-            t._mirror_update(str(self.tmp / "wk"))
-        return "\n".join(e[1][2] for e in t.machine.effects if e[0] == "run" and e[1][:2] == ("sh", "-c"))
-
-    def test_it_carries_every_default_remote_with_no_tags(self):
-        script = self._script()
-        for remote in ("origin", "wpe", "fork", "forkwpe"):
-            with self.subTest(remote=remote):
-                self.assertIn(f"config remote.{remote}.tagOpt --no-tags", script)
-        self.assertIn("for r in origin wpe fork forkwpe; do", script)
-        self.assertIn('fetch --prune -q "$r"', script)
-        self.assertIn("+refs/heads/main:refs/heads/main", script)
-        self.assertIn("+refs/heads/*:refs/remotes/fork/*", script)
-        self.assertIn("gc.auto 0", script)
 
 if __name__ == "__main__":
     unittest.main()

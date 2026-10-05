@@ -1,7 +1,5 @@
-"""The buildroot image and slot builds as they run inside a workspace (lib/wk/sysimage/buildroot.py is the host
-half). Run as `python3 /opt/wk-tools/lib/wk/sysimage/buildroot_ws.py image|webkit ...`, under task.stage_main,
-which takes the wall off PATH. Follows the wiki recipe "Building WPEWebKit for 32-bit Raspberry Pi 3 (Buildroot DRM
-config)", the only one known to boot."""
+"""The buildroot image and slot builds inside a workspace, under task.stage_main (buildroot.py is the host half).
+Follows the wiki recipe "Building WPEWebKit for 32-bit Raspberry Pi 3 (Buildroot DRM config)", the one known to boot."""
 
 import argparse
 import fnmatch
@@ -14,14 +12,11 @@ if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from wk.clock import Clock  # noqa: E402
-from wk import slot  # noqa: E402
-from wk.machine import here, isolated_module  # noqa: E402
-from wk.store import Store  # noqa: E402
-from wk.sysimage import Failed, fail  # noqa: E402
+from wk.machine import here  # noqa: E402
+from wk.sysimage import TOOLS, WsBuild, fail  # noqa: E402
+from wk.sysimage.task import fetch_pinned  # noqa: E402
 
-TOOLS = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 MB_PER_JOB = 2048
-SHA_LEN = 40
 TS_REL = "image/yocto/meta-wk-tailnet/recipes-network/tailscale/tailscale-release.inc"
 TS_JOIN = "image/yocto/meta-wk-tailnet/recipes-network/tailscale/files/wk-tailnet-join"
 WIFI_JOIN = "image/yocto/meta-wk-wifi/recipes-connectivity/wk-wifi-join/files/wk-wifi-join"
@@ -43,30 +38,19 @@ echo "wk: installed the pinned kernel {release} and its device trees into $b"
 
 def parse(argv):
     ap = argparse.ArgumentParser(prog="buildroot_ws.py")
-    sub = ap.add_subparsers(dest="stage")
-    img = sub.add_parser("image")
-    for flag in ("--name", "--tree-url", "--tree-branch", "--tree-commit", "--defconfig", "--image", "--jobs",
-                 "--kernel-tar", "--kernel-release", "--kernel-dts", "--overlay-arch"):
-        img.add_argument(flag, default="")
+    sub = ap.add_subparsers(dest="stage", required=True)
+    img, wk = sub.add_parser("image"), sub.add_parser("webkit")
+    for p, need, rest in ((img, ("--name", "--tree-url", "--defconfig"), ("--tree-branch", "--tree-commit", "--image", "--kernel-tar",
+                                                                          "--kernel-release", "--kernel-dts", "--overlay-arch")),
+                          (wk, ("--name", "--commit", "--slot"), ())):
+        for flag in need:
+            p.add_argument(flag, required=True)
+        for flag in rest + ("--jobs",):
+            p.add_argument(flag, default="")
+        p.add_argument("--src", default="/src/WebKit")
     for flag in ("--external", "--overlay-wifi"):
         img.add_argument(flag, default="0", choices=("0", "1"))
-    wk = sub.add_parser("webkit")
-    for flag in ("--name", "--commit", "--slot", "--jobs"):
-        wk.add_argument(flag, default="")
-    for p in (img, wk):
-        p.add_argument("--src", default="/src/WebKit")
-    a = ap.parse_args(argv)
-    if not a.stage:
-        ap.error("image or webkit")
-    need = ("name", "tree_url", "defconfig") if a.stage == "image" else ("name", "commit", "slot")
-    for n in need:
-        if not getattr(a, n):
-            ap.error("--%s is required" % n.replace("_", "-"))
-    if a.stage == "webkit" and (len(a.commit) != SHA_LEN or any(c not in "0123456789abcdef" for c in a.commit)):
-        ap.error("--commit takes a full 40-character sha, got '%s'" % a.commit)
-    if a.stage == "image" and a.kernel_tar and not (a.kernel_release and a.kernel_dts):
-        ap.error("--kernel-tar needs --kernel-release and --kernel-dts")
-    return a
+    return ap.parse_args(argv)
 
 
 def config_value(text, key):
@@ -97,24 +81,14 @@ def tailscale_pin(text, arch):
     return field("TS_VERSION"), field("TS_SHA256_" + arch)
 
 
-class Build:
+class Build(WsBuild):
+    PREFIX = "wk-buildroot"
+
     def __init__(self, a, machine, env, clock, tools=TOOLS):
-        self.a, self.m, self.env, self.clock, self.tools = a, machine, env, clock, tools
-        self.jobs = int(a.jobs) if a.jobs else int(machine.run(["nproc"]).out.strip() or 4)
+        super().__init__(a, machine, env, clock, tools)
         self.workdir = os.path.join(a.src, "WebKitBuild", "buildroot", a.name)
         self.out = os.path.join(self.workdir, "output")
         self.tcf = os.path.join(self.out, "host", "share", "buildroot", "toolchainfile.cmake")
-        self.prefix = "wk-buildroot" if a.stage == "image" else "wk-buildroot-webkit"
-
-    def say(self, text):
-        sys.stdout.write("%s: %s\n" % (self.prefix, text))
-        sys.stdout.flush()
-
-    def ok(self, argv, why):
-        r = self.m.act_run(argv)
-        if not r.ok:
-            fail("%s\n    %s" % (why, (r.err or r.out).strip()))
-        return r
 
     def git(self, *args):
         return self.m.act_run(["git", "-C", self.workdir] + list(args))
@@ -127,24 +101,14 @@ class Build:
         sys.stderr.write("" if r.ok else r.err)
         return r.ok
 
-    def guarded(self, argv):
-        return ["env", "WK_MB_PER_JOB=%d" % MB_PER_JOB, "bash", "-c",
-                '. %s/build/guard.sh && guard_run "$0" -- "$@"' % self.tools, str(self.jobs)] + list(argv)
+    def make_all(self, ext, *args):
+        # FORCE_UNSAFE_CONFIGURE=1: 2009-era configure scripts refuse to run as root.
+        return self.m.run_tty(self.guarded(self.jobs, ["env", "FORCE_UNSAFE_CONFIGURE=1", "make", "-C", self.workdir] + ext + list(args),
+                                           MB_PER_JOB), cwd=self.workdir).ok
 
     def br_ext(self, wanted):
         """On every make: buildroot records BR2_EXTERNAL in output/.br-external.mk, and a make without it then fails."""
         return ["BR2_EXTERNAL=%s/image/buildroot/external" % self.tools] if wanted else []
-
-    def check_caches(self):
-        for name in ("BR2_DL_DIR", "BR2_CCACHE_DIR"):
-            d = self.env.get(name)
-            if not d:
-                fail("BR2_DL_DIR/BR2_CCACHE_DIR are not set in this workspace.\n    They come from the container's "
-                     "store-backed cache mount (lib/wk/places.py's Container); without them buildroot's download and ccache\n"
-                     "    caches would land in the workspace and die with it.")
-            self.m.mkdir(d)
-            if not self.m.run(["test", "-w", d]).ok:
-                fail("%s is not writable" % d)
 
     def summary(self):
         a = self.a
@@ -158,7 +122,6 @@ class Build:
         self.say("host        %s, gcc %s" % (pretty.group(1) if pretty else "?", gcc.out.strip() if gcc.ok else "?"))
 
     def tree(self):
-        """An output/ tree is tens of gigabytes: a second run at the pin fetches rather than re-cloning."""
         a = self.a
         if self.m.isdir(os.path.join(self.workdir, ".git")):
             self.say("tree already present; fetching the pin")
@@ -173,8 +136,7 @@ class Build:
         if a.tree_commit:
             self.git("fetch", "origin", a.tree_commit)
             if not self.git("checkout", "--detach", a.tree_commit).ok:
-                fail("%s has no commit %s.\n    The configuration pins one deliberately: a branch moves and the 2020.02 "
-                     "tag\n    predates the cog defconfigs." % (a.tree_url, a.tree_commit))
+                fail("%s has no commit %s" % (a.tree_url, a.tree_commit))
             self.say("pinned at %s" % self.m.run(["git", "-C", self.workdir, "rev-parse", "--short", "HEAD"]).out.strip())
 
     def tree_patches(self):
@@ -191,12 +153,7 @@ class Build:
                 fail("tree patch does not apply: %s\n    The pin moved out from under it (BR_TREE_COMMIT); rederive the patch." % n)
             self.say("tree patch applied: %s" % n)
 
-    def sha_ok(self, sha, path):
-        words = self.m.run(["sha256sum", path]).out.split()
-        return bool(words) and words[0] == sha
-
     def tailnet_overlay(self, stage):
-        """The tailscale release the yocto layer pins, and no credential: the key arrives with the card."""
         arch = self.a.overlay_arch
         rel = os.path.join(self.tools, TS_REL)
         ver, sha = tailscale_pin(self.m.read(rel), arch)
@@ -206,15 +163,9 @@ class Build:
             fail("%s declares no TS_SHA256_%s" % (rel, arch))
         base = "tailscale_%s_%s" % (ver, arch)
         tgz = os.path.join(self.workdir, base + ".tgz")
-        if not (self.m.exists(tgz) and self.sha_ok(sha, tgz)):
-            self.say("fetching tailscale %s (%s)" % (ver, arch))
-            self.ok(["curl", "-fsSL", "-o", tgz + ".part", "https://pkgs.tailscale.com/stable/%s.tgz" % base],
-                    "could not fetch the tailscale release")
-            if not self.sha_ok(sha, tgz + ".part"):
-                self.m.remove(tgz + ".part")
-                fail("%s.tgz does not match the pinned sha256.\n    Refusing to put unverified bytes in an image -- %s "
-                     "is what says which bytes are right." % (base, rel))
-            self.ok(["mv", "-f", tgz + ".part", tgz], "could not keep %s" % tgz)
+        why = fetch_pinned(self.m, "https://pkgs.tailscale.com/stable/%s.tgz" % base, tgz, sha)
+        if why:
+            fail(why)
         self.say("assembling the tailnet overlay (%s)" % arch)
         self.fresh_dirs(stage, ("usr/bin", "usr/sbin", "etc/init.d"))
         for into, member in (("usr/bin", "tailscale"), ("usr/sbin", "tailscaled")):
@@ -243,9 +194,7 @@ class Build:
         """The modules go in as an overlay; the boot files through a post-image hook ahead of the board's own."""
         a = self.a
         if not self.m.exists(a.kernel_tar):
-            fail("the pinned kernel is not at %s.\n    It is fetched and prepared on the driving machine and handed over "
-                 "through\n    the download cache both sides share (lib/wk/sysimage/buildroot.py); this build does\n"
-                 "    not fetch it itself." % a.kernel_tar)
+            fail("the pinned kernel is not at %s; the driving machine prepares it (lib/wk/sysimage/buildroot.py)" % a.kernel_tar)
         stage = os.path.join(self.workdir, "wk-kernel")
         self.m.remove(stage)
         self.m.mkdir(stage)
@@ -273,22 +222,9 @@ class Build:
         self.ok(["chmod", "+x", script], "could not make %s executable" % script)
         return (script + " " + orig).strip()
 
-    def verify_fresh(self, img, start):
-        """make exits 0 on a tree with nothing left to do, so the image must be newer than the build."""
-        if not self.m.exists(img):
-            fail("the configuration names '%s' and make\n    reported success, but %s does not exist. A cog defconfig whose\n"
-                 "    filesystem output is tar-only builds no card image -- a defconfig question, not\n"
-                 "    something this stage can call done." % (os.path.basename(img), img))
-        r = self.m.run(["stat", "-c", "%Y", img])
-        if not r.ok or not r.out.strip().isdigit():
-            fail("could not read the mtime of %s" % img)
-        if int(r.out.strip()) < int(start):
-            fail("make reported success but %s is older\n    than this build started: something upstream of genimage "
-                 "skipped work\n    it always does, the trap verify_fresh (yocto_ws.py) guards against for bitbake." % img)
-
     def image(self):
         a = self.a
-        self.check_caches()
+        self.need_caches(("BR2_DL_DIR", "BR2_CCACHE_DIR"))
         self.summary()
         self.tree()
         self.tree_patches()
@@ -306,8 +242,7 @@ class Build:
         ext = self.br_ext(a.external == "1")
         self.say("applying %s" % a.defconfig)
         if not self.make(ext, a.defconfig):
-            fail("no such defconfig: %s\n    'make list-defconfigs' in %s shows what the tree has, and the external\n"
-                 "    tree adds this repository's own (image/buildroot/external/configs)." % (a.defconfig, self.workdir))
+            fail("no such defconfig: %s ('make list-defconfigs' in %s)" % (a.defconfig, self.workdir))
         post = self.post_image(stage) if stage else ""
         conf = os.path.join(self.workdir, ".config")
         # In .config because only .config survives buildroot's recursive makes; olddefconfig resolves the later line.
@@ -324,16 +259,14 @@ class Build:
             if not self.make(ext, "toolchain-reinstall", quiet=True):
                 fail("toolchain-reinstall failed")
         local = os.path.join(self.workdir, "local.mk")
-        if self.m.exists(local):   # a slot's source override; an image is the pinned tarball and nothing else
+        if self.m.exists(local):
             self.say("dropping local.mk (a WebKit slot's source override) and rebuilding wpewebkit from the pinned tarball")
             self.m.remove(local)
             if not self.make(ext, "wpewebkit-dirclean", quiet=True):
                 fail("wpewebkit-dirclean failed")
         start = self.clock.now()
         self.say("building (this is hours, and the log below is the whole account of it)")
-        # FORCE_UNSAFE_CONFIGURE=1: 2009-era configure scripts refuse to run as root.
-        if not self.m.run_tty(self.guarded(["env", "FORCE_UNSAFE_CONFIGURE=1", "make", "-C", self.workdir] + ext
-                                           + ["-j%d" % self.jobs]), cwd=self.workdir).ok:
+        if not self.make_all(ext, "-j%d" % self.jobs):
             fail("buildroot failed. The last lines above are the failing package.")
         images = os.path.join(self.out, "images")
         if not self.m.isdir(images):
@@ -343,46 +276,31 @@ class Build:
             self.say("  -   %s" % n)
         if a.image:
             self.verify_fresh(os.path.join(images, a.image), start)
-            self.say("%s is fresh" % a.image)
         self.say("stage 'image' done")
 
     def check_image(self):
         n = self.a.name
         if not self.m.isdir(os.path.join(self.workdir, "package")):
-            fail("no buildroot tree at %s.\n    A slot is built beside a finished image; build the image first:\n"
-                 "        wk sysimage build %s" % (self.workdir, n))
+            fail("no buildroot tree at %s; build the image first:  wk sysimage build %s" % (self.workdir, n))
         if not self.m.exists(os.path.join(self.out, "build", "packages-file-list.txt")):
-            fail("the image in %s was never built to the end\n    (no output/build/packages-file-list.txt); "
-                 "'wk sysimage build %s' first." % (self.workdir, n))
+            fail("the image in %s was never built to the end; 'wk sysimage build %s' first" % (self.workdir, n))
         if not (self.m.exists(self.tcf) and "--build-id" in self.m.read(self.tcf)):
-            fail("the image's toolchain file carries no --build-id\n    (%s). Every slot binary must carry the identifier "
-                 "the board is checked\n    against; the image build sets it (BR2_TARGET_LDFLAGS) and regenerates the\n"
-                 "    file:  wk sysimage build %s   (incremental)" % (self.tcf, n))
+            fail("the image's toolchain file %s carries no --build-id, which every slot binary needs;\n"
+                 "    'wk sysimage build %s' regenerates it (incremental)" % (self.tcf, n))
 
     def checkout(self):
         a, src = self.a, self.a.src
-        mirror = Store(self.env).container_mirror_dir()
-        if not mirror:
-            fail("WK_MIRROR names the mirror this container mounts, set by lib/wk/places.py's Container")
         dirty = [l for l in self.m.run(["git", "-C", src, "status", "--porcelain"]).out.splitlines() if l.strip()]
         if dirty:
-            fail("%s has %d uncommitted change(s); a slot is built from a\n    commit and nothing else. Commit or discard "
-                 "them in the workspace first." % (src, len(dirty)))
-        if not self.m.run(["git", "-C", src, "cat-file", "-e", a.commit + "^{commit}"]).ok:
-            self.say("fetching %s from the mirror" % a.commit)
-            if not self.m.act_run(["git", "-C", src, "fetch", "--quiet", mirror, a.commit]).ok:
-                fail("%s is not in this machine's mirror (%s).\n    'wk bench ab' and 'wk pr' fetch a PR head into the mirror "
-                     "first; a bare sha has\n    to be reachable from a branch the mirror carries." % (a.commit, mirror))
+            fail("%s has %d uncommitted change(s); a slot is built from a commit and nothing else" % (src, len(dirty)))
+        self.fetch_commit(src, a.commit)
         if not self.m.act_run(["git", "-C", src, "checkout", "--detach", "--quiet", a.commit]).ok:
             fail("could not check out %s in %s" % (a.commit, src))
-        self.say("source      %s @ %s" % (src, self.m.run(["git", "-C", src, "log", "-1", "--format=%h (%s)"]).out.strip()[:80]))
+        self.say_source(src)
 
-    def find_one(self, d, pattern, want_dir):
-        for n in self.m.listdir(d) if self.m.isdir(d) else []:
-            p = os.path.join(d, n)
-            if fnmatch.fnmatchcase(n, pattern) and self.m.isdir(p) == want_dir:
-                return p
-        return ""
+    def find_one(self, d, pattern):
+        return next((os.path.join(d, n) for n in (self.m.listdir(d) if self.m.isdir(d) else [])
+                     if fnmatch.fnmatchcase(n, pattern) and self.m.isdir(os.path.join(d, n))), "")
 
     def copy_slot(self, root, slotdir):
         listing = self.m.read(os.path.join(self.out, "build", "packages-file-list.txt"))
@@ -415,8 +333,7 @@ class Build:
         start = self.clock.now()
         self.say("building (make wpewebkit-rebuild; the output below is the whole account of it)")
         # BR2_JLEVEL is a kconfig symbol, so it goes on the command line, not the environment.
-        if not self.m.run_tty(self.guarded(["env", "FORCE_UNSAFE_CONFIGURE=1", "make", "-C", self.workdir] + ext
-                                           + ["BR2_JLEVEL=%d" % self.jobs, "wpewebkit-rebuild"]), cwd=self.workdir).ok:
+        if not self.make_all(ext, "BR2_JLEVEL=%d" % self.jobs, "wpewebkit-rebuild"):
             fail("the WebKit build failed. The last lines above are the failing step.")
         self.say("built in %d min" % ((self.clock.now() - start) // 60))
         self.say("finalising the root filesystem (strip, development files) the way an image build does")
@@ -429,35 +346,23 @@ class Build:
 
     def slot(self, root, slotdir):
         a = self.a
-        lib = self.find_one(os.path.join(root, "usr", "lib"), "libWPEWebKit-*.so.*.*.*", False)
-        if not lib:
-            fail("the slot has no libWPEWebKit under %s/usr/lib" % root)
-        execdir = self.find_one(os.path.join(root, "usr", "libexec"), "wpe-webkit-*", True)
+        execdir = self.find_one(os.path.join(root, "usr", "libexec"), "wpe-webkit-*")
         if not execdir or not self.m.run(["test", "-x", os.path.join(execdir, "WPEWebProcess")]).ok:
             fail("no WPEWebProcess under %s/usr/libexec" % root)
-        libdir = os.path.join(root, "usr", "lib")
-        bundle = next((os.path.join(libdir, n, "injected-bundle") for n in self.m.listdir(libdir)
-                       if self.m.isdir(os.path.join(libdir, n, "injected-bundle"))), "")
+        bundle = self.find_one(os.path.join(root, "usr", "lib"), "wpe-webkit-*")
+        bundle = bundle and os.path.join(bundle, "injected-bundle")
         if not bundle or not self.m.exists(os.path.join(bundle, "libWPEInjectedBundle.so")):
             fail("no injected bundle under %s/usr/lib" % root)
         cc = re.search(r'(?m)^set\(CMAKE_C_COMPILER .*bin/(.*)-gcc"\)$', self.m.read(self.tcf))
         if not cc:
             fail("%s names no cross gcc, so there is no readelf to read the build-id with" % self.tcf)
-        rev = self.m.run(["git", "-C", self.tools, "rev-parse", "--short", "HEAD"])
-        fields = dict(slot=a.slot, profile=a.name, commit=a.commit, browser="cog", lib_dir="usr/lib",
-                      exec_dir=os.path.relpath(execdir, root), bundle_dir=os.path.relpath(bundle, root), jobs=str(self.jobs),
-                      built_at=self.clock.iso(), wk_tools=rev.out.strip() if rev.ok else "unknown")
-        sj = os.path.join(slotdir, "slot.json")
-        self.ok(isolated_module(os.path.join(self.tools, "lib"), "wk.slot")
-                + ["manifest", "--readelf", os.path.join(self.out, "host", "bin", cc.group(1) + "-readelf"), root, sj]
-                + ["%s=%s" % kv for kv in sorted(fields.items())], "could not write %s" % sj)
-        try:
-            bid = slot.recorded_build_id(self.m, sj)
-        except ValueError as e:
-            fail(str(e))
+        bid = self.manifest(root, slotdir, dict(slot=a.slot, profile=a.name, commit=a.commit, browser="cog", lib_dir="usr/lib",
+                                                exec_dir=os.path.relpath(execdir, root), bundle_dir=os.path.relpath(bundle, root),
+                                                jobs=str(self.jobs)),
+                            ["--readelf", os.path.join(self.out, "host", "bin", cc.group(1) + "-readelf")])
         du = self.m.run(["du", "-sh", root]).out.split()
         self.say("slot ready: %s" % slotdir)
-        self.say("  %s in root/, %s build-id %s" % (du[0] if du else "?", os.path.basename(lib), bid))
+        self.say("  %s in root/, build-id %s" % (du[0] if du else "?", bid))
         self.say("stage 'webkit-%s' done" % a.slot)
 
     def run(self):
@@ -468,14 +373,7 @@ class Build:
 
 
 def main(argv, environ=None, machine=None, clock=None, tools=TOOLS):
-    a = parse(argv)
-    b = Build(a, machine or here(), dict(os.environ if environ is None else environ), clock or Clock(), tools)
-    try:
-        b.run()
-    except Failed as e:
-        sys.stderr.write("%s: error: %s\n" % (b.prefix, e))
-        return 1
-    return 0
+    return Build(parse(argv), machine or here(), dict(os.environ if environ is None else environ), clock or Clock(), tools).main()
 
 
 if __name__ == "__main__":

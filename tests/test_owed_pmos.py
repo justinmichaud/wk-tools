@@ -15,7 +15,7 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import act  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import HAVE, Fake, Result  # noqa: E402
 from wk.sysimage import pmos, pmos_build  # noqa: E402
 
 PROFILE = {
@@ -234,9 +234,22 @@ class TestTheImageComesOffAsBytes(WkTest):
 class TestTheBuildHostHalf(unittest.TestCase):
     """lib/wk/sysimage/pmos_build.py's pure parts; pmbootstrap, loop devices and sudo run only on a real build host."""
 
-    def test_the_far_command_runs_the_copied_tree(self):
-        self.assertEqual(["env", "PYTHONPATH=/r/lib", "python3", "-m", "wk.sysimage.pmos_build", "wifi-ssid"],
-                         pmos_build.argv_for("/r", "wifi-ssid"))
+    def preflight(self, uname, missing=()):
+        m = Fake("buildhost1")
+        m.answer(["uname", "-sm"], out=uname + "\n")
+        m.answer(["python3"])
+        m.answer(["sudo", "-n", "true"])
+        m.react(list(HAVE), lambda a, f: Result(1 if a[-1] in missing else 0))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            try:
+                return pmos_build.preflight(m), err.getvalue()
+            except Refused:
+                return None, err.getvalue()
+
+    def test_the_build_host_checks_itself_for_pmbootstrap(self):
+        self.assertEqual(self.preflight("Linux aarch64")[0], 0)
+        self.assertIn("Linux on aarch64", self.preflight("Linux x86_64")[1])
+        self.assertIn("rsync multipath-tools", self.preflight("Linux aarch64", ("kpartx", "rsync"))[1])
 
     def test_a_kconfig_delta_replaces_set_and_unset_lines_and_appends_the_rest(self):
         lines = ["CONFIG_A=y", "# CONFIG_B is not set", "CONFIG_C=m"]

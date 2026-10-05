@@ -101,16 +101,8 @@ class TestMacJscUsesXcode(unittest.TestCase):
         for name in XCODE_PRESETS:
             self.assertIn("Xcode", refused(self, lambda: preset(name, "linux")))
 
-    def test_the_platform_and_kind_are_required(self):
-        self.assertIn("Driver.os()", refused(self, lambda: presets.resolve("jsc-debug", "", "container", {})))
-        self.assertIn("Driver.kind", refused(self, lambda: presets.resolve("jsc-debug", "linux", None, {})))
-
     def test_an_unknown_kind_is_refused(self):
         self.assertIn("unknown driver 'bogus'", refused(self, lambda: preset("jsc-release", kind="bogus")))
-
-    def test_the_kind_falls_back_to_WK_DRIVER(self):
-        c = presets.resolve("jsc-release", "linux", None, {"WK_DRIVER": "remote"})
-        self.assertIn("-DUSE_LIBBACKTRACE=OFF", c.cmake)
 
     def test_the_run_side_paths_per_build_system(self):
         c, m = preset("wpe-release"), preset("mac-release", "macos")
@@ -227,15 +219,11 @@ class TestCcacheIsBlindToTheJobCount(unittest.TestCase):
 class TestMbPerJob(unittest.TestCase):
     """The memory a compile job is charged: the config's figure, unless WK_MB_PER_JOB names one."""
 
-    def test_the_config_decides_by_its_build_system(self):
+    def test_jsconly_is_charged_less_unless_WK_MB_PER_JOB_names_a_figure(self):
         self.assertEqual(presets.mb_per_job(preset("mac-release", "macos", "vm"), {}), 3072)
-        self.assertEqual(presets.mb_per_job(preset("jsc-release"), {}), 1536)
-
-    def test_an_explicit_mb_per_job_is_kept(self):
-        self.assertEqual(presets.mb_per_job(preset("mac-release", "macos", "vm"), {"WK_MB_PER_JOB": "999"}), 999)
-
-    def test_a_full_port_gets_the_xcode_figure(self):
         self.assertEqual(presets.mb_per_job(preset("gtk-debug"), {}), 3072)
+        self.assertEqual(presets.mb_per_job(preset("jsc-release"), {}), 1536)
+        self.assertEqual(presets.mb_per_job(preset("mac-release", "macos", "vm"), {"WK_MB_PER_JOB": "999"}), 999)
 
 
 class TestCompilerAndMemoryOverrides(unittest.TestCase):

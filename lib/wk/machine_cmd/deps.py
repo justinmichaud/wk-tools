@@ -3,7 +3,6 @@
 import hashlib
 import os
 import re
-import sys
 
 from wk import secrets
 from wk.kv import kv
@@ -56,8 +55,7 @@ def package(tool, family):
 
 
 def install_cmd(family, pkgs):
-    return INSTALL[family] % " ".join(pkgs) if pkgs and family in INSTALL else None
-
+    return INSTALL[family] % " ".join(pkgs) if family in INSTALL else None
 
 
 class Deps:
@@ -160,8 +158,3 @@ def stale(t, root):
     if marker["inputs"] == inputs_hash(root):
         return None
     return "remote/provision.sh or remote/deps.sh has changed since it ran"
-
-
-def said(r):
-    sys.stderr.write(r.out + r.err)
-    return r

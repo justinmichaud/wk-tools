@@ -9,7 +9,7 @@ import sys
 from wk import act, places, secrets, sudo
 from wk.act import die, info, log, warn
 from wk.kv import kv
-from wk.machine_cmd.deps import Deps, inputs_hash, probe, said
+from wk.machine_cmd.deps import Deps, inputs_hash, probe
 
 CONFS = {
     "build": "# %(name)s -- a shared build machine, reached through the ssh entry of the same name.\n"
@@ -95,7 +95,9 @@ class BuildMachines:
             die("nothing was changed on %s: it has no wk-tools to provision from" % host)
         q = ["WK_REMOTE_MACHINE=" + name, "WK_REMOTE_ROOT=" + t.root_there(), "WK_REMOTE_REFERENCE=" + ref,
              "WK_REMOTE_INPUTS=" + inputs_hash(self.root)]
-        if not said(t._far().act_run(["env"] + q + ["bash", tools + "/remote/provision.sh"])).ok:
+        r = t._far().act_run(["env"] + q + ["bash", tools + "/remote/provision.sh"])
+        places.show(r)
+        if not r.ok:
             die("remote/provision.sh failed on %s; what it said is above. Re-run 'wk machine setup %s' once it is fixed." % (host, name))
         if t._far().act_run(["env", "WK_ROOT=" + tools, "WK_CLAUDE_REMOTE=1", "bash", "-c",
                              'set -euo pipefail; . "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/claude/install.sh"']).ok:
@@ -121,7 +123,7 @@ class BuildMachines:
         return r.out.strip() or "?"
 
     def rubble(self, t, ref):
-        """(path, size, why) for what a setup would remove: an older wk-tools checkout, and the mirror a shared repository replaces."""
+        """(path, size, why): an older wk-tools checkout, and the mirror a shared repository replaces."""
         tools, out = t.tools(""), []
         for d in t._sh(OLD_TOOLS).out.split():
             if d != tools:
@@ -133,7 +135,6 @@ class BuildMachines:
         return out
 
     def ask_rubble(self, host, rubble):
-        """The one question a setup asks; what it declines is left in place and named."""
         if not rubble:
             act.nothing_to_ask()
             return False
@@ -146,8 +147,7 @@ class BuildMachines:
         return False
 
     def credentials(self, t, host):
-        """Copies of the rows delivered to a `remote`, refreshed on every setup and removed when this store has none;
-        on stdin, never in `ps`. Not the claude.ai login, whose refresh token would rotate out from under every holder."""
+        """Refreshed on every setup and removed when this store has none; on stdin, never in `ps`."""
         sec = secrets.Secrets(self.root, self.env, self.here)
         for row in Deps(self.root, self.env, self.here).remote_rows():
             name, home_path = row[0], row[2]
@@ -187,20 +187,10 @@ class BuildMachines:
     def rm_machine(self, name, conf, path):
         t = self.driver(name, conf)
         if t.peer:
-            if not act.confirm("forget the peer '%s' (%s)? Its workspaces stay its own." % (name, self.rel(path))):
-                die("aborted -- nothing was changed")
-            self.here.remove(path)
-            info("removed %s" % self.rel(path))
-            return 0
+            return self.forget(path, "forget the peer '%s' (%s)? Its workspaces stay its own." % (name, self.rel(path)))
         ok, why = t.answers()
         if not ok:
-            warn("cannot reach %s (%s) -- the machine keeps whatever it has." % (t.label(), why))
-            log("  (re-run this when it is reachable to deprovision it properly)")
-            if not act.confirm("remove the local conf %s anyway?" % self.rel(path)):
-                die("aborted -- nothing was changed")
-            self.here.remove(path)
-            info("removed %s" % self.rel(path))
-            return 0
+            return self.forget_unreached(t.label(), why, "the machine keeps whatever it has", path)
         live = [n for n, _s in t.list()]
         if live:
             die("workspaces still live on '%s': %s\n"
@@ -220,7 +210,4 @@ class BuildMachines:
         if there and t._far().act_run(["rm", "-rf", root]).ok:
             info("removed %s" % root)
         info("%s is deprovisioned" % t.label())
-        log("  it is still a machine here, because the registry names it:")
-        log("      git rm %s && git commit" % self.rel(path))
-        log("  that forgets it on every device. 'wk machine setup %s' brings it back." % name)
-        return 0
+        return self.still_named(name, path)

@@ -102,12 +102,11 @@ class TestBootFiles(WkTest):
 
     def test_path_traversal_is_refused(self):
         d = self._fixture()
-        for n in ("../../etc/passwd", "deadbeef/../../etc/passwd"):
-            cp = subprocess.run(
-                ["python3", str(REPO / "boot" / "check-boot-files.py"), "--root", str(d), "--resolve", n],
-                capture_output=True, text=True,
-            )
-            self.assertEqual(cp.stdout.strip(), "", f"{n} resolved to something: {cp.stdout}")
+        for n in ("../../../../../../etc/passwd", "deadbeef/../../../../../../etc/passwd"):
+            (d / "config.txt").write_text("[all]\nkernel=%s\n" % n)
+            cp = subprocess.run(["python3", str(REPO / "boot" / "check-boot-files.py"), "--root", str(d)],
+                                capture_output=True, text=True)
+            self.assertIn("kernel: " + n, cp.stderr, f"{n} resolved outside the root")
 
     def test_boot_files_check_catches_missing_kernel(self):
         d = self._fixture()

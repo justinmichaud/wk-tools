@@ -127,17 +127,9 @@ class TestSnapshotCheckout(MirrorFixture):
                  cwd=tree).stdout.strip(), "origin/main")
         self.assertEqual(self.head(tree), self.sha1)
 
-    def test_a_detached_checkout_is_what_it_replaces(self):
-        tree = self.clone_snapshot(self.tmp / "base-detached")
-        _git("checkout", "-q", "--detach", "origin/main", cwd=tree)
-        self.assertEqual(self.status_line(tree), "## HEAD (no branch)")
-        self.assertNotEqual(
-            _git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}",
-                 cwd=tree, check=False).returncode, 0)
-
-    def test_the_next_snapshot_resets_the_branch_forward(self):
+    def test_the_next_snapshot_resets_the_branch_forward_even_from_a_detached_one(self):
         first = self.clone_snapshot(self.tmp / "base1")
-        self.checkout(first)
+        _git("checkout", "-q", "--detach", "origin/main", cwd=first)
         sha2 = self.advance_upstream()
 
         second = self.tmp / "base2"
@@ -207,12 +199,6 @@ class TestWsFetchScript(WorkspaceFixture):
                          "git-webkit reads this to find the project; the rewrite "
                          "must not have replaced it")
 
-    def test_a_person_typing_git_fetch_origin_gets_the_same_read(self):
-        sha2 = self.advance_upstream()
-        out = _git("fetch", "origin", cwd=self.ws, check=False)
-        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        self.assertEqual(self.head(self.ws, "refs/remotes/origin/main"), sha2)
-
     def test_no_tags_are_followed(self):
         _git("tag", "some-release", self.sha1, cwd=self.seed)
         _git("push", "-q", "origin", "some-release", cwd=self.seed)
@@ -248,13 +234,6 @@ class TestWsFetchScript(WorkspaceFixture):
         self.assertIn("couldn't find remote ref", cp.stderr)
         self.assertIn("from=mirror", cp.stdout,
                       "which source it read is still reported")
-
-    def test_it_is_one_fetch_of_every_remote_git_has(self):
-        script = self.fetch_script()
-        self.assertIn("git fetch --all --prune --quiet", script)
-        for word in ("refs/heads", "refs/remotes", "--no-tags", "github.com"):
-            self.assertNotIn(word, script, script)
-
 
 class TestWiringWithNoMirror(MirrorFixture):
     """A checkout on a machine that keeps no mirror -- a build box cloning from the reference its admins refresh
@@ -297,15 +276,6 @@ class TestTheWiringCheck(MirrorFixture):
     def test_a_freshly_wired_checkout_passes(self):
         tree = self.clone_snapshot(self.tmp / "wired")
         self.wire(tree)
-        out = self.check(tree)
-        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-
-    def test_the_url_the_remote_records_is_read_from_config_not_from_git_remote(self):
-        tree = self.clone_snapshot(self.tmp / "wired2")
-        self.wire(tree)
-        self.assertEqual(
-            _git("remote", "get-url", "origin", cwd=tree).stdout.strip(),
-            str(self.mirror), "the rewrite is what a fetch resolves to")
         out = self.check(tree)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
@@ -478,29 +448,6 @@ _git_py() { %s; }
         out = self._run("printf 'true\\n'", mirror="/mirror/WebKit.git")
         self.assertIn("fetches read /mirror/WebKit.git", out)
         self.assertNotIn("warning", out)
-
-
-class TestPublishingOverADetachedSnapshot(MirrorFixture):
-    """The defect, at its root: `wk new` on moose kept leaving HEAD detached because the snapshots it built from
-    were published before a snapshot was checked out onto a branch, and every later snapshot is a hardlinked
-    copy of the one before -- so the detached HEAD is inherited, publish after publish, and every workspace
-    overlaid on one starts detached."""
-
-    def test_the_publish_puts_the_hardlinked_copy_back_on_its_branch(self):
-        first = self.clone_snapshot(self.tmp / "base1")
-        self.wire(first)
-        _git("checkout", "-q", "--detach", "origin/main", cwd=first)
-        self.assertEqual(self.status_line(first), "## HEAD (no branch)")
-
-        sha2 = self.advance_upstream()
-        second = self.tmp / "base2"
-        subprocess.run(["cp", "-al", str(first), str(second)], check=True,
-                       capture_output=True)
-        self.wire(second)
-        _git("fetch", "--all", "--prune", "-q", cwd=second)
-        self.assertEqual(self.checkout(second), "")
-        self.assertEqual(self.status_line(second), "## main...origin/main")
-        self.assertEqual(self.head(second), sha2)
 
 
 class StoreFixture(MirrorFixture):

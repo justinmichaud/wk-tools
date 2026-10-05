@@ -459,35 +459,21 @@ def _quiet(fn, *args):
     return result, err.getvalue()
 
 
-class TestTheInjectorReadinessProbeAnswersOnThisPlatform(WkTest):
-    """`nc -z -U` answers 1 for a served unix socket on macOS (measured 2026-09-05, macOS 26.6.2)."""
+class TestTheInjectorReadinessProbe(WkTest):
+    """`nc -z -U` answers 1 for a served unix socket on macOS, so the probe connects in python."""
 
-    def _running(self, sock):
+    def test_only_a_served_socket_reads_as_running(self):
+        import socket as sk
         host = _host(self)
-        with mock.patch.object(host, "path", lambda name: str(sock)):
-            return "YES" if host.inject_running() else "NO"
-
-    def test_a_served_socket_reads_as_running(self):
-        import socket as sk
-        sock = self.tmp / "served.sock"
-        srv = sk.socket(sk.AF_UNIX)
-        srv.bind(str(sock))
-        srv.listen(1)
-        try:
-            self.assertEqual("YES", self._running(sock))
-        finally:
-            srv.close()
-
-    def test_a_socket_nothing_listens_on_reads_as_not_running(self):
-        import socket as sk
-        sock = self.tmp / "dead.sock"
-        srv = sk.socket(sk.AF_UNIX)
-        srv.bind(str(sock))
-        srv.close()
-        self.assertEqual("NO", self._running(sock))
-
-    def test_no_socket_at_all_reads_as_not_running(self):
-        self.assertEqual("NO", self._running(self.tmp / "absent.sock"))
+        served, dead = sk.socket(sk.AF_UNIX), sk.socket(sk.AF_UNIX)
+        served.bind(str(self.tmp / "served.sock"))
+        served.listen(1)
+        self.addCleanup(served.close)
+        dead.bind(str(self.tmp / "dead.sock"))
+        dead.close()
+        for name, want in (("served.sock", True), ("dead.sock", False), ("absent.sock", False)):
+            with self.subTest(name=name), mock.patch.object(host, "path", lambda _n: str(self.tmp / name)):
+                self.assertEqual(want, host.inject_running())
 
 
 class TestTheGuestsInjectorGetsTheStandingReadToken(WkTest):

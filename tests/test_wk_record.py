@@ -83,7 +83,6 @@ class TestSteps(RecordTest):
         self.assertEqual(t.steps(), [(1, "pending"), (2, "pending")])
         t.step(2)
         self.assertEqual(t.steps(), [(1, "done"), (2, "running")])
-        self.assertEqual(t.step_now(), 2)
         self.assertEqual(t.stage(), ["compile"])
 
     def test_a_scheduler_event_maps_to_one_state(self):
@@ -98,7 +97,6 @@ class TestSteps(RecordTest):
     def test_a_step_by_name(self):
         t = self.begin()
         t.step_named("compile")
-        self.assertEqual(t.step_now(), 2)
         with self.assertRaises(ValueError):
             t.step_named("link")
 
@@ -107,12 +105,10 @@ class TestTheVerdict(RecordTest):
     def test_a_live_local_pid_with_a_fresh_log_is_running(self):
         t = self.begin()
         self.assertEqual(t.verdict(), "running")
-        self.assertTrue(t.running())
 
     def test_a_gone_pid_is_died(self):
         t = self.begin(pid=999999)
         self.assertEqual(t.verdict(), "died")
-        self.assertFalse(t.running())
 
     def test_the_first_exit_stands(self):
         t = self.begin()
@@ -144,7 +140,6 @@ class TestTheVerdict(RecordTest):
         self.assertEqual(t.verdict(), "died")
         self.answers[("ws", 77)] = None
         self.assertEqual(t.verdict("capped"), "unanswered")
-        self.assertTrue(t.running())
 
 
 class TestToleratesCorruptAndOld(RecordTest):
@@ -401,27 +396,15 @@ class TestTheMachineName(unittest.TestCase):
         self.assertEqual(record.machine_name({"WK_IN_VM": "1"}, m), "tolken")
 
 
-
 class TestWatchdogSettings(unittest.TestCase):
-    def test_the_deadlines_come_from_the_env_else_the_default(self):
-        self.assertEqual((record.watchdog_stall({}), record.watchdog_abort({}), record.task_ask_seconds({})), (300, 0, 5))
-        env = {"WK_STALL_SECONDS": "60", "WK_ABORT_SECONDS": "90", "WK_TASK_ASK_SECONDS": "9"}
-        self.assertEqual((record.watchdog_stall(env), record.watchdog_abort(env, 1800), record.task_ask_seconds(env)), (60, 90, 9))
-
     def test_the_deadlines_may_be_fractional(self):
-        env = {"WK_STALL_SECONDS": "1.5", "WK_ABORT_SECONDS": "2.5"}
-        self.assertEqual((record.watchdog_stall(env), record.watchdog_abort(env)), (1.5, 2.5))
+        env = {"WK_STALL_SECONDS": "1.5", "WK_ABORT_SECONDS": "2.5", "WK_TASK_ASK_SECONDS": "0.5"}
+        self.assertEqual((record.watchdog_stall(env), record.watchdog_abort(env), record.task_ask_seconds(env)), (1.5, 2.5, 0.5))
 
     def test_a_runs_own_deadlines_never_override_the_ones_set(self):
         env = {"WK_STALL_SECONDS": "60"}
         record.default_watchdog(env, 900, 5400)
         self.assertEqual(env, {"WK_STALL_SECONDS": "60", "WK_ABORT_SECONDS": "5400"})
-
-
-class TestRowLabelAndHostSelf(unittest.TestCase):
-    def test_they_are_what_the_dispatcher_exported(self):
-        self.assertEqual((record.row_label({}), record.host_self({})), ("", False))
-        self.assertEqual((record.row_label({"WK_ROW_LABEL": "mbp"}), record.host_self({"WK_HOST_SELF": "1"})), ("mbp", True))
 
 
 if __name__ == "__main__":

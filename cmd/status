@@ -5,61 +5,42 @@
 # wk: opts --no-fleet,--no-devices,--records,--json,--text,--cli,--html=,--web,--port=,--interval=,--wait,--timeout=,--holds=,--log,--follow,-f,--all,-a,--gates,-g
 # wk: flag --log,--follow,-f,--all,-a,--gates,-g name=required here=no
 #
-# The build records its own state, not a process list, and this reads it.
+# Reads the records builds and tasks write, not a process list.
 #
-# Exit status is meaningful, so a script or an agent can branch on it:
+# Exit status:
 #   0  idle or last build succeeded
 #   1  last build failed
-#   2  a build is running or silent, or a workspace is still being created
-#      (`silent`: the record says running and the log has said nothing for
-#      WK_STALL_SECONDS. A full-LTO link is silent for minutes, so this is
-#      busy and `--wait` waits through it, as far as the `abort_after` the
-#      build recorded)
-#   3  a build stalled and was killed by its own watchdog
-#   4  a workspace needs a person: a creation whose driver is gone, a build
-#      silent past its own `abort_after` (its watchdog would have written
-#      `stalled` there, so the watchdog is gone too), an environment removed
-#      from under the record, an unreadable task record, or a machine that
-#      will not answer (3 is a build whose watchdog reported; 4 is a workspace
-#      whose record no longer has a writer -- don't conflate them). Also what
-#      a fleet walk reports for an unreachable peer, and a workspace that did
-#      not answer about its job's pid within WK_TASK_ASK_SECONDS (default 5):
-#      `unanswered`.
+#   2  busy: a build running or `silent` (no log output for WK_STALL_SECONDS,
+#      inside the `abort_after` it recorded), or a workspace being created
+#   3  a build stalled and its watchdog killed it
+#   4  a workspace needs a person: a creation nothing is driving, a build
+#      silent past its `abort_after`, an environment removed under the record,
+#      an unreadable task record, an unreachable machine, or a workspace that
+#      did not answer about its job's pid within WK_TASK_ASK_SECONDS
+#      (`unanswered`)
 #
-#   wk status --holds device:rpi5    the live tasks in this machine's store
-#                                    holding that resource, one per line, for
-#                                    the machine asking. A board is a fleet
-#                                    resource, and this is the half of the
-#                                    answer this machine owns.
+# At a terminal this opens the page (--web); a pipe, CI or an agent gets the
+# table (--text, or --cli). --json prints the merged document, --html=<file>
+# writes a static page (- for $TMPDIR/wk-status.html).
 #
-# At a terminal, with nothing else said, this opens the page (`--web`).
-# Anything else (a pipe, CI, an agent) gets the plain table; `--text` asks
-# for the table anyway.
+#   --holds <res>   the live tasks in this machine's store holding <res>
+#   --no-fleet      the workspaces alone; --no-devices drops boards and bridges
+#   --records       the records, one JSON object per line
+#   --wait          block while busy (exit 2), then report; --timeout=<s>
+#                   stops waiting without claiming the work stopped
+#   --port, --interval   the served page's port (0: any) and refresh seconds
 #
-#   --no-fleet    the workspaces alone, for the half of a listing another
-#                 machine assembles; --no-devices keeps the machine facts and
-#                 drops the boards and bridges
-#   --records     the records alone, one JSON object per line, rendered by
-#                 the wk that asked
-#   --wait        block while busy (exit 2) and report once; --timeout stops
-#                 waiting without claiming the work stopped
+#   <workspace> --log   the build or image-stage log, normalised, with the
+#                       first error and the last output
+#     --follow, -f   stream it
+#     --all, -a      print all of it
+#     --gates, -g    the readings this build was collected under
 #
-#   WK_WAIT_TIMEOUT=<s>     default for --timeout when --wait is given with
-#                           none (0, the default, waits forever)
-#   WK_WAIT_INTERVAL=<s>    how often --wait polls (default 5)
-#   WK_FLEET_TIMEOUT=<s>    ceiling on one fleet-device probe (default 4)
-#   WK_BRIDGE_TIMEOUT=<s>   ceiling on one bridge-phone health check
-#                           (default 20; slower than a fleet probe on purpose)
-#   WK_STATUS_PORT, WK_STATUS_INTERVAL   --web's defaults (0: any free port; 20s)
-#   WK_STATUS_VIEW=<mode>   the view a bare `wk status` gets: text, web or json
-#
-#   wk status <workspace> --log   the build or image-stage log, read on the
-#                 machine holding the workspace: ninja's carriage returns
-#                 normalised, the first error and the last output
-#     --follow, -f   stream the log live
-#     --all, -a      print the full normalised log
-#     --gates, -g    the readings this build was collected under: the browser
-#                    check, the profile check, and the pinned benchmark payloads
+#   WK_WAIT_TIMEOUT, WK_WAIT_INTERVAL   --wait's defaults (0: forever; 5s)
+#   WK_FLEET_TIMEOUT    ceiling on one fleet-device probe (4s)
+#   WK_BRIDGE_TIMEOUT   ceiling on one bridge health check (20s)
+#   WK_STATUS_PORT, WK_STATUS_INTERVAL   --port and --interval defaults (0, 20)
+#   WK_STATUS_VIEW      the view a bare `wk status` gets: text, web or json
 
 import json
 import os
@@ -115,40 +96,29 @@ def main(argv):
     if any(args.flag(f) for f in LOG_FLAGS):
         return show_log(args)
     no_fleet = args.flag("--no-fleet")
-    no_devices = args.flag("--no-devices")
-    devices = not (no_fleet or no_devices)
-    mode, asked = statusview.default_mode(env, sys.stdout.isatty()), False
-    if args.flag("--json"):
-        mode, asked = "json", True
-    if args.flag("--text") or args.flag("--cli"):
-        mode, asked = "text", True
-    html_out = ""
-    if args.value("--html") is not None:
-        mode, asked = "html", True
-        html_out = args.value("--html")
-        html_out = "" if html_out == "-" else html_out
-    if args.flag("--web"):
-        mode, asked = "web", True
-    port, interval = statusview.web_defaults(env)
-    if args.value("--port") is not None:
-        port = args.value("--port")
-    if args.value("--interval") is not None:
-        interval = args.value("--interval")
     if args.value("--holds") is not None:
         return holders(args.value("--holds"))
+    views = (("web", args.flag("--web")), ("html", args.value("--html") is not None),
+             ("text", args.flag("--text") or args.flag("--cli")), ("json", args.flag("--json")))
+    mode = next((v for v, on in views if on), None)
+    html_out = "" if args.value("--html") in (None, "-") else args.value("--html")
+    port = args.value("--port") or env.get("WK_STATUS_PORT") or "0"
+    interval = args.value("--interval") or env.get("WK_STATUS_INTERVAL") or "20"
     name = store.ws_name(env) or None
     wait = args.flag("--wait")
-    if not asked and mode == "web" and (name or wait):
-        mode = "text"
+    if mode is None:
+        mode = statusview.default_mode(env, sys.stdout.isatty())
+        if mode == "web" and (name or wait):
+            mode = "text"
     waited = None
     if wait:
-        timeout = int((args.value("--timeout") if args.value("--timeout") is not None else env.get("WK_WAIT_TIMEOUT", "0")) or 0)
+        timeout = int(args.value("--timeout") or env.get("WK_WAIT_TIMEOUT") or 0)
         waited = wait_until_idle(lambda: Walk(ROOT, name=name, fleet=False, devices=False).worst_only(), timeout,
                         float(env.get("WK_WAIT_INTERVAL", "5")), Clock(), name, info, warn)
-    walk = Walk(ROOT, name=name, fleet=not no_fleet, devices=devices)
+    walk = Walk(ROOT, name=name, fleet=not no_fleet, devices=not (no_fleet or args.flag("--no-devices")))
     if args.flag("--records"):
         for r in walk.records(markers=False):
-            print(statusview.dumps(r))
+            print(json.dumps(r, separators=(",", ":")))
         return verdict(waited, walk)
     if mode == "text":
         statusview.render_text_stream(walk.records(), sys.stdout, statusview.colour_wanted())
@@ -169,7 +139,7 @@ def main(argv):
 
 
 def verdict(waited, walk):
-    """--wait's exit is the answer the wait confirmed; the walk after it only shows the state."""
+    """--wait's exit is the answer the wait confirmed, not the walk after it."""
     return walk.worst if waited is None else waited
 
 

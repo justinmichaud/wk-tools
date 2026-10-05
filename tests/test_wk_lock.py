@@ -120,26 +120,6 @@ class TestOnTheFake(LockTest):
         self.assertEqual(self.fake.files[self.path], DEAD)
         self.assertEqual(self.clock.slept, [1, 1])
 
-    def test_a_directory_at_the_lock_path_is_a_holder_only_while_its_pid_lives(self):
-        self.fake.dirs.add(self.path)
-        self.fake.files[self.path + "/pid"] = "4242\n"
-        self.fake.pids.add(4242)
-        self.stderr(lambda: self.assertRaises(Refused, self.lock.hold, "r", timeout=1))
-        self.assertIn(self.path, self.fake.dirs)
-        self.fake.pids.discard(4242)
-        self.lock.hold("r")
-        self.assertNotIn(self.path, self.fake.dirs)
-        self.assertEqual(self.fake.files[self.path], self.lock.payload)
-
-    def test_a_directory_naming_no_pid_is_cleared(self):
-        self.fake.dirs.add(self.path)
-        self.lock.hold("r")
-        self.assertEqual(self.fake.files[self.path], self.lock.payload)
-
-    def test_holder_pid_of_a_directory_is_none(self):
-        self.fake.dirs.add(self.path)
-        self.assertIsNone(self.lock.holder_pid("r"))
-
     def test_a_breaker_left_by_a_dead_process_is_removed_and_a_live_one_is_waited_out(self):
         breaker = self.path + ".breaking"
         reads = []

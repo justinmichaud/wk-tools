@@ -1,6 +1,5 @@
-"""`wk gc`: every module's rubble rows, one question, then each chosen row taken through the machine. A plain run takes
-what loses no work and names the rest with the flag or command that takes it. On a macOS host the container store is
-the podman VM's, and the VM's own wk answers that half: its rows join this one's before the question."""
+"""`wk gc`: every module's rubble rows, one question, then each chosen row taken. On a macOS host the podman VM's own wk
+answers for the container store: its rows join this one's before the question."""
 
 import json
 import os
@@ -19,12 +18,11 @@ from wk.sysimage import guestbase, pmos, task
 
 
 def build_outputs(store, env):
-    """Where each image builder leaves bytes; `pmos` builds on its host and `guest` is a tart VM, each with rows of its own."""
     return {"buildroot": os.path.join(store.store_dir(), "cache", "buildroot"),
             "yocto": os.path.join(store.store_dir(), "cache", "yocto"),
             "fetch": task.cache_dir(env),
             "mac-volume": os.path.join(os.path.dirname(task.cache_dir(env)), "mac-tailnet"),
-            "pmos": None, "guest": None}
+            "pmos": None, "guest": None}   # each builds elsewhere, with rows of its own
 
 
 class Gc:

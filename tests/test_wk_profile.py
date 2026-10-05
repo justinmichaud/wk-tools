@@ -172,6 +172,59 @@ class TestSysprof(ProfileTest):
         self.assertIn("--process is meaningless with --profile=sysprof", err)
 
 
+class TestTheBrowserAndItsProcesses(ProfileTest):
+    """`--browser` under each mode and `--process`, read off the dry run's plan."""
+
+    NAMES = {"wpe-release": {"web": "WPEWebProcess", "network": "WPENetworkProcess", "gpu": "WPEGPUProcess"},
+             "gtk-release": {"web": "WebKitWebProcess", "network": "WebKitNetworkProcess", "gpu": "WebKitGPUProcess"}}
+
+    def setUp(self):
+        super().setUp()
+        os.environ["WK_DRY_RUN"] = "1"
+
+    def test_an_unknown_mode_or_process_is_refused_naming_the_valid_ones(self):
+        for argv, words in ((("--profile=bogus",), ("no such mode",) + profile.MODES),
+                            (("--profile", "--process", "bogus"), ("no such process", "ui", "web", "network", "gpu")),
+                            (("--profile", "--process", "ui"), ("--browser",))):
+            with self.subTest(argv=argv):
+                _, err = self.refused(*argv)
+                for w in words:
+                    self.assertIn(w, err)
+
+    def test_the_ui_process_is_prefixed_through_minibrowsers_variable(self):
+        for preset in self.NAMES:
+            with self.subTest(preset=preset):
+                rc, err = self.run_("--preset", preset, "--browser", "--process", "ui", "--profile=samply")
+                self.assertEqual(rc, 0, err)
+                self.assertIn("WEBKIT_MINI_BROWSER_PREFIX=", err)
+                self.assertNotIn("samply", next(l for l in err.splitlines() if "run-minibrowser" in l))
+
+    def test_a_child_process_is_attached_to_by_pid_after_launch(self):
+        for preset, names in self.NAMES.items():
+            for process, name in names.items():
+                with self.subTest(preset=preset, process=process):
+                    rc, err = self.run_("--preset", preset, "--browser", "--profile=samply", "--process", process)
+                    self.assertEqual(rc, 0, err)
+                    for w in (name, "pgrep", "samply record", " -p "):
+                        self.assertIn(w, err)
+
+    def test_the_apple_port_profiles_minibrowser_itself_and_refuses_process(self):
+        with mock.patch.object(ProfileDriver, "os", lambda self: "macos"):
+            rc, err = self.run_("--preset", "mac-release", "--browser", "--profile")
+            self.assertEqual(rc, 0, err)
+            self.assertIn("MiniBrowser.app/Contents/MacOS/MiniBrowser", err)
+            self.assertNotIn("WEBKIT_MINI_BROWSER_PREFIX", err)
+            _, err = self.refused("--preset", "mac-release", "--browser", "--process", "web", "--profile")
+            self.assertIn("not wired up for the Apple ports", err)
+
+    def test_a_mode_that_covers_the_whole_tree_or_must_start_first_is_refused(self):
+        _, err = self.refused("--preset", "gtk-release", "--browser", "--process", "ui", "--profile=sampling")
+        self.assertIn("meaningless", err)
+        for mode in ("heaptrack", "massif"):
+            _, err = self.refused("--preset", "gtk-release", "--browser", "--profile=" + mode)
+            self.assertIn("not wired up", err)
+
+
 class TestFetch(ProfileTest):
     def test_fetch_copies_the_run_directory_out(self):
         self.w.answer(["exec-tty", "ws", "bash", "-lc"], out="")

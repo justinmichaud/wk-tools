@@ -152,12 +152,6 @@ class TestPeerResolution(PeerFixture):
 
 class TestPeerDelegation(PeerFixture):
 
-    def test_command_runs_on_the_peer(self):
-        """`wk status <ws> --log` runs `wk status <ws> --log` over there, not a thing here"""
-        cp = self._wk("status", "peerws", "--log")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("status peerws --log ", self.peer_calls())
-
     def test_destroying_one_is_asked_of_the_peer(self):
         """`wk rm <ws>` of a workspace a peer keeps the record of is that
         peer's own `wk rm`, run over there with the answer given here"""

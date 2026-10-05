@@ -4,17 +4,13 @@ import os
 import re
 import sys
 
-from wk import act, record, status
+from wk import act, priv, record, status
 from wk.act import die, log
 from wk.store import ws_name
 
 DROPIN_FMT = "/etc/sudoers.d/zz-%s-passwd"
 DEFAULT_TIMEOUT_MIN = "0.5"
-QUIESCE_PRIV = "/usr/local/libexec/wk-quiesce-priv"
-CARD_PRIV = "/usr/local/libexec/wk-card-priv"
-BOOT_PRIV = "/usr/local/libexec/wk-boot-priv"
-# A drop-in that out-ranks one of these three sudoers-allowlisted helpers costs 'wk quiesce' a password too.
-PRIV_HELPERS = (QUIESCE_PRIV, CARD_PRIV, BOOT_PRIV)
+QUIESCE_PRIV, CARD_PRIV, BOOT_PRIV = PRIV_HELPERS = tuple(priv.path(n) for n, _, _ in priv.HELPERS)
 
 _RULE_LINE = re.compile(r'^\s*\(.*\)')
 _BLANKET = re.compile(r'(^|\s)(NO)?PASSWD:\s*ALL\s*$|\)\s*ALL\s*$')
@@ -31,21 +27,11 @@ SUDOERS_BODY = (
 )
 
 
-def timeout_desc(minutes):
-    return "%g seconds" % (float(minutes) * 60)
-
-
-def timeout_secs(minutes):
-    return "%g" % (float(minutes) * 60)
-
-
-def timeout_is_ours(value, wanted):
-    if not value:
-        return False
+def seconds(minutes):
     try:
-        return float(value) == float(wanted)
+        return "%g" % (float(minutes) * 60)
     except ValueError:
-        return False
+        return None
 
 
 def _rule_lines(out):
@@ -74,7 +60,7 @@ class Sudo:
         self.machine = machine
         self.env = os.environ if env is None else env
         self.timeout_min = self.env.get("WK_SUDO_TIMEOUT_MIN") or DEFAULT_TIMEOUT_MIN
-        self.timeout_desc = timeout_desc(self.timeout_min)
+        self.timeout_desc = "%s seconds" % seconds(self.timeout_min)
         self._linux = linux
 
     def is_linux(self):
@@ -119,33 +105,21 @@ class Sudo:
                 return 0, prefix + "but %s is installed" % dropin
             return 1, prefix + "and %s is not installed, so it is sudo's default (a few minutes)" % dropin
 
-        timeout = p["timeout"]
-        if timeout_is_ours(timeout, self.timeout_min):
-            msg = "a password is required, and the timestamp lasts %s" % self.timeout_desc
-            if self.machine.exists(dropin):
-                msg += " (%s)" % dropin
-            return 0, msg
-
-        if timeout in ("0", "0.0", ".0"):
-            msg = ("a password is required, and no timestamp is kept at all (timeout 0)"
+        timeout, secs = p["timeout"], seconds(p["timeout"])
+        if secs is not None and 0 <= float(secs) <= float(seconds(self.timeout_min)):
+            msg = ("a password is required, and the timestamp lasts %s seconds" % secs
+                   if float(secs) else "a password is required, and no timestamp is kept at all (timeout 0)"
                    " -- stricter than the %s this installs, so nothing to do" % self.timeout_desc)
-            if self.machine.exists(dropin):
-                msg += " (%s)" % dropin
-            return 0, msg
-
+            return 0, msg + (" (%s)" % dropin if self.machine.exists(dropin) else "")
         if timeout == "unset":
             return 1, "a password is required, but sudo keeps a timestamp (timeout unset -- sudo's default)"
-
         return 1, ("a password is required, but sudo keeps a timestamp for %s minute(s) (%s seconds) -- wanted %s"
-                    % (timeout, timeout_secs(timeout), self.timeout_desc))
+                   % (timeout, secs, self.timeout_desc))
 
-    def _visudo_resolve(self):
+    def setup(self):
         if not self.machine.have("visudo"):
             die("visudo is required (part of the sudo package) but not on PATH -- "
                 "refusing to write a sudoers file that cannot be validated")
-
-    def setup(self):
-        self._visudo_resolve()
         rc, v = self.verdict()
         host = record.host_name(self.machine)
         if rc == 0:
@@ -253,8 +227,7 @@ def status_here(sudo, env):
 
 
 def main(words, on, all_flag, reg, env=None):
-    """`wk key sudo [status|setup] [--on <machine>|--all]`: `words` are the positionals after `sudo`, `on` is None
-    when --on was not given."""
+    """`words` are the positionals after `sudo`; `on` is None when --on was not given."""
     env = os.environ if env is None else env
     if reg.in_workspace():
         die("'wk key sudo' hardens a machine you log into, and this is workspace\n"

@@ -85,44 +85,26 @@ def findings(text, default_remedy=""):
     return rows
 
 
-# -- credentials: a verdict line is <verdict>\t<detail>, the detail's `    key: value` lines being facts
-
-def cred_verdict(line):
-    return line.split("\t", 1)[0]
-
-
-def cred_detail(line):
-    return line.split("\t", 1)[-1]
-
-
-def cred_first(line):
-    return (cred_detail(line).splitlines() or [""])[0]
-
-
-def cred_fact(line, key):
-    m = re.search(r"^ *%s: (.*)$" % re.escape(key), line, re.M)
-    return m.group(1) if m else ""
-
-
 def credentials_section(names, verdict_of):
+    """A verdict line is <verdict>\t<detail>, the detail's `    key: value` lines being facts."""
     rows = []
     for name in names:
         line = verdict_of(name)
-        v, why = cred_verdict(line), cred_first(line)
+        v, _, detail = line.partition("\t")
+        why = (detail.splitlines() or [""])[0]
+        fix = re.search(r"^ *fix: (.*)$", line, re.M)
         if v == "ok":
             rows.append(ok("%s -- %s" % (name, why)))
         elif v == "wide":
             rows.append(unk("%s reaches further than wk spends it" % name, why))
         elif v == "bad":
-            rows.append(miss("%s: %s" % (name, why), cred_fact(line, "fix") or "wk key check"))
+            rows.append(miss("%s: %s" % (name, why), fix.group(1) if fix else "wk key check"))
         elif v == "absent":
             rows.append(unk("%s: %s" % (name, why), "wk key setup"))
         else:
             rows.append(unk("%s: %s" % (name, why), "wk key check"))
     return rows
 
-
-# -- git identity, wherever a git.* blob came from
 
 def git_fields(machine):
     if not machine.have("git"):
@@ -161,8 +143,6 @@ def vm_guest_git_findings(driver, want):
         rows += git_config_findings("%s (tart guest)" % name, blob, "wk start %s (the include is written on every start)" % name, want)
     return rows
 
-
-# -- the store, probed where it lives
 
 def probe_store(store, machine, branches, env):
     """key=value lines: every mirror branch this tree declares is named, since one it lacks fails every fetch."""
@@ -217,8 +197,6 @@ def report_store(out, gitremedy, fork_key, macos, want):
         rows += git_config_findings("container machine", out, gitremedy, want)
     return rows
 
-
-# -- the bridge phones and this Mac
 
 def battery_verdict(name, blob):
     f = kv(blob)
@@ -412,12 +390,7 @@ class Doctor:
                     linked(os.path.join(self.home, ".claude", "CLAUDE.md"), os.path.join(self.root, "claude", "CLAUDE-host.md")))
         yield check("shell rc sources shell/bashrc", "./setup --stage dotfiles",
                     any("wk-tools/shell/bashrc" in self.read(os.path.join(self.home, rc)) for rc in (".zshrc", ".bashrc")))
-        if self.machine.have("git"):
-            have, want = kv(git_fields(self.machine)), self.want()
-            for v in ("name", "email"):
-                yield check("git user.%s is the repo's" % v, "./setup --stage dotfiles", have.get("git." + v, "") == want.get(v, ""))
-            yield check("git speed settings (fsmonitor, manyFiles)", "./setup --stage dotfiles",
-                        have.get("git.fsmonitor") == "true" and have.get("git.manyfiles") == "true")
+        yield from git_config_findings("this machine", git_fields(self.machine), "./setup --stage dotfiles", self.want())
 
     def local_state(self, path, kind, how):
         disp = "~" + path[len(self.home):] if path.startswith(self.home) else path
@@ -474,7 +447,7 @@ class Doctor:
                                    "on its rescue; lost, it rejoins under a new name")
         else:
             rpi5 = dict(machine_confs(self.root, self.env)).get("rpi5")
-            if rpi5 and rpi5.get("ssh") == self.machine_name():
+            if rpi5 and rpi5.get("ssh") == record.machine_name(self.env, self.machine):
                 yield self.local_state(os.path.join(self.root, "host", "linux", "rpi5", "rpi5.conf"), "backed-up",
                                        "site WiFi identity (gitignored: repo is public); rpi5.conf.example documents the shape")
                 yield self.local_state(os.path.join(self.root, "host", "linux", "rpi5", "id_ed25519"), "backed-up",
@@ -495,9 +468,6 @@ class Doctor:
         else:
             yield miss("/var/lib/tailscale (podman VM) -- the machine holds this workstation's image workspaces and reaches no board without it",
                        "./setup --stage machine, which needs a live tailnet auth key: wk key set tailnet")
-
-    def machine_name(self):
-        return record.machine_name(self.env, self.machine)
 
     def workspaces_store(self):
         fork_key = self.machine.exists(os.path.join(self.paths()["push_held"], "build_key_fork"))

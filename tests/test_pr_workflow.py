@@ -1,7 +1,6 @@
 """`wk pr` / `wk new --pr`: the spec parser and the mirror fetches underneath
 them (lib/wk/pr.py's parse_spec, sync.fetch_into_mirror and fetch_pull_into_mirror)."""
 import contextlib
-import importlib.machinery
 import importlib.util
 import io
 import os
@@ -13,20 +12,12 @@ from pathlib import Path
 from unittest import mock
 
 from tests.killpoints import converges
-from tests.support import REPO, fake_workspace, rand_suffix, run, scratch_dir, stub_path
+from tests.support import REPO, load_cmd, rand_suffix, run, scratch_dir, stub_path
 
 CMD_PR = REPO / "cmd" / "pr"
 
 
-def _load_cmd_pr():
-    loader = importlib.machinery.SourceFileLoader("wk_cmd_pr", str(CMD_PR))
-    spec = importlib.util.spec_from_file_location("wk_cmd_pr", str(CMD_PR), loader=loader)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
-
-
-CMD_PR_MODULE = _load_cmd_pr()
+CMD_PR_MODULE = load_cmd("pr")
 KEY_LOADED = lambda: 0
 
 from wk import act, decl, git, places, pr, sync  # noqa: E402  -- needs CMD_PR_MODULE's sys.path.insert above
@@ -376,18 +367,11 @@ class TestPrOpenFromABoxKillPoints(unittest.TestCase):
 
 class TestPrCheckoutDryRunEqualsWetRun(unittest.TestCase):
 
-    URL = "https://github.com/alice/WebKit.git"
-    WPE_URL = "https://github.com/alice/WPEWebKit.git"
-
     def _world(self):
-        w = GitWorld()
-        w.answer(["git", "ls-remote", git.direct_url(self.URL), "refs/heads/eng/x"], out="b" * 40 + "\trefs/heads/eng/x\n")
-        w.answer(["git", "ls-remote", git.direct_url(self.WPE_URL), "refs/heads/eng/x"], out="")
-        w.fetch_shas = {"refs/heads/eng/x": "b" * 40}
+        w = TestPrCheckoutKillPoints.make_world(TestPrCheckoutKillPoints)
         return w, RecordingDriver(w)
 
-    def _state(self, w):
-        return (dict(w.remotes), dict(w.local), w.head, {b: dict(v) for b, v in w.upstream.items()})
+    _state = TestPrCheckoutKillPoints.state
 
     def test_a_dry_run_is_the_wet_runs_plan_and_touches_nothing(self):
         wet_world, wet_place = self._world()
@@ -593,16 +577,9 @@ class TestPrOpenTarget(unittest.TestCase):
         _git("checkout", "-q", "-b", "eng/untracked", cwd=loose)
         for work, why in ((main, "cannot open 'main'"), (detached, "detached HEAD"),
                           (dirty, "uncommitted changes"), (loose, "no upstream")):
-            with self.assertRaises(CMD_PR_MODULE.PrOpenError) as ctx:
+            with self.assertRaises(act.Refused), contextlib.redirect_stderr(io.StringIO()) as err:
                 CMD_PR_MODULE.pr_open_target(work)
-            self.assertIn(why, str(ctx.exception))
-
-
-class TestPrOpenGhArgs(unittest.TestCase):
-    def test_draft_and_web_pass_through_and_nothing_else(self):
-        base = ["--repo", "WebKit/WebKit", "--head", "alice:eng/x", "--fill"]
-        for flags, extra in (((), []), (("--draft", "--web"), ["--draft", "--web"]), (("--bogus",), [])):
-            self.assertEqual(CMD_PR_MODULE.pr_open_gh_args("WebKit/WebKit", "alice:eng/x", *flags), base + extra)
+            self.assertIn(why, err.getvalue())
 
 
 class _FakeRebaseTarget:
@@ -637,37 +614,13 @@ class TestPrRebase(unittest.TestCase):
             rc = CMD_PR_MODULE.pr_rebase(driver, "myws")
         return rc, driver.calls, err.getvalue()
 
-    def test_fetches_from_the_mirror_when_it_is_there(self):
-        rc, calls, _ = self._run("/store/git/WebKit.git", [
-            Result(0),                       # test -d <mirror>
-            Result(0),                       # git fetch <mirror>
-            Result(0),                       # git rebase origin/main
-            Result(0, "abc1234 c\n"),        # git log --oneline -1
-        ])
-        self.assertEqual(rc, 0)
-        self.assertEqual(calls[0], ["test", "-d", "/store/git/WebKit.git"])
-        self.assertIn("/store/git/WebKit.git", calls[1])
-        self.assertIn("+refs/heads/*:refs/remotes/origin/*", calls[1])
-        self.assertEqual(calls[2], ["git", "-C", "/src/WebKit", "rebase", "origin/main"])
-
-    def test_fetches_from_origin_with_no_mirror(self):
-        rc, calls, _ = self._run("", [
-            Result(0),                       # git fetch origin
-            Result(0),                       # git rebase origin/main
-            Result(0, "abc1234 c\n"),        # git log --oneline -1
-        ])
-        self.assertEqual(rc, 0)
-        self.assertEqual(calls[0], ["git", "-C", "/src/WebKit", "fetch", "--prune", "--quiet", "origin"])
-
-    def test_fetches_from_origin_when_the_mirror_is_not_there(self):
-        rc, calls, _ = self._run("/store/git/WebKit.git", [
-            Result(1),                       # test -d <mirror> -- not there
-            Result(0),                       # git fetch origin
-            Result(0),                       # git rebase origin/main
-            Result(0, "abc1234 c\n"),
-        ])
-        self.assertEqual(rc, 0)
-        self.assertEqual(calls[1], ["git", "-C", "/src/WebKit", "fetch", "--prune", "--quiet", "origin"])
+    def test_it_fetches_from_the_mirror_only_when_it_is_there(self):
+        ok = [Result(0), Result(0), Result(0, "abc1234 c\n")]   # fetch, rebase, log
+        for mirror, there, source in (("/m.git", [Result(0)], "/m.git"), ("", [], "origin"), ("/m.git", [Result(1)], "origin")):
+            rc, calls, _ = self._run(mirror, there + ok)
+            self.assertEqual(rc, 0)
+            self.assertIn(source, calls[len(there)])
+            self.assertEqual(calls[len(there) + 1], ["git", "-C", "/src/WebKit", "rebase", "origin/main"])
 
     def test_a_failed_fetch_never_rebases(self):
         rc, calls, err = self._run("", [Result(1, "", "network unreachable\n")])
@@ -737,7 +690,6 @@ class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        import importlib.util
         import shutil
         if not shutil.which("openssl"):
             raise unittest.SkipTest("needs the openssl CLI")

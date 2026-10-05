@@ -1,101 +1,41 @@
-Defconfigs this repository derives, because the fork does not ship them --
-or ships them short of what a fleet board needs. An external tree's configs
-take precedence over the fork's of the same name (buildroot's %_defconfig rules
-are declared externals-first).
+Defconfigs this repository derives because the fork does not ship them, or ships them short of what a
+fleet board needs. An external tree's config takes precedence over the fork's of the same name.
 
-raspberrypi3_wpe_2_38_cog_defconfig is the fork's, plus what every fleet bench
-system needs and the fork's cog images do not have (the rpi4 defconfig below
-carries the first three; its kernel is pinned, not built here, so the fourth
-does not apply -- see below):
+raspberrypi3_wpe_2_38_cog_defconfig is the fork's, plus what every bench system needs:
 
-  BR2_PACKAGE_WPA_SUPPLICANT*               the fork installs the Pi 3's WiFi
-                                            firmware and no wpa_supplicant; the
-                                            board has no cable at the bench
-  BR2_PACKAGE_OPENSSH (not DROPBEAR)        dropbear 2019.78 predates ed25519
-                                            keys and refuses the driving key
-  BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES    ../board/linux-fleet.fragment: TUN
-                                            and netfilter, without which
-                                            tailscaled cannot create tailscale0
+  BR2_PACKAGE_WPA_SUPPLICANT*               the board has no cable at the bench
+  BR2_PACKAGE_OPENSSH (not DROPBEAR)        dropbear 2019.78 refuses ed25519 keys
+  BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES    ../board/linux-fleet.fragment: TUN and netfilter
+                                            for tailscale0
   BR2_PACKAGE_IPTABLES                      tailscaled's netfilter tool
 
-raspberrypi3_wpe_2_46_cog_defconfig is the fork's 2.46 with those same four, and
-nothing else: against the 2.38 file above it differs only in what the release
-itself brings -- BR2_PACKAGE_WPEWEBKIT2_46, the gcc 11 the fork pairs with it
-(2.38 takes gcc 9), and WPEWEBKIT_USE_LIBWEBRTC=n. That is what makes a
-2.38-against-2.46 A/B a release comparison rather than a comparison of two
-configurations: `diff` the two files and the whole difference is the release.
+raspberrypi3_wpe_2_46_cog_defconfig is the fork's 2.46 with the same four; against the 2.38 file it
+differs only in what the release brings (BR2_PACKAGE_WPEWEBKIT2_46, gcc 11, WPEWEBKIT_USE_LIBWEBRTC=n),
+so a 2.38-against-2.46 A/B compares releases.
 
-The WPE buildroot fork release-pins its `cog` defconfigs for the **rpi3 only** --
-raspberrypi3_wpe_{2_22,2_28,2_38,2_42,2_46,2_50}_cog_defconfig -- and its rpi4
-defconfigs (raspberrypi4_wpe_defconfig and the _ml_/_weston_/_wst_ variants) pin
-no WPE release at all. So "WPEWebKit 2.38 on an rpi4" is a configuration that
-exists here and nowhere upstream, and the only honest way to have it is to derive
-it from the two that do exist.
-
-raspberrypi4_wpe_2_38_cog_defconfig is raspberrypi3_wpe_2_38_cog_defconfig with
-the changes below. Each board change is taken from raspberrypi4_wpe_defconfig
-rather than invented; the last two are what this repository needs of any image.
+The fork release-pins its cog defconfigs for the rpi3 only, so raspberrypi4_wpe_2_38_cog_defconfig is
+the rpi3 2.38 one with the board changes taken from raspberrypi4_wpe_defconfig:
 
   BR2_cortex_a53 -> BR2_cortex_a72          the SoC
-  no BR2_LINUX_KERNEL*                      the board's kernel is pinned
-                                            (BR_KERNEL_DEB_URL), not built here;
-                                            see "The kernel is not built" above
-  post-build.sh, post-image.sh              board/raspberrypi3 -> board/raspberrypi4
-  post-script args                          the rpi3 set carries --rpi-wifi and
-                                            --overclock-pi3, which name the wrong
-                                            board; the rpi4 set is used instead
-  RPI_FIRMWARE_VARIANT_PI4                  the rpi4 boots start4.elf and
-                                            fixup4.dat and no bootcode.bin, and
-                                            board/raspberrypi4's genimage config
-                                            names exactly those; the default
-                                            variant installs the pre-4 set, so
-                                            without this the build reaches
-                                            genimage and dies on a missing
-                                            rpi-firmware/fixup4.dat
-  RPI_FIRMWARE_3BPLUSNEW                    the fork's newest rpi-firmware
-                                            (52185fdd, 2023-03-06) instead of
-                                            the 2020 one: a rev 1.4/1.5 board
-                                            boots this image's own firmware;
-                                            tree-patches/0002 lets the Pi 4
-                                            variant select it
-  BR2_PACKAGE_WPA_SUPPLICANT*               wifi, see the defconfig
-  BR2_TARGET_ROOTFS_EXT2*                   the rpi3 2.38 defconfig emits a
-                                            tarball only, which leaves genimage
-                                            nothing to assemble into an
-                                            sdcard.img
+  no BR2_LINUX_KERNEL*                      the kernel is pinned (BR_KERNEL_DEB_URL)
+  post-build.sh, post-image.sh, their args  board/raspberrypi4's
+  RPI_FIRMWARE_VARIANT_PI4                  start4.elf/fixup4.dat, which genimage names
+  RPI_FIRMWARE_3BPLUSNEW                    the fork's newest rpi-firmware (2023-03-06), which a
+                                            rev 1.4/1.5 board boots; tree-patches/0002 lets the
+                                            Pi 4 variant select it
+  BR2_PACKAGE_WPA_SUPPLICANT*               as above
+  BR2_TARGET_ROOTFS_EXT2*                   the rpi3 2.38 defconfig emits a tarball only
 
-The graphics stack is where the rpi4 must differ from the rpi3, not merely
-may: the Pi 4's VideoCore VI runs no Khronos vchiq service (no /opt/vc GL),
-so wpebackend-rdk's bcm-rpi backend on dispmanx -- the rpi3's stack -- can
-never render on it. Measured 2026-08-31 on the board: every WPEWebProcess
-dies at startup registering its vchiq service ("failed to add service --
-already in use"), on a native 5.15 32-bit kernel and a 6.6 arm64 one alike,
-while the identical stack renders on the rpi3. The fork's own answer for the
-rpi4 is KMS: its rpi4 defconfigs carry mesa (v3d/vc4) and weston, and the
-selectable cog platform at 2.38 in this tree is the wayland one
-(BR2_PACKAGE_COG_PLATFORM_FDO on BR2_PACKAGE_WPEBACKEND_FDO; the DRM platform
-depends on a BR2_PACKAGE_HAS_LIBGBM machinery this 2020.02 base does not
-have, so kconfig drops it). Hence the block in the defconfig: wpebackend-fdo,
-cog's wayland platform, mesa's v3d GL, weston on DRM, the vc4-kms-v3d
-overlay via the post-image script, and python3 for the uinput seat shim
-a board run starts (the same one the yocto images use). wpebackend-rdk is
-explicitly off: one backend per image, and the one that cannot work here
-would otherwise still be the one libwpe dlopens as default.
+Graphics: the Pi 4's VideoCore VI runs no vchiq GL service, so the rpi3's wpebackend-rdk on dispmanx
+cannot render (measured 2026-08-31: every WPEWebProcess dies registering its vchiq service). The rpi4
+stack is the fork's KMS one: wpebackend-fdo, cog's wayland platform, mesa v3d, weston on DRM, the
+vc4-kms-v3d overlay, and python3 for the uinput seat shim; wpebackend-rdk is off so libwpe cannot
+dlopen it as the default.
 
-The kernel is not built here at all: the fork's rpi34-linux-5.15.config is
-named for the rpi3 and the rpi4 but is a Pi 2/3 config in truth -- measured on
-an rpi4 (rev 1.5) over the tryboot path 2026-08-31, it hangs before init, and
-it lacks the 2711's SD controller (MMC_SDHCI_IPROC), PCIe root (PCIE_BRCMSTB),
-XHCI, LPAE and HIGHMEM, so it could mount no root there even if it ran, and
-its LZ4 zImage hangs the board before the console is up even where the config
-is right. RPi OS's own gzip kernel7l build (5.15.84) boots it in 90 s over the
-same tryboot staging -- measured 2026-08-31 -- so BR_KERNEL_DEB_URL pins that
-package instead (image/configs/wpewebkit-2.38-buildroot-rpi4-32.conf) and the
-defconfig sets no BR2_LINUX_KERNEL: buildroot_ws.py installs the pinned
-kernel's own zImage and device tree ahead of the board's post-image script.
+Kernel: the fork's rpi34-linux-5.15.config is a Pi 2/3 config (no MMC_SDHCI_IPROC, PCIE_BRCMSTB, XHCI,
+LPAE or HIGHMEM; it hangs before init on an rpi4). RPi OS's gzip kernel7l 5.15.84 boots in 90 s
+(measured 2026-08-31), so the profile pins that package and buildroot_ws.py installs its zImage and
+device tree ahead of the board's post-image script.
 
-TODO: **a full bench run on this image is unmeasured.** The tryboot path, the
-32-bit kernel path (RPi OS's gzip build) and the compat of the userland with
-this board are proven; this image's own gzip kernel and the weston/mesa
-session are built to the measured constraints above but have not yet drawn a
-frame on the board.
+TODO: a full bench run on the rpi4 2.38 image is unmeasured; its weston/mesa session has not yet drawn
+a frame on the board.

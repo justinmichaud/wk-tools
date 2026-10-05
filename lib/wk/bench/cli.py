@@ -15,6 +15,20 @@ REPORT_USAGE = ("usage: wk bench report <task> [--html] [--text]\n"
                 "       wk bench report <run-a> <run-b> [--html out.html] [--text]; see wk bench -h")
 
 
+def options(args, names, **given):
+    """Each named option under its name without dashes: a value as given, True for a flag given, None for either absent."""
+    return dict({n[2:].replace("-", "_"): args.flag(n) or args.value(n) for n in names}, **given)
+
+
+RUN = ("--count", "--browser", "--subtests", "--cores", "--browser-args", "--software", "--system", "--slot", "--ab", "--ab-systems",
+       "--rounds", "--task", "--timeout", "--exclude-subtests", "--collect", "--max-rounds", "--detect", "--a-args", "--b-args",
+       "--no-warmup-profile", "--jit-tiers")
+STAGED = ("--id", "--plan", "--count", "--subtests", "--payload", "--profile", "--timeout", "--browser-args", "--expect-display", "--ls", "--gates")
+AB = ("--devices", "--release", "--builder", "--bits", "--base", "--build-on", "--rounds", "--count", "--timeout", "--task", "--systems",
+      "--slot", "--detach", "--patch", "--workspace", "--max-rounds", "--detect", "--settle", "--a-args", "--b-args", "--plant", "--rehearse",
+      "--allow-network-fetch", "--preflight", "--progress", "--status", "--collect")
+
+
 def where(reg, args):
     """seed runs where its workspace's store is; ls walks from where it was typed, and answers another machine's walk (--continued) from this machine's store."""
     verb = args[0] if args else ""
@@ -239,14 +253,7 @@ class Bench:
             act.die(str(e))
         if not resolved:
             driver.wait_ready(ws, self.clock)
-
-        def read(path):
-            r = driver.exec(ws, ["cat", "%s/Tools/Scripts/%s" % (driver.src(ws), path)])
-            return r.out.replace("\r", "") if r.ok else None
-
-        text = seed.plan_json(read, plan)
-        lock = Lock(self.reg.store, self.machine, self.clock)
-        print(seed.Seeder(self.machine, lock, os.path.join(self.reg.store.cache_dir(), "bench"), self.reg.store.mirror_dir()).seed(plan, text))
+        print(seed.pin(self.machine, Lock(self.reg.store, self.machine, self.clock), self.reg.store, seed.ws_reader(driver, ws), plan)[1])
         return 0
 
     def deploy(self, ws, board_name, slot_name, machine=None, driver=None):

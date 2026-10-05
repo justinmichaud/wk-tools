@@ -205,9 +205,9 @@ class TestBrokenRefusesNamingTheRepair(unittest.TestCase):
 
     def test_broken_reason_names_wk_rm_and_wk_new(self):
         # No podman answer: `podman inspect` comes back 127, read as absent.
-        driver, tname = self._resolve("demo")
-        reason = ZED.broken_reason(driver, tname, "demo")
-        self.assertIsNotNone(reason)
+        driver, _ = self._resolve("demo")
+        self.assertEqual("broken", driver.state("demo"))
+        reason = driver.broken_words("demo")
         self.assertIn("wk rm demo", reason)
         self.assertIn("wk new demo", reason)
 
@@ -217,8 +217,8 @@ class TestBrokenRefusesNamingTheRepair(unittest.TestCase):
         self.fake.write(os.path.join(self.env["WK_STORE"], "ws", "fine", "home", places.READY_MARKER), "")
         with open(os.path.join(self.env["WK_STORE"], "ws", "fine", "base-id"), "w") as f:
             f.write("main-1\n")
-        driver, tname = self._resolve("fine")
-        self.assertIsNone(ZED.broken_reason(driver, tname, "fine"))
+        driver, _ = self._resolve("fine")
+        self.assertNotEqual("broken", driver.state("fine"))
 
 
 class TestZedRoute(WkTest):

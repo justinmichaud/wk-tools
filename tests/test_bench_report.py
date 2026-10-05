@@ -454,10 +454,9 @@ class TestPrecisionCarriesTheNoiseFloor(WkTest):
                         {"Speedometer-3": {"metrics": {"Score": {"current": [[v]]}}}}))
                     paths.append(str(d))
                 dirs[side] = ",".join(paths)
-            cp = self.bash('python3 "$WK_ROOT/lib/wkdata.py" ab-precision --a %s --b %s --goal %s'
-                           % (json.dumps(dirs["a"]), json.dumps(dirs["b"]), goal))
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            return dict(l.split("=", 1) for l in cp.stdout.splitlines() if "=" in l)
+            out = io.StringIO()
+            report.precision(dirs["a"], dirs["b"], float(goal), out=out)
+            return dict(l.split("=", 1) for l in out.getvalue().splitlines() if "=" in l)
 
     def test_each_arms_spread_is_reported_against_its_own_mean(self):
         out = self._precision([100.0, 102.0], [100.0, 100.0])

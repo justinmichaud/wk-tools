@@ -25,7 +25,7 @@ def guest(**state):
 class TestTheRehearsalIsNotAMeasurement(unittest.TestCase):
     def test_it_says_it_measures_nothing(self):
         _, d = guest()
-        self.assertEqual(d.facts()["measures"], "no")
+        self.assertFalse(d.measures)
         self.assertIn("measurement=refused", d.evidence())
 
 

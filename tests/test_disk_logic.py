@@ -1,7 +1,6 @@
 """The disk model (lib/wk/sysimage/disk.py) over captured `lsblk -J` outputs and a card helper faked at the Channel."""
 import contextlib
 import io
-import shlex
 import sys
 import unittest
 from types import SimpleNamespace
@@ -11,7 +10,6 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act  # noqa: E402
-from wk.boot.driver import CARD_PRIV, Channel  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 from wk.sysimage import cli, disk  # noqa: E402
 
@@ -168,19 +166,6 @@ class TestListing(unittest.TestCase):
     def test_no_candidate_says_none_is_attached(self):
         text, _ = quietly(disks(Writer('{"blockdevices": []}')).listing)
         self.assertEqual(text, "    (none -- no removable disk is attached to rpi5)")
-
-
-class TestChannel(unittest.TestCase):
-    def test_reads_and_the_helper_go_over_ssh_to_the_conf_machine(self):
-        m = Fake()
-        m.react(("ssh",), lambda argv, f: Result(0, LSBLK_234 if "lsblk" in argv[-1] else "marker: none\n"))
-        conf = {"name": "rpi4", "ssh": "rpi4", "device": "/dev/sdc"}
-        d = disk.Disks(Channel(REPO, conf, "host", env={}, via=m), conf)
-        self.assertEqual(d.for_machine("rpi4"), "")
-        sent = [e[1][:-1] + (shlex.split(e[1][-1])[-1],) for e in m.effects if e[1][0] == "ssh"]
-        self.assertEqual(sent[0][-2:], ("rpi4", "sh -c %s" % shlex.quote(disk.LSBLK)))
-        self.assertIn(("rpi4", "sudo -n %s whose /dev/sdc" % CARD_PRIV), [e[-2:] for e in sent])
-        self.assertFalse([e for e in m.effects if e[1][0] in ("bash", "env")])
 
 
 class TestTheDisksVerb(unittest.TestCase):

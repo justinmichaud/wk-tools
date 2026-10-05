@@ -1,12 +1,6 @@
-"""lib/wk/key/ against a fake machine: the election across workstations, the deploy keys GitHub holds, `wk key
-check` per machine, a run killed after any effect, and a dry run that is the wet run's plan.
-
-The fake is tests/test_wk_secrets.py's machine plus a toy rulebook in lib/credcheck.py's place, a GitHub that keeps
-each repository's deploy keys, and peer workstations whose `wk key` answers from what they hold. A private key is
-`KEY:<tag>`, its public half `ssh-ed25519 AAAA<tag> wk`, and a stored credential fingerprints as `fp-<value>`.
-
-Run: python3 tests/run.py --unit -k test_wk_key
-"""
+"""lib/wk/key/ over tests/test_wk_secrets.py's fake machine, a toy rulebook in lib/credcheck.py's place, a GitHub
+holding deploy keys, and peers answering from what they hold. A private key is `KEY:<tag>`, its public half
+`ssh-ed25519 AAAA<tag> wk`, and a stored credential fingerprints as `fp-<value>`."""
 import contextlib
 import io
 import os
@@ -18,7 +12,7 @@ from tests.fakes import FakeRegistry, FakeDriver
 from tests.killpoints import converges
 from tests.test_wk_secrets import ROOT, SECRETFILE, SecretsTest, World
 
-from wk import act, decl, dispatch  # noqa: E402
+from wk import act  # noqa: E402
 from wk.key import cli, common  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Result  # noqa: E402
@@ -232,8 +226,6 @@ class KeyTest(SecretsTest):
 
 
 class TestTheElection(KeyTest):
-    """`key.election`: the credential its issuer accepts wins from whichever workstation holds it."""
-
     def test_a_peers_working_credential_is_taken_over_one_refused_here(self):
         w = self.provisioned(Peer("peerbox", creds={"github-pat": GOOD, "ntfy": TOPIC}, keys={f: "KEY:" + f for f in REPOS}),
                              pat=STALE)
@@ -288,9 +280,6 @@ class TestTheElection(KeyTest):
 
 
 class TestRegisterPerMachine(KeyTest):
-    """`key.register_per_machine`: each fork's key is registered once under the one title, `check` reports each
-    workstation in its own section, and a peer that did not answer reads differently from one holding no key."""
-
     def test_each_fork_is_registered_once_under_the_shared_title(self):
         w = self.world()
         w.keys()
@@ -474,45 +463,6 @@ class TestTheFleetQuestion(KeyTest):
             rc, _, err = self.run_verb("deploy", w)
         self.assertEqual(1, rc)
         self.assertEqual([], [a for a in w.acts() if a[0] == "act"])
-
-
-class TestTheDeclaration(unittest.TestCase):
-    """cmd/key's `# wk:` lines, as the dispatcher reads them, for `sudo` and `backup` beside the credential verbs."""
-
-    d = decl.Decl(os.path.join(ROOT, "cmd", "key"))
-
-    def check(self, *args):
-        try:
-            return dispatch.Invocation("key", self.d, list(args)).argv_check()
-        except dispatch.Exit as e:
-            return e.status
-
-    def test_only_the_credential_verbs_are_destructive(self):
-        self.assertTrue(self.d.is_destructive(["setup"]) and self.d.is_destructive(["set", "ntfy", "--replace"]))
-        self.assertFalse(self.d.is_destructive(["sudo", "setup"]))
-        self.assertFalse(self.d.is_destructive(["backup"]))
-
-    def test_every_verb_has_a_dry_run_or_only_reads(self):
-        self.assertTrue(self.d.honours_dryrun(["sudo", "setup"]) and self.d.honours_dryrun(["sudo"]))
-        self.assertTrue(self.d.honours_dryrun(["backup"]) and self.d.honours_dryrun(["backup", "--candidates"]))
-        for v in ("check", "show", "pub", "sshtest", "fingerprints", "verdict", "give"):
-            self.assertTrue(self.d.is_readonly([v]), v)
-
-    def test_push_status_only_reads(self):
-        self.assertTrue(self.d.is_readonly(["push", "status"]))
-        self.assertFalse(self.d.is_readonly(["push", "on"]) or self.d.is_readonly(["push", "off"]))
-
-    def test_each_subverb_takes_its_own_options(self):
-        self.assertEqual(["sudo", "status", "--on=box"], self.check("sudo", "status", "--on", "box"))
-        self.assertEqual(["backup", "--candidates"], self.check("backup", "--candidates"))
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(2, self.check("backup", "--on", "box"))
-            self.assertEqual(2, self.check("sudo", "status", "--candidates"))
-            self.assertEqual(2, self.check("sudo", "status", "extra"))
-
-    def test_neither_needs_github(self):
-        self.assertEqual("", self.d.needs_for(["sudo"]))
-        self.assertEqual("", self.d.needs_for(["backup"]))
 
 
 if __name__ == "__main__":

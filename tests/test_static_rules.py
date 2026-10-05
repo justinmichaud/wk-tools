@@ -1,4 +1,4 @@
-"""The static rules over the tree: each check here reads sources and confs"""
+"""Static rules over the tree's sources and confs."""
 TIER = "lint"
 import re
 import subprocess
@@ -46,26 +46,10 @@ class TestParsing(WkTest):
         self.assertEqual(dups, [], f"defined twice in one file: {dups}")
 
     def test_one_lock_mechanism_nothing_calls_flock(self):
-        hits = []
-        for d in ("cmd", "lib", "boot", "image"):
-            cp = subprocess.run(
-                ["grep", "-rn", r"\bflock\b", str(REPO / d)],
-                capture_output=True, text=True,
-            )
-            for line in cp.stdout.splitlines():
-                if "/selftest:" in line:
-                    continue
-                path_rest = line.split(":", 2)
-                if len(path_rest) == 3 and re.match(r"^\s*#", path_rest[2]):
-                    continue
-                if "# " in line:
-                    continue
-                hits.append(line)
-        cp = subprocess.run(["grep", "-n", r"\bflock\b", str(WK)], capture_output=True, text=True)
-        for line in cp.stdout.splitlines():
-            if not re.match(r"^\d+:\s*#", line.split(":", 1)[1] if ":" in line else ""):
-                hits.append(f"{WK}:{line}")
-        self.assertEqual(hits, [], f"flock is still called here: {hits}")
+        cp = subprocess.run(["grep", "-rnE", r"^[^#]*\bflock\b", str(WK)] +
+                            [str(REPO / d) for d in ("cmd", "lib", "boot", "image")],
+                            capture_output=True, text=True)
+        self.assertEqual([h for h in cp.stdout.splitlines() if "/selftest:" not in h], [])
 
     def test_no_bash_file_parses_json(self):
         jq_call = re.compile(r"""(?<![\w-])jq(?=\s+[-'"])|\|\s*jq\b""")
@@ -256,20 +240,8 @@ class TestSshJumpHosts(WkTest):
         bad = []
         for j in sorted(jumps):
             cp2 = subprocess.run([SYSTEM_SSH, "-G", "-F", str(conf), j], capture_output=True, text=True)
-            opts = cp2.stdout
-            mode = ""
-            timeout = ""
-            batch = ""
-            for line in opts.splitlines():
-                parts = line.split()
-                if not parts:
-                    continue
-                if parts[0] == "stricthostkeychecking":
-                    mode = parts[1] if len(parts) > 1 else ""
-                if parts[0] == "connecttimeout":
-                    timeout = parts[1] if len(parts) > 1 else ""
-                if parts[0] == "batchmode":
-                    batch = parts[1] if len(parts) > 1 else ""
+            opts = dict((line.split() + [""])[:2] for line in cp2.stdout.splitlines() if line.strip())
+            mode, timeout, batch = (opts.get(k, "") for k in ("stricthostkeychecking", "connecttimeout", "batchmode"))
             if mode not in ("accept-new", "no", "false", "off"):
                 bad.append(f"{j}: StrictHostKeyChecking is '{mode or 'unset'}'")
             if timeout in ("", "none", "0"):

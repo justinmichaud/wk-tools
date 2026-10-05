@@ -65,8 +65,7 @@ def runner_ref(env):
 
 
 def runner_tree(reg, here, root):
-    """(tree, sha): Tools/Scripts exported from the mirror at one commit, the runner_sha both arms of an A/B share, with the
-    board driver beside the others. The export is an artifact keyed by that commit; the driver is copied in every run."""
+    """(tree, sha): Tools/Scripts at one mirror commit, which both arms of an A/B share; the board driver is copied in every run."""
     mirror = reg.store.mirror_dir()
     if not here.isdir(mirror):
         die("no mirror at %s; 'wk sync' makes one. The runner tree is exported from it." % mirror)
@@ -501,8 +500,7 @@ class BoardRun(pipeline.Run):
                 return self.here.read(os.path.join(s.runner_dir, "Tools", "Scripts", path))
             except OSError:
                 return None
-        s.plan_text = seed.plan_json(read, plan)
-        s.payload = seed.Seeder(self.here, self.lock, os.path.join(self.reg.store.cache_dir(), "bench"), self.reg.store.mirror_dir()).seed(plan, s.plan_text)
+        s.plan_text, s.payload = seed.pin(self.here, self.lock, self.reg.store, read, plan)
         return s.plan_text
 
     def seed(self, leg):
@@ -531,14 +529,10 @@ class BoardRun(pipeline.Run):
         self.task = (progress.hold(self.recs, self.holders, s.board, "bench", self.name, self.kill_cmd, log_path, steps, os.getpid(), self.env)
                      or self.recs.begin("bench", "here", self.name, self.kill_cmd, log_path, steps))
         if new:
-            if leg.machine.exists(taskdir):
-                die("task %s already exists (%s); a task is one request, made once" % (leg.task, taskdir))
-            self.lock.hold("bench-task-" + leg.task, timeout=5)
-            record.task_write(taskdir, ["task=" + leg.task, "requested=" + self.clock.iso(), "subject.kind=slots", "subject.spec=" + leg.slot,
-                                        "devices=%s=%s" % (s.board, s.doc.get("profile", "")), "plans=" + leg.plan, "rounds=1", "slots=" + leg.slot]
-                              + (["count=" + leg.count] if leg.count else []),
-                              ["wk bench run %s %s --system %s --slot %s%s" % (self.ws, leg.plan, s.board, leg.slot, " --count " + leg.count if leg.count else "")],
-                              machine=leg.machine)
+            record.new_task(leg.machine, bench, leg.task, self.lock, self.clock.iso(), [
+                "subject.kind=slots", "subject.spec=" + leg.slot, "devices=%s=%s" % (s.board, s.doc.get("profile", "")), "plans=" + leg.plan,
+                "rounds=1", "slots=" + leg.slot] + (["count=" + leg.count] if leg.count else []),
+                "wk bench run %s %s --system %s --slot %s%s" % (self.ws, leg.plan, s.board, leg.slot, " --count " + leg.count if leg.count else ""))
         if o.get("pgo_dir"):
             self.here.remove(leg.out)
         leg.machine.mkdir(os.path.join(leg.out, "diagnose"))
@@ -583,12 +577,9 @@ class BoardRun(pipeline.Run):
         if not port.isdigit():
             die("could not find a free port on this host for run-benchmark's page server")
         leg.port = int(port)
-        args = ["python3", "Tools/Scripts/run-benchmark", "--plan", leg.plan, "--browser", "wk-board", "--platform", "linux", "--driver", "webserver",
-                "--http-server-type", "builtin", "--http-server-port", port, "--output-file", os.path.join(leg.out, "result.json"),
-                "--no-adjust-unit", "--show-iteration-values", "--diagnose-directory", os.path.join(leg.out, "diagnose")]
-        args += (["--count", leg.count] if leg.count else []) + (["--timeout", o["timeout"]] if o.get("timeout") else [])
-        args += (["--local-copy", leg.payload] if leg.payload else []) + (["--subtests"] + leg.subtests.split() if leg.subtests else [])
-        args += ["--generate-pgo-profiles"] if o.get("pgo_dir") else []
+        args = ["python3", "Tools/Scripts/run-benchmark", "--browser", "wk-board", "--platform", "linux", "--driver", "webserver",
+                "--http-server-type", "builtin", "--http-server-port", port, "--diagnose-directory", os.path.join(leg.out, "diagnose")]
+        args += pipeline.measure_args(leg, os.path.join(leg.out, "result.json"), leg.payload) + (["--generate-pgo-profiles"] if o.get("pgo_dir") else [])
         script = "".join("export %s=%s\n" % (k, shlex.quote(v)) for k, v in s.board_env(leg))
         script += "cd %s && exec %s" % (shlex.quote(s.runner_dir), shlex.join(args))
         info("running %s on %s from slot '%s' (WebKit %s)" % (leg.plan, s.board, leg.slot, s.doc.get("commit", "")[:12]))

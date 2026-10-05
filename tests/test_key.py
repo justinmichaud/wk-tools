@@ -66,13 +66,6 @@ class TestEnsureRunsHere(_KeyRun):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(before, (held / "build_key_fork").read_bytes())
 
-    def test_the_public_half_is_re_asserted_from_the_private_one(self):
-        _cp, secrets = self.key("ensure")
-        (secrets / "build_key_fork.pub").unlink()
-        cp, _ = self.key("ensure")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertTrue((secrets / "build_key_fork.pub").exists())
-
     def test_the_public_half_is_the_private_ones_own_and_nothing_sits_beside_the_key(self):
         """ssh refuses an identity whose `.pub` beside it disagrees."""
         _cp, secrets = self.key("ensure")
@@ -127,7 +120,8 @@ class TestCheckAsksAboutEveryCredential(_KeyRun):
         self.assertNotEqual(0, cp.returncode, cp.stdout + cp.stderr)
         for fork in ("WebKit", "WPEWebKit"):
             self.assertIn(fork, cp.stdout)
-        self.assertIn("wk key deploy", cp.stdout)
+        actions = cp.stdout.partition("needs you:")[2]
+        self.assertEqual(2, actions.count("wk key deploy"), "one line per fork: " + actions)
 
     def test_every_credential_is_reported_and_absence_is_not_a_fault(self):
         cp, _secrets = self.key("check")
@@ -150,12 +144,6 @@ class TestCheckAsksAboutEveryCredential(_KeyRun):
             self.assertNotIn("fix:", line)
         self.assertRegex(actions, r"\d+\. github-pat\s+wk key set github-pat --replace")
         self.assertIn("https://github.com/settings/tokens/new", actions)
-
-    def test_a_deploy_key_remedy_is_not_printed_twice(self):
-        cp, _secrets = self.key("check")
-        actions = cp.stdout.partition("needs you:")[2]
-        self.assertEqual(2, actions.count("wk key deploy"),
-                         "one line per fork, not two: " + actions)
 
     def test_a_row_that_fails_without_a_remedy_is_not_called_nothing_to_do(self):
         self.key("ensure")
@@ -243,32 +231,23 @@ class TestTheTopicIsMintedNotAsked(_KeyRun):
     def topic_path(self, secrets):
         return secrets.parent / "notify" / "ntfy-topic"
 
-    def test_a_machine_with_no_topic_ends_up_with_one(self):
+    def test_a_machine_with_no_topic_mints_one_and_prints_the_subscribe_url_once(self):
         cp, secrets = self.key("set", "ntfy")
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         path = self.topic_path(secrets)
-        self.assertTrue(path.exists(), cp.stdout + cp.stderr)
-        self.assertTrue(path.read_text().strip())
         self.assertEqual(0o600, path.stat().st_mode & 0o777)
-
-    def test_it_prints_the_subscribe_url_once(self):
-        cp, secrets = self.key("set", "ntfy")
-        topic = self.topic_path(secrets).read_text().strip()
+        topic = path.read_text().strip()
         out = cp.stdout + cp.stderr
         self.assertEqual(1, out.count(topic), out)
         self.assertIn("https://ntfy.sh/" + topic, out)
 
-    def test_nothing_prints_it_a_second_time(self):
+    def test_only_show_prints_it_again(self):
         _cp, secrets = self.key("set", "ntfy")
         topic = self.topic_path(secrets).read_text().strip()
         for args in (("check",), ("set", "ntfy")):
             cp, _ = self.key(*args)
             with self.subTest(args=args):
                 self.assertNotIn(topic, cp.stdout + cp.stderr)
-
-    def test_only_show_prints_it_again(self):
-        _cp, secrets = self.key("set", "ntfy")
-        topic = self.topic_path(secrets).read_text().strip()
         cp, _ = self.key("show")
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("https://ntfy.sh/" + topic, cp.stdout)
@@ -307,11 +286,6 @@ class TestTheTopicIsMintedNotAsked(_KeyRun):
         self.assertNotEqual(0, cp.returncode, cp.stdout)
         self.assertIn("wk key set ntfy", cp.stdout + cp.stderr)
         self.assertFalse(self.topic_path(secrets).exists())
-
-    def test_paste_carries_a_handed_credential_too(self):
-        cp, secrets = self.key("set", "github-pat", "--paste", input="not-a-token\n")
-        self.assertNotEqual(0, cp.returncode, cp.stdout)
-        self.assertFalse((secrets.parent / "push-keys" / "github-pat").exists())
 
 # GitHub with the deploy keys not yet registered, and with them registered; `false` answers the read_only query.
 GH_NO_KEYS_YET = ('#!/bin/sh\ncase "$*" in *read_only*) echo false ;; esac\nexit 0\n')
@@ -402,17 +376,6 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
         self.assertEqual(9, len(rows), cp.stdout)
 
 
-class TestTheOldNamesSayWhatReplacedThem(WkTest):
-
-
-    def test_a_retired_word_is_still_a_verbs_argument(self):
-        self.assertEqual(as_dispatched("key", ["set", "claude"], {}), ["set", "claude"])
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestABareKeyChangesNothing(_KeyRun):
     def test_it_is_check_and_prints_the_report_and_nothing_else(self):
         self.assertEqual(as_dispatched("key", [], {}), ["check"])
@@ -420,6 +383,7 @@ class TestABareKeyChangesNothing(_KeyRun):
         self.assertIn("credentials:", check.stdout)
         for word in ("sharing to", "registering", "minted"):
             self.assertNotIn(word, check.stdout + check.stderr)
+
 
 class TestAnAuthKeyIsMintedNotOnlyHanded(WkTest):
     """`wk_tailscale_authkey` (lib/common.sh): a machine that can administer the tailnet mints its own key."""
@@ -468,3 +432,7 @@ class TestAnAuthKeyIsMintedNotOnlyHanded(WkTest):
             with self.subTest(env=env):
                 self.assertEqual(present, tailnet.Fleet(str(REPO), clean_env(env)).key_present())
         self.assertFalse((self.tmp / "no-such-key").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

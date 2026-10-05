@@ -1,4 +1,4 @@
-"""Static audits over the tree's shell: four shapes that are invisible in"""
+"""Static audits over the tree's shell for shapes `bash -n` cannot see."""
 TIER = "lint"
 import re
 import unittest

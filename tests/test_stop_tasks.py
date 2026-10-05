@@ -3,6 +3,7 @@ again afterwards for its exit status."""
 import importlib.machinery
 import importlib.util
 import os
+from unittest import mock
 import shlex
 import shutil
 import subprocess
@@ -141,10 +142,7 @@ class TestStopWorkspace(unittest.TestCase):
         def __init__(self, driver):
             self.driver = driver
 
-        def ws_place(self, name):
-            return "t"
-
-        def load(self, name):
+        def present(self, name):
             return self.driver
 
     def test_each_kind_is_stopped_by_its_driver_alone(self):
@@ -152,5 +150,6 @@ class TestStopWorkspace(unittest.TestCase):
         for kind in ("container", "vm", "remote"):
             with self.subTest(kind=kind):
                 t = self.Driver(kind)
-                self.assertEqual(0, stop.stop_workspace(self.Reg(t), "ws"))
+                with mock.patch.object(stop.places, "Registry", lambda root: self.Reg(t)), mock.patch.dict(os.environ, {"WK_NAME": "ws"}):
+                    self.assertEqual(0, stop.main([]))
                 self.assertEqual([("stop", "ws")], t.calls)

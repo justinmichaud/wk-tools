@@ -15,34 +15,26 @@
 #
 # <user>:<branch> is a fork's branch; both projects are tried, and a branch existing in both is
 # refused by name. A bare number is a WebKit/WebKit pull request, `wpe:<number>` a WPEWebKit one.
-#
-# Either way the one ref is fetched from GitHub straight into the workspace's checkout, and a
-# remote for an account that has none yet is added there. The machine's mirror is not involved:
-# it exists to hold the history the workspaces share, and a PR head is neither shared nor in it.
-# The fetch is thin -- the checkout already has the history those commits sit on -- and it is the
-# same from the host and from inside a workspace.
-#
-# Uncommitted changes are named before anything moves, and a local branch with commits the PR head
-# lacks is never overwritten, only named.
+# The one ref is fetched from GitHub straight into the workspace's checkout (not the mirror), and a
+# remote for an account that has none yet is added there. Uncommitted changes are named before
+# anything moves, and a local branch with commits the PR head lacks is kept, only named.
 #
 #   --force   take the PR head even when the local branch has commits it does not, discarding them
 #
-# 'rebase' fetches just enough of the mirror for origin/main into the workspace and rebases the
-# current branch onto it; either argument order works, and a bare 'wk pr rebase' runs inside a
-# workspace.
+# 'rebase' fetches origin/main from the mirror into the workspace and rebases the current branch
+# onto it; either argument order works, and a bare 'wk pr rebase' runs inside a workspace.
 #
 # 'open' pushes the workspace's current branch to its fork and opens it as a pull request with
-# `gh pr create --fill`. Runs on the host only and refuses inside a workspace. The project comes
-# from which upstream the branch tracks; no upstream, `main`, a detached HEAD, or a dirty tree is
-# refused by name. Pushing needs `wk key push on`, which is never flipped here. A build box's branch is
-# fetched over ssh into this machine's mirror and pushed from here through the agent `wk key push on`
-# loads: no key reaches a box.
+# `gh pr create --fill`; host only. The project comes from the upstream the branch tracks; no
+# upstream, `main`, a detached HEAD, or a dirty tree is refused by name. Pushing needs
+# `wk key push on`. A build box's branch is fetched over ssh into this machine's mirror and pushed
+# from here: no key reaches a box.
 #
 #   --draft   open it as a draft
 #   --web     open the browser's new-PR form instead of creating it directly
 #
-# 'report' summarises your GitHub activity on WebKit/WebKit through gh: the pull requests you
-# created and updated, and others' you reviewed or commented on. Host only.
+# 'report' lists, through gh, the pull requests you created and updated on WebKit/WebKit, and
+# others' you reviewed or commented on. Host only.
 #
 #   --since <date>   the first day it covers (default: seven days ago)
 
@@ -71,75 +63,43 @@ from wk.workspace import require_name  # noqa: E402
 
 
 
-class PrOpenError(Exception):
-    pass
-
-
-def _run_local(argv):
-    r = Local().run(argv)
-    return r.rc, r.out, r.err
-
-
-def _owner_of(url):
-    m = re.search(r"[:/]([^/]+)/[^/]+$", re.sub(r"\.git$", "", url))
-    return m.group(1) if m else ""
-
-
-def pr_open_target(src, run=_run_local, remotes=None, push_forks=None):
-    """(base-repo, "<owner>:<branch>", fork-remote, branch) for the checkout at `src`, or PrOpenError naming what stops it."""
+def pr_open_target(src, run=lambda argv: Local().run(argv)):
+    """(base-repo, "<owner>:<branch>", fork-remote, branch) for the checkout at `src`."""
     def ask(*args):
-        rc, out, _ = run(["git", "-C", str(src)] + list(args))
-        return rc, out.strip()
+        r = run(["git", "-C", str(src)] + list(args))
+        return r.rc, r.out.strip()
 
     rc, branch = ask("symbolic-ref", "--quiet", "--short", "HEAD")
     if rc != 0 or not branch:
-        raise PrOpenError("'wk pr open' needs a branch checked out, not a detached HEAD")
+        die("'wk pr open' needs a branch checked out, not a detached HEAD")
     if branch == "main":
-        raise PrOpenError("'wk pr open' cannot open 'main' as a pull request -- create a branch first")
-    _, dirty = ask("status", "--porcelain")
-    if dirty:
-        raise PrOpenError("the tree has uncommitted changes -- commit or stash them: git -C %s status" % src)
+        die("'wk pr open' cannot open 'main' as a pull request -- create a branch first")
+    if ask("status", "--porcelain")[1]:
+        die("the tree has uncommitted changes -- commit or stash them: git -C %s status" % src)
     rc, up = ask("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
     if rc != 0 or not up:
-        raise PrOpenError("'%s' has no upstream, so 'wk pr open' cannot tell which project it belongs to -- "
-                          "track one first: git branch -u origin/main (WebKit) or wpe/main (WPEWebKit)" % branch)
-    up_remote = up.split("/", 1)[0]
+        die("'%s' has no upstream, so 'wk pr open' cannot tell which project it belongs to -- "
+            "track one first: git branch -u origin/main (WebKit) or wpe/main (WPEWebKit)" % branch)
     # Not `git remote get-url`: through the mirror's insteadOf every remote reads as the mirror, and both projects as one.
-    _, up_url = ask("config", "--get", "remote.%s.url" % up_remote)
+    up_url = ask("config", "--get", "remote.%s.url" % up.split("/", 1)[0])[1]
     up_repo = git.repo_of(up_url)
-    if push_forks is None:
-        push_forks = secrets.forks()
-    fork_names = {r for r, _, _ in push_forks}
-    # The project's upstream, not the remote the branch happens to track: `wk pr` leaves a
-    # branch tracking the fork it came from, and a pull request against that is one against yourself.
+    push_forks = secrets.forks()
+    # The project's upstream, not the fork `wk pr` leaves a branch tracking: a PR against that is one against yourself.
     fork = next((r for r, repo, _ in push_forks if git.repo_of(repo) == up_repo), None)
     if not fork:
-        raise PrOpenError("'%s' tracks '%s' (%s), not a known upstream (origin or wpe) -- "
-                          "'wk pr open' only knows WebKit and WPEWebKit" % (branch, up, up_url))
+        die("'%s' tracks '%s' (%s), not a known upstream (origin or wpe) -- "
+            "'wk pr open' only knows WebKit and WPEWebKit" % (branch, up, up_url))
     rc, url = ask("config", "--get", "remote.%s.url" % fork)
     if rc != 0 or not url:
-        raise PrOpenError("no '%s' remote here -- 'wk sync --fix' wires it" % fork)
-    owner = _owner_of(url)
-    if remotes is None:
-        remotes = git.REMOTES
-    base = ""
-    for name, remote_url in remotes:
-        if name in fork_names:
-            continue
-        if remote_url.endswith("/%s.git" % up_repo):
-            base = re.sub(r"^https://github\.com/", "", remote_url)
-            base = re.sub(r"\.git$", "", base)
-            break
+        die("no '%s' remote here -- 'wk sync --fix' wires it" % fork)
+    owner = re.search(r"[:/]([^/]+)/[^/]+$", re.sub(r"\.git$", "", url))
+    forks = {r for r, _, _ in push_forks}
+    base = next((re.sub(r"^https://github\.com/|\.git$", "", u) for n, u in git.REMOTES
+                 if n not in forks and u.endswith("/%s.git" % up_repo)), "")
     if not base:
-        raise PrOpenError("no upstream among the wired remotes for the project '%s', so there is nothing to open '%s' against"
-                          % (up_repo, branch))
-    return base, "%s:%s" % (owner, branch), fork, branch
-
-
-def pr_open_gh_args(base, head, *flags):
-    args = ["--repo", base, "--head", head, "--fill"]
-    args += [f for f in flags if f in ("--draft", "--web")]
-    return args
+        die("no upstream among the wired remotes for the project '%s', so there is nothing to open '%s' against"
+            % (up_repo, branch))
+    return base, "%s:%s" % (owner.group(1) if owner else "", branch), fork, branch
 
 
 def pr_rebase(driver, name):
@@ -166,20 +126,9 @@ def pr_rebase(driver, name):
 def pr_open(driver, name, draft, web, push_status):
     src = driver.src(name)
     info("reading '%s's branch and remotes" % name)
-
-    def _target_run(argv):
-        r = driver.exec(name, argv)
-        return r.rc, r.out, r.err
-
-    try:
-        base, head, fork, branch = pr_open_target(src, run=_target_run)
-    except PrOpenError as e:
-        sys.stderr.write("error: %s\n" % e)
-        die("'%s' is not ready to open as a pull request -- see above" % name)
-
+    base, head, fork, branch = pr_open_target(src, run=lambda argv: driver.exec(name, argv))
     if push_status() != 0:
         die("'wk pr open' pushes '%s' to '%s', and the deploy key is held back.\n    wk key push on" % (branch, fork))
-
     info("pushing '%s' to '%s'" % (branch, fork))
     if driver.kind == "remote" and not driver.is_local and not driver.peer:
         r = push_from_here(driver, src, fork, branch)
@@ -188,14 +137,12 @@ def pr_open(driver, name, draft, web, push_status):
     show(r)
     if not r.ok:
         die("the push to '%s' failed -- see above.\n    If the deploy key is the problem:  wk key push on" % fork)
-
-    flags = (["--draft"] if draft else []) + (["--web"] if web else [])
     info("opening a pull request: %s <- %s" % (base, head))
-    driver.here.exec(["gh", "pr", "create"] + pr_open_gh_args(base, head, *flags))
+    driver.here.exec(["gh", "pr", "create", "--repo", base, "--head", head, "--fill"]
+                     + (["--draft"] if draft else []) + (["--web"] if web else []))
 
 
 def push_from_here(driver, src, fork, branch):
-    """The box's branch into this machine's mirror over ssh, then pushed from here through the agent `wk key push on` loads."""
     here, store = driver.here, Store(driver.env)
     sec = secrets.Secrets(ROOT, driver.env, here)
     # A macOS host's podman machine holds its agent inside the VM; the one a process here reaches is the guests'.
@@ -216,12 +163,14 @@ def push_from_here(driver, src, fork, branch):
 
 
 def push_rc(reg):
-    """`wk key push status`'s own exit code: the key and the API credentials a push and a pull request need."""
     with contextlib.redirect_stderr(io.StringIO()):
         return Push(reg, secrets.Secrets(ROOT, reg.env, reg.machine), Clock(), io.StringIO()).switch_status()
 
 
-def _load(reg, name):
+def _load(reg, name, usage):
+    if not name:
+        die("usage: %s; see wk pr -h" % usage)
+    require_name(name)
     try:
         return reg.load(reg.ws_place(name))
     except LookupError as e:
@@ -235,29 +184,14 @@ def main(argv):
     if verb == "report":
         today = datetime.date.today()
         return pr.weekly(Local(), pr.since_date(args.value("--since"), today), today, sys.stdout)
-
     reg = places.Registry(ROOT)
-
     if verb == "rebase":
-        if not name:
-            name = rest[0] if rest else ""
-        if not name:
-            die("usage: wk pr rebase [<workspace>]; run inside a workspace, or name one; see wk pr -h")
-        require_name(name)
-        driver = _load(reg, name)
-        return pr_rebase(driver, name)
-
+        name = name or (rest[0] if rest else "")
+        return pr_rebase(_load(reg, name, "wk pr rebase [<workspace>]; run inside a workspace, or name one"), name)
     if verb == "open":
-        draft, web = args.flag("--draft"), args.flag("--web")
-        name2 = rest[-1] if rest else ""
-        if not name:
-            name = name2
-        if not name:
-            die("usage: wk pr open <workspace> [--draft] [--web]; see wk pr -h")
-        require_name(name)
-        driver = _load(reg, name)
-        return pr_open(driver, name, draft, web, lambda: push_rc(reg))
-
+        name = name or (rest[-1] if rest else "")
+        driver = _load(reg, name, "wk pr open <workspace> [--draft] [--web]")
+        return pr_open(driver, name, args.flag("--draft"), args.flag("--web"), lambda: push_rc(reg))
     spec = rest[0] if rest else ""
     if not spec:
         die("usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>, or 'wk pr rebase [<ws>]', or "
@@ -267,9 +201,7 @@ def main(argv):
         die("'wk pr %s' does not say which workspace to check it out into.\n"
             "    Name one:        wk pr <workspace> %s   ('wk ls' lists them)\n"
             "    or run it in one: wk pr %s" % (spec, spec, spec))
-
-    require_name(name)
-    pr.checkout(_load(reg, name), reg.machine, name, spec)
+    pr.checkout(_load(reg, name, ""), reg.machine, name, spec)
     return 0
 
 

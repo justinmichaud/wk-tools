@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from tests.support import REPO
@@ -21,21 +22,15 @@ def declare(tmp, name, *lines):
 
 class TestDeclarations(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="wk-test-decl-")
-
-    def tearDown(self):
-        for p in Path(self.tmp).iterdir():
-            p.unlink()
-        os.rmdir(self.tmp)
+        t = tempfile.TemporaryDirectory(prefix="wk-test-decl-")
+        self.addCleanup(t.cleanup)
+        self.tmp = t.name
 
     def test_defaults_are_a_workspace_command_taking_no_name(self):
         d = declare(self.tmp, "probe", "# wk: group=other")
         self.assertEqual((d.where, d.name_decl, d.takes, d.group), ("workspace", "none", "0", "other"))
         self.assertFalse(d.is_readonly())
         self.assertFalse(d.is_destructive([]))
-
-    def test_nodryrun_declares_the_exemption(self):
-        self.assertTrue(declare(self.tmp, "probe", "# wk: where=host nodryrun").nodryrun)
 
     def test_every_key_is_read(self):
         d = declare(self.tmp, "probe",
@@ -50,6 +45,7 @@ class TestDeclarations(unittest.TestCase):
         self.assertFalse(d.is_destructive(["ls"]))
         self.assertTrue(d.honours_dryrun(["anything"]))
         self.assertFalse(d.nodryrun)
+        self.assertTrue(declare(self.tmp, "probe", "# wk: where=host nodryrun").nodryrun)
         self.assertEqual(d.passthrough, "tail")
         self.assertEqual(d.broker, "*")
         self.assertEqual((d.bare, d.post, d.values, d.needs), ("merged", "zed", "--list", "gh,ssh"))
@@ -71,16 +67,10 @@ class TestDeclarations(unittest.TestCase):
         self.assertIn("declares no verbs", self._refused("# wk: opts --x", "# wk: sub a opts=--x"))
 
 
-    def test_an_unknown_word_is_refused_by_name(self):
-        with self.assertRaises(D.DeclError) as cm:
-            declare(self.tmp, "probe", "# wk: where=host frobnicate")
-        self.assertIn("frobnicate", str(cm.exception))
-
-    def test_where_and_name_are_closed_vocabularies(self):
-        with self.assertRaises(D.DeclError):
-            declare(self.tmp, "probe", "# wk: where=elsewhere")
-        with self.assertRaises(D.DeclError):
-            declare(self.tmp, "probe", "# wk: name=maybe")
+    def test_an_unknown_word_or_value_is_refused_by_name(self):
+        self.assertIn("frobnicate", self._refused("# wk: where=host frobnicate"))
+        self.assertIn("elsewhere", self._refused("# wk: where=elsewhere"))
+        self.assertIn("maybe", self._refused("# wk: name=maybe"))
 
     def test_a_flag_override_beats_a_subverb_override_beats_the_default(self):
         d = declare(self.tmp, "probe",
@@ -158,18 +148,12 @@ class TestArgvArithmetic(unittest.TestCase):
 
 class TestArgvCheck(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="wk-test-decl-")
-        self.marker = os.environ.get("WK_MARKER")
-        os.environ["WK_MARKER"] = os.path.join(self.tmp, "no-marker")
-
-    def tearDown(self):
-        if self.marker is None:
-            os.environ.pop("WK_MARKER", None)
-        else:
-            os.environ["WK_MARKER"] = self.marker
-        for p in Path(self.tmp).iterdir():
-            p.unlink()
-        os.rmdir(self.tmp)
+        t = tempfile.TemporaryDirectory(prefix="wk-test-decl-")
+        self.addCleanup(t.cleanup)
+        self.tmp = t.name
+        env = mock.patch.dict(os.environ, {"WK_MARKER": os.path.join(self.tmp, "no-marker")})
+        env.start()
+        self.addCleanup(env.stop)
 
     def _check(self, decl_lines, args):
         d = declare(self.tmp, "probe", *decl_lines)

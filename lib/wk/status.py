@@ -28,6 +28,8 @@ from wk.store import Snapshots, Store, dispatch_place, in_vm
 
 
 ENDED_AS_ASKED = ("ok", "cancelled", "stopped", "refused")
+TASK_EXIT = {"running": 2, "starting": 2, "silent": 2, "died": 4, "unreadable": 4, "unanswered": 4,
+             "failed": 1, "gave-up": 1, "error": 1, "stalled": 3, "oom": 3}
 METHOD = {"container": "container", "vm": "macOS guest"}
 RANK = {"container": 0, "vm": 1, "local": 2}
 UPSTREAM_ORIGIN = "https://github.com/WebKit/WebKit.git"
@@ -82,13 +84,10 @@ def bump(worst, code):
         code = int(str(code).strip())
     except ValueError:
         code = 4
-    if code < 0 or code > 4:
-        code = 4
-    return max(worst, code)
+    return max(worst, code if 0 <= code <= 4 else 4)
 
 
 class Rec:
-    """One record: `kind` first, strings cleaned of escapes, notes last."""
 
     def __init__(self, kind, **fields):
         self.d = {"kind": kind}
@@ -219,44 +218,35 @@ def task_records(records, only=None, clock=None):
         age = record.log_age(log, clock, t.machine)
         abort = t.field("abort_after")
         shown_age = "?" if age is None else str(age)
+        code = TASK_EXIT.get(st, 0)
         if st == "silent":
             r.opt("log_age", shown_age if age is not None else "")
             if age is not None and abort.isdigit() and age > int(abort):
                 r.warn("silent for %ss, past the %ss this %s recorded as its watchdog's deadline" % (age, abort, kind))
                 r.note("so the watchdog is gone as well: a live 'wk %s' would have\n      killed the job and written its exit "
                        "at that deadline. Re-run it to\n      rewrite the record." % kind)
-                worst = bump(worst, 4)
+                code = 4
             else:
                 r.warn("no log output for %ss -- counted as busy, since nothing\n      here is evidence it stopped. "
                        "Follow it:  tail -f %s" % (shown_age, log))
-                worst = bump(worst, 2)
         elif st == "running":
             r.note("alive: %s (last output %ss ago)" % (record.progress_line(log, t.machine) or "running", shown_age))
-            worst = bump(worst, 2)
-        elif st == "starting":
-            worst = bump(worst, 2)
         elif st == "died":
             r.warn("%s '%s' died without recording an exit -- its log is %s" % (kind, name, log))
-            worst = bump(worst, 4)
         elif st == "unreadable":
             r.warn("this record cannot be read (%s): an older wk wrote it, or it is damaged,\n      so nothing here "
                    "can say whether its job runs. The record is %s" % (", ".join(t.unreadable()), t.path))
-            worst = bump(worst, 4)
         elif st == "unanswered":
             r.warn("'%s' did not say within %ss whether pid %s is alive, so\n      nothing here can confirm the record. "
                    "Ask it directly:  wk enter %s" % (name, ask, t.field("pid"), name))
-            worst = bump(worst, 4)
         elif st == "failed":
             r.warn("exit %s" % t.field("exit"))
             for line in record.first_error(log, t.machine):
                 r.note("  " + line)
-            worst = bump(worst, 1)
         elif st == "stalled":
             r.warn("killed after no output; see %s" % log)
-            worst = bump(worst, 3)
         elif st in ("gave-up", "error"):
             r.warn("%s gave up -- see %s" % (kind, log))
-            worst = bump(worst, 1)
         elif st == "oom":
             r.warn("killed for memory; see %s" % log)
             try:
@@ -265,7 +255,7 @@ def task_records(records, only=None, clock=None):
                 hits = []
             if hits:
                 r.note("  " + hits[-1].replace("wk: ", "", 1))
-            worst = bump(worst, 3)
+        worst = bump(worst, code)
         out.append(r.done())
     return out, worst
 
@@ -487,10 +477,8 @@ def fleet_probe(root, name, cap, env=None):
 
 
 def armed_desync(fields, clock):
-    """The record still claims an arm the machine has moved past: a boot id mismatch is cmd/boot's own
-    'spent' test, and an arm
-    that has sat unconsumed past ARM_STALE_SECONDS is stale on its own reading; an unreadable stamp is no
-    evidence the arm is current."""
+    """The record claims an arm the machine has moved past: another boot id (cmd/boot's 'spent' test), or
+    unconsumed past ARM_STALE_SECONDS; an unreadable stamp is no evidence the arm is current."""
     if fields.get("armed_boot") and fields.get("boot_id") and fields["armed_boot"] != fields["boot_id"]:
         return True
     at = fields.get("armed_at")
@@ -505,17 +493,16 @@ def armed_desync(fields, clock):
 
 def fleet_record(name, conf, fields, cap, reach=None, clock=None):
     """`fields` is fleet_probe's answer; `reach` answers (tailnet, direct) for a board the probe never described."""
-    r = Rec("fleet", machine=name)
+    if fields == {}:
+        return None
+    r = Rec("fleet", machine=name, conf="machines/%s.conf" % name)
     if fields is None or "error" in fields:
         r.set("role", conf.get("role") or "workstation")
         r.set("mode", "no answer within %ss" % cap if fields is None else "probe failed: %s" % fields["error"])
-        r.set("conf", "machines/%s.conf" % name)
         tailnet, direct = reach(name) if reach else ("", "")
         r.opt("tailnet", tailnet)
         r.opt("direct", direct)
         return r.done()
-    if not fields:
-        return None
     r.set("role", fields["role"])
     r.set("mode", fleet_mode(fields["probeable"], fields["mode"], fields["bridge"]))
     r.set("media", fields["media"])
@@ -525,7 +512,6 @@ def fleet_record(name, conf, fields, cap, reach=None, clock=None):
         r.opt("armed_at", fields.get("armed_at"))
         if armed_desync(fields, clock or Clock()):
             r.raw("armed_desync", True)
-    r.set("conf", "machines/%s.conf" % name)
     r.opt("tailnet", fields["tailnet"])
     r.opt("direct", fields["direct"])
     r.opt("reprovision", fields["reprovision"])
@@ -549,8 +535,7 @@ def self_mode_word(env):
 
 
 def self_fleet_record(root, env, machine):
-    """The self machine's role and mode, read locally with no probe of its own -- the record every
-    session's first line comes from (statusview.self_line_text)."""
+    """Read locally, never by probing this machine as a board."""
     r = Rec("fleet", machine=machine, role=self_role(root, machine),
             mode=fleet_mode("yes", self_mode_word(env), ""))
     r.raw("self", True)
@@ -558,13 +543,12 @@ def self_fleet_record(root, env, machine):
 
 
 def self_line(root, env, colour):
-    """This machine, its role and its mode: the line `wk status` and `wk help` start with."""
     r = self_fleet_record(root, env, record.row_label(env) or record.machine_name(env))
     return statusview.self_line_text(r["machine"], r["role"], r["mode"], colour)
 
 
 def machine_confs(root, env):
-    """(name, conf) for every bench machine with a driver and a note, as `wk boot --list` lists them."""
+    """Every bench machine with a driver and a note, as `wk boot --list` lists them."""
     f = fleet.Fleet(root, env)
     out = []
     for n in f.names(fleet.BENCH_KINDS):
@@ -649,8 +633,7 @@ def wait_until_idle(poll, timeout, interval, clock, label, info, warn):
 
 
 class Walk:
-    """One `wk status`: the places this machine lists, each a job, plus the
-    fleet's devices and bridges; `records()` yields what they report."""
+    """One `wk status`: a job per place this machine lists, plus the fleet's devices and bridges."""
 
     def __init__(self, root, name=None, fleet=True, devices=True, env=None, clock=None, reg=None):
         self.root = str(root)
@@ -672,8 +655,6 @@ class Walk:
         self._git = None
         self._loaded = {}
         self._reach = reach.Reach(self.reg.machine, self.env, self.reg.fleet)
-
-    # -- the walk
 
     def places(self):
         names = self.reg.walk()
@@ -728,21 +709,13 @@ class Walk:
             yield {"kind": "plan", "jobs": plan}
         worst = 0
         with ThreadPoolExecutor(max_workers=max(1, len(jobs))) as pool:
-            futures = [(job, pool.submit(fn)) for job, fn in jobs]
-            if markers:
-                by_future = {f: job for job, f in futures}
-                for f in as_completed(by_future):
-                    recs, w = f.result()
-                    worst = bump(worst, w)
-                    for r in recs:
-                        yield r
-                    yield {"kind": "flush", "job": by_future[f]}
-            else:
-                for _, f in futures:
-                    recs, w = f.result()
-                    worst = bump(worst, w)
-                    for r in recs:
-                        yield r
+            job_of = {pool.submit(fn): job for job, fn in jobs}
+            for f in as_completed(job_of) if markers else job_of:
+                recs, w = f.result()
+                worst = bump(worst, w)
+                yield from recs
+                if markers:
+                    yield {"kind": "flush", "job": job_of[f]}
         self.worst = worst
         yield {"kind": "exit", "code": worst}
 
@@ -756,8 +729,6 @@ class Walk:
             return self.driver(tname).is_here()
         except LookupError:
             return False
-
-    # -- one place
 
     def report_target(self, driver, name):
         out, worst = [], 0
@@ -912,8 +883,6 @@ class Walk:
             self.tasks_said.add(key)
         return task_records(records, only, self.clock)
 
-    # -- what a machine is, apart from its workspaces
-
     def git_here(self):
         with self.lock:
             if self._git is None:
@@ -922,9 +891,6 @@ class Walk:
                 self._git = (head.out.strip() if head.ok else "", bool(st.ok and st.out.strip()))
             return self._git
 
-    def version_here(self):
-        return tools.identity(self.root, Local())
-
     def report_machine(self, driver, gm, has_wk):
         if driver.kind == "remote" and has_wk:
             ver = kv(driver.wk("doctor", "--probe-tools", quiet=True)[1])
@@ -932,7 +898,7 @@ class Walk:
             peer = driver.peer
         elif driver.name == self.reg.default():
             self.tooling_said = True
-            ver = self.version_here()
+            ver = tools.identity(self.root, Local())
             keys = Local().run([os.path.join(self.root, "cmd", "key"), "fingerprints"]).out
             peer = False
         else:
@@ -951,7 +917,7 @@ class Walk:
             if self.tooling_said:
                 return []
             self.tooling_said = True
-        ver = self.version_here()
+        ver = tools.identity(self.root, Local())
         if not ver:
             return []
         r = Rec("fact", machine=self.this_machine, type="wk-tools", sha=ver.get("sha", ""))
@@ -983,14 +949,10 @@ class Walk:
         out += bench_records(store, m, lambda pid: bool(pid and alive(pid)))
         return [r for r in out if r]
 
-    # -- the fleet
-
     def fleet_devices(self):
         if self.reg.in_workspace():
             return [], 0
         cap = fleet_timeout(self.env) * 5
-        # This machine's own role and mode already lead every record (self_fleet_record); probing it
-        # again as a board would print the one machine here twice.
         confs = [(n, c) for n, c in machine_confs(self.root, self.env) if n != self.this_machine]
 
         def one(item):

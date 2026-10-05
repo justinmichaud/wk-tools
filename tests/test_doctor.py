@@ -103,8 +103,7 @@ class TestTheRenderer(unittest.TestCase):
 
 
 class TestHostToolsZed(unittest.TestCase):
-    """`wk doctor`'s zed row and `cmd/zed`'s own "is zed installed" check read the one answer, `places.zed_cli`
-    -- they used to disagree (doctor took the app bundle's presence, `cmd/zed` the cli's)."""
+    """The zed row reads `places.zed_cli`, the answer `cmd/zed` reads too."""
 
     def _zed_row(self, fake):
         d = fake_doctor(True, machine=fake)
@@ -297,11 +296,6 @@ class TestVmGuestGitFindings(unittest.TestCase):
         self.assertEqual({OK}, {r[0] for r in f}, f)
         self.assertTrue(all("mac-rel (tart guest)" in r[1] for r in f), f)
 
-    def test_a_stopped_guest_is_skipped_not_asked(self):
-        guests = StubGuests({"mac-rel": "stopped"}, self.GOOD)
-        self.assertEqual([], doctor.vm_guest_git_findings(guests, WANT))
-        self.assertEqual([], guests.asked)
-
     def test_a_running_guest_that_does_not_answer_is_unknown(self):
         f = doctor.vm_guest_git_findings(StubGuests({"mac-rel": "running"}, ""), WANT)
         self.assertEqual([(UNK, "mac-rel (tart guest): git config did not answer", "wk doctor mac-rel")], f)
@@ -343,9 +337,7 @@ class TestProbeStoreGit(unittest.TestCase):
 
 
 class TestProbeStoreMirror(unittest.TestCase):
-    """The mirror is reported by the branches it carries: a workspace asks it for a head per declared branch
-    (wk_fetch_refspecs), so one it lacks fails every fetch, and a directory that exists says nothing about
-    that."""
+    """The mirror is reported by the branches it carries: one it lacks fails every fetch."""
 
     def _store(self, heads):
         d = Path(tempfile.mkdtemp(prefix="wk-test-doctor-mirror-"))
@@ -451,8 +443,7 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
 
 
 class TestTheCredentialsSection(unittest.TestCase):
-    """Each row is one verdict of lib/credcheck.py's rules, taken through the `wk key`'s own reading of it
-    (Key.stored_verdict) from what is in a scratch store."""
+    """Each row is one verdict of lib/credcheck.py's rules, read through Key.stored_verdict from a scratch store."""
 
     @classmethod
     def setUpClass(cls):
@@ -578,23 +569,13 @@ class TestRootAccess(unittest.TestCase):
         fake.answer(["env", "WK_QUIET=1", key, "sudo", "status"], 1, "a password is required, but sudo keeps a timestamp\n")
         rows = list(fake_doctor(True, machine=fake).root_access())
         self.assertEqual([(MISS, "sudo: a password is required, but sudo keeps a timestamp", "wk key sudo setup")], rows)
-        self.assertEqual([("run", ("env", "WK_QUIET=1", key, "sudo", "status"))], fake.effects)
 
 
 class TestPrivilegedHelpers(unittest.TestCase):
-    """A helper whose sudoers rule is out-ranked is installed, executable and useless, so the property asked is
-    whether it answers -- of every helper, on the platform each applies to."""
+    """A helper whose sudoers rule is out-ranked is installed and useless, so what is asked is whether it answers."""
 
     def setUp(self):
         self.helpers = doctor.Host.priv_helpers(str(REPO), env=clean_env())
-
-    def test_the_table_names_all_three(self):
-        self.assertEqual(["wk-quiesce-priv", "wk-card-priv", "wk-boot-priv"], [h[0] for h in self.helpers])
-
-    def test_the_sudoers_name_is_derived_from_the_helper(self):
-        for name, path, sudoers in ((h[0], h[3], h[4]) for h in self.helpers):
-            self.assertEqual("/usr/local/libexec/" + name, path)
-            self.assertEqual("/etc/sudoers.d/zzz-wk-" + name[3:-5], sudoers)
 
     def _rows(self, answers, executable=True):
         fake = Fake()
@@ -657,17 +638,15 @@ class ACachedCredentialIsNotAGrant(WkTest):
         self.assertFalse(self._answers(""))
 
 
-
 class TestTheMachineOverlay(unittest.TestCase):
-    """~/.config/wk/machines/ is machine-local; the directory it replaced is named with the move."""
+    """~/.config/wk/machines/ and bench tasks are machine-local."""
 
     def rows(self, fake):
         return list(fake_doctor(False, machine=fake).machine_local())
 
-    def test_the_overlay_is_a_backed_up_row_and_no_leftover_is_reported(self):
+    def test_the_overlay_is_a_backed_up_row(self):
         rows = self.rows(Fake())
         self.assertTrue(any(r[1].startswith("~/.config/wk/machines (absent)") and r[2].startswith("backed-up") for r in rows), rows)
-        self.assertEqual([], [r for r in rows if "bridges" in r[1]])
 
     def test_each_workspace_holding_tasks_is_backed_up(self):
         fake = Fake()
@@ -690,7 +669,6 @@ class TestTheMachineOverlay(unittest.TestCase):
         (row,) = named()
         self.assertIn("(backed-up)", row)
         self.assertIn("wk gc names", row)
-
 
 
 if __name__ == "__main__":

@@ -41,7 +41,6 @@ VARIANCE = (("aslr", "WK_BENCH_ASLR"), ("env_pad", "WK_BENCH_ENV_PAD"), ("path_p
 
 
 def variance(env):
-    """The variance knobs as set, "" when not."""
     return {key: env.get(name, "") for key, name in VARIANCE}
 
 
@@ -138,6 +137,12 @@ def one_minute_load(res):
         return float(fields[index])
     except (IndexError, ValueError):
         return None
+
+
+def measure_args(leg, output, payload):
+    return (["--plan", leg.plan, "--output-file", output, "--no-adjust-unit", "--show-iteration-values"]
+            + (["--count", leg.count] if leg.count else []) + (["--timeout", leg.o["timeout"]] if leg.o.get("timeout") else [])
+            + (["--local-copy", payload] if payload else []) + (["--subtests"] + leg.subtests.split() if leg.subtests else []))
 
 
 class Leg:
@@ -245,11 +250,7 @@ class Run:
                         "    a forced run is recorded as forced, and is not comparable with a clean run." % len(fails), env=self.env)
 
     def seed(self, leg):
-        def read(path):
-            r = self.ws_driver.exec(self.ws, ["cat", "%s/Tools/Scripts/%s" % (self.system.src(), path)])
-            return r.out.replace("\r", "") if r.ok else None
-        seeder = seed.Seeder(self.here, self.lock, os.path.join(self.reg.store.cache_dir(), "bench"), self.reg.store.mirror_dir())
-        leg.payload = seeder.seed(leg.plan, seed.plan_json(read, leg.plan))
+        leg.payload = seed.pin(self.here, self.lock, self.reg.store, seed.ws_reader(self.ws_driver, self.ws), leg.plan)[1]
         if leg.runner != "jsc":
             return
         if not leg.payload:
@@ -272,17 +273,14 @@ class Run:
                  "run %s (%s, %s iteration(s))" % (leg.plan, leg.runner, leg.count or "default"), "collect into %s" % leg.out]
         if act.dry_run():
             return steps
-        if not given and leg.machine.exists(taskdir):
-            die("task %s already exists (%s); a task is one request, made once" % (leg.task, taskdir))
-        if not task_held(self.env, leg.task):
-            self.lock.hold("bench-task-" + leg.task, timeout=5)
-        count = ["count=" + leg.count] if leg.count else []
-        command = "wk bench run %s %s --preset %s%s" % (self.ws, leg.plan, leg.preset.name, " --count " + leg.count if leg.count else "")
-        if not given:
-            record.task_write(taskdir, ["task=" + leg.task, "requested=" + self.clock.iso(), "subject.kind=workspace",
-                                        "subject.spec=" + self.ws, "devices=%s=%s" % (self.system.kind, leg.preset.name),
-                                        "plans=" + leg.plan, "rounds=1", "slots=" + self.ws, "restart=%s --task %s" % (command, leg.task)] + count,
-                              [command], machine=leg.machine)
+        if given:
+            if not task_held(self.env, leg.task):
+                self.lock.hold("bench-task-" + leg.task, timeout=5)
+        else:
+            command = "wk bench run %s %s --preset %s%s" % (self.ws, leg.plan, leg.preset.name, " --count " + leg.count if leg.count else "")
+            record.new_task(leg.machine, bench, leg.task, self.lock, self.clock.iso(), [
+                "subject.kind=workspace", "subject.spec=" + self.ws, "devices=%s=%s" % (self.system.kind, leg.preset.name),
+                "plans=" + leg.plan, "rounds=1", "slots=" + self.ws] + (["count=" + leg.count] if leg.count else []), command)
         leg.machine.mkdir(leg.out)
         record.write_env(os.path.join(leg.out, "env.json"), [
             "plan=" + leg.plan, "workspace=" + self.ws, "preset=" + leg.preset.name, "browser=" + leg.browser, "task=" + leg.task,
@@ -356,11 +354,8 @@ class Run:
 
     def run_browser(self, leg):
         s, src = self.system, self.system.src()
-        args = s.runner_argv(leg) + ["--plan", leg.plan, "--build-directory", self.through_pad(s.build_dir(leg)),
-                                     "--output-file", os.path.join(s.run_dir(leg), "result.json"), "--no-adjust-unit", "--show-iteration-values"]
-        args += (["--count", leg.count] if leg.count else []) + (["--local-copy", s.payload_dir(leg)] if leg.payload else [])
-        args += ["--timeout", leg.o["timeout"]] if leg.o.get("timeout") else []
-        args += ["--subtests"] + leg.subtests.split() if leg.subtests else []
+        args = s.runner_argv(leg) + measure_args(leg, os.path.join(s.run_dir(leg), "result.json"), s.payload_dir(leg) if leg.payload else "")
+        args += ["--build-directory", self.through_pad(s.build_dir(leg))]
         extra = (["--headless"] if leg.software else []) + (leg.o.get("browser_args") or "").split() + leg.args
         args += ["--"] + extra if extra else []
         info("running %s in '%s' (%s, %s)" % (leg.plan, self.ws, leg.preset.name, leg.browser))

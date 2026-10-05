@@ -81,15 +81,13 @@ class Base:
 
     def findings(self):
         if not self.exists():
-            return ("wrong\tno golden base VM '%s' -- there is nothing for a guest to be cloned from\t"
-                    "%s   (hours: the image pull, Xcode's first launch)\n" % (self.name, guest.BASE_BUILD))
+            return "wrong\tno golden base VM '%s' to clone a guest from\t%s   (hours)\n" % (self.name, guest.BASE_BUILD)
         if not self.machine.exists(self.marker()):
-            return ("wrong\t'%s' exists but provisioning never finished in it\t%s --refresh   (re-runs provisioning; "
-                    "nothing is re-downloaded)\n" % (self.name, guest.BASE_BUILD))
+            return "wrong\t'%s' exists but provisioning never finished in it\t%s --refresh\n" % (self.name, guest.BASE_BUILD)
         why = self.stale()
         if why:
-            return ("wrong\t'%s' predates its own provisioning inputs: %s -- every guest cloned from it carries what that "
-                    "base was built with\t%s --rebuild   (hours; existing guests are unaffected)\n" % (self.name, why, guest.BASE_BUILD))
+            return ("wrong\t'%s' predates its own provisioning inputs: %s\t%s --rebuild   (hours; existing guests are "
+                    "unaffected)\n" % (self.name, why, guest.BASE_BUILD))
         return "ok\tgolden base '%s' matches its provisioning inputs\t\n" % self.name
 
     def build(self, rest):
@@ -114,7 +112,6 @@ class Base:
         return 0
 
     def rebuild(self):
-        """The tree is asked first: refusing it after the delete would cost a clone, a grow and a boot for the same verdict."""
         why = tools.committed(self.root, self.machine)
         if why:
             die("the golden base is given a commit, so it cannot be built from this tree:\n%s\n    Nothing has been deleted." % why)
@@ -126,16 +123,14 @@ class Base:
 
     def erase(self):
         if not self.exists():
-            die("no golden base '%s' on this machine -- nothing to erase.\n    '%s' builds one; 'wk doctor' says what "
-                "everything here costs." % (self.name, guest.BASE_BUILD))
+            die("no golden base '%s' on this machine -- nothing to erase" % self.name)
         home = tart_home(self.env)
         if not act.confirm("delete the golden base VM '%s' (%s)? rebuilding it is hours"
                            % (self.name, self.size(os.path.join(home, "vms", self.name)))):
             die("aborted -- nothing was changed")
         self.vm.delete_vm(self.name)
         self.machine.remove(self.marker())
-        info("deleted '%s' -- existing vm workspaces are unaffected" % self.name)
-        log("  '%s' builds it again; until then 'wk new --on vm' has nothing to clone" % guest.BASE_BUILD)
+        info("deleted '%s' -- existing vm workspaces are unaffected; '%s' builds it again" % (self.name, guest.BASE_BUILD))
         cache = os.path.join(home, "cache")
         try:
             cached = self.machine.isdir(cache) and bool(self.machine.listdir(cache))
@@ -154,11 +149,11 @@ class Base:
         words = self.machine.run(["du", "-sh", path]).out.split()
         return words[0] if words else "?"
 
-    def tart_or_die(self, args, what=None, stream=False):
+    def tart_or_die(self, args, stream=False):
         argv = [self.vm.tart_or_die()] + args
         r = self.machine.act_run(argv, stream=True) if stream else self.machine.act_run(argv)
         if not r.ok:
-            die("tart %s failed (exit %d): %s" % (what or args[0], r.rc, (r.err or r.out).strip() or "what it said is above"),
+            die("tart %s failed (exit %d): %s" % (args[0], r.rc, (r.err or r.out).strip() or "what it said is above"),
                 r.rc or 1)
         return r
 
@@ -179,8 +174,7 @@ class Base:
         if self.ready():
             return
         if self.exists():
-            warn("'%s' exists but was never finished (no completion marker)" % self.name)
-            log("  destroying it and starting again")
+            warn("'%s' exists but was never finished -- destroying it and starting again" % self.name)
             self.vm.delete_vm(self.name)
         self.machine.remove(self.marker())
         if not self.cached():
@@ -213,9 +207,8 @@ class Base:
 
     def install_key(self, g):
         if not self.wait_agent(g):
-            die("the tart guest agent in '%s' never answered, and it is the one way into a guest.\n    The Cirrus Labs images "
-                "ship it and a vanilla macOS image does not: build the base from\n    the image WK_VM_IMAGE names. Its run log says:\n%s"
-                % (self.name, guest.runlog_tail(self.machine, self.runlog())))
+            die("the tart guest agent in '%s' never answered (a Cirrus Labs image ships it; a vanilla macOS image does not).\n"
+                "    Its run log says:\n%s" % (self.name, guest.runlog_tail(self.machine, self.runlog())))
         pub = self.machine.read(self.vm.key() + ".pub").strip()
         if not g.act_run(["sh", "-c", 'umask 077 && mkdir -p ~/.ssh && { grep -qxF "$1" ~/.ssh/authorized_keys 2>/dev/null || '
                           'echo "$1" >> ~/.ssh/authorized_keys; }', "sh", pub]).ok:
@@ -237,36 +230,33 @@ class Base:
                 die("could not generate the macOS VM ssh key %s" % v.key())
             info("generated the macOS VM ssh key")
         if act.dry_run():
-            log("would boot '%s', provision it (vm/provision-base.sh), drive Setup Assistant off its screen, reboot it\n"
-                "  and seal it only on a clear screen -- nothing past here can be shown without a running guest" % self.name)
+            log("would boot '%s', provision it, reboot it and seal it on a clear screen" % self.name)
             return
         ip = self.start()
         g = v.guest_of(self.name)
         self.install_key(g)
         # A stale clock fails provisioning's first HTTPS clone as a not-yet-valid certificate, and a base hands it to every clone.
         if not guest.Guest(self.host, self.name, g).set_guest_clock():
-            die("could not set the clock in '%s'. Passwordless sudo is what it needs, and the base is\n    built from the image "
-                "WK_VM_IMAGE names -- check that image rather than patching the guest" % self.name)
+            die("could not set the clock in '%s', which needs passwordless sudo in the image WK_VM_IMAGE names" % self.name)
         info("provisioning the base VM (Xcode licence, disk, desktop)")
         if not tools.push(self.root, self.machine, g, v.tools(self.name), self.env):
             die("the base cannot be provisioned without wk-tools in it (see above)")
         guest.login_note(self.env)
         self.run_provisioning(g)
         if not guest.unblock_desktop(self.root, g):
-            die("Setup Assistant is still on '%s''s screen, and a base is not sealed behind a pane:\n    every guest cloned "
-                "from it would come up behind one too. It is running at %s --\n    answer it at its own window, then  %s --refresh"
-                % (self.name, ip, guest.BASE_BUILD))
+            die("Setup Assistant is still on '%s''s screen, and a base is not sealed behind a pane.\n    It is running at %s: "
+                "answer it at its own window, then  %s --refresh" % (self.name, ip, guest.BASE_BUILD))
         if not guest.Guest(self.host, self.name, g).settle_desktop():
             warn("could not re-settle the base's desktop after Setup Assistant")
         info("rebooting the base to prove its screen comes up clear")   # a dismissed pane comes back at the next login
         self.tart_or_die(["stop", self.name])
         ip = self.start()
         if not self.wait_agent(g):
-            die("'%s' rebooted to %s but its guest agent never answered, so the screen it came up\n    with cannot be read. Its run log says:\n%s"
+            die("'%s' rebooted to %s but its guest agent never answered. Its run log says:\n%s"
                 % (self.name, ip, guest.runlog_tail(self.machine, self.runlog())))
         if not self.login_settled(g):
-            die("Setup Assistant came back at '%s''s next login, so the flow that answered it did\n    not finish. The base is "
-                "running at %s: answer it at its own window, then  %s --refresh" % (self.name, ip, guest.BASE_BUILD))
+            die("Setup Assistant came back at '%s''s next login. The base is running at %s: answer it at its own window,\n"
+                "    then  %s --refresh" % (self.name, ip, guest.BASE_BUILD))
         self.check_screen(g, ip)
         info("shutting the base VM down")
         self.tart_or_die(["stop", self.name])
@@ -288,26 +278,23 @@ class Base:
         except OSError:
             pass
         if word != "0":
-            die("base provisioning failed (%s).\n    What it printed is in %s; the base is rubble until this finishes,\n"
-                "    and a re-run starts it again:  %s --refresh" % ("rc=" + word if word.isdigit() else word, saved, guest.BASE_BUILD))
+            die("base provisioning failed (%s). What it printed is in %s; a re-run:  %s --refresh" % ("rc=" + word if word.isdigit() else word, saved, guest.BASE_BUILD))
 
     def login_settled(self, g):
-        """The guest answers before the login has drawn anything, so a read straight after boot reads clear whatever is coming."""
+        # The guest answers before the login has drawn anything, so one read straight after boot reads clear.
         return not self.clock.wait_until(lambda: guest.setup_assistant(g) == "up", LOGIN_SETTLE, 3)
 
     def check_screen(self, g, ip):
         reading = guest.window_reading(self.root, self.machine, g)
         if not reading or reading == "?":
-            die("could not ask '%s' what is on its screen, and a base is not sealed unread: every\n    guest cloned from it "
-                "would come up behind whatever is there. The base is still\n    running at %s -- '%s --refresh' re-runs this."
-                % (self.name, ip, guest.BASE_BUILD))
+            die("could not ask '%s' what is on its screen, and a base is not sealed unread.\n    It is running at %s; "
+                "'%s --refresh' re-runs this." % (self.name, ip, guest.BASE_BUILD))
         uninvited = guest.unexpected(self.root, self.machine, reading)
         if not uninvited:
             info("the base's screen is clear, so a clone's will be too")
             return
-        die("on the base's screen, and nothing wk put there: %s\n    Every guest cloned from this base comes up behind it, and "
-            "a clone cannot clear it\n    itself. The base is running now, at %s: answer it at its own window, then  %s --refresh"
-            % (uninvited.rstrip(";"), ip, guest.BASE_BUILD))
+        die("on the base's screen, and nothing wk put there: %s\n    Every clone would come up behind it. The base is running at "
+            "%s: answer it at its own window, then  %s --refresh" % (uninvited.rstrip(";"), ip, guest.BASE_BUILD))
 
 
 def rubble(vm):

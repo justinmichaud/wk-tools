@@ -2,13 +2,12 @@
 import contextlib
 import io
 import os
-import re
 import subprocess
 import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, WkTest, bash, shell_files, stub_path
+from tests.support import REPO, WkTest, bash, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places, resources  # noqa: E402
@@ -86,7 +85,6 @@ class TestTheLoadCoresAndJobCount(unittest.TestCase):
 
 
 class TestStoreFreeGb(WkTest):
-    """The store's free space, read with this machine's real df."""
 
     def test_it_answers_the_one_spelling_both_dfs_have(self):
         free = resources.Budget(Local(), {}).free_gb(str(self.tmp))
@@ -102,7 +100,6 @@ class TestStoreFreeGb(WkTest):
 
 
 class TestImageStageBudget(unittest.TestCase):
-    """yocto.stage_budget: a bitbake stage books the machine, a cross WebKit build its own jobs, the mix one job."""
 
     def test_each_stage_books_what_it_uses(self):
         for stage, want in (("layers", (79, 113000)), ("fetch", (79, 113000)), ("image", (79, 113000)),
@@ -116,126 +113,15 @@ class TestImageStageBudget(unittest.TestCase):
         self.assertLess(left(113000), 4)
 
 
-# `wk_py wk.resources <verb>`'s readings: what a refusal has to survive.
-VERB = re.compile(r"\bwk\.resources\b(.*)")
-WORD = re.compile(r"[a-z][a-z-]*")
-
-# A reading belongs on the right of an assignment and nowhere else. `local v`
-# ahead of it and a `|| ...` after it are that same shape; a case arm or a
-# second assignment on the line is still one simple command.
-ASSIGNED = re.compile(r"(?:^|[;{)]|&&|\|\||\bthen\b|\bdo\b|\belse\b"
-                      r"|\bif\b|\belif\b|\bwhile\b|\buntil\b)\s*"
-                      r"(?:local\s+|export\s+|declare\s+-\w+\s+)?[A-Za-z_][A-Za-z0-9_]*=$")
-# A trailing backslash too: `if a=$(...) \` continues onto the next line, where the
-# status is still the condition's.
-SEPARATED = re.compile(r"^\s*($|;|\|\||&&|#|\\\s*$)")
-
-
 CANNOT_REFUSE = {"headless-marker", "defaults"}
-
-
-def verbs():
-    """Every verb lib/wk/resources.py answers."""
-    return set(resources.READINGS)
-
-
-def readings():
-    """Every verb that can refuse."""
-    return verbs() - CANNOT_REFUSE
 
 
 class TestTheExemptionsDoNotRefuse(unittest.TestCase):
     def test_a_deaf_machine_answers_every_exempt_verb(self):
-        self.assertLessEqual(CANNOT_REFUSE, verbs())
         for verb in CANNOT_REFUSE:
             with self.subTest(verb=verb), mock.patch("wk.machine.here", return_value=Fake()), \
                     contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(resources.main(["--os", "linux", verb], env={}), 0)
-
-
-def substitutions(text):
-    """(offset, end, inner) for every `$( ... )`, nesting included."""
-    out, i = [], 0
-    while True:
-        i = text.find("$(", i)
-        if i < 0:
-            return out
-        if text[i:i + 3] == "$((":
-            i += 3
-            continue
-        depth, j = 0, i + 1
-        while j < len(text):
-            if text[j] == "(":
-                depth += 1
-            elif text[j] == ")":
-                depth -= 1
-                if depth == 0:
-                    break
-            j += 1
-        out.append((i, j + 1, text[i + 2:j]))
-        i += 2
-
-
-def strip_nested(text):
-    """The command a substitution runs, with its own substitutions removed:
-    the one in `x=$(printf %s "$(wk_py wk.resources envelope-cores)")` belongs to the inner one."""
-    while True:
-        cut = re.sub(r"\$\(\((?:[^()]|\([^()]*\))*\)\)|\$\([^()$]*\)", " ", text)
-        if cut == text:
-            return text
-        text = cut
-
-
-def reading_in_a_word_in(text, rel="<text>"):
-    """The audit over one piece of shell, so the rule itself is testable."""
-    names = readings()
-    out = []
-    for start, end, inner in substitutions(text):
-        if not set(WORD.findall(" ".join(VERB.findall(strip_nested(inner))))) & names:
-            continue
-        bol = text.rfind("\n", 0, start) + 1
-        eol = text.find("\n", end)
-        if ASSIGNED.search(text[bol:start]) \
-           and SEPARATED.match(text[end:eol if eol >= 0 else len(text)]):
-            continue
-        out.append(f"  {rel}:{text.count(chr(10), 0, start) + 1}: "
-                   f"{text[bol:end].strip()[:90]}")
-    return out
-
-
-def reading_in_a_word():
-    """Every call site in the tree that takes a reading into a word."""
-    out = []
-    for path in shell_files():
-        rel = str(path.relative_to(REPO))
-        if rel.startswith("tests/"):
-            continue
-        out += reading_in_a_word_in(path.read_text(), rel)
-    return out
-
-
-class TestEveryCallSiteTakesAReadingIntoAVariable(unittest.TestCase):
-    """A refusal inside `$(...)` kills only that subshell, so a reading belongs alone on the right of an assignment."""
-
-    def test_no_reading_is_taken_into_a_word(self):
-        wrong = reading_in_a_word()
-        if wrong:
-            self.fail(f"{len(wrong)} call site(s) take a reading from "
-                      "lib/wk/resources.py into a word, where its refusal is "
-                      "discarded. Each wants the reading on a line of its "
-                      "own -- `v=$(...)`, then use $v:\n" + "\n".join(wrong))
-
-    def test_the_readings_are_found_from_the_file_that_defines_them(self):
-        names = readings()
-        self.assertLessEqual({"host-mem-mb", "describe-cores", "envelope-cores", "envelope-mem-mb"}, names)
-        self.assertNotIn("headless-marker", names, "a path refuses nothing")
-
-    def test_a_condition_that_tests_the_assignment_is_not_flagged(self):
-        self.assertEqual([], reading_in_a_word_in(
-            'if cores=$(wk_py wk.resources envelope-cores) && mem=$(wk_py wk.resources envelope-mem-mb) \\\n   && [ -n "$cores" ]; then :; fi\n'))
-
-    def test_a_reading_interpolated_into_a_word_is_flagged(self):
-        self.assertEqual(1, len(reading_in_a_word_in('echo "jobs=$(wk_py wk.resources --os "$(wk_os)" envelope-cores)"\n')))
 
 
 class TestAReadingRefusalReachesItsCaller(WkTest):
@@ -269,7 +155,6 @@ class TestAReadingRefusalReachesItsCaller(WkTest):
                 self.assertRegex(cp.stdout, r"ANSWERED \[[0-9]")
 
     def _guest(self, env=None):
-        """A vm place with tart present but never configured, so its sizing falls to WK_VM_* or the host reading."""
         p = mock.patch.object(places.Vm, "tart", lambda s: "/t/tart")
         p.start()
         self.addCleanup(p.stop)

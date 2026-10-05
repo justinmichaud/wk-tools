@@ -24,7 +24,7 @@ def flags_for(d, verb=None):
 
 
 def subverbs(d):
-    return sorted(d.verbs.split(",")) if d.verbs else []
+    return sorted(filter(None, d.verbs.split(",")))
 
 
 def values_cmd(d):
@@ -119,9 +119,7 @@ complete -F _wk_completion wk
 
 
 def _case_arm(d):
-    slot = 0
-    if d.name_decl.split("@")[0] in ("required", "optional"):
-        slot = int(d.name_decl.split("@")[1]) if "@" in d.name_decl else 1
+    slot = D.name_slot(d.name_decl)
     flags = flags_for(d)
     vslots = ["%s:%d" % (v, D.name_slot(d.name_for([v]))) for v in subverbs(d)]
     vflags = ["%s:%s" % (v, ",".join(flags_for(d, v))) for v in subverbs(d)]

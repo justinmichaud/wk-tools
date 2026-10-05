@@ -44,9 +44,9 @@ BUGZILLA_KEYS = "https://bugs.webkit.org/userprefs.cgi?tab=apikey"
 TIMEOUT = 20
 PER_PAGE = 100
 
-# `url` is the page that mints one with everything a link can carry already filled in, `remedy` what is left to choose there; either may be a function of the fork list.
+# `url` mints one with what a link can carry filled in, `remedy` is what is left to choose there.
 Rule = collections.namedtuple(
-    "Rule", "spent_by needs forbids what url remedy store_with check mint",
+    "Rule", "needs forbids what url remedy store_with check mint",
     defaults=(None,))
 
 FIELDS = tuple(f for f in Rule._fields if f not in ("check", "mint"))
@@ -58,19 +58,14 @@ LITELLM_KEYS = "https://ai.igalia.com/ui/api-keys/"
 LITELLM_ENDPOINT = LITELLM_API + "/v1"  # `wk ai pi` -- pi's OpenAI-compatible endpoint for the key above
 
 
-def _resolved(value, repos):
-    return value(repos) if callable(value) else value
-
-
-def fix_of(rule, repos):
-    return " -- ".join(x for x in (_resolved(rule.url, repos),
-                                   _resolved(rule.remedy, repos)) if x)
+def fix_of(rule):
+    return " -- ".join(x for x in (rule.url, rule.remedy) if x)
 
 
 # The longest lifetime an organization's token policy allows; a token minted to never expire is refused every call to every repository the organization owns (measured against WebKit/WebKit, 2026-09-15).
 MAX_PAT_DAYS = 365
 
-# A classic token, because a fine-grained one reaches only repositories owned by the account that owns it and an upstream in another organization can never be granted to one -- so it opens a pull request on every fork and on no project. `scopes` and `description` are what the page takes as query parameters; the expiry is not one of them.
+# Classic: a fine-grained token reaches only its owner's repositories, so it opens a pull request on no upstream project.
 CLASSIC_TOKEN_PAGE = (
     "https://github.com/settings/tokens/new?"
     + urllib.parse.urlencode([("scopes", "public_repo"),
@@ -92,8 +87,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def http(method, url, headers=(), body=None, timeout=TIMEOUT, follow=True):
-    """(status, {header: value} lowercased, body) of wk's one HTTP request; a JSON `body`. Unreachable: no HTTP answer.
-    `follow=False` answers a redirect as itself."""
+    """(status, {header: value} lowercased, body); Unreachable when no HTTP answer came."""
     req = urllib.request.Request(url, method=method, data=body, headers={"User-Agent": "wk"})
     for name, value in headers:
         req.add_header(name, value)
@@ -125,7 +119,7 @@ def _json(raw):
     return doc if isinstance(doc, dict) else {}
 
 
-# Powers no wk code path spends and a token reachable from the boundary must not carry; every other classic scope is merely broader than needed.
+# Powers no wk path spends; every other classic scope is merely broader than needed.
 CLASSIC_REFUSED = ("delete_repo", "site_admin")
 
 
@@ -188,7 +182,7 @@ def _github_pat(value, repos, path, evidence):
                      % (", ".join(refused), "; ".join(facts)))
 
     for repo in repos:
-        verdict, why = _github_pat_can_open_a_pr(token, repo)
+        verdict, why = _github_pr_verdict(token, kind, repo, False)
         if verdict != OK:
             return verdict, why
         facts.append("can open a pull request on %s" % repo)
@@ -198,7 +192,7 @@ def _github_pat(value, repos, path, evidence):
         return UNVERIFIED, ("could not ask %s which project each fork belongs "
                             "to (%s); 'wk doctor' asks again." % (GITHUB_API, e))
     for project in projects:
-        verdict, why = _github_project_accepts(token, kind, project)
+        verdict, why = _github_pr_verdict(token, kind, project, True)
         if verdict != OK:
             return verdict, why
         facts.append("can open a pull request on %s" % project)
@@ -229,7 +223,7 @@ def _github_pat(value, repos, path, evidence):
                 "account.\n    %s" % (len(repos), len(others), "; ".join(facts)))
 
 
-# A Bugzilla key is the account: nothing narrower exists, so the rule asks only whether bugs.webkit.org takes it for the login this GitHub account maps to. `valid_login` answers false for a key of another account and error 306 for one it does not know.
+# `valid_login` answers false for another account's key and error 306 for one it does not know.
 def _bugzilla_api_key(value, repos, path, evidence):
     key = value.strip()
     if not key or len(key.split()) != 1:
@@ -260,14 +254,10 @@ def _bugzilla_api_key(value, repos, path, evidence):
         return BAD, ("%s accepts this key, but not as %s: it belongs to another "
                      "account, and `git-webkit pr` would file and assign as that "
                      "one." % (BUGZILLA_API, login))
-    return OK, ("%s accepts it as %s, which is all /rest/valid_login answers: "
-                "whether that account may change a bug -- see_also and assignee "
-                "need editbugs -- is not knowable from here, because Bugzilla "
-                "discloses no group membership to a caller without editusers. "
-                "`git-webkit pr` reports it as \"Failed to modify\" when it "
-                "cannot.\n    spent on every bugs.webkit.org request a workspace "
-                "makes while push is on, and on none while it is off"
-                % (BUGZILLA_API, login))
+    # Bugzilla discloses no group membership to a caller without editusers, so editbugs is not knowable here.
+    return OK, ("%s accepts it as %s; whether that account has editbugs is not "
+                "knowable from here.\n    spent on every bugs.webkit.org request "
+                "a workspace makes while push is on" % (BUGZILLA_API, login))
 
 
 def _some(names, n=3):
@@ -275,7 +265,7 @@ def _some(names, n=3):
 
 
 def _github_account_repos(token):
-    """Every repository the account owns or collaborates on that the token can read: the public ones whatever the token was granted, the private ones only when granted. It answers for the account (`permissions` is the account's), so what the token reaches is measured per repository by the probe below."""
+    """`permissions` here is the account's, so what the token reaches is measured per repository by the probe."""
     names, page = [], 1
     while True:
         status, _headers, body = _http(
@@ -296,7 +286,7 @@ def _github_account_repos(token):
 
 
 def _pull_request_probe(token, repo):
-    """The write-shaped probe that creates nothing: an empty body names no head or base branch, so an authorised call is 422 and an unauthorised one 403 (measured 2026-09-11: a fine-grained token answers 422 on exactly the repositories it was granted with 'Pull requests: write', 403 on every other repository the account has). GitHub's message comes back with the status because a project's two ways of refusing differ only by it."""
+    """An empty body names no branch, so an authorised call is 422 and an unauthorised one 403 (measured 2026-09-11)."""
     status, _headers, body = _http("POST", "%s/repos/%s/pulls"
                                    % (GITHUB_API, repo), token, body=b"{}",
                                    headers=GITHUB_HEADERS)
@@ -304,7 +294,7 @@ def _pull_request_probe(token, repo):
 
 
 def _github_pr_bases(token, repos):
-    """The repository each fork's pull request is opened on: `git-webkit pr` posts to the project, not to the fork, so the project is what has to accept this token. GitHub names it `parent`; a repository that is nobody's fork is its own base and was probed above."""
+    """`git-webkit pr` posts to each fork's `parent`, so that project has to accept the token too."""
     bases = []
     for repo in repos:
         status, _headers, body = _http("GET", "%s/repos/%s" % (GITHUB_API, repo),
@@ -317,17 +307,17 @@ def _github_pr_bases(token, repos):
     return bases
 
 
-def _github_project_accepts(token, kind, repo):
-    """Whether a pull request can be opened on the project a fork belongs to -- the call `git-webkit pr` makes, asked of the project rather than of the fork. A read of the same repository is not the question: a token that cannot open one still answers 200 to it. The two ways a project refuses both arrive as 403 and GitHub's own message tells them apart -- an organization's token policy names the policy and the page to fix the token at, and a fine-grained token outside its resource owner is 'Resource not accessible by personal access token'."""
+def _github_pr_verdict(token, kind, repo, project):
+    """A project's two 403s differ only by GitHub's message: an organization's token policy, or a fine-grained token
+    outside its resource owner."""
     try:
         status, message = _pull_request_probe(token, repo)
     except Unreachable as e:
         return UNVERIFIED, ("could not reach %s (%s) to ask whether a pull "
-                            "request can be opened on %s."
-                            % (GITHUB_API, e, repo))
+                            "request can be opened on %s." % (GITHUB_API, e, repo))
     if status == 422:
         return OK, ""
-    if status == 403:
+    if status == 403 and project:
         why = ("%s refuses this token a pull request (HTTP 403). GitHub says: %s"
                % (repo, message or "nothing at all."))
         if kind == "fine-grained":
@@ -338,21 +328,6 @@ def _github_project_accepts(token, kind, repo):
                     "classic one is what can, and the link below mints it."
                     % repo)
         return BAD, why
-    if status == 401:
-        return BAD, "GitHub does not accept this token (HTTP 401) for %s." % repo
-    return UNVERIFIED, ("POST /repos/%s/pulls answered HTTP %d rather than 422 "
-                        "or 403, so whether a pull request can be opened on "
-                        "that project is not known." % (repo, status))
-
-
-def _github_pat_can_open_a_pr(token, repo):
-    try:
-        status, _message = _pull_request_probe(token, repo)
-    except Unreachable as e:
-        return UNVERIFIED, ("could not reach %s (%s) to ask whether a pull "
-                            "request can be opened on %s." % (GITHUB_API, e, repo))
-    if status == 422:
-        return OK, ""
     if status == 403:
         return BAD, ("GitHub refused it: no 'Pull requests: write' on %s, so "
                      "'git-webkit pr' in a workspace cannot open one (HTTP 403): "
@@ -364,16 +339,13 @@ def _github_pat_can_open_a_pr(token, repo):
     if status == 401:
         return BAD, "GitHub does not accept this token (HTTP 401) for %s." % repo
     return UNVERIFIED, ("POST /repos/%s/pulls answered HTTP %d rather than 422 "
-                        "or 403, so whether a pull request can be opened is "
-                        "not known." % (repo, status))
+                        "or 403, so whether a pull request can be opened on %s "
+                        "is not known." % (repo, status, repo))
 
 
 ANTHROPIC_API = api_base("WK_ANTHROPIC_API", "https://api.anthropic.com")
 
-# The read-only request that answers whether Anthropic still accepts a token,
-# measured 2026-09-10 against api.anthropic.com: a `Bearer sk-ant-oat` token
-# with the version header answers 200, one Anthropic refuses answers 401
-# (whether or not the header is there), and no model is inferred either way.
+# Measured 2026-09-10: an accepted `Bearer sk-ant-oat` token answers 200, a refused one 401, and no model is inferred.
 def _claude_token_accepted(token):
     url = "%s/v1/models?limit=1" % ANTHROPIC_API
     try:
@@ -437,7 +409,7 @@ def _litellm_key(value, repos, path, evidence):
                             "known." % (LITELLM_API, status))
     served = len(_json(raw).get("data") or [])
     facts = ["%s accepts it and serves it %d model(s)" % (LITELLM_API, served)]
-    # The key's own record is a management route, which a key every workspace holds must be shut out of; LiteLLM answers 403 for one restricted to the LLM API routes.
+    # LiteLLM answers 403 on this management route for a key restricted to the LLM API routes.
     try:
         status, _headers, raw = _http("GET", LITELLM_API + "/key/info", key)
     except Unreachable as e:
@@ -462,13 +434,12 @@ def _litellm_key(value, repos, path, evidence):
 
 
 def chat_model_ids(doc):
-    """LiteLLM's /model/info rows a chat agent can call; /models also lists an embedding model and answers no mode."""
+    """/models also lists an embedding model and answers no mode."""
     return [m.get("model_name") for m in doc.get("data") or []
             if m.get("model_name") and (m.get("model_info") or {}).get("mode") in (None, "chat")]
 
 
 def litellm_models(key):
-    """The chat models the endpoint serves this key, [] when it answers anything but 200; Unreachable when it does not answer."""
     status, _headers, raw = _http("GET", LITELLM_ENDPOINT + "/model/info", key.strip())
     return chat_model_ids(_json(raw)) if status == 200 else []
 
@@ -483,7 +454,6 @@ def litellm_callable(key, ids):
     return None
 
 
-# Tailscale spells three very different powers with one prefix: an auth key enrolls a node, an API access token administers the tailnet, an OAuth client secret mints both.
 def _tailnet_authkey(value, repos, path, evidence):
     key = value.strip()
     if key.startswith("tskey-auth-") and len(key) > len("tskey-auth-"):
@@ -532,7 +502,7 @@ def _tailscale_wrong(key, wanted, shape):
     return "that does not look like a tailscale key at all (they start 'tskey-')."
 
 
-# Repo-scoped by construction: GitHub refuses the same key on a second repository. The evidence is gathered where the key is (`wk key sshtest`) and the verdict reached here, so both halves are one rule.
+# The evidence is gathered where the key is (`wk key sshtest`); the verdict is reached here.
 def _deploy_key(value, repos, path, evidence):
     repo = repos[0] if repos else "?"
     ssh = evidence.get("ssh", "")
@@ -582,8 +552,6 @@ def _ntfy_topic(value, repos, path, evidence):
 
 RULES = collections.OrderedDict((
     ("github-pat", Rule(
-        spent_by="container/proxy/github-inject.py -- the Authorization header "
-                 "a workspace's `git-webkit pr` request is forwarded with",
         needs="open a pull request from each fork wk pushes to, on the "
               "project it is a fork of",
         forbids="delete a repository, or administer a repository, an "
@@ -599,9 +567,6 @@ RULES = collections.OrderedDict((
         store_with="wk key set github-pat",
         check=_github_pat)),
     ("bugzilla-api-key", Rule(
-        spent_by="container/proxy/github-inject.py -- the api_key query "
-                 "parameter a workspace's bugs.webkit.org request is forwarded "
-                 "with while push is on",
         needs="be accepted by bugs.webkit.org as the login WebKit's "
               "metadata/contributors.json gives this GitHub account",
         forbids="rest where a workspace reads, or be spent while push is off: "
@@ -614,9 +579,6 @@ RULES = collections.OrderedDict((
         store_with="wk key set bugzilla-api-key",
         check=_bugzilla_api_key)),
     ("claude", Rule(
-        spent_by="shell/bashrc -- exported as $CLAUDE_CODE_OAUTH_TOKEN in a "
-                 "macOS guest and on a build box, the two kinds of place the "
-                 "delivery column sends it to",
         needs="authenticate Claude Code for inference",
         forbids="read the account, bill the organization, or mint further "
                 "credentials",
@@ -627,8 +589,6 @@ RULES = collections.OrderedDict((
         store_with="wk key set claude",
         check=_claude_token)),
     ("litellm", Rule(
-        spent_by="shell/bashrc -- exported as $LITELLM_API_KEY, which "
-                 "`wk ai pi` reaches your endpoint with",
         needs="reach your own LiteLLM endpoint",
         forbids="reach the upstream provider account directly",
         what="your LiteLLM API key, so `wk ai pi` in a workspace can reach "
@@ -638,7 +598,6 @@ RULES = collections.OrderedDict((
         store_with="wk key set litellm",
         check=_litellm_key)),
     ("tailnet", Rule(
-        spent_by="cmd/sysimage -- seeded onto every card written from here",
         needs="enroll a node on the tailnet",
         forbids="administer the tailnet or mint further keys",
         what="the fleet's tailnet auth key, so a card written here boots onto "
@@ -649,8 +608,6 @@ RULES = collections.OrderedDict((
         store_with="wk key set tailnet",
         check=_tailnet_authkey)),
     ("tailnet-api", Rule(
-        spent_by="lib/wk/tailnet.py -- retiring the offline fleet node whose name "
-                 "a new card needs",
         needs="list and delete devices on this tailnet",
         forbids="be written to a card or reach a workspace: it administers "
                 "the whole tailnet",
@@ -661,8 +618,6 @@ RULES = collections.OrderedDict((
         store_with="wk key set tailnet-api",
         check=_tailnet_api)),
     ("deploy-key", Rule(
-        spent_by="lib/wk/secrets.py agent_load -- loaded into the ssh-agent a "
-                 "workspace reaches while `wk key push` is on",
         needs="push to exactly one fork",
         forbids="reach any other repository, or be read-only",
         what="an ed25519 key per fork, generated here and never pasted",
@@ -671,7 +626,6 @@ RULES = collections.OrderedDict((
         store_with="wk key deploy",
         check=_deploy_key)),
     ("ntfy", Rule(
-        spent_by="lib/wk/notify.py -- the topic `send` publishes a headline to",
         needs="publish a notification a person sees",
         forbids="be a name someone could arrive at by guessing: the topic is "
                 "the whole credential, so anyone holding it reads every "
@@ -699,7 +653,7 @@ def check(name, repos, path, evidence):
     verdict, detail = rule.check(value, repos, path, evidence)
     if verdict == BAD:
         detail = ("%s\n    it must %s, and must not %s\n    fix: %s -- then: %s%s"
-                  % (detail, rule.needs, rule.forbids, fix_of(rule, repos),
+                  % (detail, rule.needs, rule.forbids, fix_of(rule),
                      rule.store_with, " --replace" if path else ""))
     sys.stdout.write("%s\t%s\n" % (verdict, detail))
     return 0
@@ -719,14 +673,13 @@ def _minted():
     return [n for n, r in RULES.items() if r.mint]
 
 
-def rule(name, repos):
+def rule(name):
     r = RULES.get(name)
     if r is None:
         return 2
     for field in FIELDS:
-        sys.stdout.write("%s\t%s\n" % (field, _resolved(getattr(r, field),
-                                                         repos)))
-    sys.stdout.write("fix\t%s\n" % fix_of(r, repos))
+        sys.stdout.write("%s\t%s\n" % (field, getattr(r, field)))
+    sys.stdout.write("fix\t%s\n" % fix_of(r))
     return 0
 
 
@@ -736,13 +689,12 @@ def main(argv):
     verbs.add_parser("names", help="every credential wk holds")
     verbs.add_parser("minted", help="the ones wk mints itself")
     verbs.add_parser("mint", help="mint one").add_argument("name")
-    for verb in ("rule", "check"):
-        v = verbs.add_parser(verb, help="the rule for <name>" if verb == "rule" else "the verdict on the value")
-        v.add_argument("name")
-        v.add_argument("--repos", default="", help="the forks, as '<owner/repo> ...'")
-        if verb == "check":
-            v.add_argument("--path", default="", help="where it is kept: an empty value is then absent")
-            v.add_argument("--evidence", action="append", default=[], metavar="KEY=VALUE")
+    verbs.add_parser("rule", help="the rule for <name>").add_argument("name")
+    v = verbs.add_parser("check", help="the verdict on the value")
+    v.add_argument("name")
+    v.add_argument("--repos", default="", help="the forks, as '<owner/repo> ...'")
+    v.add_argument("--path", default="", help="where it is kept: an empty value is then absent")
+    v.add_argument("--evidence", action="append", default=[], metavar="KEY=VALUE")
     a = p.parse_args(argv)
     if a.verb in ("names", "minted"):
         sys.stdout.write("".join(n + "\n" for n in (RULES if a.verb == "names" else _minted())))
@@ -750,7 +702,7 @@ def main(argv):
     if a.verb == "mint":
         return mint(a.name)
     if a.verb == "rule":
-        return rule(a.name, a.repos.split())
+        return rule(a.name)
     return check(a.name, a.repos.split(), a.path, dict(e.partition("=")[::2] for e in a.evidence))
 
 

@@ -5,63 +5,30 @@
 # wk: where=host name=none group=hosts needs quiesce-helper takes=1 verbs=on,off,status,session default=status dryrun on,off
 # wk: readonly status
 # wk: sub status needs=
-# wk: sub session takes=2 needs= opts=--bmc,--mirror dryrun=yes
+# wk: sub session takes=2 needs= opts=--bmc dryrun=yes
 # wk: sub session on,gdm,off needs=quiesce-helper
 # wk: sub session status readonly=yes
 #
-# Privileged actions go through the sudoers-allowlisted helper (wk-quiesce-priv);
-# everything else stays here.
+# Privileged actions go through the sudoers-allowlisted helper (wk-quiesce-priv).
 #
-#   on      quiet the machine for the length of a run and no longer: stop
-#           every process in bench/quiet/macos.tsv's table -- the agents a
-#           login session starts and the background daemons alike -- disable
-#           App Nap, keep MiniBrowser frontmost and the display awake (macOS).
-#           In bench mode it also writes this account's desktop settings, which
-#           a first boot cannot make hold for an account with no session yet.
-#           Settles for WK_SETTLE_SECONDS (default 30) before returning.
-#   off     undo everything `on` did, reading this machine's one state
-#           directory.
-#   status  what is quiesced right now, plus the privileged helper's own
-#           account of what it did.
+#   on      quiet the machine for one run: stop every process in
+#           bench/quiet/macos.tsv, disable App Nap, keep MiniBrowser frontmost
+#           and the display awake (macOS); in bench mode also write this
+#           account's desktop settings. Settles for WK_SETTLE_SECONDS
+#           (default 30) before returning.
+#   off     undo everything `on` did.
+#   status  what is quiesced now, and the helper's own account of it.
 #
-#   What a measured Mac is permanently is written at provisioning time
-#   (`wk sysimage build <profile> --provision`); `status` reports both.
+#   session on [--bmc]   the benchmark session: cage alone on seat0. A no-op
+#                when someone is logged in or the mode is already running.
+#   session gdm [--bmc]  a desktop to log into instead of the kiosk.
+#   session off  outputs modeset off, a placeholder compositor holding the
+#                device so fbcon cannot repaint them; `session gdm` undoes it.
+#   session status   unit, socket, display manager and DRM state.
 #
-#   session ...   a real graphical session on real hardware (Linux), below.
-#
-# GPU benchmarks need a real DRM session on real hardware: Speedometer and
-# MotionMark under llvmpipe, or headless, are a different measurement.
-#
-#   session on [--bmc]   the benchmark session: a single-client kiosk compositor
-#                (cage), nothing else on seat0. A no-op if someone is already
-#                logged in, or if the wanted mode is already running.
-#                Unattended (nobody logged in) it stops the display manager
-#                and starts cage; that is the only case needing privilege.
-#                --mirror is an accepted synonym for --bmc.
-#   session gdm [--bmc]  a real, loggable-into desktop instead of a kiosk, for
-#                debugging that needs more than one window.
-#   session off  the opposite of `on`/`gdm`: outputs modeset off (the CRTC
-#                disabled, not painted black -- a compositor painting black
-#                is still scanning out a lit signal) and a placeholder
-#                compositor left holding the device (so the kernel's fbcon
-#                can't repaint the now-masterless outputs on top). It does
-#                not bring anything back -- `wk quiesce session gdm` does that.
-#   session status   unit, socket, display manager and DRM state, read without
-#                privilege wherever possible.
-#
-# This machine has two DRM devices: the GPU, and the ASPEED BMC's display-only
-# `ast` chip, served over KVM-over-IP. The default session names the GPU alone;
-# --bmc moves the session onto the ast chip instead (software-rendered -- ast has
-# no render node) and the monitor goes dark. The mode is in /run/wk-session-mode.
-#
-# cage takes its device from WLR_DRM_DEVICES; gdm's mutter has none, so `gdm
-# --bmc` strips the GPU's seat-member udev tags instead. That only reaches a
-# compositor taking devices from logind (Wayland) -- NVIDIA's Xorg driver uses
-# /dev/nvidia* -- so both gdm modes force the greeter onto Wayland and check it.
-#
-# The compositor's Wayland socket is $XDG_RUNTIME_DIR/wk/display/wayland-0,
-# separate from the user runtime directory so a workspace can be handed the
-# socket without the session D-Bus socket next to it.
+#   --bmc moves the session from the GPU to the BMC's `ast` chip
+#   (software-rendered; the monitor goes dark). The compositor's socket is
+#   $XDG_RUNTIME_DIR/wk/display/wayland-0.
 
 import os
 import sys
@@ -95,7 +62,7 @@ def main(argv):
     args = decl.Args(decl.Decl(__file__), argv)
     verb = args.positionals[0]
     if verb == "session":
-        return graphical(args.positionals[1:], args.flag("--bmc") or args.flag("--mirror"))
+        return graphical(args.positionals[1:], args.flag("--bmc"))
     act.terminate_as_interrupt()
     q = quiet.Quiesce(ROOT, Local(), Clock(), os.environ)
     return getattr(q, verb)()

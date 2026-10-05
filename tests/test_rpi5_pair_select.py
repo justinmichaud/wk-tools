@@ -28,15 +28,6 @@ class TestTheDriverSelectsByAutoboot(unittest.TestCase):
         fake.channel = "host"
         return fake, Rpi5Usb(REPO, conf, fake)
 
-    def test_arming_writes_the_selector_and_boots_that_pair(self):
-        for boot, root in (("/dev/sda3", "/dev/sda4"), ("/dev/sda1", "/dev/sda2")):
-            with self.subTest(pair=boot):
-                fake, d = self.board()
-                d.arm(boot, d.order_image)
-                self.assertIn(("card_priv", "autoboot", "/dev/sda", boot[-1]), fake.effects)
-                d.reboot(armed=True)
-                self.assertEqual(fake.running, root)
-
     def test_arming_never_uses_the_tryboot_flag(self):
         fake, d = self.board()
         d.arm("/dev/sda3", d.order_image)

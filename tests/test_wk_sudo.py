@@ -7,8 +7,6 @@ nothing here runs a real one.
 Run: python3 tests/run.py -k tests.test_wk_sudo
 """
 
-import importlib.machinery
-import importlib.util
 import os
 import sys
 import unittest
@@ -16,23 +14,19 @@ from unittest import mock
 
 from tests.fakes import FakeRegistry, FakeDriver
 from tests.killpoints import converges
-from tests.support import REPO
+from tests.support import REPO, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import sudo  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import HAVE, Fake  # noqa: E402
-from wk.sudo import Sudo, timeout_desc, timeout_is_ours, timeout_secs  # noqa: E402
+from wk.sudo import Sudo  # noqa: E402
 
 CMD_KEY = REPO / "cmd" / "key"
 
 
 def _load_cmd():
-    loader = importlib.machinery.SourceFileLoader("wk_cmd_key_sudo_test", str(CMD_KEY))
-    spec = importlib.util.spec_from_file_location("wk_cmd_key_sudo_test", str(CMD_KEY), loader=loader)
-    m = importlib.util.module_from_spec(spec)
-    loader.exec_module(m)
-    return m
+    return load_cmd("key")
 
 
 cmd = _load_cmd()
@@ -79,19 +73,6 @@ class TestArgv(unittest.TestCase):
                 self.reached(argv)
 
 
-class TestTimeoutMath(unittest.TestCase):
-    def test_desc_and_secs_agree(self):
-        self.assertEqual(timeout_desc("0.5"), "30 seconds")
-        self.assertEqual(timeout_secs("0.5"), "30")
-
-    def test_is_ours_compares_numerically(self):
-        self.assertTrue(timeout_is_ours("0.5", "0.5"))
-        self.assertTrue(timeout_is_ours(".5", "0.50"))
-        self.assertFalse(timeout_is_ours("15", "0.5"))
-        self.assertFalse(timeout_is_ours("", "0.5"))
-        self.assertFalse(timeout_is_ours("unset", "0.5"))
-
-
 class TestVerdict(unittest.TestCase):
     """0 exactly when a password is required and the window is 30s or less."""
 
@@ -112,6 +93,10 @@ class TestVerdict(unittest.TestCase):
         rc, msg = Sudo(f, {"WK_SUDO_TIMEOUT_MIN": "0.5"}).verdict()
         self.assertEqual(rc, 0)
         self.assertIn("stricter", msg)
+
+    def test_a_never_expiring_timestamp_fails(self):
+        f = _fake(free=False, listing="    timestamp_timeout=-1\n\n" + LISTING_UNSET)
+        self.assertEqual(Sudo(f, {"WK_SUDO_TIMEOUT_MIN": "0.5"}).verdict()[0], 1)
 
     def test_unset_timeout_fails(self):
         f = _fake(free=False, listing=LISTING_UNSET)

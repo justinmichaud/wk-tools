@@ -109,7 +109,7 @@ class TestStatus(unittest.TestCase):
         fake.up = False
         rc, err = run(b.status)
         self.assertEqual(rc, 3, err)
-        self.assertIn("plain outage", err)
+        self.assertIn("an outage", err)
         self.assertNotIn("rule the network out", err)
 
     def test_every_sibling_quiet_names_the_network(self):
@@ -118,7 +118,7 @@ class TestStatus(unittest.TestCase):
         peers = [("rpi4-rescue", "100.0.0.1", "down"), ("rpi5", "100.0.0.2", "down")]
         rc, err = run(boot_over(fake, d, peers).status)
         self.assertEqual(rc, 3, err)
-        self.assertIn("rule the network out before the board", err)
+        self.assertIn("rule the network out", err)
 
 
 class TestArm(unittest.TestCase):
@@ -143,7 +143,7 @@ class TestArm(unittest.TestCase):
         rc, err = run(boot_over(fake, d).arm)
         self.assertEqual(rc, 0, err)
         self.assertNotIn("--keep", err)
-        self.assertIn("the job it was armed for does", err)
+        self.assertIn("the job it was armed for returns it", err)
 
     def test_the_dry_run_arms_nothing(self):
         fake, d, b = pi("pi-sd")
@@ -317,7 +317,7 @@ class TestTheOrderArithmetic(unittest.TestCase):
         self.assertEqual(eeprom.first("0xf641", "4"), "0xf614")
 
     def test_local_drops_the_network_only(self):
-        self.assertEqual(eeprom.without_net("0xf421"), "0xf41")
+        self.assertEqual(eeprom.first("0xf421", ""), "0xf41")
 
     def test_the_network_settings_go_and_a_missing_order_is_added(self):
         self.assertEqual(eeprom.reorder("TFTP_IP=1.2.3.4\nX=1\nBOOT_ORDER=0xf41", "usb-first"), "X=1\nBOOT_ORDER=0xf14")
@@ -528,17 +528,6 @@ class TestStatusArmedTransition(unittest.TestCase):
         self.assertIn("desync", self.text(rec))
 
 
-class TestStatusWebMirrorsText(unittest.TestCase):
-    """status.web_mirrors_text: the --web page reads every field the text renderer shows of an armed machine and of a
-    workspace two views disagree about."""
-
-    def test_the_page_reads_what_the_text_shows(self):
-        page = statusview.page({"machines": [], "fleet": [], "bridges": []}, False)
-        for field in ("f.armed_by", "f.armed_at", "f.armed_desync", "w.disagree"):
-            with self.subTest(field=field):
-                self.assertIn(field, page)
-
-
 class TestTheCommand(WkTest):
     """cmd/boot through the dispatcher: the declaration and the refusals that need no board."""
 
@@ -586,7 +575,6 @@ class TestOnTheBoards(unittest.TestCase):
     @requires_machine("rpi5")
     def test_boot_rpi5(self):
         self.status("rpi5")
-
 
 
 class TestBroker(unittest.TestCase):

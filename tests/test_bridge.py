@@ -5,98 +5,38 @@ import fnmatch
 import io
 import json
 import os
-import re
 import shlex
 import subprocess
 import sys
 import tarfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from tests.killpoints import converges
-from tests.support import REPO, WK, WkTest, live_selected, machine_reachable, real_confs, run
+from tests.support import REPO, WK, live_selected, machine_reachable, real_confs
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, bridge, reach  # noqa: E402
+from wk import act, bridge, images, reach  # noqa: E402
 from wk.bridge import plan, provision, role  # noqa: E402
 from wk.bridge.plan import AUTHKEY, LIB  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
-from wk.machine import HAVE  # noqa: E402
+from wk.machine import HAVE, Fake, Result  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.store import Store  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
 from wk.sysimage import pmos  # noqa: E402
 
 
-class TestBridge(WkTest):
-    def test_bridge_image_heads_are_distinguishable(self):
-        cp = run("sysimage", "ls")
-        a = b = None
-        for line in cp.stdout.splitlines():
-            first = line.split()[0] if line.split() else ""
-            if first.startswith("bridge-pinephone-"):
-                a = first
-            if first.startswith("recovery-pinephone-"):
-                b = first
-        if not a or not b:
-            self.skipTest("needs a bridge-pinephone and a recovery-pinephone image in the store")
-
-        def disk_path(image_id):
-            if os.uname().sysname == "Darwin":
-                root = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "wk"
-            else:
-                root = Path(os.environ.get("WK_STORE", "/var/lib/wk"))
-            return root / "images" / image_id / "disk.img"
-
-        pa, pb = disk_path(a), disk_path(b)
-        if not (pa.exists() and pb.exists()):
-            self.fail(f"one of the images has no disk.img: {pa} {pb}")
-        for p in (pa, pb):
-            with open(p, "rb") as f:
-                f.seek(8196)
-                self.assertEqual(f.read(8), b"eGON.BT0", f"{p} has no sunxi SPL at offset 8192")
-        import hashlib
-        with open(pa, "rb") as f:
-            ha = hashlib.sha256(f.read(1048576)).hexdigest()
-        with open(pb, "rb") as f:
-            hb = hashlib.sha256(f.read(1048576)).hexdigest()
-        self.assertNotEqual(ha, hb, "the two images' first mebibytes are identical")
-        self.assertNotEqual(ha, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
-
-    def test_bridge_pmos_profiles_declare_bands(self):
-        bad = []
-        for prof in ("bridge-pinephone", "bridge-librem5"):
-            cp = run("sysimage", "build", prof, "--dry-run")
-            if cp.returncode != 0:
-                bad.append(f"{prof}: --dry-run does not resolve: {cp.stdout + cp.stderr}")
-                continue
-            if not re.search(r"(?m)^  radio ", cp.stdout):
-                bad.append(f"{prof}: its dry run names no radio bands")
-        self.assertEqual(bad, [], "; ".join(bad))
-
-    def test_bridge_profiles_match_bridge_confs(self):
-        bad = []
-        for prof in ("bridge-pinephone", "bridge-librem5"):
-            cp = run("sysimage", "build", prof, "--dry-run")
-            out = cp.stdout
-            self.assertEqual(cp.returncode, 0, f"{prof}: does not resolve: {out + cp.stderr}")
-            dev_m = re.search(r"(?m)^  device *(\S+)", out)
-            br_m = re.search(r"(?m)^  for bridge *(\S+)", out)
-            if not dev_m:
-                bad.append(f"{prof}: the dry run names no device")
-                continue
-            device = dev_m.group(1)
-            bridge = br_m.group(1) if br_m else ""
-            conf = REPO / "machines" / f"{bridge}.conf"
-            if not conf.exists():
-                bad.append(f"{prof}: names bridge '{bridge}', which has no conf")
-                continue
-            decl_m = re.search(r"(?m)^device=(.*)$", conf.read_text())
-            declared = decl_m.group(1) if decl_m else ""
-            if declared not in device:
-                bad.append(f"{prof}: builds for '{device}' but {bridge}.conf says device={declared}")
-        self.assertEqual(bad, [], "; ".join(bad))
+class TestImageProfiles(unittest.TestCase):
+    def test_each_bridge_image_profile_builds_for_its_bridges_device_and_declares_its_bands(self):
+        env = dict(os.environ, WK_ROOT=str(REPO))
+        profiles = [images.quiet_load(n, env) for n in images.names(env)]
+        bridged = [p for p in profiles if p and p["IMG_BUILDER"] == "pmos" and p["PMO_BRIDGE"]]
+        self.assertTrue(bridged)
+        for p in bridged:
+            with self.subTest(bridge=p["PMO_BRIDGE"]):
+                conf = bridge.Bridge(REPO, env=MACHINES_ENV).conf(p["PMO_BRIDGE"])
+                self.assertIn(conf.device, p["PMO_DEVICE"])
+                self.assertTrue(p["PMO_WIFI_BANDS"])
 
 
 def ts_status(**over):
@@ -141,30 +81,22 @@ class TestJudge(unittest.TestCase):
     def test_every_check_passing_reports_no_failure(self):
         report = bridge.judge(GOOD_FACTS, bridge_conf())
         self.assertFalse(report.failed, report.rows)
+        self.assertNotIn(("hdr", "Camera"), report.rows)
 
-    def test_no_carrier_fails_and_names_the_cable(self):
-        report = bridge.judge(dict(GOOD_FACTS, seg_carrier="0"), bridge_conf())
-        self.assertTrue(report.failed)
-        self.assertTrue(any("no carrier" in t for lvl, t in report.rows if lvl == "bad"))
-
-    def test_a_missing_interface_fails_and_names_the_dock_not_the_cable(self):
-        facts = dict(GOOD_FACTS, seg_iface_exists="no", seg_typec_role="")
-        facts.pop("seg_carrier", None)
-        report = bridge.judge(facts, bridge_conf())
-        self.assertTrue(report.failed)
-        self.assertTrue(any("missing" in t for lvl, t in report.rows if lvl == "bad"))
-        self.assertFalse(any("no carrier" in t for lvl, t in report.rows if lvl == "bad"))
-
-    def test_an_unapproved_route_fails_by_segment_name(self):
-        report = bridge.judge(dict(GOOD_FACTS, ts_status_json=ts_status(PrimaryRoutes=[])), bridge_conf())
-        self.assertTrue(report.failed)
-        self.assertTrue(any("no approved subnet route" in t for lvl, t in report.rows if lvl == "bad"))
-
-    def test_camera_is_only_reported_when_declared(self):
-        off = bridge.judge(GOOD_FACTS, bridge_conf())
-        self.assertFalse(any(t == "Camera" for lvl, t in off.rows if lvl == "hdr"))
-        on = bridge.judge(dict(GOOD_FACTS, camera_device="no"), bridge_conf(camera="http"))
-        self.assertTrue(any(t == "Camera" for lvl, t in on.rows if lvl == "hdr"))
+    def test_each_fault_fails_and_names_itself(self):
+        no_iface = dict(GOOD_FACTS, seg_iface_exists="no", seg_typec_role="")
+        del no_iface["seg_carrier"]
+        for facts, conf, says in (
+                (dict(GOOD_FACTS, seg_carrier="0"), {}, "no carrier"),
+                (no_iface, {}, "lan0 missing"),
+                (dict(GOOD_FACTS, ts_status_json=ts_status(PrimaryRoutes=[])), {}, "no approved subnet route"),
+                (dict(GOOD_FACTS, svc_nm="stopped"), {}, "networkmanager is not running"),
+                (dict(GOOD_FACTS, camera_device="yes"), {"camera": "http"}, "the stream is not running")):
+            with self.subTest(says=says):
+                report = bridge.judge(facts, bridge_conf(**conf))
+                self.assertTrue(report.failed)
+                self.assertTrue([t for lvl, t in report.rows if lvl == "bad" and says in t], report.rows)
+        self.assertNotIn("no carrier", str(bridge.judge(no_iface, bridge_conf()).rows))
 
 
 MACHINES_ENV = {"WK_MACHINES_DIR": str(REPO / "machines"), "HOME": "/nonexistent-wk-bridge-test-home",
@@ -231,26 +163,13 @@ class TestResolve(unittest.TestCase):
 
 
 class TestLsRow(unittest.TestCase):
-    def row(self, reactor):
-        fake = Fake("phone")
-        fake.react(["ssh"], reactor)
-        b = bridge.Bridge(REPO, env=MACHINES_ENV, machine=fake)
-        return b.ls_row("tailnet-bridge-generic")
-
-    def test_a_provisioned_bridge_is_reported_provisioned(self):
-        def reactor(argv, fake):
-            return Result(0) if argv[-1] in ("true", "test -e /etc/wk-bridge.conf") else Result(255, "", "")
-        self.assertEqual(self.row(reactor)["state"], "provisioned")
-
-    def test_an_up_bridge_with_no_role_is_bare(self):
-        def reactor(argv, fake):
-            return Result(0) if argv[-1] == "true" else Result(1, "", "")
-        self.assertEqual(self.row(reactor)["state"], "bare")
-
-    def test_a_refused_key_is_reported_key_changed_not_unreachable(self):
-        def reactor(argv, fake):
-            return Result(255, "", "Host key verification failed.")
-        self.assertEqual(self.row(reactor)["state"], "key-changed")
+    def test_the_state_is_what_ssh_and_the_role_file_say(self):
+        for ok, err, state in ((("true", "test -e /etc/wk-bridge.conf"), "", "provisioned"), (("true",), "", "bare"),
+                               ((), "Host key verification failed.", "key-changed"), ((), "No route to host", "unreachable")):
+            fake = Fake("phone")
+            fake.react(["ssh"], lambda argv, f, ok=ok, err=err: Result(0) if argv[-1] in ok else Result(255, "", err))
+            with self.subTest(state=state):
+                self.assertEqual(bridge.Bridge(REPO, env=MACHINES_ENV, machine=fake).ls_row("tailnet-bridge-generic")["state"], state)
 
 
 class TestBattery(unittest.TestCase):
@@ -434,24 +353,15 @@ class TestPlan(unittest.TestCase):
                     p = plan.Plan(f.stem, c, facts)
                     self.assertTrue(plan.bundle(REPO, p))
 
-    def test_rm_removes_every_path_a_setup_can_render(self):
-        w = PhoneWorld()
-        script = w.role().deprovision(w.role().b.conf(BMC))
-        rendered = plan.Plan(BMC, self.conf(), bridge.kv(FACTS)).paths()
-        self.assertTrue(rendered)
-        for path in rendered:
-            self.assertIn(path, script)
-
-    def test_nat_egress_masquerades_and_serves_dns(self):
-        p = plan.Plan(BMC, self.conf(egress="nat"), bridge.kv(FACTS))
-        files = {path: text for path, _m, text in p.files}
-        self.assertIn("masquerade", files["/etc/nftables.d/wk-bridge.nft"])
-        self.assertIn("dhcp-option=option:dns-server,10.99.0.1", files["/etc/dnsmasq.d/wk-bridge.conf"])
-
-    def test_no_egress_forwards_nothing_out_and_serves_no_dns(self):
-        files = {path: text for path, _m, text in plan.Plan(BMC, self.conf(), bridge.kv(FACTS)).files}
-        self.assertNotIn("masquerade", files["/etc/nftables.d/wk-bridge.nft"])
-        self.assertIn("port=0\n", files["/etc/dnsmasq.d/wk-bridge.conf"])
+    def test_nat_egress_masquerades_and_serves_dns_and_none_does_neither(self):
+        def files(**over):
+            return {path: text for path, _m, text in plan.Plan(BMC, self.conf(**over), bridge.kv(FACTS)).files}
+        nat, none = files(egress="nat"), files()
+        self.assertIn("masquerade", nat["/etc/nftables.d/wk-bridge.nft"])
+        self.assertIn("dhcp-option=option:dns-server,10.99.0.1", nat["/etc/dnsmasq.d/wk-bridge.conf"])
+        self.assertIn("dhcp-range=10.99.0.2,10.99.0.2,255.255.255.0,infinite", nat["/etc/dnsmasq.d/wk-bridge.conf"])
+        self.assertNotIn("masquerade", none["/etc/nftables.d/wk-bridge.nft"])
+        self.assertIn("port=0\n", none["/etc/dnsmasq.d/wk-bridge.conf"])
 
     def test_no_adapter_means_no_rename_and_a_warning(self):
         p = plan.Plan(BMC, self.conf(), dict(bridge.kv(FACTS), lan_mac=""))
@@ -499,10 +409,6 @@ class TestSetup(RoleTest):
         self.assertIn(JOINED, w.fake.files)
         self.assertNotIn(AUTHKEY, w.fake.files)
         self.assertIn('"autoApprovers"', out)
-
-    def test_the_auth_key_never_reaches_argv(self):
-        w = PhoneWorld()
-        quiet(w.role().setup, BMC)
         self.assertFalse([a for a in w.argvs() + [e[1] for e in w.here.effects if e[0] == "run"] if KEY in " ".join(a)])
 
     def test_a_setup_killed_after_any_effect_and_rerun_converges(self):
@@ -726,17 +632,13 @@ class TestProvision(RoleTest):
             (row,) = provision.rubble(store, here, lock)
         self.assertTrue(row.why)
 
-    def test_image_and_rebuild_need_a_disk_and_contradict_each_other(self):
-        w = self.world()
-        for kw in ({"image": "/x.img"}, {"rebuild": True}, {"disk": DISK, "image": "/x.img", "rebuild": True}):
-            with self.subTest(**kw):
-                self.assertEqual(quiet(w.role().setup, BMC, **kw)[0], 1)
-        self.assertEqual(self.children(w), [])
-
-    def test_a_disk_that_is_not_machine_colon_device_is_refused(self):
+    def test_contradictory_or_malformed_write_flags_are_refused_before_anything_runs(self):
         w = self.world()
         with mock.patch.dict(os.environ, {"WK_YES": "1"}):
-            self.assertEqual(quiet(w.role().setup, BMC, disk="/dev/sda")[0], 1)
+            for kw in ({"image": "/x.img"}, {"rebuild": True}, {"disk": DISK, "image": "/x.img", "rebuild": True},
+                       {"disk": "/dev/sda"}):
+                with self.subTest(**kw):
+                    self.assertEqual(quiet(w.role().setup, BMC, **kw)[0], 1)
         self.assertEqual(self.children(w), [])
 
     def test_the_wait_tries_the_names_each_tick_and_sweeps_once_a_minute(self):

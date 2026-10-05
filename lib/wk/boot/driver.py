@@ -3,6 +3,7 @@
 import copy
 import os
 import re
+import shlex
 import time
 
 from wk import act, reach as wkreach, record as wkrecord
@@ -29,21 +30,28 @@ def partno(p):
 
 
 class Onboard:
-    """A boot/onboard/ file verbatim, led by its `KEY=value; ` parameters; continuations joined: an ExecStart takes one line."""
+    """A boot/onboard/ file verbatim, led by its `KEY=value; ` parameters and `lead`'s files; continuations joined: an
+    ExecStart takes one line. A parameter is one literal word, or shell-quoted where `quote` (a Mac takes any string)."""
 
-    def __init__(self, root, name, **params):
+    quote = False
+    where = os.path.join("boot", "onboard")
+
+    def __init__(self, root, name, lead=(), **params):
         for k, v in params.items():
-            if not SAFE.match(str(v)):
+            if not (self.quote or SAFE.match(str(v))):
                 raise ValueError("%s=%r is not one word both a board's shell and a systemd ExecStart read literally" % (k, v))
-        self.root, self.name, self.params = str(root), name, params
+        self.root, self.name, self.params, self.lead = str(root), name, params, tuple(lead)
 
-    def path(self):
-        return os.path.join(self.root, "boot", "onboard", self.name)
+    def path(self, name=None):
+        return os.path.join(self.root, self.where, name or self.name)
 
     def text(self):
-        with open(self.path()) as f:
-            body = f.read().replace("\\\n", "").rstrip("\n")
-        return "".join("%s=%s; " % kv for kv in sorted(self.params.items())) + body
+        body = []
+        for path in [self.path(n) for n in self.lead] + [self.path()]:
+            with open(path) as f:
+                body.append(f.read().replace("\\\n", "").rstrip("\n"))
+        q = shlex.quote if self.quote else str
+        return "".join("%s=%s; " % (k, q(str(v))) for k, v in sorted(self.params.items())) + "\n".join(body)
 
 
 class Channel:
@@ -64,7 +72,6 @@ class Channel:
         return self._reach
 
     def here(self):
-        """Standing on ssh, by `hostname -s`: a machine drives itself only from its own keyboard."""
         if self._here is None:
             self._here = bool(self.c("ssh")) and wkrecord.host_name(self.via) == self.c("ssh").lower()
         return self._here
@@ -82,7 +89,7 @@ class Channel:
         return found.split()[0] if found else self.c("ssh") or self.c("name")
 
     def opts(self, fn):
-        """Root on a bench system whatever the role, a person on a workstation's host mode; host keys are never pinned."""
+        # Root on a bench system whatever the role, a person on a workstation's host mode.
         return ["-l", "root"] + wkreach.UNPINNED if fn == "i_ssh" or self.c("role") == "bench-device" else []
 
     def machine(self, fn):
@@ -109,7 +116,6 @@ class Channel:
         return {"host": "m_ssh", "bench": "i_ssh"}.get(channel, "")
 
     def is_root(self):
-        """Privilege follows the channel that answered: a bench system is root, a bench machine's host mode its rescue."""
         return self.channel == "bench" or self.c("role") == "bench-device"
 
     def run(self, fn, argv, input=None, mutates=False):
@@ -134,10 +140,9 @@ class Channel:
     def boot_priv_require(self):
         if self.is_root() or self.boot_priv("status").ok:
             return Result(0)
-        act.die("%s cannot be armed: its boot helper is missing, or its sudoers\n    rule is not in force. A workstation is "
-                "driven as a person and wk takes no\n    passwordless sudo on one beyond its named helpers, so there is "
-                "deliberately\n    no second way in.\n    What fails:  sudo -n %s status\n    The remedy, from a terminal on %s:  "
-                "./setup --stage quiesce" % (self.c("name"), BOOT_PRIV, self.c("name")))
+        act.die("%s cannot be armed: its boot helper is missing or its sudoers rule is not in force.\n"
+                "    What fails:  sudo -n %s status\n    The remedy, from a terminal on %s:  ./setup --stage quiesce"
+                % (self.c("name"), BOOT_PRIV, self.c("name")))
 
     def disk_unmount(self, dev):
         if self.sudo([CARD_PRIV, "unmount", dev], mutates=True).ok:
@@ -160,8 +165,6 @@ class Channel:
             return self.boot_priv_require()
         if fn == "disk_unmount":
             return self.disk_unmount(*args)
-        if fn == "image_addr":
-            return Result(0, self.image_addr())
         raise ValueError("no transport call '%s'" % fn)
 
 
@@ -181,7 +184,6 @@ class Driver:
     system_parts = (1,)
     failsafe = None
     selects_by_partition = False
-    disarms = False
 
     def __init__(self, root, conf, ch, mode=""):
         self.root, self.conf, self.ch, self.mode = str(root), conf, ch, mode
@@ -206,8 +208,7 @@ class Driver:
         return self.ch.call("card_priv", *args, mutates=mutates)
 
     def facts(self):
-        return {"arming": self.arming, "arm_from_bench": "yes" if self.arm_from_bench else "no",
-                "order_image": self.order_image, "order_normal": self.order_normal, "record": RECORD}
+        return {"arming": self.arming, "record": RECORD}
 
     # -- what is running
     def probeable(self):
@@ -236,7 +237,7 @@ class Driver:
         return self.mode
 
     def system_kind(self, rootdev):
-        """root first: on a one-medium board (rpi3) both prefixes match."""
+        # root first: on a one-medium board (rpi3) both prefixes match.
         for key, kind in (("root", "base"), ("device", "bench")):
             if rootdev and self.c(key) and rootdev.startswith(self.c(key)):
                 return kind
@@ -272,7 +273,7 @@ class Driver:
         return r.ok and r.out.replace("\r", "").strip() == "no"
 
     def medium_read(self, p, name):
-        """"" for a file the partition lacks, None when unreadable; a bench machine mounts its own medium."""
+        """"" for a file the partition lacks, None when unreadable."""
         if self.c("role") == "bench-device":
             r = self.sudo("medium-read.sh", WK_PART=p, WK_FILE=name)
             return r.out if r.ok else None
@@ -281,8 +282,7 @@ class Driver:
             return r.out
         if self.part_absent(p):
             return ""
-        act.warn("%s could not read %s off %s.\n    Its card helper is older than this verb, or its sudoers rule is not in\n"
-                 "    force; a workstation has no second way to reach the medium.\n"
+        act.warn("%s could not read %s off %s: its card helper is older than this verb, or its sudoers rule is not in force.\n"
                  "    What fails:  sudo -n %s boot-read ...\n"
                  "    The remedy, from a terminal on %s:  ./setup --stage quiesce" % (self.c("name"), name, p, CARD_PRIV, self.c("name")))
         return None
@@ -306,7 +306,7 @@ class Driver:
         return ident if [i for _, i in systems].count(ident) == 1 else "%s@%s" % (ident, self.slot(p))
 
     def select_system(self, want):
-        """The (boot partition, id) `wk boot --system <want>` arms; <want> is <id>, <id>@<slot> or @<slot>."""
+        """The (boot partition, id) `--system <id>[@<slot>]` names."""
         systems = self.systems()
         name, dev = self.c("name"), self.c("device")
         if systems is None:
@@ -331,7 +331,6 @@ class Driver:
                 "    (a medium already holding a system takes a second one at ...:%s@second)" % (dev, name, listing, want, name, dev, dev))
 
     def diag(self):
-        """Every system's own dump: after a failed boot of the second, the first one's is the stale one."""
         systems = self.systems()
         dev = self.c("device")
         if systems is None:
@@ -355,9 +354,8 @@ class Driver:
 
     def reboot_tryboot(self):
         if not self.run("has-systemd.sh").ok:
-            act.die("%s answered on a system with no systemd, which cannot pass the\n    tryboot flag to the reboot it rides on "
-                    "(only 'systemctl reboot' with\n    /run/systemd/reboot-param does). Arm from a system that can:\n"
-                    "        wk boot %s --back" % (self.c("name"), self.c("name")))
+            act.die("%s answered on a system with no systemd, which cannot pass the tryboot flag to its reboot.\n"
+                    "    Arm from a system that can:  wk boot %s --back" % (self.c("name"), self.c("name")))
         return self.ch.call("boot_priv", "reboot-tryboot", mutates=True).rc
 
     def disarm(self):
@@ -404,19 +402,16 @@ class Driver:
         return self.record("record-clear.sh", mutates=True).rc
 
     def armed_barrier(self, what):
-        """Between `wk boot` and its reboot, the filesystem answering ssh is not the one about to run."""
+        # Between `wk boot` and its reboot, the filesystem answering ssh is not the one about to run.
         name = self.c("name")
         mode = self.mode or self.probe()
         if mode in ("", "unreachable"):
-            act.barrier("could not tell what %s is running, so whether it is armed for a\n    one-shot boot is unknown -- and if it is, "
-                        "the filesystem answering ssh is\n    not the one about to run:\n    %s\n    Ask from a machine that can reach it:  "
-                        "wk boot %s --status\n    A board in bench mode answers a workspace; one in host mode answers only a\n    workstation."
-                        % (name, what, name))
+            act.barrier("could not tell what %s is running, so whether it is armed for a one-shot boot is unknown:\n    %s\n"
+                        "    Ask from a machine that can reach it:  wk boot %s --status" % (name, what, name))
             return
         if mode != "host":
             return
-        rec = self.record_read()
-        d = kv(rec)
+        d = kv(self.record_read())
         image, armed_boot = d.get("image", ""), d.get("armed_boot_id", "")
         if not image:
             return
@@ -425,10 +420,4 @@ class Driver:
             return
         act.barrier("%s is armed for system '%s' and has not rebooted yet.\n    %s\n    Disarm it first:   wk boot %s --disarm\n"
                     "    Or see the state:  wk boot %s --status" % (name, image, what, name, name))
-
-
-def interface():
-    return ("probeable", "probe", "system_kind", "boot_id", "booted_at", "display", "watchdog_present", "systems",
-            "select_system", "diag", "arm", "reboot", "disarm", "disarm_note", "self_disarm_sh", "media", "evidence",
-            "reprovision", "record_write", "record_read", "record_clear", "armed_barrier")
 

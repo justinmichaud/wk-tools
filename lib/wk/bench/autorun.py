@@ -16,6 +16,7 @@ if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from wk import act, images, screen  # noqa: E402
+from wk.bench.board_ab import interleave  # noqa: E402
 from wk.bench.mac import AGENT, CHECK, MARKER, WKMAC  # noqa: E402
 from wk.bench.pipeline import VARIANCE  # noqa: E402
 from wk.boot.mac import BENCH_ROOT  # noqa: E402
@@ -68,8 +69,9 @@ class Autorun:
         self.runs = ""
         self.job = {}
 
-    def say(self, msg):
-        self.out.write("[%s] %s\n" % (self.clock.iso(), msg))
+    def say(self, *lines):
+        for msg in lines:
+            self.out.write("[%s] %s\n" % (self.clock.iso(), msg))
         self.out.flush()
 
     def state(self):
@@ -81,9 +83,10 @@ class Autorun:
     def state_get(self, key):
         return self.state().get(key, "")
 
-    def state_set(self, key, value):
+    def state_set(self, key=None, value=None, **more):
+        new = dict(more, **({key: value} if key else {}))
         with self.lock:
-            rows = [(k, v) for k, v in self.state().items() if k != key] + [(key, str(value))]
+            rows = [(k, v) for k, v in self.state().items() if k not in new] + [(k, str(v)) for k, v in new.items()]
             self.m.write(self.state_path, "".join("%s=%s\n" % r for r in rows))
             self.m.act_run(["sync"])   # the next thing this has to survive is an ungraceful reboot
 
@@ -157,9 +160,8 @@ class Autorun:
             node = kv(self.m.read(self.root + "/tailnet/tailnet.conf")).get("hostname") or "<the bench node>"
         except OSError:
             node = "<the bench node>"
-        self.say("no number came out of this boot. Holding the machine here for %ds," % self.hold_secs)
-        self.say("  where it is reachable and host mode would not be:")
-        self.say("    ssh %s tail -120 %s" % (node, self.log_path))
+        self.say("no number came out of this boot. Holding the machine here for %ds, reachable as host mode would not be:"
+                 % self.hold_secs, "    ssh %s tail -120 %s" % (node, self.log_path))
         self.pause(self.hold_secs)
 
     def leave(self, why):
@@ -176,14 +178,13 @@ class Autorun:
             self.sudo("bless", "--mount", host, "--setBoot")
             got = self.wkmac("boot-volume").out.strip().split(":")[-1]
             if want and got == want:
-                self.say("handing the machine back: %s" % why)
-                self.say("  the firmware now names %s, so this reboot comes up in host mode" % host)
+                self.say("handing the machine back: %s" % why, "  the firmware now names %s, so this reboot comes up in host mode" % host)
                 self.m.act_run(["sync"])
                 if not self.sudo("/sbin/reboot"):
                     self.say("WARNING: could not reboot")
                 return
-            self.say("  the firmware still names this volume (reads '%s', wanted '%s')" % (got or "nothing", want or "unreadable"))
-            self.say("  so it powers off instead: a reboot would land back here and measure again.")
+            self.say("  the firmware still names this volume (reads '%s', wanted '%s'), so it powers off: a reboot would measure again"
+                     % (got or "nothing", want or "unreadable"))
         else:
             self.say("  no single host install is mounted, so there is nothing to hand back to")
         self.say("powering off: %s" % why)
@@ -196,8 +197,7 @@ class Autorun:
         if attempt_back:
             self.state_set("attempts", int(self.state_get("attempts") or 1) - 1)
         if outcome:
-            self.state_set("phase", "done")
-            self.state_set("outcome", outcome)
+            self.state_set(phase="done", outcome=outcome)
         if agent:
             self.remove_agent()
         self.leave(why)
@@ -221,8 +221,7 @@ class Autorun:
     def stand_aside_if_provisioning(self):
         if not self.running("-f", "wk-bench-firstboot"):
             return
-        self.say("provisioning is running right now -- standing aside so it can finish.")
-        self.say("  It reboots at the end, and this agent starts again on that boot.")
+        self.say("provisioning is running right now -- standing aside; it reboots at the end, and this agent starts again then")
         self.stay = True
         raise Stop(0)
 
@@ -253,8 +252,7 @@ class Autorun:
             self.say("no job at %s -- nothing to run" % self.job_path)
             self.quit("no job", agent=True)
         if self.state_get("phase") == "done":
-            self.say("the job is already finished, and this volume booted again -- so it is the")
-            self.say("firmware default. Powering off rather than looping.")
+            self.say("the job is already finished and this volume, the firmware default, booted again: powering off rather than looping")
             self.quit("job already complete", agent=True)
         attempts = int(self.state_get("attempts") or 0) + 1
         self.state_set("attempts", attempts)
@@ -274,11 +272,10 @@ class Autorun:
         self.display, self.rehearsal = f("display"), f("rehearsal")
         self.say("job: plans=%s rounds=%d-%d detect=%s%% arms=%d timeout=%ds count=%d" % (
             " ".join(self.plans), self.rounds, self.max_rounds, self.detect, self.n_arms, self.timeout, self.count))
-        self.say("     variance: " + " ".join("%s=%s" % (k, f(k) or "unset") for k, _ in VARIANCE))
-        self.say("     wk-tools=%s  display=%s" % (self.tools, self.display or "unpinned"))
+        self.say("     variance: " + " ".join("%s=%s" % (k, f(k) or "unset") for k, _ in VARIANCE),
+                 "     wk-tools=%s  display=%s" % (self.tools, self.display or "unpinned"))
         if self.rehearsal:
-            self.say("     REHEARSAL: every leg is forced past its own preflight, and every number")
-            self.say("     it takes is recorded as forced. This measures the path, not the machine.")
+            self.say("     REHEARSAL: every leg is forced past its preflight and recorded as forced; it measures the path, not the machine")
         self.runs = "%s/ab/%s" % (self.root, self.state_get("job_stamp") or "unstamped")
         self.m.mkdir(self.runs)
 
@@ -295,8 +292,7 @@ class Autorun:
             if quiet < self.stall:
                 continue
             self.say("WATCHDOG FIRED -- nothing written for %ds; the run is not coming back" % quiet)
-            self.state_set("phase", "done")
-            self.state_set("outcome", "watchdog")
+            self.state_set(phase="done", outcome="watchdog")
             self.summarise()
             self.leave("watchdog: nothing written for %ds" % quiet)
             return
@@ -311,16 +307,15 @@ class Autorun:
         """The panel is a load on the package the browser runs on, so it goes down before anything that can stall."""
         r = self.m.act_run(["python3", self.tool(WKMAC), "brightness", "--set", "0"])
         if not r.ok:
-            self.say("the display would not go to minimum brightness (rc=%d, read back '%s')." % (r.rc, r.out.strip() or "nothing"))
-            self.say("  A backlight that varies is a load that varies, so nothing runs.")
+            self.say("the display would not go to minimum brightness (rc=%d, read back '%s'), and a varying backlight is a varying load"
+                     % (r.rc, r.out.strip() or "nothing"))
             self.quit("the display would not dim")
         self.say("display at minimum brightness (reads %s)" % r.out.strip())
 
     def refuse_unpinned_display(self):
         if self.display:
             return
-        self.say("the job names no display, so what a round would be measured at is unknown.")
-        self.say("  From host mode: set display in machines/mbp.conf, then plant again.")
+        self.say("the job names no display; from host mode set display in machines/mbp.conf, then plant again")
         self.quit("the job names no display", outcome="no-display-expectation", agent=True)
 
     def hold_auto_brightness(self):
@@ -331,8 +326,7 @@ class Autorun:
             return self.say("ambient light: compensation off (read back)")
         if got == "none":
             return self.say("ambient light: this panel has no sensor to hold")
-        self.say("ambient light: still reads '%s' (rc=%d) after being turned off." % (got or "nothing", r.rc))
-        self.say("  A brightness the sensor can raise again is a load that varies, so nothing runs.")
+        self.say("ambient light: still reads '%s' (rc=%d) after being turned off, so the panel's load could vary" % (got or "nothing", r.rc))
         self.quit("ambient-light compensation could not be turned off", attempt_back=True)
 
     def refuse_wrong_displays(self):
@@ -341,11 +335,8 @@ class Autorun:
         said = (r.out + r.err).strip()
         if r.ok:
             return self.say("displays: %s" % said)
-        self.say("the screen this would be measured on is not the declared one:")
-        for line in said.splitlines():
-            self.say("  " + line)
-        self.say("  Nothing runs and no mode is written. Disconnect the monitor and boot")
-        self.say("  this volume again -- the job stays planted and spends no attempt.")
+        self.say("the screen this would be measured on is not the declared one:", *("  " + l for l in said.splitlines()))
+        self.say("  Nothing runs. Disconnect the monitor and boot this volume again; the job stays planted and spends no attempt.")
         self.quit("the display is not the declared one", attempt_back=True)
 
     def converge_display_mode(self):
@@ -357,18 +348,14 @@ class Autorun:
             return self.say("display mode: %s, as the job declares" % running)
         self.say("display mode: running at %s, and the job declares %s" % (running or "unreadable", want))
         if self.state_get("mode_declared") == want:
-            self.say("  %s was written into the WindowServer configuration for this boot and" % want)
-            self.say("  the panel still comes up at %s, so the write does not take." % (running or "unreadable"))
-            self.say("  Nothing is measured at a mode that is not the declared one: MotionMark's")
-            self.say("  score is the area it draws. From host mode, set the mode on this install")
-            self.say("  by hand and re-plant, or declare the mode it does come up at:")
-            self.say('    display="%s %s"  in machines/mbp.conf' % (self.display.split()[0], running or "<what it reads>"))
+            self.say("  %s was written for this boot and the panel still comes up at %s: MotionMark scores the area it draws, so"
+                     % (want, running or "unreadable"), "  set the mode by hand from host mode and re-plant, or declare the one it comes up at:",
+                     '    display="%s %s"  in machines/mbp.conf' % (self.display.split()[0], running or "<what it reads>"))
             self.quit("the declared display mode cannot be set", outcome="display-mode-unsettable", agent=True)
         if not self.sudo("python3", self.tool(WKMAC), "display-mode", "--declare", want):
             self.say("  the WindowServer configuration would not take %s." % want)
             self.quit("the declared display mode could not be written", outcome="display-mode-unwritable", agent=True)
-        self.state_set("mode_declared", want)
-        self.state_set("attempts", int(self.state_get("attempts") or 1) - 1)
+        self.state_set(mode_declared=want, attempts=int(self.state_get("attempts") or 1) - 1)
         self.say("  wrote it; restarting so WindowServer comes up at %s" % want)
         self.stay = True
         self.m.act_run(["sync"])
@@ -406,8 +393,7 @@ class Autorun:
         """A window over MiniBrowser throttles it into a timeout; killing Setup Assistant ends the desktop session."""
         front = screen.blocker(self.m, self.tools)
         if front == "?":
-            self.say("WARNING: could not ask the window server what is on the screen; a run that")
-            self.say("    times out with no error is this and nothing else")
+            self.say("WARNING: could not ask the window server what is on the screen; a run timing out with no error is this")
         elif front:
             self.say("on the screen, and nothing this job put there: %s" % front)
             self.sudo("touch", "/var/db/.AppleSetupDone")
@@ -434,8 +420,7 @@ class Autorun:
             elif not self.m.run(["sudo", "-n", "launchctl", "print", svc]).ok:
                 self.say("  %s is not loaded" % svc)
             else:
-                self.say("  WARNING: could not boot out %s and it is still loaded --" % svc)
-                self.say("    a scan can still start inside a run; each arm's scan check says if one does.")
+                self.say("  WARNING: could not boot out %s; a scan can still start inside a run, and each arm's scan check says so" % svc)
         for key in ("AutomaticCheckEnabled", "AutomaticDownload"):
             self.sudo("defaults", "write", SU_PREFS, key, "-bool", "false")
 
@@ -455,11 +440,9 @@ class Autorun:
         if not wrong:
             return
         installed = "yes" if self.m.exists(FB_PLIST) or self.m.exists(FB_SELF) else "no"
-        self.say("this volume is not set up as a measured Mac (first-boot daemon installed: %s):" % installed)
-        for w in wrong:
-            self.say("  " + w)
-        self.say("  Every leg would be refused for these. From host mode:")
-        self.say("    wk sysimage build %s --repair    then boot this volume once" % images.mac_profile(self.env))
+        self.say("this volume is not set up as a measured Mac (first-boot daemon installed: %s):" % installed, *("  " + w for w in wrong))
+        self.say("  Every leg would be refused for these. From host mode: wk sysimage build %s --repair, then boot this volume once"
+                 % images.mac_profile(self.env))
         self.quit("this volume is not set up as a measured Mac")
 
     def refuse_throttled_browser(self):
@@ -477,8 +460,7 @@ class Autorun:
         if self.logged(["/usr/bin/python3", self.tool(CHECK), "--build-directory", dirs[0], "--expect-display", self.display,
                         "--json", self.runs + "/browser-check.json"]) == 0:
             return self.say("  the browser here is accelerated and unthrottled (readings above)")
-        self.say("  this install cannot present a browser worth measuring (faults above).")
-        self.say("  Every round would measure that instead of the patch, so nothing runs.")
+        self.say("  this install cannot present a browser worth measuring (faults above), so nothing runs")
         self.quit("browser check failed")
 
     def newest_result(self):
@@ -517,9 +499,7 @@ class Autorun:
         after, clean = self.update_stamp(), "clean"
         if after != stamp:
             clean = "scanned"
-            self.say("    CONTAMINATED: a software-update scan ran during this arm")
-            self.say("      before: %s" % stamp)
-            self.say("      after:  %s" % after)
+            self.say("    CONTAMINATED: a software-update scan ran during this arm", "      before: %s" % stamp, "      after:  %s" % after)
         got = self.newest_result()
         if got and got != before:
             self.write_rows(self.rows() + [[str(r), label, sid, got, clean, plan]])
@@ -538,10 +518,8 @@ class Autorun:
 
     def plan_resolves(self, plan):
         a, b = self.arm_results(plan, "A"), self.arm_results(plan, "B")
-        if not (a and b):
-            return False
-        r = self.m.run(["/usr/bin/python3", self.tool("lib/wkdata.py"), "ab-precision", "--a", a, "--b", b, "--goal", self.detect])
-        if not r.ok:
+        r = self.m.run(self.wk("bench", "precision", a, b, "--detect", self.detect)) if a and b else None
+        if r is None or not r.ok:
             return False
         self.say("  %s: %s" % (plan, " ".join(r.out.split())))
         return "met=yes" in r.out.splitlines()
@@ -561,33 +539,32 @@ class Autorun:
 
     def rounds_loop(self):
         """Interleaved and counterbalanced (ABBA): the machine drifts, and a fixed order puts that drift on one arm."""
-        ceiling = self.rounds if self.detect_off() else self.max_rounds
-        any_ok, r = False, 1
-        while r <= ceiling:
+        any_ok = []
+
+        def play(r):
             for plan in self.plans:
                 for i in range(self.n_arms):
-                    any_ok = self.leg(r, plan, i if r % 2 else self.n_arms - 1 - i) or any_ok
-            if not any_ok:
-                self.say("round %d produced nothing at all -- every arm failed the same way, and" % r)
-                self.say("the next round has nothing different to try. Stopping here so the")
-                self.say("machine hands itself back instead of burning the schedule.")
-                return self.state_set("outcome", "all-failed-round-%d" % r)
-            self.state_set("rounds_done", r)
-            if r >= self.rounds and not self.detect_off():
-                self.say("precision after round %d (goal %s%%):" % (r, self.detect))
-                unresolved = [p for p in self.plans if not self.plan_resolves(p)]
-                if not unresolved:
-                    self.say("every plan resolves %s%% -- stopping at round %d" % (self.detect, r))
-                    return self.state_set("outcome", "resolved-at-round-%d" % r)
+                    any_ok.append(self.leg(r, plan, i if r % 2 else self.n_arms - 1 - i))
+            if any(any_ok):
+                self.state_set("rounds_done", r)
+            return any(any_ok)
+
+        def resolved(r):
+            self.say("precision after round %d (goal %s%%):" % (r, self.detect))
+            unresolved = [p for p in self.plans if not self.plan_resolves(p)]
+            if unresolved:
                 self.say("  still coarser than %s%%: %s" % (self.detect, " ".join(unresolved)))
-            r += 1
-        if self.detect_off():
-            self.say("ran the %d round(s) asked for; no precision goal was set, so what" % self.rounds)
-            self.say("these numbers resolve is whatever 'wk bench precision' says of them.")
-            return self.state_set("outcome", "rounds-done")
-        self.say("reached the ceiling of %d rounds without resolving %s%% on every plan." % (self.max_rounds, self.detect))
-        self.say("The numbers are real; the claim they support is the one the precision lines above allow.")
-        self.state_set("outcome", "hit-max-rounds")
+            return not unresolved
+
+        outcome, _, _ = interleave(self.rounds, self.max_rounds, not self.detect_off(), play, resolved, 1)
+        kind, at = outcome.rsplit("-", 1)[0], outcome.rsplit("-", 1)[1]
+        outcome = "all-failed-round-" + at if kind == "lost-at-round" else outcome
+        self.say({"lost-at-round": "round %s produced nothing at all, and the next has nothing different to try: handing the machine back" % at,
+                  "resolved-at-round": "every plan resolves %s%% -- stopping at round %s" % (self.detect, at),
+                  "rounds": "ran the %d round(s) asked for with no precision goal; 'wk bench precision' says what they resolve" % self.rounds,
+                  "hit-max": "reached the ceiling of %d rounds without resolving %s%% on every plan; the precision lines above say what "
+                             "they do resolve" % (self.max_rounds, self.detect)}[kind])
+        self.state_set("outcome", outcome)
 
     def summarise(self):
         self.say("summarising")
@@ -608,17 +585,14 @@ class Autorun:
         self.hold_auto_brightness()
         self.refuse_wrong_displays()
         self.converge_display_mode()
-        self.state_set("phase", "running")
-        self.state_set("plans", " ".join(self.plans))
-        self.state_set("started_at", self.clock.iso())
+        self.state_set(phase="running", plans=" ".join(self.plans), started_at=self.clock.iso())
         self.say("settling for %ds" % self.settle)   # the agent starts at login, the moment the machine is least quiet
         self.pause(self.settle)
         self.wait_for_temp()
         self.cancel_pending_reboot()
         self.clear_the_screen()
         self.stop_updates()
-        self.say("  scan stamp before the job: %s" % self.update_stamp())
-        self.say("quiescing")
+        self.say("  scan stamp before the job: %s" % self.update_stamp(), "quiescing")
         if self.logged(self.wk("quiesce", "on")) != 0:
             self.say("WARNING: quiesce reported a problem; the runner will judge it")
         self.refuse_unprovisioned()
@@ -626,8 +600,7 @@ class Autorun:
         self.warmup()
         self.rounds_loop()
         self.say("leaving the machine quiesced: quiet is this install's permanent state")
-        self.state_set("phase", "done")
-        self.state_set("finished_at", self.clock.iso())
+        self.state_set(phase="done", finished_at=self.clock.iso())
         self.summarise()
         self.say("=== job finished ===")
         self.leave("job finished")

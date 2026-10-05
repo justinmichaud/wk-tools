@@ -33,7 +33,6 @@ PAYLOAD = (("bench/mac-bench-firstboot.sh", "usr/local/libexec/wk-bench-firstboo
            ("bench/quiet/macos.tsv", "usr/local/libexec/quiet/macos.tsv", "0644"),
            ("bench/quiet/macos-hosts.txt", "usr/local/libexec/quiet/macos-hosts.txt", "0644"),
            ("bench/mac-pyobjc.sh", "usr/local/libexec/wk-bench-pyobjc.sh", "0644"))
-STALE = ("tailscale-authkey", "Tailscale-macos.pkg")   # tombstone: the packaged client and its key, removed on repair
 SKIP_SETUP = ("private/var/db/.AppleSetupDone", "System/Library/User Template/English.lproj/.skipbuddy",
               "System/Library/User Template/Non_localized/.skipbuddy", "Library/User Template/English.lproj/.skipbuddy")
 ACTIONS = ("--create", "--fetch", "--install", "--provision", "--repair", "--build-pkg", "--all")
@@ -53,25 +52,12 @@ launchctl bootstrap system "$PLIST" 2>/dev/null || launchctl load -w "$PLIST" 2>
 exit 0
 """ % FIRSTBOOT
 
+# --passprompt: on Apple Silicon a volume is personalised only with a volume owner's credential.
 BANNER = """
-  ------------------------------------------------------------------
-   NEXT IS THE PART THAT NEEDS YOU, AND IT REBOOTS THIS MACHINE.
-
-   startosinstall erases '{v}' and will:
-     - ask for your password (sudo), and then again (--passprompt)
-       for the volume-owner authorisation: on Apple Silicon a volume
-       is personalised only with an owner's credential, and without
-       it the install fails with "failed to authorize for installation".
-     - reboot into the installer and install macOS onto '{v}',
-       about half an hour with the machine unusable.
-
-   The provisioning package answers Setup Assistant: the new install
-   gets one user, bench, no Apple ID, no FileVault, no Siri. Then, in it:
-     wk sysimage build {p} --provision
-
-   Installer: {app}
-   Target:    {s}
-  ------------------------------------------------------------------
+  startosinstall ({app}) erases '{v}', asks for your password twice
+  (sudo, then the volume owner's), reboots and installs macOS onto {s}:
+  about half an hour with the machine unusable. Then, in the new install:
+    wk sysimage build {p} --provision
 
 """
 
@@ -141,7 +127,6 @@ class MacVolume:
             self.act(["sudo", "chmod", mode, path], "could not set %s's mode" % path)
 
     def tty(self, argv, what):
-        """A command whose prompt and progress are the person's to see."""
         if act.dry_run():
             log("would run: %s" % shlex.join(argv))
             return
@@ -162,12 +147,10 @@ class MacVolume:
         return self.m.run(["diskutil", "info", self.volume]).ok
 
     def installed(self):
-        """An empty formatted volume with the right name mounts perfectly and boots nothing."""
         core = self.s + "/System/Library/CoreServices"
         return self.m.isdir(core) and self.m.exists(core + "/SystemVersion.plist")
 
     def outputs(self):
-        """The builder's done marker: an installed volume carrying the marker a board's image carries."""
         return [self.s + MARKER] if self.installed() and self.m.exists(self.s + MARKER) else []
 
     def marker_id(self, path):
@@ -186,36 +169,21 @@ class MacVolume:
         if act.dry_run():
             info("--dry-run: nothing on this machine will be changed")
         version = o.get("--version") or ""
-        action = actions[0] if actions else ""
-        if action == "--create":
-            return self.create()
-        if action == "--fetch":
-            return self.fetch(version)
-        if action == "--install":
-            return self.install()
-        if action == "--provision":
-            return self.provision()
-        if action == "--build-pkg":
-            self.build_pkg()
-            return 0
-        if action == "--repair":
-            return self.repair()
-        if action == "--all":
-            return self.all(version)
-        return self.report()
+        verbs = {"--create": self.create, "--fetch": lambda: self.fetch(version), "--install": self.install,
+                 "--provision": self.provision, "--build-pkg": lambda: self.build_pkg() and 0, "--repair": self.repair,
+                 "--all": lambda: self.all(version)}
+        return verbs[actions[0]]() if actions else self.report()
 
     def report(self):
         cont, free = self.container(), self.disk("/").get("APFSContainerFree")
         info("the benchmark volume on this Mac")
         log("  container:      %s  (the same one the running system is on)" % cont)
-        log("  free in it:     %d GB   (need %d GB to proceed)" % (gb(free), self.need_gb))
+        log("  free in it:     %d GB   (need %d GB)" % (gb(free), self.need_gb))
         log("  volume name:    %s" % self.volume)
         if not self.present():
             log("  state:          absent -- --create makes it")
         elif not self.installed():
-            warn("  state:          the volume exists but has no macOS on it")
-            log("                  --fetch then --install, or delete it and start again:")
-            log("                    sudo diskutil apfs deleteVolume '%s'" % self.volume)
+            warn("  state:          the volume exists but has no macOS on it -- --fetch then --install")
         else:
             try:
                 v = load_plist(self.m.read(self.s + "/System/Library/CoreServices/SystemVersion.plist")).get(
@@ -226,9 +194,7 @@ class MacVolume:
             if self.outputs():
                 log("  marker:         %s" % self.marker_id(self.s + MARKER))
             else:
-                warn("  marker:         MISSING -- bench mode would report itself as host mode")
-                log("                  --provision writes it (run it in bench mode)")
-        log("")
+                warn("  marker:         MISSING -- --provision (in bench mode) writes it")
         log("  the way back, whole:  sudo diskutil apfs deleteVolume '%s'" % self.volume)
         return 0
 
@@ -240,9 +206,9 @@ class MacVolume:
         if free is None:
             die("could not read the container's free space -- refusing to add a volume blind")
         if int(free) < self.need_gb * 1000000000:
-            die("only %d GB free in %s, and this needs %d GB.\n  Both installs share this container, so filling it stops "
-                "the machine you work\n  on, not just the one you measure on. Free space first, or set\n"
-                "  WK_BENCH_NEED_GB deliberately lower if you have costed it." % (gb(free), cont, self.need_gb))
+            die("only %d GB free in %s, and this needs %d GB: both installs share this container, so filling it\n"
+                "  stops the machine you work on too. Free space first, or set WK_BENCH_NEED_GB lower."
+                % (gb(free), cont, self.need_gb))
         info("adding APFS volume '%s' to %s" % (self.volume, cont))   # no quota: an upgrade that outgrows one fails like a disk fault
         self.act(["sudo", "diskutil", "apfs", "addVolume", cont, "APFS", self.volume], "could not add '%s'" % self.volume)
         if not act.dry_run():
@@ -256,9 +222,7 @@ class MacVolume:
             for line in (r.out + r.err).splitlines():
                 log("  " + line)
             log("")
-            log("  pick one:  wk sysimage build %s --fetch --version <version>" % self.name)
-            log("  match the host install's major version unless you mean not to --")
-            log("  two different macOS versions is a second variable in every number.")
+            log("  pick one (the host install's major version):  wk sysimage build %s --fetch --version <version>" % self.name)
             return 0
         info("fetching the macOS %s installer (this is tens of GB)" % version)   # the one source Apple personalises
         self.tty(["softwareupdate", "--fetch-full-installer", "--full-installer-version", version],
@@ -307,11 +271,7 @@ class MacVolume:
         self.m.write(pwfile, BENCH_PASSWORD)
         self.act(["chmod", "0600", pwfile], "could not keep %s private" % pwfile)
         dest = "%s/%s/password" % (root.rstrip("/"), PAYLOAD_DIR)
-        if sudo:
-            self.sudo_write(dest, BENCH_PASSWORD, "0600")
-        else:
-            self.m.write(dest, BENCH_PASSWORD)
-            self.act(["chmod", "0600", dest], "could not keep %s private" % dest)
+        self.act((["sudo"] if sudo else []) + ["install", "-m", "0600", pwfile, dest], "could not stage %s" % dest)
         log("  bench account password: '%s' (constant; also at %s)" % (BENCH_PASSWORD, pwfile))
 
     def build_pkg(self):
@@ -363,11 +323,10 @@ class MacVolume:
                 self.sudo_write(dest, "WIFI_SSID=%s\nWIFI_PSK=%s\n" % (shlex.quote(ssid), shlex.quote(psk)), "0600")
                 info("  wifi: '%s' written into the bench payload" % ssid)
                 return
-        die("this Mac has Wi-Fi (%s) and no preferred network whose passphrase is\n    in its System keychain, so there is "
-            "nothing to give the bench install -- and\n    without a network that install joins no tailnet, installs no "
-            "pyobjc and\n    cannot take the Command Line Tools.\n      networksetup -listpreferredwirelessnetworks %s   "
-            "lists what was looked for\n    Join the network on this install first, or put the bench install on ethernet\n"
-            "    and re-run with WK_BENCH_WIRED=1." % (dev, dev))
+        die("this Mac has Wi-Fi (%s) and no preferred network whose passphrase is in its System keychain, so the\n"
+            "    bench install would have no network ('networksetup -listpreferredwirelessnetworks %s' lists them).\n"
+            "    Join the network on this install first, or put the bench install on ethernet and set WK_BENCH_WIRED=1."
+            % (dev, dev))
 
     def sshd_on(self, dis):
         """Remote Login is a launchd override, so false is "not disabled"."""
@@ -416,11 +375,6 @@ class MacVolume:
             log("  would copy this Mac's Wi-Fi identity into the bench payload")
         else:
             self.wifi_conf("%s/%s/wifi.conf" % (self.s, PAYLOAD_DIR))
-        for f in STALE:
-            stale = "%s/%s/%s" % (self.s, PAYLOAD_DIR, f)
-            if self.m.exists(stale):
-                self.act(["sudo", "rm", "-f", stale], "could not remove %s" % stale)
-                info("removed %s from the payload" % f)
         self.sudo_write(self.s + FIRSTBOOT, FIRSTBOOT_PLIST, "0644")
         self.act(["sudo", "chown", "root:wheel", self.s + FIRSTBOOT], "could not give the first-boot daemon to root")
         info("re-armed the first-boot daemon")
@@ -431,8 +385,8 @@ class MacVolume:
     def provision(self):
         here = self.disk("/").get("VolumeName", "?")
         if not self.m.isdir("/System/Volumes/Data") or here != self.volume:
-            die("this is running on '%s', not on '%s'.\n  --provision writes the bench-mode marker, and writing it on the "
-                "workstation\n  would make host mode claim to be bench mode. Boot '%s' first." % (here, self.volume, self.volume))
+            die("this is running on '%s', not on '%s', and the bench-mode marker written here would make host mode\n"
+                "  claim to be bench mode. Boot '%s' first." % (here, self.volume, self.volume))
         info("provisioning '%s' as the benchmark install" % self.volume)
         if self.m.exists(MARKER):
             act.debug("ok: marker %s: %s" % (MARKER, self.marker_id(MARKER)))
@@ -452,15 +406,11 @@ class MacVolume:
             warn("/usr/bin/python3 cannot 'import objc' -- run-benchmark's prepare_env will fail")
             log("  xcode-select --install   (Command Line Tools; it is a GUI prompt)")
         if not self.m.run(["/usr/bin/python3", "-c", "import scipy"]).ok:
-            log("scipy absent -- optional: /usr/bin/python3 -m pip install --user scipy")
-            log("  (only needed to run 'wk bench compare' in bench mode)")
+            log("scipy absent -- 'wk bench compare' in bench mode needs: /usr/bin/python3 -m pip install --user scipy")
         self.record(quiet_ok)
         log("")
-        info("still yours to check, and each is a run that otherwise looks like a hang:")
-        log("  * one user, logged in AT THE CONSOLE. A browser driven over ssh with")
-        log("    nobody at the screen has nowhere to draw.")
-        log("  * this install's own ~/.ssh/authorized_keys -- two installs, two files.")
-        log("  then, from the driving machine:  wk bench ab --devices <mac> --preflight")
+        info("still yours to check: one user logged in at the console (a browser over ssh has nowhere to draw),")
+        log("  and this install's own ~/.ssh/authorized_keys. Then:  wk bench ab --devices <mac> --preflight")
         return 0
 
     def quiet(self):
@@ -486,21 +436,19 @@ class MacVolume:
     def record(self, quiet_ok):
         """The first-boot daemon's log line, written only behind a clean readback: the A/B plants a job on its strength."""
         if act.dry_run():
-            log("  would record 'provisioning complete' in %s -- but only on a readback" % FIRSTBOOT_LOG)
-            log("    with no '--' line above, and this one has %s" % ("none" if quiet_ok else "some"))
+            log("  would record 'provisioning complete' in %s -- but only on a readback with no '--' line" % FIRSTBOOT_LOG)
         elif quiet_ok:
             self.sudo_write(FIRSTBOOT_LOG, "=== provisioning complete (wk sysimage build %s --provision, %s) ===\n"
                             % (self.name, self.clock.iso()), append=True)
             info("recorded 'provisioning complete' in %s" % FIRSTBOOT_LOG)
         else:
-            warn("  not recorded as provisioned: the settings above are not a measured Mac's,")
-            warn("  and that record is what 'wk bench ab --devices <mac>' plants a job on the strength of")
+            warn("  not recorded as provisioned: the settings above are not a measured Mac's")
 
     def all(self, version):
         """Three steps that each say "nothing to do" can still leave no tailnet identity, so an installed volume is re-armed."""
         if not self.find_installer() and not version:
-            die("no installer downloaded and no --version given.\n  'wk sysimage build %s --fetch' lists what this Mac "
-                "is offered; then\n  'wk sysimage build %s --all --version <v>' does the rest in one go." % (self.name, self.name))
+            die("no installer downloaded and no --version given: 'wk sysimage build %s --fetch' lists what this Mac is offered"
+                % self.name)
         if self.present() and self.installed():
             act.nothing_to_ask()
         elif not act.confirm("add '%s' if it is absent, then erase it and install macOS onto it -- this reboots the machine?"

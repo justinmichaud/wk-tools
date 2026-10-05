@@ -26,6 +26,14 @@ def said(r):
     return r
 
 
+NOT_INSTALLED = "%s is not installed.\n    Remedy:  %s" % (PRIV, SETUP)
+
+
+def require_helper(machine):
+    if not machine.exists(PRIV):
+        die(NOT_INSTALLED)
+
+
 def bench_mode(machine, env):
     return machine.exists(images.marker(env))
 
@@ -35,7 +43,6 @@ class Quiesce:
         self.root, self.m, self.clock, self.env = str(root), machine, clock, env
         self.macos = is_macos() if macos is None else macos
         self.state = status.quiesce_dir(Store(env))
-        self.stale = os.path.join(env.get("TMPDIR") or "/tmp", "wk-quiesce")
         self.bench = bench_mode(machine, env)
 
     def _lib(self, rel, fn, *args):
@@ -52,19 +59,14 @@ class Quiesce:
                     "    it was doing." % (PRIV, verb))
         return "passwordless sudo is not set up for %s.\n    Remedy:  %s" % (PRIV, SETUP)
 
-    def _not_installed(self):
-        return ("%s is not installed, so the privileged half of quiesce\n    cannot run.\n    Remedy:  %s"
-                % (PRIV, SETUP))
-
     def priv(self, verb):
-        if not self.m.exists(PRIV):
-            die(self._not_installed())
+        require_helper(self.m)
         if not said(self.m.act_run(["sudo", "-n", PRIV, verb])).ok:
             die(self._priv_refusal(verb))
 
     def priv_claim(self):
         if not self.m.exists(PRIV):
-            return self._not_installed()
+            return NOT_INSTALLED
         r = self.m.run(["sudo", "-n", PRIV, "status"])
         text = (r.out + r.err).strip()
         return text if r.ok else "\n".join(t for t in (text, self._priv_refusal("status")) if t)
@@ -134,8 +136,6 @@ class Quiesce:
         log("  caffeinate: running" if self._running("caffeinate.pid") else "  caffeinate: no")
         log("  daemons:    'quiesce on' paused them; each one's state is measured below"
             if self.m.exists(self._at("daemons_paused")) else "  daemons:    not paused")
-        if self.m.isdir(self.stale):
-            log("  stale: %s (an older wk-tools' state; not read -- rm -rf it)" % self.stale)
         if self.macos:
             log("  raiser:     running (MiniBrowser kept frontmost)" if self._running("raiser.pid") else "  raiser:     no")
             nap = self.m.run(["defaults", "read", "org.webkit.MiniBrowser", "NSAppSleepDisabled"]).out.strip()

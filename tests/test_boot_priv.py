@@ -114,39 +114,15 @@ class TestStatusReportsWhatThisMachineCanDo(unittest.TestCase):
         return dict(l.split(": ", 1)[1].split("=", 1)
                     for l in cp.stdout.splitlines() if "=" in l)
 
-    def test_a_pi_says_it_cannot_bless(self):
-        cp = self._status(have=("vcmailbox",), systemd=True)
-        got = self._lines(cp)
-        self.assertEqual("yes", got["order"])
-        self.assertEqual("yes", got["tryboot"])
-        self.assertTrue(got["bless"].startswith("no"), got)
-
-    def test_a_mac_says_it_has_neither_an_order_nor_tryboot(self):
-        cp = self._status(have=("bless",))
-        got = self._lines(cp)
-        self.assertTrue(got["order"].startswith("no"), got)
-        self.assertTrue(got["tryboot"].startswith("no"), got)
-        self.assertEqual("yes", got["bless"])
-
-    def test_every_no_says_why(self):
-        cp = self._status()
-        for key, value in self._lines(cp).items():
-            if value == "no" or value.startswith("no ") or value.startswith("no("):
-                with self.subTest(key=key):
-                    self.assertIn("(", value, value)
-
-    def test_the_reboot_every_machine_has_is_the_one_unconditional_yes(self):
-        for have in ((), ("bless",), ("vcmailbox",)):
+    def test_each_machine_reports_what_it_can_do(self):
+        for have, systemd, want in ((("vcmailbox",), True, {"order": "yes", "tryboot": "yes", "bless": "no"}),
+                                    (("bless",), False, {"order": "no", "tryboot": "no", "bless": "yes"})):
             with self.subTest(have=have):
-                self.assertEqual("yes", self._lines(self._status(have=have))["reboot"])
-
-    def test_it_names_the_detach_its_reboot_verbs_use(self):
-        self.assertEqual("nohup", self._lines(self._status())["detach"])
-
-    def test_it_still_opens_with_ok(self):
-        cp = self._status()
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        self.assertEqual("wk-boot-priv: ok", cp.stdout.splitlines()[0])
+                cp = self._status(have=have, systemd=systemd)
+                self.assertEqual("wk-boot-priv: ok", cp.stdout.splitlines()[0])
+                got = self._lines(cp)
+                self.assertEqual({k: got[k].split()[0] for k in want}, want)
+                self.assertEqual((got["reboot"], got["detach"]), ("yes", "nohup"))
 
 
 class TestTheDispatcherHasNoDefaultThatRuns(unittest.TestCase):

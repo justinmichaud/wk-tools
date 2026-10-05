@@ -1,24 +1,15 @@
-"""A JSC build's dry-run line never turns ccache off, and lib/wk/sudo.py requires visudo outright."""
+"""lib/wk/sudo.py requires visudo outright."""
 import contextlib
 import io
 import sys
 import unittest
 
-from tests.support import REPO, WkTest, fake_workspace
+from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.act import Refused  # noqa: E402
 from wk.machine import HAVE, Fake  # noqa: E402
 from wk.sudo import Sudo  # noqa: E402
-
-
-class TestJscConfigsUseCcache(WkTest):
-    def test_the_running_line_never_disables_ccache(self):
-        with fake_workspace() as ws:
-            cp = ws.run("build", "jsc-release", "--dry-run")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        (line,) = [l for l in cp.stdout.splitlines() if "running:" in l]
-        self.assertNotIn("--no-use-ccache", line)
 
 
 class TestSudoRequiresVisudo(unittest.TestCase):

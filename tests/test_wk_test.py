@@ -13,95 +13,25 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes import FakeProc, FakeRegistry
+from tests.fakes import FakeProc, JobWorld
 from tests.killpoints import converges
 from tests.support import REPO, as_dispatched
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import job, places, record  # noqa: E402
+from wk import job, record  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Result  # noqa: E402
 
 CMD_LOADER = importlib.machinery.SourceFileLoader("cmd_test", str(REPO / "cmd" / "test"))
 CMD = importlib.util.module_from_spec(importlib.util.spec_from_loader("cmd_test", CMD_LOADER))
 CMD_LOADER.exec_module(CMD)
 
-DF_ROOMY = "Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 209715200 1% /\n"
-
-
-class TestDriver(places.Driver):
-    def __init__(self, name, root, env, machine, kind="container"):
-        super().__init__(name, root, env, machine)
-        self.kind = kind
-
-    def info(self, ws):
-        return "running"
-
-    def state(self, ws, info=None):
-        return "present"
-
-    def os(self):
-        return self.machine.place_os
-
-    def src(self, ws):
-        return "/src/WebKit"
-
-    def exec(self, ws, argv, tty=False, timeout=None):
-        return self.machine.run(["exec", ws] + list(argv))
-
-    def exec_argv(self, ws, argv, tty=False):
-        return ["exec", ws] + list(argv), None
-
-    def exec_tty(self, ws, argv, timeout=None):
-        return self.machine.run_tty(["exec-tty", ws] + list(argv))
-
-    def build_size(self, ws):
-        return self.machine.size
-
-    def sync_tools(self, ws):
-        return self.machine.act_run(["sync-tools", ws]).ok
-
-
-class World(Fake):
-    """This host testing workspace `ws` on place `box`: `sh -c` finds every layout
-    path present, the run writes `out` to its log and exits `rc`."""
+class World(JobWorld):
+    """`sh -c` finds every layout path present unless a test says otherwise."""
 
     def __init__(self, tmp, kind="container"):
-        super().__init__("here")
-        self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
-        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"),
-                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_PLACE": "box", "WK_NAME": "ws", "WK_IN_VM": "1",
-                    "WK_AVAIL_MB": "65536", "WK_JOB_PID_TRIES": "0", "WK_KILL_WAIT": "2"}
-        self.conf, self.kind, self.place_os = {}, kind, "linux"
-        self.size = (8, 32768, 2 if kind == "remote" else None)
-        self.clock = FakeClock()
-        self.out, self.rc = b"Ran 3 tests\nAll 3 tests passed.\n", 0
-        self.answer(["hostname"], out="here\n")
-        self.answer(["df", "-Pk"], out=DF_ROOMY)
-        self.answer(["exec", "ws", "sh", "-c"], out="")   # every layout path is present unless a test says otherwise
-        self.react(["bash", "-c"], self._bash)
-        self.answer(["sync-tools"])
-        self.react(["exec", "ws", "kill", "-0"], lambda a, f: Result(0 if int(a[-1]) in f.pids else 1))
-        self.reg = FakeRegistry(self.env, self, lambda n, e: TestDriver("box", str(REPO), dict(e, **self.conf), self, self.kind),
-                                ws_place=lambda ws: "box", in_workspace=lambda: False)
-        self.ws_dir = os.path.join(self.env["WK_STORE"], "ws", "ws")
-        os.makedirs(self.ws_dir)
-
-    @property
-    def fake(self):
-        return self
-
-    def _bash(self, argv, f):
-        return Result(127, "", "no bash answer")
-
-    def start(self, argv, out, cwd=None):
-        self.effect(("watch", tuple(argv)))
-        out.write(self.out)
-        return FakeProc(self.rc)
-
-    def recs(self):
-        return CMD.records_of(self.reg.load("box"), self.clock, self)
+        super().__init__(tmp, kind, b"Ran 3 tests\nAll 3 tests passed.\n")
+        self.answer(["exec", "ws", "sh", "-c"], out="")
 
     def state(self):
         return [(t.field("kind"), t.field("exit")) for t in self.recs().list()]

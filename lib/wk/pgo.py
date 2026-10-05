@@ -95,13 +95,12 @@ class Cycle:
                 die("usage: wk sysimage webkit %s --slot <name> --stop\n    --stop stops the cycle running for one slot, so it needs --slot"
                     % self.name)
             if commit or preset or o.get("--detach") or act.dry_run():
-                die("'wk sysimage webkit %s --slot %s --stop' stops the cycle already\n    running for that slot and takes nothing "
-                    "with it -- no --commit, --preset,\n    --detach or --dry-run." % (self.spec, slot))
+                die("'wk sysimage webkit %s --slot %s --stop' takes nothing else: no --commit, --preset,\n"
+                    "    --detach or --dry-run." % (self.spec, slot))
             return self.stop(ws, slot)
         if preset and preset not in PRESETS:
-            die("--preset takes one of the presets %s is built with, not '%s':\n    %s and %s are one phase of the cycle each\n"
-                "    ('wk sysimage webkit %s --commit <sha> --slot <name>' runs all of\n    them), and 'wpe-cross' is a slot built "
-                "without a profile, for measuring\n    against one." % (self.name, preset, COLLECT, USE, self.name))
+            die("--preset takes one of %s, not '%s': each pgo preset is one phase of the cycle,\n"
+                "    'wpe-cross' a slot built without a profile." % (", ".join(PRESETS), preset))
         if not (commit and slot):
             die(USAGE % self.name + "\n    a slot needs both --commit <sha> and --slot <name>")
         if not SHA.match(commit):
@@ -122,9 +121,8 @@ class Cycle:
     def phase(self, ws, commit, slot, preset, detach):
         extra = []
         if preset == "wpe-cross":
-            warn("slot '%s' is being built WITHOUT a profile, on a release where every\n  measured build has one. Nothing but a "
-                 "comparison against a profile-guided\n  slot should be taken from it; 'wk sysimage ls' and each run's env.json\n"
-                 "  record it as wpe-cross." % slot)
+            warn("slot '%s' is being built WITHOUT a profile: use it only for a comparison against a\n"
+                 "  profile-guided slot ('wk sysimage ls' and each run's env.json record it as wpe-cross)." % slot)
         elif preset == COLLECT:
             self.here.remove(images.pgo_dir(ws, images.measured_slot(slot), self.env))   # legs of the last instrumented build say nothing of this one
         else:
@@ -144,16 +142,13 @@ class Cycle:
     def require_board(self):
         board = self.board()
         if not board:
-            die("no fleet board carries %s, so there is nowhere to collect a profile.\n    A profile names its board in its own "
-                "IMG_MACHINE (%s), and the fleet\n    has no board of that name. Every number from a %s board is a profile-guided\n"
-                "    build's, so there is no plain build of this profile to fall back to."
-                % (self.name, images.conf_path(self.name, self.env), self.p["CFG_RELEASE"]))
+            die("no fleet board carries %s, so there is nowhere to collect a profile:\n    the fleet has no board named by "
+                "its IMG_MACHINE (%s)." % (self.name, images.conf_path(self.name, self.env)))
         mode = self.mode_of(board)
         if not mode.startswith("bench %s-" % self.name):
-            die("%s is '%s', not a bench system built from %s, so a\n    collection there would profile the wrong code -- or "
-                "nothing at all.\n    Put it into the image first:\n        wk sysimage write --from %s --disk %s:<device>\n"
-                "        wk boot %s\n    ('wk sysimage disks %s' lists what is attached; 'wk boot %s --status'\n    says what it is "
-                "running now.)" % (board, mode, self.name, self.name, board, board, board, board))
+            die("%s is '%s', not a bench system built from %s. Put it into the image first:\n"
+                "        wk sysimage write --from %s --disk %s:<device>\n        wk boot %s"
+                % (board, mode, self.name, self.name, board, board))
         return board
 
     def log_path(self, ws, slot):
@@ -174,14 +169,17 @@ class Cycle:
         place = named if named and named != me else ""
         return sched.validate(steps(self.step, self.holds, board, ws, self.spec, on, place, commit, slot, ()))
 
+    def say_collection(self, ws, slot):
+        log("  collection  %s" % images.pgo_dir(ws, slot, self.env))
+        log("  benchmarks  %s, mixed at WebKit's own weights (Tools/Scripts/pgo-profile)" % " ".join(BENCHMARKS))
+
     def plan(self, ws, commit, slot):
         board = self.board()
         log("would build slot '%s' of %s as a profile-guided build" % (slot, self.name))
         log("  workspace   %s" % ws)
         log("  board       %s" % ("%s -- it has to be running this image; wk boot %s --status" % (board, board) if board
                                   else "the fleet has no board named by IMG_MACHINE, so this refuses"))
-        log("  collection  %s" % images.pgo_dir(ws, slot, self.env))
-        log("  benchmarks  %s, mixed at WebKit's own weights\n" % " ".join(BENCHMARKS))
+        self.say_collection(ws, slot)
         graph = self.graph(ws, commit, slot, board or "<board>")
         sched.render(graph, sched.done_ids(graph, self.pool), sys.stderr)
         log("dry run -- nothing was built.")
@@ -194,8 +192,7 @@ class Cycle:
         t = self.records().begin("pgo", "here", "%s/%s" % (ws, slot), "wk sysimage webkit %s --workspace %s --slot %s --stop"
                                  % (self.spec, ws, slot), self.log, [s.command for s in order])
         info("profile-guided slot '%s' of %s in workspace %s: instrument, collect on %s, rebuild" % (slot, self.name, ws, board))
-        log("  collection  %s" % images.pgo_dir(ws, slot, self.env))
-        log("  benchmarks  %s, mixed at WebKit's own weights (Tools/Scripts/pgo-profile)" % " ".join(BENCHMARKS))
+        self.say_collection(ws, slot)
 
         def announce(event, step, rc=0):
             t.step_event(order.index(step) + 1, event)
@@ -209,9 +206,8 @@ class Cycle:
                 for line in sched.summary(s):
                     log(line)
                 if rc:
-                    die("the cycle for '%s' stopped: the steps above say which phase is left\n    and why. What was collected is "
-                        "in %s, and re-running this command takes\n    up what is left rather than starting again."
-                        % (slot, images.pgo_dir(ws, slot, self.env)))
+                    die("the cycle for '%s' stopped (above); what was collected is in %s,\n    and re-running this command "
+                        "takes up what is left." % (slot, images.pgo_dir(ws, slot, self.env)))
         except job.Interrupted as e:
             rc = "cancelled"
             raise Refused(job.EXIT_OF.get(e.signum, 130))
@@ -221,8 +217,9 @@ class Cycle:
         finally:
             t.end(rc)
         info("slot '%s' is a profile-guided build of %s" % (slot, commit[:12]))
-        log("  profile     %s/output/%s.profdata" % (images.pgo_dir(ws, slot, self.env), GLIB_LIB))
-        log("  readings    %s/profile-check.json  ('wk sysimage ls' has the slot)" % images.pgo_dir(ws, slot, self.env))
+        d = images.pgo_dir(ws, slot, self.env)
+        log("  profile     %s/output/%s.profdata" % (d, GLIB_LIB))
+        log("  readings    %s/profile-check.json  ('wk sysimage ls' has the slot)" % d)
         log("  next:       wk bench deploy %s %s --slot %s" % (ws, board, slot))
         return 0
 
@@ -241,8 +238,7 @@ class Cycle:
 def upstream(scripts):
     path = os.path.join(scripts, "pgo-profile")
     if not os.path.isfile(path):
-        sys.exit("wk.pgo: no %s. --scripts names a checkout's Tools/Scripts, and the\n"
-                 "  mixing, the weights and the llvm-profdata calls are that checkout's." % path)
+        sys.exit("wk.pgo: no %s: --scripts names a checkout's Tools/Scripts." % path)
     if scripts not in sys.path:
         sys.path.insert(0, scripts)   # pgo-profile imports webkitpy from beside itself
     loader = importlib.machinery.SourceFileLoader("wk_pgo_profile", path)
@@ -261,10 +257,8 @@ def profile_utils():
 
 def profdata(utils):
     if not utils.LLVMProfDataExecutable.detect_binaries():
-        sys.exit("wk.pgo: no llvm-profdata on PATH and none xcrun can find, so no profile\n"
-                 "  here can be read or mixed. A .profraw is only readable by the\n"
-                 "  toolchain that wrote it: run this where that clang is -- inside the\n"
-                 "  cross environment for a board, in the Xcode toolchain for macOS.")
+        sys.exit("wk.pgo: no llvm-profdata on PATH and none xcrun can find. A .profraw is only\n"
+                 "  readable by the toolchain that wrote it: run this where that clang is.")
     return utils.LLVMProfDataExecutable
 
 
@@ -276,17 +270,15 @@ def cmd_mix(args):
     plans = args.plan or list(weights)
     unweighed = [plan for plan in plans if plan not in weights]
     if unweighed:
-        sys.exit("wk.pgo mix: %s carries no weight in %s/pgo-profile, so there is no ratio to mix it in at.\n"
-                 "  The benchmarks a profile is taken from are the ones upstream weighs: %s."
+        sys.exit("wk.pgo mix: %s carries no weight in %s/pgo-profile; upstream weighs: %s."
                  % (", ".join(unweighed), args.scripts, ", ".join(weights)))
     module.PROFILED_DYLIBS = [args.lib]
     per_plan = {}
     for plan in plans:
         raw = os.path.join(args.dir, plan, "diagnose")
         if not glob.glob(os.path.join(raw, "%s*.profraw" % args.lib)):
-            sys.exit("wk.pgo mix: %s holds no %s*.profraw, so the %s leg\n  wrote no profile. An instrumented build writes one "
-                     "per process at\n  LLVM_PROFILE_FILE; a leg that produced none either ran an\n  uninstrumented build or never "
-                     "started the browser." % (raw, args.lib, plan))
+            sys.exit("wk.pgo mix: %s holds no %s*.profraw: the %s leg ran an uninstrumented\n  build or never started "
+                     "the browser." % (raw, args.lib, plan))
         per_plan[plan] = os.path.join(args.dir, plan)
         utils.merge_raw_profiles_in_directory_by_prefixes([args.lib], raw, output_directory=per_plan[plan])
     combined = os.path.join(args.dir, "output")

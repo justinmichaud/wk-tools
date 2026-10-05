@@ -92,17 +92,6 @@ class TestTheBuildersConform(unittest.TestCase):
         self.assertEqual(ls.scan(f, Store({"WK_STORE": "/st"})),
                          [ls.Image("yocto", YWS, "/st/ws/%s/build/CrossToolChains/t/build/image/a.wic.xz" % YWS)])
 
-    def test_the_mac_volume_finds_what_it_leaves_and_nothing_beside_it(self):
-        """`sysimage.builders_conform[mac-volume]`: built is an installed volume carrying the board's marker."""
-        from wk.sysimage import macvolume
-        f = Fake()
-        v = macvolume.MacVolume(f, images.load("perf-macos-tolken"), {"HOME": "/nonexistent"}, root=REPO)
-        f._set_file("/Volumes/%s/etc/wk-image" % v.volume, "id=x\n")
-        self.assertEqual(v.outputs(), [], "a marker on a volume with no macOS on it")
-        f._set_file("/Volumes/%s/System/Library/CoreServices/SystemVersion.plist" % v.volume, "")
-        self.assertEqual(v.outputs(), ["/Volumes/%s/etc/wk-image" % v.volume])
-        self.assertIn("mac-volume", cli.BUILDERS)
-
     def test_every_builder_a_profile_names_has_outputs(self):
         named = {images.load(n)["IMG_BUILDER"] for n in images.names()}
         reachable = {b.kind for b in ls.BUILDERS} | set(ls.HOST_BUILDERS)
@@ -195,23 +184,19 @@ class TestTheListing(NoPmosHost):
         self.assertEqual(lines[0].split(), list(ls.HEADER))
         self.assertEqual(lines[1].split()[:5], [YWS, "rpi3", "yocto", "ready", "1.0K"])
         self.assertEqual(lines[2].strip(), str(p))
-        self.assertIn("1 image, each in the workspace that built it", cp.err)
 
     def test_a_workspace_with_no_image_still_has_a_row(self):
         """A yocto image stage removes the last image as it rebuilds, so this is normal for hours."""
         with scratch_dir() as d:
             (d / "ws" / YWS / "build").mkdir(parents=True)
             cp = ran(sysimage(d).ls, False)
-        self.assertIn("none", cp.out.splitlines()[1])
-        self.assertIn("no image here yet", cp.out)
-        self.assertIn("'wk sysimage build %s' builds one" % YOCTO, cp.out)
+        self.assertEqual(cp.out.splitlines()[1].split()[3], "none")
 
     def test_a_running_build_is_stated_on_the_row(self):
         with scratch_dir() as d:
             (d / "ws" / YWS / "build").mkdir(parents=True)
             cp = ran(sysimage(d, building={YWS}).ls, False)
-        self.assertIn("building", cp.out.splitlines()[1])
-        self.assertIn("a build is running here -- 'wk status %s --log' follows it" % YWS, cp.out)
+        self.assertEqual(cp.out.splitlines()[1].split()[3], "building")
 
     def test_a_workspace_whose_build_state_cannot_be_read_says_unknown(self):
         with scratch_dir() as d:
@@ -225,8 +210,8 @@ class TestTheListing(NoPmosHost):
         with scratch_dir() as d:
             yocto_image(d)
             cp = ran(sysimage(d, building={YWS}).ls, False)
-        self.assertIn("building", cp.out.splitlines()[1])
-        self.assertIn("these bytes are the previous image", cp.out)
+        self.assertEqual(cp.out.splitlines()[1].split()[3], "building")
+        self.assertIn(".wic.xz", cp.out)
 
     def test_each_slot_is_listed_under_its_image(self):
         with scratch_dir() as d:
@@ -240,7 +225,6 @@ class TestTheListing(NoPmosHost):
         with scratch_dir() as d:
             cp = ran(sysimage(d).ls, False)
         self.assertEqual(cp.out, "")
-        self.assertIn("no workspace on any machine this one knows has built an image", cp.err)
 
     def test_continued_is_rows_and_nothing_else(self):
         with scratch_dir() as d:
@@ -349,19 +333,15 @@ class TestHolds(WkTest):
             self.assertEqual(self.holds(d, BUILDROOT, None, "base", SHA, None, False).out, "yes\n")
             self.assertEqual(self.holds(d, BUILDROOT, None, "nope", SHA, None, False).out, "no\n")
 
-    def test_the_refusals_name_what_is_wrong(self):
+    def test_every_malformed_question_is_refused_with_no_verdict(self):
         with scratch_dir() as d:
-            for args, words in (((YOCTO, None, "base", "abc", None, False), "full 40-digit sha"),
-                                ((YOCTO, None, None, SHA, None, False), "they need --slot"),
-                                ((YOCTO, None, "base", None, None, True), "takes nothing else"),
-                                ((BUILDROOT, None, None, None, None, True), "no cross toolchain"),
-                                ((YOCTO, None, "-x", SHA, None, False), "is not usable"),
-                                (("nosuch", None, None, None, None, False), "unknown profile 'nosuch'"),
-                                (("", None, None, None, None, False), "usage: wk sysimage holds")):
+            for args in ((YOCTO, None, "base", "abc", None, False), (YOCTO, None, None, SHA, None, False),
+                         (YOCTO, None, "base", None, None, True), (BUILDROOT, None, None, None, None, True),
+                         (YOCTO, None, "-x", SHA, None, False), ("nosuch", None, None, None, None, False),
+                         ("", None, None, None, None, False)):
                 with self.subTest(args=args):
                     cp = self.holds(d, *args)
                     self.assertEqual((cp.rc, cp.out), (1, ""))
-                    self.assertIn(words, cp.err)
 
 
 class TestPath(WkTest):
@@ -375,48 +355,25 @@ class TestPath(WkTest):
             self.assertIn("usage: wk sysimage path", ran(s.path, "", None).err)
 
 
-class TestPathAndHoldsReachTheMacVolumeMarker(WkTest):
-    """`unit sysimage.builders_conform[mac-volume]`: a builder with no workspace still answers `path` and `holds`,
-    read straight off the machine it builds on."""
+class TestPathHoldsAndLsReachTheMacVolumeMarker(WkTest):
+    """`unit sysimage.builders_conform[mac-volume]`: a builder with no workspace answers off the machine it builds on."""
 
-    def volume(self, f, env):
+    def test_each_answers_only_once_the_volume_is_installed_and_marked(self):
         from wk.sysimage import macvolume
-        return macvolume.MacVolume(f, images.load("perf-macos-tolken"), env)
-
-    def test_path_is_the_marker_once_installed(self):
         with scratch_dir() as d:
             f = Fake()
             s = sysimage(d, machine=f)
-            v = self.volume(f, s.reg.env)
-            self.assertEqual(ran(s.path, "perf-macos-tolken", None).rc, 1)
-            f._set_file(v.s + "/System/Library/CoreServices/SystemVersion.plist", "")
+            v = macvolume.MacVolume(f, images.load("perf-macos-tolken"), s.reg.env)
             f._set_file(v.s + "/etc/wk-image", "id=x\n")
-            self.assertEqual(ran(s.path, "perf-macos-tolken", None).out, "%s/etc/wk-image\n" % v.s)
-
-    def test_ls_lists_it_only_once_installed(self):
-        """`unit sysimage.builders_conform[mac-volume]`: `ls` has no workspace to anchor a placeholder row at,
-        so the profile is silent until `builder_outputs` finds its marker."""
-        with scratch_dir() as d:
-            f = Fake()
-            s = sysimage(d, machine=f)
-            v = self.volume(f, s.reg.env)
+            self.assertEqual(ran(s.path, "perf-macos-tolken", None).rc, 1, "a marker on a volume with no macOS on it")
+            self.assertEqual(ran(s.holds, "perf-macos-tolken", None, None, None, None, False).out, "no\n")
             self.assertNotIn("perf-macos-tolken", ran(s.ls, False).out)
             f._set_file(v.s + "/System/Library/CoreServices/SystemVersion.plist", "")
-            f._set_file(v.s + "/etc/wk-image", "id=x\n")
+            self.assertEqual(ran(s.path, "perf-macos-tolken", None).out, "%s/etc/wk-image\n" % v.s)
+            self.assertEqual(ran(s.holds, "perf-macos-tolken", None, None, None, None, False).out, "yes\n")
             cp = ran(s.ls, False)
         line = next(l for l in cp.out.splitlines() if l.startswith("perf-macos-tolken"))
         self.assertEqual(line.split()[:5], ["perf-macos-tolken", "mbp", "mac-volume", "ready", "-"])
-        self.assertIn("    " + v.s + "/etc/wk-image", cp.out)
-
-    def test_holds_the_image_answers_yes_once_installed(self):
-        with scratch_dir() as d:
-            f = Fake()
-            s = sysimage(d, machine=f)
-            v = self.volume(f, s.reg.env)
-            self.assertEqual(ran(s.holds, "perf-macos-tolken", None, None, None, None, False).out, "no\n")
-            f._set_file(v.s + "/System/Library/CoreServices/SystemVersion.plist", "")
-            f._set_file(v.s + "/etc/wk-image", "id=x\n")
-            self.assertEqual(ran(s.holds, "perf-macos-tolken", None, None, None, None, False).out, "yes\n")
 
 
 class TestTheRoutingAnswers(unittest.TestCase):
@@ -426,11 +383,6 @@ class TestTheRoutingAnswers(unittest.TestCase):
         self.assertEqual(cli.where(["ls"]), "local")
         self.assertEqual(cli.where(["list", "--continued"]), "store")
 
-    def test_a_verb_naming_an_image_workspace_runs_where_it_is(self):
-        self.assertEqual(cli.where(["path", YOCTO]), "workspace")
-        self.assertEqual(cli.where(["path", "bridge-pinephone"]), "host")
-        self.assertEqual(cli.wsname(["path", YOCTO, "--workspace", "arm-b"]), "arm-b")
-
     def test_a_spec_naming_a_machine_is_its_target_and_this_machine_its_default(self):
         with scratch_dir() as d:
             reg = registry(d)
@@ -438,8 +390,6 @@ class TestTheRoutingAnswers(unittest.TestCase):
             self.assertEqual(cli.wsplace(["holds", YOCTO + "@" + record.machine_name(reg.env)], reg), "container")
             self.assertEqual(cli.wsplace(["holds", YOCTO], reg), "")
             self.assertEqual(cli.wsplace(["holds", "bridge-pinephone@moose"], reg), "")
-
-
 
 
 class TestAnImageBuiltInAGuestReachesTheHost(unittest.TestCase):

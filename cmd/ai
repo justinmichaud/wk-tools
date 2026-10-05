@@ -173,8 +173,8 @@ class Ai:
         `tart run`: a guest booted without it is unfiltered."""
         name, unfiltered = self.name, guest.is_unfiltered(self.env)
         if not self.driver.egress_filtered(name) and not unfiltered:
-            barrier("'%s' was booted with NO egress filter.\n    Restart it filtered:  wk stop %s && wk start %s\n"
-                    "    (WK_VM_UNFILTERED=1 is the same decision, said the older way.)" % (name, name, name))
+            barrier("'%s' was booted with NO egress filter.\n    Restart it filtered:  wk stop %s && wk start %s"
+                    % (name, name, name))
         softnet = guest.softnet_bin(self.env)
         if not unfiltered and self.machine.run(["test", "-x", softnet]).ok:
             info("'%s' is a macOS VM: egress is filtered on the host by Softnet,\n  default-deny except the wk-proxy address. Of "
@@ -185,7 +185,7 @@ class Ai:
                  "directory, and the guest is still\n  disposable -- but that is the whole of the boundary right now." % name)
         else:
             barrier("softnet is not installed, so this guest's egress is not filtered.\n    Install it:  ./setup --stage softnet"
-                    "   (needs a terminal)\n    (WK_VM_UNFILTERED=1 is the same decision, said the older way.)")
+                    "   (needs a terminal)")
 
     def wall_available(self):
         """A builtin needs `sh -c`: a place's exec hands argv to an exec, not a shell (measured)."""

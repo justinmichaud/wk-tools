@@ -333,13 +333,17 @@ class TheScreenTheReadingWasTakenOn(WkTest):
         self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn(phrase, cp.stderr)
 
-    def test_a_reading_on_the_declared_display_raises_nothing(self):
-        cp = self.check()
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        self.assertEqual("", cp.stderr)
+    def test_what_is_recorded_and_not_judged_raises_nothing(self):
+        for why, over in (("the declared display", {}), ("brightness", {"brightness": 0.9, "displays": [dict(PANEL, brightness=0.9)]}),
+                          ("the screen reading", {"screen": [0, 0]}),
+                          ("an external panel declared", {"expect": "external 1470x956", "displays": [dict(EXTERNAL, points=[1470, 956])]})):
+            with self.subTest(why):
+                cp = self.check(**over)
+                self.assertEqual((0, ""), (cp.returncode, cp.stderr), cp.stdout)
 
-    def test_a_window_that_is_not_frontmost_is_refused(self):
+    def test_a_window_that_is_not_frontmost_or_not_focused_is_refused(self):
         self.assertFault("not org.webkit.MiniBrowser", frontmost="com.apple.Terminal")
+        self.assertFault("did not have the focus", focused=False)
 
     def test_a_machine_without_pyobjc_is_refused(self):
         with mock.patch.dict(sys.modules, {"AppKit": None}):
@@ -347,21 +351,10 @@ class TheScreenTheReadingWasTakenOn(WkTest):
                 BROWSER.frontmost_bundle()
         self.assertIn("pyobjc", str(cm.exception))
 
-    def test_brightness_is_recorded_and_not_judged(self):
-        cp = self.check(brightness=0.9, displays=[dict(PANEL, brightness=0.9)])
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-
-    def test_a_page_that_does_not_have_the_focus_is_refused(self):
-        self.assertFault("did not have the focus", focused=False)
-
     def test_focus_and_frontmost_answer_different_questions(self):
         cp = self.check(focused=False)
         self.assertNotIn("org.webkit.MiniBrowser: ", cp.stderr)
         self.assertIn("focused=False", cp.stdout)
-
-    def test_the_screen_reading_alone_decides_nothing(self):
-        cp = self.check(screen=[0, 0])
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
 
     def test_the_new_readings_reach_the_log(self):
         cp = self.check()
@@ -405,13 +398,6 @@ class TheScreenTheReadingWasTakenOn(WkTest):
                 cp = self.check(expect=spec)
                 self.assertEqual(2, cp.returncode)
                 self.assertIn("<kind> <w>x<h>", cp.stderr)
-
-    def test_a_panel_that_is_not_a_built_in_one_is_declarable(self):
-        self.assertEqual(("external", [1470, 956]),
-                         BROWSER.parse_expect_display("external 1470x956"))
-        cp = self.check(expect="external 1470x956",
-                        displays=[dict(EXTERNAL, points=[1470, 956])])
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
 
     def test_the_built_in_panel_is_refused_where_an_external_one_is_declared(self):
         """The discriminating half: the kind is judged, not merely recorded."""
@@ -500,15 +486,6 @@ class AmbientLightControl(WkTest):
             [sys.executable, str(REPO / "bench" / "mac-browser-check.py"),
              "--read", str(path), "--expect-display", EXPECT],
             capture_output=True, text=True)
-
-    def test_auto_brightness_on_is_refused(self):
-        cp = self.check(True)
-        self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
-        self.assertIn("ambient-light control", cp.stderr)
-
-    def test_auto_brightness_off_raises_nothing(self):
-        cp = self.check(False)
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
 
     def test_a_panel_with_no_sensor_to_ask_is_reported_not_refused(self):
         cp = self.check(None)

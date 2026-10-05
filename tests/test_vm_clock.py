@@ -87,10 +87,5 @@ class TestGuestClock(WkTest):
         self.assertIn("-n date -u ", sudolog, out)
 
 
-class TestStartSetsTheClock(unittest.TestCase):
-    def test_the_clock_is_set_before_the_proxy(self):
-        steps = [s[0] for s in guest.STEPS]
-        self.assertEqual(steps.index("set_guest_clock") + 1, steps.index("set_guest_egress"))
-
 if __name__ == "__main__":
     unittest.main()

@@ -41,7 +41,7 @@ class TestAStageAsksPython(unittest.TestCase):
         """A stage that evals a non-default store asks about that store, not the default one."""
         cp = bash('. "$WK_ROOT/lib/common.sh"\nWK_STORE=/tmp/wk-elsewhere\nwk_py wk.resources --os linux headless-marker\n',
                   env={"WK_STORE": ""})
-        self.assertEqual(cp.stdout, "/tmp/wk-elsewhere/.headless", cp.stderr)
+        self.assertEqual(cp.stdout.strip(), "/tmp/wk-elsewhere/.headless", cp.stderr)
 
 
 class TestStoreInitSaysWhatItChanged(unittest.TestCase):

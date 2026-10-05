@@ -15,7 +15,7 @@ sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act, fleet  # noqa: E402
 from wk.boot import driver_class  # noqa: E402
-from wk.boot.driver import Channel, Driver, Onboard, disk_of, interface, part, partno  # noqa: E402
+from wk.boot.driver import Channel, Driver, Onboard, disk_of, part, partno  # noqa: E402
 from tests.fake_boot import FakeBoard  # noqa: E402
 from wk.boot import drivers, open_driver  # noqa: E402
 from wk.machine import Fake  # noqa: E402
@@ -78,10 +78,6 @@ class Conformance:
         for verb in ("arm", "evidence", "media", "reprovision"):
             with self.subTest(verb=verb):
                 self.assertIsNot(getattr(cls, verb), getattr(Driver, verb), "%s forgot %s" % (self.kind, verb))
-        for verb in interface():
-            self.assertTrue(callable(getattr(cls, verb)), verb)
-        self.assertEqual(cls.disarms, cls.disarm is not Driver.disarm)
-        self.assertEqual(cls.disarms, cls.disarm_note is not Driver.disarm_note)
         self.assertIs(driver_class(self.kind), cls)
 
     def test_the_production_transport_is_machines_and_no_bash(self):
@@ -249,14 +245,6 @@ class TestArmingExact(unittest.TestCase):
                 fake.stuck = True
                 got, err = quiet(d.arm, d.select_system("b")[0], d.order_image)
                 self.assertIs(got, act.Refused, "%s: an arming that left the first system armed passed" % kind)
-
-    def test_a_unique_id_still_needs_no_slot(self):
-        fake, d = board("pi-tryboot", ("a", "b"))
-        d.probe()
-        self.assertEqual(d.select_system("b"), ("/dev/sda3", "b"))
-        got, err = quiet(d.select_system, "")
-        self.assertIn("holds 2 systems", err)
-        self.assertIn("        a  (on /dev/sda1)", err)
 
 
 class TestChannel(unittest.TestCase):

@@ -155,8 +155,7 @@ class Build:
         name, o = self.name, self.opts
         if not o.get("preset"):
             log("usage: wk build <preset>" if self.in_ws else "usage: wk build <workspace> <preset>")
-            for line in presets.LIST_TEXT.splitlines():
-                log("  " + line)
+            list_presets()
             raise Refused(2)
         self.preset = presets.resolve(o["preset"], self.driver.os(), self.driver.kind, self.driver.env)
         for e in o.get("env", []):
@@ -169,11 +168,6 @@ class Build:
                         "        wk build%s %s --cmake %s" % (self.preset.name, self.preset.cmake_summary(), "" if self.in_ws else " " + name,
                                                            self.preset.name, shlex.quote(o["cmakeargs"])))
             o.setdefault("pass", []).insert(0, "--cmakeargs=" + o["cmakeargs"])
-        if o.get("sysroot") is not None:
-            die("--sysroot is not implemented (docs/Nice to have/HANDOFF-cross-compile.md).\n"
-                "    This workspace is %s; a --sysroot build would be a *cross* build from a\n"
-                "    native workspace, which is a different mechanism -- an aarch64 clang, -m32,\n"
-                "    CMAKE_LIBRARY_ARCHITECTURE and another rootfs to link against." % self.driver.arch(name))
         if o.get("babysit_driver"):
             return self.babysit()
         if o.get("babysit"):

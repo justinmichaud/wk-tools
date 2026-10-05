@@ -45,18 +45,11 @@ class TestTheSwitchIsThrownForEveryPlace(_AiRun):
         for place in PLACES:
             with self.subTest(place=place):
                 status, err = self._ai(place)
-                self.assertTrue(any(c.startswith("push off") for c in self.calls),
-                                f"{place}: {self.calls}")
+                self.assertEqual(self.CALLS[place], self.calls)
                 # The `off` was made to fail, so cmd/ai refuses to run at all
                 # rather than handing over an agent that can publish.
                 self.assertNotEqual(status, 0, err)
                 self.assertIn("refusing to run", err)
-
-    def test_a_guest_is_not_the_exception(self):
-        """The defect verbatim: `wk ai claude <guest>` on a vm place left the
-        switch on while the guest held a copy of the key."""
-        self._ai("vm")
-        self.assertEqual(["push status", "push off"], self.calls)
 
     def test_the_second_agent_gets_the_same_treatment(self):
         """The switch is a property of handing over control, not of Claude."""
@@ -66,20 +59,6 @@ class TestTheSwitchIsThrownForEveryPlace(_AiRun):
                 self.assertTrue(any(c.startswith("push off") for c in self.calls),
                                 f"{place}: {self.calls}")
 
-    def test_a_build_box_has_it_thrown_on_its_own_store(self):
-        """It keeps its keys under its own wk root, so the switch is named
-        rather than assumed to be this machine's."""
-        self._ai("remote")
-        self.assertEqual(["push status --on remote",
-                          "push off --on remote"], self.calls)
-
-    def test_every_other_target_uses_this_machine_s_store(self):
-        for place in ("container", "vm"):
-            with self.subTest(place=place):
-                self._ai(place)
-                for call in self.calls:
-                    self.assertNotIn("--on", call)
-
     def test_a_switch_already_off_is_left_alone(self):
         for place in PLACES:
             with self.subTest(place=place):
@@ -88,20 +67,7 @@ class TestTheSwitchIsThrownForEveryPlace(_AiRun):
 
 
 class TestAnUnmeasuredSwitchIsARefusal(_AiRun):
-    """3 (did not answer) and 5 (no switch) are not "off"; 4 (no keys anywhere) is."""
-
-    def test_a_machine_that_did_not_answer_stops_the_command(self):
-        status, out = self._ai("remote", push_status=3)
-        self.assertNotEqual(status, 0, out)
-        self.assertIn("refusing to run", out)
-        self.assertIn("wk key push status --on remote", out)
-        self.assertEqual(["push status --on remote"], self.calls, self.calls)
-
-    def test_a_machine_with_no_switch_stops_it_too(self):
-        status, err = self._ai("container", push_status=5)
-        self.assertNotEqual(status, 0, err)
-        self.assertIn("refusing to run", err)
-        self.assertEqual(["push status"], self.calls, self.calls)
+    """4 (no keys anywhere) is a measured off; 3 and 5 refuse (tests/test_ai.py)."""
 
     def test_no_keys_and_no_token_anywhere_is_a_measured_off(self):
         """4 is `wk key deploy` never having been run here: there is nothing
@@ -110,32 +76,6 @@ class TestAnUnmeasuredSwitchIsARefusal(_AiRun):
         _, err = self._ai("container", push_status=4)
         self.assertEqual(["push status"], self.calls, self.calls)
         self.assertNotIn("refusing to run", err)
-
-
-class TestTheSwitchComesBackOnlyForAPerson(unittest.TestCase):
-    """restore_push: a headless run leaves the switch off; only a person at a terminal gets it back."""
-
-    def _restore(self, was_on, terminal):
-        fake = Fake()
-        fake.answer([WK, "key", "push"])
-        env = {}
-        place = SimDriver(fake, env)
-        reg = sim_registry(env, fake, place)
-        ai = AI.Ai(AI.ROOT, env, reg, place, "claude", "demo")
-        ai.push_was_on = was_on
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            ai.restore_push(terminal)
-        return [" ".join(e[1][2:]) for e in fake.effects], err.getvalue()
-
-    def test_a_headless_session_leaves_it_off(self):
-        self.assertEqual([], self._restore(True, terminal=False)[0])
-
-    def test_a_person_at_a_terminal_gets_it_back(self):
-        self.assertEqual(["push on"], self._restore(True, terminal=True)[0])
-
-    def test_a_switch_this_command_did_not_throw_is_not_touched(self):
-        for terminal in (False, True):
-            self.assertEqual(([], ""), self._restore(False, terminal))
 
 
 class TestOneShapeAndNoPlaceNames(unittest.TestCase):

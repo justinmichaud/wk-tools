@@ -12,223 +12,104 @@
 # wk: sub push status readonly=yes
 #
 #   wk key setup      every credential this machine needs, and one working
-#                     credential of each kind on every workstation. The one
-#                     command a new machine needs, and the one that keeps the
-#                     fleet holding the same keys:
-#                       the deploy keys and every credential are elected.
-#                       Every workstation is asked what it
-#                       holds and whether its issuer still accepts it, at that
-#                       moment, and the best working answer wins -- age counts
-#                       for nothing. The winner is put on every workstation
-#                       holding a different one, and a tie goes to this machine,
-#                       so a fleet that already agrees is left alone.
-#                       When no workstation holds one that works, this machine
-#                       mints or is asked for one, and that one is fanned out.
-#                     A build machine is sent nothing: it keeps no credential at
-#                     rest and reaches the elected deploy key through an
-#                     ssh-agent forwarded from whoever drives the push. One line
-#                     per credential -- stored, minted, taken, skipped or
-#                     refused -- and then `wk key check`'s table. It overwrites
-#                     what the other workstations hold, so it asks once, first,
-#                     and it can be killed and re-run
-#                       --rotate  turn every credential over rather than elect
-#                                 one: the deploy keys as `wk key deploy
-#                                 --rotate` does, then each stored credential
-#                                 replaced as `wk key set <name> --replace`
-#                                 does, and the fresh ones fanned out
+#                     credential of each kind on every workstation. Each
+#                     workstation is asked what it holds and whether its issuer
+#                     accepts it now; the best answer wins (a tie goes to this
+#                     machine) and is put on every workstation holding a
+#                     different one. When none works, this machine mints or
+#                     asks for one and fans it out. A build machine is sent
+#                     nothing: it reaches the deploy key through a forwarded
+#                     ssh-agent. One line per credential, then `wk key check`'s
+#                     table. Asks once, first, and can be killed and re-run
+#                       --rotate  turn every credential over instead of electing:
+#                                 the deploy keys as `wk key deploy --rotate`,
+#                                 each stored credential as `wk key set <name>
+#                                 --replace`, and the fresh ones fanned out
 #   wk key set <name> [--replace] [--paste]
 #                     one credential by name, or the report on it when it is
-#                     already here.
+#                     already here
 #                       --replace  rotate it: the old one is removed first
 #                       --paste    take the value on stdin instead of minting
-#                                  one, so a second machine can hold the same
-#                                  minted credential as the first
+#                                  or asking for one
 #                     <name> is a row of lib/credcheck.py:
-#
-#                       github-pat    what `git-webkit pr` opens a pull request
-#                                     with. Never enters a workspace: only the credential
-#                                     injector reads it, which reads GitHub
-#                                     with it whatever position `wk key push` is in
-#                                     and writes only while it is on. A classic
-#                                     token with 'public_repo': a fine-grained
-#                                     one opens a pull request on every fork and
-#                                     on no project, because it reaches only
-#                                     repositories this account owns. Refused
-#                                     unless it can open one on each fork and on
-#                                     the project that fork belongs to, each
-#                                     asked with the write itself. Rotating it
-#                                     while `wk key push` is on hands the new one
-#                                     straight to the injector
+#                       github-pat    a classic token with 'public_repo' that
+#                                     `git-webkit pr` opens a pull request with;
+#                                     only the credential injector reads it, and
+#                                     writes with it only while push is on
 #                       bugzilla-api-key
-#                                     what `git-webkit pr` files and updates the
-#                                     bug with. Never enters a workspace either:
-#                                     the injector adds it to every
-#                                     bugs.webkit.org request while `wk key push` is
-#                                     on and to none while it is off. Judged as
-#                                     the login WebKit's contributors.json gives
-#                                     this GitHub account
-#                       claude        the Claude Code token a build box's agent
-#                                     starts authenticated with (`claude
-#                                     setup-token` prints one); inference only
+#                                     what `git-webkit pr` files the bug with;
+#                                     the injector adds it while push is on
+#                       claude        the Claude Code token (`claude
+#                                     setup-token`) a build box starts with
 #                       litellm       the API key `wk ai pi` reaches your
 #                                     LiteLLM endpoint with
 #                       tailnet       the fleet's tailnet auth key, seeded onto
 #                                     every card written here
-#                       tailnet-api   the tailnet API token a workstation
-#                                     retires a stale fleet node with; never
-#                                     written to a card
-#                       ntfy          the ntfy.sh topic lib/wk/notify.py publishes to
-#                                     to, so the fleet can tell you it wants
-#                                     you. Minted here, never invented: the
-#                                     topic name is the whole credential, so it
-#                                     is printed as it is minted and by `wk key
-#                                     show`, and never written to a card or held
-#                                     by a workspace
-#
-#   wk key deploy     the deploy keys alone, elected and converged the way
-#                     `setup` does them: the key each fork's repository accepts
-#                     wins, it is registered on GitHub with write access under a
-#                     single title, and every workstation holding a different
-#                     one takes it. --rotate removes the old keys from GitHub
-#                     and mints fresh ones instead of electing. Asks once, first
-#   wk key check      what every credential this machine holds can do and how
-#                     far it reaches and what each other workstation holds of
-#                     each of them -- every line asked again at that moment.
-#                     One row each: a state, the name, and what its issuer
-#                     just said; a workstation holding the same credential as
-#                     this one says so rather than repeating its reach.
-#                     Anything that needs doing ends up under `needs you:`, the
-#                     command to type first and where to get what it wants
-#                     second. Read-only, and what a bare `wk key` runs
-#   wk key show       print the public halves, and the ntfy topic URL to point a
-#                     phone at
+#                       tailnet-api   the tailnet API token that retires a stale
+#                                     fleet node; never written to a card
+#                       ntfy          the ntfy.sh topic lib/wk/notify.py
+#                                     publishes to; minted here and printed
+#                                     only at the mint and by `wk key show`
+#   wk key deploy     the deploy keys alone, elected and converged as `setup`
+#                     does them and registered on GitHub with write access.
+#                     --rotate removes the old keys from GitHub and mints fresh
+#                     ones. Asks once, first
+#   wk key check      what every credential here and on each other workstation
+#                     can do, asked now: one row each, and what needs doing
+#                     under `needs you:`. Read-only, and what a bare `wk key` runs
+#   wk key show       the public halves, and the ntfy topic URL for a phone
 #   wk key ensure     create missing push keys without registering them
 #   wk key push [on|off|status] [--on <machine>|--all] [--force]
-#                     whether a workspace can push to git at all (`status`,
-#                     the default, asks). Only the person at the keyboard
-#                     pushes: an agent in a workspace cannot publish anything,
-#                     while a shell there run by a human pushes normally. It is
-#                     a switch over credentials nothing in a workspace ever
-#                     holds: the deploy keys sit in an ssh-agent outside it, the
-#                     GitHub token and the Bugzilla key in the injector that
-#                     terminates TLS for api.github.com and bugs.webkit.org
-#                     (README.md has the mechanism).
-#                       on     the keys are in the agent and the token and the
-#                              Bugzilla key where the injector reads them:
-#                              `git push` and `git-webkit pr` work, the bug
-#                              included. A claude session in any workspace
-#                              would be handed that push, so `on` asks once and
-#                              ends every one of them
-#                       off    `ssh-add -D` empties the agent and both files go:
-#                              ssh has no identity to offer, and the injector
-#                              refuses a write with a 412 naming this switch
-#                     `status` asks the agent what it holds (`ssh-add -l`) and
-#                     the machine whether the credential files are there; there
-#                     is no state file. A machine runs an agent per kind of
-#                     workspace -- one in the podman machine the containers
-#                     mount its socket from, and on macOS one here for the
-#                     guests, reached through a forward (lib/wk/guest.py). `on`
-#                     and `off` switch every one or name the one they could not
-#                     reach; `status` says ON while any holds a key. It runs on
-#                     this machine (where=local), a build box included, and
-#                     `wk ai claude` turns it off before handing over control.
-#                       --on <machine>   ask that fleet machine, through its
-#                                            own wk. A build box holds no deploy
-#                                            key (`wk enter` forwards this
-#                                            machine's agent), so it reports off
-#                       --all                this machine and every other one
-#                                            (wk boot --list names them)
-#                       --force              `on` leaves a running claude session
-#                                            alone; it can push until it exits
+#                     whether a workspace can push (`status`, the default). The
+#                     deploy keys sit in an ssh-agent outside the workspace and
+#                     the GitHub token and Bugzilla key in the credential
+#                     injector (README.md has the mechanism).
+#                       on     load the keys and hand the injector its
+#                              credentials; asks once and ends every claude
+#                              session, which would be handed that push
+#                       off    `ssh-add -D` and remove the injector's files
+#                     `status` asks each agent (`ssh-add -l`) and the machine;
+#                     ON while any agent holds a key. `wk ai claude` turns it
+#                     off before handing over control.
+#                       --on <machine>  ask that fleet machine, through its wk
+#                       --all           this machine and every other one
+#                       --force         `on` leaves a running claude session
+#                                       alone; it can push until it exits
 #                     Exit: 0 on (status) or done; 1 off (status) or failed, or
 #                     a build box with no key at rest; 3 a machine did not
-#                     answer, so its position is unknown -- never "off" (in the
-#                     podman machine, `on`/`off` switched its half and not the
-#                     host's guests'); 4 no deploy keys here at all; 5 no
-#                     switch here: no key, or one live at rest
+#                     answer; 4 no deploy keys here; 5 no switch here
 #   wk key sudo [status|setup] [--on <machine>|--all]
-#                     make root cost a password, on a short leash: no blanket
-#                     NOPASSWD, and a 30-second cached-credential window
-#                     (WK_SUDO_TIMEOUT_MIN, in minutes), from one drop-in,
-#                     /etc/sudoers.d/zz-<user>-passwd, which sudoers' last-match
-#                     rule lets override an earlier NOPASSWD without touching a
-#                     file the sysadmins own. `status` (the default) says what
-#                     this machine does today. `setup` installs the drop-in and
-#                     asks for your password: it never edits or removes an
-#                     existing file, validates with `visudo -c` before and after
-#                     installing, then clears the timestamp and checks that sudo
-#                     asks. Exits 0 when a password is required and the window
-#                     is 30 seconds or less, 1 otherwise
+#                     make root cost a password with a 30-second window
+#                     (WK_SUDO_TIMEOUT_MIN) through one drop-in,
+#                     /etc/sudoers.d/zz-<user>-passwd. `status` (the default)
+#                     says what this machine does; `setup` installs the drop-in,
+#                     validating with `visudo -c` before and after, and checks
+#                     that sudo asks. Exits 0 when a password is required and
+#                     the window is 30 seconds or less, 1 otherwise
 #                       --on <machine>  the same, on a configured machine
-#                       --all         every configured machine's, and this
-#                                     one's status
+#                       --all           every configured machine, and this one
 #   wk key backup [--candidates]
-#                     write this host's live desktop settings back into the
-#                     repo, the inverse of ./setup: on macOS
-#                     host/macos/defaults.conf (refreshed value by value,
-#                     comments and ordering kept) and
-#                     host/macos/symbolichotkeys.plist; on Linux
-#                     host/linux/config.dconf, filtered of machine-specific and
-#                     secret entries, its leading comment block kept. Only
-#                     deliberate choices are captured, never a credential. Each
-#                     write is a tmp file beside the destination, then `mv`
+#                     write this host's desktop settings back into the repo, the
+#                     inverse of ./setup: host/macos/defaults.conf and
+#                     symbolichotkeys.plist on macOS, host/linux/config.dconf on
+#                     Linux, never a credential
 #                       --candidates  macOS only, read-only: every `defaults`
 #                                     value that differs from Apple's default
-#                                     and is not in defaults.conf yet, minus
-#                                     window positions, timestamps, UUIDs and
-#                                     other per-run noise, as "domain key
-#                                     value", for a maintainer to decide on
+#                                     and is not in defaults.conf yet
 #
-# One key per fork, the same on every workstation and shared by every workspace:
-# GitHub deploy keys are scoped to a single repository and refuse the same key on
-# a second one, so a compromised workspace can push to the forks in secrets.FORKS
-# and nowhere else. The one key per fork is registered once and held on every
-# workstation. Which key that is, and which of every other credential the fleet
-# holds, is decided by evidence taken at that moment rather than by where one
-# was last stored: 'wk key setup' asks every workstation what it holds
-# and whether its issuer still accepts it, and the best working answer is put
-# everywhere. Rotating ('wk key setup --rotate', or 'wk key deploy --rotate' for
-# the keys alone) turns the whole fleet over from one command.
-#
-# A shared build machine holds no key at all: it reaches the deploy key through
-# an ssh-agent forwarded from the workstation that drives it, so nothing private
-# rests on a machine other people are root on (remote/provision.sh, lib/wk/places.py's Remote).
-# Registration goes through the GitHub API, which takes the title, key and
-# read_only=false directly.
-#
-# The rest are meant for another machine to call over the tailnet, or for `wk
-# status`, rather than to type by hand:
-#
-#   wk key pub <fork>        print that fork's public key
+# For another workstation or `wk status` to call:
+#   wk key pub <fork>        that fork's public key
 #   wk key sshtest <fork>    does that fork's key authenticate, and as what
 #   wk key fingerprints      every key here, its fingerprint and its state
-#   wk key verdict <name>    one stored credential's verdict and detail, as
-#                            `check` prints them, on one tab-separated line,
-#                            with the fingerprint an election compares
+#   wk key verdict <name>    one stored credential's verdict and fingerprint
 #   wk key adopt <fork>      take a shared deploy key's private half on stdin
 #   wk key give <fork>|<name>
-#                            print that credential, for the workstation running
-#                            `wk key setup` to take -- the other half of
-#                            `adopt`
+#                            print that credential, the other half of `adopt`
 #
-# <fork> is one of the short names in lib/wk/secrets.py's FORKS.
-#
-# Every credential is put to a rule before it is stored, and to the same rule
-# again whenever one is reported (`wk key check`, `wk doctor`): the rules are
-# lib/credcheck.py, one row each, and that row is also what a prompt here asks
-# for and where it sends you to mint one. One that cannot do its job is refused
-# and nothing is stored; one that reaches further than wk spends it is kept with
-# that reach named; one no network could be reached to judge is kept and
-# reported unverified.
-#
-# Runs on the machine that holds the keys: the keyring is this device's
-# (Store.keyring_dir), and on macOS the podman machine reads it as a mount, so every
-# subverb here is ssh-keygen, a file and `gh`, with no VM in the path.
-#
-# `setup`, `deploy` and `check` are the only ones that call the GitHub API, which
-# is why the rest clear `needs`: that is what lets `wk key ensure` run over ssh
-# on a build machine with no `gh` on it, and `wk key set tailnet` store a key on
-# a machine whose gh login has expired.
+# <fork> is one of lib/wk/secrets.py's FORKS. Every credential is put to its
+# lib/credcheck.py rule before it is stored and whenever it is reported: one
+# that cannot do its job is refused, one that reaches further is kept with that
+# reach named, one no network could judge is kept as unverified.
 
 import os
 import sys

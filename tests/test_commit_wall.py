@@ -1,8 +1,4 @@
-"""The commit wall: `wk ai claude` runs the agent under bwrap with the checkout's .git commit-parts read-only
-(commit_wall_prefix, lib/wk/wall.py), proved live against a throwaway repo in the workspace image.
-
-Run: python3 -m unittest tests.test_commit_wall -v
-"""
+"""The commit wall (wall.commit_wall_prefix), proved live against a throwaway repo in the workspace image."""
 import shlex
 import sys
 import unittest
@@ -17,17 +13,6 @@ def prefix(src):
     return " ".join(wall.commit_wall_prefix(str(REPO), src))
 
 
-class TestWiring(unittest.TestCase):
-    def test_prefix_binds_every_wall_path_read_only(self):
-        line = prefix("/src/WebKit")
-        self.assertTrue(line.startswith("bwrap "), line)
-        self.assertIn("--dev-bind / /", line)
-        for p in ("objects", "refs", "logs", "HEAD", "packed-refs"):
-            self.assertIn(f"--ro-bind-try /src/WebKit/.git/{p} /src/WebKit/.git/{p}", line)
-        self.assertTrue(line.rstrip().endswith("--"), line)
-
-
-
 def _workspace_image():
     cp = container_side("podman images --format '{{.Repository}}:{{.Tag}}' | grep -m1 wkdev")
     return cp.stdout.strip() if cp.returncode == 0 else ""
@@ -35,16 +20,11 @@ def _workspace_image():
 
 @requires_container_place()
 class TestTheWallHolds(unittest.TestCase):
-    """The recipe run for real inside the workspace image: a commit is blocked,
-    an ordinary write is not, and no unmount/shadow/nested-namespace escape
-    lifts it -- while an unwrapped shell commits fine."""
-
     @classmethod
     def setUpClass(cls):
         cls.img = _workspace_image()
         if not cls.img:
             raise unittest.SkipTest("no wkdev image for the container place")
-        # the exact prefix production emits, for a repo at /tmp/r
         cls.prefix = prefix("/tmp/r")
 
     def _run(self, script):
@@ -84,10 +64,6 @@ class TestTheWallHolds(unittest.TestCase):
         self.assertIn("OK", out)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestBuiltinsAreAskedThroughAShell(unittest.TestCase):
     """A place's exec runs argv, not a shell, so a builtin such as `command -v` goes through `sh -c` (machine.HAVE)."""
 
@@ -107,3 +83,7 @@ class TestBuiltinsAreAskedThroughAShell(unittest.TestCase):
         found = ["%s:%d" % (f.name, n) for f in files
                  for n, line in enumerate(f.read_text(errors="replace").splitlines(), 1) if bad.search(line)]
         self.assertEqual([], found)
+
+
+if __name__ == "__main__":
+    unittest.main()

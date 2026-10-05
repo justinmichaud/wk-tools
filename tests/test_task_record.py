@@ -1,17 +1,9 @@
 """One renderer for every long-running command's task record (wk.statusview): the plan under the task as [x] done,
 [>] running, [-] skipped, [!] stopped there and [ ] pending, with the kill command and the log beneath it."""
-import io
-import os
-import sys
-import tempfile
-import types
 import unittest
 from pathlib import Path
 
-from tests.support import REPO
-
-sys.path.insert(0, str(REPO / "lib"))
-from wk import statusview  # noqa: E402
+from tests.test_status import render
 
 PLANS = {
     "build":  ["configure", "compile", "link"],
@@ -29,19 +21,6 @@ KILLS = {
     "new":   "wk new ws1 --kill",
     "agent-forward": "wk key push off",
 }
-
-
-def render(records, mode="text"):
-    """The renderer on synthetic records, in process."""
-    records = list(records)
-    if mode == "html":
-        out = statusview.write_page(statusview.merge(records),
-                                    os.path.join(tempfile.mkdtemp(prefix="wk-status-page-"), "status.html")) + "\n"
-    else:
-        buf = io.StringIO()
-        statusview.render_text_stream(iter(records), buf, False)
-        out = buf.getvalue()
-    return types.SimpleNamespace(stdout=out, stderr="", returncode=0)
 
 
 def in_order(plan, step):
@@ -65,9 +44,7 @@ def task_rec(kind, state, step, plan=None, steps=None, **extra):
 class TestTheRendererSaysWhatIsLeftAndWhatStopsIt(unittest.TestCase):
 
     def _text(self, rec):
-        cp = render([{"kind": "machine", "name": "tolken", "self": True}, rec])
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        return cp.stdout
+        return render([{"kind": "machine", "name": "tolken", "self": True}, rec]).stdout
 
     def test_exactly_one_step_is_marked_running(self):
         out = self._text(task_rec("yocto", "running", 3))
@@ -119,7 +96,6 @@ class TestTheRendererSaysWhatIsLeftAndWhatStopsIt(unittest.TestCase):
     def test_the_page_renders_the_same_plan(self):
         cp = render([{"kind": "machine", "name": "tolken", "self": True},
                      task_rec("yocto", "running", 3)], "html")
-        self.assertEqual(cp.returncode, 0, cp.stderr)
         page = Path(cp.stdout.strip()).read_text()
         self.assertIn("[&gt;]", page)
         self.assertIn("wk sysimage build wpe --stage image --stop", page)

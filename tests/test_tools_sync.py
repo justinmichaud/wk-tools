@@ -288,17 +288,8 @@ class TestStatusToolsRow(unittest.TestCase):
     """`wk status`'s wk-tools row for a machine across ssh: every copy is compared by commit -- a checkout's own,
     or, in the podman VM, this very checkout mounted in."""
 
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-toolsrow-"))
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.src = self.tmp / "src"
-        self.src.mkdir()
-        git(self.src, "init", "-q", ".")
-        (self.src / "f").write_text("one\n")
-        git(self.src, "add", "-A")
-        git(self.src, "commit", "-qm", "one")
-        self.short = git(self.src, "rev-parse", "--short", "HEAD").stdout.strip()
-        self.full = git(self.src, "rev-parse", "HEAD").stdout.strip()
+    full = "4f1c2b9e0d3a5c7e9b1d3f5a7c9e1b3d5f7a9c1e"
+    short = full[:7]
 
     def row(self, ver, in_vm=False):
         from wk import status

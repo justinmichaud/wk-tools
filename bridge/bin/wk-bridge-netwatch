@@ -113,13 +113,7 @@ while :; do
     /usr/local/sbin/wk-bridge-usb-host 2>/dev/null || true
 
     if [ ! -e "/sys/class/net/$iface" ]; then
-        log "$iface missing -- re-asserting USB host mode"
-        /usr/local/sbin/wk-bridge-usb-host 2>/dev/null || true
-        if [ -e "/sys/class/net/$iface" ]; then
-            log "$iface came back"
-        else
-            log "$iface still absent -- wk-bridge-healthcheck says which fault"
-        fi
+        log "$iface absent after re-asserting USB host mode -- wk-bridge-healthcheck says which fault"
     elif [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null)" = 1 ] \
          && ! segment_answers; then
         # Carrier up and nothing answers: these leases never expire, so a client that missed the window re-uses its address by ARP and never files another request -- taking the carrier away and back is what makes it ask. Two passes before flapping, except within 180 s of this phone's own boot, where a board's DHCPDISCOVER was measured landing 134 s in on its own retry schedule.

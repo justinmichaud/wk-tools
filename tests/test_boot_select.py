@@ -56,11 +56,6 @@ class TestEnumeration(unittest.TestCase):
         ch = Channel({"card_priv": lambda fn, w, p: Result(0, "alpha-1\n" if w[2] == "1" else "")})
         self.assertEqual(PiTryboot(REPO, CONF, ch).systems(), [("/dev/sda1", "alpha-1")])
 
-    def test_an_unreadable_medium_is_not_an_empty_one(self):
-        ch = Channel({"card_priv": Result(1), "part-absent.sh": Result(0, "yes\n")})
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.assertIsNone(PiTryboot(REPO, CONF, ch).systems())
-
     def test_a_slot_the_medium_does_not_have_reads_as_empty_and_says_nothing(self):
         """a card written with one system simply has no p3: an empty slot, not a card that cannot be read."""
         ch = Channel({"card_priv": Result(1), "part-absent.sh": Result(0, "no\n")})
@@ -72,6 +67,7 @@ class TestEnumeration(unittest.TestCase):
         ch = Channel({"card_priv": Result(1), "part-absent.sh": Result(0, "yes\n")})
         with contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertIsNone(Rpi5Usb(REPO, CONF, ch).medium_read("/dev/sda3", "wk-image.id"))
+            self.assertIsNone(PiTryboot(REPO, CONF, ch).systems())
         self.assertIn("card helper is older", err.getvalue())
         self.assertIn("./setup --stage quiesce", err.getvalue())
 

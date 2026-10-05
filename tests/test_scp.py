@@ -13,21 +13,7 @@ from tests.support import (
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places  # noqa: E402
-from wk.decl import leading_block  # noqa: E402
 from wk.machine import Fake, Local  # noqa: E402
-
-# `podman`: logs every invocation and answers the two questions the container
-# driver asks -- the container's user (its working directory) and what a path
-# is. Nothing is copied; the argv is the whole answer.
-FAKE_PODMAN = '''
-printf '%s\\n' "$*" >> "$WK_TEST_PODMAN_LOG"
-case "$*" in
-    *WorkingDir*)   echo "/home/dev" ;;
-    *"echo dir"*)   echo file ;;
-esac
-exit 0
-'''
-
 
 def _tart(kind="absent"):
     """`tart`: one running guest whose `exec` logs its argv and answers t_path_kind's one question with <kind>."""
@@ -251,8 +237,6 @@ class TestTheWholeCommandOnAGuest(WkTest):
         cp = self._run(_tart(kind="file"),
                        "demo", ":a.txt", str(self.tmp / "a.txt"))
         self.assertEqual(cp.returncode, 0, cp.stdout)
-        # The name came out of argv as the dispatcher's positional, so the
-        # command never re-parsed it out of a `<ws>:<path>` operand.
         self.assertIn(f"copied demo:/Users/admin/WebKit/a.txt to {self.tmp / 'a.txt'}",
                       cp.stdout)
         self.assertIn("tart exec wk-demo /bin/cat /Users/admin/WebKit/a.txt", self.log)

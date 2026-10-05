@@ -1,6 +1,5 @@
 """The build presets as data, resolved for a place's os and driver."""
 
-import os
 import shlex
 
 from wk import act, fleet, images, resources
@@ -79,10 +78,6 @@ IMAGE_ARMHF = "ghcr.io/igalia/wkdev-sdk:24.04_arm32"
 def arch_canon(arch):
     if arch in ARCH_NAMES:
         return ARCH_NAMES[arch]
-    if arch in ("riscv64", "riscv"):
-        act.die("riscv64 is a cross-build target, not a workspace architecture:\n"
-                "    this machine cannot execute riscv64 natively, so it needs a sysroot.\n"
-                "    See docs/Nice to have/HANDOFF-cross-compile.md; 'wk build --sysroot' is where it will go.")
     act.die("unknown architecture '%s' (one of: %s)\n"
             "    A workspace's --arch is what it runs *natively*. To build for something\n"
             "    this machine cannot execute, that is a cross build -- see\n"
@@ -198,16 +193,10 @@ class Preset:
         return self.cmake or "the flags it sets"
 
 
-def resolve(name, os_name, kind=None, env=None):
+def resolve(name, os_name, kind, env):
     """LookupError for a name that is none; a refusal (`Refused`) for one this place cannot build."""
-    env = os.environ if env is None else env
     if name not in PRESETS:
         raise LookupError(name)
-    if not os_name:
-        act.die("resolve('%s'): no platform given -- the caller passes Driver.os() (a bug in the caller)." % name)
-    kind = kind or env.get("WK_DRIVER", "")
-    if not kind:
-        act.die("resolve('%s'): no driver given -- the caller passes Driver.kind (a bug in the caller)." % name)
     spec = PRESETS[name]
     if os_name == "macos" and "macos" in spec:
         spec = dict(spec, **spec["macos"])

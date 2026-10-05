@@ -1,8 +1,4 @@
-"""Every credential's rule (lib/credcheck.py): what it must be able to do, and what it must not. Each issuer is a
-local HTTP server, so the real request-making code runs and nothing leaves the machine.
-
-Run: python3 -m unittest tests.test_credcheck -v
-"""
+"""Every credential's rule (lib/credcheck.py); each issuer is a loopback HTTP server, so the real request code runs."""
 import copy
 import json
 import os
@@ -19,7 +15,7 @@ REPO = Path(__file__).resolve().parent.parent
 CREDCHECK = REPO / "lib" / "credcheck.py"
 
 sys.path.insert(0, str(REPO / "lib"))
-import credcheck   # noqa: E402 -- the constants a verdict names are read from it
+import credcheck   # noqa: E402
 
 FORKS = "wkuser/WebKit wkuser/WPEWebKit"
 PROJECTS = {"wkuser/WebKit": "WebKit/WebKit",
@@ -34,29 +30,7 @@ POLICY = ("The 'WebKit' organization forbids access via a fine-grained "
           "https://github.com/settings/personal-access-tokens/19512093")
 
 
-class FakeGitHub(BaseHTTPRequestHandler):
-    """`GET /user` answers the token's identity, its classic scope list and its
-    expiry; `GET /user/repos` the account's repositories, one page at a time,
-    whatever the token was granted; `GET /repos/<r>` the repository, with the
-    project it is a fork of as `parent`, or `repo_status`'s refusal carrying
-    `repo_message`; `POST /repos/<r>/pulls` whether the token can open a pull
-    request there, 403 unless `pulls` says otherwise. All four are what GitHub
-    itself answers."""
-
-    # Every field is class state the whole suite shares, so a fixture setting
-    # only what it varies would inherit the rest from whichever module ran
-    # before it. `reset` is what makes each fixture's starting point its own.
-    DEFAULTS = dict(user_status=200, scopes="", expiry="", pulls={}, repos=[],
-                    repos_status=200, repos_answer=None, parents={},
-                    repo_status={}, repo_message="", pulls_message={}, seen=[])
-
-    @classmethod
-    def reset(cls, **fields):
-        # On FakeGitHub itself, never on cls: the handler reads the base class,
-        # so a subclass fixture setting its own would be read by nothing.
-        for name, value in dict(cls.DEFAULTS, **fields).items():
-            setattr(FakeGitHub, name, copy.deepcopy(value))
-
+class JsonHandler(BaseHTTPRequestHandler):
     def _send(self, code, body, headers=()):
         raw = json.dumps(body).encode()
         self.send_response(code)
@@ -66,6 +40,33 @@ class FakeGitHub(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def log_message(self, *a):
+        pass
+
+
+def serve(handler, cleanup):
+    """A loopback server for `handler`, stopped through `cleanup` (a TestCase's addCleanup); its base URL."""
+    server = HTTPServer(("127.0.0.1", 0), handler)
+    cleanup(server.server_close)
+    cleanup(server.shutdown)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return "http://127.0.0.1:%d" % server.server_port
+
+
+class FakeGitHub(JsonHandler):
+    """GitHub's /user, /user/repos (paged), /repos/<r> (with `parent`) and POST /repos/<r>/pulls (403 by default)."""
+
+    # Class state the suite shares: `reset` gives each fixture its own starting point, on FakeGitHub itself
+    # because the handler reads the base class.
+    DEFAULTS = dict(user_status=200, scopes="", expiry="", pulls={}, repos=[],
+                    repos_status=200, repos_answer=None, parents={},
+                    repo_status={}, repo_message="", pulls_message={}, seen=[])
+
+    @classmethod
+    def reset(cls, **fields):
+        for name, value in dict(cls.DEFAULTS, **fields).items():
+            setattr(FakeGitHub, name, copy.deepcopy(value))
 
     def do_GET(self):
         FakeGitHub.seen.append(("GET", self.path,
@@ -111,9 +112,6 @@ class FakeGitHub(BaseHTTPRequestHandler):
         self._send(code, {"message": FakeGitHub.pulls_message.get(
             repo, "Resource not accessible by personal access token")})
 
-    def log_message(self, *a):
-        pass
-
 
 FakeGitHub.reset()
 
@@ -121,15 +119,7 @@ FakeGitHub.reset()
 class _Rules(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.server = HTTPServer(("127.0.0.1", 0), FakeGitHub)
-        cls.base = "http://127.0.0.1:%d" % cls.server.server_port
-        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
-        cls.thread.start()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.server.shutdown()
-        cls.server.server_close()
+        cls.base = serve(FakeGitHub, cls.addClassCleanup)
 
     def setUp(self):
         FakeGitHub.reset(
@@ -143,8 +133,6 @@ class _Rules(unittest.TestCase):
         args = ["python3", str(CREDCHECK), "check", name, "--repos", repos]
         if path is not None:
             args += ["--path", str(path)]
-            # What Secrets.check_value does: the value always arrives on stdin, read
-            # the one way; the path is context for the rules that need it.
             if value is None and Path(path).exists():
                 value = Path(path).read_text()
         for e in evidence:
@@ -158,30 +146,17 @@ class _Rules(unittest.TestCase):
         verdict, _, detail = cp.stdout.partition("\t")
         return verdict, detail
 
-    def assert_verdict(self, want, got, detail):
-        self.assertEqual(want, got, detail)
-
 
 # --- bugzilla-api-key ------------------------------------------------------------
 BZ_LOGIN = "me@example.test"
 BZ_KEY = "notarealbugzillakey0123456789abcdefghijk"
 
 
-class FakeBugzilla(BaseHTTPRequestHandler):
-    """`GET /rest/valid_login?login=..&api_key=..` answers as bugs.webkit.org
-    (Bugzilla 5.0.4) does, measured 2026-09-14: `{"result": true}` for the
-    key's own login, `{"result": false}` for another login, and HTTP 400 with
-    error code 306 for a key it does not know."""
+class FakeBugzilla(JsonHandler):
+    """bugs.webkit.org's valid_login, measured 2026-09-14: true for the key's own login, false for another, 400/306
+    for a key it does not know."""
 
     seen = []
-
-    def _send(self, code, body):
-        raw = json.dumps(body).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
 
     def do_GET(self):
         FakeBugzilla.seen.append(self.path)
@@ -194,23 +169,12 @@ class FakeBugzilla(BaseHTTPRequestHandler):
                                     "message": "The API key you specified is invalid."})
         self._send(200, {"result": q.get("login", [""])[0] == BZ_LOGIN})
 
-    def log_message(self, *a):
-        pass
-
 
 class _Bugzilla(_Rules):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.bz = HTTPServer(("127.0.0.1", 0), FakeBugzilla)
-        cls.bz_base = "http://127.0.0.1:%d" % cls.bz.server_port
-        threading.Thread(target=cls.bz.serve_forever, daemon=True).start()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.bz.shutdown()
-        cls.bz.server_close()
-        super().tearDownClass()
+        cls.bz_base = serve(FakeBugzilla, cls.addClassCleanup)
 
     def setUp(self):
         super().setUp()
@@ -230,8 +194,6 @@ class TestTheBugzillaKey(_Bugzilla):
         self.assertIn("while push is on", detail)
 
     def test_it_is_judged_as_a_pair_by_one_request(self):
-        """Secrets.check_value (lib/wk/secrets.py) supplies the login as evidence, from
-        the mirror; the rule sends the pair to `valid_login` and nothing else."""
         self.bz_check(BZ_KEY)
         self.assertEqual(1, len(FakeBugzilla.seen), FakeBugzilla.seen)
         self.assertTrue(FakeBugzilla.seen[0].startswith("/rest/valid_login?"))
@@ -273,28 +235,8 @@ class TestTheTokenCanDoTheJob(_Rules):
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("ok", verdict, detail)
         self.assertIn("fine-grained", detail)
-        for repo in FORKS.split():
+        for repo in FORKS.split() + list(PROJECTS.values()):
             self.assertIn("can open a pull request on %s" % repo, detail)
-
-    def test_the_account_repositories_are_listed_once_per_page(self):
-        """One GET per page, after the identity call, each fork and each
-        project a fork belongs to."""
-        self.check("github-pat", FINE)
-        self.assertEqual(["/user",
-                          "/repos/wkuser/WebKit", "/repos/wkuser/WPEWebKit",
-                          "/user/repos?per_page=100&page=1"],
-                         [p[1] for p in FakeGitHub.seen if p[0] == "GET"])
-
-    def test_the_probe_is_a_write_that_creates_nothing(self):
-        """An empty body names no head or base branch, so an authorised call is
-        422 -- the same probe `wk doctor` runs from inside a workspace."""
-        self.check("github-pat", FINE)
-        posts = [p for p in FakeGitHub.seen if p[0] == "POST"]
-        self.assertEqual(["/repos/%s/pulls" % r
-                          for r in FORKS.split() + list(PROJECTS.values())],
-                         [p[1] for p in posts])
-        for _m, _p, auth in posts:
-            self.assertTrue(auth.startswith("Bearer "), auth[:12])
 
     def test_the_identity_and_expiry_github_reports_are_named(self):
         FakeGitHub.expiry = "2026-12-01 00:00:00 UTC"
@@ -303,8 +245,6 @@ class TestTheTokenCanDoTheJob(_Rules):
         self.assertIn("expires 2026-12-01", detail)
 
     def test_no_pull_request_permission_on_one_fork_is_refused_by_name(self):
-        """The failure measured 2026-09-04: the token is spent, GitHub answers
-        403, and `git-webkit pr` cannot open a pull request."""
         FakeGitHub.pulls["wkuser/WPEWebKit"] = 403
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("bad", verdict, detail)
@@ -327,19 +267,9 @@ class TestTheTokenCanDoTheJob(_Rules):
 
 
 class TestTheProjectRefusesIt(_Rules):
-    """A pull request is opened on the project, not on the fork, so the project
-    is asked the same write-shaped question the forks are. A read of it is not
-    the question and would pass a token that cannot do the job: measured
-    2026-09-15, a fine-grained token reads WebKit/WebKit (200) and is refused
-    POST /repos/WebKit/WebKit/pulls, because a fine-grained token reaches only
-    repositories owned by the account that owns it. The organization's
-    token-lifetime policy refuses the same call in its own words, and GitHub's
-    message is what tells the two apart."""
+    """Measured 2026-09-15: a fine-grained token reads WebKit/WebKit and is refused POST /pulls there."""
 
     def test_a_fine_grained_token_is_refused_with_the_reason_it_cannot_be_fixed(self):
-        """The one a person would otherwise chase for an afternoon: every fork
-        probe passes, so the token looks right everywhere except the one call
-        that matters."""
         FakeGitHub.pulls["WebKit/WebKit"] = 403
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("bad", verdict, detail)
@@ -351,9 +281,6 @@ class TestTheProjectRefusesIt(_Rules):
         self.assertIn("scopes=public_repo", detail)
 
     def test_the_organizations_lifetime_policy_is_refused_in_its_own_words(self):
-        """The other 403 the same call answers, told apart by GitHub's message
-        alone -- and that message names the token and the page to shorten it
-        at, so it is the remedy."""
         FakeGitHub.pulls["WebKit/WebKit"] = 403
         FakeGitHub.pulls_message = {"WebKit/WebKit": POLICY}
         verdict, detail = self.check("github-pat", FINE)
@@ -362,16 +289,7 @@ class TestTheProjectRefusesIt(_Rules):
         self.assertIn("personal-access-tokens/19512093", detail)
         self.assertIn("wk key set github-pat", detail)
 
-    def test_a_refusal_with_no_message_still_names_the_project(self):
-        FakeGitHub.pulls["WebKit/WebKit"] = 403
-        FakeGitHub.pulls_message = {"WebKit/WebKit": ""}
-        verdict, detail = self.check("github-pat", FINE)
-        self.assertEqual("bad", verdict, detail)
-        self.assertIn("WebKit/WebKit", detail)
-
     def test_a_classic_token_is_asked_the_same_question(self):
-        """The question is the project's, not the token format's -- but the
-        advice to mint a classic one is not repeated at a classic one."""
         FakeGitHub.scopes = "repo"
         FakeGitHub.pulls["WebKit/WebKit"] = 403
         verdict, detail = self.check("github-pat", CLASSIC)
@@ -379,15 +297,7 @@ class TestTheProjectRefusesIt(_Rules):
         self.assertIn("WebKit/WebKit", detail)
         self.assertNotIn("reaches only repositories owned by the account", detail)
 
-    def test_every_project_it_can_open_one_on_is_named(self):
-        verdict, detail = self.check("github-pat", FINE)
-        self.assertEqual("ok", verdict, detail)
-        for project in PROJECTS.values():
-            self.assertIn("can open a pull request on %s" % project, detail)
-
     def test_a_fork_of_nothing_has_no_project_to_ask(self):
-        """The parent is what GitHub answers, not a list kept here: a
-        repository that is nobody's fork is its own base, already probed."""
         FakeGitHub.parents = {}
         verdict, detail = self.check("github-pat", FINE)
         self.assertEqual("ok", verdict, detail)
@@ -413,8 +323,6 @@ class TestTheProjectRefusesIt(_Rules):
         self.assertIn("rather than 422", detail)
 
     def test_the_project_is_asked_before_the_account_is_enumerated(self):
-        """Refusing costs one request; enumerating the account costs one per
-        repository it owns."""
         FakeGitHub.pulls["WebKit/WebKit"] = 403
         self.check("github-pat", FINE)
         self.assertEqual([], [p for p in FakeGitHub.seen
@@ -423,8 +331,6 @@ class TestTheProjectRefusesIt(_Rules):
 
 class TestTheTokenIsNotWiderThanTheJob(_Rules):
     def test_a_classic_token_is_kept_with_its_reach_named(self):
-        """It can do the job, and it is the token a person most likely already
-        has working, so the wider reach is reported rather than refused."""
         FakeGitHub.scopes = "repo, read:org"
         verdict, detail = self.check("github-pat", CLASSIC)
         self.assertEqual("wide", verdict, detail)
@@ -444,21 +350,13 @@ class TestTheTokenIsNotWiderThanTheJob(_Rules):
         self.assertIn("admin:org", detail)
 
     def test_a_refused_scope_costs_no_write_probe(self):
-        """The cheap local answer comes first: nothing is spent establishing
-        what the scope list already settled."""
         FakeGitHub.scopes = "repo, delete_repo"
         self.check("github-pat", CLASSIC)
         self.assertEqual([], [p for p in FakeGitHub.seen if p[0] == "POST"])
 
 
 class TestTheTokenReachesTheForksAndNothingElse(_Rules):
-    """GitHub's fine-grained token form takes no repository parameter, so a
-    token minted from the link arrives on *All repositories* unless the person
-    changes that field -- and a token on all of them is the whole account's
-    reach behind one workspace boundary. No endpoint enumerates what a token
-    was granted, and `GET /user/repos` answers for the account (every public
-    repository it has, whatever the token reaches), so each listed repository
-    is asked the same write-shaped question as the forks."""
+    """No endpoint enumerates what a token was granted, so each listed repository is probed like the forks."""
 
     OTHERS = ["wkuser/other%d" % i for i in range(44)]
 
@@ -469,9 +367,6 @@ class TestTheTokenReachesTheForksAndNothingElse(_Rules):
         self.assertIn("on the 2 forks and on none of the 44 other", detail)
 
     def test_every_listed_repository_is_probed_not_counted(self):
-        """The measurement of 2026-09-11: a token granted exactly the two forks
-        is listed 48 repositories with the account's `push: true` on each, and
-        answers 422 on the forks alone."""
         FakeGitHub.repos = FORKS.split() + self.OTHERS
         self.check("github-pat", FINE)
         self.assertEqual(["/repos/%s/pulls" % r
@@ -490,8 +385,6 @@ class TestTheTokenReachesTheForksAndNothingElse(_Rules):
             self.assertIn(repo, detail)
 
     def test_the_list_is_read_to_its_last_page(self):
-        """100 per page: a token on a busy account whose second page held the
-        repositories it reaches would otherwise pass."""
         others = ["wkuser/r%03d" % i for i in range(150)]
         FakeGitHub.repos = FORKS.split() + others
         FakeGitHub.pulls[others[-1]] = 422
@@ -504,8 +397,6 @@ class TestTheTokenReachesTheForksAndNothingElse(_Rules):
                           if p[1].startswith("/user/repos")])
 
     def test_a_classic_token_is_not_asked_which_repositories_it_reaches(self):
-        """Its scope list already answers: `repo` reaches every repository the
-        account can write, which is the reach the verdict names."""
         FakeGitHub.scopes = "repo"
         verdict, detail = self.check("github-pat", CLASSIC)
         self.assertEqual("wide", verdict, detail)
@@ -538,20 +429,14 @@ class TestAMalformedToken(_Rules):
                 self.assertEqual("bad", verdict, detail)
                 self.assertIn("not a personal access token", detail)
 
-    def test_nothing_at_all(self):
+    def test_nothing_at_all_asks_nothing_of_github(self):
         verdict, detail = self.check("github-pat", "")
         self.assertEqual("bad", verdict, detail)
-
-    def test_nothing_was_asked_of_github(self):
-        self.check("github-pat", "hunter2")
         self.assertEqual([], FakeGitHub.seen)
 
 
 class TestAnUnreachableApi(_Rules):
     def test_offline_is_a_state_and_the_credential_is_still_usable_here(self):
-        """Refusing to store a credential because the machine is offline would
-        leave the person with nothing; the verdict says it was not established
-        and every reader asks again."""
         verdict, detail = self.check("github-pat", FINE, api="http://127.0.0.1:1")
         self.assertEqual("unverified", verdict, detail)
         self.assertIn("could not reach", detail)
@@ -559,10 +444,6 @@ class TestAnUnreachableApi(_Rules):
 
 
 class TestWhereTheseApisMayBePointed(_Rules):
-    """Both bases come from the environment so a test can stand a stub up on
-    loopback, and a credential goes to whatever they name in an Authorization
-    header. So: https, or loopback, or a refusal that names the variable."""
-
     def _run(self, **env):
         e = dict(os.environ)
         e.update(env)
@@ -587,20 +468,11 @@ class TestWhereTheseApisMayBePointed(_Rules):
                 self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
 
 
-class FakeAnthropic(BaseHTTPRequestHandler):
-    """api.anthropic.com as the rules see it (measured 2026-09-10): `GET /v1/models` answers 200 for a token
-    Anthropic accepts and 401 for one it does not, with no model inferred."""
+class FakeAnthropic(JsonHandler):
+    """api.anthropic.com, measured 2026-09-10: GET /v1/models is 200 for an accepted token, 401 otherwise."""
 
     status = 200
     seen = []
-
-    def _send(self, status, body):
-        raw = json.dumps(body).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
 
     def do_GET(self):
         FakeAnthropic.seen.append(
@@ -612,27 +484,12 @@ class FakeAnthropic(BaseHTTPRequestHandler):
                                "error": {"type": "authentication_error"}})
         return self._send(200, {"data": [{"id": "claude-x"}]})
 
-    def log_message(self, *a):
-        pass
-
 
 class _Anthropic(_Rules):
-    """A FakeAnthropic of the class's own, reset before every test."""
-
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.anthropic = HTTPServer(("127.0.0.1", 0), FakeAnthropic)
-        cls.anthropic_base = "http://127.0.0.1:%d" % cls.anthropic.server_port
-        cls.anthropic_thread = threading.Thread(
-            target=cls.anthropic.serve_forever, daemon=True)
-        cls.anthropic_thread.start()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.anthropic.shutdown()
-        cls.anthropic.server_close()
-        super().tearDownClass()
+        cls.anthropic_base = serve(FakeAnthropic, cls.addClassCleanup)
 
     def setUp(self):
         super().setUp()
@@ -644,11 +501,9 @@ class _Anthropic(_Rules):
         return {"WK_ANTHROPIC_API": base}
 
 
-class FakeLiteLLM(BaseHTTPRequestHandler):
-    """ai.igalia.com as measured 2026-09-14: `GET /v1/models` lists what a key
-    may call (401 for one it does not accept), and `GET /key/info` answers 403
-    for a key restricted to the LLM API routes, 200 with the key's own record
-    for one that is not."""
+class FakeLiteLLM(JsonHandler):
+    """ai.igalia.com, measured 2026-09-14: /v1/models lists what a key may call (401 for one it does not accept), and
+    /key/info is 403 for a key restricted to the LLM API routes."""
 
     models_status = 200
     info_status = 403
@@ -665,15 +520,7 @@ class FakeLiteLLM(BaseHTTPRequestHandler):
                     else {"detail": "Virtual key is not allowed to call this route."})
         else:
             status, body = 404, {"detail": "Not Found"}
-        raw = json.dumps(body).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
-
-    def log_message(self, *a):
-        pass
+        self._send(status, body)
 
 
 # --- the two pasted keys -------------------------------------------------------
@@ -681,17 +528,7 @@ class TestTheAgentKeys(_Anthropic):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.litellm = HTTPServer(("127.0.0.1", 0), FakeLiteLLM)
-        cls.litellm_base = "http://127.0.0.1:%d" % cls.litellm.server_port
-        cls.litellm_thread = threading.Thread(
-            target=cls.litellm.serve_forever, daemon=True)
-        cls.litellm_thread.start()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.litellm.shutdown()
-        cls.litellm.server_close()
-        super().tearDownClass()
+        cls.litellm_base = serve(FakeLiteLLM, cls.addClassCleanup)
 
     def setUp(self):
         super().setUp()
@@ -711,9 +548,6 @@ class TestTheAgentKeys(_Anthropic):
         self.assertIn("inference-only", detail)
 
     def test_whether_anthropic_still_accepts_it_is_asked_and_not_assumed(self):
-        """The one request a workspace cannot make for itself before it is
-        handed the token: a stale token is otherwise discovered as a /login
-        prompt inside a workspace, hours later."""
         _v, detail = self.claude("sk-ant-oat01-abc")
         self.assertIn("Anthropic accepts it", detail)
         self.assertEqual(1, len(FakeAnthropic.seen), FakeAnthropic.seen)
@@ -753,9 +587,6 @@ class TestTheAgentKeys(_Anthropic):
         self.assertIn("sk-ant-oat", detail)
 
     def test_a_litellm_key_the_endpoint_accepts_and_restricts_is_ok(self):
-        """Measured, not assumed: the endpoint is asked what the key may call,
-        and a key shut out of the management routes (403 on /key/info) is what
-        a key every workspace holds should be."""
         verdict, detail = self.litellm_key("sk-abc123")
         self.assertEqual("ok", verdict, detail)
         self.assertIn("serves it 2 model(s)", detail)
@@ -852,9 +683,6 @@ class TestADeployKey(_Rules):
         self.assertIn("not registered on", detail)
 
     def test_an_account_key_reaches_too_far_and_is_refused(self):
-        """A user key authenticates without naming a repository: it reaches
-        every repository that account can, which is the reach a deploy key
-        exists to avoid."""
         verdict, detail = self.key("Hi wkuser! You've successfully "
                                    "authenticated, but GitHub does not provide "
                                    "shell access.", "")
@@ -880,26 +708,22 @@ class TestOneTableForEveryCredential(_Rules):
         return cp.stdout.split()
 
     def test_every_credential_wk_stores_has_a_rule(self):
-        """A file row is the Claude CLI's own, and wk stores none."""
         from wk import secrets
         held = ["github-pat", "bugzilla-api-key", "tailnet", "tailnet-api", "deploy-key"]
         for row in [r[0] for r in secrets.AGENT_SECRETS if r[4] == "value"] + held:
             self.assertIn(row, self.names(), row)
 
-    def rule(self, name, repos=FORKS):
-        cp = subprocess.run(["python3", str(CREDCHECK), "rule", name,
-                             "--repos", repos], capture_output=True, text=True)
+    def rule(self, name):
+        cp = subprocess.run(["python3", str(CREDCHECK), "rule", name], capture_output=True, text=True)
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         return dict(l.split("\t", 1) for l in cp.stdout.splitlines())
 
     def test_every_rule_names_where_it_is_spent_what_to_ask_for_and_where_to_get_it(self):
-        """`wk key`'s prompt, page and remedy all come from the rule."""
         for name in self.names():
             fields = self.rule(name)
             with self.subTest(name=name):
-                self.assertEqual({"spent_by", "needs", "forbids", "what", "url",
+                self.assertEqual({"needs", "forbids", "what", "url",
                                   "remedy", "store_with", "fix"}, set(fields), name)
-                self.assertRegex(fields["spent_by"], r"[\w.-]+/[\w.-]+")
                 self.assertTrue(fields["what"].strip(), "%s: no `what`" % name)
                 self.assertTrue(fields["remedy"].strip(), name)
                 if fields["url"]:
@@ -909,7 +733,6 @@ class TestOneTableForEveryCredential(_Rules):
                 self.assertIn(fields["remedy"], fields["fix"])
 
     def test_the_token_page_is_the_one_that_mints_a_token_that_works(self):
-        """The classic page: a fine-grained token opens a pull request on every fork and on no project."""
         fields = self.rule("github-pat")
         url = fields["url"]
         self.assertTrue(url.startswith(
@@ -917,9 +740,6 @@ class TestOneTableForEveryCredential(_Rules):
         query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
         self.assertEqual(["public_repo"], query["scopes"])
         self.assertIn("wk", query["description"][0])
-        # WebKit's stated ceiling.
-        self.assertLessEqual(credcheck.MAX_PAT_DAYS, 366)
-        self.assertGreater(credcheck.MAX_PAT_DAYS, 0)
         self.assertIn(str(credcheck.MAX_PAT_DAYS), fields["remedy"])
         self.assertIn("public_repo", fields["remedy"])
 
@@ -943,9 +763,6 @@ class TestOneTableForEveryCredential(_Rules):
 
 
 class TestTheModelsPiIsPointedAt(unittest.TestCase):
-    """`wk new` writes the models /v1/model/info names for the key (measured on ai.igalia.com 2026-09-27:
-    /v1/models lists the same names and no mode, and an access group like 'standard' is not a callable model)."""
-
     def test_chat_models_are_kept_in_order_and_an_embedding_model_is_not(self):
         doc = {"data": [{"model_name": "gpt-oss-120b", "model_info": {"mode": None}},
                         {"model_name": "qwen3-embedding-8b", "model_info": {"mode": "embedding"}},

@@ -22,7 +22,6 @@ from wk.store import Store, dispatch_place, in_vm, no_such_workspace
 BUILTIN = ("container", "vm", "remote", "local")
 SDK_REPO = "ghcr.io/igalia/wkdev-sdk"
 READY_MARKER = ".wk-ready"
-FIRSTRUN_MARKER = ".wk-firstrun-complete"   # TODO: drop once no pre-marker workspace is left
 STATES_NOT_THERE = ("absent", "creating", "broken", "unreachable")
 READY_TIMEOUT = 300
 WK_FLAGS = ("WK_DEBUG", "WK_QUIET", "WK_YES", "WK_FORCE", "WK_DRY_RUN", "WK_NO_DELEGATE", "WK_EXPORTS_READ")
@@ -68,13 +67,9 @@ UPSTREAM_LINE = UPSTREAM_LINE_BODY + "printf '%s' \"${_b:-?}\"\n"
 
 def image_base(root, ws):
     """CFG_RELEASE of an image workspace's profile, or None."""
-    for prefix in ("yocto-", "buildroot-"):
-        if ws.startswith(prefix):
-            conf = os.path.join(root, "image", "configs", ws[len(prefix):] + ".conf")
-            if not os.path.isfile(conf):
-                return None
-            return kv.conf_file(conf).get("CFG_RELEASE") or None
-    return None
+    prefix = next((p for p in ("yocto-", "buildroot-") if ws.startswith(p)), None)
+    conf = prefix and os.path.join(root, "image", "configs", ws[len(prefix):] + ".conf")
+    return (kv.conf_file(conf).get("CFG_RELEASE") or None) if conf and os.path.isfile(conf) else None
 
 
 def git_base(driver, ws):
@@ -204,11 +199,8 @@ class Registry:
     def workspace_name(self):
         return kv.kv_file(self.marker_path()).get("name", "")
 
-    def remote_marker_path(self):
-        return remote_marker_path(self.env)
-
     def in_remote_host(self):
-        return os.path.isfile(self.remote_marker_path())
+        return os.path.isfile(remote_marker_path(self.env))
 
     def far_root(self):
         """This far end's root: its own conf's, since two machines of one home share the marker and nothing machine-specific is in it."""
@@ -281,12 +273,18 @@ class Registry:
             return self.here()
         return self.all()
 
-    def on_place(self, name, ws):
-        """Whether `ws` is on `name`: its directory, its environment, or a creation still running."""
+    def on_place(self, name, ws, ask=False):
+        """Whether `ws` is on `name`: its directory, its environment, or a creation still running. `ask`: a machine
+        whose one probe does not answer is named, since what is there is not in the answer."""
         try:
             t = self.load(name)
         except LookupError:
             return False
+        if ask and not t.store_machine.isdir(t.store.ws_dir(ws)):
+            ok, why = t.answers()
+            if not ok:
+                act.warn("could not ask %s over ssh: %s -- what is there is not in this answer" % (name, why))
+                return False
         return self._holds(t, ws)
 
     def _holds(self, t, ws):
@@ -295,20 +293,6 @@ class Registry:
         if t.info(ws) not in ("absent", "unreachable", ""):
             return True
         return t.creating_now(ws)
-
-    def _asked(self, name, ws):
-        """A machine's answer for `ws`, its one probe paid here; one that does not answer is named, since what is there is not in the answer."""
-        try:
-            t = self.load(name)
-        except LookupError:
-            return False
-        if t.store_machine.isdir(t.store.ws_dir(ws)):
-            return True
-        ok, why = t.answers()
-        if not ok:
-            act.warn("could not ask %s over ssh: %s -- what is there is not in this answer" % (name, why))
-            return False
-        return self._holds(t, ws)
 
     def locate(self, ws):
         """Every place that answers for `ws`; the machines are asked at once."""
@@ -319,7 +303,7 @@ class Registry:
             return hits
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=len(far)) as pool:
-            answers = list(pool.map(lambda m: (m, self._asked(m, ws)), far))
+            answers = list(pool.map(lambda m: (m, self.on_place(m, ws, ask=True)), far))
         return [m for m, hit in answers if hit]
 
     def exists_on(self, t, ws):
@@ -363,13 +347,14 @@ class Registry:
         env = dict(self.env)
         if name not in BUILTIN:
             env.update(conf_env(self._conf(name), self.conf_path(name)))
-        if kind == "container":
-            return Container(name, self.root, env, self.machine)
-        if kind == "vm":
-            return Vm(name, self.root, env, self.machine)
-        if kind == "local":
-            return LocalWorkspace(name, self.root, env, self.machine)
-        return Remote(name, self.root, env, self.machine)
+        return {"container": Container, "vm": Vm, "local": LocalWorkspace}.get(kind, Remote)(name, self.root, env, self.machine)
+
+    def present(self, name):
+        """The driver holding `name`, refusing a name that is nowhere."""
+        driver = self.load(self.ws_place(name))
+        if driver.info(name) == "absent":
+            act.die(no_such_workspace(name))
+        return driver
 
     def default_preset(self, name):
         """The last build's preset, from its task record; else the place's own platform default."""
@@ -380,17 +365,6 @@ class Registry:
             act.info("preset: %s -- what '%s' was last built with" % (preset_name, name))
             return preset_name
         return "mac-release" if driver.os() == "macos" else "jsc-release"
-
-
-def path_kind_probe(path):
-    """The one `path_kind` shell test; Container, Vm and Remote each run it where the workspace lives."""
-    return "if [ -d %s ]; then echo dir; elif [ -e %s ]; then echo file; else echo absent; fi" \
-        % ((shlex.quote(path),) * 2)
-
-
-def path_kind_result(r):
-    out = r.out.replace("\r", "").strip()
-    return out if out in ("dir", "file", "absent") else ""
 
 
 class Driver:
@@ -418,16 +392,11 @@ class Driver:
         return self.machine
 
     def records(self, clock=None):
-        """The records this machine holds for the place: every driver writes its own, here."""
         return record.of_driver(self, clock, self.here)
 
     def creating_now(self, ws):
         t = self.records().find("new", ws)
         return bool(t and t.alive(None))
-
-    def creation_finished(self, ws):
-        t = self.records().find("new", ws)
-        return bool(t and t.field("exit") == "0")
 
     def src(self, ws):
         return "/src/WebKit"
@@ -493,7 +462,6 @@ class Driver:
         return secrets.Secrets(self.root, self.env, self.machine).agent_secret_remedy(secret)
 
     def is_here(self):
-        """Whether the machine behind this place is the one running this process."""
         return True
 
     def answers(self):
@@ -501,14 +469,12 @@ class Driver:
         return True, ""
 
     def probe(self):
-        """(far side, why it does not answer)."""
         return self.far_side(), ""
 
     def has_wk(self):
         return False
 
     def wk(self, *args, env=None, quiet=False):
-        """(status, output) of the far side's own wk."""
         return 1, ""
 
     def podman_machine(self):
@@ -556,7 +522,8 @@ class Driver:
         if env == "absent":
             if not m.isdir(ws_dir):
                 return "absent"
-            return "broken" if self.created(ws) or self.creation_finished(ws) else "creating"
+            t = self.records().find("new", ws)
+            return "broken" if self.created(ws) or (t and t.field("exit") == "0") else "creating"
         if self.dir_first and not m.isdir(ws_dir) and not self.creating_now(ws):
             return "broken"
         if env == "creating":
@@ -587,7 +554,7 @@ class Driver:
             if st == "absent":
                 act.die(no_such_workspace(ws))
             if st == "broken":
-                act.die(self._broken_words(ws))
+                act.die(self.broken_words(ws))
             if st == "unreachable":
                 act.die("'%s' lives on a machine that did not answer (%ss).\n"
                         "    Nothing is wrong with the workspace as far as this end can tell -- it\n"
@@ -624,7 +591,7 @@ class Driver:
             return "systemctl --user status wk-proxy"
         return "systemctl --user status wk-github-inject; the CA is /run/wk/wk-github-ca.pem"
 
-    def _broken_words(self, ws):
+    def broken_words(self, ws):
         if not self.store_machine.isdir(self.store.ws_dir(ws)):
             return ("'%s' is an environment with no workspace directory: nothing is creating it, and\n"
                     "    what it would run in is gone -- something outside wk removed it.\n"
@@ -697,42 +664,44 @@ class Driver:
         return "", "", ""
 
     def sync(self, named=False):
-        """Refresh this place's furniture: its copy of the tooling, and what it keeps of its own."""
         return True
 
     def enter_argv(self, ws):
         """(argv, cwd) to `Machine.exec` into a login shell in `ws`; `cwd` is set only when the shell needs starting there rather than told to `cd`."""
         raise NotImplementedError
 
+    def copier(self, ws):
+        """The Machine whose files are the workspace's."""
+        return self.machine
+
     def pull(self, ws, src, dest):
-        self.machine.copy_out(src, dest)
+        self.copier(ws).copy_out(src, dest)
 
     def pull_dir(self, ws, src, dest, exclude=()):
-        self.machine.copy_tree_out(src, dest, exclude)
+        self.copier(ws).copy_tree_out(src, dest, exclude)
 
     def push(self, ws, src, dest):
-        self.machine.copy_in(src, dest)
+        self.copier(ws).copy_in(src, dest)
 
     def push_dir(self, ws, src, dest):
-        self.machine.copy_tree_in(src, dest)
+        self.copier(ws).copy_tree_in(src, dest)
 
     def path_kind(self, ws, path):
         """dir | file | absent | "" (a probe that answered nothing is not evidence of absent)."""
-        if self.machine.isdir(path):
-            return "dir"
-        if self.machine.exists(path):
-            return "file"
-        return "absent"
+        out = self.run_as_owner(ws, ["/bin/sh", "-c", "if [ -d %s ]; then echo dir; elif [ -e %s ]; then echo file; else echo absent; fi"
+                                     % ((shlex.quote(path),) * 2)]).out.replace("\r", "").strip()
+        return out if out in ("dir", "file", "absent") else ""
+
+    def run_as_owner(self, ws, argv):
+        return self.copier(ws).run(argv)
 
     def ssh_host(self, ws):
-        """The ssh destination for Zed and the generated alias."""
         return "wk-%s" % ws
 
     def ssh_prepare(self, ws):
         """Point an editor at this place over ssh; nothing for one already an ssh destination."""
 
     def ssh_user(self, ws):
-        """The account inside the workspace an editor logs into, or None."""
         return None
 
     def ssh_proxy(self, ws):
@@ -747,12 +716,10 @@ class Driver:
         cmd, cwd = self.exec_argv(ws, argv, tty=True)
         return self.machine.run_tty(cmd, cwd=cwd, timeout=timeout)
 
-
     def ccache_dir(self, ws):
         return "/ccache"
 
     def build_argv(self, ws, argv):
-        """(argv, cwd)."""
         return self.exec_argv(ws, argv)
 
     def build_size(self, ws):
@@ -762,7 +729,6 @@ class Driver:
 
 
 def show(r):
-    """A captured command's output, into the log this driver writes."""
     sys.stderr.write(r.out + r.err)
 
 
@@ -853,10 +819,8 @@ class Container(Driver):
         return self.store.mirror_dir()
 
     def sdk(self):
-        if in_vm(self.env):
-            return self.env.get("WK_SDK") or "/opt/webkit-container-sdk"
-        return self.env.get("WK_SDK") or os.path.join(
-            self.env.get("XDG_DATA_HOME") or os.path.join(self.env.get("HOME", ""), ".local", "share"), "webkit-container-sdk")
+        return self.env.get("WK_SDK") or ("/opt/webkit-container-sdk" if in_vm(self.env) else os.path.join(
+            self.env.get("XDG_DATA_HOME") or os.path.join(self.env.get("HOME", ""), ".local", "share"), "webkit-container-sdk"))
 
     def sdk_env(self):
         """The environment every SDK script reads, and refuses to run without (`env` prefix for an argv)."""
@@ -895,8 +859,7 @@ class Container(Driver):
         return rows
 
     def created(self, ws):
-        home, m = os.path.join(self.store.ws_dir(ws), "home"), self.store_machine
-        return m.exists(os.path.join(home, READY_MARKER)) or m.exists(os.path.join(home, FIRSTRUN_MARKER))
+        return self.store_machine.exists(os.path.join(self.store.ws_dir(ws), "home", READY_MARKER))
 
     def info(self, ws):
         r = self.machine.run(self.podman() + ["inspect", self.ctr(ws), "--format", "{{.State.Status}}"])
@@ -935,7 +898,6 @@ class Container(Driver):
         return in_vm(self.env) or os.uname().sysname != "Darwin"
 
     def machine_state(self):
-        """running | stopped | absent | ...: podman's own word for the machine, asked once per Container."""
         if not hasattr(self, "_machine_state"):
             rec = podman_vm(self.machine, self.podman_machine())
             self._machine_state = (rec.get("State") or "absent") if rec else "absent"
@@ -949,8 +911,7 @@ class Container(Driver):
     def has_wk(self):
         return self.far_side() == "answering"
 
-    def wk_far(self, env):
-        """The VM is part of this machine, so its records name this host as itself."""
+    def wk_far(self, env):   # the VM is part of this machine, so its records name this host as itself
         return "WK_IN_VM=1 WK_HOST_SELF=1 ", TOOLS + "/wk", dict(env, WK_ROW_LABEL=record.row_label(env) or record.machine_name(env, self.machine))
 
     def wk(self, *args, env=None, quiet=False):
@@ -960,12 +921,10 @@ class Container(Driver):
 
     def start(self, ws):
         secrets.Secrets(self.root, self.env, self.machine).pat_converge_machine()
-        r = self.machine.act_run(self.podman() + ["start", self.ctr(ws)])
-        return r.ok
+        return self.machine.act_run(self.podman() + ["start", self.ctr(ws)]).ok
 
     def stop(self, ws):
-        r = self.machine.act_run(self.podman() + ["stop", "--time", "30", self.ctr(ws)])
-        return r.ok
+        return self.machine.act_run(self.podman() + ["stop", "--time", "30", self.ctr(ws)]).ok
 
     def tools_src(self):
         return self.env.get("WK_TOOLS_SRC") or (TOOLS if in_vm(self.env) else self.root)
@@ -1027,8 +986,7 @@ class Container(Driver):
         ws_dir, store, mirror = self.store.ws_dir(ws), self.store.store_dir(), self.store.mirror_dir()
         mirror_dir = os.path.dirname(mirror)
         res = Resources(self.machine, self.env, self.os())
-        volumes = ["%s:%s:ro" % (self.tools_src(), TOOLS), "%s:%s:ro" % (mirror_dir, mirror_dir)]
-        flags = ["--volume", volumes[0], "--volume", volumes[1], "--env", "WK_MIRROR=%s" % mirror,
+        flags = ["--volume", "%s:%s:ro" % (self.tools_src(), TOOLS), "--volume", "%s:%s:ro" % (mirror_dir, mirror_dir), "--env", "WK_MIRROR=%s" % mirror,
                  "--volume", "%s:/src/WebKit:O,upperdir=%s/changes,workdir=%s/overlay-work" % (self.store.snapshot_tree(base), ws_dir, ws_dir),
                  "--volume", "%s/build:/src/WebKit/WebKitBuild" % ws_dir,
                  "--volume", "%s:/var/lib/wk/ws/%s" % (ws_dir, ws)]
@@ -1159,21 +1117,22 @@ class Container(Driver):
         self._cp("%s:%s/." % (self.ctr(ws), src), dest)
 
     def push_dir(self, ws, src, dest):
-        u = self._ctr_user(ws)
-        if u is None:
-            act.die("workspace '%s' has no container to reach (podman does not know it)" % ws)
-        r = self.machine.act_run(self.podman() + ["exec", "--user", u, self.ctr(ws), "/bin/sh", "-c",
-                                                    "rm -rf %s && mkdir -p %s" % (shlex.quote(dest), shlex.quote(dest))])
+        r = self.machine.act_run(self._as_owner(ws, ["/bin/sh", "-c", "rm -rf %s && mkdir -p %s" % (shlex.quote(dest), shlex.quote(dest))]))
         if not r.ok:
             raise OSError(r.err.strip() or "could not clear %s" % dest)
         self._cp(src + "/.", "%s:%s" % (self.ctr(ws), dest))
 
-    def path_kind(self, ws, path):
+    def _ctr_user_or_die(self, ws):
         u = self._ctr_user(ws)
         if u is None:
             act.die("workspace '%s' has no container to reach (podman does not know it)" % ws)
-        r = self.machine.run(self.podman() + ["exec", "--user", u, self.ctr(ws), "/bin/sh", "-c", path_kind_probe(path)])
-        return path_kind_result(r)
+        return u
+
+    def _as_owner(self, ws, argv):
+        return self.podman() + ["exec", "--user", self._ctr_user_or_die(ws), self.ctr(ws)] + argv
+
+    def run_as_owner(self, ws, argv):
+        return self.machine.run(self._as_owner(ws, argv))
 
     def ssh_user(self, ws):
         return self._ctr_user(ws)
@@ -1189,9 +1148,7 @@ class Container(Driver):
                 "-o AllowUsers=%s -o LogLevel=ERROR -o Subsystem=\"sftp internal-sftp\" -o SetEnv=\"$WK_SSH_SETENV\"'" % (BRIDGE, h, u))
 
     def ssh_transport(self, ws):
-        u = self._ctr_user(ws)
-        if u is None:
-            act.die("workspace '%s' has no container to reach (podman does not know it)" % ws)
+        u = self._ctr_user_or_die(ws)
         os.execvp("podman", self.podman() + ["exec", "-i", self.ctr(ws), "/bin/sh", "-c", self.sshd_cmd(u)])
 
     def ssh_prepare(self, ws):
@@ -1215,23 +1172,22 @@ class Container(Driver):
                         "    runs as the wk-proxy user service on the machine that holds the containers\n"
                         "    (journalctl --user -u wk-proxy), and its allowlist is\n"
                         "    container/proxy/wk-proxy.py." % ws)
+        pub = zed_key_pub(self.machine, self.env)
+        if pub is None:
+            act.die("could not create this machine's zed key")
         script = ("set -e\n"
                   "install -d -m 0700 '%(h)s/.wk-ssh' '%(h)s/.ssh'\n"
                   "[ -f '%(h)s/.wk-ssh/ssh_host_ed25519_key' ] ||\n"
                   "    ssh-keygen -q -t ed25519 -N '' -C 'wk-%(ws)s host key' -f '%(h)s/.wk-ssh/ssh_host_ed25519_key'\n"
                   "touch '%(h)s/.ssh/authorized_keys'\n"
-                  "chmod 0600 '%(h)s/.ssh/authorized_keys'") % {"h": h, "ws": ws}
-        r = self.machine.act_run(self.podman() + ["exec", "--user", u, c, "/bin/sh", "-c", script])
+                  "chmod 0600 '%(h)s/.ssh/authorized_keys'\n"
+                  "read -r pub\n"
+                  "grep -qsF \"$pub\" '%(h)s/.ssh/authorized_keys' || { printf '%%s\\n' \"$pub\" >> '%(h)s/.ssh/authorized_keys'; echo added; }"
+                  ) % {"h": h, "ws": ws}
+        r = self.machine.act_run(self.podman() + ["exec", "-i", "--user", u, c, "/bin/sh", "-c", script], input=pub + "\n")
         if not r.ok:
-            act.die("could not prepare the ssh identity in '%s'" % ws)
-        pub = zed_key_pub(self.machine, self.env)
-        if pub is None:
-            act.die("could not create this machine's zed key")
-        if not self.machine.run(self.podman() + ["exec", "--user", u, c, "grep", "-qsF", pub, "%s/.ssh/authorized_keys" % h]).ok:
-            r = self.machine.act_run(self.podman() + ["exec", "-i", "--user", u, c, "/bin/sh", "-c",
-                                                        "cat >> '%s/.ssh/authorized_keys'" % h], input=pub + "\n")
-            if not r.ok:
-                act.die("could not authorise the editor's key in '%s'" % ws)
+            act.die("could not prepare the ssh identity and the editor's key in '%s'" % ws)
+        if "added" in r.out.split():
             act.info("authorised the editor's key in '%s'" % ws)
         sshalias.alias_set(self.machine, self.env, ws, "wk-%s.container.invalid" % ws, u,
                            identity=zed_key_path(self.env), extra=("ProxyCommand %s" % self.ssh_proxy(ws),))
@@ -1289,17 +1245,17 @@ class Vm(Driver):
             got = None
         return int(got) if isinstance(got, (int, float)) or (isinstance(got, str) and got.isdigit()) else None
 
+    def _sized(self, ws, key, given, envelope):
+        """As the guest is configured, else as WK_VM_* asks, else as this host would size one."""
+        v = self.configured(self.vm(ws), key)
+        v = given(self.env) if v is None else v
+        return v if v is not None else envelope(Resources(self.machine, self.env, "macos"))
+
     def cores(self, ws):
-        c = self.configured(self.vm(ws), "CPU")
-        if c is None:
-            c = guest.vm_cpus(self.env)
-        return c if c is not None else Resources(self.machine, self.env, "macos").envelope_cores()
+        return self._sized(ws, "CPU", guest.vm_cpus, Resources.envelope_cores)
 
     def mem_mb(self, ws):
-        m = self.configured(self.vm(ws), "Memory")
-        if m is None:
-            m = guest.vm_mem_mb(self.env)
-        return m if m is not None else Resources(self.machine, self.env, "macos").envelope_mem_mb()
+        return self._sized(ws, "Memory", guest.vm_mem_mb, Resources.envelope_mem_mb)
 
     def keyring_agent_rw_dir(self):
         return GUEST_SHARES + "/" + self.agent_rw_share
@@ -1412,20 +1368,8 @@ class Vm(Driver):
     def exec_argv(self, ws, argv, tty=False):
         return self._guest_or_die(ws).argv(shlex.join(argv), tty=tty), None
 
-    def pull(self, ws, src, dest):
-        self._guest_or_die(ws).copy_out(src, dest)
-
-    def push(self, ws, src, dest):
-        self._guest_or_die(ws).copy_in(src, dest)
-
-    def pull_dir(self, ws, src, dest, exclude=()):
-        self._guest_or_die(ws).copy_tree_out(src, dest, exclude)
-
-    def push_dir(self, ws, src, dest):
-        self._guest_or_die(ws).copy_tree_in(src, dest)
-
-    def path_kind(self, ws, path):
-        return path_kind_result(self._guest_or_die(ws).run(["sh", "-c", path_kind_probe(path)]))
+    def copier(self, ws):
+        return self._guest_or_die(ws)
 
     def ssh_user(self, ws):
         return self.user()
@@ -1713,20 +1657,14 @@ class Remote(Driver):
             here_place = ""
         self.is_local = bool(env.get("WK_REMOTE_LOCAL")) or (bool(here_place) and here_place == name)
         self.conf_root = env.get("WK_REMOTE_ROOT", "")
-        root_there = self.conf_root or (default_root(env.get("HOME", os.path.expanduser("~"))) if self.is_local else "")
-        if self.is_local and root_there:
-            store = env.get("WK_REMOTE_STORE") or root_there
-        else:
-            store = env.get("WK_REMOTE_STORE") or os.path.join(Store(env).state_dir(), "remote", name)
+        here_root = self.conf_root or default_root(env.get("HOME", os.path.expanduser("~")))
+        store = env.get("WK_REMOTE_STORE") or (here_root if self.is_local else os.path.join(Store(env).state_dir(), "remote", name))
         self._store = Store(dict(env, WK_STORE=store))
         self.probe_seconds = int(env.get("WK_PROBE_SECONDS") or 20)
         if not self.is_local and self.host:
             self.machine = Ssh(self.host, opts=self.ssh_opts(), control_dir=self.ssh_dir(), timeout=reach.ssh_timeout(env), via=machine)
-        self._probed = None
-        self._has_wk = None
-        self._peer_rows = None
+        self._probed = self._has_wk = self._peer_rows = self._reference = None
         self._routes = {}
-        self._reference = None
 
     def ssh_dir(self):
         return os.path.join(Store(self.env).state_dir(), "ssh")
@@ -1893,10 +1831,6 @@ class Remote(Driver):
         """`exec_argv` is already a literal command (its own `ssh`), run by `self.here`: `self.machine` would wrap it twice."""
         cmd, cwd = self.exec_argv(ws, argv, tty=True)
         return self.here.run_tty(cmd, cwd=cwd, timeout=timeout)
-
-    def path_kind(self, ws, path):
-        r = self.machine.run(["sh", "-c", path_kind_probe(path)])
-        return path_kind_result(r)
 
     def ssh_host(self, ws):
         """The configured destination, not a generated alias (which could not carry a ProxyJump)."""

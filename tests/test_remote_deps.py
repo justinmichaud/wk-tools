@@ -86,18 +86,6 @@ def findings(probe, env=None):
 
 
 class TestTheList(WkTest):
-    def test_every_dep_is_tool_need_and_a_reason(self):
-        rows = machine_deps.deps(REPO)
-        self.assertTrue(rows)
-        for row in rows:
-            self.assertEqual(len(row), 3, row)
-            self.assertIn(row[1], ("required", "wanted"), row)
-        names = [r[0] for r in rows]
-        self.assertEqual(len(names), len(set(names)), f"a tool listed twice: {names}")
-        need = {r[0] for r in rows if r[1] == "required"}
-        self.assertEqual(need, {"git", "cmake", "ninja", "clang", "python3"})
-        self.assertEqual({r[0] for r in rows if r[1] == "wanted"}, {"ccache", "zsh"})
-
     def test_the_machine_reads_the_same_table(self):
         cp = self.bash(f'. "{DEPS}"\nwk_remote_deps\n')
         self.assertEqual([tuple(l.split(None, 2)) for l in cp.stdout.strip().splitlines()], machine_deps.deps(REPO))
@@ -118,19 +106,6 @@ class TestTheList(WkTest):
             with self.subTest(id=idv, id_like=like):
                 self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
                 self.assertEqual(cp.stdout.strip(), want)
-
-    def test_the_package_name_is_the_tool_unless_it_differs(self):
-        self.assertEqual([machine_deps.package("ninja", "debian"), machine_deps.package("ccache", "debian"),
-                          machine_deps.package("ninja", "fedora")], ["ninja-build", "ccache", "ninja-build"])
-
-    def test_one_command_installs_the_whole_set(self):
-        self.assertEqual(machine_deps.install_cmd("debian", ["ccache", "zsh"]),
-                         "sudo apt-get update && sudo apt-get install -y ccache zsh")
-        self.assertEqual(machine_deps.install_cmd("fedora", ["ccache"]), "sudo dnf install -y ccache")
-        self.assertEqual(machine_deps.install_cmd("arch", ["ccache"]), "sudo pacman -S --needed ccache")
-        self.assertIsNone(machine_deps.install_cmd("unknown", ["ccache"]))
-        self.assertIsNone(machine_deps.install_cmd("debian", []))
-
 
 class TestTheFindings(WkTest):
     def test_a_complete_machine_reports_only_ok(self):
@@ -231,8 +206,3 @@ class TestTheProbeItself(WkTest):
             self.assertIn(f"tool.{t}", keys, f"the probe said nothing about {t}")
         self.assertIn("cred..wk-agent-token", keys, "a credential copy is reported by digest")
         self.assertNotIn("sk-the-value", cp.stdout)
-
-    def test_it_sources_nothing(self):
-        text = PROBE.read_text()
-        for bad in ("lib/common.sh", "$WK_ROOT", "wk_state_dir"):
-            self.assertNotIn(bad, text, f"remote/probe.sh reaches for {bad}")

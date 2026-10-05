@@ -1,9 +1,10 @@
-"""What `wk machine setup <bridge>` puts on the phone, rendered here from its conf and the facts the phone
-reports: the files, the manifest bridge/provision.sh applies, and the bundle that carries them."""
+"""What `wk machine setup <bridge>` puts on the phone, from its conf and the phone's facts: the files, the
+manifest bridge/provision.sh applies, and the bundle that carries them."""
 
 import base64
 import gzip
 import io
+import ipaddress
 import os
 import shlex
 import tarfile
@@ -11,7 +12,7 @@ import tarfile
 LIB = "/usr/local/lib/wk-bridge"
 LEASEFILE = "/var/lib/misc/dnsmasq.leases"
 AUTHKEY = "/run/wk-bridge-authkey"
-NETMASKS = {"16": "255.255.0.0", "24": "255.255.255.0"}
+SSHD_DROPIN = "/etc/ssh/sshd_config.d/10-wk-bridge.conf"
 PACKAGED = (("nm", ("networkmanager", "NetworkManager")), ("chrony", ("chronyd", "chrony")),
             ("tailscale", ("tailscale", "tailscaled")))
 
@@ -112,7 +113,7 @@ def wk_bridge_conf(name, c):
         name, "".join("%s=%s\n" % (k, shlex.quote(v)) for k, v in keys.items()))
 
 
-def dnsmasq(c, netmask):
+def dnsmasq(c):
     nat, iface, router = c["egress"] == "nat", c["if"], c["router"]
     out = ["# DHCP for the bridge segment."]
     # No egress: DNS off (port=0, an empty option 6), since there is nothing to resolve and a resolver is attackable.
@@ -120,7 +121,7 @@ def dnsmasq(c, netmask):
     # bind-dynamic: the NIC comes and goes with the dock, and bind-interfaces fails to start while it is out.
     out += ["interface=" + iface, "bind-dynamic", "dhcp-authoritative", "log-dhcp", "dhcp-leasefile=" + LEASEFILE]
     if c.get("pool"):
-        out.append("dhcp-range=%s,%s,infinite" % (c["pool"], netmask))
+        out.append("dhcp-range=%s,%s,infinite" % (c["pool"], ipaddress.ip_network(c["segment"], strict=False).netmask))
     out += ["dhcp-option=option:router," + router, "dhcp-option=option:ntp-server," + router]
     out.append("dhcp-option=option:dns-server," + router if nat else "dhcp-option=6")
     out += ["dhcp-host=%s,infinite" % lease for lease in c.get("leases", "").split()]
@@ -171,15 +172,10 @@ def battery_node(c, facts):
 
 
 class Plan:
-    """The files and manifest lines one bundle carries, and what the host has to say about them."""
 
     def __init__(self, name, conf, facts=None):
         self.name, self.conf = name, conf
         self.files, self.lines, self.warnings = [], [], []
-        prefix = conf["segment"].split("/")[-1]
-        self.netmask = NETMASKS.get(prefix, "255.255.255.0")
-        if prefix not in NETMASKS:
-            self.warnings.append("prefix /%s is not one this understands -- assuming %s" % (prefix, self.netmask))
         self.lan_mac = (conf.get("lan_mac") or (facts or {}).get("lan_mac", "")).lower()
         self.battery = battery_node(conf, facts) if facts is not None else ""
         self._common()
@@ -197,10 +193,10 @@ class Plan:
         self.file("/etc/NetworkManager/conf.d/99-wk-bridge.conf", NM_WIFI)
         self.file("/etc/NetworkManager/dispatcher.d/50-wk-bridge-gro", GRO, "0755")
         self.file("/etc/NetworkManager/conf.d/98-wk-bridge-dns.conf", NM_DNS)
-        self.file("/etc/dnsmasq.d/wk-bridge.conf", dnsmasq(c, self.netmask))
+        self.file("/etc/dnsmasq.d/wk-bridge.conf", dnsmasq(c))
         self.file("/etc/sysctl.d/99-wk-bridge.conf", SYSCTL)
         self.file("/etc/chrony/conf.d/wk-bridge.conf", CHRONY % c["segment"])
-        self.file("/etc/ssh/sshd_config.d/10-wk-bridge.conf", SSHD)
+        self.file(SSHD_DROPIN, SSHD)
         self.file("/etc/logrotate.d/wk-bridge", LOGROTATE)
 
     def _role(self, facts):
@@ -277,8 +273,7 @@ def _add(tar, name, data, mode):
 
 
 def bundle(root, plan):
-    """bridge/'s scripts plus the plan, as base64 text for `base64 -d | tar xz` on the phone: byte for byte the
-    same for the same inputs, so a dry run and a re-run show the same thing."""
+    """bridge/'s scripts plus the plan, base64 for `base64 -d | tar xz`; byte-identical for the same inputs."""
     raw = io.BytesIO()
     with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as gz, tarfile.open(fileobj=gz, mode="w") as tar:
         src = os.path.join(str(root), "bridge")

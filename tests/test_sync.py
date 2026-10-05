@@ -22,7 +22,7 @@ from unittest import mock
 
 from tests.fakes import FakeRegistry
 from tests.killpoints import converges
-from tests.support import REPO, fake_workspace
+from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, git, places, pr, sync  # noqa: E402
@@ -320,16 +320,11 @@ class TestParse(SyncTest):
     def test_inside_a_workspace_the_dispatchers_name_is_the_workspace(self):
         self.assertEqual(self.parse(name="selftest-ws"), ("ws", "selftest-ws", "", False))
 
-    def test_two_scopes_are_refused_rather_than_last_one_wins(self):
+    def test_two_scopes_or_a_name_and_a_scope_are_refused_rather_than_last_one_wins(self):
         for pair in (("--all", "--tools"), ("--tools", "--all"), ("--all", "--on", "moose"),
-                     ("--on", "moose", "--all"), ("--mirror", "--all")):
+                     ("--on", "moose", "--all"), ("--mirror", "--all"), ("myws", "--all")):
             with self.subTest(pair=pair):
                 self.assertIn("ask for different things -- one at a time", self.refused(lambda: self.parse(*pair)))
-
-    def test_a_name_and_a_scope_together_is_refused(self):
-        err = self.refused(lambda: self.parse("myws", "--all"))
-        self.assertIn("ask for different things", err)
-        self.assertIn("'myws'", err)
 
     def test_a_second_target_is_refused_rather_than_overwriting_the_first(self):
         self.assertIn("one place at a time (got 'moose' and 'buildbox4')",
@@ -347,15 +342,10 @@ class TestWhere(unittest.TestCase):
     def test_the_answers(self):
         for args, inside, want in (((), False, "host"), (("myws",), False, "workspace"), (("--fix",), False, "host"),
                                    (("myws", "--fix"), False, "workspace"), ((), True, "workspace"), (("--fix",), True, "workspace"),
-                                   (("--all",), True, "host")):
+                                   (("--all",), True, "host"), (("--on=moose",), False, "host"), (("--tools", "buildbox4"), False, "host"),
+                                   (("--mirror",), False, "host"), (("--fix", "--all"), False, "host")):
             with self.subTest(args=args, inside=inside):
                 self.assertEqual(sync.where(inside, list(args)), want)
-
-    def test_every_scope_flag_is_this_host(self):
-        for args in (("--all",), ("--tools",), ("--on", "moose"), ("--tools", "buildbox4"), ("--on=moose",),
-                     ("--tools=buildbox4",), ("--mirror",), ("--tools", "--all"), ("--fix", "--all")):
-            with self.subTest(args=args):
-                self.assertEqual(sync.where(False, list(args)), "host")
 
     def test_the_dispatcher_asks_cmd_sync_and_nothing_else_decides(self):
         self.assertEqual(Decl(CMD_SYNC).where_for(["myws"]), "dynamic")
@@ -485,28 +475,21 @@ class TestWhatEachScopeRuns(SyncTest):
         rc, steps, _ = self.steps("mirror")
         self.assertEqual((rc, steps), (0, ["MIRROR", "REMOUNT"]))
 
-    def test_in_the_podman_vm_the_mirror_is_a_request_too(self):
+    def test_inside_a_workspace_a_bare_sync_is_the_mirror_then_this_one_alone_even_when_the_refresh_failed(self):
+        Path(self.w.env["WK_MARKER"]).write_text("name=ws\n")
+        self.w.reg.env["WK_PLACE"] = "container"
+        for asked in (0, 1):
+            self.w.steps.clear()
+            with mock.patch.object(sync.Sync, "mirror_refresh_request",
+                                   side_effect=lambda: self.w.steps.append("ASK BROKER") or asked):
+                rc, steps, _ = self.steps("ws", only="ws")
+            self.assertEqual((rc, steps), (asked, ["ASK BROKER", "FETCH-IN container: ws"]))
+
+    def test_in_the_podman_vm_or_a_workspace_the_mirror_is_a_request(self):
         self.w.reg.env["WK_IN_VM"] = "1"
         with mock.patch.object(sync.Sync, "mirror_refresh_request", return_value=0) as ask:
-            rc, steps, _ = self.steps("mirror")
-        self.assertEqual((rc, steps, ask.called), (0, [], True))
-
-    def test_inside_a_workspace_a_bare_sync_is_the_mirror_then_this_one_alone(self):
-        Path(self.w.env["WK_MARKER"]).write_text("name=ws\n")
-        self.w.reg.env["WK_PLACE"] = "container"
-        with mock.patch.object(sync.Sync, "mirror_refresh_request",
-                               side_effect=lambda: self.w.steps.append("ASK BROKER") or 0):
-            rc, steps, _ = self.steps("ws", only="ws")
-        self.assertEqual((rc, steps), (0, ["ASK BROKER", "FETCH-IN container: ws"]))
-
-    def test_inside_a_workspace_a_refresh_that_failed_still_fetches_and_is_not_a_success(self):
-        Path(self.w.env["WK_MARKER"]).write_text("name=ws\n")
-        self.w.reg.env["WK_PLACE"] = "container"
-        with mock.patch.object(sync.Sync, "mirror_refresh_request", return_value=1):
-            rc, steps, _ = self.steps("ws", only="ws")
-        self.assertEqual((rc, steps), (1, ["FETCH-IN container: ws"]))
-
-    def test_inside_a_workspace_the_mirror_is_a_request(self):
+            self.assertEqual(self.steps("mirror")[:2] + (ask.called,), (0, [], True))
+        self.w.reg.env.pop("WK_IN_VM")
         Path(self.w.env["WK_MARKER"]).write_text("name=ws\n")
         for rc_asked, want in ((0, 0), (1, 1)):
             with mock.patch.object(sync.Sync, "mirror_refresh_request", return_value=rc_asked) as ask:
@@ -1215,77 +1198,18 @@ def stub_broker(tmp):
         p.wait()
 
 
-class TestSyncInsideWorkspace(unittest.TestCase):
-    """Inside a workspace `wk sync` is the machine's mirror, asked for over the broker socket, then a fetch in
-    this workspace from it; with no broker listening the fetch still runs and the miss is reported."""
+class TestTheBrokerClient(unittest.TestCase):
+    def test_the_client_asks_for_sync_and_the_brokers_verdict_is_its_status(self):
+        with tempfile.TemporaryDirectory() as tmp, stub_broker(Path(tmp)) as (sock, record):
+            cp = subprocess.run([sys.executable, str(REPO / "container" / "broker" / "wk-broker-client.py"), "sync"],
+                                env=dict(os.environ, WK_BROKER_SOCKET=str(sock)), capture_output=True, text=True)
+            self.assertEqual(json.loads(record.read_text()), {"verb": "sync", "args": {}})
+        self.assertEqual(cp.returncode, 0, cp.stderr)
 
-    def _refused(self, *args):
-        with fake_workspace() as ws:
-            cp = ws.run("sync", *args)
-        self.assertNotEqual(cp.returncode, 0, f"'wk sync {' '.join(args)}' was accepted inside a workspace")
-        self.assertIn("acts on a host, and this is workspace 'selftest-ws'", cp.stdout)
-        self.assertIn(f"From the host:  wk sync {' '.join(args)}", cp.stdout)
-
-    def test_the_scope_flags_are_refused_naming_the_host_invocation(self):
-        self._refused("--all")
-        self._refused("--tools")
-        self._refused("--on", "container")
-
-    def test_a_different_workspaces_name_is_refused_by_the_dispatcher(self):
-        with fake_workspace() as ws:
-            cp = ws.run("sync", "someotherws")
-        self.assertEqual(cp.returncode, 2, cp.stdout)
-        self.assertIn("unexpected argument: someotherws", cp.stdout)
-
-    def test_an_unrecognised_flag_is_refused_as_unknown_not_as_host_only(self):
-        with fake_workspace() as ws:
-            cp = ws.run("sync", "--bogus")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("unknown option: --bogus", cp.stdout)
-        self.assertNotIn("acts on a host", cp.stdout)
-
-    def _checkout(self, ws):
-        """A bare repo standing in for upstream with one commit on main, and the workspace's checkout with it as
-        origin -- real git, no network, and not wired the way wk wires one, so the report names that."""
-        bare, seed = ws.tmp / "origin.git", ws.tmp / "seed"
-        subprocess.run(["git", "init", "--quiet", "--bare", "-b", "main", str(bare)], check=True, capture_output=True)
-        subprocess.run(["git", "clone", "--quiet", str(bare), str(seed)], check=True, capture_output=True)
-        (seed / "file.txt").write_text("hello\n")
-        subprocess.run(["git", "-C", str(seed), "add", "file.txt"], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(seed), "-c", "user.email=t@t.example", "-c", "user.name=t", "commit", "-q", "-m", "seed"],
-                       check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", "main"], check=True, capture_output=True)
-        sha = subprocess.run(["git", "-C", str(seed), "rev-parse", "main"], capture_output=True, text=True, check=True).stdout.strip()
-        src = ws.ws_dir / "WebKit"
-        subprocess.run(["git", "init", "--quiet", "-b", "main", str(src)], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(src), "remote", "add", "origin", str(bare)], check=True, capture_output=True)
-        return src, sha
-
-    def fetched(self, src):
-        return subprocess.run(["git", "-C", str(src), "rev-parse", "refs/remotes/origin/main"], capture_output=True, text=True).stdout.strip()
-
-    def test_bare_sync_asks_the_machine_to_refresh_its_mirror_then_fetches_here(self):
-        with fake_workspace() as ws:
-            src, sha = self._checkout(ws)
-            with stub_broker(ws.tmp) as (sock, record):
-                cp = ws.run("sync", env={"WK_BROKER_SOCKET": str(sock)})
-            self.assertEqual(json.loads(record.read_text()), {"verb": "sync", "args": {}}, record.read_text())
-            self.assertEqual(self.fetched(src), sha, cp.stdout)
-            self.assertIn("selftest-ws", cp.stdout)
-            self.assertIn("-- wired wrong:", cp.stdout)
-            self.assertIn("origin is %s" % (ws.tmp / "origin.git"), cp.stdout)
-            self.assertEqual(cp.returncode, 1, cp.stdout)
-            self.assertNotIn("Permission denied", cp.stdout)
-
-    def test_with_no_broker_the_fetch_still_runs_and_the_miss_is_reported(self):
-        with fake_workspace() as ws:
-            src, sha = self._checkout(ws)
-            cp = ws.run("sync", env={"WK_BROKER_SOCKET": str(ws.tmp / "nothing.sock")})
-            self.assertEqual(cp.returncode, 1, cp.stdout)
-            self.assertIn("mirror was not", cp.stdout)
-            self.assertIn("./setup --stage broker", cp.stdout)
-            self.assertEqual(self.fetched(src), sha)
-
+    def test_no_broker_is_status_2(self):
+        cp = subprocess.run([sys.executable, str(REPO / "container" / "broker" / "wk-broker-client.py"), "sync"],
+                            env=dict(os.environ, WK_BROKER_SOCKET="/nonexistent/broker.sock"), capture_output=True, text=True)
+        self.assertEqual(cp.returncode, 2)
 
 if __name__ == "__main__":
     unittest.main()

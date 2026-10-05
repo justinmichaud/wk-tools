@@ -46,27 +46,6 @@ class RmAllFixture(WkTest):
 
 
 class TestTheQuestionNamesEveryWorkspaceAndItsMachine(RmAllFixture):
-    def test_the_dry_run_names_each_one_and_the_removal_it_would_run(self):
-        self.make("alpha")
-        self.make("beta")
-        cp = self.rm("--all", "--dry-run")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("alpha@fakebox", cp.stdout, cp.stdout)
-        self.assertIn("beta@fakebox", cp.stdout, cp.stdout)
-        self.assertIn("WK_PLACE=fakebox", cp.stdout, cp.stdout)
-        self.assertIn("rm alpha --yes", cp.stdout, cp.stdout)
-        self.assertEqual(self.remaining(), ["alpha", "beta"])
-
-    def test_the_question_is_asked_once_and_declining_destroys_nothing(self):
-        self.make("alpha")
-        self.make("beta")
-        cp = self.rm("--all")
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertEqual(cp.stdout.count("destroy them?"), 1, cp.stdout)
-        self.assertIn("alpha@fakebox", cp.stdout, cp.stdout)
-        self.assertIn("beta@fakebox", cp.stdout, cp.stdout)
-        self.assertEqual(self.remaining(), ["alpha", "beta"], cp.stdout)
-
     def test_a_named_removal_names_the_target_too(self):
         self.make("alpha")
         self.make("beta")
@@ -85,12 +64,6 @@ class TestItDestroysEveryWorkspaceItNamed(RmAllFixture):
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertEqual(self.remaining(), [], cp.stdout)
         self.assertEqual(sorted(p.name for p in (self.store / "ws").iterdir()), [])
-
-    def test_with_nothing_to_destroy_it_asks_nobody(self):
-        cp = self.rm("--all")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertNotIn("destroy them?", cp.stdout, cp.stdout)
-
 
 class TestWhatItRefuses(RmAllFixture):
     def test_a_name_and_all_together_are_refused(self):

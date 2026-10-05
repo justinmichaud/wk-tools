@@ -11,17 +11,10 @@
 #   wk boot <machine> --keep                       cancel the self-return watchdog
 #   wk boot <machine> --back                       reboot back to host mode
 #   wk boot <machine> --disarm                     cancel an arming not yet spent
-#   wk boot <machine> --diag                       the bench system's own account
-#                                                  of its last boot, read offline
-#   wk boot <board> --boot-order <order>           write a Pi's EEPROM boot order:
-#                                                  usb-first, sd-first, or local
-#                                                  (the local disks, no network);
-#                                                  asks once, and names the undo
+#   wk boot <machine> --diag                       the bench system's own account of its last boot
+#   wk boot <board> --boot-order <order>           write a Pi's EEPROM boot order: usb-first,
+#                                                  sd-first, or local (the local disks, no network)
 #   wk boot --list                                 the machines that have drivers
-#
-# This is a mode transition, not a reboot: arming leaves a record of intent, and
-# this command reads that record back against the evidence. The record is kept on
-# the machine it describes, next to the boot mechanism, and nowhere else.
 
 import os
 import sys

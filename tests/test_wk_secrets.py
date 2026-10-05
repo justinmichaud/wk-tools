@@ -1,12 +1,5 @@
-"""lib/wk/secrets.py against a fake machine: the held credentials, the agent and injector files `wk key push`
-switches, and /secrets, what a container mounts.
-
-The fake is an ssh-agent and a filesystem in one: `ssh-add` over `sh -c` loads and lists what came in on
-stdin, a private half is `KEY:<fork>` and its public half `PUB:<fork>`, so ssh-keygen's answers follow from
-the bytes. `SecretsTest` is the base tests/test_push_switch.py drives `wk key push` over.
-
-Run: python3 tests/run.py --unit -k test_wk_secrets
-"""
+"""lib/wk/secrets.py over a fake machine that is an ssh-agent and a filesystem in one: a private half is `KEY:<fork>`
+and its public half `PUB:<fork>`, so ssh-keygen's answers follow from the bytes."""
 import contextlib
 import io
 import json
@@ -30,8 +23,7 @@ from wk.machine import Fake, Result  # noqa: E402
 ROOT = str(REPO)
 SECRETFILE = os.path.join(ROOT, "lib", "secretfile.py")
 CONTRIBUTORS = os.path.join(ROOT, "lib", "contributors.py")
-# Bash lifting a stored credential: `key_store <name>` takes the value on stdin, `key_clear <name>` withdraws it, both
-# through cli.Key, the one writer.
+# `key_store <name>` (value on stdin) and `key_clear <name>` for bash, through cli.Key.
 KEY_SH = """_key() { WK_STORE="$WK_STORE" WK_STORE_DEFAULT="${WK_STORE_DEFAULT:-}" WK_IN_VM="${WK_IN_VM:-}" PYTHONPATH="$WK_ROOT/lib" python3 -c 'import sys
 from wk.key.cli import Key
 k = Key(sys.argv[1])
@@ -195,29 +187,11 @@ class SecretsTest(unittest.TestCase):
 
 
 class TestWhereThingsAre(SecretsTest):
-    def test_the_held_directory_is_beside_the_mounted_one_and_nothing_mounts_it(self):
-        s = self.w.sec()
-        self.assertEqual(os.path.dirname(s.store.keyring_push_dir()), os.path.dirname(s.store.keyring_dir()))
-        self.assertEqual(s.github_pat_path(), self.w.held + "/github-pat")
-        self.assertEqual(s.cred_path("bugzilla-api-key"), self.w.held + "/bugzilla-api-key")
-
     def test_a_row_of_the_agent_table_is_kept_by_its_kind(self):
         s = self.w.sec()
         self.assertEqual(s.cred_path("litellm"), self.w.keyring_dir + "/litellm-key")
         self.assertEqual(s.cred_path("claude-login"), self.tmp + "/store/agent-rw/.credentials.json")
         self.assertIsNone(s.cred_path("no-such-credential"))
-
-    def test_the_machine_files_are_under_the_store_and_carry_no_quotes(self):
-        s = self.w.sec()
-        self.assertEqual(s.machine_pat(), self.tmp + "/store/push-github-pat")
-        self.assertEqual(s.machine_read_pat(), self.tmp + "/store/read-github-pat")
-        self.assertEqual(s.machine_bugzilla_key(), self.tmp + "/store/push-bugzilla-api-key")
-
-    def test_the_default_socket_is_expanded_on_the_machine_that_holds_it(self):
-        """/run/user/501 is not on a Mac, so the path travels as shell text."""
-        del self.w.env["WK_PUSH_AGENT_SOCK"]
-        self.assertEqual(secrets.AGENT_SOCK, self.w.sec().machine_sock())
-        self.assertIn("${XDG_RUNTIME_DIR", secrets.AGENT_SOCK)
 
     def test_the_agent_is_reached_here_or_in_the_podman_vm(self):
         s = self.w.sec()
@@ -228,15 +202,12 @@ class TestWhereThingsAre(SecretsTest):
 
 class TestTheLoginIsTheClaudeClis(SecretsTest):
     def test_a_workspace_missing_the_login_is_sent_to_slash_login_and_nothing_is_judged(self):
-        """The file row is filled by the Claude CLI in a workspace; this machine stores and judges none."""
         said = self.w.sec().agent_secret_remedy("claude-login")
         self.assertIn("/login", said)
         self.assertEqual([], [a for a in self.w.argvs() if "credcheck.py" in " ".join(a) or "secretfile.py" in " ".join(a)])
 
 
 class TestAStoredCredentialIsReadTheOneWay(SecretsTest):
-    """cred_verdict and cred_stored read through lib/secretfile.py, which refuses a link (tests/test_store_secrets.py)."""
-
     def _refuse(self, name, verb, out=""):
         path = self.w.sec().cred_path(name)
         self.w.react(["python3", os.path.join(ROOT, "lib", "secretfile.py"), verb, path],
@@ -244,7 +215,6 @@ class TestAStoredCredentialIsReadTheOneWay(SecretsTest):
         return path
 
     def test_a_refused_read_is_bad_and_carries_none_of_its_own_bytes(self):
-        """Secrets.read discards a reader's stdout on any non-zero exit."""
         path = self._refuse("litellm", "read", out="a-broken-reader-leaked-this\n")
         verdict, err = quiet(self.w.sec().cred_verdict, "litellm")
         self.assertEqual("bad\tthe file at %s could not be read; the refusal above says why" % path, verdict)
@@ -272,7 +242,6 @@ class TestTheAgent(SecretsTest):
         self.assertEqual([("fork", "loaded"), ("forkwpe", "no-key")], self.w.sec().agent_load(SOCK))
 
     def test_a_refused_read_is_no_key(self):
-        """lib/secretfile.py refuses a link or a shared inode: nothing reaches the agent."""
         self.w.seed()
         self.w.react(["python3", SECRETFILE, "read"], lambda a, f: Result(2, "", "wk: refusing to read"))
         rows, err = quiet(self.w.sec().agent_load, SOCK)
@@ -350,8 +319,7 @@ class TestTheInjectorsFiles(SecretsTest):
         self.assertEqual([1], called, "a Linux host has no guests' injector")
 
     def test_a_machine_that_cannot_see_the_held_token_leaves_the_injectors_alone(self):
-        """The podman machine never mounts the held credentials, so a converge asked there (`wk start <ws>`, forwarded)
-        read no token and removed the injector's: every read in every workspace was unauthenticated until ./setup."""
+        """The podman machine never mounts the held credentials."""
         read = self.tmp + "/store/read-github-pat"
         self.w._set_file(read, "ghp-held\n")
         _, err = quiet(self.w.sec().pat_converge_machine)

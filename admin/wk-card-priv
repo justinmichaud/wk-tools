@@ -1,25 +1,15 @@
 #!/bin/bash
-# Root via a NOPASSWD sudoers rule naming this exact path (`wk sysimage write` drives it
-# down a BatchMode ssh with no terminal for a password prompt, and Linux cannot make a
-# #! script setuid). The grant is forever, so:
-#   - a fixed verb allowlist: no passthrough, no eval, no argument becoming part of a
-#     command line, and nothing read from the environment (env_reset plus the PATH below);
-#   - **only usb and mmc whole disks may be touched, ever** -- not "removable", which
-#     RM=1 claims for things that are not cards and denies to no internal disk, so
-#     transport is checked against a two-item list instead;
-#   - **a disk this machine is running from is refused** whatever its transport (root's,
-#     /boot's, /boot/firmware's, any swap's, the kernel's root=): on these Pis the system
-#     disk *is* an SD card or USB stick, so transport alone would overwrite it;
+# Root via a NOPASSWD sudoers rule naming this exact path (`wk sysimage write` drives it down a
+# BatchMode ssh, and Linux cannot make a #! script setuid). The grant is forever, so:
+#   - a fixed verb allowlist: no passthrough, no eval, nothing read from the environment;
+#   - only usb and mmc whole disks, by transport: RM=1 is claimed by things that are not cards;
+#   - a disk this machine is running from is refused whatever its transport: on these Pis the
+#     system disk is itself an SD card or USB stick;
 #   - a disk with anything mounted from it is refused;
-#   - the one carve-out is a system beside this one (`<device>@second`, `@third`): the
-#     image is split into partitions 3 and up, the disk identity is never touched, and
-#     1 and 2 are never addressed;
-#   - secrets (a tailscale auth key, a WiFi passphrase) arrive on stdin, never as
-#     arguments, which are world-readable in /proc; the marker and the ssh *public* key
-#     are arguments because neither is a secret;
-#   - what arrives on stdin is data, never code: an image to a gated device, a key to a
-#     file, a unit archive to fixed directories under /etc, each under a size bound, and
-#     no file root runs is a path a caller names.
+#   - the one carve-out is a system beside this one (`<device>@second`, `@third`): partitions
+#     3 and up, never 1 and 2, never the disk identity;
+#   - secrets arrive on stdin, never as arguments (world-readable in /proc); stdin is data,
+#     never code, each under a size bound, and no file root runs is a path a caller names.
 
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -68,10 +58,8 @@ _slot_resolve() { # <disk>
         5|f|0x5|0xf|05|0f)
             BOOTP=$((3 + 2 * SLOT)); ROOTP=$((4 + 2 * SLOT)) ;;
         *)
-            [ "$SLOT" -eq 1 ] || deny "'$1' carries its second system on primary partitions 3-4,
-    which leaves no room for a third. The shared layout (an extended partition
-    holding two systems) is made by a fresh '@second' write on a medium whose
-    first system is a rescue."
+            [ "$SLOT" -eq 1 ] || deny "'$1' carries its second system on partitions 3-4, leaving no room for a third;
+    a fresh '@second' write beside a rescue makes the shared layout that holds two"
             BOOTP=3; ROOTP=4 ;;
     esac
 }
@@ -99,23 +87,18 @@ gate() { # <device>[@second|@third] [allow-mounted]
     read -r type tran <<EOF
 $(lsblk -dno TYPE,TRAN "$dev" 2>/dev/null)
 EOF
-    [ "$type" = disk ] || deny "'$dev' is a '${type:-unknown}', not a whole disk.
-    An image carries its own partition table, so it goes to the disk."
+    [ "$type" = disk ] || deny "'$dev' is a '${type:-unknown}', not a whole disk"
 
     # The two-item list this helper exists to enforce.
     case "$tran" in
         usb|mmc) ;;
-        *) deny "'$dev' is on transport '${tran:-unknown}'. Only usb and mmc
-    devices may be written by this helper -- that is the entire grant." ;;
+        *) deny "'$dev' is on transport '${tran:-unknown}'; this helper writes usb and mmc devices only" ;;
     esac
 
     name=$(basename "$dev")
     booted=$(booted_disks)
     if [ -z "$SECOND" ] && printf '%s\n' "$booted" | grep -qx "$name"; then
-        deny "'$dev' is a disk this machine is running from (/, /boot, swap or
-    the kernel's root=). On these boards the system disk is itself an SD card or
-    a USB stick, so being removable is no protection at all. A second system
-    beside this one is '$dev@second'."
+        deny "'$dev' is a disk this machine is running from (/, /boot, swap or root=); a system beside it is '$dev@second'"
     fi
 
     [ -z "$SECOND" ] || _slot_resolve "$dev"
@@ -126,12 +109,10 @@ EOF
     if [ "$allow_mounted" != allow-mounted ]; then
         if [ -n "$SECOND" ]; then
             mounted=$(lsblk -no MOUNTPOINT "$(part "$dev" "$BOOTP")" "$(part "$dev" "$ROOTP")" 2>/dev/null | grep -c . || true)
-            [ "${mounted:-0}" -eq 0 ] || deny "'$dev@$PFX': partitions $BOOTP and $ROOTP have $mounted mounted filesystem(s).
-    A system in use is a system somebody is using; unmount it first."
+            [ "${mounted:-0}" -eq 0 ] || deny "'$dev@$PFX': partitions $BOOTP and $ROOTP have $mounted mounted filesystem(s); unmount them first"
         else
             mounted=$(lsblk -no MOUNTPOINT "$dev" 2>/dev/null | grep -c . || true)
-            [ "${mounted:-0}" -eq 0 ] || deny "'$dev' has $mounted mounted filesystem(s) on it.
-    A card in use is a card somebody is using; unmount it first."
+            [ "${mounted:-0}" -eq 0 ] || deny "'$dev' has $mounted mounted filesystem(s) on it; unmount them first"
         fi
     fi
 
@@ -168,6 +149,10 @@ check_partno() {
     esac
     [ "$1" -ge 1 ] && [ "$1" -le 16 ] \
         || deny "'$1' is not a partition number this helper addresses (1-16)"
+}
+
+_put() { # <source> <destination> <mode>
+    cat "$1" > "$2" && chmod "$3" "$2" && chown 0:0 "$2" && [ -s "$2" ] || fail "$(basename "$2") did not land on this disk"
 }
 
 # A scratch mountpoint of this helper's own making: a caller-named path is a bigger grant.
@@ -290,13 +275,13 @@ v_whose() {
     with_mount -r "$(part "$dev" "$ROOTP")" _whose_probe
 }
 
-_joins_probe() { # <mountpoint>
-    [ -x "$1/usr/sbin/wk-tailnet-join" ] && say "tailnet-join: yes" || say "tailnet-join: no"
+_joiner_probe() { # <mountpoint> <joiner>
+    [ -x "$1/usr/sbin/wk-$2-join" ] && say "$2-join: yes" || say "$2-join: no"
 }
 
-v_joins() {
+v_joins() { # <device> [tailnet|wifi]
     local dev; gate "${1:-}"; dev=$GATED_DEV
-    with_mount -r "$(part "$dev" "$ROOTP")" _joins_probe
+    with_mount -r "$(part "$dev" "$ROOTP")" _joiner_probe "${2:-tailnet}"
 }
 
 v_tailnet() {
@@ -318,15 +303,6 @@ v_tailnet() {
     rm -f "$tmp"
     [ "$rc" -eq 0 ] && say "tailnet identity seeded on $dev (joins as $host, $tag)"
     return "$rc"
-}
-
-_wifi_joins_probe() { # <mountpoint>
-    [ -x "$1/usr/sbin/wk-wifi-join" ] && say "wifi-join: yes" || say "wifi-join: no"
-}
-
-v_wifi_joins() {
-    local dev; gate "${1:-}"; dev=$GATED_DEV
-    with_mount -r "$(part "$dev" "$ROOTP")" _wifi_joins_probe
 }
 
 # Sits in a double-quoted wpa_supplicant string: a quote, backslash or newline breaks out.
@@ -442,8 +418,7 @@ _id_edit() { # <mountpoint> <old> <new>
 v_identity() {
     local dev old new
     gate "${1:-}"; dev=$GATED_DEV
-    [ -z "$SECOND" ] || deny "the disk identity belongs to the system this machine runs from;
-    a second system takes its PARTUUIDs from it (retarget) and never changes it"
+    [ -z "$SECOND" ] || deny "the disk identity belongs to the first system; a second system never changes it"
     check_hex "${2:-}"; check_hex "${3:-}"
     old="$2"; new="$3"
     sfdisk --disk-id "$dev" "0x$new" >/dev/null
@@ -539,8 +514,6 @@ v_eject() {
     blockdev --flushbufs "$dev" || fail "blockdev --flushbufs $dev failed, so $dev is not flushed; do not pull it"
     say "$dev flushed"
 }
-
-# Every edit is made where the reader is: a macOS workstation has no mtools or sfdisk.
 
 # Root-owned beside this helper because root runs it, so not a path a caller names.
 CHECK_BOOT_FILES=/usr/local/libexec/wk-check-boot-files.py
@@ -647,10 +620,7 @@ left = [l.split()[0] for l in lines
 if left:
     sys.exit("still names another disk: " + ", ".join(left))
 ' "$f" "PARTUUID=$boot" "PARTUUID=$root" \
-        || fail "/etc/fstab on this disk still names a partition that is not this card's.
-    Every line has to name PARTUUID=$boot or PARTUUID=$root; a line naming
-    anything else mounts another disk, or nothing, and takes local-fs.target
-    down with it."
+        || fail "/etc/fstab on this disk names a partition other than PARTUUID=$boot or PARTUUID=$root, which takes local-fs.target down"
 }
 
 # A wic image says `root=/dev/mmcblk0p2` because its wks file did; fstab's /boot too.
@@ -663,8 +633,7 @@ v_retarget() {
         ''|*[!0-9a-fA-F]*) deny "'$dev' has no MBR disk signature, so a PARTUUID cannot name its partitions" ;;
     esac
     case "$(with_mount -r "$(part "$dev" "$BOOTP")" _root_spec_probe)" in
-        root=PARTUUID=*) deny "'$dev' already boots by PARTUUID. A card whose PARTUUIDs name no partition on it
-    is re-provisioned, not rescued: 'wk status' prints each board's re-provisioning recipe" ;;
+        root=PARTUUID=*) deny "'$dev' already boots by PARTUUID; a card whose PARTUUIDs name no partition on it is re-provisioned ('wk status' prints how)" ;;
     esac
     root=$(printf '%08x-%02d' "$((0x$sig))" "$ROOTP")
     boot=$(printf '%08x-%02d' "$((0x$sig))" "$BOOTP")
@@ -720,8 +689,7 @@ v_config_append() {
     marker=$(printf '%s\n' "$block" | head -1)
     case "$marker" in
         "# --- wk sysimage: "*) ;;
-        *) deny "a config.txt block starts with its own '# --- wk sysimage: <profile> ---' line,
-    which is what makes appending it twice a no-op" ;;
+        *) deny "a config.txt block starts with its own '# --- wk sysimage: <profile> ---' line" ;;
     esac
     with_mount "$(part "$dev" "$BOOTP")" _config_append_edit "$block" "$marker"
     say "config.txt on $dev carries $marker"
@@ -752,9 +720,7 @@ _units_names() { # <tar file>
         case "$name" in
             systemd/|sysctl.d/|init.d/|./) continue ;;
             systemd/*.service|systemd/*.timer|sysctl.d/*.conf|init.d/S[0-9][0-9]*) ;;
-            *) deny "'$name' is not something this verb may write: a unit archive holds
-    systemd/<name>.service, systemd/<name>.timer, sysctl.d/<name>.conf and
-    init.d/S<nn><name>, and nothing else" ;;
+            *) deny "'$name' is not systemd/*.service, systemd/*.timer, sysctl.d/*.conf or init.d/S<nn>*" ;;
         esac
         case "${name#*/}" in
             ''|.*|*/*|*[!a-zA-Z0-9@._-]*) deny "'$name' is not a plain file name" ;;
@@ -790,10 +756,7 @@ _units_edit() { # <mountpoint> <staging directory>
         fi
         for f in "$work"/init.d/*; do
             [ -f "$f" ] || continue
-            name=$(basename "$f")
-            cat "$f" > "$m/etc/init.d/$name"
-            chmod 0755 "$m/etc/init.d/$name"; chown 0:0 "$m/etc/init.d/$name"
-            [ -s "$m/etc/init.d/$name" ] || fail "$name did not land on this disk"
+            _put "$f" "$m/etc/init.d/$(basename "$f")" 0755
             n=$((n + 1))
         done
         _units_sysctl "$m" "$work"; n=$((n + SYSCTL_N))
@@ -807,27 +770,19 @@ _units_edit() { # <mountpoint> <staging directory>
         # `systemctl enable` never runs against a card, so WantedBy= decides the link.
         target=$(_unit_target "$f")
         # A service a timer starts declares no WantedBy=, or it runs at boot too.
-        if [ -z "$target" ] && [ -f "$work/systemd/${name%.service}.timer" ]; then
-            cat "$f" > "$m/etc/systemd/system/$name"
-            chmod 0644 "$m/etc/systemd/system/$name"; chown 0:0 "$m/etc/systemd/system/$name"
-            [ -s "$m/etc/systemd/system/$name" ] || fail "$name did not land on this disk"
-            n=$((n + 1))
-            continue
+        if [ -n "$target" ] || [ ! -f "$work/systemd/${name%.service}.timer" ]; then
+            case "$target" in
+                *[!a-z0-9@.-]*) fail "'$target' is not a systemd target name" ;;
+                *.target) ;;
+                *) fail "$name declares no WantedBy= target, so nothing would ever start it" ;;
+            esac
         fi
-        case "$target" in
-            *.target) ;;
-            *) fail "$name declares no WantedBy= target, so nothing would ever start it" ;;
-        esac
-        case "$target" in
-            *[!a-z0-9@.-]*) fail "'$target' is not a systemd target name" ;;
-        esac
-        cat "$f" > "$m/etc/systemd/system/$name"
-        chmod 0644 "$m/etc/systemd/system/$name"; chown 0:0 "$m/etc/systemd/system/$name"
+        _put "$f" "$m/etc/systemd/system/$name" 0644
+        n=$((n + 1))
+        [ -n "$target" ] || continue
         mkdir -p "$m/etc/systemd/system/$target.wants"
         ln -sf "/etc/systemd/system/$name" "$m/etc/systemd/system/$target.wants/$name"
-        [ -s "$m/etc/systemd/system/$name" ] && [ -L "$m/etc/systemd/system/$target.wants/$name" ] \
-            || fail "$name did not land on this disk"
-        n=$((n + 1))
+        [ -L "$m/etc/systemd/system/$target.wants/$name" ] || fail "$name did not land on this disk"
     done
     _units_sysctl "$m" "$work"; n=$((n + SYSCTL_N))
     say "units: installed $n file(s)"
@@ -835,15 +790,12 @@ _units_edit() { # <mountpoint> <staging directory>
 
 SYSCTL_N=0
 _units_sysctl() { # <mountpoint> <staging directory>
-    local m="$1" work="$2" f name
+    local m="$1" work="$2" f
     SYSCTL_N=0
     for f in "$work"/sysctl.d/*; do
         [ -f "$f" ] || continue
-        name=$(basename "$f")
         mkdir -p "$m/etc/sysctl.d"
-        cat "$f" > "$m/etc/sysctl.d/$name"
-        chmod 0644 "$m/etc/sysctl.d/$name"; chown 0:0 "$m/etc/sysctl.d/$name"
-        [ -s "$m/etc/sysctl.d/$name" ] || fail "$name did not land on this disk"
+        _put "$f" "$m/etc/sysctl.d/$(basename "$f")" 0644
         SYSCTL_N=$((SYSCTL_N + 1))
     done
 }
@@ -876,20 +828,14 @@ v_units() {
 _helper_install() { # <mountpoint>
     local m="$1" d="$m/usr/local/libexec"
     mkdir -p "$d" || fail "could not make $d on this disk"
-    cat "$SELF" > "$d/wk-card-priv" || fail "the card helper did not land on this disk"
-    cat "$CHECK_BOOT_FILES" > "$d/wk-check-boot-files.py" \
-        || fail "the boot-file checker did not land on this disk"
-    chmod 0755 "$d/wk-card-priv" "$d/wk-check-boot-files.py"
-    chown 0:0 "$d/wk-card-priv" "$d/wk-check-boot-files.py"
-    [ -s "$d/wk-card-priv" ] && [ -s "$d/wk-check-boot-files.py" ] \
-        || fail "a helper file landed empty on this disk"
+    _put "$SELF" "$d/wk-card-priv" 0755
+    _put "$CHECK_BOOT_FILES" "$d/wk-check-boot-files.py" 0755
     say "helper: this machine's card helper and boot-file checker are on it"
 }
 v_helper() {
     local dev; gate "${1:-}"; dev=$GATED_DEV
     [ -r "$SELF" ] || fail "this helper cannot read its own file at $SELF"
-    [ -r "$CHECK_BOOT_FILES" ] || deny "there is no boot-file checker at $CHECK_BOOT_FILES on
-    this machine, so a rescue written from here would carry none either.
+    [ -r "$CHECK_BOOT_FILES" ] || deny "there is no boot-file checker at $CHECK_BOOT_FILES on this machine.
     Remedy, from a terminal on this machine:  ./setup --stage quiesce"
     with_mount "$(part "$dev" "$ROOTP")" _helper_install
 }
@@ -901,10 +847,8 @@ _autoboot_write() { # <mountpoint> <pair>
         || fail "autoboot.txt did not land on this disk"
     say "autoboot: partition $2"
 }
-# autoboot <device> [pair] -- which pair a plain boot lands on, default 1. The
-# firmware's own selector, and the only one this board has: its tryboot flag
-# belongs to the system on its other medium, and a pair selected with that flag
-# never boots (rpi5, 2026-09-05).
+# Which pair a plain boot lands on, default 1: rpi5's tryboot flag belongs to the system on
+# its other medium, and a pair selected with it never boots (measured).
 v_autoboot() {
     local dev pair; gate "${1:-}"; dev=$GATED_DEV
     pair="${2:-1}"
@@ -934,8 +878,7 @@ v_boot_read() {
     check_partno "${2:-}"
     case "${3:-}" in
         wk-image.id|wk-diag.txt|autoboot.txt|config.txt|cmdline.txt) ;;
-        *) deny "'${3:-}' is not a file this helper reads off a boot partition
-    (wk-image.id, wk-diag.txt, autoboot.txt, config.txt, cmdline.txt)" ;;
+        *) deny "'${3:-}' is not wk-image.id, wk-diag.txt, autoboot.txt, config.txt or cmdline.txt" ;;
     esac
     at=$(_boot_read_at "$(part "$dev" "$2")")
     if [ -n "$at" ]; then
@@ -954,18 +897,15 @@ v_boot_check() {
     local dev rc=0
     gate "${1:-}"; dev=$GATED_DEV
     check_name "${2:-}"
-    [ -r "$CHECK_BOOT_FILES" ] || deny "there is no boot-file checker at $CHECK_BOOT_FILES on this
-    machine. It is boot/check-boot-files.py from wk-tools, installed root-owned
-    beside this helper -- root runs it, so it cannot be a path a caller names.
+    [ -r "$CHECK_BOOT_FILES" ] || deny "there is no boot-file checker at $CHECK_BOOT_FILES on this machine.
     Remedy, from a terminal on this machine:  ./setup --stage quiesce"
     with_mount -r "$(part "$dev" "$BOOTP")" _boot_check_run "$2" || rc=$?
     [ "$rc" -eq 0 ] || fail "this card's boot partition is missing files a $2 board's firmware asks for"
     say "boot-check: every file the firmware asks for resolves"
 }
 
-# The image on stdin is a whole card (MBR, boot FAT as 1, root as 2). Beside a rescue it
-# goes into an extended partition 3 whose geometry is a function of the disk size alone
-# (5-6 and 7-8, a 256 MiB boot and half the rest each); on a dedicated medium, into 3-4.
+# The image on stdin is a whole card (MBR, boot as 1, root as 2). Beside a rescue it goes into an
+# extended partition 3 sized from the disk alone (5-6 and 7-8); on a dedicated medium, into 3-4.
 # The program arrives on stdin too, so the image is on fd 3 before the heredoc takes 0.
 _rescue_marker_probe() { [ -f "$1/etc/wk/rescue" ]; }
 _first_is_rescue() { # <disk>
@@ -1052,10 +992,7 @@ if shape == "shared":
         if old:
             say("replacing the layout of partitions %s; the systems there are gone" %
                 ",".join(str(n) for n in old))
-        # The disk identifier is carried over: sfdisk generates a fresh random
-        # one for a script that does not name it, and every PARTUUID is
-        # <disk id>-<nn>. The rescue on 1-2 names its own root that way and
-        # this write does not retarget it.
+        # sfdisk makes a fresh disk id for a script that names none, and the rescue's root is <disk id>-02.
         lines = ["label: dos", "label-id: %s" % disk_id()]
         for n in (1, 2):
             p = have[n]
@@ -1097,7 +1034,6 @@ if have[bootp]["size"] < b_size or have[rootp]["size"] < r_size:
 
 pos = 512
 def copy(n_bytes, out_path, skip_to):
-    """Consume the stream up to byte skip_to, then copy n_bytes into out_path."""
     global pos
     while pos < skip_to:
         chunk = src.read(min(1 << 20, skip_to - pos))
@@ -1288,14 +1224,14 @@ case "$verb" in
     joins)    v_joins    "$@" ;;
     whose)    v_whose    "$@" ;;
     tailnet)  v_tailnet  "$@" ;;
-    wifi-joins) v_wifi_joins "$@" ;;
+    wifi-joins) v_joins "${1:-}" wifi ;;
     wifi-host) v_wifi_host "$@" ;;
     wifi-from-host) v_wifi_from_host "$@" ;;
     identity) v_identity "$@" ;;
     role)     v_role     "$@" ;;
     grow)     v_grow     "$@" ;;
     unmount)  v_unmount  "$@" ;;
-    verify)   case "${1:-}" in *@second) v_second_verify "$@" ;; *) v_verify "$@" ;; esac ;;
+    verify)   case "${1:-}" in *@second|*@third) v_second_verify "$@" ;; *) v_verify "$@" ;; esac ;;
     second-arm)    v_second_arm    "$@" ;;
     second-disarm) v_second_disarm "$@" ;;
     second-state)  v_second_state  "$@" ;;

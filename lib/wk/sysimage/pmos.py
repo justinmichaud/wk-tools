@@ -74,25 +74,30 @@ def out_dir(root, id_):
     return "%s/out/%s" % (root, id_)
 
 
+def builds(machine, root, profile_name):
+    """The profile's build ids on the build host, newest first."""
+    return [d for d in ask(machine, "ls -1t %s" % shlex.quote(os.path.join(root, "out"))).splitlines() if d.startswith(profile_name + "-")]
+
+
 def newest_out(machine, env, profile_name):
     """The newest build with a result block: "finished" is that block, not merely an rc file (a resumed build has an rc but no result yet)."""
     root = root_dir(machine, env)
-    for d in ask(machine, "ls -1t %s" % shlex.quote(os.path.join(root, "out"))).splitlines():
-        if d.startswith(profile_name + "-") and sh(machine, "test -f %s" % shlex.quote(os.path.join(root, "out", d, "result"))).ok:
-            return d
-    return None
+    return next((d for d in builds(machine, root, profile_name)
+                 if sh(machine, "test -f %s" % shlex.quote(os.path.join(root, "out", d, "result"))).ok), None)
+
+
+def result_of(machine, out):
+    result = sh(machine, "cat %s" % shlex.quote(out + "/result"))
+    if not result.ok:
+        die("the build on %s produced no image (no result block at %s); its log is %s/build.log there" % (machine.name, out, out))
+    return kv(result.out)
 
 
 def fetch_out(machine, env, id_, dest, here=None):
     """The hash is the one the build host computed: the only check that works from a Mac, with no sfdisk."""
     here = here or machine.via
     out = out_dir(root_dir(machine, env), id_)
-    result = sh(machine, "cat %s" % shlex.quote(out + "/result"))
-    if not result.ok:
-        die("the build on %s left no result block at %s.\n    It did not get as far as producing an image. "
-            "The log is at %s/build.log\n    on that machine."
-            % (machine.name, out, out))
-    there = kv(result.out).get("raw_sha256", "")
+    there = result_of(machine, out).get("raw_sha256", "")
     info("copying %s off %s" % (id_, machine.name))
     try:
         machine.copy_out(out + "/disk.wic.xz", dest + ".xz")
@@ -237,22 +242,10 @@ class Pmos:
         log("dry run -- nothing was built.")
         return 0
 
-    def ensure_packages(self, machine):
-        missing = []
-
-        def need(prog, pkg):
-            if not machine.have(prog):
-                missing.append(pkg)
-        need("kpartx", "multipath-tools")
-        need("xz", "xz-utils")
-        need("rsync", "rsync")
-        if not sh(machine, "python3 -c 'import ensurepip'").ok:
-            missing.append("python3-venv")
-        if not sh(machine, "python3 -c 'import yaml'").ok:
-            missing.append("python3-yaml")
-        if missing:
-            die("%s is missing what pmbootstrap needs: %s\n    './setup' on that machine installs them (host/linux/apt.txt); by hand:\n"
-                "        ssh %s sudo apt install -y %s" % (machine.name, " ".join(missing), machine.name, " ".join(missing)))
+    @staticmethod
+    def preflight(machine, root):
+        if not machine.run_tty(pmos_build.argv_for(root, "preflight")).ok:
+            die("%s cannot build a pmos image; the reason is above" % machine.name)
 
     def push_tree(self, machine, root):
         machine.mkdir(os.path.join(root, "lib"))
@@ -266,7 +259,6 @@ class Pmos:
         if not bands:
             act.debug("profile declares no PMO_WIFI_BANDS -- not checking the uplink band")
             return
-        want24, want5 = "2.4" in bands.split(), "5" in bands.split()
         ssid = machine.run(pmos_build.argv_for(root, "wifi-ssid")).out.strip()
         if not ssid:
             warn("%s cannot currently read its own WiFi SSID -- leaving the band unchecked" % machine.name)
@@ -276,22 +268,13 @@ class Pmos:
             warn("%s cannot currently see '%s' on the air, so which bands it" % (machine.name, ssid))
             warn("  offers could not be checked. %s's radio is %s GHz." % (self.p["PMO_DEVICE"], bands))
             return
-        seen, hit = set(), False
-        for f in freqs:
-            if f < 3000:
-                seen.add("2.4")
-                hit = hit or want24
-            else:
-                seen.add("5")
-                hit = hit or want5
-        if hit:
+        seen = {"2.4" if f < 3000 else "5" for f in freqs}
+        if seen & set(bands.split()):
             act.debug("'%s' is on the air in a band %s supports" % (ssid, self.p["PMO_DEVICE"]))
             return
-        die("'%s' is only being broadcast on %s GHz, and %s's radio is %s GHz only.\n    The image copies its WiFi credential "
-            "from %s's own association, so it\n    would be built with a valid PSK for a network the phone's hardware cannot\n"
-            "    see -- and a phone with no uplink has no way in at all.\n    The fix is on the access point, not here: broadcast "
-            "'%s' on %s GHz as well." % (ssid, "/".join(sorted(seen)), self.p["PMO_DEVICE"], bands.replace(" ", "/"),
-                                        machine.name, ssid, bands.replace(" ", "/")))
+        die("'%s' is only on the air at %s GHz, and %s's radio is %s GHz only: the image would join a network\n"
+            "    the phone cannot see. Broadcast '%s' on %s GHz as well." % (ssid, "/".join(sorted(seen)), self.p["PMO_DEVICE"],
+                                                                         bands.replace(" ", "/"), ssid, bands.replace(" ", "/")))
 
     @staticmethod
     def _ssid_freqs(machine, ssid):
@@ -321,12 +304,11 @@ class Pmos:
             return self.dry_run()
         machine = self.machine()
         if not sh(machine, "true").ok:
-            die("cannot ssh to %s -- that is the build host for this profile.\n"
-                "    pmbootstrap is Linux-only and needs root, so the build happens there.\n"
-                "    Another machine: WK_PMOS_HOST=<name> wk sysimage build %s" % (machine.name, self.name))
+            die("cannot ssh to %s, this profile's build host.\n    Another machine: WK_PMOS_HOST=<name> wk sysimage build %s"
+                % (machine.name, self.name))
         root = root_dir(machine, self.env)
         if o.get("--resume"):
-            id_ = self._find_build(machine, root)
+            id_ = next(iter(builds(machine, root, self.name)), None)
             if not id_:
                 die("no build to resume on %s for '%s'.\n    'wk sysimage build %s' starts one." % (machine.name, self.name, self.name))
             info("resuming %s on %s" % (id_, machine.name))
@@ -338,9 +320,9 @@ class Pmos:
                     die("that build failed (exit %s); its log is %s/build.log on %s" % (rc, out_dir(root, id_), machine.name))
                 info("it has already finished")
         else:
-            self.ensure_packages(machine)
             self._refuse_if_running(machine, root)
             self.push_tree(machine, root)
+            self.preflight(machine, root)
             self.check_uplink_band(machine, root)
             id_ = "%s-%s" % (self.name, self.clock.stamp())
             self._spawn(machine, root, id_)
@@ -352,21 +334,12 @@ class Pmos:
             self._follow(machine, root, id_)
 
         out = out_dir(root, id_)
-        if not sh(machine, "test -f %s" % shlex.quote(out + "/result")).ok:
-            die("the build on %s left no result block at %s.\n    It did not get as far as producing an image. The log is at %s/build.log\n"
-                "    on that machine." % (machine.name, out, out))
+        result_of(machine, out)
         info("built %s on %s -- %s/disk.wic.xz" % (id_, machine.name, out))
         log("  the rest of the way:  " + PROVISION % (p["PMO_BRIDGE"] or "<bridge>"))
         log("  ...or by hand: copy disk.wic.xz off %s, then" % machine.name)
         log("             wk sysimage write --from <path> --disk <machine>:<device>")
         return 0
-
-    def _find_build(self, machine, root):
-        prefix = self.name + "-"
-        for d in ask(machine, "ls -1t %s" % shlex.quote(os.path.join(root, "out"))).splitlines():
-            if d.startswith(prefix):
-                return d
-        return None
 
     @staticmethod
     def _running(machine, root, id_):
@@ -382,18 +355,13 @@ class Pmos:
         with open(keyfile) as f:
             machine.write(os.path.join(root, "driving-key.pub"), f.read())
         info("starting the build on %s (it survives this connection)" % machine.name)
-        p = self.p
+        p, opt = self.p, task.opt
         argv = pmos_build.argv_for(root, "remote-build",
                 "--id", id_, "--device", p["PMO_DEVICE"], "--channel", p["PMO_CHANNEL"], "--pmb-version", p["PMO_PMB_VERSION"],
-                "--hostname", p["IMG_HOSTNAME"], "--keyfile", os.path.join(root, "driving-key.pub"), "--root", root,
-                "--ui", p["PMO_UI"] or "phosh", "--user", p["PMO_USER"] or "user", "--password", p["PMO_PASSWORD"] or "147147",
-                "--extra-space", p["PMO_EXTRA_SPACE"] or "512")
-        if p["PMO_PACKAGES"]:
-            argv += ["--packages", p["PMO_PACKAGES"]]
-        if p["PMO_KERNEL_APORT"]:
-            argv += ["--kernel-aport", p["PMO_KERNEL_APORT"]]
-        if p["PMO_KCONFIG"]:
-            argv += ["--kconfig", p["PMO_KCONFIG"]]
+                "--hostname", p["IMG_HOSTNAME"], "--keyfile", os.path.join(root, "driving-key.pub"), "--root", root)
+        for flag, key in (("--ui", "PMO_UI"), ("--user", "PMO_USER"), ("--password", "PMO_PASSWORD"), ("--extra-space", "PMO_EXTRA_SPACE"),
+                          ("--packages", "PMO_PACKAGES"), ("--kernel-aport", "PMO_KERNEL_APORT"), ("--kconfig", "PMO_KCONFIG")):
+            argv += opt(flag, p[key])
         line = job.remote_line(argv, out + "/build.log", out + "/build.rc")
         act_sh(machine, line)
         self.clock.sleep(3)
@@ -402,8 +370,8 @@ class Pmos:
     def _refuse_if_running(machine, root):
         running = ask(machine, "pgrep -f %s >/dev/null && echo yes" % shlex.quote(RUNNING_PATTERN)).strip()
         if running == "yes":
-            die("a pmos build is already running on %s.\n    Two at once would fight over the same chroots and loop devices. Wait for it,\n"
-                "    or watch it:  ssh %s tail -f %s/out/*/build.log" % (machine.name, machine.name, root))
+            die("a pmos build is already running on %s, and two would fight over its chroots and loop devices.\n"
+                "    Watch it:  ssh %s tail -f %s/out/*/build.log" % (machine.name, machine.name, root))
 
     def _follow(self, machine, root, id_):
         info("following the build on %s -- ^C stops watching, not building" % machine.name)

@@ -1,6 +1,5 @@
-"""What the fleet asks of the tailnet's API, and the one auth key a machine joins nodes with; `Api.transport` is the
-seam every request crosses. Exit: 0 done, 1 no auth key, 2 no such node / no such key / a usage error, 3 online, 4 no credential,
-5 refused, 6 unreachable."""
+"""The tailnet API and the one auth key a machine joins nodes with. Exit: 0 done, 1 no auth key, 2 no such node or a usage
+error, 3 online, 4 no credential, 5 refused, 6 unreachable."""
 
 import argparse
 import base64
@@ -96,20 +95,13 @@ def retire(api, name, out):
         out.write("retired %s (id %s, last seen %s)\n" % (d.get("name", name), d.get("id", "?"), d.get("lastSeen", "unknown")))
 
 
-def key_live(api, key_id, out):
-    if any(k.get("id") == key_id for k in api.call("GET", "/tailnet/-/keys").get("keys") or []):
-        out.write("ok: the tailnet still has key %s\n" % key_id)
-        return
-    raise Failed(2, "the tailnet has no key %s (it was deleted, or its expiry passed)" % key_id)
-
-
-def key_mint(api, tag, out):
-    body = {"capabilities": {"devices": {"create": {"reusable": True, "ephemeral": False, "preauthorized": True, "tags": [tag]}}},
-            "expirySeconds": KEY_DAYS * 86400, "description": "wk fleet key"}
-    got = api.call("POST", "/tailnet/-/keys", body)
-    if not got.get("key"):
-        raise Failed(5, "the tailnet minted no key for %s: %s" % (tag, json.dumps(got)[:200]))
-    out.write(got["key"])
+def live(api, key):
+    """Only "the tailnet has no such key" counts against one: a tailnet that could not be asked is no evidence."""
+    try:
+        keys = api.call("GET", "/tailnet/-/keys").get("keys") or []
+    except Failed:
+        return True
+    return any(k.get("id") == (key.split("-") + ["", "", ""])[2] for k in keys)
 
 
 class Fleet:
@@ -135,15 +127,17 @@ class Fleet:
     def api_present(self):
         return self.api() is not None
 
+    def stored(self):
+        return (self.sec.cred_read("tailnet") or "").split("\n")[0].strip()
+
     def key_present(self):
         """A usable auth key on file, or the API credential that mints one."""
-        key = (self.sec.cred_read("tailnet") or "").split("\n")[0].strip()
+        key = self.stored()
         return bool(key and usable("tailnet", key)[0]) or self.api_present()
 
     def authkey(self):
         """The key file: the stored key while the tailnet has it, else one minted where the API credential is; "" if none."""
-        path, api = self.sec.cred_path("tailnet"), self.api()
-        key = (self.sec.cred_read("tailnet") or "").split("\n")[0].strip()
+        path, api, key = self.sec.cred_path("tailnet"), self.api(), self.stored()
         ok, why = usable("tailnet", key)
         if key and ok and (api is None or live(api, key)):
             return path
@@ -156,27 +150,28 @@ class Fleet:
         return ""
 
     def key(self):
-        return (self.authkey() and self.sec.cred_read("tailnet") or "").split("\n")[0].strip()
+        return self.stored() if self.authkey() else ""
 
     def mint(self, api, path, tag):
         if act.dry_run():
             act.log("would mint a tailnet auth key for %s into %s" % (tag, path))
             return ""
-        out = io.StringIO()
+        body = {"capabilities": {"devices": {"create": {"reusable": True, "ephemeral": False, "preauthorized": True, "tags": [tag]}}},
+                "expirySeconds": KEY_DAYS * 86400, "description": "wk fleet key"}
         try:
-            key_mint(api, tag, out)
+            key = api.call("POST", "/tailnet/-/keys", body).get("key") or ""
         except Failed as e:
             act.warn("the tailnet minted no auth key for %s: %s\n  An API credential that may not grant that tag fails "
                      "exactly here:\n      wk key set tailnet-api     replace the credential that mints\n"
                      "      wk key set tailnet         store a key by hand instead" % (tag, e))
             return ""
-        ok, why = usable("tailnet", out.getvalue())
+        ok, why = usable("tailnet", key)
         if not ok:
             act.warn("the tailnet returned something that is not an auth key: %s" % why)
             return ""
         self.machine.mkdir(os.path.dirname(path))
         if not self.machine.act_run(["python3", os.path.join(self.root, "lib", "secretfile.py"), "write", path],
-                                    input=out.getvalue() + "\n").ok:
+                                    input=key + "\n").ok:
             act.warn("could not store the minted auth key at %s" % path)
             return ""
         act.info("minted a tailnet auth key for %s (reusable, %d days) -- %s" % (tag, KEY_DAYS, path))
@@ -197,20 +192,6 @@ class Fleet:
         return Result(0, out.getvalue())
 
 
-def live(api, key):
-    """Only "the tailnet has no such key" counts against one: a tailnet that could not be asked is no evidence."""
-    try:
-        key_live(api, (key.split("-") + ["", "", ""])[2], io.StringIO())
-        return True
-    except Failed as e:
-        return e.code != 2
-
-
-def check(api, out):
-    n = len(api.devices())
-    out.write("ok: the credential works (%d device%s on the tailnet)\n" % (n, "" if n == 1 else "s"))
-
-
 def main(argv, env=None, out=None, transport=urllib_transport):
     p = argparse.ArgumentParser(prog="python3 -m wk.tailnet")
     p.add_argument("verb", choices=("check", "authkey"),
@@ -228,7 +209,8 @@ def main(argv, env=None, out=None, transport=urllib_transport):
             value = Local().read(path) if path else ""
         except OSError:
             value = ""
-        check(Api(secret(value, path), api_url(env), transport), out)
+        n = len(Api(secret(value, path), api_url(env), transport).devices())
+        out.write("ok: the credential works (%d device%s on the tailnet)\n" % (n, "" if n == 1 else "s"))
     except Failed as e:
         sys.stderr.write("wk-tailnet: %s\n" % e)
         return e.code

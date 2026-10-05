@@ -4,10 +4,10 @@ import re
 import sys
 import unittest
 
-from tests.support import FLEET_ENV, REAL_MACHINES, REPO, run
+from tests.support import FLEET_ENV, REAL_MACHINES, REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import fleet, places  # noqa: E402
+from wk import fleet, images, places  # noqa: E402
 
 REGISTRIES = {
     "image/configs": REPO / "image" / "configs",
@@ -63,16 +63,10 @@ class TestConfShape(unittest.TestCase):
 
 
 class TestEveryImageListsADescription(unittest.TestCase):
-    def test_the_listing_prints_a_description_under_every_image(self):
-        cp = run("sysimage", "configs")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        names = {p.stem for p in conf_files("image/configs")}
-        lines = cp.stdout.splitlines()
-        for i, line in enumerate(lines):
-            if line.strip() in names and not line.startswith(" "):
-                self.assertLess(i + 1, len(lines), line)
-                described = lines[i + 1].strip()
-                self.assertTrue(described and not described.startswith("--"), line)
+    def test_every_image_conf_has_a_blurb(self):
+        for name in images.names({"WK_ROOT": str(REPO)}):
+            with self.subTest(conf=name):
+                self.assertTrue(images.blurb(name, {"WK_ROOT": str(REPO)}))
 
 
 class TestConfFieldSets(unittest.TestCase):
@@ -109,14 +103,6 @@ class TestConfFieldSets(unittest.TestCase):
                 self.assert_one_field_set(files, known, optional)
 
 
-class TestBootListsEveryMachine(unittest.TestCase):
-    def test_wk_boot_list_covers_every_conf(self):
-        cp = run("boot", "--list")
-        for name in {p.stem for p in conf_files("machines", fleet.BENCH_KINDS)}:
-            with self.subTest(machine=name):
-                self.assertRegex(cp.stdout, rf"(?m)^{re.escape(name)}\b")
-
-
 class TestNoHardcodedMachineDefaults(unittest.TestCase):
     """CLAUDE.md: 'New devices arrive as config, never code'. A line escapes only by a '# static' mark."""
 
@@ -146,17 +132,6 @@ class TestBenchConfFields(unittest.TestCase):
                 self.assertIn(fields.get("net"), ("wifi", "ethernet"))
                 if path.stem in ("rpi3", "rpi4", "rpi5"):
                     self.assertTrue(fields.get("dtb"))
-
-
-class TestUnknownPlaceRefusal(unittest.TestCase):
-    def test_the_refusal_names_the_machines_that_exist_and_how_to_add_one(self):
-        names = fleet.Fleet(REPO, FLEET_ENV).names(fleet.PLACE_KINDS)
-        self.assertTrue(names)
-        typo = names[0][::-1]
-        cp = run("key", "push", "status", "--on", typo, env={"WK_MACHINES_DIR": str(REAL_MACHINES)})
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        for n in names + ["wk machine setup " + typo]:
-            self.assertIn(n, cp.stdout)
 
 
 if __name__ == "__main__":

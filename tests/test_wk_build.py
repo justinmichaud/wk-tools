@@ -18,15 +18,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes import FakeProc, FakeRegistry
+from tests.fakes import JobWorld
 from tests.killpoints import converges
 from tests.support import REPO, as_dispatched
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, build, dispatch, job, places, record  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Local, Result, isolated_module  # noqa: E402
+from wk.machine import Local, Result, isolated_module  # noqa: E402
 
 FAR_LINE = "cd /src/WebKit && Tools/Scripts/build-webkit --jsc-only --release --makeargs=-j8\n"
 CMD_LOADER = importlib.machinery.SourceFileLoader("cmd_build", str(REPO / "cmd" / "build"))
@@ -35,74 +34,13 @@ CMD_LOADER.exec_module(CMD)
 LINUX = posix.uname_result(("Linux", "h", "6", "#1", "aarch64"))
 
 
-class BuildDriver(places.Driver):
-    def __init__(self, name, root, env, machine, kind):
-        super().__init__(name, root, env, machine)
-        self.kind = kind
-        self.host = "box.example" if kind == "remote" else ""
-
-    def info(self, ws):
-        return "running"
-
-    def state(self, ws, info=None):
-        return "present"
-
-    def exec(self, ws, argv, tty=False, timeout=None):
-        return self.machine.run(["exec", ws] + list(argv))
-
-    def exec_argv(self, ws, argv, tty=False):
-        return ["exec", ws] + list(argv), None
-
-    def build_size(self, ws):
-        return self.machine.size
-
-    def sync_tools(self, ws):
-        return self.machine.act_run(["sync-tools", ws]).ok
-
-    def mirror_dir(self):
-        return "/mirror"
-
-    def os(self):
-        return self.machine.place_os
-
-
-class World(Fake):
-
+class World(JobWorld):
     def __init__(self, tmp, kind="container"):
-        super().__init__("here")
-        self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
-        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"), "WK_LOCK_DIR": str(self.tmp / "locks"),
-                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_PLACE": "box", "WK_NAME": "ws", "WK_IN_VM": "1",
-                    "WK_AVAIL_MB": "65536", "WK_JOB_PID_TRIES": "0", "WK_KILL_WAIT": "2"}
-        self.conf, self.kind, self.in_ws, self.place_os = {}, kind, False, "linux"
-        self.size = (8, 32768, 2 if kind == "remote" else None)
-        self.clock = FakeClock()
-        self.dirs.add(self.env["WK_LOCK_DIR"])
-        self.out, self.rc, self.hang, self.interrupt = b"[1/2] CXX a.o\n[2/2] LINK jsc\n", 0, False, None
-        self.answer(["hostname"], out="here\n")
-        self.answer(["df", "-Pk"], out="Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 209715200 1% /\n")
-        self.react(["exec", "ws", "kill", "-0"], lambda a, f: Result(0 if int(a[-1]) in f.pids else 1))
+        super().__init__(tmp, kind, b"[1/2] CXX a.o\n[2/2] LINK jsc\n")
         self.answer(["exec", "ws", "grep", "-q", "WK_DRY_RUN"])
         self.answer(["exec", "ws", "bash", "-c"])
         self.react(["exec", "ws", "env"], lambda a, f: Result(0, FAR_LINE) if "WK_DRY_RUN=1" in a else Result(1))
-        self.answer(["sync-tools"])
-        self.reg = FakeRegistry(self.env, self, lambda n, e: BuildDriver("box", str(REPO), dict(e, **self.conf), self, self.kind),
-                                ws_place=lambda ws: "box", in_workspace=lambda: self.in_ws)
-        self.ws_dir = os.path.join(self.env["WK_STORE"], "ws", "ws")
-        os.makedirs(self.ws_dir)
         self.log = os.path.join(self.ws_dir, "build.log")
-
-    @property
-    def fake(self):
-        return self
-
-    def start(self, argv, out, cwd=None):
-        self.effect(("watch", tuple(argv)))
-        out.write(self.out)
-        return FakeProc(self.rc, None if self.hang else 0, self.interrupt)
-
-    def recs(self):
-        return build.records_of(self.reg.load("box"), self.clock, self)
 
     def begin(self, kind="build", name="ws", pid=4242, where="here", **kw):
         t = self.recs().begin(kind, where, name, kw.pop("kill", "wk build %s --kill" % name), kw.pop("log", self.log),
@@ -319,8 +257,7 @@ class TestRefusals(BuildTest):
         (w,) = [e for e in self.w.effects if e[0] == "watch"]
         self.assertEqual(w[1][-1], "--cmakeargs=-DX=1")
 
-    def test_sysroot_and_a_bad_env_are_refused(self):
-        self.assertIn("--sysroot is not implemented", self.refused(None, "jsc-release", "--sysroot", "x"))
+    def test_a_bad_env_is_refused(self):
         self.assertIn("--env takes NAME=VALUE, got nope", self.refused(None, "jsc-release", "--env", "nope"))
 
     def test_a_held_workspace_lock_is_refused_at_once_naming_kill(self):

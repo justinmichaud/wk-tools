@@ -2,8 +2,6 @@
 machine answering each gh call."""
 import contextlib
 import datetime
-import importlib.machinery
-import importlib.util
 import io
 import json
 import os
@@ -11,16 +9,14 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, as_dispatched
+from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import pr  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
-CMD_LOADER = importlib.machinery.SourceFileLoader("cmd_pr_report", str(REPO / "cmd" / "pr"))
-CMD = importlib.util.module_from_spec(importlib.util.spec_from_loader("cmd_pr_report", CMD_LOADER))
-CMD_LOADER.exec_module(CMD)
+CMD = load_cmd("pr")
 
 TODAY = datetime.date(2026, 10, 4)
 REPO_ARGS = ["--repo", "WebKit/WebKit"]

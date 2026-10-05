@@ -79,7 +79,7 @@ class TestStartAndStopHaveADryRun(unittest.TestCase):
 
     def test_start_everything(self):
         start = load_cmd("start")
-        with mock.patch.object(start, "here", lambda: False), mock.patch.object(start.status, "Walk"), \
+        with mock.patch.object(start.Store, "macos_host", False), mock.patch.object(start.status, "Walk"), \
                 mock.patch.object(start.statusview, "render_text_stream"):
             self.assertIn("would run: podman start wk-a wk-b", self.dry(start.start_everything, self.reg))
 
@@ -87,7 +87,7 @@ class TestStartAndStopHaveADryRun(unittest.TestCase):
         start = load_cmd("start")
         self.ctr.machine_state = lambda: "stopped"
         self.reg.machine = self.m
-        with mock.patch.object(start, "here", lambda: True), mock.patch.object(start.status, "Walk"), \
+        with mock.patch.object(start.Store, "macos_host", True), mock.patch.object(start.status, "Walk"), \
                 mock.patch.object(start.statusview, "render_text_stream"), \
                 mock.patch.object(start.dispatch, "start_podman_machine") as one:
             self.dry(start.start_everything, self.reg)
@@ -95,7 +95,7 @@ class TestStartAndStopHaveADryRun(unittest.TestCase):
 
     def test_stop_everything(self):
         stop = load_cmd("stop")
-        with mock.patch.object(stop, "here", lambda: False):
+        with mock.patch.object(stop.Store, "macos_host", False):
             self.assertIn("would run: podman stop --time 30 wk-a wk-b", self.dry(stop.stop_everything, self.reg, False))
 
     def test_one_workspace(self):

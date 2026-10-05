@@ -10,6 +10,8 @@ one. Every test that touches real state cleans up after itself.
 import atexit
 import contextlib
 import functools
+import importlib.machinery
+import importlib.util
 import os
 import random
 import re
@@ -285,6 +287,16 @@ def repo_files():
                          capture_output=True, text=True, check=True).stdout
     return [REPO / name for name in out.split("\0")
             if name and (REPO / name).is_file()]
+
+
+def load_cmd(name):
+    """cmd/<name> as a module: a file with no extension needs its loader spelled out."""
+    path = str(REPO / "cmd" / name)
+    loader = importlib.machinery.SourceFileLoader("wk_cmd_" + name.replace("-", "_"), path)
+    m = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader, origin=path))
+    m.__file__ = path
+    loader.exec_module(m)
+    return m
 
 
 def shell_files():

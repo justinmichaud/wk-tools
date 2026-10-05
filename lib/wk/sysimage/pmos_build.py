@@ -73,6 +73,21 @@ def parser():
     return ap
 
 
+def preflight(m):
+    u = m.run(["uname", "-sm"]).out.strip()
+    if u != "Linux aarch64":
+        die("this host is '%s'; pmbootstrap needs Linux on aarch64, or it emulates the phone's whole build" % u)
+    missing = [pkg for tool, pkg in (("git", "git"), ("xz", "xz-utils"), ("rsync", "rsync"), ("kpartx", "multipath-tools"),
+                                     ("losetup", "util-linux")) if not m.have(tool)]
+    missing += [pkg for mod, pkg in (("ensurepip", "python3-venv"), ("yaml", "python3-yaml"))
+                if not m.run(["python3", "-c", "import " + mod]).ok]
+    if missing:
+        die("missing here: %s; './setup' installs them (host/linux/apt.txt)" % " ".join(missing))
+    if not m.run(["sudo", "-n", "true"]).ok:
+        die("pmbootstrap mounts chroots and loop devices, and sudo needs a password here")
+    return 0
+
+
 class Build:
     def __init__(self, a, m, clock):
         self.a, self.m, self.clock = a, m, clock
@@ -103,26 +118,6 @@ class Build:
 
     def size(self, path):
         return self.m.run(["stat", "-c", "%s", path]).out.strip()
-
-    def preflight(self):
-        info("Preflight")
-        u = os.uname()
-        if u.sysname != "Linux":
-            die("this is not Linux; pmbootstrap cannot run here")
-        if u.machine != "aarch64":
-            die("this host is %s and the phones are aarch64.\n    pmbootstrap would emulate the whole build with qemu -- hours instead of\n"
-                "    minutes -- so this refuses. Build on an aarch64 machine." % u.machine)
-        missing = [t for t in ("git", "xz") if not self.m.have(t)]
-        missing += ["%s(%s)" % t for t in (("kpartx", "multipath-tools"), ("losetup", "util-linux")) if not self.m.have(t[0])]
-        missing += [pkg for mod, pkg in (("ensurepip", "python3-venv"), ("yaml", "python3-yaml"))
-                    if not self.m.run(["python3", "-c", "import " + mod]).ok]
-        if missing:
-            die("missing on this host: %s\n    sudo apt install -y multipath-tools python3-venv python3-yaml xz-utils git" % " ".join(missing))
-        if not self.m.run(["sudo", "-n", "true"]).ok:
-            die("sudo needs a password here.\n    pmbootstrap mounts chroots and loop devices; it cannot do that\n"
-                "    non-interactively without passwordless sudo.")
-        if not self.m.exists(self.a.keyfile):
-            die("no public key at %s" % self.a.keyfile)
 
     def pmbootstrap(self):
         a = self.a
@@ -316,7 +311,6 @@ class Build:
 
     def run(self):
         a = self.a
-        self.preflight()
         have = self.pmbootstrap()
         self.work_folder()
         rev = self.pmaports()
@@ -337,11 +331,13 @@ def main(argv):
     try:
         if verb == "remote-build":
             return Build(parser().parse_args(rest), m, Clock()).run()
+        if verb == "preflight" and not rest:
+            return preflight(m)
         if verb == "wifi-ssid" and not rest:
             cred = read_wifi_credential(m)
             sys.stdout.write((cred["ssid"] if cred else "") + "\n")
             return 0
-        die("usage: python3 -m %s remote-build <options> | wifi-ssid" % MODULE, 2)
+        die("usage: python3 -m %s remote-build <options> | preflight | wifi-ssid" % MODULE, 2)
     except Refused as e:
         return e.status
 

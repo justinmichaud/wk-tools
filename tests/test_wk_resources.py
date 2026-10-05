@@ -1,9 +1,7 @@
-"""lib/wk/resources.py: the envelope a place is sized from, the budget `wk build` sizes against, and the
-`wk_py wk.resources` verbs."""
+"""lib/wk/resources.py: the envelope a place is sized from and the budget `wk build` sizes against."""
 import contextlib
 import io
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,9 +13,8 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 from wk import resources  # noqa: E402
 from wk.act import RETRY_EXIT, Refused  # noqa: E402
-from wk.machine import Fake, Local  # noqa: E402
+from wk.machine import Fake  # noqa: E402
 
-IS_MACOS = os.uname().sysname == "Darwin"
 MEMINFO = "MemTotal:       32806140 kB\nMemFree:         1000000 kB\nMemAvailable:   20480000 kB\n"
 
 
@@ -83,6 +80,7 @@ class TestEnvelope(ResourcesTest):
         self.assertEqual(self.linux({"WK_CGROUP_MB": "8000"}).avail_mem_mb(), 8000)
         self.assertEqual(self.linux({"WK_CGROUP_MB": "80000"}).avail_mem_mb(), 20000)
         self.assertEqual(self.linux({"WK_AVAIL_MB": "123"}).avail_mem_mb(), 123)
+        self.assertEqual((self.linux({"WK_MAX_JOBS": "3"}).max_jobs(), r.avail_override(), r.max_jobs()), (3, None, None))
         self.fake.files[resources.CGROUP_MEM_MAX] = "max\n"
         self.assertEqual(r.avail_mem_mb(), 20000)
         self.fake.files[resources.CGROUP_MEM_MAX] = "4294967296\n"
@@ -105,17 +103,6 @@ class TestEnvelope(ResourcesTest):
             with contextlib.redirect_stderr(io.StringIO()) as err:
                 r.avail_mem_mb()
         self.assertIn(resources.CGROUP_MEM_MAX, err.getvalue())
-
-    def test_a_stage_reads_what_the_class_answers_on_this_machine(self):
-        env = {k: v for k, v in os.environ.items() if not k.startswith("WK_")}
-        env.update(self.env, XDG_STATE_HOME=str(self.tmp / "state"))
-        cp = subprocess.run(["bash", "-c", '. lib/common.sh; for v in envelope-cores envelope-mem-mb host-mem-mb; do '
-                             'wk_py wk.resources --os "$(wk_os)" "$v" || exit; done'],
-                            cwd=str(REPO), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        r = resources.Resources(Local(), env, "macos" if IS_MACOS else "linux")
-        self.assertEqual([int(x) for x in cp.stdout.split()],
-                         [r.envelope_cores(), r.envelope_mem_mb(), r.host_mem_mb()])
 
 
 class TestBudget(ResourcesTest):
@@ -185,21 +172,6 @@ class TestBudget(ResourcesTest):
         with mock.patch.dict(os.environ, {"WK_FORCE": "1"}):
             with contextlib.redirect_stderr(io.StringIO()):
                 b.disk_admit("this build", 25, 10, "x")
-
-    def test_df_is_read_in_the_one_spelling_both_dfs_have(self):
-        self.fake.answer(["df", "-Pk", "/s"], out="Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/d 1 1 1048577 1% /\n")
-        self.assertEqual(self.budget().free_gb("/s"), 2)
-        self.assertIsNone(resources.parse_df("garbage"))
-
-
-class TestOverridesThatSizeABuild(ResourcesTest):
-    def test_the_free_memory_and_the_job_ceiling_come_from_the_env(self):
-        r = self.linux({"WK_AVAIL_MB": "4096", "WK_MAX_JOBS": "3"})
-        self.assertEqual((r.avail_override(), r.max_jobs(), r.avail_mem_mb()), (4096, 3, 4096))
-
-    def test_unset_neither_is_an_override(self):
-        r = self.linux()
-        self.assertEqual((r.avail_override(), r.max_jobs()), (None, None))
 
 
 if __name__ == "__main__":

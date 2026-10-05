@@ -35,8 +35,11 @@ class TestMachineArmedBarrier(unittest.TestCase):
             finally:
                 act._forced.clear()
 
-    def test_unarmed_machine_passes(self):
-        self.assertEqual(self.barrier("host", [], "boot-1")[0], 0)
+    def test_an_unarmed_a_spent_or_a_bench_answer_passes(self):
+        armed = ["image=demo-system", "armed_boot_id=boot-1"]
+        for mode, record, boot_id in (("host", [], "boot-1"), ("host", armed, "boot-new"), ("bench demo-system", armed, "boot-1")):
+            with self.subTest(mode=mode, record=record, boot_id=boot_id):
+                self.assertEqual(self.barrier(mode, record, boot_id)[0], 0)
 
     def test_armed_and_not_yet_rebooted_refuses_with_remedy(self):
         rc, out = self.barrier("host", ["image=demo-system", "armed_boot_id=boot-1"], "boot-1",
@@ -45,14 +48,6 @@ class TestMachineArmedBarrier(unittest.TestCase):
         for want in ("testmach", "demo-system", "Doing the thing now would race the reboot.",
                      "wk boot testmach --disarm", "wk boot testmach --status"):
             self.assertIn(want, out)
-
-    def test_spent_arming_passes(self):
-        """a different boot id: the one-shot is consumed, so there is nothing left to race."""
-        self.assertEqual(self.barrier("host", ["image=demo-system", "armed_boot_id=boot-old"], "boot-new")[0], 0)
-
-    def test_not_in_host_mode_passes(self):
-        """a machine answering as its bench system is not about to leave host mode: it already has."""
-        self.assertEqual(self.barrier("bench demo-system", ["image=demo-system", "armed_boot_id=boot-1"], "boot-1")[0], 0)
 
     def test_a_board_that_could_not_be_probed_is_not_read_as_unarmed(self):
         rc, out = self.barrier("unreachable", [], "boot-1", what="Doing the thing now would race the reboot.")

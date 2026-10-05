@@ -457,13 +457,13 @@ class Channel:
         return Result(rc, out)
 
 
-def step(fn, *args, **answers):
+def step(fn, *args, kw=None, **answers):
     w = write.Write(REPO, ENV, Fake(), None)
     w.conf, w.ch = {"name": "rescue", "ssh": "rescue"}, Channel(**answers)
     w.piped = lambda reader: w.ch
     with contextlib.redirect_stderr(io.StringIO()) as err:
         try:
-            return getattr(w, fn)(*args), err.getvalue(), w.ch.calls
+            return getattr(w, fn)(*args, **kw or {}), err.getvalue(), w.ch.calls
         except act.Refused:
             return act.Refused, err.getvalue(), w.ch.calls
 
@@ -500,13 +500,13 @@ class TestSteps(WriteTest):
         self.assertIn("could not install the fleet units", err)
 
     def test_an_older_helper_is_told_apart_from_a_refusal(self):
-        for fn, verb in (("install_helper", "helper"), ("seed_role", "role"), ("install_autoboot", "autoboot")):
-            args = ("/dev/sdX", "bench") if fn == "seed_role" else ("/dev/sdX",)
-            got, err, _ = step(fn, *args, **{verb: (2, "usage: wk-card-priv status|check")})
-            self.assertIs(got, act.Refused)
-            self.assertIn("older than this checkout", err)
-            got, err, _ = step(fn, *args, **{verb: (1, "no space")})
-            self.assertNotIn("older than this checkout", err)
+        got, err, _ = step("simple", "mark", "role", "/dev/sdX", "bench", kw={"why": "no role"}, role=(2, "usage: wk-card-priv status"))
+        self.assertIs(got, act.Refused)
+        self.assertIn("older than this checkout", err)
+        got, err, _ = step("simple", "mark", "role", "/dev/sdX", "bench", kw={"why": "no role"}, role=(1, "no space"))
+        self.assertIs(got, act.Refused)
+        self.assertNotIn("older than this checkout", err)
+        self.assertIn("no role\n    no space", err)
 
     def test_a_root_on_the_wrong_kind_of_device_is_refused(self):
         with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):

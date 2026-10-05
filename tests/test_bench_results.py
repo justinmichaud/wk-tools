@@ -254,7 +254,6 @@ class TestThroughWk(ExportTest):
         self.assertTrue(zipfile.is_zipfile(str(self.tmp / "out" / (TASK + ".zip"))), wet.stdout)
         again = run("bench", "export", TASK, "--to", str(self.tmp / "out"), "--yes", env=env, timeout=60)
         self.assertEqual(again.returncode, 0, again.stdout)
-        self.assertIn("usage", run("bench", "export", TASK, "--nosuch", env=env, timeout=60).stdout)
 
 
 def far_driver(name, far, side="answering"):

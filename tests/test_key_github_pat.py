@@ -8,13 +8,11 @@ import pty
 import select
 import subprocess
 import termios
-import threading
 import time
 import unittest
-from http.server import HTTPServer
 
 from tests.support import REPO, WkTest, clean_env, stub_path
-from tests.test_credcheck import CLASSIC, FINE, POLICY, FakeGitHub
+from tests.test_credcheck import CLASSIC, FINE, POLICY, FakeGitHub, serve
 
 KEY = REPO / "cmd" / "key"
 
@@ -195,16 +193,13 @@ class TestWhatTheTokenCanDoDecidesWhetherItIsKept(_PatRun):
 
     def setUp(self):
         super().setUp()
-        self.server = HTTPServer(("127.0.0.1", 0), FakeGitHub)
-        self.addCleanup(self.server.server_close)
-        self.addCleanup(self.server.shutdown)
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.api = serve(FakeGitHub, self.addCleanup)
         FakeGitHub.reset(user_status=200, repos=list(FORKS),
                          pulls=dict.fromkeys(
                              list(FORKS) + list(FORKS.values()), 422),
                          parents=dict(FORKS), repo_message=POLICY)
         self.extra_env = {
-            "WK_GITHUB_API": "http://127.0.0.1:%d" % self.server.server_port}
+            "WK_GITHUB_API": self.api}
 
     def test_a_token_that_can_open_a_pull_request_is_stored(self):
         rc, out = self.key_tty("set", "github-pat", paste=FINE)
@@ -240,25 +235,19 @@ class TestWhatTheTokenCanDoDecidesWhetherItIsKept(_PatRun):
         cp = self.key("set", "github-pat")
         self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestATokenGitHubRefusesIsReplaced(_PatRun):
     """A stored token GitHub answers 401 for: `wk key setup` without a terminal names the remedy and keeps the file."""
 
     def setUp(self):
         super().setUp()
-        self.server = HTTPServer(("127.0.0.1", 0), FakeGitHub)
-        self.addCleanup(self.server.server_close)
-        self.addCleanup(self.server.shutdown)
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.api = serve(FakeGitHub, self.addCleanup)
         FakeGitHub.reset(user_status=401, repos=list(FORKS),
                          pulls=dict.fromkeys(
                              list(FORKS) + list(FORKS.values()), 422),
                          parents=dict(FORKS), repo_message=POLICY)
         self.extra_env = {
-            "WK_GITHUB_API": "http://127.0.0.1:%d" % self.server.server_port}
+            "WK_GITHUB_API": self.api}
         self.pat().write_text("ghp_revokedone\n")
         self.pat().chmod(0o600)
 
@@ -299,3 +288,7 @@ class TestTheMachineTakesTheTokenOnEveryStart(unittest.TestCase):
         with mock.patch.object(secrets.Secrets, "pat_converge_machine") as converge:
             c.start("demo")
         self.assertEqual(1, converge.call_count, "'wk start <container workspace>' does not converge the read token")
+
+
+if __name__ == "__main__":
+    unittest.main()

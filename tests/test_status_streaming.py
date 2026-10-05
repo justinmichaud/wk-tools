@@ -149,8 +149,7 @@ exec bash -c "$last"
 
 
 class TestCollectorMarkers(WkTest):
-    """The stream cmd/status collects over one faked reachable place: a rendering run opens with a plan and ends
-    every job with a flush; a run asked for `--records` carries neither."""
+    """A run asked for `--records` carries no plan or flush."""
 
     def _status(self, *args):
         with scratch_dir(prefix="wk-test-machines-") as machdir, stub_path({"ssh": _ANSWERING_SSH}) as binp:
@@ -165,12 +164,6 @@ class TestCollectorMarkers(WkTest):
         self.assertIn("machine", kinds, cp.stdout)
         self.assertNotIn("plan", kinds, cp.stdout)
         self.assertNotIn("flush", kinds, cp.stdout)
-
-    def test_text_draws_the_planned_machine_once(self):
-        cp = self._status("--text", "--no-devices")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("probing remote", cp.stdout)
-        self.assertEqual(len([l for l in cp.stdout.splitlines() if l.startswith("remote")]), 1, cp.stdout)
 
 
 _MARKER_LEAKING_SSH = '''#!/bin/sh
@@ -196,6 +189,7 @@ class TestARemotesMarkersStayItsOwn(WkTest):
                 "WK_MACHINES_DIR": str(machdir), "WK_PLACE": "remote", "WK_REMOTE_HOST": "fake-leaky-" + rand_suffix(4),
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}", "WK_PROBE_SECONDS": "1"}, timeout=60)
         self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("probing remote", cp.stdout)
         self.assertEqual(len([l for l in cp.stdout.splitlines() if l.startswith("remote")]), 1, cp.stdout)
         self.assertRegex(cp.stdout, r"(?m)^\s+leaky-ws\s", cp.stdout)
 

@@ -24,7 +24,7 @@ from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 from wk.sysimage import macvolume, mactailnet  # noqa: E402
 from wk.sysimage.macvolume import MacVolume  # noqa: E402
-from wk.sysimage.mactailnet import PIN, Tailnet  # noqa: E402
+from wk.sysimage.mactailnet import GO, Tailnet  # noqa: E402
 from wk.quiet import COMMON, DESKTOP, RENDER, lib_argv as quiet_lib  # noqa: E402
 
 MACHO = bytes.fromhex(mactailnet.MACHO_ARM64.replace(" ", "")) + b"\0" * 24
@@ -54,7 +54,7 @@ class FakeMac(Fake):
 
     def __init__(self):
         super().__init__("mac")
-        self.downloads = {"https://go.dev/dl/go%s.darwin-arm64.tar.gz" % PIN["GO_VERSION"]: b"go-tarball",
+        self.downloads = {"https://go.dev/dl/go%s.darwin-arm64.tar.gz" % GO["version"]: b"go-tarball",
                           "https://proxy.golang.org/tailscale.com/@v/v%s.zip" % TS_VERSION: b"ts-zip"}
         self.volumes = {"WK Bench"}
         self.modes = {}
@@ -219,50 +219,25 @@ def quiet(fn, *args, **kw):
             return Refused, err.getvalue()
 
 
-def tailnet(mac, pin=None):
-    return Tailnet(mac, ENV, REPO, pin=pin)
+def tailnet(mac, go=None):
+    return Tailnet(mac, ENV, REPO, go=go)
 
 
 def volume(mac, clock=None, **env):
     return MacVolume(mac, PROFILE, dict(ENV, **env), clock or FakeClock(), root=REPO)
 
 
-class ThePin(unittest.TestCase):
-    def test_the_source_checksum_is_for_the_fleets_one_tailscale_version(self):
-        self.assertEqual(PIN["TS_SRC_FOR"], TS_VERSION)
-
-    def test_every_checksum_is_a_sha256(self):
-        for sha in [PIN["TS_SRC_SHA256"]] + list(PIN["GO_SHA256"].values()):
-            self.assertRegex(sha, r"^[0-9a-f]{64}$")
-        self.assertIn("darwin_arm64", PIN["GO_SHA256"])
-
-    def test_go_version_is_a_release(self):
-        self.assertRegex(PIN["GO_VERSION"], r"^\d+\.\d+(\.\d+)?$")
-
-    def test_a_pin_for_another_version_refuses_and_names_the_bump(self):
-        with clean_env():
-            got, err = quiet(tailnet(FakeMac(), dict(PIN, TS_SRC_FOR="9.9.9")).build)
-        self.assertIs(got, Refused)
-        for word in ("9.9.9", TS_VERSION, "TS_SRC_SHA256"):
-            self.assertIn(word, err)
-
-    def test_a_host_with_no_toolchain_checksum_refuses_and_names_the_key(self):
-        mac = FakeMac()
-        with clean_env():
-            got, err = quiet(tailnet(mac, dict(PIN, GO_SHA256={})).build)
-        self.assertIs(got, Refused)
-        self.assertIn('GO_SHA256["darwin_arm64"]', err)
-        self.assertIn("go.dev", err)
-        self.assertEqual(mac.runs("curl"), [])
+def source_sha(mac, sha):
+    rel = os.path.join(str(REPO), mactailnet.REL)
+    mac.put(rel, re.sub(r'(?m)^TS_SRC_SHA256 = ".*"$', 'TS_SRC_SHA256 = "%s"' % sha, mac.files[rel]))
 
 
 class TheBuild(unittest.TestCase):
     def test_it_fetches_verifies_and_builds_a_darwin_arm64_daemon(self):
         mac = FakeMac()
-        pin = dict(PIN, TS_SRC_SHA256=hashlib.sha256(b"ts-zip").hexdigest(),
-                   GO_SHA256={"darwin_arm64": hashlib.sha256(b"go-tarball").hexdigest()})
+        source_sha(mac, hashlib.sha256(b"ts-zip").hexdigest())
         with clean_env():
-            out, err = quiet(tailnet(mac, pin).build)
+            out, err = quiet(tailnet(mac, dict(GO, darwin_arm64=hashlib.sha256(b"go-tarball").hexdigest())).build)
         self.assertEqual(out, OUT)
         self.assertEqual(blob(mac.files[out + "/tailscaled"])[:8], MACHO[:8])
         go = [r for r in mac.runs("GOTOOLCHAIN=local")][0]
@@ -272,11 +247,19 @@ class TheBuild(unittest.TestCase):
     def test_a_download_that_does_not_match_its_checksum_is_refused_and_not_kept(self):
         mac = FakeMac()
         with clean_env():
-            got, err = quiet(tailnet(mac, dict(PIN, GO_SHA256={"darwin_arm64": "0" * 64})).build)
+            got, err = quiet(tailnet(mac, dict(GO, darwin_arm64="0" * 64)).build)
         self.assertIs(got, Refused)
         self.assertIn("unverified", err)
         self.assertFalse([p for p in mac.files if p.endswith(".part")])
         self.assertEqual(mac.runs("GOTOOLCHAIN"), [])
+
+    def test_a_host_with_no_toolchain_checksum_refuses_and_names_the_key(self):
+        mac = FakeMac()
+        with clean_env():
+            got, err = quiet(tailnet(mac, {"version": GO["version"]}).build)
+        self.assertIs(got, Refused)
+        self.assertIn('GO["darwin_arm64"]', err)
+        self.assertEqual(mac.runs("curl"), [])
 
     def test_a_finished_build_is_not_built_again(self):
         mac = FakeMac()
@@ -300,28 +283,19 @@ class TheStage(unittest.TestCase):
         self.assertIsNot(got, Refused, err)
         return err
 
-    def test_it_installs_the_daemon_the_cli_and_a_private_state_directory(self):
+    def test_it_installs_the_daemon_its_launchd_jobs_and_a_private_state_directory(self):
         mac = built(FakeMac())
         self.stage(mac)
         for n in ("tailscaled", "tailscale"):
             self.assertEqual(mac.files["/vol/usr/local/bin/" + n], MACHO)
             self.assertEqual(mac.modes["/vol/usr/local/bin/" + n], "0755")
         self.assertEqual(mac.modes["/vol/private/var/db/wk/tailscale"], "0700")
-
-    def test_the_daemon_keeps_its_state_on_the_volume_and_is_kept_alive(self):
-        mac = built(FakeMac())
-        self.stage(mac)
         d = plistlib.loads(blob(mac.files["/vol/Library/LaunchDaemons/com.wk.tailscaled.plist"]))
-        self.assertEqual(d["ProgramArguments"][0], "/usr/local/bin/tailscaled")
         self.assertIn("--state=/var/db/wk/tailscale/tailscaled.state", d["ProgramArguments"])
         self.assertTrue(d["RunAtLoad"] and d["KeepAlive"])
-
-    def test_the_join_is_retried_on_every_boot_by_the_on_board_script(self):
-        mac = built(FakeMac())
-        self.stage(mac)
-        d = plistlib.loads(blob(mac.files["/vol/Library/LaunchDaemons/com.wk.tailnet-join.plist"]))
-        self.assertEqual(d["ProgramArguments"][1:], [mactailnet.PAYLOAD_TOOLS + "/bench/mac-tailnet.sh", "join"])
-        self.assertTrue(d["RunAtLoad"])
+        j = plistlib.loads(blob(mac.files["/vol/Library/LaunchDaemons/com.wk.tailnet-join.plist"]))
+        self.assertEqual(j["ProgramArguments"][1:], [mactailnet.PAYLOAD_TOOLS + "/bench/mac-tailnet.sh", "join"])
+        self.assertNotIn("KeepAlive", j)
 
     def test_the_key_is_root_only_and_the_conf_names_the_node_the_machine_declares(self):
         mac = built(FakeMac())
@@ -654,14 +628,6 @@ class TheRepair(unittest.TestCase):
             got, err = quiet(volume(mac).build, ["--repair"])
         self.assertIs(got, Refused)
         self.assertIn("WK_BENCH_WIRED=1", err)
-
-    def test_the_packaged_client_and_its_key_are_removed(self):
-        mac = self.mac()
-        for f in macvolume.STALE:
-            mac.put(VOL + "/usr/local/share/wk-bench/" + f, "old")
-        self.repair(mac)
-        for f in macvolume.STALE:
-            self.assertNotIn(VOL + "/usr/local/share/wk-bench/" + f, mac.files)
 
     def test_remote_login_is_added_when_absent_and_left_when_on(self):
         mac = self.mac()

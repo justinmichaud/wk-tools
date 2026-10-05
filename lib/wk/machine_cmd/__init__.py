@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from wk import fleet, places, reach
+from wk import act, fleet, places, reach
 from wk.act import die, info, log, warn
 from wk.kv import ConfError
 from wk.machine import Local, Ssh
@@ -44,7 +44,22 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
     def rel(self, path):
         return os.path.relpath(path, self.root) if path.startswith(self.root + os.sep) else path
 
-    # -- setup
+    def forget(self, path, question):
+        if not act.confirm(question):
+            die("aborted -- nothing was changed")
+        self.here.remove(path)
+        info("removed %s" % self.rel(path))
+        return 0
+
+    def forget_unreached(self, dest, why, keeps, path):
+        warn("cannot reach %s (%s) -- %s." % (dest, why, keeps))
+        log("  (re-run this when it is reachable to remove it properly)")
+        return self.forget(path, "remove the local conf %s anyway?" % self.rel(path))
+
+    def still_named(self, name, path):
+        log("  it is still a machine here, because the registry names it:\n      git rm %s && git commit\n"
+            "  that forgets it on every device. 'wk machine setup %s' brings it back." % (self.rel(path), name))
+        return 0
 
     def setup(self, name, kind=None, at=None, no_tailnet=False, disk=None, image=None, rebuild=False):
         require_name(name)
@@ -86,11 +101,8 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
         return self.setup_build(name, t, path, new)
 
     def board_machine(self, dest):
-        """The Fake a test hands the constructor, or a real ssh to `dest`: boards and Macs hold no
-        places, so they take a Machine straight rather than through `driver()`'s Remote wrapping."""
+        """Boards and Macs hold no places, so they take a Machine straight rather than `driver()`'s Remote."""
         return self.far if self.far is not None else Ssh(dest, timeout=reach.ssh_timeout(self.env), via=self.here)
-
-    # -- rm
 
     def rm(self, name, at=None):
         require_name(name)
@@ -107,15 +119,13 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
             die("'%s' is a %s (%s): 'wk machine rm' removes a build machine or a peer" % (name, conf["kind"], self.rel(path)))
         return self.rm_machine(name, conf, path)
 
-    # -- ls and probe
-
     def ls(self, as_json=False, out=None):
         out = out or sys.stdout
         rows = []
         for name in self.fleet.names():
             c = self.conf(name)
             reached = "; ".join("%s %s" % (n, self.reach.tailnet(n) or "not a node") for n in self.reach.names(name))
-            rows.append({"name": name, "kind": c["kind"], "tailnet": reached, "note": c.get("note") or c.get("note", ""),
+            rows.append({"name": name, "kind": c["kind"], "tailnet": reached, "note": c.get("note", ""),
                          "conf": self.rel(self.fleet.path(name))})
         if as_json:
             out.write(json.dumps({"machines": rows}) + "\n")
@@ -127,11 +137,10 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
         return 0
 
     def answers(self, name, conf):
-        """(True, "") or (False, why): a build machine or peer by its one probe, anything else by an ssh `true`, and
-        a node the tailnet already reports down by that alone."""
+        """(ok, why): a place by its own probe, anything else by an ssh `true` unless the tailnet reports it down."""
         if conf["kind"] in fleet.PLACE_KINDS:
             return self.driver(name, conf).answers()
-        dest = conf.get("ssh") or conf.get("ssh") or name
+        dest = conf.get("ssh") or name
         down = self.reach.offline(dest)
         if down:
             return False, down
@@ -146,7 +155,7 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
         ok, why = self.answers(name, conf)
         doc = {"machine": name, "kind": conf["kind"], "answers": ok, "why": why,
                "tailnet": {n: self.reach.tailnet(n) for n in self.reach.names(name)},
-               "ssh": self.reach.ssh_path(conf.get("ssh") or conf.get("ssh") or name)}
+               "ssh": self.reach.ssh_path(conf.get("ssh") or name)}
         mac = conf.get("mac", "").lower()
         if not ok and mac:
             doc["sweep"] = survey.run(mac)

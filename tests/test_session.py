@@ -5,8 +5,6 @@ helper, systemctl, loginctl or gdm. Also `killpoints[session]`, a dry run printi
 and the live row `session.modes[moose]`."""
 
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import os
 import subprocess
@@ -16,7 +14,7 @@ import unittest
 from unittest import mock
 
 from tests.killpoints import converges
-from tests.support import REPO, WkTest, as_dispatched, requires_machine
+from tests.support import REPO, WkTest, as_dispatched, load_cmd, requires_machine
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, fleet, quiet, session  # noqa: E402
@@ -351,19 +349,14 @@ class TestCrashOnly(SessionTest):
 
 class TestTheCommand(SessionTest):
     def load(self):
-        path = str(REPO / "cmd" / "quiesce")
-        loader = importlib.machinery.SourceFileLoader("wk_cmd_quiesce", path)
-        spec = importlib.util.spec_from_file_location("wk_cmd_quiesce", path, loader=loader)
-        m = importlib.util.module_from_spec(spec)
-        loader.exec_module(m)
-        return m
+        return load_cmd("quiesce")
 
     def test_the_words_it_takes(self):
         m = self.load()
         with mock.patch.object(m, "is_linux", return_value=True), mock.patch.object(m.session, "Session") as s:
             m.main(as_dispatched("quiesce", ["session"], {}))
             m.main(["session", "on", "--bmc"])
-            m.main(["session", "gdm", "--mirror"])
+            m.main(["session", "gdm", "--bmc"])
         self.assertEqual([c[0] for c in s.return_value.method_calls], ["status", "on", "gdm"])
         self.assertEqual([c[1] for c in s.return_value.method_calls], [(), (True,), (True,)])
         self.assertIn("on, gdm, off or status", self.refused(m.main, ["session", "up"]))

@@ -1,56 +1,19 @@
-"""`wk build`: help/list surface, the reproducible `running:` command line,
-per-place build_args defaults (and --no-defaults), and lib/wk/resources.py's
-readings. The presets themselves are tests/test_presets.py's. Each docstring is the phrase of the behaviour it
-checks."""
+"""`wk build`'s per-place build_args defaults and a real host conf's flags, and lib/wk/resources.py's readings.
+The presets themselves are tests/test_presets.py's; the flow is tests/test_wk_build.py's."""
 import contextlib
 import io
-import platform
 import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import (FLEET_ENV, REAL_MACHINES, REPO, WkTest, fake_workspace,
-                           container_side, requires_container_place, run)
+from tests.support import FLEET_ENV, REAL_MACHINES, REPO, WkTest, container_side, requires_container_place
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import fleet, places, presets, resources  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake  # noqa: E402
-
-
-class TestHelpAndList(WkTest):
-    def test_build_list_shows_all_configs(self):
-        cp = run("build", "--list")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("jsc-release", cp.stdout)
-        self.assertIn("mac-release", cp.stdout)
-
-
-class TestDryRunRunningLine(WkTest):
-
-    def test_dry_run_prints_running_line(self):
-        with fake_workspace() as ws:
-            cp = ws.run("build", "jsc-release", "--dry-run")
-            self.assertEqual(cp.returncode, 0, cp.stdout)
-            self.assertIn("dry run -- nothing was built", cp.stdout)
-            lines = [l for l in cp.stdout.splitlines() if "running:" in l]
-            self.assertEqual(len(lines), 1, cp.stdout)
-            self.assertIn("cd ", lines[0])
-            if platform.system() == "Darwin":
-                self.assertIn("build-jsc", lines[0])
-                self.assertNotIn("--jsc-only", lines[0])
-            else:
-                self.assertIn("build-webkit", lines[0])
-                self.assertIn("--jsc-only", lines[0])
-
-    def test_no_defaults_flag_is_consumed_not_passed_through(self):
-        with fake_workspace() as ws:
-            cp = ws.run("build", "jsc-release", "--dry-run", "--no-defaults")
-            self.assertEqual(cp.returncode, 0, cp.stdout)
-            running = [l for l in cp.stdout.splitlines() if "running:" in l][0]
-            self.assertNotIn("--no-defaults", running)
 
 
 class TestPlaceBuildArgsDefaults(unittest.TestCase):

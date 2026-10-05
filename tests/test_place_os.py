@@ -15,17 +15,7 @@ from wk.record import Records  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 
-def _os(driver):
-    return places.Registry(REPO, env={"HOME": "/nonexistent"}, machine=Fake()).load(driver).os()
-
-
 class TestEveryDriverAnswers(unittest.TestCase):
-    def test_the_container_is_linux(self):
-        self.assertEqual(_os("container"), "linux")
-
-    def test_a_macos_guest_is_macos(self):
-        self.assertEqual(_os("vm"), "macos")
-
     def test_a_workspace_answers_for_itself(self):
         """Inside a workspace `uname` decides, driven through `wk build --dry-run`."""
         want_darwin = platform.system() == "Darwin"

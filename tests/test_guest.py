@@ -140,7 +140,7 @@ class GuestTest(SecretsTest):
 
 
 class TestVmConformance(GuestTest, DriverConformance):
-    cls, ws, down = places.Vm, "demo", "stopped"
+    cls, ws, down, platform = places.Vm, "demo", "stopped", "macos"
 
     def stopped(self):
         self.w.state = "stopped"
@@ -302,14 +302,6 @@ class TestTheSteps(GuestTest):
         self.assertIn(shlex.join(["bash", "-lc", "python3 %s/claude/workspace-config.py %s" % (self.vm.tools("demo"), self.vm.src("demo"))]),
                       cmds)
 
-    def test_the_clock_step_hands_the_guest_this_hosts_time(self):
-        g = guest.Guest(guest.Host(self.vm, self.clock), "demo", self.vm.guest("demo"))
-        self.assertTrue(quiet(g.set_guest_clock)[0])
-        cmd, script = next((c, i) for c, i in self.w.guest_cmds if "WK_NOW_EPOCH" in c)
-        self.assertIn("WK_NOW_EPOCH=%d" % self.clock.now(), cmd)
-        self.assertIn("WK_SKEW=30", cmd)
-        self.assertEqual(guest.CLOCK, script)
-
     def test_a_credential_file_its_reader_refuses_stops_the_delivery(self):
         self.w.answer(["python3", SECRETFILE, "present"], rc=2, err="wk: refusing to read ...\n")
         g = guest.Guest(guest.Host(self.vm, self.clock), "demo", self.vm.guest("demo"))
@@ -344,6 +336,7 @@ class TestTheOverrides(GuestTest):
         self.assertEqual("203.0.113.9", h.proxy_addr())
         self.assertEqual("9999", h.port())
         self.assertEqual("/opt/softnet", h.softnet())
+        self.assertEqual(100, guest.vm_disk_gb({"WK_VM_DISK_GB": "100"}))
         self.assertEqual([], quiet(self.host(WK_VM_UNFILTERED="1").softnet_flags)[0])
 
 

@@ -77,12 +77,6 @@ class TestWhatMustKeepRunning(unittest.TestCase):
             with self.subTest(proc=row[1]):
                 self.assertNotIn(row[1], stopped)
 
-    def test_every_row_says_what_it_costs(self):
-        for row in _rows("expected"):
-            with self.subTest(proc=row[1]):
-                self.assertRegex(row[2], r"[0-9]")
-                self.assertGreater(len(row[2].split()), 8, row)
-
     def _judge(self, probe):
         cp = bash(""". %r
 probe=$(cat <<'P'

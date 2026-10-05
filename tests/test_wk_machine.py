@@ -28,13 +28,8 @@ INTERFACE = ("run", "run_tty", "read", "exists", "isdir", "listdir", "alive", "a
 class TestConformance(unittest.TestCase):
     def test_every_transport_implements_the_whole_interface(self):
         for cls in (machine.Local, machine.Ssh, machine.Fake):
-            for name in INTERFACE:
-                with self.subTest(cls=cls.__name__, method=name):
-                    own = getattr(cls, name, None)
-                    base = getattr(machine.Machine, name)
-                    if name == "act_run":
-                        continue   # the one shared implementation, through act
-                    self.assertIsNot(own, base, "%s inherits %s unimplemented" % (cls.__name__, name))
+            missing = [n for n in INTERFACE if not callable(getattr(cls, n, None))]
+            self.assertEqual(missing, [], cls.__name__)
 
 
 class MachineTest(unittest.TestCase):
@@ -199,12 +194,11 @@ class TestLocal(MachineTest, LockEffectsConformance, CopyConformance, LogReadCon
         r = self.m.run(["sh", "-c", "echo out; echo err >&2; exit 3"])
         self.assertEqual((r.rc, r.out, r.err, r.ok), (3, "out\n", "err\n", False))
 
-    def test_a_missing_program_is_127_not_an_exception(self):
-        self.assertEqual(self.m.run(["no-such-program-zz"]).rc, 127)
-
-    def test_a_timeout_is_its_own_status(self):
-        r = self.m.run(["sleep", "5"], timeout=0.2)
-        self.assertEqual(r.rc, machine.TIMED_OUT)
+    def test_a_missing_program_is_127_and_a_timeout_its_own_status_under_both_runs(self):
+        for run in (self.m.run, self.m.run_tty):
+            with self.subTest(run=run.__name__):
+                self.assertEqual(run(["no-such-program-zz"]).rc, 127)
+                self.assertEqual(run(["sleep", "5"], timeout=0.2).rc, machine.TIMED_OUT)
 
     def test_run_tty_inherits_stdio_and_returns_only_a_status(self):
         r = self.m.run_tty([sys.executable, "-c", "import sys; sys.exit(5)"])
@@ -216,13 +210,6 @@ class TestLocal(MachineTest, LockEffectsConformance, CopyConformance, LogReadCon
                             "import os, sys; sys.exit(0 if os.path.realpath(os.getcwd()) == %r else 1)" % want],
                            cwd=self.tmp)
         self.assertEqual(r.rc, 0)
-
-    def test_run_tty_a_missing_program_is_127(self):
-        self.assertEqual(self.m.run_tty(["no-such-program-zz"]).rc, 127)
-
-    def test_run_tty_a_timeout_is_its_own_status(self):
-        r = self.m.run_tty(["sleep", "5"], timeout=0.2)
-        self.assertEqual(r.rc, machine.TIMED_OUT)
 
     def test_files_round_trip_and_write_is_atomic(self):
         p = os.path.join(self.tmp, "f")

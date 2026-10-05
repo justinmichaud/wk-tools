@@ -13,7 +13,7 @@ from tests.support import REPO, WkTest, run, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
 from tests.test_bench_mac import StubWatch  # noqa: E402
-from wk import pgo, presets, screen as wkscreen  # noqa: E402
+from wk import presets, screen as wkscreen  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import mac, seed  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
@@ -69,16 +69,12 @@ class TestTheConfig(WkTest):
 
 class TestTheThreePhases(WkTest):
 
-    def setUp(self):
-        self._scratch = scratch_dir()
-        self.tmp = self._scratch.__enter__()
-        cp = pgo_dry_run(self.tmp)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.out = cp.stdout + cp.stderr
-        self.lines = [l for l in self.out.splitlines() if l.strip()]
-
-    def tearDown(self):
-        self._scratch.__exit__(None, None, None)
+    @classmethod
+    def setUpClass(cls):
+        with scratch_dir() as tmp:
+            cp = pgo_dry_run(tmp)
+        assert cp.returncode == 0, cp.stdout + cp.stderr
+        cls.lines = [l for l in (cp.stdout + cp.stderr).splitlines() if l.strip()]
 
     def _line(self, needle):
         hits = [l for l in self.lines if needle in l]
@@ -111,10 +107,9 @@ class TestTheThreePhases(WkTest):
         self.assertIn("--build-directory", line)
         self.assertIn("Release-pgo-instr", line)
         # And through the harness that knows where the profiles land.
+        self.assertIn("--run-benchmark-harness", line)
         self.assertIn("pgo-run-benchmark.py", line)
-
-    def test_the_collection_starts_from_an_empty_profile_directory(self):
-        self.assertIn("rm -rf", self._line("collect-pgo-profiles"))
+        self.assertIn("rm -rf", line)
 
     def test_the_measured_phase_uses_the_profile_with_full_lto_and_symbols(self):
         line = self._line("WK_ENABLE_PGO_USE=YES")
@@ -297,27 +292,7 @@ def run_py(*args):
                           env=dict(os.environ, PYTHONPATH=str(REPO / "lib")))
 
 
-class TestTheProfileReachesTheMachineThatRunsIt(WkTest):
-
-    def test_the_stage_carries_them(self):
-        self.assertFalse([p for p in mac.PRODUCT_SKIP if "dSYM" in p], mac.PRODUCT_SKIP)
-
 class TestTheHarnessWrapper(WkTest):
-    def setUp(self):
-        self._scratch = scratch_dir()
-        self.tmp = self._scratch.__enter__()
-        cp = pgo_dry_run(self.tmp)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.lines = [l for l in (cp.stdout + cp.stderr).splitlines() if l.strip()]
-
-    def tearDown(self):
-        self._scratch.__exit__(None, None, None)
-
-    def _line(self, needle):
-        hits = [l for l in self.lines if needle in l]
-        self.assertEqual(len(hits), 1, f"{needle!r} in {self.lines}")
-        return hits[0]
-
     def test_it_refuses_without_being_told_where_the_checkout_is(self):
         cp = subprocess.run(["python3", str(REPO / "build" / "pgo-run-benchmark.py")],
                             capture_output=True, text=True, timeout=30,
@@ -325,11 +300,6 @@ class TestTheHarnessWrapper(WkTest):
                                  if k != "WK_WEBKIT_SCRIPTS"})
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("WK_WEBKIT_SCRIPTS", cp.stdout + cp.stderr)
-
-    def test_the_collection_goes_through_it_and_not_through_run_benchmark(self):
-        line = self._line("collect-pgo-profiles")
-        self.assertIn("--run-benchmark-harness", line)
-        self.assertIn("pgo-run-benchmark.py", line)
 
 
 if __name__ == "__main__":

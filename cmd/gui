@@ -52,12 +52,10 @@ def gui_default_preset(reg, name):
 
 
 def fullscreen_flag(preset):
-    if preset.buildsys == "cmake" and preset.port in ("--wpe",):
-        return "--fullscreen"
-    if preset.buildsys == "cmake" and preset.port in ("--gtk",):
-        return "--full-screen"
-    if preset.buildsys == "xcode" and not preset.port:
-        return ""
+    flag = {("cmake", "--wpe"): "--fullscreen", ("cmake", "--gtk"): "--full-screen", ("xcode", ""): ""}.get(
+        (preset.buildsys, preset.port or ""))
+    if flag is not None:
+        return flag
     die("'%s' builds no browser to drive -- use a wpe-*, gtk-* or mac-* preset" % preset.name)
 
 
@@ -138,19 +136,11 @@ def main(argv):
         info("MiniBrowser (%s) in '%s' under rr -> %s" % (preset_name, name, url))
         log("  every process it starts is recorded; 'wk run %s --replay -- -p <pid>' replays one" % name)
         cmd = "%s; cd %s && %s WEBKIT_MINI_BROWSER_PREFIX='rr record' %s" % (rr_trace_dir(driver), src, launch_env, launch_cmd)
-        argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=False)
-        reg.machine.exec(argv_, cwd)
-        return
-
-    if opts["debug"] == "":
+    elif opts["debug"] == "":
         info("MiniBrowser (%s) in '%s' -> %s" % (preset_name, name, url))
         log("  ctrl-c here closes it")
         cmd = "cd %s && %s %s" % (src, launch_env, launch_cmd)
-        argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=False)
-        reg.machine.exec(argv_, cwd)
-        return
-
-    if opts["debug"] == "ui":
+    elif opts["debug"] == "ui":
         info("MiniBrowser (%s) in '%s' under lldb -> %s" % (preset_name, name, url))
         log("  'run' starts it; breakpoints can go in first")
         if preset.buildsys == "xcode":
@@ -159,10 +149,13 @@ def main(argv):
         else:
             run = "cd %s && %s %s exec %s" % (src, launch_env, ui_prefix, launch_cmd)
         cmd = "%s\n%s" % (LLDB_PRELUDE, run)
-        argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=True)
-        reg.machine.exec(argv_, cwd)
-        return
+    else:
+        cmd = web_debug(driver, preset, preset_name, name, url, src, launch_env, launch_cmd)
+    argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=bool(opts["debug"]))
+    reg.machine.exec(argv_, cwd)
 
+
+def web_debug(driver, preset, preset_name, name, url, src, launch_env, launch_cmd):
     web_proc = preset.web_process_name()
     info("MiniBrowser (%s) in '%s' -> %s, lldb waiting for %s" % (preset_name, name, url, web_proc))
     log("  it attaches as the page's process starts; 'continue' lets it run")
@@ -172,12 +165,10 @@ def main(argv):
     log("  the live page, and stays there ('reattach' catches the next one at")
     log("  launch instead, for debugging it from the start). Re-set breakpoints.")
     log("  browser output: /tmp/wk-gui.log (in the workspace)")
-    cmd = lldb_waiting("cd %s && %s %s %s" % (src, launch_env, preset.web_process_pause_env(), launch_cmd), "/tmp/wk-gui.log", web_proc,
-                       "command script import %s/container/lldb/webprocess.py" % driver.tools(name),
-                       "command alias follow-page wk-follow-page %s" % web_proc,
-                       "command alias reattach process attach --name %s --waitfor" % web_proc)
-    argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=True)
-    reg.machine.exec(argv_, cwd)
+    return lldb_waiting("cd %s && %s %s %s" % (src, launch_env, preset.web_process_pause_env(), launch_cmd), "/tmp/wk-gui.log",
+                        web_proc, "command script import %s/container/lldb/webprocess.py" % driver.tools(name),
+                        "command alias follow-page wk-follow-page %s" % web_proc,
+                        "command alias reattach process attach --name %s --waitfor" % web_proc)
 
 
 if __name__ == "__main__":
