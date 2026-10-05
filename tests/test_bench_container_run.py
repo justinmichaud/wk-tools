@@ -12,7 +12,7 @@ from tests.support import (
     bench_ls_runs,
     container_side,
     rand_suffix,
-    requires_container_target,
+    requires_container_place,
     run,
     scratch_dir,
 )
@@ -26,17 +26,17 @@ PLAN, SUBTEST, CONFIG = "jetstream3", "richards", "jsc-release"
 
 
 def _read(path):
-    """A file in the container target's store."""
+    """A file in the container place's store."""
     cp = container_side("cat %s" % path)
     assert cp.returncode == 0, "could not read %s: %s" % (path, cp.stderr)
     return cp.stdout
 
 
-@requires_container_target()
+@requires_container_place()
 @unittest.skipUnless(os.environ.get("WK_TEST_SLOW") == "1", "a jsc-release build; set WK_TEST_SLOW=1 to run it")
 class TestBenchContainerRun(WkTest):
     def bench(self, ws, *extra):
-        cp = run("bench", "run", ws, PLAN, "--config", CONFIG, "--count", "2", "--subtests", SUBTEST, "--force", *extra,
+        cp = run("bench", "run", ws, PLAN, "--preset", CONFIG, "--count", "2", "--subtests", SUBTEST, "--force", *extra,
                  timeout=900)
         self.assertEqual(cp.returncode, 0, "wk bench run failed:\n%s" % cp.stdout)
         return cp

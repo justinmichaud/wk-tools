@@ -21,7 +21,7 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, targets  # noqa: E402
+from wk import decl, places  # noqa: E402
 from wk.act import Refused, confirm, die, dry_run, info, log, nothing_to_ask, warn  # noqa: E402
 
 
@@ -36,11 +36,11 @@ def is_ws_side(p):
     return p.startswith(":") and len(p) > 1
 
 
-def ws_path(target, name, p):
+def ws_path(driver, name, p):
     p = p[1:]
     if p.startswith("/"):
         return p
-    return posixpath.join(target.src(name), p)
+    return posixpath.join(driver.src(name), p)
 
 
 def kind_here(p):
@@ -80,26 +80,26 @@ def main(argv):
     if not src_is_ws and not dst_is_ws:
         usage("neither path is in the workspace -- mark that side with a leading ':', as in :Tools/foo.js")
 
-    reg = targets.Registry(ROOT)
+    reg = places.Registry(ROOT)
     try:
-        target = reg.load(reg.ws_target(name))
+        driver = reg.load(reg.ws_place(name))
     except LookupError as e:
         die(str(e))
 
     if src_is_ws:
-        src_path, src_pfx = ws_path(target, name, src), name + ":"
+        src_path, src_pfx = ws_path(driver, name, src), name + ":"
         dst_path, dst_pfx = dst, ""
-        kind_src = lambda p: target.path_kind(name, p)  # noqa: E731
+        kind_src = lambda p: driver.path_kind(name, p)  # noqa: E731
         kind_dst = kind_here
-        copy_file = lambda: target.pull(name, src_path, dst_path)  # noqa: E731
-        copy_dir = lambda: target.pull_dir(name, src_path, dst_path)  # noqa: E731
+        copy_file = lambda: driver.pull(name, src_path, dst_path)  # noqa: E731
+        copy_dir = lambda: driver.pull_dir(name, src_path, dst_path)  # noqa: E731
     else:
         src_path, src_pfx = src, ""
-        dst_path, dst_pfx = ws_path(target, name, dst), name + ":"
+        dst_path, dst_pfx = ws_path(driver, name, dst), name + ":"
         kind_src = kind_here
-        kind_dst = lambda p: target.path_kind(name, p)  # noqa: E731
-        copy_file = lambda: target.push(name, src_path, dst_path)  # noqa: E731
-        copy_dir = lambda: target.push_dir(name, src_path, dst_path)  # noqa: E731
+        kind_dst = lambda p: driver.path_kind(name, p)  # noqa: E731
+        copy_file = lambda: driver.push(name, src_path, dst_path)  # noqa: E731
+        copy_dir = lambda: driver.push_dir(name, src_path, dst_path)  # noqa: E731
 
     src_kind = kind_src(src_path)
     kind_or_die(src_kind, src_pfx + src_path, name)

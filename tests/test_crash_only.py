@@ -12,7 +12,7 @@ from tests.support import (
     WkTest,
     container_side,
     rand_suffix,
-    requires_container_target,
+    requires_container_place,
     run,
     scratch_dir,
 )
@@ -23,7 +23,7 @@ from wk.machine import Local  # noqa: E402
 
 
 def _wait_dead(pid, timeout=60):
-    """Poll until <pid>, where the container target runs it, is no longer alive."""
+    """Poll until <pid>, where the container place runs it, is no longer alive."""
     waited = 0
     while waited < timeout:
         cp = container_side(f"kill -0 {pid} 2>/dev/null")
@@ -44,7 +44,7 @@ def _wait_registered(name, timeout=600):
     return False
 
 
-@requires_container_target()
+@requires_container_place()
 class TestWkNewKilledMidway(WkTest):
 
     def setUp(self):
@@ -60,7 +60,7 @@ class TestWkNewKilledMidway(WkTest):
         super().tearDown()
 
     def test_killed_driver_then_rerun_converges(self):
-        cp = run("new", self.name, "--target", "container", "--no-wait", timeout=120)
+        cp = run("new", self.name, "--on", "container", "--no-wait", timeout=120)
         self.assertEqual(cp.returncode, 0, f"'wk new --no-wait' failed: {cp.stdout}")
 
         m = re.search(r"detached as pid (\d+)", cp.stdout)
@@ -74,12 +74,12 @@ class TestWkNewKilledMidway(WkTest):
 
         st = run("status", self.name, "--json")
         self.assertNotIn('"state":"present"', st.stdout.replace(" ", ""), st.stdout)
-        cp2 = run("new", self.name, "--target", "container", timeout=600)
+        cp2 = run("new", self.name, "--on", "container", timeout=600)
         self.assertEqual(cp2.returncode, 0, cp2.stdout)
         self.assertIn(self.name, run("ls").stdout)
 
 
-@requires_container_target()
+@requires_container_place()
 class TestWkRmOfRubble(WkTest):
 
     def setUp(self):
@@ -93,7 +93,7 @@ class TestWkRmOfRubble(WkTest):
             print(f"[teardown] 'wk rm {self.name}' exited {cp.returncode}: {cp.stdout}")
 
     def test_rm_converges_on_a_killed_creation(self):
-        cp = run("new", self.name, "--target", "container", "--no-wait", timeout=120)
+        cp = run("new", self.name, "--on", "container", "--no-wait", timeout=120)
         self.assertEqual(cp.returncode, 0, f"'wk new --no-wait' failed: {cp.stdout}")
         m = re.search(r"detached as pid (\d+)", cp.stdout)
         self.assertIsNotNone(m, cp.stdout)

@@ -15,7 +15,7 @@ from tests.killpoints import converges
 from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, gc, pr, record, rubble, targets  # noqa: E402
+from wk import act, gc, places, pr, record, rubble  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
@@ -71,7 +71,7 @@ class World(Host):
         self.react(["podman", "volume", "prune"], lambda a, f: self._no_volumes())
         self.react(["env"], self._env)
         self.answer(["git", "-C", self.store.mirror_dir(), "for-each-ref"])
-        self.container = targets.Container("container", str(REPO), self.env, self)
+        self.container = places.Container("container", str(REPO), self.env, self)
         self.vm = None
         self.remotes, self.boards, self.offline, self.pmos_hosts = [], [], {}, []
         self.board, self.pmos = Host("rpi5-bench"), Host("pmhost")
@@ -135,7 +135,7 @@ class World(Host):
         if base:
             self.files[os.path.join(d, "base-id")] = base + "\n"
         if ready:
-            self.files[os.path.join(d, "home", targets.READY_MARKER)] = ""
+            self.files[os.path.join(d, "home", places.READY_MARKER)] = ""
         if container:
             self.containers.add(name)
 
@@ -185,7 +185,7 @@ class FakeGc(gc.Gc):
         return self.w.install
 
 
-class FakeVm(targets.Vm):
+class FakeVm(places.Vm):
 
     def __init__(self, w, guests):
         env = dict(w.env, TART_HOME="/tart", WK_VM_STORE=str(w.tmp / "vmstore"))

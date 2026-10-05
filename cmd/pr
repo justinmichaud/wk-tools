@@ -59,14 +59,14 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, git, guest, pr, secrets, sync, targets  # noqa: E402
+from wk import decl, git, guest, places, pr, secrets, sync  # noqa: E402
 from wk.act import Refused, die, info, log, warn  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.pushswitch import Push  # noqa: E402
 from wk.store import Store  # noqa: E402
-from wk.targets import show  # noqa: E402
+from wk.places import show  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
 
 
@@ -142,19 +142,19 @@ def pr_open_gh_args(base, head, *flags):
     return args
 
 
-def pr_rebase(target, name):
-    src, mirror = target.src(name), target.mirror_dir()
+def pr_rebase(driver, name):
+    src, mirror = driver.src(name), driver.mirror_dir()
     info("fetching in '%s' from the mirror, then rebasing onto origin/main" % name)
-    if mirror and target.exec(name, ["test", "-d", mirror]).ok:
-        r = target.act_exec(name, ["git", "-C", src, "fetch", "--prune", "--quiet", mirror,
+    if mirror and driver.exec(name, ["test", "-d", mirror]).ok:
+        r = driver.act_exec(name, ["git", "-C", src, "fetch", "--prune", "--quiet", mirror,
                                    "+refs/heads/*:refs/remotes/origin/*"])
     else:
-        r = target.act_exec(name, ["git", "-C", src, "fetch", "--prune", "--quiet", "origin"])
+        r = driver.act_exec(name, ["git", "-C", src, "fetch", "--prune", "--quiet", "origin"])
     if r.ok:
-        r = target.act_exec(name, ["git", "-C", src, "rebase", "origin/main"])
+        r = driver.act_exec(name, ["git", "-C", src, "rebase", "origin/main"])
     if r.ok:
         info("'%s' is rebased onto origin/main" % name)
-        r = target.exec(name, ["git", "-C", src, "--no-pager", "log", "--oneline", "-1"])
+        r = driver.exec(name, ["git", "-C", src, "--no-pager", "log", "--oneline", "-1"])
         log("  %s" % r.out.replace("\r", "").strip())
         return 0
     show(r)
@@ -163,12 +163,12 @@ def pr_rebase(target, name):
     return 1
 
 
-def pr_open(target, name, draft, web, push_status):
-    src = target.src(name)
+def pr_open(driver, name, draft, web, push_status):
+    src = driver.src(name)
     info("reading '%s's branch and remotes" % name)
 
     def _target_run(argv):
-        r = target.exec(name, argv)
+        r = driver.exec(name, argv)
         return r.rc, r.out, r.err
 
     try:
@@ -181,33 +181,33 @@ def pr_open(target, name, draft, web, push_status):
         die("'wk pr open' pushes '%s' to '%s', and the deploy key is held back.\n    wk key push on" % (branch, fork))
 
     info("pushing '%s' to '%s'" % (branch, fork))
-    if target.kind == "remote" and not target.is_local and not target.peer:
-        r = push_from_here(target, src, fork, branch)
+    if driver.kind == "remote" and not driver.is_local and not driver.peer:
+        r = push_from_here(driver, src, fork, branch)
     else:
-        r = target.act_exec(name, ["git", "-C", src, "push", "-u", fork, branch])
+        r = driver.act_exec(name, ["git", "-C", src, "push", "-u", fork, branch])
     show(r)
     if not r.ok:
         die("the push to '%s' failed -- see above.\n    If the deploy key is the problem:  wk key push on" % fork)
 
     flags = (["--draft"] if draft else []) + (["--web"] if web else [])
     info("opening a pull request: %s <- %s" % (base, head))
-    target.here.exec(["gh", "pr", "create"] + pr_open_gh_args(base, head, *flags))
+    driver.here.exec(["gh", "pr", "create"] + pr_open_gh_args(base, head, *flags))
 
 
-def push_from_here(target, src, fork, branch):
+def push_from_here(driver, src, fork, branch):
     """The box's branch into this machine's mirror over ssh, then pushed from here through the agent `wk key push on` loads."""
-    here, store = target.here, Store(target.env)
-    sec = secrets.Secrets(ROOT, target.env, here)
+    here, store = driver.here, Store(driver.env)
+    sec = secrets.Secrets(ROOT, driver.env, here)
     # A macOS host's podman machine holds its agent inside the VM; the one a process here reaches is the guests'.
-    sec, sock = guest.push_agent(ROOT, here, target.env) if sec.macos else (sec, sec.machine_sock())
+    sec, sock = guest.push_agent(ROOT, here, driver.env) if sec.macos else (sec, sec.machine_sock())
     if not sec.agent_list(sock):
         die("'wk pr open' pushes '%s' from here through the agent 'wk key push on' loads, and it holds no key.\n"
             "    wk key push on" % branch)
-    ref, lock = "%s%s/%s" % (pr.PUSH_REFS, target.name, branch), Lock(store, here, Clock())
+    ref, lock = "%s%s/%s" % (pr.PUSH_REFS, driver.name, branch), Lock(store, here, Clock())
     repo = next(r for f, r, _ in sec.forks() if f == fork)
     ssh = "ssh -o IdentitiesOnly=yes -i %s" % shlex.quote(sec.pub_path(fork)[:-len(".pub")])
     with lock.held(pr.push_lock(ref)):
-        sync.fetch_into_mirror(here, store, lock, "%s:%s" % (target.ssh_host(""), src), "refs/heads/" + branch, ref)
+        sync.fetch_into_mirror(here, store, lock, "%s:%s" % (driver.ssh_host(""), src), "refs/heads/" + branch, ref)
         r = here.act_run(sec.agent_argv("SSH_AUTH_SOCK=%s exec git -C %s -c core.sshCommand=%s push %s %s" % (
             sock, shlex.quote(store.mirror_dir()), shlex.quote(ssh), shlex.quote("git@github.com:%s.git" % repo),
             shlex.quote("%s:refs/heads/%s" % (ref, branch)))))
@@ -223,7 +223,7 @@ def push_rc(reg):
 
 def _load(reg, name):
     try:
-        return reg.load(reg.ws_target(name))
+        return reg.load(reg.ws_place(name))
     except LookupError as e:
         die(str(e))
 
@@ -236,7 +236,7 @@ def main(argv):
         today = datetime.date.today()
         return pr.weekly(Local(), pr.since_date(args.value("--since"), today), today, sys.stdout)
 
-    reg = targets.Registry(ROOT)
+    reg = places.Registry(ROOT)
 
     if verb == "rebase":
         if not name:
@@ -244,8 +244,8 @@ def main(argv):
         if not name:
             die("usage: wk pr rebase [<workspace>]; run inside a workspace, or name one; see wk pr -h")
         require_name(name)
-        target = _load(reg, name)
-        return pr_rebase(target, name)
+        driver = _load(reg, name)
+        return pr_rebase(driver, name)
 
     if verb == "open":
         draft, web = args.flag("--draft"), args.flag("--web")
@@ -255,8 +255,8 @@ def main(argv):
         if not name:
             die("usage: wk pr open <workspace> [--draft] [--web]; see wk pr -h")
         require_name(name)
-        target = _load(reg, name)
-        return pr_open(target, name, draft, web, lambda: push_rc(reg))
+        driver = _load(reg, name)
+        return pr_open(driver, name, draft, web, lambda: push_rc(reg))
 
     spec = rest[0] if rest else ""
     if not spec:

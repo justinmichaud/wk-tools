@@ -29,12 +29,12 @@ PS_OUT = " 99.5 cc1plus\n 98.0 cc1plus\n 97.0 ld\n  0.1 bash\n"
 
 def write_task(store, kind="build", name="ws1", pid=None, log=None,
                plan=("compile jsc-release with -j4",), end=None,
-               abort_after=1800, config="jsc-release", kill=None):
+               abort_after=1800, preset="jsc-release", kill=None):
     t = record.Records(store, env={"WK_ABORT_SECONDS": str(abort_after)}).begin(
         kind, "here", name, kill or "wk %s %s --kill" % (kind, name), str(log or "/dev/null"), list(plan),
         pid=os.getpid() if pid is None else pid)
     t.step(1)
-    t.set("config", config)
+    t.set("preset", preset)
     if end is not None:
         t.end(end)
     return t
@@ -105,10 +105,10 @@ class _FakeWalk(WkTest):
                 "XDG_STATE_HOME": str(self.xdg),
                 "WK_REMOTE_ROOT": str(self.tmp / "remote-root"),
                 "WK_MACHINES_DIR": str(self.machdir),
-                "WK_TARGET": "remote",
+                "WK_PLACE": "remote",
                 "WK_REMOTE_HOST": "fake-reachable-machine",
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
-                # The remote target's probe cap; the stub answers at once.
+                # The remote place's probe cap; the stub answers at once.
                 "WK_PROBE_SECONDS": "1",
             }
             e.update(env or {})

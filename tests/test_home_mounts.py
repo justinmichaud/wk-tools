@@ -7,12 +7,12 @@ import unittest
 from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets  # noqa: E402
+from wk import places  # noqa: E402
 from wk.machine import Local  # noqa: E402
 
 
 def _ensure(ws, dest, user="wsuser"):
-    c = targets.Container("container", str(REPO), dict(os.environ, WK_CONTAINER_USER=user), Local())
+    c = places.Container("container", str(REPO), dict(os.environ, WK_CONTAINER_USER=user), Local())
     c._ensure_home_mountpoint(str(ws), str(dest))
 
 

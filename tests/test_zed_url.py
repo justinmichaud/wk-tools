@@ -5,7 +5,7 @@ import os
 import stat
 import unittest
 
-from tests.support import WkTest, rand_suffix, requires_container_target, run, scratch_dir
+from tests.support import WkTest, rand_suffix, requires_container_place, run, scratch_dir
 
 _FAKE_ZED = """#!/bin/sh
 echo "FAKE ZED WAS INVOKED: $*" >&2
@@ -13,7 +13,7 @@ exit 1
 """
 
 
-@requires_container_target()
+@requires_container_place()
 class TestZedUrl(WkTest):
     def setUp(self):
         super().setUp()
@@ -28,7 +28,7 @@ class TestZedUrl(WkTest):
         super().tearDown()
 
     def test_url_prints_ssh_url_and_never_execs_zed(self):
-        cp = run("new", self.name, "--target", "container", timeout=600)
+        cp = run("new", self.name, "--on", "container", timeout=600)
         self._created = cp.returncode == 0
         self.assertEqual(cp.returncode, 0, f"wk new failed: {cp.stdout + cp.stderr}")
         run("status", self.name, "--wait", "--timeout", "300")

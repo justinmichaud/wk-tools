@@ -1,10 +1,10 @@
-"""The named build configurations as data, resolved for a target's os and kind."""
+"""The build presets as data, resolved for a place's os and driver."""
 
 import os
 import shlex
 
 from wk import act, fleet, images, resources
-from wk.store import dispatch_target
+from wk.store import dispatch_place
 
 LIST_TEXT = """\
 jsc-debug          JSCOnly, Debug, assertions on
@@ -20,7 +20,7 @@ mac-release-pgo    macOS (Apple port), Release + PGO and full LTO -- the perf bu
 mac-release-asan   macOS (Apple port), Release + AddressSanitizer
 ios-sim-release    iOS Simulator, Release, Xcode
 
-In a macOS workspace the three jsc-* configs build the Apple port's
+In a macOS workspace the three jsc-* presets build the Apple port's
 JavaScriptCore with Xcode instead: there is no JSCOnly port there.
 """
 
@@ -44,7 +44,7 @@ ARCH = {"armhf": {"wrapper": "linux32", "cflags": "-mthumb -march=armv7-a+fp -Wn
                                  "--gtk": "-DUSE_VULKAN=OFF -DENABLE_WEB_RTC=OFF -DENABLE_WPE_QT_API=OFF"}}}
 
 APPLE_JSC = {"buildsys": "xcode", "script": "Tools/Scripts/build-jsc", "port": "", "cmake": "", "apple": True}
-CONFIGS = {
+PRESETS = {
     "jsc-debug": {"type": "Debug", "jsc_only": True, "args": "--debug", "port": "--jsc-only",
                   "cmake": "-DENABLE_OFFLINE_ASM_ALT_ENTRY=1", "macos": APPLE_JSC},
     "jsc-release": {"type": "Release", "jsc_only": True, "args": "--release", "port": "--jsc-only",
@@ -66,7 +66,7 @@ CONFIGS = {
 
 
 def names():
-    return list(CONFIGS)
+    return list(PRESETS)
 
 
 ARCHES = ("native", "armhf")
@@ -105,19 +105,19 @@ def arch_cmake(arch, port):
     return a["cmake"] + (" " + extra if extra else "")
 
 
-def target_cmake(env, cfg=None):
-    return env.get("WK_TARGET_CMAKE", "") if cfg is None else target_var(env, "WK_TARGET_CMAKE", cfg)
+def machine_cmake(env, cfg=None):
+    return env.get("WK_REMOTE_CMAKE", "") if cfg is None else machine_var(env, "WK_REMOTE_CMAKE", cfg)
 
 
 def build_args(env, cfg=None):
-    return env.get("WK_BUILD_ARGS", "") if cfg is None else target_var(env, "WK_BUILD_ARGS", cfg)
+    return env.get("WK_BUILD_ARGS", "") if cfg is None else machine_var(env, "WK_BUILD_ARGS", cfg)
 
 
 def disk_gb(env):
     return int(env.get("WK_BUILD_DISK_GB") or DISK_GB)
 
 
-class Config:
+class Preset:
     def __init__(self, name, os_name, kind, spec, env):
         self.name, self.os, self.kind = name, os_name, kind
         self.type = spec["type"]
@@ -199,25 +199,25 @@ class Config:
 
 
 def resolve(name, os_name, kind=None, env=None):
-    """LookupError for a name that is none; a refusal (`Refused`) for one this target cannot build."""
+    """LookupError for a name that is none; a refusal (`Refused`) for one this place cannot build."""
     env = os.environ if env is None else env
-    if name not in CONFIGS:
+    if name not in PRESETS:
         raise LookupError(name)
     if not os_name:
-        act.die("resolve('%s'): no platform given -- the caller passes Target.os() (a bug in the caller)." % name)
-    kind = kind or env.get("WK_TARGET_KIND", "")
+        act.die("resolve('%s'): no platform given -- the caller passes Driver.os() (a bug in the caller)." % name)
+    kind = kind or env.get("WK_DRIVER", "")
     if not kind:
-        act.die("resolve('%s'): no target kind given -- the caller passes Target.kind (a bug in the caller)." % name)
-    spec = CONFIGS[name]
+        act.die("resolve('%s'): no driver given -- the caller passes Driver.kind (a bug in the caller)." % name)
+    spec = PRESETS[name]
     if os_name == "macos" and "macos" in spec:
         spec = dict(spec, **spec["macos"])
-    cfg = Config(name, os_name, kind, spec, env)
+    cfg = Preset(name, os_name, kind, spec, env)
     if cfg.xcode() and os_name != "macos":
-        act.die("'%s' is an Apple-port config and builds with Xcode, which this\n    workspace has no way to run (it is %s). The configs that build here\n"
+        act.die("'%s' is an Apple-port preset and builds with Xcode, which this\n    workspace has no way to run (it is %s). The presets that build here\n"
                 "    are the CMake ports:  wk build --list" % (name, os_name))
     if cfg.buildsys == "cmake":
         if kind not in LIBBACKTRACE:
-            act.die("config_load: unknown target kind '%s'" % kind)
+            act.die("presets.resolve: unknown driver '%s'" % kind)
         cfg.args = DEFAULT_ARGS + (" " + cfg.args if cfg.args else "")
         default = "%s -DUSE_LIBBACKTRACE=%s" % (DEFAULT_CMAKE, LIBBACKTRACE[kind])
         if libcxx(env):
@@ -227,17 +227,17 @@ def resolve(name, os_name, kind=None, env=None):
 
 
 def libcxx(env):
-    v = env.get("WK_TARGET_LIBCXX", "")
+    v = env.get("WK_REMOTE_LIBCXX", "")
     if v in ("0", ""):
         return False
     if v == "1":
         return True
     act.die("libcxx='%s' in %s\n    is neither 1 nor 0. It says whether that machine has libc++:\n"
             "    1 to build with -stdlib=libc++, 0 (or unset) to leave it out."
-            % (v, fleet.Fleet(images.root(env), env).path(dispatch_target(env) or "<target>")))
+            % (v, fleet.Fleet(images.root(env), env).path(dispatch_place(env) or "<place>")))
 
 
-def target_var(env, stem, cfg):
+def machine_var(env, stem, cfg):
     return env.get("%s_%s" % (stem, cfg.name.replace("-", "_")), "")
 
 
@@ -261,11 +261,11 @@ def mb_per_job(cfg, env):
     return resources.mb_per_job_setting(env, cfg.mb_per_job())
 
 
-def build_env(cfg, src, jobs, nice, arch, ccache_dir, env, extra_cmake="", extra_env=(), target_build_args=""):
-    """What build/build-in-target.sh runs under, narrowest last: `env` applies left to right."""
-    cmake = [cfg.cmake, arch_cmake(arch, cfg.port), target_cmake(env), target_cmake(env, cfg), extra_cmake]
+def build_env(cfg, src, jobs, nice, arch, ccache_dir, env, extra_cmake="", extra_env=(), machine_build_args=""):
+    """What build/build-in-workspace.sh runs under, narrowest last: `env` applies left to right."""
+    cmake = [cfg.cmake, arch_cmake(arch, cfg.port), machine_cmake(env), machine_cmake(env, cfg), extra_cmake]
     cfgargs = build_args(env, cfg)
-    args = "%s %s%s%s" % (cfg.port, cfg.args, " " + target_build_args if target_build_args else "", " " + cfgargs if cfgargs else "")
+    args = "%s %s%s%s" % (cfg.port, cfg.args, " " + machine_build_args if machine_build_args else "", " " + cfgargs if cfgargs else "")
     out = ["CCACHE_DIR=" + ccache_dir, "CCACHE_BASEDIR=" + src, "CCACHE_SLOPPINESS=" + CCACHE_SLOPPINESS,
            "CCACHE_NOHASHDIR=true", "NUMBER_OF_PROCESSORS=%s" % jobs, "CMAKE_BUILD_PARALLEL_LEVEL=%s" % jobs,
            "WK_JOBS=%s" % jobs, "WK_NICE=%s" % nice, "WK_SRC=" + src, "WK_BUILDSYS=" + cfg.buildsys,

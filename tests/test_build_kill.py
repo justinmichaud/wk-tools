@@ -29,21 +29,21 @@ def _load(rel):
     return mod
 
 
-# The record the fake workspace's own `local` target resolves to.
+# The record the fake workspace's own `local` place resolves to.
 def store_of(ws):
     return Path(ws.state_dir) / "wk"
 
 
-# What the pid's command line inside the target must match, recorded by
+# What the pid's command line inside the place must match, recorded by
 # job.adopt with the pid itself: nothing signals a pid without it.
-TARGET_PID_MATCH = "*build-in-target.sh*"
-TARGET_PID_ARGS = "bash /opt/wk-tools/build/build-in-target.sh --release"
+PLACE_PID_MATCH = "*build-in-workspace.sh*"
+PLACE_PID_ARGS = "bash /opt/wk-tools/build/build-in-workspace.sh --release"
 # A pid above every default pid_max on both platforms: dead by construction.
 DEAD_PID = 4194304
 
 
-class StubTarget:
-    def __init__(self, answer="dead", args=TARGET_PID_ARGS):
+class StubDriver:
+    def __init__(self, answer="dead", args=PLACE_PID_ARGS):
         self.answer, self.args, self.execs = answer, args, []
 
     def exec(self, ws, argv, tty=False, timeout=None):
@@ -61,17 +61,17 @@ class StubTarget:
         return self.exec(ws, ["kill", "-0", str(pid)]).rc == 0
 
 
-def records(store, target=None):
-    return record.Records(store, env={}, ask_target=target.pid_alive if target else None)
+def records(store, driver=None):
+    return record.Records(store, env={}, ask_place=driver.pid_alive if driver else None)
 
 
 def begin(store, kind="build", name="selftest-ws", pid=None, log="/dev/null",
           where="here", kill=None, plan="compile jsc-release",
-          pid_match=TARGET_PID_MATCH, target=None):
-    t = records(store, target).begin(kind, where, name, kill or f"wk {kind} {name} --kill", log, [plan],
+          pid_match=PLACE_PID_MATCH, driver=None):
+    t = records(store, driver).begin(kind, where, name, kill or f"wk {kind} {name} --kill", log, [plan],
                                      pid=DEAD_PID if pid is None and where == "here" else pid)
     t.step(1)
-    if where == "target":
+    if where == "place":
         t.set("pid_match", pid_match)
         if pid:
             t.pid(pid)
@@ -144,20 +144,20 @@ class TestJobKillStopsWhatTheJobStarted(WkTest):
             reap(pid)
 
     def test_a_record_with_no_pid_yet_is_just_converged(self):
-        target = StubTarget()
-        t = begin(self.tmp / "store", where="target", target=target)
-        self.assertTrue(job.kill(target, "selftest-ws", t, "cancelled", here(), FakeClock(), {}))
+        driver = StubDriver()
+        t = begin(self.tmp / "store", where="place", driver=driver)
+        self.assertTrue(job.kill(driver, "selftest-ws", t, "cancelled", here(), FakeClock(), {}))
         self.assertEqual(t.field("exit"), "cancelled")
-        self.assertEqual(target.execs, [], "nothing was signalled")
+        self.assertEqual(driver.execs, [], "nothing was signalled")
 
 
 class TestJobKillReachesTheMachineThatRuns(WkTest):
 
     def test_the_term_goes_through_the_target_with_the_descendant_walk(self):
-        target = StubTarget()
-        t = begin(self.tmp / "store", where="target", pid=4242, target=target)
-        self.assertTrue(job.kill(target, "selftest-ws", t, "cancelled", here(), FakeClock(), {}))
-        execs = "\n".join(target.execs)
+        driver = StubDriver()
+        t = begin(self.tmp / "store", where="place", pid=4242, driver=driver)
+        self.assertTrue(job.kill(driver, "selftest-ws", t, "cancelled", here(), FakeClock(), {}))
+        execs = "\n".join(driver.execs)
         self.assertIn("sh -c %s wk 4242" % job.TREE, execs,
                       "the far side gets the same descendants-first walk")
         self.assertIn("kill -TERM", execs)
@@ -166,36 +166,36 @@ class TestJobKillReachesTheMachineThatRuns(WkTest):
         self.assertEqual(t.field("exit"), "cancelled")
 
     def test_one_that_outlives_term_and_kill_is_reported_not_claimed_stopped(self):
-        target = StubTarget(answer="alive")
-        t = begin(self.tmp / "store", where="target", pid=4242, target=target)
-        gone, out = said(lambda: job.kill(target, "selftest-ws", t, "cancelled", here(), FakeClock(),
+        driver = StubDriver(answer="alive")
+        t = begin(self.tmp / "store", where="place", pid=4242, driver=driver)
+        gone, out = said(lambda: job.kill(driver, "selftest-ws", t, "cancelled", here(), FakeClock(),
                                           {"WK_KILL_WAIT": "1"}))
         self.assertFalse(gone, out)
-        self.assertIn("kill -KILL", "\n".join(target.execs))
+        self.assertIn("kill -KILL", "\n".join(driver.execs))
         self.assertEqual(t.field("exit"), "cancelled",
                          "the record still converges: nothing is left saying running")
 
     def test_a_kill_stays_cancelled_when_the_driver_it_stopped_ends_too(self):
-        target = StubTarget()
-        t = begin(self.tmp / "store", where="target", pid=4242, target=target)
-        term = target.act_exec
+        driver = StubDriver()
+        t = begin(self.tmp / "store", where="place", pid=4242, driver=driver)
+        term = driver.act_exec
 
         def driver_ends_first(ws, argv):
             t.end(1)
             return term(ws, argv)
 
-        target.act_exec = driver_ends_first
-        job.kill(target, "selftest-ws", t, "cancelled", here(), FakeClock(), {})
+        driver.act_exec = driver_ends_first
+        job.kill(driver, "selftest-ws", t, "cancelled", here(), FakeClock(), {})
         self.assertEqual(t.field("exit"), "cancelled")
 
 
 class TestJobStopHasOneExitCodePerOutcome(WkTest):
-    def _stop(self, target, env=None):
-        return said(lambda: job.stop(target, records(self.tmp / "store", target), "selftest-ws", "build",
+    def _stop(self, driver, env=None):
+        return said(lambda: job.stop(driver, records(self.tmp / "store", driver), "selftest-ws", "build",
                                      here(), FakeClock(), env or {}))
 
     def test_nothing_running_is_2_and_says_so(self):
-        rc, out = self._stop(StubTarget())
+        rc, out = self._stop(StubDriver())
         self.assertEqual(rc, 2, out)
         self.assertIn("no build is running", out)
 
@@ -203,7 +203,7 @@ class TestJobStopHasOneExitCodePerOutcome(WkTest):
         pid = spawn_orphan()
         try:
             begin(self.tmp / "store", pid=pid)
-            rc, out = self._stop(StubTarget())
+            rc, out = self._stop(StubDriver())
             self.assertEqual(rc, 0, out)
             self.assertIn("stopping the build in 'selftest-ws'", out)
             self.assertIn("cancelled", out)
@@ -211,31 +211,31 @@ class TestJobStopHasOneExitCodePerOutcome(WkTest):
             reap(pid)
 
     def test_one_that_outlives_the_kill_is_1(self):
-        target = StubTarget(answer="alive")
-        begin(self.tmp / "store", where="target", pid=4242, target=target)
-        rc, out = self._stop(target, {"WK_KILL_WAIT": "1"})
+        driver = StubDriver(answer="alive")
+        begin(self.tmp / "store", where="place", pid=4242, driver=driver)
+        rc, out = self._stop(driver, {"WK_KILL_WAIT": "1"})
         self.assertEqual(rc, 1, out)
 
 
 class TestThePidComesBackDownTheLog(WkTest):
-    """The one channel that reaches the driver from every target kind."""
+    """The one channel that reaches the driver from every driver."""
 
     def test_nothing_is_signalled_at_a_pid_that_is_not_the_job(self):
-        target = StubTarget(answer="alive", args="/usr/bin/sshd -D")
-        t = begin(self.tmp / "store", where="target", pid=4242, target=target)
-        out = refusal(self, lambda: job.kill(target, "selftest-ws", t, "cancelled", here(), FakeClock(),
+        driver = StubDriver(answer="alive", args="/usr/bin/sshd -D")
+        t = begin(self.tmp / "store", where="place", pid=4242, driver=driver)
+        out = refusal(self, lambda: job.kill(driver, "selftest-ws", t, "cancelled", here(), FakeClock(),
                                              {"WK_KILL_WAIT": "1"}))
         self.assertIn("refusing to send", out)
-        self.assertNotIn("kill -TERM", "\n".join(target.execs))
+        self.assertNotIn("kill -TERM", "\n".join(driver.execs))
 
     def test_a_target_record_with_no_pattern_at_all_is_a_refusal(self):
-        target = StubTarget(answer="alive")
-        t = begin(self.tmp / "store", where="target", pid=4242, target=target)
+        driver = StubDriver(answer="alive")
+        t = begin(self.tmp / "store", where="place", pid=4242, driver=driver)
         (t.path / "pid_match").unlink()
-        out = refusal(self, lambda: job.kill(target, "selftest-ws", t, "cancelled", here(), FakeClock(),
+        out = refusal(self, lambda: job.kill(driver, "selftest-ws", t, "cancelled", here(), FakeClock(),
                                              {"WK_KILL_WAIT": "1"}))
         self.assertIn("job.adopt", out)
-        self.assertEqual(target.execs, [], "it refused before asking the target anything")
+        self.assertEqual(driver.execs, [], "it refused before asking the place anything")
 
 
 class TestThePatternsCoverEveryShapeTheJobTakes(WkTest):
@@ -252,7 +252,7 @@ class TestThePatternsCoverEveryShapeTheJobTakes(WkTest):
 
     def test_a_builds_two_shapes_both_match_and_nothing_else_does(self):
         want = self._declared("lib/wk/build.py", "build")
-        for args in ("env WK_JOBS=8 /opt/wk-tools/build/build-in-target.sh --release",
+        for args in ("env WK_JOBS=8 /opt/wk-tools/build/build-in-workspace.sh --release",
                      "Tools/Scripts/build-webkit --release --export-compile-commands",
                      "linux32 Tools/Scripts/build-jsc --release"):
             self.assertTrue(self._matches(args, want), args)
@@ -271,7 +271,7 @@ class TestThePatternsCoverEveryShapeTheJobTakes(WkTest):
     def test_the_image_builds_wrapper_matches_and_a_bare_bitbake_does_not(self):
         from wk.sysimage import yocto
         self.assertTrue(self._matches(
-            "python3 /opt/wk-tools/lib/wk/sysimage/yocto_target.py --target rpi5 --stage image", yocto.PATTERN))
+            "python3 /opt/wk-tools/lib/wk/sysimage/yocto_ws.py --target rpi5 --stage image", yocto.PATTERN))
         self.assertFalse(self._matches("bitbake core-image-weston", yocto.PATTERN))
 
 

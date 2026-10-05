@@ -13,7 +13,7 @@ from wk import decl as D  # noqa: E402
 GLOBAL_OPTS = {"--force", "--quiet", "--dry-run", "-n", "--yes", "-y",
                "-h", "--help", "--explain"}
 
-DISPATCHER_READS = {"--config": {"--config"}}
+DISPATCHER_READS = {"--preset": {"--preset"}}
 
 CMD_FILES = sorted(p for p in (REPO / "cmd").iterdir() if p.is_file())
 
@@ -113,7 +113,7 @@ class TestArgumentsAreRefusedOnce(WkTest):
     def test_the_declared_options_are_the_ones_the_code_reads(self):
         for path in CMD_FILES:
             with self.subTest(cmd=path.name):
-                declared = declared_opts(path) - DISPATCHER_READS.get(D.Decl(path).config, set())
+                declared = declared_opts(path) - DISPATCHER_READS.get(D.Decl(path).preset, set())
                 code = code_opts(path) - GLOBAL_OPTS
                 code |= declared & (package_opts(path) | imported_reads(path))
                 self.assertEqual(
@@ -216,7 +216,7 @@ class TestEveryRemovalAsks(unittest.TestCase):
         return {c for c, d in declarations().items() if d["destructive"] != "-"}
     REMOVING = re.compile(r"delete_vm|\"podman\", *\"(rm|rmi)\"|\"image\", \"prune\"|\"volume\", \"prune\"|unshare\", \"rm\"|"
                           r"tart, \"delete\"")
-    REMOVERS = {"lib/wk/gc.py": ("gc",), "lib/wk/sysimage/guestbase.py": ("sysimage",), "lib/wk/targets.py": ("rm", "gc", "stop")}
+    REMOVERS = {"lib/wk/gc.py": ("gc",), "lib/wk/sysimage/guestbase.py": ("sysimage",), "lib/wk/places.py": ("rm", "gc", "stop")}
 
     def test_every_removing_effect_is_reached_only_from_commands_that_ask(self):
         found = {str(p.relative_to(REPO)) for p in (REPO / "lib" / "wk").rglob("*.py") if self.REMOVING.search(p.read_text())}

@@ -16,7 +16,7 @@ from tests.fakes import FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO, WkTest, bash
 from tests.test_wk_secrets import SOCK, SecretsTest, World
-from wk import act, guest, pushswitch, targets
+from wk import act, guest, places, pushswitch
 from wk.act import Refused
 from wk.clock import FakeClock
 from wk.machine import Result
@@ -34,8 +34,8 @@ def load_key():
 KEY = load_key()
 
 
-class Box(targets.Target):
-    """The default target: workspaces with the claude pids each holds, and whether it names an agent socket."""
+class Box(places.Driver):
+    """The default place: workspaces with the claude pids each holds, and whether it names an agent socket."""
 
     def __init__(self, machine, env, name="container", sock="/run/wk/ssh-agent.sock"):
         super().__init__(name, str(REPO), env, machine)
@@ -112,10 +112,10 @@ class PushTest(SecretsTest):
 class TestWhere(WkTest):
     def _as_build_machine(self):
         marker = self.tmp / "wk-remote"
-        marker.write_text("target=buildbox4\n")
+        marker.write_text("place=buildbox4\n")
         store = self.tmp / "store"
         store.mkdir()
-        # The far end knows which target it is by its hostname, from its conf.
+        # The far end knows which place it is by its hostname, from its conf.
         machines = self.tmp / "machines"
         machines.mkdir()
         host = subprocess.run(["hostname", "-s"], capture_output=True, text=True).stdout.strip().lower()
@@ -387,14 +387,14 @@ class TestAskingAnotherMachine(PushTest):
         for rc_there in (0, 1):
             with self.subTest(rc=rc_there):
                 self.peer.far = (rc_there, "fork       push allowed (in the agent)\n")
-                rc, out, _ = self.main("status", "--target", "peerbox")
+                rc, out, _ = self.main("status", "--on", "peerbox")
                 self.assertEqual(rc_there, rc)
                 self.assertEqual(("key", "push", "status"), self.peer.asked[-1])
                 self.assertIn("peerbox               fork       push allowed", out)
 
     def test_a_machine_that_did_not_answer_is_3_and_never_off(self):
         self.peer.side = "unreachable"
-        rc, out, err = self.main("off", "--target", "peerbox")
+        rc, out, err = self.main("off", "--on", "peerbox")
         self.assertEqual(3, rc)
         self.assertIn("peerbox", out)
         self.assertEqual([], self.peer.asked)
@@ -407,7 +407,7 @@ class TestAskingAnotherMachine(PushTest):
         self.assertLess(out.index("thishost"), out.index("peerbox"))
 
     def test_an_unknown_machine_is_refused_by_name(self):
-        rc, _, err = self.main("status", "--target", "nosuch")
+        rc, _, err = self.main("status", "--on", "nosuch")
         self.assertEqual(1, rc)
         self.assertIn("nosuch", err)
 
@@ -499,7 +499,7 @@ class TestTheStatusRowIsCredentialsNotThePosition(WkTest):
         self.assertIsNone(self._row(keys=("fork", "forkwpe"), in_vm=True))
 
 
-class TestEveryTargetThisMachineHoldsIsAsked(PushTest):
+class TestEveryPlaceThisMachineHoldsIsAsked(PushTest):
     """`on` hands the keys to every workspace on this machine, the macOS guests too (their agent is on this host,
     forwarded per guest), so a claude session in a guest is ended like one in a container."""
 

@@ -1,4 +1,4 @@
-# wk memory-experiment patch: disable-prewarming
+# wk memory-charts patch: disable-prewarming
 #
 # docs/Urgent/HANDOFF-memory.md asks for this to be a file instead of a
 # copy-paste block, so it survives past whoever currently holds it in their
@@ -16,7 +16,7 @@
 # claude/skills' own notes on process attach already name -- see cmd/gui's
 # 'web process' case). A memory-usage run wants exactly one process doing
 # exactly one thing, and a prewarmed spare confuses both the process count
-# and the memory total, so the experiment disables it -- most likely a
+# and the memory total, so the patch disables it -- most likely a
 # WebPreferences/WebsitePolicies toggle or a build-time flag, whichever the
 # checkout that still has this patch actually uses.
 #

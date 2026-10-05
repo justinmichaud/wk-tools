@@ -10,7 +10,7 @@ from wk.key.creds import Creds
 from wk.key.deploy import DeployKeys
 from wk.key.election import Election
 from wk.secrets import Secrets
-from wk.targets import Registry
+from wk.places import Registry
 
 
 class Key(Creds, DeployKeys, Election, Check):

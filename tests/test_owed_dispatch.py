@@ -1,18 +1,18 @@
-"""Target-kind dispatch and the small pure classifiers a target driver is"""
+"""Driver dispatch and the small pure classifiers a place driver is"""
 import sys
 import unittest
 
 from tests.support import REPO, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets  # noqa: E402
+from wk import places  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 from wk.sysimage import write  # noqa: E402
 
 
-class TestTargetKind(unittest.TestCase):
+class TestPlaceKind(unittest.TestCase):
     def _kind(self, name, registry):
-        return targets.Registry(REPO, env={"WK_MACHINES_DIR": str(registry), "HOME": "/nonexistent"}, machine=Fake()).kind(name)
+        return places.Registry(REPO, env={"WK_MACHINES_DIR": str(registry), "HOME": "/nonexistent"}, machine=Fake()).kind(name)
 
     def test_the_four_built_in_kinds_name_themselves(self):
         with scratch_dir() as reg:
@@ -42,12 +42,12 @@ class TestRemoteIsLocal(unittest.TestCase):
                    "WK_REMOTE_HOST": "buildbox1"}
             if remote_local:
                 env["WK_REMOTE_LOCAL"] = "1"
-            return targets.Remote("buildbox1", str(REPO), env, Fake()).is_local
+            return places.Remote("buildbox1", str(REPO), env, Fake()).is_local
 
     def test_true_once_the_remote_marker_says_this_is_the_machine(self):
         self.assertTrue(self._is_local(True))
 
-    def test_false_for_a_plain_ssh_driven_target(self):
+    def test_false_for_a_plain_ssh_driven_place(self):
         self.assertFalse(self._is_local(False))
 
 

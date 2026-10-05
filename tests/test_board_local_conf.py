@@ -11,19 +11,19 @@ from tests.support import REPO
 
 BOARDS = REPO / "image" / "boards"
 sys.path.insert(0, str(REPO / "lib"))
-from wk.sysimage import yocto_target  # noqa: E402
+from wk.sysimage import yocto_ws  # noqa: E402
 
 ENV = {"DL_DIR": "/cache/dl", "SSTATE_DIR": "/cache/sstate"}
 
 
 def conf(board, append):
-    a = yocto_target.parse(["--target", "rpi5-64bits-mesa", "--rm-work", "1"] + (["--board", board] if board else []))
-    return yocto_target.local_conf(a, ENV, 8, append)
+    a = yocto_ws.parse(["--target", "rpi5-64bits-mesa", "--rm-work", "1"] + (["--board", board] if board else []))
+    return yocto_ws.local_conf(a, ENV, 8, append)
 
 
 class TestTheBoardHalfIsWired(unittest.TestCase):
     def test_the_builder_takes_a_board(self):
-        self.assertEqual(yocto_target.parse(["--target", "t", "--board", "rpi5"]).board, "rpi5")
+        self.assertEqual(yocto_ws.parse(["--target", "t", "--board", "rpi5"]).board, "rpi5")
 
     def test_the_board_file_is_appended_last(self):
         text = conf("rpi5", 'X = "1"\n')

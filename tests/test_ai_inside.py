@@ -18,7 +18,7 @@ class _Inside(_Flow, _Wall):
     def setUp(self):
         _Wall.setUp(self)
         self.setUpFlow()
-        self.env.update(WK_NAME="demo", WK_TARGET="local")
+        self.env.update(WK_NAME="demo", WK_PLACE="local")
         self.fake.answer(["ssh", "-G", "github-webkit"], out="user me\n")
 
     def checks(self, force=False):
@@ -28,7 +28,7 @@ class _Inside(_Flow, _Wall):
         refused = False
         with contextlib.redirect_stderr(err):
             try:
-                AI.Ai(AI.ROOT, self.env, self.reg, self.target, "claude", "demo").checks()
+                AI.Ai(AI.ROOT, self.env, self.reg, self.driver, "claude", "demo").checks()
             except Refused:
                 refused = True
         os.environ.pop("WK_FORCE", None)
@@ -44,10 +44,10 @@ class TestTheCommandRunsInAWorkspace(_Inside):
         self.assertIn("sandbox intact", err)
 
     def test_the_commit_wall_covers_a_session_started_from_inside(self):
-        with mock.patch.object(self.target, "os", return_value="linux"):
-            self.assertTrue(wall.commit_walled(self.target))
-        with mock.patch.object(self.target, "os", return_value="macos"):
-            self.assertFalse(wall.commit_walled(self.target))
+        with mock.patch.object(self.driver, "os", return_value="linux"):
+            self.assertTrue(wall.commit_walled(self.driver))
+        with mock.patch.object(self.driver, "os", return_value="macos"):
+            self.assertFalse(wall.commit_walled(self.driver))
         self.assertTrue(wall.commit_walled(self.reg.load("container")))
         self.assertFalse(wall.commit_walled(self.reg.load("remote")))
 

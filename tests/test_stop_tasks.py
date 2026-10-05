@@ -123,7 +123,7 @@ def load_stop():
 class TestStopWorkspace(unittest.TestCase):
     """`wk stop <ws>` is the driver's stop and nothing else, on every kind: no session of its own to end first."""
 
-    class Target:
+    class Driver:
         def __init__(self, kind):
             self.kind, self.calls = kind, []
 
@@ -135,22 +135,22 @@ class TestStopWorkspace(unittest.TestCase):
             return True
 
         def __getattr__(self, name):
-            raise AssertionError("wk stop <ws> asked the target for %s" % name)
+            raise AssertionError("wk stop <ws> asked the place for %s" % name)
 
     class Reg:
-        def __init__(self, target):
-            self.target = target
+        def __init__(self, driver):
+            self.driver = driver
 
-        def ws_target(self, name):
+        def ws_place(self, name):
             return "t"
 
         def load(self, name):
-            return self.target
+            return self.driver
 
     def test_each_kind_is_stopped_by_its_driver_alone(self):
         stop = load_stop()
         for kind in ("container", "vm", "remote"):
             with self.subTest(kind=kind):
-                t = self.Target(kind)
+                t = self.Driver(kind)
                 self.assertEqual(0, stop.stop_workspace(self.Reg(t), "ws"))
                 self.assertEqual([("stop", "ws")], t.calls)

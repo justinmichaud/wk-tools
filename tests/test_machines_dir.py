@@ -14,7 +14,7 @@ from pathlib import Path
 from tests.support import FLEET_ENV, REAL_MACHINES, REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, fleet, targets  # noqa: E402
+from wk import act, fleet, places  # noqa: E402
 from wk.boot.cli import load_conf  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
@@ -102,7 +102,7 @@ class TestTheReader(FleetTest):
         self.assertIn("volume is not a literal", str(cm.exception))
 
     def test_an_uppercase_key_is_refused_naming_the_file_and_the_key(self):
-        for old in ("KIND=board", "NODE_BENCH_SSH=x", "WK_TARGET_KIND=remote"):
+        for old in ("KIND=board", "NODE_BENCH_SSH=x", "WK_DRIVER=remote"):
             with self.subTest(key=old):
                 self.conf("old", "kind=build\n" + old + "\n")
                 with self.assertRaises(fleet.ConfError) as cm:
@@ -127,7 +127,7 @@ class TestTheReader(FleetTest):
     def test_a_listing_names_only_the_kinds_asked_for(self):
         for n, k in (("a", "build"), ("b", "peer"), ("c", "board"), ("d", "bridge")):
             self.conf(n, "kind=%s\n" % k)
-        self.assertEqual(self.fleet.names(fleet.TARGET_KINDS), ["a", "b"])
+        self.assertEqual(self.fleet.names(fleet.PLACE_KINDS), ["a", "b"])
         self.assertEqual(self.fleet.names(("bridge",)), ["d"])
         self.assertIsNone(self.fleet.load("nosuch"))
 
@@ -170,40 +170,40 @@ class TestTheReadersOverIt(FleetTest):
         self.conf("box", "kind=build\nhost=box\n")
         self.conf("pe", "kind=peer\npeer=1\n")
         self.conf("pi", "kind=board\ndriver=pi-sd\nnote=n\n")
-        reg = targets.Registry(REPO, env=self.env, machine=Fake())
+        reg = places.Registry(REPO, env=self.env, machine=Fake())
         self.assertEqual(reg.known(), ["box", "pe"])
         self.assertIsNone(reg.kind("pi"))
 
     def test_a_target_confs_keys_set_their_wk_variables_over_the_environment(self):
         self.conf("box", "kind=build\ndriver=remote\nhost=box.example\nroot=\ncmake=-DX=1\nbuild_args=--y\n")
         env = dict(self.env, WK_REMOTE_HOST="from-env", WK_REMOTE_ROOT="/env/root", WK_REMOTE_TOOLS="/env/tools")
-        t = targets.Registry(REPO, env=env, machine=Fake()).load("box")
-        self.assertEqual({k: t.env.get(k) for k in ("WK_TARGET_KIND", "WK_REMOTE_HOST", "WK_REMOTE_ROOT", "WK_REMOTE_TOOLS",
-                                                    "WK_TARGET_CMAKE", "WK_BUILD_ARGS")},
-                         {"WK_TARGET_KIND": "remote", "WK_REMOTE_HOST": "box.example", "WK_REMOTE_ROOT": "",
-                          "WK_REMOTE_TOOLS": "/env/tools", "WK_TARGET_CMAKE": "-DX=1", "WK_BUILD_ARGS": "--y"})
+        t = places.Registry(REPO, env=env, machine=Fake()).load("box")
+        self.assertEqual({k: t.env.get(k) for k in ("WK_DRIVER", "WK_REMOTE_HOST", "WK_REMOTE_ROOT", "WK_REMOTE_TOOLS",
+                                                    "WK_REMOTE_CMAKE", "WK_BUILD_ARGS")},
+                         {"WK_DRIVER": "remote", "WK_REMOTE_HOST": "box.example", "WK_REMOTE_ROOT": "",
+                          "WK_REMOTE_TOOLS": "/env/tools", "WK_REMOTE_CMAKE": "-DX=1", "WK_BUILD_ARGS": "--y"})
 
     def test_a_key_no_target_reads_is_refused_naming_it(self):
         self.conf("box", "kind=build\nhots=box.example\n")
         with self.assertRaises(LookupError) as cm:
-            targets.Registry(REPO, env=self.env, machine=Fake()).load("box")
+            places.Registry(REPO, env=self.env, machine=Fake()).load("box")
         self.assertIn("box.conf: hots is not a key a build machine's conf takes", str(cm.exception))
 
     def test_one_configs_own_flags_are_a_key_of_their_own(self):
         self.conf("box", "kind=build\ncmake_wpe_release=-DONE=1\nbuild_args_jsc_release=--one\n")
-        env = targets.Registry(REPO, env=self.env, machine=Fake()).load("box").env
-        self.assertEqual((env["WK_TARGET_CMAKE_wpe_release"], env["WK_BUILD_ARGS_jsc_release"]), ("-DONE=1", "--one"))
+        env = places.Registry(REPO, env=self.env, machine=Fake()).load("box").env
+        self.assertEqual((env["WK_REMOTE_CMAKE_wpe_release"], env["WK_BUILD_ARGS_jsc_release"]), ("-DONE=1", "--one"))
 
     def test_a_config_that_does_not_exist_is_refused(self):
         self.conf("box", "kind=build\ncmake_no_such_config=-DX=1\n")
         with self.assertRaises(LookupError) as cm:
-            targets.Registry(REPO, env=self.env, machine=Fake()).load("box")
+            places.Registry(REPO, env=self.env, machine=Fake()).load("box")
         self.assertIn("cmake_no_such_config is not a key", str(cm.exception))
 
 
 
 class TestSharedHome(FleetTest):
-    """Two machines sharing one home (one ~/.wk-remote) each resolve their own target by hostname."""
+    """Two machines sharing one home (one ~/.wk-remote) each resolve their own place by hostname."""
 
     def setUp(self):
         super().setUp()
@@ -211,14 +211,14 @@ class TestSharedHome(FleetTest):
         self.conf("boxb", "kind=build\nhostname=bbox-2\n")
         home = self.tmp / "home"
         home.mkdir()
-        (home / ".wk-remote").write_text("target=boxb\nroot=%s/wk\n" % home)
+        (home / ".wk-remote").write_text("place=boxb\nroot=%s/wk\n" % home)
 
     def registry(self, host):
         far = Fake(host)
         far.answer(["hostname", "-s"], out=host.upper() + "\n")
-        return targets.Registry(REPO, env=self.env, machine=far), far
+        return places.Registry(REPO, env=self.env, machine=far), far
 
-    def test_each_machine_of_a_shared_home_is_its_own_target(self):
+    def test_each_machine_of_a_shared_home_is_its_own_place(self):
         for host, name in (("boxa", "boxa"), ("bbox-2", "boxb")):
             with self.subTest(host=host):
                 reg, far = self.registry(host)

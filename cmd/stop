@@ -32,7 +32,7 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import act, decl, record, status, targets  # noqa: E402
+from wk import act, decl, places, record, status  # noqa: E402
 from wk.act import Refused, confirm, die, info, log, warn  # noqa: E402
 from wk.machine import Local, is_macos  # noqa: E402
 from wk.store import Store  # noqa: E402
@@ -86,13 +86,13 @@ def stop_tasks_everywhere(reg, records):
     os.environ["WK_YES"] = "1"
     rc = stop_tasks_here(records)
     for m in reg.machines():
-        target = reg.load(m)
-        side, why = target.probe()
+        driver = reg.load(m)
+        side, why = driver.probe()
         if side != "answering":
-            sys.stderr.write("%-22s %s\n" % (m, status.far_side_reason(target, side, why)))
+            sys.stderr.write("%-22s %s\n" % (m, status.far_side_reason(driver, side, why)))
             rc = max(rc, 3)   # a machine that cannot be asked may be running something
             continue
-        rc_there, out = target.wk("stop", "--tasks")
+        rc_there, out = driver.wk("stop", "--tasks")
         for line in out.splitlines():
             sys.stdout.write("%-22s%s\n" % (m, line))
         rc = max(rc, rc_there)
@@ -100,10 +100,10 @@ def stop_tasks_everywhere(reg, records):
 
 
 def stop_workspace(reg, name):
-    target = reg.load(reg.ws_target(name))
-    if target.info(name) == "absent":
+    driver = reg.load(reg.ws_place(name))
+    if driver.info(name) == "absent":
         die(store.no_such_workspace(name))
-    if not target.stop(name):
+    if not driver.stop(name):
         raise Refused(1)
     return 0
 
@@ -142,12 +142,12 @@ def main(argv):
     tasks = args.flag("--tasks")
     everywhere = args.flag("--all")
     name = store.ws_name()
-    reg = targets.Registry(ROOT)
+    reg = places.Registry(ROOT)
     try:
         if tasks:
             if keep_vm:
                 die("'--keep-vm' is about the podman machine, which 'wk stop --tasks' leaves alone")
-            records = record.Records(ask_target=lambda n, pid, cap: reg.load(reg.ws_target(n)).pid_alive(n, pid, cap))
+            records = record.Records(ask_place=lambda n, pid, cap: reg.load(reg.ws_place(n)).pid_alive(n, pid, cap))
             return stop_tasks_everywhere(reg, records) if everywhere else stop_tasks_here(records)
         if name:
             return stop_workspace(reg, name)

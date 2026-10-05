@@ -21,7 +21,7 @@ from tests.killpoints import converges
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import decl, samply as wksamply, screen, targets  # noqa: E402
+from wk import decl, places, samply as wksamply, screen  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import cli, mac, record as brecord, report  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
@@ -83,13 +83,13 @@ class World(Fake):
                     "XDG_STATE_HOME": str(self.tmp / "state"), "XDG_CONFIG_HOME": str(self.tmp / "config"),
                     "WK_MACHINES_DIR": str(machines), "WK_BENCH_ROOT": self.home, "WK_BENCH_PYTHON": "/py", "WK_POLL_SECONDS": "1"}
         self.clock = FakeClock()
-        self.reg = targets.Registry(REPO, env=self.env, machine=self)
+        self.reg = places.Registry(REPO, env=self.env, machine=self)
         if bench:
             self._set_file(mac.MARKER, MARKERS[machine])
         self.stage = os.path.join(self.home, "staged", STAGE_ID)
         self.build = os.path.join(self.stage, "WebKitBuild", "Release")
         self._set_file(os.path.join(self.stage, "stage.json"), json.dumps({
-            "workspace": "ws", "workspace_target": "vm", "config": "mac-release", "webkit_sha": SHA,
+            "workspace": "ws", "workspace_place": "vm", "preset": "mac-release", "webkit_sha": SHA,
             "plans": "speedometer3", "wk_tools": "abc"}))
         self._set_file(os.path.join(self.build, "MiniBrowser.app/Contents/MacOS/MiniBrowser"), "")
         self.dirs.add(os.path.join(self.build, "JavaScriptCore.framework"))
@@ -194,7 +194,7 @@ class TestTheRecord(MacTest):
         """`bench.one_record[mac-volume]`: kernel, arch, profile, root device, cores, the stage it ran and the machine."""
         self.staged()
         env = self.w.env_json()
-        self.assertEqual((env["bench_host"], env["machine"], env["measures"], env["profile"], env["config"], env["webkit_sha"]),
+        self.assertEqual((env["bench_host"], env["machine"], env["measures"], env["profile"], env["preset"], env["webkit_sha"]),
                          ("image", "mbp", True, "perf-macos-tolken", "mac-release", SHA))
         self.assertEqual((env["host"]["kernel"], env["host"]["kernel_arch"], env["host"]["cores"], env["host"]["root_device"]),
                          ("25.0.0", "arm64", "12", "/dev/disk3s1 (Apple Fabric, ssd)"))
@@ -445,7 +445,7 @@ class TestTheInstallResolvesItself(MacTest):
             mac.staged_python(Fake(), {})
 
 
-class Target(targets.Target):
+class Driver(places.Driver):
     kind = "vm"
 
     def wait_ready(self, ws, clock, timeout=None):
@@ -497,8 +497,8 @@ class StageWorld(World):
         super().__init__(tmp)
         self._drop(os.path.join(self.home, "staged"))
         self.drv = Drv(self, local)
-        self.reg.load = lambda name: Target(name, str(REPO), dict(self.env), self)
-        self.reg.ws_target = lambda ws: "vm"
+        self.reg.load = lambda name: Driver(name, str(REPO), dict(self.env), self)
+        self.reg.ws_place = lambda ws: "vm"
         self.answer(["exec", "ws", "test"], out="")
         self.answer(["exec", "ws", "git"], out=SHA + "\n")
         self.answer(["git", "-C", str(REPO), "rev-parse", "HEAD"], out="abc\n")
@@ -511,14 +511,14 @@ class StageWorld(World):
     def stage_(self, *argv):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            a = args("stage", "ws", "--to", "mbp", "--config", "mac-release", *argv)
-            rc = mac.stage(REPO, self.reg, self.clock, a.positionals[1:], a.value("--to"), a.value("--config"),
+            a = args("stage", "ws", "--to", "mbp", "--preset", "mac-release", *argv)
+            rc = mac.stage(REPO, self.reg, self.clock, a.positionals[1:], a.value("--to"), a.value("--preset"),
                            mac.plans(a.order, a.values("--plan"), a.values("--payload")), driver=lambda root, conf: self.drv)
         return rc, err.getvalue()
 
     def stages(self):
         staged = os.path.join(self.home, "staged")
-        return sorted(json.loads(self.files[os.path.join(staged, d, "stage.json")])["config"]
+        return sorted(json.loads(self.files[os.path.join(staged, d, "stage.json")])["preset"]
                       for d in (self.listdir(staged) if self.isdir(staged) else ())
                       if os.path.join(staged, d, "stage.json") in self.files)
 
@@ -530,7 +530,7 @@ class TestStage(MacTest):
         self.assertEqual(rc, 0, err)
         dest = os.path.join(w.home, "staged", "%s-mac-release" % w.clock.stamp())
         doc = json.loads(w.files[os.path.join(dest, "stage.json")])
-        self.assertEqual((doc["workspace"], doc["config"], doc["webkit_sha"], doc["plans"], doc["payloads_pinned"], doc["wk_tools"]),
+        self.assertEqual((doc["workspace"], doc["preset"], doc["webkit_sha"], doc["plans"], doc["payloads_pinned"], doc["wk_tools"]),
                          ("ws", "mac-release", SHA, "speedometer3,jetstream3", "speedometer3", "abc"))
         (products,) = [e for e in w.effects if e[0] == "copy_tree_out" and e[2].endswith("/WebKitBuild/Release")]
         self.assertEqual(mac.PRODUCT_SKIP, products[3:])
@@ -605,7 +605,7 @@ class TestStage(MacTest):
 class TestWhere(unittest.TestCase):
 
     def test_the_dynamic_verbs_answer_for_themselves(self):
-        reg = targets.Registry(REPO, env={}, machine=Fake())
+        reg = places.Registry(REPO, env={}, machine=Fake())
         self.assertEqual(cli.where(reg, ["ls"]), "local")
         self.assertEqual(cli.where(reg, ["ls", "--continued"]), "store")
 

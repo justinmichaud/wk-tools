@@ -7,12 +7,12 @@ TOOLS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WK_ROOT="$TOOLS"
 . "$TOOLS/lib/common.sh"
 
-TARGET="${WK_REMOTE_TARGET:-}"
+MACHINE="${WK_REMOTE_MACHINE:-}"
 ROOT="${WK_REMOTE_ROOT:-$HOME/wk}"
 
-[ -n "$TARGET" ] || die "WK_REMOTE_TARGET is not set (run this through 'wk remote setup')"
+[ -n "$MACHINE" ] || die "WK_REMOTE_MACHINE is not set (run this through 'wk remote setup')"
 
-info "provisioning $(hostname) for target '$TARGET'"
+info "provisioning $(hostname) as '$MACHINE'"
 
 _missing=""   # git is load-bearing: the checkout, and the lock that serialises builds
 for _t in git; do
@@ -20,7 +20,7 @@ for _t in git; do
 done
 [ -z "$_missing" ] || die "missing on this machine:$_missing
     Installing needs root, and this never asks for it. Ask the machine's
-    administrators, or use a target that has them."
+    administrators, or use a machine that has them."
 
 have ccache || warn "no ccache on this machine -- every build starts cold"
 
@@ -34,8 +34,8 @@ write_file "$HOME/.wk-remote" 0644 <<EOF
 #
 # It is not a workspace (there are several here) and not a workstation (it owns
 # no store, no VM and no hardware of yours), so \`wk\` reads this to know it is
-# the far end of a target -- and refuses the commands that only make sense on
-# a workstation. Which target it is the far end of comes from machines/*.conf
+# the far end of a remote place -- and refuses the commands that only make sense on
+# a workstation. Which machine it is comes from machines/*.conf
 # (hostname=), the one place a machine's kind is read. Nothing here is one machine's
 # own: the home may be shared, and each machine's root is its conf's.
 inputs=${WK_REMOTE_INPUTS:-}
@@ -106,7 +106,7 @@ unset _rc _rc_line _tmp _t _missing
 
 info "provisioned. On this machine:"
 log  "  wk ls / wk status            what is here"
-log  "  wk build <ws> <config>       polite: sized from this machine's load"
+log  "  wk build <ws> <preset>       polite: sized from this machine's load"
 log  "  wk run <ws> -- <args>        run jsc from that workspace's build"
 log  "  wk test <ws> / wk status <ws> --log  the rest of the in-workspace interface"
 log  ""

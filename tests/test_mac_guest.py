@@ -1,5 +1,5 @@
 """mac-guest (lib/wk/boot/mac.py): a Tart guest standing in for a Mac in bench mode, against FakeGuest
-(tests/test_mac_volume.py) and GuestChannel over a vm target in memory. It conforms like the real driver, and a
+(tests/test_mac_volume.py) and GuestChannel over a vm place in memory. It conforms like the real driver, and a
 reading from it is refused as a measurement."""
 import os
 import sys
@@ -36,7 +36,7 @@ class TestArming(unittest.TestCase):
         fake, d = guest(st="absent")
         got, err = quiet(d.arm)
         self.assertIs(got, act.Refused)
-        self.assertIn("wk new wk-bench --target vm", err)
+        self.assertIn("wk new wk-bench --on vm", err)
         self.assertEqual(fake.effects, [])
 
     def test_a_stopped_guest_is_started(self):
@@ -92,7 +92,7 @@ class TestStaging(unittest.TestCase):
 
 
 class FakeVm:
-    """The vm target's surface GuestChannel uses."""
+    """The vm place's surface GuestChannel uses."""
 
     env = {}
 
@@ -111,7 +111,7 @@ class FakeVm:
 
 
 class TestGuestChannel(unittest.TestCase):
-    def test_a_script_runs_in_the_guest_through_the_vm_target(self):
+    def test_a_script_runs_in_the_guest_through_the_vm_place(self):
         vm = FakeVm()
         ch = GuestChannel(REPO, {}, {"WK_BENCH_GUEST": "g"}, vm=vm)
         self.assertTrue(ch.call("r_ssh", Script(REPO, "mac-probe.sh")).ok)

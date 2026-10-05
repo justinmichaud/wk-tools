@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes import FakeTarget
+from tests.fakes import FakeDriver
 from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -123,27 +123,27 @@ class TestTheFleetIsAsked(unittest.TestCase):
         rows = record.fleet_holders("device:rpi5", self.records, [("moose", lambda r: (None, "unreachable\tover ssh"))])
         self.assertEqual([("?", "moose", "unknown", "unreachable over ssh")], rows)
 
-    def stores(self, local, targets, peers=("moose",)):
+    def stores(self, local, drivers, peers=("moose",)):
         with mock.patch("wk.store.Store.is_local", return_value=local), \
-                mock.patch("wk.targets.Registry") as reg:
-            reg.return_value.load.side_effect = lambda name: targets[name]
+                mock.patch("wk.places.Registry") as reg:
+            reg.return_value.load.side_effect = lambda name: drivers[name]
             reg.return_value.peer_workstations.return_value = list(peers)
             return [(name, ask("device:rpi5")) for name, ask in record.fleet_stores(str(REPO), {}, Fake())]
 
     def test_a_peer_is_asked_through_its_own_wk(self):
-        moose = FakeTarget("moose", out="\t".join(ROW))
+        moose = FakeDriver("moose", out="\t".join(ROW))
         self.assertEqual([("moose", ("\t".join(ROW), ""))], self.stores(True, {"moose": moose}))
         self.assertEqual([("status", "--holds", "device:rpi5")], [args for args, _, _ in moose.asked])
 
     def test_a_peer_that_cannot_be_reached_is_not_asked_and_says_why(self):
-        moose = FakeTarget("moose", side="unreachable", why="timed out")
+        moose = FakeDriver("moose", side="unreachable", why="timed out")
         [(_, (rows, why))] = self.stores(True, {"moose": moose})
         self.assertIsNone(rows)
         self.assertIn("unreachable over ssh", why)
         self.assertEqual([], moose.asked)
 
     def test_a_peer_whose_wk_does_not_read_the_flag_names_the_sync(self):
-        [(_, (rows, why))] = self.stores(True, {"moose": FakeTarget("moose", rc=1)})
+        [(_, (rows, why))] = self.stores(True, {"moose": FakeDriver("moose", rc=1)})
         self.assertIsNone(rows)
         self.assertIn("wk sync --tools moose", why)
 
@@ -151,13 +151,13 @@ class TestTheFleetIsAsked(unittest.TestCase):
         self.assertEqual([], self.stores(True, {}, peers=()))
 
     def test_a_store_elsewhere_is_asked_as_well(self):
-        vm = FakeTarget("container", out="\t".join(ROW))
+        vm = FakeDriver("container", out="\t".join(ROW))
         [(name, (rows, _))] = self.stores(False, {"container": vm}, peers=())
         self.assertIn("podman machine", name)
         self.assertEqual("\t".join(ROW), rows)
 
     def test_a_podman_machine_that_did_not_answer_says_so(self):
-        [(name, (rows, why))] = self.stores(False, {"container": FakeTarget("container", rc=1)}, peers=())
+        [(name, (rows, why))] = self.stores(False, {"container": FakeDriver("container", rc=1)}, peers=())
         self.assertIn("podman machine", name)
         self.assertIsNone(rows)
         self.assertIn("wk start", why)
@@ -282,14 +282,14 @@ class TestTheCommandsTakeIt(ClaimTest):
         self.assertIn("kill %d" % pid, out)
 
     def test_bench_deploy_takes_it_where_the_image_workspace_is(self):
-        from wk import targets
+        from wk import places
         from wk.bench import cli
         from wk.clock import Clock
         from wk.machine import Local
         pid = self.held()
         err = io.StringIO()
         with mock.patch.dict(os.environ, self.env), contextlib.redirect_stderr(err), self.assertRaises(act.Refused):
-            cli.Bench(str(REPO), targets.Registry(REPO, env=dict(os.environ), machine=Local()), Clock()).deploy(
+            cli.Bench(str(REPO), places.Registry(REPO, env=dict(os.environ), machine=Local()), Clock()).deploy(
                 "webkit-2.52-yocto-rpi5-64", "fakeboard", "a")
         out = err.getvalue()
         self.assertIn("bench fakeboard/speedometer3", out)

@@ -213,11 +213,11 @@ class TestTheProfileGate(WkTest):
 
 class TestAProfileGuidedBuildDoesNotCacheCompilations(WkTest):
 
-    def _env(self, config):
+    def _env(self, preset):
         sys.path.insert(0, str(REPO / "lib"))
-        from wk import buildconf
-        c = buildconf.resolve(config, "macos", "vm", {})
-        return types.SimpleNamespace(stdout="\n".join(buildconf.build_env(c, "/src/WebKit", 4, 10, "native", "/ccache", {})), stderr="")
+        from wk import presets
+        c = presets.resolve(preset, "macos", "vm", {})
+        return types.SimpleNamespace(stdout="\n".join(presets.build_env(c, "/src/WebKit", 4, 10, "native", "/ccache", {})), stderr="")
 
     def test_the_pgo_config_turns_it_off(self):
         cp = self._env("mac-release-pgo")

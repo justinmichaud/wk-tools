@@ -1,5 +1,5 @@
 """`wk gui` (cmd/gui): MiniBrowser in the benchmark seat, its refusals, and the fullscreen flag per port, with
-`Target.exec_argv` intercepted before it replaces the process."""
+`Driver.exec_argv` intercepted before it replaces the process."""
 import contextlib
 import importlib.machinery
 import importlib.util
@@ -12,7 +12,7 @@ from unittest import mock
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import buildconf  # noqa: E402
+from wk import presets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
@@ -31,17 +31,17 @@ os.environ.setdefault("WK_ROOT", str(REPO))
 GUI = _load_cmd_gui()
 
 
-def _target(kind="container", os_name="linux"):
-    target = mock.Mock()
-    target.os.return_value = os_name
-    target.kind = kind
-    target.env = {}
-    target.src.return_value = "/src/WebKit"
-    target.exec.return_value = mock.Mock(ok=True)
-    target.exec_argv.return_value = (["true"], None)
-    target.lldb_opts.return_value = ""
-    target.tools.return_value = "/opt/wk-tools"
-    return target
+def _driver(kind="container", os_name="linux"):
+    driver = mock.Mock()
+    driver.os.return_value = os_name
+    driver.kind = kind
+    driver.env = {}
+    driver.src.return_value = "/src/WebKit"
+    driver.exec.return_value = mock.Mock(ok=True)
+    driver.exec_argv.return_value = (["true"], None)
+    driver.lldb_opts.return_value = ""
+    driver.tools.return_value = "/opt/wk-tools"
+    return driver
 
 
 def _refused(case, fn):
@@ -51,42 +51,42 @@ def _refused(case, fn):
     return err.getvalue()
 
 
-class TestRefusesARemoteTarget(unittest.TestCase):
+class TestRefusesARemotePlace(unittest.TestCase):
 
     def test_a_remote_target_is_refused_before_anything_else(self):
-        target = _target(kind="remote")
+        driver = _driver(kind="remote")
         reg = mock.Mock()
-        reg.load.return_value = target
-        with mock.patch.object(GUI.targets, "Registry", return_value=reg), \
+        reg.load.return_value = driver
+        with mock.patch.object(GUI.places, "Registry", return_value=reg), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws"}):
             err = _refused(self, lambda: GUI.main([]))
-        self.assertIn("remote target", err)
+        self.assertIn("remote place", err)
         self.assertIn("ws", err)
-        target.exec_argv.assert_not_called()
+        driver.exec_argv.assert_not_called()
 
     def test_a_container_target_is_not_refused_by_this_check(self):
-        target = _target(kind="container")
+        driver = _driver(kind="container")
         reg = mock.Mock()
-        reg.load.return_value = target
-        with mock.patch.object(GUI.targets, "Registry", return_value=reg), \
+        reg.load.return_value = driver
+        with mock.patch.object(GUI.places, "Registry", return_value=reg), \
                 mock.patch.object(GUI, "is_macos", return_value=False), \
                 mock.patch.object(GUI, "session_env", return_value=""), \
-                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_QUIET": "1", "WK_CONFIG": "gtk-release"}):
+                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_QUIET": "1", "WK_PRESET": "gtk-release"}):
             GUI.main([])
-        target.exec_argv.assert_called_once()
+        driver.exec_argv.assert_called_once()
 
     def test_a_dry_run_prints_the_launch_and_runs_nothing(self):
-        target = _target(kind="container")
-        target.exec_argv.return_value = (["wkdev-enter", "--exec", "--", "run-minibrowser"], None)
+        driver = _driver(kind="container")
+        driver.exec_argv.return_value = (["wkdev-enter", "--exec", "--", "run-minibrowser"], None)
         reg = mock.Mock()
-        reg.load.return_value = target
+        reg.load.return_value = driver
         reg.machine = Fake()
         err = io.StringIO()
-        with mock.patch.object(GUI.targets, "Registry", return_value=reg), \
+        with mock.patch.object(GUI.places, "Registry", return_value=reg), \
                 mock.patch("os.execvp", side_effect=AssertionError("ran it")), \
                 mock.patch.object(GUI, "is_macos", return_value=False), \
                 mock.patch.object(GUI, "session_env", return_value=""), \
-                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_CONFIG": "gtk-release", "WK_DRY_RUN": "1"}), \
+                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "gtk-release", "WK_DRY_RUN": "1"}), \
                 contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
             GUI.main([])
         self.assertEqual(cm.exception.code, 0)
@@ -95,35 +95,35 @@ class TestRefusesARemoteTarget(unittest.TestCase):
 
 class TestJscOnlyAndMissingBrowserRefusals(unittest.TestCase):
     def test_a_jsc_only_config_is_refused(self):
-        target = _target()
+        driver = _driver()
         reg = mock.Mock()
-        reg.load.return_value = target
-        with mock.patch.object(GUI.targets, "Registry", return_value=reg), \
-                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_CONFIG": "jsc-release"}):
+        reg.load.return_value = driver
+        with mock.patch.object(GUI.places, "Registry", return_value=reg), \
+                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "jsc-release"}):
             _refused(self, lambda: GUI.main([]))
 
     def test_no_minibrowser_built_is_refused_naming_the_build_command(self):
-        target = _target()
-        target.exec.return_value = mock.Mock(ok=False)
+        driver = _driver()
+        driver.exec.return_value = mock.Mock(ok=False)
         reg = mock.Mock()
-        reg.load.return_value = target
-        with mock.patch.object(GUI.targets, "Registry", return_value=reg), \
+        reg.load.return_value = driver
+        with mock.patch.object(GUI.places, "Registry", return_value=reg), \
                 mock.patch.object(GUI, "is_macos", return_value=False), \
-                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_CONFIG": "gtk-release"}):
+                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "gtk-release"}):
             err = _refused(self, lambda: GUI.main([]))
         self.assertIn("wk build ws gtk-release", err)
 
 
 class TestMacosContainerHasNoDisplay(unittest.TestCase):
     def test_a_container_target_on_a_macos_host_is_refused(self):
-        target = _target(kind="container")
+        driver = _driver(kind="container")
         reg = mock.Mock()
-        reg.load.return_value = target
-        with mock.patch.object(GUI.targets, "Registry", return_value=reg), \
+        reg.load.return_value = driver
+        with mock.patch.object(GUI.places, "Registry", return_value=reg), \
                 mock.patch.object(GUI, "is_macos", return_value=True), \
-                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_CONFIG": "gtk-release"}):
+                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "gtk-release"}):
             _refused(self, lambda: GUI.main([]))
-        target.exec_argv.assert_not_called()
+        driver.exec_argv.assert_not_called()
 
 
 class TestFullscreenFlagByPort(unittest.TestCase):
@@ -133,11 +133,11 @@ class TestFullscreenFlagByPort(unittest.TestCase):
                  ("mac-release", "macos", "vm", ""))
         for name, os_name, kind, want in cases:
             with self.subTest(config=name):
-                cfg = buildconf.resolve(name, os_name, kind, {})
+                cfg = presets.resolve(name, os_name, kind, {})
                 self.assertEqual(GUI.fullscreen_flag(cfg), want)
 
     def test_a_config_with_no_browser_is_refused(self):
-        cfg = buildconf.resolve("ios-sim-release", "macos", "vm", {})
+        cfg = presets.resolve("ios-sim-release", "macos", "vm", {})
         with self.assertRaises(Refused):
             with contextlib.redirect_stderr(io.StringIO()):
                 GUI.fullscreen_flag(cfg)

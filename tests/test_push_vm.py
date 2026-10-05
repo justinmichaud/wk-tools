@@ -20,7 +20,7 @@ from tests.support import (guest_step, REPO,
                            WkTest, stub_path)
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import guest, secrets, targets  # noqa: E402
+from wk import guest, places, secrets  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 # `tart`: one running guest called wk-demo, and the guest itself as a directory. `tart exec` hands the guest's
@@ -76,7 +76,7 @@ exit 255
 
 def _guest(tmp, name="demo", claude=()):
     """A scratch guest home plus the host-side workspace directory and ready
-    marker Vm.created reads (lib/wk/targets.py) -- without which Vm.info says
+    marker Vm.created reads (lib/wk/places.py) -- without which Vm.info says
     `creating`, not `running`. The guest's `ps` lists the `claude` pids given:
     its commands run on this host, whose own processes are not the guest's."""
     home = tmp / "guest-home"
@@ -112,7 +112,7 @@ def _store(tmp, keys=()):
 
 
 def _forward_pidfile(vmstore, name="demo"):
-    """`wk key push on` starts one tunnel per guest, a daemon whose pidfile is in the vm target's own store."""
+    """`wk key push on` starts one tunnel per guest, a daemon whose pidfile is in the vm place's own store."""
     return pathlib.Path(vmstore) / "vm" / ("%s.agent-forward.pid" % name)
 
 
@@ -450,7 +450,7 @@ def _host(case, **env):
             "WK_HOST_SECRETS": str(case.tmp / "store" / "secrets"), "WK_VM_STORE": str(case.tmp / "vmstore"),
             "WK_LOCK_DIR": str(case.tmp / "locks"), "XDG_STATE_HOME": str(case.tmp / "state")}
     base.update(env)
-    return guest.Host(targets.Registry(str(REPO), env=base).load("vm"))
+    return guest.Host(places.Registry(str(REPO), env=base).load("vm"))
 
 
 def _quiet(fn, *args):

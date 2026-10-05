@@ -28,7 +28,7 @@ from wk import images  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, gc, targets  # noqa: E402
+from wk import decl, gc, places  # noqa: E402
 from wk.act import Refused, die  # noqa: E402
 
 
@@ -38,7 +38,7 @@ def main(argv):
              "--purge-builds": args.flag("--purge-builds"), "--purge-rubble": args.flag("--purge-rubble"),
              "--purge-images": args.flag("--purge-images")}
     flags = tuple(f for f, on in purge.items() if on)
-    g = gc.Gc(ROOT, targets.Registry(ROOT))
+    g = gc.Gc(ROOT, places.Registry(ROOT))
     if args.flag("--rows"):
         if flags:
             die("--rows prints what 'wk gc' would take, and takes no --purge flag")

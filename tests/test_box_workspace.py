@@ -7,10 +7,10 @@ import sys
 from unittest import mock
 
 from tests.support import REPO
-from tests.test_wk_targets import LINUX_PROBE, RemoteTest
+from tests.test_wk_places import LINUX_PROBE, RemoteTest
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import record, targets, workspace  # noqa: E402
+from wk import places, record, workspace  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 
@@ -29,7 +29,7 @@ class BoxTest(RemoteTest):
         root = self.tmp / "rr"
         self.conf("me", "local=1\nroot=%s\n" % root)
         me = self.reg.load("me")
-        self.fake.answer(["sh", "-c", targets.PROBE_SCRIPT], out=LINUX_PROBE)
+        self.fake.answer(["sh", "-c", places.PROBE_SCRIPT], out=LINUX_PROBE)
         self.fake.answer(["sh", "-c"], out="present\n")
         self.fake.dirs.add(me.store.ws_dir("integ"))
         return me
@@ -51,7 +51,7 @@ class TestTheWorkstationHandsTheLifecycleOver(BoxTest):
         self.fake.answer(["ssh"])
         with mock.patch("os.isatty", lambda fd: False), contextlib.redirect_stderr(io.StringIO()) as err:
             try:
-                return workspace.new_front(self.reg, records, "integ", dict(opts, target="box")), err.getvalue()
+                return workspace.new_front(self.reg, records, "integ", dict(opts, place="box")), err.getvalue()
             except Refused as e:
                 return e.status, err.getvalue()
 
@@ -97,4 +97,4 @@ class TestTheWorkstationHandsTheLifecycleOver(BoxTest):
             marker = self.tmp / "wk-remote"
             marker.write_text("")
             self.env["WK_REMOTE_MARKER"] = str(marker)
-            self.assertEqual(workspace.unsaved_results(targets.Registry(REPO, env=self.env, machine=self.fake), found), [])
+            self.assertEqual(workspace.unsaved_results(places.Registry(REPO, env=self.env, machine=self.fake), found), [])

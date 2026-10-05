@@ -17,7 +17,7 @@ from tests.killpoints import converges
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import build, images, job, record, targets  # noqa: E402
+from wk import build, images, job, places, record  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result, isolated_module  # noqa: E402
@@ -28,7 +28,7 @@ WS = "buildroot-" + PROFILE
 SHA = "a" * 40
 
 
-class Box(targets.Target):
+class Box(places.Driver):
     kind = "container"
 
     def podman(self):
@@ -51,7 +51,7 @@ class Box(targets.Target):
 
 
 class World(Fake):
-    """This machine holding `WS` on its container target `box`: the image and the workspace exist unless
+    """This machine holding `WS` on its container place `box`: the image and the workspace exist unless
     `made` is False, the stage writes `out` to its log and exits `rc`."""
 
     def __init__(self, tmp):
@@ -118,7 +118,7 @@ class TaskTest(unittest.TestCase):
         osenv = mock.patch.dict(os.environ, {}, clear=False)
         osenv.start()
         self.addCleanup(osenv.stop)
-        for v in ("WK_DRY_RUN", "WK_FORCE", "WK_YES", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_TARGET"):
+        for v in ("WK_DRY_RUN", "WK_FORCE", "WK_YES", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_PLACE"):
             os.environ.pop(v, None)
         p = mock.patch.object(record, "host_name", return_value="here")
         p.start()
@@ -160,7 +160,7 @@ class TestTheRecordAStageWrites(TaskTest):
         (w,) = [e for e in self.w.effects if e[0] == "watch"]
         argv = list(w[1])
         self.assertEqual(argv[:10], ["exec", WS] + isolated_module("/opt/wk-tools/lib", "wk.sysimage.task") + ["stage", "buildroot"])
-        self.assertEqual(argv[10:15], ["--", "python3", "/opt/wk-tools/lib/wk/sysimage/buildroot_target.py", "image", "--name"])
+        self.assertEqual(argv[10:15], ["--", "python3", "/opt/wk-tools/lib/wk/sysimage/buildroot_ws.py", "image", "--name"])
         self.assertIn("--overlay-wifi", argv)
         self.assertEqual(argv[argv.index("--jobs") + 1], "8")
 
@@ -188,7 +188,7 @@ class TestTheRecordAStageWrites(TaskTest):
         rc, err = self.build()
         self.assertEqual(rc, 0, err)
         (new,) = [e for e in self.w.effects if e[0] == "run_tty" and e[1][:1] == ("env",)]
-        self.assertEqual(list(new[1]), ["env", "WK_SDK_IMAGE=" + self.w.tag(), str(REPO / "wk"), "new", WS, "--target", "box"])
+        self.assertEqual(list(new[1]), ["env", "WK_SDK_IMAGE=" + self.w.tag(), str(REPO / "wk"), "new", WS, "--on", "box"])
 
     def test_a_workspace_made_from_another_image_is_refused_naming_the_remake(self):
         self.w.answer(["podman", "container", "inspect"], out="localhost/wk-buildroot-host:22.04-old\n")
@@ -304,7 +304,7 @@ class TestRefusals(TaskTest):
     def test_a_target_that_is_not_a_container_is_refused(self):
         with mock.patch.object(Box, "kind", "remote"):
             err = self.refused()
-        self.assertIn("a buildroot image builds in a container workspace, and target 'box' is a remote one", err)
+        self.assertIn("a buildroot image builds in a container workspace, and place 'box' is a remote one", err)
 
     def test_an_unknown_option_is_a_usage_error(self):
         self.assertIn("--stage is not an option of this build", self.refused(None, "--stage", "image"))
@@ -344,10 +344,10 @@ class TestTheWatchdog(TaskTest):
             t = real(recs, *a, **kw)
             t.set("pid_match", buildroot.PATTERN)
             t.pid(777)
-            t.set("where", "target")
+            t.set("where", "place")
             return t
         self.w.pids.add(777)
-        self.w.answer(["exec", WS, "ps", "-o", "args=", "-p", "777"], out="python3 /opt/wk-tools/lib/wk/sysimage/buildroot_target.py image --name x\n")
+        self.w.answer(["exec", WS, "ps", "-o", "args=", "-p", "777"], out="python3 /opt/wk-tools/lib/wk/sysimage/buildroot_ws.py image --name x\n")
         self.w.react(["exec", WS, "kill", "-TERM"], lambda a, f: (f.pids.discard(777), Result(0))[1])
         with mock.patch.object(record.Records, "begin", begin):
             self.refused(status=130)
@@ -360,9 +360,9 @@ class TestStop(TaskTest):
         t = self.w.recs().begin("buildroot", "here", WS, "k", self.w.log, ["a"], pid=1)
         t.set("pid_match", buildroot.PATTERN)
         t.pid(777)
-        t.set("where", "target")
+        t.set("where", "place")
         self.w.pids.add(777)
-        self.w.answer(["exec", WS, "ps", "-o", "args=", "-p", "777"], out="python3 /opt/wk-tools/lib/wk/sysimage/buildroot_target.py image --name x\n")
+        self.w.answer(["exec", WS, "ps", "-o", "args=", "-p", "777"], out="python3 /opt/wk-tools/lib/wk/sysimage/buildroot_ws.py image --name x\n")
         self.w.answer(["exec", WS, "sh", "-c"], out="778\n777\n")
         self.w.react(["exec", WS, "kill", "-TERM"], lambda a, f: (f.pids.discard(777), Result(0))[1])
         rc, err = self.build(None, "--stop")

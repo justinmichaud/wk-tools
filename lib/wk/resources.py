@@ -1,4 +1,4 @@
-"""The envelope a target is sized from and each build's budget, read through a `Machine`."""
+"""The envelope a place is sized from and each build's budget, read through a `Machine`."""
 
 import argparse
 import os
@@ -108,7 +108,7 @@ class Resources:
         return self._setting("WK_CGROUP_CORES", None) or self.host_cores()
 
     def load(self):
-        """A remote target's, measured by whoever can reach it, else this machine's."""
+        """A remote place's, measured by whoever can reach it, else this machine's."""
         v = self.env.get("WK_LOAD")
         return int(v) if v else self.host_load()
 
@@ -228,7 +228,7 @@ class Budget:
                 act.warn("parallelism: %d jobs is under half of %d cores -- load average\n  %d is treated as that many cores already spoken for on this shared machine."
                          % (jobs, cores, load))
             else:
-                act.warn("parallelism: %d jobs is under half of %d cores -- %d is\n  this target's own ceiling (a reserve held back for the host, or a fixed vCPU/cgroup count)."
+                act.warn("parallelism: %d jobs is under half of %d cores -- %d is\n  this place's own ceiling (a reserve held back for the host, or a fixed vCPU/cgroup count)."
                          % (jobs, cores, cores))
         return jobs
 
@@ -274,7 +274,7 @@ def build_jobs(res, budget, running):
 
 
 def defaults():
-    from wk.buildconf import DISK_GB
+    from wk.presets import DISK_GB
     return "".join(': "${%s:=%s}"\n' % pair for pair in (
         ("WK_RESERVE_CORES", RESERVE_CORES), ("WK_RESERVE_MB", RESERVE_MB),
         ("WK_HEADLESS_RESERVE_CORES", HEADLESS_RESERVE_CORES), ("WK_HEADLESS_RESERVE_MB", HEADLESS_RESERVE_MB),

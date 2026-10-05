@@ -14,7 +14,7 @@ from unittest import mock
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets, tools  # noqa: E402
+from wk import places, tools  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
 
 SHA = "a" * 40
@@ -225,7 +225,7 @@ class TestDryRun(ToolsPushCase):
 
 
 class EachKind(unittest.TestCase):
-    """Each driver's `sync_tools` over a Fake host: the push goes to where that target runs wk-tools from."""
+    """Each driver's `sync_tools` over a Fake host: the push goes to where that place runs wk-tools from."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-tools-kind-"))
@@ -241,7 +241,7 @@ class EachKind(unittest.TestCase):
         self.fake.answer(["scp"])
         self.fake.react(["ssh"], lambda a, f: Result(1) if "wk-image" in a[-1] else
                         Result(0, SHA + "\n" if "rev-parse HEAD" in a[-1] else ""))
-        self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
+        self.reg = places.Registry(REPO, env=self.env, machine=self.fake)
 
     def conf(self, name, text):
         (self.tmp / "hosts" / (name + ".conf")).write_text(text)
@@ -271,11 +271,11 @@ class EachKind(unittest.TestCase):
     def test_a_guest_gets_the_same_bundle_through_its_guest_agent(self):
         (self.tmp / "vmstore").mkdir()
         self.env.update({"WK_VM_STORE": str(self.tmp / "vmstore"), "WK_VM_USER": "admin"})
-        t = targets.Vm("vm", str(REPO), dict(self.env), self.fake)
+        t = places.Vm("vm", str(REPO), dict(self.env), self.fake)
         self.fake.react(["/t/tart", "exec"], lambda a, f: Result(1) if "wk-image" in a[-1] else
                         Result(0, SHA + "\n" if "rev-parse HEAD" in a[-1] else ""))
         self.fake.answer(["sh", "-c"])
-        with mock.patch.object(targets.Vm, "tart", lambda s: "/t/tart"), mock.patch.object(targets.Vm, "vm_state", return_value="running"), \
+        with mock.patch.object(places.Vm, "tart", lambda s: "/t/tart"), mock.patch.object(places.Vm, "vm_state", return_value="running"), \
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertTrue(t.sync_tools("mac"))
         runs = [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] in ("/t/tart", "sh")]
@@ -326,9 +326,9 @@ class TestStatusToolsRow(unittest.TestCase):
 
 class TestTheToolsSource(unittest.TestCase):
     def test_a_container_mounts_this_checkout_unless_the_env_names_another(self):
-        c = targets.Container("container", str(REPO), {"HOME": "/nonexistent"}, Fake("here"))
+        c = places.Container("container", str(REPO), {"HOME": "/nonexistent"}, Fake("here"))
         self.assertEqual(c.tools_src(), str(REPO))
-        c = targets.Container("container", str(REPO), {"HOME": "/nonexistent", "WK_TOOLS_SRC": "/x"}, Fake("here"))
+        c = places.Container("container", str(REPO), {"HOME": "/nonexistent", "WK_TOOLS_SRC": "/x"}, Fake("here"))
         self.assertEqual(c.tools_src(), "/x")
 
 

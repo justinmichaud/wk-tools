@@ -10,7 +10,7 @@ from wk import act, images, kv
 from wk.kv import ConfError
 
 KINDS = ("build", "peer", "board", "mac", "guest", "bridge")
-TARGET_KINDS = ("build", "peer")
+PLACE_KINDS = ("build", "peer")
 BENCH_KINDS = ("board", "mac", "guest")
 BRIDGE_DEFAULTS = {"ssh": lambda n: n, "hostname": lambda n: n, "tag": "tag:bridge", "if": "lan0",
                    "egress": "none", "camera": "off", "user": "user", "battery_limit": "80"}
@@ -99,12 +99,12 @@ class Fleet:
         return out
 
     def named_by_host(self, host):
-        """The target this host is, by `hostname -s`: two machines sharing one home share every file there."""
+        """The place this host is, by `hostname -s`: two machines sharing one home share every file there."""
         host = (host or "").lower()
-        for n in self.names(TARGET_KINDS):
+        for n in self.names(PLACE_KINDS):
             if (self.load(n).get("hostname") or n).lower() == host:
                 return n
-        raise LookupError("this host, %s, is the far end of a target (~/.wk-remote), and no machines/<name>.conf\n"
+        raise LookupError("this host, %s, is the far end of a place (~/.wk-remote), and no machines/<name>.conf\n"
                           "    names it. Set hostname=%s in the conf of the machine it is." % (host, host))
 
 

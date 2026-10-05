@@ -228,8 +228,8 @@ class TestAWkCommandStep(unittest.TestCase):
         f.answer(["sh", "-c", sched.LOGGED])
         s = sched.wk_step(f, "/t/wk", lambda st: "/l", "a", "m", (), (), None, ["x"], "moose")
         s.run()
-        self.assertEqual(s.command, "WK_TARGET=moose wk x")
-        self.assertEqual(f.effects[0][1][5:8], ("env", "WK_TARGET=moose", "/t/wk"))
+        self.assertEqual(s.command, "WK_PLACE=moose wk x")
+        self.assertEqual(f.effects[0][1][5:8], ("env", "WK_PLACE=moose", "/t/wk"))
 
     def test_the_verdict_is_the_last_line(self):
         f = Fake("here")

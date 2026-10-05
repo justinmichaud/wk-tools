@@ -46,7 +46,7 @@ if [ "$self" != git ] && [ -z "${WK_BUILD:-}" ] \
     printf '%s: refused. An agent does not drive a build or a test run directly:\n' "$self" >&2
     printf '  wk carries the job count and the nice level this machine needs, and a raw\n' >&2
     printf '  %s has taken shared build machines down.\n' "$self" >&2
-    printf 'Use instead:  wk build <config> | wk test <args> | wk bench <plan> | wk run -- <args>\n' >&2
+    printf 'Use instead:  wk build <preset> | wk test <args> | wk bench <plan> | wk run -- <args>\n' >&2
     exit 1
 fi
 

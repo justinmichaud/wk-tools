@@ -126,7 +126,7 @@ class Fleet:
 
     def __init__(self, reg, env):
         self.reg, self.env = reg, env
-        self.peers, self.boxes, self.targets = [], [], {}
+        self.peers, self.boxes, self.drivers = [], [], {}
 
     def _load(self, name):
         try:
@@ -141,20 +141,20 @@ class Fleet:
             loaded = list(pool.map(self._load, names))
         for name, t in zip(names, loaded):
             if t is not None:
-                self.targets[name] = t
+                self.drivers[name] = t
                 (self.peers if t.peer else self.boxes).append(name)
         return self
 
     def _argv(self, name, args, env):
-        return ["sh", "-c", self.targets[name].wk_cmd(["key"] + list(args), env)]
+        return ["sh", "-c", self.drivers[name].wk_cmd(["key"] + list(args), env)]
 
     def ask(self, name, *args):
         """(status, stdout): a read, so the far side is never told this run is a dry one."""
         env = {k: v for k, v in self.env.items() if k != "WK_DRY_RUN"}
-        r = self.targets[name].machine.run(self._argv(name, args, env), input="")
+        r = self.drivers[name].machine.run(self._argv(name, args, env), input="")
         return r.rc, r.out.replace("\r", "")
 
     def tell(self, name, args, value):
         """The value on stdin, never an argument in `ps` over there."""
-        r = self.targets[name].machine.act_run(self._argv(name, args, self.env), input=value)
+        r = self.drivers[name].machine.act_run(self._argv(name, args, self.env), input=value)
         return r.ok, r.out.replace("\r", "")

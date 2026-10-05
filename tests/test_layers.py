@@ -36,10 +36,10 @@ class TestZedStripsTheDispatchersVariables(unittest.TestCase):
         seen = {}
         with tempfile.TemporaryDirectory() as empty, mock.patch.object(zed, "ROOT", empty), \
                 mock.patch.object(zed.Local, "exec", lambda self, argv, env: seen.update(env=env)), \
-                mock.patch.dict(os.environ, {"WK_NAME": "a", "WK_CONFIG": "Debug", "KEEP": "1"}):
+                mock.patch.dict(os.environ, {"WK_NAME": "a", "WK_PRESET": "Debug", "KEEP": "1"}):
             zed.exec_clean(["zed", "url"])
         self.assertNotIn("WK_NAME", seen["env"])
-        self.assertNotIn("WK_CONFIG", seen["env"])
+        self.assertNotIn("WK_PRESET", seen["env"])
         self.assertEqual("1", seen["env"]["KEEP"])
 
 
@@ -89,12 +89,12 @@ class TestStatusIsReadFromTheLibrary(unittest.TestCase):
 class TestPrOpenAsksWhatPushStatusAsks(unittest.TestCase):
     def test_a_refused_push_status_refuses_without_a_wk_subprocess(self):
         pr = load_cmd("pr")
-        target = mock.Mock()
+        driver = mock.Mock()
         with mock.patch.object(pr, "pr_open_target", return_value=("WebKit/WebKit", "me:topic", "fork", "topic")), \
                 mock.patch.object(subprocess, "run", no_subprocess), mock.patch("sys.stderr", io.StringIO()):
             with self.assertRaises(Refused):
-                pr.pr_open(target, "ws", False, False, lambda: 1)
-        target.exec.assert_not_called()
+                pr.pr_open(driver, "ws", False, False, lambda: 1)
+        driver.exec.assert_not_called()
 
     def test_the_answer_is_the_exit_code_of_the_push_switchs_own_status(self):
         pr = load_cmd("pr")

@@ -109,7 +109,7 @@ class Channel:
         return {"host": "m_ssh", "bench": "i_ssh"}.get(channel, "")
 
     def is_root(self):
-        """Privilege follows the channel that answered: a bench system is root, a bench-device's host mode its rescue."""
+        """Privilege follows the channel that answered: a bench system is root, a bench machine's host mode its rescue."""
         return self.channel == "bench" or self.c("role") == "bench-device"
 
     def run(self, fn, argv, input=None, mutates=False):
@@ -272,7 +272,7 @@ class Driver:
         return r.ok and r.out.replace("\r", "").strip() == "no"
 
     def medium_read(self, p, name):
-        """"" for a file the partition lacks, None when unreadable; a bench-device mounts its own medium."""
+        """"" for a file the partition lacks, None when unreadable; a bench machine mounts its own medium."""
         if self.c("role") == "bench-device":
             r = self.sudo("medium-read.sh", WK_PART=p, WK_FILE=name)
             return r.out if r.ok else None

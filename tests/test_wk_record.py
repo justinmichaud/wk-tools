@@ -25,7 +25,7 @@ class RecordTest(unittest.TestCase):
         os.utime(self.log, (self.clock.now(), self.clock.now()))
         self.answers = {}
         self.records = record.Records(self.tmp / "store", clock=self.clock,
-                                      ask_target=lambda name, pid, cap: self.answers.get((name, pid)),
+                                      ask_place=lambda name, pid, cap: self.answers.get((name, pid)),
                                       env={"WK_STORE": str(self.tmp / "store")})
 
     def tearDown(self):
@@ -50,7 +50,7 @@ class TestTheShapeOnDisk(RecordTest):
         self.assertEqual([], list((t.path / "steps").glob("*")))
 
     def test_a_target_record_has_no_pid_until_the_job_announces_one(self):
-        t = self.begin(where="target")
+        t = self.begin(where="place")
         self.assertEqual(t.field("pid"), "")
         t.pid(4242, "moose")
         self.assertEqual((t.field("pid"), t.field("machine")), ("4242", "moose"))
@@ -135,7 +135,7 @@ class TestTheVerdict(RecordTest):
         self.assertEqual(t.verdict(stall_seconds=2000), "running")
 
     def test_a_target_pid_is_asked_of_the_workspace(self):
-        t = self.begin(where="target")
+        t = self.begin(where="place")
         self.assertEqual(t.verdict(), "starting")
         t.pid(77)
         self.answers[("ws", 77)] = True
@@ -310,10 +310,10 @@ class TestHoldFollowsHolder(RecordTest):
 
     def test_a_workspace_pid_cannot_hold(self):
         with self.assertRaises(ValueError):
-            self.begin(where="target", holds="device:rpi3")
+            self.begin(where="place", holds="device:rpi3")
 
     def test_a_target_record_given_a_hold_keeps_it_until_it_ends(self):
-        t = self.begin(where="target")
+        t = self.begin(where="place")
         t.set("holds", "device:rpi3")
         t.pid(77)
         self.assertEqual(self.holders(), [t.id])
@@ -336,8 +336,8 @@ class TestHoldFollowsHolder(RecordTest):
         self.assertEqual(self.records.wait("build", "nothing", str(self.log), pid=4242), "crashed")
 
 
-class TestOneStorePerTarget(unittest.TestCase):
-    """The vm target's store is WK_VM_STORE or this host's record directory, never the container's."""
+class TestOneStorePerPlace(unittest.TestCase):
+    """The vm place's store is WK_VM_STORE or this host's record directory, never the container's."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="wk-test-vmstore-")

@@ -1,4 +1,4 @@
-"""`wk sync`: each target's furniture, this machine's mirror, each target's snapshot, then a fetch per
+"""`wk sync`: each place's furniture, this machine's mirror, each place's snapshot, then a fetch per
 workspace that reads the checkout's wiring back in the same round trip, `--fix` re-asserting it first."""
 
 import contextlib
@@ -11,7 +11,7 @@ from wk import act, git, kv, pr, secrets
 from wk.act import Refused, debug, die, info, log, warn
 from wk.store import Snapshots, Store, in_vm
 
-SCOPE_FLAGS = ("--all", "--tools", "--target", "--mirror")
+SCOPE_FLAGS = ("--all", "--tools", "--on", "--mirror")
 FETCH_JOBS = 16
 FIX_AGAIN = "'wk sync <ws> --fix' re-asserts the wiring"
 
@@ -82,10 +82,10 @@ def stage(clock, name):
 
 
 class Sync:
-    def __init__(self, reg, clock, lock, scope, only="", target="", fix=False):
+    def __init__(self, reg, clock, lock, scope, only="", place="", fix=False):
         self.reg, self.clock, self.lock = reg, clock, lock
         self.here, self.root, self.env = reg.machine, reg.root, reg.env
-        self.scope, self.only, self.target, self.fix = scope, only, target, fix
+        self.scope, self.only, self.place, self.fix = scope, only, place, fix
         self.branches = git.mirror_branches(self.env)
         self._forks = None
 
@@ -96,16 +96,16 @@ class Sync:
 
     # -- the scope
 
-    def targets(self):
+    def places(self):
         if self.scope == "here":
             return self.reg.here()
-        if self.target:
-            return [self.target]
+        if self.place:
+            return [self.place]
         return self.reg.walk()
 
     def touches_here(self):
         here = self.reg.here()
-        return any(t in here for t in self.targets())
+        return any(t in here for t in self.places())
 
     def mirror_is_here(self):
         return not in_vm(self.env)
@@ -143,91 +143,91 @@ class Sync:
             return self.refresh_mirror()
         if self.scope == "ws":
             return self.sync_one()
-        if self.target:
-            self.load(self.target)
+        if self.place:
+            self.load(self.place)
         rc = self.sync_furniture()
         if self.touches_here() and self.mirror_is_here():
             rc |= self.refresh_mirror()
-        for t in self.targets():
+        for t in self.places():
             rc |= self.sync_store_of(t)
         return rc
 
     def sync_one(self):
         rc = 0
         try:
-            target = self.load(self.reg.ws_target(self.only))
+            driver = self.load(self.reg.ws_place(self.only))
         except LookupError as e:
             die(str(e))
         if self.reg.in_workspace():
             rc = self.mirror_refresh_request()
         else:
-            target.store_init()
-        return rc | self.fetch_workspaces(target, [self.only])
+            driver.store_init()
+        return rc | self.fetch_workspaces(driver, [self.only])
 
     def sync_furniture(self):
         bad = 0
-        for t in self.targets():
+        for t in self.places():
             try:
-                ok = self.load(t).sync(named=bool(self.target))
+                ok = self.load(t).sync(named=bool(self.place))
             except Refused:
                 ok = False
             bad += 0 if ok else 1
         info("'wk status' compares every copy against this one")
         if bad:
-            warn("%d target(s) did not take the tooling -- see above" % bad)
+            warn("%d place(s) did not take the tooling -- see above" % bad)
             return 1
         return 0
 
     def sync_store_of(self, name):
-        target = self.load(name)
-        if target.needs_base and not Store(self.env).is_local():
-            return self.sync_in_vm(target)
+        driver = self.load(name)
+        if driver.needs_base and not Store(self.env).is_local():
+            return self.sync_in_vm(driver)
         rc = 0
-        if target.needs_base:
+        if driver.needs_base:
             try:
                 with self.lock.held("store"):
-                    self.sync_snapshot(target)
+                    self.sync_snapshot(driver)
             except Refused:
                 rc = 1
-            rc |= self.base_wiring(target)
+            rc |= self.base_wiring(driver)
         if self.scope != "tools":
-            rc |= self.sync_target(target)
+            rc |= self.sync_place(driver)
         return rc
 
-    def sync_in_vm(self, target):
-        word = "--tools" if self.scope == "tools" else "--target"
-        if target.far_side() != "answering":
+    def sync_in_vm(self, driver):
+        word = "--tools" if self.scope == "tools" else "--on"
+        if driver.far_side() != "answering":
             warn("the podman machine is stopped, so %s's snapshot was not published and its\n"
-                 "    workspaces did not fetch:  wk start, then  wk sync %s %s" % (target.name, word, target.name))
+                 "    workspaces did not fetch:  wk start, then  wk sync %s %s" % (driver.name, word, driver.name))
             return 1
-        info("%s's snapshot and workspaces are in the podman VM -- syncing in there" % target.name)
-        rc, out = target.wk("sync", word, target.name, *(["--fix"] if self.fix else []))
+        info("%s's snapshot and workspaces are in the podman VM -- syncing in there" % driver.name)
+        rc, out = driver.wk("sync", word, driver.name, *(["--fix"] if self.fix else []))
         sys.stderr.write(out)
         return 0 if rc == 0 else 1
 
     # A peer is asked by name, never a scope word: what a scope means is its own copy of wk-tools to decide.
-    def sync_target(self, target):
-        if target.kind == "remote" and target.peer:
-            names = [n for n, _ in target.list()]
+    def sync_place(self, driver):
+        if driver.kind == "remote" and driver.peer:
+            names = [n for n, _ in driver.list()]
             if not names:
-                info("no workspaces on %s" % target.name)
+                info("no workspaces on %s" % driver.name)
                 return 0
-            info("%s holds its own workspaces -- asking it to fetch in each" % target.name)
+            info("%s holds its own workspaces -- asking it to fetch in each" % driver.name)
             rc = 0
             for w in names:
-                code, out = target.wk("sync", w, *(["--fix"] if self.fix else []), env=dict(target.env, WK_NO_DELEGATE="1"))
+                code, out = driver.wk("sync", w, *(["--fix"] if self.fix else []), env=dict(driver.env, WK_NO_DELEGATE="1"))
                 sys.stderr.write(out)
                 if code:
                     rc = 1
-                    warn("%s did not fetch in '%s' -- see above%s" % (target.name, w, (
+                    warn("%s did not fetch in '%s' -- see above%s" % (driver.name, w, (
                         "; a usage error is a copy of wk-tools older than 'wk sync --fix':\n"
-                        "    wk sync --tools %s" % target.name) if self.fix and code == 2 else ""))
+                        "    wk sync --tools %s" % driver.name) if self.fix and code == 2 else ""))
             return rc
-        names = target.workspaces()
+        names = driver.workspaces()
         if not names:
-            info("no workspaces on %s" % target.name)
+            info("no workspaces on %s" % driver.name)
             return 0
-        return self.fetch_workspaces(target, names)
+        return self.fetch_workspaces(driver, names)
 
     # -- the mirror and the snapshot
 
@@ -309,9 +309,9 @@ class Sync:
         return ""
 
     # `--shared`: the snapshot borrows the mirror's objects, and every workspace overlaid on it borrows them too.
-    def sync_snapshot(self, target):
-        target.store_init()
-        store, here = target.store, self.here
+    def sync_snapshot(self, driver):
+        driver.store_init()
+        store, here = driver.store, self.here
         mirror = store.mirror_dir()
         if not here.isdir(mirror):
             die("no mirror at %s to publish a snapshot from -- 'wk sync' on the host makes it" % mirror)
@@ -369,20 +369,20 @@ class Sync:
         here.write(store.snapshot_sha_file(new_id), sha + "\n")
         info("published base %s (%s)" % (new_id, sha[:10]))
 
-    def base_wiring(self, target):
+    def base_wiring(self, driver):
         """The current snapshot is where every future workspace gets its remotes from."""
-        base = Snapshots(target.store, self.here).current()
-        tree = target.store.snapshot_tree(base) if base else ""
+        base = Snapshots(driver.store, self.here).current()
+        tree = driver.store.snapshot_tree(base) if base else ""
         if not tree or not self.here.isdir(os.path.join(tree, ".git")):
             return 0
-        mirror = target.store.mirror_dir()
+        mirror = driver.store.mirror_dir()
         r = self.here.run(["sh", "-c", git.wiring_check_script(tree, mirror, self.forks(), self.branches, "skip-env")])
         if r.ok:
             return 0
         warn("the snapshot %s is wired wrong, and every new workspace starts from it:\n%s"
              % (base, "".join("    - %s\n" % l[len("problem: "):] for l in r.out.splitlines() if l.startswith("problem: ")).rstrip("\n")))
         if not self.fix:
-            log("  re-assert it:  wk sync --target %s --fix" % target.name)
+            log("  re-assert it:  wk sync --on %s --fix" % driver.name)
             return 1
         if not self.here.act_run(["sh", "-c", git.wiring_script(tree, mirror, self.forks(), self.branches)]).ok:
             warn("could not re-wire the snapshot %s" % base)
@@ -392,10 +392,10 @@ class Sync:
 
     # -- the workspaces
 
-    def fetch_workspaces(self, target, names):
+    def fetch_workspaces(self, driver, names):
         info("fetching in %d workspace(s) -- %s" % (len(names), " ".join(r[0] for r in git.REMOTES)))
         with ThreadPoolExecutor(max_workers=min(len(names), FETCH_JOBS)) as pool:
-            results = list(pool.map(lambda ws: self.fetch_one(target, ws), names))
+            results = list(pool.map(lambda ws: self.fetch_one(driver, ws), names))
         failed = wired = 0
         for code, text in results:
             sys.stderr.write(text)
@@ -410,19 +410,19 @@ class Sync:
             warn("%d workspace(s) fetched but are wired wrong (above) -- %s" % (wired, FIX_AGAIN))
         return 1 if failed or wired else 0
 
-    def fetch_one(self, target, ws):
+    def fetch_one(self, driver, ws):
         """(ok | skipped | failed | wired, its lines): these run at once, so nothing is printed here."""
         try:
-            st = target.state(ws)
+            st = driver.state(ws)
         except Refused:
             st = "unreachable"
         if st != "present":
             return "skipped", "  %-24s %s -- skipped\n" % (ws, st)
-        src, mirror = target.src(ws), target.mirror_dir()
+        src, mirror = driver.src(ws), driver.mirror_dir()
         notes = []
-        fixed = self.fix_one(target, ws, src, mirror, notes) if self.fix else True
+        fixed = self.fix_one(driver, ws, src, mirror, notes) if self.fix else True
         with stage(self.clock, "workspace fetch %s" % ws):
-            r = target.act_exec(ws, ["sh", "-c", fetch_and_check_script(src, mirror, self.forks(), self.branches)])
+            r = driver.act_exec(ws, ["sh", "-c", fetch_and_check_script(src, mirror, self.forks(), self.branches)])
         lines = r.out.replace("\r", "").splitlines()
         said = kv.kv(r.out)
         problems = ["    - %s" % l[len("problem: "):] for l in lines if l.startswith("problem: ")]
@@ -441,18 +441,18 @@ class Sync:
             return "wired", "  %-24s %s -- wired wrong:\n%s" % (ws, row, "".join(p + "\n" for p in notes + problems))
         return "ok", "  %-24s %s\n%s" % (ws, row, "".join(p + "\n" for p in notes))
 
-    def fix_one(self, target, ws, src, mirror, notes):
+    def fix_one(self, driver, ws, src, mirror, notes):
         """`git-webkit setup` runs only where the injector puts the credential it reads: a container or a guest."""
-        n, u, c = target.wiring_args()
-        r = target.act_exec(ws, ["sh", "-c", git.wiring_script(src, mirror, self.forks(), self.branches, n, u, c)])
+        n, u, c = driver.wiring_args()
+        r = driver.act_exec(ws, ["sh", "-c", git.wiring_script(src, mirror, self.forks(), self.branches, n, u, c)])
         if not r.ok:
             notes.append("    could not re-wire '%s'" % ws)
             return False
         notes.append("    re-wired")
-        notes.extend("    " + l for l in pr.retarget(target, ws, src, self.forks(), self.branches) + pr.converge(target, ws, src, self.forks()))
-        if target.kind not in ("container", "vm"):
+        notes.extend("    " + l for l in pr.retarget(driver, ws, src, self.forks(), self.branches) + pr.converge(driver, ws, src, self.forks()))
+        if driver.kind not in ("container", "vm"):
             return True
-        r = target.act_exec(ws, ["sh", "-c", git.gitwebkit_setup_script(src, self.forks())])
+        r = driver.act_exec(ws, ["sh", "-c", git.gitwebkit_setup_script(src, self.forks())])
         said = (r.out.replace("\r", "").strip().splitlines() or [""])[-1]
         if not r.ok:
             notes.extend("    " + l for l in r.err.replace("\r", "").splitlines() if l.strip())

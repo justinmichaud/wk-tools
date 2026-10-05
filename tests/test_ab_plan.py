@@ -75,7 +75,7 @@ class Far(Fake):
 
 
 class Reg(FakeRegistry):
-    """The container target as a macOS host has it: its store in the podman machine, reached over `podman machine ssh`."""
+    """The container place as a macOS host has it: its store in the podman machine, reached over `podman machine ssh`."""
 
     remote = {}
 
@@ -110,7 +110,7 @@ class World:
         for name in self.boards_:
             (self.tmp / "machines" / (name + ".conf")).write_text("kind=board\nssh=%s-rescue\n" % name)
         self.fake, self.clock = Far("here"), FakeClock()
-        self.reg = Reg(self.env, self.fake, ws_target=lambda ws: "container", in_workspace=lambda: False)
+        self.reg = Reg(self.env, self.fake, ws_place=lambda ws: "container", in_workspace=lambda: False)
         self.mirror = self.reg.store.mirror_dir()
         self.fake.dirs.add(self.mirror)
         self.ahead, self.benched = ahead, []
@@ -138,7 +138,7 @@ class World:
         store = self.tmp / "peer1"
         (self.tmp / "machines" / "peer1.conf").write_text("kind=peer\ndriver=remote\nhost=peer1\npeer=1\ntools=%s\n" % REPO)
         (store / "machines").mkdir(parents=True)
-        self.fake.peer_env = {"PATH": os.environ["PATH"], "HOME": str(store), "SHELL": "/bin/sh", "WK_TARGET": "local",
+        self.fake.peer_env = {"PATH": os.environ["PATH"], "HOME": str(store), "SHELL": "/bin/sh", "WK_PLACE": "local",
                               "WK_LOCAL_STORE": str(store), "XDG_STATE_HOME": str(store / "state"),
                               "XDG_CONFIG_HOME": str(store / "config"), "WK_MACHINES_DIR": str(store / "machines")}
         return store / "ws" / ("buildroot-" + R38) / "bench"
@@ -407,7 +407,7 @@ class TestTheGraph(ABTest):
         self.assertEqual((s["instr:%s:base" % ws].holds, s["instr:%s:pr" % ws].holds), (("machine:one",), ("machine:two",)))
         first = {x.id for x in sched.waves(list(s.values()))[0]}
         self.assertEqual(first, {"image:%s@one" % ws, "image:%s@two" % ws})
-        self.assertTrue(s["deploy:rpi5:pr"].command.startswith("WK_TARGET=two "))
+        self.assertTrue(s["deploy:rpi5:pr"].command.startswith("WK_PLACE=two "))
 
     def test_two_slots_and_two_systems_are_one_board_ab_each(self):
         w = self.world()
@@ -486,7 +486,7 @@ class TestARun(ABTest):
         self.assertEqual(record.tasks(str(far / "bench")), [name])
         self.assertEqual(record.tasks(w.home()), [], "nothing is written into the workspace of the same name here")
         bench = [e[1] for e in w.fake.effects if e[0] == "run" and e[1][:2] == ("sh", "-c") and "run" in e[1] and "--ab" in e[1]]
-        self.assertTrue(bench and all("WK_TARGET=one" in argv for argv in bench), bench)
+        self.assertTrue(bench and all("WK_PLACE=one" in argv for argv in bench), bench)
 
     def test_a_task_in_a_peers_workspace_is_written_where_its_own_wk_holds_it(self):
         w = self.world()

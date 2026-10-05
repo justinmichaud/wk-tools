@@ -30,8 +30,8 @@ but a workspace on a shared build box is at neither path, so `pwd` is not the te
 yours to do:**
 
 ```bash
-wk build <config>              # jsc-release, gtk-debug, wpe-release, mac-release, ...
-wk build <config> --detach     # tens of minutes; survives the shell going away
+wk build <preset>              # jsc-release, gtk-debug, wpe-release, mac-release, ...
+wk build <preset> --detach     # tens of minutes; survives the shell going away
 wk build --list                # what the configs are
 wk status                      # build/test state, machine-readable exit code
 wk status --log [-f]                   # the log, errors first
@@ -41,7 +41,7 @@ wk run -- <args>               # run jsc from the build just made
 `wk build` already derives the job count from available memory, runs the build at
 a nice level that keeps the host usable, watches for OOM (`build=oom` in
 `wk status`, with the peak and the budget — rebuild with
-`WK_MB_PER_JOB=3072 wk build <config>` rather than assuming the code is at
+`WK_MB_PER_JOB=3072 wk build <preset>` rather than assuming the code is at
 fault), and passes the right arch flags in a 32-bit workspace. Do not hand-roll
 a `build-webkit` invocation in here: a raw `ninja -j$(nproc)` can hang the
 machine, and every number below about `-j` is the host's problem, not yours.

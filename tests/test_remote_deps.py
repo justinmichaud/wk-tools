@@ -34,7 +34,7 @@ git.fsmonitor=true
 git.manyfiles=true
 marker=yes
 root=/home/x/wk
-target=fullbox
+place=fullbox
 cred..wk-agent-token=__TOKEN__
 cred..wk-litellm-key=__LITELLM__
 """
@@ -58,7 +58,7 @@ git.fsmonitor=
 git.manyfiles=
 marker=yes
 root=/home/x/wk
-target=thinbox
+place=thinbox
 """
 
 NO_GIT = FULL.replace("tool.git=/usr/bin/git", "tool.git=")

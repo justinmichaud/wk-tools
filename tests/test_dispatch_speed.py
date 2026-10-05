@@ -1,4 +1,4 @@
-"""What resolving a workspace name costs: the walk that decides which target"""
+"""What resolving a workspace name costs: the walk that decides which place"""
 import os
 import subprocess
 import sys
@@ -34,8 +34,8 @@ _LOCAL_CONF = (
     "store={store}\n"
 )
 
-_ASK = ("import sys; sys.path.insert(0, sys.argv[1]); from wk import targets\n"
-        "a = getattr(targets.Registry(sys.argv[2]), sys.argv[3])(sys.argv[4])\n"
+_ASK = ("import sys; sys.path.insert(0, sys.argv[1]); from wk import places\n"
+        "a = getattr(places.Registry(sys.argv[2]), sys.argv[3])(sys.argv[4])\n"
         "print(a if isinstance(a, str) else ' '.join(a))\n")
 
 
@@ -79,7 +79,7 @@ class TestALocalNameNeverReachesTheFleet(WkTest):
             _MACHINE_CONF.format(host="fakemachine.invalid"))
         witness = self.tmp / "ssh-witness"
         with stub_path({"ssh": _WITNESS_SSH}) as binp:
-            cp = ask("ws_target", "here-ws", {
+            cp = ask("ws_place", "here-ws", {
                 "WK_MACHINES_DIR": str(registry),
                 "XDG_STATE_HOME": str(self.tmp / "state"),
                 "WK_TEST_SSH_WITNESS": str(witness),
@@ -102,7 +102,7 @@ class TestAMachineThatDidNotAnswerIsNamed(WkTest):
         (registry / "fakedown.conf").write_text(
             _MACHINE_CONF.format(host="fakedown.invalid"))
         with stub_path({"ssh": _DOWN_SSH}) as binp:
-            cp = ask("ws_target", "no-such-workspace", {
+            cp = ask("ws_place", "no-such-workspace", {
                 "WK_MACHINES_DIR": str(registry),
                 "XDG_STATE_HOME": str(self.tmp / "state"),
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
@@ -130,7 +130,7 @@ class TestTheListingWalksTheSameWay(WkTest):
         cp = run("ls", env={
             "WK_MACHINES_DIR": str(registry),
             "XDG_STATE_HOME": str(self.tmp / "state"),
-            "WK_TARGET": "fakebox",
+            "WK_PLACE": "fakebox",
         }, timeout=120)
         self.assertEqual(cp.returncode, 0, cp.stdout)
         for n in names:

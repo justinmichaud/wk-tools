@@ -11,7 +11,7 @@ from tests.support import REPO, bash, glob_bait, shell_files
 sys.path.insert(0, str(REPO / "lib"))
 from wk import job  # noqa: E402
 
-WANT = "*build-in-target.sh* *Tools/Scripts/build-*"
+WANT = "*build-in-workspace.sh* *Tools/Scripts/build-*"
 ARGS = "perl Tools/Scripts/build-webkit --jsc-only --debug --makeargs=-j75 "
 
 
@@ -19,7 +19,7 @@ class TestMatchAnyIsIndependentOfTheCwd(unittest.TestCase):
     def test_the_bait_cwd_expands_the_pattern_words(self):
         with glob_bait(WANT) as cwd:
             cp = bash("want=%s; for p in $want; do echo \"$p\"; done" % shlex.quote(WANT), cwd=str(cwd), timeout=30)
-        self.assertEqual(["xbuild-in-target.shx", "xTools/Scripts/build-x"], cp.stdout.split())
+        self.assertEqual(["xbuild-in-workspace.shx", "xTools/Scripts/build-x"], cp.stdout.split())
 
     def test_a_declared_pattern_matches_from_inside_a_checkout(self):
         here = os.getcwd()

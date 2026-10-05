@@ -1,4 +1,4 @@
-"""Where a checkout fetches from, per target: Target.mirror_dir (lib/wk/targets.py)."""
+"""Where a checkout fetches from, per place: Driver.mirror_dir (lib/wk/places.py)."""
 import contextlib
 import io
 import os
@@ -11,7 +11,7 @@ from unittest import mock
 from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, git, images, sync, targets  # noqa: E402
+from wk import act, git, images, places, sync  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
 from wk.clock import Clock  # noqa: E402
@@ -32,9 +32,9 @@ def _driver(kind, env=None, system="Darwin"):
     fake.react(["sh", "-c"], _probe)
     env = dict({"HOME": "/nonexistent", "WK_STORE": "/the/store", "XDG_STATE_HOME": "/state",
                 "WK_MARKER": "/nonexistent/marker"}, **(env or {}))
-    with mock.patch("wk.targets.os.uname", return_value=mock.Mock(sysname=system)), \
+    with mock.patch("wk.places.os.uname", return_value=mock.Mock(sysname=system)), \
          mock.patch("wk.store.os.uname", return_value=mock.Mock(sysname=system)):
-        return targets.Registry(REPO, env, fake).load(kind).mirror_dir()
+        return places.Registry(REPO, env, fake).load(kind).mirror_dir()
 
 
 class TestEveryDriverNamesOne(WkTest):
@@ -48,21 +48,21 @@ class TestEveryDriverNamesOne(WkTest):
             f"root={self.tmp / 'remote-root'}\n"
             f"store={self.tmp / 'remote-store'}\n")
 
-    def _mirror(self, target):
-        if target == "remote":
+    def _mirror(self, place):
+        if place == "remote":
             return _driver("fakebox", {"WK_MACHINES_DIR": str(self.registry)})
-        if target == "local":
+        if place == "local":
             return _driver("local", system="Linux")
-        return _driver(target)
+        return _driver(place)
 
     def test_each_of_the_four_names_a_mirror(self):
-        for target in DRIVERS:
-            with self.subTest(target=target):
-                self.assertTrue(self._mirror(target).startswith("/"),
-                                f"{target} names no mirror")
+        for place in DRIVERS:
+            with self.subTest(place=place):
+                self.assertTrue(self._mirror(place).startswith("/"),
+                                f"{place} names no mirror")
 
     def test_the_default_is_no_mirror_rather_than_somebody_elses_path(self):
-        self.assertEqual("", targets.Target("demo", str(REPO), {}, Fake("here")).mirror_dir())
+        self.assertEqual("", places.Driver("demo", str(REPO), {}, Fake("here")).mirror_dir())
 
     def test_the_three_machines_name_three_different_mirrors(self):
         got = {t: self._mirror(t) for t in ("container", "vm", "remote")}
@@ -72,7 +72,7 @@ class TestEveryDriverNamesOne(WkTest):
         self.assertEqual(str(self.tmp / "remote-root" / "mirror"), self._mirror("remote"))
 
     def test_a_guests_mirror_is_the_hosts_on_the_share_the_guest_mounts(self):
-        self.assertEqual(self._mirror("vm"), targets.GUEST_MIRROR_MOUNT + "/mirror/WebKit.git")
+        self.assertEqual(self._mirror("vm"), places.GUEST_MIRROR_MOUNT + "/mirror/WebKit.git")
 
 
 class TestAWorkspaceAnswersForTheKindItIs(WkTest):
@@ -297,13 +297,13 @@ class TestASnapshotBorrowsTheMirrorsObjects(MirrorFixture):
         p.start()
         self.addCleanup(p.stop)
 
-        class Here(targets.Container):
+        class Here(places.Container):
             def store_init(self):
                 pass
-        reg = targets.Registry(REPO, env=dict(os.environ))
-        target = Here("container", str(REPO), dict(os.environ), reg.machine)
+        reg = places.Registry(REPO, env=dict(os.environ))
+        place = Here("container", str(REPO), dict(os.environ), reg.machine)
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            sync.Sync(reg, Clock(), None, "tools", target="container").sync_snapshot(target)
+            sync.Sync(reg, Clock(), None, "tools", place="container").sync_snapshot(place)
         ids = sorted(d.name for d in (store / "base").iterdir())
         self.assertEqual(len(ids), 1, ids)
         return store, store / "base" / ids[0], err.getvalue()

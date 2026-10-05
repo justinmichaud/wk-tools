@@ -21,7 +21,7 @@ from tests.support import guest_step, REPO, WkTest, bash, stub_path
 from tests.test_pi_agent import FILE_ROWS, TABLE, VALUE_ROWS, store_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import guest, targets  # noqa: E402
+from wk import guest, places  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
 
 RC = REPO / "shell" / "bashrc"
@@ -29,7 +29,7 @@ VAR = "CLAUDE_CODE_OAUTH_TOKEN"
 
 
 def delivered_to(kind, rows=TABLE):
-    """The rows the delivery column sends to one kind of target."""
+    """The rows the delivery column sends to one kind of place."""
     return [r for r in rows if kind in r[5].split(",")]
 
 
@@ -45,7 +45,7 @@ class TestTheShellExportsIt(WkTest):
     SHELLS = {
         "editor terminal pane": ("zsh", ["-i", "-c"]),
         "login zsh": ("zsh", ["-l", "-c"]),
-        "bash -lc (every Target.exec)": ("bash", ["-lc"]),
+        "bash -lc (every Driver.exec)": ("bash", ["-lc"]),
         "non-interactive bash": ("bash", ["-c"]),
     }
 
@@ -102,12 +102,12 @@ class TestTheVmDriverFindsTheMachinesToken(unittest.TestCase):
         env = {"WK_HOST_SECRETS": "/this/device/secrets", "WK_STORE": "/the/machine/store",
                "WK_STORE_DEFAULT": "/the/machine/store", "WK_VM_STORE": "/some/vm/state", "HOME": "/nonexistent"}
         with mock.patch("wk.store.os.uname", return_value=mock.Mock(sysname="Darwin")):
-            vm = targets.Registry(REPO, env, Fake("here")).load("vm")
+            vm = places.Registry(REPO, env, Fake("here")).load("vm")
             self.assertEqual("/some/vm/state", vm.store.store_dir())
             self.assertEqual("/this/device/secrets/claude-token", guest.Host(vm).secrets.cred_path("claude"))
 
 
-class TestOneClaudeCredentialPerTarget(unittest.TestCase):
+class TestOneClaudeCredentialPerPlace(unittest.TestCase):
     """Claude Code takes $CLAUDE_CODE_OAUTH_TOKEN over a stored login, and remote control refuses the token."""
 
     CLAUDE_ROWS = [r for r in TABLE if r[0].startswith("claude")]
@@ -193,17 +193,17 @@ esac
 '''
 
 
-def ask(target, fn, secret):
-    """The target's answer as the shell probes printed it: YES or NO for `present`, the text for `remedy`."""
+def ask(driver, fn, secret):
+    """The place's answer as the shell probes printed it: YES or NO for `present`, the text for `remedy`."""
     if fn == "present":
-        out = "YES" if target.agent_secret_present("demo", secret) else "NO"
+        out = "YES" if driver.agent_secret_present("demo", secret) else "NO"
     else:
-        out = target.agent_secret_remedy("demo", secret)
+        out = driver.agent_secret_remedy("demo", secret)
     return SimpleNamespace(stdout=out, stderr="")
 
 
-class _Plain(targets.Target):
-    """The base driver's contract, minus the hop: a real exec reaches the target over podman or ssh and runs the
+class _Plain(places.Driver):
+    """The base driver's contract, minus the hop: a real exec reaches the place over podman or ssh and runs the
     probe in a login shell, which is what decides where CLAUDE_SECURESTORAGE_CONFIG_DIR points."""
 
     def __init__(self, env):
@@ -307,8 +307,8 @@ class TestABuildBoxGetsThemAtSetup(_Delivery):
             env = self._env(store, home, {"PATH": f"{binp}:{os.environ['PATH']}"})
             err = io.StringIO()
             with mock.patch.dict(os.environ, env), contextlib.redirect_stderr(err):
-                # The credentials are in this machine's store (WK_STORE_DEFAULT), not the target's remote root.
-                t = targets.Remote("fakebox", str(REPO), dict(os.environ), Local())
+                # The credentials are in this machine's store (WK_STORE_DEFAULT), not the place's remote root.
+                t = places.Remote("fakebox", str(REPO), dict(os.environ), Local())
                 machine_cmd.Machines(REPO, env=dict(os.environ)).credentials(t, "fakebox")
         return SimpleNamespace(returncode=0, stdout="", stderr=err.getvalue())
 
@@ -459,7 +459,7 @@ class TestAGuestIsNeverGivenACopyOfTheFileRow(_Delivery):
             self.assertFalse((home / row[2]).exists(), row[2])
 
 class TestWhoIsAskedWhetherAWorkspaceCanAuthenticate(_Delivery):
-    """Target.agent_secret_present asks the machine that will run the agent, through its own login shell."""
+    """Driver.agent_secret_present asks the machine that will run the agent, through its own login shell."""
 
     def _guest(self, login=None, mounted=True):
         home = self.tmp / "guest-home"
@@ -481,7 +481,7 @@ class TestWhoIsAskedWhetherAWorkspaceCanAuthenticate(_Delivery):
                                                              "WK_VM_STORE": str(self.tmp / "vmstore")}))
             with mock.patch.dict(os.environ, env), \
                     mock.patch("wk.store.Store.macos_host", new_callable=mock.PropertyMock, return_value=True):
-                return ask(targets.Registry(str(REPO), env=env, machine=Local()).load("vm"), fn, secret)
+                return ask(places.Registry(str(REPO), env=env, machine=Local()).load("vm"), fn, secret)
 
     def test_a_guest_whose_share_holds_the_login_answers_yes(self):
         cp = self._ask(self._store(), self._guest(FAKE_LOGIN),
@@ -533,25 +533,25 @@ class TestWhoIsAskedWhetherAWorkspaceCanAuthenticate(_Delivery):
         self.assertIn(f"wk key set {name}", cp.stdout, cp.stdout + cp.stderr)
 
 
-class TestTheDefaultAsksTheTarget(_Delivery):
+class TestTheDefaultAsksThePlace(_Delivery):
     """The default the container and remote drivers inherit: the workspace is asked, not this store."""
 
-    def _target(self):
-        h = self.tmp / "target-home"
+    def _driver(self):
+        h = self.tmp / "place-home"
         (h / ".claude").mkdir(parents=True, exist_ok=True)
         return h
 
-    def _ask(self, store, target, fn, secret):
-        env = dict(os.environ, **self._env(store, target))
+    def _ask(self, store, driver, fn, secret):
+        env = dict(os.environ, **self._env(store, driver))
         with mock.patch.dict(os.environ, env):
             return ask(_Plain(env), fn, secret)
 
 
     def test_a_login_in_the_workspace_is_a_yes(self):
-        target = self._target()
+        driver = self._driver()
         row = FILE_ROWS[0]
-        (target / ".claude" / row[1]).write_text(FAKE_LOGIN)
-        cp = self._ask(self._store(), target, "present", row[0])
+        (driver / ".claude" / row[1]).write_text(FAKE_LOGIN)
+        cp = self._ask(self._store(), driver, "present", row[0])
         self.assertIn("YES", cp.stdout, cp.stdout + cp.stderr)
 
     def test_a_full_store_the_workspace_never_got_is_a_no(self):
@@ -559,29 +559,29 @@ class TestTheDefaultAsksTheTarget(_Delivery):
         for row in FILE_ROWS:
             store_path(store, row).write_text(FAKE_LOGIN)
             store_path(store, row).chmod(0o600)
-        cp = self._ask(store, self._target(), "present",
+        cp = self._ask(store, self._driver(), "present",
                        FILE_ROWS[0][0])
         self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
 
     def test_an_empty_credential_file_is_not_a_login(self):
-        target = self._target()
-        (target / ".claude" / FILE_ROWS[0][1]).write_text("")
-        cp = self._ask(self._store(), target, "present",
+        driver = self._driver()
+        (driver / ".claude" / FILE_ROWS[0][1]).write_text("")
+        cp = self._ask(self._store(), driver, "present",
                        FILE_ROWS[0][0])
         self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
 
     def test_a_value_row_is_read_where_the_driver_delivered_it(self):
         row = VALUE_ROWS[0]
-        target = self._target()
-        cp = self._ask(self._store(values=[row[0]]), target,
+        driver = self._driver()
+        cp = self._ask(self._store(values=[row[0]]), driver,
                        "present", row[0])
         self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
-        (target / row[2]).write_text(f"{PLACEHOLDER}-{row[0]}\n")
-        cp = self._ask(self._store(), target, "present", row[0])
+        (driver / row[2]).write_text(f"{PLACEHOLDER}-{row[0]}\n")
+        cp = self._ask(self._store(), driver, "present", row[0])
         self.assertIn("YES", cp.stdout, cp.stdout + cp.stderr)
 
     def test_the_remedy_names_the_login_that_makes_one(self):
-        cp = self._ask(self._store(), self._target(), "remedy",
+        cp = self._ask(self._store(), self._driver(), "remedy",
                        FILE_ROWS[0][0])
         self.assertIn("/login in a 'wk ai claude' session", cp.stdout,
                       cp.stdout + cp.stderr)

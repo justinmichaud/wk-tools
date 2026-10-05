@@ -11,7 +11,7 @@ from unittest import mock
 from tests.support import REPO, WkTest, bash, shell_files, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import resources, targets  # noqa: E402
+from wk import places, resources  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Local  # noqa: E402
 from wk.sysimage import guestbase, yocto  # noqa: E402
@@ -33,7 +33,7 @@ class TestTheDefaultsAreThePythons(WkTest):
         cp = bash(f'. "{REPO}/lib/common.sh"\nWK_RESERVE_MB=7\neval "$(wk_py wk.resources --os linux defaults)"\n'
                   'echo "$WK_RESERVE_MB $WK_RESERVE_CORES $WK_MB_PER_JOB $WK_BUILD_DISK_GB"')
         self.assertEqual(cp.returncode, 0, cp.stderr)
-        from wk.buildconf import DISK_GB
+        from wk.presets import DISK_GB
         self.assertEqual(cp.stdout.split(), ["7", str(resources.RESERVE_CORES), str(resources.MB_PER_JOB), str(DISK_GB)])
 
 
@@ -269,12 +269,12 @@ class TestAReadingRefusalReachesItsCaller(WkTest):
                 self.assertRegex(cp.stdout, r"ANSWERED \[[0-9]")
 
     def _guest(self, env=None):
-        """A vm target with tart present but never configured, so its sizing falls to WK_VM_* or the host reading."""
-        p = mock.patch.object(targets.Vm, "tart", lambda s: "/t/tart")
+        """A vm place with tart present but never configured, so its sizing falls to WK_VM_* or the host reading."""
+        p = mock.patch.object(places.Vm, "tart", lambda s: "/t/tart")
         p.start()
         self.addCleanup(p.stop)
         fake = Fake("here")
-        vm = targets.Vm("vm", str(REPO), dict(env or {}), fake)
+        vm = places.Vm("vm", str(REPO), dict(env or {}), fake)
         return vm, guestbase.Base(vm), fake
 
     def test_it_walks_out_through_the_target_drivers_wrappers(self):

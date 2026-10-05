@@ -5,7 +5,7 @@ wk_remote_deps() {   # <tool> <required|wanted> <what it is for>; a build cannot
 git required the checkout, and the lock that serialises builds
 cmake required configures every CMake port
 ninja required every CMake port builds with it
-clang required the compiler every config here names (lib/wk/buildconf.py)
+clang required the compiler every config here names (lib/wk/presets.py)
 python3 required webkitpy, and every structured-data step wk runs on the far side
 ccache wanted without it every build on this machine starts cold, every time
 zsh wanted the shell wk's rc moves an interactive session to; bash works too
@@ -25,7 +25,7 @@ wk_remote_family() { # <ID> <ID_LIKE> -- ID then ID_LIKE, so a derivative (Raspb
     printf unknown
 }
 
-wk_remote_build_env_vars() {   # the variables wk's build sets for itself (build_env, lib/wk/buildconf.py)
+wk_remote_build_env_vars() {   # the variables wk's build sets for itself (build_env, lib/wk/presets.py)
     printf '%s\n' CC CXX CFLAGS CXXFLAGS LDFLAGS MAKEFLAGS \
         CCACHE_DIR CCACHE_BASEDIR CCACHE_SLOPPINESS \
         NUMBER_OF_PROCESSORS CMAKE_BUILD_PARALLEL_LEVEL WEBKIT_OUTPUTDIR

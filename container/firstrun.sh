@@ -18,7 +18,7 @@ fi
 if [ -S /run/wk/broker.sock ]; then
     log "fleet-request broker present -- wk boot / wk pi deploy|bench become requests"
 else
-    log "no fleet-request broker at /run/wk/broker.sock -- no bench device from here"
+    log "no fleet-request broker at /run/wk/broker.sock -- no bench machine from here"
 fi
 
 git config --global --replace-all include.path "$WK_TOOLS/dotfiles/gitconfig"
@@ -47,7 +47,7 @@ _git_py() { PYTHONPATH="$WK_TOOLS/lib" WK_ROOT="$WK_TOOLS" python3 -m wk.git "$@
 
 if [ -d "$SRC/.git" ]; then             # an old snapshot's remotes are stale
     _mirror="${WK_MIRROR:-}"
-    [ -n "$_mirror" ] || log "no mirror on this target, so every fetch in here reads github.com"
+    [ -n "$_mirror" ] || log "no mirror on this place, so every fetch in here reads github.com"
     _wiring=$(_git_py wiring-script "$SRC" "$_mirror") \
         || { _wiring=""; warn "wk.git wiring-script failed, so it wired nothing"; }
     if [ -n "$_wiring" ] && sh -c "$_wiring"; then
@@ -113,7 +113,7 @@ if [ -n "${http_proxy:-}" ] && [ -n "${https_proxy:-}" ]; then
         warn "not writing $APT_PROXY_CONF: a proxy address here carries a quote or a
          semicolon ('$http_proxy', '$https_proxy'), which is apt.conf's own syntax --
          apt would read the rest of the line as further directives. Every apt step
-         below fails until the value lib/wk/targets.py's Container passes is fixed." ;;
+         below fails until the value lib/wk/places.py's Container passes is fixed." ;;
     *)
         apt_proxy_conf | sudo tee "$APT_PROXY_CONF" >/dev/null
         log "apt goes through the workspace proxy ($http_proxy, $APT_PROXY_CONF)" ;;
@@ -121,7 +121,7 @@ if [ -n "${http_proxy:-}" ] && [ -n "${https_proxy:-}" ]; then
 else
     warn "http_proxy/https_proxy are not set in this workspace, so apt has no way
          out and every apt step below fails. The container is started without the
-         proxy environment lib/wk/targets.py's Container gives it: 'wk rm' and 'wk new'."
+         proxy environment lib/wk/places.py's Container gives it: 'wk rm' and 'wk new'."
 fi
 
 _install_profilers() {                  # wrapped: not load-bearing
@@ -279,7 +279,7 @@ grep -qF 'wk-tools/shell/bashrc' "$HOME/.bashrc" 2>/dev/null || \
     '# wk: login shells read this, interactive non-login shells read .bashrc.' \
     '[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"' > "$HOME/.bash_profile"
 
-# The marker lib/wk/targets.py's Local reads. arch= is recorded because the kernel is the
+# The marker lib/wk/places.py's Local reads. arch= is recorded because the kernel is the
 # host's: `uname -m` in an armhf container answers aarch64.
 if [ -n "${WK_WORKSPACE:-}" ]; then
     cat > "$HOME/.wk-workspace" <<EOF

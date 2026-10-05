@@ -10,7 +10,7 @@ from unittest import mock
 from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import guest, targets  # noqa: E402
+from wk import guest, places  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.store import Store  # noqa: E402
@@ -52,7 +52,7 @@ class TestGuestClock(WkTest):
         err = io.StringIO()
         with mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True), \
                 mock.patch.dict(os.environ, guest_env), contextlib.redirect_stderr(err):
-            vm = targets.Registry(str(REPO), env=env).load("vm")
+            vm = places.Registry(str(REPO), env=env).load("vm")
             g = guest.Guest(guest.Host(vm, FakeClock(HOST_EPOCH)), "testguest", Local())
             rc = 0 if g.set_guest_clock() else 1
         return "rc=%d\n%s" % (rc, err.getvalue()), log.read_text()

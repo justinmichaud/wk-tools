@@ -60,7 +60,7 @@ class TestEndToEndTextModeHasNoEscBytes(WkTest):
             (root / "ws" / name).mkdir(parents=True)
             (root / "ws" / name / ".wk-ready").touch()
             env = {
-                "WK_TARGET": "remote",
+                "WK_PLACE": "remote",
                 "WK_REMOTE_HOST": "fake-reachable-machine",
                 "WK_REMOTE_ROOT": str(root),
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",

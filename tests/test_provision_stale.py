@@ -9,7 +9,7 @@ from pathlib import Path
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets  # noqa: E402
+from wk import places  # noqa: E402
 from wk.machine_cmd import deps  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
@@ -22,18 +22,18 @@ class TestTheBuildMachineRecord(unittest.TestCase):
             far.answer(["sh", "-c"], rc=0, out="")
         else:
             far.answer(["sh", "-c"], out=marker_text)
-        t = targets.Remote("box", str(REPO), {"HOME": "/tmp/wk-test-unused", "XDG_STATE_HOME": "/tmp/wk-test-unused/state"}, far)
+        t = places.Remote("box", str(REPO), {"HOME": "/tmp/wk-test-unused", "XDG_STATE_HOME": "/tmp/wk-test-unused/state"}, far)
         t.machine = far
         return deps.stale(t, REPO)
 
     def test_a_machine_provisioned_from_these_inputs_reads_fresh(self):
-        self.assertIsNone(self._stale("target=otherbox\nroot=/home/x/wk\ninputs=%s\n" % deps.inputs_hash(REPO)))
+        self.assertIsNone(self._stale("place=otherbox\nroot=/home/x/wk\ninputs=%s\n" % deps.inputs_hash(REPO)))
 
     def test_a_machine_provisioned_before_the_record_says_so(self):
-        self.assertTrue(self._stale("target=otherbox\nroot=/home/x/wk\n"))
+        self.assertTrue(self._stale("place=otherbox\nroot=/home/x/wk\n"))
 
     def test_a_changed_provisioning_script_makes_it_stale(self):
-        self.assertIn("remote/provision.sh", self._stale("target=otherbox\nroot=/home/x/wk\ninputs=0000000000000000\n"))
+        self.assertIn("remote/provision.sh", self._stale("place=otherbox\nroot=/home/x/wk\ninputs=0000000000000000\n"))
 
     def test_a_machine_with_no_marker_is_not_provisioned_at_all(self):
         self.assertTrue(self._stale(None))
@@ -68,9 +68,9 @@ class TestDoctorReportsIt(unittest.TestCase):
         from tests.test_doctor import MISS, OK, build_doctor
         asked = []
 
-        def stale(target, root):
-            asked.append(target.name)
-            return "provisioned before this record existed" if target.name == "old" else None
+        def stale(driver, root):
+            asked.append(driver.name)
+            return "provisioned before this record existed" if driver.name == "old" else None
         doc = build_doctor(probe=lambda t, root: "family=debian\n", stale=stale)
         (old,), (fresh,) = list(doc.build_machine("old")), list(doc.build_machine("fresh"))
         self.assertEqual((old[0], old[2]), (MISS, "wk machine setup old"))

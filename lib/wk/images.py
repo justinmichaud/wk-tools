@@ -131,7 +131,7 @@ def spec_machine(spec):
     return spec.split("@", 1)[1] if "@" in spec else ""
 
 
-def spec_target(machine, here, default):
+def spec_place(machine, here, default):
     return default if machine == here else machine
 
 
@@ -180,7 +180,7 @@ def slot_dir(ws, slot, env=None):
 
 
 def toolchain_holds(ws, cross_target, env=None):
-    """cross-toolchain-helper's own test of an installed SDK, which lib/wk/sysimage/yocto_target.py reads too."""
+    """cross-toolchain-helper's own test of an installed SDK, which lib/wk/sysimage/yocto_ws.py reads too."""
     d = os.path.join(Store(env).ws_dir(ws), "build", "CrossToolChains", cross_target, "build", "toolchain")
     if not os.path.isfile(os.path.join(d, ".toolchain_path_configured")):
         return False
@@ -206,11 +206,11 @@ def measured_slot(slot):
     return slot[:-len(INSTR_SUFFIX)] if slot.endswith(INSTR_SUFFIX) else slot
 
 
-def ws_machine(named, target, here):
-    """The machine holding an image workspace: the one a spec named, else its target's, `container` and `local` being here."""
+def ws_machine(named, place, here):
+    """The machine holding an image workspace: the one a spec named, else its place's, `container` and `local` being here."""
     if named:
         return named
-    return here if target in ("container", "local") else target
+    return here if place in ("container", "local") else place
 
 
 def build_resource(machine):
@@ -225,9 +225,9 @@ CONFIG_WORDS = {
 }
 
 
-def build_subject(ws, stage, slot, commit, cross_config):
+def build_subject(ws, stage, slot, commit, cross_preset):
     if stage == "webkit":
-        return "slot %s in %s at %.12s -- %s" % (slot, ws, commit, CONFIG_WORDS.get(cross_config, cross_config))
+        return "slot %s in %s at %.12s -- %s" % (slot, ws, commit, CONFIG_WORDS.get(cross_preset, cross_preset))
     if stage == "pgo-mix":
         return "mixing slot %s's collection in %s" % (slot, ws)
     return "%s stage of %s" % (stage or "build", ws)

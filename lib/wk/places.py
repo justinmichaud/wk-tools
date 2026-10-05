@@ -1,4 +1,4 @@
-"""The targets: where a workspace lives and how it is driven. A `Registry`
+"""The places: where a workspace lives and how it is driven. A `Registry`
 names them (container, vm on a macOS host, this machine inside a workspace,
 and every build machine and peer in `machines/`); each driver answers the same
 contract over a `Machine`."""
@@ -14,10 +14,10 @@ import shutil
 import stat
 import sys
 
-from wk import act, agents, buildconf, fleet, git, guest, images, kv, reach, record, secrets, sshalias, tools
+from wk import act, agents, fleet, git, guest, images, kv, presets, reach, record, secrets, sshalias, tools
 from wk.machine import TIMED_OUT, Local, PodmanVm, Result, Ssh, TartExec, isolated_module, lib_argv
 from wk.resources import Resources, workspace_marker_path
-from wk.store import Store, dispatch_target, in_vm, no_such_workspace
+from wk.store import Store, dispatch_place, in_vm, no_such_workspace
 
 BUILTIN = ("container", "vm", "remote", "local")
 SDK_REPO = "ghcr.io/igalia/wkdev-sdk"
@@ -77,10 +77,10 @@ def image_base(root, ws):
     return None
 
 
-def git_base(target, ws):
-    if target.info(ws) in STATES_NOT_THERE:
+def git_base(driver, ws):
+    if driver.info(ws) in STATES_NOT_THERE:
         return None
-    r = target.exec(ws, ["sh", "-c", "cd %s 2>/dev/null || exit 0\n%s" % (shlex.quote(target.src(ws)), UPSTREAM_LINE)])
+    r = driver.exec(ws, ["sh", "-c", "cd %s 2>/dev/null || exit 0\n%s" % (shlex.quote(driver.src(ws)), UPSTREAM_LINE)])
     out = r.out.replace("\r", "").strip().splitlines()
     return out[-1] if r.ok and out else None
 
@@ -139,20 +139,20 @@ def zed_key_pub(machine, env):
         return None
 
 
-# A target conf's keys and the WK_* variable each sets; a conf value wins over the environment's.
-CONF_ENV = {"driver": "WK_TARGET_KIND", "host": "WK_REMOTE_HOST", "hostname": "WK_REMOTE_HOSTNAME", "root": "WK_REMOTE_ROOT",
+# A place conf's keys and the WK_* variable each sets; a conf value wins over the environment's.
+CONF_ENV = {"driver": "WK_DRIVER", "host": "WK_REMOTE_HOST", "hostname": "WK_REMOTE_HOSTNAME", "root": "WK_REMOTE_ROOT",
             "reference": "WK_REMOTE_REFERENCE", "local": "WK_REMOTE_LOCAL", "peer": "WK_REMOTE_PEER", "tools": "WK_REMOTE_TOOLS",
-            "store": "WK_REMOTE_STORE", "cmake": "WK_TARGET_CMAKE", "libcxx": "WK_TARGET_LIBCXX", "wpe": "WK_TARGET_WPE",
+            "store": "WK_REMOTE_STORE", "cmake": "WK_REMOTE_CMAKE", "libcxx": "WK_REMOTE_LIBCXX", "wpe": "WK_REMOTE_WPE",
             "build_args": "WK_BUILD_ARGS"}
-PER_CONFIG = ("cmake", "build_args")   # also `<key>_<config>`, the config's dashes as underscores: one build config's own
+PER_PRESET = ("cmake", "build_args")   # also `<key>_<preset>`, the preset's dashes as underscores: one build preset's own
 
 
 def conf_key(k):
     if k in CONF_ENV:
         return CONF_ENV[k]
-    for stem in PER_CONFIG:
+    for stem in PER_PRESET:
         cfg = k[len(stem) + 1:]
-        if k.startswith(stem + "_") and cfg.replace("_", "-") in buildconf.CONFIGS:
+        if k.startswith(stem + "_") and cfg.replace("_", "-") in presets.PRESETS:
             return "%s_%s" % (CONF_ENV[stem], cfg)
     return None
 
@@ -160,8 +160,8 @@ def conf_key(k):
 def conf_env(conf, path):
     for k in sorted(conf):
         if k != "kind" and conf_key(k) is None:
-            raise LookupError("%s: %s is not a key a build machine's conf takes (%s, or %s_<config>)"
-                              % (path, k, ", ".join(CONF_ENV), "|".join(PER_CONFIG)))
+            raise LookupError("%s: %s is not a key a build machine's conf takes (%s, or %s_<preset>)"
+                              % (path, k, ", ".join(CONF_ENV), "|".join(PER_PRESET)))
     return {conf_key(k): v for k, v in conf.items() if k != "kind"}
 
 
@@ -177,14 +177,14 @@ class Registry:
         return self.fleet.path(name)
 
     def known(self):
-        return self.fleet.names(fleet.TARGET_KINDS)
+        return self.fleet.names(fleet.PLACE_KINDS)
 
     def _conf(self, name):
         try:
             conf = self.fleet.load(name)
         except fleet.ConfError as e:
             raise LookupError(str(e))
-        return conf if conf and conf["kind"] in fleet.TARGET_KINDS else None
+        return conf if conf and conf["kind"] in fleet.PLACE_KINDS else None
 
     def kind(self, name):
         if name in BUILTIN:
@@ -212,10 +212,10 @@ class Registry:
 
     def far_root(self):
         """This far end's root: its own conf's, since two machines of one home share the marker and nothing machine-specific is in it."""
-        conf = self.fleet.load(self.self_target()) or {}
+        conf = self.fleet.load(self.self_place()) or {}
         return conf.get("root") or default_root(self.env.get("HOME", os.path.expanduser("~")))
 
-    def self_target(self):
+    def self_place(self):
         if not self.in_remote_host():
             return ""
         return self.fleet.named_by_host(record.host_name(self.machine))
@@ -223,7 +223,7 @@ class Registry:
     def default(self):
         if self.in_workspace():
             return "local"
-        return self.self_target() or "container"
+        return self.self_place() or "container"
 
     def vm_listed(self):
         return self.store.vm_store_apart()
@@ -232,10 +232,10 @@ class Registry:
         out = ["container"]
         if self.vm_listed():
             out.append("vm")
-        t = self.self_target()
+        t = self.self_place()
         if t:
             out.append(t)
-        # Skipped on the far end of a target: a delegated listing would pay an ssh timeout per machine it has no route to.
+        # Skipped on the far end of a place: a delegated listing would pay an ssh timeout per machine it has no route to.
         if self.in_remote_host() or in_vm(self.env):
             return out
         me = record.machine_name(self.env)
@@ -272,16 +272,16 @@ class Registry:
         return out
 
     def walk(self):
-        """The targets a listing covers: WK_TARGET's, this workspace's, the ones here when another wk asked, else all."""
-        if dispatch_target(self.env):
-            return dispatch_target(self.env).split()
+        """The places a listing covers: WK_PLACE's, this workspace's, the ones here when another wk asked, else all."""
+        if dispatch_place(self.env):
+            return dispatch_place(self.env).split()
         if self.in_workspace():
             return [self.default()]
         if self.env.get("WK_NO_DELEGATE"):
             return self.here()
         return self.all()
 
-    def on_target(self, name, ws):
+    def on_place(self, name, ws):
         """Whether `ws` is on `name`: its directory, its environment, or a creation still running."""
         try:
             t = self.load(name)
@@ -311,9 +311,9 @@ class Registry:
         return self._holds(t, ws)
 
     def locate(self, ws):
-        """Every target that answers for `ws`; the machines are asked at once."""
+        """Every place that answers for `ws`; the machines are asked at once."""
         here = self.here()
-        hits = [t for t in here if self.on_target(t, ws)]
+        hits = [t for t in here if self.on_place(t, ws)]
         far = [t for t in self.all() if t not in here]
         if hits or not far:
             return hits
@@ -323,7 +323,7 @@ class Registry:
         return [m for m, hit in answers if hit]
 
     def exists_on(self, t, ws):
-        """Whether `ws` is on the loaded target `t`, where a machine that did not answer is not an absence."""
+        """Whether `ws` is on the loaded place `t`, where a machine that did not answer is not an absence."""
         return self._holds(t, ws) or t.info(ws) == "unreachable"
 
     def local_workspaces(self):
@@ -337,16 +337,16 @@ class Registry:
                 seen += [n for n in store.workspaces() if n not in seen]
         return seen
 
-    def ws_target(self, ws):
-        """The one target holding `ws`; the default when none does."""
-        if dispatch_target(self.env):
-            return dispatch_target(self.env)
+    def ws_place(self, ws):
+        """The one place holding `ws`; the default when none does."""
+        if dispatch_place(self.env):
+            return dispatch_place(self.env)
         hits = self.locate(ws)
         if not hits:
             return self.default()
         if len(hits) == 1:
             return hits[0]
-        raise LookupError("workspace '%s' exists on targets: %s -- this cannot be\n    resolved; remove one, or set WK_TARGET"
+        raise LookupError("workspace '%s' exists on places: %s -- this cannot be\n    resolved; remove one, or set WK_PLACE"
                           % (ws, " ".join(hits)))
 
     def load(self, name):
@@ -355,7 +355,7 @@ class Registry:
             self._conf(name)   # a conf that does not parse says why
             names = " ".join(self.known())
             raise LookupError(
-                "unknown target '%s'.\n    The built-in ones are container, vm, remote and local.%s\n\n"
+                "unknown place '%s'.\n    The built-in ones are container, vm, remote and local.%s\n\n"
                 "    Anything else is a machine, and needs a conf -- in the registry, so every\n"
                 "    device gets it:\n\n        %s\n            kind=build\n            host=%s      # an ssh destination that already works\n"
                 "            root=/home/you/wk\n\n    'wk machine setup %s' writes it for you."
@@ -371,15 +371,15 @@ class Registry:
             return LocalWorkspace(name, self.root, env, self.machine)
         return Remote(name, self.root, env, self.machine)
 
-    def default_config(self, name):
-        """The last build's config, from its task record; else the target's own platform default."""
-        target = self.load(self.ws_target(name))
-        rec = record.Records(target.store.records_dir(), env=target.env).find("build", name)
-        cfg = rec.field("config") if rec else ""
+    def default_preset(self, name):
+        """The last build's preset, from its task record; else the place's own platform default."""
+        driver = self.load(self.ws_place(name))
+        rec = record.Records(driver.store.records_dir(), env=driver.env).find("build", name)
+        cfg = rec.field("preset") if rec else ""
         if cfg:
-            act.info("config: %s -- what '%s' was last built with" % (cfg, name))
+            act.info("preset: %s -- what '%s' was last built with" % (cfg, name))
             return cfg
-        return "mac-release" if target.os() == "macos" else "jsc-release"
+        return "mac-release" if driver.os() == "macos" else "jsc-release"
 
 
 def path_kind_probe(path):
@@ -393,10 +393,10 @@ def path_kind_result(r):
     return out if out in ("dir", "file", "absent") else ""
 
 
-class Target:
+class Driver:
     """The contract. `info` answers absent | creating | unreachable | the driver's own word for one that exists."""
 
-    kind = "target"
+    kind = "place"
     needs_base = True
     dir_first = False   # the workspace directory is made before the environment, so an environment without one is no creation
     reads_host_mirror = False
@@ -418,8 +418,8 @@ class Target:
         return self.machine
 
     def records(self, clock=None):
-        """The records this machine holds for the target: every driver writes its own, here."""
-        return record.of_target(self, clock, self.here)
+        """The records this machine holds for the place: every driver writes its own, here."""
+        return record.of_driver(self, clock, self.here)
 
     def creating_now(self, ws):
         t = self.records().find("new", ws)
@@ -460,7 +460,7 @@ class Target:
         return self.machine.run(self.exec_argv(ws, argv, tty)[0], timeout=timeout)
 
     def pid_alive(self, ws, pid, cap=None):
-        """True, False or None (no answer within cap seconds) for a pid inside the workspace -- the one "is it alive in the target" answer."""
+        """True, False or None (no answer within cap seconds) for a pid inside the workspace -- the one "is it alive in the place" answer."""
         r = self.exec(ws, ["kill", "-0", str(pid)], timeout=cap)
         return True if r.rc == 0 else False if r.rc == 1 else None
 
@@ -493,11 +493,11 @@ class Target:
         return secrets.Secrets(self.root, self.env, self.machine).agent_secret_remedy(secret)
 
     def is_here(self):
-        """Whether the machine behind this target is the one running this process."""
+        """Whether the machine behind this place is the one running this process."""
         return True
 
     def answers(self):
-        """(whether the machine behind this target answers, why not)."""
+        """(whether the machine behind this place answers, why not)."""
         return True, ""
 
     def probe(self):
@@ -568,8 +568,8 @@ class Target:
     def remake_hint(self, ws):
         reg = Registry(self.root, self.env, self.machine)
         if reg.in_remote_host():
-            return "from the workstation:  wk new %s --target %s" % (ws, reg.self_target())
-        return "wk new %s --target %s" % (ws, self.name)
+            return "from the workstation:  wk new %s --on %s" % (ws, reg.self_place())
+        return "wk new %s --on %s" % (ws, self.name)
 
     def wait_ready(self, ws, clock, timeout=None):
         """Returns once `ws` is present, or dies naming why it never will be; a creation still running is waited for."""
@@ -697,7 +697,7 @@ class Target:
         return "", "", ""
 
     def sync(self, named=False):
-        """Refresh this target's furniture: its copy of the tooling, and what it keeps of its own."""
+        """Refresh this place's furniture: its copy of the tooling, and what it keeps of its own."""
         return True
 
     def enter_argv(self, ws):
@@ -729,7 +729,7 @@ class Target:
         return "wk-%s" % ws
 
     def ssh_prepare(self, ws):
-        """Point an editor at this target over ssh; nothing for one already an ssh destination."""
+        """Point an editor at this place over ssh; nothing for one already an ssh destination."""
 
     def ssh_user(self, ws):
         """The account inside the workspace an editor logs into, or None."""
@@ -777,7 +777,7 @@ def tart_path(env):
 
 
 def arch_image(arch):
-    return buildconf.IMAGE_ARMHF if arch == "armhf" else ""
+    return presets.IMAGE_ARMHF if arch == "armhf" else ""
 
 
 def podman_vm(machine, name, timeout=None):
@@ -808,7 +808,7 @@ def podman_vm_route(rec):
              "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR"], "%s@127.0.0.1" % c["RemoteUsername"])
 
 
-class Container(Target):
+class Container(Driver):
     kind = "container"
     dir_first = True
     reads_host_mirror = True
@@ -1017,7 +1017,7 @@ class Container(Target):
         for v in ("no_proxy", "NO_PROXY"):
             flags += ["--env", "%s=%s" % (v, NO_PROXY)]
         flags += ["--env", "WAYLAND_DISPLAY=/run/wk/display/wayland-0"]
-        if buildconf.arch_has_gpu(arch):
+        if presets.arch_has_gpu(arch):
             r = self.machine.run(lib_argv(self.root, "host/linux/gpu.sh", "gpu_flags"))
             sys.stderr.write(r.err)
             flags += r.out.split() if r.ok else []
@@ -1195,7 +1195,7 @@ class Container(Target):
         os.execvp("podman", self.podman() + ["exec", "-i", self.ctr(ws), "/bin/sh", "-c", self.sshd_cmd(u)])
 
     def ssh_prepare(self, ws):
-        """An sshd inside the container so Zed reaches it like every target, over the `Host wk-<ws>` alias."""
+        """An sshd inside the container so Zed reaches it like every place, over the `Host wk-<ws>` alias."""
         c = self.ctr(ws)
         u = self._ctr_user(ws)
         if u is None:
@@ -1237,7 +1237,7 @@ class Container(Target):
                            identity=zed_key_path(self.env), extra=("ProxyCommand %s" % self.ssh_proxy(ws),))
 
 
-class Vm(Target):
+class Vm(Driver):
     kind = "vm"
     needs_base = False
     reads_host_mirror = True
@@ -1256,7 +1256,7 @@ class Vm(Target):
     def store(self):
         if self._vm_store is None:
             if not self.vm_store_apart():
-                act.die("the vm target has no store of its own on this machine -- set WK_VM_STORE apart from WK_STORE")
+                act.die("the vm place has no store of its own on this machine -- set WK_VM_STORE apart from WK_STORE")
             self._vm_store = Store(dict(self.env, WK_STORE=Store(self.env).vm_store_dir()))
         return self._vm_store
 
@@ -1475,7 +1475,7 @@ class Vm(Target):
             if guest.run(["test", "-f", images.MARKER]).ok:
                 guest.remove(path)
             else:
-                guest.write(path, "# wk: this machine IS a workspace. Written by lib/wk/targets.py.\nname=%s\nsrc=%s\n"
+                guest.write(path, "# wk: this machine IS a workspace. Written by lib/wk/places.py.\nname=%s\nsrc=%s\n"
                             % (ws, self.src(ws)))
         except OSError as e:
             act.warn("could not settle %s's workspace marker: %s" % (ws, e))
@@ -1613,7 +1613,7 @@ class Vm(Target):
             act.info("removed %s" % ws_dir)
 
 
-class LocalWorkspace(Target):
+class LocalWorkspace(Driver):
     kind = "local"
     needs_base = False
 
@@ -1697,8 +1697,8 @@ class LocalWorkspace(Target):
         return text
 
 
-class Remote(Target):
-    """A machine of its own, reached over ssh (or this machine, when ~/.wk-remote names the target)."""
+class Remote(Driver):
+    """A machine of its own, reached over ssh (or this machine, when ~/.wk-remote names the place)."""
 
     kind = "remote"
     needs_base = False
@@ -1708,10 +1708,10 @@ class Remote(Target):
         self.host = env.get("WK_REMOTE_HOST") or (name if name != "remote" else "")
         self.peer = bool(env.get("WK_REMOTE_PEER"))
         try:
-            here_target = Registry(root, env, machine).self_target()
+            here_place = Registry(root, env, machine).self_place()
         except LookupError:
-            here_target = ""
-        self.is_local = bool(env.get("WK_REMOTE_LOCAL")) or (bool(here_target) and here_target == name)
+            here_place = ""
+        self.is_local = bool(env.get("WK_REMOTE_LOCAL")) or (bool(here_place) and here_place == name)
         self.conf_root = env.get("WK_REMOTE_ROOT", "")
         root_there = self.conf_root or (default_root(env.get("HOME", os.path.expanduser("~"))) if self.is_local else "")
         if self.is_local and root_there:
@@ -1740,8 +1740,8 @@ class Remote(Target):
     def _far(self):
         if self.is_local or self.host:
             return self.machine
-        act.die("target '%s' has no host to reach.\n    Set host= in %s, or\n"
-                "    name the target after a machine your ~/.ssh/config already knows:\n        wk new <name> --target devbox-arm64-2"
+        act.die("place '%s' has no host to reach.\n    Set host= in %s, or\n"
+                "    name the place after a machine your ~/.ssh/config already knows:\n        wk new <name> --on devbox-arm64-2"
                 % (self.name, Registry(self.root, self.env).conf_path(self.name)))
 
     def _sh(self, text, timeout=None):
@@ -1772,10 +1772,10 @@ class Remote(Target):
     def _probe_or_die(self):
         p = self.probed()
         if p.get("unreadable"):
-            act.die("'%s' %s.\n    PROBE_SCRIPT (lib/wk/targets.py) is what ran: run its lines there to see which answers\n"
+            act.die("'%s' %s.\n    PROBE_SCRIPT (lib/wk/places.py) is what ran: run its lines there to see which answers\n"
                     "    differently from the Linux and macOS shapes it reads." % (self.host, p["why"]))
         if p.get("why") is not None:
-            act.die("cannot reach '%s' over ssh: %s\n    This target has no way in but ssh, and it is not interactive: the key,\n"
+            act.die("cannot reach '%s' over ssh: %s\n    This place has no way in but ssh, and it is not interactive: the key,\n"
                     "    the ProxyJump and the host entry all have to work non-interactively.\n"
                     "    What BatchMode refuses to ask -- a new host key, a passphrase -- one\n"
                     "    interactive  ssh %s true  asks and settles." % (self.host, p["why"], self.host))
@@ -1945,7 +1945,7 @@ class Remote(Target):
         dest = self.tools(ws)
         if self.is_local:
             if self.root != dest:
-                act.warn("running %s/wk, but this target's tooling is %s" % (self.root, dest))
+                act.warn("running %s/wk, but this place's tooling is %s" % (self.root, dest))
             return True
         return tools.push(self.root, self.here, self._far(), dest, self.env)
 
@@ -2009,7 +2009,7 @@ class Remote(Target):
         return True
 
     def stop(self, ws):
-        act.err("the '%s' target has no notion of stopping a single workspace -- '%s' is left running" % (self.name, ws))
+        act.err("the '%s' place has no notion of stopping a single workspace -- '%s' is left running" % (self.name, ws))
         return False
 
     def store_init(self):
@@ -2119,7 +2119,7 @@ class Remote(Target):
         self._sh_act("[ -f %s ] || printf %%s %s > %s" % (conf, shlex.quote(self.ccache_conf()), conf))
         self.here.mkdir(self.store.ws_dir(ws))
         if not self._sh_act("touch %s" % shlex.quote(wsd + "/" + READY_MARKER)).ok:   # last: an ssh cut mid-clone leaves it creating
-            act.die("could not mark '%s' ready on %s -- treat it as half-made\n    and re-run 'wk new %s --target %s'" % (ws, host, ws, self.name))
+            act.die("could not mark '%s' ready on %s -- treat it as half-made\n    and re-run 'wk new %s --on %s'" % (ws, host, ws, self.name))
         act.info("remote workspace '%s' created on %s (%s)" % (ws, host, wsd))
 
     def results(self, ws):
@@ -2282,7 +2282,7 @@ def store_state(store):
 
 def main(argv, env=None):
     env = os.environ if env is None else env
-    ap = argparse.ArgumentParser(prog="python3 -m wk.targets")
+    ap = argparse.ArgumentParser(prog="python3 -m wk.places")
     sub = ap.add_subparsers(dest="verb", required=True)
     sub.add_parser("store-init", help="make the container store; print each path it changed")
     sub.add_parser("tart", help="print the tart binary's path (tart_path); exit 1 where there is none")

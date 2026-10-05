@@ -1,6 +1,6 @@
 """The yocto image build as it runs inside a workspace (lib/wk/sysimage/yocto.py is the host half), around
 Tools/Scripts/cross-toolchain-helper, which stays the upstream interface for the build itself. Run as
-`python3 /opt/wk-tools/lib/wk/sysimage/yocto_target.py`, under task.stage_main, which takes the wall off PATH."""
+`python3 /opt/wk-tools/lib/wk/sysimage/yocto_ws.py`, under task.stage_main, which takes the wall off PATH."""
 
 import argparse
 import configparser
@@ -53,14 +53,14 @@ def say(text):
 
 
 def parse(argv):
-    ap = argparse.ArgumentParser(prog="yocto_target.py")
+    ap = argparse.ArgumentParser(prog="yocto_ws.py")
     for flag in ("--target", "--image", "--jobs", "--mem-budget", "--commit", "--slot", "--profile", "--sstate-ns",
                  "--port-target-from", "--port-machine", "--board", "--multilib", "--multilib-tune", "--cross-cc",
                  "--cross-cxx", "--cross-cmake", "--pgo-dir", "--pgo-lib", "--webkit-jobs"):
         ap.add_argument(flag, default="")
     ap.add_argument("--stage", default="image", choices=STAGES)
     ap.add_argument("--src", default="/src/WebKit")
-    ap.add_argument("--cross-config", default="wpe-cross")
+    ap.add_argument("--cross-preset", default="wpe-cross")
     for flag, default in (("--rm-work", "1"), ("--chromium", "0"), ("--local-layer", "1"), ("--tailnet", "1")):
         ap.add_argument(flag, default=default, choices=("0", "1"))
     a = ap.parse_args(argv)
@@ -98,7 +98,7 @@ def strip_block(text, marker):
 
 def local_conf(a, env, jobs, board_append):
     bb, par = threads(jobs)
-    out = ["", MARKER, "# Written by lib/wk/sysimage/yocto_target.py; the workdir is wiped whenever the target config changes.", "",
+    out = ["", MARKER, "# Written by lib/wk/sysimage/yocto_ws.py; the workdir is wiped whenever the target config changes.", "",
            'DL_DIR = "%s"' % env["DL_DIR"], 'SSTATE_DIR = "%s"' % env["SSTATE_DIR"], ""]
     if a.multilib:
         out += ["require conf/multilib.conf", 'MULTILIBS = "multilib:%s"' % a.multilib,
@@ -187,7 +187,7 @@ class Build:
             d = self.env.get(name)
             if not d:
                 fail("DL_DIR/SSTATE_DIR are not set in this workspace. They come from the container's\n    store-backed "
-                     "cache mount (lib/wk/targets.py's Container); without them the caches would die with it.")
+                     "cache mount (lib/wk/places.py's Container); without them the caches would die with it.")
             self.m.mkdir(d)
 
     def refresh_git_index(self, d):
@@ -207,7 +207,7 @@ class Build:
         """Forced and cleaned: a killed webkit stage leaves the checkout mid-checkout. `-fd`, never `-fdx`: WebKitBuild holds the image workspace's slots."""
         c, mirror = self.a.commit, Store(self.env).container_mirror_dir()
         if not mirror:
-            fail("WK_MIRROR names the mirror this container mounts (lib/wk/targets.py's Container), and it is not set")
+            fail("WK_MIRROR names the mirror this container mounts (lib/wk/places.py's Container), and it is not set")
         if not self.m.run(["git", "-C", self.src, "cat-file", "-e", c + "^{commit}"]).ok \
                 and not self.git(self.src, "fetch", "--quiet", mirror, c).ok:
             fail("%s is not in this machine's mirror; 'wk bench ab' and 'wk pr' fetch a PR head into it first" % c)
@@ -361,7 +361,7 @@ class Build:
         if int(max(stamps)) < int(start):
             fail("bitbake produced no new image; the helper reported a stale one. The newest\n    file in %s predates this "
                  "stage, which the move aside makes\n    impossible -- so cross-toolchain-helper changed how it decides an "
-                 "image is\n    built, and copies_aside (lib/wk/sysimage/yocto_target.py) must change with it." % self.image_dir)
+                 "image is\n    built, and copies_aside (lib/wk/sysimage/yocto_ws.py) must change with it." % self.image_dir)
 
     def summary(self):
         a = self.a
@@ -395,7 +395,7 @@ class Build:
             fail("could not read BUILD_WEBKIT_ARGS for %s out of Tools/yocto/targets.conf" % a.target)
         cmake = " ".join(x for x in (cmake, WEBKIT_CMAKE, a.cross_cmake) if x)
         jobs = int(a.webkit_jobs or 8)
-        say("  config:       %s" % a.cross_config)
+        say("  preset:       %s" % a.cross_preset)
         say("  target flags: %s" % (" ".join(flags) or "none"))
         say("  cmakeargs:    %s" % cmake)
         pre = ["env", "CC=" + a.cross_cc, "CXX=" + a.cross_cxx] if a.cross_cc else []   # the SDK's setup exports its clang only when named
@@ -419,7 +419,7 @@ class Build:
         if not self.m.act_run(["cp", "-a", os.path.join(b, "bin"), os.path.join(b, "lib"), root + "/"]).ok:
             fail("could not copy the build into %s" % slotdir)
         rev = self.m.run(["git", "-C", self.tools, "rev-parse", "--short", "HEAD"])
-        fields = dict(slot=a.slot, profile=a.profile, commit=a.commit, target=a.target, build_config=a.cross_config,
+        fields = dict(slot=a.slot, profile=a.profile, commit=a.commit, target=a.target, build_preset=a.cross_preset,
                       browser="minibrowser", lib_dir="lib", exec_dir="bin", bundle_dir="lib", jobs=str(jobs),
                       built_at=self.clock.iso(), wk_tools=rev.out.strip() if rev.ok else "unknown")
         sj = os.path.join(slotdir, "slot.json")

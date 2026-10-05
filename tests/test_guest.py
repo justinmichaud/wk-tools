@@ -12,10 +12,10 @@ from unittest import mock
 from tests.killpoints import converges
 from tests.support import REPO, live_selected
 from tests.test_wk_secrets import SECRETFILE, SecretsTest, World, quiet
-from tests.test_wk_targets import TargetConformance
+from tests.test_wk_places import DriverConformance
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import agents, guest, targets, tools  # noqa: E402
+from wk import agents, guest, places, tools  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Killed, Result  # noqa: E402
@@ -106,7 +106,7 @@ class GuestTest(SecretsTest):
             if self.admit_rc:
                 raise Refused(self.admit_rc)
         for obj, name, fn in ((Store, "macos_host", mock.PropertyMock(return_value=True)),
-                              (targets.Vm, "tart", lambda s: TART),
+                              (places.Vm, "tart", lambda s: TART),
                               (guest, "admit", admit),
                               (guest, "login_note", lambda env: self.notes.append(1)),
                               (tools, "push", lambda *a: True)) + tuple((guest.Guest, fn, step(fn)) for fn in BASH_STEPS):
@@ -115,7 +115,7 @@ class GuestTest(SecretsTest):
             p.start()
             self.addCleanup(p.stop)
         self.clock = FakeClock()
-        self.vm = targets.Registry(str(REPO), env=self.w.env, machine=self.w).load("vm")
+        self.vm = places.Registry(str(REPO), env=self.w.env, machine=self.w).load("vm")
 
     @property
     def vmdir(self):
@@ -139,12 +139,12 @@ class GuestTest(SecretsTest):
         return path
 
 
-class TestVmConformance(GuestTest, TargetConformance):
-    cls, ws, down = targets.Vm, "demo", "stopped"
+class TestVmConformance(GuestTest, DriverConformance):
+    cls, ws, down = places.Vm, "demo", "stopped"
 
     def stopped(self):
         self.w.state = "stopped"
-        self.w.write(os.path.join(self.vm.store.ws_dir("demo"), targets.READY_MARKER), "")
+        self.w.write(os.path.join(self.vm.store.ws_dir("demo"), places.READY_MARKER), "")
         return self.vm
 
     def brought_up(self, t):
@@ -204,7 +204,7 @@ class TestBothArms(GuestTest):
     def test_an_unfiltered_guest_is_marked_and_gets_no_softnet(self):
         self.w.state = "stopped"
         self.w.env["WK_VM_UNFILTERED"] = "1"
-        self.vm = targets.Registry(str(REPO), env=self.w.env, machine=self.w).load("vm")
+        self.vm = places.Registry(str(REPO), env=self.w.env, machine=self.w).load("vm")
         ip, err = self.run_start()
         self.assertEqual(IP, ip, err)
         self.assertIn("open network", err)
@@ -274,7 +274,7 @@ class TestBothArms(GuestTest):
         def world():
             w = GuestWorld(self.tmp)
             w.state = "stopped"
-            return type("W", (), {"fake": w, "vm": targets.Registry(str(REPO), env=w.env, machine=w).load("vm")})
+            return type("W", (), {"fake": w, "vm": places.Registry(str(REPO), env=w.env, machine=w).load("vm")})
 
         def run_once(w):
             quiet(guest.start, w.vm, "demo", FakeClock())
@@ -331,7 +331,7 @@ class TestTheSteps(GuestTest):
 class TestTheOverrides(GuestTest):
     def host(self, **env):
         self.w.env.update(env)
-        return guest.Host(targets.Registry(str(REPO), env=self.w.env, machine=self.w).load("vm"), self.clock)
+        return guest.Host(places.Registry(str(REPO), env=self.w.env, machine=self.w).load("vm"), self.clock)
 
     def test_the_proxy_address_is_read_off_the_live_interface_on_the_guest_subnet(self):
         self.assertEqual(ADDR, self.host().proxy_addr())
@@ -363,7 +363,7 @@ class TestTheDaemons(GuestTest):
     def test_a_bridge_that_never_gets_its_address_starts_no_proxy(self):
         self.w.bridge = False
         self.w.env["WK_VM_PROXY_ADDR"] = ADDR
-        self.vm = targets.Registry(str(REPO), env=self.w.env, machine=self.w).load("vm")
+        self.vm = places.Registry(str(REPO), env=self.w.env, machine=self.w).load("vm")
         ok, err = quiet(self.host().start_proxy)
         self.assertFalse(ok)
         self.assertIn("never got address", err)
@@ -378,7 +378,7 @@ class TestTheDaemons(GuestTest):
     def ready(self):
         ws_dir = self.vm.store.ws_dir("demo")
         self.w.mkdir_now(ws_dir)
-        self.w._set_file(os.path.join(ws_dir, targets.READY_MARKER), "")
+        self.w._set_file(os.path.join(ws_dir, places.READY_MARKER), "")
         quiet(lambda: self.vm.wait_ready("demo", self.clock))
 
     def test_a_command_that_waits_for_a_running_guest_respawns_a_dead_proxy(self):
@@ -600,11 +600,11 @@ GuestWorld.state_of = _state_of
 
 
 def _a_running_guest():
-    """(vm target, name) of a guest up on this host, or None; nothing is started to find one."""
+    """(vm place, name) of a guest up on this host, or None; nothing is started to find one."""
     if not live_selected() or sys.platform != "darwin":
         return None
     try:
-        vm = targets.Registry(str(REPO)).load("vm")
+        vm = places.Registry(str(REPO)).load("vm")
         up = [n for n, state in vm.list() if state == "running"]
     except (LookupError, Refused):
         return None
@@ -661,11 +661,11 @@ class TestTheLiveRemount(unittest.TestCase):
         agent-rw, on the automount tag, is the mount it was."""
         vm, ws = self.found
         host = vm.machine.run(["git", "-C", vm.store.mirror_dir(), "rev-parse", "refs/heads/main"])
-        rw = vm.exec(ws, ["sh", "-c", "mount | grep -F %s" % shlex.quote(" on %s (" % targets.GUEST_SHARES)], timeout=60)
+        rw = vm.exec(ws, ["sh", "-c", "mount | grep -F %s" % shlex.quote(" on %s (" % places.GUEST_SHARES)], timeout=60)
         self.assertEqual(vm.remount_mirror(ws), "")
         r = vm.exec(ws, ["git", "-C", vm.mirror_dir(), "rev-parse", "refs/heads/main"], timeout=60)
         self.assertEqual((r.ok, r.out.strip()), (True, host.out.strip()), r.err)
-        self.assertEqual(rw.out, vm.exec(ws, ["sh", "-c", "mount | grep -F %s" % shlex.quote(" on %s (" % targets.GUEST_SHARES)],
+        self.assertEqual(rw.out, vm.exec(ws, ["sh", "-c", "mount | grep -F %s" % shlex.quote(" on %s (" % places.GUEST_SHARES)],
                                          timeout=60).out)
 
 
@@ -700,7 +700,7 @@ class TestTheLiveWayIn(unittest.TestCase):
     def test_vm_mirror_tag_mount(self):
         """`live vm.mirror_tag_mount`: the base's LaunchDaemon mounted the mirror's own tag at boot, where mirror_dir is."""
         vm, ws = self.found
-        r = vm.exec(ws, ["sh", "-c", "mount | grep -F %s && test -d %s" % (shlex.quote(" on %s (" % targets.GUEST_MIRROR_MOUNT),
+        r = vm.exec(ws, ["sh", "-c", "mount | grep -F %s && test -d %s" % (shlex.quote(" on %s (" % places.GUEST_MIRROR_MOUNT),
                                                                         shlex.quote(vm.mirror_dir()))], timeout=60)
         self.assertTrue(r.ok, r.out + r.err)
 

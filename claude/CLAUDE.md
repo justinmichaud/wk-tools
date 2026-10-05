@@ -48,13 +48,13 @@ route around it — the job count and the nice level are what keep a shared
 build machine alive.
 
 ```
-wk build <config>     # jsc-release, gtk-debug, wpe-release, mac-release, ...
+wk build <preset>     # jsc-release, gtk-debug, wpe-release, mac-release, ...
 wk run -- <args>      # run jsc from the current build
 wk test <args>        # run tests
 wk status             # this workspace's build/test state; exit code is machine-readable
 wk status --wait      # ... blocking until it is not busy, instead of polling a pid
 wk status --log [-f|--all]     # the build log, errors first
-wk build <config> --dry-run    # what it would build, and where, without building
+wk build <preset> --dry-run    # what it would build, and where, without building
 wk run --profile[=<mode>] [file.js]
                       # where the time went: JSC's own profilers, samply,
                       # Instruments -- one flag each, no env-var walls
@@ -87,7 +87,7 @@ terminal belongs to the debugger.
 
 No workspace name in any of them: you are inside the workspace, and it is the
 only one there is. `wk build --list` shows the configs, and a bare `wk run` or
-`wk test` uses the config this workspace was built with — so a macOS guest does
+`wk test` uses the preset this workspace was built with — so a macOS guest does
 not have to be told it is an Apple port every time.
 
 Commands that act on the *host* — `wk new`, `wk rm`, `wk gc`,
@@ -153,17 +153,17 @@ asked.
 ## Long-running commands, from inside a workspace
 
 A build here is tens of minutes and the shell running it is not guaranteed to
-last that long. `wk build <config> --detach` starts it and returns
+last that long. `wk build <preset> --detach` starts it and returns
 immediately; `wk status` and `wk status --log -f` follow it. Nothing is lost if this
 session ends, and the build's record ends up saying what actually happened
-rather than `running` forever. `wk build <config> --kill` stops one that is
+rather than `running` forever. `wk build <preset> --kill` stops one that is
 running, wherever it runs, and records it as cancelled -- which is also what
 ^C does to a build you started in the foreground.
 
 Every build is watched for memory (a job count is a prediction, and a link
 step can break it). If yours is killed you will see `build=oom` in `wk status`
 with the peak and the budget: build with fewer jobs
-(`WK_MB_PER_JOB=3072 wk build <config>`) rather than assuming the code is at
+(`WK_MB_PER_JOB=3072 wk build <preset>`) rather than assuming the code is at
 fault.
 
 ## WebKit conventions

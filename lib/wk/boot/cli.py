@@ -343,7 +343,7 @@ def fleet_probe(root, name, env):
 
 def broker(root, name, action, system, env, machine=None):
     """A sandboxed `wk boot` is a request over the one socket a workspace sees; only the action word and the machine cross it."""
-    from wk.targets import workspace_marker_path
+    from wk.places import workspace_marker_path
     if action == "diag":
         act.die("'wk boot %s --diag' mounts that machine's boot partition on the\n    workstation to read the system's own account of its last "
                 "boot. That is a\n    disk read, not a mode transition, and it is not in the request broker's\n    vocabulary -- a workspace "

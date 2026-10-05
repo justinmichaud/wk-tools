@@ -24,7 +24,7 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, dispatch, record, targets  # noqa: E402
+from wk import decl, dispatch, places, record  # noqa: E402
 from wk.act import Refused, die, log  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
@@ -59,13 +59,13 @@ def main(argv):
 
     zed = None
     if not url_only and not route:
-        zed = targets.zed_cli(Local())
+        zed = places.zed_cli(Local())
         if zed is None:
             die("zed is not installed (no 'zed' on PATH, no /Applications/Zed.app)\n"
                 "    https://zed.dev/download -- 'wk doctor' checks for it, or add --url to print\n"
                 "    the route instead and open it from a machine that does have Zed")
 
-    reg = targets.Registry(ROOT)
+    reg = places.Registry(ROOT)
 
     if tools:
         hostname = record.host_name(reg.machine)
@@ -82,16 +82,16 @@ def main(argv):
             kind = None
         if kind == "remote":
             try:
-                target = reg.load(name)
+                driver = reg.load(name)
             except LookupError as e:
                 die(str(e))
-            host = target.ssh_host("")
+            host = driver.ssh_host("")
             if not host:
-                die("target '%s' is this machine -- 'wk zed --tools' opens this checkout" % name)
-            emit(url_only, zed, "ssh://%s%s" % (host, target.tools("")))
+                die("place '%s' is this machine -- 'wk zed --tools' opens this checkout" % name)
+            emit(url_only, zed, "ssh://%s%s" % (host, driver.tools("")))
 
         if kind in ("container", "vm", "local"):
-            die("'%s' is a kind of target, not a machine. What holds a copy of\n"
+            die("'%s' is a kind of place, not a machine. What holds a copy of\n"
                 "    wk-tools is a machine or a workspace:\n"
                 "        wk zed --tools            this checkout\n"
                 "        wk zed --tools moose      a machine's copy\n"
@@ -99,57 +99,57 @@ def main(argv):
 
         require_name(name)
         try:
-            tname = reg.ws_target(name)
-            target = reg.load(tname)
+            tname = reg.ws_place(name)
+            driver = reg.load(tname)
         except LookupError as e:
             die(str(e))
-        if not reg.on_target(tname, name) and target.info(name) != "unreachable":
+        if not reg.on_place(tname, name) and driver.info(name) != "unreachable":
             die("no machine or workspace named '%s'\n"
                 "    'wk ls' lists the workspaces, 'wk status' the machines." % name)
-        target.ssh_prepare(name)
-        host = target.ssh_host(name)
+        driver.ssh_prepare(name)
+        host = driver.ssh_host(name)
         if not host:
             die("'%s' is not running, so nothing in it can be opened" % name)
-        emit(url_only, zed, "ssh://%s%s" % (host, target.tools(name)))
+        emit(url_only, zed, "ssh://%s%s" % (host, driver.tools(name)))
         return 0
 
     require_name(name)
     try:
-        tname = reg.ws_target(name)
-        target = reg.load(tname)
+        tname = reg.ws_place(name)
+        driver = reg.load(tname)
     except LookupError as e:
         die(str(e))
-    broken = broken_reason(target, tname, name)
+    broken = broken_reason(driver, tname, name)
     if broken:
         die(broken)
 
-    target.ssh_prepare(name)
+    driver.ssh_prepare(name)
 
     if route:
-        user = target.ssh_user(name)
+        user = driver.ssh_user(name)
         if not user:
-            die("a %s workspace has no ssh account for an editor to log in to" % target.kind)
-        proxy = target.ssh_proxy(name) or ""
+            die("a %s workspace has no ssh account for an editor to log in to" % driver.kind)
+        proxy = driver.ssh_proxy(name) or ""
         print("user=%s" % user)
-        print("src=%s" % target.src(name))
+        print("src=%s" % driver.src(name))
         print("proxy=%s" % proxy)
         return 0
 
-    host = target.ssh_host(name)
+    host = driver.ssh_host(name)
     if not host:
         die("'%s' is not running, so there is no route to it.\n"
             "    A macOS guest needs booting first:  wk start %s" % (name, name))
 
-    if target.kind == "vm":
-        target.login_note()
+    if driver.kind == "vm":
+        driver.login_note()
 
-    emit(url_only, zed, "ssh://%s%s" % (host, target.src(name)))
+    emit(url_only, zed, "ssh://%s%s" % (host, driver.src(name)))
     return 0
 
 
-def broken_reason(target, tname, name):
+def broken_reason(driver, tname, name):
     """None, or why `name` is a record without an environment -- naming the repair, not a driver's word."""
-    if target.state(name) != "broken":
+    if driver.state(name) != "broken":
         return None
     return ("'%s' exists as a record and not as a %s workspace: creation\n"
             "    finished, and the environment is gone -- something outside wk removed it.\n"

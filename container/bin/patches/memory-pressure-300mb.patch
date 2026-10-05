@@ -1,4 +1,4 @@
-# wk memory-experiment patch: 300 MB MemoryPressureMonitor clamp
+# wk memory-charts patch: 300 MB MemoryPressureMonitor clamp
 #
 # docs/Urgent/HANDOFF-memory.md asks for this to be a file instead of a
 # copy-paste block, so it survives past whoever currently holds it in their
@@ -16,7 +16,7 @@
 # how a page behaves against a small budget on hardware with much more RAM
 # than the target device, without needing that device to reproduce the run.
 # MemoryPressureHandler.cpp/.h (Source/WTF/wtf or Source/WebCore/platform,
-# depending on branch) is where the real threshold lives; this experiment
+# depending on branch) is where the real threshold lives; this patch
 # overrides it, most likely behind an environment variable or a debug build
 # flag in whichever checkout still has this patch.
 #

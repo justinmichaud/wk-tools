@@ -43,7 +43,7 @@ class TestAnUnreachableMachineKeepsItsRecord(WkTest):
 
     def test_rm_refuses_with_ssh_words_and_keeps_the_record(self):
         with stub_path({"ssh": _HOSTKEY_SSH}) as binp:
-            cp = run("rm", "fakews", env=self._env(binp, WK_YES="1", WK_TARGET="fakebox"),
+            cp = run("rm", "fakews", env=self._env(binp, WK_YES="1", WK_PLACE="fakebox"),
                      input="", timeout=120)
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("Host key verification failed.", cp.stdout, cp.stdout)
@@ -51,7 +51,7 @@ class TestAnUnreachableMachineKeepsItsRecord(WkTest):
 
     def test_a_name_with_no_record_is_refused_before_the_prompt(self):
         with stub_path({"ssh": _HOSTKEY_SSH}) as binp:
-            cp = run("rm", "nope", env=self._env(binp, WK_TARGET="fakebox"), input="", timeout=120)
+            cp = run("rm", "nope", env=self._env(binp, WK_PLACE="fakebox"), input="", timeout=120)
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("Host key verification failed.", cp.stdout, cp.stdout)
         self.assertNotIn("destroy workspace", cp.stdout)
@@ -60,7 +60,7 @@ class TestAnUnreachableMachineKeepsItsRecord(WkTest):
         with stub_path({"ssh": _HOSTKEY_SSH}) as binp:
             cp = subprocess.run(
                 [sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1] + '/lib')\n"
-                 "from wk import targets\nprint(targets.Registry(sys.argv[1]).locate('no-such-workspace'))", str(REPO)],
+                 "from wk import places\nprint(places.Registry(sys.argv[1]).locate('no-such-workspace'))", str(REPO)],
                 env=dict(os.environ, **self._env(binp)), capture_output=True, text=True, timeout=120)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.strip(), "[]", cp.stdout + cp.stderr)
@@ -82,7 +82,7 @@ class TestAnAbsentNameIsRefusedBeforeThePrompt(WkTest):
         self.env = {
             "WK_MACHINES_DIR": str(self.registry),
             "XDG_STATE_HOME": str(self.tmp / "state"),
-            "WK_TARGET": "fakelocal",
+            "WK_PLACE": "fakelocal",
         }
 
     def _make(self, name):

@@ -13,10 +13,10 @@ from pathlib import Path
 from unittest import mock
 
 from tests.support import REPO, WkTest, bash, clean_env, run
-from tests.test_wk_targets import LINUX_PROBE, SshFake
+from tests.test_wk_places import LINUX_PROBE, SshFake
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import fleet, record, status, statusview, targets  # noqa: E402
+from wk import fleet, places, record, status, statusview  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 from wk.resources import Resources  # noqa: E402
@@ -301,7 +301,7 @@ class TestWalkLeadsWithSelf(unittest.TestCase):
 
     def _walk(self, root, env):
         w = status.Walk(root, env=env, fleet=False, devices=False)
-        w.targets = lambda: []   # no registry needed: only the leading record and the exit are asked
+        w.places = lambda: []   # no registry needed: only the leading record and the exit are asked
         return w
 
     def test_the_self_record_is_the_first_thing_yielded(self):
@@ -315,7 +315,7 @@ class TestWalkLeadsWithSelf(unittest.TestCase):
     def test_a_named_workspace_walk_does_not_lead_with_it(self):
         env = {"WK_ROW_LABEL": "here"}
         w = status.Walk(REPO, name="ws1", env=env, fleet=False, devices=False)
-        w.reg = types.SimpleNamespace(ws_target=lambda n: "local")
+        w.reg = types.SimpleNamespace(ws_place=lambda n: "local")
         w._job = lambda tname, name: (lambda: ([], 0))
         recs = list(w.records(markers=False))
         self.assertFalse(any(r.get("kind") == "fleet" for r in recs))
@@ -499,13 +499,13 @@ class TestToolsFact(unittest.TestCase):
                {"kind": "workspace", "machine": "far", "method": "native", "name": "ws", "state": "absent", "ws": "absent"}]
         asked = []
 
-        class FarTarget:
+        class FarDriver:
             def wk(self, *args, env=None, quiet=False):
                 asked.append((args, env))
                 return 0, "".join(json.dumps(r) + "\n" for r in far)
 
         walk = object.__new__(status.Walk)
-        recs, rc = walk.delegate(FarTarget(), "far", ["status", "--no-fleet", "--records", "ws"])
+        recs, rc = walk.delegate(FarDriver(), "far", ["status", "--no-fleet", "--records", "ws"])
         self.assertEqual((rc, asked[0][1]["WK_ROW_LABEL"], asked[0][1]["WK_NO_DELEGATE"]), (0, "far", "1"))
         here = {"kind": "workspace", "machine": "here", "method": "native", "name": "ws", "state": "present", "ws": "present"}
         skew = status.tools_fact({"sha": "0000000", "dirty": "no"}, "abcdef1", "far", "far")
@@ -522,7 +522,7 @@ class TestPushStatusAll(WkTest):
     def test_one_line_per_machine_including_this_one(self):
         env = clean_env()
         here = record.machine_name(env)
-        expected = set(targets.Registry(REPO, env=env).machines()) | {here}
+        expected = set(places.Registry(REPO, env=env).machines()) | {here}
         try:
             cp = self.run_wk("key", "push", "status", "--all", timeout=180)
         except subprocess.TimeoutExpired:
@@ -548,7 +548,7 @@ class TaskTest(WkTest):
         return Records(self.store, clock=self.clock, env=env).begin(kind, where, name, kill, log, list(plan))
 
     def records(self):
-        return Records(self.store, clock=self.clock, ask_target=lambda n, pid, cap: self.answers.get(n),
+        return Records(self.store, clock=self.clock, ask_place=lambda n, pid, cap: self.answers.get(n),
                        env={"WK_STORE": self.store})
 
     def reported(self, only=None):
@@ -583,7 +583,7 @@ class TestTasksOfOneWorkspace(TaskTest):
                 self.assertEqual(self.names("ws1"), ["ws1"] if reported else [])
 
     def test_a_task_whose_pid_is_in_a_workspace_is_asked_of_it_and_no_answer_reads_unanswered(self):
-        self.begin("target", "ws3", "wk build ws3 --kill", "/nolog", "compile").pid(4242)
+        self.begin("place", "ws3", "wk build ws3 --kill", "/nolog", "compile").pid(4242)
         for answer, state, code in ((True, "running", 2), (False, "died", 4), (None, "unanswered", 4)):
             with self.subTest(answer=answer):
                 self.answers["ws3"] = answer
@@ -591,7 +591,7 @@ class TestTasksOfOneWorkspace(TaskTest):
                 self.assertEqual((recs[0]["state"], worst), (state, code))
 
     def test_a_task_is_reported_on_the_machine_its_pid_is_on(self):
-        self.begin("target", "ws4", "wk build ws4 --kill", "/nolog", "compile").pid(4242, "farbox")
+        self.begin("place", "ws4", "wk build ws4 --kill", "/nolog", "compile").pid(4242, "farbox")
         self.answers["ws4"] = True
         self.assertEqual(self.reported("ws4")[0][0]["machine"], "farbox")
 
@@ -757,7 +757,7 @@ class TestHealthRecords(unittest.TestCase):
 
 
 class TestTheWalkProbesAMachineOnce(unittest.TestCase):
-    """One remote target in the walk: the driver object is the walk's, so its probe is paid once and capacity,
+    """One remote place in the walk: the driver object is the walk's, so its probe is paid once and capacity,
     delegation and tooling read the memo."""
 
     def setUp(self):
@@ -765,7 +765,7 @@ class TestTheWalkProbesAMachineOnce(unittest.TestCase):
         (self.tmp / "hosts").mkdir()
         (self.tmp / "hosts" / "box.conf").write_text("kind=build\nhost=box.example\nroot=/home/u/wk\n")
         self.env = {"HOME": str(self.tmp), "XDG_STATE_HOME": str(self.tmp / "state"), "WK_STORE": str(self.tmp / "store"),
-                    "WK_MACHINES_DIR": str(self.tmp / "hosts"), "WK_TARGET": "box", "WK_IN_VM": "1",
+                    "WK_MACHINES_DIR": str(self.tmp / "hosts"), "WK_PLACE": "box", "WK_IN_VM": "1",
                     "PATH": os.environ.get("PATH", "")}
         self.fake = SshFake()
         self.fake.answer_remote("uname -s", out=LINUX_PROBE)
@@ -776,11 +776,11 @@ class TestTheWalkProbesAMachineOnce(unittest.TestCase):
         subprocess.run(["rm", "-rf", str(self.tmp)])
 
     def test_one_ssh_probe_for_the_whole_walk(self):
-        reg = targets.Registry(REPO, env=self.env, machine=self.fake)
+        reg = places.Registry(REPO, env=self.env, machine=self.fake)
         walk = status.Walk(REPO, fleet=True, devices=False, env=self.env, reg=reg)
         with mock.patch.object(status.Walk, "reach", return_value=("", "")):
             recs = [r for r in walk.records() if r.get("kind") not in ("plan", "flush", "exit")]
-        self.assertIs(walk.target("box"), walk.target("box"))
+        self.assertIs(walk.driver("box"), walk.driver("box"))
         self.assertEqual(len(self.fake.ssh_calls("uname -s")), 1)
         self.assertEqual(len(self.fake.ssh_calls("test -f $HOME/.wk-remote")), 1)
         wk_calls = [c[-1] for c in self.fake.ssh_calls("tools/wk ")]
@@ -849,7 +849,7 @@ class TestRendersPartial(unittest.TestCase):
         out = render([machine_rec("m"), {"kind": "workspace", "machine": "m", "method": "container", "name": "bare", "state": "running", "ws": "present"}]).stdout
         self.assertRegex(out, r"(?m)^\s+bare\s+running\s+-\s+\?\s+clean")
 
-    def test_an_unreachable_machine_is_a_line_not_an_empty_target(self):
+    def test_an_unreachable_machine_is_a_line_not_an_empty_place(self):
         out = render([machine_rec("box"), {"kind": "raw", "machine": "box", "text": "box: unreachable over ssh: Connection refused"}]).stdout
         self.assertIn("box: unreachable over ssh: Connection refused", out)
         self.assertNotIn("no workspaces on it", out)

@@ -45,12 +45,12 @@ class TestAStageAsksPython(unittest.TestCase):
 
 
 class TestStoreInitSaysWhatItChanged(unittest.TestCase):
-    """`python3 -m wk.targets store-init` prints a line per path it made or changed, so the setup stage can count it."""
+    """`python3 -m wk.places store-init` prints a line per path it made or changed, so the setup stage can count it."""
 
     def run_init(self, tmp):
         env = {"WK_STORE": tmp + "/store", "WK_HOST_SECRETS": tmp + "/secrets", "XDG_STATE_HOME": tmp + "/state",
                "HOME": tmp, "WK_MACHINES_DIR": tmp + "/machines", "XDG_CONFIG_HOME": tmp + "/config"}
-        cp = bash('PYTHONPATH="$WK_ROOT/lib" python3 -m wk.targets store-init', env=env)
+        cp = bash('PYTHONPATH="$WK_ROOT/lib" python3 -m wk.places store-init', env=env)
         self.assertEqual(cp.returncode, 0, cp.stderr)
         return cp.stdout.splitlines()
 

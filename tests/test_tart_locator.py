@@ -20,8 +20,8 @@ class TestThePythonLocator(WkTest):
         self.home = self._scratch.__enter__()
         import sys
         sys.path.insert(0, str(REPO / "lib"))
-        from wk import targets
-        self.targets = targets
+        from wk import places
+        self.places = places
 
     def tearDown(self):
         self._scratch.__exit__(None, None, None)
@@ -31,23 +31,23 @@ class TestThePythonLocator(WkTest):
         link = self.home / ".local" / "bin" / "tart"
         link.parent.mkdir(parents=True, exist_ok=True)
         link.symlink_to(real)
-        self.assertEqual(self.targets.tart_path({"HOME": str(self.home), "PATH": "/usr/bin:/bin"}), os.path.realpath(real))
+        self.assertEqual(self.places.tart_path({"HOME": str(self.home), "PATH": "/usr/bin:/bin"}), os.path.realpath(real))
 
     def test_one_on_the_path_wins(self):
         onpath = plant(self.home, "bin/tart")
         plant(self.home, ".local/bin/tart")
-        self.assertEqual(self.targets.tart_path({"HOME": str(self.home), "PATH": str(self.home / "bin")}), os.path.realpath(onpath))
+        self.assertEqual(self.places.tart_path({"HOME": str(self.home), "PATH": str(self.home / "bin")}), os.path.realpath(onpath))
 
     def test_a_bundle_nothing_links_is_not_guessed_at_and_the_refusal_names_the_link(self):
         plant(self.home, ".local/share/tart/tart.app/Contents/MacOS/tart")
         env = {"HOME": str(self.home), "PATH": "/usr/bin:/bin"}
-        self.assertIsNone(self.targets.tart_path(env))
+        self.assertIsNone(self.places.tart_path(env))
         import contextlib
         import io
         from wk.act import Refused
         from wk.machine import Fake
         with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(Refused):
-            self.targets.Vm("vm", str(REPO), env, Fake()).tart_or_die()
+            self.places.Vm("vm", str(REPO), env, Fake()).tart_or_die()
         self.assertIn("ln -sfn ~/.local/share/tart/tart.app/Contents/MacOS/tart ~/.local/bin/tart", err.getvalue())
 
 

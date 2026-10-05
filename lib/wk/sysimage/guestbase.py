@@ -32,7 +32,7 @@ def image(env):
 
 
 def mirror_env_words():
-    from wk.targets import GUEST_MIRROR_MOUNT, GUEST_MOUNT_MIRROR, MIRROR_TAG
+    from wk.places import GUEST_MIRROR_MOUNT, GUEST_MOUNT_MIRROR, MIRROR_TAG
     return " ".join(("WK_MIRROR_TAG=" + MIRROR_TAG, "WK_MIRROR_MOUNT=" + GUEST_MIRROR_MOUNT, "WK_MOUNT_MIRROR=" + GUEST_MOUNT_MIRROR))
 
 
@@ -135,7 +135,7 @@ class Base:
         self.vm.delete_vm(self.name)
         self.machine.remove(self.marker())
         info("deleted '%s' -- existing vm workspaces are unaffected" % self.name)
-        log("  '%s' builds it again; until then 'wk new --target vm' has nothing to clone" % guest.BASE_BUILD)
+        log("  '%s' builds it again; until then 'wk new --on vm' has nothing to clone" % guest.BASE_BUILD)
         cache = os.path.join(home, "cache")
         try:
             cached = self.machine.isdir(cache) and bool(self.machine.listdir(cache))

@@ -15,7 +15,7 @@ import unittest.mock
 from pathlib import Path
 
 from tests.support import (REPO, WkTest, container_side, container_store, run_here,
-                           requires_container_target, run)
+                           requires_container_place, run)
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import slot as wkslot_lib  # noqa: E402
@@ -239,7 +239,7 @@ class TestSysimageLs(WkTest):
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertNotIn("command not found", cp.stdout)
 
-    @requires_container_target()
+    @requires_container_place()
     @unittest.skipUnless(sys.platform == "darwin",
                          "only a macOS workstation keeps the store off this machine")
     def test_a_store_this_machine_cannot_read_is_asked_of_the_machine_holding_it(self):

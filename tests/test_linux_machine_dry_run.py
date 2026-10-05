@@ -54,7 +54,7 @@ class TestTheLinuxMachineStageHonoursDryRun(WkTest):
         rpi5_ran = self.tmp / f"rpi5-{tag}"
 
         env = {k: v for k, v in os.environ.items()
-               if k not in ("WK_NAME", "WK_TARGET", "WK_TARGET_KIND", "WK_IN_VM")}
+               if k not in ("WK_NAME", "WK_PLACE", "WK_DRIVER", "WK_IN_VM")}
         env.update({
             "WK_ROOT": str(root),
             "WK_STORE": str(store),

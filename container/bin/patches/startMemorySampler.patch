@@ -1,4 +1,4 @@
-# wk memory-experiment patch: startMemorySampler
+# wk memory-charts patch: startMemorySampler
 #
 # docs/Urgent/HANDOFF-memory.md asks for this to be a file instead of a
 # copy-paste block, so it survives past whoever currently holds it in their

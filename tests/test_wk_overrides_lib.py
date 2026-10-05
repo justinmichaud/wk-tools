@@ -8,7 +8,7 @@ from unittest import mock
 from tests.support import REAL_MACHINES, REPO, WkTest, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import git, reach, resources, screen, targets  # noqa: E402
+from wk import git, places, reach, resources, screen  # noqa: E402
 from wk.boot.mac import GuestChannel  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
@@ -109,7 +109,7 @@ class TestResourcesLib(WkTest):
 
 class TestStoreLib(unittest.TestCase):
     def test_wk_ccache_maxsize_renders_into_the_conf(self):
-        t = targets.Registry(REPO, env={"HOME": "/nonexistent", "WK_CCACHE_MAXSIZE": "12G"}, machine=Fake()).load("container")
+        t = places.Registry(REPO, env={"HOME": "/nonexistent", "WK_CCACHE_MAXSIZE": "12G"}, machine=Fake()).load("container")
         self.assertEqual(t.ccache_conf(), "max_size = 12G\n")
 
     def test_wk_mirror_branches_replaces_the_derived_list(self):
@@ -117,22 +117,22 @@ class TestStoreLib(unittest.TestCase):
         self.assertEqual(git.mirror_branches({"WK_MIRROR_BRANCHES": "main release/1.0"}), ["main", "release/1.0"])
 
 
-class _Walk(targets.Registry):
+class _Walk(places.Registry):
     def all(self):
         return ["container", "vm", "buildbox1"]
 
 
-class TestTargetLib(WkTest):
-    def test_wk_no_delegate_stops_a_fleet_walk_asking_a_remote_target(self):
+class TestPlaceLib(WkTest):
+    def test_wk_no_delegate_stops_a_fleet_walk_asking_a_remote_place(self):
         env = {"HOME": str(self.tmp), "WK_MARKER": str(self.tmp / "no-such-marker")}
         self.assertEqual(_Walk(REPO, env=env, machine=Fake()).walk(), ["container", "vm", "buildbox1"])
         self.assertEqual(_Walk(REPO, env=dict(env, WK_NO_DELEGATE="1"), machine=Fake()).walk(), ["container", "vm"])
 
     def test_wk_remote_marker_overrides_the_remote_host_marker(self):
         marker = self.tmp / "remote-marker"
-        reg = targets.Registry(REPO, env={"HOME": str(self.tmp), "WK_REMOTE_MARKER": str(marker)}, machine=Fake())
+        reg = places.Registry(REPO, env={"HOME": str(self.tmp), "WK_REMOTE_MARKER": str(marker)}, machine=Fake())
         self.assertFalse(reg.in_remote_host(), "should be false before the marker exists")
-        marker.write_text("target=devbox\nroot=/home/x/wk\n")
+        marker.write_text("place=devbox\nroot=/home/x/wk\n")
         self.assertTrue(reg.in_remote_host(), "should be true once the marker exists")
 
 
@@ -141,16 +141,16 @@ class TestBootMacGuest(unittest.TestCase):
         self.assertEqual(GuestChannel(REPO, {}, env={"WK_BENCH_GUEST": "my-custom-guest"}).ws, "my-custom-guest")
 
 
-class TestTargetsContainer(unittest.TestCase):
+class TestPlacesContainer(unittest.TestCase):
     def test_wk_container_user_overrides_the_workspace_owner(self):
-        t = targets.Registry(REPO, env={"HOME": "/nonexistent", "WK_CONTAINER_USER": "customuser"}, machine=Fake()).load("container")
+        t = places.Registry(REPO, env={"HOME": "/nonexistent", "WK_CONTAINER_USER": "customuser"}, machine=Fake()).load("container")
         self.assertEqual(t.user(), "customuser")
 
 
-class TestTargetsLocal(WkTest):
+class TestPlacesLocal(WkTest):
     def test_wk_local_store_overrides_the_bind_mounted_store(self):
         store = self.tmp / "customstore"
-        t = targets.LocalWorkspace("local", str(REPO), {"HOME": str(self.tmp), "WK_LOCAL_STORE": str(store)}, Fake())
+        t = places.LocalWorkspace("local", str(REPO), {"HOME": str(self.tmp), "WK_LOCAL_STORE": str(store)}, Fake())
         self.assertEqual(t.store.store_dir(), str(store))
 
 
@@ -167,10 +167,10 @@ class TestTheGuestOverrides(unittest.TestCase):
         self.result = Result
 
     def vm(self, **env):
-        from wk import targets
+        from wk import places
         e = {"HOME": "/h", "WK_STORE": "/st", "WK_VM_STORE": "/vs", "XDG_STATE_HOME": "/h/st", **env}
-        vm = targets.Registry(str(REPO), env=e, machine=self.fake).load("vm")
-        p = mock.patch.object(targets.Vm, "tart", lambda s: "/t/tart")
+        vm = places.Registry(str(REPO), env=e, machine=self.fake).load("vm")
+        p = mock.patch.object(places.Vm, "tart", lambda s: "/t/tart")
         p.start()
         self.addCleanup(p.stop)
         return vm
@@ -211,7 +211,7 @@ class TestEachOverrideReachesWhatItNames(WkTest):
         from wk import guest, status
         self.assertEqual((status.fleet_timeout({}), status.fleet_timeout({"WK_FLEET_TIMEOUT": "9"})), (4, 9))
         self.assertEqual(guest.password({"WK_VM_PASSWORD": "pw"}), "pw")
-        t = targets.Registry(REPO, env={"HOME": "/h", "WK_SDK": "/my/sdk"}, machine=Fake()).load("container")
+        t = places.Registry(REPO, env={"HOME": "/h", "WK_SDK": "/my/sdk"}, machine=Fake()).load("container")
         self.assertEqual(t.sdk(), "/my/sdk")
 
     def test_wk_bench_machine_names_the_volume_in_host_mode(self):

@@ -73,7 +73,7 @@ class TestFleetExitCodeIsTheWorst(WkTest):
                 "XDG_STATE_HOME": str(xdg),
                 "WK_REMOTE_ROOT": str(remote_root),
                 "WK_MACHINES_DIR": str(machdir),
-                "WK_TARGET": "remote",
+                "WK_PLACE": "remote",
                 "WK_REMOTE_HOST": "fake-reachable-machine",
                 "PATH": f"{binp}:{self._real_path()}",
                 "WK_PROBE_SECONDS": "1",
@@ -129,7 +129,7 @@ class TestAFailedRecordSurvivesAWorkspaceThatBumpedFourAlready(WkTest):
                 env = {
                     "XDG_STATE_HOME": str(xdg),
                     "WK_MACHINES_DIR": str(machdir),
-                    "WK_TARGET": "remote",
+                    "WK_PLACE": "remote",
                     "WK_REMOTE_HOST": "fake-reachable-machine",
                     "PATH": f"{binp}:{self._real_path()}",
                     "WK_PROBE_SECONDS": "1",

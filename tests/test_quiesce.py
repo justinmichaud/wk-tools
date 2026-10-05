@@ -1,5 +1,5 @@
 """`wk quiesce`: lib/wk/quiet.py's on/off/status and the readings it judges a Mac by, against a fake
-machine whose privileged helper, `sudo`, `defaults`, `tmutil` and in-target bash calls answer as a
+machine whose privileged helper, `sudo`, `defaults`, `tmutil` and in-place bash calls answer as a
 real one would -- nothing here runs the real helper or signals a real daemon. Also the one state
 directory, the helper's bound on a stopped daemon, `killpoints[quiesce]`, a dry run printing the
 wet run's plan, and the live rows `quiesce.readback[<m>]` and `quiesce.classified[<m>]`."""

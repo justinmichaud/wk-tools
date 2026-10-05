@@ -16,7 +16,7 @@ from tests.support import (
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import decl as D  # noqa: E402
-from wk import dispatch, targets  # noqa: E402
+from wk import dispatch, places  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
 DISPATCH = REPO / "lib" / "wk" / "dispatch.py"
@@ -105,9 +105,9 @@ class TestHelpAndDeclarations(WkTest):
 
 
     def test_unknown_target_names_the_conf_to_write(self):
-        cp = run("ls", env={"WK_TARGET": "nosuchtarget-selftest",
+        cp = run("ls", env={"WK_PLACE": "nosuchtarget-selftest",
                             "WK_MACHINES_DIR": str(REAL_MACHINES)})
-        self.assertNotEqual(cp.returncode, 0, "an unknown target was accepted")
+        self.assertNotEqual(cp.returncode, 0, "an unknown place was accepted")
         self.assertIn(
             "machines/nosuchtarget-selftest.conf", cp.stdout + cp.stderr
         )
@@ -123,21 +123,21 @@ class TestDelegationReadsTheRegistry(WkTest):
         env = {"HOME": str(self.tmp), "XDG_STATE_HOME": str(self.tmp / "state"), "WK_STORE": str(self.tmp / "store"),
                "WK_MACHINES_DIR": str(self.tmp / "hosts"), "WK_IN_VM": "1", "PATH": os.environ.get("PATH", "")}
         self.fake = Fake("host")
-        self.reg = targets.Registry(REPO, env=env, machine=self.fake)
+        self.reg = places.Registry(REPO, env=env, machine=self.fake)
 
     def test_a_peer_delegates_this_machine_and_an_unknown_name_do_not(self):
         with mock.patch.object(dispatch, "_registry", self.reg):
             self.assertIs(dispatch.registry(), self.reg)
-            peer = dispatch.delegate_target("peer")
+            peer = dispatch.delegate_driver("peer")
             self.assertEqual((peer.name, peer.delegates()), ("peer", True))
-            self.assertIsNone(dispatch.delegate_target("me"))
-            self.assertIsNone(dispatch.delegate_target("nosuch"))
-            self.assertIsNone(dispatch.delegate_target("container"))
+            self.assertIsNone(dispatch.delegate_driver("me"))
+            self.assertIsNone(dispatch.delegate_driver("nosuch"))
+            self.assertIsNone(dispatch.delegate_driver("container"))
         self.assertEqual(self.fake.effects, [])
 
     def test_a_peer_that_does_not_answer_is_refused_with_its_name(self):
         with mock.patch.object(dispatch, "_registry", self.reg):
-            peer = dispatch.delegate_target("peer")
+            peer = dispatch.delegate_driver("peer")
             with contextlib.redirect_stderr(io.StringIO()) as err:
                 with self.assertRaises(dispatch.Exit) as raised:
                     dispatch.delegate_run(peer, "status", ["ws"])
@@ -186,16 +186,16 @@ class TestWorkspaceRefusals(WkTest):
     def test_build_arg_forms_in_workspace_vs_on_host(self):
         with fake_workspace() as ws:
             cp = ws.run("build", "jsc-release", "--dry-run")
-            self.assertEqual(cp.returncode, 0, f"in-workspace 'wk build <config>' failed: {cp.stdout + cp.stderr}")
+            self.assertEqual(cp.returncode, 0, f"in-workspace 'wk build <preset>' failed: {cp.stdout + cp.stderr}")
             self.assertIn("workspace: selftest-ws", cp.stdout)
 
             cp2 = ws.run("build", "otherws", "jsc-release", "--dry-run")
-            self.assertNotEqual(cp2.returncode, 0, "'wk build <ws> <config>' was accepted inside a workspace")
+            self.assertNotEqual(cp2.returncode, 0, "'wk build <ws> <preset>' was accepted inside a workspace")
             self.assertIn("no workspace argument in here", cp2.stdout + cp2.stderr)
 
         cp3 = run("build", "jsc-release", env={"WK_IN_VM": "1"})
-        self.assertEqual(cp3.returncode, 2, f"host 'wk build <config>' exited {cp3.returncode}, expected 2")
-        self.assertIn("usage: wk build <workspace> <config>", cp3.stdout + cp3.stderr)
+        self.assertEqual(cp3.returncode, 2, f"host 'wk build <preset>' exited {cp3.returncode}, expected 2")
+        self.assertIn("usage: wk build <workspace> <preset>", cp3.stdout + cp3.stderr)
 
     def test_broker_door_is_narrow(self):
         with fake_workspace() as ws:
@@ -225,7 +225,7 @@ class TestUnknownWorkspaceName(WkTest):
 
     def test_a_name_at_another_slot_is_refused_the_same_way(self):
         name = "nosuchws-" + rand_suffix()
-        cp = run("ai", "claude", name, env={"WK_TARGET": "vm"})
+        cp = run("ai", "claude", name, env={"WK_PLACE": "vm"})
         out = cp.stdout + cp.stderr
         self.assertEqual(cp.returncode, 2, out)
         self.assertIn(f"no such workspace: {name}", out)
@@ -242,7 +242,7 @@ class TestUnknownWorkspaceName(WkTest):
             with self.subTest(cmd=c):
                 takes = self._takes(c)
                 extra = tuple(f"arg{i}" for i in range(takes))
-                cp = run(c, name, *extra, env={"WK_TARGET": "vm"})
+                cp = run(c, name, *extra, env={"WK_PLACE": "vm"})
                 out = cp.stdout + cp.stderr
                 self.assertEqual(cp.returncode, 2, f"'wk {c} {name} {' '.join(extra)}' exited {cp.returncode}:\n{out}")
                 self.assertIn(f"no such workspace: {name}", out)
@@ -460,7 +460,7 @@ exit 0
             cp = run(*args, env={
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
                 "WK_TEST_PODMAN_WITNESS": str(witness),
-                "WK_TARGET": "container",
+                "WK_PLACE": "container",
             })
         asked = witness.read_text() if witness.exists() else ""
         return cp, asked

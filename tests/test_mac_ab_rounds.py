@@ -17,7 +17,7 @@ from tests.test_ab_precision import speedometer_doc, write_runs
 from tests.test_mac_ab_driver import ready, said, world
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets  # noqa: E402
+from wk import places  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import ab, board_ab, mac, record, report  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
@@ -54,7 +54,7 @@ class TestTheStoppingRule(WkTest):
 
     def test_a_fleet_ab_hands_the_rule_to_each_board_as_the_command_it_prints(self):
         with temp_store() as store:
-            reg = targets.Registry(REPO, env={"WK_STORE": store["WK_STORE"], "HOME": "/nonexistent"}, machine=Fake())
+            reg = places.Registry(REPO, env={"WK_STORE": store["WK_STORE"], "HOME": "/nonexistent"}, machine=Fake())
             a = ab.AB(REPO, reg, FakeClock(), "", {"devices": "rpi5", "systems": "a,b", "workspace": "ws", "detect": "0.5", "max_rounds": "9"})
             a.check()
 
@@ -218,7 +218,7 @@ class TestTheSummary(WkTest):
 
     def test_the_command_refuses_a_missing_run_map(self):
         from wk.bench import cli
-        bench = cli.Bench(REPO, targets.Registry(REPO, env={"HOME": "/nonexistent"}, machine=Fake()), FakeClock())
+        bench = cli.Bench(REPO, places.Registry(REPO, env={"HOME": "/nonexistent"}, machine=Fake()), FakeClock())
         self.assertIn("no run map", refused(bench.ab_summary, "/nonexistent/runs.tsv", "/var/wk", ""))
 
 
@@ -362,12 +362,12 @@ class TestStatusAndProgressRead(WkTest):
             self.assertIn("  " + want, err.splitlines())
         self.assertIn("4 round(s), outcome resolved-at-round-4", err)
 
-    def test_a_job_for_arms_no_longer_staged_is_an_older_experiments(self):
+    def test_a_job_for_arms_no_longer_staged_is_an_older_ab_tasks(self):
         with planted() as m:
             m.fake.answer(r"^PlistBuddy", Result(0, "26.1\n"))
             m.fake.files[m.root_ + "/job.json"] = json.dumps({"arms": [{"id": "sid-old"}]})
             _, err = said(m.read_progress)
-        self.assertIn("older experiment's", err)
+        self.assertIn("older A/B task's", err)
         self.assertIn("nothing has run for these arms", err)
 
 
@@ -380,7 +380,7 @@ class TestTheReadingsAreOneAtATime(WkTest):
 
     def test_a_board_is_refused_a_macs_reading(self):
         with temp_store() as store:
-            reg = targets.Registry(REPO, env={"WK_STORE": store["WK_STORE"], "HOME": "/nonexistent"}, machine=Fake())
+            reg = places.Registry(REPO, env={"WK_STORE": store["WK_STORE"], "HOME": "/nonexistent"}, machine=Fake())
             err = refused(ab.run, REPO, reg, FakeClock(), "", {"devices": "rpi5", "systems": "a,b", "status": True})
         self.assertIn("--status is a Mac A/B's", err)
 
@@ -389,7 +389,7 @@ class TestTheReadingsAreOneAtATime(WkTest):
 class TestTheLiveRows(unittest.TestCase):
 
     def back(self, reading):
-        reg = targets.Registry(REPO, machine=None)
+        reg = places.Registry(REPO, machine=None)
         m = mac.MacAB(REPO, reg, FakeClock(), "", {"devices": "mbp", reading: True})
         got, err = said(m.back)
         self.assertIn(got, (0, 1, Refused), err)

@@ -1,5 +1,5 @@
 """The tailnet name a system `wk sysimage write` seeds onto a card is the board's, by role: a bench system joins
-as bench_ssh (`<board>-bench`), a rescue as ssh -- `<board>-rescue` on a bench device, the workstation's own
+as bench_ssh (`<board>-bench`), a rescue as ssh -- `<board>-rescue` on a bench machine, the workstation's own
 name on a workstation (rpi5), whose own install is never written."""
 import sys
 import unittest

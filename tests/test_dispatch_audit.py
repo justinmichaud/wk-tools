@@ -68,12 +68,12 @@ def takes_a_subverb(path):
 SHARED_SPELLING = ("sysimage",)
 
 
-def takes_a_config(path):
+def takes_a_preset(path):
     if path.name in SHARED_SPELLING:
         return False
-    if decl_value(path, "config"):
-        return parses_flag(path, "--config") or '"--config"' in path.read_text(errors="replace")
-    return "--config" in declared_opts(path) or "<config>" in synopsis(path)
+    if decl_value(path, "preset"):
+        return parses_flag(path, "--preset") or '"--preset"' in path.read_text(errors="replace")
+    return "--preset" in declared_opts(path) or "<preset>" in synopsis(path)
 
 
 def audit(path):
@@ -81,12 +81,12 @@ def audit(path):
     name = decl_value(path, "name", "none").split("@")[0]
     if name != "none" and "ws_name(" not in path.read_text(errors="replace"):
         own.append("name")
-    if takes_a_config(path):
-        own.append("config")
+    if takes_a_preset(path):
+        own.append("preset")
     if takes_a_subverb(path) and not decl_value(path, "verbs"):
         own.append("subverb")
-    if parses_flag(path, "--target"):
-        own.append("--target")
+    if parses_flag(path, "--on"):
+        own.append("--on")
     if parses_flag(path, "--force"):
         own.append("--force")
     if parses_flag(path, "--quiet"):
@@ -123,7 +123,7 @@ class TestTheVerbIsTheDispatchers(unittest.TestCase):
     def test_the_verb_is_handed_over_first(self):
         def first(cmd, *args):
             return dispatch.Invocation(cmd, D.Decl(REPO / "cmd" / cmd), list(args)).verb_first()
-        self.assertEqual(first("key", "push", "on", "--target", "box"), ["push", "on", "--target", "box"])
+        self.assertEqual(first("key", "push", "on", "--on", "box"), ["push", "on", "--on", "box"])
         self.assertEqual(first("key", "--rotate"), ["check", "--rotate"])
         self.assertEqual(first("pr", "ws", "rebase"), ["checkout", "ws", "rebase"])
         self.assertEqual(first("pr", "rebase", "ws"), ["rebase", "ws"])
@@ -132,7 +132,7 @@ class TestTheVerbIsTheDispatchers(unittest.TestCase):
         self.assertEqual(first("sysimage", "configs"), ["configs"])
 
     def test_an_option_before_the_verb_is_refused(self):
-        for argv in (("key", "--target", "box", "push"), ("key", "--rotate", "setup"), ("pr", "--draft", "open")):
+        for argv in (("key", "--on", "box", "push"), ("key", "--rotate", "setup"), ("pr", "--draft", "open")):
             with self.subTest(argv=argv):
                 cp = run(*argv)
                 self.assertEqual(cp.returncode, 2, cp.stdout)

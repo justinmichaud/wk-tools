@@ -46,7 +46,7 @@ class World:
         self.fake.answer(["hostname", "-s"], out="tolken\n")
         self.fake.react(["sh", "-c", sched.LOGGED], self.logged)
         self.fake.react([WK, "sysimage", "holds"], self.holds)
-        self.reg = FakeRegistry(self.env, self.fake, ws_target=lambda ws: "container")
+        self.reg = FakeRegistry(self.env, self.fake, ws_place=lambda ws: "container")
         self.p = images.load(PROFILE, self.env)
 
     @staticmethod
@@ -55,7 +55,7 @@ class World:
         if words[:2] == ["sysimage", "build"]:
             return "mix/%s" % w("--slot")
         if words[:2] == ["sysimage", "webkit"]:
-            return "slot/%s/%s/%s" % (w("--slot"), w("--commit"), w("--config"))
+            return "slot/%s/%s/%s" % (w("--slot"), w("--commit"), w("--preset"))
         if words[:2] == ["bench", "deploy"]:
             return "deploy/%s" % w("--slot")
         return "collect/%s/%s" % (w("--slot"), words[3])
@@ -69,8 +69,8 @@ class World:
 
     def holds(self, argv, fk):
         w = lambda flag: argv[argv.index(flag) + 1] if flag in argv else ""   # noqa: E731
-        config = w("--config") or pgo.USE
-        return Result(0, "yes\n" if "/state/slot/%s/%s/%s" % (w("--slot"), w("--commit"), config) in fk.files else "no\n")
+        preset = w("--preset") or pgo.USE
+        return Result(0, "yes\n" if "/state/slot/%s/%s/%s" % (w("--slot"), w("--commit"), preset) in fk.files else "no\n")
 
     def cycle(self, spec=PROFILE, p=None):
         def build(rest):
@@ -175,13 +175,13 @@ class TestThePhasesAndTheirOrder(PgoTest):
         g = self.graph(self.world())
         self.assertTrue(all(WS in s.command for s in g.values()))
         self.assertIn("wk bench run %s jetstream3 --system rpi5 --slot pr-instr --collect" % WS, g["collect:rpi5:pr:jetstream3"].command)
-        self.assertIn("--slot pr-instr --config %s" % pgo.COLLECT, g["instr:%s:pr" % WS].command)
-        self.assertIn("--slot pr --config %s" % pgo.USE, g["slot:%s:pr" % WS].command)
+        self.assertIn("--slot pr-instr --preset %s" % pgo.COLLECT, g["instr:%s:pr" % WS].command)
+        self.assertIn("--slot pr --preset %s" % pgo.USE, g["slot:%s:pr" % WS].command)
 
     def test_a_spec_naming_another_machine_routes_the_board_steps_there(self):
         g = self.graph(self.world(), PROFILE + "@moose")
         self.assertEqual(g["instr:%s:pr" % WS].holds, ("machine:moose",))
-        self.assertTrue(g["deploy:rpi5:pr-instr"].command.startswith("WK_TARGET=moose wk bench deploy"))
+        self.assertTrue(g["deploy:rpi5:pr-instr"].command.startswith("WK_PLACE=moose wk bench deploy"))
 
     def test_a_phase_already_done_is_asked_about_by_its_own_evidence(self):
         w = self.world()
@@ -191,8 +191,8 @@ class TestThePhasesAndTheirOrder(PgoTest):
 
 class TestEachPhaseByItself(PgoTest):
 
-    def phase(self, w, config, slot="pr"):
-        rc, err = self.webkit(w, "--commit", SHA, "--slot", slot, "--config", config)
+    def phase(self, w, preset, slot="pr"):
+        rc, err = self.webkit(w, "--commit", SHA, "--slot", slot, "--preset", preset)
         self.assertEqual(rc, 0, err)
         return w.built[-1], err
 
@@ -212,10 +212,10 @@ class TestEachPhaseByItself(PgoTest):
     def test_the_unprofiled_build_is_taken_and_says_so(self):
         rest, err = self.phase(self.world(), "wpe-cross")
         self.assertIn("WITHOUT a profile", err)
-        self.assertEqual(rest[rest.index("--config") + 1], "wpe-cross")
+        self.assertEqual(rest[rest.index("--preset") + 1], "wpe-cross")
 
     def test_any_other_config_is_refused(self):
-        self.assertIn("--config takes one of", self.refused(self.world(), "--commit", SHA, "--slot", "pr", "--config", "wpe-cross-pgo"))
+        self.assertIn("--preset takes one of", self.refused(self.world(), "--commit", SHA, "--slot", "pr", "--preset", "wpe-cross-pgo"))
 
     def test_a_slot_needs_a_full_sha(self):
         self.assertIn("40 hex digits", self.refused(self.world(), "--commit", "abc", "--slot", "pr"))
@@ -241,7 +241,7 @@ class TestTheCycle(PgoTest):
         self.assertEqual(len(w.state()), 7, w.state())
         (t,) = w.recs().list()
         self.assertEqual(len(t.plan()), 7)
-        self.assertIn("--config %s" % pgo.COLLECT, t.plan()[0])
+        self.assertIn("--preset %s" % pgo.COLLECT, t.plan()[0])
         self.assertEqual((t.field("kill"), t.field("exit")), ("wk sysimage webkit %s --workspace %s --slot pr --stop" % (PROFILE, WS), "0"))
 
     def test_a_failed_leg_stops_the_cycle_before_the_measured_build(self):

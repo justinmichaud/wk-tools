@@ -1,5 +1,5 @@
 """The buildroot image and slot builds as they run inside a workspace (lib/wk/sysimage/buildroot.py is the host
-half). Run as `python3 /opt/wk-tools/lib/wk/sysimage/buildroot_target.py image|webkit ...`, under task.stage_main,
+half). Run as `python3 /opt/wk-tools/lib/wk/sysimage/buildroot_ws.py image|webkit ...`, under task.stage_main,
 which takes the wall off PATH. Follows the wiki recipe "Building WPEWebKit for 32-bit Raspberry Pi 3 (Buildroot DRM
 config)", the only one known to boot."""
 
@@ -25,7 +25,7 @@ SHA_LEN = 40
 TS_REL = "image/yocto/meta-wk-tailnet/recipes-network/tailscale/tailscale-release.inc"
 TS_JOIN = "image/yocto/meta-wk-tailnet/recipes-network/tailscale/files/wk-tailnet-join"
 WIFI_JOIN = "image/yocto/meta-wk-wifi/recipes-connectivity/wk-wifi-join/files/wk-wifi-join"
-MARKER = "# --- added by wk (lib/wk/sysimage/buildroot_target.py) ---"
+MARKER = "# --- added by wk (lib/wk/sysimage/buildroot_ws.py) ---"
 # WebKitBuild and the test trees are gigabytes the package build never reads.
 RSYNC_EXCLUDE = "--exclude WebKitBuild --exclude LayoutTests --exclude JSTests --exclude ManualTests " \
                 "--exclude WebDriverTests --exclude Websites"
@@ -42,7 +42,7 @@ echo "wk: installed the pinned kernel {release} and its device trees into $b"
 
 
 def parse(argv):
-    ap = argparse.ArgumentParser(prog="buildroot_target.py")
+    ap = argparse.ArgumentParser(prog="buildroot_ws.py")
     sub = ap.add_subparsers(dest="stage")
     img = sub.add_parser("image")
     for flag in ("--name", "--tree-url", "--tree-branch", "--tree-commit", "--defconfig", "--image", "--jobs",
@@ -140,7 +140,7 @@ class Build:
             d = self.env.get(name)
             if not d:
                 fail("BR2_DL_DIR/BR2_CCACHE_DIR are not set in this workspace.\n    They come from the container's "
-                     "store-backed cache mount (lib/wk/targets.py's Container); without them buildroot's download and ccache\n"
+                     "store-backed cache mount (lib/wk/places.py's Container); without them buildroot's download and ccache\n"
                      "    caches would land in the workspace and die with it.")
             self.m.mkdir(d)
             if not self.m.run(["test", "-w", d]).ok:
@@ -284,7 +284,7 @@ class Build:
             fail("could not read the mtime of %s" % img)
         if int(r.out.strip()) < int(start):
             fail("make reported success but %s is older\n    than this build started: something upstream of genimage "
-                 "skipped work\n    it always does, the trap verify_fresh (yocto_target.py) guards against for bitbake." % img)
+                 "skipped work\n    it always does, the trap verify_fresh (yocto_ws.py) guards against for bitbake." % img)
 
     def image(self):
         a = self.a
@@ -363,7 +363,7 @@ class Build:
         a, src = self.a, self.a.src
         mirror = Store(self.env).container_mirror_dir()
         if not mirror:
-            fail("WK_MIRROR names the mirror this container mounts, set by lib/wk/targets.py's Container")
+            fail("WK_MIRROR names the mirror this container mounts, set by lib/wk/places.py's Container")
         dirty = [l for l in self.m.run(["git", "-C", src, "status", "--porcelain"]).out.splitlines() if l.strip()]
         if dirty:
             fail("%s has %d uncommitted change(s); a slot is built from a\n    commit and nothing else. Commit or discard "

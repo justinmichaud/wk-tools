@@ -47,26 +47,26 @@ class TestNoTerminalAsksForNone(unittest.TestCase):
 
     def test_the_command_is_exec_argv_without_a_tty_and_replaces_this_process(self):
         enter = _load_enter()
-        target = mock.Mock()
-        target.info.return_value = "present"
-        target.exec_argv.return_value = (["true"], None)
+        driver = mock.Mock()
+        driver.info.return_value = "present"
+        driver.exec_argv.return_value = (["true"], None)
         reg = mock.Mock()
-        reg.load.return_value = target
-        with mock.patch.object(enter.targets, "Registry", return_value=reg), \
+        reg.load.return_value = driver
+        with mock.patch.object(enter.places, "Registry", return_value=reg), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws"}), \
                 mock.patch("sys.stdin", io.StringIO("")):
             enter.main(["git", "status"])
-        target.exec_argv.assert_called_once_with("ws", ["git", "status"], tty=False)
+        driver.exec_argv.assert_called_once_with("ws", ["git", "status"], tty=False)
         reg.machine.exec.assert_called_once_with(["true"], None)
 
 
 class TestNoSuchWorkspace(WkTest):
     def test_refuses_by_name_without_landing_anywhere(self):
-        # WK_TARGET=vm: an absent name otherwise resolves to the container
-        # target, which a macOS host forwards into the podman VM -- what is
+        # WK_PLACE=vm: an absent name otherwise resolves to the container
+        # place, which a macOS host forwards into the podman VM -- what is
         # under test here is the dispatcher's own resolution and refusal,
         # needing no machine at all (test_lifecycle.py's own comment on this).
-        cp = run("enter", "no-such-workspace-abcxyz", "true", env={"WK_TARGET": "vm"})
+        cp = run("enter", "no-such-workspace-abcxyz", "true", env={"WK_PLACE": "vm"})
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("no such workspace", cp.stdout)
 

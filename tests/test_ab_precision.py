@@ -304,7 +304,7 @@ class TestARunIsADirectory(WkTest):
 
 
 class TestTheCommand(WkTest):
-    def test_a_noisy_experiment_is_not_met_and_says_how_many_more_rounds(self):
+    def test_a_noisy_ab_is_not_met_and_says_how_many_more_rounds(self):
         with scratch_dir() as tmp:
             a = write_runs(tmp, "a", [99.0, 101.0, 99.0, 101.0, 99.0, 101.0])
             b = write_runs(tmp, "b", [99.5, 101.5, 99.5, 101.5, 99.5, 101.5])
@@ -319,7 +319,7 @@ class TestTheCommand(WkTest):
             self.assertAlmostEqual(int(f["rounds_needed"]),
                                    6 * (float(f["mde_pct"]) / 0.3) ** 2, delta=1)
 
-    def test_a_quiet_experiment_is_met_and_owes_no_more_rounds(self):
+    def test_a_quiet_ab_is_met_and_owes_no_more_rounds(self):
         with scratch_dir() as tmp:
             a = write_runs(tmp, "a", [100.0, 100.02, 99.98, 100.0, 100.01, 99.99])
             b = write_runs(tmp, "b", [100.0, 100.01, 99.99, 100.0, 100.02, 99.98])

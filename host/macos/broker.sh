@@ -69,7 +69,7 @@ if [ -n "$_reload" ]; then
         changed "started the fleet-request broker ($_label)"
     else
         warn "could not start $_label -- workspaces will have no way to ask for a
-    bench device. launchctl print $_svc says why; the log is $_log"
+    bench machine. launchctl print $_svc says why; the log is $_log"
     fi
 elif launchctl print "$_svc" >/dev/null 2>&1; then
     unchanged "wk-broker running"

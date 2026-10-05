@@ -1,7 +1,7 @@
 """`wk key sudo`: lib/wk/sudo.py's Sudo (the status verdict read from `sudo -n -l`
 under sudoers' last-match rule, and the drop-in write with its before/after
 `visudo -c` validation and cleared-timestamp property test), cmd/key's argv for
-it and the --target/--all fan-out. Every sudo/visudo call is a Fake answer;
+it and the --on/--all fan-out. Every sudo/visudo call is a Fake answer;
 nothing here runs a real one.
 
 Run: python3 tests/run.py -k tests.test_wk_sudo
@@ -14,7 +14,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.fakes import FakeRegistry, FakeTarget
+from tests.fakes import FakeRegistry, FakeDriver
 from tests.killpoints import converges
 from tests.support import REPO
 
@@ -55,11 +55,11 @@ def _fake(free=False, listing=LISTING_UNSET, rc_l=0):
 
 
 class TestArgv(unittest.TestCase):
-    """What each spelling reaches: the verb, --target and --all read through wk.decl.Args."""
+    """What each spelling reaches: the verb, --on and --all read through wk.decl.Args."""
 
     def reached(self, argv):
         seen = []
-        with mock.patch.object(sudo, "on_target", lambda reg, a, t, env: seen.append(("target", a, t)) or 0), \
+        with mock.patch.object(sudo, "on_machine", lambda reg, a, t, env: seen.append(("machine", a, t)) or 0), \
                 mock.patch.object(sudo, "all_machines", lambda reg, a, env: seen.append(("all", a)) or 0), \
                 mock.patch.object(sudo, "status_here", lambda s, env: seen.append(("here", "status")) or 0), \
                 mock.patch.object(Sudo, "setup", lambda s: seen.append(("here", "setup")) or 0):
@@ -68,13 +68,13 @@ class TestArgv(unittest.TestCase):
 
     def test_each_spelling_reaches_its_arm(self):
         for argv, want in (([], ("here", "status")), (["setup"], ("here", "setup")),
-                           (["setup", "--target", "moose"], ("target", "setup", "moose")),
+                           (["setup", "--on", "moose"], ("machine", "setup", "moose")),
                            (["status", "--all"], ("all", "status"))):
             with self.subTest(argv=argv):
                 self.assertEqual([want], self.reached(argv))
 
     def test_an_unknown_verb_or_an_empty_target_is_refused(self):
-        for argv in (["bogus"], ["--target", ""]):
+        for argv in (["bogus"], ["--on", ""]):
             with self.subTest(argv=argv), self.assertRaises(Refused):
                 self.reached(argv)
 
@@ -264,48 +264,48 @@ class TestSetupConvergesAndDryRun(unittest.TestCase):
         self.assertEqual([e for e in dry.fake.effects if e[0] == "run" and e[1][:2] == ("sudo", "install")], [])
 
 
-def registry(targets=None, machine=None):
-    ts = targets or {}
+def registry(drivers=None, machine=None):
+    ts = drivers or {}
     return FakeRegistry({}, machine or Fake("here"), lambda n, e: ts[n], names=list(ts), in_workspace=lambda: False)
 
 
-class TestTargetAndAll(unittest.TestCase):
+class TestPlaceAndAll(unittest.TestCase):
     def test_target_status_asks_the_machine_and_reports_its_line(self):
-        box = FakeTarget("box", out="tolken box status line\n")
-        rc = key_sudo(["status", "--target", "box"], reg=registry({"box": box}))
+        box = FakeDriver("box", out="tolken box status line\n")
+        rc = key_sudo(["status", "--on", "box"], reg=registry({"box": box}))
         self.assertEqual(rc, 0)
         self.assertEqual([args for args, _, _ in box.asked], [("key", "sudo", "status", "--quiet")])
 
     def test_target_setup_goes_over_a_tty(self):
         box = Fake("box")
         box.answer(["sh", "-c"])
-        rc = key_sudo(["setup", "--target", "box"], reg=registry({"box": FakeTarget("box", machine=box)}))
+        rc = key_sudo(["setup", "--on", "box"], reg=registry({"box": FakeDriver("box", machine=box)}))
         self.assertEqual(rc, 0)
         self.assertEqual([e[1] for e in box.effects if e[0] == "run_tty"], [("sh", "-c", "PEER box key sudo setup")])
 
     def test_an_unreachable_target_is_named_not_run(self):
-        reg = registry({"box": FakeTarget("box", side="unreachable", why="timed out after 10s", out="ok\n")})
-        rc = key_sudo(["status", "--target", "box"], reg=reg)
+        reg = registry({"box": FakeDriver("box", side="unreachable", why="timed out after 10s", out="ok\n")})
+        rc = key_sudo(["status", "--on", "box"], reg=reg)
         self.assertEqual(rc, 1)
 
     def test_an_unknown_target_is_refused(self):
         reg = registry({})
         with self.assertRaises(Refused):
-            key_sudo(["status", "--target", "nowhere"], reg=reg)
+            key_sudo(["status", "--on", "nowhere"], reg=reg)
 
     def test_all_reports_the_local_machine_and_fans_out(self):
         local = _fake(free=False, listing="    timestamp_timeout=0.5\n\n" + LISTING_UNSET)
-        reg = registry({"box": FakeTarget("box", out="box status line\n")}, machine=local)
+        reg = registry({"box": FakeDriver("box", out="box status line\n")}, machine=local)
         rc = key_sudo(["status", "--all"], env={"WK_SUDO_TIMEOUT_MIN": "0.5"}, reg=reg)
         self.assertEqual(rc, 0)
 
     def test_all_setup_never_sets_up_the_local_machine(self):
         """`--all` always reports the local machine's own status, whatever the action -- only
-        'wk key sudo setup' bare or --target actually sets a machine up."""
+        'wk key sudo setup' bare or --on actually sets a machine up."""
         local = _fake(free=False, listing="    timestamp_timeout=0.5\n\n" + LISTING_UNSET)
         box = Fake("box")
         box.answer(["sh", "-c"])
-        reg = registry({"box": FakeTarget("box", machine=box)}, machine=local)
+        reg = registry({"box": FakeDriver("box", machine=box)}, machine=local)
         key_sudo(["setup", "--all"], env={"WK_SUDO_TIMEOUT_MIN": "0.5"}, reg=reg)
         self.assertFalse(any(e[0] == "run" and e[1][:2] == ("sudo", "install") for e in local.effects))
 

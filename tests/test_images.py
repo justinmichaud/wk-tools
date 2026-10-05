@@ -110,9 +110,9 @@ class TestTheSpec(unittest.TestCase):
         self.assertEqual(images.spec_machine(PROFILE + "@moose"), "moose")
         self.assertEqual(images.spec_machine(PROFILE), "")
 
-    def test_this_machines_own_name_is_its_default_target(self):
-        self.assertEqual(images.spec_target("here", "here", "container"), "container")
-        self.assertEqual(images.spec_target("moose", "here", "container"), "moose")
+    def test_this_machines_own_name_is_its_default_place(self):
+        self.assertEqual(images.spec_place("here", "here", "container"), "container")
+        self.assertEqual(images.spec_place("moose", "here", "container"), "moose")
 
 
 class TestTheImageWorkspace(unittest.TestCase):
@@ -185,7 +185,7 @@ class TestWhichMachineHoldsIt(unittest.TestCase):
     def test_a_spec_that_names_one_is_believed(self):
         self.assertEqual(images.ws_machine("moose", "elsewhere", "here"), "moose")
 
-    def test_otherwise_the_workspaces_target(self):
+    def test_otherwise_the_workspaces_place(self):
         self.assertEqual(images.ws_machine("", "elsewhere", "here"), "elsewhere")
 
     def test_container_and_local_are_this_machine(self):

@@ -5,7 +5,7 @@ import unittest
 
 from tests.support import REPO, WkTest, bash
 
-IN_TARGET = ("bench/mac-raiser.sh",
+IN_PLACE = ("bench/mac-raiser.sh",
              "bench/mac-quiet-desktop.sh", "bench/mac-window-probe.sh",
              "build/guard.sh")
 
@@ -13,14 +13,14 @@ WORDS = ("info", "warn", "log", "die", "debug", "changed", "unchanged")
 CALLS = re.compile(r"^\s*(%s) " % "|".join(WORDS), re.M)
 
 
-class TestALibraryASourcedTargetUsesCanReport(WkTest):
+class TestALibraryASourcedPlaceUsesCanReport(WkTest):
     def _words_after_sourcing(self, rel):
         checks = "; ".join(f'echo "{w}=$(type -t {w} || echo none)"' for w in WORDS)
         return bash(f'set -euo pipefail\n. "$WK_ROOT/{rel}"\n{checks}\n')
 
     def test_each_one_ends_up_with_functions_and_not_binaries(self):
         wrong = []
-        for rel in IN_TARGET:
+        for rel in IN_PLACE:
             if not CALLS.search((REPO / rel).read_text()):
                 continue
             cp = self._words_after_sourcing(rel)

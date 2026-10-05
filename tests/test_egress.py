@@ -19,7 +19,7 @@ from pathlib import Path
 from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets as wk_targets  # noqa: E402
+from wk import places as wk_places  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
 PROXY = REPO / "container" / "proxy" / "wk-proxy.py"
@@ -1067,11 +1067,11 @@ class TestWhatGhNeeds(unittest.TestCase):
         self.assertEqual("THE-SYSTEM-STORE\nTHE-INJECTORS-CA\n", text)
 
 class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
-    """Both targets set the same two variables and the same CA bundle, from the one wrapper each of them already
+    """Both places set the same two variables and the same CA bundle, from the one wrapper each of them already
     goes through."""
 
     def test_every_way_into_a_container_goes_through_the_wrapper(self):
-        c = wk_targets.Container("c", REPO, {"WK_CONTAINER_USER": "dev", "WK_IN_VM": "1"}, Fake("here"))
+        c = wk_places.Container("c", REPO, {"WK_CONTAINER_USER": "dev", "WK_IN_VM": "1"}, Fake("here"))
         bridge = "/opt/wk-tools/container/proxy/ensure-bridge.sh"
         for tty in (False, True):
             with self.subTest(exec_tty=tty):
@@ -1080,7 +1080,7 @@ class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
         self.assertIn("exec %s " % bridge, c.sshd_cmd("dev"))
 
     def test_enter_argv_goes_through_the_bridge_too(self):
-        c = wk_targets.Container("c", REPO, {"WK_CONTAINER_USER": "dev"}, Fake("here"))
+        c = wk_places.Container("c", REPO, {"WK_CONTAINER_USER": "dev"}, Fake("here"))
         argv, _ = c.enter_argv("a")
         self.assertIn("/opt/wk-tools/container/proxy/ensure-bridge.sh", argv)
         self.assertIn("--login", argv)
@@ -1232,7 +1232,7 @@ class TestTheEditorsTerminalGetsTheSameEnvironment(unittest.TestCase):
                             'for a in "$@"; do printf "ARG=[%s]\\n" "$a"; done\n')
             for f in (wrapper, sshd):
                 f.chmod(0o755)
-            cmd = (wk_targets.Container("c", REPO, {}, Fake("here")).sshd_cmd("tester")
+            cmd = (wk_places.Container("c", REPO, {}, Fake("here")).sshd_cmd("tester")
                    .replace("mkdir -p /run/sshd && ", "")
                    .replace("/opt/wk-tools/container/proxy/ensure-bridge.sh",
                             str(wrapper))
@@ -1347,9 +1347,9 @@ def _sandbox_env():
     """The proxy variables the container target starts a container with (`Container.sandbox_flags`), asked of a
     fake machine: the runtime directory is made under /run, which a test may not do."""
     sys.path.insert(0, str(REPO / "lib"))
-    from wk import targets
+    from wk import places
     from wk.machine import Fake
-    flags = targets.Container("container", str(REPO), {"XDG_RUNTIME_DIR": "/run/user/1"}, Fake("here")).sandbox_flags("armhf")
+    flags = places.Container("container", str(REPO), {"XDG_RUNTIME_DIR": "/run/user/1"}, Fake("here")).sandbox_flags("armhf")
     return dict(v.split("=", 1) for k, v in zip(flags[0::2], flags[1::2]) if k == "--env")
 
 

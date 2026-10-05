@@ -7,7 +7,7 @@ import subprocess
 import sys
 import unittest
 
-from tests.fakes import FakeRegistry, FakeTarget
+from tests.fakes import FakeRegistry, FakeDriver
 from tests.support import REPO, WkTest, clean_env, run, scratch_dir, temp_store
 from tests.test_bench_report import in_process
 
@@ -42,7 +42,7 @@ def add_run(task_dir, slot, rnd, arm, outcome, vals=(100.0, 102.0, 99.0)):
     d = task_dir / "runs" / f"20260830T12{rnd:02d}{'00' if arm == 'a' else '30'}Z-speedometer2.1-rpi3-{slot}"
     d.mkdir(parents=True)
     record.write_env(str(d / "env.json"), [
-        "plan=speedometer2.1", "config=wpewebkit-2.38-buildroot-rpi3-32", "machine=rpi3",
+        "plan=speedometer2.1", "preset=wpewebkit-2.38-buildroot-rpi3-32", "machine=rpi3",
         f"build_slot={slot}", "webkit_sha=abcdef1234567890", "runner=browser", "arch=armv7l",
         "bench_host=image", f"task={task_dir.name}", f"ab.round={rnd}", f"ab.arm={arm}",
         "ab.slot_a=base", "ab.slot_b=pr1725"])
@@ -67,16 +67,16 @@ def status(d, running=False):
     return dict(out, subject=record.subject_line(st["doc"]), current=st["current"]["id"] if st["current"] else "")
 
 
-def registry(store_dir, targets=(), env=None):
-    """What cli.Bench and record.Listing ask of the registry: a store, the walk, and each target."""
+def registry(store_dir, drivers=(), env=None):
+    """What cli.Bench and record.Listing ask of the registry: a store, the walk, and each place."""
     env = dict(env or {}, WK_STORE=str(store_dir), WK_LOCK_DIR=str(store_dir / "locks"))
-    ts = {t.name: t for t in targets}
+    ts = {t.name: t for t in drivers}
     return FakeRegistry(env, Local(), lambda n, e: ts[n], names=list(ts),
-                        ws_target=lambda ws: {"cws": "container"}.get(ws, "vm"), in_workspace=lambda: False)
+                        ws_place=lambda ws: {"cws": "container"}.get(ws, "vm"), in_workspace=lambda: False)
 
 
-def bench(store_dir, targets=(), env=None):
-    return cli.Bench(REPO, registry(store_dir, targets, dict(env or {}, WK_ROW_LABEL="here")), FakeClock())
+def bench(store_dir, drivers=(), env=None):
+    return cli.Bench(REPO, registry(store_dir, drivers, dict(env or {}, WK_ROW_LABEL="here")), FakeClock())
 
 
 class TestTaskState(WkTest):
@@ -131,7 +131,7 @@ class TestTaskState(WkTest):
 
 class TestOneRecord(WkTest):
 
-    FIELDS = ["plan=jetstream3", "workspace=w", "config=jsc-release", "class=cpu", "runner=jsc",
+    FIELDS = ["plan=jetstream3", "workspace=w", "preset=jsc-release", "class=cpu", "runner=jsc",
               "arch=native", "bench_host=container", "webkit_sha=0123456789abcdef", "count=4",
               "host.kernel=6.8.0", "host.kernel_arch=x86_64", "host.cores=16",
               "host.root_device=nvme0n1 (nvme, ssd, trim)", "cores.set=0-3", "configuration.aslr=off"]
@@ -256,15 +256,15 @@ class TestLs(WkTest):
 
 class TestTheFleetListing(WkTest):
 
-    def listing(self, tmp, targets, warned):
-        reg = registry(tmp, targets)
+    def listing(self, tmp, drivers, warned):
+        reg = registry(tmp, drivers)
         return record.Listing(reg, reg.store, lambda path: False, "here", warned.append)
 
     def test_each_answering_machine_adds_its_own_rows_after_this_stores(self):
         with scratch_dir() as tmp:
             make_task(tmp / "ws" / "w" / "bench")
-            moose = FakeTarget("moose", out="T-moose  x  [moose]\r\n    complete\n")
-            vm = FakeTarget("vm", kind="vm", out="T-vm  y  [here]\n")
+            moose = FakeDriver("moose", out="T-moose  x  [moose]\r\n    complete\n")
+            vm = FakeDriver("vm", kind="vm", out="T-vm  y  [here]\n")
             rows = self.listing(tmp, [moose, vm], []).rows()
             self.assertTrue(rows[0].startswith(TASK))
             self.assertEqual(rows[-3:], ["T-moose  x  [moose]", "    complete", "T-vm  y  [here]"])
@@ -276,18 +276,18 @@ class TestTheFleetListing(WkTest):
     def test_a_stopped_machine_is_named_with_its_remedy(self):
         with scratch_dir() as tmp:
             warned = []
-            self.assertEqual(self.listing(tmp, [FakeTarget("vm", kind="vm", side="stopped")], warned).rows(), [])
+            self.assertEqual(self.listing(tmp, [FakeDriver("vm", kind="vm", side="stopped")], warned).rows(), [])
             self.assertIn("'wk start' brings it up", warned[0])
 
     def test_one_that_does_not_answer_the_listing_is_named(self):
         with scratch_dir() as tmp:
             warned = []
-            self.listing(tmp, [FakeTarget("moose", rc=2)], warned).rows()
+            self.listing(tmp, [FakeDriver("moose", rc=2)], warned).rows()
             self.assertIn("wk sync --tools moose", warned[0])
 
     def test_one_with_no_store_of_its_own_is_not_asked(self):
         with scratch_dir() as tmp:
-            quiet = [FakeTarget("c", kind="container", side="none"), FakeTarget("far", side="unreachable")]
+            quiet = [FakeDriver("c", kind="container", side="none"), FakeDriver("far", side="unreachable")]
             warned = []
             self.assertEqual(self.listing(tmp, quiet, warned).rows(), [])
             self.assertEqual(warned, [])
@@ -388,7 +388,7 @@ class TestTheVerbs(WkTest):
 
     def test_an_unknown_task_names_the_fleet_rows_that_do(self):
         with temp_store() as s:
-            other = FakeTarget("moose", out="T-elsewhere  x  [moose]\n")
+            other = FakeDriver("moose", out="T-elsewhere  x  [moose]\n")
             self.assertIn("    T-elsewhere  x  [moose]", refusal(bench(s["path"], [other]).report, ["T-elsewhere"], "", False))
 
 
@@ -422,7 +422,7 @@ class TestWhere(WkTest):
 
             def nowhere(ws):
                 raise LookupError(ws)
-            reg.ws_target = nowhere
+            reg.ws_place = nowhere
             self.assertEqual(cli.where(reg, ["seed", "gone", "p"]), "host")
 
 
@@ -435,7 +435,7 @@ class TestThroughWk(WkTest):
             d = make_task(bench_dir)
             add_run(d, "base", 1, "a", "ok", (100.0, 101.0, 99.0))
             add_run(d, "pr1725", 1, "b", "ok", (95.0, 96.0, 94.0))
-            env = {"WK_STORE": store["WK_STORE"], "WK_LOCK_DIR": str(store["path"] / "locks"), "WK_TARGET": "local"}
+            env = {"WK_STORE": store["WK_STORE"], "WK_LOCK_DIR": str(store["path"] / "locks"), "WK_PLACE": "local"}
             ls = run("bench", "ls", env=env, timeout=60)
             self.assertEqual(ls.returncode, 0, ls.stdout)
             self.assertIn(TASK, ls.stdout)

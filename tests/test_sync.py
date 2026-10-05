@@ -1,4 +1,4 @@
-"""`wk sync`: cmd/sync's parse and `--where` answer, and lib/wk/sync.py's flows over fake targets on a fake
+"""`wk sync`: cmd/sync's parse and `--where` answer, and lib/wk/sync.py's flows over fake places on a fake
 machine -- what each scope runs and in what order, the mirror refresh and what it reports, the snapshot
 publish and its skip, the fetch in each workspace with the wiring read back (and re-asserted under --fix),
 each driver's furniture, a publish killed after any effect and re-run converging, and a dry run printing the
@@ -25,7 +25,7 @@ from tests.killpoints import converges
 from tests.support import REPO, fake_workspace
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, git, pr, sync, targets  # noqa: E402
+from wk import act, git, places, pr, sync  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.decl import Decl  # noqa: E402
@@ -49,9 +49,9 @@ cmd = _load_cmd()
 REAL_MIRROR_BRANCHES = git.mirror_branches
 
 
-def fake_retarget(target, ws, src, forks, branches):
-    target.machine.steps.append("UPSTREAMFIX %s" % ws)
-    r = target.machine.fixes.get((ws, "UPSTREAMFIX"))
+def fake_retarget(driver, ws, src, forks, branches):
+    driver.machine.steps.append("UPSTREAMFIX %s" % ws)
+    r = driver.machine.fixes.get((ws, "UPSTREAMFIX"))
     return [l for l in r.out.replace("\r", "").splitlines() if l.strip()] if r else []
 
 
@@ -65,12 +65,12 @@ GENERATORS = {
     (git, "REMOTES"): (("origin", "u1"), ("wpe", "u2"), ("fork", "u3"), ("forkwpe", "u4")),
     (git, "mirror_branches"): lambda env=None: ["main"],
     (pr, "retarget"): fake_retarget,
-    (pr, "converge"): lambda target, ws, src, forks: [],
+    (pr, "converge"): lambda driver, ws, src, forks: [],
 }
 
 
-class SyncTarget(targets.Target):
-    """A target whose environment is the World's: workspaces, states, far side and far `wk` are its answers."""
+class SyncDriver(places.Driver):
+    """A place whose environment is the World's: workspaces, states, far side and far `wk` are its answers."""
 
     def __init__(self, name, root, env, machine, kind):
         super().__init__(name, root, env, machine)
@@ -152,18 +152,18 @@ class World(Fake):
         return self
 
     def registry(self, kinds, guests=False):
-        """A SyncTarget of each of `kinds` (name -> kind), but a FakeVm for 'vm' when `guests`."""
+        """A SyncDriver of each of `kinds` (name -> kind), but a FakeVm for 'vm' when `guests`."""
         def make(name, env):
             if guests and name == "vm":
                 return FakeVm(name, str(REPO), env, self)
-            return SyncTarget(name, str(REPO), env, self, kinds[name])
+            return SyncDriver(name, str(REPO), env, self, kinds[name])
         return FakeRegistry(self.env, self, make, names=list(kinds))
 
     def lock(self):
         return Lock(self.store, self, self.clock)
 
-    def sync(self, scope="here", only="", target="", fix=False):
-        return sync.Sync(self.reg, self.clock, self.lock(), scope, only, target, fix)
+    def sync(self, scope="here", only="", place="", fix=False):
+        return sync.Sync(self.reg, self.clock, self.lock(), scope, only, place, fix)
 
     def snapshots_dir(self):
         return self.store.snapshots_dir()
@@ -268,13 +268,13 @@ class SyncTest(unittest.TestCase):
         osenv.start()
         self.addCleanup(osenv.stop)
         for v in ("WK_DRY_RUN", "WK_YES", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_CMD", "WK_DEBUG",
-                  "WK_BRANCH", "WK_IN_VM", "WK_TARGET", "WK_NAME", "WK_NO_DELEGATE"):
+                  "WK_BRANCH", "WK_IN_VM", "WK_PLACE", "WK_NAME", "WK_NO_DELEGATE"):
             os.environ.pop(v, None)
         for (module, name), fn in GENERATORS.items():
             p = mock.patch.object(module, name, fn)
             p.start()
             self.addCleanup(p.stop)
-        p = mock.patch.object(targets.record, "host_name", return_value="here")
+        p = mock.patch.object(places.record, "host_name", return_value="here")
         p.start()
         self.addCleanup(p.stop)
         p = mock.patch("wk.store.Store.is_local", lambda st: self.w.local_store)
@@ -299,7 +299,7 @@ class SyncTest(unittest.TestCase):
 
 
 class TestParse(SyncTest):
-    """cmd/sync's own words: a scope, the workspace named, the target named, --fix."""
+    """cmd/sync's own words: a scope, the workspace named, the place named, --fix."""
 
     def parse(self, *args, name=""):
         return cmd.parse(list(args), name)
@@ -309,7 +309,7 @@ class TestParse(SyncTest):
                            (("myws",), ("ws", "myws", "", False)),
                            (("--all",), ("all", "", "", False)),
                            (("--mirror",), ("mirror", "", "", False)),
-                           (("--target", "moose"), ("target", "", "moose", False)),
+                           (("--on", "moose"), ("place", "", "moose", False)),
                            (("--tools",), ("tools", "", "", False)),
                            (("--tools", "buildbox4"), ("tools", "", "buildbox4", False)),
                            (("--fix",), ("here", "", "", True)),
@@ -321,8 +321,8 @@ class TestParse(SyncTest):
         self.assertEqual(self.parse(name="selftest-ws"), ("ws", "selftest-ws", "", False))
 
     def test_two_scopes_are_refused_rather_than_last_one_wins(self):
-        for pair in (("--all", "--tools"), ("--tools", "--all"), ("--all", "--target", "moose"),
-                     ("--target", "moose", "--all"), ("--mirror", "--all")):
+        for pair in (("--all", "--tools"), ("--tools", "--all"), ("--all", "--on", "moose"),
+                     ("--on", "moose", "--all"), ("--mirror", "--all")):
             with self.subTest(pair=pair):
                 self.assertIn("ask for different things -- one at a time", self.refused(lambda: self.parse(*pair)))
 
@@ -332,8 +332,8 @@ class TestParse(SyncTest):
         self.assertIn("'myws'", err)
 
     def test_a_second_target_is_refused_rather_than_overwriting_the_first(self):
-        self.assertIn("one target at a time (got 'moose' and 'buildbox4')",
-                      self.refused(lambda: self.parse("--target", "moose", "--target", "buildbox4")))
+        self.assertIn("one place at a time (got 'moose' and 'buildbox4')",
+                      self.refused(lambda: self.parse("--on", "moose", "--on", "buildbox4")))
 
 
     def test_an_invalid_name_is_refused(self):
@@ -352,14 +352,14 @@ class TestWhere(unittest.TestCase):
                 self.assertEqual(sync.where(inside, list(args)), want)
 
     def test_every_scope_flag_is_this_host(self):
-        for args in (("--all",), ("--tools",), ("--target", "moose"), ("--tools", "buildbox4"), ("--target=moose",),
+        for args in (("--all",), ("--tools",), ("--on", "moose"), ("--tools", "buildbox4"), ("--on=moose",),
                      ("--tools=buildbox4",), ("--mirror",), ("--tools", "--all"), ("--fix", "--all")):
             with self.subTest(args=args):
                 self.assertEqual(sync.where(False, list(args)), "host")
 
     def test_the_dispatcher_asks_cmd_sync_and_nothing_else_decides(self):
         self.assertEqual(Decl(CMD_SYNC).where_for(["myws"]), "dynamic")
-        cp = subprocess.run([str(CMD_SYNC), "--where", "--target=moose"], capture_output=True, text=True, timeout=30)
+        cp = subprocess.run([str(CMD_SYNC), "--where", "--on=moose"], capture_output=True, text=True, timeout=30)
         self.assertEqual((cp.returncode, cp.stdout.strip()), (0, "host"), cp.stderr)
         cp = subprocess.run([str(CMD_SYNC), "--where", "myws"], capture_output=True, text=True, timeout=30)
         self.assertEqual(cp.stdout.strip(), "workspace")
@@ -376,21 +376,21 @@ class Steps(sync.Sync):
         self.here.steps.append("REMOUNT")
         return 0
 
-    def sync_snapshot(self, target):
-        self.here.steps.append("SNAPSHOT %s" % target.name)
-        if target.name in self.here.refuse_publish:
+    def sync_snapshot(self, driver):
+        self.here.steps.append("SNAPSHOT %s" % driver.name)
+        if driver.name in self.here.refuse_publish:
             raise Refused(1)
 
-    def base_wiring(self, target):
+    def base_wiring(self, driver):
         return 0
 
-    def fetch_workspaces(self, target, names):
-        self.here.steps.append("FETCH-IN %s: %s" % (target.name, " ".join(names)))
+    def fetch_workspaces(self, driver, names):
+        self.here.steps.append("FETCH-IN %s: %s" % (driver.name, " ".join(names)))
         return 0
 
 
 class TestWhatEachScopeRuns(SyncTest):
-    """`unit sync.scopes`: the tooling copies, this machine's mirror, then each target's snapshot and the fetch
+    """`unit sync.scopes`: the tooling copies, this machine's mirror, then each place's snapshot and the fetch
     in its workspaces -- a snapshot is cloned off the mirror and a workspace fetches from it, so either before
     the refresh hands back what the machine already had."""
 
@@ -403,8 +403,8 @@ class TestWhatEachScopeRuns(SyncTest):
         for t in self.KINDS:
             self.w.workspaces[t] = ["%s-ws" % t]
 
-    def steps(self, scope="here", target="", only="", fix=False):
-        s = Steps(self.w.reg, self.w.clock, self.w.lock(), scope, only, target, fix)
+    def steps(self, scope="here", place="", only="", fix=False):
+        s = Steps(self.w.reg, self.w.clock, self.w.lock(), scope, only, place, fix)
         rc, err = self.stderr(s.run)
         return rc, self.w.steps, err
 
@@ -414,14 +414,14 @@ class TestWhatEachScopeRuns(SyncTest):
                                            "FETCH-IN container: container-ws", "FETCH-IN vm: vm-ws"]))
 
     def test_a_named_target_refreshes_its_furniture_before_fetching_in_it(self):
-        rc, steps, _ = self.steps("target", "container")
+        rc, steps, _ = self.steps("place", "container")
         self.assertEqual(steps, ["FURNITURE container named", "MIRROR", "REMOUNT", "SNAPSHOT container", "FETCH-IN container: container-ws"])
 
     def test_a_guest_target_gets_the_mirror_and_a_fetch_but_no_snapshot(self):
-        rc, steps, _ = self.steps("target", "vm")
+        rc, steps, _ = self.steps("place", "vm")
         self.assertEqual(steps, ["FURNITURE vm named", "MIRROR", "REMOUNT", "FETCH-IN vm: vm-ws"])
 
-    def test_all_reaches_every_workspace_on_every_target(self):
+    def test_all_reaches_every_workspace_on_every_place(self):
         rc, steps, _ = self.steps("all")
         self.assertEqual(steps, ["FURNITURE container", "FURNITURE vm", "FURNITURE buildbox4", "MIRROR", "REMOUNT", "SNAPSHOT container",
                                  "FETCH-IN container: container-ws", "FETCH-IN vm: vm-ws", "FETCH-IN buildbox4: buildbox4-ws"])
@@ -434,19 +434,19 @@ class TestWhatEachScopeRuns(SyncTest):
         self.assertEqual(steps, ["FURNITURE container named", "MIRROR", "REMOUNT", "SNAPSHOT container"])
 
     def test_a_machine_of_its_own_touches_neither_the_mirror_nor_a_snapshot_here(self):
-        rc, steps, _ = self.steps("target", "buildbox4")
+        rc, steps, _ = self.steps("place", "buildbox4")
         self.assertEqual(steps, ["FURNITURE buildbox4 named", "FETCH-IN buildbox4: buildbox4-ws"])
 
     def test_an_unknown_target_is_refused_by_name_before_anything_runs(self):
-        s = Steps(self.w.reg, self.w.clock, self.w.lock(), "target", "", "nosuchthing")
-        self.assertIn("unknown target 'nosuchthing'", self.refused(s.run))
+        s = Steps(self.w.reg, self.w.clock, self.w.lock(), "place", "", "nosuchthing")
+        self.assertIn("unknown place 'nosuchthing'", self.refused(s.run))
         self.assertEqual(self.w.steps, [])
 
     def test_a_store_in_the_podman_vm_is_asked_with_the_same_scope_word(self):
         self.w.local_store = False
         self.w.far["container"] = "answering"
-        _, steps, _ = self.steps("target", "container")
-        self.assertEqual(steps, ["FURNITURE container named", "MIRROR", "REMOUNT", "ASKED container: wk sync --target container"])
+        _, steps, _ = self.steps("place", "container")
+        self.assertEqual(steps, ["FURNITURE container named", "MIRROR", "REMOUNT", "ASKED container: wk sync --on container"])
         self.w.steps.clear()
         _, steps, _ = self.steps("tools", "container", fix=True)
         self.assertEqual(steps, ["FURNITURE container named", "MIRROR", "REMOUNT", "ASKED container: wk sync --tools container --fix"])
@@ -454,30 +454,30 @@ class TestWhatEachScopeRuns(SyncTest):
     def test_a_stopped_podman_machine_is_named_and_is_not_a_success(self):
         self.w.local_store = False
         self.w.far["container"] = "stopped"
-        rc, steps, err = self.steps("target", "container")
+        rc, steps, err = self.steps("place", "container")
         self.assertEqual((rc, steps), (1, ["FURNITURE container named", "MIRROR", "REMOUNT"]))
         self.assertIn("podman machine is stopped", err)
-        self.assertIn("wk start, then  wk sync --target container", err)
+        self.assertIn("wk start, then  wk sync --on container", err)
 
     def test_inside_the_podman_vm_the_mirror_is_read_not_refreshed(self):
         self.w.reg.env["WK_IN_VM"] = "1"
-        _, steps, _ = self.steps("target", "container")
+        _, steps, _ = self.steps("place", "container")
         self.assertEqual(steps, ["FURNITURE container named", "SNAPSHOT container", "FETCH-IN container: container-ws"])
 
     def test_a_target_that_did_not_take_the_tooling_fails_the_run_and_the_rest_still_runs(self):
         self.w.refuse_tools.add("vm")
         rc, steps, err = self.steps()
         self.assertEqual(rc, 1)
-        self.assertIn("1 target(s) did not take the tooling", err)
+        self.assertIn("1 place(s) did not take the tooling", err)
         self.assertIn("FETCH-IN vm: vm-ws", steps)
 
     def test_a_failed_publish_does_not_stop_the_fetches_and_is_not_a_success(self):
         self.w.refuse_publish.add("container")
-        rc, steps, _ = self.steps("target", "container")
+        rc, steps, _ = self.steps("place", "container")
         self.assertEqual((rc, steps[-1]), (1, "FETCH-IN container: container-ws"))
 
     def test_one_workspace_fetches_in_that_one_and_refreshes_no_mirror(self):
-        self.w.reg.env["WK_TARGET"] = "container"
+        self.w.reg.env["WK_PLACE"] = "container"
         rc, steps, _ = self.steps("ws", only="bug-238")
         self.assertEqual(steps, ["FETCH-IN container: bug-238"])
 
@@ -493,7 +493,7 @@ class TestWhatEachScopeRuns(SyncTest):
 
     def test_inside_a_workspace_a_bare_sync_is_the_mirror_then_this_one_alone(self):
         Path(self.w.env["WK_MARKER"]).write_text("name=ws\n")
-        self.w.reg.env["WK_TARGET"] = "container"
+        self.w.reg.env["WK_PLACE"] = "container"
         with mock.patch.object(sync.Sync, "mirror_refresh_request",
                                side_effect=lambda: self.w.steps.append("ASK BROKER") or 0):
             rc, steps, _ = self.steps("ws", only="ws")
@@ -501,7 +501,7 @@ class TestWhatEachScopeRuns(SyncTest):
 
     def test_inside_a_workspace_a_refresh_that_failed_still_fetches_and_is_not_a_success(self):
         Path(self.w.env["WK_MARKER"]).write_text("name=ws\n")
-        self.w.reg.env["WK_TARGET"] = "container"
+        self.w.reg.env["WK_PLACE"] = "container"
         with mock.patch.object(sync.Sync, "mirror_refresh_request", return_value=1):
             rc, steps, _ = self.steps("ws", only="ws")
         self.assertEqual((rc, steps), (1, ["FETCH-IN container: ws"]))
@@ -523,7 +523,7 @@ class TestWhatEachScopeRuns(SyncTest):
             held.append(resource)
             return real(resource, timeout)
         lock.held = spy
-        s = Steps(self.w.reg, self.w.clock, lock, "target", "", "container")
+        s = Steps(self.w.reg, self.w.clock, lock, "place", "", "container")
         self.stderr(s.run)
         self.assertEqual(held, ["store", "store"])
 
@@ -572,8 +572,8 @@ class TestTheRefreshAskedOfTheBroker(SyncTest):
         self.assertIn("wk sync --tools container", self.refused(self.w.sync("mirror").mirror_refresh_request))
 
 
-class TestWhereEachTargetsWorkspacesAreFetched(SyncTest):
-    """sync_target: a plain target's workspaces are fetched from here; a peer is asked for each by name and never
+class TestWhereEachPlacesWorkspacesAreFetched(SyncTest):
+    """sync_place: a plain place's workspaces are fetched from here; a peer is asked for each by name and never
     with a scope word -- what a scope means is that machine's copy of wk-tools to decide."""
 
     def setUp(self):
@@ -582,8 +582,8 @@ class TestWhereEachTargetsWorkspacesAreFetched(SyncTest):
         self.w.workspaces = {"buildbox4": ["ws-a", "ws-b"], "moose": ["ws-a", "ws-b"]}
 
     def route(self, name, fix=False):
-        s = Steps(self.w.reg, self.w.clock, self.w.lock(), "target", "", name, fix)
-        rc, err = self.stderr(lambda: s.sync_target(self.w.reg.load(name)))
+        s = Steps(self.w.reg, self.w.clock, self.w.lock(), "place", "", name, fix)
+        rc, err = self.stderr(lambda: s.sync_place(self.w.reg.load(name)))
         return rc, self.w.steps, err
 
     def test_a_plain_target_fetches_in_its_workspaces_from_here(self):
@@ -611,7 +611,7 @@ class TestWhereEachTargetsWorkspacesAreFetched(SyncTest):
     def test_no_workspaces_says_so(self):
         self.w.workspaces = {}
         for t in ("buildbox4", "moose"):
-            with self.subTest(target=t):
+            with self.subTest(driver=t):
                 rc, steps, err = self.route(t)
                 self.assertEqual((rc, steps), (0, []))
                 self.assertIn("no workspaces on %s" % t, err)
@@ -623,7 +623,7 @@ class TestFurniture(SyncTest):
         self.stderr(self.w.sync("tools").sync_furniture)
         self.assertEqual(self.w.steps, ["FURNITURE container", "FURNITURE buildbox4"])
         self.w.steps.clear()
-        rc, err = self.stderr(self.w.sync("tools", target="buildbox4").sync_furniture)
+        rc, err = self.stderr(self.w.sync("tools", place="buildbox4").sync_furniture)
         self.assertEqual((rc, self.w.steps), (0, ["FURNITURE buildbox4 named"]))
         self.assertIn("'wk status' compares every copy against this one", err)
 
@@ -669,7 +669,7 @@ class TestTheMirror(SyncTest):
         self.assertNotIn("stage mirror fetch", self.mirror())
 
 
-class FakeVm(targets.Vm):
+class FakeVm(places.Vm):
     """The guest driver with tart's listing and the ssh into a guest answered by the World."""
 
     def list(self):
@@ -709,15 +709,15 @@ class TestTheGuestsRemount(SyncTest):
     def test_the_remount_is_the_mirror_tag_alone_never_agent_rw(self):
         self.stderr(self.w.sync("mirror").run)
         asked = [e[1][2:] for e in self.w.effects if e[0] == "run" and e[1][0] == "guest"]
-        self.assertEqual(asked, [("sudo", "-n", targets.GUEST_MOUNT_MIRROR, targets.MIRROR_TAG, targets.GUEST_MIRROR_MOUNT)] * 2)
-        self.assertNotIn(targets.GUEST_SHARES, " ".join(" ".join(a) for a in asked))
+        self.assertEqual(asked, [("sudo", "-n", places.GUEST_MOUNT_MIRROR, places.MIRROR_TAG, places.GUEST_MIRROR_MOUNT)] * 2)
+        self.assertNotIn(places.GUEST_SHARES, " ".join(" ".join(a) for a in asked))
 
     def test_the_remount_converges_from_a_share_mounted_or_not(self):
         bindir, at = self.tmp / "bin", str(self.tmp / "mnt")
         bindir.mkdir()
-        stubs = {"mount": '[ -f "$STATE" ] && echo "%s on %s (virtiofs, local)"\nexit 0' % (targets.MIRROR_TAG, at),
+        stubs = {"mount": '[ -f "$STATE" ] && echo "%s on %s (virtiofs, local)"\nexit 0' % (places.MIRROR_TAG, at),
                  "umount": '[ "$1" = "%s" ] && [ -f "$STATE" ] && rm "$STATE"' % at,
-                 "mount_virtiofs": '[ "$1 $2" = "%s %s" ] && [ ! -f "$STATE" ] && touch "$STATE"' % (targets.MIRROR_TAG, at)}
+                 "mount_virtiofs": '[ "$1 $2" = "%s %s" ] && [ ! -f "$STATE" ] && touch "$STATE"' % (places.MIRROR_TAG, at)}
         for stub, body in stubs.items():
             (bindir / stub).write_text("#!/bin/sh\n%s\n" % body)
             os.chmod(bindir / stub, 0o755)
@@ -728,13 +728,13 @@ class TestTheGuestsRemount(SyncTest):
                     state.write_text("")
                 elif state.exists():
                     state.unlink()
-                cp = subprocess.run([str(REPO / "vm" / "mount-mirror.sh"), targets.MIRROR_TAG, at], capture_output=True,
+                cp = subprocess.run([str(REPO / "vm" / "mount-mirror.sh"), places.MIRROR_TAG, at], capture_output=True,
                                     text=True, timeout=30,
                                     env=dict(os.environ, PATH="%s:%s" % (bindir, os.environ["PATH"]), STATE=str(state)))
                 self.assertEqual((cp.returncode, state.exists()), (0, True), cp.stderr)
 
     def test_the_remount_follows_the_refresh_whatever_target_asked_for_it(self):
-        self.stderr(self.w.sync("target", target="container").run)
+        self.stderr(self.w.sync("place", place="container").run)
         runs = [e[1] for e in self.w.effects if e[0] == "run"]
         refresh = runs.index(("sh", "-c", "REFRESH %s" % self.w.mirror))
         self.assertEqual([r[1] for r in runs[refresh:] if r[0] == "guest"], ["up-a", "up-b"])
@@ -744,7 +744,7 @@ class TestTheGuestsRemount(SyncTest):
         rc, err = self.stderr(self.w.sync("mirror").run)
         self.assertEqual((rc, self.remounts()), (0, []))
         for ws in ("up-a", "up-b"):
-            self.assertIn("would run in %s: sudo -n %s" % (ws, targets.GUEST_MOUNT_MIRROR), err)
+            self.assertIn("would run in %s: sudo -n %s" % (ws, places.GUEST_MOUNT_MIRROR), err)
         self.assertNotIn("would run in down", err)
 
     def test_a_busy_share_is_named_with_the_restart_and_the_refresh_still_succeeds(self):
@@ -771,7 +771,7 @@ class TestTheSnapshot(SyncTest):
         self.w = self.make_world(cls=Recording)
 
     def publish_raw(self):
-        self.w.sync("target", target="container").sync_snapshot(self.w.reg.load("container"))
+        self.w.sync("place", place="container").sync_snapshot(self.w.reg.load("container"))
 
     def publish(self):
         return self.stderr(self.publish_raw)[1]
@@ -847,7 +847,7 @@ class TestTheSnapshot(SyncTest):
 
         def run_once(w):
             with contextlib.redirect_stderr(io.StringIO()):
-                w.sync("tools", target="container").run()
+                w.sync("tools", place="container").run()
         converges(self, world, run_once, World.state)
         w = world()
         run_once(w)
@@ -861,11 +861,11 @@ class TestTheSnapshot(SyncTest):
             w.workspaces["container"] = ["ws"]
             return w
         wet = world()
-        self.stderr(wet.sync("target", target="container", fix=True).run)
+        self.stderr(wet.sync("place", place="container", fix=True).run)
         dry = world()
         before = dry.state()
         os.environ["WK_DRY_RUN"] = "1"
-        rc, err = self.stderr(dry.sync("target", target="container", fix=True).run)
+        rc, err = self.stderr(dry.sync("place", place="container", fix=True).run)
         self.assertEqual(dry.mutations(), wet.mutations())
         self.assertGreaterEqual(len(dry.mutations()), 10)
         self.assertEqual(dry.state(), before)
@@ -873,7 +873,7 @@ class TestTheSnapshot(SyncTest):
 
 class TestTheBaseWiring(SyncTest):
     """The current snapshot is where every future workspace gets its remotes from: read back on every sync of its
-    target, and re-wired under --fix."""
+    place, and re-wired under --fix."""
 
     def setUp(self):
         super().setUp()
@@ -882,7 +882,7 @@ class TestTheBaseWiring(SyncTest):
         self.w.verified.add(self.current)
 
     def wiring(self, fix=False):
-        s = self.w.sync("target", target="container", fix=fix)
+        s = self.w.sync("place", place="container", fix=fix)
         return self.stderr(lambda: s.base_wiring(self.w.reg.load("container")))
 
     def test_a_right_one_says_nothing(self):
@@ -894,7 +894,7 @@ class TestTheBaseWiring(SyncTest):
         self.assertEqual(rc, 1)
         self.assertIn("the snapshot 20200101T000000Z is wired wrong", err)
         self.assertIn("    - origin is /x", err)
-        self.assertIn("wk sync --target container --fix", err)
+        self.assertIn("wk sync --on container --fix", err)
 
     def test_fix_re_wires_it(self):
         self.w.base_check = Result(1, "problem: origin is /x\n")
@@ -919,9 +919,9 @@ class TestTheFetch(SyncTest):
         super().setUp()
         self.w = self.make_world({"container": "container", "buildbox4": "remote", "vm": "vm"})
 
-    def fetch_raw(self, *names, scope="all", fix=False, target="container"):
+    def fetch_raw(self, *names, scope="all", fix=False, place="container"):
         s = self.w.sync(scope, only=names[0] if scope == "ws" else "", fix=fix)
-        return s.fetch_workspaces(self.w.reg.load(target), list(names))
+        return s.fetch_workspaces(self.w.reg.load(place), list(names))
 
     def fetch(self, *names, **kw):
         return self.stderr(lambda: self.fetch_raw(*names, **kw))
@@ -1021,13 +1021,13 @@ class TestTheFetch(SyncTest):
         self.assertIn("    re-wired\n    retargeted: eng/x now tracks fork/eng/x\n    git-webkit: setup=ok", err)
 
     def test_fix_wires_from_the_driver_and_leaves_a_machine_of_the_persons_own_its_setup(self):
-        self.fetch("one", fix=True, target="buildbox4")
+        self.fetch("one", fix=True, place="buildbox4")
         self.assertEqual(self.w.steps, ["WIRING one", "UPSTREAMFIX one", "FETCH one"])
         wired = next(e[1][-1] for e in self.w.effects if e[1][:1] == ("exec",))
         self.assertEqual(wired, "WIRING /src/WebKit /mirror/buildbox4/WebKit.git mirror /far/mirror /far/ssh/config")
 
     def test_fix_runs_git_webkit_in_a_guest_too(self):
-        self.fetch("one", fix=True, target="vm")
+        self.fetch("one", fix=True, place="vm")
         self.assertIn("GITWEBKIT one", self.w.steps)
 
     def test_a_git_webkit_setup_that_failed_names_both_remedies(self):
@@ -1048,16 +1048,16 @@ class TestTheFetch(SyncTest):
 
 
 class TestEachDriversFurniture(SyncTest):
-    """Target.sync, the half of `wk sync --tools` each driver answers for itself."""
+    """Driver.sync, the half of `wk sync --tools` each driver answers for itself."""
 
     def test_a_container_mounts_the_tooling_and_copies_nothing(self):
-        t = targets.Container("container", str(REPO), dict(self.w.env), self.w)
+        t = places.Container("container", str(REPO), dict(self.w.env), self.w)
         ok, err = self.stderr(lambda: t.sync())
         self.assertEqual((ok, self.w.effects), (True, []))
         self.assertIn("nothing to copy", err)
 
     def test_a_guest_gets_its_copy_pushed_and_one_not_running_is_skipped(self):
-        class Guests(targets.Vm):
+        class Guests(places.Vm):
             pushed, result = [], True
 
             def list(self):
@@ -1088,7 +1088,7 @@ class TestRemoteFurniture(SyncTest):
                    WK_REMOTE_REFERENCE=reference)
         if peer:
             env["WK_REMOTE_PEER"] = "1"
-        return targets.Remote("apeer" if peer else "box", str(REPO), env, self.w)
+        return places.Remote("apeer" if peer else "box", str(REPO), env, self.w)
 
     def answer_versions(self, theirs):
         self.w.answer(["git", "-C", str(REPO), "rev-parse", "HEAD"], out="abc\n")
@@ -1152,7 +1152,7 @@ class TestRemoteFurniture(SyncTest):
 
     def test_a_build_box_cloning_from_its_admins_reference_keeps_no_mirror(self):
         self.answer_versions("")
-        with mock.patch.object(targets.Remote, "sync_tools", return_value=False):
+        with mock.patch.object(places.Remote, "sync_tools", return_value=False):
             ok, err = self.stderr(lambda: self.remote(reference="/srv/WebKit").sync())
         self.assertFalse(ok)
         self.assertIn("clone from /srv/WebKit", err)
@@ -1162,22 +1162,22 @@ class TestRemoteFurniture(SyncTest):
 class TestWhyAPeerIsBehind(SyncTest):
     def test_each_reason(self):
         self.w = Fake("here")
-        self.assertIn("not a git checkout", targets.tools_why_behind(self.w, "/t"))
+        self.assertIn("not a git checkout", places.tools_why_behind(self.w, "/t"))
         self.w.answer(["git", "-C", "/t", "rev-parse", "--git-dir"], out=".git\n")
         self.w.answer(["git", "-C", "/t", "rev-parse", "--abbrev-ref", "HEAD"], out="eng/x\n")
-        self.assertIn("branch 'eng/x' has no upstream here", targets.tools_why_behind(self.w, "/t"))
+        self.assertIn("branch 'eng/x' has no upstream here", places.tools_why_behind(self.w, "/t"))
         self.w.answer(["git", "-C", "/t", "rev-parse", "--abbrev-ref", "@{upstream}"], out="origin/main\n")
         self.w.answer(["git", "-C", "/t", "rev-list"], out="2\n")
-        self.assertIn("2 commit(s) ahead of origin/main", targets.tools_why_behind(self.w, "/t"))
+        self.assertIn("2 commit(s) ahead of origin/main", places.tools_why_behind(self.w, "/t"))
         self.w.answer(["git", "-C", "/t", "rev-list"], out="0\n")
-        self.assertEqual(targets.tools_why_behind(self.w, "/t"), "")
+        self.assertEqual(places.tools_why_behind(self.w, "/t"), "")
 
     def test_a_count_git_could_not_make_is_said_not_read_as_in_sync(self):
         self.w = Fake("here")
         self.w.answer(["git", "-C", "/t", "rev-parse", "--git-dir"], out=".git\n")
         self.w.answer(["git", "-C", "/t", "rev-parse", "--abbrev-ref", "@{upstream}"], out="origin/main\n")
         self.w.answer(["git", "-C", "/t", "rev-list"], rc=128)
-        self.assertEqual(targets.tools_why_behind(self.w, "/t"), "git could not count this machine's commits past origin/main")
+        self.assertEqual(places.tools_why_behind(self.w, "/t"), "git could not count this machine's commits past origin/main")
 
 
 # A broker that answers one request and records it: enough for container/broker/wk-broker-client.py to speak to.
@@ -1229,7 +1229,7 @@ class TestSyncInsideWorkspace(unittest.TestCase):
     def test_the_scope_flags_are_refused_naming_the_host_invocation(self):
         self._refused("--all")
         self._refused("--tools")
-        self._refused("--target", "container")
+        self._refused("--on", "container")
 
     def test_a_different_workspaces_name_is_refused_by_the_dispatcher(self):
         with fake_workspace() as ws:

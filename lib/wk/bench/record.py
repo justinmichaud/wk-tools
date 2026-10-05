@@ -331,10 +331,10 @@ def driver_logs(store, task):
     return os.path.join(store.records_dir(), "log", task)
 
 
-def ws_home(reg, ws, target=""):
-    """(machine, directory) where `ws` keeps its tasks, wherever it lives: its target's own answer (Target.results)."""
+def ws_home(reg, ws, place=""):
+    """(machine, directory) where `ws` keeps its tasks, wherever it lives: its place's own answer (Driver.results)."""
     try:
-        home = reg.load(target or reg.ws_target(ws)).results(ws) if ws else None
+        home = reg.load(place or reg.ws_place(ws)).results(ws) if ws else None
     except LookupError as e:
         die(str(e))
     if not home:
@@ -418,14 +418,14 @@ def ls_rows(found, running=(), where=""):
             if m.get("bench_host", "container") != "container":
                 axes += "/" + m["bench_host"]
             out.append("      %s  %s %s %s %s %s%s" % (
-                r["dir"], m.get("plan", "?"), m.get("config", "?"), axes,
+                r["dir"], m.get("plan", "?"), m.get("preset", "?"), axes,
                 (m.get("webkit_sha") or "?")[:10], r["state"],
                 "  [FORCED]" if m.get("forced") else ""))
     return out
 
 
 class Listing:
-    """This machine's store, then every target whose machine answers for a store of its own, through its own wk."""
+    """This machine's store, then every place whose machine answers for a store of its own, through its own wk."""
 
     def __init__(self, reg, store, alive, label, warn):
         self.reg, self.store, self.label, self.warn, self.alive = reg, store, label, warn, alive
@@ -434,8 +434,8 @@ class Listing:
         found = homes(self.store)
         return ls_rows(found, running_tasks(found, self.store.lock_path, self.alive), self.label)
 
-    def _label(self, target, name):
-        return name if target.kind == "remote" and not getattr(target, "is_local", True) else self.label
+    def _label(self, driver, name):
+        return name if driver.kind == "remote" and not getattr(driver, "is_local", True) else self.label
 
     def fleet_rows(self):
         return fleetwalk.fleet_rows(self.reg, "bench", "tasks", self._label, self.warn)
@@ -445,11 +445,11 @@ class Listing:
 
 
 def main(argv):
-    from wk import images, targets
+    from wk import images, places
     if len(argv) != 2 or argv[0] != "home":
         die("usage: python3 -m wk.bench.record home <workspace>")
     env = os.environ
-    m, path = ws_home(targets.Registry(images.root(env), env, Local()), argv[1])
+    m, path = ws_home(places.Registry(images.root(env), env, Local()), argv[1])
     print(json.dumps({"via": hops(m), "path": path}))
     return 0
 

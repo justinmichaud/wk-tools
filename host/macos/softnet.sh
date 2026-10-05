@@ -2,7 +2,7 @@
 WK_SOFTNET_VERSION="${WK_SOFTNET_VERSION:-0.23.0}"
 WK_SOFTNET_BIN="${WK_SOFTNET_BIN:-/usr/local/bin/softnet}"
 
-if ! wk_py wk.targets tart >/dev/null; then
+if ! wk_py wk.places tart >/dev/null; then
     debug "tart not installed; skipping softnet (see README.md, Setup)"
     return 0 2>/dev/null || true
 fi

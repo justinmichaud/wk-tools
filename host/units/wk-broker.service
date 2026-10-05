@@ -22,7 +22,7 @@ RuntimeDirectoryPreserve=yes
 # one runs `wk boot`/`wk pi`, reading what system a device's own boot
 # partition holds and ssh-ing to a board -- it is the thing with the
 # privilege. What bounds it instead is the vocabulary: seven commands against
-# machines the fleet declares as bench devices.
+# machines the fleet declares as bench machines.
 PrivateTmp=yes
 
 [Install]

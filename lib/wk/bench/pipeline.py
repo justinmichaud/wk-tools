@@ -7,7 +7,7 @@ import re
 import shlex
 import sys
 
-from wk import act, buildconf, job, record as progress, screen
+from wk import act, job, presets, record as progress, screen
 from wk.act import Refused, die, info, log, warn
 from wk.bench import record, seed, systems
 from wk.lock import Lock
@@ -22,7 +22,7 @@ PID_MATCH = "*run-benchmark* *cli.js*"
 # A benchmark reports once per subtest, far less often than a compiler does.
 STALL_SECONDS, ABORT_SECONDS = "900", "5400"
 MAX_LOAD = 4
-DEFAULT_CONFIG = "wpe-release"
+DEFAULT_PRESET = "wpe-release"
 SCORE = re.compile(r"^(Score|Total|.*Score:)", re.I)
 BOARD_AB_ONLY = ("exclude_subtests", "no_warmup_profile", "jit_tiers")
 AB_ONLY = ("rounds",) + BOARD_AB_ONLY
@@ -159,17 +159,17 @@ class Run:
         self.root, self.reg, self.system, self.clock = str(root), reg, system, clock
         self.env = dict(os.environ if env is None else env)
         progress.default_watchdog(self.env, STALL_SECONDS, ABORT_SECONDS)
-        self.here, self.ws, self.target = reg.machine, system.ws, system.target
+        self.here, self.ws, self.ws_driver = reg.machine, system.ws, system.ws_driver
         self.recs = self.records(clock)
         self.lock = Lock(reg.store, self.here, clock)
         self.task, self.dry_fails = None, 0
         self.kill_cmd = "wk bench run%s --kill" % ("" if reg.in_workspace() else " " + self.ws)
 
     def records(self, clock):
-        return progress.of_target(self.target, clock, self.here, env=dict(self.target.env, WK_ABORT_SECONDS=str(progress.watchdog_abort(self.env))))
+        return progress.of_driver(self.ws_driver, clock, self.here, env=dict(self.ws_driver.env, WK_ABORT_SECONDS=str(progress.watchdog_abort(self.env))))
 
     def stop(self):
-        rc = job.stop(self.target, self.recs, self.ws, "bench", self.here, self.clock, self.env)
+        rc = job.stop(self.ws_driver, self.recs, self.ws, "bench", self.here, self.clock, self.env)
         if rc == 1:
             die("the benchmark in '%s' outlived a TERM and a KILL.\n    Look at it:  wk enter %s" % (self.ws, self.ws))
         return 0
@@ -181,20 +181,20 @@ class Run:
                 die("--cores '%s' is not a valid Linux cpu list (e.g. 0-3, 2,3, 0-1,4, 7)" % leg.cores)
             if s.cores_refusal():
                 die("--cores: " + s.cores_refusal())
-        name = o.get("config") or DEFAULT_CONFIG
+        name = o.get("preset") or DEFAULT_PRESET
         try:
-            leg.cfg = buildconf.resolve(name, self.target.os(), self.target.kind, self.target.env)
+            leg.cfg = presets.resolve(name, self.ws_driver.os(), self.ws_driver.kind, self.ws_driver.env)
         except LookupError:
-            die("unknown config '%s' (wk build --list)" % name)
-        leg.klass, leg.arch = bench_class(plan), self.target.arch(self.ws)
+            die("unknown preset '%s' (wk build --list)" % name)
+        leg.klass, leg.arch = bench_class(plan), self.ws_driver.arch(self.ws)
         leg.runner = "jsc" if leg.cfg.jsc_only else "browser"
         if leg.runner == "jsc" and leg.klass == "gpu":
             die("%s is a gpu-class benchmark and %s builds no browser.\n    Either build a browser port (wk build %s wpe-release) and pass\n"
-                "    --config wpe-release, or run a cpu-class plan -- jetstream3, octane,\n    kraken, sunspider, ares6 -- which the jsc shell can drive directly."
+                "    --preset wpe-release, or run a cpu-class plan -- jetstream3, octane,\n    kraken, sunspider, ares6 -- which the jsc shell can drive directly."
                 % (plan, name, self.ws))
         if leg.klass == "gpu" and not s.has_gpu(leg.arch):
             die("%s is gpu-class and '%s' is an %s workspace, which has no GPU.\n    cpu-class plans (jetstream3, octane, kraken, sunspider) do run in here,\n"
-                "    with either a browser or a JSCOnly config. For a 32-bit rendering number\n    measure a board:  wk bench run %s %s --system <board>" % (plan, self.ws, leg.arch, self.ws, plan))
+                "    with either a browser or a JSCOnly preset. For a 32-bit rendering number\n    measure a board:  wk bench run %s %s --system <board>" % (plan, self.ws, leg.arch, self.ws, plan))
         if leg.runner == "browser":
             leg.browser = leg.browser or s.default_browser(leg.cfg)
         if leg.software:
@@ -246,7 +246,7 @@ class Run:
 
     def seed(self, leg):
         def read(path):
-            r = self.target.exec(self.ws, ["cat", "%s/Tools/Scripts/%s" % (self.system.src(), path)])
+            r = self.ws_driver.exec(self.ws, ["cat", "%s/Tools/Scripts/%s" % (self.system.src(), path)])
             return r.out.replace("\r", "") if r.ok else None
         seeder = seed.Seeder(self.here, self.lock, os.path.join(self.reg.store.cache_dir(), "bench"), self.reg.store.mirror_dir())
         leg.payload = seeder.seed(leg.plan, seed.plan_json(read, leg.plan))
@@ -254,10 +254,10 @@ class Run:
             return
         if not leg.payload:
             die("%s has no seeded payload, and the jsc runner has nothing to run without one.\n    'wk bench seed %s %s' fetches it; "
-                "a plan whose source cannot be pre-seeded can only be run with a browser config." % (leg.plan, self.ws, leg.plan))
+                "a plan whose source cannot be pre-seeded can only be run with a browser preset." % (leg.plan, self.ws, leg.plan))
         if not act.dry_run() and not self.here.exists(os.path.join(leg.payload, "cli.js")):
-            die("%s has no cli.js, so %s cannot be driven from a JavaScript shell. Run it with a browser config\n"
-                "    instead (--config wpe-release), which is the official number for every plan anyway." % (leg.payload, leg.plan))
+            die("%s has no cli.js, so %s cannot be driven from a JavaScript shell. Run it with a browser preset\n"
+                "    instead (--preset wpe-release), which is the official number for every plan anyway." % (leg.payload, leg.plan))
 
     def begin(self, leg):
         """The task (task.json, under its lock) and its run directory, the env.json the report reads, and the progress record."""
@@ -277,7 +277,7 @@ class Run:
         if not task_held(self.env, leg.task):
             self.lock.hold("bench-task-" + leg.task, timeout=5)
         count = ["count=" + leg.count] if leg.count else []
-        command = "wk bench run %s %s --config %s%s" % (self.ws, leg.plan, leg.cfg.name, " --count " + leg.count if leg.count else "")
+        command = "wk bench run %s %s --preset %s%s" % (self.ws, leg.plan, leg.cfg.name, " --count " + leg.count if leg.count else "")
         if not given:
             record.task_write(taskdir, ["task=" + leg.task, "requested=" + self.clock.iso(), "subject.kind=workspace",
                                         "subject.spec=" + self.ws, "devices=%s=%s" % (self.system.kind, leg.cfg.name),
@@ -285,7 +285,7 @@ class Run:
                               [command], machine=leg.machine)
         leg.machine.mkdir(leg.out)
         record.write_env(os.path.join(leg.out, "env.json"), [
-            "plan=" + leg.plan, "workspace=" + self.ws, "config=" + leg.cfg.name, "browser=" + leg.browser, "task=" + leg.task,
+            "plan=" + leg.plan, "workspace=" + self.ws, "preset=" + leg.cfg.name, "browser=" + leg.browser, "task=" + leg.task,
             "webkit_sha=" + self.system.sha(), "count=" + leg.count, "local_copy=" + leg.payload,
             "software_reason=" + leg.software_reason, "class=" + leg.klass, "runner=" + leg.runner, "arch=" + leg.arch,
             "bench_host=" + self.system.bench_host, "preflight_notes=" + leg.notes, "cores.set=" + leg.cores]
@@ -310,7 +310,7 @@ class Run:
         watcher = None
         if self.task is not None:
             self.task.set("log", path)
-            watcher = job.PidWatch(self.target, self.ws, self.task, path, "bench", PID_MATCH, job.pid_tries(self.env))
+            watcher = job.PidWatch(self.ws_driver, self.ws, self.task, path, "bench", PID_MATCH, job.pid_tries(self.env))
             watcher.start()
         try:
             return job.watch(argv, path, self.here, self.clock, self.env, cwd)
@@ -400,7 +400,7 @@ class Run:
                     self.system.collect(leg)
             except job.Interrupted as e:
                 warn("interrupted -- stopping the benchmark in '%s'" % self.ws)
-                if self.task is not None and not job.kill(self.target, self.ws, self.task, "cancelled", self.here, self.clock, self.env):
+                if self.task is not None and not job.kill(self.ws_driver, self.ws, self.task, "cancelled", self.here, self.clock, self.env):
                     warn("it is still running; stop it with:  %s" % self.kill_cmd)
                 self.lock.release_all()
                 raise Refused(job.EXIT_OF.get(e.signum, 130))

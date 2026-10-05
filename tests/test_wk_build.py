@@ -23,7 +23,7 @@ from tests.killpoints import converges
 from tests.support import REPO, as_dispatched
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, build, dispatch, job, record, targets  # noqa: E402
+from wk import act, build, dispatch, job, places, record  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Local, Result, isolated_module  # noqa: E402
@@ -35,7 +35,7 @@ CMD_LOADER.exec_module(CMD)
 LINUX = posix.uname_result(("Linux", "h", "6", "#1", "aarch64"))
 
 
-class BuildTarget(targets.Target):
+class BuildDriver(places.Driver):
     def __init__(self, name, root, env, machine, kind):
         super().__init__(name, root, env, machine)
         self.kind = kind
@@ -63,7 +63,7 @@ class BuildTarget(targets.Target):
         return "/mirror"
 
     def os(self):
-        return self.machine.target_os
+        return self.machine.place_os
 
 
 class World(Fake):
@@ -72,9 +72,9 @@ class World(Fake):
         super().__init__("here")
         self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
         self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"), "WK_LOCK_DIR": str(self.tmp / "locks"),
-                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_TARGET": "box", "WK_NAME": "ws", "WK_IN_VM": "1",
+                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_PLACE": "box", "WK_NAME": "ws", "WK_IN_VM": "1",
                     "WK_AVAIL_MB": "65536", "WK_JOB_PID_TRIES": "0", "WK_KILL_WAIT": "2"}
-        self.conf, self.kind, self.in_ws, self.target_os = {}, kind, False, "linux"
+        self.conf, self.kind, self.in_ws, self.place_os = {}, kind, False, "linux"
         self.size = (8, 32768, 2 if kind == "remote" else None)
         self.clock = FakeClock()
         self.dirs.add(self.env["WK_LOCK_DIR"])
@@ -86,8 +86,8 @@ class World(Fake):
         self.answer(["exec", "ws", "bash", "-c"])
         self.react(["exec", "ws", "env"], lambda a, f: Result(0, FAR_LINE) if "WK_DRY_RUN=1" in a else Result(1))
         self.answer(["sync-tools"])
-        self.reg = FakeRegistry(self.env, self, lambda n, e: BuildTarget("box", str(REPO), dict(e, **self.conf), self, self.kind),
-                                ws_target=lambda ws: "box", in_workspace=lambda: self.in_ws)
+        self.reg = FakeRegistry(self.env, self, lambda n, e: BuildDriver("box", str(REPO), dict(e, **self.conf), self, self.kind),
+                                ws_place=lambda ws: "box", in_workspace=lambda: self.in_ws)
         self.ws_dir = os.path.join(self.env["WK_STORE"], "ws", "ws")
         os.makedirs(self.ws_dir)
         self.log = os.path.join(self.ws_dir, "build.log")
@@ -119,8 +119,8 @@ class World(Fake):
         return ([(t.field("kind"), t.field("exit")) for t in self.recs().list()], len(self.budget_files()))
 
 
-def argv_of(config="jsc-release", *more):
-    return [config] + list(more)
+def argv_of(preset="jsc-release", *more):
+    return [preset] + list(more)
 
 
 class BuildTest(unittest.TestCase):
@@ -165,7 +165,7 @@ class TestTheRecordARunWrites(BuildTest):
         self.assertEqual((t.field("kind"), t.field("where"), t.field("name"), t.field("exit")), ("build", "here", "ws", "0"))
         self.assertEqual(t.plan(), ["sync wk-tools into 'ws'", "compile jsc-release with -j8"])
         self.assertEqual(t.steps(), [(1, "done"), (2, "running")])
-        self.assertEqual((t.field("log"), t.field("kill"), t.field("config")), (self.w.log, "wk build ws --kill", "jsc-release"))
+        self.assertEqual((t.field("log"), t.field("kill"), t.field("preset")), (self.w.log, "wk build ws --kill", "jsc-release"))
         self.assertEqual(t.field("abort_after"), "1800")
         self.assertTrue(t.field("started"))
         self.assertEqual(Path(self.w.log).read_bytes(), self.w.out)
@@ -191,7 +191,7 @@ class TestTheRecordARunWrites(BuildTest):
         (w,) = [e for e in self.w.effects if e[0] == "watch"]
         argv = list(w[1])
         self.assertEqual(argv[:9], ["exec", "ws"] + isolated_module("/opt/wk-tools/lib", "wk.sysimage.task") + ["stage"])
-        self.assertEqual(argv[-2:], ["/opt/wk-tools/build/build-in-target.sh", "--verbose"])
+        self.assertEqual(argv[-2:], ["/opt/wk-tools/build/build-in-workspace.sh", "--verbose"])
         self.assertIn("CC=gcc", argv)
         self.assertTrue(any(a.startswith("WK_BUILD_CMAKE=") and a.endswith("-DX=1") for a in argv))
 
@@ -203,7 +203,7 @@ class TestTheRecordARunWrites(BuildTest):
         self.assertEqual(self.w.recs().list()[0].field("exit"), "2")
 
     def test_a_broken_xcode_plan_names_the_directory_to_remove(self):
-        self.w.target_os, self.w.out, self.w.rc = "macos", b"error: xcbuilddata/manifest.json unreadable\n", 1
+        self.w.place_os, self.w.out, self.w.rc = "macos", b"error: xcbuilddata/manifest.json unreadable\n", 1
         self.w.kind = "vm"
         err = self.refused(None, "mac-release")
         self.assertIn("rm -rf /src/WebKit/WebKitBuild/Release/XCBuildData", err)
@@ -254,9 +254,9 @@ class TestInterrupted(BuildTest):
             t = real(recs, *a, **kw)
             t.set("pid_match", build.PID_MATCH)
             t.pid(777)
-            t.set("where", "target")
+            t.set("where", "place")
             return t
-        self.w.answer(["exec", "ws", "ps", "-o", "args=", "-p", "777"], out="bash /opt/wk-tools/build/build-in-target.sh\n")
+        self.w.answer(["exec", "ws", "ps", "-o", "args=", "-p", "777"], out="bash /opt/wk-tools/build/build-in-workspace.sh\n")
         self.w.react(["exec", "ws", "kill", "-TERM"], lambda a, f: (f.pids.discard(777), Result(0))[1])
         self.w.pids.add(777)
         with mock.patch.object(record.Records, "begin", begin):
@@ -296,21 +296,21 @@ class TestStoppedByItsKill(BuildTest):
 class TestRefusals(BuildTest):
     def test_no_config_prints_the_usage_and_the_list(self):
         err = self.refused(None, "--no-defaults", status=2)
-        self.assertIn("usage: wk build <workspace> <config>", err)
+        self.assertIn("usage: wk build <workspace> <preset>", err)
         self.assertIn("  jsc-release ", err)
         self.w.in_ws = True
-        self.assertIn("usage: wk build <config>", self.refused(None, "--no-defaults", status=2))
+        self.assertIn("usage: wk build <preset>", self.refused(None, "--no-defaults", status=2))
 
     def test_an_unknown_config_names_the_list(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err), self.assertRaises(dispatch.Exit) as cm:
             self.make(None, "nope")
         self.assertEqual(cm.exception.status, 2)
-        self.assertIn("unknown config: nope -- 'wk build --list' names every one", err.getvalue())
+        self.assertIn("unknown preset: nope -- 'wk build --list' names every one", err.getvalue())
 
     def test_cmakeargs_is_refused_naming_what_it_would_drop(self):
         err = self.refused(None, "jsc-release", "--cmakeargs", "-DX=1")
-        self.assertIn("--cmakeargs would replace the config's CMake flags", err)
+        self.assertIn("--cmakeargs would replace the preset's CMake flags", err)
         self.assertIn("wk build ws jsc-release --cmake -DX=1", err)
         self.assertIn("--force proceeds anyway", err)
         os.environ["WK_FORCE"] = "1"
@@ -359,7 +359,7 @@ class TestRefusals(BuildTest):
         self.w.answer(["df", "-Pk"], out=full)
         self.assertIn("10 GB free on %s's filesystem; this build wants about 25 GB." % self.w.env["WK_STORE"], self.refused())
         w = World(self.tmp, kind="vm")
-        w.target_os = "macos"
+        w.place_os = "macos"
         w.answer(["exec", "ws", "df", "-Pk"], out=full.replace("10485760", "41943040"))
         self.assertIn("40 GB free on the disk inside 'ws'; this build wants about 60 GB.", self.refused(w, "mac-release-pgo"))
 
@@ -377,7 +377,7 @@ class TestSizedOnce(BuildTest):
             w.files[os.path.join(w.env["WK_STORE"], ".headless")] = ""
         with mock.patch("os.uname", return_value=LINUX):
             t = w.reg.load("box")
-            w.size = targets.Target.build_size(t, "ws")
+            w.size = places.Driver.build_size(t, "ws")
             rc, err = self.run_(w)
         self.assertEqual(rc, 0, err)
         return w.size, [l for l in err.splitlines() if l.startswith("resources:")][0]
@@ -411,8 +411,8 @@ class TestDryRun(BuildTest):
         self.assertEqual(rc, 0, err)
         self.assertIn("dry run -- nothing was built.", err)
         self.assertIn("  workspace: ws (box, present)", err)
-        self.assertIn("  config:    jsc-release (cmake --jsc-only --no-fatal-warnings --release)", err)
-        self.assertIn("  --cmake:   -DX=1 (added to the config's)", err)
+        self.assertIn("  preset:    jsc-release (cmake --jsc-only --no-fatal-warnings --release)", err)
+        self.assertIn("  --cmake:   -DX=1 (added to the preset's)", err)
         self.assertIn("  passed on: --verbose (straight to build-webkit)", err)
         self.assertEqual([l for l in err.splitlines() if "running:" in l], ["  running:   " + FAR_LINE.strip()])
         self.assertEqual(self.w.recs().list(), [])
@@ -463,7 +463,7 @@ class TestKill(BuildTest):
         self.assertEqual([e[1] for e in self.w.effects if e[0] == "kill"], [11, 12])
         self.assertEqual({t.field("kind"): t.field("exit") for t in self.w.recs().list()}, {"babysit": "cancelled", "build": "cancelled"})
         self.assertIn("stopping the build in 'ws' (pid 12 on here)", err)
-        self.assertIn("'wk build ws <config>' resumes rather than starts over.", err)
+        self.assertIn("'wk build ws <preset>' resumes rather than starts over.", err)
 
     def test_one_that_outlives_a_kill_is_refused_naming_it(self):
         class Immortal(World):
@@ -540,7 +540,7 @@ class TestBabysitFront(BuildTest):
     def test_it_refuses_where_it_cannot_run(self):
         self.w.in_ws = True
         self.assertIn("--babysit runs on the host", self.refused(None, "jsc-release", "--babysit"))
-        self.assertIn("refusing to babysit on a remote target", self.refused(World(self.tmp, "remote"), "jsc-release", "--babysit"))
+        self.assertIn("refusing to babysit on a remote place", self.refused(World(self.tmp, "remote"), "jsc-release", "--babysit"))
         self.assertIn("already inside a workspace", self.refused(World(self.tmp, "local"), "jsc-release", "--babysit"))
 
     def test_one_at_a_time_by_its_record(self):
@@ -643,7 +643,7 @@ class TestBabysitStates(BuildTest):
 
 
 class TestBusyReason(BuildTest):
-    def target(self):
+    def driver(self):
         return self.w.reg.load("box")
 
     def test_a_pid_file_in_the_home_alive_in_the_workspace_is_busy(self):
@@ -651,32 +651,32 @@ class TestBusyReason(BuildTest):
         self.w.dirs.add(home)
         self.w.files[os.path.join(home, "buildroot-image.pid")] = "77\n"
         self.w.answer(["exec", "ws", "kill", "-0", "77"])
-        self.assertEqual(build.busy_reason(self.target(), self.w.recs(), "ws"), "buildroot-image (pid 77 in the workspace)")
+        self.assertEqual(build.busy_reason(self.driver(), self.w.recs(), "ws"), "buildroot-image (pid 77 in the workspace)")
         self.w.answer(["exec", "ws", "kill", "-0", "77"], rc=1)
-        self.assertIsNone(build.busy_reason(self.target(), self.w.recs(), "ws"))
+        self.assertIsNone(build.busy_reason(self.driver(), self.w.recs(), "ws"))
 
     def test_a_pid_a_target_record_names_is_judged_by_its_kind_alone(self):
         home = os.path.join(self.w.ws_dir, "home")
         self.w.files[os.path.join(home, "jsc-tests.pid")] = "88\n"
-        self.w.begin("test", pid=88, where="target")
+        self.w.begin("test", pid=88, where="place")
         self.w.pids.add(88)
         self.w.answer(["exec", "ws", "kill", "-0", "88"])
-        self.assertIsNone(build.busy_reason(self.target(), self.w.recs(), "ws"))
+        self.assertIsNone(build.busy_reason(self.driver(), self.w.recs(), "ws"))
 
     def test_another_workspaces_job_is_not_this_ones(self):
         self.w.begin("build", name="other", pid=4242)
         self.w.pids.add(4242)
-        self.assertIsNone(build.busy_reason(self.target(), self.w.recs(), "ws"))
+        self.assertIsNone(build.busy_reason(self.driver(), self.w.recs(), "ws"))
 
 
 class TestJob(BuildTest):
     def test_a_pid_announced_down_the_log_is_adopted_only_when_it_is_the_job(self):
         t = self.w.begin("build")
         Path(self.w.log).write_text("noise\nwk: build pid 8123\n")
-        self.w.answer(["exec", "ws", "ps", "-o", "args=", "-p", "8123"], out="bash /opt/wk-tools/build/build-in-target.sh\n")
+        self.w.answer(["exec", "ws", "ps", "-o", "args=", "-p", "8123"], out="bash /opt/wk-tools/build/build-in-workspace.sh\n")
         watch = job.PidWatch(self.w.reg.load("box"), "ws", t, self.w.log, "build", build.PID_MATCH, 1)
         watch.run()
-        self.assertEqual((t.field("pid"), t.field("where"), t.field("pid_match")), ("8123", "target", build.PID_MATCH))
+        self.assertEqual((t.field("pid"), t.field("where"), t.field("pid_match")), ("8123", "place", build.PID_MATCH))
         t2 = self.w.begin("build", name="x")
         self.w.answer(["exec", "ws", "ps", "-o", "args=", "-p", "8123"], out="/sbin/init\n")
         with contextlib.redirect_stderr(io.StringIO()) as err:

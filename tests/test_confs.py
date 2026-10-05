@@ -7,7 +7,7 @@ import unittest
 from tests.support import FLEET_ENV, REAL_MACHINES, REPO, run
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import fleet, targets  # noqa: E402
+from wk import fleet, places  # noqa: E402
 
 REGISTRIES = {
     "image/configs": REPO / "image" / "configs",
@@ -90,7 +90,7 @@ class TestConfFieldSets(unittest.TestCase):
         wk = REPO / "lib" / "wk"
         bench = loader_keys(*(p for d in ("boot", "sysimage") for p in sorted((wk / d).glob("*.py"))), wk / "reach.py")
         bridge = loader_keys(*sorted((wk / "bridge").glob("*.py")), wk / "fleet.py")
-        for kinds, known in ((fleet.BENCH_KINDS, bench), (("bridge",), bridge), (fleet.TARGET_KINDS, set(targets.CONF_ENV))):
+        for kinds, known in ((fleet.BENCH_KINDS, bench), (("bridge",), bridge), (fleet.PLACE_KINDS, set(places.CONF_ENV))):
             with self.subTest(kinds=kinds):
                 self.assert_one_field_set(conf_files("machines", kinds), known)
 
@@ -148,12 +148,12 @@ class TestBenchConfFields(unittest.TestCase):
                     self.assertTrue(fields.get("dtb"))
 
 
-class TestUnknownTargetRefusal(unittest.TestCase):
+class TestUnknownPlaceRefusal(unittest.TestCase):
     def test_the_refusal_names_the_machines_that_exist_and_how_to_add_one(self):
-        names = fleet.Fleet(REPO, FLEET_ENV).names(fleet.TARGET_KINDS)
+        names = fleet.Fleet(REPO, FLEET_ENV).names(fleet.PLACE_KINDS)
         self.assertTrue(names)
         typo = names[0][::-1]
-        cp = run("key", "push", "status", "--target", typo, env={"WK_MACHINES_DIR": str(REAL_MACHINES)})
+        cp = run("key", "push", "status", "--on", typo, env={"WK_MACHINES_DIR": str(REAL_MACHINES)})
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         for n in names + ["wk machine setup " + typo]:
             self.assertIn(n, cp.stdout)

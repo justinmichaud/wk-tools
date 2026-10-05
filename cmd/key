@@ -6,9 +6,9 @@
 # wk: sub set,pub,sshtest,adopt,verdict,give takes=2
 # wk: sub set opts=--replace,--paste
 # wk: sub deploy,setup opts=--rotate
-# wk: sub sudo takes=2 opts=--target=,--all destructive=
+# wk: sub sudo takes=2 opts=--on=,--all destructive=
 # wk: sub backup opts=--candidates
-# wk: sub push where=local takes=2 needs= opts=--target=,--all destructive=on dryrun=yes
+# wk: sub push where=local takes=2 needs= opts=--on=,--all destructive=on dryrun=yes
 #
 #   wk key setup      every credential this machine needs, and one working
 #                     credential of each kind on every workstation. The one
@@ -102,7 +102,7 @@
 #   wk key show       print the public halves, and the ntfy topic URL to point a
 #                     phone at
 #   wk key ensure     create missing push keys without registering them
-#   wk key push [on|off|status] [--target <machine>|--all] [--force]
+#   wk key push [on|off|status] [--on <machine>|--all] [--force]
 #                     whether a workspace can push to git at all (`status`,
 #                     the default, asks). Only the person at the keyboard
 #                     pushes: an agent in a workspace cannot publish anything,
@@ -131,7 +131,7 @@
 #                     reach; `status` says ON while any holds a key. It runs on
 #                     this machine (where=local), a build box included, and
 #                     `wk ai claude` turns it off before handing over control.
-#                       --target <machine>   ask that fleet machine, through its
+#                       --on <machine>   ask that fleet machine, through its
 #                                            own wk. A build box holds no deploy
 #                                            key (`wk enter` forwards this
 #                                            machine's agent), so it reports off
@@ -145,7 +145,7 @@
 #                     podman machine, `on`/`off` switched its half and not the
 #                     host's guests'); 4 no deploy keys here at all; 5 no
 #                     switch here: no key, or one live at rest
-#   wk key sudo [status|setup] [--target <t>|--all]
+#   wk key sudo [status|setup] [--on <machine>|--all]
 #                     make root cost a password, on a short leash: no blanket
 #                     NOPASSWD, and a 30-second cached-credential window
 #                     (WK_SUDO_TIMEOUT_MIN, in minutes), from one drop-in,
@@ -158,7 +158,7 @@
 #                     installing, then clears the timestamp and checks that sudo
 #                     asks. Exits 0 when a password is required and the window
 #                     is 30 seconds or less, 1 otherwise
-#                       --target <t>  the same, on a configured machine
+#                       --on <machine>  the same, on a configured machine
 #                       --all         every configured machine's, and this
 #                                     one's status
 #   wk key backup [--candidates]
@@ -170,7 +170,7 @@
 #                     host/linux/config.dconf, filtered of machine-specific and
 #                     secret entries, its leading comment block kept. Only
 #                     deliberate choices are captured, never a credential. Each
-#                     write is a tmp file beside the target, then `mv`
+#                     write is a tmp file beside the destination, then `mv`
 #                       --candidates  macOS only, read-only: every `defaults`
 #                                     value that differs from Apple's default
 #                                     and is not in defaults.conf yet, minus
@@ -191,7 +191,7 @@
 #
 # A shared build machine holds no key at all: it reaches the deploy key through
 # an ssh-agent forwarded from the workstation that drives it, so nothing private
-# rests on a machine other people are root on (remote/provision.sh, lib/wk/targets.py's Remote).
+# rests on a machine other people are root on (remote/provision.sh, lib/wk/places.py's Remote).
 # Registration goes through the GitHub API, which takes the title, key and
 # read_only=false directly.
 #
@@ -242,17 +242,17 @@ from wk.key import cli  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import Local, is_macos  # noqa: E402
-from wk.targets import Registry  # noqa: E402
+from wk.places import Registry  # noqa: E402
 
 
-def push_target(args):
-    """The last of --target <machine> and --all as typed, or ""."""
-    named = {"--all": "--all" if args.flag("--all") else None, "--target": args.value("--target")}
-    target = ""
+def push_on(args):
+    """The last of --on <machine> and --all as typed, or ""."""
+    named = {"--all": "--all" if args.flag("--all") else None, "--on": args.value("--on")}
+    on = ""
     for opt in args.order:
         if named.get(opt) is not None:
-            target = named[opt]
-    return target
+            on = named[opt]
+    return on
 
 
 def main(argv, env=None, reg=None, machine=None, macos=None, clock=None, out=None):
@@ -260,10 +260,10 @@ def main(argv, env=None, reg=None, machine=None, macos=None, clock=None, out=Non
     words = args.positionals
     verb = words[0]
     if verb == "push":
-        return pushswitch.main(ROOT, words[1:], push_target(args), reg or Registry(ROOT, os.environ if env is None else env),
+        return pushswitch.main(ROOT, words[1:], push_on(args), reg or Registry(ROOT, os.environ if env is None else env),
                                clock or Clock(), out)
     if verb == "sudo":
-        return sudo.main(words[1:], args.value("--target"), args.flag("--all"),
+        return sudo.main(words[1:], args.value("--on"), args.flag("--all"),
                          reg or Registry(ROOT, os.environ if env is None else env, Local()), env=env)
     if verb == "backup":
         return backup.main(ROOT, args.flag("--candidates"), machine or Local(), is_macos() if macos is None else macos)

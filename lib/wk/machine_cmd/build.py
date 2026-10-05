@@ -6,7 +6,7 @@ import re
 import shlex
 import sys
 
-from wk import act, secrets, sudo, targets
+from wk import act, places, secrets, sudo
 from wk.act import die, info, log, warn
 from wk.kv import kv
 from wk.machine_cmd.deps import Deps, inputs_hash, probe, said
@@ -49,7 +49,7 @@ class BuildMachines:
         act.nothing_to_ask()
         self.write_conf(name, path, new, "peer")
         info("%s is a peer: its workspaces are its own, and it is asked for them" % name)
-        log("  from here:  wk new <ws> --target %s" % name)
+        log("  from here:  wk new <ws> --on %s" % name)
         return 0
 
     def setup_build(self, name, t, path, new):
@@ -93,7 +93,7 @@ class BuildMachines:
         info("pushing wk-tools to %s" % tools)
         if not t.sync_tools(""):
             die("nothing was changed on %s: it has no wk-tools to provision from" % host)
-        q = ["WK_REMOTE_TARGET=" + name, "WK_REMOTE_ROOT=" + t.root_there(), "WK_REMOTE_REFERENCE=" + ref,
+        q = ["WK_REMOTE_MACHINE=" + name, "WK_REMOTE_ROOT=" + t.root_there(), "WK_REMOTE_REFERENCE=" + ref,
              "WK_REMOTE_INPUTS=" + inputs_hash(self.root)]
         if not said(t._far().act_run(["env"] + q + ["bash", tools + "/remote/provision.sh"])).ok:
             die("remote/provision.sh failed on %s; what it said is above. Re-run 'wk machine setup %s' once it is fixed." % (host, name))
@@ -105,15 +105,15 @@ class BuildMachines:
         if rc != 0:
             warn(verdict)
             act.barrier("sudo on '%s' grants root without a password, and this machine\n"
-                        "    runs unattended builds. 'wk key sudo setup --target %s' fixes it in one\n"
+                        "    runs unattended builds. 'wk key sudo setup --on %s' fixes it in one\n"
                         "    file that no sysadmin has to approve." % (name, name))
         self.install_dependencies(t, host, name, ref)
         for d, _size, _why in rubble if clean else ():
             if t._far().act_run(["rm", "-rf", d]).ok:
                 info("removed %s" % d)
         info("%s is ready" % name)
-        log("  from here:   wk new <ws> --target %s" % name)
-        log("  on the box:  ssh %s, then wk ls / wk build <ws> <config>" % host)
+        log("  from here:   wk new <ws> --on %s" % name)
+        log("  on the box:  ssh %s, then wk ls / wk build <ws> <preset>" % host)
         return 0
 
     def size(self, t, path):
@@ -172,7 +172,7 @@ class BuildMachines:
         if not src:
             t._mirror_update(t.root_there())
             src = t.mirror_dir()
-        dirs = "Tools/gtk" + (" Tools/wpe" if t.env.get("WK_TARGET_WPE") else "")
+        dirs = "Tools/gtk" + (" Tools/wpe" if t.env.get("WK_REMOTE_WPE") else "")
         script = ('set -e; tmp=$(mktemp -d); trap \'rm -rf "$tmp"\' 0\n'
                   'git -C %s archive main -- %s | tar -x -C "$tmp"\n'
                   'for d in %s; do "$tmp/$d/install-dependencies"; done' % (shlex.quote(src), dirs, dirs))
@@ -184,8 +184,8 @@ class BuildMachines:
         else:
             warn("Tools/*/install-dependencies failed on %s -- re-run 'wk machine setup %s' once it's fixed" % (host, name))
 
-    def rm_target(self, name, conf, path):
-        t = self.target(name, conf)
+    def rm_machine(self, name, conf, path):
+        t = self.driver(name, conf)
         if t.peer:
             if not act.confirm("forget the peer '%s' (%s)? Its workspaces stay its own." % (name, self.rel(path))):
                 die("aborted -- nothing was changed")
@@ -215,7 +215,7 @@ class BuildMachines:
         for rc in r.out.split():
             info("removed the wk-tools line from %s" % rc)
         if not r.ok:
-            die("could not deprovision %s: %s" % (t.label(), targets.ssh_last_word(r)))
+            die("could not deprovision %s: %s" % (t.label(), places.ssh_last_word(r)))
         info("removed the marker from %s" % t.label())
         if there and t._far().act_run(["rm", "-rf", root]).ok:
             info("removed %s" % root)

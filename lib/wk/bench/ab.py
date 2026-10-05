@@ -27,7 +27,7 @@ USAGE = ("usage: wk bench ab <pr-spec|branch|sha> --devices <a,b> [--release X.Y
          "       wk bench ab --devices <mac> --systems A,B | --patch <ref|diff> [--base <ref>] --workspace <ws> ...\n"
          "       wk bench ab <task> --kill; see wk bench -h")
 BUILD_ONLY = ("release", "builder", "bits", "base", "build_on")
-MAC_ONLY = ("patch", "config", "settle", "a_args", "b_args", "plant", "rehearse", "allow_network_fetch",
+MAC_ONLY = ("patch", "preset", "settle", "a_args", "b_args", "plant", "rehearse", "allow_network_fetch",
             "preflight", "progress", "status", "collect")
 
 
@@ -41,7 +41,7 @@ def legs_per_plan(rounds, systems):
 
 
 def leg_seconds(reg, homes, device, plan, count):
-    """Seconds at `count` of every measured leg of `plan` on `device` in the tasks of `homes` ((workspace, target) pairs): a leg at
+    """Seconds at `count` of every measured leg of `plan` on `device` in the tasks of `homes` ((workspace, place) pairs): a leg at
     another count scales by the ratio, and one at the plan's own default count stands only for that default."""
     out = []
     for m, bench in (record.ws_home(reg, *h) for h in dict.fromkeys(homes)):
@@ -224,7 +224,7 @@ class AB:
             return self.o["release"]
         m = RELEASE_OF.match(self.pr_base_branch())
         if not m:
-            die("pull request %s targets '%s', which names no release.\n    Say which image to measure on: --release 2.38 "
+            die("pull request %s is against '%s', which names no release.\n    Say which image to measure on: --release 2.38 "
                 "(wk sysimage configs)" % (self.pr["n"], self.pr_base_branch()))
         return m.group(2)
 
@@ -324,28 +324,28 @@ class AB:
             ws = images.image_ws(d.profile, self.env)
             for named in on:
                 try:
-                    where = images.ws_machine(named, "" if named else self.reg.ws_target(ws), self.me)
+                    where = images.ws_machine(named, "" if named else self.reg.ws_place(ws), self.me)
                 except LookupError as e:
                     die(str(e))
-                target = named if named and named != self.me else ""
-                d.arm_ws.append((ws, "%s@%s" % (d.profile, named) if named else d.profile, where, target))
+                place = named if named and named != self.me else ""
+                d.arm_ws.append((ws, "%s@%s" % (d.profile, named) if named else d.profile, where, place))
 
     def holds(self, spec, ws, *rest):
         return sched.wk_yes(self.here, [self.wk, "sysimage", "holds", spec, "--workspace", ws] + list(rest))
 
-    def wk_step(self, sid, on, needs, holds, done, words, target=""):
+    def wk_step(self, sid, on, needs, holds, done, words, place=""):
         self.logged.add(sid)
         return sched.wk_step(self.here, self.wk, lambda s: os.path.join(self.logdir(), sched.log_name(s)), sid, on, needs, holds,
-                             done, words, target, env=["WK_TASK_HELD=" + self.task] if self.task else [])
+                             done, words, place, env=["WK_TASK_HELD=" + self.task] if self.task else [])
 
-    def pgo_steps(self, d, ws, spec, on, target, commit, slot, need):
-        return pgo.steps(self.wk_step, self.holds, d.name, ws, spec, on, target, commit, slot, (need,))
+    def pgo_steps(self, d, ws, spec, on, place, commit, slot, need):
+        return pgo.steps(self.wk_step, self.holds, d.name, ws, spec, on, place, commit, slot, (need,))
 
     def build_steps(self, d, imaged):
         out = []
         for a, (_, slot) in enumerate(self.arms):
             commit = self.head if a else self.base
-            ws, spec, on, target = d.arm_ws[a]
+            ws, spec, on, place = d.arm_ws[a]
             key, res = "%s@%s" % (ws, on), images.build_resource(on)
             built = ("toolchain:" if d.sdk else "image:") + key
             if key not in imaged:
@@ -356,23 +356,23 @@ class AB:
                     out.append(self.wk_step("toolchain:" + key, on, ("image:" + key,), (res,), self.holds(spec, ws, "--toolchain"),
                                             ["sysimage", "build", spec, "--workspace", ws, "--stage", "toolchain"]))
             if d.pgo:
-                out += self.pgo_steps(d, ws, spec, on, target, commit, slot, built)
+                out += self.pgo_steps(d, ws, spec, on, place, commit, slot, built)
             else:
                 out.append(self.wk_step("slot:%s:%s" % (ws, slot), on, (built,), (res,), self.holds(spec, ws, "--slot", slot, "--commit", commit),
                                         ["sysimage", "webkit", spec, "--workspace", ws, "--commit", commit, "--slot", slot]))
             out.append(self.wk_step("deploy:%s:%s" % (d.name, slot), on, ("slot:%s:%s" % (ws, slot),), ("device:" + d.name,), None,
-                                    ["bench", "deploy", ws, d.name, "--slot", slot], target))
+                                    ["bench", "deploy", ws, d.name, "--slot", slot], place))
         return out
 
     def home(self):
-        """(workspace, target) the task lives in: a --systems A/B's --workspace, else the first device's base image workspace."""
+        """(workspace, place) the task lives in: a --systems A/B's --workspace, else the first device's base image workspace."""
         if self.systems:
             return self.o["workspace"], ""
-        ws, _, _, target = self.devices[0].arm_ws[0]
-        return ws, target
+        ws, _, _, place = self.devices[0].arm_ws[0]
+        return ws, place
 
     def cost_homes(self):
-        return [self.home()] + [(ws, target) for d in self.devices for ws, _, _, target in d.arm_ws]
+        return [self.home()] + [(ws, place) for d in self.devices for ws, _, _, place in d.arm_ws]
 
     def logdir(self):
         return record.driver_logs(self.store, self.task)
@@ -408,10 +408,10 @@ class AB:
         out.append(self.task_step())
         for d in self.devices:
             needs = ("task",) + (() if self.systems else tuple("deploy:%s:%s" % (d.name, s) for _, s in self.arms))
-            on, target = (self.me, "") if self.systems else d.arm_ws[0][2:]
+            on, place = (self.me, "") if self.systems else d.arm_ws[0][2:]
             for plan in self.plans:
                 benches.append("bench:%s:%s" % (d.name, plan))
-                out.append(self.wk_step(benches[-1], on, needs, ("device:" + d.name,), None, self.bench_words(d, plan), target))
+                out.append(self.wk_step(benches[-1], on, needs, ("device:" + d.name,), None, self.bench_words(d, plan), place))
         out.append(self.wk_step("report", self.me, benches, (), None, ["bench", "report", self.task or "<task>", "--html", "--text"]))
         return sched.validate(out)
 

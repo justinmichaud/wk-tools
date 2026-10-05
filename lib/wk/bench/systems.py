@@ -7,7 +7,7 @@ import os
 import plistlib
 import shlex
 
-from wk import buildconf, fleet
+from wk import fleet, presets
 from wk.act import die
 from wk.resources import Resources
 from wk.session import Session
@@ -63,26 +63,26 @@ class System:
     bench_host = ""
     host_os = ""
 
-    def __init__(self, root, reg, target, ws, clock):
-        self.root, self.reg, self.target, self.ws, self.clock = str(root), reg, target, ws, clock
+    def __init__(self, root, reg, driver, ws, clock):
+        self.root, self.reg, self.ws_driver, self.ws, self.clock = str(root), reg, driver, ws, clock
         self.here = reg.machine
 
     def boot(self):
-        if self.target.info(self.ws) in ("absent", "unreachable"):
+        if self.ws_driver.info(self.ws) in ("absent", "unreachable"):
             die(no_such_workspace(self.ws))
 
     def deploy(self, leg):
         raise NotImplementedError
 
     def run(self, leg, script, watched, log):
-        argv, cwd = self.target.exec_argv(self.ws, ["bash", "-lc", script])
+        argv, cwd = self.ws_driver.exec_argv(self.ws, ["bash", "-lc", script])
         return watched(argv, cwd, log)
 
     def collect(self, leg):
         raise NotImplementedError
 
     def src(self):
-        return self.target.src(self.ws)
+        return self.ws_driver.src(self.ws)
 
     def build_dir(self, leg):
         return leg.cfg.build_dir(self.src())
@@ -91,10 +91,10 @@ class System:
         return []
 
     def exec_ok(self, *argv):
-        return self.target.exec(self.ws, list(argv)).ok
+        return self.ws_driver.exec(self.ws, list(argv)).ok
 
     def sha(self):
-        return first_line(self.target.exec(self.ws, ["git", "-C", self.src(), "rev-parse", "HEAD"]))
+        return first_line(self.ws_driver.exec(self.ws, ["git", "-C", self.src(), "rev-parse", "HEAD"]))
 
     def build_present(self, leg):
         build = leg.cfg.build_dir(self.src())
@@ -106,8 +106,8 @@ class System:
         return False, "no MiniBrowser in %s -- wk build %s %s" % (build, self.ws, leg.cfg.name)
 
     def link(self, path, link):
-        self.target.act_exec(self.ws, ["mkdir", "-p", os.path.dirname(link)])
-        self.target.act_exec(self.ws, ["ln", "-sf", path, link])
+        self.ws_driver.act_exec(self.ws, ["mkdir", "-p", os.path.dirname(link)])
+        self.ws_driver.act_exec(self.ws, ["ln", "-sf", path, link])
 
 
 class ContainerSystem(System):
@@ -117,8 +117,8 @@ class ContainerSystem(System):
     bench_host = "container"
     host_os = "linux"
 
-    def __init__(self, root, reg, target, ws, clock):
-        super().__init__(root, reg, target, ws, clock)
+    def __init__(self, root, reg, driver, ws, clock):
+        super().__init__(root, reg, driver, ws, clock)
         self.session = Session(self.root, self.here, clock, reg.env)
         self.renderer, self.mode = "", None
 
@@ -129,7 +129,7 @@ class ContainerSystem(System):
         return "setarch $(uname -m) -R -- "
 
     def has_gpu(self, arch):
-        return buildconf.arch_has_gpu(arch)
+        return presets.arch_has_gpu(arch)
 
     def session_mode(self):
         if self.mode is None:
@@ -154,7 +154,7 @@ class ContainerSystem(System):
         return [build + "/bin/MiniBrowser", build + "/bin/WPEWebProcess"]
 
     def run_dir(self, leg):
-        return os.path.join("/var/lib/wk/ws", self.ws, os.path.relpath(leg.out, self.target.store.ws_dir(self.ws)))
+        return os.path.join("/var/lib/wk/ws", self.ws, os.path.relpath(leg.out, self.ws_driver.store.ws_dir(self.ws)))
 
     def payload_dir(self, leg):
         return "/cache/bench/" + os.path.basename(leg.payload) if leg.payload else ""
@@ -275,7 +275,7 @@ class GuestSystem(System):
         return [leg.cfg.browser_path(self.src())]
 
     def home(self):
-        return os.path.join(self.target.home(), self.ROOT)
+        return os.path.join(self.ws_driver.home(), self.ROOT)
 
     def run_dir(self, leg):
         return os.path.join(self.home(), leg.rel)
@@ -292,7 +292,7 @@ class GuestSystem(System):
     def deploy(self, leg):
         """The pinned payload, copied in: the guest cannot see this store."""
         if leg.payload:
-            self.target.push_dir(self.ws, leg.payload, self.payload_dir(leg))
+            self.ws_driver.push_dir(self.ws, leg.payload, self.payload_dir(leg))
 
     def run(self, leg, script, watched, log):
         """The run directory is made by the run itself, so a dry run shows it in the line it prints."""
@@ -300,7 +300,7 @@ class GuestSystem(System):
 
     def collect(self, leg):
         if leg.runner == "browser":
-            self.target.pull(self.ws, os.path.join(self.run_dir(leg), "result.json"), os.path.join(leg.out, "result.json"))
+            self.ws_driver.pull(self.ws, os.path.join(self.run_dir(leg), "result.json"), os.path.join(leg.out, "result.json"))
 
     def checks(self, leg):
         if leg.runner != "browser":
@@ -310,14 +310,14 @@ class GuestSystem(System):
                 (False, "python with PyObjC", "the guest's python3 cannot 'import objc'; run-benchmark's driver needs it")], []
 
     def sysctl(self, key):
-        return first_line(self.target.exec(self.ws, ["sysctl", "-n", key]))
+        return first_line(self.ws_driver.exec(self.ws, ["sysctl", "-n", key]))
 
     def facts(self, leg):
         """host.cores is the guest's vCPU count, which is what its cores are held to."""
         return ["host.model=" + self.sysctl("hw.model"), "host.cores=" + self.sysctl("hw.ncpu"),
-                "host.macos=" + first_line(self.target.exec(self.ws, ["sw_vers", "-productVersion"])),
-                "host.kernel_arch=" + first_line(self.target.exec(self.ws, ["uname", "-m"])),
-                "host.root_device=" + root_device(lambda a: self.target.exec(self.ws, a), None, self.target.home(), True)]
+                "host.macos=" + first_line(self.ws_driver.exec(self.ws, ["sw_vers", "-productVersion"])),
+                "host.kernel_arch=" + first_line(self.ws_driver.exec(self.ws, ["uname", "-m"])),
+                "host.root_device=" + root_device(lambda a: self.ws_driver.exec(self.ws, a), None, self.ws_driver.home(), True)]
 
 
 SYSTEMS = {"container": ContainerSystem, "vm": GuestSystem}
@@ -325,19 +325,19 @@ SYSTEMS = {"container": ContainerSystem, "vm": GuestSystem}
 
 def for_workspace(root, reg, ws, clock, system_name=""):
     try:
-        target = reg.load(reg.ws_target(ws))
+        driver = reg.load(reg.ws_place(ws))
     except LookupError as e:
         die(str(e))
     if system_name:
         conf = fleet.Fleet(root, reg.env).load(system_name)
         if conf and conf.get("kind") == "board":
             from wk.bench import board
-            return board.for_board(root, reg, ws, clock, system_name, target=target)
+            return board.for_board(root, reg, ws, clock, system_name, ws_driver=driver)
         die("--system '%s' names no board in machines/ (wk boot --list).\n"
             "    The Mac's bench volume measures from the install itself:  wk bench staged" % system_name)
-    cls = SYSTEMS.get(target.kind)
+    cls = SYSTEMS.get(driver.kind)
     if cls is None:
-        die("wk bench run measures a container workspace or a macOS guest; '%s' is on target '%s' (%s).\n"
-            "    A board is measured with --system <machine>." % (ws, target.name, target.kind))
-    return cls(root, reg, target, ws, clock)
+        die("wk bench run measures a container workspace or a macOS guest; '%s' is on place '%s' (%s).\n"
+            "    A board is measured with --system <machine>." % (ws, driver.name, driver.kind))
+    return cls(root, reg, driver, ws, clock)
 

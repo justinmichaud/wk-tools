@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
-# wk sync [<workspace>|--mirror|--target <t>|--all|--tools [<t>]] [--fix] -- bring WebKit and the tooling up to date
-# wk: where=dynamic name=optional group=sources needs git dryrun opts --all,--target=,--tools,--mirror,--fix broker --mirror
+# wk sync [<workspace>|--mirror|--on <place|machine>|--all|--tools [<place|machine>]] [--fix] -- bring WebKit and the tooling up to date
+# wk: where=dynamic name=optional group=sources needs git dryrun opts --all,--on=,--tools,--mirror,--fix broker --mirror
 #
 # A fetch, and never a checkout: no branch is switched, merged or rebased, here
 # or in a workspace. Safe to run at any time -- workspaces already made stay
@@ -22,11 +22,13 @@
 #                              it is asked of the broker the same way.
 #                              On a Mac, a refresh that moves a ref remounts
 #                              the mirror share in each running guest.
-#   wk sync --target <target>  that target's furniture, then its workspaces
-#   wk sync --all              every target's furniture, then its workspaces
-#   wk sync --tools [<target>] the furniture alone: a machine's copy of
+#   wk sync --on <place|machine>
+#                              that one's furniture, then its workspaces
+#   wk sync --all              every place's furniture, then its workspaces
+#   wk sync --tools [<place|machine>]
+#                              the furniture alone: a machine's copy of
 #                              wk-tools, its WebKit mirror, and a new snapshot.
-#                              One target's, or all.
+#                              One place's, or all.
 #
 # Each fetch also reads the checkout's wiring back: `origin` is upstream
 # (fetch-only, push URL `no-push://`), each fork pushes over ssh through its
@@ -55,18 +57,18 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, sync, targets, workspace  # noqa: E402
+from wk import decl, places, sync, workspace  # noqa: E402
 from wk.act import Refused, die  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 
-USAGE = "usage: wk sync [<workspace>|--mirror|--target <target>|--all|--tools [<target>]] [--fix]"
+USAGE = "usage: wk sync [<workspace>|--mirror|--on <place|machine>|--all|--tools [<place|machine>]] [--fix]"
 
 
 def parse(argv, name=""):
-    """(scope, the workspace named, the target named, --fix): ws | here | target | all | tools | mirror."""
+    """(scope, the workspace named, the place named, --fix): ws | here | place | all | tools | mirror."""
     args = decl.Args(decl.Decl(__file__), argv)
-    scope, spelled, target = "", "", ""
+    scope, spelled, place = "", "", ""
 
     def set_scope(s, as_typed):
         nonlocal scope, spelled
@@ -74,20 +76,20 @@ def parse(argv, name=""):
             die("%s and %s ask for different things -- one at a time.\n    %s" % (spelled, as_typed, USAGE))
         scope, spelled = s, as_typed
 
-    values = args.values("--target")
+    values = args.values("--on")
     if len(values) > 1:
-        die("one target at a time (got '%s' and '%s')" % (values[0], values[1]))
+        die("one place at a time (got '%s' and '%s')" % (values[0], values[1]))
     if values:
-        target = values[0]
+        place = values[0]
     tools = args.flag("--tools")
 
     positionals = list(args.positionals)
     if tools and positionals:
-        target = positionals.pop(0)
+        place = positionals.pop(0)
 
     scope_named = {"--all": "all" if args.flag("--all") else None,
                   "--mirror": "mirror" if args.flag("--mirror") else None,
-                  "--target": "target" if values else None, "--tools": "tools" if tools else None}
+                  "--on": "place" if values else None, "--tools": "tools" if tools else None}
     for opt in args.order:   # two scopes are refused in the order they were typed
         named = scope_named.get(opt)
         if named is not None:
@@ -98,17 +100,17 @@ def parse(argv, name=""):
         name = positionals[0]
     if name:
         set_scope("ws", "'%s'" % name)
-    return scope or "here", name, target, args.flag("--fix")
+    return scope or "here", name, place, args.flag("--fix")
 
 
 def main(argv):
-    reg = targets.Registry(ROOT)
+    reg = places.Registry(ROOT)
     if argv[:1] == ["--where"]:
         print(sync.where(reg.in_workspace(), argv[1:]))
         return 0
-    scope, name, target, fix = parse(argv, store.ws_name())
+    scope, name, place, fix = parse(argv, store.ws_name())
     clock = Clock()
-    return sync.Sync(reg, clock, Lock(reg.store, reg.machine, clock), scope, name, target, fix).run()
+    return sync.Sync(reg, clock, Lock(reg.store, reg.machine, clock), scope, name, place, fix).run()
 
 
 if __name__ == "__main__":

@@ -11,13 +11,13 @@ from pathlib import Path
 from tests.support import REPO, WkTest, fake_workspace, run, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import fleet, targets  # noqa: E402
+from wk import fleet, places  # noqa: E402
 from wk.boot.driver import Driver  # noqa: E402
 
 
 class TestHostState(WkTest):
     def test_no_host_marker_on_the_host(self):
-        if targets.Registry(REPO).in_workspace():
+        if places.Registry(REPO).in_workspace():
             self.skipTest("this machine is a workspace")
         self.assertFalse(
             (Path.home() / ".wk-workspace").exists(),
@@ -47,18 +47,18 @@ class TestCommandsWithoutAMachine(WkTest):
 
 class TestResolveWithoutABuild(WkTest):
     @unittest.skipUnless(platform.system() == "Darwin",
-                         "a mac-* config is refused off an Apple host")
+                         "a mac-* preset is refused off an Apple host")
     def test_wk_profile_composes_the_apple_port_environment(self):
         with fake_workspace() as ws:
             bad = []
-            cp = ws.run("run", "--profile", "--config", "mac-release", "--dry-run", "bench.js")
+            cp = ws.run("run", "--profile", "--preset", "mac-release", "--dry-run", "bench.js")
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             if "DYLD_FRAMEWORK_PATH" not in cp.stdout:
                 bad.append("no-dyld")
             if not re.search(r"/jsc.* --sample.* .?bench\.js", cp.stdout):
                 bad.append("flags-after-script")
 
-            cp = ws.run("run", "--config", "mac-release", "--profile=native", "--dry-run", "bench.js")
+            cp = ws.run("run", "--preset", "mac-release", "--profile=native", "--dry-run", "bench.js")
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             if "xctrace record" not in cp.stdout:
                 bad.append("native-is-not-xctrace")
@@ -67,7 +67,7 @@ class TestResolveWithoutABuild(WkTest):
     def test_wk_profile_composes_the_right_environment(self):
         with fake_workspace() as ws:
             bad = []
-            cp = ws.run("run", "--config", "wpe-release", "--profile=native", "--dry-run", "bench.js")
+            cp = ws.run("run", "--preset", "wpe-release", "--profile=native", "--dry-run", "bench.js")
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             if "LD_LIBRARY_PATH" not in cp.stdout:
                 bad.append("no-ld-library-path")
@@ -170,7 +170,7 @@ print("OK")
             self.fail(f"the policy would not load: {out}")
         if "FLEET" in out:
             self.skipTest(f"no fleet to test against: {out}")
-        self.assertIn("OK", out, f"a workstation was not refused as a bench device: {out}")
+        self.assertIn("OK", out, f"a workstation was not refused as a bench machine: {out}")
 
     def test_broker_plan_allowlist_is_closed(self):
         cp = _broker_policy('''
@@ -261,7 +261,7 @@ class TestHandsOnArmingAndBench(WkTest):
         stage = self.tmp / "bench" / "staged" / "20260101T000000Z-mac-release"
         (stage / "Tools" / "Scripts").mkdir(parents=True)
         (stage / "WebKitBuild" / "Release" / "MiniBrowser.app" / "Contents" / "MacOS").mkdir(parents=True)
-        (stage / "stage.json").write_text('{"config":"mac-release","plans":"jetstream2.2"}')
+        (stage / "stage.json").write_text('{"preset":"mac-release","plans":"jetstream2.2"}')
 
         cp2 = run("bench", "staged", "--plan", "jetstream2.2", "--force", env={"WK_BENCH_ROOT": str(self.tmp / "bench")})
         self.assertNotEqual(cp2.returncode, 0, "--force ran a benchmark in host mode")

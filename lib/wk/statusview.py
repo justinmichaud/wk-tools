@@ -177,8 +177,8 @@ def severity(word):
 
 def sub_text(sub):
     out = "%s=%s" % (sub.get("kind", "?"), sub.get("state", "?"))
-    if sub.get("config"):
-        out += " (%s)" % sub["config"]
+    if sub.get("preset"):
+        out += " (%s)" % sub["preset"]
     return out
 
 
@@ -838,8 +838,8 @@ function tiles(m) {
       continue;
     }
     const hue = loadHue(c.load, c.cores), pct = (parseFloat(c.load) / parseInt(c.cores,10)) * 100;
-    // A remote target's free memory has no total beside it (t_mem_mb there
-    // is MemAvailable, not a size, lib/wk/targets.py's Remote) -- print one only when
+    // A remote place's free memory has no total beside it (t_mem_mb there
+    // is MemAvailable, not a size, lib/wk/places.py's Remote) -- print one only when
     // there is one.
     const free = c.mem_mb ? `${GB(c.free_mb)} free of ${GB(c.mem_mb)}` : `${GB(c.free_mb)} free`;
     t.push(tile(label,
@@ -1075,10 +1075,10 @@ def page(doc, live):
 
 
 def write_page(doc, out):
-    target = out or os.path.join(os.environ.get("TMPDIR", "/tmp"), "wk-status.html")
-    with open(target, "w", encoding="utf-8") as fh:
+    dest = out or os.path.join(os.environ.get("TMPDIR", "/tmp"), "wk-status.html")
+    with open(dest, "w", encoding="utf-8") as fh:
         fh.write(page(doc, live=False))
-    return target
+    return dest
 
 
 class Live:

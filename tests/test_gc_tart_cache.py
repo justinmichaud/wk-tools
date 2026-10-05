@@ -1,5 +1,5 @@
 """`wk gc` prunes tart's pulled-image cache to its budget (caches only), and names the golden base with the command
-that erases it. Over tests/test_owed_gc.py's fake machine and vm target."""
+that erases it. Over tests/test_owed_gc.py's fake machine and vm place."""
 import unittest
 
 from tests.test_owed_gc import FakeVm, GcTest, _seed

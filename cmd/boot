@@ -34,7 +34,7 @@ ROOT = images.root()
 from wk import act, decl  # noqa: E402
 from wk.act import Refused, die  # noqa: E402
 from wk.boot import cli, eeprom, pi  # noqa: E402
-from wk.targets import Registry  # noqa: E402
+from wk.places import Registry  # noqa: E402
 
 USAGE = "usage: wk boot <machine> [options]; see wk boot -h"
 

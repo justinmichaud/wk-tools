@@ -196,39 +196,39 @@ class Sudo:
         return 0
 
 
-def machine_answers(target, name):
-    """One probe: whether `target` answers at all, printing the fan-out row when it does not."""
-    side, why = target.probe()
+def machine_answers(driver, name):
+    """One probe: whether `place` answers at all, printing the fan-out row when it does not."""
+    side, why = driver.probe()
     if side == "answering":
         return True
-    sys.stdout.write("%-22s %s\n" % (name, status.far_side_reason(target, side, why)))
+    sys.stdout.write("%-22s %s\n" % (name, status.far_side_reason(driver, side, why)))
     return False
 
 
-def wk_tty(target, *args, env=None):
+def wk_tty(driver, *args, env=None):
     """With a terminal, for far-side commands that prompt a human -- 'wk key sudo setup' over ssh -t."""
     env = os.environ if env is None else env
-    return target.machine.run_tty(["sh", "-c", target.wk_cmd(list(args), env)]).rc
+    return driver.machine.run_tty(["sh", "-c", driver.wk_cmd(list(args), env)]).rc
 
 
-def on_target(reg, action, name, env):
+def on_machine(reg, action, name, env):
     try:
-        target = reg.load(name)
+        driver = reg.load(name)
     except LookupError as e:
         die(str(e))
-    if not machine_answers(target, name):
+    if not machine_answers(driver, name):
         return 1
     if action == "setup":
-        return wk_tty(target, "key", "sudo", "setup", env=env)
-    rc, out = target.wk("key", "sudo", "status", "--quiet", env=env)
+        return wk_tty(driver, "key", "sudo", "setup", env=env)
+    rc, out = driver.wk("key", "sudo", "status", "--quiet", env=env)
     sys.stdout.write("%-22s %s\n" % (name, out.strip()))
     if rc != 0:
-        log("  fix: wk key sudo setup --target %s" % name)
+        log("  fix: wk key sudo setup --on %s" % name)
     return rc
 
 
 def all_machines(reg, action, env):
-    """This machine's own status whatever `action` is (only a bare or --target setup sets a machine up), then `action`
+    """This machine's own status whatever `action` is (only a bare or --on setup sets a machine up), then `action`
     on every other one."""
     rc, v = Sudo(reg.machine, env).verdict()
     sys.stdout.write("%-22s %s\n" % (record.host_name(reg.machine), v))
@@ -236,7 +236,7 @@ def all_machines(reg, action, env):
         log("  fix: wk key sudo setup")
     worst = rc
     for name in reg.machines():
-        worst = max(worst, on_target(reg, action, name, env))
+        worst = max(worst, on_machine(reg, action, name, env))
     return worst
 
 
@@ -252,9 +252,9 @@ def status_here(sudo, env):
     return rc
 
 
-def main(words, target, all_flag, reg, env=None):
-    """`wk key sudo [status|setup] [--target <t>|--all]`: `words` are the positionals after `sudo`, `target` is None
-    when --target was not given."""
+def main(words, on, all_flag, reg, env=None):
+    """`wk key sudo [status|setup] [--on <machine>|--all]`: `words` are the positionals after `sudo`, `on` is None
+    when --on was not given."""
     env = os.environ if env is None else env
     if reg.in_workspace():
         die("'wk key sudo' hardens a machine you log into, and this is workspace\n"
@@ -263,10 +263,10 @@ def main(words, target, all_flag, reg, env=None):
     action = words[0] if words else "status"
     if action not in ("status", "setup"):
         die("'%s' is not a verb of wk key sudo: status or setup; see wk key -h" % action)
-    if target == "":
-        die("--target needs a name")
-    if target:
-        return on_target(reg, action, target, env)
+    if on == "":
+        die("--on needs a name")
+    if on:
+        return on_machine(reg, action, on, env)
     if all_flag:
         return all_machines(reg, action, env)
     sudo = Sudo(reg.machine, env)

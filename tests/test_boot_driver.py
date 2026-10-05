@@ -86,7 +86,7 @@ class Conformance:
 
     def test_the_production_transport_is_machines_and_no_bash(self):
         """machine.conformance[<kind>] over wk.machine.Fake: the driver as `wk boot` builds it reaches its machine
-        through Machine.run alone -- ssh, or the vm target for a guest -- and never through a shell library."""
+        through Machine.run alone -- ssh, or the vm place for a guest -- and never through a shell library."""
         via = Fake()
         conf = conf_for(self.kind) if self.kind not in FAKES else mac_conf(self.kind)
         d = open_driver(REPO, conf, env={"HOME": "/nonexistent", "WK_MACHINES_DIR": str(REPO / "machines")}, via=via)
@@ -94,7 +94,7 @@ class Conformance:
             quiet(getattr(d, verb))
         ran = [e[1] for e in via.effects if e[0] in ("run", "run_tty")]
         if self.kind == "mac-guest":
-            self.assertIs(d.ch.vm().machine, via, "a guest is reached through the vm target, over the same machine")
+            self.assertIs(d.ch.vm().machine, via, "a guest is reached through the vm place, over the same machine")
         else:
             self.assertTrue(ran, "the driver reached nothing")
         for argv in ran:
@@ -168,7 +168,7 @@ class Conformance:
         """boot.arming_exact: a failsafe lives outside the script it guards."""
         cls = DRIVERS[self.kind]
         if self.kind in FAKES:
-            # A volume's return is its bench job's hand-back, a guest's is being stopped.
+            # A volume's return is its bench task's hand-back, a guest's is being stopped.
             self.assertIsNone(cls.failsafe)
             self.assertIn(cls.arming, ("command", "guest"))
             self.assertIsNone(board(self.kind)[1].self_disarm_sh())

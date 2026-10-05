@@ -5,7 +5,7 @@ import os
 import shlex
 import time
 
-from wk import buildconf, images, store, targets
+from wk import images, places, presets, store
 from wk.act import Refused, die, dry_run, info, log, warn
 from wk.ldpath import perf_events, prelude, require_tool
 from wk.store import Store
@@ -98,7 +98,7 @@ def browser_target(cfg, url, process, process_explicit, mode, args, outdir):
         proc_name = {"web": cfg.web_process_name(), "network": cfg.network_process_name(),
                     "gpu": cfg.gpu_process_name()}.get(process, "")
         if not proc_name:
-            die("no %s process for the resolved config (%s:%s)" % (process, cfg.buildsys, cfg.port))
+            die("no %s process for the resolved preset (%s:%s)" % (process, cfg.buildsys, cfg.port))
         subject = "MiniBrowser %s, samply attaching to the newest %s after launch" % (url, proc_name)
         cmd = ("%s %s >%s 2>&1 &\n"
               "sleep 5\n"
@@ -136,18 +136,18 @@ def main(args, cmd, reg=None):
         die("--process only makes sense with --browser: it names which of\n"
             "    MiniBrowser's own processes (ui, web, network, gpu) to point the profiler\n"
             "    at, and without --browser there is no MiniBrowser to name one of.")
-    reg = reg or targets.Registry(images.root())
+    reg = reg or places.Registry(images.root())
 
-    config = store.build_config() or reg.default_config(name)
+    preset = store.build_preset() or reg.default_preset(name)
     try:
-        tname = reg.ws_target(name)
-        target = reg.load(tname)
+        tname = reg.ws_place(name)
+        driver = reg.load(tname)
     except LookupError as e:
         die(str(e))
     try:
-        cfg = buildconf.resolve(config, target.os(), target.kind, target.env)
+        cfg = presets.resolve(preset, driver.os(), driver.kind, driver.env)
     except LookupError:
-        die("unknown config '%s' (wk build --list)" % config)
+        die("unknown preset '%s' (wk build --list)" % preset)
 
     mode = o["mode"]
     if mode == "native":
@@ -155,13 +155,13 @@ def main(args, cmd, reg=None):
     if mode not in MODES:
         die("no such mode '%s' -- there are: %s (and 'native')" % (mode, " ".join(MODES)))
 
-    src = target.src(name)
+    src = driver.src(name)
     var, run_dir = cfg.run_var(), cfg.run_dir(src)
 
     # Not /tmp: a profile is worth more than the ten minutes it took to record, and /tmp on a container workspace is the first thing a restart takes away.
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     run = "%s-%s" % (stamp, mode)
-    outdir = os.path.join(target.home(), "wk-profile", run)
+    outdir = os.path.join(driver.home(), "wk-profile", run)
 
     attach, browser, url = o.get("attach", ""), o.get("browser", False), o.get("url", "")
     args = o["args"]
@@ -243,7 +243,7 @@ def main(args, cmd, reg=None):
             wrap = "samply record --save-only -o %s --" % shlex.quote(artifact)
     elif mode == "sysprof":
         if cfg.xcode():
-            die("sysprof profiles Linux; '%s' is an Apple-port build. Use --profile=instruments there." % config)
+            die("sysprof profiles Linux; '%s' is an Apple-port build. Use --profile=instruments there." % preset)
         if attach:
             die("sysprof-cli records a command it launches, and samples the whole system while it\n"
                 "    runs; there is no attach. Use --profile=samply to attach to a pid.")
@@ -253,7 +253,7 @@ def main(args, cmd, reg=None):
     elif mode == "instruments":
         if not cfg.xcode():
             die("xctrace profiles Mach-O processes on macOS; '%s' is a %s\n"
-                "    build. Use --profile=samply there." % (config, cfg.buildsys))
+                "    build. Use --profile=samply there." % (preset, cfg.buildsys))
         needs = "xctrace"
         artifact = os.path.join(outdir, "trace.trace")
         if attach:
@@ -285,16 +285,16 @@ def main(args, cmd, reg=None):
 
     bin_present = False
     if not attach and bin_path:
-        if target.exec(name, ["test", "-x", bin_path]).ok:
+        if driver.exec(name, ["test", "-x", bin_path]).ok:
             bin_present = True
         elif not dry_run():
             die("nothing to profile: no %s at %s\n"
-                "    Build it first:  wk build %s %s" % (os.path.basename(bin_path), bin_path, name, config))
+                "    Build it first:  wk build %s %s" % (os.path.basename(bin_path), bin_path, name, preset))
 
     if needs and not dry_run():
-        require_tool(target, name, needs)
+        require_tool(driver, name, needs)
     if mode in ("samply", "sysprof") and not dry_run():
-        perf_events(target, name, mode)
+        perf_events(driver, name, mode)
 
     if not target_cmd:
         target_cmd = shlex.quote(bin_path) + (" " + jsc_flags if jsc_flags else "")
@@ -315,19 +315,19 @@ def main(args, cmd, reg=None):
     cmd += target_cmd
 
     if dry_run():
-        info_lines_dry(name, tname, config, subject, bin_path, bin_present, outdir, cmd, post, mode)
+        info_lines_dry(name, tname, preset, subject, bin_path, bin_present, outdir, cmd, post, mode)
         return 0
 
-    info("%s: %s in '%s' (%s)" % (mode, subject, name, config))
+    info("%s: %s in '%s' (%s)" % (mode, subject, name, preset))
     log("  output: %s" % outdir)
 
     # exec_tty inherits this stdio, so reports and a crash's text print here, and xctrace/samply still get ctrl-c.
-    r = target.exec_tty(name, ["bash", "-lc", "cd %s && %s" % (src, cmd)])
+    r = driver.exec_tty(name, ["bash", "-lc", "cd %s && %s" % (src, cmd)])
     if not r.ok:
         raise Refused(r.rc)
 
     if post:
-        target.exec_tty(name, ["bash", "-lc", post])   # its own failure never stops the report below
+        driver.exec_tty(name, ["bash", "-lc", post])   # its own failure never stops the report below
 
     info("recorded in '%s': %s" % (name, artifact))
 
@@ -335,7 +335,7 @@ def main(args, cmd, reg=None):
         fetch_dir = o.get("fetch_dir") or os.path.join(Store(reg.env).state_dir(), "profiles", name, run)
         # The whole run directory in one copy (pull_dir): a loop over pull only reaches top-level files, silently missing instruments' .trace bundle.
         try:
-            target.pull_dir(name, outdir, fetch_dir)
+            driver.pull_dir(name, outdir, fetch_dir)
             info("copied to %s" % fetch_dir)
         except OSError:
             warn("could not copy '%s' out of '%s'" % (outdir, name))
@@ -344,10 +344,10 @@ def main(args, cmd, reg=None):
     return 0
 
 
-def info_lines_dry(name, tname, config, subject, bin_path, bin_present, outdir, cmd, post, mode):
+def info_lines_dry(name, tname, preset, subject, bin_path, bin_present, outdir, cmd, post, mode):
     info("dry run -- nothing was profiled")
     built = ("built: " if bin_present else "NOT BUILT: ") + bin_path if bin_path else ""
-    log("  workspace: %s (%s), config: %s, mode: %s" % (name, tname, config, mode))
+    log("  workspace: %s (%s), preset: %s, mode: %s" % (name, tname, preset, mode))
     log("  subject:   %s%s" % (subject, " (%s)" % built if built else ""))
     log("  output:    %s" % outdir)
     log("  in the workspace:")

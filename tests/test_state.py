@@ -1,4 +1,4 @@
-"""Workspace state: one walk behind `wk ls`/`wk status`, `Target.state`'s words, `wait_ready`, and task records."""
+"""Workspace state: one walk behind `wk ls`/`wk status`, `Driver.state`'s words, `wait_ready`, and task records."""
 import contextlib
 import io
 import json
@@ -10,17 +10,17 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, WkTest, requires_container_target, run
+from tests.support import REPO, WkTest, requires_container_place, run
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import record, targets  # noqa: E402
+from wk import places, record  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
 
 class TestListingsAgree(WkTest):
-    @requires_container_target()
+    @requires_container_place()
     def test_ls_status_same_names(self):
         ls_cp = run("ls")
         names_ls = set()
@@ -74,8 +74,8 @@ class TestZedRefusesInsideAWorkspace(WkTest):
         self.assertIn("wk zed selftest-ws", cp.stdout, cp.stdout)
 
 
-class Scripted(targets.Target):
-    """A target whose environment says `word` and whose creation marker is `marker`, over a Fake host."""
+class Scripted(places.Driver):
+    """A place whose environment says `word` and whose creation marker is `marker`, over a Fake host."""
 
     def __init__(self, store, fake, word="absent", marker=False, needs_base=False):
         super().__init__("stub", str(REPO), {"WK_STORE": store, "HOME": store}, fake)
@@ -101,7 +101,7 @@ class StateTest(unittest.TestCase):
         for v in ("WK_FORCE", "WK_DRY_RUN", "WK_READY_WAIT", "WK_QUIET"):
             os.environ.pop(v, None)
 
-    def target(self, **kw):
+    def driver(self, **kw):
         return Scripted(self.store, self.fake, **kw)
 
     def ws_dir(self, t, ws):
@@ -129,7 +129,7 @@ class StateTest(unittest.TestCase):
 
 class TestWsStateWords(StateTest):
     def test_ws_state_words(self):
-        t = self.target()
+        t = self.driver()
         self.assertEqual(t.state("ws"), "absent")                    # nothing anywhere
         self.ws_dir(t, "ws")
         t.word, t.marker = "running", True
@@ -144,20 +144,20 @@ class TestWsStateWords(StateTest):
         self.assertEqual(t.state("ws"), "broken")                    # the same once creation had finished
 
     def test_a_finished_creation_record_is_the_marker_where_the_target_keeps_none(self):
-        t = self.target()
+        t = self.driver()
         self.ws_dir(t, "ws")
         self.creation(t, "ws", alive=False)
         self.assertEqual(t.state("ws"), "broken")
 
     def test_a_directory_that_is_not_on_the_fake_machine_is_absent_whatever_the_real_disk_holds(self):
-        t = self.target()
+        t = self.driver()
         os.makedirs(t.store.ws_dir("ws"))
         self.assertEqual(t.state("ws"), "absent")
 
 
 class TestReadyMeansTheCreationIsFinished(StateTest):
     def test_a_workspace_whose_creation_is_still_running_is_not_ready(self):
-        t = self.target(word="running", marker=True)
+        t = self.driver(word="running", marker=True)
         self.ws_dir(t, "ws")
         rec = self.creation(t, "ws", alive=True)
         t.env["WK_READY_WAIT"] = "4"
@@ -169,7 +169,7 @@ class TestReadyMeansTheCreationIsFinished(StateTest):
         self.assertEqual(self.waited(t), (0, ""))
 
     def test_the_wait_ends_when_the_creation_does(self):
-        t = self.target(word="running", marker=True)
+        t = self.driver(word="running", marker=True)
         self.ws_dir(t, "ws")
         rec = self.creation(t, "ws", alive=True)
         real = self.clock.sleep
@@ -188,7 +188,7 @@ class TestReadyMeansTheCreationIsFinished(StateTest):
                                          ("absent", True, True, "wk rm ws"),
                                          ("unreachable", False, False, "ws")):
             with self.subTest(word=word, marker=marker):
-                t = self.target(word=word, marker=marker)
+                t = self.driver(word=word, marker=marker)
                 if dir_:
                     self.ws_dir(t, "ws")
                 rc, err = self.waited(t)
@@ -197,18 +197,18 @@ class TestReadyMeansTheCreationIsFinished(StateTest):
                 self.assertEqual(self.clock.slept, [])
 
     def test_a_creation_nothing_is_running_is_a_barrier_naming_the_remake(self):
-        t = self.target(word="creating")
+        t = self.driver(word="creating")
         self.ws_dir(t, "ws")
         rc, err = self.waited(t)
         self.assertEqual(rc, 1)
-        self.assertIn("wk new ws --target stub", err)
+        self.assertIn("wk new ws --on stub", err)
         self.assertEqual(self.clock.slept, [])
         os.environ["WK_FORCE"] = "1"
         self.assertEqual(self.waited(t)[0], 0)
 
     def test_a_dead_creation_is_refused_at_once_by_the_real_container_driver(self):
         self.fake.answer(["podman", "inspect"], out="running\n")
-        t = targets.Container("container", str(REPO), {"WK_STORE": self.store, "HOME": self.store, "WK_IN_VM": "1"}, self.fake)
+        t = places.Container("container", str(REPO), {"WK_STORE": self.store, "HOME": self.store, "WK_IN_VM": "1"}, self.fake)
         self.assertEqual(t.state("ws"), "broken")
         rc, err = self.waited(t)
         self.assertEqual(rc, 1)
@@ -242,7 +242,7 @@ class TestVmDriverWithoutTart(unittest.TestCase):
         tmp = tempfile.mkdtemp(prefix="wk-test-state-")
         self.addCleanup(shutil.rmtree, tmp, True)
         fake = Fake("here")
-        reg = targets.Registry(REPO, env={"HOME": tmp, "WK_STORE": tmp + "/s", "WK_VM_STORE": tmp + "/v"}, machine=fake)
+        reg = places.Registry(REPO, env={"HOME": tmp, "WK_STORE": tmp + "/s", "WK_VM_STORE": tmp + "/v"}, machine=fake)
         t = reg.load("vm")
         self.assertIsNone(t.tart())
         self.assertEqual((t.state_of("wk-nosuch"), t.info("nosuchws"), t.list(), t.state("nosuchws")),

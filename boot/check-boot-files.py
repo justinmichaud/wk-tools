@@ -67,7 +67,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", required=True, help="the boot filesystem to check")
     ap.add_argument("--dtb", default="bcm2711-rpi-4-b.dtb",
-                    help="the device tree the target board will ask for")
+                    help="the device tree the place board will ask for")
     ap.add_argument("--resolve", metavar="NAME",
                     help="print the file this name resolves to, relative to the root, or nothing")
     args = ap.parse_args()

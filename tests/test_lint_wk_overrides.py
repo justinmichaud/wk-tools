@@ -6,7 +6,7 @@ import unittest
 
 from tests.support import INTERNAL_VARS, REPO
 from tests.test_lint_machine_name import python_sources
-from wk.targets import CONF_ENV
+from wk.places import CONF_ENV
 
 NAME = re.compile(r"WK_[A-Z0-9_]+")
 SELF = "tests/test_lint_wk_overrides.py"

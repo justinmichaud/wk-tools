@@ -3,7 +3,7 @@
 Reads the command's declaration (decl.py), refuses what it does not declare,
 resolves the workspace name and the machine holding it, and runs the command
 there: here, forwarded into the podman VM on a macOS host, or handed to the
-machine's own wk. The targets are asked through one Registry (wk.targets).
+machine's own wk. The places are asked through one Registry (wk.places).
 """
 
 import json
@@ -17,17 +17,17 @@ from pathlib import Path
 
 from wk import completion as C
 from wk import decl as D
-from wk import act, buildconf, clock, guest, images, record, sshalias, targets
+from wk import act, clock, guest, images, places, presets, record, sshalias
 from wk.act import info, log, warn
 from wk.machine import Local, is_macos
 from wk.reach import Reach
-from wk.store import Store, build_config, dispatch_target, in_vm, no_such_workspace, ws_name
+from wk.store import Store, build_preset, dispatch_place, in_vm, no_such_workspace, ws_name
 
 ROOT = Path(images.root())
 MACHINE = Store().podman_machine()
 _registry = None
-DISPATCH_VARS = ("WK_NAME", "WK_TARGET", "WK_TARGET_KIND", "WK_ROOT", "WK_FORCE", "WK_QUIET", "WK_DRY_RUN", "WK_DESTRUCTIVE",
-                 "WK_CONFIRMED", "WK_ROW_LABEL", "WK_HOST_SELF", "WK_IN_VM", "WK_CONFIG")
+DISPATCH_VARS = ("WK_NAME", "WK_PLACE", "WK_DRIVER", "WK_ROOT", "WK_FORCE", "WK_QUIET", "WK_DRY_RUN", "WK_DESTRUCTIVE",
+                 "WK_CONFIRMED", "WK_ROW_LABEL", "WK_HOST_SELF", "WK_IN_VM", "WK_PRESET")
 GLOBALS = {"--force": "WK_FORCE", "--quiet": "WK_QUIET", "--dry-run": "WK_DRY_RUN",
            "-n": "WK_DRY_RUN", "--yes": "WK_YES", "-y": "WK_YES"}
 
@@ -260,17 +260,17 @@ class Invocation:
             return args
         self.usage_die("unknown verb: %s (one of %s)" % (args[pos], d.verbs.replace(",", ", ")))
 
-    def refuse_inherited_config(self, inherited):
-        """An exported WK_CONFIG is never an invocation's answer: one that argv does not name too is refused."""
+    def refuse_inherited_preset(self, inherited):
+        """An exported WK_PRESET is never an invocation's answer: one that argv does not name too is refused."""
         d, args = self.decl, self.args
-        if not inherited or not d.config:
+        if not inherited or not d.preset:
             return
         pos = [a for a in args[:args.index("--") if "--" in args else len(args)] if not a.startswith("-")]
-        if d.config == "--config":
-            if not D.in_list("--config=", d.opts_for(args)):
+        if d.preset == "--preset":
+            if not D.in_list("--preset=", d.opts_for(args)):
                 return
-            given = ([a[len("--config="):] for a in args if a.startswith("--config=")] or [None])[-1]
-            remedy = "--config %s" % inherited
+            given = ([a[len("--preset="):] for a in args if a.startswith("--preset=")] or [None])[-1]
+            remedy = "--preset %s" % inherited
         else:
             if d.takes_for(args) == "0":
                 return
@@ -278,8 +278,8 @@ class Invocation:
             given = pos[k] if len(pos) > k else None
             remedy = "wk %s%s %s" % (self.cmd, "" if k == 0 else " <workspace>", inherited)
         if given != inherited:
-            self.usage_die("WK_CONFIG=%s is set in this environment, and wk takes a build config only from\n"
-                           "    its arguments: unset it, or name the config:  %s" % (inherited, remedy))
+            self.usage_die("WK_PRESET=%s is set in this environment, and wk takes a build preset only from\n"
+                           "    its arguments: unset it, or name the preset:  %s" % (inherited, remedy))
 
     def verb_given(self):
         """After the options are checked: a verb."""
@@ -287,24 +287,24 @@ class Invocation:
         if d.verbs and not (args and D.in_list(args[0], d.verbs)):
             self.usage_die("'wk %s' needs one of: %s" % (self.cmd, d.verbs.replace(",", ", ")))
 
-    def take_config(self, args, env=None):
-        """The declared build config lifted out of argv into WK_CONFIG; one buildconf does not name is refused."""
-        how, out, given = self.decl.config, [], None
+    def take_preset(self, args, env=None):
+        """The declared build preset lifted out of argv into WK_PRESET; one presets does not name is refused."""
+        how, out, given = self.decl.preset, [], None
         positional = how == "arg" and self.decl.takes_for(args) != "0"
         for i, a in enumerate(args):
             if a == "--":
                 out.extend(args[i:])
                 break
-            if how == "--config" and a.startswith("--config="):
-                given = a[len("--config="):]
+            if how == "--preset" and a.startswith("--preset="):
+                given = a[len("--preset="):]
             elif positional and given is None and not a.startswith("-"):
                 given = a
             else:
                 out.append(a)
         if given is not None:
-            if given not in buildconf.names():
-                self.usage_die("unknown config: %s -- 'wk build --list' names every one" % given)
-            (os.environ if env is None else env)["WK_CONFIG"] = given
+            if given not in presets.names():
+                self.usage_die("unknown preset: %s -- 'wk build --list' names every one" % given)
+            (os.environ if env is None else env)["WK_PRESET"] = given
         return out
 
     # -- questions the command answers for itself
@@ -325,8 +325,8 @@ class Invocation:
     def derived_name(self):
         return self._impl("--wsname", *self.args)[1]
 
-    def named_target(self):
-        return self._impl("--wstarget", *self.args)[1]
+    def named_place(self):
+        return self._impl("--wsplace", *self.args)[1]
 
     # -- checks
 
@@ -370,7 +370,7 @@ def usage():
             for d in rows:
                 err.write("  %-32s %s\n" % (d.synopsis_line(), d.summary()))
     err.write("""
-  Inside a workspace the name is implicit: `wk build <config>`, `wk run -- <args>`
+  Inside a workspace the name is implicit: `wk build <preset>`, `wk run -- <args>`
   act on this machine.
 
   wk <command> -h          what it does, what it acts on, whether it changes anything
@@ -387,7 +387,7 @@ def usage():
   takes, is refused with its usage line.
   wk <command> --all       every one of what the command acts on -- every
                            machine ('wk key push'/'wk key sudo'), every workspace on
-                           every target ('wk sync', 'wk rm'), every line of
+                           every place ('wk sync', 'wk rm'), every line of
                            the log ('wk status <ws> --log --all'); a command's own -h says what
                            its --all covers
   WK_DEBUG=1               verbose output
@@ -439,7 +439,7 @@ def where_prose(d, where):
         return "the machine you type it on"
     if d.lifecycle:
         return "the machine holding the workspace, which keeps its record: a build box or a peer workstation is handed it"
-    return ("the workspace's target, on the machine holding it (the podman VM for a container "
+    return ("the workspace's place, on the machine holding it (the podman VM for a container "
             "workspace on macOS; that machine's own wk when it has one)")
 
 
@@ -459,12 +459,12 @@ def take_name(inv, args):
 
 
 def command_line(inv, args, env=None):
-    args = inv.take_config(args, env)
+    args = inv.take_preset(args, env)
     return [str(inv.decl.path), *argv_split(inv.decl.opts_for(args), args)]
 
 
 def preview(cmd, d, args):
-    """The argv, config and machine `wk <cmd> <args>` would run with, or the refusal it would print; runs nothing."""
+    """The argv, preset and machine `wk <cmd> <args>` would run with, or the refusal it would print; runs nothing."""
     inv = Invocation(cmd, d, args)
     env = {}
     try:
@@ -512,9 +512,9 @@ def explain(cmd, d, args=()):
                                        if d.default else ""))
     out.write("\nwhat it does (from %s):\n" % os.path.relpath(str(d.path), str(ROOT)))
     out.write(d.leading_comment() + "\n")
-    if d.config:
-        out.write("\nvalid values (%s):\n" % ("--config" if d.config == "--config" else "<config>"))
-        out.write("".join(("  " + l).rstrip() + "\n" for l in buildconf.LIST_TEXT.splitlines()))
+    if d.preset:
+        out.write("\nvalid values (%s):\n" % ("--preset" if d.preset == "--preset" else "<preset>"))
+        out.write("".join(("  " + l).rstrip() + "\n" for l in presets.LIST_TEXT.splitlines()))
     if d.values:
         out.write("\nvalid values (wk %s %s):\n" % (cmd, d.values))
         out.flush()
@@ -560,7 +560,7 @@ def help_doc(topic):
 # -- machines
 
 def podman_vm():
-    return targets.podman_vm(Local(), MACHINE) if shutil.which("podman") else None
+    return places.podman_vm(Local(), MACHINE) if shutil.which("podman") else None
 
 
 def machine_running():
@@ -572,7 +572,7 @@ def start_podman_machine(machine, cmd, tty):
     if not tty and not act.dry_run():
         die("the podman machine '%s' is stopped, and 'wk %s' needs it.\n"
             "    Nothing here starts it without a terminal asking:  wk start" % (MACHINE, cmd))
-    guest.podman_admit(targets.Registry(ROOT, os.environ, machine).load("vm"))
+    guest.podman_admit(places.Registry(ROOT, os.environ, machine).load("vm"))
     info("starting podman machine '%s'" % MACHINE)
     machine.act_run(["podman", "machine", "start", MACHINE], tty=True)
 
@@ -593,7 +593,7 @@ def forward_to_vm(inv, cmd, args):
     sys.stdout.flush()
     sys.stderr.flush()
     if os.isatty(0) and os.isatty(1):
-        opts, dest = targets.podman_vm_route(rec)
+        opts, dest = places.podman_vm_route(rec)
         os.execvp("ssh", ["ssh", "-t", *opts, dest, line])
     os.execvp("podman", ["podman", "machine", "ssh", MACHINE, "--", line])
 
@@ -606,24 +606,24 @@ def forward_status(inv, cmd, args, env=None):
 
 
 def registry():
-    """This invocation's one Registry: every target is loaded, and every machine probed, at most once."""
+    """This invocation's one Registry: every place is loaded, and every machine probed, at most once."""
     global _registry
     if _registry is None:
-        _registry = targets.Registry(ROOT)
+        _registry = places.Registry(ROOT)
     return _registry
 
 
-def delegate_target(target):
-    """The target's driver when it runs commands itself, else None."""
+def delegate_driver(place):
+    """The place's driver when it runs commands itself, else None."""
     try:
-        t = registry().load(target)
+        t = registry().load(place)
     except LookupError:
         return None
     return t if t.delegates() else None
 
 
-def delegate_run(target, cmd, args, readonly=False):
-    argv = target.hand_over(cmd, args, tty=os.isatty(0) and os.isatty(1), readonly=readonly)
+def delegate_run(driver, cmd, args, readonly=False):
+    argv = driver.hand_over(cmd, args, tty=os.isatty(0) and os.isatty(1), readonly=readonly)
     sys.stdout.flush()
     sys.stderr.flush()
     os.execvp(argv[0], argv)
@@ -631,7 +631,7 @@ def delegate_run(target, cmd, args, readonly=False):
 
 def json_merge_list(key, paths):
     """{"<key>": [...]} merged from N files, each zero or more JSON documents concatenated with no
-    delimiter -- the shape a per-target `--json` listing (or a missing/empty file) produces."""
+    delimiter -- the shape a per-place `--json` listing (or a missing/empty file) produces."""
     items = []
     dec = json.JSONDecoder()
     for path in paths:
@@ -652,7 +652,7 @@ def json_merge_list(key, paths):
 
 
 def bare_report(inv, cmd, args):
-    """A report with no subject, merged over every target here and the VM."""
+    """A report with no subject, merged over every place here and the VM."""
     hosts = [t for t in registry().all() if t != "container"]
     worst = 0
     ls_json = cmd == "ls" and "--json" in args
@@ -660,7 +660,7 @@ def bare_report(inv, cmd, args):
     ls_empty = []
     import tempfile
     if hosts:
-        env = dict(os.environ, WK_TARGET=" ".join(hosts))
+        env = dict(os.environ, WK_PLACE=" ".join(hosts))
         if ls_json:
             ls_local = tempfile.NamedTemporaryFile(delete=False)
             rc = subprocess.call([str(inv.decl.path), *args], stdout=ls_local, env=env)
@@ -747,14 +747,14 @@ def main(argv):
     inv.globals_text = globals_text
     args = inv.args = inv.verb_first()
 
-    # WK_NAME and WK_CONFIG are this invocation's answers, never inherited ones.
+    # WK_NAME and WK_PRESET are this invocation's answers, never inherited ones.
     ws_name(take=True)
-    inherited_config = build_config(take=True)
+    inherited_preset = build_preset(take=True)
 
     where = inv.where()
     sub = args[0] if args else ""
     try:
-        registry().self_target()
+        registry().self_place()
     except LookupError as e:
         die(str(e))
 
@@ -766,14 +766,14 @@ def main(argv):
             % (cmd, wk_self(), cmd, "".join(" " + a for a in args), globals_text))
     if registry().in_remote_host() and where == "host":
         die("'wk %s' acts on a workstation's own store or hardware, and this is\n"
-            "    the shared build machine for target '%s'.\n"
+            "    the shared build machine for place '%s'.\n"
             "    Run it on the workstation instead. What works here: ls, status, build,\n"
-            "    run, test, enter, new, rm." % (cmd, registry().self_target()))
+            "    run, test, enter, new, rm." % (cmd, registry().self_place()))
 
     args = inv.argv_check()
     inv.args = args
     inv.verb_given()
-    inv.refuse_inherited_config(inherited_config)
+    inv.refuse_inherited_preset(inherited_preset)
     sub = args[0] if args else ""
     if act.dry_run() and d.nodryrun:
         inv.usage_die("'wk %s' is exempt from --dry-run (wk %s -h says why)" % (cmd, cmd))
@@ -793,12 +793,12 @@ def main(argv):
 
     resolved = ""
     if where == "workspace" and not in_workspace():
-        resolved = resolve_target(inv, name_decl, slot, takes, derived)
+        resolved = resolve_place(inv, name_decl, slot, takes, derived)
 
     delegate = None
     if (where == "workspace" and name_decl.split("@")[0] != "none" and not in_workspace()
             and not in_vm() and not d.here_for(args) and not d.lifecycle):
-        delegate = delegate_target(resolved)
+        delegate = delegate_driver(resolved)
 
     forwards = (where == "workspace" and is_macos() and not in_vm()
                 and not in_workspace() and d.forward_for(args) and resolved == "container")
@@ -821,8 +821,8 @@ def main(argv):
         if name_in_argv("required", slot, takes, args) is None and not cwd_workspace():
             inv.usage_die()
     if in_workspace():
-        resolved = dispatch_target(default="local")
-        os.environ.update({"WK_TARGET": resolved})
+        resolved = dispatch_place(default="local")
+        os.environ.update({"WK_PLACE": resolved})
         name = wk_self()
         if name_decl.split("@")[0] != "none" and argv_name(slot, takes, args) == name:
             die("this is workspace '%s', and there is no workspace argument in here --\n"
@@ -852,7 +852,7 @@ def main(argv):
             bare_report(inv, cmd, args)
         if d.is_readonly(sub) and not shutil.which("podman"):
             warn("podman is not installed, so there are no container workspaces to read")
-            log("  './setup' installs it; 'WK_TARGET=vm wk ls' lists the macOS guests, which do not need it")
+            log("  './setup' installs it; 'WK_PLACE=vm wk ls' lists the macOS guests, which do not need it")
             raise Exit(0)
         forward_to_vm(inv, cmd, args)
 
@@ -867,21 +867,21 @@ def main(argv):
         os.environ["WK_NAME"] = name
         asks = not d.lifecycle and base != "derived" and not in_workspace()
         if not d.lifecycle:
-            os.environ["WK_TARGET"] = resolved
+            os.environ["WK_PLACE"] = resolved
         if asks or d.ready:
-            ask_target(inv, resolved, name, asks, d.ready)
+            ask_place(inv, resolved, name, asks, d.ready)
     line = command_line(inv, args)
     os.execv(line[0], line)
 
 
-def ask_target(inv, resolved, name, exists, ready):
+def ask_place(inv, resolved, name, exists, ready):
     """Whether `name` is on `resolved` (a machine that did not answer is no absence), then its readiness, from one load."""
     try:
-        target = registry().load(resolved)
-        if exists and not registry().exists_on(target, name):
+        driver = registry().load(resolved)
+        if exists and not registry().exists_on(driver, name):
             inv.usage_die(no_such_workspace(name))
         if ready:
-            target.wait_ready(name, clock.Clock())
+            driver.wait_ready(name, clock.Clock())
     except LookupError as e:
         die(str(e))
 
@@ -894,22 +894,22 @@ def decl_name(inv, name_decl, slot, takes, derived):
     return ""
 
 
-def resolve_target(inv, name_decl, slot, takes, derived):
-    inherited = dispatch_target()
+def resolve_place(inv, name_decl, slot, takes, derived):
+    inherited = dispatch_place()
     if inherited:
         return inherited
     args = inv.args
-    named = D.Args(inv.decl, argv_split(inv.decl.opts_for(args), args)).value("--target")
+    named = D.Args(inv.decl, argv_split(inv.decl.opts_for(args), args)).value("--on")
     if named:
         return named
     if name_decl.split("@")[0] == "derived":
-        t = inv.named_target()
+        t = inv.named_place()
         if t:
             return t
     name = decl_name(inv, name_decl, slot, takes, derived)
     if name:
         try:
-            return registry().ws_target(name)
+            return registry().ws_place(name)
         except LookupError as e:
             die(str(e))
     return "container"

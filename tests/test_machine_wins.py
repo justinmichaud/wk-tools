@@ -17,7 +17,7 @@ LATER = "Host added-later\n    User me\n"
 class TestMachineWins(RmFinalStateTest):
     def status_of(self, w):
         walk = status.Walk(REPO, env=w.env, reg=w.reg, fleet=False, devices=False, clock=w.clock)
-        rec, _ = walk.workspace(w.target, "here", "native", "ws", w.records)
+        rec, _ = walk.workspace(w.driver, "here", "native", "ws", w.records)
         return rec["ws"], [n["text"] for n in rec.get("notes", [])]
 
     def runs_of(self, w, head):
@@ -69,10 +69,10 @@ class TestMachineWins(RmFinalStateTest):
         """A snapshot whose tree moved is not the one the record names: new builds on neither, and leaves it as it is."""
         w = World(self.tmp)
         w.react(["git", "-C"], lambda a, f: Result(0, "b" * 40 + "\n") if a[3:] == ["rev-parse", "HEAD"] else World._git(w, a, f))
-        base = w.target.store.snapshots_dir()
+        base = w.driver.store.snapshots_dir()
         for given in ("", "main-1"):
             w.effects = []
-            self.refused(lambda: workspace.new_driver(w.target, w.records, w.lock, w.clock, "ws", given, "native"))
+            self.refused(lambda: workspace.new_driver(w.driver, w.records, w.lock, w.clock, "ws", given, "native"))
             self.assertEqual([a for a in self.runs(w) if a[0] == "wkdev-create"], [])
             self.assertEqual([e for e in w.effects if e[0] in ("write", "remove", "mkdir") and e[1].startswith(base)], [])
             (t,) = w.records.list()

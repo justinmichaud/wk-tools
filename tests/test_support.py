@@ -9,7 +9,7 @@ from tests.support import BLIND_FLEET, NO_CONFIG, NO_SECRETS, _clean_env, bash, 
 
 
 class TestCleanEnvScrubsMachineState(unittest.TestCase):
-    def test_the_default_fleet_holds_no_target(self):
+    def test_the_default_fleet_holds_no_place(self):
         self.assertEqual(_clean_env()["WK_MACHINES_DIR"], BLIND_FLEET)
         kinds = {l for p in os.listdir(BLIND_FLEET)
                  for l in open(os.path.join(BLIND_FLEET, p)).read().splitlines() if l.startswith("kind=")}
@@ -20,7 +20,7 @@ class TestCleanEnvScrubsMachineState(unittest.TestCase):
         self.assertEqual(_clean_env()["XDG_CONFIG_HOME"], NO_CONFIG)
         self.assertNotIn("wk", os.listdir(NO_CONFIG))
 
-    def test_no_test_is_the_far_end_of_a_target(self):
+    def test_no_test_is_the_far_end_of_a_place(self):
         self.assertFalse(os.path.exists(_clean_env()["WK_REMOTE_MARKER"]))
 
     def test_wk_host_secrets_defaults_to_a_scratch_dir(self):

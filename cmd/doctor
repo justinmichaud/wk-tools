@@ -21,9 +21,9 @@
 #           commit wall (a container), no key, token or credential inside that
 #           could publish, reads and writes through the credential injector
 #           against the host's push switch, the agent's login, and the GPU. A
-#           remote target has no sandbox, and is refused.
+#           remote place has no sandbox, and is refused.
 #   wk doctor <machine>     a machine in machines/, asked from here: its tailnet
-#           names, whether it answers, a bench device's system, media and arm,
+#           names, whether it answers, a bench machine's system, media and arm,
 #           and a board's cpu governor and temperature. A name that is both a
 #           machine and a workspace is the machine.
 #   wk doctor               inside a workspace: the half it answers about itself,
@@ -65,7 +65,7 @@ from wk import decl, disk, fleet, tools, wall  # noqa: E402
 from wk.act import Refused, die, info, log, warn  # noqa: E402
 from wk.doctor import Doctor, Report, device  # noqa: E402
 from wk.machine import Local  # noqa: E402
-from wk.targets import Registry  # noqa: E402
+from wk.places import Registry  # noqa: E402
 
 ALLOWED = ("--all", "--probe-store", "--probe-tools", "--gpu")
 
@@ -98,10 +98,10 @@ def only(args, allowed, why):
 
 
 def inside(reg):
-    target = reg.load("local")
-    info("checking workspace '%s' from inside it" % target.ws_name)
+    driver = reg.load("local")
+    info("checking workspace '%s' from inside it" % driver.ws_name)
     rep = Report(sys.stderr)
-    publishing = wall.from_inside(ROOT, target, target.ws_name, reg.machine, rep)
+    publishing = wall.from_inside(ROOT, driver, driver.ws_name, reg.machine, rep)
     sys.stderr.write("\n")
     disk.workspace_report(reg)
     v = wall.verdict(rep, publishing)
@@ -117,10 +117,10 @@ def inside(reg):
 
 def workspace(reg, name, argv):
     args = decl.Args(decl.Decl(__file__), argv)
-    target = reg.load(reg.ws_target(name))
-    info("checking workspace '%s' (%s)" % (name, target.name))
+    driver = reg.load(reg.ws_place(name))
+    info("checking workspace '%s' (%s)" % (name, driver.name))
     rep = Report(sys.stderr)
-    wall.from_host(ROOT, target, name, reg.machine, rep, want_gpu=args.flag("--gpu"))
+    wall.from_host(ROOT, driver, name, reg.machine, rep, want_gpu=args.flag("--gpu"))
     sys.stderr.write("\n")
     if wall.verdict(rep) == "broken":
         warn("%d check(s) failed -- the sandbox is not intact" % rep.missing)

@@ -573,7 +573,7 @@ class TestTheUnitsAreTheImageMachines(unittest.TestCase):
         self.assertIn("/etc/wk/rescue", timer, "the timer is not gated on the rescue marker")
         svc = units["systemd/wk-self-return.service"]
         self.assertNotIn("sleep", svc)
-        self.assertNotIn("[Install]", svc, "a service also wanted by a target reboots the board at boot")
+        self.assertNotIn("[Install]", svc, "a service also wanted by a systemd target reboots the board at boot")
         self.assertIn("wk-keep-running", svc)
         self.assertIn("/etc/wk/rescue", svc, "the service is not gated on the rescue marker")
 

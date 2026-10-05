@@ -25,7 +25,7 @@ class TestCoresValid(unittest.TestCase):
 class TestAPinnedRun(BenchTest):
 
     def test_a_container_run_is_exec_d_under_taskset_and_records_it(self):
-        rc, err = self.run_(None, "run", "jetstream3", "--config", "jsc-release", "--cores", "0-3")
+        rc, err = self.run_(None, "run", "jetstream3", "--preset", "jsc-release", "--cores", "0-3")
         self.assertEqual(rc, 0, err)
         self.assertIn("exec taskset -c 0-3 ", self.w.watched[0][-1])
         self.assertEqual(self.env_json()["cores"], {"set": "0-3", "pinned": True})
@@ -38,8 +38,8 @@ class TestAPinnedRun(BenchTest):
     def test_a_guest_records_its_vcpu_count_and_refuses_a_pin(self):
         w = World(self.tmp, "vm")
         self.assertIn("no pin exists on macOS; the guest's vCPU count is not a pin",
-                      self.said("run", "jetstream3", "--config", "jsc-release", "--cores", "0-1", w=w))
-        self.run_(w, "run", "jetstream3", "--config", "jsc-release")
+                      self.said("run", "jetstream3", "--preset", "jsc-release", "--cores", "0-1", w=w))
+        self.run_(w, "run", "jetstream3", "--preset", "jsc-release")
         self.assertEqual(self.env_json(w)["host"]["cores"], "4")
 
     def test_an_invalid_set_is_refused_before_anything_runs(self):

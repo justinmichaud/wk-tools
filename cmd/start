@@ -18,7 +18,7 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import act, dispatch, secrets, status, statusview, targets  # noqa: E402
+from wk import act, dispatch, places, secrets, status, statusview  # noqa: E402
 from wk.act import Refused, die, info, log  # noqa: E402
 from wk.store import Store  # noqa: E402
 
@@ -30,10 +30,10 @@ def here():
 
 
 def start_workspace(reg, name):
-    target = reg.load(reg.ws_target(name))
-    if target.info(name) == "absent":
+    driver = reg.load(reg.ws_place(name))
+    if driver.info(name) == "absent":
         die(store.no_such_workspace(name))
-    return 0 if target.start(name) else 1
+    return 0 if driver.start(name) else 1
 
 
 def start_everything(reg):
@@ -70,7 +70,7 @@ def start_everything(reg):
 
 
 def main(argv):
-    reg = targets.Registry(ROOT)
+    reg = places.Registry(ROOT)
     name = store.ws_name()
     try:
         return start_workspace(reg, name) if name else start_everything(reg)

@@ -28,7 +28,7 @@ class TestTheEmptyNoteIsDecidedOnce(unittest.TestCase):
             return run_impl("ls", *flags, env={
                 "WK_STORE": store["WK_STORE"],
                 "XDG_STATE_HOME": str(store["path"] / "state"),
-                "WK_TARGET": "container",
+                "WK_PLACE": "container",
                 "PATH": f"{binp}:/usr/bin:/bin",
             })
 

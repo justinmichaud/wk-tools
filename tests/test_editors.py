@@ -100,7 +100,7 @@ class TestZedInheritsNoDispatcherVariables(unittest.TestCase):
             cp = run("zed", "--tools", env={
                 "PATH": f"{binp}:/usr/bin:/bin",
                 "ZED_ENV_LOG": str(log),
-                "WK_NAME": "leaked-ws", "WK_TARGET": "leaked-target", "WK_TARGET_KIND": "remote",
+                "WK_NAME": "leaked-ws", "WK_PLACE": "leaked-place", "WK_DRIVER": "remote",
             })
             self.assertEqual(cp.returncode, 0, cp.stdout)
             env = dict(l.split("=", 1) for l in log.read_text().splitlines() if "=" in l)

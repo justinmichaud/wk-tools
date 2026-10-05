@@ -8,7 +8,7 @@ from unittest import mock
 from tests.support import REPO, WkTest, rand_suffix, stub_path, temp_store
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets  # noqa: E402
+from wk import places  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 
@@ -16,7 +16,7 @@ class Clobbered(WkTest):
     def state(self, kind, env, binp, name):
         with mock.patch.dict(os.environ, {"PATH": "%s:%s" % (binp, os.environ["PATH"])}):
             env = dict(env, HOME=str(self.tmp), PATH=os.environ["PATH"])
-            return targets.Registry(REPO, env=env).load(kind).state(name)
+            return places.Registry(REPO, env=env).load(kind).state(name)
 
 
 class TestPodmanRmByHand(Clobbered):
@@ -26,7 +26,7 @@ class TestPodmanRmByHand(Clobbered):
             name = f"demo-{rand_suffix()}"
             ws = store["path"] / "ws" / name
             (ws / "home").mkdir(parents=True)
-            (ws / "home" / targets.READY_MARKER).write_text("")
+            (ws / "home" / places.READY_MARKER).write_text("")
             (ws / "base-id").write_text("deadbeef\n")
             st = self.state("container", {"WK_STORE": store["WK_STORE"], "WK_IN_VM": "1"}, binp, name)
             self.assertEqual(st, "broken")
@@ -40,7 +40,7 @@ class TestTartDeleteByHand(Clobbered):
             name = f"demo-{rand_suffix()}"
             ws = store["path"] / "ws" / name
             ws.mkdir(parents=True)
-            (ws / targets.READY_MARKER).write_text("")
+            (ws / places.READY_MARKER).write_text("")
             st = self.state("vm", {"WK_VM_STORE": store["WK_STORE"]}, binp, name)
             self.assertEqual(st, "broken")
 

@@ -7,7 +7,7 @@ import shlex
 import sys
 import unittest
 
-from tests.support import REPO, container_side, requires_container_target
+from tests.support import REPO, container_side, requires_container_place
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import wall  # noqa: E402
@@ -33,7 +33,7 @@ def _workspace_image():
     return cp.stdout.strip() if cp.returncode == 0 else ""
 
 
-@requires_container_target()
+@requires_container_place()
 class TestTheWallHolds(unittest.TestCase):
     """The recipe run for real inside the workspace image: a commit is blocked,
     an ordinary write is not, and no unmount/shadow/nested-namespace escape
@@ -43,7 +43,7 @@ class TestTheWallHolds(unittest.TestCase):
     def setUpClass(cls):
         cls.img = _workspace_image()
         if not cls.img:
-            raise unittest.SkipTest("no wkdev image for the container target")
+            raise unittest.SkipTest("no wkdev image for the container place")
         # the exact prefix production emits, for a repo at /tmp/r
         cls.prefix = prefix("/tmp/r")
 
@@ -89,21 +89,21 @@ if __name__ == "__main__":
 
 
 class TestBuiltinsAreAskedThroughAShell(unittest.TestCase):
-    """A target's exec runs argv, not a shell, so a builtin such as `command -v` goes through `sh -c` (machine.HAVE)."""
+    """A place's exec runs argv, not a shell, so a builtin such as `command -v` goes through `sh -c` (machine.HAVE)."""
 
     def test_cmd_ai_asks_for_bwrap_through_a_shell(self):
-        from tests.test_ai import AI, sim_registry, SimTarget
+        from tests.test_ai import AI, sim_registry, SimDriver
         from wk.machine import HAVE, Fake
         fake = Fake()
-        target = SimTarget(fake, {})
-        AI.Ai(str(REPO), {}, sim_registry({}, fake, target), target, "claude", "demo").wall_available()
-        self.assertEqual([" ".join(HAVE + ("bwrap",))], target.asked)
+        driver = SimDriver(fake, {})
+        AI.Ai(str(REPO), {}, sim_registry({}, fake, driver), driver, "claude", "demo").wall_available()
+        self.assertEqual([" ".join(HAVE + ("bwrap",))], driver.asked)
 
-    def test_no_bare_builtin_reaches_a_targets_exec(self):
+    def test_no_bare_builtin_reaches_a_places_exec(self):
         import re
         bad = re.compile(r'exec\([^,()]+, \[\s*"(command|type|alias|cd|builtin|source)"')
         files = [f for f in sorted((REPO / "cmd").iterdir()) if f.is_file()] + sorted((REPO / "lib" / "wk").rglob("*.py"))
-        self.assertIsNotNone(bad.search('target.exec(ws, ["command", "-v", "bwrap"])'))
+        self.assertIsNotNone(bad.search('place.exec(ws, ["command", "-v", "bwrap"])'))
         found = ["%s:%d" % (f.name, n) for f in files
                  for n, line in enumerate(f.read_text(errors="replace").splitlines(), 1) if bad.search(line)]
         self.assertEqual([], found)

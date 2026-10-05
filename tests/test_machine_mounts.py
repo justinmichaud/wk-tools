@@ -6,7 +6,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, container_side, requires_container_target, stub_path
+from tests.support import REPO, WkTest, container_side, requires_container_place, stub_path
 
 MACHINE_SH = REPO / "host" / "macos" / "machine.sh"
 
@@ -119,7 +119,7 @@ WK_ROOT={wk_root}
 . "{REPO}/host/macos/machine.sh"
 '''
         e = dict(os.environ)
-        for var in ("WK_NAME", "WK_TARGET", "WK_TARGET_KIND", "WK_MARKER",
+        for var in ("WK_NAME", "WK_PLACE", "WK_DRIVER", "WK_MARKER",
                     "WK_YES", "WK_STORE", "WK_IN_VM", "WK_DRY_RUN"):
             e.pop(var, None)
         e.update({
@@ -474,7 +474,7 @@ class TestAConfigItCannotReadIsRefused(_Stage):
         self.assertNotIn("machine rm", self.podman, self.podman)
 
 
-@requires_container_target()
+@requires_container_place()
 @unittest.skipUnless(sys.platform == "darwin", "the podman VM and its mounts are a macOS host's")
 class TestTheMountsAreThereOnThisMachine(unittest.TestCase):
     REMEDY = "run ./setup (it recreates the machine with the three mounts)"

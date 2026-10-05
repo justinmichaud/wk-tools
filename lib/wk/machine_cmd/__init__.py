@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from wk import fleet, reach, targets
+from wk import fleet, places, reach
 from wk.act import die, info, log, warn
 from wk.kv import ConfError
 from wk.machine import Local, Ssh
@@ -31,12 +31,12 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
         except ConfError as e:
             die(str(e))
 
-    def target(self, name, conf):
+    def driver(self, name, conf):
         try:
-            env = dict(self.env, **targets.conf_env(conf, self.fleet.path(name)))
+            env = dict(self.env, **places.conf_env(conf, self.fleet.path(name)))
         except LookupError as e:
             die(str(e))
-        t = targets.Remote(name, self.root, env, self.here)
+        t = places.Remote(name, self.root, env, self.here)
         if self.far is not None:
             t.machine = self.far
         return t
@@ -59,7 +59,7 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
                 die("'%s' has no conf yet (%s). A board's driver, device and partitions cannot be\n"
                     "    derived, so copy an existing board's conf (machines/rpi3.conf and its kin) and fill\n"
                     "    in this one's, then re-run 'wk machine setup %s'." % (name, self.rel(path), name))
-            if kind not in fleet.TARGET_KINDS:
+            if kind not in fleet.PLACE_KINDS:
                 die("--kind %s: 'wk machine setup' makes a build machine or a peer (--kind build | peer)" % kind)
             conf = fleet.parse_text(CONFS[kind] % {"name": name})
         elif kind and kind != conf["kind"]:
@@ -72,10 +72,10 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
             return self.setup_board(name, conf)
         if conf["kind"] == "mac":
             return self.setup_mac(name, conf)
-        if conf["kind"] not in fleet.TARGET_KINDS:
+        if conf["kind"] not in fleet.PLACE_KINDS:
             die("'%s' is a %s (%s): 'wk machine setup' sets up a build machine, a peer, a board or a Mac"
                 % (name, conf["kind"], self.rel(self.fleet.path(name))))
-        t = self.target(name, conf)
+        t = self.driver(name, conf)
         ok, why = t.answers()
         if not ok:
             die("cannot ssh to '%s' non-interactively: %s\n"
@@ -86,8 +86,8 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
         return self.setup_build(name, t, path, new)
 
     def board_machine(self, dest):
-        """The Fake a test hands the constructor, or a real ssh to `dest`: boards and Macs are not
-        Targets, so they take a Machine straight rather than through `target()`'s Remote wrapping."""
+        """The Fake a test hands the constructor, or a real ssh to `dest`: boards and Macs hold no
+        places, so they take a Machine straight rather than through `driver()`'s Remote wrapping."""
         return self.far if self.far is not None else Ssh(dest, timeout=reach.ssh_timeout(self.env), via=self.here)
 
     # -- rm
@@ -103,9 +103,9 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
         self.refuse_bridge_flags(conf, at)
         if conf["kind"] == "board":
             return self.rm_board(name, conf, path)
-        if conf["kind"] not in fleet.TARGET_KINDS:
+        if conf["kind"] not in fleet.PLACE_KINDS:
             die("'%s' is a %s (%s): 'wk machine rm' removes a build machine or a peer" % (name, conf["kind"], self.rel(path)))
-        return self.rm_target(name, conf, path)
+        return self.rm_machine(name, conf, path)
 
     # -- ls and probe
 
@@ -129,14 +129,14 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
     def answers(self, name, conf):
         """(True, "") or (False, why): a build machine or peer by its one probe, anything else by an ssh `true`, and
         a node the tailnet already reports down by that alone."""
-        if conf["kind"] in fleet.TARGET_KINDS:
-            return self.target(name, conf).answers()
+        if conf["kind"] in fleet.PLACE_KINDS:
+            return self.driver(name, conf).answers()
         dest = conf.get("ssh") or conf.get("ssh") or name
         down = self.reach.offline(dest)
         if down:
             return False, down
         r = Ssh(dest, timeout=reach.ssh_timeout(self.env), via=self.here).run(["true"], timeout=reach.ssh_timeout(self.env) + 5)
-        return (True, "") if r.ok else (False, targets.ssh_last_word(r))
+        return (True, "") if r.ok else (False, places.ssh_last_word(r))
 
     def probe_one(self, name, survey, as_json=False, out=None):
         out = out or sys.stdout

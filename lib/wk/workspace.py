@@ -1,4 +1,4 @@
-"""`wk new` and `wk rm` as flows over a Target, a Records, a Lock and a Clock.
+"""`wk new` and `wk rm` as flows over a Driver, a Records, a Lock and a Clock.
 
 `new` is two halves: the front refuses on the terminal, detaches the driver
 and follows its record; the driver does everything that changes anything,
@@ -13,12 +13,12 @@ import re
 import shlex
 import sys
 
-from wk import act, buildconf, job, kv, record, sshalias
+from wk import act, job, kv, presets, record, sshalias
 from wk.act import Refused, die, info, log, warn
 from wk.machine import Killed, in_podman_machine
 from wk.pr import checkout as pr_checkout, parse_spec
 from wk.store import Snapshots, no_such_workspace
-from wk.targets import show
+from wk.places import show
 
 PLAN = ("checking", "wipe", "base", "create", "init", "agents", "fetch", "register")
 NEW_TIMEOUT = 3600
@@ -77,10 +77,10 @@ def remove_task_records(records, name):
         records.machine.remove(str(t.path))
 
 
-def creation_state(target, records, name):
-    """`Target.state`, except that a present workspace whose creation driver failed or died without a verdict is still
+def creation_state(driver, records, name):
+    """`Driver.state`, except that a present workspace whose creation driver failed or died without a verdict is still
     creating: it was never announced ready, so nothing in it is worth keeping and "already exists" is not the answer."""
-    state = target.state(name)
+    state = driver.state(name)
     if state != "present":
         return state
     t = records.find("new", name)
@@ -103,19 +103,19 @@ def new_front(reg, records, name, opts):
     pr = opts.get("pr")
     if pr is not None and not pr:
         die("--pr needs a spec: <user>:<branch>, <n>, or wpe:<n>")
-    arch = buildconf.arch_canon(opts.get("arch") or "native")
-    tname = opts.get("target") or reg.default()
+    arch = presets.arch_canon(opts.get("arch") or "native")
+    tname = opts.get("place") or reg.default()
     try:
-        target = reg.load(tname)
+        driver = reg.load(tname)
     except LookupError as e:
         die(str(e))
-    if target.kind == "remote" and (target.peer or not target.is_local):
-        return new_handed_over(target, here, root, name, arch, opts)
-    recs = record.of_target(target, records.clock, records.machine)
+    if driver.kind == "remote" and (driver.peer or not driver.is_local):
+        return new_handed_over(driver, here, root, name, arch, opts)
+    recs = record.of_driver(driver, records.clock, records.machine)
     if opts.get("kill"):
-        return new_kill(target, here, recs, env, name, opts)
-    if arch != "native" and target.kind != "container":
-        die("--arch %s is a container-only capability (this is target '%s').\n"
+        return new_kill(driver, here, recs, env, name, opts)
+    if arch != "native" and driver.kind != "container":
+        die("--arch %s is a container-only capability (this is place '%s').\n"
             "    32-bit ARM needs a host that can execute it: this Neoverse-N1 runs AArch32\n"
             "    at EL0, and Apple Silicon does not, which is why it lives on the Linux\n"
             "    workstation permanently." % (arch, tname))
@@ -124,13 +124,13 @@ def new_front(reg, records, name, opts):
             die("--pr needs the workspace to be ready, and --no-wait returns before it is.\n"
                 "    Drop --no-wait, or check it out afterwards:  wk pr %s %s" % (name, pr))
         parse_spec(pr)
-    if target.kind == "local":
-        target.create(name)
-    target.store_init()
-    log_path = target.create_log(name)
-    st = creation_state(target, recs, name)
+    if driver.kind == "local":
+        driver.create(name)
+    driver.store_init()
+    log_path = driver.create_log(name)
+    st = creation_state(driver, recs, name)
     if st == "present":
-        die("workspace '%s' already exists (target '%s').\n    'wk rm %s' first, or pick another name." % (name, tname, name))
+        die("workspace '%s' already exists (place '%s').\n    'wk rm %s' first, or pick another name." % (name, tname, name))
     if st == "broken":
         die("'%s' is a record without an environment -- something outside wk removed\n"
             "    the %s side of it. 'wk status %s' says so; 'wk rm %s' clears it." % (name, tname, name, name))
@@ -138,17 +138,17 @@ def new_front(reg, records, name, opts):
         t = recs.find("new", name)
         if t is not None and t.alive(None):
             die("'%s' is already being created (pid %s, at stage\n    '%s'). Follow it:      tail -f %s\n"
-                "    Or ask for it and wait:  wk enter %s --zed   /   wk build %s <config>"
+                "    Or ask for it and wait:  wk enter %s --zed   /   wk build %s <preset>"
                 % (name, t.field("pid"), " ".join(t.stage()), t.field("log"), name, name))
     base = opts.get("base") or ""
     if act.dry_run():
         from wk.lock import Lock
-        new_driver(target, recs, Lock(target.store, here, recs.clock), recs.clock, name, base, arch)
+        new_driver(driver, recs, Lock(driver.store, here, recs.clock), recs.clock, name, base, arch)
         return 0
     since = recs.clock.stamp()
     here.mkdir(os.path.dirname(log_path))
     here.write(log_path, "")
-    argv = [wk_of(root), "new", name, "--target", tname, "--arch", arch] + (["--base", base] if base else []) + ["--_detached"]
+    argv = [wk_of(root), "new", name, "--on", tname, "--arch", arch] + (["--base", base] if base else []) + ["--_detached"]
     pid = here.spawn(argv, log_path)
     if opts.get("no_wait"):
         info("creating '%s' on %s, detached as pid %d -- this end can go away" % (name, tname, pid))
@@ -162,7 +162,7 @@ def new_front(reg, records, name, opts):
     if st == "crashed":
         die("the process creating '%s' is gone without having said how it ended.\n"
             "    Whatever it left is half-made, and a re-run destroys it and starts again:\n"
-            "        wk new %s --target %s\n    What it managed to say is in %s" % (name, name, tname, log_path))
+            "        wk new %s --on %s\n    What it managed to say is in %s" % (name, name, tname, log_path))
     if st == "refused":
         die("'%s' was not created, and nothing was left half-made: the reason is\n    above, in full in %s" % (name, log_path))
     if st == "timeout":
@@ -170,11 +170,11 @@ def new_front(reg, records, name, opts):
             "    %s says what it is doing. Nothing here was undone." % (name, timeout, name, log_path))
     if st != "ok":
         die("creating '%s' failed (%s) -- the reason is above, in full in %s.\n"
-            "    A re-run destroys what is there and starts again:  wk new %s --target %s" % (name, st, log_path, name, tname))
+            "    A re-run destroys what is there and starts again:  wk new %s --on %s" % (name, st, log_path, name, tname))
     info("workspace '%s' ready%s" % (name, "" if arch == "native" else " (%s)" % arch))
     if pr:
-        pr_checkout(target, here, name, pr)
-    new_hints(target, name, arch)
+        pr_checkout(driver, here, name, pr)
+    new_hints(driver, name, arch)
     if opts.get("zed"):
         open_zed(here, root, name)
     return 0
@@ -187,53 +187,53 @@ def open_zed(here, root, name):
         warn("'%s' is there; opening it in Zed is what failed (above) -- 'wk zed %s' retries" % (name, name))
 
 
-def new_handed_over(target, here, root, name, arch, opts):
-    """A machine that runs wk for itself makes its own workspaces and keeps their records: its `wk new`, at its own default target."""
-    if target.is_local:
+def new_handed_over(driver, here, root, name, arch, opts):
+    """A machine that runs wk for itself makes its own workspaces and keeps their records: its `wk new`, at its own default place."""
+    if driver.is_local:
         die("'%s' is this machine, and its workspaces are made at its own default\n"
-            "    target:  wk new %s" % (target.name, name))
+            "    place:  wk new %s" % (driver.name, name))
     if opts.get("base"):
         die("--base names a snapshot in this machine's store, and %s makes '%s' from its own:\n"
-            "    drop --base" % (target.name, name))
+            "    drop --base" % (driver.name, name))
     args = [name] + (["--arch", arch] if arch != "native" else [])
     if opts.get("pr"):
         args += ["--pr", opts["pr"]]
     args += [flag for key, flag in (("no_wait", "--no-wait"), ("kill", "--kill")) if opts.get(key)]
-    r = here.act_run(target.hand_over("new", args, tty=os.isatty(0) and os.isatty(1)), tty=True)
+    r = here.act_run(driver.hand_over("new", args, tty=os.isatty(0) and os.isatty(1)), tty=True)
     if not r.ok:
-        die("%s did not create '%s'; what its own wk said is above." % (target.name, name), status=r.rc)
+        die("%s did not create '%s'; what its own wk said is above." % (driver.name, name), status=r.rc)
     if opts.get("zed"):
         open_zed(here, root, name)
     return 0
 
 
-def new_hints(target, name, arch):
+def new_hints(driver, name, arch):
     if arch != "native":
         log("  %s: native 32-bit, no GPU. 'wk bench' will run CPU-class plans" % arch)
         log("  in here and refuse GPU-class ones.")
-    if target.kind == "vm":
+    if driver.kind == "vm":
         log("  wk start %s       boot it (its ssh alias is written then)" % name)
         log("  wk zed %s            the checkout, in Zed (once it is up)" % name)
         log("  wk build %s mac-release" % name)
-    elif target.kind == "remote":
-        log("  wk build %s <config> build (polite: sized from that machine's load)" % name)
+    elif driver.kind == "remote":
+        log("  wk build %s <preset> build (polite: sized from that machine's load)" % name)
         log("  wk enter %s          shell, in the checkout" % name)
-        if target.host:
-            log("  wk zed %s            the checkout, in Zed (ssh://%s%s)" % (name, target.host, target.src(name)))
+        if driver.host:
+            log("  wk zed %s            the checkout, in Zed (ssh://%s%s)" % (name, driver.host, driver.src(name)))
         log("")
         log("  no sandbox on a shared machine, so 'wk ai claude' and 'wk doctor <ws>' refuse.")
     else:
         log("  wk enter %s          shell" % name)
-        log("  wk build %s <config> build" % name)
+        log("  wk build %s <preset> build" % name)
         log("  wk ai claude %s      sandboxed agent" % name)
         log("  wk zed %s            the checkout, in Zed" % name)
 
 
-def new_kill(target, here, records, env, name, opts):
+def new_kill(driver, here, records, env, name, opts):
     if any(opts.get(k) for k in ("pr", "zed", "no_wait", "base")):
         die("'wk new %s --kill' stops the creation already running and takes\n"
             "    nothing with it -- no --base, --zed, --no-wait or --pr." % name)
-    stopped = job.stop(target, records, name, "new", here, records.clock, env)
+    stopped = job.stop(driver, records, name, "new", here, records.clock, env)
     if stopped == 1:
         die("the process creating '%s' outlived a TERM and a KILL. It holds the\n"
             "    workspace lock, so nothing else can touch '%s' until it is gone:\n        ps -p %s"
@@ -243,23 +243,23 @@ def new_kill(target, here, records, env, name, opts):
     return 0
 
 
-def new_driver(target, records, lock, clock, name, base, arch):
+def new_driver(driver, records, lock, clock, name, base, arch):
     """PLAN's steps under the workspace lock: a refusal ends the record `refused`, any other failure 1."""
     here = records.machine
-    if target.kind == "container":
+    if driver.kind == "container":
         with lock.held("sdk"):
-            target.sdk_refresh()
+            driver.sdk_refresh()
     lock.hold("ws-" + name)
-    if target.reads_host_mirror:
-        refresh_mirror(target, here, name)
-    if target.needs_base:
+    if driver.reads_host_mirror:
+        refresh_mirror(driver, here, name)
+    if driver.needs_base:
         lock.hold("store")
-    state = creation_state(target, records, name)
+    state = creation_state(driver, records, name)
     task = None
     if not act.dry_run():
-        task = records.begin("new", "here", name, "wk new %s --kill" % name, target.create_log(name), list(PLAN))
+        task = records.begin("new", "here", name, "wk new %s --kill" % name, driver.create_log(name), list(PLAN))
     try:
-        _create(target, records, task, clock, name, base, arch, state)
+        _create(driver, records, task, clock, name, base, arch, state)
     except Killed:
         raise
     except Refused as e:
@@ -278,8 +278,8 @@ def new_driver(target, records, lock, clock, name, base, arch):
 
 
 # Before the store lock, which `wk sync --mirror` takes for itself; a refresh that moves a ref remounts each running guest's shares.
-def refresh_mirror(target, here, name):
-    r = here.act_run([wk_of(target.root), "sync", "--mirror"])
+def refresh_mirror(driver, here, name):
+    r = here.act_run([wk_of(driver.root), "sync", "--mirror"])
     show(r)
     if not r.ok:
         die("the mirror refresh did not finish (above), so '%s' was not created.\n    Fix that:  wk sync --mirror   then  wk new %s" % (name, name))
@@ -290,8 +290,8 @@ def _end(task, status):
         task.end(status)
 
 
-def _create(target, records, task, clock, name, base, arch, state):
-    here, tname = records.machine, target.name
+def _create(driver, records, task, clock, name, base, arch, state):
+    here, tname = records.machine, driver.name
 
     def stage(step):
         if task is not None:
@@ -303,33 +303,33 @@ def _create(target, records, task, clock, name, base, arch, state):
 
     stage("checking")
     if state == "present":
-        refuse("workspace '%s' already exists (target '%s').\n    'wk rm %s' first, or pick another name." % (name, tname, name))
+        refuse("workspace '%s' already exists (place '%s').\n    'wk rm %s' first, or pick another name." % (name, tname, name))
     if state == "broken":
         refuse("'%s' is a record without an environment: creation finished, and the\n"
                "    %s side of it is gone -- something outside wk removed it. Its layer\n"
                "    may still hold work, so this will not wipe it for you:\n"
                "        wk rm %s     then 'wk new %s' to start again" % (name, tname, name, name))
     if state == "unreachable":
-        refuse("cannot reach the machine behind target '%s', so whether '%s' is\n"
+        refuse("cannot reach the machine behind place '%s', so whether '%s' is\n"
                "    already there cannot be known -- and creating it blind could clobber a\n"
                "    workspace of the same name. Try again when the machine answers." % (tname, name))
     if state == "creating":
         stage("wipe")
         warn("'%s' exists but was never finished -- destroying it and starting again" % name)
         log("  (an interrupted 'wk new' leaves this; nothing in it is worth keeping)")
-        target.destroy(name)
-        left = leftovers(target, here, name)
+        driver.destroy(name)
+        left = leftovers(driver, here, name)
         if left:
             die("could not destroy the half-made workspace '%s'; still here:%s\n"
                 "    'wk rm %s' retries exactly that, then 'wk new %s'" % (name, left, name, name))
-        sshalias.alias_remove(here, target.env, name)
-    if target.needs_base:
+        sshalias.alias_remove(here, driver.env, name)
+    if driver.needs_base:
         stage("base")
-        mirror = target.store.mirror_dir()
+        mirror = driver.store.mirror_dir()
         if not here.isdir(mirror):
             die("no WebKit mirror at %s, and every snapshot borrows its objects:\n"
                 "    wk sync    makes it, then publishes a snapshot to build a workspace from." % mirror)
-        bases = Snapshots(target.store, here)
+        bases = Snapshots(driver.store, here)
         base = base or bases.current()
         if not base:
             die("no snapshot this machine can build a workspace from:  wk sync\n"
@@ -339,17 +339,17 @@ def _create(target, records, task, clock, name, base, arch, state):
         if why:
             die(why)
     stage("create")
-    target.create(name, base, arch)
+    driver.create(name, base, arch)
     stage("init")
-    if not act.dry_run() and not target.ready(name, clock):
+    if not act.dry_run() and not driver.ready(name, clock):
         die("'%s' was created but never finished initialising -- the push\n"
             "    keys, the lldb config and the shell rc are set up at first\n"
             "    start, and something above went wrong before the end of it.\n"
             "    Nothing here is worth repairing:  wk new %s    (destroys it and retries)" % (name, name))
     stage("agents")
-    target.install_agents(name)
+    driver.install_agents(name)
     stage("fetch")
-    freshen(target, name, here)
+    freshen(driver, name, here)
     stage("register")
 
 
@@ -365,14 +365,14 @@ def checkout_script(src):
     return "cd %s || exit 2\n" % shlex.quote(src) + CHECKOUT_SCRIPT
 
 
-def freshen(target, name, here):
+def freshen(driver, name, here):
     """Fetch the checkout from the mirror beside its snapshot and fast-forward onto it. Never fatal."""
-    wk = wk_of(target.root)
+    wk = wk_of(driver.root)
     if act.dry_run():
         here.act_run([wk, "sync", name])
         return
-    mirror = shlex.quote(target.mirror_dir())
-    r = target.exec(name, ["sh", "-c", "[ -n %s ] && [ -d %s ] && echo yes || echo no" % (mirror, mirror)])
+    mirror = shlex.quote(driver.mirror_dir())
+    r = driver.exec(name, ["sh", "-c", "[ -n %s ] && [ -d %s ] && echo yes || echo no" % (mirror, mirror)])
     lines = r.out.replace("\r", "").splitlines() if r.ok else []
     source = fetch_from(lines[-1].strip() if lines else "")
     if source == "mirror":
@@ -388,7 +388,7 @@ def freshen(target, name, here):
         info("nothing to run in '%s' yet, so its checkout was not fetched in" % name)
         log("  wk sync %s    once it is up" % name)
         return
-    r = target.exec(name, ["sh", "-c", checkout_script(target.src(name))])
+    r = driver.exec(name, ["sh", "-c", checkout_script(driver.src(name))])
     said = kv.kv(r.out if r.ok else "")
     if said.get("detached"):
         warn("'%s' is not on a branch (detached at %s), so 'git status',\n"
@@ -413,23 +413,23 @@ def freshen(target, name, here):
 
 
 def rm_plan(reg, records, name):
-    """(target, "workspace" | "record"), mutating nothing; Refused(1) absent, Refused(2) unreachable."""
+    """(driver, "workspace" | "record"), mutating nothing; Refused(1) absent, Refused(2) unreachable."""
     try:
-        tname = reg.ws_target(name)
-        target = reg.load(tname)
+        tname = reg.ws_place(name)
+        driver = reg.load(tname)
     except LookupError as e:
         die(str(e))
-    if reg.machine.isdir(target.store.ws_dir(name)):
-        return target, "workspace"
-    ok, why = target.answers()
+    if reg.machine.isdir(driver.store.ws_dir(name)):
+        return driver, "workspace"
+    ok, why = driver.answers()
     if not ok:
         act.err("'%s' has no record here, and %s did not answer: %s\n"
                 "    Nothing this end can see is there to destroy; re-run once %s answers." % (name, tname, why, tname))
         raise Refused(2)
-    if target.info(name) != "absent":
-        return target, "workspace"
-    if record.of_target(target, records.clock, records.machine).find("new", name) is not None:
-        return target, "record"
+    if driver.info(name) != "absent":
+        return driver, "workspace"
+    if record.of_driver(driver, records.clock, records.machine).find("new", name) is not None:
+        return driver, "record"
     for other in reg.all():
         if other == tname:
             continue
@@ -437,61 +437,61 @@ def rm_plan(reg, records, name):
             t = reg.load(other)
         except LookupError:
             continue
-        if record.of_target(t, records.clock, records.machine).find("new", name) is not None:
+        if record.of_driver(t, records.clock, records.machine).find("new", name) is not None:
             return t, "record"
     raise Refused(1)
 
 
-def leftovers(target, here, name):
+def leftovers(driver, here, name):
     if act.dry_run():
         return ""
     left = ""
-    if target.info(name) != "absent":
-        left += " the %s environment" % target.name
-    ws = target.store.ws_dir(name)
+    if driver.info(name) != "absent":
+        left += " the %s environment" % driver.name
+    ws = driver.store.ws_dir(name)
     if here.isdir(ws):
         left += " " + ws
     return left
 
 
-def _forget(target, records, here, name):
+def _forget(driver, records, here, name):
     """The alias and the log first and the record last: a record that outlives them is what a re-run finds."""
-    sshalias.alias_remove(here, target.env, name)
-    here.remove(target.create_log(name))
+    sshalias.alias_remove(here, driver.env, name)
+    here.remove(driver.create_log(name))
     remove_task_records(records, name)
 
 
-def rm_one(target, records, lock, name, what):
+def rm_one(driver, records, lock, name, what):
     """Destroy one workspace, or forget one that is nothing but a record. 0 destroyed, 1 not fully."""
     here = records.machine
-    recs = record.of_target(target, records.clock, records.machine)
+    recs = record.of_driver(driver, records.clock, records.machine)
     if what == "record":
         lock.hold("ws-" + name)
-        _forget(target, recs, here, name)
+        _forget(driver, recs, here, name)
         info("'%s' had nothing left but its record; forgotten" % name)
         return 0
-    if target.kind == "local":
-        target.destroy(name)
+    if driver.kind == "local":
+        driver.destroy(name)
     live = live_task_lines(recs, name)
     if live:
         die("'%s' has work running in it, and destroying it under a running job\n"
             "    leaves that job compiling into a directory that is gone:\n%s" % (name, live))
     lock.hold("ws-" + name)
-    if target.needs_base:
+    if driver.needs_base:
         lock.hold("store")
-    ws = target.store.ws_dir(name)
+    ws = driver.store.ws_dir(name)
     changes = os.path.join(ws, "changes")
     if here.isdir(changes):
         n = len(here.run(["find", changes, "-type", "f"]).out.splitlines())
         if n:
             warn("%s has %d modified file(s) in its overlay" % (name, n))
-    target.destroy(name)
-    left = leftovers(target, here, name)
+    driver.destroy(name)
+    left = leftovers(driver, here, name)
     if left:
         warn("'%s' was not fully destroyed; still here:%s" % (name, left))
         log("  re-run 'wk rm %s' -- what is left is exactly what it will find and retry" % name)
         return 1
-    _forget(target, recs, here, name)
+    _forget(driver, recs, here, name)
     if not act.dry_run():
         info("workspace '%s' destroyed" % name)
     return 0
@@ -508,10 +508,10 @@ def unsaved_results(reg, found):
     if reg.in_remote_host() or in_podman_machine() and record.host_self(reg.env):
         return []   # the workstation that handed `wk rm` over (refuse_unsaved_before_forward) read its own zips first
     out = []
-    for n, target, what in found:
-        if getattr(target, "peer", False):
+    for n, driver, what in found:
+        if getattr(driver, "peer", False):
             continue   # its destroy runs the peer's own `wk rm`, which reads the exports there
-        at = target.results(n) if what != "record" else None
+        at = driver.results(n) if what != "record" else None
         if at:
             out += [(n, t, why) for t, why in bench_record.unexported(at[0], at[1], os.path.join(reg.store.home(), "Downloads"))]
     return out
@@ -526,8 +526,8 @@ def refuse_unsaved(reg, found):
 
 def refuse_unsaved_before_forward(reg, names):
     """A Mac's container removal runs in the podman machine, which cannot read a zip here, so this host reads them first."""
-    target = reg.load("container")
-    refuse_unsaved(reg, [(n, target, "workspace") for n in names])
+    driver = reg.load("container")
+    refuse_unsaved(reg, [(n, driver, "workspace") for n in names])
 
 
 def rm_names(reg, records, names):
@@ -547,10 +547,10 @@ def rm_names(reg, records, names):
         return worst
     refuse_unsaved(reg, found)
     confirm_destroy(len(found), "\n".join("    %s@%s" % (n, t.name) for n, t, _ in found))
-    for n, target, what in found:
-        lock = Lock(target.store, records.machine, records.clock)
+    for n, driver, what in found:
+        lock = Lock(driver.store, records.machine, records.clock)
         try:
-            worst = max(worst, rm_one(target, records, lock, n, what))
+            worst = max(worst, rm_one(driver, records, lock, n, what))
         except Refused as e:
             worst = max(worst, e.status)
         finally:
@@ -559,24 +559,24 @@ def rm_names(reg, records, names):
 
 
 def all_workspaces(reg, records):
-    """`wk ls`'s rows as (target, name): a row another machine's wk answered carries its label, which is this machine's target for it."""
+    """`wk ls`'s rows as (place, name): a row another machine's wk answered carries its label, which is this machine's place for it."""
     r = reg.machine.run([wk_of(reg.root), "ls", "--json"])
     if not r.ok:
         die("'wk ls --json' did not answer with the workspaces to destroy, so\n    nothing here knows what every workspace is")
     label = record.machine_name(reg.env, records.machine) + ":"
     rows = []
     for w in json.loads(r.out).get("workspaces", []):
-        target, name = w.get("target", ""), w.get("name", "")
-        if target.startswith(label):
-            target = target[len(label):]
-        target = target.split(":")[0]
-        if target and name:
-            rows.append((target, name))
+        place, name = w.get("place", ""), w.get("name", "")
+        if place.startswith(label):
+            place = place[len(label):]
+        place = place.split(":")[0]
+        if place and name:
+            rows.append((place, name))
     return rows
 
 
 def rm_all(reg, records):
-    """Every workspace `wk ls` finds, asked once as <name>@<target>, each through the one path a named removal takes."""
+    """Every workspace `wk ls` finds, asked once as <name>@<place>, each through the one path a named removal takes."""
     rows = all_workspaces(reg, records)
     if not rows:
         info("no workspaces -- nothing to destroy")
@@ -584,7 +584,7 @@ def rm_all(reg, records):
     confirm_destroy(len(rows), "\n".join("    %s@%s" % (n, t) for t, n in rows))
     worst = 0
     for t, n in rows:
-        worst = max(worst, reg.machine.act_run(["env", "WK_TARGET=%s" % t, wk_of(reg.root), "rm", n, "--yes"],
+        worst = max(worst, reg.machine.act_run(["env", "WK_PLACE=%s" % t, wk_of(reg.root), "rm", n, "--yes"],
                                                input="", stream=True).rc)
     return worst
 
@@ -593,12 +593,12 @@ SELFTEST_PREFIX = "wk-test-"
 
 
 def rubble(listed, stored, here, root, selftest_live, clock):
-    """`listed`: the targets whose environments this process lists; `stored`: those whose store it reads."""
+    """`listed`: the places whose environments this process lists; `stored`: those whose store it reads."""
     from wk.rubble import remover, row
     rows = []
 
     def rm(t, n):
-        return lambda: here.act_run(["env", "WK_TARGET=%s" % t.name, wk_of(root), "rm", n, "--yes"]).ok
+        return lambda: here.act_run(["env", "WK_PLACE=%s" % t.name, wk_of(root), "rm", n, "--yes"]).ok
 
     def names(t):
         try:
@@ -608,7 +608,7 @@ def rubble(listed, stored, here, root, selftest_live, clock):
         return sorted(set(dirs) | {n for n, _ in t.list()})
 
     for t in stored:
-        recs = record.of_target(t, clock, here)
+        recs = record.of_driver(t, clock, here)
         for task in recs.list():
             n = task.field("name")
             if task.field("kind") != "new" or task.alive(None) or any(here.isdir(s.store.ws_dir(n)) for s in stored):

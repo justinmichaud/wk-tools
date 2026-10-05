@@ -1,5 +1,5 @@
-"""The macOS perf build: `mac-release-pgo`, the config every macOS number is
-taken from (lib/wk/buildconf.py, build/mac-pgo.sh, lib/wk/bench/mac.py's PgoCollect,
+"""The macOS perf build: `mac-release-pgo`, the preset every macOS number is
+taken from (lib/wk/presets.py, build/mac-pgo.sh, lib/wk/bench/mac.py's PgoCollect,
 build/pgo-run-benchmark.py)."""
 import contextlib
 import io
@@ -13,16 +13,16 @@ from tests.support import REPO, WkTest, run, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
 from tests.test_bench_mac import StubWatch  # noqa: E402
-from wk import buildconf, pgo, screen as wkscreen  # noqa: E402
+from wk import pgo, presets, screen as wkscreen  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import mac, seed  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
-CONFIG = "mac-release-pgo"
+PRESET = "mac-release-pgo"
 
 
-def config(name, os_name="macos"):
-    return buildconf.resolve(name, os_name, "vm", {})
+def preset(name, os_name="macos"):
+    return presets.resolve(name, os_name, "vm", {})
 
 
 def pgo_dry_run(tmp):
@@ -42,28 +42,28 @@ def pgo_dry_run(tmp):
         "WK_PGO_DIR": str(src / "WebKitBuild" / "Release-pgo-profile"),
         "WK_NO_COMPILE_COMMANDS": "1",
     })
-    return subprocess.run(["bash", str(REPO / "build" / "build-in-target.sh")],
+    return subprocess.run(["bash", str(REPO / "build" / "build-in-workspace.sh")],
                           capture_output=True, text=True, env=env, timeout=60)
 
 
 class TestTheConfig(WkTest):
     def test_it_is_listed_so_a_reader_can_find_it(self):
         cp = run("build", "--list")
-        self.assertIn(CONFIG, cp.stdout + cp.stderr)
+        self.assertIn(PRESET, cp.stdout + cp.stderr)
 
     def test_it_is_an_xcode_config_that_asks_for_a_profile(self):
-        c = config(CONFIG)
+        c = preset(PRESET)
         self.assertEqual((c.buildsys, c.pgo, c.args), ("xcode", True, "--release"))
 
     def test_its_products_never_share_a_directory_with_the_plain_release(self):
-        pgo_dir = config(CONFIG).build_dir()
-        self.assertNotEqual(pgo_dir, config("mac-release").build_dir())
-        self.assertNotEqual(pgo_dir, config("mac-release-asan").build_dir())
+        pgo_dir = preset(PRESET).build_dir()
+        self.assertNotEqual(pgo_dir, preset("mac-release").build_dir())
+        self.assertNotEqual(pgo_dir, preset("mac-release-asan").build_dir())
         self.assertTrue(pgo_dir.endswith("Release-pgo"), pgo_dir)
 
     def test_a_linux_workspace_is_told_it_cannot_build_it(self):
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
-            config(CONFIG, "linux")
+            preset(PRESET, "linux")
         self.assertIn("Xcode", err.getvalue())
 
 

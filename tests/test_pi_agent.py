@@ -230,7 +230,7 @@ class TestTheShellExportsEveryName(WkTest):
     SHELLS = {
         "editor terminal pane": ("zsh", ["-i", "-c"]),
         "login zsh": ("zsh", ["-l", "-c"]),
-        "bash -lc (every Target.exec)": ("bash", ["-lc"]),
+        "bash -lc (every Driver.exec)": ("bash", ["-lc"]),
         "non-interactive bash": ("bash", ["-c"]),
     }
 

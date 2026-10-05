@@ -1,4 +1,4 @@
-"""Registry.ws_target derives a workspace's target from evidence -- its store directory, or a live `wk new` record --
+"""Registry.ws_place derives a workspace's place from evidence -- its store directory, or a live `wk new` record --
 and the completion list walks the same stores."""
 import os
 import sys
@@ -8,7 +8,7 @@ import unittest
 from tests.support import REPO, rand_suffix
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import completion, targets  # noqa: E402
+from wk import completion, places  # noqa: E402
 from wk.record import Records  # noqa: E402
 
 
@@ -25,12 +25,12 @@ class RegistryTest(unittest.TestCase):
                 "WK_MACHINES_DIR": self.machines, "WK_STORE": os.path.join(self.tmp, "store"),
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
         base.update(env)
-        return targets.Registry(REPO, env=base)
+        return places.Registry(REPO, env=base)
 
 
-class TestWsTargetDerivesFromTheStore(RegistryTest):
+class TestWsPlaceDerivesFromTheStore(RegistryTest):
     def test_ws_target_resolves_an_unknown_name_to_container(self):
-        self.assertEqual(self.registry().ws_target(f"nowhere-{rand_suffix()}"), "container")
+        self.assertEqual(self.registry().ws_place(f"nowhere-{rand_suffix()}"), "container")
 
     def _creating(self, name, pid):
         store = os.path.join(self.tmp, "fakebox-store")
@@ -43,15 +43,15 @@ class TestWsTargetDerivesFromTheStore(RegistryTest):
     def test_ws_target_resolves_a_live_creating_record_to_its_target(self):
         name = f"creating-{rand_suffix()}"
         self._creating(name, os.getpid())
-        self.assertEqual(self.registry().ws_target(name), "fakebox")
+        self.assertEqual(self.registry().ws_place(name), "fakebox")
 
     def test_ws_target_ignores_a_dead_creating_record(self):
         name = f"dead-{rand_suffix()}"
         self._creating(name, 4194304)
-        self.assertEqual(self.registry().ws_target(name), "container")
+        self.assertEqual(self.registry().ws_place(name), "container")
 
 
-class TestTargetAllReadsTheMachineRegistry(RegistryTest):
+class TestPlaceAllReadsTheMachineRegistry(RegistryTest):
     """`Registry.all`: the built-ins plus one entry per conf in WK_MACHINES_DIR."""
 
     def builtins(self, reg):

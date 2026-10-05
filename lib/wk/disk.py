@@ -6,7 +6,7 @@ import os
 import shlex
 import sys
 
-from wk import gc, kv, rubble, targets
+from wk import gc, kv, places, rubble
 from wk.act import log
 from wk.machine import Local
 from wk.store import Store
@@ -122,7 +122,7 @@ def machine_report(root, reg):
         rep.section("the podman VM (container workspaces)")
         mdir = os.path.join(DATA, "containers", "podman", "machine")
         images = glob.glob(os.path.join(mdir, "*", vm_name + "-*.raw")) + glob.glob(os.path.join(mdir, "*", vm_name + ".raw"))
-        ceiling = ((targets.podman_vm(here, vm_name) or {}).get("Resources") or {}).get("DiskSize") or "?"
+        ceiling = ((places.podman_vm(here, vm_name) or {}).get("Resources") or {}).get("DiskSize") or "?"
         for f in images:
             rep.row(kb(f), "disk image", "sparse, %s GB ceiling; grows, never shrinks" % ceiling)
         if not images:
@@ -147,7 +147,7 @@ def machine_report(root, reg):
         rep.render(probe_store(store), add=True)
     tart_home = guestbase.tart_home(os.environ)
     if macos_host and os.path.isdir(tart_home):
-        rep.section("macOS guests (vm target, %s)" % tart_home)
+        rep.section("macOS guests (vm place, %s)" % tart_home)
         base = reg.load("vm").base() if reg.vm_listed() else None
         for d in sorted(glob.glob(os.path.join(tart_home, "vms", "*"))):
             if not os.path.isdir(d):

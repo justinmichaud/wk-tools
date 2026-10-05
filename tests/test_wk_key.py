@@ -14,7 +14,7 @@ import shlex
 import unittest
 from unittest import mock
 
-from tests.fakes import FakeRegistry, FakeTarget
+from tests.fakes import FakeRegistry, FakeDriver
 from tests.killpoints import converges
 from tests.test_wk_secrets import ROOT, SECRETFILE, SecretsTest, World
 
@@ -198,7 +198,7 @@ class KeyTest(SecretsTest):
 
     def key(self, w=None, rotate=False, tty=False, typed="", boxes=()):
         w = w or self.w
-        reg = FakeRegistry(w.env, w, lambda n, e: FakeTarget(n, peer=n in w.peers, machine=w), names=sorted(list(w.peers) + list(boxes)))
+        reg = FakeRegistry(w.env, w, lambda n, e: FakeDriver(n, peer=n in w.peers, machine=w), names=sorted(list(w.peers) + list(boxes)))
         return cli.Key(ROOT, env=w.env, machine=w, reg=reg, sec=w.sec(), tty=lambda: tty,
                        prompt=lambda *a: typed or None, out=io.StringIO(), rotate=rotate)
 
@@ -499,10 +499,10 @@ class TestTheDeclaration(unittest.TestCase):
             self.assertTrue(self.d.is_readonly(v), v)
 
     def test_each_subverb_takes_its_own_options(self):
-        self.assertEqual(["sudo", "status", "--target=box"], self.check("sudo", "status", "--target", "box"))
+        self.assertEqual(["sudo", "status", "--on=box"], self.check("sudo", "status", "--on", "box"))
         self.assertEqual(["backup", "--candidates"], self.check("backup", "--candidates"))
         with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(2, self.check("backup", "--target", "box"))
+            self.assertEqual(2, self.check("backup", "--on", "box"))
             self.assertEqual(2, self.check("sudo", "status", "--candidates"))
             self.assertEqual(2, self.check("sudo", "status", "extra"))
 

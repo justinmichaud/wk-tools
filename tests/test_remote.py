@@ -1,4 +1,4 @@
-"""A configured machine name resolves as a target and its driver answers; a fan-out names a machine that is down."""
+"""A configured machine name resolves as a place and its driver answers; a fan-out names a machine that is down."""
 import contextlib
 import io
 import os
@@ -10,7 +10,7 @@ from unittest import mock
 from tests.support import REAL_MACHINES, REPO, WkTest, live_selected, machine_reachable, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import sudo, targets  # noqa: E402
+from wk import places, sudo  # noqa: E402
 
 
 class TestUnregisteredWorkspaceResolves(WkTest):
@@ -29,9 +29,9 @@ class TestUnregisteredWorkspaceResolves(WkTest):
             f"root={root}\n"
             f"store={store}\n"
         )
-        reg = targets.Registry(REPO, env=dict(os.environ, WK_MACHINES_DIR=str(registry),
+        reg = places.Registry(REPO, env=dict(os.environ, WK_MACHINES_DIR=str(registry),
                                               XDG_STATE_HOME=str(self.tmp / "state")))
-        self.assertEqual(reg.ws_target("tws"), "fakebox")
+        self.assertEqual(reg.ws_place("tws"), "fakebox")
 
 
 class TestMachineAnswers(WkTest):
@@ -51,7 +51,7 @@ class TestMachineAnswers(WkTest):
                 contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(out):
             env = dict(os.environ, WK_MACHINES_DIR=str(self._registry(conf)),
                        XDG_STATE_HOME=str(self.tmp / "state"), WK_SSH_TIMEOUT="3")
-            answered = sudo.machine_answers(targets.Registry(REPO, env=env).load("fakebox"), "fakebox")
+            answered = sudo.machine_answers(places.Registry(REPO, env=env).load("fakebox"), "fakebox")
         return answered, out.getvalue()
 
     def test_an_unreachable_machine_is_reported_as_unreachable(self):
@@ -70,8 +70,8 @@ class TestMachineAnswers(WkTest):
         self.assertRegex(out, r"(?m)^fakebox\s+not a machine of its own", out)
 
 def _configured_remote_machines():
-    """{name: kind} for every target conf in machines/ -- pure logic, no ssh."""
-    reg = targets.Registry(REPO, env=dict(os.environ, WK_MACHINES_DIR=str(REAL_MACHINES)))
+    """{name: kind} for every place conf in machines/ -- pure logic, no ssh."""
+    reg = places.Registry(REPO, env=dict(os.environ, WK_MACHINES_DIR=str(REAL_MACHINES)))
     return {n: reg.kind(n) for n in reg.known()}
 
 
@@ -91,7 +91,7 @@ class TestRemoteReachable(unittest.TestCase):
         machines = [n for n in _configured_remote_machines() if machine_reachable(n)] if live_selected() else []
         if not machines:
             self.skipTest("live tier not selected, or no configured machine answers over ssh")
-        reg = targets.Registry(REPO, env=dict(os.environ, WK_MACHINES_DIR=str(REAL_MACHINES)))
+        reg = places.Registry(REPO, env=dict(os.environ, WK_MACHINES_DIR=str(REAL_MACHINES)))
         for name in machines:
             with self.subTest(machine=name):
                 self.assertEqual(reg.load(name).info("selftest-nonexistent"), "absent")
@@ -112,13 +112,13 @@ class TestTheMirrorOnTheBox(WkTest):
 
     def _script(self):
         """The shell Remote._mirror_update sends, to a fake machine: the driver is real, only the far side is not."""
-        from wk import targets
+        from wk import places
         from wk.machine import Fake, Result
         env = dict(os.environ, WK_MACHINES_DIR=str(self.registry), XDG_STATE_HOME=str(self.tmp / "state"))
-        t = targets.Registry(REPO, env).load("fakebox")
+        t = places.Registry(REPO, env).load("fakebox")
         t.machine = Fake("fakebox")
         probe = "/far\nLinux\n4\n0.1 0 0\n===MEM===\nMemAvailable: 1024 kB\n===IONICE===\nno\n"
-        t.machine.react(["sh", "-c"], lambda argv, f: Result(0, probe if argv[-1] == targets.PROBE_SCRIPT else ""))
+        t.machine.react(["sh", "-c"], lambda argv, f: Result(0, probe if argv[-1] == places.PROBE_SCRIPT else ""))
         with contextlib.redirect_stderr(io.StringIO()):
             t._mirror_update(str(self.tmp / "wk"))
         return "\n".join(e[1][2] for e in t.machine.effects if e[0] == "run" and e[1][:2] == ("sh", "-c"))

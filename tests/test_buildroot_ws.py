@@ -1,4 +1,4 @@
-"""The buildroot image and slot builds as they run inside a workspace (lib/wk/sysimage/buildroot_target.py)."""
+"""The buildroot image and slot builds as they run inside a workspace (lib/wk/sysimage/buildroot_ws.py)."""
 import contextlib
 import io
 import sys
@@ -9,7 +9,7 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result, isolated_module  # noqa: E402
-from wk.sysimage import buildroot_target as bt  # noqa: E402
+from wk.sysimage import buildroot_ws as bt  # noqa: E402
 
 TOOLS = "/opt/wk-tools"
 SRC = "/src/WebKit"

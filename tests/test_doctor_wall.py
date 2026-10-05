@@ -19,7 +19,7 @@ from tests.fakes import FakeRegistry
 from tests.support import REPO, WkTest, bash, clean_env
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import doctor, secrets, targets, wall  # noqa: E402
+from wk import doctor, places, secrets, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
@@ -97,8 +97,8 @@ class _Wall(unittest.TestCase):
         self.fake.answer(["python3", os.path.join(str(REPO), "lib", "secretfile.py"), "present"])
         self.fake.answer(["python3", os.path.join(str(REPO), "lib", "secretfile.py"), "read"], out="stored-value")
         self.fake.answer(["python3", os.path.join(str(REPO), "lib", "credcheck.py")], out="ok\tit works")
-        self.reg = targets.Registry(str(REPO), env=self.env, machine=self.fake)
-        self.target = self.load(self.kind)
+        self.reg = places.Registry(str(REPO), env=self.env, machine=self.fake)
+        self.driver = self.load(self.kind)
 
     def load(self, kind):
         """A guest's store is a macOS host's own, on any platform the suite runs on."""
@@ -129,7 +129,7 @@ class _Wall(unittest.TestCase):
         self.answers[key] = value
 
     def wall(self, push_on=0, want_gpu=False):
-        return wall.Wall(str(REPO), self.target, "demo", self.fake, push_on, want_gpu)
+        return wall.Wall(str(REPO), self.driver, "demo", self.fake, push_on, want_gpu)
 
     def check(self, name, push_on=0, want_gpu=False):
         return getattr(self.wall(push_on, want_gpu), name)()
@@ -320,7 +320,7 @@ class TestAgentIdentities(_Wall):
         self.assertFails(self.check("agent_identities"), "no ssh-add in the workspace")
 
     def test_a_target_with_no_socket_fails(self):
-        self.target = self.reg.load("remote")
+        self.driver = self.reg.load("remote")
         self.assertFails(self.check("agent_identities"), "names no ssh-agent socket")
 
 
@@ -465,15 +465,15 @@ class TestAgentCredential(_Wall):
         self.assertFails(self.check("agent_credential"), "the token wins", n=2)
 
     def test_a_build_box_is_given_the_token(self):
-        self.target = self.reg.load("remote")
-        self.target.exec = self._direct
+        self.driver = self.reg.load("remote")
+        self.driver.exec = self._direct
         self.set("CLAUDE_CODE_OAUTH_TOKEN:+set", "set")
         self.set("claude auth status", self.TOKEN)
         self.assertPasses(self.check("agent_credential"))
         self.set("CLAUDE_CODE_OAUTH_TOKEN:+set", "")
         self.assertFails(self.check("agent_credential"), "no $CLAUDE_CODE_OAUTH_TOKEN", "usable claude")
 
-    def test_not_logged_in_names_the_targets_remedy(self):
+    def test_not_logged_in_names_the_places_remedy(self):
         self.set("claude auth status", '{"loggedIn": false}')
         self.assertFails(self.check("agent_credential"), "not logged in", "/login in a 'wk ai claude' session")
 
@@ -544,12 +544,12 @@ class TestGpu(_Wall):
         self.assertFails(self.check("gpu", want_gpu=True), "no usable EGL inside the workspace (probe exit 2)")
 
     def test_an_arch_with_no_gpu(self):
-        self.fake.files[os.path.join(self.target.store.ws_dir("demo"), "arch")] = "armhf\n"
+        self.fake.files[os.path.join(self.driver.store.ws_dir("demo"), "arch")] = "armhf\n"
         self.assertPasses(self.check("gpu"))
         self.assertFails(self.check("gpu", want_gpu=True), "--gpu on an armhf workspace")
 
     def test_a_guests_gpu_is_the_benchmarks_to_measure(self):
-        with mock.patch.object(self.target, "os", return_value="macos"):
+        with mock.patch.object(self.driver, "os", return_value="macos"):
             rows = self.check("gpu", want_gpu=True)
         self.assertPasses(rows)
         self.assertIn("its desktop rows above say whether its window is covered", rows_text(rows))
@@ -598,7 +598,7 @@ class TestFromTheHost(_Wall):
     def setUp(self):
         super().setUp()
         self.fake.answer(["podman", "inspect", "wk-demo"], out="running\n")
-        self.fake.files[os.path.join(self.target.store.ws_dir("demo"), "home", targets.READY_MARKER)] = ""
+        self.fake.files[os.path.join(self.driver.store.ws_dir("demo"), "home", places.READY_MARKER)] = ""
         self.fake.answer([str(REPO / "wk"), "key", "push", "status"], rc=1)
         self.fake.answer(["podman", "info"], out="true\n")
         self.fake.answer(["systemctl", "--user"])
@@ -606,7 +606,7 @@ class TestFromTheHost(_Wall):
     def report(self):
         out = io.StringIO()
         rep = doctor.Report(out)
-        wall.from_host(str(REPO), self.target, "demo", self.fake, rep)
+        wall.from_host(str(REPO), self.driver, "demo", self.fake, rep)
         return rep, out.getvalue()
 
     def test_a_healthy_container_passes_every_check(self):
@@ -630,7 +630,7 @@ class TestFromTheHost(_Wall):
         self.assertEqual("rm -f /opt/wk-tools/.wk-write-probe" in self.asked, False)
         self.assertEqual("touch /opt/wk-tools/.wk-write-probe 2>&1", self.asked[-1])
 
-    def test_a_workspace_without_the_login_gets_the_targets_remedy(self):
+    def test_a_workspace_without_the_login_gets_the_places_remedy(self):
         self.set("test -s", Result(1, "", ""))
         _, out = self.report()
         self.assertIn("remote control refuses to start without one", out)
@@ -648,22 +648,22 @@ class TestFromTheHost(_Wall):
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
             self.report()
         self.assertIn("no such workspace: demo", err.getvalue())
-        self.target = self.reg.load("remote")
+        self.driver = self.reg.load("remote")
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
             self.report()
-        self.assertIn("a remote target has none", err.getvalue())
+        self.assertIn("a remote place has none", err.getvalue())
 
     def test_the_egress_checks_are_gated_on_the_driver(self):
         names = [n for n, _ in self.wall().from_host()]
         self.assertIn("egress-github", names)
         self.assertNotIn("egress-softwareupdate", names)
-        with mock.patch.object(self.target, "egress_filtered", return_value=False):
+        with mock.patch.object(self.driver, "egress_filtered", return_value=False):
             names = [n for n, _ in self.wall().from_host()]
         self.assertFalse([n for n in names if n.startswith("egress-")], names)
 
     def test_the_credential_checks_are_asked_of_every_kind_and_isolation_of_a_container_only(self):
         self.assertIn("isolation", [n for n, _ in self.wall().from_host()])
-        self.target = self.load("vm")
+        self.driver = self.load("vm")
         names = [n for n, _ in self.wall().from_host()]
         self.assertNotIn("isolation", names)
         self.assertNotIn("commit-wall", names)
@@ -675,13 +675,13 @@ class TestAGuest(_Wall):
     kind = "vm"
 
     def test_an_unfiltered_guest_is_a_failure(self):
-        self.target.info = lambda ws: "running"
-        self.target.exec = self._direct
+        self.driver.info = lambda ws: "running"
+        self.driver.exec = self._direct
         self.fake.answer([str(REPO / "wk"), "key", "push", "status"], rc=1)
-        self.fake.files[os.path.join(self.target.vm_dir(), "demo.unfiltered")] = ""
+        self.fake.files[os.path.join(self.driver.vm_dir(), "demo.unfiltered")] = ""
         out = io.StringIO()
         rep = doctor.Report(out)
-        wall.from_host(str(REPO), self.target, "demo", self.fake, rep)
+        wall.from_host(str(REPO), self.driver, "demo", self.fake, rep)
         self.assertIn("booted with WK_VM_UNFILTERED", out.getvalue())
         self.assertIn("wk stop demo && wk start demo", out.getvalue())
         self.assertNotIn("github reachable", out.getvalue())
@@ -699,7 +699,7 @@ class TestFromInside(_Wall):
     def results(self):
         out = io.StringIO()
         rep = doctor.Report(out)
-        return wall.from_inside(str(REPO), self.target, "demo", self.fake, rep), rep, out.getvalue()
+        return wall.from_inside(str(REPO), self.driver, "demo", self.fake, rep), rep, out.getvalue()
 
     def test_a_healthy_workspace_passes_and_nothing_can_publish(self):
         publishing, rep, out = self.results()
@@ -729,9 +729,9 @@ class TestFromInside(_Wall):
             self.assertNotIn(n, names)
 
     def test_the_commit_wall_is_probed_where_bwrap_is(self):
-        with mock.patch.object(self.target, "os", return_value="linux"):
+        with mock.patch.object(self.driver, "os", return_value="linux"):
             self.assertIn("commit-wall", [n for n, _ in self.wall().from_inside()])
-        with mock.patch.object(self.target, "os", return_value="macos"):
+        with mock.patch.object(self.driver, "os", return_value="macos"):
             self.assertNotIn("commit-wall", [n for n, _ in self.wall().from_inside()])
 
 
@@ -751,11 +751,11 @@ class TestTheDriversAnswer(_Wall):
         self.assertIsNone(self.reg.load("remote").agent_sock())
 
     def test_agent_secret_present_asks_where_each_kind_of_row_lives(self):
-        self.assertTrue(self.target.agent_secret_present("demo", "claude-login"))
-        self.target.agent_secret_present("demo", "litellm")
+        self.assertTrue(self.driver.agent_secret_present("demo", "claude-login"))
+        self.driver.agent_secret_present("demo", "litellm")
         self.assertIn('test -s "$HOME/.wk-litellm-key"', self.asked)
         self.set("test -s", Result(1, "", ""))
-        self.assertFalse(self.target.agent_secret_present("demo", "claude-login"))
+        self.assertFalse(self.driver.agent_secret_present("demo", "claude-login"))
 
     def test_a_guest_without_the_share_is_told_to_boot_with_it(self):
         vm = self.load("vm")
@@ -767,9 +767,9 @@ class TestTheDriversAnswer(_Wall):
 
     def test_rootless_is_podmans_word(self):
         self.fake.answer(["podman", "info"], out="true\n")
-        self.assertEqual("true", self.target.rootless())
+        self.assertEqual("true", self.driver.rootless())
         self.fake.answer(["podman", "info"], rc=125)
-        self.assertEqual("unknown", self.target.rootless())
+        self.assertEqual("unknown", self.driver.rootless())
 
 
 class TestTheCommand(WkTest):
@@ -809,7 +809,7 @@ class TestTheCommand(WkTest):
         self.assertIn("wk doctor <workspace> --gpu", cp.stderr)
 
     def test_all_is_this_machines_question(self):
-        cp = self.run_doctor("--all", env={"WK_NAME": "demo", "WK_TARGET": "container"})
+        cp = self.run_doctor("--all", env={"WK_NAME": "demo", "WK_PLACE": "container"})
         self.assertEqual(1, cp.returncode, cp.stderr)
         self.assertIn("drop the workspace name", cp.stderr)
 
@@ -823,12 +823,12 @@ class TestTheCommand(WkTest):
 
 def sim_registry(in_ws):
     """Just enough of a Registry for `inside`/`workspace`'s own exit-code translation: a report's `.missing` and
-    (inside) whether it is publishing decide 0 | 1 | 3, not what a target actually measures."""
-    def target(name, env):
+    (inside) whether it is publishing decide 0 | 1 | 3, not what a place actually measures."""
+    def driver(name, env):
         t = mock.Mock(ws_name="demo")
         t.name = name
         return t
-    return FakeRegistry({}, Fake(), target, ws_target=lambda ws: "container", in_workspace=lambda: in_ws)
+    return FakeRegistry({}, Fake(), driver, ws_place=lambda ws: "container", in_workspace=lambda: in_ws)
 
 
 class TestExitCodes(unittest.TestCase):
@@ -836,7 +836,7 @@ class TestExitCodes(unittest.TestCase):
     intact | 1 broken | 3 publishing; nothing here drives a real check."""
 
     def _inside(self, missing, publishing):
-        def fake_from_inside(root, target, ws, machine, rep):
+        def fake_from_inside(root, driver, ws, machine, rep):
             rep.missing = missing
             return publishing
         with mock.patch.object(DOCTOR_CMD.wall, "from_inside", side_effect=fake_from_inside), \
@@ -844,7 +844,7 @@ class TestExitCodes(unittest.TestCase):
             return DOCTOR_CMD.inside(sim_registry(True))
 
     def _workspace(self, missing):
-        def fake_from_host(root, target, ws, machine, rep, want_gpu=False):
+        def fake_from_host(root, driver, ws, machine, rep, want_gpu=False):
             rep.missing = missing
         with mock.patch.object(DOCTOR_CMD.wall, "from_host", side_effect=fake_from_host), \
                 contextlib.redirect_stderr(io.StringIO()):

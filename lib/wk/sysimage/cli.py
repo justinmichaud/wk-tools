@@ -26,11 +26,11 @@ def where(argv, env=None):
     return "workspace" if wsname(argv, env) else "host"
 
 
-def wstarget(argv, reg):
+def wsplace(argv, reg):
     m = images.spec_machine(argv[1]) if len(argv) > 1 else ""
     if not m or not wsname(argv, reg.env):
         return ""
-    return images.spec_target(m, record.machine_name(reg.env), reg.default())
+    return images.spec_place(m, record.machine_name(reg.env), reg.default())
 
 
 def grow(grows, keeps, order):
@@ -46,8 +46,8 @@ class Sysimage:
 
     def building(self, ws):
         try:
-            target = self.reg.load(self.reg.ws_target(ws))
-            return build.busy_reason(target, build.records_of(target, self.clock, self.machine), ws) is not None
+            place = self.reg.load(self.reg.ws_place(ws))
+            return build.busy_reason(place, build.records_of(place, self.clock, self.machine), ws) is not None
         except (LookupError, OSError):
             return None
 
@@ -137,7 +137,7 @@ class Sysimage:
         act.log("                 add --rescue for the system a board falls back to")
         return 0
 
-    def holds(self, spec, ws, slot, commit, config, toolchain):
+    def holds(self, spec, ws, slot, commit, preset, toolchain):
         """A step's done predicate, asked of the machine holding the workspace (lib/wk/sched.py). The verdict is
         on stdout: a readonly command forwarded to a stopped podman machine exits 0 having said so."""
         if not spec:
@@ -148,7 +148,7 @@ class Sysimage:
         name = p["IMG_PROFILE"]
         ws = ws or images.image_ws(name, self.env)
         if toolchain:
-            if slot is not None or commit or config:
+            if slot is not None or commit or preset:
                 act.die("usage: wk sysimage holds %s --toolchain\n"
                         "    --toolchain asks whether the image workspace has the cross SDK the webkit stage builds\n"
                         "    against, which is one question about the workspace and takes nothing else." % name)
@@ -158,16 +158,16 @@ class Sysimage:
                         % (name, p["IMG_BUILDER"] or "no builder"))
             return self.say(images.toolchain_holds(ws, p["YOC_TARGET"], self.env))
         if slot is None:
-            if commit or config:
+            if commit or preset:
                 act.die("usage: wk sysimage holds %s --slot <name> --commit <sha>\n"
-                        "    --commit and --config ask about a slot, so they need --slot; without one\n"
+                        "    --commit and --preset ask about a slot, so they need --slot; without one\n"
                         "    the question is whether the image itself is built." % name)
             return self.say(self.image_path(ws, p) is not None)
         if not SHA.match(commit or ""):
             act.die("usage: wk sysimage holds %s --slot %s --commit <sha>\n"
                     "    --commit takes the full 40-digit sha the slot would hold, got '%s'" % (name, slot, commit or ""))
-        if config:
-            return self.say(lsmod.slot_is(ws, slot, commit, config, self.env))
+        if preset:
+            return self.say(lsmod.slot_is(ws, slot, commit, preset, self.env))
         return self.say(lsmod.slot_holds(ws, slot, commit, self.env))
 
     @staticmethod

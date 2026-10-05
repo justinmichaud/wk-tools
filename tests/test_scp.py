@@ -12,7 +12,7 @@ from tests.support import (
 )
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets  # noqa: E402
+from wk import places  # noqa: E402
 from wk.decl import leading_block  # noqa: E402
 from wk.machine import Fake, Local  # noqa: E402
 
@@ -165,12 +165,12 @@ class TestRefusals(WkTest):
         self.assertIn("no such file or directory", cp.stdout)
 
     def test_a_directory_never_replaces_a_file(self):
-        target = self.here / "occupied"
-        target.write_bytes(b"mine\n")
-        cp = self.scp("-r", ":tree", str(target))
+        driver = self.here / "occupied"
+        driver.write_bytes(b"mine\n")
+        cp = self.scp("-r", ":tree", str(driver))
         self.assertEqual(cp.returncode, 1, cp.stdout)
         self.assertIn("is a file, and a directory cannot replace it", cp.stdout)
-        self.assertEqual(target.read_bytes(), b"mine\n")
+        self.assertEqual(driver.read_bytes(), b"mine\n")
 
     def test_a_file_never_replaces_a_directory(self):
         drop = self.here / "drop"
@@ -240,7 +240,7 @@ class TestTheWholeCommandOnAGuest(WkTest):
             cp = run("scp", *args, env={
                 "PATH": f"{binp}:{os.environ['PATH']}",
                 "WK_TEST_NET_LOG": str(log),
-                "WK_TARGET": "vm",
+                "WK_PLACE": "vm",
                 "WK_VM_STORE": str(vmstore),
                 "XDG_STATE_HOME": str(self.tmp / "state"),
             })
@@ -276,7 +276,7 @@ class DriverCopyTest(unittest.TestCase):
         (self.tmp / "home").mkdir()
         (self.tmp / "hosts").mkdir()
         self.fake = Fake("here")
-        self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
+        self.reg = places.Registry(REPO, env=self.env, machine=self.fake)
 
     def conf(self, name, text):
         kind = "" if "kind=build" in text else "kind=%s\n" % ("peer" if "peer=1" in text else "build")
@@ -332,7 +332,7 @@ class TestVmCopy(DriverCopyTest):
         p = mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True)
         p.start()
         self.addCleanup(p.stop)
-        self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
+        self.reg = places.Registry(REPO, env=self.env, machine=self.fake)
         self.t = self.reg.load("vm")
         self.fake.answer([self.t.tart(), "list"], out=json.dumps([{"Name": "wk-demo", "State": "running", "Source": "local"}]))
         self.fake.answer([self.t.tart(), "ip"], out="1.2.3.4\n")
@@ -365,7 +365,7 @@ class TestRemoteCopy(DriverCopyTest):
         del self.env["WK_IN_VM"]
         self.env["XDG_STATE_HOME"] = str(self.tmp / "state")
         self.conf("box", "host=box.example\nroot=/home/u/wk\n")
-        self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
+        self.reg = places.Registry(REPO, env=self.env, machine=self.fake)
         self.t = self.reg.load("box")
 
     def test_push_and_pull_are_scp(self):
@@ -397,7 +397,7 @@ class TestRemoteLocalCopy(DriverCopyTest):
         self.env["XDG_STATE_HOME"] = str(self.tmp / "state")
         self.box = self.tmp / "box"
         self.conf("fakebox", "kind=build\ndriver=remote\nlocal=1\nroot=%s\n" % self.box)
-        self.reg = targets.Registry(REPO, env=self.env, machine=Local())
+        self.reg = places.Registry(REPO, env=self.env, machine=Local())
         self.t = self.reg.load("fakebox")
 
     def test_push_and_push_dir_copy_on_a_real_filesystem(self):

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
-# wk build <workspace> <config> -- build WebKit or JSC
-# wk: where=workspace name=required takes=1 config=arg ready=yes group=workspaces dryrun passthrough
+# wk build <workspace> <preset> -- build WebKit or JSC
+# wk: where=workspace name=required takes=1 preset=arg ready=yes group=workspaces dryrun passthrough
 # wk: opts --list,--no-defaults,--detach,--kill,--babysit,--_babysit,--branch=,--mem-budget=,--mem-floor=,--cmake=,--env=,--cmakeargs=,--sysroot=
 # wk: flag --list where=local name=none takes=0
 # wk: flag --kill takes=0 opts=--kill
@@ -13,19 +13,19 @@
 # Our own flags are taken off the argument list; everything left passes
 # through to the build untouched.
 #
-#   --list                 print the available configs (wk build --list) and exit
-#   --no-defaults          skip this target's build_args conf default
+#   --list                 print the available presets (wk build --list) and exit
+#   --no-defaults          skip the build machine's build_args conf default
 #   --detach                hand the build to the machine that runs it, and return
 #                           once it has started; a foreground build is cancelled if
 #                           its terminal or its ssh goes away (the driver takes the HUP)
 #   --kill                  stop the build running in this workspace, wherever it
-#                           runs, and record it as cancelled; takes no config
+#                           runs, and record it as cancelled; takes no preset
 #   --babysit               run under a Claude fix loop until it builds or gives up
 #   --branch <name>         check out this branch first
 #   --mem-budget <MB>       memory ceiling for the watchdog
 #   --mem-floor <MB>        memory floor for the watchdog
-#   --cmake <flags>         extra CMake flags, added to the config's own (repeatable)
-#   --env NAME=VALUE        extra environment for the build, overriding the config's (repeatable)
+#   --cmake <flags>         extra CMake flags, added to the preset's own (repeatable)
+#   --env NAME=VALUE        extra environment for the build, overriding the preset's (repeatable)
 #   --                      everything after this goes to build-webkit verbatim
 #
 #   WK_BABYSIT_MODEL=<model>    the model `--babysit` uses (default haiku)
@@ -36,7 +36,7 @@
 #   WK_NO_COMPILE_COMMANDS=1    write no compile_commands.json (it costs the Apple
 #                               ports their precompiled prefix headers)
 #   WK_NO_COMPILATION_CACHE=1   build without Xcode's compilation cache
-#   WK_JOBS, WK_NICE            the job count and nice level the target half runs at
+#   WK_JOBS, WK_NICE            the job count and nice level the place half runs at
 
 import os
 import sys
@@ -46,7 +46,7 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import build, decl, targets  # noqa: E402
+from wk import build, decl, places  # noqa: E402
 from wk.act import Refused  # noqa: E402
 
 
@@ -57,15 +57,15 @@ def parse(argv):
          "babysit_driver": a.flag("--_babysit"), "branch": a.value("--branch"),
          "mem_budget": a.value("--mem-budget"), "mem_floor": a.value("--mem-floor"),
          "cmakeargs": a.value("--cmakeargs"), "sysroot": a.value("--sysroot"),
-         "cmake": a.values("--cmake"), "env": a.values("--env"), "pass": a.tail, "config": store.build_config()}
+         "cmake": a.values("--cmake"), "env": a.values("--env"), "pass": a.tail, "preset": store.build_preset()}
     return o
 
 
 def main(argv, reg=None, clock=None):
     opts = parse(argv)
     if opts.get("list"):
-        return build.list_configs()
-    reg = reg or targets.Registry(ROOT)
+        return build.list_presets()
+    reg = reg or places.Registry(ROOT)
     return build.Build(reg, store.ws_name(reg.env), opts, argv, clock).front()
 
 

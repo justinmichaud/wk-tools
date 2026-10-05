@@ -1,4 +1,4 @@
-# `wk build <ws> mac-release-pgo`: the three phases README.md describes, sourced by build/build-in-target.sh inside the guest that builds (bash 3.2, macOS). The flags are `make release`'s (WebKit's Makefile.shared) as build-webkit arguments, and $(inherited) is not optional -- OTHER_LDFLAGS and OTHER_CFLAGS replace a framework's own flags without it.
+# `wk build <ws> mac-release-pgo`: the three phases README.md describes, sourced by build/build-in-workspace.sh inside the guest that builds (bash 3.2, macOS). The flags are `make release`'s (WebKit's Makefile.shared) as build-webkit arguments, and $(inherited) is not optional -- OTHER_LDFLAGS and OTHER_CFLAGS replace a framework's own flags without it.
 
 _pgo_tools="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -26,8 +26,8 @@ pgo_build() {
     [ "$(uname -s)" = Darwin ] || [ -n "${WK_DRY_RUN:-}" ] \
         || { echo "wk: a PGO build is the Apple port's, and this is not macOS" >&2; return 1; }
     local final="${WEBKIT_OUTPUTDIR:-}" pgo="${WK_PGO_DIR:-}" arch
-    [ -n "$final" ] || { echo "wk: WEBKIT_OUTPUTDIR is unset; lib/wk/buildconf.py sets it for every Apple config" >&2; return 1; }
-    [ -n "$pgo" ] || { echo "wk: WK_PGO_DIR is unset; lib/wk/buildconf.py sets it for a PGO config" >&2; return 1; }
+    [ -n "$final" ] || { echo "wk: WEBKIT_OUTPUTDIR is unset; lib/wk/presets.py sets it for every Apple config" >&2; return 1; }
+    [ -n "$pgo" ] || { echo "wk: WK_PGO_DIR is unset; lib/wk/presets.py sets it for a PGO config" >&2; return 1; }
     arch=$(uname -m)
     local instr
     instr=$(_pgo_py pgo-instr "$final") || return 1

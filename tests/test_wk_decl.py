@@ -127,11 +127,11 @@ class TestArgvArithmetic(unittest.TestCase):
         self.assertEqual(D.name_slot("optional@2"), 2)
 
     def test_positionals_ignore_options_and_their_joined_values(self):
-        args = ["--target=vm", "ws", "--count=3", "cfg"]
+        args = ["--on=vm", "ws", "--count=3", "cfg"]
         self.assertEqual(dispatch.positionals(args), ["ws", "cfg"])
         self.assertEqual(dispatch.positional(2, args), "cfg")
         self.assertIsNone(dispatch.positional(3, args))
-        self.assertEqual(dispatch.without_positional(1, args), ["--target=vm", "--count=3", "cfg"])
+        self.assertEqual(dispatch.without_positional(1, args), ["--on=vm", "--count=3", "cfg"])
 
     def test_argv_name_needs_every_declared_positional(self):
         self.assertIsNone(dispatch.argv_name(1, "1", ["ws"]))

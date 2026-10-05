@@ -97,7 +97,7 @@ class Channel:
 
 
 class GuestChannel:
-    """A guest through the vm target: its address changes every boot and is in no ssh config."""
+    """A guest through the vm place: its address changes every boot and is in no ssh config."""
 
     def __init__(self, root, conf, env=None, channel="none", vm=None, via=None):
         self.root, self.conf, self.env, self.channel = str(root), conf, os.environ if env is None else env, channel
@@ -106,13 +106,13 @@ class GuestChannel:
 
     def vm(self):
         if self._vm is None:
-            from wk.targets import Registry
+            from wk.places import Registry
             self._vm = Registry(self.root, self.env, machine=self.via).load("vm")
         return self._vm
 
     def call(self, fn, *args, input=None, mutates=False):
         if fn not in ("m_ssh", "r_ssh"):
-            return Result(255, "", "a guest is reached one way, through the vm target")
+            return Result(255, "", "a guest is reached one way, through the vm place")
         if mutates and act.dry_run():
             act.log("would run in guest %s: %s" % (self.ws, args[0].name))
             return Result(0)
@@ -216,7 +216,7 @@ class MacDriver(Driver):
 
 
 class MacVolume(MacDriver):
-    """Only the boot helper blesses the install the firmware boots next; --setBoot is sticky, so the bench job hands back."""
+    """Only the boot helper blesses the install the firmware boots next; --setBoot is sticky, so the bench task hands back."""
 
     name = "mac-volume"
     arming = "command"
@@ -494,7 +494,7 @@ class MacGuest(MacDriver):
         st = self.ch.state()
         if st == "absent":
             act.die("%s has no guest '%s'.\n    Make one from the golden base and mark it as a benchmark install:\n"
-                    "        wk new %s --target vm && wk start %s\n        then, in it:  sudo tee /etc/wk-image <<<'id=%s'"
+                    "        wk new %s --on vm && wk start %s\n        then, in it:  sudo tee /etc/wk-image <<<'id=%s'"
                     % (name, g, g, g, self.c("profile") or "perf-macos-benchvm"))
         if st != "running":
             act.info("starting guest '%s'" % g)
@@ -528,7 +528,7 @@ class MacGuest(MacDriver):
         return "a Tart guest, %s (%s); no physical media" % (self.guest(), self.ch.state() or "unknown")
 
     def reprovision(self):
-        return ("wk sysimage build macos-guest-base\n    the golden guest every vm workspace is cloned from\nwk new %s --target vm\nwk bench stage <ws> --to %s"
+        return ("wk sysimage build macos-guest-base\n    the golden guest every vm workspace is cloned from\nwk new %s --on vm\nwk bench stage <ws> --to %s"
                 % (self.who(), self.who()))
 
     def own(self, dest):

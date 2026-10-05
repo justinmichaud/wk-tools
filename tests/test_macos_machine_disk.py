@@ -28,7 +28,7 @@ exit 0
 def reconcile_block():
     """From `_cur_cpus=` to the end of the `if` that sets the resources."""
     text = STAGE.read_text()
-    start = text.index("wk_eval wk.targets podman-vm _cur_cpus=")
+    start = text.index("wk_eval wk.places podman-vm _cur_cpus=")
     end = text.index("\nfi\n", text.index("podman machine set", start)) + 4
     return text[start:end]
 

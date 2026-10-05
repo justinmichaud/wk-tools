@@ -1,9 +1,9 @@
 wk_eval wk.store paths
 . "$WK_ROOT/host/units.sh"
 
-WK_MACHINE="${WK_MACHINE:-wk}"; export WK_MACHINE   # wk.targets podman-vm reads it from the environment
+WK_MACHINE="${WK_MACHINE:-wk}"; export WK_MACHINE   # wk.places podman-vm reads it from the environment
 
-_state=$(wk_py wk.targets podman-vm State) || {
+_state=$(wk_py wk.places podman-vm State) || {
     debug "no machine yet; skipping VM tooling"
     return 0 2>/dev/null || true
 }
@@ -13,7 +13,7 @@ if [ "$_state" != running ]; then
     podman machine start "$WK_MACHINE" >/dev/null
 fi
 
-wk_eval wk.targets podman-vm _ssh_port=SSHConfig.Port _ssh_key=SSHConfig.IdentityPath _ssh_user=SSHConfig.RemoteUsername
+wk_eval wk.places podman-vm _ssh_port=SSHConfig.Port _ssh_key=SSHConfig.IdentityPath _ssh_user=SSHConfig.RemoteUsername
 _unpinned=$(wk_py wk.reach unpinned)
 
 _rsh() {

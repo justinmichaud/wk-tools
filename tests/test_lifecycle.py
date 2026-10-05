@@ -6,11 +6,11 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, WkTest, rand_suffix, requires_container_target, run, stub_path
+from tests.support import REPO, WkTest, rand_suffix, requires_container_place, run, stub_path
 from tests.test_layers import load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets  # noqa: E402
+from wk import places  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
 
@@ -37,7 +37,7 @@ class TestStartExitsOnItsOwnResult(WkTest):
                 "XDG_STATE_HOME": str(self.tmp / "xdg"),
                 "WK_REMOTE_ROOT": str(self.tmp / "rr"),
                 "WK_MACHINES_DIR": str(self.tmp / "machines"),
-                "WK_TARGET": "remote",
+                "WK_PLACE": "remote",
                 "WK_REMOTE_HOST": "fake-unreachable-machine",
                 "WK_PROBE_SECONDS": "1"}
 
@@ -63,7 +63,7 @@ class TestStartAndStopHaveADryRun(unittest.TestCase):
     def setUp(self):
         self.m = Fake("here")
         self.m.answer(["podman", "ps"], out="wk-a\nwk-b\n")
-        self.ctr = targets.Container("container", str(REPO), {}, self.m)
+        self.ctr = places.Container("container", str(REPO), {}, self.m)
         self.reg = mock.Mock()
         self.reg.load.return_value = self.ctr
         for p in (mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), mock.patch.object(self.ctr, "podman", lambda: ["podman"]),
@@ -108,12 +108,12 @@ class TestStartAndStopHaveADryRun(unittest.TestCase):
 
 class TestEnterDashDash(unittest.TestCase):
     def test_enter_dash_dash_command_reaches_the_command(self):
-        cp = run("enter", "zz-does-not-exist-xyz", "--", "true", env={"WK_TARGET": "vm"})
+        cp = run("enter", "zz-does-not-exist-xyz", "--", "true", env={"WK_PLACE": "vm"})
         self.assertNotIn("--: command not found", cp.stdout)
         self.assertIn("no such workspace", cp.stdout)
 
 
-@requires_container_target()
+@requires_container_place()
 class TestContainerLifecycle(WkTest):
     """new -> stop <ws> -> start <ws> -> the shared store mount -> rm <ws> <bogus>."""
 
@@ -133,7 +133,7 @@ class TestContainerLifecycle(WkTest):
         return next((l for l in ls_output.splitlines() if self.name in l), "")
 
     def test_stop_start_shared_mount_and_multi_rm(self):
-        cp = run("new", self.name, "--target", "container", timeout=600)
+        cp = run("new", self.name, "--on", "container", timeout=600)
         self._created = cp.returncode == 0
         self.assertEqual(cp.returncode, 0, cp.stdout)
 

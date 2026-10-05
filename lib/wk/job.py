@@ -246,7 +246,7 @@ def wait_remote(ask, log_path, rc, clock, interval=30, stream=False, timeout=0, 
 
 
 def announced_pid(path, label):
-    """The pid a job announces down its log (`wk: <label> pid <n>`), the one channel back from every target kind."""
+    """The pid a job announces down its log (`wk: <label> pid <n>`), the one channel back from every driver."""
     try:
         with open(path, errors="replace") as f:
             m = re.search(r"^wk: %s pid ([0-9]+)" % re.escape(label), f.read(), re.M)
@@ -256,19 +256,19 @@ def announced_pid(path, label):
 
 
 class PidWatch(threading.Thread):
-    def __init__(self, target, ws, task, path, label, patterns, tries):
+    def __init__(self, driver, ws, task, path, label, patterns, tries):
         super().__init__(daemon=True)
-        self.args_ = (target, ws, task, path, label, patterns)
+        self.args_ = (driver, ws, task, path, label, patterns)
         self.tries = tries
         self.done = threading.Event()
         self.adopted = None
 
     def run(self):
-        target, ws, task, path, label, patterns = self.args_
+        driver, ws, task, path, label, patterns = self.args_
         for _ in range(self.tries):
             pid = announced_pid(path, label)
             if pid is not None:
-                self.adopted = adopt(target, ws, task, pid, patterns)
+                self.adopted = adopt(driver, ws, task, pid, patterns)
                 return
             if self.done.wait(1):
                 return
@@ -281,18 +281,18 @@ def match_any(text, patterns):
     return any(fnmatch.fnmatchcase(text, p) for p in patterns.split())
 
 
-def pid_args(target, ws, pid):
-    return target.exec(ws, ["ps", "-o", "args=", "-p", str(pid)]).out.replace("\r", "").replace("\n", " ").strip()
+def pid_args(driver, ws, pid):
+    return driver.exec(ws, ["ps", "-o", "args=", "-p", str(pid)]).out.replace("\r", "").replace("\n", " ").strip()
 
 
-def adopt(target, ws, t, pid, want):
+def adopt(driver, ws, t, pid, want):
     """A pid out of a workspace is its own claim, and a wkdev container shares the host's PID namespace
     (--pid host): it is adopted, and later signalled, only while its command line there matches `want`."""
-    args = pid_args(target, ws, pid)
+    args = pid_args(driver, ws, pid)
     if match_any(args, want):
         t.set("pid_match", want)
         t.pid(pid)
-        t.set("where", "target")
+        t.set("where", "place")
         return True
     warn("'%s' names pid %s as its job, and that pid inside '%s' is running\n  '%s', not %s. It is not adopted, so\n"
          "  nothing here will signal it; stop the job where it runs:  wk enter %s"
@@ -300,30 +300,30 @@ def adopt(target, ws, t, pid, want):
     return False
 
 
-def signal(target, ws, t, pid, signum):
+def signal(driver, ws, t, pid, signum):
     want = t.field("pid_match")
     if not want:
         die("the record %s holds pid %s inside '%s' and no pattern its\n    command line must match, so nothing can tell it "
             "from any other pid in a\n    shared PID namespace. Whatever adopted that pid did not go through\n"
             "    job.adopt (lib/wk/job.py), which is a bug." % (t.id, pid, ws))
-    args = pid_args(target, ws, pid)
+    args = pid_args(driver, ws, pid)
     if not args:
         return
     if not match_any(args, want):
         die("refusing to send %s to pid %s inside '%s': it is running\n    '%s', not %s. The pid is what the workspace "
             "announced, and this one\n    is another process -- in a shared PID namespace it could be another\n"
             "    workspace's build. Stop the job where it runs:  wk enter %s" % (signal_name(signum), pid, ws, args, want, ws))
-    kill_tree_in(target, ws, int(pid), signum)
+    kill_tree_in(driver, ws, int(pid), signum)
 
 
-def kill_tree_in(target, ws, pid, signum):
-    pids = descendants(lambda argv: target.exec(ws, argv), pid)
-    target.act_exec(ws, ["kill", "-" + signal_name(signum)] + [str(p) for p in pids])
+def kill_tree_in(driver, ws, pid, signum):
+    pids = descendants(lambda argv: driver.exec(ws, argv), pid)
+    driver.act_exec(ws, ["kill", "-" + signal_name(signum)] + [str(p) for p in pids])
 
 
-def _signal(target, ws, task, pid, machine, signum):
-    if task.field("where") == "target":
-        signal(target, ws, task, pid, signum)
+def _signal(driver, ws, task, pid, machine, signum):
+    if task.field("where") == "place":
+        signal(driver, ws, task, pid, signum)
     else:
         kill_tree(machine, pid, signum)
 
@@ -332,7 +332,7 @@ def signal_name(signum):
     return sig.Signals(signum).name[3:]
 
 
-def kill(target, ws, task, word, machine, clock, env=None, me=None):
+def kill(driver, ws, task, word, machine, clock, env=None, me=None):
     """TERM, KILL after WK_KILL_WAIT, the record ended `word`; `stopping` first, so the driver ends it `word` too."""
     env = os.environ if env is None else env
     pid, wait = task.field("pid"), kill_wait(env)
@@ -347,19 +347,19 @@ def kill(target, ws, task, word, machine, clock, env=None, me=None):
     def send(signum):
         if signum == sig.SIGKILL:
             warn("pid %s did not stop on TERM after %ds -- killing it" % (pid, wait))
-        _signal(target, ws, task, int(pid), machine, signum)
+        _signal(driver, ws, task, int(pid), machine, signum)
     gone = terminate(send, lambda: not task.alive(None), clock, wait, 5)
     task.end(word)
     return gone
 
 
-def stop(target, records, ws, kind, machine, clock, env=None):
+def stop(driver, records, ws, kind, machine, clock, env=None):
     t = records.find(kind, ws)
     if t is None or not t.alive(None):
         log("no %s is running in '%s' -- 'wk status %s' says what it last did" % (kind, ws, ws))
         return 2
     info("stopping the %s in '%s' (pid %s on %s)" % (kind, ws, t.field("pid"), t.field("machine")))
-    ok = kill(target, ws, t, "cancelled", machine, clock, env)
+    ok = kill(driver, ws, t, "cancelled", machine, clock, env)
     if act.dry_run():
         return 2
     if ok:

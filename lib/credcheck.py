@@ -615,7 +615,7 @@ RULES = collections.OrderedDict((
         check=_bugzilla_api_key)),
     ("claude", Rule(
         spent_by="shell/bashrc -- exported as $CLAUDE_CODE_OAUTH_TOKEN in a "
-                 "macOS guest and on a build box, the two kinds of target the "
+                 "macOS guest and on a build box, the two kinds of place the "
                  "delivery column sends it to",
         needs="authenticate Claude Code for inference",
         forbids="read the account, bill the organization, or mint further "

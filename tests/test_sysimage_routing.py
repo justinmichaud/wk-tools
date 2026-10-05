@@ -96,27 +96,27 @@ class TestTheDispatcherReadsDerived(unittest.TestCase):
             impl.unlink()
         self.assertIn("name=inferred is not one of", str(cm.exception))
 
-    def _resolve(self, *, wstarget, derived, args):
-        """resolve_target with its two collaborators answering as told: what
-        the command names as the target, and what a located workspace
+    def _resolve(self, *, wsplace, derived, args):
+        """resolve_place with its two collaborators answering as told: what
+        the command names as the place, and what a located workspace
         resolves to."""
         inv = dispatch.Invocation("sysimage", self._decl(), args)
-        with mock.patch.object(dispatch.Invocation, "named_target", lambda self: wstarget), \
-                mock.patch.object(dispatch, "registry", lambda: mock.Mock(ws_target=lambda name: "target-of:" + name)), \
+        with mock.patch.object(dispatch.Invocation, "named_place", lambda self: wsplace), \
+                mock.patch.object(dispatch, "registry", lambda: mock.Mock(ws_place=lambda name: "place-of:" + name)), \
                 mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("WK_TARGET", None)
-            return dispatch.resolve_target(inv, "derived", 0, "2", derived)
+            os.environ.pop("WK_PLACE", None)
+            return dispatch.resolve_place(inv, "derived", 0, "2", derived)
 
-    def test_the_derived_name_decides_the_target(self):
-        """resolve_target asks the command, not the argument list"""
-        self.assertEqual(self._resolve(wstarget="", derived="yocto-demo", args=["build", "demo"]),
-                         "target-of:yocto-demo")
-        self.assertEqual(self._resolve(wstarget="", derived="", args=["build", "demo"]), "container")
+    def test_the_derived_name_decides_the_place(self):
+        """resolve_place asks the command, not the argument list"""
+        self.assertEqual(self._resolve(wsplace="", derived="yocto-demo", args=["build", "demo"]),
+                         "place-of:yocto-demo")
+        self.assertEqual(self._resolve(wsplace="", derived="", args=["build", "demo"]), "container")
 
     def test_a_target_the_command_names_outright_wins(self):
         """A spec that names its machine is not located: that machine
         holds the image workspace whether or not another one holds its name."""
-        self.assertEqual(self._resolve(wstarget="moose", derived="yocto-demo", args=["build", "demo@moose"]),
+        self.assertEqual(self._resolve(wsplace="moose", derived="yocto-demo", args=["build", "demo@moose"]),
                          "moose")
 
 
@@ -156,7 +156,7 @@ exit 0
         """an image workspace on another machine: `wk sysimage build` runs over there"""
         with stub_path({"ssh": self.SSH_STUB}) as binp:
             env = dict(self.env, PATH=f"{binp}:{os.environ['PATH']}",
-                       WK_TARGET="fakebox")
+                       WK_PLACE="fakebox")
             cp = run("sysimage", "build", self.profile,
                      "--workspace", self.ws, "--detach", env=env)
         sent = self.log.read_text()
@@ -167,11 +167,11 @@ exit 0
 
     def test_the_spec_names_the_machine_with_no_target_set(self):
         """`<profile>@<machine>`: the machine a new image workspace goes on, said in the
-        argument rather than in WK_TARGET. Nothing here holds this image workspace, so
+        argument rather than in WK_PLACE. Nothing here holds this image workspace, so
         without the machine half there would be nothing to route by."""
         with stub_path({"ssh": self.SSH_STUB}) as binp:
             env = dict(self.env, PATH=f"{binp}:{os.environ['PATH']}")
-            self.assertNotIn("WK_TARGET", env)
+            self.assertNotIn("WK_PLACE", env)
             cp = run("sysimage", "build", f"{self.profile}@fakebox",
                      "--workspace", self.ws, "--detach", env=env)
         sent = self.log.read_text()
@@ -181,16 +181,16 @@ exit 0
 
     def test_an_image_workspace_that_does_not_exist_yet_is_not_refused(self):
         """the build creates its image workspace, so the dispatcher does not refuse it"""
-        # `vm` is a target the yocto builder itself refuses, so this runs the
+        # `vm` is a place the yocto builder itself refuses, so this runs the
         # whole dispatcher and stops one line into the command.
         with stub_path({"tart": "exit 0\n"}) as binp:
             cp = run("sysimage", "build", self.profile, "--workspace", self.ws,
-                     env=dict(self.env, WK_TARGET="vm",
+                     env=dict(self.env, WK_PLACE="vm",
                               PATH=f"{binp}:{os.environ['PATH']}"))
         out = cp.stdout + cp.stderr
         self.assertNotEqual(cp.returncode, 0, out)
         self.assertNotIn("no such workspace", out)
-        self.assertIn("target 'vm' is a vm one", out)
+        self.assertIn("place 'vm' is a vm one", out)
 
 
 if __name__ == "__main__":

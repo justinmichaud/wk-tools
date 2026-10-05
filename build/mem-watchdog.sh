@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Watches a build's memory from inside the machine that is building. Started by build/guard.sh just before the build execs, so <pid> is the build. Over `budget`, or with the machine under `floor` -- memory we are not using is not ours either on a shared machine -- it kills the build rather than leave the OOM killer to pick somebody else's work. Output is on stderr, and `wk build` lifts the peak line into the status file. bash 3.2, this running in macOS guests as well as Linux.
 #
-# What it measures is the target's own cgroup where there is one, and the process tree under <pid> where there is not. Not every compiler is a descendant: bitbake's cooker detaches, so the tree misses the whole of a yocto build's long phase. Measured 2026-09-16, one stage twice -- killed on the machine floor mid-bitbake at "peak 96MB of budget 12800MB" while it said "this build is using 70MB of it", and finishing its ninja phase at "peak 12663MB of budget 15360MB". The cgroup holds the workspace and nothing else, so it counts what detached.
+# What it measures is the workspace's own cgroup where there is one, and the process tree under <pid> where there is not. Not every compiler is a descendant: bitbake's cooker detaches, so the tree misses the whole of a yocto build's long phase. Measured 2026-09-16, one stage twice -- killed on the machine floor mid-bitbake at "peak 96MB of budget 12800MB" while it said "this build is using 70MB of it", and finishing its ninja phase at "peak 12663MB of budget 15360MB". The cgroup holds the workspace and nothing else, so it counts what detached.
 
 set -uo pipefail
 
@@ -30,7 +30,7 @@ _avail_mb() {   # what the machine has left; macOS has no MemAvailable, so nothi
     awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo
 }
 
-_cgroup_mb() {   # what the target's own cgroup is using; nothing where there is no cgroup (a macOS guest)
+_cgroup_mb() {   # what the workspace's own cgroup is using; nothing where there is no cgroup (a macOS guest)
     [ -r /sys/fs/cgroup/memory.current ] || return 0
     awk '{ printf "%d\n", $1 / 1048576 }' /sys/fs/cgroup/memory.current
 }

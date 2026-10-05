@@ -19,7 +19,7 @@ from tests.support import REPO, as_dispatched
 
 sys.path.insert(0, str(REPO / "lib"))
 from tests.test_bench_mac import StubWatch  # noqa: E402
-from wk import decl, dispatch, job, record, screen, targets  # noqa: E402
+from wk import decl, dispatch, job, places, record, screen  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import pipeline, record as brecord, systems  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
@@ -34,7 +34,7 @@ CMD = importlib.util.module_from_spec(importlib.util.spec_from_loader("cmd_bench
 CMD_LOADER.exec_module(CMD)
 
 
-class BenchTarget(targets.Target):
+class BenchDriver(places.Driver):
     """A workspace `ws` whose commands answer from the world as ("exec", ws, ...)."""
 
     def __init__(self, name, root, env, machine, kind):
@@ -140,10 +140,10 @@ class World(Fake):
         return st["state"], st["ok"], recs[-1].field("exit") if recs else None
 
 
-def registry(w, target=None):
-    """The registry a run resolves its workspace through: a `target` (BenchTarget) of the world's kind."""
-    return FakeRegistry(w.env, w, lambda n, e: (target or BenchTarget)(n, str(REPO), e, w, w.kind),
-                        ws_target=lambda ws: w.kind, in_workspace=lambda: False)
+def registry(w, driver=None):
+    """The registry a run resolves its workspace through: a `place` (BenchDriver) of the world's kind."""
+    return FakeRegistry(w.env, w, lambda n, e: (driver or BenchDriver)(n, str(REPO), e, w, w.kind),
+                        ws_place=lambda ws: w.kind, in_workspace=lambda: False)
 
 
 def invoke(w, argv):
@@ -168,7 +168,7 @@ class BenchTest(unittest.TestCase):
     def run_(self, w=None, *argv, extra=None):
         w = w or self.w
         w.env.update(extra or {})
-        argv = argv or ("run", "jetstream3", "--config", "jsc-release", "--count", "2")
+        argv = argv or ("run", "jetstream3", "--preset", "jsc-release", "--count", "2")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             rc = invoke(w, argv)
@@ -183,7 +183,7 @@ class BenchTest(unittest.TestCase):
         err = io.StringIO()
         w = w or self.w
         w.env.update(extra or {})
-        argv = argv or ("run", "jetstream3", "--config", "jsc-release")
+        argv = argv or ("run", "jetstream3", "--preset", "jsc-release")
         with self.assertRaises(Refused), contextlib.redirect_stderr(err):
             invoke(w, argv)
         return err.getvalue()
@@ -200,23 +200,23 @@ class BenchTest(unittest.TestCase):
 
 class TestConformance(BenchTest):
     def test_each_system_runs_the_one_pipeline_into_the_one_record(self):
-        for kind, plan, config, host in (("container", "jetstream3", "jsc-release", "container"),
+        for kind, plan, preset, host in (("container", "jetstream3", "jsc-release", "container"),
                                          ("container", "speedometer3", "wpe-release", "container"),
                                          ("vm", "jetstream3", "jsc-release", "guest"),
                                          ("vm", "speedometer3", "mac-release", "guest")):
             with self.subTest(kind=kind, plan=plan):
                 w = World(self.tmp, kind)
-                rc, err = self.run_(w, "run", plan, "--config", config)
+                rc, err = self.run_(w, "run", plan, "--preset", preset)
                 self.assertEqual(rc, 0, err)
                 self.assertIn("BENCH OK  %s" % plan, err)
                 self.assertEqual(w.state(), ("complete", 1, "0"))
                 env = self.env_json(w)
-                self.assertEqual((env["bench_host"], env["config"], env["plan"], env["webkit_sha"]), (host, config, plan, SHA))
+                self.assertEqual((env["bench_host"], env["preset"], env["plan"], env["webkit_sha"]), (host, preset, plan, SHA))
                 self.assertTrue((self.run_dir(w) / "result.json").is_file(), err)
 
     def test_a_guest_run_is_collected_from_the_guest_through_its_copy(self):
         w = World(self.tmp, "vm")
-        rc, err = self.run_(w, "run", "speedometer3", "--config", "mac-release")
+        rc, err = self.run_(w, "run", "speedometer3", "--preset", "mac-release")
         self.assertEqual(rc, 0, err)
         (pull,) = [e for e in w.effects if e[0] == "copy_out"]
         self.assertTrue(pull[1].startswith("/Users/admin/wk-bench/") and pull[1].endswith("/result.json"), pull)
@@ -226,13 +226,13 @@ class TestConformance(BenchTest):
 
     def test_a_guest_gets_the_pinned_payload_the_store_holds(self):
         w = World(self.tmp, "vm")
-        self.run_(w, "run", "jetstream3", "--config", "jsc-release")
+        self.run_(w, "run", "jetstream3", "--preset", "jsc-release")
         (push,) = [e for e in w.effects if e[0] == "copy_tree_in"]
         self.assertEqual(push[1:], (w.seed_dest, "/Users/admin/wk-bench/payload/" + os.path.basename(w.seed_dest)))
         self.assertIn("cd /Users/admin/wk-bench/payload/", w.watched[0][-1])
 
     def test_a_container_run_writes_into_its_workspaces_directory(self):
-        self.run_(None, "run", "speedometer3", "--config", "wpe-release")
+        self.run_(None, "run", "speedometer3", "--preset", "wpe-release")
         script = self.w.watched[0][-1]
         self.assertIn("--output-file /var/lib/wk/ws/ws/bench/", script)
         self.assertIn("--local-copy /cache/bench/speedometer3-", script)
@@ -264,7 +264,7 @@ class TestTheRecord(BenchTest):
         doc = json.loads((self.w.bench_dir() / task / "task.json").read_text())
         self.assertEqual((doc["subject"], doc["devices"]), ({"kind": "workspace", "spec": "ws"},
                                                            [{"device": "container", "profile": "jsc-release"}]))
-        self.assertEqual(doc["commands"], ["wk bench run ws jetstream3 --config jsc-release --count 2"])
+        self.assertEqual(doc["commands"], ["wk bench run ws jetstream3 --preset jsc-release --count 2"])
         env = self.env_json()
         self.assertEqual((env["class"], env["runner"], env["host"]["root_device"]), ("cpu", "jsc", "nvme0n1 Fast (nvme, ssd, no-trim)"))
         self.assertEqual(env["configuration"]["env_pad_bytes"], "64")
@@ -293,7 +293,7 @@ class TestInterrupted(BenchTest):
             t = real(recs, *a, **kw)
             t.set("pid_match", pipeline.PID_MATCH)
             t.pid(77)
-            t.set("where", "target")
+            t.set("where", "place")
             return t
         self.w.pids.add(77)
         self.w.answer(["exec", "ws", "ps", "-o", "args=", "-p", "77"], out="jsc cli.js\n")
@@ -312,7 +312,7 @@ class TestInterrupted(BenchTest):
 
 class TestARestart(BenchTest):
 
-    ARGV = ("run", "jetstream3", "--config", "jsc-release")
+    ARGV = ("run", "jetstream3", "--preset", "jsc-release")
 
     def first(self):
         rc, err = self.run_(None, *self.ARGV)
@@ -324,7 +324,7 @@ class TestARestart(BenchTest):
     def test_the_task_records_its_restart(self):
         task = self.first()
         doc = json.loads((self.w.bench_dir() / task / "task.json").read_text())
-        self.assertEqual(doc["restart"], "wk bench run ws jetstream3 --config jsc-release --task " + task)
+        self.assertEqual(doc["restart"], "wk bench run ws jetstream3 --preset jsc-release --task " + task)
 
     def test_a_task_that_holds_its_run_runs_nothing(self):
         task = self.first()
@@ -348,7 +348,7 @@ class TestARestart(BenchTest):
         task = self.first()
         self.assertIn("no such task 'nope'", self.said(*self.ARGV + ("--task", "nope")))
         self.assertIn("task %s measures jetstream3, not speedometer3" % task,
-                      self.said("run", "speedometer3", "--config", "wpe-release", "--task", task))
+                      self.said("run", "speedometer3", "--preset", "wpe-release", "--task", task))
         doc = json.loads((self.w.bench_dir() / task / "task.json").read_text())
         (self.w.bench_dir() / task / "task.json").write_text(json.dumps(dict(doc, slots=["a", "b"], restart="wk bench ab x --task " + task)))
         self.assertIn("is an A/B; restart it with its own command:\n    wk bench ab x --task " + task, self.said(*self.ARGV + ("--task", task)))
@@ -356,7 +356,7 @@ class TestARestart(BenchTest):
 
 class TestWhereTheLegRecords(BenchTest):
     def test_a_workspace_whose_tasks_are_on_another_machine_is_refused_before_anything_is_written(self):
-        with mock.patch.object(BenchTarget, "results", lambda t, ws: (Ssh("box", via=self.w), str(self.tmp / "far" / "bench"))):
+        with mock.patch.object(BenchDriver, "results", lambda t, ws: (Ssh("box", via=self.w), str(self.tmp / "far" / "bench"))):
             err = self.said()
         self.assertIn("run it on box", err)
         self.assertEqual(self.w.watched, [])
@@ -377,10 +377,10 @@ class TestRefusals(BenchTest):
         self.assertIn("wk bench run <workspace> <plan>", err)
 
     def test_a_jsc_config_cannot_run_a_gpu_plan(self):
-        self.assertIn("gpu-class benchmark and jsc-release builds no browser", self.said("run", "speedometer3", "--config", "jsc-release"))
+        self.assertIn("gpu-class benchmark and jsc-release builds no browser", self.said("run", "speedometer3", "--preset", "jsc-release"))
 
     def test_an_unknown_config_is_named(self):
-        self.assertIn("unknown config: nosuch", self.dispatch_refuses("run", "jetstream3", "--config", "nosuch"))
+        self.assertIn("unknown preset: nosuch", self.dispatch_refuses("run", "jetstream3", "--preset", "nosuch"))
 
     def test_a_board_or_remote_workspace_is_not_a_workspace_system(self):
         w = World(self.tmp, "remote")
@@ -391,9 +391,9 @@ class TestRefusals(BenchTest):
 
     def test_a_failed_preflight_refuses_and_force_records_it(self):
         self.w.files[systems.GOVERNOR] = "powersave\n"
-        self.assertIn("1 preflight check(s) failed", self.said("run", "jetstream3", "--config", "jsc-release"))
+        self.assertIn("1 preflight check(s) failed", self.said("run", "jetstream3", "--preset", "jsc-release"))
         self.assertEqual(self.w.tasks(), [])
-        rc, err = self.run_(None, "run", "jetstream3", "--config", "jsc-release", extra={"WK_FORCE": "1"})
+        rc, err = self.run_(None, "run", "jetstream3", "--preset", "jsc-release", extra={"WK_FORCE": "1"})
         env = self.env_json()
         self.assertTrue(env["forced"])
         self.assertIn("cpu governor: powersave -- wk quiesce on; ", env["preflight_notes"])
@@ -415,7 +415,7 @@ class TestRefusals(BenchTest):
     def test_a_build_on_the_books_holds_the_run_off(self):
         t = self.w.recs().begin("build", "here", "other", "k", "/l", ["x"], pid=99)
         self.w.pids.add(99)
-        self.assertIn("no builds running", self.said("run", "jetstream3", "--config", "jsc-release"))
+        self.assertIn("no builds running", self.said("run", "jetstream3", "--preset", "jsc-release"))
         t.end(0)
 
     def test_the_jsc_runner_needs_a_seeded_cli_js(self):
@@ -424,36 +424,36 @@ class TestRefusals(BenchTest):
 
     def test_a_cpu_class_browser_run_goes_headless_without_a_display(self):
         del self.w.files["/run/user/1/wk/display/wayland-0"]
-        rc, err = self.run_(None, "run", "jetstream3", "--config", "wpe-release")
+        rc, err = self.run_(None, "run", "jetstream3", "--preset", "wpe-release")
         self.assertIn("running headless (cpu-class, no usable display)", err)
         self.assertIn("-- --headless", self.w.watched[0][-1])
         self.assertIn("export LIBGL_ALWAYS_SOFTWARE=1", self.w.watched[0][-1])
 
     def test_aslr_cannot_be_turned_off_in_a_guest(self):
         w = World(self.tmp, "vm")
-        self.assertIn("ASLR cannot be turned off on macOS", self.said("run", "jetstream3", "--config", "jsc-release", w=w,
+        self.assertIn("ASLR cannot be turned off on macOS", self.said("run", "jetstream3", "--preset", "jsc-release", w=w,
                                                                      extra={"WK_BENCH_ASLR": "off"}))
 
 
 class TestAMeasuredRunIsWatchedThroughout(BenchTest):
 
     def test_the_run_is_bracketed_by_the_watch(self):
-        self.run_(None, "run", "speedometer3", "--config", "wpe-release")
+        self.run_(None, "run", "speedometer3", "--preset", "wpe-release")
         self.assertEqual([e for e in self.w.effects if e[0] == "watch"], [("watch", "start", 0), ("watch", "stop", 1)])
 
     def test_a_dry_run_starts_no_watch(self):
         os.environ["WK_DRY_RUN"] = "1"
-        self.run_(None, "run", "speedometer3", "--config", "wpe-release")
+        self.run_(None, "run", "speedometer3", "--preset", "wpe-release")
         self.assertNotIn("start", [e[1] for e in self.w.effects if e[0] == "watch"])
 
     def test_a_covered_run_fails_unless_it_is_forced(self):
         self.w.drew = ["2026-09-27T12:00:00Z\tSecurityAgent"]
-        err = self.said("run", "speedometer3", "--config", "wpe-release")
+        err = self.said("run", "speedometer3", "--preset", "wpe-release")
         self.assertIn("did not stay quiet", err)
         self.assertIn("SecurityAgent", err)
         w = World(self.tmp)
         w.drew = ["2026-09-27T12:00:00Z\trunning again: NotificationCenter"]
-        rc, err = self.run_(w, "run", "speedometer3", "--config", "wpe-release", extra={"WK_FORCE": "1"})
+        rc, err = self.run_(w, "run", "speedometer3", "--preset", "wpe-release", extra={"WK_FORCE": "1"})
         self.assertEqual(rc, 0, err)
         self.assertIn("FORCED past a barrier: something drew over this run", err)
 
@@ -503,13 +503,13 @@ class TestDryRun(BenchTest):
             locks = w.env["WK_LOCK_DIR"]
             return [e for e in w.effects if e[0] in ("act", "write", "mkdir", "remove", "copy_in", "copy_out", "copy_tree_in", "spawn", "kill")
                     and not (isinstance(e[1], str) and e[1].startswith(locks))]
-        for kind, plan, config in (("container", "speedometer3", "wpe-release"), ("vm", "speedometer3", "mac-release")):
+        for kind, plan, preset in (("container", "speedometer3", "wpe-release"), ("vm", "speedometer3", "mac-release")):
             with self.subTest(kind=kind):
                 wet, dry = World(self.tmp, kind), World(self.tmp, kind)
-                self.run_(wet, "run", plan, "--config", config)
+                self.run_(wet, "run", plan, "--preset", preset)
                 os.environ["WK_DRY_RUN"] = "1"
                 try:
-                    rc, err = self.run_(dry, "run", plan, "--config", config)
+                    rc, err = self.run_(dry, "run", plan, "--preset", preset)
                 finally:
                     del os.environ["WK_DRY_RUN"]
                 strip = [[tuple(str(x).replace(str(w.tmp), "") for x in e) for e in mutations(w)] for w in (wet, dry)]
@@ -524,7 +524,7 @@ class TestKillPoints(BenchTest):
         def run_once(w):
             w.clock.t += 1
             with contextlib.redirect_stderr(io.StringIO()):
-                invoke(w, ("run", "speedometer3", "--config", "wpe-release"))
+                invoke(w, ("run", "speedometer3", "--preset", "wpe-release"))
         for kind in ("container", "vm"):
             with self.subTest(kind=kind):
                 converges(self, lambda: World(self.tmp, kind), run_once, World.state)

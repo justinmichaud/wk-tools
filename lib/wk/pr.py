@@ -1,4 +1,4 @@
-"""A PR head taken into a checkout, and a branch pointed at its fork: git argv through a target's exec; and the week's
+"""A PR head taken into a checkout, and a branch pointed at its fork: git argv through a place's exec; and the week's
 activity on WebKit/WebKit, read through gh's JSON."""
 
 import datetime
@@ -76,8 +76,8 @@ def branch_repos(machine, user, branch, remotes=git.REMOTES):
 
 
 # The `branch.<b>.merge` that makes `@{u}` resolve: git maps it through the remote's fetch refspec, so a mirror-shaped remote (`git.fetch_refspecs`) is named by its tracking ref and any other by `refs/heads/<b>`. `push.default = current` (dotfiles/gitconfig) pushes to `<b>`.
-def merge_ref(target, ws, src, remote, branch):
-    specs = _out(target.exec(ws, ["git", "-C", src, "config", "--get-all", "remote.%s.fetch" % remote])).splitlines()
+def merge_ref(driver, ws, src, remote, branch):
+    specs = _out(driver.exec(ws, ["git", "-C", src, "config", "--get-all", "remote.%s.fetch" % remote])).splitlines()
     if git.fetch_refspecs(remote, True, [])[0] in specs:
         return "refs/remotes/%s/%s" % (remote, branch)
     return "refs/heads/" + branch
@@ -88,8 +88,8 @@ def track(src, remote, branch, merge):
             ["git", "-C", src, "config", "branch.%s.merge" % branch, merge]]
 
 
-def converge(target, ws, src, forks):
-    cfg = target.exec(ws, ["git", "-C", src, "config", "--get-regexp", r"^branch\..*\.(remote|merge)$"])
+def converge(driver, ws, src, forks):
+    cfg = driver.exec(ws, ["git", "-C", src, "config", "--get-regexp", r"^branch\..*\.(remote|merge)$"])
     seen = {}
     for line in _out(cfg).splitlines():
         key, _, value = line.partition(" ")
@@ -100,8 +100,8 @@ def converge(target, ws, src, forks):
     for b, c in sorted(seen.items()):
         if c.get("remote") not in names or c.get("merge") != "refs/heads/" + b:
             continue
-        merge = merge_ref(target, ws, src, c["remote"], b)
-        if merge != c["merge"] and all(target.act_exec(ws, argv).ok for argv in track(src, c["remote"], b, merge)):
+        merge = merge_ref(driver, ws, src, c["remote"], b)
+        if merge != c["merge"] and all(driver.act_exec(ws, argv).ok for argv in track(src, c["remote"], b, merge)):
             out.append("converged: %s tracks %s/%s" % (b, c["remote"], b))
     return out
 
@@ -110,12 +110,12 @@ def _out(r):
     return r.out.replace("\r", "").strip() if r.ok else ""
 
 
-def retarget(target, ws, src, forks, branches, remotes=git.REMOTES):
+def retarget(driver, ws, src, forks, branches, remotes=git.REMOTES):
     """Point the checked-out branch at the fork it can be pushed to: the lines to report, none when it is already right."""
-    b = _out(target.exec(ws, ["git", "-C", src, "symbolic-ref", "--quiet", "--short", "HEAD"]))
+    b = _out(driver.exec(ws, ["git", "-C", src, "symbolic-ref", "--quiet", "--short", "HEAD"]))
     if not b:
         return []
-    up = _out(target.exec(ws, ["git", "-C", src, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]))
+    up = _out(driver.exec(ws, ["git", "-C", src, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]))
     names = {f[0] for f in forks}
     ups = [(n, u) for n, u in remotes if n not in names]
     if up in {"%s/%s" % (n, m) for n, _ in ups for m in branches}:
@@ -123,23 +123,23 @@ def retarget(target, ws, src, forks, branches, remotes=git.REMOTES):
     f = next((git.fork_for(u, forks) for n, u in ups if up.startswith(n + "/") and git.fork_for(u, forks)), "")
     if not f:
         return []
-    target.act_exec(ws, ["git", "-C", src, "fetch", "-q", f, b])
-    if not target.exec(ws, ["git", "-C", src, "rev-parse", "--verify", "-q", "refs/remotes/%s/%s" % (f, b)]).ok:
+    driver.act_exec(ws, ["git", "-C", src, "fetch", "-q", f, b])
+    if not driver.exec(ws, ["git", "-C", src, "rev-parse", "--verify", "-q", "refs/remotes/%s/%s" % (f, b)]).ok:
         return ["left alone: %s is not on %s yet -- push it first:  git push %s %s" % (b, f, f, b)]
-    if all(target.act_exec(ws, argv).ok for argv in track(src, f, b, merge_ref(target, ws, src, f, b))):
+    if all(driver.act_exec(ws, argv).ok for argv in track(src, f, b, merge_ref(driver, ws, src, f, b))):
         return ["retargeted: %s now tracks %s/%s" % (b, f, b)]
     return []
 
 
-def _probe(target, name, src, branch):
-    dirty = target.exec(name, ["git", "-C", src, "status", "--porcelain"])
+def _probe(driver, name, src, branch):
+    dirty = driver.exec(name, ["git", "-C", src, "status", "--porcelain"])
     if not dirty.ok:
         die("could not reach the checkout in '%s'" % name)
-    local = _out(target.exec(name, ["git", "-C", src, "rev-parse", "--verify", "--quiet", "refs/heads/" + branch]))
+    local = _out(driver.exec(name, ["git", "-C", src, "rev-parse", "--verify", "--quiet", "refs/heads/" + branch]))
     return local, len([l for l in dirty.out.replace("\r", "").splitlines() if l.strip()])
 
 
-def _source(target, here, name, src, pr, remotes):
+def _source(driver, here, name, src, pr, remotes):
     if pr["kind"] == "pull":
         remote = pr["remote"]
         url = dict(remotes).get(remote)
@@ -160,7 +160,7 @@ def _source(target, here, name, src, pr, remotes):
         die("'%s' exists in more than one of %s's repositories:\n%s\n    They are different projects; check the PR page for which one it is and\n"
             "    fetch that remote by hand." % (branch, user, "\n".join("    %s %s %s" % f for f in found)))
     repo, url, head = found[0]
-    urls = target.exec(name, ["git", "-C", src, "config", "--get-regexp", r"^remote\..*\.url$"])
+    urls = driver.exec(name, ["git", "-C", src, "config", "--get-regexp", r"^remote\..*\.url$"])
     remote = next((l.split()[0][len("remote."):-len(".url")] for l in urls.out.replace("\r", "").splitlines()
                    if len(l.split()) == 2 and l.split()[1] == url), "")
     if remote:
@@ -169,20 +169,20 @@ def _source(target, here, name, src, pr, remotes):
     return repo, url, remote, branch, "refs/heads/" + branch, head, True
 
 
-def checkout(target, here, name, spec, remotes=git.REMOTES):
+def checkout(driver, here, name, spec, remotes=git.REMOTES):
     """Fetch the one ref into the workspace's checkout and check it out; a local branch with commits the head lacks is kept unless --force."""
     pr = parse_spec(spec)
-    src = target.src(name)
-    repo, url, remote, branch, src_ref, head, add = _source(target, here, name, src, pr, remotes)
-    local, dirty = _probe(target, name, src, branch)
+    src = driver.src(name)
+    repo, url, remote, branch, src_ref, head, add = _source(driver, here, name, src, pr, remotes)
+    local, dirty = _probe(driver, name, src, branch)
     if dirty:
         warn("'%s' has %d uncommitted change(s); the checkout carries them across" % (name, dirty))
 
     def step(argv, why):
-        if not target.act_exec(name, ["git", "-C", src] + argv).ok:
+        if not driver.act_exec(name, ["git", "-C", src] + argv).ok:
             die(why)
     if add:
-        target.act_exec(name, ["git", "-C", src, "remote", "add", remote, url])
+        driver.act_exec(name, ["git", "-C", src, "remote", "add", remote, url])
         step(["remote", "set-url", remote, url], "could not add the remote '%s' in '%s'; nothing was checked out" % (remote, name))
     tracking = "refs/remotes/%s/%s" % (remote, branch)
     # By URL, never a remote, and --no-prune: every workspace's gitconfig has `fetch.prune = true`, and this must not retire origin/main.
@@ -190,7 +190,7 @@ def checkout(target, here, name, spec, remotes=git.REMOTES):
          "could not fetch '%s' into '%s'; nothing was checked out" % (branch, name))
     reset = False
     if local and local != head:
-        r = target.exec(name, ["git", "-C", src, "rev-list", "--count", "%s..%s" % (tracking, branch)])
+        r = driver.exec(name, ["git", "-C", src, "rev-list", "--count", "%s..%s" % (tracking, branch)])
         ahead = _out(r) if r.ok else "unknown"
         if ahead == "0":
             reset = True
@@ -204,7 +204,7 @@ def checkout(target, here, name, spec, remotes=git.REMOTES):
             log("  it is checked out as it is; nothing is discarded.\n  to take the PR head instead and lose those commits:\n"
                 "    wk pr %s %s --force" % (name, spec))
     why = "could not check out '%s' in '%s'" % (branch, name)
-    if target.exec(name, ["git", "-C", src, "show-ref", "--verify", "--quiet", "refs/heads/" + branch]).ok:
+    if driver.exec(name, ["git", "-C", src, "show-ref", "--verify", "--quiet", "refs/heads/" + branch]).ok:
         step(["checkout", "--quiet", branch], why)
         if reset:
             step(["reset", "--hard", "--quiet", tracking], why)
@@ -212,12 +212,12 @@ def checkout(target, here, name, spec, remotes=git.REMOTES):
         step(["checkout", "--quiet", "-b", branch, tracking], why)
     # A pull request head is no branch on the remote: nothing to track, and nothing to push back to.
     if pr["kind"] == "pull":
-        target.act_exec(name, ["git", "-C", src, "branch", "--quiet", "--unset-upstream", branch])
+        driver.act_exec(name, ["git", "-C", src, "branch", "--quiet", "--unset-upstream", branch])
     else:
-        for argv in track(src, remote, branch, merge_ref(target, name, src, remote, branch)):
+        for argv in track(src, remote, branch, merge_ref(driver, name, src, remote, branch)):
             step(argv[3:], why)
     info("'%s' is on %s (%s, from %s)" % (name, branch, repo, remote))
-    log("  " + _out(target.exec(name, ["git", "-C", src, "--no-pager", "log", "--oneline", "-1"])))
+    log("  " + _out(driver.exec(name, ["git", "-C", src, "--no-pager", "log", "--oneline", "-1"])))
 
 
 def pr_refname(user, repo, branch):

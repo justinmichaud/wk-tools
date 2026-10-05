@@ -48,7 +48,7 @@ from wk import agents, guest, secrets, wall  # noqa: E402
 from wk.act import Refused, barrier, die, info, log, warn  # noqa: E402
 from wk.doctor import Report  # noqa: E402
 from wk.machine import HAVE, Local  # noqa: E402
-from wk.targets import Registry  # noqa: E402
+from wk.places import Registry  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
 
 NOT_INTACT = ("the sandbox around '%s' is not intact (see above), and relaxed\n"
@@ -91,21 +91,21 @@ class _CatchTermHup:
 
 
 class Ai:
-    def __init__(self, root, env, reg, target, agent, name):
+    def __init__(self, root, env, reg, driver, agent, name):
         self.root, self.env, self.reg, self.machine = root, env, reg, reg.machine
-        self.target, self.agent, self.name = target, agent, name
-        self.push_target = None   # a build box keeps its own keys under its own wk root, so the switch is thrown there
+        self.driver, self.agent, self.name = driver, agent, name
+        self.push_on = None   # a build box keeps its own keys under its own wk root, so the switch is thrown there
         self.push_was_on = False
 
     def exec(self, argv):
-        return self.target.exec(self.name, argv)
+        return self.driver.exec(self.name, argv)
 
     def push_switch(self, verb):
-        argv = [os.path.join(self.root, "wk"), "key", "push", verb] + (["--target", self.push_target] if self.push_target else [])
+        argv = [os.path.join(self.root, "wk"), "key", "push", verb] + (["--on", self.push_on] if self.push_on else [])
         return self.machine.run(argv) if verb == "status" else self.machine.act_run(argv)
 
     def push_status_line(self):
-        return "wk key push status" + (" --target %s" % self.push_target if self.push_target else "")
+        return "wk key push status" + (" --on %s" % self.push_on if self.push_on else "")
 
     def push_hold_back(self):
         """In a workspace the measurement stands in for the switch, beside the sandbox probes (`checks`)."""
@@ -145,18 +145,18 @@ class Ai:
 
     def checks(self):
         """`wk doctor`'s checks, run at once: from the host for a container or a guest, from inside for this workspace."""
-        kind, name = self.target.kind, self.name
+        kind, name = self.driver.kind, self.name
         if kind == "remote":
             info("'wk doctor %s' is not run for '%s': there is no sandbox there to\n  measure (it says so and refuses). The "
-                 "barrier above is the whole of the\n  boundary on this target." % (name, self.target.name))
+                 "barrier above is the whole of the\n  boundary on this place." % (name, self.driver.name))
             return
         rep = Report(sys.stderr)
         if kind == "local":
             info("checking workspace '%s' from inside it" % name)
-            publishing = wall.from_inside(self.root, self.target, name, self.machine, rep)
+            publishing = wall.from_inside(self.root, self.driver, name, self.machine, rep)
         else:
-            info("checking workspace '%s' (%s)" % (name, self.target.name))
-            publishing = wall.from_host(self.root, self.target, name, self.machine, rep)
+            info("checking workspace '%s' (%s)" % (name, self.driver.name))
+            publishing = wall.from_host(self.root, self.driver, name, self.machine, rep)
         sys.stderr.write("\n")
         v = wall.verdict(rep, publishing)
         if v == "publishing":
@@ -172,7 +172,7 @@ class Ai:
         """A macOS guest's egress is filtered on the host by Softnet, unmeasurable from in there, and Softnet applies at
         `tart run`: a guest booted without it is unfiltered."""
         name, unfiltered = self.name, guest.is_unfiltered(self.env)
-        if not self.target.egress_filtered(name) and not unfiltered:
+        if not self.driver.egress_filtered(name) and not unfiltered:
             barrier("'%s' was booted with NO egress filter.\n    Restart it filtered:  wk stop %s && wk start %s\n"
                     "    (WK_VM_UNFILTERED=1 is the same decision, said the older way.)" % (name, name, name))
         softnet = guest.softnet_bin(self.env)
@@ -188,21 +188,21 @@ class Ai:
                     "   (needs a terminal)\n    (WK_VM_UNFILTERED=1 is the same decision, said the older way.)")
 
     def wall_available(self):
-        """A builtin needs `sh -c`: a target's exec hands argv to an exec, not a shell (measured)."""
+        """A builtin needs `sh -c`: a place's exec hands argv to an exec, not a shell (measured)."""
         return self.exec(list(HAVE) + ["bwrap"]).ok
 
     def remote_control(self):
-        """A person's Claude session, not the babysitter's `-p`; the setup token a target kind is given wins over the login."""
+        """A person's Claude session, not the babysitter's `-p`; the setup token a driver is given wins over the login."""
         if self.agent != "claude" or not on_a_terminal():
             return []
-        if any(r[0] == "claude" and self.target.kind in r[5].split(",") for r in secrets.agent_secrets()):
-            warn("Remote Control is off for this session: a %s target authenticates with the\n"
-                 "  `claude setup-token` credential, which Remote Control refuses" % self.target.kind)
+        if any(r[0] == "claude" and self.driver.kind in r[5].split(",") for r in secrets.agent_secrets()):
+            warn("Remote Control is off for this session: a %s place authenticates with the\n"
+                 "  `claude setup-token` credential, which Remote Control refuses" % self.driver.kind)
             return []
         return ["--remote-control", self.name]
 
     def session(self, agent_bin, mode, args):
-        name, t = self.name, self.target
+        name, t = self.name, self.driver
         with _CatchTermHup():
             try:
                 prefix = []
@@ -227,7 +227,7 @@ class Ai:
                 self.restore_push(on_a_terminal())
 
     def run(self, args):
-        t, name = self.target, self.name
+        t, name = self.driver, self.name
         mode = ["--dangerously-skip-permissions"] if self.agent == "claude" else []
         if t.kind == "remote":
             barrier("'%s' is on the shared build machine '%s', which has no sandbox at\n    all: no container, no separate uid, "
@@ -236,7 +236,7 @@ class Ai:
             if self.agent == "claude":
                 mode = ["--permission-mode", "auto"]
                 info("Claude on %s runs in auto mode (this machine is not a sandbox)" % t.name)
-            self.push_target = None if t.is_local else t.name
+            self.push_on = None if t.is_local else t.name
         agent_bin = self.agent_bin()
         self.push_hold_back()
         if t.kind == "remote" and self.exec(["sh", "-c", GH_LOGIN]).ok:
@@ -255,10 +255,10 @@ def main(argv, env=None, reg=None):
     require_name(name)
     reg = reg or Registry(ROOT, env, Local())
     try:
-        target = reg.load(reg.ws_target(name))
+        driver = reg.load(reg.ws_place(name))
     except LookupError as e:
         die(str(e))
-    return Ai(ROOT, env, reg, target, agent, name).run(argv[1:])
+    return Ai(ROOT, env, reg, driver, agent, name).run(argv[1:])
 
 
 if __name__ == "__main__":

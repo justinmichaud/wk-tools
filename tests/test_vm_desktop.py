@@ -13,7 +13,7 @@ from unittest import mock
 from tests.support import REPO, live_selected, repo_files
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import doctor, guest, targets  # noqa: E402
+from wk import doctor, guest, places  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
@@ -311,8 +311,8 @@ class TestWhatIsResidentInThere(unittest.TestCase):
         self.assertFalse([x for x in f if "shells are resident" in x[1] or "macOS calls that pressure" in x[1]], f)
 
     def test_nothing_wk_runs_in_a_guest_leaves_a_shell_behind(self):
-        with mock.patch.object(targets.Vm, "tart", lambda s: "/t/tart"):
-            argv = targets.Vm("vm", str(REPO), {}, Fake()).guest_of("wk-demo").argv("true")
+        with mock.patch.object(places.Vm, "tart", lambda s: "/t/tart"):
+            argv = places.Vm("vm", str(REPO), {}, Fake()).guest_of("wk-demo").argv("true")
         self.assertEqual(["/t/tart", "exec"], argv[:2])
         self.assertNotIn("ControlPersist", " ".join(argv))
 
@@ -321,7 +321,7 @@ class TestARehearsalGuestIsNotAlsoAWorkspace(unittest.TestCase):
     def _write_marker(self, bench):
         g = Fake("guest")
         g.answer(["test", "-f", "/etc/wk-image"], rc=0 if bench else 1)
-        vm = targets.Vm("vm", str(REPO), {"WK_VM_USER": "admin"}, Fake("here"))
+        vm = places.Vm("vm", str(REPO), {"WK_VM_USER": "admin"}, Fake("here"))
         self.assertTrue(vm.write_marker("demo", g))
         return g
 
@@ -357,14 +357,14 @@ class GuestAt(Here):
 class ReportTest(unittest.TestCase):
     def setUp(self):
         for p in (mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True),
-                  mock.patch.object(targets.Vm, "tart", lambda s: "/t/tart"), mock.patch.dict(os.environ, {}, clear=False)):
+                  mock.patch.object(places.Vm, "tart", lambda s: "/t/tart"), mock.patch.dict(os.environ, {}, clear=False)):
             p.start()
             self.addCleanup(p.stop)
         os.environ.pop("WK_DRY_RUN", None)
         self.env = {"HOME": "/h", "WK_STORE": "/st", "WK_VM_STORE": "/vs", "XDG_STATE_HOME": "/h/st"}
 
     def vm(self, here):
-        return targets.Registry(str(REPO), env=self.env, machine=here).load("vm")
+        return places.Registry(str(REPO), env=self.env, machine=here).load("vm")
 
     def report(self, sample):
         """(started, stdout, stderr) of the start's last step against a guest answering `sample`."""
@@ -446,7 +446,7 @@ class TestTheLiveDesktop(unittest.TestCase):
     def test_vm_desktop(self):
         if not live_selected() or sys.platform != "darwin":
             self.skipTest("live tier not selected, or not a macOS host")
-        vm = targets.Registry(str(REPO)).load("vm")
+        vm = places.Registry(str(REPO)).load("vm")
         up = [n for n, state in vm.list() if state == "running"] if vm.tart() else []
         if not up:
             self.skipTest("no macOS guest is running on this host")

@@ -1,4 +1,4 @@
-"""`unit rm.final_state[<target>]`: `wk rm` over each real driver on the Fake machine leaves nothing of the
+"""`unit rm.final_state[<place>]`: `wk rm` over each real driver on the Fake machine leaves nothing of the
 workspace -- no environment, no directory, no record, no alias, no creation log, no guest file -- and its record
 is the last thing to go, so an rm killed after any effect and re-run converges on that.
 
@@ -16,21 +16,21 @@ from unittest import mock
 from tests.fakes import FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO
-from tests.test_wk_targets import LINUX_PROBE
+from tests.test_wk_places import LINUX_PROBE
 from tests.test_wk_workspace import ContainerWorld, World, WorkspaceTest
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, record, targets, workspace  # noqa: E402
+from wk import act, places, record, workspace  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.machine import Result  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 FAR_ROOT = "/home/u/wk"
-DRIVERS = {"container": targets.Container, "vm": targets.Vm, "remote": targets.Remote, "local": targets.LocalWorkspace}
+DRIVERS = {"container": places.Container, "vm": places.Vm, "remote": places.Remote, "local": places.LocalWorkspace}
 
 
 class DriverWorld(World):
-    """The World with one real driver in PodmanTarget's place, its records where that driver keeps them."""
+    """The World with one real driver in PodmanDriver's place, its records where that driver keeps them."""
 
     KIND = None
 
@@ -38,9 +38,9 @@ class DriverWorld(World):
         super().__init__(tmp)
         self.env_for_driver()
         self.reg = FakeRegistry(self.env, self, lambda n, e: DRIVERS[self.KIND](n, str(REPO), e, self), names=["fakebox"])
-        self.target = self.reg.load("fakebox")
-        self.records = record.of_target(self.target, self.clock, self)
-        self.lock = Lock(self.target.store, self, self.clock)
+        self.driver = self.reg.load("fakebox")
+        self.records = record.of_driver(self.driver, self.clock, self)
+        self.lock = Lock(self.driver.store, self, self.clock)
         self.effects = []
         self.acted = set()
 
@@ -56,11 +56,11 @@ class DriverWorld(World):
         super().make(name, marker, base)
         self.containers.discard("wk-" + name)
         self.dirs.add(self.ws_dir(name))
-        self.files[os.path.join(self.ws_dir(name), targets.READY_MARKER)] = ""
+        self.files[os.path.join(self.ws_dir(name), places.READY_MARKER)] = ""
 
     def left(self, name="ws"):
         """What of `name` is still anywhere, by where it lives; empty is gone."""
-        t, out = self.target, {}
+        t, out = self.driver, {}
         if t.info(name) != "absent":
             out["environment"] = t.info(name)
         if self.isdir(t.store.ws_dir(name)):
@@ -123,11 +123,11 @@ class VmWorld(DriverWorld):
         super().make(name, marker, base)
         self.vms["wk-" + name] = "running"
         for f in (".run.log", ".unfiltered"):
-            self.files[os.path.join(self.target.vm_dir(), name + f)] = ""
+            self.files[os.path.join(self.driver.vm_dir(), name + f)] = ""
 
     def left(self, name="ws"):
         out = super().left(name)
-        guest = [f for f in (name + ".run.log", name + ".unfiltered") if os.path.join(self.target.vm_dir(), f) in self.files]
+        guest = [f for f in (name + ".run.log", name + ".unfiltered") if os.path.join(self.driver.vm_dir(), f) in self.files]
         if guest:
             out["guest files"] = guest
         return out
@@ -197,7 +197,7 @@ class RmFinalStateTest(WorkspaceTest):
         w = cls(self.tmp)
         w.make()
         w.alias()
-        w.files[w.target.create_log("ws")] = "log\n"
+        w.files[w.driver.create_log("ws")] = "log\n"
         w.begin().end(0)
         w.begin("build", pid=99).end(0)
         w.effects = []
@@ -213,7 +213,7 @@ class TestRmFinalState(RmFinalStateTest):
     def test_rm_final_state(self):
         """Inside a workspace (local) there is nothing to remove it from: the refusal names the host and removes nothing."""
         for kind, cls in dict(WORLDS, local=LocalWorld).items():
-            with self.subTest(target=kind):
+            with self.subTest(driver=kind):
                 w = self.world(cls)
                 before = w.left()
                 self.assertTrue(before, "the world made nothing to remove")
@@ -227,5 +227,5 @@ class TestRmFinalState(RmFinalStateTest):
 
     def test_rm_final_state_killed_after_any_effect_and_rerun(self):
         for kind, cls in WORLDS.items():
-            with self.subTest(target=kind):
+            with self.subTest(driver=kind):
                 converges(self, lambda: self.world(cls), self.rm, lambda w: w.left(), max_effects=80)

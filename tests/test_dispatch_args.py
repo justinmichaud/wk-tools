@@ -1,4 +1,4 @@
-"""wk.decl.Args: how a command, and resolve_target, read the options the"""
+"""wk.decl.Args: how a command, and resolve_place, read the options the"""
 import os
 import sys
 import tempfile
@@ -79,33 +79,33 @@ class TestAnOptionalValue(unittest.TestCase):
         self.assertEqual(self.d.valued_opts(), set())
 
 
-class TestResolveTargetReadsTheSameWay(unittest.TestCase):
+class TestResolvePlaceReadsTheSameWay(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="wk-test-args-")
         self.addCleanup(self.tmp.cleanup)
-        self.d = declare(self.tmp.name, "# wk: name=none opts --target=")
+        self.d = declare(self.tmp.name, "# wk: name=none opts --on=")
         env = mock.patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
-        os.environ.pop("WK_TARGET", None)
+        os.environ.pop("WK_PLACE", None)
 
     def resolve(self, *canonical):
-        return dispatch.resolve_target(dispatch.Invocation("probe", self.d, list(canonical)), "none", 0, "0", "")
+        return dispatch.resolve_place(dispatch.Invocation("probe", self.d, list(canonical)), "none", 0, "0", "")
 
     def test_the_named_target_is_the_answer(self):
-        self.assertEqual(self.resolve("--target=vm"), "vm")
+        self.assertEqual(self.resolve("--on=vm"), "vm")
 
     def test_an_empty_target_falls_through_to_the_default(self):
-        self.assertEqual(self.resolve("--target="), "container")
+        self.assertEqual(self.resolve("--on="), "container")
 
 
 class TestNewReadsEveryOptionThroughArgs(unittest.TestCase):
     def test_new(self):
-        got = load_cmd("new").parse(["--target", "vm", "--arch", "armhf", "--base", "b1", "--pr", "7",
+        got = load_cmd("new").parse(["--on", "vm", "--arch", "armhf", "--base", "b1", "--pr", "7",
                                      "--zed", "--no-wait", "--kill", "--sysroot", "--_detached"])
-        self.assertEqual(got, {"target": "vm", "base": "b1", "arch": "armhf", "pr": "7", "zed": True,
+        self.assertEqual(got, {"place": "vm", "base": "b1", "arch": "armhf", "pr": "7", "zed": True,
                                "no_wait": True, "kill": True, "sysroot": True, "detached": True})
-        self.assertEqual(load_cmd("new").parse([]), {"target": None, "base": None, "arch": None, "pr": None, "zed": False,
+        self.assertEqual(load_cmd("new").parse([]), {"place": None, "base": None, "arch": None, "pr": None, "zed": False,
                                                      "no_wait": False, "kill": False, "sysroot": False, "detached": False})
 
 

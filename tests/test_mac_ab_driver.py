@@ -14,7 +14,7 @@ from tests.support import REPO, WkTest, bash, requires_machine, scratch_dir, tem
 from tests.test_mac_volume import BENCH_GROUP, FakeGuest, FakeMac, conf_for
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, sched, targets  # noqa: E402
+from wk import act, places, sched  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import ab, mac, record  # noqa: E402
 from wk.boot.mac import DRIVERS, HELPER, Channel  # noqa: E402
@@ -141,14 +141,14 @@ def here_fake():
     return here
 
 
-class ManagerReg(targets.Registry):
-    """The arms' workspace on the Mac's manager, a target of its own: its store a scratch tree this test reads in place."""
+class ManagerReg(places.Registry):
+    """The arms' workspace on the Mac's manager, a place of its own: its store a scratch tree this test reads in place."""
 
     def __init__(self, far, **kw):
         super().__init__(REPO, **kw)
         self.far = far
 
-    def ws_target(self, ws):
+    def ws_place(self, ws):
         return "manager"
 
     def walk(self):
@@ -405,7 +405,7 @@ class TestItSharesTheBoardABsRefusals(WkTest):
 
     def test_a_board_is_refused_a_macs_option(self):
         with temp_store() as store:
-            reg = targets.Registry(REPO, env={"WK_STORE": store["WK_STORE"], "HOME": "/nonexistent"}, machine=Fake())
+            reg = places.Registry(REPO, env={"WK_STORE": store["WK_STORE"], "HOME": "/nonexistent"}, machine=Fake())
             got, err = said(ab.run, REPO, reg, FakeClock(), "", {"devices": "rpi5", "systems": "a,b", "patch": "x"})
         self.assertIs(got, Refused)
         self.assertIn("--patch is a Mac A/B's", err)
@@ -705,7 +705,7 @@ class TestTheLiveRows(unittest.TestCase):
     """Read-only: the preflight of each machine the Mac A/B plants on."""
 
     def preflight(self, machine):
-        reg = targets.Registry(REPO, machine=None)
+        reg = places.Registry(REPO, machine=None)
         m = mac.MacAB(REPO, reg, FakeClock(), "", {"devices": machine})
         m.resolve()
         n, err = said(m.preflight)
@@ -760,7 +760,7 @@ class TestStatusCarriesTheLegs(WkTest):
     def test_it_counts_what_ran_against_what_the_job_planned(self):
         self.assertIn("3 of 14 planned", self._legs())
 
-    def test_an_older_experiments_results_are_not_this_jobs(self):
+    def test_an_older_ab_tasks_results_are_not_this_jobs(self):
         out = self._legs()
         self.assertNotIn("20260101", out)
         self.assertNotIn(" 42s", out)

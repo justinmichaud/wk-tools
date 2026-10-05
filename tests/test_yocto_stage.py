@@ -1,5 +1,5 @@
 """`wk sysimage build` of a yocto profile (lib/wk/sysimage/yocto.py) as a task against a Fake world. What the task base
-(lib/wk/sysimage/task.py) does for every driver -- the workspace, its image, the target kind, options, done marker,
+(lib/wk/sysimage/task.py) does for every driver -- the workspace, its image, the driver, options, done marker,
 --detach -- is tests/test_sysimage_task.py's."""
 import contextlib
 import io
@@ -31,7 +31,7 @@ TASK_LINE = "NOTE: Running task 7658 of 13213 (virtual:native:/w/sources/meta-cl
 
 
 class World(Fake):
-    """This machine holding `WS` on its container target `box`, the workspace on the profile's branch and its
+    """This machine holding `WS` on its container place `box`, the workspace on the profile's branch and its
     targets.conf holding the profile's section; a stage writes `out` to its log and exits `rc` after `polls`."""
 
     def __init__(self, tmp):
@@ -125,7 +125,7 @@ class YoctoTest(unittest.TestCase):
         osenv = mock.patch.dict(os.environ, {}, clear=False)
         osenv.start()
         self.addCleanup(osenv.stop)
-        for v in ("WK_DRY_RUN", "WK_FORCE", "WK_YES", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_TARGET"):
+        for v in ("WK_DRY_RUN", "WK_FORCE", "WK_YES", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_PLACE"):
             os.environ.pop(v, None)
         p = mock.patch.object(record, "host_name", return_value="here")
         p.start()
@@ -179,7 +179,7 @@ class TestTheCrossConfigs(unittest.TestCase):
     def cross(self, name, profile=""):
         with contextlib.redirect_stderr(io.StringIO()) as err:
             try:
-                return yocto.cross_config(name, profile), ""
+                return yocto.cross_preset(name, profile), ""
             except Refused:
                 return None, err.getvalue()
 
@@ -232,9 +232,9 @@ class TestTheRecordAStageWrites(YoctoTest):
         self.build()
         argv = self.w.watched()
         self.assertEqual(argv[:13], ["exec", WS] + isolated_module("/opt/wk-tools/lib", "wk.sysimage.task")
-                         + ["stage", "yocto", "--", "python3", "/opt/wk-tools/lib/wk/sysimage/yocto_target.py"])
+                         + ["stage", "yocto", "--", "python3", "/opt/wk-tools/lib/wk/sysimage/yocto_ws.py"])
         for flag, value in (("--target", CROSS_TARGET), ("--stage", "image"), ("--board", "rpi4"), ("--jobs", str(self.cores())),
-                            ("--rm-work", "1"), ("--chromium", "0"), ("--cross-config", "wpe-cross"),
+                            ("--rm-work", "1"), ("--chromium", "0"), ("--cross-preset", "wpe-cross"),
                             ("--sstate-ns", self.w.tag().rsplit("/", 1)[-1].replace(":", "-"))):
             self.assertEqual(argv[argv.index(flag) + 1], value, flag)
         self.assertNotIn("--slot", argv)
@@ -330,7 +330,7 @@ class TestRefusals(YoctoTest):
         self.assertIn("40 hex digits", self.refused("--stage", "webkit", "--slot", "s", "--commit", "abc"))
         self.assertIn("--slot <name>", self.refused("--stage", "pgo-mix"))
         self.assertIn("--commit builds", self.refused("--stage", "pgo-mix", "--slot", "s", "--commit", SHA))
-        self.assertIn("builds no WebKit", self.refused("--config", "wpe-cross-pgo-collect"))
+        self.assertIn("builds no WebKit", self.refused("--preset", "wpe-cross-pgo-collect"))
 
     def test_too_little_disk_is_a_barrier(self):
         self.w.answer(["df", "-Pk"], out="Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 1048576 1% /\n")
@@ -389,9 +389,9 @@ class TestStop(YoctoTest):
         t = self.w.running(stage, pid=1)
         t.set("pid_match", yocto.PATTERN)
         t.pid(777)
-        t.set("where", "target")
+        t.set("where", "place")
         self.w.pids.add(777)
-        self.w.answer(["exec", WS, "ps", "-o", "args=", "-p", "777"], out="python3 /opt/wk-tools/lib/wk/sysimage/yocto_target.py\n")
+        self.w.answer(["exec", WS, "ps", "-o", "args=", "-p", "777"], out="python3 /opt/wk-tools/lib/wk/sysimage/yocto_ws.py\n")
         self.w.answer(["exec", WS, "sh", "-c"], out="778\n777\n")
         self.w.react(["exec", WS, "kill", "-TERM"], lambda a, f: (f.pids.discard(777), Result(0))[1])
         return t

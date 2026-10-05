@@ -3,14 +3,14 @@ import os
 import sys
 import unittest
 
-from tests.support import REPO, rand_suffix, requires_container_target, run
+from tests.support import REPO, rand_suffix, requires_container_place, run
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets  # noqa: E402
+from wk import places  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
 
-class Up(targets.Target):
+class Up(places.Driver):
     def info(self, ws):
         return "running"
 
@@ -34,13 +34,13 @@ class TestWorkspaceWithNoBaseIdIsStillCreating(unittest.TestCase):
 class TestNewKillStopsTheCreation(unittest.TestCase):
 
 
-    @requires_container_target()
+    @requires_container_place()
     def test_it_takes_nothing_that_belongs_to_a_creation(self):
         cp = run("new", "kill-probe-%s" % rand_suffix(), "--kill", "--no-wait")
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("stops the creation already running", cp.stdout)
 
-    @requires_container_target()
+    @requires_container_place()
     def test_with_no_creation_running_it_says_so_and_ends_well(self):
         cp = run("new", "kill-probe-%s" % rand_suffix(), "--kill")
         self.assertEqual(cp.returncode, 0, cp.stdout)

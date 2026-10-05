@@ -6,7 +6,7 @@ import os
 import re
 import shlex
 
-from wk import bridge, fleet, git, guest, priv, reach, record, secrets, status, targets
+from wk import bridge, fleet, git, guest, places, priv, reach, record, secrets, status
 from wk.bench import record as bench_record
 from wk.clock import Clock
 from wk.key.cli import Key
@@ -148,12 +148,12 @@ def git_config_findings(label, blob, remedy, want):
     return rows
 
 
-def vm_guest_git_findings(target, want):
+def vm_guest_git_findings(driver, want):
     rows = []
-    for name, _ in target.list():
-        if target.info(name) != "running":
+    for name, _ in driver.list():
+        if driver.info(name) != "running":
             continue
-        r = target.exec(name, ["sh", "-c", GIT_PROBE])
+        r = driver.exec(name, ["sh", "-c", GIT_PROBE])
         blob = r.out if r.ok else ""
         if not blob.strip():
             rows.append(unk("%s (tart guest): git config did not answer" % name, "wk doctor %s" % name))
@@ -241,7 +241,7 @@ cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo"""
 
 
 def device(root, name, env, machine, probe=status.fleet_probe, answers=None):
-    """`wk doctor <machine>`: its tailnet names, whether it answers, a bench device's system and arm, and a
+    """`wk doctor <machine>`: its tailnet names, whether it answers, a bench machine's system and arm, and a
     board's governor and temperature, each a row. Nothing is changed and nothing is started."""
     conf = fleet.Fleet(root, env).load(name)
     r = reach.Reach(machine, env)
@@ -315,7 +315,7 @@ class Doctor:
         self.macos = (os.uname().sysname == "Darwin") if macos is None else macos
         self.macos_host = self.macos and not in_vm(self.env)
         self.home = self.store.home()
-        self.reg = targets.Registry(root, self.env, self.machine)
+        self.reg = places.Registry(root, self.env, self.machine)
         self.container = self.reg.load("container")
         self._paths = None
         self._keys = keys
@@ -369,7 +369,7 @@ class Doctor:
         if not self.macos:
             yield "benchmarking", self.benchmarking()
         if self.macos_host:
-            yield "macOS VM target (optional -- Apple ports)", self.vm_target()
+            yield "macOS VM place (optional -- Apple ports)", self.vm_place()
         if not everything:
             return
         for t in self.reg.all():
@@ -381,7 +381,7 @@ class Doctor:
         if self.macos:
             yield check("Xcode command line tools", "xcode-select --install", self.machine.run(["xcode-select", "-p"]).ok)
             yield check("podman", "install the official pkg from podman.io", self.machine.have("podman"))
-            yield check("zed", "https://zed.dev/download", targets.zed_cli(self.machine) is not None)
+            yield check("zed", "https://zed.dev/download", places.zed_cli(self.machine) is not None)
             yield check("tailscale", "https://tailscale.com/download/macos",
                         self.machine.have("tailscale") or self.machine.isdir("/Applications/Tailscale.app"))
         else:
@@ -404,8 +404,8 @@ class Doctor:
         yield ok("sudo: " + out) if r.ok else miss("sudo: " + out, "wk key sudo setup")
 
     def config(self):
-        def linked(path, target):
-            return self.machine.run(["readlink", path]).out.strip() == target
+        def linked(path, dest):
+            return self.machine.run(["readlink", path]).out.strip() == dest
         yield check("~/.claude/settings.json is the HOST settings", "./setup --stage claude",
                     linked(os.path.join(self.home, ".claude", "settings.json"), os.path.join(self.root, "claude", "settings-host.json")))
         yield check("~/.claude/CLAUDE.md is the HOST briefing", "./setup --stage claude",
@@ -535,7 +535,7 @@ class Doctor:
     def benchmarking(self):
         yield check("render group configured", "./setup --stage tools, then log out and in", "render" in self.machine.run(["id", "-nG"]).out.split())
 
-    def vm_target(self):
+    def vm_place(self):
         vm = self.reg.load("vm")
         if not vm.tart():
             yield unk("tart not installed", "README.md, Setup -- only needed for Apple-port builds")
@@ -549,14 +549,14 @@ class Doctor:
         yield from vm_guest_git_findings(vm, self.want())
 
     def build_machine(self, t):
-        target = self.reg.load(t)
-        probe = self.mc.probe(target, self.root)
+        driver = self.reg.load(t)
+        probe = self.mc.probe(driver, self.root)
         if not probe:
             yield unk("%s did not answer" % t, "ssh %s true  -- then re-run; nothing was changed" % t)
             return
         rows = self.mc.findings(self.root, probe, self.env, self.machine)
         yield from findings(machine_deps.findings_text(rows), "see 'wk machine setup %s'" % t)
-        why = self.mc.stale(target, self.root)
+        why = self.mc.stale(driver, self.root)
         if why:
             yield miss("provisioning on %s predates its inputs: %s" % (t, why), "wk machine setup %s" % t)
         else:

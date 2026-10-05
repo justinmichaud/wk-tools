@@ -10,7 +10,7 @@ from tests.support import REPO, WkTest, run_here
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.act import Refused  # noqa: E402
-from wk.sysimage import buildroot, buildroot_target  # noqa: E402
+from wk.sysimage import buildroot, buildroot_ws  # noqa: E402
 
 EXTERNAL_DIR = REPO / "image" / "buildroot" / "external"
 PROFILES = ["wpewebkit-2.38-buildroot-rpi3-32", "wpewebkit-2.38-buildroot-rpi4-32"]
@@ -40,7 +40,7 @@ class TestDryRun(WkTest):
                                   "BR_DEFCONFIG": "d_defconfig", "BR_EXTERNAL": "1", "BR_IMAGE": "sdcard.img",
                                   "BR_OVERLAY_TAILSCALE": "arm", "BR_KERNEL_RELEASE": "6.1"})
         argv = br.image_argv("/opt/wk-tools", 8, True, "/cache/buildroot/dl/k.tar", "bcm2711-rpi-4-b")
-        a = buildroot_target.parse(argv[2:])
+        a = buildroot_ws.parse(argv[2:])
         self.assertEqual((a.overlay_wifi, a.overlay_arch, a.kernel_tar, a.kernel_dts, a.external, a.jobs),
                          ("1", "arm", "/cache/buildroot/dl/k.tar", "bcm2711-rpi-4-b", "1", "8"))
 
@@ -51,7 +51,7 @@ class TestDryRun(WkTest):
         self.assertIn("no-such-board.conf names no dtb=", err.getvalue())
 
     def test_br2_external_goes_on_every_make(self):
-        self.assertEqual(buildroot_target.Build.br_ext(type("B", (), {"tools": "/opt/wk-tools"})(), True),
+        self.assertEqual(buildroot_ws.Build.br_ext(type("B", (), {"tools": "/opt/wk-tools"})(), True),
                          ["BR2_EXTERNAL=/opt/wk-tools/image/buildroot/external"])
 
 

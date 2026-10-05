@@ -1,4 +1,4 @@
-"""The yocto build as it runs inside a workspace (lib/wk/sysimage/yocto_target.py) against a Fake machine."""
+"""The yocto build as it runs inside a workspace (lib/wk/sysimage/yocto_ws.py) against a Fake machine."""
 import configparser
 import contextlib
 import io
@@ -12,7 +12,7 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result, isolated_module  # noqa: E402
-from wk.sysimage import yocto_target as yt  # noqa: E402
+from wk.sysimage import yocto_ws as yt  # noqa: E402
 
 TARGET = "rpi4-64bits-mesa"
 SRC = "/src/WebKit"
@@ -381,7 +381,7 @@ class TestTheStages(unittest.TestCase):
     def test_a_slot_is_built_with_the_branch_s_flags_and_ours_after_and_described(self):
         w = self.slot_world()
         rc, out, err = self.run_stage(w, "--stage", "webkit", "--commit", "c" * 40, "--slot", "pr", "--profile", "p",
-                                      "--webkit-jobs", "6", "--cross-config", "wpe-cross-pgo-collect", "--cross-cc", "clang",
+                                      "--webkit-jobs", "6", "--cross-preset", "wpe-cross-pgo-collect", "--cross-cc", "clang",
                                       "--cross-cxx", "clang++", "--cross-cmake=-DENABLE_LLVM_PROFILE_GENERATION=ON")
         self.assertEqual(rc, 0, out + err)
         (bw,) = [a for a in w.ran("env", "WK_MB_PER_JOB=2560") if "build-webkit" in " ".join(a)]
@@ -391,7 +391,7 @@ class TestTheStages(unittest.TestCase):
         self.assertEqual(bw[-1], "--cmakeargs=-DENABLE_X=OFF -DUSE_Y=ON %s -DENABLE_LLVM_PROFILE_GENERATION=ON" % yt.WEBKIT_CMAKE)
         self.assertIn(("env", "CC=clang", "CXX=clang++"), [tuple(bw[6:9])])
         (manifest,) = w.ran(*isolated_module(TOOLS + "/lib", "wk.slot"), "manifest")
-        self.assertIn("build_config=wpe-cross-pgo-collect", manifest)
+        self.assertIn("build_preset=wpe-cross-pgo-collect", manifest)
         self.assertIn("slot=pr", manifest)
         self.assertIn("build-id b1d", out)
 
@@ -431,7 +431,7 @@ class TestTheStages(unittest.TestCase):
         self.assertIn("no collection at /nowhere", err)
 
     def test_it_runs_as_a_file_in_the_workspace(self):
-        cp = subprocess.run([sys.executable, str(REPO / "lib" / "wk" / "sysimage" / "yocto_target.py"), "--help"],
+        cp = subprocess.run([sys.executable, str(REPO / "lib" / "wk" / "sysimage" / "yocto_ws.py"), "--help"],
                             capture_output=True, text=True, timeout=30, env={"PATH": os.environ.get("PATH", "")})
         self.assertEqual(cp.returncode, 0, cp.stderr)
         self.assertIn("--target", cp.stdout)

@@ -6,7 +6,7 @@ _gid=$(id -g)
 _user=$(id -un)
 
 info "store: $WK_STORE"
-_init=$(wk_py wk.targets store-init) || die "laying out the store failed (above)"
+_init=$(wk_py wk.places store-init) || die "laying out the store failed (above)"
 while IFS= read -r _p; do [ -z "$_p" ] || changed "store: $_p"; done <<EOF
 $_init
 EOF

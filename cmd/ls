@@ -3,10 +3,10 @@
 # wk ls -- workspaces, what they are pinned to, and what they cost on disk
 # wk: where=workspace name=none bare=merged readonly group=workspaces opts --json,--continued,--more-follows,--empty-so-far
 #
-# One line per workspace, on every target this machine knows:
+# One line per workspace, on every place this machine knows:
 #
 #   NAME      the workspace
-#   TARGET    where it lives (container, vm, or a machine)
+#   PLACE    where it lives (container, vm, or a machine)
 #   STATE     the environment's own word: running, exited, present, creating
 #   BASE      the upstream WebKit line it is built from: main, a release like
 #             2.52, an image workspace's profile, or `?` when unknown
@@ -30,7 +30,7 @@ from wk import images  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, record, targets  # noqa: E402
+from wk import decl, places, record  # noqa: E402
 from wk.act import Refused, die, log  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.store import Snapshots  # noqa: E402
@@ -38,44 +38,44 @@ from wk.store import Snapshots  # noqa: E402
 FORMAT = "%-20s %-18s %-10s %-8s %-20s %-8s %8s"
 NOT_APPLICABLE = "n/a"
 
-def base_of(target, ws):
-    return targets.image_base(ROOT, ws) or targets.git_base(target, ws) or "?"
+def base_of(driver, ws):
+    return places.image_base(ROOT, ws) or places.git_base(driver, ws) or "?"
 
 
-def col(label, target):
-    return target if not label or target == label else "%s:%s" % (label, target)
+def col(label, place):
+    return place if not label or place == label else "%s:%s" % (label, place)
 
 
-def changes_of(target, ws):
-    r = Local().run(["du", "-sh", os.path.join(target.store.ws_dir(ws), "changes")])
+def changes_of(driver, ws):
+    r = Local().run(["du", "-sh", os.path.join(driver.store.ws_dir(ws), "changes")])
     return r.out.split("\t")[0].strip() if r.ok and r.out.strip() else "-"
 
 
-def row(target, ws, label, as_json):
-    state = target.display_state(ws)
-    inside = target.kind == "local"
-    base = NOT_APPLICABLE if inside else base_of(target, ws)
-    snap = target.store.ws_snapshot_id(ws) or "-"
-    size = NOT_APPLICABLE if inside else changes_of(target, ws)
-    arch = target.arch(ws)
-    fields = (ws, col(label, target.name), state, base, snap, arch, size)
+def row(driver, ws, label, as_json):
+    state = driver.display_state(ws)
+    inside = driver.kind == "local"
+    base = NOT_APPLICABLE if inside else base_of(driver, ws)
+    snap = driver.store.ws_snapshot_id(ws) or "-"
+    size = NOT_APPLICABLE if inside else changes_of(driver, ws)
+    arch = driver.arch(ws)
+    fields = (ws, col(label, driver.name), state, base, snap, arch, size)
     if as_json:
-        return json.dumps({"workspaces": [dict(zip(("name", "target", "state", "base", "snap", "arch", "changes"), fields))]})
+        return json.dumps({"workspaces": [dict(zip(("name", "place", "state", "base", "snap", "arch", "changes"), fields))]})
     return FORMAT % fields
 
 
-def target_rows(reg, name, label, as_json):
-    """The rows one target contributes: its own machine's `wk ls` when it has one."""
-    target = reg.load(name)
-    if target.has_wk() and target.kind == "remote":
+def place_rows(reg, name, label, as_json):
+    """The rows one place contributes: its own machine's `wk ls` when it has one."""
+    driver = reg.load(name)
+    if driver.has_wk() and driver.kind == "remote":
         args = ["ls", "--continued"] + (["--json"] if as_json else [])
         os.environ["WK_ROW_LABEL"] = name
         os.environ["WK_NO_DELEGATE"] = "1"
-        rc, out = target.wk(*args)
+        rc, out = driver.wk(*args)
         return out.rstrip("\n")
-    names = sorted(set(target.store.workspaces()) | {n for n, _ in target.list()})
+    names = sorted(set(driver.store.workspaces()) | {n for n, _ in driver.list()})
     with ThreadPoolExecutor(max_workers=8) as pool:
-        rows = list(pool.map(lambda ws: row(target, ws, label, as_json), names))
+        rows = list(pool.map(lambda ws: row(driver, ws, label, as_json), names))
     return "\n".join(rows)
 
 
@@ -84,16 +84,16 @@ def footer(reg, names):
     spaced = False
     for name in names:
         try:
-            target = reg.load(name)
+            driver = reg.load(name)
         except LookupError:
             continue
-        if not target.needs_base:
+        if not driver.needs_base:
             continue
         if not spaced:
             print()
             spaced = True
         prefix = "%s: " % name if multi else ""
-        bases = Snapshots(target.store, target.store_machine)
+        bases = Snapshots(driver.store, driver.store_machine)
         log("%scurrent base: %s" % (prefix, bases.current() or "none"))
         unref = len(bases.unreferenced())
         if unref > 0:
@@ -107,13 +107,13 @@ def main(argv):
     empty_so_far = args.flag("--empty-so-far")
     as_json = args.flag("--json")
     label = record.row_label(os.environ)
-    reg = targets.Registry(ROOT)
+    reg = places.Registry(ROOT)
     if not continued and not as_json:
-        print(FORMAT % ("NAME", "TARGET", "STATE", "BASE", "SNAP", "ARCH", "CHANGES"))
+        print(FORMAT % ("NAME", "PLACE", "STATE", "BASE", "SNAP", "ARCH", "CHANGES"))
     names = reg.walk()
     try:
         with ThreadPoolExecutor(max_workers=max(1, len(names))) as pool:
-            outputs = list(pool.map(lambda n: target_rows(reg, n, label, as_json), names))
+            outputs = list(pool.map(lambda n: place_rows(reg, n, label, as_json), names))
     except LookupError as e:
         die(str(e))
     found = False
@@ -136,7 +136,7 @@ def main(argv):
         return 0
     if not found and not more_follows and (not continued or empty_so_far):
         if reg.in_remote_host():
-            log("(no workspaces here -- from the workstation: wk new <name> --target %s)" % reg.self_target())
+            log("(no workspaces here -- from the workstation: wk new <name> --on %s)" % reg.self_place())
         else:
             log("(no workspaces -- 'wk new <name>' to create one)")
     if label:

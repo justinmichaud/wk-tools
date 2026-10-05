@@ -17,7 +17,7 @@ from tests.killpoints import converges
 from tests.support import REPO, live_selected
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, guest, targets, tools  # noqa: E402
+from wk import act, guest, places, tools  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
@@ -123,7 +123,7 @@ class BaseTest(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="wk-test-vm-base-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
         for p in (mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True),
-                  mock.patch.object(targets.Vm, "tart", lambda s: TART),
+                  mock.patch.object(places.Vm, "tart", lambda s: TART),
                   mock.patch.object(tools, "push", lambda *a: True),
                   mock.patch.dict(os.environ, {}, clear=False)):
             p.start()
@@ -134,7 +134,7 @@ class BaseTest(unittest.TestCase):
         self.clock = FakeClock()
 
     def base(self):
-        vm = targets.Registry(str(REPO), env=self.w.env, machine=self.w).load("vm")
+        vm = places.Registry(str(REPO), env=self.w.env, machine=self.w).load("vm")
         return guestbase.Base(vm, self.clock)
 
     def build(self, *rest, answers=None):
@@ -201,7 +201,7 @@ class TestTheBaseIsBuiltOnce(BaseTest):
         started = [c for c in self.w.guest_cmds if "nohup" in c]
         self.assertEqual(1, len(started))
         self.assertIn("vm/provision-base.sh", started[0])
-        self.assertIn("WK_MIRROR_TAG=%s" % targets.MIRROR_TAG, started[0], "the mount daemon is given the tag tart runs with")
+        self.assertIn("WK_MIRROR_TAG=%s" % places.MIRROR_TAG, started[0], "the mount daemon is given the tag tart runs with")
         self.assertTrue([c for c in self.w.guest_cmds if "wc -c" in c], "nothing polled the detached log")
 
     def test_the_wk_key_is_authorised_through_the_guest_agent(self):
@@ -381,7 +381,7 @@ class TestTheBuilderConforms(BaseTest):
     def test_sysimage_builders_conform_guest(self):
         self.assertIn("guest", cli.BUILDERS)
         seen = []
-        reg = targets.Registry(str(REPO), env=self.w.env, machine=self.w)
+        reg = places.Registry(str(REPO), env=self.w.env, machine=self.w)
         with mock.patch.object(guestbase.Base, "build", lambda b, rest: seen.append((b.name, rest)) or 0):
             self.assertEqual(0, cli.Sysimage(reg, self.clock).build(guest.BASE_PROFILE, ["--refresh"]))
         self.assertEqual([("wk-base", ["--refresh"])], seen)
@@ -394,7 +394,7 @@ class TestTheBuilderConforms(BaseTest):
         return rc, buf.getvalue()
 
     def test_path_and_holds_reach_the_sealed_base_marker(self):
-        reg = targets.Registry(str(REPO), env=self.w.env, machine=self.w)
+        reg = places.Registry(str(REPO), env=self.w.env, machine=self.w)
         s = cli.Sysimage(reg, self.clock)
         self.assertEqual(self.out(s.path, guest.BASE_PROFILE, None), (1, ""))
         self.assertEqual(self.out(s.holds, guest.BASE_PROFILE, None, None, None, None, False)[1], "no\n")
@@ -403,7 +403,7 @@ class TestTheBuilderConforms(BaseTest):
         self.assertEqual(self.out(s.holds, guest.BASE_PROFILE, None, None, None, None, False)[1], "yes\n")
 
     def test_ls_lists_it_only_once_sealed(self):
-        reg = targets.Registry(str(REPO), env=self.w.env, machine=self.w)
+        reg = places.Registry(str(REPO), env=self.w.env, machine=self.w)
         s = cli.Sysimage(reg, self.clock)
         self.assertNotIn(guest.BASE_PROFILE, self.out(lambda: s.ls(False))[1])
         self.build()
@@ -520,7 +520,7 @@ class LocalGuest(Local):
         self.home = home
 
     def _map(self, text):
-        return text.replace(os.path.dirname(targets.GUEST_MIRROR), self.home + "/share").replace("/Users/admin", self.home)
+        return text.replace(os.path.dirname(places.GUEST_MIRROR), self.home + "/share").replace("/Users/admin", self.home)
 
     def run(self, argv, input=None, timeout=None):
         env = dict(os.environ, HOME=self.home)
@@ -564,7 +564,7 @@ class TestTheCheckoutIsMadeAtFirstStart(unittest.TestCase):
         env = {"HOME": self.tmp + "/home", "WK_VM_STORE": self.tmp + "/vmstore", "WK_STORE": self.tmp + "/store",
                "XDG_STATE_HOME": self.tmp + "/state", "WK_MACHINES_DIR": self.tmp + "/registry", "PATH": os.environ["PATH"],
                "WK_MIRROR_BRANCHES": "main"}
-        vm = targets.Registry(str(REPO), env=env, machine=Local()).load("vm")
+        vm = places.Registry(str(REPO), env=env, machine=Local()).load("vm")
         g = guest.Guest(guest.Host(vm, FakeClock()), "demo", LocalGuest(self.guest))
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
@@ -634,7 +634,7 @@ class TestTheLiveBase(unittest.TestCase):
     def test_vm_base_matches_pin(self):
         if not live_selected() or sys.platform != "darwin":
             self.skipTest("live tier not selected, or not a macOS host")
-        vm = targets.Registry(str(REPO)).load("vm")
+        vm = places.Registry(str(REPO)).load("vm")
         if not vm.tart():
             self.skipTest("tart is not installed here")
         base = guestbase.Base(vm)

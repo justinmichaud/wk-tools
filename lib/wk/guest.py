@@ -905,7 +905,7 @@ def memory_budget(host, name, mine):
 def podman_admit(vm):
     """The podman machine holds its whole size from the moment it starts, so it is refused beside running guests it does not fit with."""
     from wk.resources import Resources
-    from wk.targets import podman_vm
+    from wk.places import podman_vm
     name = Store(vm.env).podman_machine()
     pod = int(((podman_vm(vm.machine, name) or {}).get("Resources") or {}).get("Memory") or 0)
     guests = vm.committed_mem_mb(None)
@@ -1008,12 +1008,12 @@ def stop(vm, ws, clock=None):
 
 
 def _vm(root, machine, env):
-    from wk import targets   # targets drives a guest through this module
-    return targets.Registry(root, env=os.environ if env is None else env, machine=machine).load("vm")
+    from wk import places   # places drives a guest through this module
+    return places.Registry(root, env=os.environ if env is None else env, machine=machine).load("vm")
 
 
 def pat_converge(root, env, machine):
-    """The guests' injector serves every guest on a macOS host, wherever the vm target's store is."""
+    """The guests' injector serves every guest on a macOS host, wherever the vm place's store is."""
     vm = _vm(root, machine, env)
     return not Store(vm.env).macos_host or Host(vm).pat_converge()
 

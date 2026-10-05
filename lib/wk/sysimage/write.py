@@ -167,7 +167,7 @@ def init_script(root, name, **params):
 
 def stage_units(root, watchdog, disarm, profile=""):
     """{archive path: text}. The two units that hand a machine back are gated at runtime on /etc/wk/rescue, so one
-    artifact serves both roles; a timer, since a sleeping oneshot holds its target inactive for the whole watchdog."""
+    artifact serves both roles; a timer, since a sleeping oneshot holds its systemd target inactive for the whole watchdog."""
     out = {}
     if not watchdog:
         act.warn("%s sets no IMG_WATCHDOG, so this image will not hand its machine back" % (profile or "this image"))

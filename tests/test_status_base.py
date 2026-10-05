@@ -1,4 +1,4 @@
-"""The base a workspace tracks: the upstream WebKit line a checkout's HEAD descends from (targets.UPSTREAM_LINE,
+"""The base a workspace tracks: the upstream WebKit line a checkout's HEAD descends from (places.UPSTREAM_LINE,
 run inside the workspace by `wk ls` and `wk status`), against real disposable repositories; an image
 workspace's base from the profile conf this checkout ships; and the SDK image's freshness as the renderer
 words it."""
@@ -14,7 +14,7 @@ from tests.support import REPO, bash
 from tests.test_status import machine_rec, render
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets  # noqa: E402
+from wk import places  # noqa: E402
 
 CONFIGS = REPO / "image" / "configs"
 
@@ -35,7 +35,7 @@ def _init_repo(repo):
 
 def upstream_line(repo):
     """The script `wk status` runs inside a workspace, run with $PWD inside `repo`."""
-    cp = bash(targets.UPSTREAM_LINE, cwd=str(repo))
+    cp = bash(places.UPSTREAM_LINE, cwd=str(repo))
     assert cp.returncode == 0, cp.stderr
     return cp.stdout.strip()
 
@@ -89,11 +89,11 @@ class TestImageBase(unittest.TestCase):
         for kind, profile in (("buildroot", "webkit-2.52-buildroot-rpi3-32"), ("yocto", "wpewebkit-2.46-yocto-rpi3-32")):
             with self.subTest(kind=kind):
                 release = re.search(r"^CFG_RELEASE=(\S+)", (CONFIGS / (profile + ".conf")).read_text(), re.M).group(1)
-                self.assertEqual(targets.image_base(str(REPO), "%s-%s" % (kind, profile)), release)
+                self.assertEqual(places.image_base(str(REPO), "%s-%s" % (kind, profile)), release)
 
     def test_a_plain_checkout_name_is_not_an_image_workspace(self):
-        self.assertIsNone(targets.image_base(str(REPO), "stringimpl238"))
-        self.assertIsNone(targets.image_base(str(REPO), "yocto-no-such-profile"))
+        self.assertIsNone(places.image_base(str(REPO), "stringimpl238"))
+        self.assertIsNone(places.image_base(str(REPO), "yocto-no-such-profile"))
 
 
 def sdk_rec(machine, **extra):

@@ -1,4 +1,4 @@
-"""What the dispatcher hands the command it runs: the target the name"""
+"""What the dispatcher hands the command it runs: the place the name"""
 import os
 import subprocess
 import sys
@@ -10,7 +10,7 @@ from tests.test_dispatch_speed import _LOCAL_CONF, _MACHINE_CONF, _WITNESS_SSH
 _PROBE = '''#!/usr/bin/env python3
 #
 # wk probe <workspace> -- print what the dispatcher handed over
-# wk: where=workspace name=required group=other readonly opts --target=
+# wk: where=workspace name=required group=other readonly opts --on=
 #
 # A test probe (tests/test_dispatch_handoff.py), never installed.
 import os
@@ -18,7 +18,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
-from wk import targets
+from wk import places
 
 
 def witnessed():
@@ -29,9 +29,9 @@ def witnessed():
 
 
 print("WK_NAME=%s" % os.environ.get("WK_NAME", "unset"))
-print("WK_TARGET=%s" % os.environ.get("WK_TARGET", "unset"))
+print("WK_PLACE=%s" % os.environ.get("WK_PLACE", "unset"))
 before = witnessed()
-print("ws_target=%s" % targets.Registry(ROOT).ws_target(os.environ.get("WK_NAME", "")))
+print("ws_place=%s" % places.Registry(ROOT).ws_place(os.environ.get("WK_NAME", "")))
 print("walked=%s" % ("no" if witnessed() == before else "yes"))
 '''
 
@@ -41,7 +41,7 @@ exit 1
 '''
 
 
-class TestTheResolvedTargetIsHandedOn(WkTest):
+class TestTheResolvedPlaceIsHandedOn(WkTest):
 
     def setUp(self):
         super().setUp()
@@ -92,7 +92,7 @@ class TestTheResolvedTargetIsHandedOn(WkTest):
             )
         fields = dict(
             line.split("=", 1) for line in cp.stdout.splitlines() if "=" in line
-            and line.split("=", 1)[0] in ("WK_NAME", "WK_TARGET", "ws_target", "walked")
+            and line.split("=", 1)[0] in ("WK_NAME", "WK_PLACE", "ws_place", "walked")
         )
         return cp, fields
 
@@ -100,35 +100,35 @@ class TestTheResolvedTargetIsHandedOn(WkTest):
         cp, f = self._probe("probe", "handoff-ws")
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertEqual(f.get("WK_NAME"), "handoff-ws", cp.stdout)
-        self.assertEqual(f.get("WK_TARGET"), "fakelocal", cp.stdout)
+        self.assertEqual(f.get("WK_PLACE"), "fakelocal", cp.stdout)
 
 
     def test_an_explicit_target_is_what_the_command_gets(self):
-        cp, f = self._probe("probe", "handoff-ws", "--target", "fakelocal")
+        cp, f = self._probe("probe", "handoff-ws", "--on", "fakelocal")
         self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertEqual(f.get("WK_TARGET"), "fakelocal", cp.stdout)
+        self.assertEqual(f.get("WK_PLACE"), "fakelocal", cp.stdout)
 
 
-class TestWhatIsNotToldTheTarget(unittest.TestCase):
+class TestWhatIsNotToldThePlace(unittest.TestCase):
 
-    def test_the_forwarded_environment_carries_no_target(self):
+    def test_the_forwarded_environment_carries_no_place(self):
         sys.path.insert(0, str(REPO / "lib"))
-        from wk import targets
+        from wk import places
         from wk.machine import Fake
-        env = {"WK_TARGET": "box", "WK_STORE": "/here", "WK_ROW_LABEL": "host", "WK_YES": "1"}
+        env = {"WK_PLACE": "box", "WK_STORE": "/here", "WK_ROW_LABEL": "host", "WK_YES": "1"}
         remote = {"WK_REMOTE_LOCAL": "1", "WK_REMOTE_TOOLS": "/opt/wk-tools"}
-        for t in (targets.Container("container", str(REPO), {}, Fake()), targets.Remote("box", str(REPO), remote, Fake())):
+        for t in (places.Container("container", str(REPO), {}, Fake()), places.Remote("box", str(REPO), remote, Fake())):
             with self.subTest(kind=t.kind):
                 line = t.wk_cmd(["status"], env)
-                self.assertNotIn("WK_TARGET", line, "a forwarded command is told a target it must resolve itself")
+                self.assertNotIn("WK_PLACE", line, "a forwarded command is told a place it must resolve itself")
                 self.assertNotIn("WK_STORE", line, "the far side's store is its own")
 
     def test_the_sdk_image_override_is_carried_to_the_far_side(self):
         sys.path.insert(0, str(REPO / "lib"))
-        from wk import targets
+        from wk import places
         from wk.machine import Fake
         remote = {"WK_REMOTE_LOCAL": "1", "WK_REMOTE_TOOLS": "/opt/wk-tools"}
-        line = targets.Remote("box", str(REPO), remote, Fake()).wk_cmd(["new", "x"], {"WK_SDK_IMAGE": "ghcr.io/igalia/wkdev-sdk:2.55-v1-abc"})
+        line = places.Remote("box", str(REPO), remote, Fake()).wk_cmd(["new", "x"], {"WK_SDK_IMAGE": "ghcr.io/igalia/wkdev-sdk:2.55-v1-abc"})
         self.assertIn("WK_SDK_IMAGE=ghcr.io/igalia/wkdev-sdk:2.55-v1-abc ", line)
 
 

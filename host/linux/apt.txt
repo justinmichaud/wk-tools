@@ -1,7 +1,7 @@
 # Host packages, Ubuntu 26.04. Stock archive only -- no third-party repos.
 # Anything a build needs lives in the workspace image, not here.
 
-# Containers, driven by lib/wk/targets.py's Container (wk new/build/test/... with a
+# Containers, driven by lib/wk/places.py's Container (wk new/build/test/... with a
 # container workspace). Rootless: uidmap provides newuidmap/newgidmap,
 # without which no user namespace can be mapped and --userns keep-id cannot
 # work.
@@ -49,7 +49,7 @@ python3-venv
 xz-utils
 rsync
 
-# PyYAML, because an image's network configuration is derived from the target
+# PyYAML, because an image's network configuration is derived from the
 # machine's own netplan rather than copied (lib/wk/sysimage/pmos_build.py):
 # the two ends render it with different backends, and getting that wrong
 # produces an image with no network on a board with no cable.

@@ -70,7 +70,7 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, record, statusview, targets  # noqa: E402
+from wk import decl, places, record, statusview  # noqa: E402
 from wk.act import Refused, die, info, warn  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.record import Records  # noqa: E402
@@ -78,8 +78,8 @@ from wk.status import Walk, wait_until_idle  # noqa: E402
 
 
 def holders(resource):
-    reg = targets.Registry(ROOT)
-    records = Records(ask_target=lambda n, pid, cap: reg.load(reg.ws_target(n)).pid_alive(n, pid, cap))
+    reg = places.Registry(ROOT)
+    records = Records(ask_place=lambda n, pid, cap: reg.load(reg.ws_place(n)).pid_alive(n, pid, cap))
     for row in records.holders(resource):
         print("\t".join(row))
     return 0
@@ -101,12 +101,12 @@ def show_log(args):
     name = store.ws_name()
     if not name:
         die("wk status --log needs a workspace name")
-    reg = targets.Registry(ROOT)
+    reg = places.Registry(ROOT)
     try:
-        target = reg.load(reg.ws_target(name))
+        driver = reg.load(reg.ws_place(name))
     except LookupError as e:
         die(str(e))
-    return record.show_log(target, name, modes[0] if modes else "", "" if reg.in_workspace() else " " + name)
+    return record.show_log(driver, name, modes[0] if modes else "", "" if reg.in_workspace() else " " + name)
 
 
 def main(argv):

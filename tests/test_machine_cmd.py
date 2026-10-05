@@ -16,7 +16,7 @@ from tests.killpoints import converges
 from tests.support import REAL_MACHINES, REPO, live_selected, machine_reachable
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, machine_cmd, reach, targets, tools  # noqa: E402
+from wk import act, machine_cmd, places, reach, tools  # noqa: E402
 from wk.machine_cmd import build, deps  # noqa: E402
 from wk import bridge  # noqa: E402
 from wk.bridge import role  # noqa: E402
@@ -100,7 +100,7 @@ class World:
         text = argv[2]
         if not self.answers:
             return Result(255, "", "ssh: connect to host box port 22: Connection refused\n")
-        if text == targets.PROBE_SCRIPT:
+        if text == places.PROBE_SCRIPT:
             return Result(0, PROBE)
         if text == tools.CONVERGE:
             return Result(0, SHA + "\n")
@@ -116,7 +116,7 @@ class World:
 
     def env_run(self, argv, fake):
         if argv[-1].endswith("/remote/provision.sh"):
-            fake.files[HOME + "/.wk-remote"] = "target=box\n"
+            fake.files[HOME + "/.wk-remote"] = "place=box\n"
         return Result(0)
 
     def machines(self):
@@ -158,8 +158,8 @@ class MachineTest(unittest.TestCase):
 
 
 class TestSharedHomeProvisioning(unittest.TestCase):
-    def provision(self, home, target, root):
-        env = dict(os.environ, HOME=home, GIT_CONFIG_GLOBAL=home + "/.gitconfig", WK_REMOTE_TARGET=target,
+    def provision(self, home, driver, root):
+        env = dict(os.environ, HOME=home, GIT_CONFIG_GLOBAL=home + "/.gitconfig", WK_REMOTE_MACHINE=driver,
                    WK_REMOTE_ROOT=root, WK_REMOTE_INPUTS="abc")
         cp = subprocess.run(["bash", str(REPO / "remote" / "provision.sh")], env=env, capture_output=True, text=True)
         self.assertEqual(cp.returncode, 0, cp.stderr)
@@ -220,7 +220,7 @@ class TestSetup(MachineTest):
     def test_the_machine_is_probed_once_for_the_whole_setup(self):
         w = self.world(conf="kind=build\ndriver=remote\n")
         self.quiet(w.machines().setup, "box")
-        probes = [r for r in self.runs(w) if r[:2] == ("sh", "-c") and r[2] == targets.PROBE_SCRIPT]
+        probes = [r for r in self.runs(w) if r[:2] == ("sh", "-c") and r[2] == places.PROBE_SCRIPT]
         self.assertEqual(len(probes), 1)
         self.assertEqual(len([r for r in self.runs(w) if r[:2] == ("bash", "-s")]), 1)
 
@@ -309,7 +309,7 @@ class TestRm(MachineTest):
 
     def test_it_deprovisions_and_keeps_the_conf(self):
         w = self.world(conf=self.CONF)
-        w.fake.files[HOME + "/.wk-remote"] = "target=box\n"
+        w.fake.files[HOME + "/.wk-remote"] = "place=box\n"
         rc, err = self.quiet(w.machines().rm, "box")
         self.assertEqual(rc, 0, err)
         self.assertNotIn(HOME + "/.wk-remote", w.fake.files)
@@ -327,7 +327,7 @@ class TestRm(MachineTest):
     def test_an_rm_killed_after_any_effect_and_rerun_converges(self):
         def world():
             w = self.world(conf=self.CONF)
-            w.fake.files[HOME + "/.wk-remote"] = "target=box\n"
+            w.fake.files[HOME + "/.wk-remote"] = "place=box\n"
             return w
 
         def run_once(w):
@@ -517,7 +517,7 @@ class TestSetupOnARealBox(unittest.TestCase):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("%s is ready" % box, cp.stderr)
         self.assertTrue("zsh:" in cp.stderr or "no zsh on this machine" in cp.stderr, cp.stderr)
-        t = targets.Registry(REPO, dict(os.environ, WK_MACHINES_DIR=str(REAL_MACHINES))).load(box)
+        t = places.Registry(REPO, dict(os.environ, WK_MACHINES_DIR=str(REAL_MACHINES))).load(box)
         self.assertIsNone(deps.stale(t, REPO), cp.stderr)
 
 

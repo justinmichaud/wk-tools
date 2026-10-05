@@ -1,4 +1,4 @@
-"""Fleet walk: `wk status` reaches a remote target through a stub `ssh` that answers (running the far command here)
+"""Fleet walk: `wk status` reaches a remote place through a stub `ssh` that answers (running the far command here)
 or refuses (exit 255), and a bare `wk status` walks a faked WK_MACHINES_DIR fleet the same way."""
 import os
 import sys
@@ -7,7 +7,7 @@ import unittest
 from tests.support import REPO, WkTest, rand_suffix, run, scratch_dir, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets  # noqa: E402
+from wk import places  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
 
@@ -28,7 +28,7 @@ class TestFleetWalkNamedFormRendersAFakedMachine(WkTest):
             (root / "ws" / name).mkdir(parents=True)
             (root / "ws" / name / ".wk-ready").touch()
             env = {
-                "WK_TARGET": "remote",
+                "WK_PLACE": "remote",
                 "WK_REMOTE_HOST": "fake-reachable-machine",
                 "WK_REMOTE_ROOT": str(root),
                 "PATH": f"{binp}:{self._real_path()}",
@@ -44,7 +44,7 @@ class TestFleetWalkNamedFormRendersAFakedMachine(WkTest):
         with stub_path({"ssh": _REFUSING_SSH}) as binp:
             name = f"demo-{rand_suffix()}"
             env = {
-                "WK_TARGET": "remote",
+                "WK_PLACE": "remote",
                 "WK_REMOTE_HOST": "fake-down-machine",
                 "PATH": f"{binp}:{self._real_path()}",
                 "WK_SSH_TIMEOUT": "2",
@@ -93,7 +93,7 @@ class TestFleetWalkBareFormMultiMachine(WkTest):
                 )
             env = {
                 "WK_MACHINES_DIR": str(machdir),
-                "WK_TARGET": "remote",
+                "WK_PLACE": "remote",
                 "WK_REMOTE_HOST": "fake-reachable-machine",
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
                 "WK_PROBE_SECONDS": "1",
@@ -104,8 +104,8 @@ class TestFleetWalkBareFormMultiMachine(WkTest):
                 self.assertIn(n, cp.stdout, f"'{n}' missing from a bare 'wk status --text':\n{cp.stdout}")
 
 
-class _Registry(targets.Registry):
-    """A registry of named targets, `holding` the ones a workspace is on."""
+class _Registry(places.Registry):
+    """A registry of named places, `holding` the ones a workspace is on."""
 
     def __init__(self, names, holding):
         super().__init__(REPO, env={}, machine=Fake())
@@ -117,20 +117,20 @@ class _Registry(targets.Registry):
     def machines(self):
         return []
 
-    def on_target(self, name, ws):
+    def on_place(self, name, ws):
         return name in self.holding
 
 
 class TestResolution(unittest.TestCase):
-    def test_a_name_on_two_targets_refuses_naming_both(self):
+    def test_a_name_on_two_places_refuses_naming_both(self):
         with self.assertRaises(LookupError) as e:
-            _Registry(["alpha", "beta", "gamma"], {"alpha", "beta"}).ws_target("demo-ambiguous")
+            _Registry(["alpha", "beta", "gamma"], {"alpha", "beta"}).ws_place("demo-ambiguous")
         self.assertIn("demo-ambiguous", str(e.exception))
         self.assertIn("alpha beta", str(e.exception))
         self.assertNotIn("gamma", str(e.exception))
 
     def test_a_name_on_one_target_still_resolves(self):
-        self.assertEqual(_Registry(["alpha", "beta"], {"beta"}).ws_target("demo-single"), "beta")
+        self.assertEqual(_Registry(["alpha", "beta"], {"beta"}).ws_place("demo-single"), "beta")
 
 
 if __name__ == "__main__":

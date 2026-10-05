@@ -12,7 +12,7 @@ from unittest import mock
 from tests.support import REPO, WkTest, run
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import sshalias, targets  # noqa: E402
+from wk import places, sshalias  # noqa: E402
 from wk.machine import HAVE, Fake, Result  # noqa: E402
 
 
@@ -41,7 +41,7 @@ class DriverTest(unittest.TestCase):
         (self.tmp / "home").mkdir()
         (self.tmp / "hosts").mkdir()
         self.fake = Fake("here")
-        self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
+        self.reg = places.Registry(REPO, env=self.env, machine=self.fake)
 
     def conf(self, name, text):
         kind = "kind=%s\n" % ("peer" if "peer=1" in text else "build")
@@ -69,7 +69,7 @@ class TestContainerAlias(DriverTest):
         self.assertIn("Host wk-demo", text)
         self.assertIn("ProxyCommand %s container demo" % os.path.join(str(REPO), "container", "ssh-transport"), text)
         self.assertIn("IdentityFile", text)
-        self.assertIn(targets.zed_key_path(self.env), text)
+        self.assertIn(places.zed_key_path(self.env), text)
 
     def test_ssh_prepare_refuses_a_container_podman_does_not_know(self):
         self.fake.answer(["podman", "inspect", "wk-gone", "--format", "{{.Config.WorkingDir}}"], rc=125)
@@ -101,7 +101,7 @@ class TestContainerAlias(DriverTest):
         self.assertEqual(before, (self.fake.files, self.fake.dirs))
 
 
-class TestToolsTargetResolvedOnce(TestContainerAlias):
+class TestToolsPlaceResolvedOnce(TestContainerAlias):
 
     def setUp(self):
         super().setUp()
@@ -110,15 +110,15 @@ class TestToolsTargetResolvedOnce(TestContainerAlias):
 
     def test_locate_is_called_once(self):
         calls = {"n": 0}
-        real_locate = targets.Registry.locate
+        real_locate = places.Registry.locate
 
         def counting_locate(reg_self, ws):
             calls["n"] += 1
             return real_locate(reg_self, ws)
 
-        with mock.patch.object(targets.Registry, "locate", counting_locate), \
-                mock.patch.object(ZED.targets, "Registry", return_value=self.reg), \
-                mock.patch.object(ZED.targets, "zed_cli", return_value="/usr/bin/zed"), \
+        with mock.patch.object(places.Registry, "locate", counting_locate), \
+                mock.patch.object(ZED.places, "Registry", return_value=self.reg), \
+                mock.patch.object(ZED.places, "zed_cli", return_value="/usr/bin/zed"), \
                 mock.patch.object(ZED, "emit") as emit:
             ZED.main(["--tools", "demo"])
         self.assertEqual(calls["n"], 1)
@@ -163,7 +163,7 @@ class TestPeerAlias(DriverTest):
         self.env["XDG_STATE_HOME"] = str(self.tmp / "state")
         del self.env["WK_IN_VM"]
         self.conf("peer", "host=peer.example\npeer=1\n")
-        self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
+        self.reg = places.Registry(REPO, env=self.env, machine=self.fake)
         self.t = self.reg.load("peer")
         self.fake.answer_remote("uname -s", out=PROBE)
         self.fake.answer_remote("zed demo --route", out="user=dev\nsrc=/src/WebKit\nproxy=/opt/wk-tools/container/ssh-transport demo\n")
@@ -195,18 +195,18 @@ class TestBrokenRefusesNamingTheRepair(unittest.TestCase):
         (self.tmp / "home").mkdir()
         (self.tmp / "hosts").mkdir()
         self.fake = Fake("here")
-        self.reg = targets.Registry(REPO, env=self.env, machine=self.fake)
+        self.reg = places.Registry(REPO, env=self.env, machine=self.fake)
         os.makedirs(os.path.join(self.env["WK_STORE"], "ws", "demo", "home"))
-        self.fake.write(os.path.join(self.env["WK_STORE"], "ws", "demo", "home", targets.READY_MARKER), "")
+        self.fake.write(os.path.join(self.env["WK_STORE"], "ws", "demo", "home", places.READY_MARKER), "")
 
     def _resolve(self, name):
-        tname = self.reg.ws_target(name)
+        tname = self.reg.ws_place(name)
         return self.reg.load(tname), tname
 
     def test_broken_reason_names_wk_rm_and_wk_new(self):
         # No podman answer: `podman inspect` comes back 127, read as absent.
-        target, tname = self._resolve("demo")
-        reason = ZED.broken_reason(target, tname, "demo")
+        driver, tname = self._resolve("demo")
+        reason = ZED.broken_reason(driver, tname, "demo")
         self.assertIsNotNone(reason)
         self.assertIn("wk rm demo", reason)
         self.assertIn("wk new demo", reason)
@@ -214,11 +214,11 @@ class TestBrokenRefusesNamingTheRepair(unittest.TestCase):
     def test_a_present_workspace_is_not_broken(self):
         self.fake.answer(["podman", "inspect", "wk-fine", "--format", "{{.State.Status}}"], out="running\n")
         os.makedirs(os.path.join(self.env["WK_STORE"], "ws", "fine", "home"))
-        self.fake.write(os.path.join(self.env["WK_STORE"], "ws", "fine", "home", targets.READY_MARKER), "")
+        self.fake.write(os.path.join(self.env["WK_STORE"], "ws", "fine", "home", places.READY_MARKER), "")
         with open(os.path.join(self.env["WK_STORE"], "ws", "fine", "base-id"), "w") as f:
             f.write("main-1\n")
-        target, tname = self._resolve("fine")
-        self.assertIsNone(ZED.broken_reason(target, tname, "fine"))
+        driver, tname = self._resolve("fine")
+        self.assertIsNone(ZED.broken_reason(driver, tname, "fine"))
 
 
 class TestZedRoute(WkTest):
@@ -239,17 +239,17 @@ class TestZedCli(unittest.TestCase):
     def test_a_zed_on_path_wins(self):
         fake = Fake()
         fake.answer(HAVE + ("zed",))
-        self.assertEqual(targets.zed_cli(fake), "zed")
+        self.assertEqual(places.zed_cli(fake), "zed")
 
     def test_a_drag_installed_bundle_with_no_path_symlink_is_found(self):
         fake = Fake()
         fake.answer(["test", "-x", "/Applications/Zed.app/Contents/MacOS/cli"], rc=0)
-        self.assertEqual(targets.zed_cli(fake), "/Applications/Zed.app/Contents/MacOS/cli")
+        self.assertEqual(places.zed_cli(fake), "/Applications/Zed.app/Contents/MacOS/cli")
 
     def test_neither_is_not_installed(self):
         fake = Fake()
         fake.answer(["test", "-x", "/Applications/Zed.app/Contents/MacOS/cli"], rc=1)
-        self.assertIsNone(targets.zed_cli(fake))
+        self.assertIsNone(places.zed_cli(fake))
 
 
 if __name__ == "__main__":

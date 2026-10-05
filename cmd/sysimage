@@ -7,10 +7,10 @@
 # wk: sub ls,list where=dynamic opts=--continued
 # wk: sub build,webkit,holds,path where=dynamic name=derived
 # wk: sub build,webkit,disks,holds,path takes=2
-# wk: sub holds opts=--slot=,--commit=,--config=,--workspace=,--toolchain
+# wk: sub holds opts=--slot=,--commit=,--preset=,--workspace=,--toolchain
 # wk: sub path opts=--workspace=
-# wk: sub build opts=--workspace=,--detach,--stop,--resume,--stage=,--commit=,--slot=,--config=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet,--create,--fetch,--install,--provision,--repair,--build-pkg,--all,--version=,--refresh,--rebuild,--rm
-# wk: sub webkit opts=--workspace=,--detach,--stop,--commit=,--slot=,--config=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet
+# wk: sub build opts=--workspace=,--detach,--stop,--resume,--stage=,--commit=,--slot=,--preset=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet,--create,--fetch,--install,--provision,--repair,--build-pkg,--all,--version=,--refresh,--rebuild,--rm
+# wk: sub webkit opts=--workspace=,--detach,--stop,--commit=,--slot=,--preset=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet
 # wk: sub write opts=--from=,--disk=,--profile=,--machine=,--rescue,--grow,--no-grow
 #
 # An image is a whole machine, built from a spec in this repo, that a machine can
@@ -69,14 +69,14 @@
 #                                profile-guided build's.
 #                                --stop, with --slot and nothing else, stops the
 #                                build or cycle running for that slot
-#       --config <name>          which of the builds the profile's toolchain
+#       --preset <name>          which of the builds the profile's toolchain
 #                                makes: wpe-cross (no profile, for measuring
 #                                against one), or one phase of the cycle by
 #                                itself -- wpe-cross-pgo-collect (instrumented)
 #                                or wpe-cross-pgo-use (against the mixed
 #                                profile). Without it a 2.52 profile runs all
 #                                three phases in order
-#   holds <profile> [--toolchain | --slot <name> --commit <sha> [--config <c>]]
+#   holds <profile> [--toolchain | --slot <name> --commit <sha> [--preset <p>]]
 #                                prints `yes` when that workspace already holds what
 #                                is named -- the built image, the cross SDK
 #                                (--toolchain), or the slot at that commit
@@ -129,7 +129,7 @@ from wk import images  # noqa: E402
 
 ROOT = images.root()
 
-from wk import act, decl, images, targets  # noqa: E402
+from wk import act, decl, images, places  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import Local  # noqa: E402
@@ -138,12 +138,12 @@ from wk.sysimage import cli  # noqa: E402
 
 # The dispatcher's routing questions (lib/wk/dispatch.py), answered before anything else.
 HOOKS = {"--wsname": lambda rest, reg: cli.wsname(rest, reg.env),
-         "--wstarget": cli.wstarget,
+         "--wsplace": cli.wsplace,
          "--where": lambda rest, reg: cli.where(rest, reg.env)}
 
 
 def main(argv):
-    reg = targets.Registry(ROOT, machine=Local())
+    reg = places.Registry(ROOT, machine=Local())
     hook, rest = argv[0], argv[1:]
     if hook in HOOKS:
         print(HOOKS[hook](rest, reg))
@@ -159,7 +159,7 @@ def main(argv):
         return s.ls(args.flag("--continued"))
     if hook == "holds":
         return s.holds(spec, args.value("--workspace"), args.value("--slot"), args.value("--commit"),
-                       args.value("--config"), args.flag("--toolchain"))
+                       args.value("--preset"), args.flag("--toolchain"))
     if hook == "path":
         return s.path(spec, args.value("--workspace"))
     if hook in ("build", "webkit"):

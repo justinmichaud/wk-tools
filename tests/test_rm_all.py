@@ -1,5 +1,5 @@
-"""`wk rm --all`: every workspace `wk ls` lists, named `<name>@<target>` in one question before anything is destroyed,
-each removed through the path a named `wk rm` takes. WK_TARGET pins one fake local remote target, so the listing can
+"""`wk rm --all`: every workspace `wk ls` lists, named `<name>@<place>` in one question before anything is destroyed,
+each removed through the path a named `wk rm` takes. WK_PLACE pins one fake local remote place, so the listing can
 never reach this machine's own workspaces."""
 import unittest
 
@@ -27,7 +27,7 @@ class RmAllFixture(WkTest):
         self.env = {
             "WK_MACHINES_DIR": str(self.registry),
             "XDG_STATE_HOME": str(self.tmp / "state"),
-            "WK_TARGET": "fakebox",
+            "WK_PLACE": "fakebox",
         }
 
     def make(self, name):
@@ -53,7 +53,7 @@ class TestTheQuestionNamesEveryWorkspaceAndItsMachine(RmAllFixture):
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("alpha@fakebox", cp.stdout, cp.stdout)
         self.assertIn("beta@fakebox", cp.stdout, cp.stdout)
-        self.assertIn("WK_TARGET=fakebox", cp.stdout, cp.stdout)
+        self.assertIn("WK_PLACE=fakebox", cp.stdout, cp.stdout)
         self.assertIn("rm alpha --yes", cp.stdout, cp.stdout)
         self.assertEqual(self.remaining(), ["alpha", "beta"])
 

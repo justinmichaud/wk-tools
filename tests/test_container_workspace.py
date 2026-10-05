@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest import mock
 
-from tests.support import REPO, WK, WkTest, rand_suffix, requires_container_target, run
+from tests.support import REPO, WK, WkTest, rand_suffix, requires_container_place, run
 
 sys.path.insert(0, str(REPO / "lib"))
 
@@ -27,7 +27,7 @@ def container_log(ws):
     return cp.stdout
 
 
-@requires_container_target()
+@requires_container_place()
 class TestContainerWorkspaceLifecycle(WkTest):
     def setUp(self):
         super().setUp()
@@ -107,7 +107,7 @@ class TestContainerWorkspaceLifecycle(WkTest):
 
     def test_create_list_status_build_dry_run_remove(self):
         t0 = time.time()
-        cp = run("new", self.name, "--target", "container", timeout=600)
+        cp = run("new", self.name, "--on", "container", timeout=600)
         self._created = cp.returncode == 0
         self.assertEqual(cp.returncode, 0, f"wk new failed: {cp.stdout + cp.stderr}")
         created_s = time.time() - t0
@@ -138,7 +138,7 @@ class TestContainerWorkspaceLifecycle(WkTest):
         print(f"[timing] wk new: {created_s:.1f}s, total lifecycle: {total_s:.1f}s")
 
 
-@requires_container_target()
+@requires_container_place()
 class TestCancellingARealBuild(WkTest):
     """A ^C byte into a pty (the only interrupt that crosses `ssh -t` into the podman VM), a refused second
     build, and --kill, on a real JSC build."""
@@ -146,7 +146,7 @@ class TestCancellingARealBuild(WkTest):
     def setUp(self):
         super().setUp()
         self.name = f"wk-test-{rand_suffix()}"
-        cp = run("new", self.name, "--target", "container", timeout=1200)
+        cp = run("new", self.name, "--on", "container", timeout=1200)
         self._created = cp.returncode == 0
         self.assertEqual(cp.returncode, 0, f"wk new failed: {cp.stdout}")
         run("status", self.name, "--wait", "--timeout", "900", timeout=960)
@@ -254,10 +254,10 @@ class TestOnePodmanWrapper(unittest.TestCase):
     """`Container.podman()` names the machine's connection from a macOS host; bare `podman` is only `machine`/`unshare`."""
 
     def container(self, env, system):
-        from wk import targets
+        from wk import places
         from wk.machine import Fake
-        with mock.patch("wk.targets.os.uname", return_value=mock.Mock(sysname=system)):
-            return targets.Container("container", str(REPO), env, Fake("here")).podman()
+        with mock.patch("wk.places.os.uname", return_value=mock.Mock(sysname=system)):
+            return places.Container("container", str(REPO), env, Fake("here")).podman()
 
     def test_from_a_macos_host_it_names_the_machines_connection(self):
         self.assertEqual(["podman", "-c", "wk"], self.container({}, "Darwin"))
@@ -270,8 +270,8 @@ class TestOnePodmanWrapper(unittest.TestCase):
     def test_the_driver_names_no_bare_podman_of_its_own(self):
         import inspect
         import re
-        from wk import targets
-        src = inspect.getsource(targets.Container)
+        from wk import places
+        src = inspect.getsource(places.Container)
         for m in re.finditer(r'\["podman", "([^"]+)"', src):
             with self.subTest(call=m.group(0)):
                 self.assertIn(m.group(1), ("-c", "machine", "unshare"))

@@ -38,7 +38,7 @@ BOARD = "testboard"
 BCONF = ('kind=board\nssh=testboard-rescue\nbench_ssh=testboard-bench\ndriver=rpi5-usb\nrole=bench-device\n'
          'root=/dev/mmcblk0p2\ndevice=/dev/sda\nnote="test board"\n')
 SLOT_DOC = {"slot": "a", "workspace": WS, "profile": "buildroot-rpi5-64", "browser": "cog", "commit": SHA, "build_id": "b1d" * 8,
-            "build_config": "wpe-cross-release", "lib_dir": "usr/lib", "exec_dir": "usr/libexec/wpe-webkit-2.0",
+            "build_preset": "wpe-cross-release", "lib_dir": "usr/lib", "exec_dir": "usr/libexec/wpe-webkit-2.0",
             "bundle_dir": "usr/lib/wpe-webkit-2.0/injected-bundle", "lib_file": "usr/lib/libWPEWebKit-2.0.so.1.0.0",
             "files": {"usr/lib/libWPEWebKit-2.0.so.1.0.0": "ab" * 32}}
 OD_AARCH64 = " 127 69 76 70 2 1 1 0 0 0 0 0 0 0 0 0 3 0 183 0\n"
@@ -155,7 +155,7 @@ class DeployWorld:
 
     def bench(self):
         reg = FakeRegistry(self.env, Local(), lambda n, e: mock.Mock(**{"info.return_value": "running"}),
-                           ws_target=lambda ws: "container", in_workspace=lambda: False)
+                           ws_place=lambda ws: "container", in_workspace=lambda: False)
         return cli.Bench(str(REPO), reg, self.clock)
 
     def deploy(self, name="a", ok=True):
@@ -526,7 +526,7 @@ class BoardTest(unittest.TestCase):
 class TestARun(BoardTest):
     def test_a_pgo_slot_carries_its_profile_reading_into_the_run(self):
         w = self.world()
-        w.board.bench.files[board.slot_path("a") + "/slot.json"] = json.dumps(dict(SLOT_DOC, build_config=pgo.USE))
+        w.board.bench.files[board.slot_path("a") + "/slot.json"] = json.dumps(dict(SLOT_DOC, build_preset=pgo.USE))
         w._set_file(os.path.join(images.pgo_dir(WS, "a", w.env), "profile-check.json"), '{"missing": []}')
         self.assertEqual(w.invoke(), 0, w.err)
         self.assertEqual((w.run_dir() / "profile-check.json").read_text(), '{"missing": []}')
@@ -625,7 +625,7 @@ class TestRefusals(BoardTest):
 
     def test_an_instrumented_slot_is_never_measured(self):
         w = self.world()
-        w.board.bench.files[board.slot_path("a") + "/slot.json"] = json.dumps(dict(SLOT_DOC, build_config=board.INSTRUMENTED))
+        w.board.bench.files[board.slot_path("a") + "/slot.json"] = json.dumps(dict(SLOT_DOC, build_preset=board.INSTRUMENTED))
         self.assertIn("is an instrumented build", self.refused(w))
 
     def test_a_leg_on_the_wrong_system_is_refused_before_anything_runs(self):
@@ -638,7 +638,7 @@ class TestRefusals(BoardTest):
 
     def collecting(self):
         w = self.world()
-        w.board.bench.files[board.slot_path("a-instr") + "/slot.json"] = json.dumps(dict(SLOT_DOC, build_config=board.INSTRUMENTED))
+        w.board.bench.files[board.slot_path("a-instr") + "/slot.json"] = json.dumps(dict(SLOT_DOC, build_preset=board.INSTRUMENTED))
         return w
 
     def test_a_collection_needs_an_instrumented_slot(self):
@@ -659,7 +659,7 @@ class TestRefusals(BoardTest):
         self.assertIn("runs one iteration", self.refused(self.collecting(), "jetstream3", "--slot", "a-instr", "--collect", "--count", "3"))
 
     def test_the_slot_decides_the_build_so_config_is_refused(self):
-        self.assertIn("--config: a board runs the slot it holds", self.refused(self.world(), "jetstream3", "--config", "wpe-release"))
+        self.assertIn("--preset: a board runs the slot it holds", self.refused(self.world(), "jetstream3", "--preset", "wpe-release"))
 
     def test_no_display_and_an_unpinned_clock_fail_preflight_and_force_records_them(self):
         w = self.world()
@@ -1070,8 +1070,8 @@ def live_board(name):
     """A real board's bench system, read through the same channel and on-board files a run uses; nothing on it changes."""
     conf = bootcli.load_conf(str(REPO), name, os.environ)
     d = bootcli.driver_for(str(REPO), conf)
-    from wk import targets
-    system = board.BoardSystem(str(REPO), targets.Registry(REPO, machine=Local()), None, "", FakeClock(), name, d)
+    from wk import places
+    system = board.BoardSystem(str(REPO), places.Registry(REPO, machine=Local()), None, "", FakeClock(), name, d)
     return d, system
 
 

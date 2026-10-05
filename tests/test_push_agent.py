@@ -13,12 +13,12 @@ import sys
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, bash, requires_container_target
+from tests.support import REPO, WkTest, bash, requires_container_place
 from tests.test_wk_key import GOOD, KeyTest
 from tests.test_wk_secrets import KEY_SH, SOCK
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import secrets, targets  # noqa: E402
+from wk import places, secrets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
 from wk.secrets import Secrets  # noqa: E402
@@ -28,8 +28,8 @@ FORKS = ("fork", "forkwpe")
 
 
 def store_init(env, extra=""):
-    """`python3 -m wk.targets store-init`, then `extra` (bash with KEY_SH's key_store)."""
-    return bash('PYTHONPATH="$WK_ROOT/lib" python3 -m wk.targets store-init || exit\n' + KEY_SH + extra, env=env)
+    """`python3 -m wk.places store-init`, then `extra` (bash with KEY_SH's key_store)."""
+    return bash('PYTHONPATH="$WK_ROOT/lib" python3 -m wk.places store-init || exit\n' + KEY_SH + extra, env=env)
 
 
 @unittest.skipUnless(shutil.which("ssh-agent") and shutil.which("ssh-add"), "needs ssh-agent and ssh-add")
@@ -196,14 +196,14 @@ class TestTheSwitchEndToEnd(_Agent):
         self.assertEqual("justinmichaud", (self.secrets / "github-user").read_text().strip())
 
 
-class TestTheAgentSocketIsTheTargets(unittest.TestCase):
+class TestTheAgentSocketIsThePlaces(unittest.TestCase):
     def registry(self):
-        return targets.Registry(REPO, {"HOME": "/nonexistent", "WK_STORE": "/nonexistent/store"}, Fake("here"))
+        return places.Registry(REPO, {"HOME": "/nonexistent", "WK_STORE": "/nonexistent/store"}, Fake("here"))
 
     def test_the_container_names_the_mounted_socket_and_the_others_none(self):
         self.assertEqual("/run/wk/ssh-agent.sock", self.registry().load("container").agent_sock())
         for kind in ("remote", "local"):
-            with self.subTest(target=kind):
+            with self.subTest(driver=kind):
                 self.assertIsNone(self.registry().load(kind).agent_sock())
 
 
@@ -215,7 +215,7 @@ def _machine(cmd, timeout=60):
 RUNTIME = "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk"
 
 
-@requires_container_target()
+@requires_container_place()
 class TestLiveAgentInTheMachine(unittest.TestCase):
     """Read-only: whether this machine's own agent and injector are where every container's mount says."""
 
@@ -240,7 +240,7 @@ class TestLiveAgentInTheMachine(unittest.TestCase):
         self.assertIn("NO", _machine('test -S "%s/github-inject.sock" && echo EXPOSED || echo NO' % RUNTIME).stdout)
 
 
-@requires_container_target()
+@requires_container_place()
 @unittest.skipUnless(os.environ.get("WK_TEST_LIVE_PUSH") == "1", "throws the real switch; set WK_TEST_LIVE_PUSH=1")
 class TestLivePushFromAContainer(unittest.TestCase):
     def wk(self, *args, timeout=180):
@@ -331,7 +331,7 @@ PEER_WK = '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$WK_TEST_PEER_LOG"\necho "fork  
 
 
 class TestAskingAnotherMachine(WkTest):
-    """`wk key push --target <machine>` runs the far side's own `wk key push` over ssh; ssh is a stub that runs it here."""
+    """`wk key push --on <machine>` runs the far side's own `wk key push` over ssh; ssh is a stub that runs it here."""
 
     def test_the_far_side_runs_the_same_command(self):
         reg, root, binp = self.tmp / "registry", self.tmp / "peer-root", self.tmp / "bin"
@@ -342,7 +342,7 @@ class TestAskingAnotherMachine(WkTest):
             path.chmod(0o755)
         (reg / "peerbox.conf").write_text("kind=peer\nhost=fake-peerbox\npeer=1\nroot=%s\n" % root)
         log = self.tmp / "peer.log"
-        cp = self.run_wk("key", "push", "status", "--target", "peerbox", env={
+        cp = self.run_wk("key", "push", "status", "--on", "peerbox", env={
             "PATH": f"{binp}:{os.environ['PATH']}", "WK_MACHINES_DIR": str(reg), "WK_STORE": str(self.tmp / "store"),
             "WK_HOST_SECRETS": str(self.tmp / "secrets"), "WK_TEST_PEER_LOG": str(log)})
         self.assertEqual(["key push status"], log.read_text().split("\n")[:-1], cp.stdout)

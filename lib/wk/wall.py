@@ -6,7 +6,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 
-from wk import buildconf, reach, secrets
+from wk import presets, reach, secrets
 from wk.store import no_such_workspace
 from wk.act import die
 from wk.doctor import MISS, miss, note, ok
@@ -62,8 +62,8 @@ def claude_status(text):
     return "%s %s" % (doc.get("loggedIn"), doc.get("authMethod"))
 
 
-def commit_walled(target):
-    return target.kind == "container" or (target.kind == "local" and target.os() != "macos")
+def commit_walled(driver):
+    return driver.kind == "container" or (driver.kind == "local" and driver.os() != "macos")
 
 
 def commit_wall_prefix(root, src):
@@ -90,9 +90,9 @@ def run_at_once(checks):
 
 
 class Wall:
-    def __init__(self, root, target, ws, machine, push_on=0, want_gpu=False):
+    def __init__(self, root, driver, ws, machine, push_on=0, want_gpu=False):
         self.root = root
-        self.target = target
+        self.driver = driver
         self.ws = ws
         self.machine = machine
         self.push_on = push_on
@@ -100,13 +100,13 @@ class Wall:
 
     def inside(self, cmd):
         """The container exec path appends \\r, which every numeric probe would then test as "2\\r"."""
-        return self.target.exec(self.ws, ["bash", "-lc", cmd]).out.replace("\r", "").rstrip("\n")
+        return self.driver.exec(self.ws, ["bash", "-lc", cmd]).out.replace("\r", "").rstrip("\n")
 
     def github(self):
         code = status_of(self.inside(http("https://github.com/")))
         if code == "200":
             return [ok("github reachable through the proxy (HTTP %s)" % code)]
-        return [miss("github unreachable through the proxy (got '%s')" % (code or "nothing"), self.target.daemon_remedy(self.ws, "proxy"))]
+        return [miss("github unreachable through the proxy (got '%s')" % (code or "nothing"), self.driver.daemon_remedy(self.ws, "proxy"))]
 
     def allowlist(self):
         denied = self.inside("curl -sS -m 15 -o /dev/null https://example.com/ 2>&1")
@@ -202,11 +202,11 @@ class Wall:
     def secrets_view(self):
         rows, kept = [], []
         for row in secrets.agent_secrets():
-            if self.target.kind in row[5].split(","):
+            if self.driver.kind in row[5].split(","):
                 continue
             path = ("/agent-rw/" if row[4] == "file" else "/secrets/") + row[1]
             if self.inside("test -r %s && echo yes" % path) == "yes":
-                rows.append(miss("%s is readable in '%s' and the delivery table gives %s to no %s target" % (path, self.ws, row[0], self.target.kind),
+                rows.append(miss("%s is readable in '%s' and the delivery table gives %s to no %s place" % (path, self.ws, row[0], self.driver.kind),
                                  "what a workspace mounts holds only what it is given (Secrets.publish_view, lib/wk/secrets.py)"))
             else:
                 kept.append(row[0])
@@ -215,10 +215,10 @@ class Wall:
         return rows
 
     def agent_identities(self):
-        sock = self.target.agent_sock()
+        sock = self.driver.agent_sock()
         if not sock:
-            return [miss("the '%s' target names no ssh-agent socket, so a push from in here would use a credential wk does not control"
-                         % self.target.name, "lib/wk/targets.py, %s.agent_sock" % type(self.target).__name__)]
+            return [miss("the '%s' place names no ssh-agent socket, so a push from in here would use a credential wk does not control"
+                         % self.driver.name, "lib/wk/places.py, %s.agent_sock" % type(self.driver).__name__)]
         # An empty agent prints "The agent has no identities." on stdout.
         ident = self.inside("command -v ssh-add >/dev/null 2>&1 "
                             "&& (SSH_AUTH_SOCK=%s ssh-add -l 2>/dev/null | grep -v 'has no identities' | grep -c . || true) "
@@ -268,7 +268,7 @@ class Wall:
             return [miss("a read answered '%s' rather than 200 or 401" % (user or "nothing"),
                          "the injector is in the path but not answering for api.github.com/user")]
         return [miss("api.github.com answered '%s' -- the injector is not in the path" % (root or "nothing"),
-                     self.target.daemon_remedy(self.ws, "inject"))]
+                     self.driver.daemon_remedy(self.ws, "inject"))]
 
     def github_write(self):
         """An empty body names no branch, so 422 is the authenticated answer and no pull request is created."""
@@ -300,7 +300,7 @@ class Wall:
     def agent_credential(self):
         """`claude auth status` is local (measured 2026-09-10: loggedIn for a token Anthropic has never seen)."""
         rows = []
-        login = any(r[0] == "claude-login" and self.target.kind in r[5].split(",")
+        login = any(r[0] == "claude-login" and self.driver.kind in r[5].split(",")
                     for r in secrets.agent_secrets())
         secret, want = ("claude-login", "claude.ai") if login else ("claude", "oauth_token")
         token = self.inside('printf %s "${CLAUDE_CODE_OAUTH_TOKEN:+set}"')
@@ -308,18 +308,18 @@ class Wall:
             rows.append(miss("$CLAUDE_CODE_OAUTH_TOKEN is set in this workspace as well as the claude.ai login, and the token wins: "
                              "every session authenticates as an inference-only credential and remote control refuses to start",
                              "nothing should put it here (%s/shell/bashrc exports it only where the delivery column sends it); "
-                             "'wk rm %s' and 'wk new' remake the workspace without it" % (self.target.tools(self.ws), self.ws)))
+                             "'wk rm %s' and 'wk new' remake the workspace without it" % (self.driver.tools(self.ws), self.ws)))
         elif not login and token != "set":
-            rows.append(miss("no $CLAUDE_CODE_OAUTH_TOKEN in this workspace, which is the one Claude credential a %s target is given"
-                             % self.target.kind, self.target.agent_secret_remedy(self.ws, "claude")))
+            rows.append(miss("no $CLAUDE_CODE_OAUTH_TOKEN in this workspace, which is the one Claude credential a %s place is given"
+                             % self.driver.kind, self.driver.agent_secret_remedy(self.ws, "claude")))
         verdict = claude_status(self.inside("if command -v claude >/dev/null 2>&1; then claude auth status 2>/dev/null; "
                                             "else echo wk-no-claude-cli; fi"))
         if verdict == "True " + want:
             rows.append(ok("the agent in '%s' is authenticated (%s), from the %s credential this machine delivered -- no /login, no browser"
                            % (self.ws, want, secret)))
         elif verdict.startswith("True "):
-            rows.append(miss("the agent in '%s' authenticates as %s, where a %s target is given %s and must report %s"
-                             % (self.ws, verdict[5:], self.target.kind, secret, want), "two credentials reach it, or the wrong one does"))
+            rows.append(miss("the agent in '%s' authenticates as %s, where a %s place is given %s and must report %s"
+                             % (self.ws, verdict[5:], self.driver.kind, secret, want), "two credentials reach it, or the wrong one does"))
         elif verdict == "absent":
             rows.append(miss("no 'claude' on $PATH in '%s', so no session there can run at all" % self.ws,
                              "'wk enter %s' then 'claude --version'. Whether an agent there can authenticate is unmeasured" % self.ws))
@@ -330,17 +330,17 @@ class Wall:
                              "or what it wrote is not the JSON this reads" % self.ws))
         else:
             rows.append(miss("'claude auth status' in '%s' says it is not logged in, so every session there stops at /login" % self.ws,
-                             self.target.agent_secret_remedy(self.ws, secret)))
+                             self.driver.agent_secret_remedy(self.ws, secret)))
         return rows
 
     def gitwebkit_setup(self):
-        if self.inside("git -C %s config --get webkitscmpy.setup" % self.target.src(self.ws)) == "true":
+        if self.inside("git -C %s config --get webkitscmpy.setup" % self.driver.src(self.ws)) == "true":
             return [ok("git-webkit is set up in '%s' (hooks, fork remote verified)" % self.ws)]
         return [miss("'git-webkit setup' has not completed in '%s' (webkitscmpy.setup is not true): `git-webkit pr` prompts or refuses" % self.ws,
                      "'wk sync %s --fix' re-asserts the remotes and runs it" % self.ws)]
 
     def gap(self, name, *replies):
-        return upstream_gap(name, self.target.daemon_remedy(self.ws, "inject"), *replies)
+        return upstream_gap(name, self.driver.daemon_remedy(self.ws, "inject"), *replies)
 
     def bugzilla_read(self):
         reply = self.inside(http("https://bugs.webkit.org/rest/version"))
@@ -350,7 +350,7 @@ class Wall:
         if code == "200":
             return [ok("bugs.webkit.org reachable through the injector (HTTP %s)" % code)]
         return [miss("bugs.webkit.org answered '%s' -- the injector is not in the path for it" % (code or "nothing"),
-                     self.target.daemon_remedy(self.ws, "inject"))]
+                     self.driver.daemon_remedy(self.ws, "inject"))]
 
     def bugzilla_write(self):
         """Bugzilla names its own refusal in the body: 410 "log in first", 306 an unknown key, else an empty bug refused."""
@@ -387,16 +387,16 @@ class Wall:
 
     def gpu(self):
         """gpu-probe.sh exits 0 hardware, 1 software only, 2 no EGL, 3 build failed."""
-        arch = self.target.arch(self.ws)
-        if not buildconf.arch_has_gpu(arch):
+        arch = self.driver.arch(self.ws)
+        if not presets.arch_has_gpu(arch):
             rows = [note("no GPU: an %s workspace gets none (the NVIDIA userspace is aarch64-only)" % arch)]
             if self.want_gpu:
                 rows.append(miss("--gpu on an %s workspace, which cannot have one" % arch, "a native workspace"))
             return rows
-        if self.target.os() == "macos":
+        if self.driver.os() == "macos":
             return [note("a guest's GPU is Virtualization.framework's, reached through Metal, and this probe is EGL: what a benchmark "
                          "in there gets is measured by the benchmark, and its desktop rows above say whether its window is covered")]
-        r = self.target.exec(self.ws, ["bash", "-lc", os.path.join(self.target.tools(self.ws), "container", "gpu", "gpu-probe.sh")])
+        r = self.driver.exec(self.ws, ["bash", "-lc", os.path.join(self.driver.tools(self.ws), "container", "gpu", "gpu-probe.sh")])
         rows = [note(l) for l in (r.out + r.err).replace("\r", "").splitlines()]
         if r.rc == 0:
             return rows + [ok("GPU acceleration available")]
@@ -407,31 +407,31 @@ class Wall:
 
     def rootless_proxy(self):
         rows = []
-        if self.target.rootless() == "true":
+        if self.driver.rootless() == "true":
             rows.append(ok("podman is rootless"))
         else:
             rows.append(miss("podman is NOT rootless", "an escape from this container is an escape as root"))
         if self.machine.run(["systemctl", "--user", "is-active", "--quiet", "wk-proxy.service"]).ok:
             rows.append(ok("egress proxy running"))
         else:
-            rows.append(miss("egress proxy is not running", self.target.daemon_remedy(self.ws, "proxy")))
+            rows.append(miss("egress proxy is not running", self.driver.daemon_remedy(self.ws, "proxy")))
         written = self.inside("touch /opt/wk-tools/.wk-write-probe 2>&1")
         if "read-only" in written.lower() or "permission denied" in written.lower():
             rows.append(ok("/opt/wk-tools is read-only"))
         else:
             self.inside("rm -f /opt/wk-tools/.wk-write-probe")
-            rows.append(miss("/opt/wk-tools is writable from inside the workspace", "it is mounted read-only (lib/wk/targets.py's Container)"))
+            rows.append(miss("/opt/wk-tools is writable from inside the workspace", "it is mounted read-only (lib/wk/places.py's Container)"))
         return rows
 
     def from_host(self):
         checks = []
-        if self.target.egress_filtered(self.ws):
+        if self.driver.egress_filtered(self.ws):
             checks += [("egress-github", self.github), ("egress-allowlist", self.allowlist), ("egress-off-allowlist", self.off_allowlist)]
-            if self.target.os() == "macos":
+            if self.driver.os() == "macos":
                 checks.append(("egress-softwareupdate", self.softwareupdate))
-        if self.target.kind == "container":
+        if self.driver.kind == "container":
             checks.append(("isolation", self.isolation))
-        if commit_walled(self.target):
+        if commit_walled(self.driver):
             checks.append(("commit-wall", self.commit_wall))
         return checks + [("no-credentials-inside", self.no_credentials_inside), ("secrets-view", self.secrets_view),
                          ("agent-identities", self.agent_identities), ("github-read", self.github_read),
@@ -444,7 +444,7 @@ class Wall:
                   ("bugzilla-read", self.bugzilla_read), ("bugzilla-write", self.bugzilla_write), ("egress-github", self.github),
                   ("egress-allowlist", self.allowlist), ("egress-off-allowlist", self.off_allowlist),
                   ("no-credentials", self.no_credentials_inside), ("gitwebkit-setup", self.gitwebkit_setup)]
-        if commit_walled(self.target):
+        if commit_walled(self.driver):
             checks.append(("commit-wall", self.commit_wall))
         return checks
 
@@ -478,41 +478,41 @@ def push_switch(root, machine):
                   "is measured below and compared to nothing" % rc)
 
 
-def from_host(root, target, ws, machine, rep, want_gpu=False):
+def from_host(root, driver, ws, machine, rep, want_gpu=False):
     """Out of the parallel pass: the push switch, which two checks read, and the write probe, which cleans up after itself."""
-    if target.kind == "remote":
-        die("'wk doctor %s' proves a sandbox holds, and a remote target has none:\n"
+    if driver.kind == "remote":
+        die("'wk doctor %s' proves a sandbox holds, and a remote place has none:\n"
             "    a plain checkout on a shared machine, no container, no firewall, no\n"
             "    disposable layer. There is nothing here to measure and nothing it\n"
-            "    promised. 'wk ai claude' puts a barrier in front of this target rather\n"
+            "    promised. 'wk ai claude' puts a barrier in front of this place rather\n"
             "    than a measurement, for the same reason." % ws)
-    state = target.info(ws)
+    state = driver.info(ws)
     if state == "absent":
         die(no_such_workspace(ws))
     rows = [ok("workspace running") if state == "running" else miss("workspace state: %s" % state, "wk start %s" % ws)]
-    if target.agent_secret_present(ws, "claude-login"):
+    if driver.agent_secret_present(ws, "claude-login"):
         rows.append(note("this workspace has your claude.ai login (account scope, not just inference)"))
     else:
         rows += [note("no claude.ai login here, and remote control refuses to start without one:"),
-                 note(target.agent_secret_remedy(ws, "claude-login"))]
+                 note(driver.agent_secret_remedy(ws, "claude-login"))]
     push_on, said = push_switch(root, machine)
     rows.append(note(said))
-    if target.kind == "vm" and not target.egress_filtered(ws):
+    if driver.kind == "vm" and not driver.egress_filtered(ws):
         rows.append(miss("this guest was booted with WK_VM_UNFILTERED, so it has the open network",
                          "wk stop %s && wk start %s   (without that variable)" % (ws, ws)))
-    if target.kind == "vm":
-        rows += target.check_rows(ws)
+    if driver.kind == "vm":
+        rows += driver.check_rows(ws)
     rep.rows(rows)
-    wall = Wall(root, target, ws, machine, push_on, want_gpu)
+    wall = Wall(root, driver, ws, machine, push_on, want_gpu)
     for _, found in run_at_once(wall.from_host()):
         rep.rows(found)
-    if target.kind == "container":
+    if driver.kind == "container":
         rep.rows(wall.rootless_proxy())
 
 
-def from_inside(root, target, ws, machine, rep):
+def from_inside(root, driver, ws, machine, rep):
     """`wk doctor` in a workspace: every row into `rep`, and whether an agent in here could publish."""
-    results = run_at_once(Wall(root, target, ws, machine, 0, False).from_inside())
+    results = run_at_once(Wall(root, driver, ws, machine, 0, False).from_inside())
     for _, found in results:
         rep.rows(found)
     return any(r[0] == MISS for name, found in results if name in PUBLISHING for r in found)

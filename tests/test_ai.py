@@ -20,7 +20,7 @@ from tests.support import REPO, run
 from tests.test_doctor_wall import _Wall
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, targets, wall  # noqa: E402
+from wk import act, places, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
@@ -39,7 +39,7 @@ AI = load_ai()
 WK = os.path.join(AI.ROOT, "wk")
 
 
-class SimTarget(targets.Target):
+class SimDriver(places.Driver):
 
     def __init__(self, machine, env, kind="container", name=None):
         super().__init__(name or kind, str(REPO), env, machine)
@@ -47,7 +47,7 @@ class SimTarget(targets.Target):
         self.answers = {}
         self.asked = []
         self.filtered = True
-        self.present, self.remedy = True, "the target's own remedy"
+        self.present, self.remedy = True, "the place's own remedy"
         self.is_local = False
 
     def home(self):
@@ -83,17 +83,17 @@ class SimTarget(targets.Target):
         return self.remedy
 
 
-def sim_registry(env, machine, target):
-    """A registry loading `target` under any name, on this host even when the suite runs in a workspace."""
+def sim_registry(env, machine, driver):
+    """A registry loading `place` under any name, on this host even when the suite runs in a workspace."""
     env.setdefault("WK_MARKER", "/nonexistent/wk-marker")
-    return FakeRegistry(env, machine, lambda n, e: target)
+    return FakeRegistry(env, machine, lambda n, e: driver)
 
 
 def quiet_env():
     """os.environ as a test of this command needs it: no answer given in advance, no barrier already crossed."""
     p = mock.patch.dict(os.environ, {}, clear=False)
     p.start()
-    for v in ("WK_FORCE", "WK_YES", "WK_DRY_RUN", "WK_QUIET", "WK_DESTRUCTIVE", "WK_NAME", "WK_TARGET", "WK_TARGET_KIND"):
+    for v in ("WK_FORCE", "WK_YES", "WK_DRY_RUN", "WK_QUIET", "WK_DESTRUCTIVE", "WK_NAME", "WK_PLACE", "WK_DRIVER"):
         os.environ.pop(v, None)
     return p
 
@@ -141,9 +141,9 @@ class _Host(_Flow, _Wall):
         _Wall.setUp(self)
         self.setUpFlow()
         os.unlink(self.env["WK_MARKER"])
-        self.env.update(WK_NAME="demo", WK_TARGET="container")
+        self.env.update(WK_NAME="demo", WK_PLACE="container")
         self.fake.answer(["podman", "inspect", "wk-demo"], out="running\n")
-        self.fake.files[os.path.join(self.target.store.ws_dir("demo"), "home", targets.READY_MARKER)] = ""
+        self.fake.files[os.path.join(self.driver.store.ws_dir("demo"), "home", places.READY_MARKER)] = ""
         self.fake.answer([WK, "key", "push", "status"], rc=1)
         self.fake.answer([WK, "key", "push"])
         self.fake.answer(["podman", "info"], out="true\n")
@@ -221,7 +221,7 @@ class TestItVerifiesTheWall(_Host):
         self.assertEqual(["env", "WK_AGENT=claude", "WK_WORKSPACE=demo", "bash", "-lc"], self.handed[0][-6:-1])
 
     def test_a_checkout_path_with_a_space_survives_the_login_shell(self):
-        with mock.patch.object(targets.Container, "src", return_value="/src/Web Kit"):
+        with mock.patch.object(places.Container, "src", return_value="/src/Web Kit"):
             self.ai("claude")
         words = shlex.split(self.line())
         self.assertEqual("/src/Web Kit", words[1])
@@ -347,8 +347,8 @@ class TestWhatIsWkTheAgentNever(_Flow):
     def setUp(self):
         self.setUpFlow()
         self.fake = Fake()
-        self.env = {"WK_NAME": "demo", "WK_TARGET": "container"}
-        self.reg = sim_registry(self.env, self.fake, SimTarget(self.fake, self.env))
+        self.env = {"WK_NAME": "demo", "WK_PLACE": "container"}
+        self.reg = sim_registry(self.env, self.fake, SimDriver(self.fake, self.env))
 
     def test_each_refusal(self):
         for argv, said in (((), "'wk ai' needs one of: claude, pi"),
@@ -371,11 +371,11 @@ class TestABuildBox(_Flow):
         self.setUpFlow()
         self.fake = Fake()
         self.fake.answer([WK, "key", "push"], rc=1)
-        self.env = {"WK_NAME": "demo", "WK_TARGET": "box"}
-        self.target = SimTarget(self.fake, self.env, kind="remote", name="box")
-        self.target.answers["find claude"] = Result(0, "/home/u/.local/bin/claude\r\n")
-        self.target.answers["gh auth status"] = Result(1)
-        self.reg = sim_registry(self.env, self.fake, self.target)
+        self.env = {"WK_NAME": "demo", "WK_PLACE": "box"}
+        self.driver = SimDriver(self.fake, self.env, kind="remote", name="box")
+        self.driver.answers["find claude"] = Result(0, "/home/u/.local/bin/claude\r\n")
+        self.driver.answers["gh auth status"] = Result(1)
+        self.reg = sim_registry(self.env, self.fake, self.driver)
 
     def test_it_is_a_barrier(self):
         status, err = self.ai("claude")
@@ -386,14 +386,14 @@ class TestABuildBox(_Flow):
     def test_forced_it_runs_in_auto_mode_with_the_switch_named(self):
         status, err = self.ai("claude", force=True)
         self.assertEqual(0, status, err)
-        self.assertEqual(["push status --target box"], self.pushes())
+        self.assertEqual(["push status --on box"], self.pushes())
         self.assertIn("'wk doctor demo' is not run for 'box'", err)
         self.assertIn("Claude on box runs in auto mode", err)
         self.assertIn("exec /home/u/.local/bin/claude --permission-mode auto", self.line())
         self.assertNotIn("bwrap", self.line())
 
     def test_handed_over_the_box_asks_its_own_switch(self):
-        self.target.is_local = True
+        self.driver.is_local = True
         status, err = self.ai("claude", force=True)
         self.assertEqual(0, status, err)
         self.assertEqual(["push status"], self.pushes())
@@ -406,7 +406,7 @@ class TestABuildBox(_Flow):
         self.assertNotIn("--remote-control", self.line())
 
     def test_a_gh_login_there_is_a_refusal_force_does_not_cross(self):
-        self.target.answers["gh auth status"] = Result(0)
+        self.driver.answers["gh auth status"] = Result(0)
         status, err = self.ai("claude", force=True)
         self.assertEqual(1, status, err)
         self.assertIn("holds a GitHub credential", err)
@@ -414,13 +414,13 @@ class TestABuildBox(_Flow):
         self.assertEqual([], self.handed)
 
     def test_a_workspace_made_without_the_agent_is_refused_naming_the_remedy(self):
-        self.target.answers["find claude"] = Result(1)
+        self.driver.answers["find claude"] = Result(1)
         status, err = self.ai("claude", force=True)
         self.assertEqual(1, status, err)
         self.assertIn("there is no claude in 'demo' that runs", err)
         self.assertIn("wk rm demo && wk new demo", err)
         self.assertEqual([], self.handed)
-        self.assertFalse([a for a in self.target.asked if "install.sh" in a and "find" not in a])
+        self.assertFalse([a for a in self.driver.asked if "install.sh" in a and "find" not in a])
 
 
 class TestTheSessionIsAnEffect(_Flow):
@@ -433,11 +433,11 @@ class TestTheSessionIsAnEffect(_Flow):
         self.fake.answer([WK, "key", "push", "status"], rc=0)
         self.fake.answer([WK, "key", "push"])
         self.fake.answer(["exec"])
-        self.env = {"WK_NAME": "demo", "WK_TARGET": "box"}
-        self.target = SimTarget(self.fake, self.env, kind="remote", name="box")
-        self.target.answers["find claude"] = Result(0, "/home/u/.local/bin/claude\n")
-        self.target.answers["gh auth status"] = Result(1)
-        self.reg = sim_registry(self.env, self.fake, self.target)
+        self.env = {"WK_NAME": "demo", "WK_PLACE": "box"}
+        self.driver = SimDriver(self.fake, self.env, kind="remote", name="box")
+        self.driver.answers["find claude"] = Result(0, "/home/u/.local/bin/claude\n")
+        self.driver.answers["gh auth status"] = Result(1)
+        self.reg = sim_registry(self.env, self.fake, self.driver)
 
     def sessions(self):
         return [e for e in self.fake.effects if e[0] == "run_tty"]
@@ -449,17 +449,17 @@ class TestTheSessionIsAnEffect(_Flow):
         [(_, argv, cwd)] = self.sessions()
         self.assertEqual(("exec", "demo", "no-tty"), argv[:3])
         self.assertIn("exec /home/u/.local/bin/claude --permission-mode auto", argv[-1])
-        self.assertEqual(["push status --target box", "push off --target box"], self.pushes())
+        self.assertEqual(["push status --on box", "push off --on box"], self.pushes())
         self.assertIs(before, signal.getsignal(signal.SIGINT))
 
     def test_a_dry_run_prints_the_switch_and_the_session_and_does_neither(self):
         os.environ["WK_DRY_RUN"] = "1"
         status, err = self.ai("claude", force=True)
         self.assertEqual(0, status, err)
-        self.assertIn("would run on fake: %s key push off --target box" % WK, err)
+        self.assertIn("would run on fake: %s key push off --on box" % WK, err)
         self.assertRegex(err, r"would run on fake: exec demo no-tty .*exec /home/u/.local/bin/claude --permission-mode auto")
         self.assertNotIn("would run in demo", err)
-        self.assertEqual(["push status --target box"], self.pushes())
+        self.assertEqual(["push status --on box"], self.pushes())
         self.assertEqual([], self.sessions())
 
 
@@ -471,10 +471,10 @@ class TestAGuest(_Flow):
         self.fake = Fake()
         self.fake.answer([WK, "key", "push"], rc=1)
         self.fake.answer(["test", "-x"])
-        self.env = {"WK_NAME": "demo", "WK_TARGET": "vm"}
-        self.target = SimTarget(self.fake, self.env, kind="vm")
-        self.target.answers["find claude"] = Result(0, "claude\n")
-        self.reg = sim_registry(self.env, self.fake, self.target)
+        self.env = {"WK_NAME": "demo", "WK_PLACE": "vm"}
+        self.driver = SimDriver(self.fake, self.env, kind="vm")
+        self.driver.answers["find claude"] = Result(0, "claude\n")
+        self.reg = sim_registry(self.env, self.fake, self.driver)
         p = mock.patch.object(AI.Ai, "checks")
         p.start()
         self.addCleanup(p.stop)
@@ -486,7 +486,7 @@ class TestAGuest(_Flow):
         self.assertNotIn("bwrap", self.line())
 
     def test_one_booted_unfiltered_is_a_barrier(self):
-        self.target.filtered = False
+        self.driver.filtered = False
         status, err = self.ai("claude")
         self.assertEqual(1, status, err)
         self.assertIn("'demo' was booted with NO egress filter", err)
@@ -498,7 +498,7 @@ class TestAGuest(_Flow):
         self.assertIn("softnet is not installed", err)
 
     def test_the_older_spelling_is_a_warning_and_the_same_decision(self):
-        self.target.filtered = False
+        self.driver.filtered = False
         self.env["WK_VM_UNFILTERED"] = "1"
         status, err = self.ai("claude")
         self.assertEqual(0, status, err)

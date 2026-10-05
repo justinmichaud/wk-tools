@@ -12,11 +12,11 @@
 #
 #   wk rm a b c   three removals: one confirmation for all, each destroyed
 #                 independently
-#   wk rm --all   every workspace `wk ls` finds: every target on this machine,
+#   wk rm --all   every workspace `wk ls` finds: every place on this machine,
 #                 and every machine that keeps workspaces of its own
 #
-# The question names each one as <name>@<target> before it asks, so which
-# machine it is on is part of what is answered -- a target that is a machine of
+# The question names each one as <name>@<place> before it asks, so which
+# machine it is on is part of what is answered -- a place that is a machine of
 # its own is that machine. A workspace another workstation keeps the record of
 # is destroyed by that machine's own `wk`, asked from here. --dry-run prints
 # each removal and runs none of them.
@@ -29,14 +29,14 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, record, targets, workspace  # noqa: E402
+from wk import decl, places, record, workspace  # noqa: E402
 from wk.act import Refused, die  # noqa: E402
 
 
 def main(argv):
     args = decl.Args(decl.Decl(__file__), argv)
     names = args.positionals
-    reg = targets.Registry(ROOT)
+    reg = places.Registry(ROOT)
     records = record.Records(machine=reg.machine)
     try:
         if args.flag("--all"):

@@ -1,4 +1,4 @@
-"""lib/wk/resources.py: the envelope a target is sized from, the budget `wk build` sizes against, and the
+"""lib/wk/resources.py: the envelope a place is sized from, the budget `wk build` sizes against, and the
 `wk_py wk.resources` verbs."""
 import contextlib
 import io

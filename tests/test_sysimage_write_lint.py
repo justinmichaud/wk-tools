@@ -9,7 +9,7 @@ import unittest
 from tests.support import REPO, owed
 
 TIER = "lint"
-ROOTS = ("admin", "bench", "boot", "bridge", "build", "cmd", "container", "host", "image", "lib", "remote", "targets", "vm")
+ROOTS = ("admin", "bench", "boot", "bridge", "build", "cmd", "container", "host", "image", "lib", "remote", "places", "vm")
 READER = re.compile(r"etc/netplan/\*\.yaml|find-generic-password|wireless-security\.psk|--show-secrets")
 THE_READER = "admin/wk-card-priv"
 

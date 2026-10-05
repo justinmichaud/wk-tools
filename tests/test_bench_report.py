@@ -273,11 +273,11 @@ class TestReportWalkerAndStats(WkTest):
     def test_env_record_update_merges_wall_time_without_clobbering(self):
         with scratch_dir() as tmp:
             f = tmp / "env.json"
-            env_record(f, "plan=jetstream3", "config=jsc-release")
+            env_record(f, "plan=jetstream3", "preset=jsc-release")
             env_record(f, "--update", "wall_time_s=42")
             doc = json.loads(f.read_text())
             self.assertEqual(doc["plan"], "jetstream3")
-            self.assertEqual(doc["config"], "jsc-release")
+            self.assertEqual(doc["preset"], "jsc-release")
             self.assertEqual(doc["wall_time_s"], "42")
 
     def test_env_record_refuses_a_field_that_is_not_key_value(self):

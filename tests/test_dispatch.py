@@ -13,7 +13,7 @@ from unittest import mock
 from tests.support import REPO, bash, clean_env, run
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, buildconf, dispatch, store, targets, workspace  # noqa: E402
+from wk import act, dispatch, places, presets, store, workspace  # noqa: E402
 from wk import decl as D  # noqa: E402
 from wk.machine import Fake, Local  # noqa: E402
 
@@ -29,7 +29,7 @@ class Handed(Exception):
 HANDED = []
 
 
-def dispatched(argv, macos=False, target="container", delegates=False, env=None):
+def dispatched(argv, macos=False, place="container", delegates=False, env=None):
     def execv(path, args):
         raise Handed("here", args[1:])
 
@@ -49,12 +49,12 @@ def dispatched(argv, macos=False, target="container", delegates=False, env=None)
                mock.patch.object(dispatch, "forward_status", forward),
                mock.patch.object(dispatch, "bare_report", forward),
                mock.patch.object(dispatch, "delegate_run", delegate),
-               mock.patch.object(dispatch, "delegate_target", lambda t: object() if delegates else None),
-               mock.patch.object(dispatch, "resolve_target", lambda *a: target),
-               mock.patch.object(dispatch, "ask_target", lambda *a: None),
+               mock.patch.object(dispatch, "delegate_driver", lambda t: object() if delegates else None),
+               mock.patch.object(dispatch, "resolve_place", lambda *a: place),
+               mock.patch.object(dispatch, "ask_place", lambda *a: None),
                mock.patch.object(dispatch.Invocation, "check_needs", lambda self, machine=None: None),
                mock.patch.object(dispatch.Invocation, "derived_name", lambda self: "ws1"),
-               mock.patch.object(dispatch.Invocation, "named_target", lambda self: ""),
+               mock.patch.object(dispatch.Invocation, "named_place", lambda self: ""),
                mock.patch.object(workspace, "refuse_unsaved_before_forward", lambda *a: None),
                mock.patch.object(dispatch.sshalias, "alias_remove", lambda *a: None)]
     out = io.StringIO()
@@ -83,8 +83,8 @@ def positionals_for(d, probe):
             words.append(probe[0])
         elif k == slot:
             words.append("ws1")
-        elif d.config == "arg" and not any(w in buildconf.names() for w in words):
-            words.append(buildconf.names()[0])
+        elif d.preset == "arg" and not any(w in presets.names() for w in words):
+            words.append(presets.names()[0])
         else:
             words.append("a%d" % k)
     return words
@@ -170,7 +170,7 @@ class TestParsesEveryArgument(unittest.TestCase):
         for d in DECLS:
             for label, argv in invocations(d):
                 opts = d.opts_for(argv).split(",")
-                for opt in sorted(o[:-1] for o in opts if o.endswith("=") and o != "--config="):
+                for opt in sorted(o[:-1] for o in opts if o.endswith("=") and o != "--preset="):
                     optional = opt in opts   # declared bare too: a value only as `--x=v`, handed on so
                     for typed in ([] if optional else [[opt, self.PATH]]) + [["%s=%s" % (opt, self.PATH)]]:
                         with self.subTest(cmd=d.name, verb=label, typed=typed):
@@ -251,7 +251,7 @@ class TestDestructiveAsksOnce(unittest.TestCase):
         self.assertIn("declining", cp.stderr)
 
     def test_a_forwarded_command_carries_the_answer_and_asks_again(self):
-        line = targets.Container("container", str(REPO), {}, Fake()).wk_cmd(
+        line = places.Container("container", str(REPO), {}, Fake()).wk_cmd(
             ["rm", "ws1"], {"WK_YES": "1", "WK_DESTRUCTIVE": "1", "WK_CONFIRMED": "1"})
         self.assertIn("WK_YES=1 ", line)
         self.assertNotIn("WK_CONFIRMED", line)
@@ -263,7 +263,7 @@ class TestForceNamesWhatItCrosses(unittest.TestCase):
     def test_force_is_carried_as_environment(self):
         how, handed, env = dispatched(["gc", "--force"])
         self.assertEqual((how, "--force" in handed, env.get("WK_FORCE")), ("here", False, "1"))
-        line = targets.Container("container", str(REPO), {}, Fake()).wk_cmd(["gc"], {"WK_FORCE": "1"})
+        line = places.Container("container", str(REPO), {}, Fake()).wk_cmd(["gc"], {"WK_FORCE": "1"})
         self.assertIn("WK_FORCE=1 ", line)
 
     def test_a_barrier_refuses_naming_itself_and_the_flag(self):
@@ -313,7 +313,7 @@ class TestAFarEndNoConfNames(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             marker = os.path.join(tmp, "wk-remote")
             with open(marker, "w") as f:
-                f.write("target=box\n")
+                f.write("place=box\n")
             for argv in (["gc"], ["build", "jsc-release"]):
                 with self.subTest(argv=argv):
                     how, status, out = dispatched(argv, env={"WK_REMOTE_MARKER": marker})
@@ -324,8 +324,8 @@ class TestAFarEndNoConfNames(unittest.TestCase):
 class TestHelpPreviewsTheCommandLine(unittest.TestCase):
 
     def test_the_preview_is_the_argv_and_where(self):
-        out = run("bench", "stage", "ws1", "--to=mbp", "--config", "mac-release", "-h", timeout=30).stdout
-        self.assertIn("  this command line runs: WK_CONFIG=mac-release %s stage ws1 --to mbp\n"
+        out = run("bench", "stage", "ws1", "--to=mbp", "--preset", "mac-release", "-h", timeout=30).stdout
+        self.assertIn("  this command line runs: WK_PRESET=mac-release %s stage ws1 --to mbp\n"
                       % shlex.quote(str(REPO / "cmd" / "bench")), out)
         self.assertIn("    on: %s\n" % dispatch.where_prose(D.Decl(REPO / "cmd" / "bench"), "host"), out)
 
@@ -336,9 +336,9 @@ class TestHelpPreviewsTheCommandLine(unittest.TestCase):
 
     def test_the_workspace_name_is_not_the_config(self):
         out = run("build", "ws1", "jsc-release", "-h", timeout=30).stdout
-        self.assertIn("  this command line runs: WK_CONFIG=jsc-release %s\n" % shlex.quote(str(REPO / "cmd" / "build")), out)
-        out = run("run", "ws1", "--config", "jsc-release", "-h", timeout=30).stdout
-        self.assertIn("  this command line runs: WK_CONFIG=jsc-release %s\n" % shlex.quote(str(REPO / "cmd" / "run")), out)
+        self.assertIn("  this command line runs: WK_PRESET=jsc-release %s\n" % shlex.quote(str(REPO / "cmd" / "build")), out)
+        out = run("run", "ws1", "--preset", "jsc-release", "-h", timeout=30).stdout
+        self.assertIn("  this command line runs: WK_PRESET=jsc-release %s\n" % shlex.quote(str(REPO / "cmd" / "run")), out)
 
     def test_no_arguments_no_preview(self):
         self.assertNotIn("this command line", run("gc", "-h", timeout=30).stdout)

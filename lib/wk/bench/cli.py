@@ -20,7 +20,7 @@ def where(reg, args):
     verb = args[0] if args else ""
     if verb == "seed":
         try:
-            t = reg.ws_target(args[1]) if len(args) > 1 and args[1] else ""
+            t = reg.ws_place(args[1]) if len(args) > 1 and args[1] else ""
         except LookupError:
             t = ""
         return "workspace" if t == "container" else "host"
@@ -167,7 +167,7 @@ class Bench:
             yield copy
 
     def locate(self, task):
-        """(machine, directory, whether this machine holds its lock): this store first, then each target's store of its own."""
+        """(machine, directory, whether this machine holds its lock): this store first, then each place's store of its own."""
         hit = self.find(task)
         if hit:
             return hit[0], hit[1], hit[0] is self.machine
@@ -222,10 +222,10 @@ class Bench:
             act.die("usage: wk bench precision <run-a> <run-b> [--detect PCT]\n"
                     "    Either side may be comma-separated run directories, pooled.")
         try:
-            target = float(detect)
+            pct = float(detect)
         except ValueError:
             act.die("--detect '%s' is not a percentage (0.3 is a third of one per cent)" % detect)
-        report.precision(sides[0], sides[1], target)
+        report.precision(sides[0], sides[1], pct)
         return 0
 
     def seed(self, ws, plan, resolved):
@@ -233,15 +233,15 @@ class Bench:
         if not ws or not plan:
             act.die("usage: wk bench seed <workspace> <plan>; see wk bench -h")
         try:
-            tname = self.reg.ws_target(ws)
-            target = self.reg.load(tname)
+            tname = self.reg.ws_place(ws)
+            driver = self.reg.load(tname)
         except LookupError as e:
             act.die(str(e))
         if not resolved:
-            target.wait_ready(ws, self.clock)
+            driver.wait_ready(ws, self.clock)
 
         def read(path):
-            r = target.exec(ws, ["cat", "%s/Tools/Scripts/%s" % (target.src(ws), path)])
+            r = driver.exec(ws, ["cat", "%s/Tools/Scripts/%s" % (driver.src(ws), path)])
             return r.out.replace("\r", "") if r.ok else None
 
         text = seed.plan_json(read, plan)

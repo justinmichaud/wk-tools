@@ -2,16 +2,16 @@
 #
 # wk new <name> -- create a workspace named after the task it is for
 # wk: where=workspace name=required lifecycle post=zed group=workspaces dryrun
-# wk: opts --target=,--base=,--arch=,--zed,--no-wait,--kill,--pr=,--sysroot,--_detached
+# wk: opts --on=,--base=,--arch=,--zed,--no-wait,--kill,--pr=,--sysroot,--_detached
 #
-# Other targets take minutes (a guest clone, a git clone over ssh), so creation is
+# Other places take minutes (a guest clone, a git clone over ssh), so creation is
 # *detached*: a dropped connection does not take it with it, and re-running `wk
 # new` resumes it. This end refuses what should be refused, starts the driver and
 # follows its log; the driver (`--_detached`) does everything that changes
 # anything, under the workspace lock, stepping its task record as it goes.
 # --dry-run runs the driver here instead and prints what it would change.
 #
-#   --target <target>   container, vm, or a machine named in
+#   --on <place|machine> container, vm, or a machine named in
 #                        machines/<name>.conf (default: container); a build
 #                        box's or peer workstation's own `wk new` makes it there
 #   --base <id>          which snapshot to build from -- an id 'wk sync'
@@ -45,36 +45,36 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, record, targets, workspace  # noqa: E402
+from wk import decl, places, record, workspace  # noqa: E402
 from wk.act import Refused, die  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 
 
 def parse(argv):
     a = decl.Args(decl.Decl(__file__), argv)
-    return {"target": a.value("--target"), "base": a.value("--base"), "arch": a.value("--arch"),
+    return {"place": a.value("--on"), "base": a.value("--base"), "arch": a.value("--arch"),
             "pr": a.value("--pr"), "zed": a.flag("--zed"), "no_wait": a.flag("--no-wait"),
             "kill": a.flag("--kill"), "sysroot": a.flag("--sysroot"), "detached": a.flag("--_detached")}
 
 
-def driver(reg, records, name, opts):
-    """The detached half: the front spawned it with the canonical --target, --arch and --base."""
+def detached(reg, records, name, opts):
+    """The detached half: the front spawned it with the canonical --on, --arch and --base."""
     try:
-        target = reg.load(opts.get("target") or reg.default())
+        driver = reg.load(opts.get("place") or reg.default())
     except LookupError as e:
         die(str(e))
-    recs = record.of_target(target, records.clock, reg.machine)
-    return workspace.new_driver(target, recs, Lock(target.store, reg.machine, recs.clock), recs.clock,
+    recs = record.of_driver(driver, records.clock, reg.machine)
+    return workspace.new_driver(driver, recs, Lock(driver.store, reg.machine, recs.clock), recs.clock,
                                 name, opts.get("base") or "", opts.get("arch") or "native")
 
 
 def main(argv):
     opts = parse(argv)
     name = store.ws_name()
-    reg = targets.Registry(ROOT)
+    reg = places.Registry(ROOT)
     records = record.Records(machine=reg.machine)
     if opts.get("detached"):
-        return driver(reg, records, name, opts)
+        return detached(reg, records, name, opts)
     return workspace.new_front(reg, records, name, opts)
 
 

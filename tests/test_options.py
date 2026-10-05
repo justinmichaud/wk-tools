@@ -65,7 +65,7 @@ class TestLsJson(WkTest):
     def test_ls_json_is_one_valid_document(self):
         with temp_store() as store:
             cp = run_impl("ls", "--json", split=True,
-                           env={"WK_STORE": store["WK_STORE"], "WK_TARGET": "container"})
+                           env={"WK_STORE": store["WK_STORE"], "WK_PLACE": "container"})
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(len(cp.stdout.strip().splitlines()), 1, cp.stdout)
         doc = json.loads(cp.stdout)
@@ -74,7 +74,7 @@ class TestLsJson(WkTest):
         for row in doc["workspaces"]:
             self.assertEqual(
                 set(row.keys()),
-                {"name", "target", "state", "base", "snap", "arch", "changes"},
+                {"name", "place", "state", "base", "snap", "arch", "changes"},
             )
 
 

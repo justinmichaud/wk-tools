@@ -36,7 +36,7 @@ JIT_TIERS = ("JSC_reportDFGCompileTimes=1", "JSC_reportFTLCompileTimes=1")
 # (EI_CLASS, e_machine) of the measured library: a lib32 image reports aarch64 from `uname -m`.
 ELF = {(1, 40): "armv7l", (2, 183): "aarch64", (2, 62): "x86_64", (1, 3): "i686"}
 FREE_PORT = 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'
-REFUSED_OPTIONS = ("config", "browser", "browser_args", "software")
+REFUSED_OPTIONS = ("preset", "browser", "browser_args", "software")
 
 
 class Script(Onboard):
@@ -96,8 +96,8 @@ class BoardSystem(System):
     bench_host = "image"
     host_os = "linux"
 
-    def __init__(self, root, reg, target, ws, clock, board, driver, machine=None):
-        super().__init__(root, reg, target, ws, clock)
+    def __init__(self, root, reg, ws_driver, ws, clock, board, driver, machine=None):
+        super().__init__(root, reg, ws_driver, ws, clock)
         self.board, self.driver, self.machine = board, driver, machine
         self.pending = None   # the leg BoardRun.leg() is about to run: System.boot() takes none
         self.sysid = self.display = self.session = self.renderer = self.runner_dir = self.runner_sha = self.payload = self.plan_text = ""
@@ -220,7 +220,7 @@ class BoardSystem(System):
 
     def instrumented(self, leg):
         """An instrumented build writes a profile as each process exits and is several times slower for it: collected from, never measured."""
-        was = self.doc.get("build_config", "")
+        was = self.doc.get("build_preset", "")
         if leg.o.get("pgo_dir") and was != INSTRUMENTED:
             die("a collection reads an instrumented build and slot '%s' is '%s', so it would write no profile at all.\n"
                 "    The instrumented slot is the middle phase of 'wk sysimage webkit' and is named <slot>-instr." % (leg.slot, was or "not one"))
@@ -552,7 +552,7 @@ class BoardRun(pipeline.Run):
         """A PGO slot's profile reading, from its image workspace's collection, goes with the run it measured."""
         doc = self.system.doc
         check = os.path.join(images.pgo_dir(doc.get("workspace") or self.ws, leg.slot, self.reg.env), "profile-check.json")
-        if doc.get("build_config") == pgo.USE and not leg.o.get("pgo_dir") and self.here.exists(check):
+        if doc.get("build_preset") == pgo.USE and not leg.o.get("pgo_dir") and self.here.exists(check):
             leg.machine.write(os.path.join(leg.out, "profile-check.json"), self.here.read(check))
 
     def write_env(self, leg):
@@ -560,10 +560,10 @@ class BoardRun(pipeline.Run):
         lo, hi = s.clk.get("min", ""), s.clk.get("max", "")
         ab = ["ab.round=" + o["round"], "ab.arm=" + o.get("arm", ""), "ab.slot_a=" + o.get("slot_a", ""), "ab.slot_b=" + o.get("slot_b", "")] if o.get("round") else []
         record.write_env(os.path.join(leg.out, "env.json"), [
-            "plan=" + leg.plan, "workspace=" + doc.get("workspace", ""), "config=" + doc.get("profile", ""), "browser=" + doc.get("browser", ""),
+            "plan=" + leg.plan, "workspace=" + doc.get("workspace", ""), "preset=" + doc.get("profile", ""), "browser=" + doc.get("browser", ""),
             "count=" + leg.count, "class=" + leg.klass, "runner=browser", "arch=" + (s.facts_.get("arch") or "native"), "bench_host=" + s.bench_host,
             "display=" + s.display, "machine=" + s.board, "system=" + s.sysid, "build_slot=" + leg.slot,
-            "build_config=" + doc.get("build_config", ""), "webkit_sha=" + doc.get("commit", ""), "build_id=" + doc.get("build_id", ""),
+            "build_preset=" + doc.get("build_preset", ""), "webkit_sha=" + doc.get("commit", ""), "build_id=" + doc.get("build_id", ""),
             "runner_sha=" + s.runner_sha, "local_copy=" + leg.payload, "host.kernel=" + s.facts_.get("kernel", ""),
             "host.kernel_arch=" + s.facts_.get("arch", ""), "host.governor=" + s.clk.get("governor", ""), "host.throttled=" + s.throttled(),
             "host.root_device=" + s.probed.get("rootdev", ""), "host.cpu_khz=" + lo, "cores.set=" + leg.cores,
@@ -618,7 +618,7 @@ def claim(root, env, board, what):
                          "kill %d" % os.getpid(), "", [what], os.getpid(), env)
 
 
-def for_board(root, reg, ws, clock, board, machine=None, target=None, driver=None):
+def for_board(root, reg, ws, clock, board, machine=None, ws_driver=None, driver=None):
     require_board(root, reg.env, board)
     if driver is None:
         bconf = bootcli.load_conf(root, board, reg.env)
@@ -626,12 +626,12 @@ def for_board(root, reg, ws, clock, board, machine=None, target=None, driver=Non
             die("machines/%s.conf declares no driver and note, so nothing can tell what %s is running\n"
                 "    or whether a `wk boot` arming is about to reboot it." % (board, board))
         driver = bootcli.driver_for(root, bconf)
-    if target is None and ws:
+    if ws_driver is None and ws:
         try:
-            target = reg.load(reg.ws_target(ws))
+            ws_driver = reg.load(reg.ws_place(ws))
         except LookupError as e:
             die(str(e))
-    return BoardSystem(root, reg, target, ws, clock, board, driver, machine)
+    return BoardSystem(root, reg, ws_driver, ws, clock, board, driver, machine)
 
 
 def request(root, reg, verb, words, typed):

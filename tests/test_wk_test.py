@@ -18,7 +18,7 @@ from tests.killpoints import converges
 from tests.support import REPO, as_dispatched
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import job, record, targets  # noqa: E402
+from wk import job, places, record  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
@@ -30,7 +30,7 @@ CMD_LOADER.exec_module(CMD)
 DF_ROOMY = "Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 209715200 1% /\n"
 
 
-class TestTarget(targets.Target):
+class TestDriver(places.Driver):
     def __init__(self, name, root, env, machine, kind="container"):
         super().__init__(name, root, env, machine)
         self.kind = kind
@@ -42,7 +42,7 @@ class TestTarget(targets.Target):
         return "present"
 
     def os(self):
-        return self.machine.target_os
+        return self.machine.place_os
 
     def src(self, ws):
         return "/src/WebKit"
@@ -64,16 +64,16 @@ class TestTarget(targets.Target):
 
 
 class World(Fake):
-    """This host testing workspace `ws` on target `box`: `sh -c` finds every layout
+    """This host testing workspace `ws` on place `box`: `sh -c` finds every layout
     path present, the run writes `out` to its log and exits `rc`."""
 
     def __init__(self, tmp, kind="container"):
         super().__init__("here")
         self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
         self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"),
-                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_TARGET": "box", "WK_NAME": "ws", "WK_IN_VM": "1",
+                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_PLACE": "box", "WK_NAME": "ws", "WK_IN_VM": "1",
                     "WK_AVAIL_MB": "65536", "WK_JOB_PID_TRIES": "0", "WK_KILL_WAIT": "2"}
-        self.conf, self.kind, self.target_os = {}, kind, "linux"
+        self.conf, self.kind, self.place_os = {}, kind, "linux"
         self.size = (8, 32768, 2 if kind == "remote" else None)
         self.clock = FakeClock()
         self.out, self.rc = b"Ran 3 tests\nAll 3 tests passed.\n", 0
@@ -83,8 +83,8 @@ class World(Fake):
         self.react(["bash", "-c"], self._bash)
         self.answer(["sync-tools"])
         self.react(["exec", "ws", "kill", "-0"], lambda a, f: Result(0 if int(a[-1]) in f.pids else 1))
-        self.reg = FakeRegistry(self.env, self, lambda n, e: TestTarget("box", str(REPO), dict(e, **self.conf), self, self.kind),
-                                ws_target=lambda ws: "box", in_workspace=lambda: False)
+        self.reg = FakeRegistry(self.env, self, lambda n, e: TestDriver("box", str(REPO), dict(e, **self.conf), self, self.kind),
+                                ws_place=lambda ws: "box", in_workspace=lambda: False)
         self.ws_dir = os.path.join(self.env["WK_STORE"], "ws", "ws")
         os.makedirs(self.ws_dir)
 
@@ -114,7 +114,7 @@ class TestTest(unittest.TestCase):
         osenv = mock.patch.dict(os.environ, {}, clear=False)
         osenv.start()
         self.addCleanup(osenv.stop)
-        for v in ("WK_DRY_RUN", "WK_FORCE", "WK_YES", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_NAME", "WK_CONFIG"):
+        for v in ("WK_DRY_RUN", "WK_FORCE", "WK_YES", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_NAME", "WK_PRESET"):
             os.environ.pop(v, None)
         p = mock.patch.object(record, "host_name", return_value="here")
         p.start()
@@ -150,13 +150,13 @@ class TestDryRun(TestTest):
 
     def test_the_layout_suite_dry_run_names_software_rendering(self):
         os.environ["WK_DRY_RUN"] = "1"
-        rc, err = self.run_(None, "--layout", "--config", "gtk-release")
+        rc, err = self.run_(None, "--layout", "--preset", "gtk-release")
         self.assertEqual(rc, 0, err)
         self.assertIn("run-webkit-tests", err)
 
     def test_layout_on_a_jsc_only_config_is_refused(self):
         err = self.refused(None, "--layout", status=1)
-        self.assertIn("wk test ws --layout --config gtk-release-asan", err)
+        self.assertIn("wk test ws --layout --preset gtk-release-asan", err)
 
 
 class TestKill(TestTest):
@@ -187,15 +187,15 @@ class TestKill(TestTest):
 class TestSizing(TestTest):
     def test_jobs_are_sized_at_the_configs_memory_per_job(self):
         os.environ["WK_DRY_RUN"] = "1"
-        self.w.target_os, self.w.env["WK_AVAIL_MB"] = "macos", "6144"
-        rc, err = self.run_(None, "--config", "mac-release")
+        self.w.place_os, self.w.env["WK_AVAIL_MB"] = "macos", "6144"
+        rc, err = self.run_(None, "--preset", "mac-release")
         self.assertEqual(rc, 0, err)
         self.assertIn("-j2", err)
 
     def test_the_disk_a_run_wants_is_the_configs(self):
-        self.w.target_os = "macos"
+        self.w.place_os = "macos"
         self.w.answer(["df", "-Pk"], out="Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 31457280 9% /\n")
-        err = self.refused(None, "--config", "mac-release-pgo")
+        err = self.refused(None, "--preset", "mac-release-pgo")
         self.assertIn("60 GB", err)
 
 
@@ -239,7 +239,7 @@ class TestTheRecordARunWrites(TestTest):
         self.assertEqual(self.w.recs().list()[0].field("exit"), "stalled")
 
     def test_the_layout_suite_runs_with_software_rendering_by_default(self):
-        rc, err = self.run_(None, "--layout", "--config", "gtk-release")
+        rc, err = self.run_(None, "--layout", "--preset", "gtk-release")
         self.assertEqual(rc, 0, err)
         (w,) = [e for e in self.w.effects if e[0] == "watch"]
         line = " ".join(w[1])
@@ -248,7 +248,7 @@ class TestTheRecordARunWrites(TestTest):
 
     def test_a_missing_layout_path_is_refused_before_the_suite_runs(self):
         self.w.answer(["exec", "ws", "sh", "-c"], out="fast/gone.html\n")
-        err = self.refused(None, "--layout", "--config", "gtk-release", "fast/gone.html", status=1)
+        err = self.refused(None, "--layout", "--preset", "gtk-release", "fast/gone.html", status=1)
         self.assertIn("fast/gone.html", err)
         self.assertEqual(self.w.recs().list(), [])
 
@@ -264,7 +264,7 @@ class TestInterrupted(TestTest):
             t = real(recs, *a, **kw)
             t.set("pid_match", CMD.PID_MATCH)
             t.pid(777)
-            t.set("where", "target")
+            t.set("where", "place")
             return t
         self.w.pids.add(777)
         self.w.answer(["exec", "ws", "ps", "-o", "args=", "-p", "777"], out="perl Tools/Scripts/run-javascriptcore-tests\n")

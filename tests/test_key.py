@@ -35,7 +35,7 @@ class _KeyRun(WkTest):
 
     def _base_env(self):
         env = dict(os.environ)
-        for var in ("WK_NAME", "WK_TARGET", "WK_TARGET_KIND", "WK_MARKER",
+        for var in ("WK_NAME", "WK_PLACE", "WK_DRIVER", "WK_MARKER",
                     "WK_STORE", "WK_IN_VM"):
             env.pop(var, None)
         env["WK_MACHINES_DIR"] = str(self.tmp / "no-registry")

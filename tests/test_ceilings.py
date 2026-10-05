@@ -35,7 +35,7 @@ class TestCeilings(WkTest):
     def test_status_parallel_keeps_starting_order(self):
         w = status.Walk(REPO, env={"WK_ROW_LABEL": "here", "WK_IMAGE_MARKER": str(self.tmp / "none")},
                         fleet=False, devices=False)
-        w.targets = lambda: ["a", "b", "c"]
+        w.places = lambda: ["a", "b", "c"]
         w._is_here = lambda t: False
         delays = {"a": (0.6, 2), "b": (0.3, 4), "c": (0, 0)}
 

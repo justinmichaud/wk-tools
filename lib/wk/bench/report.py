@@ -4,7 +4,7 @@ import math
 import os
 import sys
 
-from wk import buildconf, pgo
+from wk import pgo, presets
 from wk.bench import record
 from wk.machine import Local
 
@@ -16,8 +16,8 @@ def axis_check_lines(a, b):
 
     if a.get("plan") != b.get("plan"):
         lines.append("warning: different plans (%s vs %s)" % (a.get("plan"), b.get("plan")))
-    if a.get("config") != b.get("config"):
-        lines.append("warning: different build configs (%s vs %s)" % (a.get("config"), b.get("config")))
+    if a.get("preset") != b.get("preset"):
+        lines.append("warning: different build presets (%s vs %s)" % (a.get("preset"), b.get("preset")))
 
     # A runner or host mismatch is not a caveat: it is two machines doing different work, and the statistics below will still produce a p-value for them.
     if a.get("runner", "browser") != b.get("runner", "browser"):
@@ -84,7 +84,7 @@ def axis_check_lines(a, b):
             "two states of one" % (a["machine"], b["machine"])
         )
 
-    # The kernel and system are reported, not warned about: for a kernel A/B their differing is the whole experiment. Width, which `arch` does not answer, is a warning -- that is two measurements.
+    # The kernel and system are reported, not warned about: for a kernel A/B their differing is the whole A/B. Width, which `arch` does not answer, is a warning -- that is two measurements.
     kaa = (a.get("host") or {}).get("kernel_arch")
     kab = (b.get("host") or {}).get("kernel_arch")
     if kaa and kab and kaa != kab:
@@ -1037,7 +1037,7 @@ def built_lines(doc, runs, arm_names, arm_kind):
 
 
 def pgo_built(env):
-    return bool(buildconf.CONFIGS.get(env.get("config") or "", {}).get("pgo")) or env.get("build_config") == pgo.USE
+    return bool(presets.PRESETS.get(env.get("preset") or "", {}).get("pgo")) or env.get("build_preset") == pgo.USE
 
 
 def pgo_faults(reading):

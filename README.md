@@ -204,7 +204,7 @@ wk run   bug-238 --rr -- crash.js       # record it with rr (Linux ports); wk gu
 wk run   bug-238 --replay               # the latest recording, under lldb
 wk test  bug-238
 wk status bug-238 --log --follow
-wk enter bug-238 -- ls                  # a shell or one command, on any target
+wk enter bug-238 -- ls                  # a shell or one command, on any place
 wk stop  bug-238                        # parked; wk start brings it back
 wk rm    bug-238
 ```
@@ -229,7 +229,7 @@ Runs where you type it; the other path is on this machine.
 
 ```sh
 ./setup --stage softnet                 # once: the guest's egress filter
-wk new mac-rel --target vm              # builds the golden base the first time (hours, once)
+wk new mac-rel --on vm                  # builds the golden base the first time (hours, once)
 wk start mac-rel                        # boots it and writes its ssh alias, wk-mac-rel
 wk build mac-rel mac-release
 wk build mac-rel mac-release-pgo        # instrument, collect, rebuild: the perf build
@@ -260,7 +260,7 @@ guest, so `wk sync` in there asks the broker as a container does.
 ```sh
 wk machine setup buildbox4 --kind build # probes it, writes machines/buildbox4.conf,
                                         # installs WebKit's build dependencies
-wk new big-build --target buildbox4
+wk new big-build --on buildbox4
 wk build big-build jsc-release          # sized from the machine's live load
 wk machine rm buildbox4
 wk machine ls                           # every machine in machines/, and its tailnet names
@@ -335,7 +335,7 @@ wk test bug-238 --profile=native --attach <pid> # the same profiler, from wk tes
 wk quiesce on && wk quiesce session on
 wk bench run bug-238 speedometer3
 wk bench run bug-238 jetstream3 --cores 0-3      # pinned; recorded and compared
-wk bench run bug-238 jetstream3 --config jsc-release --a-args '' --b-args '--useFoo=1' --rounds 10
+wk bench run bug-238 jetstream3 --preset jsc-release --a-args '' --b-args '--useFoo=1' --rounds 10
                                                  # one build, a jsc option toggled in alternating rounds
 wk bench ls                                      # every task on every machine, where it is
 wk bench compare <run-a> <run-b>
@@ -512,9 +512,9 @@ wk boot --list
 ```
 
 Every machine is one `machines/<name>.conf`, named as the CLI names it, with a
-`kind`: `build` or `peer` (a target), `board`, `mac` or `guest` (a bench
+`kind`: `build` or `peer` (a place), `board`, `mac` or `guest` (a bench
 machine), or `bridge`. Values are literals. A bench role that is also a peer
-names the peer (`ssh=<peer>`). A target whose `hostname -s`
+names the peer (`ssh=<peer>`). A place whose `hostname -s`
 is not its name says what it is (`hostname`): that is how its far
 end knows which machine it is, however many share its home. A conf in
 `~/.config/wk/machines/` sets keys over the shared one's, for this device only.
@@ -595,7 +595,7 @@ hosts and puts the credential on the request: a read always, a write only
 while push is on. With push off a write is refused with 412 naming `wk key push
 on`. A macOS guest gets the same through an ssh-agent on the host forwarded
 per guest over its sshd on `tart exec`. A build box holds no deploy key and nothing forwards one to it,
-so a push is made from the workstation and `wk key push status --target <box>`
+so a push is made from the workstation and `wk key push status --on <box>`
 says off: `wk pr open <ws>` fetches the box's branch into this machine's
 mirror over ssh and pushes it from here, through the agent `wk key push on`
 loads (on a macOS host, the one it runs for its guests). A ref a killed push
@@ -605,7 +605,7 @@ or `git-webkit pr`, is refused naming `wk pr open`.
 **Housekeeping**
 
 ```sh
-wk status                               # every workspace, task, machine and bench device
+wk status                               # every workspace, task, machine and bench machine
 wk doctor --all                         # this machine (its wk-tools and disk too) and every build machine
 wk gc                                   # asks once, takes what loses no work, names the rest with what takes it
 wk gc --purge-rubble                    # half-made workspaces nothing is creating, instrumented slots on a board
@@ -721,7 +721,7 @@ or mount its root read-only and read `/var/log` and `tailscaled.log`.
 Every `WK_*` variable is read with a default; each moves one decision.
 
 **What to build** — `WK_CC`, `WK_CXX`, `WK_EXTRA_CMAKE`, `WK_BUILD_CMAKE`,
-`WK_EXTRA_ENV`, `WK_CCACHE_DIR`, `WK_CCACHE_MAXSIZE`, `WK_TARGET_KIND`,
+`WK_EXTRA_ENV`, `WK_CCACHE_DIR`, `WK_CCACHE_MAXSIZE`, `WK_DRIVER`,
 `WK_REMOTE_MAX_JOBS`, `WK_MB_PER_JOB`, `WK_PGO_COLLECT_TIMEOUT`.
 
 **How much of the machine** — `WK_MAX_JOBS`, `WK_LOAD`, `WK_AVAIL_MB`,
@@ -748,7 +748,7 @@ On a macOS workstation the store is the podman machine's, so this machine's
 own records and mirror go under `~/.local/state/wk` and its keyring under
 `~/.config/wk/secrets`.
 
-**The container target** — `WK_SDK`, `WK_SDK_IMAGE`, `WK_CONTAINER_USER`,
+**The container place** — `WK_SDK`, `WK_SDK_IMAGE`, `WK_CONTAINER_USER`,
 `WK_TOOLS_SRC`, `WK_MACHINE`, `WK_MIRROR` (the mirror's path
 inside a container).
 

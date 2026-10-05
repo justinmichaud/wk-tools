@@ -12,7 +12,7 @@ import subprocess
 import sys
 from unittest import mock
 
-from tests import test_pr_workflow, test_push_switch, test_wk_targets
+from tests import test_pr_workflow, test_push_switch, test_wk_places
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -31,7 +31,7 @@ def forwarded(argv):
     return values[0] if values and values[0].lower() != "no" else None
 
 
-class TestABoxHoldsNoKey(test_wk_targets.RemoteTest):
+class TestABoxHoldsNoKey(test_wk_places.RemoteTest):
     def test_no_ssh_to_a_box_forwards_an_agent(self):
         """Neither an argv wk builds nor a block of dotfiles/ssh/config, the gateway's included."""
         for argv in (self.t.machine.argv("true"), self.t.build_argv("a", ["ninja"])[0], self.t.exec_argv("a", ["true"])[0],
@@ -46,7 +46,7 @@ class TestABoxHoldsNoKey(test_wk_targets.RemoteTest):
             self.assertNotIn("forwardagent", block.lower(), host)
 
 
-class TestAPushFromABoxIsMadeHere(test_wk_targets.RemoteTest):
+class TestAPushFromABoxIsMadeHere(test_wk_places.RemoteTest):
     def test_wk_pr_open_fetches_the_box_branch_into_the_mirror_and_pushes_from_here(self):
         self.fake.answer(["git"])
         self.fake.answer(["sh", "-c"])
@@ -67,7 +67,7 @@ class TestAPushFromABoxIsMadeHere(test_wk_targets.RemoteTest):
         self.assertEqual(1, len([e for e in self.fake.effects if e[0] == "exec" and e[1][:3] == ("gh", "pr", "create")]))
 
 
-class TestAPushOnTheBoxIsRefused(test_wk_targets.RemoteTest):
+class TestAPushOnTheBoxIsRefused(test_wk_places.RemoteTest):
     def test_every_fork_alias_on_a_box_stops_on_the_refusal_naming_wk_pr_open(self):
         """remote/provision.sh writes these blocks; the ProxyCommand ssh would run for `git push` is run here as ssh runs it."""
         text = secrets.box_alias_blocks(secrets.FORKS)

@@ -1,4 +1,4 @@
-"""The fakes the suite shares, one per seam: a detached child, a registry over a fake machine, and a target that
+"""The fakes the suite shares, one per seam: a detached child, a registry over a fake machine, and a place that
 answers a probe and its own wk."""
 
 import shlex
@@ -7,7 +7,7 @@ import sys
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import job, targets  # noqa: E402
+from wk import job, places  # noqa: E402
 
 
 class FakeProc:
@@ -35,15 +35,15 @@ class FakeProc:
         return self.returncode
 
 
-class FakeRegistry(targets.Registry):
-    """targets.Registry over a fake machine. `make(name, env)` builds each target -- any name, or only those `names`
+class FakeRegistry(places.Registry):
+    """places.Registry over a fake machine. `make(name, env)` builds each place -- any name, or only those `names`
     lists, which are then the whole fleet and the first its default; without `make` the real drivers load.
-    `ws_target`, `default` and `in_workspace`, when given, replace those methods."""
+    `ws_place`, `default` and `in_workspace`, when given, replace those methods."""
 
-    def __init__(self, env, machine, make=None, names=None, ws_target=None, default=None, in_workspace=None):
+    def __init__(self, env, machine, make=None, names=None, ws_place=None, default=None, in_workspace=None):
         super().__init__(REPO, env=env, machine=machine)
         self.make, self.names = make, names
-        for method, given in (("ws_target", ws_target), ("default", default), ("in_workspace", in_workspace)):
+        for method, given in (("ws_place", ws_place), ("default", default), ("in_workspace", in_workspace)):
             if given is not None:
                 setattr(self, method, given)
 
@@ -60,12 +60,12 @@ class FakeRegistry(targets.Registry):
         if self.make is None:
             return super().load(name)
         if self.names is not None and name not in self.names:
-            raise LookupError("unknown target '%s'.\n    The built-in ones are container, vm, remote and local." % name)
+            raise LookupError("unknown place '%s'.\n    The built-in ones are container, vm, remote and local." % name)
         return self.make(name, dict(self.env))
 
 
-class FakeTarget:
-    """A machine behind a target: it answers a probe with (`side`, `why`) and its own wk with (`rc`, `out`), recording
+class FakeDriver:
+    """A machine behind a place: it answers a probe with (`side`, `why`) and its own wk with (`rc`, `out`), recording
     each ask's (args, env, quiet) in `asked`; `far_store` is its task store and `here` whether it is this machine. A
     command for its wk is `PEER <name> <args>`, for a world to answer."""
 

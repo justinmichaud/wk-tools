@@ -17,7 +17,7 @@ from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 import credcheck  # noqa: E402
-from wk import agents, targets  # noqa: E402
+from wk import agents, places  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
@@ -210,7 +210,7 @@ class TestInstall(unittest.TestCase):
         self.assertEqual([], writes)
 
 
-class Recorded(targets.Target):
+class Recorded(places.Driver):
     kind = "container"
 
     def __init__(self):

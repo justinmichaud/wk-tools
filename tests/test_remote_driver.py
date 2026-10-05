@@ -1,4 +1,4 @@
-"""The remote driver's probe (lib/wk/targets.py): `parse_probe` over captured Linux and Darwin samples, and the
+"""The remote driver's probe (lib/wk/places.py): `parse_probe` over captured Linux and Darwin samples, and the
 one round trip that fetches it, under a ceiling of its own."""
 import os
 import sys
@@ -9,7 +9,7 @@ from pathlib import Path
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets  # noqa: E402
+from wk import places  # noqa: E402
 from wk.machine import TIMED_OUT, Fake, Result  # noqa: E402
 
 # A real /proc/loadavg line and a real /proc/meminfo excerpt, after the
@@ -53,45 +53,45 @@ def fields(parsed):
 
 class TestRemoteProbeParseLinux(unittest.TestCase):
     def test_parses_cores_load_mem_ionice_os_from_proc(self):
-        p = targets.parse_probe(LINUX_SAMPLE)
+        p = places.parse_probe(LINUX_SAMPLE)
         self.assertEqual(fields(p), (8, 0, 20000, "yes", "linux"))   # int(0.52); int(20480000 / 1024)
         self.assertEqual((p["home"], p["root"]), ("/home/t", "/home/t/wk"))
-        self.assertEqual(targets.parse_probe(LINUX_SAMPLE, "/srv/wk")["root"], "/srv/wk")
+        self.assertEqual(places.parse_probe(LINUX_SAMPLE, "/srv/wk")["root"], "/srv/wk")
 
 
 class TestTheDefaultRoot(unittest.TestCase):
     def test_the_probe_the_far_end_and_the_driver_agree(self):
-        self.assertEqual(targets.parse_probe(LINUX_SAMPLE)["root"], targets.default_root("/home/t"))
+        self.assertEqual(places.parse_probe(LINUX_SAMPLE)["root"], places.default_root("/home/t"))
         env = {"HOME": "/h", "WK_REMOTE_MARKER": "/nonexistent/.wk-remote"}
-        reg = targets.Registry(REPO, env=env, machine=Fake())
+        reg = places.Registry(REPO, env=env, machine=Fake())
         reg.fleet.load = lambda name: {}
-        self.assertEqual(reg.far_root(), targets.default_root("/h"))
-        local = targets.Remote("box", REPO, dict(env, WK_REMOTE_LOCAL="1"), Fake())
-        self.assertEqual(local.store.store_dir(), targets.default_root("/h"))
+        self.assertEqual(reg.far_root(), places.default_root("/h"))
+        local = places.Remote("box", REPO, dict(env, WK_REMOTE_LOCAL="1"), Fake())
+        self.assertEqual(local.store.store_dir(), places.default_root("/h"))
 
 
 class TestRemoteProbeParseDarwin(unittest.TestCase):
     def test_parses_cores_load_mem_ionice_os_from_sysctl_vm_stat(self):
         # int(1.23), the 2nd field of "{ ... }"; (123456 free + 345678 inactive
         # + 45678 speculative) pages * 16384 bytes/page, in MB.
-        self.assertEqual(fields(targets.parse_probe(DARWIN_SAMPLE)), (10, 1, 8043, "no", "macos"))
+        self.assertEqual(fields(places.parse_probe(DARWIN_SAMPLE)), (10, 1, 8043, "no", "macos"))
 
     def test_a_missing_page_size_is_refused_not_read_as_no_memory(self):
         sample = "/Users/t\nDarwin\n4\n{ 0.10 0.20 0.30 }\n===MEM===\nPages free:   123456.\n===IONICE===\nno\n"
         with self.assertRaisesRegex(ValueError, "vm_stat printed no page size"):
-            targets.parse_probe(sample)
+            places.parse_probe(sample)
 
 
 class TestRemoteProbeParseRobustness(unittest.TestCase):
     def test_trailing_blank_line_does_not_erase_ionice(self):
-        p = targets.parse_probe(LINUX_SAMPLE + "\n")
+        p = places.parse_probe(LINUX_SAMPLE + "\n")
         self.assertEqual((p["ionice"], p["os"]), ("yes", "linux"))
 
     def test_an_answer_missing_a_figure_is_refused_not_read_as_one_core_and_no_memory(self):
         with self.assertRaisesRegex(ValueError, "the core count is '', not a number"):
-            targets.parse_probe("/home/t\n")
+            places.parse_probe("/home/t\n")
         with self.assertRaisesRegex(ValueError, "MemAvailable is '', not a number"):
-            targets.parse_probe(LINUX_SAMPLE.replace("MemAvailable:", "MemGone:"))
+            places.parse_probe(LINUX_SAMPLE.replace("MemAvailable:", "MemGone:"))
 
 
 class TimingFake(Fake):
@@ -118,7 +118,7 @@ class TestTheProbeIsBounded(unittest.TestCase):
         (tmp / "hosts" / "hangs.conf").write_text("kind=build\nhost=hangs.example\n")
         env = {"HOME": str(tmp), "XDG_STATE_HOME": str(tmp / "state"), "WK_MACHINES_DIR": str(tmp / "hosts"),
                "WK_PROBE_SECONDS": seconds, "PATH": os.environ.get("PATH", "")}
-        return targets.Registry(REPO, env=env, machine=fake).load("hangs")
+        return places.Registry(REPO, env=env, machine=fake).load("hangs")
 
     def test_a_machine_that_connects_and_says_nothing_is_given_up_on(self):
         fake = TimingFake(Result(TIMED_OUT, "", "timed out after 2s"))
@@ -142,7 +142,7 @@ class TestTheProbeIsBounded(unittest.TestCase):
         self.assertEqual(t.answers(), (False, "it answered the probe with what this end cannot read: the core count is 'eight', not a number"))
         with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(Refused):
             t.cores()
-        self.assertIn("PROBE_SCRIPT (lib/wk/targets.py) is what ran", err.getvalue())
+        self.assertIn("PROBE_SCRIPT (lib/wk/places.py) is what ran", err.getvalue())
 
 
 if __name__ == "__main__":

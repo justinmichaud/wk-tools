@@ -16,7 +16,7 @@ EFFECT = re.compile(
 NOT_STATE = {
     "lib/wk/dispatch.py": "the dispatcher execs into the command it resolved, and probes for it",
     "lib/wk/job.py": "the job's own log, opened only past its dry-run check",
-    "lib/wk/targets.py": "the ProxyCommand exec that is the route",
+    "lib/wk/places.py": "the ProxyCommand exec that is the route",
     "lib/wk/tools.py": "removes its own temporary bundle",
     "lib/wk/boot/mac.py": "removes its own temporary tar",
     "lib/wk/statusview.py": "the --html page asked for",
@@ -30,7 +30,7 @@ PROCESS = re.compile(r"\bsubprocess\.(run|Popen|call|check_call|check_output)\b|
 
 FORCED = {
     "lib/wk/dispatch.py": "the dispatcher starts the command it resolved under --dry-run too, since that command is what honours it",
-    "lib/wk/targets.py": "the ProxyCommand exec is the transport a dry run's reads also travel",
+    "lib/wk/places.py": "the ProxyCommand exec is the transport a dry run's reads also travel",
     "lib/wk/mac.py": "a program sent whole to a Mac's `python3 -`, where no wk package is importable",
 }
 

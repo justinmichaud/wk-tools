@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs inside a workspace, invoked by `wk build`: cmd/build decides policy outside the target and sets the WK_* variables read here. Runs on a Fedora container and a macOS guest alike -- bash 3.2, no cgroups/ionice/choom, and "${arr[@]}" on an empty array errors under `set -u`, hence lists as strings.
+# Runs inside a workspace, invoked by `wk build`: cmd/build decides policy outside the workspace and sets the WK_* variables read here. Runs on a Fedora container and a macOS guest alike -- bash 3.2, no cgroups/ionice/choom, and "${arr[@]}" on an empty array errors under `set -u`, hence lists as strings.
 
 set -euo pipefail
 
@@ -23,7 +23,7 @@ script=${WK_BUILD_SCRIPT:-Tools/Scripts/build-webkit}
 
 cmakeargs=${WK_BUILD_CMAKE:-}
 
-# CMake caches these at *configure* time, so an architecture is fixed at creation: WK_ARCH plus WK_ARCH_WRAPPER/WK_ARCH_CFLAGS/WK_ARCH_LDFLAGS for a non-native workspace, and WK_BUILDSYS, WK_BUILD_SCRIPT, WK_SRC, WK_BUILD_DIR, WK_DERIVED_DATA and -- for a profile-guided config -- WK_PGO and WK_PGO_DIR the config's own, set by lib/wk/buildconf.py.
+# CMake caches these at *configure* time, so an architecture is fixed at creation: WK_ARCH plus WK_ARCH_WRAPPER/WK_ARCH_CFLAGS/WK_ARCH_LDFLAGS for a non-native workspace, and WK_BUILDSYS, WK_BUILD_SCRIPT, WK_SRC, WK_BUILD_DIR, WK_DERIVED_DATA and -- for a profile-guided config -- WK_PGO and WK_PGO_DIR the config's own, set by lib/wk/presets.py.
 arch=${WK_ARCH:-native}
 if [ "$arch" != native ]; then
     export CFLAGS="${WK_ARCH_CFLAGS:-} ${CFLAGS:-}"
@@ -112,7 +112,7 @@ if [ -n "${WK_DRY_RUN:-}" ]; then   # printed here and not in cmd/build: this ha
     exit 0
 fi
 
-echo "wk: build pid $$" >&2   # the pid `wk build --kill` and ^C signal: down the log, the one channel back to the driver on every target kind, and kept by guard_exec's exec, so every compiler is under it
+echo "wk: build pid $$" >&2   # the pid `wk build --kill` and ^C signal: down the log, the one channel back to the driver under every driver, and kept by guard_exec's exec, so every compiler is under it
 
 set -x
 # shellcheck disable=SC2086 -- $wrapper is a deliberate list of bare words.

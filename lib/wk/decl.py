@@ -1,7 +1,7 @@
 """A command's declaration: the `# wk:` lines in the leading comment block of cmd/<name> and the
 `# wk <name> ... -- <summary>` synopsis. Keys: where=, name= (with @N for the slot), takes=,
 ready=yes, group=, lifecycle, readonly, destructive, dryrun, nodryrun, opts, passthrough[=tail|=all], broker,
-outside, forward=no, here, bare=merged, post=, values=, config=, verbs=, default=, needs;
+outside, forward=no, here, bare=merged, post=, values=, preset=, verbs=, default=, needs;
 `sub` lines override per verb (a command with verbs= keeps its opts on them), `flag` lines per flag of a command without.
 An option declared both bare and with `=` (`--x,--x=`) takes a value only as `--x=v`."""
 
@@ -13,7 +13,7 @@ NAME_VALUES = ("required", "optional", "none", "derived")
 FLAGS = ("lifecycle", "readonly", "destructive", "broker", "needs", "opts",
          "passthrough", "dryrun", "nodryrun", "passthrough=tail", "passthrough=all", "forward=no", "here",
          "outside", "bare=merged")
-CONFIG_VALUES = ("--config", "arg")
+PRESET_VALUES = ("--preset", "arg")
 LIST_KEYS = ("needs", "opts", "readonly", "destructive", "dryrun", "broker")
 
 
@@ -60,7 +60,7 @@ class Decl:
         self.here = False
         self.takes = "0"
         self.values = ""
-        self.config = ""
+        self.preset = ""
         self.verbs = ""
         self.default = ""
         self.destructive = ""
@@ -121,7 +121,7 @@ class Decl:
         pending = ""
         for tok in tokens:
             key, eq, value = tok.partition("=")
-            if key in ("where", "name", "takes", "ready", "group", "values", "post", "config", "verbs", "default") and eq:
+            if key in ("where", "name", "takes", "ready", "group", "values", "post", "preset", "verbs", "default") and eq:
                 pending = ""
                 if key == "where":
                     if value not in WHERE_VALUES:
@@ -143,11 +143,11 @@ class Decl:
                     self.values = value
                 elif key == "post":
                     self.post = value
-                elif key == "config":
-                    if value not in CONFIG_VALUES:
-                        raise DeclError("%s: config=%s is not one of %s"
-                                        % (self.name, value, "|".join(CONFIG_VALUES)))
-                    self.config = value
+                elif key == "preset":
+                    if value not in PRESET_VALUES:
+                        raise DeclError("%s: preset=%s is not one of %s"
+                                        % (self.name, value, "|".join(PRESET_VALUES)))
+                    self.preset = value
                 elif key == "verbs":
                     self.verbs = value
                 elif key == "default":

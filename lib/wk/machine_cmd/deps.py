@@ -113,7 +113,7 @@ class Deps:
         for k, v in p.items():
             if k.startswith("env."):
                 out.append(("note", "%s is set to '%s' in a login shell there" % (k[4:], v),
-                            "wk's build sets its own %s and ignores that one (lib/wk/buildconf.py)" % k[4:]))
+                            "wk's build sets its own %s and ignores that one (lib/wk/presets.py)" % k[4:]))
         for row in self.remote_rows():
             out.append(self.cred_finding(row[0], p.get("cred." + row[2], ""), self.stored_digest(row[0])))
         return out

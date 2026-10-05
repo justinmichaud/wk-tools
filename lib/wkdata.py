@@ -75,7 +75,7 @@ def cmd_ab_legs(args):
     except OSError:
         pass
 
-    # The volume keeps every result it ever produced and a run directory is named for the instant its leg began, so this job's are the ones at or after the moment its autorun started; with no such moment it has run none, and listing the directory would report an older experiment as this one.
+    # The volume keeps every result it ever produced and a run directory is named for the instant its leg began, so this job's are the ones at or after the moment its autorun started; with no such moment it has run none, and listing the directory would report an older A/B task as this one.
     since = re.sub(r"[-:]", "", state.get("started_at") or "")
     results = os.path.join(root, "results")
     rids = []

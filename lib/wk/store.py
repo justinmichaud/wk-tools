@@ -28,13 +28,13 @@ def no_such_workspace(name):
     return "no such workspace: %s -- 'wk ls' lists them" % name
 
 
-def build_config(env=None, take=False):  # the config lifted out of argv, or None
+def build_preset(env=None, take=False):  # the preset lifted out of argv, or None
     env = _env(env)
-    return env.pop("WK_CONFIG", None) if take else env.get("WK_CONFIG")
+    return env.pop("WK_PRESET", None) if take else env.get("WK_PRESET")
 
 
-def dispatch_target(env=None, default=None):
-    return _env(env).get("WK_TARGET", default)
+def dispatch_place(env=None, default=None):
+    return _env(env).get("WK_PLACE", default)
 
 
 class Store:

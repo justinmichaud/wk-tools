@@ -8,7 +8,7 @@ import unittest
 from tests.support import REPO
 
 CLOCKS = {"time", "monotonic", "perf_counter", "monotonic_ns", "time_ns", "perf_counter_ns"}
-LIVE_GATES = {"requires", "requires_container_target", "requires_machine"}
+LIVE_GATES = {"requires", "requires_container_place", "requires_machine"}
 
 
 def reads_clock(node):

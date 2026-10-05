@@ -9,7 +9,7 @@ from pathlib import Path
 from tests.support import REPO, bash, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import git, secrets, sync, targets, workspace  # noqa: E402
+from wk import git, places, secrets, sync, workspace  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.store import Snapshots, Store  # noqa: E402
@@ -91,11 +91,11 @@ class MirrorFixture(unittest.TestCase):
 
     def checkout(self, tree, branch="origin/main"):
         """lib/wk/sync.py's snapshot_checkout, run for real: why it refused, or ""."""
-        reg = targets.Registry(REPO, env=dict(os.environ, WK_MIRROR_BRANCHES="main"))
+        reg = places.Registry(REPO, env=dict(os.environ, WK_MIRROR_BRANCHES="main"))
         return sync.Sync(reg, Clock(), None, "here").snapshot_checkout(str(tree), branch)
 
     def wire(self, tree, mirror=None, branches=None):
-        """lib/wk/git.py's wiring_script -- the one authority every target wires from -- run for real against
+        """lib/wk/git.py's wiring_script -- the one authority every place wires from -- run for real against
         this fixture's mirror."""
         m = str(self.mirror if mirror is None else mirror)
         script = git.wiring_script(str(tree), m, _forks(), (branches or "main").split())
@@ -193,7 +193,7 @@ class WorkspaceFixture(MirrorFixture):
 
 
 class TestWsFetchScript(WorkspaceFixture):
-    """The fetch itself, run for real in a checkout wired the way every target wires one: `git fetch --all
+    """The fetch itself, run for real in a checkout wired the way every place wires one: `git fetch --all
     --prune`, against remotes whose URLs are github.com and whose fetches are rewritten to this machine's
     mirror."""
 
@@ -438,7 +438,7 @@ class TestTheStaleRewritesTheWiringClearsFirst(MirrorFixture):
 
 
 class TestWhatFirstRunSaysAboutTheMirror(unittest.TestCase):
-    """container/firstrun.sh wires the checkout from `python3 -m wk.git wiring-script` and the mirror the target
+    """container/firstrun.sh wires the checkout from `python3 -m wk.git wiring-script` and the mirror the place
     hands it in WK_MIRROR."""
 
     # The wiring half of the block, taken from the file and run: the half below
@@ -470,7 +470,7 @@ _git_py() { %s; }
 
     def test_no_mirror_on_the_target_is_stated_and_is_not_a_warning(self):
         out = self._run("printf 'true\\n'")
-        self.assertIn("no mirror on this target", out)
+        self.assertIn("no mirror on this place", out)
         self.assertNotIn("warning", out)
         self.assertIn("fetches read github.com", out)
 

@@ -10,14 +10,14 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes import FakeTarget
+from tests.fakes import FakeDriver
 from tests.killpoints import converges
 from tests.support import REPO, WkTest, run, scratch_dir
 from tests.test_bench_report import in_process
 from tests.test_bench_task import TASK, add_run, make_task, refusal, registry
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import status, targets  # noqa: E402
+from wk import places, status  # noqa: E402
 from wk.bench import cli, record, report  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.act import Refused  # noqa: E402
@@ -102,7 +102,7 @@ class TestTheReportConfirmsWhatWasBuiltAndChecked(WkTest):
             d = complete_task(tmp)
             runs = sorted((d / "runs").iterdir())
             for r in runs:
-                record.write_env(str(r / "env.json"), ["config=mac-release-pgo"], update=True)
+                record.write_env(str(r / "env.json"), ["preset=mac-release-pgo"], update=True)
             self.assertIn("unknown  PGO profile   2 of 2 PGO runs carry no profile-check.json reading", self.report(d))
             for r in runs:
                 (r / "profile-check.json").write_text(json.dumps(READING))
@@ -116,7 +116,7 @@ class TestTheReportConfirmsWhatWasBuiltAndChecked(WkTest):
         with scratch_dir() as tmp:
             d = complete_task(tmp)
             for r in (d / "runs").iterdir():
-                record.write_env(str(r / "env.json"), ["build_config=wpe-cross-pgo-use"], update=True)
+                record.write_env(str(r / "env.json"), ["build_preset=wpe-cross-pgo-use"], update=True)
             (d / "warmup" / "rpi3-a.evidence.json").write_text(json.dumps({"elf": {}, "gl": {}, "jit": {}, "problems": []}))
             out = self.report(d)
             self.assertIn("unknown  PGO profile", out)
@@ -245,7 +245,7 @@ class TestThroughWk(ExportTest):
     def test_export_is_declared_with_its_destination_and_its_dry_run(self):
         store = self.tmp / "store"
         complete_task(store / "ws" / "w" / "bench")
-        env = {"WK_STORE": str(store), "WK_LOCK_DIR": str(store / "locks"), "WK_TARGET": "local", "HOME": str(self.tmp / "home")}
+        env = {"WK_STORE": str(store), "WK_LOCK_DIR": str(store / "locks"), "WK_PLACE": "local", "HOME": str(self.tmp / "home")}
         dry = run("bench", "export", TASK, "--to", str(self.tmp / "out"), "--dry-run", env=env, timeout=60)
         self.assertEqual(dry.returncode, 0, dry.stdout)
         self.assertFalse((self.tmp / "out").exists(), dry.stdout)
@@ -257,8 +257,8 @@ class TestThroughWk(ExportTest):
         self.assertIn("usage", run("bench", "export", TASK, "--nosuch", env=env, timeout=60).stdout)
 
 
-def far_target(name, far, side="answering"):
-    return FakeTarget(name, side=side, far_store=(far, "/var/lib/wk"))
+def far_driver(name, far, side="answering"):
+    return FakeDriver(name, side=side, far_store=(far, "/var/lib/wk"))
 
 
 class FarBox(Fake, Ssh):
@@ -273,7 +273,7 @@ class TestWhereALegRecords(WkTest):
             if p.is_file():
                 far._set_file("/var/lib/wk/ws/w/bench/%s/%s" % (TASK, p.relative_to(d)), p.read_bytes())
         far.dirs.add("/var/lib/wk/ws/w")
-        vm = far_target("vm", far)
+        vm = far_driver("vm", far)
         vm.results = lambda ws: (far, "/var/lib/wk/ws/%s/bench" % ws)
         return registry(self.tmp / "store", [vm])
 
@@ -306,13 +306,13 @@ class TestExportReachesATaskOnAnotherMachine(ExportTest):
                 far._set_file("/var/lib/wk/ws/w/bench/%s/%s" % (TASK, p.relative_to(d)), p.read_bytes())
         return far
 
-    def bench_with(self, target):
-        reg = registry(self.tmp / "store", [target], env={"HOME": str(self.tmp / "home"), "WK_ROW_LABEL": "here"})
+    def bench_with(self, driver):
+        reg = registry(self.tmp / "store", [driver], env={"HOME": str(self.tmp / "home"), "WK_ROW_LABEL": "here"})
         return cli.Bench(REPO, reg, FakeClock())
 
     def test_the_zip_is_built_here_from_reads_and_the_task_records_it(self):
         far = self.far()
-        rc, out, err = self.export(self.bench_with(far_target("container", far)))
+        rc, out, err = self.export(self.bench_with(far_driver("container", far)))
         dest = self.tmp / "home" / "Downloads" / (TASK + ".zip")
         self.assertEqual((rc, out.strip()), (0, str(dest)), err)
         names = zipfile.ZipFile(str(dest)).namelist()
@@ -326,7 +326,7 @@ class TestExportReachesATaskOnAnotherMachine(ExportTest):
     def test_a_report_reaches_it_the_same_way(self):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.bench_with(far_target("container", self.far())).task_report(TASK, False, True)
+            rc = self.bench_with(far_driver("container", self.far())).task_report(TASK, False, True)
         self.assertEqual(0, rc, err.getvalue())
         self.assertIn("data      /var/lib/wk/ws/w/bench/" + TASK, out.getvalue())
 
@@ -336,13 +336,13 @@ class TestExportReachesATaskOnAnotherMachine(ExportTest):
         a, b = ("/var/lib/wk/ws/w/bench/%s/runs/%s" % (TASK, r) for r in runs[:2])
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.bench_with(far_target("container", far)).report([a, b], False, True)
+            rc = self.bench_with(far_driver("container", far)).report([a, b], False, True)
         self.assertEqual(0, rc, err.getvalue())
         self.assertIn("Elm-TodoMVC", out.getvalue())
 
     def test_a_machine_that_does_not_answer_is_not_asked(self):
-        target = far_target("buildbox", self.far(), side="unreachable")
-        self.assertIn("stays on the machine that took it", refusal(self.bench_with(target).export, TASK, ""))
+        driver = far_driver("buildbox", self.far(), side="unreachable")
+        self.assertIn("stays on the machine that took it", refusal(self.bench_with(driver).export, TASK, ""))
 
 
 class HereOverSsh(Ssh):
@@ -365,8 +365,8 @@ class PlantedTest(ExportTest):
         self.task = complete_task(self.tmp / "store" / "ws" / "w" / "bench")
         self.run_dir = sorted((self.task / "runs").iterdir())[0]
 
-    def plant(self, at, target=None):
-        os.symlink(str(target or self.key), str(at))
+    def plant(self, at, driver=None):
+        os.symlink(str(driver or self.key), str(at))
         return at
 
     def assertNothingHolds(self, *where):
@@ -521,21 +521,21 @@ class TestTheSeamReadsATree(PlantedTest):
             f.read_tree("/s/ws/w", "bench/t", ("task.json",))
 
     def test_each_target_names_the_store_it_holds_apart_from_this_one(self):
-        c = targets.Container("container", str(REPO), {"HOME": "/h", "WK_STORE": "/var/lib/wk"}, Fake())
-        with mock.patch.object(targets.Container, "is_here", return_value=True):
+        c = places.Container("container", str(REPO), {"HOME": "/h", "WK_STORE": "/var/lib/wk"}, Fake())
+        with mock.patch.object(places.Container, "is_here", return_value=True):
             self.assertIsNone(c.task_store())
-        with mock.patch.object(targets.Container, "is_here", return_value=False):
+        with mock.patch.object(places.Container, "is_here", return_value=False):
             m, root = c.task_store()
         self.assertEqual((type(m), root), (PodmanVm, "/var/lib/wk"))
         box = types.SimpleNamespace(peer=False, is_local=False, machine="ssh", root_there=lambda: "/srv/wk")
-        self.assertEqual(targets.Remote.task_store(box), ("ssh", "/srv/wk"))
+        self.assertEqual(places.Remote.task_store(box), ("ssh", "/srv/wk"))
         for peer, local in ((True, False), (False, True)):
-            self.assertIsNone(targets.Remote.task_store(types.SimpleNamespace(peer=peer, is_local=local)))
+            self.assertIsNone(places.Remote.task_store(types.SimpleNamespace(peer=peer, is_local=local)))
 
     def peer(self, rc=0, out=""):
         far = Fake("peer")
         far.answer(["sh", "-c"], rc=rc, out=out, err="" if rc == 0 else "ssh: connect to host peer1: refused")
-        p = targets.Remote.__new__(targets.Remote)
+        p = places.Remote.__new__(places.Remote)
         p.peer, p.is_local, p.machine, p.host, p.env = True, False, far, "peer1", {"WK_REMOTE_TOOLS": "/t"}
         return p, far
 

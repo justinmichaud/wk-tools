@@ -1,4 +1,4 @@
-"""lib/wk/job.py: a watched job, the detach, the far-side start line and its poll, a stop through the target, and
+"""lib/wk/job.py: a watched job, the detach, the far-side start line and its poll, a stop through the place, and
 lib/wk/lock.py's locked run."""
 import contextlib
 import io
@@ -115,8 +115,8 @@ class TestTheFarSide(Scratch):
             self.assertEqual(("7", True), job.wait_remote(ask, "/l", "/rc", self.clock, 200, env={"WK_STALL_SECONDS": "300"}))
 
 
-class TestAStopThroughTheTarget(Scratch):
-    """job.kill: a workspace pid is signalled through the target, after its command line is checked."""
+class TestAStopThroughThePlace(Scratch):
+    """job.kill: a workspace pid is signalled through the place, after its command line is checked."""
 
     def test_the_callers_own_pid_is_ended_without_a_signal(self):
         t = record.Records(self.tmp, clock=self.clock, machine=self.fake, env={}).begin(
@@ -127,7 +127,7 @@ class TestAStopThroughTheTarget(Scratch):
 
     def test_a_workspace_pid_with_no_pattern_to_match_is_a_refusal(self):
         t = record.Records(self.tmp / "store", clock=self.clock, env={}).begin(
-            "build", "target", "ws", "k", "/l", ["one"])
+            "build", "place", "ws", "k", "/l", ["one"])
         t.pid(4242)
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(act.Refused):
             job.kill(object(), "ws", t, "cancelled", self.fake, self.clock, {})
@@ -135,7 +135,7 @@ class TestAStopThroughTheTarget(Scratch):
     def test_the_descendants_are_walked_and_signalled_inside_the_workspace(self):
         seen = []
 
-        class Target:
+        class Driver:
             def exec(self, ws, argv, timeout=None):
                 seen.append(("exec", ws, tuple(argv)))
                 return Result(0, "12\n4242\n")
@@ -144,7 +144,7 @@ class TestAStopThroughTheTarget(Scratch):
                 seen.append(("act", ws, tuple(argv)))
                 return Result(0)
 
-        job.kill_tree_in(Target(), "ws", 4242, job.sig.SIGTERM)
+        job.kill_tree_in(Driver(), "ws", 4242, job.sig.SIGTERM)
         self.assertEqual(("act", "ws", ("kill", "-TERM", "12", "4242")), seen[-1])
 
 

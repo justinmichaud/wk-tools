@@ -18,13 +18,13 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, session, targets  # noqa: E402
+from wk import decl, places, session  # noqa: E402
 from wk.act import Refused, die, log, warn  # noqa: E402
 from wk.machine import is_linux  # noqa: E402
 
 
 def session_display_warning(env):
-    if not targets.session_socket_present(env):
+    if not places.session_socket_present(env):
         warn("no benchmark session running; GPU-accelerated tests fall back to software rendering")
         log("  start one with:  wk quiesce session on")
     else:
@@ -44,10 +44,10 @@ def main(argv):
     name = store.ws_name()
     zed, cmd = parse(argv)
 
-    reg = targets.Registry(ROOT)
+    reg = places.Registry(ROOT)
     try:
-        tname = reg.ws_target(name)
-        target = reg.load(tname)
+        tname = reg.ws_place(name)
+        driver = reg.load(tname)
     except LookupError as e:
         die(str(e))
 
@@ -55,19 +55,19 @@ def main(argv):
         reg.machine.exec([os.path.join(ROOT, "cmd", "zed"), name])
         return
 
-    if target.info(name) == "absent":
+    if driver.info(name) == "absent":
         die(store.no_such_workspace(name))
 
     if cmd:
         tty = sys.stdin.isatty() and sys.stdout.isatty()
-        argv, cwd = target.exec_argv(name, cmd, tty=tty)
+        argv, cwd = driver.exec_argv(name, cmd, tty=tty)
         reg.machine.exec(argv, cwd)
         return
 
     if is_linux():
         session_display_warning(os.environ)
 
-    argv, cwd = target.enter_argv(name)
+    argv, cwd = driver.enter_argv(name)
     reg.machine.exec(argv, cwd)
 
 

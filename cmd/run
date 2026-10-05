@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 #
 # wk run <workspace> [options] [--profile[=<mode>]] [-- jsc-args] -- run jsc from a workspace build, or profile it
-# wk: where=workspace name=required ready=yes group=workspaces config=--config dryrun passthrough
-# wk: opts --config=,--lldb,--until-crash,--max=,--rr,--replay,--profile,--profile=,--browser,--process=,--attach=,--jit-dump,--markers,--top=,--fetch,--env=
+# wk: where=workspace name=required ready=yes group=workspaces preset=--preset dryrun passthrough
+# wk: opts --preset=,--lldb,--until-crash,--max=,--rr,--replay,--profile,--profile=,--browser,--process=,--attach=,--jit-dump,--markers,--top=,--fetch,--env=
 # wk: flag --profile takes=*
 #
 # Runs the jsc binary a build produced, from the workspace's own build tree on
-# its target. Everything after `--` goes to jsc verbatim.
+# its place. Everything after `--` goes to jsc verbatim.
 #
-#   --config <config>   the build config to run (default: the last build's,
+#   --preset <preset>   the build preset to run (default: the last build's,
 #                       else the platform's; the list is below)
 #   --lldb              run jsc under lldb instead of directly; under
 #                       --until-crash each iteration runs under lldb, and a
@@ -69,7 +69,7 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import buildconf, decl, profile, targets  # noqa: E402
+from wk import decl, places, presets, profile  # noqa: E402
 from wk.act import Refused, die  # noqa: E402
 from wk.ldpath import LLDB_PRELUDE, prelude, rr_ready, rr_trace_dir  # noqa: E402
 
@@ -157,59 +157,59 @@ def main(argv):
     name = store.ws_name()
     opts = parse(argv)
 
-    reg = targets.Registry(ROOT)
+    reg = places.Registry(ROOT)
     try:
-        target = reg.load(reg.ws_target(name))
+        driver = reg.load(reg.ws_place(name))
     except LookupError as e:
         die(str(e))
 
-    config = store.build_config() or reg.default_config(name)
+    preset = store.build_preset() or reg.default_preset(name)
     try:
-        cfg = buildconf.resolve(config, target.os(), target.kind, target.env)
+        cfg = presets.resolve(preset, driver.os(), driver.kind, driver.env)
     except LookupError:
-        die("unknown config '%s'" % config)
+        die("unknown preset '%s'" % preset)
 
-    src = target.src(name)
+    src = driver.src(name)
     jsc = cfg.jsc_path(src)
     var = cfg.run_var()
     pre = prelude(var, cfg.run_dir(src))
     tail_q = shlex.join(opts["tail"])
 
     if opts["rr"] or opts["replay"]:
-        rr_ready(target, name)
+        rr_ready(driver, name)
         if opts["replay"]:
-            cmd = RR_REPLAY.format(lldb_prelude=LLDB_PRELUDE, trace_dir=rr_trace_dir(target), tail_q=tail_q)
+            cmd = RR_REPLAY.format(lldb_prelude=LLDB_PRELUDE, trace_dir=rr_trace_dir(driver), tail_q=tail_q)
         else:
-            cmd = RR_RECORD.format(prelude=pre, trace_dir=rr_trace_dir(target), jsc_q=shlex.quote(jsc), tail_q=tail_q)
-        argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=opts["replay"])
+            cmd = RR_RECORD.format(prelude=pre, trace_dir=rr_trace_dir(driver), jsc_q=shlex.quote(jsc), tail_q=tail_q)
+        argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=opts["replay"])
         reg.machine.exec(argv_, cwd)
         return
 
     if opts["until_crash"]:
-        home = target.home()
+        home = driver.home()
         if opts["lldb"]:
             cmd = LLDB_UNTIL_CRASH.format(
                 lldb_prelude=LLDB_PRELUDE, prelude=pre, logdir_q=shlex.quote(home + "/until-crash"),
-                max=opts["max"], lldb_opts=target.lldb_opts(),
-                runfile_q=shlex.quote(target.tools(name) + "/container/lldb/until-crash-run-file"),
+                max=opts["max"], lldb_opts=driver.lldb_opts(),
+                runfile_q=shlex.quote(driver.tools(name) + "/container/lldb/until-crash-run-file"),
                 jsc_q=shlex.quote(jsc), tail_q=tail_q)
-            argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=True)
+            argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=True)
         else:
             cmd = PLAIN_UNTIL_CRASH.format(
                 prelude=pre, logdir_q=shlex.quote(home + "/until-crash"), core_dir_q=shlex.quote(home + "/wk-cores"),
                 max=opts["max"], jsc_invoke="%s --validateOptions=1 %s" % (shlex.quote(jsc), tail_q), tail_q=tail_q)
-            argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=False)
+            argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=False)
         reg.machine.exec(argv_, cwd)
         return
 
     if opts["lldb"]:
         cmd = DIRECT_LLDB.format(
-            lldb_prelude=LLDB_PRELUDE, prelude=pre, lldb_opts=target.lldb_opts(),
-            runfile_q=shlex.quote(target.tools(name) + "/container/lldb/run-file"), jsc_q=shlex.quote(jsc), tail_q=tail_q)
-        argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=True)
+            lldb_prelude=LLDB_PRELUDE, prelude=pre, lldb_opts=driver.lldb_opts(),
+            runfile_q=shlex.quote(driver.tools(name) + "/container/lldb/run-file"), jsc_q=shlex.quote(jsc), tail_q=tail_q)
+        argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=True)
     else:
         cmd = DIRECT_PLAIN.format(prelude=pre, jsc_q=shlex.quote(jsc), tail_q=tail_q)
-        argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=False)
+        argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=False)
     reg.machine.exec(argv_, cwd)
 
 

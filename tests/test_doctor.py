@@ -57,8 +57,8 @@ def stub_keys():
 
 def stub_mc(**over):
     """lib/wk/machine_cmd/deps.py's build-machine questions, answered with nothing unless the test says otherwise."""
-    base = dict(probe=lambda target, root: "", findings=lambda root, probe, env=None, here=None: [],
-                stale=lambda target, root: None)
+    base = dict(probe=lambda driver, root: "", findings=lambda root, probe, env=None, here=None: [],
+                stale=lambda driver, root: None)
     base.update(over)
     return types.SimpleNamespace(**base)
 
@@ -103,7 +103,7 @@ class TestTheRenderer(unittest.TestCase):
 
 
 class TestHostToolsZed(unittest.TestCase):
-    """`wk doctor`'s zed row and `cmd/zed`'s own "is zed installed" check read the one answer, `targets.zed_cli`
+    """`wk doctor`'s zed row and `cmd/zed`'s own "is zed installed" check read the one answer, `places.zed_cli`
     -- they used to disagree (doctor took the app bundle's presence, `cmd/zed` the cli's)."""
 
     def _zed_row(self, fake):
@@ -273,7 +273,7 @@ class TestGitConfigFindings(unittest.TestCase):
 
 
 class StubGuests:
-    """A vm target: `states` per guest, and one answer to the git probe."""
+    """A vm place: `states` per guest, and one answer to the git probe."""
 
     def __init__(self, states, blob="", answers=True):
         self.states, self.blob, self.answers, self.asked = states, blob, answers, []

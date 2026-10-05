@@ -402,14 +402,14 @@ class ArgsAB(AB):
         if m.exists(self.taskdir):
             die("task %s already exists (%s); a task is one request, made once" % (self.task, self.taskdir))
         self.lock.hold("bench-task-" + self.task, timeout=5)
-        config = self.o.get("config") or pipeline.DEFAULT_CONFIG
+        preset = self.o.get("preset") or pipeline.DEFAULT_PRESET
         measured = "".join(" --%s %s" % (k.replace("_", "-"), shlex.quote(self.o[k])) for k in ARGS_AB_MEASURED if self.o.get(k))
-        command = "wk bench run %s %s --config %s --a-args %s --b-args %s --rounds %d%s%s%s" % (
-            self.ws, self.plan, config, shlex.quote(self.args[0]), shlex.quote(self.args[1]), self.rounds,
+        command = "wk bench run %s %s --preset %s --a-args %s --b-args %s --rounds %d%s%s%s" % (
+            self.ws, self.plan, preset, shlex.quote(self.args[0]), shlex.quote(self.args[1]), self.rounds,
             " --max-rounds %d --detect %g" % (self.max_rounds, self.detect) if self.detect else "", measured,
             " --software" if self.o.get("software") else "")
         record.task_write(self.taskdir, ["task=" + self.task, "requested=" + self.clock.iso(), "subject.kind=options",
-                                         "subject.a=" + self.args[0], "subject.b=" + self.args[1], "devices=%s=%s" % (self.ws, config),
+                                         "subject.a=" + self.args[0], "subject.b=" + self.args[1], "devices=%s=%s" % (self.ws, preset),
                                          "plans=" + self.plan, "rounds=%d" % self.rounds, "slots=" + self.ws,
                                          "restart=%s --task %s" % (command, self.task)], [command], machine=m)
         self.base["task"], self.owned = self.task, True

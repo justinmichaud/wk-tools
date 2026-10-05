@@ -5,8 +5,8 @@
       release the binary has to run on (glibc is backwards compatible only)
 - [ ] `wk build <ws> <config> --sysroot <name>`: the build directory gets a
       component (`WebKitBuild/cross-<sysroot>/…`, decided in `Config.build_subdir`,
-      lib/wk/buildconf.py) since it shares a checkout with the native builds;
-      the flags sit beside `ARCH` (lib/wk/buildconf.py), keyed
+      lib/wk/presets.py) since it shares a checkout with the native builds;
+      the flags sit beside `ARCH` (lib/wk/presets.py), keyed
       by sysroot -- a sysroot is not an `arch` and `arch_canon` keeps refusing
       `riscv64` as one
 - [ ] `wk new --sysroot` and `wk build --sysroot` stop refusing (`cmd/new`,

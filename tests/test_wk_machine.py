@@ -690,7 +690,7 @@ class TestForward(MachineTest):
 # A copy's transport named outside the seam: an argv headed scp or rsync, a shell line starting one, podman's cp, shutil's copies.
 COPY = re.compile(r"\[\s*[\"'](scp|rsync)[\"']|[\"'](scp|rsync) -|podman\(\)\s*\+\s*\[[\"']cp[\"']|\bshutil\.copy\w*\(")
 COPIES_ELSEWHERE = {
-    "lib/wk/targets.py": "the container driver's half of the one copy: `podman cp` is how bytes cross into a container",
+    "lib/wk/places.py": "the container driver's half of the one copy: `podman cp` is how bytes cross into a container",
     "lib/wk/bench/mac.py": "pins a payload into the staging tree: both ends are this host's own filesystem",
     "lib/wk/sysimage/macvolume.py": "stages wk-tools onto the bench volume, mounted on the machine that runs the copy",
 }

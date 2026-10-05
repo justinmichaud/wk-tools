@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 #
 # wk gui <workspace> [<url>] [flags] -- run MiniBrowser in the benchmark seat
-# wk: where=workspace name=required ready=yes forward=no group=workspaces takes=1 passthrough config=--config dryrun
-# wk: opts --config=,--no-fullscreen,--lldb=,--rr
+# wk: where=workspace name=required ready=yes forward=no group=workspaces takes=1 passthrough preset=--preset dryrun
+# wk: opts --preset=,--no-fullscreen,--lldb=,--rr
 #
 # The same launch a perf run performs (Tools/Scripts/run-minibrowser), without
 # the benchmark around it. Refuses when there is no session to draw into.
 #
 #   [<url>]                page to load (default: about:blank)
-#   --config <config>      build config to run (default: the last build's inside a
+#   --preset <preset>      build preset to run (default: the last build's inside a
 #                          workspace, else mac-release on macOS and wpe-release elsewhere)
 #   --no-fullscreen        skip the port's fullscreen flag (WPE: --fullscreen,
 #                          GTK: --full-screen; the Apple port has neither)
@@ -27,7 +27,7 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import buildconf, decl, session, targets  # noqa: E402
+from wk import decl, places, presets, session  # noqa: E402
 from wk.ldpath import LLDB_PIN_OPTS, LLDB_PRELUDE, lldb_waiting, rr_ready, rr_trace_dir  # noqa: E402
 from wk.act import Refused, die, info, log, warn  # noqa: E402
 from wk.machine import is_macos  # noqa: E402
@@ -45,9 +45,9 @@ def parse(argv):
     return {"url": url, "fullscreen": fullscreen, "tail": args.tail, "debug": debug, "rr": args.flag("--rr")}
 
 
-def gui_default_config(reg, name):
+def gui_default_preset(reg, name):
     if reg.in_workspace():
-        return reg.default_config(name)
+        return reg.default_preset(name)
     return "mac-release" if is_macos() else "wpe-release"
 
 
@@ -58,12 +58,12 @@ def fullscreen_flag(cfg):
         return "--full-screen"
     if cfg.buildsys == "xcode" and not cfg.port:
         return ""
-    die("'%s' builds no browser to drive -- use a wpe-*, gtk-* or mac-* config" % cfg.name)
+    die("'%s' builds no browser to drive -- use a wpe-*, gtk-* or mac-* preset" % cfg.name)
 
 
 def session_env(root):
     """The Linux GPU-session gate and, on a BMC seat, the software-rendering pins."""
-    if not targets.session_socket_present(os.environ):
+    if not places.session_socket_present(os.environ):
         die("no graphical session -- 'wk quiesce session on', or 'wk quiesce session on --bmc' to watch it over the BMC")
     seat = session.here(root, os.environ)
     seat.mode_warn()
@@ -85,40 +85,40 @@ def main(argv):
     name = store.ws_name()
     opts = parse(argv)
 
-    reg = targets.Registry(ROOT)
+    reg = places.Registry(ROOT)
     try:
-        target = reg.load(reg.ws_target(name))
+        driver = reg.load(reg.ws_place(name))
     except LookupError as e:
         die(str(e))
 
-    if target.kind == "remote":
+    if driver.kind == "remote":
         die("wk gui needs a benchmark seat -- a container, a guest or the workspace itself:\n"
-            "    '%s' is a remote target, an arbitrary machine reached over ssh with no seat\n"
+            "    '%s' is a remote place, an arbitrary machine reached over ssh with no seat\n"
             "    of its own to draw into. Use a container or vm workspace instead." % name)
 
-    config = store.build_config() or gui_default_config(reg, name)
+    preset = store.build_preset() or gui_default_preset(reg, name)
     try:
-        cfg = buildconf.resolve(config, target.os(), target.kind, target.env)
+        cfg = presets.resolve(preset, driver.os(), driver.kind, driver.env)
     except LookupError:
-        die("unknown config '%s'" % config)
+        die("unknown preset '%s'" % preset)
 
     if cfg.jsc_only:
         die("'%s' builds JavaScriptCore alone -- there is no browser in it.\n"
-            "    Use a wpe-*, gtk-* or mac-* config." % config)
+            "    Use a wpe-*, gtk-* or mac-* preset." % preset)
 
     fs_flag = fullscreen_flag(cfg) if opts["fullscreen"] else ""
     url = opts["url"] or "about:blank"
 
-    if is_macos() and target.kind == "container":
+    if is_macos() and driver.kind == "container":
         die("a container workspace on a macOS host has no display, and cannot get one:\n"
             "    the podman machine has no GPU and there is no compositor to draw into.\n"
-            "    Use a macOS guest instead -- 'wk new <name> --target vm', then 'wk gui <name>',\n"
+            "    Use a macOS guest instead -- 'wk new <name> --on vm', then 'wk gui <name>',\n"
             "    which runs MiniBrowser on the guest's own desktop with the real GPU.")
 
-    src = target.src(name)
+    src = driver.src(name)
     browser = cfg.browser_path(src)
-    if not target.exec(name, ["test", "-x", browser]).ok:
-        die("no MiniBrowser at %s -- wk build %s %s" % (browser, name, config))
+    if not driver.exec(name, ["test", "-x", browser]).ok:
+        die("no MiniBrowser at %s -- wk build %s %s" % (browser, name, preset))
 
     run_env = "" if is_macos() else session_env(ROOT)
     extra_q = shlex.join(opts["tail"])
@@ -131,40 +131,40 @@ def main(argv):
     else:
         launch_env = ("WPE_BROWSER=minibrowser " + run_env).rstrip()
         launch_cmd = "Tools/Scripts/run-minibrowser %s %s -- %s %s %s" % (cfg.port, type_flag, fs_flag, shlex.quote(url), extra_q)
-        ui_prefix = 'WEBKIT_MINI_BROWSER_PREFIX="$LLDB %s %s --"' % (target.lldb_opts(), LLDB_PIN_OPTS)
+        ui_prefix = 'WEBKIT_MINI_BROWSER_PREFIX="$LLDB %s %s --"' % (driver.lldb_opts(), LLDB_PIN_OPTS)
 
     if opts["rr"]:
-        rr_ready(target, name)
-        info("MiniBrowser (%s) in '%s' under rr -> %s" % (config, name, url))
+        rr_ready(driver, name)
+        info("MiniBrowser (%s) in '%s' under rr -> %s" % (preset, name, url))
         log("  every process it starts is recorded; 'wk run %s --replay -- -p <pid>' replays one" % name)
-        cmd = "%s; cd %s && %s WEBKIT_MINI_BROWSER_PREFIX='rr record' %s" % (rr_trace_dir(target), src, launch_env, launch_cmd)
-        argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=False)
+        cmd = "%s; cd %s && %s WEBKIT_MINI_BROWSER_PREFIX='rr record' %s" % (rr_trace_dir(driver), src, launch_env, launch_cmd)
+        argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=False)
         reg.machine.exec(argv_, cwd)
         return
 
     if opts["debug"] == "":
-        info("MiniBrowser (%s) in '%s' -> %s" % (config, name, url))
+        info("MiniBrowser (%s) in '%s' -> %s" % (preset, name, url))
         log("  ctrl-c here closes it")
         cmd = "cd %s && %s %s" % (src, launch_env, launch_cmd)
-        argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=False)
+        argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=False)
         reg.machine.exec(argv_, cwd)
         return
 
     if opts["debug"] == "ui":
-        info("MiniBrowser (%s) in '%s' under lldb -> %s" % (config, name, url))
+        info("MiniBrowser (%s) in '%s' under lldb -> %s" % (preset, name, url))
         log("  'run' starts it; breakpoints can go in first")
         if cfg.buildsys == "xcode":
             run = ('cd %s && %s exec "$LLDB" %s %s -- %s'
-                  % (src, launch_env, target.lldb_opts(), LLDB_PIN_OPTS, launch_cmd))
+                  % (src, launch_env, driver.lldb_opts(), LLDB_PIN_OPTS, launch_cmd))
         else:
             run = "cd %s && %s %s exec %s" % (src, launch_env, ui_prefix, launch_cmd)
         cmd = "%s\n%s" % (LLDB_PRELUDE, run)
-        argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=True)
+        argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=True)
         reg.machine.exec(argv_, cwd)
         return
 
     web_proc = cfg.web_process_name()
-    info("MiniBrowser (%s) in '%s' -> %s, lldb waiting for %s" % (config, name, url, web_proc))
+    info("MiniBrowser (%s) in '%s' -> %s, lldb waiting for %s" % (preset, name, url, web_proc))
     log("  it attaches as the page's process starts; 'continue' lets it run")
     log("  a cross-site navigation moves the page to a *new* process and leaves")
     log("  lldb in the old one, silently -- breakpoints just stop being reached.")
@@ -173,10 +173,10 @@ def main(argv):
     log("  launch instead, for debugging it from the start). Re-set breakpoints.")
     log("  browser output: /tmp/wk-gui.log (in the workspace)")
     cmd = lldb_waiting("cd %s && %s %s %s" % (src, launch_env, cfg.web_process_pause_env(), launch_cmd), "/tmp/wk-gui.log", web_proc,
-                       "command script import %s/container/lldb/webprocess.py" % target.tools(name),
+                       "command script import %s/container/lldb/webprocess.py" % driver.tools(name),
                        "command alias follow-page wk-follow-page %s" % web_proc,
                        "command alias reattach process attach --name %s --waitfor" % web_proc)
-    argv_, cwd = target.exec_argv(name, ["bash", "-lc", cmd], tty=True)
+    argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=True)
     reg.machine.exec(argv_, cwd)
 
 

@@ -1,4 +1,4 @@
-"""The `wk status` walk: one job per target, then the fleet's devices and
+"""The `wk status` walk: one job per place, then the fleet's devices and
 bridges, each returning the records wk.statusview draws and the worst exit
 code it found. Every fact is read as the walk runs; nothing is stored."""
 
@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import secretfile
 import shlex
-from wk import bridge, fleet, images, reach, record, secrets, statusview, targets, tools
+from wk import bridge, fleet, images, places, reach, record, secrets, statusview, tools
 from wk.bench import record as bench_record
 from wk.clock import Clock
 from wk.lock import holder_pid
@@ -24,7 +24,7 @@ from wk.machine import TIMED_OUT, Local, Ssh
 from wk.act import Refused
 from wk.resources import Resources
 from wk.kv import ANSI, kv, kv_file
-from wk.store import Snapshots, Store, dispatch_target, in_vm
+from wk.store import Snapshots, Store, dispatch_place, in_vm
 
 
 ENDED_AS_ASKED = ("ok", "cancelled", "stopped", "refused")
@@ -119,15 +119,15 @@ class Rec:
         return d
 
 
-def far_side_reason(target, side, why):
+def far_side_reason(driver, side, why):
     if side == "unreachable":
         return "unreachable over ssh" + (": %s" % why if why else "")
-    if side == "stopped" and target.machine_state() == "absent":
-        return "no podman machine '%s' yet -- ./setup makes it" % target.podman_machine()
+    if side == "stopped" and driver.machine_state() == "absent":
+        return "no podman machine '%s' yet -- ./setup makes it" % driver.podman_machine()
     if side == "stopped":
-        return "the podman machine '%s' is stopped -- 'wk start' brings it up" % target.podman_machine()
+        return "the podman machine '%s' is stopped -- 'wk start' brings it up" % driver.podman_machine()
     if side == "no-wk":
-        return "no wk-tools there yet -- 'wk machine setup %s'" % target.name
+        return "no wk-tools there yet -- 'wk machine setup %s'" % driver.name
     return "not a machine of its own"
 
 
@@ -649,14 +649,14 @@ def wait_until_idle(poll, timeout, interval, clock, label, info, warn):
 
 
 class Walk:
-    """One `wk status`: the targets this machine lists, each a job, plus the
+    """One `wk status`: the places this machine lists, each a job, plus the
     fleet's devices and bridges; `records()` yields what they report."""
 
     def __init__(self, root, name=None, fleet=True, devices=True, env=None, clock=None, reg=None):
         self.root = str(root)
         self.env = os.environ if env is None else env
         self.clock = clock or Clock()
-        self.reg = reg or targets.Registry(self.root, env=self.env)
+        self.reg = reg or places.Registry(self.root, env=self.env)
         self.name = name
         self.fleet = fleet and not name
         self.devices = devices and not name
@@ -675,38 +675,38 @@ class Walk:
 
     # -- the walk
 
-    def targets(self):
+    def places(self):
         names = self.reg.walk()
         return sorted(names, key=lambda t: (RANK.get(self.reg.kind(t), 3), t))
 
-    def target(self, name):
-        """The one driver object per target for this walk, so a machine is probed at most once."""
+    def driver(self, name):
+        """The one driver object per place for this walk, so a machine is probed at most once."""
         with self.lock:
             if name not in self._loaded:
                 self._loaded[name] = self.reg.load(name)
             return self._loaded[name]
 
-    def machine_of_target(self, name):
+    def machine_of_place(self, name):
         try:
-            return self.machine_of(self.target(name))
+            return self.machine_of(self.driver(name))
         except LookupError:
             return self.this_machine
 
-    def machine_of(self, target):
-        if target.kind == "remote" and not target.is_local and target.host:
-            return target.name
+    def machine_of(self, driver):
+        if driver.kind == "remote" and not driver.is_local and driver.host:
+            return driver.name
         return self.this_machine
 
     def _job(self, tname, name):
         def run():
             try:
-                target = self.target(tname)
+                driver = self.driver(tname)
             except LookupError as e:
                 return [Rec("raw", machine=self.this_machine, text=str(e)).done()], 4
             try:
-                return self.report_target(target, name)
+                return self.report_target(driver, name)
             except Exception as e:
-                return [Rec("raw", machine=self.machine_of(target), text="%s: %s: %s" % (tname, type(e).__name__, e)).done()], 4
+                return [Rec("raw", machine=self.machine_of(driver), text="%s: %s: %s" % (tname, type(e).__name__, e)).done()], 4
         return run
 
     def records(self, markers=True):
@@ -714,16 +714,16 @@ class Walk:
         if not self.name:
             yield self_fleet_record(self.root, self.env, self.this_machine)
         if self.name:
-            tname = dispatch_target(self.env) or self.reg.ws_target(self.name)
+            tname = dispatch_place(self.env) or self.reg.ws_place(self.name)
             jobs = [(tname, self._job(tname, self.name))]
         else:
-            names = self.targets()
+            names = self.places()
             self.health_owner = next((t for t in names if self._is_here(t)), None)
             jobs = [(t, self._job(t, None)) for t in names]
             if self.devices:
                 jobs += [("devices", self.fleet_devices), ("bridges", self.bridges)]
         if markers:
-            plan = [{"job": t, "machine": self.machine_of_target(t)} for t, _ in jobs if t not in ("devices", "bridges")]
+            plan = [{"job": t, "machine": self.machine_of_place(t)} for t, _ in jobs if t not in ("devices", "bridges")]
             plan += [{"job": t} for t, _ in jobs if t in ("devices", "bridges")]
             yield {"kind": "plan", "jobs": plan}
         worst = 0
@@ -753,44 +753,44 @@ class Walk:
 
     def _is_here(self, tname):
         try:
-            return self.target(tname).is_here()
+            return self.driver(tname).is_here()
         except LookupError:
             return False
 
-    # -- one target
+    # -- one place
 
-    def report_target(self, target, name):
+    def report_target(self, driver, name):
         out, worst = [], 0
-        gm = self.machine_of(target)
-        method = METHOD.get(target.kind, "native")
+        gm = self.machine_of(driver)
+        method = METHOD.get(driver.kind, "native")
         out.append(self.machine_seen(gm))
-        side, why = target.probe()
+        side, why = driver.probe()
         has_wk = side == "answering"
         if has_wk:
             args = ["status", "--no-devices" if gm == self.this_machine else "--no-fleet", "--records"] + ([name] if name else [])
-            recs, rc = self.delegate(target, gm, args)
+            recs, rc = self.delegate(driver, gm, args)
             out += recs
-            recs, w = self.tasks(target.records(self.clock), name)
+            recs, w = self.tasks(driver.records(self.clock), name)
             out += recs
             rc = bump(rc, w)
             if gm != self.this_machine and self.fleet:
-                out += self.report_machine(target, gm, has_wk)
-                out.append(self.capacity_remote(target, gm))
+                out += self.report_machine(driver, gm, has_wk)
+                out.append(self.capacity_remote(driver, gm))
             return out, bump(worst, rc)
         if side == "unreachable":
             worst = bump(worst, 4)
         if side in ("unreachable", "stopped"):
-            out.append(Rec("raw", machine=gm, text="%s: %s" % (target.name, far_side_reason(target, side, why))).done())
+            out.append(Rec("raw", machine=gm, text="%s: %s" % (driver.name, far_side_reason(driver, side, why))).done())
             return out, worst
-        records = target.records(self.clock)
+        records = driver.records(self.clock)
         if name:
-            r, w = self.workspace(target, gm, method, name, records)
+            r, w = self.workspace(driver, gm, method, name, records)
             out.append(r)
             worst = bump(worst, w)
         else:
-            names = target.workspaces()
+            names = driver.workspaces()
             with ThreadPoolExecutor(max_workers=8) as pool:
-                rows = list(pool.map(lambda ws: self.workspace(target, gm, method, ws, records), names))
+                rows = list(pool.map(lambda ws: self.workspace(driver, gm, method, ws, records), names))
             for r, w in rows:
                 out.append(r)
                 worst = bump(worst, w)
@@ -798,10 +798,10 @@ class Walk:
         out += recs
         worst = bump(worst, w)
         if self.fleet:
-            out += self.report_machine(target, gm, has_wk)
-            if gm == self.this_machine and target.name == self.health_owner:
+            out += self.report_machine(driver, gm, has_wk)
+            if gm == self.this_machine and driver.name == self.health_owner:
                 out += self.report_self()
-                out += self.health(target, gm)
+                out += self.health(driver, gm)
         return out, worst
 
 
@@ -824,10 +824,10 @@ class Walk:
     def reach_fleet(self, m):
         return self._reach.fleet_line(m), self._reach.without_tailnet(m)
 
-    def delegate(self, target, gm, args):
+    def delegate(self, driver, gm, args):
         """A machine of its own answers in its own records, stripped of the markers that end its jobs."""
         env = dict(os.environ, WK_ROW_LABEL=gm, WK_NO_DELEGATE="1")
-        rc, out = target.wk(*args, env=env, quiet=True)
+        rc, out = driver.wk(*args, env=env, quiet=True)
         out = clean(out)
         if out.lstrip().startswith("{"):
             return list(statusview.strip_markers(statusview.records_from_lines(out.splitlines()))), rc
@@ -839,43 +839,43 @@ class Walk:
             recs.append(r.done())
         return recs, rc
 
-    def current_base(self, target):
+    def current_base(self, driver):
         with self.lock:
-            if target.name not in self.bases:
-                self.bases[target.name] = Snapshots(target.store, target.store_machine).current()
-            return self.bases[target.name]
+            if driver.name not in self.bases:
+                self.bases[driver.name] = Snapshots(driver.store, driver.store_machine).current()
+            return self.bases[driver.name]
 
-    def remake_hint(self, target, ws):
+    def remake_hint(self, driver, ws):
         if self.reg.in_remote_host():
-            return "from the workstation:  wk new %s --target %s" % (ws, self.reg.self_target())
-        return "wk new %s --target %s" % (ws, target.name)
+            return "from the workstation:  wk new %s --on %s" % (ws, self.reg.self_place())
+        return "wk new %s --on %s" % (ws, driver.name)
 
-    def workspace(self, target, gm, method, ws, records):
+    def workspace(self, driver, gm, method, ws, records):
         r = Rec("workspace", machine=gm, method=method, name=ws)
         worst = 0
-        info = target.info(ws)
-        st = target.state(ws, info=info)
+        info = driver.info(ws)
+        st = driver.state(ws, info=info)
         r.set("state", info if st == "present" else st)
         r.set("ws", st)
-        r.opt("branch", target.branch(ws))
+        r.opt("branch", driver.branch(ws))
         probe = {}
         if st == "present":
-            script = WS_PROBE.replace("@SRC@", shlex.quote(target.src(ws))).replace("@BASE@", targets.UPSTREAM_LINE_BODY)
-            probe = kv(target.exec(ws, ["sh", "-c", script]).out)
+            script = WS_PROBE.replace("@SRC@", shlex.quote(driver.src(ws))).replace("@BASE@", places.UPSTREAM_LINE_BODY)
+            probe = kv(driver.exec(ws, ["sh", "-c", script]).out)
             origin = probe.get("origin", "")
             if origin and origin != UPSTREAM_ORIGIN:
                 r.warn("origin is %s, not upstream -- 'wk sync %s --fix'" % (origin, ws))
             for f in ("dirty", "untracked", "unpushed", "upstream", "behind", "ahead"):
                 if probe.get(f) and probe[f] != "0":
                     r.set(f, probe[f])
-        base = targets.image_base(self.root, ws) or (probe.get("wsbase") if probe.get("wsbase") != "?" else None)
+        base = places.image_base(self.root, ws) or (probe.get("wsbase") if probe.get("wsbase") != "?" else None)
         r.opt("base", base)
-        snap = target.store.ws_snapshot_id(ws)
+        snap = driver.store.ws_snapshot_id(ws)
         if snap:
             r.set("snap", snap)
-            cur = self.current_base(target)
+            cur = self.current_base(driver)
             if cur and cur != snap:
-                r.set("snap_behind", len([b for b in Snapshots(target.store, target.store_machine).ids() if b > snap]))
+                r.set("snap_behind", len([b for b in Snapshots(driver.store, driver.store_machine).ids() if b > snap]))
         if st == "creating":
             new = records.find("new", ws)
             if new and new.alive(None):
@@ -884,24 +884,24 @@ class Walk:
             else:
                 r.warn("creation never finished, and nothing is creating it now")
                 r.note("usually there is nothing in one worth keeping -- remake it:")
-                r.note("  " + self.remake_hint(target, ws))
+                r.note("  " + self.remake_hint(driver, ws))
                 r.note("or, if the checkout is complete and only the marker is missing,")
                 r.note("any command that gates on it takes --force")
                 worst = bump(worst, 4)
         elif st == "broken":
             r.warn("the record says a %s workspace and the machine has none --\n      something outside wk removed it "
-                   "(podman rm, tart delete, an rm -rf over there)" % target.name)
+                   "(podman rm, tart delete, an rm -rf over there)" % driver.name)
             r.note("clear the record:  wk rm %s" % ws)
-            if target.store_machine.isdir(target.store.ws_dir(ws)):
-                r.note("what is left of it here: %s" % target.store.ws_dir(ws))
+            if driver.store_machine.isdir(driver.store.ws_dir(ws)):
+                r.note("what is left of it here: %s" % driver.store.ws_dir(ws))
             worst = bump(worst, 4)
         elif st == "unreachable":
-            r.warn("the machine behind '%s' did not answer within %ss" % (target.name, reach.ssh_timeout(self.env)))
+            r.warn("the machine behind '%s' did not answer within %ss" % (driver.name, reach.ssh_timeout(self.env)))
             r.note("this is not 'absent': nothing about the workspace was checked at all,")
             r.note("and anything below is the last thing this machine wrote about it")
             worst = bump(worst, 4)
         build = records.find("build", ws)
-        r.raw("subs", [{"kind": "build", "state": build.verdict("capped"), "config": build.field("config")}] if build else [])
+        r.raw("subs", [{"kind": "build", "state": build.verdict("capped"), "preset": build.field("preset")}] if build else [])
         return r.done(), worst
 
     def tasks(self, records, only):
@@ -925,12 +925,12 @@ class Walk:
     def version_here(self):
         return tools.identity(self.root, Local())
 
-    def report_machine(self, target, gm, has_wk):
-        if target.kind == "remote" and has_wk:
-            ver = kv(target.wk("doctor", "--probe-tools", quiet=True)[1])
-            keys = clean(target.wk("key", "fingerprints", quiet=True)[1])
-            peer = target.peer
-        elif target.name == self.reg.default():
+    def report_machine(self, driver, gm, has_wk):
+        if driver.kind == "remote" and has_wk:
+            ver = kv(driver.wk("doctor", "--probe-tools", quiet=True)[1])
+            keys = clean(driver.wk("key", "fingerprints", quiet=True)[1])
+            peer = driver.peer
+        elif driver.name == self.reg.default():
             self.tooling_said = True
             ver = self.version_here()
             keys = Local().run([os.path.join(self.root, "cmd", "key"), "fingerprints"]).out
@@ -940,7 +940,7 @@ class Walk:
         out = []
         if ver:
             expect, dirty_here = self.git_here()
-            out.append(tools_fact(ver, expect, gm, target.name, in_vm=self.in_vm, peer=peer, dirty_here=dirty_here))
+            out.append(tools_fact(ver, expect, gm, driver.name, in_vm=self.in_vm, peer=peer, dirty_here=dirty_here))
         for line in keys.splitlines():
             if line.strip():
                 out.append(Rec("fact", machine=gm, type="key", text=line).done())
@@ -959,19 +959,19 @@ class Walk:
         r.raw("insync", True)
         return [r.done()]
 
-    def capacity_remote(self, target, m):
-        return capacity_record(m, None, str(target.cores()), "", str(target.mem_mb()), str(target.load()))
+    def capacity_remote(self, driver, m):
+        return capacity_record(m, None, str(driver.cores()), "", str(driver.mem_mb()), str(driver.load()))
 
-    def health(self, target, m):
-        store = target.store
+    def health(self, driver, m):
+        store = driver.store
         alive = Local().alive
         out = []
         out.append(disk_record(store, m, self.in_vm, len(Snapshots(store, Local()).unreferenced())))
-        if target.kind == "container":
-            local = target.sdk_local()
+        if driver.kind == "container":
+            local = driver.sdk_local()
             if local:
                 cap = fleet_timeout(self.env)
-                out.append(sdk_record(m, local, target.sdk_upstream(timeout=cap), cap))
+                out.append(sdk_record(m, local, driver.sdk_upstream(timeout=cap), cap))
         if not self.in_vm:
             out.append(broker_record(store, m, alive))
         out += service_records(self.root, m)

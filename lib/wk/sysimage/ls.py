@@ -31,7 +31,7 @@ class Builder:
         return sorted(_glob(machine, ws_dir, self.pattern.split("/")))
 
 
-# Under ws/<name>/build, which lib/wk/targets.py's Container bind-mounts as /src/WebKit/WebKitBuild.
+# Under ws/<name>/build, which lib/wk/places.py's Container bind-mounts as /src/WebKit/WebKitBuild.
 BUILDERS = (Builder("yocto", "build/CrossToolChains/*/build/image/*.wic.xz"),
             Builder("buildroot", "build/buildroot/*/output/images/*.img"))
 
@@ -126,7 +126,7 @@ def slot_docs(ws, env):
     return out
 
 
-def slot_is(ws, name, commit, config, env):
+def slot_is(ws, name, commit, preset, env):
     d = images.slot_dir(ws, name, env)
     try:
         doc = slot.load(os.path.join(d, "slot.json")) if d else None
@@ -134,7 +134,7 @@ def slot_is(ws, name, commit, config, env):
         return False
     if doc is None or doc.get("commit") != commit:
         return False
-    return config is None or doc.get("build_config") == config
+    return preset is None or doc.get("build_preset") == preset
 
 
 def slot_holds(ws, name, commit, env):
@@ -146,7 +146,7 @@ def slot_holds(ws, name, commit, env):
 
 
 class Listing:
-    """This store's images, then each target whose machine answers for a store of its own, through its own wk."""
+    """This store's images, then each place whose machine answers for a store of its own, through its own wk."""
 
     def __init__(self, reg, label, here_label, building, warn=act.warn, clock=None):
         self.reg, self.label, self.here_label, self.building, self.warn = reg, label, here_label, building, warn
@@ -173,7 +173,7 @@ class Listing:
                 out.append("    a build is running here -- these bytes are the previous image; 'wk status %s --log' follows it" % ws)
         for d, doc in slot_docs(ws, env):
             out.append("    slot %-12s %s  %s  built %s  (%s)" % (
-                doc.get("slot", ""), doc.get("commit", "")[:12], doc.get("build_config", "?"),
+                doc.get("slot", ""), doc.get("commit", "")[:12], doc.get("build_preset", "?"),
                 doc.get("built_at", ""), d))
         return out + (["    " + note] if note else [])
 
@@ -196,8 +196,8 @@ class Listing:
     def store_rows(self):
         return [row for image in scan(self.reg.machine, self.reg.store) for row in self.image_rows(image)] + self.host_rows()
 
-    def _label(self, target, name):
-        return self.here_label if target.is_here() else name
+    def _label(self, driver, name):
+        return self.here_label if driver.is_here() else name
 
     def rows(self):
         return self.store_rows() + fleetwalk.fleet_rows(self.reg, "sysimage", "images", self._label, self.warn)

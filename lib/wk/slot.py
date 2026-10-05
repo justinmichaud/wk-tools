@@ -1,5 +1,5 @@
 """A WebKit *slot*: one built WebKit that sits beside others on a board. Its layout
-is written by lib/wk/sysimage/buildroot_target.py and read by lib/wk/bench/board.py and `wk sysimage`."""
+is written by lib/wk/sysimage/buildroot_ws.py and read by lib/wk/bench/board.py and `wk sysimage`."""
 import argparse
 import hashlib
 import json

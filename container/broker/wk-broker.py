@@ -15,7 +15,7 @@ import time
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "lib"))
-from wk import act as wkact, fleet as wkfleet, images as wkimages, kv as wkkv, reach as wkreach, targets as wktargets  # noqa: E402
+from wk import act as wkact, fleet as wkfleet, images as wkimages, kv as wkkv, places as wkplaces, reach as wkreach  # noqa: E402
 from wk.boot import cli as bootcli  # noqa: E402
 from wk.machine import Local, replace_file  # noqa: E402
 from wk.notify import sd_notify  # noqa: E402
@@ -116,10 +116,10 @@ def want_bench_device(args):           # the central refusal every mutating verb
             sorted(k for k, v in machines.items() if v["role"] == "bench-device")
         ) or "(none)"
         raise Refused(
-            f"'{name}' is declared role={m['role']}, not bench-device. This broker "
-            f"acts on bench devices only: a workspace that can reboot a workstation is "
+            f"'{name}' is declared role={m['role']}, not role=bench-device. This broker "
+            f"acts on bench machines only: a workspace that can reboot a workstation is "
             f"the sandbox escape it exists to prevent.",
-            f"bench devices here: {benches}. To act on '{name}', run 'wk boot {name}' "
+            f"bench machines here: {benches}. To act on '{name}', run 'wk boot {name}' "
             f"on the workstation yourself.",
         )
     if m["os"] not in ("any", host_os()):
@@ -553,10 +553,10 @@ async def publish_into_machine(machine, local_sock):
     # On macOS the containers mount the podman guest's runtime directory, so the socket is carried in over a remote unix-socket forward the Mac dials itself; the guest's sshd will not replace an existing one, so remove it.
     while True:
         try:
-            rec = wktargets.podman_vm(Local(), machine, timeout=30)
+            rec = wkplaces.podman_vm(Local(), machine, timeout=30)
             if rec is None:
                 raise OSError(f"podman machine '{machine}' is not there")
-            opts, dest = wktargets.podman_vm_route(rec)
+            opts, dest = wkplaces.podman_vm_route(rec)
             base = ["ssh", "-q", *opts, "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=3",
                     "-o", "ExitOnForwardFailure=yes", dest]
             rt = subprocess.run(
@@ -599,7 +599,7 @@ async def main():
 
     machines = fleet()
     benches = sorted(k for k, v in machines.items() if v["role"] == "bench-device")
-    log(f"bench devices: {', '.join(benches) or '(none declared)'}")
+    log(f"bench machines: {', '.join(benches) or '(none declared)'}")
     log(f"verbs: {', '.join(sorted(VERBS) + ['capabilities'])}")
     log(f"plans: {', '.join(sorted(ALLOWED_PLANS))}")
 

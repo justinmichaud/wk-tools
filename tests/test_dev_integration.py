@@ -1,13 +1,13 @@
-"""DevIntegrationTest: one workspace per target, taken through what a developer does with one -- the credentials,
+"""DevIntegrationTest: one workspace per place, taken through what a developer does with one -- the credentials,
 `wk new`, git, both agents, the push switch, a build, git-webkit's credentials, `wk sync` and Zed -- against the
 real machines. Each step converges from evidence, so a re-run joins what is already there; the workspace persists
 between runs, and only the last step removes it, once every step before it passed in the same run.
 
-A target (container, tart, moose, bb4):   wk selftest --live DevIntegrationContainer
+A place (container, tart, moose, bb4):   wk selftest --live DevIntegrationContainer
 From step N on:                         WK_INTEG_FROM=7 wk selftest --live DevIntegrationContainer
 One step:                               wk selftest --live '*DevIntegrationContainer.test_07*'
 
-While the target's own build runs, `wk selftest --live` refuses beside it: add --force, or run
+While the place's own build runs, `wk selftest --live` refuses beside it: add --force, or run
 python3 tests/run.py --live -k DevIntegrationContainer. Push is turned on only under PushGuard, and off again
 however the run ends.
 """
@@ -36,7 +36,7 @@ PROMPT = "Reply with exactly the text %s and nothing else." % REPLY
 CREDENTIALS = ("claude", "litellm", "github-pat", "bugzilla-api-key")
 PROBE_BRANCH = "refs/heads/wk-integ-probe"
 
-# The first `git status` in the checkout, cold: measured once per target on 2026-09-27.
+# The first `git status` in the checkout, cold: measured once per place on 2026-09-27.
 GIT_STATUS_BUDGET = {
     "container": 3.0,     # 0.84 s cold and 0.46 s warm in a new container: headroom for a loaded podman VM
     "tart": 3.0,          # 0.82 s cold in a guest sharing the host with the podman VM (2026-10-01)
@@ -44,15 +44,15 @@ GIT_STATUS_BUDGET = {
     "bb4": 3.0,           # 1.11 s in a checkout on buildbox4's shared disk (2026-10-05)
 }
 
-TARGETS = {
+PLACES = {
     "container": {"new": (), "machine": None, "push": True},
-    "tart": {"new": ("--target", "vm"), "machine": None, "push": True},
-    # A peer workstation: `wk new --target moose` is moose's own `wk new`, a container there, and every later
-    # command (push included, as `--target moose`) is moose's own wk.
-    "moose": {"new": ("--target", "moose"), "machine": "moose", "push": True,
+    "tart": {"new": ("--on", "vm"), "machine": None, "push": True},
+    # A peer workstation: `wk new --on moose` is moose's own `wk new`, a container there, and every later
+    # command (push included, as `--on moose`) is moose's own wk.
+    "moose": {"new": ("--on", "moose"), "machine": "moose", "push": True,
               "remedy": "moose pulls its own checkout: push this commit to the branch moose's checkout tracks, "
                         "then 'wk sync --tools moose'"},
-    "bb4": {"new": ("--target", "buildbox4"), "machine": "buildbox4", "push": False,
+    "bb4": {"new": ("--on", "buildbox4"), "machine": "buildbox4", "push": False,
             "remedy": "'wk sync --tools buildbox4' from a clean tree here"},
 }
 
@@ -125,7 +125,7 @@ def credential_rows(doctor_text):
 
 
 def credential_problems(rows, names):
-    """The rows that stop a target: absent, or anything but ok and "reaches further than wk spends it"."""
+    """The rows that stop a place: absent, or anything but ok and "reaches further than wk spends it"."""
     out = []
     for name in names:
         mark, line = rows.get(name, ("", "%s: not in wk doctor's output at all" % name))
@@ -162,7 +162,7 @@ def last_build(rec):
     """(state, config) of the build the workspace's record names, or (None, None)."""
     for sub in (rec or {}).get("subs") or []:
         if sub.get("kind") == "build":
-            return sub.get("state"), sub.get("config")
+            return sub.get("state"), sub.get("preset")
     return None, None
 
 
@@ -174,7 +174,7 @@ def tagged(text, tag):
 
 
 def ls_rows(text):
-    """(name, target, state) for each `wk ls` row."""
+    """(name, place, state) for each `wk ls` row."""
     rows = []
     for line in clean(text).splitlines()[1:]:
         f = line.split()
@@ -262,15 +262,15 @@ def step(n, needs_workspace=True):
     return deco
 
 
-class TargetSteps:
-    """The steps, in order; a target class names its target."""
+class PlaceSteps:
+    """The steps, in order; a place class names its place."""
 
-    target = ""
+    place = ""
 
     @classmethod
     def setUpClass(cls):
-        cls.ws = PREFIX + cls.target
-        cls.conf = TARGETS[cls.target]
+        cls.ws = PREFIX + cls.place
+        cls.conf = PLACES[cls.place]
         cls.outcome = {}
         cls.guard = None
         cls.background = None
@@ -296,15 +296,15 @@ class TargetSteps:
 
     def push_args(self, verb, *more):
         machine = self.conf["machine"]
-        return ("key", "push", verb) + (("--target", machine) if machine else ()) + more
+        return ("key", "push", verb) + (("--on", machine) if machine else ()) + more
 
     def record(self):
         return workspace_record(wk("status", self.ws, "--records", timeout=300).out, self.ws)
 
     def src(self):
-        from wk import targets
-        reg = targets.Registry(str(REPO), env=real_env())
-        return reg.load(reg.ws_target(self.ws)).src(self.ws)
+        from wk import places
+        reg = places.Registry(str(REPO), env=real_env())
+        return reg.load(reg.ws_place(self.ws)).src(self.ws)
 
     def inside(self, script, timeout=300):
         return wk("enter", self.ws, "--", "bash", "-lc", script, timeout=timeout)
@@ -325,7 +325,7 @@ class TargetSteps:
         return [n for n, t, st in ls_rows(wk("ls", timeout=300).out)
                 if not n.startswith(PREFIX) and st == "running" and t.split(":")[0].lower() == host and self.agent_pids(n)]
 
-    def need_push_target(self):
+    def need_push_place(self):
         if not self.conf["push"]:
             self.skipTest("'%s' is a build machine, which has no push switch ('wk key push' exits 5 there): "
                           "its keys are live wherever they sit" % self.conf["machine"])
@@ -384,9 +384,9 @@ class TargetSteps:
         self.assertEqual(0, got["fetch_rc"], "git fetch --dry-run --all failed in '%s'" % self.ws)
         self.assertEqual([], got["would_update"], "a remote in '%s' is behind what it fetches from" % self.ws)
         if measure_status:
-            budget = GIT_STATUS_BUDGET.get(self.target)
-            self.assertIsNotNone(budget, "no git status budget is measured for the %s target yet: this run took %.2fs "
-                                 "-- put a budget in GIT_STATUS_BUDGET with a one-line why" % (self.target, got["status_seconds"]))
+            budget = GIT_STATUS_BUDGET.get(self.place)
+            self.assertIsNotNone(budget, "no git status budget is measured for the %s place yet: this run took %.2fs "
+                                 "-- put a budget in GIT_STATUS_BUDGET with a one-line why" % (self.place, got["status_seconds"]))
             self.assertLess(got["status_seconds"], budget, "git status took %.2fs in '%s'" % (got["status_seconds"], self.ws))
 
     def agent_replies(self, agent, *extra):
@@ -440,7 +440,7 @@ class TargetSteps:
 
     @step(5)
     def test_05_push_on_never_coexists_with_claude(self):
-        self.need_push_target()
+        self.need_push_place()
         self.push_off()
         try:
             pids = self.start_background_claude()
@@ -483,12 +483,12 @@ class TargetSteps:
 
     @step(8)
     def test_08_push_on(self):
-        self.need_push_target()
+        self.need_push_place()
         self.ensure_push_on()
 
     @step(9)
     def test_09_git_webkit_reads_with_the_credentials(self):
-        self.need_push_target()
+        self.need_push_place()
         self.ensure_push_on()
         r = self.dry_push()
         self.assertEqual(0, r.rc, "git push --dry-run to the fork did not authenticate:\n%s" % tail(r.out))
@@ -501,9 +501,9 @@ class TargetSteps:
     def test_10_claude_never_runs_with_push_on(self):
         """A Mac's container session is started in the podman machine, which holds half the switch and cannot throw the
         host's: it refuses until `wk key push off` here. Where the whole switch is in reach, it is thrown first."""
-        self.need_push_target()
+        self.need_push_place()
         self.ensure_push_on()
-        if self.target == "container" and sys.platform == "darwin":
+        if self.place == "container" and sys.platform == "darwin":
             r = wk("ai", "claude", self.ws, "-p", PROMPT, timeout=900)
             self.assertNotEqual(0, r.rc, "claude started with push on:\n%s" % tail(r.out))
             self.assertIn("could not hold back the push keys", r.out)
@@ -519,7 +519,7 @@ class TargetSteps:
 
     @step(11)
     def test_11_push_off_reaches_nothing(self):
-        self.need_push_target()
+        self.need_push_place()
         self.push_off()
         self.wk_ok("doctor", self.ws, timeout=600, why="the wall around '%s' with push off" % self.ws)
         r = self.dry_push()
@@ -593,26 +593,26 @@ def zed_pids():
 
 # -- the gates: nothing here starts, boots or updates a machine
 
-def own_build(label, target):
-    return label.startswith("wk build %s%s " % (PREFIX, target))
+def own_build(label, place):
+    return label.startswith("wk build %s%s " % (PREFIX, place))
 
 
-def target_unready(target):
+def place_unready(place):
     if not support.live_selected():
-        return "live tier not selected: the %s target needs real machines" % target
-    conf = TARGETS[target]
-    if target == "container":
+        return "live tier not selected: the %s place needs real machines" % place
+    conf = PLACES[place]
+    if place == "container":
         missing = support.container_target_missing()
         if missing:
             return missing
-        busy = [b for b in support.builds_on_the_books() if not own_build(b, target)]
+        busy = [b for b in support.builds_on_the_books() if not own_build(b, place)]
         if busy:
-            return "a build is on this machine's books (%s): re-run the target on an idle machine" % ", ".join(busy)
-    if target == "tart":
+            return "a build is on this machine's books (%s): re-run the place on an idle machine" % ", ".join(busy)
+    if place == "tart":
         return tart_unready()
     if conf["machine"]:
-        from wk import targets
-        t = targets.Registry(str(REPO), env=real_env()).load(conf["machine"])
+        from wk import places
+        t = places.Registry(str(REPO), env=real_env()).load(conf["machine"])
         side, why = t.probe()
         if side != "answering":
             return "'%s' does not answer (%s %s)" % (conf["machine"], side, why)
@@ -620,7 +620,7 @@ def target_unready(target):
         far = dict(l.partition("=")[::2] for l in out.splitlines() if "=" in l).get("sha", "")
         here = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
         if far != here:
-            return "%s runs wk-tools %s and this tree is at %s, and the target's commands run in its own wk: %s" % (
+            return "%s runs wk-tools %s and this tree is at %s, and the place's commands run in its own wk: %s" % (
                 conf["machine"], far[:12] or "(none)", here[:12], conf["remedy"])
     return None
 
@@ -628,42 +628,42 @@ def target_unready(target):
 def tart_unready():
     """A guest is cloned from the golden base, and rebuilding a stale one takes hours and a person."""
     if sys.platform != "darwin" or subprocess.run(["sh", "-c", "command -v tart"], capture_output=True).returncode:
-        return "the tart target needs a Mac with tart installed"
-    from wk import targets
+        return "the tart place needs a Mac with tart installed"
+    from wk import places
     from wk.sysimage import guestbase
-    vm = targets.Registry(str(REPO), env=real_env()).load("vm")
+    vm = places.Registry(str(REPO), env=real_env()).load("vm")
     if vm.vm_state(PREFIX + "tart") != "absent" or os.environ.get("WK_VM_FORCE"):
         return None
     base = guestbase.Base(vm)
     why = base.stale() if base.ready() else "it is not there, or its provisioning never finished"
-    return why and ("'%s' cannot be cloned for the tart target: %s. Rebuild it (%s --rebuild, hours), "
+    return why and ("'%s' cannot be cloned for the tart place: %s. Rebuild it (%s --rebuild, hours), "
                     "or WK_VM_FORCE=1 clones it anyway" % (base.name, why, guestbase.guest.BASE_BUILD))
 
 
-def on_target(name):
+def on_place(name):
     def make(cls):
-        cls.target = name
-        return support.requires(functools.lru_cache(maxsize=None)(target_unready), name)(cls)
+        cls.place = name
+        return support.requires(functools.lru_cache(maxsize=None)(place_unready), name)(cls)
     return make
 
 
-@on_target("container")
-class DevIntegrationContainer(TargetSteps, unittest.TestCase):
+@on_place("container")
+class DevIntegrationContainer(PlaceSteps, unittest.TestCase):
     pass
 
 
-@on_target("tart")
-class DevIntegrationTart(TargetSteps, unittest.TestCase):
+@on_place("tart")
+class DevIntegrationTart(PlaceSteps, unittest.TestCase):
     pass
 
 
-@on_target("moose")
-class DevIntegrationMoose(TargetSteps, unittest.TestCase):
+@on_place("moose")
+class DevIntegrationMoose(PlaceSteps, unittest.TestCase):
     pass
 
 
-@on_target("bb4")
-class DevIntegrationBb4(TargetSteps, unittest.TestCase):
+@on_place("bb4")
+class DevIntegrationBb4(PlaceSteps, unittest.TestCase):
     pass
 
 
@@ -701,7 +701,7 @@ class TestTheEvidence(unittest.TestCase):
     def test_the_record_and_its_build_are_read_from_status_records(self):
         text = ('\x1b[0m{"kind":"machine","name":"tolken"}\r\n'
                 '{"kind":"workspace","name":"integ-x","state":"running","ws":"present",'
-                '"subs":[{"kind":"build","state":"ok","config":"jsc-debug"}]}\n{"kind":"exit","code":0}\n')
+                '"subs":[{"kind":"build","state":"ok","preset":"jsc-debug"}]}\n{"kind":"exit","code":0}\n')
         rec = workspace_record(text, "integ-x")
         self.assertEqual(("ok", "jsc-debug"), last_build(rec))
         self.assertIsNone(workspace_record(text, "integ-y"))
@@ -712,10 +712,10 @@ class TestTheEvidence(unittest.TestCase):
         self.assertIsNone(tagged("nothing", "WK-GIT"))
 
     def test_ls_rows_skip_the_header(self):
-        text = "NAME   TARGET            STATE\ncorpse-tv  tolken:container  running  main\n"
+        text = "NAME   PLACE            STATE\ncorpse-tv  tolken:container  running  main\n"
         self.assertEqual([("corpse-tv", "tolken:container", "running")], ls_rows(text))
 
-    def test_only_the_targets_own_build_is_joined_rather_than_waited_out(self):
+    def test_only_the_places_own_build_is_joined_rather_than_waited_out(self):
         self.assertTrue(own_build("wk build integ-container (jsc-debug)", "container"))
         self.assertFalse(own_build("wk build corpse-tv (jsc-release)", "container"))
         self.assertFalse(own_build("wk build integ-container2 (jsc-debug)", "container"))
@@ -723,7 +723,7 @@ class TestTheEvidence(unittest.TestCase):
 
 class TestTheSteps(unittest.TestCase):
     def steps(self):
-        return sorted((getattr(TargetSteps, n).wk_step, n) for n in dir(TargetSteps) if n.startswith("test_"))
+        return sorted((getattr(PlaceSteps, n).wk_step, n) for n in dir(PlaceSteps) if n.startswith("test_"))
 
     def test_the_steps_run_in_their_numbered_order_and_removal_is_last(self):
         steps = self.steps()
@@ -734,11 +734,11 @@ class TestTheSteps(unittest.TestCase):
     def test_every_target_is_a_class_with_every_step(self):
         for cls in (DevIntegrationContainer, DevIntegrationTart, DevIntegrationMoose, DevIntegrationBb4):
             self.assertEqual("live", cls.wk_tier)
-            self.assertIn(cls.target, TARGETS)
+            self.assertIn(cls.place, PLACES)
 
     def test_a_step_before_the_starting_one_skips_and_so_does_one_after_a_step_2_that_did_not_pass(self):
-        class Target(TargetSteps, unittest.TestCase):
-            target = "container"
+        class Driver(PlaceSteps, unittest.TestCase):
+            place = "container"
             outcome = {}
 
             @step(3)
@@ -746,14 +746,14 @@ class TestTheSteps(unittest.TestCase):
                 pass
         with unittest.mock.patch.dict(os.environ, {"WK_INTEG_FROM": "4"}):
             with self.assertRaises(unittest.SkipTest):
-                Target("test_x").test_x()
+                Driver("test_x").test_x()
         for outcome in ("failed", "skipped"):
-            Target.outcome = {2: outcome}
+            Driver.outcome = {2: outcome}
             with self.assertRaises(unittest.SkipTest):
-                Target("test_x").test_x()
-        Target.outcome = {2: "passed"}
-        Target("test_x").test_x()
-        self.assertEqual("passed", Target.outcome[3])
+                Driver("test_x").test_x()
+        Driver.outcome = {2: "passed"}
+        Driver("test_x").test_x()
+        self.assertEqual("passed", Driver.outcome[3])
 
     def test_the_guard_turns_push_off_when_its_holder_is_gone(self):
         with support.scratch_dir() as d:

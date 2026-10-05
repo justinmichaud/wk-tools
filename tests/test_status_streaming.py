@@ -6,7 +6,7 @@ import os
 import sys
 import unittest
 
-from tests.support import REPO, WkTest, rand_suffix, requires_container_target, run, scratch_dir, stub_path
+from tests.support import REPO, WkTest, rand_suffix, requires_container_place, run, scratch_dir, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import statusview  # noqa: E402
@@ -91,7 +91,7 @@ class TestTextStreamsAsRecordsArrive(unittest.TestCase):
 
 
 class TestABlockWaitsForEveryPlannedJob(unittest.TestCase):
-    """A macOS host feeds one machine from two jobs, the podman VM's container target and the tart vm target."""
+    """A macOS host feeds one machine from two jobs, the podman VM's container place and the tart vm place."""
 
     def test_the_first_job_flushing_empty_does_not_draw_the_machine(self):
         tap, err = _render([
@@ -149,12 +149,12 @@ exec bash -c "$last"
 
 
 class TestCollectorMarkers(WkTest):
-    """The stream cmd/status collects over one faked reachable target: a rendering run opens with a plan and ends
+    """The stream cmd/status collects over one faked reachable place: a rendering run opens with a plan and ends
     every job with a flush; a run asked for `--records` carries neither."""
 
     def _status(self, *args):
         with scratch_dir(prefix="wk-test-machines-") as machdir, stub_path({"ssh": _ANSWERING_SSH}) as binp:
-            env = {"WK_MACHINES_DIR": str(machdir), "WK_TARGET": "remote", "WK_REMOTE_HOST": "fake-reachable-" + rand_suffix(4),
+            env = {"WK_MACHINES_DIR": str(machdir), "WK_PLACE": "remote", "WK_REMOTE_HOST": "fake-reachable-" + rand_suffix(4),
                    "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}", "WK_PROBE_SECONDS": "1"}
             return run("status", *args, env=env, timeout=60)
 
@@ -193,7 +193,7 @@ class TestARemotesMarkersStayItsOwn(WkTest):
     def test_a_flush_in_a_remotes_records_does_not_draw_its_block_early(self):
         with scratch_dir(prefix="wk-test-machines-") as machdir, stub_path({"ssh": _MARKER_LEAKING_SSH}) as binp:
             cp = run("status", "--text", "--no-devices", env={
-                "WK_MACHINES_DIR": str(machdir), "WK_TARGET": "remote", "WK_REMOTE_HOST": "fake-leaky-" + rand_suffix(4),
+                "WK_MACHINES_DIR": str(machdir), "WK_PLACE": "remote", "WK_REMOTE_HOST": "fake-leaky-" + rand_suffix(4),
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}", "WK_PROBE_SECONDS": "1"}, timeout=60)
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertEqual(len([l for l in cp.stdout.splitlines() if l.startswith("remote")]), 1, cp.stdout)
@@ -201,7 +201,7 @@ class TestARemotesMarkersStayItsOwn(WkTest):
 
 
 class TestEveryWorkspaceIsInTheListing(WkTest):
-    @requires_container_target()
+    @requires_container_place()
     def test_bare_status_lists_every_workspace_ls_lists(self):
         ls = run("ls", "--json", timeout=120)
         self.assertEqual(ls.returncode, 0, ls.stdout)
@@ -221,10 +221,10 @@ esac
 
 
 class TestAStoppedPodmanMachineSaysSo(WkTest):
-    @unittest.skipUnless(sys.platform == "darwin", "the container target has a far side only on macOS")
+    @unittest.skipUnless(sys.platform == "darwin", "the container place has a far side only on macOS")
     def test_the_block_names_wk_start(self):
         with stub_path({"podman": _STOPPED_PODMAN}) as binp:
-            cp = run("status", "--records", env={"WK_TARGET": "container", "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}"}, timeout=60)
+            cp = run("status", "--records", env={"WK_PLACE": "container", "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}"}, timeout=60)
         self.assertEqual(cp.returncode, 0, cp.stdout)
         raws = [json.loads(l) for l in cp.stdout.splitlines() if l.startswith('{"kind":"raw"')]
         self.assertEqual(len(raws), 1, cp.stdout)

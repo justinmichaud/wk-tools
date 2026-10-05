@@ -1,12 +1,12 @@
-"""`wk completion bash|zsh`, generated from the declarations, never `-h` text; build configs
-from lib/wk/buildconf.py; workspace names and `values=` lists are asked at TAB, of this machine only."""
+"""`wk completion bash|zsh`, generated from the declarations, never `-h` text; build presets
+from lib/wk/presets.py; workspace names and `values=` lists are asked at TAB, of this machine only."""
 
 import os
 import sys
 
-from wk import buildconf, images
+from wk import images, presets
 from wk import decl as D
-from wk.targets import Registry
+from wk.places import Registry
 
 BUILTIN_COMMANDS = ("completion",)
 SHELLS = ("bash", "zsh")
@@ -59,8 +59,8 @@ _wk_completion() {
     fi
     cmd="${COMP_WORDS[1]}"
     _wk_decl "$cmd" || return 0
-    if [ "$prev" = --config ] && [ "$_wk_config" = --config ]; then
-        COMPREPLY=( $(compgen -W "$_wk_configs" -- "$cur") )
+    if [ "$prev" = --preset ] && [ "$_wk_preset" = --preset ]; then
+        COMPREPLY=( $(compgen -W "$_wk_presets" -- "$cur") )
         return 0
     fi
     i=2
@@ -98,7 +98,7 @@ _wk_completion() {
         [ "$typed" -ne 1 ] || [ "$shift" -ne 0 ] || [ -z "$_wk_vals" ] || words="$words $(_wk_values "$bin" "$cmd" "$_wk_vals")"
     elif [ -z "$words" ] && [ "$typed" -eq "$_wk_first_arg" ]; then
         words="$_wk_subverbs"
-        [ "$_wk_config" != arg ] || words="$words $_wk_configs"
+        [ "$_wk_preset" != arg ] || words="$words $_wk_presets"
         [ -z "$_wk_vals" ] || words="$words $(_wk_values "$bin" "$cmd" "$_wk_vals")"
     fi
     COMPREPLY=( $(compgen -W "$words" -- "$cur") )
@@ -126,9 +126,9 @@ def _case_arm(d):
     vslots = ["%s:%d" % (v, D.name_slot(d.name_for([v]))) for v in subverbs(d)]
     vflags = ["%s:%s" % (v, ",".join(flags_for(d, v))) for v in subverbs(d)]
     return ("        %s) _wk_slot=%d; _wk_first_arg=%d; _wk_flags=%s; _wk_valued=%s; _wk_subverbs=%s; _wk_vslots=%s;"
-            " _wk_vflags=%s; _wk_default=%s; _wk_vals=%s; _wk_config=%s ;;\n"
+            " _wk_vflags=%s; _wk_default=%s; _wk_vals=%s; _wk_preset=%s ;;\n"
             % (d.name, slot, 1 if slot == 1 else 0, _words(flags), _words(sorted(d.valued_opts())), _words(subverbs(d)),
-               _words(vslots), _words(vflags), _words([d.default]), _words([values_cmd(d)]), _words([d.config])))
+               _words(vslots), _words(vflags), _words([d.default]), _words([values_cmd(d)]), _words([d.preset])))
 
 
 def generate(root, shell_name):
@@ -141,12 +141,12 @@ def generate(root, shell_name):
         out.append("autoload -U +X bashcompinit && bashcompinit\n")
     out.append("_wk_root=%s\n" % _words([str(root)]))
     out.append("_wk_commands=%s\n" % _words(commands(root)))
-    out.append("_wk_configs=%s\n" % _words(buildconf.names()))
+    out.append("_wk_presets=%s\n" % _words(presets.names()))
     out.append("_wk_decl() {\n    case \"$1\" in\n")
     for d in decls:
         out.append(_case_arm(d))
     out.append("        completion) _wk_slot=0; _wk_first_arg=0; _wk_flags=''; _wk_valued=''; _wk_subverbs=%s; _wk_vslots='';"
-               " _wk_vflags=''; _wk_default=''; _wk_vals=''; _wk_config='' ;;\n" % _words(SHELLS))
+               " _wk_vflags=''; _wk_default=''; _wk_vals=''; _wk_preset='' ;;\n" % _words(SHELLS))
     out.append("        *) return 1 ;;\n    esac\n}\n")
     out.append(_FUNCTION)
     return "".join(out)

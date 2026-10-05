@@ -17,14 +17,14 @@ from tests.support import REPO, as_dispatched
 from tests.test_layers import load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import decl, ldpath, profile, targets  # noqa: E402
+from wk import decl, ldpath, places, profile  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
 RUN = decl.Decl(REPO / "cmd" / "run")
 
 
-class ProfileTarget(targets.Target):
+class ProfileDriver(places.Driver):
     def __init__(self, name, root, env, machine, kind="container"):
         super().__init__(name, root, env, machine)
         self.kind = kind
@@ -58,7 +58,7 @@ class World(Fake):
         self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"),
                     "XDG_STATE_HOME": str(self.tmp / "state"), "WK_NAME": "ws", "WK_IN_VM": "1"}
         self.answer(["exec", "ws", "test", "-x"], rc=0)   # the binary is built
-        self.reg = FakeRegistry(self.env, self, lambda n, e: ProfileTarget("box", str(REPO), e, self), ws_target=lambda ws: "box")
+        self.reg = FakeRegistry(self.env, self, lambda n, e: ProfileDriver("box", str(REPO), e, self), ws_place=lambda ws: "box")
 
 
 class ProfileTest(unittest.TestCase):
@@ -68,7 +68,7 @@ class ProfileTest(unittest.TestCase):
         osenv = mock.patch.dict(os.environ, {}, clear=False)
         osenv.start()
         self.addCleanup(osenv.stop)
-        for v in ("WK_DRY_RUN", "WK_NAME", "WK_CONFIG"):
+        for v in ("WK_DRY_RUN", "WK_NAME", "WK_PRESET"):
             os.environ.pop(v, None)
         os.environ["WK_NAME"] = "ws"
         self.w = World(self.tmp)
@@ -95,13 +95,13 @@ class TestPerfEventParanoidGate(ProfileTest):
     def test_paranoid_1_or_less_never_refuses(self):
         self._paranoid(1)
         self.w.answer(["exec-tty", "ws", "bash", "-lc"], out="")
-        rc, err = self.run_("--config", "gtk-release", "--profile=samply", "--", "x.js")
+        rc, err = self.run_("--preset", "gtk-release", "--profile=samply", "--", "x.js")
         self.assertEqual(rc, 0, err)
 
     def test_high_paranoid_off_linux_names_the_sysctl_remedy(self):
         self._paranoid(2)
         with mock.patch.object(ldpath, "is_linux", return_value=False):
-            e, err = self.refused("--config", "gtk-release", "--profile=samply", "--", "x.js")
+            e, err = self.refused("--preset", "gtk-release", "--profile=samply", "--", "x.js")
         self.assertEqual(e.status, 1)
         self.assertIn("perf_event_paranoid is 2 in 'ws'", err)
         self.assertIn("not namespaced", err)
@@ -111,7 +111,7 @@ class TestPerfEventParanoidGate(ProfileTest):
         self._paranoid(2)
         with mock.patch.object(ldpath, "is_linux", return_value=True), \
              mock.patch("os.access", return_value=False):
-            e, err = self.refused("--config", "gtk-release", "--profile=samply", "--", "x.js")
+            e, err = self.refused("--preset", "gtk-release", "--profile=samply", "--", "x.js")
         self.assertEqual(e.status, 1)
         self.assertIn("privileged helper", err)
         self.assertIn("./setup --stage quiesce", err)
@@ -121,7 +121,7 @@ class TestPerfEventParanoidGate(ProfileTest):
         with mock.patch.object(ldpath, "is_linux", return_value=True), \
              mock.patch("os.access", return_value=True), \
              mock.patch.object(ldpath.Local, "act_run") as run:
-            e, err = self.refused("--config", "gtk-release", "--profile=samply", "--", "x.js")
+            e, err = self.refused("--preset", "gtk-release", "--profile=samply", "--", "x.js")
         self.assertTrue(run.called)
         self.assertEqual(e.status, 1)
         self.assertIn("did not bring it down", err)
@@ -138,7 +138,7 @@ class TestSysprof(ProfileTest):
 
     def test_sysprof_wraps_jsc_with_the_jit_dump_and_markers_on(self):
         self._ready()
-        rc, err = self.run_("--config", "gtk-release", "--profile=sysprof", "--", "x.js")
+        rc, err = self.run_("--preset", "gtk-release", "--profile=sysprof", "--", "x.js")
         self.assertEqual(rc, 0, err)
         cmd = self.script()
         self.assertRegex(cmd, r"sysprof-cli --force /home/u/wk-profile/\S+-sysprof/capture.syscap -- \S+/bin/jsc x.js")
@@ -148,27 +148,27 @@ class TestSysprof(ProfileTest):
     def test_sysprof_asks_for_sysprof_cli_and_the_perf_events(self):
         self._ready(level=2)
         self.w.answer(["exec", "ws", "sh", "-c"], rc=1)
-        e, err = self.refused("--config", "gtk-release", "--profile=sysprof", "--", "x.js")
+        e, err = self.refused("--preset", "gtk-release", "--profile=sysprof", "--", "x.js")
         self.assertIn("sysprof-cli is not installed in 'ws'", err)
         self.w.answer(["exec", "ws", "sh", "-c"], rc=0)
         with mock.patch.object(ldpath, "is_linux", return_value=False):
-            e, err = self.refused("--config", "gtk-release", "--profile=sysprof", "--", "x.js")
+            e, err = self.refused("--preset", "gtk-release", "--profile=sysprof", "--", "x.js")
         self.assertIn("sysprof needs 1 or less", err)
 
     def test_sysprof_refuses_an_apple_port_and_an_attach(self):
         self._ready()
-        e, err = self.refused("--config", "gtk-release", "--profile=sysprof", "--attach", "123")
+        e, err = self.refused("--preset", "gtk-release", "--profile=sysprof", "--attach", "123")
         self.assertIn("there is no attach", err)
-        with mock.patch.object(ProfileTarget, "os", lambda self: "macos"):
-            e, err = self.refused("--config", "mac-release", "--profile=sysprof", "--", "x.js")
+        with mock.patch.object(ProfileDriver, "os", lambda self: "macos"):
+            e, err = self.refused("--preset", "mac-release", "--profile=sysprof", "--", "x.js")
         self.assertIn("'mac-release' is an Apple-port build", err)
 
     def test_sysprof_against_the_browser_prefixes_minibrowser_and_refuses_process(self):
         self._ready()
-        rc, err = self.run_("--config", "gtk-release", "--profile=sysprof", "--browser", "about:blank")
+        rc, err = self.run_("--preset", "gtk-release", "--profile=sysprof", "--browser", "about:blank")
         self.assertEqual(rc, 0, err)
         self.assertIn("WEBKIT_MINI_BROWSER_PREFIX='sysprof-cli --force", self.script())
-        e, err = self.refused("--config", "gtk-release", "--profile=sysprof", "--browser", "--process", "web")
+        e, err = self.refused("--preset", "gtk-release", "--profile=sysprof", "--browser", "--process", "web")
         self.assertIn("--process is meaningless with --profile=sysprof", err)
 
 
@@ -181,7 +181,7 @@ class TestFetch(ProfileTest):
             fake.dirs.add(re.search(r"/home/u/wk-profile/\S+", argv[-1]).group(0))
             return Result(0)
         self.w.react(["exec-tty", "ws", "bash", "-lc"], make_dir_then_run)
-        rc, err = self.run_("--config", "gtk-release", "--profile=sampling", "--fetch", fetch_dir, "--", "x.js")
+        rc, err = self.run_("--preset", "gtk-release", "--profile=sampling", "--fetch", fetch_dir, "--", "x.js")
         self.assertEqual(rc, 0, err)
         copies = [e for e in self.w.effects if e[0] == "copy_tree_out"]
         self.assertEqual(len(copies), 1, self.w.effects)
@@ -190,7 +190,7 @@ class TestFetch(ProfileTest):
 
     def test_a_fetch_that_finds_nothing_to_copy_warns_rather_than_dies(self):
         self.w.answer(["exec-tty", "ws", "bash", "-lc"], out="")
-        rc, err = self.run_("--config", "gtk-release", "--profile=sampling", "--fetch", os.path.join(self.tmp, "f"), "--", "x.js")
+        rc, err = self.run_("--preset", "gtk-release", "--profile=sampling", "--fetch", os.path.join(self.tmp, "f"), "--", "x.js")
         self.assertEqual(rc, 0, err)
         self.assertIn("could not copy", err)
 
@@ -199,7 +199,7 @@ class TestOutputReachesTheTerminal(ProfileTest):
 
     def test_the_run_and_post_go_through_exec_tty_not_the_capturing_exec(self):
         self.w.answer(["exec-tty", "ws", "bash", "-lc"], out="")
-        rc, err = self.run_("--config", "gtk-release", "--profile=bytecode", "--", "x.js")
+        rc, err = self.run_("--preset", "gtk-release", "--profile=bytecode", "--", "x.js")
         self.assertEqual(rc, 0, err)
         tty_runs = [e for e in self.w.effects if e[0] == "run_tty" and e[1][:2] == ("exec-tty", "ws")]
         self.assertEqual(2, len(tty_runs), self.w.effects)   # the run itself, and bytecode's `post`
@@ -208,7 +208,7 @@ class TestOutputReachesTheTerminal(ProfileTest):
 
     def test_sampling_default_mode_also_streams(self):
         self.w.answer(["exec-tty", "ws", "bash", "-lc"], out="")
-        rc, err = self.run_("--config", "gtk-release", "--profile=sampling", "--", "x.js")
+        rc, err = self.run_("--preset", "gtk-release", "--profile=sampling", "--", "x.js")
         self.assertEqual(rc, 0, err)
         self.assertTrue([e for e in self.w.effects if e[0] == "run_tty" and e[1][:2] == ("exec-tty", "ws")], self.w.effects)
 

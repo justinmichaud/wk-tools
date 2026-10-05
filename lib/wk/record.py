@@ -116,9 +116,9 @@ wk-pgo/); every other build has no gates.\n' "$SRC"
 '''
 
 
-def workspace_log(target, name):
+def workspace_log(driver, name):
     """(path, whether it is an image-stage log): build.log, else the newest log an image builder wrote under home/."""
-    ws_dir = target.store.ws_dir(name)
+    ws_dir = driver.store.ws_dir(name)
     build_log = os.path.join(ws_dir, "build.log")
     if os.path.isfile(build_log):
         return build_log, False
@@ -128,13 +128,13 @@ def workspace_log(target, name):
     return max(stage_logs, key=os.path.getmtime), True
 
 
-def show_log(target, name, mode, hint):
+def show_log(driver, name, mode, hint):
     if mode == "gates":
-        r = target.exec(name, ["bash", "-c", "SRC=%s TOOLS=%s\n%s" % (shlex.quote(target.src(name)), shlex.quote(target.tools(name)), GATES)])
+        r = driver.exec(name, ["bash", "-c", "SRC=%s TOOLS=%s\n%s" % (shlex.quote(driver.src(name)), shlex.quote(driver.tools(name)), GATES)])
         sys.stdout.write(r.out)
         sys.stderr.write(r.err)
         return r.rc
-    path, stage = workspace_log(target, name)
+    path, stage = workspace_log(driver, name)
     if stage:
         act.info("showing %s" % path)
     if mode == "follow":
@@ -187,14 +187,14 @@ def log_age(path, clock, machine=None):
 
 
 class Task:
-    """One record, on `machine`; `ask_target(name, pid, cap)` answers True, False or None (no answer in cap seconds)."""
+    """One record, on `machine`; `ask_place(name, pid, cap)` answers True, False or None (no answer in cap seconds)."""
 
-    def __init__(self, path, clock=None, ask_target=None, machine=None, env=None):
+    def __init__(self, path, clock=None, ask_place=None, machine=None, env=None):
         self.env = os.environ if env is None else env
         self.path = Path(path)
         self.id = self.path.name
         self.clock = clock or Clock()
-        self.ask_target = ask_target
+        self.ask_place = ask_place
         self.machine = machine or here()
 
     def _at(self, name):
@@ -225,7 +225,7 @@ class Task:
     def unreadable(self):
         """What keeps this record from a verdict: a required field absent (an older shape), unreadable or unknown, or an unreadable plan."""
         out = [f for f in REQUIRED if not self.field(f)]
-        if self.field("where") and self.field("where") not in ("here", "target"):
+        if self.field("where") and self.field("where") not in ("here", "place"):
             out.append("where")
         if self.raw("plan") is UNREADABLE:
             out.append("plan")
@@ -282,10 +282,10 @@ class Task:
         pid = self.field("pid")
         if not pid.isdigit():
             return False
-        if self.field("where") == "target":
-            if self.ask_target is None:
-                raise RuntimeError("%s runs inside a workspace and no target is loaded" % self.id)
-            return self.ask_target(self.field("name"), int(pid), cap)
+        if self.field("where") == "place":
+            if self.ask_place is None:
+                raise RuntimeError("%s runs inside a workspace and no place is loaded" % self.id)
+            return self.ask_place(self.field("name"), int(pid), cap)
         return self.machine.alive(int(pid))
 
     def holder_gone(self):
@@ -310,7 +310,7 @@ class Task:
         if not self.field("pid"):
             return "starting"
         cap = None
-        if how == "capped" and self.field("where") == "target":
+        if how == "capped" and self.field("where") == "place":
             cap = ask_seconds if ask_seconds is not None else task_ask_seconds(self.env)
         alive = self.alive(cap)
         if alive is None:
@@ -330,22 +330,22 @@ class Task:
         return self.verdict(how) in RUNNING
 
 
-def of_target(target, clock=None, machine=None, env=None):
-    """`target`'s records; a pid in a workspace is asked there, None where the workspace does not answer in time."""
-    return Records(target.store.records_dir(), clock=clock, ask_target=target.pid_alive, env=target.env if env is None else env,
+def of_driver(driver, clock=None, machine=None, env=None):
+    """`place`'s records; a pid in a workspace is asked there, None where the workspace does not answer in time."""
+    return Records(driver.store.records_dir(), clock=clock, ask_place=driver.pid_alive, env=driver.env if env is None else env,
                    machine=machine)
 
 
 class Records:
-    def __init__(self, root=None, clock=None, ask_target=None, env=None, machine=None):
+    def __init__(self, root=None, clock=None, ask_place=None, env=None, machine=None):
         self.env = os.environ if env is None else env
         self.root = Path(root or store.Store(self.env).records_dir()) / "task"
         self.clock = clock or Clock()
-        self.ask_target = ask_target
+        self.ask_place = ask_place
         self.machine = machine or here()
 
     def _task(self, path):
-        return Task(path, self.clock, self.ask_target, self.machine, self.env)
+        return Task(path, self.clock, self.ask_place, self.machine, self.env)
 
     def list(self):
         if not self.machine.isdir(str(self.root)):
@@ -383,8 +383,8 @@ class Records:
                 self.machine.remove_own(str(t.path))
 
     def begin(self, kind, where, name, kill, log, plan, holds=None, pid=None, argv=None):
-        if where not in ("here", "target"):
-            raise ValueError("where is here or target, not '%s'" % where)
+        if where not in ("here", "place"):
+            raise ValueError("where is here or place, not '%s'" % where)
         if not plan:
             raise ValueError("%s/%s declared no plan" % (kind, name))
         if not kill:
@@ -395,7 +395,7 @@ class Records:
         path = self.root / ("%s-%s-%s-%d" % (slug(kind), slug(name), self.clock.stamp(), pid))
         self.prune(kind, name, keep=path)
         t = self._task(path)
-        if where != "target":
+        if where != "place":
             t.set("pid", pid)
         if holds:
             t.set("holds", holds)
@@ -487,11 +487,11 @@ def fleet_holders(resource, records, stores):
 def fleet_stores(root, env, machine):
     """(name, ask) for the podman machine's store where this one is not it, and for each peer through its own wk."""
     from wk import status
-    from wk.targets import Registry
+    from wk.places import Registry
     reg = Registry(root, env, machine)
 
-    def holds(target, resource, why):
-        rc, out = target.wk("status", "--holds", resource, quiet=True)
+    def holds(driver, resource, why):
+        rc, out = driver.wk("status", "--holds", resource, quiet=True)
         return (out, "") if rc == 0 else (None, why)
 
     def peer(name):

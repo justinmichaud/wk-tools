@@ -4,7 +4,7 @@ import re
 import unittest
 
 from tests.support import REPO
-from wk.targets import CONF_ENV
+from wk.places import CONF_ENV
 
 SCOPE_NAMES = ("wk", "lib", "cmd", "build")
 

@@ -9,7 +9,7 @@ import types
 import unittest
 import unittest.mock
 
-from tests.fakes import FakeRegistry, FakeTarget
+from tests.fakes import FakeRegistry, FakeDriver
 from tests.support import NO_REGISTRY, REPO, WkTest, requires_machine, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -24,17 +24,17 @@ YWS, BWS = "yocto-" + YOCTO, "buildroot-" + BUILDROOT
 SHA = "a" * 40
 
 
-def registry(store_dir, targets=(), machine=None):
+def registry(store_dir, drivers=(), machine=None):
     """What cli.Sysimage and ls.Listing ask of the registry."""
     # A blind fleet: host_profiles()'s mac-volume check reads machines/<IMG_MACHINE>.conf through this env, and this
     # repo's real one names a real Mac's real volume. WK_IN_VM=1 keeps the fetch builder's cache in this store too.
     env = {"WK_MACHINES_DIR": NO_REGISTRY, "WK_IN_VM": "1", "WK_STORE": str(store_dir)}
-    ts = {t.name: t for t in targets}
+    ts = {t.name: t for t in drivers}
     return FakeRegistry(env, machine or Local(), lambda n, e: ts[n], names=list(ts), default=lambda: "container")
 
 
-def sysimage(store_dir, targets=(), machine=None, building=()):
-    s = cli.Sysimage(registry(store_dir, targets, machine), clock=None)
+def sysimage(store_dir, drivers=(), machine=None, building=()):
+    s = cli.Sysimage(registry(store_dir, drivers, machine), clock=None)
     s.building = lambda ws: ws in building
     return s
 
@@ -60,10 +60,10 @@ def yocto_image(store, ws=YWS):
     return image(store, ws, "build/CrossToolChains/rpi3-32bits-mesa/build/image/core.wic.xz")
 
 
-def slot(store, ws, name, commit=SHA, config="wpe-cross-pgo-use", **extra):
+def slot(store, ws, name, commit=SHA, preset="wpe-cross-pgo-use", **extra):
     d = images.slot_dir(ws, name, {"WK_STORE": str(store)})
     os.makedirs(d, exist_ok=True)
-    doc = dict(slot=name, commit=commit, build_config=config, built_at="2026-09-01T00:00:00Z", **extra)
+    doc = dict(slot=name, commit=commit, build_preset=preset, built_at="2026-09-01T00:00:00Z", **extra)
     with open(os.path.join(d, "slot.json"), "w") as f:
         json.dump(doc, f)
     return d
@@ -264,17 +264,17 @@ class TestTheListing(NoPmosHost):
 
 
 class TestTheFleetWalk(NoPmosHost):
-    """This store's rows first, then each target whose machine answers for a store of its own,
+    """This store's rows first, then each place whose machine answers for a store of its own,
     asked through its own wk with the label it is to print and no walk of its own."""
 
-    def rows(self, d, targets, warned):
-        return ls.Listing(registry(d, targets), "", "here", lambda ws: False, warned.append).rows()
+    def rows(self, d, drivers, warned):
+        return ls.Listing(registry(d, drivers), "", "here", lambda ws: False, warned.append).rows()
 
     def test_each_answering_machine_adds_its_rows_after_this_stores(self):
         with scratch_dir() as d:
             yocto_image(d)
-            far = FakeTarget("fakebox", out="yocto-faraway  rpi4  fakebox\r\n    /elsewhere/faraway.wic.xz\n")
-            vm = FakeTarget("container", here=True, out="")
+            far = FakeDriver("fakebox", out="yocto-faraway  rpi4  fakebox\r\n    /elsewhere/faraway.wic.xz\n")
+            vm = FakeDriver("container", here=True, out="")
             rows = self.rows(d, [far, vm], [])
         self.assertTrue(rows[0].startswith(YWS))
         self.assertEqual(rows[-2:], ["yocto-faraway  rpi4  fakebox", "    /elsewhere/faraway.wic.xz"])
@@ -286,19 +286,19 @@ class TestTheFleetWalk(NoPmosHost):
     def test_a_stopped_machine_is_named_not_left_out(self):
         with scratch_dir() as d:
             warned = []
-            self.assertEqual(self.rows(d, [FakeTarget("container", here=True, side="stopped")], warned), [])
+            self.assertEqual(self.rows(d, [FakeDriver("container", here=True, side="stopped")], warned), [])
         self.assertIn("is stopped, so the images in its", warned[0])
 
     def test_one_that_refuses_the_walk_names_the_remedy(self):
         with scratch_dir() as d:
             warned = []
-            self.rows(d, [FakeTarget("oldbox", rc=2, out="")], warned)
+            self.rows(d, [FakeDriver("oldbox", rc=2, out="")], warned)
         self.assertIn("'oldbox' did not answer the listing", warned[0])
         self.assertIn("wk sync --tools oldbox", warned[0])
 
     def test_one_with_no_store_of_its_own_is_not_asked(self):
         with scratch_dir() as d:
-            quiet = [FakeTarget("c", side="none"), FakeTarget("far", side="unreachable")]
+            quiet = [FakeDriver("c", side="none"), FakeDriver("far", side="unreachable")]
             warned = []
             self.assertEqual(self.rows(d, quiet, warned), [])
         self.assertEqual((warned, [t.asked for t in quiet]), ([], [[], []]))
@@ -309,7 +309,7 @@ class TestTheFleetWalk(NoPmosHost):
             listing = ls.Listing(registry(d), "", "here", lambda ws: False, warned.append)
             listing.reg.walk = lambda: ["ghost"]
             self.assertEqual(listing.rows(), [])
-        self.assertIn("unknown target 'ghost'", warned[0])
+        self.assertIn("unknown place 'ghost'", warned[0])
 
 
 class TestHolds(WkTest):
@@ -336,7 +336,7 @@ class TestHolds(WkTest):
 
     def test_a_slot_on_a_profile_guided_release_is_its_measured_build(self):
         with scratch_dir() as d:
-            slot(d, YWS, "base", config="wpe-cross-pgo-collect")
+            slot(d, YWS, "base", preset="wpe-cross-pgo-collect")
             self.assertEqual(self.holds(d, YOCTO, None, "base", SHA, None, False).out, "no\n")
             self.assertEqual(self.holds(d, YOCTO, None, "base", SHA, "wpe-cross-pgo-collect", False).out, "yes\n")
             slot(d, YWS, "base")
@@ -345,7 +345,7 @@ class TestHolds(WkTest):
 
     def test_a_slot_elsewhere_is_the_commit_alone(self):
         with scratch_dir() as d:
-            slot(d, BWS, "base", config="")
+            slot(d, BWS, "base", preset="")
             self.assertEqual(self.holds(d, BUILDROOT, None, "base", SHA, None, False).out, "yes\n")
             self.assertEqual(self.holds(d, BUILDROOT, None, "nope", SHA, None, False).out, "no\n")
 
@@ -434,10 +434,10 @@ class TestTheRoutingAnswers(unittest.TestCase):
     def test_a_spec_naming_a_machine_is_its_target_and_this_machine_its_default(self):
         with scratch_dir() as d:
             reg = registry(d)
-            self.assertEqual(cli.wstarget(["holds", YOCTO + "@moose"], reg), "moose")
-            self.assertEqual(cli.wstarget(["holds", YOCTO + "@" + record.machine_name(reg.env)], reg), "container")
-            self.assertEqual(cli.wstarget(["holds", YOCTO], reg), "")
-            self.assertEqual(cli.wstarget(["holds", "bridge-pinephone@moose"], reg), "")
+            self.assertEqual(cli.wsplace(["holds", YOCTO + "@moose"], reg), "moose")
+            self.assertEqual(cli.wsplace(["holds", YOCTO + "@" + record.machine_name(reg.env)], reg), "container")
+            self.assertEqual(cli.wsplace(["holds", YOCTO], reg), "")
+            self.assertEqual(cli.wsplace(["holds", "bridge-pinephone@moose"], reg), "")
 
 
 

@@ -244,7 +244,7 @@ class TestThePlanIsRead(WkTest):
 
 class TestTheVerb(WkTest):
 
-    class Target:
+    class Driver:
         def __init__(self):
             self.read = []
 
@@ -256,19 +256,19 @@ class TestTheVerb(WkTest):
             return Result(0, PLAN.replace("\n", "\r\n"))
 
     @staticmethod
-    def registry(target, machine, store):
-        return FakeRegistry({"WK_STORE": store, "WK_LOCK_DIR": "/locks"}, machine, lambda n, e: target,
-                            ws_target=lambda ws: "container")
+    def registry(driver, machine, store):
+        return FakeRegistry({"WK_STORE": store, "WK_LOCK_DIR": "/locks"}, machine, lambda n, e: driver,
+                            ws_place=lambda ws: "container")
 
     def test_the_verb_reads_the_checkout_and_prints_the_payload(self):
-        m, target = fake(), self.Target()
-        reg = self.registry(target, m, "/store")
+        m, driver = fake(), self.Driver()
+        reg = self.registry(driver, m, "/store")
         cp = in_process(cli.Bench(REPO, reg, FakeClock()).seed, "w", "jetstream3", True)
         self.assertEqual(cp.stdout.strip(), "/store/cache/bench/jetstream3-%s" % SHA[:12], cp.stderr)
-        self.assertEqual(target.read, [("w", ("cat", "/src/WebKit/Tools/Scripts/webkitpy/benchmark_runner/data/plans/jetstream3.plan"))])
+        self.assertEqual(driver.read, [("w", ("cat", "/src/WebKit/Tools/Scripts/webkitpy/benchmark_runner/data/plans/jetstream3.plan"))])
 
     def test_it_needs_a_workspace_and_a_plan(self):
-        b = cli.Bench(REPO, self.registry(self.Target(), fake(), "/store"), FakeClock())
+        b = cli.Bench(REPO, self.registry(self.Driver(), fake(), "/store"), FakeClock())
         with self.assertRaises(Refused):
             with in_process_ok():
                 b.seed("w", "", True)

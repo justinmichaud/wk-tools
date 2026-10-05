@@ -91,7 +91,7 @@ its LZ4 zImage hangs the board before the console is up even where the config
 is right. RPi OS's own gzip kernel7l build (5.15.84) boots it in 90 s over the
 same tryboot staging -- measured 2026-08-31 -- so BR_KERNEL_DEB_URL pins that
 package instead (image/configs/wpewebkit-2.38-buildroot-rpi4-32.conf) and the
-defconfig sets no BR2_LINUX_KERNEL: buildroot_target.py installs the pinned
+defconfig sets no BR2_LINUX_KERNEL: buildroot_ws.py installs the pinned
 kernel's own zImage and device tree ahead of the board's post-image script.
 
 TODO: **a full bench run on this image is unmeasured.** The tryboot path, the

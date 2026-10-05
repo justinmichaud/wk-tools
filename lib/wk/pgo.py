@@ -21,11 +21,11 @@ GLIB_LIB = "WPEWebKit"   # a GLib port links one shared library, where the Apple
 BOARD_DIR = "/var/wk/pgo"   # baked in as PGO_PROFILE_DIR, so a browser started by hand still writes somewhere writable
 BOARD_FILE = BOARD_DIR + "/" + GLIB_LIB + "_%p.profraw"   # one file per process: the browser's and each web process's counters merge as peers
 COLLECT, USE = "wpe-cross-pgo-collect", "wpe-cross-pgo-use"
-CONFIGS = ("wpe-cross", COLLECT, USE)
+PRESETS = ("wpe-cross", COLLECT, USE)
 MIN_FUNCTIONS = 1000
 MIN_COVERAGE = 0.25   # of the combined profile's, per library; the thinnest leg measured was 53%
 SHA = re.compile(r"^[0-9a-f]{40}$")
-USAGE = "usage: wk sysimage webkit %s --commit <sha> --slot <name> [--workspace <ws>] [--config <c>] [--detach|--stop]"
+USAGE = "usage: wk sysimage webkit %s --commit <sha> --slot <name> [--workspace <ws>] [--preset <p>] [--detach|--stop]"
 
 
 def collect_timeout(env):
@@ -36,24 +36,24 @@ def profile_path(slot):
     return "%s/output/%s.profdata" % (images.pgo_dir_in(slot), GLIB_LIB)
 
 
-def steps(step, holds, board, ws, spec, on, target, commit, slot, needs):
+def steps(step, holds, board, ws, spec, on, place, commit, slot, needs):
     """The cycle's phases, each on the machine holding the image workspace, into whose build directory the board writes."""
     instr, res, dev, w = images.instr_slot(slot), images.build_resource(on), "device:" + board, ["--workspace", ws]
     out = [step("instr:%s:%s" % (ws, slot), on, tuple(needs), (res,),
-                holds(spec, ws, "--slot", instr, "--commit", commit, "--config", COLLECT),
-                ["sysimage", "webkit", spec] + w + ["--commit", commit, "--slot", instr, "--config", COLLECT]),
+                holds(spec, ws, "--slot", instr, "--commit", commit, "--preset", COLLECT),
+                ["sysimage", "webkit", spec] + w + ["--commit", commit, "--slot", instr, "--preset", COLLECT]),
            step("deploy:%s:%s" % (board, instr), on, ("instr:%s:%s" % (ws, slot),), (dev,), None,
-                ["bench", "deploy", ws, board, "--slot", instr], target)]
+                ["bench", "deploy", ws, board, "--slot", instr], place)]
     legs = []
     for plan in BENCHMARKS:
         legs.append("collect:%s:%s:%s" % (board, slot, plan))
         out.append(step(legs[-1], on, ("deploy:%s:%s" % (board, instr),), (dev,), None,
-                        ["bench", "run", ws, plan, "--system", board, "--slot", instr, "--collect"], target))
+                        ["bench", "run", ws, plan, "--system", board, "--slot", instr, "--collect"], place))
     out.append(step("mix:%s:%s" % (ws, slot), on, legs, (res,), None,
                     ["sysimage", "build", spec] + w + ["--stage", "pgo-mix", "--slot", slot]))
     out.append(step("slot:%s:%s" % (ws, slot), on, ("mix:%s:%s" % (ws, slot),), (res,),
                     holds(spec, ws, "--slot", slot, "--commit", commit),
-                    ["sysimage", "webkit", spec] + w + ["--commit", commit, "--slot", slot, "--config", USE]))
+                    ["sysimage", "webkit", spec] + w + ["--commit", commit, "--slot", slot, "--preset", USE]))
     return out
 
 
@@ -84,9 +84,9 @@ class Cycle:
 
     def webkit(self, rest):
         from wk.sysimage import task
-        o = task.options(rest, ("--detach", "--stop"), ("--commit", "--slot", "--workspace", "--config"),
+        o = task.options(rest, ("--detach", "--stop"), ("--commit", "--slot", "--workspace", "--preset"),
                          USAGE % self.name)
-        commit, slot, config = o.get("--commit") or "", o.get("--slot") or "", o.get("--config") or ""
+        commit, slot, preset = o.get("--commit") or "", o.get("--slot") or "", o.get("--preset") or ""
         if slot:
             images.check_slot_name(slot)
         ws = o.get("--workspace") or images.image_ws(self.name, self.env)
@@ -94,20 +94,20 @@ class Cycle:
             if not slot:
                 die("usage: wk sysimage webkit %s --slot <name> --stop\n    --stop stops the cycle running for one slot, so it needs --slot"
                     % self.name)
-            if commit or config or o.get("--detach") or act.dry_run():
+            if commit or preset or o.get("--detach") or act.dry_run():
                 die("'wk sysimage webkit %s --slot %s --stop' stops the cycle already\n    running for that slot and takes nothing "
-                    "with it -- no --commit, --config,\n    --detach or --dry-run." % (self.spec, slot))
+                    "with it -- no --commit, --preset,\n    --detach or --dry-run." % (self.spec, slot))
             return self.stop(ws, slot)
-        if config and config not in CONFIGS:
-            die("--config takes one of the configs %s is built with, not '%s':\n    %s and %s are one phase of the cycle each\n"
+        if preset and preset not in PRESETS:
+            die("--preset takes one of the presets %s is built with, not '%s':\n    %s and %s are one phase of the cycle each\n"
                 "    ('wk sysimage webkit %s --commit <sha> --slot <name>' runs all of\n    them), and 'wpe-cross' is a slot built "
-                "without a profile, for measuring\n    against one." % (self.name, config, COLLECT, USE, self.name))
+                "without a profile, for measuring\n    against one." % (self.name, preset, COLLECT, USE, self.name))
         if not (commit and slot):
             die(USAGE % self.name + "\n    a slot needs both --commit <sha> and --slot <name>")
         if not SHA.match(commit):
             die("--commit takes a full sha (40 hex digits), got '%s'" % commit)
-        if config:
-            return self.phase(ws, commit, slot, config, o.get("--detach"))
+        if preset:
+            return self.phase(ws, commit, slot, preset, o.get("--detach"))
         if act.dry_run():
             return self.plan(ws, commit, slot)
         board = self.require_board()
@@ -119,17 +119,17 @@ class Cycle:
             return 0
         return self.cycle(ws, commit, slot, board)
 
-    def phase(self, ws, commit, slot, config, detach):
+    def phase(self, ws, commit, slot, preset, detach):
         extra = []
-        if config == "wpe-cross":
+        if preset == "wpe-cross":
             warn("slot '%s' is being built WITHOUT a profile, on a release where every\n  measured build has one. Nothing but a "
                  "comparison against a profile-guided\n  slot should be taken from it; 'wk sysimage ls' and each run's env.json\n"
                  "  record it as wpe-cross." % slot)
-        elif config == COLLECT:
+        elif preset == COLLECT:
             self.here.remove(images.pgo_dir(ws, images.measured_slot(slot), self.env))   # legs of the last instrumented build say nothing of this one
         else:
             extra = ["--pgo-profile", profile_path(slot)]
-        return self.build(["--stage", "webkit", "--workspace", ws, "--commit", commit, "--slot", slot, "--config", config]
+        return self.build(["--stage", "webkit", "--workspace", ws, "--commit", commit, "--slot", slot, "--preset", preset]
                           + extra + (["--detach"] if detach else []))
 
     def board(self):
@@ -159,8 +159,8 @@ class Cycle:
     def log_path(self, ws, slot):
         return os.path.join(self.store.ws_dir(ws), "pgo-%s.log" % slot)
 
-    def step(self, sid, on, needs, holds, done, words, target=""):
-        return sched.wk_step(self.here, self.wk, lambda s: self.log, sid, on, needs, holds, done, words, target)
+    def step(self, sid, on, needs, holds, done, words, place=""):
+        return sched.wk_step(self.here, self.wk, lambda s: self.log, sid, on, needs, holds, done, words, place)
 
     def holds(self, spec, ws, *rest):
         return sched.wk_yes(self.here, [self.wk, "sysimage", "holds", spec, "--workspace", ws] + list(rest))
@@ -168,11 +168,11 @@ class Cycle:
     def graph(self, ws, commit, slot, board):
         named, me = images.spec_machine(self.spec), progress.machine_name(self.env, self.here)
         try:
-            on = images.ws_machine(named, "" if named else self.reg.ws_target(ws), me)
+            on = images.ws_machine(named, "" if named else self.reg.ws_place(ws), me)
         except LookupError as e:
             die(str(e))
-        target = named if named and named != me else ""
-        return sched.validate(steps(self.step, self.holds, board, ws, self.spec, on, target, commit, slot, ()))
+        place = named if named and named != me else ""
+        return sched.validate(steps(self.step, self.holds, board, ws, self.spec, on, place, commit, slot, ()))
 
     def plan(self, ws, commit, slot):
         board = self.board()

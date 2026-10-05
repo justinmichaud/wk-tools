@@ -12,7 +12,7 @@ from unittest import mock
 from tests.support import REPO, WkTest, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import targets, workspace  # noqa: E402
+from wk import places, workspace  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
@@ -49,7 +49,7 @@ esac
 exit 0
 """
 
-_LISTING = ('{"workspaces": [{"name": "peerws", "target": "container", '
+_LISTING = ('{"workspaces": [{"name": "peerws", "place": "container", '
             '"state": "running", "base": "-", "arch": "native", "changes": "1M"}]}')
 
 
@@ -98,7 +98,7 @@ class PeerFixture(WkTest):
         return e
 
     def registry(self):
-        return targets.Registry(self.root, env=dict(os.environ, **self.env()))
+        return places.Registry(self.root, env=dict(os.environ, **self.env()))
 
     def _wk(self, *args, extra_env=None):
         with stub_path({"ssh": _FAKE_SSH}) as binp:
@@ -128,9 +128,9 @@ class TestPeerResolution(PeerFixture):
             yield
 
     def test_peer_workspace_resolves(self):
-        """ws_target finds a workspace only the peer's own `wk` knows"""
+        """ws_place finds a workspace only the peer's own `wk` knows"""
         with self.faked_ssh():
-            self.assertEqual(self.registry().ws_target("peerws"), "peerbox")
+            self.assertEqual(self.registry().ws_place("peerws"), "peerbox")
 
     def test_only_a_workstation_keeps_its_own_records(self):
         """a workstation's workspaces are its own, so a removal is its own `wk
@@ -180,32 +180,32 @@ class TestPeerDelegation(PeerFixture):
                          self.peer_calls())
 
     def test_making_one_is_the_peers_own_wk_new(self):
-        """`wk new <ws> --target <peer>` is the peer's `wk new <ws>` at its own default
-        target: the driver here would make a plain checkout under ~/wk instead"""
-        cp = self._wk("new", "newws", "--target", "peerbox", "--arch", "armhf", "--pr", "1234")
+        """`wk new <ws> --on <peer>` is the peer's `wk new <ws>` at its own default
+        place: the driver here would make a plain checkout under ~/wk instead"""
+        cp = self._wk("new", "newws", "--on", "peerbox", "--arch", "armhf", "--pr", "1234")
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("new newws --arch armhf --pr 1234 ", self.peer_calls())
-        self.assertEqual(0, self._wk("new", "newws", "--target", "peerbox", "--kill").returncode)
+        self.assertEqual(0, self._wk("new", "newws", "--on", "peerbox", "--kill").returncode)
         self.assertIn("new newws --kill ", self.peer_calls())
         self.assertFalse((self.tmp / "remote-root").exists(), "a checkout was made here for the peer")
 
     def test_zed_opens_the_peers_new_workspace_from_here(self):
-        cp = self._wk("new", "newws", "--target", "peerbox", "--no-wait", "--zed", "--dry-run")
+        cp = self._wk("new", "newws", "--on", "peerbox", "--no-wait", "--zed", "--dry-run")
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertEqual(self.peer_calls(), [], "a dry run hands nothing over")
         self.assertRegex(cp.stdout, r"would run: .* new newws --no-wait")
         self.assertRegex(cp.stdout, r"would run: \S*/cmd/zed newws")
 
     def test_a_refused_creation_is_the_peers_refusal(self):
-        cp = self._wk("new", "refusedws", "--target", "peerbox")
+        cp = self._wk("new", "refusedws", "--on", "peerbox")
         self.assertEqual(cp.returncode, 3, cp.stdout)
         self.assertIn("peerbox did not create 'refusedws'; what its own wk said is above.", cp.stdout)
 
     def test_this_machine_named_as_a_peer_is_its_own_default(self):
         (self.root / "machines" / "me.conf").write_text("kind=peer\npeer=1\nlocal=1\n")
-        reg = targets.Registry(self.root, env=dict(os.environ, **self.env()), machine=Fake("host"))
+        reg = places.Registry(self.root, env=dict(os.environ, **self.env()), machine=Fake("host"))
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
-            workspace.new_front(reg, None, "newws", {"target": "me"})
+            workspace.new_front(reg, None, "newws", {"place": "me"})
         self.assertIn("'me' is this machine, and its workspaces are made at its own default", err.getvalue())
         self.assertEqual(reg.machine.effects, [])
 
@@ -220,14 +220,14 @@ class TestPeerDelegation(PeerFixture):
                 (("enter", "peerws", "--", "bash", "-lc", "true"), "enter peerws -- bash -lc true "),
                 (("sync", "peerws"), "sync peerws "),
                 (("doctor", "peerws"), "doctor peerws "),
-                (("key", "push", "on", "--target", "peerbox", "--yes"), "key push on yes=1 "),
-                (("key", "push", "status", "--target", "peerbox"), "key push status ")]
+                (("key", "push", "on", "--on", "peerbox", "--yes"), "key push on yes=1 "),
+                (("key", "push", "status", "--on", "peerbox"), "key push status ")]
         for argv, asked in steps:
             with self.subTest(argv=argv):
                 cp = self._wk(*argv)
                 self.assertEqual(cp.returncode, 0, cp.stdout)
                 self.assertIn(asked, self.peer_calls())
-        cp = self._wk("ls", "--json", extra_env={"WK_TARGET": "peerbox"})
+        cp = self._wk("ls", "--json", extra_env={"WK_PLACE": "peerbox"})
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("ls --continued --json ", self.peer_calls())
 

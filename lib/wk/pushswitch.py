@@ -29,12 +29,12 @@ class Push:
     def __init__(self, reg, sec, clock, out=None):
         self.reg, self.sec, self.clock = reg, sec, clock
         self.out = out or sys.stdout
-        self.target_name = reg.default()
+        self.place_name = reg.default()
         try:
-            self.target = reg.load(self.target_name)
+            self.driver = reg.load(self.place_name)
         except LookupError:
-            self.target = None
-        self.ws_sock = self.target.agent_sock() if self.target else None
+            self.driver = None
+        self.ws_sock = self.driver.agent_sock() if self.driver else None
         self.sock, self.pat, self.bz = sec.machine_sock(), sec.machine_pat(), sec.machine_bugzilla_key()
         self.guest_live = False
         self.in_vm = store.in_vm(reg.env) and not sec.macos
@@ -48,9 +48,9 @@ class Push:
             rc = max(rc, self.converge_guests(action))
         return rc
 
-    def session_targets(self):
-        """Every target this machine holds workspaces on, each of which `on` would hand the keys: the macOS guests too."""
-        out = [self.target] if self.target else []
+    def session_drivers(self):
+        """Every place this machine holds workspaces on, each of which `on` would hand the keys: the macOS guests too."""
+        out = [self.driver] if self.driver else []
         if self.sec.macos and self.reg.vm_listed():
             try:
                 out.append(self.reg.load("vm"))
@@ -66,8 +66,8 @@ class Push:
         return [p for p in r.out.replace("\r", "").split() if p.isdigit()]
 
     def agent_sessions(self):
-        """(target, workspace, pids) for each workspace with a claude process in it, pids None where it could not be asked."""
-        found = [(t, ws, self.agent_pids(t, ws)) for t in self.session_targets() for ws, _ in t.list() if ws]
+        """(place, workspace, pids) for each workspace with a claude process in it, pids None where it could not be asked."""
+        found = [(t, ws, self.agent_pids(t, ws)) for t in self.session_drivers() for ws, _ in t.list() if ws]
         return [(t, ws, pids) for t, ws, pids in found if pids is None or pids]
 
     def end_agent_sessions(self, sessions):
@@ -120,16 +120,16 @@ class Push:
         # Ending a session is `on`'s one destructive effect, and past this gate none is left to end.
         act.nothing_to_ask()
 
-    def require_agent_target(self):
+    def require_agent_driver(self):
         if self.ws_sock:
             return
         warn("'%s' is a build box: it holds no deploy key, so there is no switch here.\n    A push is made from the workstation, "
-             "with the switch there:  wk pr open <workspace>" % self.target_name)
+             "with the switch there:  wk pr open <workspace>" % self.place_name)
         raise Refused(NO_SWITCH)
 
     def switch_on(self):
         sec = self.sec
-        self.require_agent_target()
+        self.require_agent_driver()
         self.end_sessions_first(self.agent_sessions())
         if not sec.agent_answers(self.sock):
             warn("no ssh-agent answers at %s on the machine that runs the\n    workspaces, so there is nothing to load the deploy "
@@ -170,7 +170,7 @@ class Push:
 
     def switch_off(self):
         sec = self.sec
-        self.require_agent_target()
+        self.require_agent_driver()
         sec.agent_clear(self.sock)
         sec.cred_clear(self.pat)
         sec.cred_clear(self.bz)
@@ -337,22 +337,22 @@ class FanOut:
         self.row(record.machine_name(self.reg.env, self.reg.machine), r.out)
         return r.rc
 
-    def run(self, target):
-        if target == "--all":
+    def run(self, on):
+        if on == "--all":
             rc = self.here()
             for m in self.reg.machines():
                 rc = max(rc, self.one(m))
         else:
-            rc = self.one(target)
+            rc = self.one(on)
         if self.unasked:
-            warn("not asked: %s -- the keys there are wherever they were, which\n    is not 'off'. 'wk key push %s --target <machine>' "
+            warn("not asked: %s -- the keys there are wherever they were, which\n    is not 'off'. 'wk key push %s --on <machine>' "
                  "once each one answers." % (" ".join(self.unasked), self.action))
             return UNASKED
         return rc
 
 
-def main(root, words, target, reg, clock, out=None):
-    # Refused before the target loads: in a workspace the default is `local`, which names no switch.
+def main(root, words, on, reg, clock, out=None):
+    # Refused before the place loads: in a workspace the default is `local`, which names no switch.
     if reg.in_workspace():
         die("'wk key push' throws the credential switch, and this is workspace '%s'.\n    The keys and the token are on the host and "
             "a workspace cannot reach either --\n    which is what makes the switch a switch. Run it on the host."
@@ -360,6 +360,6 @@ def main(root, words, target, reg, clock, out=None):
     action = words[0] if words else "status"
     if action not in PUSH_VERBS:
         die("'%s' is not a verb of wk key push: on, off or status; see wk key -h" % action)
-    if target:
-        return FanOut(reg, action, out or sys.stdout).run(target)
+    if on:
+        return FanOut(reg, action, out or sys.stdout).run(on)
     return Push(reg, secrets.Secrets(root, reg.env, reg.machine), clock, out).run(action)

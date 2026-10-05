@@ -8,7 +8,7 @@ protection.
 Consequences:
 
 - **Never build, test, or benchmark WebKit here.** Drive a workspace instead:
-  `wk new <name>`, `wk build <name> <config>`, `wk test <name>`, `wk rm <name>`.
+  `wk new <name>`, `wk build <name> <preset>`, `wk test <name>`, `wk rm <name>`.
   `wk help` lists everything.
 - **Do not weaken the sandbox to make something work.** If a workspace cannot
   do something, that is usually the boundary working; the fix belongs in
@@ -18,7 +18,7 @@ Consequences:
   repo and apply inside workspaces.
 
 - **Claude only ever runs inside a workspace.** The in-workspace interface --
-  `wk build <config>`, `wk run -- <args>`, `wk test <args>`, no workspace
+  `wk build <preset>`, `wk run -- <args>`, `wk test <args>`, no workspace
   name -- is load-bearing, not a convenience: it carries the job-count and
   nice-level policy, and hand-rolling `build-webkit` around it is forbidden.
 - **Never edit wk-tools while a `wk` command is running**, here or on a
@@ -50,7 +50,7 @@ reached.
 
 So never run one in the foreground. Two ways, and prefer the first:
 
-- **`wk build <ws> <config> --detach`** returns in a fraction of a second and
+- **`wk build <ws> <preset> --detach`** returns in a fraction of a second and
   leaves the build running *on the machine that builds it* — in the podman VM
   for a container workspace, on the build machine itself for a remote one. No
   ssh session has to stay up, so nothing this end does can kill it. Then poll
@@ -82,4 +82,4 @@ them in the background too rather than watching a tool call time out.
 
 `wk status` reporting `alive: [N/M] (last output Xs ago)` just after a kill is
 not evidence the build survived; in-flight compile jobs drain for a minute or
-more. Confirm with `pgrep -c ninja` on the target before believing it.
+more. Confirm with `pgrep -c ninja` on the build machine before believing it.

@@ -1,4 +1,4 @@
-# The guard every heavy build step inside a target runs under -- guard_jobs, guard_exec, guard_run -- sourced from /opt/wk-tools inside the target. bash 3.2, this running in macOS guests as well as on Linux. guard_jobs clamps to the target's own cgroup memory limit, the authoritative ceiling: inside a container the kernel reports the whole machine's MemAvailable.
+# The guard every heavy build step inside a workspace runs under -- guard_jobs, guard_exec, guard_run -- sourced from /opt/wk-tools inside the workspace. bash 3.2, this running in macOS guests as well as on Linux. guard_jobs clamps to the workspace's own cgroup memory limit, the authoritative ceiling: inside a container the kernel reports the whole machine's MemAvailable.
 
 guard_jobs() {
     local jobs="$1" limit max_jobs

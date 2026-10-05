@@ -1,4 +1,4 @@
-"""`wk status <ws> --log` (cmd/status, driven directly with WK_NAME/WK_TARGET/WK_VM_STORE): build.log, else the image stage
+"""`wk status <ws> --log` (cmd/status, driven directly with WK_NAME/WK_PLACE/WK_VM_STORE): build.log, else the image stage
 log its builder wrote under home/."""
 import unittest
 
@@ -9,7 +9,7 @@ CMD_STATUS = REPO / "cmd" / "status"
 
 class TestLogsPicksTheRightFile(WkTest):
     def _run(self, name, store, args=()):
-        env = {"WK_NAME": name, "WK_TARGET": "vm", "WK_VM_STORE": str(store)}
+        env = {"WK_NAME": name, "WK_PLACE": "vm", "WK_VM_STORE": str(store)}
         return bash(f'exec "{CMD_STATUS}" --log {" ".join(args)}', env=env)
 
     def test_with_no_build_log_an_image_stage_log_is_shown_and_named(self):
@@ -32,11 +32,11 @@ class TestLogsPicksTheRightFile(WkTest):
         home = wsdir / "home"
         home.mkdir(parents=True)
         (home / "yocto-image.log").write_text("stale image-stage output\n")
-        (wsdir / "build.log").write_text("ninja: building targets\n")
+        (wsdir / "build.log").write_text("ninja: building places\n")
         cp = self._run(name, self.tmp)
         out = cp.stdout + cp.stderr
         self.assertEqual(cp.returncode, 0, out)
-        self.assertIn("ninja: building targets", out, out)
+        self.assertIn("ninja: building places", out, out)
         self.assertNotIn("stale image-stage output", out, out)
 
     def test_neither_log_names_both_remedies(self):

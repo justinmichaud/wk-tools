@@ -1,6 +1,6 @@
 """`wk build`: help/list surface, the reproducible `running:` command line,
-per-target build_args defaults (and --no-defaults), and lib/wk/resources.py's
-readings. The configs themselves are tests/test_buildconf.py's. Each docstring is the phrase of the behaviour it
+per-place build_args defaults (and --no-defaults), and lib/wk/resources.py's
+readings. The presets themselves are tests/test_presets.py's. Each docstring is the phrase of the behaviour it
 checks."""
 import contextlib
 import io
@@ -12,10 +12,10 @@ import unittest
 from pathlib import Path
 
 from tests.support import (FLEET_ENV, REAL_MACHINES, REPO, WkTest, fake_workspace,
-                           container_side, requires_container_target, run)
+                           container_side, requires_container_place, run)
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import buildconf, fleet, resources, targets  # noqa: E402
+from wk import fleet, places, presets, resources  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
@@ -53,7 +53,7 @@ class TestDryRunRunningLine(WkTest):
             self.assertNotIn("--no-defaults", running)
 
 
-class TestTargetBuildArgsDefaults(unittest.TestCase):
+class TestPlaceBuildArgsDefaults(unittest.TestCase):
 
     def test_load_target_reads_WK_BUILD_ARGS_from_conf(self):
         name = "wk-test-build-args-probe"
@@ -65,7 +65,7 @@ class TestTargetBuildArgsDefaults(unittest.TestCase):
             'host=nonexistent.invalid\n'
             'build_args="--no-fatal-warnings --extra-flag"\n'
         )
-        t = targets.Registry(REPO, dict(FLEET_ENV, WK_MACHINES_DIR=str(registry)), Fake()).load(name)
+        t = places.Registry(REPO, dict(FLEET_ENV, WK_MACHINES_DIR=str(registry)), Fake()).load(name)
         self.assertEqual("--no-fatal-warnings --extra-flag", t.env["WK_BUILD_ARGS"])
 
 
@@ -85,10 +85,10 @@ class TestStaleLoadAverage(unittest.TestCase):
 
 class TestARealHostConfReachesTheBuildFlags(WkTest):
 
-    def _cmake(self, target, config="jsc-release"):
+    def _cmake(self, driver, preset="jsc-release"):
         env = dict(FLEET_ENV, WK_MACHINES_DIR=str(REAL_MACHINES), XDG_STATE_HOME=str(self.tmp / "state"))
-        t = targets.Registry(REPO, env, Fake()).load(target)
-        return t.kind, buildconf.resolve(config, "linux", t.kind, t.env).cmake
+        t = places.Registry(REPO, env, Fake()).load(driver)
+        return t.kind, presets.resolve(preset, "linux", t.kind, t.env).cmake
 
     def test_buildbox4s_conf_turns_libcxx_off_and_libbacktrace_with_it(self):
         kind, cmake = self._cmake("buildbox4")
@@ -101,7 +101,7 @@ class TestARealHostConfReachesTheBuildFlags(WkTest):
         self.assertIn("-stdlib=libc++", cmake)
 
     def test_every_host_conf_carries_a_value_the_loader_accepts(self):
-        for name in fleet.Fleet(REPO, FLEET_ENV).names(fleet.TARGET_KINDS):
+        for name in fleet.Fleet(REPO, FLEET_ENV).names(fleet.PLACE_KINDS):
             with self.subTest(machine=name):
                 self._cmake(name)
 
@@ -171,7 +171,7 @@ class TestAReadingTheMachineWillNotGive(WkTest):
 
 class TestSdkImageCarriesLibbacktrace(unittest.TestCase):
 
-    @requires_container_target()
+    @requires_container_place()
     def test_sdk_image_has_libbacktrace(self):
         img_cp = container_side(
             "podman images --format '{{.Repository}}:{{.Tag}}' "
@@ -179,14 +179,14 @@ class TestSdkImageCarriesLibbacktrace(unittest.TestCase):
         )
         img = img_cp.stdout.strip()
         if not img:
-            self.skipTest("no ghcr.io/igalia/wkdev-sdk image pulled for the container target")
+            self.skipTest("no ghcr.io/igalia/wkdev-sdk image pulled for the container place")
         cp = container_side(
             f"podman run --rm {img} sh -c "
             "'pkg-config --exists libbacktrace || test -f /usr/include/backtrace.h'"
         )
         self.assertEqual(cp.returncode, 0,
             f"the wkdev SDK image ({img}) carries no libbacktrace -- "
-            f"USE_LIBBACKTRACE=ON (lib/wk/buildconf.py, container/vm/local kinds) "
+            f"USE_LIBBACKTRACE=ON (lib/wk/presets.py, container/vm/local kinds) "
             f"would fail to configure: {cp.stdout}{cp.stderr}")
 
 

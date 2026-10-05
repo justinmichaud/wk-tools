@@ -1,5 +1,5 @@
 """`wk rm` refuses to take a bench task no export holds as it is now, naming `wk bench export <task>`; `--force`
-crosses it. "Exported" is read off the zips themselves. Driven through ./wk against a remote target that is this machine."""
+crosses it. "Exported" is read off the zips themselves. Driven through ./wk against a remote place that is this machine."""
 import sys
 import types
 from unittest import mock
@@ -10,7 +10,7 @@ from tests.test_bench_task import TASK
 from tests.test_rm_remote import _LOCAL_CONF
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import machine, targets, workspace  # noqa: E402
+from wk import machine, places, workspace  # noqa: E402
 from wk.bench import cli, record  # noqa: E402
 from wk.machine import Fake, Local  # noqa: E402
 
@@ -25,7 +25,7 @@ class RmResultsTest(WkTest):
         (store / "ws" / "w").mkdir(parents=True)
         (registry / "fakebox.conf").write_text(_LOCAL_CONF.format(root=self.root, store=store))
         self.home = self.tmp / "home"
-        self.env = {"WK_MACHINES_DIR": str(registry), "XDG_STATE_HOME": str(self.tmp / "state"), "WK_TARGET": "fakebox",
+        self.env = {"WK_MACHINES_DIR": str(registry), "XDG_STATE_HOME": str(self.tmp / "state"), "WK_PLACE": "fakebox",
                     "HOME": str(self.home), "WK_YES": "1"}
         self.task = complete_task(self.root / "ws" / "w" / "bench")
 
@@ -108,7 +108,7 @@ class TestTheEvidenceIsReadOrRefused(WkTest):
 
     def test_a_build_boxs_tasks_are_in_its_workspace_directory_there(self):
         box = types.SimpleNamespace(peer=False, machine="ssh", ws_dir_there=lambda ws: "/srv/wk/ws/" + ws)
-        self.assertEqual(targets.Remote.results(box, "w"), ("ssh", "/srv/wk/ws/w/bench"))
+        self.assertEqual(places.Remote.results(box, "w"), ("ssh", "/srv/wk/ws/w/bench"))
 
     def test_a_peers_tasks_are_left_to_the_peers_own_rm(self):
         peer = types.SimpleNamespace(peer=True, results=lambda ws: self.fail("a peer's tasks were read from here"))
@@ -117,7 +117,7 @@ class TestTheEvidenceIsReadOrRefused(WkTest):
 
 
 class _Holder:
-    """A target whose workspace's bench tasks are read through another machine, the way a Mac reads the podman machine's."""
+    """A place whose workspace's bench tasks are read through another machine, the way a Mac reads the podman machine's."""
 
     name = "container"
 

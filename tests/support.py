@@ -2,7 +2,7 @@
 
 Run the whole suite:      python3 tests/run.py -v      (wk selftest)
 Run one module:            python3 -m unittest tests.test_dispatcher -v
-A live test (requires_container_target and the other gates below) runs only when
+A live test (requires_container_place and the other gates below) runs only when
 the runner selected the live tier and its machine is up; it never starts
 one. Every test that touches real state cleans up after itself.
 """
@@ -25,7 +25,7 @@ REPO = Path(__file__).resolve().parent.parent
 WK = REPO / "wk"
 
 # The suite is fleet-blind: BLIND_FLEET is this repo's machines less every build machine and peer, so no test
-# reaches a real target. A test that wants a fleet passes its own directory, NO_REGISTRY, or REAL_MACHINES.
+# reaches a real place. A test that wants a fleet passes its own directory, NO_REGISTRY, or REAL_MACHINES.
 REAL_MACHINES = REPO / "machines"
 NO_REGISTRY = tempfile.mkdtemp(prefix="wk-test-no-registry-")
 BLIND_FLEET = tempfile.mkdtemp(prefix="wk-test-blind-fleet-")
@@ -42,7 +42,7 @@ for _entry in (_REAL_CONFIG.iterdir() if _REAL_CONFIG.is_dir() else ()):
         os.symlink(_entry, os.path.join(NO_CONFIG, _entry.name))
 atexit.register(shutil.rmtree, NO_CONFIG, True)
 FLEET_ENV = {"XDG_CONFIG_HOME": NO_CONFIG}
-# The name a fake target conf gives this host (hostname=) to be its far end.
+# The name a fake place conf gives this host (hostname=) to be its far end.
 THIS_HOST = subprocess.run(["hostname", "-s"], stdout=subprocess.PIPE, universal_newlines=True).stdout.strip().lower()
 
 
@@ -110,7 +110,7 @@ def _clean_env(extra=None, wk_root=False):
     per-invocation variables (DISPATCH_VARS above) and anything else that
     would make the command under test think it is already a workspace or
     already pointed at a scratch store, and with a fleet of no build machine
-    or peer (BLIND_FLEET above) so nothing reaches a real target, and a scratch
+    or peer (BLIND_FLEET above) so nothing reaches a real place, and a scratch
     keyring (NO_SECRETS above) so nothing reads or writes the real
     ~/.config/wk/secrets, plus whatever the caller adds -- including a
     WK_MACHINES_DIR or WK_HOST_SECRETS of its own."""
@@ -122,7 +122,7 @@ def _clean_env(extra=None, wk_root=False):
     env["XDG_STATE_HOME"] = NO_STATE
     env["WK_MACHINES_DIR"] = BLIND_FLEET
     env["XDG_CONFIG_HOME"] = NO_CONFIG
-    env["WK_REMOTE_MARKER"] = os.path.join(NO_STATE, "no-wk-remote")   # a real ~/.wk-remote makes this host a target's far end
+    env["WK_REMOTE_MARKER"] = os.path.join(NO_STATE, "no-wk-remote")   # a real ~/.wk-remote makes this host a place's far end
     env["WK_HOST_SECRETS"] = NO_SECRETS
     env["WK_GITHUB_API"] = NO_GITHUB
     env["WK_TAILNET_API"] = NO_GITHUB
@@ -199,10 +199,10 @@ def run(*args, env=None, check=False, timeout=120, input=None):
 
 def as_dispatched(cmd, argv, env):
     """argv as the dispatcher hands it to cmd/<cmd> (lib/wk/dispatch.py): the verb first, and a
-    declared build config -- `--config <c>`, or build's positional -- lifted into env's WK_CONFIG."""
+    declared build preset -- `--preset <p>`, or build's positional -- lifted into env's WK_PRESET."""
     sys.path.insert(0, str(REPO / "lib"))
     from wk import decl, dispatch
-    env.pop("WK_CONFIG", None)
+    env.pop("WK_PRESET", None)
     d = decl.Decl(REPO / "cmd" / cmd)
     inv = dispatch.Invocation(cmd, d, list(argv))
     args, joined, valued = inv.verb_first(), [], d.valued_opts()
@@ -212,7 +212,7 @@ def as_dispatched(cmd, argv, env):
             joined += [a] + args
             break
         joined.append(a + "=" + args.pop(0) if a in valued and args else a)
-    rest = inv.take_config(joined, env)
+    rest = inv.take_preset(joined, env)
     return dispatch.argv_split(d.opts_for(rest), rest)
 
 
@@ -315,7 +315,7 @@ def guest_step(env, step, ws="demo", secrets=None):
     import types
     from unittest import mock
     sys.path.insert(0, str(REPO / "lib"))
-    from wk import act, guest, targets
+    from wk import act, guest, places
     from wk.secrets import Secrets
     from wk.store import Store
     err = io.StringIO()
@@ -325,7 +325,7 @@ def guest_step(env, step, ws="demo", secrets=None):
         for name, fn in (secrets or {}).items():
             stack.enter_context(mock.patch.object(Secrets, name, fn))
         stack.enter_context(contextlib.redirect_stderr(err))
-        vm = targets.Registry(str(REPO), env=dict(os.environ)).load("vm")
+        vm = places.Registry(str(REPO), env=dict(os.environ)).load("vm")
         try:
             rc = 0 if getattr(guest.Guest(guest.Host(vm), ws, vm.guest_of(vm.vm(ws))), step)() else 1
         except act.Refused as e:
@@ -421,7 +421,7 @@ def glob_bait(patterns):
 def podman_vm_running(machine="wk"):
     try:
         cp = subprocess.run(
-            [sys.executable, "-m", "wk.targets", "podman-vm", "State"],
+            [sys.executable, "-m", "wk.places", "podman-vm", "State"],
             capture_output=True, text=True, timeout=15,
             env=dict(os.environ, PYTHONPATH=str(REPO / "lib"), WK_MACHINE=machine),
         )
@@ -484,12 +484,12 @@ def _live(need, *args):
     return decorate
 
 
-def requires_container_target():
-    """Gate for a test that needs the real container target: on macOS the
+def requires_container_place():
+    """Gate for a test that needs the real container place: on macOS the
     podman VM this repo drives must already be up (never started here), on
     Linux podman itself; skipped while the live tier is out, and while this
     machine has a build on its books."""
-    return _live(_needs_container_target)
+    return _live(_needs_container_place)
 
 
 def requires_machine(name, timeout=5):
@@ -500,16 +500,16 @@ def requires_machine(name, timeout=5):
 
 
 def container_target_missing():
-    """Why this machine has no real container target to test against, or None."""
+    """Why this machine has no real container place to test against, or None."""
     if sys.platform == "darwin":
         return None if podman_vm_running("wk") else "podman machine 'wk' is not running"
     return None if shutil.which("podman") else "podman is not installed"
 
 
 @functools.lru_cache(maxsize=None)
-def _needs_container_target():
+def _needs_container_place():
     if not live_selected():
-        return "live tier not selected: needs the container target"
+        return "live tier not selected: needs the container place"
     return container_target_missing() or _build_in_the_way()
 
 
@@ -590,7 +590,7 @@ def stub_path(scripts):
 
 
 def container_side(command, timeout=60):
-    """Run one shell command where the container target keeps its store and its
+    """Run one shell command where the container place keeps its store and its
     drivers: inside the podman VM on macOS, on this host on Linux. For a test
     that has to kill a real driver pid, or read the store, without forwarding
     a second whole `wk` command to do it."""
@@ -599,7 +599,7 @@ def container_side(command, timeout=60):
 
 
 def container_store():
-    """The container target's store as container_side sees it."""
+    """The container place's store as container_side sees it."""
     if sys.platform == "darwin":
         return "/var/lib/wk"
     sys.path.insert(0, str(REPO / "lib"))

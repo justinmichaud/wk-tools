@@ -32,7 +32,7 @@ rewritten file resumes a running process mid-word. Check `wk status` first.
   A branch nothing exercises is deleted, not kept in case.
 - **No stored copy of a recomputable fact.** A cache is extra state that drifts
   and a second code path -- the hit and the miss -- that both need tests. A list
-  of workspaces, a workspace's target, a machine's reachability, a probe's
+  of workspaces, a workspace's place, a machine's reachability, a probe's
   result: recomputed from evidence on every read. Records of a user's choice,
   locks, logs and measurements are not caches.
 - **Measure before theorising.** A fault is fixed at its root after it has been
@@ -153,7 +153,7 @@ hardware` derives each board's arrangement.
 ## Layering
 
 `home` / `lab` / `wk` / `field` / `stock`, one-way dependency: the lab layer
-(targets, boot, image, bench mechanics) knows nothing about WebKit. No CLI is
+(places, boot, image, bench mechanics) knows nothing about WebKit. No CLI is
 minted until a layer has a second consumer.
 
 ## One path, not two
@@ -180,7 +180,7 @@ test or it refuses loudly; it never silently degrades.
 - **`tests/` is the test authority, and `wk selftest` runs it.** Real tests
   (stdlib `unittest`), one per behaviour: a dispatcher rule, a command's
   refusal, a lock, a status file, a workspace lifecycle against the real
-  container target. A test creates what it needs and removes it in teardown;
+  container place. A test creates what it needs and removes it in teardown;
   a test that needs a VM, a machine or a board skips by name when that is
   absent. There is no test plan document: a behaviour is tested or it is owed
   work in a handoff.

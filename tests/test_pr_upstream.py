@@ -211,17 +211,17 @@ class TestPrOpenTarget(unittest.TestCase):
         for remote, _ in git.REMOTES:
             git_("update-ref", f"refs/remotes/{remote}/main", head, cwd=self.src)
 
-    def target(self, upstream_remote, branch):
+    def driver(self, upstream_remote, branch):
         git_("checkout", "-q", "-b", branch, cwd=self.src)
         git_("branch", "-q", f"--set-upstream-to={upstream_remote}/main", branch, cwd=self.src)
         return list(CMD_PR_MODULE.pr_open_target(self.src))
 
     def test_a_webkit_branch_opens_against_webkit_from_the_webkit_fork(self):
-        self.assertEqual(self.target("origin", "eng/x"),
+        self.assertEqual(self.driver("origin", "eng/x"),
                          ["WebKit/WebKit", "justinmichaud:eng/x", "fork", "eng/x"])
 
     def test_a_wpe_branch_opens_against_wpewebkit_from_the_wpe_fork(self):
-        self.assertEqual(self.target("wpe", "eng/y"),
+        self.assertEqual(self.driver("wpe", "eng/y"),
                          ["WebPlatformForEmbedded/WPEWebKit", "justinmichaud:eng/y", "forkwpe", "eng/y"])
 
 
@@ -256,12 +256,12 @@ class TestTheDirectSpellingEscapesEveryWiredRewrite(unittest.TestCase):
 class Checkout(Wired):
 
     def run_checkout(self, spec, found=None, remotes=None, force=False):
-        target = Here(self.src)
+        driver = Here(self.src)
         rows = found if found is not None else [("WebKit", str(self.fork), git_("rev-parse", "topic", cwd=self.fork))]
         with mock.patch.object(pr, "branch_repos", lambda *a: rows), mock.patch.dict("os.environ", {"WK_FORCE": "1" if force else ""}), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
-            pr.checkout(target, Local(), "ws", spec, remotes or self.remotes)
-        return target, err.getvalue()
+            pr.checkout(driver, Local(), "ws", spec, remotes or self.remotes)
+        return driver, err.getvalue()
 
     def upstream(self, branch="topic"):
         return (git_("config", "--get", f"branch.{branch}.remote", cwd=self.src),
@@ -272,8 +272,8 @@ class TestThePrFetchRetiresNothing(Checkout):
 
 
     def test_the_one_fetch_is_by_the_direct_url_with_no_prune(self):
-        target, _ = self.run_checkout("justinmichaud:topic")
-        fetches = [a for a in target.ran if "fetch" in a]
+        driver, _ = self.run_checkout("justinmichaud:topic")
+        fetches = [a for a in driver.ran if "fetch" in a]
         self.assertEqual(len(fetches), 1, fetches)
         self.assertIn("--no-prune", fetches[0])
         self.assertIn(str(self.dir / "fork"), fetches[0])
@@ -414,7 +414,7 @@ class TestThePrBranchIsLeftPushable(Pushable):
         other = self.dir / "alice.git"
         git_("clone", "-q", "--bare", str(self.fork), str(other))
         (self.dir / "alice").symlink_to(other)
-        target, err = self.run_checkout("alice:topic", found=[("WPEWebKit", str(other), git_("rev-parse", "topic", cwd=other))])
+        driver, err = self.run_checkout("alice:topic", found=[("WPEWebKit", str(other), git_("rev-parse", "topic", cwd=other))])
         self.assertEqual(git_("config", "--get", "remote.alice-wpewebkit.url", cwd=self.src), str(other))
         self.assertEqual(self.upstream(), ("alice-wpewebkit", "refs/heads/topic"))
         self.assertEqual(self.resolves(), "alice-wpewebkit/topic")
@@ -440,20 +440,20 @@ class TestThePrBranchIsLeftPushable(Pushable):
         self.assertEqual(cp.returncode, 1, cp.stdout)
 
     def test_no_such_pull_request_is_refused_before_anything_moves(self):
-        target = Here(self.src)
+        driver = Here(self.src)
         with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
-            pr.checkout(target, Local(), "ws", "999", (("origin", str(self.fork)),))
+            pr.checkout(driver, Local(), "ws", "999", (("origin", str(self.fork)),))
         self.assertIn("no pull request #999", err.getvalue())
-        self.assertEqual(target.ran, [])
+        self.assertEqual(driver.ran, [])
 
     def test_a_branch_in_both_projects_is_refused_by_name(self):
         rows = [("WebKit", "u1", "a"), ("WPEWebKit", "u2", "b")]
-        target = Here(self.src)
+        driver = Here(self.src)
         with mock.patch.object(pr, "branch_repos", lambda *a: rows), contextlib.redirect_stderr(io.StringIO()) as err, \
                 self.assertRaises(act.Refused):
-            pr.checkout(target, Local(), "ws", "justinmichaud:topic")
+            pr.checkout(driver, Local(), "ws", "justinmichaud:topic")
         self.assertIn("exists in more than one of justinmichaud's repositories", err.getvalue())
-        self.assertEqual(target.ran, [])
+        self.assertEqual(driver.ran, [])
 
     def test_the_retarget_points_a_branch_the_same_way(self):
         git_("fetch", "-q", "--no-prune", str(self.dir / "fork"), "refs/heads/topic:refs/remotes/fork/topic", cwd=self.src)

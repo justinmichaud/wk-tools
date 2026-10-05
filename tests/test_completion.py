@@ -131,7 +131,7 @@ printf '%s\\n' "${{COMPREPLY[@]}}"
 
 
     def test_config_flag_completes_build_configs(self):
-        reply = self._complete([str(WK), "test", "somews", "--config", ""], 4)
+        reply = self._complete([str(WK), "test", "somews", "--preset", ""], 4)
         self.assertIn("jsc-release", reply)
         self.assertIn("mac-release", reply)
 

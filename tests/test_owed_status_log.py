@@ -25,7 +25,7 @@ GOOD_PROFILE = {
 
 class TestLogsShowsNoneOnAGoodBuild(WkTest):
     def _run(self, name, store):
-        env = {"WK_NAME": name, "WK_TARGET": "vm", "WK_VM_STORE": str(store)}
+        env = {"WK_NAME": name, "WK_PLACE": "vm", "WK_VM_STORE": str(store)}
         return bash(f'exec "{CMD_STATUS}" --log', env=env)
 
     def test_a_message_containing_the_word_error_mid_sentence_is_not_reported(self):
@@ -33,7 +33,7 @@ class TestLogsShowsNoneOnAGoodBuild(WkTest):
         wsdir = self.tmp / "ws" / name
         wsdir.mkdir(parents=True)
         (wsdir / "build.log").write_text(
-            "Building target foo\n"
+            "Building place foo\n"
             "-- no error: handling here, everything is fine\n"
             "ninja: no work to do.\n"
         )
@@ -49,7 +49,7 @@ class TestLogsShowsNoneOnAGoodBuild(WkTest):
         wsdir = self.tmp / "ws" / name
         wsdir.mkdir(parents=True)
         (wsdir / "build.log").write_text(
-            "Building target foo\n"
+            "Building place foo\n"
             "foo.cpp:10:5: error: use of undeclared identifier 'x'\n"
             "ninja: build stopped: subcommand failed.\n"
         )
@@ -73,7 +73,7 @@ class TestTheReadingsTravelWithTheBuild(WkTest):
             if pins is not None:
                 (products / "wk-payload-pins").write_text(pins)
             cp = bash(f'exec "{CMD_STATUS}" --log --gates',
-                      env=ws.env({"WK_NAME": "selftest-ws", "WK_TARGET": "local"}))
+                      env=ws.env({"WK_NAME": "selftest-ws", "WK_PLACE": "local"}))
             return cp, cp.stdout + cp.stderr
 
     def test_a_build_with_no_readings_says_which_configs_have_them(self):

@@ -1,4 +1,4 @@
-"""The shell preludes cmd/run, cmd/gui, cmd/test and lib/wk/profile.py put in front of a target command: the loader path, prepended so the wkdev image's own jhbuild/libwpe prefix survives, and the lldb that starts (run, not found: the image's /opt/swift lldb links a libxml2 it lacks), pinned to the parent after ~/.lldbinit; and the checks a recorder needs before it runs: the tool, and the kernel's perf events."""
+"""The shell preludes cmd/run, cmd/gui, cmd/test and lib/wk/profile.py put in front of a command run in a workspace: the loader path, prepended so the wkdev image's own jhbuild/libwpe prefix survives, and the lldb that starts (run, not found: the image's /opt/swift lldb links a libxml2 it lacks), pinned to the parent after ~/.lldbinit; and the checks a recorder needs before it runs: the tool, and the kernel's perf events."""
 
 import os
 import shlex
@@ -29,25 +29,25 @@ def lldb_waiting(run, log, attach, *commands):
     return '%s\n( sleep 2; %s >%s 2>&1 ) &\nexec "$LLDB" %s %s' % (LLDB_PRELUDE, run, log, LLDB_PIN_OPTS, opts)
 
 
-def require_tool(target, name, tool):
-    if not target.exec(name, list(HAVE) + [tool]).ok:
+def require_tool(driver, name, tool):
+    if not driver.exec(name, list(HAVE) + [tool]).ok:
         die("%s is not installed in '%s'. It is provisioning, not a per-run step:\n"
             "        wk enter %s     and install it there" % (tool, name, name))
 
 
-def _paranoid(target, name):
-    r = target.exec(name, ["cat", "/proc/sys/kernel/perf_event_paranoid"])
+def _paranoid(driver, name):
+    r = driver.exec(name, ["cat", "/proc/sys/kernel/perf_event_paranoid"])
     par = "".join(c for c in r.out if c.isdigit() or c == "-")
     return int(par) if par.lstrip("-").isdigit() else None
 
 
-def perf_events(target, name, tool):
+def perf_events(driver, name, tool):
     """perf_event_paranoid at 1 or less, which rr, samply and sysprof need; the sysctl is not namespaced, so a container cannot set it."""
-    par = _paranoid(target, name)
+    par = _paranoid(driver, name)
     if par is not None and par > 1 and is_linux() and os.access(PRIV, os.X_OK):
         info("perf_event_paranoid is %d on this host -- asking the quiesce helper to unrestrict it" % par)
         Local().act_run(["sudo", "-n", PRIV, "perf-on"])
-        par = _paranoid(target, name)
+        par = _paranoid(driver, name)
     if par is None or par <= 1:
         return
     head = "perf_event_paranoid is %d in '%s', and %s needs 1 or less.\n" % (par, name, tool)
@@ -65,23 +65,23 @@ def perf_events(target, name, tool):
         "    Remedy:  ./setup --stage quiesce" % PRIV)
 
 
-def on_apple_cpu(target):
+def on_apple_cpu(driver):
     """A container on a macOS host runs in its podman machine, on the host's own CPU."""
-    return target.kind == "container" and (Store(target.env).macos_host or in_vm(target.env)) and os.uname().machine in ("arm64", "aarch64")
+    return driver.kind == "container" and (Store(driver.env).macos_host or in_vm(driver.env)) and os.uname().machine in ("arm64", "aarch64")
 
 
-def rr_ready(target, name):
-    if target.os() != "linux":
+def rr_ready(driver, name):
+    if driver.os() != "linux":
         die("rr records Linux processes only: it replays from ptrace and the CPU's perf counters,\n"
-            "    and '%s' runs %s. Debug it live instead:  --lldb" % (name, target.os()))
-    if on_apple_cpu(target):
+            "    and '%s' runs %s. Debug it live instead:  --lldb" % (name, driver.os()))
+    if on_apple_cpu(driver):
         die("rr does not support Apple Silicon CPUs (its docs: Intel, AMD and certain AArch64 server cores),\n"
             "    and '%s' runs in this Mac's podman machine, on its CPU. Debug it live instead:  --lldb,\n"
             "    or record in a workspace on a Linux build machine" % name)
     if not dry_run():
-        require_tool(target, name, "rr")
-        perf_events(target, name, "rr")
+        require_tool(driver, name, "rr")
+        perf_events(driver, name, "rr")
 
 
-def rr_trace_dir(target):
-    return "export _RR_TRACE_DIR=%s" % shlex.quote(target.home() + "/wk-rr")
+def rr_trace_dir(driver):
+    return "export _RR_TRACE_DIR=%s" % shlex.quote(driver.home() + "/wk-rr")
