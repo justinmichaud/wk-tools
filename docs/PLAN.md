@@ -1215,6 +1215,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | `wk doctor <board>` against a live board prints its tailnet names, its system and arm, and its governor and temperature, with the rows the unit half asserts on a fake | 5 | `unit doctor.TestDeviceRows`, `live doctor.device[<board>]` |
 | No lab module names WebKit or imports a wk or field module, and nothing but the CLI imports field: the bench pipeline, the image builders' WebKit stage, places' checkout/mirror names and the PR flow's credentials move into wk modules (the list is `OWED` in tests/test_lint_layering.py) | 5 | `lint.layering` |
 | `./setup --stage tools` on a bare macOS host downloads git-lfs at its pinned version, checks it against the release's sha256sums, and `wk doctor` then reports it present | 5 | `unit doctor.TestHostToolsGitLfs`, `live setup.git_lfs[macos]` |
+| Speedometer 3 under MiniBrowser runs without its `wakeLock` error: an upstream WebKit patch, landed last, after every other owed row | end | `live bench.speedometer3_wakelock[mbp]` |
 
 ### Decisions for the user
 
