@@ -935,6 +935,15 @@ class TestVmWrite(VmTest):
         self.assertIn("set WK_VM_STORE apart from WK_STORE", err)
         self.assertEqual(t.list(), [("mac", "running")])
 
+    def test_off_a_macos_host_the_vm_place_holds_no_name_and_refuses_to_be_driven(self):
+        with mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=False):
+            t = self.reg.load("vm")
+            self.assertFalse(self.reg.exists_on(t, "mac"))
+            self.assertFalse(self.reg.on_place("vm", "mac"))
+            err = self.refused(lambda: t.create("new"))
+        self.assertIn("exists only on a macOS host", err)
+        self.assertNotIn("WK_VM_STORE", err)
+
 
 class TestRemoteWrite(RemoteTest):
     def setUp(self):

@@ -842,12 +842,12 @@ def main(argv):
             name = cwd_workspace()
     if name:
         os.environ["WK_NAME"] = name
-        refuse_repo(inv, "local" if in_workspace() else resolved, name)
         asks = not d.lifecycle and base != "derived" and not in_workspace()
         if not d.lifecycle:
             os.environ["WK_PLACE"] = resolved
         if asks or d.ready:
             ask_place(inv, resolved, name, asks, d.ready)
+        refuse_repo(inv, "local" if in_workspace() else resolved, name)
     line = command_line(inv, args)
     os.execv(line[0], line)
 

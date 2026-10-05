@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 from tests.support import (
-    REAL_MACHINES, REPO, WkTest, fake_workspace, rand_suffix, run, stub_path,
+    REAL_MACHINES, REPO, WkTest, fake_workspace, rand_suffix, run, run_here, stub_path,
 )
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -163,11 +163,13 @@ class TestUnknownWorkspaceName(WkTest):
 
     def test_a_name_at_another_slot_is_refused_the_same_way(self):
         name = "nosuchws-" + rand_suffix()
-        cp = run("ai", "claude", name, env={"WK_PLACE": "vm"})
-        out = cp.stdout + cp.stderr
-        self.assertEqual(cp.returncode, 2, out)
-        self.assertIn(f"no such workspace: {name}", out)
-        self.assertIn("usage: wk ai", out)
+        for run_as in (run, run_here):
+            with self.subTest(run=run_as.__name__):
+                cp = run_as("ai", "claude", name, env={"WK_PLACE": "vm"})
+                out = cp.stdout + cp.stderr
+                self.assertEqual(cp.returncode, 2, out)
+                self.assertIn(f"no such workspace: {name}", out)
+                self.assertIn("usage: wk ai", out)
 
     @staticmethod
     def _takes(cmd):
@@ -175,6 +177,12 @@ class TestUnknownWorkspaceName(WkTest):
         return 0 if takes == "*" else int(takes)
 
     def test_every_command_refuses_a_name_no_workspace_answers_to(self):
+        self._refuses_everywhere(run)
+
+    def test_a_machine_with_no_vm_place_refuses_the_name_the_same_way(self):
+        self._refuses_everywhere(run_here)
+
+    def _refuses_everywhere(self, run):
         name = "nosuchws-" + rand_suffix()
         for c in self.COMMANDS:
             with self.subTest(cmd=c):

@@ -284,6 +284,8 @@ class Registry:
             t = self.load(name)
         except LookupError:
             return False
+        if not t.possible():
+            return False
         if ask and not t.store_machine.isdir(t.store.ws_dir(ws)):
             ok, why = t.answers()
             if not ok:
@@ -312,7 +314,7 @@ class Registry:
 
     def exists_on(self, t, ws):
         """Whether `ws` is on the loaded place `t`, where a machine that did not answer is not an absence."""
-        return self._holds(t, ws) or t.info(ws) == "unreachable"
+        return t.possible() and (self._holds(t, ws) or t.info(ws) == "unreachable")
 
     def local_workspaces(self):
         seen = []
@@ -420,6 +422,10 @@ class Driver:
         raise NotImplementedError
 
     def created(self, ws):
+        return True
+
+    def possible(self):
+        """Whether this place can exist on this machine; one that cannot holds no workspace."""
         return True
 
     def exec(self, ws, argv, tty=False, timeout=None):
@@ -1221,9 +1227,14 @@ class Vm(Driver):
     def install_agents(self, ws):
         return None
 
+    def possible(self):
+        return Store(self.env).macos_host
+
     @property
     def store(self):
         if self._vm_store is None:
+            if not self.possible():
+                act.die("the vm place holds macOS guests, so it exists only on a macOS host -- run this on the Mac that holds them")
             if not self.vm_store_apart():
                 act.die("the vm place has no store of its own on this machine -- set WK_VM_STORE apart from WK_STORE")
             self._vm_store = Store(dict(self.env, WK_STORE=Store(self.env).vm_store_dir()))
