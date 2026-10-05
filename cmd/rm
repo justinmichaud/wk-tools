@@ -15,11 +15,8 @@
 #   wk rm --all   every workspace `wk ls` finds: every place on this machine,
 #                 and every machine that keeps workspaces of its own
 #
-# The question names each one as <name>@<place> before it asks, so which
-# machine it is on is part of what is answered -- a place that is a machine of
-# its own is that machine. A workspace another workstation keeps the record of
-# is destroyed by that machine's own `wk`, asked from here. --dry-run prints
-# each removal and runs none of them.
+# The question names each one as <name>@<place>. A workspace another workstation
+# keeps the record of is destroyed by that machine's own `wk`, asked from here.
 
 import os
 import sys

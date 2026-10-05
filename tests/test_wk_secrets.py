@@ -225,14 +225,12 @@ class TestAStoredCredentialIsReadTheOneWay(SecretsTest):
 class TestRepoPushKeys(unittest.TestCase):
     """Each repo pushes through its own deploy keys; the default repo's are the forks its checkout is wired with."""
 
-    def test_every_repo_has_its_own_keys_and_aliases(self):
+    def test_every_repo_has_its_own_keys_and_aliases_and_only_the_default_repos_are_the_forks(self):
         names = [k[0] for k in secrets.push_keys()]
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(len(names), len({k[2] for k in secrets.push_keys()}))
         for r in repos.names():
             self.assertTrue(repos.Repo(r).push, r)
-
-    def test_the_forks_are_the_default_repos_and_no_other_repos_key_is_one(self):
         self.assertEqual(repos.default().push, secrets.forks())
         others = [k for r in repos.names() if r != repos.default().name for k in repos.Repo(r).push]
         self.assertTrue(others)
@@ -262,9 +260,12 @@ class TestTheAgent(SecretsTest):
             self.assertNotIn("KEY:", " ".join(argv))
         self.assertIn("KEY:fork\n", [i for a, i in self.w.inputs if "ssh-add -" in a[-1]])
 
-    def test_a_fork_with_no_private_half_is_reported_not_invented(self):
+    def test_a_fork_with_no_private_half_is_reported_not_invented_and_one_the_agent_will_not_take_failed(self):
         self.w.seed(forks=("fork",))
         self.assertEqual([("fork", "loaded")] + [(k, "no-key") for k in KEYS[1:]], self.w.sec().agent_load(SOCK))
+        self.w.files[self.w.held + "/build_key_fork"] = "not a key\n"
+        self.w.agents[SOCK] = set()
+        self.assertIn(("fork", "FAILED"), self.w.sec().agent_load(SOCK))
 
     def test_a_refused_read_is_no_key(self):
         self.w.seed()
@@ -273,47 +274,35 @@ class TestTheAgent(SecretsTest):
         self.assertEqual({"no-key"}, {r[1] for r in rows})
         self.assertIn("refusing", err)
 
-    def test_a_key_the_agent_will_not_take_is_failed(self):
-        self.w.seed(forks=("fork",))
-        self.w.files[self.w.held + "/build_key_fork"] = "not a key\n"
-        self.assertIn(("fork", "FAILED"), self.w.sec().agent_load(SOCK))
-
-    def test_an_empty_agent_answers_and_lists_nothing_and_no_agent_does_not_answer(self):
+    def test_an_empty_agent_answers_a_cleared_one_lists_nothing_and_no_agent_does_not_answer(self):
         s = self.w.sec()
         self.assertTrue(s.agent_answers(SOCK))
         self.assertEqual([], s.agent_list(SOCK))
         self.assertFalse(s.agent_answers("/nowhere.sock"))
-
-    def test_clear_empties_it(self):
         self.w.seed()
-        s = self.w.sec()
         s.agent_load(SOCK)
+        self.assertTrue(s.agent_list(SOCK))
         s.agent_clear(SOCK)
         self.assertEqual([], s.agent_list(SOCK))
 
 
 class TestTheInjectorsFiles(SecretsTest):
-    def test_the_first_line_is_written_under_umask_077_and_never_as_an_argument(self):
+    def test_the_first_line_is_written_under_umask_077_never_as_an_argument_and_cleared(self):
         self.w.seed()
-        path = self.tmp + "/a dir/push-github-pat"
-        self.assertTrue(self.w.sec().cred_write(path, "github-pat"))
+        s, path = self.w.sec(), self.tmp + "/a dir/push-github-pat"
+        self.assertTrue(s.cred_write(path, "github-pat"))
         self.assertEqual("ghp-held\n", self.w.files[path])
         for argv in self.w.argvs():
             self.assertNotIn("ghp-held", " ".join(argv))
+        self.assertTrue(s.cred_present(path))
+        s.cred_clear(path)
+        self.assertFalse(s.cred_present(path))
 
     def test_nothing_held_writes_nothing(self):
         """An empty token file would be a token file: the injector would send `Authorization: Bearer`."""
         path = self.tmp + "/pat"
         self.assertFalse(self.w.sec().cred_write(path, "github-pat"))
         self.assertNotIn(path, self.w.files)
-
-    def test_present_clear_and_a_path_with_a_space(self):
-        self.w.seed()
-        s, path = self.w.sec(), self.tmp + "/a dir/pat"
-        s.cred_write(path, "github-pat")
-        self.assertTrue(s.cred_present(path))
-        s.cred_clear(path)
-        self.assertFalse(s.cred_present(path))
 
     def test_sync_is_write_or_clear(self):
         s, path = self.w.sec(), self.tmp + "/read-pat"
@@ -363,33 +352,26 @@ class TestSecretsIsPublished(SecretsTest):
         self.w.contributors = json.dumps([{"github": "someone", "emails": ["else@example.test"]},
                                           {"github": user, "emails": ["me@example.test", "other@example.test"]}])
 
-    def test_the_aliases_and_the_account_are_there_whatever_the_switch(self):
+    def test_the_aliases_through_the_agent_and_the_account_are_there_whatever_the_switch(self):
         self.w.seed()
         quiet(self.w.sec().publish)
         cfg = self.w.files[self.w.keyring_dir + "/ssh_config"]
         self.assertIn("Host github-webkit", cfg)
-        self.assertIn("IdentityAgent /run/wk/ssh-agent.sock", cfg)
+        for key, _, alias in secrets.push_keys():
+            block = cfg[cfg.index("Host %s\n" % alias):].split("\nHost ")[0]
+            self.assertIn("IdentityFile /secrets/build_key_%s\n" % key, block)
+            self.assertIn("IdentityAgent /run/wk/ssh-agent.sock", block)
         self.assertEqual("justinmichaud\n", self.w.files[self.w.keyring_dir + "/github-user"])
         for p in self.w.files:
             if p.startswith(self.w.keyring_dir):
                 self.assertNotIn("KEY:", self.w.files[p], p)
 
-    def test_every_repos_deploy_key_has_an_alias_through_the_agent(self):
-        quiet(self.w.sec().publish)
-        cfg = self.w.files[self.w.keyring_dir + "/ssh_config"]
-        for key, _, alias in secrets.push_keys():
-            block = cfg[cfg.index("Host %s\n" % alias):].split("\nHost ")[0]
-            self.assertIn("IdentityFile /secrets/build_key_%s\n" % key, block)
-            self.assertIn("IdentityAgent /run/wk/ssh-agent.sock", block)
-
-    def test_the_bugzilla_login_is_read_from_the_mirror(self):
+    def test_the_bugzilla_login_is_read_from_the_mirror_and_absent_without_one(self):
         self.contributors()
         quiet(self.w.sec().publish)
-        self.assertEqual("me@example.test\n", self.w.files[self.w.keyring_dir + "/bugzilla-user"])
-        self.assertEqual("me@example.test\n", self.w.files[self.w.keyring_dir + "/view/container/bugzilla-user"])
-
-    def test_no_login_in_the_mirror_is_absent_and_said_so(self):
-        self.w.files[self.w.keyring_dir + "/bugzilla-user"] = "stale@example.test\n"
+        for f in ("/bugzilla-user", "/view/container/bugzilla-user"):
+            self.assertEqual("me@example.test\n", self.w.files[self.w.keyring_dir + f])
+        self.w.contributors = None
         _, err = quiet(self.w.sec().publish)
         self.assertNotIn(self.w.keyring_dir + "/bugzilla-user", self.w.files)
         self.assertIn("no Bugzilla login", err)

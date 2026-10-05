@@ -4,10 +4,8 @@ import importlib.util
 import io
 import json
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 import textwrap
 import types
 import unittest
@@ -16,7 +14,7 @@ from pathlib import Path
 
 from tests.fakes import FakeRegistry
 from tests.killpoints import converges
-from tests.test_ab_plan import Inline
+from tests.test_ab_plan import ABTest, Inline
 from tests.support import REPO, WkTest, _clean_env, requires_machine, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -85,27 +83,10 @@ class World:
         return sorted(k for k in self.fake.files if k.startswith("/state/"))
 
 
-class PgoTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="wk-test-pgo-")
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        saved = dict(os.environ)
-        for v in ("WK_DRY_RUN", "WK_FORCE", "WK_DESTRUCTIVE", "WK_CONFIRMED"):
-            os.environ.pop(v, None)
-        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved)))
-        self.n = 0
-
+class PgoTest(ABTest):
     def world(self, **kw):
         self.n += 1
         return World(os.path.join(self.tmp, "w%d" % self.n), **kw)
-
-    def quiet(self, fn, *args):
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-            try:
-                return fn(*args), err.getvalue()
-            except Refused as e:
-                return e, err.getvalue()
 
     def webkit(self, w, *rest):
         return self.quiet(w.cycle().webkit, list(rest))

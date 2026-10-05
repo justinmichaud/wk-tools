@@ -27,6 +27,15 @@ def cores_valid(spec):
     return bool(spec) and all(CORES_TOKEN.match(t) for t in spec.split(","))
 
 
+def check_cores(spec):
+    if spec and not cores_valid(spec):
+        die("--cores '%s' is not a valid Linux cpu list (e.g. 0-3, 2,3, 0-1,4, 7)" % spec)
+
+
+def ab_fields(o):
+    return ["ab.round=" + o["round"]] + ["ab.%s=%s" % (k, o.get(k, "")) for k in ("arm", "slot_a", "slot_b")] if o.get("round") else []
+
+
 VARIANCE = (("aslr", "WK_BENCH_ASLR"), ("env_pad", "WK_BENCH_ENV_PAD"), ("path_pad", "WK_BENCH_PATH_PAD"),
             ("shared_cache", "WK_BENCH_SHARED_CACHE"))
 
@@ -124,11 +133,9 @@ class Run:
 
     def leg(self, plan, o):
         s, leg = self.system, Leg(plan, o)
-        if leg.cores:
-            if not cores_valid(leg.cores):
-                die("--cores '%s' is not a valid Linux cpu list (e.g. 0-3, 2,3, 0-1,4, 7)" % leg.cores)
-            if s.cores_refusal():
-                die("--cores: " + s.cores_refusal())
+        check_cores(leg.cores)
+        if leg.cores and s.cores_refusal():
+            die("--cores: " + s.cores_refusal())
         name, shell, browser_preset = o.get("preset") or project.get("BENCH_PRESET"), project.get("SHELL"), project.get("BENCH_PRESET")
         try:
             leg.preset = self.kit.resolve_preset(name, self.ws_driver.os(), self.ws_driver.kind, self.ws_driver.env)
@@ -222,23 +229,26 @@ class Run:
             if not task_held(self.env, leg.task):
                 self.lock.hold("bench-task-" + leg.task, timeout=5)
         else:
-            command = "wk bench run %s %s --preset %s%s" % (self.ws, leg.plan, leg.preset.name, " --count " + leg.count if leg.count else "")
-            record.new_task(leg.machine, bench, leg.task, self.lock, self.clock.iso(), [
-                "subject.kind=workspace", "subject.spec=" + self.ws, "devices=%s=%s" % (self.system.kind, leg.preset.name),
-                "plans=" + leg.plan, "rounds=1", "slots=" + self.ws] + (["count=" + leg.count] if leg.count else []), command)
+            self.new_task(leg, bench, "workspace", self.ws, "%s=%s" % (self.system.kind, leg.preset.name),
+                          "wk bench run %s %s --preset %s" % (self.ws, leg.plan, leg.preset.name))
         leg.machine.mkdir(leg.out)
         record.write_env(os.path.join(leg.out, "env.json"), [
             "plan=" + leg.plan, "workspace=" + self.ws, "preset=" + leg.preset.name, "browser=" + leg.browser, "task=" + leg.task,
             project.get("SHA_FIELD") + "=" + self.system.sha(), "count=" + leg.count, "local_copy=" + leg.payload,
             "software_reason=" + leg.software_reason, "class=" + leg.klass, "runner=" + leg.runner, "arch=" + leg.arch,
             "bench_host=" + self.system.bench_host, "preflight_notes=" + leg.notes, "cores.set=" + leg.cores]
-            + (["ab.round=" + rnd, "ab.arm=" + leg.o.get("arm", ""), "ab.slot_a=" + leg.o.get("slot_a", ""),
-                "ab.slot_b=" + leg.o.get("slot_b", ""), "arm_args=" + shlex.join(leg.args)] if rnd else [])
+            + ab_fields(leg.o) + (["arm_args=" + shlex.join(leg.args)] if rnd else [])
             + self.system.facts(leg) + configuration_fields(self.env),
             bool_fields=["forced=" + act.forced(self.env), "software=" + ("1" if leg.software else ""), "cores.pinned=" + leg.cores],
             machine=leg.machine)
         self.task = self.recs.begin("bench", "here", self.ws, self.kill_cmd, os.path.join(leg.out, "run.log"), steps)
         return steps
+
+    def new_task(self, leg, bench, kind, spec, device, command):
+        """A one-run task whose subject `spec` is also its one slot."""
+        count = ["count=" + leg.count] if leg.count else []
+        record.new_task(leg.machine, bench, leg.task, self.lock, self.clock.iso(), ["subject.kind=" + kind, "subject.spec=" + spec, "devices=" + device,
+                        "plans=" + leg.plan, "rounds=1", "slots=" + spec] + count, command + (" --count " + leg.count if leg.count else ""))
 
     def step(self, n):
         if self.task is not None:
@@ -249,10 +259,13 @@ class Run:
             self.task.end(word)
         self.lock.release_all()
 
+    pid_watch = True
+
     def watched(self, argv, cwd, path):
         watcher = None
         if self.task is not None:
             self.task.set("log", path)
+        if self.task is not None and self.pid_watch:
             watcher = job.PidWatch(self.ws_driver, self.ws, self.task, path, "bench", project.get("BENCH_PID_MATCH"), job.pid_tries(self.env))
             watcher.start()
         try:

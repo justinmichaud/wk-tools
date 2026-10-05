@@ -110,9 +110,7 @@ class Bench:
                 refuse_planted(e)
             except OSError:
                 files = {}
-            for rel, data in files.items():
-                with open(os.path.join(copy, rel), "wb") as f:
-                    f.write(data)
+            unpack(files, copy)
             if "result.json" not in files:
                 act.die("no such run in %s: %s (a run directory, from 'wk bench ls')" % (which, one))
             out.append(copy)
@@ -176,10 +174,7 @@ class Bench:
         with tempfile.TemporaryDirectory(prefix="wk-export-") as stage:
             copy = os.path.join(stage, task)
             os.makedirs(copy)
-            for rel, data in files.items():
-                os.makedirs(os.path.dirname(os.path.join(copy, rel)), exist_ok=True)
-                with open(os.path.join(copy, rel), "wb") as f:
-                    f.write(data)
+            unpack(files, copy)
             yield copy
 
     def locate(self, task):
@@ -287,6 +282,13 @@ class Bench:
         if not runs or not os.path.isfile(runs):
             act.die("no run map at '%s' -- the A/B recorded nothing (--runs <runs.tsv>)" % runs)
         return report.ab_summary(runs, root, self.clock.iso(), out, machine=self.machine)
+
+
+def unpack(files, into):
+    for rel, data in files.items():
+        os.makedirs(os.path.dirname(os.path.join(into, rel)), exist_ok=True)
+        with open(os.path.join(into, rel), "wb") as f:
+            f.write(data)
 
 
 def refuse_planted(e):

@@ -112,7 +112,7 @@ def task_write(taskdir, fields, commands, machine=None):
 
 def new_task(m, bench, task, lock, requested, fields, command, held=False):
     taskdir = os.path.join(bench, task)
-    if m.exists(taskdir):
+    if m.exists(os.path.join(taskdir, "task.json")):
         die("task %s already exists (%s); a task is one request, made once" % (task, taskdir))
     if not held:
         lock.hold("bench-task-" + task, timeout=5)

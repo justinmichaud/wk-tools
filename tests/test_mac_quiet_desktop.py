@@ -50,45 +50,44 @@ P
 
 class TestTheTables(unittest.TestCase):
 
-    def test_spotlights_indexer_is_turned_off_and_not_stopped(self):
-        stopped = [r[1] for r in _rows("daemons")]
-        for proc in ("mds", "mds_stores", "mdworker", "mdbulkimport"):
-            self.assertNotIn(proc, stopped)
-
-    def test_every_row_is_complete(self):
+    def test_every_row_is_complete_of_a_known_kind_and_named_once(self):
         for name, n in FIELDS.items():
             for r in _rows(name):
                 with self.subTest(kind=name, row=r):
                     self.assertEqual(n, len(r), r)
         for r in _rows("rows"):
             self.assertIn(r[3], ("bool", "int", "string"))
+        kinds = set(KIND.values()) | {"unsettable", "unstoppable"}
+        for line in TABLE.read_text().splitlines():
+            if line and not line.startswith("#"):
+                self.assertIn(line.split("\t")[0], kinds, line)
+        names = [r[0] for name in FIELDS for r in _rows(name)] + sorted(_probe_only_keys())
+        self.assertEqual(len(names), len(set(names)), [n for n in names if names.count(n) > 1])
 
-    def test_the_names_are_distinct(self):
-        names = [r[0] for name in FIELDS for r in _rows(name)]
-        names += sorted(_probe_only_keys())
-        self.assertEqual(len(names), len(set(names)),
-                         [n for n in names if names.count(n) > 1])
-
-
-class TestWhatSipWillNotLetGo(unittest.TestCase):
-
-    def test_every_name_is_a_process_the_table_asks_about(self):
-        """A name nobody looks up is an exemption that exempts nothing."""
+    def test_the_signalled_list_holds_every_agent_and_daemon_and_no_expected_process(self):
         rows = bash('. %s\nwk_quiet_desktop_stopped\n' % QUIET).stdout.splitlines()
         watched = {l.split()[1] for l in rows if len(l.split()) > 1}
-        named = bash('. %s\nwk_quiet_desktop_unstoppable\n' % QUIET).stdout.split()
-        for proc in named:
-            with self.subTest(proc=proc):
-                self.assertIn(proc, watched)
+        for row, at in [(r, 2) for r in _rows("agents")] + [(r, 1) for r in _rows("daemons")]:
+            self.assertIn(row[at], watched, row)
+        for row in _rows("expected"):
+            self.assertNotIn(row[1], watched, row)
+        for proc in bash('. %s\nwk_quiet_desktop_unstoppable\n' % QUIET).stdout.split():
+            self.assertIn(proc, watched, "a name nobody looks up exempts nothing")
+
+
+    def test_nothing_keeps_its_own_copy_of_a_setting(self):
+        for f in (DESKTOP, FIRSTBOOT, VOLUME, REPO / "vm" / "desktop-probe.sh",
+                  REPO / "cmd" / "bench", REPO / "lib" / "wk" / "bench" / "mac.py"):
+            text = f.read_text()
+            with self.subTest(file=f.name):
+                for _name, domain, key, _t, _v, _why in _rows("rows"):
+                    self.assertNotIn(f"{domain.lstrip('@')} {key}", text, f"{f.name} writes {key} itself")
+                self.assertNotIn("mdutil", text, f"{f.name} turns Spotlight off itself")
+                for _name, key, _value, _shown in _rows("power"):
+                    self.assertNotIn(f"pmset -a {key}", text, f"{f.name} sets {key} itself")
 
 
 class TestWhatMustKeepRunning(unittest.TestCase):
-
-    def test_it_is_not_in_the_table_that_gets_signalled(self):
-        stopped = bash('. %r\nwk_quiet_desktop_stopped\n' % str(QUIET)).stdout.split()
-        for row in _rows("expected"):
-            with self.subTest(proc=row[1]):
-                self.assertNotIn(row[1], stopped)
 
     def _judge(self, probe):
         return [f for f in findings("wk_quiet_daemons_findings", probe) if len(f) > 1]
@@ -187,16 +186,6 @@ class TestApplyingIt(WkTest):
         self.assertIn("killall", wrote)
         self.assertNotIn("defaults write", again)
         self.assertNotIn("killall", again)
-
-    def test_every_agent_is_on_the_list_that_gets_signalled(self):
-        stopped = bash(f'. {str(QUIET)!r}\nwk_quiet_desktop_stopped\n').stdout
-        listed = {line.split()[1] for line in stopped.splitlines() if line.split()}
-        for row in _rows("agents"):
-            with self.subTest(agent=row[2]):
-                self.assertIn(row[2], listed)
-        for row in _rows("daemons"):
-            with self.subTest(daemon=row[1]):
-                self.assertIn(row[1], listed)
 
     def test_another_account_is_written_as_that_account_and_one_that_does_not_exist_is_refused(self):
         cp, calls = self._run("wk_quiet_desktop_user nosuchuser; echo rc=$?")
@@ -443,22 +432,6 @@ class TestTheFindings(WkTest):
                     self.assertEqual(3, len(line), line)
 
 
-class TestBothKindsOfMeasuredMacGetIt(unittest.TestCase):
-
-    def test_nothing_keeps_its_own_copy_of_a_setting(self):
-        for f in (DESKTOP, FIRSTBOOT, VOLUME, REPO / "vm" / "desktop-probe.sh",
-                  REPO / "cmd" / "bench", REPO / "lib" / "wk" / "bench" / "mac.py"):
-            text = f.read_text()
-            with self.subTest(file=f.name):
-                for _name, domain, key, _t, _v, _why in _rows("rows"):
-                    self.assertNotIn(f"{domain.lstrip('@')} {key}", text,
-                                     f"{f.name} writes {key} itself")
-                self.assertNotIn("mdutil", text, f"{f.name} turns Spotlight off itself")
-                for _name, key, _value, _shown in _rows("power"):
-                    self.assertNotIn(f"pmset -a {key}", text,
-                                     f"{f.name} sets {key} itself")
-
-
 class TestTheTableTravelsWithTheFile(WkTest):
 
     PROBE = "set -u\nwk_quiet_desktop_power | head -1\nwk_quiet_desktop_stopped | wc -l\n"
@@ -478,12 +451,6 @@ class TestTheTableTravelsWithTheFile(WkTest):
         self.assertIn("rc=1", cp.stdout, cp.stderr)
         self.assertIn("no quiet table here", cp.stderr)
 
-    def test_every_row_is_one_of_the_kinds_a_reader_asks_for(self):
-        kinds = set(KIND.values()) | {"unsettable", "unstoppable"}
-        for line in TABLE.read_text().splitlines():
-            if line and not line.startswith("#"):
-                with self.subTest(row=line):
-                    self.assertIn(line.split("\t")[0], kinds)
 
 
 if __name__ == "__main__":

@@ -84,6 +84,15 @@ class TestTheProgramStamp(WkTest):
                 (self.tmp / "lib" / "wk" / (mod + ".py")).write_text("X = 3\n")
                 self.assertNotEqual(before, self.stamp("prog.py"))
 
+    def test_a_module_beside_the_program_changes_it(self):
+        (self.tmp / "lib").mkdir()
+        (self.tmp / "proxy").mkdir()
+        (self.tmp / "proxy" / "relay.py").write_text("X = 1\n")
+        (self.tmp / "proxy" / "prog.py").write_text("from relay import X\n")
+        before = self.stamp("proxy/prog.py")
+        (self.tmp / "proxy" / "relay.py").write_text("X = 2\n")
+        self.assertNotEqual(before, self.stamp("proxy/prog.py"))
+
     def test_a_program_that_is_not_python_is_stamped_alone(self):
         (self.tmp / "run.sh").write_text("exec sleep 1\n")
         first = self.stamp("run.sh")
@@ -279,8 +288,8 @@ class TestTheStartVerdictComesFromSystemd(WkTest):
 def _has_user_systemd():
     if not shutil.which("systemd-run"):
         return False
-    return subprocess.run(["systemctl", "--user", "is-system-running"],
-                          capture_output=True).returncode in (0, 1)
+    state = subprocess.run(["systemctl", "--user", "is-system-running"], capture_output=True, text=True).stdout.strip()
+    return state in ("running", "degraded")   # exit 1 alone also means no user bus
 
 
 @unittest.skipUnless(_has_user_systemd(), "no systemd --user bus here")

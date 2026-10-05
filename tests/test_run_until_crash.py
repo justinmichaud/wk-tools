@@ -86,7 +86,11 @@ class TestUntilCrashLoopsToTheCrash(WkTest):
             self.assertIn("--max needs a positive integer", cp.stdout)
 
 
-@unittest.skipUnless(shutil.which("lldb"), "no lldb on this host")
+def _lldb_runs():
+    return bool(shutil.which("lldb")) and subprocess.run(["lldb", "--version"], capture_output=True).returncode == 0
+
+
+@unittest.skipUnless(_lldb_runs(), "no working lldb on this host")
 class TestUntilCrashLldbCommandFile(unittest.TestCase):
     PATH = REPO / "container" / "lldb" / "until-crash-run-file"
 

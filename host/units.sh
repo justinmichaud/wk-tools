@@ -15,17 +15,17 @@ program_stamp() { # <program, relative to WK_ROOT>
 import modulefinder, os, sys, zlib
 
 root, prog = sys.argv[1], sys.argv[2]
-lib = os.path.join(root, "lib")
+tree = [os.path.dirname(os.path.join(root, prog)), os.path.join(root, "lib")]   # a program's own directory, as python3 puts it first
 
 
 class InTree(modulefinder.ModuleFinder):
     def find_module(self, name, path, parent=None):
-        return super().find_module(name, [lib] if path is None else path, parent)
+        return super().find_module(name, tree if path is None else path, parent)
 
 
 files = {os.path.join(root, prog)}
 if prog.endswith(".py"):
-    f = InTree([lib])
+    f = InTree(tree)
     f.run_script(os.path.join(root, prog))
     files |= {m.__file__ for m in f.modules.values() if m.__file__}
 crc = 0

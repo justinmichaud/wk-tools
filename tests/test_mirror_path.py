@@ -44,36 +44,18 @@ class TestEveryDriverNamesOne(WkTest):
             f"root={self.tmp / 'remote-root'}\n"
             f"store={self.tmp / 'remote-store'}\n")
 
-    def _mirror(self, place):
-        if place == "remote":
-            return _driver("fakebox", {"WK_MACHINES_DIR": str(self.registry)})
-        return _driver(place)
-
-    def test_the_default_is_no_mirror_rather_than_somebody_elses_path(self):
-        self.assertEqual("", places.Driver("demo", str(REPO), {}, Fake("here")).mirror_dir())
-
-    def test_the_three_machines_name_three_different_absolute_mirrors(self):
-        got = {t: self._mirror(t) for t in ("container", "vm", "remote")}
-        self.assertEqual(len(set(got.values())), 3, got)
-        self.assertTrue(all(m.startswith("/") for m in got.values()), got)
-
-    def test_a_build_boxs_is_under_its_own_root(self):
-        self.assertEqual(str(self.tmp / "remote-root" / "mirror"), self._mirror("remote"))
-
-    def test_a_guests_mirror_is_the_hosts_on_the_share_the_guest_mounts(self):
-        self.assertEqual(self._mirror("vm"), places.GUEST_MIRROR_MOUNT + "/mirror/WebKit.git")
-
-
-class TestAWorkspaceAnswersForTheKindItIs(WkTest):
-    """LocalWorkspace runs in both kinds of workspace and each has its mirror somewhere else, so it answers from
-    `uname -s`."""
-
-    def test_in_a_container_it_is_the_path_the_container_driver_named(self):
-        self.assertEqual("/some/store/git/WebKit.git",
-                         _driver("local", {"WK_MIRROR": "/some/store/git/WebKit.git"}, system="Linux"))
-
-    def test_in_a_guest_it_is_the_share_the_vm_driver_names(self):
-        self.assertEqual(_driver("vm"), _driver("local"))
+    def test_each_place_names_its_own_and_a_workspace_the_one_of_the_kind_it_is(self):
+        """LocalWorkspace runs in both kinds of workspace, so it answers from `uname -s`."""
+        guest = places.GUEST_MIRROR_MOUNT + "/mirror/WebKit.git"
+        for got, want in ((places.Driver("demo", str(REPO), {}, Fake("here")).mirror_dir(), ""),
+                          (_driver("fakebox", {"WK_MACHINES_DIR": str(self.registry)}), str(self.tmp / "remote-root" / "mirror")),
+                          (_driver("vm"), guest), (_driver("local"), guest),
+                          (_driver("container", {"WK_IN_VM": "1"}), Store({"WK_STORE": "/the/store", "WK_IN_VM": "1"}).mirror_dir()),
+                          (_driver("local", {"WK_MIRROR": "/some/store/git/WebKit.git"}, system="Linux"), "/some/store/git/WebKit.git")):
+            with self.subTest(want=want):
+                self.assertEqual(got, want)
+        self.assertTrue(_driver("container").startswith("/"))
+        self.assertNotIn(_driver("container"), (guest, str(self.tmp / "remote-root" / "mirror")))
 
 
 class MirrorFixture(WkTest):
@@ -195,11 +177,6 @@ class TestWhatTheMirrorCarries(WkTest):
         self.assertEqual(self._branches(env={"WK_MIRROR_BRANCHES": "main only/this"}),
                          ["main", "only/this"])
 
-
-class TestTheContainersMirrorIsTheStores(unittest.TestCase):
-    def test_in_the_podman_vm_it_is_the_stores_mirror(self):
-        mine = Store({"HOME": "/nonexistent", "WK_STORE": "/the/store", "WK_IN_VM": "1"}).mirror_dir()
-        self.assertEqual(mine, _driver("container", {"WK_IN_VM": "1"}))
 
 class TestOneMirrorPerMachine(WkTest):
     """Store.mirror_dir (lib/wk/store.py): a machine keeps one mirror, written where `wk sync` runs."""

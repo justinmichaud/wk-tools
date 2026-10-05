@@ -2,23 +2,17 @@
 import contextlib
 import io
 import os
-import shutil
 import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
-from tests.fakes import FakeProc, FakeRegistry
-from tests.killpoints import converges
 from tests.support import REPO
-from tests.test_sysimage_task import Box
+from tests import test_sysimage_task
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import images, job, record, resources  # noqa: E402
+from wk import images, job, resources  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result, isolated_module  # noqa: E402
+from wk.machine import Result  # noqa: E402
 from wk.sysimage import yocto  # noqa: E402
 
 PRESET = "wpewebkit-2.46-yocto-rpi4-64"
@@ -28,48 +22,28 @@ SHA = "a" * 40
 TASK_LINE = "NOTE: Running task 7658 of 13213 (virtual:native:/w/sources/meta-clang/recipes-devtools/clang/clang_git.bb:do_compile)\n"
 
 
-class World(Fake):
-    """This machine holding `WS` on its container place `box`, the workspace on the preset's branch and its
-    targets.conf holding the preset's section; a stage writes `out` to its log and exits `rc` after `polls`."""
+class World(test_sysimage_task.World):
+    """The workspace on the preset's branch, its targets.conf holding the preset's section."""
+
+    BUILDER, PRESET, KIND = yocto.Yocto, PRESET, "yocto"
+    OUT = b"wk-yocto: target rpi4-64bits-mesa\nwk-yocto: stage 'image' done\n"
+    KILL = "wk sysimage build %s --stage image --stop" % PRESET
+    DONE, IDLE, STOPPED = "built %s-" % PRESET, "no 'image' build is running in '%s'" % WS, "restarting resumes"
+    DETACHED = "'image' stage of " + PRESET
+    DRY = ("  cross-target %s  (verified on wpe-2.46)" % CROSS_TARGET, "  wifi        wk-wifi-join in the image")
+    SUBJECT, UNKNOWN = "image stage of %s" % WS, (["--resume"],)
 
     def __init__(self, tmp):
-        super().__init__("here")
-        self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
-        store = self.tmp / "store"
-        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(store), "WK_LOCK_DIR": str(self.tmp / "locks"),
-                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_IN_VM": "1", "WK_AVAIL_MB": "65536",
-                    "WK_CGROUP_CORES": "8", "WK_JOB_PID_TRIES": "0", "WK_KILL_WAIT": "2", "WK_ROOT": str(REPO),
-                    "WK_POLL_SECONDS": "10", "WK_STALL_SECONDS": "30", "WK_HEARTBEAT_SECONDS": "60"}
-        self.clock = FakeClock()
-        self.dirs.add(self.env["WK_LOCK_DIR"])
-        self.made, self.rc, self.polls, self.grow = True, 0, 0, None
-        self.out = b"wk-yocto: target rpi4-64bits-mesa\nwk-yocto: stage 'image' done\n"
-        self.answer(["hostname"], out="here\n")
-        self.answer(["df", "-Pk"], out="Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 209715200 1% /\n")
-        self.answer(["du", "-sh"], rc=1)
-        self.answer(["podman", "image", "exists"])
+        super().__init__(tmp)
+        self.env.update({"WK_POLL_SECONDS": "10", "WK_STALL_SECONDS": "30", "WK_HEARTBEAT_SECONDS": "60"})
         self.answer(["nproc"], out="12\n")
         self.answer(["sysctl", "-n", "hw.ncpu"], out="12\n")
         self.answer(["sysctl", "-n", "hw.memsize"], out="%d\n" % (32 << 30))
         self.files["/proc/meminfo"] = "MemTotal: %d kB\nMemAvailable: %d kB\n" % (32 << 20, 30 << 20)
-        self.react(["podman", "container", "inspect"], lambda a, f: Result(0, self.tag() + "\n"))
-        self.react(["env"], self._new)
         self.head, self.checkout_rc = "wpe-2.46\r\n", 0
         self.sections = Result(0, "[rpi3-32bits-mesa]\n[%s]\nimage_basename = webkit-dev-ci-tools\n" % CROSS_TARGET)
         self.react(["exec", WS, "bash", "-c"], self._bash)
-        self.react(["exec", WS, "kill", "-0"], lambda a, f: Result(0 if int(a[-1]) in f.pids else 1))
-        self.reg = FakeRegistry(self.env, self, lambda n, e: Box("box", str(REPO), self.env, self), default=lambda: "box")
-        self.ws_dir = os.path.join(str(store), "ws", WS)
-        os.makedirs(os.path.join(self.ws_dir, "home"))
-        self.log = os.path.join(self.ws_dir, "home", "yocto-image.log")
         self.lock = os.path.join(yocto.host_workdir(self.ws_dir, CROSS_TARGET), "build", "bitbake.lock")
-
-    @property
-    def fake(self):
-        return self
-
-    def tag(self):
-        return self.driver().host_image()[1]
 
     def _bash(self, argv, f):
         line = argv[4]
@@ -79,73 +53,37 @@ class World(Fake):
             return self.sections
         return Result(self.checkout_rc)
 
-    def _new(self, argv, f):
-        self.made = True
-        return Result(0)
-
-    def preset(self):
-        return images.load(PRESET, self.env)
-
-    def start(self, argv, out, cwd=None):
-        self.effect(("watch", tuple(argv)))
-        out.write(self.out)
-        return FakeProc(self.rc, self.polls, grow=self.grow)
-
-    def driver(self):
-        return yocto.Yocto(self.reg, self.preset(), PRESET, self.clock)
-
-    def recs(self):
-        return job.records_of(self.reg.load("box"), self.clock, self)
-
-    def budget_files(self):
-        d = os.path.join(self.env["XDG_STATE_HOME"], "wk", "builds")
-        return sorted(p for p in self.files if p.startswith(d + "/"))
-
-    def watched(self):
-        (w,) = [e for e in self.effects if e[0] == "watch"]
-        return list(w[1])
-
-    def state(self):
-        return ([(t.field("kind"), t.field("exit")) for t in self.recs().list()], len(self.budget_files()))
-
-    def running(self, stage, pid=77):
-        t = self.recs().begin("yocto", "here", WS, "wk sysimage build %s --stage %s --stop" % (PRESET, stage), self.log,
+    def running(self, stage="image", pid=77, kill=None):
+        t = self.recs().begin("yocto", "here", WS, kill or "wk sysimage build %s --stage %s --stop" % (PRESET, stage), self.log,
                               list(yocto.STAGES), pid=pid)
         t.step_state(yocto.stage_index(stage), "running")
         self.pids.add(pid)
         return t
 
+    def plan(self):
+        return list(yocto.STAGES)
 
-class YoctoTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-yocto-stage-"))
-        self.addCleanup(shutil.rmtree, str(self.tmp), True)
-        osenv = mock.patch.dict(os.environ, {}, clear=False)
-        osenv.start()
-        self.addCleanup(osenv.stop)
-        for v in ("WK_DRY_RUN", "WK_FORCE", "WK_YES", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_PLACE"):
-            os.environ.pop(v, None)
-        p = mock.patch.object(record, "host_name", return_value="here")
-        p.start()
-        self.addCleanup(p.stop)
-        self.w = World(self.tmp)
+    def steps(self):
+        return [(1, "pending"), (2, "pending"), (3, "running"), (4, "pending"), (5, "pending"), (6, "pending")]
 
     def cores(self):
-        return resources.Resources(self.w, self.w.env).envelope_cores()
+        return resources.Resources(self, self.env).envelope_cores()
 
-    def build(self, *rest, w=None):
-        w = w or self.w
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = w.driver().build(list(rest))
-        return rc, err.getvalue()
+    def flags(self):
+        return {"--target": CROSS_TARGET, "--stage": "image", "--board": "rpi4", "--jobs": str(self.cores()), "--rm-work": "1",
+                "--chromium": "0", "--cross-preset": "wpe-cross", "--sstate-ns": self.tag().rsplit("/", 1)[-1].replace(":", "-")}
 
-    def refused(self, *rest, w=None, status=1):
-        w = w or self.w
-        with self.assertRaises(Refused) as cm:
-            with contextlib.redirect_stderr(io.StringIO()) as err:
-                w.driver().build(list(rest))
-        self.assertEqual(cm.exception.status, status, err.getvalue())
-        return err.getvalue()
+    def booked(self):
+        argv = self.watched()
+        return self.cores(), int(argv[argv.index("--mem-budget") + 1])
+
+
+class YoctoTest(test_sysimage_task.TaskTest):
+    WORLD = World
+
+
+class TestTheYoctoLifecycle(test_sysimage_task.Lifecycle, YoctoTest):
+    pass
 
 
 class TestTheStages(unittest.TestCase):
@@ -206,40 +144,10 @@ class TestTheCrossConfigs(unittest.TestCase):
 
 
 class TestTheRecordAStageWrites(YoctoTest):
-    def test_a_stage_that_says_it_is_done_ends_ok_stepping_only_its_own_index(self):
-        rc, err = self.build()
-        self.assertEqual(rc, 0, err)
-        self.assertIn("built %s-" % PRESET, err)
-        (t,) = self.w.recs().list()
-        self.assertEqual((t.field("kind"), t.field("name"), t.field("stage"), t.field("exit")), ("yocto", WS, "image", "0"))
-        self.assertEqual(t.plan(), list(yocto.STAGES))
-        self.assertEqual(t.steps(), [(1, "pending"), (2, "pending"), (3, "running"), (4, "pending"), (5, "pending"), (6, "pending")])
-        self.assertEqual((t.field("log"), t.field("kill")), (self.w.log, "wk sysimage build %s --stage image --stop" % PRESET))
-        self.assertEqual(t.field("subject"), "image stage of %s" % WS)
-
     def test_the_record_holds_no_deadline_since_silence_is_not_a_failure(self):
         self.w.env["WK_ABORT_SECONDS"] = "60"
         self.build()
         self.assertEqual(self.w.recs().list()[0].field("abort_after"), "")
-
-    def test_the_stage_runs_in_the_workspace_under_the_wrapper(self):
-        self.build()
-        argv = self.w.watched()
-        self.assertEqual(argv[:13], ["exec", WS] + isolated_module("/opt/wk-tools/lib", "wk.sysimage.task")
-                         + ["stage", "yocto", "--", "python3", "/opt/wk-tools/lib/wk/sysimage/yocto_ws.py"])
-        for flag, value in (("--target", CROSS_TARGET), ("--stage", "image"), ("--board", "rpi4"), ("--jobs", str(self.cores())),
-                            ("--rm-work", "1"), ("--chromium", "0"), ("--cross-preset", "wpe-cross"),
-                            ("--sstate-ns", self.w.tag().rsplit("/", 1)[-1].replace(":", "-"))):
-            self.assertEqual(argv[argv.index(flag) + 1], value, flag)
-        self.assertNotIn("--slot", argv)
-
-    def test_the_booked_budget_is_what_the_stage_enforces(self):
-        self.build()
-        argv = self.w.watched()
-        (f,) = self.w.budget_files()
-        self.assertIn("label=wk sysimage image %s\n" % WS, self.w.files[f])
-        self.assertIn("\njobs=%d\n" % self.cores(), self.w.files[f])
-        self.assertIn("budget_mb=%s\n" % argv[argv.index("--mem-budget") + 1], self.w.files[f])
 
     def test_the_flags_override_the_preset(self):
         self.build("--keep-work", "--chromium", "--no-local-layer", "--local-layer", "--no-tailnet")
@@ -386,14 +294,6 @@ class TestStop(YoctoTest):
         self.w.answer(["exec", WS, "ps", "-o", "args=", "-p", "555"], out=args)
         self.w.answer(["exec", WS, "sh", "-c", job.TREE, "wk", "555"], out="556\n555\n")
 
-    def test_stop_kills_the_stage_s_tree_and_then_says_it_resumes(self):
-        t = self.adopted("image")
-        rc, err = self.build("--stop")
-        self.assertEqual(rc, 0, err)
-        self.assertIn(("run", ("exec", WS, "kill", "-TERM", "778", "777")), self.w.effects)
-        self.assertIn("restarting resumes", err)
-        self.assertEqual(t.field("exit"), "cancelled")
-
     def test_stop_of_a_stage_that_is_not_the_running_one_touches_nothing(self):
         t = self.adopted("toolchain")
         rc, err = self.build("--stop")
@@ -431,31 +331,12 @@ class TestStop(YoctoTest):
 
 
 class TestDryRun(YoctoTest):
-    def test_a_dry_run_reports_the_plan_and_changes_nothing(self):
-        os.environ["WK_DRY_RUN"] = "1"
-        rc, err = self.build()
-        self.assertEqual(rc, 0, err)
-        self.assertIn("would build image %s (builder: yocto)" % PRESET, err)
-        self.assertIn("  cross-target %s  (verified on wpe-2.46)" % CROSS_TARGET, err)
-        self.assertIn("  wifi        wk-wifi-join in the image", err)
-        self.assertEqual(self.w.recs().list(), [])
-        self.assertEqual([e for e in self.w.effects if e[0] != "run"], [])
-
     def test_a_dry_run_of_the_mix_names_the_collection_on_both_sides(self):
         os.environ["WK_DRY_RUN"] = "1"
         rc, err = self.build("--stage", "pgo-mix", "--slot", "pr")
         self.assertEqual(rc, 0, err)
         self.assertIn("  collection  %s" % images.pgo_dir(WS, "pr", self.w.env), err)
         self.assertIn("  into        /src/WebKit/WebKitBuild/wk-pgo/pr/output/WPEWebKit.profdata", err)
-
-
-class TestKillPoints(YoctoTest):
-    def test_a_stage_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[sysimage build]` for yocto: each run its own record, whatever the killed one held gone with it."""
-        def run_once(w):
-            with contextlib.redirect_stderr(io.StringIO()):
-                w.driver().build([])
-        converges(self, lambda: World(self.tmp), run_once, World.state)
 
 
 if __name__ == "__main__":

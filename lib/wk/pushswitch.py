@@ -243,7 +243,6 @@ class Push:
         if (count["held"] or count["loaded"]) and not sec.agent_answers(self.sock):
             log("  no ssh-agent answers at %s ('./setup' installs it there)" % self.sock)
 
-        self.guest_agent_row()
         self.guest_rows()
 
         if count["live"]:
@@ -265,8 +264,6 @@ class Push:
         warn("there are no deploy keys here at all -- 'wk key deploy' makes them")
         return NO_KEYS
 
-    # -- a macOS host's guests: an ssh-agent here and an `ssh -N -R` per guest (lib/wk/guest.py)
-
     def converge_guests(self, action):
         if self.in_vm:
             warn("this is the podman machine's half of the switch: the host's agent for its macOS\n    guests is not reached "
@@ -278,20 +275,18 @@ class Push:
              "answers" % action)
         return 1
 
-    def guest_agent_row(self):
+    def guest_rows(self):
         """A key in this host's agent is a push from here and from every guest holding a forward, whether or not one is up now."""
         if self.in_vm:
             self.say("guests", "not read from the podman machine -- 'wk key push status' on the host")
             return
         if not self.sec.macos:
             return
-        n = guest.vm_push_agent_keys(ROOT, self.sec.machine)
+        n, rows = guest.vm_push_status(ROOT, self.sec.machine)
         self.guest_live = self.guest_live or n > 0
         self.say("guests", "%d key(s) in the agent this host runs for them and its own pushes" % n if n
                  else "the agent this host runs for them and its own pushes holds nothing")
-
-    def guest_rows(self):
-        for g, state, forks in guest.vm_push_keys_state(ROOT, self.sec.machine) if self.sec.macos else []:
+        for g, state, forks in rows:
             if state != "running":
                 self.out.write("guest %-10s %s\n" % (g, "%s -- not read; 'wk start %s' converges it" % (state, g)))
             elif forks:

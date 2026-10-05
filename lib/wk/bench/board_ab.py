@@ -10,15 +10,14 @@ import shlex
 from wk import act, images, job, project, record as progress
 from wk.act import Refused, die, info, log, warn
 from wk.bench import board, pipeline, plans, record, scores, systems
+from wk.bench.ab import Task, flags, interleave, pair, rounds_of, stopping
 from wk.boot import cli as bootcli
-from wk.lock import Lock
 
 EXCLUSIONS = os.path.join("bench", "subtest-exclusions.conf")
 NARROW = ("armhf", "armv7l", "i686")
 SYSTEM_TRIES = 3
 WAIT, POLL, ARM_RETRY = 420, 12, 15
 LOST_ROUNDS = 3
-MAX_ROUNDS = 40
 ARGS_AB_MEASURED = ("count", "timeout", "subtests", "cores", "browser", "browser_args")
 INTERRUPTED = set(job.EXIT_OF.values())
 
@@ -66,57 +65,7 @@ def subtests(root, env, plan, plan_doc, idents, asked, exclude):
     return " ".join(keep), ",".join(dropped)
 
 
-def pair(spec, what):
-    a, _, b = (spec or "").partition(",")
-    if not a or not b or "," in b:
-        die("--%s takes two names separated by a comma, e.g. --%s base,pr" % (what, what))
-    if a == b:
-        die("--%s needs two different arms (got '%s' twice). Two runs of one arm measure it twice,\n"
-            "    which is a repeatability check rather than an A/B -- '--count N' asks for that." % (what, a))
-    return a, b
-
-
-def rounds_of(o, default="3"):
-    rounds = o.get("rounds") or default
-    if not rounds.isdigit() or int(rounds) < 1:
-        die("--rounds takes a number of at least 1 (got '%s')" % rounds)
-    return int(rounds)
-
-
-def stopping(o, rounds, detect="0"):
-    """(max_rounds, detect): past --rounds the rounds go on until scores.resolved says they resolve --detect percent,
-    up to --max-rounds; --detect 0 runs --rounds exactly."""
-    pct = o.get("detect") or detect
-    try:
-        goal = float(pct)
-    except ValueError:
-        goal = -1
-    if goal < 0:
-        die("--detect '%s' is not a percentage (0.3 is a third of one per cent; 0 runs --rounds exactly)" % pct)
-    top = o.get("max_rounds") or str(MAX_ROUNDS if goal else rounds)
-    if not top.isdigit():
-        die("--max-rounds takes a number (got '%s')" % top)
-    if int(top) < rounds:
-        die("--max-rounds %s is below --rounds %d: --rounds is the floor it alternates from" % (top, rounds))
-    return int(top), goal
-
-
-def interleave(first, top, detect, play, resolved, lost_limit):
-    """(outcome, kept, lost): rounds until `first` without `detect`, else until resolved(i) past `first` or `top`."""
-    kept = lost = 0
-    for i in range(1, (top if detect else first) + 1):
-        if play(i):
-            kept += 1
-        else:
-            lost += 1
-            if lost >= lost_limit:
-                return "lost-at-round-%d" % i, kept, lost
-        if detect and i >= first and resolved(i):
-            return "resolved-at-round-%d" % i, kept, lost
-    return ("hit-max-rounds" if detect else "rounds-done"), kept, lost
-
-
-class AB:
+class AB(Task):
     @property
     def arm_word(self):
         return "system" if self.systems else "slot"
@@ -134,13 +83,13 @@ class AB:
         self.system = board.for_board(self.root, reg, ws, clock, self.name, machine=machine, driver=driver)
 
     def setup(self, root, reg, ws, plan, o, clock, labels):
-        self.root, self.reg, self.ws, self.plan, self.o, self.clock, self.labels = str(root), reg, ws, plan, o, clock, labels
+        Task.__init__(self, root, reg, clock, o)
+        self.ws, self.plan, self.labels = ws, plan, labels
         self.rounds = rounds_of(o)
         self.max_rounds, self.detect = stopping(o, self.rounds)
-        self.task, self.taskdir, self.owned = o.get("task") or "", "", False
+        self.taskdir, self.owned = "", False
         if self.task:
             self.taskdir = os.path.join(record.leg_home(reg, ws, self.task)[1], self.task)
-        self.lock = Lock(reg.store, reg.machine, clock)
 
     def run(self):
         return board.BoardRun(self.root, self.reg, self.system, self.clock, plans, self.env, name=self.ws + "-leg")
@@ -235,8 +184,8 @@ class AB:
         command = " ".join(["wk bench run %s %s --system %s %s %s,%s" % (self.ws, self.plan, self.name, flag, a, b)]
                            + (["--slot " + self.arms[0][1]] if self.systems else []) + [self.rounds_words()] + given)
         self.create("%s-%s-systems" % (stamp, self.name) if self.systems else "%s-%s-%s-vs-%s" % (stamp, self.name, a, b), [
-            "subject.kind=" + ("systems" if self.systems else "slots"), "subject.spec=%s,%s" % (a, b), "devices=" + device, "plans=" + self.plan,
-            "rounds=%d" % self.rounds, "slots=" + ",".join(dict.fromkeys(s for _, s in self.arms))]
+            "subject.kind=" + ("systems" if self.systems else "slots"), "subject.spec=%s,%s" % (a, b)]
+            + self.shape(device, [self.plan], (s for _, s in self.arms))
             + [w.replace(" ", "=", 1)[2:] for w in given], command)
 
     def claimed(self):
@@ -245,8 +194,7 @@ class AB:
         return bool(self.task) or act.dry_run()
 
     def create(self, task, fields, command):
-        self.task = task
-        self.taskdir = record.new_task(*record.leg_home(self.reg, self.ws), task, self.lock, self.clock.iso(), fields, command)
+        self.taskdir = self.new_task(record.leg_home(self.reg, self.ws), task, fields, command)
         self.base["task"], self.owned = task, True
 
     def rounds_words(self):
@@ -315,22 +263,8 @@ class AB:
                              ["%s on %s, %s" % (self.plan, self.name, " vs ".join(self.labels))], os.getpid(), self.reg.env)
 
     def go(self):
-        self.held = self.hold()
-        rc = 1
-        try:
-            with job.Signals():
-                rc = self.body()
-        except job.Interrupted as e:
-            rc = "cancelled"
-            raise Refused(job.EXIT_OF.get(e.signum, 130))
-        except Refused as e:
-            rc = e.status
-            raise
-        finally:
-            if self.held is not None:
-                self.held.end(rc)
-            self.lock.release_all()
-        return rc
+        held = self.hold()
+        return self.guarded(self.body, lambda rc: held is not None and held.end(rc))
 
     def body(self):
         if not self.systems:
@@ -371,10 +305,7 @@ class AB:
         if not self.owned:
             log("  report:  wk bench report %s" % self.task)
             return
-        try:
-            self.reporter(self.taskdir)
-        except (Refused, SystemExit, OSError, ValueError) as e:
-            warn("the report did not complete (%s); the runs are recorded:  wk bench report %s" % (e, self.task))
+        self.reported(lambda: self.reporter(self.taskdir), self.task)
 
 
 class ArgsAB(AB):
@@ -389,7 +320,7 @@ class ArgsAB(AB):
             die("--a-args and --b-args are the same ('%s'). Two runs of one arm measure it twice,\n"
                 "    which is a repeatability check rather than an A/B -- '--count N' asks for that." % self.args[0])
         self.setup(root, reg, ws, plan, o, clock, tuple(a or "(none)" for a in self.args))
-        self.name, self.systems, self.env = ws, False, reg.env
+        self.name, self.systems = ws, False
         self.system = systems.for_workspace(self.root, reg, ws, clock, "")
 
     def run(self):
@@ -405,10 +336,10 @@ class ArgsAB(AB):
         self.base = dict(self.o, slot_a=self.labels[0], slot_b=self.labels[1], task=self.task)
         if not self.claimed():
             preset = self.o.get("preset") or project.get("BENCH_PRESET")
-            measured = "".join(" --%s %s" % (k.replace("_", "-"), shlex.quote(self.o[k])) for k in ARGS_AB_MEASURED if self.o.get(k))
+            measured = "".join(" " + shlex.quote(w) for w in flags(self.o, ARGS_AB_MEASURED))
             self.create("%s-%s-options" % (self.clock.stamp(), self.ws), [
-                "subject.kind=options", "subject.a=" + self.args[0], "subject.b=" + self.args[1], "devices=%s=%s" % (self.ws, preset),
-                "plans=" + self.plan, "rounds=%d" % self.rounds, "slots=" + self.ws],
+                "subject.kind=options", "subject.a=" + self.args[0], "subject.b=" + self.args[1]]
+                + self.shape("%s=%s" % (self.ws, preset), [self.plan], [self.ws]),
                 "wk bench run %s %s --preset %s --a-args %s --b-args %s %s%s%s" % (
                     self.ws, self.plan, preset, shlex.quote(self.args[0]), shlex.quote(self.args[1]), self.rounds_words(), measured,
                     " --software" if self.o.get("software") else ""))

@@ -3,10 +3,8 @@
 # wk sync [<workspace>|--mirror|--on <place|machine>|--all|--tools [<place|machine>]] [--fix] -- bring WebKit and the tooling up to date
 # wk: where=dynamic name=optional group=sources needs git dryrun opts --all,--on=,--tools,--mirror,--fix broker --mirror
 #
-# A fetch, and never a checkout: no branch is switched, merged or rebased, here
-# or in a workspace. Safe to run at any time -- workspaces already made stay
-# pinned to the snapshot they were created from, and only ones made after this
-# pick up the new one.
+# A fetch, and never a checkout: no branch is switched, merged or rebased. A
+# workspace stays on the snapshot it was made from.
 #
 #   wk sync                    this machine: its tooling, its one WebKit mirror,
 #                              a new snapshot, then a fetch in every workspace
@@ -16,12 +14,9 @@
 #                              there, so the refresh is asked of the machine
 #                              through the request broker
 #   wk sync <workspace>        a fetch in that one workspace, from its mirror
-#   wk sync --mirror           the mirror alone -- no snapshot, no tooling, no
-#                              workspace. What the brokered refresh above runs,
-#                              and what 'wk new' runs first; in the podman VM
-#                              it is asked of the broker the same way.
-#                              On a Mac, a refresh that moves a ref remounts
-#                              the mirror share in each running guest.
+#   wk sync --mirror           the mirror alone (asked of the broker in the
+#                              podman VM); a refresh that moves a ref remounts
+#                              the mirror share in each running guest
 #   wk sync --on <place|machine>
 #                              that one's furniture, then its workspaces
 #   wk sync --all              every place's furniture, then its workspaces

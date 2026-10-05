@@ -181,65 +181,40 @@ class RecordingDriver(WsDriver):
         return super().act_exec(ws, argv)
 
 
-class TestPrCheckoutKillPoints(unittest.TestCase):
-
-    URL = "https://github.com/alice/WebKit.git"
-    WPE_URL = "https://github.com/alice/WPEWebKit.git"
-
-    def make_world(self):
-        w = GitWorld()
-        w.answer(["git", "ls-remote", git.direct_url(self.URL), "refs/heads/eng/x"], out="b" * 40 + "\trefs/heads/eng/x\n")
-        w.answer(["git", "ls-remote", git.direct_url(self.WPE_URL), "refs/heads/eng/x"], out="")
-        w.fetch_shas = {"refs/heads/eng/x": "b" * 40}
-        return w
-
-    def run_once(self, w):
-        with contextlib.redirect_stderr(io.StringIO()):
-            pr.checkout(w.driver, w, "ws", "alice:eng/x")
-
-    def state(self, w):
-        return (dict(w.remotes), dict(w.local), w.head, {b: dict(v) for b, v in w.upstream.items()})
-
-    def test_a_checkout_killed_after_any_effect_and_rerun_converges(self):
-        converges(self, self.make_world, self.run_once, self.state)
+OPENS = ("WebKit/WebKit", "alice:eng/x", "fork", "eng/x")
 
 
-class TestPrRebaseKillPoints(unittest.TestCase):
-
-    def make_world(self):
-        w = GitWorld()
-        w.local = {"eng/y": "d" * 40}
-        w.head = "eng/y"
-        w.fetch_shas = {"origin/main": "c" * 40}
-        return w
-
-    def run_once(self, w):
-        with contextlib.redirect_stderr(io.StringIO()):
-            CMD_PR_MODULE.pr_rebase(w.driver, "ws")
-
-    def state(self, w):
-        return dict(w.local)
-
-    def test_a_rebase_killed_after_any_effect_and_rerun_converges(self):
-        converges(self, self.make_world, self.run_once, self.state)
+def checkout_world():
+    w = GitWorld()
+    for url, out in (("https://github.com/alice/WebKit.git", "b" * 40 + "\trefs/heads/eng/x\n"), ("https://github.com/alice/WPEWebKit.git", "")):
+        w.answer(["git", "ls-remote", git.direct_url(url), "refs/heads/eng/x"], out=out)
+    w.fetch_shas = {"refs/heads/eng/x": "b" * 40}
+    return w
 
 
-class TestPrOpenKillPoints(unittest.TestCase):
+def checkout_state(w):
+    return (dict(w.remotes), dict(w.local), w.head, {b: dict(v) for b, v in w.upstream.items()})
 
-    def make_world(self):
-        return GitWorld()
 
-    def run_once(self, w):
-        with mock.patch.object(CMD_PR_MODULE, "pr_open_target",
-                               return_value=("WebKit/WebKit", "alice:eng/x", "fork", "eng/x")), \
-                contextlib.redirect_stderr(io.StringIO()):
-            CMD_PR_MODULE.pr_open(w.driver, "ws", False, False, push_status=KEY_LOADED)
+def rebase_world():
+    w = GitWorld()
+    w.local, w.head, w.fetch_shas = {"eng/y": "d" * 40}, "eng/y", {"origin/main": "c" * 40}
+    return w
 
-    def state(self, w):
-        return (set(w.pushed), any(e[0] == "exec" for e in w.effects))
 
-    def test_an_open_killed_after_any_effect_and_rerun_converges(self):
-        converges(self, self.make_world, self.run_once, self.state)
+def open_once(driver):
+    with mock.patch.object(CMD_PR_MODULE, "pr_open_target", return_value=OPENS):
+        CMD_PR_MODULE.pr_open(driver, "ws", False, False, push_status=KEY_LOADED)
+
+
+class TestPrKillPoints(unittest.TestCase):
+    def test_a_checkout_a_rebase_and_an_open_killed_after_any_effect_and_rerun_converge(self):
+        for name, make, flow, state in (
+                ("checkout", checkout_world, lambda w: pr.checkout(w.driver, w, "ws", "alice:eng/x"), checkout_state),
+                ("rebase", rebase_world, lambda w: CMD_PR_MODULE.pr_rebase(w.driver, "ws"), lambda w: dict(w.local)),
+                ("open", GitWorld, lambda w: open_once(w.driver), lambda w: (set(w.pushed), any(e[0] == "exec" for e in w.effects)))):
+            with self.subTest(flow=name), contextlib.redirect_stderr(io.StringIO()):
+                converges(self, make, flow, state)
 
 
 class AgentKeys:
@@ -366,23 +341,19 @@ class TestPrDryRunEqualsWetRun(unittest.TestCase):
         return wet_world, dry_world
 
     def test_a_dry_checkout_is_the_wet_runs_plan_and_touches_nothing(self):
-        kp = TestPrCheckoutKillPoints()
-        _, dry = self.dry_and_wet(kp.make_world, lambda t: pr.checkout(t, t.machine, "ws", "alice:eng/x"))
-        self.assertEqual(kp.state(dry), kp.state(kp.make_world()))
+        _, dry = self.dry_and_wet(checkout_world, lambda t: pr.checkout(t, t.machine, "ws", "alice:eng/x"))
+        self.assertEqual(checkout_state(dry), checkout_state(checkout_world()))
 
     def test_a_dry_rebase_is_the_wet_runs_plan_and_touches_nothing(self):
-        wet, dry = self.dry_and_wet(TestPrRebaseKillPoints().make_world, lambda t: CMD_PR_MODULE.pr_rebase(t, "ws"))
-        self.assertEqual({"eng/y": "c" * 40}, wet.local)
-        self.assertEqual({"eng/y": "d" * 40}, dry.local)
+        wet, dry = self.dry_and_wet(rebase_world, lambda t: CMD_PR_MODULE.pr_rebase(t, "ws"))
+        self.assertEqual(({"eng/y": "c" * 40}, {"eng/y": "d" * 40}), (wet.local, dry.local))
 
     def test_a_dry_open_pushes_nothing_and_prints_the_pull_request(self):
-        with mock.patch.object(CMD_PR_MODULE, "pr_open_target",
-                               return_value=("WebKit/WebKit", "alice:eng/x", "fork", "eng/x")), \
-                mock.patch.object(CMD_PR_MODULE.os, "execvp") as execvp, \
+        with mock.patch.object(CMD_PR_MODULE.os, "execvp") as execvp, \
                 mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), contextlib.redirect_stderr(io.StringIO()) as err:
             w = GitWorld()
             with self.assertRaises(SystemExit):
-                CMD_PR_MODULE.pr_open(RecordingDriver(w), "ws", False, False, push_status=KEY_LOADED)
+                open_once(RecordingDriver(w))
         execvp.assert_not_called()
         self.assertEqual(set(), w.pushed)
         self.assertIn("would run in ws: git -C /src/WebKit push -u fork eng/x", err.getvalue())
@@ -416,13 +387,18 @@ def scratch_store(tmp):
                   "XDG_STATE_HOME": str(tmp / "state"), "WK_IN_VM": "", "HOME": str(tmp)})
 
 
-class TestMirrorFetch(unittest.TestCase):
+class ScratchTest(unittest.TestCase):
+    def setUp(self):
+        scratch = scratch_dir(prefix="wk-pr-test-")
+        self.tmp = scratch.__enter__()
+        self.addCleanup(scratch.__exit__, None, None, None)
+        self.store = scratch_store(self.tmp)
+
+
+class TestMirrorFetch(ScratchTest):
 
     def setUp(self):
-        self._scratch = scratch_dir(prefix="wk-pr-test-")
-        self.tmp = self._scratch.__enter__()
-        self.addCleanup(self._scratch.__exit__, None, None, None)
-        self.store = scratch_store(self.tmp)
+        super().setUp()
         self.here = Local()
 
     def fetch(self, fn, *args):
@@ -464,13 +440,10 @@ class TestMirrorFetch(unittest.TestCase):
         self.assertIn("could not fetch refs/heads/x", err.getvalue())
 
 
-class TestMirrorFetchIsARecorderUnderADryRun(unittest.TestCase):
+class TestMirrorFetchIsARecorderUnderADryRun(ScratchTest):
 
     def setUp(self):
-        self._scratch = scratch_dir(prefix="wk-pr-dryrun-")
-        self.tmp = self._scratch.__enter__()
-        self.addCleanup(self._scratch.__exit__, None, None, None)
-        self.store = scratch_store(self.tmp)
+        super().setUp()
         self.here = Fake("here")
         p = mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"})
         p.start()
@@ -502,13 +475,7 @@ class TestMirrorFetchIsARecorderUnderADryRun(unittest.TestCase):
         self.assertIn("would fetch x from y into the mirror", err.getvalue())
 
 
-class TestPrOpenTarget(unittest.TestCase):
-
-    def setUp(self):
-        self._scratch = scratch_dir(prefix="wk-pr-open-test-")
-        self.tmp = self._scratch.__enter__()
-        self.addCleanup(self._scratch.__exit__, None, None, None)
-
+class TestPrOpenTarget(ScratchTest):
     def _checkout(self, project, remote, fork_remote, branch, tracks_fork):
         upstream = self.tmp / f"{project}-{rand_suffix()}" / project
         _make_repo(upstream, branch if tracks_fork else "main")
@@ -596,34 +563,28 @@ class TestPrRebase(unittest.TestCase):
         self.assertIn("git rebase --continue", err)
 
 
-class TestPrOpenStatus(unittest.TestCase):
-    """'wk pr open' ends as gh: the process becomes `gh pr create`, so a PR gh did not create is not a success."""
+class TestPrOpen(unittest.TestCase):
+    """It pushes from where the key is, then ends as gh: the process becomes `gh pr create`, so a PR gh did not create
+    is not a success."""
 
-    def test_the_command_execs_into_gh(self):
+    def _open(self, peer=None, draft=False):
         driver = rebase_place("", [Result(0)])   # the push
-        with mock.patch.object(CMD_PR_MODULE, "pr_open_target", return_value=("WebKit/WebKit", "me:b", "fork", "b")), \
-                contextlib.redirect_stderr(io.StringIO()):
-            CMD_PR_MODULE.pr_open(driver, "myws", draft=True, web=False, push_status=KEY_LOADED)
-        self.assertEqual([("exec", ("gh", "pr", "create", "--repo", "WebKit/WebKit", "--head", "me:b", "--fill", "--draft"), None)],
-                         [e for e in driver.here.effects if e[0] == "exec"])
-
-
-class TestPrOpenPushesFromWhereTheKeyIs(unittest.TestCase):
-
-    def _open(self, peer):
-        driver = rebase_place("", [Result(0)])
-        driver.kind, driver.is_local, driver.peer = "remote", False, peer
+        if peer is not None:
+            driver.kind, driver.is_local, driver.peer = "remote", False, peer
         with mock.patch.object(CMD_PR_MODULE, "pr_open_target", return_value=("WebKit/WebKit", "me:b", "fork", "b")), \
                 mock.patch.object(CMD_PR_MODULE, "push_from_here", return_value=Result(0)) as from_here, \
                 contextlib.redirect_stderr(io.StringIO()):
-            CMD_PR_MODULE.pr_open(driver, "myws", draft=False, web=False, push_status=KEY_LOADED)
-        return from_here.called, calls(driver)
+            CMD_PR_MODULE.pr_open(driver, "myws", draft=draft, web=False, push_status=KEY_LOADED)
+        return driver, from_here.called, calls(driver)
 
-    def test_a_build_box_pushes_from_here(self):
-        self.assertEqual(self._open(peer=False), (True, []))
+    def test_the_command_execs_into_gh(self):
+        driver = self._open(draft=True)[0]
+        self.assertEqual([("exec", ("gh", "pr", "create", "--repo", "WebKit/WebKit", "--head", "me:b", "--fill", "--draft"), None)],
+                         [e for e in driver.here.effects if e[0] == "exec"])
 
-    def test_a_peer_pushes_its_own(self):
-        self.assertEqual(self._open(peer=True), (False, [["git", "-C", "/src/WebKit", "push", "-u", "fork", "b"]]))
+    def test_a_build_box_pushes_from_here_and_a_peer_its_own(self):
+        self.assertEqual(self._open(peer=False)[1:], (True, []))
+        self.assertEqual(self._open(peer=True)[1:], (False, [["git", "-C", "/src/WebKit", "push", "-u", "fork", "b"]]))
 
 
 class TestPrOpenRefusals(unittest.TestCase):

@@ -56,10 +56,8 @@ class TestTheBrowserGate(WkTest):
                               "AppleParavirtGPU", min_raf,
                               GOOD_EXPECT if expect is _DEFAULT else expect)
 
-    def test_an_accelerated_unthrottled_run_passes(self):
-        self.assertEqual(self.verdict(), [])
-
     def test_each_fault_is_refused_by_name(self):
+        self.assertEqual(self.verdict(), [], "an accelerated, unthrottled run passes")
         for said, reading, clients in (("throttle", dict(GOOD_READING, raf_hz=8.0), None),
                                        ("no WebGL", dict(GOOD_READING, webgl=None), None), ("did not reach that device", None, {}),
                                        ("never reported", {}, {}),
@@ -78,11 +76,9 @@ class TestTheBrowserGate(WkTest):
         self.assertTrue(any("throttle" in f for f in found), found)
         self.assertEqual([], [f for f in found if "display" in f or "panel" in f])
 
-    def test_the_bar_is_the_callers_to_set(self):
+    def test_the_bar_is_the_callers_to_set_and_a_busy_but_focused_window_is_not_a_throttled_one(self):
         self.assertEqual(self.verdict(min_raf=10.0), [])
         self.assertNotEqual(self.verdict(min_raf=59.0), [])
-
-    def test_a_busy_but_focused_window_is_not_a_throttled_one(self):
         self.assertEqual(self.verdict(dict(GOOD_READING, raf_hz=44.4, focused=True), min_raf=BROWSER.MIN_RAF), [])
 
 
@@ -132,21 +128,17 @@ class TestTheProfileGate(WkTest):
                      for where, libs in rows.items() for lib, (f, c) in libs.items()}
         return self.read(summaries)
 
-    def test_a_full_collection_passes(self):
+    def test_a_full_collection_and_a_real_one_pass(self):
         profile_tree(self.root)
         self.assertEqual(PROFILE.faults(self.read({})), [])
+        self.assertEqual(PROFILE.faults(self.read_real()), [])
 
-    def test_a_benchmark_that_never_finished_is_named(self):
-        profile_tree(self.root)
+    def test_a_benchmark_that_never_finished_and_a_missing_compressed_copy_are_named(self):
+        """The measured build reads only the compressed copy, so its absence is silent."""
+        profile_tree(self.root, compressed=False)
         os.remove(self.root / "motionmark" / "WebCore.profdata")
         found = PROFILE.faults(self.read({}))
-        self.assertTrue(any("motionmark/WebCore.profdata" in f and "did not finish" in f
-                            for f in found), found)
-
-    def test_a_missing_compressed_copy_is_named(self):
-        """The measured build reads only this one, so its absence is silent."""
-        profile_tree(self.root, compressed=False)
-        found = PROFILE.faults(self.read({}))
+        self.assertTrue(any("motionmark/WebCore.profdata" in f and "did not finish" in f for f in found), found)
         self.assertTrue(any("the measured build reads" in f for f in found), found)
 
     def test_each_unusable_profile_is_refused_by_name(self):
@@ -161,10 +153,6 @@ class TestTheProfileGate(WkTest):
             with self.subTest(said):
                 found = PROFILE.faults(reading())
                 self.assertTrue(any(said in f for f in found), found)
-
-    def test_a_real_collection_passes(self):
-        profile_tree(self.root)
-        self.assertEqual(PROFILE.faults(self.read_real()), [])
 
 
 class TestAProfileGuidedBuildDoesNotCacheCompilations(WkTest):
@@ -221,10 +209,8 @@ class TestNothingMayDrawOverAMeasuredRun(WkTest):
                 m.answer(lib_argv(str(REPO), screen.WINDOWS, "wk_window_probe"), out=said)
                 self.assertEqual(screen.blocker(m, REPO), want)
 
-    def test_a_window_that_appears_mid_run_is_caught(self):
+    def test_a_window_that_appears_mid_run_is_caught_and_a_run_nothing_drew_over_passes(self):
         self.assertEqual([l.split("\t", 1)[1] for l in self._watch(True)], ["UserNotificationCenter"])
-
-    def test_a_run_nothing_drew_over_passes(self):
         self.assertEqual(self._watch(False), [])
 
 

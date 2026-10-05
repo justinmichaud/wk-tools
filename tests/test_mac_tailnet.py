@@ -15,7 +15,7 @@ import unittest
 from unittest import mock
 
 from tests.killpoints import converges
-from tests.support import REPO, requires_machine, scratch_dir
+from tests.support import REPO, requires_machine, requires_tool, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import images  # noqa: E402
@@ -684,6 +684,7 @@ class TheProvision(unittest.TestCase):
         self.assertIn("but only on a readback", err)
 
 
+@requires_tool("rsync")
 class ThePayloadTheAutorunStages(unittest.TestCase):
     """`python3 -m wk.sysimage.macvolume stage-payload /`, the bench install's convergence (lib/wk/bench/autorun.py)."""
 

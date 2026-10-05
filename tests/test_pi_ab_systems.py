@@ -56,21 +56,18 @@ class SystemBootTest(BoardTest):
 
 
 class TestTheLegsSystem(SystemBootTest):
-    def test_a_board_already_on_the_system_boots_nothing(self):
-        ab = self.ab()
-        self.assertTrue(self.boot(ab, "sys-a"), self.err)
-        self.assertEqual(self.landed, [])
-
-    def test_a_board_that_arms_where_it_stands_is_armed_there(self):
-        ab = self.ab(driver=ArmsFromBench)
-        self.assertTrue(self.boot(ab, "sys-b"), self.err)
-        self.assertEqual(self.landed, [SYS_B])
-
-    def test_a_board_that_arms_only_from_its_rescue_goes_back_to_it_first(self):
-        ab = self.ab()
-        self.assertTrue(self.boot(ab, "sys-b"), self.err)
-        self.assertEqual(self.landed, [self.w.board.conf["root"], SYS_B])
-        self.assertEqual(self.armings(), 1)
+    def test_the_board_reaches_the_legs_system_from_wherever_it_stands(self):
+        """On it already, armed where it stands, back to its rescue first, from the rescue, or armed again after a wrong landing."""
+        for driver, running, misroute, want, landed, armings in (
+                (Rpi5Usb, SYS_A, 0, "sys-a", [], 0), (ArmsFromBench, SYS_A, 0, "sys-b", [SYS_B], 1),
+                (Rpi5Usb, SYS_A, 0, "sys-b", ["rescue", SYS_B], 1), (Rpi5Usb, "/dev/mmcblk0p2", 0, "sys-b", [SYS_B], 1),
+                (ArmsFromBench, SYS_A, 2, "sys-b", [SYS_A, SYS_A, SYS_B], 3)):
+            with self.subTest(driver=driver.__name__, running=running, misroute=misroute, want=want):
+                ab = self.ab(driver=driver, running=running)
+                self.misroute = misroute
+                self.assertTrue(self.boot(ab, want), self.err)
+                self.assertEqual(self.landed, [self.w.board.conf["root"] if x == "rescue" else x for x in landed])
+                self.assertEqual(self.armings(), armings)
 
     def test_a_failed_back_transition_is_retried_not_ignored(self):
         ab = self.ab()
@@ -87,17 +84,6 @@ class TestTheLegsSystem(SystemBootTest):
         self.assertIn("could not send", self.err)
         self.assertEqual(self.landed, [self.w.board.conf["root"], SYS_B])
         self.assertEqual(2, len(calls))
-
-    def test_the_rescue_is_armed_from_directly(self):
-        ab = self.ab(running="/dev/mmcblk0p2")
-        self.assertTrue(self.boot(ab, "sys-b"), self.err)
-        self.assertEqual(self.landed, [SYS_B])
-
-    def test_a_board_that_comes_up_wrong_is_armed_again(self):
-        ab = self.ab(driver=ArmsFromBench)
-        self.misroute = 2
-        self.assertTrue(self.boot(ab, "sys-b"), self.err)
-        self.assertEqual(self.landed, [SYS_A, SYS_A, SYS_B])
 
     def test_the_last_arming_is_read_before_the_leg_is_given_up(self):
         ab = self.ab(driver=ArmsFromBench)

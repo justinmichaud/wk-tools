@@ -182,10 +182,9 @@ class TestContainer(DriversTest):
         self.fake.mkdir(os.path.join(self.env["WK_STORE"], "ws", "c"))
         self.assertTrue(self.reg.exists_on(self.t, "c"))
 
-    def test_exec_goes_through_the_sdk_and_the_bridge_without_a_tty(self):
+    def test_exec_goes_through_the_sdk_and_the_bridge_and_only_exec_tty_carries_a_tty(self):
         self.fake.answer(["env"], out="ok\n")
-        r = self.t.exec("a", ["git", "rev-parse", "HEAD"])
-        self.assertEqual(r.out, "ok\n")
+        self.assertEqual(self.t.exec("a", ["git", "rev-parse", "HEAD"]).out, "ok\n")
         argv = self.fake.effects[-1][1]
         self.assertEqual(argv[0], "env")
         self.assertIn("WKDEV_SDK=%s" % self.t.sdk(), argv)
@@ -193,6 +192,10 @@ class TestContainer(DriversTest):
         self.assertIn("--no-tty", argv)
         self.assertEqual(argv[-3:], ("git", "rev-parse", "HEAD"))
         self.assertIn("ensure-bridge.sh", argv[argv.index("--") + 1])
+        self.assertEqual(self.t.exec_tty("a", ["lldb", "-o", "attach"]).rc, 0)
+        kind, argv, cwd = self.fake.effects[-1]
+        self.assertEqual((kind, argv[-3:], cwd), ("run_tty", ("lldb", "-o", "attach"), None))
+        self.assertNotIn("--no-tty", argv)
 
     def test_wk_is_the_podman_vms_own_wk_over_machine_ssh(self):
         self.fake.answer(["podman", "machine", "ssh", "wk", "--"], out='{"kind": "workspace"}\n')
@@ -210,36 +213,22 @@ class TestContainer(DriversTest):
         self.assertTrue(self.t.stop("a"))
         self.assertEqual(self.fake.effects[-1][1][:3], ("podman", "stop", "--time"))
 
-    def test_exec_tty_carries_a_tty_through_the_sdk_and_the_bridge(self):
-        self.fake.answer(["env"], out="ok\n")
-        r = self.t.exec_tty("a", ["lldb", "-o", "attach"])
-        self.assertEqual(r.rc, 0)
-        kind, argv, cwd = self.fake.effects[-1]
-        self.assertEqual(kind, "run_tty")
-        self.assertNotIn("--no-tty", argv)
-        self.assertEqual(argv[-3:], ("lldb", "-o", "attach"))
-        self.assertIsNone(cwd)
-
     def test_the_arch_is_recorded_at_creation(self):
         self.assertEqual(self.t.arch("a"), "native")
         self.fake.write(os.path.join(self.env["WK_STORE"], "ws", "a", "arch"), "armhf\n")
         self.assertEqual(self.t.arch("a"), "armhf")
 
-    def test_sdk_local_is_none_with_no_image_pulled(self):
+    def test_sdk_local_reads_the_pulled_image_and_its_pull_date_or_none(self):
         self.fake.answer(["podman", "images"], out="docker.io/library/busybox:latest\n")
         self.assertIsNone(self.t.sdk_local())
-
-    def test_sdk_local_reads_the_pulled_image_and_its_pull_date(self):
         self.fake.answer(["podman", "images"], out="ghcr.io/igalia/wkdev-sdk:2.53-v9-abc0000\n")
         self.fake.answer(["podman", "image", "inspect"], out="2026-08-01T12:00:00Z\n")
         self.assertEqual(self.t.sdk_local(), {"image": "ghcr.io/igalia/wkdev-sdk:2.53-v9-abc0000", "created": "2026-08-01"})
 
-    def test_sdk_upstream_is_the_registrys_tags_past_the_header_row(self):
+    def test_sdk_upstream_is_the_registrys_tags_past_the_header_row_or_none(self):
         self.fake.answer(["podman", "search", "--list-tags"], out="NAME\tTAG\nghcr.io/igalia/wkdev-sdk\t2.53-v9-abc0000\n"
                                                                     "ghcr.io/igalia/wkdev-sdk\t24.04_arm32\n")
         self.assertEqual(self.t.sdk_upstream(), ["2.53-v9-abc0000", "24.04_arm32"])
-
-    def test_sdk_upstream_is_none_when_the_registry_does_not_answer(self):
         self.fake.answer(["podman", "search", "--list-tags"], rc=1, err="timed out")
         self.assertIsNone(self.t.sdk_upstream(timeout=4))
 
@@ -826,9 +815,6 @@ class TestVmWrite(VmTest):
         self.assertEqual(1, self.base_ensure.call_count)
         self.assertTrue(self.t.created("new"))
 
-    def test_the_guest_sees_the_mirror_on_its_own_tagged_share(self):
-        self.assertEqual(self.t.mirror_dir(), places.GUEST_MIRROR_MOUNT + "/mirror/WebKit.git")
-
     def test_create_takes_the_sizing_and_display_overrides(self):
         self.env.update({"WK_VM_CPUS": "4", "WK_VM_MEM_MB": "8192", "WK_VM_DISPLAY": "1920x1080"})
         self.stderr_of(lambda: self.reg.load("vm").create("new"))
@@ -1034,15 +1020,11 @@ class TestRemoteWrite(RemoteTest):
         err = self.refused(lambda: self.reg.load("peer").hand_over("new", ["a"], tty=False))
         self.assertIn("'new' acts on a workspace on peer, which has no wk-tools of its own", err)
 
-    def test_a_box_at_another_wk_tools_commit_is_refused_the_hand_over_naming_the_sync(self):
+    def test_a_box_at_another_wk_tools_commit_is_refused_the_hand_over_naming_the_sync_and_asked_again_each_time(self):
         self.tools_at("0000stale000")
-        err = self.refused(lambda: self.t.hand_over("build", ["a", "jsc-release"], tty=False))
+        err = self.refused(lambda: self.t.hand_over("build", ["a"], tty=False))
         self.assertIn("wk sync --tools box", err)
         self.assertEqual([], self.fake.ssh_calls("wk build"))
-
-    def test_the_comparison_is_made_again_at_each_hand_over(self):
-        self.tools_at("0000stale000")
-        self.refused(lambda: self.t.hand_over("build", ["a"], tty=False))
         self.tools_at("abc1234")
         self.assertIn("wk build a", self.t.hand_over("build", ["a"], tty=False)[-1])
         self.assertEqual(2, len(self.fake.ssh_calls("/wk doctor --probe-tools")))
@@ -1281,8 +1263,9 @@ class TestThePodmanMachineRecord(DriversTest):
         self.assertEqual(places.podman_vm(self.fake, "wk"), rec)
         opts, dest = places.podman_vm_route(rec)
         self.assertEqual((opts[:4], dest), (["-p", "50123", "-i", "/k"], "core@127.0.0.1"))
-
-    def test_an_unreadable_answer_is_refused(self):
+        err = self.refused(lambda: places.podman_vm_route({"Name": "wk", "SSHConfig": {"Port": 0}}))
+        self.assertIn("podman names no ssh port, key and user for its machine 'wk'", err)
+        self.assertIn("./setup --stage machine", err)
         self.fake.answer(["podman", "machine", "inspect", "wk"], out="running\n")
         err = self.refused(lambda: places.podman_vm(self.fake, "wk"))
         self.assertIn("'podman machine inspect wk' answered what this end cannot read", err)
@@ -1312,11 +1295,6 @@ class TestThePodmanMachineRecord(DriversTest):
             rc = places.main(["podman-vm", "_cpus=Resources.CPUs", "_disk=Resources.DiskSize"], env=self.env)
         self.assertEqual(rc, 0)
         self.assertEqual(out.getvalue(), "_cpus=9\n_disk=''\n")
-
-    def test_a_record_naming_no_way_in_is_refused(self):
-        err = self.refused(lambda: places.podman_vm_route({"Name": "wk", "SSHConfig": {"Port": 0}}))
-        self.assertIn("podman names no ssh port, key and user for its machine 'wk'", err)
-        self.assertIn("./setup --stage machine", err)
 
 
 if __name__ == "__main__":

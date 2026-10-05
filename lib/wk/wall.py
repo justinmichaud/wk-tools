@@ -3,13 +3,14 @@
 import json
 import os
 import re
+import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import credcheck
-from wk import claudelogin, project, reach, secrets
+from wk import claudelogin, guest, project, reach, secrets
 from wk.store import no_such_workspace
-from wk.act import die
-from wk.doctor import MISS, miss, note, ok
+from wk.act import barrier, die, info, warn
+from wk.doctor import MISS, Report, miss, note, ok
 from wk.resources import arch_has_gpu
 
 # Named places, never the checkout: it ships PEM fixtures.
@@ -555,3 +556,46 @@ def from_inside(root, driver, ws, machine, rep):
     for _, found in results:
         rep.rows(found)
     return any(r[0] == MISS for name, found in results if name in PUBLISHING for r in found)
+
+
+def agent_checks(root, driver, ws, machine):
+    """`wk ai`'s gate: `wk doctor`'s checks, from the host for a container or a guest, from inside for this workspace."""
+    if driver.kind == "remote":
+        info("'wk doctor %s' is not run for '%s': there is no sandbox there to\n  measure (it says so and refuses). The "
+             "barrier above is the whole of the\n  boundary on this place." % (ws, driver.name))
+        return
+    rep = Report(sys.stderr)
+    if driver.kind == "local":
+        info("checking workspace '%s' from inside it" % ws)
+        publishing = from_inside(root, driver, ws, machine, rep)
+    else:
+        info("checking workspace '%s' (%s)" % (ws, driver.name))
+        publishing = from_host(root, driver, ws, machine, rep)
+    sys.stderr.write("\n")
+    v = verdict(rep, publishing)
+    if v == "publishing":
+        die("refusing to run: an agent in '%s' could publish (see above).\n    Nothing in here can fix it and --force does "
+            "not cross it; the switch is the\n    host's:  wk key push off" % ws)
+    if v == "broken":
+        warn("%d check(s) failed -- the sandbox is not intact" % rep.missing)
+        barrier("the sandbox around '%s' is not intact (see above), and relaxed\n"
+                "    permissions are only defensible while it is." % ws)
+    else:
+        info("sandbox intact")
+
+
+def guest_egress(env, driver, ws, machine):
+    """Softnet filters a macOS guest's egress on the host, unmeasurable from in there, from `tart run` on."""
+    unfiltered = guest.is_unfiltered(env)
+    if not driver.egress_filtered(ws) and not unfiltered:
+        barrier("'%s' was booted with NO egress filter.\n    Restart it filtered:  wk stop %s && wk start %s" % (ws, ws, ws))
+    if not unfiltered and machine.run(["test", "-x", guest.softnet_bin(env)]).ok:
+        info("'%s' is a macOS VM: egress is filtered on the host by Softnet,\n  default-deny except the wk-proxy address. Of "
+             "the host filesystem it reaches\n  only the mirror, read-only, and the\n"
+             "  guest is disposable." % ws)
+    elif unfiltered:
+        warn("WK_VM_UNFILTERED=1: '%s' has the open network. Of the host filesystem\n  it still reaches only the mirror, "
+             "read-only, and the guest is still\n  disposable -- but that is the whole of the boundary right now." % ws)
+    else:
+        barrier("softnet is not installed, so this guest's egress is not filtered.\n    Install it:  ./setup --stage softnet"
+                "   (needs a terminal)")

@@ -208,7 +208,9 @@ class TestTheCredentialIsDeclaredWhereARebuildLooks(unittest.TestCase):
         from tests.test_doctor import fake_doctor
         doc = fake_doctor(True)
         rows = [w + " -> " + r for _, w, r in doc.machine_local()]
-        line = [l for l in rows if l.startswith("~" + doc.paths()["ntfy_topic"][len(doc.home):] + " ")]
+        path = doc.paths()["ntfy_topic"]   # under HOME only where Store.macos_host (a Darwin uname) puts the keyring there
+        shown = "~" + path[len(doc.home):] if path.startswith(doc.home) else path
+        line = [l for l in rows if l.startswith(shown + " ")]
         self.assertEqual(1, len(line), rows)
         self.assertIn("re-authable", line[0])
         self.assertIn("wk key set ntfy", line[0])

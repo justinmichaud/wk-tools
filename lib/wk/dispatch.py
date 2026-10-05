@@ -682,21 +682,25 @@ def bare_report(inv, cmd, args):
 
 # -- main
 
+def forward_cmd(args):
+    forward_to_vm(Invocation(args[0], D.Decl(ROOT / "cmd" / args[0]), args[1:]), args[0], args[1:])
+
+
+BUILTINS = {
+    "help": lambda args: help_doc(args[0] if args else ""),
+    "setup": lambda args: os.execv(str(ROOT / "setup"), [str(ROOT / "setup"), *args]),
+    "--declarations": lambda args: dump_declarations(),
+    "completion": completion_cmd,
+    "--forward": forward_cmd}
+BUILTINS["-h"] = BUILTINS["--help"] = BUILTINS["help"]
+
+
 def main(argv):
     if not argv:
         usage()
     cmd, args = argv[0], list(argv[1:])
-    if cmd in ("help", "-h", "--help"):
-        help_doc(args[0] if args else "")
-    if cmd == "setup":
-        os.execv(str(ROOT / "setup"), [str(ROOT / "setup"), *args])
-    if cmd == "--declarations":
-        dump_declarations()
-    if cmd == "completion":
-        completion_cmd(args)
-    if cmd == "--forward":
-        d = D.Decl(ROOT / "cmd" / args[0])
-        forward_to_vm(Invocation(args[0], d, args[1:]), args[0], args[1:])
+    if cmd in BUILTINS:
+        BUILTINS[cmd](args)
     impl = ROOT / "cmd" / cmd
     if not (impl.is_file() and os.access(str(impl), os.X_OK)):
         warn("unknown command: %s" % cmd)

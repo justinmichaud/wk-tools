@@ -63,13 +63,11 @@ class PushTest(SecretsTest):
         self.box = Box(self.w, self.w.env)
         self.boxes = {"container": self.box}
         self.clock = FakeClock()
-        self.guest = mock.patch.multiple(guest, vm_push_keys_converge=mock.DEFAULT, vm_push_agent_keys=mock.DEFAULT,
-                                         vm_push_keys_state=mock.DEFAULT)
+        self.guest = mock.patch.multiple(guest, vm_push_keys_converge=mock.DEFAULT, vm_push_status=mock.DEFAULT)
         self.vm = self.guest.start()
         self.addCleanup(self.guest.stop)
         self.vm["vm_push_keys_converge"].side_effect = lambda root, m, action: m.effects.append(("act", ("guests", action))) or True
-        self.vm["vm_push_agent_keys"].return_value = None
-        self.vm["vm_push_keys_state"].return_value = []
+        self.vm["vm_push_status"].return_value = (0, [])
 
     def push(self, action, w=None, macos=False, boxes=None):
         """(exit status, stdout, stderr) of one `wk key push <action>`."""
@@ -288,8 +286,7 @@ class TestTheGuests(PushTest):
 
     def test_a_key_in_the_guests_agent_is_on_with_no_guest_up(self):
         self.w.seed()
-        self.vm["vm_push_agent_keys"].return_value = 1
-        self.vm["vm_push_keys_state"].return_value = [["demo", "stopped", ""]]
+        self.vm["vm_push_status"].return_value = (1, [["demo", "stopped", ""]])
         rc, out, err = self.push("status", macos=True)
         self.assertEqual(0, rc)
         self.assertIn("1 key(s) in the agent this host runs for them and its own pushes", out)
@@ -297,16 +294,14 @@ class TestTheGuests(PushTest):
 
     def test_a_running_guest_that_reaches_it_is_on(self):
         self.w.seed()
-        self.vm["vm_push_agent_keys"].return_value = 0
-        self.vm["vm_push_keys_state"].return_value = [["demo", "running", "1 key(s) through the agent on this host"]]
+        self.vm["vm_push_status"].return_value = (0, [["demo", "running", "1 key(s) through the agent on this host"]])
         rc, out, _ = self.push("status", macos=True)
         self.assertEqual(0, rc)
         self.assertIn("the agent this host runs for them and its own pushes holds nothing", out)
 
     def test_nothing_reaching_it_is_off(self):
         self.w.seed()
-        self.vm["vm_push_agent_keys"].return_value = 0
-        self.vm["vm_push_keys_state"].return_value = [["demo", "running", ""]]
+        self.vm["vm_push_status"].return_value = (0, [["demo", "running", ""]])
         self.assertEqual(1, self.push("status", macos=True)[0])
 
 

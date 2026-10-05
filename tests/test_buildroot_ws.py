@@ -34,12 +34,27 @@ def webkit_args():
     return bt.parse(["webkit", "--name", NAME, "--commit", COMMIT, "--slot", "base", "--jobs", "8"])
 
 
-class World(Fake):
-    """A workspace with the tree cloned and the tools pushed; make and the guarded build answer as buildroot would."""
+class WsWorld(Fake):
+    """A workspace an in-workspace builder's `Build` runs in, with this module's ENV unless a subclass names its own."""
+
+    BUILD, ENV = bt.Build, ENV
 
     def __init__(self):
         super().__init__("ws")
         self.clock = FakeClock()
+
+    def build(self, a):
+        return self.BUILD(a, self, dict(self.ENV), self.clock, TOOLS)
+
+    def ran(self, *prefix):
+        return [e[1] for e in self.effects if e[0] in ("run", "run_tty") and tuple(e[1][:len(prefix)]) == prefix]
+
+
+class World(WsWorld):
+    """A workspace with the tree cloned and the tools pushed; make and the guarded build answer as buildroot would."""
+
+    def __init__(self):
+        super().__init__()
         self.dirs.update({SRC, WORK + "/.git", WORK + "/package", TOOLS + "/image/buildroot/tree-patches"})
         self.files.update({
             TOOLS + "/" + bt.TS_REL: 'TS_VERSION = "1.2.3"\nTS_SHA256_arm = "%s"\n' % SHA,
@@ -72,12 +87,6 @@ class World(Fake):
         f.files[OUT + "/images/sdcard.img"] = ""
         f.mtime = int(f.clock.now()) + 60
         return Result(0)
-
-    def build(self, a):
-        return bt.Build(a, self, dict(ENV), self.clock, TOOLS)
-
-    def ran(self, *prefix):
-        return [e[1] for e in self.effects if e[0] in ("run", "run_tty") and tuple(e[1][:len(prefix)]) == prefix]
 
 
 def quiet(fn, *a):

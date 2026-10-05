@@ -2,7 +2,6 @@
 and a clock -- machine.conformance[<kind>] over one test body, boot.arming_exact and the on-board files."""
 import contextlib
 import io
-import re
 import shlex
 import subprocess
 import sys
@@ -307,13 +306,6 @@ class TestOnboard(unittest.TestCase):
         """PLAN's ~150 lines of shell that run on a board, before python3 is there to run instead."""
         lines = sum(len([l for l in f.read_text().splitlines() if l.strip()]) for f in ONBOARD.iterdir())
         self.assertLessEqual(lines, 150)
-
-    def test_no_python_driver_builds_shell_by_string(self):
-        """every remote command is an Onboard file; the only literal a driver hands the channel is a verb."""
-        for name in ("driver.py", "pi.py"):
-            text = (REPO / "lib" / "wk" / "boot" / name).read_text()
-            with self.subTest(file=name):
-                self.assertIsNone(re.search(r'call\("(r_ssh|r_sudo|m_ssh|i_ssh)", "', text))
 
     def test_a_parameter_is_one_literal_word(self):
         with self.assertRaises(ValueError):

@@ -344,12 +344,9 @@ class Registry:
         if kind is None:
             self._conf(name)   # a conf that does not parse says why
             names = " ".join(self.known())
-            raise LookupError(
-                "unknown place '%s'.\n    The built-in ones are container, vm, remote and local.%s\n\n"
-                "    Anything else is a machine, and needs a conf -- in the registry, so every\n"
-                "    device gets it:\n\n        %s\n            kind=build\n            host=%s      # an ssh destination that already works\n"
-                "            root=/home/you/wk\n\n    'wk machine setup %s' writes it for you."
-                % (name, ("\n    The machines here: " + names) if names else "", self.conf_path(name), name, name))
+            raise LookupError("unknown place '%s'.\n    The built-in ones are container, vm, remote and local.%s\n"
+                              "    A machine needs a conf (%s):  wk machine setup %s"
+                              % (name, ("\n    The machines here: " + names) if names else "", self.conf_path(name), name))
         env = dict(self.env)
         if name not in BUILTIN:
             env.update(conf_env(self._conf(name), self.conf_path(name)))
@@ -424,6 +421,12 @@ class Driver:
     def created(self, ws):
         return True
 
+    def _info_of(self, ws, st):
+        """The environment's own word `st`, read as creating until the ready marker is down."""
+        if st == "absent":
+            return st
+        return st if self.created(ws) else "creating"
+
     def possible(self):
         """Whether this place can exist on this machine; one that cannot holds no workspace."""
         return True
@@ -445,17 +448,8 @@ class Driver:
     def agent_sock(self):
         return None
 
-    def _agent_secret(self, secret):
-        return next(r for r in secrets.agent_secrets() if r[0] == secret)
-
-    def _agent_secret_file(self, secret):
-        return '"$HOME/%s"' % self._agent_secret(secret)[2]
-
     def install_agents(self, ws):
         agents.install(self.root, self.env, self.here, lambda argv: self.act_exec(ws, argv), ws, self.tools(ws), self.src(ws))
-
-    def agent_secret_present(self, ws, secret):
-        return self.exec(ws, ["bash", "-lc", "test -s %s" % self._agent_secret_file(secret)]).ok
 
     def agent_secret_remedy(self, ws, secret):
         return secrets.Secrets(self.root, self.env, self.machine).agent_secret_remedy(secret)
@@ -555,17 +549,12 @@ class Driver:
             if st == "broken":
                 act.die(self.broken_words(ws))
             if st == "unreachable":
-                act.die("'%s' lives on a machine that did not answer (%ss).\n"
-                        "    Nothing is wrong with the workspace as far as this end can tell -- it\n"
-                        "    cannot be reached to ask. Try again, or check the route:\n"
+                act.die("'%s' lives on a machine that did not answer (%ss); check the route:\n"
                         "        ssh -o BatchMode=yes %s true"
                         % (ws, reach.ssh_timeout(self.env), getattr(self, "host", "") or "the machine"))
             if not now:
-                act.barrier("'%s' was never finished creating, and nothing is creating it now\n"
-                            "    (the process that was is gone, with whatever connection started it).\n"
-                            "    Usually there is nothing in one worth keeping, so remake it:\n        %s\n"
-                            "    --force uses it as it is, which is right when you can see that the\n"
-                            "    checkout is complete and only the marker is missing." % (ws, self.remake_hint(ws)))
+                act.barrier("'%s' was never finished creating, and nothing is creating it now.\n"
+                            "    Remake it:  %s\n    --force uses it as it is." % (ws, self.remake_hint(ws)))
                 return True
             if not seen["said"]:
                 seen["said"] = True
@@ -576,8 +565,8 @@ class Driver:
             return False
 
         if not clock.wait_until(ready, timeout, 2):
-            act.die("'%s' was still %s after %ds.\n    Creation is detached, so it may still be going: 'wk status %s' says\n"
-                    "    whether the detached run is alive, and %s says what it is doing." % (ws, seen["st"], timeout, ws, self.create_log(ws)))
+            act.die("'%s' was still %s after %ds; 'wk status %s' says whether its creation is alive, %s what it is doing"
+                    % (ws, seen["st"], timeout, ws, self.create_log(ws)))
         if seen["said"]:
             act.info("'%s' is ready" % ws)
         self.converge(ws, clock)
@@ -592,12 +581,10 @@ class Driver:
 
     def broken_words(self, ws):
         if not self.store_machine.isdir(self.store.ws_dir(ws)):
-            return ("'%s' is an environment with no workspace directory: nothing is creating it, and\n"
-                    "    what it would run in is gone -- something outside wk removed it.\n"
-                    "    Repair:  wk rm %s    (then 'wk new %s' if you still want it)" % (ws, ws, ws))
-        return ("'%s' exists as a record and not as a %s workspace: creation\n"
-                "    finished, and the environment is gone -- something outside wk removed it.\n"
-                "    Repair:  wk rm %s    (then 'wk new %s' if you still want it)" % (ws, self.name, ws, ws))
+            half = "an environment with no workspace directory"
+        else:
+            half = "a record whose %s environment is gone" % self.name
+        return "'%s' is %s -- something outside wk removed it.\n    Repair:  wk rm %s    (then 'wk new %s')" % (ws, half, ws, ws)
 
     def sync_tools(self, ws):
         return True
@@ -609,8 +596,12 @@ class Driver:
     def create_log(self, ws):
         return os.path.join(self.store.store_dir(), "log", "new-%s.log" % ws)
 
+    store_dirs = ("ws",)
+
     def store_init(self):
-        raise NotImplementedError
+        root = self.store.store_dir()
+        for d in ("",) + self.store_dirs:
+            self.here.mkdir(os.path.join(root, d) if d else root)
 
     def sdk_refresh(self):
         return True
@@ -698,7 +689,15 @@ class Driver:
         return "wk-%s" % ws
 
     def ssh_prepare(self, ws):
-        """Point an editor at this place over ssh; nothing for one already an ssh destination."""
+        """Point an editor at this place over the `Host wk-<ws>` alias; nothing for one already an ssh destination."""
+        end = self.ssh_endpoint(ws)
+        if end:
+            hostname, user, key, proxy = end
+            sshalias.alias_set(self.here, self.env, ws, hostname, user, identity=key, extra=("ProxyCommand " + proxy,))
+
+    def ssh_endpoint(self, ws):
+        """(HostName, user, key, ProxyCommand) of an addressless workspace, its far end made ready; None for none."""
+        return None
 
     def ssh_user(self, ws):
         return None
@@ -711,9 +710,10 @@ class Driver:
         raise NotImplementedError
 
     def exec_tty(self, ws, argv, timeout=None):
-        """Blocking, this process's own stdio inherited -- a real pty for lldb/samply/xctrace -- control returns here, unlike `enter_argv`'s exec."""
+        """Blocking, this process's own stdio inherited -- a real pty for lldb/samply/xctrace -- control returns here, unlike `enter_argv`'s exec.
+        `exec_argv` is already the whole command line (its own `ssh`, for a machine), so `self.here` runs it."""
         cmd, cwd = self.exec_argv(ws, argv, tty=True)
-        return self.machine.run_tty(cmd, cwd=cwd, timeout=timeout)
+        return self.here.run_tty(cmd, cwd=cwd, timeout=timeout)
 
     def ccache_dir(self, ws):
         return "/ccache"
@@ -727,8 +727,20 @@ class Driver:
         return res.envelope_cores(), res.envelope_mem_mb(), None
 
 
+def json_or(text, default):
+    try:
+        return json.loads(text)
+    except ValueError:
+        return default
+
+
 def show(r):
     sys.stderr.write(r.out + r.err)
+
+
+def said(name, word):
+    """One row of a sync's report."""
+    sys.stderr.write("  %-24s %s\n" % (name, word))
 
 
 TART_APP = ".local/share/tart/tart.app/Contents/MacOS/tart"
@@ -861,22 +873,14 @@ class Container(Driver):
 
     def list(self):
         r = self.machine.run(self.podman() + ["ps", "-a", "--filter", "name=^wk-", "--format", "{{.Names}}\t{{.Status}}"])
-        rows = []
-        for line in r.out.splitlines():
-            name, _, status = line.partition("\t")
-            if name.startswith("wk-"):
-                rows.append((name[3:], status))
-        return rows
+        return [(n[3:], st) for n, _, st in (line.partition("\t") for line in r.out.splitlines()) if n.startswith("wk-")]
 
     def created(self, ws):
         return self.store_machine.exists(os.path.join(self.store.ws_dir(ws), "home", READY_MARKER))
 
     def info(self, ws):
         r = self.machine.run(self.podman() + ["inspect", self.ctr(ws), "--format", "{{.State.Status}}"])
-        st = r.out.strip() if r.ok else "absent"
-        if not st or st == "absent":
-            return "absent"
-        return st if self.created(ws) else "creating"
+        return self._info_of(ws, (r.out.strip() if r.ok else "") or "absent")
 
     def branch(self, ws):
         repo = self.repo(ws)
@@ -941,10 +945,8 @@ class Container(Driver):
         return self.env.get("WK_TOOLS_SRC") or (TOOLS if in_vm(self.env) else self.root)
 
     def sync(self, named=False):
-        act.info("nothing to copy: a container bind-mounts this checkout (%s) at\n"
-                 "  /opt/wk-tools, so the tooling in one is never stale. What the VM has\n"
-                 "  installed rather than mounted -- the proxy and injector units, the skills,\n"
-                 "  its packages -- comes from:  ./setup --stage vmtools" % self.root)
+        act.info("nothing to copy: a container bind-mounts this checkout (%s) at /opt/wk-tools;\n"
+                 "  what the VM installs rather than mounts comes from:  ./setup --stage vmtools" % self.root)
         return True
 
     def runtime_dir(self):
@@ -953,12 +955,12 @@ class Container(Driver):
     def exists(self, ws):
         return self.machine.run(self.podman() + ["container", "exists", self.ctr(ws)]).ok
 
+    store_dirs = ("git", "base", "ws", "cache/ccache", "cache/yocto/downloads", "cache/yocto/sstate", "cache/buildroot/dl",
+                  "cache/buildroot/ccache", "cache/bench", "skills")
+
     def store_init(self):
-        root = self.store.store_dir()
-        for d in ("", "git", "base", "ws", "cache/ccache", "cache/yocto/downloads", "cache/yocto/sstate", "cache/buildroot/dl",
-                  "cache/buildroot/ccache", "cache/bench", "skills"):
-            self.machine.mkdir(os.path.join(root, d) if d else root)
-        conf = os.path.join(root, "cache", "ccache", "ccache.conf")
+        super().store_init()
+        conf = os.path.join(self.store.store_dir(), "cache", "ccache", "ccache.conf")
         if not self.machine.exists(conf):
             self.machine.write(conf, self.ccache_conf())
         self.ensure_dir_mode(self.store.keyring_dir(), "0700")
@@ -967,8 +969,7 @@ class Container(Driver):
     def sdk_refresh(self):
         r = self.machine.act_run(["bash", os.path.join(self.root, "container", "sdk-refresh.sh"), self.sdk()], stream=True)
         if not r.ok:
-            act.die("refreshing the %s checkout failed (above); %s\n"
-                    "    would otherwise ask for whatever image tag was current when this checkout\n    was last fetched." % (project.get("SDK"), project.get("SDK_CREATE")))
+            act.die("refreshing the %s checkout failed (above)" % project.get("SDK"))
         return True
 
     # podman makes a missing mount destination as container root: the mirror's is inside the home where this machine's store is under $HOME.
@@ -1035,8 +1036,7 @@ class Container(Driver):
         newest = max((t for t in published if re.fullmatch(re.escape(series) + r"\d+-[0-9a-f]+", t)),
                      key=lambda t: int(t[len(series):].split("-")[0]), default="<tag>")
         act.die("the SDK checkout asks for image %s:%s, which upstream has not published.\n"
-                "    The newest published tag of that series is %s.\n"
-                "    Use it:  WK_SDK_IMAGE=%s:%s wk new ..." % (project.get("SDK_IMAGE"), tag, newest, project.get("SDK_IMAGE"), newest))
+                "    Use the newest of that series:  WK_SDK_IMAGE=%s:%s wk new ..." % (project.get("SDK_IMAGE"), tag, project.get("SDK_IMAGE"), newest))
 
     def create_argv(self, ws, base, arch, repo):
         u = self.user()
@@ -1072,8 +1072,7 @@ class Container(Driver):
         r = self.machine.act_run(["install", "-m", "0755", os.path.join(self.root, "container", "firstrun.sh"),
                                   os.path.join(ws_dir, "home", project.get("SDK_FIRSTRUN"))])
         if not r.ok:
-            act.die("installing firstrun.sh into '%s' failed (exit %d); %s made the container "
-                     "but it is not usable -- run 'wk rm %s' and retry" % (ws, r.rc, project.get("SDK_CREATE"), ws), r.rc)
+            act.die("installing firstrun.sh into '%s' failed (exit %d): run 'wk rm %s' and retry" % (ws, r.rc, ws), r.rc)
         # Last: state() reads this file's presence as "the workspace finished setting up".
         if repo.snapshot:
             self.machine.write(os.path.join(ws_dir, "base-id"), base + "\n")
@@ -1130,8 +1129,7 @@ class Container(Driver):
 
     def pull_dir(self, ws, src, dest, exclude=()):
         if exclude:
-            act.die("the container driver cannot exclude paths (%s): copy the whole tree, or make the selection "
-                    "inside the workspace first" % " ".join(exclude))
+            act.die("the container driver cannot exclude paths (%s): copy the whole tree" % " ".join(exclude))
         self.machine.remove(dest)
         self.machine.mkdir(dest)
         self._cp("%s:%s/." % (self.ctr(ws), src), dest)
@@ -1171,15 +1169,13 @@ class Container(Driver):
         u = self._ctr_user_or_die(ws)
         os.execvp("podman", self.podman() + ["exec", "-i", self.ctr(ws), "/bin/sh", "-c", self.sshd_cmd(u)])
 
-    def ssh_prepare(self, ws):
-        """An sshd inside the container so Zed reaches it like every place, over the `Host wk-<ws>` alias."""
+    def ssh_endpoint(self, ws):
+        """An sshd inside the container, reached over podman: the workspace has no network interface."""
         c = self.ctr(ws)
         u = self._ctr_user(ws)
         if u is None:
             act.die("no container workspace called '%s' on this machine.\n"
-                    "    'wk ls' lists the ones there are, and 'wk start' brings the podman machine up\n"
-                    "    if it is stopped. (An editor reaches a container over podman from here: the\n"
-                    "    workspace has no network interface, so there is no other route in.)" % ws)
+                    "    'wk ls' lists the ones there are; 'wk start' brings a stopped podman machine up." % ws)
         h = "/home/%s" % u
         if not self.machine.run(self.podman() + ["exec", c, "test", "-x", "/usr/sbin/sshd"]).ok:
             act.info("installing openssh-server in '%s' (once per workspace; Zed needs an sshd to talk to)" % ws)
@@ -1187,11 +1183,8 @@ class Container(Driver):
                                                         "apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server"])
             show(r)
             if not r.ok or not self.machine.run(self.podman() + ["exec", c, "test", "-x", "/usr/sbin/sshd"]).ok:
-                act.die("could not install openssh-server in '%s', and Zed needs that one package.\n"
-                        "    A refused fetch is logged by the egress proxy as 'DENY <host>:<port>' -- it\n"
-                        "    runs as the wk-proxy user service on the machine that holds the containers\n"
-                        "    (journalctl --user -u wk-proxy), and its allowlist is\n"
-                        "    container/proxy/wk-proxy.py." % ws)
+                act.die("could not install openssh-server in '%s'.\n    A refused fetch is 'DENY <host>:<port>' in"
+                        " journalctl --user -u wk-proxy; the allowlist is container/proxy/wk-proxy.py." % ws)
         pub = zed_key_pub(self.machine, self.env)
         if pub is None:
             act.die("could not create this machine's zed key")
@@ -1209,8 +1202,7 @@ class Container(Driver):
             act.die("could not prepare the ssh identity and the editor's key in '%s'" % ws)
         if "added" in r.out.split():
             act.info("authorised the editor's key in '%s'" % ws)
-        sshalias.alias_set(self.machine, self.env, ws, "wk-%s.container.invalid" % ws, u,
-                           identity=zed_key_path(self.env), extra=("ProxyCommand %s" % self.ssh_proxy(ws),))
+        return "wk-%s.container.invalid" % ws, u, zed_key_path(self.env), self.ssh_proxy(ws)
 
 
 class Vm(Driver):
@@ -1263,10 +1255,7 @@ class Vm(Driver):
 
     def configured(self, v, key):
         r = self.machine.run([self.tart_or_die(), "get", v, "--format", "json"])
-        try:
-            got = json.loads(r.out).get(key) if r.ok else None
-        except ValueError:
-            got = None
+        got = json_or(r.out, {}).get(key) if r.ok else None
         return int(got) if isinstance(got, (int, float)) or (isinstance(got, str) and got.isdigit()) else None
 
     def _sized(self, ws, key, given, envelope):
@@ -1322,19 +1311,11 @@ class Vm(Driver):
         if not bin:
             return []
         r = self.machine.run([bin, "list", "--format", "json"])
-        try:
-            vms = json.loads(r.out) if r.ok else []
-        except ValueError:
-            vms = []
-        return [v for v in vms if str(v.get("Source", "")).lower() == "local"]
+        return [v for v in (json_or(r.out, []) if r.ok else []) if str(v.get("Source", "")).lower() == "local"]
 
     def list(self):
-        rows = []
-        for v in self._vms():
-            n = v.get("Name", "")
-            if n.startswith("wk-") and n != self.base():
-                rows.append((n[3:], v.get("State", "")))
-        return rows
+        return [(v["Name"][3:], v.get("State", "")) for v in self._vms()
+                if str(v.get("Name", "")).startswith("wk-") and v["Name"] != self.base()]
 
     def state_of(self, v):
         return next((x.get("State", "absent") for x in self._vms() if x.get("Name") == v), "absent")
@@ -1346,10 +1327,7 @@ class Vm(Driver):
         return self.machine.exists(os.path.join(self.store.ws_dir(ws), READY_MARKER))
 
     def info(self, ws):
-        st = self.vm_state(ws)
-        if st == "absent":
-            return "absent"
-        return st if self.created(ws) else "creating"
+        return self._info_of(ws, self.vm_state(ws))
 
     def ip(self, ws):
         if self.vm_state(ws) != "running":
@@ -1401,9 +1379,8 @@ class Vm(Driver):
                 "-o", "LogLevel=ERROR", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=60", "-o", "ServerAliveCountMax=10",
                 "-i", self.key(), "-l", self.user(), self.vm(ws) + ".vm.invalid"]
 
-    def ssh_prepare(self, ws):
-        sshalias.alias_set(self.machine, self.env, ws, self.vm(ws) + ".vm.invalid", self.user(), self.key(),
-                           extra=("ProxyCommand %s" % self.ssh_proxy(ws),))
+    def ssh_endpoint(self, ws):
+        return self.vm(ws) + ".vm.invalid", self.user(), self.key(), self.ssh_proxy(ws)
 
     def ssh_host(self, ws):
         return "wk-%s" % ws if self.vm_state(ws) == "running" else None
@@ -1415,9 +1392,9 @@ class Vm(Driver):
         ok = True
         for g, _ in self.list():
             if self.info(g) != "running":
-                sys.stderr.write("  %-24s not running -- skipped\n" % g)
+                said(g, "not running -- skipped")
             elif self.sync_tools(g):
-                sys.stderr.write("  %-24s ok\n" % g)
+                said(g, "ok")
             else:
                 ok = False
         return ok
@@ -1460,8 +1437,8 @@ class Vm(Driver):
     def tart_or_die(self):
         bin = self.tart()
         if not bin:
-            act.die("tart is not installed: not on PATH, and not in ~/.local/bin.\n    Install the signed bundle (it needs the virtualization entitlement, so the\n"
-                    "    .app must stay intact):\n      mkdir -p ~/.local/share/tart ~/.local/bin\n"
+            act.die("tart is not installed: not on PATH, and not in ~/.local/bin. Install the signed bundle intact:\n"
+                    "      mkdir -p ~/.local/share/tart ~/.local/bin\n"
                     "      curl -fsSLO https://github.com/cirruslabs/tart/releases/latest/download/tart.tar.gz\n"
                     "      tar -xzf tart.tar.gz -C ~/.local/share/tart/\n"
                     "      ln -sfn ~/%s ~/.local/bin/tart\n"
@@ -1469,8 +1446,7 @@ class Vm(Driver):
         return bin
 
     def store_init(self):
-        self.machine.mkdir(self.store.store_dir())
-        self.machine.mkdir(os.path.join(self.store.store_dir(), "ws"))
+        super().store_init()
         self.ensure_dir_mode(self.vm_dir(), "0700")
 
     def _podman_up(self):
@@ -1508,19 +1484,17 @@ class Vm(Driver):
         if self.vm_state(ws) != "absent":
             act.die("workspace '%s' already exists" % ws)
         if not self.machine.isdir(mirror):
-            act.die("no %s mirror on this machine for '%s' to clone its checkout from\n    (%s does not exist):  wk sync    makes it" % (project.get("CHECKOUT"), ws, mirror))
+            act.die("no %s mirror on this machine for '%s' (%s):  wk sync    makes it" % (project.get("CHECKOUT"), ws, mirror))
         from wk.sysimage import guestbase
         base = guestbase.Base(self)
         with base.host.lock().held("guest-base"):
             base.ensure()
         why = base.stale()
         if why and guest.vm_forced(self.env):
-            act.warn("WK_VM_FORCE=1 -- '%s' is cloned from a base that\n  predates its own provisioning inputs: %s" % (ws, why))
+            act.warn("WK_VM_FORCE=1 -- '%s' is cloned from a base that predates its own provisioning inputs: %s" % (ws, why))
         elif why:
-            act.die("'%s' predates its own provisioning inputs: %s.\n  '%s' would be a clone of it, carrying the desktop settings of the day it\n"
-                    "  was sealed -- which is how a guest comes up behind Setup Assistant, where\n  nothing in the guest can clear it:\n"
-                    "      %s --rebuild     hours; existing guests are unaffected\n  WK_VM_FORCE=1 clones it anyway."
-                    % (self.base(), why, ws, guest.BASE_BUILD))
+            act.die("'%s' predates its own provisioning inputs: %s.\n      %s --rebuild     hours; existing guests are unaffected\n"
+                    "  WK_VM_FORCE=1 clones it anyway." % (self.base(), why, guest.BASE_BUILD))
         running = self.running_vms()
         if len(running) >= guest.vm_max(self.env):
             act.warn("%d VM(s) already running on this host; you will have to stop one before starting '%s':\n%s"
@@ -1552,7 +1526,7 @@ class Vm(Driver):
             self.machine.kill(pid)
         left = " ".join(str(p) for p in self.runners(v))
         if left:
-            act.warn("a 'tart run' for '%s' is still alive (pid %s) and holds a\n    VM slot the next guest needs:  kill -9 %s" % (v, left, left))
+            act.warn("a 'tart run' for '%s' is still alive (pid %s), holding a VM slot:  kill -9 %s" % (v, left, left))
         show(r)
         if not r.ok:
             act.die("tart delete %s failed (exit %d); what it said is above" % (v, r.rc), r.rc)
@@ -1697,9 +1671,7 @@ class Remote(Driver):
     def _far(self):
         if self.is_local or self.host:
             return self.machine
-        act.die("place '%s' has no host to reach.\n    Set host= in %s, or\n"
-                "    name the place after a machine your ~/.ssh/config already knows:\n        wk new <name> --on devbox-arm64-2"
-                % (self.name, Registry(self.root, self.env).conf_path(self.name)))
+        act.die("place '%s' has no host to reach: set host= in %s" % (self.name, Registry(self.root, self.env).conf_path(self.name)))
 
     def _sh(self, text, timeout=None):
         return self._far().run(["sh", "-c", text], timeout=timeout)
@@ -1729,13 +1701,10 @@ class Remote(Driver):
     def _probe_or_die(self):
         p = self.probed()
         if p.get("unreadable"):
-            act.die("'%s' %s.\n    PROBE_SCRIPT (lib/wk/places.py) is what ran: run its lines there to see which answers\n"
-                    "    differently from the Linux and macOS shapes it reads." % (self.host, p["why"]))
+            act.die("'%s' %s.\n    PROBE_SCRIPT (lib/wk/places.py) is what ran: run it there to see which line differs." % (self.host, p["why"]))
         if p.get("why") is not None:
-            act.die("cannot reach '%s' over ssh: %s\n    This place has no way in but ssh, and it is not interactive: the key,\n"
-                    "    the ProxyJump and the host entry all have to work non-interactively.\n"
-                    "    What BatchMode refuses to ask -- a new host key, a passphrase -- one\n"
-                    "    interactive  ssh %s true  asks and settles." % (self.host, p["why"], self.host))
+            act.die("cannot reach '%s' over ssh: %s\n    ssh here is non-interactive; a new host key or a passphrase is settled by:  ssh %s true"
+                    % (self.host, p["why"], self.host))
         return p
 
     def answers(self):
@@ -1794,14 +1763,9 @@ class Remote(Driver):
 
     def _peer_list(self):
         if self._peer_rows is None:
-            self._peer_rows = []
             rc, out = self.wk("ls", "--json", env=dict(self.env, WK_NO_DELEGATE="1"), quiet=True)
-            if rc == 0:
-                try:
-                    doc = json.loads(out)
-                except ValueError:
-                    doc = {}
-                self._peer_rows = [(w.get("name", ""), w.get("state", "")) for w in doc.get("workspaces", [])]
+            doc = json_or(out, {}) if rc == 0 else {}
+            self._peer_rows = [(w.get("name", ""), w.get("state", "")) for w in doc.get("workspaces", [])]
         return self._peer_rows
 
     def list(self):
@@ -1821,9 +1785,7 @@ class Remote(Driver):
             return "unreachable"
         if self.peer:
             st = next((state for n, state in self._peer_list() if n == ws), "")
-            if st in ("creating", "unreachable"):
-                return st
-            return "present" if st else "absent"
+            return st if st in ("creating", "unreachable") else "present" if st else "absent"
         d = shlex.quote(self.ws_dir_there(ws))
         r = self._sh("if [ ! -d %s ]; then echo absent; elif [ -f %s/%s ]; then echo present; else echo creating; fi"
                      % (d, d, READY_MARKER))
@@ -1846,11 +1808,6 @@ class Remote(Driver):
             return list(argv), self.src(ws)
         return self._far().argv("cd %s && %s" % (shlex.quote(self.src(ws)), shlex.join(argv)), tty=tty), None
 
-    def exec_tty(self, ws, argv, timeout=None):
-        """`exec_argv` is already a literal command (its own `ssh`), run by `self.here`: `self.machine` would wrap it twice."""
-        cmd, cwd = self.exec_argv(ws, argv, tty=True)
-        return self.here.run_tty(cmd, cwd=cwd, timeout=timeout)
-
     def ssh_host(self, ws):
         """The configured destination, not a generated alias (which could not carry a ProxyJump)."""
         if self.is_local:
@@ -1860,16 +1817,14 @@ class Remote(Driver):
             return "wk-%s" % ws
         return self.host
 
-    def ssh_prepare(self, ws):
+    def ssh_endpoint(self, ws):
         if not (self.peer and ws):
-            return
+            return None
         user, src, proxy = self._peer_route(ws)
         if not proxy:
-            act.die("'%s' on %s is reached at an address on that machine's\n"
-                    "    own network, which is not this one's. Open it from %s:\n"
-                    "        ssh %s wk zed %s" % (ws, self.host, self.host, self.host, ws))
-        sshalias.alias_set(self.here, self.env, ws, "wk-%s.%s.invalid" % (ws, self.name), user,
-                           identity=zed_key_path(self.env), extra=("ProxyCommand ssh %s %s" % (self.host, proxy),))
+            act.die("'%s' on %s is reached at an address on that machine's own network; open it from there:\n"
+                    "        ssh %s wk zed %s" % (ws, self.host, self.host, ws))
+        return "wk-%s.%s.invalid" % (ws, self.name), user, zed_key_path(self.env), "ssh %s %s" % (self.host, proxy)
 
     def _peer_route(self, ws):
         """(user, src, proxy) an addressless peer workspace answers with, over `wk zed --route`, asked once."""
@@ -1878,9 +1833,8 @@ class Remote(Driver):
         env = dict(self.env, WK_ZED_PUBKEY=zed_key_pub(self.here, self.env) or "")
         rc, out = self.wk("zed", ws, "--route", env=env, quiet=True)
         if rc != 0:
-            act.die("%s could not open a route into '%s'; what it said is above.\n"
-                    "    A copy of wk-tools that has never heard of 'wk zed --route' says so as a usage\n"
-                    "    error -- that one is fixed by bringing the machine up to date:  wk sync --tools" % (self.host, ws))
+            act.die("%s could not open a route into '%s' (above); an older wk-tools there is brought level by:  wk sync --tools"
+                    % (self.host, ws))
         route = kv.kv(out)
         if not route.get("user") or not route.get("src"):
             act.die("%s said nothing an editor can use about '%s'" % (self.host, ws))
@@ -1965,10 +1919,6 @@ class Remote(Driver):
         act.err("the '%s' place has no notion of stopping a single workspace -- '%s' is left running" % (self.name, ws))
         return False
 
-    def store_init(self):
-        self.here.mkdir(self.store.store_dir())
-        self.here.mkdir(os.path.join(self.store.store_dir(), "ws"))
-
     def reference(self):
         """A shared checkout this machine's admins keep (named in the conf, or by its MOTD), verified to hold main."""
         if self._reference is None:
@@ -1997,11 +1947,12 @@ class Remote(Driver):
         if not self._sh_act(script).ok:
             act.warn("could not wire the remotes in %s" % src)
 
+    def _in_root(self, root, script):
+        return self._sh_act("set -e\n mkdir -p %s %s\n %s" % (shlex.quote(root + "/ws"), shlex.quote(root + "/cache/ccache"), script))
+
     def _mirror_update(self, root):
         act.info("updating the %s mirror on %s (first run clones it)" % (project.get("CHECKOUT"), self.label()))
-        script = git.mirror_refresh_script(self.mirror_dir(), images.mirror_branches(self.env))
-        r = self._sh_act("set -e\n mkdir -p %s %s\n %s" % (shlex.quote(root + "/ws"), shlex.quote(root + "/cache/ccache"),
-                                                          script))
+        r = self._in_root(root, git.mirror_refresh_script(self.mirror_dir(), images.mirror_branches(self.env)))
         for line in r.out.splitlines():
             f = line.split()
             if len(f) == 3 and f[0] == "mirror-fetch":
@@ -2016,15 +1967,15 @@ class Remote(Driver):
             r = self._sh_act("cd %s && git pull --ff-only" % shlex.quote(far_tools))
             show(r)
             if not r.ok:
-                sys.stderr.write("  %-24s git pull --ff-only failed there\n" % self.name)
+                said(self.name, "git pull --ff-only failed there")
                 return False
             mine = tools.identity(self.root, self.here)
             theirs = kv.kv(self._sh(shlex.quote(far_tools + "/wk") + " doctor --probe-tools").out)
             if not mine.get("sha") or (mine.get("sha"), mine.get("dirty")) != (theirs.get("sha"), theirs.get("dirty")):
-                sys.stderr.write("  %-24s pulled, still DIFFERS (%s, this machine has %s)\n  %-24s %s\n"
-                                 % (self.name, _ident(theirs), _ident(mine), "", tools_why_behind(self.here, self.root)))
+                said(self.name, "pulled, still DIFFERS (%s, this machine has %s)" % (_ident(theirs), _ident(mine)))
+                said("", tools_why_behind(self.here, self.root))
                 return False
-            sys.stderr.write("  %-24s pulled, in sync\n" % self.name)
+            said(self.name, "pulled, in sync")
             if not named:
                 act.info("%s keeps a store of its own -- its mirror and snapshot untouched" % host)
                 act.log("  name it for those:  wk sync --tools %s" % self.name)
@@ -2035,7 +1986,7 @@ class Remote(Driver):
             return rc == 0
         ok = self.sync_tools("")
         if ok:
-            sys.stderr.write("  %-24s pushed %s\n" % (self.name, tools.head(self.root, self.here)))
+            said(self.name, "pushed " + tools.head(self.root, self.here))
         if self.reference():
             act.info("workspaces here clone from %s, which this machine's admins keep up to date" % self.reference())
             act.log("  nothing of ours to fetch: no mirror is kept on %s" % host)
@@ -2049,30 +2000,27 @@ class Remote(Driver):
         root, wsd, host = self.root_there(), self.ws_dir_there(ws), self.label()
         st = self.info(ws)
         if st == "creating":
-            act.die("'%s' on %s is a checkout that never finished being\n    made, and destroying it did not take. Remove it by hand and try again:\n"
+            act.die("'%s' on %s is a checkout that never finished being made; remove it and try again:\n"
                     "        rm -rf %s" % (ws, host, shlex.quote(wsd)))
         if st == "unreachable":
             act.die("cannot reach %s to create '%s'" % (host, ws))
         if st != "absent":
             act.die("workspace '%s' already exists on %s" % (ws, host))
-        ref = self.reference()
+        ref, src = self.reference(), wsd + "/" + project.get("CHECKOUT")
         if ref:
             act.info("cloning from %s (this machine's shared %s, hardlinked)" % (ref, project.get("CHECKOUT")))
-            r = self._sh_act("set -e\n mkdir -p %s %s\n git clone --quiet -b main %s %s"
-                             % (shlex.quote(root + "/ws"), shlex.quote(root + "/cache/ccache"), shlex.quote(ref), shlex.quote(wsd + "/" + project.get("CHECKOUT"))))
-            if not r.ok:
+            if not self._in_root(root, "git clone --quiet -b main %s %s" % (shlex.quote(ref), shlex.quote(src))).ok:
                 act.die("could not clone %s on %s" % (ref, host))
         else:
             self._mirror_update(root)
-            r = self._sh_act("git clone --quiet --shared -b main %s %s" % (shlex.quote(root + "/mirror"), shlex.quote(wsd + "/" + project.get("CHECKOUT"))))
-            if not r.ok:
+            if not self._sh_act("git clone --quiet --shared -b main %s %s" % (shlex.quote(root + "/mirror"), shlex.quote(src))).ok:
                 act.die("could not create the checkout on %s" % host)
-        self._wire(wsd + "/" + project.get("CHECKOUT"))
+        self._wire(src)
         conf = shlex.quote(root + "/cache/ccache/ccache.conf")
         self._sh_act("[ -f %s ] || printf %%s %s > %s" % (conf, shlex.quote(self.ccache_conf()), conf))
         self.here.mkdir(self.store.ws_dir(ws))
         if not self._sh_act("touch %s" % shlex.quote(wsd + "/" + READY_MARKER)).ok:   # last: an ssh cut mid-clone leaves it creating
-            act.die("could not mark '%s' ready on %s -- treat it as half-made\n    and re-run 'wk new %s --on %s'" % (ws, host, ws, self.name))
+            act.die("could not mark '%s' ready on %s -- treat it as half-made and re-run 'wk new %s --on %s'" % (ws, host, ws, self.name))
         act.info("remote workspace '%s' created on %s (%s)" % (ws, host, wsd))
 
     def results(self, ws):
@@ -2080,13 +2028,9 @@ class Remote(Driver):
         if not self.peer:
             return self.machine, self.ws_dir_there(ws) + "/bench"
         r = self._sh("cd $HOME && " + shlex.join(isolated_module(self.tools("") + "/lib", "wk.bench.record") + ["home", ws]))
-        try:
-            doc = json.loads(r.out) if r.ok else None
-        except ValueError:
-            doc = None
+        doc = json_or(r.out, None) if r.ok else None
         if not doc:
-            act.die("%s did not say where '%s' keeps its bench tasks:\n    %s\n"
-                    "    A copy of wk-tools there that predates the question answers nothing: wk sync --tools"
+            act.die("%s did not say where '%s' keeps its bench tasks (wk sync --tools brings it level):\n    %s"
                     % (self.label(), ws, (r.err.strip() or r.out.strip() or "rc %d" % r.rc).replace("\n", "\n    ")))
         m = self.machine
         for kind, dest in doc["via"]:
@@ -2099,28 +2043,25 @@ class Remote(Driver):
     def destroy(self, ws):
         """Another machine's own wk destroys its workspace; the record here outlives anything it has not confirmed gone."""
         host = self.label()
-        if not self.is_local:
-            self._probe_or_die()
-            if self.info(ws) == "absent":
-                self.here.remove(self.store.ws_dir(ws))
-                act.info("'%s' is already gone from %s; its record here is removed" % (ws, host))
-                return
+        if self.is_local:
+            wsd = self.ws_dir_there(ws)
+            r = self._sh_act("rm -rf %s" % shlex.quote(wsd))
+            show(r)
+            if not r.ok:
+                act.die("could not remove %s (above); re-run 'wk rm %s'" % (wsd, ws))
+            done = "removed workspace '%s' (%s)" % (ws, wsd)
+        elif self._probe_or_die() and self.info(ws) == "absent":
+            done = "'%s' is already gone from %s; its record here is removed" % (ws, host)
+        else:
             exports_read_here = {} if self.peer else {"WK_EXPORTS_READ": "1"}
             r = self.here.act_run(self.hand_over("rm", [ws], tty=False, env=dict(os.environ, WK_YES="1", **exports_read_here)))
             show(r)
             if not r.ok:
-                act.die("%s did not destroy '%s'; what its own wk said is above.\n    Nothing here was changed -- re-run 'wk rm %s' once that is settled." % (host, ws, ws))
-            self.here.remove(self.store.ws_dir(ws))
+                act.die("%s did not destroy '%s' (above); nothing here was changed -- re-run 'wk rm %s'" % (host, ws, ws))
             self._peer_rows = None   # the listing read before the removal is what the read-back must not see
-            act.info("'%s' destroyed on %s, by that machine's own wk" % (ws, host))
-            return
-        wsd = self.ws_dir_there(ws)
-        r = self._sh_act("rm -rf %s" % shlex.quote(wsd))
-        show(r)
-        if not r.ok:
-            act.die("could not remove %s (above); re-run 'wk rm %s'" % (wsd, ws))
+            done = "'%s' destroyed on %s, by that machine's own wk" % (ws, host)
         self.here.remove(self.store.ws_dir(ws))
-        act.info("removed workspace '%s' (%s)" % (ws, wsd))
+        act.info(done)
 
 
 PROBE_SCRIPT = """

@@ -1,11 +1,5 @@
-"""`wk new` and `wk rm` as flows over a Driver, a Records, a Lock and a Clock.
-
-`new` is two halves: the front refuses on the terminal, starts the detached run
-and follows its record; the detached run does everything that changes anything,
-under the workspace lock, stepping its record as it goes. Under --dry-run the
-front runs it inline against the recorder, so nothing is made or
-waited for and the plan cannot differ from the run.
-"""
+"""`wk new` and `wk rm` as flows over a Driver, a Records, a Lock and a Clock. `new`'s front refuses, detaches and
+follows the record; the detached run changes everything, under the workspace lock (inline under --dry-run)."""
 
 import json
 import os
@@ -22,6 +16,13 @@ from wk.places import show
 PLAN = ("checking", "wipe", "base", "create", "init", "agents", "fetch", "register")
 NEW_TIMEOUT = 3600
 NAME = re.compile(r"^[a-zA-Z0-9._][a-zA-Z0-9._-]*$")
+REFUSALS = {
+    "present": "workspace '{n}' already exists (place '{t}').\n    'wk rm {n}' first, or pick another name.",
+    "broken": "'{n}' is a record without an environment: creation finished, and the\n    {t} side of it is gone -- something "
+              "outside wk removed it.\n    'wk status {n}' says so:  wk rm {n}   then 'wk new {n}' to start again",
+    "unreachable": "cannot reach the machine behind place '{t}', so whether '{n}' is\n    already there cannot be known. "
+                   "Try again when the machine answers.",
+}
 
 CHECKOUT_SCRIPT = r'''
 b=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
@@ -55,6 +56,10 @@ def require_name(name):
 
 def wk_of(root):
     return os.path.join(str(root), "wk")
+
+
+def rm_argv(root, place, name):
+    return ["env", "WK_PLACE=%s" % place, wk_of(root), "rm", name, "--yes"]
 
 
 def task_records_for(records, name):
@@ -117,20 +122,14 @@ def new_front(reg, records, name, opts, prflow):
     if opts.get("kill"):
         return new_kill(driver, here, recs, env, name, opts)
     if arch != "native" and driver.kind != "container":
-        die("--arch %s is a container-only capability (this is place '%s').\n"
-            "    32-bit ARM needs a host that can execute it: this Neoverse-N1 runs AArch32\n"
-            "    at EL0, and Apple Silicon does not, which is why it lives on the Linux\n"
-            "    workstation permanently." % (arch, tname))
+        die("--arch %s is a container-only capability (this is place '%s')." % (arch, tname))
     if driver.kind == "local":
         driver.create(name)
     driver.store_init()
     log_path = driver.create_log(name)
     st = creation_state(driver, recs, name)
-    if st == "present":
-        die("workspace '%s' already exists (place '%s').\n    'wk rm %s' first, or pick another name." % (name, tname, name))
-    if st == "broken":
-        die("'%s' is a record without an environment -- something outside wk removed\n"
-            "    the %s side of it. 'wk status %s' says so; 'wk rm %s' clears it." % (name, tname, name, name))
+    if st in ("present", "broken"):
+        die(REFUSALS[st].format(n=name, t=tname))
     if st == "creating":
         t = recs.find("new", name)
         if t is not None and t.alive(None):
@@ -143,10 +142,8 @@ def new_front(reg, records, name, opts, prflow):
         new_detached_run(driver, recs, Lock(driver.store, here, recs.clock), recs.clock, name, base, arch, repo)
         return 0
     since = recs.clock.stamp()
-    here.mkdir(os.path.dirname(log_path))
-    here.write(log_path, "")
-    argv = [wk_of(root), "new", name, "--on", tname, "--arch", arch, "--repo", repo.name] + (["--base", base] if base else []) + ["--_detached"]
-    pid = here.spawn(argv, log_path)
+    pid = job.detach(here, [wk_of(root), "new", name, "--on", tname, "--arch", arch, "--repo", repo.name]
+                     + (["--base", base] if base else []) + ["--_detached"], log_path)
     if opts.get("no_wait"):
         info("creating '%s' on %s, detached as pid %d -- this end can go away" % (name, tname, pid))
         log("  follow:  tail -f %s" % log_path)
@@ -157,13 +154,12 @@ def new_front(reg, records, name, opts, prflow):
     st = recs.wait("new", name, log_path, timeout=timeout, pid=pid, floor=since, stream=sys.stderr)
     if st == "crashed":
         die("the process creating '%s' is gone without having said how it ended.\n"
-            "    Whatever it left is half-made, and a re-run destroys it and starts again:\n"
-            "        wk new %s --on %s\n    What it managed to say is in %s" % (name, name, tname, log_path))
+            "    A re-run destroys what it left and starts again:  wk new %s --on %s   (%s)" % (name, name, tname, log_path))
     if st == "refused":
         die("'%s' was not created, and nothing was left half-made: the reason is\n    above, in full in %s" % (name, log_path))
     if st == "timeout":
-        die("'%s' is still being created after %ds.\n    It is detached, so it is still going: 'wk status %s' says where, and\n"
-            "    %s says what it is doing. Nothing here was undone." % (name, timeout, name, log_path))
+        die("'%s' is still being created after %ds. Nothing here was undone.\n"
+            "    'wk status %s' says where it is; %s, what it is doing." % (name, timeout, name, log_path))
     if st != "ok":
         die("creating '%s' failed (%s) -- the reason is above, in full in %s.\n"
             "    A re-run destroys what is there and starts again:  wk new %s --on %s" % (name, st, log_path, name, tname))
@@ -180,11 +176,7 @@ def zed_after(here, root, name, opts):
         return
     if opts.get("no_wait"):
         log("  open it:  wk enter %s --zed   (waits for it to be ready)" % name)
-    else:
-        open_zed(here, root, name)
-
-
-def open_zed(here, root, name):
+        return
     r = here.act_run([os.path.join(str(root), "cmd", "zed"), name])
     show(r)
     if not r.ok:
@@ -238,9 +230,8 @@ def new_kill(driver, here, records, env, name, opts):
             "    nothing with it -- no --base, --repo, --zed, --no-wait or --pr." % name)
     stopped = job.stop(driver, records, name, "new", here, records.clock, env)
     if stopped == 1:
-        die("the process creating '%s' outlived a TERM and a KILL. It holds the\n"
-            "    workspace lock, so nothing else can touch '%s' until it is gone:\n        ps -p %s"
-            % (name, name, records.find("new", name).field("pid")))
+        die("the process creating '%s' outlived a TERM and a KILL. It holds the workspace lock:\n"
+            "        ps -p %s" % (name, records.find("new", name).field("pid")))
     if stopped == 0:
         log("  what it got as far as is half-made and nothing in one is worth\n  keeping:  wk rm %s    (then 'wk new %s' to start again)" % (name, name))
     return 0
@@ -266,10 +257,12 @@ def new_detached_run(driver, records, lock, clock, name, base, arch, repo):
     except Killed:
         raise
     except Exception as e:
-        _end(task, e.status if isinstance(e, Refused) else 1)
+        if task is not None:
+            task.end(e.status if isinstance(e, Refused) else 1)
         lock.release_all()
         raise
-    _end(task, 0)
+    if task is not None:
+        task.end(0)
     lock.release_all()
     if task is not None:
         info("workspace '%s' created" % name)
@@ -284,11 +277,6 @@ def refresh_mirror(driver, here, name):
         die("the mirror refresh did not finish (above), so '%s' was not created.\n    Fix that:  wk sync --mirror   then  wk new %s" % (name, name))
 
 
-def _end(task, status):
-    if task is not None:
-        task.end(status)
-
-
 def _create(driver, records, task, clock, name, base, arch, repo, state):
     here, tname = records.machine, driver.name
 
@@ -297,25 +285,16 @@ def _create(driver, records, task, clock, name, base, arch, repo, state):
             task.step_named(step)
 
     def refuse(msg):
-        _end(task, "refused")
+        if task is not None:
+            task.end("refused")
         die(msg)
 
     stage("checking")
-    if state == "present":
-        refuse("workspace '%s' already exists (place '%s').\n    'wk rm %s' first, or pick another name." % (name, tname, name))
-    if state == "broken":
-        refuse("'%s' is a record without an environment: creation finished, and the\n"
-               "    %s side of it is gone -- something outside wk removed it. Its layer\n"
-               "    may still hold work, so this will not wipe it for you:\n"
-               "        wk rm %s     then 'wk new %s' to start again" % (name, tname, name, name))
-    if state == "unreachable":
-        refuse("cannot reach the machine behind place '%s', so whether '%s' is\n"
-               "    already there cannot be known -- and creating it blind could clobber a\n"
-               "    workspace of the same name. Try again when the machine answers." % (tname, name))
+    if state in REFUSALS:
+        refuse(REFUSALS[state].format(n=name, t=tname))
     if state == "creating":
         stage("wipe")
         warn("'%s' exists but was never finished -- destroying it and starting again" % name)
-        log("  (an interrupted 'wk new' leaves this; nothing in it is worth keeping)")
         driver.destroy(name)
         left = leftovers(driver, here, name)
         if left:
@@ -326,14 +305,11 @@ def _create(driver, records, task, clock, name, base, arch, repo, state):
         stage("base")
         mirror = driver.store.mirror_dir()
         if not here.isdir(mirror):
-            die("no %s mirror at %s, and every snapshot borrows its objects:\n"
-                "    wk sync    makes it, then publishes a snapshot to build a workspace from." % (project.get("CHECKOUT"), mirror))
+            die("no %s mirror at %s:\n    wk sync    makes it, then publishes a snapshot to build from." % (project.get("CHECKOUT"), mirror))
         bases = Snapshots(driver.store, here)
         base = base or bases.current()
         if not base:
-            die("no snapshot this machine can build a workspace from:  wk sync\n"
-                "    publishes one. A snapshot that is not on the branch it was published from\n"
-                "    is refused here -- every workspace overlaid on it starts detached.")
+            die("no snapshot this machine can build a workspace from:  wk sync\n    publishes one.")
         why = bases.verify(base)
         if why:
             die(why)
@@ -341,10 +317,8 @@ def _create(driver, records, task, clock, name, base, arch, repo, state):
     driver.create(name, base, arch, repo)
     stage("init")
     if not act.dry_run() and not driver.ready(name, clock):
-        die("'%s' was created but never finished initialising -- the push\n"
-            "    keys, the lldb config and the shell rc are set up at first\n"
-            "    start, and something above went wrong before the end of it.\n"
-            "    Nothing here is worth repairing:  wk new %s    (destroys it and retries)" % (name, name))
+        die("'%s' was created but never finished initialising (above):\n"
+            "    wk new %s    (destroys it and retries)" % (name, name))
     stage("agents")
     driver.install_agents(name)
     stage("fetch")
@@ -430,13 +404,9 @@ def rm_plan(reg, records, name):
         raise Refused(2)
     if driver.info(name) != "absent":
         return driver, "workspace"
-    if record.of_driver(driver, records.clock, records.machine).find("new", name) is not None:
-        return driver, "record"
-    for other in reg.all():
-        if other == tname:
-            continue
+    for other in [tname] + [o for o in reg.all() if o != tname]:
         try:
-            t = reg.load(other)
+            t = driver if other == tname else reg.load(other)
         except LookupError:
             continue
         if record.of_driver(t, records.clock, records.machine).find("new", name) is not None:
@@ -586,8 +556,7 @@ def rm_all(reg, records):
     confirm_destroy(len(rows), "\n".join("    %s@%s" % (n, t) for t, n in rows))
     worst = 0
     for t, n in rows:
-        worst = max(worst, reg.machine.act_run(["env", "WK_PLACE=%s" % t, wk_of(reg.root), "rm", n, "--yes"],
-                                               input="", stream=True).rc)
+        worst = max(worst, reg.machine.act_run(rm_argv(reg.root, t, n), input="", stream=True).rc)
     return worst
 
 
@@ -600,7 +569,7 @@ def rubble(listed, stored, here, root, selftest_live, clock):
     rows = []
 
     def rm(t, n):
-        return lambda: here.act_run(["env", "WK_PLACE=%s" % t.name, wk_of(root), "rm", n, "--yes"]).ok
+        return lambda: here.act_run(rm_argv(root, t.name, n)).ok
 
     def names(t):
         try:

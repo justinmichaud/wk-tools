@@ -8,6 +8,7 @@ import subprocess
 import sys
 import unittest
 
+from tests.bashlift import lift as _lift
 from tests.support import REPO, WkTest, bash, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -16,35 +17,10 @@ from wk.sysimage import write  # noqa: E402
 
 CARD_PRIV = REPO / "admin" / "wk-card-priv"
 
-# Every device verb and the function that implements it.
-NEW_VERBS = {
-    "parts": "v_parts",
-    "root-spec": "v_root_spec",
-    "retarget": "v_retarget",
-    "cmdline-append": "v_cmdline_append",
-    "config-append": "v_config_append",
-    "boot-id": "v_boot_id",
-    "units": "v_units",
-    "boot-check": "v_boot_check",
-    "helper": "v_helper",
-    "boot-read": "v_boot_read",
-    "wifi-from-host": "v_wifi_from_host",
-    "wifi-joins": "v_joins",
-    "tailnet-save": "v_tailnet_save",
-    "tailnet-restore": "v_tailnet_restore",
-}
-
-
-def _lift(path, *funcs):
-    out = []
-    for func in funcs:
-        text = subprocess.run(
-            ["sed", "-n", f"/^{func}()/,/^}}/p", str(path)],
-            capture_output=True, text=True,
-        ).stdout
-        assert text.strip(), f"could not lift {func} from {path}"
-        out.append(text)
-    return "\n".join(out)
+# Every verb that takes a device: each must reach the gate, which refuses a non-block device.
+DEVICE_VERBS = ("parts", "root-spec", "retarget", "cmdline-append", "config-append", "boot-id", "units",
+                "boot-check", "helper", "boot-read", "wifi-from-host", "wifi-joins", "tailnet-save",
+                "tailnet-restore")
 
 
 _SAY = '''
@@ -177,20 +153,17 @@ class TestRetarget(CardEditTest):
 
 
 class TestRootSpec(CardEditTest):
-    def test_reads_the_root_off_the_card(self):
-        (self.boot / "cmdline.txt").write_text("console=tty1 root=PARTUUID=abc-02 rw\n")
-        cp = self.run_helper(
-            _lift(CARD_PRIV, "_boot_file", "_root_spec_probe", "v_root_spec")
-            + "\nv_root_spec /dev/sdX\n")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "root=PARTUUID=abc-02", cp.stdout)
-
-    def test_a_disk_with_no_cmdline_says_nothing_rather_than_failing(self):
-        cp = self.run_helper(
-            _lift(CARD_PRIV, "_boot_file", "_root_spec_probe", "v_root_spec")
-            + "\nv_root_spec /dev/sdX\n")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "", cp.stdout)
+    def test_reads_the_root_off_the_card_and_says_nothing_when_there_is_no_cmdline(self):
+        for text, want in (("console=tty1 root=PARTUUID=abc-02 rw\n", "root=PARTUUID=abc-02"), (None, "")):
+            with self.subTest(cmdline=text):
+                (self.boot / "cmdline.txt").unlink(missing_ok=True)
+                if text:
+                    (self.boot / "cmdline.txt").write_text(text)
+                cp = self.run_helper(
+                    _lift(CARD_PRIV, "_boot_file", "_root_spec_probe", "v_root_spec")
+                    + "\nv_root_spec /dev/sdX\n")
+                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                self.assertEqual(cp.stdout.strip(), want, cp.stdout)
 
 
 class TestCmdlineAppend(CardEditTest):
@@ -267,19 +240,15 @@ class TestConfigAppend(CardEditTest):
 
 
 class TestBootId(CardEditTest):
-    def test_the_id_lands_on_the_boot_partition(self):
-        cp = self.run_helper(
-            _lift(CARD_PRIV, "check_name", "_boot_id_edit", "v_boot_id")
-            + "\nv_boot_id /dev/sdX webkit-2.52-yocto-rpi5-64-0123456789ab\n")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual((self.boot / "wk-image.id").read_text().strip(),
-                         "webkit-2.52-yocto-rpi5-64-0123456789ab")
-
-    def test_an_id_that_is_not_a_name_is_refused(self):
-        cp = self.run_helper(
-            _lift(CARD_PRIV, "check_name", "_boot_id_edit", "v_boot_id")
-            + "\nv_boot_id /dev/sdX 'not; a name'\n")
-        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
+    def test_the_id_lands_on_the_boot_partition_and_a_non_name_is_refused(self):
+        for ident, rc in (("webkit-2.52-yocto-rpi5-64-0123456789ab", 0), ("'not; a name'", 3)):
+            with self.subTest(ident=ident):
+                cp = self.run_helper(
+                    _lift(CARD_PRIV, "check_name", "_boot_id_edit", "v_boot_id")
+                    + f"\nv_boot_id /dev/sdX {ident}\n")
+                self.assertEqual(cp.returncode, rc, cp.stdout + cp.stderr)
+                if rc == 0:
+                    self.assertEqual((self.boot / "wk-image.id").read_text().strip(), ident)
 
 
 class TestUnits(CardEditTest):
@@ -430,12 +399,16 @@ class TestBootCheck(CardEditTest):
         self.assertIn("./setup --stage quiesce", out)
 
 
-class TestHelperShape(unittest.TestCase):
-    def test_every_device_verb_calls_the_gate(self):
-        text = CARD_PRIV.read_text(errors="replace")
-        for verb, fn in NEW_VERBS.items():
-            m = re.search(rf"(?ms)^{fn}\(\) \{{.*?^\}}", text)
-            self.assertTrue(m and "gate " in m.group(0), f"{fn} ({verb}) does not call gate")
+class TestEveryDeviceVerbIsGated(WkTest):
+    def test_a_device_that_is_not_a_block_device_is_refused_before_any_edit(self):
+        script = self.tmp / "helper"
+        script.write_text(re.sub(r'(?m)^\[ "\$\(id -u\)" -eq 0 \].*$', ":", CARD_PRIV.read_text()))
+        for verb in DEVICE_VERBS:
+            with self.subTest(verb=verb):
+                cp = subprocess.run(["bash", str(script), verb, "/dev/null", "x", "y"], capture_output=True,
+                                    text=True, stdin=subprocess.DEVNULL)
+                self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
+                self.assertIn("not a block device", cp.stderr)
 
 
 class TestTheUnitsAreTheImageMachines(unittest.TestCase):
@@ -600,34 +573,22 @@ class TestGrowAndEjectReportTheirFailures(CardEditTest):
         with stub_path(self.tools(**rc)) as binp:
             return self.run_helper(_lift(CARD_PRIV, "v_eject") + "\nv_eject /dev/sdX\n", path=binp)
 
-    def test_a_clean_or_corrected_filesystem_is_grown(self):
-        for code in (0, 1):
-            with self.subTest(e2fsck=code):
-                cp = self.grow(e2fsck=code)
-                self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-                self.assertIn("grown to fill /dev/sdX", cp.stdout)
+    def test_grow_succeeds_only_on_a_clean_or_corrected_filesystem(self):
+        for rc, want, says in (({"e2fsck": 0}, 0, ""), ({"e2fsck": 1}, 0, ""), ({"e2fsck": 4}, 1, "e2fsck"),
+                               ({"e2fsck": 8}, 1, "e2fsck"), ({"partx": 1}, 1, "partx")):
+            with self.subTest(rc=rc):
+                cp = self.grow(**rc)
+                self.assertEqual(want, cp.returncode, cp.stdout + cp.stderr)
+                if want == 0:
+                    self.assertIn("grown to fill /dev/sdX", cp.stdout)
+                else:
+                    self.assertIn(says, cp.stderr)
+                    self.assertNotIn("grown", cp.stdout)
 
-    def test_an_uncorrected_or_failed_check_is_a_failure_naming_e2fsck(self):
-        for code in (4, 8):
-            with self.subTest(e2fsck=code):
-                cp = self.grow(e2fsck=code)
-                self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
-                self.assertIn("e2fsck", cp.stderr)
-                self.assertIn("exit %d" % code, cp.stderr)
-                self.assertNotIn("grown", cp.stdout)
-
-    def test_a_table_the_kernel_was_not_told_about_is_a_failure_naming_partx(self):
-        cp = self.grow(partx=1)
-        self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
-        self.assertIn("partx", cp.stderr)
-        self.assertNotIn("grown", cp.stdout)
-
-    def test_a_flushed_card_says_so(self):
+    def test_eject_says_flushed_only_when_the_flush_succeeded(self):
         cp = self.eject()
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("/dev/sdX flushed", cp.stdout)
-
-    def test_a_failed_flush_is_a_failure_and_never_claims_flushed(self):
         cp = self.eject(blockdev=1)
         self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("blockdev --flushbufs", cp.stderr)

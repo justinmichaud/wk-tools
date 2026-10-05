@@ -152,7 +152,7 @@ class WkBoardDriver(BrowserDriver):
             self._launch + ' ' + shlex.quote(url))
         self._remote(cmd)
         if self._profile:
-            self.start_profiler()
+            self._profiler(_PROFILE_START_SH, True)
         if self._warmup:
             self._gpu_before = self._remote(_GPU_SH, capture=True, check=False)
 
@@ -169,7 +169,7 @@ class WkBoardDriver(BrowserDriver):
 
     def close_browsers(self):
         if self._profile:
-            self.stop_profiler()
+            self._profiler(_PROFILE_STOP_SH, False)
         self._remote(self._kill, check=False)
         time.sleep(1)
 
@@ -220,14 +220,8 @@ class WkBoardDriver(BrowserDriver):
         return {'tool': shlex.quote(tool), 'out': shlex.quote(out), 'dir': PROFILE_DIR,
                 'process': self._expect['process']}
 
-    def start_profiler(self):
-        got = self._remote(_PROFILE_START_SH % self._profile_fields(), capture=True)
-        _log.info('profiler: %s' % got.strip())
-
-    def stop_profiler(self):
-        got = self._remote(_PROFILE_STOP_SH % self._profile_fields(),
-                           capture=True, check=False)
-        _log.info('profiler: %s' % got.strip())
+    def _profiler(self, script, check):
+        _log.info('profiler: %s' % self._remote(script % self._profile_fields(), capture=True, check=check).strip())
 
     def record_warmup_evidence(self):
         probed = self._remote(_WARMUP_SH % self._expect, capture=True)

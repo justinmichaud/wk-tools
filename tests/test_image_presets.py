@@ -29,13 +29,11 @@ def setting_lines(path):
 class TestImagePresetsAreData(unittest.TestCase):
     wk_tier = "lint"
 
-    def test_every_preset_is_a_conf_the_loader_reads(self):
+    def test_every_preset_is_a_conf_the_loader_reads_and_declared_in_no_code(self):
         self.assertTrue(presets())
         for n in images.names(ENV):
             self.assertTrue(images.blurb(n, ENV), "%s.conf has no '# %s -- <description>' header" % (n, n))
-
-    def test_no_preset_is_declared_in_code(self):
-        self.assertEqual({v for k, v in images.FIELDS.items() if k == "IMG_BUILDER"}, {""})
+        self.assertEqual(images.FIELDS["IMG_BUILDER"], "")
 
     def test_the_watchdog_is_one_value_a_preset_names_only_to_differ(self):
         self.assertEqual(images.FIELDS["IMG_WATCHDOG"], "300")
@@ -71,16 +69,12 @@ class TestImagePresetsAreData(unittest.TestCase):
                 else:
                     self.assertTrue((EXTERNAL_CONFIGS / p["BR_DEFCONFIG"]).is_file(), p["BR_DEFCONFIG"])
 
-    def test_a_pinned_kernel_is_pinned_by_all_three_fields(self):
+    def test_a_pinned_kernel_is_pinned_by_all_three_fields_and_builds_none(self):
         keys = ("BR_KERNEL_DEB_URL", "BR_KERNEL_DEB_SHA256", "BR_KERNEL_RELEASE")
         for n, p in presets().items():
             with self.subTest(preset=n):
                 self.assertIn(sum(bool(p[k]) for k in keys), (0, 3))
-
-    def test_a_pinned_kernel_builds_none(self):
-        for n, p in presets().items():
-            if p["BR_KERNEL_DEB_URL"]:
-                with self.subTest(preset=n):
+                if p["BR_KERNEL_DEB_URL"]:
                     self.assertNotIn("BR2_LINUX_KERNEL=y", (EXTERNAL_CONFIGS / p["BR_DEFCONFIG"]).read_text())
 
     def test_a_buildroot_image_preset_at_a_pgo_release_says_why_it_takes_no_pgo(self):

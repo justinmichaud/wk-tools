@@ -15,6 +15,7 @@ import unittest
 from pathlib import Path
 
 from tests.fake_boot import FakeBoard
+from tests.bashlift import lift as _lift
 from tests.support import REPO, WkTest, bash, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -22,18 +23,6 @@ from wk import act  # noqa: E402
 from wk.boot.pi import PiSd  # noqa: E402
 
 CARD_PRIV = REPO / "admin" / "wk-card-priv"
-
-
-def _lift(path, *funcs):
-    out = []
-    for func in funcs:
-        text = subprocess.run(
-            ["sed", "-n", f"/^{func}()/,/^}}/p", str(path)],
-            capture_output=True, text=True,
-        ).stdout
-        assert text.strip(), f"could not lift {func} from {path}"
-        out.append(text)
-    return "\n".join(out)
 
 
 _SAY = '''

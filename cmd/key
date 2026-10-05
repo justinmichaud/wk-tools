@@ -11,91 +11,50 @@
 # wk: sub push where=local takes=2 needs= opts=--on=,--all destructive=on dryrun=yes
 # wk: sub push status readonly=yes
 #
-#   wk key setup      every credential this machine needs, and one working
-#                     credential of each kind on every workstation. Each
-#                     workstation is asked what it holds and whether its issuer
-#                     accepts it now; the best answer wins (a tie goes to this
-#                     machine) and is put on every workstation holding a
-#                     different one. When none works, this machine mints or
-#                     asks for one and fans it out. A build machine is sent
-#                     nothing: it reaches the deploy key through a forwarded
-#                     ssh-agent. One line per credential, then `wk key check`'s
-#                     table. Asks once, first, and can be killed and re-run
-#                       --rotate  turn every credential over instead of electing:
-#                                 the deploy keys as `wk key deploy --rotate`,
-#                                 each stored credential as `wk key set <name>
-#                                 --replace`, and the fresh ones fanned out
+#   wk key setup [--rotate]   every credential this machine needs, and one working credential of each kind on
+#                     every workstation: the one its issuer accepts wins (a tie goes to this machine) and is put on
+#                     every workstation holding another; when none works, this machine mints or asks for one. A build
+#                     machine is sent nothing. Asks once, first; can be killed and re-run
+#                       --rotate  turn every credential over instead: `deploy --rotate`, then `set <name> --replace`
 #   wk key set <name> [--replace] [--paste]
-#                     one credential by name, or the report on it when it is
-#                     already here
+#                     store one credential by name, or report on the one already here
 #                       --replace  rotate it: the old one is removed first
-#                       --paste    take the value on stdin instead of minting
-#                                  or asking for one
+#                       --paste    take the value on stdin instead of minting or asking for one
 #                     <name> is a row of lib/credcheck.py:
-#                       github-pat    a classic token with 'public_repo' that
-#                                     `git-webkit pr` opens a pull request with;
-#                                     only the credential injector reads it, and
-#                                     writes with it only while push is on
-#                       bugzilla-api-key
-#                                     what `git-webkit pr` files the bug with;
-#                                     the injector adds it while push is on
-#                       claude        the Claude Code token (`claude
-#                                     setup-token`) a build box starts with
-#                       litellm       the API key `wk ai pi` reaches your
-#                                     LiteLLM endpoint with
-#                       tailnet       the fleet's tailnet auth key, seeded onto
-#                                     every card written here
-#                       tailnet-api   the tailnet API token that retires a stale
-#                                     fleet node; never written to a card
-#                       ntfy          the ntfy.sh topic lib/wk/notify.py
-#                                     publishes to; minted here and printed
-#                                     only at the mint and by `wk key show`
-#   wk key deploy     the deploy keys alone, elected and converged as `setup`
-#                     does them and registered on GitHub with write access.
-#                     --rotate removes the old keys from GitHub and mints fresh
-#                     ones. Asks once, first
-#   wk key check      what every credential here and on each other workstation
-#                     can do, asked now: one row each, and what needs doing
-#                     under `needs you:`. Read-only, and what a bare `wk key` runs
+#                       github-pat        a classic 'public_repo' token `git-webkit pr` opens a pull request with
+#                       bugzilla-api-key  what `git-webkit pr` files the bug with
+#                       claude            the Claude Code token (`claude setup-token`) a build box starts with
+#                       litellm           the API key `wk ai pi` reaches your LiteLLM endpoint with
+#                       tailnet           the fleet's tailnet auth key, seeded onto every card written here
+#                       tailnet-api       the tailnet API token that retires a stale fleet node
+#                       ntfy              the ntfy.sh topic notifications go to; minted here
+#   wk key deploy [--rotate]  the deploy keys alone, as `setup` does them, registered on GitHub with write
+#                     access. Asks once, first
+#                       --rotate  remove the old keys from GitHub and mint fresh ones
+#   wk key check      what every credential here and on each other workstation can do, asked now, and what needs
+#                     doing under `needs you:`. Read-only; what a bare `wk key` runs
 #   wk key show       the public halves, and the ntfy topic URL for a phone
 #   wk key ensure     create missing push keys without registering them
 #   wk key push [on|off|status] [--on <machine>|--all] [--force]
-#                     whether a workspace can push (`status`, the default). The
-#                     deploy keys sit in an ssh-agent outside the workspace and
-#                     the GitHub token and Bugzilla key in the credential
-#                     injector (README.md has the mechanism).
-#                       on     load the keys and hand the injector its
-#                              credentials; asks once and ends every claude
-#                              session, which would be handed that push
+#                     whether a workspace can push (`status`, the default: ON while any agent holds a key)
+#                       on     load the deploy keys and hand the credential injector its credentials; asks once
+#                              and ends every claude session
 #                       off    `ssh-add -D` and remove the injector's files
-#                     `status` asks each agent (`ssh-add -l`) and the machine;
-#                     ON while any agent holds a key. `wk ai claude` turns it
-#                     off before handing over control.
 #                       --on <machine>  ask that fleet machine, through its wk
 #                       --all           this machine and every other one
-#                       --force         `on` leaves a running claude session
-#                                       alone; it can push until it exits
-#                     Exit: 0 on (status) or done; 1 off (status) or failed, or
-#                     a build box with no key at rest; 3 a machine did not
-#                     answer; 4 no deploy keys here; 5 no switch here
+#                       --force         `on` leaves a running claude session alone
+#                     Exit: 0 on (status) or done; 1 off (status), failed, or a build box with no key at rest;
+#                     3 a machine did not answer; 4 no deploy keys here; 5 no switch here
 #   wk key sudo [status|setup] [--on <machine>|--all]
-#                     make root cost a password with a 30-second window
-#                     (WK_SUDO_TIMEOUT_MIN) through one drop-in,
-#                     /etc/sudoers.d/zz-<user>-passwd. `status` (the default)
-#                     says what this machine does; `setup` installs the drop-in,
-#                     validating with `visudo -c` before and after, and checks
-#                     that sudo asks. Exits 0 when a password is required and
-#                     the window is 30 seconds or less, 1 otherwise
+#                     root costs a password with a 30-second window (WK_SUDO_TIMEOUT_MIN), through
+#                     /etc/sudoers.d/zz-<user>-passwd. `status` (the default) reports; `setup` installs it,
+#                     checked by `visudo -c` before and after. Exits 0 when that policy holds, 1 otherwise
 #                       --on <machine>  the same, on a configured machine
 #                       --all           every configured machine, and this one
 #   wk key backup [--candidates]
-#                     write this host's desktop settings back into the repo, the
-#                     inverse of ./setup: host/macos/defaults.conf and
-#                     symbolichotkeys.plist on macOS, host/linux/config.dconf on
-#                     Linux, never a credential
-#                       --candidates  macOS only, read-only: every `defaults`
-#                                     value that differs from Apple's default
-#                                     and is not in defaults.conf yet
+#                     write this host's desktop settings back into the repo, never a credential:
+#                     host/macos/defaults.conf and symbolichotkeys.plist, or host/linux/config.dconf
+#                       --candidates  macOS, read-only: every `defaults` value off Apple's default and not yet kept
 #
 # For another workstation or `wk status` to call:
 #   wk key pub <key>         that deploy key's public half
@@ -103,13 +62,11 @@
 #   wk key fingerprints      every key here, its fingerprint and its state
 #   wk key verdict <name>    one stored credential's verdict and fingerprint
 #   wk key adopt <key>       take a shared deploy key's private half on stdin
-#   wk key give <key>|<name>
-#                            print that credential, the other half of `adopt`
+#   wk key give <key>|<name> print that credential, the other half of `adopt`
 #
-# <key> is a deploy key of a repo in lib/wk/project.json's REPOS. Every credential is put to its
-# lib/credcheck.py rule before it is stored and whenever it is reported: one
-# that cannot do its job is refused, one that reaches further is kept with that
-# reach named, one no network could judge is kept as unverified.
+# <key> is a deploy key of a repo in lib/wk/project.json's REPOS. Every credential is put to its lib/credcheck.py
+# rule when stored and when reported: one that cannot do its job is refused, one that reaches further is kept with
+# that reach named, one no network could judge is kept as unverified.
 
 import os
 import sys

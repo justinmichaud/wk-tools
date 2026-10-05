@@ -6,10 +6,10 @@ import os
 import pwd
 import re
 import shutil
-import subprocess
 import sys
 import unittest
 
+from tests.bashlift import lift
 from tests.fake_boot import FakeBoard
 from tests.support import REPO, WkTest, bash, stub_path
 
@@ -32,22 +32,12 @@ fail() { printf 'wk-boot-priv: %s\\n' "$*" >&2; exit 1; }
 _VCMAILBOX = '#!/bin/sh\necho "vcmailbox $*"\n'
 
 
-def _lift_from(path, *funcs):
-    out = []
-    for func in funcs:
-        text = subprocess.run(["sed", "-n", f"/^{func}()/,/^}}/p", str(path)],
-                              capture_output=True, text=True).stdout
-        assert text.strip(), f"could not lift {func} from {path}"
-        out.append(text)
-    return "\n".join(out)
-
-
 def _lift(*funcs):
-    return _lift_from(HELPER, *funcs)
+    return lift(HELPER, *funcs)
 
 
 def _lift_install(*funcs):
-    return _lift_from(INSTALL, *funcs)
+    return lift(INSTALL, *funcs)
 
 
 def _q(word):
@@ -106,9 +96,9 @@ class TestTheGrantIsNarrow(WkTest):
     def test_it_writes_no_file_and_names_no_path(self):
         """The one file written is systemd's fixed /run/systemd/reboot-param."""
         body = HELPER.read_text()
-        paths = [p for p in re.findall(r'>\s*"?(/[A-Za-z0-9_./-]+)', body)
-                 if p != "/dev/null"]
+        paths = [p for p in re.findall(r'>\s*"?(/[A-Za-z0-9_./-]+)', body) if p != "/dev/null"]
         self.assertEqual(["/run/systemd/reboot-param"], sorted(set(paths)), body)
+
 
 class TestStatusReportsWhatThisMachineCanDo(unittest.TestCase):
 
@@ -424,13 +414,6 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
         self.assertGreaterEqual(cp.changes, 1, cp.said)
         self.assertEqual(0, self.converge().changes)
 
-    def test_the_installed_binary_is_a_copy_and_never_a_symlink_into_this_repo(self):
-        cp = self.converge()
-        self.assertEqual(0, cp.returncode, cp.said)
-        self.assertFalse(self.target().is_symlink())
-        self.assertEqual((REPO / "admin" / "wk-boot-priv").read_bytes(),
-                         self.target().read_bytes())
-
     def test_a_stale_binary_with_a_working_grant_is_detected_and_replaced(self):
         self.plant_binary(stale=True)
         self.plant_rule()
@@ -470,6 +453,11 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
         self.assertEqual(self.rule(), self.sudoers().read_text())
         self.assertEqual("ok ok", self.state())
         self.assertEqual([], sorted((self.fake / "rules").glob("*")))
+
+    def test_the_installed_binary_is_a_copy_and_never_a_symlink_into_this_repo(self):
+        self.assertEqual(0, self.converge().returncode)
+        self.assertFalse(self.target().is_symlink())
+        self.assertEqual((REPO / "admin" / "wk-boot-priv").read_bytes(), self.target().read_bytes())
 
     def test_a_kill_after_validation_and_before_the_install_converges(self):
         cand = self.fake / "rules" / "wk-boot-priv.rule"
@@ -584,6 +572,9 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
         self.assertEqual(0, second.changes, second.said)
 
     def test_without_sudo_or_a_terminal_it_reports_which_half_is_wrong(self):
+        cp = self.converge(nosudo=1)
+        self.assertEqual(0, cp.returncode, cp.said)
+        self.assertIn("%s is not installed" % self.target(), cp.said)
         self.plant_binary()
         self.plant_rule(user="root")
         cp = self.converge(nosudo=1)
@@ -592,11 +583,6 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
         self.assertIn("lists no NOPASSWD rule", cp.said)
         self.assertIn("./setup --stage quiesce", cp.said)
         self.assertEqual(self.rule(user="root"), self.sudoers().read_text())
-
-    def test_without_sudo_or_a_terminal_it_names_a_missing_binary(self):
-        cp = self.converge(nosudo=1)
-        self.assertEqual(0, cp.returncode, cp.said)
-        self.assertIn("%s is not installed" % self.target(), cp.said)
 
     def test_a_cached_sudo_credential_cannot_make_a_missing_grant_read_as_done(self):
         self.plant_binary()
@@ -609,19 +595,14 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
         self.assertEqual(self.rule(), self.sudoers().read_text())
         self.assertGreaterEqual(cp.changes, 1, cp.said)
 
-    def test_the_owner_and_mode_are_read_by_the_form_this_platform_answers(self):
+    def test_the_owner_and_mode_are_read_by_the_form_this_platform_answers_and_an_absent_file_answers_neither(self):
         f = self.tmp / "a-file"
         f.write_text("x\n")
         f.chmod(0o640)
-        cp = bash('. "$WK_ROOT/lib/common.sh"\nfile_owner %s\nfile_mode %s\n' % (_q(str(f)), _q(str(f))))
+        cp = bash('. "$WK_ROOT/lib/common.sh"\nset -euo pipefail\nfile_owner %s\nfile_mode %s\n'
+                  'echo "owner=[$(file_owner /nope)] mode=[$(file_mode /nope)]"\n' % (_q(str(f)), _q(str(f))))
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        self.assertEqual([self.me, "640"], cp.stdout.split())
-
-    def test_an_absent_file_answers_neither(self):
-        cp = bash('. "$WK_ROOT/lib/common.sh"\nset -euo pipefail\n'
-                  'echo "owner=[$(file_owner /nope)] mode=[$(file_mode /nope)]"\n')
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        self.assertIn("owner=[] mode=[]", cp.stdout)
+        self.assertEqual([self.me, "640", "owner=[]", "mode=[]"], cp.stdout.split())
 
 
 if __name__ == "__main__":

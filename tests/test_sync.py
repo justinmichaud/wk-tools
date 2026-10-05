@@ -4,7 +4,6 @@ import contextlib
 import io
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,9 +16,10 @@ from unittest import mock
 from tests.fakes import FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO, load_cmd
+from tests.test_wk_workspace import FlowTest, RecordsActs, Scratch
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, git, images, places, pr, sync  # noqa: E402
+from wk import git, images, places, pr, sync  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.decl import Decl  # noqa: E402
@@ -106,7 +106,7 @@ class SyncDriver(places.Driver):
         return self.machine.wk_rc.get(args[1] if len(args) > 1 else "", 0), "said %s\n" % " ".join(args)
 
 
-class World(Fake):
+class World(Scratch, Fake):
     """This host: a store in a scratch directory, a mirror the refresh makes, git answering for the snapshot, the
     bridged bash functions answering from `bash`, and each workspace's exec answering from `fetched`."""
 
@@ -131,10 +131,6 @@ class World(Fake):
         self.react(["git"], self._git)
         self.react(["cp", "-al"], self._cp)
         self.effects = []
-
-    @property
-    def fake(self):
-        return self
 
     def registry(self, kinds, guests=False):
         """A SyncDriver of each of `kinds` (name -> kind), but a FakeVm for 'vm' when `guests`."""
@@ -217,70 +213,30 @@ class World(Fake):
         f.dirs.update({dst} | {dst + d[len(src):] for d in f.dirs if d.startswith(src + "/")})
         return Result(0)
 
-    def rel(self, value):
-        if isinstance(value, tuple):
-            return tuple(self.rel(v) for v in value)
-        return value.replace(str(self.tmp), "") if isinstance(value, str) else value
-
     def state(self):
         """What a sync leaves in the store: a lock is process coordination, not state."""
         store = self.env["WK_STORE"]
         return (sorted(self.rel(p) for p in self.files if p.startswith(store)),
                 sorted(self.rel(d) for d in self.dirs if d.startswith(store + "/base")), sorted(self.rel(d) for d in self.dirs if d == self.mirror))
 
-    def work(self):
-        return [e for e in self.effects if not (isinstance(e[1], str) and e[1].startswith(self.env["WK_LOCK_DIR"]))]
+
+class Recording(RecordsActs, World):
+    pass
 
 
-class Recording(World):
-    """Every act_run as ("act", argv) in both modes, so a dry run's plan can be held against a wet run's."""
+class SyncTest(FlowTest):
+    UNSET = FlowTest.UNSET + ("WK_BRANCH", "WK_IN_VM", "WK_PLACE", "WK_NAME", "WK_NO_DELEGATE")
 
-    def act_run(self, argv, **kw):
-        self.effects.append(("act", tuple(argv)))
-        if act.dry_run():
-            return Result(0)
-        return super().act_run(argv, **kw)
-
-    def mutations(self):
-        return [self.rel(e) for e in self.work() if e[0] in ("act", "write", "mkdir", "remove")]
-
-
-class SyncTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-sync-"))
-        self.addCleanup(shutil.rmtree, str(self.tmp), True)
-        osenv = mock.patch.dict(os.environ, {}, clear=False)
-        osenv.start()
-        self.addCleanup(osenv.stop)
-        for v in ("WK_DRY_RUN", "WK_YES", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_CMD", "WK_DEBUG",
-                  "WK_BRANCH", "WK_IN_VM", "WK_PLACE", "WK_NAME", "WK_NO_DELEGATE"):
-            os.environ.pop(v, None)
-        for (module, name), fn in GENERATORS.items():
-            p = mock.patch.object(module, name, fn)
+        super().setUp()
+        for p in [mock.patch.object(module, name, fn) for (module, name), fn in GENERATORS.items()] + [
+                mock.patch("wk.store.Store.is_local", lambda st: self.w.local_store)]:
             p.start()
             self.addCleanup(p.stop)
-        p = mock.patch.object(places.record, "host_name", return_value="here")
-        p.start()
-        self.addCleanup(p.stop)
-        p = mock.patch("wk.store.Store.is_local", lambda st: self.w.local_store)
-        p.start()
-        self.addCleanup(p.stop)
         self.w = self.make_world()
 
     def make_world(self, kinds=None, cls=World):
         return cls(self.tmp, kinds)
-
-    def stderr(self, fn):
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            result = fn()
-        return result, err.getvalue()
-
-    def refused(self, fn, status=1):
-        with self.assertRaises(Refused) as cm:
-            with contextlib.redirect_stderr(io.StringIO()) as err:
-                fn()
-        self.assertEqual(cm.exception.status, status, err.getvalue())
-        return err.getvalue()
 
 
 class TestParse(SyncTest):
@@ -378,34 +334,23 @@ class TestWhatEachScopeRuns(SyncTest):
         rc, err = self.stderr(s.run)
         return rc, self.w.steps, err
 
-    def test_bare_is_the_tooling_the_mirror_then_each_target_here(self):
-        rc, steps, _ = self.steps()
-        self.assertEqual((rc, steps), (0, ["FURNITURE container", "FURNITURE vm", "MIRROR", "REMOUNT", "SNAPSHOT container",
-                                           "FETCH-IN container: container-ws", "FETCH-IN vm: vm-ws"]))
-
-    def test_a_named_target_refreshes_its_furniture_before_fetching_in_it(self):
-        rc, steps, _ = self.steps("place", "container")
-        self.assertEqual(steps, ["FURNITURE container named", "MIRROR", "REMOUNT", "SNAPSHOT container", "FETCH-IN container: container-ws"])
-
-    def test_a_guest_target_gets_the_mirror_and_a_fetch_but_no_snapshot(self):
-        rc, steps, _ = self.steps("place", "vm")
-        self.assertEqual(steps, ["FURNITURE vm named", "MIRROR", "REMOUNT", "FETCH-IN vm: vm-ws"])
-
-    def test_all_reaches_every_workspace_on_every_place(self):
-        rc, steps, _ = self.steps("all")
-        self.assertEqual(steps, ["FURNITURE container", "FURNITURE vm", "FURNITURE buildbox4", "MIRROR", "REMOUNT", "SNAPSHOT container",
-                                 "FETCH-IN container: container-ws", "FETCH-IN vm: vm-ws", "FETCH-IN buildbox4: buildbox4-ws"])
-
-    def test_tools_refreshes_every_machines_copy_and_publishes_one_snapshot(self):
-        rc, steps, _ = self.steps("tools")
-        self.assertEqual(steps, ["FURNITURE container", "FURNITURE vm", "FURNITURE buildbox4", "MIRROR", "REMOUNT", "SNAPSHOT container"])
-        self.w.steps.clear()
-        rc, steps, _ = self.steps("tools", "container")
-        self.assertEqual(steps, ["FURNITURE container named", "MIRROR", "REMOUNT", "SNAPSHOT container"])
-
-    def test_a_machine_of_its_own_touches_neither_the_mirror_nor_a_snapshot_here(self):
-        rc, steps, _ = self.steps("place", "buildbox4")
-        self.assertEqual(steps, ["FURNITURE buildbox4 named", "FETCH-IN buildbox4: buildbox4-ws"])
+    def test_each_scope_and_the_steps_it_runs_in_order(self):
+        """A named place refreshes its furniture first; a guest gets no snapshot; a machine of its own neither the
+        mirror nor a snapshot here; --tools no fetch."""
+        mirror, snap = ["MIRROR", "REMOUNT"], ["SNAPSHOT container"]
+        every = ["FURNITURE container", "FURNITURE vm", "FURNITURE buildbox4"] + mirror + snap
+        fetch = {t: ["FETCH-IN %s: %s-ws" % (t, t)] for t in self.KINDS}
+        for scope, place, want in (("here", "", every[:2] + every[3:] + fetch["container"] + fetch["vm"]),
+                                   ("place", "container", ["FURNITURE container named"] + mirror + snap + fetch["container"]),
+                                   ("place", "vm", ["FURNITURE vm named"] + mirror + fetch["vm"]),
+                                   ("all", "", every + fetch["container"] + fetch["vm"] + fetch["buildbox4"]),
+                                   ("tools", "", every),
+                                   ("tools", "container", ["FURNITURE container named"] + mirror + snap),
+                                   ("place", "buildbox4", ["FURNITURE buildbox4 named"] + fetch["buildbox4"]),
+                                   ("mirror", "", mirror)):
+            with self.subTest(scope=scope, place=place):
+                self.w.steps.clear()
+                self.assertEqual(self.steps(scope, place)[:2], (0, want))
 
     def test_an_unknown_target_is_refused_by_name_before_anything_runs(self):
         s = Steps(self.w.reg, self.w.clock, self.w.lock(), "place", "", "nosuchthing")
@@ -450,10 +395,6 @@ class TestWhatEachScopeRuns(SyncTest):
         self.w.reg.env["WK_PLACE"] = "container"
         rc, steps, _ = self.steps("ws", only="bug-238")
         self.assertEqual(steps, ["FETCH-IN container: bug-238"])
-
-    def test_the_mirror_alone(self):
-        rc, steps, _ = self.steps("mirror")
-        self.assertEqual((rc, steps), (0, ["MIRROR", "REMOUNT"]))
 
     def test_inside_a_workspace_a_bare_sync_is_the_mirror_then_this_one_alone_even_when_the_refresh_failed(self):
         Path(self.w.env["WK_MARKER"]).write_text("name=ws\n")
@@ -936,35 +877,24 @@ class TestTheFetch(SyncTest):
         self.assertIn("over the network: this checkout reads no mirror)", err)
         self.assertIn(r"'^url\..*\.insteadof$'", next(e[1][-1] for e in reversed(self.w.effects) if e[1][:1] == ("exec",)))
 
-    def test_a_checkout_that_says_nothing_is_not_reported_as_a_local_read(self):
-        self.w.fetched = {"one": Result(0, "fetch=0\n")}
-        self.assertIn("did not say which source", self.fetch("one")[1])
-
-    def test_a_check_that_never_reported_is_wired_wrong_not_right(self):
-        self.w.fetched = {"one": Result(0, "from=mirror\nfetch=0\n")}
-        rc, err = self.fetch("one")
-        self.assertEqual(rc, 1)
-        self.assertIn("-- wired wrong:\n    - the wiring check did not report (it never reached its end)", err)
-
-    def test_an_exec_that_answered_nothing_is_a_failure(self):
-        self.w.fetched = {"one": Result(1, "", "no such container")}
-        rc, err = self.fetch("one")
-        self.assertEqual(rc, 1)
-        self.assertIn("FAILED (continuing)", err)
-
-    def test_a_deviation_in_the_wiring_is_reported_under_the_workspace(self):
-        self.w.fetched = {"one": Result(0, "from=mirror\nfetch=0\nproblem: origin accepts a push (x)\ncheck=1\n")}
-        rc, err = self.fetch("one")
-        self.assertEqual(rc, 1)
-        self.assertIn("ok  (/mirror/container/WebKit.git) -- wired wrong:", err)
-        self.assertIn("    - origin accepts a push (x)", err)
-        self.assertIn("1 workspace(s) fetched but are wired wrong", err)
-        self.assertIn("'wk sync <ws> --fix' re-asserts the wiring", err)
-
-    def test_a_failed_fetch_names_the_problem_the_check_found(self):
-        self.w.fetched = {"one": Result(0, "from=mirror\nfetch=1\nproblem: the mirror carries no refs/heads/x\ncheck=1\n")}
-        err = self.fetch("one")[1]
-        self.assertIn("FAILED (continuing)\n    - the mirror carries no refs/heads/x", err)
+    def test_what_falls_short_is_named_under_the_workspace_and_fails_the_run(self):
+        """A checkout that names no source is no local read, a check that never reported is wired wrong, an exec that
+        answered nothing failed, and a failed fetch names the problem the check found."""
+        for out, words in ((Result(0, "fetch=0\n"), ["did not say which source"]),
+                           (Result(0, "from=mirror\nfetch=0\n"),
+                            ["-- wired wrong:\n    - the wiring check did not report (it never reached its end)"]),
+                           (Result(1, "", "no such container"), ["FAILED (continuing)"]),
+                           (Result(0, "from=mirror\nfetch=0\nproblem: origin accepts a push (x)\ncheck=1\n"),
+                            ["ok  (/mirror/container/WebKit.git) -- wired wrong:", "    - origin accepts a push (x)",
+                             "1 workspace(s) fetched but are wired wrong", "'wk sync <ws> --fix' re-asserts the wiring"]),
+                           (Result(0, "from=mirror\nfetch=1\nproblem: the mirror carries no refs/heads/x\ncheck=1\n"),
+                            ["FAILED (continuing)\n    - the mirror carries no refs/heads/x"])):
+            with self.subTest(said=out.out):
+                self.w.fetched = {"one": out}
+                rc, err = self.fetch("one")
+                self.assertEqual(rc, 1)
+                for w in words:
+                    self.assertIn(w, err)
 
     def test_fix_re_asserts_the_wiring_the_upstream_and_git_webkit_before_the_fetch(self):
         self.w.fixes = {("one", "UPSTREAMFIX"): Result(0, "retargeted: eng/x now tracks fork/eng/x\r\n")}

@@ -53,44 +53,33 @@ def sh_react(handlers):
 class TestPmosFollowReportsAFailure(unittest.TestCase):
     """Pmos._report_follow: the remote build's own exit code, or that it lost track of it."""
 
-    def test_a_failed_remote_build_dies_naming_the_host_code_and_log(self):
-        p, machine = make()
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            with self.assertRaises(Refused):
-                p._report_follow(machine, "/home/x/wk-pmos/out/test-preset-20260101T000000Z", "1", True)
-        out = err.getvalue()
-        self.assertIn("the build failed on buildhost1", out)
-        self.assertIn("exit 1", out)
-        self.assertIn("build.log", out)
-
-    def test_a_successful_remote_build_reports_nothing_and_continues(self):
-        p, machine = make()
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            p._report_follow(machine, "/home/x/wk-pmos/out/id", "0", True)
-        self.assertNotIn("failed", err.getvalue())
-
-    def test_a_lost_connection_names_resume_rather_than_a_bare_failure(self):
-        p, machine = make()
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            with self.assertRaises(Refused):
-                p._report_follow(machine, "/home/x/wk-pmos/out/id", "", False)
-        out = err.getvalue()
-        self.assertIn("lost track of the build", out)
-        self.assertIn("--resume", out)
+    def test_the_remote_build_s_outcome_is_reported_by_what_it_was(self):
+        for code, known, says in (("1", True, ("the build failed on buildhost1", "exit 1", "build.log")),
+                                  ("", False, ("lost track of the build", "--resume")),
+                                  ("0", True, ())):
+            with self.subTest(code=code, known=known):
+                p, machine = make()
+                with contextlib.redirect_stderr(io.StringIO()) as err:
+                    if says:
+                        with self.assertRaises(Refused):
+                            p._report_follow(machine, "/home/x/wk-pmos/out/test-preset-20260101T000000Z", code, known)
+                    else:
+                        p._report_follow(machine, "/home/x/wk-pmos/out/id", code, known)
+                for word in says:
+                    self.assertIn(word, err.getvalue())
+                if not says:
+                    self.assertNotIn("failed", err.getvalue())
 
 
 class TestPmosRefusesASecondConcurrentBuild(unittest.TestCase):
 
-    def test_a_build_already_running_refuses_and_names_the_host(self):
+    def test_a_build_already_running_refuses_and_names_the_host_and_none_lets_a_new_one_proceed(self):
         p, machine = make()
         machine.react(("sh", "-c"), sh_react([("pgrep -f", Result(0, "yes\n"))]))
         with contextlib.redirect_stderr(io.StringIO()) as err:
             with self.assertRaises(Refused):
                 p._refuse_if_running(machine, "/home/x/wk-pmos")
         self.assertIn("a pmos build is already running on buildhost1", err.getvalue())
-
-    def test_no_build_running_lets_a_new_one_proceed(self):
-        p, machine = make()
         machine.react(("sh", "-c"), sh_react([("pgrep -f", Result(1, ""))]))
         p._refuse_if_running(machine, "/home/x/wk-pmos")
 

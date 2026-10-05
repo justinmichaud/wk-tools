@@ -14,7 +14,6 @@ from wk.bench.systems import System, first_line, root_device
 from wk.boot import driver_class, open_driver
 from wk.boot.mac import BENCH_ROOT
 from wk.kv import kv
-from wk.lock import Lock
 from wk.mac import SET_TOLERANCE
 from wk.machine import Local, lib_argv
 from wk.quiet import DESKTOP, PRIV, Quiesce
@@ -172,9 +171,8 @@ class MacVolumeSystem(System):
     host_os = "macos"
 
     def __init__(self, root, reg, clock, install, home, stage_dir, o):
-        self.root, self.reg, self.clock, self.install, self.o = str(root), reg, clock, install, o
-        self.here, self.ws_driver, self.env = reg.machine, None, reg.env
-        self.home, self.dir = home, stage_dir
+        super().__init__(root, reg, None, "", clock)
+        self.install, self.o, self.env, self.home, self.dir = install, o, reg.env, home, stage_dir
         try:
             self.manifest = json.loads(self.here.read(os.path.join(stage_dir, "stage.json")))
         except (OSError, ValueError):
@@ -342,12 +340,11 @@ class StagedRun(pipeline.Run):
     """The pipeline on the running install: no workspace, no task (the host install's task collects the run directory)."""
 
     def __init__(self, root, reg, system, clock, kit, env):
-        self.root, self.reg, self.system, self.clock, self.kit = str(root), reg, system, clock, kit
-        self.env = dict(env)
-        wkrecord.default_watchdog(self.env, pipeline.STALL_SECONDS, pipeline.ABORT_SECONDS)
-        self.here, self.ws, self.ws_driver = reg.machine, system.ws, None
-        self.bench_dir = os.path.join(system.home, "results")
-        self.lock, self.task, self.kill_cmd, self.dry_fails = Lock(reg.store, self.here, clock), None, "", 0
+        super().__init__(root, reg, system, clock, kit, env)
+        self.bench_dir, self.kill_cmd = os.path.join(system.home, "results"), ""
+
+    def records(self, clock):
+        return None
 
     def idle_rows(self):
         """A bench install builds nothing, and its one load is the leg before this one; the quiet gate judges the rest."""

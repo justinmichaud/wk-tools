@@ -98,8 +98,7 @@ class Secrets:
     def cred_path(self, name):
         home = self.env.get("HOME") or os.path.expanduser("~")
         fixed = {"github-pat": self.github_pat_path, "bugzilla-api-key": self.bugzilla_key_path,
-                 "claude-login": self.store.keyring_claude_login,
-                 "ntfy": self.store.keyring_ntfy_topic,
+                 "claude-login": self.store.keyring_claude_login, "ntfy": self.store.keyring_ntfy_topic,
                  "tailnet": lambda: self.env.get("WK_TS_AUTHKEY") or os.path.join(home, ".config", "wk", "tailscale-authkey"),
                  "tailnet-api": lambda: self.env.get("WK_TS_API_SECRET") or os.path.join(home, ".config", "wk", "tailscale-api-key")}
         if name in fixed:

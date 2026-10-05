@@ -136,21 +136,22 @@ class SessionTest(unittest.TestCase):
                 fn(*args)
         return err.getvalue()
 
+    def world(self, start=None, cls=World):
+        w = cls()
+        if start:
+            self.go(w.s().on, start == "bmc")
+        w.effects, w.applied = [], 0
+        return w
+
 
 class TestTheReadings(SessionTest):
     def test_the_driver_tells_the_chips_apart_not_the_card_number(self):
         w = World()
         w.files[DRM + "/card0/device/driver"] = "../drivers/ast"
         w.files[DRM + "/card1/device/driver"] = "../drivers/nvidia"
-        s = w.s()
-        self.assertEqual(["DP-1 connected"], s.connectors("ast"))
-        self.assertEqual(["VGA-1 connected"], s.connectors("not-ast"))
-
-    def test_a_card_with_no_driver_is_neither_chip(self):
-        w = World()
-        del w.files[DRM + "/card0/device/driver"]
-        self.assertEqual([], w.s().connectors("not-ast"))
-        self.assertEqual("none", w.s().driver("card0"))
+        self.assertEqual((["DP-1 connected"], ["VGA-1 connected"]), (w.s().connectors("ast"), w.s().connectors("not-ast")))
+        del w.files[DRM + "/card1/device/driver"]
+        self.assertEqual(([], "none"), (w.s().connectors("not-ast"), w.s().driver("card1")))
 
     def test_lit_needs_connected_enabled_and_on(self):
         w = World()
@@ -158,15 +159,12 @@ class TestTheReadings(SessionTest):
         w.files[DRM + "/card0-DP-1/enabled"] = "disabled\n"
         self.assertEqual([], w.s().lit())
 
-    def test_the_greeter_is_not_somebodys_desktop(self):
+    def test_neither_the_greeter_nor_our_own_compositor_is_somebodys_desktop(self):
         w = World()
         w.sessions = [("c1", "greeter", "wayland")]
         self.assertEqual("", w.s().foreign())
         w.sessions.append(("2", "user", "x11"))
         self.assertEqual("2 x11", w.s().foreign())
-
-    def test_our_own_compositor_is_not_foreign(self):
-        w = World()
         w.sessions = [("5", "user", "wayland")]
         w.answer(("systemctl", "show", session.UNIT, "-p", "MainPID", "--value"), out="1\n")
         self.assertEqual("", w.s().foreign())
@@ -178,104 +176,64 @@ class TestTheReadings(SessionTest):
 
 
 class TestOn(SessionTest):
-    def test_it_starts_the_gpu_compositor(self):
-        w = World()
-        rc, out = self.go(w.s().on, False)
-        self.assertEqual(0, rc, out)
-        self.assertEqual(["session-on"], w.priv_verbs())
-        self.assertIn("session up: %s (mode gpu)" % SOCKET, out)
-        self.assertIn("outputs: DP-1", out)
+    def test_each_starting_state_ends_in_the_mode_asked_for(self):
+        stale = World()
+        stale._set_file(SOCKET, "")
+        theirs = World()
+        theirs.sessions = [("2", "user", "wayland")]
+        for name, w, bmc, verbs, words in (
+                ("fresh", World(), False, ["session-on"], ["session up: %s (mode gpu)" % SOCKET, "outputs: DP-1"]),
+                ("same mode", self.world("gpu"), False, [], ["already running"]),
+                ("other mode", self.world("bmc"), False, ["session-stop", "session-on"], ["restarting it as 'gpu'"]),
+                ("bmc", World(), True, ["session-on-bmc"], ["SLOW SESSION"]),
+                ("somebody's desktop", theirs, False, [], ["already active on seat0 (session 2 wayland)"]),
+                ("stale socket", stale, False, ["session-on"], ["stale compositor socket"])):
+            with self.subTest(name):
+                rc, out = self.go(w.s().on, bmc)
+                self.assertEqual(0, rc, out)
+                self.assertEqual(verbs, w.priv_verbs())
+                for word in words:
+                    self.assertIn(word, out)
+                self.assertNotIn("not on a BMC connector", out)
+                if verbs:
+                    self.assertEqual("bmc" if bmc else "gpu", w.files[MODE_FILE])
 
-    def test_the_mode_already_running_is_left_alone(self):
+    def test_a_bmc_session_on_another_output_says_so(self):
         w = World()
-        self.go(w.s().on, False)
-        w.effects = []
-        rc, out = self.go(w.s().on, False)
-        self.assertEqual([], w.priv_verbs())
-        self.assertIn("already running", out)
+        w.react(("env", "WAYLAND_DISPLAY=" + SOCKET, "wayland-info"), lambda a, f: Result(0, "\tname: DP-1\n"))
+        self.assertIn("not on a BMC connector (outputs: DP-1)", self.go(w.s().on, True)[1])
 
-    def test_another_mode_running_is_restarted_as_the_one_asked_for(self):
-        w = World()
-        self.go(w.s().on, True)
-        w.effects = []
-        rc, out = self.go(w.s().on, False)
-        self.assertEqual(["session-stop", "session-on"], w.priv_verbs())
-        self.assertEqual("gpu", w.files[MODE_FILE])
-        self.assertIn("restarting it as 'gpu'", out)
-
-    def test_the_bmc_session_is_checked_for_a_bmc_output(self):
-        w = World()
-        rc, out = self.go(w.s().on, True)
-        self.assertEqual(["session-on-bmc"], w.priv_verbs())
-        self.assertNotIn("not on a BMC connector", out)
-        self.assertIn("SLOW SESSION", out)
-        w2 = World()
-        w2.react(("env", "WAYLAND_DISPLAY=" + SOCKET, "wayland-info"), lambda a, f: Result(0, "\tname: DP-1\n"))
-        rc, out = self.go(w2.s().on, True)
-        self.assertIn("not on a BMC connector (outputs: DP-1)", out)
-
-    def test_somebodys_desktop_is_left_alone(self):
-        w = World()
-        w.sessions = [("2", "user", "wayland")]
-        rc, out = self.go(w.s().on, False)
-        self.assertEqual(0, rc)
-        self.assertEqual([], w.priv_verbs())
-        self.assertIn("already active on seat0 (session 2 wayland)", out)
-
-    def test_a_stale_socket_is_named_and_replaced(self):
-        w = World()
-        w._set_file(SOCKET, "")
-        rc, out = self.go(w.s().on, False)
-        self.assertIn("stale compositor socket", out)
-        self.assertEqual(["session-on"], w.priv_verbs())
-
-    def test_no_wayland_info_is_refused_before_anything_starts(self):
-        w = World()
-        w.answer(HAVE + ("wayland-info",), 1)
-        self.assertIn("wayland-info missing", self.refused(w.s().on, False))
-        self.assertEqual([], w.priv_verbs())
-
-    def test_a_compositor_that_left_no_socket_is_refused(self):
-        w = World()
-        w.react(("sudo", "-n", PRIV, "session-on"), lambda a, f: Result(0))
-        self.assertIn("no Wayland socket", self.refused(w.s().on, False))
-
-    def test_a_missing_grant_is_refused_naming_the_setup_stage(self):
-        w = World(passwordless=False)
-        self.assertIn("./setup --stage quiesce", self.refused(w.s().on, False))
-        self.assertEqual([], w.priv_verbs())
-
-    def test_no_helper_is_refused(self):
-        w = World()
-        del w.files[PRIV]
-        self.assertIn("is not installed", self.refused(w.s().on, False))
+    def test_what_it_cannot_start_is_refused_naming_why(self):
+        no_info = World()
+        no_info.answer(HAVE + ("wayland-info",), 1)
+        no_socket = World()
+        no_socket.react(("sudo", "-n", PRIV, "session-on"), lambda a, f: Result(0))
+        no_helper = World()
+        del no_helper.files[PRIV]
+        for w, words, started in ((no_info, "wayland-info missing", False), (no_socket, "no Wayland socket", True),
+                                  (World(passwordless=False), "./setup --stage quiesce", False),
+                                  (no_helper, "is not installed", False)):
+            with self.subTest(words):
+                self.assertIn(words, self.refused(w.s().on, False))
+                self.assertEqual(started, bool(w.priv_verbs()))
 
 
 class TestGdmAndOff(SessionTest):
-    def test_gdm_starts_a_wayland_greeter(self):
-        w = World()
-        rc, out = self.go(w.s().gdm, False)
-        self.assertEqual(["session-gdm"], w.priv_verbs())
-        self.assertIn("wayland greeter", out)
-
-    def test_a_greeter_on_xorg_says_the_mode_is_not_enforced(self):
-        w = World()
-        w.react(("sudo", "-n", PRIV, "session-gdm-bmc"),
-                lambda a, f: (w.sessions.append(("c1", "greeter", "x11")), Result(0))[1])
-        rc, out = self.go(w.s().gdm, True)
-        self.assertIn("came up on x11, not wayland -- the mode is not enforced", out)
-
-    def test_off_turns_the_outputs_off_and_says_so(self):
-        w = World()
-        rc, out = self.go(w.s().off)
-        self.assertEqual(["session-off"], w.priv_verbs())
-        self.assertIn("screen off", out)
-
-    def test_off_that_left_the_screen_lit_says_what_darkens_it(self):
-        w = World()
-        w.react(("sudo", "-n", PRIV, "session-off"), lambda a, f: Result(0))
-        rc, out = self.go(w.s().off)
-        self.assertIn("the screen is black but still lit: DP-1", out)
+    def test_each_verb_runs_its_helper_verb_and_says_what_it_left(self):
+        xorg = World()
+        xorg.react(("sudo", "-n", PRIV, "session-gdm-bmc"),
+                   lambda a, f: (xorg.sessions.append(("c1", "greeter", "x11")), Result(0))[1])
+        lit = World()
+        lit.react(("sudo", "-n", PRIV, "session-off"), lambda a, f: Result(0))
+        for w, verb, args, helper, words in (
+                (World(), "gdm", (False,), "session-gdm", "wayland greeter"),
+                (xorg, "gdm", (True,), "session-gdm-bmc", "came up on x11, not wayland -- the mode is not enforced"),
+                (World(), "off", (), "session-off", "screen off"),
+                (lit, "off", (), "session-off", "the screen is black but still lit: DP-1")):
+            with self.subTest(words):
+                rc, out = self.go(getattr(w.s(), verb), *args)
+                self.assertEqual([helper], w.priv_verbs())
+                self.assertIn(words, out)
 
     def test_a_failed_helper_verb_is_refused(self):
         w = World()
@@ -285,18 +243,15 @@ class TestGdmAndOff(SessionTest):
 
 class TestStatus(SessionTest):
     def test_it_reports_every_row_and_changes_nothing(self):
-        w = World()
-        self.go(w.s().on, False)
+        w = self.world("gpu")
         before = w.state()
-        w.effects = []
         out = io.StringIO()
         with contextlib.redirect_stderr(io.StringIO()):
             w.s().status(out)
-        text = out.getvalue()
         for row in ("session:   active", "socket:    " + SOCKET, "dm:        inactive", "modeset:   Y", "mode:      gpu",
                     "lit:       DP-1", "gpu:       DP-1 connected", "bmc:       VGA-1 connected",
                     "outputs:   DP-1", "display:   1920x1080 @ 60.000Hz"):
-            self.assertIn(row, text)
+            self.assertIn(row, out.getvalue())
         self.assertEqual(before, w.state())
         self.assertEqual([], [e for e in w.effects if e[0] != "run"])
 
@@ -304,13 +259,6 @@ class TestStatus(SessionTest):
 class TestCrashOnly(SessionTest):
     CASES = (("on gpu from bmc", lambda s: s.on(False), "bmc"), ("gdm", lambda s: s.gdm(False), None),
              ("off", lambda s: s.off(), "gpu"))
-
-    def world(self, start, cls=World):
-        w = cls()
-        if start:
-            self.go(w.s().on, start == "bmc")
-        w.effects, w.applied = [], 0
-        return w
 
     def test_each_verb_killed_after_any_effect_and_rerun_converges(self):
         for what, verb, start in self.CASES:
@@ -321,26 +269,19 @@ class TestCrashOnly(SessionTest):
     def test_a_dry_run_is_the_wet_runs_plan_and_touches_nothing(self):
         for what, verb, start in self.CASES:
             with self.subTest(verb=what):
-                wet = self.world(start, Recording)
+                wet, dry = self.world(start, Recording), self.world(start, Recording)
                 self.go(verb, wet.s())
-                dry = self.world(start, Recording)
                 before = dry.state()
-                os.environ["WK_DRY_RUN"] = "1"
-                try:
+                with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
                     self.go(verb, dry.s())
-                finally:
-                    del os.environ["WK_DRY_RUN"]
                 self.assertEqual(wet.mutations(), dry.mutations())
                 self.assertTrue(dry.mutations())
                 self.assertEqual(before, dry.state())
 
 
 class TestTheCommand(SessionTest):
-    def load(self):
-        return load_cmd("quiesce")
-
     def test_the_words_it_takes(self):
-        m = self.load()
+        m = load_cmd("quiesce")
         with mock.patch.object(m, "is_linux", return_value=True), mock.patch.object(m.session, "Session") as s:
             m.main(as_dispatched("quiesce", ["session"], {}))
             m.main(["session", "on", "--bmc"])
@@ -349,9 +290,6 @@ class TestTheCommand(SessionTest):
         self.assertEqual([c[1] for c in s.return_value.method_calls], [(), (True,), (True,)])
         self.assertIn("on, gdm, off or status", self.refused(m.main, ["session", "up"]))
         self.assertIn("--bmc moves the session", self.refused(m.main, ["session", "off", "--bmc"]))
-
-    def test_it_is_refused_off_linux(self):
-        m = self.load()
         with mock.patch.object(m, "is_linux", return_value=False):
             self.assertIn("Linux-only", self.refused(m.main, ["session", "status"]))
 

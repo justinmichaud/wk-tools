@@ -1,0 +1,394 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>wk status</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg:#f7f7f5; --fg:#1b1b19; --dim:#6d6d67; --faint:#8e8e87;
+    --line:#e0e0d9; --card:#ffffff; --sunk:#f0f0ec;
+    --good:#127a33; --busy:#8a5b00; --bad:#b3261e; --idle:#8a8a82; --accent:#2d5fa8;
+    --good-bg:#e4f4e8; --busy-bg:#fdf1d6; --bad-bg:#fbe6e4; --idle-bg:#eeeeea;
+    --accent-bg:#e6eefb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#131417; --fg:#e7e7e3; --dim:#9b9b95; --faint:#7c7c76;
+      --line:#2a2c31; --card:#1a1c20; --sunk:#212429;
+      --good:#5fd07f; --busy:#e0b23c; --bad:#ff7b70; --idle:#84847d; --accent:#7fa9ee;
+      --good-bg:#16301f; --busy-bg:#332a12; --bad-bg:#37201e; --idle-bg:#23252a;
+      --accent-bg:#1b2536;
+    }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:0 0 4rem; background:var(--bg); color:var(--fg);
+         font:13.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  .wrap { max-width:1400px; margin:0 auto; padding:1.5rem 1.75rem; }
+
+  .top { border-bottom:1px solid var(--line); background:var(--card); }
+  .top .wrap { padding-bottom:1rem; }
+  .title { display:flex; align-items:baseline; gap:.9rem; flex-wrap:wrap; }
+  h1 { font-size:1.05rem; margin:0; letter-spacing:.04em; }
+  .verdict { font-weight:700; }
+  .attn { display:flex; gap:.45rem; flex-wrap:wrap; margin-top:.7rem; }
+  .attn:empty { display:none; }
+  .allclear { margin-top:.7rem; color:var(--good); }
+
+  .chip { display:inline-block; padding:.08rem .5rem; border-radius:999px;
+          font-size:.8rem; font-weight:600; white-space:nowrap;
+          background:var(--idle-bg); color:var(--idle); }
+  .chip.good{background:var(--good-bg);color:var(--good)}
+  .chip.busy{background:var(--busy-bg);color:var(--busy)}
+  .chip.bad {background:var(--bad-bg); color:var(--bad)}
+  .chip.idle{background:var(--idle-bg);color:var(--idle)}
+  .chip.accent{background:var(--accent-bg);color:var(--accent)}
+
+  h2 { font-size:1rem; margin:0; letter-spacing:.02em; }
+  .tag { color:var(--dim); font-weight:400; font-size:.82em; margin-left:.6rem; }
+  section.machine { margin:1.75rem 0 0; }
+  .mhead { display:flex; align-items:baseline; gap:.5rem; flex-wrap:wrap;
+           border-bottom:2px solid var(--line); padding-bottom:.45rem; margin-bottom:.75rem; }
+
+  .tiles { display:grid; gap:.55rem; margin:0 0 1rem;
+           grid-template-columns:repeat(auto-fill,minmax(15rem,1fr)); }
+  .tile { background:var(--card); border:1px solid var(--line); border-radius:7px;
+          padding:.5rem .65rem; }
+  .tile .tk { color:var(--dim); font-size:.75rem; text-transform:uppercase;
+              letter-spacing:.07em; margin-bottom:.2rem; }
+  .tile .tv { font-size:.92rem; }
+  .tile .tv b { font-variant-numeric:tabular-nums; font-weight:700; }
+  .tile .sub { color:var(--faint); font-size:.8rem; }
+  .meter { height:5px; border-radius:3px; background:var(--sunk); margin-top:.4rem;
+           overflow:hidden; }
+  .meter i { display:block; height:100%; background:var(--idle); }
+  .meter.good i{background:var(--good)} .meter.busy i{background:var(--busy)}
+  .meter.bad  i{background:var(--bad)}
+
+  .method { margin:0 0 1.1rem; }
+  .method > h3 { font-size:.75rem; text-transform:uppercase; letter-spacing:.09em;
+                 color:var(--dim); margin:0 0 .35rem; font-weight:700; }
+  table { border-collapse:collapse; width:100%; background:var(--card);
+          border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+  th { text-align:left; font-size:.7rem; text-transform:uppercase; letter-spacing:.07em;
+       color:var(--dim); font-weight:700; padding:.45rem .7rem;
+       border-bottom:1px solid var(--line); background:var(--sunk); }
+  td { padding:.38rem .7rem; border-top:1px solid var(--line); vertical-align:top;
+       white-space:nowrap; }
+  tr.sub td, tr.note td { border-top:none; padding-top:0; }
+  td.wide { white-space:normal; }
+  td.name { font-weight:700; }
+  tr.attention td { background:var(--bad-bg); }
+  tr.attention td.name { box-shadow:inset 3px 0 0 var(--bad); }
+  tr.working td { background:var(--busy-bg); }
+  tr.working td.name { box-shadow:inset 3px 0 0 var(--busy); }
+  .good{color:var(--good)} .busy{color:var(--busy)} .bad{color:var(--bad)}
+  .idle{color:var(--idle)} .dim{color:var(--dim)}
+  .note { color:var(--dim); white-space:pre-wrap; font-size:.88em; }
+  .note.warn { color:var(--busy); }
+  .meta { color:var(--faint); font-size:.84em; margin:.2rem 0 .8rem; }
+  .meta .k { display:inline-block; min-width:11rem; }
+  code.fix { background:var(--sunk); border:1px solid var(--line); border-radius:4px;
+             padding:0 .35rem; color:var(--busy); font-weight:600; }
+  .facts { margin:.4rem 0 0; color:var(--dim); font-size:.88em; }
+  pre.raw { background:var(--card); border:1px solid var(--line); border-radius:7px;
+            padding:.7rem; overflow-x:auto; margin:.4rem 0 0; font-size:.85em; }
+
+  .board { display:grid; gap:.6rem; grid-template-columns:repeat(auto-fill,minmax(17rem,1fr)); }
+  .dev { background:var(--card); border:1px solid var(--line); border-left:4px solid var(--idle);
+         border-radius:7px; padding:.6rem .75rem; }
+  .dev.good{border-left-color:var(--good)} .dev.busy{border-left-color:var(--busy)}
+  .dev.bad {border-left-color:var(--bad)}
+  .dev.bench { border-left-color:var(--accent); background:var(--accent-bg); }
+  .dev .dn { font-weight:700; font-size:.95rem; }
+  .dev .dr { color:var(--dim); font-size:.8rem; }
+  .dev .dm { margin:.3rem 0; }
+  .dev .media { color:var(--faint); font-size:.82em; white-space:normal; }
+  .armed { margin-top:.4rem; color:var(--busy); font-weight:600; font-size:.85em; }
+  .armed.bad { color:var(--bad); }
+
+  footer { position:fixed; right:1rem; bottom:.75rem; color:var(--dim); font-size:.8rem;
+           background:var(--card); border:1px solid var(--line);
+           padding:.3rem .6rem; border-radius:999px; }
+  footer .spin { color:var(--busy); font-weight:600; }
+  body.gone { filter:grayscale(1) opacity(.55); }
+  body.gone::after { content:""; position:fixed; inset:0; pointer-events:none;
+                     border:6px solid var(--bad); }
+  body.gone footer { filter:none; color:var(--bad); font-weight:700; }
+</style>
+<body>
+<div class="top"><div class="wrap">
+  <div class="title"><h1>wk status</h1><span id="verdict" class="chip verdict">…</span>
+    <span id="counts" class="dim"></span></div>
+  <div id="attn" class="attn"></div>
+</div></div>
+<div class="wrap"><div id="app"></div></div>
+<footer id="foot">loading…</footer>
+<script>
+const ESC = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const SEV = __SEV__;
+function sev(w) {
+  w = String(w || "").split(" ")[0].toLowerCase();
+  for (const k of ["good","busy","bad","idle"]) if (SEV[k].includes(w)) return k;
+  return "";
+}
+const chip = (w, k) => `<span class="chip ${k === undefined ? sev(w) : k}">${ESC(w)}</span>`;
+function subText(s) {
+  let out = `${s.kind}=${s.state}`;
+  if (s.preset) out += ` (${s.preset})`;
+  return out;
+}
+function meta(o) {
+  const rows = [];
+  if (o.tailnet) rows.push(`<div><span class="k">reached</span>${ESC(o.tailnet)}</div>`);
+  if (o.direct)  rows.push(`<div><span class="k">without tailscale</span>${ESC(o.direct)}</div>`);
+  if (o.conf)    rows.push(`<div><span class="k">from</span>${ESC(o.conf)}</div>`);
+  return rows.length ? `<div class="meta">${rows.join("")}</div>` : "";
+}
+const GB = mb => { const n = parseInt(mb, 10); return isNaN(n) ? "?" : (n >= 1024 ? Math.round(n/1024) + "G" : n + "M"); };
+function diskHue(p) { const n = parseInt(p,10); return isNaN(n) ? "" : n >= 90 ? "bad" : n >= 75 ? "busy" : "good"; }
+function loadHue(l, c) { l = parseFloat(l); c = parseInt(c,10);
+  return (isNaN(l) || !c) ? "" : l > c ? "bad" : l > c/2 ? "busy" : "good"; }
+const where = o => (o.where || "").replace("in the ","").replace("the ","");
+function sdkVerdict(s) {
+  if (s.upstream) return s.upstream === s.tag ? chip("current", "good") : chip(`behind (${s.upstream})`, "busy");
+  return chip(`unknown -- ${s.unknown || "registry did not answer"}`, "");
+}
+function sdkLine(s) { return `${ESC(s.tag || "?")} pulled ${ESC(s.pulled || "?")}; upstream ${sdkVerdict(s)}`; }
+function meter(pct, hue) {
+  const p = Math.max(0, Math.min(100, pct));
+  return `<div class="meter ${hue}"><i style="width:${p}%"></i></div>`;
+}
+function tile(k, v, m) { return `<div class="tile"><div class="tk">${ESC(k)}</div>
+  <div class="tv">${v}</div>${m || ""}</div>`; }
+
+function tiles(m) {
+  const t = [];
+  for (const d of m.disk || []) {
+    const pct = parseInt(d.used_pct, 10);
+    let sub = `${GB(d.free_mb)} free of ${GB(d.total_mb)}`;
+    if (d.snapshots) sub += ` · ${ESC(d.snapshots)} snapshot${d.snapshots === "1" ? "" : "s"}`;
+    if (d.reclaimable && d.reclaimable !== "0")
+      sub += ` · <span class="busy">${ESC(d.reclaimable)} reclaimable (wk gc)</span>`;
+    t.push(tile("disk" + (where(d) ? " · " + where(d) : ""),
+      `<b class="${diskHue(d.used_pct)}">${ESC(d.used_pct || "?")}%</b> used
+       <span class="sub">${sub}</span>`, meter(pct, diskHue(d.used_pct))));
+  }
+  for (const c of m.capacity || []) {
+    const label = "load" + (where(c) ? " · " + where(c) : "");
+    if (!c.cores) {
+      if (c.note) t.push(tile(label, chip(c.note, "bad")));
+      continue;
+    }
+    const hue = loadHue(c.load, c.cores), pct = (parseFloat(c.load) / parseInt(c.cores,10)) * 100;
+    const free = c.mem_mb ? `${GB(c.free_mb)} free of ${GB(c.mem_mb)}` : `${GB(c.free_mb)} free`;
+    t.push(tile(label,
+      `<b class="${hue}">${ESC(c.load || "?")}</b> of ${ESC(c.cores)} cores
+       <span class="sub">${free}</span>`, meter(pct, hue)));
+  }
+  for (const s of m.sdk || [])
+    t.push(tile("sdk image", sdkLine(s)));
+  for (const sv of m.services || [])
+    t.push(tile(sv.name, chip(sv.state) + (sv.fix ? ` <code class="fix">${ESC(sv.fix)}</code>` : "")));
+  for (const sw of m.switches || [])
+    t.push(tile(sw.name + (where(sw) ? " · " + where(sw) : ""),
+      chip(sw.state, sw.state === "on" ? "good" : "busy") +
+      ` <span class="sub">${ESC(sw.detail || "")}</span>`));
+  for (const lk of m.locks || [])
+    t.push(tile("lock · " + ESC(lk.resource),
+      chip(lk.alive ? "held" : "stale", lk.alive ? "busy" : "bad") +
+      ` <span class="sub">pid ${ESC(lk.pid || "?")} ${ESC(lk.cmd || "")}</span>`));
+  for (const b of (m.bench || []))
+    t.push(tile("bench", chip(b.state) + ` <span class="sub">${ESC(b.task)} — ${ESC(b.summary || "")}</span>`));
+  for (const k of (m.tasks || [])) {
+    const live = ["running", "silent", "starting"].includes(k.state);
+    const MARKS = {done: ["[x]", "good"], failed: ["[!]", "bad"],
+                   skipped: ["[-]", "sub"], pending: ["[ ]", "sub"]};
+    const plan = (k.plan || []).map((line, i) => {
+      const st = (k.steps || [])[i] || "pending";
+      const [mark, hue] = k.state === "ok" ? MARKS.done
+        : st === "running" ? (live ? ["[&gt;]", "busy"] : ["[!]", "bad"])
+        : (MARKS[st] || MARKS.pending);
+      return `<div class="${hue}">${mark} ${ESC(line)}</div>`;
+    }).join("");
+    t.push(tile(`${ESC(k.task_kind || "task")} · ${ESC(k.name || "?")}`,
+      chip(k.state) + ` <span class="sub">since ${ESC(k.since || "?")}</span>` +
+      (k.subject ? `<div class="sub">${ESC(k.subject)}</div>` : "") + plan +
+      (k.state === "died" ? `<div class="bad">died — ${k.exit ? "exit " + ESC(k.exit) : "no exit recorded"}</div>` : "") +
+      (k.holds ? `<div class="sub">holds: ${ESC(k.holds)}</div>` : "") +
+      `<div class="sub">kill: <code>${ESC(k.kill || "?")}</code></div>` +
+      (k.log ? `<div class="sub">log: ${ESC(k.log)}</div>` : "")));
+  }
+  return t.length ? `<div class="tiles">${t.join("")}</div>` : "";
+}
+
+const VERDICT = {
+  0: ["good", "idle, or the last build succeeded"],
+  1: ["bad",  "a build failed"],
+  2: ["busy", "a build is running or silent, or a workspace is being created"],
+  3: ["bad",  "a build stalled and was killed by its own watchdog"],
+  4: ["bad",  "a workspace needs a person"],
+};
+function summary(doc) {
+  let ws = 0, attn = 0, running = 0, failed = 0, stale = 0, full = 0, drift = 0,
+      unpushed = 0, away = 0, oldrole = 0, bench = 0;
+  for (const m of doc.machines) {
+    for (const g of m.methods) for (const w of g.workspaces) {
+      ws++;
+      if (["creating","broken","unreachable"].includes(w.ws)) attn++;
+      if (w.unpushed) unpushed += parseInt(w.unpushed, 10) || 0;
+      for (const s of w.subs || []) {
+        if (["running","building","silent"].includes(s.state)) running++;
+        if (["failed","oom","stalled","gave-up","error"].includes(s.state)) failed++;
+      }
+    }
+    for (const lk of m.locks || []) if (!lk.alive) stale++;
+    for (const d of m.disk || []) if (parseInt(d.used_pct,10) >= 90) full++;
+    for (const f of m.facts || []) if (f.type === "wk-tools" && !f.insync) drift++;
+  }
+  for (const f of doc.fleet || []) {
+    if (String(f.mode || "").startsWith("bench")) bench++;
+    if (String(f.mode || "").startsWith("unreachable") || String(f.mode || "").startsWith("no answer")) away++;
+  }
+  for (const b of doc.bridges || []) if (b.role_insync === false) oldrole++;
+  const bits = [
+    [attn,     "bad",    n => `${n} workspace${n>1?"s":""} needing a person`],
+    [failed,   "bad",    n => `${n} failed`],
+    [stale,    "bad",    n => `${n} stale lock${n>1?"s":""}`],
+    [full,     "bad",    n => `${n} disk${n>1?"s":""} over 90%`],
+    [running,  "busy",   n => `${n} running`],
+    [unpushed, "busy",   n => `${n} unpushed commit${n>1?"s":""}`],
+    [drift,    "busy",   n => `${n} wk-tools ${n>1?"copies":"copy"} behind`],
+    [oldrole,  "busy",   n => `${n} bridge role${n>1?"s":""} older than the repo`],
+    [away,     "idle",   n => `${n} board${n>1?"s":""} not answering`],
+    [bench,    "accent", n => `${n} board${n>1?"s":""} in bench mode`],
+  ];
+  return { ws, chips: bits.filter(b => b[0] > 0).map(b => chip(b[2](b[0]), b[1])) };
+}
+
+function render(doc) {
+  const s = summary(doc);
+  const [vk, vt] = VERDICT[doc.exit] || ["", "exit " + doc.exit];
+  const v = document.getElementById("verdict");
+  v.className = "chip verdict " + vk;
+  v.textContent = doc.exit + " · " + vt;
+  document.getElementById("counts").textContent =
+    `${doc.machines.length} machine${doc.machines.length===1?"":"s"} · ${s.ws} workspace${s.ws===1?"":"s"}`;
+  document.getElementById("attn").innerHTML =
+    s.chips.length ? s.chips.join("") : '<span class="allclear">nothing wants attention</span>';
+
+  const parts = [];
+  for (const m of doc.machines) {
+    parts.push(`<section class="machine"><div class="mhead"><h2>${ESC(m.name)}</h2>` +
+      (m.self ? '<span class="tag">this machine</span>' : "") + `</div>${meta(m)}${tiles(m)}`);
+    for (const g of m.methods) {
+      if (!g.workspaces.length) continue;
+      parts.push(`<div class="method"><h3>${ESC(g.name)}</h3><table>
+        <tr><th>workspace</th><th>state</th><th>branch</th><th>base</th><th>work</th><th>snap</th><th>build</th></tr>`);
+      for (const w of g.workspaces) {
+        const subs = w.subs || [];
+        const work = [];
+        if (w.unpushed) work.push(`${w.unpushed} unpushed`);
+        if (w.dirty) work.push(`${w.dirty} dirty`);
+        if (w.untracked) work.push(`+${w.untracked} new`);
+        const workTxt = work.length ? work.join(", ") : (w.ws === "present" ? "clean" : "");
+        let branch = w.branch || "-";
+        if (w.behind) branch += ` ↓${w.behind}`;
+        if (w.ahead) branch += ` ↑${w.ahead}`;
+        const needs = ["creating","broken","unreachable"].includes(w.ws);
+        const busy = subs.some(x => x.state === "running" || x.state === "building");
+        const cls = needs ? "attention" : busy ? "working" : "";
+        parts.push(`<tr class="${cls}">
+          <td class="name">${ESC(w.name)}</td>
+          <td>${chip(w.disagree ? `disagree (${w.disagree[0]} vs ${w.disagree[1]})` : w.state)}</td>
+          <td title="${ESC(w.branch || "")}">${ESC(branch)}</td>
+          <td>${ESC(w.base || "?")}</td>
+          <td class="${work.length ? "busy" : "idle"}">${ESC(workTxt)}</td>
+          <td class="${w.snap_behind ? "busy" : "idle"}" title="${ESC(w.snap || "")}">${w.snap_behind ? "-" + ESC(w.snap_behind) : ""}</td>
+          <td class="${subs[0] ? sev(subs[0].state) : ""}">${subs[0] ? ESC(subText(subs[0])) : ""}</td></tr>`);
+        for (const x of subs.slice(1))
+          parts.push(`<tr class="sub"><td colspan="6"></td><td class="${sev(x.state)}">${ESC(subText(x))}</td></tr>`);
+        for (const n of (w.notes || []))
+          parts.push(`<tr class="note"><td colspan="7" class="wide"><div class="note ${n.level === "warn" ? "warn" : ""}">${ESC(n.text)}</div></td></tr>`);
+      }
+      parts.push(`</table></div>`);
+    }
+    const facts = (m.facts || []).map(f => {
+      if (f.type === "wk-tools") {
+        const what = "wk-tools" + (f.copy ? ` (${f.copy})` : "");
+        const ver = (f.sha || "-") + (f.dirty ? "+dirty" : "");
+        return `<div>${ESC(what)} ${ESC(ver)} ` + (f.insync
+          ? chip("in sync", "good")
+          : chip("differs from the workstation (" + (f.expect || "?") + ")", "bad")
+            + (f.fix ? ` <code class="fix">${ESC(f.fix)}</code>` : "")) + `</div>`;
+      }
+      return `<div>push key ${ESC(f.text)}</div>`;
+    });
+    if (facts.length) parts.push(`<div class="facts">${facts.join("")}</div>`);
+    for (const r of (m.raw || []))
+      parts.push(`<pre class="raw">${ESC(r.text)}</pre>` +
+        (r.notes || []).map(n => `<div class="note warn">${ESC(n.text)}</div>`).join(""));
+    if (!m.methods.some(g => g.workspaces.length) && !(m.raw || []).length)
+      parts.push(`<div class="idle">(no workspaces on it)</div>`);
+    parts.push(`</section>`);
+  }
+
+  if (doc.fleet && doc.fleet.length) {
+    parts.push(`<section class="machine"><div class="mhead"><h2>fleet</h2>
+      <span class="tag">role, mode, and the media wk owns</span></div>
+      <div class="board">`);
+    for (const f of doc.fleet) {
+      const bench = String(f.mode || "").startsWith("bench");
+      parts.push(`<div class="dev ${bench ? "bench" : sev(f.mode)}">
+        <div class="dn">${ESC(f.machine)} <span class="dr">${ESC(f.role || "")}</span></div>
+        <div class="dm">${chip(f.mode)}</div>
+        <div class="media">${ESC(f.media || "")}</div>` +
+        (f.armed ? `<div class="armed${f.armed_desync ? " bad" : ""}">${f.armed_desync ? "desync -- " : ""}armed for ${ESC(f.armed)}` +
+          (f.armed_by ? ` by ${ESC(f.armed_by)}` : "") + (f.armed_at ? ` since ${ESC(f.armed_at)}` : "") +
+          (f.armed_desync ? ", and the record was never cleared" : "") + ` — wk boot ${ESC(f.machine)} --status</div>` : "") +
+        meta(f) + `</div>`);
+    }
+    parts.push(`</div></section>`);
+  }
+
+  if (doc.bridges && doc.bridges.length) {
+    parts.push(`<section class="machine"><div class="mhead"><h2>tailnet bridges</h2>
+      <span class="tag">probed: the segment, the role, and its own health check</span></div>
+      <table><tr><th>bridge</th><th>device</th><th>segment</th><th>state</th><th>role</th><th>health</th></tr>`);
+    for (const b of doc.bridges) {
+      const role = b.role_insync === undefined ? ""
+        : b.role_insync ? chip("this repository's", "good")
+        : chip("older — wk machine setup " + b.name, "bad");
+      parts.push(`<tr><td class="name">${ESC(b.name)}</td><td>${ESC(b.device)}</td><td>${ESC(b.segment)}</td>
+        <td>${chip(b.state || "?")}</td><td class="wide">${role}</td>
+        <td class="wide dim">${ESC(b.health || "")}</td></tr>`);
+      const extra = [];
+      if (b.note) extra.push(`<div class="note">${ESC(b.note)}</div>`);
+      const bm = meta(b);
+      if (extra.length || bm) parts.push(`<tr class="note"><td colspan="6" class="wide">${extra.join("")}${bm}</td></tr>`);
+      for (const n of (b.notes || [])) parts.push(`<tr class="note"><td colspan="6" class="wide"><div class="note warn">${ESC(n.text)}</div></td></tr>`);
+    }
+    parts.push(`</table></section>`);
+  }
+  document.getElementById("app").innerHTML = parts.join("");
+}
+const LIVE = __LIVE__;
+if (!LIVE) { render(__DOC__); document.getElementById("foot").textContent = "static page — wk status --web for a live one"; }
+else {
+  let last = 0;
+  async function poll() {
+    try {
+      const r = await fetch("status.json", { cache: "no-store" });
+      const p = await r.json();
+      if (p.stamp !== last) { last = p.stamp; render(p.doc); }
+      document.body.classList.remove("gone");
+      const age = Math.round((Date.now()/1000) - p.stamp);
+      document.getElementById("foot").innerHTML = p.refreshing
+        ? '<span class="spin">walking the fleet…</span>'
+        : `updated ${age}s ago · every ${p.interval}s`;
+    } catch (e) {
+      document.body.classList.add("gone");
+      document.getElementById("foot").textContent = "wk status --web has stopped — this listing is frozen";
+    }
+  }
+  poll(); setInterval(poll, 1500);
+}
+</script>

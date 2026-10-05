@@ -3,6 +3,7 @@ workspace builder shares, and lib/wk/sysimage/buildroot.py) against a Fake world
 import contextlib
 import io
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -42,11 +43,21 @@ class Box(WsDriver):
 
 
 class World(Fake):
-    """This machine holding `WS` on its container place `box`: the image and the workspace exist unless
-    `made` is False, the stage writes `out` to its log and exits `rc`."""
+    """This machine holding `WS` on its container place `box`: the image and the workspace exist unless `made` is
+    False, and a stage writes `out` to its log and exits `rc` after `polls` polls (for ever when None).
+    A subclass is one builder: its class, preset and what the shared lifecycle tests expect of it."""
+
+    BUILDER, PRESET, KIND = buildroot.Buildroot, PRESET, "buildroot"
+    OUT = b"wk-buildroot: building\nwk-buildroot: stage 'image' done\n"
+    KILL = "wk sysimage build %s --stop" % PRESET
+    DONE, IDLE, STOPPED = "built %s in '%s'" % (PRESET, WS), "no buildroot is running in '%s'" % WS, \
+        "stopped '%s's buildroot and recorded it as cancelled" % WS
+    DETACHED, DRY = "build of " + PRESET, ("  jobs         -j8 (memory-sized at 2048 MB/job)",)
+    SUBJECT, UNKNOWN = "", (["--stage", "image"], ["--resume"])
 
     def __init__(self, tmp):
         super().__init__("here")
+        self.ws = self.KIND + "-" + self.PRESET
         self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
         store = self.tmp / "store"
         self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(store), "WK_LOCK_DIR": str(self.tmp / "locks"),
@@ -54,42 +65,51 @@ class World(Fake):
                     "WK_CGROUP_CORES": "8", "WK_JOB_PID_TRIES": "0", "WK_KILL_WAIT": "2", "WK_ROOT": str(REPO)}
         self.clock = FakeClock()
         self.dirs.add(self.env["WK_LOCK_DIR"])
-        self.made, self.rc, self.hang, self.interrupt, self.kind = True, 0, False, None, "container"
-        self.out = b"wk-buildroot: building\nwk-buildroot: stage 'image' done\n"
+        self.made, self.rc, self.polls, self.grow, self.interrupt, self.kind = True, 0, 0, None, None, "container"
+        self.detaching, self.out = None, self.OUT
         self.answer(["hostname"], out="here\n")
         self.answer(["df", "-Pk"], out="Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 209715200 1% /\n")
         self.answer(["du", "-sh"], rc=1)
         self.answer(["podman", "image", "exists"])
         self.react(["podman", "container", "inspect"], lambda a, f: Result(0, self.tag() + "\n"))
         self.react(["env"], self._new)
-        self.react(["exec", WS, "kill", "-0"], lambda a, f: Result(0 if int(a[-1]) in f.pids else 1))
+        self.react(["exec", self.ws, "kill", "-0"], lambda a, f: Result(0 if int(a[-1]) in f.pids else 1))
         self.answer(["sync-tools"])
         self.reg = FakeRegistry(self.env, self, lambda n, e: Box("box", str(REPO), self.env, self, self.kind), default=lambda: "box")
-        self.ws_dir = os.path.join(str(store), "ws", WS)
+        self.ws_dir = os.path.join(str(store), "ws", self.ws)
         os.makedirs(os.path.join(self.ws_dir, "home"))
-        self.log = os.path.join(self.ws_dir, "home", "buildroot-image.log")
+        self.log = os.path.join(self.ws_dir, "home", "%s-image.log" % self.KIND)
 
     @property
     def fake(self):
         return self
 
     def tag(self):
-        return buildroot.Buildroot(self.reg, self.preset(), PRESET, self.clock).host_image()[1]
+        return self.driver().host_image()[1]
 
     def _new(self, argv, f):
         self.made = True
         return Result(0)
 
     def preset(self):
-        return images.load(PRESET, self.env)
+        return images.load(self.PRESET, self.env)
 
     def start(self, argv, out, cwd=None):
         self.effect(("watch", tuple(argv)))
         out.write(self.out)
-        return FakeProc(self.rc, None if self.hang else 0, self.interrupt)
+        return FakeProc(self.rc, self.polls, self.interrupt, self.grow)
+
+    def spawn(self, argv, log):
+        """With `detaching` set, the detached child begins its record (True) or dies before it does (False)."""
+        pid = super().spawn(argv, log)
+        if self.detaching:
+            self.recs().begin(self.KIND, "here", self.ws, "k", self.log, ["a"], pid=pid)
+        elif self.detaching is False:
+            self.pids.discard(pid)
+        return pid
 
     def driver(self):
-        return buildroot.Buildroot(self.reg, self.preset(), PRESET, self.clock)
+        return self.BUILDER(self.reg, self.preset(), self.PRESET, self.clock)
 
     def recs(self):
         return job.records_of(self.reg.load("box"), self.clock, self)
@@ -98,11 +118,34 @@ class World(Fake):
         d = os.path.join(self.env["XDG_STATE_HOME"], "wk", "builds")
         return sorted(p for p in self.files if p.startswith(d + "/"))
 
+    def watched(self):
+        (w,) = [e for e in self.effects if e[0] == "watch"]
+        return list(w[1])
+
     def state(self):
         return ([(t.field("kind"), t.field("exit")) for t in self.recs().list()], len(self.budget_files()))
 
+    def running(self, stage="image", pid=77, kill=None):
+        t = self.recs().begin(self.KIND, "here", self.ws, kill or self.KILL, self.log, ["a"], pid=pid)
+        self.pids.add(pid)
+        return t
+
+    def plan(self):
+        return ["the workspace '%s' on %s" % (WS, self.tag()), "sync wk-tools into '%s'" % WS, "build %s with -j8" % PRESET]
+
+    def steps(self):
+        return [(1, "done"), (2, "done"), (3, "running")]
+
+    def flags(self):
+        return {"/opt/wk-tools/lib/wk/sysimage/buildroot_ws.py": "image", "--name": PRESET, "--overlay-wifi": "1", "--jobs": "8"}
+
+    def booked(self):
+        return 8, 16384
+
 
 class TaskTest(unittest.TestCase):
+    WORLD = World
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-sysimage-task-"))
         self.addCleanup(shutil.rmtree, str(self.tmp), True)
@@ -114,63 +157,61 @@ class TaskTest(unittest.TestCase):
         p = mock.patch.object(record, "host_name", return_value="here")
         p.start()
         self.addCleanup(p.stop)
-        self.w = World(self.tmp)
+        self.w = self.WORLD(self.tmp)
 
-    def build(self, w=None, *rest):
-        w = w or self.w
+    def build(self, *rest):
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = w.driver().build(list(rest))
+            rc = self.w.driver().build(list(rest))
         return rc, err.getvalue()
 
-    def refused(self, w=None, *rest, status=1, verb="build"):
-        w = w or self.w
+    def refused(self, *rest, status=1, verb="build"):
         with self.assertRaises(Refused) as cm:
             with contextlib.redirect_stderr(io.StringIO()) as err:
-                getattr(w.driver(), verb)(list(rest))
+                getattr(self.w.driver(), verb)(list(rest))
         self.assertEqual(cm.exception.status, status, err.getvalue())
         return err.getvalue()
 
 
-class TestTheRecordAStageWrites(TaskTest):
+class Lifecycle:
+    """What every workspace builder's stage does as a task, run once per builder's World."""
+
     def test_a_stage_that_says_it_is_done_ends_ok_with_the_one_progress_record(self):
         """`record.progress_shape[sysimage]`: step n of m, since when, the log, how to stop it."""
+        w = self.w
         rc, err = self.build()
         self.assertEqual(rc, 0, err)
-        self.assertIn("built %s in '%s'" % (PRESET, WS), err)
-        (t,) = self.w.recs().list()
-        self.assertEqual((t.field("kind"), t.field("name"), t.field("stage"), t.field("exit")), ("buildroot", WS, "image", "0"))
-        self.assertEqual(t.plan(), ["the workspace '%s' on %s" % (WS, self.w.tag()), "sync wk-tools into '%s'" % WS,
-                                    "build %s with -j8" % PRESET])
-        self.assertEqual(t.steps(), [(1, "done"), (2, "done"), (3, "running")])
-        self.assertEqual((t.field("log"), t.field("kill")), (self.w.log, "wk sysimage build %s --stop" % PRESET))
+        self.assertIn(w.DONE, err)
+        (t,) = w.recs().list()
+        self.assertEqual((t.field("kind"), t.field("name"), t.field("stage"), t.field("exit")), (w.KIND, w.ws, "image", "0"))
+        self.assertEqual((t.plan(), t.steps()), (w.plan(), w.steps()))
+        self.assertEqual((t.field("log"), t.field("kill"), t.field("subject")), (w.log, w.KILL, w.SUBJECT))
         self.assertTrue(t.field("started"))
-        self.assertEqual(Path(self.w.log).read_bytes(), self.w.out)
+        self.assertEqual(Path(w.log).read_bytes(), w.out)
 
     def test_the_stage_runs_under_the_wrapper_in_the_workspace(self):
         self.build()
-        (w,) = [e for e in self.w.effects if e[0] == "watch"]
-        argv = list(w[1])
-        self.assertEqual(argv[:10], ["exec", WS] + isolated_module("/opt/wk-tools/lib", "wk.sysimage.task") + ["stage", "buildroot"])
-        self.assertEqual(argv[10:15], ["--", "python3", "/opt/wk-tools/lib/wk/sysimage/buildroot_ws.py", "image", "--name"])
-        self.assertIn("--overlay-wifi", argv)
-        self.assertEqual(argv[argv.index("--jobs") + 1], "8")
+        argv = self.w.watched()
+        self.assertEqual(argv[:13], ["exec", self.w.ws] + isolated_module("/opt/wk-tools/lib", "wk.sysimage.task")
+                         + ["stage", self.w.KIND, "--", "python3", "/opt/wk-tools/lib/wk/sysimage/%s_ws.py" % self.w.KIND])
+        for flag, value in self.w.flags().items():
+            self.assertEqual(argv[argv.index(flag) + 1], value, flag)
+        self.assertNotIn("--slot", argv)
 
     def test_the_budget_is_on_the_books_under_this_driver(self):
         self.build()
         (f,) = self.w.budget_files()
-        self.assertIn("label=wk sysimage image %s\n" % WS, self.w.files[f])
-        self.assertIn("jobs=8\nbudget_mb=16384\nholder=pid:%d\n" % os.getpid(), self.w.files[f])
+        self.assertIn("label=wk sysimage image %s\n" % self.w.ws, self.w.files[f])
+        self.assertIn("\njobs=%d\nbudget_mb=%d\nholder=pid:%d\n" % (self.w.booked() + (os.getpid(),)), self.w.files[f])
 
     def test_done_is_the_wrapper_s_marker_not_the_exit_status(self):
         self.w.out = b"make: Nothing to be done\n"
-        err = self.refused()
-        self.assertIn("it exited 0 and never said it was done", err)
+        self.assertIn("it exited 0 and never said it was done", self.refused())
         self.assertEqual(self.w.recs().list()[0].field("exit"), "1")
 
     def test_a_failure_ends_with_its_status_and_its_last_lines(self):
-        self.w.out, self.w.rc = b"package foo failed\nwk-buildroot: error: buildroot failed.\n", 2
+        self.w.out, self.w.rc = b"package foo failed\nwk: error: it failed.\n", 2
         err = self.refused()
-        self.assertIn("the image build in '%s' failed. Last lines:" % WS, err)
+        self.assertIn("the image build in '%s' failed. Last lines:" % self.w.ws, err)
         self.assertIn("    package foo failed", err)
         self.assertEqual(self.w.recs().list()[0].field("exit"), "2")
 
@@ -179,27 +220,163 @@ class TestTheRecordAStageWrites(TaskTest):
         rc, err = self.build()
         self.assertEqual(rc, 0, err)
         (new,) = [e for e in self.w.effects if e[0] == "run_tty" and e[1][:1] == ("env",)]
-        self.assertEqual(list(new[1]), ["env", "WK_SDK_IMAGE=" + self.w.tag(), str(REPO / "wk"), "new", WS, "--on", "box"])
+        self.assertEqual(list(new[1]), ["env", "WK_SDK_IMAGE=" + self.w.tag(), str(REPO / "wk"), "new", self.w.ws, "--on", "box"])
 
     def test_a_workspace_made_from_another_image_is_refused_naming_the_remake(self):
-        self.w.answer(["podman", "container", "inspect"], out="localhost/wk-buildroot-host:22.04-old\n")
+        self.w.answer(["podman", "container", "inspect"], out="localhost/wk-host:old\n")
         err = self.refused()
-        self.assertIn("was made from localhost/wk-buildroot-host:22.04-old", err)
-        self.assertIn("wk rm %s && wk sysimage build %s" % (WS, PRESET), err)
+        self.assertIn("was made from localhost/wk-host:old", err)
+        self.assertIn("wk rm %s && wk sysimage build %s" % (self.w.ws, self.w.PRESET), err)
         self.assertEqual(self.w.recs().list()[0].field("exit"), "1")
 
-
-class TestWhatItBuildsWith(TaskTest):
-    def test_the_host_image_is_tagged_by_its_base_and_its_containerfile(self):
+    def test_the_host_image_is_tagged_by_its_base_and_its_containerfile_and_its_variable_names_another(self):
+        b = self.w.BUILDER
         base, tag = self.w.driver().host_image()
-        self.assertEqual(base, buildroot.BASE_IMAGE)
-        self.assertRegex(tag, r"^localhost/wk-buildroot-host:22\.04-[0-9a-f]{8}$")
-
-    def test_wk_buildroot_base_names_another_host(self):
-        self.w.env["WK_BUILDROOT_BASE"] = "docker.io/library/ubuntu:24.04"
+        self.assertEqual(base, b.BASE_IMAGE)
+        self.assertRegex(tag, r"^localhost/wk-%s-host:%s-[0-9a-f]{8}$" % (self.w.KIND, re.escape(b.BASE_IMAGE.rsplit(":", 1)[-1])))
+        self.w.env[b.BASE_VAR] = "docker.io/library/debian:13"
         base, tag = self.w.driver().host_image()
-        self.assertEqual(base, "docker.io/library/ubuntu:24.04")
-        self.assertIn(":24.04-", tag)
+        self.assertEqual(base, "docker.io/library/debian:13")
+        self.assertIn(":13-", tag)
+
+    def test_a_pid_file_a_killed_build_left_is_not_busy_and_a_live_one_is(self):
+        home = os.path.join(self.w.ws_dir, "home")
+        self.w.dirs.add(home)
+        self.w.files[os.path.join(home, "%s-image.pid" % self.w.KIND)] = "99999\n"
+        rc, err = self.build()
+        self.assertEqual(rc, 0, err)
+        self.w.pids.add(99999)
+        self.assertIn("%s-image (pid 99999 in the workspace)" % self.w.KIND, self.refused())
+
+    def test_a_held_workspace_lock_is_refused_naming_the_stop(self):
+        with mock.patch("wk.lock.Lock.holder_pid", return_value=55):
+            self.w.pids.add(55)
+            err = self.refused()
+        self.assertIn("ws-%s" % self.w.ws, err)
+        self.assertIn("Stop it:    " + self.w.KILL, err)
+
+    def test_another_build_on_this_machine_is_a_barrier(self):
+        from wk.resources import Budget
+        Budget(self.w, self.w.env, self.w.clock).record("wk build other", 4, 8192, "pid:66")
+        self.w.pids.add(66)
+        with mock.patch.object(job, "holder_alive", return_value=lambda h: True):
+            self.assertIn("is already building", self.refused(status=75))
+        self.assertEqual(self.w.recs().list(), [])
+
+    def test_a_target_that_is_not_a_container_is_refused(self):
+        self.w.kind = "remote"
+        self.assertIn("%s, and place 'box' is a remote one" % self.w.BUILDER.NEEDS, self.refused())
+
+    def test_an_unknown_or_another_builder_s_option_is_a_usage_error(self):
+        for args in self.w.UNKNOWN:
+            with self.subTest(args[0]):
+                self.assertIn("%s is not an option of this build" % args[0], self.refused(*args))
+
+    def test_an_interrupt_stops_the_stage_where_it_runs_and_the_record_reads_cancelled(self):
+        """`unit machine.interrupt_stops_remote_process[image build]`: the stage's announced pid is TERMed in the workspace."""
+        w, real = self.w, record.Records.begin
+        w.polls, w.interrupt = None, signal.SIGINT
+
+        def begin(recs, *a, **kw):
+            t = real(recs, *a, **kw)
+            t.set("pid_match", w.BUILDER.PATTERN)
+            t.pid(777)
+            t.set("where", "place")
+            return t
+        w.pids.add(777)
+        w.answer(["exec", w.ws, "ps", "-o", "args=", "-p", "777"], out="python3 /opt/wk-tools/lib/wk/sysimage/%s_ws.py\n" % w.KIND)
+        w.react(["exec", w.ws, "kill", "-TERM"], lambda a, f: (f.pids.discard(777), Result(0))[1])
+        with mock.patch.object(record.Records, "begin", begin):
+            self.assertIn("interrupted -- stopping the image build in '%s'" % w.ws, self.refused(status=130))
+        self.assertIn(("run", ("exec", w.ws, "kill", "-TERM", "777")), w.effects)
+        self.assertEqual(w.recs().list()[0].field("exit"), "cancelled")
+
+    def test_stop_kills_the_tree_in_the_workspace_and_reports_once_it_is_gone(self):
+        w = self.w
+        t = w.running(pid=1)
+        t.set("pid_match", w.BUILDER.PATTERN)
+        t.pid(777)
+        t.set("where", "place")
+        w.pids.add(777)
+        w.answer(["exec", w.ws, "ps", "-o", "args=", "-p", "777"], out="python3 /opt/wk-tools/lib/wk/sysimage/%s_ws.py\n" % w.KIND)
+        w.answer(["exec", w.ws, "sh", "-c"], out="778\n777\n")
+        w.react(["exec", w.ws, "kill", "-TERM"], lambda a, f: (f.pids.discard(777), Result(0))[1])
+        rc, err = self.build("--stop")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(("run", ("exec", w.ws, "kill", "-TERM", "778", "777")), w.effects)
+        self.assertIn(w.STOPPED, err)
+        self.assertEqual(t.field("exit"), "cancelled")
+
+    def test_one_that_outlives_a_kill_is_refused_naming_it(self):
+        t = self.w.running(pid=88)
+        with mock.patch.object(self.w, "kill", return_value=True):
+            self.assertIn("outlived a TERM and a KILL", self.refused("--stop"))
+        self.assertEqual(t.field("exit"), "cancelled")
+
+    def test_nothing_running_says_so(self):
+        rc, err = self.build("--stop")
+        self.assertEqual(rc, 0)
+        self.assertIn(self.w.IDLE, err)
+
+    def test_detached_it_returns_once_its_own_child_has_begun_its_record(self):
+        w = self.w
+        w.detaching = True
+        rc, err = self.build("--detach")
+        self.assertEqual(rc, 0, err)
+        (sp,) = [e for e in w.effects if e[0] == "spawn"]
+        self.assertEqual((list(sp[1]), sp[2]), ([str(REPO / "wk"), "sysimage", "build", w.PRESET],
+                                                os.path.join(w.ws_dir, "detached-image.log")))
+        self.assertIn("running detached in '%s' as pid 1001 -- this end can go away" % w.ws, err)
+        self.assertIn("  follow:  wk status %s --log -f" % w.ws, err)
+        self.assertFalse([e for e in w.effects if e[0] == "watch"])
+
+    def test_a_detached_child_that_ends_before_its_record_is_named(self):
+        self.w.detaching = False
+        self.assertIn("the detached %s of '%s' ended before it started" % (self.w.DETACHED, self.w.ws), self.refused("--detach"))
+
+    def test_a_dry_run_reports_the_plan_and_changes_nothing(self):
+        os.environ["WK_DRY_RUN"] = "1"
+        rc, err = self.build()
+        self.assertEqual(rc, 0, err)
+        for line in ("would build image %s (builder: %s)" % (self.w.PRESET, self.w.KIND),) + self.w.DRY:
+            self.assertIn(line, err)
+        self.assertEqual(self.w.recs().list(), [])
+        self.assertEqual([e for e in self.w.effects if e[0] != "run"], [])
+
+    def test_a_dry_run_arrives_only_as_the_dispatcher_s_global(self):
+        self.assertIn("--dry-run is not an option of this build", self.refused("--dry-run"))
+        self.assertIsNone(os.environ.get("WK_DRY_RUN"))
+        self.assertEqual(self.w.recs().list(), [])
+
+    def test_a_build_killed_after_any_effect_and_rerun_converges(self):
+        """`killpoints[sysimage build]`: each run its own record, whatever the killed one held gone with it."""
+        def run_once(w):
+            with contextlib.redirect_stderr(io.StringIO()):
+                w.driver().build([])
+        converges(self, lambda: self.WORLD(self.tmp), run_once, self.WORLD.state)
+
+
+class TestTheBuildrootLifecycle(Lifecycle, TaskTest):
+    def test_a_running_stage_is_refused_by_name(self):
+        t = self.w.running()
+        err = self.refused()
+        self.assertIn("a build is still running in '%s': buildroot (pid 77, here)" % WS, err)
+        self.assertIn("Stop it:    wk sysimage build %s --stop" % PRESET, err)
+        self.assertEqual(t.field("exit"), "")
+
+    def test_a_silent_stage_is_killed_by_its_watchdog_and_ends_stalled(self):
+        self.w.polls, self.w.out = None, b""
+        self.w.env.update({"WK_ABORT_SECONDS": "60", "WK_STALL_SECONDS": "30", "WK_POLL_SECONDS": "10"})
+        err = self.refused()
+        self.assertIn("giving up and killing the job", err)
+        self.assertIn("the image build in '%s' stalled" % WS, err)
+        self.assertEqual(self.w.recs().list()[0].field("exit"), "stalled")
+
+    def test_a_half_declared_kernel_pin_is_refused(self):
+        p = dict(self.w.preset(), BR_KERNEL_DEB_URL="https://x/k.deb")
+        with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
+            buildroot.Buildroot(self.w.reg, p, PRESET, self.w.clock).build([])
+        self.assertIn("a kernel by URL alone is not pinned", err.getvalue())
 
     def test_a_pinned_kernel_is_prepared_here_and_handed_over_through_the_download_cache(self):
         p = dict(self.w.preset(), BR_KERNEL_DEB_URL="https://x/k.deb", BR_KERNEL_DEB_SHA256="d" * 64, BR_KERNEL_RELEASE="6.1.0-rpi")
@@ -260,167 +437,6 @@ class TestTheBuilderIsTheImagePresets(TaskTest):
         self.assertIn("only a buildroot or yocto image takes WebKit slots", err.getvalue())
 
 
-class TestRefusals(TaskTest):
-    def test_a_running_stage_is_refused_by_name(self):
-        t = self.w.recs().begin("buildroot", "here", WS, "wk sysimage build %s --stop" % PRESET, self.w.log, ["a"], pid=77)
-        self.w.pids.add(77)
-        err = self.refused()
-        self.assertIn("a build is still running in '%s': buildroot (pid 77, here)" % WS, err)
-        self.assertIn("Stop it:    wk sysimage build %s --stop" % PRESET, err)
-        self.assertEqual(t.field("exit"), "")
-
-    def test_a_pid_file_a_killed_build_left_is_not_busy_and_a_live_one_is(self):
-        home = os.path.join(self.w.ws_dir, "home")
-        self.w.dirs.add(home)
-        self.w.files[os.path.join(home, "buildroot-image.pid")] = "99999\n"
-        rc, err = self.build()
-        self.assertEqual(rc, 0, err)
-        self.w.pids.add(99999)
-        self.assertIn("buildroot-image (pid 99999 in the workspace)", self.refused())
-
-    def test_a_held_workspace_lock_is_refused_naming_the_stop(self):
-        with mock.patch("wk.lock.Lock.holder_pid", return_value=55):
-            self.w.pids.add(55)
-            err = self.refused()
-        self.assertIn("ws-%s" % WS, err)
-
-    def test_another_build_on_this_machine_is_a_barrier(self):
-        from wk.resources import Budget
-        Budget(self.w, self.w.env, self.w.clock).record("wk build other", 4, 8192, "pid:66")
-        self.w.pids.add(66)
-        with mock.patch.object(job, "holder_alive", return_value=lambda h: True):
-            err = self.refused(None, status=75)
-        self.assertIn("is already building", err)
-
-    def test_a_target_that_is_not_a_container_is_refused(self):
-        self.w.kind = "remote"
-        err = self.refused()
-        self.assertIn("a buildroot image builds in a container workspace, and place 'box' is a remote one", err)
-
-    def test_an_unknown_or_another_builder_s_option_is_a_usage_error(self):
-        for args in (["--stage", "image"], ["--resume"]):
-            with self.subTest(args[0]):
-                self.assertIn("%s is not an option of this build" % args[0], self.refused(None, *args))
-
-    def test_a_half_declared_kernel_pin_is_refused(self):
-        p = dict(self.w.preset(), BR_KERNEL_DEB_URL="https://x/k.deb")
-        with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
-            buildroot.Buildroot(self.w.reg, p, PRESET, self.w.clock).build([])
-        self.assertIn("a kernel by URL alone is not pinned", err.getvalue())
-
-
-class TestTheWatchdog(TaskTest):
-    def test_a_silent_stage_is_killed_by_its_watchdog_and_ends_stalled(self):
-        self.w.hang, self.w.out = True, b""
-        self.w.env.update({"WK_ABORT_SECONDS": "60", "WK_STALL_SECONDS": "30", "WK_POLL_SECONDS": "10"})
-        err = self.refused()
-        self.assertIn("giving up and killing the job", err)
-        self.assertIn("the image build in '%s' stalled" % WS, err)
-        self.assertEqual(self.w.recs().list()[0].field("exit"), "stalled")
-
-    def test_an_interrupt_stops_the_stage_and_the_record_reads_cancelled(self):
-        self.w.hang, self.w.interrupt = True, signal.SIGHUP
-        err = self.refused(status=129)
-        self.assertIn("interrupted -- stopping the image build in '%s'" % WS, err)
-        self.assertEqual(self.w.recs().list()[0].field("exit"), "cancelled")
-
-    def test_an_interrupt_stops_the_stage_where_it_runs(self):
-        """`unit machine.interrupt_stops_remote_process[image build]`: the stage's announced pid is TERMed in the workspace."""
-        self.w.hang, self.w.interrupt = True, signal.SIGINT
-        real = record.Records.begin
-
-        def begin(recs, *a, **kw):
-            t = real(recs, *a, **kw)
-            t.set("pid_match", buildroot.PATTERN)
-            t.pid(777)
-            t.set("where", "place")
-            return t
-        self.w.pids.add(777)
-        self.w.answer(["exec", WS, "ps", "-o", "args=", "-p", "777"], out="python3 /opt/wk-tools/lib/wk/sysimage/buildroot_ws.py image --name x\n")
-        self.w.react(["exec", WS, "kill", "-TERM"], lambda a, f: (f.pids.discard(777), Result(0))[1])
-        with mock.patch.object(record.Records, "begin", begin):
-            self.refused(status=130)
-        self.assertIn(("run", ("exec", WS, "kill", "-TERM", "777")), self.w.effects)
-        self.assertEqual(self.w.recs().list()[0].field("exit"), "cancelled")
-
-
-class TestStop(TaskTest):
-    def test_stop_kills_the_tree_in_the_workspace_and_reports_once_it_is_gone(self):
-        t = self.w.recs().begin("buildroot", "here", WS, "k", self.w.log, ["a"], pid=1)
-        t.set("pid_match", buildroot.PATTERN)
-        t.pid(777)
-        t.set("where", "place")
-        self.w.pids.add(777)
-        self.w.answer(["exec", WS, "ps", "-o", "args=", "-p", "777"], out="python3 /opt/wk-tools/lib/wk/sysimage/buildroot_ws.py image --name x\n")
-        self.w.answer(["exec", WS, "sh", "-c"], out="778\n777\n")
-        self.w.react(["exec", WS, "kill", "-TERM"], lambda a, f: (f.pids.discard(777), Result(0))[1])
-        rc, err = self.build(None, "--stop")
-        self.assertEqual(rc, 0, err)
-        self.assertIn(("run", ("exec", WS, "kill", "-TERM", "778", "777")), self.w.effects)
-        self.assertIn("stopped '%s's buildroot and recorded it as cancelled" % WS, err)
-        self.assertEqual(t.field("exit"), "cancelled")
-
-    def test_one_that_outlives_a_kill_is_refused_naming_it(self):
-        t = self.w.recs().begin("buildroot", "here", WS, "k", self.w.log, ["a"], pid=88)
-        self.w.pids.add(88)
-        with mock.patch.object(self.w, "kill", return_value=True):
-            err = self.refused(None, "--stop")
-        self.assertIn("outlived a TERM and a KILL", err)
-        self.assertEqual(t.field("exit"), "cancelled")
-
-    def test_nothing_running_says_so(self):
-        rc, err = self.build(None, "--stop")
-        self.assertEqual(rc, 0)
-        self.assertIn("no buildroot is running in '%s'" % WS, err)
-
-
-class Detaching(World):
-    def __init__(self, tmp, starts=True):
-        super().__init__(tmp)
-        self.starts = starts
-
-    def spawn(self, argv, log):
-        pid = super().spawn(argv, log)
-        if self.starts:
-            self.recs().begin("buildroot", "here", WS, "k", self.log, ["a"], pid=pid)
-        else:
-            self.pids.discard(pid)
-        return pid
-
-
-class TestDetach(TaskTest):
-    def test_it_returns_once_its_own_child_has_begun_its_record(self):
-        w = Detaching(self.tmp)
-        rc, err = self.build(w, "--detach")
-        self.assertEqual(rc, 0, err)
-        (sp,) = [e for e in w.effects if e[0] == "spawn"]
-        self.assertEqual(list(sp[1]), [str(REPO / "wk"), "sysimage", "build", PRESET])
-        self.assertEqual(sp[2], os.path.join(w.ws_dir, "detached-image.log"))
-        self.assertIn("running detached in '%s' as pid 1001 -- this end can go away" % WS, err)
-        self.assertIn("  follow:  wk status %s --log -f" % WS, err)
-        self.assertFalse([e for e in w.effects if e[0] == "watch"])
-
-    def test_a_child_that_ends_before_its_record_is_named(self):
-        err = self.refused(Detaching(self.tmp, starts=False), "--detach")
-        self.assertIn("the detached build of %s of '%s' ended before it started" % (PRESET, WS), err)
-
-
-class TestDryRun(TaskTest):
-    def test_a_dry_run_reports_the_plan_and_changes_nothing(self):
-        os.environ["WK_DRY_RUN"] = "1"
-        rc, err = self.build()
-        self.assertEqual(rc, 0, err)
-        self.assertIn("would build image %s (builder: buildroot)" % PRESET, err)
-        self.assertIn("  jobs         -j8 (memory-sized at 2048 MB/job)", err)
-        self.assertEqual(self.w.recs().list(), [])
-        self.assertFalse([e for e in self.w.effects if e[0] not in ("run",)])
-
-    def test_a_dry_run_arrives_only_as_the_dispatcher_s_global(self):
-        self.assertIn("--dry-run is not an option of this build", self.refused(None, "--dry-run"))
-        self.assertIsNone(os.environ.get("WK_DRY_RUN"))
-        self.assertEqual(self.w.recs().list(), [])
-
-
 class TestWebkitSlot(TaskTest):
     def setUp(self):
         super().setUp()
@@ -456,23 +472,14 @@ class TestWebkitSlot(TaskTest):
 
     def test_no_image_is_refused_before_anything_runs(self):
         self.w.files.clear()
-        err = self.refused(None, "--commit", SHA, "--slot", "base", verb="webkit")
+        err = self.refused("--commit", SHA, "--slot", "base", verb="webkit")
         self.assertIn("has no finished image", err)
         self.assertEqual(self.w.recs().list(), [])
 
     def test_the_arguments_are_checked_first(self):
-        self.assertIn("usage: wk sysimage webkit", self.refused(None, "--slot", "base", verb="webkit"))
-        self.assertIn("40 hex digits", self.refused(None, "--commit", "abc", "--slot", "base", verb="webkit"))
-        self.assertIn("not usable", self.refused(None, "--commit", SHA, "--slot", "../x", verb="webkit"))
-
-
-class TestKillPoints(TaskTest):
-    def test_a_build_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[sysimage build]`: each run its own record, whatever the killed one held gone with it."""
-        def run_once(w):
-            with contextlib.redirect_stderr(io.StringIO()):
-                w.driver().build([])
-        converges(self, lambda: World(self.tmp), run_once, World.state)
+        self.assertIn("usage: wk sysimage webkit", self.refused("--slot", "base", verb="webkit"))
+        self.assertIn("40 hex digits", self.refused("--commit", "abc", "--slot", "base", verb="webkit"))
+        self.assertIn("not usable", self.refused("--commit", SHA, "--slot", "../x", verb="webkit"))
 
 
 class TestTheWrapperInTheWorkspace(unittest.TestCase):

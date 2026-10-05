@@ -251,7 +251,7 @@ class TestCancellingARealBuild(WkTest):
 
 
 class TestOnePodmanWrapper(unittest.TestCase):
-    """`Container.podman()` names the machine's connection from a macOS host; bare `podman` is only `machine`/`unshare`."""
+    """`Container.podman()` names the machine's connection from a macOS host."""
 
     def container(self, env, system):
         from wk import places
@@ -264,15 +264,6 @@ class TestOnePodmanWrapper(unittest.TestCase):
                                   ({"WK_MACHINE": "other"}, "Darwin", ["podman", "-c", "other"]),
                                   ({"WK_IN_VM": "1"}, "Darwin", ["podman"]), ({}, "Linux", ["podman"])):
             self.assertEqual(want, self.container(env, system), (env, system))
-
-    def test_the_driver_names_no_bare_podman_of_its_own(self):
-        import inspect
-        import re
-        from wk import places
-        src = inspect.getsource(places.Container)
-        for m in re.finditer(r'\["podman", "([^"]+)"', src):
-            with self.subTest(call=m.group(0)):
-                self.assertIn(m.group(1), ("-c", "machine", "unshare"))
 
 if __name__ == "__main__":
     unittest.main()

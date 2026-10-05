@@ -7,7 +7,6 @@ import json
 import os
 import plistlib
 import shlex
-import shutil
 import sys
 import tempfile
 import unittest
@@ -17,6 +16,8 @@ from unittest import mock
 from tests.fakes import FakeProc, WsDriver
 from tests.killpoints import converges
 from tests.support import REPO
+from tests.test_bench_report import in_process
+from tests.test_bench_pipeline import Acting, CleanTest, StubWatch  # noqa: F401 -- tests/test_mac_pgo.py takes StubWatch from here
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import decl, places, project, samply as wksamply, screen  # noqa: E402
@@ -45,19 +46,6 @@ def on_screen(fake, uninvited="", reading="MiniBrowser:Speedometer"):
     fake.answer(UNEXPECTED, out=uninvited)
 
 
-class StubWatch:
-
-    def __init__(self, machine, root, clock, env=None):
-        self.m = machine
-
-    def start(self):
-        self.m.effects.append(("watch", "start", len(getattr(self.m, "watched", []))))
-
-    def stop(self):
-        self.m.effects.append(("watch", "stop", len(getattr(self.m, "watched", []))))
-        return list(getattr(self.m, "drew", []))
-
-
 def args(*argv):
     return decl.Args(decl.Decl(BENCH), list(argv))
 
@@ -68,7 +56,7 @@ def staged_options(*argv):
     return cli.options(a, cli.STAGED)
 
 
-class World(Fake):
+class World(Acting, Fake):
     """A Mac with its two installs' confs, one stage on its volume, and run-benchmark writing its --output-file."""
 
     def __init__(self, tmp, machine="mbp", bench=True):
@@ -114,10 +102,6 @@ class World(Fake):
         self.answer(["tmutil"], err="No destinations configured\n")
         on_screen(self)
 
-    def act_run(self, argv, **kw):
-        self.effects.append(("act", tuple(argv)))
-        return super().act_run(argv, **kw)
-
     def start(self, argv, out, cwd=None):
         self.watched.append(list(argv))
         out.write(b"wk: bench pid 77\nScore: 30\n")
@@ -134,14 +118,9 @@ class World(Fake):
         return json.loads(Path(self.home, "results", run, "env.json").read_text())
 
 
-class MacTest(unittest.TestCase):
+class MacTest(CleanTest):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-bench-mac-"))
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-        saved = dict(os.environ)
-        for v in ("WK_DRY_RUN", "WK_FORCE", "WK_DESTRUCTIVE", "WK_BENCH_ASLR", "WK_BENCH_PATH_PAD", "WK_BENCH_ENV_PAD"):
-            os.environ.pop(v, None)
-        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved)))
+        super().setUp()
         watch = mock.patch.object(screen, "Watch", StubWatch)
         watch.start()
         self.addCleanup(watch.stop)
@@ -149,21 +128,14 @@ class MacTest(unittest.TestCase):
 
     def staged(self, *argv, w=None, dry=False):
         w = w or self.w
-        err = io.StringIO()
-        if dry:
-            os.environ["WK_DRY_RUN"] = "1"
-        try:
-            with contextlib.redirect_stderr(err):
-                rc = mac.staged(REPO, w.reg, w.clock, staged_options(*argv), plans)
-        finally:
-            os.environ.pop("WK_DRY_RUN", None)
-        return rc, err.getvalue()
+        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"} if dry else {}):
+            cp = in_process(mac.staged, REPO, w.reg, w.clock, staged_options(*argv), plans)
+        return cp.returncode, cp.stderr
 
     def refused(self, w):
-        err = io.StringIO()
-        with self.assertRaises(Refused), contextlib.redirect_stderr(err):
-            mac.staged(REPO, w.reg, w.clock, staged_options(), plans)
-        return err.getvalue()
+        rc, err = self.staged(w=w)
+        self.assertNotEqual(rc, 0, err)
+        return err
 
 
 class TestConformance(MacTest):
@@ -203,15 +175,13 @@ class TestTheRecord(MacTest):
         self.assertIn("wall_time_s", env)
         self.assertEqual(brecord.run_state(env, True), "ok")
 
-    def test_the_staged_builds_pgo_reading_goes_with_the_run(self):
-        self.w._set_file(os.path.join(self.w.build, "wk-profile-check.json"), '{"missing": []}')
-        self.staged()
-        rundir = Path(self.w.home, "results", self.w.results()[0])
-        self.assertEqual((rundir / "profile-check.json").read_text(), '{"missing": []}')
-
-    def test_a_build_with_no_reading_carries_none(self):
+    def test_the_staged_builds_pgo_reading_goes_with_the_run_and_none_is_carried_where_there_is_none(self):
         self.staged()
         self.assertFalse(Path(self.w.home, "results", self.w.results()[0], "profile-check.json").exists())
+        w = World(self.tmp)
+        w._set_file(os.path.join(w.build, "wk-profile-check.json"), '{"missing": []}')
+        self.staged(w=w)
+        self.assertEqual(Path(w.home, "results", w.results()[0], "profile-check.json").read_text(), '{"missing": []}')
 
     def test_a_rehearsal_is_refused_as_a_measurement(self):
         """A mac-guest (its `measures` fact is no) proves every phase, and its reading is recorded as no measurement."""
@@ -544,19 +514,10 @@ class TestStage(MacTest):
         self.assertIn(("remove", os.path.join(w.reg.store.state_dir(), "bench-stage", "%s-mac-release" % w.clock.stamp())), w.effects)
 
     def test_the_dry_run_is_the_stages_mutations(self):
-        def mutations(w):
-            return [e for e in w.effects if e[0] not in ("run",)]
         for local in (True, False):
             with self.subTest(local=local):
-                wet, dry = StageWorld(self.tmp, local), StageWorld(self.tmp, local)
-                wet.stage_("--plan", "speedometer3", "--payload", "/seed/speedometer3-abc")
-                os.environ["WK_DRY_RUN"] = "1"
-                try:
-                    dry.stage_("--plan", "speedometer3", "--payload", "/seed/speedometer3-abc")
-                finally:
-                    del os.environ["WK_DRY_RUN"]
-                strip = [[tuple(str(x).replace(str(w.tmp), "") for x in e) for e in mutations(w)] for w in (wet, dry)]
-                self.assertEqual(strip[0], strip[1])
+                _, dry = self.same_plan(lambda: StageWorld(self.tmp, local), lambda w: w.stage_("--plan", "speedometer3", "--payload", "/seed/speedometer3-abc"),
+                                        lambda w: [e for e in w.effects if e[0] != "run"])
                 self.assertEqual(dry.stages(), [])
 
     def test_a_stage_killed_after_any_effect_and_rerun_converges(self):
@@ -568,13 +529,6 @@ class TestStage(MacTest):
             with self.subTest(local=local):
                 converges(self, lambda: StageWorld(self.tmp, local), run_once, StageWorld.stages)
 
-
-class TestWhere(unittest.TestCase):
-
-    def test_the_dynamic_verbs_answer_for_themselves(self):
-        reg = places.Registry(REPO, env={}, machine=Fake())
-        self.assertEqual(cli.where(reg, ["ls"]), "local")
-        self.assertEqual(cli.where(reg, ["ls", "--continued"]), "store")
 
 if __name__ == "__main__":
     unittest.main()

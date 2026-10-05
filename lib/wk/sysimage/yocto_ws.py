@@ -153,9 +153,6 @@ class Build(WsBuild):
         self.helper = os.path.join(a.src, "Tools", "Scripts", "cross-toolchain-helper")
         self.image_dir = os.path.join(self.workdir, "build", "image")
 
-    def git(self, d, *args):
-        return self.m.act_run(["git", "-C", d] + list(args))
-
     def check_host(self):
         script = ("for t in %s; do command -v \"$t\" >/dev/null 2>&1 || echo \"$t\"; done; "
                   "command -v lz4c >/dev/null 2>&1 || command -v lz4 >/dev/null 2>&1 || echo lz4; " % " ".join(HOST_TOOLS)

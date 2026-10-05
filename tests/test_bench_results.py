@@ -12,7 +12,7 @@ from unittest import mock
 
 from tests.fakes import FakeDriver
 from tests.killpoints import converges
-from tests.support import REPO, WkTest, run, scratch_dir
+from tests.support import REPO, WkTest, run
 from tests.test_bench_report import in_process
 from tests.test_bench_task import TASK, add_run, make_task, refusal, registry
 
@@ -52,27 +52,25 @@ def clean_env():
 
 class TestATaskLivesInItsWorkspace(WkTest):
     def test_a_workspace_this_store_holds_keeps_its_tasks_and_one_it_does_not_is_refused(self):
-        with scratch_dir() as tmp:
-            (tmp / "ws" / "w").mkdir(parents=True)
-            home = (Local(), str(tmp / "ws" / "w" / "bench"))
-            self.assertEqual(record.held(home, "w"), home)
-            self.assertIn("no workspace 'elsewhere'", refusal(record.held, (Local(), str(tmp / "ws" / "elsewhere" / "bench")), "elsewhere"))
-            self.assertFalse((tmp / "ws" / "elsewhere").exists(), "no workspace directory is made for a task")
+        (self.tmp / "ws" / "w").mkdir(parents=True)
+        home = (Local(), str(self.tmp / "ws" / "w" / "bench"))
+        self.assertEqual(record.held(home, "w"), home)
+        self.assertIn("no workspace 'elsewhere'", refusal(record.held, (Local(), str(self.tmp / "ws" / "elsewhere" / "bench")), "elsewhere"))
+        self.assertFalse((self.tmp / "ws" / "elsewhere").exists(), "no workspace directory is made for a task")
 
     def test_every_task_is_found_wherever_it_lives(self):
-        with scratch_dir() as tmp:
-            reg = registry(tmp, env={"WK_ROW_LABEL": "here"})
-            in_ws = make_task(tmp / "ws" / "w" / "bench", name="20260901T000000Z-w")
-            in_other = make_task(tmp / "ws" / "v" / "bench")
-            make_task(tmp / "bench", name="20260101T000000Z-stray")
-            self.assertEqual(record.homes(reg.store), {TASK: str(in_other), "20260901T000000Z-w": str(in_ws)}, "a store's bench/ is no home")
-            b = cli.Bench(REPO, reg, FakeClock())
-            listed = in_process(b.ls, True).stdout
-            self.assertIn(str(in_ws), listed)
-            self.assertIn(str(in_other), listed)
-            self.assertIn("data      %s" % in_ws, in_process(b.report, ["20260901T000000Z-w"], "", True).stdout)
-            (rec,) = status.bench_records(reg.store, "here", lambda pid: False)
-            self.assertEqual((rec["task"], rec["path"]), ("20260901T000000Z-w", str(in_ws)))
+        reg = registry(self.tmp, env={"WK_ROW_LABEL": "here"})
+        in_ws = make_task(self.tmp / "ws" / "w" / "bench", name="20260901T000000Z-w")
+        in_other = make_task(self.tmp / "ws" / "v" / "bench")
+        make_task(self.tmp / "bench", name="20260101T000000Z-stray")
+        self.assertEqual(record.homes(reg.store), {TASK: str(in_other), "20260901T000000Z-w": str(in_ws)}, "a store's bench/ is no home")
+        b = cli.Bench(REPO, reg, FakeClock())
+        listed = in_process(b.ls, True).stdout
+        self.assertIn(str(in_ws), listed)
+        self.assertIn(str(in_other), listed)
+        self.assertIn("data      %s" % in_ws, in_process(b.report, ["20260901T000000Z-w"], "", True).stdout)
+        (rec,) = status.bench_records(reg.store, "here", lambda pid: False)
+        self.assertEqual((rec["task"], rec["path"]), ("20260901T000000Z-w", str(in_ws)))
 
 
 class TestTheReportConfirmsWhatWasBuiltAndChecked(WkTest):
@@ -80,64 +78,58 @@ class TestTheReportConfirmsWhatWasBuiltAndChecked(WkTest):
         return in_process(report.task_report, str(d), False, text=True).stdout
 
     def test_each_arm_names_the_commit_it_measured_against_the_tasks(self):
-        with scratch_dir() as tmp:
-            d = complete_task(tmp)
-            out = self.report(d)
-            self.assertIn("slot base: 04abe09851b0  ok, the task's base", out)
-            self.assertIn("slot pr1725: afa2ed9e7010  ok, the task's head", out)
-            self.assertIn("ok       preflight     every run passed it", out)
-            self.assertNotIn("PGO", out, "no run is a PGO build, so there is no PGO check")
+        d = complete_task(self.tmp)
+        out = self.report(d)
+        self.assertIn("slot base: 04abe09851b0  ok, the task's base", out)
+        self.assertIn("slot pr1725: afa2ed9e7010  ok, the task's head", out)
+        self.assertIn("ok       preflight     every run passed it", out)
+        self.assertNotIn("PGO", out, "no run is a PGO build, so there is no PGO check")
 
     def test_a_run_of_another_commit_or_none_is_named(self):
-        with scratch_dir() as tmp:
-            d = complete_task(tmp)
-            for r in (d / "runs").iterdir():
-                arm = json.loads((r / "env.json").read_text())["ab"]["arm"]
-                record.write_env(str(r / "env.json"), ["webkit_sha=" + ("1" * 40 if arm == "b" else "")], update=True)
-            out = self.report(d)
-            self.assertIn("slot base: ?  unknown -- no run recorded the commit it measured", out)
-            self.assertIn("slot pr1725: 111111111111  FAIL -- the task names afa2ed9e7010", out)
+        d = complete_task(self.tmp)
+        for r in (d / "runs").iterdir():
+            arm = json.loads((r / "env.json").read_text())["ab"]["arm"]
+            record.write_env(str(r / "env.json"), ["webkit_sha=" + ("1" * 40 if arm == "b" else "")], update=True)
+        out = self.report(d)
+        self.assertIn("slot base: ?  unknown -- no run recorded the commit it measured", out)
+        self.assertIn("slot pr1725: 111111111111  FAIL -- the task names afa2ed9e7010", out)
 
     def test_a_forced_preflight_fails_its_check(self):
-        with scratch_dir() as tmp:
-            d = complete_task(tmp)
-            r = sorted((d / "runs").iterdir())[0]
-            record.write_env(str(r / "env.json"), ["preflight_notes=cpu governor: powersave; "], bool_fields=["forced=1"], update=True)
-            self.assertIn("FAIL     preflight     1 of 2 runs forced past failing checks: cpu governor: powersave;", self.report(d))
+        d = complete_task(self.tmp)
+        r = sorted((d / "runs").iterdir())[0]
+        record.write_env(str(r / "env.json"), ["preflight_notes=cpu governor: powersave; "], bool_fields=["forced=1"], update=True)
+        self.assertIn("FAIL     preflight     1 of 2 runs forced past failing checks: cpu governor: powersave;", self.report(d))
 
     def test_a_pgo_build_is_judged_by_the_reading_its_run_carries(self):
-        with scratch_dir() as tmp:
-            d = complete_task(tmp)
-            runs = sorted((d / "runs").iterdir())
-            for r in runs:
-                record.write_env(str(r / "env.json"), ["preset=mac-release-pgo"], update=True)
-            self.assertIn("unknown  PGO profile   2 of 2 PGO runs carry no profile-check.json reading", self.report(d))
-            for r in runs:
-                (r / "profile-check.json").write_text(json.dumps(READING))
-            self.assertIn("ok       PGO profile   every one of 2 PGO runs' readings passes", self.report(d))
-            (runs[0] / "profile-check.json").write_text(json.dumps(dict(READING, missing=["output/WebCore.profdata"])))
-            self.assertIn("FAIL     PGO profile   output/WebCore.profdata is missing", self.report(d))
-            (runs[0] / "profile-check.json").write_text("{\"other\": 1}")
-            self.assertIn("not a profile-check reading", self.report(d))
+        d = complete_task(self.tmp)
+        runs = sorted((d / "runs").iterdir())
+        for r in runs:
+            record.write_env(str(r / "env.json"), ["preset=mac-release-pgo"], update=True)
+        self.assertIn("unknown  PGO profile   2 of 2 PGO runs carry no profile-check.json reading", self.report(d))
+        for r in runs:
+            (r / "profile-check.json").write_text(json.dumps(READING))
+        self.assertIn("ok       PGO profile   every one of 2 PGO runs' readings passes", self.report(d))
+        (runs[0] / "profile-check.json").write_text(json.dumps(dict(READING, missing=["output/WebCore.profdata"])))
+        self.assertIn("FAIL     PGO profile   output/WebCore.profdata is missing", self.report(d))
+        (runs[0] / "profile-check.json").write_text("{\"other\": 1}")
+        self.assertIn("not a profile-check reading", self.report(d))
 
     def test_a_board_pgo_slot_and_the_warmup_round_are_checks_too(self):
-        with scratch_dir() as tmp:
-            d = complete_task(tmp)
-            for r in (d / "runs").iterdir():
-                record.write_env(str(r / "env.json"), ["build_preset=wpe-cross-pgo-use"], update=True)
-            (d / "warmup" / "rpi3-a.evidence.json").write_text(json.dumps({"elf": {}, "gl": {}, "jit": {}, "problems": []}))
-            out = self.report(d)
-            self.assertIn("unknown  PGO profile", out)
-            self.assertIn("FAIL     warmup        rpi3: arm B produced no warmup evidence", out)
+        d = complete_task(self.tmp)
+        for r in (d / "runs").iterdir():
+            record.write_env(str(r / "env.json"), ["build_preset=wpe-cross-pgo-use"], update=True)
+        (d / "warmup" / "rpi3-a.evidence.json").write_text(json.dumps({"elf": {}, "gl": {}, "jit": {}, "problems": []}))
+        out = self.report(d)
+        self.assertIn("unknown  PGO profile", out)
+        self.assertIn("FAIL     warmup        rpi3: arm B produced no warmup evidence", out)
 
     def test_a_task_stopped_short_says_how_to_restart_it(self):
-        with scratch_dir() as tmp:
-            d = make_task(tmp)
-            doc = json.loads((d / "task.json").read_text())
-            (d / "task.json").write_text(json.dumps(dict(doc, restart="wk bench ab wpe:1725 --devices rpi3 --task " + TASK)))
-            out = self.report(d)
-            self.assertIn("restart   wk bench ab wpe:1725 --devices rpi3 --task " + TASK, out)
-            self.assertIn("built:\n  no runs yet", out)
+        d = make_task(self.tmp)
+        doc = json.loads((d / "task.json").read_text())
+        (d / "task.json").write_text(json.dumps(dict(doc, restart="wk bench ab wpe:1725 --devices rpi3 --task " + TASK)))
+        out = self.report(d)
+        self.assertIn("restart   wk bench ab wpe:1725 --devices rpi3 --task " + TASK, out)
+        self.assertIn("built:\n  no runs yet", out)
 
 
 class ExportTest(WkTest):
@@ -147,17 +139,14 @@ class ExportTest(WkTest):
         env.start()
         self.addCleanup(env.stop)
 
-    def bench(self, machine=None):
-        reg = registry(self.tmp / "store", env={"HOME": str(self.tmp / "home"), "WK_ROW_LABEL": "here"})
-        if machine is not None:
-            reg.machine = machine
+    def bench(self, machine=None, drivers=()):
+        reg = registry(self.tmp / "store", drivers, env={"HOME": str(self.tmp / "home"), "WK_ROW_LABEL": "here"})
+        reg.machine = machine or reg.machine
         return cli.Bench(REPO, reg, FakeClock())
 
     def export(self, b, task=TASK, to=""):
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = b.export(task, to)
-        return rc, out.getvalue(), err.getvalue()
+        cp = in_process(b.export, task, to)
+        return cp.returncode, cp.stdout, cp.stderr
 
 
 class TestExport(ExportTest):
@@ -272,12 +261,6 @@ class TestWhereALegRecords(WkTest):
         vm.results = lambda ws: (far, "/var/lib/wk/ws/%s/bench" % ws)
         return registry(self.tmp / "store", [vm])
 
-    def refused(self, *args):
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err), self.assertRaises(Refused):
-            record.leg_home(*args)
-        return err.getvalue()
-
     def test_a_leg_records_into_its_workspaces_bench_through_the_machine_holding_it(self):
         far = Fake("vm")
         reg = self.reg(far)
@@ -285,10 +268,10 @@ class TestWhereALegRecords(WkTest):
         self.assertEqual(record.leg_home(reg, "w", TASK), (far, "/var/lib/wk/ws/w/bench"))
 
     def test_a_task_its_workspace_does_not_hold_is_refused(self):
-        self.assertIn("no such task 'nope' in workspace 'w'", self.refused(self.reg(Fake("vm")), "w", "nope"))
+        self.assertIn("no such task 'nope' in workspace 'w'", refusal(record.leg_home, self.reg(Fake("vm")), "w", "nope"))
 
     def test_a_workspace_on_a_machine_reached_over_ssh_is_refused_naming_it(self):
-        self.assertIn("run it on box", self.refused(self.reg(FarBox("box")), "w", TASK))
+        self.assertIn("run it on box", refusal(record.leg_home, self.reg(FarBox("box")), "w", TASK))
 
 
 class TestExportReachesATaskOnAnotherMachine(ExportTest):
@@ -297,8 +280,7 @@ class TestExportReachesATaskOnAnotherMachine(ExportTest):
         return mirror_task(Fake("vm"), complete_task(self.tmp / "disk"))
 
     def bench_with(self, driver):
-        reg = registry(self.tmp / "store", [driver], env={"HOME": str(self.tmp / "home"), "WK_ROW_LABEL": "here"})
-        return cli.Bench(REPO, reg, FakeClock())
+        return self.bench(drivers=[driver])
 
     def test_the_zip_is_built_here_from_reads_and_the_task_records_it(self):
         far = self.far()
@@ -314,21 +296,17 @@ class TestExportReachesATaskOnAnotherMachine(ExportTest):
         self.assertEqual([e for e in far.effects if e[0].startswith("copy")], [], "nothing is copied out of that machine")
 
     def test_a_report_reaches_it_the_same_way(self):
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.bench_with(far_driver("container", self.far())).task_report(TASK, False, True)
-        self.assertEqual(0, rc, err.getvalue())
-        self.assertIn("data      /var/lib/wk/ws/w/bench/" + TASK, out.getvalue())
+        cp = in_process(self.bench_with(far_driver("container", self.far())).task_report, TASK, False, True)
+        self.assertEqual(0, cp.returncode, cp.stderr)
+        self.assertIn("data      /var/lib/wk/ws/w/bench/" + TASK, cp.stdout)
 
     def test_two_of_its_runs_compare_from_here(self):
         far = self.far()
         runs = sorted({p.split("/runs/")[1].split("/")[0] for p in far.files if "/runs/" in p})
         a, b = ("/var/lib/wk/ws/w/bench/%s/runs/%s" % (TASK, r) for r in runs[:2])
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.bench_with(far_driver("container", far)).report([a, b], False, True)
-        self.assertEqual(0, rc, err.getvalue())
-        self.assertIn("Elm-TodoMVC", out.getvalue())
+        cp = in_process(self.bench_with(far_driver("container", far)).report, [a, b], False, True)
+        self.assertEqual(0, cp.returncode, cp.stderr)
+        self.assertIn("Elm-TodoMVC", cp.stdout)
 
     def test_a_machine_that_does_not_answer_is_not_asked(self):
         driver = far_driver("buildbox", self.far(), side="unreachable")

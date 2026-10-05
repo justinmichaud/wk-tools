@@ -67,7 +67,7 @@ MODULES = {
                                         env=dict(os.environ, PATH=f"{binp}:{os.environ['PATH']}"))
                 self.assertEqual(cp.stdout.strip(), "stubbed", cp.stderr)
             def test_ssh_config_query(self):
-                cp = subprocess.run(["ssh", "-G", "somehost"], capture_output=True, text=True)
+                cp = subprocess.run(["ssh", "-G", "-F", "/dev/null", "somehost"], capture_output=True, text=True)
                 self.assertEqual(cp.returncode, 0, cp.stderr)
                 self.assertIn("hostname somehost", cp.stdout)
     ''',

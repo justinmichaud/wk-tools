@@ -3,8 +3,8 @@
 # wk start [<workspace>] -- bring one workspace back up, or everything
 # wk: where=workspace name=optional forward=no group=hosts needs podman dryrun
 #
-# `forward=no`: runs on the host that holds the environment, never forwarded
-# into the podman VM. macOS guests are listed rather than started.
+# Runs on the host holding the environment, never forwarded into the podman VM.
+# macOS guests are listed rather than started.
 #
 #   wk start                 the podman machine, then every container
 #   wk start <workspace>     only that workspace's environment: a macOS guest

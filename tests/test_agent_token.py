@@ -196,27 +196,8 @@ esac
 '''
 
 
-def ask(driver, fn, secret):
-    """The place's answer as the shell probes printed it: YES or NO for `present`, the text for `remedy`."""
-    if fn == "present":
-        out = "YES" if driver.agent_secret_present("demo", secret) else "NO"
-    else:
-        out = driver.agent_secret_remedy("demo", secret)
-    return SimpleNamespace(stdout=out, stderr="")
-
-
-class _Plain(places.Driver):
-    """The base driver's contract, minus the hop: a real exec reaches the place over podman or ssh and runs the
-    probe in a login shell."""
-
-    def __init__(self, env):
-        super().__init__("plain", str(REPO), env, Local())
-
-    def exec(self, ws, argv, tty=False, timeout=None):
-        guest = self.env["WK_TEST_GUEST"]
-        cp = subprocess.run(argv, capture_output=True, text=True,
-                            env=dict(self.env, HOME=guest))
-        return Result(cp.returncode, cp.stdout, cp.stderr)
+def ask(driver, secret):
+    return SimpleNamespace(stdout=driver.agent_secret_remedy("demo", secret), stderr="")
 
 
 class _Delivery(WkTest):
@@ -276,97 +257,74 @@ class _Delivery(WkTest):
         return home
 
 
-class TestAGuestGetsThemOnStart(_Delivery):
-    """write_agent_secrets: a guest holds a copy of every value row, withdrawn when the store has none."""
+class TestEachPlaceGetsThemWhereItIsMade(_Delivery):
+    """A guest is written a copy of each of its value rows on every start (write_agent_secrets), a build box at
+    `wk machine setup` (over a fake ssh whose `-n` gives the far side /dev/null); a store with none withdraws it."""
 
-    def test_every_value_row_in_the_store_lands_in_the_guest_at_mode_600(self):
-        home = self._home()
-        cp = self._write(self._store(values=[n for n, *_ in TABLE]), home)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for name, _sfile, shome, *_ in VM_ROWS:
-            with self.subTest(name=name):
-                self.assertEqual((home / shome).read_text(), f"{PLACEHOLDER}-{name}\n")
-                self.assertEqual(0o600, (home / shome).stat().st_mode & 0o777)
-        self.assertNotIn(PLACEHOLDER, self.log.read_text(), "a value is never an argument")
+    def guest(self, store, home):
+        self._write(store, home)
+        return VM_ROWS, len(TABLE) + 1
 
-    def test_a_store_with_none_withdraws_what_the_guest_holds(self):
-        home = self._home()
-        for _name, _sfile, shome, *_ in TABLE:
-            (home / shome).parent.mkdir(parents=True, exist_ok=True)
-            (home / shome).write_text("stale\n")
-        cp = self._write(self._store(), home)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for _name, _sfile, shome, *_ in TABLE:
-            self.assertFalse((home / shome).exists(), shome)
+    def build_box(self, store, home):
+        from wk import machine_cmd
+        with stub_path({"ssh": FAKE_SSH}) as binp:
+            env = self._env(store, home, {"PATH": f"{binp}:{os.environ['PATH']}"})
+            with mock.patch.dict(os.environ, env), contextlib.redirect_stderr(io.StringIO()):
+                # The credentials are in this machine's store (WK_STORE_DEFAULT), not the place's remote root.
+                t = places.Remote("fakebox", str(REPO), dict(os.environ), Local())
+                machine_cmd.Machines(REPO, env=dict(os.environ)).credentials(t, "fakebox")
+        return REMOTE_ROWS, len(REMOTE_ROWS)
+
+    def places(self):
+        return (("guest", self.guest), ("build box", self.build_box))
+
+    def test_every_value_row_lands_at_mode_600_and_never_as_an_argument(self):
+        for place, deliver in self.places():
+            with self.subTest(place):
+                home = self.tmp / place
+                home.mkdir()
+                rows, _ = deliver(self._store(values=[n for n, *_ in TABLE]), home)
+                for name, _sfile, shome, *_ in rows:
+                    self.assertEqual((home / shome).read_text(), f"{PLACEHOLDER}-{name}\n")
+                    self.assertEqual(0o600, (home / shome).stat().st_mode & 0o777)
+                self.assertNotIn(PLACEHOLDER, self.log.read_text(), "a value is never an argument")
+
+    def test_a_store_with_none_withdraws_what_the_place_holds(self):
+        for place, deliver in self.places():
+            with self.subTest(place):
+                home = self.tmp / place
+                for _name, _sfile, shome, *_ in TABLE:
+                    (home / shome).parent.mkdir(parents=True, exist_ok=True)
+                    (home / shome).write_text("stale\n")
+                rows, _ = deliver(self._store(), home)
+                for _name, _sfile, shome, *_ in rows:
+                    self.assertFalse((home / shome).exists(), shome)
 
     def test_one_absent_row_does_not_cost_the_next_one(self):
-        home = self._home()
-        last = VM_ROWS[-1]
-        self._write(self._store(values=[last[0]]), home)
-        self.assertEqual((home / last[2]).read_text(),
-                         f"{PLACEHOLDER}-{last[0]}\n")
-        self.assertEqual(len(TABLE) + 1, len(self._ssh_lines()), self.log.read_text())
+        for place, deliver in self.places():
+            with self.subTest(place):
+                home = self.tmp / place
+                home.mkdir()
+                last = (VM_ROWS if place == "guest" else REMOTE_ROWS)[-1]
+                _, calls = deliver(self._store(values=[last[0]]), home)
+                self.assertEqual((home / last[2]).read_text(), f"{PLACEHOLDER}-{last[0]}\n")
+                self.assertEqual(calls, len(self._ssh_lines()), self.log.read_text())
 
-    def test_the_login_it_holds_is_the_placeholder_and_never_this_machines(self):
-        store = self._store()
+    def test_a_guest_holds_the_placeholder_login_and_a_build_box_none(self):
+        store = self._store(values=[n for n, *_ in TABLE])
         login = Path(secrets.Secrets(REPO, self._env(store, self._home())).cred_path("claude-login"))
         login.parent.mkdir(parents=True, exist_ok=True)
         login.write_text('{"claudeAiOauth": {"accessToken": "sk-ant-oat01-REAL", "refreshToken": "sk-ant-ort01-REAL"}}')
         home = self._home()
-        cp = self._write(store, home)
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.guest(store, home)
         held = home / secrets.LOGIN_DIR / ".credentials.json"
         self.assertEqual(claudelogin.placeholder(), held.read_text())
         self.assertEqual(0o600, held.stat().st_mode & 0o777)
         self.assertNotIn("REAL", self.log.read_text())
-
-
-class TestABuildBoxGetsThemAtSetup(_Delivery):
-    """`wk machine setup`'s credential step, against a fake ssh whose `-n` gives the far side /dev/null."""
-
-    def _setup(self, store, home):
-        from wk import machine_cmd
-        with stub_path({"ssh": FAKE_SSH}) as binp:
-            env = self._env(store, home, {"PATH": f"{binp}:{os.environ['PATH']}"})
-            err = io.StringIO()
-            with mock.patch.dict(os.environ, env), contextlib.redirect_stderr(err):
-                # The credentials are in this machine's store (WK_STORE_DEFAULT), not the place's remote root.
-                t = places.Remote("fakebox", str(REPO), dict(os.environ), Local())
-                machine_cmd.Machines(REPO, env=dict(os.environ)).credentials(t, "fakebox")
-        return SimpleNamespace(returncode=0, stdout="", stderr=err.getvalue())
-
-    def test_the_credential_arrives_with_its_bytes_at_mode_600(self):
-        home = self._home()
-        cp = self._setup(self._store(values=[n for n, *_ in TABLE]), home)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for name, _sfile, shome, *_ in REMOTE_ROWS:
-            with self.subTest(name=name):
-                self.assertEqual((home / shome).read_text(), f"{PLACEHOLDER}-{name}\n")
-                self.assertEqual(0o600, (home / shome).stat().st_mode & 0o777)
-        self.assertNotIn(PLACEHOLDER, self.log.read_text(), "a value is never an argument")
-
-    def test_a_store_with_none_takes_the_copy_off_the_machine(self):
-        home = self._home()
-        for _name, _sfile, shome, *_ in REMOTE_ROWS:
-            (home / shome).write_text("stale\n")
-        cp = self._setup(self._store(), home)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for _name, _sfile, shome, *_ in REMOTE_ROWS:
-            self.assertFalse((home / shome).exists(), shome)
-
-    def test_one_absent_row_does_not_cost_the_next_one(self):
-        home = self._home()
-        last = REMOTE_ROWS[-1]
-        self._setup(self._store(values=[last[0]]), home)
-        self.assertEqual((home / last[2]).read_text(),
-                         f"{PLACEHOLDER}-{last[0]}\n")
-        self.assertEqual(len(REMOTE_ROWS), len(self._ssh_lines()),
-                         self.log.read_text())
-
-    def test_no_claude_ai_login_reaches_a_shared_machine(self):
-        home = self._home()
-        self._setup(self._store(values=[n for n, *_ in TABLE]), home)
-        self.assertFalse((home / secrets.LOGIN_DIR).exists())
+        box = self.tmp / "box"
+        box.mkdir()
+        self.build_box(store, box)
+        self.assertFalse((box / secrets.LOGIN_DIR).exists())
         self.assertNotIn(".credentials.json", self.log.read_text())
 
 
@@ -386,58 +344,20 @@ class TestAGuestRcNamesNoLoginDirectory(_Delivery):
 
 
 class TestWhoIsAskedWhetherAWorkspaceCanAuthenticate(_Delivery):
-    """Driver.agent_secret_present asks the machine that will run the agent, through its own login shell."""
+    """A guest's remedy is this machine's store, which delivers its secrets."""
 
-    def _ask(self, store, home, fn, secret):
+    def _ask(self, store, home, secret):
         with stub_path({"ssh": FAKE_SSH, "tart": FAKE_TART}) as binp:
             env = dict(os.environ, **self._env(store, home, {"PATH": f"{binp}:{os.environ['PATH']}",
                                                              "WK_VM_STORE": str(self.tmp / "vmstore")}))
             with mock.patch.dict(os.environ, env), \
                     mock.patch("wk.store.Store.macos_host", new_callable=mock.PropertyMock, return_value=True):
-                return ask(places.Registry(str(REPO), env=env, machine=Local()).load("vm"), fn, secret)
-
-    def test_a_value_row_is_asked_of_the_guest_too(self):
-        row = VM_ROWS[0]
-        guest = self._guest()
-        (guest / row[2]).parent.mkdir(parents=True, exist_ok=True)
-        (guest / row[2]).write_text(f"{PLACEHOLDER}-{row[0]}\n")
-        with_it = self._ask(self._store(), guest,
-                            "present", row[0])
-        self.assertIn("YES", with_it.stdout, with_it.stdout + with_it.stderr)
-
-        (guest / row[2]).unlink()
-        without = self._ask(self._store(values=[row[0]]), guest,
-                            "present", row[0])
-        self.assertIn("NO", without.stdout, without.stdout + without.stderr)
+                return ask(places.Registry(str(REPO), env=env, machine=Local()).load("vm"), secret)
 
     def test_a_value_rows_remedy_is_this_machines_store(self):
         name = VM_ROWS[0][0]
-        cp = self._ask(self._store(), self._guest(), "remedy", name)
+        cp = self._ask(self._store(), self._guest(), name)
         self.assertIn(f"wk key set {name}", cp.stdout, cp.stdout + cp.stderr)
-
-
-class TestTheDefaultAsksThePlace(_Delivery):
-    """The default the container and remote drivers inherit: the workspace is asked, not this store."""
-
-    def _driver(self):
-        h = self.tmp / "place-home"
-        (h / ".claude").mkdir(parents=True, exist_ok=True)
-        return h
-
-    def _ask(self, store, driver, fn, secret):
-        env = dict(os.environ, **self._env(store, driver))
-        with mock.patch.dict(os.environ, env):
-            return ask(_Plain(env), fn, secret)
-
-    def test_a_value_row_is_read_where_the_driver_delivered_it(self):
-        row = TABLE[0]
-        driver = self._driver()
-        cp = self._ask(self._store(values=[row[0]]), driver,
-                       "present", row[0])
-        self.assertIn("NO", cp.stdout, cp.stdout + cp.stderr)
-        (driver / row[2]).write_text(f"{PLACEHOLDER}-{row[0]}\n")
-        cp = self._ask(self._store(), driver, "present", row[0])
-        self.assertIn("YES", cp.stdout, cp.stdout + cp.stderr)
 
 
 if __name__ == "__main__":

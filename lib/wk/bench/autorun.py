@@ -16,7 +16,7 @@ if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from wk import act, images, screen  # noqa: E402
-from wk.bench.board_ab import interleave  # noqa: E402
+from wk.bench.ab import interleave  # noqa: E402
 from wk.bench.mac import CHECK, MARKER, WKMAC  # noqa: E402
 from wk.bench.mac_ab import AGENT  # noqa: E402
 from wk.bench.pipeline import VARIANCE  # noqa: E402

@@ -8,10 +8,10 @@ import sys
 import unittest
 
 from tests.support import REPO
+from tests.test_buildroot_ws import WsWorld, quiet
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result, isolated_module  # noqa: E402
+from wk.machine import Result, isolated_module  # noqa: E402
 from wk.sysimage import Failed, yocto_ws as yt  # noqa: E402
 
 TARGET = "rpi4-64bits-mesa"
@@ -42,11 +42,13 @@ def args(*more):
     return yt.parse(ARGS + list(more))
 
 
-class World(Fake):
+class World(WsWorld):
     """A workspace whose layers are synced: the checkout, the helper's workdir and its two confs."""
 
+    BUILD, ENV = yt.Build, ENV
+
     def __init__(self):
-        super().__init__("ws")
+        super().__init__()
         self.dirs.update({SRC, SRC + "/.git", WORK + "/.git", TOOLS})
         self.files.update({CONF: 'MACHINE = "raspberrypi4-64"\n', LAYERS: 'BBLAYERS ?= "a b"\n',
                            WORK + "/.target-info-version": "rpi4-64bits-mesa 2.46.0\n",
@@ -62,7 +64,6 @@ class World(Fake):
         self.answer(["python3"])
         self.answer(["cp"])
         self.react(["mv", "-T"], self._mv)
-        self.clock = FakeClock()
         self.react(["find", IMAGE_DIR], lambda a, f: Result(0, "%d.5\n" % f.clock.now()) if IMAGE_DIR in f.dirs else Result(1))
 
     def _mv(self, argv, f):
@@ -73,21 +74,6 @@ class World(Fake):
         for p in [p for p in self.files if p.startswith(src + "/")]:
             self.files[dst + p[len(src):]] = self.files.pop(p)
         return Result(0)
-
-    def build(self, a):
-        return yt.Build(a, self, dict(ENV), self.clock, TOOLS)
-
-    def ran(self, *prefix):
-        return [e[1] for e in self.effects if e[0] in ("run", "run_tty") and tuple(e[1][:len(prefix)]) == prefix]
-
-
-def quiet(fn, *a):
-    with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
-        try:
-            fn(*a)
-        except Failed as e:
-            return out.getvalue(), str(e)
-    return out.getvalue(), None
 
 
 class TestTheEnvironment(unittest.TestCase):

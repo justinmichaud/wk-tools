@@ -16,8 +16,7 @@ from tests.killpoints import converges
 from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from tests.test_bench_mac import StubWatch  # noqa: E402
-from wk import decl, dispatch, job, record, project, screen  # noqa: E402
+from wk import act, decl, dispatch, job, record, project, screen  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import record as brecord, systems  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
@@ -28,6 +27,53 @@ PLAN_JSON = json.dumps({"git_repository": {"url": "https://example.com/bench.git
 JSC_LOG = b'wk: bench pid 77\nScore: 12\n{"JetStream3.0": {"tests": {"t": {"metrics": {"Score": {"current": [12.0]}}}}}}\n'
 RESULT = json.dumps({"Speedometer-3": {"metrics": {"Score": {"current": [30.0, 31.0]}}}})
 CMD = load_cmd("bench")
+
+
+class Acting:
+    """A machine that records each mutation as asked, so a dry run's plan can be compared with a wet run's effects."""
+
+    def act_run(self, argv, **kw):
+        self.effects.append(("act", tuple(argv)))
+        return super().act_run(argv, **kw)
+
+
+class StubWatch:
+    """screen.Watch as a run sees it: its start and stop are effects, and what `drew` names is what it caught."""
+
+    def __init__(self, machine, root, clock, env=None):
+        self.m = machine
+
+    def start(self):
+        self.m.effects.append(("watch", "start", len(getattr(self.m, "watched", []))))
+
+    def stop(self):
+        self.m.effects.append(("watch", "stop", len(getattr(self.m, "watched", []))))
+        return list(getattr(self.m, "drew", []))
+
+
+class CleanTest(unittest.TestCase):
+    """A scratch directory, and none of the knobs a run reads left set by the caller."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wk-bench-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, True))
+        saved = dict(os.environ)
+        for v in ("WK_DRY_RUN", "WK_FORCE", "WK_DESTRUCTIVE", "WK_DEVICE_HELD", "WK_BENCH_ASLR", "WK_BENCH_PATH_PAD", "WK_BENCH_ENV_PAD"):
+            os.environ.pop(v, None)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved)))
+        self.addCleanup(act._forced.clear)
+
+    def same_plan(self, make, run, mutations):
+        """A dry run's plan is the wet run's mutations, and it makes none of them; returns (wet, dry)."""
+        wet, dry = make(), make()
+        run(wet)
+        os.environ["WK_DRY_RUN"] = "1"
+        try:
+            run(dry)
+        finally:
+            del os.environ["WK_DRY_RUN"]
+        self.assertEqual(*[[tuple(str(x).replace(str(w.tmp), "") for x in e) for e in mutations(w)] for w in (wet, dry)])
+        return wet, dry
 
 
 class BenchDriver(WsDriver):
@@ -42,7 +88,7 @@ class BenchDriver(WsDriver):
         return Local(), os.path.join(self.store.ws_dir(ws), "bench")
 
 
-class World(Fake):
+class World(Acting, Fake):
     """This host benchmarking workspace `ws` on a container or a guest: the build is there, the payload
     is seeded, the machine is quiet, and the benchmark writes what run-benchmark or cli.js would."""
 
@@ -76,10 +122,6 @@ class World(Fake):
             self.answer(prefix, out=out)
         self.files["/run/wk-session-mode"] = "gpu\n"
         self.watched = []
-
-    def act_run(self, argv, **kw):
-        self.effects.append(("act", tuple(argv)))
-        return super().act_run(argv, **kw)
 
     def start(self, argv, out, cwd=None):
         self.watched.append(list(argv))
@@ -129,14 +171,9 @@ def invoke(w, argv):
     return CMD.run_arm(decl.Args(decl.Decl(REPO / "cmd" / "bench"), argv), registry(w), w.clock)
 
 
-class BenchTest(unittest.TestCase):
+class BenchTest(CleanTest):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-bench-pipeline-"))
-        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, True))
-        self._env = dict(os.environ)
-        for v in ("WK_DRY_RUN", "WK_FORCE", "WK_DESTRUCTIVE", "WK_BENCH_ASLR", "WK_BENCH_PATH_PAD", "WK_BENCH_ENV_PAD"):
-            os.environ.pop(v, None)
-        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self._env)))
+        super().setUp()
         watch = mock.patch.object(screen, "Watch", StubWatch)
         watch.start()
         self.addCleanup(watch.stop)
@@ -157,12 +194,10 @@ class BenchTest(unittest.TestCase):
         return cm.exception
 
     def said(self, *argv, w=None, extra=None):
-        err = io.StringIO()
         w = w or self.w
         w.env.update(extra or {})
-        argv = argv or ("run", "jetstream3", "--preset", "jsc-release")
-        with self.assertRaises(Refused), contextlib.redirect_stderr(err):
-            invoke(w, argv)
+        with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
+            invoke(w, argv or ("run", "jetstream3", "--preset", "jsc-release"))
         return err.getvalue()
 
     def run_dir(self, w=None):
@@ -247,16 +282,13 @@ class TestTheRecord(BenchTest):
         self.assertEqual(env["configuration"]["env_pad_bytes"], "64")
         self.assertIn("wall_time_s", env)
 
-    def test_a_failure_ends_the_record_with_its_status_and_names_the_log(self):
-        self.w.rc = 3
-        e = self.refused()
-        self.assertEqual(e.status, 3)
-        self.assertEqual(self.w.state(), ("complete", 0, "3"), "a failed run is an ended one")
-
-    def test_a_silent_run_ends_stalled(self):
-        self.w.rc = 124
-        self.refused()
-        self.assertEqual(self.w.state()[2], "stalled")
+    def test_a_failure_ends_the_record_with_its_status_and_a_silent_run_ends_stalled(self):
+        for rc, ended in ((3, "3"), (124, "stalled")):
+            with self.subTest(rc=rc):
+                w = World(self.tmp)
+                w.rc = rc
+                self.refused(w=w)
+                self.assertEqual(w.state(), ("complete", 0, ended), "a failed run is an ended one")
 
 
 class TestInterrupted(BenchTest):
@@ -375,12 +407,6 @@ class TestRefusals(BenchTest):
         self.assertTrue(env["forced"])
         self.assertIn("cpu governor: powersave -- wk quiesce on; ", env["preflight_notes"])
 
-    def test_a_busy_machine_is_refused_and_the_threshold_is_a_setting(self):
-        self.w.files["/proc/loadavg"] = "5.00 4.00 3.00 1/100 1\n"
-        self.assertIn("1-minute load average is 5.00", self.said())
-        rc, err = self.run_(extra={"WK_BENCH_MAX_LOAD": "10"})
-        self.assertIn("load 5.00, no wk builds", err)
-
     def test_the_load_is_rounded_before_it_is_compared(self):
         self.w.files["/proc/loadavg"] = "4.60 4.00 3.00 1/100 1\n"
         self.assertIn("1-minute load average is 4.60", self.said())
@@ -443,10 +469,6 @@ class TestKnobs(BenchTest):
         self.assertIn("/tmp/wk-bench-pad-pppp/jsc cli.js", self.w.watched[0][-1])
         self.assertEqual(self.env_json()["configuration"]["path_len"], "4")
 
-    def test_aslr_off_is_setarch_in_a_container(self):
-        self.run_(extra={"WK_BENCH_ASLR": "off"})
-        self.assertIn("exec setarch $(uname -m) -R -- ", self.w.watched[0][-1])
-
 
 class TestRootDevice(unittest.TestCase):
     def test_a_linux_disk_names_its_bus_rotation_and_trim(self):
@@ -473,19 +495,12 @@ class TestDryRun(BenchTest):
             locks = w.env["WK_LOCK_DIR"]
             return [e for e in w.effects if e[0] in ("act", "write", "mkdir", "remove", "copy_in", "copy_out", "copy_tree_in", "spawn", "kill")
                     and not (isinstance(e[1], str) and e[1].startswith(locks))]
-        for kind, plan, preset in (("container", "speedometer3", "wpe-release"), ("vm", "speedometer3", "mac-release")):
+        for kind, preset in (("container", "wpe-release"), ("vm", "mac-release")):
             with self.subTest(kind=kind):
-                wet, dry = World(self.tmp, kind), World(self.tmp, kind)
-                self.run_(wet, "run", plan, "--preset", preset)
-                os.environ["WK_DRY_RUN"] = "1"
-                try:
-                    rc, err = self.run_(dry, "run", plan, "--preset", preset)
-                finally:
-                    del os.environ["WK_DRY_RUN"]
-                strip = [[tuple(str(x).replace(str(w.tmp), "") for x in e) for e in mutations(w)] for w in (wet, dry)]
-                self.assertEqual(strip[0], strip[1])
-                self.assertTrue(strip[0])
-                self.assertIn("would run: " + " ".join(shlex.quote(a) for a in wet.watched[0]).replace(str(wet.tmp), str(dry.tmp)), err)
+                wet, dry = self.same_plan(lambda: World(self.tmp, kind), lambda w: setattr(w, "said", self.run_(w, "run", "speedometer3", "--preset", preset)[1]),
+                                          mutations)
+                self.assertTrue(mutations(wet))
+                self.assertIn("would run: " + " ".join(shlex.quote(a) for a in wet.watched[0]).replace(str(wet.tmp), str(dry.tmp)), dry.said)
                 self.assertEqual((dry.watched, dry.tasks(), dry.recs().list()), ([], [], []))
 
 

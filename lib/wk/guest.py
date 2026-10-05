@@ -45,41 +45,14 @@ echo "$skew"
 # The browser's network process reads no http_proxy, so the system proxy is set too. The CA bundle is the system's
 # plus the injector's: these variables replace the trust store outright.
 EGRESS = """set -u
-addr=$WK_ADDR port=$WK_PORT ghuser=$WK_GHUSER bzuser=$WK_BZUSER
-if [ -z "$addr" ]; then
-    rm -f "$HOME/.wk-egress"
-else
-    cat > "$HOME/.wk-egress" <<WKEGRESS
-# wk: written by lib/wk/guest.py on every start; sourced by every shell
-# (vm/shell-rc.sh). Softnet denies everything but this address.
-export http_proxy=http://$addr:$port
-export https_proxy=http://$addr:$port
-export HTTP_PROXY=http://$addr:$port
-export HTTPS_PROXY=http://$addr:$port
-export no_proxy=localhost,127.0.0.1,::1
-export NO_PROXY=localhost,127.0.0.1,::1
-export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring
-WKEGRESS
-fi
-if grep -q 'BEGIN CERTIFICATE' /tmp/.wk-github-ca.new 2>/dev/null; then
+addr=$WK_ADDR port=$WK_PORT
+if [ -s /tmp/.wk-egress.new ]; then sed "s|\\$HOME|$HOME|g" /tmp/.wk-egress.new > "$HOME/.wk-egress"; rm -f /tmp/.wk-egress.new
+else rm -f "$HOME/.wk-egress"; fi   # written with the guest's own home, so a shell with another HOME (sudo) reads the same paths
+if [ -s /tmp/.wk-github-ca.new ]; then
     mv /tmp/.wk-github-ca.new "$HOME/.wk-github-ca.pem"
     cat /etc/ssl/cert.pem "$HOME/.wk-github-ca.pem" > "$HOME/.wk-ca-bundle.pem"
-    cat >> "$HOME/.wk-egress" <<WKCAENV
-export REQUESTS_CA_BUNDLE=$HOME/.wk-ca-bundle.pem
-export CURL_CA_BUNDLE=$HOME/.wk-ca-bundle.pem
-export GIT_SSL_CAINFO=$HOME/.wk-ca-bundle.pem
-export GITHUB_COM_USERNAME=$ghuser
-export GITHUB_COM_TOKEN=wk-injects-this
-export SSL_CERT_FILE=$HOME/.wk-ca-bundle.pem
-export NODE_EXTRA_CA_CERTS=$HOME/.wk-github-ca.pem
-export GH_TOKEN=wk-injects-this
-WKCAENV
-    [ -z "$bzuser" ] || cat >> "$HOME/.wk-egress" <<WKBZENV
-export @BZUSER@=$bzuser
-export @BZPASSWORD@=wk-injects-this
-WKBZENV
 else
-    rm -f /tmp/.wk-github-ca.new "$HOME/.wk-github-ca.pem" "$HOME/.wk-ca-bundle.pem"
+    rm -f "$HOME/.wk-github-ca.pem" "$HOME/.wk-ca-bundle.pem"
 fi
 dev=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
 [ -n "$dev" ] || { echo "no default route in the guest" >&2; exit 1; }
@@ -170,7 +143,7 @@ class Host:
         return is_unfiltered(self.env)
 
     def port(self):
-        return self.env.get("WK_VM_PROXY_PORT") or PROXY_PORT
+        return proxy_port(self.env)
 
     def softnet(self):
         return softnet_bin(self.env)
@@ -206,6 +179,14 @@ class Host:
         pid = self.machine.spawn(argv, log)
         self.machine.write(pidfile, "%d\n" % pid)
         return pid
+
+    def launch(self, name, argv, up, wait, failed):
+        log = self.path(name + ".log")
+        pid = self.spawn(argv, log, self.path(name + ".pid"))
+        if act.dry_run() or self.clock.wait_until(lambda: up() or not self.machine.alive(pid), wait, 0.25) and up():
+            return True
+        warn(failed % log)
+        return False
 
     def listener(self, where):
         pids = [int(p) for p in self.machine.run(["lsof", "-t", *where]).out.split() if p.isdigit()]
@@ -265,8 +246,7 @@ class Host:
 
     def _start_proxy(self):
         self.start_inject()
-        pidfile, log = self.path("proxy.pid"), self.path("proxy.log")
-        self.restart_if_stale(pidfile, "egress proxy", self.proxy_where())
+        self.restart_if_stale(self.path("proxy.pid"), "egress proxy", self.proxy_where())
         if self.proxy_running():
             debug("host proxy already running")
             return True
@@ -275,25 +255,21 @@ class Host:
         if not self.clock.wait_until(lambda: ("inet %s " % addr) in self.machine.run(["ifconfig"]).out, 15, 0.5):
             warn("the guest bridge never got address %s; not starting the proxy" % addr)
             return False
-        pid = self.spawn(["env", "WK_PROXY_UNIX=0", "WK_PROXY_TCP=%s:%s" % (addr, self.port()),
-                          "WK_STORE=" + self.vm.store.store_dir(), "WK_INJECT_SOCK=" + self.path("github-inject.sock"),
-                          "WK_INJECT_CA_OUT=" + self.path("wk-github-ca.pem"),
-                          "/usr/bin/python3", os.path.join(self.root, "container", "proxy", "wk-proxy.py")], log, pidfile)
-        if act.dry_run():
-            return True
 
         def said():
             try:
-                return ("listening on " + addr) in self.machine.read(log)
+                return ("listening on " + addr) in self.machine.read(self.path("proxy.log"))
             except OSError:
                 return False
-        self.clock.wait_until(lambda: said() or not self.machine.alive(pid), 10, 0.5)
-        if said():
-            info("egress proxy on %s:%s" % (addr, self.port()))
-            return True
-        warn("the host egress proxy did not start; the guest will have no egress at all\n"
-             "  (Softnet denies everything except the proxy address). See %s" % log)
-        return False
+        if not self.launch("proxy", ["env", "WK_PROXY_UNIX=0", "WK_PROXY_TCP=%s:%s" % (addr, self.port()),
+                                     "WK_STORE=" + self.vm.store.store_dir(), "WK_INJECT_SOCK=" + self.path("github-inject.sock"),
+                                     "WK_INJECT_CA_OUT=" + self.path("wk-github-ca.pem"), "/usr/bin/python3",
+                                     os.path.join(self.root, "container", "proxy", "wk-proxy.py")], said, 10,
+                           "the host egress proxy did not start; the guest will have no egress at all\n"
+                           "  (Softnet denies everything except the proxy address). See %s"):
+            return False
+        info("egress proxy on %s:%s" % (addr, self.port()))
+        return True
 
     def inject_running(self):
         sock = self.path("github-inject.sock")
@@ -343,11 +319,8 @@ class Host:
             return True
         self.machine.mkdir(self.dir)
         self.machine.remove(sock)   # ssh-agent refuses to bind a path that exists
-        self.spawn(["/usr/bin/ssh-agent", "-D", "-a", sock], self.path("ssh-agent.log"), pidfile)
-        if act.dry_run() or self.clock.wait_until(lambda: self.secrets.agent_answers(sock), 4, 0.2):
-            return True
-        warn("the guests' ssh-agent did not start, so no guest can push;\n  see %s" % self.path("ssh-agent.log"))
-        return False
+        return self.launch("ssh-agent", ["/usr/bin/ssh-agent", "-D", "-a", sock], lambda: self.secrets.agent_answers(sock), 4,
+                           "the guests' ssh-agent did not start, so no guest can push;\n  see %s")
 
     def lock(self):
         if self._lock is None:
@@ -493,7 +466,7 @@ class Guest:
         """Idempotent by measurement: a guest within WK_VM_CLOCK_SKEW costs no sudo."""
         now = int(self.host.clock.now())
         r = self.m.act_run(["env", "WK_NOW_EPOCH=%d" % now, "WK_NOW_SET=" + time.strftime("%m%d%H%M%Y.%S", time.gmtime(now)),
-                            "WK_SKEW=" + (self.host.env.get("WK_VM_CLOCK_SKEW") or CLOCK_SKEW), "bash", "-s"], input=CLOCK)
+                            "WK_SKEW=" + clock_skew(self.host.env), "bash", "-s"], input=CLOCK)
         if not r.ok:
             return False
         if r.out.strip():
@@ -503,17 +476,30 @@ class Guest:
     def set_guest_egress(self):
         h = self.host
         addr = "" if h.unfiltered() else h.proxy_addr()
-        ca = ""
-        if addr:
-            try:
-                ca = h.machine.read(h.path("wk-github-ca.pem"))
-            except OSError:
-                ca = ""
+        try:
+            ca = h.machine.read(h.path("wk-github-ca.pem")) if addr else ""
+        except OSError:
+            ca = ""
+        ca = ca if "BEGIN CERTIFICATE" in ca else ""
         debug("guest egress in %s: %s" % (self.ws, addr or "off"))
-        script = "cat > /tmp/.wk-github-ca.new <<'WKCA'\n%s\nWKCA\n" % ca.rstrip("\n") \
-            + EGRESS.replace("@BZUSER@", project.get("BUGZILLA_ENV")[0]).replace("@BZPASSWORD@", project.get("BUGZILLA_ENV")[1])
-        return self.m.act_run(["env", "WK_ADDR=" + addr, "WK_PORT=" + h.port(), "WK_GHUSER=" + self.secrets.github_user(),
-                               "WK_BZUSER=" + (self.secrets.bugzilla_user() or ""), "bash", "-s"], input=script).ok
+        script = here_doc("/tmp/.wk-github-ca.new", ca) + here_doc("/tmp/.wk-egress.new", self.egress_env(addr, ca)) + EGRESS
+        return self.m.act_run(["env", "WK_ADDR=" + addr, "WK_PORT=" + h.port(), "bash", "-s"], input=script).ok
+
+    def egress_env(self, addr, ca):
+        if not addr:
+            return ""
+        url, local, bundle = "http://%s:%s" % (addr, self.host.port()), "localhost,127.0.0.1,::1", "$HOME/.wk-ca-bundle.pem"
+        env = [(v, url) for v in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")] + [("no_proxy", local), ("NO_PROXY", local),
+               ("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")]
+        if ca:
+            env += [(v, bundle) for v in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO")] + [
+                ("GITHUB_COM_USERNAME", self.secrets.github_user()), ("GITHUB_COM_TOKEN", claudelogin.PLACEHOLDER),
+                ("SSL_CERT_FILE", bundle), ("NODE_EXTRA_CA_CERTS", "$HOME/.wk-github-ca.pem"), ("GH_TOKEN", claudelogin.PLACEHOLDER)]
+            bz_user, bz_password = project.get("BUGZILLA_ENV")
+            if self.secrets.bugzilla_user():
+                env += [(bz_user, self.secrets.bugzilla_user()), (bz_password, claudelogin.PLACEHOLDER)]
+        return "# wk: written by lib/wk/guest.py on every start. Softnet denies everything but this address.\n" \
+            + "".join("export %s=%s\n" % kv for kv in env)
 
     def write_agent_secrets(self):
         """Rewritten every start, so a withdrawn one goes; the claude.ai login is the placeholder the host's injector swaps."""
@@ -569,49 +555,28 @@ class Guest:
                                        Store(self.host.env).runtime_socket())
 
 
-def is_unfiltered(env):
-    return bool(env.get("WK_VM_UNFILTERED"))
+def setting(var, default=None, kind=str):
+    return lambda env: kind(env[var]) if env.get(var) else default
 
 
-def softnet_bin(env):
-    return env.get("WK_SOFTNET_BIN") or SOFTNET
+is_unfiltered = setting("WK_VM_UNFILTERED", False, bool)
+softnet_bin = setting("WK_SOFTNET_BIN", SOFTNET)
+vm_user = setting("WK_VM_USER", "admin")
+vm_max = setting("WK_VM_MAX", 2, int)
+vm_share = setting("WK_VM_SHARE", False, bool)
+vm_forced = setting("WK_VM_FORCE", False, bool)
+vm_cpus = setting("WK_VM_CPUS", None, int)
+vm_mem_mb = setting("WK_VM_MEM_MB", None, int)
+vm_disk_gb = setting("WK_VM_DISK_GB", DISK_GB, int)
+display = setting("WK_VM_DISPLAY", DISPLAY)
+base_name = setting("WK_VM_BASE", BASE)
+password = setting("WK_VM_PASSWORD", PASSWORD)
+proxy_port = setting("WK_VM_PROXY_PORT", PROXY_PORT)
+clock_skew = setting("WK_VM_CLOCK_SKEW", CLOCK_SKEW)
 
 
-def vm_user(env):
-    return env.get("WK_VM_USER") or "admin"
-
-
-def vm_max(env):
-    return int(env.get("WK_VM_MAX") or 2)
-
-
-def vm_share(env):
-    return bool(env.get("WK_VM_SHARE"))
-
-
-def vm_forced(env):
-    return bool(env.get("WK_VM_FORCE"))
-
-
-def vm_cpus(env):
-    return int(env["WK_VM_CPUS"]) if env.get("WK_VM_CPUS") else None
-
-
-def vm_mem_mb(env):
-    return int(env["WK_VM_MEM_MB"]) if env.get("WK_VM_MEM_MB") else None
-
-
-def vm_disk_gb(env):
-    return int(env.get("WK_VM_DISK_GB") or DISK_GB)
-
-
-def display(env):
-    return env.get("WK_VM_DISPLAY") or DISPLAY
-
-
-def base_name(env):
-    """The golden base every guest is cloned from."""
-    return env.get("WK_VM_BASE") or BASE
+def here_doc(path, text):
+    return "cat > %s <<'WKDOC'\n%s\nWKDOC\n" % (path, text.rstrip("\n")) if text else "rm -f %s\n" % path
 
 
 def runlog_tail(machine, path):
@@ -631,10 +596,6 @@ def tree(root, *rels):
         with open(os.path.join(str(root), rel), errors="replace") as f:
             out.append(f.read())
     return "".join(out)
-
-
-def password(env):
-    return env.get("WK_VM_PASSWORD") or PASSWORD
 
 
 def login_note(env):
@@ -1027,7 +988,6 @@ def _vm(root, machine, env):
 
 
 def pat_converge(root, env, machine):
-    """The guests' injector serves every guest on a macOS host, wherever the vm place's store is."""
     vm = _vm(root, machine, env)
     return not Store(vm.env).macos_host or Host(vm).pat_converge()
 
@@ -1075,28 +1035,16 @@ def vm_push_keys_converge(root, machine, action, env=None):
     return ok
 
 
-def vm_push_agent_keys(root, machine, env=None):
-    host = Host(_vm(root, machine, env))
-    return len(host.secrets.agent_list(host.agent_sock()))
-
-
-def vm_push_keys_state(root, machine, env=None):
-    """(guest, state, what it reaches) per guest; a stopped one is reported, never started."""
+def vm_push_status(root, machine, env=None):
+    """(keys in push_agent's agent, [(guest, state, what it reaches)]); a stopped guest is reported, never started."""
     vm = _vm(root, machine, env)
-    if not vm.vm_store_apart():
-        return []
     host = Host(vm)
-    n = len(host.secrets.agent_list(host.agent_sock()))
-    rows = []
-    for g in vm.workspaces():
+    n, rows = len(host.secrets.agent_list(host.agent_sock())), []
+    for g in vm.workspaces() if vm.vm_store_apart() else ():
         state = vm.info(g) or "unknown"
-        if state != "running":
-            rows.append((g, state, ""))
-        elif n and vm.guest_of(vm.vm(g)).run(["test", "-S", vm.agent_sock()]).ok:
-            rows.append((g, "running", "%d key(s) through the agent on this host" % n))
-        else:
-            rows.append((g, "running", ""))
-    return rows
+        reaches = state == "running" and n and vm.guest_of(vm.vm(g)).run(["test", "-S", vm.agent_sock()]).ok
+        rows.append((g, state, "%d key(s) through the agent on this host" % n if reaches else ""))
+    return n, rows
 
 
 def rubble(vm):

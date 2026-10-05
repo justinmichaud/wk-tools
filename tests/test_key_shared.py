@@ -31,27 +31,21 @@ exit 0
 class _Shared(WkTest):
     def base_env(self):
         env = dict(os.environ)
-        for var in ("WK_NAME", "WK_PLACE", "WK_DRIVER", "WK_MARKER",
-                    "WK_STORE", "WK_IN_VM"):
+        for var in ("WK_NAME", "WK_PLACE", "WK_DRIVER", "WK_MARKER", "WK_STORE", "WK_IN_VM"):
             env.pop(var, None)
         store = self.tmp / "store"
         self.secrets = store / "secrets"
         self.held = store / "push-keys"
-        env.update({"WK_HOST_SECRETS": str(self.secrets), "WK_STORE": str(store),
-                    "WK_NTFY_API": "http://127.0.0.1:1", "WK_YES": "1",
-                    "WK_GITHUB_API": "http://127.0.0.1:1",
-                    "WK_MACHINES_DIR": str(self.tmp / "reg")})
+        env.update({"WK_HOST_SECRETS": str(self.secrets), "WK_STORE": str(store), "WK_NTFY_API": "http://127.0.0.1:1",
+                    "WK_YES": "1", "WK_GITHUB_API": "http://127.0.0.1:1", "WK_MACHINES_DIR": str(self.tmp / "reg")})
         (self.tmp / "reg").mkdir(exist_ok=True)
         return env
 
     def key(self, *args, stubs=None, input=None, env=None):
-        e = self.base_env()
-        if env:
-            e.update(env)
-        with stub_path({**(stubs or {})}) as binp:
+        e = {**self.base_env(), **(env or {})}
+        with stub_path(stubs or {}) as binp:
             e["PATH"] = f"{binp}:/usr/bin:/bin:/usr/sbin:/sbin"
-            return subprocess.run([str(KEY), *args], cwd=str(REPO), env=e,
-                                  input=input, capture_output=True, text=True,
+            return subprocess.run([str(KEY), *args], cwd=str(REPO), env=e, input=input, capture_output=True, text=True,
                                   timeout=120)
 
     def fleet(self):
@@ -66,9 +60,8 @@ class _Shared(WkTest):
             wk = root / "tools" / "wk"
             wk.write_text(PEER_WK)
             wk.chmod(0o755)
-            (reg / f"{name}.conf").write_text(
-                f"kind={'peer' if peer else 'build'}\nhost=fake-{name}\nroot={root}\n"
-                + ("peer=1\n" if peer else ""))
+            (reg / f"{name}.conf").write_text(f"kind={'peer' if peer else 'build'}\nhost=fake-{name}\nroot={root}\n"
+                                              + ("peer=1\n" if peer else ""))
         return {"WK_TEST_PEER_LOG": str(log)}
 
 
@@ -81,10 +74,8 @@ class TestAdopt(_Shared):
         self.assertEqual(shared, (self.held / "build_key_forkwpe").read_text())
         self.assertFalse((self.secrets / "build_key_forkwpe").exists())
         self.assertEqual(0o600, (self.held / "build_key_forkwpe").stat().st_mode & 0o777)
-        a = subprocess.run(["ssh-keygen", "-lf", str(self.secrets / "build_key_fork.pub")],
-                           capture_output=True, text=True).stdout.split()[1]
-        b = subprocess.run(["ssh-keygen", "-lf", str(self.secrets / "build_key_forkwpe.pub")],
-                           capture_output=True, text=True).stdout.split()[1]
+        a, b = (subprocess.run(["ssh-keygen", "-lf", str(self.secrets / f"build_key_{f}.pub")], capture_output=True,
+                               text=True).stdout.split()[1] for f in ("fork", "forkwpe"))
         self.assertEqual(a, b)
 
     def test_rubbish_on_stdin_is_refused_and_stores_nothing(self):
@@ -101,17 +92,10 @@ class TestAdopt(_Shared):
 
 
 # Answers as github.com for `ssh git@github.com`, and runs any other far command here.
-FLEET_SSH = ('#!/bin/sh\ncase "$*" in\n'
-             '  *git@github.com*) '
-             'case "$*" in\n'
-             '    *build_key_forkwpe*) echo "Hi justinmichaud/WPEWebKit! You\'ve '
-             'successfully authenticated, but GitHub does not provide shell access." ;;\n'
-             '    *) echo "Hi justinmichaud/WebKit! You\'ve successfully '
-             'authenticated, but GitHub does not provide shell access." ;;\n'
-             '  esac\n'
-             '  exit 0 ;;\n'
-             'esac\n'
-             'for last; do :; done\nexec bash -c "$last"\n')
+FLEET_SSH = ("#!/bin/sh\ncase \"$*\" in\n  *git@github.com*) case \"$*\" in\n    *build_key_forkwpe*) echo \"Hi "
+             "justinmichaud/WPEWebKit! You've successfully authenticated, but GitHub does not provide shell access.\" "
+             ";;\n    *) echo \"Hi justinmichaud/WebKit! You've successfully authenticated, but GitHub does not "
+             "provide shell access.\" ;;\n  esac\n  exit 0 ;;\nesac\nfor last; do :; done\nexec bash -c \"$last\"\n")
 PEER_WK = '''#!/bin/sh
 printf '%s\\n' "$*" >> "$WK_TEST_PEER_LOG"
 answer() { [ -n "$1" ] && [ -f "$1" ] && cat "$1"; return 0; }
@@ -149,15 +133,16 @@ class GitHubKnowsOnePat(FakeGitHub):
         return FakeGitHub.do_POST(self)
 
 
-class _Fleet(_Shared):
+ELECTED = ("github-pat", "bugzilla-api-key", "claude", "litellm", "tailnet", "tailnet-api", "ntfy")
 
+
+class _Fleet(_Shared):
     def setUp(self):
         super().setUp()
         GitHubKnowsOnePat.good = GOOD_PAT
         self.api = serve(GitHubKnowsOnePat, self.addCleanup)
         self.forks = [r[1] for r in secrets.forks()]
-        FakeGitHub.reset(repos=list(self.forks),
-                         pulls=dict.fromkeys(self.forks, 422))
+        FakeGitHub.reset(repos=list(self.forks), pulls=dict.fromkeys(self.forks, 422))
         self.gh_log = self.tmp / "gh.log"
         self.gh_log.write_text("")
         self.gh_keys = self.tmp / "gh.keys"
@@ -171,35 +156,25 @@ class _Fleet(_Shared):
             if key in files:
                 path.write_text(files[key])
             env["WK_TEST_PEER_" + key.upper()] = str(path)
-        env.update({"WK_TEST_GH_LOG": str(self.gh_log),
-                    "WK_TEST_GH_KEYS": str(self.gh_keys),
-                    "WK_GITHUB_API": self.api,
-                    "WK_BUGZILLA_API": "http://127.0.0.1:1",
-                    "WK_ANTHROPIC_API": "http://127.0.0.1:1",
-                    "WK_TAILNET_API": "http://127.0.0.1:1",
-                    "WK_LITELLM_API": "http://127.0.0.1:1",
+        env.update(dict.fromkeys(("WK_BUGZILLA_API", "WK_ANTHROPIC_API", "WK_TAILNET_API", "WK_LITELLM_API"),
+                                 "http://127.0.0.1:1"))
+        env.update({"WK_TEST_GH_LOG": str(self.gh_log), "WK_TEST_GH_KEYS": str(self.gh_keys), "WK_GITHUB_API": self.api,
                     "WK_TS_AUTHKEY": str(self.tmp / "tailscale-authkey"),
-                    "WK_TS_API_SECRET": str(self.tmp / "tailscale-api-key"),
-                    "HOME": str(self.tmp / "home")})
+                    "WK_TS_API_SECRET": str(self.tmp / "tailscale-api-key"), "HOME": str(self.tmp / "home")})
         (self.tmp / "home").mkdir(exist_ok=True)
         return env
 
     def registered(self):
-        self.gh_keys.write_text("".join(
-            (self.secrets / f"build_key_{f}.pub").read_text()
-            for f in ("fork", "forkwpe")))
+        self.gh_keys.write_text("".join((self.secrets / f"build_key_{f}.pub").read_text() for f in ("fork", "forkwpe")))
 
     def setup(self, *args, env=None, **stubs):
-        e = {"gh": GH_RECORDER, "ssh": FLEET_SSH}
-        e.update(stubs)
-        return self.key("setup", *args, stubs=e, env=env)
+        return self.key("setup", *args, stubs={"gh": GH_RECORDER, "ssh": FLEET_SSH, **stubs}, env=env)
 
     def check(self, pat=None, **files):
         self.key("ensure")
         if pat:
             (self.held / "github-pat").write_text(pat + "\n")
-        env = self.fleet_env(**files)
-        return self.key("check", stubs={"ssh": FLEET_SSH, "gh": GH_RECORDER}, env=env)
+        return self.key("check", stubs={"ssh": FLEET_SSH, "gh": GH_RECORDER}, env=self.fleet_env(**files))
 
     def calls(self):
         return [l for l in self.peer_log.read_text().splitlines() if l.strip()]
@@ -214,20 +189,13 @@ class _Fleet(_Shared):
 
 
 class TestEveryCredentialIsTheFleets(_Fleet):
-
-    ELECTED = ("github-pat", "bugzilla-api-key", "claude", "litellm",
-               "tailnet", "tailnet-api", "ntfy")
-
     def test_each_one_is_put_to_the_election(self):
         self.key("ensure")
         self.registered()
-        env = self.fleet_env(verdict="absent\tnothing stored\n")
-        cp = self.setup(env=env)
-        asked = [l.split(" ", 2)[2] for l in self.calls()
-                 if l.startswith("key verdict ")]
-        for name in self.ELECTED:
-            with self.subTest(name=name):
-                self.assertIn(name, asked, cp.stdout + cp.stderr)
+        cp = self.setup(env=self.fleet_env(verdict="absent\tnothing stored\n"))
+        asked = [l.split(" ", 2)[2] for l in self.calls() if l.startswith("key verdict ")]
+        for name in ELECTED:
+            self.assertIn(name, asked, cp.stdout + cp.stderr)
 
     def test_the_claude_ai_login_is_neither_elected_nor_sent(self):
         self.key("ensure")
@@ -242,8 +210,7 @@ class TestEveryCredentialIsTheFleets(_Fleet):
         self.key("ensure")
         self.registered()
         (self.held / "github-pat").write_text(OTHER_PAT + "\n")
-        env = self.fleet_env(verdict="bad\tGitHub refuses this one too\n")
-        cp = self.setup(env=env)
+        cp = self.setup(env=self.fleet_env(verdict="bad\tGitHub refuses this one too\n"))
         out = cp.stdout + cp.stderr
         self.assertNotIn("key set github-pat --paste", self.calls(), out)
         self.assertIn("wk key set github-pat --replace", out)
@@ -251,34 +218,25 @@ class TestEveryCredentialIsTheFleets(_Fleet):
 
 
 class TestCheckAsksEachWorkstationWhatItHolds(_Fleet):
-    def test_what_a_peer_holds_of_each_credential_is_a_row(self):
+    def test_what_a_peer_holds_of_each_credential_is_a_row_and_it_is_never_asked_about_the_claude_ai_login(self):
         cp = self.check(verdict="ok\tit reaches exactly the forks\n")
         out = cp.stdout + cp.stderr
-        for name in ("github-pat", "bugzilla-api-key", "claude", "litellm",
-                     "tailnet", "tailnet-api", "ntfy"):
-            with self.subTest(name=name):
-                self.assertRegex(out, r"peerbox %s\s+it reaches exactly the forks"
-                                 % name)
-
-    def test_no_peer_is_asked_about_the_claude_ai_login(self):
-        cp = self.check(verdict="ok\tit reaches exactly the forks\n")
-        self.assertNotIn("peerbox claude-login", cp.stdout + cp.stderr)
+        for name in ELECTED:
+            self.assertRegex(out, r"peerbox %s\s+it reaches exactly the forks" % name)
+        self.assertNotIn("peerbox claude-login", out)
         self.assertNotIn("key verdict claude-login", self.calls())
 
     def test_a_peer_holding_none_of_the_fleets_is_a_fault_with_one_remedy(self):
         cp = self.check(verdict="absent\tnothing stored\n")
         out = cp.stdout + cp.stderr
         self.assertRegex(out, r"peerbox github-pat\s+nothing stored")
-        self.assertRegex(out.split("needs you:")[1],
-                         r"peerbox github-pat\s+wk key setup\s+\(it puts the fleet's "
-                         r"github-pat there\)")
+        self.assertRegex(out.split("needs you:")[1], r"peerbox github-pat\s+wk key setup\s+\(it puts the fleet's github-pat there\)")
         self.assertNotEqual(0, cp.returncode)
 
     def test_a_peer_holding_the_same_one_does_not_repeat_its_reach(self):
         """A peer holding the very credential this machine holds is reported as that, its reach once."""
         fp = self.held_pat(GOOD_PAT)
-        cp = self.check(verdict="ok\tit reaches exactly the forks\n"
-                                "    fingerprint: %s\n" % fp)
+        cp = self.check(verdict="ok\tit reaches exactly the forks\n    fingerprint: %s\n" % fp)
         out = cp.stdout + cp.stderr
         self.assertRegex(out, r"peerbox github-pat\s+the one this machine holds")
         self.assertNotRegex(out, r"peerbox github-pat\s+it reaches exactly the forks")
@@ -287,23 +245,16 @@ class TestTheFleetSettlesWhatThisMachineCannotUse(_Fleet):
     """A credential missing or refused here is settled by `wk key setup` when a peer holds a working one."""
 
     def peer_holds_a_working_one(self, fingerprint="not-the-one-here"):
-        return dict(verdict="ok\tit reaches exactly the forks\n"
-                            "    fingerprint: %s\n" % fingerprint)
+        return dict(verdict="ok\tit reaches exactly the forks\n    fingerprint: %s\n" % fingerprint)
 
-    def test_one_this_machine_has_none_of_is_taken_rather_than_asked_for_in_one_line(self):
-        cp = self.check(**self.peer_holds_a_working_one())
-        needs = (cp.stdout + cp.stderr).split("needs you:")[1]
-        self.assertRegex(needs, r"github-pat\s+wk key setup\s+\(peerbox holds one "
-                                r"its issuer accepts\)")
-        self.assertEqual(1, len([l for l in needs.splitlines() if "litellm" in l]), needs)
-
-    def test_one_the_issuer_refuses_here_is_settled_by_the_fleet(self):
-        cp = self.check(pat=OTHER_PAT, **self.peer_holds_a_working_one())
-        out = cp.stdout + cp.stderr
-        needs = out.split("needs you:")[1]
-        self.assertRegex(needs, r"github-pat\s+wk key setup\s+\(peerbox holds one "
-                                r"its issuer accepts\)")
-        self.assertNotRegex(needs, r"\n\s+\d+\. github-pat\s+wk key set github-pat")
+    def test_one_missing_or_refused_here_is_taken_from_the_fleet_rather_than_asked_for_in_one_line(self):
+        for pat in (None, OTHER_PAT):
+            with self.subTest(pat=pat):
+                cp = self.check(pat=pat, **self.peer_holds_a_working_one())
+                needs = (cp.stdout + cp.stderr).split("needs you:")[1]
+                self.assertRegex(needs, r"github-pat\s+wk key setup\s+\(peerbox holds one its issuer accepts\)")
+                self.assertNotRegex(needs, r"\n\s+\d+\. github-pat\s+wk key set github-pat")
+                self.assertEqual(1, len([l for l in needs.splitlines() if "litellm" in l]), needs)
 
     def test_a_peer_holding_the_same_one_sends_you_to_the_issuer(self):
         fp = self.held_pat(OTHER_PAT)

@@ -156,6 +156,20 @@ class MachineTest(unittest.TestCase):
     def runs(self, w):
         return [e[1] for e in w.fake.effects if e[0] == "run"]
 
+    def verb(self, want, verb, *args, w=None, env=(), **kw):
+        """`wk machine <verb>` over `w` (else a world made of `kw`), asserted to end `want`; the world and its stderr."""
+        w = w or self.world(**kw)
+        with mock.patch.dict(os.environ, dict(env)):
+            rc, err = self.quiet(getattr(w.machines(), verb), *args)
+        self.assertEqual(rc, want, err)
+        return w, err
+
+    def converges(self, world, verb, *args):
+        def run_once(w):
+            with contextlib.redirect_stderr(io.StringIO()):
+                getattr(w.machines(), verb)(*args)
+        converges(self, world, run_once, World.state)
+
 
 class TestSharedHomeProvisioning(unittest.TestCase):
     def provision(self, home, driver, root):
@@ -243,223 +257,147 @@ class TestNodeForPi(unittest.TestCase):
         self.fail("live")
 
 
+BUILD = "kind=build\ndriver=remote\n"
+BOARD = "kind=board\nssh=box\ndriver=pi-sd\n"
+DRY = {"WK_DRY_RUN": "1"}
+SHARED = "Your home directory is shared across all of these boxes.\n"
+
+
 class TestSetup(MachineTest):
-    def test_a_first_setup_without_a_conf_needs_the_kind_and_changes_nothing(self):
-        w = self.world()
-        rc, err = self.quiet(w.machines().setup, "box")
-        self.assertEqual(rc, 1)
+    def test_a_first_setup_without_a_conf_needs_the_kind_and_after_that_the_conf_is_the_answer(self):
+        w, err = self.verb(1, "setup", "box")
         self.assertIn("--kind build", err)
         self.assertEqual(w.fake.effects, [])
-
-    def test_a_first_setup_writes_the_conf_of_the_kind_it_was_given(self):
-        w = self.world()
-        rc, err = self.quiet(w.machines().setup, "box", "build")
-        self.assertEqual(rc, 0, err)
-        conf = w.fake.files[str(w.fleet / "box.conf")]
-        self.assertIn("kind=build\n", conf)
-
-    def test_after_that_the_conf_is_the_answer(self):
-        w = self.world(conf="kind=peer\ndriver=remote\npeer=1\n")
-        rc, err = self.quiet(w.machines().setup, "box", "build")
-        self.assertEqual(rc, 1)
+        w, _ = self.verb(0, "setup", "box", "build")
+        self.assertIn("kind=build\n", w.fake.files[str(w.fleet / "box.conf")])
+        w, _ = self.verb(1, "setup", "box", "build", conf="kind=peer\ndriver=remote\npeer=1\n")
         self.assertEqual(w.fake.effects, [])
 
     def test_a_shared_home_needs_a_root_of_its_own_and_nothing_is_changed_without_one(self):
-        w = self.world(conf="kind=build\n")
-        w.motd = "Your home directory is shared across all of these boxes.\n"
-        rc, err = self.quiet(w.machines().setup, "box")
-        self.assertEqual(rc, 1)
-        self.assertIn("root=", err)
-        self.assertEqual([r for r in self.runs(w) if r[0] == "env"], [])
-        w = self.world(conf="kind=build\nroot=%s/wk-box\n" % HOME)
-        w.motd = "Your home directory is shared across all of these boxes.\n"
-        rc, err = self.quiet(w.machines().setup, "box")
-        self.assertEqual(rc, 0, err)
+        for conf, want in (("kind=build\n", 1), ("kind=build\nroot=%s/wk-box\n" % HOME, 0)):
+            w = self.world(conf=conf)
+            w.motd = SHARED
+            _, err = self.verb(want, "setup", "box", w=w)
+            if want:
+                self.assertIn("root=", err)
+                self.assertEqual([r for r in self.runs(w) if r[0] == "env"], [])
 
     def test_a_missing_required_tool_stops_it_before_any_change(self):
-        w = self.world(deps=DEPS_PROBE.replace("tool.git=/usr/bin/git", "tool.git="))
-        rc, err = self.quiet(w.machines().setup, "box", "build")
-        self.assertEqual(rc, 1)
+        w, err = self.verb(1, "setup", "box", "build", deps=DEPS_PROBE.replace("tool.git=/usr/bin/git", "tool.git="))
         self.assertIn("sudo apt-get update && sudo apt-get install -y git", err)
         self.assertEqual([e for e in w.fake.effects if e[0] != "run" or e[1][0] not in ("sh", "bash", "git", "python3", "id")], [])
 
-    def test_the_machine_is_probed_once_for_the_whole_setup(self):
-        w = self.world(conf="kind=build\ndriver=remote\n")
-        self.quiet(w.machines().setup, "box")
-        probes = [r for r in self.runs(w) if r[:2] == ("sh", "-c") and r[2] == places.PROBE_SCRIPT]
-        self.assertEqual(len(probes), 1)
-        self.assertEqual(len([r for r in self.runs(w) if r[:2] == ("bash", "-s")]), 1)
+    def test_the_machine_is_probed_once_and_provisioning_is_handed_the_inputs_hash(self):
+        w, _ = self.verb(0, "setup", "box", conf=BUILD)
+        self.assertEqual(1, len([r for r in self.runs(w) if r[:2] == ("sh", "-c") and r[2] == places.PROBE_SCRIPT]))
+        self.assertEqual(1, len([r for r in self.runs(w) if r[:2] == ("bash", "-s")]))
+        (prov,) = [r for r in self.runs(w) if r[0] == "env" and r[-1].endswith("remote/provision.sh")]
+        self.assertIn("WK_REMOTE_INPUTS=" + deps.inputs_hash(REPO), prov)
+        self.assertIn("WK_REMOTE_ROOT=%s/wk" % HOME, prov)
 
     def test_an_unreachable_machine_is_refused_by_ssh_word(self):
-        w = self.world(conf="kind=build\ndriver=remote\n", answers=False)
-        rc, err = self.quiet(w.machines().setup, "box")
-        self.assertEqual(rc, 1)
-        self.assertIn("connect to host box port 22: Connection refused", err)
+        self.assertIn("connect to host box port 22: Connection refused",
+                      self.verb(1, "setup", "box", conf=BUILD, answers=False)[1])
 
     def test_a_key_no_target_reads_is_refused_before_anything_is_asked(self):
-        w = self.world(conf="kind=build\nhots=box\n")
-        rc, err = self.quiet(w.machines().setup, "box")
-        self.assertEqual(rc, 1)
+        w, err = self.verb(1, "setup", "box", conf="kind=build\nhots=box\n")
         self.assertIn("hots is not a key a build machine's conf takes", err)
         self.assertEqual(self.runs(w), [])
 
-    def test_provisioning_is_handed_the_inputs_hash(self):
-        w = self.world(conf="kind=build\ndriver=remote\n")
-        self.quiet(w.machines().setup, "box")
-        prov = [r for r in self.runs(w) if r[0] == "env" and r[-1].endswith("remote/provision.sh")]
-        self.assertEqual(len(prov), 1)
-        self.assertIn("WK_REMOTE_INPUTS=" + deps.inputs_hash(REPO), prov[0])
-        self.assertIn("WK_REMOTE_ROOT=%s/wk" % HOME, prov[0])
-
-    def test_an_old_checkout_is_asked_about_once_and_removed(self):
-        w = self.world(conf="kind=build\ndriver=remote\n", old_tools=(HOME + "/Development/wk-tools",))
+    def test_an_old_checkout_is_asked_about_once_and_removed_and_a_declined_one_left(self):
+        old = HOME + "/Development/wk-tools"
         with mock.patch.object(act, "confirm", return_value=True) as asked:
-            rc, err = self.quiet(w.machines().setup, "box")
-        self.assertEqual(rc, 0, err)
+            w, _ = self.verb(0, "setup", "box", conf=BUILD, old_tools=(old,))
         self.assertEqual(asked.call_count, 1)
-        self.assertNotIn(HOME + "/Development/wk-tools", w.fake.dirs)
-        self.assertIn(("rm", "-rf", HOME + "/Development/wk-tools"), self.runs(w))
-
-    def test_a_declined_cleanup_leaves_it_and_provisions_anyway(self):
-        w = self.world(conf="kind=build\ndriver=remote\n", old_tools=(HOME + "/wk-tools",))
+        self.assertNotIn(old, w.fake.dirs)
+        self.assertIn(("rm", "-rf", old), self.runs(w))
         with mock.patch.object(act, "confirm", return_value=False):
-            rc, err = self.quiet(w.machines().setup, "box")
-        self.assertEqual(rc, 0, err)
-        self.assertIn(HOME + "/wk-tools", w.fake.dirs)
+            w, _ = self.verb(0, "setup", "box", conf=BUILD, old_tools=(old,))
+        self.assertIn(old, w.fake.dirs)
         self.assertIn(HOME + "/.wk-remote", w.fake.files)
 
     def test_a_setup_killed_after_any_effect_and_rerun_converges(self):
-        worlds = []
-
-        def world():
-            worlds.append(self.world(old_tools=(HOME + "/wk-tools",)))
-            return worlds[-1]
-
-        def run_once(w):
-            with contextlib.redirect_stderr(io.StringIO()):
-                w.machines().setup("box", "build")
-        converges(self, world, run_once, World.state)
+        self.converges(lambda: self.world(old_tools=(HOME + "/wk-tools",)), "setup", "box", "build")
 
     def test_a_dry_run_is_the_wet_runs_plan_and_touches_nothing(self):
-        wet = self.world(old_tools=(HOME + "/wk-tools",))
-        self.quiet(wet.machines().setup, "box", "build")
+        wet, _ = self.verb(0, "setup", "box", "build", old_tools=(HOME + "/wk-tools",))
         acted = [r for r in self.runs(wet) if r[0] in ("env", "rm") or (r[:2] == ("sh", "-c") and r[2].startswith(("umask", "rm -f")))]
         self.assertGreaterEqual(len(acted), 5)
         dry = self.world(old_tools=(HOME + "/wk-tools",))
         before = dry.state()
-        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
-            rc, err = self.quiet(dry.machines().setup, "box", "build")
-        self.assertEqual(rc, 0, err)
+        _, err = self.verb(0, "setup", "box", "build", w=dry, env=DRY)
         self.assertEqual(dry.state(), before)
         for r in acted:
             self.assertIn("would run on both: " + " ".join(shlex.quote(a) for a in r), err)
         self.assertIn(("write", str(dry.fleet / "box.conf")), dry.fake.effects)
 
     def test_a_peer_is_asked_for_its_own_wk_and_not_provisioned(self):
-        w = self.world(conf="kind=peer\ndriver=remote\npeer=1\ntools=Development/wk-tools\n")
-        rc, err = self.quiet(w.machines().setup, "box")
-        self.assertEqual(rc, 0, err)
+        w, _ = self.verb(0, "setup", "box", conf="kind=peer\ndriver=remote\npeer=1\ntools=Development/wk-tools\n")
         self.assertIn(("sh", "-c", "test -x %s/Development/wk-tools/wk" % HOME), self.runs(w))
         self.assertFalse([r for r in self.runs(w) if r[0] == "env"])
 
 
 class TestRm(MachineTest):
-    CONF = "kind=build\ndriver=remote\n"
+    def deployed(self):
+        w = self.world(conf=BUILD)
+        w.fake.files[HOME + "/.wk-remote"] = "place=box\n"
+        return w
 
     def test_a_machine_with_workspaces_is_refused_by_name(self):
-        w = self.world(conf=self.CONF, ws=("big",))
-        rc, err = self.quiet(w.machines().rm, "box")
-        self.assertEqual(rc, 1)
+        w, err = self.verb(1, "rm", "box", conf=BUILD, ws=("big",))
         self.assertIn("big", err)
         self.assertFalse([r for r in self.runs(w) if r[:2] == ("sh", "-c") and r[2] == build.DEPROVISION])
 
     def test_it_deprovisions_and_keeps_the_conf(self):
-        w = self.world(conf=self.CONF)
-        w.fake.files[HOME + "/.wk-remote"] = "place=box\n"
-        rc, err = self.quiet(w.machines().rm, "box")
-        self.assertEqual(rc, 0, err)
+        w, err = self.verb(0, "rm", "box", w=self.deployed())
         self.assertNotIn(HOME + "/.wk-remote", w.fake.files)
         self.assertNotIn(HOME + "/wk", w.fake.dirs)
         self.assertTrue((w.fleet / "box.conf").exists())
         self.assertIn("git rm machines/box.conf", err.replace(str(w.fleet), "machines"))
 
     def test_an_unreachable_machine_or_board_only_loses_its_conf_here(self):
-        for conf in (self.CONF, TestBoardRm.CONF):
+        for conf in (BUILD, BOARD):
             with self.subTest(conf=conf):
-                w = self.world(conf=conf, answers=False)
-                rc, err = self.quiet(w.machines().rm, "box")
-                self.assertEqual(rc, 0, err)
+                w, err = self.verb(0, "rm", "box", conf=conf, answers=False)
                 self.assertIn("Connection refused", err)
                 self.assertEqual([e for e in w.fake.effects if e[0] == "remove"], [("remove", str(w.fleet / "box.conf"))])
 
     def test_an_rm_killed_after_any_effect_and_rerun_converges(self):
-        def world():
-            w = self.world(conf=self.CONF)
-            w.fake.files[HOME + "/.wk-remote"] = "place=box\n"
-            return w
-
-        def run_once(w):
-            with contextlib.redirect_stderr(io.StringIO()):
-                w.machines().rm("box")
-        converges(self, world, run_once, World.state)
+        self.converges(self.deployed, "rm", "box")
 
 
-class TestBoardSetup(MachineTest):
-    CONF = "kind=board\nssh=box\ndriver=pi-sd\n"
+class TestBoard(MachineTest):
+    HELPERS = ("/usr/local/libexec/wk-card-priv", "/usr/local/libexec/wk-check-boot-files.py")
 
-    def test_it_installs_the_card_helper(self):
-        w = self.world(conf=self.CONF)
-        rc, err = self.quiet(w.machines().setup, "box")
-        self.assertEqual(rc, 0, err)
-        copies = [e[2] for e in w.fake.effects if e[0] == "copy_in"]
-        self.assertEqual(copies, ["/usr/local/libexec/wk-card-priv", "/usr/local/libexec/wk-check-boot-files.py"])
-        self.assertIn(("run", ("chmod", "+x", "/usr/local/libexec/wk-card-priv")), w.fake.effects)
-        self.assertIn(("run", ("chmod", "+x", "/usr/local/libexec/wk-check-boot-files.py")), w.fake.effects)
+    def test_setup_installs_the_card_helper(self):
+        w, _ = self.verb(0, "setup", "box", conf=BOARD)
+        self.assertEqual([e[2] for e in w.fake.effects if e[0] == "copy_in"], list(self.HELPERS))
+        for helper in self.HELPERS:
+            self.assertIn(("run", ("chmod", "+x", helper)), w.fake.effects)
 
     def test_an_unreachable_board_is_refused_and_nothing_is_changed(self):
-        w = self.world(conf=self.CONF, answers=False)
-        rc, err = self.quiet(w.machines().setup, "box")
-        self.assertEqual(rc, 1)
+        w, err = self.verb(1, "setup", "box", conf=BOARD, answers=False)
         self.assertIn("Connection refused", err)
         self.assertEqual([e for e in w.fake.effects if e[0] in ("copy_in", "write", "remove")], [])
 
     def test_a_dry_run_is_the_wet_runs_plan_and_touches_nothing(self):
-        dry = self.world(conf=self.CONF)
+        dry = self.world(conf=BOARD)
         before = dry.state()
-        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
-            rc, err = self.quiet(dry.machines().setup, "box")
-        self.assertEqual(rc, 0, err)
+        self.assertIn("wk-card-priv", self.verb(0, "setup", "box", w=dry, env=DRY)[1])
         self.assertEqual(dry.state(), before)
-        self.assertIn("wk-card-priv", err)
 
     def test_a_setup_killed_after_any_effect_and_rerun_converges(self):
-        def world():
-            return self.world(conf=self.CONF)
-
-        def run_once(w):
-            with contextlib.redirect_stderr(io.StringIO()):
-                w.machines().setup("box")
-        converges(self, world, run_once, World.state)
+        self.converges(lambda: self.world(conf=BOARD), "setup", "box")
 
     def test_an_unreachable_board_or_mac_still_prints_the_plan_under_dry_run(self):
-        for conf, plan in ((self.CONF, "wk-card-priv"), ("kind=mac\nssh=box\n", "would push")):
+        for conf, plan in ((BOARD, "wk-card-priv"), ("kind=mac\nssh=box\n", "would push")):
             with self.subTest(conf=conf):
-                w = self.world(conf=conf, answers=False)
-                with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
-                    rc, err = self.quiet(w.machines().setup, "box")
-                self.assertEqual(rc, 0, err)
-                self.assertIn(plan, err)
+                self.assertIn(plan, self.verb(0, "setup", "box", conf=conf, answers=False, env=DRY)[1])
 
-
-class TestBoardRm(MachineTest):
-    CONF = "kind=board\nssh=box\ndriver=pi-sd\n"
-
-    def test_it_removes_the_card_helper_and_the_conf(self):
-        w = self.world(conf=self.CONF)
-        rc, err = self.quiet(w.machines().rm, "box")
-        self.assertEqual(rc, 0, err)
-        self.assertIn(("run", ("rm", "-f", "/usr/local/libexec/wk-card-priv")), w.fake.effects)
-        self.assertIn(("run", ("rm", "-f", "/usr/local/libexec/wk-check-boot-files.py")), w.fake.effects)
+    def test_rm_removes_the_card_helper_and_the_conf(self):
+        w, _ = self.verb(0, "rm", "box", conf=BOARD)
+        for helper in self.HELPERS:
+            self.assertIn(("run", ("rm", "-f", helper)), w.fake.effects)
         self.assertEqual([e for e in w.fake.effects if e[0] == "remove"], [("remove", str(w.fleet / "box.conf"))])
 
 
@@ -484,13 +422,10 @@ class TestBridgeDispatch(MachineTest):
         tn.assert_called_once_with("phone", at=None)
 
     def test_tailnet_is_refused_for_anything_but_a_bridge(self):
-        w = self.world(conf="kind=build\ndriver=remote\n")
-        rc, err = self.quiet(w.machines().tailnet, "box")
-        self.assertEqual(rc, 1)
-        self.assertIn("not a bridge", err)
+        self.assertIn("not a bridge", self.verb(1, "tailnet", "box", conf=BUILD)[1])
 
     def test_the_bridge_flags_are_refused_for_a_build_machine(self):
-        w = self.world(conf="kind=build\ndriver=remote\n")
+        w = self.world(conf=BUILD)
         rc, err = self.quiet(lambda: w.machines().setup("box", at="10.0.0.9"))
         self.assertEqual(rc, 1)
         self.assertIn("are a bridge's", err)
@@ -506,15 +441,12 @@ class TestBridgeDispatch(MachineTest):
             self.quiet(lambda: w.machines().status())
         status.assert_called_once_with("phone", at="10.0.0.9")
         ls.assert_called_once_with()
-        w = self.world(conf="kind=build\ndriver=remote\n")
-        rc, err = self.quiet(w.machines().status, "box")
-        self.assertEqual(rc, 1)
-        self.assertIn("not a bridge", err)
+        self.assertIn("not a bridge", self.verb(1, "status", "box", conf=BUILD)[1])
 
 
 class TestProbeAndLs(MachineTest):
     def test_a_machine_that_does_not_answer_is_named_with_why(self):
-        w = self.world(conf="kind=build\ndriver=remote\n", answers=False)
+        w = self.world(conf=BUILD, answers=False)
         w.fake.answer(["tailscale"], rc=1)
         w.fake.answer(["ssh", "-G"], rc=1)
         out = io.StringIO()
@@ -539,7 +471,7 @@ class TestProbeAndLs(MachineTest):
         self.assertEqual(len(out.getvalue().strip().splitlines()), 1)
 
     def test_ls_reads_the_tailnet_once(self):
-        w = self.world(conf="kind=build\ndriver=remote\n")
+        w = self.world(conf=BUILD)
         (w.fleet / "other.conf").write_text("kind=peer\ndriver=remote\n")
         w.fake.answer(["tailscale", "status", "--json"], out=json.dumps({"Peer": {"k": {"DNSName": "box.ts.net.", "TailscaleIPs": ["100.64.0.9"], "Online": True}}}))
         out = io.StringIO()

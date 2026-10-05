@@ -13,13 +13,14 @@ from fnmatch import fnmatchcase
 
 from wk import act, fleet, git, images, job, pgo, pr, record as progress, sched, sync
 from wk.act import Refused, die, info, log, warn
-from wk.bench import board, board_ab, record
+from wk.bench import board, record
 from wk.lock import Lock
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
 NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 RELEASE_OF = re.compile(r"^(wpe-|webkitglib/)([0-9]+\.[0-9]+)$")
 ROUNDS, PLAN = "5", "speedometer3"
+MAX_ROUNDS = 40
 SLOTS = 'for s in %s/*/slot.json; do [ -f "$s" ] && basename "$(dirname "$s")"; done 2>/dev/null; true' % board.SLOTS_DIR
 USAGE = ("usage: wk bench ab <pr-spec|branch|sha> --devices <a,b> [--release X.Y] [--builder B] [--bits N] [--base <sha>]\n"
          "           [--build-on <a[,b]>] [--plan P]... [--rounds N] [--count N] [--timeout S] [--detach]\n"
@@ -29,6 +30,67 @@ USAGE = ("usage: wk bench ab <pr-spec|branch|sha> --devices <a,b> [--release X.Y
 BUILD_ONLY = ("release", "builder", "bits", "base", "build_on")
 MAC_ONLY = ("patch", "preset", "settle", "a_args", "b_args", "plant", "rehearse", "allow_network_fetch",
             "preflight", "progress", "status", "collect")
+
+
+def pair(spec, what):
+    a, _, b = (spec or "").partition(",")
+    if not a or not b or "," in b:
+        die("--%s takes two names separated by a comma, e.g. --%s base,pr" % (what, what))
+    if a == b:
+        die("--%s needs two different arms (got '%s' twice). Two runs of one arm measure it twice,\n"
+            "    which is a repeatability check rather than an A/B -- '--count N' asks for that." % (what, a))
+    return a, b
+
+
+def rounds_of(o, default="3"):
+    rounds = o.get("rounds") or default
+    if not rounds.isdigit() or int(rounds) < 1:
+        die("--rounds takes a number of at least 1 (got '%s')" % rounds)
+    return int(rounds)
+
+
+def stopping(o, rounds, detect="0"):
+    """(max_rounds, detect): past --rounds the rounds go on until scores.resolved says they resolve --detect percent,
+    up to --max-rounds; --detect 0 runs --rounds exactly."""
+    pct = o.get("detect") or detect
+    try:
+        goal = float(pct)
+    except ValueError:
+        goal = -1
+    if goal < 0:
+        die("--detect '%s' is not a percentage (0.3 is a third of one per cent; 0 runs --rounds exactly)" % pct)
+    top = o.get("max_rounds") or str(MAX_ROUNDS if goal else rounds)
+    if not top.isdigit():
+        die("--max-rounds takes a number (got '%s')" % top)
+    if int(top) < rounds:
+        die("--max-rounds %s is below --rounds %d: --rounds is the floor it alternates from" % (top, rounds))
+    return int(top), goal
+
+
+def interleave(first, top, detect, play, resolved, lost_limit):
+    """(outcome, kept, lost): rounds until `first` without `detect`, else until resolved(i) past `first` or `top`."""
+    kept = lost = 0
+    for i in range(1, (top if detect else first) + 1):
+        if play(i):
+            kept += 1
+        else:
+            lost += 1
+            if lost >= lost_limit:
+                return "lost-at-round-%d" % i, kept, lost
+        if detect and i >= first and resolved(i):
+            return "resolved-at-round-%d" % i, kept, lost
+    return ("hit-max-rounds" if detect else "rounds-done"), kept, lost
+
+
+def flags(o, keys):
+    """`--key value` for each of `keys` set in `o`."""
+    return [w for k in keys if o.get(k) for w in ("--" + k.replace("_", "-"), o[k])]
+
+
+def refuse(o, keys, why):
+    given = flags(o, keys)
+    if given:
+        die(why % given[0])
 
 
 def legs_per_plan(rounds, systems):
@@ -53,7 +115,7 @@ def leg_seconds(reg, homes, device, plan, count):
 
 
 def check_plan(o, default_plans):
-    rounds = board_ab.rounds_of(o, ROUNDS)
+    rounds = rounds_of(o, ROUNDS)
     for key, what in (("count", "a number"), ("timeout", "seconds")):
         if o.get(key) and not o[key].isdigit():
             die("--%s takes %s (got '%s')" % (key, what, o[key]))
@@ -69,6 +131,47 @@ def duration(seconds):
     return "%dh%02dm" % (m // 60, m % 60) if m >= 60 else "%dm" % max(m, 1)
 
 
+class Task:
+    """What every A/B driver holds: its options, the lock its task is taken under, and that task once it is named."""
+
+    def __init__(self, root, reg, clock, o):
+        self.root, self.reg, self.clock, self.o = str(root), reg, clock, dict(o)
+        self.here, self.env = reg.machine, reg.env
+        self.lock = Lock(reg.store, reg.machine, clock)
+        self.task = self.o.get("task") or ""
+
+    def shape(self, devices, plans, slots):
+        """The fields `wk bench report`, `ls` and `export` read every task by."""
+        return ["devices=" + devices, "plans=" + ",".join(plans), "rounds=%d" % self.rounds, "slots=" + ",".join(dict.fromkeys(slots))]
+
+    def new_task(self, home, task, fields, command):
+        self.task = task
+        return record.new_task(*home, task, self.lock, self.clock.iso(), fields, command)
+
+    def guarded(self, body, end):
+        """body() under the signals; `end` is told 0, the refusal's status or cancelled, and the lock is let go."""
+        rc = 1
+        try:
+            with job.Signals():
+                rc = body()
+            return rc
+        except job.Interrupted as e:
+            rc = "cancelled"
+            raise Refused(job.EXIT_OF.get(e.signum, 130))
+        except Refused as e:
+            rc = e.status
+            raise
+        finally:
+            end(rc)
+            self.lock.release_all()
+
+    def reported(self, report, task):
+        try:
+            report()
+        except (Refused, SystemExit, OSError, ValueError) as e:
+            warn("the report did not complete (%s); the runs are recorded:  wk bench report %s" % (e, task))
+
+
 class Device:
     def __init__(self, name, image_preset, p):
         self.name, self.image_preset, self.p = name, image_preset, p
@@ -82,17 +185,15 @@ class Device:
         return self.mode.startswith("bench %s-" % self.image_preset)
 
 
-class AB:
+class AB(Task):
     """`boards(name)` answers (mode, slots) for a board, by default the real board's; `pool` is the executor steps run on."""
 
     def __init__(self, root, reg, clock, spec, o, boards=None, pool=futures.ThreadPoolExecutor):
-        self.root, self.reg, self.clock, self.spec, self.o = str(root), reg, clock, spec or "", dict(o)
-        self.here, self.env, self.store = reg.machine, reg.env, reg.store
+        super().__init__(root, reg, clock, o)
+        self.spec, self.store = spec or "", reg.store
         self.boards, self.pool = boards or self.board_state, pool
-        self.lock = Lock(self.store, self.here, clock)
         self.wk = os.path.join(self.root, "wk")
         self.systems = bool(self.o.get("systems"))
-        self.task = self.o.get("task") or ""
         self.me = progress.machine_name(self.env, self.here)
         self.devices, self.arms, self.pr, self._base_branch = [], [], {}, None
         self.head = self.base = self.head_desc = self.base_how = self.branch = ""
@@ -103,11 +204,9 @@ class AB:
         o = self.o
         if not o.get("devices"):
             die(USAGE + "\n    --devices names the boards (wk boot --list)")
-        given = [k for k in MAC_ONLY if o.get(k)]
-        if given:
-            die("--%s is a Mac A/B's: --devices names a board here, and a board's arms are slots" % given[0].replace("_", "-"))
+        refuse(o, MAC_ONLY, "%s is a Mac A/B's: --devices names a board here, and a board's arms are slots")
         self.rounds, self.plans = check_plan(o, [PLAN])
-        self.max_rounds, self.detect = board_ab.stopping(o, self.rounds)
+        self.max_rounds, self.detect = stopping(o, self.rounds)
         if o.get("detach") and act.dry_run():
             die("--detach and --dry-run: a dry run has nothing to detach")
         if o.get("bits") not in (None, "", "32", "64"):
@@ -125,14 +224,12 @@ class AB:
         o = self.o
         if self.spec:
             die("--systems compares two system images, so there is no change to build: drop '%s'" % self.spec)
-        given = [k for k in BUILD_ONLY if o.get(k)]
-        if given:
-            die("--%s says how to build a change's slots, and a --systems A/B builds nothing" % given[0].replace("_", "-"))
+        refuse(o, BUILD_ONLY, "%s says how to build a change's slots, and a --systems A/B builds nothing")
         if "," in o["devices"]:
             die("--systems names two system ids, and a system id names one board's image: one --devices board")
         if not o.get("workspace"):
             die("--systems keeps its task in the image workspace that built system A: --workspace <ws> ('wk sysimage ls')")
-        a, b = board_ab.pair(o["systems"], "systems")
+        a, b = pair(o["systems"], "systems")
         slot = o.get("slot") or "a"
         images.check_slot_name(slot)
         self.arms = [(a, slot), (b, slot)]
@@ -408,7 +505,7 @@ class AB:
 
     def bench_words(self, d, plan):
         ws, o = self.bench_options(d)
-        return (["bench", "run", ws, plan, "--system", d.name] + [w for k, v in o.items() if v for w in ("--" + k.replace("_", "-"), v)]
+        return (["bench", "run", ws, plan, "--system", d.name] + flags(o, o)
                 + ["--task", self.task or "<task>"])
 
     def board_state(self, name):
@@ -496,10 +593,8 @@ class AB:
                     "    wk boot %s" % (d.name, d.image_preset, d.image_preset, d.name, d.name))
 
     def argv(self):
-        words = [self.spec] if self.spec else []
-        for key in ("devices", "release", "builder", "bits", "base", "build_on", "systems", "workspace", "slot", "count", "timeout", "max_rounds", "detect"):
-            if self.o.get(key):
-                words += ["--" + key.replace("_", "-"), self.o[key]]
+        words = ([self.spec] if self.spec else []) + flags(self.o, ("devices", "release", "builder", "bits", "base", "build_on", "systems",
+                                                                   "workspace", "slot", "count", "timeout", "max_rounds", "detect"))
         for p in self.plans:
             words += ["--plan", p]
         return [self.wk, "bench", "ab"] + words + ["--rounds", str(self.rounds)]
@@ -525,8 +620,7 @@ class AB:
                     "subject.number=" + self.pr["n"], "subject.head=" + self.head, "subject.base=" + self.base, "subject.base_how=" + self.base_how,
                     "subject.release=" + self.devices[0].p["CFG_RELEASE"], "subject.branch=%s/%s" % (self.devices[0].p["CFG_REMOTE"], self.devices[0].p["CFG_BRANCH"])]
             devices = ",".join("%s=%s" % (d.name, d.image_preset) for d in self.devices)
-        return (["task=" + self.task, "requested=" + self.clock.iso(), "devices=" + devices, "plans=" + ",".join(self.plans),
-                 "rounds=%d" % self.rounds, "slots=" + ",".join(dict.fromkeys(s for _, s in self.arms))] + subj
+        return (["task=" + self.task, "requested=" + self.clock.iso()] + self.shape(devices, self.plans, (s for _, s in self.arms)) + subj
                 + ["%s=%s" % (k, self.o[k]) for k in ("count", "timeout") if self.o.get(k)]
                 + ["restart=%s --task %s" % (" ".join(["wk"] + self.argv()[1:]), self.task)])
 
@@ -584,27 +678,18 @@ class AB:
             t.step_event(order.index(step) + 1, event)
             log(sched.say_event(order, event, step, rc, os.path.join(self.logdir(), sched.log_name(step)) if step.id in self.logged else ""))
 
-        rc = 1
-        try:
-            with job.Signals():
-                s = sched.Scheduler(order, announce, pool=self.pool)
-                rc = s.run_all()
-                for line in sched.summary(s):
-                    log(line)
-                if rc:
-                    die("A/B incomplete: the steps above say which did not run, and each one's log is beside its own resource in\n"
-                        "    %s. Every round that finished is recorded ('wk bench report %s'), and re-running\n"
-                        "    'wk bench ab ... --task %s' takes up what is left." % (self.logdir(), self.task, self.task))
-                self.verify()
-        except job.Interrupted as e:
-            rc = "cancelled"
-            raise Refused(job.EXIT_OF.get(e.signum, 130))
-        except Refused as e:
-            rc = e.status
-            raise
-        finally:
-            t.end(rc)
-            self.lock.release_all()
+        def body():
+            s = sched.Scheduler(order, announce, pool=self.pool)
+            rc = s.run_all()
+            for line in sched.summary(s):
+                log(line)
+            if rc:
+                die("A/B incomplete: the steps above say which did not run, and each one's log is beside its own resource in\n"
+                    "    %s. Every round that finished is recorded ('wk bench report %s'), and re-running\n"
+                    "    'wk bench ab ... --task %s' takes up what is left." % (self.logdir(), self.task, self.task))
+            self.verify()
+            return rc
+        self.guarded(body, t.end)
         info("A/B complete: task %s in workspace %s  (wk bench ls; wk bench report %s)" % (self.task, self.home()[0], self.task))
         return 0
 

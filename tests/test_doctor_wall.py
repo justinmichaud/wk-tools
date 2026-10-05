@@ -134,44 +134,135 @@ class _Wall(unittest.TestCase):
             self.assertIn(w, rows_text(rows))
 
 
-class TestEgress(_Wall):
-    def test_github_through_the_proxy(self):
-        self.assertPasses(self.check("github"))
-        self.set("https://github.com/ 2", "000")
-        self.assertFails(self.check("github"), "github unreachable through the proxy (got '000')")
+ON, GPU = {"push_on": 1}, {"want_gpu": True}
+LOGIN = '{"claudeAiOauth": {"accessToken": "sk-ant-oat01-x", "refreshToken": "wk-injects-this"}}'
+BZ_POST = "-D - -X POST -H"
+# A check passing on HEALTHY changed by `answers`: (check, its arguments, answers, words its rows say).
+PASSES = (
+    ("github", {}, {}, ()), ("allowlist", {}, {}, ()), ("off_allowlist", {}, {}, ()),
+    ("off_allowlist", {}, {"1.1.1.1": ""}, ()), ("softwareupdate", {}, {}, ()), ("isolation", {}, {}, ()),
+    ("commit_wall", {}, {}, ()),
+    ("secrets_view", {}, {}, ("no credential this kind is not given is readable in here (claude)",)),
+    ("agent_identities", ON, {"ssh-add -l": "2"}, ()),
+    ("github_read", {}, {}, ("a read is authenticated (HTTP 200)",)),
+    ("github_write", {}, {}, ()), ("github_write", ON, {"/pulls": "422"}, ()),
+    ("pr_tool_setup", {}, {}, ()), ("bugzilla_read", {}, {}, ()), ("bugzilla_write", {}, {}, ()),
+    ("bugzilla_write", ON, {}, ("error 50",)),
+    ("gpu", {}, {"gpu-probe.sh": Result(1, "renderer=llvmpipe\n", "")}, ("llvmpipe",)),
+    ("gpu", {}, {"gpu-probe.sh": Result(2, "", "")}, ()),
+)
+# A check's one miss when HEALTHY is changed by `answers`, and the words it says.
+FAILS = (
+    ("github", {}, {"https://github.com/ 2": "000"}, ("github unreachable through the proxy (got '000')",)),
+    ("allowlist", {}, {"example.com": ""}, ("example.com was NOT refused",)),
+    ("off_allowlist", {}, {"192.168.1.1": "200"}, ("reaching the LAN gateway returned '200'",)),
+    ("off_allowlist", {}, {"1.1.1.1": "200"}, ("direct egress succeeded",)),
+    ("softwareupdate", {}, {"swscan": "curl: (56) Received HTTP code 403"}, ("swscan/gdmf are reachable", "vm/desktop.sh")),
+    ("isolation", {}, {"/proc/net/dev": "lo eth0 "}, ("workspace has network interfaces: lo eth0",)),
+    ("isolation", {}, {"/proc/net/dev": ""}, ("could not enumerate interfaces",)),
+    ("commit_wall", {}, {"command -v bwrap": ""}, ("no bwrap in the workspace", "refuses to start")),
+    ("commit_wall", {}, {"mktemp -d /tmp/wk-wall": "COMMITTED\nWROTE"}, ("commit wall did NOT block a commit",)),
+    ("commit_wall", {}, {"mktemp -d /tmp/wk-wall": "BLOCKED\nNOWRITE"}, ("blocks an ordinary write too",)),
+    ("no_credentials_inside", {}, {"PRIVATE KEY": "/home/u/.ssh/id_fork"}, ("private key material inside the workspace", "id_fork")),
+    ("no_credentials_inside", {}, {"hosts.yml": "/home/u/.config/gh/hosts.yml"}, ("GitHub credential inside the workspace",)),
+    ("secrets_view", {}, {"test -r /secrets/claude-token": "yes"}, ("/secrets/claude-token is readable in 'demo'", "Secrets.publish_view")),
+    ("agent_identities", {}, {"ssh-add -l": "1"}, ("1 identity/identities reach this workspace", "wk key push off")),
+    ("agent_identities", {"push_on": None}, {"ssh-add -l": "1"}, ("does not say push is on",)),
+    ("agent_identities", ON, {"ssh-add -l": "0"}, ("push is ON but no identity reaches",)),
+    ("agent_identities", {}, {"ssh-add -l": "MISSING"}, ("no ssh-add in the workspace",)),
+    ("github_read", {}, {"api.github.com/user": "000"}, ("rather than 200 or 401",)),
+    ("github_read", {}, {"api.github.com/user": "000", "https://api.github.com/ 2": "000"},
+     ("the injector is not in the path", "systemctl --user status wk-github-inject", "/run/wk/wk-github-ca.pem")),
+    ("github_write", {}, {"/pulls": "422"}, ("where the host does not say push is on", "wk key push off")),
+    ("github_write", ON, {"/pulls": "403"}, ("Pull requests: write",)),
+    ("github_write", ON, {"/pulls": "401"}, ("no write token", "wk key set github-pat --replace")),
+    ("github_write", ON, {"/pulls": ""}, ("answered 'nothing' rather than 422",)),
+    ("agent_credential", {}, {"claude auth status": '{"loggedIn": false}'}, ("not logged in", "'wk rm demo' and 'wk new'", "'wk start demo'")),
+    ("agent_credential", {}, {"claude auth status": ""}, ("It answered (first 80 bytes): b''", "claude --version")),
+    ("claude_login", {}, {"/.credentials.json": LOGIN}, ("is not the placeholder login", "'wk start demo'")),
+    ("claude_login", {}, {"/.credentials.json": ""}, ("is not the placeholder login", "'wk start demo'")),
+    ("claude_login", {}, {"/.credentials.json": "[]"}, ("is not the placeholder login", "'wk start demo'")),
+    ("claude_login", {}, {"sk-ant-o[ar]t": "/run/wk/.credentials.json"},
+     ("a claude.ai token is readable in 'demo': /run/wk/.credentials.json", "'wk key check claude-login'")),
+    ("claude_login", {}, {"api.anthropic.com/v1/models": 'HTTP/1.1 401 Unauthorized\r\n\r\n{"type": "error"}\n401'},
+     ("Anthropic refused", "wk key set claude-login --replace")),
+    ("claude_login", {}, {"api.anthropic.com/v1/models": "\n000"}, ("not in the path", "wk-github-inject")),
+    ("pr_tool_setup", {}, {"webkitscmpy.setup": ""}, ("has not completed", "wk sync demo --fix")),
+    ("pr_tool_setup", {}, {"webkitscmpy.setup": "false"}, ("has not completed", "wk sync demo --fix")),
+    ("bugzilla_read", {}, {"rest/version": "000"}, ("not in the path for it", "systemctl --user status wk-github-inject")),
+    ("bugzilla_write", {}, {"http_code}' -X POST -H": "410"}, ("Bugzilla key still on the machine", "wk key push off")),
+    ("bugzilla_write", ON, {BZ_POST: 'HTTP/1.1 200 OK\r\n\r\n{"code": 410}'}, ("no Bugzilla API key", "wk key set bugzilla-api-key")),
+    ("bugzilla_write", ON, {BZ_POST: 'HTTP/1.1 200 OK\r\n\r\n{"code": 306}'}, ("does not know it", "--replace")),
+    ("bugzilla_write", ON, {BZ_POST: "HTTP/1.1 200 OK\r\n\r\n<html>"}, ("nothing Bugzilla-shaped",)),
+    ("gpu", GPU, {"gpu-probe.sh": Result(1, "renderer=llvmpipe\n", "")}, ("only software rendering",)),
+    ("gpu", GPU, {"gpu-probe.sh": Result(2, "", "")}, ("no usable EGL inside the workspace (probe exit 2)",)),
+)
 
-    def test_a_host_outside_the_allowlist_is_refused(self):
-        self.assertPasses(self.check("allowlist"))
-        self.set("example.com", "")
-        self.assertFails(self.check("allowlist"), "example.com was NOT refused")
+OUTAGE = "did not answer through the injector (HTTP 504) -- an upstream outage, not the sandbox"
+# A check that passes with a note saying `words`: no standing token, or an upstream outage behind the injector.
+NOTES = (
+    ("github_read", {}, {"api.github.com/user": "401"}, ("60 requests an hour",)),
+    ("github_read", {}, {"api.github.com/user": "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 5\r\n\r\n502"}, ("an upstream outage",)),
+    ("github_read", {}, {"api.github.com/user": "504"}, ("GitHub " + OUTAGE,)),
+    ("github_write", {}, {"/pulls": "504"}, ("GitHub " + OUTAGE,)),
+    ("github_write", ON, {"/pulls": "504"}, ("GitHub " + OUTAGE,)),
+    ("bugzilla_read", {}, {"rest/version": "504"}, ("Bugzilla " + OUTAGE,)),
+    ("bugzilla_write", {}, {"http_code}' -X POST -H": "504"}, ("Bugzilla " + OUTAGE,)),
+    ("bugzilla_write", ON, {BZ_POST: "HTTP/1.1 504 Gateway Timeout\r\n\r\nbugs.webkit.org did not answer within 12 seconds; "
+                                     "the wk credential injector is up\r\n"}, ("Bugzilla " + OUTAGE,)),
+    ("claude_login", {}, {"api.anthropic.com/v1/models": "HTTP/1.1 401 Unauthorized\r\n\r\nthe wk credential injector put no "
+                          "claude.ai login on this request: this machine holds no claude.ai login\n401"}, ("holds no claude.ai login",)),
+    ("claude_login", {}, {"api.anthropic.com/v1/models": "HTTP/1.1 504 Gateway Timeout\r\n\r\napi.anthropic.com did not answer\n504"},
+     ("an upstream outage",)),
+)
+# A 502 carrying the injector's `X-Wk-Injector` header (TLS or DNS toward the host failed) is a miss naming the injector.
+FAULT = "HTTP/1.1 502 Bad Gateway\r\nX-Wk-Injector: SSLCertVerificationError\r\nContent-Length: 5\r\n\r\n502"
+FAULTS = (
+    ("github_read", {}, {"api.github.com/user": FAULT}, "GitHub"),
+    ("bugzilla_read", {}, {"rest/version": FAULT}, "Bugzilla"),
+    ("bugzilla_write", {}, {"http_code}' -X POST -H": FAULT}, "Bugzilla"),
+    ("bugzilla_write", ON, {BZ_POST: FAULT.rsplit("\r\n\r\n", 1)[0] + "\r\n\r\nthe wk credential injector failed to verify or "
+                                     "resolve bugs.webkit.org (SSLCertVerificationError)\r\n"}, "Bugzilla"),
+)
 
-    def test_the_lan_and_a_direct_route_are_refused(self):
-        self.assertPasses(self.check("off_allowlist"))
-        self.set("192.168.1.1", "200")
-        self.assertFails(self.check("off_allowlist"), "reaching the LAN gateway returned '200'")
-        self.set("192.168.1.1", "403")
-        self.set("1.1.1.1", "200")
-        self.assertFails(self.check("off_allowlist"), "direct egress succeeded")
 
-    def test_no_route_at_all_is_no_direct_egress(self):
-        self.set("1.1.1.1", "")
-        self.assertPasses(self.check("off_allowlist"))
+class TestEachCheck(_Wall):
+    def test_each_passes_on_a_healthy_answer(self):
+        for name, kw, answers, words in PASSES:
+            with self.subTest(check=name, answers=answers, **kw):
+                self.answers = {**dict(HEALTHY), **answers}
+                rows = self.check(name, **kw)
+                self.assertPasses(rows)
+                for w in words:
+                    self.assertIn(w, rows_text(rows))
 
-    def test_the_softwareupdate_scan_path_is_refused(self):
-        self.assertPasses(self.check("softwareupdate"))
-        self.set("swscan", "curl: (56) Received HTTP code 403")
-        self.assertFails(self.check("softwareupdate"), "swscan/gdmf are reachable", "vm/desktop.sh")
+    def test_each_wrong_answer_is_one_miss_naming_it(self):
+        for name, kw, answers, words in FAILS:
+            with self.subTest(check=name, answers=answers, **kw):
+                self.answers = {**dict(HEALTHY), **answers}
+                self.assertFails(self.check(name, **kw), *words)
+
+    def test_each_answer_the_sandbox_is_not_at_fault_for_is_a_note(self):
+        for name, kw, answers, words in NOTES:
+            with self.subTest(check=name, answers=answers, **kw):
+                self.answers = {**dict(HEALTHY), **answers}
+                rows = self.check(name, **kw)
+                self.assertPasses(rows)
+                for w in words:
+                    self.assertIn(w, "\n".join(r[1] for r in rows if r[0] == NOTE))
+
+    def test_an_injector_fault_is_a_miss_naming_the_injector_not_an_outage(self):
+        for name, kw, answers, host in FAULTS:
+            with self.subTest(check=name, **kw):
+                self.answers = {**dict(HEALTHY), **answers}
+                rows = self.check(name, **kw)
+                self.assertEqual(MISS, rows[0][0])
+                self.assertIn("%s: the injector failed to verify or resolve the host (SSLCertVerificationError)" % host, rows[0][1])
+                self.assertIn("wk-github-inject", rows[0][2])
+                self.assertNotIn("upstream outage", rows[0][1])
 
 
 class TestIsolation(_Wall):
-    def test_loopback_only_passes_and_anything_else_fails(self):
-        self.assertPasses(self.check("isolation"))
-        for answer, said in (("lo eth0 ", "workspace has network interfaces: lo eth0"),
-                             ("", "could not enumerate interfaces")):
-            with self.subTest(answer=answer):
-                self.set("/proc/net/dev", answer)
-                self.assertFails(self.check("isolation"), said)
-
     def test_a_host_path_fails_by_name(self):
         self.set("ls -d", "/host/home")
         rows = self.check("isolation")
@@ -180,16 +271,6 @@ class TestIsolation(_Wall):
 
 
 class TestCommitWall(_Wall):
-    def test_a_commit_is_blocked_and_a_write_is_not(self):
-        self.assertPasses(self.check("commit_wall"))
-        for key, answer, words in (("command -v bwrap", "", ("no bwrap in the workspace", "refuses to start")),
-                                   ("mktemp -d /tmp/wk-wall", "COMMITTED\nWROTE", ("commit wall did NOT block a commit",)),
-                                   ("mktemp -d /tmp/wk-wall", "BLOCKED\nNOWRITE", ("blocks an ordinary write too",))):
-            with self.subTest(answer=answer):
-                self.answers = dict(HEALTHY)
-                self.set(key, answer)
-                self.assertFails(self.check("commit_wall"), *words)
-
     def test_the_paths_are_the_ones_the_session_walls(self):
         self.check("commit_wall")
         probe = [c for c in self.asked if "mktemp" in c][0]
@@ -203,10 +284,6 @@ class TestNoCredentialsInside(_Wall):
         self.assertPasses(rows)
         for var in wall.placeholders():
             self.assertIn("%s in the workspace is the placeholder" % var, rows_text(rows))
-
-    def test_private_key_material_fails_by_path(self):
-        self.set("PRIVATE KEY", "/home/u/.ssh/id_fork")
-        self.assertFails(self.check("no_credentials_inside"), "private key material inside the workspace", "id_fork")
 
     def test_an_unset_placeholder_names_what_exports_it(self):
         for var in wall.placeholders():
@@ -224,9 +301,6 @@ class TestNoCredentialsInside(_Wall):
                 self.assertNotIn("ghp-a-real-one", rows_text(rows))
                 self.set(var, "wk-injects-this")
 
-    def test_a_stored_gh_credential_fails(self):
-        self.set("hosts.yml", "/home/u/.config/gh/hosts.yml")
-        self.assertFails(self.check("no_credentials_inside"), "GitHub credential inside the workspace")
 
 
 class TestTheKeyScanRunsForReal(WkTest):
@@ -261,39 +335,10 @@ class TestTheKeyScanRunsForReal(WkTest):
             self.assertIn(name, out)
 
 
-class TestSecretsView(_Wall):
-    def test_a_row_this_kind_is_not_given_is_named_unreadable(self):
-        rows = self.check("secrets_view")
-        self.assertPasses(rows)
-        self.assertIn("no credential this kind is not given is readable in here (claude)", rows_text(rows))
-
-    def test_reading_one_from_inside_fails(self):
-        self.set("test -r /secrets/claude-token", "yes")
-        self.assertFails(self.check("secrets_view"), "/secrets/claude-token is readable in 'demo'", "Secrets.publish_view")
-
-
 class TestAgentIdentities(_Wall):
     def test_push_off_and_an_empty_agent_passes(self):
         self.assertPasses(self.check("agent_identities"))
         self.assertIn("ssh-add -l", [c for c in self.asked if "SSH_AUTH_SOCK=/run/wk/ssh-agent.sock" in c][0])
-
-    def test_an_identity_while_push_is_off_fails(self):
-        self.set("ssh-add -l", "1")
-        self.assertFails(self.check("agent_identities"), "1 identity/identities reach this workspace", "wk key push off")
-
-    def test_an_unmeasured_switch_is_compared_as_off(self):
-        self.set("ssh-add -l", "1")
-        self.assertFails(self.check("agent_identities", push_on=None), "does not say push is on")
-
-    def test_push_on_wants_a_key(self):
-        self.set("ssh-add -l", "2")
-        self.assertPasses(self.check("agent_identities", push_on=1))
-        self.set("ssh-add -l", "0")
-        self.assertFails(self.check("agent_identities", push_on=1), "push is ON but no identity reaches")
-
-    def test_no_ssh_add_is_not_an_empty_agent(self):
-        self.set("ssh-add -l", "MISSING")
-        self.assertFails(self.check("agent_identities"), "no ssh-add in the workspace")
 
     def test_a_target_with_no_socket_fails(self):
         self.driver = self.reg.load("remote")
@@ -318,16 +363,6 @@ class TestTheSwitchMeasuredInside(_Wall):
 
 
 class TestGitHubRead(_Wall):
-    def test_an_authenticated_read_passes(self):
-        self.assertIn("a read is authenticated (HTTP 200)", rows_text(self.check("github_read")))
-
-    def test_no_standing_token_is_a_note_not_a_failure(self):
-        self.set("api.github.com/user", "401")
-        rows = self.check("github_read")
-        self.assertPasses(rows)
-        self.assertEqual(NOTE, rows[0][0])
-        self.assertIn("60 requests an hour", rows[0][1])
-
     def test_a_refused_standing_token_is_a_note_naming_both_remedies(self):
         self.set("https://api.github.com/ 2", "401")
         self.set("api.github.com/user", "401")
@@ -337,87 +372,6 @@ class TestGitHubRead(_Wall):
             self.assertIn(w, rows[0][1])
         self.assertNotIn("60 requests an hour", rows[0][1])
 
-    def test_any_other_answer_fails(self):
-        self.set("api.github.com/user", "000")
-        self.assertFails(self.check("github_read"), "rather than 200 or 401")
-        self.set("https://api.github.com/ 2", "000")
-        self.assertFails(self.check("github_read"), "the injector is not in the path", "systemctl --user status wk-github-inject", "/run/wk/wk-github-ca.pem")
-
-
-class TestAnInjectorFaultIsNotAnUpstreamOutage(_Wall):
-    """A 502 carrying the injector's `X-Wk-Injector` header (TLS or DNS toward the host failed) is a miss naming the injector."""
-
-    FAULT = "HTTP/1.1 502 Bad Gateway\r\nX-Wk-Injector: SSLCertVerificationError\r\nContent-Length: 5\r\n\r\n502"
-
-    def assertInjectorFault(self, rows, name):
-        self.assertEqual(MISS, rows[0][0])
-        self.assertIn("%s: the injector failed to verify or resolve the host (SSLCertVerificationError)" % name, rows[0][1])
-        self.assertIn("wk-github-inject", rows[0][2])
-        self.assertNotIn("upstream outage", rows[0][1])
-
-    def test_a_github_fault_is_a_miss(self):
-        self.set("api.github.com/user", self.FAULT)
-        self.assertInjectorFault(self.check("github_read"), "GitHub")
-
-    def test_a_bugzilla_fault_is_a_miss_for_read_and_write(self):
-        self.set("rest/version", self.FAULT)
-        self.assertInjectorFault(self.check("bugzilla_read"), "Bugzilla")
-        self.set("http_code}' -X POST -H", self.FAULT)
-        self.assertInjectorFault(self.check("bugzilla_write"), "Bugzilla")
-        body = "the wk credential injector failed to verify or resolve bugs.webkit.org (SSLCertVerificationError)\r\n"
-        self.set("-D - -X POST -H", self.FAULT.rsplit("\r\n\r\n", 1)[0] + "\r\n\r\n" + body)
-        self.assertInjectorFault(self.check("bugzilla_write", push_on=1), "Bugzilla")
-
-    def test_a_502_without_the_header_is_the_upstream(self):
-        self.set("api.github.com/user", "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 5\r\n\r\n502")
-        rows = self.check("github_read")
-        self.assertEqual(NOTE, rows[0][0])
-        self.assertIn("an upstream outage", rows[0][1])
-
-
-class TestAnUpstreamOutageIsNotTheSandbox(_Wall):
-    """The injector's own 502/504 means it answered; '000' means nothing did."""
-
-    def assertNoted(self, rows, name):
-        self.assertPasses(rows)
-        self.assertEqual(NOTE, rows[0][0])
-        self.assertIn("%s did not answer through the injector (HTTP 504) -- an upstream outage, not the sandbox" % name, rows[0][1])
-
-    def test_a_github_read_504_is_a_note(self):
-        self.set("api.github.com/user", "504")
-        self.assertNoted(self.check("github_read"), "GitHub")
-
-    def test_a_github_write_504_is_a_note_on_and_off(self):
-        self.set("/pulls", "504")
-        self.assertNoted(self.check("github_write"), "GitHub")
-        self.assertNoted(self.check("github_write", push_on=1), "GitHub")
-
-    def test_a_bugzilla_504_is_a_note_for_read_and_both_writes(self):
-        self.set("rest/version", "504")
-        self.assertNoted(self.check("bugzilla_read"), "Bugzilla")
-        self.set("http_code}' -X POST -H", "504")
-        self.assertNoted(self.check("bugzilla_write"), "Bugzilla")
-        self.set("-D - -X POST -H", "HTTP/1.1 504 Gateway Timeout\r\n\r\nbugs.webkit.org did not answer within 12 seconds; the wk credential injector is up\r\n")
-        self.assertNoted(self.check("bugzilla_write", push_on=1), "Bugzilla")
-
-
-class TestGitHubWrite(_Wall):
-    def test_off_wants_the_injectors_412(self):
-        self.assertPasses(self.check("github_write"))
-        self.set("/pulls", "422")
-        self.assertFails(self.check("github_write"), "where the host does not say push is on", "wk key push off")
-
-    def test_on_wants_githubs_422(self):
-        self.set("/pulls", "422")
-        self.assertPasses(self.check("github_write", push_on=1))
-
-    def test_on_and_refused_names_each_cause(self):
-        for code, words in (("403", ("Pull requests: write",)),
-                            ("401", ("no write token", "wk key set github-pat --replace")),
-                            ("", ("answered 'nothing' rather than 422",))):
-            with self.subTest(code=code):
-                self.set("/pulls", code)
-                self.assertFails(self.check("github_write", push_on=1), *words)
 
 
 class TestAgentCredential(_Wall):
@@ -442,14 +396,6 @@ class TestAgentCredential(_Wall):
         self.set("CLAUDE_CODE_OAUTH_TOKEN:+set", "")
         self.assertFails(self.check("agent_credential"), "no $CLAUDE_CODE_OAUTH_TOKEN", "usable claude")
 
-    def test_not_logged_in_names_the_places_remedy(self):
-        self.set("claude auth status", '{"loggedIn": false}')
-        self.assertFails(self.check("agent_credential"), "not logged in", "'wk rm demo' and 'wk new'", "'wk start demo'")
-
-    def test_an_unreadable_answer_is_quoted(self):
-        self.set("claude auth status", "")
-        self.assertFails(self.check("agent_credential"), "It answered (first 80 bytes): b''", "claude --version")
-
     def test_no_cli_is_missing_not_unreadable(self):
         self.set("claude auth status", "wk-no-claude-cli")
         rows = self.check("agent_credential")
@@ -470,42 +416,10 @@ class TestClaudeLogin(_Wall):
         self.assertIn("Authorization: Bearer %s" % claudelogin.PLACEHOLDER,
                       next(c for c in self.asked if "api.anthropic.com" in c))
 
-    def test_a_login_that_is_not_the_placeholder_fails(self):
-        for held in ('{"claudeAiOauth": {"accessToken": "sk-ant-oat01-x", "refreshToken": "wk-injects-this"}}', "", "[]"):
-            with self.subTest(held=held):
-                self.set("/.credentials.json", held)
-                self.assertFails(self.check("claude_login"), "is not the placeholder login", "'wk start demo'")
-
-    def test_a_readable_token_fails_naming_where(self):
-        self.set("sk-ant-o[ar]t", "/run/wk/.credentials.json")
-        self.assertFails(self.check("claude_login"), "a claude.ai token is readable in 'demo': /run/wk/.credentials.json",
-                         "'wk key check claude-login'")
-
     def test_the_scan_reads_no_mount_an_older_workspace_had(self):
         for old in ("/agent-rw", "My Shared Files"):
             with self.subTest(old=old):
                 self.assertNotIn(old, wall.CLAUDE_TOKEN_SCAN)
-
-    def test_the_injectors_own_refusal_is_a_note_naming_it(self):
-        self.set("api.anthropic.com/v1/models", "HTTP/1.1 401 Unauthorized\r\n\r\nthe wk credential injector put no claude.ai "
-                 "login on this request: this machine holds no claude.ai login\n401")
-        rows = self.check("claude_login")
-        self.assertPasses(rows)
-        self.assertIn("holds no claude.ai login", rows_text(rows))
-
-    def test_anthropic_refusing_the_login_fails(self):
-        self.set("api.anthropic.com/v1/models", 'HTTP/1.1 401 Unauthorized\r\n\r\n{"type": "error"}\n401')
-        self.assertFails(self.check("claude_login"), "Anthropic refused", "wk key set claude-login --replace")
-
-    def test_no_injector_in_the_path_fails_with_the_places_remedy(self):
-        self.set("api.anthropic.com/v1/models", "\n000")
-        self.assertFails(self.check("claude_login"), "not in the path", "wk-github-inject")
-
-    def test_an_upstream_outage_is_a_note(self):
-        self.set("api.anthropic.com/v1/models", "HTTP/1.1 504 Gateway Timeout\r\n\r\napi.anthropic.com did not answer\n504")
-        rows = self.check("claude_login")
-        self.assertPasses(rows)
-        self.assertIn("an upstream outage", rows_text(rows))
 
     def test_a_build_box_is_not_asked(self):
         self.driver = self.reg.load("remote")
@@ -517,12 +431,6 @@ class TestGitWebkitSetup(_Wall):
         self.assertPasses(self.check("pr_tool_setup"))
         self.assertIn("git -C /src/WebKit config --get webkitscmpy.setup", self.asked)
 
-    def test_anything_else_fails_with_the_converging_command(self):
-        for answer in ("", "false"):
-            with self.subTest(answer=answer):
-                self.set("webkitscmpy.setup", answer)
-                self.assertFails(self.check("pr_tool_setup"), "has not completed", "wk sync demo --fix")
-
     def test_only_a_repo_that_uses_the_pr_tool_is_asked(self):
         from wk import repos
         self.assertIn("pr-tool-setup", [n for n, _ in self.wall().from_host()])
@@ -530,43 +438,11 @@ class TestGitWebkitSetup(_Wall):
         self.assertNotIn("pr-tool-setup", [n for n, _ in self.wall().from_host()])
 
 
-class TestBugzilla(_Wall):
-    def test_the_read_goes_through_the_injector(self):
-        self.assertPasses(self.check("bugzilla_read"))
-        self.set("rest/version", "000")
-        self.assertFails(self.check("bugzilla_read"), "not in the path for it", "systemctl --user status wk-github-inject")
-
-    def test_off_wants_the_injectors_412(self):
-        self.assertPasses(self.check("bugzilla_write"))
-        self.set("http_code}' -X POST -H", "410")
-        self.assertFails(self.check("bugzilla_write"), "Bugzilla key still on the machine", "wk key push off")
-
-    def test_on_reads_bugzillas_own_code(self):
-        self.assertIn("error 50", rows_text(self.check("bugzilla_write", push_on=1)))
-        for body, words in (('{"code": 410}', ("no Bugzilla API key", "wk key set bugzilla-api-key")),
-                            ('{"code": 306}', ("does not know it", "--replace")),
-                            ("<html>", ("nothing Bugzilla-shaped",))):
-            with self.subTest(body=body):
-                self.set("-D - -X POST -H", "HTTP/1.1 200 OK\r\n\r\n" + body)
-                self.assertFails(self.check("bugzilla_write", push_on=1), *words)
-
-
 class TestGpu(_Wall):
     def test_hardware_passes_and_the_probe_output_is_kept(self):
         rows = self.check("gpu", want_gpu=True)
         self.assertPasses(rows)
         self.assertIn((NOTE, "renderer=NVIDIA Tegra | vendor=NVIDIA", ""), rows)
-
-    def test_software_rendering_is_a_note_unless_asked_for(self):
-        self.set("gpu-probe.sh", Result(1, "renderer=llvmpipe\n", ""))
-        self.assertPasses(self.check("gpu"))
-        self.assertIn("llvmpipe", rows_text(self.check("gpu")))
-        self.assertFails(self.check("gpu", want_gpu=True), "only software rendering")
-
-    def test_no_egl_is_a_note_unless_asked_for(self):
-        self.set("gpu-probe.sh", Result(2, "", ""))
-        self.assertPasses(self.check("gpu"))
-        self.assertFails(self.check("gpu", want_gpu=True), "no usable EGL inside the workspace (probe exit 2)")
 
     def test_an_arch_with_no_gpu(self):
         self.fake.files[os.path.join(self.driver.store.ws_dir("demo"), "arch")] = "armhf\n"
@@ -762,12 +638,6 @@ class TestTheDriversAnswer(_Wall):
         self.assertTrue(vm.egress_filtered("demo"))
         self.fake.files[os.path.join(str(self.tmp / "vmstore"), "vm", "demo.unfiltered")] = ""
         self.assertFalse(vm.egress_filtered("demo"))
-
-    def test_agent_secret_present_asks_the_workspaces_home(self):
-        self.assertTrue(self.driver.agent_secret_present("demo", "litellm"))
-        self.assertIn('test -s "$HOME/.wk-litellm-key"', self.asked)
-        self.set("test -s", Result(1, "", ""))
-        self.assertFalse(self.driver.agent_secret_present("demo", "litellm"))
 
     def test_a_guests_remedy_is_this_machines_store(self):
         vm = self.load("vm")

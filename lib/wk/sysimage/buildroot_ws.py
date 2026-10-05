@@ -15,7 +15,7 @@ from wk import slot as wkslot  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import here  # noqa: E402
 from wk.sysimage import TOOLS, WsBuild, fail  # noqa: E402
-from wk.sysimage.task import fetch_pinned  # noqa: E402
+from wk.sysimage.task import du, fetch_pinned  # noqa: E402
 
 MB_PER_JOB = 2048
 TS_REL = "image/yocto/meta-wk-tailnet/recipes-network/tailscale/tailscale-release.inc"
@@ -91,9 +91,6 @@ class Build(WsBuild):
         self.out = os.path.join(self.workdir, "output")
         self.tcf = os.path.join(self.out, "host", "share", "buildroot", "toolchainfile.cmake")
 
-    def git(self, *args):
-        return self.m.act_run(["git", "-C", self.workdir] + list(args))
-
     def make(self, br_ext, *args, quiet=False):
         argv = ["make", "-C", self.workdir] + br_ext + list(args)
         if not quiet:
@@ -126,7 +123,7 @@ class Build(WsBuild):
         a = self.a
         if self.m.isdir(os.path.join(self.workdir, ".git")):
             self.say("tree already present; fetching the pin")
-            if not self.git("fetch", "--tags", "origin", a.tree_branch or "HEAD").ok:
+            if not self.git(self.workdir, "fetch", "--tags", "origin", a.tree_branch or "HEAD").ok:
                 fail("could not fetch %s in %s" % (a.tree_url, self.workdir))
         else:
             self.m.mkdir(os.path.dirname(self.workdir))
@@ -135,8 +132,8 @@ class Build(WsBuild):
                                   + [a.tree_url, self.workdir]).ok:
                 fail("could not clone %s" % a.tree_url)
         if a.tree_commit:
-            self.git("fetch", "origin", a.tree_commit)
-            if not self.git("checkout", "--detach", a.tree_commit).ok:
+            self.git(self.workdir, "fetch", "origin", a.tree_commit)
+            if not self.git(self.workdir, "checkout", "--detach", a.tree_commit).ok:
                 fail("%s has no commit %s" % (a.tree_url, a.tree_commit))
             self.say("pinned at %s" % self.m.run(["git", "-C", self.workdir, "rev-parse", "--short", "HEAD"]).out.strip())
 
@@ -150,7 +147,7 @@ class Build(WsBuild):
             if self.m.run(["git", "-C", self.workdir, "apply", "--reverse", "--check", p]).ok:
                 self.say("tree patch already applied: %s" % n)
                 continue
-            if not self.git("apply", p).ok:
+            if not self.git(self.workdir, "apply", p).ok:
                 fail("tree patch does not apply: %s\n    The pin moved out from under it (BR_TREE_COMMIT); rederive the patch." % n)
             self.say("tree patch applied: %s" % n)
 
@@ -361,9 +358,9 @@ class Build(WsBuild):
                                                 exec_dir=os.path.relpath(execdir, root), bundle_dir=os.path.relpath(bundle, root),
                                                 jobs=str(self.jobs)),
                             ["--readelf", os.path.join(self.out, "host", "bin", cc.group(1) + "-readelf")])
-        du = self.m.run(["du", "-sh", root]).out.split()
+        size = du(self.m, root)
         self.say("slot ready: %s" % slotdir)
-        self.say("  %s in root/, build-id %s" % (du[0] if du else "?", bid))
+        self.say("  %s in root/, build-id %s" % (size, bid))
         self.say("stage 'webkit-%s' done" % a.slot)
 
     def run(self):

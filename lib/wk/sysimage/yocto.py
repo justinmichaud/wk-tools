@@ -131,7 +131,7 @@ def build_subject(ws, stage, slot, commit, cross_preset):
 
 
 class Yocto(task.ContainerBuilder):
-    KIND, TITLE, SPEC, BASE_IMAGE, BASE_VAR = "yocto", "Yocto", SPEC, BASE_IMAGE, "WK_YOCTO_BASE"
+    KIND, TITLE, SPEC, BASE_IMAGE, BASE_VAR, PATTERN = "yocto", "Yocto", SPEC, BASE_IMAGE, "WK_YOCTO_BASE", PATTERN
     NEEDS = "the Yocto builder needs a container workspace"
     NOT_HERE = ("A remote place is a shared machine -- 100 GB of scratch and days of CPU\n"
                 "    are not ours to take there -- and a macOS VM workspace has no store-backed\n"
@@ -143,7 +143,7 @@ class Yocto(task.ContainerBuilder):
         return "wk sysimage build %s --stage %s%s --stop" % (self.spec, stage, self.ws_flag(ws))
 
     def stage(self, driver, ws, stage):
-        st = task.Stage(self.reg, driver, ws, "yocto", stage, self.kill_cmd(ws, stage), self.clock)
+        st = super().stage(driver, ws, stage)
         env = {k: v for k, v in driver.env.items() if k != "WK_ABORT_SECONDS"}
         st.recs = record.of_driver(driver, self.clock, self.here, env)   # a record with no deadline: silence is not a failure
         st.env = dict(self.env, WK_KILL_WAIT=str(job.kill_wait(self.env, KILL_WAIT)))
@@ -325,21 +325,12 @@ class Yocto(task.ContainerBuilder):
         cores, mem, webkit_jobs, budget, running = self.sizes(st)
         jobs, stage_mb = stage_budget(o["stage"], cores, mem, webkit_jobs)
         what = {"pgo-mix": "mixing this collection", "webkit": "this WebKit cross build"}.get(o["stage"], "this image build")
-        lock = st.admit(budget, running, jobs, disk_need(o["stage"], o["chromium"], o["rm_work"], self.env), what)
-        try:
-            t = st.begin(list(STAGES))
-            t.set("subject", build_subject(ws, o["stage"], o["slot"], o["commit"], o["preset"] if o["stage"] == "webkit" else ""))
-            try:
-                self.ensure_ws(driver, ws, base, tag)
-                self.check_target(driver, ws)
-            except act.Refused as e:
-                t.end(e.status)
-                raise
-            t.step_state(stage_index(o["stage"]), "running")   # this stage, and no claim about the ones before it
-            info("stage '%s' for %s in '%s'" % (o["stage"], self.name, ws))
-            st.run(t, budget, jobs, self.argv(driver, ws, o, cores, stage_mb, webkit_jobs, tag), PATTERN, stage_mb)
-        finally:
-            lock.release_all()
+        self.staged(st, (budget, running, jobs), list(STAGES),
+                    [lambda: self.ensure_ws(driver, ws, base, tag), lambda: self.check_target(driver, ws)],
+                    "stage '%s' for %s in '%s'" % (o["stage"], self.name, ws),
+                    lambda: self.argv(driver, ws, o, cores, stage_mb, webkit_jobs, tag), at=stage_index(o["stage"]),
+                    subject=build_subject(ws, o["stage"], o["slot"], o["commit"], o["preset"] if o["stage"] == "webkit" else ""),
+                    mb=stage_mb, need_gb=disk_need(o["stage"], o["chromium"], o["rm_work"], self.env), what=what)
         return self.done(driver, ws, o)
 
     def done(self, driver, ws, o):
@@ -373,7 +364,6 @@ class Yocto(task.ContainerBuilder):
             return 0
         at = "not created" if driver.info(ws) == "absent" else self.ws_head(driver, ws)
         cores, mem, webkit_jobs, budget, _ = self.sizes(st)
-        cache = os.path.join(self.store.store_dir(), "cache", "yocto")
         wifi = wants_wifi(fleet.Fleet(images.root(self.env), self.env), p["IMG_MACHINE"])
         free = budget.free_gb(self.store.admission_dir())
         log("would build image %s (builder: yocto)" % self.name)
@@ -384,8 +374,8 @@ class Yocto(task.ContainerBuilder):
         log("  stage       %s (it includes the ones before it)" % stage)
         log("  workspace   %s (%s)" % (ws, at))
         log("  jobs        %d cores, %d MB envelope" % (cores, mem))
-        log("  DL_DIR      %s (%s)" % (os.path.join(cache, "downloads"), self.du(os.path.join(cache, "downloads"))))
-        log("  SSTATE_DIR  %s (%s)" % (os.path.join(cache, "sstate"), self.du(os.path.join(cache, "sstate"))))
+        log("  DL_DIR      %s (%s)" % (self.cache("downloads"), self.du(self.cache("downloads"))))
+        log("  SSTATE_DIR  %s (%s)" % (self.cache("sstate"), self.du(self.cache("sstate"))))
         log("  rm_work     %s" % ("on (--keep-work turns it off)" if o["rm_work"] else "off"))
         log("  chromium    %s" % ("in the image (--chromium)" if o["chromium"] else "dropped (about half the build; --chromium puts it back)"))
         log("  webkit jobs %d (%d MB/job)" % (webkit_jobs, WEBKIT_MB_PER_JOB))

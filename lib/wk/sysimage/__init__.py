@@ -27,6 +27,9 @@ class WsBuild:
         sys.stdout.write("%s: %s\n" % (self.PREFIX, text))
         sys.stdout.flush()
 
+    def git(self, d, *args):
+        return self.m.act_run(["git", "-C", d] + list(args))
+
     def ok(self, argv, why):
         r = self.m.act_run(argv)
         if not r.ok:

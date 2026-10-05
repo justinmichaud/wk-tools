@@ -108,40 +108,33 @@ def react_true(argv, fake):
 
 
 class TestResolve(unittest.TestCase):
-    def bridge_with(self, machines_dir, reactor):
+    def bridge_with(self, reactor):
         fake = Fake("phone")
         fake.react(["ssh"], reactor)
-        return bridge.Bridge(REPO, env=dict(MACHINES_ENV, WK_MACHINES_DIR=str(machines_dir)), machine=fake)
+        return bridge.Bridge(REPO, env=MACHINES_ENV, machine=fake)
 
-    def test_the_conf_name_resolves_without_discovery(self):
-        b = self.bridge_with(REPO / "machines", react_true)
+    def test_the_conf_name_resolves_without_discovery_and_an_unknown_name_is_refused(self):
+        b = self.bridge_with(react_true)
         self.assertEqual(b.resolve("tailnet-bridge-generic"), "root@tailnet-bridge-generic")
+        with self.assertRaises(LookupError):
+            b.resolve("not-a-bridge")
 
     def test_at_tries_root_then_the_declared_user(self):
-        def reactor(argv, fake):
-            return Result(0) if argv[-2].startswith("user@") else Result(255, "", "refused")
-        b = self.bridge_with(REPO / "machines", reactor)
+        b = self.bridge_with(lambda argv, f: Result(0) if argv[-2].startswith("user@") else Result(255, "", "refused"))
         self.assertEqual(b.resolve("tailnet-bridge-generic", at="10.0.0.9"), "user@10.0.0.9")
 
     def test_an_unreachable_bridge_names_the_provision_command(self):
-        def reactor(argv, fake):
-            return Result(255, "", "ssh: connect to host x port 22: No route to host")
-        b = self.bridge_with(REPO / "machines", reactor)
+        b = self.bridge_with(lambda argv, f: Result(255, "", "ssh: connect to host x port 22: No route to host"))
         with self.assertRaises(bridge.Unreachable) as ctx:
             b.resolve("tailnet-bridge-generic", names_only=True)
         self.assertIn("wk machine setup tailnet-bridge-generic --disk", str(ctx.exception))
-
-    def test_an_unknown_name_is_refused_by_name(self):
-        b = self.bridge_with(REPO / "machines", react_true)
-        with self.assertRaises(LookupError):
-            b.resolve("not-a-bridge")
 
     def test_the_phone_is_found_on_reachs_sweep_by_its_own_hostname(self):
         def reactor(argv, fake):
             if argv[-1] == "true":
                 return Result(0) if "10.0.0.7" in argv[-2] else Result(255, "", "refused")
             return Result(0, "tailnet-bridge-generic\n" if "10.0.0.7" in argv[-2] else "other\n")
-        b = self.bridge_with(REPO / "machines", reactor)
+        b = self.bridge_with(reactor)
         b.machine.answer(["ip", "-4", "-o", "addr", "show"], out="2: en0 inet 10.0.0.4/24 brd x\n")
         b.machine.answer(["sh", "-c", reach.SWEEP], out="10.0.0.5 dev en0 lladdr aa:00:00:00:00:05 REACHABLE\n"
                                                          "10.0.0.7 dev en0 lladdr aa:00:00:00:00:07 STALE\n")
@@ -151,9 +144,7 @@ class TestResolve(unittest.TestCase):
         self.assertFalse([e for e in b.machine.effects if e[1][:1] == ("dig",) or any(".local" in w for w in e[1])])
 
     def test_a_machine_that_cannot_sweep_says_so_and_names_at(self):
-        def reactor(argv, fake):
-            return Result(255, "", "ssh: connect to host x port 22: No route to host")
-        b = self.bridge_with(REPO / "machines", reactor)
+        b = self.bridge_with(lambda argv, f: Result(255, "", "ssh: connect to host x port 22: No route to host"))
         b.machine.answer(["ip", "-4", "-o", "addr", "show"], rc=127)
         err = io.StringIO()
         with contextlib.redirect_stderr(err), self.assertRaises(bridge.Unreachable) as ctx:
@@ -174,16 +165,12 @@ class TestLsRow(unittest.TestCase):
 
 class TestBattery(unittest.TestCase):
     def test_reads_percent_status_and_cap_from_the_phone(self):
-        def reactor(argv, fake):
-            if argv[-1] == "true":
-                return Result(0)
-            return Result(0, "percent=72\nstatus=Charging\nlimit=80\ncurrent=80\n")
         fake = Fake("phone")
-        fake.react(["ssh"], reactor)
+        fake.react(["ssh"], lambda argv, f: Result(0, "" if argv[-1] == "true" else
+                                                     "percent=72\nstatus=Charging\nlimit=80\ncurrent=80\n"))
         rendered = bridge.Bridge(REPO, env=MACHINES_ENV, machine=fake).battery("tailnet-bridge-generic")
-        self.assertIn("percent=72", rendered)
-        self.assertIn("status=Charging", rendered)
-        self.assertIn("limit=80", rendered)
+        for line in ("percent=72", "status=Charging", "limit=80"):
+            self.assertIn(line, rendered)
 
 
 KEY = "tskey-auth-k1-secret"
@@ -340,6 +327,14 @@ class RoleTest(unittest.TestCase):
         for v in ("WK_DRY_RUN", "WK_CONFIRMED", "WK_DESTRUCTIVE", "WK_YES"):
             os.environ.pop(v, None)
 
+    def verb(self, w=None, want=0, verb="setup", name=BMC, env=(), **kw):
+        """`verb` run on `w` (a fresh PhoneWorld), asserted to end `want`; the world and what it printed."""
+        w = w or PhoneWorld()
+        with mock.patch.dict(os.environ, dict(env)):
+            rc, out = quiet(getattr(w.role(), verb), name, **kw)
+        self.assertEqual(rc, want, out)
+        return w, out
+
 
 class TestPlan(unittest.TestCase):
     def conf(self, name=BMC, **over):
@@ -379,33 +374,27 @@ class TestPlan(unittest.TestCase):
         self.assertEqual(missing.battery, "")
         self.assertNotIn("service wk-bridge-battery", missing.lines)
 
-    def test_camera_off_drops_the_service(self):
+    def test_camera_off_drops_the_service_and_the_packaged_names_come_from_the_phone(self):
         self.assertIn("drop wk-bridge-camera", plan.Plan(BMC, self.conf(camera="off"), bridge.kv(FACTS)).lines)
         self.assertIn("service wk-bridge-camera", plan.Plan(BMC, self.conf(), bridge.kv(FACTS)).lines)
-
-    def test_the_packaged_names_come_from_the_phone(self):
         lines = plan.Plan(BMC, self.conf(), dict(bridge.kv(FACTS), init="NetworkManager chrony tailscaled")).lines
         for line in ("enable NetworkManager", "enable chrony", "enable tailscaled"):
             self.assertIn(line, lines)
-
-    def test_a_phone_with_no_tailscale_service_is_refused(self):
-        with self.assertRaises(LookupError):
+        with self.assertRaises(LookupError, msg="a phone with no tailscale service"):
             plan.Plan(BMC, self.conf(), dict(bridge.kv(FACTS), init="networkmanager"))
 
     def test_the_bundle_is_the_same_bytes_for_the_same_inputs(self):
-        p = plan.Plan(BMC, self.conf(), bridge.kv(FACTS))
-        self.assertEqual(plan.bundle(REPO, p), plan.bundle(REPO, plan.Plan(BMC, self.conf(), bridge.kv(FACTS))))
+        self.assertEqual(*(plan.bundle(REPO, plan.Plan(BMC, self.conf(), bridge.kv(FACTS))) for _ in range(2)))
 
 
 class TestSetup(RoleTest):
+    def ups(self, w):
+        return [a for a in w.argvs() if a[:2] == ("tailscale", "up")]
+
     def test_setup_applies_the_role_and_joins_with_the_key(self):
-        w = PhoneWorld()
-        rc, out = quiet(w.role().setup, BMC)
-        self.assertEqual(rc, 0, out)
-        self.assertIn("/etc/wk-bridge.conf", w.fake.files)
-        self.assertIn("/etc/init.d/wk-bridge-dhcp", w.fake.files)
-        self.assertIn("/etc/udev/rules.d/70-wk-bridge-net.rules", w.fake.files)
-        self.assertIn(JOINED, w.fake.files)
+        w, out = self.verb()
+        for path in ("/etc/wk-bridge.conf", "/etc/init.d/wk-bridge-dhcp", "/etc/udev/rules.d/70-wk-bridge-net.rules", JOINED):
+            self.assertIn(path, w.fake.files)
         self.assertNotIn(AUTHKEY, w.fake.files)
         self.assertIn('"autoApprovers"', out)
         self.assertFalse([a for a in w.argvs() + [e[1] for e in w.here.effects if e[0] == "run"] if KEY in " ".join(a)])
@@ -416,31 +405,28 @@ class TestSetup(RoleTest):
     def test_a_dry_run_changes_nothing_on_the_phone(self):
         w = PhoneWorld()
         before = w.state()
-        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
-            rc, out = quiet(w.role().setup, BMC)
-        self.assertEqual(rc, 0, out)
+        _, out = self.verb(w, env={"WK_DRY_RUN": "1"})
         self.assertEqual(w.state(), before)
         self.assertIn("would run on phone: sh %s/provision.sh role" % LIB, out)
 
-    def test_no_tailnet_hands_over_no_key_and_does_not_join(self):
-        w = PhoneWorld()
-        rc, out = quiet(w.role().setup, BMC, no_tailnet=True)
-        self.assertEqual(rc, 0, out)
-        self.assertNotIn(JOINED, w.fake.files)
-        self.assertFalse([a for a in w.argvs() if a[:2] == ("tailscale", "up") or AUTHKEY in " ".join(a[2:3])])
-        self.assertIn("wk machine tailnet %s" % BMC, out)
+    def test_no_tailnet_or_no_key_applies_the_role_hands_over_no_key_and_does_not_join(self):
+        keyless = PhoneWorld()
+        keyless.stored()
+        for w, kw in ((PhoneWorld(), {"no_tailnet": True}), (keyless, {})):
+            with self.subTest(**kw):
+                _, out = self.verb(w, **kw)
+                self.assertIn("/etc/wk-bridge.conf", w.fake.files)
+                self.assertNotIn(JOINED, w.fake.files)
+                self.assertFalse([a for a in w.argvs() if a[:2] == ("tailscale", "up") or AUTHKEY in " ".join(a[2:3])])
+                self.assertIn("wk machine tailnet %s" % BMC, out)
 
     def test_a_joined_node_reasserts_its_route_and_never_logs_in_again(self):
-        w = PhoneWorld(joined=True)
-        rc, out = quiet(w.role().setup, BMC)
-        self.assertEqual(rc, 0, out)
+        w, _ = self.verb(PhoneWorld(joined=True))
         self.assertIn(("tailscale", "set", "--advertise-routes=10.99.0.0/24", "--accept-dns=false", "--ssh=true"), w.argvs())
-        self.assertFalse([a for a in w.argvs() if a[:2] == ("tailscale", "up")])
+        self.assertFalse(self.ups(w))
 
     def test_an_unapproved_route_is_withdrawn_and_readvertised(self):
-        w = PhoneWorld(joined=True, approves=False)
-        rc, out = quiet(w.role().setup, BMC)
-        self.assertEqual(rc, 0, out)
+        w, out = self.verb(PhoneWorld(joined=True, approves=False))
         self.assertIn(("tailscale", "set", "--advertise-routes="), w.argvs())
         self.assertEqual(w.clock.slept[-2:], [2, 5])
         self.assertIn("still not approved", out)
@@ -458,75 +444,51 @@ class TestSetup(RoleTest):
         self.assertIn(JOINED, w.fake.files)
         self.assertEqual(asked, [("GET", "/tailnet/-/keys")])
 
-    def test_no_key_applies_the_role_and_says_so(self):
-        w = PhoneWorld()
-        w.stored()
-        rc, out = quiet(w.role().setup, BMC)
-        self.assertEqual(rc, 0, out)
-        self.assertIn("/etc/wk-bridge.conf", w.fake.files)
-        self.assertNotIn(JOINED, w.fake.files)
-        self.assertFalse([a for a in w.argvs() if a[:2] == ("tailscale", "up")])
-
     def test_a_password_doas_gets_root_the_key_and_carries_on_as_root(self):
-        w = PhoneWorld(uid="1000", doas_password=True)
-        rc, out = quiet(w.role().setup, BMC)
-        self.assertEqual(rc, 0, out)
+        w, _ = self.verb(PhoneWorld(uid="1000", doas_password=True))
         (bootstrap,) = [e[1] for e in w.here.effects if e[0] == "run" and e[1][:3] == ("sh", "-c", role.PAUSED)]
         self.assertIn("-tt", bootstrap)
         self.assertIn(BMC, bootstrap)
         self.assertIn("/etc/wk-bridge.conf", w.fake.files)
 
     def test_a_phone_without_apk_is_refused_before_anything_is_sent(self):
-        w = PhoneWorld(apk=False)
-        rc, out = quiet(w.role().setup, BMC)
-        self.assertEqual(rc, 1)
+        w, out = self.verb(PhoneWorld(apk=False), want=1)
         self.assertIn("not running postmarketOS", out)
-        self.assertFalse([e for e in w.fake.effects if e[0] == "run" and e[1][:2] == ("sh", "-c")
-                          and e[1][2] == role.SHIP])
+        self.assertFalse([e for e in w.fake.effects if e[0] == "run" and e[1][:3] == ("sh", "-c", role.SHIP)])
 
     def test_an_unknown_name_is_refused_by_name(self):
-        rc, out = quiet(PhoneWorld().role().setup, "not-a-bridge")
-        self.assertEqual(rc, 1)
-        self.assertIn("not a declared bridge", out)
+        self.assertIn("not a declared bridge", self.verb(want=1, name="not-a-bridge")[1])
 
 
 class TestTailnetVerb(RoleTest):
-    def test_a_phone_with_no_role_is_sent_to_setup(self):
-        w = PhoneWorld()
-        rc, out = quiet(w.role().tailnet, BMC)
-        self.assertEqual(rc, 1)
+    def test_a_phone_with_no_role_is_sent_to_setup_and_a_role_without_the_tailnet_joins(self):
+        w, out = self.verb(want=1, verb="tailnet")
         self.assertIn("--no-tailnet", out)
-
-    def test_a_role_without_the_tailnet_joins(self):
-        w = PhoneWorld()
-        quiet(w.role().setup, BMC, no_tailnet=True)
-        rc, out = quiet(w.role().tailnet, BMC)
-        self.assertEqual(rc, 0, out)
+        self.verb(w, no_tailnet=True)
+        self.verb(w, verb="tailnet")
         self.assertIn(JOINED, w.fake.files)
 
 
 class TestRm(RoleTest):
     def test_rm_asks_first_and_a_no_changes_nothing(self):
-        w = PhoneWorld()
-        quiet(w.role().setup, BMC)
+        w, _ = self.verb()
         before = w.state()
         with mock.patch.object(act, "confirm", return_value=False):
-            rc, _out = quiet(w.role().rm, BMC)
-        self.assertEqual(rc, 1)
+            self.verb(w, want=1, verb="rm")
         self.assertEqual(w.state(), before)
 
     def test_rm_leaves_nothing_setup_made_but_the_os_services_it_enabled(self):
         w = PhoneWorld()
         before = set(w.state())
-        quiet(w.role().setup, BMC)
+        self.verb(w)
         with mock.patch.object(act, "confirm", return_value=True):
-            rc, out = quiet(w.role().rm, BMC)
-        self.assertEqual(rc, 0, out)
+            self.verb(w, verb="rm")
         os_services = {"/etc/runlevels/default/" + s for s in ("networkmanager", "chronyd", "sshd", "tailscale")}
         self.assertEqual(set(w.state()) - before - os_services, set())
 
 
 DISK = "rpi5:/dev/sda"
+YES = {"WK_YES": "1"}
 
 
 class TestProvision(RoleTest):
@@ -549,69 +511,45 @@ class TestProvision(RoleTest):
         return [e[1][1:] for e in w.here.effects if e[0] == "run_tty"]
 
     def test_a_write_asks_once_hands_the_disk_to_sysimage_write_and_applies_the_role(self):
-        w = self.world()
-        with mock.patch.dict(os.environ, {"WK_YES": "1"}):
-            rc, out = quiet(w.role().setup, BMC, disk=DISK)
-        self.assertEqual(rc, 0, out)
+        w, _ = self.verb(self.world(), env=YES, disk=DISK)
         self.assertEqual(self.children(w), [("sysimage", "write", "--from", self.fetched[0], "--disk", DISK, "--yes")])
         self.assertEqual(os.path.dirname(self.fetched[0]), provision.image_dir(Store(w.env)))
         self.assertIn(("remove", self.fetched[0]), w.here.effects)
         self.assertIn("/etc/wk-bridge.conf", w.fake.files)
 
-    def test_no_terminal_and_no_yes_writes_nothing(self):
-        w = self.world()
-        before = w.state()
-        rc, out = quiet(w.role().setup, BMC, disk=DISK)
-        self.assertEqual(rc, 1, out)
-        self.assertEqual((self.children(w), w.state()), ([], before))
-
-    def test_a_dry_run_runs_no_child_and_waits_for_no_phone(self):
-        w = self.world()
-        before = w.state()
-        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
-            rc, out = quiet(w.role().setup, BMC, disk=DISK)
-        self.assertEqual(rc, 0, out)
-        self.assertEqual((self.children(w), w.state(), w.clock.slept), ([], before, []))
+    def test_no_terminal_and_no_yes_writes_nothing_and_a_dry_run_waits_for_no_phone(self):
+        for env, want in (({}, 1), ({"WK_DRY_RUN": "1"}, 0)):
+            with self.subTest(env=env):
+                w = self.world()
+                before = w.state()
+                _, out = self.verb(w, want=want, env=env, disk=DISK)
+                self.assertEqual((self.children(w), w.state(), w.clock.slept), ([], before, []))
         self.assertIn("would run: %s sysimage write --from" % self.wk, out)
 
-    def test_no_finished_build_builds_one_before_writing_it(self):
-        w = self.world(newest=(None, "bridge-librem5-2"))
-        with mock.patch.dict(os.environ, {"WK_YES": "1"}):
-            rc, out = quiet(w.role().setup, BMC, disk=DISK)
-        self.assertEqual(rc, 0, out)
-        self.assertEqual([c[:2] for c in self.children(w)], [("sysimage", "build"), ("sysimage", "write")])
-
-    def test_rebuild_builds_even_with_a_finished_build(self):
-        w = self.world(newest=("bridge-librem5-2",))
-        with mock.patch.dict(os.environ, {"WK_YES": "1"}):
-            rc, out = quiet(w.role().setup, BMC, disk=DISK, rebuild=True)
-        self.assertEqual(rc, 0, out)
-        self.assertEqual(self.children(w)[0], ("sysimage", "build", "bridge-librem5"))
+    def test_no_finished_build_or_rebuild_builds_one_before_writing_it(self):
+        for newest, kw in (((None, "bridge-librem5-2"), {}), (("bridge-librem5-2",), {"rebuild": True})):
+            with self.subTest(**kw):
+                w, _ = self.verb(self.world(newest=newest), env=YES, disk=DISK, **kw)
+                self.assertEqual(self.children(w)[0], ("sysimage", "build", "bridge-librem5"))
+                self.assertEqual(self.children(w)[1][:2], ("sysimage", "write"))
 
     def test_image_is_written_as_given_and_never_removed(self):
-        w = self.world()
-        with mock.patch.dict(os.environ, {"WK_YES": "1"}):
-            rc, out = quiet(w.role().setup, BMC, disk=DISK, image="/imgs/phone.img")
-        self.assertEqual(rc, 0, out)
+        w, _ = self.verb(self.world(), env=YES, disk=DISK, image="/imgs/phone.img")
         self.assertEqual(self.children(w), [("sysimage", "write", "--from", "/imgs/phone.img", "--disk", DISK, "--yes")])
         self.assertEqual(self.fetched, [])
 
     def test_a_failed_write_stops_before_the_phone(self):
         w = self.world()
         w.here.answer([self.wk, "sysimage", "write"], rc=1)
-        with mock.patch.dict(os.environ, {"WK_YES": "1"}):
-            rc, out = quiet(w.role().setup, BMC, disk=DISK)
-        self.assertEqual(rc, 1, out)
+        self.verb(w, want=1, env=YES, disk=DISK)
         self.assertNotIn("/etc/wk-bridge.conf", w.fake.files)
         self.assertIn(("remove", self.fetched[0]), w.here.effects)
 
     def test_a_copy_that_fails_is_removed(self):
         w = self.world()
-        with mock.patch.object(pmos, "fetch_out", side_effect=act.Refused(1)), mock.patch.dict(os.environ, {"WK_YES": "1"}):
-            rc, out = quiet(w.role().setup, BMC, disk=DISK)
-        self.assertEqual(rc, 1, out)
-        path = os.path.join(provision.image_dir(Store(w.env)), BMC + ".img")
-        self.assertIn(("remove", path), w.here.effects)
+        with mock.patch.object(pmos, "fetch_out", side_effect=act.Refused(1)):
+            self.verb(w, want=1, env=YES, disk=DISK)
+        self.assertIn(("remove", os.path.join(provision.image_dir(Store(w.env)), BMC + ".img")), w.here.effects)
         self.assertEqual(self.children(w), [])
 
     def test_a_copy_a_kill_left_is_rubble_and_one_being_written_is_kept(self):
@@ -633,11 +571,10 @@ class TestProvision(RoleTest):
 
     def test_contradictory_or_malformed_write_flags_are_refused_before_anything_runs(self):
         w = self.world()
-        with mock.patch.dict(os.environ, {"WK_YES": "1"}):
-            for kw in ({"image": "/x.img"}, {"rebuild": True}, {"disk": DISK, "image": "/x.img", "rebuild": True},
-                       {"disk": "/dev/sda"}):
-                with self.subTest(**kw):
-                    self.assertEqual(quiet(w.role().setup, BMC, **kw)[0], 1)
+        for kw in ({"image": "/x.img"}, {"rebuild": True}, {"disk": DISK, "image": "/x.img", "rebuild": True},
+                   {"disk": "/dev/sda"}):
+            with self.subTest(**kw):
+                self.verb(w, want=1, env=YES, **kw)
         self.assertEqual(self.children(w), [])
 
     def test_the_wait_tries_the_names_each_tick_and_sweeps_once_a_minute(self):

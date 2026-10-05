@@ -5,8 +5,8 @@
 #
 # Three tiers, any combination; with none named, lint then unit run. A test
 # over WK_TEST_BUDGET seconds (30) fails; the summary prints the owed count and
-# the slowest tests. Exempt from --dry-run: it runs tests, whose own effects
-# are against fakes or are the live tier's purpose.
+# the slowest tests. Exempt from --dry-run: a test's effects are against fakes,
+# or are the live tier's purpose.
 #
 #   --lint        the static rules: one pass over the tree
 #   --unit        every test that needs no VM, machine or board

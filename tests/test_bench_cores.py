@@ -1,10 +1,9 @@
 """`wk bench run --cores`: the cpu-list syntax, the pin a run records, and the warning for two runs pinned differently."""
-import json
 import unittest
 
 from tests.support import WkTest, scratch_dir
 from tests.test_bench_pipeline import BenchTest, World
-from tests.test_bench_report import env_record, rep
+from tests.test_bench_report import rep, run_dir
 
 from wk.bench import pipeline
 
@@ -46,14 +45,9 @@ class TestAPinnedRun(BenchTest):
 class TestCoresAxisWarning(WkTest):
 
     def _pair(self, tmp, a_cores, b_cores):
-        a_dir, b_dir = tmp / "a", tmp / "b"
         doc = {"JetStream3.0": {"tests": {"t": {"metrics": {"Score": {"current": [1.0, 2.0]}}}}}}
-        for d, cores in ((a_dir, a_cores), (b_dir, b_cores)):
-            d.mkdir()
-            (d / "result.json").write_text(json.dumps(doc))
-            env_record(d / "env.json", "plan=jetstream3", "class=cpu", "runner=jsc", "bench_host=container",
-                       *([f"cores.set={cores}"] if cores is not None else []))
-        return a_dir, b_dir
+        return tuple(run_dir(tmp / s, doc, "plan=jetstream3", "class=cpu", "runner=jsc", "bench_host=container",
+                             *([f"cores.set={cores}"] if cores is not None else [])) for s, cores in (("a", a_cores), ("b", b_cores)))
 
     def test_two_runs_pinned_differently_warn(self):
         for a_cores, b_cores, warns in (("0-3", "4-7", ("0-3", "4-7")), ("0-3", "0-3", None),

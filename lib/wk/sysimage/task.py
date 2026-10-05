@@ -33,6 +33,11 @@ def sha256(machine, path):
     return words[0] if words else ""
 
 
+def du(machine, path, absent="?"):
+    words = machine.run(["du", "-sh", path]).out.split()
+    return words[0] if words else absent
+
+
 def fetch_pinned(machine, url, dest, sha):
     """`url` kept at `dest` on `machine` only once its sha256 is `sha`, resumed from `dest`.part; "" or why it is not."""
     if machine.exists(dest) and sha256(machine, dest) == sha:
@@ -244,7 +249,7 @@ class ContainerBuilder:
     """A builder in a container workspace made from its own host image; a subclass is its data and its stages."""
 
     KIND = TITLE = SPEC = BASE_IMAGE = BASE_VAR = ""
-    NEEDS = NOT_HERE = IMAGE_NOTE = SURVIVES = ""
+    NEEDS = NOT_HERE = IMAGE_NOTE = SURVIVES = PATTERN = ""
 
     def __init__(self, reg, preset, spec, clock):
         self.reg, self.p, self.spec, self.clock = reg, preset, spec, clock
@@ -268,6 +273,42 @@ class ContainerBuilder:
             digest = hashlib.sha256(f.read()).hexdigest()[:8]
         return base, "localhost/wk-%s-host:%s-%s" % (self.KIND, base.rsplit(":", 1)[-1], digest)
 
+    def stage(self, driver, ws, stage):
+        return Stage(self.reg, driver, ws, self.KIND, stage, self.kill_cmd(ws, stage), self.clock)
+
+    def cache(self, what):
+        return os.path.join(self.store.store_dir(), "cache", self.KIND, what)
+
+    def sync(self, driver, ws):
+        if not driver.sync_tools(ws):
+            die("pushing wk-tools into '%s' failed -- the reason is above" % ws)
+
+    def staged(self, st, sized, plan, steps, say, argv, at=None, subject="", mb=None, need_gb=None, what=None):
+        """Under the workspace's lock and a record of `plan`: each of `steps` is a plan step (or, with `at`, all come
+        before step `at`), a refusal in one ends the record, then `argv()` runs as the next step."""
+        budget, running, jobs = sized
+        lock = st.admit(budget, running, jobs, need_gb, what)
+        try:
+            t = st.begin(plan)
+            if subject:
+                t.set("subject", subject)
+            try:
+                for n, fn in enumerate(steps, 1):
+                    if at is None:
+                        t.step(n)
+                    fn()
+            except Refused as e:
+                t.end(e.status)
+                raise
+            if at is None:
+                t.step(len(steps) + 1)
+            else:
+                t.step_state(at, "running")
+            info(say)
+            st.run(t, budget, jobs, argv(), self.PATTERN, mb)
+        finally:
+            lock.release_all()
+
     def ws_flag(self, ws):
         return "" if ws == images.image_ws(self.name, self.env) else " --workspace " + ws
 
@@ -278,8 +319,7 @@ class ContainerBuilder:
         return st.detach([os.path.join(self.root, "wk"), "sysimage", verb, self.spec] + [a for a in rest if a != "--detach"], what)
 
     def du(self, path):
-        words = self.here.run(["du", "-sh", path]).out.split()
-        return words[0] if words else "not created yet"
+        return du(self.here, path, "not created yet")
 
     def ensure_ws(self, driver, ws, base, tag):
         """The image first, so an edited Containerfile changes the wanted tag on every run."""

@@ -7,6 +7,7 @@ import shlex
 import signal as sig
 import sys
 import threading
+from pathlib import Path
 
 from wk import act, record
 from wk.act import die, info, log, warn
@@ -32,11 +33,11 @@ def heartbeat_seconds(env):
 
 
 def pid_tries(env):
-    return int(env.get("WK_JOB_PID_TRIES") or 900)
+    return _seconds(env, "WK_JOB_PID_TRIES", 900)
 
 
 def kill_wait(env, default=KILL_WAIT):
-    return int(env.get("WK_KILL_WAIT") or default)
+    return _seconds(env, "WK_KILL_WAIT", default)
 
 
 class Interrupted(KeyboardInterrupt):
@@ -104,24 +105,21 @@ def stall_report(machine, path, idle, verdict="silent", named=""):
     else:
         warn("no output for %ds, and nothing here is compiling or linking" % idle)
     log("  last progress: %s" % (progress_line(path) or "unknown"))
-    try:
-        for line in machine.read("/proc/meminfo").splitlines():
-            if line.startswith("MemAvailable:"):
-                log("  memory:        %d MB available" % (int(line.split()[1]) // 1024))
-    except OSError:
-        pass
-    try:
-        for line in machine.read("/sys/fs/cgroup/memory.events").splitlines():
-            if line.startswith("oom_kill ") and line.split()[1] != "0":
-                warn("  cgroup has OOM-killed %s process(es) -- lower the job count" % line.split()[1])
-    except OSError:
-        pass
-    try:
-        with open(path, errors="replace") as f:
-            tail = [l for l in f.read().replace("\r", "\n").split("\n") if l]
-    except OSError:
-        tail = []
+    for line in _lines(machine.read, "/proc/meminfo"):
+        if line.startswith("MemAvailable:"):
+            log("  memory:        %d MB available" % (int(line.split()[1]) // 1024))
+    for line in _lines(machine.read, "/sys/fs/cgroup/memory.events"):
+        if line.startswith("oom_kill ") and line.split()[1] != "0":
+            warn("  cgroup has OOM-killed %s process(es) -- lower the job count" % line.split()[1])
+    tail = [l for l in _lines(lambda p: Path(p).read_text(errors="replace").replace("\r", "\n"), path) if l]
     log("  tail: %s" % (tail[-1][:100] if tail else ""))
+
+
+def _lines(read, path):
+    try:
+        return read(path).splitlines()
+    except OSError:
+        return []
 
 
 def watch(argv, path, machine, clock, env=None, cwd=None, abort=None, wedge=None):
@@ -295,25 +293,22 @@ def adopt(driver, ws, t, pid, want):
         t.pid(pid)
         t.set("where", "place")
         return True
-    warn("'%s' names pid %s as its job, and that pid inside '%s' is running\n  '%s', not %s. It is not adopted, so\n"
-         "  nothing here will signal it; stop the job where it runs:  wk enter %s"
-         % (ws, pid, ws, args or "nothing -- it is already gone", want, ws))
+    warn("'%s' names pid %s as its job, and that pid there is running '%s', not %s.\n"
+         "  It is not adopted; stop the job where it runs:  wk enter %s" % (ws, pid, args or "nothing -- it is already gone", want, ws))
     return False
 
 
 def signal(driver, ws, t, pid, signum):
     want = t.field("pid_match")
     if not want:
-        die("the record %s holds pid %s inside '%s' and no pattern its\n    command line must match, so nothing can tell it "
-            "from any other pid in a\n    shared PID namespace. Whatever adopted that pid did not go through\n"
-            "    job.adopt (lib/wk/job.py), which is a bug." % (t.id, pid, ws))
+        die("the record %s holds pid %s inside '%s' with no pid_match to check it against:\n"
+            "    it was not adopted through job.adopt, which is a bug." % (t.id, pid, ws))
     args = pid_args(driver, ws, pid)
     if not args:
         return
     if not match_any(args, want):
-        die("refusing to send %s to pid %s inside '%s': it is running\n    '%s', not %s. The pid is what the workspace "
-            "announced, and this one\n    is another process -- in a shared PID namespace it could be another\n"
-            "    workspace's build. Stop the job where it runs:  wk enter %s" % (signal_name(signum), pid, ws, args, want, ws))
+        die("refusing to send %s to pid %s inside '%s': it is running\n    '%s', not %s -- in a shared PID namespace, "
+            "maybe another workspace's.\n    Stop the job where it runs:  wk enter %s" % (signal_name(signum), pid, ws, args, want, ws))
     kill_tree_in(driver, ws, int(pid), signum)
 
 

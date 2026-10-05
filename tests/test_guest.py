@@ -651,8 +651,9 @@ class TestTheSwitchForTheGuests(GuestTest):
         quiet(guest.vm_push_keys_converge, str(REPO), self.w, "on", self.w.env)
         self.w.guest_sock = True
         before = self.w.state_of()
-        rows = guest.vm_push_keys_state(str(REPO), self.w, self.w.env)
-        self.assertEqual([("demo", "running", "%d key(s) through the agent on this host" % len(secrets.push_keys()))], rows)
+        n = len(secrets.push_keys())
+        self.assertEqual((n, [("demo", "running", "%d key(s) through the agent on this host" % n)]),
+                         guest.vm_push_status(str(REPO), self.w, self.w.env))
         self.assertEqual(before, self.w.state_of())
 
     def test_a_host_with_no_guests_still_loads_the_agent_its_own_pushes_use(self):
@@ -661,8 +662,7 @@ class TestTheSwitchForTheGuests(GuestTest):
         ok, err = quiet(guest.vm_push_keys_converge, str(REPO), self.w, "on", self.w.env)
         self.assertTrue(ok, err)
         self.assertEqual({"KEY:" + k[0] for k in secrets.push_keys()}, self.w.agents[self.vmdir + "/ssh-agent.sock"])
-        self.assertEqual(len(secrets.push_keys()), guest.vm_push_agent_keys(str(REPO), self.w, self.w.env))
-        self.assertEqual([], guest.vm_push_keys_state(str(REPO), self.w, self.w.env))
+        self.assertEqual((len(secrets.push_keys()), []), guest.vm_push_status(str(REPO), self.w, self.w.env))
         self.assertEqual([], self.w.spawned(" -N "))
 
 

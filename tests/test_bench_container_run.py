@@ -99,12 +99,8 @@ class TestTheWatchIsInertInAContainer(unittest.TestCase):
         time.sleep(0.3)
         return w.stop(), [e[1][0] for e in m.effects]
 
-    def test_a_container_is_never_asked(self):
-        seen, ran = self.watch("Linux")
-        self.assertEqual([], seen)
-        self.assertEqual(["uname"], ran)
-
-    def test_a_mac_whose_window_server_cannot_be_asked_says_so(self):
+    def test_a_container_is_never_asked_and_a_mac_whose_window_server_cannot_be_asked_says_so(self):
+        self.assertEqual(([], ["uname"]), self.watch("Linux"))
         seen, ran = self.watch("Darwin")
         self.assertEqual([screen.UNASKED], [l.split("\t", 1)[1] for l in seen])
         self.assertIn("ps", ran, "the watch never looked")

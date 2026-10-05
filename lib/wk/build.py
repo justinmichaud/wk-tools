@@ -95,10 +95,8 @@ class Build:
             if not re.match(r"^[A-Za-z_][^=]*=", e):
                 die("--env takes NAME=VALUE, got %s" % shlex.quote(e))
         if o.get("cmakeargs") is not None:
-            act.barrier("--cmakeargs would replace the preset's CMake flags rather than add to\n"
-                        "    them: build-webkit takes one --cmakeargs, so the last one on the command\n"
-                        "    line wins and '%s' would lose %s.\n    Use --cmake instead, which is added to them:\n"
-                        "        wk build%s %s --cmake %s" % (self.preset.name, self.preset.cmake_summary(), "" if self.in_ws else " " + name,
+            act.barrier("--cmakeargs would replace the preset's CMake flags, and '%s' would lose %s.\n"
+                        "    --cmake adds to them:  wk build%s %s --cmake %s" % (self.preset.name, self.preset.cmake_summary(), "" if self.in_ws else " " + name,
                                                            self.preset.name, shlex.quote(o["cmakeargs"])))
             o.setdefault("pass", []).insert(0, "--cmakeargs=" + o["cmakeargs"])
         if o.get("babysit_driver"):
@@ -143,10 +141,9 @@ class Build:
     def babysit_front(self):
         name, env = self.name, self.env
         if self.in_ws:
-            die("--babysit runs on the host: it re-runs 'wk build' and starts\n    Claude in the workspace, neither of which works from in here")
+            die("--babysit runs on the host, not in a workspace")
         if self.driver.kind == "remote":
-            die("refusing to babysit on a remote place: the fixer is Claude, and\n"
-                "    a shared machine has no sandbox to run it in (the same rule as 'wk ai claude')")
+            die("refusing to babysit on a remote place: a shared machine has no sandbox for Claude")
         if self.driver.kind == "local":
             die("already inside a workspace -- run the build and claude directly")
         blog = os.path.join(self.ws_dir, "babysit.log")
@@ -312,41 +309,34 @@ class Build:
         name, preset, o, t = self.name, self.preset, self.opts, self.driver
         arch = t.arch(name)
         label = presets.arch_label(arch)
+        machine, a = presets.machine_cmake(tenv), presets.ARCH.get(arch, {})
         log("dry run -- nothing was built.")
-        log("  workspace: %s (%s, %s%s)" % (name, t.name, t.state(name), ", " + label if label else ""))
-        if o.get("branch"):
-            log("  branch:    %s (would be checked out first)" % o["branch"])
-        log("  preset:    %s (%s%s%s)" % (preset.name, preset.buildsys, " " + preset.port if preset.port else "", " " + preset.args if preset.args else ""))
-        if presets.machine_cmake(tenv):
-            log("  machine:   %s (cmake, from %s's conf)" % (presets.machine_cmake(tenv), t.name))
-        if defaults:
-            log("  defaults:  %s (build_args, from %s's conf; --no-defaults skips it)" % (defaults, t.name))
-        if o.get("cmake"):
-            log("  --cmake:   %s (added to the preset's)" % " ".join(o["cmake"]))
-        if o.get("env"):
-            log("  --env:     %s(overrides the preset's)" % "".join(e + " " for e in o["env"]))
-        if passthru:
-            log("  passed on: %s (straight to build-webkit)" % " ".join(passthru))
-        if label:
-            a = presets.ARCH[arch]
-            log("  arch:      %s, native (%s %s)" % (label, a["wrapper"], a["cflags"]))
-        log("  src:       %s" % t.src(name))
-        log("  build dir: %s" % preset.build_dir(t.src(name)))
-        log("  jobs:      %d (nice %d)" % (jobs, nice))
-        log("  memory:    budget %dMB, floor %sMB, watched every %ss"
-            % (budget_mb, tenv.get("WK_MEM_FLOOR_MB") or 2048, self.env.get("WK_MEM_INTERVAL") or 30))
-        log(("  would run: env %s %s %s" % (" ".join(preset_env), bit, " ".join(passthru))).rstrip())
+        for key, value in (
+                ("workspace", "%s (%s, %s%s)" % (name, t.name, t.state(name), ", " + label if label else "")),
+                ("branch", o.get("branch") and "%s (would be checked out first)" % o["branch"]),
+                ("preset", "%s (%s%s%s)" % (preset.name, preset.buildsys, " " + preset.port if preset.port else "",
+                                            " " + preset.args if preset.args else "")),
+                ("machine", machine and "%s (cmake, from %s's conf)" % (machine, t.name)),
+                ("defaults", defaults and "%s (build_args, from %s's conf; --no-defaults skips it)" % (defaults, t.name)),
+                ("--cmake", o.get("cmake") and "%s (added to the preset's)" % " ".join(o["cmake"])),
+                ("--env", o.get("env") and "%s(overrides the preset's)" % "".join(e + " " for e in o["env"])),
+                ("passed on", passthru and "%s (straight to build-webkit)" % " ".join(passthru)),
+                ("arch", label and "%s, native (%s %s)" % (label, a["wrapper"], a["cflags"])),
+                ("src", t.src(name)), ("build dir", preset.build_dir(t.src(name))), ("jobs", "%d (nice %d)" % (jobs, nice)),
+                ("memory", "budget %dMB, floor %sMB, watched every %ss"
+                 % (budget_mb, tenv.get("WK_MEM_FLOOR_MB") or 2048, self.env.get("WK_MEM_INTERVAL") or 30)),
+                ("would run", ("env %s %s %s" % (" ".join(preset_env), bit, " ".join(passthru))).rstrip())):
+            if value:
+                log("  %-10s %s" % (key + ":", value))
         if not t.exec(name, ["grep", "-q", "WK_DRY_RUN", bit]).ok:
-            warn("  the wk-tools in '%s' predates --dry-run's place half, so the commands" % name)
-            log("  it would run cannot be asked for without risking a real build.")
+            warn("  the wk-tools in '%s' predates --dry-run's place half, so what it would run is not asked." % name)
             log("  push this tree there first:  wk sync --tools %s" % t.name)
             return
         line = self.far_line(preset_env, bit, passthru)
         if line is not None:
             log("  running:   %s" % line)
         else:
-            warn("  could not ask '%s' itself what it would run -- the lines above are" % name)
-            log("  this side's half of it. Is the workspace up? (wk status %s)" % name)
+            warn("  could not ask '%s' what it would run; is it up? (wk status %s)" % (name, name))
 
     def far_line(self, preset_env, bit, passthru):
         """The command line the place half resolves, asked of it under WK_DRY_RUN; it knows ionice and the cgroup clamp."""
@@ -466,10 +456,7 @@ class Build:
         for e in record.first_error(path):
             log("  " + e)
         if "xcbuilddata/manifest.json" in text:
-            log("")
-            warn("that is Xcode's build description, not your code.")
-            log("  It is derived, and an interrupted build can leave it unusable.")
-            log("  The products survive; only the plan has to be rebuilt:")
+            warn("that is Xcode's derived build description, not your code; the products survive:")
             log("    wk enter %s rm -rf %s/WebKitBuild/%s/XCBuildData"
                 % (name, self.driver.src(name), os.path.basename(preset.build_dir(self.driver.src(name)))))
             log("    wk build %s %s" % (name, preset.name))

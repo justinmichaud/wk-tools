@@ -27,6 +27,11 @@ def load(path, name):
 WKMAC = load(REPO / "lib" / "wk" / "mac.py", "wkmac")
 BROWSER = load(REPO / "bench" / "mac-browser-check.py", "mac_browser_check")
 
+
+def py(script, *argv):
+    """`script` (lib/wk/mac.py or bench/mac-browser-check.py) run as its own process."""
+    return subprocess.run([sys.executable, str(REPO / script)] + [str(a) for a in argv], capture_output=True, text=True)
+
 # tolken's built-in panel, as CGGetOnlineDisplayList reports it on the bench
 # install: asleep and inactive is what a headless ssh session sees.
 PANEL = {"id": 1, "builtin": True, "main": True, "active": False, "online": True,
@@ -161,9 +166,7 @@ class WkmacDisplayMode(WkmacHandles):
         return WKMAC._mode_rows(doc, uuid)
 
     def test_it_reads_the_running_mode_in_points(self):
-        rc, out = self.mode(FakeCG([dict(PANEL, points=[1280, 832])]))
-        self.assertEqual(0, rc)
-        self.assertEqual("1280x832", out.strip())
+        self.assertEqual((0, "1280x832\n"), self.mode(FakeCG([dict(PANEL, points=[1280, 832])])))
 
     def test_declaring_a_mode_rewrites_that_panels_size_in_every_row_and_nothing_else(self):
         config = self._config(wide=1470, high=956)
@@ -196,27 +199,18 @@ class WkmacDisplayMode(WkmacHandles):
 class WkmacDisplays(WkmacHandles):
     def test_the_display_list_carries_every_field_consumers_read(self):
         rc, out = self.displays(FakeCG([PANEL]))
-        self.assertEqual(0, rc)
         answer = json.loads(out)
-        self.assertEqual(1, answer["count"])
+        self.assertEqual((0, 1), (rc, answer["count"]))
         row = answer["displays"][0]
         self.assertEqual(ROW_KEYS, set(row))
-        self.assertEqual([1470, 956], row["points"])
-        self.assertTrue(row["builtin"])
-        self.assertFalse(row["mirrored"])
-        self.assertEqual(0.4375, row["brightness"])
+        self.assertEqual(([1470, 956], True, False, 0.4375), (row["points"], row["builtin"], row["mirrored"], row["brightness"]))
 
-    def test_a_second_display_is_listed_too(self):
-        rc, out = self.displays(FakeCG([PANEL, EXTERNAL]))
-        self.assertEqual(0, rc)
-        answer = json.loads(out)
-        self.assertEqual(2, answer["count"])
-        self.assertEqual([1, 2], [d["id"] for d in answer["displays"]])
-
-    def test_no_displays_at_all_is_a_valid_answer(self):
-        rc, out = self.displays(FakeCG([]))
-        self.assertEqual(0, rc)
-        self.assertEqual({"count": 0, "displays": []}, json.loads(out))
+    def test_a_second_display_is_listed_too_and_none_at_all_is_a_valid_answer(self):
+        for displays, ids in (([PANEL, EXTERNAL], [1, 2]), ([], [])):
+            with self.subTest(ids=ids):
+                rc, out = self.displays(FakeCG(displays))
+                answer = json.loads(out)
+                self.assertEqual((0, len(ids), ids), (rc, answer["count"], [d["id"] for d in answer["displays"]]))
 
     def test_a_display_list_it_cannot_read_prints_nothing(self):
         self.assertEqual((1, ""), self.displays(None))
@@ -230,15 +224,13 @@ class WkmacDisplays(WkmacHandles):
     @unittest.skipIf(platform.system() == "Darwin",
                      "this machine is a Mac: CoreGraphics loads here")
     def test_the_subcommand_exits_1_printing_nothing_off_a_mac(self):
-        cp = subprocess.run([sys.executable, str(REPO / "lib" / "wk" / "mac.py"), "displays"],
-                            capture_output=True, text=True)
+        cp = py("lib/wk/mac.py", "displays")
         self.assertEqual(1, cp.returncode)
         self.assertEqual("", cp.stdout)
 
     @unittest.skipUnless(platform.system() == "Darwin", "needs a Mac")
     def test_a_real_window_server_answers_with_that_shape(self):
-        cp = subprocess.run([sys.executable, str(REPO / "lib" / "wk" / "mac.py"), "displays"],
-                            capture_output=True, text=True)
+        cp = py("lib/wk/mac.py", "displays")
         self.assertEqual(0, cp.returncode, cp.stderr)
         answer = json.loads(cp.stdout)
         self.assertEqual(answer["count"], len(answer["displays"]))
@@ -248,17 +240,12 @@ class WkmacDisplays(WkmacHandles):
 
 
 class WkmacBrightness(WkmacHandles):
-    def test_it_reads_the_builtin_panel(self):
+    def test_it_reads_the_builtin_panel_and_a_set_prints_the_value_read_back(self):
         rc, out = self.brightness(FakeCG([PANEL]))
-        self.assertEqual(0, rc)
-        self.assertEqual(0.4375, float(out))
-
-    def test_a_set_prints_the_value_read_back(self):
+        self.assertEqual((0, 0.4375), (rc, float(out)))
         ds = FakeDS()
         rc, out = self.brightness(FakeCG([PANEL]), ds=ds, value=0.0)
-        self.assertEqual(0, rc)
-        self.assertEqual(0.0, float(out))
-        self.assertEqual(0.0, ds.value)
+        self.assertEqual((0, 0.0, 0.0), (rc, float(out), ds.value))
 
     def test_each_reading_or_set_it_cannot_stand_behind_is_refused_printing_nothing(self):
         for name, displays, ds, value in (("unreadable", [PANEL], FakeDS(get_rc=1), None),
@@ -271,9 +258,7 @@ class WkmacBrightness(WkmacHandles):
                 self.assertEqual((1, ""), self.brightness(FakeCG(displays), ds=ds, value=value))
 
     def test_a_value_outside_0_to_1_is_a_usage_error(self):
-        cp = subprocess.run([sys.executable, str(REPO / "lib" / "wk" / "mac.py"),
-                             "brightness", "--set", "2.0"],
-                            capture_output=True, text=True)
+        cp = py("lib/wk/mac.py", "brightness", "--set", "2.0")
         self.assertEqual(2, cp.returncode)
         self.assertIn("fraction from 0.0 to 1.0", cp.stderr)
 
@@ -299,11 +284,7 @@ class TheScreenTheReadingWasTakenOn(WkTest):
         reading = dict(GOOD, **overrides)
         path = self.tmp / "reading.json"
         path.write_text(json.dumps(reading))
-        argv = [sys.executable, str(REPO / "bench" / "mac-browser-check.py"),
-                "--read", str(path)]
-        if expect is not None:
-            argv += ["--expect-display", expect]
-        return subprocess.run(argv, capture_output=True, text=True)
+        return py("bench/mac-browser-check.py", "--read", path, *(["--expect-display", expect] if expect is not None else []))
 
     def assertFault(self, phrase, **overrides):
         cp = self.check(**overrides)
@@ -356,16 +337,12 @@ class TheScreenTheReadingWasTakenOn(WkTest):
         self.assertNotIn("built-in panel", cp.stderr)
 
     def test_a_stored_reading_that_records_one_is_judged_against_it(self):
-        script = str(REPO / "bench" / "mac-browser-check.py")
         src, out = self.tmp / "in.json", self.tmp / "out.json"
         src.write_text(json.dumps(dict(GOOD)))
-        cp = subprocess.run([sys.executable, script, "--read", str(src),
-                             "--expect-display", EXPECT, "--json", str(out)],
-                            capture_output=True, text=True)
+        cp = py("bench/mac-browser-check.py", "--read", src, "--expect-display", EXPECT, "--json", out)
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertEqual(EXPECT, json.loads(out.read_text())["expect_display"])
-        again = subprocess.run([sys.executable, script, "--read", str(out)],
-                               capture_output=True, text=True)
+        again = py("bench/mac-browser-check.py", "--read", out)
         self.assertEqual(0, again.returncode, again.stdout + again.stderr)
         self.assertNotIn("display=not judged", again.stdout)
 
@@ -420,8 +397,7 @@ class TakeReadingNeverLeavesTheBrowserRunning(WkTest):
 class TheDisplayRuleAskedOnItsOwn(WkTest):
 
     def test_it_needs_neither_a_build_nor_a_reading(self):
-        cp = subprocess.run([sys.executable, str(REPO / "bench" / "mac-browser-check.py")],
-                            capture_output=True, text=True)
+        cp = py("bench/mac-browser-check.py")
         self.assertEqual(2, cp.returncode)
         self.assertIn("--displays-only", cp.stderr)
 

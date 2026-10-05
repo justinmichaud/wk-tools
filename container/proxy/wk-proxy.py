@@ -9,8 +9,9 @@ import ssl
 import sys
 import time
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "lib"))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [HERE, os.path.join(os.path.dirname(os.path.dirname(HERE)), "lib")]
+from relay import close, pipe  # noqa: E402
 from wk.notify import sd_notify  # noqa: E402
 
 DENIED_HOSTS = {
@@ -199,7 +200,7 @@ class Policy:
                 return False, why
         for suffix, ports in ALLOWED_HOSTS.items():
             if host == suffix or host.endswith("." + suffix):
-                if port in (ports if isinstance(ports, tuple) else (ports,)):
+                if port in ports:
                     return True, suffix
                 return False, f"port {port} not allowed for {suffix}"
         return False, "not in the allowlist"
@@ -261,22 +262,6 @@ class Proxy:
             except (OSError, asyncio.TimeoutError) as exc:
                 last_error = exc
         raise last_error or OSError("no usable address")
-
-    async def pipe(self, reader, writer):
-        try:
-            while True:
-                data = await asyncio.wait_for(reader.read(65536), IDLE_TIMEOUT)
-                if not data:
-                    break
-                writer.write(data)
-                await writer.drain()
-        except (asyncio.TimeoutError, ConnectionResetError, BrokenPipeError, OSError):
-            pass
-        finally:
-            try:
-                writer.close()
-            except OSError:
-                pass
 
     async def handle(self, creader, cwriter):
         if self.active >= MAX_CONNECTIONS:
@@ -351,20 +336,12 @@ class Proxy:
                         break
                 await uwriter.drain()
 
-            await asyncio.gather(
-                self.pipe(creader, uwriter),
-                self.pipe(ureader, cwriter),
-            )
+            await asyncio.gather(pipe(creader, uwriter, IDLE_TIMEOUT), pipe(ureader, cwriter, IDLE_TIMEOUT))
         except (asyncio.TimeoutError, ConnectionResetError, OSError):
             pass
         finally:
             self.active -= 1
-            for w in (cwriter, upstream):
-                if w is not None:
-                    try:
-                        w.close()
-                    except OSError:
-                        pass
+            close(cwriter, upstream)
 
 
 async def main():

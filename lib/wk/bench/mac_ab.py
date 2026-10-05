@@ -9,12 +9,11 @@ import statistics
 
 from wk import act, fleet, job, notify, presets, record as wkrecord, samply as wksamply, sched
 from wk.act import Refused, die, info, log, warn
-from wk.bench import ab, board_ab, pipeline, record
+from wk.bench import ab, pipeline, record
 from wk.bench.systems import first_line
 from wk.boot import open_driver
 from wk.boot.mac import BENCH_ROOT, Script
 from wk.kv import kv
-from wk.lock import Lock
 from wk.machine import Ssh
 from wk.workspace import require_name
 from wk.bench.mac import MARKER, PUT_SKIP, WKMAC
@@ -111,7 +110,7 @@ def display_verdict(text, want):
     return True, "%s alone, as the install that answers here reads it" % shown
 
 
-class MacAB:
+class MacAB(ab.Task):
     """`wk bench ab --devices <mac>`: no session this side survives the reboot into the benchmark install, so the job
     is planted on it while it is merely mounted, and a LaunchAgent starts it at autologin."""
 
@@ -119,10 +118,9 @@ class MacAB:
 
     def __init__(self, root, reg, clock, spec, o, bench, driver=open_driver):
         """`bench` finds a task in any store this machine reaches and reports it (lib/wk/bench/cli.py's Bench)."""
-        self.root, self.reg, self.clock, self.spec, self.o, self.bench = str(root), reg, clock, spec or "", dict(o), bench
-        self.here, self.env, self.make_driver = reg.machine, reg.env, driver
+        super().__init__(root, reg, clock, o)
+        self.spec, self.bench, self.make_driver = spec or "", bench, driver
         self.name = self.o.get("devices") or ""
-        self.lock = Lock(reg.store, self.here, clock)
         self.a = self.b = self.fw_detail = self.task = self.taskdir = self.logs = ""
         self._mgr = self._tools = None
 
@@ -130,11 +128,9 @@ class MacAB:
         o = self.o
         if self.spec:
             die("a Mac's arms are staged builds, not a change resolved in the mirror: drop '%s'.\n%s" % (self.spec, MAC_USAGE))
-        given = [k for k in BOARD_ONLY if o.get(k)]
-        if given:
-            die("--%s is a board A/B's; a Mac A/B is planted on its benchmark install and runs by itself" % given[0].replace("_", "-"))
+        ab.refuse(o, BOARD_ONLY, "%s is a board A/B's; a Mac A/B is planted on its benchmark install and runs by itself")
         self.rounds, self.plans = ab.check_plan(o, AB_PLANS)
-        top, detect = board_ab.stopping(o, self.rounds, DETECT)
+        top, detect = ab.stopping(o, self.rounds, DETECT)
         o["max_rounds"], o["detect"] = str(top), "%g" % detect
         for key, default in AB_DEFAULTS:
             o[key] = o.get(key) or default
@@ -145,7 +141,7 @@ class MacAB:
         if o.get("systems"):
             if o.get("patch") or o.get("base"):
                 die("--systems names two builds already staged; --patch and --base build them. One or the other.")
-            self.a, self.b = board_ab.pair(o["systems"], "systems")
+            self.a, self.b = ab.pair(o["systems"], "systems")
         elif not o.get("patch"):
             die(MAC_USAGE)
         if not o.get("workspace"):
@@ -389,8 +385,7 @@ class MacAB:
 
     def command(self):
         words = ["wk", "bench", "ab", "--devices", self.name, "--systems", "%s,%s" % (self.a, self.b), "--workspace", self.ws, "--rounds", str(self.rounds)]
-        for key in ("max_rounds", "detect", "count", "timeout", "settle"):
-            words += ["--" + key.replace("_", "-"), self.o[key]]
+        words += ab.flags(self.o, ("max_rounds", "detect", "count", "timeout", "settle"))
         return " ".join(words + [w for p in self.plans for w in ("--plan", p)])
 
     def create_task(self, stamp):
@@ -402,9 +397,7 @@ class MacAB:
             return
         record.held((self.home, bench), self.ws)
         slots = [self.a or "baseline %s" % (self.o.get("base") or "HEAD"), self.b or "patched %s" % self.o.get("patch")]
-        record.new_task(self.home, bench, self.task, self.lock, self.clock.iso(), [
-            "devices=%s=%s" % (self.name, self.preset_name), "plans=" + ",".join(self.plans), "rounds=%d" % self.rounds,
-            "slots=" + ",".join(slots)], self.command())
+        self.new_task((self.home, bench), self.task, self.shape("%s=%s" % (self.name, self.preset_name), self.plans, slots), self.command())
         self.here.mkdir_now(self.logs)
 
     def put_file(self, src, dest):
@@ -672,12 +665,10 @@ class MacAB:
             die("--%s: one reading at a time" % " and --".join(verbs))
         extra = [k for k, v in self.o.items() if v and k not in READS + ("devices",)]
         if self.spec or extra:
-            die("--%s reads a planted job and takes only --devices <mac> (got %s)" % (verbs[0], self.spec or "--" + extra[0].replace("_", "-")))
+            die("--%s reads a planted job and takes only --devices <mac> (got %s)" % (verbs[0], self.spec or ab.flags(self.o, extra)[0]))
         self.resolve()
-        return getattr(self, "read_" + verbs[0])()
-
-    def read_preflight(self):
-        return 1 if self.preflight() else 0
+        return {"preflight": lambda: 1 if self.preflight() else 0, "progress": self.read_progress, "status": self.read_status,
+                "collect": self.read_collect}[verbs[0]]()
 
     def staging_root(self):
         root = self.d.bench_root()
@@ -726,10 +717,7 @@ class MacAB:
         if not self.collect_tree(m, root + "/ab/" + stamp, "warmup", taskdir):
             warn("  the warmup round's captures (%s/ab/%s/warmup) did not copy onto the task" % (root, stamp))
         if self.collect_runs(m, taskdir, root, tsv):
-            try:
-                bench.task_report(task, False, True)
-            except (Refused, SystemExit, OSError, ValueError) as e:
-                warn("the report did not complete (%s); the runs are recorded:  wk bench report %s" % (e, task))
+            self.reported(lambda: bench.task_report(task, False, True), task)
         return 0
 
     def collect_tree(self, m, parent, name, into):

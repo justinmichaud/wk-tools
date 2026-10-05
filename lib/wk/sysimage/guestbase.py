@@ -126,7 +126,7 @@ class Base:
             die("no golden base '%s' on this machine -- nothing to erase" % self.name)
         home = tart_home(self.env)
         if not act.confirm("delete the golden base VM '%s' (%s)? rebuilding it is hours"
-                           % (self.name, self.size(os.path.join(home, "vms", self.name)))):
+                           % (self.name, task.du(self.machine, os.path.join(home, "vms", self.name)))):
             die("aborted -- nothing was changed")
         self.vm.delete_vm(self.name)
         self.machine.remove(self.marker())
@@ -138,16 +138,12 @@ class Base:
             cached = False
         if not cached:
             return 0
-        if act.confirm("also drop the pulled image cache (%s)? it is re-downloadable" % self.size(cache)):
+        if act.confirm("also drop the pulled image cache (%s)? it is re-downloadable" % task.du(self.machine, cache)):
             self.tart_or_die(["prune", "--space-budget", "0"])
             info("pruned the image cache")
         else:
             log("  kept: %s" % cache)
         return 0
-
-    def size(self, path):
-        words = self.machine.run(["du", "-sh", path]).out.split()
-        return words[0] if words else "?"
 
     def tart_or_die(self, args, stream=False):
         argv = [self.vm.tart_or_die()] + args

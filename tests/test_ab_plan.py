@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,7 @@ from tests.killpoints import converges
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, images, pgo, record as progress, sched  # noqa: E402
+from wk import act, images, job, pgo, record as progress, sched  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import ab, record  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
@@ -648,6 +649,20 @@ class TestTheArmsMayDifferByOneCommit(ABTest):
         rc, err = self.quiet(self.world(ahead=2).ab().go)
         self.assertEqual(rc, 0, err)
         self.assertTrue(act._forced)
+
+
+class TestTheTaskBase(ABTest):
+    def test_every_driver_run_records_how_it_ended_and_lets_its_lock_go(self):
+        def interrupted():
+            raise job.Interrupted(signal.SIGTERM)
+        for body, ended, status in ((lambda: 0, 0, None), (lambda: act.die("no", 3), 3, 3), (interrupted, "cancelled", 143)):
+            with self.subTest(ended=ended):
+                w = self.world()
+                t, said = ab.Task(REPO, w.reg, w.clock, {}), []
+                t.lock.hold("bench-task-t", timeout=1)
+                rc, _ = self.quiet(t.guarded, body, said.append)
+                self.assertEqual((said, t.lock.holding), ([ended], []))
+                self.assertEqual(getattr(rc, "status", rc), status or 0)
 
 
 class TestTheKill(ABTest):

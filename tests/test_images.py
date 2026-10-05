@@ -102,22 +102,18 @@ class TestPgoWanted(unittest.TestCase):
 
 
 class TestTheSpec(unittest.TestCase):
-    def test_the_machine_half_is_split_off_the_preset(self):
+    def test_the_machine_half_is_split_off_and_this_machines_own_name_is_its_default_place(self):
         self.assertEqual(images.spec_preset(PRESET + "@moose"), PRESET)
         self.assertEqual(images.spec_machine(PRESET + "@moose"), "moose")
         self.assertEqual(images.spec_machine(PRESET), "")
-
-    def test_this_machines_own_name_is_its_default_place(self):
         self.assertEqual(images.spec_place("here", "here", "container"), "container")
         self.assertEqual(images.spec_place("moose", "here", "container"), "moose")
 
 
 class TestTheImageWorkspace(unittest.TestCase):
-    def test_it_is_its_builder_and_its_preset(self):
+    def test_it_is_its_builder_and_its_preset_and_the_machine_half_is_no_part_of_it(self):
         self.assertEqual(images.image_ws(PRESET, STORE), WS)
         self.assertEqual(images.image_ws(BUILDROOT_PRESET, STORE), BUILDROOT_WS)
-
-    def test_the_machine_half_is_no_part_of_the_name(self):
         self.assertEqual(images.image_ws(PRESET + "@moose", STORE), WS)
 
     def test_a_host_builder_or_no_preset_names_none(self):
@@ -144,16 +140,12 @@ class TestEveryPathIsKeyedOnTheWorkspace(unittest.TestCase):
     """One image preset may have a workspace per arm, and a slot or a collection in
     one is not the other's."""
 
-    def test_a_yocto_slot(self):
+    def test_a_slot_is_keyed_on_the_workspace_and_a_non_image_workspace_has_none(self):
         self.assertEqual(images.slot_dir(WS + "-pr", "base", STORE),
                          "/store/ws/%s-pr/build/wk-slots/base" % WS)
-
-    def test_a_buildroot_slot_keeps_the_preset_inside(self):
         self.assertEqual(images.slot_dir(BUILDROOT_WS + "-pr", "base", STORE),
                          "/store/ws/%s-pr/build/buildroot/%s/output/wk-slots/base"
                          % (BUILDROOT_WS, BUILDROOT_PRESET))
-
-    def test_no_image_workspace_has_no_slot(self):
         self.assertIsNone(images.slot_dir("jsc-release", "base", STORE))
 
     def test_a_collection(self):

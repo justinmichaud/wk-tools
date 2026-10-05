@@ -4,13 +4,8 @@
 # wk: where=workspace repos=webkit name=required ready=yes group=workspaces takes=* passthrough dryrun preset=--preset
 # wk: opts --preset=,--layout,--gpu,--lldb,--kill,--profile,--profile=,--browser,--process=,--attach=,--jit-dump,--markers,--top=,--fetch,--env=
 #
-# The same reportability as `wk build`: a watchdog that detects a silent run, a
-# status file `wk status` can read, and a summary instead of raw output. --lldb
-# turns all of that off and debugs one layout test instead.
-#
-# Layout tests default to software rendering: there is no GPU inside the
-# workspace on macOS (the podman VM has no /dev/dri to pass through). On Linux
-# with a real seat, pass --gpu.
+# Like `wk build`: a watchdog for a silent run, a record `wk status` reads, and a
+# summary instead of raw output. Layout tests use software rendering unless --gpu.
 #
 #   --preset <preset>   the build preset to test (default: the last build's,
 #                        else the platform's; the list is below)
@@ -28,15 +23,13 @@ import shlex
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images, store  # noqa: E402
-
-ROOT = images.root()
-
-from wk import decl, job, places, presets, profile, record, session  # noqa: E402
+from wk import decl, images, job, places, presets, profile, record, session, store  # noqa: E402
 from wk.ldpath import LLDB_PIN_OPTS, lldb_waiting  # noqa: E402
 from wk.act import Refused, die, dry_run, info, log, warn  # noqa: E402
 from wk.build import size_for  # noqa: E402
 from wk.clock import Clock  # noqa: E402
+
+ROOT = images.root()
 
 # The suite runner, in the announcing shell's own -lc text.
 PID_MATCH = "*Tools/Scripts/run-*"
@@ -44,38 +37,21 @@ _SUMMARY = re.compile(r"^(Ran |Test suite|[0-9]+ test|All [0-9]+ test)", re.I | 
 _FAILURE = re.compile(r"FAIL|crash|timed out", re.I)
 
 
-def parse(argv):
-    args = decl.Args(decl.Decl(__file__), argv)
-    o = {"suite": "layout" if args.flag("--layout") else "jsc"}
-    if args.flag("--gpu"):
-        o["gpu"] = True
-    if args.flag("--kill"):
-        o["kill"] = True
+def parse(args):
     paths = list(args.positionals)
-    if args.flag("--lldb"):
-        lldb = "web"
-        if paths and paths[0] in ("ui", "web"):
-            lldb = paths.pop(0)
-        o["lldb"] = lldb
-    o["pass"] = paths + args.tail
-    return o
+    lldb = args.flag("--lldb") and (paths.pop(0) if paths and paths[0] in ("ui", "web") else "web")
+    return {"suite": "layout" if args.flag("--layout") else "jsc", "gpu": args.flag("--gpu"),
+            "kill": args.flag("--kill"), "lldb": lldb, "pass": paths + args.tail}
 
 
 def missing_layout_paths(runner, src, paths):
-    """Every `paths` entry (its `?query` stripped) run-webkit-tests would find neither
-    under LayoutTests/ nor under the checkout -- one round trip, so a mistyped path is
-    named before the suite starts rather than silently "0 tests, 0 run"."""
+    """The `paths` (a `?query` stripped) under neither LayoutTests/ nor the checkout, asked in one round trip."""
     if not paths:
         return []
-    q_src = shlex.quote(src)
-    script = ("for t in " + shlex.join(paths) + "; do\n"
-              "  p=${t%%\\?*}\n"
-              '  [ -e ' + q_src + '/LayoutTests/"$p" ] || [ -e ' + q_src + '/"$p" ] || printf "%s\\n" "$t"\n'
-              "done\n")
-    r = runner(["sh", "-c", script])
-    if not r.ok:
-        return []
-    return [l for l in r.out.replace("\r", "").splitlines() if l]
+    q = shlex.quote(src)
+    r = runner(["sh", "-c", "for t in " + shlex.join(paths) + "; do p=${t%%\\?*}; [ -e " + q + '/LayoutTests/"$p" ] || [ -e '
+                + q + '/"$p" ] || printf "%s\\n" "$t"; done'])
+    return [l for l in r.out.replace("\r", "").splitlines() if l] if r.ok else []
 
 
 def size_and_admit(reg, driver, name, preset, clock):
@@ -90,14 +66,12 @@ def size_and_admit(reg, driver, name, preset, clock):
 
 
 def build_cmd(suite, src, out_env, render_env, wrap, lower, port, jobs, debug_flags, pass_args):
-    tail = shlex.join(pass_args)
     if suite == "jsc":
-        head = " ".join(x for x in (out_env, wrap, "nice -n 10 Tools/Scripts/run-javascriptcore-tests") if x)
-        return ("cd %s && %s --%s %s --no-build --no-fail-fast --memory-limited %s"
-                % (src, head, lower, port, tail)).rstrip()
-    head = " ".join(x for x in (out_env, render_env, wrap, "nice -n 10 Tools/Scripts/run-webkit-tests") if x)
-    return ("cd %s && %s --%s %s --no-build --no-retry-failures --child-processes=%d %s %s"
-            % (src, head, lower, port, jobs, debug_flags, tail)).rstrip()
+        envs, runner, flags = (out_env, wrap), "run-javascriptcore-tests", "--no-fail-fast --memory-limited"
+    else:
+        envs, runner, flags = (out_env, render_env, wrap), "run-webkit-tests", "--no-retry-failures --child-processes=%d %s" % (jobs, debug_flags)
+    head = " ".join(x for x in envs + ("nice -n 10 Tools/Scripts/" + runner,) if x)
+    return ("cd %s && %s --%s %s --no-build %s %s" % (src, head, lower, port, flags, shlex.join(pass_args))).rstrip()
 
 
 def main(argv, reg=None, clock=None):
@@ -105,25 +79,19 @@ def main(argv, reg=None, clock=None):
     profile.refuse_mixed(args, ("--layout", "--gpu", "--lldb", "--kill"))
     if profile.asked(args):
         return profile.main(args, "test", reg)
-    name = store.ws_name()
-    opts = parse(argv)
+    name, opts = store.ws_name(), parse(args)
     clock = clock or Clock()
     reg = reg or places.Registry(ROOT)
-
     try:
-        tname = reg.ws_place(name)
-        driver = reg.load(tname)
+        driver = reg.load(reg.ws_place(name))
     except LookupError as e:
         die(str(e))
     recs = job.records_of(driver, clock, reg.machine)
 
     kill_cmd = "wk test%s --kill" % ("" if reg.in_workspace() else " " + name)
-
-    if opts.get("kill"):
-        rc = job.stop(driver, recs, name, "test", reg.machine, clock, reg.env)
-        if rc == 1:
-            die("the test run in '%s' outlived a TERM and a KILL.\n"
-                "    Look at it:  wk enter %s  and then  pgrep -af run-" % (name, name))
+    if opts["kill"]:
+        if job.stop(driver, recs, name, "test", reg.machine, clock, reg.env) == 1:
+            die("the test run in '%s' outlived a TERM and a KILL.\n    Look at it:  wk enter %s  and then  pgrep -af run-" % (name, name))
         return 0
 
     preset_name = store.build_preset() or presets.default_preset(reg, name)
@@ -134,16 +102,10 @@ def main(argv, reg=None, clock=None):
 
     # Asked of the preset, not of preset.port: on macOS a jsc-* preset is an Apple-port build with no port flag.
     if opts["suite"] == "layout" and preset.jsc_only:
-        die("'%s' builds JavaScriptCore alone, which has no layout tests -- no\n"
-            "    WebKitTestRunner and no ImageDiff are built by it. Name a full-port preset\n"
-            "    that has been built in '%s':\n"
-            "        wk test %s --layout --preset gtk-release-asan\n"
-            "    ('wk status %s' says what it was last built with; 'wk build --list' has\n"
-            "    the presets.)" % (preset_name, name, name, name))
-
-    ws_state = driver.state(name) if dry_run() else "present"
-
-    lower = preset.type.lower()
+        die("'%s' builds JavaScriptCore alone, which has no layout tests. Name a full-port preset\n"
+            "    that has been built in '%s':\n        wk test %s --layout --preset gtk-release-asan\n"
+            "    ('wk status %s' says what it was last built with; 'wk build --list' has the presets.)"
+            % (preset_name, name, name, name))
     src = driver.src(name)
 
     # The same personality wrapper the build ran under: without it `uname -m` in an armhf container answers aarch64.
@@ -151,30 +113,28 @@ def main(argv, reg=None, clock=None):
     wrap = presets.ARCH.get(arch, {}).get("wrapper", "")
     jobs = size_and_admit(reg, driver, name, preset, clock)
 
+    render_env, render_desc = "", "GPU"
     if preset.buildsys == "xcode":
-        render_env, render_desc = "", "the guest's GPU"
-        if opts.get("gpu"):
+        render_desc = "the guest's GPU"
+        if opts["gpu"]:
             warn("--gpu has no meaning for an Apple port; ignoring")
-    elif opts.get("gpu"):
-        render_env, render_desc = "", "GPU"
+    elif opts["gpu"]:
         info("using the real GPU (requires /dev/dri in the workspace)")
         # /dev/dri being there is not the whole story: a BMC or software seat's display path is not the GPU's.
         session.here(ROOT, reg.env).mode_warn()
     else:
-        render_env = "LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe WEBKIT_DISABLE_DMABUF_RENDERER=1"
-        render_desc = "software rendering"
+        render_env, render_desc = "LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe WEBKIT_DISABLE_DMABUF_RENDERER=1", "software rendering"
 
     if opts["suite"] == "layout" and opts["pass"] and not dry_run():
         missing = missing_layout_paths(lambda argv: driver.exec(name, argv), src, opts["pass"])
         if missing:
             die("no such test in '%s':\n%s\n"
-                "    A path run-webkit-tests cannot find is not a failure to it -- it runs\n"
-                "    nothing and exits 0. Paths are relative to LayoutTests/ (or to the\n"
-                "    checkout): 'wk enter %s', then look under %s/LayoutTests."
+                "    run-webkit-tests runs nothing and exits 0 for a path it cannot find. Paths are relative\n"
+                "    to LayoutTests/ (or to the checkout): 'wk enter %s', then look under %s/LayoutTests."
                 % (name, "\n".join("      " + m for m in missing), name, src))
 
-    attach = ""
-    if opts.get("lldb"):
+    attach = debug_flags = ""
+    if opts["lldb"]:
         if opts["suite"] != "layout":
             die("--lldb debugs a layout test; for jsc use 'wk run --lldb'")
         attach = preset.web_process_name() if opts["lldb"] == "web" else preset.test_runner_name()
@@ -183,60 +143,46 @@ def main(argv, reg=None, clock=None):
         if not opts["pass"]:
             die("--lldb needs a test to debug, e.g. fast/dom/Comment")
         jobs = 1   # one driver, so exactly one process of either kind to catch
+        debug_flags = "--no-timeout" + (" --additional-env-var=%s" % preset.web_process_pause_env() if opts["lldb"] == "web" else "")
 
     # mac-release-asan builds into Release-asan/, and only WEBKIT_OUTPUTDIR tells webkitdirs so.
     out_env = "WEBKIT_OUTPUTDIR=%s" % preset.build_dir(src) if preset.buildsys == "xcode" else ""
 
-    debug_flags = ""
-    if opts["suite"] == "layout" and opts.get("lldb"):
-        debug_flags = "--no-timeout"
-        if opts["lldb"] == "web":
-            debug_flags += " --additional-env-var=%s" % preset.web_process_pause_env()
-
-    if opts["suite"] == "jsc":
-        info("JSC tests (%s, -j%d)" % (preset_name, jobs))
-    else:
-        info("layout tests (%s, %s, %d processes)" % (preset_name, render_desc, jobs))
-    cmd = build_cmd(opts["suite"], src, out_env, render_env, wrap, lower, preset.port, jobs, debug_flags, opts["pass"])
+    info("JSC tests (%s, -j%d)" % (preset_name, jobs) if opts["suite"] == "jsc"
+         else "layout tests (%s, %s, %d processes)" % (preset_name, render_desc, jobs))
+    cmd = build_cmd(opts["suite"], src, out_env, render_env, wrap, preset.type.lower(), preset.port, jobs, debug_flags, opts["pass"])
 
     if dry_run():
         log("dry run -- nothing was run.")
-        arch_label = presets.arch_label(arch)
-        log("  workspace: %s (%s, %s%s)" % (name, driver.name, ws_state, ", " + arch_label if arch_label else ""))
+        log("  workspace: %s (%s, %s)" % (name, driver.name, ", ".join(filter(None, (driver.state(name), presets.arch_label(arch))))))
         log("  suite:     %s (%s)" % (opts["suite"], preset_name))
         log("  would run: bash -lc %s" % shlex.quote(cmd))
-        if opts.get("lldb"):
+        if opts["lldb"]:
             log("  in front of: lldb %s -o 'process attach --name %s --waitfor'" % (LLDB_PIN_OPTS, attach))
         return 0
 
     if not driver.sync_tools(name):
         die("pushing wk-tools into '%s' failed -- the reason is above" % name)
 
-    # The watchdog kills a silent job after WK_ABORT_SECONDS, and a process at a breakpoint is silent by definition. The running record carries that deadline, so cmd/status can tell a quiet run from one whose watchdog is gone.
-    if opts.get("lldb"):
+    # A process at a breakpoint is silent, so an lldb run has no watchdog and no record.
+    if opts["lldb"]:
         info("debugging %s (%s) in '%s', lldb waiting for %s" % (" ".join(opts["pass"]), preset_name, name, attach))
         log("  it attaches as that process starts; 'continue' runs the test")
         log("  test output: /tmp/wk-test-lldb.log (in the workspace)")
         driver.exec_tty(name, ["bash", "-lc", lldb_waiting(cmd, "/tmp/wk-test-lldb.log", attach)])
         return 0
 
-    ws_dir = driver.store.ws_dir(name)
-    log_path = os.path.join(ws_dir, "test.log")
+    log_path = os.path.join(driver.store.ws_dir(name), "test.log")
     start = clock.now()
-
     task = recs.begin("test", "here", name, kill_cmd, log_path, ["%s/%s in %s" % (opts["suite"], preset_name, name)])
     task.step(1)
-
-    watcher = None
-    rc = None
+    log("  log: %s" % log_path)
+    log("  stop: %s" % kill_cmd)
+    watcher = job.PidWatch(driver, name, task, log_path, "test", PID_MATCH, job.pid_tries(reg.env))
     with job.Signals():
         try:
-            log("  log: %s" % log_path)
-            log("  stop: %s" % kill_cmd)
-            watcher = job.PidWatch(driver, name, task, log_path, "test", PID_MATCH, job.pid_tries(reg.env))
             watcher.start()
-            script = "echo \"wk: test pid $$\" >&2\n%s" % cmd
-            run_argv, cwd = driver.exec_argv(name, ["bash", "-lc", script])
+            run_argv, cwd = driver.exec_argv(name, ["bash", "-lc", "echo \"wk: test pid $$\" >&2\n%s" % cmd])
             rc = job.watch(run_argv, log_path, reg.machine, clock, reg.env, cwd)
         except job.Interrupted as e:
             warn("interrupted -- stopping the test run in '%s'" % name)
@@ -244,38 +190,32 @@ def main(argv, reg=None, clock=None):
                 warn("it is still running; stop it with:  %s" % kill_cmd)
             raise Refused(job.EXIT_OF.get(e.signum, 130))
         finally:
-            if watcher is not None:
-                watcher.stop()
+            watcher.stop()
 
     try:
-        text = record.normalised(log_path)
+        lines = record.normalised(log_path).split("\n")
     except OSError:
-        text = ""
-    summary = [l for l in text.split("\n") if _SUMMARY.match(l)][-4:]
-    elapsed = int(clock.now() - start)
-    mins, secs = elapsed // 60, elapsed % 60
+        lines = []
+    summary = [l for l in lines if _SUMMARY.match(l)][-4:]
+    mins, secs = divmod(int(clock.now() - start), 60)
 
+    what = "%s/%s in '%s'" % (opts["suite"], preset_name, name)
     sys.stderr.write("\n")
     if rc != 0 and task.field("stopping"):
         task.end(rc)
-        warn("TESTS STOPPED  %s/%s in '%s'  (by '%s' after %dm%ds)" % (opts["suite"], preset_name, name, kill_cmd, mins, secs))
+        warn("TESTS STOPPED  %s  (by '%s' after %dm%ds)" % (what, kill_cmd, mins, secs))
         raise Refused(rc)
-    if rc == 0:
-        task.end(0)
-        info("TESTS OK  %s/%s in '%s'  (%dm%ds)" % (opts["suite"], preset_name, name, mins, secs))
-        for l in summary:
-            log("  " + l)
-        return 0
+    task.end("stalled" if rc == 124 else rc)
     if rc == 124:
-        task.end("stalled")
-        die("TESTS STALLED  %s/%s in '%s' (killed after %dm%ds with no output)\n"
-            "    log: %s" % (opts["suite"], preset_name, name, mins, secs, log_path))
-    task.end(rc)
-    warn("TESTS FAILED  %s/%s in '%s'  (exit %d after %dm%ds)" % (opts["suite"], preset_name, name, rc, mins, secs))
+        die("TESTS STALLED  %s (killed after %dm%ds with no output)\n    log: %s" % (what, mins, secs, log_path))
+    (info, warn)[rc != 0]("TESTS OK  %s  (%dm%ds)" % (what, mins, secs) if rc == 0
+                          else "TESTS FAILED  %s  (exit %d after %dm%ds)" % (what, rc, mins, secs))
     for l in summary:
         log("  " + l)
+    if rc == 0:
+        return 0
     log("failures:")
-    for l in [l for l in text.split("\n") if _FAILURE.search(l)][:10]:
+    for l in [l for l in lines if _FAILURE.search(l)][:10]:
         log("  " + l)
     log("  full log: %s" % log_path)
     raise Refused(rc)

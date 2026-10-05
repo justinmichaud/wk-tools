@@ -252,68 +252,25 @@ class TestThePinnedDisplayIsConfig(WkTest):
 
 class TestPreflight(WkTest):
 
-    def pf(self, m, setup=lambda m: None):
-        ready(m)
-        setup(m)
-        return said(m.preflight)
-
-    def test_a_ready_mac_is_clean_and_changes_nothing(self):
-        with world() as m:
-            n, err = self.pf(m)
-            self.assertEqual(n, 0, err)
-            self.assertEqual(mutations(m), [])
-        self.assertIn("preflight clean", err)
-
-    def test_an_unreachable_mac_stops_at_the_first_row(self):
-        with world() as m:
-            m.fake.up = False
-            n, err = self.pf(m)
-        self.assertEqual(n, 1)
-        self.assertIn("nothing else was checked", err)
-
-    def test_bench_mode_is_refused_since_the_arms_are_on_the_host_install(self):
-        with world() as m:
-            m.fake.enter_bench()
-            n, err = self.pf(m)
-        self.assertGreaterEqual(n, 1)
-        self.assertIn("BENCH mode", err)
-
-    def test_an_unprovisioned_volume_fails_and_names_the_repair(self):
-        with world() as m:
-            n, err = self.pf(m, lambda m: m.fake.files.update({m.fake.firstboot_log(): ""}))
-        self.assertEqual(n, 1, err)
-        self.assertIn("wk sysimage build perf-macos-tolken --repair", err)
-
-    def test_a_mac_it_cannot_restart_names_machine_setup(self):
-        with world() as m:
-            m.fake.helper = None
-            n, err = self.pf(m)
-        self.assertEqual(n, 1, err)
-        self.assertIn("wk machine setup mbp", err)
-
-    def test_nothing_staged_fails_unless_patch_will_stage(self):
+    def test_each_gate_fails_by_name_and_a_ready_mac_is_clean_and_changed_nothing(self):
+        two = {"displays": [BENCH_DISPLAY["displays"][0], {"online": True, "points": [3840, 2160]}]}
         empty = lambda m: m.fake.answer(r"^ls -1 .*/staged", Result(0, ""))   # noqa: E731
-        with world() as m:
-            self.assertEqual(self.pf(m, empty)[0], 1)
-        with world(systems="", patch="HEAD", workspace="mac-rel") as m:
-            self.assertEqual(self.pf(m, empty)[0], 0)
-
-    def test_a_second_display_fails_and_no_force_crosses_it(self):
-        with world() as m:
-            two = {"displays": [BENCH_DISPLAY["displays"][0], {"online": True, "points": [3840, 2160]}]}
-            n, err = self.pf(m, lambda m: m.fake.answer(r"^displays$", Result(0, json.dumps(two))))
-        self.assertEqual(n, 1)
-        self.assertIn("No --force crosses it", err)
-
-    def test_a_guest_needs_its_marker_and_has_no_firmware_to_ask(self):
-        with world("mac-guest") as m:
-            n, err = self.pf(m)
-            self.assertEqual(n, 0, err)
-            self.assertIn("enters bench mode", err)
-        with world("mac-guest") as m:
-            m.fake.marked = False
-            n, err = self.pf(m)
-            self.assertIn("carries no /etc/wk-image", err)
+        for o, setup, n, named in (({}, lambda m: None, 0, "preflight clean"),
+                                  ({}, lambda m: setattr(m.fake, "up", False), 1, "nothing else was checked"),
+                                  ({}, lambda m: m.fake.enter_bench(), 4, "BENCH mode"),
+                                  ({}, lambda m: m.fake.files.update({m.fake.firstboot_log(): ""}), 1,
+                                   "wk sysimage build perf-macos-tolken --repair"),
+                                  ({}, lambda m: setattr(m.fake, "helper", None), 1, "wk machine setup mbp"),
+                                  ({}, empty, 1, "nothing on the volume"), ({"systems": "", "patch": "HEAD"}, empty, 0, "--patch stages both arms"),
+                                  ({}, lambda m: m.fake.answer(r"^displays$", Result(0, json.dumps(two))), 1, "No --force crosses it"),
+                                  ({"kind": "mac-guest"}, lambda m: None, 0, "enters bench mode"),
+                                  ({"kind": "mac-guest"}, lambda m: setattr(m.fake, "marked", False), 1, "carries no /etc/wk-image")):
+            with self.subTest(named), world(**o) as m:
+                setup(m)
+                got, err = said(ready(m).preflight)
+                self.assertEqual(got, n, err)
+                self.assertIn(named, err)
+                self.assertEqual(mutations(m), [])
 
 
 class TestItSharesTheBoardABsRefusals(WkTest):
@@ -391,18 +348,19 @@ class TestThePlant(WkTest):
         self.assertEqual(record.subject_line(st["doc"]).split(" · ")[0], "sid-a vs sid-b")
         self.assertIn("mbp", record.subject_line(st["doc"]))
 
-    def test_an_arm_that_is_not_staged_is_refused_before_anything_lands(self):
-        with world(systems="sid-a,sid-x") as m:
-            got, err = self.plant(m)
-            self.assertIs(got, Refused)
-            self.assertEqual(mutations(m), [])
-        self.assertIn("no staged build 'sid-x'", err)
-
-    def test_the_tree_is_verified_file_for_file(self):
-        with world() as m:
-            got, err = self.plant(m, lambda m: m.fake.answer(r"wk-tools'? --exclude", Result(0, "e" * 64 + "\n")))
-        self.assertIs(got, Refused)
-        self.assertIn("what landed is not this tree", err)
+    def test_what_did_not_land_or_read_back_as_asked_is_refused(self):
+        ans = lambda pat, res: lambda m: m.fake.answer(pat, res)   # noqa: E731
+        for o, setup, named in (({"systems": "sid-a,sid-x"}, lambda m: None, "no staged build 'sid-x'"),
+                                ({}, ans(r"wk-tools'? --exclude", Result(0, "e" * 64 + "\n")), "what landed is not this tree"),
+                                ({}, ans(r"^wc -c .*job.json", Result(0, "7\n")), "could not write the job"),
+                                ({}, ans(r"wk_quiet_dnd_on", Result(0, "off\n")), "Do Not Disturb"),
+                                ({}, ans(r"^test -r .*lib/wk/bench/autorun.py", Result(1)), "carries no lib/wk/bench/autorun.py")):
+            with self.subTest(named), world(**o) as m:
+                got, err = self.plant(m, setup)
+                self.assertIs(got, Refused)
+                self.assertIn(named, err)
+                if o:
+                    self.assertEqual(mutations(m), [], "an arm not staged is refused before anything lands")
 
     def test_both_digests_leave_out_the_same_names(self):
         with world() as m:
@@ -415,12 +373,6 @@ class TestThePlant(WkTest):
             self.assertIn(name, here)
             self.assertFalse([n for n in pushed if name in n], pushed)
 
-    def test_a_file_that_landed_short_is_refused(self):
-        with world() as m:
-            got, err = self.plant(m, lambda m: m.fake.answer(r"^wc -c .*job.json", Result(0, "7\n")))
-        self.assertIs(got, Refused)
-        self.assertIn("could not write the job", err)
-
     def test_a_screensaver_it_cannot_turn_off_is_refused_unless_forced(self):
         idle = lambda m: m.fake.answer(r"^defaults read .*idleTime", Result(0, "300\n"))   # noqa: E731
         with world() as m:
@@ -431,12 +383,6 @@ class TestThePlant(WkTest):
             got, err = self.plant(m, idle)
         self.assertIsNone(got, err)
         self.assertIn("FORCED past a barrier: could not disable the screensaver", err)
-
-    def test_do_not_disturb_is_read_back(self):
-        with world() as m:
-            got, err = self.plant(m, lambda m: m.fake.answer(r"wk_quiet_dnd_on", Result(0, "off\n")))
-        self.assertIs(got, Refused)
-        self.assertIn("Do Not Disturb", err)
 
     def test_the_planted_samply_is_made_executable_over_there(self):
         with world() as m:
@@ -449,12 +395,6 @@ class TestThePlant(WkTest):
             plist = m.here_fake.files[os.path.join(m.logs, mac_ab.AGENT + ".plist")]
         self.assertIn("/var/wk/wk-tools/lib/wk/bench/autorun.py", plist)
         self.assertNotIn("KeepAlive", plist)
-
-    def test_a_tree_with_no_autorun_is_refused(self):
-        with world() as m:
-            got, err = self.plant(m, lambda m: m.fake.answer(r"^test -r .*lib/wk/bench/autorun.py", Result(1)))
-        self.assertIs(got, Refused)
-        self.assertIn("carries no lib/wk/bench/autorun.py", err)
 
     def test_the_autorun_state_is_reset_to_this_job(self):
         with world() as m:

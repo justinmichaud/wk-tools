@@ -73,6 +73,10 @@ def slot_verified(path):
     return n
 
 
+def nonempty(path):
+    return os.path.isfile(path) and os.path.getsize(path) > 0
+
+
 def kill_cmd(browser):
     names = " ".join((project.get("BOARD_BROWSERS")[browser],) + project.get("BOARD_HELPERS"))
     return "killall %s 2>/dev/null; sleep 1; killall -9 %s 2>/dev/null; true" % (names, names)
@@ -411,8 +415,7 @@ class BoardSystem(System):
         """The board's side of a leg, taken whether or not it produced a result: a browser that outlives a run is a second
         browser on the GPU and in the memory the next one measures."""
         m, out, dry = self.bench(), leg.out, act.dry_run()
-        result = os.path.join(out, "result.json")
-        if not dry and not (os.path.isfile(result) and os.path.getsize(result)):
+        if not dry and not nonempty(os.path.join(out, "result.json")):
             leg.machine.write(os.path.join(out, "diagnose", "board-at-failure.txt"), self.sh(self.ob("at-failure.sh")).out)
         m.act_run(["sh", "-c", kill_cmd(self.doc["browser"])])
         try:
@@ -448,7 +451,7 @@ class BoardSystem(System):
             copy_error = str(e)
         if act.dry_run():
             return
-        if os.path.isfile(local) and os.path.getsize(local):
+        if nonempty(local):
             log("  profile     %s (%s)" % (local, self.profiler))
             return
         if os.path.exists(local):
@@ -461,13 +464,12 @@ class BoardSystem(System):
 class BoardRun(pipeline.Run):
     """One leg on a board: its task and progress record live on this machine, where the benchmark runner runs."""
 
+    pid_watch = False
+
     def __init__(self, root, reg, system, clock, kit, env=None, name=""):
         super().__init__(root, reg, system, clock, kit, env)
         self.name = name or self.ws or system.board
         self.kill_cmd = ("wk bench run %s --kill --system %s" % (self.ws, system.board)) if self.ws else "kill %d" % os.getpid()
-
-    def holders(self, res):
-        return progress.fleet_holders(res, self.recs, progress.fleet_stores(self.root, self.env, self.recs.machine))
 
     def records(self, clock):
         return progress.Records(self.reg.store.records_dir(), clock=clock, env=dict(self.reg.env, WK_ABORT_SECONDS=str(progress.watchdog_abort(self.env))),
@@ -490,8 +492,7 @@ class BoardRun(pipeline.Run):
         leg = pipeline.Leg(plan, o)
         leg.slot = o.get("slot") or "a"
         images.check_slot_name(leg.slot)
-        if leg.cores and not pipeline.cores_valid(leg.cores):
-            die("--cores '%s' is not a valid Linux cpu list (e.g. 0-3, 2,3, 0-1,4, 7)" % leg.cores)
+        pipeline.check_cores(leg.cores)
         task = o.get("task") or ""
         if task and not o.get("pgo_dir"):
             record.leg_home(self.reg, self.ws, task)
@@ -549,13 +550,11 @@ class BoardRun(pipeline.Run):
             return steps
         log_path = os.path.join(leg.out, "run.log")
         # The board is a fleet resource: the record is its claim, unless the A/B driving this leg already holds it.
-        self.task = (progress.hold(self.recs, self.holders, s.board, "bench", self.name, self.kill_cmd, log_path, steps, os.getpid(), self.env)
+        self.task = (progress.hold(self.recs, fleet_holders(self.root, self.env, self.recs), s.board, "bench", self.name, self.kill_cmd, log_path, steps, os.getpid(), self.env)
                      or self.recs.begin("bench", "here", self.name, self.kill_cmd, log_path, steps))
         if new:
-            record.new_task(leg.machine, bench, leg.task, self.lock, self.clock.iso(), [
-                "subject.kind=slots", "subject.spec=" + leg.slot, "devices=%s=%s" % (s.board, s.doc.get("profile", "")), "plans=" + leg.plan,
-                "rounds=1", "slots=" + leg.slot] + (["count=" + leg.count] if leg.count else []),
-                "wk bench run %s %s --system %s --slot %s%s" % (self.ws, leg.plan, s.board, leg.slot, " --count " + leg.count if leg.count else ""))
+            self.new_task(leg, bench, "slots", leg.slot, "%s=%s" % (s.board, s.doc.get("profile", "")),
+                          "wk bench run %s %s --system %s --slot %s" % (self.ws, leg.plan, s.board, leg.slot))
         if o.get("pgo_dir"):
             self.here.remove(leg.out)
         leg.machine.mkdir(os.path.join(leg.out, "diagnose"))
@@ -575,7 +574,6 @@ class BoardRun(pipeline.Run):
     def write_env(self, leg):
         s, doc, o = self.system, self.system.doc, leg.o
         lo, hi = s.clk.get("min", ""), s.clk.get("max", "")
-        ab = ["ab.round=" + o["round"], "ab.arm=" + o.get("arm", ""), "ab.slot_a=" + o.get("slot_a", ""), "ab.slot_b=" + o.get("slot_b", "")] if o.get("round") else []
         record.write_env(os.path.join(leg.out, "env.json"), [
             "plan=" + leg.plan, "workspace=" + doc.get("workspace", ""), "preset=" + doc.get("profile", ""), "browser=" + doc.get("browser", ""),
             "count=" + leg.count, "class=" + leg.klass, "runner=browser", "arch=" + (s.facts_.get("arch") or "native"), "bench_host=" + s.bench_host,
@@ -584,15 +582,10 @@ class BoardRun(pipeline.Run):
             "runner_sha=" + s.runner_sha, "local_copy=" + leg.payload, "host.kernel=" + s.facts_.get("kernel", ""),
             "host.kernel_arch=" + s.facts_.get("arch", ""), "host.governor=" + s.clk.get("governor", ""), "host.throttled=" + s.throttled(),
             "host.root_device=" + s.probed.get("rootdev", ""), "host.cpu_khz=" + lo, "cores.set=" + leg.cores,
-            "subtests_excluded=" + o.get("excluded", ""), "task=" + leg.task, "preflight_notes=" + leg.notes] + ab
+            "subtests_excluded=" + o.get("excluded", ""), "task=" + leg.task, "preflight_notes=" + leg.notes] + pipeline.ab_fields(o)
             + pipeline.configuration_fields(self.env),
             bool_fields=["forced=" + act.forced(self.env), "cores.pinned=" + leg.cores, "host.dvfs_pinned=" + ("1" if lo and lo == hi else "")],
             machine=leg.machine)
-
-    def watched(self, argv, cwd, path):
-        if self.task is not None:
-            self.task.set("log", path)
-        return job.watch(argv, path, self.here, self.clock, self.env, cwd)
 
     def run_browser(self, leg):
         s, o = self.system, leg.o
@@ -608,8 +601,7 @@ class BoardRun(pipeline.Run):
         path = os.path.join(leg.out, "run.log")
         rc = s.run(leg, script, self.watched, path)
         s.evidence(leg)
-        result = os.path.join(leg.out, "result.json")
-        if rc == 0 and not act.dry_run() and not (os.path.isfile(result) and os.path.getsize(result)):
+        if rc == 0 and not act.dry_run() and not nonempty(os.path.join(leg.out, "result.json")):
             return 1, "%s exited 0 from slot '%s' with no result" % (runner, leg.slot), path
         return rc, "%s exited %d from slot '%s'" % (runner, rc, leg.slot), path
 
@@ -626,8 +618,11 @@ def require_board(root, env, board):
 def claim(root, env, board, what):
     """A deploy's hold on the board, a record of its own; None under --dry-run or inside a run that holds it."""
     records = progress.Records(env=env)
-    return progress.hold(records, lambda res: progress.fleet_holders(res, records, progress.fleet_stores(root, env, records.machine)), board, "bench", what,
-                         "kill %d" % os.getpid(), "", [what], os.getpid(), env)
+    return progress.hold(records, fleet_holders(root, env, records), board, "bench", what, "kill %d" % os.getpid(), "", [what], os.getpid(), env)
+
+
+def fleet_holders(root, env, records):
+    return lambda res: progress.fleet_holders(res, records, progress.fleet_stores(root, env, records.machine))
 
 
 def for_board(root, reg, ws, clock, board, machine=None, ws_driver=None, driver=None):

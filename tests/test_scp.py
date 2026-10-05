@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, WkTest, fake_workspace, run, stub_path
+from tests.support import REPO, WkTest, fake_workspace, requires_tool, run, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places  # noqa: E402
@@ -95,6 +95,7 @@ class TestTheBytesArrive(ScpTest):
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertEqual(dest.read_bytes(), blob)
 
+    @requires_tool("rsync")
     def test_a_directory_comes_out_whole(self):
         self._tree(self.src / "tree")
         cp = self.scp("-r", ":tree", str(self.here / "tree"))
@@ -102,6 +103,7 @@ class TestTheBytesArrive(ScpTest):
         self.assertEqual((self.here / "tree" / "a").read_bytes(), b"a\n")
         self.assertEqual((self.here / "tree" / "sub" / "c").read_bytes(), b"c\n")
 
+    @requires_tool("rsync")
     def test_a_directory_goes_in_whole(self):
         self._tree(self.here / "tree")
         cp = self.scp("-r", str(self.here / "tree"), ":tree")
@@ -171,6 +173,7 @@ class TestRefusals(ScpTest):
         (drop / "tree" / "stale").write_bytes(b"stale\n")
         return drop
 
+    @requires_tool("rsync")
     def test_replacing_a_whole_directory_is_asked_and_declines_without_a_terminal(self):
         drop = self._copied_once()
         cp = self.scp("-r", ":tree", str(drop))
@@ -187,6 +190,7 @@ class TestRefusals(ScpTest):
         self.assertEqual(self.scp(":file.txt", str(self.here / "file.txt"), "--yes").returncode, 0)
         self.assertEqual((self.here / "file.txt").read_bytes(), b"f\n")
 
+    @requires_tool("rsync")
     def test_a_dry_run_names_the_question_and_the_copy_and_changes_nothing(self):
         drop = self._copied_once()
         cp = self.scp("-r", ":tree", str(drop), "--dry-run")
@@ -196,6 +200,7 @@ class TestRefusals(ScpTest):
         self.assertNotIn("copied", cp.stdout)
         self.assertTrue((drop / "tree" / "stale").exists(), "a dry run copied")
 
+    @requires_tool("rsync")
     def test_yes_replaces_its_contents(self):
         drop = self._copied_once()
         cp = self.scp("-r", ":tree", str(drop), "--yes")
@@ -205,6 +210,7 @@ class TestRefusals(ScpTest):
                          "contents are replaced, not merged")
 
 
+@unittest.skipUnless(os.uname().sysname == "Darwin", "the vm place exists only on a macOS host")
 class TestTheWholeCommandOnAGuest(WkTest):
 
     def _run(self, tart_body, *args):
@@ -373,15 +379,19 @@ class TestRemoteLocalCopy(DriverCopyTest):
         self.reg = places.Registry(REPO, env=self.env, machine=Local())
         self.t = self.reg.load("fakebox")
 
-    def test_push_and_push_dir_copy_on_a_real_filesystem(self):
-        (self.box / "src").mkdir(parents=True)
-        (self.box / "src" / "a").write_bytes(b"a\n")
+    def test_push_copies_on_a_real_filesystem(self):
+        self.box.mkdir(parents=True)
         (self.box / "one.txt").write_bytes(b"one\n")
         self.t.push("demo", str(self.box / "one.txt"), str(self.box / "two.txt"))
         self.assertEqual((self.box / "two.txt").read_bytes(), b"one\n")
+        self.assertEqual(self.t.path_kind("demo", str(self.box / "one.txt")), "file")
+
+    @requires_tool("rsync")
+    def test_push_dir_copies_on_a_real_filesystem(self):
+        (self.box / "src").mkdir(parents=True)
+        (self.box / "src" / "a").write_bytes(b"a\n")
         self.t.push_dir("demo", str(self.box / "src"), str(self.box / "dst"))
         self.assertEqual((self.box / "dst" / "a").read_bytes(), b"a\n")
-        self.assertEqual(self.t.path_kind("demo", str(self.box / "one.txt")), "file")
 
 
 if __name__ == "__main__":

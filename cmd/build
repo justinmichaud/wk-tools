@@ -6,12 +6,9 @@
 # wk: flag --list where=local name=none takes=0
 # wk: flag --kill takes=0 opts=--kill
 #
-# The job count is derived from memory actually available right now, and the
-# build runs where the scheduler and the OOM killer will pick it over your
-# desktop session. Under wk's --dry-run it resolves everything and prints the
-# exact command line this build would run, prefixed `running:`, and builds nothing.
-# Our own flags are taken off the argument list; everything left passes
-# through to the build untouched.
+# The job count is derived from the memory available now. --dry-run prints the
+# command line it would run, prefixed `running:`, and builds nothing. Every
+# argument that is not one of these flags passes through to the build.
 #
 #   --list                 print the available presets (wk build --list) and exit
 #   --no-defaults          skip the build machine's build_args conf default

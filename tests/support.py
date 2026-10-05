@@ -542,6 +542,11 @@ def _live(need, *args):
     return decorate
 
 
+def requires_tool(name):
+    """Skip a unit test, by name, on a machine where the real tool `name` is not installed; the tier is unchanged."""
+    return unittest.skipUnless(shutil.which(name), "needs %s on PATH" % name)
+
+
 def requires_container_place():
     """Gate for a test that needs the real container place: on macOS the
     podman VM this repo drives must already be up (never started here), on

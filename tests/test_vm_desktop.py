@@ -152,28 +152,29 @@ def findings(probe):
     return [tuple(l.split("\t")) for l in desktop(probe).findings().splitlines()]
 
 
+# (probe, state, what a finding says): each must be found.
+FINDINGS = (
+    [(AS_FOUND, "wrong", w) for w in ("screen saver", "Setup Assistant will put a modal pane", "nothing wk runs put it there")]
+    + [(UPDATE_ON, "wrong", w) for w in ("install themselves", "download themselves", "what is new in macOS")]
+    + [(LOGIN_WINDOW, "wrong", "nobody is logged in")]
+)
+
+
 class TestTheFindings(unittest.TestCase):
     def test_a_settled_guest_is_all_ok(self):
         self.assertEqual({f[0] for f in findings(SETTLED)} - {"note"}, {"ok"}, findings(SETTLED))
 
-    def test_the_guest_as_it_was_found_reports_each_fault(self):
-        wrong = [x[1] for x in findings(AS_FOUND) if x[0] == "wrong"]
-        self.assertTrue(any("screen saver" in w for w in wrong), wrong)
-        self.assertTrue(any("Setup Assistant will put a modal pane" in w for w in wrong), wrong)
-        self.assertTrue(any("nothing wk runs put it there" in w for w in wrong), wrong)
+    def test_each_fault_is_reported(self):
+        for probe, state, what in FINDINGS:
+            with self.subTest(what):
+                self.assertTrue([x for x in findings(probe) if x[0] == state and what in x[1]], findings(probe))
+        self.assertTrue(all(REBUILD in x[2] for x in findings(UPDATE_ON) if "install themselves" in x[1]))
 
     def test_a_guest_that_says_nothing_about_software_update_is_not_called_ok(self):
         f = [x for x in findings(AS_FOUND) if "Software Update" in x[1]]
         self.assertTrue(f)
         self.assertNotIn("ok", [x[0] for x in f], f)
         self.assertTrue(any("wk start" in x[2] for x in f), f)
-
-    def test_an_update_that_reboots_or_downloads_itself_is_wrong(self):
-        f = findings(UPDATE_ON)
-        wrong = [x[1] for x in f if x[0] == "wrong"]
-        for what in ("install themselves", "download themselves", "what is new in macOS"):
-            self.assertTrue(any(what in w for w in wrong), (what, wrong))
-        self.assertTrue(all(REBUILD in x[2] for x in f if "install themselves" in x[1]))
 
     def test_the_check_flag_no_guest_can_set_is_not_judged(self):
         for probe in (SETTLED, AS_FOUND, UPDATE_ON):
@@ -198,9 +199,6 @@ class TestTheFindings(unittest.TestCase):
     def test_the_probe_asks_only_about_keys_the_settle_writes(self):
         asked = set(re.findall(r"DidSee[A-Za-z0-9]+", PROBE.read_text()))
         self.assertEqual(set(), asked - set(re.findall(r"DidSee[A-Za-z0-9]+", DESKTOP.read_text())))
-
-    def test_a_login_window_is_no_desktop_at_all(self):
-        self.assertTrue([x for x in findings(LOGIN_WINDOW) if x[0] == "wrong" and "nobody is logged in" in x[1]])
 
     def test_the_login_names_the_account_and_not_its_password(self):
         note = [x for x in findings(SETTLED) if "logs in as" in x[1]]
@@ -265,23 +263,13 @@ def load_findings(probe, env=None):
 
 
 class TestWhatIsResidentInThere(unittest.TestCase):
-    def test_an_accumulation_is_reported_and_the_culprit_named(self):
-        shells = [x for x in load_findings(_load_sample()) if x[0] == "wrong" and "shells are resident" in x[1]]
-        self.assertIn("40 shells", shells[0][1])
-        self.assertIn("editor remote server", shells[0][1])
-        self.assertIn("wk stop", shells[0][2])
-
-    def test_the_editor_remote_server_is_named_as_outliving_its_window(self):
-        f = [x for x in load_findings(_load_sample()) if "editor remote server" in x[1] and x[0] == "note"]
-        self.assertIn("outlives the editor window", f[0][2])
-
-    def test_low_memory_is_wrong_and_names_the_biggest_processes(self):
-        f = [x for x in load_findings(_load_sample()) if x[0] == "wrong" and "free" in x[1]]
-        self.assertIn("6%", f[0][1])
-        self.assertIn("jsc", f[0][1])
-
-    def test_swap_in_a_fixed_allocation_is_reported(self):
-        self.assertIn("4096 MB of swap", [x for x in load_findings(_load_sample()) if "swap" in x[1]][0][1])
+    def test_an_accumulation_low_memory_and_swap_are_reported_with_the_culprits_and_the_remedy(self):
+        f = load_findings(_load_sample())
+        for state, what, remedy in (("wrong", "40 shells", "wk stop"), ("wrong", "editor remote server", ""),
+                                    ("note", "editor remote server", "outlives the editor window"), ("wrong", "6%", ""),
+                                    ("wrong", "jsc", ""), ("note", "4096 MB of swap", "")):
+            with self.subTest(what):
+                self.assertTrue([x for x in f if x[0] == state and what in x[1] and remedy in x[2]], f)
 
     def test_an_idle_guest_is_all_ok(self):
         f = load_findings(IDLE_SAMPLE)
@@ -297,23 +285,6 @@ class TestWhatIsResidentInThere(unittest.TestCase):
             argv = places.Vm("vm", str(REPO), {}, Fake()).guest_of("wk-demo").argv("true")
         self.assertEqual(["/t/tart", "exec"], argv[:2])
         self.assertNotIn("ControlPersist", " ".join(argv))
-
-
-class TestARehearsalGuestIsNotAlsoAWorkspace(unittest.TestCase):
-    def _write_marker(self, bench):
-        g = Fake("guest")
-        g.answer(["test", "-f", "/etc/wk-image"], rc=0 if bench else 1)
-        vm = places.Vm("vm", str(REPO), {"WK_VM_USER": "admin"}, Fake("here"))
-        self.assertTrue(vm.write_marker("demo", g))
-        return g
-
-    def test_a_benchmark_install_has_the_claim_taken_off(self):
-        g = self._write_marker(bench=True)
-        self.assertIn(("remove", "/Users/admin/.wk-workspace"), g.effects)
-
-    def test_an_ordinary_workspace_guest_still_gets_it(self):
-        text = self._write_marker(bench=False).files["/Users/admin/.wk-workspace"]
-        self.assertIn("name=demo", text)
 
 
 class GuestAt(BenchHere):

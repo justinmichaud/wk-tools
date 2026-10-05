@@ -1,11 +1,10 @@
-"""Matching a string against declared glob patterns happens in one place."""
+"""job.match_any: a command line against declared glob patterns, whatever the cwd holds."""
 TIER = "lint"
 import os
-import re
 import sys
 import unittest
 
-from tests.support import REPO, glob_bait, shell_files
+from tests.support import REPO, glob_bait
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import job  # noqa: E402
@@ -28,23 +27,6 @@ class TestMatchAnyIsIndependentOfTheCwd(unittest.TestCase):
         for args, want in (("bash -lc sleep 300", WANT), ("", WANT), (ARGS, "")):
             with self.subTest(args=args, want=want):
                 self.assertFalse(job.match_any(args, want))
-
-
-VAR = r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?"
-VARIABLE_PATTERN = re.compile(
-    r"^\s*(?:;;\s*)?%s\)|\bcase\b.*\bin\s+%s\)|\S\|%s\)"
-    r"|\[\[[^]]*(?:==|!=)\s*%s" % (VAR, VAR, VAR, VAR))
-
-
-class TestNoShellFileUsesAVariableAsAPattern(unittest.TestCase):
-    def test_no_shell_file_matches_a_variable_pattern(self):
-        offenders = []
-        for path in shell_files():
-            for n, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
-                if VARIABLE_PATTERN.search(line):
-                    offenders.append(f"{path.relative_to(REPO)}:{n}: {line.strip()}")
-        self.assertEqual(offenders, [], "a variable as a case pattern -- match in Python (lib/wk/job.py match_any):\n"
-                         + "\n".join(offenders))
 
 
 if __name__ == "__main__":

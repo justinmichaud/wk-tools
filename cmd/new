@@ -4,12 +4,8 @@
 # wk: where=workspace name=required lifecycle post=zed group=workspaces dryrun
 # wk: opts --on=,--base=,--arch=,--repo=,--zed,--no-wait,--kill,--pr=,--_detached
 #
-# Other places take minutes (a guest clone, a git clone over ssh), so creation is
-# *detached*: a dropped connection does not take it with it, and re-running `wk
-# new` resumes it. This end refuses what should be refused, starts the detached
-# run and follows its log; the detached run (`--_detached`) does everything that changes
-# anything, under the workspace lock, stepping its task record as it goes.
-# --dry-run runs it here instead and prints what it would change.
+# Creation is detached: a dropped connection does not take it with it, and
+# re-running `wk new` resumes it. --dry-run prints what it would change.
 #
 #   --on <place|machine> container, vm, or a machine named in
 #                        machines/<name>.conf (default: container); a build
@@ -36,10 +32,8 @@
 #                        initialising (default 300)
 #   WK_KILL_WAIT=<s>     how long --kill waits after TERM before KILL (default 15)
 #
-# Creation refreshes this machine's mirror first (`wk sync --mirror`: no other
-# workspace is touched), then fetches from it, fast-forwards the checkout onto
-# it and runs one `git status`, so the first one in the workspace is fast.
-# A refresh that fails refuses the creation: fix it with `wk sync --mirror`.
+# Creation refreshes this machine's mirror first (`wk sync --mirror`; a refresh
+# that fails refuses the creation), then fetches from it and fast-forwards the checkout.
 
 import os
 import sys

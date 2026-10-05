@@ -10,6 +10,7 @@ passes as sent. WK_INJECT_CLAUDE_LOGIN names the holder; the podman machine's re
 
 import asyncio
 import errno
+import functools
 import json
 import os
 import re
@@ -21,8 +22,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "lib"))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [HERE, os.path.join(os.path.dirname(os.path.dirname(HERE)), "lib")]
+import relay  # noqa: E402
 from wk import claudelogin  # noqa: E402
 from wk.machine import in_podman_machine, replace_file  # noqa: E402
 from wk.notify import sd_notify  # noqa: E402
@@ -340,21 +342,7 @@ def ensure_certs(d, ca_out):
     return chain
 
 
-async def pipe(reader, writer):
-    try:
-        while True:
-            data = await asyncio.wait_for(reader.read(65536), IDLE_TIMEOUT)
-            if not data:
-                break
-            writer.write(data)
-            await writer.drain()
-    except (asyncio.TimeoutError, ConnectionResetError, BrokenPipeError, OSError):
-        pass
-    finally:
-        try:
-            writer.close()
-        except OSError:
-            pass
+pipe = functools.partial(relay.pipe, idle=IDLE_TIMEOUT)
 
 
 class StatusTimeout(asyncio.TimeoutError):
@@ -548,12 +536,7 @@ class Injector:
         except (asyncio.TimeoutError, ConnectionResetError, OSError) as exc:
             log("connection failed: %s: %s" % (type(exc).__name__, exc))
         finally:
-            for w in (cwriter, upstream):
-                if w is not None:
-                    try:
-                        w.close()
-                    except OSError:
-                        pass
+            relay.close(cwriter, upstream)
 
 
 def _default_runtime(env=os.environ):

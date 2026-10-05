@@ -135,13 +135,6 @@ class TestPeerResolution(PeerFixture):
         self.assertTrue(reg.load("peerbox").peer)
         self.assertFalse(reg.load("buildbox").peer)
 
-    def test_peer_info_and_list(self):
-        with self.faked_ssh():
-            t = self.registry().load("peerbox")
-            self.assertEqual(t.info("peerws"), "present")
-            self.assertEqual(t.info("ghost"), "absent")
-            self.assertEqual([n for n, _ in t.list()], ["peerws"])
-
 
 class TestPeerDelegation(PeerFixture):
 

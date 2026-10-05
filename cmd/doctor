@@ -26,12 +26,10 @@
 #
 #   --gpu   fail if the workspace has no hardware-accelerated GPU (informational otherwise)
 #
-#   --all   also ask every build machine in machines/ for the tools a build
-#           needs, its commit identity, its profile's build variables, whether
-#           its credential copies are the ones stored here and whether its
-#           provisioning is current (one that does not answer is unreachable,
-#           never broken); and every bridge phone's battery charge cap and this
-#           Mac's `pmset -g batt` line.
+#   --all   also ask every build machine in machines/ for its build tools,
+#           commit identity, build variables, credential copies and provisioning
+#           (one that does not answer is unreachable, never broken); and every
+#           bridge phone's battery charge cap and this Mac's `pmset -g batt`.
 #
 #   --probe-store   the store's key=value facts alone, for the host that asks
 #                   the podman VM to run this where the store is

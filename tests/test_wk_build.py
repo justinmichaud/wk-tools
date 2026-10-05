@@ -4,11 +4,9 @@ import io
 import os
 import posix
 import re
-import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -17,6 +15,7 @@ from unittest import mock
 from tests.fakes import JobWorld
 from tests.killpoints import converges
 from tests.support import REPO, as_dispatched, load_cmd
+from tests.test_wk_workspace import FlowTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, build, dispatch, job, places, record  # noqa: E402
@@ -51,18 +50,9 @@ class World(JobWorld):
         return ([(t.field("kind"), t.field("exit")) for t in self.recs().list()], len(self.budget_files()))
 
 
-class BuildTest(unittest.TestCase):
+class BuildTest(FlowTest):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-build-"))
-        self.addCleanup(shutil.rmtree, str(self.tmp), True)
-        osenv = mock.patch.dict(os.environ, {}, clear=False)
-        osenv.start()
-        self.addCleanup(osenv.stop)
-        for v in ("WK_DRY_RUN", "WK_FORCE", "WK_YES", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_CMD"):
-            os.environ.pop(v, None)
-        p = mock.patch.object(record, "host_name", return_value="here")
-        p.start()
-        self.addCleanup(p.stop)
+        super().setUp()
         self.w = World(self.tmp)
 
     def make(self, w=None, *argv):
@@ -333,9 +323,11 @@ class TestSizedOnce(BuildTest):
 class TestDryRun(BuildTest):
     def test_it_prints_the_plan_and_one_running_line_and_builds_nothing(self):
         os.environ["WK_DRY_RUN"] = "1"
-        rc, err = self.run_(None, "jsc-release", "--cmake", "-DX=1", "--", "--verbose")
+        rc, err = self.run_(None, "jsc-release", "--cmake", "-DX=1", "--env", "CC=gcc", "--branch", "topic", "--", "--verbose")
         self.assertEqual(rc, 0, err)
         self.assertIn("dry run -- nothing was built.", err)
+        self.assertIn("  branch:    topic (would be checked out first)\n", err)
+        self.assertIn("  --env:     CC=gcc (overrides the preset's)\n", err)
         self.assertIn("  workspace: ws (box, present)", err)
         self.assertIn("  preset:    jsc-release (cmake --jsc-only --no-fatal-warnings --release)", err)
         self.assertIn("  --cmake:   -DX=1 (added to the preset's)", err)
@@ -524,31 +516,21 @@ class TestBabysitStates(BuildTest):
         self.assertEqual(self.record().steps()[:2], [(1, "done"), (2, "running")])
         self.assertIn("=== fix attempt 1 (exit 0)", self.report())
 
-    def test_a_stalled_build_ends_stalled(self):
-        w = self.loop([(1, "stalled")])
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.assertRaises(Refused, self.babysit(w).front)
-        self.assertEqual(self.record().field("exit"), "stalled")
-
-    def test_still_failing_after_every_fix_ends_gave_up(self):
-        w = self.loop([(1, "1")] * 3)
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.assertRaises(Refused, self.babysit(w).front)
-        self.assertEqual(self.record().field("exit"), "gave-up")
-        self.assertIn("still failing after 2 fix attempt(s)", self.report())
-
-    def test_claude_that_did_not_run_ends_error(self):
-        w = self.loop([(1, "1")], fixes=[Result(1, "", "no claude")])
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.assertRaises(Refused, self.babysit(w).front)
-        self.assertEqual(self.record().field("exit"), "error")
-
-    def test_a_branch_it_cannot_check_out_ends_error(self):
-        w = self.loop([])
-        w.react(["exec", "ws", "bash", "-c"], lambda a, f: Result(1))
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.assertRaises(Refused, self.babysit(w, "--branch", "topic").front)
-        self.assertEqual(self.record().field("exit"), "error")
+    def test_each_way_it_gives_up_is_its_own_verdict(self):
+        """A stalled build, every fix used, a claude that did not run, a branch it cannot check out."""
+        def no_checkout(w):
+            w.react(["exec", "ws", "bash", "-c"], lambda a, f: Result(1))
+            return ("--branch", "topic")
+        for word, builds, fixes, setup, said in (
+                ("stalled", [(1, "stalled")], None, None, ""), ("gave-up", [(1, "1")] * 3, None, None, "still failing after 2 fix attempt(s)"),
+                ("error", [(1, "1")], [Result(1, "", "no claude")], None, ""), ("error", [], None, no_checkout, "")):
+            with self.subTest(word=word, builds=builds):
+                self.w = World(self.tmp)
+                w = self.loop(builds, fixes)
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertRaises(Refused, self.babysit(w, *(setup(w) if setup else ())).front)
+                self.assertEqual(self.record().field("exit"), word)
+                self.assertIn(said, self.report())
 
     def test_a_stopped_one_reads_cancelled_and_a_killed_one_died(self):
         def stopped(argv, f):

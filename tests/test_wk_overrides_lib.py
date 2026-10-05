@@ -123,6 +123,9 @@ class TestPlacesLocal(WkTest):
 class TestTheGuestOverrides(unittest.TestCase):
 
     def setUp(self):
+        mac = mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True)
+        mac.start()
+        self.addCleanup(mac.stop)
         self.fake = Fake("here")
         self.fake.answer(["/t/tart", "list"], out="[]")
         self.fake.answer(["podman", "machine", "inspect"], rc=125)

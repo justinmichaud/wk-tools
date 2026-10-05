@@ -11,6 +11,7 @@ STAGE = REPO / "host" / "linux" / "machine.sh"
 FAKE_GREP = '''#!/bin/sh
 case "$*" in
 *"Raspberry Pi 5"*) exit "$WK_TEST_RPI5" ;;
+*/etc/subuid*|*/etc/subgid*) exit 1 ;;   # this machine has no subordinate ids for the user, whatever the real files say
 esac
 exec /usr/bin/grep "$@"
 '''

@@ -4,11 +4,8 @@ import contextlib
 import io
 import json
 import os
-import shutil
 import sys
-import tempfile
 import unittest
-from pathlib import Path
 
 from tests.support import REPO, WkTest
 from tests.test_slots import load_driver
@@ -17,11 +14,6 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import samply  # noqa: E402
 from wk.bench import record, report, scores  # noqa: E402
 from wk.machine import Fake  # noqa: E402
-
-def tmpdir(case):
-    d = Path(tempfile.mkdtemp(prefix="wk-warmup-"))
-    case.addCleanup(shutil.rmtree, d, True)
-    return d
 
 
 def warmup_check(a, b, same_width=False):
@@ -58,8 +50,11 @@ gl=/usr/lib/libEGL.so.1
 """
 
 
-class TestWarmupProbe(WkTest):
+class TestTheDriversEvidence(WkTest):
+    """What lib/wk/bench/board_driver.py reads off the live web process, the GPU's counters and the browser log."""
+
     def setUp(self):
+        super().setUp()
         self.d = load_driver()
 
     def test_reads_width_and_machine_off_the_live_process(self):
@@ -95,15 +90,7 @@ class TestWarmupProbe(WkTest):
         self.assertIn("nothing was JITted", " ".join(self.d.warmup_problems(r)))
 
     def test_a_process_that_never_started_refuses_rather_than_reporting_zero(self):
-        r = self.d.warmup_record("pid=0\n")
-        problems = self.d.warmup_problems(r)
-        self.assertTrue(problems)
-
-
-class TestGpuLoad(WkTest):
-
-    def setUp(self):
-        self.d = load_driver()
+        self.assertTrue(self.d.warmup_problems(self.d.warmup_record("pid=0\n")))
 
     BEFORE = ("gpudrv=v3d\n"
               "gpu=WPEWebProcess 417 render 1000000000\n"
@@ -128,23 +115,6 @@ class TestGpuLoad(WkTest):
         self.assertEqual(self.d.warmup_problems(rec), [])
         self.assertEqual(rec["gpu"]["busy_ms"], 0)
 
-class TestArtifactsOfOneLegDoNotCollide(WkTest):
-    def test_a_json_file_that_is_not_evidence_is_refused(self):
-        d = tmpdir(self)
-        # a samply profile: valid JSON, no evidence fields
-        (d / "a.json").write_text(json.dumps({"meta": {"interval": 1.0}, "threads": []}))
-        (d / "b.json").write_text(json.dumps(
-            {"elf": {"bits": 64}, "gl": {}, "jit": {}, "problems": []}))
-        problems = warmup_check(d / "a.json", d / "b.json")
-        self.assertIn("is not warmup evidence", problems)
-        self.assertIn("elf/gl/jit/problems", problems)
-
-
-class TestGpuClaimMatchesWhatTheDriverCanSay(WkTest):
-
-    def setUp(self):
-        self.d = load_driver()
-
     def rec(self, measured, busy, nodes, mapped=("v3d_dri.so",), software=False):
         return {"elf": {"bits": 64}, "class": "gpu",
                 "gl": {"mapped": list(mapped), "software": software,
@@ -166,12 +136,6 @@ class TestGpuClaimMatchesWhatTheDriverCanSay(WkTest):
                 else:
                     self.assertEqual(problems, "")
                     self.assertTrue(any("unreadable on this driver" in n for n in r["notes"]))
-
-
-class TestJitTierIsConfirmed(WkTest):
-
-    def setUp(self):
-        self.d = load_driver()
 
     def record(self, bits, tiers):
         return {"elf": {"bits": bits}, "gl": {"mapped": ["v3d_dri.so"], "software": False},
@@ -202,11 +166,11 @@ class TestJitTierIsConfirmed(WkTest):
 
 
 class TestWarmupCheck(WkTest):
-    def arms(self, a, b):
-        d = tmpdir(self)
-        (d / "a.json").write_text(json.dumps(a))
-        (d / "b.json").write_text(json.dumps(b))
-        return d
+    def check(self, a, b, same_width=False):
+        for name, doc in (("a.json", a), ("b.json", b)):
+            if doc is not None:
+                (self.tmp / name).write_text(json.dumps(doc))
+        return warmup_check(self.tmp / "a.json", self.tmp / "b.json", same_width)
 
     def record(self, bits=64, driver="/usr/lib/dri/v3d_dri.so", software=False, maps=2):
         return {"elf": {"bits": bits, "machine": "AArch64" if bits == 64 else "ARM"},
@@ -218,33 +182,25 @@ class TestWarmupCheck(WkTest):
                 "gpu": {"measured": True, "busy_ms": 900, "driver": "v3d"},
                 "problems": []}
 
-    def test_two_good_arms_pass(self):
-        d = self.arms(self.record(), self.record())
-        self.assertEqual(warmup_check(d / "a.json", d / "b.json"), "")
+    def test_two_good_arms_pass_and_widths_may_differ_across_two_images(self):
+        self.assertEqual(self.check(self.record(), self.record()), "")
+        self.assertEqual(self.check(self.record(bits=64), self.record(bits=32)), "")
 
-    def test_a_missing_arm_refuses(self):
-        d = tmpdir(self)
-        (d / "a.json").write_text(json.dumps(self.record()))
-        self.assertIn("arm B produced no warmup evidence", warmup_check(d / "a.json", d / "b.json"))
-
-    def test_different_renderers_refuse(self):
-        d = self.arms(self.record(), self.record(driver="/usr/lib/dri/swrast_dri.so",
-                                                 software=True))
-        self.assertIn("different drivers", warmup_check(d / "a.json", d / "b.json"))
-
-    def test_widths_may_differ_across_two_images(self):
-        d = self.arms(self.record(bits=64), self.record(bits=32))
-        self.assertEqual(warmup_check(d / "a.json", d / "b.json"), "")
-
-    def test_widths_may_not_differ_across_two_slots_of_one_image(self):
-        d = self.arms(self.record(bits=64), self.record(bits=32))
-        self.assertIn("64-bit and 32-bit", warmup_check(d / "a.json", d / "b.json", same_width=True))
+    def test_each_arm_that_is_not_what_the_ab_claims_refuses(self):
+        for said, a, b, same_width in (("arm B produced no warmup evidence", self.record(), None, False),
+                                       ("different drivers", self.record(), self.record(driver="/usr/lib/dri/swrast_dri.so", software=True), False),
+                                       ("64-bit and 32-bit", self.record(bits=64), self.record(bits=32), True),
+                                       ("elf/gl/jit/problems", {"meta": {"interval": 1.0}, "threads": []}, self.record(), False)):
+            with self.subTest(said):
+                for f in self.tmp.glob("*.json"):
+                    f.unlink()
+                self.assertIn(said, self.check(a, b, same_width))
 
 
 class TestWarmupEvidenceIsPerBoard(WkTest):
 
     def test_each_board_reads_back_its_own_evidence(self):
-        d = tmpdir(self)
+        d = self.tmp
         (d / "warmup").mkdir()
         for board, bits in (("rpi3", 32), ("rpi5", 64)):
             for arm in ("a", "b"):
@@ -258,7 +214,7 @@ class TestWarmupEvidenceIsPerBoard(WkTest):
 
 class TestWarmupNeverEntersTheStatistics(WkTest):
     def task(self):
-        d = tmpdir(self)
+        d = self.tmp
         (d / "task.json").write_text(json.dumps({
             "task": "t", "subject": {"kind": "slots", "spec": "base,pr"},
             "devices": [{"device": "rpi5", "profile": "p"}], "plans": ["speedometer2.1"],
@@ -302,21 +258,14 @@ class TestRunOrderAndSettling(WkTest):
             (a if arm == "A" else b).append(entry)
         return a, b
 
-    def test_always_leading_with_a_is_reported(self):
-        a, b = self.runs("ABABABABAB")
-        lines = report.order_lines(a, b)
-        self.assertTrue(lines)
-        self.assertIn("not counterbalanced", lines[0])
-        self.assertIn("B runs 1.0 position", lines[0])
-
-    def test_a_counterbalanced_order_is_not_flagged(self):
-        a, b = self.runs("ABBAABBA")
-        self.assertEqual(report.order_lines(a, b), [])
-
-    def test_blocked_runs_are_flagged_hardest(self):
-        a, b = self.runs("AAAAABBBBB")
-        lines = report.order_lines(a, b)
-        self.assertIn("5.0 position", lines[0])
+    def test_an_order_that_is_not_counterbalanced_is_reported_and_blocked_runs_hardest(self):
+        for order, said in (("ABABABABAB", "not counterbalanced -- B runs 1.0 position"), ("AAAAABBBBB", "B runs 5.0 position"), ("ABBAABBA", None)):
+            with self.subTest(order):
+                lines = report.order_lines(*self.runs(order))
+                if said:
+                    self.assertIn(said, lines[0])
+                else:
+                    self.assertEqual(lines, [])
 
 
 class TestScoreAgainstItsOwnSubtests(WkTest):
@@ -348,13 +297,10 @@ class TestScoreAgainstItsOwnSubtests(WkTest):
 
 class TestProfilerChoice(WkTest):
 
-    def test_aarch64_and_x86_64_use_samply(self):
-        for arch in ("aarch64", "x86_64"):
+    def test_aarch64_and_x86_64_use_samply_and_armv7_the_images_sysprof(self):
+        for arch, sysprof, tool in (("aarch64", False, "samply"), ("x86_64", False, "samply"), ("armv7l", True, "sysprof")):
             with self.subTest(arch=arch):
-                self.assertEqual(samply.resolve(arch, False)[0], "samply")
-
-    def test_armv7_falls_to_the_image_sysprof(self):
-        self.assertEqual(samply.resolve("armv7l", True)[0], "sysprof")
+                self.assertEqual(samply.resolve(arch, sysprof)[0], tool)
 
     def test_armv7_without_sysprof_refuses_and_names_both_remedies(self):
         tool, why = samply.resolve("armv7l", False)

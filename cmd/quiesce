@@ -11,24 +11,21 @@
 #
 # Privileged actions go through the sudoers-allowlisted helper (wk-quiesce-priv).
 #
-#   on      quiet the machine for one run: stop every process in
-#           bench/quiet/macos.tsv, disable App Nap, keep MiniBrowser frontmost
-#           and the display awake (macOS); in bench mode also write this
-#           account's desktop settings. Settles for WK_SETTLE_SECONDS
-#           (default 30) before returning.
+#   on      quiet the machine for one run: stop every process in bench/quiet/macos.tsv, disable App Nap, keep
+#           MiniBrowser frontmost and the display awake (macOS); in bench mode also write this account's desktop
+#           settings. Settles for WK_SETTLE_SECONDS (default 30) before returning.
 #   off     undo everything `on` did.
 #   status  what is quiesced now, and the helper's own account of it.
 #
-#   session on [--bmc]   the benchmark session: cage alone on seat0. A no-op
-#                when someone is logged in or the mode is already running.
+#   session on [--bmc]   the benchmark session: cage alone on seat0; a no-op when someone is logged in or the mode
+#                        is already running.
 #   session gdm [--bmc]  a desktop to log into instead of the kiosk.
-#   session off  outputs modeset off, a placeholder compositor holding the
-#                device so fbcon cannot repaint them; `session gdm` undoes it.
-#   session status   unit, socket, display manager and DRM state.
+#   session off          outputs modeset off, a placeholder compositor holding the device so fbcon cannot repaint
+#                        them; `session gdm` undoes it.
+#   session status       unit, socket, display manager and DRM state.
 #
-#   --bmc moves the session from the GPU to the BMC's `ast` chip
-#   (software-rendered; the monitor goes dark). The compositor's socket is
-#   $XDG_RUNTIME_DIR/wk/display/wayland-0.
+#   --bmc   move the session from the GPU to the BMC's `ast` chip (software-rendered; the monitor goes dark). The
+#           compositor's socket is $XDG_RUNTIME_DIR/wk/display/wayland-0.
 
 import os
 import sys

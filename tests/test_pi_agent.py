@@ -181,7 +181,8 @@ HOME={home}
                 link = home / home_file
                 self.assertTrue(link.is_symlink(), f"{home_file} is not a link")
                 self.assertEqual(f"/secrets/{file_}", str(link.readlink()))
-                self.assertIn(f"wk key set {name}", cp.stdout)
+                # /secrets is absolute: where this container holds the credential, the link resolves and nothing is logged.
+                self.assertEqual(not link.exists(), f"wk key set {name}" in cp.stdout)
 
 
 class TestTheShellExportsEveryName(WkTest):

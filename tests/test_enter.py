@@ -1,6 +1,8 @@
 """`wk enter` -- a shell in a workspace, or one command run there and exited."""
 import io
 import os
+import shutil
+import tempfile
 import unittest
 from unittest import mock
 
@@ -25,8 +27,14 @@ class TestRunsCommand(WkTest):
             self.assertFalse(marker.exists(), "a dry run ran the command")
 
     def test_zed_delegates_to_cmd_zed_by_name_rather_than_running_a_command(self):
+        stub = tempfile.mkdtemp(prefix="wk-test-zed-")
+        self.addCleanup(shutil.rmtree, stub, True)
+        zed = os.path.join(stub, "zed")
+        with open(zed, "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(zed, 0o755)
         with fake_workspace() as ws:
-            cp = ws.run("enter", "--zed", "should-never-run")
+            cp = ws.run("enter", "--zed", "should-never-run", env={"PATH": stub + os.pathsep + os.environ["PATH"]})
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("no ssh route to itself", cp.stdout)   # cmd/zed's own refusal answered, not cmd/enter's
         self.assertNotIn("should-never-run", cp.stdout)

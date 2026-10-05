@@ -36,17 +36,17 @@ def refused(fn, *args):
 
 class TestTheStoppingRule(WkTest):
     def test_rounds_are_exact_unless_a_precision_is_asked_for_and_then_go_on_to_the_ceiling(self):
-        for o, default, want in (({}, "0", (5, 0.0)), ({"detect": "0.3"}, "0", (board_ab.MAX_ROUNDS, 0.3)),
+        for o, default, want in (({}, "0", (5, 0.0)), ({"detect": "0.3"}, "0", (ab.MAX_ROUNDS, 0.3)),
                                  ({"detect": "0.3", "max_rounds": "12"}, "0", (12, 0.3)),
-                                 ({}, mac_ab.DETECT, (board_ab.MAX_ROUNDS, 0.3)), ({"detect": "0.0"}, mac_ab.DETECT, (5, 0.0))):
+                                 ({}, mac_ab.DETECT, (ab.MAX_ROUNDS, 0.3)), ({"detect": "0.0"}, mac_ab.DETECT, (5, 0.0))):
             with self.subTest(o=o, default=default):
-                self.assertEqual(board_ab.stopping(o, 5, default), want)
+                self.assertEqual(ab.stopping(o, 5, default), want)
 
     def test_a_ceiling_below_the_floor_and_a_non_percentage_are_refused(self):
-        self.assertIn("below --rounds", refused(board_ab.stopping, {"detect": "0.3", "max_rounds": "4"}, 9))
-        self.assertIn("not a percentage", refused(board_ab.stopping, {"detect": "a lot"}, 5))
-        self.assertIn("not a percentage", refused(board_ab.stopping, {"detect": "-1"}, 5))
-        self.assertIn("takes a number", refused(board_ab.stopping, {"detect": "0.3", "max_rounds": "x"}, 5))
+        self.assertIn("below --rounds", refused(ab.stopping, {"detect": "0.3", "max_rounds": "4"}, 9))
+        self.assertIn("not a percentage", refused(ab.stopping, {"detect": "a lot"}, 5))
+        self.assertIn("not a percentage", refused(ab.stopping, {"detect": "-1"}, 5))
+        self.assertIn("takes a number", refused(ab.stopping, {"detect": "0.3", "max_rounds": "x"}, 5))
 
     def test_a_fleet_ab_hands_the_rule_to_each_board_as_the_command_it_prints(self):
         with temp_store() as store:
@@ -79,36 +79,20 @@ class Rounds:
 
 
 class TestTheRoundsStopWhenTheyResolve(WkTest):
-    def test_detect_zero_runs_exactly_the_rounds_asked_for_and_asks_nothing(self):
-        r = Rounds(2, 2, 0.0)
-        kept, _, rounds, _ = r.run()
-        self.assertEqual((kept, rounds, r.asked), (2, [1, 2], []))
-
-    def test_the_rule_is_not_asked_before_the_floor(self):
-        r = Rounds(3, 40, 0.3, resolves_at=1)
-        _, _, rounds, err = r.run()
-        self.assertEqual(rounds, [1, 2, 3])
-        self.assertEqual(r.asked, [3])
-        self.assertIn("resolved", err)
-
-    def test_it_stops_at_the_round_that_resolves(self):
-        _, _, rounds, _ = Rounds(2, 40, 0.3, resolves_at=6).run()
-        self.assertEqual(rounds, [1, 2, 3, 4, 5, 6])
-
-    def test_a_target_it_cannot_reach_stops_at_the_ceiling_and_says_so(self):
-        _, _, rounds, err = Rounds(2, 4, 0.3).run()
-        self.assertEqual(rounds, [1, 2, 3, 4])
-        self.assertIn("--max-rounds 4 reached", err)
-
-    def test_a_restart_takes_up_after_the_rounds_the_task_already_holds(self):
-        """Round 2 has one arm only, so it is run again; 1 and 3 have both and count as kept."""
-        kept, lost, rounds, err = Rounds(4, 4, 0.0, recorded=((1, "ab"), (2, "a"), (3, "ab"))).run()
-        self.assertEqual((kept, lost, rounds), (4, 0, [2, 4]))
-        self.assertIn("round 1/4 -- recorded already", err)
-
-    def test_lost_rounds_still_end_it_early(self):
-        kept, lost, rounds, _ = Rounds(2, 40, 0.3, lost=(3, 4, 5)).run()
-        self.assertEqual((kept, lost, rounds[-1]), (2, 3, 5))
+    def test_the_floor_the_resolving_round_the_ceiling_a_restart_and_lost_rounds_each_end_it(self):
+        """--detect 0 asks nothing; the rule is not asked before the floor; a restart reruns round 2, which has one arm only."""
+        for args, kw, want, said in (
+                ((2, 2, 0.0), {}, (2, 0, [1, 2], []), ""),
+                ((3, 40, 0.3), {"resolves_at": 1}, (3, 0, [1, 2, 3], [3]), "resolved"),
+                ((2, 40, 0.3), {"resolves_at": 6}, (6, 0, [1, 2, 3, 4, 5, 6], [2, 3, 4, 5, 6]), ""),
+                ((2, 4, 0.3), {}, (4, 0, [1, 2, 3, 4], [2, 3, 4]), "--max-rounds 4 reached"),
+                ((4, 4, 0.0), {"recorded": ((1, "ab"), (2, "a"), (3, "ab"))}, (4, 0, [2, 4], []), "round 1/4 -- recorded already"),
+                ((2, 40, 0.3), {"lost": (3, 4, 5)}, (2, 3, [1, 2, 3, 4, 5], [2, 3, 4]), "3 rounds lost")):
+            with self.subTest(args=args, kw=kw):
+                r = Rounds(*args, **kw)
+                kept, lost, rounds, err = r.run()
+                self.assertEqual((kept, lost, rounds, r.asked), want)
+                self.assertIn(said, err)
 
 
 class TestResolvedIsThePrecisionRule(WkTest):

@@ -29,27 +29,25 @@ def publish_branch(env):
     return env.get("WK_BRANCH") or "origin/main"
 
 
-def fetch_script(src, mirror):
+def fetch_script(src, mirror, end="exit $rc\n"):
     out = "cd %s || exit 1\nrc=0\ngit fetch --all --prune --quiet || rc=1\n" % shlex.quote(src)
     if mirror:
         test = "git config --get-all %s" % shlex.quote("url.%s.insteadOf" % mirror)
     else:
         test = "git config --get-regexp %s" % shlex.quote(r"^url\..*\.insteadof$")
     out += 'if [ -n "$(%s 2>/dev/null)" ]; then echo from=mirror; else echo from=github; fi\n' % test
-    return out + "exit $rc\n"
+    return out + end
 
 
 def fetch_and_check_script(src, mirror, forks, branches):
     """The fetch, then the wiring check in a subshell: `fetch=` and `check=` carry each one's status."""
-    fetch = fetch_script(src, mirror).replace("exit $rc\n", "echo fetch=$rc\n")
-    return "%s(\n%s\n)\necho check=$?\n" % (fetch, git.wiring_check_script(src, mirror, forks, branches))
+    return "%s(\n%s\n)\necho check=$?\n" % (fetch_script(src, mirror, "echo fetch=$rc\n"), git.wiring_check_script(src, mirror, forks, branches))
 
 
 def clone_fetch_and_check_script(src, origin, push):
     """A cloned repo's fetch, then whether its origin is still the one it was cloned from and pushes through its deploy key."""
-    fetch = fetch_script(src, "").replace("exit $rc\n", "echo fetch=$rc\n")
     o, p = shlex.quote(origin), shlex.quote(push)
-    return fetch + ('u=$(git config --get remote.origin.url 2>/dev/null || echo "")\n'
+    return fetch_script(src, "", "echo fetch=$rc\n") + ('u=$(git config --get remote.origin.url 2>/dev/null || echo "")\n'
                     'p=$(git config --get remote.origin.pushurl 2>/dev/null || echo "")\n'
                     'check=0\n'
                     '[ "$u" = %s ] || { echo "problem: origin is ${u:-unset}, not "%s; check=1; }\n'
@@ -123,11 +121,9 @@ class Sync:
         store = Store(self.env)
         sock = store.workspace_runtime_socket() if self.reg.in_workspace() else store.runtime_socket()
         if not self.here.run(["test", "-S", sock]).ok:
-            warn("no request broker at %s, so this machine's mirror was not\n"
-                 "    refreshed -- only this workspace's own fetch ran, against whatever the\n"
-                 "    mirror already had. Somebody with the workstation opens the door with:\n"
-                 "        ./setup --stage broker     ('wk doctor' says whether it is reachable)\n"
-                 "    The refresh itself, out there:  wk sync --mirror" % sock)
+            warn("no request broker at %s, so this machine's mirror was not refreshed.\n"
+                 "    On the workstation:  ./setup --stage broker   ('wk doctor' says whether it is\n"
+                 "    reachable), or the refresh itself:  wk sync --mirror" % sock)
             return 1
         client = os.path.join(str(self.root), "container", "broker", "wk-broker-client.py")
         if not self.here.exists(client):
@@ -272,9 +268,8 @@ class Sync:
         # The refresh is the one producer of what every workspace's refspecs ask for, so a branch still absent is one origin does not advertise.
         gap = [b for b in branches if not has(b)]
         if gap:
-            warn("origin advertises no %s, so the mirror carries none of it and every\n"
-                 "    workspace wired to ask for it fails its fetch. An image preset names\n"
-                 "    it (image/presets, CFG_BRANCH); 'wk doctor' reports the mirror the same way." % " ".join(gap))
+            warn("origin advertises no %s, so every workspace wired to ask for it fails its\n"
+                 "    fetch. An image preset names it (image/presets, CFG_BRANCH)." % " ".join(gap))
         return self.mirror_refs(mirror) != refs
 
     def mirror_refs(self, mirror):
@@ -303,11 +298,9 @@ class Sync:
         ref = "refs/remotes/" + branch if act.dry_run() else (r.out.strip() if r.ok else "")
         parts = ref.split("/")
         if len(parts) < 4 or parts[:2] != ["refs", "remotes"]:
-            return ("'%s' is not a branch this mirror carries.\n"
-                    "    A snapshot is published from a remote-tracking branch, spelled\n"
-                    "    <remote>/<branch>:  origin/main (the default), wpe/wpe-2.46.\n"
-                    "    Only %s of origin is in the mirror at all -- WK_MIRROR_BRANCHES=<branch>\n"
-                    "    carries another one in." % (branch, " ".join(self.branches)))
+            return ("'%s' is not a branch this mirror carries: a snapshot is published from a\n"
+                    "    remote-tracking branch, <remote>/<branch> (origin/main, wpe/wpe-2.46). Only %s\n"
+                    "    of origin is in the mirror -- WK_MIRROR_BRANCHES=<branch> carries another." % (branch, " ".join(self.branches)))
         upstream = "/".join(parts[2:])
         local = "/".join(parts[3:])
         if not self.here.act_run(["git", "-C", tree, "checkout", "--quiet", "-B", local, ref]).ok:

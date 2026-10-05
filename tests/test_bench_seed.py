@@ -11,6 +11,7 @@ from unittest import mock
 from tests.fakes import FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO, WkTest
+from tests.test_bench_board import _mv
 from tests.test_bench_report import in_process
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -41,17 +42,8 @@ def fake(clone_ok=True):
         f._set_file(repo + "/.git/HEAD", "ref")
         return Result(0)
 
-    def mv(argv, f):
-        src, dst = argv[1], argv[2]
-        for p in [p for p in f.files if p.startswith(src + "/")]:
-            f._set_file(dst + p[len(src):], f.files.pop(p))
-        for d in [d for d in f.dirs if d == src or d.startswith(src + "/")]:
-            f.dirs.discard(d)
-            f.dirs.add(dst + d[len(src):])
-        return Result(0)
-
     m.react(["git", "clone"], clone)
-    m.react(["mv"], mv)
+    m.react(["mv"], _mv)
     return m
 
 
@@ -83,13 +75,9 @@ class TestAPayloadIsSeededOnce(WkTest):
         self.assertFalse(any(p.startswith(DEST + "/.git") for p in m.files), "a pinned payload carries no .git")
         self.assertIn("sha=%s\n" % SHA, m.files[DEST + "/.wk-seeded/origin"])
         self.assertFalse(any("/.tmp-" in p for p in m.files), "the clone's scratch directory is gone")
-
-    def test_a_second_seed_reads_the_pinned_one(self):
-        m = fake()
         with quiet():
-            seeder(m).seed("jetstream3", PLAN)
             self.assertEqual(seeder(m).seed("jetstream3", PLAN), DEST)
-        self.assertEqual(len(ran(m, "clone")), 1)
+        self.assertEqual(len(ran(m, "clone")), 1, "a second seed reads the pinned one")
 
     def test_a_seed_running_beside_another_waits_for_it_and_fetches_nothing(self):
         m = fake()
@@ -230,16 +218,11 @@ class TestThePlanIsRead(WkTest):
                  "webkitpy/benchmark_runner/data/plans/speedometer3.1.plan": PLAN}
         self.assertEqual(seed.plan_json(files.get, "speedometer3"), PLAN)
 
-    def test_a_missing_plan_is_refused_by_name(self):
-        with self.assertRaises(Refused):
-            with quiet() as said:
-                seed.plan_json(lambda p: None, "nosuch")
-        self.assertIn("no such plan: nosuch", said.getvalue())
-
-    def test_a_plan_that_never_resolves_is_refused(self):
-        with self.assertRaises(Refused):
-            with quiet():
-                seed.plan_json(lambda p: "loop.plan", "loop")
+    def test_a_missing_plan_and_one_that_never_resolves_are_refused_by_name(self):
+        for read, plan, said in ((lambda p: None, "nosuch", "no such plan: nosuch"), (lambda p: "loop.plan", "loop", "indirects too many times")):
+            with self.subTest(plan), self.assertRaises(Refused), quiet() as err:
+                seed.plan_json(read, plan)
+            self.assertIn(said, err.getvalue())
 
 
 class TestTheVerb(WkTest):

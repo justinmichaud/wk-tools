@@ -144,8 +144,7 @@ def Machine_answering(head, remote):
 
 
 class TestTheFront(WorkspaceTest):
-    def make_world(self, **kw):
-        return ToolsWorld(self.tmp, **kw)
+    world_class = ToolsWorld
 
     def test_another_place_is_refused_before_anything_runs(self):
         for kind in ("vm", "remote"):
@@ -167,8 +166,7 @@ class TestTheFront(WorkspaceTest):
 
 
 class TestCreation(WorkspaceTest):
-    def make_world(self, **kw):
-        return ToolsWorld(self.tmp, **kw)
+    world_class = ToolsWorld
 
     def create_flags(self):
         (argv,) = self.runs(head="wkdev-create")
@@ -213,14 +211,7 @@ class TestCreation(WorkspaceTest):
         self.assertTrue(all(c.endswith(" /src/wk-tools") for c in configs), configs)
 
     def test_a_dry_run_is_the_wet_runs_plan_and_touches_nothing(self):
-        wet = ToolsRecording(self.tmp)
-        self.stderr(lambda: self.detached(wet, repo=tools()))
-        dry = ToolsRecording(self.tmp)
-        before = dry.state()
-        self.dry_run()
-        self.stderr(lambda: self.detached(dry, repo=tools()))
-        self.assertEqual(wet.mutations(), dry.mutations())
-        self.assertEqual(before, dry.state())
+        self.dry_as_wet(lambda: ToolsRecording(self.tmp), lambda w: self.detached(w, repo=tools()))
 
 
 class TestFreshen(WorkspaceTest):
@@ -237,8 +228,7 @@ class TestFreshen(WorkspaceTest):
 
 
 class TestReaders(WorkspaceTest):
-    def make_world(self, **kw):
-        return ToolsWorld(self.tmp, **kw)
+    world_class = ToolsWorld
 
     def test_the_branch_is_read_from_the_clone(self):
         self.w.make(base=False)
@@ -267,8 +257,7 @@ class TestReaders(WorkspaceTest):
 
 
 class TestStatus(WorkspaceTest):
-    def make_world(self, **kw):
-        return ToolsWorld(self.tmp, **kw)
+    world_class = ToolsWorld
 
     def status(self, origin):
         self.w.checkout = Result(0, "origin=%s\nwsbase=main\n" % origin)

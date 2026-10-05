@@ -6,17 +6,114 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from tests.support import REPO, WK, WkTest, shell_files
+from tests.support import REPO, WkTest, repo_files, shell_files
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import boot, fleet, gc, images  # noqa: E402
 from wk.boot import cli  # noqa: E402
+from wk.places import CONF_ENV  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 SYSTEM_SSH = "/usr/bin/ssh"
 
-JSON_PARSING_EXEMPT = {"bridge/bin/wk-bridge-netwatch"}
+
+def under(*roots):
+    return lambda: [p for p in repo_files() if p.relative_to(REPO).parts[0] in roots]
+
+
+def code(line):
+    return not line.lstrip().startswith("#")
+
+
+def sources_common(path):
+    return "lib/common.sh" in path.read_text(errors="replace")
+
+
+JSON_PARSERS = (re.compile(r"""(?<![\w-])jq(?=\s+[-'"])|\|\s*jq\b"""), re.compile(r"python3\s+-c\s+.*import\s+json"),
+                re.compile(r"(?<![\w-])sed\b[^\n]*[{}][^\n]*\bjson\b", re.I))
+RSYNC_REMOTE = re.compile(r'rsync\s[^\n]*(-e\s+"ssh|\$\w+:|@\$)')
+VAR = r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?"
+VARIABLE_PATTERN = re.compile(r"^\s*(?:;;\s*)?%s\)|\bcase\b.*\bin\s+%s\)|\S\|%s\)|\[\[[^]]*(?:==|!=)\s*%s" % (VAR, VAR, VAR, VAR))
+RUNS_HOSTNAME = re.compile(r"(^|[;&|({`$]|\bthen|\bdo)\s*hostname(\s+-s)?\s*(2>|\||\)|;|$)")
+# What each line rule refuses: (the files it reads, the line that breaks it).
+LINE_RULES = {
+    "flock is called: there is one lock mechanism": (
+        under("wk", "cmd", "lib", "boot", "image"),
+        lambda p, l: re.search(r"^[^#]*\bflock\b", l) and p.name != "selftest"),
+    "a script sourcing lib/common.sh takes the EXIT trap instead of registering a handler": (
+        under("cmd", "lib", "boot", "image"),
+        lambda p, l: re.search(r"^[^#]*trap .*EXIT", l) and p.name != "common.sh" and sources_common(p)),
+    "a bash file parses JSON": (
+        shell_files,
+        lambda p, l: any(r.search(l) for r in JSON_PARSERS) and p.relative_to(REPO).as_posix() != "bridge/bin/wk-bridge-netwatch"),
+    "a tailscale key is passed through argv": (
+        under("cmd", "bench", "bridge", "boot", "image", "lib"),
+        lambda p, l: re.search(r"--auth-?key", l) and code(l) and "file:" not in l),
+    "a cross-machine rsync carries the local umask (no --chmod)": (
+        shell_files,
+        lambda p, l: code(l) and RSYNC_REMOTE.search(l) and "--chmod=" not in l),
+    "a variable is a case pattern: match in Python (lib/wk/job.py match_any)": (
+        shell_files, lambda p, l: VARIABLE_PATTERN.search(l)),
+    "host-side bash runs hostname: lib/common.sh's wk_machine_name is the bash spelling of this machine's name": (
+        lambda: [p for p in shell_files() if p.relative_to(REPO).parts[0] in ("lib", "cmd", "host", "setup")],
+        lambda p, l: code(l) and RUNS_HOSTNAME.search(l)),
+}
+
+
+def line_rule_hits(files, broken):
+    hits = []
+    for p in files:
+        try:
+            text = p.read_text(errors="replace")
+        except OSError:
+            continue
+        hits += ["%s:%d: %s" % (p.relative_to(REPO), n, l.strip()[:90])
+                 for n, l in enumerate(text.splitlines(), 1) if broken(p, l)]
+    return hits
+
+
+class TestLineRules(unittest.TestCase):
+    def test_no_line_breaks_a_rule(self):
+        for why, (files, broken) in LINE_RULES.items():
+            with self.subTest(why):
+                self.assertEqual(line_rule_hits(files(), broken), [], why)
+
+    def test_each_rule_sees_the_shape_it_is_for(self):
+        shapes = {"flock": 'flock -x 9 "$lock"', "EXIT": "trap cleanup EXIT", "JSON": 'echo "$out" | jq -r .name',
+                  "tailscale": "tailscale up --authkey=$KEY", "rsync": 'rsync -a "$src" "$host:$dst"',
+                  "case pattern": 'case "$x" in $want) ;;', "hostname": 'name=$(hostname -s)'}
+        for why, (_, broken) in LINE_RULES.items():
+            line = next(v for k, v in shapes.items() if k in why)
+            with self.subTest(why), mock.patch.object(Path, "read_text", return_value=". lib/common.sh"):
+                self.assertTrue(broken(REPO / "cmd" / "x", line))
+
+
+def wk_overrides():
+    """Every WK_* read with a default (`${WK_X:-...}`) under wk, lib, cmd and build."""
+    found = {}
+    for p in under("wk", "lib", "cmd", "build")():
+        for m in re.finditer(r"\$\{(WK_[A-Z_]+):-", p.read_text(errors="replace")):
+            found.setdefault(m.group(1), p.relative_to(REPO).as_posix())
+    return found
+
+
+def documented(var, files):
+    """Named in README.md, or in a comment line anywhere outside tests/."""
+    word = re.compile(r"\b%s\b" % re.escape(var))
+    for p in files:
+        text = p.read_text(errors="replace")
+        if word.search(text) if p.name == "README.md" else any(word.search(l) for l in text.splitlines() if not code(l)):
+            return True
+    return False
+
+
+class TestEveryWkOverrideIsDocumentedOrRemoved(unittest.TestCase):
+    def test_no_wk_override_is_read_with_a_default_and_never_explained(self):
+        files = [p for p in repo_files() if p.relative_to(REPO).parts[0] != "tests"]
+        self.assertEqual(sorted("%s (read in %s)" % (v, where) for v, where in wk_overrides().items()
+                                if v not in CONF_ENV.values() and not documented(v, files)), [])
 
 
 class TestParsing(WkTest):
@@ -44,52 +141,6 @@ class TestParsing(WkTest):
             if twice:
                 dups.append(f"{f.name}: {' '.join(twice)}")
         self.assertEqual(dups, [], f"defined twice in one file: {dups}")
-
-    def test_one_lock_mechanism_nothing_calls_flock(self):
-        cp = subprocess.run(["grep", "-rnE", r"^[^#]*\bflock\b", str(WK)] +
-                            [str(REPO / d) for d in ("cmd", "lib", "boot", "image")],
-                            capture_output=True, text=True)
-        self.assertEqual([h for h in cp.stdout.splitlines() if "/selftest:" not in h], [])
-
-    def test_no_bash_file_parses_json(self):
-        jq_call = re.compile(r"""(?<![\w-])jq(?=\s+[-'"])|\|\s*jq\b""")
-        py_json = re.compile(r"python3\s+-c\s+.*import\s+json")
-        sed_json = re.compile(r"(?<![\w-])sed\b[^\n]*[{}][^\n]*\bjson\b", re.IGNORECASE)
-        hits = []
-        for f in shell_files():
-            rel = str(f.relative_to(REPO))
-            if rel in JSON_PARSING_EXEMPT:
-                continue
-            try:
-                text = f.read_text(errors="replace")
-            except OSError:
-                continue
-            for pat in (jq_call, py_json, sed_json):
-                if pat.search(text):
-                    hits.append(rel)
-                    break
-        self.assertEqual(sorted(set(hits)), [])
-
-
-class TestExitTrapOwnership(WkTest):
-    def test_only_lib_common_sh_takes_the_exit_trap(self):
-        claimants = []
-        cp = subprocess.run(
-            ["grep", "-rn", r"^[^#]*trap .*EXIT", str(REPO / "cmd"), str(REPO / "lib"),
-             str(REPO / "boot"), str(REPO / "image")],
-            capture_output=True, text=True,
-        )
-        for line in cp.stdout.splitlines():
-            if "lib/common.sh" in line:
-                continue
-            path = line.split(":", 1)[0]
-            try:
-                text = Path(path).read_text(errors="replace")
-            except OSError:
-                continue
-            if "lib/common.sh" in text:
-                claimants.append(line)
-        self.assertEqual(claimants, [], f"these take the EXIT trap instead of registering a handler: {claimants}")
 
 
 class TestMachineRegistry(WkTest):
@@ -141,25 +192,6 @@ class TestBridgeDeclarations(WkTest):
         for p in bridges:
             missing = [r for r in required if r not in p["PMO_PACKAGES"].split(",")]
             self.assertEqual(missing, [], f"bridge/provision.sh needs these and {p['IMG_PRESET']} does not carry them: {missing}")
-
-
-class TestTailnetHygiene(WkTest):
-    def test_no_authkey_in_argv(self):
-        cp = subprocess.run(
-            ["grep", "-rnI", "-e", r"--auth-\{0,1\}key",
-             str(REPO / "cmd"), str(REPO / "bench"), str(REPO / "bridge"),
-             str(REPO / "boot"), str(REPO / "image"), str(REPO / "lib")],
-            capture_output=True, text=True,
-        )
-        bad = []
-        for line in cp.stdout.splitlines():
-            body = line.split(":", 2)
-            content = body[2] if len(body) == 3 else line
-            if content.lstrip().startswith("#"):
-                continue
-            if "file:" not in content:
-                bad.append(line)
-        self.assertEqual(bad, [], f"a tailscale key is passed through argv: {bad}")
 
 
 class TestBuildLocations(WkTest):

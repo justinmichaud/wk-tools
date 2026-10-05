@@ -22,6 +22,7 @@ NAMES = ("github-pat", "litellm", "ntfy", "deploy-key")
 GOOD, OTHER_GOOD, STALE, UNJUDGED = "good-token", "good-token-2", "stale-token", "offline-token"
 TOPIC = "topic-minted-here"
 REPOS = {"fork": "justinmichaud/WebKit", "forkwpe": "justinmichaud/WPEWebKit", "wk-tools": "someone/wk-tools"}
+ALL_KEYS = {f: "KEY:" + f for f in REPOS}
 
 
 def pub_of(k):
@@ -228,15 +229,14 @@ class KeyTest(SecretsTest):
 
 class TestTheElection(KeyTest):
     def test_a_peers_working_credential_is_taken_over_one_refused_here(self):
-        w = self.provisioned(Peer("peerbox", creds={"github-pat": GOOD, "ntfy": TOPIC}, keys={f: "KEY:" + f for f in REPOS}),
-                             pat=STALE)
+        w = self.provisioned(Peer("peerbox", creds={"github-pat": GOOD, "ntfy": TOPIC}, keys=ALL_KEYS), pat=STALE)
         self.run_verb("setup")
         self.assertEqual(GOOD + "\n", w.files[w.held + "/github-pat"])
         self.assertIn("give github-pat", w.peers["peerbox"].asked)
         self.assertFalse([a for a in w.peer_acts() if "github-pat" in a], "the winner was written back over itself")
 
     def test_a_tie_goes_to_this_machine(self):
-        w = self.provisioned(Peer("peerbox", creds={"github-pat": OTHER_GOOD, "ntfy": TOPIC}, keys={f: "KEY:" + f for f in REPOS}))
+        w = self.provisioned(Peer("peerbox", creds={"github-pat": OTHER_GOOD, "ntfy": TOPIC}, keys=ALL_KEYS))
         self.run_verb("setup")
         self.assertEqual(GOOD + "\n", w.files[w.held + "/github-pat"])
         self.assertEqual(GOOD, w.peers["peerbox"].creds["github-pat"])
@@ -260,7 +260,7 @@ class TestTheElection(KeyTest):
         self.assertFalse([a for a in w.peer_acts() if " adopt fork" in a])
 
     def test_one_nobody_could_judge_is_not_written_over_a_peers(self):
-        w = self.provisioned(Peer("peerbox", creds={"github-pat": UNJUDGED, "ntfy": TOPIC}, keys={f: "KEY:" + f for f in REPOS}),
+        w = self.provisioned(Peer("peerbox", creds={"github-pat": UNJUDGED, "ntfy": TOPIC}, keys=ALL_KEYS),
                              pat=UNJUDGED)
         _, _, err = self.run_verb("setup")
         self.assertIn("github-pat: no workstation's could be judged", err)
@@ -304,7 +304,7 @@ class TestRegisterPerMachine(KeyTest):
         self.assertEqual([pub_of("KEY:fork-g1")], sorted(w.github[REPOS["fork"]].values()))
 
     def test_check_reports_each_workstation_in_its_own_section(self):
-        self.provisioned(Peer("peerbox", keys={f: "KEY:" + f for f in REPOS}))
+        self.provisioned(Peer("peerbox", keys=ALL_KEYS))
         _, out, _ = self.run_verb("check")
         here, peer = out.split("  here:\n")[1].split("  peerbox:\n")
         for repo in REPOS.values():
@@ -359,68 +359,45 @@ class TestCrashOnlyAndDryRun(KeyTest):
                 self.key(w).deploy()
         converges(self, self.fleet_world, deploy, KeyWorld.state, max_effects=80)
 
-    def dry_equals_wet(self, verb, make, **kw):
-        os.environ["WK_YES"] = "1"
-        wet = make()
-        self.run_verb(verb, wet, **kw)
-        dry = make()
-        before = dry.state()
-        os.environ["WK_DRY_RUN"] = "1"
-        self.run_verb(verb, dry, **kw)
-        self.assertEqual(wet.acts(), dry.acts())
-        self.assertEqual(before, dry.state())
-        return wet.acts()
-
     def keyed_fleet(self):
         w = self.fleet_world()
         w.keys()
         w.holds("ntfy", TOPIC)
         return w
 
-    def test_a_dry_setup_is_the_wet_runs_plan_and_touches_nothing(self):
-        plan = self.dry_equals_wet("setup", self.keyed_fleet)
-        self.assertTrue([a for a in plan if a[0] == "act" and "PEER peerbox key adopt fork" in " ".join(a[1])])
-
-    def test_a_dry_deploy_is_the_wet_runs_plan_and_touches_nothing(self):
-        plan = self.dry_equals_wet("deploy", self.keyed_fleet)
-        self.assertTrue([a for a in plan if a[0] == "act" and a[1][:2] == ("gh", "api")])
-
-    def test_a_dry_set_is_the_wet_runs_plan_and_touches_nothing(self):
-        def one(w=None):
-            k = self.key(w)
-            with contextlib.redirect_stderr(io.StringIO()):
-                return k.set("ntfy")
-        wet = KeyWorld(self.tmp)
-        one(wet)
-        dry = KeyWorld(self.tmp)
-        before = dry.state()
-        os.environ["WK_DRY_RUN"] = "1"
-        one(dry)
-        self.assertEqual(wet.acts(), dry.acts())
-        self.assertEqual(before, dry.state())
-        self.assertIn(TOPIC + "\n", wet.files.values())
-
-
-class TestTheStoringVerbsHaveADryRun(KeyTest):
-    def dry_equals_wet(self, make, verb, minted=False):
+    def test_a_dry_run_of_each_verb_is_the_wet_runs_plan_and_touches_nothing(self):
         """`minted`: the wet run publishes the public half of a key the dry one did not write, so has none to derive."""
-        wet = make()
-        with contextlib.redirect_stderr(io.StringIO()), mock.patch("os.urandom", return_value=b"\0" * 8):
-            verb(self.key(wet))
-            dry = make()
-            before = dry.state()
-            os.environ["WK_DRY_RUN"] = "1"
-            verb(self.key(dry))
-        plan = wet.acts()
-        self.assertTrue(plan)
-        self.assertEqual([a for a in plan if not (minted and (".pub" in str(a) or "/view" in str(a)))], dry.acts())
-        self.assertEqual(before, dry.state())
-
-    def test_ensure(self):
-        self.dry_equals_wet(lambda: KeyWorld(self.tmp), lambda k: k.ensure(), minted=True)
-
-    def test_adopt_a_deploy_key(self):
-        self.dry_equals_wet(lambda: KeyWorld(self.tmp), lambda k: k.adopt_verb("fork", lambda: b"KEY:taken\n"), minted=True)
+        os.environ["WK_YES"] = "1"
+        fresh = lambda: KeyWorld(self.tmp)
+        for name, make, verb, minted, planned in (
+                ("setup", self.keyed_fleet, lambda k: k.setup(), False,
+                 lambda a: a[0] == "act" and "PEER peerbox key adopt fork" in " ".join(a[1])),
+                ("deploy", self.keyed_fleet, lambda k: k.deploy(), False,
+                 lambda a: a[0] == "act" and a[1][:2] == ("gh", "api")),
+                ("set", fresh, lambda k: k.set("ntfy"), False, lambda a: True),
+                ("ensure", fresh, lambda k: k.ensure(), True, lambda a: True),
+                ("adopt", fresh, lambda k: k.adopt_verb("fork", lambda: b"KEY:taken\n"), True, lambda a: True)):
+            with self.subTest(verb=name):
+                os.environ.pop("WK_DRY_RUN", None)
+                wet = make()
+                with contextlib.redirect_stderr(io.StringIO()), mock.patch("os.urandom", return_value=b"\0" * 8):
+                    try:
+                        verb(self.key(wet))
+                    except Refused:
+                        pass
+                    dry = make()
+                    before = dry.state()
+                    os.environ["WK_DRY_RUN"] = "1"
+                    try:
+                        verb(self.key(dry))
+                    except Refused:
+                        pass
+                plan = wet.acts()
+                self.assertTrue([a for a in plan if planned(a)], plan)
+                self.assertEqual([a for a in plan if not (minted and (".pub" in str(a) or "/view" in str(a)))], dry.acts())
+                self.assertEqual(before, dry.state())
+                if name == "set":
+                    self.assertIn(TOPIC + "\n", wet.files.values())
 
 
 class TestTheFleetQuestion(KeyTest):

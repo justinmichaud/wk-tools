@@ -10,13 +10,14 @@ import sys
 import unittest
 import unittest.mock
 
-from tests.support import REPO, WkTest, scratch_dir
+from tests.support import REPO, WkTest
 from tests.test_ab_precision import (
     JETSTREAM3_CHILDREN, JETSTREAM3_HEADLINE, MOTIONMARK_CHILDREN, MOTIONMARK_HEADLINE,
     SPEEDOMETER3_HEADLINE, aggregate_doc, fields, speedometer_doc,
 )
 
 sys.path.insert(0, str(REPO / "lib"))
+from wk.act import Refused  # noqa: E402
 from wk.bench import record, report  # noqa: E402
 
 # The text table's name column is as wide as its widest name, so a name is
@@ -26,11 +27,14 @@ ROW = re.compile(r"^(?P<name>\S.*?) +(?P<metric>Score|Time) +"
 
 
 def in_process(fn, *args, **kw):
-    """`fn`'s stdout, stderr and exit status, as the command would have had them."""
+    """`fn`'s stdout, stderr and exit status, as the command would have had them: what it returns, or its refusal's."""
     out, err, rc = io.StringIO(), io.StringIO(), 0
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         try:
-            fn(*args, **kw)
+            got = fn(*args, **kw)
+            rc = got if isinstance(got, int) and not isinstance(got, bool) else 0
+        except Refused as e:
+            rc = e.status
         except SystemExit as e:
             rc = 1 if isinstance(e.code, str) else (e.code or 0)
             if isinstance(e.code, str):
@@ -61,33 +65,36 @@ def env_record(path, *fields):
     record.write_env(str(path), [f for f in fields if f != "--update"], update="--update" in fields)
 
 
+def run_dir(d, doc, *env):
+    """A run directory holding `doc` as its result.json, and `env` as its env.json when any is given."""
+    d.mkdir(parents=True)
+    (d / "result.json").write_text(json.dumps(doc))
+    if env:
+        env_record(d / "env.json", *env)
+    return d
+
+
+def side(tmp, name, runs):
+    """One side of a report: a run directory per Speedometer-3 score list in `runs`, comma-joined."""
+    return ",".join(str(run_dir(tmp / ("%s%d" % (name, i)), {"Speedometer-3": {"metrics": {"Score": {"current": vals}}}}))
+                    for i, vals in enumerate(runs))
+
+
 class TestRecordLoadTellsMissingFromCorrupt(WkTest):
 
-    def test_a_missing_file_reads_as_empty(self):
-        with scratch_dir() as tmp:
-            self.assertEqual({}, record.load(str(tmp / "nosuch.json")))
-
-    def test_a_corrupt_file_is_not_reported_as_merely_missing(self):
-        with scratch_dir() as tmp:
-            path = tmp / "env.json"
-            path.write_text("not json at all")
-            with self.assertRaises(ValueError):
-                record.load(str(path))
+    def test_a_missing_file_reads_as_empty_and_a_corrupt_one_is_not_reported_as_merely_missing(self):
+        self.assertEqual({}, record.load(str(self.tmp / "nosuch.json")))
+        path = self.tmp / "env.json"
+        path.write_text("not json at all")
+        with self.assertRaises(ValueError):
+            record.load(str(path))
 
 
 class TestReportWalkerAndStats(WkTest):
 
     def _write_pair(self, tmp, a_doc, b_doc, a_extra=(), b_extra=()):
-        a_dir, b_dir = tmp / "a", tmp / "b"
-        a_dir.mkdir()
-        b_dir.mkdir()
-        (a_dir / "result.json").write_text(json.dumps(a_doc))
-        (b_dir / "result.json").write_text(json.dumps(b_doc))
-        env_record(a_dir / "env.json", "plan=jetstream3", "config=jsc-release",
-                    "count=6", "class=cpu", "runner=jsc", "bench_host=container", *a_extra)
-        env_record(b_dir / "env.json", "plan=jetstream3", "config=jsc-release",
-                    "count=6", "class=cpu", "runner=jsc", "bench_host=container", *b_extra)
-        return a_dir, b_dir
+        common = ("plan=jetstream3", "config=jsc-release", "count=6", "class=cpu", "runner=jsc", "bench_host=container")
+        return run_dir(tmp / "a", a_doc, *common, *a_extra), run_dir(tmp / "b", b_doc, *common, *b_extra)
 
     @staticmethod
     def _one_subtest():
@@ -95,50 +102,48 @@ class TestReportWalkerAndStats(WkTest):
             "Score": {"current": [99.0, 100.0, 101.0, 100.0]}}}}}}
 
     def test_report_html_has_every_subtest_both_metrics_and_one_svg_each(self):
-        with scratch_dir() as tmp:
-            def doc(blur, blur_time, rich):
-                return {"JetStream3.0": {"tests": {
-                    "gaussian-blur": {"metrics": {"Score": {None: {"current": blur}}, "Time": {"current": blur_time}}},
-                    "richards": {"metrics": {"Score": {"current": rich}}}}}}
-            a_doc = doc([95.0, 97.0, 96.0, 94.0, 98.0, 96.5], [10.1, 10.3, 10.2, 10.0, 10.4, 10.2],
-                        [50.0, 51.0, 49.5, 50.5, 50.2, 49.8])
-            b_doc = doc([104.0, 106.0, 105.0, 103.0, 107.0, 105.5], [9.1, 9.3, 9.2, 9.0, 9.4, 9.2],
-                        [52.0, 53.0, 51.5, 52.5, 52.2, 51.8])
-            a, b = self._write_pair(tmp, a_doc, b_doc)
-            html_out = tmp / "report.html"
-            cp = rep(a, b, html=str(html_out))
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn(f"wrote {html_out}", cp.stdout)
+        def doc(blur, blur_time, rich):
+            return {"JetStream3.0": {"tests": {
+                "gaussian-blur": {"metrics": {"Score": {None: {"current": blur}}, "Time": {"current": blur_time}}},
+                "richards": {"metrics": {"Score": {"current": rich}}}}}}
+        a_doc = doc([95.0, 97.0, 96.0, 94.0, 98.0, 96.5], [10.1, 10.3, 10.2, 10.0, 10.4, 10.2],
+                    [50.0, 51.0, 49.5, 50.5, 50.2, 49.8])
+        b_doc = doc([104.0, 106.0, 105.0, 103.0, 107.0, 105.5], [9.1, 9.3, 9.2, 9.0, 9.4, 9.2],
+                    [52.0, 53.0, 51.5, 52.5, 52.2, 51.8])
+        a, b = self._write_pair(self.tmp, a_doc, b_doc)
+        html_out = self.tmp / "report.html"
+        cp = rep(a, b, html=str(html_out))
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn(f"wrote {html_out}", cp.stdout)
 
-            with unittest.mock.patch.dict("os.environ", {"WK_DRY_RUN": "1"}):
-                dry = rep(a, b, html=str(tmp / "dry.html"))
-            self.assertIn("would write: %s" % (tmp / "dry.html"), dry.stderr)
-            self.assertFalse((tmp / "dry.html").exists())
+        with unittest.mock.patch.dict("os.environ", {"WK_DRY_RUN": "1"}):
+            dry = rep(a, b, html=str(self.tmp / "dry.html"))
+        self.assertIn("would write: %s" % (self.tmp / "dry.html"), dry.stderr)
+        self.assertFalse((self.tmp / "dry.html").exists())
 
-            html = html_out.read_text()
-            self.assertIn("<td>Score</td>", html)
-            self.assertIn("<td>Time</td>", html)
-            self.assertEqual(html.count("<svg"), 2, "one <svg> per subtest")
-            self.assertIn("variance by configuration", html.lower())
-            text = rep(a, b).stdout
-            for mean in (statistics.mean(a_doc["JetStream3.0"]["tests"]["gaussian-blur"]["metrics"]["Time"]["current"]),
-                         statistics.mean(b_doc["JetStream3.0"]["tests"]["richards"]["metrics"]["Score"]["current"])):
-                self.assertIn("%.3f" % mean, text)
-                self.assertIn("%.3f" % mean, html)
+        html = html_out.read_text()
+        self.assertIn("<td>Score</td>", html)
+        self.assertIn("<td>Time</td>", html)
+        self.assertEqual(html.count("<svg"), 2, "one <svg> per subtest")
+        self.assertIn("variance by configuration", html.lower())
+        text = rep(a, b).stdout
+        for mean in (statistics.mean(a_doc["JetStream3.0"]["tests"]["gaussian-blur"]["metrics"]["Time"]["current"]),
+                     statistics.mean(b_doc["JetStream3.0"]["tests"]["richards"]["metrics"]["Score"]["current"])):
+            self.assertIn("%.3f" % mean, text)
+            self.assertIn("%.3f" % mean, html)
 
     def test_report_handles_speedometer_total_modifier_shape(self):
-        with scratch_dir() as tmp:
-            a_doc = {"Speedometer-3": {"tests": {"TodoMVC-JS": {
-                "metrics": {"Time": {"Total": {"current": [100.0, 102.0, 99.0, 101.0]}}}
-            }}}}
-            b_doc = {"Speedometer-3": {"tests": {"TodoMVC-JS": {
-                "metrics": {"Time": {"Total": {"current": [95.0, 97.0, 96.0, 94.0]}}}
-            }}}}
-            a, b = self._write_pair(tmp, a_doc, b_doc)
-            cp = rep(a, b)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("TodoMVC-JS", cp.stdout)
-            self.assertIn("Time", cp.stdout)
+        a_doc = {"Speedometer-3": {"tests": {"TodoMVC-JS": {
+            "metrics": {"Time": {"Total": {"current": [100.0, 102.0, 99.0, 101.0]}}}
+        }}}}
+        b_doc = {"Speedometer-3": {"tests": {"TodoMVC-JS": {
+            "metrics": {"Time": {"Total": {"current": [95.0, 97.0, 96.0, 94.0]}}}
+        }}}}
+        a, b = self._write_pair(self.tmp, a_doc, b_doc)
+        cp = rep(a, b)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("TodoMVC-JS", cp.stdout)
+        self.assertIn("Time", cp.stdout)
 
     def test_report_reads_speedometer2_board_results(self):
         def doc(base):
@@ -153,70 +158,66 @@ class TestReportWalkerAndStats(WkTest):
                             "Sync": {"metrics": {"Time": {"current": [[base * 10, base * 10 + 2]]}}},
                             "Async": {"metrics": {"Time": {"current": [[base, base + 1]]}}},
                         }}}}}}}
-        with scratch_dir() as tmp:
-            a, b = self._write_pair(tmp, doc(11.0), doc(10.5))
-            cp = rep(a, b)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            means = report_means(cp.stdout)
-            self.assertEqual(
-                {name for name, _metric in means},
-                {"Speedometer-2",
-                 "Speedometer-2/VanillaJS-TodoMVC",
-                 "Speedometer-2/VanillaJS-TodoMVC/Adding100Items",
-                 "Speedometer-2/VanillaJS-TodoMVC/Adding100Items/Sync",
-                 "Speedometer-2/VanillaJS-TodoMVC/Adding100Items/Async"},
-                "a row is named by its whole path, so the suite is the one row "
-                "with no '/' in its name, and a level declaring how to "
-                "aggregate the one below is a row too")
-            # 110/112 and 11/12 are one iteration each, so Sync is 111 and
-            # Async 11.5, and every Total above them is their sum.
-            self.assertEqual((111.0, 106.0),
-                             means[("Speedometer-2/VanillaJS-TodoMVC/Adding100Items/Sync", "Time")])
-            for name in ("Speedometer-2",
-                         "Speedometer-2/VanillaJS-TodoMVC",
-                         "Speedometer-2/VanillaJS-TodoMVC/Adding100Items"):
-                self.assertEqual((122.5, 117.0), means[(name, "Time")], name)
+        a, b = self._write_pair(self.tmp, doc(11.0), doc(10.5))
+        cp = rep(a, b)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        means = report_means(cp.stdout)
+        self.assertEqual(
+            {name for name, _metric in means},
+            {"Speedometer-2",
+             "Speedometer-2/VanillaJS-TodoMVC",
+             "Speedometer-2/VanillaJS-TodoMVC/Adding100Items",
+             "Speedometer-2/VanillaJS-TodoMVC/Adding100Items/Sync",
+             "Speedometer-2/VanillaJS-TodoMVC/Adding100Items/Async"},
+            "a row is named by its whole path, so the suite is the one row "
+            "with no '/' in its name, and a level declaring how to "
+            "aggregate the one below is a row too")
+        # 110/112 and 11/12 are one iteration each, so Sync is 111 and
+        # Async 11.5, and every Total above them is their sum.
+        self.assertEqual((111.0, 106.0),
+                         means[("Speedometer-2/VanillaJS-TodoMVC/Adding100Items/Sync", "Time")])
+        for name in ("Speedometer-2",
+                     "Speedometer-2/VanillaJS-TodoMVC",
+                     "Speedometer-2/VanillaJS-TodoMVC/Adding100Items"):
+            self.assertEqual((122.5, 117.0), means[(name, "Time")], name)
 
     def test_variance_by_configuration_groups_matching_tuples(self):
-        with scratch_dir() as tmp:
-            doc_a = {"JetStream3.0": {"tests": {"t": {"metrics": {
-                "Score": {"current": [99.0, 100.0, 101.0, 100.0]}
-            }}}}}
-            doc_b = {"JetStream3.0": {"tests": {"t": {"metrics": {
-                "Score": {"current": [80.0, 120.0, 70.0, 130.0]}
-            }}}}}
-            a, b = self._write_pair(
-                tmp, doc_a, doc_b,
-                a_extra=("configuration.aslr=off", "configuration.env_pad_bytes=4096"),
-                b_extra=("configuration.aslr=off", "configuration.env_pad_bytes=4096"),
-            )
-            cp = rep(a, b)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("aslr=off", cp.stdout)
-            self.assertIn("env_pad_bytes=4096", cp.stdout)
-            self.assertIn("exceeds A sd by >20%", cp.stdout, "B is far noisier than A and should be flagged")
+        doc_a = {"JetStream3.0": {"tests": {"t": {"metrics": {
+            "Score": {"current": [99.0, 100.0, 101.0, 100.0]}
+        }}}}}
+        doc_b = {"JetStream3.0": {"tests": {"t": {"metrics": {
+            "Score": {"current": [80.0, 120.0, 70.0, 130.0]}
+        }}}}}
+        a, b = self._write_pair(
+            self.tmp, doc_a, doc_b,
+            a_extra=("configuration.aslr=off", "configuration.env_pad_bytes=4096"),
+            b_extra=("configuration.aslr=off", "configuration.env_pad_bytes=4096"),
+        )
+        cp = rep(a, b)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("aslr=off", cp.stdout)
+        self.assertIn("env_pad_bytes=4096", cp.stdout)
+        self.assertIn("exceeds A sd by >20%", cp.stdout, "B is far noisier than A and should be flagged")
 
     def test_axis_check_warnings_appear_in_the_report(self):
-        with scratch_dir() as tmp:
-            doc = {"JetStream3.0": {"tests": {"t": {"metrics": {"Score": {"current": [1.0, 2.0]}}}}}}
-            a, b = self._write_pair(
-                tmp, doc, doc,
-                a_extra=("runner=jsc",), b_extra=("runner=browser",),
-            )
-            cp = rep(a, b)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("different runners", cp.stdout)
+        doc = {"JetStream3.0": {"tests": {"t": {"metrics": {"Score": {"current": [1.0, 2.0]}}}}}}
+        a, b = self._write_pair(
+            self.tmp, doc, doc,
+            a_extra=("runner=jsc",), b_extra=("runner=browser",),
+        )
+        cp = rep(a, b)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("different runners", cp.stdout)
 
     def test_a_run_directory_with_no_result_json_is_refused_by_name(self):
-        with scratch_dir() as tmp:
-            a, b = self._write_pair(tmp, self._one_subtest(), self._one_subtest())
-            (a / "result.json").unlink()
-            cp = rep(a, b)
-            self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            out = cp.stdout + cp.stderr
-            self.assertIn("no result.json in this directory", out)
-            self.assertIn(str(a), out)
-            self.assertIn("side A", out)
+        a, b = self._write_pair(self.tmp, self._one_subtest(), self._one_subtest())
+        (a / "result.json").unlink()
+        cp = rep(a, b)
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        out = cp.stdout + cp.stderr
+        self.assertIn("no result.json in this directory", out)
+        self.assertIn(str(a), out)
+        self.assertIn("side A", out)
 
     def test_naming_no_run_directory_at_all_is_refused(self):
         cp = rep("", "")
@@ -224,61 +225,41 @@ class TestReportWalkerAndStats(WkTest):
         self.assertIn("no run directories given", cp.stdout + cp.stderr)
 
     def test_one_missing_run_among_several_is_warned_about_not_hidden(self):
-        with scratch_dir() as tmp:
-            a, b = self._write_pair(tmp, self._one_subtest(), self._one_subtest())
-            gone = tmp / "a-gone"
-            gone.mkdir()
-            cp = rep("%s,%s" % (a, gone), b)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("warning: side A", cp.stderr)
-            self.assertIn("no result.json in this directory", cp.stderr)
+        a, b = self._write_pair(self.tmp, self._one_subtest(), self._one_subtest())
+        gone = self.tmp / "a-gone"
+        gone.mkdir()
+        cp = rep("%s,%s" % (a, gone), b)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("warning: side A", cp.stderr)
+        self.assertIn("no result.json in this directory", cp.stderr)
 
     def test_a_run_with_no_env_json_reads_as_unknown_rather_than_refusing(self):
-        with scratch_dir() as tmp:
-            a, b = self._write_pair(tmp, self._one_subtest(), self._one_subtest())
-            (a / "env.json").unlink()
-            (b / "env.json").unlink()
-            cp = rep(a, b)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("t", cp.stdout)
-            self.assertIn("no warnings", cp.stdout)
+        a, b = self._write_pair(self.tmp, self._one_subtest(), self._one_subtest())
+        (a / "env.json").unlink()
+        (b / "env.json").unlink()
+        cp = rep(a, b)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("t", cp.stdout)
+        self.assertIn("no warnings", cp.stdout)
 
-    def test_env_record_defaults_configuration_for_untouched_runs(self):
-        with scratch_dir() as tmp:
-            f = tmp / "env.json"
-            env_record(f, "plan=jetstream3")
-            doc = json.loads(f.read_text())
-            self.assertEqual(
-                doc["configuration"],
-                {"aslr": "unset", "path_len": 0, "shared_cache": None, "env_pad_bytes": 0},
-            )
-
-    def test_env_record_update_merges_wall_time_without_clobbering(self):
-        with scratch_dir() as tmp:
-            f = tmp / "env.json"
-            env_record(f, "plan=jetstream3", "preset=jsc-release")
-            env_record(f, "--update", "wall_time_s=42")
-            doc = json.loads(f.read_text())
-            self.assertEqual(doc["plan"], "jetstream3")
-            self.assertEqual(doc["preset"], "jsc-release")
-            self.assertEqual(doc["wall_time_s"], "42")
+    def test_env_record_defaults_configuration_and_an_update_merges_without_clobbering(self):
+        f = self.tmp / "env.json"
+        env_record(f, "plan=jetstream3", "preset=jsc-release")
+        self.assertEqual(json.loads(f.read_text())["configuration"], {"aslr": "unset", "path_len": 0, "shared_cache": None, "env_pad_bytes": 0})
+        env_record(f, "--update", "wall_time_s=42")
+        doc = json.loads(f.read_text())
+        self.assertEqual((doc["plan"], doc["preset"], doc["wall_time_s"]), ("jetstream3", "jsc-release", "42"))
 
     def test_env_record_refuses_a_field_that_is_not_key_value(self):
-        with scratch_dir() as tmp:
-            r = in_process(record.write_env, str(tmp / "env.json"), ["--nosuch"])
-            self.assertEqual(1, r.returncode)
-            self.assertIn("not a key=value: --nosuch", r.stderr)
+        r = in_process(record.write_env, str(self.tmp / "env.json"), ["--nosuch"])
+        self.assertEqual(1, r.returncode)
+        self.assertIn("not a key=value: --nosuch", r.stderr)
 
 
 class TestTheHeadlineRow(WkTest):
 
     def _pair(self, tmp, doc):
-        a_dir, b_dir = tmp / "a", tmp / "b"
-        for d in (a_dir, b_dir):
-            d.mkdir()
-            (d / "result.json").write_text(json.dumps(doc))
-            env_record(d / "env.json", "plan=mac-ab", "runner=browser")
-        return a_dir, b_dir
+        return tuple(run_dir(tmp / s, doc, "plan=mac-ab", "runner=browser") for s in "ab")
 
     def _headline_row(self, tmp, doc, suite):
         a, b = self._pair(tmp, doc)
@@ -291,155 +272,115 @@ class TestTheHeadlineRow(WkTest):
         self.assertEqual(precision_run.returncode, 0, precision_run.stdout + precision_run.stderr)
         return means[(suite, "Score")][0], float(fields(precision_run.stdout)["mean_a"])
 
-    def test_jetstream3_reports_the_geometric_mean_of_its_seventy_seven_children(self):
-        with scratch_dir() as tmp:
-            doc = aggregate_doc("JetStream3.0", "Geometric", JETSTREAM3_CHILDREN)
-            row, precision = self._headline_row(tmp, doc, "JetStream3.0")
-            self.assertAlmostEqual(row, JETSTREAM3_HEADLINE, places=3)
-            self.assertAlmostEqual(row, precision, places=3)
-
-    def test_motionmark_reports_the_geometric_mean_of_its_eight_children(self):
-        with scratch_dir() as tmp:
-            doc = aggregate_doc("MotionMark-1.3.1", "Geometric", MOTIONMARK_CHILDREN)
-            row, precision = self._headline_row(tmp, doc, "MotionMark-1.3.1")
-            self.assertAlmostEqual(row, MOTIONMARK_HEADLINE, places=2)
-            self.assertAlmostEqual(row, precision, places=2)
-
-    def test_speedometer3_reports_the_score_it_writes_itself(self):
-        with scratch_dir() as tmp:
-            row, precision = self._headline_row(tmp, speedometer_doc(), "Speedometer-3")
-            self.assertAlmostEqual(row, SPEEDOMETER3_HEADLINE, places=3)
-            self.assertAlmostEqual(row, precision, places=3)
+    def test_each_suite_reports_its_declared_or_written_headline_as_the_stopping_rule_reads_it(self):
+        for doc, suite, want, places in ((aggregate_doc("JetStream3.0", "Geometric", JETSTREAM3_CHILDREN), "JetStream3.0", JETSTREAM3_HEADLINE, 3),
+                                         (aggregate_doc("MotionMark-1.3.1", "Geometric", MOTIONMARK_CHILDREN), "MotionMark-1.3.1", MOTIONMARK_HEADLINE, 2),
+                                         (speedometer_doc(), "Speedometer-3", SPEEDOMETER3_HEADLINE, 3)):
+            with self.subTest(suite):
+                row, precision = self._headline_row(self.tmp / suite, doc, suite)
+                self.assertAlmostEqual(row, want, places=places)
+                self.assertAlmostEqual(row, precision, places=places)
 
     def test_the_declared_row_is_the_suite_and_its_children_are_below_it(self):
-        with scratch_dir() as tmp:
-            doc = aggregate_doc("JetStream3.0", "Geometric", {"x": [1.0], "y": [4.0]})
-            a, b = self._pair(tmp, doc)
-            cp = rep(a, b)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            means = report_means(cp.stdout)
-            self.assertEqual(means[("JetStream3.0", "Score")][0], 2.0)
-            self.assertEqual(means[("JetStream3.0/x", "Score")][0], 1.0)
-            self.assertEqual(means[("JetStream3.0/y", "Score")][0], 4.0)
+        doc = aggregate_doc("JetStream3.0", "Geometric", {"x": [1.0], "y": [4.0]})
+        a, b = self._pair(self.tmp, doc)
+        cp = rep(a, b)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        means = report_means(cp.stdout)
+        self.assertEqual(means[("JetStream3.0", "Score")][0], 2.0)
+        self.assertEqual(means[("JetStream3.0/x", "Score")][0], 1.0)
+        self.assertEqual(means[("JetStream3.0/y", "Score")][0], 4.0)
 
     def test_a_child_that_declares_its_own_aggregate_becomes_a_row_too(self):
-        with scratch_dir() as tmp:
-            doc = {"JetStream3.0": {
-                "metrics": {"Score": ["Geometric"]},
-                "tests": {"gaussian-blur": {
-                    "metrics": {"Score": {"current": [8.0]}, "Time": ["Geometric"]},
-                    "tests": {
-                        "First": {"metrics": {"Time": {"current": [2.0]}}},
-                        "Worst": {"metrics": {"Time": {"current": [8.0]}}},
-                        "Average": {"metrics": {"Time": {"current": [4.0]}}},
-                    }}}}}
-            a, b = self._pair(tmp, doc)
-            cp = rep(a, b)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            means = report_means(cp.stdout)
-            self.assertEqual(4.0, means[("JetStream3.0/gaussian-blur", "Time")][0],
-                             "the geometric mean of 2, 8 and 4")
-            self.assertEqual(8.0, means[("JetStream3.0/gaussian-blur", "Score")][0])
-            self.assertEqual(8.0, means[("JetStream3.0", "Score")][0])
+        doc = {"JetStream3.0": {
+            "metrics": {"Score": ["Geometric"]},
+            "tests": {"gaussian-blur": {
+                "metrics": {"Score": {"current": [8.0]}, "Time": ["Geometric"]},
+                "tests": {
+                    "First": {"metrics": {"Time": {"current": [2.0]}}},
+                    "Worst": {"metrics": {"Time": {"current": [8.0]}}},
+                    "Average": {"metrics": {"Time": {"current": [4.0]}}},
+                }}}}}
+        a, b = self._pair(self.tmp, doc)
+        cp = rep(a, b)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        means = report_means(cp.stdout)
+        self.assertEqual(4.0, means[("JetStream3.0/gaussian-blur", "Time")][0],
+                         "the geometric mean of 2, 8 and 4")
+        self.assertEqual(8.0, means[("JetStream3.0/gaussian-blur", "Score")][0])
+        self.assertEqual(8.0, means[("JetStream3.0", "Score")][0])
 
     def test_only_the_topmost_declaration_that_cannot_be_resolved_says_so(self):
-        with scratch_dir() as tmp:
-            doc = {"JetStream3.0": {
+        doc = {"JetStream3.0": {
+            "metrics": {"Score": ["Geometric"]},
+            "tests": {"gaussian-blur": {
                 "metrics": {"Score": ["Geometric"]},
-                "tests": {"gaussian-blur": {
-                    "metrics": {"Score": ["Geometric"]},
-                    "tests": {"First": {"metrics": {"Score": {}}}}}}}}
-            a, b = self._pair(tmp, doc)
-            cp = rep(a, b)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            said = [l for l in cp.stdout.splitlines() if "report no Score" in l]
-            self.assertTrue(said, cp.stdout)
-            self.assertTrue(all("JetStream3.0's Score" in l for l in said),
-                            "only the suite's own declaration is reported:\n"
-                            + "\n".join(said))
+                "tests": {"First": {"metrics": {"Score": {}}}}}}}}
+        a, b = self._pair(self.tmp, doc)
+        cp = rep(a, b)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        said = [l for l in cp.stdout.splitlines() if "report no Score" in l]
+        self.assertTrue(said, cp.stdout)
+        self.assertTrue(all("JetStream3.0's Score" in l for l in said),
+                        "only the suite's own declaration is reported:\n"
+                        + "\n".join(said))
 
     def test_a_partial_suite_still_reports_its_subtests_and_says_why_it_has_no_total(self):
-        with scratch_dir() as tmp:
-            doc = aggregate_doc("JetStream3.0", "Geometric", {"x": [1.0], "y": [4.0]})
-            doc["JetStream3.0"]["tests"]["y"] = {"metrics": {"Time": {"current": [9.0]}}}
-            a, b = self._pair(tmp, doc)
-            cp = rep(a, b)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            means = report_means(cp.stdout)
-            self.assertNotIn(("JetStream3.0", "Score"), means,
-                             "a partial suite has no headline score")
-            self.assertIn(("JetStream3.0/x", "Score"), means)
-            self.assertIn("1 of 2 first-level tests report no Score", cp.stdout)
-            self.assertIn("(y)", cp.stdout)
-            self.assertIn("side A", cp.stdout)
-            precision_run = precision(a, b)
-            self.assertNotEqual(precision_run.returncode, 0,
-                                "the stopping rule refuses what the report warns about")
+        doc = aggregate_doc("JetStream3.0", "Geometric", {"x": [1.0], "y": [4.0]})
+        doc["JetStream3.0"]["tests"]["y"] = {"metrics": {"Time": {"current": [9.0]}}}
+        a, b = self._pair(self.tmp, doc)
+        cp = rep(a, b)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        means = report_means(cp.stdout)
+        self.assertNotIn(("JetStream3.0", "Score"), means,
+                         "a partial suite has no headline score")
+        self.assertIn(("JetStream3.0/x", "Score"), means)
+        self.assertIn("1 of 2 first-level tests report no Score", cp.stdout)
+        self.assertIn("(y)", cp.stdout)
+        self.assertIn("side A", cp.stdout)
+        precision_run = precision(a, b)
+        self.assertNotEqual(precision_run.returncode, 0,
+                            "the stopping rule refuses what the report warns about")
 
     def test_an_aggregator_the_report_cannot_take_is_named_rather_than_dropped(self):
-        with scratch_dir() as tmp:
-            doc = aggregate_doc("JetStream3.0", "Harmonic", {"x": [1.0], "y": [4.0]})
-            a, b = self._pair(tmp, doc)
-            cp = rep(a, b)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("Harmonic", cp.stdout)
-            self.assertNotIn(("JetStream3.0", "Score"), report_means(cp.stdout))
+        doc = aggregate_doc("JetStream3.0", "Harmonic", {"x": [1.0], "y": [4.0]})
+        a, b = self._pair(self.tmp, doc)
+        cp = rep(a, b)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("Harmonic", cp.stdout)
+        self.assertNotIn(("JetStream3.0", "Score"), report_means(cp.stdout))
 
 
 class TestSpreadWithinAndBetweenRuns(WkTest):
 
-    def _side(self, tmp, name, runs):
-        dirs = []
-        for i, vals in enumerate(runs):
-            d = tmp / ("%s%d" % (name, i))
-            d.mkdir()
-            (d / "result.json").write_text(json.dumps(
-                {"Speedometer-3": {"metrics": {"Score": {"current": vals}}}}))
-            dirs.append(str(d))
-        return ",".join(dirs)
-
     def test_each_side_carries_both_spreads_for_the_suite_row(self):
-        with scratch_dir() as tmp:
-            a = self._side(tmp, "a", [[100.0, 101.0], [110.0, 111.0]])
-            b = self._side(tmp, "b", [[100.0, 101.0], [100.0, 101.0]])
-            cp = rep(a, b)
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            line = [l for l in cp.stdout.splitlines() if l.strip().startswith("Speedometer-3 Score:")]
-            self.assertEqual(len(line), 1, cp.stdout)
-            self.assertIn("A within-run sd=0.7071, run-to-run sd=7.0711 over 2 run(s)", line[0])
-            self.assertIn("B within-run sd=0.7071, run-to-run sd=0.0000 over 2 run(s)", line[0])
+        a = side(self.tmp, "a", [[100.0, 101.0], [110.0, 111.0]])
+        b = side(self.tmp, "b", [[100.0, 101.0], [100.0, 101.0]])
+        cp = rep(a, b)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        line = [l for l in cp.stdout.splitlines() if l.strip().startswith("Speedometer-3 Score:")]
+        self.assertEqual(len(line), 1, cp.stdout)
+        self.assertIn("A within-run sd=0.7071, run-to-run sd=7.0711 over 2 run(s)", line[0])
+        self.assertIn("B within-run sd=0.7071, run-to-run sd=0.0000 over 2 run(s)", line[0])
 
     def test_one_run_has_no_run_to_run_spread_and_says_so(self):
-        with scratch_dir() as tmp:
-            a = self._side(tmp, "a", [[100.0, 101.0]])
-            cp = rep(a, a)
-            self.assertIn("run-to-run sd=- over 1 run(s)", cp.stdout)
+        a = side(self.tmp, "a", [[100.0, 101.0]])
+        cp = rep(a, a)
+        self.assertIn("run-to-run sd=- over 1 run(s)", cp.stdout)
 
     def test_the_html_carries_the_same_lines(self):
-        with scratch_dir() as tmp:
-            a = self._side(tmp, "a", [[100.0, 101.0], [110.0, 111.0]])
-            out = tmp / "r.html"
-            self.assertEqual(rep(a, a, html=str(out)).returncode, 0)
-            self.assertIn("run-to-run sd=7.0711", out.read_text())
+        a = side(self.tmp, "a", [[100.0, 101.0], [110.0, 111.0]])
+        out = self.tmp / "r.html"
+        self.assertEqual(rep(a, a, html=str(out)).returncode, 0)
+        self.assertIn("run-to-run sd=7.0711", out.read_text())
 
 
 class TestPrecisionCarriesTheNoiseFloor(WkTest):
 
-    def _precision(self, a, b, goal="0.3"):
-        with scratch_dir() as tmp:
-            dirs = {}
-            for side, vals in (("a", a), ("b", b)):
-                paths = []
-                for i, v in enumerate(vals):
-                    d = tmp / ("%s%d" % (side, i))
-                    d.mkdir()
-                    (d / "result.json").write_text(json.dumps(
-                        {"Speedometer-3": {"metrics": {"Score": {"current": [[v]]}}}}))
-                    paths.append(str(d))
-                dirs[side] = ",".join(paths)
-            out = io.StringIO()
-            report.precision(dirs["a"], dirs["b"], float(goal), out=out)
-            return dict(l.split("=", 1) for l in out.getvalue().splitlines() if "=" in l)
+    def _precision(self, a, b):
+        out = io.StringIO()
+        report.precision(side(self.tmp, "a", [[[v]] for v in a]), side(self.tmp, "b", [[[v]] for v in b]), 0.3, out=out)
+        return dict(l.split("=", 1) for l in out.getvalue().splitlines() if "=" in l)
 
     def test_each_arms_spread_is_reported_against_its_own_mean(self):
         out = self._precision([100.0, 102.0], [100.0, 100.0])

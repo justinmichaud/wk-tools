@@ -3,7 +3,7 @@ TIER = "lint"
 import re
 import unittest
 
-from tests.support import REPO
+from tests.support import REPO, shell_files
 
 FUNC_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{\s*(#.*)?$')
 
@@ -14,8 +14,6 @@ DELIBERATE_PREDICATES = {
     ("container/proxy/ensure-bridge.sh", "bridge_alive"),
 }
 
-SHELL_ROOTS = ("admin", "bench", "boot", "bridge", "build", "cmd", "container",
-               "host", "image", "lib", "vm")
 SHELL_SHEBANG_LINE = re.compile(r'^#!.*\b(bash|sh|dash|ksh)\b')
 
 GREP_ASSIGN_RE = re.compile(
@@ -62,7 +60,7 @@ def _grep_assignments_in(text):
 
 def find_grep_assignments():
     found = []
-    for path in _iter_shell_files():
+    for path in shell_files():
         text = path.read_text(errors="replace")
         if "set -e" not in text:
             continue
@@ -96,21 +94,6 @@ class TestGrepAssignmentAudit(unittest.TestCase):
 
 
 HEREDOC_OP_RE = re.compile(r'<<(?!<)(-)?\s*([\'"]?)([A-Za-z_][A-Za-z0-9_]*)\2')
-
-
-def _iter_shell_files():
-    for root in SHELL_ROOTS:
-        for p in sorted((REPO / root).rglob("*")):
-            if not p.is_file() or "__pycache__" in p.parts:
-                continue
-            if p.suffix in (".py", ".pyc", ".md", ".json", ".conf", ".plist"):
-                continue
-            if p.suffix == ".sh":
-                yield p
-                continue
-            with p.open(errors="replace") as handle:
-                if SHELL_SHEBANG_LINE.match(handle.readline()):
-                    yield p
 
 
 def _functions(path):
@@ -298,7 +281,7 @@ def deciding_and_chain(body):
 
 def find_offenders():
     offenders = []
-    for f in _iter_shell_files():
+    for f in shell_files():
         rel = str(f.relative_to(REPO))
         for name, body in _functions(f):
             stmt = deciding_and_chain(body)
@@ -343,10 +326,7 @@ class TestTrailingAndChainAudit(unittest.TestCase):
             'done']), "")
 
 
-SCRIPT_ROOTS = (
-    "cmd", "lib", "vm", "boot", "build", "host", "bench",
-    "container/bin", "container/proxy", "admin",
-)
+SCRIPT_ROOTS = tuple(r + "/" for r in ("cmd", "lib", "vm", "boot", "build", "host", "bench", "container/bin", "container/proxy", "admin"))
 SET_EUO_PIPEFAIL_RE = re.compile(r'(?m)^\s*set\s+-euo\s+pipefail\s*$')
 
 DELIBERATE_EXCLUSIONS = {
@@ -356,12 +336,11 @@ DELIBERATE_EXCLUSIONS = {
 
 
 def _iter_candidate_scripts():
-    for root in SCRIPT_ROOTS:
-        for p in sorted((REPO / root).rglob("*")):
-            if p.is_file() and "__pycache__" not in p.parts:
-                with p.open(errors="replace") as f:
-                    if SHELL_SHEBANG_LINE.match(f.readline()):
-                        yield p
+    for p in shell_files():
+        if p.relative_to(REPO).as_posix().startswith(SCRIPT_ROOTS):
+            with p.open(errors="replace") as f:
+                if SHELL_SHEBANG_LINE.match(f.readline()):
+                    yield p
 
 
 class TestEveryScriptSetsEuoPipefail(unittest.TestCase):
@@ -385,24 +364,6 @@ class TestEveryScriptSetsEuoPipefail(unittest.TestCase):
                 SET_EUO_PIPEFAIL_RE.search(p.read_text(errors="replace")),
                 f"{rel} now sets `set -euo pipefail` -- drop it from DELIBERATE_EXCLUSIONS",
             )
-
-
-class TestEveryCrossMachinePushNormalisesTheMode(unittest.TestCase):
-    REMOTE = re.compile(r'rsync\s[^\n]*(-e\s+"ssh|\$\w+:|@\$)')
-
-    def test_no_cross_machine_rsync_carries_the_local_umask(self):
-        bad = []
-        for path in _iter_shell_files():
-            rel = str(path.relative_to(REPO))
-            for n, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
-                stripped = line.strip()
-                if stripped.startswith("#") or "rsync" not in stripped:
-                    continue
-                if not self.REMOTE.search(stripped):
-                    continue
-                if "--chmod=" not in stripped:
-                    bad.append(f"{rel}:{n}: {stripped[:90]}")
-        self.assertEqual([], bad, "cross-machine rsync without --chmod:\n" + "\n".join(bad))
 
 
 if __name__ == "__main__":

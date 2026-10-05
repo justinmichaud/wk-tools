@@ -11,28 +11,19 @@
 #   wk ai claude                 in a workspace: this one, no name
 #   wk ai claude --dry-run bb4   the push switch and session it would run
 #
-# Permissions are relaxed because the workspace is the blast radius, not the
-# machine, so this checks the boundary holds before handing over control. For
-# the session it also holds back the push keys and walls off git commits.
+# The agent runs with relaxed permissions, after `wk doctor`'s checks of the
+# workspace's boundary pass; the push keys are held back and git commits walled
+# off for the session. Inside a workspace (`claude` there calls this) the push
+# switch is measured instead: a key reaching it, or a GitHub or Bugzilla write
+# not refused, stops the session and no --force crosses it.
 #
-# Run inside a workspace it is the same command and the same start: `claude`
-# there is a shell function that calls it (shell/bashrc). What differs is that
-# the host's push switch cannot be thrown from in here, so it is measured
-# instead -- a key reaching this workspace, or a GitHub or Bugzilla write that
-# is not refused, stops the session and no --force crosses it. The checks are
-# `wk doctor`'s own, minus the half only the host can answer, and every one
-# runs at once.
+# A Claude session on a terminal starts with Remote Control on, named after the
+# workspace, using the claude.ai login the credential injector holds (`wk key
+# set claude-login`); on a build box, whose `claude setup-token` credential
+# Remote Control refuses, it starts without it and says so.
 #
-# A Claude session on a terminal starts with Remote Control on, named after
-# the workspace (`claude --remote-control <ws>`), so claude.ai/code and the
-# mobile app can join it. It needs the claude.ai login the credential injector
-# holds (`wk key set claude-login`), a placeholder in here; a build box is given
-# the `claude setup-token` credential instead, which Remote Control refuses, so
-# a session there starts without it and says so.
-#
-# The agents, Claude Code and pi, are installed when the workspace is made
-# (`wk new`; a macOS guest at its first start). A workspace made without one is
-# refused, naming the remedy: make it again.
+# The agents are installed by `wk new` (a macOS guest: at its first start); a
+# workspace made without one is refused, naming the remedy.
 
 import os
 import shlex
@@ -44,15 +35,12 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import agents, guest, secrets, wall  # noqa: E402
+from wk import agents, secrets, wall  # noqa: E402
 from wk.act import Refused, barrier, die, info, log, warn  # noqa: E402
-from wk.doctor import Report  # noqa: E402
 from wk.machine import HAVE, Local  # noqa: E402
 from wk.places import Registry  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
 
-NOT_INTACT = ("the sandbox around '%s' is not intact (see above), and relaxed\n"
-              "    permissions are only defensible while it is.")
 GH_LOGIN = 'test -e "$HOME/.config/gh/hosts.yml" || { command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; }'
 
 
@@ -147,48 +135,10 @@ class Ai:
         return lines[-1]
 
     def checks(self):
-        """`wk doctor`'s checks, run at once: from the host for a container or a guest, from inside for this workspace."""
-        kind, name = self.driver.kind, self.name
-        if kind == "remote":
-            info("'wk doctor %s' is not run for '%s': there is no sandbox there to\n  measure (it says so and refuses). The "
-                 "barrier above is the whole of the\n  boundary on this place." % (name, self.driver.name))
-            return
-        rep = Report(sys.stderr)
-        if kind == "local":
-            info("checking workspace '%s' from inside it" % name)
-            publishing = wall.from_inside(self.root, self.driver, name, self.machine, rep)
-        else:
-            info("checking workspace '%s' (%s)" % (name, self.driver.name))
-            publishing = wall.from_host(self.root, self.driver, name, self.machine, rep)
-        sys.stderr.write("\n")
-        v = wall.verdict(rep, publishing)
-        if v == "publishing":
-            die("refusing to run: an agent in '%s' could publish (see above).\n    Nothing in here can fix it and --force does "
-                "not cross it; the switch is the\n    host's:  wk key push off" % name)
-        if v == "broken":
-            warn("%d check(s) failed -- the sandbox is not intact" % rep.missing)
-            barrier(NOT_INTACT % name)
-        else:
-            info("sandbox intact")
+        wall.agent_checks(self.root, self.driver, self.name, self.machine)
 
     def guest_egress(self):
-        """A macOS guest's egress is filtered on the host by Softnet, unmeasurable from in there, and Softnet applies at
-        `tart run`: a guest booted without it is unfiltered."""
-        name, unfiltered = self.name, guest.is_unfiltered(self.env)
-        if not self.driver.egress_filtered(name) and not unfiltered:
-            barrier("'%s' was booted with NO egress filter.\n    Restart it filtered:  wk stop %s && wk start %s"
-                    % (name, name, name))
-        softnet = guest.softnet_bin(self.env)
-        if not unfiltered and self.machine.run(["test", "-x", softnet]).ok:
-            info("'%s' is a macOS VM: egress is filtered on the host by Softnet,\n  default-deny except the wk-proxy address. Of "
-                 "the host filesystem it reaches\n  only the mirror, read-only, and the\n"
-                 "  guest is disposable." % name)
-        elif unfiltered:
-            warn("WK_VM_UNFILTERED=1: '%s' has the open network. Of the host filesystem\n  it still reaches only the mirror, "
-                 "read-only, and the guest is still\n  disposable -- but that is the whole of the boundary right now." % name)
-        else:
-            barrier("softnet is not installed, so this guest's egress is not filtered.\n    Install it:  ./setup --stage softnet"
-                    "   (needs a terminal)")
+        wall.guest_egress(self.env, self.driver, self.name, self.machine)
 
     def wall_available(self):
         """A builtin needs `sh -c`: a place's exec hands argv to an exec, not a shell (measured)."""

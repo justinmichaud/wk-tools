@@ -5,25 +5,10 @@ import asyncio
 import os
 import sys
 
+from relay import pipe
+
 SOCKET = os.environ.get("WK_PROXY_SOCKET", "/run/wk/proxy.sock")
 PORT = int(os.environ.get("WK_PROXY_PORT", "3128"))
-
-
-async def pipe(reader, writer):
-    try:
-        while True:
-            data = await reader.read(65536)
-            if not data:
-                break
-            writer.write(data)
-            await writer.drain()
-    except (ConnectionResetError, BrokenPipeError, OSError):
-        pass
-    finally:
-        try:
-            writer.close()
-        except OSError:
-            pass
 
 
 async def handle(creader, cwriter):
@@ -58,5 +43,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         pass
     except OSError as exc:
-        # Almost always "address already in use": another wk command won the race and the bridge is up.
-        print(f"[wk-bridge] not started: {exc}", file=sys.stderr)
+        print(f"[wk-bridge] not started (another bridge holds the port?): {exc}", file=sys.stderr)

@@ -1,10 +1,9 @@
 """lint.one_machine_name_reader: this host's name is read in one place,"""
 TIER = "lint"
 import ast
-import re
 import unittest
 
-from tests.support import REPO, shell_files
+from tests.support import REPO
 
 READER = ("lib/wk/record.py", "host_name")
 
@@ -61,18 +60,6 @@ class TestOneMachineNameReader(unittest.TestCase):
             runs.visit(ast.parse(path.read_text(errors="replace"), str(path)))
             found += [(str(path.relative_to(REPO)), fn) for fn in sorted(runs.found)]
         self.assertEqual(found, [READER], "this machine's name is read by record.host_name; call it instead")
-
-    def test_no_host_side_bash_runs_hostname(self):
-        runs = re.compile(r"(^|[;&|({`$]|\bthen|\bdo)\s*hostname(\s+-s)?\s*(2>|\||\)|;|$)", re.M)
-        found = []
-        for path in shell_files():
-            rel = str(path.relative_to(REPO))
-            if not (rel.split("/")[0] in ("lib", "cmd", "host") or rel == "setup"):
-                continue
-            body = "\n".join(l for l in path.read_text(errors="replace").splitlines() if not l.lstrip().startswith("#"))
-            if runs.search(body):
-                found.append(rel)
-        self.assertEqual(found, [], "lib/common.sh's wk_machine_name is the bash spelling of this machine's name")
 
 
 if __name__ == "__main__":

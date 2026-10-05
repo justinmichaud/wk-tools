@@ -34,7 +34,7 @@ class SimDriver(WsDriver):
         super().__init__(name or kind, str(REPO), env, machine, kind)
         self.answers, self.asked = {}, []
         self.filtered = True
-        self.present, self.remedy = True, "the place's own remedy"
+        self.remedy = "the place's own remedy"
         self.is_local = False
 
     def tools(self, ws):
@@ -53,9 +53,6 @@ class SimDriver(WsDriver):
 
     def exec_argv(self, ws, argv, tty=False):
         return ["exec", ws, "tty" if tty else "no-tty"] + list(argv), None
-
-    def agent_secret_present(self, ws, secret):
-        return self.present
 
     def agent_secret_remedy(self, ws, secret):
         return self.remedy

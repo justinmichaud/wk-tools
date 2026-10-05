@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.bashlift import lift as _lift
 from tests.support import FLEET_ENV, REPO, WkTest, requires_machine, run, run_here
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -33,10 +34,6 @@ def _netplan_parser_source():
     m = re.search(r"python3 -c '\n(.*?)\n' > \"\$tmp\"", text, re.S)
     assert m, "no embedded netplan parser in admin/wk-card-priv"
     return m.group(1)
-
-
-def _lift(path, func):
-    return subprocess.run(["sed", "-n", f"/^{func}()/,/^}}/p", str(path)], capture_output=True, text=True).stdout
 
 
 def _wifi_edit(mnt, ssid, psk):
@@ -235,17 +232,16 @@ class TestImageWantsWifi(WkTest):
 class TestWifiPreflight(unittest.TestCase):
     """The preflight asks the disk machine's own card helper, never a local file; there is no --force past it."""
 
-    def test_refuses_a_wifi_board_when_the_disk_machine_is_not_on_wifi(self):
-        err = refusal(writer(**{"wifi-host": (0, "wifi-host: no")}).wifi_preflight, "rpi3")
-        self.assertIn("no uplink", err)
-        self.assertIn("stub-disk-machine", err, "the refusal does not name the disk machine")
-
-    def test_refuses_when_card_priv_itself_fails(self):
-        self.assertIsNotNone(refusal(writer(**{"wifi-host": (1, "connection refused")}).wifi_preflight, "rpi5"))
-
-    def test_force_does_not_cross_the_wifi_barrier(self):
-        with mock.patch.dict(os.environ, {"WK_FORCE": "1"}):
-            self.assertIsNotNone(refusal(writer(**{"wifi-host": (0, "wifi-host: no")}).wifi_preflight, "rpi3"))
+    def test_refuses_a_wifi_board_unless_the_disk_machine_is_on_wifi_and_force_does_not_cross_it(self):
+        for why, answer, env in (("not on wifi", (0, "wifi-host: no"), {}),
+                                 ("helper fails", (1, "connection refused"), {}),
+                                 ("forced", (0, "wifi-host: no"), {"WK_FORCE": "1"})):
+            with self.subTest(why), mock.patch.dict(os.environ, env):
+                err = refusal(writer(**{"wifi-host": answer}).wifi_preflight, "rpi3")
+                self.assertIsNotNone(err)
+                if why == "not on wifi":
+                    self.assertIn("no uplink", err)
+                    self.assertIn("stub-disk-machine", err, "the refusal does not name the disk machine")
 
     def test_passes_for_a_wired_board_regardless_of_the_disk_machine(self):
         w = writer(**{"wifi-host": (0, "wifi-host: no")})
@@ -303,25 +299,19 @@ class TestTailnetNameCollision(WkTest):
         self.assertIn("admin console", err)
         self.assertIn("--force", err, "does not say --force cannot cross this")
 
-    def test_suffixed_match_refuses(self):
-        """a '<name>-N' peer -- the trace of an earlier rename -- refuses too"""
-        self.assertIn("rpi3-1", _name_preflight("rpi3", self.tmp, self.PEERS))
-
-    def test_no_match_passes(self):
-        self.assertIsNone(_name_preflight("rpi5", self.tmp, self.PEERS))
-
-    def test_case_insensitive_match_refuses(self):
-        self.assertIsNotNone(_name_preflight("rpi4", self.tmp, self.PEERS.replace('"rpi4.tail0', '"RPI4.tail0')))
-
-    def test_a_peer_is_keyed_by_its_magicdns_label_not_its_os_hostname(self):
-        """A Mac keeps its hostname's capitals and two phones both answer 'localhost'."""
-        peers = self.PEERS.replace('"b":{"HostName":"rpi4","DNSName":"rpi4.tail0.ts.net."',
-                                   '"b":{"HostName":"Tolken","DNSName":"rpi4.tail0.ts.net."')
-        self.assertIn("already on the tailnet", _name_preflight("rpi4", self.tmp, peers))
-
-    def test_a_peer_with_no_magicdns_name_is_no_name_at_all(self):
-        """MagicDNS off means there is no name to dial, so the peer yields no row."""
-        self.assertIsNone(_name_preflight("rpi4", self.tmp, self.PEERS.replace('"DNSName":"rpi4.tail0.ts.net.",', "")))
+    def test_which_peers_collide_with_a_name(self):
+        """A '<name>-N' peer is the trace of an earlier rename; a peer is keyed by its MagicDNS label, not its
+        OS hostname (a Mac keeps its capitals, two phones both answer 'localhost'); none means no name to dial."""
+        hostname = self.PEERS.replace('"b":{"HostName":"rpi4"', '"b":{"HostName":"Tolken"')
+        for why, name, peers, refused in (
+                ("suffixed", "rpi3", self.PEERS, True), ("no match", "rpi5", self.PEERS, False),
+                ("case", "rpi4", self.PEERS.replace('"rpi4.tail0', '"RPI4.tail0'), True),
+                ("os hostname", "rpi4", hostname, True),
+                ("no magicdns name", "rpi4", self.PEERS.replace('"DNSName":"rpi4.tail0.ts.net.",', ""), False),
+                ("empty name", "", self.PEERS, False)):
+            with self.subTest(why):
+                err = _name_preflight(name, self.tmp, peers)
+                self.assertEqual(refused, err is not None, err)
 
     def test_empty_or_invalid_json_refuses_the_check_cannot_be_skipped(self):
         for label, doc in [("empty", ""), ("garbage", "not json at all")]:

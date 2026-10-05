@@ -9,8 +9,7 @@
 # A named workspace: stops only its container or macOS guest; nothing on disk
 # is touched.
 #
-# `forward=no`: runs on the host holding the environment -- stopping its own
-# containers from inside the podman VM would kill the ssh session mid-word.
+# Runs on the host holding the environment, never forwarded into the podman VM.
 #
 #   wk stop                  macOS VMs, containers, then the machine
 #   wk stop --keep-vm        macOS VMs and containers, leave the machine running

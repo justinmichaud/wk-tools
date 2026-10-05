@@ -1235,4 +1235,14 @@ decides is a row; one still open is listed under "Decisions for the user".
 
 ### Decisions for the user
 
-None open: decisions are asked as questions, and their answers are recorded under "Decisions taken".
+Decisions are asked as questions, and their answers are recorded under "Decisions taken".
+
+- `claude/settings-host.json` names its deny list `deny_temp`, so `test_build_wall`'s
+  `TestTheAgentIsToldUpFront` (six tests) fails: the host deny list back as `deny`, or the host
+  settings file gone with the host `claude`?
+- The cut is spent at the four rules: measured 2026-10-05 in a wk-tools workspace, core is 33.0k
+  non-blank lines and tests 51.7k after a trimming pass over every package and the two structural
+  merges (the A/B drivers on `ab.Task`, the image builders' one staged lifecycle), each of which
+  found the remaining code to be distinct behaviour. 10k and 15k are reachable only by removing
+  features or by the user naming what goes: lower the budgets to what was measured, or name the
+  features to drop?

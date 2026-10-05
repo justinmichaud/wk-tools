@@ -1,5 +1,5 @@
-"""The buildroot builder's driving half; lib/wk/sysimage/buildroot_ws.py runs from the workspace's own copy of
-this tree, so the halves cannot skew. The tree is a fork: the release-pinned `cog` defconfigs exist nowhere else.
+"""The buildroot builder's driving half; buildroot_ws.py runs from the workspace's own copy of this tree, so the halves cannot skew.
+The tree is a fork whose release-pinned `cog` defconfigs exist nowhere else, not even at its 2020.02 tag: BR_TREE_COMMIT is a commit.
 TODO: whether the rpi3 defconfig compiles wpa_supplicant at all is unverified."""
 
 import os
@@ -18,7 +18,7 @@ PATTERN = "*buildroot_ws.py*"
 DL_IN_WS = "/cache/buildroot/dl"
 BUILD_USAGE = "usage: wk sysimage build %s [--dry-run|--workspace <name>|--detach|--stop]"
 WEBKIT_USAGE = "usage: wk sysimage webkit <image-preset> --commit <sha> --slot <name> [--detach] [--dry-run]"
-ZIMAGE_MAGIC = "016f2818"   # at offset 36 of a 32-bit ARM zImage
+ZIMAGE_MAGIC = "016f2818"
 PIN_TOOLS = ("dpkg-deb", "xz", "depmod", "tar")
 
 
@@ -73,20 +73,14 @@ def kernel_pin(m, deb, release, out):
 
 
 class Buildroot(task.ContainerBuilder):
-    KIND, TITLE, SPEC, BASE_IMAGE, BASE_VAR = "buildroot", "buildroot", SPEC, BASE_IMAGE, "WK_BUILDROOT_BASE"
+    KIND, TITLE, SPEC, BASE_IMAGE, BASE_VAR, PATTERN = "buildroot", "buildroot", SPEC, BASE_IMAGE, "WK_BUILDROOT_BASE", PATTERN
     NEEDS = "a buildroot image builds in a container workspace"
     NOT_HERE = "Build it on a machine whose container place holds it:  wk sysimage build %(spec)s@<machine>"
     IMAGE_NOTE = "  22.04 is the host the wiki recipe was driven on; a 2020 buildroot\n  does not survive a much newer one (%(spec)s)."
     SURVIVES = "the buildroot downloads are in the store and survive"
 
-    def cache(self, what):
-        return os.path.join(self.store.store_dir(), "cache", "buildroot", what)
-
-    def kill_cmd(self, ws):
+    def kill_cmd(self, ws, stage):
         return "wk sysimage build %s%s --stop" % (self.spec, self.ws_flag(ws))
-
-    def stage(self, driver, ws, stage):
-        return task.Stage(self.reg, driver, ws, "buildroot", stage, self.kill_cmd(ws), self.clock)
 
     def kernel(self):
         """Fetched and prepared here, where the network and depmod are; its path in the download cache both sides share."""
@@ -128,34 +122,13 @@ class Buildroot(task.ContainerBuilder):
         if o.get("--detach"):
             return self.detach(st, "build", rest, "build of %s" % self.name)
         budget, running, jobs = st.size(IMAGE_JOBS)
-        lock = st.admit(budget, running, jobs)
-        try:
-            plan = (["prepare the pinned kernel %s" % p["BR_KERNEL_RELEASE"]] if p["BR_KERNEL_DEB_URL"] else []) + [
-                "the workspace '%s' on %s" % (ws, tag), "sync wk-tools into '%s'" % ws, "build %s with -j%d" % (self.name, jobs)]
-            t = st.begin(plan)
-            n, kernel_tar, kernel_dts = 0, "", ""
-            try:
-                if p["BR_KERNEL_DEB_URL"]:
-                    n += 1
-                    t.step(n)
-                    kernel_tar = self.kernel()
-                    kernel_dts = self.kernel_dts()
-                n += 1
-                t.step(n)
-                self.ensure_ws(driver, ws, base, tag)
-                n += 1
-                t.step(n)
-                if not driver.sync_tools(ws):
-                    die("pushing wk-tools into '%s' failed -- the reason is above" % ws)
-            except act.Refused as e:
-                t.end(e.status)
-                raise
-            t.step(n + 1)
-            # BR_TREE_COMMIT is a commit, never the 2020.02 tag: the cog defconfig is absent there.
-            info("building %s in '%s' (hours; --detach returns instead)" % (self.name, ws))
-            st.run(t, budget, jobs, self.image_argv(driver.tools(ws), jobs, wifi, kernel_tar, kernel_dts), PATTERN)
-        finally:
-            lock.release_all()
+        kernel = {"tar": "", "dts": ""}
+        pin = [lambda: kernel.update(tar=self.kernel(), dts=self.kernel_dts())] if p["BR_KERNEL_DEB_URL"] else []
+        plan = (["prepare the pinned kernel %s" % p["BR_KERNEL_RELEASE"]] if pin else []) + [
+            "the workspace '%s' on %s" % (ws, tag), "sync wk-tools into '%s'" % ws, "build %s with -j%d" % (self.name, jobs)]
+        self.staged(st, (budget, running, jobs), plan, pin + [lambda: self.ensure_ws(driver, ws, base, tag), lambda: self.sync(driver, ws)],
+                    "building %s in '%s' (hours; --detach returns instead)" % (self.name, ws),
+                    lambda: self.image_argv(driver.tools(ws), jobs, wifi, kernel["tar"], kernel["dts"]))
         info("built %s in '%s'" % (self.name, ws))
         return 0
 
@@ -206,19 +179,11 @@ class Buildroot(task.ContainerBuilder):
         if o.get("--detach"):
             return self.detach(st, "webkit", rest, "slot build of %s" % self.name)
         budget, running, jobs = st.size(WEBKIT_JOBS)
-        lock = st.admit(budget, running, jobs)
-        try:
-            t = st.begin(["sync wk-tools into '%s'" % ws, "build WebKit %s into slot '%s' with -j%d" % (commit[:12], name, jobs)])
-            t.step(1)
-            if not driver.sync_tools(ws):
-                t.end(1)
-                die("pushing wk-tools into '%s' failed -- the reason is above" % ws)
-            t.step(2)
-            info("building WebKit %s into slot '%s' of %s in '%s' (tens of minutes; --detach returns instead)" % (commit[:12], name, self.name, ws))
-            st.run(t, budget, jobs, ["python3", driver.tools(ws) + "/lib/wk/sysimage/buildroot_ws.py", "webkit", "--name", self.name, "--commit", commit,
-                                     "--slot", name, "--jobs", str(jobs)], PATTERN)
-        finally:
-            lock.release_all()
+        self.staged(st, (budget, running, jobs), ["sync wk-tools into '%s'" % ws, "build WebKit %s into slot '%s' with -j%d" % (commit[:12], name, jobs)],
+                    [lambda: self.sync(driver, ws)],
+                    "building WebKit %s into slot '%s' of %s in '%s' (tens of minutes; --detach returns instead)" % (commit[:12], name, self.name, ws),
+                    lambda: ["python3", driver.tools(ws) + "/lib/wk/sysimage/buildroot_ws.py", "webkit", "--name", self.name, "--commit", commit,
+                             "--slot", name, "--jobs", str(jobs)])
         if not self.here.exists(os.path.join(slotdir, "slot.json")):
             die("the build reported done but left no %s/slot.json" % slotdir)
         info("slot '%s' of %s holds %s" % (name, self.name, commit[:12]))

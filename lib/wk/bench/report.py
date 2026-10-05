@@ -25,10 +25,14 @@ BOTH = (("class", "benchmark classes", ""), ("machine", "machines", " -- these a
 def axis_check_lines(a, b):
     if not a or not b:
         return []
-    lines = ["warning: different %s (%s vs %s)%s" % (label, a.get(k, d), b.get(k, d), why)
-             for k, label, d, why in AXES[:5] if a.get(k, d) != b.get(k, d)]
-    got = [(record.get_nested(a, k), record.get_nested(b, k), label, why) for k, label, why in BOTH]
-    lines += ["warning: different %s (%s vs %s)%s" % (label, x, y, why) for x, y, label, why in got[:1] if x and y and x != y]
+
+    def axes(rows):
+        return ["warning: different %s (%s vs %s)%s" % (label, a.get(k, d), b.get(k, d), why) for k, label, d, why in rows if a.get(k, d) != b.get(k, d)]
+
+    def both(rows):
+        got = [(record.get_nested(a, k), record.get_nested(b, k), label, why) for k, label, why in rows]
+        return ["warning: different %s (%s vs %s)%s" % (label, x, y, why) for x, y, label, why in got if x and y and x != y]
+    lines = axes(AXES[:5]) + both(BOTH[:1])
     # Only evidence for a gpu-class run: "no renderer" about a jsc-shell JetStream run is noise in front of real warnings.
     if a.get("class") != "cpu" and b.get("class") != "cpu":
         if a.get("gpu_renderer") != b.get("gpu_renderer"):
@@ -47,13 +51,11 @@ def axis_check_lines(a, b):
         lines.append("warning: at least one run was taken with failing preflight checks (--force)")
     if a.get("role_marker_overridden") or b.get("role_marker_overridden"):
         lines.append("warning: at least one run only *claimed* bench mode (WK_IMAGE_MARKER was overridden) -- it was measured on a workstation")
-    k, label, d, why = AXES[5]
-    if a.get(k, d) != b.get(k, d):
-        lines.append("warning: different %s (%s vs %s)%s" % (label, a.get(k, d), b.get(k, d), why))
+    lines += axes(AXES[5:])
     cores = [(r.get("cores") or {}).get("set") or "unpinned" for r in (a, b)]
     if cores[0] != cores[1]:
         lines.append("warning: different core pins (%s vs %s)" % tuple(cores))
-    lines += ["warning: different %s (%s vs %s)%s" % (label, x, y, why) for x, y, label, why in got[1:] if x and y and x != y]
+    lines += both(BOTH[1:])
     # The kernel and system are reported, not warned about: for a kernel A/B their differing is the whole A/B.
     lines += ["note: %s differs -- %s vs %s" % (k, a[k], b[k]) for k in ("system", "profile") if a.get(k) and b.get(k) and a[k] != b[k]]
     ka, kb = record.get_nested(a, "host.kernel"), record.get_nested(b, "host.kernel")

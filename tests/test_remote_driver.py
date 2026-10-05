@@ -62,6 +62,19 @@ class TestRemoteProbeParse(unittest.TestCase):
         self.assertEqual((p["home"], p["root"]), ("/home/t", "/home/t/wk"))
         self.assertEqual(places.parse_probe(LINUX_SAMPLE, "/srv/wk")["root"], "/srv/wk")
 
+    def test_parses_cores_load_mem_ionice_os_from_sysctl_vm_stat(self):
+        # int(1.23), the 2nd field of "{ ... }"; (123456 free + 345678 inactive
+        # + 45678 speculative) pages * 16384 bytes/page, in MB.
+        self.assertEqual(fields(places.parse_probe(DARWIN_SAMPLE)), (10, 1, 8043, "no", "macos"))
+
+    def test_an_answer_missing_a_figure_is_refused_not_read_as_one_core_and_no_memory(self):
+        for sample, why in (("/home/t\n", "the core count is '', not a number"),
+                            (LINUX_SAMPLE.replace("MemAvailable:", "MemGone:"), "MemAvailable is '', not a number"),
+                            ("/Users/t\nDarwin\n4\n{ 0.10 0.20 0.30 }\n===MEM===\nPages free:   123456.\n===IONICE===\nno\n",
+                             "vm_stat printed no page size")):
+            with self.subTest(why=why), self.assertRaisesRegex(ValueError, why):
+                places.parse_probe(sample)
+
 
 class TestTheDefaultRoot(unittest.TestCase):
     def test_the_probe_the_far_end_and_the_driver_agree(self):
@@ -72,25 +85,6 @@ class TestTheDefaultRoot(unittest.TestCase):
         self.assertEqual(reg.far_root(), places.default_root("/h"))
         local = places.Remote("box", REPO, dict(env, WK_REMOTE_LOCAL="1"), Fake())
         self.assertEqual(local.store.store_dir(), places.default_root("/h"))
-
-
-class TestRemoteProbeParseDarwin(unittest.TestCase):
-    def test_parses_cores_load_mem_ionice_os_from_sysctl_vm_stat(self):
-        # int(1.23), the 2nd field of "{ ... }"; (123456 free + 345678 inactive
-        # + 45678 speculative) pages * 16384 bytes/page, in MB.
-        self.assertEqual(fields(places.parse_probe(DARWIN_SAMPLE)), (10, 1, 8043, "no", "macos"))
-
-    def test_a_missing_page_size_is_refused_not_read_as_no_memory(self):
-        sample = "/Users/t\nDarwin\n4\n{ 0.10 0.20 0.30 }\n===MEM===\nPages free:   123456.\n===IONICE===\nno\n"
-        with self.assertRaisesRegex(ValueError, "vm_stat printed no page size"):
-            places.parse_probe(sample)
-
-
-    def test_an_answer_missing_a_figure_is_refused_not_read_as_one_core_and_no_memory(self):
-        with self.assertRaisesRegex(ValueError, "the core count is '', not a number"):
-            places.parse_probe("/home/t\n")
-        with self.assertRaisesRegex(ValueError, "MemAvailable is '', not a number"):
-            places.parse_probe(LINUX_SAMPLE.replace("MemAvailable:", "MemGone:"))
 
 
 class TimingFake(Fake):
@@ -119,14 +113,12 @@ class TestTheProbeIsBounded(unittest.TestCase):
                "WK_PROBE_SECONDS": seconds, "PATH": os.environ.get("PATH", "")}
         return places.Registry(REPO, env=env, machine=fake).load("hangs")
 
-    def test_a_machine_that_connects_and_says_nothing_is_given_up_on(self):
+    def test_a_machine_that_connects_and_says_nothing_is_given_up_on_and_one_that_answers_is_read(self):
         fake = TimingFake(Result(TIMED_OUT, "", "timed out after 2s"))
         t = self.remote(fake, "2")
         self.assertEqual(t.probe(), ("unreachable", "timed out after 2s"))
         self.assertEqual((t.info("a"), t.far_side()), ("unreachable", "unreachable"))
         self.assertEqual(fake.timeouts, [2])   # one round trip, under the ceiling; nothing asked again
-
-    def test_the_ceiling_is_not_reached_when_the_machine_answers(self):
         fake = TimingFake(Result(0, LINUX_SAMPLE))
         t = self.remote(fake, "20")
         self.assertEqual(t.answers(), (True, ""))

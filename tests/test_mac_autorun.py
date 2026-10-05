@@ -105,6 +105,7 @@ TOOLS = ROOT + "/wk-tools"
 HOME = "/Users/bench"
 AGENT = HOME + "/Library/LaunchAgents/com.wk.bench-ab.plist"
 STATE = ROOT + "/autorun.state"
+STATE_TEXT = "phase=planted\njob_stamp=S1\nattempts=0\n"
 RUNS = ROOT + "/ab/S1"
 HOST = "/Volumes/Macintosh HD"
 WKMAC = ["python3", TOOLS + "/" + mac.WKMAC]
@@ -140,7 +141,7 @@ class World:
         f._set_file(mac.MARKER, "id=perf-macos-tolken\n")
         if job_doc is not False:
             f._set_file(ROOT + "/job.json", json.dumps(job() if job_doc is None else job_doc))
-        f._set_file(STATE, "phase=planted\njob_stamp=S1\nattempts=0\n")
+        f._set_file(STATE, STATE_TEXT)
         f._set_file(AGENT, "<plist/>")
         for rel in ("wk", "bench/" + "mac-quiet-desktop.sh", screen.WINDOWS):
             f._set_file(TOOLS + "/" + rel, "")
@@ -410,10 +411,19 @@ class TestTheRefusals(unittest.TestCase):
         self.assertNotIn(AGENT, w.fake.files)
         self.assertEqual("1", w.state()["attempts"])
 
-    def test_the_fourth_attempt_abandons_the_job(self):
-        w = World()
-        w.fake._set_file(STATE, "phase=running\nattempts=3\n")
-        self.assertEqual(("done", "abandoned"), (self.refused(w).state()["phase"], w.state()["outcome"]))
+    def test_a_job_that_cannot_run_ends_with_its_outcome_and_retires_the_agent(self):
+        """A mode written once that still does not come up is unsettable; a tree with no wk is the one failing exit."""
+        mode = lambda f: f.answer(WKMAC + ["display-mode"], out="1800x1169")   # noqa: E731
+        for outcome, w, setup, rc in (
+                ("abandoned", World(), lambda f: f._set_file(STATE, "phase=running\nattempts=3\n"), 0),
+                ("no-display-expectation", World(job(display="")), lambda f: None, 0),
+                ("display-mode-unsettable", World(), lambda f: (mode(f), f._set_file(STATE, STATE_TEXT + "mode_declared=1512x982\n")), 0),
+                ("display-mode-unwritable", World(), lambda f: (mode(f), f.answer(["sudo", "-n"] + WKMAC, rc=1)), 0),
+                ("no-wk-tools", World(), lambda f: f._drop(TOOLS + "/wk"), 1)):
+            with self.subTest(outcome):
+                setup(w.fake)
+                self.assertEqual(("done", outcome), (self.refused(w, rc).state()["phase"], w.state()["outcome"]))
+                self.assertNotIn(AGENT, w.fake.files)
 
     def test_it_stands_aside_while_provisioning_is_running(self):
         w = World()
@@ -445,11 +455,6 @@ class TestTheRefusals(unittest.TestCase):
                 setup(w.fake)
                 self.refused(w)
 
-    def test_a_job_that_pins_no_display_measures_nothing(self):
-        w = self.refused(World(job(display="")))
-        self.assertEqual("no-display-expectation", w.state()["outcome"])
-        self.assertNotIn(AGENT, w.fake.files)
-
     def test_ambient_light_that_will_not_let_go_spends_no_attempt(self):
         w = World()
         w.fake.answer(WKMAC + ["auto-brightness"], out="on")
@@ -477,18 +482,6 @@ class TestTheRefusals(unittest.TestCase):
         self.assertNotIn(("sudo", "-n", "bless", "--mount", HOST, "--setBoot"), w.calls())
         self.assertEqual(("0", "1512x982"), (w.state()["attempts"], w.state()["mode_declared"]))
 
-    def test_a_mode_write_that_did_not_take_is_refused_the_second_time(self):
-        w = World()
-        w.fake.answer(WKMAC + ["display-mode"], out="1800x1169")
-        w.fake._set_file(STATE, "phase=planted\njob_stamp=S1\nattempts=0\nmode_declared=1512x982\n")
-        self.assertEqual("display-mode-unsettable", self.refused(w).state()["outcome"])
-
-    def test_a_mode_the_configuration_will_not_take_is_refused(self):
-        w = World()
-        w.fake.answer(WKMAC + ["display-mode"], out="1800x1169")
-        w.fake.answer(["sudo", "-n"] + WKMAC, rc=1)
-        self.assertEqual("display-mode-unwritable", self.refused(w).state()["outcome"])
-
     def test_a_setting_that_drifted_refuses_the_whole_job_once_after_the_quiesce(self):
         w = World()
         w.fake.answer(lib(autorun.DESKTOP, "wk_quiet_desktop_findings"), out=OK_ROWS + WRONG_ROWS)
@@ -506,10 +499,6 @@ class TestTheRefusals(unittest.TestCase):
         self.assertEqual(ROOT + "/staged/sa/WebKitBuild/Release", check[check.index("--build-directory") + 1])
         self.assertEqual(RUNS + "/browser-check.json", check[check.index("--json") + 1])
 
-    def test_a_tree_with_no_wk_is_the_one_failing_exit(self):
-        w = World()
-        w.fake._drop(TOOLS + "/wk")
-        self.assertEqual("no-wk-tools", self.refused(w, rc=1).state()["outcome"])
 
 
 class TestANumberlessBootIsHeld(unittest.TestCase):

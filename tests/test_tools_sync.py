@@ -256,13 +256,9 @@ class EachKind(unittest.TestCase):
         self.assertTrue(shlex.split(runs[0][-1])[-1].endswith("sh /home/u/wk/tools"), runs[0][-1])
         self.assertEqual(runs[1][-1], "box.example:/home/u/wk/tools/" + tools.BUNDLE)
 
-    def test_a_peer_is_not_pushed_to_at_all(self):
+    def test_a_peer_keeps_its_own_checkout_and_a_container_bind_mounts_this_one_so_nothing_is_pushed(self):
         self.conf("pal", "kind=peer\nhost=pal.example\npeer=1\n")
-        self.assertTrue(self.reg.load("pal").sync_tools(""))
-        self.assertEqual(self.pushed(), [])
-
-    def test_a_container_bind_mounts_this_checkout_so_nothing_is_pushed(self):
-        self.assertTrue(self.reg.load("container").sync_tools("ws"))
+        self.assertTrue(self.reg.load("pal").sync_tools("") and self.reg.load("container").sync_tools("ws"))
         self.assertEqual(self.fake.effects, [])
 
     def test_a_guest_gets_the_same_bundle_through_its_guest_agent(self):

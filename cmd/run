@@ -45,14 +45,8 @@
 #
 #     --browser [url]   MiniBrowser on that page instead of the jsc shell
 #     --process <p>     which of MiniBrowser's processes: ui | web (default) |
-#                       network | gpu. Refused on the Apple ports, where the
-#                       browser is profiled directly. On GTK/WPE, 'ui' puts the
-#                       recorder in front of the launch (WEBKIT_MINI_BROWSER_PREFIX,
-#                       the hook `wk gui --lldb ui` uses); web/network/gpu launch
-#                       and attach after a fixed wait, so it may not be mid-load.
-#                       Only samply attaches; sampling/bytecode/sysprof cover the
-#                       whole tree and refuse it; heaptrack/massif are not wired
-#                       up for a browser (docs/Urgent/HANDOFF-linux-minibrower.md)
+#                       network | gpu (GTK/WPE, samply only). 'ui' records from
+#                       the launch; the others attach after a fixed wait
 #     --attach <pid|name>   something already running in the workspace
 #     --jit-dump        JS/JIT frame names for the native profilers
 #     --markers         JSC's interval text markers, for splitting a trace by phase

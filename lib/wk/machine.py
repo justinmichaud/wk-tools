@@ -122,8 +122,7 @@ class Machine:
         if self._would("run", shlex.join(argv)):
             return Result(0)
         if act.destructive() and not act.asked():
-            act.die("BUG: this command is declared destructive and acted before asking:\n    %s"
-                    % shlex.join(argv))
+            act.die("BUG: this command is declared destructive and acted before asking:\n    %s" % shlex.join(argv))
         if kw.pop("tty", False):
             return self.run_tty(argv, **kw)
         return self._effect_run(argv, **kw)
@@ -441,21 +440,17 @@ class Ssh(Machine):
         # The far sshd runs a command under a non-login shell, so ~/.local/bin and Homebrew are off its PATH.
         return ["ssh"] + (["-t"] if tty else []) + self.opts + [self.dest, LOGIN + shlex.quote(remote)]
 
-    def _ssh(self, remote, input=None, timeout=None):
+    def _ssh(self, remote, input=None, timeout=None, how=None, stream=False):
         self._up()
         # An empty stdin, not the caller's: ssh drinks whatever it is handed.
-        return self.via.run(self.argv(remote), input="" if input is None else input, timeout=timeout)
-
-    def _via(self, how, argv, input, timeout, stream):
-        self._up()
-        return how(self.argv(shlex.join(argv)), input="" if input is None else input,
-                   timeout=timeout, **({"stream": True} if stream else {}))
+        return (how or self.via.run)(self.argv(remote), input="" if input is None else input, timeout=timeout,
+                                     **({"stream": True} if stream else {}))
 
     def run(self, argv, input=None, timeout=None, stream=False):
-        return self._via(self.via.run, argv, input, timeout, stream)
+        return self._ssh(shlex.join(argv), input, timeout, self.via.run, stream)
 
     def _effect_run(self, argv, input=None, timeout=None, stream=False):
-        return self._via(self.via.act_run, argv, input, timeout, stream)
+        return self._ssh(shlex.join(argv), input, timeout, self.via.act_run, stream)
 
     def run_tty(self, argv, cwd=None, timeout=None):
         self._up()
@@ -465,10 +460,7 @@ class Ssh(Machine):
         return self.via.run_tty(self.argv(remote, tty=True), timeout=timeout)
 
     def read(self, path):
-        r = self._ssh("cat %s" % shlex.quote(path))
-        if not r.ok:
-            raise OSError(r.err.strip() or "cannot read %s on %s" % (path, self.dest))
-        return r.out
+        return self._far("cat %s" % shlex.quote(path), path)
 
     def read_tree(self, anchor, rel, patterns, depth=3):
         parts = [p for p in rel.split("/") if p]
@@ -614,11 +606,7 @@ class TartExec(Ssh):
         return [self.tart, "exec", "-i"] + (["-t"] if tty else []) + [self.dest, "/bin/zsh", "-lc", remote]
 
     def _pipe(self, line, src, dest, *args):
-        if self._would("copy", "%s -> %s" % (src, dest)):
-            return
-        r = self.via.run(["sh", "-c", "set -o pipefail; " + line, self.tart, self.dest, src, dest, *args])
-        if not r.ok:
-            raise OSError(r.err.strip() or "copy between here and %s failed" % self.dest)
+        self._copy(["sh", "-c", "set -o pipefail; " + line, self.tart, self.dest, src, dest, *args], src, dest)
 
     def copy_in(self, src, dest):
         self._pipe('"$0" exec -i "$1" /bin/sh -c \'cat > "$0"\' "$3" < "$2"', src, dest)
@@ -633,8 +621,7 @@ class TartExec(Ssh):
     def copy_tree_out(self, src, dest, exclude=()):
         """bsdtar matches an --exclude unanchored, so a pattern without a slash names a path at any depth, as rsync's does."""
         self._pipe('t=$0 g=$1 s=$2 d=$3; shift 3; "$t" exec "$g" /usr/bin/tar -cf - -C "$s" "$@" . '
-                   '| { rm -rf "$d" && mkdir -p "$d" && tar -C "$d" -xf -; }',
-                   src, dest, *excludes(exclude))
+                   '| { rm -rf "$d" && mkdir -p "$d" && tar -C "$d" -xf -; }', src, dest, *excludes(exclude))
 
     def _refused(self, *a, **kw):
         raise NotImplementedError("a port forward into %s goes over its sshd (Vm.ssh_transport), not tart exec" % self.dest)

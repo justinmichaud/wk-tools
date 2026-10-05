@@ -17,6 +17,7 @@ from wk import places, record  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake  # noqa: E402
+from wk.store import Store  # noqa: E402
 
 
 class TestListingsAgree(WkTest):
@@ -231,6 +232,9 @@ class TestARecordIsAClaimAndThePidIsTheFact(WkTest):
 class TestVmDriverWithoutTart(unittest.TestCase):
 
     def test_no_tart_means_every_guest_is_absent(self):
+        mac = mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True)
+        mac.start()
+        self.addCleanup(mac.stop)
         tmp = tempfile.mkdtemp(prefix="wk-test-state-")
         self.addCleanup(shutil.rmtree, tmp, True)
         fake = Fake("here")

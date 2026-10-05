@@ -11,34 +11,22 @@
 # wk: sub probe opts=--json,--segment=,--vantage=,--no-ssh,--timeout=
 #
 #   setup <name> [--kind build|peer]
-#            a build machine: probes it for what a build needs (remote/deps.sh),
-#            pushes wk-tools, provisions it (remote/provision.sh), places the
-#            agent credentials and runs WebKit's install-dependencies; nothing
-#            changes until the probe passes. A peer: checks its own wk answers.
-#            A name with no machines/<name>.conf needs --kind, which writes the
-#            conf; after that the conf's kind is the answer. Asks once before
-#            removing an older wk-tools checkout or a redundant mirror.
-#            A bridge: renders its role from the conf, applies it on the phone
-#            (bridge/provision.sh), joins the tailnet, prints the policy to paste
-#            and runs the health check; re-run after any change to the conf.
-#            With --disk it first writes the phone's system to that disk and
-#            waits up to 15 minutes for the phone to answer.
-#   tailnet <name>
-#            a bridge's tailnet join and policy on their own.
-#   status [<name>]
-#            a bridge's health check; with no name, every bridge and whether it answers.
+#            a build machine: probe it (remote/deps.sh), push wk-tools, provision it (remote/provision.sh), place the
+#            agent credentials and run WebKit's install-dependencies; nothing changes until the probe passes. A peer:
+#            check its own wk answers. A name with no machines/<name>.conf needs --kind, which writes the conf.
+#            Asks once before removing an older wk-tools checkout or a redundant mirror.
+#            A bridge: apply the role its conf renders (bridge/provision.sh), join the tailnet, print the policy to
+#            paste and run the health check. With --disk, first write the phone's system and wait up to 15 minutes.
+#   tailnet <name>   a bridge's tailnet join and policy on their own.
+#   status [<name>]  a bridge's health check; with no name, every bridge and whether it answers.
 #   rm <name>
-#            a build machine: removes the wk-tools lines from its shell rc files,
-#            its ~/.wk-remote and its root, once no workspace is left on it; an
-#            unreachable one only loses its conf here. A peer: its conf. A bridge:
+#            a build machine, once no workspace is left on it: the wk-tools lines in its shell rc files, its
+#            ~/.wk-remote and its root; an unreachable one only loses its conf here. A peer: its conf. A bridge:
 #            everything setup left on the phone, and its tailnet login. Asks once.
-#   ls [--json]
-#            every machine in machines/, its kind and its tailnet names.
-#   probe <name>
-#            its tailnet names, what `ssh` would dial, and whether it answers; a
-#            board that does not answer is swept for by its hardware address.
-#   probe    every device on every segment a sweep can see (this machine's
-#            subnets and each bridge's), through nmap and the neighbour table.
+#   ls [--json]      every machine in machines/, its kind and its tailnet names.
+#   probe <name>     its tailnet names, what `ssh` would dial, and whether it answers; a board that does not answer
+#                    is swept for by its hardware address.
+#   probe            every device on every segment a sweep can see (this machine's subnets and each bridge's).
 #
 #   --segment <cidr>   sweep this instead of the derived segments
 #   --vantage <name>   sweep from this machine only (a bridge's ssh name, or 'local')

@@ -13,7 +13,7 @@ from http.server import HTTPServer
 from pathlib import Path
 from unittest import mock
 
-from tests.support import NO_REGISTRY, REPO, WkTest, clean_env
+from tests.support import NO_REGISTRY, REPO, SYSTEM_DIRS, WkTest, clean_env
 from tests.test_credcheck import FakeAnthropic, FakeLiteLLM
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -137,7 +137,7 @@ class TestTheGitLfsFilter(unittest.TestCase):
             f.write("[include]\n\tpath = %s\n" % (REPO / "dotfiles" / "gitconfig"))
         bare = os.path.join(tmp, "bin")
         os.mkdir(bare)
-        os.symlink(shutil.which("git"), os.path.join(bare, "git"))
+        os.symlink(shutil.which("git", path=os.pathsep.join(SYSTEM_DIRS)), os.path.join(bare, "git"))   # a workspace's PATH leads with a wrapper that is no git
         env = dict(os.environ, GIT_CONFIG_GLOBAL=os.path.join(tmp, "gitconfig"), GIT_CONFIG_NOSYSTEM="1", PATH=bare + ":/bin")
         git = lambda *a: subprocess.run(["git", "-C", tmp + "/r"] + list(a), env=env, capture_output=True, text=True)
         subprocess.run(["git", "init", "-q", tmp + "/r"], env=env, check=True)
@@ -178,33 +178,20 @@ class TestDeviceRows(unittest.TestCase):
     def row(self, rows, word):
         return next(r for r in rows if word in r[1])
 
-    def test_each_tailnet_name_is_a_row_and_an_offline_one_is_missing(self):
-        rows = self.rows("pi", probed())
-        self.assertEqual(OK, self.row(rows, "pi-rescue on the tailnet")[0])
-        self.assertEqual(MISS, self.row(rows, "pi-bench on the tailnet")[0])
-
-    def test_a_board_answering_in_host_mode_reports_its_governor_and_temperature(self):
-        rows = self.rows("pi", probed())
-        self.assertEqual(OK, self.row(rows, "answers in host mode")[0])
-        self.assertEqual(OK, self.row(rows, "not armed")[0])
-        self.assertIn("performance", self.row(rows, "cpu governor on pi-rescue")[1])
-        self.assertIn("51C", self.row(rows, "temperature on pi-rescue")[1])
-
-    def test_bench_mode_reads_the_bench_name(self):
-        self.assertTrue(any("on pi-bench" in r[1] for r in self.rows("pi", probed(mode="bench"))))
-
-    def test_unreachable_is_missing_and_asks_nothing_further(self):
-        rows = self.rows("pi", probed(mode=""))
-        self.assertEqual(MISS, self.row(rows, "unreachable")[0])
-        self.assertFalse(any("governor" in r[1] for r in rows))
-
-    def test_no_answer_within_the_ceiling_is_unknown(self):
-        self.assertEqual(UNK, self.row(self.rows("pi", None), "did not answer")[0])
-
-    def test_a_current_arm_is_a_note_and_a_stale_one_is_missing(self):
-        self.assertEqual(doctor.NOTE, self.row(self.rows("pi", probed(armed="bench")), "armed for bench")[0])
+    def test_each_row_of_a_board(self):
         stale = probed(armed="bench", armed_boot="b1", boot_id="b2")
-        self.assertEqual(MISS, self.row(self.rows("pi", stale), "armed for bench")[0])
+        for fields, word, state in ((probed(), "pi-rescue on the tailnet", OK), (probed(), "pi-bench on the tailnet", MISS),
+                                    (probed(), "answers in host mode", OK), (probed(), "not armed", OK),
+                                    (probed(), "cpu governor on pi-rescue: performance", doctor.NOTE),
+                                    (probed(), "temperature on pi-rescue: 51C", doctor.NOTE),
+                                    (probed(mode="bench"), "cpu governor on pi-bench", doctor.NOTE),
+                                    (probed(mode=""), "unreachable", MISS), (None, "did not answer", UNK),
+                                    (probed(armed="bench"), "armed for bench", doctor.NOTE), (stale, "armed for bench", MISS)):
+            with self.subTest(fields=fields, word=word):
+                self.assertEqual(state, self.row(self.rows("pi", fields), word)[0])
+
+    def test_an_unreachable_board_is_asked_nothing_further(self):
+        self.assertFalse(any("governor" in r[1] for r in self.rows("pi", probed(mode=""))))
 
     def test_a_name_the_tailnet_lacks_and_a_failed_probe_are_unknown(self):
         self.fake.answer(["tailscale", "status", "--json"], out="{}")
@@ -223,32 +210,17 @@ class TestGitConfigFindings(unittest.TestCase):
 
     def test_matching_identity_and_speed_settings_are_all_ok(self):
         f = doctor.git_config_findings("label", self._blob(), "remedy", WANT)
-        self.assertEqual({OK}, {r[0] for r in f}, f)
-        self.assertEqual(3, len(f), f)
-        self.assertTrue(all(what.startswith("label: ") for _, what, _ in f), f)
+        self.assertEqual([(OK, "label: git user.name = %s" % WANT["name"], ""), (OK, "label: git user.email = %s" % WANT["email"], ""),
+                          (OK, "label: git speed settings (fsmonitor, manyFiles)", "")], f)
 
-    def test_unset_identity_is_missing_and_names_the_remedy(self):
-        f = doctor.git_config_findings("label", self._blob(name="", email=""), "the remedy", WANT)
-        name_row = [r for r in f if "user.name" in r[1]][0]
-        self.assertEqual((MISS, "label: git user.name is not set there", "the remedy"), name_row)
-
-    def test_a_different_email_is_named_with_both_values(self):
-        f = doctor.git_config_findings("label", self._blob(email="someone-else@example.com"), "the remedy", WANT)
-        email_row = [r for r in f if "user.email" in r[1]][0]
-        self.assertEqual(MISS, email_row[0])
-        self.assertIn("someone-else@example.com", email_row[1])
-        self.assertIn(WANT["email"], email_row[1])
-        self.assertEqual("the remedy", email_row[2])
-
-    def test_speed_settings_are_a_finding_of_their_own(self):
-        ok_f = doctor.git_config_findings("l", self._blob(), "r", WANT)
-        bad_f = doctor.git_config_findings("l", self._blob(fsmonitor=""), "r", WANT)
-        self.assertIn((OK, "l: git speed settings (fsmonitor, manyFiles)", ""), ok_f)
-        self.assertIn((MISS, "l: git speed settings (fsmonitor, manyFiles)", "r"), bad_f)
-
-    def test_git_not_installed_is_unknown_not_missing(self):
-        f = doctor.git_config_findings("label", "", "remedy", WANT)
-        self.assertEqual([(UNK, "label: git not installed there", "")], f)
+    def test_each_setting_that_differs_is_its_own_miss_naming_the_remedy(self):
+        for blob, row in ((self._blob(name="", email=""), (MISS, "l: git user.name is not set there", "r")),
+                          (self._blob(email="other@example.com"),
+                           (MISS, "l: git user.email there is 'other@example.com', not this repo's '%s'" % WANT["email"], "r")),
+                          (self._blob(fsmonitor=""), (MISS, "l: git speed settings (fsmonitor, manyFiles)", "r")),
+                          ("", (UNK, "l: git not installed there", ""))):
+            with self.subTest(row=row):
+                self.assertIn(row, doctor.git_config_findings("l", blob, "r", WANT))
 
 
 class StubGuests:
