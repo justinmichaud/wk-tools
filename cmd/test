@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk test <workspace> [flags] [paths...] -- run the JSC or layout test suites, or profile a run
-# wk: where=workspace name=required ready=yes group=workspaces takes=* passthrough dryrun preset=--preset
+# wk: where=workspace repos=webkit name=required ready=yes group=workspaces takes=* passthrough dryrun preset=--preset
 # wk: opts --preset=,--layout,--gpu,--lldb,--kill,--profile,--profile=,--browser,--process=,--attach=,--jit-dump,--markers,--top=,--fetch,--env=
 #
 # The same reportability as `wk build`: a watchdog that detects a silent run, a

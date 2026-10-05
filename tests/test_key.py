@@ -10,7 +10,12 @@ from tests.support import REPO, WkTest, as_dispatched, bash, stub_path
 from tests.test_credcheck import FINE
 
 sys.path.insert(0, str(REPO / "lib"))
+from wk import repos, secrets  # noqa: E402
 from wk.key import cli  # noqa: E402
+from wk.machine import Local  # noqa: E402
+
+KEYS = len(secrets.push_keys())
+TOOLS_REPO = repos.Repo("wk-tools").github(Local(), REPO)
 
 KEY = REPO / "cmd" / "key"
 PODMAN_TRAP = '#!/bin/sh\necho "podman was called" >&2\nexit 1\n'
@@ -114,7 +119,7 @@ class TestCheckAsksAboutEveryCredential(_KeyRun):
         for fork in ("WebKit", "WPEWebKit"):
             self.assertIn(fork, cp.stdout)
         actions = cp.stdout.partition("needs you:")[2]
-        self.assertEqual(2, actions.count("wk key deploy"), "one line per fork: " + actions)
+        self.assertEqual(KEYS, actions.count("wk key deploy"), "one line per deploy key: " + actions)
         self.assertIn("credentials:", cp.stdout)
         for name in ("github-pat", "bugzilla-api-key", "claude", "litellm",
                      "tailnet", "tailnet-api", "ntfy"):
@@ -146,7 +151,7 @@ class TestCheckAsksAboutEveryCredential(_KeyRun):
         self.assertNotIn("nothing needs you.", cp.stdout)
         self.assertNotIn("needs you:", cp.stdout)
 
-    def test_the_fork_rows_are_asked_at_once(self):
+    def test_the_key_rows_are_asked_at_once(self):
         """Proved by overlap: two serial calls would log start, end, start, end."""
         calls = self.tmp / "gh-calls"
         self.key("ensure")
@@ -278,9 +283,11 @@ GH_HAS_THE_KEYS = ('#!/bin/sh\ncase "$*" in\n'
                    '  *) cat "$WK_HOST_SECRETS"/build_key_*.pub 2>/dev/null ;;\n'
                    'esac\nexit 0\n')
 
-# What github.com answers `wk key sshtest` for a key registered on its own fork.
+# What github.com answers `wk key sshtest` for a key registered on its own repository.
 SSH_IS_THE_FORKS_KEY = (
     '#!/bin/sh\ncase "$*" in\n'
+    '  *build_key_wk-tools*) echo "Hi %s! You\'ve successfully authenticated, '
+    'but GitHub does not provide shell access." ;;\n' % TOOLS_REPO +
     '  *build_key_forkwpe*) echo "Hi justinmichaud/WPEWebKit! You\'ve '
     'successfully authenticated, but GitHub does not provide shell access." ;;\n'
     '  *) echo "Hi justinmichaud/WebKit! You\'ve successfully authenticated, '
@@ -354,7 +361,7 @@ class TestSetupSaysOneLinePerCredential(_KeyRun):
                          env=self.env())
         rows = [l for l in cp.stdout.splitlines()
                 if l.startswith("    ") and l.strip()]
-        self.assertEqual(9, len(rows), cp.stdout)
+        self.assertEqual(7 + KEYS, len(rows), cp.stdout)
 
 
 class TestAnAuthKeyIsMintedNotOnlyHanded(WkTest):

@@ -23,6 +23,13 @@ class ToolsWorkspaceLive(unittest.TestCase):
         self.assertEqual(0, r.rc, "'wk %s' exited %d:\n%s" % (" ".join(args), r.rc, tail(r.out)))
         return r
 
+    @support.owed("a push from a wk-tools workspace reaching its repository through its deploy key, with push on, "
+                  "has not been run against GitHub")
+    def test_a_push_reaches_the_tools_repository_through_its_deploy_key(self):
+        if workspace_record(wk("status", WS, "--records", timeout=300).out, WS) is None:
+            self.ok("new", WS, "--repo", "wk-tools", timeout=1500)
+        self.ok("enter", WS, "--", "git", "-C", repos.Repo("wk-tools").src, "push", "--dry-run", "origin", "HEAD:refs/heads/wk-push-probe")
+
     def test_a_wk_tools_workspace_lints_runs_claude_and_fetches(self):
         if workspace_record(wk("status", WS, "--records", timeout=300).out, WS) is None:
             self.ok("new", WS, "--repo", "wk-tools", timeout=1500)

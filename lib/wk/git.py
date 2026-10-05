@@ -5,7 +5,7 @@ import re
 import sys
 from shlex import quote as q
 
-from wk import images, project
+from wk import images, project, secrets
 
 REMOTES = project.get("REMOTES")
 NO_PUSH = "no-push://use-a-fork-remote"
@@ -254,9 +254,9 @@ def main(argv):
     sub.add_parser("pr-tool-setup-script").add_argument("src")
     a = parser.parse_args(argv)
     if a.verb == "wiring-script":
-        sys.stdout.write(wiring_script(a.src, a.mirror, project.get("FORKS"), images.mirror_branches()))
+        sys.stdout.write(wiring_script(a.src, a.mirror, secrets.forks(), images.mirror_branches()))
     else:
-        sys.stdout.write(pr_tool_setup_script(a.src, project.get("FORKS")))
+        sys.stdout.write(pr_tool_setup_script(a.src, secrets.forks()))
     return 0
 
 

@@ -20,7 +20,7 @@ from wk.machine import Fake, Local, Result  # noqa: E402
 from wk.secrets import Secrets  # noqa: E402
 from wk.store import Store  # noqa: E402
 
-FORKS = ("fork", "forkwpe")
+FORKS = tuple(k[0] for k in secrets.push_keys())
 
 
 def store_init(env, extra=""):

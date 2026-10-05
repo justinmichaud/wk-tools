@@ -19,7 +19,7 @@ class Election:
     def label(self, m):
         return record.host_name(self.machine) if m == LOCAL else m
 
-    def fork_verdict(self, m, fork, repo):
+    def key_verdict(self, m, fork, repo):
         """What that machine's key authenticates as, and whether its public half is registered with write access."""
         if m == LOCAL:
             pub = self.pub_of(fork)
@@ -29,7 +29,7 @@ class Election:
             if rc not in (0, 1):
                 return "unverified\t%s did not answer (wk sync --tools %s if its wk-tools differs)" % (m, m)
         if not pub:
-            return "absent\tno key for this fork\n    fix: wk key deploy"
+            return "absent\tno key here\n    fix: wk key deploy"
         b64 = (pub.split() + ["", ""])[1]
         ssh = self.sshtest(fork)[1] if m == LOCAL else self.fleet.ask(m, "sshtest", fork)[1]
         line = self.sec.check_value("deploy-key", "", "--repos", repo, "--evidence", "ssh=" + ssh.rstrip("\n"),
@@ -65,25 +65,25 @@ class Election:
         act.nothing_to_ask()
         return not (self.rotate or self.fleet_on)
 
-    def fleet_fork(self, fork, repo):
+    def fleet_key(self, fork, repo):
         winner, held, fps = None, False, {}
         if self.fleet_on and not self.rotate:
-            winner, held, fps = self.elect(self.fork_verdict, fork, repo)
+            winner, held, fps = self.elect(self.key_verdict, fork, repo)
             if winner and winner != LOCAL:
                 info("%s: %s holds the deploy key GitHub accepts -- taking it" % (repo, winner))
                 if not self.sec.push_key_adopt(fork, self.fleet.ask(winner, "give", fork)[1]):
                     warn("%s: %s's deploy key did not arrive, so nothing was changed" % (repo, winner))
                     return False
                 log("  an ssh-agent already holding the old key keeps offering it:  wk key push off && wk key push on")
-        ok = self.register_fork(fork, repo)
+        ok = self.register_key(fork, repo)
         if not self.fleet_on:
             return ok
         if not winner and held:
             warn("%s: no workstation's deploy key could be judged, so none was written over another's" % repo)
             return False
-        return self.fan_out_fork(fork, repo, fps) and ok
+        return self.fan_out_key(fork, repo, fps) and ok
 
-    def fan_out_fork(self, fork, repo, fps):
+    def fan_out_key(self, fork, repo, fps):
         mine = self.pub_fingerprint(self.pub_of(fork))
         if not mine:
             return False
@@ -167,7 +167,7 @@ class Election:
     def rotate_here(self, name):
         return self._set(name, replace=self.present(name))
 
-    def converge_forks(self):
+    def converge_keys(self):
         if self.rotate:
             info("rotating: removing the old shared keys from GitHub")
             self.rotate_keys()
@@ -177,8 +177,8 @@ class Election:
             except Refused:
                 return False
         ok = True
-        for fork, repo in [f[:2] for f in self.forks()]:
-            ok = self.fleet_fork(fork, repo) and ok
+        for fork, repo in [f[:2] for f in self.push_keys()]:
+            ok = self.fleet_key(fork, repo) and ok
         return ok
 
     def start_fleet(self):

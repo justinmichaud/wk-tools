@@ -20,6 +20,8 @@ from wk.store import Snapshots  # noqa: E402
 
 TOOLS = "wk-tools"
 ORIGIN = "https://github.com/someone/wk-tools.git"
+BRANCH = "python-core"
+PUSH = "git@github-wk-tools:someone/wk-tools.git"
 
 
 def tools():
@@ -32,7 +34,9 @@ class ToolsWorld(World):
 
     def __init__(self, tmp, **kw):
         super().__init__(tmp, **kw)
-        self.answer(["git", "-c", "safe.directory=*", "-C"], out="git@github.com:someone/wk-tools.git\n")
+        self.react(["git", "-c", "safe.directory=*", "-C"],
+                   lambda argv, f: Result(0, BRANCH + "\n" if "symbolic-ref" in argv else "git@github.com:someone/wk-tools.git\n"))
+        self.answer(["git", "ls-remote"])
         store = self.driver.store
         self.dirs = {d for d in self.dirs if not d.startswith((store.mirror_dir(), store.snapshots_dir()))}
         self.files = {p: v for p, v in self.files.items() if not p.startswith(store.snapshots_dir())}
@@ -91,10 +95,52 @@ class TestTheOrigin(unittest.TestCase):
             with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()):
                 self.origin(rc, out)
 
+    def test_it_pushes_through_its_own_deploy_keys_alias(self):
+        m = mock.Mock()
+        m.run.return_value = Result(0, "git@github.com:someone/wk-tools.git\n")
+        self.assertEqual(PUSH, tools().push_url(m, "/tools"))
+
     def test_the_defaults_origin_is_upstream_and_asks_no_machine(self):
         m = mock.Mock()
         self.assertEqual(dict(project.get("REMOTES"))["origin"], repos.default().origin(m, "/tools"))
         m.run.assert_not_called()
+
+
+class TestTheBranch(unittest.TestCase):
+    """A cloned workspace checks out the branch this machine's wk-tools is on, which must be on its origin."""
+
+    def branch(self, head, remote):
+        m = Machine_answering(head, remote)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            try:
+                return tools().branch(m, "/tools"), err.getvalue()
+            except Refused:
+                return None, err.getvalue()
+
+    def test_the_current_branch_on_the_origin_is_the_one(self):
+        self.assertEqual(BRANCH, self.branch(Result(0, BRANCH + "\n"), Result(0, "sha\trefs/heads/x\n"))[0])
+
+    def test_a_detached_checkout_is_refused(self):
+        name, err = self.branch(Result(128, "", "fatal: ref HEAD is not a symbolic ref"), Result(0))
+        self.assertIsNone(name)
+        self.assertIn("switch", err)
+
+    def test_a_branch_not_on_the_origin_is_refused_naming_the_push(self):
+        name, err = self.branch(Result(0, BRANCH + "\n"), Result(2))
+        self.assertIsNone(name)
+        self.assertIn("push -u origin " + BRANCH, err)
+
+    def test_an_origin_that_does_not_answer_is_refused_with_what_git_said(self):
+        name, err = self.branch(Result(0, BRANCH + "\n"), Result(128, "", "fatal: unable to access"))
+        self.assertIsNone(name)
+        self.assertIn("unable to access", err)
+
+
+def Machine_answering(head, remote):
+    m = mock.Mock()
+    m.run.side_effect = lambda argv: (head if "symbolic-ref" in argv else remote if argv[1] == "ls-remote"
+                                      else Result(0, "git@github.com:someone/wk-tools.git\n"))
+    return m
 
 
 class TestTheFront(WorkspaceTest):
@@ -146,6 +192,8 @@ class TestCreation(WorkspaceTest):
         flags = self.create_flags()
         self.assertIn("%s/wk-tools:/src/wk-tools" % self.w.ws_dir(), flags)
         self.assertIn("WK_CLONE=" + ORIGIN, flags)
+        self.assertIn("WK_BRANCH=" + BRANCH, flags)
+        self.assertIn("WK_PUSH=" + PUSH, flags)
         self.assertIn("WK_REPO=wk-tools", flags)
         self.assertIn(os.path.join(self.w.ws_dir(), "wk-tools"), self.w.dirs)
 
@@ -250,9 +298,11 @@ class ToolsDriver(test_sync.SyncDriver):
 class TestSync(test_sync.SyncTest):
     def setUp(self):
         super().setUp()
-        p = mock.patch.object(repos.Repo, "origin", lambda r, machine, root: ORIGIN if not r.snapshot else "u1")
-        p.start()
-        self.addCleanup(p.stop)
+        for name, fn in (("origin", lambda r, machine, root: ORIGIN if not r.snapshot else "u1"),
+                         ("push_url", lambda r, machine, root: PUSH)):
+            p = mock.patch.object(repos.Repo, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
         self.w.reg = test_sync.FakeRegistry(self.w.env, self.w, lambda n, env: ToolsDriver(n, str(REPO), env, self.w, "container"),
                                             names=["container"])
         self.w.workspaces["container"] = ["tools"]
@@ -273,8 +323,9 @@ class TestSync(test_sync.SyncTest):
         self.w.fetched["tools"] = Result(0, "from=github\nfetch=0\ncheck=0\n")
         code, _ = self.fetch(fix=True)
         self.assertEqual("ok", code)
-        self.assertIn(("exec", "container", "tools", "git", "-C", "/src/wk-tools", "remote", "set-url", "origin", ORIGIN),
-                      [e[1] for e in self.w.effects if e[0] == "run"])
+        runs = [e[1] for e in self.w.effects if e[0] == "run"]
+        self.assertIn(("exec", "container", "tools", "git", "-C", "/src/wk-tools", "remote", "set-url", "origin", ORIGIN), runs)
+        self.assertIn(("exec", "container", "tools", "git", "-C", "/src/wk-tools", "remote", "set-url", "--push", "origin", PUSH), runs)
         self.assertFalse([s for s in self.w.steps if s.startswith(("WIRING", "GITWEBKIT"))])
 
 
@@ -290,36 +341,44 @@ class TestSync(test_sync.SyncTest):
 
 
 class TestTheCloneCheckScript(unittest.TestCase):
-    def test_a_matching_origin_checks_and_another_is_named(self):
+    def test_a_matching_origin_and_push_url_check_and_each_other_one_is_named(self):
         with scratch_dir(prefix="wk-clone-check-") as d:
             up = d / "up"
             git_run("init", "-q", "-b", "main", str(up), cwd=str(d))
             git_commit(up, "one")
             git_run("clone", "-q", str(up), str(d / "co"), cwd=str(d))
-            run = lambda origin: subprocess.run(["sh", "-c", sync.clone_fetch_and_check_script(str(d / "co"), origin)],
-                                                capture_output=True, text=True).stdout
-            self.assertIn("check=0", run(str(up)))
-            out = run(ORIGIN)
+            git_run("remote", "set-url", "--push", "origin", PUSH, cwd=str(d / "co"))
+            run = lambda origin, push: subprocess.run(["sh", "-c", sync.clone_fetch_and_check_script(str(d / "co"), origin, push)],
+                                                      capture_output=True, text=True).stdout
+            self.assertIn("check=0", run(str(up), PUSH))
+            out = run(ORIGIN, PUSH)
             self.assertIn("check=1", out)
             self.assertIn("problem: origin is %s, not %s" % (up, ORIGIN), out)
+            out = run(str(up), "git@elsewhere:x.git")
+            self.assertIn("check=1", out)
+            self.assertIn("problem: origin pushes to %s, not git@elsewhere:x.git" % PUSH, out)
 
 
 class TestFirstRun(unittest.TestCase):
-    """container/firstrun.sh's checkout block, lifted and run: a cloned repo is cloned and never given the snapshot's wiring."""
+    """container/firstrun.sh's checkout block, lifted and run: a cloned repo is cloned at its branch, pushes through its
+    deploy key's alias, and is never given the snapshot's wiring."""
     TEXT = (REPO / "container" / "firstrun.sh").read_text()
     BLOCK = TEXT[TEXT.index('if [ -n "${WK_CLONE:-}" ]'):TEXT.index("    # Through ensure-bridge.sh")] + "fi\n"
 
-    def test_the_clone_is_made_and_the_wiring_never_runs(self):
+    def test_the_branch_is_cloned_with_its_push_url_and_the_wiring_never_runs(self):
         with scratch_dir(prefix="wk-firstrun-clone-") as d:
             up = d / "up"
             git_run("init", "-q", "-b", "main", str(up), cwd=str(d))
             git_commit(up, "one")
+            git_run("branch", BRANCH, cwd=str(up))
             (d / "src").mkdir()
             harness = ("set -eu\nSRC=%s\nlog() { printf '[firstrun] %%s\\n' \"$*\"; }\nwarn() { log \"$*\"; }\n"
                        "_git_py() { touch %s; }\n" % (d / "src", d / "wired"))
-            cp = bash(harness + self.BLOCK, env={"WK_CLONE": str(up)})
+            cp = bash(harness + self.BLOCK, env={"WK_CLONE": str(up), "WK_BRANCH": BRANCH, "WK_PUSH": PUSH})
             self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-            self.assertTrue((d / "src" / ".git").is_dir())
+            src = str(d / "src")
+            self.assertEqual(BRANCH, git_run("symbolic-ref", "--short", "HEAD", cwd=src).stdout.strip())
+            self.assertEqual(PUSH, git_run("config", "remote.origin.pushurl", cwd=src).stdout.strip())
             self.assertFalse((d / "wired").exists())
 
 

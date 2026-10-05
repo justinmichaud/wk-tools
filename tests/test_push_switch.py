@@ -11,7 +11,7 @@ from tests.fakes import FakeRegistry
 from tests.killpoints import converges
 from tests.support import REPO, WkTest, bash, load_cmd
 from tests.test_wk_secrets import SOCK, SecretsTest, World
-from wk import act, guest, places, pushswitch
+from wk import act, guest, places, pushswitch, secrets
 from wk.act import Refused
 from wk.clock import FakeClock
 from wk.machine import Result
@@ -127,7 +127,7 @@ class TestOn(PushTest):
         self.w.seed()
         rc, out, err = self.push("on")
         self.assertEqual(0, rc, err)
-        self.assertEqual({"KEY:fork", "KEY:forkwpe"}, self.w.agents[SOCK])
+        self.assertEqual({"KEY:" + k[0] for k in secrets.push_keys()}, self.w.agents[SOCK])
         self.assertEqual("ghp-held\n", self.w.files[self.tmp + "/store/push-github-pat"])
         self.assertEqual("bz-held\n", self.w.files[self.tmp + "/store/push-bugzilla-api-key"])
 
@@ -192,7 +192,7 @@ class TestOff(PushTest):
         self.w.stubborn = True
         rc, _, err = self.push("off")
         self.assertEqual(1, rc)
-        self.assertEqual({"KEY:fork", "KEY:forkwpe"}, self.w.agents[SOCK])
+        self.assertEqual({"KEY:" + k[0] for k in secrets.push_keys()}, self.w.agents[SOCK])
 
     def test_it_reads_the_files_back_too(self):
         self.on()

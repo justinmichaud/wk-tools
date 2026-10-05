@@ -17,7 +17,7 @@ from pathlib import Path
 
 from wk import completion as C
 from wk import decl as D
-from wk import act, clock, guest, images, places, presets, record, sshalias
+from wk import act, clock, guest, images, places, presets, project, record, repos, sshalias
 from wk.act import info, log, warn
 from wk.machine import Local, is_macos
 from wk.reach import Reach
@@ -504,6 +504,8 @@ def explain(cmd, d, args=()):
     for verbs, spec in d.overrides():
         if "where" in spec:
             out.write("    %s: %s\n" % (verbs.replace(",", ", "), where_prose(d, spec["where"])))
+    if d.repos:
+        out.write("  acts on: a workspace holding %s\n" % d.repos.replace(",", " or "))
     if d.verbs:
         out.write("  verbs: %s%s\n" % (d.verbs.replace(",", ", "), "; with none, or another first word: %s" % d.default
                                        if d.default else ""))
@@ -512,6 +514,9 @@ def explain(cmd, d, args=()):
     if d.preset:
         out.write("\nvalid values (%s):\n" % ("--preset" if d.preset == "--preset" else "<preset>"))
         out.write("".join(("  " + l).rstrip() + "\n" for l in presets.LIST_TEXT.splitlines()))
+    if D.in_list("--repo=", d.opts):
+        out.write("\nvalid values (--repo):\n" + "".join("  %s%s\n" % (r, " (the default)" if r == project.get("REPO") else "")
+                                                         for r in repos.names()))
     if d.values:
         out.write("\nvalid values (wk %s %s):\n" % (cmd, d.values))
         out.flush()
@@ -837,6 +842,7 @@ def main(argv):
             name = cwd_workspace()
     if name:
         os.environ["WK_NAME"] = name
+        refuse_repo(inv, "local" if in_workspace() else resolved, name)
         asks = not d.lifecycle and base != "derived" and not in_workspace()
         if not d.lifecycle:
             os.environ["WK_PLACE"] = resolved
@@ -844,6 +850,18 @@ def main(argv):
             ask_place(inv, resolved, name, asks, d.ready)
     line = command_line(inv, args)
     os.execv(line[0], line)
+
+
+def refuse_repo(inv, place, name):
+    """`repos=`: a workspace holding a repo the command does not serve is refused, naming what it holds."""
+    if not inv.decl.repos:
+        return
+    try:
+        held = registry().load(place).repo(name).name
+    except LookupError as e:
+        die(str(e))
+    if not inv.decl.serves(held):
+        die("'wk %s' acts on a %s workspace, and '%s' holds %s" % (inv.cmd, inv.decl.repos.replace(",", " or "), name, held))
 
 
 def ask_place(inv, resolved, name, exists, ready):

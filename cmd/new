@@ -18,10 +18,10 @@
 #                        published, under $WK_STORE/base (default: current)
 #   --arch <arch>        native|armhf -- the architecture the workspace
 #                        itself runs (container only; default: native)
-#   --repo <repo>        webkit|wk-tools -- the repository it holds
-#                        (default: webkit). wk-tools is cloned from this
-#                        machine's wk-tools origin and needs no mirror or
-#                        snapshot; it is container only for now
+#   --repo <repo>        the repository it holds (valid values below).
+#                        wk-tools is cloned from this machine's wk-tools
+#                        origin, pushes through its own deploy key, and
+#                        needs no mirror or snapshot; it is container only
 #   --zed                open the checkout in Zed once it is ready
 #   --no-wait            return once creation has started, without waiting for it;
 #                        incompatible with --pr

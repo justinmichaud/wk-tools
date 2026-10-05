@@ -15,7 +15,7 @@ from tests.test_wk_secrets import SECRETFILE, SecretsTest, World, quiet
 from tests.test_wk_places import DriverConformance
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import agents, guest, places, tools  # noqa: E402
+from wk import agents, guest, places, secrets, tools  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Killed, Result  # noqa: E402
@@ -539,7 +539,7 @@ class TestTheSwitchForTheGuests(GuestTest):
         self.seed_ready()
         ok, err = quiet(guest.vm_push_keys_converge, str(REPO), self.w, "on", self.w.env)
         self.assertTrue(ok, err)
-        self.assertEqual({"KEY:fork", "KEY:forkwpe"}, self.w.agents[self.vmdir + "/ssh-agent.sock"])
+        self.assertEqual({"KEY:" + k[0] for k in secrets.push_keys()}, self.w.agents[self.vmdir + "/ssh-agent.sock"])
         self.assertEqual(["ghp-held\n", "bz-held\n"], list(self.creds().values()))
         self.assertEqual(1, len(self.w.spawned(" -N ")))
 
@@ -572,7 +572,7 @@ class TestTheSwitchForTheGuests(GuestTest):
         self.w.guest_sock = True
         before = self.w.state_of()
         rows = guest.vm_push_keys_state(str(REPO), self.w, self.w.env)
-        self.assertEqual([("demo", "running", "2 key(s) through the agent on this host")], rows)
+        self.assertEqual([("demo", "running", "%d key(s) through the agent on this host" % len(secrets.push_keys()))], rows)
         self.assertEqual(before, self.w.state_of())
 
     def test_a_host_with_no_guests_still_loads_the_agent_its_own_pushes_use(self):
@@ -580,8 +580,8 @@ class TestTheSwitchForTheGuests(GuestTest):
         self.w.env["WK_VM_STORE"] = self.w.env["WK_STORE"]
         ok, err = quiet(guest.vm_push_keys_converge, str(REPO), self.w, "on", self.w.env)
         self.assertTrue(ok, err)
-        self.assertEqual({"KEY:fork", "KEY:forkwpe"}, self.w.agents[self.vmdir + "/ssh-agent.sock"])
-        self.assertEqual(2, guest.vm_push_agent_keys(str(REPO), self.w, self.w.env))
+        self.assertEqual({"KEY:" + k[0] for k in secrets.push_keys()}, self.w.agents[self.vmdir + "/ssh-agent.sock"])
+        self.assertEqual(len(secrets.push_keys()), guest.vm_push_agent_keys(str(REPO), self.w, self.w.env))
         self.assertEqual([], guest.vm_push_keys_state(str(REPO), self.w, self.w.env))
         self.assertEqual([], self.w.spawned(" -N "))
 

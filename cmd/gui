@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk gui <workspace> [<url>] [flags] -- run MiniBrowser in the benchmark seat
-# wk: where=workspace name=required ready=yes forward=no group=workspaces takes=1 passthrough preset=--preset dryrun
+# wk: where=workspace repos=webkit name=required ready=yes forward=no group=workspaces takes=1 passthrough preset=--preset dryrun
 # wk: opts --preset=,--no-fullscreen,--lldb=,--rr
 #
 # The same launch a perf run performs (Tools/Scripts/run-minibrowser), without

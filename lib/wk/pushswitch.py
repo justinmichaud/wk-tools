@@ -148,8 +148,8 @@ class Push:
             return NO_KEYS
         changed("push is ON -- %d deploy key(s) in the agent outside every workspace" % rows.count("loaded"))
         if rows.count("no-key"):
-            log("  %d fork(s) have no key here ('wk key deploy')" % rows.count("no-key"))
-        log("  every workspace can push to the forks now, including any agent in one.")
+            log("  %d deploy key(s) are not here ('wk key deploy')" % rows.count("no-key"))
+        log("  every workspace can push to its repositories now, including any agent in one.")
         log("  'wk key push off' when you are done; 'wk ai claude' turns it off by itself.")
         for path, name, what, who, does, lacks, scope in (
                 (self.pat, "github-pat", "GitHub API token", sec.github_user(), "posts as that account",
@@ -172,7 +172,7 @@ class Push:
         sec.agent_clear(self.sock)
         sec.cred_clear(self.pat)
         sec.cred_clear(self.bz)
-        # It names public halves and a socket, not a credential, and an unresolvable fork alias fails with a hostname error.
+        # It names public halves and a socket, not a credential, and an unresolvable alias fails with a hostname error.
         sec.publish()
         if act.dry_run():
             changed("push is OFF -- nothing was cleared, so nothing is read back")
@@ -218,7 +218,7 @@ class Push:
                  "live": "at rest (%s) -- a build box holds none; 'wk machine setup' removes it" % push_dir,
                  "absent": "no key ('wk key deploy')", "forwarded": "no key at rest; a push is made from the workstation"}
         count = {w: 0 for w in words}
-        for fork in [f[0] for f in sec.forks()]:
+        for fork in [f[0] for f in secrets.push_keys()]:
             w = self.where(fork, in_agent)
             count[w] += 1
             self.say(fork, words[w])

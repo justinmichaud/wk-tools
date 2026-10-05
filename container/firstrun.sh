@@ -46,8 +46,10 @@ fi
 _git_py() { PYTHONPATH="$WK_TOOLS/lib" WK_ROOT="$WK_TOOLS" python3 -m wk.git "$@"; }
 
 if [ -n "${WK_CLONE:-}" ]; then         # a repo cloned here, not overlaid on a snapshot
-    git clone --quiet "$WK_CLONE" "$SRC"
-    log "checkout: $WK_CLONE cloned into $SRC"
+    git clone --quiet --branch "$WK_BRANCH" "$WK_CLONE" "$SRC"
+    log "checkout: $WK_CLONE's $WK_BRANCH cloned into $SRC"
+    git -C "$SRC" remote set-url --push origin "$WK_PUSH"
+    log "push: $WK_PUSH, through the agent 'wk key push on' loads"
 elif [ -d "$SRC/.git" ]; then           # an old snapshot's remotes are stale
     _mirror="${WK_MIRROR:-}"
     [ -n "$_mirror" ] || log "no mirror on this place, so every fetch in here reads github.com"

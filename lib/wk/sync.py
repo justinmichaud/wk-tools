@@ -45,12 +45,16 @@ def fetch_and_check_script(src, mirror, forks, branches):
     return "%s(\n%s\n)\necho check=$?\n" % (fetch, git.wiring_check_script(src, mirror, forks, branches))
 
 
-def clone_fetch_and_check_script(src, origin):
-    """A cloned repo's fetch, then whether its origin is still the one it was cloned from."""
+def clone_fetch_and_check_script(src, origin, push):
+    """A cloned repo's fetch, then whether its origin is still the one it was cloned from and pushes through its deploy key."""
     fetch = fetch_script(src, "").replace("exit $rc\n", "echo fetch=$rc\n")
+    o, p = shlex.quote(origin), shlex.quote(push)
     return fetch + ('u=$(git config --get remote.origin.url 2>/dev/null || echo "")\n'
-                    'if [ "$u" = %s ]; then echo check=0; else echo "problem: origin is ${u:-unset}, not "%s; echo check=1; fi\n'
-                    % (shlex.quote(origin), shlex.quote(origin)))
+                    'p=$(git config --get remote.origin.pushurl 2>/dev/null || echo "")\n'
+                    'check=0\n'
+                    '[ "$u" = %s ] || { echo "problem: origin is ${u:-unset}, not "%s; check=1; }\n'
+                    '[ "$p" = %s ] || { echo "problem: origin pushes to ${p:-its fetch URL}, not "%s; check=1; }\n'
+                    'echo check=$check\n' % (o, o, p, p))
 
 
 def fetch_into_mirror(here, store, lock, src, srcspec, dest):
@@ -428,9 +432,9 @@ class Sync:
             fixed = self.fix_one(driver, ws, src, mirror, notes) if self.fix else True
             script = fetch_and_check_script(src, mirror, self.forks(), self.branches)
         else:
-            mirror, origin = "", repo.origin(self.here, self.root)
-            fixed = self.fix_clone(driver, ws, src, origin, notes) if self.fix else True
-            script = clone_fetch_and_check_script(src, origin)
+            mirror, origin, push = "", repo.origin(self.here, self.root), repo.push_url(self.here, self.root)
+            fixed = self.fix_clone(driver, ws, src, origin, push, notes) if self.fix else True
+            script = clone_fetch_and_check_script(src, origin, push)
         with stage(self.clock, "workspace fetch %s" % ws):
             r = driver.act_exec(ws, ["sh", "-c", script])
         lines = r.out.replace("\r", "").splitlines()
@@ -451,8 +455,9 @@ class Sync:
             return "wired", "  %-24s %s -- wired wrong:\n%s" % (ws, row, "".join(p + "\n" for p in notes + problems))
         return "ok", "  %-24s %s\n%s" % (ws, row, "".join(p + "\n" for p in notes))
 
-    def fix_clone(self, driver, ws, src, origin, notes):
-        ok = driver.act_exec(ws, ["git", "-C", src, "remote", "set-url", "origin", origin]).ok
+    def fix_clone(self, driver, ws, src, origin, push, notes):
+        ok = (driver.act_exec(ws, ["git", "-C", src, "remote", "set-url", "origin", origin]).ok
+              and driver.act_exec(ws, ["git", "-C", src, "remote", "set-url", "--push", "origin", push]).ok)
         notes.append("    re-wired" if ok else "    could not re-wire '%s'" % ws)
         return ok
 

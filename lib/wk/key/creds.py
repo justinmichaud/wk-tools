@@ -3,17 +3,18 @@
 import os
 import sys
 
-from wk import act, project
+from wk import act, project, repos, secrets
 from wk.act import Refused, die, info, log, warn
 from wk.key.common import cred_print, detail, verdict
 
 
 class Creds:
-    def forks(self):
-        return self.sec.forks()
+    def push_keys(self):
+        """Every repo's deploy keys, each GitHub repository resolved."""
+        return repos.push_rows(self.machine, self.root)
 
-    def fork_names(self):
-        return [f[0] for f in self.forks()]
+    def key_names(self):
+        return [k[0] for k in secrets.push_keys()]
 
     def _cc(self, *args, input=""):
         r = self.machine.run(["python3", os.path.join(self.root, "lib", "credcheck.py")] + list(args), input=input)

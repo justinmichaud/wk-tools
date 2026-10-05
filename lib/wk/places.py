@@ -997,7 +997,9 @@ class Container(Driver):
         ws_dir, mirror = self.store.ws_dir(ws), self.store.mirror_dir()
         flags = ["--env", "WK_REPO=%s" % repo.name, "--env", "WK_SRC=%s" % repo.src]
         if not repo.snapshot:
-            return flags + ["--volume", "%s/%s:%s" % (ws_dir, repo.checkout, repo.src), "--env", "WK_CLONE=%s" % repo.origin(self.machine, self.tools_src())]
+            tools = self.tools_src()
+            return flags + ["--volume", "%s/%s:%s" % (ws_dir, repo.checkout, repo.src), "--env", "WK_CLONE=%s" % repo.origin(self.machine, tools),
+                            "--env", "WK_PUSH=%s" % repo.push_url(self.machine, tools), "--env", "WK_BRANCH=%s" % repo.branch(self.machine, tools)]
         mirror_dir = os.path.dirname(mirror)
         return flags + ["--volume", "%s:%s:ro" % (mirror_dir, mirror_dir), "--env", "WK_MIRROR=%s" % mirror,
                         "--volume", "%s:%s:O,upperdir=%s/changes,workdir=%s/overlay-work" % (self.store.snapshot_tree(base), repo.src, ws_dir, ws_dir),

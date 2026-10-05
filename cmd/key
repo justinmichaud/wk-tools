@@ -98,15 +98,15 @@
 #                                     and is not in defaults.conf yet
 #
 # For another workstation or `wk status` to call:
-#   wk key pub <fork>        that fork's public key
-#   wk key sshtest <fork>    does that fork's key authenticate, and as what
+#   wk key pub <key>         that deploy key's public half
+#   wk key sshtest <key>     does that deploy key authenticate, and as what
 #   wk key fingerprints      every key here, its fingerprint and its state
 #   wk key verdict <name>    one stored credential's verdict and fingerprint
-#   wk key adopt <fork>      take a shared deploy key's private half on stdin
-#   wk key give <fork>|<name>
+#   wk key adopt <key>       take a shared deploy key's private half on stdin
+#   wk key give <key>|<name>
 #                            print that credential, the other half of `adopt`
 #
-# <fork> is one of lib/wk/project.json's FORKS. Every credential is put to its
+# <key> is a deploy key of a repo in lib/wk/project.json's REPOS. Every credential is put to its
 # lib/credcheck.py rule before it is stored and whenever it is reported: one
 # that cannot do its job is refused, one that reaches further is kept with that
 # reach named, one no network could judge is kept as unverified.

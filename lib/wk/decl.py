@@ -6,11 +6,13 @@ takes a value only as `--x=v`."""
 import re
 from pathlib import Path
 
+from wk import repos
+
 WHERE_VALUES = ("host", "store", "local", "workspace", "dynamic")
 NAME_VALUES = ("required", "optional", "none", "derived")
 PRESET_VALUES = ("--preset", "arg")
 VALUED = {"where": WHERE_VALUES, "name": NAME_VALUES, "preset": PRESET_VALUES, "takes": (), "ready": (), "group": (),
-          "values": (), "post": (), "verbs": (), "default": ()}
+          "values": (), "post": (), "verbs": (), "default": (), "repos": ()}
 FLAGS = {"lifecycle": {"lifecycle": True}, "readonly": {"readonly": "yes"}, "destructive": {"destructive": "yes"},
          "broker": {"broker": "*"}, "needs": {}, "opts": {}, "passthrough": {"passthrough": "yes"},
          "passthrough=tail": {"passthrough": "tail"}, "passthrough=all": {"passthrough": "all"},
@@ -19,7 +21,7 @@ FLAGS = {"lifecycle": {"lifecycle": True}, "readonly": {"readonly": "yes"}, "des
 DEFAULTS = {"where": "workspace", "name_decl": "none", "ready": False, "group": "other", "lifecycle": False,
             "readonly": "", "broker": "", "forward": True, "bare": "", "post": "", "outside": False, "needs": "",
             "here": False, "takes": "0", "values": "", "preset": "", "verbs": "", "default": "", "destructive": "",
-            "opts": "", "passthrough": "", "dryrun": "", "nodryrun": False, "synopsis": ""}
+            "opts": "", "passthrough": "", "dryrun": "", "nodryrun": False, "synopsis": "", "repos": ""}
 LIST_KEYS = ("needs", "opts", "readonly", "destructive", "dryrun", "broker")
 
 
@@ -110,6 +112,9 @@ class Decl:
                 allowed = VALUED[key]
                 if allowed and (value.split("@")[0] if key == "name" else value) not in allowed:
                     raise DeclError("%s: %s=%s is not one of %s" % (self.name, key, value, "|".join(allowed)))
+                unknown = [r for r in value.split(",") if r not in repos.names()] if key == "repos" else []
+                if unknown:
+                    raise DeclError("%s: repos=%s names no repo in REPOS (%s)" % (self.name, value, " ".join(repos.names())))
                 setattr(self, "name_decl" if key == "name" else key, value == "yes" if key == "ready" else value)
             elif tok in FLAGS:
                 self.__dict__.update(FLAGS[tok])
@@ -201,6 +206,10 @@ class Decl:
     def valued_opts(self):
         specs = [self.opts] + [spec.get("opts") or "" for _, spec in self.overrides()]
         return {x[:-1] for spec in specs for x in spec.split(",") if x.endswith("=") and not in_list(x[:-1], spec)}
+
+    def serves(self, repo):
+        """Whether a workspace holding `repo` is one this command acts on: every repo unless `repos=` names some."""
+        return not self.repos or in_list(repo, self.repos)
 
     def synopsis_line(self):
         return self.synopsis.split(" -- ")[0]

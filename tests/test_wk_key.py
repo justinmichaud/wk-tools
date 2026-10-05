@@ -21,7 +21,7 @@ CREDCHECK = os.path.join(ROOT, "lib", "credcheck.py")
 NAMES = ("github-pat", "litellm", "ntfy", "deploy-key")
 GOOD, OTHER_GOOD, STALE, UNJUDGED = "good-token", "good-token-2", "stale-token", "offline-token"
 TOPIC = "topic-minted-here"
-REPOS = {"fork": "justinmichaud/WebKit", "forkwpe": "justinmichaud/WPEWebKit"}
+REPOS = {"fork": "justinmichaud/WebKit", "forkwpe": "justinmichaud/WPEWebKit", "wk-tools": "someone/wk-tools"}
 
 
 def pub_of(k):
@@ -78,6 +78,7 @@ class KeyWorld(World):
         self.react(["ssh-keygen", "-lf", "-"], lambda a, f: Result(0, "256 SHA256:%s wk (ED25519)\n" % f.last_input.split()[1][4:]))
         self.react(["ssh"], lambda a, f: Result(0, "", "Hi justinmichaud/WebKit! You've successfully authenticated\n"))
         self.react(["gh", "api"], self._gh)
+        self.answer(["git", "-c", "safe.directory=*", "-C", ROOT, "remote", "get-url", "origin"], out="git@github.com:someone/wk-tools.git\n")
         self.react(["hostname", "-s"], lambda a, f: Result(0, "here\n"))
         self.react(["rm"], self._rm)
 
@@ -288,9 +289,9 @@ class TestRegisterPerMachine(KeyTest):
         k = self.key(self.world())
         registered = []
         k.ensure = lambda: act.die("no key could be made")
-        k.fleet_fork = lambda fork, repo: registered.append(fork) or True
+        k.fleet_key = lambda fork, repo: registered.append(fork) or True
         with contextlib.redirect_stderr(io.StringIO()):
-            self.assertFalse(k.converge_forks())
+            self.assertFalse(k.converge_keys())
         self.assertEqual([], registered)
 
     def test_rotate_removes_the_old_key_from_github_and_mints_a_fresh_one(self):
@@ -315,7 +316,7 @@ class TestRegisterPerMachine(KeyTest):
         rc, out, _ = self.run_verb("check")
         empty = out.split("  empty:\n")[1].split("  gone:\n")[0]
         gone = out.split("  gone:\n")[1].split("  credentials:\n")[0]
-        self.assertRegex(empty, r"none\s+%s\s+no key for this fork" % REPOS["fork"])
+        self.assertRegex(empty, r"none\s+%s\s+no key here" % REPOS["fork"])
         self.assertRegex(gone, r"\?\s+%s\s+gone did not answer" % REPOS["fork"])
         self.assertNotIn("no key", gone)
         self.assertEqual(1, rc)
@@ -347,7 +348,7 @@ class TestCrashOnlyAndDryRun(KeyTest):
         w = self.fleet_world()
         self.setup_once(w)
         self.assertEqual({"github-pat": GOOD, "ntfy": TOPIC}, w.peers["peerbox"].creds)
-        self.assertEqual({"fork": "KEY:fork-g1", "forkwpe": "KEY:forkwpe-g1"}, w.peers["peerbox"].keys)
+        self.assertEqual({f: "KEY:%s-g1" % f for f in REPOS}, w.peers["peerbox"].keys)
         self.assertEqual([pub_of("KEY:fork-g1")], list(w.github[REPOS["fork"]].values()))
 
     def test_deploy_killed_after_any_effect_and_rerun_converges(self):

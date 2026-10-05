@@ -16,7 +16,7 @@ from unittest import mock
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, guest, secrets  # noqa: E402
+from wk import act, guest, repos, secrets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
@@ -34,6 +34,7 @@ key_store() { _key store "$1"; }
 key_clear() { _key clear "$1" </dev/null; }
 """
 SOCK = "/agent.sock"
+KEYS = [k[0] for k in secrets.push_keys()]
 
 
 class World(Fake):
@@ -70,7 +71,7 @@ class World(Fake):
     def held(self):
         return self.base + "/store/push-keys"
 
-    def seed(self, forks=("fork", "forkwpe"), pat="ghp-held", bz="bz-held"):
+    def seed(self, forks=tuple(k[0] for k in secrets.push_keys()), pat="ghp-held", bz="bz-held"):
         for f in forks:
             self._set_file("%s/build_key_%s" % (self.held, f), "KEY:%s\n" % f)
             self._set_file("%s/build_key_%s.pub" % (self.keyring_dir, f), "PUB:%s\n" % f)
@@ -228,18 +229,49 @@ class TestAStoredCredentialIsReadTheOneWay(SecretsTest):
         self.assertIn("refusing to read", err)
 
 
+class TestRepoPushKeys(unittest.TestCase):
+    """Each repo pushes through its own deploy keys; the default repo's are the forks its checkout is wired with."""
+
+    def test_every_repo_has_its_own_keys_and_aliases(self):
+        names = [k[0] for k in secrets.push_keys()]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(len(names), len({k[2] for k in secrets.push_keys()}))
+        for r in repos.names():
+            self.assertTrue(repos.Repo(r).push, r)
+
+    def test_the_forks_are_the_default_repos_and_no_other_repos_key_is_one(self):
+        self.assertEqual(repos.default().push, secrets.forks())
+        others = [k for r in repos.names() if r != repos.default().name for k in repos.Repo(r).push]
+        self.assertTrue(others)
+        for k in others:
+            self.assertNotIn(k, secrets.forks())
+
+    def test_a_cloned_repos_github_repository_is_its_origins(self):
+        m = mock.Mock()
+        m.run.return_value = Result(0, "git@github.com:someone/wk-tools.git\n")
+        rows = repos.push_rows(m, "/tools")
+        self.assertEqual([f[1] for f in secrets.forks()], [r[1] for r in rows if r in secrets.forks()])
+        self.assertIn("someone/wk-tools", [r[1] for r in rows])
+
+    def test_the_setup_listing_names_every_key(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            secrets.main(["push-keys"])
+        self.assertEqual([[k, a] for k, _, a in secrets.push_keys()], [l.split("  ") for l in out.getvalue().splitlines()])
+
+
 class TestTheAgent(SecretsTest):
     def test_the_key_goes_in_on_stdin_and_never_as_an_argument(self):
         self.w.seed()
-        self.assertEqual([("fork", "loaded"), ("forkwpe", "loaded")], self.w.sec().agent_load(SOCK))
-        self.assertEqual({"KEY:fork", "KEY:forkwpe"}, self.w.agents[SOCK])
+        self.assertEqual([(k, "loaded") for k in KEYS], self.w.sec().agent_load(SOCK))
+        self.assertEqual({"KEY:" + k for k in KEYS}, self.w.agents[SOCK])
         for argv in self.w.argvs():
             self.assertNotIn("KEY:", " ".join(argv))
         self.assertIn("KEY:fork\n", [i for a, i in self.w.inputs if "ssh-add -" in a[-1]])
 
     def test_a_fork_with_no_private_half_is_reported_not_invented(self):
         self.w.seed(forks=("fork",))
-        self.assertEqual([("fork", "loaded"), ("forkwpe", "no-key")], self.w.sec().agent_load(SOCK))
+        self.assertEqual([("fork", "loaded")] + [(k, "no-key") for k in KEYS[1:]], self.w.sec().agent_load(SOCK))
 
     def test_a_refused_read_is_no_key(self):
         self.w.seed()
@@ -349,6 +381,14 @@ class TestSecretsIsPublished(SecretsTest):
             if p.startswith(self.w.keyring_dir):
                 self.assertNotIn("KEY:", self.w.files[p], p)
 
+    def test_every_repos_deploy_key_has_an_alias_through_the_agent(self):
+        quiet(self.w.sec().publish)
+        cfg = self.w.files[self.w.keyring_dir + "/ssh_config"]
+        for key, _, alias in secrets.push_keys():
+            block = cfg[cfg.index("Host %s\n" % alias):].split("\nHost ")[0]
+            self.assertIn("IdentityFile /secrets/build_key_%s\n" % key, block)
+            self.assertIn("IdentityAgent /run/wk/ssh-agent.sock", block)
+
     def test_the_bugzilla_login_is_read_from_the_mirror(self):
         self.contributors()
         quiet(self.w.sec().publish)
@@ -368,7 +408,7 @@ class TestSecretsIsPublished(SecretsTest):
             self.w.files["%s/%s" % (self.w.keyring_dir, name)] = name + "\n"
         quiet(self.w.sec().publish)
         view = self.w.keyring_dir + "/view/container"
-        self.assertEqual({"ssh_config", "github-user", "build_key_fork.pub", "build_key_forkwpe.pub", "litellm-key"},
+        self.assertEqual({"ssh_config", "github-user", "litellm-key"} | {"build_key_%s.pub" % k for k in KEYS},
                          set(self.w.listdir(view)))
         self.assertIn(("act", ("chmod", "0600", view + "/litellm-key")), self.w.effects)
         self.assertIn(("act", ("chmod", "0700", view)), self.w.effects)

@@ -19,7 +19,7 @@ class DeployKeys:
     def ensure(self):
         self.private_dir(self.sec.store.keyring_dir())
         self.private_dir(self.sec.store.keyring_push_dir())
-        for fork, repo in [f[:2] for f in self.forks()]:
+        for fork, repo in [f[:2] for f in self.push_keys()]:
             key = self.sec.push_key_path(fork)
             if self.machine.exists(key):
                 unchanged("key for " + repo)
@@ -44,14 +44,14 @@ class DeployKeys:
         return 0, r.out + r.err
 
     def adopt(self, fork, value):
-        if fork not in self.fork_names():
-            die("no fork called '%s'; this checkout knows: %s " % (fork, " ".join(self.fork_names())))
+        if fork not in self.key_names():
+            die("no deploy key called '%s'; this checkout knows: %s " % (fork, " ".join(self.key_names())))
         if not self.sec.push_key_adopt(fork, value):
             die("what arrived on stdin is not a usable private key for " + fork)
         log("adopted the shared deploy key for " + fork)
         return 0
 
-    def register_fork(self, fork, repo):
+    def register_key(self, fork, repo):
         pub = self.pub_of(fork)
         if not pub:
             warn("no key for %s here -- 'wk key ensure' makes it" % repo)
@@ -71,7 +71,7 @@ class DeployKeys:
 
     def rotate_keys(self):
         """The old keys off GitHub first: one left there keeps write access."""
-        for fork, repo in [f[:2] for f in self.forks()]:
+        for fork, repo in [f[:2] for f in self.push_keys()]:
             for key_id in self.gh.titled(repo, TITLE):
                 if self.gh.delete(repo, key_id):
                     changed("%s: removed the old shared deploy key (%s)" % (repo, key_id))

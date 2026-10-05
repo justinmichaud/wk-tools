@@ -112,14 +112,14 @@ else
     changed "seeded $WK_STORE/skills"
 fi
 
-# One deploy key per fork: GitHub refuses the same key on a second repository.
+# One deploy key per repository: GitHub refuses the same key on a second one.
 _missing_keys=""
-_forks=$(wk_py wk.secrets forks)
-while read -r _remote _repo _alias; do
-    [ -n "$_remote" ] || continue
-    [ -f "$keyring_push_dir/build_key_$_remote" ] || _missing_keys="$_missing_keys $_repo"
+_keys=$(wk_py wk.secrets push-keys)
+while read -r _key _alias; do
+    [ -n "$_key" ] || continue
+    [ -f "$keyring_push_dir/build_key_$_key" ] || _missing_keys="$_missing_keys $_key"
 done <<EOF
-$_forks
+$_keys
 EOF
 
 if [ -z "$_missing_keys" ]; then

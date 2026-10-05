@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n> -- check out a PR head, from either project
-# wk: where=workspace name=optional@2 takes=1 ready=yes group=sources dryrun verbs=checkout,rebase,open,report default=checkout readonly report
+# wk: where=workspace repos=webkit name=optional@2 takes=1 ready=yes group=sources dryrun verbs=checkout,rebase,open,report default=checkout readonly report
 # wk: sub open where=host name=optional@2 takes=0 opts=--draft,--web needs=gh,gh-auth
 # wk: sub report where=host name=none takes=1 opts=--since= needs=gh,gh-auth
 # wk: sub rebase name=optional@2 takes=0

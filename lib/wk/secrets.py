@@ -6,7 +6,7 @@ import os
 import shlex
 import sys
 
-from wk import act, images, project
+from wk import act, images, project, repos
 from wk.act import debug, die, warn
 from wk.machine import Local
 from wk.store import Store, in_vm, remote_marker_path
@@ -18,14 +18,18 @@ PUBLISHED = ("ssh_config", "github-user", "view/container/ssh_config")
 AGENT_SECRETS = (("claude", "claude-token", ".wk-agent-token", "CLAUDE_CODE_OAUTH_TOKEN", "value", "remote"),
                  ("litellm", "litellm-key", ".wk-litellm-key", "LITELLM_API_KEY", "value", "container,vm,remote"),
                  ("claude-login", ".credentials.json", ".claude/.credentials.json", "-", "file", "container,vm"))
-CONFIG_HEADER = """# wk: written by 'wk key push on|off' (lib/wk/secrets.py). One alias per fork, because GitHub takes one deploy
-# key per repository and both forks live on github.com. The identity is a public half; the private one is
+CONFIG_HEADER = """# wk: written by 'wk key push on|off' (lib/wk/secrets.py). One alias per deploy key, because GitHub takes one
+# deploy key per repository and every repository lives on github.com. The identity is a public half; the private one is
 # in an ssh-agent outside this workspace, and whether it is loaded there is what 'wk key push' switches.
 """
 
 
 def forks():
-    return [list(r) for r in project.get("FORKS")]
+    return repos.default().push
+
+
+def push_keys():
+    return repos.push_keys()
 
 
 def agent_secrets():
@@ -36,13 +40,13 @@ def first_line(text):
     return (text or "").split("\n", 1)[0].rstrip("\r")
 
 
-def alias_blocks(forks, d, prefix="build_key_", sock="", proxy=""):
+def alias_blocks(keys, d, prefix="build_key_", sock="", proxy=""):
     """IdentityFile carries no `.pub`: named with it, OpenSSH 10 loads that path as the private key (10.2p1)."""
     out = []
-    for fork, _repo, alias in forks:
+    for key, _repo, alias in keys:
         out.append("\nHost %s\n    HostName github.com\n    User git\n    StrictHostKeyChecking accept-new\n" % alias)
         if d:
-            out.append("    IdentityFile %s/%s%s\n    IdentitiesOnly yes\n" % (d, prefix, fork))
+            out.append("    IdentityFile %s/%s%s\n    IdentitiesOnly yes\n" % (d, prefix, key))
         if sock:
             out.append("    IdentityAgent %s\n" % sock)
         if proxy:
@@ -207,15 +211,15 @@ class Secrets:
         return [line for line in out.splitlines() if line.strip() and "has no identities" not in line]
 
     def agent_load(self, sock):
-        """(fork, loaded | no-key | FAILED) per fork; the key goes in on stdin, never an argument."""
+        """(key, loaded | no-key | FAILED) per deploy key; the key goes in on stdin, never an argument."""
         rows = []
-        for fork in [f[0] for f in self.forks()]:
-            key = (self.read(self.push_key_path(fork)) or "").rstrip("\n")
+        for name in [f[0] for f in push_keys()]:
+            key = (self.read(self.push_key_path(name)) or "").rstrip("\n")
             if not key:
-                rows.append((fork, "no-key"))
+                rows.append((name, "no-key"))
                 continue
             ok = self._act("SSH_AUTH_SOCK=%s ssh-add - >/dev/null 2>&1" % sock, input=key + "\n").ok
-            rows.append((fork, "loaded" if ok else "FAILED"))
+            rows.append((name, "loaded" if ok else "FAILED"))
         return rows
 
     def agent_clear(self, sock):
@@ -296,7 +300,7 @@ class Secrets:
 
     def publish_config(self, d, sock):
         self.ensure_dir(d, "0700")
-        blocks = alias_blocks(self.forks(), "/secrets", "build_key_", sock)
+        blocks = alias_blocks(push_keys(), "/secrets", "build_key_", sock)
         self.converge_file(os.path.join(d, "ssh_config"), CONFIG_HEADER + blocks, "0644")
         self.converge_file(os.path.join(d, "github-user"), self.github_user() + "\n", "0644")
         bz = self.bugzilla_user()
@@ -386,14 +390,15 @@ def rows(table):
 def main(argv):
     parser = argparse.ArgumentParser(prog="python3 -m wk.secrets")
     sub = parser.add_subparsers(dest="verb", required=True)
-    for verb in ("forks", "agent-secrets", "pat-converge"):
+    for verb in ("push-keys", "agent-secrets", "pat-converge"):
         sub.add_parser(verb)
     sub.add_parser("box-alias-blocks")
     a = parser.parse_args(argv)
     if a.verb == "pat-converge":
         s = Secrets(images.root())
         return 0 if s.cred_sync(s.machine_read_pat(), "github-pat") else 1
-    sys.stdout.write(box_alias_blocks(project.get("FORKS")) if a.verb == "box-alias-blocks" else rows(project.get("FORKS") if a.verb == "forks" else AGENT_SECRETS))
+    sys.stdout.write(box_alias_blocks(forks()) if a.verb == "box-alias-blocks" else
+                     rows([k, alias] for k, _, alias in push_keys()) if a.verb == "push-keys" else rows(AGENT_SECRETS))
     return 0
 
 

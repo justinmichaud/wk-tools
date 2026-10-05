@@ -42,7 +42,7 @@ class Key(Creds, DeployKeys, Election, Check):
                 self.fleet_on = False
             if peers and not self.fleet_on:
                 warn("%s was left exactly as it is -- this machine's own credentials are still set up" % peers)
-        left = "" if self.converge_forks() else "the deploy keys"
+        left = "" if self.converge_keys() else "the deploy keys"
         for name in self.settable():
             ok = self.fleet_cred(name) if self.fleet_on else self.local_cred(name)
             if not ok:
@@ -60,24 +60,24 @@ class Key(Creds, DeployKeys, Election, Check):
             q = "register the shared deploy keys on GitHub and put the elected one on %s?" % peers
         if not self.confirm(q):
             die("not done -- nothing was changed")
-        self.converge_forks()
+        self.converge_keys()
         sys.stderr.write("\n")
         return self.check()
 
-    def fork_arg(self, verb, fork):
+    def key_arg(self, verb, fork):
         if not fork:
-            die("wk key %s needs a fork: %s " % (verb, " ".join(self.fork_names())))
+            die("wk key %s needs a deploy key: %s " % (verb, " ".join(self.key_names())))
         return fork
 
     def pub(self, fork):
-        out = self.pub_of(self.fork_arg("pub", fork))
+        out = self.pub_of(self.key_arg("pub", fork))
         if not out:
             return 1
         self.out.write(out + "\n")
         return 0
 
     def fingerprints(self):
-        for fork in self.fork_names():
+        for fork in self.key_names():
             pub = self.pub_of(fork)
             if not pub:
                 self.out.write("%-9s %-50s %s\n" % (fork, "-", "no key"))
@@ -88,7 +88,7 @@ class Key(Creds, DeployKeys, Election, Check):
         return 0
 
     def show(self):
-        for fork, repo in [f[:2] for f in self.forks()]:
+        for fork, repo in [f[:2] for f in self.push_keys()]:
             self.out.write("# %s\n%s\n" % (repo, self.pub_of(fork)))
         # The topic name is the whole ntfy credential, so this is the one reader that prints it: a second phone joins the topic already minted.
         if self.present("ntfy"):
@@ -100,14 +100,14 @@ class Key(Creds, DeployKeys, Election, Check):
 
     def give(self, what):
         if not what:
-            die("usage: wk key give <fork>|<name>   (it prints on stdout, for the workstation electing one to take)")
-        if what in self.fork_names():
+            die("usage: wk key give <key>|<name>   (it prints on stdout, for the workstation electing one to take)")
+        if what in self.key_names():
             val = self.push_key(what)
         elif what in self.settable():
             val = self.sec.cred_read(what)
         else:
-            die("there is no fork or credential called '%s'.\n    This checkout knows: %s %s " % (
-                what, " ".join(self.fork_names()), " ".join(self.settable())))
+            die("there is no deploy key or credential called '%s'.\n    This checkout knows: %s %s " % (
+                what, " ".join(self.key_names()), " ".join(self.settable())))
         if val is None:
             return 2
         self.out.write(val)
@@ -121,7 +121,7 @@ class Key(Creds, DeployKeys, Election, Check):
 
     def adopt_verb(self, what, stdin):
         if not what:
-            die("usage: wk key adopt <fork>   (the private key on stdin)")
+            die("usage: wk key adopt <key>   (the private key on stdin)")
         return self.adopt(what, stdin().decode(errors="replace"))
 
 def main(root, verb, arg="", rotate=False, replace=False, paste=False, env=None, stdin=None, **kw):
@@ -135,7 +135,7 @@ def main(root, verb, arg="", rotate=False, replace=False, paste=False, env=None,
     if verb in ("pub", "give", "verdict"):
         return getattr(k, verb)(arg)
     if verb == "sshtest":
-        rc, text = k.sshtest(k.fork_arg("sshtest", arg))
+        rc, text = k.sshtest(k.key_arg("sshtest", arg))
         k.out.write(text)
         return rc
     if verb == "adopt":

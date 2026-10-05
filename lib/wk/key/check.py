@@ -18,8 +18,8 @@ class Check:
     def row_agrees(self, fp, line):
         return bool(fp) and verdict(line) == "ok" and fact(line, "fingerprint") == fp
 
-    def fork_row(self, m, fork, repo):
-        line = self.fork_verdict(m, fork, repo)
+    def key_row(self, m, fork, repo):
+        line = self.key_verdict(m, fork, repo)
         if m != LOCAL and self.row_agrees(self.pub_fingerprint(self.pub_of(fork)), line):
             return True, [("row", table_row("ok", repo, SAME_AS_HERE))]
         return verdict(line) == "ok", self.cred_row(repo, line)
@@ -48,9 +48,9 @@ class Check:
         return True, rows
 
     def check(self):
-        peers, boxes, forks, creds = self.resolve().peers, self.fleet.boxes, self.forks(), self.settable()
+        peers, boxes, forks, creds = self.resolve().peers, self.fleet.boxes, self.push_keys(), self.settable()
         with ThreadPoolExecutor(max_workers=16) as pool:
-            fork_jobs = [(m, [pool.submit(self.fork_row, m, f[0], f[1]) for f in forks]) for m in self.workstations()]
+            key_jobs = [(m, [pool.submit(self.key_row, m, f[0], f[1]) for f in forks]) for m in self.workstations()]
             cred_jobs = [pool.submit(self.local_row, c) for c in creds]
             peer_jobs = [pool.submit(self.peer_row, m, c) for m in peers for c in creds]
         ok, actions, held = True, [], []
@@ -67,7 +67,7 @@ class Check:
                 else:
                     held.append((r[1], r[2]))
 
-        for m, jobs in fork_jobs:
+        for m, jobs in key_jobs:
             if jobs:
                 self.out.write("  %s:\n" % self.label(m))
             for j in jobs:

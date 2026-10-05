@@ -50,6 +50,13 @@ class TestDeclarations(unittest.TestCase):
         self.assertEqual(d.broker, "*")
         self.assertEqual((d.bare, d.post, d.values, d.needs), ("merged", "zed", "--list", "gh,ssh"))
 
+    def test_repos_names_the_repos_a_command_serves_and_no_other(self):
+        self.assertTrue(declare(self.tmp, "probe", "# wk: group=other").serves("anything"))
+        d = declare(self.tmp, "probe", "# wk: repos=webkit")
+        self.assertTrue(d.serves("webkit"))
+        self.assertFalse(d.serves("wk-tools"))
+        self.assertIn("names no repo", self._refused("# wk: repos=webkit,nonesuch"))
+
     def _refused(self, *lines):
         with self.assertRaises(D.DeclError) as cm:
             declare(self.tmp, "probe", *lines)

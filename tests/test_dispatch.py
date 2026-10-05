@@ -13,7 +13,7 @@ from unittest import mock
 from tests.support import REPO, bash, clean_env, run
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, dispatch, places, presets, store, workspace  # noqa: E402
+from wk import act, dispatch, places, presets, project, repos, store, workspace  # noqa: E402
 from wk import decl as D  # noqa: E402
 from wk.machine import Fake, Local  # noqa: E402
 
@@ -319,6 +319,63 @@ class TestAFarEndNoConfNames(unittest.TestCase):
                     how, status, out = dispatched(argv, env={"WK_REMOTE_MARKER": marker})
                     self.assertEqual((how, status), ("exit", 1), out)
                     self.assertIn("no machines/<name>.conf\n    names it", out)
+
+
+class TestACommandServesItsRepos(unittest.TestCase):
+    """`repos=`: a workspace holding a repo the command does not serve is refused by the one rule, naming that repo."""
+    OTHER = next(r for r in repos.names() if r != project.get("REPO"))
+
+    def held(self, repo, argv, inside=False):
+        loaded = []
+
+        class Driver:
+            def repo(self, name):
+                return repos.Repo(repo)
+
+        with tempfile.TemporaryDirectory(prefix="wk-test-repos-") as tmp:
+            env = {}
+            if inside:
+                env["WK_MARKER"] = os.path.join(tmp, "marker")
+                with open(env["WK_MARKER"], "w") as f:
+                    f.write("name=ws1\nrepo=%s\n" % repo)
+            with mock.patch.object(places.Registry, "load", lambda reg, place: loaded.append(place) or Driver()):
+                return dispatched(argv, env=env), loaded
+
+    def test_every_command_declaring_repos_refuses_another_repos_workspace_naming_it(self):
+        checked = 0
+        for d in DECLS:
+            if not d.repos:
+                continue
+            for label, argv in invocations(d):
+                if d.where_for(argv) != "workspace" or d.name_for(argv).split("@")[0] == "none":
+                    continue
+                with self.subTest(cmd=d.name, verb=label):
+                    (how, rc, out), _ = self.held(self.OTHER, [d.name, *argv])
+                    self.assertEqual(("exit", 1), (how, rc), out)
+                    self.assertIn("holds %s" % self.OTHER, out)
+                    self.assertEqual("here", self.held(project.get("REPO"), [d.name, *argv])[0][0])
+                    checked += 1
+        self.assertGreater(checked, 5)
+
+    def test_a_command_declaring_none_serves_every_repo_and_asks_no_place(self):
+        (how, _, _), loaded = self.held(self.OTHER, ["enter", "ws1"])
+        self.assertEqual("here", how)
+        self.assertEqual([], loaded)
+
+    def test_inside_a_workspace_its_own_marker_is_asked(self):
+        (how, rc, out), loaded = self.held(self.OTHER, ["build", presets.names()[0]], inside=True)
+        self.assertEqual(("exit", 1), (how, rc), out)
+        self.assertEqual(["local"], loaded)
+
+
+class TestTheRepoValuesAreTheTables(unittest.TestCase):
+    def test_new_h_lists_every_repo_and_the_default(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(dispatch.Exit):
+            dispatch.explain("new", D.Decl(REPO / "cmd" / "new"))
+        values = out.getvalue().split("valid values (--repo):\n")[1].splitlines()
+        self.assertEqual(["%s%s" % (r, " (the default)" if r == project.get("REPO") else "") for r in repos.names()],
+                         [v.strip() for v in values[:len(repos.names())]])
 
 
 class TestHelpPreviewsTheCommandLine(unittest.TestCase):

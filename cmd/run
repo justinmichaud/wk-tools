@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk run <workspace> [options] [--profile[=<mode>]] [-- jsc-args] -- run jsc from a workspace build, or profile it
-# wk: where=workspace name=required ready=yes group=workspaces preset=--preset dryrun passthrough
+# wk: where=workspace repos=webkit name=required ready=yes group=workspaces preset=--preset dryrun passthrough
 # wk: opts --preset=,--lldb,--until-crash,--max=,--rr,--replay,--profile,--profile=,--browser,--process=,--attach=,--jit-dump,--markers,--top=,--fetch,--env=
 # wk: flag --profile takes=*
 #

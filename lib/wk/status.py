@@ -945,8 +945,8 @@ class Walk:
             out.append(broker_record(store, m, alive))
         out += service_records(self.root, m)
         out += lock_records(store, m, alive)
-        forks = [r[0] for r in secrets.forks()]
-        out.append(push_record(store, m, forks, self.in_vm))
+        keys = [r[0] for r in secrets.push_keys()]
+        out.append(push_record(store, m, keys, self.in_vm))
         out.append(capacity_here(m, "the podman VM" if self.in_vm else "", Resources(Local(), self.env)))
         out.append(quiesce_record(quiesce_dir(store), m))
         out += bench_records(store, m, lambda pid: bool(pid and alive(pid)))
