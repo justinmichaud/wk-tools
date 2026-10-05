@@ -127,6 +127,8 @@ Answered 2026-10-05 (fourth batch): wk-tools work happens in a workspace made by
 
 Answered 2026-10-05 (fifth batch): the user's Bugzilla account has no editbugs, so the comment-tag probe's "cannot tag comments" is right for it; boards keep the ssh -R tunnel to the page server until upstream run-benchmark takes a bind address (an upstream patch), after which a run from a `tag:wk` machine hands boards the server's tailnet address.
 
+Answered 2026-10-05 (sixth batch): each repo has its own push identity (wk-tools its own deploy key); commands declare the repos they serve and the dispatcher refuses the rest; on a Mac a guest's Anthropic and claude.ai traffic goes to the podman VM's injector, so one injector holds and refreshes the login; the injector adds the bearer for api.anthropic.com, claude.ai and platform.claude.com.
+
 ## Cutting it down
 
 40k lines of bash is the problem, not the raw material. It is that big
