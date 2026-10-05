@@ -11,7 +11,7 @@ from tests.support import REPO
 from tests.test_wk_places import LINUX_PROBE, RemoteTest
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import places, pr, record, workspace  # noqa: E402
+from wk import places, pr, record, repos, workspace  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 
@@ -47,8 +47,9 @@ class TestTheBoxReadsItsWorkspace(BoxTest):
         records = record.Records(root=str(self.tmp / "records"), clock=FakeClock(), machine=self.fake)
         with mock.patch.object(me, "create") as create, mock.patch.object(me, "ready", lambda ws, clock: True), \
                 mock.patch.object(me, "install_agents"), mock.patch.object(workspace, "freshen"):
-            workspace._create(me, records, None, FakeClock(), "fresh", None, "native", "absent")
-        create.assert_called_once_with("fresh", None, "native")
+            workspace._create(me, records, None, FakeClock(), "fresh", None, "native", repos.default(), "absent")
+        create.assert_called_once()
+        self.assertEqual(("fresh", None, "native", repos.default().name), create.call_args.args[:3] + (create.call_args.args[3].name,))
 
 
 class TestTheWorkstationHandsTheLifecycleOver(BoxTest):

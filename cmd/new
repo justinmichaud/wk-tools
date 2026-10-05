@@ -2,7 +2,7 @@
 #
 # wk new <name> -- create a workspace named after the task it is for
 # wk: where=workspace name=required lifecycle post=zed group=workspaces dryrun
-# wk: opts --on=,--base=,--arch=,--zed,--no-wait,--kill,--pr=,--_detached
+# wk: opts --on=,--base=,--arch=,--repo=,--zed,--no-wait,--kill,--pr=,--_detached
 #
 # Other places take minutes (a guest clone, a git clone over ssh), so creation is
 # *detached*: a dropped connection does not take it with it, and re-running `wk
@@ -18,6 +18,10 @@
 #                        published, under $WK_STORE/base (default: current)
 #   --arch <arch>        native|armhf -- the architecture the workspace
 #                        itself runs (container only; default: native)
+#   --repo <repo>        webkit|wk-tools -- the repository it holds
+#                        (default: webkit). wk-tools is cloned from this
+#                        machine's wk-tools origin and needs no mirror or
+#                        snapshot; it is container only for now
 #   --zed                open the checkout in Zed once it is ready
 #   --no-wait            return once creation has started, without waiting for it;
 #                        incompatible with --pr
@@ -45,27 +49,28 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, places, pr, record, workspace  # noqa: E402
+from wk import decl, places, pr, project, record, repos, workspace  # noqa: E402
 from wk.act import Refused, die  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 
 
 def parse(argv):
     a = decl.Args(decl.Decl(__file__), argv)
-    return {"place": a.value("--on"), "base": a.value("--base"), "arch": a.value("--arch"),
+    return {"place": a.value("--on"), "base": a.value("--base"), "arch": a.value("--arch"), "repo": a.value("--repo"),
             "pr": a.value("--pr"), "zed": a.flag("--zed"), "no_wait": a.flag("--no-wait"),
             "kill": a.flag("--kill"), "detached": a.flag("--_detached")}
 
 
 def detached(reg, records, name, opts):
-    """The detached half: the front spawned it with the canonical --on, --arch and --base."""
+    """The detached half: the front spawned it with the canonical --on, --arch, --repo and --base."""
     try:
         driver = reg.load(opts.get("place") or reg.default())
+        repo = repos.Repo(opts.get("repo") or project.get("REPO"))
     except LookupError as e:
         die(str(e))
     recs = record.of_driver(driver, records.clock, reg.machine)
     return workspace.new_detached_run(driver, recs, Lock(driver.store, reg.machine, recs.clock), recs.clock,
-                                name, opts.get("base") or "", opts.get("arch") or "native")
+                                name, opts.get("base") or "", opts.get("arch") or "native", repo)
 
 
 def main(argv):

@@ -831,17 +831,18 @@ class Walk:
         r.set("state", info if st == "present" else st)
         r.set("ws", st)
         r.opt("branch", driver.branch(ws))
-        probe = {}
+        probe, repo = {}, driver.repo(ws)
         if st == "present":
             script = WS_PROBE.replace("@SRC@", shlex.quote(driver.src(ws))).replace("@BASE@", places.upstream_line_body())
             probe = kv(driver.exec(ws, ["sh", "-c", script]).out)
             origin = probe.get("origin", "")
-            if origin and origin != project.get("REMOTES"):
+            if origin and origin != repo.origin(driver.here, self.root):
                 r.warn("origin is %s, not upstream -- 'wk sync %s --fix'" % (origin, ws))
             for f in ("dirty", "untracked", "unpushed", "upstream", "behind", "ahead"):
                 if probe.get(f) and probe[f] != "0":
                     r.set(f, probe[f])
-        base = places.image_base(self.root, ws) or (probe.get("wsbase") if probe.get("wsbase") != "?" else None)
+        base = (places.image_base(self.root, ws) or (repo.name if not repo.snapshot else None)
+                or (probe.get("wsbase") if probe.get("wsbase") != "?" else None))
         r.opt("base", base)
         snap = driver.store.ws_snapshot_id(ws)
         if snap:

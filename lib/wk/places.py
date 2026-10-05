@@ -14,7 +14,7 @@ import shutil
 import stat
 import sys
 
-from wk import act, agents, fleet, git, guest, images, kv, project, reach, record, secrets, sshalias, tools
+from wk import act, agents, fleet, git, guest, images, kv, project, reach, record, repos, secrets, sshalias, tools
 from wk.machine import TIMED_OUT, Local, PodmanVm, Result, Ssh, TartExec, isolated_module, lib_argv
 from wk.resources import Resources, arch_has_gpu, workspace_marker_path
 from wk.store import Store, dispatch_place, in_vm, no_such_workspace, remote_marker_path
@@ -396,6 +396,9 @@ class Driver:
     def src(self, ws):
         return project.get("SRC")
 
+    def repo(self, ws):
+        return repos.default()
+
     def tools(self, ws):
         return TOOLS
 
@@ -523,7 +526,7 @@ class Driver:
             return "broken"
         if env == "creating":
             return env
-        if self.needs_base and not m.exists(os.path.join(ws_dir, "base-id")):
+        if self.needs_base and self.repo(ws).snapshot and not m.exists(os.path.join(ws_dir, "base-id")):
             return "creating"
         return "present"
 
@@ -611,7 +614,7 @@ class Driver:
     def sdk_refresh(self):
         return True
 
-    def create(self, ws, base=None, arch="native"):
+    def create(self, ws, base=None, arch="native", repo=None):
         raise NotImplementedError
 
     def ready_timeout(self, timeout):
@@ -839,6 +842,15 @@ class Container(Driver):
             return None
         return [parts[1] for parts in (line.split() for line in r.out.splitlines()[1:]) if len(parts) > 1]
 
+    def repo(self, ws):
+        try:
+            return repos.of_marker(kv.kv(self.store_machine.read(repos.marker_in(self.store.ws_dir(ws)))))
+        except OSError:
+            return repos.default()
+
+    def src(self, ws):
+        return self.repo(ws).src
+
     def arch(self, ws):
         path = os.path.join(self.store.ws_dir(ws), "arch")
         try:
@@ -866,8 +878,9 @@ class Container(Driver):
         return st if self.created(ws) else "creating"
 
     def branch(self, ws):
-        head = os.path.join(self.store.ws_dir(ws), "changes", ".git", "HEAD")
-        if not self.machine.exists(head):
+        repo = self.repo(ws)
+        head = os.path.join(self.store.ws_dir(ws), "changes" if repo.snapshot else repo.checkout, ".git", "HEAD")
+        if repo.snapshot and not self.machine.exists(head):
             base = self.store.ws_snapshot_id(ws)
             if not base:
                 return "-"
@@ -979,14 +992,21 @@ class Container(Driver):
             flags += r.out.split() if r.ok else []
         return flags
 
-    def create_flags(self, ws, base, arch):
-        ws_dir, store, mirror = self.store.ws_dir(ws), self.store.store_dir(), self.store.mirror_dir()
+    def checkout_flags(self, ws, base, repo):
+        """A snapshot repo's overlay on the snapshot and its build directory, or the directory a cloned repo's checkout is made in."""
+        ws_dir, mirror = self.store.ws_dir(ws), self.store.mirror_dir()
+        flags = ["--env", "WK_REPO=%s" % repo.name, "--env", "WK_SRC=%s" % repo.src]
+        if not repo.snapshot:
+            return flags + ["--volume", "%s/%s:%s" % (ws_dir, repo.checkout, repo.src), "--env", "WK_CLONE=%s" % repo.origin(self.machine, self.tools_src())]
         mirror_dir = os.path.dirname(mirror)
+        return flags + ["--volume", "%s:%s:ro" % (mirror_dir, mirror_dir), "--env", "WK_MIRROR=%s" % mirror,
+                        "--volume", "%s:%s:O,upperdir=%s/changes,workdir=%s/overlay-work" % (self.store.snapshot_tree(base), repo.src, ws_dir, ws_dir),
+                        "--volume", "%s/build:%s/%s" % (ws_dir, repo.src, project.get("BUILD_DIR"))]
+
+    def create_flags(self, ws, base, arch, repo):
+        ws_dir, store = self.store.ws_dir(ws), self.store.store_dir()
         res = Resources(self.machine, self.env, self.os())
-        flags = ["--volume", "%s:%s:ro" % (self.tools_src(), TOOLS), "--volume", "%s:%s:ro" % (mirror_dir, mirror_dir), "--env", "WK_MIRROR=%s" % mirror,
-                 "--volume", "%s:%s:O,upperdir=%s/changes,workdir=%s/overlay-work" % (self.store.snapshot_tree(base), project.get("SRC"), ws_dir, ws_dir),
-                 "--volume", "%s/build:%s/%s" % (ws_dir, project.get("SRC"), project.get("BUILD_DIR")),
-                 "--volume", "%s:/var/lib/wk/ws/%s" % (ws_dir, ws)]
+        flags = ["--volume", "%s:%s:ro" % (self.tools_src(), TOOLS), "--volume", "%s:/var/lib/wk/ws/%s" % (ws_dir, ws)] + self.checkout_flags(ws, base, repo)
         for sub, dest in (("cache/ccache", "/ccache"), ("cache/yocto", "/cache/yocto"), ("cache/buildroot", "/cache/buildroot"),
                           ("cache/bench", "/cache/bench"), ("skills", "/skills")):
             flags += ["--volume", "%s/%s:%s" % (store, sub, dest)]
@@ -1017,7 +1037,7 @@ class Container(Driver):
                 "    The newest published tag of that series is %s.\n"
                 "    Use it:  WK_SDK_IMAGE=%s:%s wk new ..." % (project.get("SDK_IMAGE"), tag, newest, project.get("SDK_IMAGE"), newest))
 
-    def create_argv(self, ws, base, arch):
+    def create_argv(self, ws, base, arch, repo):
         u = self.user()
         argv = self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", project.get("SDK_CREATE")), "--network", "none", "--isolated"]
         if arch != "native":
@@ -1026,24 +1046,25 @@ class Container(Driver):
         if image:
             argv += ["--image", image]
         return argv + ["--name", self.ctr(ws), "--shell", "/bin/bash", "--user", u, "--group", u,
-                       "--home", os.path.join(self.store.ws_dir(ws), "home"), "--additional-flags", " ".join(self.create_flags(ws, base, arch))]
+                       "--home", os.path.join(self.store.ws_dir(ws), "home"), "--additional-flags", " ".join(self.create_flags(ws, base, arch, repo))]
 
-    def create(self, ws, base=None, arch="native"):
-        ws_dir = self.store.ws_dir(ws)
-        if not self.machine.isdir(self.store.snapshot_tree(base)):
+    def create(self, ws, base=None, arch="native", repo=None):
+        ws_dir, repo = self.store.ws_dir(ws), repo or repos.default()
+        if repo.snapshot and not self.machine.isdir(self.store.snapshot_tree(base)):
             act.die("snapshot %s not found; run 'wk sync' first" % base)
         if self.exists(ws):
             act.die("workspace '%s' already exists" % ws)
         if not (self.sdk_image() or arch_image(arch)):
             self.check_sdk_tag()
-        for d in (ws_dir, "changes", "overlay-work", "home", "build"):
+        for d in (ws_dir, "home") + (("changes", "overlay-work", "build") if repo.snapshot else (repo.checkout,)):
             self.machine.mkdir(d if d == ws_dir else os.path.join(ws_dir, d))
-        self._ensure_home_mountpoint(ws_dir, self.store.mirror_parent())
+        if repo.snapshot:
+            self._ensure_home_mountpoint(ws_dir, self.store.mirror_parent())
         self.machine.write(os.path.join(ws_dir, "arch"), arch + "\n")
-        argv = self.create_argv(ws, base, arch)
+        argv = self.create_argv(ws, base, arch, repo)
         if self.sdk_image():
             act.info("using workspace image %s (WK_SDK_IMAGE)" % self.sdk_image())
-        act.info("creating workspace '%s' from base %s (rootless-proxy, %s)" % (ws, base, arch))
+        act.info("creating workspace '%s' from %s (rootless-proxy, %s)" % (ws, "base " + base if repo.snapshot else repo.name, arch))
         r = self.machine.act_run(argv, stream=True)
         if not r.ok:
             act.die("%s failed for '%s' (exit %d); what it said is above" % (project.get("SDK_CREATE"), ws, r.rc), r.rc)
@@ -1052,8 +1073,9 @@ class Container(Driver):
         if not r.ok:
             act.die("installing firstrun.sh into '%s' failed (exit %d); %s made the container "
                      "but it is not usable -- run 'wk rm %s' and retry" % (ws, r.rc, project.get("SDK_CREATE"), ws), r.rc)
-        # Last: create() reads this file's presence as "the workspace finished setting up".
-        self.machine.write(os.path.join(ws_dir, "base-id"), base + "\n")
+        # Last: state() reads this file's presence as "the workspace finished setting up".
+        if repo.snapshot:
+            self.machine.write(os.path.join(ws_dir, "base-id"), base + "\n")
 
     def ready(self, ws, clock, timeout=None):
         if clock.wait_until(lambda: self.created(ws) or not self.exists(ws), self.ready_timeout(timeout), 1) and self.created(ws):
@@ -1485,7 +1507,7 @@ class Vm(Driver):
             names.append("podman machine %s" % self.podman_machine())
         return names
 
-    def create(self, ws, base=None, arch="native"):
+    def create(self, ws, base=None, arch="native", repo=None):
         v, ws_dir, mirror = self.vm(ws), self.store.ws_dir(ws), self.store.mirror_dir()
         if self.vm_state(ws) != "absent":
             act.die("workspace '%s' already exists" % ws)
@@ -1565,9 +1587,13 @@ class LocalWorkspace(Driver):
         self.ws_name = marker.get("name", "")
         self.ws_src = marker.get("src", "")
         self.ws_arch = marker.get("arch", "") or "native"
+        self.ws_repo = repos.of_marker(marker)
 
     def src(self, ws):
         return self.ws_src
+
+    def repo(self, ws):
+        return self.ws_repo
 
     def tools(self, ws):
         return self.root
@@ -1598,7 +1624,7 @@ class LocalWorkspace(Driver):
     def store_init(self):
         self.machine.mkdir(self.store.ws_dir(self.ws_name))
 
-    def create(self, ws, base=None, arch="native"):
+    def create(self, ws, base=None, arch="native", repo=None):
         act.die("a workspace cannot create a workspace -- run 'wk new %s' on the host" % ws)
 
     def destroy(self, ws):
@@ -2022,7 +2048,7 @@ class Remote(Driver):
         act.info("the %s mirror on %s is up to date" % (project.get("CHECKOUT"), host))
         return ok
 
-    def create(self, ws, base=None, arch="native"):
+    def create(self, ws, base=None, arch="native", repo=None):
         self._probe_or_die()
         root, wsd, host = self.root_there(), self.ws_dir_there(ws), self.label()
         st = self.info(ws)

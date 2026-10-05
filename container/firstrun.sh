@@ -4,7 +4,7 @@
 set -euo pipefail
 
 WK_TOOLS=/opt/wk-tools
-SRC=/src/WebKit
+SRC=$WK_SRC                             # the repo's checkout, lib/wk/repos.py
 
 log()  { printf '[firstrun] %s\n' "$*"; }
 warn() { printf '[firstrun] warning: %s\n' "$*" >&2; }
@@ -45,7 +45,10 @@ fi
 
 _git_py() { PYTHONPATH="$WK_TOOLS/lib" WK_ROOT="$WK_TOOLS" python3 -m wk.git "$@"; }
 
-if [ -d "$SRC/.git" ]; then             # an old snapshot's remotes are stale
+if [ -n "${WK_CLONE:-}" ]; then         # a repo cloned here, not overlaid on a snapshot
+    git clone --quiet "$WK_CLONE" "$SRC"
+    log "checkout: $WK_CLONE cloned into $SRC"
+elif [ -d "$SRC/.git" ]; then           # an old snapshot's remotes are stale
     _mirror="${WK_MIRROR:-}"
     [ -n "$_mirror" ] || log "no mirror on this place, so every fetch in here reads github.com"
     _wiring=$(_git_py wiring-script "$SRC" "$_mirror") \
@@ -263,8 +266,8 @@ if ! command -v npm >/dev/null 2>&1; then
     fi
 fi
 
-{                                       # WebKit's helpers are in the checkout
-    echo "command script import $SRC/Tools/lldb/lldb_webkit.py"
+{                                       # WebKit's helpers are in its checkout
+    [ -n "${WK_CLONE:-}" ] || echo "command script import $SRC/Tools/lldb/lldb_webkit.py"
     echo "command script import $WK_TOOLS/container/lldb/rr.py"
     cat "$WK_TOOLS/dotfiles/lldbinit"
 } > "$HOME/.lldbinit"
@@ -286,6 +289,7 @@ if [ -n "${WK_WORKSPACE:-}" ]; then
 # wk: this machine IS a workspace. Written by container/firstrun.sh.
 name=$WK_WORKSPACE
 src=$SRC
+repo=$WK_REPO
 arch=${WK_ARCH:-native}
 EOF
     log "workspace marker written ($HOME/.wk-workspace)"

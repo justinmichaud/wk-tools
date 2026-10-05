@@ -5,7 +5,7 @@ import os
 import shlex
 import sys
 
-from wk import project, record
+from wk import kv, project, record, repos
 
 BROKER_SOCKET = "/run/wk/broker.sock"
 GUEST_BROKER_SOCKET = ".wk-broker.sock"
@@ -257,7 +257,8 @@ class Snapshots:
         return None if text is None else text.strip()
 
     def unpinned(self):
-        return [w for w in self.workspaces() if self.pin(w) is None]
+        return [w for w in self.workspaces() if self.pin(w) is None
+                and repos.of_marker(kv.kv(self._read(repos.marker_in(self.store.ws_dir(w))))).snapshot]
 
     def unreferenced(self):
         """The snapshots `wk gc` may take; none while a workspace's pin is unknown."""

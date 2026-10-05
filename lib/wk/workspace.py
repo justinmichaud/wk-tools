@@ -13,7 +13,7 @@ import re
 import shlex
 import sys
 
-from wk import act, job, kv, project, record, resources, sshalias
+from wk import act, job, kv, project, record, repos, resources, sshalias
 from wk.act import Refused, die, info, log, warn
 from wk.machine import Killed, in_podman_machine
 from wk.store import Snapshots, no_such_workspace
@@ -105,8 +105,12 @@ def new_front(reg, records, name, opts, prflow):
     tname = opts.get("place") or reg.default()
     try:
         driver = reg.load(tname)
+        repo = repos.Repo(opts.get("repo") or project.get("REPO"))
     except LookupError as e:
         die(str(e))
+    if repo.name != project.get("REPO") and driver.kind != "container":
+        die("--repo %s is container-only for now (this is place '%s'): a guest or a build\n"
+            "    box makes its checkout only from a %s mirror." % (repo.name, tname, project.get("CHECKOUT")))
     if driver.kind == "remote" and (driver.peer or not driver.is_local):
         return new_handed_over(driver, here, root, name, arch, opts)
     recs = record.of_driver(driver, records.clock, records.machine)
@@ -136,12 +140,12 @@ def new_front(reg, records, name, opts, prflow):
     base = opts.get("base") or ""
     if act.dry_run():
         from wk.lock import Lock
-        new_detached_run(driver, recs, Lock(driver.store, here, recs.clock), recs.clock, name, base, arch)
+        new_detached_run(driver, recs, Lock(driver.store, here, recs.clock), recs.clock, name, base, arch, repo)
         return 0
     since = recs.clock.stamp()
     here.mkdir(os.path.dirname(log_path))
     here.write(log_path, "")
-    argv = [wk_of(root), "new", name, "--on", tname, "--arch", arch] + (["--base", base] if base else []) + ["--_detached"]
+    argv = [wk_of(root), "new", name, "--on", tname, "--arch", arch, "--repo", repo.name] + (["--base", base] if base else []) + ["--_detached"]
     pid = here.spawn(argv, log_path)
     if opts.get("no_wait"):
         info("creating '%s' on %s, detached as pid %d -- this end can go away" % (name, tname, pid))
@@ -229,9 +233,9 @@ def new_hints(driver, name, arch):
 
 
 def new_kill(driver, here, records, env, name, opts):
-    if any(opts.get(k) for k in ("pr", "zed", "no_wait", "base")):
+    if any(opts.get(k) for k in ("pr", "zed", "no_wait", "base", "repo")):
         die("'wk new %s --kill' stops the creation already running and takes\n"
-            "    nothing with it -- no --base, --zed, --no-wait or --pr." % name)
+            "    nothing with it -- no --base, --repo, --zed, --no-wait or --pr." % name)
     stopped = job.stop(driver, records, name, "new", here, records.clock, env)
     if stopped == 1:
         die("the process creating '%s' outlived a TERM and a KILL. It holds the\n"
@@ -242,23 +246,23 @@ def new_kill(driver, here, records, env, name, opts):
     return 0
 
 
-def new_detached_run(driver, records, lock, clock, name, base, arch):
+def new_detached_run(driver, records, lock, clock, name, base, arch, repo):
     """PLAN's steps under the workspace lock: a refusal ends the record `refused`, any other failure 1."""
     here = records.machine
     if driver.kind == "container":
         with lock.held("sdk"):
             driver.sdk_refresh()
     lock.hold("ws-" + name)
-    if driver.reads_host_mirror:
+    if driver.reads_host_mirror and repo.snapshot:
         refresh_mirror(driver, here, name)
-    if driver.needs_base:
+    if driver.needs_base and repo.snapshot:
         lock.hold("store")
     state = creation_state(driver, records, name)
     task = None
     if not act.dry_run():
         task = records.begin("new", "here", name, "wk new %s --kill" % name, driver.create_log(name), list(PLAN))
     try:
-        _create(driver, records, task, clock, name, base, arch, state)
+        _create(driver, records, task, clock, name, base, arch, repo, state)
     except Killed:
         raise
     except Exception as e:
@@ -285,7 +289,7 @@ def _end(task, status):
         task.end(status)
 
 
-def _create(driver, records, task, clock, name, base, arch, state):
+def _create(driver, records, task, clock, name, base, arch, repo, state):
     here, tname = records.machine, driver.name
 
     def stage(step):
@@ -318,7 +322,7 @@ def _create(driver, records, task, clock, name, base, arch, state):
             die("could not destroy the half-made workspace '%s'; still here:%s\n"
                 "    'wk rm %s' retries exactly that, then 'wk new %s'" % (name, left, name, name))
         sshalias.alias_remove(here, driver.env, name)
-    if driver.needs_base:
+    if driver.needs_base and repo.snapshot:
         stage("base")
         mirror = driver.store.mirror_dir()
         if not here.isdir(mirror):
@@ -334,7 +338,7 @@ def _create(driver, records, task, clock, name, base, arch, state):
         if why:
             die(why)
     stage("create")
-    driver.create(name, base, arch)
+    driver.create(name, base, arch, repo)
     stage("init")
     if not act.dry_run() and not driver.ready(name, clock):
         die("'%s' was created but never finished initialising -- the push\n"
@@ -344,7 +348,7 @@ def _create(driver, records, task, clock, name, base, arch, state):
     stage("agents")
     driver.install_agents(name)
     stage("fetch")
-    freshen(driver, name, here)
+    freshen(driver, name, here, repo)
     stage("register")
 
 
@@ -352,12 +356,19 @@ def checkout_script(src):
     return "cd %s || exit 2\n" % shlex.quote(src) + CHECKOUT_SCRIPT
 
 
-def freshen(driver, name, here):
-    """Fetch the checkout from the mirror beside its snapshot and fast-forward onto it. Never fatal."""
-    wk = wk_of(driver.root)
+def freshen(driver, name, here, repo):
+    """Fetch a snapshot repo's checkout from its mirror and fast-forward onto it, then report the checkout. Never fatal."""
     if act.dry_run():
-        here.act_run([wk, "sync", name])
+        if repo.snapshot:
+            here.act_run([wk_of(driver.root), "sync", name])
         return
+    if repo.snapshot and not fetch_from_mirror(driver, name, here):
+        return
+    report_checkout(driver, name)
+
+
+def fetch_from_mirror(driver, name, here):
+    wk = wk_of(driver.root)
     mirror = shlex.quote(driver.mirror_dir())
     r = driver.exec(name, ["sh", "-c", "[ -n %s ] && [ -d %s ] && echo yes || echo no" % (mirror, mirror)])
     lines = r.out.replace("\r", "").splitlines() if r.ok else []
@@ -374,7 +385,11 @@ def freshen(driver, name, here):
     else:
         info("nothing to run in '%s' yet, so its checkout was not fetched in" % name)
         log("  wk sync %s    once it is up" % name)
-        return
+        return False
+    return True
+
+
+def report_checkout(driver, name):
     r = driver.exec(name, ["sh", "-c", checkout_script(driver.src(name))])
     said = kv.kv(r.out if r.ok else "")
     if said.get("detached"):

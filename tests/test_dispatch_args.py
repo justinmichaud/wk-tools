@@ -100,11 +100,11 @@ class TestResolvePlaceReadsTheSameWay(unittest.TestCase):
 
 class TestNewReadsEveryOptionThroughArgs(unittest.TestCase):
     def test_new(self):
-        got = load_cmd("new").parse(["--on", "vm", "--arch", "armhf", "--base", "b1", "--pr", "7",
+        got = load_cmd("new").parse(["--on", "vm", "--arch", "armhf", "--base", "b1", "--repo", "wk-tools", "--pr", "7",
                                      "--zed", "--no-wait", "--kill", "--_detached"])
-        self.assertEqual(got, {"place": "vm", "base": "b1", "arch": "armhf", "pr": "7", "zed": True,
+        self.assertEqual(got, {"place": "vm", "base": "b1", "arch": "armhf", "repo": "wk-tools", "pr": "7", "zed": True,
                                "no_wait": True, "kill": True, "detached": True})
-        self.assertEqual(load_cmd("new").parse([]), {"place": None, "base": None, "arch": None, "pr": None, "zed": False,
+        self.assertEqual(load_cmd("new").parse([]), {"place": None, "base": None, "arch": None, "repo": None, "pr": None, "zed": False,
                                                      "no_wait": False, "kill": False, "detached": False})
 
 

@@ -18,7 +18,7 @@ from tests.support import REPO
 from tests.test_wk_places import LINUX_PROBE
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, places, pr, record, secrets, workspace  # noqa: E402
+from wk import act, places, pr, record, repos, secrets, workspace  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
@@ -349,9 +349,9 @@ class WorkspaceTest(unittest.TestCase):
         w = w or self.w
         return workspace.new_front(w.reg, w.records, name, opts, pr)
 
-    def detached(self, w=None, name="ws", base="", arch="native", driver=None):
+    def detached(self, w=None, name="ws", base="", arch="native", driver=None, repo=None):
         w = w or self.w
-        return workspace.new_detached_run(driver or w.driver, w.records, w.lock, w.clock, name, base, arch)
+        return workspace.new_detached_run(driver or w.driver, w.records, w.lock, w.clock, name, base, arch, repo or repos.default())
 
     def runs(self, w=None, head=None):
         w = w or self.w
@@ -444,7 +444,7 @@ class TestNewFrontDetach(WorkspaceTest):
         rc, err = self.stderr(lambda: self.front(no_wait=True, base="main-2", arch="arm", zed=True))
         self.assertEqual(rc, 0)
         log = self.w.driver.create_log("ws")
-        self.assertEqual(self.spawned(), [("spawn", (WK, "new", "ws", "--on", "fakebox", "--arch", "armhf", "--base", "main-2", "--_detached"), log)])
+        self.assertEqual(self.spawned(), [("spawn", (WK, "new", "ws", "--on", "fakebox", "--arch", "armhf", "--repo", "webkit", "--base", "main-2", "--_detached"), log)])
         self.assertIn(("write", log), self.w.effects)
         self.assertIn(("mkdir", os.path.dirname(log)), self.w.effects)
 
@@ -584,7 +584,7 @@ class TestNewOnAPeer(unittest.TestCase):
 class TestNewKill(WorkspaceTest):
     def test_kill_takes_no_other_flag(self):
         err = self.refused(lambda: self.front(kill=True, no_wait=True))
-        self.assertIn("'wk new ws --kill' stops the creation already running and takes\n    nothing with it -- no --base, --zed, --no-wait or --pr.", err)
+        self.assertIn("'wk new ws --kill' stops the creation already running and takes\n    nothing with it -- no --base, --repo, --zed, --no-wait or --pr.", err)
 
     def test_nothing_running_is_said_and_is_not_a_failure(self):
         rc, err = self.stderr(lambda: self.front(kill=True))
@@ -817,7 +817,7 @@ class TestNewDriver(WorkspaceTest):
 class TestFreshen(WorkspaceTest):
     def freshen(self, w=None):
         w = w or self.w
-        return self.stderr(lambda: workspace.freshen(w.driver, "ws", w))[1]
+        return self.stderr(lambda: workspace.freshen(w.driver, "ws", w, repos.default()))[1]
 
     def test_a_mirror_in_reach_is_fetched_with_wk_sync(self):
         err = self.freshen()

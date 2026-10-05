@@ -1225,6 +1225,8 @@ decides is a row; one still open is listed under "Decisions for the user".
 | `./setup --stage tools` on a bare macOS host downloads git-lfs at its pinned version, checks it against the release's sha256sums, and `wk doctor` then reports it present | 5 | `unit doctor.TestHostToolsGitLfs`, `live setup.git_lfs[macos]` |
 | bugs.webkit.org gates comment tagging on editbugs, so `wk doctor`'s Bugzilla row can say editbugs: the comment-tag probe answers a key of an account with editbugs and refuses (304) one without | 4 | `live credcheck.editbugs_probe` |
 | A board reaches the page server at its tailnet name and port through the `tag:wk -> tag:wk` grant, with no `ssh -R` held for the run | 5 | `live bench.direct_page_server[<board>]` |
+| `wk new --repo wk-tools` makes a container holding wk-tools: `./wk selftest --lint` passes in it, `wk ai claude` starts in its checkout and `wk sync` fetches its origin; once it passes, the host `claude` session goes from claude/CLAUDE-host.md and README | 3 | `live repo_workspace_live.ToolsWorkspaceLive` |
+| A push from a wk-tools workspace reaches the user's wk-tools repository through a deploy key `wk key` makes and `wk key push on` loads, kept apart from the forks a WebKit checkout is wired with | 3 | `unit secrets.repo_push_keys`, `live repo_workspace_live.push` |
 | Speedometer 3 under MiniBrowser runs without its `wakeLock` error: an upstream WebKit patch, landed last, after every other owed row | end | `live bench.speedometer3_wakelock[mbp]` |
 
 ### Decisions for the user

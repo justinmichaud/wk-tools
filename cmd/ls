@@ -9,7 +9,8 @@
 #   PLACE    where it lives (container, vm, or a machine)
 #   STATE     the environment's own word: running, exited, present, creating
 #   BASE      the upstream WebKit line it is built from: main, a release like
-#             2.52, an image workspace's image preset, or `?` when unknown
+#             2.52, an image workspace's image preset, or `?` when unknown; the
+#             repo, for one that is not WebKit (`wk new --repo`)
 #   SNAP      the snapshot its checkout is pinned to (`wk help`)
 #   ARCH      what it builds natively; blank when that is the host's own
 #   CHANGES   disk its own writes take -- the overlay layer, reclaimed by `wk gc`
@@ -38,7 +39,8 @@ FORMAT = "%-20s %-18s %-10s %-8s %-20s %-8s %8s"
 NOT_APPLICABLE = "n/a"
 
 def base_of(driver, ws):
-    return places.image_base(ROOT, ws) or places.git_base(driver, ws) or "?"
+    repo = driver.repo(ws)
+    return places.image_base(ROOT, ws) or (repo.name if not repo.snapshot else None) or places.git_base(driver, ws) or "?"
 
 
 def col(label, place):

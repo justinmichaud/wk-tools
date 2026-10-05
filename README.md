@@ -234,6 +234,25 @@ wk scp bug-238 -r :WebKitBuild/logs ~/logs
 
 Runs where you type it; the other path is on this machine.
 
+**Working on wk-tools**
+
+```sh
+wk new tools --repo wk-tools            # a container holding wk-tools instead of WebKit
+wk ai claude tools                      # the agent starts in /src/wk-tools
+wk enter tools                          # a shell there; ./wk selftest runs lint and unit
+wk sync tools                           # fetches its origin
+```
+
+wk-tools is worked on from such a workspace, not from a session on the host.
+Its checkout is cloned at first start from this machine's wk-tools `origin`
+(its GitHub repository, over https), so it needs no mirror and no snapshot.
+The commit wall and the push switch are a WebKit workspace's: an agent there
+cannot commit or push, and a person turns push on. The live tier of `wk
+selftest` stays the host's. Only the container place holds one for now; `--repo`
+on another is refused.
+TODO: a push from it needs a deploy key for the wk-tools repository in `wk key`'s set (docs/PLAN.md, Owed).
+TODO: the host session goes once the live check `tests/test_repo_workspace_live.py` passes (claude/CLAUDE-host.md).
+
 **A macOS guest, for the Apple ports**
 
 ```sh

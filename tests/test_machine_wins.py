@@ -7,7 +7,7 @@ from tests.test_rm_final_state import RmFinalStateTest
 from tests.test_wk_workspace import World, step
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import sshalias, status, workspace  # noqa: E402
+from wk import repos, sshalias, status, workspace  # noqa: E402
 from wk.machine import Result  # noqa: E402
 
 USER = "Host mine\n    HostName m.example\n# kept as written\n"
@@ -72,7 +72,7 @@ class TestMachineWins(RmFinalStateTest):
         base = w.driver.store.snapshots_dir()
         for given in ("", "main-1"):
             w.effects = []
-            self.refused(lambda: workspace.new_detached_run(w.driver, w.records, w.lock, w.clock, "ws", given, "native"))
+            self.refused(lambda: workspace.new_detached_run(w.driver, w.records, w.lock, w.clock, "ws", given, "native", repos.default()))
             self.assertEqual([a for a in self.runs(w) if step(a) == "wkdev-create"], [])
             self.assertEqual([e for e in w.effects if e[0] in ("write", "remove", "mkdir") and e[1].startswith(base)], [])
             (t,) = w.records.list()

@@ -45,6 +45,14 @@ def fetch_and_check_script(src, mirror, forks, branches):
     return "%s(\n%s\n)\necho check=$?\n" % (fetch, git.wiring_check_script(src, mirror, forks, branches))
 
 
+def clone_fetch_and_check_script(src, origin):
+    """A cloned repo's fetch, then whether its origin is still the one it was cloned from."""
+    fetch = fetch_script(src, "").replace("exit $rc\n", "echo fetch=$rc\n")
+    return fetch + ('u=$(git config --get remote.origin.url 2>/dev/null || echo "")\n'
+                    'if [ "$u" = %s ]; then echo check=0; else echo "problem: origin is ${u:-unset}, not "%s; echo check=1; fi\n'
+                    % (shlex.quote(origin), shlex.quote(origin)))
+
+
 def fetch_into_mirror(here, store, lock, src, srcspec, dest):
     """The one entry point that fetches a named ref from `src` into this machine's mirror (`wk bench ab`'s PR and branch heads), made on first use, under the store lock."""
     if in_vm(store.env):
@@ -154,7 +162,7 @@ class Sync:
             driver = self.load(self.reg.ws_place(self.only))
         except LookupError as e:
             die(str(e))
-        if self.reg.in_workspace():
+        if self.reg.in_workspace() and driver.repo(self.only).snapshot:
             rc = self.mirror_refresh_request()
         else:
             driver.store_init()
@@ -414,11 +422,17 @@ class Sync:
             st = "unreachable"
         if st != "present":
             return "skipped", "  %-24s %s -- skipped\n" % (ws, st)
-        src, mirror = driver.src(ws), driver.mirror_dir()
-        notes = []
-        fixed = self.fix_one(driver, ws, src, mirror, notes) if self.fix else True
+        repo, src, notes = driver.repo(ws), driver.src(ws), []
+        if repo.snapshot:
+            mirror = driver.mirror_dir()
+            fixed = self.fix_one(driver, ws, src, mirror, notes) if self.fix else True
+            script = fetch_and_check_script(src, mirror, self.forks(), self.branches)
+        else:
+            mirror, origin = "", repo.origin(self.here, self.root)
+            fixed = self.fix_clone(driver, ws, src, origin, notes) if self.fix else True
+            script = clone_fetch_and_check_script(src, origin)
         with stage(self.clock, "workspace fetch %s" % ws):
-            r = driver.act_exec(ws, ["sh", "-c", fetch_and_check_script(src, mirror, self.forks(), self.branches)])
+            r = driver.act_exec(ws, ["sh", "-c", script])
         lines = r.out.replace("\r", "").splitlines()
         said = kv.kv(r.out)
         problems = ["    - %s" % l[len("problem: "):] for l in lines if l.startswith("problem: ")]
@@ -436,6 +450,11 @@ class Sync:
         if not fixed or said.get("check") != "0":
             return "wired", "  %-24s %s -- wired wrong:\n%s" % (ws, row, "".join(p + "\n" for p in notes + problems))
         return "ok", "  %-24s %s\n%s" % (ws, row, "".join(p + "\n" for p in notes))
+
+    def fix_clone(self, driver, ws, src, origin, notes):
+        ok = driver.act_exec(ws, ["git", "-C", src, "remote", "set-url", "origin", origin]).ok
+        notes.append("    re-wired" if ok else "    could not re-wire '%s'" % ws)
+        return ok
 
     def fix_one(self, driver, ws, src, mirror, notes):
         """`git-webkit setup` runs only where the injector puts the credential it reads: a container or a guest."""
