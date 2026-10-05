@@ -19,10 +19,8 @@ Consequences:
 
 - **wk-tools is worked on from a `--repo wk-tools` workspace, not from here:**
   `wk new <name> --repo wk-tools`, then `wk ai claude <name>`; `./wk selftest`
-  (lint and unit) runs in it, and the live tier stays this host's.
-  TODO: this host's `claude` goes once the owed live check
-  `tests/test_repo_workspace_live.py` (ToolsWorkspaceLive) passes; until then
-  the instructions below still hold for a session here.
+  (lint and unit) runs in it, and the live tier stays this host's, run by a
+  person.
 - **Claude only ever runs inside a workspace.** The in-workspace interface --
   `wk build <preset>`, `wk run -- <args>`, `wk test <args>`, no workspace
   name -- is load-bearing, not a convenience: it carries the job-count and

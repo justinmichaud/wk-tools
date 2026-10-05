@@ -251,7 +251,6 @@ cannot commit or push, and a person turns push on. The live tier of `wk
 selftest` stays the host's. Only the container place holds one for now; `--repo`
 on another is refused.
 TODO: a push from it needs a deploy key for the wk-tools repository in `wk key`'s set (docs/PLAN.md, Owed).
-TODO: the host session goes once the live check `tests/test_repo_workspace_live.py` passes (claude/CLAUDE-host.md).
 
 **A macOS guest, for the Apple ports**
 
