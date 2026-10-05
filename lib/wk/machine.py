@@ -501,8 +501,10 @@ def far_tree(out, top, patterns):
 
 
 def far_side_start(cmd, out_path, tail):
-    """The far-side start line: `cmd` detached, its output in `out_path`, ending in `tail` (a pid, or a disown)."""
-    return "nohup %s > %s 2>&1 < /dev/null & %s" % (cmd, shlex.quote(out_path), tail)
+    """The far-side start line: `cmd` detached, its output in `out_path`, ending in `tail` (a pid, or a disown).
+    The subshell exits at once, so the job's parent is the far side's init, which reaps it; tart's guest agent never reaps
+    a child that outlives its exec, and a zombie answers `kill -0`."""
+    return "(nohup %s > %s 2>&1 < /dev/null & %s)" % (cmd, shlex.quote(out_path), tail)
 
 
 LOGIN = '"$SHELL" -lc '

@@ -713,3 +713,16 @@ class TestOneCopyPath(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestADetachedJobIsInitsChild(unittest.TestCase):
+    def test_the_job_outlives_its_starter_as_a_child_of_init(self):
+        """A parent that never reaps (tart's guest agent) would leave the job a zombie that answers `kill -0`."""
+        with tempfile.TemporaryDirectory() as d:
+            line = machine.far_side_start("sleep 5", os.path.join(d, "log"), "echo $!")
+            pid = int(subprocess.run(["sh", "-c", line], capture_output=True, text=True, timeout=10).stdout)
+            try:
+                ppid = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+                self.assertEqual("1", ppid)
+            finally:
+                os.kill(pid, signal.SIGKILL)
