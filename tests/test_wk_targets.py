@@ -327,12 +327,11 @@ class TestVm(VmTest):
         self.assertIn("IdentityFile " + self.t.key(), text)
         self.assertEqual((self.t.ssh_host("mac"), self.t.ssh_host("gone"), self.t.ssh_user("mac")), ("wk-mac", None, "admin"))
 
-    def test_the_transport_is_sshd_on_stdio_inside_the_guest(self):
+    def test_the_transport_bridges_stdio_to_the_guests_own_sshd_on_loopback(self):
         with mock.patch.object(os, "execvp") as ex:
             self.t.ssh_transport("mac")
         (prog, argv), _ = ex.call_args
-        self.assertEqual((prog, argv[:6]), (self.t.tart(), [self.t.tart(), "exec", "-i", "wk-mac", "/bin/sh", "-c"]))
-        self.assertIn("/usr/sbin/sshd -i ", argv[-1])
+        self.assertEqual((prog, argv), (self.t.tart(), [self.t.tart(), "exec", "-i", "wk-mac", "/usr/bin/nc", "127.0.0.1", "22"]))
 
     def test_the_socket_forwards_ride_the_same_transport(self):
         argv = self.t.ssh_argv("mac")

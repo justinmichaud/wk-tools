@@ -1433,15 +1433,9 @@ class Vm(Target):
     def ssh_proxy(self, ws):
         return "%s vm %s" % (os.path.join(self.root, "container", "ssh-transport"), ws)
 
-    def sshd_cmd(self):
-        """sshd on stdio as the guest's own user, keyed by a host key it makes once; never a listener on the network."""
-        return ("k=$HOME/.wk-ssh/ssh_host_ed25519_key; [ -f \"$k\" ] || { mkdir -p -m 0700 \"$HOME/.wk-ssh\" && "
-                "ssh-keygen -q -t ed25519 -N '' -f \"$k\"; } >&2 && exec /usr/sbin/sshd -i -e -f /dev/null -o HostKey=\"$k\" "
-                "-o AuthorizedKeysFile=.ssh/authorized_keys -o UsePAM=no -o PidFile=none -o PermitRootLogin=no "
-                "-o AllowUsers=%s -o LogLevel=ERROR -o Subsystem='sftp internal-sftp'" % self.user())
-
     def ssh_transport(self, ws):
-        os.execvp(self.tart_or_die(), [self.tart_or_die(), "exec", "-i", self.vm(ws), "/bin/sh", "-c", self.sshd_cmd()])
+        # macOS sshd cannot open an audit session on a pipe (`sshd -i` dies), so stdio is bridged to the guest's own sshd on loopback.
+        os.execvp(self.tart_or_die(), [self.tart_or_die(), "exec", "-i", self.vm(ws), "/usr/bin/nc", "127.0.0.1", "22"])
 
     def ssh_argv(self, ws):
         return ["ssh", "-o", "ProxyCommand=" + self.ssh_proxy(ws), "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",

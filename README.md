@@ -248,8 +248,8 @@ stale once an input that made it changes, and `wk doctor` says so.
 Everything wk runs in a guest, and every copy in or out, goes through `tart
 exec`, the guest agent's own channel, never the network (macOS refuses a
 launchd job's connection to a guest). The `wk-<name>` alias the editor uses
-reaches the guest's sshd the same way: its ProxyCommand runs `sshd -i` under
-`tart exec`. A guest mounts two host directories: agent-rw on macOS's
+reaches the guest's sshd the same way: its ProxyCommand runs `nc 127.0.0.1 22`
+under `tart exec`. A guest mounts two host directories: agent-rw on macOS's
 automount tag, and the mirror read-only on its own tag, `wk-mirror`, which a
 LaunchDaemon the base installs mounts at boot under `/Volumes/wk-mirror`.
 Each start forwards the host's request broker to `~/.wk-broker.sock` in the
