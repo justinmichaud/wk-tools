@@ -41,6 +41,10 @@ SOURCE=cgroup
 [ -n "$(_cgroup_mb)" ] || SOURCE=tree
 echo "wk: memory: measuring the $SOURCE" >&2
 
+_alive() {   # a zombie answers kill -0, and tart's guest agent reaps the build only once this watchdog lets go of its output
+    kill -0 "$PID" 2>/dev/null && [ "$(ps -o stat= -p "$PID" 2>/dev/null | cut -c1)" != Z ]
+}
+
 _kill_tree() {   # TERM before KILL: a half-written object file fails the *next* build, not this one
     local pids="$1" p
     for p in $pids; do
@@ -49,7 +53,7 @@ _kill_tree() {   # TERM before KILL: a half-written object file fails the *next*
     done
     local i=0
     while [ "$i" -lt 10 ]; do
-        kill -0 "$PID" 2>/dev/null || return 0
+        _alive || return 0
         sleep 1; i=$((i + 1))
     done
     for p in $pids; do kill -KILL "$p" 2>/dev/null || true; done
@@ -66,7 +70,7 @@ _report_survivors() {
     echo "wk: stop it by name -- wk sysimage build <profile> --stop -- or remake the workspace." >&2
 }
 
-while kill -0 "$PID" 2>/dev/null; do
+while _alive; do
     sample=$(_tree "$PID")
     rss=${sample%% *}
     pids=${sample#* }

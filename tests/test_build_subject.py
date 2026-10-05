@@ -62,6 +62,18 @@ class TestTheWatchdogMeasuresWhatDetached(WkTest):
                   + "\n_cgroup_mb")
         self.assertEqual(cp.stdout.strip(), "12800", cp.stdout + cp.stderr)
 
+    def test_a_build_that_ended_unreaped_ends_the_watchdog(self):
+        """tart's guest agent reaps the build only after the watchdog lets go of the session's output."""
+        zombie = subprocess.Popen(["true"])
+        while subprocess.run(["ps", "-o", "stat=", "-p", str(zombie.pid)], capture_output=True, text=True).stdout[:1] != "Z":
+            pass
+        try:
+            cp = subprocess.run(["bash", str(self.WATCHDOG), str(zombie.pid), "999999"], capture_output=True, text=True,
+                                timeout=10, env=dict(os.environ, WK_MEM_INTERVAL="1"))
+            self.assertEqual(0, cp.returncode, cp.stderr)
+        finally:
+            zombie.wait()
+
     def test_nothing_comes_back_where_there_is_no_cgroup(self):
         cp = bash(self._lift("_cgroup_mb") + "\necho \"[$(_cgroup_mb)]\"")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)

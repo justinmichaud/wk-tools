@@ -41,6 +41,7 @@ GIT_STATUS_BUDGET = {
     "container": 3.0,     # 0.84 s cold and 0.46 s warm in a new container: headroom for a loaded podman VM
     "tart": 3.0,          # 0.82 s cold in a guest sharing the host with the podman VM (2026-10-01)
     "moose": 3.0,         # 0.36 s cold in a container on moose (2026-10-04)
+    "bb4": 3.0,           # 1.11 s in a checkout on buildbox4's shared disk (2026-10-05)
 }
 
 TARGETS = {
@@ -389,7 +390,7 @@ class TargetSteps:
             self.assertLess(got["status_seconds"], budget, "git status took %.2fs in '%s'" % (got["status_seconds"], self.ws))
 
     def agent_replies(self, agent, *extra):
-        r = wk("ai", agent, self.ws, *(extra + ("-p", PROMPT)), timeout=900)
+        r = wk("ai", *extra, agent, self.ws, "-p", PROMPT, timeout=900)   # after the workspace, everything is the agent's
         self.assertEqual(0, r.rc, "'wk ai %s %s' exited %d:\n%s" % (agent, self.ws, r.rc, tail(r.out)))
         self.assertIn(REPLY, [l.strip() for l in r.out.splitlines()], "%s did not answer:\n%s" % (agent, tail(r.out)))
         return r
