@@ -904,13 +904,13 @@ class TestFreshen(WorkspaceTest):
 class TestRecordHelpers(WorkspaceTest):
     def test_live_lines_name_every_live_job_and_skip_dead_pids(self):
         self.w.begin("build", "ws1", pid=4242)
-        self.w.begin("agent-forward", "ws1", pid=4243, kill="wk key push off")
+        self.w.begin("push-forward", "ws1", pid=4243, kill="wk stop ws1")
         self.w.begin("test", "ws1", pid=4244)
         self.w.begin("build", "ws2", pid=4245)
         self.w.pids.update({4242, 4243, 4245})
         self.assertEqual(workspace.live_task_lines(self.w.records, "ws1"),
-                         "    agent-forward (pid 4243 on here)  stop it:  wk key push off\n"
-                         "    build (pid 4242 on here)  stop it:  wk build ws1 --kill")
+                         "    build (pid 4242 on here)  stop it:  wk build ws1 --kill\n"
+                         "    push-forward (pid 4243 on here)  stop it:  wk stop ws1")
         self.assertEqual(len(workspace.task_records_for(self.w.records, "ws1")), 3)
 
     def test_every_record_of_that_workspace_goes_and_no_others(self):

@@ -40,12 +40,12 @@ class TestBinDir(WkTest):
             "kind=build\ndriver=remote\nhost=overlaybox\nroot=/tmp/x\n")
 
         env = {"HOME": str(self.tmp), "PATH": "/usr/bin:/bin"}
-        cp = subprocess.run([str(root / "wk"), "key", "push", "status", "--on", "overlaybox"],
+        cp = subprocess.run([str(root / "wk"), "key", "sudo", "status", "--on", "overlaybox"],
                             cwd="/", env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, timeout=60)
         self.assertNotIn("unknown place", cp.stdout)
         real = fleet.Fleet(REPO, FLEET_ENV).names(fleet.PLACE_KINDS)
-        cp = subprocess.run([str(root / "wk"), "key", "push", "status", "--on", "nosuchbox"],
+        cp = subprocess.run([str(root / "wk"), "key", "sudo", "status", "--on", "nosuchbox"],
                             cwd="/", env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, timeout=60)
         self.assertIn("overlaybox", cp.stdout)

@@ -868,7 +868,7 @@ class TestVmWrite(VmTest):
         _, err = self.stderr_of(lambda: self.t.destroy("mac"))
         acts = [e for e in self.fake.effects if e[0] != "run" or e[1][0] == self.tart and e[1][1] != "list"]
         self.assertEqual(acts, [("run", (self.tart, "stop", "wk-mac")), ("run", (self.tart, "delete", "wk-mac")), ("kill", 4242, 15),
-                                *[("remove", os.path.join(vm_dir, "mac." + f)) for f in ("run.log", "unfiltered", "agent-forward.log", "broker-forward.log")],
+                                *[("remove", os.path.join(vm_dir, "mac." + f)) for f in ("run.log", "unfiltered", "push-forward.log", "broker-forward.log")],
                                 ("remove", ws_dir)])
         self.assertNotIn("still alive", err)
         self.fake.pids.add(4242)
@@ -882,7 +882,7 @@ class TestVmWrite(VmTest):
         self.fake.effects = []
         self.stderr_of(lambda: self.t.destroy("gone"))
         self.assertEqual([e for e in self.fake.effects if e[0] != "run"],
-                         [("remove", os.path.join(self.t.vm_dir(), "gone." + f)) for f in ("run.log", "unfiltered", "agent-forward.log", "broker-forward.log")])
+                         [("remove", os.path.join(self.t.vm_dir(), "gone." + f)) for f in ("run.log", "unfiltered", "push-forward.log", "broker-forward.log")])
 
     def test_a_dry_run_prints_would_run_and_changes_nothing(self):
         self.dry_run()

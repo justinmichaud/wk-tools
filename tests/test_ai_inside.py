@@ -19,7 +19,7 @@ class _Inside(_Flow, _Wall):
         _Wall.setUp(self)
         self.setUpFlow()
         self.env.update(WK_NAME="demo", WK_PLACE="local")
-        self.fake.answer(["ssh", "-G", "github-webkit"], out="user me\n")
+        self.set("git config --global --get core.sshCommand", "%s/container/push/wk-push-client.py" % REPO)
 
     def checks(self, force=False):
         if force:
@@ -40,7 +40,7 @@ class TestTheCommandRunsInAWorkspace(_Inside):
         refused, err = self.checks()
         self.assertFalse(refused, err)
         self.assertIn("checking workspace 'demo' from inside it", err)
-        self.assertIn("the agent holds nothing", err)
+        self.assertIn("no ssh-agent socket", err)
         self.assertIn("sandbox intact", err)
 
     def test_the_commit_wall_covers_a_session_started_from_inside(self):
@@ -69,7 +69,7 @@ class TestWhatEachKindOfFailureDoes(_Inside):
                 refused, err = self.checks(force=force)
                 self.assertTrue(refused, err)
                 self.assertIn("could publish", err)
-                self.assertIn("wk key push off", err)
+                self.assertIn("'wk doctor demo' on the host says which part fails", err)
 
 
 class TestTheFunctionDoesNotShadowTheRealCli(WkTest):

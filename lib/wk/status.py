@@ -8,7 +8,6 @@ import math
 import os
 import re
 import shutil
-import stat
 import sys
 import threading
 import time
@@ -16,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import secretfile
 import shlex
-from wk import bridge, fleet, images, places, project, reach, record, secrets, statusview, tools
+from wk import bridge, fleet, guest, images, places, project, reach, record, secrets, statusview, tools
 from wk.bench import record as bench_record
 from wk.clock import Clock
 from wk.lock import holder_pid
@@ -281,15 +280,39 @@ def disk_record(store, machine, in_vm, reclaimable):
     return r.done()
 
 
+def socket_answers(path, machine=None):
+    """A socket file is no evidence of a daemon: a killed one leaves it behind, so the answer is a connect."""
+    return (machine or Local()).run(["python3", "-c", guest.SOCKET_ANSWERS, path]).ok
+
+
+def launchd_daemons(store):
+    """(name, socket, setup stage) of what launchd keeps on a macOS host; the podman VM's copies of these sockets are forwards, not the daemons."""
+    if not store.macos_host:
+        return []
+    return [("credential injector", os.path.join(store.vm_store_dir(), "vm", "github-inject.sock"), "inject"),
+            ("request broker", store.runtime_socket(), "broker")]
+
+
+def injector_record(store, machine):
+    for name, sock, stage in launchd_daemons(store):
+        if stage != "inject":
+            continue
+        r = Rec("service", machine=machine, name=name + " (this Mac)")
+        if socket_answers(sock):
+            r.set("state", "running")
+        else:
+            r.set("state", "down")
+            r.set("fix", "./setup --stage inject   (a guest gets no credential and no container a claude.ai login)")
+        return r.done()
+    return None
+
+
 def broker_record(store, machine, alive):
     """The request broker: in flight is read from the process table, since a `running` status file is a claim a killed broker leaves behind."""
     sock = store.runtime_socket()
     brdir = os.path.join(store.state_dir(), "broker")
-    try:
-        is_sock = stat.S_ISSOCK(os.stat(sock).st_mode)
-    except OSError:
-        is_sock = False
-    if not is_sock and not os.path.isdir(brdir):
+    answers = socket_answers(sock)
+    if not answers and not os.path.exists(sock) and not os.path.isdir(brdir):
         return None
     r = Rec("service", machine=machine, name="request broker")
     n = 0
@@ -300,10 +323,10 @@ def broker_record(store, machine, alive):
                 continue
             n += 1
             r.note("in flight: %s -- %s" % (rid, st.get("stage", "")))
-    if is_sock:
+    if answers:
         r.set("state", "open (%d in flight)" % n)
     else:
-        r.set("state", "closed")
+        r.set("state", "down")
         r.set("fix", "./setup --stage broker   (a workspace cannot ask for a bench run without it)")
     return r.done()
 
@@ -338,7 +361,8 @@ def unit_stale(root, unit, run=None):
 
 def services():
     return (("wk-proxy.service", "egress proxy", "workspaces have no network without it"),
-            ("wk-github-inject.service", "credential injector", "'%s pr', 'gh' and claude in a workspace get no credential" % project.get("PR_TOOL")))
+            ("wk-github-inject.service", "credential injector", "'%s pr', 'gh' and claude in a workspace get no credential" % project.get("PR_TOOL")),
+            ("wk-push.service", "push service", "'git push' in a workspace is refused"))
 
 
 def service_records(root, machine, run=None):
@@ -387,7 +411,7 @@ def lock_records(store, machine, alive):
 
 
 def push_record(store, machine, forks, in_vm):
-    """The deploy keys held on disk: a count, never a switch position, which only `wk key push status` measures.
+    """The deploy keys held on disk, where only the push service reads them: no key reaches a workspace.
     The podman VM mounts only their public halves, so it has no row."""
     if in_vm or not forks:
         return None
@@ -400,7 +424,7 @@ def push_record(store, machine, forks, in_vm):
         pat = secretfile.present(os.path.join(held, "github-pat")) == 0
     except SystemExit:
         pat = False
-    r.set("detail", "%d deploy key(s), %d absent, %s -- 'wk key push status' says whether they are loaded"
+    r.set("detail", "%d deploy key(s), %d absent, %s -- no key reaches a workspace; the push service holds them"
           % (keys, absent, "an API token" if pat else "no API token"))
     return r.done()
 
@@ -943,6 +967,7 @@ class Walk:
                 out.append(sdk_record(m, local, driver.sdk_upstream(timeout=cap), cap))
         if not self.in_vm:
             out.append(broker_record(store, m, alive))
+            out.append(injector_record(store, m))
         out += service_records(self.root, m)
         out += lock_records(store, m, alive)
         keys = [r[0] for r in secrets.push_keys()]

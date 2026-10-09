@@ -919,7 +919,6 @@ class TestTheFetch(SyncTest):
         self.assertIn("-- wired wrong:", err)
         self.assertIn("    HTTP 401", err)
         self.assertIn("'git-webkit setup' did not finish (setup=failed)", err)
-        self.assertIn("wk key push on", err)
         self.assertIn("wk sync one --fix", err)
 
     def test_a_wiring_that_did_not_take_is_named_and_the_fetch_still_runs(self):

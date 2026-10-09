@@ -11,7 +11,7 @@ PLANS = {
     "yocto":  ["layers", "fetch", "image", "toolchain", "webkit", "pgo-mix"],
     "pgo":    ["instrumented build", "collect on rpi5", "measured build"],
     "new":    ["checking", "wipe", "base", "create", "init", "fetch", "register"],
-    "agent-forward": ["start forward", "verify"],
+    "push-forward": ["start forward", "verify"],
 }
 KILLS = {
     "build": "wk build ws1 --kill",
@@ -19,7 +19,7 @@ KILLS = {
     "yocto": "wk sysimage build wpe --stage image --stop",
     "pgo":   "kill 1234 on tolken",
     "new":   "wk new ws1 --kill",
-    "agent-forward": "wk key push off",
+    "push-forward": "wk stop ws1",
 }
 
 

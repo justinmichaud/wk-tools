@@ -1,6 +1,5 @@
 """`unit push.remote_forwarding`: a build box holds no deploy key at rest and nothing forwards one to it, so a push is made
-from the workstation (`wk pr open`, which fetches the box's branch into this machine's mirror) and `wk key push status` on the
-box says off."""
+from the workstation (`wk pr open`, which fetches the box's branch into this machine's mirror and pushes it with the deploy key)."""
 import contextlib
 import io
 import re
@@ -9,11 +8,11 @@ import subprocess
 import sys
 from unittest import mock
 
-from tests import test_pr_workflow, test_push_switch, test_wk_places
+from tests import test_pr_workflow, test_wk_places
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import pushswitch, secrets  # noqa: E402
+from wk import secrets  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 CMD_PR = test_pr_workflow.CMD_PR_MODULE
@@ -46,19 +45,20 @@ class TestABoxHoldsNoKey(test_wk_places.RemoteTest):
 class TestAPushFromABoxIsMadeHere(test_wk_places.RemoteTest):
     def test_wk_pr_open_fetches_the_box_branch_into_the_mirror_and_pushes_from_here(self):
         self.fake.answer(["git"])
-        self.fake.answer(["sh", "-c"])
         with mock.patch.object(CMD_PR, "pr_open_target", return_value=("WebKit/WebKit", "me:eng/b", "fork", "eng/b")), \
-                mock.patch.object(CMD_PR.secrets, "Secrets", lambda *a: test_pr_workflow.AgentKeys()), \
+                mock.patch.object(CMD_PR.secrets, "Secrets", lambda *a: test_pr_workflow.BoxKeys()), \
                 contextlib.redirect_stderr(io.StringIO()):
-            CMD_PR.pr_open(self.t, "a", False, False, push_status=lambda: 0)
+            self.fake.files["/s/push-keys/build_key_fork"] = "KEY\n"
+            CMD_PR.pr_open(self.t, "a", False, False)
         mirror = Store(self.env).mirror_dir()
         here = [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] == "git"]
         self.assertIn(("git", "-C", mirror, "fetch", "--quiet", "box.example:/home/u/wk/ws/a/WebKit",
                        "+refs/heads/eng/b:refs/wk/push/box/eng/b"), here)
-        push = [shlex.split(e[1][-1]) for e in self.fake.effects if e[0] == "run" and e[1][:2] == ("sh", "-c")]
+        push = [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] == "git" and "push" in e[1]]
         self.assertEqual(1, len(push), push)
-        self.assertEqual(["-C", mirror], push[0][3:5])
-        self.assertEqual(["push", "git@github.com:alice/WebKit.git", "refs/wk/push/box/eng/b:refs/heads/eng/b"], push[0][-3:])
+        self.assertEqual(("-C", mirror), push[0][1:3])
+        self.assertIn("-i /s/push-keys/build_key_fork", push[0][4])
+        self.assertEqual(("push", "git@github.com:alice/WebKit.git", "refs/wk/push/box/eng/b:refs/heads/eng/b"), push[0][-3:])
         self.assertIn(("git", "-C", mirror, "update-ref", "-d", "refs/wk/push/box/eng/b"), here)
         self.assertEqual([], [c for c in self.fake.ssh_calls() if "push" in c[-1]])
         self.assertEqual(1, len([e for e in self.fake.effects if e[0] == "exec" and e[1][:3] == ("gh", "pr", "create")]))
@@ -73,14 +73,3 @@ class TestAPushOnTheBoxIsRefused(test_wk_places.RemoteTest):
         cp = subprocess.run(shlex.split(proxies[0]), capture_output=True, text=True)
         self.assertEqual(1, cp.returncode)
         self.assertIn("wk pr open", cp.stderr)
-
-
-class TestStatusOnTheBox(test_push_switch.PushTest):
-    def setUp(self):
-        super().setUp()
-        self.box = test_push_switch.Box(self.w, self.w.env, name="buildbox", sock=None)
-        self.boxes = {"container": self.box}
-
-    def test_each_fork_is_neither_held_nor_absent(self):
-        p = pushswitch.Push(test_push_switch.registry(self.w, self.boxes), self.w.sec(), self.clock)
-        self.assertEqual({"forwarded"}, {p.where(f, set()) for f, _, _ in secrets.forks()})

@@ -371,6 +371,15 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
         self.assertTrue(podman)
         self.assertEqual({INSPECT}, set(podman), "only the state was asked")
 
+    def test_a_daemon_launchd_should_keep_that_answers_no_connect_is_missing_with_its_stage(self):
+        fake = Fake()
+        fake.answer(("python3", "-c"), rc=1)
+        daemons = [("credential injector", "/s/github-inject.sock", "inject"), ("request broker", "/b.sock", "broker")]
+        with mock.patch.object(doctor.status, "launchd_daemons", return_value=daemons):
+            rows = list(fake_doctor(True, machine=fake, sh=stub_shell()).workspaces_store())
+        self.assertEqual([(MISS, "credential injector answers on this Mac", "./setup --stage inject"),
+                          (MISS, "request broker answers on this Mac", "./setup --stage broker")], rows[:2])
+
     def test_no_machine_at_all_is_missing_with_the_stage_that_makes_one(self):
         rows = list(fake_doctor(True, sh=stub_shell()).workspaces_store())
         self.assertEqual([(MISS, "podman machine 'wk'", "./setup --stage machine")], rows)

@@ -111,11 +111,10 @@ the host, outside the guest — denies everything except the address of that sam
 proxy. You cannot turn it off from in here, which is the point.
 
 If a fetch fails in either kind of workspace, that is the boundary working.
-Find another way rather than trying to route around it. ssh reaches
-`github.com:22` through that same proxy in both kinds — the fork remotes' host
-aliases (`github-webkit`, `github-wpe`) each carry a `ProxyCommand` — so a push
-over ssh is wired the same way in a macOS workspace as in a container, whenever
-the switch below is on; a live check on a real guest is still owed
+Find another way rather than trying to route around it. ssh to `github.com` is
+not allowed: the fork remotes' host aliases (`github-webkit`, `github-wpe`) are
+reached through the push service's client, wired the same way in a macOS
+workspace as in a container; a live check on a real guest is still owed
 (docs/defects).
 
 The Pis (`rpi4`, `rpi5`) are reachable over SSH for performance testing and
@@ -131,21 +130,19 @@ over ssh through a deploy key scoped to that one repository.
 Reads are anonymous over HTTPS and always work: fetching `origin` or either
 fork needs no credential at all.
 
-**Pushing is a switch, and it is normally off while you are running.** No
-credential that publishes is in this workspace at all. The deploy keys are in
-an `ssh-agent` outside it and only its socket crosses in, so ssh here can sign
-with a key it cannot read; the GitHub API token is in a proxy that puts it in
-the `Authorization` header, so `GITHUB_COM_TOKEN` in here is the literal
-placeholder `wk-injects-this` and not a secret. The switch is thrown on the
-host (`wk key push`), and `wk ai claude` turns it off before handing over control:
-a push is then refused at the door — `Permission denied (publickey)` from ssh
-means exactly that, not a broken setup — and an API call that needs an account
-answers `401`. Do not try to work around it: publishing is the one thing a
-disposable workspace is not allowed to do on its own. Say what you would have
-pushed and let the person at the keyboard run `wk key push on`, which is also what
-makes `git-webkit pr` work from in here. The same switch covers Bugzilla:
-`BUGS_WEBKIT_ORG_PASSWORD` is the same placeholder, filing or updating a bug
-answers `410` while push is off, and `git-webkit pr` never asks for a login.
+**A push is the host's, and it is refused while you run.** No credential that
+publishes is in this workspace at all. `git push` here sends the command to a
+push service on the host, which runs the ssh session to GitHub with the
+repository's deploy key; it refuses, naming the remedy, while a claude or pi
+process runs in this workspace -- yours. The GitHub API token is in a proxy
+that puts it in the `Authorization` header, so `GITHUB_COM_TOKEN` in here is
+the literal placeholder `wk-injects-this` and not a secret; an API call that
+writes (`git-webkit pr`) answers `412` while you run, and Bugzilla's
+`BUGS_WEBKIT_ORG_PASSWORD` is the same placeholder. Do not try to work around
+it: publishing is the one thing a disposable workspace is not allowed to do
+on its own. Say what you would have pushed and let the person at the keyboard
+push from a shell of their own in the workspace (`wk enter`) once you have
+ended.
 
 Never use `git push --force` against a shared branch, and never commit unless
 asked.

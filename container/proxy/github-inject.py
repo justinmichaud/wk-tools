@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Swap the placeholder credential a workspace holds for a real one, on the
 hosts whose TLS ends here. api.github.com takes a token in the Authorization
-header: a read spends the standing one, a write only `wk key push on`'s.
-bugs.webkit.org takes an api_key query parameter, `wk key push on`'s alone; a write
-with the switch off is refused here, naming it. See `wk help push`.
+header: a read spends the standing one, a write only on the writing socket. bugs.webkit.org
+takes an api_key query parameter, the held key, on the writing socket alone. The proxy picks the
+reading socket for a workspace an agent runs in, and a write there is refused here, naming that.
 api.anthropic.com, claude.ai and platform.claude.com take the claude.ai login's
 access token for the placeholder bearer, and refuse their OAuth endpoints; the rest
 passes as sent. WK_INJECT_CLAUDE_LOGIN names the holder; the podman machine's relays to the Mac's."""
@@ -49,19 +49,19 @@ DROP_FROM_FORWARDED = ("authorization", "connection", "proxy-connection",
                        "x-bugzilla-api-key", "x-bugzilla-login",
                        "x-bugzilla-password", "x-bugzilla-token")
 
-# Every spelling Bugzilla's REST API takes a login in; a workspace's own never goes on, the switch's api_key does.
+# Every spelling Bugzilla's REST API takes a login in; a workspace's own never goes on, the held api_key does.
 BUGZILLA_PARAMS = ("login", "password", "api_key", "token", "bugzilla_api_key",
                    "bugzilla_login", "bugzilla_password", "bugzilla_token")
 
 READ_METHODS = ("GET", "HEAD")
 
 # Not one of the far end's own codes: GitHub's 401 and Bugzilla's 410 mean a credential was refused, and this one was never sent.
-PUSH_OFF_STATUS = b"412 Precondition Failed"
-PUSH_OFF_REASON = (
-    b"wk key push is off for this workspace's machine, so the wk credential "
-    b"injector has no credential to write with and did not forward this "
-    b"request. Outside the workspace, 'wk key push on' allows it and "
-    b"'wk key push status --all' says where every switch is.\r\n")
+WRITE_REFUSED_STATUS = b"412 Precondition Failed"
+WRITE_REFUSED_REASON = (
+    b"the wk credential injector has no credential to write with and did not "
+    b"forward this request: an agent runs in this workspace, or no token is "
+    b"stored ('wk key set github-pat'). End the session, or run the command "
+    b"from a shell of your own (wk enter <workspace>) once none runs here.\r\n")
 
 # GitHub's API is all behind /graphql: only the document says if a POST writes.
 _MUTATION = re.compile(rb"mutation", re.IGNORECASE)
@@ -367,7 +367,8 @@ class Forward:
 
 
 class Injector:
-    def __init__(self, pat_path, read_pat_path, bugzilla_key_path, claude, client_ctx, hosts=HOSTS):
+    def __init__(self, pat_path, read_pat_path, bugzilla_key_path, claude, client_ctx, hosts=HOSTS, writes=True):
+        self.writes = writes
         self.pat_path = pat_path
         self.read_pat_path = read_pat_path
         self.bugzilla_key_path = bugzilla_key_path
@@ -377,10 +378,10 @@ class Injector:
 
     def token_for(self, host, reading):
         if host == BUGZILLA:
-            return read_token(self.bugzilla_key_path)
+            return read_token(self.bugzilla_key_path) if self.writes else ""
         if reading:
             return read_token(self.read_pat_path) or read_token(self.pat_path)
-        return read_token(self.pat_path)
+        return read_token(self.pat_path) if self.writes else ""
 
     async def refuse(self, cwriter, status, reason, fault=b""):
         cwriter.write(b"HTTP/1.1 " + status + b"\r\n"
@@ -492,10 +493,10 @@ class Injector:
                                     "inject" if token else
                                     "as sent" if host in CLAUDE_HOSTS else
                                     "unauthenticated" if reading else
-                                    "refused: push is off",
+                                    "refused: no credential to write with",
                                     method, target[:200]))
             if not token and not reading:
-                await self.refuse(cwriter, PUSH_OFF_STATUS, PUSH_OFF_REASON)
+                await self.refuse(cwriter, WRITE_REFUSED_STATUS, WRITE_REFUSED_REASON)
                 return
 
             opened = []
@@ -561,6 +562,8 @@ async def main():
     runtime = os.path.join(_default_runtime(), "wk")
     sock = os.environ.get("WK_INJECT_SOCK",
                           os.path.join(store, "github-inject.sock"))
+    read_sock = os.environ.get("WK_INJECT_READ_SOCK",
+                               os.path.join(store, "github-inject-read.sock"))
     certs = os.environ.get("WK_INJECT_DIR",
                            os.path.join(store, "github-inject"))
     ca_out = os.environ.get("WK_INJECT_CA_OUT",
@@ -582,16 +585,17 @@ async def main():
     claude = claude_source(os.environ, in_podman_machine())
     injector = Injector(pat, read_pat, bugzilla_key, claude, client_ctx)
 
-    if os.path.exists(sock):
-        os.unlink(sock)
+    reading = Injector(pat, read_pat, bugzilla_key, claude, client_ctx, writes=False)
     os.makedirs(os.path.dirname(sock), mode=0o700, exist_ok=True)
-    server = await asyncio.start_unix_server(injector.handle, path=sock,
-                                             ssl=server_ctx)
-    os.chmod(sock, 0o600)
-    log("listening on %s for %s (write token: %s, read token: %s, Bugzilla key: %s, "
-        "claude.ai login: %s, CA published at %s)" % (sock, ", ".join(HOSTS), pat, read_pat,
+    tasks = []
+    for path, who in ((sock, injector), (read_sock, reading)):
+        if os.path.exists(path):
+            os.unlink(path)
+        tasks.append((await asyncio.start_unix_server(who.handle, path=path, ssl=server_ctx)).serve_forever())
+        os.chmod(path, 0o600)
+    log("listening on %s, and %s for a workspace an agent runs in, for %s (write token: %s, read token: %s, Bugzilla key: %s, "
+        "claude.ai login: %s, CA published at %s)" % (sock, read_sock, ", ".join(HOSTS), pat, read_pat,
                                                       bugzilla_key, claude.path if claude else "none held", ca_out))
-    tasks = [server.serve_forever()]
     machine = os.environ.get("WK_INJECT_PUBLISH_MACHINE")
     if machine:
         from wk import publish

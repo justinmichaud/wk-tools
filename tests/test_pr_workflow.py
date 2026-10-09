@@ -5,7 +5,6 @@ import contextlib
 import importlib.util
 import io
 import os
-import shlex
 import shutil
 import ssl
 import subprocess
@@ -23,7 +22,6 @@ CMD_PR = REPO / "cmd" / "pr"
 
 
 CMD_PR_MODULE = load_cmd("pr")
-KEY_LOADED = lambda: 0
 
 from wk import act, decl, git, places, pr, sync  # noqa: E402  -- needs CMD_PR_MODULE's sys.path.insert above
 from wk.clock import Clock  # noqa: E402
@@ -204,7 +202,7 @@ def rebase_world():
 
 def open_once(driver):
     with mock.patch.object(CMD_PR_MODULE, "pr_open_target", return_value=OPENS):
-        CMD_PR_MODULE.pr_open(driver, "ws", False, False, push_status=KEY_LOADED)
+        CMD_PR_MODULE.pr_open(driver, "ws", False, False)
 
 
 class TestPrKillPoints(unittest.TestCase):
@@ -217,27 +215,14 @@ class TestPrKillPoints(unittest.TestCase):
                 converges(self, make, flow, state)
 
 
-class AgentKeys:
-    """Secrets as `push_from_here` reads it: one fork, its public half, and an agent holding `keys`."""
-    macos = False
-
-    def __init__(self, keys=("256 SHA256:k fork (ED25519)",), sock="/run/agent.sock"):
-        self.keys, self.sock = list(keys), sock
+class BoxKeys:
+    """Secrets as `push_from_here` reads it: one fork, and where its private half is."""
 
     def forks(self):
         return [("fork", "alice/WebKit", "")]
 
-    def machine_sock(self):
-        return self.sock
-
-    def agent_list(self, sock):
-        return self.keys if sock == self.sock else []
-
-    def pub_path(self, fork):
-        return "/s/build_key_%s.pub" % fork
-
-    def agent_argv(self, line):
-        return ["sh", "-c", line]
+    def push_key_path(self, fork):
+        return "/s/push-keys/build_key_%s" % fork
 
 
 class TestPrOpenFromABoxKillPoints(unittest.TestCase):
@@ -250,26 +235,22 @@ class TestPrOpenFromABoxKillPoints(unittest.TestCase):
         w.fake, w.refs, w.pushed = w, set(), set()
         w.answer(["git", "init"], 0)
         w.answer(["git", "-C", self.MIRROR, "config"], 0)
+        w.files["/s/push-keys/build_key_fork"] = "KEY\n"
 
         def git_in_mirror(argv, fake):
             if "fetch" in argv:
                 fake.refs.add(argv[-1].split(":", 1)[1])
             elif "update-ref" in argv:
                 fake.refs.discard(argv[-1])
-            return Result(0)
-
-        def push(argv, fake):
-            words = shlex.split(argv[-1])
-            if words[words.index("-C") + 1] == self.MIRROR and "push" in words:
-                fake.pushed.add(words[-1])
+            elif "push" in argv:
+                fake.pushed.add(argv[-1])
             return Result(0)
         w.react(["git", "-C", self.MIRROR], git_in_mirror)
-        w.react(["sh", "-c"], push)
         return w
 
     def run_once(self, w, keys=None):
         driver = types.SimpleNamespace(here=w, env={"HOME": "/h"}, name="box", ssh_host=lambda _: "box")
-        keys = keys or AgentKeys()
+        keys = keys or BoxKeys()
 
         @contextlib.contextmanager
         def held(resource):
@@ -301,30 +282,23 @@ class TestPrOpenFromABoxKillPoints(unittest.TestCase):
         self.assertEqual(2, len(locks))
         self.assertTrue(locks[0] < min(work) and max(work) < locks[1], w.effects)
 
-    def test_the_push_goes_through_the_agent_and_names_the_forks_public_half(self):
+    def test_the_push_uses_the_forks_private_key_and_no_agent(self):
         w = self.make_world()
         self.run_once(w)
-        (line,) = [e[1][-1] for e in w.effects if e[0] == "run" and e[1][:2] == ("sh", "-c")]
-        self.assertTrue(line.startswith("SSH_AUTH_SOCK=/run/agent.sock exec git"), line)
-        self.assertIn("-i /s/build_key_fork", line)
-        self.assertNotIn(".pub", line)
+        (argv,) = [e[1] for e in w.effects if e[0] == "run" and "push" in e[1]]
+        ssh = next(a for a in argv if a.startswith("core.sshCommand=")).split("=", 1)[1]
+        self.assertIn("-i /s/push-keys/build_key_fork", ssh)
+        self.assertIn("IdentityAgent=none", ssh)
+        self.assertNotIn(".pub", ssh)
+        self.assertIn("git@github.com:alice/WebKit.git", argv)
 
-    def test_an_empty_agent_refuses_naming_the_switch_before_any_effect(self):
+    def test_a_machine_with_no_key_refuses_naming_the_remedy_before_any_effect(self):
         w = self.make_world()
+        w.files.clear()
         with self.assertRaises(act.Refused), mock.patch.object(CMD_PR_MODULE, "die", side_effect=act.Refused(1)) as die:
-            self.run_once(w, AgentKeys(keys=()))
-        self.assertIn("wk key push on", die.call_args[0][0])
+            self.run_once(w)
+        self.assertIn("wk key deploy", die.call_args[0][0])
         self.assertEqual((set(), set()), self.state(w))
-
-    def test_a_macos_host_pushes_through_the_agent_it_runs_for_its_guests(self):
-        mac, guests = AgentKeys(keys=()), AgentKeys(sock="/g/agent.sock")
-        mac.macos = True
-        w = self.make_world()
-        with mock.patch.object(CMD_PR_MODULE.guest, "push_agent", lambda root, machine, env: (guests, "/g/agent.sock")):
-            self.run_once(w, mac)
-        self.assertEqual(self.state(w), (set(), {"%s:refs/heads/eng/x" % self.REF}))
-        (line,) = [e[1][-1] for e in w.effects if e[0] == "run" and e[1][:2] == ("sh", "-c")]
-        self.assertTrue(line.startswith("SSH_AUTH_SOCK=/g/agent.sock "), line)
 
 
 class TestPrDryRunEqualsWetRun(unittest.TestCase):
@@ -574,7 +548,7 @@ class TestPrOpen(unittest.TestCase):
         with mock.patch.object(CMD_PR_MODULE, "pr_open_target", return_value=("WebKit/WebKit", "me:b", "fork", "b")), \
                 mock.patch.object(CMD_PR_MODULE, "push_from_here", return_value=Result(0)) as from_here, \
                 contextlib.redirect_stderr(io.StringIO()):
-            CMD_PR_MODULE.pr_open(driver, "myws", draft=draft, web=False, push_status=KEY_LOADED)
+            CMD_PR_MODULE.pr_open(driver, "myws", draft=draft, web=False)
         return driver, from_here.called, calls(driver)
 
     def test_the_command_execs_into_gh(self):

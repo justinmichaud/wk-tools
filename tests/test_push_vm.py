@@ -1,13 +1,9 @@
-"""`wk key push` reaches a macOS guest: the guest holds the ssh config and public halves, its agent is on this host and
-reaches it through one `ssh -N -R` per running guest, and no private key byte is ever written into it. `tart` and
-`ssh` are stubs whose guest is a scratch directory; the keys and the ssh-agent are real.
+"""What a macOS guest is given by the host daemons it shares: the injector's CA and placeholders, its tokens, and a proxy kept on the program in the tree.
+`tart` and `ssh` are stubs whose guest is a scratch directory.
 """
 import contextlib
 import io
 import os
-import pathlib
-import shutil
-import signal
 import subprocess
 import sys
 import time
@@ -18,15 +14,14 @@ from tests.support import (guest_step, REPO,
                            WkTest, stub_path)
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import guest, places, secrets  # noqa: E402
+from wk import guest, places  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 # `tart`: one running guest called wk-demo, and the guest itself as a directory. `tart exec` hands the guest's
 # command as the last argument for a login shell, and everything it writes it writes under $HOME, so running that command with HOME
 # pointed at a scratch directory exercises the real umask, mkdir, redirect and rm -- not a transcript of them.
-# /Users/admin is rewritten to that directory for the same reason: the agent socket's path has to be absolute on the
-# guest, because that is what `ssh -R` binds. `tart list` mixes local VMs with cached OCI images, so Source matters.
-# Every invocation is appended to $WK_TEST_LOG, which is how a test asks whether a private key was ever an argument.
+# /Users/admin is rewritten to that directory for the same reason. `tart list` mixes local VMs with cached OCI images, so
+# Source matters. Every invocation is appended to $WK_TEST_LOG.
 FAKE_TART = '''
 case "$1" in
 list) echo '[{"Name":"wk-demo","State":"running","Source":"local"}]' ;;
@@ -42,44 +37,10 @@ exec)
 esac
 '''
 
-# `tart` with the same guest stopped.
-FAKE_TART_STOPPED = '''
-case "$1" in
-list) echo '[{"Name":"wk-demo","State":"stopped","Source":"local"}]' ;;
-*)    exit 1 ;;
-esac
-'''
-
-# `ssh`: only the socket forward, which rides the guest's sshd on tart exec and stays up -- what sshd does at the far
-# end of `-R <remote>:<local>` is bind the remote socket, and `test -S` on it is how this host reports that a guest
-# reaches the agent. Anything else is a network ssh into a guest, which nothing makes.
-FAKE_SSH = '''
-printf '%s\\n' "$*" >> "$WK_TEST_LOG"
-case " $* " in
-    *" -N "*)
-        fwd=""
-        for a in "$@"; do
-            case "$a" in
-                *.wk-ssh-agent.sock:*) fwd=$(printf '%s' "${a%%:*}" | sed "s|/Users/admin|$WK_TEST_GUEST|") ;;
-            esac
-        done
-        [ -n "$fwd" ] || exec sleep 30
-        exec python3 -c 'import socket,sys,time
-s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); time.sleep(30)' "$fwd"
-        ;;
-esac
-echo "ssh: a guest is reached through tart exec, never the network" >&2
-exit 255
-'''
-
-def _guest(tmp, name="demo", claude=()):
-    """A scratch guest home, and the ready marker without which Vm.info says `creating`; its `ps` lists the `claude` pids given."""
+def _guest(tmp, name="demo"):
+    """A scratch guest home, and the ready marker without which Vm.info says `creating`."""
     home = tmp / "guest-home"
-    (home / ".ssh").mkdir(parents=True, exist_ok=True)
-    (home / "bin").mkdir(exist_ok=True)
-    (home / "bin" / "ps").write_text("#!/bin/sh\n" + "".join("echo '%s /Users/admin/.local/bin/claude'\n" % p for p in claude))
-    (home / "bin" / "ps").chmod(0o755)
-    (home / ".bash_profile").write_text('PATH="$HOME/bin:$PATH"\n')
+    home.mkdir(parents=True, exist_ok=True)
     vmstore = tmp / "vmstore"
     ws = vmstore / "ws" / name
     ws.mkdir(parents=True, exist_ok=True)
@@ -87,231 +48,11 @@ def _guest(tmp, name="demo", claude=()):
     return home, vmstore
 
 
-def _store(tmp, keys=()):
-    """A scratch store with real keys, because `ssh-add` takes nothing else: private halves held, public halves in the keyring."""
-    d = tmp / "store"
-    secrets = d / "secrets"
-    held = d / "push-keys"
-    secrets.mkdir(parents=True, exist_ok=True)
-    held.mkdir(parents=True, exist_ok=True)
-    for fork in keys:
-        priv = held / f"build_key_{fork}"
-        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "",
-                        "-C", f"wk deploy key for {fork}", "-f", str(priv)],
-                       check=True)
-        shutil.move(str(priv) + ".pub", str(secrets / f"build_key_{fork}.pub"))
-    return d
-
-
-def _forward_pidfile(vmstore, name="demo"):
-    return pathlib.Path(vmstore) / "vm" / ("%s.agent-forward.pid" % name)
-
-
-def _kill_forward(vmstore, name="demo"):
-    _kill_pidfile(_forward_pidfile(vmstore, name))
-
 
 def _stub_env(binp, home, log, store, vmstore, **extra):
     return {"PATH": f"{binp}:{os.environ['PATH']}", "WK_TEST_GUEST": str(home), "WK_TEST_LOG": str(log),
             "WK_STORE": str(store), "WK_HOST_SECRETS": str(store / "secrets"), "WK_VM_STORE": str(vmstore),
             "WK_VM_PROXY_ADDR": "192.0.2.1", **extra}
-
-
-def _identities(sock):
-    return subprocess.run(["ssh-add", "-l"], text=True, env={**os.environ, "SSH_AUTH_SOCK": str(sock)},
-                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout
-
-
-def _kill_pidfile(path):
-    try:
-        pid = int(path.read_text().strip())
-    except (OSError, ValueError):
-        return
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError:
-        pass
-
-
-class TestOneAliasBlock(WkTest):
-    """IdentityFile never carries `.pub`: OpenSSH 10 then loads the public file as the private key (10.2p1)."""
-
-    CONTAINER = ("/secrets", "build_key_", "/run/wk/ssh-agent.sock")
-    GUEST = ("~/.ssh", "id_", "/a/sock", "nc %h %p")
-
-    def _blocks(self, args):
-        return secrets.alias_blocks(secrets.forks(), *args)
-
-    def test_a_build_box_names_no_identity_and_refuses_by_name(self):
-        out = secrets.box_alias_blocks(secrets.forks())
-        self.assertIn("Host github-webkit", out)
-        self.assertNotIn("IdentityFile", out)
-        self.assertNotIn("IdentityAgent", out)
-        self.assertIn("wk pr open", out)
-
-    def test_a_container_names_the_identity_and_the_mounted_socket(self):
-        out = self._blocks(self.CONTAINER)
-        self.assertIn("IdentityFile /secrets/build_key_fork\n", out)
-        self.assertIn("IdentityAgent /run/wk/ssh-agent.sock", out)
-        self.assertIn("IdentitiesOnly yes", out)
-        self.assertNotIn("ProxyCommand", out)
-
-    def test_a_guest_names_its_own_public_copy_and_carries_a_proxy(self):
-        out = self._blocks(("/Users/admin/.ssh", "id_", "/Users/admin/.wk-ssh-agent.sock",
-                            "nc -X connect -x 10.0.0.1:3128 %h %p"))
-        self.assertIn("IdentityFile /Users/admin/.ssh/id_fork\n", out)
-        self.assertIn("IdentityAgent /Users/admin/.wk-ssh-agent.sock", out)
-        self.assertIn("ProxyCommand nc -X connect -x 10.0.0.1:3128 %h %p", out)
-
-    def test_no_identity_line_ever_carries_the_pub_suffix(self):
-        for args in (self.CONTAINER, self.GUEST):
-            with self.subTest(args=args):
-                for line in self._blocks(args).splitlines():
-                    if line.strip().startswith("IdentityFile"):
-                        self.assertFalse(line.strip().endswith(".pub"), line)
-
-    def test_every_fork_gets_a_block(self):
-        aliases = [r[2] for r in secrets.forks()]
-        self.assertTrue(aliases)
-        out = self._blocks(("/d",))
-        for a in aliases:
-            self.assertIn(f"Host {a}\n", out)
-
-    def test_the_arg_sets_differ_only_where_they_must(self):
-        """Byte-identical but for the identity, the agent and the ProxyCommand."""
-        def norm(text):
-            skip = ("IdentityFile", "IdentitiesOnly", "ProxyCommand", "IdentityAgent")
-            return [line for line in text.splitlines() if not line.strip().startswith(skip)]
-
-        container = self._blocks(self.CONTAINER)
-        guest = self._blocks(self.GUEST)
-        box = secrets.box_alias_blocks(secrets.forks())
-        self.assertEqual(norm(container), norm(guest))
-        self.assertEqual(norm(container), norm(box))
-
-class TestAGuestGetsTheConfigOnStart(WkTest):
-    """The real Guest.write_deploy_keys, against a fake guest."""
-
-    def _write(self, store, home, vmstore):
-        log = self.tmp / "guest.log"
-        log.write_text("")
-        with stub_path({"ssh": FAKE_SSH, "tart": FAKE_TART}) as binp:
-            cp = guest_step(_stub_env(binp, home, log, store, vmstore), "write_deploy_keys")
-        self.log = log.read_text()
-        return cp
-
-    def test_the_public_half_lands_in_the_guest_and_no_private_key_byte_does(self):
-        home, vmstore = _guest(self.tmp)
-        cp = self._write(_store(self.tmp, keys=("fork", "forkwpe")), home, vmstore)
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertIn("ssh-ed25519 ", (home / ".ssh" / "id_fork.pub").read_text())
-        self.assertFalse((home / ".ssh" / "id_fork").exists())
-        for path in home.rglob("*"):
-            if path.is_file():
-                self.assertNotIn("PRIVATE KEY", path.read_text(errors="replace"),
-                                 f"{path} holds key material")
-        self.assertNotIn("PRIVATE KEY", self.log, self.log)
-
-    def test_a_public_half_withdrawn_here_is_withdrawn_there(self):
-        home, vmstore = _guest(self.tmp)
-        (home / ".ssh" / "id_fork.pub").write_text("stale\n")
-        (home / ".ssh" / "id_forkwpe.pub").write_text("stale\n")
-        cp = self._write(_store(self.tmp), home, vmstore)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertFalse((home / ".ssh" / "id_fork.pub").exists())
-        self.assertFalse((home / ".ssh" / "id_forkwpe.pub").exists())
-
-    def test_the_config_names_the_aliases_the_agent_and_a_route_to_github(self):
-        home, vmstore = _guest(self.tmp)
-        cfg = self._write(_store(self.tmp, keys=("fork",)), home, vmstore)
-        self.assertEqual(cfg.returncode, 0, cfg.stdout + cfg.stderr)
-        text = (home / ".ssh" / "config").read_text()
-        self.assertIn("Host github-webkit", text)
-        self.assertIn("Host github-wpe", text)
-        self.assertIn("IdentityFile /Users/admin/.ssh/id_fork\n", text)
-        self.assertIn("IdentityAgent /Users/admin/.wk-ssh-agent.sock", text)
-        self.assertIn("-X connect -x 192.0.2.1:3128 %h %p", text)
-
-    def test_the_config_is_written_once_however_often_and_with_no_key_behind_it(self):
-        home, vmstore = _guest(self.tmp)
-        store = _store(self.tmp)
-        for _ in range(3):
-            self._write(store, home, vmstore)
-        text = (home / ".ssh" / "config").read_text()
-        self.assertEqual(1, text.count("Host github-webkit"), text)
-
-
-@unittest.skipUnless(os.uname().sysname == "Darwin", "guests are a macOS-host thing (tart)")
-class TestTheGuestHalfOfTheSwitch(WkTest):
-    """`wk key push` end to end with one fake guest and the real ssh-agent the code under test starts."""
-
-    def _push(self, action, store, home, vmstore, tart=FAKE_TART):
-        log = self.tmp / "guest.log"
-        log.write_text("")
-        self.addCleanup(_kill_pidfile, vmstore / "vm" / "ssh-agent.pid")
-        self.addCleanup(_kill_forward, vmstore)
-        with stub_path({"ssh": FAKE_SSH, "tart": tart}) as binp:
-            env = _stub_env(binp, home, log, store, vmstore, WK_PUSH_AGENT_SOCK=str(self.tmp / "no-machine-agent.sock"),
-                            WK_PUSH_PAT_FILE=str(self.tmp / "machine-pat"), WK_MACHINE="wk-no-such-machine")
-            cp = self.run_wk("key", "push", action, env=env)
-        self.log = log.read_text()
-        return cp
-
-    def _forward_is_up(self, vmstore, name="demo"):
-        return _forward_pidfile(vmstore, name).exists()
-
-    def test_on_stops_at_a_claude_session_in_a_guest(self):
-        """The guest's own `ps` names a claude pid, which `on` asks to end before loading anything."""
-        home, vmstore = _guest(self.tmp, claude=("999999",))
-        store = _store(self.tmp, keys=("fork",))
-        cp = self._push("on", store, home, vmstore)
-        self.assertIn("demo", cp.stdout)
-        self.assertFalse(self._forward_is_up(vmstore))
-
-    def test_on_loads_the_hosts_agent_and_forwards_it_into_the_guest(self):
-        home, vmstore = _guest(self.tmp)
-        store = _store(self.tmp, keys=("fork",))
-        cp = self._push("on", store, home, vmstore)
-        self.assertIn("SHA256:", _identities(vmstore / "vm" / "ssh-agent.sock"))
-        self.assertTrue(self._forward_is_up(vmstore), cp.stdout)
-        self.assertRegex(self.log, r"-N .*-R /Users/admin/\.wk-ssh-agent\.sock:")
-        self.assertNotIn("PRIVATE KEY", self.log, self.log)
-        priv = (store / "push-keys" / "build_key_fork").read_text()
-        for line in priv.splitlines():
-            if "PRIVATE KEY" not in line and line.strip():
-                self.assertNotIn(line, self.log)
-
-    def test_off_empties_the_agent_ends_the_forward_and_status_reads_off(self):
-        home, vmstore = _guest(self.tmp)
-        store = _store(self.tmp, keys=("fork",))
-        self._push("on", store, home, vmstore)
-        cp = self._push("off", store, home, vmstore)
-        self.assertIn("no identities", _identities(vmstore / "vm" / "ssh-agent.sock"))
-        self.assertFalse(self._forward_is_up(vmstore), cp.stdout)
-        cp = self._push("status", store, home, vmstore, tart=FAKE_TART_STOPPED)
-        self.assertEqual(1, cp.returncode, cp.stdout)
-
-    def test_a_stopped_guest_is_reported_not_started(self):
-        home, vmstore = _guest(self.tmp)
-        cp = self._push("status", _store(self.tmp, keys=("fork",)), home, vmstore,
-                        tart=FAKE_TART_STOPPED)
-        self.assertIn("stopped", cp.stdout)
-        self.assertEqual("", self.log, self.log)
-
-    def test_status_is_on_while_the_guests_agent_holds_a_key_with_no_guest_up(self):
-        home, vmstore = _guest(self.tmp)
-        store = _store(self.tmp, keys=("fork",))
-        self._push("on", store, home, vmstore)
-        cp = self._push("status", store, home, vmstore, tart=FAKE_TART_STOPPED)
-        self.assertIn("in the agent this host runs for them and its own pushes", cp.stdout)
-        self.assertIn("push is ON", cp.stdout)
-        self.assertEqual(0, cp.returncode, cp.stdout)
-
-    def test_status_is_off_when_no_guest_reaches_it_either(self):
-        home, vmstore = _guest(self.tmp)
-        store = _store(self.tmp, keys=("fork",))
-        cp = self._push("status", store, home, vmstore)
-        self.assertEqual(cp.returncode, 1, cp.stdout)
 
 
 class TestTheGuestGetsTheInjectorsCa(WkTest):
@@ -323,7 +64,7 @@ class TestTheGuestGetsTheInjectorsCa(WkTest):
         vmdir.mkdir(parents=True, exist_ok=True)
         if ca_text is not None:
             (vmdir / "wk-github-ca.pem").write_text(ca_text)
-        with stub_path({"ssh": FAKE_SSH, "tart": FAKE_TART}) as binp:
+        with stub_path({"tart": FAKE_TART}) as binp:
             env = _stub_env(binp, home, log, self.tmp / "store", vmstore, XDG_STATE_HOME=str(self.tmp / "state"), **extra)
             return guest_step(env, "set_guest_egress", secrets={"bugzilla_user": lambda s: bugzilla})
 
@@ -395,52 +136,43 @@ class TestTheInjectorReadinessProbe(WkTest):
                 self.assertEqual(want, host.inject_running())
 
 
-class TestTheGuestsInjectorGetsTheStandingReadToken(WkTest):
+class TestTheGuestsInjectorGetsTheStandingCredentials(WkTest):
 
-    def _start_inject(self, vmstore, pat=None):
+    def _start_inject(self, vmstore, pat=None, bz=None):
         store = self.tmp / "store"
         held = store / "push-keys"
         held.mkdir(parents=True, exist_ok=True)
         (store / "secrets").mkdir(parents=True, exist_ok=True)
-        if pat is None:
-            (held / "github-pat").unlink(missing_ok=True)
-        else:
-            (held / "github-pat").write_text(pat)
+        for name, value in (("github-pat", pat), ("bugzilla-api-key", bz)):
+            if value is None:
+                (held / name).unlink(missing_ok=True)
+            else:
+                (held / name).write_text(value)
         host = _host(self, WK_VM_STORE=str(vmstore))
         with mock.patch.object(host, "inject_running", lambda: True):
             return _quiet(host.start_inject)
 
-    def read_pat(self, vmstore):
-        return vmstore / "vm" / "read-github-pat"
+    def files(self, vmstore):
+        return {n: (vmstore / "vm" / n) for n in ("read-github-pat", "push-github-pat", "push-bugzilla-api-key")}
 
-    def test_a_start_writes_it_from_the_token_this_host_holds(self):
+    def test_a_start_writes_them_from_what_this_host_holds(self):
         _, vmstore = _guest(self.tmp)
-        ok, err = self._start_inject(vmstore, pat="ghp-not-a-real-token\n")
+        ok, err = self._start_inject(vmstore, pat="ghp-not-a-real-token\n", bz="bz-not-a-real-key\n")
         self.assertTrue(ok, err)
-        self.assertEqual("ghp-not-a-real-token\n", self.read_pat(vmstore).read_text())
-        self.assertEqual(0o600, self.read_pat(vmstore).stat().st_mode & 0o777)
+        got = self.files(vmstore)
+        self.assertEqual("ghp-not-a-real-token\n", got["read-github-pat"].read_text())
+        self.assertEqual("ghp-not-a-real-token\n", got["push-github-pat"].read_text())
+        self.assertEqual("bz-not-a-real-key\n", got["push-bugzilla-api-key"].read_text())
+        self.assertEqual([0o600] * 3, [p.stat().st_mode & 0o777 for p in got.values()])
 
-    def test_a_token_withdrawn_on_this_host_is_gone_at_the_next_start(self):
+    def test_one_withdrawn_on_this_host_is_gone_at_the_next_start(self):
         _, vmstore = _guest(self.tmp)
-        self._start_inject(vmstore, pat="ghp-not-a-real-token\n")
-        self._start_inject(vmstore, pat=None)
-        self.assertFalse(self.read_pat(vmstore).exists())
-
-    @unittest.skipUnless(os.uname().sysname == "Darwin",
-                         "guests are a macOS-host thing (tart)")
-    def test_neither_position_of_the_switch_touches_it(self):
-        home, vmstore = _guest(self.tmp)
-        store = _store(self.tmp, keys=("fork",))
-        (store / "push-keys" / "github-pat").write_text("ghp-not-a-real-token\n")
-        (vmstore / "vm").mkdir(parents=True, exist_ok=True)
-        self.read_pat(vmstore).write_text("ghp-standing\n")
-        for action in ("on", "off"):
-            with self.subTest(action=action):
-                TestTheGuestHalfOfTheSwitch._push(self, action, store, home, vmstore)
-                self.assertEqual("ghp-standing\n", self.read_pat(vmstore).read_text())
+        self._start_inject(vmstore, pat="ghp-not-a-real-token\n", bz="bz\n")
+        self._start_inject(vmstore, pat=None, bz=None)
+        self.assertEqual([False] * 3, [p.exists() for p in self.files(vmstore).values()])
 
 
-class TestEveryGuestStartConvergesTheReadToken(WkTest):
+class TestEveryGuestStartConvergesTheCredentials(WkTest):
 
     def test_a_start_that_finds_the_proxy_up_still_delivers_the_token(self):
         _, vmstore = _guest(self.tmp)
@@ -486,58 +218,6 @@ class TestAHostDaemonOlderThanItsSourceIsRestarted(WkTest):
         self.assertTrue(alive, err)
         self.assertTrue(kept)
         self.assertNotIn("restarting", err)
-
-@unittest.skipUnless(os.uname().sysname == "Darwin",
-                     "guests are a macOS-host thing (tart)")
-@unittest.skipUnless(shutil.which("ssh-agent"), "needs ssh-agent")
-class TestOneOffClearsEveryAgentThisMachineRuns(WkTest):
-    """One `wk key push off` empties both the containers' agent and the guests'."""
-
-    def _machine_agent(self):
-        sock = self.tmp / "machine-agent.sock"
-        out = subprocess.run(["ssh-agent", "-s", "-a", str(sock)],
-                             stdout=subprocess.PIPE, text=True,
-                             check=True).stdout
-        for part in out.split(";"):
-            if "SSH_AGENT_PID=" in part:
-                pid = int(part.split("=", 1)[1])
-                self.addCleanup(lambda: os.kill(pid, signal.SIGTERM))
-        return sock
-
-    def _push(self, action, store, home, vmstore, machine_sock):
-        log = self.tmp / "guest.log"
-        log.write_text("")
-        self.addCleanup(_kill_pidfile, vmstore / "vm" / "ssh-agent.pid")
-        self.addCleanup(_kill_forward, vmstore)
-        with stub_path({"ssh": FAKE_SSH, "tart": FAKE_TART}) as binp:
-            return self.run_wk("key", "push", action, env=_stub_env(
-                binp, home, log, store, vmstore, WK_PUSH_AGENT_SOCK=str(machine_sock),
-                WK_PUSH_PAT_FILE=str(self.tmp / "machine-pat")))
-
-    def test_on_loads_both_and_one_off_empties_both(self):
-        home, vmstore = _guest(self.tmp)
-        store = _store(self.tmp, keys=("fork",))
-        machine = self._machine_agent()
-        guest_agent = vmstore / "vm" / "ssh-agent.sock"
-
-        cp = self._push("on", store, home, vmstore, machine)
-        self.assertIn("SHA256:", _identities(machine), cp.stdout)
-        self.assertIn("SHA256:", _identities(guest_agent), cp.stdout)
-
-        cp = self._push("off", store, home, vmstore, machine)
-        self.assertEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("no identities", _identities(machine))
-        self.assertIn("no identities", _identities(guest_agent))
-
-
-class TestABoxPushReachesTheGuestsAgent(WkTest):
-    def test_a_box_push_on_this_host_reaches_the_agent_the_guest_half_loads(self):
-        """`wk pr open`'s push runs here, on the socket `vm_push_keys_converge` loads."""
-        from wk.machine import Fake
-        env = {"HOME": str(self.tmp), "WK_VM_STORE": str(self.tmp / "vs"), "WK_STORE": str(self.tmp / "st"), "PATH": "/usr/bin"}
-        sec, sock = guest.push_agent(str(REPO), Fake(), env)
-        self.assertEqual((sock, sec.agent_argv("true")), (str(self.tmp / "vs" / "vm" / "ssh-agent.sock"), ["sh", "-c", "true"]))
-
 
 if __name__ == "__main__":
     unittest.main()

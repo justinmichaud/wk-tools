@@ -7,7 +7,7 @@ set -euo pipefail
 
 WALL_NAMES="ninja cmake make xcodebuild build-webkit build-jsc run-javascriptcore-tests run-webkit-tests run-benchmark"
 
-GATE_NAMES="git"   # on a workspace's PATH only (shell/path.sh), where the switch and the wall are what a failure means
+GATE_NAMES="git"   # on a workspace's PATH only (shell/path.sh), where the wall is what a failure means
 
 GIT_WRITE_VERBS="add am apply branch checkout cherry-pick commit fetch gc merge mv notes prune pull push rebase reset restore revert rm stash switch tag"   # what the commit wall (COMMIT_WALL_PATHS, lib/wk/wall.py) can make fail; read only after the command has failed, so a verb whose read-only form works -- `git tag`, `git stash list` -- costs nothing to name
 
@@ -103,16 +103,6 @@ _history_walled() {   # the wall is read-only mounts, so this asks the machine r
     [ ! -w "$g/objects" ]
 }
 
-_no_deploy_key() {   # the agent the fork aliases name, asked of the agent; the path is followed from ~/.ssh/config's own Include rather than written down here, so this reads the file ssh would (`wk key push on|off` rewrites it). Exit 1 is "answered, holds nothing"; 2 is "could not be asked", which proves nothing and says nothing
-    local conf sock rc=0
-    conf=$(sed -n 's/^[[:space:]]*Include[[:space:]]*//p' "$HOME/.ssh/config" 2>/dev/null | head -1)
-    [ -n "$conf" ] || return 1
-    sock=$(sed -n 's/^[[:space:]]*IdentityAgent[[:space:]]*//p' "$conf" 2>/dev/null | head -1)
-    [ -n "$sock" ] || return 1
-    SSH_AUTH_SOCK="$sock" ssh-add -l >/dev/null 2>&1 || rc=$?
-    [ "$rc" = 1 ]
-}
-
 # Never a refusal: the command runs exactly as it would without this file, and what is added is the reason for a failure the sandbox caused. Refusing up front would need a list of verbs that always write, and `git tag`, `git branch` and `git stash list` are the same verbs reading.
 if [ "$self" = git ]; then
     verb=$(_git_verb "$@") || verb=""
@@ -121,19 +111,11 @@ if [ "$self" = git ]; then
             rc=0
             "$real" "$@" || rc=$?
             [ "$rc" != 0 ] || exit 0
-            if [ "$verb" = push ] && _no_deploy_key; then
-                printf '\nwk: no deploy key reaches this workspace. The private halves are in an\n' >&2
-                printf '    ssh-agent on the host, which this workspace can only ask to sign, and\n' >&2
-                printf "    'wk key push' is the switch over what it holds -- it is off, so github.com\n" >&2
-                printf '    has no identity to accept.\n' >&2
-                printf '    On the host:  wk key push on\n' >&2
-            fi
             if _history_walled; then
                 printf '\nwk: git history is read-only in this session. An agent runs under bwrap\n' >&2
                 printf "    with this checkout's .git commit parts bound read-only, so nothing it\n" >&2
                 printf '    runs writes history -- a build, an edit and git status/diff/log all work.\n' >&2
-                printf '    A person\x27s own shell here (wk enter) is not walled, and on the host\n' >&2
-                printf "    'wk key push on' lifts it for the next session.\n" >&2
+                printf '    A person\x27s own shell here (wk enter) is not walled.\n' >&2
             fi
             exit "$rc" ;;
     esac

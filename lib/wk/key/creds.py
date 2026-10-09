@@ -85,19 +85,10 @@ class Creds:
         return cred_print(name, self.stored_verdict(name))
 
     def deliver(self, name):
-        if name == "github-pat":
-            target = self.sec.machine_pat()
-            if not self.sec.pat_deliver():
-                warn("an injector on this machine did not take the read token, so a read from\n    the workspaces it serves answers "
-                     "401 until it does. './setup' converges the\n    one in the podman machine (the vmtools stage on macOS, sdk "
-                     "on Linux) and\n    'wk start <guest>' the one that serves the guests.")
-        elif name == "bugzilla-api-key":
-            target = self.sec.machine_bugzilla_key()
-        else:
-            return
-        if not self.sec.switch_cred_converge(self.sec.machine_sock(), target, name):
-            warn("the injector on this machine is still writing with the %s stored\n    before this one, so '%s pr' in a "
-                 "workspace spends that: 'wk key push off'\n    then 'wk key push on' hands it the one stored here." % (name, project.get("PR_TOOL")))
+        if name in ("github-pat", "bugzilla-api-key") and not self.sec.push_deliver():
+            warn("an injector on this machine did not take the %s, so a request from the workspaces it serves answers 401\n"
+                 "    (or is refused) until it does. './setup' converges the one in the podman machine (the vmtools stage on\n"
+                 "    macOS, sdk on Linux) and 'wk start <guest>' the one that serves the guests." % name)
 
     def set(self, name, replace=False, paste=False, value=None):
         """0 when what is stored can do its job."""

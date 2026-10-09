@@ -191,9 +191,7 @@ class TestPeerDelegation(PeerFixture):
                 (("status", "peerws", "--log"), "status peerws --log "),
                 (("enter", "peerws", "--", "bash", "-lc", "true"), "enter peerws -- bash -lc true "),
                 (("sync", "peerws"), "sync peerws "),
-                (("doctor", "peerws"), "doctor peerws "),
-                (("key", "push", "on", "--on", "peerbox", "--yes"), "key push on yes=1 "),
-                (("key", "push", "status", "--on", "peerbox"), "key push status ")]
+                (("doctor", "peerws"), "doctor peerws ")]
         for argv, asked in steps:
             with self.subTest(argv=argv):
                 cp = self._wk(*argv)

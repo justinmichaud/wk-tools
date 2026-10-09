@@ -63,8 +63,7 @@ _policy_hash=$(cksum < "$WK_ROOT/container/broker/wk-broker.py" | awk '{print $1
 _svc="gui/$(id -u)/$_label"
 if [ -n "$_reload" ]; then
     # launchd re-reads the plist only on bootstrap, so bootout then bootstrap.
-    launchctl bootout "$_svc" >/dev/null 2>&1 || true
-    if launchctl bootstrap "gui/$(id -u)" "$_plist" >/dev/null 2>&1; then
+    if wk_py wk.guest broker-restart "$_label" "$_plist"; then
         printf '%s\n' "$_policy_hash" > "$_policy_stamp"
         changed "started the fleet-request broker ($_label)"
     else

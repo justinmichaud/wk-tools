@@ -34,7 +34,7 @@ Why bugs come back:
    `doctor`, `bridge` and `pi` call podman, ssh and rm directly. `--dry-run`
    is a per-command promise, and 25 commands refuse it.
 4. **Tests remember incidents.** Names carry the bug that was found by hand;
-   dated measurements sit in comments. The push switch is tested in nine
+   dated measurements sit in comments. The push service is tested in nine
    modules and the credential store in ten, because each agent wrote its own. The
    design lives in 2,000 lines of prose and each agent reads a different
    part of it.
@@ -111,7 +111,7 @@ PyYAML stays in `lib/wk/sysimage/pmos_build.py` (netplan's own dependency on the
 
 Answered 2026-10-04: `pr.mirror_fetch` moves under `wk sync`, the mirror's one writer; the sync that rewrites the host mirror remounts its share in each running macOS guest; a push from a build box is made only from the workstation, against the box's checkout over ssh, and no key reaches a box; a build a workstation drives on a build box keeps its record on the box, handed to the box's wk.
 
-`wk ai --dry-run` runs its reads (the agent probe and the sandbox checks), then prints the push-switch change and the session's argv, and switches and starts nothing.
+`wk ai --dry-run` runs its reads (the agent probe and the sandbox checks), then prints the session's argv, and starts nothing.
 
 Answered 2026-10-04 (second batch): DevIntegration step 13 closes the person's Zed, runs, and reopens nothing; guest commands run through `tart exec` (the guest agent), the one way into a guest; the mirror is its own tagged virtiofs share in a guest, mounted at boot, so a remount never touches agent-rw; a box whose wk-tools sha differs from the workstation's refuses, naming `wk sync --tools <box>`; `Host igalia.com` forwards no agent; a box push goes through the ssh-agent `wk push on` loads, not the key file; `wk gc` names a leftover `refs/wk/push/*` ref; agents are installed at `wk new`, so `wk ai` throws the push switch and starts the session (Claude's remote control on by default) and nothing more; the size budgets stand and the cut follows four rules -- upstream first, fewer cases and branches, no duplication, tests that test behaviour rather than that the code is unchanged; `MacHostSystem`/`HostRun` and wk's own claude.ai login and OAuth refresh go; one way of running commands across systems; every concept has one spelling (`experiment` stays only where nothing else says it); shell stays only where the shell is the point and the rest is Python.
 
@@ -272,8 +272,8 @@ exist.
      `tests/test_agents.py`), and step 2 asserts a made workspace's Claude CLI runs. Live:
      `test_dev_integration`'s `test_04_claude_starts_after_the_sandbox_check`
      starts `wk ai claude` on a container, a guest and a peer's container and
-     asserts the wall check printed `sandbox intact`; `test_05_push_on_never_coexists_with_claude`
-     asserts `wk push on` on the host ends the session. Owed: the live
+     asserts the wall check printed `sandbox intact`; `test_05_a_push_is_refused_while_claude_runs`
+     asserts a push is refused while a claude session runs in the workspace. Owed: the live
      checks `ai.walled_session` (the stopped-proxy refusal, a tool refused
      the network), `ai.commit_wall` (git's own error and the rule, a
      terminal session's push back on at exit) and `ai.remote_control`.
@@ -347,8 +347,8 @@ exist.
      `wk` command; every report checked against `git diff`.
    - *Python-vs-Python duplicates a review pass found.* Fixed already:
      `wall.verdict(rep, publishing)` is the one "N check(s) failed" render
-     (`cmd/doctor`, `cmd/ai`) and `wall.push_verdict(rc)` the one push-status
-     decode (`cmd/ai`'s `push_switch` only runs `wk push <verb>` now).
+     (`cmd/doctor`, `cmd/ai`) and `wall.could_publish(results)` the one
+     "an agent could publish" decision.
      Also fixed: `is_linux`/`is_macos` live once in `lib/wk/machine.py`,
      the session socket in `places.session_socket_present`, the loader-path
      prelude in `lib/wk/ldpath.py`, the Zed CLI in `places.zed_cli`, and
@@ -367,7 +367,7 @@ exist.
      `act.confirm` or `act.nothing_to_ask`, and `act.asked` is the one
      "acted before asking" check. Every Python command reads its options
      through `wk.decl.Args`. `tests/test_wk_key.py`, `test_wk_secrets.py`,
-     `test_push_switch.py`, `test_wk_sudo.py` and `test_backup.py` hold the
+     `test_push_service.py`, `test_wk_sudo.py` and `test_backup.py` hold the
      flows, `killpoints[key]`, `killpoints[push]` and dry-run-equals-wet-run.
      The fork and agent-secret tables are `secrets.FORKS` and
      `secrets.AGENT_SECRETS`, the one copy, and `container/firstrun.sh` asks
@@ -421,8 +421,8 @@ exist.
    | `notify` | a tombstone; `lib/wk/notify.py` is the library call | the bash `wk_notify` and the notify CLI |
 
    Commands after step 5: `new rm build run test enter scp sync pr ai zed gui
-   profile status ls logs stop start doctor key push machine bench boot
-   sysimage quiesce gc selftest`. That is 28 against the budget of 20.
+   profile status ls logs stop start doctor key machine bench boot
+   sysimage quiesce gc selftest`. That is 27 against the budget of 20.
    `logs`/`status` and `start`/`stop` are the obvious next merges, and they
    are not in this step.
 
@@ -1162,7 +1162,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | `wk run` finds its binary on every port (GTK, WPE, an Apple-port guest) with `LD_LIBRARY_PATH` prepended, and `--lldb` gets a pty on every place | 3 | `unit run.finds_binary[<port>]`, `live run.lldb_tty` |
 | `wk enter <ws>` lands in a shell, `--zed` against a broken workspace refuses naming the repair | 3 | `live enter.shell` |
 | `wk sync` bare inside a workspace syncs it, `--all` reaches every workspace on every place, `--tools` refreshes every machine's copy and publishes one snapshot, `WK_MIRROR_BRANCHES` carries the extra branches | 3 | `live sync.fleet` (`wk sync <ws>` is `test_dev_integration` step 12) |
-| The PR workflow runs as one flow: `wk key push on\|off`, `wk sync --fix`, `wk pr`, the `container/bin` helpers, agents building while a person pushes, including from an armhf container | 3 | `live pr.workflow` |
+| The PR workflow runs as one flow: `wk sync --fix`, `wk pr`, a push through the push service, the `container/bin` helpers, agents building while a person pushes, including from an armhf container | 3 | `live pr.workflow` |
 | `wk ai claude` refuses a stopped proxy, and a tool inside wanting the network is refused and told so | 3 | `live ai.walled_session` |
 | In an agent session `git commit` and `git push` name the rule after git's own error, and a terminal session turns push back on at exit | 3 | `live ai.commit_wall` |
 | `wk ai claude` on a terminal, against a real container and a real guest holding only the placeholder login while the injector holds the claude.ai login, starts a session Remote Control shows under the workspace's name, its connection (WebSocket or SSE) passing through the injector; on a build box holding the inference token it starts without it and says so | 3 | `live ai.remote_control` |
@@ -1171,7 +1171,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | The injector puts the claude.ai access token only on the path prefixes the Claude CLI sends the placeholder to, measured from the injector's log over a real session (Remote Control included); until then it injects on every path but the OAuth token and authorize endpoints | 3 | `live inject.claude_paths` |
 | `wk zed` reaches a workspace through its `Host wk-<name>` ProxyCommand alias on every place, one hop for a peer's, and `wk new --zed` warns instead of failing when zed cannot launch | 3 | `unit zed.alias_is_proxycommand`, `live zed.peer` |
 | `wk key setup` elects across workstations: the credential its issuer accepts wins from whichever machine runs it, and a second run moves nothing | 4 | `live key.election[<peer>]` |
-| A build box holds no deploy key at rest, no ssh to it (nor to the gateway in front of it) forwards an agent, `wk key push status --on <box>` says so, a push on the box is refused naming `wk pr open`, and `wk pr open <box-ws>` on the workstation fetches the box's branch into the mirror over ssh and pushes it from there through the agent `wk push on` loads, refusing naming `wk push on` while that agent is empty; the `refs/wk/push/*` ref a killed push leaves is taken by a plain `wk gc`. The unit half is green; the live run against buildbox4 is owed | 4 | `unit push.remote_forwarding`, `live push.from_box` |
+| A build box holds no deploy key at rest, no ssh to it (nor to the gateway in front of it) forwards a key, a push on the box is refused naming `wk pr open`, and `wk pr open <box-ws>` on the workstation fetches the box's branch into the mirror over ssh and pushes it from there with the deploy key, refusing naming `wk key deploy` while this machine holds none; the `refs/wk/push/*` ref a killed push leaves is taken by a plain `wk gc`. The unit half is green; the live run against buildbox4 is owed | 4 | `unit push.remote_forwarding`, `live push.from_box` |
 | `wk new <ws> --on buildbox4` and `wk rm <ws>` from a workstation are the box's own `wk new` and `wk rm`: the creation record and log are on the box and the workstation keeps none, the box's `wk status` and the workstation's read one state for the workspace during creation and after, and the creation's fetch step fetches. The unit half is green; the live run is owed | 3 | `unit box_workspace`, `live new.box_record[buildbox4]` |
 | A hand-over to buildbox4 while its wk-tools commit differs from the workstation's is refused naming `wk sync --tools buildbox4`, `--force` crosses it and says so, and `wk status`/`wk status --log` hand over and report the difference. The unit half is green; the live run is owed | 3 | `unit handover.tools_level`, `live handover.tools_level[buildbox4]` |
 | `wk key backup` then `./setup` round-trips with no spurious change; the junk filters strip what they claim; a write is whole or unchanged; one path with a per-platform adapter | 4 | `unit backup.filters`, `live backup.roundtrip` |
@@ -1181,7 +1181,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | The golden base is rebuilt from `WK_VM_IMAGE`, carries no build caches, tracks the Xcode GA image, and `wk vm base --rm` asks separately about the pulled image while guests keep working | 5 | `live vm.base_matches_pin`, `unit vm.base_rm_asks_twice` |
 | `tart exec` is the one way into a guest: a command runs as the guest's user with its home and its status, a binary copy crosses both ways intact, and a detached job outlives its exec | 5 | `live vm.tart_exec` |
 | A guest booted from a base rebuilt with vm/mount-mirror.sh has the mirror's `wk-mirror` tag mounted at boot under `/Volumes/wk-mirror`, the checkout's alternates resolve there, and `wk sync`'s remount leaves agent-rw's mount as it was | 5 | `live vm.mirror_tag_mount`, `live sync.guest_remount`, `live vm.shared_mirror` |
-| The editor and the socket forwards reach a guest's sshd over `tart exec` (`sshd -i` as the guest's user, no network): `wk zed <guest>` opens, and `wk key push on` reaches the guest's agent | 5 | `live vm.ssh_transport`, `live zed.peer` |
+| The editor and the socket forwards reach a guest's sshd over `tart exec` (`sshd -i` as the guest's user, no network): `wk zed <guest>` opens, and a `git push` in the guest reaches the push service through its forward | 5 | `live vm.ssh_transport`, `live zed.peer` |
 | `wk sync` inside a guest asks the host's broker over the socket each start forwards to `~/.wk-broker.sock` | 5 | `live vm.broker_forward` |
 | The guest desktop is usable and stays so: the window resizes, `open -a` launches, screen saver, sleep and lock stay off across a reboot, both Setup Assistants stay suppressed, lldb prints no `llvmcas:` warnings | 5 | `live vm.desktop` |
 | `wk quiesce on` sets and reads back every setting on every machine (governor, App Nap, high power mode, sleep, update checks from the setting, Do Not Disturb proven by a banner not drawn), `off` restores the real prior values after a reboot, a re-run is a no-op, and it returns over ssh | 5 | `live quiesce.readback[<machine>]` |
@@ -1230,16 +1230,16 @@ decides is a row; one still open is listed under "Decisions for the user".
 | `./setup --stage tools` on a bare macOS host downloads git-lfs at its pinned version, checks it against the release's sha256sums, and `wk doctor` then reports it present | 5 | `unit doctor.TestHostToolsGitLfs`, `live setup.git_lfs[macos]` |
 | bugs.webkit.org gates comment tagging on editbugs, so `wk doctor`'s Bugzilla row can say editbugs: the comment-tag probe answers a key of an account with editbugs and refuses (304) one without | 4 | `live credcheck.editbugs_probe` |
 | A board reaches the page server at its tailnet name and port through the `tag:wk -> tag:wk` grant, with no `ssh -R` held for the run | 5 | `live bench.direct_page_server[<board>]` |
-| A push from a wk-tools workspace, with push on, reaches the user's wk-tools repository on GitHub through its own deploy key | 3 | `live repo_workspace_live.ToolsWorkspaceLive.test_a_push_reaches_the_tools_repository_through_its_deploy_key` |
+| A push from a wk-tools workspace, with no agent running in it, reaches the user's wk-tools repository on GitHub through the push service and its own deploy key | 3 | `live repo_workspace_live.ToolsWorkspaceLive.test_a_push_reaches_the_tools_repository_through_its_deploy_key` |
+| A container's `git push` reaches the push service, which maps the peer's pid through its cgroup (`libpod-<id>.scope`, measured 2026-10-08 on the podman VM) to the workspace, refuses while a claude or pi process runs in that workspace (not another's), and otherwise pushes with the deploy key | 3 | `live push.container_cgroup` |
+| The podman machine's push service pushes with the deploy keys `./setup` and `wk key deploy` copied into it, and its proxy sends a workspace with an agent to the injector's reading socket | 3 | `live push.vm_keys` |
+| A macOS guest's `git push` reaches the Mac's push service through the guest's forward and its own listener, and the Mac proxy sends a guest with an agent to the injector's reading socket by its address | 5 | `live push.guest_forward` |
 | Speedometer 3 under MiniBrowser runs without its `wakeLock` error: an upstream WebKit patch, landed last, after every other owed row | end | `live bench.speedometer3_wakelock[mbp]` |
 
 ### Decisions for the user
 
 Decisions are asked as questions, and their answers are recorded under "Decisions taken".
 
-- `claude/settings-host.json` names its deny list `deny_temp`, so `test_build_wall`'s
-  `TestTheAgentIsToldUpFront` (six tests) fails: the host deny list back as `deny`, or the host
-  settings file gone with the host `claude`?
 - The cut is spent at the four rules: measured 2026-10-05 in a wk-tools workspace, core is 33.0k
   non-blank lines and tests 51.7k after a trimming pass over every package and the two structural
   merges (the A/B drivers on `ab.Task`, the image builders' one staged lifecycle), each of which

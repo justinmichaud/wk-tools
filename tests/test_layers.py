@@ -1,4 +1,4 @@
-"""A layer is reached through its own Python API: no command runs `wk status` or `wk key push status` as a subprocess to read"""
+"""A layer is reached through its own Python API: no command runs `wk status` as a subprocess to read"""
 import io
 import os
 import subprocess
@@ -73,23 +73,6 @@ class TestStatusIsReadFromTheLibrary(unittest.TestCase):
             self.assertEqual(0, start.start_everything(reg))
         self.assertFalse(W.call_args.kwargs["fleet"])
         render.assert_called_once()
-
-
-class TestPrOpenAsksWhatPushStatusAsks(unittest.TestCase):
-    def test_a_refused_push_status_refuses_without_a_wk_subprocess(self):
-        pr = load_cmd("pr")
-        driver = mock.Mock()
-        with mock.patch.object(pr, "pr_open_target", return_value=("WebKit/WebKit", "me:topic", "fork", "topic")), \
-                mock.patch.object(subprocess, "run", no_subprocess), mock.patch("sys.stderr", io.StringIO()):
-            with self.assertRaises(Refused):
-                pr.pr_open(driver, "ws", False, False, lambda: 1)
-        driver.exec.assert_not_called()
-
-    def test_the_answer_is_the_exit_code_of_the_push_switchs_own_status(self):
-        pr = load_cmd("pr")
-        with mock.patch.object(pr, "Push") as P, mock.patch.object(pr.secrets, "Secrets"), mock.patch.object(subprocess, "run", no_subprocess):
-            P.return_value.switch_status.return_value = 4
-            self.assertEqual(4, pr.push_rc(mock.Mock()))
 
 
 if __name__ == "__main__":

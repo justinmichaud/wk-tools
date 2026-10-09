@@ -74,7 +74,7 @@ ALLOWLIST = (
     + [(h, (80, 443), "tunnel") for h in ("valid.apple.com", "ocsp.apple.com", "crl.apple.com", "i.pki.goog",
                                          "archive.ubuntu.com", "ports.ubuntu.com", "security.ubuntu.com",
                                          "ddebs.ubuntu.com")]
-    + [("github.com", (443, 22), "tunnel")]
+    + [("github.com", (443,), "tunnel"), ("github.com", (22,), "refuse")]
     + [(h, (443,), "inject") for h in ("api.github.com", "bugs.webkit.org", "api.anthropic.com", "claude.ai",
                                       "platform.claude.com")]
     + [("api.github.com", (22, 80, 9418), "refuse"), ("bugs.webkit.org", (80, 22), "refuse"),
@@ -125,7 +125,7 @@ class TestTheProxy(unittest.TestCase):
                 proxy = self.m.Proxy(self.m.Policy(tempfile.mkdtemp(prefix="wk-test-store-")))
                 seen, client, upstream = [], Sink(), Sink()
 
-                async def open_upstream(host, port, tls=False):
+                async def open_upstream(host, port, tls=False, caller=None):
                     seen.append((host, port, tls))
                     return _reader(b"HTTP/1.1 204 No Content\r\n\r\n" if forwarded else b""), upstream
 
@@ -177,6 +177,88 @@ class TestTheProxy(unittest.TestCase):
                           (sock, "api.anthropic.com", True), (sock, None, False)], calls)
 
 
+class _Peer:
+    def __init__(self, sock):
+        self.sock = sock
+
+    def get_extra_info(self, name):
+        return self.sock if name == "socket" else ("192.0.2.9", 5555)
+
+
+class TestTheProxyPicksTheInjectorsSocket(unittest.TestCase):
+    """A write goes to the writing socket only when the push service finds no agent in the caller's workspace."""
+
+    def setUp(self):
+        self.m = _load(PROXY, "wkproxy")
+        self.tmp = tempfile.mkdtemp(prefix="wk-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.m.PUSH_SOCKET = os.path.join(self.tmp, "push.sock")
+        self.asked = []
+
+    def service(self, reply):
+        async def handle(r, w):
+            self.asked.append(json.loads(await r.readline()))
+            w.write(reply)
+            await w.drain()
+            w.close()
+        return asyncio.start_unix_server(handle, path=self.m.PUSH_SOCKET)
+
+    def may_write(self, reply, peer=None):
+        async def run():
+            if reply is None:
+                return await self.m.may_write(peer or {"pid": 4})
+            server = await self.service(reply)
+            try:
+                return await self.m.may_write(peer or {"pid": 4})
+            finally:
+                server.close()
+        return asyncio.run(run())
+
+    def test_only_a_yes_is_a_yes(self):
+        self.assertTrue(self.may_write(b'{"writes": true, "why": ""}\n'))
+        self.assertEqual([{"pid": 4, "verb": "writes"}], self.asked)
+        for reply in (b'{"writes": false, "why": "an agent"}\n', b"garbage\n", b'{"writes": "yes"}\n', b"", None):
+            with self.subTest(reply=reply):
+                self.assertFalse(self.may_write(reply))
+
+    def test_a_guest_is_named_by_its_address(self):
+        self.assertTrue(self.may_write(b'{"writes": true}\n', {"addr": "192.0.2.9"}))
+        self.assertEqual({"addr": "192.0.2.9", "verb": "writes"}, self.asked[0])
+
+    def test_the_caller_is_a_pid_on_a_unix_socket_and_an_address_on_a_tcp_one(self):
+        a, b = socket.socketpair(socket.AF_UNIX)
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        self.assertEqual({"pid": os.getpid()}, self.m.peer_of(_Peer(a)))
+        tcp = socket.socket(socket.AF_INET)
+        self.addCleanup(tcp.close)
+        self.assertEqual({"addr": "192.0.2.9"}, self.m.peer_of(_Peer(tcp)))
+
+    def test_each_host_goes_to_the_socket_it_may(self):
+        calls, asked = [], []
+
+        async def unix(path, **kw):
+            calls.append(path)
+            return None, Sink()
+
+        async def may(peer):
+            asked.append(peer)
+            return self.allowed
+        self.m.may_write = may
+        for host, allowed, want in (("api.github.com", True, self.m.INJECT_SOCKET), ("api.github.com", False, self.m.INJECT_READ_SOCKET),
+                                    ("bugs.webkit.org", False, self.m.INJECT_READ_SOCKET), ("bugs.webkit.org", True, self.m.INJECT_SOCKET),
+                                    ("claude.ai", False, self.m.INJECT_SOCKET)):
+            with self.subTest(host=host, allowed=allowed):
+                self.allowed, calls[:], asked[:] = allowed, [], []
+                a, b = socket.socketpair(socket.AF_UNIX)
+                self.addCleanup(a.close)
+                self.addCleanup(b.close)
+                with unittest.mock.patch.object(self.m.asyncio, "open_unix_connection", unix):
+                    asyncio.run(self.m.Proxy(self.m.Policy(self.tmp)).open_upstream(host, 443, False, _Peer(a)))
+                self.assertEqual([want], calls)
+                self.assertEqual(host in self.m.WRITE_HOSTS, bool(asked), "only a host a write can reach asks")
+
+
 PAT, READ, BZ, REAL = "ghp-not-a-real-token", "ghp-read-only", "not-a-real-bugzilla-key", "sk-ant-oat01-REAL"
 GH, BUGS, ANT = "api.github.com", "bugs.webkit.org", "api.anthropic.com"
 CLAUDE_HOSTS = (ANT, "claude.ai", "platform.claude.com")
@@ -193,10 +275,11 @@ def http(line, host=GH, *headers, body=None):
 
 
 def inject(tmp, request, reply=NO_CONTENT, pat=PAT, read=None, bz=None, login=True, forward=None, hosts=None,
-           connect=None, timeouts=None):
+           connect=None, timeouts=None, writes=True):
     """Injector.handle on `request` against a fake upstream: (what the client read, every byte the upstream got, the hosts
     opened, the log). login: True holds one, False names an absent file, None holds none. forward: "up" or "down" makes
-    this a podman machine's injector, relaying to a holder that answers or not."""
+    this a podman machine's injector, relaying to a holder that answers or not. writes: the socket the proxy picks for a
+    workspace no agent runs in; False is the reading one."""
     m = _load(INJECT, "wkinject")
     d = Path(tempfile.mkdtemp(dir=str(tmp)))
     for name, value in (("pat", pat), ("read", read), ("bz", bz)):
@@ -208,7 +291,7 @@ def inject(tmp, request, reply=NO_CONTENT, pat=PAT, read=None, bz=None, login=Tr
     if forward == "up":
         (d / "claude-inject.sock").write_text("")
     claude = m.Forward(str(d / "claude-inject.sock")) if forward else None if login is None else m.Holder(str(d / "login.json"))
-    inj = m.Injector(str(d / "pat"), str(d / "read"), str(d / "bz"), claude, None, *([hosts] if hosts else []))
+    inj = m.Injector(str(d / "pat"), str(d / "read"), str(d / "bz"), claude, None, *([hosts] if hosts else []), writes=writes)
     upstream, client, opened = Sink(), Sink(), []
 
     async def tcp(host, port, **kw):
@@ -241,8 +324,9 @@ def row(label, request, setup=None, to=GH, said=(), sent=(), unsent=(), once=(),
                                               logged=logged, unlogged=unlogged, whole=whole)
 
 
-PUSH_OFF = dict(to=None, said=(b"412 Precondition Failed", b"wk key push is off for this workspace's machine",
-                               b"'wk key push on'"), logged=("write refused: push is off",))
+NO_WRITE = dict(to=None, said=(b"412 Precondition Failed", b"no credential to write with", b"an agent runs in this workspace",
+                               b"'wk key set github-pat'"), logged=("write refused: no credential to write with",))
+READING = {"writes": False}
 
 # Every request `git-webkit` makes of api.github.com, by the file that builds the URL.
 GIT_WEBKIT_READS = (
@@ -284,7 +368,7 @@ HOSTILE_WRITES = (
     ("POST", "/applications/id/token"), ("DELETE", "/user/keys/1"),
 )
 # Every request webkitbugspy makes of bugs.webkit.org (bugzilla.py); `_login_arguments` appends LOGIN_PAIR to each. A
-# Bugzilla key has no read-only form, so the switch's key goes on all of them or on none.
+# Bugzilla key has no read-only form, so the key goes on all of them or on none.
 GIT_WEBKIT_BUGZILLA = (
     # Tracker.credentials' validater, .user, .me; .populate, comments, see_also, attachments
     ("GET", "/rest/user/me%40example.test"), ("GET", "/rest/user?names=me%40example.test"), ("GET", "/rest/bug/250000"),
@@ -305,8 +389,8 @@ def _bz(method, target):
 
 
 INJECTOR_ROWS = (
-    # GitHub: the switch's token or the read token in, everything the workspace sent as a credential out.
-    [row("a read spends the switch's token when there is no read token, and the rest survives",
+    # GitHub: the held token or the read token in, everything the workspace sent as a credential out.
+    [row("a read spends the held token when there is no read token, and the rest survives",
          http("GET /user HTTP/1.1", GH, "Authorization: Basic d2s6d2staW5qZWN0cy10aGlz", "Connection: keep-alive",
               "Proxy-Authorization: Basic zzz", "User-Agent: python-requests/2.31.0"),
          first=b"GET /user HTTP/1.1", sent=(b"Authorization: Bearer " + PAT.encode(), b"Host: api.github.com\r\n",
@@ -316,17 +400,19 @@ INJECTOR_ROWS = (
      row("with no token a read goes unauthenticated, the placeholder stripped",
          http("GET /user HTTP/1.1", GH, "Authorization: Basic d2s6d2staW5qZWN0cy10aGlz"), {"pat": None},
          unsent=(b"Authorization", b"Basic"), logged=("read unauthenticated GET /user",)),
-     row("a read spends the read token over the switch's", http("GET /user HTTP/1.1"), {"read": READ},
+     row("a read spends the read token over the write token", http("GET /user HTTP/1.1"), {"read": READ},
          sent=(b"Authorization: Bearer " + READ.encode(),), unsent=(PAT.encode(),)),
-     row("a read carries the read token with the switch off", http("GET /repos/WebKit/WebKit/pulls/1234 HTTP/1.1"),
-         {"pat": None, "read": READ}, sent=(b"Authorization: Bearer " + READ.encode(),),
+     row("a read on the reading socket carries the read token", http("GET /repos/WebKit/WebKit/pulls/1234 HTTP/1.1"),
+         {**READING, "read": READ}, sent=(b"Authorization: Bearer " + READ.encode(),),
          logged=("read inject GET /repos/WebKit/WebKit/pulls/1234",)),
-     row("a write spends the switch's token, never the read token", http("POST /user/repos HTTP/1.1", body=b""), {"read": READ},
+     row("a write spends the write token, never the read token", http("POST /user/repos HTTP/1.1", body=b""), {"read": READ},
          sent=(b"Authorization: Bearer " + PAT.encode(),), unsent=(READ.encode(),)),
-     row("a write with the switch off is refused by name", http("POST /user/repos HTTP/1.1", body=b""),
-         {"pat": None, "read": READ}, **PUSH_OFF),
+     row("a write on the reading socket is refused by name", http("POST /user/repos HTTP/1.1", body=b""),
+         {**READING, "read": READ}, **NO_WRITE),
+     row("a write with no write token stored is refused by name", http("POST /user/repos HTTP/1.1", body=b""),
+         {"pat": None, "read": READ}, **NO_WRITE),
      row("a GitHub write never spends the Bugzilla key", http("POST /repos/x/y/pulls HTTP/1.1", body=b""),
-         {"pat": None, "bz": BZ}, **PUSH_OFF),
+         {"pat": None, "bz": BZ}, **NO_WRITE),
      row("github is never upgraded", http("GET /x HTTP/1.1", GH, *UPGRADE), sent=(b"Connection: close",),
          unsent=(b"Connection: Upgrade",))]
     + [row("git-webkit's read %s %s" % r, http("%s %s HTTP/1.1" % r, body=b""), {"read": READ},
@@ -338,11 +424,11 @@ INJECTOR_ROWS = (
     + [row("a read nothing in git-webkit makes: %s %s" % (m, t), http("%s %s HTTP/1.1" % (m, t)), {"read": READ},
            first=("%s %s HTTP/1.1" % (m, t)).encode(), sent=(b"Bearer " + READ.encode(),))
        for m in ("GET", "HEAD") for t in OTHER_READS]
-    + [row("a hostile write carries the switch's token: %s %s" % r, http("%s %s HTTP/1.1" % r, body=b""),
+    + [row("a hostile write carries the write token: %s %s" % r, http("%s %s HTTP/1.1" % r, body=b""),
            first=("%s %s HTTP/1.1" % r).encode(), sent=(b"Authorization: Bearer " + PAT.encode(),))
        for r in HOSTILE_WRITES]
-    + [row("a hostile write with the switch off: %s %s" % r, http("%s %s HTTP/1.1" % r, body=b""),
-           {"pat": None, "read": READ}, **PUSH_OFF) for r in HOSTILE_WRITES]
+    + [row("a hostile write on the reading socket: %s %s" % r, http("%s %s HTTP/1.1" % r, body=b""),
+           {**READING, "read": READ}, **NO_WRITE) for r in HOSTILE_WRITES]
     + [row("a path a server would normalise is forwarded unchanged: " + t, http("POST %s HTTP/1.1" % t, body=b""),
            first=("POST %s HTTP/1.1" % t).encode())
        for t in ("/repos/a/b/pulls/../../../../user", "/repos/a/b/%2e%2e/%2e%2e/keys", "//repos/a/b/pulls")]
@@ -362,18 +448,18 @@ INJECTOR_ROWS = (
                              ("POST", "/graphql?anything", b'{"query": "query { x }"}', "read"),
                              ("POST", "/graphql?anything", b'{"query": "mutation { x }"}', "write"),
                              ("PUT", "/graphql", b'{"query": "query { x }"}', "write"))]
-    # Bugzilla takes its login in the query string: the workspace's never goes on, the switch's api_key does.
-    + [row("bugzilla with the switch on: %s %s" % r, http(_bz(*r), BUGS, body=b""), {"pat": None, "bz": BZ}, to=BUGS,
+    # Bugzilla takes its login in the query string: the workspace's never goes on, the held api_key does.
+    + [row("bugzilla on the writing socket: %s %s" % r, http(_bz(*r), BUGS, body=b""), {"pat": None, "bz": BZ}, to=BUGS,
            sent=(("%s %s" % r).encode(), b"api_key=%s HTTP/1.1" % BZ.encode()), unsent=(b"login=", b"password="),
            logged=(" inject ",)) for r in GIT_WEBKIT_BUGZILLA]
-    + [row("bugzilla read with the switch off: %s %s" % r, http(_bz(*r), BUGS, body=b""), {"pat": None}, to=BUGS,
+    + [row("bugzilla read on the reading socket: %s %s" % r, http(_bz(*r), BUGS, body=b""), {**READING, "bz": BZ}, to=BUGS,
            sent=(("%s %s" % r).encode(),), unsent=(b"api_key", b"login=", b"password="), logged=(" unauthenticated ",))
        for r in GIT_WEBKIT_BUGZILLA if r[0] == "GET"]
-    + [row("bugzilla write with the switch off: %s %s" % r, http(_bz(*r), BUGS, body=b""), {"pat": None, "read": READ},
-           **PUSH_OFF) for r in GIT_WEBKIT_BUGZILLA if r[0] != "GET"]
+    + [row("bugzilla write on the reading socket: %s %s" % r, http(_bz(*r), BUGS, body=b""), {**READING, "bz": BZ, "read": READ},
+           **NO_WRITE) for r in GIT_WEBKIT_BUGZILLA if r[0] != "GET"]
     + [row("bugzilla never gets a GitHub token", http(_bz("GET", "/rest/bug/1"), BUGS), {"read": READ}, to=BUGS,
            unsent=(b"ghp-", b"Authorization", b"api_key"), logged=("/rest/bug/1",)),
-       row("the switch's key is url-encoded", http("GET /rest/bug/1 HTTP/1.1", BUGS), {"bz": "a b&c"}, to=BUGS,
+       row("the key is url-encoded", http("GET /rest/bug/1 HTTP/1.1", BUGS), {"bz": "a b&c"}, to=BUGS,
            first=b"GET /rest/bug/1?api_key=a%20b%26c HTTP/1.1", unsent=(b"Authorization",)),
        row("a key in a header is dropped", http("GET /rest/bug/1 HTTP/1.1", BUGS, "X-BUGZILLA-API-KEY: the-workspaces-own"),
            to=BUGS, unsent=(b"the-workspaces-own",)),

@@ -156,17 +156,17 @@ _unit_journal="podman machine ssh $WK_MACHINE -- "
 unit_start wk-proxy.service "$_unit_root" "$_unit_store" \
     "workspaces will have no egress" "$_unit_journal" _rsh
 
-unit_start wk-ssh-agent.service "$_unit_root" "$_unit_store" \
+unit_start wk-push.service "$_unit_root" "$_unit_store" \
     "no workspace here can push" "$_unit_journal" _rsh
 
 unit_start wk-github-inject.service "$_unit_root" "$_unit_store" \
     "'git-webkit pr' in a workspace will fail" "$_unit_journal" _rsh
 
-if wk_py wk.secrets pat-converge; then
-    debug "GitHub read token converged on the machine"
+if wk_py wk.secrets push-converge; then
+    debug "GitHub token, Bugzilla key and deploy keys converged on the machine"
 else
-    warn "could not converge the GitHub read token on '$WK_MACHINE', so a read
-  from a workspace answers 401 ('wk key set github-pat' stores one)"
+    warn "could not converge the credentials and deploy keys on '$WK_MACHINE', so a read from a
+  workspace answers 401 ('wk key set github-pat' stores one) and a push is refused"
 fi
 
 unset _state _ssh_port _ssh_key _ssh_user _unpinned _unit_root _unit_store _unit_journal _pb _pb_state _pb_changed

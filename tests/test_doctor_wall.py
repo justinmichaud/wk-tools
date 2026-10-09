@@ -16,7 +16,7 @@ from tests.fakes import FakeRegistry
 from tests.support import REPO, WkTest, bash, clean_env, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import claudelogin, doctor, places, wall  # noqa: E402
+from wk import claudelogin, doctor, places, pushgate, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
@@ -45,7 +45,9 @@ HEALTHY = [
     ("GH_TOKEN", "wk-injects-this"),
     ("BUGS_WEBKIT_ORG_PASSWORD", "wk-injects-this"),
     ("test -r /secrets/claude-token", ""),
-    ("ssh-add -l", "0"),
+    ("git ls-remote", "error: an agent (claude or pi) runs in 'demo' (pid 9), and nothing it can reach may publish"),
+    ("git config --global --get core.sshCommand", "/opt/wk-tools/container/push/wk-push-client.py"),
+    ("test -S /run/wk/ssh-agent.sock", ""),
     ("https://api.github.com/ 2", "200"),
     ("api.github.com/user", "200"),
     ("/pulls", "412"),
@@ -116,11 +118,11 @@ class _Wall(unittest.TestCase):
     def set(self, key, value):
         self.answers[key] = value
 
-    def wall(self, push_on=0, want_gpu=False):
-        return wall.Wall(str(REPO), self.driver, "demo", self.fake, push_on, want_gpu)
+    def wall(self, want_gpu=False):
+        return wall.Wall(str(REPO), self.driver, "demo", self.fake, want_gpu)
 
-    def check(self, name, push_on=0, want_gpu=False):
-        return getattr(self.wall(push_on, want_gpu), name)()
+    def check(self, name, want_gpu=False):
+        return getattr(self.wall(want_gpu), name)()
 
     def misses(self, rows):
         return [r for r in rows if r[0] == MISS]
@@ -134,20 +136,18 @@ class _Wall(unittest.TestCase):
             self.assertIn(w, rows_text(rows))
 
 
-ON, GPU = {"push_on": 1}, {"want_gpu": True}
+GPU = {"want_gpu": True}
 LOGIN = '{"claudeAiOauth": {"accessToken": "sk-ant-oat01-x", "refreshToken": "wk-injects-this"}}'
-BZ_POST = "-D - -X POST -H"
 # A check passing on HEALTHY changed by `answers`: (check, its arguments, answers, words its rows say).
 PASSES = (
     ("github", {}, {}, ()), ("allowlist", {}, {}, ()), ("off_allowlist", {}, {}, ()),
     ("off_allowlist", {}, {"1.1.1.1": ""}, ()), ("softwareupdate", {}, {}, ()), ("isolation", {}, {}, ()),
     ("commit_wall", {}, {}, ()),
     ("secrets_view", {}, {}, ("no credential this kind is not given is readable in here (claude)",)),
-    ("agent_identities", ON, {"ssh-add -l": "2"}, ()),
+    ("push_refused", {}, {}, ("no ssh-agent socket", "the push client", "a push is refused while an agent runs")),
     ("github_read", {}, {}, ("a read is authenticated (HTTP 200)",)),
-    ("github_write", {}, {}, ()), ("github_write", ON, {"/pulls": "422"}, ()),
-    ("pr_tool_setup", {}, {}, ()), ("bugzilla_read", {}, {}, ()), ("bugzilla_write", {}, {}, ()),
-    ("bugzilla_write", ON, {}, ("error 50",)),
+    ("github_write", {}, {}, ("while an agent runs",)),
+    ("pr_tool_setup", {}, {}, ()), ("bugzilla_read", {}, {}, ()), ("bugzilla_write", {}, {}, ("while an agent runs",)),
     ("gpu", {}, {"gpu-probe.sh": Result(1, "renderer=llvmpipe\n", "")}, ("llvmpipe",)),
     ("gpu", {}, {"gpu-probe.sh": Result(2, "", "")}, ()),
 )
@@ -166,17 +166,15 @@ FAILS = (
     ("no_credentials_inside", {}, {"PRIVATE KEY": "/home/u/.ssh/id_fork"}, ("private key material inside the workspace", "id_fork")),
     ("no_credentials_inside", {}, {"hosts.yml": "/home/u/.config/gh/hosts.yml"}, ("GitHub credential inside the workspace",)),
     ("secrets_view", {}, {"test -r /secrets/claude-token": "yes"}, ("/secrets/claude-token is readable in 'demo'", "Secrets.publish_view")),
-    ("agent_identities", {}, {"ssh-add -l": "1"}, ("1 identity/identities reach this workspace", "wk key push off")),
-    ("agent_identities", {"push_on": None}, {"ssh-add -l": "1"}, ("does not say push is on",)),
-    ("agent_identities", ON, {"ssh-add -l": "0"}, ("push is ON but no identity reaches",)),
-    ("agent_identities", {}, {"ssh-add -l": "MISSING"}, ("no ssh-add in the workspace",)),
+    ("push_refused", {}, {"test -S /run/wk/ssh-agent.sock": "agent"}, ("an ssh-agent reaches this workspace",)),
+    ("push_refused", {}, {"git config --global --get core.sshCommand": ""}, ("is not the push client", "'wk rm demo' and 'wk new'")),
+    ("push_refused", {}, {"git ls-remote": "Permission denied (publickey)."},
+     ("a push was not refused while an agent ran in 'demo'", "Permission denied")),
     ("github_read", {}, {"api.github.com/user": "000"}, ("rather than 200 or 401",)),
     ("github_read", {}, {"api.github.com/user": "000", "https://api.github.com/ 2": "000"},
      ("the injector is not in the path", "systemctl --user status wk-github-inject", "/run/wk/wk-github-ca.pem")),
-    ("github_write", {}, {"/pulls": "422"}, ("where the host does not say push is on", "wk key push off")),
-    ("github_write", ON, {"/pulls": "403"}, ("Pull requests: write",)),
-    ("github_write", ON, {"/pulls": "401"}, ("no write token", "wk key set github-pat --replace")),
-    ("github_write", ON, {"/pulls": ""}, ("answered 'nothing' rather than 422",)),
+    ("github_write", {}, {"/pulls": "422"}, ("answered '422' while an agent ran", "expected 412")),
+    ("github_write", {}, {"/pulls": ""}, ("answered 'nothing' while an agent ran",)),
     ("agent_credential", {}, {"claude auth status": '{"loggedIn": false}'}, ("not logged in", "'wk rm demo' and 'wk new'", "'wk start demo'")),
     ("agent_credential", {}, {"claude auth status": ""}, ("It answered (first 80 bytes): b''", "claude --version")),
     ("claude_login", {}, {"/.credentials.json": LOGIN}, ("is not the placeholder login", "'wk start demo'")),
@@ -190,10 +188,7 @@ FAILS = (
     ("pr_tool_setup", {}, {"webkitscmpy.setup": ""}, ("has not completed", "wk sync demo --fix")),
     ("pr_tool_setup", {}, {"webkitscmpy.setup": "false"}, ("has not completed", "wk sync demo --fix")),
     ("bugzilla_read", {}, {"rest/version": "000"}, ("not in the path for it", "systemctl --user status wk-github-inject")),
-    ("bugzilla_write", {}, {"http_code}' -X POST -H": "410"}, ("Bugzilla key still on the machine", "wk key push off")),
-    ("bugzilla_write", ON, {BZ_POST: 'HTTP/1.1 200 OK\r\n\r\n{"code": 410}'}, ("no Bugzilla API key", "wk key set bugzilla-api-key")),
-    ("bugzilla_write", ON, {BZ_POST: 'HTTP/1.1 200 OK\r\n\r\n{"code": 306}'}, ("does not know it", "--replace")),
-    ("bugzilla_write", ON, {BZ_POST: "HTTP/1.1 200 OK\r\n\r\n<html>"}, ("nothing Bugzilla-shaped",)),
+    ("bugzilla_write", {}, {"http_code}' -X POST -H": "410"}, ("answered '410' while an agent ran", "the write socket serving an agent")),
     ("gpu", GPU, {"gpu-probe.sh": Result(1, "renderer=llvmpipe\n", "")}, ("only software rendering",)),
     ("gpu", GPU, {"gpu-probe.sh": Result(2, "", "")}, ("no usable EGL inside the workspace (probe exit 2)",)),
 )
@@ -205,11 +200,8 @@ NOTES = (
     ("github_read", {}, {"api.github.com/user": "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 5\r\n\r\n502"}, ("an upstream outage",)),
     ("github_read", {}, {"api.github.com/user": "504"}, ("GitHub " + OUTAGE,)),
     ("github_write", {}, {"/pulls": "504"}, ("GitHub " + OUTAGE,)),
-    ("github_write", ON, {"/pulls": "504"}, ("GitHub " + OUTAGE,)),
     ("bugzilla_read", {}, {"rest/version": "504"}, ("Bugzilla " + OUTAGE,)),
     ("bugzilla_write", {}, {"http_code}' -X POST -H": "504"}, ("Bugzilla " + OUTAGE,)),
-    ("bugzilla_write", ON, {BZ_POST: "HTTP/1.1 504 Gateway Timeout\r\n\r\nbugs.webkit.org did not answer within 12 seconds; "
-                                     "the wk credential injector is up\r\n"}, ("Bugzilla " + OUTAGE,)),
     ("claude_login", {}, {"api.anthropic.com/v1/models": "HTTP/1.1 401 Unauthorized\r\n\r\nthe wk credential injector put no "
                           "claude.ai login on this request: this machine holds no claude.ai login\n401"}, ("holds no claude.ai login",)),
     ("claude_login", {}, {"api.anthropic.com/v1/models": "HTTP/1.1 504 Gateway Timeout\r\n\r\napi.anthropic.com did not answer\n504"},
@@ -221,8 +213,6 @@ FAULTS = (
     ("github_read", {}, {"api.github.com/user": FAULT}, "GitHub"),
     ("bugzilla_read", {}, {"rest/version": FAULT}, "Bugzilla"),
     ("bugzilla_write", {}, {"http_code}' -X POST -H": FAULT}, "Bugzilla"),
-    ("bugzilla_write", ON, {BZ_POST: FAULT.rsplit("\r\n\r\n", 1)[0] + "\r\n\r\nthe wk credential injector failed to verify or "
-                                     "resolve bugs.webkit.org (SSLCertVerificationError)\r\n"}, "Bugzilla"),
 )
 
 
@@ -335,31 +325,16 @@ class TestTheKeyScanRunsForReal(WkTest):
             self.assertIn(name, out)
 
 
-class TestAgentIdentities(_Wall):
-    def test_push_off_and_an_empty_agent_passes(self):
-        self.assertPasses(self.check("agent_identities"))
-        self.assertIn("ssh-add -l", [c for c in self.asked if "SSH_AUTH_SOCK=/run/wk/ssh-agent.sock" in c][0])
+class TestPushRefused(_Wall):
+    def test_the_probe_runs_while_a_stand_in_agent_does(self):
+        self.check("push_refused")
+        probe = next(c for c in self.asked if "git ls-remote" in c)
+        self.assertIn('cp "$(command -v sh)" "$d/claude"', probe)
+        self.assertIn("git@github-webkit:", probe)
+        self.assertLess(probe.index('"$d/claude" -c'), probe.index("git ls-remote"))
 
-    def test_a_target_with_no_socket_fails(self):
-        self.driver = self.reg.load("remote")
-        self.assertFails(self.check("agent_identities"), "names no ssh-agent socket")
-
-
-class TestTheSwitchMeasuredInside(_Wall):
-    def ssh(self, sock, idents):
-        self.fake.answer(["ssh", "-G", "github-webkit"], out=("identityagent %s\n" % sock) if sock else "user me\n")
-        self.fake.answer(["env", "SSH_AUTH_SOCK=" + sock, "ssh-add", "-l"], rc=0 if idents else 1,
-                         out="".join("256 SHA256:x k%d (ED25519)\n" % i for i in range(idents)) or "The agent has no identities.\n")
-
-    def test_an_empty_agent_or_no_socket_holds_nothing(self):
-        for sock in ("/run/wk/ssh-agent.sock", ""):
-            with self.subTest(sock=sock):
-                self.ssh(sock, 0)
-                self.assertPasses(self.check("push_here"))
-
-    def test_a_key_names_the_socket_and_the_hosts_remedy(self):
-        self.ssh("/run/wk/ssh-agent.sock", 2)
-        self.assertFails(self.check("push_here"), "2 deploy key(s) reach this workspace through /run/wk/ssh-agent.sock", "wk key push off")
+    def test_the_stand_in_is_what_the_scan_looks_for(self):
+        self.assertIn("*/claude", pushgate.AGENT_PID_SCAN)
 
 
 class TestGitHubRead(_Wall):
@@ -500,36 +475,36 @@ class TestFromTheHost(_Wall):
         super().setUp()
         self.fake.answer(["podman", "inspect", "wk-demo"], out="running\n")
         self.fake.files[os.path.join(self.driver.store.ws_dir("demo"), "home", places.READY_MARKER)] = ""
-        self.fake.answer([str(REPO / "wk"), "key", "push", "status"], rc=1)
         self.fake.answer(["podman", "info"], out="true\n")
         self.fake.answer(["systemctl", "--user"])
 
     def report(self):
         out = io.StringIO()
         rep = doctor.Report(out)
-        wall.from_host(str(REPO), self.driver, "demo", self.fake, rep)
+        self.publishing = wall.from_host(str(REPO), self.driver, "demo", self.fake, rep)
         return rep, out.getvalue()
 
     def test_a_healthy_container_passes_every_check(self):
         rep, out = self.report()
         self.assertEqual(0, rep.missing, out)
-        for w in ("workspace running", "the host says push is OFF", "the placeholder login is authenticated", "commit wall", "podman is rootless",
+        self.assertFalse(self.publishing)
+        for w in ("workspace running", "a push is refused while an agent runs", "the placeholder login is authenticated", "commit wall", "podman is rootless",
                   "no network interface but loopback", "github reachable"):
             self.assertIn(w, out)
 
-    def test_the_switch_is_read_once_and_only_a_measured_off_is_off(self):
-        for rc, said in ((0, "push is ON"), (4, "push is OFF"), (3, "could not measure the switch ('wk key push status' exited 3)")):
-            with self.subTest(rc=rc):
-                self.fake.answer([str(REPO / "wk"), "key", "push", "status"], rc=rc)
-                self.assertIn(said, wall.push_switch(str(REPO), self.fake)[1])
-        self.assertEqual(None, wall.push_switch(str(REPO), self.fake)[0])
-
-    def test_the_switch_is_asked_once_and_the_write_probe_after_the_parallel_pass(self):
+    def test_the_write_probe_runs_after_the_parallel_pass(self):
         self.report()
-        runs = [e[1] for e in self.fake.effects if e[0] == "run"]
-        self.assertEqual(1, runs.count((str(REPO / "wk"), "key", "push", "status")))
         self.assertNotIn("rm -f /opt/wk-tools/.wk-write-probe", self.asked)
         self.assertEqual("touch /opt/wk-tools/.wk-write-probe 2>&1", self.asked[-1])
+
+    def test_a_push_that_is_not_refused_is_publishing_and_a_failed_read_is_not(self):
+        self.set("git ls-remote", "")
+        self.report()
+        self.assertTrue(self.publishing)
+        self.answers = dict(HEALTHY)
+        self.set("rest/version", "000")
+        rep, _ = self.report()
+        self.assertEqual((False, 1), (self.publishing, rep.missing))
 
     def test_a_stopped_workspace_fails(self):
         self.fake.answer(["podman", "inspect", "wk-demo"], out="exited\n")
@@ -561,7 +536,7 @@ class TestFromTheHost(_Wall):
         names = [n for n, _ in self.wall().from_host()]
         self.assertNotIn("isolation", names)
         self.assertNotIn("commit-wall", names)
-        for n in ("no-credentials-inside", "agent-identities", "github-read", "github-write", "egress-softwareupdate"):
+        for n in ("no-credentials-inside", "push", "github-read", "github-write", "egress-softwareupdate"):
             self.assertIn(n, names)
 
 
@@ -571,7 +546,6 @@ class TestAGuest(_Wall):
     def test_an_unfiltered_guest_is_a_failure(self):
         self.driver.info = lambda ws: "running"
         self.driver.exec = self._direct
-        self.fake.answer([str(REPO / "wk"), "key", "push", "status"], rc=1)
         self.fake.files[os.path.join(self.driver.vm_dir(), "demo.unfiltered")] = ""
         out = io.StringIO()
         rep = doctor.Report(out)
@@ -588,7 +562,7 @@ class TestFromInside(_Wall):
 
     def setUp(self):
         super().setUp()
-        self.fake.answer(["ssh", "-G", "github-webkit"], out="user me\n")
+        self.set("git config --global --get core.sshCommand", str(REPO / "container" / "push" / "wk-push-client.py"))
 
     def results(self):
         out = io.StringIO()
@@ -599,17 +573,15 @@ class TestFromInside(_Wall):
         publishing, rep, out = self.results()
         self.assertFalse(publishing)
         self.assertEqual(0, rep.missing, out)
-        self.assertIn("the agent holds nothing", out)
+        self.assertIn("no ssh-agent socket", out)
 
     def test_each_way_to_publish_is_publishing(self):
-        for key, value in (("/pulls", "422"), ("http_code}' -X POST -H", "410")):
+        for key, value in (("/pulls", "422"), ("http_code}' -X POST -H", "410"), ("git ls-remote", ""), ("test -S /run/wk/ssh-agent.sock", "agent")):
             with self.subTest(key=key):
                 self.set(key, value)
                 self.assertTrue(self.results()[0])
                 self.answers = dict(HEALTHY)
-        self.fake.answer(["ssh", "-G", "github-webkit"], out="identityagent /s\n")
-        self.fake.answer(["env", "SSH_AUTH_SOCK=/s", "ssh-add", "-l"], out="256 SHA256:x k (ED25519)\n")
-        self.assertTrue(self.results()[0])
+                self.set("git config --global --get core.sshCommand", str(REPO / "container" / "push" / "wk-push-client.py"))
 
     def test_a_read_that_fails_is_the_sandbox_not_publishing(self):
         self.set("rest/version", "000")
@@ -619,7 +591,7 @@ class TestFromInside(_Wall):
 
     def test_the_host_half_is_not_asked(self):
         names = [n for n, _ in self.wall().from_inside()]
-        for n in ("secrets-view", "agent-identities", "isolation", "gpu", "agent-credential"):
+        for n in ("secrets-view", "isolation", "gpu", "agent-credential"):
             self.assertNotIn(n, names)
 
     def test_the_commit_wall_is_probed_where_bwrap_is(self):
@@ -699,16 +671,17 @@ class TestExitCodes(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             return DOCTOR_CMD.inside(sim_registry(True))
 
-    def _workspace(self, missing):
+    def _workspace(self, missing, publishing=False):
         def fake_from_host(root, driver, ws, machine, rep, want_gpu=False):
             rep.missing = missing
+            return publishing
         with mock.patch.object(DOCTOR_CMD.wall, "from_host", side_effect=fake_from_host), \
                 contextlib.redirect_stderr(io.StringIO()):
             return DOCTOR_CMD.workspace(sim_registry(False), "demo", [])
 
     def test_inside_and_from_the_host(self):
         self.assertEqual([0, 1, 3], [self._inside(0, False), self._inside(2, False), self._inside(2, True)])
-        self.assertEqual([0, 1], [self._workspace(0), self._workspace(3)])
+        self.assertEqual([0, 1, 3], [self._workspace(0), self._workspace(3), self._workspace(3, True)])
 
 
 if __name__ == "__main__":

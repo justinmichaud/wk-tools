@@ -7,7 +7,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import credcheck
-from wk import claudelogin, guest, project, reach, secrets
+from wk import claudelogin, guest, project, secrets
 from wk.store import no_such_workspace
 from wk.act import barrier, die, info, warn
 from wk.doctor import MISS, Report, miss, note, ok
@@ -17,7 +17,7 @@ from wk.resources import arch_has_gpu
 KEY_SCAN = ("{ grep -rl 'PRIVATE KEY' $HOME/.ssh $HOME/.claude /secrets /run/wk;\n"
             "  grep -l  'PRIVATE KEY' $HOME/* ; } 2>/dev/null | head -5")
 HOST_PATHS = ("/host/home", "/host/run", "/run/user/*/bus", "/run/dbus/system_bus_socket")
-PUBLISHING = ("push-keys", "github-write", "bugzilla-write")
+PUBLISHING = ("push", "github-write", "bugzilla-write")
 CSI = re.compile(r"\x1b\[[0-9;?<>=]*[A-Za-z]|\x1b[78]|\x1b\([A-Z]|\x0f")
 COMMIT_WALL_PATHS = ("objects", "refs", "logs", "HEAD", "packed-refs", "index.lock", "ORIG_HEAD")
 
@@ -83,6 +83,11 @@ def commit_wall_prefix(root, src):
     return ["bwrap", "--dev-bind", "/", "/"] + ro + ["--"]
 
 
+# A stand-in for an agent: the push service and the injector look for a process whose exe is a `claude`, and a refusal is only measured while one runs.
+WITH_AGENT = ('d=$(mktemp -d); cp "$(command -v sh)" "$d/claude"; "$d/claude" -c "while :; do sleep 1; done" & p=$!; sleep 0.3; %s; '
+              'kill $p 2>/dev/null; wait $p 2>/dev/null; rm -rf "$d"')
+
+
 def run_at_once(checks):
     """(name, rows) in the order given; a check that raises is reported as unmeasured, never as passed."""
     with ThreadPoolExecutor(max_workers=max(1, len(checks))) as pool:
@@ -99,17 +104,19 @@ def run_at_once(checks):
 
 
 class Wall:
-    def __init__(self, root, driver, ws, machine, push_on=0, want_gpu=False):
+    def __init__(self, root, driver, ws, machine, want_gpu=False):
         self.root = root
         self.driver = driver
         self.ws = ws
         self.machine = machine
-        self.push_on = push_on
         self.want_gpu = want_gpu
 
     def inside(self, cmd):
         """The container exec path appends \\r, which every numeric probe would then test as "2\\r"."""
         return self.driver.exec(self.ws, ["bash", "-lc", cmd]).out.replace("\r", "").rstrip("\n")
+
+    def with_agent(self, cmd):
+        return self.inside(WITH_AGENT % cmd)
 
     def github(self):
         code = status_of(self.inside(http("https://github.com/")))
@@ -195,7 +202,7 @@ class Wall:
             elif not tok:
                 rows.append(miss("%s is unset in here, so nothing that reads it sends a credential for the injector to replace" % var,
                                  "container/proxy/ensure-bridge.sh exports all three, from /secrets/github-user, "
-                                 "/secrets/bugzilla-user and the injector's CA; 'wk key push on' rewrites /secrets"))
+                                 "/secrets/bugzilla-user and the injector's CA; './setup' rewrites /secrets"))
             else:
                 rows.append(miss("%s in the workspace is not the placeholder: something put a real credential in here" % var,
                                  "find it and remove it"))
@@ -223,38 +230,25 @@ class Wall:
             rows.append(ok("no credential this kind is not given is readable in here (%s)" % " ".join(kept)))
         return rows
 
-    def agent_identities(self):
-        sock = self.driver.agent_sock()
-        if not sock:
-            return [miss("the '%s' place names no ssh-agent socket, so a push from in here would use a credential wk does not control"
-                         % self.driver.name, "lib/wk/places.py, %s.agent_sock" % type(self.driver).__name__)]
-        # An empty agent prints "The agent has no identities." on stdout.
-        ident = self.inside("command -v ssh-add >/dev/null 2>&1 "
-                            "&& (SSH_AUTH_SOCK=%s ssh-add -l 2>/dev/null | grep -v 'has no identities' | grep -c . || true) "
-                            "|| echo MISSING" % sock)
-        if ident == "MISSING":
-            return [miss("no ssh-add in the workspace, so what the agent holds cannot be measured from in here",
-                         "a push from in here would not work either")]
-        n = int(ident) if ident.isdigit() else 0
-        if self.push_on == 1:
-            if n > 0:
-                return [ok("%d deploy key(s) reach this workspace through %s, and push is on" % (n, sock))]
-            return [miss("push is ON but no identity reaches %s in here" % sock, "wk key push on")]
-        if n == 0:
-            return [ok("no identity reaches this workspace (%s is empty): a push is refused" % sock)]
-        return [miss("%d identity/identities reach this workspace, and the host does not say push is on" % n, "wk key push off")]
-
-    def push_here(self):
-        alias = next((r[2] for r in secrets.forks()), "")
-        sock = reach.ssh_g(self.machine, alias).get("identityagent", "")
-        ident = 0
-        if sock:
-            r = self.machine.run(["env", "SSH_AUTH_SOCK=" + sock, "ssh-add", "-l"])
-            ident = len([l for l in r.out.splitlines() if l]) if r.ok else 0
-        if ident == 0:
-            return [ok("the agent holds nothing, so a push from in here has no identity to offer")]
-        return [miss("%d deploy key(s) reach this workspace through %s, so an agent in here could push" % (ident, sock),
-                     "the switch is the host's:  wk key push off")]
+    def push_refused(self):
+        """No key reaches the workspace, and its git push is refused while an agent runs in it."""
+        tools = self.driver.tools(self.ws)
+        agent = self.inside('test -S /run/wk/ssh-agent.sock && echo agent; printf %s "${SSH_AUTH_SOCK:+env}"')
+        rows = [miss("an ssh-agent reaches this workspace (%s)" % agent.replace("\n", " "), "no key may: nothing but the push service holds one")
+                if agent else ok("no ssh-agent socket and no $SSH_AUTH_SOCK: no key reaches this workspace")]
+        client = "%s/container/push/wk-push-client.py" % tools
+        if self.inside("git config --global --get core.sshCommand") != client:
+            return rows + [miss("git's ssh transport in '%s' is not the push client (core.sshCommand)" % self.ws,
+                                "'wk rm %s' and 'wk new' remake the workspace with it; a guest is rewritten at every 'wk start %s'"
+                                % (self.ws, self.ws))]
+        rows.append(ok("git's ssh transport is the push client, so a push is the host's service's to allow"))
+        _, repo, alias = self.driver.repo(self.ws).push_rows(self.machine, self.driver.tools_src())[0]
+        url = "git@%s:%s.git" % (alias, repo)
+        said = self.with_agent("GIT_TERMINAL_PROMPT=0 git ls-remote --heads %s 2>&1 | head -3" % url)
+        if "agent" in said and "runs in" in said:
+            return rows + [ok("a push is refused while an agent runs in the workspace")]
+        return rows + [miss("a push was not refused while an agent ran in '%s': %s" % (self.ws, said.replace("\n", " ")[:160] or "nothing said"),
+                            "the push service on the host: 'wk doctor' there says whether it answers")]
 
     def github_read(self):
         """GET / answers 200 unauthenticated and 401 only for a token GitHub refuses, which is the injector's own standing one."""
@@ -280,31 +274,18 @@ class Wall:
                      self.driver.daemon_remedy(self.ws, "inject"))]
 
     def github_write(self):
-        """An empty body names no branch, so 422 is the authenticated answer and no pull request is created."""
+        """An empty body names no branch; with an agent running the injector answers 412 before GitHub is asked."""
         fork = next((r[1] for r in secrets.forks()), "")
-        pulls = "https://api.github.com/repos/%s/pulls" % fork
-        reply = self.inside(http(pulls, "-X POST -d '{}' "))
+        reply = self.with_agent(http("https://api.github.com/repos/%s/pulls" % fork, "-X POST -d '{}' "))
         if gap := self.gap("GitHub", reply):
             return gap
         code = status_of(reply)
-        if self.push_on != 1:
-            if code == "412":
-                return [ok("a write is refused by the injector (HTTP 412), which names 'wk key push on'")]
-            return [miss("POST /repos/%s/pulls answered '%s' where the host does not say push is on -- expected 412, the injector's own refusal"
-                         % (fork, code or "nothing"),
-                         "a 401 is an injector still running older code, which 'wk status' reports and './setup' on that machine "
-                         "restarts; anything else is a write token still on the machine:  wk key push off")]
-        if code == "422":
-            return [ok("a write is authenticated (HTTP 422, nothing created), and push is on")]
-        if code == "403":
-            return [miss("push is ON and the token reached GitHub, which refused it: the stored PAT has no 'Pull requests: write' on %s" % fork,
-                         "reissue it with that permission and 'wk key set github-pat --replace'")]
-        if code == "401":
-            return [miss("push is ON but POST /repos/%s/pulls answered 401: the injector has no write token, or one GitHub refuses" % fork,
-                         "'wk key push on' again for the first; 'wk key set github-pat --replace', then './setup' for a spent, revoked or "
-                         "expired PAT. 'wk key push status' says which of the two the machine is in")]
-        return [miss("push is ON but POST /repos/%s/pulls answered '%s' rather than 422" % (fork, code or "nothing"),
-                     "the injector has no write token ('wk key push on' again)")]
+        if code == "412":
+            return [ok("a write is refused by the injector (HTTP 412) while an agent runs in the workspace")]
+        return [miss("POST /repos/%s/pulls answered '%s' while an agent ran in the workspace -- expected 412, the injector's own refusal"
+                     % (fork, code or "nothing"),
+                     "a 401 is an injector still running older code, which 'wk status' reports and './setup' on that machine "
+                     "restarts; anything else is the write socket serving an agent: the push service and the egress proxy")]
 
     def agent_credential(self):
         """`claude auth status` is local (measured 2026-09-10: loggedIn for a token Anthropic has never seen)."""
@@ -405,37 +386,16 @@ class Wall:
                      self.driver.daemon_remedy(self.ws, "inject"))]
 
     def bugzilla_write(self):
-        """Bugzilla names its own refusal in the body: 410 "log in first", 306 an unknown key, else an empty bug refused."""
-        post = "-X POST -H 'Content-Type: application/json' -d '{}' "
-        if self.push_on != 1:
-            # Nothing reaches Bugzilla here, so the status is the injector's own.
-            reply = self.inside(http(project.get("BUGZILLA") + "/rest/bug", post))
-            if gap := self.gap("Bugzilla", reply):
-                return gap
-            code = status_of(reply)
-            if code == "412":
-                return [ok("a Bugzilla write is refused by the injector (HTTP 412), which names 'wk key push on'")]
-            return [miss("POST /rest/bug answered '%s' where the host does not say push is on -- expected 412, the injector's own refusal"
-                         % (code or "nothing"),
-                         "Bugzilla's own 'log in first' is an injector still running older code, which 'wk status' reports and "
-                         "'./setup' on that machine restarts; anything else is a Bugzilla key still on the machine:  wk key push off")]
-        reply = self.inside("%s %s%s/rest/bug 2>/dev/null" % (CURL, post, project.get("BUGZILLA")))
-        headers, _, body = reply.partition("\n\n") if reply.startswith("HTTP/") else ("", "", reply)
-        if "wk credential injector" in body or fault_of(headers):
-            return self.gap("Bugzilla", headers + "\n" + ("504" if "did not answer" in body else "502"))
-        try:
-            code = str(json.loads(body).get("code", ""))
-        except (ValueError, AttributeError):
-            code = ""
-        if code == "410":
-            return [miss("push is ON but POST /rest/bug answered 'log in first' (410): the injector has no Bugzilla API key",
-                         "'wk key set bugzilla-api-key', then 'wk key push on' again")]
-        if code == "306":
-            return [miss("push is ON and the key reached Bugzilla, which does not know it (306)",
-                         "'wk key set bugzilla-api-key --replace', then 'wk key push on' again")]
-        if not code:
-            return [miss("POST /rest/bug answered nothing Bugzilla-shaped", "the injector is in the path but not answering for " + credcheck.bugzilla_host())]
-        return [ok("a Bugzilla write is authenticated (error %s: an empty bug, nothing filed), and push is on" % code)]
+        reply = self.with_agent(http(project.get("BUGZILLA") + "/rest/bug", "-X POST -H 'Content-Type: application/json' -d '{}' "))
+        if gap := self.gap("Bugzilla", reply):
+            return gap
+        code = status_of(reply)
+        if code == "412":
+            return [ok("a Bugzilla write is refused by the injector (HTTP 412) while an agent runs in the workspace")]
+        return [miss("POST /rest/bug answered '%s' while an agent ran in the workspace -- expected 412, the injector's own refusal"
+                     % (code or "nothing"),
+                     "Bugzilla's own 'log in first' is an injector still running older code, which 'wk status' reports and "
+                     "'./setup' on that machine restarts; anything else is the write socket serving an agent")]
 
     def gpu(self):
         """gpu-probe.sh exits 0 hardware, 1 software only, 2 no EGL, 3 build failed."""
@@ -488,13 +448,13 @@ class Wall:
         if self.driver.kind in secrets.LOGIN_KINDS:
             checks.append(("claude-login", self.claude_login))
         return checks + [("no-credentials-inside", self.no_credentials_inside), ("secrets-view", self.secrets_view),
-                         ("agent-identities", self.agent_identities), ("github-read", self.github_read),
+                         ("push", self.push_refused), ("github-read", self.github_read),
                          ("github-write", self.github_write), ("bugzilla-read", self.bugzilla_read),
                          ("bugzilla-write", self.bugzilla_write), *self.pr_tool_check(),
                          ("agent-credential", self.agent_credential), ("gpu", self.gpu)]
 
     def from_inside(self):
-        checks = [("push-keys", self.push_here), ("github-read", self.github_read), ("github-write", self.github_write),
+        checks = [("push", self.push_refused), ("github-read", self.github_read), ("github-write", self.github_write),
                   ("bugzilla-read", self.bugzilla_read), ("bugzilla-write", self.bugzilla_write), ("egress-github", self.github),
                   ("egress-allowlist", self.allowlist), ("egress-off-allowlist", self.off_allowlist),
                   ("no-credentials", self.no_credentials_inside), *self.pr_tool_check()]
@@ -507,24 +467,12 @@ def verdict(rep, publishing=False):
     return "publishing" if publishing else "broken" if rep.missing else "intact"
 
 
-def push_verdict(rc):
-    """push_on (1, 0 or None, unmeasured) from `wk key push status`'s exit code."""
-    return {0: 1, 1: 0, 4: 0}.get(rc)
-
-
-def push_switch(root, machine):
-    rc = machine.run([os.path.join(root, "wk"), "key", "push", "status"]).rc
-    push_on = push_verdict(rc)
-    if push_on == 1:
-        return 1, "the host says push is ON"
-    if push_on == 0:
-        return 0, "the host says push is OFF"
-    return None, ("the host could not measure the switch ('wk key push status' exited %d), so what reaches this workspace "
-                  "is measured below and compared to nothing" % rc)
+def could_publish(results):
+    return any(r[0] == MISS for name, found in results if name in PUBLISHING for r in found)
 
 
 def from_host(root, driver, ws, machine, rep, want_gpu=False):
-    """Out of the parallel pass: the push switch, which two checks read, and the write probe, which cleans up after itself."""
+    """Every row into `rep`, and whether an agent in the workspace could publish."""
     if driver.kind == "remote":
         die("'wk doctor %s' proves a sandbox holds, and a remote place has none:\n"
             "    a plain checkout on a shared machine, no container, no firewall, no\n"
@@ -535,27 +483,27 @@ def from_host(root, driver, ws, machine, rep, want_gpu=False):
     if state == "absent":
         die(no_such_workspace(ws))
     rows = [ok("workspace running") if state == "running" else miss("workspace state: %s" % state, "wk start %s" % ws)]
-    push_on, said = push_switch(root, machine)
-    rows.append(note(said))
     if driver.kind == "vm" and not driver.egress_filtered(ws):
         rows.append(miss("this guest was booted with WK_VM_UNFILTERED, so it has the open network",
                          "wk stop %s && wk start %s   (without that variable)" % (ws, ws)))
     if driver.kind == "vm":
         rows += driver.check_rows(ws)
     rep.rows(rows)
-    wall = Wall(root, driver, ws, machine, push_on, want_gpu)
-    for _, found in run_at_once(wall.from_host()):
+    wall = Wall(root, driver, ws, machine, want_gpu)
+    results = run_at_once(wall.from_host())
+    for _, found in results:
         rep.rows(found)
     if driver.kind == "container":
         rep.rows(wall.rootless_proxy())
+    return could_publish(results)
 
 
 def from_inside(root, driver, ws, machine, rep):
     """`wk doctor` in a workspace: every row into `rep`, and whether an agent in here could publish."""
-    results = run_at_once(Wall(root, driver, ws, machine, 0, False).from_inside())
+    results = run_at_once(Wall(root, driver, ws, machine).from_inside())
     for _, found in results:
         rep.rows(found)
-    return any(r[0] == MISS for name, found in results if name in PUBLISHING for r in found)
+    return could_publish(results)
 
 
 def agent_checks(root, driver, ws, machine):
@@ -575,7 +523,7 @@ def agent_checks(root, driver, ws, machine):
     v = verdict(rep, publishing)
     if v == "publishing":
         die("refusing to run: an agent in '%s' could publish (see above).\n    Nothing in here can fix it and --force does "
-            "not cross it; the switch is the\n    host's:  wk key push off" % ws)
+            "not cross it; 'wk doctor %s' on the host says which part fails" % (ws, ws))
     if v == "broken":
         warn("%d check(s) failed -- the sandbox is not intact" % rep.missing)
         barrier("the sandbox around '%s' is not intact (see above), and relaxed\n"

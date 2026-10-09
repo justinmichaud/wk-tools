@@ -1,4 +1,4 @@
-"""The keyring is this device's own: `wk key` and `wk key push` read and write it with a `podman` on PATH that
+"""The keyring is this device's own: `wk key` reads and writes it with a `podman` on PATH that
 leaves a witness and fails, and every reader refuses a link planted beside a credential."""
 import contextlib
 import io
@@ -87,19 +87,12 @@ class TestTheStoreFunctionsReadAndWriteHere(_Here):
         self.assertEqual(f"{PLACEHOLDER}-pat\n", sec.cred_read("github-pat"))
 
 
-class TestThePushSwitchRunsHere(_Here):
-    """The agent is pointed at a socket of its own (WK_PUSH_AGENT_SOCK), so the podman witness must stay empty."""
+class TestTheKeyReadsRunHere(_Here):
+    """The held keys are read where they are, so the podman witness must stay empty."""
 
     def setUp(self):
         super().setUp()
         self.held = self.secrets.parent / "push-keys"
-        self.sock = self.tmp / "agent.sock"
-        self.pat = self.tmp / "pat"
-
-    def env(self, extra=None):
-        return super().env({"WK_PUSH_AGENT_SOCK": str(self.sock),
-                            "WK_PUSH_PAT_FILE": str(self.pat),
-                            **(extra or {})})
 
     def _keys(self):
         self.held.mkdir(parents=True, exist_ok=True)
@@ -108,15 +101,14 @@ class TestThePushSwitchRunsHere(_Here):
             p = self.held / f"build_key_{fork}"
             p.write_text(f"{PLACEHOLDER}-{fork}\n")
             p.chmod(0o600)
+            (self.secrets / f"build_key_{fork}.pub").write_text(f"ssh-ed25519 AAAA {fork}\n")
 
-    def test_status_and_off_read_the_keys_here_and_start_nothing(self):
-        self.assertEqual(4, self.wk("key", "push", "status").returncode)
+    def test_fingerprints_reads_the_keys_here_and_starts_nothing(self):
         self._keys()
-        for action, rc in (("status", 1), ("off", 0)):
-            with self.subTest(action=action):
-                cp = self.wk("key", "push", action)
-                self.assertEqual(rc, cp.returncode, cp.stdout)
-                self.assert_no_podman(cp)
+        cp = self.wk("key", "fingerprints")
+        self.assertEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("private half here", cp.stdout)
+        self.assert_no_podman(cp)
 
 
 class TestNothingButAFileIsReadOrWrittenThroughALink(_Here):

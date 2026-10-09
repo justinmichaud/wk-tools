@@ -74,7 +74,6 @@ class Election:
                 if not self.sec.push_key_adopt(fork, self.fleet.ask(winner, "give", fork)[1]):
                     warn("%s: %s's deploy key did not arrive, so nothing was changed" % (repo, winner))
                     return False
-                log("  an ssh-agent already holding the old key keeps offering it:  wk key push off && wk key push on")
         ok = self.register_key(fork, repo)
         if not self.fleet_on:
             return ok

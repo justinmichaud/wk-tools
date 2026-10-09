@@ -13,15 +13,15 @@
 #   wk doctor <workspace>   the sandbox around that workspace, measured from
 #           inside it: egress through the allowlisting proxy, isolation and the
 #           commit wall (a container), no key, token or credential inside that
-#           could publish, reads and writes through the credential injector
-#           against the host's push switch, the agent's login, and the GPU. A
+#           could publish, reads and writes through the credential injector, a
+#           push and a write refused while an agent runs, the agent's login, and the GPU. A
 #           remote place has no sandbox, and is refused.
 #   wk doctor <machine>     a machine in machines/, asked from here: its tailnet
 #           names, whether it answers, a bench machine's system, media and arm,
 #           and a board's cpu governor and temperature. A name that is both a
 #           machine and a workspace is the machine.
 #   wk doctor               inside a workspace: the half it answers about itself,
-#           with the push switch measured rather than read (what `wk ai claude`
+#           with the push refusal measured rather than read (what `wk ai claude`
 #           runs in here before a session)
 #
 #   --gpu   fail if the workspace has no hardware-accelerated GPU (informational otherwise)
@@ -38,8 +38,8 @@
 #
 #   0  everything checkable is provisioned; every check of the wall passed
 #   1  something is missing, or a check of the wall failed (the lines say what and how)
-#   3  inside a workspace: something in here could publish (a deploy key, a
-#      GitHub or Bugzilla write the injector did not refuse)
+#   3  something in a workspace could publish (a deploy key, a push or a GitHub or
+#      Bugzilla write that was not refused while an agent ran)
 
 import os
 import sys
@@ -104,12 +104,16 @@ def workspace(reg, name, argv):
     driver = reg.load(reg.ws_place(name))
     info("checking workspace '%s' (%s)" % (name, driver.name))
     rep = Report(sys.stderr)
-    wall.from_host(ROOT, driver, name, reg.machine, rep, want_gpu=args.flag("--gpu"))
+    publishing = wall.from_host(ROOT, driver, name, reg.machine, rep, want_gpu=args.flag("--gpu"))
     sys.stderr.write("\n")
-    if wall.verdict(rep) == "broken":
+    v = wall.verdict(rep, publishing)
+    if v == "publishing":
+        warn("an agent in '%s' could publish (see above)" % name)
+        return 3
+    if v == "broken":
         warn("%d check(s) failed -- the sandbox is not intact" % rep.missing)
         return 1
-    info("sandbox intact")
+    info("sandbox intact, and nothing in there can publish")
     return 0
 
 

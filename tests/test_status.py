@@ -586,7 +586,7 @@ class TestHealthRecords(unittest.TestCase):
         self.assertEqual((rec["kind"], rec["task"], rec["state"]), ("bench", "20260101T000000Z-t", "broken"))
         self.assertIn(str(task), rec["notes"][0]["text"])
 
-    def test_the_push_row_counts_keys_and_never_reports_a_switch_position(self):
+    def test_the_push_row_counts_keys_and_says_none_reaches_a_workspace(self):
         held = self.tmp / "store" / "push-keys"
         held.mkdir(parents=True)
         env = dict(self.env)
@@ -596,7 +596,7 @@ class TestHealthRecords(unittest.TestCase):
         (held / "build_key_fork").write_text("not-a-key\n")
         rec = status.push_record(store, "m", ["fork", "forkwpe"], False)
         self.assertEqual((rec["name"], rec["state"]), ("push credentials", "some keys held"))
-        self.assertIn("1 deploy key(s), 1 absent, no API token -- 'wk key push status' says whether they are loaded", rec["detail"])
+        self.assertIn("1 deploy key(s), 1 absent, no API token -- no key reaches a workspace; the push service holds them", rec["detail"])
         (held / "build_key_forkwpe").write_text("not-a-key\n")
         (held / "github-pat").write_text("ghp_notatoken\n")
         rec = status.push_record(store, "m", ["fork", "forkwpe"], False)
@@ -640,10 +640,34 @@ class TestHealthRecords(unittest.TestCase):
         (brdir / "r1" / "status").write_text("state=running\npid=%d\nstage=building\n" % os.getpid())
         (brdir / "r2" / "status").write_text("state=running\npid=4194304\nstage=gone\n")
         rec = status.broker_record(self.store, "m", status.Local().alive)
-        self.assertEqual((rec["name"], rec["state"]), ("request broker", "closed"))
+        self.assertEqual((rec["name"], rec["state"]), ("request broker", "down"))
         self.assertIn("./setup --stage broker", rec["fix"])
         self.assertEqual([n["text"] for n in rec["notes"]], ["in flight: r1 -- building"])
         self.assertIsNone(status.broker_record(Store(dict(self.env, XDG_STATE_HOME=str(self.tmp / "nostate"))), "m", lambda p: False))
+
+    def test_a_socket_file_nobody_listens_on_is_down_and_a_listener_is_open(self):
+        import socket
+        sock = str(self.tmp / "b.sock")
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(sock)
+        self.addCleanup(server.close)
+        store = Store(dict(self.env, WK_BROKER_SOCKET=sock))
+        self.assertEqual("down", status.broker_record(store, "m", lambda p: False)["state"], "a bound socket that is not listening")
+        server.listen(1)
+        self.assertEqual("open (0 in flight)", status.broker_record(store, "m", lambda p: False)["state"])
+        self.assertTrue(status.socket_answers(sock))
+        self.assertFalse(status.socket_answers(sock + ".none"))
+
+    def test_the_hosts_injector_is_measured_on_a_mac_only(self):
+        store = Store(dict(self.env, WK_STORE=str(self.tmp / "store")))
+        self.assertEqual([], status.launchd_daemons(store))
+        self.assertIsNone(status.injector_record(store, "m"))
+        with mock.patch.object(Store, "macos_host", True):
+            names = [(n, stage) for n, _, stage in status.launchd_daemons(store)]
+            self.assertEqual([("credential injector", "inject"), ("request broker", "broker")], names)
+            rec = status.injector_record(store, "m")
+        self.assertEqual((rec["name"], rec["state"]), ("credential injector (this Mac)", "down"))
+        self.assertIn("./setup --stage inject", rec["fix"])
 
     def test_services_are_named_and_asked_whether_they_are_stale(self):
         self.assertEqual(status.unit_program(REPO, "wk-proxy.service"), "container/proxy/wk-proxy.py")
@@ -653,8 +677,9 @@ class TestHealthRecords(unittest.TestCase):
         import shutil
         if shutil.which("systemctl"):
             recs = status.service_records(REPO, "m", run)
-            self.assertEqual([r["state"] for r in recs], ["stopped", "stopped"])
+            self.assertEqual([r["state"] for r in recs], ["stopped", "stopped", "stopped"])
             self.assertIn("systemctl --user start wk-proxy   (workspaces have no network without it)", recs[0]["fix"])
+            self.assertIn("systemctl --user start wk-push   ('git push' in a workspace is refused)", recs[2]["fix"])
 
 
 class TestTheWalkProbesAMachineOnce(unittest.TestCase):

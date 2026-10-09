@@ -145,7 +145,7 @@ class TestReplacingOne(_PatRun):
 
 
 class TestTheStandingReadTokenReachesTheMachine(_PatRun):
-    """Storing, rotating and withdrawing converge the read copy (tests/test_push_agent.py); these are the edges."""
+    """Storing, rotating and withdrawing converge the read copy (tests/test_push_keys.py); these are the edges."""
 
     @unittest.skipUnless(os.uname().sysname == "Darwin", "the injector that serves the guests is a macOS host's")
     def test_the_guests_injector_takes_it_from_this_store_and_no_other(self):
@@ -220,9 +220,9 @@ class TestTheMachineTakesTheTokenOnEveryStart(unittest.TestCase):
         from wk import places, secrets
         from wk.machine import Fake
         c = places.Container("container", str(REPO), {"HOME": "/nonexistent", "WK_STORE": "/nonexistent/store"}, Fake("here"))
-        with mock.patch.object(secrets.Secrets, "pat_converge_machine") as converge:
+        with mock.patch.object(secrets.Secrets, "push_converge_machine") as converge:
             c.start("demo")
-        self.assertEqual(1, converge.call_count, "'wk start <container workspace>' does not converge the read token")
+        self.assertEqual(1, converge.call_count, "'wk start <container workspace>' does not converge the credentials")
 
 
 if __name__ == "__main__":

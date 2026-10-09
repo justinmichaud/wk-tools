@@ -12,7 +12,7 @@ machines and Raspberry Pi/Mac benchmark boards connected by tailnet.
 
 `wk new`, `wk rm`
 
-Credentials required for git, git-webkit, github, claude, etc are shared or revoked using `wk key push`.
+Credentials required for git, git-webkit, github, claude, etc are held outside every workspace and used on its behalf: a `git push` in a workspace is the host's.
 
 **place** — where a workspace lives, named with `--on`; a **driver** makes and runs one
 
@@ -246,8 +246,8 @@ wk sync tools                           # fetches its origin
 wk-tools is worked on from such a workspace, not from a session on the host.
 Its checkout is cloned at first start from this machine's wk-tools `origin`
 (its GitHub repository, over https), so it needs no mirror and no snapshot.
-The commit wall and the push switch are a WebKit workspace's: an agent there
-cannot commit or push, and a person turns push on. The live tier of `wk
+The commit wall and the push refusal are every workspace's: an agent there
+cannot commit, and a push is refused while one runs. The live tier of `wk
 selftest` stays the host's. Only the container place holds one for now; `--repo`
 on another is refused.
 TODO: a push from it needs a deploy key for the wk-tools repository in `wk key`'s set (docs/PLAN.md, Owed).
@@ -280,7 +280,9 @@ under `tart exec`. A guest mounts one host directory: the mirror, read-only
 on its own tag, `wk-mirror`, which a LaunchDaemon the base installs mounts at
 boot under `/Volumes/wk-mirror`.
 Each start forwards the host's request broker to `~/.wk-broker.sock` in the
-guest, so `wk sync` in there asks the broker as a container does.
+guest, so `wk sync` in there asks the broker as a container does, and the
+guest's own socket on the push service to `~/.wk-push.sock`, so a push in there
+is the host's as a container's is.
 
 **A build machine**
 
@@ -574,16 +576,16 @@ wk ai pi bug-238                        # the pi agent
 wk ai claude                            # inside a workspace: this one
 ```
 
-An agent cannot push, commit or build directly. Pushing needs a key that is
-not there (`wk key push`, below). Committing is walled: the checkout's `.git`
+An agent cannot push, commit or build directly. A push is refused while it
+runs (pushing, below). Committing is walled: the checkout's `.git`
 commit parts are mounted read-only under the agent. Building goes through
 `wk build`: the build tools on `PATH` refuse an agent by name. `wk doctor
-<ws>` measures all three from inside.
+<ws>` measures all three, running a stand-in agent in the workspace to see the
+push and a write refused.
 
 `wk new` installs both agents into the workspace (a macOS guest gets them at
-its first `wk start`), and `wk ai` throws the push switch and starts the
-session, nothing more; a workspace made without an agent is refused, naming
-`wk rm` and `wk new`. pi needs node 22.19 or newer where it is made.
+its first `wk start`), and `wk ai` starts the session, nothing more; a
+workspace made without an agent is refused, naming `wk rm` and `wk new`. pi needs node 22.19 or newer where it is made.
 
 A Claude session on a terminal starts with Remote Control on, named after the
 workspace, so claude.ai/code and the mobile app can join it. It needs the
@@ -623,28 +625,49 @@ there whole, so a guest never needs the podman machine and a container shares
 the guests' holder.
 `CLAUDE_CODE_OAUTH_TOKEN` is what a build machine gets instead.
 
-**`wk key push`: publishing without the credentials inside**
+**Pushing: a workspace's `git push`, through the host**
 
 ```sh
-wk key push on                              # asks once; ends every agent session first
-wk key push status                          # asks the agent, not a record
-wk key push off
+git push                                    # in a workspace: it just works
+wk doctor <ws>                              # measures that no key reaches it, and that an agent is refused
 ```
 
-The deploy keys live in an ssh-agent on the machine running the workspaces;
-a workspace's ssh config names the socket, so ssh signs with a key it can
-never read. The GitHub token and Bugzilla key go to the injector
-(`container/proxy/github-inject.py`), which terminates TLS for those two
-hosts (and Claude's three, for the claude.ai login) and puts the credential on the request: a read always, a write only
-while push is on. With push off a write is refused with 412 naming `wk key push
-on`. A macOS guest gets the same through an ssh-agent on the host forwarded
-per guest over its sshd on `tart exec`. A build box holds no deploy key and nothing forwards one to it,
-so a push is made from the workstation and `wk key push status --on <box>`
-says off: `wk pr open <ws>` fetches the box's branch into this machine's
-mirror over ssh and pushes it from here, through the agent `wk key push on`
-loads (on a macOS host, the one it runs for its guests). A ref a killed push
-leaves in the mirror is `wk gc` rubble. A push on the box itself, `git push`
-or `git-webkit pr`, is refused naming `wk pr open`.
+A workspace holds no deploy key, and no ssh-agent reaches it. Its
+`core.sshCommand` is `container/push/wk-push-client.py`, which sends the
+`git-receive-pack` or `git-upload-pack` command to the push service
+(`container/push/wk-push.py`) over a unix socket: `/run/wk/push.sock` in a
+container, `~/.wk-push.sock` in a guest. The service identifies the workspace
+from the socket: a container by the cgroup of the peer's pid, a guest by its
+own listener, which the guest's forward ends at. It refuses, naming the
+remedy, while a claude or pi process runs in that workspace (the scan is
+`pushgate.AGENT_PID_SCAN`; agents in other workspaces do not matter), and
+otherwise runs the ssh session to GitHub itself with the deploy key of the
+repository the command names, relaying stdio. Only the two commands, for the
+repositories of the workspace's own repo, are allowed. It is its own program
+and not a broker verb because a push is a byte stream and a broker verb one
+reply, and because the broker's socket is published into a Mac's podman
+machine, which hides the caller's pid.
+
+The keys are in `push-keys/` beside the keyring on the machine that runs the
+service (the podman machine's copy is delivered by `./setup` and `wk key
+deploy`, since it mounts no key); no workspace mounts that directory. A
+person's `wk enter` shell pushes and commits freely while no agent runs in the
+workspace; only an agent session is under the commit wall. `wk pr open <ws>`
+pushes through the same service for a container or a guest; a build box
+holds no key, so it fetches the box's branch into this machine's mirror and
+pushes it with the deploy key from here, by the same ssh command
+(`pushgate.ssh_prefix`). A ref a killed push leaves in the mirror is `wk gc`
+rubble. A push on the box itself, `git push` or `git-webkit pr`, is refused
+naming `wk pr open`.
+
+The GitHub token and Bugzilla key are held by the injector
+(`container/proxy/github-inject.py`), which terminates TLS for those two hosts
+(and Claude's three, for the claude.ai login) and puts the credential on the
+request. It listens twice: a write goes through only on the writing socket.
+The egress proxy asks the push service which workspace a connection is from
+and whether an agent runs there, and sends a connection from a workspace with
+one to the reading socket, where a write is refused with 412 and a read is
+unchanged. A push service that does not answer is a no.
 
 **Housekeeping**
 
@@ -787,7 +810,8 @@ What lives there has six parts, each with one name in code, help and prose
 - the **keyring**: `secrets/`, with `claude-login/` (the injector's claude.ai
   login) and `push-keys/` beside it;
 - the **runtime**, the broker socket (`$XDG_RUNTIME_DIR/wk/broker.sock`,
-  `/run/wk/broker.sock` in a workspace, or `WK_BROKER_SOCKET`).
+  `/run/wk/broker.sock` in a workspace, or `WK_BROKER_SOCKET`) and the push
+  service's (`push.sock` beside it, or `WK_PUSH_SOCKET`).
 
 On a macOS workstation the store is the podman machine's, so this machine's
 own records and mirror go under `~/.local/state/wk` and its keyring under
@@ -807,7 +831,7 @@ inside a container).
 
 **The Mac's bench install** — `WK_BENCH_USER`, `WK_BENCH_VOLUME`.
 
-**Credentials and the tailnet** — `WK_PUSH_AGENT_SOCK`, `WK_PUSH_PAT_FILE`,
+**Credentials and the tailnet** — `WK_PUSH_SOCKET`, `WK_PUSH_PAT_FILE`,
 `WK_PUSH_READ_PAT_FILE`, `WK_PUSH_BUGZILLA_KEY_FILE`, `WK_TS_AUTHKEY`,
 `WK_TS_API_SECRET`, `WK_IMAGE_KEY`, `WK_ANY_ROOT`, `WK_TAILSCALE_TIMEOUT`,
 `WK_SOFTNET_BIN`, `WK_PROBE_SECONDS` (how long a build machine's probe may take),

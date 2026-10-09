@@ -238,7 +238,7 @@ def _bugzilla_api_key(value, repos, path, evidence):
     if doc.get("result") is not True:
         return BAD, ("%s accepts this key, but not as %s: it belongs to another account, and `%s pr` would file and "
                      "assign as that one." % (BUGZILLA_API, login, project.get("PR_TOOL")))
-    return OK, ("%s accepts it as %s; %s.\n    spent on every %s request a workspace makes while push is on"
+    return OK, ("%s accepts it as %s; %s.\n    spent on every %s request a workspace makes while no agent runs in it"
                 % (BUGZILLA_API, login, _bugzilla_tagger(key), bugzilla_host()))
 
 

@@ -3,9 +3,11 @@
 
 import asyncio
 import ipaddress
+import json
 import os
 import socket
 import ssl
+import struct
 import sys
 import time
 
@@ -18,7 +20,7 @@ DENIED_HOSTS = {
     "uploads.github.com": "GitHub's upload API is refused: nothing in a workspace may publish",
 }
 
-# The hosts whose TLS is not tunnelled: CONNECT goes to the credential injector (github-inject.py), exact-match and checked first. SANDBOX AUDIT (docs/PLAN.md): a workspace reaches GitHub's API and Bugzilla but cannot authenticate -- under `wk key push off`, which `wk ai claude` sets, the injector refuses a write itself (412) rather than forwarding it uncredentialed; Anthropic's API gets the claude.ai login, which no workspace holds.
+# The hosts whose TLS is not tunnelled: CONNECT goes to the credential injector (github-inject.py), exact-match and checked first. SANDBOX AUDIT (docs/PLAN.md): a workspace reaches GitHub's API and Bugzilla but an agent's cannot write -- a connection from a workspace the push service finds an agent in goes to the injector's reading socket, which refuses a write itself (412) rather than forwarding it uncredentialed; Anthropic's API gets the claude.ai login, which no workspace holds.
 INJECTED_HOSTS = {
     "api.github.com": 443,
     "bugs.webkit.org": 443,
@@ -30,6 +32,13 @@ INJECTED_HOSTS = {
 INJECT_SOCKET = os.environ.get(
     "WK_INJECT_SOCK",
     os.path.join(os.environ.get("WK_STORE", "/var/lib/wk"), "github-inject.sock"))
+INJECT_READ_SOCKET = os.environ.get(
+    "WK_INJECT_READ_SOCK",
+    os.path.join(os.environ.get("WK_STORE", "/var/lib/wk"), "github-inject-read.sock"))
+PUSH_SOCKET = os.environ.get(
+    "WK_PUSH_SOCKET",
+    os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid(), "wk", "push.sock"))
+WRITE_HOSTS = ("api.github.com", "bugs.webkit.org")
 INJECT_CA = os.environ.get(
     "WK_INJECT_CA_OUT",
     os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid(), "wk", "wk-github-ca.pem"))
@@ -39,7 +48,7 @@ ALLOWED_HOSTS = {
     "anthropic.com": (80, 443),
     "claude.ai": (80, 443),
     "claude.com": (80, 443),
-    "github.com": (22, 80, 443),
+    "github.com": (80, 443),
     "githubusercontent.com": (80, 443),
     "githubassets.com": (443,),
     "pypi.org": (443,),
@@ -135,6 +144,27 @@ def log(msg):
 def normalize_host(host):
     # `API.GITHUB.COM.` is one host to DNS and another to a dict, so the allowlist check and the route are taken on this one spelling.
     return host.lower().rstrip(".")
+
+
+def peer_of(writer):
+    """Who connected, in the words the push service takes: a pid on a unix socket, an address on a TCP one."""
+    sock = writer.get_extra_info("socket")
+    if sock.family == socket.AF_UNIX:
+        return {"pid": struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))[0]}
+    return {"addr": writer.get_extra_info("peername")[0]}
+
+
+async def may_write(peer):
+    """Whether the push service finds no agent in the caller's workspace; a service that does not answer is a no."""
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(PUSH_SOCKET), CONNECT_TIMEOUT)
+        writer.write((json.dumps(dict(peer, verb="writes")) + "\n").encode())
+        await writer.drain()
+        reply = json.loads(await asyncio.wait_for(reader.readline(), IDLE_TIMEOUT))
+        close(writer)
+        return reply.get("writes") is True
+    except (OSError, ValueError, asyncio.TimeoutError):
+        return False
 
 
 # Verified against the system trust; the proxy presents no certificate of its own (only the credential injector terminates a client's TLS), so nothing here forges one.
@@ -233,11 +263,12 @@ class Proxy:
             self._denials = {k: v for k, v in self._denials.items()
                              if now - v <= DENY_LOG_INTERVAL}
 
-    async def open_upstream(self, host, port, tls=False):
+    async def open_upstream(self, host, port, tls=False, caller=None):
         if INJECTED_HOSTS.get(host) == port:
+            sock = INJECT_READ_SOCKET if host in WRITE_HOSTS and not await may_write(peer_of(caller)) else INJECT_SOCKET
             if not tls:
-                return await asyncio.open_unix_connection(INJECT_SOCKET)
-            return await asyncio.open_unix_connection(INJECT_SOCKET, server_hostname=host,
+                return await asyncio.open_unix_connection(sock)
+            return await asyncio.open_unix_connection(sock, server_hostname=host,
                                                       ssl=ssl.create_default_context(cafile=INJECT_CA))
 
         loop = asyncio.get_running_loop()
@@ -314,7 +345,7 @@ class Proxy:
                 return
 
             try:
-                ureader, uwriter = await self.open_upstream(host, port, upstream_tls)
+                ureader, uwriter = await self.open_upstream(host, port, upstream_tls, cwriter)
             except Exception as exc:                      # noqa: BLE001
                 log(f"upstream {host}:{port} failed: {exc}")
                 cwriter.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")

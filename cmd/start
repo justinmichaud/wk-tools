@@ -34,7 +34,7 @@ def start_everything(reg):
             dispatch.start_podman_machine(reg.machine, "start", True)   # 'wk start' is itself the asking
         else:
             act.debug("ok: machine already running")
-    secrets.Secrets(ROOT).pat_converge_machine()
+    secrets.Secrets(ROOT).push_converge_machine()
     ctr = reg.load("container")
     stopped = ctr.machine.run(ctr.podman() + ["ps", "-a", "--filter", "name=^wk-", "--filter", "status=exited",
                                               "--filter", "status=created", "--format", "{{.Names}}"], input="").out.split()

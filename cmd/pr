@@ -26,9 +26,9 @@
 #
 # 'open' pushes the workspace's current branch to its fork and opens it as a pull request with
 # `gh pr create --fill`; host only. The project comes from the upstream the branch tracks; no
-# upstream, `main`, a detached HEAD, or a dirty tree is refused by name. Pushing needs
-# `wk key push on`. A build box's branch is fetched over ssh into this machine's mirror and pushed
-# from here: no key reaches a box.
+# upstream, `main`, a detached HEAD, or a dirty tree is refused by name. The push goes through
+# the push service, which refuses while an agent runs in the workspace. A build box's branch is
+# fetched over ssh into this machine's mirror and pushed from here: no key reaches a box.
 #
 #   --draft   open it as a draft
 #   --web     open the browser's new-PR form instead of creating it directly
@@ -38,9 +38,7 @@
 #
 #   --since <date>   the first day it covers (default: seven days ago)
 
-import contextlib
 import datetime
-import io
 import os
 import re
 import shlex
@@ -51,12 +49,11 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, git, guest, places, pr, secrets, sync  # noqa: E402
+from wk import decl, git, places, pr, pushgate, secrets, sync  # noqa: E402
 from wk.act import Refused, die, info, log, warn  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.machine import Local  # noqa: E402
-from wk.pushswitch import Push  # noqa: E402
 from wk.store import Store  # noqa: E402
 from wk.places import show  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
@@ -123,12 +120,10 @@ def pr_rebase(driver, name):
     return 1
 
 
-def pr_open(driver, name, draft, web, push_status):
+def pr_open(driver, name, draft, web):
     src = driver.src(name)
     info("reading '%s's branch and remotes" % name)
     base, head, fork, branch = pr_open_target(src, run=lambda argv: driver.exec(name, argv))
-    if push_status() != 0:
-        die("'wk pr open' pushes '%s' to '%s', and the deploy key is held back.\n    wk key push on" % (branch, fork))
     info("pushing '%s' to '%s'" % (branch, fork))
     if driver.kind == "remote" and not driver.is_local and not driver.peer:
         r = push_from_here(driver, src, fork, branch)
@@ -136,7 +131,7 @@ def pr_open(driver, name, draft, web, push_status):
         r = driver.act_exec(name, ["git", "-C", src, "push", "-u", fork, branch])
     show(r)
     if not r.ok:
-        die("the push to '%s' failed -- see above.\n    If the deploy key is the problem:  wk key push on" % fork)
+        die("the push to '%s' failed -- see above; a refusal there is the push service's, and names its remedy" % fork)
     info("opening a pull request: %s <- %s" % (base, head))
     driver.here.exec(["gh", "pr", "create", "--repo", base, "--head", head, "--fill"]
                      + (["--draft"] if draft else []) + (["--web"] if web else []))
@@ -145,26 +140,17 @@ def pr_open(driver, name, draft, web, push_status):
 def push_from_here(driver, src, fork, branch):
     here, store = driver.here, Store(driver.env)
     sec = secrets.Secrets(ROOT, driver.env, here)
-    # A macOS host's podman machine holds its agent inside the VM; the one a process here reaches is the guests'.
-    sec, sock = guest.push_agent(ROOT, here, driver.env) if sec.macos else (sec, sec.machine_sock())
-    if not sec.agent_list(sock):
-        die("'wk pr open' pushes '%s' from here through the agent 'wk key push on' loads, and it holds no key.\n"
-            "    wk key push on" % branch)
+    key = sec.push_key_path(fork)
+    if not here.exists(key):
+        die("'wk pr open' pushes '%s' from here with the deploy key '%s', and this machine holds none.\n    wk key deploy" % (branch, fork))
     ref, lock = "%s%s/%s" % (pr.PUSH_REFS, driver.name, branch), Lock(store, here, Clock())
     repo = next(r for f, r, _ in sec.forks() if f == fork)
-    ssh = "ssh -o IdentitiesOnly=yes -i %s" % shlex.quote(sec.pub_path(fork)[:-len(".pub")])
     with lock.held(pr.push_lock(ref)):
         sync.fetch_into_mirror(here, store, lock, "%s:%s" % (driver.ssh_host(""), src), "refs/heads/" + branch, ref)
-        r = here.act_run(sec.agent_argv("SSH_AUTH_SOCK=%s exec git -C %s -c core.sshCommand=%s push %s %s" % (
-            sock, shlex.quote(store.mirror_dir()), shlex.quote(ssh), shlex.quote("git@github.com:%s.git" % repo),
-            shlex.quote("%s:refs/heads/%s" % (ref, branch)))))
+        r = here.act_run(["git", "-C", store.mirror_dir(), "-c", "core.sshCommand=" + shlex.join(pushgate.ssh_prefix(key)), "push",
+                          "git@github.com:%s.git" % repo, "%s:refs/heads/%s" % (ref, branch)])
         here.act_run(["git", "-C", store.mirror_dir(), "update-ref", "-d", ref])
     return r
-
-
-def push_rc(reg):
-    with contextlib.redirect_stderr(io.StringIO()):
-        return Push(reg, secrets.Secrets(ROOT, reg.env, reg.machine), Clock(), io.StringIO()).switch_status()
 
 
 def _load(reg, name, usage):
@@ -191,7 +177,7 @@ def main(argv):
     if verb == "open":
         name = name or (rest[-1] if rest else "")
         driver = _load(reg, name, "wk pr open <workspace> [--draft] [--web]")
-        return pr_open(driver, name, args.flag("--draft"), args.flag("--web"), lambda: push_rc(reg))
+        return pr_open(driver, name, args.flag("--draft"), args.flag("--web"))
     spec = rest[0] if rest else ""
     if not spec:
         die("usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>, or 'wk pr rebase [<ws>]', or "

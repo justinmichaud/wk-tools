@@ -5,7 +5,7 @@ import os
 import shlex
 
 from wk.act import die, info, log, warn
-from wk.kv import kv
+from wk.kv import ASSIGN, kv
 from wk.secrets import Secrets, first_line
 
 AGENTS = ("claude", "pi")
@@ -45,9 +45,10 @@ def install(root, env, machine, run, ws, tools, src):
     if said.get("pi", "").startswith("no-node"):
         log("  no pi in '%s': it needs node >= 22.19 and npm, and found node %s" % (ws, said["pi"].split(" ", 1)[-1]))
     if not r.ok:
-        die("could not install the coding agents in '%s' (%s).\n    The workspace's egress must reach claude.ai and "
+        why = [l.rstrip() for l in (r.out + "\n" + r.err).replace("\r", "").splitlines() if l.strip() and not ASSIGN.match(l)]
+        die("could not install the coding agents in '%s' (%s).%s\n    The workspace's egress must reach claude.ai and "
             "registry.npmjs.org;\n    'wk new %s' destroys the half-made workspace and tries again."
-            % (ws, " ".join("%s=%s" % (a, said.get(a, "?")) for a in AGENTS), ws))
+            % (ws, " ".join("%s=%s" % (a, said.get(a, "?")) for a in AGENTS), "".join("\n    " + l for l in why), ws))
     config = run(["bash", "-lc", "python3 %s %s" % (shlex.quote(tools + "/claude/workspace-config.py"), shlex.quote(src))])
     if not config.ok:
         die("could not record Claude's start-up answers in '%s', and every session there\n    would stop at a dialog instead "

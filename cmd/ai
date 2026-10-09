@@ -9,13 +9,14 @@
 #   wk ai claude bb4 --continue  and so on
 #   wk ai pi bb4 --help          pi's own help, not this one
 #   wk ai claude                 in a workspace: this one, no name
-#   wk ai claude --dry-run bb4   the push switch and session it would run
+#   wk ai claude --dry-run bb4   the session it would run
 #
 # The agent runs with relaxed permissions, after `wk doctor`'s checks of the
-# workspace's boundary pass; the push keys are held back and git commits walled
-# off for the session. Inside a workspace (`claude` there calls this) the push
-# switch is measured instead: a key reaching it, or a GitHub or Bugzilla write
-# not refused, stops the session and no --force crosses it.
+# workspace's boundary pass; git commits are walled off for the session. A push
+# is refused by the push service, and a GitHub or Bugzilla write by the injector,
+# while an agent runs in the workspace. Inside a workspace (`claude` there calls
+# this) a key reaching it, or a write not refused, stops the session and no
+# --force crosses it.
 #
 # A Claude session on a terminal starts with Remote Control on, named after the
 # workspace, using the claude.ai login the credential injector holds (`wk key
@@ -36,7 +37,7 @@ from wk import images, store  # noqa: E402
 ROOT = images.root()
 
 from wk import agents, secrets, wall  # noqa: E402
-from wk.act import Refused, barrier, die, info, log, warn  # noqa: E402
+from wk.act import Refused, barrier, die, info, warn  # noqa: E402
 from wk.machine import HAVE, Local  # noqa: E402
 from wk.places import Registry  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
@@ -61,68 +62,13 @@ def on_a_terminal():
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def _raise(signum, frame):
-    raise SystemExit(128 + signum)
-
-
-class _CatchTermHup:
-    """SIGTERM/SIGHUP have no Python-level default: they end the process before a `finally` restores the push switch."""
-
-    def __enter__(self):
-        self.old = {sig: signal.signal(sig, _raise) for sig in (signal.SIGTERM, signal.SIGHUP)}
-        return self
-
-    def __exit__(self, *exc):
-        for sig, handler in self.old.items():
-            signal.signal(sig, handler)
-        return False
-
-
 class Ai:
     def __init__(self, root, env, reg, driver, agent, name):
         self.root, self.env, self.reg, self.machine = root, env, reg, reg.machine
         self.driver, self.agent, self.name = driver, agent, name
-        self.push_on = None   # a build box keeps its own keys under its own wk root, so the switch is thrown there
-        self.push_was_on = False
 
     def exec(self, argv):
         return self.driver.exec(self.name, argv)
-
-    def push_switch(self, verb):
-        argv = [os.path.join(self.root, "wk"), "key", "push", verb] + (["--on", self.push_on] if self.push_on else [])
-        return self.machine.run(argv) if verb == "status" else self.machine.act_run(argv)
-
-    def push_status_line(self):
-        return "wk key push status" + (" --on %s" % self.push_on if self.push_on else "")
-
-    def push_hold_back(self):
-        """In a workspace the measurement stands in for the switch, beside the sandbox probes (`checks`)."""
-        if self.reg.in_workspace():
-            return
-        st = self.push_switch("status").rc
-        push_on = wall.push_verdict(st)
-        if push_on == 0:
-            return
-        if push_on is None:
-            die("refusing to run: '%s' exited %d rather\n    than measuring the switch, so whether an agent in '%s' could "
-                "publish is\n    unknown. Run that command and fix what it names." % (self.push_status_line(), st, self.name))
-        self.push_was_on = True
-        warn("git push is ON -- turning it off while the agent runs in '%s'" % self.name)
-        off = self.push_switch("off")
-        if not off.ok:
-            said = (off.out + off.err).strip()
-            die("refusing to run: could not hold back the push keys ('%s')%s"
-                % (self.push_status_line(), "; it said:\n    " + said.replace("\n", "\n    ") if said else ""))
-
-    def restore_push(self, terminal):
-        if not self.push_was_on:
-            return
-        if not terminal:
-            log("git push stays off (headless session; 'wk key push on' when you want it back)")
-        elif self.push_switch("on").ok:
-            info("git push turned back on")
-        else:
-            warn("could not turn git push back on -- 'wk key push on'")
 
     def agent_bin(self):
         lines = self.exec(agents.find_argv(self.root, self.agent)).out.replace("\r", "").splitlines()
@@ -156,28 +102,24 @@ class Ai:
 
     def session(self, agent_bin, mode, args):
         name, t = self.name, self.driver
-        with _CatchTermHup():
-            try:
-                prefix = []
-                if wall.commit_walled(t):
-                    if not self.wall_available():
-                        die("the commit wall needs bwrap in the workspace image, and '%s' has none.\n    Rebuild the workspace from "
-                            "a current base ('wk rm %s' then 'wk new'), or\n    install bwrap in the image; nothing an agent runs "
-                            "may write git history\n    while the sandbox cannot stop it." % (name, name))
-                    prefix = wall.commit_wall_prefix(self.root, t.src(name))
-                    info("git commits are walled off for this session (bwrap; 'wk key push on' lifts it for the next)")
-                if self.agent == "claude":
-                    info("starting Claude in '%s' (permissions relaxed; the workspace is the boundary)" % name)
-                else:
-                    info("starting %s in '%s' (%s; the workspace is the boundary)" % (self.agent, name, agent_bin))
-                words = prefix + [agent_bin] + mode + self.remote_control() + args
-                line = "cd %s && exec %s" % (shlex.quote(t.src(name)), shlex.join(words))
-                # The babysitter's fix loop runs this under nohup with -p, where a terminal of its own would be demanded.
-                argv, cwd = t.exec_argv(name, ["env", "WK_AGENT=" + self.agent, "WK_WORKSPACE=" + name, "bash", "-lc", line],
-                                        on_a_terminal())
-                return foreground(self.machine, argv, cwd)
-            finally:
-                self.restore_push(on_a_terminal())
+        prefix = []
+        if wall.commit_walled(t):
+            if not self.wall_available():
+                die("the commit wall needs bwrap in the workspace image, and '%s' has none.\n    Rebuild the workspace from "
+                    "a current base ('wk rm %s' then 'wk new'), or\n    install bwrap in the image; nothing an agent runs "
+                    "may write git history\n    while the sandbox cannot stop it." % (name, name))
+            prefix = wall.commit_wall_prefix(self.root, t.src(name))
+            info("git commits are walled off for this session (bwrap; a shell of your own, 'wk enter', is not walled)")
+        if self.agent == "claude":
+            info("starting Claude in '%s' (permissions relaxed; the workspace is the boundary)" % name)
+        else:
+            info("starting %s in '%s' (%s; the workspace is the boundary)" % (self.agent, name, agent_bin))
+        words = prefix + [agent_bin] + mode + self.remote_control() + args
+        line = "cd %s && exec %s" % (shlex.quote(t.src(name)), shlex.join(words))
+        # The babysitter's fix loop runs this under nohup with -p, where a terminal of its own would be demanded.
+        argv, cwd = t.exec_argv(name, ["env", "WK_AGENT=" + self.agent, "WK_WORKSPACE=" + name, "bash", "-lc", line],
+                                on_a_terminal())
+        return foreground(self.machine, argv, cwd)
 
     def run(self, args):
         t, name = self.driver, self.name
@@ -189,9 +131,7 @@ class Ai:
             if self.agent == "claude":
                 mode = ["--permission-mode", "auto"]
                 info("Claude on %s runs in auto mode (this machine is not a sandbox)" % t.name)
-            self.push_on = None if t.is_local else t.name
         agent_bin = self.agent_bin()
-        self.push_hold_back()
         if t.kind == "remote" and self.exec(["sh", "-c", GH_LOGIN]).ok:
             die("'%s' holds a GitHub credential in the account the agent would run as\n    (~/.config/gh/hosts.yml, or gh is "
                 "logged in there), and nothing an agent runs\n    may post as you. Remedy, on %s:  gh auth logout" % (t.name, t.name))

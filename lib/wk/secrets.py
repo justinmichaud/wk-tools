@@ -1,4 +1,4 @@
-"""The credentials: where this machine keeps them, the agent and injector files `wk key push` switches, and
+"""The credentials: where this machine keeps them, the key and token files the push service and the injector read, and
 /secrets, what every workspace here reads."""
 
 import argparse
@@ -11,18 +11,12 @@ from wk.act import debug, die, warn
 from wk.machine import Local
 from wk.store import Store, in_vm, remote_marker_path
 
-AGENT_SOCK = "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/ssh-agent.sock"
-CONTAINER_SOCK = "/run/wk/ssh-agent.sock"
-PUBLIC = ("ssh_config", "github-user", "bugzilla-user")
-PUBLISHED = ("ssh_config", "github-user", "view/container/ssh_config")
+PUBLIC = ("github-user", "bugzilla-user")
+PUBLISHED = ("github-user", "view/container/github-user")
 AGENT_SECRETS = (("claude", "claude-token", ".wk-agent-token", "CLAUDE_CODE_OAUTH_TOKEN", "remote"),
                  ("litellm", "litellm-key", ".wk-litellm-key", "LITELLM_API_KEY", "container,vm,remote"))
 LOGIN_KINDS = ("container", "vm")
 LOGIN_DIR = ".wk-claude"
-CONFIG_HEADER = """# wk: written by 'wk key push on|off' (lib/wk/secrets.py). One alias per deploy key, because GitHub takes one
-# deploy key per repository and every repository lives on github.com. The identity is a public half; the private one is
-# in an ssh-agent outside this workspace, and whether it is loaded there is what 'wk key push' switches.
-"""
 
 
 def forks():
@@ -41,25 +35,12 @@ def first_line(text):
     return (text or "").split("\n", 1)[0].rstrip("\r")
 
 
-def alias_blocks(keys, d, prefix="build_key_", sock="", proxy=""):
-    """IdentityFile carries no `.pub`: named with it, OpenSSH 10 loads that path as the private key (10.2p1)."""
-    out = []
-    for key, _repo, alias in keys:
-        out.append("\nHost %s\n    HostName github.com\n    User git\n    StrictHostKeyChecking accept-new\n" % alias)
-        if d:
-            out.append("    IdentityFile %s/%s%s\n    IdentitiesOnly yes\n" % (d, prefix, key))
-        if sock:
-            out.append("    IdentityAgent %s\n" % sock)
-        if proxy:
-            out.append("    ProxyCommand %s\n" % proxy)
-    return "".join(out)
-
-
 BOX_PUSH_REFUSAL = "error: a build box holds no deploy key; push from the workstation:  wk pr open <workspace>"
 
 
 def box_alias_blocks(forks):
-    return alias_blocks(forks, "", proxy="sh -c %s" % shlex.quote('echo "%s" >&2; exit 1' % BOX_PUSH_REFUSAL))
+    refuse = "sh -c %s" % shlex.quote('echo "%s" >&2; exit 1' % BOX_PUSH_REFUSAL)
+    return "".join("\nHost %s\n    HostName github.com\n    User git\n    ProxyCommand %s\n" % (alias, refuse) for _, _, alias in forks)
 
 
 class Secrets:
@@ -172,9 +153,6 @@ class Secrets:
             return None
         return r.out.strip() or None
 
-    def machine_sock(self):
-        return self.env.get("WK_PUSH_AGENT_SOCK") or AGENT_SOCK
-
     def _machine_file(self, var, name):
         return self.env.get(var) or os.path.join(self.store.store_dir(), name)
 
@@ -187,41 +165,17 @@ class Secrets:
     def machine_bugzilla_key(self):
         return self._machine_file("WK_PUSH_BUGZILLA_KEY_FILE", "push-bugzilla-api-key")
 
-    def agent_argv(self, line):
+    def machine_argv(self, line):
         """A shell line on that machine: here, or in the podman VM when its store is not this process's to write."""
         if self.host_side or self.store.is_local():
             return ["sh", "-c", line]
         return ["podman", "machine", "ssh", self.store.podman_machine(), "--", line]
 
     def _ask(self, line):
-        return self.machine.run(self.agent_argv(line), input="")
+        return self.machine.run(self.machine_argv(line), input="")
 
     def _act(self, line, input=""):
-        return self.machine.act_run(self.agent_argv(line), input=input)
-
-    def agent_answers(self, sock):
-        """`ssh-add -l` exits 1 for an empty agent and 2 for none."""
-        rc = "".join(c for c in self._ask("SSH_AUTH_SOCK=%s ssh-add -l >/dev/null 2>&1; echo $?" % sock).out if c.isdigit())
-        return rc in ("0", "1")
-
-    def agent_list(self, sock):
-        out = self._ask("SSH_AUTH_SOCK=%s ssh-add -l 2>/dev/null" % sock).out.replace("\r", "")
-        return [line for line in out.splitlines() if line.strip() and "has no identities" not in line]
-
-    def agent_load(self, sock):
-        """(key, loaded | no-key | FAILED) per deploy key; the key goes in on stdin, never an argument."""
-        rows = []
-        for name in [f[0] for f in push_keys()]:
-            key = (self.read(self.push_key_path(name)) or "").rstrip("\n")
-            if not key:
-                rows.append((name, "no-key"))
-                continue
-            ok = self._act("SSH_AUTH_SOCK=%s ssh-add - >/dev/null 2>&1" % sock, input=key + "\n").ok
-            rows.append((name, "loaded" if ok else "FAILED"))
-        return rows
-
-    def agent_clear(self, sock):
-        return self._act("SSH_AUTH_SOCK=%s ssh-add -D >/dev/null 2>&1" % sock).ok
+        return self.machine.act_run(self.machine_argv(line), input=input)
 
     def cred_write(self, path, name):
         """The first line of a held credential, down a pipe: an empty file would be a token the injector sends."""
@@ -233,34 +187,46 @@ class Secrets:
     def cred_clear(self, path):
         return self._act("rm -f %s" % shlex.quote(path)).ok
 
-    def cred_present(self, path):
-        return self._ask("test -s %s && echo yes" % shlex.quote(path)).out.strip() == "yes"
-
     def cred_sync(self, path, name):
         if first_line(self.cred_read(name)):
             return self.cred_write(path, name)
         return self.cred_clear(path)
 
-    def switch_cred_converge(self, sock, path, name):
-        """Only while the agent holds a key: writing one into a machine whose agent is empty would be turning push on."""
-        if not self.agent_list(sock):
+    def machine_creds(self):
+        """(path, held credential) per file the injector on this machine reads: the token a read spends, the one a write spends, the Bugzilla key."""
+        return ((self.machine_read_pat(), "github-pat"), (self.machine_pat(), "github-pat"),
+                (self.machine_bugzilla_key(), "bugzilla-api-key"))
+
+    def machine_push_key(self, fork):
+        return os.path.join(self.store.store_dir(), "push-keys", "build_key_" + fork)
+
+    def push_key_sync(self, fork):
+        """The deploy key where the push service of this machine reads it; the podman machine mounts none, so it is a copy there."""
+        src, dest = self.push_key_path(fork), self.machine_push_key(fork)
+        if src == dest:
             return True
-        return self.cred_sync(path, name)
+        key = self.read(src)
+        if not (key or "").strip():
+            return self._act("rm -f %s" % shlex.quote(dest)).ok
+        return self._act("umask 077 && mkdir -p %s && cat > %s" % (shlex.quote(os.path.dirname(dest)), shlex.quote(dest)), input=key).ok
 
-    def pat_converge_machine(self):
+    def push_converge_machine(self):
         if not self.machine.isdir(self.store.keyring_push_dir()):
-            debug("the held credentials are not on this machine (%s; the podman machine never mounts them), so the read "
-                  "token is left to the host that has them" % self.store.keyring_push_dir())
-            return
-        if not self.cred_sync(self.machine_read_pat(), "github-pat"):
-            warn("the injector in the podman machine did not take the read token; './setup' converges it")
+            debug("the held credentials are not on this machine (%s; the podman machine never mounts them), so they are "
+                  "left to the host that has them" % self.store.keyring_push_dir())
+            return True
+        ok = all([self.cred_sync(path, name) for path, name in self.machine_creds()]
+                 + [self.push_key_sync(k) for k, _, _ in push_keys()])
+        if not ok:
+            warn("this machine's injector and push service did not take every credential and deploy key; './setup' converges them")
+        return ok
 
-    def pat_deliver(self):
-        """Every injector this machine runs: a token delivered to one of the two is a 401 from the other."""
-        ok = self.cred_sync(self.machine_read_pat(), "github-pat")
+    def push_deliver(self):
+        """Every injector and push service this machine runs: a credential delivered to one of two is a 401 from the other."""
+        ok = self.push_converge_machine()
         if self.macos:
             from wk import guest
-            ok = guest.pat_converge(self.root, self.env, self.machine) and ok
+            ok = guest.credentials_converge(self.root, self.env, self.machine) and ok
         return ok
 
     def claude_login_migrate(self):
@@ -308,10 +274,8 @@ class Secrets:
             if act.dry_run():
                 self.planned[path] = None
 
-    def publish_config(self, d, sock):
+    def publish_config(self, d):
         self.ensure_dir(d, "0700")
-        blocks = alias_blocks(push_keys(), "/secrets", "build_key_", sock)
-        self.converge_file(os.path.join(d, "ssh_config"), CONFIG_HEADER + blocks, "0644")
         self.converge_file(os.path.join(d, "github-user"), self.github_user() + "\n", "0644")
         bz = self.bugzilla_user()
         if bz:
@@ -322,7 +286,7 @@ class Secrets:
                  "is no mirror\n    ('wk sync'). %s in a workspace asks for one instead" % (self.github_user(), self.store.mirror_dir(), project.get("PR_TOOL")))
 
     def publish(self):
-        self.publish_config(self.store.keyring_dir(), CONTAINER_SOCK)
+        self.publish_config(self.store.keyring_dir())
         self.publish_view("container")
 
     def store_publish(self):
@@ -340,11 +304,6 @@ class Secrets:
 
     def view_files(self, kind):
         want = {f: "0644" for f in PUBLIC}
-        try:
-            names = self.machine.listdir(self.store.keyring_dir())
-        except OSError:
-            names = []
-        want.update({f: "0644" for f in names if f.startswith("build_key_") and f.endswith(".pub")})
         for row in self.agent_secrets():
             if kind in row[4].split(","):
                 want[row[1]] = "0600"
@@ -383,14 +342,16 @@ class Secrets:
         return self.pub_publish(fork)
 
     def pub_publish(self, fork):
-        """Kept only where workspaces read it: ssh refuses an identity whose `.pub` beside it disagrees."""
+        """The `.pub` beside a private key is dropped (ssh refuses an identity whose `.pub` beside it disagrees), and the key goes where the push service reads it."""
         priv = self.push_key_path(fork)
         self.drop(priv + ".pub")
         r = self.machine.run(["ssh-keygen", "-y", "-f", priv], input="")
         if not r.ok:
             return False
         self.converge_file(self.pub_path(fork), r.out, "0644")
-        return self.publish_view("container")
+        if not self.push_key_sync(fork):
+            warn("the deploy key '%s' did not reach this machine's push service; './setup' converges it" % fork)
+        return True
 
 
 def rows(table):
@@ -400,13 +361,12 @@ def rows(table):
 def main(argv):
     parser = argparse.ArgumentParser(prog="python3 -m wk.secrets")
     sub = parser.add_subparsers(dest="verb", required=True)
-    for verb in ("push-keys", "agent-secrets", "pat-converge", "claude-placeholder", "claude-login-migrate"):
+    for verb in ("push-keys", "agent-secrets", "push-converge", "claude-placeholder", "claude-login-migrate"):
         sub.add_parser(verb)
     sub.add_parser("box-alias-blocks")
     a = parser.parse_args(argv)
-    if a.verb == "pat-converge":
-        s = Secrets(images.root())
-        return 0 if s.cred_sync(s.machine_read_pat(), "github-pat") else 1
+    if a.verb == "push-converge":
+        return 0 if Secrets(images.root()).push_converge_machine() else 1
     if a.verb == "claude-login-migrate":
         said = Secrets(images.root()).claude_login_migrate()
         print(said)

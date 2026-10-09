@@ -24,23 +24,21 @@ fi
 git config --global --replace-all include.path "$WK_TOOLS/dotfiles/gitconfig"
 [ -f "$HOME/.gitignore" ] || printf '.DS_Store\n.cache\ncompile_commands.json\n' > "$HOME/.gitignore"
 git config --global --add safe.directory "$SRC"
+git config --global core.sshCommand "$WK_TOOLS/container/push/wk-push-client.py"
+git config --global ssh.variant ssh   # git would otherwise run the client with -G, to learn whether it is OpenSSH
 
 install -d -m 0700 "$HOME/.ssh"
 
-# ssh takes the first value it sees per keyword, hence the ProxyCommand first and for every host; %h is the resolved HostName, so an alias arrives as it.
 cat > "$HOME/.ssh/config" <<'PROXYEOF'
 Host *
     ProxyCommand /opt/wk-tools/container/proxy/ssh-proxy.py %h %p
-
-Include /secrets/ssh_config
 PROXYEOF
 chmod 0600 "$HOME/.ssh/config"
 
-if [ -s /secrets/ssh_config ]; then
-    log "ssh: fork aliases from /secrets/ssh_config; keys are in an agent outside this workspace"
+if [ -S /run/wk/push.sock ]; then
+    log "push: git's ssh transport is the host's push service; no key is in here"
 else
-    log "no /secrets/ssh_config, so ~/.ssh/config names no fork host and a push"
-    log "         from here cannot resolve one -- 'wk key push on' (or 'off') writes it"
+    log "WARNING: no push service at /run/wk/push.sock -- a push from here is refused"
 fi
 
 _git_py() { PYTHONPATH="$WK_TOOLS/lib" WK_ROOT="$WK_TOOLS" python3 -m wk.git "$@"; }
@@ -49,7 +47,7 @@ if [ -n "${WK_CLONE:-}" ]; then         # a repo cloned here, not overlaid on a 
     git clone --quiet --branch "$WK_BRANCH" "$WK_CLONE" "$SRC"
     log "checkout: $WK_CLONE's $WK_BRANCH cloned into $SRC"
     git -C "$SRC" remote set-url --push origin "$WK_PUSH"
-    log "push: $WK_PUSH, through the agent 'wk key push on' loads"
+    log "push: $WK_PUSH, through the push service"
 elif [ -d "$SRC/.git" ]; then           # an old snapshot's remotes are stale
     _mirror="${WK_MIRROR:-}"
     [ -n "$_mirror" ] || log "no mirror on this place, so every fetch in here reads github.com"
@@ -67,8 +65,7 @@ elif [ -d "$SRC/.git" ]; then           # an old snapshot's remotes are stale
         && _out=$("$WK_TOOLS/container/proxy/ensure-bridge.sh" sh -c "$_setup" </dev/null); then
         log "git-webkit: $_out"
     else
-        log "WARNING: 'git-webkit setup' did not finish (above) -- 'wk key push on' if the"
-        log "         token is off, then 'wk sync ${WK_WORKSPACE:-?} --fix' on the host"
+        log "WARNING: 'git-webkit setup' did not finish (above) -- 'wk sync ${WK_WORKSPACE:-?} --fix' on the host"
     fi
 fi
 

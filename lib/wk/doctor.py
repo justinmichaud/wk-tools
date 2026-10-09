@@ -149,7 +149,7 @@ def probe_store(store, machine, branches, env):
     runtime = env.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid()
 
     def sock(name):
-        return machine.run(["test", "-S", os.path.join(runtime, "wk", name)]).ok
+        return status.socket_answers(os.path.join(runtime, "wk", name), machine)
 
     def filled(path):
         try:
@@ -315,6 +315,8 @@ class Doctor:
         if self._paths is None:
             sec = secrets.Secrets(self.root, self.env, self.machine)
             self._paths = {"push_held": self.store.keyring_push_dir(), "read_pat": sec.machine_read_pat(),
+                           "push_pat": sec.machine_pat(), "bugzilla_key": sec.machine_bugzilla_key(),
+                           "push_copy": os.path.dirname(sec.machine_push_key("")),
                            "claude_login": sec.cred_path("claude-login"),
                            "tailscale_api": sec.cred_path("tailnet-api"), "tailscale_authkey": sec.cred_path("tailnet"), "ntfy_topic": self.store.keyring_ntfy_topic()}
             self._paths.update(("secret." + r[0], sec.cred_path(r[0])) for r in secrets.agent_secrets())
@@ -420,8 +422,12 @@ class Doctor:
         yield self.local_state(p["push_held"], "regenerable",
                                "wk key deploy makes new deploy keys; wk key set github-pat and wk key set bugzilla-api-key store new ones "
                                "(revoke the old ones on GitHub and Bugzilla)")
-        yield self.local_state(p["read_pat"], "regenerable",
-                               "./setup and wk key set github-pat both write it from the token in %s" % p["push_held"])
+        for key, name in (("read_pat", "the token a read spends"), ("push_pat", "the token a write spends"),
+                          ("bugzilla_key", "the Bugzilla key")):
+            yield self.local_state(p[key], "regenerable", "./setup and wk key set both write %s from what %s holds" % (name, p["push_held"]))
+        if p["push_copy"] != p["push_held"]:
+            yield self.local_state(p["push_copy"], "regenerable",
+                                   "./setup and wk key deploy copy the deploy keys from %s to where the push service reads them" % p["push_held"])
         for key, path in p.items():
             if key.startswith("secret."):
                 yield self.local_state(path, "re-authable",
@@ -478,6 +484,8 @@ class Doctor:
         if not self.macos_host:
             yield from report_store(self.probe_store(), "", fork_key, self.macos, self.want())
             return
+        for name, sock, stage in status.launchd_daemons(self.store):
+            yield check("%s answers on this Mac" % name, "./setup --stage " + stage, status.socket_answers(sock, self.machine))
         state = self.podman_state()
         if state == "absent":
             yield miss("podman machine '%s'" % self.container.podman_machine(), "./setup --stage machine")

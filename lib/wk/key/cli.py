@@ -84,7 +84,7 @@ class Key(Creds, DeployKeys, Election, Check):
                 continue
             here = self.machine.exists(self.sec.push_key_path(fork))
             self.out.write("%-9s %-50s %s\n" % (fork, self.pub_fingerprint(pub) or "unreadable",
-                                                 "private half here ('wk key push status')" if here else "no private half"))
+                                                 "private half here" if here else "no private half"))
         return 0
 
     def show(self):

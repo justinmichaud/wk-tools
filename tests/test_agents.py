@@ -169,6 +169,13 @@ class TestInstall(unittest.TestCase):
         self.assertIn("'wk new demo' destroys the half-made workspace and tries again", err)
         self.assertEqual(1, len(self.ws.argvs))
 
+    def test_a_failed_install_carries_the_scripts_own_error_text(self):
+        self.ws.answers["claude.ai/install.sh"] = Result(1, "claude=failed\ncurl said so\n", "curl: (22) The requested URL returned error: 401\n")
+        status, err = self.install()
+        self.assertEqual(1, status, err)
+        self.assertIn("(claude=failed pi=?).\n    curl said so\n    curl: (22) The requested URL returned error: 401\n", err)
+        self.assertNotIn("\n    claude=failed", err)
+
     def test_answers_that_cannot_be_recorded_refuse(self):
         self.ws.answers["workspace-config.py"] = Result(1, "", "not readable as JSON")
         status, err = self.install()

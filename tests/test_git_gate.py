@@ -1,8 +1,7 @@
 """`git` in a workspace (container/bin/ws/git): the command runs exactly as it would have, and a failure the sandbox
-caused (the read-only commit wall, an empty push agent) gains a line naming the remedy. A scratch repository with
-`chmod -w .git/objects` stands in for the bind, and a real ssh-agent for the switch."""
+caused (the read-only commit wall) gains a line naming the remedy. A scratch repository with
+`chmod -w .git/objects` stands in for the bind."""
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -47,30 +46,6 @@ class _Gate(WkTest):
         (self.repo / ".git" / "objects").chmod(0o555)
         self.addCleanup(lambda: (self.repo / ".git" / "objects").chmod(0o755))
 
-    def agent(self, keys=0):
-        """A real ssh-agent behind ~/.ssh/config's Include, as a workspace's is written."""
-        sock = self.tmp / "agent.sock"
-        cp = subprocess.run(["ssh-agent", "-a", str(sock)],
-                            capture_output=True, text=True)
-        if cp.returncode != 0:
-            raise unittest.SkipTest("no ssh-agent")
-        pid = re.search(r"SSH_AGENT_PID=(\d+)", cp.stdout)
-        self.addCleanup(subprocess.run,
-                        ["kill", pid.group(1)] if pid else ["true"],
-                        capture_output=True)
-        (self.home / ".ssh" / "fork_config").write_text(
-            f"Host github-webkit\n    IdentityAgent {sock}\n")
-        (self.home / ".ssh" / "config").write_text(
-            f"Host *\n    Include {self.home}/.ssh/fork_config\n")
-        for i in range(keys):
-            key = self.tmp / f"k{i}"
-            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "",
-                            "-f", str(key)], check=True, capture_output=True)
-            subprocess.run(["ssh-add", str(key)], capture_output=True,
-                           env={**os.environ, "SSH_AUTH_SOCK": str(sock)})
-        return sock
-
-
 class TestItNeverChangesWhatTheCommandDoes(_Gate):
 
     def test_a_verb_it_watches_still_succeeds_untouched(self):
@@ -104,36 +79,13 @@ class TestTheCommitWallExplainsItself(_Gate):
         self.wall_on(staged=True)
         cp = self._git("commit", "-m", "two")
         self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("wk key push on", cp.stderr)
+        self.assertIn("wk enter", cp.stderr)
         self.assertLess(cp.stderr.index("insufficient permission"), cp.stderr.index("wk:"))
 
     def test_an_unwalled_checkout_is_silent(self):
         cp = self._git("commit", "--allow-empty", "-m", "two")
         self.assertEqual(cp.returncode, 0, cp.stderr)
         self.assertNotIn("wk:", cp.stderr)
-
-
-class TestThePushSwitchExplainsItself(_Gate):
-    def test_a_failed_push_with_an_empty_agent_names_the_switch(self):
-        self.agent(keys=0)
-        self._git("remote", "add", "fork", "ssh://git@github-webkit/x/y.git",
-                  wrapped=False)
-        cp = self._git("push", "fork", "HEAD")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("wk key push on", cp.stderr)
-
-    def test_a_push_whose_agent_holds_a_key_cannot_be_asked_or_is_not_configured_says_nothing(self):
-        def unreachable_agent():
-            (self.home / ".ssh" / "fork_config").write_text(f"Host github-webkit\n    IdentityAgent {self.tmp}/nothing.sock\n")
-            (self.home / ".ssh" / "config").write_text(f"Host *\n    Include {self.home}/.ssh/fork_config\n")
-        self._git("remote", "add", "fork", "ssh://git@github-webkit/x/y.git", wrapped=False)
-        for case, arrange in (("no ssh config", lambda: None), ("an agent with a key", lambda: self.agent(keys=1)),
-                              ("an agent that cannot be asked", unreachable_agent)):
-            with self.subTest(case):
-                arrange()
-                cp = self._git("push", "fork", "HEAD")
-                self.assertNotEqual(cp.returncode, 0)
-                self.assertNotIn("wk:", cp.stderr)
 
 
 class TestWhatAToolResolvesGitTo(_Gate):

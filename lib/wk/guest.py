@@ -1,7 +1,8 @@
 """A macOS guest's start, stop and convergence, what its desktop and its load say about it, and the host daemons every
-guest shares: the egress proxy, the credential injector behind it, the ssh-agent a guest's push reaches and the request
+guest shares: the egress proxy, the credential injector behind it, the push service a guest's push reaches and the request
 broker its `wk sync` asks. A pidfile is a lock, never a record."""
 
+import contextlib
 import os
 import re
 import shlex
@@ -14,7 +15,7 @@ from wk.act import Refused, debug, die, info, log, warn
 from wk.clock import Clock
 from wk.lock import Lock
 from wk.machine import Local
-from wk.store import GUEST_BROKER_SOCKET, Store, no_such_workspace
+from wk.store import GUEST_BROKER_SOCKET, GUEST_PUSH_SOCKET, Store, no_such_workspace
 
 SUBNET = "192.168.2"   # Softnet's own network, not vmnet's 192.168.64
 PROXY_PORT = "3128"
@@ -22,7 +23,7 @@ SOFTNET = "/usr/local/bin/softnet"
 CLOCK_SKEW = "30"      # not zero: the reading is taken through the guest agent, so a round trip is in every compare
 BOOT_WAIT = 180
 FORWARD_WAIT = 4
-FORWARDS = ("agent", "broker")
+FORWARDS = ("push", "broker")
 
 # An `nc -z -U` answers 1 for a served socket on macOS, so the connect is made in python.
 SOCKET_ANSWERS = """import socket, sys
@@ -31,6 +32,14 @@ try:
     s.connect(sys.argv[1])
 except OSError:
     sys.exit(1)
+"""
+
+# The one request a guest's start makes of the push service; its refusal is the exit status.
+PUSH_LISTEN = """import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(5)
+s.connect(sys.argv[1])
+s.sendall((json.dumps({"verb": "listen", "workspace": sys.argv[2]}) + "\\n").encode())
+sys.exit(0 if "listening" in json.loads(s.makefile().readline()) else 1)
 """
 
 # `tart clone` hands a clone the base's clock, and NTP is UDP, which the CONNECT proxy cannot carry.
@@ -77,7 +86,6 @@ sudo -n networksetup -setsecurewebproxy "$svc" "$addr" "$port" &&
 sudo -n networksetup -setproxybypassdomains "$svc" localhost 127.0.0.1
 """
 
-DEPLOY_HEADER = "# wk: written by lib/wk/guest.py on every start. Whether the agent these name\n# holds a key at all is 'wk key push'.\n"
 PASSWORD = "admin"
 DISPLAY = "1280x800"
 BASE = "wk-base"
@@ -98,6 +106,8 @@ for f in settings.json hooks CLAUDE.md skills; do ln -sfn "$1/claude/$f" "$HOME/
 
 CHECKOUT = """set -u
 git config --global --replace-all include.path "$WK_TOOLS/dotfiles/gitconfig"
+git config --global core.sshCommand "$WK_TOOLS/container/push/wk-push-client.py"
+git config --global ssh.variant ssh
 if [ -d "$WK_SRC/.git" ]; then
     echo checkout=present
 elif [ ! -d "$WK_MIRROR" ]; then
@@ -174,15 +184,16 @@ class Host:
             return None
         return int(pid) if pid.isdigit() and self.machine.alive(int(pid)) else None
 
-    def spawn(self, argv, log, pidfile):
+    def spawn(self, argv, log, pidfile=None):
         self.machine.remove(log)
         pid = self.machine.spawn(argv, log)
-        self.machine.write(pidfile, "%d\n" % pid)
+        if pidfile:
+            self.machine.write(pidfile, "%d\n" % pid)
         return pid
 
-    def launch(self, name, argv, up, wait, failed):
+    def launch(self, name, argv, up, wait, failed, pidfile=True):
         log = self.path(name + ".log")
-        pid = self.spawn(argv, log, self.path(name + ".pid"))
+        pid = self.spawn(argv, log, self.path(name + ".pid") if pidfile else None)
         if act.dry_run() or self.clock.wait_until(lambda: up() or not self.machine.alive(pid), wait, 0.25) and up():
             return True
         warn(failed % log)
@@ -263,6 +274,7 @@ class Host:
                 return False
         if not self.launch("proxy", ["env", "WK_PROXY_UNIX=0", "WK_PROXY_TCP=%s:%s" % (addr, self.port()),
                                      "WK_STORE=" + self.vm.store.store_dir(), "WK_INJECT_SOCK=" + self.path("github-inject.sock"),
+                                     "WK_INJECT_READ_SOCK=" + self.path("github-inject-read.sock"), "WK_PUSH_SOCKET=" + self.push_sock(),
                                      "WK_INJECT_CA_OUT=" + self.path("wk-github-ca.pem"), "/usr/bin/python3",
                                      os.path.join(self.root, "container", "proxy", "wk-proxy.py")], said, 10,
                            "the host egress proxy did not start; the guest will have no egress at all\n"
@@ -275,16 +287,18 @@ class Host:
         sock = self.path("github-inject.sock")
         return self.machine.exists(sock) and self.machine.run(["/usr/bin/python3", "-c", SOCKET_ANSWERS, sock]).ok
 
-    def pat_converge(self):
-        """The one writer of the read token this injector serves every guest: each start and each `wk key set`."""
+    def credentials_converge(self):
+        """The one writer of what this injector serves every guest: each start and each `wk key set`."""
         self.machine.mkdir(self.dir)
-        if self.secrets.cred_sync(self.path("read-github-pat"), "github-pat"):
+        held = (("read-github-pat", "github-pat"), ("push-github-pat", "github-pat"), ("push-bugzilla-api-key", "bugzilla-api-key"))
+        if all([self.secrets.cred_sync(self.path(f), name) for f, name in held]):
             return True
-        warn("could not converge %s; a read from a guest answers 401" % self.path("read-github-pat"))
+        warn("could not converge the tokens in %s; a read from a guest answers 401" % self.dir)
         return False
 
     def inject_env(self):
-        return {"WK_INJECT_SOCK": self.path("github-inject.sock"), "WK_INJECT_DIR": self.path("github-inject"),
+        return {"WK_INJECT_SOCK": self.path("github-inject.sock"), "WK_INJECT_READ_SOCK": self.path("github-inject-read.sock"),
+                "WK_INJECT_DIR": self.path("github-inject"),
                 "WK_INJECT_CA_OUT": self.path("wk-github-ca.pem"), "WK_INJECT_PAT": self.path("push-github-pat"),
                 "WK_INJECT_READ_PAT": self.path("read-github-pat"), "WK_INJECT_BUGZILLA_KEY": self.path("push-bugzilla-api-key"),
                 "WK_INJECT_CLAUDE_LOGIN": self.secrets.cred_path("claude-login"),
@@ -292,35 +306,38 @@ class Host:
                 "WK_INJECT_PUBLISH_MACHINE": Store(self.env).podman_machine()}
 
     def start_inject(self):
-        """launchd keeps it (host/macos/inject.sh); a start converges its read token and asks whether it answers."""
-        self.machine.mkdir(self.dir)
-        self.pat_converge()
+        """launchd keeps it (host/macos/inject.sh); a start converges its credentials and asks whether it answers."""
+        self.credentials_converge()
         if self.inject_running():
             return True
         warn("the credential injector is not running on this Mac, so '%s pr' and Claude in a guest get no\n"
              "  credential:  ./setup --stage inject" % project.get("PR_TOOL"))
         return False
 
-    def agent_sock(self):
-        return self.path("ssh-agent.sock")
+    def push_sock(self):
+        return Store(self.env).push_socket()
 
-    def start_agent(self):
-        """The agent holding the private halves runs here: a guest cannot see a unix socket across the hypervisor."""
+    def push_running(self):
+        sock = self.push_sock()
+        return self.machine.exists(sock) and self.machine.run(["/usr/bin/python3", "-c", SOCKET_ANSWERS, sock]).ok
+
+    def start_push(self):
+        """The push service every guest's push reaches, run here because a guest cannot see a unix socket across the hypervisor."""
         with self.lock().held("vm-daemons"):
-            return self._start_agent()
+            if self.push_running():
+                return True
+            self.machine.mkdir(self.dir)
+            return self.launch("push", ["env", "WK_PUSH_SOCKET=" + self.push_sock(), "WK_PUSH_GUEST_DIR=" + self.dir, "/usr/bin/python3",
+                                        os.path.join(self.root, "container", "push", "wk-push.py")], self.push_running, 4,
+                               "the guests' push service did not start, so no guest can push;\n  see %s", pidfile=False)
 
-    def _start_agent(self):
-        # One that answers is adopted, not replaced, which would drop the keys `wk key push on` loaded.
-        sock, pidfile = self.agent_sock(), self.path("ssh-agent.pid")
-        if self.secrets.agent_answers(sock):
-            pid = None if self.daemon_pid(pidfile) else self.listener([sock])
-            if pid is not None:
-                self.machine.write(pidfile, "%d\n" % pid)
-            return True
-        self.machine.mkdir(self.dir)
-        self.machine.remove(sock)   # ssh-agent refuses to bind a path that exists
-        return self.launch("ssh-agent", ["/usr/bin/ssh-agent", "-D", "-a", sock], lambda: self.secrets.agent_answers(sock), 4,
-                           "the guests' ssh-agent did not start, so no guest can push;\n  see %s")
+    def push_listen(self, ws):
+        """The service's own socket for guest `ws`, which that guest's forward ends at: the socket names the guest."""
+        if not self.start_push():
+            return None
+        if not self.machine.act_run(["/usr/bin/python3", "-c", PUSH_LISTEN, self.push_sock(), ws]).ok:
+            return None
+        return self.path(ws + ".push.sock")
 
     def lock(self):
         if self._lock is None:
@@ -369,8 +386,7 @@ STEPS = (
     ("install_agents", warn, "{ws} has no working coding agents (above); 'wk rm {ws}' and 'wk new' remake it"),
     ("write_claude_config", warn, "could not link ~/.claude in {ws}; an agent in there would have no instructions"),
     ("write_agent_secrets", warn, "could not write the agent credentials into {ws}; an agent in there will ask you to log in"),
-    ("write_deploy_keys", warn, "could not write {ws}'s ssh config and public key halves; a push from in there is refused ('wk key push status')"),
-    ("agent_converge_guest", warn, "could not converge {ws}'s ssh-agent forward; 'wk key push status' says what it can reach"),
+    ("push_forward", warn, "could not reach the push service from {ws}; a push from in there is refused"),
     ("broker_forward", warn, "could not reach the request broker from {ws}; 'wk sync' in there refreshes no mirror"),
     ("settle_desktop", warn, "could not settle {ws}'s desktop; 'wk doctor {ws}' says what is in front of the window"),
     ("report_desktop", None, ""),
@@ -522,32 +538,10 @@ class Guest:
         debug("agent credentials in %s: %d" % (self.ws, n))
         return True
 
-    def write_deploy_keys(self):
-        """Never a private half. Port 22 is reached by CONNECT through the one address Softnet allows."""
-        proxy = "/usr/bin/nc -X connect -x %s:%s %%h %%p" % (self.host.proxy_addr(), self.host.port())
-        forks = self.secrets.forks()
-        cfg = DEPLOY_HEADER + secrets.alias_blocks(forks, self.vm.home() + "/.ssh", "id_", self.vm.agent_sock(), proxy)
-        if not self.m.act_run(["sh", "-c", 'umask 077 && mkdir -p "$HOME/.ssh" && cat > "$HOME/.ssh/config"'], input=cfg).ok:
-            return False
-        n = 0
-        for fork, _repo, _alias in forks:
-            pub = (self.secrets.read(self.secrets.pub_path(fork)) or "").strip()
-            idf = ".ssh/id_%s.pub" % fork
-            if pub:
-                ok = self.m.act_run(["sh", "-c", 'cat > "$HOME/$1"', "sh", idf], input=pub + "\n").ok
-                n += 1
-            else:
-                ok = self.m.act_run(["sh", "-c", 'rm -f "$HOME/$1"', "sh", idf]).ok
-            if not ok:
-                return False
-        debug("public deploy halves in %s: %d of %d" % (self.ws, n, len(forks)))
-        return True
-
-    def agent_converge_guest(self):
-        if self.secrets.agent_list(self.host.agent_sock()):
-            return self.host.forward_start(self.ws, self.m, "agent", self.vm.agent_sock(), self.host.agent_sock())
-        self.host.forward_stop(self.ws, "agent")
-        return self.m.act_run(["rm", "-f", self.vm.agent_sock()]).ok
+    def push_forward(self):
+        """The service's socket for this guest, at the one a workspace's push client dials."""
+        near = self.host.push_listen(self.ws)
+        return bool(near) and self.host.forward_start(self.ws, self.m, "push", self.vm.home() + "/" + GUEST_PUSH_SOCKET, near)
 
     def broker_forward(self):
         """The host broker's socket at the one a workspace's broker client dials; a broker that starts later is reached then."""
@@ -987,64 +981,9 @@ def _vm(root, machine, env):
     return places.Registry(root, env=os.environ if env is None else env, machine=machine).load("vm")
 
 
-def pat_converge(root, env, machine):
+def credentials_converge(root, env, machine):
     vm = _vm(root, machine, env)
-    return not Store(vm.env).macos_host or Host(vm).pat_converge()
-
-
-def push_agent(root, machine, env=None):
-    """(Secrets, socket) of the agent `wk key push on` loads on this host for its own pushes and its guests."""
-    host = Host(_vm(root, machine, env))
-    return host.secrets, host.agent_sock()
-
-
-def vm_push_keys_converge(root, machine, action, env=None):
-    """`wk key push on|off` for push_agent's agent, then each running guest; one that did not converge fails it."""
-    vm = _vm(root, machine, env)
-    host = Host(vm)
-    sec, sock, ok = host.secrets, host.agent_sock(), True
-    creds = ((host.path("push-github-pat"), "github-pat"), (host.path("push-bugzilla-api-key"), "bugzilla-api-key"))
-    if action == "on":
-        if not host.start_agent():
-            return False
-        ok = all(state != "FAILED" for _, state in sec.agent_load(sock))
-        for path, name in creds:
-            if not sec.cred_write(path, name):
-                sec.cred_clear(path)
-    else:
-        sec.agent_clear(sock)
-        for path, _ in creds:
-            sec.cred_clear(path)
-        left = len(sec.agent_list(sock))
-        if left:
-            sys.stderr.write("  %-24s still holds %d identity/identities at %s\n" % ("the guests' agent", left, sock))
-            ok = False
-    for g in vm.workspaces() if vm.vm_store_apart() else ():
-        if vm.info(g) != "running":
-            continue
-        guest = Guest(host, g, vm.guest_of(vm.vm(g)))
-        if not guest.write_deploy_keys():
-            sys.stderr.write("  %-24s FAILED -- its ssh config was not rewritten\n" % g)
-            ok = False
-        elif not guest.agent_converge_guest():
-            sys.stderr.write("  %-24s FAILED -- it may still reach the agent\n" % g)
-            ok = False
-        else:
-            sys.stderr.write("  %-24s %s\n" % (g, "reaches the agent on this host" if action == "on"
-                                                   else "no agent socket -- a push in there is refused"))
-    return ok
-
-
-def vm_push_status(root, machine, env=None):
-    """(keys in push_agent's agent, [(guest, state, what it reaches)]); a stopped guest is reported, never started."""
-    vm = _vm(root, machine, env)
-    host = Host(vm)
-    n, rows = len(host.secrets.agent_list(host.agent_sock())), []
-    for g in vm.workspaces() if vm.vm_store_apart() else ():
-        state = vm.info(g) or "unknown"
-        reaches = state == "running" and n and vm.guest_of(vm.vm(g)).run(["test", "-S", vm.agent_sock()]).ok
-        rows.append((g, state, "%d key(s) through the agent on this host" % n if reaches else ""))
-    return n, rows
+    return not Store(vm.env).macos_host or Host(vm).credentials_converge()
 
 
 def rubble(vm):
@@ -1065,16 +1004,39 @@ def inject_host(root, env):
     return Host(places.Registry(root, env, Local()).load("vm"))
 
 
-def inject_restart(host, label, plist):
-    """Booted out under the login's lock, so no refresh is cut short; bootstrapped once launchd has let the label go."""
-    svc, login = "gui/%d/%s" % (os.getuid(), label), host.secrets.cred_path("claude-login")
-    host.secrets.ensure_dir(os.path.dirname(login), "0700")
-    with claudelogin.locked(login):
+def launchd_reload(host, label, plist, sock, lock):
+    """A bootstrap that fails after the bootout leaves no service, so every failure here names the label; success is `launchctl print` and `sock`."""
+    svc, domain = "gui/%d/%s" % (os.getuid(), label), "gui/%d" % os.getuid()
+    with lock:
         host.machine.act_run(["launchctl", "bootout", svc])
         if not act.dry_run() and not host.clock.wait_until(lambda: not host.machine.run(["launchctl", "print", svc]).ok, 10, 0.2):
             warn("launchd still has %s 10 seconds after booting it out" % svc)
             return False
-    return host.machine.act_run(["launchctl", "bootstrap", "gui/%d" % os.getuid(), plist]).ok
+    r = host.machine.act_run(["launchctl", "bootstrap", domain, plist])
+    if not r.ok:
+        warn("launchctl bootstrap of %s failed after its bootout, so the service is not loaded: %s\n    launchctl print %s says why"
+             % (label, (r.err or r.out).strip(), svc))
+        return False
+    if act.dry_run():
+        return True
+
+    def back():
+        return host.machine.run(["launchctl", "print", svc]).ok and host.machine.run(["python3", "-c", SOCKET_ANSWERS, sock]).ok
+    if not host.clock.wait_until(back, 10, 0.2):
+        warn("%s is not back 10 seconds after its bootstrap: launchctl print %s or the socket %s does not answer" % (label, svc, sock))
+        return False
+    return True
+
+
+def inject_restart(host, label, plist):
+    """Booted out under the login's lock, so no refresh is cut short."""
+    login = host.secrets.cred_path("claude-login")
+    host.secrets.ensure_dir(os.path.dirname(login), "0700")
+    return launchd_reload(host, label, plist, host.path("github-inject.sock"), claudelogin.locked(login))
+
+
+def broker_restart(host, label, plist):
+    return launchd_reload(host, label, plist, Store(host.env).runtime_socket(), contextlib.nullcontext())
 
 
 def inject_plist(host, label, log, path):
@@ -1085,16 +1047,16 @@ def inject_plist(host, label, log, path):
                            "StandardOutPath": log, "StandardErrorPath": log}).decode()
 
 
-INJECT_VERBS = {"inject-plist": 3, "inject-restart": 2, "inject-retire": 0}
+INJECT_VERBS = {"inject-plist": 3, "inject-restart": 2, "broker-restart": 2, "inject-retire": 0}
 
 if __name__ == "__main__":
     verb, args = (sys.argv[1:2] or [""])[0], sys.argv[2:]
     if INJECT_VERBS.get(verb) != len(args):
-        sys.exit("usage: python3 -m wk.guest inject-plist <label> <log> <PATH> | inject-restart <label> <plist> | inject-retire")
+        sys.exit("usage: python3 -m wk.guest inject-plist <label> <log> <PATH> | inject-restart <label> <plist> | broker-restart <label> <plist> | inject-retire")
     h = inject_host(images.root(), os.environ)
     if verb == "inject-plist":
         sys.stdout.write(inject_plist(h, *args))
-    elif verb == "inject-restart":
-        sys.exit(0 if inject_restart(h, *args) else 1)
+    elif verb in ("inject-restart", "broker-restart"):
+        sys.exit(0 if (inject_restart if verb == "inject-restart" else broker_restart)(h, *args) else 1)
     else:
         print("stopped" if h.retire_spawned_inject() else "none")

@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 #
-# wk key check|setup|set|deploy|show|ensure|push|sudo|backup -- the credentials this machine holds, whether a workspace can push, its sudo policy and its settings backup
-# wk: where=host name=none group=sources needs gh,gh-auth takes=1 default=check verbs=check,setup,deploy,show,ensure,pub,sshtest,fingerprints,set,adopt,verdict,give,push,sudo,backup destructive setup,deploy,--replace dryrun setup,deploy,set,sudo,ensure,adopt,backup readonly check,show,pub,sshtest,fingerprints,verdict,give
+# wk key check|setup|set|deploy|show|ensure|sudo|backup -- the credentials this machine holds, its sudo policy and its settings backup
+# wk: where=host name=none group=sources needs gh,gh-auth takes=1 default=check verbs=check,setup,deploy,show,ensure,pub,sshtest,fingerprints,set,adopt,verdict,give,sudo,backup destructive setup,deploy,--replace dryrun setup,deploy,set,sudo,ensure,adopt,backup readonly check,show,pub,sshtest,fingerprints,verdict,give
 # wk: sub show,ensure,pub,sshtest,fingerprints,set,adopt,verdict,give,sudo,backup needs=
 # wk: sub set,pub,sshtest,adopt,verdict,give takes=2
 # wk: sub set opts=--replace,--paste
 # wk: sub deploy,setup opts=--rotate
 # wk: sub sudo takes=2 opts=--on=,--all destructive=
 # wk: sub backup opts=--candidates
-# wk: sub push where=local takes=2 needs= opts=--on=,--all destructive=on dryrun=yes
-# wk: sub push status readonly=yes
 #
 #   wk key setup [--rotate]   every credential this machine needs, and one working credential of each kind on
 #                     every workstation: the one its issuer accepts wins (a tie goes to this machine) and is put on
@@ -35,16 +33,6 @@
 #                     doing under `needs you:`. Read-only; what a bare `wk key` runs
 #   wk key show       the public halves, and the ntfy topic URL for a phone
 #   wk key ensure     create missing push keys without registering them
-#   wk key push [on|off|status] [--on <machine>|--all] [--force]
-#                     whether a workspace can push (`status`, the default: ON while any agent holds a key)
-#                       on     load the deploy keys and hand the credential injector its credentials; asks once
-#                              and ends every claude session
-#                       off    `ssh-add -D` and remove the injector's files
-#                       --on <machine>  ask that fleet machine, through its wk
-#                       --all           this machine and every other one
-#                       --force         `on` leaves a running claude session alone
-#                     Exit: 0 on (status) or done; 1 off (status), failed, or a build box with no key at rest;
-#                     3 a machine did not answer; 4 no deploy keys here; 5 no switch here
 #   wk key sudo [status|setup] [--on <machine>|--all]
 #                     root costs a password with a 30-second window (WK_SUDO_TIMEOUT_MIN), through
 #                     /etc/sudoers.d/zz-<user>-passwd. `status` (the default) reports; `setup` installs it,
@@ -76,31 +64,17 @@ from wk import images  # noqa: E402
 
 ROOT = images.root()
 
-from wk import backup, decl, pushswitch, sudo  # noqa: E402
+from wk import backup, decl, sudo  # noqa: E402
 from wk.key import cli  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.clock import Clock  # noqa: E402
 from wk.machine import Local, is_macos  # noqa: E402
 from wk.places import Registry  # noqa: E402
 
 
-def push_on(args):
-    """The last of --on <machine> and --all as typed, or ""."""
-    named = {"--all": "--all" if args.flag("--all") else None, "--on": args.value("--on")}
-    on = ""
-    for opt in args.order:
-        if named.get(opt) is not None:
-            on = named[opt]
-    return on
-
-
-def main(argv, env=None, reg=None, machine=None, macos=None, clock=None, out=None):
+def main(argv, env=None, reg=None, machine=None, macos=None):
     args = decl.Args(decl.Decl(__file__), argv)
     words = args.positionals
     verb = words[0]
-    if verb == "push":
-        return pushswitch.main(ROOT, words[1:], push_on(args), reg or Registry(ROOT, os.environ if env is None else env),
-                               clock or Clock(), out)
     if verb == "sudo":
         return sudo.main(words[1:], args.value("--on"), args.flag("--all"),
                          reg or Registry(ROOT, os.environ if env is None else env, Local()), env=env)

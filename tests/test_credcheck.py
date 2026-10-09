@@ -190,7 +190,7 @@ class _Bugzilla(_Rules):
 
 class TestTheBugzillaKey(_Bugzilla):
     def test_it_is_judged_as_a_pair_then_probed_read_only_for_comment_tagging(self):
-        self.expect(self.bz_check(BZ_KEY), "ok", (BZ_LOGIN, "while push is on", "can tag comments"), ("cannot",))
+        self.expect(self.bz_check(BZ_KEY), "ok", (BZ_LOGIN, "while no agent runs in it", "can tag comments"), ("cannot",))
         self.assertEqual(2, len(FakeBugzilla.seen), FakeBugzilla.seen)
         self.assertTrue(FakeBugzilla.seen[0].startswith("/rest/valid_login?"))
         self.assertIn("api_key=" + BZ_KEY, FakeBugzilla.seen[0])

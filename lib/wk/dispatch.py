@@ -382,7 +382,7 @@ def usage():
   An option a command does not name in its -h, or an argument past what it
   takes, is refused with its usage line.
   wk <command> --all       every one of what the command acts on -- every
-                           machine ('wk key push'/'wk key sudo'), every workspace on
+                           machine ('wk key sudo'), every workspace on
                            every place ('wk sync', 'wk rm'), every line of
                            the log ('wk status <ws> --log --all'); a command's own -h says what
                            its --all covers

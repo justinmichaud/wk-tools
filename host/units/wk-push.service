@@ -1,0 +1,29 @@
+[Unit]
+Description=wk workspace push service
+Documentation=file://@WK_ROOT@/container/push/wk-push.py
+# On a mount, and waited for, for the reason wk-proxy.service gives.
+RequiresMountsFor=@WK_ROOT@
+
+[Service]
+# Ready is "the socket is bound", for the reason wk-github-inject.service gives.
+Type=notify
+NotifyAccess=all
+ExecStart=/usr/bin/python3 @WK_ROOT@/container/push/wk-push.py
+Environment=WK_ROOT=@WK_ROOT@
+Environment=WK_STORE=@WK_STORE@
+Restart=on-failure
+RestartSec=2
+# %t/wk holds the sockets a workspace can see, and containers bind-mount that
+# directory: preserved across restarts, or systemd deleting it on stop leaves
+# every running workspace holding a mount of a deleted directory.
+RuntimeDirectory=wk
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+# Not sandboxed the way wk-proxy is: it asks podman which workspace a caller is
+# in and whether an agent runs there, and runs ssh with a deploy key. What bounds
+# it is the request: one git command, for the repositories of the workspace that
+# asked, refused while an agent runs in it.
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

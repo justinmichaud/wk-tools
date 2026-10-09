@@ -113,7 +113,7 @@ class TestTheVerbIsTheDispatchers(unittest.TestCase):
     def test_the_verb_is_handed_over_first(self):
         def first(cmd, *args):
             return dispatch.Invocation(cmd, D.Decl(REPO / "cmd" / cmd), list(args)).verb_first()
-        self.assertEqual(first("key", "push", "on", "--on", "box"), ["push", "on", "--on", "box"])
+        self.assertEqual(first("key", "sudo", "status", "--on", "box"), ["sudo", "status", "--on", "box"])
         self.assertEqual(first("key", "--rotate"), ["check", "--rotate"])
         self.assertEqual(first("pr", "ws", "rebase"), ["checkout", "ws", "rebase"])
         self.assertEqual(first("pr", "rebase", "ws"), ["rebase", "ws"])
@@ -122,7 +122,7 @@ class TestTheVerbIsTheDispatchers(unittest.TestCase):
         self.assertEqual(first("sysimage", "presets"), ["presets"])
 
     def test_an_option_before_the_verb_is_refused(self):
-        for argv in (("key", "--on", "box", "push"), ("key", "--rotate", "setup"), ("pr", "--draft", "open")):
+        for argv in (("key", "--on", "box", "sudo"), ("key", "--rotate", "setup"), ("pr", "--draft", "open")):
             with self.subTest(argv=argv):
                 cp = run(*argv)
                 self.assertEqual(cp.returncode, 2, cp.stdout)

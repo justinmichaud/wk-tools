@@ -9,6 +9,8 @@ from wk import kv, project, record, repos
 
 BROKER_SOCKET = "/run/wk/broker.sock"
 GUEST_BROKER_SOCKET = ".wk-broker.sock"
+PUSH_SOCKET = "/run/wk/push.sock"
+GUEST_PUSH_SOCKET = ".wk-push.sock"
 
 
 def _env(env):
@@ -84,6 +86,17 @@ class Store:
 
     def workspace_runtime_socket(self):
         return self.named_runtime_socket() or (os.path.join(self.home(), GUEST_BROKER_SOCKET) if self.macos_host else BROKER_SOCKET)
+
+    def named_push_socket(self):
+        return self.env.get("WK_PUSH_SOCKET")
+
+    def push_socket(self):
+        default = os.path.join(self.env["XDG_RUNTIME_DIR"], "wk", "push.sock") if self.env.get("XDG_RUNTIME_DIR") \
+            else os.path.join(self.state_dir(), "push.sock")
+        return self.named_push_socket() or default
+
+    def workspace_push_socket(self):
+        return self.named_push_socket() or (os.path.join(self.home(), GUEST_PUSH_SOCKET) if self.macos_host else PUSH_SOCKET)
 
     def container_mirror_dir(self):
         return self.env.get("WK_MIRROR")

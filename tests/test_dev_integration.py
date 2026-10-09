@@ -1,5 +1,5 @@
 """DevIntegrationTest: one workspace per place, taken through what a developer does with one -- the credentials,
-`wk new`, git, both agents, the push switch, a build, git-webkit's credentials, `wk sync` and Zed -- against the
+`wk new`, git, both agents, a push refused while an agent runs, a build, git-webkit's credentials, `wk sync` and Zed -- against the
 real machines. Each step converges from evidence, so a re-run joins what is already there; the workspace persists
 between runs, and only the last step removes it, once every step before it passed in the same run.
 
@@ -8,8 +8,7 @@ From step N on:                         WK_INTEG_FROM=7 wk selftest --live DevIn
 One step:                               wk selftest --live '*DevIntegrationContainer.test_07*'
 
 While the place's own build runs, `wk selftest --live` refuses beside it: add --force, or run
-python3 tests/run.py --live -k DevIntegrationContainer. Push is turned on only under PushGuard, and off again
-however the run ends.
+python3 tests/run.py --live -k DevIntegrationContainer.
 """
 import functools
 import json
@@ -26,6 +25,7 @@ from tests import support
 from tests.support import REPO, WK
 
 sys.path.insert(0, str(REPO / "lib"))
+from wk import pushgate  # noqa: E402
 from wk.wall import CSI  # noqa: E402
 
 PREFIX = "integ-"
@@ -56,16 +56,8 @@ PLACES = {
             "remedy": "'wk sync --tools buildbox4' from a clean tree here"},
 }
 
-# lib/wk/pushswitch.py's scan, and `ps` where there is no /proc (a macOS guest).
-AGENT_SCAN = r'''if [ -d /proc/self ]; then
-    for e in /proc/[0-9]*/exe; do
-        case "$(readlink "$e" 2>/dev/null)" in
-            */claude/versions/*|*/.local/bin/claude) p=${e#/proc/}; printf "%s\n" "${p%/exe}" ;;
-        esac
-    done
-else
-    ps -Ao pid=,comm= | awk '$2 ~ /(^|\/)claude$|\/claude\/versions\// {print $1}'
-fi'''
+# lib/wk/pushgate.py's scan, and `ps` where there is no /proc (a macOS guest).
+AGENT_SCAN = pushgate.AGENT_PID_SCAN
 
 GIT_PROBE = r'''import json, subprocess, time
 t = time.time()
@@ -100,9 +92,6 @@ rows = r.json().get("users") or []
 out["bugzilla_user"] = user
 out["bugzilla_logged_in"] = r.status_code == 200 and bool(rows) and "email" in rows[0]
 print("WK-CRED " + json.dumps(out))'''
-
-GUARD = "import subprocess, sys\nsys.stdin.buffer.read()\nsys.exit(subprocess.call(sys.argv[1:], stdin=subprocess.DEVNULL))\n"
-
 
 # -- the evidence, read from what wk prints
 
@@ -216,28 +205,6 @@ def tail(text, n=40):
     return "\n".join(text.splitlines()[-n:])
 
 
-class PushGuard:
-    """Push stays on while this is held: a child in a session of its own reads a pipe only this process writes, and
-    runs `wk key push off` when it closes -- at release(), or when this process ends however it ends."""
-
-    def __init__(self, off_argv):
-        self.log = tempfile.NamedTemporaryFile(prefix="wk-integ-push-guard-", suffix=".log", delete=False)
-        r, self.w = os.pipe()
-        self.proc = subprocess.Popen([sys.executable, "-c", GUARD, *off_argv], stdin=r, stdout=self.log,
-                                     stderr=subprocess.STDOUT, env=real_env(), cwd=str(REPO), start_new_session=True)
-        os.close(r)
-
-    def release(self):
-        if self.w is not None:
-            os.close(self.w)
-            self.w = None
-        rc = self.proc.wait(timeout=300)
-        with open(self.log.name) as f:
-            text = f.read()
-        os.unlink(self.log.name)
-        return rc, clean(text)
-
-
 def step(n, needs_workspace=True):
     def deco(fn):
         @functools.wraps(fn)
@@ -272,17 +239,11 @@ class PlaceSteps:
         cls.ws = PREFIX + cls.place
         cls.conf = PLACES[cls.place]
         cls.outcome = {}
-        cls.guard = None
         cls.background = None
 
     @classmethod
     def tearDownClass(cls):
         cls.stop_background()
-        if cls.guard:
-            rc, text = cls.guard.release()
-            cls.guard = None
-            if rc != 0:
-                sys.stderr.write("[%s] push guard: 'wk key push off' exited %d:\n%s\n" % (cls.ws, rc, text))
 
     # -- helpers
 
@@ -293,10 +254,6 @@ class PlaceSteps:
         r = wk(*args, timeout=timeout)
         self.assertEqual(0, r.rc, "%s'wk %s' exited %d:\n%s" % (why and why + "\n", " ".join(args), r.rc, tail(r.out)))
         return r
-
-    def push_args(self, verb, *more):
-        machine = self.conf["machine"]
-        return ("key", "push", verb) + (("--on", machine) if machine else ()) + more
 
     def record(self):
         return workspace_record(wk("status", self.ws, "--records", timeout=300).out, self.ws)
@@ -319,38 +276,10 @@ class PlaceSteps:
     def agent_pids(self, ws):
         return [p for p in wk("enter", ws, "--", "sh", "-c", AGENT_SCAN, timeout=120).out.split() if p.isdigit()]
 
-    def foreign_sessions(self):
-        """Workspaces on the switch's machine the test did not make, with a claude process in them: `wk key push on` ends or arms it."""
-        host = self.conf["machine"] or support.THIS_HOST
-        return [n for n, t, st in ls_rows(wk("ls", timeout=300).out)
-                if not n.startswith(PREFIX) and st == "running" and t.split(":")[0].lower() == host and self.agent_pids(n)]
-
     def need_push_place(self):
         if not self.conf["push"]:
-            self.skipTest("'%s' is a build machine, which has no push switch ('wk key push' exits 5 there): "
-                          "its keys are live wherever they sit" % self.conf["machine"])
-        foreign = self.foreign_sessions()
-        if foreign:
-            self.skipTest("a claude session runs in %s, which this test did not make, and 'wk key push on' "
-                          "would end it (or arm it, with --force)" % " ".join(foreign))
-
-    def ensure_push_on(self):
-        cls = type(self)
-        if cls.guard is None:
-            cls.guard = PushGuard([str(WK), *self.push_args("off")])
-        if wk(*self.push_args("status"), timeout=300).rc != 0:
-            self.wk_ok(*self.push_args("on", "--yes"), timeout=600)
-        self.assertEqual(0, wk(*self.push_args("status"), timeout=300).rc, "push is not on after 'wk key push on'")
-
-    def push_off(self):
-        cls = type(self)
-        if cls.guard is not None:
-            rc, text = cls.guard.release()
-            cls.guard = None
-            self.assertEqual(0, rc, "'wk key push off' (the guard's) exited %d:\n%s" % (rc, tail(text)))
-        else:
-            self.wk_ok(*self.push_args("off"), timeout=600)
-        self.assertEqual(1, wk(*self.push_args("status"), timeout=300).rc, "push is not off after 'wk key push off'")
+            self.skipTest("'%s' is a build machine: it holds no deploy key, and a branch there is pushed by 'wk pr open'"
+                          % self.conf["machine"])
 
     @classmethod
     def stop_background(cls):
@@ -439,29 +368,18 @@ class PlaceSteps:
         self.assertIn(evidence, r.out, "no sign the sandbox check ran:\n%s" % tail(r.out))
 
     @step(5)
-    def test_05_push_on_never_coexists_with_claude(self):
+    def test_05_a_push_is_refused_while_claude_runs(self):
         self.need_push_place()
-        self.push_off()
         try:
             self.start_background_claude()
-            cls = type(self)
-            cls.guard = PushGuard([str(WK), *self.push_args("off")])
-            self.wk_ok(*self.push_args("on", "--force", "--yes"), why="--force keeps the session and loads the keys")
-            self.assertEqual(0, wk(*self.push_args("status")).rc, "push is not on after 'wk key push on --force'")
-            self.assertIsNone(type(self).background.poll(), "--force ended the claude session it was to keep")
-            self.assertTrue(self.agent_pids(self.ws), "--force ended the claude session it was to keep")
-            inside = wk("enter", self.ws, "--", "bash", "-lc", "wk key push on --force", timeout=120)
-            self.assertNotEqual(0, inside.rc, "'wk key push on --force' worked inside '%s':\n%s" % (self.ws, tail(inside.out)))
-            self.assertIn("throws the credential switch", inside.out)
-            self.push_off()
-            self.assertTrue(self.agent_pids(self.ws), "the claude session ended before 'wk key push on' was asked about it")
-            cls.guard = PushGuard([str(WK), *self.push_args("off")])
-            on = self.wk_ok(*self.push_args("on", "--yes"))
-            self.assertIn("ending the claude session", on.out)
-            self.assertEqual([], self.agent_pids(self.ws), "push is on and claude still runs in '%s'" % self.ws)
+            r = self.dry_push()
+            self.assertNotEqual(0, r.rc, "git push --dry-run authenticated while claude runs in '%s':\n%s" % (self.ws, tail(r.out)))
+            self.assertIn("an agent (claude or pi) runs in '%s'" % self.ws, r.out)
         finally:
             self.stop_background()
-            self.push_off()
+        self.assertEqual([], self.agent_pids(self.ws), "claude still runs in '%s'" % self.ws)
+        r = self.dry_push()
+        self.assertEqual(0, r.rc, "git push --dry-run to the fork was refused with no agent running:\n%s" % tail(r.out))
 
     @step(6)
     def test_06_pi_answers(self):
@@ -483,14 +401,15 @@ class PlaceSteps:
                       % (self.ws, state, config, tail(wk("status", self.ws, "--log", timeout=300).out, 60)))
 
     @step(8)
-    def test_08_push_on(self):
+    def test_08_a_push_reaches_the_fork_through_the_service(self):
         self.need_push_place()
-        self.ensure_push_on()
+        r = self.dry_push()
+        self.assertEqual(0, r.rc, "git push --dry-run to the fork did not authenticate:\n%s" % tail(r.out))
+        self.assertNotIn("publickey", r.out)
 
     @step(9)
     def test_09_git_webkit_reads_with_the_credentials(self):
         self.need_push_place()
-        self.ensure_push_on()
         r = self.dry_push()
         self.assertEqual(0, r.rc, "git push --dry-run to the fork did not authenticate:\n%s" % tail(r.out))
         got = self.in_checkout(CRED_PROBE, "WK-CRED")
@@ -499,36 +418,22 @@ class PlaceSteps:
         self.assertTrue(got["bugzilla_logged_in"], "webkitbugspy's user lookup was not logged in: %r" % got)
 
     @step(10)
-    def test_10_claude_never_runs_with_push_on(self):
-        """A Mac's container session is started in the podman machine, which holds half the switch and cannot throw the
-        host's: it refuses until `wk key push off` here. Where the whole switch is in reach, it is thrown first."""
+    def test_10_claude_starts_with_the_push_refusal_measured(self):
         self.need_push_place()
-        self.ensure_push_on()
-        if self.place == "container" and sys.platform == "darwin":
-            r = wk("ai", "claude", self.ws, "-p", PROMPT, timeout=900)
-            self.assertNotEqual(0, r.rc, "claude started with push on:\n%s" % tail(r.out))
-            self.assertIn("could not hold back the push keys", r.out)
-            self.assertNotIn(REPLY, [l.strip() for l in r.out.splitlines()])
-            self.push_off()
-            self.agent_replies("claude")
-            return
         r = self.agent_replies("claude")
-        self.assertIn("turning it off while the agent runs", r.out)
-        self.assertLess(r.out.index("turning it off"), r.out.index("starting Claude"))
-        self.assertIn("no identity reaches this workspace", r.out, "the session's own wall check saw a key")
-        self.assertIn("git push stays off", r.out)
+        self.assertIn("a push is refused while an agent runs in the workspace", r.out)
+        self.assertIn("no ssh-agent socket and no $SSH_AUTH_SOCK: no key reaches this workspace", r.out)
 
     @step(11)
-    def test_11_push_off_reaches_nothing(self):
+    def test_11_a_write_while_claude_runs_reaches_nothing(self):
         self.need_push_place()
-        self.push_off()
-        self.wk_ok("doctor", self.ws, timeout=600, why="the wall around '%s' with push off" % self.ws)
-        r = self.dry_push()
-        self.assertNotEqual(0, r.rc, "git push --dry-run to the fork authenticated with push off:\n%s" % tail(r.out))
-        self.assertIn("publickey", r.out)
-        got = self.in_checkout(CRED_PROBE, "WK-CRED")
-        self.assertEqual(412, got["github_write"], "a write with push off should be the injector's 412: %r" % got)
-        self.assertFalse(got["bugzilla_logged_in"], "webkitbugspy is logged in to Bugzilla with push off: %r" % got)
+        try:
+            self.start_background_claude()
+            got = self.in_checkout(CRED_PROBE, "WK-CRED")
+        finally:
+            self.stop_background()
+        self.assertEqual(412, got["github_write"], "a write while an agent runs should be the injector's 412: %r" % got)
+        self.assertFalse(got["bugzilla_logged_in"], "webkitbugspy is logged in to Bugzilla while an agent runs: %r" % got)
 
     @step(12)
     def test_12_sync_leaves_every_remote_current(self):
@@ -758,14 +663,6 @@ class TestTheSteps(unittest.TestCase):
         Driver.outcome = {2: "passed"}
         Driver("test_x").test_x()
         self.assertEqual("passed", Driver.outcome[3])
-
-    def test_the_guard_turns_push_off_when_its_holder_is_gone(self):
-        with support.scratch_dir() as d:
-            done = d / "off"
-            g = PushGuard(["sh", "-c", 'echo off > "%s"' % done])
-            self.assertFalse(done.exists())
-            self.assertEqual((0, ""), g.release())
-            self.assertEqual("off\n", done.read_text())
 
     def test_the_real_environment_drops_what_the_suite_points_away(self):
         env = real_env()

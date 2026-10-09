@@ -400,6 +400,9 @@ class Driver:
     def tools(self, ws):
         return TOOLS
 
+    def tools_src(self):
+        return self.root
+
     def mirror_dir(self):
         return ""
 
@@ -444,9 +447,6 @@ class Driver:
 
     def egress_filtered(self, ws):
         return False
-
-    def agent_sock(self):
-        return None
 
     def install_agents(self, ws):
         agents.install(self.root, self.env, self.here, lambda argv: self.act_exec(ws, argv), ws, self.tools(ws), self.src(ws))
@@ -809,9 +809,6 @@ class Container(Driver):
     def task_store(self):
         return None if self.is_here() else (self.store_machine, self.store.store_dir())
 
-    def agent_sock(self):
-        return "/run/wk/ssh-agent.sock"
-
     def rootless(self):
         r = self.machine.run(self.podman() + ["info", "--format", "{{.Host.Security.Rootless}}"])
         return r.out.strip() if r.ok else "unknown"
@@ -935,7 +932,7 @@ class Container(Driver):
         return r.rc, r.out
 
     def start(self, ws):
-        secrets.Secrets(self.root, self.env, self.machine).pat_converge_machine()
+        secrets.Secrets(self.root, self.env, self.machine).push_converge_machine()
         return self.machine.act_run(self.podman() + ["start", self.ctr(ws)]).ok
 
     def stop(self, ws):
@@ -1259,7 +1256,6 @@ class Vm(Driver):
         return int(got) if isinstance(got, (int, float)) or (isinstance(got, str) and got.isdigit()) else None
 
     def _sized(self, ws, key, given, envelope):
-        """As the guest is configured, else as WK_VM_* asks, else as this host would size one."""
         v = self.configured(self.vm(ws), key)
         v = given(self.env) if v is None else v
         return v if v is not None else envelope(Resources(self.machine, self.env, "macos"))
@@ -1293,9 +1289,6 @@ class Vm(Driver):
 
     def egress_filtered(self, ws):
         return not self.machine.exists(os.path.join(self.vm_dir(), ws + ".unfiltered"))
-
-    def agent_sock(self):
-        return "/Users/%s/.wk-ssh-agent.sock" % self.user()
 
     def base(self):
         return guest.base_name(self.env)
@@ -1538,7 +1531,7 @@ class Vm(Driver):
             act.die("refusing to delete the golden base (%s --rm)" % guest.BASE_BUILD)
         if self.vm_state(ws) != "absent":
             self.delete_vm(v)
-        for f in (ws + ".run.log", ws + ".unfiltered", ws + ".agent-forward.log", ws + ".broker-forward.log"):
+        for f in (ws + ".run.log", ws + ".unfiltered", ws + ".push-forward.log", ws + ".broker-forward.log"):
             self.machine.remove(os.path.join(self.vm_dir(), f))
         # The directory goes last: it is what a re-run of a killed rm finds and destroys again.
         if self.machine.isdir(ws_dir):

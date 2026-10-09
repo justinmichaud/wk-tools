@@ -29,7 +29,7 @@ _unit_journal=""
 unit_start wk-proxy.service "$WK_ROOT" "$WK_STORE" \
     "workspaces will have no egress" "$_unit_journal" sh -c
 
-unit_start wk-ssh-agent.service "$WK_ROOT" "$WK_STORE" \
+unit_start wk-push.service "$WK_ROOT" "$WK_STORE" \
     "no workspace here can push" "$_unit_journal" sh -c
 
 case "$(wk_py wk.secrets claude-login-migrate)" in
@@ -39,11 +39,11 @@ esac
 WK_UNIT_CLAUDE_LOGIN="$keyring_claude_login" unit_start wk-github-inject.service "$WK_ROOT" "$WK_STORE" \
     "'git-webkit pr' and claude in a workspace will fail" "$_unit_journal" sh -c
 
-if wk_py wk.secrets pat-converge; then
-    debug "GitHub read token converged"
+if wk_py wk.secrets push-converge; then
+    debug "GitHub token, Bugzilla key and deploy keys converged"
 else
-    warn "could not write the injector's read token, so a read from a
-  workspace answers 401 ('wk key set github-pat' stores a token)"
+    warn "could not write the injector's tokens or the push service's deploy keys, so a read from a
+  workspace answers 401 ('wk key set github-pat' stores a token) and a push is refused"
 fi
 
 unset SDK _before _after _unit_journal

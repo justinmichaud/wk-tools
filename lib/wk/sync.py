@@ -469,8 +469,7 @@ class Sync:
         said = (r.out.replace("\r", "").strip().splitlines() or [""])[-1]
         if not r.ok:
             notes.extend("    " + l for l in r.err.replace("\r", "").splitlines() if l.strip())
-            notes.append("    'git-webkit setup' did not finish (%s); 'wk key push on' if the read token\n"
-                         "    is off, then 'wk sync %s --fix' again" % (said or "no answer", ws))
+            notes.append("    'git-webkit setup' did not finish (%s); 'wk sync %s --fix' again" % (said or "no answer", ws))
             return False
         notes.append("    git-webkit: %s" % said)
         return True

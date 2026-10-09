@@ -10,7 +10,7 @@ import unittest
 from tests.support import REPO, WkTest, bash
 
 # Each unit and the file of this tree it runs; a system binary names none.
-UNITS = {"wk-proxy.service": "container/proxy/wk-proxy.py", "wk-ssh-agent.service": "",
+UNITS = {"wk-proxy.service": "container/proxy/wk-proxy.py", "wk-push.service": "container/push/wk-push.py",
          "wk-github-inject.service": "container/proxy/github-inject.py", "wk-broker.service": "container/broker/wk-broker.py"}
 
 
@@ -47,9 +47,17 @@ class TestRenderingSubstitutesBothEnds(unittest.TestCase):
             with self.subTest(unit=name):
                 self.assertNotIn("@WK_", self._render(name, "/r", "/s"))
 
-    def test_percent_t_is_left_for_systemd(self):
-        out = self._render("wk-ssh-agent.service", "/r", "/s")
-        self.assertIn("%t/wk/ssh-agent.sock", out)
+    def test_the_runtime_directory_every_workspace_mounts_is_kept_across_a_restart(self):
+        for name in ("wk-proxy.service", "wk-push.service", "wk-broker.service", "wk-github-inject.service"):
+            with self.subTest(unit=name):
+                out = self._render(name, "/r", "/s")
+                self.assertIn("RuntimeDirectory=wk", out)
+                self.assertIn("RuntimeDirectoryPreserve=yes", out)
+
+    def test_the_push_service_runs_its_own_program_with_the_store(self):
+        out = self._render("wk-push.service", "/r", "/s")
+        self.assertIn("ExecStart=/usr/bin/python3 /r/container/push/wk-push.py", out)
+        self.assertIn("Environment=WK_STORE=/s", out)
 
     def test_a_unit_with_no_body_is_refused_by_name(self):
         for call in ("unit_render wk-nonesuch.service /r /s",
@@ -168,7 +176,7 @@ class TestTheStartVerdictComesFromSystemd(WkTest):
         (self.binp / "systemctl").write_text(FAKE_SYSTEMCTL)
         (self.binp / "systemctl").chmod(0o755)
 
-    def _start(self, active=False, start_ok=True, restart_ok=True, dry=False):
+    def _start(self, active=False, start_ok=True, restart_ok=True, dry=False, root=None):
         env = {
             "HOME": str(self.home),
             "PATH": f"{self.binp}:{os.environ['PATH']}",
@@ -180,7 +188,7 @@ class TestTheStartVerdictComesFromSystemd(WkTest):
             "WK_DRY_RUN": "1" if dry else "",
         }
         cp = bash(
-            f'. "$WK_ROOT/host/units.sh"; unit_start {self.UNIT} /opt/wk-tools '
+            f'. "$WK_ROOT/host/units.sh"; {"WK_ROOT=" + shlex.quote(str(root)) + ";" if root else ""} unit_start {self.UNIT} /opt/wk-tools '
             f'{self.store} "workspaces will have no egress" "OVER-THERE " sh -c',
             env=env)
         return cp, cp.stdout + cp.stderr
@@ -279,9 +287,12 @@ class TestTheStartVerdictComesFromSystemd(WkTest):
         self.assertIn("--user restart " + self.UNIT, self.log.read_text())
 
     def test_a_service_with_no_program_of_ours_stamps_nothing(self):
-        self.UNIT, self.STAMP = "wk-ssh-agent.service", ".wk-ssh-agent.program"
-        cp, out = self._start(active=False)
-        self.assertIn("started wk-ssh-agent.service", out)
+        tree = self.tmp / "tree"
+        (tree / "host" / "units").mkdir(parents=True)
+        (tree / "host" / "units" / "wk-system.service").write_text("[Service]\nExecStart=/usr/bin/sleep 300\n")
+        self.UNIT = "wk-system.service"
+        cp, out = self._start(active=False, root=tree)
+        self.assertIn("started wk-system.service", out)
         self.assertEqual([], list(self.store.iterdir()))
 
 

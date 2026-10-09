@@ -9,7 +9,6 @@ import os
 import shlex
 import signal
 import sys
-import time
 import unittest
 from unittest import mock
 
@@ -101,8 +100,9 @@ class _Flow(unittest.TestCase):
         os.environ.pop("WK_FORCE", None)
         return status, err.getvalue()
 
-    def pushes(self):
-        return [" ".join(e[1][2:]) for e in self.fake.effects if e[0] == "run" and e[1][:3] == (WK, "key", "push")]
+    def switches(self):
+        """What `wk ai` asked of any push switch: nothing, there is none."""
+        return [e[1] for e in self.fake.effects if e[0] in ("run", "act") and e[1][:2] == (WK, "key")]
 
     def line(self):
         self.assertEqual(1, len(self.handed), self.handed)
@@ -110,7 +110,7 @@ class _Flow(unittest.TestCase):
 
 
 class _Host(_Flow, _Wall):
-    """A healthy container, reached from the host, with the switch off."""
+    """A healthy container, reached from the host."""
 
     def setUp(self):
         _Wall.setUp(self)
@@ -119,8 +119,6 @@ class _Host(_Flow, _Wall):
         self.env.update(WK_NAME="demo", WK_PLACE="container")
         self.fake.answer(["podman", "inspect", "wk-demo"], out="running\n")
         self.fake.files[os.path.join(self.driver.store.ws_dir("demo"), "home", places.READY_MARKER)] = ""
-        self.fake.answer([WK, "key", "push", "status"], rc=1)
-        self.fake.answer([WK, "key", "push"])
         self.fake.answer(["podman", "info"], out="true\n")
         self.fake.answer(["systemctl", "--user"])
         p = mock.patch.object(AI.Ai, "agent_bin", return_value="claude")
@@ -134,7 +132,7 @@ class TestItVerifiesTheWall(_Host):
     def test_a_healthy_container_gets_doctors_report_and_the_session(self):
         status, err = self.ai("claude", "-r")
         self.assertEqual(0, status, err)
-        for w in ("checking workspace 'demo' (container)", "workspace running", "the host says push is OFF", "commit wall",
+        for w in ("checking workspace 'demo' (container)", "workspace running", "a push is refused while an agent runs", "commit wall",
                   "podman is rootless", "egress proxy running", "sandbox intact"):
             self.assertIn(w, err)
         self.assertIn("--dangerously-skip-permissions -r", self.line())
@@ -176,12 +174,10 @@ class TestItVerifiesTheWall(_Host):
         self.assertIn("example.com was NOT refused", err)
         self.assertIn("the allowlist is not being enforced", err)
 
-    def test_the_keys_are_held_back_before_anything_is_measured(self):
-        self.fake.answer([WK, "key", "push", "status"], rc=0)
+    def test_no_switch_is_thrown_and_the_session_is_not_wrapped_in_one(self):
         self.ai("claude")
-        runs = [e[1] for e in self.fake.effects if e[0] == "run"]
-        off = runs.index((WK, "key", "push", "off"))
-        self.assertLess(off, runs.index(("podman", "inspect", "wk-demo", "--format", "{{.State.Status}}")))
+        self.assertEqual([], self.switches())
+        self.assertEqual(1, len(self.handed))
 
     def test_the_commit_wall_goes_in_front_of_the_agent(self):
         self.ai("claude")
@@ -242,78 +238,34 @@ class TestRemoteControl(_Host):
         self.assertNotIn("--remote-control", shlex.split(self.line()))
 
 
-class TestThePushSwitch(_Host):
-    """In an agent session nothing can push; a person's terminal gets the switch back."""
+class TestNoPushSwitch(_Host):
+    """A push is the host's service's to refuse while an agent runs, so `wk ai` throws nothing and restores nothing."""
 
-    def setUp(self):
-        super().setUp()
-        self.push_on = True
-        for verb in ("status", "off", "on"):
-            self.fake.react([WK, "key", "push", verb], self._push)
+    def test_a_terminal_session_and_a_headless_one_ask_nothing_of_any_switch(self):
+        for terminal in (True, False):
+            with self.subTest(terminal=terminal):
+                self.terminal.stop()
+                with mock.patch.object(AI, "on_a_terminal", return_value=terminal):
+                    status, err = self.ai("claude")
+                self.terminal.start()
+                self.assertEqual(0, status, err)
+                self.assertEqual([], self.switches())
+                self.assertNotIn("git push", err)
 
-    def _push(self, argv, fake):
-        if argv[3] == "status":
-            return Result(0 if self.push_on else 1)
-        self.push_on = argv[3] == "on"
-        return Result(0)
-
-    def test_a_terminal_session_turns_push_back_on_at_exit(self):
-        self.terminal.stop()
-        with mock.patch.object(AI, "on_a_terminal", return_value=True):
-            status, err = self.ai("claude")
-        self.terminal.start()
-        self.assertEqual(0, status, err)
-        self.assertEqual(["push status", "push off", "push status", "push on"], self.pushes(), "the doctor reads the switch once")
-        self.assertIn("git push turned back on", err)
-
-    def test_a_sigterm_during_the_session_still_restores_the_push_switch(self):
-        self.terminal.stop()
-
-        def killed_mid_session(machine, argv, cwd):
-            os.kill(os.getpid(), signal.SIGTERM)
-            time.sleep(0.2)   # gives the pending signal a chance to be delivered before returning
-            return 0
-        with mock.patch.object(AI, "on_a_terminal", return_value=True), \
-                mock.patch.object(AI, "foreground", side_effect=killed_mid_session):
-            with self.assertRaises(SystemExit):
-                self.ai("claude")
-        self.terminal.start()
-        self.assertEqual(["push status", "push off", "push status", "push on"], self.pushes())
-
-    def test_a_headless_session_leaves_it_off(self):
-        status, err = self.ai("claude")
-        self.assertEqual(0, status, err)
-        self.assertEqual(["push status", "push off", "push status"], self.pushes())
-        self.assertIn("git push stays off (headless session", err)
-
-    def test_a_refused_session_after_the_switch_still_says_where_push_is(self):
-        self.set("bwrap", Result(1, "", ""))
-        _, err = self.ai("claude", force=True)
-        self.assertIn("git push stays off", err)
-
-    def test_a_workspace_without_the_agent_refuses_before_the_switch_is_touched(self):
+    def test_a_workspace_without_the_agent_refuses_before_anything_is_measured(self):
         with mock.patch.object(AI.Ai, "agent_bin", side_effect=Refused(1)):
             status, err = self.ai("claude")
         self.assertEqual(1, status, err)
-        self.assertEqual([], self.pushes())
-        self.assertTrue(self.push_on)
+        self.assertEqual([], self.switches())
 
-    def test_a_switch_that_would_not_go_off_refuses(self):
-        self.fake.answer([WK, "key", "push", "status"], rc=0)
-        self.fake.answer([WK, "key", "push", "off"], rc=3, err="error: this is the podman machine.\n    On the host: wk key push off\n")
-        status, err = self.ai("claude")
-        self.assertEqual(1, status, err)
-        self.assertIn("refusing to run: could not hold back the push keys ('wk key push status'); it said:\n"
-                      "    error: this is the podman machine.\n        On the host: wk key push off", err)
-        self.assertEqual([], self.handed)
-
-    def test_an_unmeasured_switch_refuses(self):
-        for st in (3, 5):
-            with self.subTest(status=st):
-                self.fake.answer([WK, "key", "push", "status"], rc=st)
-                status, err = self.ai("claude")
+    def test_a_push_the_wall_would_not_refuse_stops_the_session_and_no_force_crosses_it(self):
+        self.set("git ls-remote", "")
+        for force in (False, True):
+            with self.subTest(force=force):
+                status, err = self.ai("claude", force=force)
                 self.assertEqual(1, status, err)
-                self.assertIn("'wk key push status' exited %d rather" % st, err)
+                self.assertIn("an agent in 'demo' could publish", err)
+                self.assertEqual([], self.handed)
 
 
 class TestWhatIsWkTheAgentNever(_Flow):
@@ -340,13 +292,9 @@ class TestWhatIsWkTheAgentNever(_Flow):
 
 
 class _Box(_Flow):
-    push_status = 1
-
     def setUp(self):
         self.setUpFlow()
         self.fake = Fake()
-        self.fake.answer([WK, "key", "push", "status"], rc=self.push_status)
-        self.fake.answer([WK, "key", "push"])
         self.env = {"WK_NAME": "demo", "WK_PLACE": "box"}
         self.driver = SimDriver(self.fake, self.env, kind="remote", name="box")
         self.driver.answers["find claude"] = Result(0, "/home/u/.local/bin/claude\r\n")
@@ -355,7 +303,7 @@ class _Box(_Flow):
 
 
 class TestABuildBox(_Box):
-    """No sandbox at all: a barrier, the switch thrown on its own store, and a gh login there a refusal."""
+    """No sandbox at all: a barrier, and a gh login there a refusal."""
 
     def test_it_is_a_barrier(self):
         status, err = self.ai("claude")
@@ -363,20 +311,13 @@ class TestABuildBox(_Box):
         self.assertIn("'demo' is on the shared build machine 'box', which has no sandbox", err)
         self.assertEqual([], self.fake.effects)
 
-    def test_forced_it_runs_in_auto_mode_with_the_switch_named(self):
+    def test_forced_it_runs_in_auto_mode(self):
         status, err = self.ai("claude", force=True)
         self.assertEqual(0, status, err)
-        self.assertEqual(["push status --on box"], self.pushes())
         self.assertIn("'wk doctor demo' is not run for 'box'", err)
         self.assertIn("Claude on box runs in auto mode", err)
         self.assertIn("exec /home/u/.local/bin/claude --permission-mode auto", self.line())
         self.assertNotIn("bwrap", self.line())
-
-    def test_handed_over_the_box_asks_its_own_switch(self):
-        self.driver.is_local = True
-        status, err = self.ai("claude", force=True)
-        self.assertEqual(0, status, err)
-        self.assertEqual(["push status"], self.pushes())
 
     def test_the_setup_token_it_is_given_starts_the_session_without_remote_control_and_says_why(self):
         with mock.patch.object(AI, "on_a_terminal", return_value=True):
@@ -412,9 +353,7 @@ class TestABuildBox(_Box):
 
 
 class TestTheSessionIsAnEffect(_Box):
-    """The session starts through the Machine, so --dry-run prints it with the switch it would make."""
-
-    push_status = 0
+    """The session starts through the Machine, so --dry-run prints it."""
 
     def setUp(self):
         super().setUp()
@@ -431,17 +370,15 @@ class TestTheSessionIsAnEffect(_Box):
         [(_, argv, cwd)] = self.sessions()
         self.assertEqual(("exec", "demo", "no-tty"), argv[:3])
         self.assertIn("exec /home/u/.local/bin/claude --permission-mode auto", argv[-1])
-        self.assertEqual(["push status --on box", "push off --on box"], self.pushes())
+        self.assertEqual([], self.switches())
         self.assertIs(before, signal.getsignal(signal.SIGINT))
 
-    def test_a_dry_run_prints_the_switch_and_the_session_and_does_neither(self):
+    def test_a_dry_run_prints_the_session_and_does_not_start_it(self):
         os.environ["WK_DRY_RUN"] = "1"
         status, err = self.ai("claude", force=True)
         self.assertEqual(0, status, err)
-        self.assertIn("would run on fake: %s key push off --on box" % WK, err)
         self.assertRegex(err, r"would run on fake: exec demo no-tty .*exec /home/u/.local/bin/claude --permission-mode auto")
         self.assertNotIn("would run in demo", err)
-        self.assertEqual(["push status --on box"], self.pushes())
         self.assertEqual([], self.sessions())
 
 
@@ -451,7 +388,6 @@ class TestAGuest(_Flow):
     def setUp(self):
         self.setUpFlow()
         self.fake = Fake()
-        self.fake.answer([WK, "key", "push"], rc=1)
         self.fake.answer(["test", "-x"])
         self.env = {"WK_NAME": "demo", "WK_PLACE": "vm"}
         self.driver = SimDriver(self.fake, self.env, kind="vm")

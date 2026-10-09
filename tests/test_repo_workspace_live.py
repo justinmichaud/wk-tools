@@ -23,9 +23,10 @@ class ToolsWorkspaceLive(unittest.TestCase):
         self.assertEqual(0, r.rc, "'wk %s' exited %d:\n%s" % (" ".join(args), r.rc, tail(r.out)))
         return r
 
-    @support.owed("a push from a wk-tools workspace reaching its repository through its deploy key, with push on, "
-                  "has not been run against GitHub")
+    @support.owed("a push from a wk-tools workspace, with no agent running in it, reaching its repository through the push "
+                  "service and its deploy key has not been run against GitHub")
     def test_a_push_reaches_the_tools_repository_through_its_deploy_key(self):
+        """`origin` is wired to push through the wk-tools deploy key's alias, and `git push` there is the push service's."""
         if workspace_record(wk("status", WS, "--records", timeout=300).out, WS) is None:
             self.ok("new", WS, "--repo", "wk-tools", timeout=1500)
         self.ok("enter", WS, "--", "git", "-C", repos.Repo("wk-tools").src, "push", "--dry-run", "origin", "HEAD:refs/heads/wk-push-probe")
