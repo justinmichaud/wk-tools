@@ -276,6 +276,19 @@ class Wall:
         return [miss("api.github.com answered '%s' -- the injector is not in the path" % (root or "nothing"),
                      self.driver.daemon_remedy(self.ws, "inject"))]
 
+    def person_write(self):
+        """With no agent the proxy hands the write socket: an empty ref is GitHub's to refuse (422), not the injector's (412)."""
+        fork = next((r[1] for r in secrets.forks()), "")
+        reply = self.inside(http("https://api.github.com/repos/%s/git/refs" % fork, "-X POST -d '{}' "))
+        if gap := self.gap("GitHub", reply):
+            return gap
+        code = status_of(reply)
+        if code == "422":
+            return [ok("a person's write reaches GitHub (HTTP 422 for an empty ref): no agent, so the injector writes")]
+        return [miss("a write from '%s' with no agent in it answered '%s' -- expected GitHub's 422; a 412 is the push service not "
+                     "saying no agent runs here, so '%s pr' fails for a person too" % (self.ws, code or "nothing", project.get("PR_TOOL")),
+                     "the push service where the workspace's place runs it ('./setup' converges it)")]
+
     def github_write(self):
         """An empty body names no branch; with an agent running the injector answers 412 before GitHub is asked."""
         fork = next((r[1] for r in secrets.forks()), "")
@@ -452,12 +465,13 @@ class Wall:
             checks.append(("claude-login", self.claude_login))
         return checks + [("no-credentials-inside", self.no_credentials_inside), ("secrets-view", self.secrets_view),
                          ("push", self.push_refused), ("github-read", self.github_read),
-                         ("github-write", self.github_write), ("bugzilla-read", self.bugzilla_read),
+                         ("github-write", self.github_write), ("person-write", self.person_write), ("bugzilla-read", self.bugzilla_read),
                          ("bugzilla-write", self.bugzilla_write), *self.pr_tool_check(),
                          ("agent-credential", self.agent_credential), ("gpu", self.gpu)]
 
     def from_inside(self):
         checks = [("push", self.push_refused), ("github-read", self.github_read), ("github-write", self.github_write),
+                  ("person-write", self.person_write),
                   ("bugzilla-read", self.bugzilla_read), ("bugzilla-write", self.bugzilla_write), ("egress-github", self.github),
                   ("egress-allowlist", self.allowlist), ("egress-off-allowlist", self.off_allowlist),
                   ("no-credentials", self.no_credentials_inside), *self.pr_tool_check()]
