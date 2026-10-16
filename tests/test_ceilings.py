@@ -3,6 +3,7 @@ import subprocess
 import sys
 import time
 import unittest
+from unittest import mock
 
 from tests.support import REPO, WkTest
 
@@ -20,6 +21,16 @@ class TestCeilings(WkTest):
         if left:
             subprocess.run(["pkill", "-f", r"^sleep 131\.5$"])
         self.assertEqual(left, [], "the ceiling killed the child and left a grandchild running")
+
+    def test_an_interrupt_reaches_the_session_a_ceiling_started(self):
+        with mock.patch.object(subprocess.Popen, "communicate", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                Local().run(["bash", "-c", "sleep 131.6 & wait"], timeout=60)
+        time.sleep(0.5)
+        left = subprocess.run(["pgrep", "-f", r"^sleep 131\.6$"], capture_output=True, text=True).stdout.split()
+        if left:
+            subprocess.run(["pkill", "-f", r"^sleep 131\.6$"])
+        self.assertEqual(left, [], "an interrupted wait left its session running")
 
     def test_no_fleet_probe_can_outlive_its_ceiling(self):
         boot = self.tmp / "lib" / "wk" / "boot"

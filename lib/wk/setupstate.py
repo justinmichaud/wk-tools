@@ -19,7 +19,10 @@ def tree(root, machine):
     for entry in status.split("\0"):
         path = os.path.join(root, entry[3:])
         if entry[3:] and machine.exists(path) and not machine.isdir(path):
-            h.update(machine.read_bytes(path))
+            try:
+                h.update(machine.read_bytes(path))
+            except OSError:
+                pass
     return h.hexdigest()
 
 
@@ -40,8 +43,8 @@ def read(env, machine):
         return None
 
 
-def write(root, env, machine):
-    machine.write_own(path(env), json.dumps({"tree": tree(root, machine), "boot": boot(machine)}))
+def write(env, machine, applied):
+    machine.write_own(path(env), json.dumps({"tree": applied, "boot": boot(machine)}))
 
 
 def unloaded_agents(env, machine):
@@ -66,10 +69,13 @@ def behind(root, env, machine=None):
 
 
 def main(argv):
-    if argv == ["record"]:
-        write(images.root(), os.environ, Local())
+    if argv == ["tree"]:
+        print(tree(images.root(), Local()))
         return 0
-    sys.stderr.write("usage: python3 -m wk.setupstate record\n")
+    if len(argv) == 2 and argv[0] == "record":
+        write(os.environ, Local(), argv[1])
+        return 0
+    sys.stderr.write("usage: python3 -m wk.setupstate tree | record <tree>\n")
     return 2
 
 

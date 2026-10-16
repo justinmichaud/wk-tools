@@ -53,7 +53,7 @@ class SetupTest(WkTest):
         return setupstate.behind(str(self.root), self.env, self.m)
 
     def record(self):
-        setupstate.write(str(self.root), self.env, self.m)
+        setupstate.write(self.env, self.m, setupstate.tree(str(self.root), self.m))
 
 
 class TestTheRecord(SetupTest):
@@ -135,10 +135,20 @@ class TestTheDispatcherRunsIt(SetupTest):
 
 
 class TestSetupRecordsItsRun(SetupTest):
-    def test_the_record_verb_writes_what_a_later_command_reads_as_current(self):
+    def py(self, *argv):
         env = dict(os.environ, WK_ROOT=str(self.root), PYTHONPATH=str(REPO / "lib"), **self.env)
-        cp = subprocess.run([sys.executable, "-m", "wk.setupstate", "record"], env=env, capture_output=True, text=True)
+        return subprocess.run([sys.executable, "-m", "wk.setupstate", *argv], env=env, capture_output=True, text=True)
+
+    def test_the_tree_taken_at_the_start_is_what_is_recorded(self):
+        start = self.py("tree").stdout.strip()
+        (self.root / "setup").write_text("edited while it ran\n")
+        cp = self.py("record", start)
         self.assertEqual(0, cp.returncode, cp.stderr)
-        self.assertEqual("", setupstate.behind(str(self.root), self.env))
-        cp = subprocess.run([sys.executable, "-m", "wk.setupstate", "nonesuch"], env=env, capture_output=True, text=True)
-        self.assertEqual((2, "usage: python3 -m wk.setupstate record\n"), (cp.returncode, cp.stderr))
+        self.assertEqual("the tree changed since it last ran", setupstate.behind(str(self.root), self.env))
+        self.assertEqual((2, "usage: python3 -m wk.setupstate tree | record <tree>\n"), (self.py("record").returncode, self.py("record").stderr))
+
+    def test_an_unreadable_untracked_file_is_hashed_by_name(self):
+        (self.root / "locked").write_text("x")
+        (self.root / "locked").chmod(0)
+        self.addCleanup((self.root / "locked").chmod, 0o644)
+        self.assertTrue(self.py("tree").stdout.strip())

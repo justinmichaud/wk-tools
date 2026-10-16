@@ -873,7 +873,7 @@ def converge_setup(cmd, d, args, machine=None):
     if act.dry_run():
         machine.act_run([str(ROOT / "setup")])
         return
-    with Lock(registry().store, machine, clock.Clock()).held("setup"):
+    with Lock(registry().store, machine, clock.Clock()).held("setup", timeout=SETUP_SECONDS):
         if setupstate.behind(str(ROOT), os.environ, machine):
             if not machine.act_run([str(ROOT / "setup")], input="", stream=True, timeout=SETUP_SECONDS).ok:
                 warn("./setup did not finish (above); 'wk %s' goes on, and 'wk doctor' says what is left" % cmd)

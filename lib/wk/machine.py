@@ -175,6 +175,10 @@ class Local(Machine):
             os.killpg(p.pid, signal.SIGKILL)
             p.communicate()
             return Result(TIMED_OUT, "", "timed out after %ss" % timeout)
+        except BaseException:
+            if timeout is not None:     # a session of its own: an interrupt here never reached it
+                os.killpg(p.pid, signal.SIGKILL)
+            raise
         return Result(p.returncode, out or "", err or "")
 
     def run_tty(self, argv, cwd=None, timeout=None):
