@@ -9,6 +9,7 @@ import re
 import sys
 
 from wk import act
+from wk import rubble as rb
 
 PID = re.compile(r"pid=(\d+)")
 
@@ -125,6 +126,23 @@ class Lock:
         if path in self.holding and self._target(path) == self.payload:
             self.machine.remove_now(path)
         self.holding = [p for p in self.holding if p != path]
+
+
+def rubble(store, machine):
+    """A lock its holder left: harmless, since the next taker replaces it, but named and taken by a plain `wk gc`."""
+    d, rows = store.lock_dir(), []
+    for name in sorted(n for n in (machine.listdir(d) if machine.isdir(d) else []) if n.endswith(".lock")):
+        path = os.path.join(d, name)
+        seen = machine.readlink(path) or ""
+        pid = _pid_of(seen)
+        if pid is not None and machine.alive(pid):
+            continue
+
+        def take(path=path, seen=seen):
+            if machine.readlink(path) == seen:
+                machine.remove(path)
+        rows.append(rb.row("lock", "lock %s, its holder (pid %s) gone" % (name[:-len(".lock")], pid or "?"), 0, take=take))
+    return rows
 
 
 def main(argv, env=None):

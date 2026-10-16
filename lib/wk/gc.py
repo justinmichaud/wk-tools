@@ -11,7 +11,7 @@ from wk.act import die, info, log, warn
 from wk.bench import mac as benchmac, seed
 from wk.bench.board import SLOTS_DIR
 from wk.clock import Clock
-from wk.lock import Lock
+from wk.lock import Lock, rubble as rubble_of_locks
 from wk.machine import Ssh
 from wk.store import Store, in_vm, rubble as store_rubble
 from wk.sysimage import guestbase, pmos, task
@@ -82,6 +82,7 @@ class Gc:
         listed = ([self.container()] if self.host_half else []) + ([vm] if vm else [])
         pid = lock.holder_pid("selftest")
         rows = store_rubble(self.store, self.here, self.host_half)
+        rows += rubble_of_locks(self.store, self.here)
         if self.store_half:
             rows += self.image_rows() + self.ccache_rows()
         rows += seed.rubble(self.here, lock, os.path.join(self.store.cache_dir(), "bench"))
