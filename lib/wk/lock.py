@@ -129,9 +129,9 @@ class Lock:
 
 
 def rubble(store, machine):
-    """A lock its holder left: harmless, since the next taker replaces it, but named and taken by a plain `wk gc`."""
-    d, rows = store.lock_dir(), []
-    for name in sorted(n for n in (machine.listdir(d) if machine.isdir(d) else []) if n.endswith(".lock")):
+    """A lock this host's holder left, taken under the `.breaking` link a taker breaking it would hold."""
+    d, mine, rows = store.lock_dir(), os.path.basename(store.lock_path("")), []
+    for name in sorted(n for n in (machine.listdir(d) if machine.isdir(d) else []) if n.endswith(mine) and n != mine):
         path = os.path.join(d, name)
         seen = machine.readlink(path) or ""
         pid = _pid_of(seen)
@@ -139,9 +139,14 @@ def rubble(store, machine):
             continue
 
         def take(path=path, seen=seen):
-            if machine.readlink(path) == seen:
-                machine.remove(path)
-        rows.append(rb.row("lock", "lock %s, its holder (pid %s) gone" % (name[:-len(".lock")], pid or "?"), 0, take=take))
+            if act.dry_run() or not machine.symlink("pid=%d gc" % os.getpid(), path + ".breaking"):
+                return machine.remove(path) if act.dry_run() else False
+            try:
+                if machine.readlink(path) == seen:
+                    machine.remove(path)
+            finally:
+                machine.remove_now(path + ".breaking")
+        rows.append(rb.row("lock", "lock %s, its holder (pid %s) gone" % (name[:-len(mine)], pid or "?"), 0, take=take))
     return rows
 
 

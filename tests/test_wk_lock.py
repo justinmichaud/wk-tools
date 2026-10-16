@@ -255,18 +255,22 @@ if __name__ == "__main__":
 
 
 class TestALockItsHolderLeftIsRubble(LockTest):
-    def test_gc_names_and_takes_a_dead_holders_lock_and_leaves_a_live_ones(self):
+    def test_gc_names_and_takes_a_dead_holders_lock_and_leaves_a_live_ones_and_another_hosts(self):
         from wk import lock as wklock
         here = machine.Local()
         os.makedirs(self.store.lock_dir())
         os.symlink(DEAD, self.store.lock_path("gone"))
         os.symlink("pid=%d tok=00000000 at=2000-01-01T00:00:00Z cmd=wk" % os.getpid(), self.store.lock_path("held"))
+        os.symlink(DEAD, os.path.join(self.store.lock_dir(), "theirs@elsewhere.lock"))
         rows = wklock.rubble(self.store, here)
-        gone = os.path.basename(self.store.lock_path("gone"))[:-len(".lock")]
-        self.assertEqual(["lock %s, its holder (pid 4242) gone" % gone], [r.what for r in rows])
+        self.assertEqual(["lock gone, its holder (pid 4242) gone"], [r.what for r in rows])
         os.remove(self.store.lock_path("gone"))
         os.symlink(DEAD.replace("deadbeef", "0badbeef"), self.store.lock_path("gone"))
         rows[0].take()
         self.assertTrue(os.path.islink(self.store.lock_path("gone")), "a lock taken again since it was listed is left")
+        os.symlink("pid=1 breaking", self.store.lock_path("gone") + ".breaking")
+        self.assertFalse(wklock.rubble(self.store, here)[0].take(), "a lock someone is breaking is theirs")
+        os.remove(self.store.lock_path("gone") + ".breaking")
         wklock.rubble(self.store, here)[0].take()
-        self.assertEqual([os.path.basename(self.store.lock_path("held"))], os.listdir(self.store.lock_dir()))
+        self.assertEqual(sorted([os.path.basename(self.store.lock_path("held")), "theirs@elsewhere.lock"]),
+                         sorted(os.listdir(self.store.lock_dir())))
