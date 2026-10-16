@@ -13,9 +13,12 @@ from wk.act import barrier, die, info, warn
 from wk.doctor import MISS, Report, miss, note, ok
 from wk.resources import arch_has_gpu
 
-# Named places, never the checkout: it ships PEM fixtures.
-KEY_SCAN = ("{ grep -rl 'PRIVATE KEY' $HOME/.ssh $HOME/.claude /secrets /run/wk;\n"
-            "  grep -l  'PRIVATE KEY' $HOME/* ; } 2>/dev/null | head -5")
+# Named places, never the checkout: it ships PEM fixtures. A key is its header alone on a line, or (in a
+# transcript, one JSON line) a header, an escaped newline, a Read line number maybe, then a base64 body.
+KEY_SHAPE = (r"-e '^-----BEGIN [A-Z ]*PRIVATE KEY-----[[:space:]]*$' "
+             r"-e '-----BEGIN [A-Z ]*PRIVATE KEY-----\\n( *[0-9]+\\t)?[A-Za-z0-9+/=]{40}'")
+KEY_SCAN = ("{ grep -rlE %s $HOME/.ssh $HOME/.claude /secrets /run/wk;\n"
+            "  grep -lE  %s $HOME/* ; } 2>/dev/null | head -5" % (KEY_SHAPE, KEY_SHAPE))
 HOST_PATHS = ("/host/home", "/host/run", "/run/user/*/bus", "/run/dbus/system_bus_socket")
 PUBLISHING = ("push", "github-write", "bugzilla-write")
 CSI = re.compile(r"\x1b\[[0-9;?<>=]*[A-Za-z]|\x1b[78]|\x1b\([A-Z]|\x0f")
@@ -305,8 +308,8 @@ class Wall:
         verdict = claude_status(self.inside("if command -v claude >/dev/null 2>&1; then claude auth status 2>/dev/null; "
                                             "else echo wk-no-claude-cli; fi"))
         if verdict == "True " + want:
-            rows.append(ok("the agent in '%s' is authenticated (%s), from the %s credential this machine delivered -- no /login, no browser"
-                           % (self.ws, want, secret)))
+            rows.append(ok("the agent in '%s' reports itself logged in (%s) from the %s credential this machine delivered -- no "
+                           "/login, no browser; whether Anthropic accepts it is the injector row's measurement" % (self.ws, want, secret)))
         elif verdict.startswith("True "):
             rows.append(miss("the agent in '%s' authenticates as %s, where a %s place is given %s and must report %s"
                              % (self.ws, verdict[5:], self.driver.kind, secret, want), "two credentials reach it, or the wrong one does"))

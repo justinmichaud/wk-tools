@@ -2,6 +2,7 @@
 of the command it runs."""
 import contextlib
 import io
+import json
 import os
 import shlex
 import subprocess
@@ -322,6 +323,21 @@ class TestTheKeyScanRunsForReal(WkTest):
         (home / ".claude" / "deep" / "k").write_text(self.PEM)
         out = self.scan(home)
         for name in ("id_fork", "leaked_key", "deep/k"):
+            self.assertIn(name, out)
+
+    def test_a_transcript_quoting_the_words_is_not_reported_and_one_holding_a_key_is(self):
+        home = self.home()
+        (home / ".claude" / "projects").mkdir(parents=True)
+        quoted = home / ".claude" / "projects" / "quoted.jsonl"
+        quoted.write_text(json.dumps({"text": "KEY_SCAN greps 'PRIVATE KEY'\n" + self.PEM + "   300\tPEM = " + repr(self.PEM)}) + "\n")
+        self.assertEqual("", self.scan(home))
+        body = "A" * 64
+        for name, text in (("cat.jsonl", self.PEM.splitlines()[0] + "\n" + body),
+                           ("read.jsonl", "     1\t" + self.PEM.splitlines()[0] + "\n     2\t" + body)):
+            (home / ".claude" / "projects" / name).write_text(json.dumps({"text": text}) + "\n")
+        out = self.scan(home)
+        self.assertNotIn("quoted", out)
+        for name in ("cat.jsonl", "read.jsonl"):
             self.assertIn(name, out)
 
 
