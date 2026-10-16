@@ -14,7 +14,7 @@ from tests.support import REPO
 from tests.test_dev_integration import PROMPT, REPLY, WK, place_unready, real_env, records, tail, wk, workspace_record
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import repos, wall  # noqa: E402
+from wk import repos, secrets, wall  # noqa: E402
 
 WS = "integ-tools"
 
@@ -60,6 +60,16 @@ class ToolsWorkspaceLive(unittest.TestCase):
             r = self.ls_remote(WS)
             p.wait(60)
         self.assertEqual(0, r.rc, "an agent in '%s' refused a push from '%s':\n%s" % (other, WS, tail(r.out)))
+
+    def test_the_proxy_gives_a_person_the_write_socket_and_an_agent_the_reading_one(self):
+        """`live push.vm_keys`, its proxy half: an empty pull request is GitHub's to refuse (422) from a person, and the
+        injector's (412) while an agent runs in the workspace."""
+        self.made()
+        fork = next(r[1] for r in secrets.forks())
+        line = wall.http("https://api.github.com/repos/%s/pulls" % fork, "-X POST -d '{}' ")
+        person = wk("enter", WS, "--", "bash", "-lc", line, timeout=120)
+        agent = wk("enter", WS, "--", "bash", "-lc", wall.WITH_AGENT % line, timeout=120)
+        self.assertEqual(("422", "412"), (wall.status_of(person.out), wall.status_of(agent.out)), tail(person.out + agent.out))
 
     def test_a_wk_tools_workspace_lints_runs_claude_and_fetches(self):
         self.made()
