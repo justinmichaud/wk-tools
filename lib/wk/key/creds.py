@@ -58,10 +58,7 @@ class Creds:
 
     def private_dir(self, d):
         """0700 asserted on every run: a directory made by hand is as open as its umask left it."""
-        if self.sec.made_dir(d):
-            self.machine.act_run(["chmod", "0700", d])
-        else:
-            self.sec.ensure_dir(d, "0700")
+        self.machine.ensure_dir_mode(d, "0700")
 
     def store(self, name, value):
         p = self.path(name)

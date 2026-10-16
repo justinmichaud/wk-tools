@@ -2,6 +2,7 @@
 /secrets, what every workspace here reads."""
 
 import argparse
+import hashlib
 import os
 import shlex
 import sys
@@ -177,15 +178,24 @@ class Secrets:
     def _act(self, line, input=""):
         return self.machine.act_run(self.machine_argv(line), input=input)
 
+    def _holds(self, path, value):
+        """A read of the file's digest, so nothing secret comes back; None is a value that withdraws the file."""
+        if value is None:
+            return not self.machine.run(self.machine_argv("test -e %s" % shlex.quote(path))).ok
+        r = self.machine.run(self.machine_argv("sha256sum < %s" % shlex.quote(path)))
+        return r.ok and r.out.split()[:1] == [hashlib.sha256(value.encode()).hexdigest()]
+
     def cred_write(self, path, name):
         """The first line of a held credential, down a pipe: an empty file would be a token the injector sends."""
         value = first_line(self.cred_read(name))
         if not value:
             return False
+        if self._holds(path, value + "\n"):
+            return True
         return self._act("umask 077 && cat > %s" % shlex.quote(path), input=value + "\n").ok
 
     def cred_clear(self, path):
-        return self._act("rm -f %s" % shlex.quote(path)).ok
+        return self._holds(path, None) or self._act("rm -f %s" % shlex.quote(path)).ok
 
     def cred_sync(self, path, name):
         if first_line(self.cred_read(name)):
@@ -207,7 +217,9 @@ class Secrets:
             return True
         key = self.read(src)
         if not (key or "").strip():
-            return self._act("rm -f %s" % shlex.quote(dest)).ok
+            return self._holds(dest, None) or self._act("rm -f %s" % shlex.quote(dest)).ok
+        if self._holds(dest, key):
+            return True
         return self._act("umask 077 && mkdir -p %s && cat > %s" % (shlex.quote(os.path.dirname(dest)), shlex.quote(dest)), input=key).ok
 
     def push_converge_machine(self):

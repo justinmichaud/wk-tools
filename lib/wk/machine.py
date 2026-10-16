@@ -141,6 +141,11 @@ class Machine:
         if not self._would("create", path):
             self.mkdir_now(path)
 
+    def ensure_dir_mode(self, path, mode):
+        self.mkdir(path)
+        if not self.run(["find", path, "-maxdepth", "0", "-perm", mode]).out.strip():
+            self.act_run(["chmod", mode, path])
+
     def exec(self, argv, cwd=None, env=None):
         """Replaces this process, so the far side's tty and job control are the caller's own; a dry run prints it and ends."""
         if act.dry_run():

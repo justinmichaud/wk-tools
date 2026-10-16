@@ -1,6 +1,7 @@
 """lib/wk/secrets.py over a fake machine that is a filesystem: a private half is `KEY:<fork>` and its public half
 `PUB:<fork>`, so ssh-keygen's answers follow from the bytes."""
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -115,6 +116,12 @@ class World(Fake):
         if m:
             self._drop(self._path(m.group(1)))
             return Result(0)
+        m = re.match(r"(sha256sum <|test -e) (.*)$", line)
+        if m:
+            text = self.files.get(self._path(m.group(2)))
+            if text is None:
+                return Result(1)
+            return Result(0, hashlib.sha256(text.encode()).hexdigest() + "  -\n" if m.group(1) != "test -e" else "")
         return Result(127, "", "the fake has no answer for: " + line)
 
     def _fingerprint(self, argv, _):
@@ -265,6 +272,23 @@ class TestTheDeployKeysAreCopiedWhereTheServiceReadsThem(SecretsTest):
         self.w._set_file(there, "KEY:old\n")
         quiet(self.sec().push_key_sync, "fork")
         self.assertNotIn(there, self.w.files)
+
+    def test_a_second_converge_writes_nothing(self):
+        self.w._set_file(self.tmp + "/held/push-keys/build_key_fork", "KEY:fork\n")
+        self.w._set_file(self.tmp + "/held/push-keys/github-pat", "ghp-held\n")
+        s = self.sec()
+        pat = s.machine_pat()
+        for _ in range(2):
+            self.w.effects.clear()
+            self.assertTrue(s.push_key_sync("fork") and s.cred_sync(pat, "github-pat"))
+        self.assertEqual([], [e for e in self.w.effects if e[0] == "act"])
+        self.assertEqual("ghp-held\n", self.w.files[pat])
+        self.w._drop(self.tmp + "/held/push-keys/build_key_fork")
+        self.assertTrue(s.push_key_sync("fork"))
+        self.assertNotIn(self.tmp + "/store/push-keys/build_key_fork", self.w.files)
+        self.w.effects.clear()
+        self.assertTrue(s.push_key_sync("fork"))
+        self.assertEqual([], [e for e in self.w.effects if e[0] == "act"], "nothing there is nothing to remove")
 
     def test_where_the_service_reads_the_keyring_nothing_is_copied(self):
         self.w.seed()

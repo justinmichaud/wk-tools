@@ -636,11 +636,6 @@ class Driver:
     def ccache_conf(self):
         return "max_size = %s\n" % self.ccache_maxsize()
 
-    def ensure_dir_mode(self, path, mode):
-        self.machine.mkdir(path)
-        if not self.machine.run(["find", path, "-maxdepth", "0", "-perm", mode]).out.strip():
-            self.machine.act_run(["chmod", mode, path])
-
     def workspaces(self):
         return sorted(set(self.store.workspaces()) | {n for n, _ in self.list() if n})
 
@@ -960,7 +955,7 @@ class Container(Driver):
         conf = os.path.join(self.store.store_dir(), "cache", "ccache", "ccache.conf")
         if not self.machine.exists(conf):
             self.machine.write(conf, self.ccache_conf())
-        self.ensure_dir_mode(self.store.keyring_dir(), "0700")
+        self.machine.ensure_dir_mode(self.store.keyring_dir(), "0700")
         secrets.Secrets(self.root, self.env, self.machine).store_publish()
 
     def sdk_refresh(self):
@@ -1440,7 +1435,7 @@ class Vm(Driver):
 
     def store_init(self):
         super().store_init()
-        self.ensure_dir_mode(self.vm_dir(), "0700")
+        self.machine.ensure_dir_mode(self.vm_dir(), "0700")
 
     def _podman_up(self):
         rec = podman_vm(self.machine, self.podman_machine())

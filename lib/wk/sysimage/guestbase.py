@@ -214,7 +214,7 @@ class Base:
         v = self.vm
         cpus, mem = self.sizing()
         guest.admit(self.host, self.name, int(mem))
-        v.ensure_dir_mode(v.vm_dir(), "0700")
+        v.machine.ensure_dir_mode(v.vm_dir(), "0700")
         cur, want = v.configured(self.name, "Disk"), guest.vm_disk_gb(self.env)
         if cur is not None and cur < want:   # tart grows a disk only while the VM is off
             info("growing the base disk %dGB -> %dGB" % (cur, want))
