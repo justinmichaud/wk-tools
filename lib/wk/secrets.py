@@ -181,7 +181,7 @@ class Secrets:
     def _holds(self, path, value):
         """A read of the file's digest, so nothing secret comes back; None is a value that withdraws the file."""
         if value is None:
-            return not self.machine.run(self.machine_argv("test -e %s" % shlex.quote(path))).ok
+            return not self.machine.run(self.machine_argv("test -e {0} || test -L {0}".format(shlex.quote(path)))).ok
         r = self.machine.run(self.machine_argv("sha256sum < %s" % shlex.quote(path)))
         return r.ok and r.out.split()[:1] == [hashlib.sha256(value.encode()).hexdigest()]
 

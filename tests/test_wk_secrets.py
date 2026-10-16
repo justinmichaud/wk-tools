@@ -116,7 +116,7 @@ class World(Fake):
         if m:
             self._drop(self._path(m.group(1)))
             return Result(0)
-        m = re.match(r"(sha256sum <|test -e) (.*)$", line)
+        m = re.match(r"(sha256sum <|test -e) (.*?)(?: \|\| test -L .*)?$", line)
         if m:
             text = self.files.get(self._path(m.group(2)))
             if text is None:

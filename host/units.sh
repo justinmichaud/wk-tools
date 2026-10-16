@@ -71,7 +71,11 @@ unit_install() { # <unit name> <tools root> <store> <run...>
 unit_prune() { # <run...>: a wk unit installed there whose body host/units no longer carries is stopped and removed
     local dir='~/.config/systemd/user' name gone=""
     for name in $("$@" "ls $dir 2>/dev/null" | tr -d '\r'); do
-        case "$name" in wk-*.service) ;; *) continue ;; esac
+        case "$name" in
+            wk-*.service.new) [ -n "${WK_DRY_RUN:-}" ] || "$@" "rm -f $dir/$name"; continue ;;   # a killed unit_install's
+            wk-*.service) ;;
+            *) continue ;;
+        esac
         [ ! -f "$WK_ROOT/host/units/$name" ] || continue
         if [ -n "${WK_DRY_RUN:-}" ]; then
             changed "would stop and remove $name (host/units has no body for it)"

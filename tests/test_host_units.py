@@ -174,7 +174,7 @@ class TestAUnitThisTreeNoLongerCarriesIsRemoved(WkTest):
         super().setUp()
         self.dir = self.tmp / "home" / ".config" / "systemd" / "user"
         self.dir.mkdir(parents=True)
-        for name in ("wk-ssh-agent.service", "wk-proxy.service", "someone-else.service"):
+        for name in ("wk-ssh-agent.service", "wk-proxy.service", "someone-else.service", "wk-proxy.service.new"):
             (self.dir / name).write_text("[Service]\n")
 
     def test_it_is_stopped_and_removed_and_the_rest_are_left(self):
