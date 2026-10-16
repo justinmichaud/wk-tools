@@ -250,6 +250,9 @@ class Wall:
         said = self.with_agent("GIT_TERMINAL_PROMPT=0 git ls-remote --heads %s 2>&1 | head -3" % url)
         if "agent" in said and "runs in" in said:
             return rows + [ok("a push is refused while an agent runs in the workspace")]
+        if why := re.match(r"error: (.+)", said):
+            return rows + [miss("the push service refused the caller for '%s' before asking about agents, so whether an agent's push "
+                                "is refused is unmeasured" % why.group(1), "the push service's journal on the host: journalctl --user -u wk-push")]
         return rows + [miss("a push was not refused while an agent ran in '%s': %s" % (self.ws, said.replace("\n", " ")[:160] or "nothing said"),
                             "the push service on the host: 'wk doctor' there says whether it answers")]
 

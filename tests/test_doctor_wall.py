@@ -173,6 +173,8 @@ FAILS = (
     ("push_refused", {}, {"git config --global --get core.sshCommand": ""}, ("is not the push client", "'wk rm demo' and 'wk new'")),
     ("push_refused", {}, {"git ls-remote": "Permission denied (publickey)."},
      ("a push was not refused while an agent ran in 'demo'", "Permission denied")),
+    ("push_refused", {}, {"git ls-remote": "error: this caller is in no workspace\n    ask the host"},
+     ("refused the caller for 'this caller is in no workspace'", "unmeasured", "journalctl --user -u wk-push")),
     ("github_read", {}, {"api.github.com/user": "000"}, ("rather than 200 or 401",)),
     ("github_read", {}, {"api.github.com/user": "000", "https://api.github.com/ 2": "000"},
      ("the injector is not in the path", "systemctl --user status wk-github-inject", "/run/wk/wk-github-ca.pem")),
