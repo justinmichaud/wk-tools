@@ -15,6 +15,7 @@ import http.client as http_client
 import json
 import os
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -506,6 +507,21 @@ def _deploy_key(value, repos, path, evidence):
                         "be read." % repo)
 
 
+def _claude_login_mint():
+    """`claude auth login` (a browser consent) into a scratch directory, so no other CLI holds and refreshes this login."""
+    here, d = Local(), tempfile.mkdtemp(prefix="wk-claude-login-")
+    try:
+        r = here.run_tty(["env", "CLAUDE_CONFIG_DIR=" + d, "CLAUDE_SECURESTORAGE_CONFIG_DIR=" + d, "claude", "auth", "login", "--claudeai"])
+        doc = os.path.join(d, ".credentials.json")
+        if not (r.ok and here.exists(doc)):
+            sys.stderr.write("credcheck: `claude auth login` %s, so no claude.ai login was minted\n"
+                             % ("exited %d" % r.rc if not r.ok else "wrote no .credentials.json"))
+            return ""
+        return json.dumps(json.loads(here.read(doc)), separators=(",", ":"))
+    finally:
+        here.remove_now(d)
+
+
 def _ntfy_mint():
     from wk import notify
     return notify.mint()
@@ -560,9 +576,8 @@ def rules():
             forbids="have a second holder: a refresh spends the refresh token, so whichever holder refreshes second is "
                     "logged out",
             what="your claude.ai login, which the credential injector holds and refreshes for every workspace here",
-            remedy="d=$(mktemp -d); CLAUDE_SECURESTORAGE_CONFIG_DIR=$d claude, /login, quit, paste the one line of "
-                   "$d/.credentials.json, then rm -r $d so nothing else keeps it",
-            check=_claude_login, alone=True),
+            remedy="wk key set claude-login runs `claude auth login` in a scratch directory: approve it in the browser",
+            check=_claude_login, mint=_claude_login_mint, alone=True),
         _row("litellm",
             needs="reach your own LiteLLM endpoint",
             forbids="reach the upstream provider account directly",
@@ -620,13 +635,16 @@ def check(name, repos, path, evidence):
     return 0
 
 
-def mint(name):
+def mint(name, out):
     r = rules().get(name)
     if r is None or not r.mint:
         sys.stderr.write("credcheck: nothing here mints a '%s' credential; wk mints: %s\n"
                          % (name, " ".join(_minted())))
         return 2
-    sys.stdout.write(r.mint() + "\n")
+    value = r.mint()
+    if not value:
+        return 1
+    Local().write_own(out, value + "\n")
     return 0
 
 
@@ -649,7 +667,9 @@ def main(argv):
     verbs = p.add_subparsers(dest="verb", required=True)
     verbs.add_parser("names", help="every credential wk holds")
     verbs.add_parser("minted", help="the ones wk mints itself")
-    verbs.add_parser("mint", help="mint one").add_argument("name")
+    m = verbs.add_parser("mint", help="mint one, into <out>")
+    m.add_argument("name")
+    m.add_argument("out")
     verbs.add_parser("rule", help="the rule for <name>").add_argument("name")
     v = verbs.add_parser("check", help="the verdict on the value")
     v.add_argument("name")
@@ -661,7 +681,7 @@ def main(argv):
         sys.stdout.write("".join(n + "\n" for n in (rules() if a.verb == "names" else _minted())))
         return 0
     if a.verb == "mint":
-        return mint(a.name)
+        return mint(a.name, a.out)
     if a.verb == "rule":
         return rule(a.name)
     return check(a.name, a.repos.split(), a.path, dict(e.partition("=")[::2] for e in a.evidence))

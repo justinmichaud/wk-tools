@@ -60,6 +60,17 @@ class Creds:
         """0700 asserted on every run: a directory made by hand is as open as its umask left it."""
         self.machine.ensure_dir_mode(d, "0700")
 
+    def mint(self, name):
+        """In the foreground on this terminal, as a mint may need a person; the value comes back in the keyring's own directory."""
+        out = self.path(name) + ".minting"
+        self.private_dir(os.path.dirname(out))
+        try:
+            r = self.machine.act_run(["python3", os.path.join(self.root, "lib", "credcheck.py"), "mint", name, out], tty=True)
+            return self.machine.read(out).rstrip("\n") if r.ok and self.machine.exists(out) else ""
+        finally:
+            if self.machine.exists(out):
+                self.machine.remove_now(out)
+
     def store(self, name, value):
         p = self.path(name)
         self.private_dir(os.path.dirname(p))
@@ -115,7 +126,12 @@ class Creds:
             if not val:
                 die("nothing arrived on stdin, so nothing is stored.\n    To mint one here instead:  wk key set " + name)
         elif mints:
-            val, minted = self._cc("mint", name).out.rstrip("\n"), True
+            val, minted = self.mint(name), True
+            if act.dry_run():
+                log("  and would store what it mints at %s" % path)
+                return 0
+            if not val:
+                die(self.cred_line(name, "skipped", "nothing was minted (above), so nothing is stored"))
         else:
             val = self.prompt(self.rule(name, "what"), self.rule(name, "url"), self.rule(name, "remedy"), self.tty) or ""
             if not val:
@@ -127,7 +143,7 @@ class Creds:
             die("could not write " + path)
         self.deliver(name)
         log(self.cred_line(name, "minted" if minted else "stored", path))
-        if minted:
+        if minted and self.rule(name, "alone") != "True":
             # Every reader of a stored credential redacts it, so this is the only chance to point a phone at one wk mints.
             log("  printed once: %s%s" % (self.rule(name, "url"), val))
             log("  " + self.rule(name, "remedy"))

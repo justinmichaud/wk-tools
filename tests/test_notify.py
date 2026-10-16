@@ -158,10 +158,11 @@ class TestTheTopicIsMintedNotInvented(_Ntfy):
         self.assertEqual(0, notify.check(topic)[0])
 
     def test_the_rule_mints_through_this_module(self):
-        cp = subprocess.run(["python3", str(CREDCHECK), "mint", "ntfy"], capture_output=True, text=True, timeout=60,
+        out = self.tmp / "minted"
+        cp = subprocess.run(["python3", str(CREDCHECK), "mint", "ntfy", str(out)], capture_output=True, text=True, timeout=60,
                             env={"PATH": "/usr/bin:/bin"})
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        self.assertRegex(cp.stdout.strip(), notify.TOPIC.pattern)
+        self.assertRegex(out.read_text().strip(), notify.TOPIC.pattern)
 
 
 class TestTheLibraryCall(_Ntfy):

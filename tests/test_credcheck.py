@@ -552,3 +552,39 @@ class TestTheModelsPiIsPointedAt(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+FAKE_CLAUDE = """#!/bin/sh
+[ "$*" = "auth login --claudeai" ] || exit 9
+[ -n "$FAIL" ] && exit "$FAIL"
+[ -n "$SILENT" ] && exit 0
+printf '{\\n  "claudeAiOauth": {"accessToken": "a", "refreshToken": "r"}\\n}\\n' > "$CLAUDE_SECURESTORAGE_CONFIG_DIR/.credentials.json"
+"""
+
+
+class TestTheClaudeLoginIsMintedInAScratchDirectory(unittest.TestCase):
+    def mint(self, **env):
+        tmp = Path(tempfile.mkdtemp(prefix="wk-test-mint-"))
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(tmp)]))
+        (tmp / "bin").mkdir()
+        (tmp / "bin" / "claude").write_text(FAKE_CLAUDE)
+        (tmp / "bin" / "claude").chmod(0o755)
+        (tmp / "t").mkdir()
+        e = dict(os.environ, PATH="%s:/usr/bin:/bin" % (tmp / "bin"), TMPDIR=str(tmp / "t"), **env)
+        cp = subprocess.run([sys.executable, str(CREDCHECK), "mint", "claude-login", str(tmp / "out")], env=e,
+                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        out = (tmp / "out").read_text() if (tmp / "out").exists() else None
+        return cp, out, os.listdir(tmp / "t")
+
+    def test_the_login_comes_back_as_one_line_and_its_directory_goes(self):
+        cp, out, left = self.mint()
+        self.assertEqual(0, cp.returncode, cp.stderr)
+        self.assertEqual('{"claudeAiOauth":{"accessToken":"a","refreshToken":"r"}}\n', out)
+        self.assertEqual([], left)
+
+    def test_a_login_that_fails_or_writes_nothing_mints_nothing(self):
+        for env, said in (({"FAIL": "3"}, "exited 3"), ({"SILENT": "1"}, "wrote no .credentials.json")):
+            with self.subTest(**env):
+                cp, out, left = self.mint(**env)
+                self.assertEqual((1, None, []), (cp.returncode, out, left))
+                self.assertIn(said, cp.stderr)

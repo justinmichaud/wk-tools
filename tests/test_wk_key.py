@@ -113,7 +113,8 @@ class KeyWorld(World):
         if verb == "minted":
             return Result(0, "ntfy\n")
         if verb == "mint":
-            return Result(0, TOPIC + "\n")
+            f._set_file(argv[4], TOPIC + "\n")
+            return Result(0)
         if verb == "rule":
             return Result(0, "what\tthe %s\nurl\thttps://example.invalid/\nremedy\tsubscribe to it\nneeds\tdo its job\n" % argv[3])
         rest, path, ev = argv[4:], "", {}
@@ -332,6 +333,22 @@ class TestAValueTravelsOnStdin(KeyTest):
         self.assertIn(GOOD + "\n", [i for _, i in w.inputs])
 
 
+class TestAMintedValueIsShownOnlyWhenItMayTravel(KeyTest):
+    def set_ntfy(self, alone):
+        k = self.key(KeyWorld(self.tmp))
+        rule = k.rule
+        with mock.patch.object(k, "rule", side_effect=lambda n, f: str(alone) if f == "alone" else rule(n, f)), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(0, k.set("ntfy"))
+        return err.getvalue()
+
+    def test_an_alone_credential_is_never_printed(self):
+        self.assertIn("printed once: https://example.invalid/" + TOPIC, self.set_ntfy(False))
+        said = self.set_ntfy(True)
+        self.assertNotIn(TOPIC, said)
+        self.assertNotIn("printed once", said)
+
+
 class TestCrashOnlyAndDryRun(KeyTest):
     def fleet_world(self):
         w = KeyWorld(self.tmp, [Peer("peerbox", creds={"github-pat": STALE})])
@@ -394,6 +411,8 @@ class TestCrashOnlyAndDryRun(KeyTest):
                         pass
                 plan = wet.acts()
                 self.assertTrue([a for a in plan if planned(a)], plan)
+                if name == "set":   # a minted value exists only once minted, so the dry run plans up to the mint
+                    plan = plan[:1 + next(i for i, a in enumerate(plan) if "mint" in a[1])]
                 self.assertEqual([a for a in plan if not (minted and (".pub" in str(a) or "/view" in str(a)))], dry.acts())
                 self.assertEqual(before, dry.state())
                 if name == "set":

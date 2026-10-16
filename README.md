@@ -607,7 +607,7 @@ wk key setup                            # deploy keys, then every credential thi
 wk key check                            # one row per credential, what its issuer says now
 wk key set github-pat                   # one by name; --replace rotates it
 wk key set claude                       # the inference token, for build machines
-wk key set claude-login                 # the claude.ai login the injector holds
+wk key set claude-login                 # the claude.ai login the injector holds: approve it in the browser
 wk key deploy --rotate                  # the deploy keys, revoked and reissued fleet-wide
 ```
 
