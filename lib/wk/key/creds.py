@@ -110,9 +110,9 @@ class Creds:
                 "also what says where to mint\n    one and what it must be able to do." % (name, " ".join(names)))
         mints = name in self._cc("minted").out.split()
         path = self.path(name)
-        if replace:
-            if not self.present(name):
-                die("there is no %s credential here to replace (%s).\n    'wk key set %s' stores one." % (name, path, name))
+        if replace and not self.present(name):
+            info("no %s is stored here (%s), so there is nothing to replace: setting one" % (name, path))
+        elif replace:
             if not act.asked() and not act.confirm("remove the stored %s and replace it?" % name):
                 die("not done -- nothing was changed")
             self.clear(name)

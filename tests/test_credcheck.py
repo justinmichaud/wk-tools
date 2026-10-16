@@ -558,7 +558,21 @@ FAKE_CLAUDE = """#!/bin/sh
 [ "$*" = "auth login --claudeai" ] || exit 9
 [ -n "$FAIL" ] && exit "$FAIL"
 [ -n "$SILENT" ] && exit 0
-printf '{\\n  "claudeAiOauth": {"accessToken": "a", "refreshToken": "r"}\\n}\\n' > "$CLAUDE_SECURESTORAGE_CONFIG_DIR/.credentials.json"
+doc='{"claudeAiOauth": {"accessToken": "a", "refreshToken": "r"}}'
+if [ -n "$KEYCHAIN" ]; then
+    echo "Claude Code-credentials-$(basename "$CLAUDE_CONFIG_DIR")=$doc" >> "$KEYCHAIN"
+else
+    printf '%s\\n' "$doc" > "$CLAUDE_SECURESTORAGE_CONFIG_DIR/.credentials.json"
+fi
+"""
+# `security` over a keychain of `service=secret` lines in $KEYCHAIN.
+FAKE_SECURITY = """#!/bin/sh
+k="${KEYCHAIN:-/dev/null}"
+case "$1" in
+dump-keychain) sed 's/=.*//; s/.*/    "svce"<blob>="&"/' "$k" ;;
+find-generic-password) grep "^$3=" "$k" | sed 's/^[^=]*=//' ;;
+delete-generic-password) grep -v "^$3=" "$k" > "$k.new"; mv "$k.new" "$k" ;;
+esac
 """
 
 
@@ -567,24 +581,35 @@ class TestTheClaudeLoginIsMintedInAScratchDirectory(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="wk-test-mint-"))
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(tmp)]))
         (tmp / "bin").mkdir()
-        (tmp / "bin" / "claude").write_text(FAKE_CLAUDE)
-        (tmp / "bin" / "claude").chmod(0o755)
+        for name, body in (("claude", FAKE_CLAUDE), ("security", FAKE_SECURITY)):
+            (tmp / "bin" / name).write_text(body)
+            (tmp / "bin" / name).chmod(0o755)
         (tmp / "t").mkdir()
+        (tmp / "keychain").write_text("Claude Code-credentials=the person's own\n")
+        if env.pop("keychain", False):
+            env["KEYCHAIN"] = str(tmp / "keychain")
         e = dict(os.environ, PATH="%s:/usr/bin:/bin" % (tmp / "bin"), TMPDIR=str(tmp / "t"), **env)
         cp = subprocess.run([sys.executable, str(CREDCHECK), "mint", "claude-login", str(tmp / "out")], env=e,
                             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
         out = (tmp / "out").read_text() if (tmp / "out").exists() else None
-        return cp, out, os.listdir(tmp / "t")
+        return cp, out, os.listdir(tmp / "t"), (tmp / "keychain").read_text()
 
     def test_the_login_comes_back_as_one_line_and_its_directory_goes(self):
-        cp, out, left = self.mint()
+        cp, out, left, keychain = self.mint()
         self.assertEqual(0, cp.returncode, cp.stderr)
         self.assertEqual('{"claudeAiOauth":{"accessToken":"a","refreshToken":"r"}}\n', out)
         self.assertEqual([], left)
 
+    @unittest.skipUnless(sys.platform == "darwin", "the CLI keeps a login in the keychain on macOS only")
+    def test_on_a_mac_the_keychain_item_it_made_is_read_and_removed_and_no_other_is_touched(self):
+        cp, out, left, keychain = self.mint(keychain=True)
+        self.assertEqual(0, cp.returncode, cp.stderr)
+        self.assertEqual('{"claudeAiOauth":{"accessToken":"a","refreshToken":"r"}}\n', out)
+        self.assertEqual(([], "Claude Code-credentials=the person's own\n"), (left, keychain))
+
     def test_a_login_that_fails_or_writes_nothing_mints_nothing(self):
-        for env, said in (({"FAIL": "3"}, "exited 3"), ({"SILENT": "1"}, "wrote no .credentials.json")):
+        for env, said in (({"FAIL": "3"}, "exited 3"), ({"SILENT": "1"}, "left no login")):
             with self.subTest(**env):
-                cp, out, left = self.mint(**env)
+                cp, out, left, _ = self.mint(**env)
                 self.assertEqual((1, None, []), (cp.returncode, out, left))
                 self.assertIn(said, cp.stderr)

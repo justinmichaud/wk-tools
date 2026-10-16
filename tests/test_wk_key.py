@@ -342,6 +342,12 @@ class TestAMintedValueIsShownOnlyWhenItMayTravel(KeyTest):
             self.assertEqual(0, k.set("ntfy"))
         return err.getvalue()
 
+    def test_a_replace_with_nothing_stored_sets_one(self):
+        k = self.key(KeyWorld(self.tmp))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(0, k.set("ntfy", replace=True))
+        self.assertIn("nothing to replace: setting one", err.getvalue())
+
     def test_an_alone_credential_is_never_printed(self):
         self.assertIn("printed once: https://example.invalid/" + TOPIC, self.set_ntfy(False))
         said = self.set_ntfy(True)

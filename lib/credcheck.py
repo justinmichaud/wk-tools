@@ -14,6 +14,7 @@ import collections
 import http.client as http_client
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -507,18 +508,37 @@ def _deploy_key(value, repos, path, evidence):
                         "be read." % repo)
 
 
+KEYCHAIN_LOGIN = "Claude Code-credentials-"   # on macOS the CLI keeps a login in the keychain, named after its config dir
+
+
+def _keychain_logins(here):
+    if sys.platform != "darwin":
+        return set()
+    out = here.run(["security", "dump-keychain"]).out
+    return {m for m in re.findall(r'"svce"<blob>="([^"]+)"', out) if m.startswith(KEYCHAIN_LOGIN)}
+
+
 def _claude_login_mint():
-    """`claude auth login` (a browser consent) into a scratch directory, so no other CLI holds and refreshes this login."""
+    """`claude auth login` (a browser consent) against a scratch config dir; what it wrote, file or keychain item, is read
+    and then removed, so the injector is the login's one holder and refresher."""
     here, d = Local(), tempfile.mkdtemp(prefix="wk-claude-login-")
+    before = _keychain_logins(here)
+    made = []
     try:
         r = here.run_tty(["env", "CLAUDE_CONFIG_DIR=" + d, "CLAUDE_SECURESTORAGE_CONFIG_DIR=" + d, "claude", "auth", "login", "--claudeai"])
+        made = sorted(_keychain_logins(here) - before)
         doc = os.path.join(d, ".credentials.json")
-        if not (r.ok and here.exists(doc)):
+        text = here.read(doc) if here.exists(doc) else ""
+        if not text and len(made) == 1:
+            text = here.run(["security", "find-generic-password", "-s", made[0], "-w"]).out
+        if not (r.ok and text.strip()):
             sys.stderr.write("credcheck: `claude auth login` %s, so no claude.ai login was minted\n"
-                             % ("exited %d" % r.rc if not r.ok else "wrote no .credentials.json"))
+                             % ("exited %d" % r.rc if not r.ok else "left no login in %s or one new keychain item (%d)" % (d, len(made))))
             return ""
-        return json.dumps(json.loads(here.read(doc)), separators=(",", ":"))
+        return json.dumps(json.loads(text), separators=(",", ":"))
     finally:
+        for service in made:
+            here.run(["security", "delete-generic-password", "-s", service])
         here.remove_now(d)
 
 

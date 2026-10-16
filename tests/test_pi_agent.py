@@ -135,10 +135,10 @@ class TestWkKeySet(WkTest):
                 for name in NAMES:
                     self.assertIn(name, cp.stdout)
 
-    def test_replacing_nothing_is_refused_and_names_the_remedy(self):
+    def test_replacing_nothing_sets_one_and_says_so(self):
         cp = self._key("set", "litellm", "--replace")
-        self.assertNotEqual(0, cp.returncode)
-        self.assertIn("wk key set litellm", cp.stdout)
+        self.assertIn("nothing to replace: setting one", cp.stdout)
+        self.assertNotEqual(0, cp.returncode, "with no terminal to ask on, nothing is stored")
 
     def test_a_stored_secret_is_reported_by_name_and_never_printed(self):
         for name, value, var in (("litellm", PLACEHOLDER, "LITELLM_API_KEY"),
