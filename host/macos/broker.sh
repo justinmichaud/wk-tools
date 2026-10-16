@@ -47,13 +47,15 @@ EOF
 _reload=""
 if cmp -s "$_plist_new" "$_plist"; then
     unchanged "$_label.plist"
-    rm -f "$_plist_new"
+elif [ -n "${WK_DRY_RUN:-}" ]; then
+    _reload=1
+    changed "would install $_label.plist"
 else
     install -m 0644 "$_plist_new" "$_plist"
-    rm -f "$_plist_new"
     _reload=1
     changed "installed $_label.plist"
 fi
+rm -f "$_plist_new"
 
 # Reload only on a real change: a bootout takes an in-flight request with it.
 _policy_stamp="$(wk_state_dir)/.broker-policy"
@@ -61,7 +63,13 @@ _policy_hash=$(cksum < "$WK_ROOT/container/broker/wk-broker.py" | awk '{print $1
 [ "$(cat "$_policy_stamp" 2>/dev/null)" = "$_policy_hash" ] || _reload=1
 
 _svc="gui/$(id -u)/$_label"
-if [ -n "$_reload" ]; then
+if [ -n "${WK_DRY_RUN:-}" ]; then
+    if [ -n "$_reload" ] || ! launchctl print "$_svc" >/dev/null 2>&1; then
+        changed "would start $_label"
+    else
+        unchanged "wk-broker running"
+    fi
+elif [ -n "$_reload" ]; then
     # launchd re-reads the plist only on bootstrap, so bootout then bootstrap.
     if wk_py wk.guest broker-restart "$_label" "$_plist"; then
         printf '%s\n' "$_policy_hash" > "$_policy_stamp"

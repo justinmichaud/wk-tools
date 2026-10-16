@@ -111,6 +111,10 @@ run_stage inject   "$HOST_DIR/inject.sh"   # after vmtools: it publishes the cla
 run_stage broker   "$HOST_DIR/broker.sh"   # after sdk and vmtools: the broker publishes its socket into the podman machine on macOS, and binds beside the proxy the sdk stage started on Linux
 run_stage quiesce  "$WK_ROOT/admin/install.sh"
 [ -n "$WK_STAGE_FOUND" ] || die "no stage '$STAGE' -- ./setup -h lists them"
+# A whole run records the tree and boot it converged on; wk runs it again when either moves (lib/wk/setupstate.py).
+if [ "$STAGE" = all ] && [ -z "$WK_DRY_RUN" ]; then
+    wk_py wk.setupstate record || warn "could not record this run, so the next wk command runs ./setup again"
+fi
 
 echo >&2
 if [ -n "$WK_FAILED_STAGES" ]; then

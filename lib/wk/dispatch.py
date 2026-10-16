@@ -17,8 +17,9 @@ from pathlib import Path
 
 from wk import completion as C
 from wk import decl as D
-from wk import act, clock, guest, images, places, presets, project, record, repos, sshalias
+from wk import act, clock, guest, images, places, presets, project, record, repos, setupstate, sshalias
 from wk.act import info, log, warn
+from wk.lock import Lock
 from wk.machine import Local, is_macos
 from wk.reach import Reach
 from wk.store import Store, build_preset, dispatch_place, in_vm, no_such_workspace, ws_name
@@ -762,6 +763,7 @@ def main(argv):
     if act.dry_run() and not d.honours_dryrun(args) and not d.is_readonly(args):
         inv.usage_die("'wk %s' has no dry run yet: not every change it makes goes through\n"
                       "    the one path --dry-run intercepts (owed, docs/PLAN.md)" % cmd)
+    converge_setup(cmd, d, args)
     if d.is_destructive(args):
         os.environ["WK_DESTRUCTIVE"] = "1"
 
@@ -854,6 +856,27 @@ def main(argv):
         refuse_repo(inv, "local" if in_workspace() else resolved, name)
     line = command_line(inv, args)
     os.execv(line[0], line)
+
+
+SETUP_SECONDS = 3600
+
+
+def converge_setup(cmd, d, args, machine=None):
+    """./setup where it is behind; a timeout gives it a session with no terminal, which sudo asks a password on."""
+    if d.is_readonly(args) or in_workspace() or in_vm() or registry().in_remote_host():
+        return
+    machine = machine or Local()
+    why = setupstate.behind(str(ROOT), os.environ, machine)
+    if not why:
+        return
+    info("this machine's setup is behind (%s), so ./setup runs before 'wk %s'" % (why, cmd))
+    if act.dry_run():
+        machine.act_run([str(ROOT / "setup")])
+        return
+    with Lock(registry().store, machine, clock.Clock()).held("setup"):
+        if setupstate.behind(str(ROOT), os.environ, machine):
+            if not machine.act_run([str(ROOT / "setup")], input="", stream=True, timeout=SETUP_SECONDS).ok:
+                warn("./setup did not finish (above); 'wk %s' goes on, and 'wk doctor' says what is left" % cmd)
 
 
 def refuse_repo(inv, place, name):

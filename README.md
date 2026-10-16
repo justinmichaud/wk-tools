@@ -199,6 +199,13 @@ wk sync                        # the WebKit mirror and the snapshot; then wk new
 checks every machine it reaches against this tree: git identity and speed
 settings, the wk-tools commit, the provisioning hash.
 
+After the first whole `./setup`, a person never runs it again. It records the
+tree it converged on and the boot it ran in, and any `wk` command that changes
+something runs it first when the tree has changed since, or when launchd has
+not loaded a wk LaunchAgent this boot. It runs without a terminal, so a stage
+that needs a password asks nothing: it says so in that command's output, and
+`./setup --stage <name>` at a terminal is the remedy.
+
 ## Workflows
 
 **A workspace, start to finish**
@@ -212,7 +219,7 @@ wk run   bug-238 --until-crash --max 50 -- crash.js   # repeat until it fails; k
 wk run   bug-238 --rr -- crash.js       # record it with rr (Linux ports); wk gui --rr records the browser
 wk run   bug-238 --replay               # the latest recording, under lldb
 wk test  bug-238
-wk status bug-238 --log --follow
+wk status bug-238 --log --follow       # the newest log it has: its build, an image stage, its creation
 wk enter bug-238 -- ls                  # a shell or one command, on any place
 wk stop  bug-238                        # parked; wk start brings it back
 wk rm    bug-238
