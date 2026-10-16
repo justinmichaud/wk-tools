@@ -161,6 +161,7 @@ unit_start wk-push.service "$_unit_root" "$_unit_store" \
 
 unit_start wk-github-inject.service "$_unit_root" "$_unit_store" \
     "'git-webkit pr' in a workspace will fail" "$_unit_journal" _rsh
+unit_prune _rsh
 
 if wk_py wk.secrets push-converge; then
     debug "GitHub token, Bugzilla key and deploy keys converged on the machine"

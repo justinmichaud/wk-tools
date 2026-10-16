@@ -68,6 +68,23 @@ unit_install() { # <unit name> <tools root> <store> <run...>
     changed "installed $name"
 }
 
+unit_prune() { # <run...>: a wk unit installed there whose body host/units no longer carries is stopped and removed
+    local dir='~/.config/systemd/user' name gone=""
+    for name in $("$@" "ls $dir 2>/dev/null" | tr -d '\r'); do
+        case "$name" in wk-*.service) ;; *) continue ;; esac
+        [ ! -f "$WK_ROOT/host/units/$name" ] || continue
+        if [ -n "${WK_DRY_RUN:-}" ]; then
+            changed "would stop and remove $name (host/units has no body for it)"
+        elif "$@" "systemctl --user disable --now $name && rm -f $dir/$name" >/dev/null 2>&1; then
+            gone=1
+            changed "stopped and removed $name (host/units has no body for it)"
+        else
+            warn "could not stop and remove $name, which host/units has no body for: systemctl --user status $name says why"
+        fi
+    done
+    [ -z "$gone" ] || "$@" "systemctl --user daemon-reload"
+}
+
 unit_unready() { # <unit name> <consequence> <journal prefix>
     warn "$1 did not reach readiness -- $2
   why: ${3}journalctl --user -u $1 -e"

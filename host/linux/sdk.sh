@@ -38,6 +38,7 @@ case "$(wk_py wk.secrets claude-login-migrate)" in
 esac
 WK_UNIT_CLAUDE_LOGIN="$keyring_claude_login" unit_start wk-github-inject.service "$WK_ROOT" "$WK_STORE" \
     "'git-webkit pr' and claude in a workspace will fail" "$_unit_journal" sh -c
+unit_prune sh -c
 
 if wk_py wk.secrets push-converge; then
     debug "GitHub token, Bugzilla key and deploy keys converged"

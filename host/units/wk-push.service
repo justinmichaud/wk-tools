@@ -22,8 +22,9 @@ RuntimeDirectoryPreserve=yes
 # Not sandboxed the way wk-proxy is: it asks podman which workspace a caller is
 # in and whether an agent runs there, and runs ssh with a deploy key. What bounds
 # it is the request: one git command, for the repositories of the workspace that
-# asked, refused while an agent runs in it.
-PrivateTmp=yes
+# asked, refused while an agent runs in it. Nothing here may need a user namespace
+# (PrivateTmp and the like, in a user manager): rootless podman cannot rejoin its
+# own from one, and every caller would then be in no workspace.
 
 [Install]
 WantedBy=default.target

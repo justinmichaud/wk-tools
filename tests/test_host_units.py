@@ -54,6 +54,13 @@ class TestRenderingSubstitutesBothEnds(unittest.TestCase):
                 self.assertIn("RuntimeDirectory=wk", out)
                 self.assertIn("RuntimeDirectoryPreserve=yes", out)
 
+    def test_the_push_service_asks_podman_so_it_takes_no_user_namespace(self):
+        out = self._render("wk-push.service", "/r", "/s")
+        for key in ("PrivateTmp", "PrivateUsers", "PrivateDevices", "PrivateMounts", "ProtectSystem", "ProtectHome",
+                    "ReadOnlyPaths", "ReadWritePaths", "InaccessiblePaths", "TemporaryFileSystem"):
+            with self.subTest(key=key):
+                self.assertNotIn(key + "=", out)
+
     def test_the_push_service_runs_its_own_program_with_the_store(self):
         out = self._render("wk-push.service", "/r", "/s")
         self.assertIn("ExecStart=/usr/bin/python3 /r/container/push/wk-push.py", out)
@@ -146,6 +153,44 @@ class TestTheInstallerConverges(WkTest):
         self.assertIn("installed wk-proxy.service", cp.stdout + cp.stderr)
         self.assertNotIn("/bin/false", unit.read_text())
         self.assertEqual(2, log.read_text().count("daemon-reload"))
+
+
+class TestAUnitThisTreeNoLongerCarriesIsRemoved(WkTest):
+
+    def _prune(self, dry=False):
+        log = self.tmp / "systemctl.log"
+        binp = self.tmp / "bin"
+        binp.mkdir(exist_ok=True)
+        (binp / "systemctl").write_text(f'#!/bin/sh\necho "$*" >> {log}\n')
+        (binp / "systemctl").chmod(0o755)
+        env = {"HOME": str(self.tmp / "home"), "PATH": f"{binp}:{os.environ['PATH']}"}
+        if dry:
+            env["WK_DRY_RUN"] = "1"
+        cp = bash('. "$WK_ROOT/host/units.sh"; unit_prune sh -c', env=env)
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        return cp.stdout + cp.stderr, log.read_text() if log.exists() else ""
+
+    def setUp(self):
+        super().setUp()
+        self.dir = self.tmp / "home" / ".config" / "systemd" / "user"
+        self.dir.mkdir(parents=True)
+        for name in ("wk-ssh-agent.service", "wk-proxy.service", "someone-else.service"):
+            (self.dir / name).write_text("[Service]\n")
+
+    def test_it_is_stopped_and_removed_and_the_rest_are_left(self):
+        out, log = self._prune()
+        self.assertIn("stopped and removed wk-ssh-agent.service", out)
+        self.assertEqual(["--user disable --now wk-ssh-agent.service", "--user daemon-reload"], log.splitlines())
+        self.assertEqual(["someone-else.service", "wk-proxy.service"], sorted(p.name for p in self.dir.iterdir()))
+        out, log = self._prune()
+        self.assertNotIn("removed", out)
+        self.assertEqual(2, len(log.splitlines()))
+
+    def test_a_dry_run_names_it_and_touches_nothing(self):
+        out, log = self._prune(dry=True)
+        self.assertIn("would stop and remove wk-ssh-agent.service", out)
+        self.assertEqual("", log)
+        self.assertTrue((self.dir / "wk-ssh-agent.service").exists())
 
 
 FAKE_SYSTEMCTL = """#!/bin/sh
