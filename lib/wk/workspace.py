@@ -146,7 +146,7 @@ def new_front(reg, records, name, opts, prflow):
                      + (["--base", base] if base else []) + ["--_detached"], log_path)
     if opts.get("no_wait"):
         info("creating '%s' on %s, detached as pid %d -- this end can go away" % (name, tname, pid))
-        log("  follow:  tail -f %s" % log_path)
+        log("  follow:  wk status %s --log --follow" % name)
         log("  state:   wk status %s" % name)
         zed_after(here, root, name, opts)
         return 0
@@ -154,15 +154,16 @@ def new_front(reg, records, name, opts, prflow):
     st = recs.wait("new", name, log_path, timeout=timeout, pid=pid, floor=since, stream=sys.stderr)
     if st == "crashed":
         die("the process creating '%s' is gone without having said how it ended.\n"
-            "    A re-run destroys what it left and starts again:  wk new %s --on %s   (%s)" % (name, name, tname, log_path))
+            "    A re-run destroys what it left and starts again:  wk new %s --on %s   (its log: wk status %s --log --all)"
+            % (name, name, tname, name))
     if st == "refused":
-        die("'%s' was not created, and nothing was left half-made: the reason is\n    above, in full in %s" % (name, log_path))
+        die("'%s' was not created, and nothing was left half-made: the reason is\n    above, in full in 'wk status %s --log --all'" % (name, name))
     if st == "timeout":
         die("'%s' is still being created after %ds. Nothing here was undone.\n"
-            "    'wk status %s' says where it is; %s, what it is doing." % (name, timeout, name, log_path))
+            "    'wk status %s' says where it is; 'wk status %s --log', what it is doing." % (name, timeout, name, name))
     if st != "ok":
-        die("creating '%s' failed (%s) -- the reason is above, in full in %s.\n"
-            "    A re-run destroys what is there and starts again:  wk new %s --on %s" % (name, st, log_path, name, tname))
+        die("creating '%s' failed (%s) -- the reason is above, in full in 'wk status %s --log --all'.\n"
+            "    A re-run destroys what is there and starts again:  wk new %s --on %s" % (name, st, name, name, tname))
     info("workspace '%s' ready%s" % (name, "" if arch == "native" else " (%s)" % arch))
     if pr:
         prflow.checkout(driver, here, name, pr)

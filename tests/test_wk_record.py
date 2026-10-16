@@ -5,6 +5,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from tests.support import REPO
@@ -14,6 +15,7 @@ from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 from wk import record, status, statusview  # noqa: E402
+from wk.act import Refused  # noqa: E402
 
 
 class RecordTest(unittest.TestCase):
@@ -404,3 +406,33 @@ class TestWatchdogSettings(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheWorkspacesLog(RecordTest):
+    """`wk status <ws> --log` shows the newest log anything wrote for the workspace."""
+
+    def driver(self):
+        st = Store({"WK_STORE": str(self.tmp / "store")})
+        return type("D", (), {"store": st, "env": {"WK_STORE": str(self.tmp / "store")}, "pid_alive": lambda *a: None})()
+
+    def write(self, path, age):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n")
+        os.utime(path, (1000 - age, 1000 - age))
+        return str(path)
+
+    def test_a_creation_before_any_build_is_its_log_and_a_later_build_wins(self):
+        made = self.write(self.tmp / "store" / "log" / "new-ws.log", 50)
+        self.begin(kind="new", log=made, pid=999999)
+        self.begin(kind="new", name="other", log=self.write(self.tmp / "store" / "log" / "new-other.log", 1), pid=999999)
+        self.assertEqual(made, record.workspace_log(self.driver(), "ws"))
+        built = self.write(self.tmp / "store" / "ws" / "ws" / "build.log", 10)
+        self.assertEqual(built, record.workspace_log(self.driver(), "ws"))
+        staged = self.write(self.tmp / "store" / "ws" / "ws" / "home" / "yocto-image.log", 5)
+        self.assertEqual(staged, record.workspace_log(self.driver(), "ws"))
+
+    def test_nothing_written_is_refused_naming_what_writes_one(self):
+        err = io.StringIO()
+        with self.assertRaises(Refused), unittest.mock.patch("sys.stderr", err):
+            record.workspace_log(self.driver(), "ws")
+        self.assertIn("'wk new', 'wk build', 'wk sysimage build'", err.getvalue())

@@ -30,8 +30,8 @@
 #                   stops waiting without claiming the work stopped
 #   --port, --interval   the served page's port (0: any) and refresh seconds
 #
-#   <workspace> --log   the build or image-stage log, normalised, with the
-#                       first error and the last output
+#   <workspace> --log   its newest log (its build, an image stage, its creation),
+#                       normalised, with the first error and the last output
 #     --follow, -f   stream it
 #     --all, -a      print all of it
 #     --gates, -g    the readings this build was collected under

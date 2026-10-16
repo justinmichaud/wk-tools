@@ -510,8 +510,8 @@ class TestNewFrontDetach(WorkspaceTest):
         self.assertNotIn("ready (", err)
 
     def test_each_failed_verdict_has_its_own_words(self):
-        for status, words in (("refused", "'ws' was not created, and nothing was left half-made: the reason is\n    above, in full in"),
-                              (1, "creating 'ws' failed (failed) -- the reason is above, in full in"),
+        for status, words in (("refused", "'ws' was not created, and nothing was left half-made: the reason is\n    above, in full in 'wk status ws --log --all'"),
+                              (1, "creating 'ws' failed (failed) -- the reason is above, in full in 'wk status ws --log --all'"),
                               ("cancelled", "creating 'ws' failed (cancelled)")):
             w = self.make_world()
             t = w.begin(plan=list(workspace.PLAN), log=w.driver.create_log("ws"))

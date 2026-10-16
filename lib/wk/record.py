@@ -90,20 +90,20 @@ def first_error(path, machine=None):
 
 
 def workspace_log(driver, name):
-    """(path, whether it is an image-stage log): build.log, else the newest log an image builder wrote under home/."""
+    """The newest log written for a workspace: its build's, an image stage's under home/, or a task's naming it."""
     ws_dir = driver.store.ws_dir(name)
-    build_log = os.path.join(ws_dir, "build.log")
-    if os.path.isfile(build_log):
-        return build_log, False
-    stage_logs = glob.glob(os.path.join(ws_dir, "home", "yocto-*.log")) + glob.glob(os.path.join(ws_dir, "home", "buildroot-*.log"))
-    if not stage_logs:
-        act.die("no build log and no image-stage log for '%s' -- has it been\n    built? ('wk build', 'wk sysimage build')" % name)
-    return max(stage_logs, key=os.path.getmtime), True
+    logs = [os.path.join(ws_dir, "build.log")]
+    logs += glob.glob(os.path.join(ws_dir, "home", "yocto-*.log")) + glob.glob(os.path.join(ws_dir, "home", "buildroot-*.log"))
+    logs += [t.field("log") for t in of_driver(driver).list() if t.field("name") == name and t.field("log")]
+    there = [p for p in logs if os.path.isfile(p)]
+    if not there:
+        act.die("no log for '%s': nothing has made, built or staged it here ('wk new', 'wk build', 'wk sysimage build')" % name)
+    return max(there, key=os.path.getmtime)
 
 
 def show_log(driver, name, mode, hint):
-    path, stage = workspace_log(driver, name)
-    if stage:
+    path = workspace_log(driver, name)
+    if os.path.basename(path) != "build.log":
         act.info("showing %s" % path)
     if mode == "follow":
         here().exec(["tail", "-f", path])
