@@ -24,7 +24,9 @@ from wk.machine import Fake, Result  # noqa: E402
 
 LINK = 'mkdir -p "$HOME/.local/bin" && ln -s "$OK_BIN" "$HOME/.local/bin/%s"'
 STUBS = {
-    "curl": 'echo curl >> "$LOG"\n[ "${CURL_INSTALLS:-1}" = 1 ] && echo \'%s\'\nexit 0\n' % (LINK % "claude"),
+    "curl": ('echo curl >> "$LOG"\nwhile [ "$1" != -o ]; do shift; done\n'
+             'if [ -n "$CURL_REFUSES" ]; then echo "$CURL_REFUSES" > "$2"; echo "curl: (22) 401" >&2; exit 22; fi\n'
+             '[ "${CURL_INSTALLS:-1}" = 1 ] && echo \'%s\' > "$2"\nexit 0\n' % (LINK % "claude")),
     "node": 'case "$1" in -v) echo "$NODE_V" ;; -e) [ "$NODE_OK" = 1 ] ;; esac\n',
     "npm": 'echo "npm $*" >> "$LOG"\n[ "${NPM_OK:-1}" = 1 ] || exit 1\n%s\n' % (LINK % "pi"),
 }
@@ -38,7 +40,7 @@ class TestTheScript(unittest.TestCase):
         self.home, self.bin, self.sys = self.tmp / "home", self.tmp / "bin", self.tmp / "sys"
         for d in (self.home, self.bin, self.sys):
             d.mkdir()
-        for tool in ("bash", "mkdir", "ln"):
+        for tool in ("bash", "mkdir", "ln", "mktemp", "rm", "head"):
             (self.sys / tool).symlink_to(shutil.which(tool))
         self.ok = self.tmp / "ok"
         self.stub(self.ok, "exit 0\n")
@@ -82,6 +84,13 @@ class TestTheScript(unittest.TestCase):
         rc, said = self.run_script(CURL_INSTALLS="0")
         self.assertEqual((1, "failed"), (rc, said["claude"]))
         self.assertNotIn("pi", said)
+
+    def test_a_refused_download_shows_its_reason_and_runs_nothing(self):
+        cp = self.script(CURL_REFUSES="echo ran > $LOG.ran; the injector says why")
+        self.assertEqual(1, cp.returncode)
+        self.assertIn("claude=failed", cp.stdout)
+        self.assertIn("the injector says why", cp.stderr)
+        self.assertFalse((self.tmp / "log.ran").exists())
 
     def test_too_old_a_node_is_no_pi_not_a_failure(self):
         rc, said = self.run_script(NODE_V="v20.11.1", NODE_OK="0")
