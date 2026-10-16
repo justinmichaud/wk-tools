@@ -7,7 +7,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import credcheck
-from wk import claudelogin, guest, project, secrets
+from wk import claudelogin, guest, project, pushgate, secrets
 from wk.store import no_such_workspace
 from wk.act import barrier, die, info, warn
 from wk.doctor import MISS, Report, miss, note, ok
@@ -277,8 +277,12 @@ class Wall:
                      self.driver.daemon_remedy(self.ws, "inject"))]
 
     def person_write(self):
-        """With no agent the proxy hands the write socket: an empty ref is GitHub's to refuse (422), not the injector's (412)."""
+        """After the parallel pass, whose stand-in agents would be this probe's: with none, an empty ref is GitHub's 422."""
         fork = next((r[1] for r in secrets.forks()), "")
+        if not fork:
+            return [note("a person's write is not measured: no fork is configured to write an empty ref to")]
+        if pushgate.agent_pids(self.driver, self.ws):
+            return [note("a person's write is not measured: an agent runs in '%s', so the injector refuses it as it should" % self.ws)]
         reply = self.inside(http("https://api.github.com/repos/%s/git/refs" % fork, "-X POST -d '{}' "))
         if gap := self.gap("GitHub", reply):
             return gap
@@ -465,13 +469,12 @@ class Wall:
             checks.append(("claude-login", self.claude_login))
         return checks + [("no-credentials-inside", self.no_credentials_inside), ("secrets-view", self.secrets_view),
                          ("push", self.push_refused), ("github-read", self.github_read),
-                         ("github-write", self.github_write), ("person-write", self.person_write), ("bugzilla-read", self.bugzilla_read),
+                         ("github-write", self.github_write), ("bugzilla-read", self.bugzilla_read),
                          ("bugzilla-write", self.bugzilla_write), *self.pr_tool_check(),
                          ("agent-credential", self.agent_credential), ("gpu", self.gpu)]
 
     def from_inside(self):
         checks = [("push", self.push_refused), ("github-read", self.github_read), ("github-write", self.github_write),
-                  ("person-write", self.person_write),
                   ("bugzilla-read", self.bugzilla_read), ("bugzilla-write", self.bugzilla_write), ("egress-github", self.github),
                   ("egress-allowlist", self.allowlist), ("egress-off-allowlist", self.off_allowlist),
                   ("no-credentials", self.no_credentials_inside), *self.pr_tool_check()]
@@ -510,6 +513,7 @@ def from_host(root, driver, ws, machine, rep, want_gpu=False):
     results = run_at_once(wall.from_host())
     for _, found in results:
         rep.rows(found)
+    rep.rows(wall.person_write())
     if driver.kind == "container":
         rep.rows(wall.rootless_proxy())
     return could_publish(results)

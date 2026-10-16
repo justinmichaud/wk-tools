@@ -516,6 +516,20 @@ class TestFromTheHost(_Wall):
         self.assertNotIn("rm -f /opt/wk-tools/.wk-write-probe", self.asked)
         self.assertEqual("touch /opt/wk-tools/.wk-write-probe 2>&1", self.asked[-1])
 
+    def test_a_persons_write_is_unmeasured_while_an_agent_runs_or_with_no_fork(self):
+        self.set("/proc/[0-9]*", "4242")
+        rows = self.check("person_write")
+        self.assertEqual([], self.misses(rows))
+        self.assertIn("an agent runs in 'demo'", rows_text(rows))
+        self.assertFalse([c for c in self.asked if "/git/refs" in c])
+        with mock.patch.object(wall.secrets, "forks", return_value=[]):
+            self.assertIn("no fork is configured", rows_text(self.check("person_write")))
+
+    def test_a_persons_write_is_probed_after_every_stand_in_agent(self):
+        self.report()
+        last_agent = max(i for i, c in enumerate(self.asked) if '"$d/claude"' in c)
+        self.assertGreater(min(i for i, c in enumerate(self.asked) if "/git/refs" in c), last_agent)
+
     def test_a_push_that_is_not_refused_is_publishing_and_a_failed_read_is_not(self):
         self.set("git ls-remote", "")
         self.report()
