@@ -19,6 +19,7 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import act, guest, repos, secrets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
+from wk.store import Store  # noqa: E402
 
 ROOT = str(REPO)
 SECRETFILE = os.path.join(ROOT, "lib", "secretfile.py")
@@ -237,6 +238,7 @@ class TestRepoPushKeys(unittest.TestCase):
         self.assertEqual([[k, a] for k, _, a in secrets.push_keys()], [l.split("  ") for l in out.getvalue().splitlines()])
 
 
+@mock.patch.object(Store, "macos_host", False)   # a Linux machine, whatever runs the suite
 class TestTheDeployKeysAreCopiedWhereTheServiceReadsThem(SecretsTest):
     def sec(self):
         """A store of its own for the keyring: the podman machine's push service reads its own."""
@@ -420,6 +422,7 @@ class TestSecretsIsPublished(SecretsTest):
 
 
 class TestTheDeployKeys(SecretsTest):
+    @mock.patch.object(Store, "macos_host", False)
     def test_a_key_made_here_is_copied_where_the_service_reads_it_and_a_failed_copy_is_a_warning(self):
         env = dict(self.w.env, WK_STORE_DEFAULT=self.tmp + "/held")
         s = secrets.Secrets(ROOT, env, self.w, macos=False)

@@ -225,6 +225,7 @@ class TestTheProxyPicksTheInjectorsSocket(unittest.TestCase):
         self.assertTrue(self.may_write(b'{"writes": true}\n', {"addr": "192.0.2.9"}))
         self.assertEqual({"addr": "192.0.2.9", "verb": "writes"}, self.asked[0])
 
+    @unittest.skipUnless(sys.platform == "linux", "a unix caller is its pid by SO_PEERCRED, which only Linux has; a Mac's own proxy takes guests over TCP alone")
     def test_the_caller_is_a_pid_on_a_unix_socket_and_an_address_on_a_tcp_one(self):
         a, b = socket.socketpair(socket.AF_UNIX)
         self.addCleanup(a.close)
@@ -234,6 +235,7 @@ class TestTheProxyPicksTheInjectorsSocket(unittest.TestCase):
         self.addCleanup(tcp.close)
         self.assertEqual({"addr": "192.0.2.9"}, self.m.peer_of(_Peer(tcp)))
 
+    @unittest.skipUnless(sys.platform == "linux", "a unix caller is its pid by SO_PEERCRED, which only Linux has; a Mac's own proxy takes guests over TCP alone")
     def test_each_host_goes_to_the_socket_it_may(self):
         calls, asked = [], []
 

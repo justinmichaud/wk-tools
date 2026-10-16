@@ -287,13 +287,13 @@ def socket_answers(path, machine=None):
 
 def launchd_daemons(store):
     """(name, socket, setup stage) of what launchd keeps on a macOS host; the podman VM's copies of these sockets are forwards, not the daemons."""
-    if not store.macos_host:
-        return []
     return [("credential injector", os.path.join(store.vm_store_dir(), "vm", "github-inject.sock"), "inject"),
             ("request broker", store.runtime_socket(), "broker")]
 
 
 def injector_record(store, machine):
+    if not store.macos_host:
+        return None
     for name, sock, stage in launchd_daemons(store):
         if stage != "inject":
             continue

@@ -16,9 +16,11 @@ from wk import places, pr, workspace  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
-# `ssh <opts> <host> <command>` run here, with no WK_* variable carried across, as a real ssh carries none.
+# `ssh <opts> <host> <command>` run here, with no WK_* variable carried across, as a real ssh carries none,
+# and SHELL set as sshd sets it (a workspace's exec leaves it unset).
 _FAKE_SSH = """#!/bin/sh
 for v in $(env | sed -n 's/^\\(WK_[A-Za-z0-9_]*\\)=.*/\\1/p'); do unset "$v"; done
+export SHELL=/bin/sh
 while [ $# -gt 0 ]; do
     case "$1" in
         -o|-i|-p|-l|-F|-W) shift 2 ;;

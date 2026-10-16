@@ -653,18 +653,18 @@ class TestHealthRecords(unittest.TestCase):
         self.addCleanup(server.close)
         store = Store(dict(self.env, WK_BROKER_SOCKET=sock))
         self.assertEqual("down", status.broker_record(store, "m", lambda p: False)["state"], "a bound socket that is not listening")
-        server.listen(1)
+        server.listen(4)                    # nothing accepts, and macOS refuses a connect past the backlog
         self.assertEqual("open (0 in flight)", status.broker_record(store, "m", lambda p: False)["state"])
         self.assertTrue(status.socket_answers(sock))
         self.assertFalse(status.socket_answers(sock + ".none"))
 
     def test_the_hosts_injector_is_measured_on_a_mac_only(self):
         store = Store(dict(self.env, WK_STORE=str(self.tmp / "store")))
-        self.assertEqual([], status.launchd_daemons(store))
-        self.assertIsNone(status.injector_record(store, "m"))
+        names = [(n, stage) for n, _, stage in status.launchd_daemons(store)]
+        self.assertEqual([("credential injector", "inject"), ("request broker", "broker")], names)
+        with mock.patch.object(Store, "macos_host", False):
+            self.assertIsNone(status.injector_record(store, "m"))
         with mock.patch.object(Store, "macos_host", True):
-            names = [(n, stage) for n, _, stage in status.launchd_daemons(store)]
-            self.assertEqual([("credential injector", "inject"), ("request broker", "broker")], names)
             rec = status.injector_record(store, "m")
         self.assertEqual((rec["name"], rec["state"]), ("credential injector (this Mac)", "down"))
         self.assertIn("./setup --stage inject", rec["fix"])

@@ -172,7 +172,7 @@ done
 tmp=$(mktemp)
 if [ "$have_stdin" = 1 ]; then cat > "$tmp"; else : > "$tmp"; fi
 printf 'stdin=%s cmd=%s\n' "$(wc -c < "$tmp" | tr -d " ")" "$last" >> "$WK_TEST_SSH_LOG"
-HOME="$WK_TEST_GUEST" sh -c "$last" < "$tmp"
+HOME="$WK_TEST_GUEST" SHELL=/bin/sh sh -c "$last" < "$tmp"
 rc=$?
 rm -f "$tmp"
 exit "$rc"

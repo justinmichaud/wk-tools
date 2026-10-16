@@ -174,6 +174,7 @@ class _Service(WkTest):
         return self.log.read_text() if self.log.exists() else ""
 
 
+@unittest.skipUnless(sys.platform == "linux", "a container's caller is its pid by SO_PEERCRED, which only Linux has; a Mac host runs this service in the podman VM")
 class TestAPush(_Service):
     def test_with_no_agent_in_the_workspace_ssh_runs_with_its_deploy_key_and_its_output_comes_back(self):
         self.serve()
@@ -441,7 +442,8 @@ class TestEveryWorkspaceIsWiredToTheClient(WkTest):
         self.assertEqual("/run/user/501/wk/push.sock", Store(env).push_socket())
         self.assertEqual("/home/u/.local/state/wk/push.sock", Store({"HOME": "/home/u"}).push_socket())
         self.assertEqual("/x.sock", Store(dict(env, WK_PUSH_SOCKET="/x.sock")).workspace_push_socket())
-        self.assertEqual("/run/wk/push.sock", Store(env).workspace_push_socket())
+        with mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=False):
+            self.assertEqual("/run/wk/push.sock", Store(env).workspace_push_socket())
         with mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True):
             self.assertEqual("/home/u/.wk-push.sock", Store(env).workspace_push_socket())
 

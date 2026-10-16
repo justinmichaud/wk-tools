@@ -361,6 +361,7 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
 
     def test_a_stopped_machine_is_unknown_and_nothing_is_started(self):
         fake = Fake()
+        fake.answer(("python3", "-c"), rc=0)
         fake.answer(INSPECT, 0, machine_in("stopped"))
         doc = fake_doctor(True, machine=fake, sh=stub_shell())
         rows = list(doc.workspaces_store()) + list(doc.machine_local())
@@ -381,15 +382,18 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
                           (MISS, "request broker answers on this Mac", "./setup --stage broker")], rows[:2])
 
     def test_no_machine_at_all_is_missing_with_the_stage_that_makes_one(self):
-        rows = list(fake_doctor(True, sh=stub_shell()).workspaces_store())
-        self.assertEqual([(MISS, "podman machine 'wk'", "./setup --stage machine")], rows)
+        fake = Fake()
+        fake.answer(("python3", "-c"), rc=0)
+        rows = list(fake_doctor(True, machine=fake, sh=stub_shell()).workspaces_store())
+        self.assertEqual([(MISS, "podman machine 'wk'", "./setup --stage machine")], [r for r in rows if r[0] == MISS])
 
     def test_a_running_machine_is_asked_for_the_probe_and_its_git_identity(self):
         fake = Fake()
         fake.answer(INSPECT, 0, machine_in("running"))
         fake.answer(("podman", "machine", "ssh", "wk", "--"), out=FULL_STORE_BLOB)
+        fake.answer(("python3", "-c"), rc=0)
         rows = list(fake_doctor(True, machine=fake).workspaces_store())
-        self.assertEqual((OK, "podman machine 'wk' running", ""), rows[0])
+        self.assertEqual((OK, "podman machine 'wk' running", ""), rows[2])
         self.assertTrue(any("container machine: git user.name" in r[1] for r in rows), rows)
 
     def test_a_machine_whose_tooling_answers_nothing_is_unknown(self):
