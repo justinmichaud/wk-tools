@@ -15,7 +15,7 @@ Measured 2026-10-21 in a wk-tools workspace (`./wk selftest`).
 | `wk selftest` (lint then unit) | 3,963 tests, 3.9 minutes, green; the lint tier alone 15 s |
 | the slowest unit test | 5.7 s, under a 30 s budget the runner enforces |
 | owed tests | 9 marked `owed` in the tree (two lint, one unit, six live-gated); the runner counts the 4 it ran |
-| the Owed table | 101 rows before today's fold; 23 are held by a `live`-marked body, 9 by an `owed` mark, and about 50 name a test that does not exist in the tree (a decision below) |
+| the Owed table | every row names a test in the tree: 23 held by a `live`-marked body, 9 by an `owed` mark, and the rest by an `owed` stub in `tests/test_owed_live.py` that the live tier runs and fails until the behaviour is proven |
 | the last live run from the host | before the push rule became the caller's ancestry; `ToolsWorkspaceLive` and `DevIntegrationContainer` steps 5, 10 and 11 are owed a run |
 
 Why bugs come back:
@@ -934,6 +934,31 @@ exist.
    - Decision: the install's `/etc/wk-image` marker is the builder's done
      marker, the same as a board's.
 
+   **Zero-touch Mac nights.** The goal is a bench run nobody attends: no reboot typed at night, SIP
+   on in the host install. What the tree knows (read 2026-10-21, nothing of it run on the Mac):
+   - Arming and returning are both `bless --mount <volume> --setBoot` run as root with no owner credential
+     (`admin/wk-boot-priv` from the host, `autorun.leave` from the bench account's NOPASSWD sudo). The
+     bash version's own notes say a bare `bless --setBoot` exited 0 having done nothing on this Mac, and
+     name the credentialed form `--user <owner> --stdinpass`; `machines/mbp.conf` says the selection is
+     signed with a volume owner's credential, and the helper says root alone suffices. Neither has been
+     measured. One `wk boot mbp` on the host answers the arm; one `leave` answers the return. If root
+     alone does not take, the owner's password is a secret of the keyring (`wk key set mac-owner`),
+     spent only inside the helper's `boot-volume`/`boot-host` verbs and the bench install's `leave`.
+   - After the return the host install stops at its login window. Zero-touch needs the host reachable
+     over the tailnet there, which depends on FileVault being off on the host volume and on tailscale
+     running as a daemon rather than the logged-in user's app; `wk doctor mbp` must read both
+     (`fdesetup status`, how tailscaled is installed) and the first measurement is one unattended
+     reboot of the host with nobody at the keyboard. Until that holds, the return is deferred to the
+     morning: the night belongs to the bench install, and `wk boot mbp --back` is the person's one
+     command.
+   - The pipeline's `MacHostSystem.after()` cannot return from the bench side; the bench job's own
+     `autorun.leave` is the one return, and the pipeline waits for the host node rather than blessing.
+   - SIP is per install on Apple Silicon: `csrutil` in recoveryOS acts on the selected volume, so the
+     bench volume runs with it off (the six `unstoppable` daemons in `bench/quiet/macos.tsv` then stop)
+     while the host keeps it on. It is set once at install, by hand, like the tailscale key; `wk doctor
+     mbp` reads both (`unit doctor.sip_rows`).
+   Rows: `live boot.arm[mbp]` (both directions), `live doctor.bench_readiness[mbp]`, `live bench[mbp]`.
+
    *Group 4, ∥ Group 3*
 
    5.33 **Guest start and stop, and the host daemons.** *Landed* (`lib/wk/guest.py`:
@@ -1151,7 +1176,6 @@ decides is a row; one still open is listed under "Decisions for the user".
 | The second spellings of a round, a device, a slot and a time profile fail lint (`lint.vocabulary` catches "lane" and "benchmark task"; README defines no name for these, so which spellings are second is the user's call) | 5 | `lint.vocabulary` |
 | A failed leg on a board leaves evidence readable afterwards: a persistent journal, browser and tunnel logs on every leg, a board-at-failure capture, and warmup evidence on a leg that timed out | 5 | `unit bench.failed_leg_keeps_evidence`, `live bench.evidence[<board>]` |
 | The live tier runs against the container place on Linux and macOS alike; no test is gated on the podman VM | 1 | `live` runner rule |
-| A scratch store never puts two places on one directory, and one machine's task records live in one directory | 1 | `unit record.one_store_per_place` |
 | The fleet view is one: the exit code is the worst state found anywhere, a name alive on two machines is a conflict `--on` disambiguates, two workstations reaching one box see one state and a disagreement names both views | 2 | `unit status.fleet_is_one` |
 | `wk status <ws> --log -f` follows a live build on any place | 2 | `live logs.follow[<place>]` |
 | Bare `wk stop` then `wk start` returns every workspace to running; `--keep-vm` leaves the podman machine up | 2 | `live start.roundtrip` (one workspace's stop and start is `tests.test_lifecycle.TestContainerLifecycle`) |
@@ -1181,7 +1205,6 @@ decides is a row; one still open is listed under "Decisions for the user".
 | `wk new <ws> --on buildbox4` and `wk rm <ws>` from a workstation are the box's own `wk new` and `wk rm`: the creation record and log are on the box and the workstation keeps none, the box's `wk status` and the workstation's read one state for the workspace during creation and after, and the creation's fetch step fetches. The unit half is green; the live run is owed | 3 | `unit box_workspace`, `live new.box_record[buildbox4]` |
 | A hand-over to buildbox4 while its wk-tools commit differs from the workstation's is refused naming `wk sync --tools buildbox4`, `--force` crosses it and says so, and `wk status`/`wk status --log` hand over and report the difference. The unit half is green; the live run is owed | 3 | `unit handover.tools_level`, `live handover.tools_level[buildbox4]` |
 | `wk key backup` then `./setup` round-trips with no spurious change; the junk filters strip what they claim; a write is whole or unchanged; one path with a per-platform adapter | 4 | `unit backup.filters`, `live backup.roundtrip` |
-| Every skill is followable from inside a container and a guest | 4 | `live ai.skills_workspace_true` |
 | `wk key sudo setup` installs its sudoers rule, validates with `visudo -c` before and after, proves `sudo -n true` fails, gets a terminal over ssh with `--on`, and no fleet machine holds a NOPASSWD grant wider than the three helpers | 4 | `live sudo.require[<machine>]` |
 | One host-owned mirror feeds the podman VM and every guest: alternates resolve inside a container, `./setup` recreates the mount, and a missing mirror refuses naming `wk sync` | 5 | `live vm.shared_mirror` (the guest half), `unit new.refuses_without_mirror` |
 | The golden base is rebuilt from `WK_VM_IMAGE`, carries no build caches, tracks the Xcode GA image, and `wk vm base --rm` asks separately about the pulled image while guests keep working | 5 | `live vm.base_matches_pin`, `unit vm.base_rm_asks_twice` |
@@ -1208,7 +1231,6 @@ decides is a row; one still open is listed under "Decisions for the user".
 | The Mac's startup volume is set by the privileged helper, proven round trip before arming, and read back from firmware | 5 | `live boot.arm[mbp]` |
 | A fresh bench volume provisions itself: python3 present before it is needed, Command Line Tools fetched and the update denial restored, no FileVault, the `bench` account, room checked, network credentials checked | 5 | `live sysimage.mac_volume_provision` |
 | A second build of one profile reuses sstate, and `--keep-work` leaves the kernel tree to configure | 5 | `live sysimage.sstate_reuse` |
-| meta-wk's pseudo bump stays only if the reproducer shows it needed | 5 | `live sysimage.pseudo_reproducer` |
 | A disk written from any image is unique per disk (`LABEL=` images included) and mountable whatever the medium held | 5 | `unit sysimage.write_identity`, `live sysimage.write[<board>]` |
 | Every card verb runs against a real card and is read back before unmount, and a board boots from it onto the tailnet with its seeded key | 5 | `live sysimage.card_verbs[rpi5]` |
 | One WiFi credential reader, in the card helper | 5 | `lint.one_wifi_reader` |
@@ -1221,7 +1243,6 @@ decides is a row; one still open is listed under "Decisions for the user".
 | A board run stops what another ssh login left running (a shell loop, a hand-started cog) before its session comes up, and names what it stopped | 5 | `live bench.clear_foreign[rpi3]` |
 | The 2.38 buildroot rpi4 image boots a rev 1.4/1.5 Pi 4 from the SD on its own pinned firmware (raspberrypi/firmware 52185fdd) | 5 | `live sysimage.firmware[rpi4]` |
 | A board PGO cycle builds its collection slot with thin LTO and its measured slot with full LTO, and both link and run on the board | 5 | `live sysimage.webkit_lto[<board>]` |
-| The 26.04 re-check of rpi5's workstation tuning covers `/boot/firmware/config.txt` and `cmdline.txt` under A/B boot, the root fstab label and its `discard`, the GNOME 50 indexer names and default swap | 5 | `unit key.backup_rpi5_tuning` |
 | A board is re-flashed from nothing by the machine holding its card reader, with no other provisioned machine | 5 | `live sysimage.reflash[rpi5]` |
 | `wk machine setup <board>` takes a board from a blank card to an answering tailnet name in `pi-hosts` and back, `wk machine probe` finds it when on, and a workspace reaches only that address, on port 22 | 5 | `live pi.setup[<board>]` |
 | `wk machine setup <box>` leaves a build box in one shape (zsh, or a named warning), and a cleanup accepted at the prompt is removed | 5 | `live machine_cmd.setup[<box>]` |
@@ -1230,7 +1251,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | The Librem 5 runs the pmOS bridge role in front of moose's BMC, with the BMC's own config in a conf file | 5 | `live bridge.setup[moose-bmc]` |
 | A bridge's segment is proven: provision on the eMMC route asks which disk, a board on `lan0` gets its reserved address and a workspace reaches it, `wk bridge tailnet` approves the route and `autoApprovers` holds after a policy edit, the netwatch ladder stops at its budget, the dock holds 480 Mbit, the watchdog device exists, the camera streams, and a bridge whose segment is down reads differently from one that is off | 5 | `live bridge.segment[<bridge>]`, `unit bridge.segment_down_vs_off` |
 | An image build runs from a Tart guest and the image reaches the host for writing | 5 | `live sysimage.build[vm]` |
-| A task's results live in its workspace, `wk bench ls` names them wherever they are, the task restarts from where it stopped on any machine, and `wk doctor` names the results backed-up | 6 | `unit results.restart_anywhere` |
+| A task's results live in its workspace, `wk bench ls` names them wherever they are, the task restarts from where it stopped on any machine, and `wk doctor` names the results backed-up | 6 | `unit test_bench_results`, `killpoints[bench export]` (tests/test_bench_results.py) |
 | On a macOS host a board A/B's run-benchmark and page server run in the podman VM and reach the boards | 5 | `live bench.vm_reaches_boards` |
 | `wk doctor <board>` against a live board prints its tailnet names, its system and arm, and its governor and temperature, with the rows the unit half asserts on a fake | 5 | `unit doctor.TestDeviceRows`, `live doctor.device[<board>]` |
 | `./setup --stage tools` on a bare macOS host downloads git-lfs at its pinned version, checks it against the release's sha256sums, and `wk doctor` then reports it present | 5 | `unit doctor.TestHostToolsGitLfs`, `live setup.git_lfs[macos]` |
@@ -1274,8 +1295,8 @@ Decisions are asked as questions, and their answers are recorded under "Decision
   features or by the user naming what goes: lower the budgets to what was measured, or name the
   features to drop?
 
-- About 50 Owed rows name a test that is not in the tree (the audit of 2026-10-21). The plan's own rule is a test marked `owed` per row. Write an `owed`-marked live body for each, or cut the table to the rows a test holds?
-- The Mac bench notes ask for bench mode as the default boot, SIP off on the bench volume, detection under 0.1% on SP3, JS3 and MM, and an 8-hour unattended budget. The design arms bench for one run and returns to host mode, leaves SIP as it is, stops at `--detect` 0.3% and at 40 rounds. Which direction: bench-default and sub-0.1% (new rows above, hardware time), or keep the design and lower the notes' targets?
+- meta-wk's pseudo bump (5.19): build a pseudo at scarthgap's pin for the reproducer, or drop the bump at the next poky move?
+- The Mac's goal is a run nobody attends ("Zero-touch Mac nights" under step 5): the arm and return bless are measured first; if the host install cannot be reached at its login window, the return waits for the morning's `wk boot mbp --back`. Detection under 0.1% and the 8-hour budget stay rows (`live ab.resolution[mbp]`, `unit bench.variance_pairing`).
 - `lib/wk/project.json` and `dotfiles/gitconfig` hard-code your forks and git identity in every workspace and guest, while README says "a fork under your own account". Keep it (one user), or move the fork owner and identity to a gitignored per-machine conf?
 - Tailscale, in the admin console: Karen limited to immich, nextcloud, overleaf and proxmox and those apps isolated from each other; your two accounts reach everything; the untrusted-router question for the bridge phones and the camera; the MBP on public WiFi; a full port scan.
 - Keep or drop, none code-closable today: Windows build machines; a bare rented cloud VM as a place (and PII-free perf testing on it); code-server, a web UI over the driver contract on the gateway, and sessions spawned from a phone; helix on a shared remote and from source for armhf; Haiku and BSD guests; iOS via public entitlements; backing up Claude conversations and sharing memory across machines; devcontainers.
