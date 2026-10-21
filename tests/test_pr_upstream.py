@@ -212,7 +212,7 @@ class Pushable(Checkout):
         self.forks = [("fork", "justinmichaud/WebKit", "github-webkit")]
 
     def check(self):
-        script = git.wiring_check_script(str(self.src), "", self.forks, ["main"], skip_env=True)
+        script = git.wiring_check_script(str(self.src), "", self.forks, ["main"])
         return subprocess.run(["sh", "-c", script], cwd=str(self.src), capture_output=True, text=True).stdout
 
     def resolves(self):

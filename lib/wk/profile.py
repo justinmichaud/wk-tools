@@ -81,7 +81,7 @@ def browser_target(preset, url, process, process_explicit, mode, args, outdir):
             "    be there from the process's first allocation, and its own launch line is a\n"
             "    shell fragment ('cd <dir> && %s'), not the plain command\n"
             "    WEBKIT_MINI_BROWSER_PREFIX needs. Owed --\n"
-            "    docs/Urgent/HANDOFF-linux-minibrower.md. Use --profile=samply against the\n"
+            "    docs/PLAN.md (live run.browser_profile). Use --profile=samply against the\n"
             "    browser, or profile the jsc shell instead." % (mode, mode, mode))
     if process_explicit and mode in ("sampling", "bytecode", "sysprof"):
         die("--process is meaningless with --profile=%s: it covers the whole browser\n"

@@ -6,15 +6,16 @@ last step lands.
 
 ## Where we are
 
-Measured 2026-10-18 in a wk-tools workspace (`python3 tests/run.py --lint --unit`).
+Measured 2026-10-21 in a wk-tools workspace (`./wk selftest`).
 
 | | |
 | --- | --- |
 | code | 36k non-blank lines of Python outside `tests/`, 6k of shell (what runs on a board, a phone, a bench install or in a place, and the setup stages); 25 commands, all Python |
 | tests | 52k lines, 248 modules, 3,963 tests in the lint and unit tiers, 127 in the live tier |
-| `wk selftest` (lint then unit) | 3.9 minutes, green; the lint tier alone 15 s |
+| `wk selftest` (lint then unit) | 3,963 tests, 3.9 minutes, green; the lint tier alone 15 s |
 | the slowest unit test | 5.7 s, under a 30 s budget the runner enforces |
-| owed tests | 4 (two in the lint tier, two in the unit tier), plus the live rows marked `owed` |
+| owed tests | 9 marked `owed` in the tree (two lint, one unit, six live-gated); the runner counts the 4 it ran |
+| the Owed table | 101 rows before today's fold; 23 are held by a `live`-marked body, 9 by an `owed` mark, and about 50 name a test that does not exist in the tree (a decision below) |
 | the last live run from the host | before the push rule became the caller's ancestry; `ToolsWorkspaceLive` and `DevIntegrationContainer` steps 5, 10 and 11 are owed a run |
 
 Why bugs come back:
@@ -1240,6 +1241,27 @@ decides is a row; one still open is listed under "Decisions for the user".
 | The podman machine's push service pushes with the deploy keys `./setup` and `wk key deploy` copied into it, and its proxy sends what is not a person's shell to the injector's reading socket | 3 | `live repo_workspace_live.ToolsWorkspaceLive.test_the_push_service_serves_the_tools_repository_to_a_person_to_wks_own_run_and_to_an_agent` (the keys), `live repo_workspace_live.ToolsWorkspaceLive.test_the_proxy_gives_a_person_the_write_socket_and_wks_own_run_the_reading_one` |
 | A macOS guest's `git push` reaches the Mac's push service through the guest's forward and its own listener, and the Mac proxy sends a guest with an agent to the injector's reading socket by its address | 5 | `live push.guest_forward` |
 | Speedometer 3 under MiniBrowser runs without its `wakeLock` error: an upstream WebKit patch, landed last, after every other owed row | end | `live bench.speedometer3_wakelock[mbp]` |
+| A `gtk-release` build in a container on the Mac's 20 GB podman VM finishes under the default sizing: WebCore's unified and derived sources at -O3 -g hold 14.3 GB anonymous at four jobs (measured 2026-10-21 from the cgroup's `memory.stat`; three runs killed at 3072 MB per job), so a CMake web port is sized at 4608 MB per job; the watchdog reads `anon`+`shmem`, since `memory.current` carried 2.2 GB of page cache and slab at that peak; and the OOM advice it prints changes the next run's job count from a macOS host | 3 | `live build.preset[gtk-release]` |
+| `wk run --profile --browser --process ui\|web\|network\|gpu` attaches samply to a live MiniBrowser in a workspace with a display, heaptrack and massif reach `--browser` on the CMake ports, and the fixed-wait attach holds on a slow page | 3 | `live run.browser_profile` |
+| `wk run --lldb` in a fresh workspace symbolicates glibc, Mesa and GTK frames, and `gtk-debug` runs under lldb | 3 | `live run.debug_symbols` |
+| `wk bench mem <ws> <plan>` builds with the three memory patches as real diffs (the files in `container/bin/patches/` are stubs; the diffs are yours to supply), drives MiniBrowser through the plan, collects the WebProcess logs and plots them beside the result | 5 | `live bench.mem` |
+| A container workspace holds `CAP_CHECKPOINT_RESTORE` in the init user namespace for mya, `wk build` sets the capability on `bin/mya` and `bin/testLibJSCTools` after an `ENABLE_MYA` build, the proxy allows the SDK's debuginfod and the workspace sets `DEBUGINFOD_URLS`, the SDK carries liblldb-dev, and the `testLibJSCTools` suites pass in a fresh workspace | 3 | `live mya.checkpoint_restore`, `unit mya.setcap_after_build` |
+| moose boots a bench system: a bench-role conf naming the peer, `--bootnext` and `toram` proven on its firmware, a yocto image with UEFI rules in `boot/check-boot-files.py` and `IMG_WATCHDOG`, a reboot refused while the BMC is unreachable, the UEFI entry in `wk doctor`'s machine-local section, and `--accept-routes` right on rpi5 and moose | 5 | `live boot[moose]` |
+| The Mac in bench mode caps its battery charge, turns the display off between legs and on for one, and `wk quiesce status` reports both | 5 | `live bench.mac_charge_cap`, `live bench.mac_screen` |
+| SIP is read on both Mac installs (`csrutil status`), on for the host and off for the bench volume, and `wk doctor mbp` reports each; `wk boot mbp` refuses to arm while the bench volume's is on | 5 | `unit doctor.sip_rows`, `live doctor.bench_readiness[mbp]` |
+| An A/B's rounds cross the variance factors (layout, env size, path length, shared cache) and the report pairs rounds across them, on the Mac and on Linux alike; a side whose spread grows in one configuration is named; one measured run per arm runs under samply with a JIT dump; an unattended run stops at its wall-clock budget; run wall time is compared beside score | 5 | `unit bench.variance_pairing`, `live bench.linux_variance` |
+| Both arms of an A/B carry an identifier the tooling reads back from the running binary, so a linking slip or an interrupted deploy cannot pass as a measurement | 5 | `live bench.binary_identifier` |
+| The clangd flags in `container/helix/languages.toml` are measured (indexing time, peak memory) against a real checkout | 3 | `live clangd.measure` |
+| pi runs on a macOS guest and a build box, its TUI runs in a container, and one `~/.pi/agent/models.json` per machine replaces the one `wk new` writes per workspace | 3 | `live pi.session`, `unit agents.models_per_machine` |
+| Web Inspector reaches a layout test or a page in a headless workspace over an ssh forward | 3 | `live run.inspector_remote` |
+| `wk build <ws> <preset> --sysroot <name>` cross-builds GTK or WPE for an Ubuntu rpi3 from x86_64 or a Mac into its own build directory, deployed and run on the board; riscv64 and a QEMU user-mode JSTests lane follow | 3 | `live build.sysroot` |
+| A macOS guest gets its own helix `languages.toml` (no `--malloc-trim`, the Xcode compile-commands directory) | 3 | `unit helix.macos_languages` |
+| `wk pr open` on a branch pushed before (its `-u` upstream resolves nowhere under the mirror's fork refspecs) opens the PR instead of refusing, and leaves the workspace wired right | 3 | `unit pr.open_twice` |
+| An asan and a non-asan CMake preset build into separate directories, so `wk run --preset jsc-release-asan` runs the asan build | 3 | `unit presets.asan_build_dir` |
+| `./setup` converges the podman machine's git identity and speed settings, the rows `wk doctor` names | 2 | `live setup.vm_gitconfig` |
+| A fresh container workspace reports itself wired right (the push alias is the push service's to resolve, not the workspace's ssh), and `wk new`'s summary tells a wiring finding from a fetch that failed | 3 | `live sync.fresh_workspace_wired` |
+| A referenced tree path exists: every `/opt/wk-tools/<path>` and `container/bin/<name>` a file names is in `git ls-files`, so an untracked file cannot leave a workspace's entry broken | 1 | `lint.referenced_paths_exist` |
+| The macOS `_remote_probe_cmd`/`_remote_probe_parse` branches hold against a live macOS or BSD remote, not only captured samples | 5 | `live remote.probe_macos_bsd` |
 
 ### Decisions for the user
 
@@ -1251,3 +1273,10 @@ Decisions are asked as questions, and their answers are recorded under "Decision
   found the remaining code to be distinct behaviour. 10k and 15k are reachable only by removing
   features or by the user naming what goes: lower the budgets to what was measured, or name the
   features to drop?
+
+- About 50 Owed rows name a test that is not in the tree (the audit of 2026-10-21). The plan's own rule is a test marked `owed` per row. Write an `owed`-marked live body for each, or cut the table to the rows a test holds?
+- The Mac bench notes ask for bench mode as the default boot, SIP off on the bench volume, detection under 0.1% on SP3, JS3 and MM, and an 8-hour unattended budget. The design arms bench for one run and returns to host mode, leaves SIP as it is, stops at `--detect` 0.3% and at 40 rounds. Which direction: bench-default and sub-0.1% (new rows above, hardware time), or keep the design and lower the notes' targets?
+- `lib/wk/project.json` and `dotfiles/gitconfig` hard-code your forks and git identity in every workspace and guest, while README says "a fork under your own account". Keep it (one user), or move the fork owner and identity to a gitignored per-machine conf?
+- Tailscale, in the admin console: Karen limited to immich, nextcloud, overleaf and proxmox and those apps isolated from each other; your two accounts reach everything; the untrusted-router question for the bridge phones and the camera; the MBP on public WiFi; a full port scan.
+- Keep or drop, none code-closable today: Windows build machines; a bare rented cloud VM as a place (and PII-free perf testing on it); code-server, a web UI over the driver contract on the gateway, and sessions spawned from a phone; helix on a shared remote and from source for armhf; Haiku and BSD guests; iOS via public entitlements; backing up Claude conversations and sharing memory across machines; devcontainers.
+- By hand: delete the stray `refs/remotes/fork/dev/mya-1` on your WebKit fork; supply the three memory patches as real diffs; the clangd LSP errors and jump-to-definition misses need a person in `wk zed` on a real checkout.

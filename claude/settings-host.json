@@ -33,7 +33,7 @@
       "/private/tmp"
     ]
   },
-  "model": "opus",
+  "model": "fable",
   "hooks": {
     "PreToolUse": [
       {

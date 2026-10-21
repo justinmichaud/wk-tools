@@ -103,7 +103,7 @@
   "lsp": {
       "clangd": {
         "binary": {
-          // docs/Urgent/HUMAN-clangd.md. clangd needs pointing at a build's
+          // docs/PLAN.md (`live clangd.measure`). clangd needs pointing at a build's
           // compile_commands.json (WebKit's tree carries none at its root,
           // only inside whichever build dir produced it -- see
           // container/helix/languages.toml for the same setting with the

@@ -33,7 +33,7 @@ language-servers=[{name="solargraph"}]
 #                               of competing with them.
 #   --pch-storage=memory       precompiled preambles in RAM instead of /tmp;
 #                               faster completion, more RSS -- see
-#                               docs/Urgent/HUMAN-clangd.md if that trades badly
+#                               docs/PLAN.md (`live clangd.measure`) if that trades badly
 #                               on a small workspace and OOMs.
 #   --header-insertion=never   WebKit's own include graph already decides
 #                               which header a symbol needs; letting clangd

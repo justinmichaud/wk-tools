@@ -52,11 +52,11 @@ class TestTheWatchdogMeasuresWhatDetached(WkTest):
         return func_body(self.WATCHDOG.read_text(), func)
 
     def test_the_cgroup_reading_is_in_megabytes(self):
-        cp = bash('_cgroup_read() { echo 13421772800; }\n'
+        cp = bash('_cgroup_read() { printf "anon 12884901888\\nfile 99999999999\\nshmem 536870912\\nslab 8888888888\\n"; }\n'
                   + self._lift("_cgroup_mb").replace(
-                      '[ -r /sys/fs/cgroup/memory.current ] || return 0\n'
-                      "    awk '{ printf \"%d\\n\", $1 / 1048576 }' /sys/fs/cgroup/memory.current",
-                      "_cgroup_read | awk '{ printf \"%d\\n\", $1 / 1048576 }'")
+                      '[ -r /sys/fs/cgroup/memory.stat ] || return 0\n'
+                      "    awk '$1 == \"anon\" || $1 == \"shmem\" { s += $2 } END { printf \"%d\\n\", s / 1048576 }' /sys/fs/cgroup/memory.stat",
+                      "_cgroup_read | awk '$1 == \"anon\" || $1 == \"shmem\" { s += $2 } END { printf \"%d\\n\", s / 1048576 }'")
                   + "\n_cgroup_mb")
         self.assertEqual(cp.stdout.strip(), "12800", cp.stdout + cp.stderr)
 

@@ -36,7 +36,7 @@ def arch_canon(arch):
     act.die("unknown architecture '%s' (one of: %s)\n"
             "    A workspace's --arch is what it runs *natively*. To build for something\n"
             "    this machine cannot execute, that is a cross build -- see\n"
-            "    docs/Nice to have/HANDOFF-cross-compile.md." % (arch, " ".join(ARCHES)))
+            "    docs/PLAN.md (live build.sysroot)." % (arch, " ".join(ARCHES)))
 
 
 def workspace_marker_path(env):

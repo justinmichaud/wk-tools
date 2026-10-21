@@ -8,8 +8,8 @@ same as any other helix install.
 
 Container only, today: helix needs the checkout's clangd and its
 compile_commands.json, both of which only exist inside a container
-workspace. See `docs/Nice to have/HANDOFF-helix.md` for what a remote or VM
-workspace would still need.
+workspace. A macOS guest's own `languages.toml` is owed
+(docs/PLAN.md, `unit helix.macos_languages`).
 
 ## Coming from Zed: the same task, the helix way
 

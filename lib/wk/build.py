@@ -289,6 +289,8 @@ class Build:
 
     def detached(self):
         name, preset, here, o = self.name, self.preset, self.here, self.opts
+        if self.driver.info(name) != "running":   # before the lock, the log and the record: nothing is touched
+            die("'%s' is not running (wk start %s)" % (name, name))
         budget, running, jobs, mbpj, nice = size_for(self.reg, self.driver, self.name, self.preset, self.clock)
         tenv, defaults, preset_env = self.build_env(jobs, nice)
         budget_mb = int(tenv.get("WK_MEM_BUDGET_MB") or jobs * mbpj)
@@ -447,7 +449,7 @@ class Build:
             warn("BUILD KILLED FOR MEMORY  %s in '%s'  (after %s)" % (preset.name, name, took))
             for l in limits[-2:]:
                 sys.stderr.write(l.replace("wk: ", "  ", 1) + "\n")
-            log("  peak %sMB. Fewer jobs: WK_MB_PER_JOB=3072 wk build %s %s" % (peaks[-1] if peaks else "?", name, preset.name))
+            log("  peak %sMB. Fewer jobs: WK_MB_PER_JOB=%d wk build %s %s" % (peaks[-1] if peaks else "?", presets.mb_per_job(preset, self.driver.env) * 3 // 2, name, preset.name))
             log("  full log: %s" % path)
             raise Refused(rc)
         end(rc)

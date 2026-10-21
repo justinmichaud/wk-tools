@@ -556,4 +556,4 @@ class Doctor:
         if self.macos:
             line = mac_battery_line(self.machine.run(["pmset", "-g", "batt"]).out)
             if line:
-                yield unk("this Mac: " + line, "docs/Urgent/HUMAN-battery.md -- no OS knob exists yet")
+                yield unk("this Mac: " + line, "no charge cap is set on a Mac yet (docs/PLAN.md, live bench.mac_charge_cap)")

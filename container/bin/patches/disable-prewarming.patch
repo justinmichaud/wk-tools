@@ -1,6 +1,6 @@
 # wk memory-charts patch: disable-prewarming
 #
-# docs/Urgent/HANDOFF-memory.md asks for this to be a file instead of a
+# docs/PLAN.md (`live bench.mem`) asks for this to be a file instead of a
 # copy-paste block, so it survives past whoever currently holds it in their
 # head. It is not one yet.
 #

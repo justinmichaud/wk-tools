@@ -163,6 +163,13 @@ unit_start wk-github-inject.service "$_unit_root" "$_unit_store" \
     "'git-webkit pr' in a workspace will fail" "$_unit_journal" _rsh
 unit_prune _rsh
 
+if [ "$(_rsh 'git config --global --get include.path' 2>/dev/null)" = /opt/wk-tools/dotfiles/gitconfig ]; then
+    unchanged "the machine's git identity and speed settings come from dotfiles/gitconfig"
+else
+    _rsh 'git config --global --replace-all include.path /opt/wk-tools/dotfiles/gitconfig'
+    changed "the machine's git config includes /opt/wk-tools/dotfiles/gitconfig"
+fi
+
 if wk_py wk.secrets push-converge; then
     debug "GitHub token, Bugzilla key and deploy keys converged on the machine"
 else

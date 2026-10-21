@@ -64,7 +64,7 @@ class MirrorFixture(unittest.TestCase):
 
     def check(self, tree, mirror=None, branches=None):
         m = str(self.mirror if mirror is None else mirror)
-        script = git.wiring_check_script(str(tree), m, _forks(), (branches or "main").split(), skip_env=True)
+        script = git.wiring_check_script(str(tree), m, _forks(), (branches or "main").split())
         return subprocess.run(["sh", "-c", script], cwd=str(tree),
                               capture_output=True, text=True)
 
@@ -528,43 +528,6 @@ class TestNewCheckoutScript(WorkspaceFixture):
         self.assertEqual(got["moved"], "refused")
         self.assertEqual(self.head(self.ws), mine)
 
-
-class TestTheAliasIsResolvedByTheResolver(MirrorFixture):
-    """The other half of the check: whether an ssh alias reaches github.com."""
-
-    def aliases(self):
-        return [alias for _, _, alias in _forks()]
-
-    def ssh_config(self, name, body):
-        p = self.tmp / name
-        p.write_text(body)
-        p.chmod(0o600)
-        return p
-
-    def resolved(self, tree, config):
-        git_run("config", "core.sshCommand", f"ssh -F {config}", cwd=tree)
-        script = git.wiring_check_script(str(tree), str(self.mirror), _forks(), ["main"])
-        return subprocess.run(["sh", "-c", script], cwd=str(tree),
-                              capture_output=True, text=True)
-
-    def test_a_config_that_only_includes_the_host_blocks_resolves(self):
-        tree = self.clone_snapshot(self.tmp / "alias-include")
-        self.wire(tree)
-        inc = self.ssh_config("included-ssh-config", "".join(
-            f"Host {a}\n    HostName github.com\n" for a in self.aliases()))
-        out = self.resolved(tree, self.ssh_config("outer-ssh-config",
-                                                  f"Include {inc}\n"))
-        self.assertEqual(0, out.returncode, out.stdout + out.stderr)
-
-    def test_a_config_that_names_no_alias_names_each_one_as_a_problem(self):
-        tree = self.clone_snapshot(self.tmp / "alias-nothing")
-        self.wire(tree)
-        out = self.resolved(tree, self.ssh_config("empty-ssh-config", ""))
-        self.assertNotEqual(0, out.returncode, out.stdout)
-        for alias in self.aliases():
-            with self.subTest(alias=alias):
-                self.assertIn(f"problem: the ssh alias {alias} resolves to "
-                              f"{alias}, not github.com", out.stdout)
 
 if __name__ == "__main__":
     unittest.main()

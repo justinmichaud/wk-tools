@@ -149,7 +149,9 @@ class Preset:
         return ("__XPC_" if self.xcode() else "") + "WEBKIT_PAUSE_WEB_PROCESS_ON_LAUNCH=1"
 
     def mb_per_job(self):
-        return 1536 if self.jsc_only and not self.xcode() else 3072
+        if self.jsc_only and not self.xcode():
+            return 1536
+        return 4608 if self.buildsys == "cmake" else 3072
 
     def cmake_summary(self):
         return self.cmake or "the flags it sets"
@@ -177,6 +179,8 @@ def resolve(name, os_name, kind, env):
         act.die("'%s' is an Apple-port preset and builds with Xcode, which this\n    workspace has no way to run (it is %s). The presets that build here\n"
                 "    are the CMake ports:  wk build --list" % (name, os_name))
     if preset.buildsys == "cmake":
+        if os_name == "macos":
+            act.die("'%s' is a CMake-port preset (GTK, WPE or JSCOnly), which a macOS workspace\n    does not build. The presets that build here are the Apple ports:  wk build --list" % name)
         if kind not in LIBBACKTRACE:
             act.die("presets.resolve: unknown driver '%s'" % kind)
         preset.args = DEFAULT_ARGS + (" " + preset.args if preset.args else "")

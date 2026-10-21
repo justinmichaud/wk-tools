@@ -72,11 +72,11 @@ class TestTheWorkstationHandsTheLifecycleOver(BoxTest):
         self.assertEqual(self.t.records().list(), [])
 
     def test_a_detached_new_on_a_box_opens_no_zed_and_carries_its_timeouts(self):
-        os.environ.update(WK_NEW_TIMEOUT="7", WK_READY_TIMEOUT="9")
+        os.environ.update(WK_NEW_TIMEOUT="7", WK_READY_TIMEOUT="9", WK_MB_PER_JOB="4096", WK_MAX_JOBS="3")
         rc, err = self.front(no_wait=True, zed=True)
         self.assertEqual(rc, 0, err)
         handed = [shlex.split(shlex.split(e[1][-1])[-1]) for e in self.fake.effects if e[0] == "run_tty"]
-        self.assertLessEqual({"WK_NEW_TIMEOUT=7", "WK_READY_TIMEOUT=9"}, set(handed[0]))
+        self.assertLessEqual({"WK_NEW_TIMEOUT=7", "WK_READY_TIMEOUT=9", "WK_MB_PER_JOB=4096", "WK_MAX_JOBS=3"}, set(handed[0]))
         self.assertEqual([e for e in self.fake.effects if "cmd/zed" in str(e)], [])
 
     def test_a_box_at_another_wk_tools_commit_is_refused_the_new(self):

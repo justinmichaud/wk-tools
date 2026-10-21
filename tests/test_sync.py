@@ -44,7 +44,7 @@ def fake_retarget(driver, ws, src, forks, branches):
 # tests/test_cli_refspecs.py and tests/test_new_fetch.py run it for real, and what is asked for is this file's.
 GENERATORS = {
     (git, "wiring_script"): lambda src, mirror, forks, branches, n="", u="", c="": "WIRING %s %s %s %s %s" % (src, mirror, n, u, c),
-    (git, "wiring_check_script"): lambda src, mirror, forks, branches, skip="": "CHECK %s %s %s" % (src, mirror, skip),
+    (git, "wiring_check_script"): lambda src, mirror, forks, branches: "CHECK %s %s" % (src, mirror),
     (git, "pr_tool_setup_script"): lambda src, forks: "GITWEBKIT %s" % src,
     (git, "mirror_refresh_script"): lambda mirror, branches: "REFRESH %s" % mirror,
     (git, "REMOTES"): (("origin", "u1"), ("wpe", "u2"), ("fork", "u3"), ("forkwpe", "u4")),

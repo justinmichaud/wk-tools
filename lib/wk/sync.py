@@ -377,7 +377,7 @@ class Sync:
         if not tree or not self.here.isdir(os.path.join(tree, ".git")):
             return 0
         mirror = driver.store.mirror_dir()
-        r = self.here.run(["sh", "-c", git.wiring_check_script(tree, mirror, self.forks(), self.branches, "skip-env")])
+        r = self.here.run(["sh", "-c", git.wiring_check_script(tree, mirror, self.forks(), self.branches)])
         if r.ok:
             return 0
         warn("the snapshot %s is wired wrong, and every new workspace starts from it:\n%s"

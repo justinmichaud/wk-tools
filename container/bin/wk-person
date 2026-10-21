@@ -1,0 +1,5 @@
+#!/bin/bash
+# The entry of a person's own run in a workspace (wk enter, wk pr open, the editor's sshd): it stays as the parent, so the push service and the injector find it by name in the caller's ancestry (lib/wk/pushgate.py).
+set -euo pipefail
+"$@"
+exit $?

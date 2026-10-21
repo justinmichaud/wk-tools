@@ -1,3 +1,0 @@
-Commands should be clear and concise, consistent with each other, and you should step through the full process of using the command as a new user to ensure it is always clear what to do next. Each command should give enough outupt that if something goes wrong, it can be debugged (for example, the explain mode should print every command it would have executed), instead of needing sketchy debugging commands. This is part of a bigger principle, which is that everything should be constructed by layered levels of abstraction that are never leaky, not by bespoke hacks. Nothing should reach across a logical layer of abstraction.
-
-The stray `refs/remotes/fork/dev/mya-1` on justinmichaud/WebKit is yours to delete by hand.

@@ -1,6 +1,6 @@
 # wk memory-charts patch: startMemorySampler
 #
-# docs/Urgent/HANDOFF-memory.md asks for this to be a file instead of a
+# docs/PLAN.md (`live bench.mem`) asks for this to be a file instead of a
 # copy-paste block, so it survives past whoever currently holds it in their
 # head. It is not one yet.
 #
@@ -12,7 +12,7 @@
 # today: `git diff` in a checkout that has it, saved over this file as a
 # real unified diff (`git diff > container/bin/patches/startMemorySampler.patch`).
 #
-# What it has to do, from the name and from HANDOFF-memory.md's "collect the
+# What it has to do, from the name and from that row's "collect the
 # WebKitWebProcess logs, plot (--include c,k --max-seconds N)": make the web
 # process call WebCore's memory sampler (WebCore::MemorySampler,
 # start/stop) on a timer for the life of the run, and write each sample as a

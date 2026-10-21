@@ -746,9 +746,9 @@ partition number, bounded. Every system a write makes carries the helper;
 installing this checkout's onto a running one is `wk machine setup <board>`.
 
 **mbp — `mac-volume`.** The `WK Bench` APFS volume beside the host install.
-Apple Silicon selects a startup volume only at the keyboard, so `wk boot mbp`
-reports and stages and a person picks the volume. `wk sysimage write` refuses
-a Mac's own disks.
+`wk boot mbp` arms it through the boot helper (`bless`) and `--status` reads
+the firmware default back; returning to the desktop is the one manual step
+the workflow above names. `wk sysimage write` refuses a Mac's own disks.
 
 **benchvm — `mac-guest`.** A Tart guest rehearsing the Mac path. Nothing
 measured in it is comparable with hardware.

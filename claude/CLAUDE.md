@@ -115,7 +115,7 @@ Find another way rather than trying to route around it. ssh to `github.com` is
 not allowed: the fork remotes' host aliases (`github-webkit`, `github-wpe`) are
 reached through the push service's client, wired the same way in a macOS
 workspace as in a container; a live check on a real guest is still owed
-(docs/defects).
+(docs/PLAN.md, `live push.guest_forward`).
 
 The Pis (`rpi4`, `rpi5`) are reachable over SSH for performance testing and
 deploying builds.

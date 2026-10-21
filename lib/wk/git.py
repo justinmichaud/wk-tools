@@ -144,7 +144,7 @@ def pr_tool_setup_script(src, forks):
     return "cd %s || exit 2\nWK_HOOK_LEVELS=%s\n%s" % (q(src), q(hook_levels(forks)), PR_TOOL_SETUP % {"key": project.get("PR_TOOL_SETUP"), "tool": tool})
 
 
-def wiring_check_script(src, mirror, forks, branches, skip_env="", remotes=REMOTES):
+def wiring_check_script(src, mirror, forks, branches, remotes=REMOTES):
     out = ['cd %s || exit 2' % q(src), 'bad=0',
            'u=$(git config --get remote.origin.url 2>/dev/null || echo "")',
            'p=$(git remote get-url --push origin 2>/dev/null || echo "")',
@@ -171,13 +171,6 @@ def wiring_check_script(src, mirror, forks, branches, skip_env="", remotes=REMOT
                 'credentials it then looks for in a keyring"; bad=1\nfi\ncase "$p" in\n  git@%s:%s.git) ;;\n'
                 '  *) echo "problem: %s pushes to $p, not git@%s:%s.git -- the deploy key is chosen by that ssh alias, so no key is offered at all"; bad=1 ;;\n'
                 'esac\nfi' % (remote, alias, repo, remote, alias, repo)]
-        if skip_env:
-            continue
-        out += ['c=$(git config core.sshCommand 2>/dev/null || echo "")',
-                'case "$c" in\n  *"-F "*) f=${c#*-F }; f=${f%%%% *}; h=$(ssh -G -F "$f" %s 2>/dev/null | sed -n "s/^hostname //p") ;;\n'
-                '  *) h=$(ssh -G %s 2>/dev/null | sed -n "s/^hostname //p") ;;\nesac\n'
-                'if [ "$h" != github.com ]; then\n  echo "problem: the ssh alias %s resolves to ${h:-nothing}, not github.com -- the deploy key is '
-                'chosen by that alias, so a push offers no key at all"; bad=1\nfi' % (alias, alias, alias)]
     names = {f[0] for f in forks}
     keep = "|".join(['""'] + ["%s/%s" % (n, b) for n, _ in remotes if n not in names for b in branches])
     out.append('b=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")\nif [ -n "$b" ]; then\n'

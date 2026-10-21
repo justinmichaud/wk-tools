@@ -93,6 +93,10 @@ class TestMacJscUsesXcode(unittest.TestCase):
         for name in XCODE_PRESETS:
             self.assertIn("Xcode", refused(self, lambda: preset(name, "linux")))
 
+    def test_a_cmake_config_is_refused_on_macos(self):
+        for name in ("gtk-debug", "gtk-release", "gtk-release-asan", "wpe-release"):
+            self.assertIn("Apple ports", refused(self, lambda: preset(name, "macos")))
+
     def test_an_unknown_kind_is_refused(self):
         self.assertIn("unknown driver 'bogus'", refused(self, lambda: preset("jsc-release", kind="bogus")))
 
@@ -205,7 +209,7 @@ class TestCcacheIsBlindToTheJobCount(unittest.TestCase):
 class TestMbPerJob(unittest.TestCase):
     def test_jsconly_is_charged_less_unless_WK_MB_PER_JOB_names_a_figure(self):
         self.assertEqual(presets.mb_per_job(preset("mac-release", "macos", "vm"), {}), 3072)
-        self.assertEqual(presets.mb_per_job(preset("gtk-debug"), {}), 3072)
+        self.assertEqual(presets.mb_per_job(preset("gtk-debug"), {}), 4608)
         self.assertEqual(presets.mb_per_job(preset("jsc-release"), {}), 1536)
         self.assertEqual(presets.mb_per_job(preset("mac-release", "macos", "vm"), {"WK_MB_PER_JOB": "999"}), 999)
 

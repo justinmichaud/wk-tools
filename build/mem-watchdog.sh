@@ -30,9 +30,9 @@ _avail_mb() {   # what the machine has left; macOS has no MemAvailable, so nothi
     awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo
 }
 
-_cgroup_mb() {   # what the workspace's own cgroup is using; nothing where there is no cgroup (a macOS guest)
-    [ -r /sys/fs/cgroup/memory.current ] || return 0
-    awk '{ printf "%d\n", $1 / 1048576 }' /sys/fs/cgroup/memory.current
+_cgroup_mb() {   # the cgroup's anonymous and shmem pages: what the build holds; the page cache and slab in memory.current are the kernel's to reclaim
+    [ -r /sys/fs/cgroup/memory.stat ] || return 0
+    awk '$1 == "anon" || $1 == "shmem" { s += $2 } END { printf "%d\n", s / 1048576 }' /sys/fs/cgroup/memory.stat
 }
 
 peak=0

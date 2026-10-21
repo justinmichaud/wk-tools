@@ -9,10 +9,11 @@ import subprocess
 import sys
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes import JobWorld
+from tests.fakes import JobDriver, JobWorld
 from tests.killpoints import converges
 from tests.support import REPO, as_dispatched, load_cmd
 from tests.test_wk_workspace import FlowTest
@@ -211,6 +212,15 @@ class TestStoppedByItsKill(BuildTest):
 
 
 class TestRefusals(BuildTest):
+    def test_a_workspace_that_is_not_running_is_refused_before_any_effect(self):
+        w = World(self.tmp, kind="vm")
+        w.place_os = "macos"
+        with unittest.mock.patch.object(JobDriver, "info", lambda self, ws: "stopped"):
+            err = self.refused(w, "mac-release")
+        self.assertIn("'ws' is not running (wk start ws)", err)
+        self.assertEqual(w.state(), ([], 0))
+        self.assertFalse(os.path.exists(w.log))
+
     def test_no_config_prints_the_usage_and_the_list(self):
         err = self.refused(None, "--no-defaults", status=2)
         self.assertIn("usage: wk build <workspace> <preset>", err)

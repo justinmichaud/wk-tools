@@ -506,11 +506,11 @@ class TestDryRun(BenchTest):
 
 class TestKillPoints(BenchTest):
     def test_a_run_killed_after_any_effect_and_rerun_converges(self):
-        def run_once(w):
-            w.clock.t += 1
-            with contextlib.redirect_stderr(io.StringIO()):
-                invoke(w, ("run", "speedometer3", "--preset", "wpe-release"))
-        for kind in ("container", "vm"):
+        for kind, preset in (("container", "wpe-release"), ("vm", "mac-release")):
+            def run_once(w, preset=preset):
+                w.clock.t += 1
+                with contextlib.redirect_stderr(io.StringIO()):
+                    invoke(w, ("run", "speedometer3", "--preset", preset))
             with self.subTest(kind=kind):
                 converges(self, lambda: World(self.tmp, kind), run_once, World.state)
 
