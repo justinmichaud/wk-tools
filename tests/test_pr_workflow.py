@@ -174,9 +174,9 @@ class RecordingDriver(WsDriver):
         super().__init__("ws", REPO, {}, world)
         self.mutations = []
 
-    def act_exec(self, ws, argv):
-        self.mutations.append(tuple(argv))
-        return super().act_exec(ws, argv)
+    def act_exec(self, ws, argv, person=False):
+        self.mutations.append(tuple(argv) + (("as a person",) if person else ()))
+        return super().act_exec(ws, argv, person=person)
 
 
 OPENS = ("WebKit/WebKit", "alice:eng/x", "fork", "eng/x")

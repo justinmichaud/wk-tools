@@ -281,7 +281,7 @@ def inject(tmp, request, reply=NO_CONTENT, pat=PAT, read=None, bz=None, login=Tr
     """Injector.handle on `request` against a fake upstream: (what the client read, every byte the upstream got, the hosts
     opened, the log). login: True holds one, False names an absent file, None holds none. forward: "up" or "down" makes
     this a podman machine's injector, relaying to a holder that answers or not. writes: the socket the proxy picks for a
-    workspace no agent runs in; False is the reading one."""
+    person's shell; False is the reading one."""
     m = _load(INJECT, "wkinject")
     d = Path(tempfile.mkdtemp(dir=str(tmp)))
     for name, value in (("pat", pat), ("read", read), ("bz", bz)):
@@ -326,7 +326,7 @@ def row(label, request, setup=None, to=GH, said=(), sent=(), unsent=(), once=(),
                                               logged=logged, unlogged=unlogged, whole=whole)
 
 
-NO_WRITE = dict(to=None, said=(b"412 Precondition Failed", b"no credential to write with", b"an agent runs in this workspace",
+NO_WRITE = dict(to=None, said=(b"412 Precondition Failed", b"no credential to write with", b"not from a shell of yours",
                                b"'wk key set github-pat'"), logged=("write refused: no credential to write with",))
 READING = {"writes": False}
 
@@ -798,9 +798,10 @@ class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
         for tty in (False, True):
             with self.subTest(exec_tty=tty):
                 self.assertEqual([bridge, "true"], c.exec_argv("a", ["true"], tty)[0][-2:])
-        self.assertIn("exec %s " % bridge, c.sshd_cmd("dev"))
+        person = "/opt/wk-tools/container/bin/wk-person"
+        self.assertIn("exec %s %s " % (person, bridge), c.sshd_cmd("dev"), "the editor's terminal is a person's")
         self.assertIn(bridge, c.enter_argv("a")[0])
-        self.assertIn("--login", c.enter_argv("a")[0])
+        self.assertEqual([person, "/bin/bash", "--login"], c.enter_argv("a")[0][-3:], "a shell is a person's")
 
     def test_a_full_temp_directory_still_runs_the_command(self):
         d = Path(tempfile.mkdtemp(prefix="wk-test-ro-tmp-"))
@@ -929,6 +930,7 @@ class TestTheEditorsTerminalGetsTheSameEnvironment(unittest.TestCase):
                 f.chmod(0o755)
             cmd = (wk_places.Container("c", REPO, {}, Fake("here")).sshd_cmd("tester")
                    .replace("mkdir -p /run/sshd && ", "")
+                   .replace("/opt/wk-tools/container/bin/wk-person", str(REPO / "container" / "bin" / "wk-person"))
                    .replace("/opt/wk-tools/container/proxy/ensure-bridge.sh",
                             str(wrapper))
                    .replace("/usr/sbin/sshd", str(sshd)))

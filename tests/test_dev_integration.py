@@ -44,20 +44,35 @@ GIT_STATUS_BUDGET = {
     "bb4": 3.0,           # 1.11 s in a checkout on buildbox4's shared disk (2026-10-05)
 }
 
+# `chain`: the push service reads the caller's ancestry there (a container); a guest is asked for its agents instead.
 PLACES = {
-    "container": {"new": (), "machine": None, "push": True},
-    "tart": {"new": ("--on", "vm"), "machine": None, "push": True},
+    "container": {"new": (), "machine": None, "push": True, "chain": True},
+    "tart": {"new": ("--on", "vm"), "machine": None, "push": True, "chain": False},
     # A peer workstation: `wk new --on moose` is moose's own `wk new`, a container there, and every later
     # command (push included, as `--on moose`) is moose's own wk.
-    "moose": {"new": ("--on", "moose"), "machine": "moose", "push": True,
+    "moose": {"new": ("--on", "moose"), "machine": "moose", "push": True, "chain": True,
               "remedy": "moose pulls its own checkout: push this commit to the branch moose's checkout tracks, "
                         "then 'wk sync --tools moose'"},
-    "bb4": {"new": ("--on", "buildbox4"), "machine": "buildbox4", "push": False,
+    "bb4": {"new": ("--on", "buildbox4"), "machine": "buildbox4", "push": False, "chain": False,
             "remedy": "'wk sync --tools buildbox4' from a clean tree here"},
 }
 
-# lib/wk/pushgate.py's scan, and `ps` where there is no /proc (a macOS guest).
-AGENT_SCAN = pushgate.AGENT_PID_SCAN
+# The agents running in this workspace: in a container by /proc, which shows every process of the shared pid
+# namespace and another container's cgroup with `..` in it; in a guest (no /proc) lib/wk/pushgate.py's `ps` scan.
+AGENT_SCAN = r'''if [ -d /proc/self ]; then python3 - <<'EOF'
+import os
+for p in filter(str.isdigit, os.listdir("/proc")):
+    try:
+        own = ".." not in open("/proc/%s/cgroup" % p).read()
+        words = open("/proc/%s/cmdline" % p, "rb").read().split(b"\0")
+    except OSError:
+        continue
+    first = os.path.basename(words[0].decode("utf-8", "replace")) if words and words[0] else ""
+    if own and (first == "claude" or (first == "node" and any(w.endswith(b"/bin/pi") for w in words[1:]))):
+        print(p)
+EOF
+else
+''' + pushgate.AGENT_PS_SCAN + "\nfi"
 
 GIT_PROBE = r'''import json, subprocess, time
 t = time.time()
@@ -324,8 +339,23 @@ class PlaceSteps:
         self.assertIn(REPLY, [l.strip() for l in r.out.splitlines()], "%s did not answer:\n%s" % (agent, tail(r.out)))
         return r
 
+    def dry_push_line(self):
+        return 'cd "%s" && git push --dry-run fork HEAD:%s 2>&1' % (self.src(), PROBE_BRANCH)
+
     def dry_push(self):
-        return self.inside('cd "%s" && git push --dry-run fork HEAD:%s 2>&1' % (self.src(), PROBE_BRANCH), timeout=180)
+        """A person's: `wk enter` is a shell of yours."""
+        return self.inside(self.dry_push_line(), timeout=180)
+
+    def own_run(self, script, *args, timeout=300):
+        """wk's own run in the workspace, which no publish is served to."""
+        return wk("enter", self.ws, "--own", "--", "bash", "-lc", script, "wk-integ", *args, timeout=timeout)
+
+    def agent_runs(self, script):
+        """What a claude session's own run of `script` printed: the agent is asked to run it and answer with its output alone."""
+        r = wk("ai", "claude", self.ws, "-p", "Use your Bash tool to run exactly this command, then reply with its complete output "
+               "verbatim and nothing else:\n%s" % script, timeout=900)
+        self.assertEqual(0, r.rc, "'wk ai claude %s' exited %d:\n%s" % (self.ws, r.rc, tail(r.out)))
+        return r.out
 
     # -- the steps
 
@@ -368,18 +398,39 @@ class PlaceSteps:
         self.assertIn(evidence, r.out, "no sign the sandbox check ran:\n%s" % tail(r.out))
 
     @step(5)
-    def test_05_a_push_is_refused_while_claude_runs(self):
+    def test_05_a_push_is_served_to_a_person_alone(self):
+        """In a container the caller's chain decides: a person's shell beside a running agent is served, the agent's own
+        session, wk's own run and a daemon the session left behind are refused. A guest is asked for its agents instead."""
         self.need_push_place()
         try:
             self.start_background_claude()
             r = self.dry_push()
-            self.assertNotEqual(0, r.rc, "git push --dry-run authenticated while claude runs in '%s':\n%s" % (self.ws, tail(r.out)))
-            self.assertIn("an agent (claude or pi) runs in '%s'" % self.ws, r.out)
+            if self.conf["chain"]:
+                self.assertEqual(0, r.rc, "a person's push was refused beside a claude session in '%s':\n%s" % (self.ws, tail(r.out)))
+            else:
+                self.assertNotEqual(0, r.rc, "git push --dry-run authenticated while claude runs in '%s':\n%s" % (self.ws, tail(r.out)))
+                self.assertIn("an agent (claude or pi) runs in '%s'" % self.ws, r.out)
         finally:
             self.stop_background()
         self.assertEqual([], self.agent_pids(self.ws), "claude still runs in '%s'" % self.ws)
         r = self.dry_push()
         self.assertEqual(0, r.rc, "git push --dry-run to the fork was refused with no agent running:\n%s" % tail(r.out))
+        if not self.conf["chain"]:
+            return
+        said = self.agent_runs(self.dry_push_line())
+        self.assertIn("an agent session", said, "the agent's own push was not refused:\n%s" % tail(said))
+        self.assertNotIn(PROBE_BRANCH.split("/")[-1] + " -> ", said)
+        r = self.own_run(self.dry_push_line())
+        self.assertNotEqual(0, r.rc, "wk's own run pushed:\n%s" % tail(r.out))
+        self.assertIn("a run of wk's own", r.out)
+        left = "/tmp/wk-integ-deferred"
+        self.agent_runs("rm -f %s; setsid nohup sh -c 'sleep 15; %s > %s 2>&1' >/dev/null 2>&1 & echo started"
+                        % (left, self.dry_push_line().replace("'", "'\\''"), left))
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and self.inside("cat %s 2>/dev/null" % left).out.strip() == "":
+            time.sleep(5)
+        said = self.inside("cat %s; rm -f %s" % (left, left)).out
+        self.assertIn("no shell of yours is behind this caller", said, "a daemon left behind by the session pushed:\n%s" % tail(said))
 
     @step(6)
     def test_06_pi_answers(self):
@@ -421,19 +472,31 @@ class PlaceSteps:
     def test_10_claude_starts_with_the_push_refusal_measured(self):
         self.need_push_place()
         r = self.agent_replies("claude")
-        self.assertIn("a push is refused while an agent runs in the workspace", r.out)
+        self.assertRegex(r.out, r"a push from (wk's own run|an agent in the guest) is refused")
+        if self.conf["chain"]:
+            self.assertIn("a push from a person's shell is served", r.out)
         self.assertIn("no ssh-agent socket and no $SSH_AUTH_SOCK: no key reaches this workspace", r.out)
 
     @step(11)
-    def test_11_a_write_while_claude_runs_reaches_nothing(self):
+    def test_11_a_write_reaches_nothing_but_from_a_person(self):
+        """A write through the injector follows the push rule: in a container by the caller's chain (a person's probe is
+        served beside a running agent, wk's own run is not), in a guest by whether an agent runs there."""
         self.need_push_place()
         try:
             self.start_background_claude()
             got = self.in_checkout(CRED_PROBE, "WK-CRED")
         finally:
             self.stop_background()
-        self.assertEqual(412, got["github_write"], "a write while an agent runs should be the injector's 412: %r" % got)
-        self.assertFalse(got["bugzilla_logged_in"], "webkitbugspy is logged in to Bugzilla while an agent runs: %r" % got)
+        if not self.conf["chain"]:
+            self.assertEqual(412, got["github_write"], "a write while an agent runs should be the injector's 412: %r" % got)
+            self.assertFalse(got["bugzilla_logged_in"], "webkitbugspy is logged in to Bugzilla while an agent runs: %r" % got)
+            return
+        self.assertEqual(422, got["github_write"], "a person's write beside a running agent should be GitHub's 422: %r" % got)
+        r = self.own_run('cd "$1" && exec python3 -c "$2" </dev/null', self.src(), CRED_PROBE)
+        got = tagged(r.out, "WK-CRED")
+        self.assertIsNotNone(got, "wk's own run of the probe printed no WK-CRED line (exit %d):\n%s" % (r.rc, tail(r.out)))
+        self.assertEqual(412, got["github_write"], "a write from wk's own run should be the injector's 412: %r" % got)
+        self.assertFalse(got["bugzilla_logged_in"], "webkitbugspy is logged in to Bugzilla from wk's own run: %r" % got)
 
     @step(12)
     def test_12_sync_leaves_every_remote_current(self):

@@ -47,19 +47,21 @@ class Service:
         return struct.unpack("3i", raw)[0]
 
     def caller(self, w, fixed):
-        """(place, workspace) a connection is from: a guest's listener names it, a container's cgroup does."""
+        """(place, workspace, pid) a connection is from: a guest's listener names it, a container's cgroup does."""
         if fixed:
-            return self.gate.reg.load("vm"), fixed
-        ws = self.gate.container_of(self.peer_pid(w))
+            return self.gate.reg.load("vm"), fixed, 0
+        pid = self.peer_pid(w)
+        ws = self.gate.container_of(pid)
         if ws is None:
             raise pushgate.Denied("this caller is in no workspace", "only a workspace's git push uses this service")
-        return self.gate.reg.load("container"), ws
+        return self.gate.reg.load("container"), ws, pid
 
     async def push(self, r, w, req, fixed):
-        t, ws = await asyncio.to_thread(self.caller, w, fixed)
-        await asyncio.to_thread(pushgate.allow, t, ws)
+        t, ws, pid = await asyncio.to_thread(self.caller, w, fixed)
         rows = await asyncio.to_thread(self.gate.rows, t, ws)
         key, line = pushgate.command(rows, str(req.get("host", "")), str(req.get("command", "")))
+        if not t.repo(ws).agent_push:
+            await asyncio.to_thread(self.gate.allow, t, ws, pid)
         path = self.sec.push_key_path(key)
         if not os.path.isfile(path):
             raise pushgate.Denied("this machine holds no deploy key '%s'" % key, "'wk key deploy' makes it, './setup' puts it where this service reads it")
@@ -108,7 +110,7 @@ class Service:
         why = "no workspace is there"
         if ws is not None:
             try:
-                await asyncio.to_thread(pushgate.allow, self.gate.reg.load(kind), ws)
+                await asyncio.to_thread(self.gate.allow, self.gate.reg.load(kind), ws, req.get("pid"))
                 why = ""
             except pushgate.Denied as e:
                 why = e.why

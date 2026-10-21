@@ -14,7 +14,9 @@
 #           inside it: egress through the allowlisting proxy, isolation and the
 #           commit wall (a container), no key, token or credential inside that
 #           could publish, reads and writes through the credential injector, a
-#           push and a write refused while an agent runs, the agent's login, and the GPU. A
+#           push and a write served to a person's shell alone and refused to wk's own
+#           run and an agent (a wk-tools workspace's agent pushes that repository),
+#           the agent's login, and the GPU. A
 #           remote place has no sandbox, and is refused.
 #   wk doctor <machine>     a machine in machines/, asked from here: its tailnet
 #           names, whether it answers, a bench machine's system, media and arm,

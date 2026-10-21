@@ -140,7 +140,7 @@ class WsDriver(places.Driver):
     def mirror_dir(self):
         return self._mirror
 
-    def exec_argv(self, ws, argv, tty=False):
+    def exec_argv(self, ws, argv, tty=False, person=False):
         return ["exec", ws] + list(argv), None
 
     def exec_tty(self, ws, argv, timeout=None):

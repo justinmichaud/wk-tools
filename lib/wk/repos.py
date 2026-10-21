@@ -21,6 +21,7 @@ class Repo:
         self.push = [list(r) for r in table[name].get("push", ())]
         self.snapshot = self.clone == SNAPSHOT
         self.pr_tool = bool(table[name].get("pr_tool"))
+        self.agent_push = bool(table[name].get("agent_push"))
         self.checkout = project.get("CHECKOUT") if self.snapshot else table[name]["checkout"]
         self.src = posixpath.join(posixpath.dirname(project.get("SRC")), self.checkout)
 

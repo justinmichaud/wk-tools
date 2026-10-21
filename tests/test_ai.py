@@ -42,7 +42,7 @@ class SimDriver(WsDriver):
     def egress_filtered(self, ws):
         return self.filtered
 
-    def exec(self, ws, argv, tty=False, timeout=None):
+    def exec(self, ws, argv, tty=False, timeout=None, person=False):
         line = " ".join(argv)
         self.asked.append(line)
         for key, value in self.answers.items():
@@ -50,7 +50,7 @@ class SimDriver(WsDriver):
                 return value(argv) if callable(value) else value
         return Result(0)
 
-    def exec_argv(self, ws, argv, tty=False):
+    def exec_argv(self, ws, argv, tty=False, person=False):
         return ["exec", ws, "tty" if tty else "no-tty"] + list(argv), None
 
     def agent_secret_remedy(self, ws, secret):
@@ -132,7 +132,7 @@ class TestItVerifiesTheWall(_Host):
     def test_a_healthy_container_gets_doctors_report_and_the_session(self):
         status, err = self.ai("claude", "-r")
         self.assertEqual(0, status, err)
-        for w in ("checking workspace 'demo' (container)", "workspace running", "a push is refused while an agent runs", "commit wall",
+        for w in ("checking workspace 'demo' (container)", "workspace running", "a push from wk's own run is refused", "commit wall",
                   "podman is rootless", "egress proxy running", "sandbox intact"):
             self.assertIn(w, err)
         self.assertIn("--dangerously-skip-permissions -r", self.line())
@@ -239,7 +239,7 @@ class TestRemoteControl(_Host):
 
 
 class TestNoPushSwitch(_Host):
-    """A push is the host's service's to refuse while an agent runs, so `wk ai` throws nothing and restores nothing."""
+    """A push is the host's service's to refuse by the caller's chain, so `wk ai` throws nothing and restores nothing."""
 
     def test_a_terminal_session_and_a_headless_one_ask_nothing_of_any_switch(self):
         for terminal in (True, False):

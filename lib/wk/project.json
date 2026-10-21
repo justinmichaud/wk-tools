@@ -7,7 +7,7 @@
                        "push": [["fork", "justinmichaud/WebKit", "github-webkit"],
                                 ["forkwpe", "justinmichaud/WPEWebKit", "github-wpe"]]},
             "wk-tools": {"clone": "tools-origin", "checkout": "wk-tools",
-                         "push": [["wk-tools", "", "github-wk-tools"]]}},
+                         "push": [["wk-tools", "", "github-wk-tools"]], "agent_push": true}},
   "BUILD_DIR": "WebKitBuild",
   "SCRIPTS": "Tools/Scripts",
   "PR_TOOL": "git-webkit",

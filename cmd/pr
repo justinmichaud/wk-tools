@@ -27,7 +27,7 @@
 # 'open' pushes the workspace's current branch to its fork and opens it as a pull request with
 # `gh pr create --fill`; host only. The project comes from the upstream the branch tracks; no
 # upstream, `main`, a detached HEAD, or a dirty tree is refused by name. The push goes through
-# the push service, which refuses while an agent runs in the workspace. A build box's branch is
+# the push service, as a person's own run. A build box's branch is
 # fetched over ssh into this machine's mirror and pushed from here: no key reaches a box.
 #
 #   --draft   open it as a draft
@@ -128,7 +128,7 @@ def pr_open(driver, name, draft, web):
     if driver.kind == "remote" and not driver.is_local and not driver.peer:
         r = push_from_here(driver, src, fork, branch)
     else:
-        r = driver.act_exec(name, ["git", "-C", src, "push", "-u", fork, branch])
+        r = driver.act_exec(name, ["git", "-C", src, "push", "-u", fork, branch], person=True)
     show(r)
     if not r.ok:
         die("the push to '%s' failed -- see above; a refusal there is the push service's, and names its remedy" % fork)

@@ -12,11 +12,12 @@
 #   wk ai claude --dry-run bb4   the session it would run
 #
 # The agent runs with relaxed permissions, after `wk doctor`'s checks of the
-# workspace's boundary pass; git commits are walled off for the session. A push
-# is refused by the push service, and a GitHub or Bugzilla write by the injector,
-# while an agent runs in the workspace. Inside a workspace (`claude` there calls
-# this) a key reaching it, or a write not refused, stops the session and no
-# --force crosses it.
+# workspace's boundary pass; git commits are walled off for the session, a push
+# is refused by the push service and a GitHub or Bugzilla write by the injector
+# to anything the session starts. The one exception is a wk-tools workspace,
+# whose repository an agent commits and pushes itself. Inside a workspace
+# (`claude` there calls this) a key reaching it, or a write not refused, stops
+# the session and no --force crosses it.
 #
 # A Claude session on a terminal starts with Remote Control on, named after the
 # workspace, using the claude.ai login the credential injector holds (`wk key
@@ -103,13 +104,15 @@ class Ai:
     def session(self, agent_bin, mode, args):
         name, t = self.name, self.driver
         prefix = []
-        if wall.commit_walled(t):
+        if wall.commit_walled(t, name):
             if not self.wall_available():
                 die("the commit wall needs bwrap in the workspace image, and '%s' has none.\n    Rebuild the workspace from "
                     "a current base ('wk rm %s' then 'wk new'), or\n    install bwrap in the image; nothing an agent runs "
                     "may write git history\n    while the sandbox cannot stop it." % (name, name))
             prefix = wall.commit_wall_prefix(self.root, t.src(name))
             info("git commits are walled off for this session (bwrap; a shell of your own, 'wk enter', is not walled)")
+        elif t.repo(name).agent_push:
+            info("commits and pushes of %s are this session's own: the one repository an agent publishes" % t.repo(name).name)
         if self.agent == "claude":
             info("starting Claude in '%s' (permissions relaxed; the workspace is the boundary)" % name)
         else:

@@ -253,11 +253,13 @@ wk sync tools                           # fetches its origin
 wk-tools is worked on from such a workspace, not from a session on the host.
 Its checkout is cloned at first start from this machine's wk-tools `origin`
 (its GitHub repository, over https), so it needs no mirror and no snapshot.
-The commit wall and the push refusal are every workspace's: an agent there
-cannot commit, and a push is refused while one runs. The live tier of `wk
+wk-tools is the one repository an agent commits and pushes itself
+(`agent_push` in `REPOS`, lib/wk/project.json): there is no commit wall around
+its session, and the push service serves a push of that repository to anyone in
+the workspace. It still cannot push a WebKit fork, and GitHub and Bugzilla
+writes are refused to it. The live tier of `wk
 selftest` stays the host's. Only the container place holds one for now; `--repo`
 on another is refused.
-TODO: a push from it needs a deploy key for the wk-tools repository in `wk key`'s set (docs/PLAN.md, Owed).
 
 **A macOS guest, for the Apple ports**
 
@@ -636,7 +638,7 @@ the guests' holder.
 
 ```sh
 git push                                    # in a workspace: it just works
-wk doctor <ws>                              # measures that no key reaches it, and that an agent is refused
+wk doctor <ws>                              # measures that no key reaches it, that wk's own run is refused and a shell of yours is served
 ```
 
 A workspace holds no deploy key, and no ssh-agent reaches it. Its
@@ -645,10 +647,18 @@ A workspace holds no deploy key, and no ssh-agent reaches it. Its
 (`container/push/wk-push.py`) over a unix socket: `/run/wk/push.sock` in a
 container, `~/.wk-push.sock` in a guest. The service identifies the workspace
 from the socket: a container by the cgroup of the peer's pid, a guest by its
-own listener, which the guest's forward ends at. It refuses, naming the
-remedy, while a claude or pi process runs in that workspace (the scan is
-`pushgate.AGENT_PID_SCAN`; agents in other workspaces do not matter), and
-otherwise runs the ssh session to GitHub itself with the deploy key of the
+own listener, which the guest's forward ends at. In a container it
+decides by the caller's process ancestry, read in /proc (the container shares
+the host's pid namespace): a push is served only to a process descended from
+the entry of a person's own run, `container/bin/wk-person`, which
+`lib/wk/places.py` puts in front of `wk enter` (a shell, or `wk enter <ws> --
+<cmd>`), `wk pr open` and the editor's sshd (`wk zed`). Everything else is
+refused, naming the remedy: an agent session anywhere in the chain, a run of
+wk's own (a build, a probe, `wk enter <ws> --own -- <cmd>`, which wk's
+host-side commands use to reach a container), and a process left behind by a
+session that ended. An agent elsewhere in the workspace does not matter. A
+guest has no pid the service can see, so there a push is refused while a claude
+or pi process runs in that guest. Otherwise the service runs the ssh session to GitHub itself with the deploy key of the
 repository the command names, relaying stdio. Only the two commands, for the
 repositories of the workspace's own repo, are allowed. It is its own program
 and not a broker verb because a push is a byte stream and a broker verb one
@@ -658,8 +668,9 @@ machine, which hides the caller's pid.
 The keys are in `push-keys/` beside the keyring on the machine that runs the
 service (the podman machine's copy is delivered by `./setup` and `wk key
 deploy`, since it mounts no key); no workspace mounts that directory. A
-person's `wk enter` shell pushes and commits freely while no agent runs in the
-workspace; only an agent session is under the commit wall. `wk pr open <ws>`
+person's `wk enter` shell pushes and commits, whether or not an agent runs
+beside it; an agent session is under the commit wall and nothing it starts can
+publish. `wk pr open <ws>`
 pushes through the same service for a container or a guest; a build box
 holds no key, so it fetches the box's branch into this machine's mirror and
 pushes it with the deploy key from here, by the same ssh command
@@ -671,9 +682,8 @@ The GitHub token and Bugzilla key are held by the injector
 (`container/proxy/github-inject.py`), which terminates TLS for those two hosts
 (and Claude's three, for the claude.ai login) and puts the credential on the
 request. It listens twice: a write goes through only on the writing socket.
-The egress proxy asks the push service which workspace a connection is from
-and whether an agent runs there, and sends a connection from a workspace with
-one to the reading socket, where a write is refused with 412 and a read is
+The egress proxy asks the push service whether the connecting process is a
+person's (the same rule), and sends any other to the reading socket, where a write is refused with 412 and a read is
 unchanged. A push service that does not answer is a no.
 
 **Housekeeping**

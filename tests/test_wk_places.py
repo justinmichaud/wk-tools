@@ -192,6 +192,10 @@ class TestContainer(DriversTest):
         self.assertIn("--no-tty", argv)
         self.assertEqual(argv[-3:], ("git", "rev-parse", "HEAD"))
         self.assertIn("ensure-bridge.sh", argv[argv.index("--") + 1])
+        self.assertNotIn("/opt/wk-tools/container/bin/wk-person", argv, "wk's own run is not entered as a person's")
+        self.t.exec("a", ["git", "push"], person=True)
+        argv = self.fake.effects[-1][1]
+        self.assertEqual(argv[-3:], ("/opt/wk-tools/container/bin/wk-person", "git", "push"), "a person's run is entered through the person entry")
         self.assertEqual(self.t.exec_tty("a", ["lldb", "-o", "attach"]).rc, 0)
         kind, argv, cwd = self.fake.effects[-1]
         self.assertEqual((kind, argv[-3:], cwd), ("run_tty", ("lldb", "-o", "attach"), None))
@@ -1251,8 +1255,10 @@ class TestAMacHostReadsTheContainerStoreInThePodmanMachine(unittest.TestCase):
         with mock.patch.object(places.os, "uname", return_value=mock.Mock(sysname="Darwin")), \
                 mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
             argv, _ = c.exec_argv("w", ["sh", "-c", "echo $0", "a b"])
+            person, _ = c.exec_argv("w", ["git", "push"], person=True)
         self.assertEqual(["podman", "machine", "ssh", "wk", "--"], argv[:5])
-        self.assertIn("/opt/wk-tools/wk enter w -- sh -c 'echo $0' 'a b'", argv[5])
+        self.assertIn("/opt/wk-tools/wk enter w --own -- sh -c 'echo $0' 'a b'", argv[5])
+        self.assertIn("/opt/wk-tools/wk enter w -- git push", person[5], "a person's run is the podman machine's own wk enter")
         self.assertNotIn("WK_DRY_RUN", argv[5], "a read in a dry run is still a read; the far wk would refuse --dry-run")
 
 class TestThePodmanMachineRecord(DriversTest):

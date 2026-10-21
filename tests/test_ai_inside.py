@@ -8,7 +8,7 @@ from unittest import mock
 from tests.support import REPO, WkTest, bash
 from tests.test_ai import AI, _Flow
 from tests.test_doctor_wall import _Wall
-from wk import wall
+from wk import repos, wall  # noqa: E402
 from wk.act import Refused
 
 
@@ -45,11 +45,16 @@ class TestTheCommandRunsInAWorkspace(_Inside):
 
     def test_the_commit_wall_covers_a_session_started_from_inside(self):
         with mock.patch.object(self.driver, "os", return_value="linux"):
-            self.assertTrue(wall.commit_walled(self.driver))
+            self.assertTrue(wall.commit_walled(self.driver, "demo"))
         with mock.patch.object(self.driver, "os", return_value="macos"):
-            self.assertFalse(wall.commit_walled(self.driver))
-        self.assertTrue(wall.commit_walled(self.reg.load("container")))
-        self.assertFalse(wall.commit_walled(self.reg.load("remote")))
+            self.assertFalse(wall.commit_walled(self.driver, "demo"))
+        self.assertTrue(wall.commit_walled(self.reg.load("container"), "demo"))
+        self.assertFalse(wall.commit_walled(self.reg.load("remote"), "demo"))
+
+    def test_the_one_repository_an_agent_publishes_is_not_walled(self):
+        with mock.patch.object(self.driver, "os", return_value="linux"), \
+                mock.patch.object(self.driver, "repo", return_value=repos.Repo("wk-tools")):
+            self.assertFalse(wall.commit_walled(self.driver, "demo"))
 
 
 class TestWhatEachKindOfFailureDoes(_Inside):

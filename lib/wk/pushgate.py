@@ -1,27 +1,18 @@
-"""Who may push from a workspace: which workspace a caller is, whether an agent runs in it, and the one command a push may run."""
+"""Who may publish from a workspace: a container's caller by its ancestry in the shared pid namespace's /proc (served only below
+the entry of a person's own run, `container/bin/wk-person`, with no agent session between); a guest, which has no pid the service can see, by its agents."""
 
+import os
 import re
 import struct
 
-# The process is `claude`, `node` or a version string, but its exe resolves under the install; pi is `node <prefix>/bin/pi`. A macOS guest has no /proc. `[n]` keeps this scan's own command line from matching.
-AGENT_PID_SCAN = '''if [ -d /proc/self ]; then
-    for d in /proc/[0-9]*; do
-        p=${d#/proc/}
-        case "$(readlink "$d/exe" 2>/dev/null)" in
-            */claude/versions/*|*/claude) printf "%s\\n" "$p"; continue ;;
-        esac
-        case "$(tr '\\0' ' ' < "$d/cmdline" 2>/dev/null)" in
-            "node "*/bin/pi|"node "*/bin/pi" "*|*/pi-codi[n]g-agent/*) printf "%s\\n" "$p" ;;
-        esac
-    done
-else
-    ps -Ao pid=,comm= | while read -r p c; do
-        case "$c" in */claude/versions/*|*/claude|claude) printf "%s\\n" "$p" ;; esac
-    done
-    ps -Ao pid=,command= | while read -r p c; do
-        case "$c" in "node "*/bin/pi|"node "*/bin/pi" "*|*/pi-codi[n]g-agent/*) printf "%s\\n" "$p" ;; esac
-    done
-fi'''
+PERSON = "container/bin/wk-person"
+# A macOS guest has no /proc; the process is `claude` from any install, or `node <prefix>/bin/pi`.
+AGENT_PS_SCAN = '''ps -Ao pid=,comm= | while read -r p c; do
+    case "$c" in */claude/versions/*|*/claude|claude) printf "%s\\n" "$p" ;; esac
+done
+ps -Ao pid=,command= | while read -r p c; do
+    case "$c" in "node "*/bin/pi|"node "*/bin/pi" "*|*/pi-coding-agent/*) printf "%s\\n" "$p" ;; esac
+done'''
 
 NOT_RUNNING = ("absent", "created", "configured", "exited", "stopped")
 CGROUP_ID = re.compile(r"libpod-([0-9a-f]{64})\.scope")
@@ -37,19 +28,90 @@ def frame(kind, data):
 
 
 class Denied(Exception):
-    def __init__(self, why, remedy):
+    """`kind` names who the caller was found to be: agent, own (a run of wk's), orphan (nothing of a session behind it)."""
+
+    def __init__(self, why, remedy, kind=""):
         super().__init__(why)
-        self.why, self.remedy = why, remedy
+        self.why, self.remedy, self.kind = why, remedy, kind
+
+
+class Proc:
+    def __init__(self, root="/proc"):
+        self.root = root
+
+    def _read(self, pid, name):
+        try:
+            with open(os.path.join(self.root, str(pid), name), "rb") as f:
+                return f.read().decode("utf-8", "replace")
+        except OSError:
+            return None
+
+    def ppid(self, pid):
+        text = self._read(pid, "status") or ""
+        m = re.search(r"^PPid:\s*(\d+)", text, re.M)
+        return int(m.group(1)) if m else None
+
+    def comm(self, pid):
+        return (self._read(pid, "comm") or "").strip()
+
+    def cmdline(self, pid):
+        return [w for w in (self._read(pid, "cmdline") or "").split("\0") if w]
+
+    def exe(self, pid):
+        try:
+            return os.readlink(os.path.join(self.root, str(pid), "exe"))
+        except OSError:
+            return ""
+
+
+def agent_word(words, exe):
+    first = os.path.basename(words[0]) if words else ""
+    if first == "claude" or "/claude/versions/" in exe or exe.endswith("/claude"):
+        return "claude"
+    if words and (words[0].endswith("/cmd/ai") or (first.startswith("python") and len(words) > 1 and words[1].endswith("/cmd/ai"))):
+        return "wk ai"
+    if first == "node" and any(w.endswith("/bin/pi") or "/pi-coding-agent/" in w for w in words[1:]):
+        return "pi"
+    return ""
+
+
+def is_person_entry(words):
+    return any(w.endswith("/" + PERSON) for w in words[:2])
+
+
+def person(proc, pid, ws):
+    remedy = "a publish is made from a shell of your own:  wk enter %s" % ws
+    caller, seen = pid, set()
+    while pid and pid > 1 and pid not in seen:
+        seen.add(pid)
+        words, parent = proc.cmdline(pid), proc.ppid(pid)
+        if parent is None:
+            break
+        agent = agent_word(words, proc.exe(pid))
+        if agent:
+            raise Denied("an agent session (%s, pid %d) is behind this caller, and nothing an agent runs may publish" % (agent, pid),
+                         "end the session, then " + remedy, "agent")
+        if proc.comm(parent) == "conmon":
+            if is_person_entry(words):
+                return
+            raise Denied("this caller descends from a run of wk's own (pid %d: %s), not from a shell of yours"
+                         % (pid, " ".join(words)[:60] or "?"), remedy + "\n    (a build, a probe and 'wk enter --own' never publish)", "own")
+        pid = parent
+    raise Denied("no shell of yours is behind this caller (pid %s): it runs on its own, left behind by a session or a job that ended"
+                 % (caller or "?"), remedy, "orphan")
 
 
 def agent_pids(t, ws):
-    r = t.exec(ws, ["sh", "-c", AGENT_PID_SCAN])
+    r = t.exec(ws, ["sh", "-c", AGENT_PS_SCAN])
     if not r.ok:
         return [] if t.info(ws) in NOT_RUNNING else None
     return [p for p in r.out.replace("\r", "").split() if p.isdigit()]
 
 
-def allow(t, ws):
+def allow(t, ws, proc=None, pid=None):
+    if t.kind != "vm":
+        person(proc, pid, ws)
+        return
     pids = agent_pids(t, ws)
     if pids is None:
         raise Denied("could not ask '%s' whether an agent runs in it, and it may be running one" % ws,
@@ -82,15 +144,12 @@ def ssh_argv(key_path, line, protocol=""):
 
 class Gate:
     def __init__(self, reg, proc="/proc"):
-        self.reg, self.proc = reg, proc
+        self.reg, self.proc = reg, Proc(proc)
 
     def container_of(self, pid):
         """The workspace whose container holds `pid`, or None: its cgroup names the container by its full id."""
-        try:
-            with open("%s/%d/cgroup" % (self.proc, pid)) as f:
-                m = CGROUP_ID.search(f.read())
-        except OSError:
-            return None
+        text = self.proc._read(pid, "cgroup")
+        m = CGROUP_ID.search(text) if text else None
         if not m:
             return None
         t = self.reg.load("container")
@@ -104,6 +163,9 @@ class Gate:
     def guest_at(self, addr):
         t = self.reg.load("vm")
         return next((ws for ws, state in t.list() if state == "running" and t.ip(ws) == addr), None)
+
+    def allow(self, t, ws, pid):
+        allow(t, ws, self.proc, pid)
 
     def rows(self, t, ws):
         return t.repo(ws).push_rows(t.machine, t.tools_src())

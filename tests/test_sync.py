@@ -79,7 +79,7 @@ class SyncDriver(places.Driver):
     def mirror_dir(self):
         return self.machine.mirrors.get(self.name, "/mirror/%s/WebKit.git" % self.name)
 
-    def exec(self, ws, argv, tty=False, timeout=None):
+    def exec(self, ws, argv, tty=False, timeout=None, person=False):
         return self.machine.run(["exec", self.name, ws] + list(argv))
 
     def act_exec(self, ws, argv):
@@ -576,7 +576,7 @@ class FakeVm(places.Vm):
     def list(self):
         return sorted(self.machine.guests.items())
 
-    def exec(self, ws, argv, tty=False, timeout=None):
+    def exec(self, ws, argv, tty=False, timeout=None, person=False):
         return self.machine.run(["guest", ws] + list(argv))
 
 

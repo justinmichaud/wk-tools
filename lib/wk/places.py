@@ -14,7 +14,7 @@ import shutil
 import stat
 import sys
 
-from wk import act, agents, fleet, git, guest, images, kv, project, reach, record, repos, secrets, sshalias, tools
+from wk import act, agents, fleet, git, guest, images, kv, project, pushgate, reach, record, repos, secrets, sshalias, tools
 from wk.machine import TIMED_OUT, Local, PodmanVm, Result, Ssh, TartExec, isolated_module, lib_argv
 from wk.resources import Resources, arch_has_gpu, workspace_marker_path
 from wk.store import Store, dispatch_place, in_vm, no_such_workspace, remote_marker_path
@@ -434,8 +434,8 @@ class Driver:
         """Whether this place can exist on this machine; one that cannot holds no workspace."""
         return True
 
-    def exec(self, ws, argv, tty=False, timeout=None):
-        return self.machine.run(self.exec_argv(ws, argv, tty)[0], timeout=timeout)
+    def exec(self, ws, argv, tty=False, timeout=None, person=False):
+        return self.machine.run(self.exec_argv(ws, argv, tty, person)[0], timeout=timeout)
 
     def pid_alive(self, ws, pid, cap=None):
         """True, False or None (no answer within cap seconds) for a pid inside the workspace -- the one "is it alive in the place" answer."""
@@ -639,11 +639,11 @@ class Driver:
     def workspaces(self):
         return sorted(set(self.store.workspaces()) | {n for n, _ in self.list() if n})
 
-    def act_exec(self, ws, argv):
+    def act_exec(self, ws, argv, person=False):
         if act.dry_run():
             sys.stderr.write("would run in %s: %s\n" % (ws, shlex.join(argv)))
             return Result(0)
-        return self.exec(ws, argv)
+        return self.exec(ws, argv, person=person)
 
     def wiring_args(self):
         return "", "", ""
@@ -701,7 +701,7 @@ class Driver:
         """What to run here to reach an addressless workspace, or None."""
         return None
 
-    def exec_argv(self, ws, argv, tty=False):
+    def exec_argv(self, ws, argv, tty=False, person=False):
         raise NotImplementedError
 
     def exec_tty(self, ws, argv, timeout=None):
@@ -892,14 +892,18 @@ class Container(Driver):
             return ref[len("ref: "):]
         return "detached %s" % ref[:10]
 
-    def exec_argv(self, ws, argv, tty=False):
+    def exec_argv(self, ws, argv, tty=False, person=False):
         if not self.is_here():
             env = {k: v for k, v in os.environ.items() if k != "WK_DRY_RUN"}
-            return ["podman", "machine", "ssh", self.podman_machine(), "--", self.wk_cmd(["enter", ws, "--", *argv], env)], None
+            return ["podman", "machine", "ssh", self.podman_machine(), "--",
+                    self.wk_cmd(["enter", ws, *([] if person else ["--own"]), "--", *argv], env)], None
         cmd = self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", project.get("SDK_ENTER")), "--quiet", "--name", self.ctr(ws)]
         if not tty:
             cmd.append("--no-tty")
-        return cmd + ["--exec", "--", BRIDGE, *argv], None
+        return cmd + ["--exec", "--", BRIDGE, *(self.person_entry(ws) if person else []), *argv], None
+
+    def person_entry(self, ws):
+        return [os.path.join(self.tools(ws), pushgate.PERSON)]
 
     def is_here(self):
         return in_vm(self.env) or os.uname().sysname != "Darwin"
@@ -1106,7 +1110,7 @@ class Container(Driver):
         return (self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", project.get("SDK_ENTER")),
                                   "--name", self.ctr(ws), "--exec", "--",
                                   BRIDGE,
-                                  "/usr/bin/env", "USER=%s" % self.user(), "/bin/bash", "--login"], None)
+                                  "/usr/bin/env", "USER=%s" % self.user(), *self.person_entry(ws), "/bin/bash", "--login"], None)
 
     def _cp(self, src, dest):
         r = self.machine.act_run(self.podman() + ["cp", src, dest])
@@ -1152,10 +1156,11 @@ class Container(Driver):
 
     def sshd_cmd(self, u):
         h = "/home/" + u
-        return ("mkdir -p /run/sshd && exec %s /bin/sh -c "
+        return ("mkdir -p /run/sshd && exec %s %s /bin/sh -c "
                 "'exec /usr/sbin/sshd -i -e -f /dev/null -o HostKey=%s/.wk-ssh/ssh_host_ed25519_key "
                 "-o AuthorizedKeysFile=.ssh/authorized_keys -o UsePAM=no -o PidFile=none -o PermitRootLogin=no "
-                "-o AllowUsers=%s -o LogLevel=ERROR -o Subsystem=\"sftp internal-sftp\" -o SetEnv=\"$WK_SSH_SETENV\"'" % (BRIDGE, h, u))
+                "-o AllowUsers=%s -o LogLevel=ERROR -o Subsystem=\"sftp internal-sftp\" -o SetEnv=\"$WK_SSH_SETENV\"'"
+                % (os.path.join(TOOLS, pushgate.PERSON), BRIDGE, h, u))
 
     def ssh_transport(self, ws):
         u = self._ctr_user_or_die(ws)
@@ -1335,7 +1340,7 @@ class Vm(Driver):
             act.die("'%s' is not running (wk start %s)" % (ws, ws))
         return g
 
-    def exec(self, ws, argv, tty=False, timeout=None):
+    def exec(self, ws, argv, tty=False, timeout=None, person=False):
         g = self.guest(ws)
         if g is None:
             return Result(1, "", "'%s' is not running (wk start %s)" % (ws, ws))
@@ -1346,7 +1351,7 @@ class Vm(Driver):
         self.login_note()
         return g.argv("cd %s 2>/dev/null; exec \"${SHELL:-/bin/zsh}\" -l" % shlex.quote(self.src(ws)), tty=True), None
 
-    def exec_argv(self, ws, argv, tty=False):
+    def exec_argv(self, ws, argv, tty=False, person=False):
         return self._guest_or_die(ws).argv(shlex.join(argv), tty=tty), None
 
     def copier(self, ws):
@@ -1576,7 +1581,7 @@ class LocalWorkspace(Driver):
     def info(self, ws):
         return "running" if ws == self.ws_name else "absent"
 
-    def exec_argv(self, ws, argv, tty=False):
+    def exec_argv(self, ws, argv, tty=False, person=False):
         return ["bash", "-lc", "exec " + shlex.join(argv)], None
 
     def store_init(self):
@@ -1782,7 +1787,7 @@ class Remote(Driver):
     def created(self, ws):
         return self.info(ws) == "present"
 
-    def exec(self, ws, argv, tty=False, timeout=None):
+    def exec(self, ws, argv, tty=False, timeout=None, person=False):
         return self._sh("cd %s && %s" % (shlex.quote(self.src(ws)), shlex.join(argv)), timeout=timeout)
 
     def enter_argv(self, ws):
@@ -1791,7 +1796,7 @@ class Remote(Driver):
             return ([os.environ.get("SHELL", "/bin/sh"), "-l"], self.src(ws))
         return self.machine.argv("cd %s && exec \"$SHELL\"" % shlex.quote(self.src(ws)), tty=True), None
 
-    def exec_argv(self, ws, argv, tty=False):
+    def exec_argv(self, ws, argv, tty=False, person=False):
         if self.is_local:
             return list(argv), self.src(ws)
         return self._far().argv("cd %s && %s" % (shlex.quote(self.src(ws)), shlex.join(argv)), tty=tty), None

@@ -1,4 +1,4 @@
-"""A workspace's `git push` through the host: which workspace a caller is, what an agent in it changes, and the one command a push may run.
+"""A workspace's `git push` through the host: which workspace a caller is, who is behind it, and the one command a push may run.
 The service and its client run for real over a unix socket; ssh is a stub, /proc a directory, podman a fake."""
 import asyncio
 import importlib.util
@@ -32,6 +32,8 @@ KEY, REPO_NAME, ALIAS = secrets.forks()[0]
 OTHER_KEY, OTHER_REPO, OTHER_ALIAS = secrets.forks()[1]
 UPLOAD = "git-upload-pack '%s.git'" % REPO_NAME
 RECEIVE = "git-receive-pack '%s.git'" % REPO_NAME
+PERSON = "/opt/wk-tools/" + pushgate.PERSON
+TOOLS_ORIGIN = ["git", "-c", "safe.directory=*", "-C", str(REPO), "remote", "get-url", "origin"]
 
 # What ssh would be to GitHub: it logs its arguments and environment, speaks first as a server does, says something on stderr, echoes stdin, and exits 7.
 FAKE_SSH = """#!/bin/sh
@@ -51,17 +53,61 @@ def load(path, name):
     return m
 
 
-class Place:
-    """A place whose workspaces hold the agent pids in `agents`; a workspace not in it cannot be asked."""
+class Proc:
+    """A /proc directory: `chain` writes one process per row, (pid, ppid, comm, argv), the first being the caller."""
 
-    def __init__(self, machine, kind="container", agents=None, state="running"):
+    def __init__(self, root):
+        self.root = Path(root)
+
+    def add(self, pid, ppid, comm, argv, cgroup=CGROUP):
+        d = self.root / str(pid)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "status").write_text("Name:\t%s\nPid:\t%d\nPPid:\t%d\n" % (comm, pid, ppid))
+        (d / "comm").write_text(comm + "\n")
+        (d / "cmdline").write_bytes("\0".join(argv).encode() + b"\0")
+        if cgroup is not None:
+            (d / "cgroup").write_text(cgroup)
+
+    def chain(self, rows):
+        for pid, ppid, comm, argv in rows:
+            self.add(pid, ppid, comm, argv)
+
+
+def person_chain(pid):
+    """git in a shell a person entered: git <- bash <- the person entry (a child of conmon) <- conmon <- 1."""
+    return [(pid, 500, "bash", ["bash", "-lc", "git push"]), (500, 400, "sh", ["/bin/sh", PERSON, "/bin/bash", "--login"]),
+            (400, 1, "conmon", ["/usr/bin/conmon", "-c", ID]), (1, 0, "systemd", ["/usr/lib/systemd/systemd"])]
+
+
+def agent_chain(pid, agent=("claude", ["/home/u/.local/bin/claude", "--dangerously-skip-permissions"])):
+    """The same shell, with an agent session between: git <- bash <- claude <- bwrap <- cmd/ai <- bash --login <- entry."""
+    comm, argv = agent
+    return [(pid, 600, "bash", ["bash", "-c", "git push"]), (600, 601, comm, argv),
+            (601, 602, "bwrap", ["bwrap", "--dev-bind", "/", "/"]), (602, 603, "python3", ["python3", "/opt/wk-tools/cmd/ai", "claude"]),
+            (603, 500, "bash", ["/bin/bash", "--login"])] + person_chain(0)[1:]
+
+
+def own_chain(pid):
+    """A run of wk's own: git <- bash -lc <- conmon, no person entry (a build, a probe, `wk enter --own`)."""
+    return [(pid, 400, "bash", ["bash", "-lc", "git push"])] + person_chain(0)[2:]
+
+
+def orphan_chain(pid):
+    """A process left behind by a session that ended: reparented to init, nothing of a session behind it."""
+    return [(pid, 700, "sh", ["sh", "-c", "sleep 20; git push"]), (700, 1, "sh", ["sh"]), (1, 0, "systemd", ["systemd"])]
+
+
+class Place:
+    """A place whose guests hold the agent pids in `agents`; a guest not in it cannot be asked. A container is never asked."""
+
+    def __init__(self, machine, kind="container", agents=None, state="running", repo=None):
         self.kind, self.machine, self.agents, self.state, self.execs = kind, machine, agents or {}, state, []
-        self.guests = []
+        self.guests, self._repo = [], repo
 
     def podman(self):
         return ["podman"]
 
-    def exec(self, ws, argv, tty=False, timeout=None):
+    def exec(self, ws, argv, tty=False, timeout=None, person=False):
         self.execs.append(ws)
         pids = self.agents.get(ws)
         return Result(1, "", "no such workspace") if pids is None else Result(0, "".join(p + "\r\n" for p in pids))
@@ -70,7 +116,7 @@ class Place:
         return self.state
 
     def repo(self, ws):
-        return repos.default()
+        return self._repo or repos.default()
 
     def tools_src(self):
         return str(REPO)
@@ -91,7 +137,7 @@ class Registry:
 
 
 class _Service(WkTest):
-    """The service, serving on a socket in a thread of this process; the caller is this process, whose cgroup is `proc`'s."""
+    """The service, serving on a socket in a thread of this process; the caller is this process, whose chain is `proc`'s."""
 
     def setUp(self):
         super().setUp()
@@ -100,7 +146,7 @@ class _Service(WkTest):
         self.module = load(SERVICE, "wkpush")
         store = self.tmp / "store"
         (store / "push-keys").mkdir(parents=True)
-        for k, _, _ in secrets.forks():
+        for k, _, _ in repos.push_keys():
             (store / "push-keys" / ("build_key_" + k)).write_text("KEY\n")
         self.env = {"WK_STORE": str(store), "WK_HOST_SECRETS": str(store / "secrets")}
         self.log = self.tmp / "ssh.log"
@@ -111,16 +157,16 @@ class _Service(WkTest):
         patch = mock.patch.dict(os.environ, {"PATH": "%s:%s" % (self.tmp / "bin", os.environ["PATH"])})
         patch.start()
         self.addCleanup(patch.stop)
-        self.proc = self.tmp / "proc"
-        (self.proc / str(os.getpid())).mkdir(parents=True)
-        (self.proc / str(os.getpid()) / "cgroup").write_text(CGROUP)
+        self.proc = Proc(self.tmp / "proc")
+        self.proc.chain(person_chain(os.getpid()))
         self.machine = Fake("here")
         self.machine.answer(PS, out="%s\twk-demo\n" % ID)
-        self.place = Place(self.machine, agents={"demo": []})
+        self.machine.answer(TOOLS_ORIGIN, out="https://github.com/u/wk-tools.git\n")
+        self.place = Place(self.machine)
         self.places = {"container": self.place}
 
     def serve(self, guest_dir=None, gate=None):
-        gate = gate or pushgate.Gate(Registry(**self.places), proc=str(self.proc))
+        gate = gate or pushgate.Gate(Registry(**self.places), proc=str(self.proc.root))
         svc = self.module.Service(gate, secrets.Secrets(str(REPO), self.env, self.machine), guest_dir)
         loop, ready, started = asyncio.new_event_loop(), threading.Event(), {}
 
@@ -173,10 +219,14 @@ class _Service(WkTest):
     def ssh_log(self):
         return self.log.read_text() if self.log.exists() else ""
 
+    def caller_is(self, chain):
+        shutil.rmtree(self.proc.root)
+        self.proc.chain(chain(os.getpid()))
+
 
 @unittest.skipUnless(sys.platform == "linux", "a container's caller is its pid by SO_PEERCRED, which only Linux has; a Mac host runs this service in the podman VM")
 class TestAPush(_Service):
-    def test_with_no_agent_in_the_workspace_ssh_runs_with_its_deploy_key_and_its_output_comes_back(self):
+    def test_from_a_persons_shell_ssh_runs_with_its_deploy_key_and_its_output_comes_back(self):
         self.serve()
         reply, frames = self.push(protocol="version=2")
         self.assertEqual({"ok": True}, reply)
@@ -188,6 +238,7 @@ class TestAPush(_Service):
         self.assertIn("git@github.com %s" % UPLOAD, log)
         for word in ("IdentitiesOnly=yes", "IdentityAgent=none", "BatchMode=yes", "SendEnv=GIT_PROTOCOL", "GIT_PROTOCOL=version=2"):
             self.assertIn(word, log)
+        self.assertEqual([], self.place.execs, "a container is read in /proc, never asked")
 
     def test_the_service_builds_the_command_and_never_runs_the_callers(self):
         self.serve()
@@ -201,38 +252,69 @@ class TestAPush(_Service):
         self.assertNotIn("SendEnv", self.ssh_log())
         self.assertIn("GIT_PROTOCOL=\n", self.ssh_log())
 
-    def test_an_agent_in_the_workspace_is_refused_naming_the_remedy_and_no_ssh_runs(self):
-        self.place.agents["demo"] = ["4242"]
+    def test_an_agent_session_behind_the_caller_is_refused_naming_the_remedy_and_no_ssh_runs(self):
+        self.caller_is(agent_chain)
         self.serve()
         reply, frames = self.push()
-        self.assertIn("an agent (claude or pi) runs in 'demo' (pid 4242)", reply["refused"])
+        self.assertIn("an agent session (claude, pid 600) is behind this caller", reply["refused"])
         self.assertIn("wk enter demo", reply["remedy"])
         self.assertEqual({}, frames)
         self.assertEqual("", self.ssh_log())
 
-    def test_an_agent_in_another_workspace_does_not_matter_and_only_this_one_is_asked(self):
-        self.place.agents["other"] = ["9"]
-        self.serve()
-        reply, _ = self.push()
-        self.assertEqual({"ok": True}, reply)
-        self.assertEqual(["demo"], self.place.execs)
+    def test_wk_ai_and_pi_are_agent_sessions_too(self):
+        for comm, argv, word in (("python3", ["python3", "/opt/wk-tools/cmd/ai", "pi"], "wk ai"),
+                                 ("node", ["node", "/home/u/.local/bin/pi", "--continue"], "pi"),
+                                 ("node", ["node", "/home/u/.local/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"], "pi"),
+                                 ("claude", ["/opt/homebrew/bin/claude"], "claude")):
+            with self.subTest(argv=argv):
+                self.caller_is(lambda pid: [(pid, 600, "bash", ["bash"]), (600, 500, comm, argv)] + person_chain(0)[1:])
+                self.serve()
+                self.assertIn("an agent session (%s, pid 600)" % word, self.push()[0]["refused"])
+                self.doCleanups()
+                self.setUp()
 
-    def test_a_workspace_that_cannot_be_asked_is_refused(self):
-        del self.place.agents["demo"]
+    def test_a_run_of_wks_own_is_refused_naming_the_entry(self):
+        self.caller_is(own_chain)
         self.serve()
         reply, _ = self.push()
-        self.assertIn("could not ask 'demo' whether an agent runs in it", reply["refused"])
+        self.assertIn("descends from a run of wk's own (pid %d: bash -lc git push), not from a shell of yours" % os.getpid(), reply["refused"])
+        self.assertIn("'wk enter --own' never publish", reply["remedy"])
         self.assertEqual("", self.ssh_log())
 
+    def test_a_process_left_behind_by_a_session_is_refused(self):
+        self.caller_is(orphan_chain)
+        self.serve()
+        reply, _ = self.push()
+        self.assertIn("no shell of yours is behind this caller", reply["refused"])
+        self.assertIn("left behind by a session or a job that ended", reply["refused"])
+        self.assertEqual("", self.ssh_log())
+
+    def test_an_agent_elsewhere_in_the_workspace_does_not_matter(self):
+        """A person's shell beside an agent session: only the caller's own chain decides."""
+        self.proc.chain([(9, 500, "claude", ["/home/u/.local/bin/claude"])])
+        self.serve()
+        self.assertEqual({"ok": True}, self.push()[0])
+
+    def test_the_one_repository_an_agent_publishes_is_served_to_an_agent_and_only_that_one(self):
+        self.caller_is(agent_chain)
+        self.place = Place(self.machine, repo=repos.Repo("wk-tools"))
+        self.places = {"container": self.place}
+        self.serve()
+        reply, _ = self.push(command="git-receive-pack 'u/wk-tools.git'", host="git@github-wk-tools")
+        self.assertEqual({"ok": True}, reply)
+        self.assertIn("build_key_wk-tools", self.ssh_log())
+        reply, _ = self.push()
+        self.assertIn("is not a push or fetch of this workspace's repositories", reply["refused"], "a fork is not a wk-tools workspace's to push")
+
     def test_an_unknown_caller_is_refused(self):
-        (self.proc / str(os.getpid()) / "cgroup").write_text("0::/user.slice/session-3.scope\n")
+        self.proc.add(os.getpid(), 500, "bash", ["bash"], cgroup="0::/user.slice/session-3.scope\n")
         self.serve()
         reply, _ = self.push()
         self.assertEqual("this caller is in no workspace", reply["refused"])
-        (self.proc / str(os.getpid()) / "cgroup").write_text(CGROUP.replace(ID, "cd" * 32))
+        self.proc.add(os.getpid(), 500, "bash", ["bash"], cgroup=CGROUP.replace(ID, "cd" * 32))
         reply, _ = self.push()
         self.assertEqual("this caller is in no workspace", reply["refused"])
-        (self.proc / str(os.getpid()) / "cgroup").unlink()
+        (self.proc.root / str(os.getpid()) / "cgroup").unlink()
         self.assertEqual("this caller is in no workspace", self.push()[0]["refused"])
         self.assertEqual("", self.ssh_log())
 
@@ -286,32 +368,35 @@ class TestAPush(_Service):
 
 
 class TestWhoMayWrite(_Service):
-    """The egress proxy asks, naming who connected to it."""
+    """The egress proxy asks, naming who connected to it; the answer is the push rule's."""
 
-    def test_a_workspace_with_no_agent_may(self):
+    def test_a_persons_shell_may(self):
         self.serve()
         self.assertEqual({"writes": True, "why": ""}, self.ask({"verb": "writes", "pid": os.getpid()})[0])
 
-    def test_one_with_an_agent_may_not_and_the_reason_is_named(self):
-        self.place.agents["demo"] = ["7"]
-        self.serve()
-        reply = self.ask({"verb": "writes", "pid": os.getpid()})[0]
-        self.assertFalse(reply["writes"])
-        self.assertIn("an agent (claude or pi) runs in 'demo'", reply["why"])
+    def test_an_agent_session_and_a_run_of_wks_own_may_not_and_the_reason_is_named(self):
+        for chain, words in ((agent_chain, "an agent session (claude, pid 600) is behind this caller"), (own_chain, "a run of wk's own")):
+            with self.subTest(chain=chain.__name__):
+                self.caller_is(chain)
+                self.serve()
+                reply = self.ask({"verb": "writes", "pid": os.getpid()})[0]
+                self.assertFalse(reply["writes"])
+                self.assertIn(words, reply["why"])
+                self.doCleanups()
+                self.setUp()
 
-    def test_nobody_may_who_is_in_no_workspace_and_a_service_that_cannot_ask_says_no(self):
+    def test_nobody_may_who_is_in_no_workspace(self):
         self.serve()
         self.assertFalse(self.ask({"verb": "writes", "pid": 1})[0]["writes"])
-        del self.place.agents["demo"]
-        self.assertFalse(self.ask({"verb": "writes", "pid": os.getpid()})[0]["writes"])
 
-    def test_a_guest_is_named_by_its_address(self):
+    def test_a_guest_is_named_by_its_address_and_one_that_cannot_be_asked_says_no(self):
         vm = Place(self.machine, kind="vm", agents={"g1": [], "g2": ["5"]})
-        vm.guests = [("g1", "192.0.2.2"), ("g2", "192.0.2.3")]
+        vm.guests = [("g1", "192.0.2.2"), ("g2", "192.0.2.3"), ("g3", "192.0.2.4")]
         self.places["vm"] = vm
         self.serve()
         self.assertTrue(self.ask({"verb": "writes", "addr": "192.0.2.2"})[0]["writes"])
         self.assertFalse(self.ask({"verb": "writes", "addr": "192.0.2.3"})[0]["writes"])
+        self.assertFalse(self.ask({"verb": "writes", "addr": "192.0.2.4"})[0]["writes"])
         self.assertFalse(self.ask({"verb": "writes", "addr": "192.0.2.99"})[0]["writes"])
 
     def test_a_question_that_names_nobody_is_refused(self):
@@ -320,7 +405,7 @@ class TestWhoMayWrite(_Service):
 
 
 class TestAGuestsOwnSocket(_Service):
-    """A macOS guest's forward ends at a socket the service made for it, and that socket names the guest."""
+    """A macOS guest's forward ends at a socket the service made for it, and that socket names the guest, which is asked for its agents."""
 
     def setUp(self):
         super().setUp()
@@ -330,7 +415,7 @@ class TestAGuestsOwnSocket(_Service):
         self.addCleanup(shutil.rmtree, self.guests, True)
 
     def test_a_guest_pushes_through_its_socket_whoever_the_caller_is(self):
-        (self.proc / str(os.getpid()) / "cgroup").unlink()
+        (self.proc.root / str(os.getpid()) / "cgroup").unlink()
         self.serve(guest_dir=self.guests)
         reply = self.ask({"verb": "listen", "workspace": "g1"})[0]
         socket_path = os.path.join(self.guests, "g1.push.sock")
@@ -347,6 +432,13 @@ class TestAGuestsOwnSocket(_Service):
         request = {"verb": "push", "host": "git@" + ALIAS, "command": UPLOAD}
         self.assertTrue(self.ask(request, path=paths["g1"])[0]["ok"])
         self.assertIn("an agent (claude or pi) runs in 'g2'", self.ask(request, path=paths["g2"])[0]["refused"])
+
+    def test_a_guest_that_cannot_be_asked_is_refused(self):
+        self.serve(guest_dir=self.guests)
+        path = self.ask({"verb": "listen", "workspace": "gone"})[0]["listening"]
+        reply = self.ask({"verb": "push", "host": "git@" + ALIAS, "command": UPLOAD}, path=path)[0]
+        self.assertIn("could not ask 'gone' whether an agent runs in it", reply["refused"])
+        self.assertEqual("", self.ssh_log())
 
     def test_a_listener_is_made_once_and_only_for_a_name(self):
         svc = self.serve(guest_dir=self.guests)
@@ -376,10 +468,14 @@ class TestTheClient(_Service):
                               env=dict(os.environ, WK_PUSH_SOCKET=path or self.path, **(env or {})))
 
     def serve_for_demo(self):
+        """The client is a subprocess: its pid is this test's chain, in the workspace 'demo'."""
         class Gate(pushgate.Gate):
             def container_of(self, pid):
                 return "demo"
-        self.serve(gate=Gate(Registry(**self.places)))
+
+            def allow(self, t, ws, pid):
+                super().allow(t, ws, os.getpid())
+        self.serve(gate=Gate(Registry(**self.places), proc=str(self.proc.root)))
 
     def test_what_git_would_have_sent_ssh_is_relayed_and_the_sessions_status_is_the_exit_status(self):
         self.serve_for_demo()
@@ -390,11 +486,11 @@ class TestTheClient(_Service):
         self.assertIn("GIT_PROTOCOL=version=2", self.ssh_log())
 
     def test_a_refusal_is_printed_with_its_remedy_and_exits_1(self):
-        self.place.agents["demo"] = ["4242"]
+        self.caller_is(agent_chain)
         self.serve_for_demo()
         cp = self.run_client("git@" + ALIAS, UPLOAD)
         self.assertEqual(1, cp.returncode)
-        self.assertIn(b"error: an agent (claude or pi) runs in 'demo'", cp.stderr)
+        self.assertIn(b"error: an agent session (claude, pid 600) is behind this caller", cp.stderr)
         self.assertIn(b"wk enter demo", cp.stderr)
         self.assertEqual(b"", cp.stdout)
 
@@ -455,30 +551,73 @@ class TestTheGate(unittest.TestCase):
         self.machine = Fake("here")
         self.machine.answer(PS, out="%s\twk-demo\n%s\tnot-a-workspace\n" % (ID, "cd" * 32))
         self.place = Place(self.machine)
+        self.proc = Proc(self.tmp)
         self.gate = pushgate.Gate(Registry(container=self.place), proc=str(self.tmp))
 
-    def cgroup(self, pid, text):
-        (self.tmp / str(pid)).mkdir(exist_ok=True)
-        (self.tmp / str(pid) / "cgroup").write_text(text)
-
     def test_a_pid_is_the_workspace_whose_container_holds_it(self):
-        self.cgroup(5, CGROUP)
+        self.proc.add(5, 1, "bash", ["bash"])
         self.assertEqual("demo", self.gate.container_of(5))
 
     def test_a_pid_in_no_workspace_container_is_none(self):
-        self.cgroup(6, "0::/user.slice/session-3.scope\n")
-        self.cgroup(7, CGROUP.replace(ID, "ef" * 32))
-        self.cgroup(8, CGROUP.replace(ID, "cd" * 32))
+        self.proc.add(6, 1, "bash", ["bash"], cgroup="0::/user.slice/session-3.scope\n")
+        self.proc.add(7, 1, "bash", ["bash"], cgroup=CGROUP.replace(ID, "ef" * 32))
+        self.proc.add(8, 1, "bash", ["bash"], cgroup=CGROUP.replace(ID, "cd" * 32))
         for pid in (6, 7, 8, 99):
             with self.subTest(pid=pid):
                 self.assertIsNone(self.gate.container_of(pid))
 
-    def test_the_scan_names_every_agent_and_a_stopped_workspace_runs_none(self):
-        self.place.agents["demo"] = ["3", "4"]
-        self.assertEqual(["3", "4"], pushgate.agent_pids(self.place, "demo"))
-        self.assertIsNone(pushgate.agent_pids(self.place, "gone"))
-        self.place.state = "exited"
-        self.assertEqual([], pushgate.agent_pids(self.place, "gone"))
+    def test_a_person_is_a_chain_from_the_person_entry_with_no_agent_in_it(self):
+        self.proc.chain(person_chain(77))
+        pushgate.person(self.gate.proc, 77, "demo")
+        for chain, kind, words in ((agent_chain, "agent", "an agent session (claude, pid 600)"),
+                                   (own_chain, "own", "a run of wk's own (pid 77: bash -lc git push)"),
+                                   (orphan_chain, "orphan", "no shell of yours is behind this caller (pid 77)")):
+            with self.subTest(kind=kind):
+                shutil.rmtree(self.tmp)
+                self.proc.chain(chain(77))
+                with self.assertRaises(pushgate.Denied) as got:
+                    pushgate.person(self.gate.proc, 77, "demo")
+                self.assertEqual(kind, got.exception.kind)
+                self.assertIn(words, got.exception.why)
+                self.assertIn("wk enter demo", got.exception.remedy)
+
+    def test_a_gone_pid_and_a_loop_are_nobody_s(self):
+        with self.assertRaises(pushgate.Denied) as got:
+            pushgate.person(self.gate.proc, 77, "demo")
+        self.assertEqual("orphan", got.exception.kind)
+        self.proc.chain([(77, 78, "a", ["a"]), (78, 77, "b", ["b"])])
+        with self.assertRaises(pushgate.Denied):
+            pushgate.person(self.gate.proc, 77, "demo")
+
+    def test_what_makes_a_process_an_agent(self):
+        for words, exe, want in ((["/home/u/.local/bin/claude"], "", "claude"), (["claude", "-p", "hi"], "", "claude"),
+                                 (["/tmp/x/notclaude"], "/home/u/.local/share/claude/versions/2.1.0", "claude"),
+                                 (["python3", "/opt/wk-tools/cmd/ai", "claude"], "", "wk ai"), (["/opt/wk-tools/cmd/ai", "pi"], "", "wk ai"),
+                                 (["node", "/home/u/.local/bin/pi"], "", "pi"), (["node", "/x/pi-coding-agent/dist/cli.js"], "", "pi"),
+                                 (["node", "/home/u/.local/bin/pixie"], "", ""), (["node", "/home/u/project/pi.js"], "", ""),
+                                 (["bash", "-lc", "claude"], "", ""), (["/usr/bin/claudette"], "", ""), ([], "", ""),
+                                 (["sleep", "/opt/wk-tools/cmd/ai"], "", "")):
+            with self.subTest(words=words, exe=exe):
+                self.assertEqual(want, pushgate.agent_word(words, exe))
+
+    def test_the_person_entry_is_the_script_by_name_in_the_first_two_words(self):
+        self.assertTrue(pushgate.is_person_entry(["/bin/sh", PERSON, "bash", "--login"]))
+        self.assertTrue(pushgate.is_person_entry([PERSON, "git", "push"]))
+        self.assertFalse(pushgate.is_person_entry(["bash", "-lc", PERSON]))
+        self.assertFalse(pushgate.is_person_entry(["/bin/sh", "/tmp/wk-person", "bash"]))
+
+    def test_the_container_place_is_never_asked_and_a_guest_is(self):
+        self.proc.chain(person_chain(77))
+        self.gate.allow(self.place, "demo", 77)
+        self.assertEqual([], self.place.execs)
+        vm = Place(self.machine, kind="vm", agents={"g1": ["3", "4"], "g2": []})
+        with self.assertRaises(pushgate.Denied) as got:
+            self.gate.allow(vm, "g1", 0)
+        self.assertIn("an agent (claude or pi) runs in 'g1' (pid 3 4)", got.exception.why)
+        self.gate.allow(vm, "g2", 0)
+        self.assertIsNone(pushgate.agent_pids(vm, "gone"))
+        vm.state = "exited"
+        self.assertEqual([], pushgate.agent_pids(vm, "gone"))
 
     def test_the_command_a_push_may_run(self):
         rows = [["k", "a/b", "alias"], ["k2", "c/d", "alias2"]]
@@ -498,47 +637,10 @@ class TestTheGate(unittest.TestCase):
         self.assertIsNone(gate.guest_at("192.0.2.5"))
 
 
-class TestTheScanOfAWorkspaceRunsForReal(WkTest):
-    """The shell the service runs inside a workspace, over this machine's /proc: an agent is a process whose exe is claude or whose node script is pi."""
+class TestTheGuestScanRunsForReal(WkTest):
+    """The shell the service runs inside a guest, which has no /proc: `ps` names Claude Code's executable, from any install, and a `node .../bin/pi`."""
 
-    def scan(self, script=pushgate.AGENT_PID_SCAN, env=None):
-        cp = subprocess.run(["sh", "-c", script], env=env or os.environ, capture_output=True, text=True)
-        self.assertEqual(0, cp.returncode, cp.stderr)
-        return cp.stdout.split()
-
-    def spawn(self, argv, executable=None):
-        p = subprocess.Popen(argv, executable=executable, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.addCleanup(p.wait)
-        self.addCleanup(p.kill)
-        return str(p.pid)
-
-    @unittest.skipUnless(os.path.isdir("/proc/self"), "needs /proc")
-    def test_a_claude_exe_and_a_node_pi_are_agents_and_nothing_else_is(self):
-        claude = self.tmp / "claude"
-        shutil.copy(shutil.which("sh"), claude)
-        node = "import time; time.sleep(30)"
-        agents = [self.spawn([str(claude), "-c", "sleep 30"]),
-                  self.spawn(["node", "-c", node, "/home/u/.local/bin/pi"], executable=sys.executable),
-                  self.spawn(["node", "-c", node, "/home/u/.local/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"],
-                             executable=sys.executable)]
-        others = [self.spawn(["sleep", "30"]),
-                  self.spawn(["node", "-c", node, "/home/u/.local/bin/pixie"], executable=sys.executable),
-                  self.spawn(["node", "-c", node, "/home/u/project/pi.js"], executable=sys.executable)]
-        found = self.scan()
-        for pid in agents:
-            self.assertIn(pid, found)
-        for pid in others:
-            self.assertNotIn(pid, found)
-
-    @unittest.skipUnless(os.path.isdir("/proc/self"), "needs /proc")
-    def test_the_scan_is_not_its_own_agent(self):
-        found = self.scan()
-        me = subprocess.run(["sh", "-c", 'echo $$; ' + pushgate.AGENT_PID_SCAN], capture_output=True, text=True).stdout.split()
-        self.assertNotIn(me[0], me[1:])
-        self.assertNotIn(me[0], found)
-
-    def test_where_there_is_no_proc_ps_names_the_executable_and_the_node_script(self):
-        """A macOS guest: only Claude Code's executable, from any install, and a `node .../bin/pi`, is a session."""
+    def test_ps_names_the_executable_and_the_node_script(self):
         ps = ("#!/bin/sh\ncase \"$*\" in\n"
               "*comm=*) printf '%s\\n' '11 /opt/homebrew/Caskroom/claude-code/2.1.236/claude' '12 /Users/admin/.local/bin/claude' "
               "'13 /Users/admin/.local/share/claude/versions/2.1.270' '14 /Applications/Claude.app/Contents/MacOS/Claude' "
@@ -547,8 +649,9 @@ class TestTheScanOfAWorkspaceRunsForReal(WkTest):
               "'23 /bin/zsh -c pi' '24 node /Users/admin/.local/bin/pi' ;;\nesac\n")
         (self.tmp / "ps").write_text(ps)
         (self.tmp / "ps").chmod(0o755)
-        script = pushgate.AGENT_PID_SCAN.replace("if [ -d /proc/self ]", "if false")
-        self.assertEqual(["11", "12", "13", "16", "21", "24"], self.scan(script, env={"PATH": "%s:/usr/bin:/bin" % self.tmp}))
+        cp = subprocess.run(["sh", "-c", pushgate.AGENT_PS_SCAN], env={"PATH": "%s:/usr/bin:/bin" % self.tmp}, capture_output=True, text=True)
+        self.assertEqual(0, cp.returncode, cp.stderr)
+        self.assertEqual(["11", "12", "13", "16", "21", "24"], cp.stdout.split())
 
 
 class TestTheSshSessionIsTheKeysAlone(unittest.TestCase):
@@ -558,8 +661,6 @@ class TestTheSshSessionIsTheKeysAlone(unittest.TestCase):
         for word in ("IdentitiesOnly=yes", "IdentityAgent=none", "BatchMode=yes", "/k/key", "SendEnv=GIT_PROTOCOL"):
             self.assertIn(word, argv)
         self.assertEqual(argv[:-2], pushgate.ssh_prefix("/k/key", "version=2"))
-        for bad in ("", "version=22", "version=2 -o ProxyCommand=id", None):
-            self.assertNotIn("SendEnv=GIT_PROTOCOL", pushgate.ssh_argv("/k/key", "x", bad))
 
 
 if __name__ == "__main__":

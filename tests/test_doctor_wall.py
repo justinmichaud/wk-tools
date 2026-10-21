@@ -17,7 +17,7 @@ from tests.fakes import FakeRegistry
 from tests.support import REPO, WkTest, bash, clean_env, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import claudelogin, doctor, places, pushgate, wall  # noqa: E402
+from wk import claudelogin, doctor, places, pushgate, repos, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
@@ -46,11 +46,14 @@ HEALTHY = [
     ("GH_TOKEN", "wk-injects-this"),
     ("BUGS_WEBKIT_ORG_PASSWORD", "wk-injects-this"),
     ("test -r /secrets/claude-token", ""),
-    ("git ls-remote", "error: an agent (claude or pi) runs in 'demo' (pid 9), and nothing it can reach may publish"),
+    ("person:git ls-remote", "0123abcd\trefs/heads/main"),
+    ("git ls-remote", "error: this caller descends from a run of wk's own (pid 9: bash -lc git ls-remote), not from a shell of yours\n"
+                      "    a publish is made from a shell of your own:  wk enter demo"),
     ("git config --global --get core.sshCommand", "/opt/wk-tools/container/push/wk-push-client.py"),
     ("test -S /run/wk/ssh-agent.sock", ""),
     ("https://api.github.com/ 2", "200"),
     ("api.github.com/user", "200"),
+    ("person:/pulls", "422"),
     ("/pulls", "412"),
     ("/git/refs", "422"),
     ("CLAUDE_CODE_OAUTH_TOKEN:+set", ""),
@@ -84,6 +87,7 @@ class _Wall(unittest.TestCase):
         self.fake = Fake()
         self.answers = dict(HEALTHY)
         self.asked = []
+        self.asked_as = []
         self.fake.react(["env"], self._exec)
         self.fake.react(["bash", "-lc"], self._exec)
         self.fake.answer(["python3", os.path.join(str(REPO), "lib", "secretfile.py"), "present"])
@@ -101,20 +105,24 @@ class _Wall(unittest.TestCase):
         return self.reg.load(kind)
 
     def _exec(self, argv, fake):
-        """A container's exec ends in the command; a workspace-local one quotes it after `exec`."""
-        return self._answer(shlex.split(argv[-1])[-1] if argv[:2] == ["bash", "-lc"] else argv[-1])
+        """A container's exec ends in the command; a workspace-local one quotes it after `exec`. A person's run is entered as one."""
+        person = any(a.endswith(pushgate.PERSON) for a in argv)
+        return self._answer(shlex.split(argv[-1])[-1] if argv[:2] == ["bash", "-lc"] else argv[-1], person)
 
-    def _direct(self, ws, argv, tty=False, timeout=None):
+    def _direct(self, ws, argv, tty=False, timeout=None, person=False):
         """For a driver whose own exec would reach tart or ssh."""
-        return self._answer(argv[-1])
+        return self._answer(argv[-1], person)
 
-    def _answer(self, cmd):
-        """curl's `-D -` through the workspace's https_proxy prints the proxy's CONNECT reply first, unless suppressed."""
+    def _answer(self, cmd, person=False):
+        """curl's `-D -` through the workspace's https_proxy prints the proxy's CONNECT reply first, unless suppressed.
+        A `person:` key answers a person's run of that command ahead of the plain key."""
         self.asked.append(cmd)
+        self.asked_as.append((cmd, person))
         connect = "HTTP/1.0 200 Connection established\r\n\r\n" if "curl" in cmd and "-D -" in cmd and "--suppress-connect-headers" not in cmd else ""
-        for key, value in self.answers.items():
-            if key in cmd:
-                return value if isinstance(value, Result) else Result(0, connect + value, "")
+        found = [v for k, v in self.answers.items() if k.startswith("person:") and person and k[len("person:"):] in cmd]
+        found += [v for k, v in self.answers.items() if not k.startswith("person:") and k in cmd]
+        if found:
+            return found[0] if isinstance(found[0], Result) else Result(0, connect + found[0], "")
         return Result(0, "", "")
 
     def set(self, key, value):
@@ -146,11 +154,11 @@ PASSES = (
     ("off_allowlist", {}, {"1.1.1.1": ""}, ()), ("softwareupdate", {}, {}, ()), ("isolation", {}, {}, ()),
     ("commit_wall", {}, {}, ()),
     ("secrets_view", {}, {}, ("no credential this kind is not given is readable in here (claude)",)),
-    ("push_refused", {}, {}, ("no ssh-agent socket", "the push client", "a push is refused while an agent runs")),
+    ("push_refused", {}, {}, ("no ssh-agent socket", "the push client", "a push from wk's own run is refused: this caller descends from a run of wk's own",
+                              "a push from a person's shell is served")),
     ("github_read", {}, {}, ("a read is authenticated (HTTP 200)",)),
-    ("github_write", {}, {}, ("while an agent runs",)),
-    ("person_write", {}, {}, ("a person's write reaches GitHub",)),
-    ("pr_tool_setup", {}, {}, ()), ("bugzilla_read", {}, {}, ()), ("bugzilla_write", {}, {}, ("while an agent runs",)),
+    ("github_write", {}, {}, ("a write from wk's own run is refused by the injector (HTTP 412)", "a write from a person's shell reaches GitHub (HTTP 422")),
+    ("pr_tool_setup", {}, {}, ()), ("bugzilla_read", {}, {}, ()), ("bugzilla_write", {}, {}, ("a Bugzilla write from wk's own run is refused",)),
     ("gpu", {}, {"gpu-probe.sh": Result(1, "renderer=llvmpipe\n", "")}, ("llvmpipe",)),
     ("gpu", {}, {"gpu-probe.sh": Result(2, "", "")}, ()),
 )
@@ -171,16 +179,21 @@ FAILS = (
     ("secrets_view", {}, {"test -r /secrets/claude-token": "yes"}, ("/secrets/claude-token is readable in 'demo'", "Secrets.publish_view")),
     ("push_refused", {}, {"test -S /run/wk/ssh-agent.sock": "agent"}, ("an ssh-agent reaches this workspace",)),
     ("push_refused", {}, {"git config --global --get core.sshCommand": ""}, ("is not the push client", "'wk rm demo' and 'wk new'")),
-    ("push_refused", {}, {"git ls-remote": "Permission denied (publickey)."},
-     ("a push was not refused while an agent ran in 'demo'", "Permission denied")),
-    ("push_refused", {}, {"git ls-remote": "error: this caller is in no workspace\n    ask the host"},
-     ("refused the caller for 'this caller is in no workspace'", "unmeasured", "journalctl --user -u wk-push")),
+    ("push_refused", {"n": 2}, {"git ls-remote": "Permission denied (publickey).", "person:git ls-remote": "Permission denied (publickey)."},
+     ("a push from wk's own run was not refused", "Permission denied", "a push from a person's shell was refused or failed")),
+    ("push_refused", {"n": 2}, {"git ls-remote": "error: this caller is in no workspace\n    ask the host",
+                                "person:git ls-remote": "error: this caller is in no workspace\n    ask the host"},
+     ("refused wk's own run for 'this caller is in no workspace'", "unmeasured", "journalctl --user -u wk-push",
+      "a push from a person's shell was refused or failed")),
+    ("push_refused", {}, {"person:git ls-remote": "error: no shell of yours is behind this caller (pid 9)"},
+     ("a push from a person's shell was refused or failed: error: no shell of yours",)),
     ("github_read", {}, {"api.github.com/user": "000"}, ("rather than 200 or 401",)),
     ("github_read", {}, {"api.github.com/user": "000", "https://api.github.com/ 2": "000"},
      ("the injector is not in the path", "systemctl --user status wk-github-inject", "/run/wk/wk-github-ca.pem")),
-    ("github_write", {}, {"/pulls": "422"}, ("answered '422' while an agent ran", "expected 412")),
-    ("person_write", {}, {"/git/refs": "412"}, ("answered '412'", "fails for a person too")),
-    ("github_write", {}, {"/pulls": ""}, ("answered 'nothing' while an agent ran",)),
+    ("github_write", {}, {"/pulls": "422"}, ("a GitHub write from wk's own run answered '422'", "expected 412")),
+    ("github_write", {}, {"person:/pulls": "412"}, ("a write from a person's shell answered '412'", "fails for a person too")),
+    ("github_write", {"n": 2}, {"/pulls": "", "person:/pulls": ""}, ("a GitHub write from wk's own run answered 'nothing'",
+                                                                      "a write from a person's shell answered 'nothing'")),
     ("agent_credential", {}, {"claude auth status": '{"loggedIn": false}'}, ("not logged in", "'wk rm demo' and 'wk new'", "'wk start demo'")),
     ("agent_credential", {}, {"claude auth status": ""}, ("It answered (first 80 bytes): b''", "claude --version")),
     ("claude_login", {}, {"/.credentials.json": LOGIN}, ("is not the placeholder login", "'wk start demo'")),
@@ -194,7 +207,7 @@ FAILS = (
     ("pr_tool_setup", {}, {"webkitscmpy.setup": ""}, ("has not completed", "wk sync demo --fix")),
     ("pr_tool_setup", {}, {"webkitscmpy.setup": "false"}, ("has not completed", "wk sync demo --fix")),
     ("bugzilla_read", {}, {"rest/version": "000"}, ("not in the path for it", "systemctl --user status wk-github-inject")),
-    ("bugzilla_write", {}, {"http_code}' -X POST -H": "410"}, ("answered '410' while an agent ran", "the write socket serving an agent")),
+    ("bugzilla_write", {}, {"http_code}' -X POST -H": "410"}, ("from wk's own run answered '410'", "serving what is not a person's shell")),
     ("gpu", GPU, {"gpu-probe.sh": Result(1, "renderer=llvmpipe\n", "")}, ("only software rendering",)),
     ("gpu", GPU, {"gpu-probe.sh": Result(2, "", "")}, ("no usable EGL inside the workspace (probe exit 2)",)),
 )
@@ -233,10 +246,11 @@ class TestEachCheck(_Wall):
                     self.assertIn(w, rows_text(rows))
 
     def test_each_wrong_answer_is_one_miss_naming_it(self):
+        """One miss per wrong answer: a check asked as two publishers misses once for each."""
         for name, kw, answers, words in FAILS:
             with self.subTest(check=name, answers=answers, **kw):
                 self.answers = {**dict(HEALTHY), **answers}
-                self.assertFails(self.check(name, **kw), *words)
+                self.assertFails(self.check(name, **{k: v for k, v in kw.items() if k != "n"}), *words, n=kw.get("n", 1))
 
     def test_each_answer_the_sandbox_is_not_at_fault_for_is_a_note(self):
         for name, kw, answers, words in NOTES:
@@ -347,15 +361,60 @@ class TestTheKeyScanRunsForReal(WkTest):
 
 
 class TestPushRefused(_Wall):
-    def test_the_probe_runs_while_a_stand_in_agent_does(self):
-        self.check("push_refused")
+    def test_a_container_is_asked_as_wks_own_run_then_as_a_persons_shell(self):
+        rows = self.check("push_refused")
+        probes = [(c, p) for c, p in self.asked_as if "git ls-remote" in c]
+        self.assertEqual([False, True], [p for _, p in probes])
+        self.assertIn("git@github-webkit:", probes[0][0])
+        self.assertNotIn('"$d/claude"', probes[0][0], "no stand-in agent: the service reads a container's ancestry")
+        self.assertPasses(rows)
+
+    def test_the_one_repository_an_agent_publishes_is_served_to_wks_own_run(self):
+        self.fake.answer(["git", "-c", "safe.directory=*", "-C", self.driver.tools_src(), "remote", "get-url", "origin"], out="https://github.com/u/wk-tools.git\n")
+        self.set("git ls-remote", "0123abcd\trefs/heads/main")
+        with mock.patch.object(self.driver, "repo", return_value=repos.Repo("wk-tools")):
+            rows = self.check("push_refused")
+        self.assertPasses(rows)
+        self.assertIn("a push of u/wk-tools from wk's own run is served: the one repository an agent publishes", rows_text(rows))
+        self.assertIn("git@github-wk-tools:u/wk-tools.git", self.asked[-1])
+
+
+class TestAGuestsPublishers(_Wall):
+    """A guest has no chain the service can read: a stand-in agent is run beside the probe, and a person's write is measured after the parallel pass."""
+    kind = "vm"
+
+    def setUp(self):
+        super().setUp()
+        self.driver.exec = self._direct
+        self.driver.info = lambda ws: "running"
+        self.set("git config --global --get core.sshCommand", self.driver.tools("demo") + "/container/push/wk-push-client.py")
+
+    def test_the_push_probe_runs_beside_a_stand_in_agent(self):
+        rows = self.check("push_refused")
         probe = next(c for c in self.asked if "git ls-remote" in c)
         self.assertIn('cp "$(command -v sh)" "$d/claude"', probe)
-        self.assertIn("git@github-webkit:", probe)
         self.assertLess(probe.index('"$d/claude" -c'), probe.index("git ls-remote"))
+        self.assertIn("a push from an agent in the guest is refused", rows_text(rows))
 
-    def test_the_stand_in_is_what_the_scan_looks_for(self):
-        self.assertIn("*/claude", pushgate.AGENT_PID_SCAN)
+    def test_a_persons_write_is_unmeasured_while_an_agent_runs_or_with_no_fork(self):
+        self.set("ps -Ao", "4242")
+        rows = self.check("person_write")
+        self.assertEqual([], self.misses(rows))
+        self.assertIn("an agent runs in 'demo'", rows_text(rows))
+        self.assertFalse([c for c in self.asked if "/git/refs" in c])
+        with mock.patch.object(wall.secrets, "forks", return_value=[]):
+            self.assertIn("no fork is configured", rows_text(self.check("person_write")))
+
+    def test_a_persons_write_reaches_github_and_a_412_names_the_push_service(self):
+        self.assertIn("a write from a person's shell reaches GitHub (HTTP 422", rows_text(self.check("person_write")))
+        self.set("/git/refs", "412")
+        self.assertFails(self.check("person_write"), "answered '412'", "fails for a person too")
+
+    def test_a_persons_write_is_probed_after_every_stand_in_agent(self):
+        self.fake.files[os.path.join(self.driver.vm_dir(), "demo.unfiltered")] = ""
+        wall.from_host(str(REPO), self.driver, "demo", self.fake, doctor.Report(io.StringIO()))
+        last_agent = max(i for i, c in enumerate(self.asked) if '"$d/claude"' in c)
+        self.assertGreater(min(i for i, c in enumerate(self.asked) if "/git/refs" in c), last_agent)
 
 
 class TestGitHubRead(_Wall):
@@ -509,8 +568,8 @@ class TestFromTheHost(_Wall):
         rep, out = self.report()
         self.assertEqual(0, rep.missing, out)
         self.assertFalse(self.publishing)
-        for w in ("workspace running", "a push is refused while an agent runs", "the placeholder login is authenticated", "commit wall", "podman is rootless",
-                  "no network interface but loopback", "github reachable"):
+        for w in ("workspace running", "a push from wk's own run is refused", "a push from a person's shell is served",
+                  "the placeholder login is authenticated", "commit wall", "podman is rootless", "no network interface but loopback", "github reachable"):
             self.assertIn(w, out)
 
     def test_the_write_probe_runs_after_the_parallel_pass(self):
@@ -518,19 +577,11 @@ class TestFromTheHost(_Wall):
         self.assertNotIn("rm -f /opt/wk-tools/.wk-write-probe", self.asked)
         self.assertEqual("touch /opt/wk-tools/.wk-write-probe 2>&1", self.asked[-1])
 
-    def test_a_persons_write_is_unmeasured_while_an_agent_runs_or_with_no_fork(self):
-        self.set("/proc/[0-9]*", "4242")
-        rows = self.check("person_write")
-        self.assertEqual([], self.misses(rows))
-        self.assertIn("an agent runs in 'demo'", rows_text(rows))
-        self.assertFalse([c for c in self.asked if "/git/refs" in c])
-        with mock.patch.object(wall.secrets, "forks", return_value=[]):
-            self.assertIn("no fork is configured", rows_text(self.check("person_write")))
-
-    def test_a_persons_write_is_probed_after_every_stand_in_agent(self):
+    def test_a_containers_person_is_measured_in_the_pass_and_no_stand_in_agent_runs(self):
+        self.assertEqual([], self.check("person_write"))
         self.report()
-        last_agent = max(i for i, c in enumerate(self.asked) if '"$d/claude"' in c)
-        self.assertGreater(min(i for i, c in enumerate(self.asked) if "/git/refs" in c), last_agent)
+        self.assertFalse([c for c in self.asked if '"$d/claude"' in c])
+        self.assertEqual([False, True], [p for c, p in self.asked_as if "/pulls" in c])
 
     def test_a_push_that_is_not_refused_is_publishing_and_a_failed_read_is_not(self):
         self.set("git ls-remote", "")
@@ -593,11 +644,16 @@ class TestAGuest(_Wall):
 
 
 class TestFromInside(_Wall):
+    """Inside, the probes run as whatever this process is to the push service; an agent session's own check is the usual one."""
     kind = "local"
+    standing = "an agent session"
 
     def setUp(self):
         super().setUp()
         self.set("git config --global --get core.sshCommand", str(REPO / "container" / "push" / "wk-push-client.py"))
+        patch = mock.patch.object(wall.Wall, "own_standing", return_value=self.standing)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def results(self):
         out = io.StringIO()
@@ -634,6 +690,70 @@ class TestFromInside(_Wall):
             self.assertIn("commit-wall", [n for n, _ in self.wall().from_inside()])
         with mock.patch.object(self.driver, "os", return_value="macos"):
             self.assertNotIn("commit-wall", [n for n, _ in self.wall().from_inside()])
+
+    def test_an_agents_own_push_is_refused_and_its_check_says_so(self):
+        _, rep, out = self.results()
+        self.assertEqual(0, rep.missing, out)
+        self.assertIn("a push from an agent session is refused", out)
+        self.assertIn("a write from an agent session is refused by the injector", out)
+
+
+class TestFromInsideAPersonsShell(TestFromInside):
+    """`wk doctor` typed in a person's own shell: its push is served, and that is not publishing."""
+    standing = "a person's shell"
+
+    def setUp(self):
+        super().setUp()
+        self.set("git ls-remote", "0123abcd\trefs/heads/main")
+        self.set("/pulls", "422")
+
+    def test_a_healthy_workspace_passes_and_nothing_can_publish(self):
+        publishing, rep, out = self.results()
+        self.assertFalse(publishing)
+        self.assertEqual(0, rep.missing, out)
+        self.assertIn("a push from a person's shell is served", out)
+        self.assertIn("a write from a person's shell reaches GitHub", out)
+        self.assertIn("a Bugzilla write is not measured from a person's shell", out)
+
+    def test_each_way_to_publish_is_publishing(self):
+        self.skipTest("a person's shell publishes by design; the agent session's case above holds the rule")
+
+    def test_an_agents_own_push_is_refused_and_its_check_says_so(self):
+        self.assertEqual(0, self.results()[1].missing)
+
+
+class TestFromInsideAToolsWorkspace(TestFromInside):
+    """The one repository an agent publishes: no commit wall, and its push is served to the agent's own session."""
+
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "marker").write_text("name=demo\nsrc=/src/wk-tools\nrepo=wk-tools\n")
+        self.driver = self.load("local")
+        self.fake.answer(["git", "-c", "safe.directory=*", "-C", self.driver.tools_src(), "remote", "get-url", "origin"], out="https://github.com/u/wk-tools.git\n")
+        self.set("git ls-remote", "0123abcd\trefs/heads/main")
+
+    def test_a_healthy_workspace_passes_and_nothing_can_publish(self):
+        publishing, rep, out = self.results()
+        self.assertFalse(publishing)
+        self.assertEqual(0, rep.missing, out)
+        self.assertIn("a push of u/wk-tools from an agent session is served: the one repository an agent publishes", out)
+        self.assertIn("a write from an agent session is refused by the injector", out)
+        self.assertNotIn("commit-wall", [n for n, _ in self.wall().from_inside()])
+
+    def test_each_way_to_publish_is_publishing(self):
+        for key, value in (("/pulls", "422"), ("http_code}' -X POST -H", "410"), ("test -S /run/wk/ssh-agent.sock", "agent")):
+            with self.subTest(key=key):
+                self.set(key, value)
+                self.assertTrue(self.results()[0])
+                self.set(key, dict(HEALTHY)[key])
+
+    def test_an_agents_own_push_is_refused_and_its_check_says_so(self):
+        self.skipTest("a wk-tools workspace serves its agent's push")
+
+    def test_the_commit_wall_is_probed_where_bwrap_is(self):
+        for os_name in ("linux", "macos"):
+            with mock.patch.object(self.driver, "os", return_value=os_name):
+                self.assertNotIn("commit-wall", [n for n, _ in self.wall().from_inside()], "no wall around the one repository an agent publishes")
 
 
 class TestTheDriversAnswer(_Wall):

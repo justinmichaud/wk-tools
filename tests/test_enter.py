@@ -1,12 +1,17 @@
 """`wk enter` -- a shell in a workspace, or one command run there and exited."""
+import contextlib
 import io
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
-from tests.support import WkTest, fake_workspace, load_cmd, run
+from tests.support import REPO, WkTest, fake_workspace, load_cmd, run
+
+sys.path.insert(0, str(REPO / "lib"))
+from wk.act import Refused  # noqa: E402
 
 
 class TestRunsCommand(WkTest):
@@ -52,8 +57,24 @@ class TestNoTerminalAsksForNone(unittest.TestCase):
                 mock.patch.dict(os.environ, {"WK_NAME": "ws"}), \
                 mock.patch("sys.stdin", io.StringIO("")):
             enter.main(["git", "status"])
-        driver.exec_argv.assert_called_once_with("ws", ["git", "status"], tty=False)
+        driver.exec_argv.assert_called_once_with("ws", ["git", "status"], tty=False, person=True)
         reg.machine.exec.assert_called_once_with(["true"], None)
+
+    def test_own_runs_the_command_as_wks_own_not_a_persons_and_takes_no_shell(self):
+        enter = load_cmd("enter")
+        driver = mock.Mock()
+        driver.info.return_value = "present"
+        driver.exec_argv.return_value = (["true"], None)
+        reg = mock.Mock()
+        reg.present.return_value = driver
+        with mock.patch.object(enter.places, "Registry", return_value=reg), \
+                mock.patch.dict(os.environ, {"WK_NAME": "ws"}), \
+                mock.patch("sys.stdin", io.StringIO("")):
+            enter.main(["--own", "--", "git", "status"])
+            driver.exec_argv.assert_called_once_with("ws", ["git", "status"], tty=False, person=False)
+            with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
+                enter.main(["--own"])
+        self.assertIn("--own takes a command", err.getvalue())
 
 
 class TestNoSuchWorkspace(WkTest):

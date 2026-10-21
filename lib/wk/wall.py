@@ -74,7 +74,10 @@ def claude_status(text):
     return "%s %s" % (doc.get("loggedIn"), doc.get("authMethod"))
 
 
-def commit_walled(driver):
+def commit_walled(driver, ws):
+    """A container's agent session is walled off git history, unless the workspace holds the one repository an agent publishes."""
+    if driver.repo(ws).agent_push:
+        return False
     return driver.kind == "container" or (driver.kind == "local" and driver.os() != "macos")
 
 
@@ -114,12 +117,31 @@ class Wall:
         self.machine = machine
         self.want_gpu = want_gpu
 
-    def inside(self, cmd):
+    def inside(self, cmd, person=False):
         """The container exec path appends \\r, which every numeric probe would then test as "2\\r"."""
-        return self.driver.exec(self.ws, ["bash", "-lc", cmd]).out.replace("\r", "").rstrip("\n")
+        return self.driver.exec(self.ws, ["bash", "-lc", cmd], person=person).out.replace("\r", "").rstrip("\n")
 
     def with_agent(self, cmd):
         return self.inside(WITH_AGENT % cmd)
+
+    def own_standing(self):
+        """Inside a workspace, what this process is to the push service; a guest has no /proc, so by its agents."""
+        if self.driver.os() == "macos":
+            return "an agent session" if pushgate.agent_pids(self.driver, self.ws) else "a person's shell"
+        try:
+            pushgate.person(pushgate.Proc(), os.getpid(), self.ws)
+            return "a person's shell"
+        except pushgate.Denied as e:
+            return "an agent session" if e.kind == "agent" else "wk's own run"
+
+    def publishers(self):
+        """(who, run, served) for each way a publish is tried: a container as wk's own run and a person's shell, a guest beside a stand-in agent."""
+        if self.driver.kind == "local":
+            who = self.own_standing()
+            return [(who, self.inside, who == "a person's shell")]
+        if self.driver.kind == "vm":
+            return [("an agent in the guest", self.with_agent, False)]
+        return [("wk's own run", self.inside, False), ("a person's shell", lambda cmd: self.inside(cmd, person=True), True)]
 
     def github(self):
         code = status_of(self.inside(http("https://github.com/")))
@@ -234,7 +256,6 @@ class Wall:
         return rows
 
     def push_refused(self):
-        """No key reaches the workspace, and its git push is refused while an agent runs in it."""
         tools = self.driver.tools(self.ws)
         agent = self.inside('test -S /run/wk/ssh-agent.sock && echo agent; printf %s "${SSH_AUTH_SOCK:+env}"')
         rows = [miss("an ssh-agent reaches this workspace (%s)" % agent.replace("\n", " "), "no key may: nothing but the push service holds one")
@@ -245,16 +266,26 @@ class Wall:
                                 "'wk rm %s' and 'wk new' remake the workspace with it; a guest is rewritten at every 'wk start %s'"
                                 % (self.ws, self.ws))]
         rows.append(ok("git's ssh transport is the push client, so a push is the host's service's to allow"))
-        _, repo, alias = self.driver.repo(self.ws).push_rows(self.machine, self.driver.tools_src())[0]
-        url = "git@%s:%s.git" % (alias, repo)
-        said = self.with_agent("GIT_TERMINAL_PROMPT=0 git ls-remote --heads %s 2>&1 | head -3" % url)
-        if "agent" in said and "runs in" in said:
-            return rows + [ok("a push is refused while an agent runs in the workspace")]
+        repo = self.driver.repo(self.ws)
+        _, name, alias = repo.push_rows(self.machine, self.driver.tools_src())[0]
+        probe = "GIT_TERMINAL_PROMPT=0 git ls-remote --heads git@%s:%s.git 2>&1 | head -3" % (alias, name)
+        for who, run, served in self.publishers():
+            rows.append(self.push_row(who, run(probe), served or repo.agent_push, repo.agent_push and name))
+        return rows
+
+    def push_row(self, who, said, served, agent_repo):
+        first = said.replace("\n", " ")[:160] or "nothing said"
+        if served and "refs/heads/" in said:
+            return ok("a push of %s from %s is served: the one repository an agent publishes" % (agent_repo, who) if agent_repo
+                      else "a push from %s is served by the push service" % who)
+        if served:
+            return miss("a push from %s was refused or failed: %s" % (who, first), "the push service's journal on the host: journalctl --user -u wk-push")
+        if re.search(r"error: .*(shell of yours|agent session|runs in)", said):
+            return ok("a push from %s is refused: %s" % (who, re.search(r"error: (.+)", said).group(1)[:100]))
         if why := re.match(r"error: (.+)", said):
-            return rows + [miss("the push service refused the caller for '%s' before asking about agents, so whether an agent's push "
-                                "is refused is unmeasured" % why.group(1), "the push service's journal on the host: journalctl --user -u wk-push")]
-        return rows + [miss("a push was not refused while an agent ran in '%s': %s" % (self.ws, said.replace("\n", " ")[:160] or "nothing said"),
-                            "the push service on the host: 'wk doctor' there says whether it answers")]
+            return miss("the push service refused %s for '%s' before deciding who it is, so whether its push is refused is unmeasured"
+                        % (who, why.group(1)), "the push service's journal on the host: journalctl --user -u wk-push")
+        return miss("a push from %s was not refused: %s" % (who, first), "the push service on the host: 'wk doctor' there says whether it answers")
 
     def github_read(self):
         """GET / answers 200 unauthenticated and 401 only for a token GitHub refuses, which is the injector's own standing one."""
@@ -280,35 +311,38 @@ class Wall:
                      self.driver.daemon_remedy(self.ws, "inject"))]
 
     def person_write(self):
-        """After the parallel pass, whose stand-in agents would be this probe's: with none, an empty ref is GitHub's 422."""
+        """A guest's person is measured after the parallel pass, whose stand-in agents would refuse it."""
+        if self.driver.kind != "vm":
+            return []
         fork = next((r[1] for r in secrets.forks()), "")
         if not fork:
             return [note("a person's write is not measured: no fork is configured to write an empty ref to")]
         if pushgate.agent_pids(self.driver, self.ws):
             return [note("a person's write is not measured: an agent runs in '%s', so the injector refuses it as it should" % self.ws)]
-        reply = self.inside(http("https://api.github.com/repos/%s/git/refs" % fork, "-X POST -d '{}' "))
-        if gap := self.gap("GitHub", reply):
-            return gap
-        code = status_of(reply)
-        if code == "422":
-            return [ok("a person's write reaches GitHub (HTTP 422 for an empty ref): no agent, so the injector writes")]
-        return [miss("a write from '%s' with no agent in it answered '%s' -- expected GitHub's 422; a 412 is the push service not "
-                     "saying no agent runs here, so '%s pr' fails for a person too" % (self.ws, code or "nothing", project.get("PR_TOOL")),
-                     "the push service where the workspace's place runs it ('./setup' converges it)")]
+        return self.write_row("a person's shell", self.inside(http("https://api.github.com/repos/%s/git/refs" % fork, "-X POST -d '{}' ")), True)
 
     def github_write(self):
-        """An empty body names no branch; with an agent running the injector answers 412 before GitHub is asked."""
         fork = next((r[1] for r in secrets.forks()), "")
-        reply = self.with_agent(http("https://api.github.com/repos/%s/pulls" % fork, "-X POST -d '{}' "))
+        rows = []
+        for who, run, served in self.publishers():
+            rows += self.write_row(who, run(http("https://api.github.com/repos/%s/pulls" % fork, "-X POST -d '{}' ")), served)
+        return rows
+
+    def write_row(self, who, reply, served):
         if gap := self.gap("GitHub", reply):
             return gap
         code = status_of(reply)
+        if served and code == "422":
+            return [ok("a write from %s reaches GitHub (HTTP 422 for an empty request): the injector writes for it" % who)]
+        if served:
+            return [miss("a write from %s answered '%s' -- expected GitHub's 422; a 412 is the push service not taking it for a person's, "
+                         "so '%s pr' fails for a person too" % (who, code or "nothing", project.get("PR_TOOL")),
+                         "the push service where the workspace's place runs it ('./setup' converges it)")]
         if code == "412":
-            return [ok("a write is refused by the injector (HTTP 412) while an agent runs in the workspace")]
-        return [miss("POST /repos/%s/pulls answered '%s' while an agent ran in the workspace -- expected 412, the injector's own refusal"
-                     % (fork, code or "nothing"),
+            return [ok("a write from %s is refused by the injector (HTTP 412)" % who)]
+        return [miss("a GitHub write from %s answered '%s' -- expected 412, the injector's own refusal" % (who, code or "nothing"),
                      "a 401 is an injector still running older code, which 'wk status' reports and './setup' on that machine "
-                     "restarts; anything else is the write socket serving an agent: the push service and the egress proxy")]
+                     "restarts; anything else is the write socket serving what is not a person's shell: the push service and the egress proxy")]
 
     def agent_credential(self):
         """`claude auth status` is local (measured 2026-09-10: loggedIn for a token Anthropic has never seen)."""
@@ -409,16 +443,22 @@ class Wall:
                      self.driver.daemon_remedy(self.ws, "inject"))]
 
     def bugzilla_write(self):
-        reply = self.with_agent(http(project.get("BUGZILLA") + "/rest/bug", "-X POST -H 'Content-Type: application/json' -d '{}' "))
-        if gap := self.gap("Bugzilla", reply):
-            return gap
-        code = status_of(reply)
-        if code == "412":
-            return [ok("a Bugzilla write is refused by the injector (HTTP 412) while an agent runs in the workspace")]
-        return [miss("POST /rest/bug answered '%s' while an agent ran in the workspace -- expected 412, the injector's own refusal"
-                     % (code or "nothing"),
-                     "Bugzilla's own 'log in first' is an injector still running older code, which 'wk status' reports and "
-                     "'./setup' on that machine restarts; anything else is the write socket serving an agent")]
+        rows = []
+        for who, run, served in self.publishers():
+            if served:
+                continue
+            reply = run(http(project.get("BUGZILLA") + "/rest/bug", "-X POST -H 'Content-Type: application/json' -d '{}' "))
+            if gap := self.gap("Bugzilla", reply):
+                rows += gap
+                continue
+            code = status_of(reply)
+            if code == "412":
+                rows.append(ok("a Bugzilla write from %s is refused by the injector (HTTP 412)" % who))
+            else:
+                rows.append(miss("POST /rest/bug from %s answered '%s' -- expected 412, the injector's own refusal" % (who, code or "nothing"),
+                                 "Bugzilla's own 'log in first' is an injector still running older code, which 'wk status' reports and "
+                                 "'./setup' on that machine restarts; anything else is the write socket serving what is not a person's shell"))
+        return rows or [note("a Bugzilla write is not measured from a person's shell: Bugzilla's own answer is not this wall's")]
 
     def gpu(self):
         """gpu-probe.sh exits 0 hardware, 1 software only, 2 no EGL, 3 build failed."""
@@ -466,7 +506,7 @@ class Wall:
                 checks.append(("egress-softwareupdate", self.softwareupdate))
         if self.driver.kind == "container":
             checks.append(("isolation", self.isolation))
-        if commit_walled(self.driver):
+        if commit_walled(self.driver, self.ws):
             checks.append(("commit-wall", self.commit_wall))
         if self.driver.kind in secrets.LOGIN_KINDS:
             checks.append(("claude-login", self.claude_login))
@@ -481,7 +521,7 @@ class Wall:
                   ("bugzilla-read", self.bugzilla_read), ("bugzilla-write", self.bugzilla_write), ("egress-github", self.github),
                   ("egress-allowlist", self.allowlist), ("egress-off-allowlist", self.off_allowlist),
                   ("no-credentials", self.no_credentials_inside), *self.pr_tool_check()]
-        if commit_walled(self.driver):
+        if commit_walled(self.driver, self.ws):
             checks.append(("commit-wall", self.commit_wall))
         return checks
 

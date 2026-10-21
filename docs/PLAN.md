@@ -6,16 +6,16 @@ last step lands.
 
 ## Where we are
 
-Measured 2026-09-22 on this workstation.
+Measured 2026-10-18 in a wk-tools workspace (`python3 tests/run.py --lint --unit`).
 
 | | |
 | --- | --- |
-| code | 39k lines of bash, 13k of Python (the dispatcher, the registry and drivers, the record, status and doctor among it); 39 commands, 21 of them Python, 8 over 500 lines and holding 53% of command code |
-| tests | 71k lines, 194 modules, 4434 tests in the lint and unit tiers, 40 in the live tier |
-| `wk selftest` (lint then unit) | 13.4 minutes, green; the lint tier alone 27 s |
-| the slowest unit test | 16 s, under a 30 s budget the runner enforces |
-| owed tests | 11 |
-| places a test starts a process | 1,540 |
+| code | 36k non-blank lines of Python outside `tests/`, 6k of shell (what runs on a board, a phone, a bench install or in a place, and the setup stages); 25 commands, all Python |
+| tests | 52k lines, 248 modules, 3,963 tests in the lint and unit tiers, 127 in the live tier |
+| `wk selftest` (lint then unit) | 3.9 minutes, green; the lint tier alone 15 s |
+| the slowest unit test | 5.7 s, under a 30 s budget the runner enforces |
+| owed tests | 4 (two in the lint tier, two in the unit tier), plus the live rows marked `owed` |
+| the last live run from the host | before the push rule became the caller's ancestry; `ToolsWorkspaceLive` and `DevIntegrationContainer` steps 5, 10 and 11 are owed a run |
 
 Why bugs come back:
 
@@ -126,6 +126,8 @@ Answered 2026-10-05 (third batch): Bugzilla editbugs is probed through the comme
 Answered 2026-10-05 (fourth batch): wk-tools work happens in a workspace made by `wk new <ws> --repo wk-tools`, whose checkout is wk-tools instead of WebKit and where `./wk selftest` runs, while live lanes stay driven from the host; the host `claude` goes once that works.
 
 Answered 2026-10-05 (fifth batch): the user's Bugzilla account has no editbugs, so the comment-tag probe's "cannot tag comments" is right for it; boards keep the ssh -R tunnel to the page server until upstream run-benchmark takes a bind address (an upstream patch), after which a run from a `tag:wk` machine hands boards the server's tailnet address.
+
+Answered 2026-10-18: a publish from a container is served by the caller's ancestry (a person's own run, no agent session between), and wk-tools is the one repository an agent commits and pushes; `kernel.yama.ptrace_scope` stays as the machine ships it (0 on the podman machine), since an agent attaching to a person's shell is a hole the sandbox need not close.
 
 Answered 2026-10-05 (sixth batch): each repo has its own push identity (wk-tools its own deploy key); commands declare the repos they serve and the dispatcher refuses the rest; on a Mac the host-side injector holds and refreshes the claude.ai login and the podman VM's injector forwards Claude traffic to it, so a guest never needs the podman VM (the two VMs do not fit the Mac's memory envelope together); the injector adds the bearer for api.anthropic.com, claude.ai and platform.claude.com.
 
@@ -272,11 +274,13 @@ exist.
      `tests/test_agents.py`), and step 2 asserts a made workspace's Claude CLI runs. Live:
      `test_dev_integration`'s `test_04_claude_starts_after_the_sandbox_check`
      starts `wk ai claude` on a container, a guest and a peer's container and
-     asserts the wall check printed `sandbox intact`; `test_05_a_push_is_refused_while_claude_runs`
-     asserts a push is refused while a claude session runs in the workspace. Owed: the live
+     asserts the wall check printed `sandbox intact`; `test_05_a_push_is_served_to_a_person_alone`
+     asserts a person's push is served beside a running claude session and the session's own, wk's
+     own run's and a daemon the session left behind are refused (a guest: refused while claude runs). Owed: the live
      checks `ai.walled_session` (the stopped-proxy refusal, a tool refused
-     the network), `ai.commit_wall` (git's own error and the rule, a
-     terminal session's push back on at exit) and `ai.remote_control`.
+     the network), `ai.commit_wall` (git's own error and the rule) and `ai.remote_control`, and
+     the unit and live halves of the push rule since it became the caller's ancestry (`unit push_service`,
+     `test_05`, `ToolsWorkspaceLive`) have not run on the host.
    - *`sync`.* `cmd/sync` is a Python entry point (its parse and `--where`)
      over `lib/wk/sync.py`; each driver's furniture is `Driver.sync` in
      `lib/wk/places.py`, and `wk remotes` is a tombstone for `wk sync
@@ -1164,7 +1168,8 @@ decides is a row; one still open is listed under "Decisions for the user".
 | `wk sync` bare inside a workspace syncs it, `--all` reaches every workspace on every place, `--tools` refreshes every machine's copy and publishes one snapshot, `WK_MIRROR_BRANCHES` carries the extra branches | 3 | `live sync.fleet` (`wk sync <ws>` is `test_dev_integration` step 12) |
 | The PR workflow runs as one flow: `wk sync --fix`, `wk pr`, a push through the push service, the `container/bin` helpers, agents building while a person pushes, including from an armhf container | 3 | `live pr.workflow` |
 | `wk ai claude` refuses a stopped proxy, and a tool inside wanting the network is refused and told so | 3 | `live ai.walled_session` |
-| In an agent session `git commit` and `git push` name the rule after git's own error, and a terminal session turns push back on at exit | 3 | `live ai.commit_wall` |
+| In an agent session `git commit` and `git push` name the rule after git's own error | 3 | `live ai.commit_wall` |
+| A publish from a container is served to a person's shell alone: a process left behind by an agent session (`setsid`, a detached job), a build that pushes from its build script, and `wk enter --own` are refused by the caller's ancestry; a person's shell beside a running agent is served | 3 | `unit push_service.TestAPush`, `live dev_integration.test_05_a_push_is_served_to_a_person_alone` |
 | `wk ai claude` on a terminal, against a real container and a real guest holding only the placeholder login while the injector holds the claude.ai login, starts a session Remote Control shows under the workspace's name, its connection (WebSocket or SSE) passing through the injector; on a build box holding the inference token it starts without it and says so | 3 | `live ai.remote_control` |
 | In a real guest `wk doctor <ws>` shows the placeholder login and no readable claude.ai token, and a `claude -p` answers through the host injector (measured for containers; the guest half is held by `live inject.claude_login[vm]`, run while a guest is up); any host beyond api.anthropic.com, claude.ai and platform.claude.com the CLI sends the bearer to is measured from the proxy log and added | 3 | `live inject.claude_login[vm]` |
 | The Mac's (or a Linux machine's) injector refreshes an expired claude.ai login against the CLI's token endpoint and stores the rotated refresh token; the podman machine's injector never reads the login | 3 | `live inject.claude_refresh` |
@@ -1231,8 +1236,8 @@ decides is a row; one still open is listed under "Decisions for the user".
 | bugs.webkit.org gates comment tagging on editbugs, so `wk doctor`'s Bugzilla row can say editbugs: the comment-tag probe answers a key of an account with editbugs and refuses (304) one without | 4 | `live credcheck.editbugs_probe` |
 | A board reaches the page server at its tailnet name and port through the `tag:wk -> tag:wk` grant, with no `ssh -R` held for the run | 5 | `live bench.direct_page_server[<board>]` |
 | A push from a wk-tools workspace, with no agent running in it, reaches the user's wk-tools repository on GitHub through the push service and its own deploy key | 3 | `live repo_workspace_live.ToolsWorkspaceLive.test_a_push_reaches_the_tools_repository_through_its_deploy_key` |
-| A container's `git push` reaches the push service, which maps the peer's pid through its cgroup (`libpod-<id>.scope`, measured 2026-10-08 on the podman VM) to the workspace, refuses while a claude or pi process runs in that workspace (not another's), and otherwise pushes with the deploy key | 3 | `live repo_workspace_live.ToolsWorkspaceLive.test_the_push_service_names_a_container_caller_and_refuses_only_while_an_agent_runs_in_it` |
-| The podman machine's push service pushes with the deploy keys `./setup` and `wk key deploy` copied into it, and its proxy sends a workspace with an agent to the injector's reading socket | 3 | `live repo_workspace_live.ToolsWorkspaceLive.test_the_push_service_names_a_container_caller_and_refuses_only_while_an_agent_runs_in_it` (the keys), `live repo_workspace_live.ToolsWorkspaceLive.test_the_proxy_gives_a_person_the_write_socket_and_an_agent_the_reading_one` |
+| A container's `git push` reaches the push service, which maps the peer's pid through its cgroup (`libpod-<id>.scope`, measured 2026-10-08 on the podman VM) to the workspace and reads its ancestry; wk-tools, the one repository an agent publishes, is served to a person, to wk's own run and to an agent session alike, and a fork is not a wk-tools workspace's to push | 3 | `live repo_workspace_live.ToolsWorkspaceLive.test_the_push_service_serves_the_tools_repository_to_a_person_to_wks_own_run_and_to_an_agent`, `test_a_fork_is_not_a_tools_workspaces_to_push` |
+| The podman machine's push service pushes with the deploy keys `./setup` and `wk key deploy` copied into it, and its proxy sends what is not a person's shell to the injector's reading socket | 3 | `live repo_workspace_live.ToolsWorkspaceLive.test_the_push_service_serves_the_tools_repository_to_a_person_to_wks_own_run_and_to_an_agent` (the keys), `live repo_workspace_live.ToolsWorkspaceLive.test_the_proxy_gives_a_person_the_write_socket_and_wks_own_run_the_reading_one` |
 | A macOS guest's `git push` reaches the Mac's push service through the guest's forward and its own listener, and the Mac proxy sends a guest with an agent to the injector's reading socket by its address | 5 | `live push.guest_forward` |
 | Speedometer 3 under MiniBrowser runs without its `wakeLock` error: an upstream WebKit patch, landed last, after every other owed row | end | `live bench.speedometer3_wakelock[mbp]` |
 

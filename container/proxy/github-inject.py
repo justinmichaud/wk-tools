@@ -3,7 +3,7 @@
 hosts whose TLS ends here. api.github.com takes a token in the Authorization
 header: a read spends the standing one, a write only on the writing socket. bugs.webkit.org
 takes an api_key query parameter, the held key, on the writing socket alone. The proxy picks the
-reading socket for a workspace an agent runs in, and a write there is refused here, naming that.
+reading socket for a request that is not a person's shell's, and a write there is refused here, naming that.
 api.anthropic.com, claude.ai and platform.claude.com take the claude.ai login's
 access token for the placeholder bearer, and refuse their OAuth endpoints; the rest
 passes as sent. WK_INJECT_CLAUDE_LOGIN names the holder; the podman machine's relays to the Mac's."""
@@ -59,9 +59,9 @@ READ_METHODS = ("GET", "HEAD")
 WRITE_REFUSED_STATUS = b"412 Precondition Failed"
 WRITE_REFUSED_REASON = (
     b"the wk credential injector has no credential to write with and did not "
-    b"forward this request: an agent runs in this workspace, or no token is "
-    b"stored ('wk key set github-pat'). End the session, or run the command "
-    b"from a shell of your own (wk enter <workspace>) once none runs here.\r\n")
+    b"forward this request: it is not from a shell of yours (an agent session, a "
+    b"build or a daemon is behind it), or no token is stored ('wk key set "
+    b"github-pat'). Run the command from a shell of your own (wk enter <workspace>).\r\n")
 
 # GitHub's API is all behind /graphql: only the document says if a POST writes.
 _MUTATION = re.compile(rb"mutation", re.IGNORECASE)
@@ -593,7 +593,7 @@ async def main():
             os.unlink(path)
         tasks.append((await asyncio.start_unix_server(who.handle, path=path, ssl=server_ctx)).serve_forever())
         os.chmod(path, 0o600)
-    log("listening on %s, and %s for a workspace an agent runs in, for %s (write token: %s, read token: %s, Bugzilla key: %s, "
+    log("listening on %s, and %s for what is not a person's shell, for %s (write token: %s, read token: %s, Bugzilla key: %s, "
         "claude.ai login: %s, CA published at %s)" % (sock, read_sock, ", ".join(HOSTS), pat, read_pat,
                                                       bugzilla_key, claude.path if claude else "none held", ca_out))
     machine = os.environ.get("WK_INJECT_PUBLISH_MACHINE")

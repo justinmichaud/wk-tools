@@ -130,22 +130,29 @@ over ssh through a deploy key scoped to that one repository.
 Reads are anonymous over HTTPS and always work: fetching `origin` or either
 fork needs no credential at all.
 
-**A push is the host's, and it is refused while you run.** No credential that
-publishes is in this workspace at all. `git push` here sends the command to a
-push service on the host, which runs the ssh session to GitHub with the
-repository's deploy key; it refuses, naming the remedy, while a claude or pi
-process runs in this workspace -- yours. The GitHub API token is in a proxy
+**A push is the host's, and it is refused to you by construction.** No
+credential that publishes is in this workspace at all. `git push` here sends
+the command to a push service on the host, which runs the ssh session to GitHub
+with the repository's deploy key; it serves only a process descended from a
+person's own shell, and nothing you start, now or left running after you end,
+is that. The GitHub API token is in a proxy
 that puts it in the `Authorization` header, so `GITHUB_COM_TOKEN` in here is
 the literal placeholder `wk-injects-this` and not a secret; an API call that
-writes (`git-webkit pr`) answers `412` while you run, and Bugzilla's
+writes (`git-webkit pr`) answers `412` to you, and Bugzilla's
 `BUGS_WEBKIT_ORG_PASSWORD` is the same placeholder. Do not try to work around
 it: publishing is the one thing a disposable workspace is not allowed to do
 on its own. Say what you would have pushed and let the person at the keyboard
 push from a shell of their own in the workspace (`wk enter`) once you have
 ended.
 
-Never use `git push --force` against a shared branch, and never commit unless
-asked.
+In a wk-tools workspace (the checkout at /src/wk-tools, `repo=wk-tools` in
+~/.wk-workspace) you may commit and push the wk-tools repository when the task
+calls for it: it is the one repository an agent publishes. Never push a WebKit
+fork.
+
+Never use `git push --force` against a shared branch. In a WebKit workspace
+commits are walled off and a push is refused; in a wk-tools workspace commit
+and push only when asked.
 
 ## Long-running commands, from inside a workspace
 
