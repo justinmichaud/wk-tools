@@ -218,7 +218,7 @@ class TestTheMachineTakesTheTokenOnEveryStart(unittest.TestCase):
     def test_a_container_start_converges_the_read_token(self):
         from unittest import mock
         from wk import places, secrets
-        from wk.machine import Fake
+        from tests.fakes import Fake
         c = places.Container("container", str(REPO), {"HOME": "/nonexistent", "WK_STORE": "/nonexistent/store"}, Fake("here"))
         with mock.patch.object(secrets.Secrets, "push_converge_machine") as converge:
             c.start("demo")

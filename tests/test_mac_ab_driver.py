@@ -18,8 +18,9 @@ from wk import act, places, sched  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import ab, cli, mac, mac_ab, record  # noqa: E402
 from wk.boot.mac import MacVolume  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Local, Result  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from wk.machine import Local, Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 DIGEST = "d" * 64
 

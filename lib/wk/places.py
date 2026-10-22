@@ -15,57 +15,27 @@ import stat
 import sys
 
 from wk import act, agents, fleet, git, guest, images, kv, project, pushgate, reach, record, repos, secrets, sshalias, tools
-from wk.machine import TIMED_OUT, Local, PodmanVm, Result, Ssh, TartExec, isolated_module, lib_argv
+from wk.machine import TIMED_OUT, Local, Result, Ssh, isolated_module, lib_argv
 from wk.resources import Resources, arch_has_gpu, workspace_marker_path
 from wk.store import Store, dispatch_place, in_vm, no_such_workspace, remote_marker_path
 
 BUILTIN = ("container", "vm", "remote", "local")
 READY_MARKER = ".wk-ready"
 STATES_NOT_THERE = ("absent", "creating", "broken", "unreachable")
-READY_TIMEOUT = 300
+READY_WAIT = 1800
 WK_FLAGS = ("WK_DEBUG", "WK_QUIET", "WK_YES", "WK_FORCE", "WK_DRY_RUN", "WK_NO_DELEGATE", "WK_EXPORTS_READ")
-WK_CARRIED = ("WK_ROW_LABEL", "WK_ZED_PUBKEY", "WK_SDK_IMAGE", "WK_NEW_TIMEOUT", "WK_READY_TIMEOUT", "WK_MB_PER_JOB", "WK_MAX_JOBS")
+WK_CARRIED = ("WK_ROW_LABEL", "WK_ZED_PUBKEY", "WK_SDK_IMAGE", "WK_NEW_TIMEOUT", "WK_READY_WAIT", "WK_MB_PER_JOB", "WK_MAX_JOBS")
 MIRROR_TAG = "wk-mirror"
 GUEST_MIRROR_MOUNT = "/Volumes/" + MIRROR_TAG
 GUEST_MOUNT_MIRROR = "/usr/local/libexec/wk-mount-mirror"
 TOOLS = "/opt/wk-tools"
 BRIDGE = TOOLS + "/container/proxy/ensure-bridge.sh"
 NO_PROXY = "localhost,127.0.0.1,::1"
-MOTD_REFERENCE = '''
-        cat /etc/motd /etc/motd.d/* /run/motd.dynamic 2>/dev/null \\
-        | grep -oiE "/[A-Za-z0-9._/-]*%s(\\.git)?" | sort -u \\
-        | while read -r p; do
-              git -C "$p" rev-parse --verify -q refs/heads/main >/dev/null 2>&1 || continue
-              echo "$p"; break
-          done'''
-
-# Run with $PWD inside the checkout; sets `_b` to `main`, a release like `2.52`, or nothing.
-UPSTREAM_LINE_BODY = r'''
-_u=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || _u=''
-_b=''
-if [ -n "$_u" ]; then
-    _br=${_u#*/}
-    case "$_br" in
-        main) _b=main ;;
-        @REL@/*) _b=${_br#@REL@/} ;;
-    esac
-fi
-if [ -z "$_b" ]; then
-    _rel=$(git for-each-ref --format='%(refname)' --contains HEAD 'refs/remotes/*/@REL@/*' 2>/dev/null \
-        | sed 's#.*/@REL@/##' | sort -t. -k1,1n -k2,2n | tail -1)
-    if [ -n "$_rel" ]; then _b=$_rel
-    elif git for-each-ref --format='%(refname)' --contains HEAD 'refs/remotes/*/main' 2>/dev/null | grep -q .; then _b=main
-    fi
-fi
-'''
-
 
 def upstream_line_body():
-    return UPSTREAM_LINE_BODY.replace("@REL@", project.get("RELEASES"))
-
-
-def upstream_line():
-    return upstream_line_body() + "printf '%s' \"${_b:-?}\"\n"
+    """git.LINE as a fragment setting `_b` with $PWD inside the checkout (status.WS_PROBE's, until it runs git.PROBE)."""
+    return ("t=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || t=''\nr=%s\n%s_b=$b\n"
+            % (shlex.quote(project.get("RELEASES")), git.LINE))
 
 
 def guest_mirror():
@@ -82,9 +52,7 @@ def image_base(root, ws):
 def git_base(driver, ws):
     if driver.info(ws) in STATES_NOT_THERE:
         return None
-    r = driver.exec(ws, ["sh", "-c", "cd %s 2>/dev/null || exit 0\n%s" % (shlex.quote(driver.src(ws)), upstream_line())])
-    out = r.out.replace("\r", "").strip().splitlines()
-    return out[-1] if r.ok and out else None
+    return git.probe(lambda argv: driver.exec(ws, argv), driver.src(ws)).get("wsbase")
 
 
 def default_root(home):
@@ -139,7 +107,7 @@ def zed_key_pub(machine, env):
 
 # A place conf's keys and the WK_* variable each sets; a conf value wins over the environment's.
 CONF_ENV = {"driver": "WK_DRIVER", "host": "WK_REMOTE_HOST", "hostname": "WK_REMOTE_HOSTNAME", "root": "WK_REMOTE_ROOT",
-            "reference": "WK_REMOTE_REFERENCE", "local": "WK_REMOTE_LOCAL", "peer": "WK_REMOTE_PEER", "tools": "WK_REMOTE_TOOLS",
+            "local": "WK_REMOTE_LOCAL", "tools": "WK_REMOTE_TOOLS",
             "store": "WK_REMOTE_STORE", "cmake": "WK_REMOTE_CMAKE", "libcxx": "WK_REMOTE_LIBCXX", "wpe": "WK_REMOTE_WPE",
             "build_args": "WK_BUILD_ARGS"}
 PER_PRESET = ("cmake", "build_args")   # also `<key>_<preset>`, the preset's dashes as underscores: one build preset's own
@@ -161,6 +129,11 @@ def conf_env(conf, path):
             raise LookupError("%s: %s is not a key a build machine's conf takes (%s, or %s_<preset>)"
                               % (path, k, ", ".join(CONF_ENV), "|".join(PER_PRESET)))
     return {conf_key(k): v for k, v in conf.items() if k != "kind"}
+
+
+def machine_driver(name, root, env, machine, conf, path):
+    """The driver of a machine's conf: a peer's kind is a `Peer`, a build machine's a `Remote`."""
+    return (Peer if conf["kind"] == "peer" else Remote)(name, root, dict(env, **conf_env(conf, path)), machine)
 
 
 class Registry:
@@ -255,14 +228,13 @@ class Registry:
         return [t for t in self.all() if self.is_here(t)]
 
     def peer_workstations(self):
-        """The peers whose own wk answers, each asked once."""
         out = []
         for name in self.machines():
             try:
                 t = self.load(name)
             except LookupError:
                 continue
-            if getattr(t, "peer", False) and t.has_wk():
+            if t.peer and t.has_wk():
                 out.append(name)
         return out
 
@@ -327,7 +299,6 @@ class Registry:
         return seen
 
     def ws_place(self, ws):
-        """The one place holding `ws`; the default when none does."""
         if dispatch_place(self.env):
             return dispatch_place(self.env)
         hits = self.locate(ws)
@@ -346,23 +317,31 @@ class Registry:
             raise LookupError("unknown place '%s'.\n    The built-in ones are container, vm, remote and local.%s\n"
                               "    A machine needs a conf (%s):  wk machine setup %s"
                               % (name, ("\n    The machines here: " + names) if names else "", self.conf_path(name), name))
-        env = dict(self.env)
         if name not in BUILTIN:
-            env.update(conf_env(self._conf(name), self.conf_path(name)))
-        return {"container": Container, "vm": Vm, "local": LocalWorkspace}.get(kind, Remote)(name, self.root, env, self.machine)
+            return machine_driver(name, self.root, self.env, self.machine, self._conf(name), self.conf_path(name))
+        return {"container": Container, "vm": Vm, "local": LocalWorkspace}.get(kind, Remote)(name, self.root, dict(self.env), self.machine)
 
     def present(self, name):
-        """The driver holding `name`, refusing a name that is nowhere."""
-        driver = self.load(self.ws_place(name))
+        try:
+            driver = self.load(self.ws_place(name))
+        except LookupError as e:
+            act.die(str(e))
         if driver.info(name) == "absent":
             act.die(no_such_workspace(name))
         return driver
 
 
 class Driver:
-    """The contract. `info` answers absent | creating | unreachable | the driver's own word for one that exists."""
+    """CONTRACT and FIELDS are all a command asks of a place; `info` is absent, creating, unreachable or the driver's word."""
 
+    CONTRACT = ("list", "info", "state", "display_state", "create", "destroy", "start", "stop", "exec", "act_exec",
+                "exec_argv", "exec_tty", "enter_argv", "pull", "push", "pull_dir", "push_dir", "path_kind", "src", "home",
+                "tools", "repo", "os", "arch", "mirror_dir", "workspaces", "ssh_endpoint", "ssh_host", "ssh_user",
+                "ssh_proxy", "ssh_prepare", "build_argv", "ccache_dir", "build_size", "sync", "sync_tools",
+                "install_agents", "lldb_opts", "broken_words", "is_here")
+    FIELDS = ("name", "kind", "env", "here", "store", "store_machine", "needs_base", "peer")
     kind = "place"
+    peer = False
     needs_base = True
     dir_first = False   # the workspace directory is made before the environment, so an environment without one is no creation
     reads_host_mirror = False
@@ -392,6 +371,9 @@ class Driver:
 
     def src(self, ws):
         return project.get("SRC")
+
+    def home(self):
+        raise NotImplementedError
 
     def repo(self, ws):
         return repos.default()
@@ -457,7 +439,6 @@ class Driver:
         return True
 
     def answers(self):
-        """(whether the machine behind this place answers, why not)."""
         return True, ""
 
     def probe(self):
@@ -530,18 +511,20 @@ class Driver:
             return "from the workstation:  wk new %s --on %s" % (ws, reg.self_place())
         return "wk new %s --on %s" % (ws, self.name)
 
-    def wait_ready(self, ws, clock, timeout=None):
-        """Returns once `ws` is present, or dies naming why it never will be; a creation still running is waited for."""
-        timeout = int(timeout or self.env.get("WK_READY_WAIT") or 1800)
-        seen = {"said": False}
+    def wait_ready(self, ws, clock, timeout=None, own=False):
+        """Returns once `ws` is present, or dies naming why; `own`: the caller is the creation itself (its `init` stage)."""
+        timeout = int(timeout or self.env.get("WK_READY_WAIT") or READY_WAIT)
+        seen = {"said": own}
 
         def ready():
             st = self.state(ws)
-            now = self.creating_now(ws) if st in ("present", "creating") else False
-            if st == "present" and now:   # the marker is down at `init`, and the detached run holds the lock through the stages after it
+            now = own or (self.creating_now(ws) if st in ("present", "creating") else False)
+            if st == "present" and now and not own:   # the marker is down at `init`, and the detached run holds the lock through the stages after it
                 st = "creating"
             seen["st"] = st
             if st == "present":
+                return True
+            if own and st != "creating":
                 return True
             if st == "absent":
                 act.die(no_such_workspace(ws))
@@ -563,12 +546,21 @@ class Driver:
                 act.log("  this end can be killed; creation is detached and continues")
             return False
 
-        if not clock.wait_until(ready, timeout, 2):
+        if not clock.wait_until(ready, timeout, 2) or own and seen["st"] != "present":
+            if own:
+                for line in self.last_words(ws):
+                    sys.stderr.write("    %s\n" % line)
+                act.die("'%s' was created but never finished initialising (above):\n"
+                        "    wk new %s    (destroys it and retries)" % (ws, ws))
             act.die("'%s' was still %s after %ds; 'wk status %s' says whether its creation is alive, %s what it is doing"
                     % (ws, seen["st"], timeout, ws, self.create_log(ws)))
-        if seen["said"]:
-            act.info("'%s' is ready" % ws)
-        self.converge(ws, clock)
+        if not own:
+            if seen["said"]:
+                act.info("'%s' is ready" % ws)
+            self.converge(ws, clock)
+
+    def last_words(self, ws):
+        return []
 
     def converge(self, ws, clock):
         """What a running `ws` needs from this machine's daemons, asserted by every command that waits for it."""
@@ -608,18 +600,6 @@ class Driver:
     def create(self, ws, base=None, arch="native", repo=None):
         raise NotImplementedError
 
-    def ready_timeout(self, timeout):
-        return int(timeout if timeout is not None else self.env.get("WK_READY_TIMEOUT") or READY_TIMEOUT)
-
-    def ready(self, ws, clock, timeout=None):
-        """Whether the workspace came to exist within the timeout, `info` asked once a second; absent and unreachable do not improve with waiting."""
-        seen = {}
-
-        def settled():
-            seen["st"] = self.info(ws)
-            return seen["st"] != "creating"
-        return clock.wait_until(settled, self.ready_timeout(timeout), 1) and seen["st"] not in ("absent", "unreachable")
-
     def destroy(self, ws):
         raise NotImplementedError
 
@@ -655,7 +635,6 @@ class Driver:
         raise NotImplementedError
 
     def copier(self, ws):
-        """The Machine whose files are the workspace's."""
         return self.machine
 
     def pull(self, ws, src, dest):
@@ -733,7 +712,6 @@ def show(r):
 
 
 def said(name, word):
-    """One row of a sync's report."""
     sys.stderr.write("  %-24s %s\n" % (name, word))
 
 
@@ -798,7 +776,7 @@ class Container(Driver):
 
     @property
     def store_machine(self):
-        return self.machine if self.is_here() else PodmanVm(self.podman_machine(), via=self.machine)
+        return self.machine if self.is_here() else Ssh.podman(self.podman_machine(), via=self.machine)
 
     def task_store(self):
         return None if self.is_here() else (self.store_machine, self.store.store_dir())
@@ -894,8 +872,7 @@ class Container(Driver):
     def exec_argv(self, ws, argv, tty=False, person=False):
         if not self.is_here():
             env = {k: v for k, v in os.environ.items() if k != "WK_DRY_RUN"}
-            return ["podman", "machine", "ssh", self.podman_machine(), "--",
-                    self.wk_cmd(["enter", ws, *([] if person else ["--own"]), "--", *argv], env)], None
+            return Ssh.podman(self.podman_machine()).argv(self.wk_cmd(["enter", ws, *([] if person else ["--own"]), "--", *argv], env)), None
         cmd = self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", project.get("SDK_ENTER")), "--quiet", "--name", self.ctr(ws)]
         if not tty:
             cmd.append("--no-tty")
@@ -926,7 +903,7 @@ class Container(Driver):
 
     def wk(self, *args, env=None, quiet=False):
         env = os.environ if env is None else env
-        r = self.machine.run(["podman", "machine", "ssh", self.podman_machine(), "--", self.wk_cmd(args, env) + ("" if quiet else " 2>&1")], input="")
+        r = self.machine.run(Ssh.podman(self.podman_machine()).argv(self.wk_cmd(args, env) + ("" if quiet else " 2>&1")), input="")
         return r.rc, r.out
 
     def start(self, ws):
@@ -1071,14 +1048,9 @@ class Container(Driver):
         if repo.snapshot:
             self.machine.write(os.path.join(ws_dir, "base-id"), base + "\n")
 
-    def ready(self, ws, clock, timeout=None):
-        if clock.wait_until(lambda: self.created(ws) or not self.exists(ws), self.ready_timeout(timeout), 1) and self.created(ws):
-            return True
-        act.warn("initialisation did not complete; last output from the container:")
+    def last_words(self, ws):
         r = self.machine.run(self.podman() + ["logs", self.ctr(ws)])
-        for line in [l for l in (r.out + r.err).splitlines() if l.strip()][-8:]:
-            sys.stderr.write("    %s\n" % line)
-        return False
+        return ["the container's last output:"] + [l for l in (r.out + r.err).splitlines() if l.strip()][-8:]
 
     def destroy(self, ws):
         c, ws_dir = self.ctr(ws), self.store.ws_dir(ws)
@@ -1328,7 +1300,7 @@ class Vm(Driver):
         return r.out.strip() or None
 
     def guest_of(self, v):
-        return TartExec(self.tart_or_die(), v, via=self.machine)
+        return Ssh.tart(self.tart_or_die(), v, via=self.machine)
 
     def guest(self, ws):
         return self.guest_of(self.vm(ws)) if self.vm_state(ws) == "running" else None
@@ -1456,9 +1428,8 @@ class Vm(Driver):
         """An unreadable answer counts as busy: stopping a machine underneath something is the mistake this guards."""
         if not self.podman_running():
             return 0
-        r = self.machine.run(["podman", "machine", "ssh", self.podman_machine(), "--", "podman ps -q | grep -c . || true"])
-        n = re.sub(r"[^0-9]", "", r.out) if r.ok else ""
-        return int(n) if n else 1
+        r = Ssh.podman(self.podman_machine(), via=self.machine).run(["podman", "ps", "-q"])
+        return len(r.out.split()) if r.ok else 1
 
     def committed_mem_mb(self, skip):
         return sum(self.configured(v["Name"], "Memory") or 0 for v in self._vms()
@@ -1636,7 +1607,6 @@ class Remote(Driver):
     def __init__(self, name, root, env, machine):
         super().__init__(name, root, env, machine)
         self.host = env.get("WK_REMOTE_HOST") or (name if name != "remote" else "")
-        self.peer = bool(env.get("WK_REMOTE_PEER"))
         try:
             here_place = Registry(root, env, machine).self_place()
         except LookupError:
@@ -1649,8 +1619,7 @@ class Remote(Driver):
         self.probe_seconds = int(env.get("WK_PROBE_SECONDS") or 20)
         if not self.is_local and self.host:
             self.machine = Ssh(self.host, opts=self.ssh_opts(), control_dir=self.ssh_dir(), timeout=reach.ssh_timeout(env), via=machine)
-        self._probed = self._has_wk = self._peer_rows = self._reference = None
-        self._routes = {}
+        self._probed = self._has_wk = None
 
     def ssh_dir(self):
         return os.path.join(Store(self.env).state_dir(), "ssh")
@@ -1744,8 +1713,6 @@ class Remote(Driver):
         return self._far().argv("bash -c " + shlex.quote(text)), None
 
     def src(self, ws):
-        if self.peer and ws:
-            return self._peer_route(ws)[1]
         return self.ws_dir_there(ws) + "/" + project.get("CHECKOUT")
 
     def tools(self, ws):
@@ -1754,16 +1721,7 @@ class Remote(Driver):
             return self.root_there() + "/tools"
         return t if t.startswith("/") else "%s/%s" % (self.home(), t)
 
-    def _peer_list(self):
-        if self._peer_rows is None:
-            rc, out = self.wk("ls", "--json", env=dict(self.env, WK_NO_DELEGATE="1"), quiet=True)
-            doc = json_or(out, {}) if rc == 0 else {}
-            self._peer_rows = [(w.get("name", ""), w.get("state", "")) for w in doc.get("workspaces", [])]
-        return self._peer_rows
-
     def list(self):
-        if self.peer:
-            return self._peer_list()
         if not self.answers()[0]:
             return []
         try:
@@ -1776,9 +1734,6 @@ class Remote(Driver):
         """One round trip: no directory is absent, no `.wk-ready` is creating, and no answer is unreachable, never absent."""
         if not self.answers()[0]:
             return "unreachable"
-        if self.peer:
-            st = next((state for n, state in self._peer_list() if n == ws), "")
-            return st if st in ("creating", "unreachable") else "present" if st else "absent"
         d = shlex.quote(self.ws_dir_there(ws))
         r = self._sh("if [ ! -d %s ]; then echo absent; elif [ -f %s/%s ]; then echo present; else echo creating; fi"
                      % (d, d, READY_MARKER))
@@ -1806,42 +1761,13 @@ class Remote(Driver):
         if self.is_local:
             return None
         self._far()
-        if self.peer and ws:
-            return "wk-%s" % ws
         return self.host
-
-    def ssh_endpoint(self, ws):
-        if not (self.peer and ws):
-            return None
-        user, src, proxy = self._peer_route(ws)
-        if not proxy:
-            act.die("'%s' on %s is reached at an address on that machine's own network; open it from there:\n"
-                    "        ssh %s wk zed %s" % (ws, self.host, self.host, ws))
-        return "wk-%s.%s.invalid" % (ws, self.name), user, zed_key_path(self.env), "ssh %s %s" % (self.host, proxy)
-
-    def _peer_route(self, ws):
-        """(user, src, proxy) an addressless peer workspace answers with, over `wk zed --route`, asked once."""
-        if ws in self._routes:
-            return self._routes[ws]
-        env = dict(self.env, WK_ZED_PUBKEY=zed_key_pub(self.here, self.env) or "")
-        rc, out = self.wk("zed", ws, "--route", env=env, quiet=True)
-        if rc != 0:
-            act.die("%s could not open a route into '%s' (above); an older wk-tools there is brought level by:  wk sync --tools"
-                    % (self.host, ws))
-        route = kv.kv(out)
-        if not route.get("user") or not route.get("src"):
-            act.die("%s said nothing an editor can use about '%s'" % (self.host, ws))
-        self._routes[ws] = (route["user"], route["src"], route.get("proxy", ""))
-        return self._routes[ws]
 
     @property
     def store_machine(self):
         return self.here
 
     def sync_tools(self, ws):
-        if self.peer:
-            act.debug("not pushing wk-tools to %s: it is a workstation with its own checkout" % self.label())
-            return True
         dest = self.tools(ws)
         if self.is_local:
             if self.root != dest:
@@ -1852,13 +1778,13 @@ class Remote(Driver):
     def is_here(self):
         return self.is_local
 
+    has_wk_test = "test -f $HOME/.wk-remote && test -x %s"
+
     def has_wk(self):
         if self.is_local or not self.answers()[0]:
             return False
         if self._has_wk is None:
-            wk = shlex.quote(self.tools("") + "/wk")
-            test = "test -x %s" % wk if self.peer else "test -f $HOME/.wk-remote && test -x %s" % wk
-            self._has_wk = self._sh(test).ok
+            self._has_wk = self._sh(self.has_wk_test % shlex.quote(self.tools("") + "/wk")).ok
         return self._has_wk
 
     def far_side(self):
@@ -1873,9 +1799,7 @@ class Remote(Driver):
         return (self.far_side(), "") if ok else ("unreachable", why)
 
     def delegates(self):
-        if self.is_local:
-            return False
-        return self.peer or self.has_wk()
+        return not self.is_local and self.has_wk()
 
     def wk_far(self, env):
         return "cd $HOME && ", self.tools("") + "/wk", env
@@ -1883,8 +1807,7 @@ class Remote(Driver):
     def hand_over(self, cmd, args, tty, readonly=False, env=None):
         """The far side's wk running `cmd`; a box at another wk-tools commit is refused it, or warned on a read-only one."""
         self.far_wk_or_die(cmd)
-        if not self.peer:
-            self.tools_level_or_refuse(cmd, readonly)
+        self.tools_level_or_refuse(cmd, readonly)
         return self.machine.argv(self.wk_cmd([cmd, *args], dict(env or os.environ, WK_ROW_LABEL=self.name)), tty=tty)
 
     def tools_level_or_refuse(self, cmd, readonly):
@@ -1912,24 +1835,11 @@ class Remote(Driver):
         act.err("the '%s' place has no notion of stopping a single workspace -- '%s' is left running" % (self.name, ws))
         return False
 
-    def reference(self):
-        """A shared checkout this machine's admins keep (named in the conf, or by its MOTD), verified to hold main."""
-        if self._reference is None:
-            ref = self.env.get("WK_REMOTE_REFERENCE", "")
-            if not ref:
-                r = self._sh(MOTD_REFERENCE % project.get("CHECKOUT"))
-                ref = r.out.strip() if r.ok else ""
-            self._reference = ref
-        return self._reference
-
     def mirror_dir(self):
-        return "" if self.reference() else self.root_there() + "/mirror"
+        return self.root_there() + "/mirror"
 
     def wiring_args(self):
-        ssh_config = self.root_there() + "/ssh/config"
-        if self.reference():
-            return "shared", self.reference(), ssh_config
-        return "mirror", self.mirror_dir(), ssh_config
+        return "mirror", self.mirror_dir(), self.root_there() + "/ssh/config"
 
     def _forks(self):
         return [tuple(r) for r in secrets.forks()]
@@ -1954,36 +1864,10 @@ class Remote(Driver):
             act.die("could not update the %s mirror on %s" % (project.get("CHECKOUT"), self.label()))
 
     def sync(self, named=False):
-        """A peer pulls, and publishes its own snapshot only once it matches this checkout and was named."""
-        far_tools, host = self.tools(""), self.label()
-        if self.peer:
-            r = self._sh_act("cd %s && git pull --ff-only" % shlex.quote(far_tools))
-            show(r)
-            if not r.ok:
-                said(self.name, "git pull --ff-only failed there")
-                return False
-            mine = tools.identity(self.root, self.here)
-            theirs = kv.kv(self._sh(shlex.quote(far_tools + "/wk") + " doctor --probe-tools").out)
-            if not mine.get("sha") or (mine.get("sha"), mine.get("dirty")) != (theirs.get("sha"), theirs.get("dirty")):
-                said(self.name, "pulled, still DIFFERS (%s, this machine has %s)" % (_ident(theirs), _ident(mine)))
-                said("", tools_why_behind(self.here, self.root))
-                return False
-            said(self.name, "pulled, in sync")
-            if not named:
-                act.info("%s keeps a store of its own -- its mirror and snapshot untouched" % host)
-                act.log("  name it for those:  wk sync --tools %s" % self.name)
-                return True
-            act.info("running 'wk sync --tools' on %s -- its mirror, its snapshot" % host)
-            rc, out = self.wk("sync", "--tools", env=dict(self.env, WK_NO_DELEGATE="1"))
-            sys.stderr.write(out)
-            return rc == 0
+        host = self.label()
         ok = self.sync_tools("")
         if ok:
             said(self.name, "pushed " + tools.head(self.root, self.here))
-        if self.reference():
-            act.info("workspaces here clone from %s, which this machine's admins keep up to date" % self.reference())
-            act.log("  nothing of ours to fetch: no mirror is kept on %s" % host)
-            return ok
         self._mirror_update(self.root_there())
         act.info("the %s mirror on %s is up to date" % (project.get("CHECKOUT"), host))
         return ok
@@ -1999,15 +1883,10 @@ class Remote(Driver):
             act.die("cannot reach %s to create '%s'" % (host, ws))
         if st != "absent":
             act.die("workspace '%s' already exists on %s" % (ws, host))
-        ref, src = self.reference(), wsd + "/" + project.get("CHECKOUT")
-        if ref:
-            act.info("cloning from %s (this machine's shared %s, hardlinked)" % (ref, project.get("CHECKOUT")))
-            if not self._in_root(root, "git clone --quiet -b main %s %s" % (shlex.quote(ref), shlex.quote(src))).ok:
-                act.die("could not clone %s on %s" % (ref, host))
-        else:
-            self._mirror_update(root)
-            if not self._sh_act("git clone --quiet --shared -b main %s %s" % (shlex.quote(root + "/mirror"), shlex.quote(src))).ok:
-                act.die("could not create the checkout on %s" % host)
+        src = wsd + "/" + project.get("CHECKOUT")
+        self._mirror_update(root)
+        if not self._sh_act("git clone --quiet --shared -b main %s %s" % (shlex.quote(root + "/mirror"), shlex.quote(src))).ok:
+            act.die("could not create the checkout on %s" % host)
         self._wire(src)
         conf = shlex.quote(root + "/cache/ccache/ccache.conf")
         self._sh_act("[ -f %s ] || printf %%s %s > %s" % (conf, shlex.quote(self.ccache_conf()), conf))
@@ -2017,21 +1896,15 @@ class Remote(Driver):
         act.info("remote workspace '%s' created on %s (%s)" % (ws, host, wsd))
 
     def results(self, ws):
-        """A peer's own wk names where it holds `ws`'s tasks (`python3 -m wk.bench.record home`), reached through the peer."""
-        if not self.peer:
-            return self.machine, self.ws_dir_there(ws) + "/bench"
-        r = self._sh("cd $HOME && " + shlex.join(isolated_module(self.tools("") + "/lib", "wk.bench.record") + ["home", ws]))
-        doc = json_or(r.out, None) if r.ok else None
-        if not doc:
-            act.die("%s did not say where '%s' keeps its bench tasks (wk sync --tools brings it level):\n    %s"
-                    % (self.label(), ws, (r.err.strip() or r.out.strip() or "rc %d" % r.rc).replace("\n", "\n    ")))
-        m = self.machine
-        for kind, dest in doc["via"]:
-            m = (PodmanVm if kind == "podman" else Ssh)(dest, via=m)
-        return m, doc["path"]
+        return self.machine, self.ws_dir_there(ws) + "/bench"
 
     def task_store(self):
-        return None if self.peer or self.is_local else (self.machine, self.root_there())
+        return None if self.is_local else (self.machine, self.root_there())
+
+    rm_env = {"WK_EXPORTS_READ": "1"}   # this end read the exports before handing `wk rm` over
+
+    def forget_listing(self):
+        """The listing read before a removal, which the read-back must not see."""
 
     def destroy(self, ws):
         """Another machine's own wk destroys its workspace; the record here outlives anything it has not confirmed gone."""
@@ -2046,15 +1919,125 @@ class Remote(Driver):
         elif self._probe_or_die() and self.info(ws) == "absent":
             done = "'%s' is already gone from %s; its record here is removed" % (ws, host)
         else:
-            exports_read_here = {} if self.peer else {"WK_EXPORTS_READ": "1"}
-            r = self.here.act_run(self.hand_over("rm", [ws], tty=False, env=dict(os.environ, WK_YES="1", **exports_read_here)))
+            r = self.here.act_run(self.hand_over("rm", [ws], tty=False, env=dict(os.environ, WK_YES="1", **self.rm_env)))
             show(r)
             if not r.ok:
                 act.die("%s did not destroy '%s' (above); nothing here was changed -- re-run 'wk rm %s'" % (host, ws, ws))
-            self._peer_rows = None   # the listing read before the removal is what the read-back must not see
+            self.forget_listing()
             done = "'%s' destroyed on %s, by that machine's own wk" % (ws, host)
         self.here.remove(self.store.ws_dir(ws))
         act.info(done)
+
+
+class Peer(Remote):
+    """A workstation with its own wk-tools, asked for its workspaces rather than driven."""
+
+    peer = True
+    has_wk_test = "test -x %s"
+    rm_env = {}   # its own `wk rm` reads the exports there
+
+    def __init__(self, name, root, env, machine):
+        super().__init__(name, root, env, machine)
+        self._rows = None
+        self._routes = {}
+
+    def _listing(self):
+        if self._rows is None:
+            rc, out = self.wk("ls", "--json", env=dict(self.env, WK_NO_DELEGATE="1"), quiet=True)
+            doc = json_or(out, {}) if rc == 0 else {}
+            self._rows = [(w.get("name", ""), w.get("state", "")) for w in doc.get("workspaces", [])]
+        return self._rows
+
+    def forget_listing(self):
+        self._rows = None
+
+    def list(self):
+        return self._listing()
+
+    def info(self, ws):
+        if not self.answers()[0]:
+            return "unreachable"
+        st = next((state for n, state in self._listing() if n == ws), "")
+        return st if st in ("creating", "unreachable") else "present" if st else "absent"
+
+    def src(self, ws):
+        return self._route(ws)[1] if ws else super().src(ws)
+
+    def ssh_host(self, ws):
+        return super().ssh_host(ws) and ("wk-%s" % ws if ws else self.host)
+
+    def ssh_endpoint(self, ws):
+        if not ws:
+            return None
+        user, src, proxy = self._route(ws)
+        if not proxy:
+            act.die("'%s' on %s is reached at an address on that machine's own network; open it from there:\n"
+                    "        ssh %s wk zed %s" % (ws, self.host, self.host, ws))
+        return "wk-%s.%s.invalid" % (ws, self.name), user, zed_key_path(self.env), "ssh %s %s" % (self.host, proxy)
+
+    def _route(self, ws):
+        """(user, src, proxy) an addressless peer workspace answers with, over `wk zed --route`, asked once."""
+        if ws in self._routes:
+            return self._routes[ws]
+        env = dict(self.env, WK_ZED_PUBKEY=zed_key_pub(self.here, self.env) or "")
+        rc, out = self.wk("zed", ws, "--route", env=env, quiet=True)
+        if rc != 0:
+            act.die("%s could not open a route into '%s' (above); an older wk-tools there is brought level by:  wk sync --tools"
+                    % (self.host, ws))
+        route = kv.kv(out)
+        if not route.get("user") or not route.get("src"):
+            act.die("%s said nothing an editor can use about '%s'" % (self.host, ws))
+        self._routes[ws] = (route["user"], route["src"], route.get("proxy", ""))
+        return self._routes[ws]
+
+    def sync_tools(self, ws):
+        act.debug("not pushing wk-tools to %s: it is a workstation with its own checkout" % self.label())
+        return True
+
+    def delegates(self):
+        return not self.is_local
+
+    def tools_level_or_refuse(self, cmd, readonly):
+        """A peer pulls its own wk-tools (`sync`), so its level is its own."""
+
+    def task_store(self):
+        return None
+
+    def sync(self, named=False):
+        """A peer pulls, and publishes its own snapshot only once it matches this checkout and was named."""
+        far_tools, host = self.tools(""), self.label()
+        r = self._sh_act("cd %s && git pull --ff-only" % shlex.quote(far_tools))
+        show(r)
+        if not r.ok:
+            said(self.name, "git pull --ff-only failed there")
+            return False
+        mine = tools.identity(self.root, self.here)
+        theirs = kv.kv(self._sh(shlex.quote(far_tools + "/wk") + " doctor --probe-tools").out)
+        if not mine.get("sha") or (mine.get("sha"), mine.get("dirty")) != (theirs.get("sha"), theirs.get("dirty")):
+            said(self.name, "pulled, still DIFFERS (%s, this machine has %s)" % (_ident(theirs), _ident(mine)))
+            said("", tools_why_behind(self.here, self.root))
+            return False
+        said(self.name, "pulled, in sync")
+        if not named:
+            act.info("%s keeps a store of its own -- its mirror and snapshot untouched" % host)
+            act.log("  name it for those:  wk sync --tools %s" % self.name)
+            return True
+        act.info("running 'wk sync --tools' on %s -- its mirror, its snapshot" % host)
+        rc, out = self.wk("sync", "--tools", env=dict(self.env, WK_NO_DELEGATE="1"))
+        sys.stderr.write(out)
+        return rc == 0
+
+    def results(self, ws):
+        """A peer's own wk names where it holds `ws`'s tasks (`python3 -m wk.bench.record home`), reached through the peer."""
+        r = self._sh("cd $HOME && " + shlex.join(isolated_module(self.tools("") + "/lib", "wk.bench.record") + ["home", ws]))
+        doc = json_or(r.out, None) if r.ok else None
+        if not doc:
+            act.die("%s did not say where '%s' keeps its bench tasks (wk sync --tools brings it level):\n    %s"
+                    % (self.label(), ws, (r.err.strip() or r.out.strip() or "rc %d" % r.rc).replace("\n", "\n    ")))
+        m = self.machine
+        for kind, dest in doc["via"]:
+            m = Ssh.podman(dest, via=m) if kind == "podman" else Ssh(dest, via=m)
+        return m, doc["path"]
 
 
 PROBE_SCRIPT = """

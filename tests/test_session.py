@@ -15,8 +15,9 @@ from tests.support import REPO, WkTest, as_dispatched, load_cmd, requires_machin
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, fleet, quiet, session  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import HAVE, Fake, Result  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from wk.machine import HAVE, Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 ROOT = str(REPO)
 PRIV = quiet.PRIV

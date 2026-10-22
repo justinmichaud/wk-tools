@@ -14,7 +14,7 @@ import unittest
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk.machine import Fake, Killed  # noqa: E402
+from tests.fakes import Fake, Killed  # noqa: E402
 
 
 def converges(case, make_world, run_once, final_state, max_effects=60):

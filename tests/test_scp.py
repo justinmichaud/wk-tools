@@ -14,7 +14,8 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import places  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.store import Store  # noqa: E402
-from wk.machine import Fake, Local  # noqa: E402
+from wk.machine import Local  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 def _tart(kind="absent"):
     """`tart`: one running guest whose `exec` logs its argv and answers t_path_kind's one question with <kind>."""
@@ -237,7 +238,7 @@ class TestTheWholeCommandOnAGuest(WkTest):
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn(f"copied demo:/Users/admin/WebKit/a.txt to {self.tmp / 'a.txt'}",
                       cp.stdout)
-        self.assertIn("tart exec wk-demo /bin/cat /Users/admin/WebKit/a.txt", self.log)
+        self.assertIn("tart exec -i wk-demo /bin/zsh -lc cat /Users/admin/WebKit/a.txt", self.log)
         self.assertNotIn("ssh ", self.log, "a guest is reached through tart exec")
 
     def test_a_probe_that_answers_nothing_is_not_an_absent_file(self):
@@ -262,7 +263,7 @@ class DriverCopyTest(unittest.TestCase):
 
     def conf(self, name, text):
         kind = "" if "kind=build" in text else "kind=%s\n" % ("peer" if "peer=1" in text else "build")
-        (self.tmp / "hosts" / (name + ".conf")).write_text(kind + text)
+        (self.tmp / "hosts" / (name + ".conf")).write_text(kind + text.replace("peer=1\n", ""))
 
 
 class TestContainerCopy(DriverCopyTest):
@@ -318,14 +319,13 @@ class TestVmCopy(DriverCopyTest):
         self.fake.answer([self.t.tart(), "ip"], out="1.2.3.4\n")
 
     def test_every_copy_is_a_pipe_through_tart_exec(self):
-        self.fake.answer(["sh", "-c"], out="")
+        self.fake.answer(["bash", "-c"], out="")
         for fn, args in ((self.t.push, ("/tmp/a", "/Users/admin/WebKit/a")), (self.t.pull, ("/Users/admin/WebKit/a", "/tmp/a")),
                          (self.t.push_dir, ("/tmp/t", "/Users/admin/WebKit/t")), (self.t.pull_dir, ("/Users/admin/WebKit/t", "/tmp/t"))):
             with self.subTest(fn=fn.__name__):
                 fn("demo", *args)
                 argv = self.fake.effects[-1][1]
-                self.assertEqual((argv[:2], argv[3:7]), (("sh", "-c"), (self.t.tart(), "wk-demo") + args))
-                self.assertRegex(argv[2], r'" exec (-i )?"\$')
+                self.assertEqual((argv[:2], argv[5:9]), (("bash", "-c"), (self.t.tart(), "exec", "-i", "wk-demo")))
 
     def test_path_kind_asks_through_the_guest_agent(self):
         self.fake.answer([self.t.tart(), "exec"], out="file\n")
@@ -337,7 +337,7 @@ class TestVmCopy(DriverCopyTest):
 
 
 class TestRemoteCopy(DriverCopyTest):
-    """A build machine reached over ssh: scp and rsync, over the same opts `exec` uses."""
+    """A build machine reached over ssh: the one pipe, through the same ssh argv `exec` uses."""
 
     def setUp(self):
         super().setUp()
@@ -347,21 +347,12 @@ class TestRemoteCopy(DriverCopyTest):
         self.reg = places.Registry(REPO, env=self.env, machine=self.fake)
         self.t = self.reg.load("box")
 
-    def test_push_and_pull_are_scp(self):
-        self.fake.answer(["scp"], out="")
+    def test_every_copy_is_a_pipe_through_the_boxs_own_ssh(self):
+        self.fake.answer(["bash", "-c"], out="")
         self.t.push("demo", "/tmp/local.txt", "/wk/ws/demo/WebKit/a.txt")
-        self.assertEqual(self.fake.effects[-1][1][0], "scp")
-        self.assertEqual(self.fake.effects[-1][1][-2:], ("/tmp/local.txt", "box.example:/wk/ws/demo/WebKit/a.txt"))
-        self.t.pull("demo", "/wk/ws/demo/WebKit/a.txt", "/tmp/out.txt")
-        self.assertEqual(self.fake.effects[-1][1][-2:], ("box.example:/wk/ws/demo/WebKit/a.txt", "/tmp/out.txt"))
-
-    def test_push_dir_and_pull_dir_are_rsync_with_chmod(self):
-        self.fake.answer(["rsync"], out="")
-        self.t.push_dir("demo", "/tmp/tree", "/wk/ws/demo/WebKit/tree")
-        argv = self.fake.effects[-1][1]
-        self.assertEqual(argv[0], "rsync")
-        self.assertIn("--chmod=go-w", argv)
-        self.assertEqual(argv[-2:], ("/tmp/tree/", "box.example:/wk/ws/demo/WebKit/tree/"))
+        self.assertEqual(self.fake.effects[-1][1][5:], tuple(self.t.machine.argv("cat > /wk/ws/demo/WebKit/a.txt")))
+        self.t.pull_dir("demo", "/wk/ws/demo/WebKit/tree", "/tmp/tree")
+        self.assertIn("tar -cf - -C /wk/ws/demo/WebKit/tree", self.fake.effects[-1][1][-1])
 
     def test_path_kind_asks_over_ssh(self):
         self.fake.answer(["ssh"], out="dir\n")

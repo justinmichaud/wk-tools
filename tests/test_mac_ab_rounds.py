@@ -19,8 +19,9 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import places  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import ab, board_ab, cli, mac_ab, record, report, scores  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 QUIET = [100.0, 100.02, 99.98, 100.0, 100.01, 99.99]
 NOISY = [99.0, 101.0, 99.0, 101.0, 99.0, 101.0]

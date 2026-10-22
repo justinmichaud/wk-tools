@@ -15,8 +15,8 @@ from tests.support import REPO, WkTest, requires_container_place, run
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places, record  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 

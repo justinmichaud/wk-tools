@@ -60,8 +60,7 @@ class _Shared(WkTest):
             wk = root / "tools" / "wk"
             wk.write_text(PEER_WK)
             wk.chmod(0o755)
-            (reg / f"{name}.conf").write_text(f"kind={'peer' if peer else 'build'}\nhost=fake-{name}\nroot={root}\n"
-                                              + ("peer=1\n" if peer else ""))
+            (reg / f"{name}.conf").write_text(f"kind={'peer' if peer else 'build'}\nhost=fake-{name}\nroot={root}\n")
         return {"WK_TEST_PEER_LOG": str(log)}
 
 

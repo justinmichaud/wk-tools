@@ -255,7 +255,7 @@ class TestOnePodmanWrapper(unittest.TestCase):
 
     def container(self, env, system):
         from wk import places
-        from wk.machine import Fake
+        from tests.fakes import Fake
         with mock.patch("wk.places.os.uname", return_value=mock.Mock(sysname=system)):
             return places.Container("container", str(REPO), env, Fake("here")).podman()
 

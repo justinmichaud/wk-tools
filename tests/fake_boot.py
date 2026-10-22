@@ -15,9 +15,10 @@ from wk import act, fleet
 from wk.boot import drivers
 from wk.boot.driver import BOOT_PRIV, CARD_PRIV, Channel, disk_of, part
 from wk.boot.mac import HELPER, MacGuest
-from wk.clock import FakeClock
+from tests.fakes import FakeClock
 from wk.kv import kv
-from wk.machine import Fake, Killed, Result
+from wk.machine import Result
+from tests.fakes import Fake, Killed
 
 BTIME = ["sed", "-n", "s/^btime //p", "/proc/stat"]
 MACHINES = {"pi-sd": "rpi3", "pi-tryboot": "rpi4", "rpi5-usb": "rpi5", "mac-volume": "mbp", "mac-guest": "benchvm"}

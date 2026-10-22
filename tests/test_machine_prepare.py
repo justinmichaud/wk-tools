@@ -13,7 +13,8 @@ from tests.support import REPO, WkTest, bash, scratch_dir, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, machine_cmd  # noqa: E402
-from wk.machine import Fake, Local  # noqa: E402
+from wk.machine import Local  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 
 class TheToolsPathIsDeclared(WkTest):

@@ -12,7 +12,8 @@ from tests.support import REPO, bash, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, git, pr  # noqa: E402
-from wk.machine import Fake, Local, Result  # noqa: E402
+from wk.machine import Local, Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 GITHUB = "https://github.com/justinmichaud"
 

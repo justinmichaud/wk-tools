@@ -19,9 +19,10 @@ from tests.test_bench_task import TASK, add_run, make_task, refusal, registry
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places  # noqa: E402
 from wk.bench import cli, record, report  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Fake, Local, Planted, PodmanVm, Ssh  # noqa: E402
+from wk.machine import Local, Planted, Ssh  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 HEAD, BASE = "afa2ed9e70103469f02732323fa7b874378d6a5d", "04abe09851b03b7ce6c8b9c208659c23a5ab7138"
 READING = {"benchmarks": {}, "combined": {}, "compressed": {}, "missing": [], "libraries": [], "plans": []}
@@ -469,13 +470,13 @@ class TestTheSeamReadsATree(PlantedTest):
             self.read(far)
         self.assertIn("%s is a symbolic link" % link, str(e.exception))
 
-    def test_the_podman_vm_reads_through_the_same_script_and_still_refuses_a_copy(self):
+    def test_the_podman_vm_reads_through_the_same_script_and_a_failed_copy_raises(self):
         via = Fake("here")
         via.answer(["podman", "machine", "ssh"], rc=1, err="no such directory")
-        vm = PodmanVm("wk", via=via)
+        vm = Ssh.podman("wk", via=via)
         with self.assertRaises(OSError):
             vm.read_tree("/var/lib/wk/ws/w", "bench/t", ("*",))
-        with self.assertRaises(NotImplementedError):
+        with self.assertRaises(OSError):
             vm.copy_tree_out("/f", str(self.tmp / "x"))
 
     def test_a_fake_refuses_a_link_it_holds(self):
@@ -492,23 +493,23 @@ class TestTheSeamReadsATree(PlantedTest):
             self.assertIsNone(c.task_store())
         with mock.patch.object(places.Container, "is_here", return_value=False):
             m, root = c.task_store()
-        self.assertEqual((type(m), root), (PodmanVm, "/var/lib/wk"))
-        box = types.SimpleNamespace(peer=False, is_local=False, machine="ssh", root_there=lambda: "/srv/wk")
+        self.assertEqual((m.kind, root), ("podman", "/var/lib/wk"))
+        box = types.SimpleNamespace(is_local=False, machine="ssh", root_there=lambda: "/srv/wk")
         self.assertEqual(places.Remote.task_store(box), ("ssh", "/srv/wk"))
-        for peer, local in ((True, False), (False, True)):
-            self.assertIsNone(places.Remote.task_store(types.SimpleNamespace(peer=peer, is_local=local)))
+        self.assertIsNone(places.Remote.task_store(types.SimpleNamespace(is_local=True)))
+        self.assertIsNone(places.Peer.task_store(box))
 
     def peer(self, rc=0, out=""):
         far = Fake("peer")
         far.answer(["sh", "-c"], rc=rc, out=out, err="" if rc == 0 else "ssh: connect to host peer1: refused")
-        p = places.Remote.__new__(places.Remote)
-        p.peer, p.is_local, p.machine, p.host, p.env = True, False, far, "peer1", {"WK_REMOTE_TOOLS": "/t"}
+        p = places.Peer.__new__(places.Peer)
+        p.is_local, p.machine, p.host, p.env, p._probed = False, far, "peer1", {"WK_REMOTE_TOOLS": "/t"}, None
         return p, far
 
     def test_a_peer_names_its_tasks_home_through_the_hops_its_own_wk_reaches_it_by(self):
         p, far = self.peer(out=json.dumps({"via": [["podman", "wk"]], "path": "/var/lib/wk/ws/w/bench"}))
         m, path = p.results("w")
-        self.assertEqual((type(m), m.dest, m.via, path), (PodmanVm, "wk", far, "/var/lib/wk/ws/w/bench"))
+        self.assertEqual((m.kind, m.dest, m.via, path), ("podman", "wk", far, "/var/lib/wk/ws/w/bench"))
         self.assertIn("wk.bench.record home w", far.effects[-1][1][-1])
 
     def test_a_peer_that_does_not_answer_is_named_with_what_it_said(self):
@@ -523,4 +524,4 @@ class TestTheSeamReadsATree(PlantedTest):
 
     def test_a_machine_is_named_as_its_hops_nearest_first(self):
         self.assertEqual(record.hops(Local()), [])
-        self.assertEqual(record.hops(PodmanVm("wk", via=Ssh("box"))), [["ssh", "box"], ["podman", "wk"]])
+        self.assertEqual(record.hops(Ssh.podman("wk", via=Ssh("box"))), [["ssh", "box"], ["podman", "wk"]])

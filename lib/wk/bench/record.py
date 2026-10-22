@@ -9,7 +9,7 @@ import zipfile
 from wk import fleet, project
 from wk.act import Refused, die
 from wk.kv import kv_file
-from wk.machine import Local, PodmanVm, Ssh
+from wk.machine import Local, Ssh
 
 # The axes a report groups variance by, filled in for every subfield a writer left alone, so an older record and an uncontrolled one read alike.
 DEFAULT_CONFIGURATION = {"aslr": "unset", "path_len": 0, "shared_cache": None, "env_pad_bytes": 0}
@@ -328,7 +328,7 @@ def ws_home(reg, ws, place=""):
 def hops(machine):
     out = []
     while isinstance(machine, Ssh):
-        out.append(["podman" if isinstance(machine, PodmanVm) else "ssh", machine.dest])
+        out.append(["podman" if machine.kind == "podman" else "ssh", machine.dest])
         machine = machine.via
     return out[::-1]
 

@@ -13,7 +13,7 @@ from tests.support import REPO, bash, git_commit, git_run, scratch_dir
 from tests.test_wk_workspace import WK, World, WorkspaceTest
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import places, project, repos, status, sync, workspace  # noqa: E402
+from wk import git, places, project, repos, status, sync, workspace  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Result  # noqa: E402
 from wk.store import Snapshots  # noqa: E402
@@ -219,7 +219,7 @@ class TestFreshen(WorkspaceTest):
         self.stderr(lambda: workspace.freshen(self.w.driver, "ws", self.w, tools()))
         self.assertEqual([], self.runs(head=WK))
         (probe,) = self.runs(head="exec")
-        self.assertIn("git symbolic-ref", probe[-1])
+        self.assertIn(git.PROBE, probe)
 
     def test_a_dry_run_runs_nothing_for_it(self):
         self.dry_run()

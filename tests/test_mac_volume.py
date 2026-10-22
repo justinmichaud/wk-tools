@@ -203,7 +203,7 @@ class TestStaging(unittest.TestCase):
 class TestOnTheMac(unittest.TestCase):
     def test_standing_on_the_mac_runs_it_here_and_stages_nothing(self):
         conf = conf_for("mac-volume")
-        from wk.machine import Fake
+        from tests.fakes import Fake
         via = Fake("here")
         via.answer(["hostname", "-s"], out="Tolken\n")
         via.answer(["sh", "-c"], out="id=x\n")

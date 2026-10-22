@@ -28,10 +28,11 @@ from wk.boot import cli as bootcli  # noqa: E402
 from wk.boot.driver import Driver, Onboard, part  # noqa: E402
 from tests.fake_boot import FakeBoard, Side  # noqa: E402
 from wk.boot.pi import Rpi5Usb  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
 from wk.kv import kv  # noqa: E402
 from wk.lock import Lock  # noqa: E402
-from wk.machine import Fake, Local, Result  # noqa: E402
+from wk.machine import Local, Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 WS = "buildroot-webkit-2.52-buildroot-rpi5-64"

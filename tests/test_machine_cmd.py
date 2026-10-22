@@ -18,7 +18,8 @@ from tests.support import REAL_MACHINES, REPO, live_selected, machine_reachable,
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, machine_cmd, places, reach, tools  # noqa: E402
 from wk.machine_cmd import build, deps  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 HOME = "/home/me"
 SHA = "a" * 40
@@ -268,7 +269,7 @@ class TestSetup(MachineTest):
         self.assertEqual(w.fake.effects, [])
         w, _ = self.verb(0, "setup", "box", "build")
         self.assertIn("kind=build\n", w.fake.files[str(w.fleet / "box.conf")])
-        w, _ = self.verb(1, "setup", "box", "build", conf="kind=peer\ndriver=remote\npeer=1\n")
+        w, _ = self.verb(1, "setup", "box", "build", conf="kind=peer\ndriver=remote\n")
         self.assertEqual(w.fake.effects, [])
 
     def test_a_shared_home_needs_a_root_of_its_own_and_nothing_is_changed_without_one(self):
@@ -330,7 +331,7 @@ class TestSetup(MachineTest):
         self.assertIn(("write", str(dry.fleet / "box.conf")), dry.fake.effects)
 
     def test_a_peer_is_asked_for_its_own_wk_and_not_provisioned(self):
-        w, _ = self.verb(0, "setup", "box", conf="kind=peer\ndriver=remote\npeer=1\ntools=Development/wk-tools\n")
+        w, _ = self.verb(0, "setup", "box", conf="kind=peer\ndriver=remote\ntools=Development/wk-tools\n")
         self.assertIn(("sh", "-c", "test -x %s/Development/wk-tools/wk" % HOME), self.runs(w))
         self.assertFalse([r for r in self.runs(w) if r[0] == "env"])
 

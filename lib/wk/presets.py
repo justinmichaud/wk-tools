@@ -167,6 +167,13 @@ def default_preset(reg, name):
     return project.get("MAC_PRESET") if driver.os() == "macos" else "jsc-release"
 
 
+def resolve_or_die(name, driver):
+    try:
+        return resolve(name, driver.os(), driver.kind, driver.env)
+    except LookupError:
+        act.die("unknown preset '%s' (wk build --list)" % name)
+
+
 def resolve(name, os_name, kind, env):
     """LookupError for a name that is none; a refusal (`Refused`) for one this place cannot build."""
     if name not in PRESETS:

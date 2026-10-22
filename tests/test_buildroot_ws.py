@@ -7,8 +7,9 @@ import unittest
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result, isolated_module  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from wk.machine import Result, isolated_module  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.sysimage import Failed, buildroot_ws as bt  # noqa: E402
 
 TOOLS, SRC = "/opt/wk-tools", "/src/WebKit"

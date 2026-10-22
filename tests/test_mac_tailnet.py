@@ -19,8 +19,9 @@ from tests.support import REPO, requires_machine, requires_tool, scratch_dir
 sys.path.insert(0, str(REPO / "lib"))
 from wk import images  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.sysimage import macvolume, mactailnet  # noqa: E402
 from wk.sysimage.macvolume import MacVolume  # noqa: E402
 from wk.sysimage.mactailnet import GO, Tailnet  # noqa: E402

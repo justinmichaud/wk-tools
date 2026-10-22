@@ -848,7 +848,7 @@ check out the pin; moving it is a new `SDK_PIN`.
 `WK_SOFTNET_BIN`, `WK_PROBE_SECONDS` (how long a build machine's probe may take),
 `WK_SSH_TIMEOUT` (ssh's connect timeout on every hop, default 10).
 
-**Waiting and reporting** — `WK_READY_TIMEOUT`, `WK_READY_WAIT`,
+**Waiting and reporting** — `WK_READY_WAIT`,
 `WK_POLL_SECONDS`, `WK_HEARTBEAT_SECONDS`,
 `WK_BROKER_SOCKET`, `WK_SCREEN_EXPECTED`,
 `WK_BENCH_RUNNER_REF`.

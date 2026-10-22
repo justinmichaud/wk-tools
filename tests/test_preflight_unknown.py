@@ -11,7 +11,7 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import guest, resources  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import board, mac_ab, pipeline, record, report  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 
 def failing_df():

@@ -13,8 +13,9 @@ import unittest
 
 from tests.support import REPO, WkTest, bash
 from wk import reach, screen
-from wk.clock import FakeClock
-from wk.machine import Fake, Result, lib_argv
+from tests.fakes import FakeClock
+from wk.machine import Result, lib_argv
+from tests.fakes import Fake
 from wk.quiet import Quiesce
 
 QUIET_HOSTS = REPO / "bench" / "mac-quiet-hosts.sh"

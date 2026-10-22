@@ -5,7 +5,7 @@ import re
 import sys
 from shlex import quote as q
 
-from wk import images, project, secrets
+from wk import images, kv, project, secrets
 
 REMOTES = project.get("REMOTES")
 NO_PUSH = "no-push://use-a-fork-remote"
@@ -236,6 +236,40 @@ def origin_branch_fetch_step(branch, mirror):
         return net
     return ("if [ -d %s ] && git -C %s rev-parse --verify --quiet %s >/dev/null 2>&1\n        then git fetch -q %s %s\n        else %s\n        fi"
             % (q(mirror), q(mirror), q("refs/heads/" + branch), q(mirror), q("+refs/heads/%s:refs/remotes/origin/%s" % (branch, branch)), net))
+
+
+LINE = r"""b=''
+case "${t#*/}" in main) b=main ;; "$r"/*) b=${t#*/}; b=${b#"$r"/} ;; esac
+if [ -z "$b" ]; then
+    b=$(git for-each-ref --format='%(refname)' --contains HEAD "refs/remotes/*/$r/*" 2>/dev/null | sed "s#.*/$r/##" | sort -t. -k1,1n -k2,2n | tail -1)
+fi
+if [ -z "$b" ] && git for-each-ref --format='%(refname)' --contains HEAD 'refs/remotes/*/main' 2>/dev/null | grep -q .; then b=main; fi
+"""
+
+# The one read of a checkout: key=value lines, `tracks` empty where the branch tracks nothing; `git status` refreshes the index.
+PROBE = r"""cd "$1" 2>/dev/null || exit 0
+r=$2
+t=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || t=''
+u=${t:-origin/main}
+printf 'branch=%s\nhead=%s\ntracks=%s\nupstream=%s\n' "$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" \
+    "$(git rev-parse --short HEAD 2>/dev/null)" "$t" "$u"
+printf 'origin=%s\n' "$(git config --get remote.origin.url 2>/dev/null)"
+printf 'dirty=%s\n' "$(git status --porcelain --untracked-files=no 2>/dev/null | wc -l | tr -d ' ')"
+printf 'untracked=%s\n' "$(git ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')"
+printf 'unpushed=%s\n' "$(git rev-list --count HEAD --not --remotes 2>/dev/null)"
+set -- $(git rev-list --left-right --count "$u...HEAD" 2>/dev/null)
+printf 'behind=%s\nahead=%s\n' "${1:-}" "${2:-}"
+""" + LINE + """printf 'wsbase=%s\\n' "${b:-?}"
+"""
+
+
+def probe_argv(src):
+    return ["sh", "-c", PROBE, "sh", src, project.get("RELEASES")]
+
+
+def probe(run, src):
+    r = run(probe_argv(src))
+    return kv.kv(r.out.replace("\r", "")) if r.ok else {}
 
 
 def main(argv):

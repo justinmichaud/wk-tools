@@ -20,8 +20,9 @@ sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act, doctor  # noqa: E402
 from wk.boot import cli, eeprom  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 PI_KINDS = ("pi-sd", "pi-tryboot", "rpi5-usb")
 

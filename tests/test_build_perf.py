@@ -8,7 +8,8 @@ from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.act import Refused  # noqa: E402
-from wk.machine import HAVE, Fake  # noqa: E402
+from wk.machine import HAVE  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.sudo import Sudo  # noqa: E402
 
 

@@ -26,19 +26,3 @@ class Clock:
                 return False
             self.sleep(interval)
         return True
-
-
-class FakeClock(Clock):
-    def __init__(self, start=1_700_000_000.0):
-        self.t = float(start)
-        self.slept = []
-
-    def now(self):
-        return self.t
-
-    def monotonic(self):
-        return self.t
-
-    def sleep(self, seconds):
-        self.slept.append(seconds)
-        self.t += seconds

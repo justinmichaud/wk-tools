@@ -15,7 +15,7 @@ from tests.test_bench_report import in_process
 sys.path.insert(0, str(REPO / "lib"))
 from wk.act import Refused  # noqa: E402
 from wk.bench import cli, record, report  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk import record as task_record, samply  # noqa: E402
 from wk.machine import Local  # noqa: E402

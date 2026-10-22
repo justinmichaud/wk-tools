@@ -19,7 +19,7 @@ from wk import decl as D
 from wk import act, clock, guest, images, places, presets, project, repos, setupstate, sshalias
 from wk.act import info, log, warn
 from wk.lock import Lock
-from wk.machine import Local, PodmanVm, is_macos
+from wk.machine import Local, Ssh, is_macos
 from wk.reach import Reach
 from wk.store import Store, build_preset, dispatch_place, in_vm, no_such_workspace, ws_name
 
@@ -594,7 +594,7 @@ def forward_to_vm(inv, cmd, args):
     if os.isatty(0) and os.isatty(1):
         opts, dest = places.podman_vm_route(rec)
         exec_flushed(["ssh", "-t", *opts, dest, line])
-    exec_flushed(PodmanVm(MACHINE).argv(line))
+    exec_flushed(Ssh.podman(MACHINE).argv(line))
 
 
 def exec_flushed(argv):

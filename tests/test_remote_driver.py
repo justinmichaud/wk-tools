@@ -13,7 +13,8 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import TIMED_OUT, Fake, Result  # noqa: E402
+from wk.machine import TIMED_OUT, Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 # A real /proc/loadavg line and a real /proc/meminfo excerpt, after the
 # `$HOME` line every probe starts with.

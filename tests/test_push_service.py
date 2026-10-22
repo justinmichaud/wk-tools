@@ -20,7 +20,8 @@ from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import guest, pushgate, repos, secrets  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 SERVICE = REPO / "container" / "push" / "wk-push.py"

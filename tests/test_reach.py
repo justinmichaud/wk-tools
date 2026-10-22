@@ -11,7 +11,7 @@ from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import fleet, reach  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 STATUS = json.dumps({"Self": {"DNSName": "Here.tail.ts.net.", "TailscaleIPs": ["100.64.0.1"]},
                      "Peer": {"k1": {"DNSName": "downboard.tail.ts.net.", "TailscaleIPs": ["100.64.0.2"], "Online": False},

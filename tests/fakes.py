@@ -1,13 +1,348 @@
 """The fakes the suite shares, one per seam: a detached child, a registry over a fake machine, and a place that
 answers a probe and its own wk."""
 
+import fnmatch
+import functools
+import os
 import shlex
+import shutil
+import signal
 import sys
 
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import job, places  # noqa: E402
+from wk import act, job, places  # noqa: E402
+from wk.clock import Clock  # noqa: E402
+from wk.machine import LOGIN, Local, Machine, Planted, Result, matches  # noqa: E402
+
+
+class FakeClock(Clock):
+    def __init__(self, start=1_700_000_000.0):
+        self.t = float(start)
+        self.slept = []
+
+    def now(self):
+        return self.t
+
+    def monotonic(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.t += seconds
+
+
+class Exited:
+    def __init__(self, pid, rc):
+        self.pid, self.returncode = pid, rc
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self):
+        return self.returncode
+
+
+class Killed(BaseException):
+    """The Fake's process died: raised in place of the effect `stop_after` names, and no `except Exception` outlives it."""
+
+
+class Fake(Machine):
+    """An in-memory host: a command answers what `answer()` or `react()`
+    registered for the longest matching argv prefix (the latest among
+    equals), and every effect lands in `effects`; with `stop_after` set, the
+    effect after that many raises Killed instead of landing."""
+
+    def __init__(self, name="fake"):
+        self.name = name
+        self.files = {}
+        self.dirs = set()
+        self.links = set()
+        self.mtimes = {}
+        self.pids = {os.getpid()}
+        self.answers = []
+        self.effects = []
+        self.next_pid = 1000
+        self.stop_after = None
+        self.applied = 0
+        self.streamed = []
+        self._acting = False
+
+    def answer(self, prefix, rc=0, out="", err=""):
+        self.answers.append((tuple(prefix), Result(rc, out, err)))
+
+    def react(self, prefix, fn):
+        """`fn(argv, fake)` returns the Result and may move the fake's files and pids."""
+        self.answers.append((tuple(prefix), fn))
+
+    def effect(self, record):
+        if self.stop_after is not None and self.applied >= self.stop_after:
+            raise Killed(record)
+        self.applied += 1
+        self.effects.append(record)
+
+    def _record(self, record):
+        if self._acting:
+            self.effect(record)
+        else:
+            self.effects.append(record)
+
+    def record_run(self, argv):
+        self._record(("run", tuple(argv)))
+
+    def _answer(self, argv):
+        best = None
+        for prefix, result in self.answers:
+            if tuple(argv[:len(prefix)]) == prefix and (best is None or len(prefix) >= len(best[0])):
+                best = (prefix, result)
+        if best is None:
+            return Result(127, "", "%s: no answer registered" % argv[0])
+        if not callable(best[1]):
+            return best[1]
+        seen = list(argv)
+        if seen[0] == "ssh" and seen[-1].startswith(LOGIN):
+            seen[-1] = shlex.split(seen[-1])[-1]
+        return best[1](seen, self)
+
+    def act_run(self, argv, **kw):
+        self._acting = True
+        try:
+            return super().act_run(argv, **kw)
+        finally:
+            self._acting = False
+
+    def run(self, argv, input=None, timeout=None, stream=False):
+        self.record_run(argv)
+        r = self._answer(argv)
+        if not stream:
+            return r
+        self.streamed.append(tuple(argv))
+        sys.stderr.write(r.out + r.err)
+        return Result(r.rc)
+
+    def run_tty(self, argv, cwd=None, timeout=None):
+        self._record(("run_tty", tuple(argv), cwd))
+        return self._answer(argv)
+
+    def read(self, path):
+        if path not in self.files:
+            raise OSError("no such file: %s" % path)
+        return self.files[path]
+
+    def read_tree(self, anchor, rel, patterns, depth=3):
+        top = os.path.join(anchor, rel).rstrip("/")
+        path = anchor.rstrip("/")
+        for part in (p for p in rel.split("/") if p):
+            path += "/" + part
+            if path in self.links:
+                raise Planted(path)
+        if top not in self.dirs:
+            raise OSError("no such directory: %s" % top)
+        out = {}
+        for p in sorted(self.files):
+            r = p[len(top) + 1:]
+            if not p.startswith(top + "/") or r.count("/") >= depth:
+                continue
+            if p in self.links:
+                raise Planted(p)
+            if matches(r, patterns):
+                data = self.files[p]
+                out[r] = data if isinstance(data, bytes) else data.encode()
+        return out
+
+    def exists(self, path):
+        return path in self.files or path in self.dirs
+
+    def isdir(self, path):
+        return path in self.dirs
+
+    def listdir(self, path):
+        if path not in self.dirs:
+            raise OSError("no such directory: %s" % path)
+        prefix = path.rstrip("/") + "/"
+        names = set()
+        for p in list(self.files) + list(self.dirs):
+            if p.startswith(prefix):
+                names.add(p[len(prefix):].split("/")[0])
+        return sorted(names)
+
+    def alive(self, pid):
+        return pid in self.pids
+
+    def readlink(self, path):
+        return self.files[path] if path in self.files else None
+
+    def mtime(self, path):
+        if path not in self.files:
+            raise OSError("no such file: %s" % path)
+        return self.mtimes.get(path, 0.0)
+
+    def read_bytes(self, path, start=0):
+        data = self.read(path)
+        return (data if isinstance(data, bytes) else data.encode())[start:]
+
+    def _set_file(self, path, text):
+        self.files[path] = text
+        self.links.discard(path)
+        parent = os.path.dirname(path)
+        while parent and parent != "/":
+            self.dirs.add(parent)
+            parent = os.path.dirname(parent)
+
+    def write(self, path, text):
+        self.effect(("write", path))
+        if act.dry_run():
+            return
+        self._set_file(path, text)
+
+    def write_own(self, path, text):
+        self._set_file(path, text)
+
+    def remove_own(self, path):
+        self._drop(path)
+
+    def _drop(self, path):
+        self.files = {p: t for p, t in self.files.items() if p != path and not p.startswith(path.rstrip("/") + "/")}
+        self.links &= set(self.files)
+        self.dirs = {d for d in self.dirs if d != path and not d.startswith(path.rstrip("/") + "/")}
+
+    def remove(self, path):
+        self.effect(("remove", path))
+        if act.dry_run():
+            return
+        self._drop(path)
+
+    def remove_now(self, path):
+        self.effect(("remove", path))
+        self._drop(path)
+
+    def mkdir(self, path):
+        self.effect(("mkdir", path))
+        if act.dry_run():
+            return
+        self.dirs.add(path)
+
+    def mkdir_now(self, path):
+        self.effect(("mkdir", path))
+        self.dirs.add(path)
+
+    def symlink(self, to, path):
+        self.effect(("symlink", path))
+        parent = os.path.dirname(path)
+        if path in self.files or path in self.dirs or (parent not in ("", "/") and parent not in self.dirs):
+            return False
+        self.files[path] = to
+        self.links.add(path)
+        return True
+
+    def rename(self, path, dst):
+        self.effect(("rename", path, dst))
+        if path not in self.files:
+            return False
+        self.files[dst] = self.files.pop(path)
+        self.links.discard(dst)
+        if path in self.links:
+            self.links.discard(path)
+            self.links.add(dst)
+        return True
+
+    def kill(self, pid, sig=signal.SIGTERM):
+        self.effect(("kill", pid, int(sig)))
+        if act.dry_run():
+            return True
+        if pid in self.pids:
+            self.pids.discard(pid)
+            return True
+        return False
+
+    def spawn(self, argv, log):
+        self.effect(("spawn", tuple(argv), log))
+        if act.dry_run():
+            return 0
+        self.next_pid += 1
+        self.pids.add(self.next_pid)
+        self.files.setdefault(log, "")
+        return self.next_pid
+
+    def start(self, argv, out, cwd=None):
+        self.effect(("start", tuple(argv)))
+        r = self._answer(argv)
+        out.write((r.out + r.err).encode())
+        self.next_pid += 1
+        return Exited(self.next_pid, r.rc)
+
+    def _exec(self, argv, cwd, env):
+        self.effect(("exec", tuple(argv), cwd))
+
+    def forward(self, port, log=os.devnull):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def held():
+            self.effect(("forward", port))
+            pid = 0
+            if not act.dry_run():
+                self.next_pid += 1
+                pid = self.next_pid
+                self.pids.add(pid)
+            try:
+                yield pid
+            finally:
+                self.pids.discard(pid)
+        return held()
+
+    # A real file on disk crosses into this fake host's in-memory files, and back.
+    def copy_in(self, src, dest):
+        self.effect(("copy_in", src, dest))
+        if act.dry_run():
+            return
+        with open(src, "rb") as f:
+            data = f.read()
+        self._set_file(dest, data)
+
+    def copy_out(self, src, dest):
+        self.effect(("copy_out", src, dest))
+        if act.dry_run():
+            return
+        data = self.read(src)
+        with open(dest, "wb") as f:
+            f.write(data if isinstance(data, bytes) else data.encode())
+
+    def copy_tree_in(self, src, dest):
+        self.effect(("copy_tree_in", src, dest))
+        if act.dry_run():
+            return
+        self._drop(dest)
+        self.dirs.add(dest)
+        for root, _, filenames in os.walk(src):
+            rel = os.path.relpath(root, src)
+            base = dest if rel == "." else os.path.join(dest, rel)
+            self.dirs.add(base)
+            for fn in filenames:
+                with open(os.path.join(root, fn), "rb") as f:
+                    self.files[os.path.join(base, fn)] = f.read()
+
+    def copy_tree_out(self, src, dest, exclude=()):
+        self.effect(("copy_tree_out", src, dest) + tuple(exclude))
+        if act.dry_run():
+            return
+        if src not in self.dirs:
+            raise OSError("no such directory: %s" % src)
+        if os.path.isdir(dest):
+            shutil.rmtree(dest)
+        os.makedirs(dest, exist_ok=True)
+        prefix = src.rstrip("/") + "/"
+        for p, data in self.files.items():
+            if not p.startswith(prefix):
+                continue
+            rel = p[len(prefix):]
+            if any(fnmatch.fnmatchcase(part, x) for part in rel.split("/") for x in exclude):
+                continue
+            out = os.path.join(dest, rel)
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            with open(out, "wb") as f:
+                f.write(data if isinstance(data, bytes) else data.encode())
 
 
 class FakeProc:
@@ -101,8 +436,6 @@ class FakeDriver:
 
 
 
-import functools  # noqa: E402
-from wk.machine import Fake, Local  # noqa: E402
 
 
 @functools.lru_cache(maxsize=None)
@@ -164,10 +497,6 @@ class JobDriver(WsDriver):
 
     def os(self):
         return self.machine.place_os
-
-
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
 
 
 class JobWorld(Fake):

@@ -23,8 +23,8 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import decl, places, project, samply as wksamply, screen  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import cli, mac, plans, record as brecord, report  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.machine import lib_argv  # noqa: E402
 from wk.quiet import PRIV  # noqa: E402
 

@@ -20,8 +20,9 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 from wk import images, job, pgo, record, resources  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result, isolated_module  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from wk.machine import Result, isolated_module  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.sysimage import buildroot, task, yocto  # noqa: E402
 
 SHA = "a" * 40

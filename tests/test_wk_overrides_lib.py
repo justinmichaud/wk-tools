@@ -13,7 +13,8 @@ from wk import images, places, reach, screen  # noqa: E402
 from wk.boot.mac import MacGuest  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
-from wk.machine import Fake, Local, lib_argv  # noqa: E402
+from wk.machine import Local, lib_argv  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 

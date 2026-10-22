@@ -20,8 +20,9 @@ def load(path):
 BROWSER = load(REPO / "bench" / "mac-browser-check.py")
 sys.path.insert(0, str(REPO / "lib"))
 from wk import pgo as PROFILE, presets, screen  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result, lib_argv  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from wk.machine import Result, lib_argv  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 # What the Mac reads back: three frameworks and a compressed copy per
 # arch. A board's one library goes through the same code from the other

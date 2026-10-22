@@ -17,8 +17,9 @@ from tests.test_wk_places import DriverConformance
 sys.path.insert(0, str(REPO / "lib"))
 from wk import agents, doctor, guest, places, secrets, tools, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Killed, Result  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Killed  # noqa: E402
 from wk.store import GUEST_BROKER_SOCKET, Store  # noqa: E402
 
 TART = "/fake/tart"

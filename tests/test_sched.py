@@ -8,7 +8,7 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 from wk import sched  # noqa: E402
 from wk.act import RETRY_EXIT, Refused  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 
 class FakeRuns:

@@ -32,10 +32,9 @@ class Machines(BuildMachines, BoardMachines, MacMachines):
 
     def driver(self, name, conf):
         try:
-            env = dict(self.env, **places.conf_env(conf, self.fleet.path(name)))
+            t = places.machine_driver(name, self.root, self.env, self.here, conf, self.fleet.path(name))
         except LookupError as e:
             die(str(e))
-        t = places.Remote(name, self.root, env, self.here)
         if self.far is not None:
             t.machine = self.far
         return t

@@ -17,7 +17,7 @@ CONFS = {
              "kind=build\ndriver=remote\n",
     "peer": "# %(name)s -- a workstation with its own wk-tools, asked for its workspaces rather than driven.\n"
             "# Written by 'wk machine setup'; commit it to give every device this machine.\n"
-            "kind=peer\ndriver=remote\npeer=1\ntools=Development/wk-tools\n",
+            "kind=peer\ndriver=remote\ntools=Development/wk-tools\n",
 }
 MOTD = "cat /etc/motd /etc/motd.d/* /run/motd.dynamic 2>/dev/null"
 OLD_TOOLS = 'for d in "$HOME"/Development/wk-tools "$HOME"/wk-tools; do [ -d "$d" ] && echo "$d"; done; true'
@@ -74,26 +74,20 @@ class BuildMachines:
             die("%s is missing something a build cannot start without.\n"
                 "    Run the root command above (or send it to the machine's administrators),\n"
                 "    then re-run 'wk machine setup %s'. Nothing has been changed." % (host, name))
-        ref = t.reference()
-        if ref:
-            info("this machine publishes a %s repository: %s" % (project.get("CHECKOUT"), ref))
-            log("  workspaces will be cloned from it (hardlinked objects), not from a mirror of ours")
-        else:
-            log("  no shared %s repository advertised -- a mirror under the root will be kept instead" % project.get("CHECKOUT"))
         if re.search(r"home *(dir|directory)?.*shared", t._sh(MOTD).out, re.I) and not t.conf_root:
             die("this machine says its home directory is shared with other boxes. Each needs a root of its\n"
                 "    own, or they share one set of workspaces, key dirs and locks, and one build tree\n"
                 "    cannot hold two architectures. Add root=<a directory only this box uses> to\n"
                 "    machines/%s.conf (and hostname=<its `hostname -s`> if that is not %s), then re-run.\n"
                 "    Nothing has been changed." % (name, name))
-        rubble = self.rubble(t, ref)
+        rubble = self.rubble(t)
         clean = self.ask_rubble(host, rubble)
         self.write_conf(name, path, new, "build")
         tools = t.tools("")
         info("pushing wk-tools to %s" % tools)
         if not t.sync_tools(""):
             die("nothing was changed on %s: it has no wk-tools to provision from" % host)
-        q = ["WK_REMOTE_MACHINE=" + name, "WK_REMOTE_ROOT=" + t.root_there(), "WK_REMOTE_REFERENCE=" + ref,
+        q = ["WK_REMOTE_MACHINE=" + name, "WK_REMOTE_ROOT=" + t.root_there(),
              "WK_REMOTE_INPUTS=" + inputs_hash(self.root)]
         r = t._far().act_run(["env"] + q + ["bash", tools + "/remote/provision.sh"])
         places.show(r)
@@ -109,7 +103,7 @@ class BuildMachines:
             act.barrier("sudo on '%s' grants root without a password, and this machine\n"
                         "    runs unattended builds. 'wk key sudo setup --on %s' fixes it in one\n"
                         "    file that no sysadmin has to approve." % (name, name))
-        self.install_dependencies(t, host, name, ref)
+        self.install_dependencies(t, host, name)
         for d, _size, _why in rubble if clean else ():
             if t._far().act_run(["rm", "-rf", d]).ok:
                 info("removed %s" % d)
@@ -122,16 +116,12 @@ class BuildMachines:
         r = t._sh("du -sh %s 2>/dev/null | cut -f1" % shlex.quote(path))
         return r.out.strip() or "?"
 
-    def rubble(self, t, ref):
-        """(path, size, why): an older wk-tools checkout, and the mirror a shared repository replaces."""
+    def rubble(self, t):
+        """(path, size, why): an older wk-tools checkout."""
         tools, out = t.tools(""), []
         for d in t._sh(OLD_TOOLS).out.split():
             if d != tools:
                 out.append((d, self.size(t, d), "an older wk-tools checkout; the live one is %s" % tools))
-        mirror = t.root_there() + "/mirror"
-        if ref and t._far().isdir(mirror):
-            out.append((mirror, self.size(t, mirror), "redundant now that %s is used instead; a workspace cloned from it"
-                        " borrows its objects (--shared) and would break" % ref))
         return out
 
     def ask_rubble(self, host, rubble):
@@ -162,16 +152,14 @@ class BuildMachines:
                 t._far().act_run(["sh", "-c", "rm -f %s" % dest])
                 info("no %s credential here, so none was placed on %s ('wk key set %s' stores one)" % (name, host, name))
 
-    def install_dependencies(self, t, host, name, ref):
+    def install_dependencies(self, t, host, name):
         """Tools/*/install-dependencies prompts for sudo, so it runs only with a terminal."""
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
             warn("no terminal here -- skipping Tools/*/install-dependencies on %s.\n"
                  "  it needs an interactive sudo prompt; re-run 'wk machine setup %s' from a terminal." % (host, name))
             return
-        src = ref
-        if not src:
-            t._mirror_update(t.root_there())
-            src = t.mirror_dir()
+        t._mirror_update(t.root_there())
+        src = t.mirror_dir()
         dirs = " ".join(project.get("DEPS_DIRS")[:2 if t.env.get("WK_REMOTE_WPE") else 1])
         script = ('set -e; tmp=$(mktemp -d); trap \'rm -rf "$tmp"\' 0\n'
                   'git -C %s archive main -- %s | tar -x -C "$tmp"\n'

@@ -15,7 +15,8 @@ from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places, tools  # noqa: E402
-from wk.machine import Fake, Local, Result  # noqa: E402
+from wk.machine import Local, Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 SHA = "a" * 40
 
@@ -235,7 +236,7 @@ class EachKind(unittest.TestCase):
         self.fake.answer(["git", "-C", str(REPO), "status"], out="")
         self.fake.answer(["git", "-C", str(REPO), "rev-parse", "HEAD"], out=SHA + "\n")
         self.fake.answer(["git", "-C", str(REPO), "bundle"])
-        self.fake.answer(["scp"])
+        self.fake.answer(["bash", "-c"])
         self.fake.react(["ssh"], lambda a, f: Result(1) if "wk-image" in a[-1] else
                         Result(0, SHA + "\n" if "rev-parse HEAD" in a[-1] else ""))
         self.reg = places.Registry(REPO, env=self.env, machine=self.fake)
@@ -244,20 +245,20 @@ class EachKind(unittest.TestCase):
         (self.tmp / "hosts" / (name + ".conf")).write_text(text)
 
     def pushed(self):
-        return [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] in ("ssh", "scp")]
+        return [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] in ("ssh", "bash")]
 
     def test_a_build_box_gets_the_bundle_at_its_tools_directory(self):
         self.conf("box", "kind=build\nhost=box.example\nroot=/home/u/wk\ntools=/home/u/wk/tools\n")
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertTrue(self.reg.load("box").sync_tools(""))
         runs = self.pushed()
-        self.assertEqual([a[0] for a in runs], ["ssh", "scp", "ssh"])
+        self.assertEqual([a[0] for a in runs], ["ssh", "bash", "ssh"])
         self.assertIn("box.example", runs[0])
         self.assertTrue(shlex.split(runs[0][-1])[-1].endswith("sh /home/u/wk/tools"), runs[0][-1])
-        self.assertEqual(runs[1][-1], "box.example:/home/u/wk/tools/" + tools.BUNDLE)
+        self.assertIn("cat > /home/u/wk/tools/" + tools.BUNDLE, runs[1][-1])
 
     def test_a_peer_keeps_its_own_checkout_and_a_container_bind_mounts_this_one_so_nothing_is_pushed(self):
-        self.conf("pal", "kind=peer\nhost=pal.example\npeer=1\n")
+        self.conf("pal", "kind=peer\nhost=pal.example\n")
         self.assertTrue(self.reg.load("pal").sync_tools("") and self.reg.load("container").sync_tools("ws"))
         self.assertEqual(self.fake.effects, [])
 
@@ -267,13 +268,13 @@ class EachKind(unittest.TestCase):
         t = places.Vm("vm", str(REPO), dict(self.env), self.fake)
         self.fake.react(["/t/tart", "exec"], lambda a, f: Result(1) if "wk-image" in a[-1] else
                         Result(0, SHA + "\n" if "rev-parse HEAD" in a[-1] else ""))
-        self.fake.answer(["sh", "-c"])
+        self.fake.answer(["bash", "-c"])
         with mock.patch.object(places.Vm, "tart", lambda s: "/t/tart"), mock.patch.object(places.Vm, "vm_state", return_value="running"), \
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertTrue(t.sync_tools("mac"))
-        runs = [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] in ("/t/tart", "sh")]
+        runs = [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] in ("/t/tart", "bash")]
         self.assertEqual(runs[0][:4], ("/t/tart", "exec", "-i", "wk-mac"))
-        self.assertEqual((runs[1][3:5], runs[1][-1]), (("/t/tart", "wk-mac"), "/Users/admin/wk-tools/" + tools.BUNDLE))
+        self.assertEqual((runs[1][5:9], runs[1][-1]), (("/t/tart", "exec", "-i", "wk-mac"), "cat > /Users/admin/wk-tools/" + tools.BUNDLE))
         self.assertIn("/Users/admin/.wk-workspace", runs[-1][-1], "the marker the pushed tooling reads was not rewritten")
 
 

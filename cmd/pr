@@ -117,7 +117,7 @@ def pr_open(driver, name, draft, web):
     info("reading '%s's branch and remotes" % name)
     base, head, fork, branch = pr_open_target(src, run=lambda argv: driver.exec(name, argv))
     info("pushing '%s' to '%s'" % (branch, fork))
-    if driver.kind == "remote" and not driver.is_local and not driver.peer:
+    if driver.kind == "remote" and not driver.is_here() and not driver.peer:
         r = push_from_here(driver, src, fork, branch)
     else:
         r = driver.act_exec(name, ["git", "-C", src, "push", "-u", fork, branch], person=True)
@@ -149,10 +149,7 @@ def _load(reg, name, usage):
     if not name:
         die("usage: %s; see wk pr -h" % usage)
     require_name(name)
-    try:
-        return reg.load(reg.ws_place(name))
-    except LookupError as e:
-        die(str(e))
+    return reg.present(name)
 
 
 def main(argv):

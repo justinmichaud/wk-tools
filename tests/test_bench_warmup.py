@@ -13,7 +13,7 @@ from tests.test_slots import load_driver
 sys.path.insert(0, str(REPO / "lib"))
 from wk import samply  # noqa: E402
 from wk.bench import record, report, scores  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 
 def warmup_check(a, b, same_width=False):

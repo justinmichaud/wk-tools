@@ -11,7 +11,7 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places  # noqa: E402
 from wk.machine_cmd import deps  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 
 class TestTheBuildMachineRecord(unittest.TestCase):

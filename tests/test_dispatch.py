@@ -15,7 +15,8 @@ from tests.support import REPO, bash, clean_env, run
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, dispatch, places, presets, project, repos, store, workspace  # noqa: E402
 from wk import decl as D  # noqa: E402
-from wk.machine import Fake, Local  # noqa: E402
+from wk.machine import Local  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 DECLS = [d for d in D.all_commands(REPO)]
 GLOBAL_WORDS = set(dispatch.GLOBALS) | {"-h", "--help", "--explain"}

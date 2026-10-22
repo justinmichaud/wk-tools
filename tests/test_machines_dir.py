@@ -16,7 +16,7 @@ from tests.support import FLEET_ENV, REAL_MACHINES, REPO
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, fleet, places  # noqa: E402
 from wk.boot.cli import load_conf  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 USERS_OWN = {"CLAUDE.md", "docs/PLAN.md"}
 README_MARKER = "*** Claude edit below here ***"
@@ -168,7 +168,7 @@ class TestTheReadersOverIt(FleetTest):
 
     def test_the_target_registry_is_the_build_machines_and_peers(self):
         self.conf("box", "kind=build\nhost=box\n")
-        self.conf("pe", "kind=peer\npeer=1\n")
+        self.conf("pe", "kind=peer\n")
         self.conf("pi", "kind=board\ndriver=pi-sd\nnote=n\n")
         reg = places.Registry(REPO, env=self.env, machine=Fake())
         self.assertEqual(reg.known(), ["box", "pe"])

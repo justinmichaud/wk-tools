@@ -13,9 +13,10 @@ from tests.support import REPO, WkTest, scratch_dir
 sys.path.insert(0, str(REPO / "lib"))
 from wk import screen  # noqa: E402
 from wk.bench import autorun, mac  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
 from wk.kv import kv  # noqa: E402
-from wk.machine import Fake, Killed, Result  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake, Killed  # noqa: E402
 
 QUIET = REPO / "bench" / "mac-quiet-desktop.sh"
 

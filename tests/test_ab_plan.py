@@ -22,8 +22,9 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import act, images, job, pgo, record as progress, sched  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import ab, record  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result, Ssh  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from wk.machine import Result, Ssh  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 HEAD, BASE, TIP = "a" * 40, "b" * 40, "c" * 40
 WK = str(REPO / "wk")
@@ -137,7 +138,7 @@ class World:
     def peer(self):
         """peer1, a workstation with its own wk: what it holds is in its own store, which only its wk knows."""
         store = self.tmp / "peer1"
-        (self.tmp / "machines" / "peer1.conf").write_text("kind=peer\ndriver=remote\nhost=peer1\npeer=1\ntools=%s\n" % REPO)
+        (self.tmp / "machines" / "peer1.conf").write_text("kind=peer\ndriver=remote\nhost=peer1\ntools=%s\n" % REPO)
         (store / "machines").mkdir(parents=True)
         self.fake.peer_env = {"PATH": os.environ["PATH"], "HOME": str(store), "SHELL": "/bin/sh", "WK_PLACE": "local",
                               "WK_LOCAL_STORE": str(store), "XDG_STATE_HOME": str(store / "state"),

@@ -20,7 +20,8 @@ from tests.support import (
 sys.path.insert(0, str(REPO / "lib"))
 from wk import screen  # noqa: E402
 from wk.clock import Clock  # noqa: E402
-from wk.machine import Fake, Local, lib_argv  # noqa: E402
+from wk.machine import Local, lib_argv  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 PLAN, SUBTEST, CONFIG = "jetstream3", "richards", "jsc-release"
 

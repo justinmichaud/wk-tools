@@ -19,7 +19,7 @@ from tests.support import REPO, live_selected, load_cmd
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, dispatch, guest, places, tools  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
 from wk.machine import Local, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
 from wk.sysimage import cli, guestbase  # noqa: E402
@@ -317,14 +317,14 @@ class TestAGuestIsAdmittedOnlyWhereItFits(BaseTest):
     def test_an_idle_podman_machine_is_stopped_and_a_busy_one_is_not(self):
         state = ["podman", "machine", "inspect", "wk"]
         self.w.answer(state, out=json.dumps([{"State": "running", "Resources": {"Memory": 16384}}]))
-        self.w.answer(["podman", "machine", "ssh"], out="3\n")
+        self.w.answer(["podman", "machine", "ssh"], out="c1\nc2\nc3\n")
         rc, err = self.admit(mine=12000)
         self.assertEqual(1, rc)
         self.assertNotIn(("run", ("podman", "machine", "stop", "wk")), self.w.effects)
         self.assertIn("not enough memory", err)
         self.w.answer(["podman", "machine", "ssh"], rc=255)
         self.assertEqual(1, self.admit(mine=12000)[0], "an unreadable answer is busy")
-        self.w.answer(["podman", "machine", "ssh"], out="0\n")
+        self.w.answer(["podman", "machine", "ssh"], out="")
         self.w.react(["podman", "machine", "stop"], lambda a, f: (f.answer(state, out=json.dumps([{"State": "stopped"}])), Result(0))[1])
         rc, err = self.admit(mine=12000)
         self.assertEqual(0, rc, err)

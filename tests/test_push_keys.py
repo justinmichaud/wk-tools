@@ -15,7 +15,8 @@ from tests.test_wk_secrets import KEY_SH
 sys.path.insert(0, str(REPO / "lib"))
 from wk import secrets  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Fake, Local, Result  # noqa: E402
+from wk.machine import Local, Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.secrets import Secrets  # noqa: E402
 from wk.store import Store  # noqa: E402
 

@@ -14,7 +14,8 @@ from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.act import Refused  # noqa: E402
-from wk.machine import Fake, Result, here  # noqa: E402
+from wk.machine import Result, here  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.sysimage import buildroot  # noqa: E402
 
 

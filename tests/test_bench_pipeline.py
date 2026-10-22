@@ -19,8 +19,9 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import act, decl, dispatch, job, record, project, screen  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import record as brecord, systems  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Local, Result, Ssh  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from wk.machine import Local, Result, Ssh  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
 PLAN_JSON = json.dumps({"git_repository": {"url": "https://example.com/bench.git", "branch": "main"}})

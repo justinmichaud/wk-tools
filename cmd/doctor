@@ -85,10 +85,10 @@ def only(args, allowed, why):
 
 
 def inside(reg):
-    driver = reg.load("local")
-    info("checking workspace '%s' from inside it" % driver.ws_name)
+    driver, name = reg.load("local"), reg.workspace_name()
+    info("checking workspace '%s' from inside it" % name)
     rep = Report(sys.stderr)
-    publishing = wall.from_inside(ROOT, driver, driver.ws_name, reg.machine, rep)
+    publishing = wall.from_inside(ROOT, driver, name, reg.machine, rep)
     sys.stderr.write("\n")
     disk.workspace_report(reg)
     v = wall.verdict(rep, publishing)

@@ -16,7 +16,7 @@ from tests.support import (
 sys.path.insert(0, str(REPO / "lib"))
 from wk import decl as D  # noqa: E402
 from wk import dispatch, places  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 CMDS = [c for c in sorted((REPO / "cmd").iterdir()) if c.is_file() and os.access(c, os.X_OK)]
 
@@ -74,7 +74,7 @@ class TestDelegationReadsTheRegistry(WkTest):
     def setUp(self):
         super().setUp()
         (self.tmp / "hosts").mkdir()
-        (self.tmp / "hosts" / "peer.conf").write_text("kind=peer\npeer=1\ntools=/opt/wk-tools\n")
+        (self.tmp / "hosts" / "peer.conf").write_text("kind=peer\ntools=/opt/wk-tools\n")
         (self.tmp / "hosts" / "me.conf").write_text("kind=build\nlocal=1\nroot=%s\n" % (self.tmp / "rr"))
         env = {"HOME": str(self.tmp), "XDG_STATE_HOME": str(self.tmp / "state"), "WK_STORE": str(self.tmp / "store"),
                "WK_MACHINES_DIR": str(self.tmp / "hosts"), "WK_IN_VM": "1", "PATH": os.environ.get("PATH", "")}

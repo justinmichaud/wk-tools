@@ -16,7 +16,8 @@ from tests.support import REPO, as_dispatched, load_cmd
 sys.path.insert(0, str(REPO / "lib"))
 from wk import decl, ldpath, profile  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 RUN = decl.Decl(REPO / "cmd" / "run")
 

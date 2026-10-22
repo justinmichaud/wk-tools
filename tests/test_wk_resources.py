@@ -13,7 +13,7 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 from wk import resources  # noqa: E402
 from wk.act import RETRY_EXIT, Refused  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 MEMINFO = "MemTotal:       32806140 kB\nMemFree:         1000000 kB\nMemAvailable:   20480000 kB\n"
 
@@ -132,7 +132,7 @@ class TestBudget(ResourcesTest):
 
     def test_the_live_builds_holding_this_machines_budget_are_spoken_for(self):
         from wk import record
-        from wk.clock import FakeClock
+        from tests.fakes import FakeClock
         recs = record.Records("/s", clock=FakeClock(), machine=self.fake, env={})
         b = self.budget()
         self.fake.pids.update({7, 9})

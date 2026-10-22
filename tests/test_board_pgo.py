@@ -20,8 +20,9 @@ from tests.support import REPO, WkTest, _clean_env, requires_machine, scratch_di
 sys.path.insert(0, str(REPO / "lib"))
 from wk import images, pgo, record as progress, sched  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 PROFILE = "webkit-2.52-yocto-rpi5-64"

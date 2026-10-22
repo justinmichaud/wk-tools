@@ -19,7 +19,8 @@ from tests.test_pi_agent import TABLE, store_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import claudelogin, guest, places, secrets  # noqa: E402
-from wk.machine import Fake, Local, Result  # noqa: E402
+from wk.machine import Local, Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 RC = REPO / "shell" / "bashrc"
 VAR = "CLAUDE_CODE_OAUTH_TOKEN"

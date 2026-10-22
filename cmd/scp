@@ -56,10 +56,7 @@ def main(argv):
               "neither path is in the workspace -- mark that side with a leading ':', as in :Tools/foo.js")
 
     reg = places.Registry(ROOT)
-    try:
-        driver = reg.load(reg.ws_place(name))
-    except LookupError as e:
-        die(str(e))
+    driver = reg.present(name)
 
     in_ws = lambda p: driver.path_kind(name, p)  # noqa: E731
     if src_is_ws:

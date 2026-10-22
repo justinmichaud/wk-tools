@@ -26,7 +26,8 @@ CMD_PR_MODULE = load_cmd("pr")
 from wk import act, decl, git, places, pr, sync  # noqa: E402  -- needs CMD_PR_MODULE's sys.path.insert above
 from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
-from wk.machine import Fake, Local, Result  # noqa: E402
+from wk.machine import Local, Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 
@@ -544,7 +545,7 @@ class TestPrOpen(unittest.TestCase):
     def _open(self, peer=None, draft=False):
         driver = rebase_place("", [Result(0)])   # the push
         if peer is not None:
-            driver.kind, driver.is_local, driver.peer = "remote", False, peer
+            driver.kind, driver.is_here, driver.peer = "remote", lambda: False, peer
         with mock.patch.object(CMD_PR_MODULE, "pr_open_target", return_value=("WebKit/WebKit", "me:b", "fork", "b")), \
                 mock.patch.object(CMD_PR_MODULE, "push_from_here", return_value=Result(0)) as from_here, \
                 contextlib.redirect_stderr(io.StringIO()):

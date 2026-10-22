@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.support import REPO, requires_tool
+from tests import fakes
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import machine  # noqa: E402
@@ -28,7 +29,7 @@ INTERFACE = ("run", "run_tty", "read", "exists", "isdir", "listdir", "alive", "a
 
 class TestConformance(unittest.TestCase):
     def test_every_transport_implements_the_whole_interface(self):
-        for cls in (machine.Local, machine.Ssh, machine.Fake):
+        for cls in (machine.Local, machine.Ssh, fakes.Fake):
             missing = [n for n in INTERFACE if not callable(getattr(cls, n, None))]
             self.assertEqual(missing, [], cls.__name__)
 
@@ -291,7 +292,7 @@ class TestLocal(MachineTest, LockEffectsConformance, CopyConformance, LogReadCon
 class TestFake(MachineTest, LockEffectsConformance, CopyConformance, LogReadConformance):
     def setUp(self):
         super().setUp()
-        self.m = machine.Fake("box")
+        self.m = fakes.Fake("box")
         self.real_tmp = tempfile.mkdtemp(prefix="wk-test-machine-fake-")
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", self.real_tmp]))
 
@@ -382,7 +383,7 @@ class TestFake(MachineTest, LockEffectsConformance, CopyConformance, LogReadConf
         self.assertTrue(self.m.exists("/a") and self.m.read("/a") == "1")
         for effect in (lambda: self.m.write("/b", "2"), lambda: self.m.remove("/a"), lambda: self.m.mkdir("/d"),
                        lambda: self.m.kill(7), lambda: self.m.spawn(["x"], "/log"), lambda: self.m.act_run(["true"])):
-            with self.assertRaises(machine.Killed):
+            with self.assertRaises(fakes.Killed):
                 effect()
         self.assertEqual(self.m.files, {"/a": "1"})
         self.assertEqual(self.m.applied, 2)
@@ -416,7 +417,7 @@ class TestTartExec(MachineTest, CopyConformance):
         tart.write_text('#!/bin/sh\n[ "$1" = exec ] || exit 2; shift\nwhile [ "${1#-}" != "$1" ]; do shift; done\nshift\nexec "$@"\n')
         tart.chmod(0o755)
         os.makedirs(os.path.join(self.real_tmp, "guest"))
-        self.m = machine.TartExec(str(tart), "wk-demo", via=machine.Local())
+        self.m = machine.Ssh.tart(str(tart), "wk-demo", via=machine.Local())
 
     def path(self, *parts):
         return os.path.join(self.real_tmp, "guest", *parts)
@@ -431,12 +432,12 @@ class TestTartExec(MachineTest, CopyConformance):
 class TestHave(MachineTest):
     def test_here_a_tool_is_one_on_path_over_ssh_one_quoted_command_v_and_a_fake_answers_it_by_the_probe(self):
         self.assertEqual((machine.Local().have("sh"), machine.Local().have("wk-no-such-tool")), (True, False))
-        via = machine.Fake("here")
+        via = fakes.Fake("here")
         m = machine.Ssh("box.example", via=via)
         via.answer(m.argv(shlex.join(machine.HAVE + ("x y",))))
         self.assertTrue(m.have("x y"))
         self.assertFalse(m.have("z"))
-        fake = machine.Fake()
+        fake = fakes.Fake()
         fake.answer(machine.HAVE + ("xz",))
         self.assertEqual((fake.have("xz"), fake.have("kpartx")), (True, False))
 
@@ -461,7 +462,7 @@ class TestSshLogReads(MachineTest, LogReadConformance):
         super().setUp()
         self.tmp = tempfile.mkdtemp(prefix="wk-test-machine-ssh-")
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", self.tmp]))
-        via = machine.Fake("here")
+        via = fakes.Fake("here")
         via.react(["ssh"], lambda argv, fake: machine.Local().run(["sh", "-c", argv[-1]]))
         self.m = machine.Ssh("box.example", via=via)
 
@@ -492,19 +493,19 @@ class TestSsh(MachineTest):
         for name, call in (("run", lambda m: m.run(["tart", "list"])), ("have", lambda m: m.have("tart")),
                            ("exists", lambda m: m.exists("/x"))):
             with self.subTest(call=name):
-                via = machine.Fake("here")
+                via = fakes.Fake("here")
                 via.react(["ssh"], lambda argv, f: machine.Result(0, ""))
                 call(machine.Ssh("box", via=via))
                 sent = [e[1][-1] for e in via.effects if e[0] == "run"]
                 self.assertTrue(sent and all(s.startswith('"$SHELL" -lc ') for s in sent), sent)
 
     def test_an_effect_over_ssh_is_an_effect_on_the_machine_that_drives_it(self):
-        via = machine.Fake("here")
+        via = fakes.Fake("here")
         via.answer(["ssh"])
         m = machine.Ssh("box.example", timeout=3, via=via)
         via.stop_after = 0
         self.assertTrue(m.run(["true"]).ok)
-        with self.assertRaises(machine.Killed):
+        with self.assertRaises(fakes.Killed):
             m.act_run(["rm", "-rf", "/d"])
         via.stop_after = None
         m.act_run(["tart", "clone", "a", "b"], stream=True)
@@ -514,7 +515,7 @@ class TestSsh(MachineTest):
 
     def test_an_effect_over_ssh_refuses_before_a_destructive_command_asked(self):
         os.environ["WK_DESTRUCTIVE"] = "1"
-        via = machine.Fake("here")
+        via = fakes.Fake("here")
         via.answer(["ssh"])
         from wk.act import Refused
         with self.assertRaises(Refused):
@@ -539,23 +540,19 @@ class TestSsh(MachineTest):
         self.assertEqual([shlex.split(c[-1])[-1] for c in seen], ["ln -s target /locks/r.lock", "readlink /locks/r.lock",
                          "mv -f /locks/r.lock.new /locks/r.lock", "rm -rf /locks/r.lock", "mkdir -p /locks"])
 
-    def test_copies_are_scp_and_rsync_over_this_sshs_own_opts_naming_both_ends(self):
+    def test_a_copy_is_one_pipe_here_through_the_channels_own_argv(self):
         def calls(m):
             m.copy_in("/local/a", "/remote/a")
-            m.copy_out("/remote/b", "/local/b")
-            m.copy_tree_in("/local/tree", "/remote/tree")
-            m.copy_tree_out("/remote/tree", "/local/tree", exclude=("*.a", "DerivedSources"))
-        seen = self.ssh_calls(calls, m=machine.Ssh("box.example", opts=["-i", "key"], timeout=3))
-        self.assertEqual([a[0] for a in seen], ["scp", "scp", "rsync", "rsync"])
-        self.assertEqual([a[-2:] for a in seen], [["/local/a", "box.example:/remote/a"],
-                                                  ["box.example:/remote/b", "/local/b"],
-                                                  ["/local/tree/", "box.example:/remote/tree/"],
-                                                  ["box.example:/remote/tree/", "/local/tree/"]])
-        for argv in seen[2:]:
-            self.assertIn("--chmod=go-w", argv)
-            self.assertIn("--delete", argv)
-            self.assertIn("-i key", argv[argv.index("-e") + 1])
-        self.assertIn(["--exclude", "*.a", "--exclude", "DerivedSources"], [seen[3][i:i + 4] for i in range(len(seen[3]))])
+            m.copy_tree_out("/remote/tree", "/local/tree", exclude=("*.a",))
+        m = machine.Ssh("box.example", opts=["-i", "key"], timeout=3)
+        seen = self.ssh_calls(calls, m=m)
+        self.assertEqual([(a[0], a[4]) for a in seen], [("bash", "/local/a"), ("bash", "/local/tree")])
+        self.assertEqual(seen[0][5:], m.argv("cat > /remote/a"))
+        self.assertIn("--exclude", seen[1][-1])
+        tart = machine.Ssh.tart("/bin/tart", "g")
+        self.assertEqual(self.ssh_calls(lambda t: t.copy_in("/a", "/b"), m=tart)[0][5:],
+                         ["/bin/tart", "exec", "-i", "g", "/bin/zsh", "-lc", "cat > /b"])
+        self.assertEqual(machine.Ssh.podman("wk").argv("true", tty=True), ["podman", "machine", "ssh", "wk", "--", "true"])
 
     def test_a_copy_that_fails_raises_and_a_dry_run_copies_nothing(self):
         with self.assertRaises(OSError):
@@ -569,7 +566,7 @@ class TestSsh(MachineTest):
 
 class TestForward(MachineTest):
     def test_ssh_holds_one_reverse_forward_and_kills_it_on_the_way_out(self):
-        via = machine.Fake("here")
+        via = fakes.Fake("here")
         m = machine.Ssh("box.example", opts=["-l", "root"], timeout=3, via=via)
         with m.forward(4567, "/tmp/tunnel.log") as pid:
             self.assertIn(pid, via.pids)
@@ -592,7 +589,7 @@ class TestForward(MachineTest):
         self.assertIn("-R 127.0.0.1:4567:127.0.0.1:4567", err)
 
     def test_the_fake_holds_a_pid_while_the_forward_is_held_and_a_raise_still_closes_it(self):
-        f = machine.Fake()
+        f = fakes.Fake()
         with f.forward(4567) as pid:
             self.assertIn(pid, f.pids)
         self.assertNotIn(pid, f.pids)

@@ -78,10 +78,7 @@ def main(argv, reg=None, clock=None):
     name, opts = store.ws_name(), parse(args)
     clock = clock or Clock()
     reg = reg or places.Registry(ROOT)
-    try:
-        driver = reg.load(reg.ws_place(name))
-    except LookupError as e:
-        die(str(e))
+    driver = reg.present(name)
     recs = job.records_of(driver, clock, reg.machine)
 
     kill_cmd = "wk test%s --kill" % ("" if reg.in_workspace() else " " + name)
@@ -91,10 +88,7 @@ def main(argv, reg=None, clock=None):
         return 0
 
     preset_name = store.build_preset() or presets.default_preset(reg, name)
-    try:
-        preset = presets.resolve(preset_name, driver.os(), driver.kind, driver.env)
-    except LookupError:
-        die("unknown preset '%s' (wk build --list)" % preset_name)
+    preset = presets.resolve_or_die(preset_name, driver)
 
     # Asked of the preset, not of preset.port: on macOS a jsc-* preset is an Apple-port build with no port flag.
     if opts["suite"] == "layout" and preset.jsc_only:

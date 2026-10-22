@@ -16,7 +16,8 @@ from tests.test_bench_mac import StubWatch  # noqa: E402
 from wk import presets, screen as wkscreen  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import mac, mac_pgo, seed  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 PRESET = "mac-release-pgo"
 

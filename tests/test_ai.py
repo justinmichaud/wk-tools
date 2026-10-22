@@ -19,7 +19,8 @@ from tests.test_doctor_wall import _Wall
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, places, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 AI = load_cmd("ai")
 WK = os.path.join(AI.ROOT, "wk")

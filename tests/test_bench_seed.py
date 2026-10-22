@@ -17,9 +17,10 @@ from tests.test_bench_report import in_process
 sys.path.insert(0, str(REPO / "lib"))
 from wk.act import Refused  # noqa: E402
 from wk.bench import cli, seed  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 SHA = "0123456789abcdef0123456789abcdef01234567"

@@ -11,8 +11,9 @@ from tests.support import REPO, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, build, job, record  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, here  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from wk.machine import here  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 PLACE_PID_MATCH = "*build-in-workspace.sh*"
 

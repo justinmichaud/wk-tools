@@ -26,7 +26,7 @@ from tests.test_push_service import Proc
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places as wk_places, pushgate  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 PROXY = REPO / "container" / "proxy" / "wk-proxy.py"
 INJECT = REPO / "container" / "proxy" / "github-inject.py"

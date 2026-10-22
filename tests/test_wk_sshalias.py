@@ -10,6 +10,7 @@ from contextlib import redirect_stderr
 from unittest import mock
 
 from tests.support import REPO
+from tests import fakes
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import machine, sshalias  # noqa: E402
@@ -54,7 +55,7 @@ class TestOnDisk(unittest.TestCase):
 
 class TestOnTheFake(unittest.TestCase):
     def setUp(self):
-        self.fake = machine.Fake("box")
+        self.fake = fakes.Fake("box")
         self.fake.answer(["chmod"])
         self.env = {"HOME": "/home/u"}
         self.conf = sshalias.alias_path(self.env)
