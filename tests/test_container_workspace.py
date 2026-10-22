@@ -257,7 +257,7 @@ class TestCancellingARealBuild(WkTest):
                             f"ninja is still running in '{self.name}': {left.stdout}")
 
     def _a_second_build_is_refused_and_kill_converges_the_detached_one(self):
-        run("enter", self.name, "--", "rm", "-rf", "/src/WebKit/WebKitBuild/Debug", timeout=120)   # a build that lasts: configure and link again
+        run("enter", self.name, "--", "rm", "-rf", "/src/WebKit/WebKitBuild/JSCOnly", timeout=120)   # a build that lasts: configure and link again
         cp = run("build", self.name, "jsc-debug", "--detach", timeout=600)
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("--kill", cp.stdout, "the detach names how to stop it")
