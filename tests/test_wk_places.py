@@ -1037,6 +1037,7 @@ class TestRemoteWrite(RemoteTest):
         self.assertIn("'new' acts on a workspace on peer, which has no wk-tools of its own", err)
 
     def test_a_box_at_another_wk_tools_commit_is_refused_the_hand_over_naming_the_sync_and_asked_again_each_time(self):
+        """`unit handover.tools_level`, with the --force and read-only tests below."""
         self.tools_at("0000stale000")
         err = self.refused(lambda: self.t.hand_over("build", ["a"], tty=False))
         self.assertIn("wk sync --tools box", err)
