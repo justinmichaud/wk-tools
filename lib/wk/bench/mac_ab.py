@@ -64,7 +64,7 @@ class Remote:
         self.root, self.d = str(root), driver
 
     def call(self, script, mutates=False):
-        return stripped(self.d.ch.call("r_ssh", script, mutates=mutates))
+        return stripped(self.d.ch.run(script.argv(), mutates=mutates))
 
     def run(self, name, mutates=False, **params):
         return self.call(OnMac(self.root, name, **params), mutates=mutates)
@@ -74,10 +74,10 @@ class Remote:
         return r.out.strip() if r.ok else ""
 
     def test(self, flag, path):
-        return self.call(Script(self.root, "mac-test.sh", WK_TEST=flag, WK_PATH=path)).ok
+        return self.d.ch.run(["test", flag, path]).ok
 
     def read(self, path):
-        return self.call(Script(self.root, "mac-read.sh", WK_PATH=path)).out
+        return stripped(self.d.ch.run(["cat", path])).out
 
     def py(self, rel, *args):
         """A tree file run by the install's python3, as a parameter: a guest's channel carries no stdin."""
@@ -156,7 +156,7 @@ class MacAB(ab.Task):
         self.conf = dict(conf, name=self.name)
         self.d = self.make_driver(self.root, self.conf)
         self.d.probe()
-        self.guest = self.d.arming == "guest"
+        self.guest = self.d.name == "mac-guest"
         self.mac = Remote(self.root, self.d)
 
     # -- what preflight reads

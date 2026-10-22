@@ -62,10 +62,12 @@ class Writer:
         self.lsblk, self.whose, self.status, self.check, self.has_whose = lsblk, whose or {}, status, check, has_whose
         self.calls = []
 
-    def call(self, fn, *args, input=None, mutates=False):
-        self.calls.append((fn,) + args)
-        if fn == "m_ssh":
-            return Result(0, self.lsblk)
+    def run(self, argv, side=None, input=None, mutates=False):
+        self.calls.append(("m_ssh", " ".join(argv)))
+        return Result(0, self.lsblk)
+
+    def card(self, *args, input=None, mutates=False):
+        self.calls.append(("card_priv",) + args)
         verb, dev = args[0], (args[1:] or ("",))[0]
         if verb == "whose" and not self.has_whose:
             return Result(1, "", "usage: wk-card-priv status|check|write <device>\n")
@@ -76,7 +78,7 @@ class Writer:
             return Result(*self.status)
         if verb == "check":
             return Result(self.check[0], self.check[1] + "\n")
-        raise AssertionError("unexpected call %r" % ((fn,) + args,))
+        raise AssertionError("unexpected card helper verb %r" % (args,))
 
 
 def disks(w=None, name="rpi5", device="/dev/sda"):
@@ -111,7 +113,7 @@ class TestParse(unittest.TestCase):
 
     def test_an_unreachable_writer_has_no_candidates(self):
         w = Writer()
-        w.call = lambda fn, *a, **k: Result(255, "", "ssh: connect: no route")
+        w.run = lambda *a, **k: Result(255, "", "ssh: connect: no route")
         self.assertEqual(disks(w).candidates(), [])
 
     def test_spec_and_transport_and_partition_names(self):

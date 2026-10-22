@@ -11,13 +11,13 @@ import unittest
 from unittest import mock
 
 from tests.support import REPO, WkTest, bash, requires_machine, scratch_dir, temp_store
-from tests.test_mac_volume import BENCH_GROUP, FakeGuest, FakeMac, conf_for
+from tests.fake_boot import BENCH_GROUP, FakeGuest, FakeMac, conf_for
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, places, sched  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import ab, cli, mac, mac_ab, record  # noqa: E402
-from wk.boot.mac import DRIVERS, HELPER, Channel  # noqa: E402
+from wk.boot.mac import MacVolume  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
 
@@ -68,18 +68,16 @@ class Shell:
                 return got(cmd) if callable(got) else got
         return Result(1, "", "no answer for: %s" % cmd[:80])
 
-    def ours(self, name, p):
-        return (REPO / "bench" / "onboard" / name).is_file() and name.startswith("mac-") or (
-            name == "mac-test.sh" and p["WK_PATH"] not in self.known_paths())
+    def ours(self, name):
+        return (REPO / "bench" / "onboard" / name).is_file() and name.startswith("mac-")
 
 
 class PlantMac(Shell, FakeMac):
     """A Mac in host mode, armed and ready: every gate the preflight reads passes until a test says otherwise."""
 
-    def __init__(self, conf, env=None, clock=None, manager=None):
+    def __init__(self, conf, env=None, clock=None):
         FakeMac.__init__(self, conf, env=env, clock=clock)
         self.sh_setup()
-        self.manager = manager
         self.firmware = "bench"
         self.files[self.firstboot_log()] = "provisioning complete\n"
         for pat, res in ((r"^displays$", Result(0, json.dumps(BENCH_DISPLAY))), (r"^(boot-volume|volume-group)", lambda key: self.wkmac(key))):
@@ -88,21 +86,13 @@ class PlantMac(Shell, FakeMac):
     def firstboot_log(self):
         return self.vol + " - Data/private/var/log/wk-bench-firstboot.log"
 
-    def known_paths(self):
-        return {self.vol + "/System/Library/CoreServices", self.vol + " - Data", HELPER}
-
     def wkmac(self, key):
         words = shlex.split(key)
         out = self.fact(words[0], words[1] if len(words) > 1 else "")
         return Result(0 if out else 1, out + "\n" if out else "")
 
     def script(self, name, p, input):
-        if self.ours(name, p):
-            return self.sh(rendered(name, p))
-        return FakeMac.script(self, name, p, input)
-
-    def machine(self, fn="m_ssh"):
-        return self.manager
+        return self.sh(rendered(name, p)) if self.ours(name) else FakeMac.script(self, name, p, input)
 
 
 class PlantGuest(Shell, FakeGuest):
@@ -112,17 +102,8 @@ class PlantGuest(Shell, FakeGuest):
         self.st = "running"
         self.answer(r"^displays$", Result(0, json.dumps({"displays": [{"online": True, "points": [1280, 800]}]})))
 
-    def known_paths(self):
-        return set()
-
-    def call(self, fn, *args, input=None, mutates=False):
-        ob = args[0]
-        if self.ours(ob.name, ob.params) and self.st == "running" and self.up:
-            self.asked.append((fn, ob.name, dict(ob.params)))
-            if mutates:
-                self.effects.append((fn, ob.name))
-            return self.sh(rendered(ob.name, ob.params))
-        return FakeGuest.call(self, fn, *args, input=input, mutates=mutates)
+    def script(self, name, p, input):
+        return self.sh(rendered(name, p)) if self.ours(name) else FakeGuest.script(self, name, p, input)
 
 
 def here_fake():
@@ -168,9 +149,11 @@ def world(kind="mac-volume", env=None, **o):
         e.update(env or {})
         conf = conf_for(kind)
         manager = Fake("tolken")
-        fake = PlantMac(conf, env=e, clock=clock, manager=manager) if kind == "mac-volume" else PlantGuest(conf, env=e, clock=clock)
-        fake.write_system("perf-macos-tolken-1")
-        driver = DRIVERS[kind](REPO, conf, fake)
+        fake = (PlantMac if kind == "mac-volume" else PlantGuest)(conf, env=e, clock=clock)
+        fake.lay_out(["perf-macos-tolken-1"])
+        driver = fake.driver()
+        if kind == "mac-volume":
+            driver.manager = lambda: manager
         reg = ManagerReg(str(tree / "manager"), env=e, machine=here)
         opts = dict({"devices": "mbp" if kind == "mac-volume" else "benchvm", "systems": "sid-a,sid-b", "workspace": "mac-rel"}, **o)
         m = mac_ab.MacAB(tree, reg, clock, "", opts, cli.Bench(tree, reg, clock), driver=lambda root, c: driver)
@@ -202,7 +185,7 @@ def ready(m):
 
 
 def mutations(m):
-    return [e for e in m.fake.effects if e[0] in ("m_ssh", "r_ssh", "push")]
+    return [e for e in m.fake.effects if e not in (("start",), ("stop",))]
 
 
 class TestTheFirmwareDefaultIsAsserted(WkTest):
@@ -260,7 +243,7 @@ class TestPreflight(WkTest):
                                   ({}, lambda m: m.fake.enter_bench(), 4, "BENCH mode"),
                                   ({}, lambda m: m.fake.files.update({m.fake.firstboot_log(): ""}), 1,
                                    "wk sysimage build perf-macos-tolken --repair"),
-                                  ({}, lambda m: setattr(m.fake, "helper", None), 1, "wk machine setup mbp"),
+                                  ({}, lambda m: setattr(m.fake, "helper_is", None), 1, "wk machine setup mbp"),
                                   ({}, empty, 1, "nothing on the volume"), ({"systems": "", "patch": "HEAD"}, empty, 0, "--patch stages both arms"),
                                   ({}, lambda m: m.fake.answer(r"^displays$", Result(0, json.dumps(two))), 1, "No --force crosses it"),
                                   ({"kind": "mac-guest"}, lambda m: None, 0, "enters bench mode"),
@@ -367,7 +350,7 @@ class TestThePlant(WkTest):
             self.plant(m)
             remote = [c for c in m.fake.ran if re.search(r"wk-tools'? --exclude", c)][0]
             here = [e[1] for e in m.here_fake.effects if e[0] == "run" and e[1][0] == "python3"][0]
-            pushed = [e[1] for e in m.fake.effects if e[0] == "tar"][0]
+            pushed = [e[1] for e in m.fake.effects if e[0] == "tar" and isinstance(e[1], tuple)][0]
         for name in mac.PUT_SKIP:
             self.assertIn("--exclude %s" % name, remote)
             self.assertIn(name, here)
@@ -442,7 +425,7 @@ class TestTheWholeTrip(WkTest):
         with world() as m:
             rc, err = self.go(m)
             self.assertEqual(rc, 0, err)
-            self.assertEqual([p.get("WK_VERB") for fn, n, p in m.fake.asked if n == "mac-priv.sh" and p.get("WK_VERB") == "reboot"], ["reboot"])
+            self.assertEqual([v for v in m.fake.priv_asked() if v == "reboot"], ["reboot"])
             self.assertEqual(m.fake.running, "bench")
             self.assertEqual(len(m.here_fake.notified), 1, "the plant, and nothing about a run that is going as asked")
         self.assertIn("answers in BENCH mode", err)
@@ -670,7 +653,7 @@ class TestStatusCarriesTheLegs(WkTest):
 class TestTheDriverAnswersFromAnotherMachine(WkTest):
     def test_it_is_probeable_off_the_mac(self):
         conf = {"name": "mbp", "ssh": "fakemac", "bench_ssh": "fakemac-bench", "volume": "WK Bench"}
-        self.assertTrue(DRIVERS["mac-volume"](REPO, conf, Channel(conf, {}, via=Fake("here"))).probeable())
+        self.assertTrue(MacVolume(REPO, conf, MacVolume.channel(REPO, conf, env={}, via=Fake("here"))).probeable())
 
 
 if __name__ == "__main__":

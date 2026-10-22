@@ -133,7 +133,7 @@ class BoardSystem(System):
 
     def bench(self):
         if self.machine is None:
-            m = self.driver.ch.machine("i_ssh")
+            m = self.driver.ch.machine("bench")
             if isinstance(m, Result):
                 die("cannot reach %s's bench system over ssh: %s" % (self.board, m.err.strip()))
             self.machine = m

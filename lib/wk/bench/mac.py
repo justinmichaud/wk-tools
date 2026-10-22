@@ -574,8 +574,8 @@ class Stage:
 
     def next_steps(self, drv, machine, dest, plans):
         first = " --plan " + plans[0][0] if plans else ""
-        if drv.facts().get("arming", "") == "guest":
-            arm, go = "start the guest: for a guest that *is* the transition", "wk enter %s -- wk bench staged%s" % (drv.facts().get("guest", "<guest>"), first)
+        if drv.name == "mac-guest":
+            arm, go = "start the guest: for a guest that *is* the transition", "wk enter %s -- wk bench staged%s" % (drv.guest(), first)
         else:
             arm, go = "arm the one-shot and reboot into it", "wk bench staged%s       on the machine, once it is up" % first
         info("staged: %s" % dest)

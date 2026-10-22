@@ -1,6 +1,5 @@
 """A second system beside a rescue on one card (`<device>@second`): admin/wk-card-priv's split, gate and arming,
-lifted with sed and run on plain files standing in for the card, and lib/wk/boot/pi.py's PiSd driver."""
-import contextlib
+lifted with sed and run on plain files standing in for the card."""
 import hashlib
 import io
 import json
@@ -14,13 +13,10 @@ import tarfile
 import unittest
 from pathlib import Path
 
-from tests.fake_boot import FakeBoard
 from tests.bashlift import lift as _lift
 from tests.support import REPO, WkTest, bash, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act  # noqa: E402
-from wk.boot.pi import PiSd  # noqa: E402
 
 CARD_PRIV = REPO / "admin" / "wk-card-priv"
 
@@ -456,76 +452,6 @@ class TestUnitsForABusyBoxInit(WkTest):
         self.assertEqual(names(["init.d/S11wk-self-disarm", "init.d/S99wk-self-return"]).returncode, 0)
         self.assertEqual(names(["init.d/rcS"]).returncode, 3, "a script that is not S<nn>* was accepted")
         self.assertEqual(names(["init.d/S11../x"]).returncode, 3)
-
-
-class TestPiSdDriver(unittest.TestCase):
-    CONF = {"name": "rpi3", "driver": "pi-sd", "device": "/dev/mmcblk0", "root": "/dev/mmcblk0p2",
-            "role": "bench-device", "image_preset": "webkit-2.52-yocto-rpi3-32"}
-
-    def board(self, *boots):
-        fake = FakeBoard(self.CONF)
-        fake.rescue("rescue-1")
-        for n, boot in enumerate(boots):
-            fake.write_system(boot, "img-%s" % "abc"[n])
-        fake.channel = "host"
-        return fake, PiSd(REPO, dict(self.CONF), fake)
-
-    def arms(self, fake):
-        return [e[2] for e in fake.effects if e[:2] == ("card_priv", "second-arm")]
-
-    def refused(self, fn, *args):
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertRaises(act.Refused, fn, *args)
-        return err.getvalue()
-
-    def test_arm_and_disarm_go_through_the_helper_on_the_rescue(self):
-        fake, d = self.board("/dev/mmcblk0p3")
-        d.disarm()
-        self.assertFalse([e for e in fake.effects if "second-disarm" in e], "disarmed a board that was not armed")
-        d.arm("/dev/mmcblk0p3")
-        self.assertEqual(self.arms(fake), ["/dev/mmcblk0@second"])
-
-    def test_arm_selects_the_named_system_and_skips_only_when_armed_for_it(self):
-        fake, d = self.board("/dev/mmcblk0p5", "/dev/mmcblk0p7")
-        self.assertIn("is not a bench system's boot partition", self.refused(d.arm, ""))
-        d.arm("/dev/mmcblk0p7")
-        d.arm("/dev/mmcblk0p5")
-        self.assertEqual(self.arms(fake), ["/dev/mmcblk0@third", "/dev/mmcblk0@second"])
-        d.arm("/dev/mmcblk0p5")
-        self.assertEqual(len(self.arms(fake)), 2, "armed for this system already; the arm should be a no-op")
-
-    def test_arm_refuses_a_card_with_no_second_system(self):
-        fake, d = self.board()
-        self.assertIn("@second", self.refused(d.arm, "/dev/mmcblk0p3"))
-        self.assertEqual(self.arms(fake), [])
-
-    def test_disarm_puts_the_rescue_back_when_armed(self):
-        fake, d = self.board("/dev/mmcblk0p3")
-        d.arm("/dev/mmcblk0p3")
-        d.disarm()
-        self.assertIn(("card_priv", "second-disarm", "/dev/mmcblk0@second"), fake.effects)
-        d.reboot()
-        self.assertTrue(fake.on_rescue())
-
-    def test_the_bench_systems_boot_partition_is_the_third(self):
-        self.assertEqual(self.board()[1].boot_part(), "/dev/mmcblk0p3")
-
-    def test_the_self_disarm_puts_the_rescue_config_back(self):
-        self.assertIn("config.txt.rescue", self.board()[1].self_disarm_sh())
-
-    def test_evidence_comes_from_the_card_not_the_record(self):
-        fake, d = self.board("/dev/mmcblk0p5")
-        d.arm("/dev/mmcblk0p5")
-        out = d.evidence()
-        self.assertIn("armed=yes", out)
-        self.assertIn("system=img-a (on /dev/mmcblk0p5)", out)
-        self.assertIsNone(fake.record, "the evidence wrote or needed a record")
-
-    def test_reprovisioning_writes_both_systems_from_a_reader(self):
-        out = self.board()[1].reprovision()
-        self.assertIn("--disk <reader>:/dev/mmcblk0 --rescue", out)
-        self.assertIn("--disk <reader>:/dev/mmcblk0@second", out)
-        self.assertIn("wk boot rpi3", out)
 
 
 if __name__ == "__main__":

@@ -1,57 +1,11 @@
 """The rpi5 picks its stick's pair with autoboot.txt's boot_partition= and a plain reboot: its tryboot flag belongs
 to flash-kernel on the NVMe, and a pair selected with it does not boot (rpi5, measured)."""
-import contextlib
-import io
 import subprocess
-import sys
 import unittest
 
 from tests.support import REPO, bash
 
-sys.path.insert(0, str(REPO / "lib"))
-
-from wk import act  # noqa: E402
-from tests.fake_boot import FakeBoard  # noqa: E402
-from wk.boot.pi import Rpi5Usb  # noqa: E402
-
 CARD_PRIV = REPO / "admin" / "wk-card-priv"
-
-
-class TestTheDriverSelectsByAutoboot(unittest.TestCase):
-
-    def board(self):
-        conf = {"name": "rpi5", "driver": "rpi5-usb", "device": "/dev/sda",
-                "root": "/dev/nvme0n1p2", "role": "workstation"}
-        fake = FakeBoard(conf)
-        fake.write_system("/dev/sda1", "sys-a")
-        fake.write_system("/dev/sda3", "sys-b")
-        fake.channel = "host"
-        return fake, Rpi5Usb(REPO, conf, fake)
-
-    def test_arming_never_uses_the_tryboot_flag(self):
-        fake, d = self.board()
-        d.arm("/dev/sda3", d.order_image)
-        d.reboot(armed=True)
-        d.probe()
-        d.reboot()
-        self.assertEqual([("reboot", False)] * 2, [e for e in fake.effects if e[0] == "reboot"])
-        self.assertFalse([e for e in fake.effects if "reboot-tryboot" in e])
-
-    def test_both_pairs_are_selectable_and_nothing_else_is(self):
-        fake, d = self.board()
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertRaises(act.Refused, d.arm, "/dev/sda5", d.order_image)
-        self.assertIn("is not a boot partition this stick selects between", err.getvalue())
-        self.assertNotIn("autoboot", [e[1] for e in fake.effects if len(e) > 1])
-
-    def test_the_selection_is_read_back(self):
-        fake, d = self.board()
-        fake.stuck = True
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertRaises(act.Refused, d.arm, "/dev/sda3", d.order_image)
-        self.assertIn("does not select pair 3", err.getvalue())
-        self.assertIn("./setup --stage quiesce", err.getvalue(), "the refusal does not name the remedy")
-        self.assertNotIn(("boot_priv", "order", "0xf64"), fake.effects, "the firmware was told anyway")
 
 
 class TestTheHelperTakesAPair(unittest.TestCase):

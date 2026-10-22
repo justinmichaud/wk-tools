@@ -1,4 +1,4 @@
-"""The disks a machine offers for writing: its `lsblk -J` (over the boot Channel's `m_ssh`) and its card helper's word on each."""
+"""The disks a machine offers for writing: its `lsblk -J` (over the boot Channel's host side) and its card helper's word on each."""
 
 import json
 from collections import namedtuple
@@ -60,11 +60,11 @@ class Disks:
         self._whose = {}
 
     def card(self, *args):
-        return self.ch.call("card_priv", *args, input="")
+        return self.ch.card(*args, input="")
 
     def candidates(self):
         if self._disks is None:
-            r = self.ch.call("m_ssh", LSBLK, input="")
+            r = self.ch.run(LSBLK.split(), "host", input="")
             self._disks = parse_lsblk(r.out) if r.ok else []
         return self._disks
 

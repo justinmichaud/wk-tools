@@ -15,8 +15,6 @@ from wk.boot import cli as bootcli
 
 EXCLUSIONS = os.path.join("bench", "subtest-exclusions.conf")
 NARROW = ("armhf", "armv7l", "i686")
-SYSTEM_TRIES = 3
-WAIT, POLL, ARM_RETRY = 420, 12, 15
 LOST_ROUNDS = 3
 ARGS_AB_MEASURED = ("count", "timeout", "subtests", "cores", "browser", "browser_args")
 INTERRUPTED = set(job.EXIT_OF.values())
@@ -103,67 +101,18 @@ class AB(Task):
                 raise
             return False
 
-    def mode(self):
-        return self.system.driver.probe()
-
-    def answered(self, want_host=False):
-        d = self.system.driver
-        return self.clock.wait_until(lambda: d.probe() != "unreachable" and (d.ch.channel == "host" or not want_host), WAIT, POLL)
-
-    def transition(self, verb, want=""):
-        b = bootcli.Boot(self.root, self.system.driver.conf, self.system.driver, self.env)
-        try:
-            return (b.arm(want) if verb == "arm" else b.disarm() if verb == "disarm" else b.back()) == 0
-        except Refused:
-            return False
-
-    def boot(self, want):
-        """The board running `want`, read from its own marker; False when it will not come up so."""
-        d, name = self.system.driver, self.name
-        tries = 0
-        while tries <= SYSTEM_TRIES:
-            tries += 1
-            if self.mode() == "unreachable":
-                info("%s is not answering yet; waiting for it before deciding" % name)
-                self.answered()
-            kind, _, ident = d.mode.partition(" ")
-            if kind == "bench" and ident == want:
-                info("%s is running %s (verified from its own marker)" % (name, want))
-                return True
-            if ident:
-                info("%s answers as %s (%s), not %s" % (name, ident, kind, want))
-            if tries > SYSTEM_TRIES or act.dry_run():
-                break
-            info("%s: arming and booting system %s (attempt %d of %d)" % (name, want, tries, SYSTEM_TRIES))
-            if kind == "bench" and not d.arm_from_bench:
-                info("%s: it arms only from its rescue; going back to it first" % name)
-                if not self.transition("back"):
-                    warn("could not send %s back to its rescue (attempt %d)" % (name, tries))
-                    self.clock.sleep(ARM_RETRY)
-                    continue
-                self.answered(want_host=True)
-                continue
-            if not self.transition("arm", want):
-                warn("could not arm %s on %s (attempt %d)" % (want, name, tries))
-                self.clock.sleep(ARM_RETRY)
-                continue
-            self.answered()
-        if act.dry_run():
-            if d.mode.startswith("bench") and not d.arm_from_bench:
-                self.transition("back")
-                log("  then arm %s from its rescue and boot it" % want)
-            else:
-                self.transition("arm", want)
-            log("dry run -- the legs on %s would run once it answers" % want)
-            return False
-        warn("%s would not come up as %s in %d attempts; the leg is lost" % (name, want, SYSTEM_TRIES))
-        return False
+    def booter(self):
+        return bootcli.Boot(self.root, self.system.driver.conf, self.system.driver, self.env)
 
     def arm_leg(self, arm, o):
         ident, slot = self.arms[arm]
         if not ident:
             return self.leg(dict(o, slot=slot))
-        if not self.boot(ident):
+        if not self.booter().enter(ident, self.clock):
+            if act.dry_run():
+                log("dry run -- the legs on %s would run once it answers" % ident)
+            else:
+                warn("%s would not come up as %s in %d attempts; the leg is lost" % (self.name, ident, bootcli.TRIES))
             return False
         if not o.get("warmup") and not self.leg(dict(o, slot=slot, expect=ident, settle="1")):
             warn("the settle run for this leg did not complete")   # every leg is a fresh boot, and a first run after one is not like the rest
@@ -287,18 +236,13 @@ class AB(Task):
     def finish(self):
         kept, lost = self.measured()
         if self.systems:
-            self.release()
+            self.booter().release(self.clock)
         log("")
         log("%d round(s) usable, %d dropped; the runs are in %s/runs" % (kept, lost, self.taskdir))
         self.report()
         if not kept:
             die("no round produced both halves on %s; nothing to compare." % self.name)
         return 0
-
-    def release(self):
-        """The board back on its rescue, its arming record cleared there: the A/B claimed each system it booted."""
-        if not (self.transition("back") and self.answered(want_host=True) and self.transition("disarm")):
-            warn("%s was not handed back; 'wk boot %s --status' says where it is, --disarm and --back return it" % (self.name, self.name))
 
     def report(self):
         self.lock.release_all()

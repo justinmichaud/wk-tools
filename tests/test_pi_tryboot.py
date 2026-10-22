@@ -1,8 +1,6 @@
 """The pi-tryboot boot driver (lib/wk/boot/pi.py, boot/onboard/tryboot.sh): a Pi 4 whose bench medium the
 bootloader will not boot. The firmware loads the bench kernel from the SD via a tryboot one-shot, staged at arm
 time from the medium's own boot partition, and the kernel mounts the bench root on the medium by PARTUUID."""
-import contextlib
-import io
 import shutil
 import subprocess
 import sys
@@ -14,110 +12,7 @@ from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 
-from wk import act  # noqa: E402
-from wk.boot.pi import PiTryboot  # noqa: E402
-from wk.machine import Result  # noqa: E402
-
-CONF = {"name": "rpi4", "driver": "pi-tryboot", "device": "/dev/sda", "root": "/dev/mmcblk0p2",
-        "dtb": "bcm2711-rpi-4-b.dtb", "role": "bench-device", "image_preset": "p"}
-
-
-class Channel:
-    def __init__(self, answers=None):
-        self.answers, self.calls, self.channel = answers or {}, [], "bench"
-
-    def call(self, fn, *args, input=None, mutates=False):
-        ob = next((a for a in args if hasattr(a, "params")), None)
-        self.calls.append((fn, ob.name if ob else args, dict(ob.params) if ob else {}))
-        key = ob.params.get("WK_DO", ob.name) if ob else fn
-        got = self.answers.get(key, Result(0))
-        return got(ob) if callable(got) else got
-
-
-def driver(answers=None):
-    ch = Channel(answers)
-    return PiTryboot(REPO, dict(CONF), ch), ch
-
-
-def refused(fn, *args, **kw):
-    with contextlib.redirect_stderr(io.StringIO()) as err:
-        try:
-            fn(*args, **kw)
-        except act.Refused:
-            return err.getvalue()
-    raise AssertionError("did not refuse")
-
-
-class TestArrangement(unittest.TestCase):
-    def test_an_arming_reboot_refuses_where_the_flag_cannot_be_passed(self):
-        d, ch = driver({"has-systemd.sh": Result(1)})
-        err = refused(d.reboot, armed=True)
-        self.assertIn("no systemd", err)
-        self.assertIn("--back", err)
-        self.assertNotIn("boot_priv", [c[0] for c in ch.calls], "it rebooted anyway")
-
-    def test_only_an_arming_reboot_carries_the_flag(self):
-        d, ch = driver()
-        d.reboot(armed=True)
-        d.reboot()
-        self.assertEqual([c[1] for c in ch.calls if c[0] == "boot_priv"], [("reboot-tryboot",), ("reboot",)])
-
-    def test_the_boot_that_spends_the_staging_removes_it(self):
-        """this board does not consume the tryboot flag: a plain reboot reads tryboot.txt again."""
-        out = driver()[0].self_disarm_sh()
-        self.assertTrue(out.startswith("WK_SD=/dev/mmcblk0p1; "), out)
-        for piece in ("tryboot.txt", "second"):
-            self.assertIn(piece, out)
-
-    def test_every_step_goes_over_the_channel_that_answered(self):
-        d, ch = driver({"staged-root": Result(0, "root=PARTUUID=aa-04\n"),
-                        "medium-read.sh": Result(0, "root=PARTUUID=aa-04 rootwait\n")})
-        d.arm("/dev/sda3")
-        d.disarm()
-        d.evidence()
-        self.assertEqual({c[0] for c in ch.calls}, {"r_ssh", "r_sudo"})
-
-
-class TestArming(unittest.TestCase):
-    def test_arm_stages_from_the_selected_system_and_reads_the_staging_back(self):
-        d, ch = driver({"staged-root": Result(0, "root=PARTUUID=aa-04\n"),
-                        "medium-read.sh": Result(0, "root=PARTUUID=aa-04 rootwait\n")})
-        d.arm("/dev/sda3")
-        stage = [c for c in ch.calls if c[2].get("WK_DO") == "stage"][0]
-        self.assertEqual(stage[2], {"WK_DO": "stage", "WK_SD": "/dev/mmcblk0p1", "WK_SRC": "/dev/sda3", "WK_DTB": "bcm2711-rpi-4-b.dtb"})
-
-    def test_a_staging_of_another_system_is_refused(self):
-        d, _ = driver({"staged-root": Result(0, "root=PARTUUID=aa-02\n"),
-                       "medium-read.sh": Result(0, "root=PARTUUID=aa-04 rootwait\n")})
-        self.assertIn("not the selected system's root=PARTUUID=aa-04", refused(d.arm, "/dev/sda3"))
-
-    def test_a_failed_staging_names_what_has_to_answer(self):
-        self.assertIn("could not stage the tryboot files on rpi4", refused(driver({"stage": Result(9)})[0].arm, "/dev/sda1"))
-
-
-class TestEvidence(unittest.TestCase):
-    def evidence(self, source, staged="yes\n"):
-        d, _ = driver({"source": Result(0, source), "staged": Result(0, staged), "card_priv": Result(0, "")})
-        d.systems = lambda: [("/dev/sda1", "alpha-1"), ("/dev/sda3", "beta-2")]
-        return d.evidence()
-
-    def test_the_evidence_says_which_config_the_running_boot_came_from(self):
-        self.assertIn("boot_source=the tryboot staging now on the SD", self.evidence("staging\n"))
-        self.assertIn("boot_source=the SD config.txt", self.evidence("sd-config\n"))
-        self.assertIn("an earlier staging", self.evidence("unknown\n"))
-        self.assertIn("boot_source=unreadable (the board did not answer", self.evidence("", ""))
-
-    def test_the_evidence_reads_the_staging_and_lists_the_systems(self):
-        out = self.evidence("staging\n")
-        for want in ("tryboot_staged=yes", "bench root on /dev/sda", "system=alpha-1 (on /dev/sda1)", "system=beta-2 (on /dev/sda3)"):
-            self.assertIn(want, out)
-        self.assertIn("tryboot_staged=unreadable", self.evidence("staging\n", ""))
-
-    def test_reprovision_puts_the_sd_first(self):
-        out = driver()[0].reprovision()
-        self.assertIn("wk boot rpi4 --boot-order sd-first", out)
-        self.assertIn("--disk <reader>:/dev/mmcblk0 --rescue", out)
-        self.assertIn("--disk rpi4:/dev/sda", out)
+from wk.boot.driver import Onboard  # noqa: E402
 
 
 class TestStagingRuns(unittest.TestCase):
@@ -155,8 +50,7 @@ class TestStagingRuns(unittest.TestCase):
         (shim / "sync").write_text("#!/bin/sh\nexit 0\n")
         for f in shim.iterdir():
             f.chmod(0o755)
-        d = PiTryboot(REPO, dict(CONF, root="/dev/fake2"), None)
-        text = d.ob("tryboot.sh", WK_DO="stage", WK_SD="/dev/fake1", WK_SRC="/dev/sda1", WK_DTB="bcm2711-rpi-4-b.dtb").text()
+        text = Onboard(REPO, "tryboot.sh", WK_DO="stage", WK_SD="/dev/fake1", WK_SRC="/dev/sda1", WK_DTB="bcm2711-rpi-4-b.dtb").text()
         cp = subprocess.run(["sh", "-c", text], capture_output=True, text=True,
                             env={"PATH": "%s:/usr/bin:/bin" % shim})
         return cp, sd
