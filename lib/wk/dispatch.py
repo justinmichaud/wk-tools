@@ -332,7 +332,7 @@ def converge_setup(cmd, t, machine=None):
     why = setupstate.behind(str(ROOT), os.environ, machine)
     if not why:
         return
-    if os.environ.get("WK_BROKERED"):   # ./setup restarts the broker serving this very request
+    if os.environ.get("WK_BROKERED"):
         info("this machine's setup is behind (%s); it runs with the next command typed on it, not under the broker" % why)
         return
     info("this machine's setup is behind (%s), so ./setup runs before 'wk %s'" % (why, cmd))

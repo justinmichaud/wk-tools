@@ -349,7 +349,8 @@ wk sync bug-238 --fix                   # re-assert its remotes and git-webkit s
 A sync fetches and never checks out, and names any checkout, or snapshot,
 whose remotes are wired wrong. Every workspace, guest and the podman VM mounts
 the mirror read-only, so a refresh from one of them is asked of the machine
-that keeps it, through the broker. A refresh on a Mac then remounts the mirror's
+that keeps it, through the broker; a command the broker runs carries `WK_BROKERED=1`
+and never runs `./setup` itself, which would restart the broker serving it. A refresh on a Mac then remounts the mirror's
 share in each running guest, whose old mount keeps reading the refs as they were;
 one that cannot is named with `wk stop`/`wk start`. A workspace overlays a
 snapshot it never writes, so a newer tree is a new snapshot, hard-linked from

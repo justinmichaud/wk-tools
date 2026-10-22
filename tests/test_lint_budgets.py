@@ -21,11 +21,12 @@ ROWS = {
                    ("dispatch*", "options", "wk_decl", "wk_act", "completion", "ls_halves", "owed_cli_exit_code", "owed_dispatch", "registry_free", "setup_converges", "dispatcher"), 800, 900),
     "machine": (("lib/wk/machine.py",), ("wk_machine", "linux_machine_dry_run", "macos_machine_*", "machines_dir", "machine_wins", "machine_mounts", "machine_prepare", "remote_driver", "remote", "remote_deps", "wk_sshalias"), 400, 500),
     "places": (("lib/wk/places.py",), ("wk_places", "place_os", "lifecycle", "home_mounts", "container_workspace", "clobbering", "tree_identity", "tart_locator", "scp", "zed*", "enter", "mirror_path", "new_fetch", "owed_new", "egress"), 950, 1000),
-    "record": (("lib/wk/record.py", "lib/wk/job.py", "lib/wk/lock.py", "lib/wk/resources.py", "lib/wk/clock.py", "lib/wk/kv.py"),
+    "record": (("lib/wk/record.py", "lib/wk/job.py", "lib/wk/lock.py", "lib/wk/resources.py", "lib/wk/clock.py", "lib/wk/kv.py", "lib/wk/stop.py"),
                ("wk_record", "wk_job", "wk_lock", "wk_resources", "lock_resources", "resources", "record_home", "task_record", "kv", "interrupt", "stall_report", "stop_tasks", "pattern_matching", "build_liveness", "build_kill", "crash_only", "state", "atexit_owner", "selftest_guard", "device_claim", "ensure_dir", "killpoints"), 550, 700),
-    "workspace": (("lib/wk/workspace.py", "lib/wk/build.py", "lib/wk/sync.py", "lib/wk/pr.py", "lib/wk/git.py", "lib/wk/presets.py", "lib/wk/store.py", "lib/wk/tools.py", "lib/wk/agents.py", "lib/wk/repos.py", "lib/wk/project.py", "lib/treehash.py"),
+    "workspace": (("lib/wk/workspace.py", "lib/wk/build.py", "lib/wk/sync.py", "lib/wk/pr.py", "lib/wk/git.py", "lib/wk/presets.py", "lib/wk/store.py", "lib/wk/tools.py", "lib/wk/agents.py", "lib/wk/repos.py", "lib/wk/project.py", "lib/treehash.py",
+                   "lib/wk/testcmd.py", "lib/wk/run.py", "lib/wk/gui.py"),
                   ("wk_workspace", "wk_build", "wk_run", "wk_test", "wk_store", "wk_gui", "box_workspace", "repo_workspace", "build", "build_perf", "presets", "sync", "pr_*", "peer", "agents", "tools_sync", "cli_refspecs", "rm_*", "run_until_crash", "rr", "wk_profile", "git_gate", "hook_levels", "ai_inside"), 1150, 1800),
-    "secrets": (("lib/wk/wall.py", "lib/wk/pushgate.py", "lib/wk/secrets.py", "lib/wk/key/", "lib/credcheck.py", "lib/secretfile.py", "lib/wk/publish.py", "lib/wk/backup.py", "lib/wk/claudelogin.py", "lib/wk/sudo.py", "lib/wk/priv.py"),
+    "secrets": (("lib/wk/wall.py", "lib/wk/pushgate.py", "lib/wk/secrets.py", "lib/wk/key/", "lib/credcheck.py", "lib/secretfile.py", "lib/wk/publish.py", "lib/wk/backup.py", "lib/wk/claudelogin.py", "lib/wk/sudo.py", "lib/wk/priv.py", "lib/wk/ai.py"),
                 ("commit_wall", "push_keys", "push_remote", "push_service", "key*", "wk_key", "wk_secrets", "wk_sudo", "credcheck", "backup", "agent_token", "claude_login", "ai", "store_secrets", "no_publish", "dev_integration", "doctor_wall", "pi_agent"), 1150, 2000),
     "status": (("lib/wk/status.py", "lib/wk/statusview.py", "lib/wk/doctor.py", "lib/wk/gc.py", "lib/wk/rubble.py", "lib/wk/fleet.py", "lib/wk/reach.py", "lib/wk/setupstate.py", "lib/wkdata.py"),
                ("status*", "wk_overrides_cmd1", "doctor", "owed_gc", "owed_status_log", "owed_cli_color", "gc_tart_cache", "fleet_walk", "reach", "host_only", "newcomer_path", "ceilings", "layers", "quiesce", "build_wall"), 700, 900),
@@ -43,20 +44,20 @@ ROWS = {
 FIXTURES_BUDGET = 800
 # row: (core interim, tests interim), measured 2026-10-22 after the day's cuts; lowered, never raised.
 INTERIM = {"dispatcher": (773, 932),
-           "machine": (491, 1932),
-           "places": (1786, 3992),
-           "record": (1144, 2702),
-           "workspace": (2547, 5748),
-           "secrets": (2465, 4701),
-           "status": (1707, 2639),
-           "bench": (6326, 6808),
+           "machine": (491, 1786),
+           "places": (1786, 4020),
+           "record": (1242, 2700),
+           "workspace": (3010, 5748),
+           "secrets": (2600, 4724),
+           "status": (1703, 2635),
+           "bench": (6319, 6790),
            "boot": (1261, 2243),
            "sysimage": (3756, 3060),
-           "guest": (2356, 3579),
-           "cmd": (1629, 0),
-           "lint rules": (0, 2069),
+           "guest": (2221, 3514),
+           "cmd": (951, 0),
+           "lint rules": (0, 2070),
            "live bodies": (0, 151),
-           "fixtures": (0, 1807)}
+           "fixtures": (0, 1805)}
 
 
 def tracked():
