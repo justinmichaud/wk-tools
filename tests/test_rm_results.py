@@ -66,7 +66,7 @@ class TestATaskNoExportHoldsIsNotDestroyed(RmResultsTest):
     def test_an_export_of_an_earlier_state_holds_nothing(self):
         self.exported_to(self.home / "Downloads" / (TASK + ".zip"))
         run_dir = sorted((self.task / "runs").iterdir())[0]
-        record.write_env(str(run_dir / "env.json"), ["wall_time_s=999"], update=True)
+        record.write_env(str(run_dir / "env.json"), {"wall_time_s": "999"}, update=True)
         self.assertNotEqual(self.rm().returncode, 0)
         self.assertFalse(self.gone())
 

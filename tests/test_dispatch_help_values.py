@@ -66,9 +66,9 @@ class TestTheDispatcherHandsItOver(unittest.TestCase):
         self.assertEqual(self.exec_env("build", "--list"), (["--list"], None))
 
     def test_the_command_is_execd_with_the_config_named(self):
-        self.assertEqual(self.exec_env("bench", "stage", "ws", "--to", "mbp", "--preset", "mac-release",
+        self.assertEqual(self.exec_env("bench", "ab", "--devices", "mbp", "--preset", "mac-release",
                                        inherited="mac-release"),
-                         (["stage", "ws", "--to", "mbp"], "mac-release"))
+                         (["ab", "--devices", "mbp"], "mac-release"))
 
 
 class TestAnExportedConfigIsRefused(unittest.TestCase):

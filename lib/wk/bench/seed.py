@@ -53,8 +53,8 @@ class Seeder:
     def seed(self, plan, text):
         spec = plan_spec(text)
         if spec is None:
-            act.warn("cannot pre-seed %s; run-benchmark will fetch it itself" % plan)
-            return ""
+            act.die("%s names its payload in no form wk pins (git_repository, github_source, local_copy), so a run of it\n"
+                    "    could measure whatever revision it fetched: it is not run" % plan)
         kind, url, ref, subdir = spec
         if kind != "git":
             return ""
@@ -67,7 +67,9 @@ class Seeder:
             url = self.mirror
         else:
             r = self.machine.run(["git", "ls-remote", url, ref])
-            sha = (r.out.split() or [ref])[0] if r.ok else ref
+            sha = ref if re.match(r"^[0-9a-f]{40}$", ref) else (r.out.split() or [""])[0] if r.ok else ""
+            if not sha:
+                act.die("could not resolve %s's %s at %s, so it cannot be pinned; this machine needs a route to it" % (plan, ref, url))
         dest = os.path.join(self.seed_dir, "%s-%s" % (plan, sha[:12]))
         self.machine.mkdir(self.seed_dir)
         with self.lock.held("bench-seed-%s" % os.path.basename(dest), timeout=SEED_WAIT):
@@ -93,12 +95,9 @@ class Seeder:
             if not m.act_run(["bash", "-c", "set -o pipefail; " + line]).ok:
                 m.remove(tmp)
                 act.die("could not read %s of WebKit %s out of %s" % (subdir, sha[:12], url))
-        elif not m.act_run(["git", "clone", "-q", url, repo]).ok:
+        elif not (m.act_run(["git", "clone", "-q", url, repo]).ok and m.act_run(["git", "-C", repo, "checkout", "-q", sha]).ok):
             m.remove(tmp)
-            act.warn("could not clone %s; run-benchmark will fetch the payload itself" % url)
-            return ""
-        elif not m.act_run(["git", "-C", repo, "checkout", "-q", sha]).ok:
-            m.act_run(["git", "-C", repo, "checkout", "-q", ref])
+            act.die("could not clone %s at %s, so %s has no pinned payload; this machine needs a route to it" % (url, sha[:12], plan))
         payload = repo if subdir == "." else os.path.join(repo, subdir)
         # No .git in a pinned payload: a clone carries fsmonitor's Unix domain socket, which no copy tool can reproduce.
         m.remove(os.path.join(payload, ".git"))

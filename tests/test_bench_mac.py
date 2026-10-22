@@ -1,6 +1,6 @@
-"""The Mac's benchmark install as a bench system (lib/wk/bench/mac.py) against a Fake install: `wk bench stage` delivering
-a workspace's build, `wk bench staged` as the one pipeline on the running install, the gates asked before anything
-reboots, and where each `wk bench` verb runs. Nothing here touches a Mac, bless, a helper or a browser."""
+"""The Mac's bench volume as a bench system (lib/wk/bench/mac.py) against a Fake install: `wk bench deploy <ws> <mac>`
+staging a workspace's build, `wk bench run --system <mac>` as the one pipeline on the running install with every gate in
+its preflight. Nothing here touches a Mac, bless, a helper or a browser."""
 import contextlib
 import io
 import json
@@ -9,6 +9,7 @@ import plistlib
 import shlex
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -22,7 +23,11 @@ from tests.test_bench_pipeline import Acting, CleanTest, StubWatch  # noqa: F401
 sys.path.insert(0, str(REPO / "lib"))
 from wk import decl, places, project, samply as wksamply, screen  # noqa: E402
 from wk.act import Refused  # noqa: E402
+from wk import presets  # noqa: E402
 from wk.bench import cli, mac, plans, record as brecord, report  # noqa: E402
+from wk.bench.pipeline import Run  # noqa: E402
+from wk.boot import open_driver  # noqa: E402
+from tests.fake_boot import board, conf_for  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 from wk.machine import lib_argv  # noqa: E402
@@ -46,16 +51,6 @@ def on_screen(fake, uninvited="", reading="MiniBrowser:Speedometer"):
     fake.answer(UNEXPECTED, out=uninvited)
 
 
-def args(*argv):
-    return decl.Args(decl.Decl(BENCH), list(argv))
-
-
-def staged_options(*argv):
-    a = args("staged", *argv)
-    a.valued = decl.Decl(BENCH).valued_opts()
-    return cli.options(a, cli.STAGED)
-
-
 class World(Acting, Fake):
     """A Mac with its two installs' confs, one stage on its volume, and run-benchmark writing its --output-file."""
 
@@ -73,8 +68,9 @@ class World(Acting, Fake):
                     "WK_MACHINES_DIR": str(machines), "WK_BENCH_ROOT": self.home, "WK_BENCH_PYTHON": "/py", "WK_POLL_SECONDS": "1"}
         self.clock = FakeClock()
         self.reg = places.Registry(REPO, env=self.env, machine=self)
+        self.machine = machine
         if bench:
-            self._set_file(mac.MARKER, MARKERS[machine])
+            self._set_file(mac.images.MARKER, MARKERS[machine])
         self.stage = os.path.join(self.home, "staged", STAGE_ID)
         self.build = os.path.join(self.stage, "WebKitBuild", "Release")
         self._set_file(os.path.join(self.stage, "stage.json"), json.dumps({
@@ -110,8 +106,8 @@ class World(Acting, Fake):
         return FakeProc(self.rc)
 
     def results(self):
-        d = os.path.join(self.home, "results")
-        return sorted(os.listdir(d)) if os.path.isdir(d) else []
+        d = Path(self.home, "results")
+        return sorted(str(r.relative_to(d)) for r in d.glob("*/runs/*")) if d.is_dir() else []
 
     def env_json(self):
         (run,) = self.results()
@@ -126,10 +122,12 @@ class MacTest(CleanTest):
         self.addCleanup(watch.stop)
         self.w = World(self.tmp)
 
-    def staged(self, *argv, w=None, dry=False):
+    def staged(self, *argv, w=None, dry=False, **o):
+        """`wk bench run ws <plan> --system <mac> --slot <the stage>` on the install, as cmd/bench routes it."""
         w = w or self.w
+        o = dict({"system": w.machine, "slot": STAGE_ID}, **o)
         with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"} if dry else {}):
-            cp = in_process(mac.staged, REPO, w.reg, w.clock, staged_options(*argv), plans)
+            cp = in_process(cli.run, REPO, w.reg, ["ws", "speedometer3"], o, False, w.clock)
         return cp.returncode, cp.stderr
 
     def refused(self, w):
@@ -140,22 +138,26 @@ class MacTest(CleanTest):
 
 class TestConformance(MacTest):
     def test_the_staged_run_is_the_one_pipeline_into_the_one_record(self):
-        rc, err = self.staged("--plan", "speedometer3")
+        rc, err = self.staged()
         self.assertEqual(rc, 0, err)
         self.assertIn("BENCH OK  speedometer3", err)
         (run,) = self.w.results()
         self.assertTrue(run.endswith("-speedometer3-" + STAGE_ID), run)
         self.assertEqual(Path(self.w.home, "results", run, "result.json").read_text(), RESULT)
+        doc = brecord.task_doc(str(Path(self.w.home, "results", run.split("/")[0])))
+        self.assertEqual((doc["subject"], doc["devices"]), ({"kind": "staged", "spec": STAGE_ID}, [{"device": "mbp", "profile": "mac-release"}]))
         script = self.w.watched[0][-1]
         for word in ("/py %s/Tools/Scripts/run-benchmark" % self.w.stage, "--platform osx", "--build-directory " + self.w.build,
                      "--local-copy %s/payload/speedometer3" % self.w.stage):
             self.assertIn(word, script)
 
-    def test_the_plan_defaults_to_the_stages_first_and_the_timeout_reaches_run_benchmark(self):
-        rc, err = self.staged("--timeout", "600")
+    def test_the_timeout_reaches_run_benchmark_and_a_workspace_other_than_the_stages_is_refused(self):
+        rc, err = self.staged(timeout="600")
         self.assertEqual(rc, 0, err)
-        self.assertIn("--plan speedometer3", self.w.watched[0][-1])
         self.assertIn("--timeout 600", self.w.watched[0][-1])
+        w = World(self.tmp)
+        cp = in_process(cli.run, REPO, w.reg, ["other", "speedometer3"], {"system": "mbp", "slot": STAGE_ID}, False, w.clock)
+        self.assertIn("is staged from workspace 'ws', not 'other'", cp.stderr)
 
     def test_the_run_is_bracketed_by_the_screen_watch(self):
         self.staged()
@@ -195,14 +197,13 @@ class TestTheRecord(MacTest):
 
     def test_a_rehearsed_round_ends_the_task_and_is_never_usable(self):
         task = self.tmp / "task"
-        brecord.task_write(str(task), ["task=t", "requested=now", "devices=benchvm=mac-release", "plans=speedometer3",
-                                       "rounds=1", "slots=a,b"], ["wk bench ab --devices mbp"])
+        brecord.task_write(str(task), {"task": "t", "requested": "now", "devices": "benchvm=mac-release", "plans": "speedometer3",
+                                       "rounds": "1", "slots": "a,b"}, ["wk bench ab --devices mbp"])
         for arm in ("a", "b"):
             d = task / "runs" / arm
             d.mkdir(parents=True)
             (d / "result.json").write_text(RESULT)
-            brecord.write_env(str(d / "env.json"), ["machine=benchvm", "plan=speedometer3", "ab.round=1", "ab.arm=" + arm],
-                              bool_fields=["measures="])
+            brecord.write_env(str(d / "env.json"), {"machine": "benchvm", "plan": "speedometer3", "ab.round": "1", "ab.arm": arm, "measures": False})
         st = brecord.task_state(str(task), False)
         self.assertEqual((st["state"], st["ok"], st["usable"]), ("complete", 0, 0))
         self.assertIn("2 rehearsed (no measurement)", st["summary"])
@@ -213,7 +214,7 @@ class TestTheRecord(MacTest):
             d = self.tmp / name
             d.mkdir()
             (d / "result.json").write_text(RESULT)
-            brecord.write_env(str(d / "env.json"), ["machine=benchvm", "plan=speedometer3"], bool_fields=["measures=" + measures])
+            brecord.write_env(str(d / "env.json"), {"machine": "benchvm", "plan": "speedometer3", "measures": bool(measures)})
             sides.append(str(d))
         with self.assertRaises(SystemExit) as cm, contextlib.redirect_stdout(io.StringIO()):
             report.two_runs([sides[0]], [sides[1]])
@@ -225,11 +226,20 @@ class TestTheRecord(MacTest):
         self.assertIn("export DYLD_SHARED_REGION=avoid", self.w.watched[0][-1])
         self.assertIs(self.w.env_json()["configuration"]["shared_cache"], False)
 
-    def test_the_declared_display_is_judged_and_recorded(self):
-        self.staged("--expect-display", "builtin 1280x832")
+    def test_the_machines_declared_display_is_judged_and_recorded(self):
+        self.staged()
         asked = [e[1] for e in self.w.effects if e[0] == "run" and e[1][:2] == ("/py", os.path.join(str(REPO), mac.CHECK))]
-        self.assertEqual(asked, [("/py", os.path.join(str(REPO), mac.CHECK), "--displays-only", "--expect-display", "builtin 1280x832")])
+        self.assertEqual(asked, [("/py", os.path.join(str(REPO), mac.CHECK), "--displays-only", "--expect-display", "builtin 1280x832"),
+                                 ("/py", os.path.join(str(REPO), mac.CHECK), "--build-directory", self.w.build, "--expect-display", "builtin 1280x832")])
         self.assertEqual(self.w.env_json()["display_declared"], "builtin 1280x832")
+
+    def test_a_software_update_scan_across_a_leg_drops_it(self):
+        scans = iter(['"LastFullSuccessfulDate" => 1\n', '"LastFullSuccessfulDate" => 2\n'])
+        self.w.react(["/usr/bin/plutil"], lambda argv, f: mac.Result(0, next(scans)))
+        rc, err = self.staged()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("software-update scan ran during this leg", err)
+        self.assertEqual(brecord.run_state(self.w.env_json(), True), "failed")
 
 
 class TestTheLegsOwnGates(MacTest):
@@ -263,22 +273,15 @@ class TestTheLegsOwnGates(MacTest):
         self.assertEqual([e for e in dry.effects if e[0] == "act" and e[1][:3] == ("sudo", "-n", "bash")][:1],
                          [("act", tuple(["sudo", "-n"] + lib_argv(str(REPO), mac.DESKTOP, "wk_quiet_daemons_pause")))])
 
-    def test_an_unknown_machine_is_a_failed_gate(self):
-        w = World(self.tmp)
-        w._set_file(mac.MARKER, "id=someone-else\n")
-        self.assertIn("the marker names no machine", self.refused(w))
-
-    def test_nothing_staged_names_the_stage_command(self):
+    def test_nothing_staged_names_the_deploy_command(self):
         w = World(self.tmp)
         w._drop(os.path.join(w.home, "staged"))
-        self.assertIn("wk bench stage <workspace> --to mbp", self.refused(w))
+        self.assertIn("wk bench deploy <workspace> mbp --slot %s" % STAGE_ID, self.refused(w))
 
-    def test_the_listing_names_each_stage_and_result(self):
-        self.staged()
-        rc, err = self.staged("--ls")
-        self.assertEqual(rc, 0)
-        self.assertIn(STAGE_ID, err)
-        self.assertIn("mac-release 0123456789", err)
+    def test_a_plan_not_pinned_into_the_stage_is_refused_rather_than_fetched(self):
+        w = World(self.tmp)
+        w._drop(os.path.join(w.stage, "payload", "speedometer3"))
+        self.assertIn("nothing pinned for 'speedometer3'", self.refused(w))
 
 
 class TestTheProfile(MacTest):
@@ -292,16 +295,14 @@ class TestTheProfile(MacTest):
         w = World(self.tmp)
         w.answer(["test", "-x", self.samply()], rc=0 if cached else 1)
         w.answer(["pgrep", "-n", "-f", project.get("MAC_WEB_PROCESS")], rc=0 if web else 1, out=web)
-        rundir = self.tmp / ("run-%d" % len(os.listdir(self.tmp)))
-        rundir.mkdir()
-        c = mac.Capture(self.CACHE, w, w.clock, "/tmp/p.json", str(rundir))
+        c = mac.Capture(self.CACHE, w, w.clock, "/tmp/p.json")
         with contextlib.redirect_stderr(io.StringIO()):
             c.run()
         return w, c
 
     def test_the_web_process_is_recorded(self):
         w, c = self.capture()
-        self.assertTrue(c.taken)
+        self.assertEqual(c.said, "")
         self.assertIn(("act", ("sudo", "-n", self.samply(), "record", "--save-only", "--profile-name", "wk-warmup", "-o", "/tmp/p.json",
                                "-p", "321")), w.effects)
 
@@ -309,83 +310,64 @@ class TestTheProfile(MacTest):
         for cached, web in ((False, "321\n"), (True, "")):
             with self.subTest(cached=cached, web=web):
                 w, c = self.capture(cached, web)
-                self.assertFalse(c.taken)
+                self.assertTrue(c.said)
                 self.assertFalse([e for e in w.effects if e[0] == "act"])
 
-    def test_a_staged_run_records_where_its_profile_is(self):
+    def test_a_warmup_leg_profiles_its_web_process_beside_the_task(self):
         self.w.answer(["test", "-x", self.samply(self.w.reg.store.cache_dir())])
         self.w.answer(["pgrep", "-n", "-f", project.get("MAC_WEB_PROCESS")], out="321\n")
-        rc, err = self.staged("--profile", "/tmp/p.json")
+        rc, err = self.staged(warmup="1", arm="a")
         self.assertEqual(rc, 0, err)
-        self.assertEqual(self.w.env_json()["profile"], "/tmp/p.json")
+        self.assertEqual(self.w.env_json()["profiler"], "samply")
+        (cap,) = [e[1] for e in self.w.effects if e[0] == "act" and "record" in e[1]]
+        self.assertTrue(cap[cap.index("-o") + 1].endswith("/warmup/mbp-a.profile.json"), cap)
 
 
 class TestTheWatchdog(MacTest):
     def test_a_benchmarks_silence_is_waited_out_longer_than_a_builds_and_an_override_wins(self):
         w = self.w
-        system = mac.MacVolumeSystem(REPO, w.reg, w.clock, mac.Install(REPO, w, w.env), w.home, w.stage, {})
-        env = mac.StagedRun(REPO, w.reg, system, w.clock, plans, w.env).env
+        system = mac.Volume(REPO, w.reg, "ws", w.clock, "mbp")
+        env = Run(system, plans, w.env).env
         self.assertEqual((env["WK_STALL_SECONDS"], env["WK_ABORT_SECONDS"]), ("900", "5400"))
-        env = mac.StagedRun(REPO, w.reg, system, w.clock, plans, dict(w.env, WK_STALL_SECONDS="12")).env
-        self.assertEqual(env["WK_STALL_SECONDS"], "12")
+        self.assertEqual(Run(system, plans, dict(w.env, WK_STALL_SECONDS="12")).env["WK_STALL_SECONDS"], "12")
 
 
 class TestPreflightAsksEveryGate(MacTest):
-    def ask(self, w=None):
-        w = w or self.w
-        with contextlib.redirect_stderr(io.StringIO()):
-            return mac.gates_rows(REPO, w, w.clock, w.env, "speedometer3", "builtin 1280x832", w.build, "/py")
+    """A dry run on the install is the gate check: every gate a leg needs, asked, and nothing measured or rebooted."""
 
-    def test_every_gate_is_asked_and_nothing_is_written(self):
-        rows = self.ask()
-        self.assertEqual(8, len({r[0] for r in rows}))
-        self.assertEqual([r for r in rows if not r[1]], [])
-        self.assertEqual([e for e in self.w.effects if e[0] != "run"], [])
+    def test_every_gate_is_asked_and_a_clean_install_passes_them(self):
+        rc, err = self.staged(dry=True)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("preflight clean", err)
+        self.assertEqual(self.w.results(), [])
         self.assertFalse([e for e in self.w.effects if "reboot" in " ".join(e[1]) or "wk-boot-priv" in " ".join(e[1])])
-        self.assertIn(("run", (os.path.join(str(REPO), "wk"), "bench", "staged", "--dry-run", "--plan", "speedometer3",
-                               "--expect-display", "builtin 1280x832")), self.w.effects)
 
     def test_each_gate_refuses_on_its_own_evidence(self):
         for gate, prefix, rc, out in (("quiesce readback", ["sudo", "-n", PRIV, "status"], 1, ""),
-                                      ("brightness", ["python3"], 0, "0.85\n"),
-                                      ("display mode", ["/py"], 1, "2 displays are online\n"),
-                                      ("staged dry run", [os.path.join(str(REPO), "wk"), "bench", "staged"], 1, ""),
-                                      ("window in front", PROBE, 0, "windows=?\n"),
+                                      ("brightness", ["python3", os.path.join(str(REPO), mac.WKMAC), "brightness"], 0, "0.85\n"),
+                                      ("the display", ["/py", os.path.join(str(REPO), mac.CHECK), "--displays-only"], 1, "2 displays are online\n"),
+                                      ("browser check", ["/py", os.path.join(str(REPO), mac.CHECK), "--build-directory"], 1, "throttled\n"),
+                                      ("the screen is free", UNEXPECTED, 0, "UserNotificationCenter:Banner\n"),
                                       ("no other machine running", ["pgrep", "-x", mac.VM_PROCESS], 0, "501\n")):
             with self.subTest(gate=gate):
                 w = World(self.tmp)
                 w.answer(prefix, rc=rc, out=out)
-                failed = [r[0] for r in self.ask(w) if not r[1]]
-                self.assertIn(gate, failed)
-
-    def test_the_command_asks_them_and_exits_on_the_verdict(self):
-        rc, err = self.staged("--gates")
-        self.assertEqual(rc, 0, err)
-        self.assertIn("every gate passes", err)
-        self.assertEqual(self.w.results(), [])
-        w = World(self.tmp)
-        w.answer(["pgrep", "-x", mac.VM_PROCESS], out="501\n")
-        rc, err = self.staged("--gates", w=w)
-        self.assertEqual(rc, 1)
-        self.assertIn("1 gate(s) refuse a run here", err)
-
-    def test_the_declared_display_is_the_machines_own(self):
-        self.staged("--gates")
-        self.assertIn(("run", ("/py", os.path.join(str(REPO), mac.CHECK), "--displays-only", "--expect-display", "builtin 1280x832")),
-                      self.w.effects)
+                rc_, err = self.staged(w=w, dry=True)
+                self.assertEqual(rc_, 1, err)
+                self.assertTrue([l for l in err.splitlines() if l.split()[:1] in (["FAIL"], ["unk"]) and gate in l], err)
 
 
 class TestTheInstallResolvesItself(MacTest):
     def install(self, env, marker=None):
         f = Fake()
+        f.answer(["hostname", "-s"], out="elsewhere\n")
         if marker:
-            f._set_file(mac.MARKER, marker)
+            f._set_file(mac.images.MARKER, marker)
         return mac.Install(REPO, f, dict(self.w.env, **env))
 
     def test_the_staging_root(self):
-        self.assertEqual(self.install({"WK_BENCH_ROOT": "/x"}).staging_root(), "/x")
         self.assertEqual(self.install({"WK_BENCH_ROOT": ""}, MARKERS["mbp"]).staging_root(), "/var/wk")
-        self.assertIsNone(self.install({"WK_BENCH_ROOT": ""}).staging_root(), "host mode names no machine by itself")
+        self.assertIsNone(self.install({"WK_BENCH_ROOT": ""}).staging_root(), "no Mac in machines/ is this one")
 
     def test_the_marker_names_the_machine(self):
         self.assertEqual(self.install({}, MARKERS["mbp"]).machine()[0], "mbp")
@@ -405,35 +387,37 @@ class TestTheInstallResolvesItself(MacTest):
             mac.staged_python(Fake(), {})
 
 
-class Drv:
-    name = "mac-volume"
+class Side:
+    """The Mac as staging reaches it: its bench root, whether it is this machine, and the two puts."""
 
     def __init__(self, w, local):
-        self.w, self.local, self.put_rc = w, local, 0
+        self.w, self.is_local, self.put_rc = w, local, 0
+        self.d = types.SimpleNamespace(probe=lambda: "host")
 
-    def bench_root(self):
+    def root_dir(self):
         return self.w.home
 
-    def bench_local(self):
-        return self.local
+    def local(self):
+        return self.is_local
 
-    def bench_put(self, src, dest, *skip):
-        self.w.effect(("bench_put", src, dest) + skip)
+    def put(self, src, dest, *skip):
+        self.w.effect(("put", src, dest) + skip)
         return self.put_rc
 
-    def bench_put_file(self, src, dest):
-        self.w.effect(("bench_put_file", src, dest))
+    def put_file(self, src, dest):
+        self.w.effect(("put_file", src, dest))
         return 0
 
-    def c(self, key):
-        return {"volume": "WK Bench"}.get(key, "")
+
+KIT = types.SimpleNamespace(default_preset=lambda reg, ws: "mac-release", resolve_preset=presets.resolve,
+                            pin_payload=lambda here, lock, store, d, ws, plan: "/seed/%s-abc" % plan if plan != "local" else "")
 
 
 class StageWorld(World):
     def __init__(self, tmp, local=True, dirty="no"):
-        super().__init__(tmp)
+        super().__init__(tmp, bench=False)
         self._drop(os.path.join(self.home, "staged"))
-        self.drv = Drv(self, local)
+        self.side = Side(self, local)
         self.reg.load = lambda name: WsDriver(name, str(REPO), dict(self.env), self, "vm", "/Users/admin/WebKit", os="macos")
         self.reg.ws_place = lambda ws: "vm"
         self.answer(["exec", "ws", "test"], out="")
@@ -445,12 +429,10 @@ class StageWorld(World):
         self.answer(["rsync"], out="")
         self.dirs.update({"/seed/speedometer3-abc", "/Users/admin/WebKit/WebKitBuild/Release", "/Users/admin/WebKit/Tools"})
 
-    def stage_(self, *argv):
+    def stage_(self, *names, slot="a"):
         err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            a = args("stage", "ws", "--to", "mbp", "--preset", "mac-release", *argv)
-            rc = mac.stage(REPO, self.reg, self.clock, a.positionals[1:], a.value("--to"), a.value("--preset"),
-                           mac.plans(a.order, a.values("--plan"), a.values("--payload")), plans, driver=lambda root, conf: self.drv)
+        with contextlib.redirect_stderr(err), mock.patch.object(mac, "side", lambda root, d: self.side):
+            rc = mac.Volume(REPO, self.reg, "ws", self.clock, "mbp").deploy({"slot": slot, "preset": "mac-release", "plans": list(names)}, KIT)
         return rc, err.getvalue()
 
     def stages(self):
@@ -460,73 +442,140 @@ class StageWorld(World):
                       if os.path.join(staged, d, "stage.json") in self.files)
 
 
-class TestStage(MacTest):
-    def test_a_stage_carries_the_products_tools_and_each_pinned_payload(self):
+class TestDeploy(MacTest):
+    def test_a_deploy_carries_the_products_tools_and_each_plans_pinned_payload_as_one_slot(self):
         w = StageWorld(self.tmp)
-        rc, err = w.stage_("--plan", "speedometer3", "--payload", "/seed/speedometer3-abc", "--plan", "jetstream3")
+        rc, err = w.stage_("speedometer3", "local", slot="base")
         self.assertEqual(rc, 0, err)
-        dest = os.path.join(w.home, "staged", "%s-mac-release" % w.clock.stamp())
+        dest = os.path.join(w.home, "staged", "base")
         doc = json.loads(w.files[os.path.join(dest, "stage.json")])
-        self.assertEqual((doc["workspace"], doc["preset"], doc["webkit_sha"], doc["plans"], doc["payloads_pinned"], doc["wk_tools"]),
-                         ("ws", "mac-release", SHA, "speedometer3,jetstream3", "speedometer3", "abc"))
+        self.assertEqual((doc["workspace"], doc["preset"], doc["webkit_sha"], doc["plans"], doc["wk_tools"]),
+                         ("ws", "mac-release", SHA, "speedometer3", "abc"))
         (products,) = [e for e in w.effects if e[0] == "copy_tree_out" and e[2].endswith("/WebKitBuild/Release")]
         self.assertEqual(mac.PRODUCT_SKIP, products[3:])
-        self.assertNotIn("dSYM", " ".join(products), "the machine that profiles never had the build tree")
         self.assertIn(("copy_tree_out", "/Users/admin/WebKit/Tools", os.path.join(dest, "Tools")), w.effects)
         self.assertIn(("act", ("rsync", "-a", "--exclude", ".git", "/seed/speedometer3-abc/", dest + "/payload/speedometer3/")), w.effects)
-        self.assertIn("wk bench staged --plan speedometer3", err)
+        self.assertIn("--system mbp --slot base", err)
 
     def test_a_dirty_tree_says_so(self):
         w = StageWorld(self.tmp, dirty="yes")
         w.stage_()
-        self.assertEqual(w.stages(), ["mac-release"])
-        (d,) = w.listdir(os.path.join(w.home, "staged"))
-        self.assertEqual(json.loads(w.files[os.path.join(w.home, "staged", d, "stage.json")])["wk_tools"], "abc+dirty")
-
-    def test_a_payload_that_is_not_there_is_refused_before_anything_is_copied(self):
-        w = StageWorld(self.tmp)
-        with self.assertRaises(Refused):
-            w.stage_("--plan", "speedometer3", "--payload", "/nowhere")
-        self.assertEqual([e for e in w.effects if e[0] != "run"], [])
-
-    def test_a_payload_names_the_plan_it_follows(self):
-        w = StageWorld(self.tmp)
-        with self.assertRaises(Refused):
-            w.stage_("--payload", "/seed/speedometer3-abc")
+        self.assertEqual(json.loads(w.files[os.path.join(w.home, "staged", "a", "stage.json")])["wk_tools"], "abc+dirty")
 
     def test_a_delivered_stage_crosses_before_its_manifest(self):
         w = StageWorld(self.tmp, local=False)
         rc, err = w.stage_()
         self.assertEqual(rc, 0, err)
-        puts = [e for e in w.effects if e[0] in ("bench_put", "bench_put_file")]
-        self.assertEqual([p[0] for p in puts], ["bench_put", "bench_put_file"])
+        puts = [e for e in w.effects if e[0] in ("put", "put_file")]
+        self.assertEqual([p[0] for p in puts], ["put", "put_file"])
         self.assertEqual(puts[0][3:], mac.PUT_SKIP)
         self.assertTrue(puts[1][2].endswith("/stage.json"))
         self.assertFalse([p for p in w.files if "bench-stage" in p], "the local assembly goes once it is delivered")
 
     def test_a_failed_delivery_leaves_nothing_half_made(self):
         w = StageWorld(self.tmp, local=False)
-        w.drv.put_rc = 1
+        w.side.put_rc = 1
         with self.assertRaises(Refused):
             w.stage_()
-        self.assertFalse([e for e in w.effects if e[0] == "bench_put_file"])
-        self.assertIn(("remove", os.path.join(w.reg.store.state_dir(), "bench-stage", "%s-mac-release" % w.clock.stamp())), w.effects)
+        self.assertFalse([e for e in w.effects if e[0] == "put_file"])
+        self.assertIn(("remove", os.path.join(w.reg.store.state_dir(), "bench-stage", "a")), w.effects)
 
-    def test_the_dry_run_is_the_stages_mutations(self):
+    def test_the_dry_run_is_the_deploys_mutations(self):
         for local in (True, False):
             with self.subTest(local=local):
-                _, dry = self.same_plan(lambda: StageWorld(self.tmp, local), lambda w: w.stage_("--plan", "speedometer3", "--payload", "/seed/speedometer3-abc"),
+                _, dry = self.same_plan(lambda: StageWorld(self.tmp, local), lambda w: w.stage_("speedometer3"),
                                         lambda w: [e for e in w.effects if e[0] != "run"])
                 self.assertEqual(dry.stages(), [])
 
-    def test_a_stage_killed_after_any_effect_and_rerun_converges(self):
+    def test_a_deploy_killed_after_any_effect_and_rerun_converges(self):
         def run_once(w):
             w.clock.t += 1
             with contextlib.redirect_stderr(io.StringIO()):
-                w.stage_("--plan", "speedometer3", "--payload", "/seed/speedometer3-abc")
+                w.stage_("speedometer3")
         for local in (True, False):
             with self.subTest(local=local):
                 converges(self, lambda: StageWorld(self.tmp, local), run_once, StageWorld.stages)
+
+
+class TestTheStagingSide(unittest.TestCase):
+    """What staging and a plant reach a Mac's bench install through (mac.Side), over FakeMac and FakeGuest."""
+
+    def side(self, kind, **state):
+        fake, d = board(kind)
+        for k, v in state.items():
+            setattr(fake, k, v)
+        d.probe()
+        return fake, d, mac.side(REPO, d)
+
+    def test_the_staging_root_and_the_home_answer_on_that_side(self):
+        fake, d, s = self.side("mac-volume")
+        self.assertEqual((s.root_dir(), s.home_dir()), ("/Volumes/WK Bench - Data/private/var/wk", "/Volumes/WK Bench - Data/Users/bench"))
+        fake.data = False
+        self.assertEqual(s.root_dir(), "/Volumes/WK Bench/var/wk")
+        fake.attached = False
+        self.assertIsNone(s.root_dir())
+        fake.enter_bench()
+        d.probe()
+        self.assertEqual((s.root_dir(), s.home_dir()), ("/var/wk", "/Users/bench"))
+        fake, d, s = self.side("mac-guest", st="running")
+        self.assertEqual((s.root_dir(), s.home_dir(), s.local(), s.manager(), s.tools(s.manager())), ("/var/wk", "/Users/admin", False, d.ch.via, str(REPO)))
+
+    def test_nothing_is_staged_onto_a_running_measurement(self):
+        fake, d, s = self.side("mac-volume")
+        fake.enter_bench()
+        d.probe()
+        for put in (s.put, s.put_file):
+            with self.subTest(put=put.__name__), contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(Refused):
+                put("/tmp", "/var/wk/x")
+            self.assertIn("running measurement", err.getvalue())
+        self.assertEqual(fake.effects, [])
+
+    def test_a_tree_travels_as_a_tar_without_history_or_bytecode_and_replaces_the_one_there(self):
+        dest = "/Volumes/WK Bench - Data/private/var/wk/wk-tools"
+        with tempfile.TemporaryDirectory() as tmp:
+            for rel in ("a.txt", ".git/HEAD", "lib/__pycache__/x.pyc", "lib/x.py"):
+                Path(tmp, rel).parent.mkdir(parents=True, exist_ok=True)
+                Path(tmp, rel).write_text("x")
+            fake, d, s = self.side("mac-volume")
+            self.assertEqual(s.put(tmp, dest, ".git", "__pycache__"), 0)
+        tar = [e[1] for e in fake.effects if e[0] == "tar" and isinstance(e[1], tuple)][0]
+        self.assertIn("./lib/x.py", tar)
+        self.assertFalse([n for n in tar if ".git" in n or "__pycache__" in n], tar)
+        ran = [e for e in fake.effects if e[0] != "push" and isinstance(e[1], str)]
+        tmp_tar = ran[-1][-1]
+        self.assertEqual(ran, [("rm", "-rf", dest), ("mkdir", "-p", dest), ("tar", "-xf", tmp_tar, "-C", dest), ("rm", "-f", tmp_tar)])
+
+    def test_a_guests_root_is_owned_before_anything_lands_and_a_dry_run_owns_nothing(self):
+        fake, d, s = self.side("mac-guest", st="running")
+        self.assertEqual(s.put_file("/dev/null", "/var/wk/stage.json"), 0)
+        ran = [e for e in fake.effects if e[0] != "push"]
+        self.assertEqual(ran[:2], [("mkdir", "-p", "/var/wk"), ("chown", "-R", "admin", "/var/wk")])
+        self.assertEqual(ran[2][:2], ("mv", "-f"))
+        fake, d, s = self.side("mac-guest", st="running")
+        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), contextlib.redirect_stderr(io.StringIO()):
+            s.own("/var/wk")
+        self.assertEqual(fake.effects, [])
+
+    def test_the_restart_is_ready_only_when_the_helper_names_its_detach(self):
+        fake, d, s = self.side("mac-volume")
+        self.assertTrue(s.restart_ready())
+        fake.helper_is = "old"
+        self.assertFalse(s.restart_ready())
+        self.assertIn("older than this tree", s.restart_detail())
+        fake.helper_is = None
+        self.assertIn("plain sudo there wants a password", s.restart_detail())
+
+    def test_standing_on_the_mac_runs_it_here_and_its_tools_are_where_the_tree_is_declared(self):
+        via = Fake("here")
+        via.answer(["hostname", "-s"], out="Tolken\n")
+        via.answer(["sh", "-c"], out="id=x\n")
+        via.answer(["test", "-x", "Development/wk-tools/wk"], rc=0)
+        d = open_driver(REPO, conf_for("mac-volume"), env={}, via=via)
+        self.assertEqual(d.probe(), "bench x")
+        s = mac.side(REPO, d)
+        self.assertTrue(s.local(), "a deploy to that Mac standing on it sends nothing")
+        self.assertIs(s.manager(), via)
+        self.assertEqual(s.tools(via), "Development/wk-tools")
 
 
 if __name__ == "__main__":

@@ -300,7 +300,7 @@ class TestForceNamesWhatItCrosses(unittest.TestCase):
                 continue
             lines = p.read_text().splitlines()
             for i, line in enumerate(lines):
-                if not self.FORCED.search(line) or '"forced=" + ' in line:
+                if not self.FORCED.search(line) or '"forced=" + ' in line or '"forced": ' in line:
                     continue
                 if not any("barrier(" in l for l in lines[i:i + 3]):
                     offenders.append("%s:%d: %s" % (p.relative_to(REPO), i + 1, line.strip()))
@@ -381,8 +381,8 @@ class TestTheRepoValuesAreTheTables(unittest.TestCase):
 class TestHelpPreviewsTheCommandLine(unittest.TestCase):
 
     def test_the_preview_is_the_argv_and_where(self):
-        out = run("bench", "stage", "ws1", "--to=mbp", "--preset", "mac-release", "-h", timeout=30).stdout
-        self.assertIn("  this command line runs: WK_PRESET=mac-release %s stage ws1 --to mbp\n"
+        out = run("bench", "ab", "--devices=mbp", "--preset", "mac-release", "-h", timeout=30).stdout
+        self.assertIn("  this command line runs: WK_PRESET=mac-release %s ab --devices mbp\n"
                       % shlex.quote(str(REPO / "cmd" / "bench")), out)
         self.assertIn("    on: %s\n" % dispatch.where_prose(D.Decl(REPO / "cmd" / "bench"), "host"), out)
 

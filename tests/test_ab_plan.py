@@ -1,4 +1,4 @@
-"""`wk bench ab` (lib/wk/bench/ab.py) against a Fake world: refusals, commits, images, the graph, its cost, the arms' distance, the kill, and the pairing."""
+"""`wk bench ab <change>` (lib/wk/bench/change.py) against a Fake world: refusals, commits, images, the graph, its cost, the arms' distance, the kill, and the pairing."""
 import concurrent.futures as futures
 import contextlib
 import io
@@ -21,9 +21,14 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, images, job, pgo, record as progress, sched  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import ab, record  # noqa: E402
+from wk.bench import ab, change, record  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Result, Ssh  # noqa: E402
+
+
+def kv(fields, bools=()):
+    """Fields as wk writes them into a record: key=value strings, and the bools as flags."""
+    return dict([f.split("=", 1) for f in fields] + [(b.split("=", 1)[0], bool(b.split("=", 1)[1])) for b in bools])
 
 HEAD, BASE, TIP = "a" * 40, "b" * 40, "c" * 40
 WK = str(REPO / "wk")
@@ -194,7 +199,7 @@ class World:
         kw.setdefault("devices", ",".join(self.boards_))
         if not kw.get("systems"):
             kw.setdefault("release", "2.38")
-        return ab.AB(REPO, self.reg, self.clock, spec, opts(**kw), boards=self.boards, pool=Inline)
+        return change.Change(REPO, self.reg, self.clock, spec, opts(**kw), boards=self.boards, pool=Inline)
 
     def state(self):
         return sorted(k for k in self.fake.files if k.startswith(("/state/", "/measured/")))
@@ -246,7 +251,7 @@ class TestTheRefusals(ABTest):
     def test_a_malformed_conf_is_refused_not_treated_as_not_a_mac(self):
         w = self.world()
         (Path(w.env["WK_MACHINES_DIR"]) / "broken.conf").write_text("not a keyvalue line\n")
-        rc, err = self.quiet(ab.machine_kind, REPO, w.env, "broken")
+        rc, err = self.quiet(change.machine_kind, REPO, w.env, "broken")
         self.assertIsInstance(rc, Refused, err)
         self.assertIn("not a KEY=value line", err)
 
@@ -273,7 +278,7 @@ class TestTheRefusals(ABTest):
         self.assertIn("wk sync", self.refused(w))
 
     def test_systems_build_nothing_so_the_build_options_are_refused(self):
-        for key in ab.BUILD_ONLY:
+        for key in change.BUILD_ONLY:
             with self.subTest(key=key):
                 self.assertIn("--" + key.replace("_", "-"), self.refused(self.world(), "", systems="x,y", **{key: "1"}))
 
@@ -549,11 +554,11 @@ class TestTheCost(ABTest):
         Path(d, "env.json").write_text(json.dumps({"machine": machine, "plan": plan, "count": count, "wall_time_s": secs}))
         if ok:
             Path(d, "result.json").write_text("{}")
-        record.task_write(os.path.dirname(os.path.dirname(d)), ["task=" + task, "requested=x", "devices=rpi3=p", "plans=" + plan,
-                                                                 "rounds=1", "slots=a"], [])
+        record.task_write(os.path.dirname(os.path.dirname(d)), kv(["task=" + task, "requested=x", "devices=rpi3=p", "plans=" + plan,
+                                                                 "rounds=1", "slots=a"]), [])
 
     def test_the_legs_are_a_warmup_per_arm_and_each_round_one_leg_per_arm(self):
-        self.assertEqual((ab.legs_per_plan(5, False), ab.legs_per_plan(5, True)), (12, 22))
+        self.assertEqual((change.legs_per_plan(5, False), change.legs_per_plan(5, True)), (12, 22))
 
     def test_a_plans_cost_is_its_legs_times_the_median_measured_leg(self):
         w = self.world()
@@ -562,7 +567,7 @@ class TestTheCost(ABTest):
         self.leg(w, "t9", "r", 5000, ok=False)
         self.leg(w, "t8", "r", 5000, machine="rpi4")
         a, _ = self.graph(w)
-        self.assertEqual(a.cost(), {("rpi3", "speedometer3"): (12, 12 * 200.0, 3)})
+        self.assertEqual(a.cost_lines()[0], "rpi3 speedometer3: 12 legs x ~3m (median of 3 measured) = ~40m")
 
     def test_legs_measured_in_a_workspace_on_a_build_box_count(self):
         w = self.world()
@@ -571,7 +576,7 @@ class TestTheCost(ABTest):
         w.reg.remote = {"one": (Ssh("one", via=w.fake), str(far))}
         self.leg(w, "t1", "r", 100, home=str(far))
         a, _ = self.graph(w, build_on="one")
-        self.assertEqual(a.cost(), {("rpi3", "speedometer3"): (12, 12 * 100.0, 1)})
+        self.assertEqual(a.cost_lines()[0], "rpi3 speedometer3: 12 legs x ~2m (median of 1 measured) = ~20m")
 
     def test_legs_measured_in_a_peers_workspace_count_and_a_dry_run_states_them(self):
         w = self.world()
@@ -580,7 +585,7 @@ class TestTheCost(ABTest):
         self.leg(w, "t1", "r", 100, home=str(far))
         os.environ["WK_DRY_RUN"] = "1"
         a, _ = self.graph(w, build_on="peer1")
-        self.assertEqual(a.cost(), {("rpi3", "speedometer3"): (12, 12 * 100.0, 1)})
+        self.assertEqual(a.cost_lines()[0], "rpi3 speedometer3: 12 legs x ~2m (median of 1 measured) = ~20m")
 
     def test_a_leg_at_another_count_scales_and_one_at_the_default_stands_only_for_it(self):
         w = self.world()
@@ -600,7 +605,7 @@ class TestTheCost(ABTest):
 
     def test_nothing_measured_is_an_unknown_cost(self):
         a, _ = self.graph(self.world())
-        self.assertEqual(a.cost(), {("rpi3", "speedometer3"): (12, None, 0)})
+        self.assertEqual(a.cost_lines(), ["rpi3 speedometer3: 12 legs; no leg of it at this --count measured on rpi3 yet, so its time is unknown"])
 
 
 class TestThePairing(unittest.TestCase):
@@ -672,7 +677,7 @@ class TestTheKill(ABTest):
         return recs.begin("ab", "here", "t1", "wk bench ab t1 --kill", "/x/ab.log", ["wk sysimage build"], pid=pid)
 
     def kill(self, w, task="t1"):
-        return self.quiet(ab.kill, w.reg, w.clock, task)
+        return self.quiet(change.kill, w.reg, w.clock, task)
 
     def test_the_process_and_its_steps_go_and_the_record_says_cancelled(self):
         w = self.world()

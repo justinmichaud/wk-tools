@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 #
 # wk bench run <workspace> <plan> [options] -- run a benchmark and keep the result defensible
-# wk: where=workspace repos=webkit name=required takes=1 values=plans preset=--preset verbs=plans,run,seed,ls,compare,report,export,precision,stage,staged,ab,deploy ready=yes group=workspaces needs python3 dryrun run,stage,staged,deploy,seed,report,compare readonly plans,ls,precision
+# wk: where=workspace repos=webkit name=required takes=1 values=plans preset=--preset verbs=plans,run,seed,ls,compare,report,export,precision,ab,deploy ready=yes group=workspaces needs python3 dryrun run,deploy,seed,report,compare readonly plans,ls,precision
 # wk: sub plans where=store name=none
-# wk: sub run,deploy name=required@2 takes=1 opts=--preset=,--count=,--browser=,--subtests=,--software,--browser-args=,--cores=,--kill,--system=,--slot=,--ab=,--ab-systems=,--rounds=,--max-rounds=,--detect=,--task=,--timeout=,--exclude-subtests=,--no-warmup-profile,--jit-tiers,--collect,--a-args=,--b-args=
+# wk: sub run where=dynamic name=required@2 takes=1 opts=--preset=,--count=,--browser=,--subtests=,--software,--browser-args=,--cores=,--kill,--system=,--slot=,--ab=,--ab-systems=,--rounds=,--max-rounds=,--detect=,--task=,--timeout=,--exclude-subtests=,--no-warmup-profile,--jit-tiers,--collect,--a-args=,--b-args=
+# wk: sub deploy name=required@2 takes=1 opts=--slot=,--preset=,--plan=
 # wk: sub seed where=dynamic name=required@2 takes=1 opts=
 # wk: sub ls where=dynamic name=none takes=1 opts=--continued
 # wk: sub compare,report where=host name=none takes=4 opts=--html,--text
 # wk: sub precision where=host name=none takes=3 opts=--detect=
 # wk: sub export where=local name=none takes=2 destructive=yes dryrun=yes opts=--to=
-# wk: sub stage where=host takes=1 opts=--to=,--preset=,--plan=,--payload=
-# wk: sub staged where=host opts=--id=,--plan=,--expect-display=,--count=,--subtests=,--browser-args=,--payload=,--profile=,--timeout=,--ls,--gates
-# wk: sub ab where=host name=none takes=2 destructive=yes dryrun=yes opts=--devices=,--release=,--builder=,--bits=,--base=,--build-on=,--plan=,--rounds=,--count=,--timeout=,--task=,--kill,--detach,--systems=,--slot=,--patch=,--workspace=,--preset=,--max-rounds=,--detect=,--settle=,--a-args=,--b-args=,--plant,--rehearse,--allow-network-fetch,--preflight,--progress,--status,--collect
+# wk: sub ab where=host name=none takes=2 destructive=yes dryrun=yes opts=--devices=,--release=,--builder=,--bits=,--base=,--build-on=,--plan=,--rounds=,--count=,--timeout=,--task=,--kill,--detach,--systems=,--slot=,--patch=,--workspace=,--preset=,--max-rounds=,--detect=,--settle=,--a-args=,--b-args=,--plant,--rehearse,--preflight,--progress,--status,--collect
 #
 # <plan> is Tools/Scripts/run-benchmark's name for it; `wk bench plans` lists them.
 # --preset picks the runner: a browser port runs MiniBrowser, a JSCOnly port the jsc shell.
@@ -25,6 +24,8 @@
 #       --force                            record a run despite failing preflight checks
 #       --system <board> [--slot S]        measure slot S (default a) on a board's booted bench
 #                                          system; in a workspace, a request to the broker
+#       --system <mac> [--slot S]          on a Mac's bench volume, in bench mode: its staged build S;
+#                                          --dry-run asks every gate a run needs and runs nothing
 #       --system <board> --ab A,B          an A/B of two slots on the board, or
 #       --system <board> --ab-systems A,B [--slot S]   of two systems holding one slot, each
 #                                          booted before its legs. Round 0 is a discarded warmup
@@ -32,7 +33,10 @@
 #                                          refuse the A/B; rounds alternate the lead; a subtest one
 #                                          arm's width cannot run is dropped from both
 #                                          (bench/subtest-exclusions.conf)
-#           --rounds N                     measured rounds (default 3)
+#           --rounds N                     measured rounds (default 5)
+#           --max-rounds N, --detect PCT   go on past --rounds until the rounds resolve PCT per
+#                                          cent, up to N (default 40); --detect 0 (the default)
+#                                          runs --rounds exactly
 #           --task NAME                    record into an existing task
 #           --timeout S                    seconds one iteration may take
 #           --exclude-subtests A,B         drop these subtests from both arms
@@ -40,11 +44,14 @@
 #           --jit-tiers                    per-tier compile counts in the warmup round (their JSC
 #                                          options crash the web process on some builds)
 #       --a-args "X" --b-args "Y"          an A/B of the workspace's one build under two argument
-#                                          sets (jsc options or MiniBrowser's); --rounds,
-#                                          --max-rounds and --detect as for ab
+#                                          sets (jsc options or MiniBrowser's), rounds as above
 #       --system <board> --slot <s>-instr --collect   one iteration of an instrumented slot,
 #                                          its PGO profile written for the next build phase
 #   wk bench run <workspace> --kill        stop the benchmark running there
+#   wk bench deploy <ws> <board> [--slot S]   put <ws>'s slot on a board's bench system, verified
+#   wk bench deploy <ws> <mac> [--slot S] [--preset P] [--plan P]...   put <ws>'s build and a
+#                                          pinned copy of each plan's benchmark on a Mac's bench
+#                                          volume as its staged build S (default a)
 #   wk bench ab <pr-spec|branch|sha> --devices <a,b>   an interleaved A/B of a change on the
 #                                          boards: slots base and pr<n> built against each
 #                                          device's image, deployed, alternated and reported.
@@ -56,10 +63,7 @@
 #                                          one commit behind the head needs --force
 #       --build-on <a[,b]>                 the machine each arm builds on, base first
 #       --plan P                           repeatable (default speedometer3)
-#       --rounds N                         alternations per plan (default 5)
-#       --max-rounds N, --detect PCT       go on past --rounds until the rounds resolve PCT per
-#                                          cent, up to N (default 40); --detect 0 runs --rounds
-#                                          exactly. A board's default is 0, a Mac's 0.3
+#       --rounds N, --max-rounds N, --detect PCT   as for run
 #       --count N, --timeout S             per run, as for run
 #       --detach                           create the task and hand the rest to a process that
 #                                          outlives this one
@@ -67,29 +71,20 @@
 #   wk bench ab --systems A,B --devices <board> --workspace <ws> [--slot S]   two system
 #                                          images on one board, slot S (default a); builds nothing
 #   wk bench ab --devices <mac> --systems A,B --workspace <ws>   two builds staged on a Mac's
-#                                          benchmark install, planted there, the Mac restarted
-#                                          into it to run them unattended
+#                                          bench volume, planted there, the Mac restarted into it
+#                                          to run them unattended; --detect defaults to 0.3,
+#                                          --count to 2, --timeout to 1800
 #       --patch <ref|diff> [--base <ref>] [--preset P]   build and stage both arms first
 #                                          (default mac-release-pgo)
-#       --settle S, --a-args, --b-args     the pause before each leg; each arm's browser arguments
+#       --settle S, --a-args, --b-args     the pause before each leg (default 90); each arm's
+#                                          browser arguments
 #       --plant                            plant the job and restart nothing
 #       --rehearse                         force every leg past its preflight, recorded as forced
-#       --allow-network-fetch              stage a plan whose payload could not be pinned
 #   wk bench ab --devices <mac> --preflight|--progress|--status|--collect   a Mac A/B's gates,
 #                                          its steps, the running job, or its result read onto
 #                                          the task and reported
 #   wk bench ab <task> --kill              stop an A/B and every step it started
-#   wk bench deploy <ws> <board> [--slot S]   put <ws>'s slot on a board's bench system, verified
 #   wk bench seed <workspace> <plan>       fetch and pin the benchmark payload
-#   wk bench stage <ws> --to <machine> [--preset P] [--plan P [--payload <dir>]]...   put a build
-#                                          and a pinned copy of each benchmark on a machine's
-#                                          benchmark install
-#   wk bench staged [--plan P] [--id <staged-id>] [--count N] [--timeout S] [--subtests "A B"]
-#                   [--payload <dir>] [--browser-args "..."]   run a staged build, in bench mode
-#       --profile <file>                   record the web process with samply for the run
-#       --expect-display "<kind> <w>x<h>"  refuse any other display, a second panel or a mirror
-#       --ls                               what is staged here, and what ran
-#       --gates                            ask every gate a run needs and run nothing
 #   wk bench precision <run-a> <run-b> [--detect PCT]   how fine a difference the rounds resolve
 #                                          and how many more it would take (default 0.3%)
 #   wk bench report <task> [--html] [--text]   the task's A/B per device and plan: Score and Time
@@ -107,9 +102,9 @@
 #   WK_BENCH_ASLR=off, WK_BENCH_ENV_PAD=<bytes>, WK_BENCH_PATH_PAD=<n>,
 #   WK_BENCH_SHARED_CACHE=avoid            variance probes, each recorded into the result's
 #                                          `configuration`, which report groups variance by
-#   WK_BENCH_MACHINE=<mbp|benchvm>         which fleet Mac this is, in host mode
-#   WK_BENCH_ROOT=<dir>                    where staged payloads live (host-mode testing)
-#   WK_BENCH_PYTHON=<path>                 the python3 to run staged benchmarks with
+#   WK_BENCH_PYTHON=<path>                 the python3 a Mac's bench volume runs benchmarks with
+#   WK_BENCH_ROOT=<dir>                    where a Mac's bench install keeps its staged builds and
+#                                          results (/var/wk)
 #   WK_BENCH_MAX_LOAD=<n>                  1-minute load above which preflight calls it busy (4)
 #   WK_STALL_SECONDS=<s>, WK_ABORT_SECONDS=<s>   silence before a warning (900) and before the
 #                                          run is given up on (5400)
@@ -124,7 +119,7 @@ ROOT = images.root()
 
 from wk import decl, places  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import cli, mac, plans  # noqa: E402
+from wk.bench import cli  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import Local  # noqa: E402
 
@@ -140,20 +135,20 @@ def report_args(args):
     return positional, html or "", args.flag("--text")
 
 
-def run_arm(args, reg, clock):
-    return cli.run(ROOT, reg, args.positionals[1:], cli.options(args, cli.RUN, preset=store.build_preset()), args.flag("--kill"), clock)
-
-
-def staged_options(args):
-    return cli.options(args, cli.STAGED)
+def run(argv, reg, clock):
+    """`run`, from the argv the dispatcher hands on."""
+    d = decl.Decl(__file__)
+    args = decl.Args(d, argv)
+    return cli.run(ROOT, reg, args.positionals[1:], cli.options(d, argv, args, preset=store.build_preset()), args.flag("--kill"), clock)
 
 
 def main(argv):
     reg = places.Registry(ROOT, machine=Local())
     if argv[:1] == ["--where"]:
-        print(cli.where(reg, argv[1:]))
+        print(cli.where(ROOT, reg, argv[1:]))
         return 0
-    verb, args = argv[0], decl.Args(decl.Decl(__file__), argv)
+    d = decl.Decl(__file__)
+    verb, args = argv[0], decl.Args(d, argv)
     word = args.positionals[1] if len(args.positionals) > 1 else ""
     bench = cli.Bench(ROOT, reg, Clock())
     if verb == "ls":
@@ -170,16 +165,11 @@ def main(argv):
         words = ([name] if name else []) + args.positionals[1:] + ["", ""]
         return bench.seed(words[0], words[1], bool(name))
     if verb == "run":
-        return run_arm(args, reg, Clock())
+        return run(argv, reg, Clock())
     if verb == "deploy":
-        return bench.deploy(store.ws_name(), word, args.value("--slot") or "a")
-    if verb == "stage":
-        pairs = mac.plans(args.order, args.values("--plan"), args.values("--payload"))
-        return mac.stage(ROOT, reg, Clock(), args.positionals[1:], args.value("--to") or "", store.build_preset(), pairs, plans)
-    if verb == "staged":
-        return mac.staged(ROOT, reg, Clock(), staged_options(args), plans)
+        return bench.deploy(store.ws_name(), word, cli.options(d, argv, args, plans=args.values("--plan"), preset=store.build_preset()))
     if verb == "ab":
-        return bench.ab(word, cli.options(args, cli.AB, plans=args.values("--plan"), preset=store.build_preset()), args.flag("--kill"))
+        return bench.ab(word, cli.options(d, argv, args, plans=args.values("--plan"), preset=store.build_preset()), args.flag("--kill"))
     if verb == "plans":
         return bench.plans()
 

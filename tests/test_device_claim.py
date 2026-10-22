@@ -280,7 +280,7 @@ class TestTheCommandsTakeIt(ClaimTest):
         err = io.StringIO()
         with mock.patch.dict(os.environ, self.env), contextlib.redirect_stderr(err), self.assertRaises(act.Refused):
             cli.Bench(str(REPO), places.Registry(REPO, env=dict(os.environ), machine=Local()), Clock()).deploy(
-                "webkit-2.52-yocto-rpi5-64", "fakeboard", "a")
+                "webkit-2.52-yocto-rpi5-64", "fakeboard", {"slot": "a"})
         out = err.getvalue()
         self.assertIn("bench fakeboard/speedometer3", out)
         self.assertIn("kill %d" % pid, out)

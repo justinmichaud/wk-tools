@@ -1,22 +1,25 @@
-"""The Mac A/B's front half (lib/wk/bench/mac_ab.py's MacAB) against FakeMac; the back half is test_mac_ab_rounds."""
+"""The Mac A/B (lib/wk/bench/mac_ab.py's Plant) against FakeMac: its gates, the plant, the restart and the wait, and the
+back half -- --status, --progress, --collect -- that reads the volume's copy of the task onto the task here."""
+import base64
 import contextlib
 import io
 import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import types
 import unittest
 from unittest import mock
 
-from tests.support import REPO, WkTest, bash, requires_machine, scratch_dir, temp_store
+from tests.support import REPO, WkTest, requires_machine, scratch_dir, temp_store
 from tests.fake_boot import BENCH_GROUP, FakeGuest, FakeMac, conf_for
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, places, sched  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import ab, cli, mac, mac_ab, record  # noqa: E402
+from wk.bench import change, cli, mac, mac_ab, record  # noqa: E402
 from wk.boot.mac import MacVolume  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
@@ -32,28 +35,15 @@ HOST_DISPLAY = {"count": 1, "displays": [
      "mirrored": False, "asleep": True, "points": [1280, 832]}]}
 
 
-def rendered(name, p):
-    """Each bench/onboard/mac-* file as the command it stands for, so an answer is keyed on what it does."""
-    if name == "mac-py.sh":
-        return " ".join(shlex.quote(p[k]) for k in sorted(k for k in p if k != "WK_PY"))
-    return {"mac-test.sh": lambda: "test %s %s" % (p["WK_TEST"], p["WK_PATH"]), "mac-ls.sh": lambda: "ls -1 " + p["WK_PATH"],
-            "mac-defaults.sh": lambda: "defaults read %s %s" % (p["WK_PATH"], p["WK_KEY"]), "mac-size.sh": lambda: "wc -c " + p["WK_PATH"],
-            "mac-scipy.sh": lambda: "pip install --target %s scipy" % p["WK_PATH"], "mac-mkdir.sh": lambda: "mkdir -p " + p["WK_PATH"],
-            "mac-executable.sh": lambda: "chmod 0755 " + p["WK_PATH"], "mac-platform.sh": lambda: "ioreg",
-            "mac-screensaver.sh": lambda: "defaults read %s idleTime" % p["WK_SAVER"], "mac-dnd.sh": lambda: "wk_quiet_dnd_on " + p["WK_HOME"],
-            "mac-arch.sh": lambda: "uname -m", "mac-version.sh": lambda: "PlistBuddy " + p["WK_PATH"],
-            "mac-gated.sh": lambda: "gated " + p["WK_PATH"], "mac-tail.sh": lambda: "tail -20 " + p["WK_PATH"],
-            "mac-tar.sh": lambda: "tar %s %s" % (p["WK_PATH"], p["WK_DIR"])}[name]()
-
-
 class Shell:
+    """What the install answers a plant's reads with, each keyed on what the command does."""
 
     def sh_setup(self):
         self.answers, self.ran = [], []
         for pat, res in ((r"^test ", Result(0)), (r"^defaults read .*loginwindow", Result(0, "bench\n")),
-                         (r"^test -f .*com.wk.bench-firstboot.plist", Result(1)), (r"^ls -1 .*/staged", Result(0, "sid-a\nsid-b\n")),
-                         (r"--exclude", Result(0, DIGEST + "\n")), (r"^wc -c", Result(0, "  42\n")),
-                         (r"^ioreg", Result(0, '  "IOPlatformUUID" = "UUID-1"\n')), (r"^mkdir|^chmod|pip install", Result(0)),
+                         (r"^ls -1 .*/staged", Result(0, "sid-a\nsid-b\n")),
+                         (r"--exclude", Result(0, DIGEST + "\n")), (r"wc -c", Result(0, "  42\n")),
+                         (r"^ioreg", Result(0, '  "IOPlatformUUID" = "UUID-1"\n')), (r"^mkdir|^chmod|pip install|^defaults write", Result(0)),
                          (r"^defaults read .*idleTime", Result(0, "0\n")), (r"wk_quiet_dnd_on", Result(0, "on\n")),
                          (r"^uname -m", Result(0, "arm64\n"))):
             self.answer(pat, res)
@@ -62,14 +52,14 @@ class Shell:
         self.answers.append((re.compile(pattern), result))
 
     def sh(self, cmd):
+        words = shlex.split(cmd)
+        if words[:2] == ["python3", "-c"]:   # a tree file run by the install's python3: its arguments name the reading
+            cmd = shlex.join(words[3:])
         self.ran.append(cmd)
         for pat, got in reversed(self.answers):
             if pat.search(cmd):
                 return got(cmd) if callable(got) else got
         return Result(1, "", "no answer for: %s" % cmd[:80])
-
-    def ours(self, name):
-        return (REPO / "bench" / "onboard" / name).is_file() and name.startswith("mac-")
 
 
 class PlantMac(Shell, FakeMac):
@@ -91,8 +81,6 @@ class PlantMac(Shell, FakeMac):
         out = self.fact(words[0], words[1] if len(words) > 1 else "")
         return Result(0 if out else 1, out + "\n" if out else "")
 
-    def script(self, name, p, input):
-        return self.sh(rendered(name, p)) if self.ours(name) else FakeMac.script(self, name, p, input)
 
 
 class PlantGuest(Shell, FakeGuest):
@@ -102,8 +90,6 @@ class PlantGuest(Shell, FakeGuest):
         self.st = "running"
         self.answer(r"^displays$", Result(0, json.dumps({"displays": [{"online": True, "points": [1280, 800]}]})))
 
-    def script(self, name, p, input):
-        return self.sh(rendered(name, p)) if self.ours(name) else FakeGuest.script(self, name, p, input)
 
 
 def here_fake():
@@ -152,17 +138,15 @@ def world(kind="mac-volume", env=None, **o):
         fake = (PlantMac if kind == "mac-volume" else PlantGuest)(conf, env=e, clock=clock)
         fake.lay_out(["perf-macos-tolken-1"])
         driver = fake.driver()
-        if kind == "mac-volume":
-            driver.manager = lambda: manager
         reg = ManagerReg(str(tree / "manager"), env=e, machine=here)
         opts = dict({"devices": "mbp" if kind == "mac-volume" else "benchvm", "systems": "sid-a,sid-b", "workspace": "mac-rel"}, **o)
-        m = mac_ab.MacAB(tree, reg, clock, "", opts, cli.Bench(tree, reg, clock), driver=lambda root, c: driver)
+        m = mac_ab.Plant(tree, reg, clock, "", opts, cli.Bench(tree, reg, clock), driver=lambda root, c: driver)
         m.fake, m.here_fake, m.manager_fake, m.store, m.clock_ = fake, here, manager, store["path"], clock
         def sent(root, headline, *a, **k):
             here.notified.append(headline)
             return not getattr(here, "notify_fails", False)
         with mock.patch.dict(os.environ, {"WK_YES": "1"}), mock.patch("wk.notify.send", side_effect=sent), \
-                mock.patch("wk.sysimage.mactailnet.Tailnet.collect", return_value=""):
+                mock.patch("wk.sysimage.mactailnet.Tailnet.collect", return_value=str(tree / "lib")):
             os.environ.pop("WK_DRY_RUN", None)
             os.environ.pop("WK_FORCE", None)
             yield m
@@ -180,6 +164,8 @@ def said(fn, *args):
 def ready(m):
     m.check()
     m.resolve()
+    if m.fake.__class__ is PlantMac:
+        m.mac.manager = lambda: m.manager_fake
     m.boot_wait = 600
     return m
 
@@ -200,8 +186,9 @@ class TestTheFirmwareDefaultIsAsserted(WkTest):
                     m.fake.firmware = boot
                 elif boot is not None:
                     m.fake.answer(r"^boot-volume", boot)
-                self.assertEqual(ok, m.firmware_is_bench())
-                self.assertIn(said, m.fw_detail)
+                got, detail = m.firmware()
+                self.assertEqual(ok, got)
+                self.assertIn(said, detail)
 
 
 class TestOnlyTheDeclaredDisplay(WkTest):
@@ -246,7 +233,7 @@ class TestPreflight(WkTest):
                                   ({}, lambda m: setattr(m.fake, "helper_is", None), 1, "wk machine setup mbp"),
                                   ({}, empty, 1, "nothing on the volume"), ({"systems": "", "patch": "HEAD"}, empty, 0, "--patch stages both arms"),
                                   ({}, lambda m: m.fake.answer(r"^displays$", Result(0, json.dumps(two))), 1, "No --force crosses it"),
-                                  ({"kind": "mac-guest"}, lambda m: None, 0, "enters bench mode"),
+                                  ({"kind": "mac-guest"}, lambda m: None, 0, "starting the guest is the transition"),
                                   ({"kind": "mac-guest"}, lambda m: setattr(m.fake, "marked", False), 1, "carries no /etc/wk-image")):
             with self.subTest(named), world(**o) as m:
                 setup(m)
@@ -290,7 +277,7 @@ class TestItSharesTheBoardABsRefusals(WkTest):
     def test_a_board_is_refused_a_macs_option(self):
         with temp_store() as store:
             reg = places.Registry(REPO, env={"WK_STORE": store["WK_STORE"], "HOME": "/nonexistent"}, machine=Fake())
-            got, err = said(ab.run, REPO, reg, FakeClock(), "", {"devices": "rpi5", "systems": "a,b", "patch": "x"})
+            got, err = said(change.run, REPO, reg, FakeClock(), "", {"devices": "rpi5", "systems": "a,b", "patch": "x"})
         self.assertIs(got, Refused)
         self.assertIn("--patch is a Mac A/B's", err)
 
@@ -312,7 +299,7 @@ class TestThePlant(WkTest):
             self.assertIsNone(got, err)
             job = self.job(m)
         self.assertEqual(job["plans"], ["jetstream3", "speedometer3", "motionmark"])
-        self.assertEqual((job["rounds"], job["max_rounds"], job["detect_pct"], job["count"]), (5, 40, 0.3, "2"))
+        self.assertEqual((job["rounds"], job["max_rounds"], job["detect"], job["count"], job["task"]), ("5", "40", "0.3", "2", m.task))
         self.assertEqual([a["id"] for a in job["arms"]], ["sid-a", "sid-b"])
         self.assertEqual(job["display"], "builtin 1280x832")
         self.assertEqual(job["rehearsal"], "1")
@@ -334,10 +321,11 @@ class TestThePlant(WkTest):
     def test_what_did_not_land_or_read_back_as_asked_is_refused(self):
         ans = lambda pat, res: lambda m: m.fake.answer(pat, res)   # noqa: E731
         for o, setup, named in (({"systems": "sid-a,sid-x"}, lambda m: None, "no staged build 'sid-x'"),
-                                ({}, ans(r"wk-tools'? --exclude", Result(0, "e" * 64 + "\n")), "what landed is not this tree"),
-                                ({}, ans(r"^wc -c .*job.json", Result(0, "7\n")), "could not write the job"),
-                                ({}, ans(r"wk_quiet_dnd_on", Result(0, "off\n")), "Do Not Disturb"),
-                                ({}, ans(r"^test -r .*lib/wk/bench/autorun.py", Result(1)), "carries no lib/wk/bench/autorun.py")):
+                                ({}, ans(r"wk-tools'? --exclude", Result(0, "e" * 64 + "\n")), "could not sync wk-tools"),
+                                ({}, ans(r"wc -c .*job.json", Result(0, "7\n")), "could not write the job"),
+                                ({}, lambda m: (m.fake.answer(r"^test -d .*scipy", Result(1)), m.fake.answer(r"pip install", Result(1))),
+                                 "scipy did not install"),
+                                ({}, ans(r"wk_quiet_dnd_on", Result(0, "off\n")), "Do Not Disturb")):
             with self.subTest(named), world(**o) as m:
                 got, err = self.plant(m, setup)
                 self.assertIs(got, Refused)
@@ -370,7 +358,7 @@ class TestThePlant(WkTest):
     def test_the_planted_samply_is_made_executable_over_there(self):
         with world() as m:
             self.plant(m)
-        self.assertTrue([c for c in m.fake.ran if re.match(r"chmod 0755 .*/cache/samply/.*/samply$", c)], m.fake.ran)
+        self.assertTrue([c for c in m.fake.ran if re.match(r"chmod 0755 .*/cache/samply/.*/samply'?$", c)], m.fake.ran)
 
     def test_the_agent_runs_the_tree_the_plant_verified(self):
         with world() as m:
@@ -379,12 +367,14 @@ class TestThePlant(WkTest):
         self.assertIn("/var/wk/wk-tools/lib/wk/bench/autorun.py", plist)
         self.assertNotIn("KeepAlive", plist)
 
-    def test_the_autorun_state_is_reset_to_this_job(self):
+    def test_the_autorun_state_is_reset_to_this_job_and_the_volume_holds_its_task(self):
         with world() as m:
             self.plant(m)
             state = m.here_fake.files[os.path.join(m.logs, "planted.state")]
-        self.assertIn("phase=planted\njob_stamp=", state)
+            landed = [c for c in m.fake.ran + [" ".join(a[1:]) for a in m.fake.asked] if "results/%s" % m.task in c]
+        self.assertIn("phase=planted\ntask=%s\n" % m.task, state)
         self.assertIn("attempts=0", state)
+        self.assertTrue(landed, "the task record the autorun fills is on the volume")
 
 
 class TestTheWholeTrip(WkTest):
@@ -397,7 +387,7 @@ class TestTheWholeTrip(WkTest):
             self.assertEqual(rc, 0, err)
             self.assertEqual(mutations(m), [])
             self.assertFalse(os.path.exists(m.taskdir))
-        self.assertIn("wk bench staged --gates", err)
+        self.assertIn("wk bench run mac-rel jetstream3 --system mbp --slot sid-a --dry-run", err)
 
     def test_a_failed_preflight_is_a_barrier_that_force_crosses(self):
         with world() as m:
@@ -507,8 +497,7 @@ class TestTheArmsAreBuiltInTheWorkspace(WkTest):
         with world(systems="", patch=patch, workspace="mac-rel", **o) as m:
             mgr = m.manager_fake
             mgr.answer(["test", "-x"], rc=0)
-            mgr.answer(["sh", "-c"], out="/seed/payload\n")
-            mgr.dirs.add("/seed/payload")
+            mgr.answer(["sh", "-c"], out="")
             mgr.answer(["ssh"], out="/Users/admin/WebKit\n")
             m.here_fake.answer(["sh", "-c", sched.LOGGED], rc=0)
             ready(m)
@@ -520,18 +509,17 @@ class TestTheArmsAreBuiltInTheWorkspace(WkTest):
                 steps.append(words[1] if words[:1] == ("bench",) else words[0])
                 return rwk(*words, logged=logged)
             m.rwk = recorded
-            m.staged_ids = lambda root: ["sid-new-a", "sid-new-b"][:steps.count("stage")]
             got, err = said(m.build_ab)
             return m, got, err, steps
 
     def guest_scripts(self, m):
         return [guest_script(e[1][-1]) for e in m.manager_fake.effects if e[0] == "run" and e[1][0] == "ssh"]
 
-    def test_both_arms_are_built_staged_and_reclaimed_in_order(self):
+    def test_both_arms_are_built_deployed_as_their_slots_and_reclaimed_in_order(self):
         m, got, err, steps = self.build()
         self.assertIsNone(got, err)
-        self.assertEqual((m.a, m.b), ("sid-new-a", "sid-new-b"))
-        self.assertEqual(steps, ["start", "build", "seed", "seed", "seed", "stage", "build", "seed", "seed", "seed", "stage", "stop"])
+        self.assertEqual((m.a, m.b), ("base", "patched"))
+        self.assertEqual(steps, ["start", "build", "deploy", "build", "deploy", "stop"])
         self.assertIn("reclaimed baseline", err)
         self.assertTrue([s for s in self.guest_scripts(m) if "rm -rf" in s and "Release-pgo-instr" in s])
 
@@ -542,15 +530,6 @@ class TestTheArmsAreBuiltInTheWorkspace(WkTest):
         self.assertIsNone(got, err)
         self.assertTrue([s for s in self.guest_scripts(m) if "base64 -d > /tmp/wk-ab.patch; git -C /Users/admin/WebKit apply" in s])
 
-    def test_an_unpinnable_payload_stages_nothing_unless_told(self):
-        def unpinned(m):
-            m.manager_fake.answer(["sh", "-c"], out="\n")
-        m, got, err, steps = self.build(setup=unpinned)
-        self.assertIs(got, Refused)
-        self.assertNotIn("stage", steps)
-        self.assertIn("--allow-network-fetch", err)
-        self.assertIsNone(self.build(setup=unpinned, allow_network_fetch=True)[1])
-
     def test_a_patch_that_does_not_apply_puts_the_tree_back(self):
         def failing(m):
             m.manager_fake.react(["ssh"], lambda argv, f: Result(1 if "checkout -q refs/heads/pr" in guest_script(argv[-1]) else 0,
@@ -558,7 +537,7 @@ class TestTheArmsAreBuiltInTheWorkspace(WkTest):
         m, got, err, steps = self.build(setup=failing)
         self.assertIs(got, Refused)
         self.assertIn("the tree has been put back", err)
-        self.assertEqual(steps.count("stage"), 1)
+        self.assertEqual(steps.count("deploy"), 1)
         self.assertIn("checkout -q -f", self.guest_scripts(m)[-1])
 
 
@@ -573,7 +552,7 @@ class TestTheLiveRows(unittest.TestCase):
     def preflight(self, machine):
         reg = places.Registry(REPO, machine=None)
         clock = FakeClock()
-        m = mac_ab.MacAB(REPO, reg, clock, "", {"devices": machine}, cli.Bench(REPO, reg, clock))
+        m = mac_ab.Plant(REPO, reg, clock, "", {"devices": machine}, cli.Bench(REPO, reg, clock))
         m.resolve()
         n, err = said(m.preflight)
         self.assertIsInstance(n, int, err)
@@ -590,64 +569,68 @@ class TestTheLiveRows(unittest.TestCase):
         self.preflight("benchvm")
 
 
-class TestStatusCarriesTheLegs(WkTest):
+class TestTheBackHalf(WkTest):
+    """The volume's copy of the task, its runs written by the autorun, read onto the task here."""
 
-    def _legs(self, started="2026-09-09T18:08:20Z"):
-        with scratch_dir() as root:
-            (root / "job.json").write_text(json.dumps({
-                "plans": ["speedometer3", "jetstream3", "motionmark"],
-                "rounds": 2,
-                "arms": [{"label": "A", "id": "sid-a"}, {"label": "B", "id": "sid-b"}]}))
-            state = "job_stamp=20260909T180544Z\n"
-            if started:
-                state += "started_at=%s\n" % started
-            state += "ok_speedometer3_A_0=1\nok_speedometer3_B_0=1\nok_speedometer3_A_1=1\n"
-            (root / "autorun.state").write_text(state)
-            for name, wall in (("20260101T000000Z-speedometer3-sid-a", 42),
-                               ("20260909T181045Z-speedometer3-sid-a", 91),
-                               ("20260909T181218Z-speedometer3-sid-b", 92),
-                               ("20260909T181351Z-speedometer3-sid-a", 31),
-                               ("20260909T181500Z-motionmark-sid-b", None)):
-                d = root / "results" / name
+    def planted(self, m):
+        ready(m)
+        m.create_task("20260908T000000Z")
+        m.lock.release_all()
+        root = m.mac.root_dir()
+        m.fake.files[root + "/autorun.state"] = "phase=done\ntask=%s\noutcome=resolved-at-round-6\n" % m.task
+        with scratch_dir() as tmp:
+            for rnd, arm in (("1", "a"), ("1", "b")):
+                d = tmp / "runs" / ("r%s%s" % (rnd, arm))
                 d.mkdir(parents=True)
-                env = {"plan": name.split("-")[1]}
-                if wall is not None:
-                    env["wall_time_s"] = str(wall)
-                (d / "env.json").write_text(json.dumps(env))
-            runs = root / "ab" / "20260909T180544Z" / "runs.tsv"
-            runs.parent.mkdir(parents=True)
-            runs.write_text("1\tA\tsid-a\t20260909T181351Z-speedometer3-sid-a\tclean\tspeedometer3\n")
-            cp = bash('python3 "$WK_ROOT/lib/wkdata.py" ab-legs %s' % shlex.quote(str(root)))
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            return cp.stdout
+                (d / "env.json").write_text(json.dumps({"machine": "mbp", "plan": "speedometer3", "ab": {"round": rnd, "arm": arm}}))
+                (d / "result.json").write_text(json.dumps({"Speedometer-3": {"metrics": {"Score": {"current": [30.0]}}}}))
+            packed = base64.b64encode(subprocess.run(["tar", "-cf", "-", "-C", str(tmp), "runs"], capture_output=True).stdout).decode()
+        m.fake.answer(r"tar -cf - runs warmup", Result(0, packed))
+        return m
 
-    def test_each_leg_of_this_job_is_named_by_round_and_arm(self):
-        out = self._legs()
-        self.assertIn("3 of 14 planned", out)
-        self.assertNotIn("20260101", out, "an older A/B task's results are not this job's")
-        self.assertNotIn(" 42s", out)
-        self.assertRegex(out, r"1\s+A\s+speedometer3\s+31s\s+clean")
-        self.assertRegex(out, r"warmup\s+A\s+speedometer3\s+91s")
-        self.assertRegex(out, r"warmup\s+B\s+speedometer3\s+92s")
-        self.assertRegex(out, r"-\s+B\s+motionmark\s+running")
-        self.assertEqual(2, len([l for l in out.splitlines() if re.match(r"warmup\s+[AB]\s", l)]))
-        self.assertRegex(out, r"warmup profiles: none in .*/warmup")
+    def test_collect_reads_the_volumes_runs_onto_the_task_and_reports_it(self):
+        with world() as m:
+            self.planted(m)
+            got, err = said(lambda: m.read(True))
+            self.assertEqual(got, 0, err)
+            st = record.task_state(m.taskdir, False)
+        self.assertEqual((st["ok"], st["usable"]), (2, 1))
+        self.assertIn("phase=done", err)
 
-    def test_a_job_that_has_not_started_says_so_rather_than_listing_the_volume(self):
-        self.assertIn("no leg of this job", self._legs(started=""))
+    def test_status_reads_the_same_and_reports_nothing(self):
+        with world() as m:
+            self.planted(m)
+            got, err = said(lambda: m.read(False))
+        self.assertEqual(got, 0, err)
+        self.assertIn("2/", err)
+        self.assertNotIn("Welch", err)
 
-    def test_a_capture_that_landed_is_named(self):
-        with scratch_dir() as root:
-            (root / "job.json").write_text(json.dumps({"plans": ["speedometer3"], "rounds": 1, "arms": []}))
-            (root / "autorun.state").write_text("job_stamp=S\nstarted_at=2026-01-01T00:00:00Z\n")
-            leg = root / "results" / "20260101T000100Z-speedometer3-sid-a"
-            leg.mkdir(parents=True)
-            (leg / "env.json").write_text(json.dumps({"plan": "speedometer3", "wall_time_s": "30"}))
-            w = root / "ab" / "S" / "warmup"
-            w.mkdir(parents=True)
-            (w / "speedometer3-A.json.gz").write_bytes(b"")
-            cp = bash('python3 "$WK_ROOT/lib/wkdata.py" ab-legs %s' % shlex.quote(str(root)))
-            self.assertIn("warmup profiles: speedometer3-A.json.gz", cp.stdout)
+    def test_no_task_here_for_the_planted_job_leaves_its_results_on_the_volume(self):
+        with world() as m:
+            ready(m)
+            m.fake.files[m.mac.root_dir() + "/autorun.state"] = "task=elsewhere\n"
+            got, err = said(lambda: m.read(True))
+        self.assertEqual(got, 1)
+        self.assertIn("its results stay on the volume", err)
+
+    def test_progress_in_bench_mode_is_the_run_itself_and_in_host_mode_every_gate_and_the_job(self):
+        with world() as m:
+            ready(m)
+            got, err = said(m.progress)
+            self.assertEqual(got, 0, err)
+            self.assertIn("a job is planted for the staged arms: none", err)
+            self.assertIn("[x] firmware default", err)
+            self.assertEqual(mutations(m), [])
+            m.fake.enter_bench()
+            m.d.probe()
+            got, err = said(m.progress)
+        self.assertIn("the A/B is on it now", err)
+
+    def test_two_readings_or_a_plant_option_beside_one_are_refused(self):
+        for o in ({"status": True, "collect": True}, {"status": True, "rounds": "3"}):
+            with self.subTest(o=o), world(systems="", workspace="", devices="mbp", **o) as m:
+                got, err = said(m.back)
+                self.assertIs(got, Refused, err)
 
 
 class TestTheDriverAnswersFromAnotherMachine(WkTest):

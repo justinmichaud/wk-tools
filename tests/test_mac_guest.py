@@ -65,7 +65,6 @@ class TestArming(unittest.TestCase):
         fake, d = guest()
         with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
             quiet(d.arm)
-            quiet(d.own, "/var/wk")
         self.assertEqual(fake.effects, [])
 
 
@@ -82,24 +81,6 @@ class TestWhatItReports(unittest.TestCase):
         with mock.patch("wk.boot.mac.is_macos", return_value=True):
             self.assertFalse(d.probeable())
             self.assertIn("managed on the macOS host", d.media())
-
-    def test_its_manager_is_this_machine(self):
-        _, d = guest()
-        self.assertIs(d.manager(), d.ch.via)
-        self.assertEqual(d.manager_tools(d.manager()), str(REPO))
-        self.assertTrue(d.restart_ready())
-
-
-class TestStaging(unittest.TestCase):
-    def test_the_staging_root_is_owned_before_anything_lands(self):
-        fake, d = guest(st="running")
-        d.probe()
-        self.assertEqual(d.bench_put_file("/dev/null", "/var/wk/stage.json"), 0)
-        ran = [e for e in fake.effects if e[0] != "push"]
-        self.assertEqual(ran[:2], [("mkdir", "-p", "/var/wk"), ("chown", "-R", "admin", "/var/wk")])
-        self.assertEqual(ran[2][:2], ("mv", "-f"))
-        self.assertEqual((d.bench_root(), d.bench_home(), d.bench_local()), ("/var/wk", "/Users/admin", False))
-
 
 if __name__ == "__main__":
     unittest.main()

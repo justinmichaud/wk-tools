@@ -3,17 +3,14 @@ for one (mac-guest). A Mac is reached over ssh and nothing else, so its on-board
 
 import os
 import re
-import tempfile
 import time
 
 from wk import act, guest, images
 from wk.boot.driver import Channel, Driver, Onboard
-from wk.machine import Local, Result, is_macos
+from wk.machine import Result, is_macos
 from wk.sudo import BOOT_PRIV
 
 HELPER = BOOT_PRIV
-BENCH_ROOT = "/var/wk"
-TOOLS = "Development/wk-tools"
 BOOTTIME = re.compile(r"\{ *sec *= *(\d+)")   # `{ sec = 1786800736, usec = 451078 }`: anchored on the brace, or usec matches
 
 
@@ -56,50 +53,6 @@ class MacDriver(Driver):
         ids = re.findall(r"(?m)^id=(\S+)", r.out)
         return ids[0] if ids else ""
 
-    def bench_put(self, src, dest, *skip):
-        """Replaces dest with src's tree less the `skip` names: a tar, since the Mac's openrsync fails on the escaped
-        `/Volumes/<v> - Data/...`."""
-        self.refuse_on_bench()
-        self.own(dest)
-        fd, tar = tempfile.mkstemp(prefix="wk-put-", suffix=".tar")
-        os.close(fd)
-        try:
-            excludes = [w for x in skip for w in ("--exclude", x)]
-            if not Local().act_run(["tar", "-cf", tar, *excludes, "-C", src, "."]).ok:
-                act.die("could not pack %s" % src)
-            return self.land(tar, dest, [["rm", "-rf", dest], ["mkdir", "-p", dest], ["tar", "-xf", "{}", "-C", dest]])
-        finally:
-            os.unlink(tar)
-
-    def bench_put_file(self, src, dest):
-        self.refuse_on_bench()
-        self.own(os.path.dirname(dest))
-        return self.land(src, dest, [["mv", "-f", "{}", dest]])
-
-    def refuse_on_bench(self):
-        if self.ch.side == "bench":
-            act.die("%s answers as its benchmark install, and nothing is staged onto a running measurement.\n"
-                    "    Stage once it is back:  wk boot %s --status" % (self.who(), self.who()))
-
-    def land(self, src, dest, steps):
-        tmp = "/tmp/wk-put-%d-%s" % (os.getpid(), os.path.basename(src))
-        try:
-            self.ch.push(src, tmp)
-        except OSError as e:
-            act.warn("could not copy %s to %s: %s" % (src, self.who(), e))
-            return 1
-        rc = 0
-        for argv in steps:
-            rc = self.ch.run([tmp if w == "{}" else w for w in argv], "host", mutates=True).rc
-            if rc:
-                break
-        self.ch.run(["rm", "-f", tmp], "host", mutates=True)
-        return rc
-
-    def own(self, dest):
-        return 0
-
-
 class MacVolume(MacDriver):
     """Only the boot helper blesses the install the firmware boots next; --setBoot is sticky, so the bench task hands back."""
 
@@ -126,18 +79,6 @@ class MacVolume(MacDriver):
     def data_path(self):
         d = self.volume() + " - Data"
         return d if self.test("-d", d) else self.volume()
-
-    def in_bench(self, p):
-        """`p` inside the bench install as the answering channel reaches it; in host mode under the volume's Data mount
-        (the system volume is sealed, with /var firmlinked to private/var)."""
-        if self.ch.side == "bench":
-            return p
-        if not self.volume_present():
-            return None
-        d = self.data_path()
-        if d.endswith(" - Data") and p.startswith("/var/"):
-            p = "/private" + p
-        return d + p
 
     def fact(self, what, arg=""):
         with open(os.path.join(self.root, "lib", "wk", "mac.py")) as f:
@@ -273,35 +214,6 @@ class MacVolume(MacDriver):
             return 0
         act.die("could not restart %s: its boot helper is not installed:  wk machine setup %s" % (self.who(), self.who()))
 
-    def restart_ready(self):
-        # A helper too old to name its detach mechanism exits 0 having rebooted nothing.
-        return any(l.startswith("wk-boot-priv: detach=") for l in self.priv("status")[1].splitlines())
-
-    def restart_detail(self):
-        if self.priv("status")[1].startswith("wk-boot-priv: ok"):
-            return ("the boot helper on %s answers, but names no detach mechanism, so it is older than this tree -- "
-                    "its reboot exits 0 having rebooted nothing" % self.c("ssh"))
-        return "no boot helper on %s, and plain sudo there wants a password" % self.c("ssh")
-
-    def bench_root(self):
-        return self.in_bench(BENCH_ROOT)
-
-    def bench_home(self):
-        return self.in_bench("/Users/bench")
-
-    def bench_local(self):
-        return self.ch.here()
-
-    def manager(self):
-        m = self.ch.machine("host")
-        if not self.c("ssh") or isinstance(m, Result):
-            act.die("%s (machines/%s.conf) sets no ssh, so nothing can reach its host install" % (self.who(), self.who()))
-        return m
-
-    def manager_tools(self, m):
-        return TOOLS if m.run(["test", "-x", TOOLS + "/wk"]).ok else None
-
-
 class MacGuest(MacDriver):
     """A guest rehearses the path and not the number: arming it is starting it, and leaving the role is stopping it.
     Its one side is the vm place's own channel into it: its address changes every boot and is in no ssh config."""
@@ -390,36 +302,6 @@ class MacGuest(MacDriver):
         return "a Tart guest, %s (%s); no physical media" % (self.guest(), self.state() or "unknown")
 
     def reprovision(self):
-        return "wk sysimage build macos-guest-base\nwk new %s --on vm\nwk bench stage <ws> --to %s" % (self.who(), self.who())
-
-    def own(self, dest):
-        # /var/wk is root's on a fresh guest; the run and every put after it are the login user's.
-        me = self.ch.run(["id", "-un"], "host").out.strip()
-        for argv in (["sudo", "-n", "mkdir", "-p", dest], ["sudo", "-n", "chown", "-R", me, BENCH_ROOT]):
-            if not me or not self.ch.run(argv, "host", mutates=True).ok:
-                act.die("could not make %s in '%s'" % (dest, self.guest()))
-
-    def restart_ready(self):
-        return True
-
-    def restart_detail(self):
-        return "unreachable: stopping a guest needs no helper"
-
-    def bench_root(self):
-        return BENCH_ROOT
-
-    def bench_home(self):
-        r = self.ch.run(["printenv", "HOME"], "host")
-        return r.out.replace("\r", "").strip() if r.ok else None
-
-    def bench_local(self):
-        return False
-
-    def manager(self):
-        return self.ch.via
-
-    def manager_tools(self, m):
-        return self.root
-
+        return "wk sysimage build macos-guest-base\nwk new %s --on vm\nwk bench deploy <ws> %s" % (self.who(), self.who())
 
 DRIVERS = {d.name: d for d in (MacVolume, MacGuest)}

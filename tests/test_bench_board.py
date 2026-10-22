@@ -1,4 +1,4 @@
-"""A board as a bench system (lib/wk/bench/board.py, board_ab.py) against a FakeBoard (tests/fake_boot.py): no ssh, no hardware."""
+"""A board as a bench system (lib/wk/bench/board.py) and an A/B on it (ab.py) against a FakeBoard (tests/fake_boot.py): no ssh, no hardware."""
 import contextlib
 import hashlib
 import io
@@ -23,7 +23,8 @@ from tests.test_bench_task import refusal  # noqa: E402
 from tests.test_bench_pipeline import PLAN_JSON, RESULT, SHA, Acting, CleanTest, registry as pipeline_registry, invoke  # noqa: E402
 from wk import images, pgo, project, record, samply  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import board, board_ab, cli, plans, record as brecord  # noqa: E402
+from wk.bench import board, cli, plans, record as brecord  # noqa: E402
+from wk.bench.pipeline import Run  # noqa: E402
 from wk.boot import cli as bootcli  # noqa: E402
 from wk.boot.driver import Driver, Onboard, part  # noqa: E402
 from tests.fake_boot import FakeBoard, Side  # noqa: E402
@@ -33,6 +34,11 @@ from wk.kv import kv  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
+
+
+def kv(fields, bools=()):
+    """Fields as wk writes them into a record: key=value strings, and the bools as flags."""
+    return dict([f.split("=", 1) for f in fields] + [(b.split("=", 1)[0], bool(b.split("=", 1)[1])) for b in bools])
 
 WS = "buildroot-webkit-2.52-buildroot-rpi5-64"
 FILES = {"usr/lib/libWPEWebKit-2.0.so.1.0.0": b"webkit-bytes-here"}
@@ -44,7 +50,8 @@ SLOT_DOC = {"slot": "a", "workspace": WS, "profile": "buildroot-rpi5-64", "brows
             "bundle_dir": "usr/lib/wpe-webkit-2.0/injected-bundle", "lib_file": "usr/lib/libWPEWebKit-2.0.so.1.0.0",
             "files": {"usr/lib/libWPEWebKit-2.0.so.1.0.0": "ab" * 32}}
 OD_AARCH64 = " 127 69 76 70 2 1 1 0 0 0 0 0 0 0 0 0 3 0 183 0\n"
-EVIDENCE = {"elf": {"bits": 64}, "gl": {"driver": "/usr/lib/dri/v3d_dri.so"}, "jit": {}, "problems": []}
+EVIDENCE = {"elf": {"bits": 64}, "gl": {"driver": "/usr/lib/dri/v3d_dri.so", "mapped": ["/usr/lib/dri/v3d_dri.so"]},
+            "jit": {"exec_mappings": 1, "tiers": {"FTL": 1}}, "gpu": {"measured": True, "busy_ms": 900}}
 
 
 def write_slot(env, name, files=FILES):
@@ -162,7 +169,10 @@ class DeployWorld:
     def deploy(self, name="a", ok=True):
         self.fake.answer(["sh"], rc=0 if ok else 1, out="" if ok else "usr/lib/libWPEWebKit-2.0.so.1.0.0: FAILED\n")
         with local_holders(), contextlib.redirect_stderr(io.StringIO()):
-            return self.bench().deploy(WS, BOARD, name, machine=self.fake, driver=Driver(REPO, board_conf(), self.board))
+            return self.system().deploy({"slot": name}, plans)
+
+    def system(self):
+        return board.for_board(str(REPO), self.bench().reg, WS, self.clock, BOARD, machine=self.fake, driver=Driver(REPO, board_conf(), self.board))
 
     def state(self):
         return dict(self.fake.files), set(self.fake.dirs)
@@ -235,7 +245,9 @@ class TestDeploy(CleanTest):
 
     def refused(self, w, name=BOARD):
         with local_holders():
-            return refusal(w.bench().deploy, WS, name, "a", w.fake, Driver(REPO, board_conf(), w.board) if name == BOARD else None)
+            if name == BOARD:
+                return refusal(lambda: w.system().deploy({"slot": "a"}, plans))
+            return refusal(w.bench().deploy, WS, name, {"slot": "a"})
 
     def test_an_unknown_board_and_one_that_declares_no_driver_are_refused(self):
         for name in ("not-a-real-board", "bare"):
@@ -288,7 +300,7 @@ class TestInAWorkspaceItIsABrokerRequest(unittest.TestCase):
         self.assertEqual(call[1][-4:], ("stage", "machine=" + BOARD, "workspace=" + WS, "slot=b"))
 
     def deploy(self, reg):
-        return cli.Bench(str(REPO), reg, FakeClock()).deploy(WS, BOARD, "b")
+        return cli.Bench(str(REPO), reg, FakeClock()).deploy(WS, BOARD, {"slot": "b"})
 
     def test_a_board_run_is_a_run_request(self):
         here, reg = self.world()
@@ -405,8 +417,7 @@ class BoardWorld(Acting, Fake):
     def leg(self, plan="jetstream3", **o):
         """One leg as an A/B runs it, in the A/B's workspace, with the leg's own options."""
         reg = pipeline_registry(self)
-        return self.said(lambda: board.BoardRun(str(REPO), reg, board.for_board(str(REPO), reg, "ws", self.clock, BOARD), self.clock, plans, self.env)
-                         .go(plan, o))
+        return self.said(lambda: Run(board.for_board(str(REPO), reg, "ws", self.clock, BOARD), plans, self.env).go(plan, o))
 
     def bench_dir(self):
         return Path(self.store.records_dir(), "ws", "ws", "bench")
@@ -475,7 +486,7 @@ class TestARun(BoardTest):
         self.assertEqual(json.loads(w.exports["WK_BOARD_EXPECT"])["lib"], "/var/wk/slots/a/root/usr/lib/libWPEWebKit-2.0.so.1.0.0")
         (t,) = w.recs().list()
         self.assertEqual((t.field("kind"), t.field("where"), t.field("name"), t.field("exit")), ("bench", "here", "ws", "0"))
-        self.assertEqual(t.steps(), [(1, "done"), (2, "done"), (3, "running")])
+        self.assertEqual(t.steps(), [(1, "done"), (2, "running")])
         self.assertEqual((t.field("kill"), t.raw("holds")), ("wk bench run ws --kill --system testboard", "device:testboard"))
         self.assertEqual(Path(t.field("log")), w.run_dir() / "run.log")
         self.assertEqual([e for e in w.board.machines["host"].effects if e[0] != "run"], [], "every effect on the board goes through its bench system")
@@ -586,7 +597,7 @@ class TestRefusals(BoardTest):
 class TestTheLaunch(unittest.TestCase):
 
     def system(self, session="drm"):
-        s = board.BoardSystem(str(REPO), mock.Mock(), None, "", FakeClock(), BOARD, None, Fake())
+        s = board.Board(str(REPO), mock.Mock(), "", FakeClock(), BOARD, None, Fake())
         s.doc, s.session = dict(SLOT_DOC), session
         return s
 
@@ -623,9 +634,9 @@ class TestTheLaunch(unittest.TestCase):
         self.assertNotEqual(s.warm_file(leg, "evidence.json"), s.warm_file(leg, "profile.json"))
 
     def test_the_word_size_is_the_measured_librarys_not_the_kernels(self):
-        self.assertEqual(board.elf_arch(OD_AARCH64), "aarch64")
-        self.assertEqual(board.elf_arch(" 127 69 76 70 1 1 1 0 0 0 0 0 0 0 0 0 3 0 40 0"), "armv7l")
-        self.assertEqual(board.elf_arch(""), "")
+        self.assertEqual(board.elf(OD_AARCH64), (64, "aarch64"))
+        self.assertEqual(board.elf(" 127 69 76 70 1 1 1 0 0 0 0 0 0 0 0 0 3 0 40 0"), (32, "armv7l"))
+        self.assertEqual(board.elf(""), (0, ""))
 
     def test_every_onboard_file_parses_as_posix_sh(self):
         for f in sorted((REPO / "bench" / "onboard").iterdir()):
@@ -638,7 +649,7 @@ class TestALegForAnAB(BoardTest):
 
     def task(self, w):
         taskdir = w.bench_dir() / "t1"
-        brecord.task_write(str(taskdir), ["task=t1", "requested=x", "devices=" + BOARD, "plans=jetstream3", "rounds=2", "slots=a,b"], ["wk bench run --ab"])
+        brecord.task_write(str(taskdir), kv(["task=t1", "requested=x", "devices=" + BOARD, "plans=jetstream3", "rounds=2", "slots=a,b"]), ["wk bench run --ab"])
         return taskdir
 
     def test_a_leg_lands_in_the_task_it_names_with_its_round_and_arm_and_a_settle_leg_is_recorded_as_one(self):
@@ -841,7 +852,7 @@ class TestASlotAB(ABTest):
 
     def test_a_warmup_that_finds_different_renderers_refuses_before_any_round(self):
         w = self.ab_world()
-        w.evidence = lambda ex: dict(EVIDENCE, gl={"driver": "/usr/lib/dri/%s.so" % ("swrast" if "/slots/b/" in ex["WK_BOARD_EXPECT"] else "v3d")})
+        w.evidence = lambda ex: dict(EVIDENCE, gl=dict(EVIDENCE["gl"], driver="/usr/lib/dri/%s.so" % ("swrast" if "/slots/b/" in ex["WK_BOARD_EXPECT"] else "v3d")))
         self.assertNotEqual(w.invoke("jetstream3", "--ab", "a,b"), 0)
         self.assertIn("the warmup round says these two arms are not what the A/B claims", w.err)
         self.assertEqual(len(w.runs()), 2)
@@ -882,7 +893,8 @@ class TestASlotAB(ABTest):
         w = self.ab_world()
         w.board.roots[part("/dev/sda", 2)]["id"] = "webkit-2.52-yocto-rpi3-32-ebb646f3bf67"
         w.files[os.path.join(w.tree, "Tools", "Scripts", "webkitpy/benchmark_runner/data/plans/jetstream3.plan")] = json.dumps(
-            dict(json.loads(PLAN_JSON), subtests={"": [n for n, _ in board_ab.exclusions(str(REPO), "jetstream3", 32)] + ["b", "c"]}))
+            dict(json.loads(PLAN_JSON), subtests={"": [l.split()[2] for l in (REPO / "bench" / "subtest-exclusions.conf").read_text().splitlines()
+                                                       if l.split()[:2] == ["jetstream3", "32"]] + ["b", "c"]}))
         self.assertEqual(w.invoke("jetstream3", "--ab", "a,b", "--rounds", "1"), 0, w.err)
         self.assertEqual({e["subtests_excluded"].split(",")[0] for e in w.runs()}, {"argon2-wasm"})
         self.assertTrue(all("--subtests b c" in argv[-1] for argv, _ in w.watched))
@@ -931,7 +943,7 @@ def live_board(name):
     conf = bootcli.load_conf(str(REPO), name, os.environ)
     d = bootcli.driver_for(str(REPO), conf)
     from wk import places
-    system = board.BoardSystem(str(REPO), places.Registry(REPO, machine=Local()), None, "", FakeClock(), name, d)
+    system = board.Board(str(REPO), places.Registry(REPO, machine=Local()), "", FakeClock(), name, d)
     return d, system
 
 

@@ -21,18 +21,23 @@ from wk import record as task_record, samply  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.store import Store  # noqa: E402
 
+
+def kv(fields, bools=()):
+    """Fields as wk writes them into a record: key=value strings, and the bools as flags."""
+    return dict([f.split("=", 1) for f in fields] + [(b.split("=", 1)[0], bool(b.split("=", 1)[1])) for b in bools])
+
 TASK = "20260830T120000Z-wpe-pr1725"
 
 
 def make_task(bench_dir, rounds=3, slots=("base", "pr1725"), name=TASK):
     d = bench_dir / name
-    record.task_write(str(d), [
+    record.task_write(str(d), kv([
         f"task={name}", "requested=2026-08-30T12:00:00Z",
         "subject.kind=pull", "subject.spec=wpe:1725",
         "subject.head=afa2ed9e70103469f02732323fa7b874378d6a5d",
         "subject.base=04abe09851b03b7ce6c8b9c208659c23a5ab7138",
         "devices=rpi3=wpewebkit-2.38-buildroot-rpi3-32", "plans=speedometer2.1",
-        f"rounds={rounds}", "slots=" + ",".join(slots), "count=1", "timeout=1200"],
+        f"rounds={rounds}", "slots=" + ",".join(slots), "count=1", "timeout=1200"]),
         ["wk pi deploy wpewebkit-2.38-buildroot-rpi3-32 rpi3 --slot base",
          f"wk pi bench rpi3 speedometer2.1 --ab base,pr1725 --rounds {rounds} --task {name}"])
     return d
@@ -42,13 +47,13 @@ def add_run(task_dir, slot, rnd, arm, outcome, vals=(100.0, 102.0, 99.0)):
     """outcome: ok (result.json), failed (ended, no result), running (neither)."""
     d = task_dir / "runs" / f"20260830T12{rnd:02d}{'00' if arm == 'a' else '30'}Z-speedometer2.1-rpi3-{slot}"
     d.mkdir(parents=True)
-    record.write_env(str(d / "env.json"), [
+    record.write_env(str(d / "env.json"), kv([
         "plan=speedometer2.1", "preset=wpewebkit-2.38-buildroot-rpi3-32", "machine=rpi3",
         f"build_slot={slot}", "webkit_sha=abcdef1234567890", "runner=browser", "arch=armv7l",
         "bench_host=image", f"task={task_dir.name}", f"ab.round={rnd}", f"ab.arm={arm}",
-        "ab.slot_a=base", "ab.slot_b=pr1725"])
+        "ab.slot_a=base", "ab.slot_b=pr1725"]))
     if outcome != "running":
-        record.write_env(str(d / "env.json"), ["wall_time_s=400"], update=True)
+        record.write_env(str(d / "env.json"), kv(["wall_time_s=400"]), update=True)
     if outcome == "ok":
         (d / "result.json").write_text(json.dumps({"Speedometer-2": {"tests": {"Elm-TodoMVC": {
             "metrics": {"Time": {"Total": {"current": list(vals)}}}}}}}))
@@ -118,9 +123,10 @@ class TestTaskState(WkTest):
         self.assertEqual(st["usable"], "1", "a round with one failed arm is not usable")
 
     def test_task_write_refuses_a_task_missing_its_shape(self):
-        with self.assertRaises(SystemExit) as e:
-            record.task_write(str(self.tmp / "t"), ["task=t", "requested=now", "plans=p", "slots=a"], [])
-        self.assertIn("devices is required", str(e.exception.code))
+        err = io.StringIO()
+        with self.assertRaises(Refused), contextlib.redirect_stderr(err):
+            record.task_write(str(self.tmp / "t"), kv(["task=t", "requested=now", "plans=p", "slots=a"]), [])
+        self.assertIn("devices is required", err.getvalue())
 
     def test_a_directory_without_task_json_is_not_a_task(self):
         (self.tmp / "junk").mkdir()
@@ -139,17 +145,17 @@ class TestOneRecord(WkTest):
     def _run(self, task_dir, name, extra=(), score=(10.0, 11.0, 12.0, 13.0)):
         d = task_dir / "runs" / name
         d.mkdir(parents=True)
-        record.write_env(str(d / "env.json"), self.FIELDS + list(extra), bool_fields=["cores.pinned=0-3"])
-        record.write_env(str(d / "env.json"), ["wall_time_s=12"], update=True)
+        record.write_env(str(d / "env.json"), kv(self.FIELDS + list(extra), ["cores.pinned=0-3"]))
+        record.write_env(str(d / "env.json"), kv(["wall_time_s=12"]), update=True)
         (d / "result.json").write_text(json.dumps({"JetStream3.0": {"tests": {"t": {"metrics": {
             "Score": {"current": list(score)}}}}}}))
         return d
 
     def _task(self, tmp):
         d = tmp / "20260901T000000Z-w"
-        record.task_write(str(d), ["task=20260901T000000Z-w", "requested=now", "subject.kind=workspace",
+        record.task_write(str(d), kv(["task=20260901T000000Z-w", "requested=now", "subject.kind=workspace",
                                    "subject.spec=w", "devices=container=jsc-release", "plans=jetstream3",
-                                   "rounds=1", "slots=w", "count=4"], ["wk bench w jetstream3"])
+                                   "rounds=1", "slots=w", "count=4"]), ["wk bench w jetstream3"])
         return d
 
     def test_the_record_carries_its_provenance_and_the_default_axes(self):
@@ -182,8 +188,8 @@ class TestATaskIsMadeOnce(WkTest):
     def _new(self, bench):
         lock = Lock(Store({"HOME": str(self.tmp), "WK_LOCK_DIR": str(self.tmp / "locks")}), Local(), FakeClock())
         self.addCleanup(lock.release_all)
-        return record.new_task(Local(), str(bench), "t", lock, "now", ["subject.kind=workspace", "subject.spec=w",
-                               "devices=container=jsc-release", "plans=jetstream3", "rounds=1", "slots=w"], "wk bench w jetstream3")
+        return record.new_task(Local(), str(bench), "t", lock, "now", kv(["subject.kind=workspace", "subject.spec=w",
+                               "devices=container=jsc-release", "plans=jetstream3", "rounds=1", "slots=w"]), "wk bench w jetstream3")
 
     def test_a_half_made_task_is_made_again_and_a_made_one_is_refused(self):
         bench = self.tmp / "bench"
@@ -353,7 +359,7 @@ class TestTheVerbs(WkTest):
         d = self.store()
         runs = sorted((d / "runs").iterdir())
         for r in runs:
-            record.write_env(str(r / "env.json"), ["count=1"], update=True)
+            record.write_env(str(r / "env.json"), kv(["count=1"]), update=True)
         cp = in_process(bench(self.tmp).report, [str(r) for r in runs], "", False)
         self.assertIn("has count=1: no p-value can be computed", cp.stderr)
 
@@ -392,11 +398,13 @@ class TestWhere(WkTest):
 
     def test_each_verb_answers_where_it_runs(self):
         reg = registry(self.tmp)
-        self.assertEqual(cli.where(reg, ["ls"]), "local")
-        self.assertEqual(cli.where(reg, ["ls", "--continued"]), "store")
-        self.assertEqual(cli.where(reg, ["seed", "cws", "jetstream3"]), "workspace")
-        self.assertEqual(cli.where(reg, ["seed", "guest", "jetstream3"]), "host")
-        self.assertEqual(cli.where(reg, ["report", "t"]), "host")
+        self.assertEqual(cli.where(REPO, reg, ["ls"]), "local")
+        self.assertEqual(cli.where(REPO, reg, ["ls", "--continued"]), "store")
+        self.assertEqual(cli.where(REPO, reg, ["seed", "cws", "jetstream3"]), "workspace")
+        self.assertEqual(cli.where(REPO, reg, ["seed", "guest", "jetstream3"]), "host")
+        self.assertEqual(cli.where(REPO, reg, ["report", "t"]), "host")
+        self.assertEqual(cli.where(REPO, reg, ["run", "ws", "p", "--system", "mbp"]), "host", "a Mac's bench volume holds no workspace")
+        self.assertEqual(cli.where(REPO, reg, ["run", "ws", "p", "--system=rpi3"]), "workspace")
 
     def test_a_workspace_no_target_answers_for_is_asked_for_here(self):
         reg = registry(self.tmp)
@@ -404,7 +412,7 @@ class TestWhere(WkTest):
         def nowhere(ws):
             raise LookupError(ws)
         reg.ws_place = nowhere
-        self.assertEqual(cli.where(reg, ["seed", "gone", "p"]), "host")
+        self.assertEqual(cli.where(REPO, reg, ["seed", "gone", "p"]), "host")
 
 
 class TestThroughWk(WkTest):
@@ -419,14 +427,6 @@ class TestThroughWk(WkTest):
         rep = run("bench", "report", TASK, "--text", env=env, timeout=60)
         self.assertEqual(rep.returncode, 0, rep.stdout)
         self.assertIn("rounds: 1 usable of 1 attempted (3 planned)", rep.stdout)
-
-    def test_staged_ls_answers_only_on_a_mac(self):
-        cp = run("bench", "staged", "--ls", env={"WK_BENCH_ROOT": str(self.tmp)}, timeout=60)
-        if sys.platform == "darwin":
-            self.assertEqual(cp.returncode, 0, cp.stdout)
-            self.assertIn("nothing staged on", cp.stdout)
-        else:
-            self.assertIn("is macOS bench mode", cp.stdout)
 
 
 class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):

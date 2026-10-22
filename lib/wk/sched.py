@@ -1,11 +1,11 @@
-"""A plan as a graph. A step is an id, the machine it runs on, the steps it needs, what it holds exclusively, a
-`done()` asking whether it need not run and a `run()` returning its exit status; the scheduler starts every
-ready step whose holds are free."""
+"""A plan as a graph of steps -- an id, its machine, its needs, what it holds, `done()` and `run()` -- whose scheduler
+starts every ready step whose holds are free."""
 
 import concurrent.futures as futures
+import os
 
-from wk import act
-from wk.act import die
+from wk import act, job
+from wk.act import Refused, die, log
 
 LOGGED = 'l=$1; shift; exec "$@" >>"$l" 2>&1'
 
@@ -216,14 +216,51 @@ def summary(sched):
             + ["not run: %s: %s" % (s.id, s.command) for s in sched.skipped + sched.left])
 
 
-def wk_step(machine, wk, log_of, sid, on, needs, holds, done, words, place="", env=()):
-    pairs = (["WK_PLACE=" + place] if place else []) + list(env)
-    argv = (["env"] + pairs if pairs else []) + [wk] + list(words)
-    s = Step(sid, on, needs, holds, done, command=("WK_PLACE=%s " % place if place else "") + " ".join(["wk"] + list(words)))
-    s.run = lambda: machine.act_run(["sh", "-c", LOGGED, "sh", log_of(s)] + argv).rc
-    return s
+def run_plan(steps, task, logged, failed, pool=futures.ThreadPoolExecutor, after=None):
+    """`steps` run under `task`, a record begun with their commands; each event goes to it and to the log, `logged(step)`
+    naming the step's own log. A step that did not run refuses with `failed`, and `after` judges a plan that did; the
+    record ends as the plan does."""
+    order = plan_order(steps)
+
+    def announce(event, step, rc=0):
+        task.step_event(order.index(step) + 1, event)
+        log(say_event(order, event, step, rc, logged(step)))
+
+    rc = 1
+    try:
+        with job.Signals():
+            s = Scheduler(order, announce, pool=pool)
+            rc = s.run_all()
+            for line in summary(s):
+                log(line)
+            if rc:
+                die(failed)
+            if after is not None:
+                after()
+    except job.Interrupted as e:
+        rc = "cancelled"
+        raise Refused(job.EXIT_OF.get(e.signum, 130))
+    except Refused as e:
+        rc = e.status
+        raise
+    finally:
+        task.end(rc)
+    return 0
 
 
-def wk_yes(machine, argv):
-    """A readonly `wk` command's verdict is its last line: one forwarded to a stopped podman machine exits 0 saying so."""
-    return lambda: machine.run(argv).out.strip().splitlines()[-1:] == ["yes"]
+class Wk:
+
+    def __init__(self, machine, root, log_of, env=()):
+        self.machine, self.wk, self.log_of, self.env = machine, os.path.join(str(root), "wk"), log_of, list(env)
+
+    def step(self, sid, on, needs, holds, done, words, place=""):
+        pairs = (["WK_PLACE=" + place] if place else []) + self.env
+        argv = (["env"] + pairs if pairs else []) + [self.wk] + list(words)
+        s = Step(sid, on, needs, holds, done, command=("WK_PLACE=%s " % place if place else "") + " ".join(["wk"] + list(words)))
+        s.run = lambda: self.machine.act_run(["sh", "-c", LOGGED, "sh", self.log_of(s)] + argv).rc
+        return s
+
+    def holds(self, spec, ws, *rest):
+        """A readonly `wk` command's verdict is its last line: one forwarded to a stopped podman machine exits 0 saying so."""
+        argv = [self.wk, "sysimage", "holds", spec, "--workspace", ws] + list(rest)
+        return lambda: self.machine.run(argv).out.strip().splitlines()[-1:] == ["yes"]
