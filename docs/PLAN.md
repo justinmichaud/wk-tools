@@ -172,7 +172,7 @@ change that goes over trims something.
 
 Gone, by the answers of 2026-10-21: the bridge phones and the pmOS builder,
 the `fetch` builder, `wk status`'s web page, `key backup`, `pr report`, `zed
---tools`, the Mac on-volume `ab-summary` (the one task report prints there),
+--tools`, the Mac on-volume `ab-summary` (the volume holds no task; `--collect` prints the task report here),
 the workspace conveniences in `container/bin/` that no code calls (`git-clean`,
 `git-sync-fork`, `commit-count`, `strip-addresses`, `plot-memory-log`, the
 memory patches), and the SDK patch script (`container/sdk-patches/`): the
@@ -439,7 +439,7 @@ exist.
      Also fixed: `is_linux`/`is_macos` live once in `lib/wk/machine.py`,
      the session socket in `places.session_socket_present`, the loader-path
      prelude in `lib/wk/ldpath.py`, the Zed CLI in `places.zed_cli`, and
-     `cmd/zed --tools` resolves its place once. `lib/wk/sshalias.py` is the
+     `lib/wk/sshalias.py` is the
      one alias writer and `lib/wk/store.py`'s `cache_dir` the one artifact
      path. "Is this pid alive in the place" is one answer,
      `Driver.pid_alive` (`lib/wk/places.py`), which `record.of_driver`,
@@ -447,14 +447,12 @@ exist.
 4. **Credentials.** `key`, `push`, `sudo`, `backup`, `skills`.
    - *Landed.* `cmd/key` (`lib/wk/key/`: `cli.Key`, one mixin per concern -- `creds`, `deploy`,
      `election`, `check` -- over `common`'s verdict line, `GitHub` seam and `Fleet`) and `cmd/push` are Python
-     over `lib/wk/secrets.py`'s `Secrets`. `wk sudo` and `wk
-     backup` are `wk key sudo` and `wk key backup` (`lib/wk/sudo.py`,
-     `lib/wk/backup.py`), the old names tombstones; `skills` is a tombstone.
+     over `lib/wk/secrets.py`'s `Secrets`. `wk sudo` is `wk key sudo` (`lib/wk/sudo.py`), the old names tombstones; `skills` is a tombstone.
      A destructive command whose destructive part is conditional calls
      `act.confirm` or `act.nothing_to_ask`, and `act.asked` is the one
      "acted before asking" check. Every Python command reads its options
      through `wk.decl.Args`. `tests/test_wk_key.py`, `test_wk_secrets.py`,
-     `test_push_service.py`, `test_wk_sudo.py` and `test_backup.py` hold the
+     `test_push_service.py` and `test_wk_sudo.py` hold the
      flows, `killpoints[key]`, `killpoints[push]` and dry-run-equals-wet-run.
      The fork and agent-secret tables are `secrets.FORKS` and
      `secrets.AGENT_SECRETS`, the one copy, and `container/firstrun.sh` asks
@@ -466,7 +464,7 @@ exist.
      holds the read against a `Fake` refusing as `lib/secretfile.py` would.
      `-h` prints each subverb's destructive override under the command's line.
    - *Owed.* The live checks (`key.election[<peer>]`, `push.from_box`,
-     `backup.roundtrip`, `sudo.require[<machine>]`).
+     `sudo.require[<machine>]`).
 5. **Fleet and bench.** `sysimage`, `boot`, `pi`, `bench`, `ab`, `quiesce`,
    `session`, `bridge`, `vm`, `find`, `remote`, `gc`, `completion`, as the one
    pipeline over one `machines/` directory. Done when `lib/common.sh` is the
@@ -499,7 +497,7 @@ exist.
    | command | subverbs | replaces |
    | --- | --- | --- |
    | `machine` | `setup`, `rm`, `ls`, `probe` | `remote`, `find` (`probe` with no name sweeps), `pi setup`, `bridge` (every verb), `vm` (the lifecycle verbs become `new`/`start`/`stop`/`enter`/`sync`/`rm --on vm`, `check` becomes `doctor <ws>`) |
-   | `bench` | `deploy`, `run`, `ab`, `ls`, `report` (`compare` and `precision` are `report` over two runs) | `pi deploy`, `pi bench`, `bench <ws> <plan>`, `bench stage`/`staged`/`mac`/`mac-ab`/`ab-summary`/`seed`, `ab` |
+   | `bench` | `deploy`, `run`, `ab`, `ls`, `report` (`compare` and `precision` are `report` over two runs) | `pi deploy`, `pi bench`, `bench <ws> <plan>`, `bench stage`/`staged`/`mac`/`mac-ab`/`seed`, `ab` |
    | `boot` | `<machine>` with `--status`, `--keep`, `--back`, `--disarm`, `--diag`, `--system`, `--boot-order` | `boot`, `pi boot-order`, `pi helper` (moves to `machine setup <board>`), `boot --prepare` (moves to `machine setup mbp`) |
    | `sysimage` | `build`, `write`, `ls`, `disks`, `rm` | `sysimage`, `image/*`, `vm base` (the guest base is a builder), `bench mac-volume` (the bench volume is a builder) |
    | `quiesce` | `on [--seat=kiosk\|desktop] [--bmc]`, `off`, `status` | `quiesce`, `session` (see 5.9) |
@@ -949,7 +947,7 @@ exist.
      --devices <mac> --preflight|--progress|--status|--collect` through `ab.run`; a board refuses them, and `wk bench
      mac-ab` is a tombstone in `cli.Bench.mac_ab`). `--collect` copies each clean measured leg off the volume onto the
      plant's task (a base64 tar per leg over the probe's channel, `record.write_env` pairing it), then prints
-     `report.task_report`; `report.ab_summary` is `wk bench ab-summary`, which the autorun asks for on the volume. The
+     `report.task_report`. The
      stopping rule is `board_ab.stopping` (`--rounds` the floor, `--detect` the precision, `--max-rounds` the ceiling)
      and `report.resolved`, asked by `board_ab.AB.measured` between rounds on a board and carried through `wk bench ab`
      and `wk bench run --ab`; a board's default is 0, a Mac's `mac.DETECT`. Every on-Mac command is a named
@@ -1176,17 +1174,17 @@ exist.
    7.3 ∥ **`Machine` and the `Driver` contract.** `places.py` to the twenty
      methods; `PodmanVm`/`TartExec` as `Ssh` argv; one readiness wait.
    7.4 ∥ **The record and the fleet.** `holds=` absorbs `Budget` and
-     `busy_reason`; `fleet.each`; the web page, migration and skew code go.
+     `busy_reason`; `fleet.each`. (The web page, the migration and the skew code are gone.)
    7.5 ∥ **Diagnostics.** `doctor` owns health; `status` renders records.
    7.6 ∥ **Credentials and the wall.** One delivery, one verdict line,
      `credcheck` imported; the per-caller bridge (fix-bridge) is the rule.
    7.7 ∥ **The bench `System`, `Run` and `AB`.** One of each; the Mac as a
-     system; `ab-summary` and the `ab_summary` renderer go.
+     system. (`ab-summary` is gone.)
    7.8 ∥ **Boot.** One `Channel`, `arm_sequence` per driver.
    7.9 ∥ **Images.** The `fetch` builder, `CFG_NEEDS` plumbing kept, the SDK
      fork branch replaces `sdk-patches/`; one dry-run printer.
    7.10 ∥ **Guests and daemons.** The one supervisor; `guest.py`'s findings
-     into `doctor`; the conveniences in `container/bin/` go.
+     into `doctor`. (The conveniences in `container/bin/` are gone.)
    7.11 **Tests by cluster.** After each package lands: the push service,
      credential, dispatcher, status, A/B, bench-run, boot and lifecycle
      clusters each to one module; `test_owed_live` generated.
@@ -1210,7 +1208,6 @@ decides is a row; one still open is listed under "Decisions for the user".
 | `wk run --profile=sysprof` captures a jsc run with sysprof-cli in a container workspace (unprivileged, no sysprofd), and the capture opened in Sysprof names JS frames from the JIT dump | 3 | `live profile.modes[sysprof]` |
 | `wk run --rr` records jsc and `wk gui --rr` MiniBrowser's process tree in a container workspace (seccomp, the perf counters in the podman VM, the web process sandbox), and `wk run --replay` reaches lldb with rr's commands | 3 | `live run.rr_record_replay` |
 | `wk bench run --a-args/--b-args` runs a JetStream3 subtest in the jsc shell with an option toggled, in alternating rounds, and `wk bench report <task>` compares it per subtest | 5 | `live bench.options_ab` |
-| `wk pr report` against the real GitHub API lists the week's pull requests, reviews and comments on WebKit/WebKit | 3 | `live pr.report` |
 | rpi4 boots its bench system reliably: EEPROM sd-first with `BOOT_WATCHDOG_TIMEOUT` and `MAX_RESTARTS`, a medium that holds the bus under write load, the stick reproduced from the repo by `wk sysimage write --disk rpi4:/dev/sda`, and `--back` reaches the rescue | 5 | `live boot[rpi4]` |
 | The Mac's bench volume runs the whole lifecycle: `wk boot mbp` against the real install, a stage from a guest onto it, a measured run, `wk quiesce status` before it, the screen watch during it, and `wk bench compare` against a container run | 5 | `live bench[mbp]` |
 | The second spellings of a round, a device, a slot and a time profile fail lint (`lint.vocabulary` catches "lane" and "benchmark task"; README defines no name for these, so which spellings are second is the user's call) | 5 | `lint.vocabulary` |
@@ -1244,7 +1241,6 @@ decides is a row; one still open is listed under "Decisions for the user".
 | A build box holds no deploy key at rest, no ssh to it (nor to the gateway in front of it) forwards a key, a push on the box is refused naming `wk pr open`, and `wk pr open <box-ws>` on the workstation fetches the box's branch into the mirror over ssh and pushes it from there with the deploy key, refusing naming `wk key deploy` while this machine holds none; the `refs/wk/push/*` ref a killed push leaves is taken by a plain `wk gc`. The unit half is green; the live run against buildbox4 is owed | 4 | `unit push.remote_forwarding`, `live push.from_box` |
 | `wk new <ws> --on buildbox4` and `wk rm <ws>` from a workstation are the box's own `wk new` and `wk rm`: the creation record and log are on the box and the workstation keeps none, the box's `wk status` and the workstation's read one state for the workspace during creation and after, and the creation's fetch step fetches. The unit half is green; the live run is owed | 3 | `unit box_workspace`, `live new.box_record[buildbox4]` |
 | A hand-over to buildbox4 while its wk-tools commit differs from the workstation's is refused naming `wk sync --tools buildbox4`, `--force` crosses it and says so, and `wk status`/`wk status --log` hand over and report the difference. The unit half is green; the live run is owed | 3 | `unit handover.tools_level`, `live handover.tools_level[buildbox4]` |
-| `wk key backup` then `./setup` round-trips with no spurious change; the junk filters strip what they claim; a write is whole or unchanged; one path with a per-platform adapter | 4 | `unit backup.filters`, `live backup.roundtrip` |
 | `wk key sudo setup` installs its sudoers rule, validates with `visudo -c` before and after, proves `sudo -n true` fails, gets a terminal over ssh with `--on`, and no fleet machine holds a NOPASSWD grant wider than the three helpers | 4 | `live sudo.require[<machine>]` |
 | One host-owned mirror feeds the podman VM and every guest: alternates resolve inside a container, `./setup` recreates the mount, and a missing mirror refuses naming `wk sync` | 5 | `live vm.shared_mirror` (the guest half), `unit new.refuses_without_mirror` |
 | The golden base is rebuilt from `WK_VM_IMAGE`, carries no build caches, tracks the Xcode GA image, and `wk vm base --rm` asks separately about the pulled image while guests keep working | 5 | `live vm.base_matches_pin`, `unit vm.base_rm_asks_twice` |
@@ -1303,7 +1299,6 @@ decides is a row; one still open is listed under "Decisions for the user".
 | A `gtk-release` build in a container on the Mac's 20 GB podman VM finishes under the default sizing: WebCore's unified and derived sources at -O3 -g hold 14.3 GB anonymous at four jobs (measured 2026-10-21 from the cgroup's `memory.stat`; three runs killed at 3072 MB per job), so a CMake web port is sized at 4608 MB per job; the watchdog reads `anon`+`shmem`, since `memory.current` carried 2.2 GB of page cache and slab at that peak; and the OOM advice it prints changes the next run's job count from a macOS host | 3 | `live build.preset[gtk-release]` |
 | `wk run --profile --browser --process ui\|web\|network\|gpu` attaches samply to a live MiniBrowser in a workspace with a display, heaptrack and massif reach `--browser` on the CMake ports, and the fixed-wait attach holds on a slow page | 3 | `live run.browser_profile` |
 | `wk run --lldb` in a fresh workspace symbolicates glibc, Mesa and GTK frames, and `gtk-debug` runs under lldb | 3 | `live run.debug_symbols` |
-| `wk bench mem <ws> <plan>` builds with the three memory patches as real diffs (the files in `container/bin/patches/` are stubs; the diffs are yours to supply), drives MiniBrowser through the plan, collects the WebProcess logs and plots them beside the result | 5 | `live bench.mem` |
 | A container workspace holds `CAP_CHECKPOINT_RESTORE` in the init user namespace for mya, `wk build` sets the capability on `bin/mya` and `bin/testLibJSCTools` after an `ENABLE_MYA` build, the proxy allows the SDK's debuginfod and the workspace sets `DEBUGINFOD_URLS`, the SDK carries liblldb-dev, and the `testLibJSCTools` suites pass in a fresh workspace | 3 | `live mya.checkpoint_restore`, `unit mya.setcap_after_build` |
 | moose boots a bench system: a bench-role conf naming the peer, `--bootnext` and `toram` proven on its firmware, a yocto image with UEFI rules in `boot/check-boot-files.py` and `IMG_WATCHDOG`, a reboot refused while the BMC is unreachable, the UEFI entry in `wk doctor`'s machine-local section, and `--accept-routes` right on rpi5 and moose | 5 | `live boot[moose]` |
 | The Mac in bench mode caps its battery charge, turns the display off between legs and on for one, and `wk quiesce status` reports both | 5 | `live bench.mac_charge_cap`, `live bench.mac_screen` |
