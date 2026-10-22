@@ -9,12 +9,14 @@ import shlex
 import shutil
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from tests.fakes import Fake, FakeClock
 from tests.support import REPO, WkTest, guest_step, live_selected, owed, stub_path
+from tests.test_shell_path import BUILD_DIR, _run_install_fn, compile_commands_dir
 from tests.test_wk_places import DriverConformance
 from tests.test_wk_secrets import SECRETFILE, SecretsTest, World, quiet
 
@@ -297,6 +299,18 @@ class TestTheSteps(GuestTest):
         self.assertIn(shlex.join(["bash", "-lc", "python3 %s/claude/workspace-config.py %s" % (self.vm.tools("demo"), self.vm.src("demo"))]),
                       cmds)
 
+    def test_a_container_and_a_macos_guest_each_get_their_own_helix_languages(self):
+        """`unit helix.macos_languages`: firstrun gives a container glibc's --malloc-trim and jsc-release's build; a guest, neither."""
+        with tempfile.TemporaryDirectory() as home:
+            _run_install_fn("_install_helix", "x86_64", home, curl="exit 0\n", sudo="exit 0\n", tar='mkdir -p "$3"\n')
+            tomllib.loads(Path(home, ".config/helix/config.toml").read_text())
+            linux = Path(home, ".config/helix/languages.toml").read_text()
+        self.assertTrue(quiet(self.the_guest().write_helix_config)[0])
+        (mac,) = [i for c, i in self.w.guest_cmds if 'cat > "$HOME/.config/helix/languages.toml"' in c]
+        args = [tomllib.loads(t)["language-server"]["clangd"]["args"] for t in (linux, mac)]
+        self.assertEqual([(True, "--compile-commands-dir=/src/WebKit/" + BUILD_DIR), (False, "--compile-commands-dir=" + self.vm.src("demo"))],
+                         [("--malloc-trim" in a, compile_commands_dir(a)) for a in args])
+
     def test_a_credential_file_its_reader_refuses_stops_the_delivery(self):
         self.w.answer(["python3", SECRETFILE, "read"], rc=2, err="wk: refusing to read ...\n")
         g = self.the_guest()
@@ -332,8 +346,8 @@ class TestTheOverrides(GuestTest):
     def test_each_override_reaches_what_it_names(self):
         h = self.host(WK_VM_PROXY_ADDR="203.0.113.9", WK_VM_PROXY_PORT="9999", WK_SOFTNET_BIN="/opt/softnet")
         self.assertEqual("203.0.113.9", h.proxy_addr())
-        self.assertEqual("9999", h.port())
-        self.assertEqual("/opt/softnet", h.softnet())
+        self.assertEqual("9999", guest.proxy_port(h.env))
+        self.assertEqual("/opt/softnet", guest.softnet_bin(h.env))
         self.assertEqual(100, guest.vm_disk_gb({"WK_VM_DISK_GB": "100"}))
         self.assertEqual([], quiet(self.host(WK_VM_UNFILTERED="1").softnet_flags)[0])
 

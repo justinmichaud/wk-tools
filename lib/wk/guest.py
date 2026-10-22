@@ -10,7 +10,6 @@ from wk.act import Refused, debug, die, info, log, warn
 from wk.clock import Clock
 from wk.daemons import Daemon
 from wk.lock import Lock
-from wk.machine import Local
 from wk.store import GUEST_BROKER_SOCKET, GUEST_PUSH_SOCKET, Store, no_such_workspace
 
 SUBNET = "192.168.2"   # Softnet's own network, not vmnet's 192.168.64
@@ -62,20 +61,10 @@ class Host:
         self.clock = clock or Clock()
         self.secrets = secrets.Secrets(vm.root, vm.env, vm.machine, host_side=True)
         self.dir = vm.vm_dir()
-        self._addr = None
-        self._lock = None
+        self._addr = self._lock = None
 
     def path(self, name):
         return os.path.join(self.dir, name)
-
-    def unfiltered(self):
-        return is_unfiltered(self.env)
-
-    def port(self):
-        return proxy_port(self.env)
-
-    def softnet(self):
-        return softnet_bin(self.env)
 
     def proxy_addr(self):
         if self._addr is None:
@@ -87,10 +76,10 @@ class Host:
 
     def softnet_flags(self):
         """Default-deny, and the one allow is the proxy: Softnet applies at `tart run` and cannot be added later."""
-        if self.unfiltered():
+        if is_unfiltered(self.env):
             warn("WK_VM_UNFILTERED=1 -- this guest gets the open network, with no egress filter")
             return []
-        if not self.machine.run(["test", "-x", self.softnet()]).ok:
+        if not self.machine.run(["test", "-x", softnet_bin(self.env)]).ok:
             die("softnet is not installed, so this guest's egress would not be filtered.\n"
                 "    Install it:  ./setup --stage softnet   (needs a terminal for sudo)\n"
                 "    Or set WK_VM_UNFILTERED=1 to boot with the open network anyway.")
@@ -116,7 +105,7 @@ class Host:
         login = self.secrets.cred_path("claude-login")
         self.secrets.ensure_dir(os.path.dirname(login), "0700")
         store, push = Store(self.env), self.push_sock()
-        at = "%s:%s" % (self.proxy_addr(), self.port())
+        at = "%s:%s" % (self.proxy_addr(), proxy_port(self.env))
         proxy = {"WK_PROXY_UNIX": "0", "WK_PROXY_TCP": at, "WK_STORE": self.vm.store.store_dir(),
                  "WK_PUSH_SOCKET": push, **{k: v for k, v in self.inject_env().items() if k in ("WK_INJECT_SOCK", "WK_INJECT_READ_SOCK",
                                                                                               "WK_INJECT_CA_OUT")}}
@@ -135,7 +124,7 @@ class Host:
         return ok
 
     def start_proxy(self):
-        if self.unfiltered():
+        if is_unfiltered(self.env):
             return True
         with self.lock().held("vm-daemons"):
             self.start_inject()
@@ -227,6 +216,7 @@ STEPS = (
     ("write_marker", debug, "could not settle {ws}'s workspace marker"),
     ("write_shell_rc", warn, "could not wire {ws}'s shell; 'wk' will not be on PATH in there"),
     ("write_lldbinit", debug, "could not write .lldbinit in {ws}"),
+    ("write_helix_config", debug, "could not write {ws}'s helix configuration"),
     ("set_guest_clock", warn, "could not set {ws}'s clock; TLS in there will fail as CERT_NOT_YET_VALID"),
     ("set_guest_egress", warn, "could not set {ws}'s egress; nothing in there will reach the outside"),
     ("write_agent_secrets", warn, "could not write the agent credentials into {ws}; an agent in there will ask you to log in"),
@@ -272,6 +262,15 @@ class Guest:
         text = LLDB_HEADER + "command script import %s/%s\n" % (self.vm.src(self.ws), project.get("LLDB_SCRIPT")) \
             + tree(self.host.root, "dotfiles/lldbinit")
         return self._said(self.m.act_run(["sh", "-c", 'cat > "$HOME/.lldbinit"'], input=text))
+
+    def write_helix_config(self):
+        """container/helix, its languages.toml less comments and glibc's --malloc-trim, clangd reading the checkout root:
+        an Xcode build leaves only fragments in its products, and the project's merge of them writes the one compile_commands.json there."""
+        lines = tree(self.host.root, "container/helix/languages.toml").splitlines(True)
+        text = "".join('    "--compile-commands-dir=%s",\n' % self.vm.src(self.ws) if "--compile-commands-dir=" in l else l
+                       for l in lines if not l.startswith("#") and "--malloc-trim" not in l)
+        return self._said(self.m.act_run(["sh", "-c", 'mkdir -p "$HOME/.config/helix" && cp -R "$1/container/helix/." "$HOME/.config/helix/" && '
+                                          'cat > "$HOME/.config/helix/languages.toml"', "sh", self.vm.tools(self.ws)], input=text))
 
     def write_checkout(self):
         src, mirror, forks = self.vm.src(self.ws), self.vm.mirror_dir(), self.secrets.forks()
@@ -342,7 +341,7 @@ class Guest:
 
     def set_guest_egress(self):
         h = self.host
-        addr = "" if h.unfiltered() else h.proxy_addr()
+        addr = "" if is_unfiltered(h.env) else h.proxy_addr()
         try:
             ca = h.machine.read(h.path("wk-github-ca.pem")) if addr else ""
         except OSError:
@@ -350,12 +349,12 @@ class Guest:
         ca = ca if "BEGIN CERTIFICATE" in ca else ""
         debug("guest egress in %s: %s" % (self.ws, addr or "off"))
         script = here_doc("/tmp/.wk-github-ca.new", ca) + here_doc("/tmp/.wk-egress.new", self.egress_env(addr, ca)) + tree(h.root, "vm/egress.sh")
-        return self.m.act_run(["env", "WK_ADDR=" + addr, "WK_PORT=" + h.port(), "bash", "-s"], input=script).ok
+        return self.m.act_run(["env", "WK_ADDR=" + addr, "WK_PORT=" + proxy_port(h.env), "bash", "-s"], input=script).ok
 
     def egress_env(self, addr, ca):
         if not addr:
             return ""
-        url, local, bundle = "http://%s:%s" % (addr, self.host.port()), "localhost,127.0.0.1,::1", "$HOME/.wk-ca-bundle.pem"
+        url, local, bundle = "http://%s:%s" % (addr, proxy_port(self.host.env)), "localhost,127.0.0.1,::1", "$HOME/.wk-ca-bundle.pem"
         env = [(v, url) for v in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")] + [("no_proxy", local), ("NO_PROXY", local),
                ("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")]
         if ca:
@@ -598,7 +597,7 @@ def boot(host, ws, wait=BOOT_WAIT):
             m.remove(host.path(ws + ".unfiltered"))
         else:
             m.write(host.path(ws + ".unfiltered"), "")
-        path = "%s:%s" % (os.path.dirname(host.softnet()), host.env.get("PATH") or os.environ.get("PATH", ""))
+        path = "%s:%s" % (os.path.dirname(softnet_bin(host.env)), host.env.get("PATH") or os.environ.get("PATH", ""))
         m.remove(runlog)
         m.spawn(["env", "PATH=" + path, vm.tart_or_die(), "run", *flags,
                  "--dir=%s:%s:ro,tag=%s" % (vm.mirror_share, vm.store.mirror_parent(), vm.mirror_tag), vm.vm(ws)], runlog)
@@ -665,5 +664,4 @@ def credentials_converge(root, env, machine):
 
 
 def inject_host(root, env):
-    from wk import places
-    return Host(places.Registry(root, env, Local()).load("vm"))
+    return Host(_vm(root, None, env))

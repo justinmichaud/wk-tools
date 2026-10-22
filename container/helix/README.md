@@ -6,10 +6,15 @@ the *next* workspace's config, not a running one -- edit
 `~/.config/helix/{config,languages}.toml` directly for a same-session change,
 same as any other helix install.
 
-Container only, today: helix needs the checkout's clangd and its
-compile_commands.json, both of which only exist inside a container
-workspace. A macOS guest's own `languages.toml` is owed
-(docs/PLAN.md, `unit helix.macos_languages`).
+A macOS guest's start (`lib/wk/guest.py`, `write_helix_config`) copies the
+same directory, its `languages.toml` without the comments, without glibc's
+`--malloc-trim`, and with clangd reading the checkout root: an Xcode build
+leaves only fragments in `WebKitBuild/<Type>/compile_commands/`, which
+`Tools/Scripts/generate-compile-commands WebKitBuild/<Type>` merges into the
+checkout's `compile_commands.json`.
+
+TODO: a macOS guest installs no `hx`, and no `wk build` there runs
+`generate-compile-commands`.
 
 ## Coming from Zed: the same task, the helix way
 

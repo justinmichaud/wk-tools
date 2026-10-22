@@ -6,7 +6,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tomllib
 import unittest
 
 from tests.support import FLEET_ENV, REPO, WkTest, stub_path
@@ -44,17 +43,13 @@ class TestBinDir(WkTest):
             "kind=build\ndriver=remote\nhost=overlaybox\nroot=/tmp/x\n")
 
         env = {"HOME": str(self.tmp), "PATH": "/usr/bin:/bin"}
-        cp = subprocess.run([str(root / "wk"), "key", "sudo", "status", "--on", "overlaybox"],
-                            cwd="/", env=env, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, timeout=60)
-        self.assertNotIn("unknown place", cp.stdout)
-        real = fleet.Fleet(REPO, FLEET_ENV).names(fleet.PLACE_KINDS)
-        cp = subprocess.run([str(root / "wk"), "key", "sudo", "status", "--on", "nosuchbox"],
-                            cwd="/", env=env, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, timeout=60)
-        self.assertIn("overlaybox", cp.stdout)
-        for n in real:
-            self.assertNotIn(n, cp.stdout)
+        status = lambda box: subprocess.run([str(root / "wk"), "key", "sudo", "status", "--on", box], cwd="/", env=env,
+                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60).stdout
+        self.assertNotIn("unknown place", status("overlaybox"))
+        out = status("nosuchbox")
+        self.assertIn("overlaybox", out)
+        for n in fleet.Fleet(REPO, FLEET_ENV).names(fleet.PLACE_KINDS):
+            self.assertNotIn(n, out)
 
     def test_wk_finds_its_root_through_the_symlink(self):
         cp = subprocess.run(
@@ -224,7 +219,6 @@ class TestBashKeys(WkTest):
                         f"{seq!r} is not bound to {action}")
 
 
-HELIX_DIR = REPO / "container" / "helix"
 FIRSTRUN = REPO / "container" / "firstrun.sh"
 ZED_SETTINGS = REPO / "dotfiles" / "zed" / "settings.json"
 
@@ -245,13 +239,6 @@ def compile_commands_dir(args):
 
 
 class TestEditorConfig(unittest.TestCase):
-    def test_helix_parses_and_points_clangd_at_the_build(self):
-        with open(HELIX_DIR / "config.toml", "rb") as f:
-            tomllib.load(f)
-        with open(HELIX_DIR / "languages.toml", "rb") as f:
-            doc = tomllib.load(f)
-        self.assertIn(BUILD_DIR, compile_commands_dir(doc["language-server"]["clangd"].get("args", [])))
-
     def test_zed_parses_trusts_projects_and_points_clangd_at_the_build(self):
         doc = zed_settings()
         self.assertIs(doc["session"]["trust_all_projects"], True)
@@ -265,13 +252,13 @@ warn() { printf '[firstrun] warning: %s\\n' "$*" >&2; }
 """
 
 
-def _run_install_fn(func, arch):
+def _run_install_fn(func, arch, home="/nonexistent", **stubs):
     """firstrun.sh's `func` alone, under a stubbed `uname -m` and a curl/sudo that log and fail."""
     scripts = {
         "uname": f'case "$1" in -m) echo "{arch}" ;; *) exit 1 ;; esac\n',
         "curl": 'printf "%s\\n" "$*" >> "$CURL_LOG"; exit 1\n',
         "sudo": 'printf "%s\\n" "$*" >> "$SUDO_LOG"; exit 1\n',
-        "install": 'printf "%s\\n" "$*" >> "$INSTALL_LOG"\n',
+        **stubs,
     }
     with stub_path(scripts) as binp:
         body = subprocess.run(["sed", "-n", f"/^{func}()/,/^}}/p", str(FIRSTRUN)],
@@ -280,9 +267,8 @@ def _run_install_fn(func, arch):
             ["/bin/bash", "-c", f"set -uo pipefail\n{_LOG_STUBS}\n{body}\n{func}\n"],
             capture_output=True, text=True, timeout=30,
             env={"PATH": f"{binp}:/usr/bin:/bin", "CURL_LOG": str(binp / "curl.log"),
-                 "SUDO_LOG": str(binp / "sudo.log"), "INSTALL_LOG": str(binp / "install.log")})
-        logs = [(binp / n).read_text().splitlines() if (binp / n).exists() else [] for n in ("curl.log", "sudo.log")]
-        return cp, logs[0], logs[1]
+                 "SUDO_LOG": str(binp / "sudo.log"), "HOME": home, "WK_TOOLS": str(REPO)})
+        return (cp, *[(binp / n).read_text().splitlines() if (binp / n).exists() else [] for n in ("curl.log", "sudo.log")])
 
 
 class TestEditorInstallArch(unittest.TestCase):
@@ -305,5 +291,4 @@ class TestEditorInstallArch(unittest.TestCase):
                 cp, curls, sudos = _run_install_fn(func, "armv7l")
                 self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
                 self.assertEqual((curls, sudos), ([], []))
-                self.assertIn("armv7l", cp.stdout + cp.stderr)
-                self.assertIn("not installed", cp.stdout + cp.stderr)
+                self.assertRegex(cp.stdout + cp.stderr, "armv7l.*not installed")
