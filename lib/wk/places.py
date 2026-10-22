@@ -1375,7 +1375,7 @@ class Vm(Driver):
             if guest.run(["test", "-f", images.MARKER]).ok:
                 guest.remove(path)
             else:
-                guest.write(path, "# wk: this machine IS a workspace. Written by lib/wk/places.py.\nname=%s\nsrc=%s\n"
+                guest.write(path, "# wk: this machine IS a workspace. Written by lib/wk/places.py.\nname=%s\nplace=vm\nsrc=%s\n"
                             % (ws, self.src(ws)))
         except OSError as e:
             act.warn("could not settle %s's workspace marker: %s" % (ws, e))

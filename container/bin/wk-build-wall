@@ -126,6 +126,8 @@ fi
 
 # sudo's grammar (parse_args.c): a value option's argument is attached or the next word, a flag cluster may end in a value option, and `VAR=value` words precede the command. A form that runs no command (-l -v -K -V -e -h alone, a missing value, an option sudo would refuse) goes to sudo as it was.
 if [ "$self" = sudo ]; then
+    # the marker's place: only a container has a bridge to give root; a guest's and a box's sudo is its own
+    [ "$(sed -n 's/^place=//p' "$HOME/.wk-workspace" 2>/dev/null)" = container ] || exec "$real" "$@"
     opts=() shell="" dashdash=""
     while [ $# -gt 0 ]; do
         case "$1" in

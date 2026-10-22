@@ -18,6 +18,7 @@ if [ "${1:-}" != --bridged ]; then
         cat > "$HOME/.wk-workspace" <<EOF
 # wk: this machine IS a workspace. Written by container/firstrun.sh.
 name=$WK_WORKSPACE
+place=container
 src=$SRC
 repo=$WK_REPO
 arch=${WK_ARCH:-native}

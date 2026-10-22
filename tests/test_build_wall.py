@@ -169,6 +169,7 @@ class TestSudoGivesRootABridge(WallTest):
         self.stub = self.fake / "sudo"
         self.stub.write_text("#!/bin/sh\nfor a; do printf '%s\\n' \"$a\"; done\n")
         self.stub.chmod(0o755)
+        (self.tmp / ".wk-workspace").write_text("name=w\nplace=container\nsrc=/src/WebKit\n")
 
     def sudo(self, *args, env=None):
         e = {"HOME": str(self.tmp), "PATH": f"{BIN}/ws:{BIN}:{self.fake}:/usr/bin:/bin", "TERM": "dumb"}
@@ -176,6 +177,12 @@ class TestSudoGivesRootABridge(WallTest):
         cp = subprocess.run(["sudo", *args], cwd=str(self.tmp), env=e, capture_output=True, text=True, timeout=60)
         self.assertEqual(cp.returncode, 0, cp.stderr)
         return cp.stdout.splitlines()
+
+    def test_a_guest_or_a_box_whose_marker_names_another_place_gets_its_own_sudo(self):
+        for place in ("vm", ""):
+            with self.subTest(place=place):
+                (self.tmp / ".wk-workspace").write_text("name=w\n%ssrc=/src/WebKit\n" % ("place=%s\n" % place if place else ""))
+                self.assertEqual(self.sudo("-n", "launchctl", "print", "system/x"), ["-n", "launchctl", "print", "system/x"])
 
     def test_the_command_runs_under_the_bridge_after_sudo_s_options(self):
         for argv, want in ((["apt-get", "install", "x"], [BRIDGE, "apt-get", "install", "x"]),
