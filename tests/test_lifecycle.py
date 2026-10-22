@@ -91,7 +91,7 @@ class TestStartAndStopHaveADryRun(unittest.TestCase):
         one.assert_called_once_with(self.m, "start", True)
 
     def test_stop_everything(self):
-        stop = load_cmd("stop")
+        from wk import stop
         with mock.patch.object(stop.Store, "macos_host", False):
             self.assertIn("would run: podman stop --time 30 wk-a wk-b", self.dry(stop.stop_everything, self.reg, False))
 

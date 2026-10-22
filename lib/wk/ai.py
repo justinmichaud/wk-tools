@@ -1,0 +1,152 @@
+"""`wk ai`: a coding agent's session in a workspace, walled and ended with the terminal that started it."""
+import os
+import shlex
+import signal
+import sys
+import uuid
+
+from wk import agents, images, job, pushgate, secrets, store, wall
+from wk.act import barrier, die, info, warn
+from wk.clock import Clock
+from wk.machine import HAVE, Local
+from wk.places import Registry
+from wk.workspace import require_name
+
+ROOT = images.root()
+GH_LOGIN = 'test -e "$HOME/.config/gh/hosts.yml" || { command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; }'
+
+
+def _the_agents(signum, frame):
+    pass
+
+
+def _ending(signum, frame):
+    raise job.Interrupted(signum)
+
+
+def end_session(driver, ws, env, session, clock=None):
+    """This session's agents (by WK_SESSION), TERM then KILL after job.kill's grace; another session's are not its to end."""
+    def send(signum):
+        pids = pushgate.agent_pids(driver, ws, session)
+        if pids:
+            driver.exec(ws, ["kill", "-" + job.signal_name(signum)] + pids)
+    return job.terminate(send, lambda: not pushgate.agent_pids(driver, ws, session), clock or Clock(), job.kill_wait(env), 5)
+
+
+def foreground(machine, argv, cwd, end):
+    """The session on this terminal, waited for. TERM and HUP (and a Ctrl-C without a terminal, whose Ctrl-C is the agent's) end it with `end()`; a signal already ignored, as under the babysitter's nohup, stays ignored."""
+    ends = (signal.SIGTERM, signal.SIGHUP) + (() if on_a_terminal() else (signal.SIGINT,))
+    saved = {s: signal.getsignal(s) for s in ends + (signal.SIGINT,)}
+    signal.signal(signal.SIGINT, _the_agents)
+    for s in ends:
+        if saved[s] is not signal.SIG_IGN:
+            signal.signal(s, _ending)
+    try:
+        return machine.act_run(argv, tty=True, cwd=cwd).rc
+    except job.Interrupted as e:
+        for s in ends:
+            signal.signal(s, signal.SIG_IGN)
+        end()
+        return job.EXIT_OF[e.signum]
+    finally:
+        for s, h in saved.items():
+            signal.signal(s, h)
+
+
+def on_a_terminal():
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+class Ai:
+    def __init__(self, root, env, reg, driver, agent, name):
+        self.root, self.env, self.reg, self.machine = root, env, reg, reg.machine
+        self.driver, self.agent, self.name = driver, agent, name
+
+    def exec(self, argv):
+        return self.driver.exec(self.name, argv)
+
+    def agent_bin(self):
+        lines = self.exec(agents.find_argv(self.root, self.agent)).out.replace("\r", "").splitlines()
+        if not lines and self.agent == "pi" and self.driver.kind == "remote" and not self.exec(agents.node_argv(self.root)).ok:
+            die("there is no pi in '%s': it needs node >= 22.19 and npm, and %s has none.\n    Install one:  wk machine setup %s"
+                % (self.name, self.driver.name, self.driver.name))
+        if not lines:
+            die("there is no %s in '%s' that runs: the agents are installed when a workspace\n    is made, and this one was made "
+                "without it. Make it again:  wk rm %s && wk new %s" % (self.agent, self.name, self.name, self.name))
+        return lines[-1]
+
+    def checks(self):
+        wall.agent_checks(self.root, self.driver, self.name, self.machine)
+
+    def guest_egress(self):
+        wall.guest_egress(self.env, self.driver, self.name, self.machine)
+
+    def wall_available(self):
+        """A builtin needs `sh -c`: a place's exec hands argv to an exec, not a shell (measured)."""
+        return self.exec(list(HAVE) + ["bwrap"]).ok
+
+    def remote_control(self):
+        """A person's Claude session, not the babysitter's `-p`; the setup token a driver is given wins over the login."""
+        if self.agent != "claude" or not on_a_terminal():
+            return []
+        if any(r[0] == "claude" and self.driver.kind in r[4].split(",") for r in secrets.agent_secrets()):
+            warn("Remote Control is off for this session: a %s place authenticates with the\n"
+                 "  `claude setup-token` credential, which Remote Control refuses" % self.driver.kind)
+            return []
+        return ["--remote-control", self.name]
+
+    def session(self, agent_bin, mode, args):
+        name, t = self.name, self.driver
+        prefix = []
+        if wall.commit_walled(t, name):
+            if not self.wall_available():
+                die("the commit wall needs bwrap in the workspace image, and '%s' has none.\n    Rebuild the workspace from "
+                    "a current base ('wk rm %s' then 'wk new'), or\n    install bwrap in the image; nothing an agent runs "
+                    "may write git history\n    while the sandbox cannot stop it." % (name, name))
+            prefix = wall.commit_wall_prefix(self.root, t.src(name))
+            info("git commits are walled off for this session (bwrap; a shell of your own, 'wk enter', is not walled)")
+        elif t.repo(name).agent_push:
+            info("commits and pushes of %s are this session's own: the one repository an agent publishes" % t.repo(name).name)
+        if self.agent == "claude":
+            info("starting Claude in '%s' (permissions relaxed; the workspace is the boundary)" % name)
+        else:
+            info("starting %s in '%s' (%s; the workspace is the boundary)" % (self.agent, name, agent_bin))
+        words = prefix + [agent_bin] + mode + self.remote_control() + args
+        line = "cd %s && exec %s" % (shlex.quote(t.src(name)), shlex.join(words))
+        # The babysitter's fix loop runs this under nohup with -p, where a terminal of its own would be demanded.
+        session = uuid.uuid4().hex
+        argv, cwd = t.exec_argv(name, ["env", "WK_AGENT=" + self.agent, "WK_WORKSPACE=" + name, "WK_SESSION=" + session,
+                                       "bash", "-lc", line],
+                                on_a_terminal())
+        return foreground(self.machine, argv, cwd, lambda: end_session(t, name, self.env, session))
+
+    def run(self, args):
+        t, name = self.driver, self.name
+        mode = ["--dangerously-skip-permissions"] if self.agent == "claude" else []
+        if t.kind == "remote":
+            barrier("'%s' is on the shared build machine '%s', which has no sandbox at\n    all: no container, no separate uid, "
+                    "no filesystem boundary, and other\n    people's work on the same machine. An agent there is an agent "
+                    "on that\n    machine, with your access." % (name, t.name))
+            if self.agent == "claude":
+                mode = ["--permission-mode", "auto"]
+                info("Claude on %s runs in auto mode (this machine is not a sandbox)" % t.name)
+        agent_bin = self.agent_bin()
+        if t.kind == "remote" and self.exec(["sh", "-c", GH_LOGIN]).ok:
+            die("'%s' holds a GitHub credential in the account the agent would run as\n    (~/.config/gh/hosts.yml, or gh is "
+                "logged in there), and nothing an agent runs\n    may post as you. Remedy, on %s:  gh auth logout" % (t.name, t.name))
+        self.checks()
+        if t.kind == "vm":
+            self.guest_egress()
+        return self.session(agent_bin, mode, args)
+
+
+def main(agent, tail, env=None, reg=None):
+    env = os.environ if env is None else env
+    name = store.ws_name(env)
+    require_name(name)
+    reg = reg or Registry(ROOT, env, Local())
+    try:
+        driver = reg.load(reg.ws_place(name))
+    except LookupError as e:
+        die(str(e))
+    return Ai(ROOT, env, reg, driver, agent, name).run(tail)

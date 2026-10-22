@@ -198,8 +198,8 @@ def rebase_world():
 
 
 def open_once(driver):
-    with mock.patch.object(CMD_PR_MODULE, "pr_open_target", return_value=OPENS):
-        CMD_PR_MODULE.pr_open(driver, "ws", False, False)
+    with mock.patch.object(pr, "pr_open_target", return_value=OPENS):
+        pr.pr_open(driver, "ws", False, False)
 
 
 class BoxKeys:
@@ -245,12 +245,12 @@ def box_push(w, keys=None):
         w.effects.append(("hold", resource))
         yield
         w.effects.append(("release", resource))
-    with mock.patch.object(CMD_PR_MODULE, "Store", lambda env: mock.Mock(mirror_dir=lambda: MIRROR)), \
-            mock.patch.object(CMD_PR_MODULE, "Lock", lambda *a: mock.Mock(held=held)), \
-            mock.patch.object(CMD_PR_MODULE.secrets, "Secrets", lambda *a: keys), \
+    with mock.patch.object(pr, "Store", lambda env: mock.Mock(mirror_dir=lambda: MIRROR)), \
+            mock.patch.object(pr, "Lock", lambda *a: mock.Mock(held=held)), \
+            mock.patch.object(pr.secrets, "Secrets", lambda *a: keys), \
             mock.patch.object(sync, "in_vm", lambda env: False), \
             contextlib.redirect_stderr(io.StringIO()):
-        CMD_PR_MODULE.push_from_here(driver, "/src", "fork", "eng/x")
+        pr.push_from_here(driver, "/src", "fork", "eng/x")
 
 
 def box_state(w):
@@ -285,7 +285,7 @@ class TestPrOpenFromABox(unittest.TestCase):
     def test_a_machine_with_no_key_refuses_naming_the_remedy_before_any_effect(self):
         w = box_world()
         w.files.clear()
-        with self.assertRaises(act.Refused), mock.patch.object(CMD_PR_MODULE, "die", side_effect=act.Refused(1)) as die:
+        with self.assertRaises(act.Refused), mock.patch.object(pr, "die", side_effect=act.Refused(1)) as die:
             box_push(w)
         self.assertIn("wk key deploy", die.call_args[0][0])
         self.assertEqual((set(), set()), box_state(w))
@@ -435,7 +435,7 @@ class TestPrOpenTarget(ScratchTest):
             for tracks_fork in (False, True):
                 with self.subTest(project=project, tracks_fork=tracks_fork):
                     work = self._checkout(project, remote, fork, "eng/x", tracks_fork)
-                    self.assertEqual(CMD_PR_MODULE.pr_open_target(work), (base, "testuser:eng/x", fork, "eng/x"))
+                    self.assertEqual(pr.pr_open_target(work), (base, "testuser:eng/x", fork, "eng/x"))
 
     def test_what_cannot_be_opened_is_refused_by_name(self):
         main = self.tmp / "on-main"
@@ -452,7 +452,7 @@ class TestPrOpenTarget(ScratchTest):
         for work, why in ((main, "cannot open 'main'"), (detached, "detached HEAD"),
                           (dirty, "uncommitted changes"), (loose, "no upstream")):
             with self.assertRaises(act.Refused), contextlib.redirect_stderr(io.StringIO()) as err:
-                CMD_PR_MODULE.pr_open_target(work)
+                pr.pr_open_target(work)
             self.assertIn(why, err.getvalue())
 
 
@@ -472,7 +472,7 @@ class TestPrRebase(unittest.TestCase):
         driver = rebase_place(mirror, responses)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            rc = CMD_PR_MODULE.pr_rebase(driver, "myws")
+            rc = pr.pr_rebase(driver, "myws")
         return rc, calls(driver), err.getvalue()
 
     def test_it_fetches_from_the_mirror_only_when_it_is_there(self):
@@ -509,10 +509,10 @@ class TestPrOpen(unittest.TestCase):
         driver = rebase_place("", [Result(0)])   # the push
         if peer is not None:
             driver.kind, driver.is_here, driver.peer = "remote", lambda: False, peer
-        with mock.patch.object(CMD_PR_MODULE, "pr_open_target", return_value=("WebKit/WebKit", "me:b", "fork", "b")), \
-                mock.patch.object(CMD_PR_MODULE, "push_from_here", return_value=Result(0)) as from_here, \
+        with mock.patch.object(pr, "pr_open_target", return_value=("WebKit/WebKit", "me:b", "fork", "b")), \
+                mock.patch.object(pr, "push_from_here", return_value=Result(0)) as from_here, \
                 contextlib.redirect_stderr(io.StringIO()):
-            CMD_PR_MODULE.pr_open(driver, "myws", draft=draft, web=False)
+            pr.pr_open(driver, "myws", draft=draft, web=False)
         return driver, from_here.called, calls(driver)
 
     def test_the_command_execs_into_gh(self):

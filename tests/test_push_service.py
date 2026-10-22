@@ -24,7 +24,7 @@ from tests import test_pr_workflow, test_wk_places
 from tests.support import REPO, WkTest, load_cmd, requires_container_place
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import decl, git, pushgate, repos, secrets  # noqa: E402
+from wk import decl, git, pr, pushgate, repos, secrets  # noqa: E402
 from wk.machine import Result  # noqa: E402
 from tests.fakes import Fake, FlowTest, World  # noqa: E402
 from wk.store import Store  # noqa: E402
@@ -732,7 +732,6 @@ class TestLivePushServiceInTheMachine(unittest.TestCase):
 
 # `unit push.remote_forwarding`: a build box holds no deploy key at rest and nothing forwards one to it, so a push is made
 # from the workstation (`wk pr open` fetches the box's branch into this machine's mirror and pushes it with the deploy key).
-CMD_PR = test_pr_workflow.CMD_PR_MODULE
 
 
 def forwarded(argv):
@@ -756,11 +755,11 @@ class TestABoxHoldsNoKey(test_wk_places.RemoteTest):
 class TestAPushFromABoxIsMadeHere(test_wk_places.RemoteTest):
     def test_wk_pr_open_fetches_the_box_branch_into_the_mirror_and_pushes_from_here(self):
         self.fake.answer(["git"])
-        with mock.patch.object(CMD_PR, "pr_open_target", return_value=("WebKit/WebKit", "me:eng/b", "fork", "eng/b")), \
-                mock.patch.object(CMD_PR.secrets, "Secrets", lambda *a: test_pr_workflow.BoxKeys()), \
+        with mock.patch.object(pr, "pr_open_target", return_value=("WebKit/WebKit", "me:eng/b", "fork", "eng/b")), \
+                mock.patch.object(pr.secrets, "Secrets", lambda *a: test_pr_workflow.BoxKeys()), \
                 contextlib.redirect_stderr(io.StringIO()):
             self.fake.files["/s/push-keys/build_key_fork"] = "KEY\n"
-            CMD_PR.pr_open(self.t, "a", False, False)
+            pr.pr_open(self.t, "a", False, False)
         mirror = Store(self.env).mirror_dir()
         here = [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] == "git"]
         self.assertIn(("git", "-C", mirror, "fetch", "--quiet", "box.example:/home/u/wk/ws/a/WebKit",

@@ -11,7 +11,7 @@ from unittest import mock
 from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import presets  # noqa: E402
+from wk import places, presets, run  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
 
@@ -36,7 +36,7 @@ def run_on(driver, argv, preset="gtk-release"):
     """The (args, kwargs) `wk run <argv>` handed `exec_argv`."""
     reg = mock.Mock()
     reg.present.return_value = driver
-    with mock.patch.object(RUN.places, "Registry", return_value=reg), \
+    with mock.patch.object(places, "Registry", return_value=reg), \
             mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": preset}):
         RUN.main(as_dispatched("run", argv), None)
     return driver.exec_argv.call_args
@@ -55,7 +55,7 @@ class TestFindsBinaryOnEveryPort(unittest.TestCase):
                 preset = presets.resolve(name, os_name, kind, {})
                 self.assertEqual(preset.run_var(), var)
                 self.assertTrue(preset.jsc_path("/src/WebKit").endswith(jsc))
-                cp = subprocess.run(["sh", "-c", RUN.prelude(var, "/new") + '; printf %s "$' + var + '"'],
+                cp = subprocess.run(["sh", "-c", run.prelude(var, "/new") + '; printf %s "$' + var + '"'],
                                     env={var: "/old"}, capture_output=True, text=True)
                 self.assertEqual(cp.stdout, "/new:/old")
 
@@ -78,7 +78,7 @@ class TestLldbGetsAPty(unittest.TestCase):
         reg.present.return_value = driver
         reg.machine = Fake()
         err = io.StringIO()
-        with mock.patch.object(RUN.places, "Registry", return_value=reg), \
+        with mock.patch.object(places, "Registry", return_value=reg), \
                 mock.patch("os.execvp", side_effect=AssertionError("ran it")), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "gtk-release", "WK_DRY_RUN": "1"}), \
                 contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:

@@ -11,7 +11,7 @@ from unittest import mock
 from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import ldpath  # noqa: E402
+from wk import gui, ldpath, places  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
 from wk.act import Refused  # noqa: E402
 
@@ -52,10 +52,10 @@ class RrTest(unittest.TestCase):
     def go(self, mod, driver, argv, preset="gtk-release", **env):
         reg = mock.Mock()
         reg.present.return_value = driver
-        with mock.patch.object(mod.places, "Registry", return_value=reg), \
+        with mock.patch.object(places, "Registry", return_value=reg), \
                 mock.patch.dict(os.environ, dict({"WK_NAME": "ws", "WK_PRESET": preset, "WK_QUIET": "1"}, **env)):
             if mod is GUI:
-                with mock.patch.object(GUI, "is_macos", return_value=False), mock.patch.object(GUI, "session_env", return_value=""):
+                with mock.patch.object(gui, "is_macos", return_value=False), mock.patch.object(gui, "session_env", return_value=""):
                     mod.main(as_dispatched("gui", argv), None)
             else:
                 mod.main(as_dispatched("run", argv), None)
@@ -94,7 +94,7 @@ class TestRecordAndReplay(RrTest):
         reg = mock.Mock()
         reg.present.return_value = driver
         reg.machine = Fake()
-        with mock.patch.object(RUN.places, "Registry", return_value=reg), \
+        with mock.patch.object(places, "Registry", return_value=reg), \
                 mock.patch("os.execvp", side_effect=AssertionError("ran it")), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "gtk-release", "WK_DRY_RUN": "1"}), \
                 contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
