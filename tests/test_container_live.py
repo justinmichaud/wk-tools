@@ -343,7 +343,9 @@ class TestStopKeepVmThenStart(unittest.TestCase):
         remove_workspace(cls.ws)
 
     def running(self):
-        return sorted(n for n, place, state in ls_rows(run("ls", timeout=300).stdout) if place == "container" and state == "running")
+        """The container workspaces `wk ls` lists running; its PLACE column is `<machine>:container` for this host's own."""
+        return sorted(n for n, place, state in ls_rows(run("ls", timeout=300).stdout)
+                      if place.rpartition(":")[2] == "container" and state == "running")
 
     def test_stop_keep_vm_then_start_returns_every_container_to_running(self):
         """`live start.roundtrip`: `wk stop --keep-vm` stops every container (and a running macOS guest) and leaves the
