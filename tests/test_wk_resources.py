@@ -130,29 +130,19 @@ class TestBudget(ResourcesTest):
         self.assertEqual(b.jobs(12, 100000, 1000, load=0), 6)   # never more than half a shared box
         self.assertIn("load average", self.explain(12, 10000, 1000, load=10)[1])
 
-    def test_other_builds_on_this_machine_are_spoken_for_and_a_dead_ones_record_goes(self):
+    def test_the_live_builds_holding_this_machines_budget_are_spoken_for(self):
+        from wk import record
+        from wk.clock import FakeClock
+        recs = record.Records("/s", clock=FakeClock(), machine=self.fake, env={})
         b = self.budget()
-        self.fake.pids.add(7)
-        b.record("live", 4, 40000, "pid:7")
-        b.record("dead", 4, 40000, "pid:8")
-        other = b.record("elsewhere", 4, 40000, "pid:7")
-        self.fake.files[other] = self.fake.files[other].replace("machine=here", "machine=there")
-        alive = lambda h: self.fake.alive(int(h[4:]))
-        running = b.running(alive)
-        self.assertEqual(running, [("live", 4, 40000)])
-        self.assertEqual(len([p for p in self.fake.files if "/builds/" in p]), 2)
+        self.fake.pids.update({7, 9})
+        for name, pid, machine in (("live", 7, "here"), ("dead", 8, "here"), ("elsewhere", 9, "there")):
+            recs.begin("build", "here", name, "k", "/l", ["x"], pid=pid, holds=["build:" + machine],
+                       fields={"jobs": 4, "budget_mb": 40000})
+        running = b.running(recs)
+        self.assertEqual(running, [("build live", 4, 40000)])
         self.assertEqual(b.jobs(24, 88000, 2000, running=running), 20)
-        box = self.budget({"WK_BUILD_MACHINE": "there"})
-        self.assertEqual(box.running(alive), [("elsewhere", 4, 40000)])
-
-    def test_reaping_a_dead_record_is_dry_run_safe(self):
-        b = self.budget()
-        b.record("dead", 4, 40000, "pid:8")
-        before = {p for p in self.fake.files if "/builds/" in p}
-        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
-            running = b.running(lambda h: self.fake.alive(int(h[4:])))
-        self.assertEqual(running, [])
-        self.assertEqual({p for p in self.fake.files if "/builds/" in p}, before)
+        self.assertEqual(self.budget({"WK_BUILD_MACHINE": "there"}).running(recs), [("build elsewhere", 4, 40000)])
 
     def test_the_admissions_are_barriers_that_force_crosses(self):
         b = self.budget()

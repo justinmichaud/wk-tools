@@ -3,10 +3,11 @@
 # wk doctor [<workspace> [--gpu] | <machine>] [--all] -- what is provisioned on this machine, a machine's facts, or whether a workspace's wall holds
 # wk: where=dynamic name=optional readonly group=hosts opts --all,--probe-store,--probe-tools,--gpu
 #
-# Every check of what this machine has provisioned, with the next command for
-# each one missing; then which wk-tools this is (`sha`, and `dirty` on tracked
-# files) and everything wk stores here with the total: the podman VM's disk
-# image, the Tart guests, the store, and what `wk gc` reclaims or names.
+# Every check of what this machine has provisioned and whether its daemons
+# answer, with the next command for each one missing; then which wk-tools this
+# is (`sha`, and `dirty` on tracked files) and everything wk stores here with
+# the total: the podman VM's disk image, the Tart guests, the store, and what
+# `wk gc` reclaims or names.
 # It never starts the podman machine, boots a guest or prompts: what it cannot
 # see without that is '??' with the command that would reveal it.
 #
@@ -30,8 +31,8 @@
 #
 #   --all   also ask every build machine in machines/ for its build tools,
 #           commit identity, build variables, credential copies and provisioning
-#           (one that does not answer is unreachable, never broken); and this
-#           Mac's `pmset -g batt`.
+#           (one that does not answer is unreachable, never broken), and every
+#           bench machine what `wk doctor <machine>` asks it.
 #
 #   --probe-store   the store's key=value facts alone, for the host that asks
 #                   the podman VM to run this where the store is
@@ -144,11 +145,11 @@ def main(argv, env=None, reg=None):
         only(args, ("--gpu",), "is this machine's question, not a workspace's: drop the workspace name")
         return workspace(reg, name, argv)
     only(args, ("--all", "--probe-store"), "is a workspace's question: wk doctor <workspace> --gpu")
-    doc = Doctor(ROOT)
+    doc = Doctor(ROOT, env)
     if args.flag("--probe-store"):
         sys.stdout.write(doc.probe_store())
         return 0
-    info("wk doctor on %s (%s)" % ("macos" if doc.macos else "linux", doc.hostname()))
+    info("wk doctor on %s (%s)" % (fleet.self_line(ROOT, env), "macos" if doc.macos else "linux"))
     rep = Report(sys.stderr)
     for title, rows in doc.sections(args.flag("--all")):
         rep.section(title)

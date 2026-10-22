@@ -53,9 +53,9 @@ class World(test_sysimage_task.World):
             return self.sections
         return Result(self.checkout_rc)
 
-    def running(self, stage="image", pid=77, kill=None):
+    def running(self, stage="image", pid=77, kill=None, holds=None):
         t = self.recs().begin("yocto", "here", WS, kill or "wk sysimage build %s --stage %s --stop" % (PRESET, stage), self.log,
-                              list(yocto.STAGES), pid=pid)
+                              list(yocto.STAGES), pid=pid, holds=["ws:" + WS] if holds is None else holds)
         t.step_state(yocto.stage_index(stage), "running")
         self.pids.add(pid)
         return t
@@ -163,9 +163,8 @@ class TestTheRecordAStageWrites(YoctoTest):
         argv = self.w.watched()
         self.assertEqual([argv[argv.index(f) + 1] for f in ("--stage", "--commit", "--slot", "--image-preset")],
                          ["webkit", SHA, "base", PRESET])
-        (f,) = self.w.budget_files()
         jobs = int(argv[argv.index("--webkit-jobs") + 1])
-        self.assertIn("jobs=%d\nbudget_mb=%d\n" % (jobs, jobs * yocto.WEBKIT_MB_PER_JOB), self.w.files[f])
+        self.assertEqual(self.w.booking(), (jobs, jobs * yocto.WEBKIT_MB_PER_JOB))
         self.assertIn("slot base in %s at aaaaaaaaaaaa" % WS, self.w.recs().list()[0].field("subject"))
 
 

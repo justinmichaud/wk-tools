@@ -261,8 +261,8 @@ class TestStatus(WorkspaceTest):
 
     def status(self, origin):
         self.w.checkout = Result(0, "origin=%s\nwsbase=main\n" % origin)
-        walk = status.Walk(REPO, env=self.w.env, reg=self.w.reg, fleet=False, devices=False, clock=self.w.clock)
-        rec, _ = walk.workspace(self.w.driver, "here", "native", "ws", self.w.records)
+        walk = status.Walk(REPO, env=self.w.env, reg=self.w.reg, clock=self.w.clock)
+        rec, _ = walk.workspace(self.w.driver, "here", "ws", self.w.records)
         return rec.get("base"), [n["text"] for n in rec.get("notes", []) if n["text"].startswith("origin is")]
 
     def test_an_origin_other_than_the_repos_is_named(self):

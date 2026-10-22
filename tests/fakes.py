@@ -90,6 +90,12 @@ class FakeDriver:
     def has_wk(self):
         return True
 
+    def machine_state(self):
+        return "stopped"
+
+    def podman_machine(self):
+        return "wk"
+
     def wk_cmd(self, args, env):
         return "PEER %s %s" % (self.name, shlex.join(args))
 

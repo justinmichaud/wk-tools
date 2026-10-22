@@ -18,7 +18,7 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import act, dispatch, places, secrets, status, statusview  # noqa: E402
+from wk import act, dispatch, places, secrets  # noqa: E402
 from wk.act import Refused, die, info, log  # noqa: E402
 from wk.store import Store  # noqa: E402
 
@@ -53,8 +53,7 @@ def start_everything(reg):
             guests = []
         if guests:
             log("macOS VM(s) not started (they compete with the machine for memory): %s\n  wk start <name>" % " ".join(guests))
-    log("status (information only)")
-    statusview.render_text_stream(status.Walk(ROOT, fleet=False, devices=False).records(), sys.stdout, statusview.colour_wanted())
+    log("  wk status   what each workspace is doing")
     return 0
 
 

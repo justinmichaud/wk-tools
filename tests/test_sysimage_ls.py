@@ -9,7 +9,7 @@ import types
 import unittest
 import unittest.mock
 
-from tests.fakes import FakeRegistry, FakeDriver
+from tests.fakes import FakeRegistry
 from tests.support import NO_REGISTRY, REPO, WkTest, requires_machine, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -166,54 +166,6 @@ class TestTheListing(WkTest):
     def test_human_bytes_is_common_sh_s(self):
         self.assertEqual([ls.human_bytes(n) for n in (3, 1024, 1536, 10 * 1024, 5 * 1024 ** 3)],
                          ["3B", "1.0K", "1.5K", "10K", "5.0G"])
-
-
-class TestTheFleetWalk(WkTest):
-    """This store's rows first, then each place whose machine answers for a store of its own,
-    asked through its own wk with the label it is to print and no walk of its own."""
-
-    def rows(self, d, drivers, warned):
-        return ls.Listing(registry(d, drivers), "", "here", lambda ws: False, warned.append).rows()
-
-    def test_each_answering_machine_adds_its_rows_after_this_stores(self):
-        with scratch_dir() as d:
-            yocto_image(d)
-            far = FakeDriver("fakebox", out="yocto-faraway  rpi4  fakebox\r\n    /elsewhere/faraway.wic.xz\n")
-            vm = FakeDriver("container", here=True, out="")
-            rows = self.rows(d, [far, vm], [])
-        self.assertTrue(rows[0].startswith(YWS))
-        self.assertEqual(rows[-2:], ["yocto-faraway  rpi4  fakebox", "    /elsewhere/faraway.wic.xz"])
-        args, env, _ = far.asked[0]
-        self.assertEqual(args, ("sysimage", "ls", "--continued"))
-        self.assertEqual((env["WK_ROW_LABEL"], env["WK_NO_DELEGATE"]), ("fakebox", "1"))
-        self.assertEqual(vm.asked[0][1]["WK_ROW_LABEL"], "here", "a machine behind this one is labelled as this one")
-
-    def test_a_stopped_machine_is_named_not_left_out(self):
-        with scratch_dir() as d:
-            warned = []
-            self.assertEqual(self.rows(d, [FakeDriver("container", here=True, side="stopped")], warned), [])
-        self.assertIn("is stopped, so the images in its", warned[0])
-
-    def test_one_that_refuses_the_walk_is_named(self):
-        with scratch_dir() as d:
-            warned = []
-            self.rows(d, [FakeDriver("oldbox", rc=2, out="")], warned)
-        self.assertIn("'oldbox' did not answer the listing", warned[0])
-
-    def test_one_with_no_store_of_its_own_is_not_asked(self):
-        with scratch_dir() as d:
-            quiet = [FakeDriver("c", side="none"), FakeDriver("far", side="unreachable")]
-            warned = []
-            self.assertEqual(self.rows(d, quiet, warned), [])
-        self.assertEqual((warned, [t.asked for t in quiet]), ([], [[], []]))
-
-    def test_an_unknown_target_is_named(self):
-        with scratch_dir() as d:
-            warned = []
-            listing = ls.Listing(registry(d), "", "here", lambda ws: False, warned.append)
-            listing.reg.walk = lambda: ["ghost"]
-            self.assertEqual(listing.rows(), [])
-        self.assertIn("unknown place 'ghost'", warned[0])
 
 
 class TestHolds(WkTest):

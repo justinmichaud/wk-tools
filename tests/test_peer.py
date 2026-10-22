@@ -189,7 +189,7 @@ class TestPeerDelegation(PeerFixture):
         steps = [(("start", "peerws"), "start peerws "),
                 (("ai", "claude", "peerws", "-p", "hi"), "ai claude peerws -p hi "),
                 (("build", "peerws", "jsc-debug", "--detach"), "build peerws jsc-debug --detach "),
-                (("status", "peerws", "--wait", "--timeout", "60"), "status --no-fleet --records peerws "),
+                (("status", "peerws", "--wait", "--timeout", "60"), "status --records peerws "),
                 (("status", "peerws", "--log"), "status peerws --log "),
                 (("enter", "peerws", "--", "bash", "-lc", "true"), "enter peerws -- bash -lc true "),
                 (("sync", "peerws"), "sync peerws "),
@@ -201,7 +201,7 @@ class TestPeerDelegation(PeerFixture):
                 self.assertIn(asked, self.peer_calls())
         cp = self._wk("ls", "--json", extra_env={"WK_PLACE": "peerbox"})
         self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("ls --continued --json ", self.peer_calls())
+        self.assertIn("ls --json ", self.peer_calls())
 
     def test_a_here_command_stays_here(self):
         cp = self._wk("zed", "peerws", "--url")

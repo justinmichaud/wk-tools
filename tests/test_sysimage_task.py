@@ -114,19 +114,21 @@ class World(Fake):
     def recs(self):
         return job.records_of(self.reg.load("box"), self.clock, self)
 
-    def budget_files(self):
-        d = os.path.join(self.env["XDG_STATE_HOME"], "wk", "builds")
-        return sorted(p for p in self.files if p.startswith(d + "/"))
+    def booking(self):
+        """(jobs, MB) the record holding this machine's build budget names."""
+        (t,) = [t for t in self.recs().list() if "build:here" in t.holds()]
+        return int(t.field("jobs")), int(t.field("budget_mb"))
 
     def watched(self):
         (w,) = [e for e in self.effects if e[0] == "watch"]
         return list(w[1])
 
     def state(self):
-        return ([(t.field("kind"), t.field("exit")) for t in self.recs().list()], len(self.budget_files()))
+        return [(t.field("kind"), t.field("exit"), t.holds()) for t in self.recs().list()]
 
-    def running(self, stage="image", pid=77, kill=None):
-        t = self.recs().begin(self.KIND, "here", self.ws, kill or self.KILL, self.log, ["a"], pid=pid)
+    def running(self, stage="image", pid=77, kill=None, holds=None):
+        t = self.recs().begin(self.KIND, "here", self.ws, kill or self.KILL, self.log, ["a"], pid=pid,
+                              holds=["ws:" + self.ws] if holds is None else holds)
         self.pids.add(pid)
         return t
 
@@ -199,9 +201,7 @@ class Lifecycle:
 
     def test_the_budget_is_on_the_books_under_this_driver(self):
         self.build()
-        (f,) = self.w.budget_files()
-        self.assertIn("label=wk sysimage image %s\n" % self.w.ws, self.w.files[f])
-        self.assertIn("\njobs=%d\nbudget_mb=%d\nholder=pid:%d\n" % (self.w.booked() + (os.getpid(),)), self.w.files[f])
+        self.assertEqual(self.w.booking(), self.w.booked())
 
     def test_done_is_the_wrapper_s_marker_not_the_exit_status(self):
         self.w.out = b"make: Nothing to be done\n"
@@ -239,29 +239,11 @@ class Lifecycle:
         self.assertEqual(base, "docker.io/library/debian:13")
         self.assertIn(":13-", tag)
 
-    def test_a_pid_file_a_killed_build_left_is_not_busy_and_a_live_one_is(self):
-        home = os.path.join(self.w.ws_dir, "home")
-        self.w.dirs.add(home)
-        self.w.files[os.path.join(home, "%s-image.pid" % self.w.KIND)] = "99999\n"
-        rc, err = self.build()
-        self.assertEqual(rc, 0, err)
-        self.w.pids.add(99999)
-        self.assertIn("%s-image (pid 99999 in the workspace)" % self.w.KIND, self.refused())
-
-    def test_a_held_workspace_lock_is_refused_naming_the_stop(self):
-        with mock.patch("wk.lock.Lock.holder_pid", return_value=55):
-            self.w.pids.add(55)
-            err = self.refused()
-        self.assertIn("ws-%s" % self.w.ws, err)
-        self.assertIn("Stop it:    " + self.w.KILL, err)
-
     def test_another_build_on_this_machine_is_a_barrier(self):
-        from wk.resources import Budget
-        Budget(self.w, self.w.env, self.w.clock).record("wk build other", 4, 8192, "pid:66")
+        self.w.recs().begin("build", "here", "other", "k", "/l", ["x"], pid=66, holds=["build:here"], fields={"jobs": 4})
         self.w.pids.add(66)
-        with mock.patch.object(job, "holder_alive", return_value=lambda h: True):
-            self.assertIn("is already building", self.refused(status=75))
-        self.assertEqual(self.w.recs().list(), [])
+        self.assertIn("is already building", self.refused(status=75))
+        self.assertEqual(len(self.w.recs().list()), 1)
 
     def test_a_target_that_is_not_a_container_is_refused(self):
         self.w.kind = "remote"

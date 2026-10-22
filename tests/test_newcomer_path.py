@@ -7,7 +7,7 @@ import unittest
 from tests.support import REPO, WkTest, _clean_env, run, run_here
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import status  # noqa: E402
+from wk import fleet  # noqa: E402
 
 REMEDY = re.compile(r"(?:^\s*|-> |run |['`])(wk [a-z][\w-]*|\./setup)", re.M)
 USAGE = re.compile(r"^\s*(usage: .*|wk \S+ -h for the rest)$", re.M)
@@ -89,7 +89,7 @@ class TestAWorkspaceFromNothing(NewcomerTest):
         self.walk(run_here)
 
     def test_status_answers_on_a_bare_machine(self):
-        self.assertEqual(run("status", "--no-fleet", env={"WK_STORE": str(self.tmp)}).returncode, 0)
+        self.assertEqual(run("status", env={"WK_STORE": str(self.tmp)}).returncode, 0)
 
 
 class TestAnAbsentPodmanMachineNamesSetup(unittest.TestCase):
@@ -100,7 +100,7 @@ class TestAnAbsentPodmanMachineNamesSetup(unittest.TestCase):
 
             def podman_machine(self):
                 return "wk"
-        self.assertIn("./setup", status.far_side_reason(Absent(), "stopped", ""))
+        self.assertIn("./setup", fleet.reason(Absent(), "stopped", ""))
 
 
 if __name__ == "__main__":

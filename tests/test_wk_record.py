@@ -42,13 +42,13 @@ class RecordTest(unittest.TestCase):
 
 class TestTheShapeOnDisk(RecordTest):
     def test_one_directory_one_file_per_field(self):
-        t = self.begin(holds="device:rpi3")
+        t = self.begin(holds=["device:rpi3", "ws:ws"])
         self.assertTrue(t.id.startswith("build-ws-%s-" % self.clock.stamp()))
         for f in ("kind", "where", "name", "kill", "log", "machine", "pid", "argv", "started", "plan", "holds"):
             self.assertTrue((t.path / f).is_file(), f)
         self.assertEqual(t.field("kind"), "build")
         self.assertEqual(t.plan(), ["configure", "compile"])
-        self.assertEqual(t.field("holds"), "device:rpi3")
+        self.assertEqual(t.holds(), ["device:rpi3", "ws:ws"])
         self.assertEqual([], list((t.path / "steps").glob("*")))
 
     def test_a_target_record_has_no_pid_until_the_job_announces_one(self):
@@ -220,15 +220,6 @@ class TestFindHoldersAndWait(RecordTest):
         self.assertTrue(a.path.exists(), "a live record of the same kind and name is kept")
         self.assertEqual([t.id for t in self.records.list()], [a.id, b.id])
 
-    def test_holders_are_the_live_records_holding_the_resource(self):
-        held = self.begin(holds="device:rpi3")
-        self.begin(name="other", holds="device:rpi4")
-        dead = self.begin(name="gone", holds="device:rpi3", pid=999999)
-        rows = self.records.holders("device:rpi3")
-        self.assertEqual([r[0] for r in rows], [held.id])
-        self.assertEqual(rows[0][2:], ("build ws", "wk build ws --kill"))
-        self.assertNotIn(dead.id, [r[0] for r in rows])
-
     def test_wait_ends_on_the_verdict_and_streams_the_log(self):
         t = self.begin()
         out = []
@@ -252,78 +243,79 @@ class TestFindHoldersAndWait(RecordTest):
         self.assertEqual(sum(self.clock.slept), 5)
 
 
-class TestHoldFollowsHolder(RecordTest):
-    """A hold is released only when its holder is provably gone; an unreadable holder keeps it; no child inherits one."""
+class TestHolds(RecordTest):
+    """A hold is a resource on a live record: it ends with its holder, a claim of a held one is refused under one lock,
+    and a parent's holds are its child's."""
 
     def setUp(self):
         super().setUp()
         self.machine = Fake()
         self.records = record.Records(self.tmp / "store", clock=self.clock, machine=self.machine,
-                                      env={"WK_STORE": str(self.tmp / "store")})
+                                      ask_place=lambda name, pid, cap: self.answers.get((name, pid)),
+                                      env={"WK_STORE": str(self.tmp / "store"), "WK_LOCK_DIR": str(self.tmp / "locks")})
 
     def held(self, pid, name="ws", **kw):
         self.machine.pids.add(pid)
-        return self.begin(name=name, holds="device:rpi3", pid=pid, **kw)
+        return self.begin(name=name, holds=["device:rpi3"], pid=pid, **kw)
 
-    def holders(self):
-        return [r[0] for r in self.records.holders("device:rpi3")]
+    def holders(self, records=None):
+        return [t.id for t in (records or self.records).holders("device:rpi3")]
 
-    def test_a_hold_is_released_only_when_the_machine_says_its_holder_is_gone(self):
+    def test_a_hold_lasts_while_its_holder_lives_and_names_the_holder(self):
         t = self.held(1001)
+        self.held(1002, name="other").set("holds", "device:rpi4")
         self.assertEqual(self.holders(), [t.id])
+        self.assertEqual(self.records.holders("device:rpi3")[0].line().split("\t")[2:], ["build ws", "wk build ws --kill"])
         self.machine.pids.discard(1001)
         self.assertEqual(self.holders(), [])
-
-    def test_an_ended_holder_holds_nothing(self):
-        t = self.held(1001)
+        t = self.held(1003, name="ended")
         t.end(0)
         self.assertEqual(self.holders(), [])
 
-    def test_an_unreadable_pid_keeps_the_hold(self):
+    def test_what_cannot_be_read_keeps_the_hold(self):
         t = self.held(1001)
-        pid = str(t.path / "pid")
-        self.machine.files[pid] = "10x1\n"
-        self.assertEqual(self.holders(), [t.id])
-        del self.machine.files[pid]
-        self.machine.dirs.add(pid)
-        self.assertEqual(self.holders(), [t.id])
-
-    def test_an_unreadable_claim_keeps_the_hold(self):
-        t = self.held(1001)
+        self.machine.files[str(t.path / "pid")] = "10x1\n"
+        self.assertEqual(self.holders(), [t.id], "an unreadable pid")
+        self.machine.files[str(t.path / "pid")] = "1001\n"
         holds = str(t.path / "holds")
         del self.machine.files[holds]
         self.machine.dirs.add(holds)
-        self.assertEqual(self.holders(), [t.id])
+        self.assertEqual(self.holders(), [t.id], "an unreadable claim holds everything")
 
-    def test_a_hold_names_the_pid_that_took_it(self):
-        t = self.held(1001)
-        self.assertEqual(t.field("pid"), "1001")
-        t = self.records.begin("bench", "here", "rpi3", "k", "/l", ["one"], holds="device:rpi3")
-        self.assertEqual(t.field("pid"), str(os.getpid()))
-
-    def test_a_workspace_pid_cannot_hold(self):
+    def test_a_workspace_pid_holds_while_the_workspace_says_it_lives(self):
         with self.assertRaises(ValueError):
-            self.begin(where="place", holds="device:rpi3")
-
-    def test_a_target_record_given_a_hold_keeps_it_until_it_ends(self):
+            self.begin(where="place", holds=["device:rpi3"])
         t = self.begin(where="place")
         t.set("holds", "device:rpi3")
         t.pid(77)
-        self.assertEqual(self.holders(), [t.id])
-        t.end(0)
+        self.answers[("ws", 77)] = None
+        self.assertEqual(self.holders(), [t.id], "no answer is no evidence it is gone")
+        self.answers[("ws", 77)] = False
         self.assertEqual(self.holders(), [])
 
-    def test_no_child_inherits_its_parents_hold(self):
+    def test_a_parents_holds_are_its_childs(self):
         parent = self.held(1001)
-        self.machine.pids.add(1002)
-        records = record.Records(self.tmp / "store", clock=self.clock, machine=self.machine,
-                                 env={"WK_STORE": str(self.tmp / "store"), "WK_DEVICE_HELD": "device:rpi3"})
-        child = records.begin(kind="boot", where="here", name="rpi3", kill="wk boot --kill",
-                              log=str(self.log), plan=["boot"], pid=1002)
-        self.assertEqual(child.field("holds"), "")
+        child = record.Records(self.tmp / "store", clock=self.clock, machine=self.machine,
+                               env={"WK_STORE": str(self.tmp / "store"), "WK_TASK_PARENT": str(parent.path)})
+        self.assertEqual(self.holders(child), [])
         self.assertEqual(self.holders(), [parent.id])
-        self.machine.pids.discard(1001)
-        self.assertEqual(self.holders(), [], "the child is alive and still holds nothing")
+
+    def test_a_claim_of_a_held_resource_is_refused_and_one_of_a_free_one_holds_it(self):
+        refused = []
+        t = self.records.claim("bench", "rpi3", "k", "/l", ["one"], ["device:rpi3"], lambda r, held: refused.append(r))
+        self.assertEqual((refused, t.holds(), t.field("pid")), ([], ["device:rpi3"], str(os.getpid())))
+        self.machine.pids.add(os.getpid())
+
+        def refuse(resource, held):
+            raise Refused(1)
+        with self.assertRaises(Refused):
+            self.records.claim("boot", "rpi3", "k", "/l", ["two"], ["device:rpi3"], refuse)
+        self.assertEqual(self.holders(), [t.id])
+
+    def test_a_dry_run_claim_refuses_the_same_and_takes_nothing(self):
+        with unittest.mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
+            self.assertIsNone(self.records.claim("bench", "rpi3", "k", "/l", ["one"], ["device:rpi3"], None))
+        self.assertEqual(self.records.list(), [])
 
     def test_wait_asks_the_machine_whether_the_driver_lives(self):
         self.assertEqual(self.records.wait("build", "nothing", str(self.log), pid=4242), "crashed")
@@ -395,8 +387,8 @@ class TestTheMachineName(unittest.TestCase):
 
 class TestWatchdogSettings(unittest.TestCase):
     def test_the_deadlines_may_be_fractional(self):
-        env = {"WK_STALL_SECONDS": "1.5", "WK_ABORT_SECONDS": "2.5", "WK_TASK_ASK_SECONDS": "0.5"}
-        self.assertEqual((record.watchdog_stall(env), record.watchdog_abort(env), record.task_ask_seconds(env)), (1.5, 2.5, 0.5))
+        env = {"WK_STALL_SECONDS": "1.5", "WK_ABORT_SECONDS": "2.5"}
+        self.assertEqual((record.watchdog_stall(env), record.watchdog_abort(env)), (1.5, 2.5))
 
     def test_a_runs_own_deadlines_never_override_the_ones_set(self):
         env = {"WK_STALL_SECONDS": "60"}

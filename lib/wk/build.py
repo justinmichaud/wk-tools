@@ -10,7 +10,6 @@ import sys
 from wk import act, git, job, presets, record
 from wk.act import Refused, die, info, log, warn
 from wk.clock import Clock
-from wk.lock import Lock
 from wk.resources import Budget, Resources, parse_df
 from wk.sysimage import task as stage
 from wk.store import dispatch_place
@@ -44,7 +43,7 @@ def forward(argv, drop=(), drop_valued=(), add=()):
     return out + list(add) + argv[i:]
 
 
-def size_for(reg, driver, name, preset, clock):
+def size_for(reg, driver, name, preset, recs):
     """(budget, jobs running, jobs, MB a job, nice) from a remote place's own numbers, else this machine's free memory under the place's envelope."""
     cores, mem, load = driver.build_size(name)
     polite = driver.kind == "remote"
@@ -54,8 +53,8 @@ def size_for(reg, driver, name, preset, clock):
         avail = mem if override is None else override
     else:
         avail = Resources(reg.machine, reg.env).avail_mem_mb(cgroup_mb=mem)
-    budget = Budget(reg.machine, benv, clock)
-    running = budget.running(job.holder_alive(reg))
+    budget = Budget(reg.machine, benv)
+    running = budget.running(recs)
     mbpj = presets.mb_per_job(preset, reg.env)
     max_jobs = Resources(reg.machine, driver.env).max_jobs()
     jobs = budget.explain(cores, avail, mbpj, load if polite else None, max_jobs, running)
@@ -174,7 +173,8 @@ class Build:
         report, blog = os.path.join(self.ws_dir, "babysit.report"), os.path.join(self.ws_dir, "build.log")
         here.write(report, "")
         plan = ["build %s" % preset.name] + ["fix %d of %d, build again" % (i, most) for i in range(1, most + 1)]
-        task = self.recs.begin("babysit", "here", name, "wk build %s --kill" % name, os.path.join(self.ws_dir, "babysit.log"), plan)
+        task = self.recs.claim("babysit", name, "wk build %s --kill" % name, os.path.join(self.ws_dir, "babysit.log"), plan,
+                               ["ws:" + name], self.refuse(None, 0))
 
         def note(title, body):
             try:
@@ -256,56 +256,47 @@ class Build:
                   % (q(self.driver.src(self.name)), q(branch), fetch, q(branch)))
         return self.driver.act_exec(self.name, ["bash", "-c", script]).ok
 
-    def admit(self, budget, running, jobs):
-        name, here = self.name, self.here
-        lock = Lock(self.driver.store, here, self.clock)
-        holder = lock.holder_pid("ws-" + name)
-        if holder is not None and here.alive(holder):   # refused, not queued: an hour on a lock names no remedy
-            die("'%s' is already building -- its detached run holds the ws-%s lock.\n    Follow it:  wk status %s --log -f\n    Stop it:    %s"
-                % (name, name, name, self.kill))
-        lock.hold("ws-" + name, timeout=0)
-        busy = job.busy_reason(self.driver, self.recs, name, self.env.get("WK_TASK_PARENT", ""))
-        if busy:
-            act.barrier("'%s' already has a job running in it: %s\n    Two builds in one checkout corrupt both, and this one would be the second.\n"
-                        "    See what it is:  wk status %s --log --all" % (name, busy, name))
+    def admit(self):
+        name = self.name
         store = self.reg.store.admission_dir()
+        budget = Budget(self.here, self.env)
         budget.disk_admit("this build", self.preset.disk_gb, budget.free_gb(store), "%s's filesystem" % store)
         if self.driver.kind == "vm":   # the guest's disk, and the host image it grows, both fill
             free = parse_df(self.driver.exec(name, ["df", "-Pk", self.driver.src(name)]).out)
             budget.disk_admit("this build", self.preset.disk_gb, free, "the disk inside '%s'" % name)
-        budget.admit("this build", jobs, running)
-        return lock
+
+    def refuse(self, budget, jobs):
+        """A claim's refusal: one job in a checkout at a time, and a machine's builds one at a time unless --force."""
+        def refuse(resource, held):
+            if resource.startswith("ws:"):
+                die("'%s' already has a job running in it:\n%s    Two jobs in one checkout corrupt both.\n    Follow it:  wk status %s --log -f"
+                    % (self.name, "".join("    %s (pid %s on %s)  stop it: %s\n" % (t.field("kind"), t.field("pid"), t.field("machine"),
+                                                                                   t.field("kill")) for t in held), self.name))
+            budget.admit("this build", jobs, budget.rows(held))
+        return refuse
 
     def build_env(self, jobs, nice):
         o, tenv = self.opts, dict(self.driver.env)
-        if o.get("mem_budget"):
-            tenv["WK_MEM_BUDGET_MB"] = o["mem_budget"]
-        if o.get("mem_floor"):
-            tenv["WK_MEM_FLOOR_MB"] = o["mem_floor"]
+        mem = ["%s=%s" % (v, o[k]) for k, v in (("mem_budget", "WK_MEM_BUDGET_MB"), ("mem_floor", "WK_MEM_FLOOR_MB")) if o.get(k)]
         defaults = "" if o.get("no_defaults") else presets.build_args(tenv)
         return tenv, defaults, presets.build_env(
             self.preset, self.driver.src(self.name), jobs, nice, self.driver.arch(self.name), self.driver.ccache_dir(self.name),
-            tenv, " ".join(o.get("cmake", [])), o.get("env", []), defaults)
+            tenv, " ".join(o.get("cmake", [])), mem + o.get("env", []), defaults)
 
     def detached(self):
         name, preset, here, o = self.name, self.preset, self.here, self.opts
         if self.driver.info(name) != "running":   # before the lock, the log and the record: nothing is touched
             die("'%s' is not running (wk start %s)" % (name, name))
-        budget, running, jobs, mbpj, nice = size_for(self.reg, self.driver, self.name, self.preset, self.clock)
+        budget, running, jobs, mbpj, nice = size_for(self.reg, self.driver, self.name, self.preset, self.recs)
         tenv, defaults, preset_env = self.build_env(jobs, nice)
-        budget_mb = int(tenv.get("WK_MEM_BUDGET_MB") or jobs * mbpj)
+        budget_mb = int(self.opts.get("mem_budget") or jobs * mbpj)
         bit = self.driver.tools(name) + "/build/build-in-workspace.sh"
         passthru = o.get("pass", [])
-        lock = None
         if act.dry_run():
             self.report(tenv, defaults, preset_env, jobs, nice, budget_mb, bit, passthru)
         else:
-            lock = self.admit(budget, running, jobs)
-        try:
-            return self.run(budget, jobs, nice, budget_mb, preset_env, bit, passthru)
-        finally:
-            if lock is not None:
-                lock.release_all()
+            self.admit()
+        return self.run(budget, jobs, nice, budget_mb, preset_env, bit, passthru)
 
     def report(self, tenv, defaults, preset_env, jobs, nice, budget_mb, bit, passthru):
         name, preset, o, t = self.name, self.preset, self.opts, self.driver
@@ -325,8 +316,7 @@ class Build:
                 ("passed on", passthru and "%s (straight to build-webkit)" % " ".join(passthru)),
                 ("arch", label and "%s, native (%s %s)" % (label, a["wrapper"], a["cflags"])),
                 ("src", t.src(name)), ("build dir", preset.build_dir(t.src(name))), ("jobs", "%d (nice %d)" % (jobs, nice)),
-                ("memory", "budget %dMB, floor %sMB, watched every %ss"
-                 % (budget_mb, tenv.get("WK_MEM_FLOOR_MB") or 2048, self.env.get("WK_MEM_INTERVAL") or 30)),
+                ("memory", "budget %dMB, floor %sMB, watched every 30s" % (budget_mb, o.get("mem_floor") or 2048)),
                 ("would run", ("env %s %s %s" % (" ".join(preset_env), bit, " ".join(passthru))).rstrip())):
             if value:
                 log("  %-10s %s" % (key + ":", value))
@@ -342,17 +332,18 @@ class Build:
         return r.out.replace("\r", "").strip() if r.ok else None
 
     def run(self, budget, jobs, nice, budget_mb, preset_env, bit, passthru):
-        """The steps: the log is truncated before the record says running, so a reader of the record reads this build's log."""
+        """The steps: the log is truncated once the claim stands, so a refused build leaves the running one's log alone."""
         name, preset, here, o, t = self.name, self.preset, self.here, self.opts, self.driver
         dry = act.dry_run()
         path = os.path.join(self.ws_dir, "build.log")
-        here.mkdir(self.ws_dir)
-        here.write(path, "")
-        start = self.clock.now()
         label = presets.arch_label(t.arch(name))
         plan = (["check out %s" % o["branch"]] if o.get("branch") else []) + [
             "sync wk-tools into '%s'" % name, "compile %s%s with -j%d" % (preset.name, " (%s)" % label if label else "", jobs)]
-        task = None if dry else self.recs.begin("build", "here", name, self.kill, path, plan)
+        here.mkdir(self.ws_dir)
+        task = self.recs.claim("build", name, self.kill, path, plan, ["ws:" + name, budget.resource()], self.refuse(budget, jobs),
+                               fields={"preset": preset.name, "jobs": jobs, "budget_mb": budget_mb})
+        here.write(path, "")
+        start = self.clock.now()
         step = [0]
 
         def advance():
@@ -364,8 +355,6 @@ class Build:
             if task is not None:
                 task.end(word)
 
-        if task is not None:
-            task.set("preset", preset.name)
         watcher = None
         with job.Signals():
             try:
@@ -387,7 +376,6 @@ class Build:
                     line = self.far_line(preset_env, bit, passthru)
                     if line is not None:
                         log("running:   %s" % line)
-                budget.record("wk build %s (%s)" % (name, preset.name), jobs, budget_mb, "pid:%d" % os.getpid())
                 if task is not None:
                     watcher = job.PidWatch(t, name, task, path, "build", PID_MATCH, job.pid_tries(self.env))
                     watcher.start()

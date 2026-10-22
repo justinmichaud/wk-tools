@@ -135,7 +135,7 @@ class BenchBoard(FakeBoard):
 
 def local_holders():
     """The claim asked of this store alone: the fleet's other stores are real machines."""
-    return mock.patch.object(board.progress, "fleet_stores", lambda root, env, machine: [])
+    return mock.patch.object(board.progress, "fleet_stores", lambda root, env, machine: lambda argv: [])
 
 
 def machines_dir(tmp):
@@ -255,7 +255,7 @@ class TestDeploy(CleanTest):
 
     def test_a_board_another_task_holds_is_not_deployed_to(self):
         w = DeployWorld(self.tmp)
-        record.Records(env=w.env).begin("bench", "here", "other", "kill 1", "", ["x"], holds="device:" + BOARD, pid=os.getpid())
+        record.Records(env=w.env).begin("bench", "here", "other", "kill 1", "", ["x"], holds=["device:" + BOARD], pid=os.getpid())
         self.assertIn("another live task holds it", self.refused(w))
         self.assertEqual(w.fake.effects, [])
 
@@ -580,7 +580,7 @@ class TestRefusals(BoardTest):
     def test_another_live_task_holding_the_board_is_a_barrier(self):
         w = self.world()
         w.pids.add(99)
-        w.recs().begin("bench", "here", "other", "kill 99", "/l", ["x"], holds="device:" + BOARD, pid=99)
+        w.recs().begin("bench", "here", "other", "kill 99", "/l", ["x"], holds=["device:" + BOARD], pid=99)
         self.assertIn("another live task holds it", self.refused(w))
 
 

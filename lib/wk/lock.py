@@ -71,36 +71,27 @@ class Lock:
             act.debug("lock: %s (already held here)" % resource)
             return
         self.machine.mkdir_now(os.path.dirname(path))
-        started = self.clock.now()
-        announced = False
-        while True:
-            opid = None
-            unreadable = False
-            if self._link(path):
-                break
-            else:
+        holder = []
+
+        def taken():
+            while not self._link(path):
                 raw = self.machine.readlink(path)
-                if raw is None:
-                    # Unreadable is not evidence of free: a transient read failure could hide a live hold.
-                    unreadable = True
-                else:
-                    opid = _pid_of(raw)
-                    if opid is not None and not self.machine.alive(opid):
-                        if self._break(path, raw):
-                            break
-                        continue
-                    if opid is None:
-                        act.warn("clearing a lock file with no holder in it: %s" % path)
-                        self.machine.remove_now(path)
-                        continue
-            if not announced:
-                announced = True
-                act.info("waiting for the %s lock (%s)" % (resource,
-                          "its holder cannot be read" if unreadable else "held by pid %d" % opid))
-            if self.clock.now() - started >= timeout:
-                act.die("could not take the %s lock within %ds -- %s" % (resource, timeout,
-                        "its holder cannot be read" if unreadable else "pid %d still holds it" % opid))
-            self.clock.sleep(1)
+                opid = None if raw is None else _pid_of(raw)
+                if raw is not None and opid is not None and not self.machine.alive(opid):
+                    if self._break(path, raw):
+                        return True
+                elif raw is not None and opid is None:
+                    act.warn("clearing a lock file with no holder in it: %s" % path)
+                    self.machine.remove_now(path)
+                else:   # unreadable is not evidence of free: a transient read failure could hide a live hold
+                    if not holder:
+                        act.info("waiting for the %s lock (%s)" % (resource, "its holder cannot be read" if raw is None else "held by pid %d" % opid))
+                    holder[:] = ["its holder cannot be read" if raw is None else "pid %d still holds it" % opid]
+                    return False
+            return True
+
+        if not self.clock.wait_until(taken, timeout, 1):
+            act.die("could not take the %s lock within %ds -- %s" % (resource, timeout, holder[0] if holder else "it stayed held"))
         self.holding.append(path)
         if not self._registered:
             self._registered = True

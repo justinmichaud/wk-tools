@@ -1,5 +1,5 @@
 """`wk boot` (lib/wk/boot/cli.py, lib/wk/boot/eeprom.py) against a board in memory: what --status reads back, each
-transition, the EEPROM boot order, killpoints[boot], and what `wk status` shows of an armed machine."""
+transition, the EEPROM boot order, killpoints[boot], and what `wk doctor` reads of an armed machine."""
 import contextlib
 import hashlib
 import io
@@ -19,7 +19,7 @@ from tests.test_mac_volume import mac_board
 
 sys.path.insert(0, str(REPO / "lib"))
 
-from wk import act, status, statusview  # noqa: E402
+from wk import act, doctor  # noqa: E402
 from wk.boot import drivers  # noqa: E402
 from wk.boot import cli, eeprom  # noqa: E402
 from wk.boot.driver import part  # noqa: E402
@@ -490,33 +490,20 @@ class TestFleetProbe(unittest.TestCase):
             d.probe()
             d.record_write("sys-a", "p", "/dev/sda", d.order_image)
             fields = cli.fleet_probe(REPO, "rpi5", {})
-        rec = status.fleet_record("rpi5", {}, fields, 4)
-        self.assertEqual((rec["mode"], rec["armed"], rec["armed_by"]), ("host mode", "sys-a", fields["armed_by"]))
+        self.assertEqual((doctor.fleet_mode(fields["probeable"], fields["mode"]), fields["armed"]), ("host mode", "sys-a"))
+        self.assertTrue(fields["armed_by"])
         self.assertTrue(fields["armed_at"] and fields["boot_id"] == fields["armed_boot"] == "boot-1")
 
 
-class TestStatusArmedTransition(unittest.TestCase):
-    """status.armed_transition: an armed machine's line shows the system, who and when; a record its boot spent reads
-    desync; the refusal of a mutating command is TestBootOrder's."""
+class TestAnArmIsDesyncOnceSpentOrStale(unittest.TestCase):
+    """doctor.armed_desync: a record its boot spent, or one unconsumed past the stale window, is desync."""
 
-    FIELDS = dict(role="workstation", probeable="yes", mode="host", armed="img-1", media="usb",
-                  reprovision="", tailnet="", direct="", armed_by="tolken", armed_at="2026-01-01T00:00:00Z")
-
-    def text(self, rec):
-        buf = io.StringIO()
-        statusview.render_text_stream(iter([rec]), buf, False)
-        return buf.getvalue()
-
-    def test_the_line_names_the_system_who_and_when(self):
-        rec = status.fleet_record("rpi5", {}, dict(self.FIELDS, armed_boot="a", boot_id="a"), 4,
-                                  clock=types.SimpleNamespace(now=lambda: 1767225600))
-        out = self.text(rec)
-        self.assertIn("armed for img-1 by tolken since 2026-01-01T00:00:00Z", out)
-        self.assertNotIn("desync", out)
-
-    def test_a_spent_record_reads_desync(self):
-        rec = status.fleet_record("rpi5", {}, dict(self.FIELDS, armed_boot="before", boot_id="after"), 4)
-        self.assertIn("desync", self.text(rec))
+    def test_spent_stale_and_current(self):
+        now = types.SimpleNamespace(now=lambda: 1767225600)
+        at = dict(armed="img-1", armed_at="2026-01-01T00:00:00Z")
+        self.assertFalse(doctor.armed_desync(dict(at, armed_boot="a", boot_id="a"), now))
+        self.assertTrue(doctor.armed_desync(dict(at, armed_boot="before", boot_id="after"), now))
+        self.assertTrue(doctor.armed_desync(dict(at, armed_at="2025-12-31T00:00:00Z"), now))
 
 
 class TestTheCommand(WkTest):

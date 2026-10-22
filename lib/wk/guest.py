@@ -1,6 +1,5 @@
-"""A macOS guest's start, stop and convergence, what its desktop and its load say about it, and the host daemons every
-guest shares: the egress proxy, the credential injector behind it, the push service a guest's push reaches and the request
-broker its `wk sync` asks. A pidfile is a lock, never a record."""
+"""A macOS guest's start, stop, convergence and admission, its desktop's readings, and the host daemons every guest shares
+(egress proxy, injector, push service, broker). A pidfile is a lock, never a record."""
 
 import contextlib
 import os
@@ -51,8 +50,7 @@ sudo -n date -u "$WK_NOW_SET" >/dev/null || exit 1
 echo "$skew"
 """
 
-# The browser's network process reads no http_proxy, so the system proxy is set too. The CA bundle is the system's
-# plus the injector's: these variables replace the trust store outright.
+# The browser's network process reads no http_proxy, so the system proxy is set too; the CA bundle replaces the trust store.
 EGRESS = """set -u
 addr=$WK_ADDR port=$WK_PORT
 if [ -s /tmp/.wk-egress.new ]; then sed "s|\\$HOME|$HOME|g" /tmp/.wk-egress.new > "$HOME/.wk-egress"; rm -f /tmp/.wk-egress.new
@@ -93,7 +91,6 @@ BASE_PRESET = "macos-guest-base"
 BASE_BUILD = "wk sysimage build " + BASE_PRESET
 RESTART = "wk stop <name> && wk start <name>"
 REBUILD = BASE_BUILD + " --rebuild, then re-create this guest"
-SHELLS_WARN, MEM_FREE_WARN_PCT, SWAP_WARN_MB = 12, 15, 1024   # twelve shells measured as nothing wrong; macOS pages below 15% free
 HOST_FREE_WARN_GB, HOST_FREE_MIN_GB = 80, 25
 DISK_GB = 320
 SA_COUNT = "pgrep -f 'Setup Assistant.app/Contents/MacOS' | grep -c . || true"   # macOS pgrep has no -c
@@ -443,13 +440,13 @@ class Guest:
         return self._said(self.m.act_run(["bash", "-s"], input=script))
 
     def report_desktop(self):
-        probe = desktop_probe(self.host.root, self.host.machine, self.m)
-        if not probe:
+        from wk import doctor
+        rd = desktop_readings(self.host.root, self.host.machine, self.m)
+        if not rd:
             return True
         info("the guest's desktop, as it is now ('wk doctor %s' asks again):" % self.ws)
-        d = Desktop(self.host.root, self.host.machine, probe)
-        render(d.findings().replace("<name>", self.ws))
-        blocked = d.blockers()
+        doctor.Report(sys.stderr).rows(doctor.desktop_rows(rd, self.ws))
+        blocked = blockers(rd)
         if not blocked:
             return True
         lines = "".join("      %s\n" % b for b in blocked)
@@ -522,7 +519,6 @@ class Guest:
         return True
 
     def push_forward(self):
-        """The service's socket for this guest, at the one a workspace's push client dials."""
         near = self.host.push_listen(self.ws)
         return bool(near) and self.host.forward_start(self.ws, self.m, "push", self.vm.home() + "/" + GUEST_PUSH_SOCKET, near)
 
@@ -615,179 +611,25 @@ def value(probe, key):
     return got[-1] if got else ""
 
 
-def row(state, what, remedy=""):
-    return "%s\t%s\t%s\n" % (state, what, remedy)
+def desktop_readings(root, machine, g):
+    """vm/desktop-probe.sh's readings, the pyobjc `pin`, the `uninvited` windows and the `quiet` findings; None unanswered."""
+    probe = desktop_probe(root, machine, g)
+    if not probe:
+        return None
+    rd = {l.partition("=")[0]: l.partition("=")[2] for l in probe.splitlines() if "=" in l}
+    windows = rd.get("windows", "")
+    lib = bench(root, machine, READINGS, probe, RESTART, "" if windows in ("", "?") else windows)
+    rd.update(pin=value(lib, "pin"), uninvited=value(lib, "unexpected").rstrip(";"),
+              quiet="".join(l[4:] + "\n" for l in lib.splitlines() if l.startswith("row=")))
+    return rd
 
 
-def render(text):
-    from wk import doctor
-    doctor.Report(sys.stderr).rows(doctor.findings(text))
-
-
-class Desktop:
-
-    def __init__(self, root, machine, probe):
-        self.probe = probe
-        windows = self.v("windows")
-        lib = bench(root, machine, READINGS, probe, RESTART, "" if windows in ("", "?") else windows)
-        self.pin = value(lib, "pin")
-        self.uninvited = value(lib, "unexpected").rstrip(";")
-        self.quiet = "".join(l[4:] + "\n" for l in lib.splitlines() if l.startswith("row="))
-
-    def v(self, key):
-        return value(self.probe, key)
-
-    def blockers(self):
-        out = ["a window nothing here put there: " + self.uninvited] if self.uninvited else []
-        if self.v("securityagent") == "up":
-            out.append("an authentication sheet (SecurityAgent) is up")
-        if self.v("console_user") in ("root", "", "?"):
-            out.append("nobody is logged in at the window, so there is no desktop")
-        if self.v("screenlock") == "on":
-            out.append("the screen lock is on, so the guest comes up asking for a password")
-        return out
-
-    def findings(self):
-        v, out = self.v, []
-        cu = v("console_user")
-        out.append(row("wrong", "nobody is logged in at the window (console user '%s') -- there is no desktop to draw on" % cu,
-                       RESTART + "  (auto-login logs it back in; the account is a base setting)")
-                   if cu in ("root", "", "?") else row("ok", "logged in at the window as " + cu))
-        py = v("pyobjc")
-        if py and py == self.pin:
-            out.append(row("ok", "pyobjc %s: a browser can be driven and held in front here" % py))
-        elif py in ("", "?"):
-            out.append(row("wrong", "no pyobjc: %s cannot size the screen and nothing can keep %s frontmost, "
-                           "so a benchmark here measures a throttled browser" % (os.path.basename(project.get("BENCH_RUNNER")), project.get("BROWSER")), RESTART + "  (the settle installs it)"))
-        else:
-            out.append(row("wrong", "pyobjc here is %s and this fleet measures with %s" % (py, self.pin), RESTART))
-        lock = v("screenlock")
-        out.append(row("ok", "screen lock off") if lock == "off" else
-                   row("wrong", "the screen lock is on, so this guest comes up asking for a password", REBUILD
-                       + "  -- vm/desktop.sh leaves the lock alone unless the account's password is the one wk set") if lock == "on"
-                   else row("note", "screen lock could not be read (sysadminctl needs passwordless sudo in there)"))
-        out.append(self.quiet)
-        pending = v("setupassistant_pending")
-        out.append(row("wrong", "Setup Assistant will put a modal pane on the desktop: " + pending, REBUILD) if pending
-                   else row("ok", "Setup Assistant already clicked through"))
-        out += self.updates()
-        out.append(self.screen())
-        out.append(row("note", "%s has the focus" % v("frontapp"),
-                       "an unfocused window is a throttled window: a benchmark measured behind one measures the throttle"))
-        # SecurityAgent is up for a moment at every login, and this is read seconds after one.
-        out.append(row("ok", "no authentication sheet is up") if v("securityagent") == "down" else
-                   row("note", "SecurityAgent is up, which the frontmost-application reading above cannot see. Every login has "
-                       "one for a moment", "wk doctor <name>  -- still up means something in there is waiting for a password"))
-        out.append(row("note", "the guest's own window logs in as %s" % v("user"),
-                       "wk itself goes through the tart guest agent; 'wk start' and 'wk enter' state that account's password"))
-        return "".join(out)
-
-    def updates(self):
-        v, out = self.v, []
-        auto = v("update_autoinstall_system")
-        out.append(row("ok", "macOS updates will not install themselves") if auto == "0" else
-                   row("note", "the guest did not answer about Software Update, so whether it installs one under a build is "
-                       "unknown", RESTART + "  -- a start re-runs this probe") if auto == "" else
-                   row("wrong", "macOS updates are set to install themselves in there (AutomaticallyInstallMacOSUpdates=%s), "
-                       "which reboots the guest -- mid-build, if that is when one lands" % auto, REBUILD))
-        dl = v("update_download_system")
-        if dl == "0":
-            out.append(row("ok", "no update downloads itself in there"))
-        elif dl:
-            out.append(row("wrong", "updates download themselves in there (AutomaticDownload=%s), which takes the host's disk "
-                           "and the guest's bandwidth mid-build" % dl, REBUILD))
-        check, down = v("update_check"), v("update_download")
-        out.append(row("ok", "Software Update offers off in the login account too") if (check, down) == ("0", "0") else
-                   row("note", "the account's own Software Update settings read check=%s, download=%s -- what System Settings "
-                       "shows at that window, not what softwareupdated obeys" % (check, down), REBUILD))
-        # Buddy shows its "what is new in macOS" pane whenever these keys do not name the running system.
-        os_v, seen = v("os_product"), v("setupassistant_seen_product")
-        out.append(row("note", "the guest did not say which macOS it runs, so Setup Assistant's 'what is new in macOS' pane "
-                       "cannot be judged from here", RESTART + "  -- a start re-runs this probe") if os_v in ("", "?") else
-                   row("ok", "Setup Assistant has already seen macOS " + os_v) if seen == os_v else
-                   row("wrong", "Setup Assistant will show its 'what is new in macOS' pane (it last saw %s, this guest runs %s)"
-                       % (seen, os_v), REBUILD))
-        return out
-
-    def screen(self):
-        w = self.v("windows")
-        if w in ("", "?"):
-            return row("note", "the window server was not asked what is on that screen (no compiler in there to build the "
-                       "probe with)", RESTART + "  -- a start builds and runs it again")
-        if self.uninvited:
-            return row("wrong", "on that screen right now, and nothing wk runs put it there: " + self.uninvited,
-                       "it comes back on every boot and no setting a guest can write stops it: clear it on the base, once -- "
-                       + REBUILD)
-        return row("ok", "nothing on that screen but %d window(s) wk put there" % sum(":0:" in e for e in w.split(";")))
-
-
-def load_findings(probe, env):
-    shells_warn = int(env.get("WK_VM_SHELLS_WARN") or SHELLS_WARN)
-    free_warn = int(env.get("WK_VM_MEM_FREE_WARN_PCT") or MEM_FREE_WARN_PCT)
-    swap_warn = int(env.get("WK_VM_SWAP_WARN_MB") or SWAP_WARN_MB)
-    procs, vals, groups, out = [], {}, {}, []
-    for line in probe.splitlines():
-        key, _, val = line.partition("=")
-        if key == "proc":
-            rss, _, comm = val.strip().partition(" ")
-            if rss.isdigit():
-                procs.append((int(rss), comm.strip()))
-        elif key:
-            vals[key] = val.strip()
-    for rss, comm in procs:
-        fam = next((f for f, pat in LOAD_FAMILIES if re.search(pat, comm)), None)
-        if fam:
-            n, kb = groups.get(fam, (0, 0))
-            groups[fam] = (n + 1, kb + rss)
-    shells, shell_kb = groups.get("shell", (0, 0))
-    if shells > shells_warn:
-        holders = ["%d %s process(es)" % (groups[f][0], f) for f in ("editor remote server", "agent", "ssh session") if f in groups]
-        out.append(row("wrong", "%d shells are resident in there, holding %d MB%s" % (
-            shells, shell_kb // 1024, (" -- alongside " + ", ".join(holders)) if holders else ""),
-            RESTART + " takes them all with it; closing the editor window does not, since its remote server outlives it"))
-    else:
-        out.append(row("ok", "%d shells resident (%d MB)" % (shells, shell_kb // 1024)))
-    n, kb = groups.get("editor remote server", (0, 0))
-    if n:
-        out.append(row("note", "an editor remote server is running in there: %d process(es), %d MB" % (n, kb // 1024),
-                       "it outlives the editor window, and every terminal pane in it leaves a shell behind; a guest restart "
-                       "is what clears both"))
-    n, kb = groups.get("agent", (0, 0))
-    if n:
-        out.append(row("note", "%d agent process(es) in there, %d MB" % (n, kb // 1024),
-                       "each `wk ai claude` session in a guest is one of these"))
-    free, total = vals.get("mem_free_pct", ""), vals.get("mem_total_mb", "?")
-    if not free.isdigit():
-        out.append(row("note", "memory pressure could not be read in there (memory_pressure said nothing)"))
-    elif int(free) < free_warn:
-        top = ", ".join("%s (%d MB)" % (c.rsplit("/", 1)[-1], r // 1024) for r, c in sorted(procs, reverse=True)[:3])
-        out.append(row("wrong", "%s%% of the %s MB in that guest is free, and macOS calls that pressure: the biggest resident "
-                       "processes are %s" % (free, total, top),
-                       RESTART + "; a build in there is otherwise paging, and every number it produces is about the paging"))
-    else:
-        out.append(row("ok", "%s%% of the %s MB in that guest is free" % (free, total)))
-    m = re.search(r"used = ([0-9.]+)M", vals.get("swapusage", ""))
-    if m and float(m.group(1)) > swap_warn:
-        out.append(row("note", "the guest is using %d MB of swap" % float(m.group(1)),
-                       "it holds a fixed allocation, so this is the guest paging inside itself: a build here is slower "
-                       "than its numbers say"))
-    return "".join(out)
-
-
-def check_rows(vm, ws):
-    from wk import doctor
-    from wk.sysimage import guestbase
-    rows = doctor.findings(guestbase.Base(vm).findings())
-    g = vm.guest(ws)
-    if g is None:
-        return rows + [doctor.unk("'%s' is not running, so its desktop and its load cannot be read" % ws, "wk start %s" % ws)]
-    probe = desktop_probe(vm.root, vm.machine, g)
-    rows += doctor.findings(Desktop(vm.root, vm.machine, probe).findings().replace("<name>", ws)) if probe else \
-        [doctor.unk("'%s' did not answer the desktop probe" % ws, "wk doctor %s  -- again, once it is reachable" % ws)]
-    load = load_probe(vm.root, g)
-    rows += doctor.findings(load_findings(load, vm.env).replace("<name>", ws)) if load else \
-        [doctor.unk("'%s' did not answer the load probe, so what is resident in there is unknown" % ws, "wk doctor %s" % ws)]
-    return rows
+def blockers(rd):
+    return ([("a window nothing here put there: " + rd["uninvited"])] if rd.get("uninvited") else []) + [
+        why for key, bad, why in (("securityagent", ("up",), "an authentication sheet (SecurityAgent) is up"),
+                                  ("console_user", ("root", "", "?"), "nobody is logged in at the window, so there is no desktop"),
+                                  ("screenlock", ("on",), "the screen lock is on, so the guest comes up asking for a password"))
+        if rd.get(key, "") in bad]
 
 
 def setup_assistant(g):
@@ -797,8 +639,7 @@ def setup_assistant(g):
 
 
 def unblock_desktop(root, g):
-    """Driven over the Accessibility API, which answers a session off the console because the guest runs with SIP disabled:
-    no preference the guest can write stops the pane (vm/desktop.sh)."""
+    """Over the Accessibility API, which answers off the console with SIP disabled: no preference stops the pane."""
     if setup_assistant(g) != "up":
         return True
     info("driving Setup Assistant off the screen over the Accessibility API")
@@ -882,12 +723,12 @@ def host_disk(host):
     if free is None:
         warn("cannot tell how much is free on the host, so its disk is not checked")
         return
-    if free < int(host.env.get("WK_HOST_FREE_MIN_GB") or HOST_FREE_MIN_GB):
+    if free < HOST_FREE_MIN_GB:
         die("only %d GB free on the host.\n    A macOS guest believes it has a %d GB disk, but every byte it writes has to "
             "come\n    from here, and a build that runs out fails as an I/O error naming nothing useful.\n\n"
             "      wk ls                        what exists\n      wk rm <name>                 reclaim a workspace\n"
             "      tart prune --space-budget 0  drop the OCI image cache" % (free, vm_disk_gb(host.env)))
-    if free < int(host.env.get("WK_HOST_FREE_WARN_GB") or HOST_FREE_WARN_GB):
+    if free < HOST_FREE_WARN_GB:
         warn("%d GB free on the host -- a Release build tree is ~39 GB and a Debug one ~78 GB, so this may not be enough "
              "to finish" % free)
 
@@ -960,7 +801,7 @@ def stop(vm, ws, clock=None):
 
 
 def _vm(root, machine, env):
-    from wk import places   # places drives a guest through this module
+    from wk import places
     return places.Registry(root, env=os.environ if env is None else env, machine=machine).load("vm")
 
 

@@ -343,7 +343,7 @@ def broker_request(root, verb, words, env, machine, typed):
 def hold(root, name, action, env):
     """The two transitions that move the board out from under whatever is measuring on it, claimed fleet-wide."""
     records = wkrecord.Records(env=env)
-    t = wkrecord.hold(records, lambda r: wkrecord.fleet_holders(r, records, wkrecord.fleet_stores(root, env, records.machine)),
+    t = wkrecord.hold(records, lambda r: wkrecord.fleet_holders(r, wkrecord.fleet_stores(root, env, records.machine)),
                       name, "boot", name, "kill %d" % os.getpid(), "", ["%s %s" % (action, name)], os.getpid(), env)
     if t is not None:
         os.environ["WK_DEVICE_HELD"] = "device:" + name

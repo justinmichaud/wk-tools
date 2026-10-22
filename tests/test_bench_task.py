@@ -262,42 +262,6 @@ class TestLs(WkTest):
         self.assertNotIn("[", record.ls_rows(found(self.tmp))[0])
 
 
-class TestTheFleetListing(WkTest):
-
-    def listing(self, tmp, drivers, warned):
-        reg = registry(tmp, drivers)
-        return record.Listing(reg, reg.store, lambda path: False, "here", warned.append)
-
-    def test_each_answering_machine_adds_its_own_rows_after_this_stores(self):
-        make_task(self.tmp / "ws" / "w" / "bench")
-        moose = FakeDriver("moose", out="T-moose  x  [moose]\r\n    complete\n")
-        vm = FakeDriver("vm", kind="vm", out="T-vm  y  [here]\n")
-        rows = self.listing(self.tmp, [moose, vm], []).rows()
-        self.assertTrue(rows[0].startswith(TASK))
-        self.assertEqual(rows[-3:], ["T-moose  x  [moose]", "    complete", "T-vm  y  [here]"])
-        args, env, quiet = moose.asked[0]
-        self.assertEqual(args, ("bench", "ls", "--continued"))
-        self.assertEqual((env["WK_ROW_LABEL"], env["WK_NO_DELEGATE"]), ("moose", "1"))
-        self.assertEqual(vm.asked[0][1]["WK_ROW_LABEL"], "here", "a machine behind this one is labelled as this one")
-
-    def test_a_stopped_machine_is_named_with_its_remedy(self):
-        warned = []
-        self.assertEqual(self.listing(self.tmp, [FakeDriver("vm", kind="vm", side="stopped")], warned).rows(), [])
-        self.assertIn("'wk start' brings it up", warned[0])
-
-    def test_one_that_does_not_answer_the_listing_is_named(self):
-        warned = []
-        self.listing(self.tmp, [FakeDriver("moose", rc=2)], warned).rows()
-        self.assertIn("'moose' did not answer the listing", warned[0])
-
-    def test_one_with_no_store_of_its_own_is_not_asked(self):
-        quiet = [FakeDriver("c", kind="container", side="none"), FakeDriver("far", side="unreachable")]
-        warned = []
-        self.assertEqual(self.listing(self.tmp, quiet, warned).rows(), [])
-        self.assertEqual(warned, [])
-        self.assertEqual([t.asked for t in quiet], [[], []])
-
-
 class TestTheVerbs(WkTest):
 
     def store(self):

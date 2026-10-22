@@ -33,7 +33,7 @@
 #   wk key show       the public halves, and the ntfy topic URL for a phone
 #   wk key ensure     create missing push keys without registering them
 #   wk key sudo [status|setup] [--on <machine>|--all]
-#                     root costs a password with a 30-second window (WK_SUDO_TIMEOUT_MIN), through
+#                     root costs a password with a 30-second window, through
 #                     /etc/sudoers.d/zz-<user>-passwd. `status` (the default) reports; `setup` installs it,
 #                     checked by `visudo -c` before and after. Exits 0 when that policy holds, 1 otherwise
 #                       --on <machine>  the same, on a configured machine

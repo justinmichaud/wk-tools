@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk ls -- workspaces, what they are pinned to, and what they cost on disk
-# wk: where=workspace name=none bare=merged readonly group=workspaces opts --json,--continued,--more-follows,--empty-so-far
+# wk: where=workspace name=none bare=merged readonly group=workspaces opts --json
 #
 # One line per workspace, on every place this machine knows:
 #
@@ -30,13 +30,14 @@ from wk import images  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, places, record  # noqa: E402
-from wk.act import Refused, die, log  # noqa: E402
+from wk import decl, fleet, places, record  # noqa: E402
+from wk.act import Refused, die, log, warn  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.store import Snapshots  # noqa: E402
 
 FORMAT = "%-20s %-18s %-10s %-8s %-20s %-8s %8s"
 NOT_APPLICABLE = "n/a"
+FIELDS = ("name", "place", "state", "base", "snap", "arch", "changes")
 
 def base_of(driver, ws):
     repo = driver.repo(ws)
@@ -52,29 +53,32 @@ def changes_of(driver, ws):
     return r.out.split("\t")[0].strip() if r.ok and r.out.strip() else "-"
 
 
-def row(driver, ws, label, as_json):
+def row(driver, ws, label):
     state = driver.display_state(ws)
     inside = driver.kind == "local"
     base = NOT_APPLICABLE if inside else base_of(driver, ws)
     snap = driver.store.ws_snapshot_id(ws) or "-"
     size = NOT_APPLICABLE if inside else changes_of(driver, ws)
     arch = driver.arch(ws)
-    fields = (ws, col(label, driver.name), state, base, snap, arch, size)
-    return dict(zip(("name", "place", "state", "base", "snap", "arch", "changes"), fields)) if as_json else FORMAT % fields
+    return dict(zip(FIELDS, (ws, col(label, driver.name), state, base, snap, arch, size)))
 
 
-def place_rows(reg, name, label, as_json):
-    """The rows one place contributes (table lines, or --json's dicts): its own machine's `wk ls` when it has one."""
-    driver = reg.load(name)
-    if driver.has_wk() and driver.kind == "remote":
-        os.environ["WK_ROW_LABEL"] = name
-        os.environ["WK_NO_DELEGATE"] = "1"
-        rc, out = driver.wk("ls", "--continued", *(["--json"] if as_json else []))
-        if as_json:
-            return json.loads(out).get("workspaces", []) if out.strip() else []
-        return [out.rstrip("\n")] if out.strip() else []
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        return list(pool.map(lambda ws: row(driver, ws, label, as_json), driver.workspaces()))
+def rows_of(answer, label):
+    """A place with no wk of its own is read from here; any other answers for itself."""
+    if answer.side in ("none", "no-wk"):
+        driver = answer.driver
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            return list(pool.map(lambda ws: row(driver, ws, label), driver.workspaces()))
+    if answer.side == "unknown":
+        die(answer.why)
+    if answer.why or answer.rc:
+        warn("%s: %s, so its workspaces are not listed" % (answer.name, answer.why or "its 'wk ls' exited %d" % answer.rc))
+        return []
+    try:
+        return json.loads(answer.out).get("workspaces", []) if answer.out.strip() else []
+    except ValueError:
+        warn("%s: its 'wk ls --json' printed no JSON, so its workspaces are not listed" % answer.name)
+        return []
 
 
 def footer(reg, names):
@@ -99,35 +103,24 @@ def footer(reg, names):
 
 
 def main(argv):
-    args = decl.Args(decl.Decl(__file__), argv)
-    continued = args.flag("--continued")
-    more_follows = args.flag("--more-follows")
-    empty_so_far = args.flag("--empty-so-far")
-    as_json = args.flag("--json")
+    as_json = decl.Args(decl.Decl(__file__), argv).flag("--json")
     label = record.row_label(os.environ)
     reg = places.Registry(ROOT)
-    if not continued and not as_json:
-        print(FORMAT % ("NAME", "PLACE", "STATE", "BASE", "SNAP", "ARCH", "CHANGES"))
-    names = reg.walk()
-    try:
-        with ThreadPoolExecutor(max_workers=max(1, len(names))) as pool:
-            outputs = list(pool.map(lambda n: place_rows(reg, n, label, as_json), names))
-    except LookupError as e:
-        die(str(e))
-    rows = [r for out in outputs for r in out]
+    answers = fleet.each(reg, ["ls", "--json"])
+    rows = [r for a in answers for r in rows_of(a, label)]
     if as_json:
         print(json.dumps({"workspaces": rows}))
         return 0
+    print(FORMAT % tuple(f.upper() for f in FIELDS))
     for r in rows:
-        print(r)
-    if not rows and not more_follows and (not continued or empty_so_far):
+        print(FORMAT % tuple(r.get(f, "?") for f in FIELDS))
+    if not rows:
         if reg.in_remote_host():
             log("(no workspaces here -- from the workstation: wk new <name> --on %s)" % reg.self_place())
         else:
             log("(no workspaces -- 'wk new <name>' to create one)")
-    if label:
-        return 0   # that machine's store is not the reader's to act on
-    footer(reg, names)
+    if not label:   # another machine's store is not the reader's to act on
+        footer(reg, [a.name for a in answers if a.side in ("none", "no-wk")])
     return 0
 
 

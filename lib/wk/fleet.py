@@ -2,9 +2,11 @@
 `python3 -m wk.fleet list` exits 2 on a conf that does not parse."""
 
 import argparse
+import collections
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 from wk import act, images, kv
 from wk.kv import ConfError
@@ -81,7 +83,6 @@ class Fleet:
         return conf["kind"] if conf else None
 
     def names(self, kinds=KINDS):
-        """A conf that does not parse is refused by name rather than left out of the listing."""
         out = []
         for n in self._declared():
             try:
@@ -100,6 +101,69 @@ class Fleet:
                 return n
         raise LookupError("this host, %s, is the far end of a place (~/.wk-remote), and no machines/<name>.conf\n"
                           "    names it. Set hostname=%s in the conf of the machine it is." % (host, host))
+
+
+def self_line(root, env):
+    """`<machine> -- <role>, <mode>`: its conf's role, and whether it runs a bench image by the marker one writes."""
+    from wk import record
+    name = record.row_label(env) or record.machine_name(env)
+    try:
+        role = (Fleet(root, env).load(name) or {}).get("role") or "workstation"
+    except ConfError:
+        role = "workstation"
+    return "%s -- %s, %s" % (name, role, "bench mode" if kv.kv_file(images.marker(env)).get("id") else "host mode")
+
+
+Answer = collections.namedtuple("Answer", "name driver side rc out why")
+
+
+def reason(driver, side, why=""):
+    if side == "unreachable":
+        return "unreachable over ssh" + (": %s" % why if why else "")
+    if side == "stopped" and driver.machine_state() == "absent":
+        return "no podman machine '%s' yet -- ./setup makes it" % driver.podman_machine()
+    if side == "stopped":
+        return "the podman machine '%s' is stopped -- 'wk start' brings it up" % driver.podman_machine()
+    if side == "no-wk":
+        return "no wk-tools there yet -- 'wk machine setup %s'" % driver.name
+    return why or "not a machine of its own"
+
+
+def ask(driver, argv, env, quiet=True):
+    """`driver`'s own wk asked `argv`; `why` says why it was not, and is empty for a place with no far side (the caller's to read)."""
+    side, why = driver.probe()
+    if side != "answering":
+        return Answer(driver.name, driver, side, None, "", "" if side == "none" else reason(driver, side, why))
+    env = dict(env, WK_NO_DELEGATE="1")
+    if driver.kind == "remote":
+        env["WK_ROW_LABEL"] = driver.name
+    rc, out = driver.wk(*argv, env=env, quiet=quiet)
+    return Answer(driver.name, driver, side, rc, out.replace("\r", ""), "")
+
+
+def each(reg, argv, names=None, env=None, quiet=True):
+    """The one fan-out: every place in `names` (the registry's walk) asked `argv` through its own wk, at once."""
+    names = reg.walk() if names is None else names
+
+    def one(name):
+        try:
+            return ask(reg.load(name), argv, reg.env if env is None else env, quiet)
+        except LookupError as e:
+            return Answer(name, None, "unknown", None, "", str(e))
+    with ThreadPoolExecutor(max_workers=max(1, len(names))) as pool:
+        return list(pool.map(one, names))
+
+
+def listing(reg, argv, what, warn):
+    out = []
+    for a in each(reg, argv):
+        if a.why:
+            warn("%s: %s, so the %s in its store are not listed" % (a.name, a.why, what))
+        elif a.rc:
+            warn("'%s' did not answer the listing, so the %s in its store are not here." % (a.name, what))
+        else:
+            out += [line for line in (a.out or "").splitlines() if line.strip()]
+    return out
 
 
 def main(argv, env=None):

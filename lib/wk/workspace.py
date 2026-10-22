@@ -66,14 +66,14 @@ def task_records_for(records, name):
     return [t for t in records.list() if t.field("name") == name]
 
 
+def task_lines(tasks):
+    """One line per job, with the command that stops it."""
+    return "\n".join("    %s (pid %s on %s)  stop it:  %s" % (t.field("kind"), t.field("pid"), t.field("machine"), t.field("kill"))
+                     for t in tasks)
+
+
 def live_task_lines(records, name):
-    """One line per running job in the workspace, with the command that stops it."""
-    lines = []
-    for t in task_records_for(records, name):
-        if not t.alive(None):
-            continue
-        lines.append("    %s (pid %s on %s)  stop it:  %s" % (t.field("kind"), t.field("pid"), t.field("machine"), t.field("kill")))
-    return "\n".join(lines)
+    return task_lines(t for t in task_records_for(records, name) if t.alive(None))
 
 
 def remove_task_records(records, name):
@@ -89,7 +89,7 @@ def creation_state(driver, records, name):
         return state
     t = records.find("new", name)
     rc = None if t is None else t.raw("exit")
-    if t is not None and (t.holder_gone() if rc is None else rc.isdigit() and rc != "0"):
+    if t is not None and (t.alive() is False if rc is None else rc.isdigit() and rc != "0"):
         return "creating"
     return state
 
@@ -244,15 +244,13 @@ def new_detached_run(driver, records, lock, clock, name, base, arch, repo):
     if driver.kind == "container":
         with lock.held("sdk"):
             driver.sdk_refresh()
-    lock.hold("ws-" + name)
+    state = creation_state(driver, records, name)
+    task = records.claim("new", name, "wk new %s --kill" % name, driver.create_log(name), list(PLAN), ["ws:" + name],
+                         lambda _, held: die("'%s' has work running in it:\n%s" % (name, task_lines(held))))
     if driver.reads_host_mirror and repo.snapshot:
         refresh_mirror(driver, here, name)
     if driver.needs_base and repo.snapshot:
         lock.hold("store")
-    state = creation_state(driver, records, name)
-    task = None
-    if not act.dry_run():
-        task = records.begin("new", "here", name, "wk new %s --kill" % name, driver.create_log(name), list(PLAN))
     try:
         _create(driver, records, task, clock, name, base, arch, repo, state)
     except Killed:
@@ -435,11 +433,15 @@ def _forget(driver, records, here, name):
 
 
 def rm_one(driver, records, lock, name, what):
-    """Destroy one workspace, or forget one that is nothing but a record. 0 destroyed, 1 not fully."""
-    here = records.machine
+    """Destroy one workspace, or forget one that is nothing but a record, with no claim starting meanwhile. 0 destroyed, 1 not fully."""
     recs = record.of_driver(driver, records.clock, records.machine)
+    with recs.locked():
+        return _rm_one(driver, recs, lock, name, what)
+
+
+def _rm_one(driver, recs, lock, name, what):
+    here = recs.machine
     if what == "record":
-        lock.hold("ws-" + name)
         _forget(driver, recs, here, name)
         info("'%s' had nothing left but its record; forgotten" % name)
         return 0
@@ -449,7 +451,6 @@ def rm_one(driver, records, lock, name, what):
     if live:
         die("'%s' has work running in it, and destroying it under a running job\n"
             "    leaves that job compiling into a directory that is gone:\n%s" % (name, live))
-    lock.hold("ws-" + name)
     if driver.needs_base:
         lock.hold("store")
     ws = driver.store.ws_dir(name)

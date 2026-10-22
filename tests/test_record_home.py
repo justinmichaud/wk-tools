@@ -56,11 +56,10 @@ class TestNothingCopiesARecord(test_wk_places.RemoteTest):
         """`live build.box_record`'s unit half: the host's `wk status` asks the box's wk for its records."""
         clock = FakeClock()
         self.env["WK_PLACE"] = "box"
-        walk = status.Walk(REPO, name="a", fleet=False, devices=False, env=self.env, reg=self.reg, clock=clock)
-        with mock.patch.object(status.Walk, "reach", return_value=("", "")):
-            recs = [r for r in walk.records(markers=False) if r.get("kind") == "task"]
+        walk = status.Walk(REPO, name="a", env=self.env, reg=self.reg, clock=clock)
+        recs = [r for r in walk.records(markers=False) if r.get("kind") == "task"]
         self.assertEqual([], recs)
-        self.assertTrue(self.fake.ssh_calls("status --no-fleet --records a"))
+        self.assertTrue(self.fake.ssh_calls("status --records a"))
         self.assertEqual([], self.t.records(clock).list())
 
 

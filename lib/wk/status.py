@@ -1,39 +1,22 @@
-"""The `wk status` walk: one job per place, then the fleet's devices,
-each returning the records wk.statusview draws and the worst exit
-code it found. Every fact is read as the walk runs; nothing is stored."""
+"""The `wk status` walk: one job per place, each answering in records -- the workspaces it holds and the tasks its
+store records -- read here, or asked of the place's own wk (fleet.ask). Every fact is read as the walk runs."""
 
-import calendar
-import json
-import math
 import os
-import re
-import shutil
-import sys
+import shlex
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import secretfile
-import shlex
-from wk import fleet, guest, images, places, project, reach, record, secrets, statusview, tools
-from wk.bench import record as bench_record
+from wk import fleet, places, record, statusview
 from wk.clock import Clock
-from wk.lock import holder_pid
-from wk.machine import TIMED_OUT, Local, Ssh
-from wk.act import Refused
-from wk.resources import Resources
-from wk.kv import ANSI, kv, kv_file
-from wk.store import Snapshots, Store, dispatch_place, in_vm
-
+from wk.kv import ANSI, kv
+from wk.store import Snapshots, dispatch_place
 
 ENDED_AS_ASKED = ("ok", "cancelled", "stopped", "refused")
 TASK_EXIT = {"running": 2, "starting": 2, "silent": 2, "died": 4, "unreadable": 4, "unanswered": 4,
              "failed": 1, "gave-up": 1, "error": 1, "stalled": 3, "oom": 3}
 METHOD = {"container": "container", "vm": "macOS guest"}
 RANK = {"container": 0, "vm": 1, "local": 2}
-SDK_TAG = re.compile(r"^(.+)-v(\d+)-[0-9a-f]+$")
-# An arm is consumed by the reboot that follows it within moments; one unconsumed this long was not followed.
-ARM_STALE_SECONDS = 5 * 60
+WAIT_SECONDS = 5   # between two walks of `--wait`: a build's state changes in minutes
 
 WS_PROBE = r'''cd @SRC@ 2>/dev/null || exit 0
 printf 'origin=%s\n' "$(git config --get remote.origin.url 2>/dev/null)"
@@ -49,10 +32,6 @@ printf 'wsbase=%s\n' "${_b:-?}"
 '''
 
 
-def fleet_timeout(env):
-    return int(env.get("WK_FLEET_TIMEOUT") or 4)
-
-
 def clean(text):
     return ANSI.sub("", str(text)).replace("\r", "")
 
@@ -65,118 +44,30 @@ def bump(worst, code):
     return max(worst, code if 0 <= code <= 4 else 4)
 
 
-class Rec:
-
-    def __init__(self, kind, **fields):
-        self.d = {"kind": kind}
-        self.notes = []
-        for k, v in fields.items():
-            self.set(k, v)
-
-    def set(self, key, value):
-        self.d[key] = clean(value) if isinstance(value, (str, int, float)) else value
-
-    def opt(self, key, value):
-        if value:
-            self.set(key, value)
-
-    def raw(self, key, value):
-        self.d[key] = value
-
-    def note(self, text):
-        self.notes.append({"level": "info", "text": clean(text)})
-
-    def warn(self, text):
-        self.notes.append({"level": "warn", "text": clean(text)})
-
-    def done(self):
-        d = dict(self.d)
-        if self.notes:
-            d["notes"] = self.notes
-        return d
+def rec(kind, **fields):
+    return dict(kind=kind, **{k: clean(v) if isinstance(v, str) else v for k, v in fields.items() if v not in (None, "")})
 
 
-def far_side_reason(driver, side, why):
-    if side == "unreachable":
-        return "unreachable over ssh" + (": %s" % why if why else "")
-    if side == "stopped" and driver.machine_state() == "absent":
-        return "no podman machine '%s' yet -- ./setup makes it" % driver.podman_machine()
-    if side == "stopped":
-        return "the podman machine '%s' is stopped -- 'wk start' brings it up" % driver.podman_machine()
-    if side == "no-wk":
-        return "no wk-tools there yet -- 'wk machine setup %s'" % driver.name
-    return "not a machine of its own"
+def note(r, text, level="info"):
+    r.setdefault("notes", []).append({"level": level, "text": clean(text)})
 
 
-def fleet_mode(probeable, mode):
-    if probeable == "no":
-        return "unknown from here"
-    if mode == "host":
-        return "host mode"
-    if mode.startswith("base"):
-        return "base image -- not a bench system"
-    if mode.startswith("bench"):
-        return "bench mode"
-    return "unreachable"
-
-
-def sdk_newest(local, tags):
-    """The registry tag that supersedes `local`: the highest -v<N> sharing its version, else itself when listed."""
-    m = SDK_TAG.match(local)
-    if not m:
-        return local if local in tags else None
-    prefix, best_v, best = m.group(1), int(m.group(2)), local
-    for t in tags:
-        mm = SDK_TAG.match(t)
-        if mm and mm.group(1) == prefix and int(mm.group(2)) > best_v:
-            best, best_v = t, int(mm.group(2))
-    return best
-
-
-def sdk_record(machine, local, tags, cap):
-    """`local` is Container.sdk_local's image= and created=; `tags` the registry's list, None when it did not answer in `cap`."""
-    image = local.get("image", "")
-    if not image:
-        return None
-    r = Rec("sdk", machine=machine, tag=image.rsplit(":", 1)[-1])
-    r.opt("pulled", local.get("created"))
-    if tags is None:
-        r.set("unknown", "registry did not answer within %ss" % cap)
-    else:
-        newest = sdk_newest(r.d["tag"], tags)
-        if newest:
-            r.set("upstream", newest)
-        else:
-            r.set("unknown", "registry has no tag matching %s" % r.d["tag"])
-    return r.done()
-
-
-def tools_fact(ver, expect, machine, label, in_vm=False, peer=False, dirty_here=False):
-    """One machine's wk-tools against this checkout's commit; `ver` is `wk doctor --probe-tools`' sha= and dirty=."""
-    sha = ver.get("sha", "")
-    insync = tools.sha_matches(sha, expect)
-    r = Rec("fact", machine=machine, type="wk-tools")
-    r.opt("copy", "mounted in the podman VM" if in_vm else "")
-    r.set("sha", sha)
-    r.raw("dirty", ver.get("dirty") == "yes")
-    r.set("expect", expect)
-    r.raw("insync", insync)
-    if not insync:
-        if in_vm:
-            r.set("fix", "./setup   (recreates the machine with this checkout mounted at /opt/wk-tools)")
-        elif peer and dirty_here:
-            r.set("fix", "commit and push here first -- a peer pulls, and this checkout is dirty")
-        elif peer:
-            r.set("fix", "wk sync --tools   (pulls on %s, and says so if it still differs)" % label)
-        else:
-            r.set("fix", "wk sync --tools %s" % label)
-    return r.done()
+# A verdict's note: (level, text) with {kind} {name} {log} {age} {abort} {pid} {ask} {exit} filled in.
+NOTES = {"running": ("info", "alive: {progress} (last output {age}s ago)"),
+         "silent": ("warn", "no log output for {age}s -- busy, since nothing here says it stopped. Follow it:  tail -f {log}"),
+         "died": ("warn", "{kind} '{name}' died without recording an exit -- its log is {log}"),
+         "unreadable": ("warn", "this record cannot be read ({bad}), so nothing says whether its job runs: {path}"),
+         "unanswered": ("warn", "'{name}' did not say within {ask}s whether pid {pid} lives:  wk enter {name}"),
+         "failed": ("warn", "exit {exit}"),
+         "stalled": ("warn", "killed after no output; see {log}"),
+         "gave-up": ("warn", "{kind} gave up -- see {log}"),
+         "error": ("warn", "{kind} gave up -- see {log}"),
+         "oom": ("warn", "killed for memory; see {log}")}
 
 
 def task_records(records, only=None, clock=None):
     """One record per task that is running or ended badly; one that ended as asked left its product as the report."""
     clock = clock or records.clock
-    ask = int(record.task_ask_seconds(records.env))
     out, worst = [], 0
     for t in records.list():
         if only and t.field("name") != only:
@@ -185,436 +76,66 @@ def task_records(records, only=None, clock=None):
         if st in ENDED_AS_ASKED:
             continue
         kind, name, log = t.field("kind"), t.field("name"), t.field("log")
-        r = Rec("task", machine=t.field("machine"), task=t.id, task_kind=kind, name=name, state=st, since=t.field("started"))
-        r.raw("steps", [s for _, s in t.steps()])
-        r.set("kill", t.field("kill"))
-        r.opt("subject", t.field("subject"))
-        r.opt("log", log)
-        r.opt("holds", t.field("holds"))
-        r.opt("exit", t.field("exit"))
-        r.raw("plan", t.plan())
-        age = record.log_age(log, clock, t.machine)
-        abort = t.field("abort_after")
-        shown_age = "?" if age is None else str(age)
+        age, abort = record.log_age(log, clock, t.machine), t.field("abort_after")
+        r = rec("task", machine=t.field("machine"), task=t.id, task_kind=kind, name=name, state=st, since=t.field("started"),
+                steps=[s for _, s in t.steps()], plan=t.plan(), kill=t.field("kill"), subject=t.field("subject"), log=log,
+                holds="(unreadable)" if t.holds() is None else " ".join(t.holds()), exit=t.field("exit"),
+                log_age=str(age) if st == "silent" and age is not None else None)
         code = TASK_EXIT.get(st, 0)
-        if st == "silent":
-            r.opt("log_age", shown_age if age is not None else "")
-            if age is not None and abort.isdigit() and age > int(abort):
-                r.warn("silent for %ss, past the %ss this %s recorded as its watchdog's deadline" % (age, abort, kind))
-                r.note("so the watchdog is gone as well: a live 'wk %s' would have\n      killed the job and written its exit "
-                       "at that deadline. Re-run it to\n      rewrite the record." % kind)
-                code = 4
-            else:
-                r.warn("no log output for %ss -- counted as busy, since nothing\n      here is evidence it stopped. "
-                       "Follow it:  tail -f %s" % (shown_age, log))
-        elif st == "running":
-            r.note("alive: %s (last output %ss ago)" % (record.progress_line(log, t.machine) or "running", shown_age))
-        elif st == "died":
-            r.warn("%s '%s' died without recording an exit -- its log is %s" % (kind, name, log))
-        elif st == "unreadable":
-            r.warn("this record cannot be read (%s): an older wk wrote it, or it is damaged,\n      so nothing here "
-                   "can say whether its job runs. The record is %s" % (", ".join(t.unreadable()), t.path))
-        elif st == "unanswered":
-            r.warn("'%s' did not say within %ss whether pid %s is alive, so\n      nothing here can confirm the record. "
-                   "Ask it directly:  wk enter %s" % (name, ask, t.field("pid"), name))
-        elif st == "failed":
-            r.warn("exit %s" % t.field("exit"))
+        if st == "silent" and age is not None and abort.isdigit() and age > int(abort):
+            note(r, "silent for %ss, past the %ss its watchdog was to kill it at: the watchdog is gone too. Re-run the %s"
+                 % (age, abort, kind), "warn")
+            code = 4
+        elif st in NOTES:
+            level, text = NOTES[st]
+            note(r, text.format(kind=kind, name=name, log=log, age="?" if age is None else age, pid=t.field("pid"),
+                                ask=record.ASK_SECONDS, exit=t.field("exit"), bad=", ".join(t.unreadable()), path=t.path,
+                                progress=record.progress_line(log, t.machine) if st == "running" else ""), level)
+        if st == "failed":
             for line in record.first_error(log, t.machine):
-                r.note("  " + line)
-        elif st == "stalled":
-            r.warn("killed after no output; see %s" % log)
-        elif st in ("gave-up", "error"):
-            r.warn("%s gave up -- see %s" % (kind, log))
-        elif st == "oom":
-            r.warn("killed for memory; see %s" % log)
-            try:
-                hits = [l for l in record.normalised(log, t.machine).split("\n") if "wk: MEMORY LIMIT" in l]
-            except OSError:
-                hits = []
-            if hits:
-                r.note("  " + hits[-1].replace("wk: ", "", 1))
+                note(r, "  " + line)
         worst = bump(worst, code)
-        out.append(r.done())
+        out.append(r)
     return out, worst
 
 
-def disk_record(store, machine, in_vm, reclaimable):
-    root = store.store_dir()
-    if not os.path.isdir(root):
-        return None
-    r = Rec("disk", machine=machine, store=root)
-    r.opt("where", "in the podman VM" if in_vm else "")
-    try:
-        u = shutil.disk_usage(root)
-        r.set("total_mb", u.total // 1048576)
-        r.set("free_mb", u.free // 1048576)
-        r.set("used_pct", math.ceil(u.used * 100 / (u.used + u.free)) if u.used + u.free else 0)
-    except OSError as e:
-        r.warn("cannot measure the disk under %s: %s" % (root, e))
-    try:
-        snapshots = len(os.listdir(store.snapshots_dir()))
-    except OSError:
-        snapshots = 0
-    r.set("snapshots", snapshots)
-    r.set("reclaimable", reclaimable)
-    if reclaimable:
-        r.note("wk gc would reclaim %d snapshot(s)" % reclaimable)
-    return r.done()
+def wait(poll, timeout, clock, label, info, warn):
+    """Polls while `poll` says busy (2); another answer ends the wait only once the next poll repeats it, since one walk
+    whose probe failed reads 4 of a build still running. `timeout` seconds of elapsed time (0: none) end it unanswered."""
+    seen = {"said": False, "rc": None, "pending": None}
 
-
-def socket_answers(path, machine=None):
-    """A socket file is no evidence of a daemon: a killed one leaves it behind, so the answer is a connect."""
-    return (machine or Local()).run(["python3", "-c", guest.SOCKET_ANSWERS, path]).ok
-
-
-def launchd_daemons(store):
-    """(name, socket, setup stage) of what launchd keeps on a macOS host; the podman VM's copies of these sockets are forwards, not the daemons."""
-    return [("credential injector", os.path.join(store.vm_store_dir(), "vm", "github-inject.sock"), "inject"),
-            ("request broker", store.runtime_socket(), "broker")]
-
-
-def injector_record(store, machine):
-    if not store.macos_host:
-        return None
-    for name, sock, stage in launchd_daemons(store):
-        if stage != "inject":
-            continue
-        r = Rec("service", machine=machine, name=name + " (this Mac)")
-        if socket_answers(sock):
-            r.set("state", "running")
-        else:
-            r.set("state", "down")
-            r.set("fix", "./setup --stage inject   (a guest gets no credential and no container a claude.ai login)")
-        return r.done()
-    return None
-
-
-def broker_record(store, machine, alive):
-    """The request broker: in flight is read from the process table, since a `running` status file is a claim a killed broker leaves behind."""
-    sock = store.runtime_socket()
-    brdir = os.path.join(store.state_dir(), "broker")
-    answers = socket_answers(sock)
-    if not answers and not os.path.exists(sock) and not os.path.isdir(brdir):
-        return None
-    r = Rec("service", machine=machine, name="request broker")
-    n = 0
-    if os.path.isdir(brdir):
-        for rid in sorted(os.listdir(brdir)):
-            st = kv_file(os.path.join(brdir, rid, "status"))
-            if st.get("state") != "running" or not st.get("pid", "").isdigit() or not alive(int(st["pid"])):
-                continue
-            n += 1
-            r.note("in flight: %s -- %s" % (rid, st.get("stage", "")))
-    if answers:
-        r.set("state", "open (%d in flight)" % n)
-    else:
-        r.set("state", "down")
-        r.set("fix", "./setup --stage broker   (a workspace cannot ask for a bench run without it)")
-    return r.done()
-
-
-def unit_program(root, unit):
-    try:
-        with open(os.path.join(root, "host", "units", unit)) as f:
-            for line in f:
-                if line.startswith("ExecStart="):
-                    for tok in line.split():
-                        if tok.startswith("@WK_ROOT@/"):
-                            return tok[len("@WK_ROOT@/"):]
-    except OSError:
-        pass
-    return ""
-
-
-def unit_stale(root, unit, run=None):
-    """A service keeps the program it exec'd: this tree's copy newer than the process is code nobody can read in the tree."""
-    prog = unit_program(root, unit)
-    if not prog:
-        return False
-    r = (run or Local().run)(["systemctl", "--user", "show", "-p", "MainPID", "--value", unit])
-    pid = r.out.strip()
-    if not r.ok or not pid.isdigit() or pid == "0" or not os.path.isdir("/proc/" + pid):
-        return False
-    try:
-        return os.path.getmtime(os.path.join(root, prog)) > os.path.getmtime("/proc/" + pid)
-    except OSError:
-        return False
-
-
-def services():
-    return (("wk-proxy.service", "egress proxy", "workspaces have no network without it"),
-            ("wk-github-inject.service", "credential injector", "'%s pr', 'gh' and claude in a workspace get no credential" % project.get("PR_TOOL")),
-            ("wk-push.service", "push service", "'git push' in a workspace is refused"))
-
-
-def service_records(root, machine, run=None):
-    run = run or Local().run
-    out = []
-    if not shutil.which("systemctl"):
-        return out
-    for unit, label, cost in services():
-        if not run(["systemctl", "--user", "cat", unit]).ok:
-            continue
-        r = Rec("service", machine=machine, name=label)
-        if not run(["systemctl", "--user", "is-active", "--quiet", unit]).ok:
-            r.set("state", "stopped")
-            r.set("fix", "systemctl --user start %s   (%s)" % (unit[:-len(".service")], cost))
-        elif unit_stale(root, unit, run):
-            r.set("state", "running code older than this checkout")
-            r.set("fix", "./setup   (restarts it on the program that is in the tree now)")
-        else:
-            r.set("state", "running")
-        out.append(r.done())
-    return out
-
-
-def lock_records(store, machine, alive):
-    out = []
-    try:
-        names = sorted(f for f in os.listdir(store.lock_dir()) if f.endswith(".lock"))
-    except OSError:
-        return out
-    for f in names:
-        path = os.path.join(store.lock_dir(), f)
-        try:
-            line = os.readlink(path)
-        except OSError:
-            line = ""
-        pid = holder_pid(path)
-        r = Rec("lock", machine=machine, resource=f[:-len(".lock")])
-        r.opt("pid", str(pid) if pid else "")
-        m = re.search(r"cmd=(.*)$", line)
-        r.opt("cmd", m.group(1) if m else "")
-        m = re.search(r"at=(\S+)", line)
-        r.opt("at", m.group(1) if m else "")
-        r.raw("alive", bool(pid and alive(pid)))
-        out.append(r.done())
-    return out
-
-
-def push_record(store, machine, forks, in_vm):
-    """The deploy keys held on disk, where only the push service reads them: no key reaches a workspace.
-    The podman VM mounts only their public halves, so it has no row."""
-    if in_vm or not forks:
-        return None
-    held = store.keyring_push_dir()
-    keys = sum(1 for f in forks if os.path.isfile(os.path.join(held, "build_key_" + f)))
-    absent = len(forks) - keys
-    r = Rec("switch", machine=machine, name="push credentials")
-    r.set("state", "keys held" if not absent else "some keys held" if keys else "no keys")
-    try:
-        pat = secretfile.present(os.path.join(held, "github-pat")) == 0
-    except SystemExit:
-        pat = False
-    r.set("detail", "%d deploy key(s), %d absent, %s -- no key reaches a workspace; the push service holds them"
-          % (keys, absent, "an API token" if pat else "no API token"))
-    return r.done()
-
-
-def capacity_record(machine, where, cores, mem_mb, free_mb, load):
-    r = Rec("capacity", machine=machine)
-    r.opt("where", where)
-    if cores and free_mb:
-        r.set("cores", cores)
-        r.opt("mem_mb", mem_mb)
-        r.set("free_mb", free_mb)
-        r.opt("load", load)
-    else:
-        r.set("note", "could not measure %s on %s" % ("load/memory" if where is None else "cores/memory", machine))
-    return r.done()
-
-
-def capacity_here(name, where, res):
-    try:
-        cores, mem, free = str(res.host_cores()), str(res.host_mem_mb()), str(res.avail_mem_mb())
-    except Refused:
-        cores = mem = free = ""
-    return capacity_record(name, where, cores, mem, free, "%.2f" % os.getloadavg()[0])
-
-
-def quiesce_dir(store):
-    return store.env.get("WK_QUIESCE_STATE") or os.path.join(store.state_dir(), "quiesce")
-
-
-def quiesce_record(qdir, machine):
-    bits = [word for f, word in (("caffeinate.pid", "caffeinate"), ("daemons_paused", "daemons-paused"), ("raiser.pid", "raiser"))
-            if os.path.isfile(os.path.join(qdir, f))]
-    if not bits:
-        return None
-    r = Rec("switch", machine=machine, name="quiesce", state="on", detail=" ".join(bits))
-    r.warn("this machine is quiesced -- 'wk quiesce off' puts it back")
-    return r.done()
-
-
-def bench_records(store, machine, alive):
-    """Every running bench task, else the newest, its state recomputed from its runs (lib/wk/bench/record.py)."""
-    found = bench_record.homes(store)
-    tasks = list(found)
-    running = [t for t in tasks if alive(holder_pid(store.lock_path("bench-task-" + t)))]
-    out = []
-    for t in running or tasks[-1:]:
-        path = found[t]
-        try:
-            st = bench_record.task_state(path, t in running)
-        except (Exception, SystemExit) as e:
-            r = Rec("bench", machine=machine, task=t, path=path, state="broken")
-            r.warn("task %s cannot be read (%s): %s" % (t, path, e))
-            out.append(r.done())
-            continue
-        r = Rec("bench", machine=machine, task=t, path=path, state=st["state"], summary=st["summary"],
-                subject=bench_record.subject_line(st["doc"]))
-        if st["state"] == "incomplete":
-            r.warn("task %s stopped before every planned run ended -- wk bench report %s says what is there" % (t, t))
-        out.append(r.done())
-    return out
-
-
-def fleet_probe(root, name, cap, env=None):
-    """The board's boot driver (wk.boot.cli fleet-probe) asked under a ceiling: None when it did not answer in `cap` seconds."""
-    env = os.environ if env is None else env
-    r = Local().run(["env", "PYTHONPATH=" + os.path.join(str(root), "lib"), "WK_SSH_TIMEOUT=" + str(fleet_timeout(env)),
-                     sys.executable, "-m", "wk.boot.cli", "fleet-probe", name], input="", timeout=cap)
-    if r.rc == TIMED_OUT:
-        return None
-    if not r.ok:
-        return {"error": (r.err.strip().splitlines() or ["exit %d" % r.rc])[-1]}
-    try:
-        return json.loads(r.out)
-    except ValueError:
-        return {"error": "the probe answered no JSON"}
-
-
-def armed_desync(fields, clock):
-    """The record claims an arm the machine has moved past: another boot id (cmd/boot's 'spent' test), or
-    unconsumed past ARM_STALE_SECONDS; an unreadable stamp is no evidence the arm is current."""
-    if fields.get("armed_boot") and fields.get("boot_id") and fields["armed_boot"] != fields["boot_id"]:
-        return True
-    at = fields.get("armed_at")
-    if not at:
-        return False
-    try:
-        age = clock.now() - calendar.timegm(time.strptime(at, "%Y-%m-%dT%H:%M:%SZ"))
-    except ValueError:
-        return True
-    return age > ARM_STALE_SECONDS
-
-
-def fleet_record(name, conf, fields, cap, reach=None, clock=None):
-    """`fields` is fleet_probe's answer; `reach` answers (tailnet, direct) for a board the probe never described."""
-    if fields == {}:
-        return None
-    r = Rec("fleet", machine=name, conf="machines/%s.conf" % name)
-    if fields is None or "error" in fields:
-        r.set("role", conf.get("role") or "workstation")
-        r.set("mode", "no answer within %ss" % cap if fields is None else "probe failed: %s" % fields["error"])
-        tailnet, direct = reach(name) if reach else ("", "")
-        r.opt("tailnet", tailnet)
-        r.opt("direct", direct)
-        return r.done()
-    r.set("role", fields["role"])
-    r.set("mode", fleet_mode(fields["probeable"], fields["mode"]))
-    r.set("media", fields["media"])
-    r.opt("armed", fields["armed"])
-    if fields.get("armed"):
-        r.opt("armed_by", fields.get("armed_by"))
-        r.opt("armed_at", fields.get("armed_at"))
-        if armed_desync(fields, clock or Clock()):
-            r.raw("armed_desync", True)
-    r.opt("tailnet", fields["tailnet"])
-    r.opt("direct", fields["direct"])
-    r.opt("reprovision", fields["reprovision"])
-    return r.done()
-
-
-def self_role(root, machine):
-    """This machine's own declared role; workstation is the fleet probe's own default (wk.boot.cli.CONF_DEFAULTS)."""
-    try:
-        conf = fleet.Fleet(root).load(machine) or {}
-    except fleet.ConfError:
-        conf = {}
-    return conf.get("role") or "workstation"
-
-
-def self_mode_word(env):
-    """host/bench, from the marker every booted bench image writes; its
-    absence is the host install, the same default lib/common.sh assumes."""
-    fields = kv_file(images.marker(env))
-    return "bench %s" % fields["id"] if fields.get("id") else "host"
-
-
-def self_fleet_record(root, env, machine):
-    """Read locally, never by probing this machine as a board."""
-    r = Rec("fleet", machine=machine, role=self_role(root, machine),
-            mode=fleet_mode("yes", self_mode_word(env)))
-    r.raw("self", True)
-    return r.done()
-
-
-def self_line(root, env, colour):
-    r = self_fleet_record(root, env, record.row_label(env) or record.machine_name(env))
-    return statusview.self_line_text(r["machine"], r["role"], r["mode"], colour)
-
-
-def machine_confs(root, env):
-    """Every bench machine with a driver and a note, as `wk boot --list` lists them."""
-    f = fleet.Fleet(root, env)
-    out = []
-    for n in f.names(fleet.BENCH_KINDS):
-        conf = f.load(n)
-        if conf.get("driver") and conf.get("note"):
-            out.append((n, conf))
-    return out
-
-
-def wait_until_idle(poll, timeout, interval, clock, label, info, warn):
-    """Polls while `poll` says busy (2); once it has, another answer ends the wait only when the next poll repeats it,
-    since one walk whose probe failed reads 4 of a build still running. `timeout` seconds of elapsed time, not of
-    sleeps, ends the wait without a verdict."""
-    start = clock.monotonic()
-    said, pending = False, None
-    while True:
-        rc = poll()
-        if rc != 2 and (not said or rc == pending):
-            return rc
-        pending = None if rc == 2 else rc
-        if not said:
+    def idle():
+        rc = seen["rc"] = poll()
+        if rc != 2 and (not seen["said"] or rc == seen["pending"]):
+            return True
+        seen["pending"] = None if rc == 2 else rc
+        if not seen["said"]:
             info("waiting for%s to finish (wk status says busy)" % (" '%s'" % label if label else ""))
-            said = True
-        elapsed = int(clock.monotonic() - start)
-        if timeout > 0 and elapsed >= timeout:
-            if rc == 2:
-                warn("still busy after %ds -- the work continues; this only stopped waiting" % elapsed)
-            return rc
-        clock.sleep(interval)
+            seen["said"] = True
+        return False
+
+    if not clock.wait_until(idle, timeout or None, WAIT_SECONDS) and seen["rc"] == 2:
+        warn("still busy after %ds -- the work continues; this only stopped waiting" % timeout)
+    return seen["rc"]
 
 
 class Walk:
-    """One `wk status`: a job per place this machine lists, plus the fleet's devices."""
+    """One `wk status`: a job per place this machine lists."""
 
-    def __init__(self, root, name=None, fleet=True, devices=True, env=None, clock=None, reg=None):
+    def __init__(self, root, name=None, env=None, clock=None, reg=None):
         self.root = str(root)
         self.env = os.environ if env is None else env
         self.clock = clock or Clock()
         self.reg = reg or places.Registry(self.root, env=self.env)
         self.name = name
-        self.fleet = fleet and not name
-        self.devices = devices and not name
         self.this_machine = record.row_label(self.env) or record.machine_name(self.env)
         self.is_self = record.host_self(self.env) or not record.row_label(self.env)
-        self.in_vm = in_vm(self.env)
         self.lock = threading.Lock()
-        self.tasks_said = set()
-        self.tooling_said = False
-        self.bases = {}
-        self.health_owner = None
+        self.tasks_said, self.bases, self._loaded = set(), {}, {}
         self.worst = 0
-        self._git = None
-        self._loaded = {}
-        self._reach = reach.Reach(self.reg.machine, self.env, self.reg.fleet)
 
     def places(self):
-        names = self.reg.walk()
-        return sorted(names, key=lambda t: (RANK.get(self.reg.kind(t), 3), t))
+        return sorted(self.reg.walk(), key=lambda t: (RANK.get(self.reg.kind(t), 3), t))
 
     def driver(self, name):
         """The one driver object per place for this walk, so a machine is probed at most once."""
@@ -623,45 +144,32 @@ class Walk:
                 self._loaded[name] = self.reg.load(name)
             return self._loaded[name]
 
-    def machine_of_place(self, name):
-        try:
-            return self.machine_of(self.driver(name))
-        except LookupError:
-            return self.this_machine
-
     def machine_of(self, driver):
-        if driver.kind == "remote" and not driver.is_local and driver.host:
-            return driver.name
-        return self.this_machine
+        return driver.name if driver.kind == "remote" and not driver.is_local and driver.host else self.this_machine
 
-    def _job(self, tname, name):
+    def _job(self, tname):
         def run():
             try:
                 driver = self.driver(tname)
             except LookupError as e:
-                return [Rec("raw", machine=self.this_machine, text=str(e)).done()], 4
+                return [rec("raw", machine=self.this_machine, text=str(e))], 4
             try:
-                return self.report_target(driver, name)
+                return self.report(driver)
             except Exception as e:
-                return [Rec("raw", machine=self.machine_of(driver), text="%s: %s: %s" % (tname, type(e).__name__, e)).done()], 4
+                return [rec("raw", machine=self.machine_of(driver), text="%s: %s: %s" % (tname, type(e).__name__, e))], 4
         return run
 
     def records(self, markers=True):
         """The stream: a plan, each job's records as it ends and a flush for it, then the exit; `markers=False` is the batch in start order."""
-        if not self.name:
-            yield self_fleet_record(self.root, self.env, self.this_machine)
-        if self.name:
-            tname = dispatch_place(self.env) or self.reg.ws_place(self.name)
-            jobs = [(tname, self._job(tname, self.name))]
-        else:
-            names = self.places()
-            self.health_owner = next((t for t in names if self._is_here(t)), None)
-            jobs = [(t, self._job(t, None)) for t in names]
-            if self.devices:
-                jobs += [("devices", self.fleet_devices)]
+        names = [dispatch_place(self.env) or self.reg.ws_place(self.name)] if self.name else self.places()
+        jobs = [(t, self._job(t)) for t in names]
         if markers:
-            plan = [{"job": t, "machine": self.machine_of_place(t)} for t, _ in jobs if t != "devices"]
-            plan += [{"job": t} for t, _ in jobs if t == "devices"]
+            plan = []
+            for t, _ in jobs:
+                try:
+                    plan.append({"job": t, "machine": self.machine_of(self.driver(t))})
+                except LookupError:
+                    plan.append({"job": t, "machine": self.this_machine})
             yield {"kind": "plan", "jobs": plan}
         worst = 0
         with ThreadPoolExecutor(max_workers=max(1, len(jobs))) as pool:
@@ -680,90 +188,23 @@ class Walk:
             pass
         return self.worst
 
-    def _is_here(self, tname):
-        try:
-            return self.driver(tname).is_here()
-        except LookupError:
-            return False
-
-    def report_target(self, driver, name):
-        out, worst = [], 0
+    def report(self, driver):
         gm = self.machine_of(driver)
-        method = METHOD.get(driver.kind, "native")
-        out.append(self.machine_seen(gm))
-        side, why = driver.probe()
-        has_wk = side == "answering"
-        if has_wk:
-            args = ["status", "--no-devices" if gm == self.this_machine else "--no-fleet", "--records"] + ([name] if name else [])
-            recs, rc = self.delegate(driver, gm, args)
-            out += recs
-            recs, w = self.tasks(driver.records(self.clock), name)
-            out += recs
-            rc = bump(rc, w)
-            if gm != self.this_machine and self.fleet:
-                out += self.report_machine(driver, gm, has_wk)
-                out.append(self.capacity_remote(driver, gm))
-            return out, bump(worst, rc)
-        if side == "unreachable":
-            worst = bump(worst, 4)
-        if side in ("unreachable", "stopped"):
-            out.append(Rec("raw", machine=gm, text="%s: %s" % (driver.name, far_side_reason(driver, side, why))).done())
-            return out, worst
-        records = driver.records(self.clock)
-        if name:
-            r, w = self.workspace(driver, gm, method, name, records)
+        out = [rec("machine", name=gm, self=gm == self.this_machine and self.is_self or None)]
+        a = fleet.ask(driver, ["status", "--records"] + ([self.name] if self.name else []), dict(os.environ, WK_ROW_LABEL=gm))
+        if a.rc is not None:
+            return out + list(statusview.strip_markers(statusview.records_from_lines(clean(a.out).splitlines()))), bump(0, a.rc)
+        if a.why and a.side != "no-wk":   # a box with no wk of its own is read from here
+            return out + [rec("raw", machine=gm, text="%s: %s" % (driver.name, a.why))], 4 if a.side == "unreachable" else 0
+        records, worst = driver.records(self.clock), 0
+        names = [self.name] if self.name else driver.workspaces()
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            rows = list(pool.map(lambda ws: self.workspace(driver, gm, ws, records), names))
+        for r, w in rows:
             out.append(r)
             worst = bump(worst, w)
-        else:
-            names = driver.workspaces()
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                rows = list(pool.map(lambda ws: self.workspace(driver, gm, method, ws, records), names))
-            for r, w in rows:
-                out.append(r)
-                worst = bump(worst, w)
-        recs, w = self.tasks(records, name)
-        out += recs
-        worst = bump(worst, w)
-        if self.fleet:
-            out += self.report_machine(driver, gm, has_wk)
-            if gm == self.this_machine and driver.name == self.health_owner:
-                out += self.report_self()
-                out += self.health(driver, gm)
-        return out, worst
-
-
-    def machine_seen(self, m):
-        r = Rec("machine", name=m)
-        if m == self.this_machine and self.is_self:
-            r.raw("self", True)
-        else:
-            tailnet, direct = self.reach(m)
-            r.opt("tailnet", tailnet)
-            r.opt("direct", direct)
-        conf = self.reg.conf_path(m)
-        if os.path.isfile(conf):
-            r.set("conf", os.path.relpath(conf, self.root))
-        return r.done()
-
-    def reach(self, m):
-        return self._reach.tailnet(m), self._reach.without_tailnet(m)
-
-    def reach_fleet(self, m):
-        return self._reach.fleet_line(m), self._reach.without_tailnet(m)
-
-    def delegate(self, driver, gm, args):
-        """A machine of its own answers in its own records, stripped of the markers that end its jobs."""
-        env = dict(os.environ, WK_ROW_LABEL=gm, WK_NO_DELEGATE="1")
-        rc, out = driver.wk(*args, env=env, quiet=True)
-        out = clean(out)
-        if out.lstrip().startswith("{"):
-            return list(statusview.strip_markers(statusview.records_from_lines(out.splitlines()))), rc
-        recs = []
-        if out.strip():
-            r = Rec("raw", machine=gm, text=out.strip())
-            r.warn("this machine's wk did not answer in records -- its own words are above.")
-            recs.append(r.done())
-        return recs, rc
+        recs, w = self.tasks(records)
+        return out + recs, bump(worst, w)
 
     def current_base(self, driver):
         with self.lock:
@@ -771,151 +212,53 @@ class Walk:
                 self.bases[driver.name] = Snapshots(driver.store, driver.store_machine).current()
             return self.bases[driver.name]
 
-    def remake_hint(self, driver, ws):
-        if self.reg.in_remote_host():
-            return "from the workstation:  wk new %s --on %s" % (ws, self.reg.self_place())
-        return "wk new %s --on %s" % (ws, driver.name)
-
-    def workspace(self, driver, gm, method, ws, records):
-        r = Rec("workspace", machine=gm, method=method, name=ws)
-        worst = 0
+    def workspace(self, driver, gm, ws, records):
         info = driver.info(ws)
         st = driver.state(ws, info=info)
-        r.set("state", info if st == "present" else st)
-        r.set("ws", st)
-        r.opt("branch", driver.branch(ws))
-        probe, repo = {}, driver.repo(ws)
+        r = rec("workspace", machine=gm, method=METHOD.get(driver.kind, "native"), name=ws, state=info if st == "present" else st,
+                ws=st, branch=driver.branch(ws))
+        worst, probe, repo = 0, {}, driver.repo(ws)
         if st == "present":
             script = WS_PROBE.replace("@SRC@", shlex.quote(driver.src(ws))).replace("@BASE@", places.upstream_line_body())
             probe = kv(driver.exec(ws, ["sh", "-c", script]).out)
             origin = probe.get("origin", "")
             if origin and origin != repo.origin(driver.here, self.root):
-                r.warn("origin is %s, not upstream -- 'wk sync %s --fix'" % (origin, ws))
-            for f in ("dirty", "untracked", "unpushed", "upstream", "behind", "ahead"):
-                if probe.get(f) and probe[f] != "0":
-                    r.set(f, probe[f])
+                note(r, "origin is %s, not upstream -- 'wk sync %s --fix'" % (origin, ws), "warn")
+            r.update((f, probe[f]) for f in ("dirty", "untracked", "unpushed", "upstream", "behind", "ahead") if probe.get(f, "0") != "0")
         base = (places.image_base(self.root, ws) or (repo.name if not repo.snapshot else None)
                 or (probe.get("wsbase") if probe.get("wsbase") != "?" else None))
-        r.opt("base", base)
+        if base:
+            r["base"] = base
         snap = driver.store.ws_snapshot_id(ws)
         if snap:
-            r.set("snap", snap)
+            r["snap"] = snap
             cur = self.current_base(driver)
             if cur and cur != snap:
-                r.set("snap_behind", len([b for b in Snapshots(driver.store, driver.store_machine).ids() if b > snap]))
-        if st == "creating":
-            new = records.find("new", ws)
-            if new and new.alive(None):
-                r.note("being created right now -- its 'new' task below says how far it is")
-                worst = bump(worst, 2)
-            else:
-                r.warn("creation never finished, and nothing is creating it now")
-                r.note("usually there is nothing in one worth keeping -- remake it:")
-                r.note("  " + self.remake_hint(driver, ws))
-                r.note("or, if the checkout is complete and only the marker is missing,")
-                r.note("any command that gates on it takes --force")
-                worst = bump(worst, 4)
+                r["snap_behind"] = len([b for b in Snapshots(driver.store, driver.store_machine).ids() if b > snap])
+        new = records.find("new", ws) if st == "creating" else None
+        if st == "creating" and new and new.alive(None):
+            note(r, "being created right now -- its 'new' task says how far it is")
+            worst = 2
+        elif st == "creating":
+            note(r, "creation never finished, and nothing is creating it now: %s  (or --force on a complete checkout)"
+                 % driver.remake_hint(ws), "warn")
+            worst = 4
         elif st == "broken":
-            r.warn("the record says a %s workspace and the machine has none --\n      something outside wk removed it "
-                   "(podman rm, tart delete, an rm -rf over there)" % driver.name)
-            r.note("clear the record:  wk rm %s" % ws)
+            note(r, "the record says a %s workspace and the machine has none: something outside wk removed it.  wk rm %s"
+                 % (driver.name, ws), "warn")
             if driver.store_machine.isdir(driver.store.ws_dir(ws)):
-                r.note("what is left of it here: %s" % driver.store.ws_dir(ws))
-            worst = bump(worst, 4)
+                note(r, "what is left of it here: %s" % driver.store.ws_dir(ws))
+            worst = 4
         elif st == "unreachable":
-            r.warn("the machine behind '%s' did not answer within %ss" % (driver.name, reach.ssh_timeout(self.env)))
-            r.note("this is not 'absent': nothing about the workspace was checked at all,")
-            r.note("and anything below is the last thing this machine wrote about it")
-            worst = bump(worst, 4)
+            note(r, "the machine behind '%s' did not answer, so nothing about the workspace was checked" % driver.name, "warn")
+            worst = 4
         build = records.find("build", ws)
-        r.raw("subs", [{"kind": "build", "state": build.verdict("capped"), "preset": build.field("preset")}] if build else [])
-        return r.done(), worst
+        r["subs"] = [{"kind": "build", "state": build.verdict("capped"), "preset": build.field("preset")}] if build else []
+        return r, worst
 
-    def tasks(self, records, only):
+    def tasks(self, records):
         with self.lock:
-            key = str(records.root)
-            if key in self.tasks_said:
+            if str(records.root) in self.tasks_said:
                 return [], 0
-            self.tasks_said.add(key)
-        return task_records(records, only, self.clock)
-
-    def git_here(self):
-        with self.lock:
-            if self._git is None:
-                head = Local().run(["git", "-C", self.root, "rev-parse", "--short", "HEAD"])
-                st = Local().run(["git", "-C", self.root, "status", "--porcelain"])
-                self._git = (head.out.strip() if head.ok else "", bool(st.ok and st.out.strip()))
-            return self._git
-
-    def report_machine(self, driver, gm, has_wk):
-        if driver.kind == "remote" and has_wk:
-            ver = kv(driver.wk("doctor", "--probe-tools", quiet=True)[1])
-            keys = clean(driver.wk("key", "fingerprints", quiet=True)[1])
-            peer = driver.peer
-        elif driver.name == self.reg.default():
-            self.tooling_said = True
-            ver = tools.identity(self.root, Local())
-            keys = Local().run([os.path.join(self.root, "cmd", "key"), "fingerprints"]).out
-            peer = False
-        else:
-            return []
-        out = []
-        if ver:
-            expect, dirty_here = self.git_here()
-            out.append(tools_fact(ver, expect, gm, driver.name, in_vm=self.in_vm, peer=peer, dirty_here=dirty_here))
-        for line in keys.splitlines():
-            if line.strip():
-                out.append(Rec("fact", machine=gm, type="key", text=line).done())
-        return out
-
-    def report_self(self):
-        with self.lock:
-            if self.tooling_said:
-                return []
-            self.tooling_said = True
-        ver = tools.identity(self.root, Local())
-        if not ver:
-            return []
-        r = Rec("fact", machine=self.this_machine, type="wk-tools", sha=ver.get("sha", ""))
-        r.raw("dirty", ver.get("dirty") == "yes")
-        r.raw("insync", True)
-        return [r.done()]
-
-    def capacity_remote(self, driver, m):
-        return capacity_record(m, None, str(driver.cores()), "", str(driver.mem_mb()), str(driver.load()))
-
-    def health(self, driver, m):
-        store = driver.store
-        alive = Local().alive
-        out = []
-        out.append(disk_record(store, m, self.in_vm, len(Snapshots(store, Local()).unreferenced())))
-        if driver.kind == "container":
-            local = driver.sdk_local()
-            if local:
-                cap = fleet_timeout(self.env)
-                out.append(sdk_record(m, local, driver.sdk_upstream(timeout=cap), cap))
-        if not self.in_vm:
-            out.append(broker_record(store, m, alive))
-            out.append(injector_record(store, m))
-        out += service_records(self.root, m)
-        out += lock_records(store, m, alive)
-        keys = [r[0] for r in secrets.push_keys()]
-        out.append(push_record(store, m, keys, self.in_vm))
-        out.append(capacity_here(m, "the podman VM" if self.in_vm else "", Resources(Local(), self.env)))
-        out.append(quiesce_record(quiesce_dir(store), m))
-        out += bench_records(store, m, lambda pid: bool(pid and alive(pid)))
-        return [r for r in out if r]
-
-    def fleet_devices(self):
-        if self.reg.in_workspace():
-            return [], 0
-        cap = fleet_timeout(self.env) * 5
-        confs = [(n, c) for n, c in machine_confs(self.root, self.env) if n != self.this_machine]
-
-        def one(item):
-            name, conf = item
-            return fleet_record(name, conf, fleet_probe(self.root, name, cap), cap, self.reach_fleet, self.clock)
-
-        with ThreadPoolExecutor(max_workers=max(1, len(confs))) as pool:
-            recs = list(pool.map(one, confs))
-        return [r for r in recs if r], 0
+            self.tasks_said.add(str(records.root))
+        return task_records(records, self.name, self.clock)

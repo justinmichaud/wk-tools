@@ -16,6 +16,7 @@ guard_jobs() {
     printf '%s' "$jobs"
 }
 
+# WK_MEM_BUDGET_MB and WK_MEM_FLOOR_MB are what `wk build --mem-budget` and `--mem-floor` hand the workspace.
 _guard_watch() { # <pid> <jobs> -- the watchdog is pointed at <pid>, which `exec` preserves
     local budget watchdog
     if [ -n "${WK_MEM_BUDGET_MB:-}" ]; then
@@ -27,7 +28,7 @@ _guard_watch() { # <pid> <jobs> -- the watchdog is pointed at <pid>, which `exec
     watchdog="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mem-watchdog.sh"
     [ -x "$watchdog" ] || return 0
     "$watchdog" "$1" "$budget" "${WK_MEM_FLOOR_MB:-2048}" &
-    echo "wk: memory watchdog: budget ${budget}MB, floor ${WK_MEM_FLOOR_MB:-2048}MB, sampled every ${WK_MEM_INTERVAL:-30}s" >&2
+    echo "wk: memory watchdog: budget ${budget}MB, floor ${WK_MEM_FLOOR_MB:-2048}MB, sampled every 30s" >&2
 }
 
 _guard_prefix() {   # ionice keeps the build off the desktop's I/O path and choom makes the OOM killer choose the build over the session; neither exists on macOS
