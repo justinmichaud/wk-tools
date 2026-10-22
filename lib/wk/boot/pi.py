@@ -85,7 +85,7 @@ class PiTryboot(Driver):
     on the rescue's SD beside a `tryboot.txt` that `reboot "0 tryboot"` makes the firmware read."""
 
     name = "pi-tryboot"
-    on_medium = True
+    on_medium = armed_by_tryboot = True
     system_parts = (1, 3)
     failsafe = "tryboot-self-disarm.sh"
 
@@ -111,12 +111,6 @@ class PiTryboot(Driver):
         if not want or staged != want:
             act.die("the staging on %s's SD boots root=%s, not the selected system's root=%s (on %s)"
                     % (self.c("name"), staged or "?", want or "?", p))
-
-    def reboot(self, armed=False):
-        r = self.ch.reboot(tryboot=armed)
-        if not r.ok:
-            raise act.Refused(r.rc)
-        return 0
 
     def disarm(self, spent=False):
         self.tryboot("disarm", mutates=True)

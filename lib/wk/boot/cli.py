@@ -281,6 +281,7 @@ def fleet_probe(root, name, env):
     try:
         if d.probeable():
             out["mode"] = d.probe()
+            out["sip"] = d.sip()
             if d.mode == "host":
                 rec = kv(d.record_read())
                 out.update(armed=rec.get("image", ""), armed_by=rec.get("armed_by", ""), armed_at=rec.get("armed_at", ""),

@@ -347,6 +347,10 @@ def device(root, name, env, machine, probe=fleet_probe, answers=None):
     else:
         yield ok("not armed")
     yield note("media: %s" % fields.get("media", "unknown"))
+    for side, verb in (("host", "enable"), ("bench", "disable")) if fields.get("sip") is not None else ():
+        got = fields["sip"].get(side)
+        yield unk("SIP on the %s install is unread: csrutil reports only the running install" % side, "wk doctor %s while it runs" % name) \
+            if not got else check("SIP on the %s install: %s" % (side, got), "csrutil %s in recoveryOS, that install selected" % verb, got == verb + "d")
     if conf["kind"] != "board" or not fields["mode"]:
         return
     dest = conf.get("bench_ssh") if fields["mode"].startswith("bench") else conf.get("ssh") or name
@@ -358,7 +362,6 @@ def device(root, name, env, machine, probe=fleet_probe, answers=None):
 
 
 def named(rows, name):
-    """`rows` with the guest they are about named in each remedy."""
     return [(st, what, remedy.replace("<name>", name)) for st, what, remedy in rows]
 
 
@@ -424,7 +427,6 @@ def load_rows(probe, name):
 
 
 def guest_rows(vm, ws):
-    """A macOS guest's base, desktop and load."""
     from wk.sysimage import guestbase
     rows = findings(guestbase.Base(vm).findings())
     g = vm.guest(ws)
@@ -455,9 +457,6 @@ class Doctor:
         self.reg = places.Registry(root, self.env, self.machine)
         self.container = self.reg.load("container")
         self._paths = None
-
-    def hostname(self):
-        return record.host_name(self.machine)
 
     def want(self):
         conf = os.path.join(self.root, "dotfiles", "gitconfig")

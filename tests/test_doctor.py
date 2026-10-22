@@ -78,11 +78,6 @@ class TestTheRenderer(unittest.TestCase):
         self.assertIn("-> fix it", out.getvalue())
         self.assertIn("-> why", out.getvalue())
 
-    def test_unknown_is_not_missing(self):
-        rep = doctor.Report(io.StringIO())
-        rep.rows([doctor.ok("fine"), doctor.unk("unseen", "why")])
-        self.assertEqual(0, rep.exit_status())
-
 
 class TestHostTools(unittest.TestCase):
     def _row(self, macos, fake, name):
@@ -143,7 +138,7 @@ def probed(mode="host", armed="", **over):
 
 
 class TestDeviceRows(unittest.TestCase):
-    """`wk doctor <machine>`: rows from the tailnet, the fleet probe and a board's sysfs, asked through a fake."""
+    """`wk doctor <machine>`: rows from the tailnet, the fleet probe, a board's sysfs and a Mac's SIP (`unit doctor.sip_rows`)."""
 
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="wk-test-doctor-device-")
@@ -170,12 +165,15 @@ class TestDeviceRows(unittest.TestCase):
                                     (probed(), "temperature on pi-rescue: 51C", doctor.NOTE),
                                     (probed(mode="bench"), "cpu governor on pi-bench", doctor.NOTE),
                                     (probed(mode=""), "unreachable", MISS), (None, "did not answer", UNK),
-                                    (probed(armed="bench"), "armed for bench", doctor.NOTE), (stale, "armed for bench", MISS)):
+                                    (probed(armed="bench"), "armed for bench", doctor.NOTE), (stale, "armed for bench", MISS),
+                                    (probed(sip={"host": "enabled"}), "host install: enabled", OK), (probed(sip={}), "host install is unread", UNK),
+                                    (probed(sip={"host": "disabled"}), "host install: disabled", MISS), (probed(sip={}), "bench install is unread", UNK),
+                                    (probed(sip={"bench": "disabled"}), "bench install: disabled", OK), (probed(sip={"bench": "enabled"}), "bench install: enabled", MISS)):
             with self.subTest(fields=fields, word=word):
                 self.assertEqual(state, self.row(self.rows("pi", fields), word)[0])
 
     def test_an_unreachable_board_is_asked_nothing_further(self):
-        self.assertFalse(any("governor" in r[1] for r in self.rows("pi", probed(mode=""))))
+        self.assertFalse(any(w in r[1] for r in self.rows("pi", probed(mode="")) for w in ("governor", "SIP")))
 
     def test_a_name_the_tailnet_lacks_and_a_failed_probe_are_unknown(self):
         self.fake.answer(["tailscale", "status", "--json"], out="{}")

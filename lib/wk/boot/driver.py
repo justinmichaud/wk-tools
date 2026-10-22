@@ -169,7 +169,7 @@ class Driver:
     is the firmware default, so a reboot does not spend it and only a person's pick leaves it (`way_back`)."""
 
     name, record_at = "", RECORD
-    arm_from_bench = on_medium = sticky = False
+    arm_from_bench = on_medium = sticky = armed_by_tryboot = False
     system_parts = (1,)
     failsafe = None
     selects_by_partition = False
@@ -242,9 +242,6 @@ class Driver:
     def boot_part(self):
         return part(self.c("device"), 1)
 
-    def system_part(self, n):
-        return part(self.c("device"), n)
-
     def slot(self, p):
         n = int(partno(p) or 0)
         return SLOTS[self.system_parts.index(n)] if n in self.system_parts else "?"
@@ -271,7 +268,7 @@ class Driver:
     def systems(self):
         found = []
         for n in self.system_parts:
-            p = self.system_part(n)
+            p = part(self.c("device"), n)
             ident = self.device_image(p)
             if ident is None:
                 return None
@@ -317,9 +314,8 @@ class Driver:
         out = []
         for p, ident in systems:
             dump = self.medium_read(p, "wk-diag.txt")
-            out.append("== %s (%s) ==" % (ident, p))
-            out.append("(cannot read %s)" % p if dump is None
-                       else dump.rstrip("\n") or "(no wk-diag.txt -- the image did not get that far)")
+            out += ["== %s (%s) ==" % (ident, p), "(cannot read %s)" % p if dump is None
+                    else dump.rstrip("\n") or "(no wk-diag.txt -- the image did not get that far)"]
         return "\n".join(out)
 
     def armable(self, mode):
@@ -363,7 +359,7 @@ class Driver:
         act.log("  if it never appears, its own account of that boot says why: wk boot %s --diag" % name)
 
     def reboot(self, armed=False):
-        r = self.ch.reboot()
+        r = self.ch.reboot(tryboot=armed and self.armed_by_tryboot)
         if not r.ok:
             raise act.Refused(r.rc)
         return 0
@@ -389,6 +385,9 @@ class Driver:
 
     def reprovision(self):
         return ""
+
+    def sip(self):
+        return None
 
     # -- the record of intent, on the host install: once armed, nothing a probe reads has changed
     def record(self, do, input=None, mutates=False):

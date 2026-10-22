@@ -132,6 +132,11 @@ class MacVolume(MacDriver):
             return "%s MISSING on %s -- see 'wk help hardware'" % (what, self.c("ssh"))
         return "%s: neither %s nor %s answers" % (what, self.c("ssh"), self.bench_name())
 
+    def sip(self):
+        """{side: csrutil's word} for the install that answered: csrutil reports only the running install."""
+        m = re.search(r"status: (\w+)", self.ch.run(["csrutil", "status"], self.ch.side).out)
+        return {self.ch.side: m.group(1)} if m else {}
+
     def reprovision(self):
         build = "wk sysimage build %s" % self.c("image_preset")
         return "%s --create\n%s --install\n%s --provision\nwk boot %s" % (build, build, build, self.who())

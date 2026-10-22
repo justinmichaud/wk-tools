@@ -755,6 +755,9 @@ nothing. `wk boot mbp` restarts into it through the boot helper; `--status`
 reads the default, and the arm refuses while it is not the bench volume.
 The way back is the power-button pick, so `--back` refuses and `--disarm`
 clears the record only. `wk sysimage write` refuses a Mac's own disks.
+SIP is per install: on for the host, off for the bench volume, each set once
+in recoveryOS. `csrutil status` reads only the running install, so `wk doctor
+mbp` reports the one that answers and names the other unread.
 
 **benchvm — `mac-guest`.** A Tart guest rehearsing the Mac path. Nothing
 measured in it is comparable with hardware.

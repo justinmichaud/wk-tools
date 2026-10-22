@@ -23,7 +23,6 @@ from tests.support import REPO, bash, real_confs, requires_machine, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act  # noqa: E402
-from wk.act import Refused  # noqa: E402
 from wk.boot import cli, driver_class, drivers, open_driver  # noqa: E402
 from wk.boot.cli import load_conf  # noqa: E402
 from wk.boot.driver import BOOT_PRIV, CARD_PRIV, Channel, Driver, Onboard, disk_of, part, partno  # noqa: E402
@@ -650,6 +649,7 @@ class TestReports(unittest.TestCase):
         fake.enter_bench()
         d.probe()
         self.assertIn("tolken-bench is running from it", d.media())
+        self.assertEqual(d.sip(), {"bench": "enabled"})
 
     def test_silence_on_both_nodes_names_both_of_them(self):
         fake, d = volume()
@@ -667,6 +667,7 @@ class TestReports(unittest.TestCase):
                      "a plain reboot is expected to enter bench mode"):
             self.assertIn(want, ev)
         self.assertTrue(fake.fact_input.startswith("#!/usr/bin/env python3"), "lib/wk/mac.py travels on stdin")
+        self.assertEqual(d.sip(), {"host": "enabled"})
 
     def test_the_bench_system_is_the_volumes_marker(self):
         fake, d = volume()
@@ -1021,7 +1022,7 @@ def run(deb, release, out, machine=None):
     with contextlib.redirect_stderr(io.StringIO()) as err:
         try:
             got = buildroot.kernel_pin(machine or here(), str(deb), release, str(out))
-        except Refused as e:
+        except act.Refused as e:
             return subprocess.CompletedProcess(None, e.status, "", err.getvalue())
     return subprocess.CompletedProcess(None, 0, got, err.getvalue())
 

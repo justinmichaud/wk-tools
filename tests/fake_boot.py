@@ -16,11 +16,10 @@ from wk import act, fleet
 from wk.boot import drivers
 from wk.boot.driver import BOOT_PRIV, CARD_PRIV, Channel, disk_of, part
 from wk.boot.mac import MacGuest
-from tests.fakes import FakeClock
 from wk.kv import kv
 from wk.machine import Result
 from tests import fakes
-from tests.fakes import Fake, Killed
+from tests.fakes import Fake, FakeClock, Killed
 
 BTIME = ["sed", "-n", "s/^btime //p", "/proc/stat"]
 MACHINES = {"pi-sd": "rpi3", "pi-tryboot": "rpi4", "rpi5-usb": "rpi5", "mac-volume": "mbp", "mac-guest": "benchvm"}
@@ -153,8 +152,7 @@ class FakeBoard(Board, Channel):
         self.setup(conf, env, clock)
         Channel.__init__(self, REPO, self.conf, env=self.env, via=Fake("here"),
                          sides={s: (lambda s=s: self.machines[s]) for s in ("host", "bench")})
-        self.onboard = {}
-        self.fat, self.bootfs = {}, {}
+        self.onboard, self.fat, self.bootfs = {}, {}, {}
         self.roots = {self.conf["root"]: {"id": "", "role": "rescue"}}
         self.running = self.conf["root"]
         self.one_shot, self.tryboot, self.kept = None, False, False
@@ -370,7 +368,7 @@ class FakeMac(Board, Channel):
         self.roots = {"host": {"id": "", "group": HOST_GROUP, "name": "Macintosh HD"},
                       "bench": {"id": "", "group": BENCH_GROUP, "name": self.conf["volume"]}}
         self.running, self.firmware = "host", "bench"
-        self.attached, self.data, self.helper_is, self.said, self.fact_input = True, True, "current", {}, None
+        self.attached, self.data, self.helper_is, self.said, self.fact_input, self.sip = True, True, "current", {}, None, "enabled"
 
     def driver(self):
         return drivers()["mac-volume"](REPO, self.conf, self)
@@ -416,6 +414,8 @@ class FakeMac(Board, Channel):
                 return self.script(name, p, input)
         if argv[:3] == ["sudo", "-n", BOOT_PRIV]:
             return self.helper(argv[3])
+        if argv == ["csrutil", "status"]:
+            return Result(0, "System Integrity Protection status: %s.\n" % self.sip)
         if argv == ["sysctl", "-n", "kern.boottime"]:
             return Result(0, "{ sec = %d, usec = 451078 } Sat Aug 15 04:12:16 2026\n" % self.booted)
         if argv[:2] == ["python3", "-"]:

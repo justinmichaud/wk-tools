@@ -1009,8 +1009,9 @@ exist.
    - SIP is per install on Apple Silicon: `csrutil` in recoveryOS acts on the selected volume, so the
      bench volume runs with it off (the six `unstoppable` daemons in `bench/quiet/macos.tsv` then stop)
      while the host keeps it on. It is set once at install, by hand, like the tailscale key; `wk doctor
-     mbp` reads both (`unit doctor.sip_rows`).
-   Rows: `live boot.arm[mbp]`, `live doctor.bench_readiness[mbp]`, `live bench[mbp]`.
+     mbp` reads it on whichever install answers (`unit doctor.sip_rows`); the arm's refusal waits on a measured
+     way to read the bench volume's from the host (`live boot.sip_refusal[mbp]`).
+   Rows: `live boot.arm[mbp]`, `live doctor.bench_readiness[mbp]`, `live boot.sip_refusal[mbp]`, `live bench[mbp]`.
 
    *Group 4, ∥ Group 3*
 
@@ -1333,7 +1334,8 @@ decides is a row; one still open is listed under "Decisions for the user".
 | A container workspace holds `CAP_CHECKPOINT_RESTORE` in the init user namespace for mya (measured 2026-10-22: a workspace's bounding set is 800c05fb, without it, and nothing in the tree sets a capability yet), `wk build` sets the capability on `bin/mya` and `bin/testLibJSCTools` after an `ENABLE_MYA` build, the proxy allows the SDK's debuginfod and the workspace sets `DEBUGINFOD_URLS`, the SDK carries liblldb-dev, and the `testLibJSCTools` suites pass in a fresh workspace | 3 | `live mya.checkpoint_restore`, `unit mya.setcap_after_build` |
 | moose boots a bench system: a bench-role conf naming the peer, `--bootnext` and `toram` proven on its firmware, a yocto image with UEFI rules in `boot/check-boot-files.py` and `IMG_WATCHDOG`, a reboot refused while the BMC is unreachable, the UEFI entry in `wk doctor`'s machine-local section, and `--accept-routes` right on rpi5 and moose | 5 | `live boot[moose]` |
 | The Mac in bench mode caps its battery charge, turns the display off between legs and on for one, and `wk quiesce status` reports both | 5 | `live bench.mac_charge_cap`, `live bench.mac_screen` |
-| SIP is read on both Mac installs (`csrutil status`), on for the host and off for the bench volume, and `wk doctor mbp` reports each; `wk boot mbp` refuses to arm while the bench volume's is on | 5 | `unit doctor.sip_rows`, `live doctor.bench_readiness[mbp]` |
+| SIP is read on both Mac installs (`csrutil status`), on for the host and off for the bench volume, and `wk doctor mbp` reports each (`unit doctor.sip_rows` landed 2026-10-22: each install is read while it runs, the other one reported unread) | 5 | `live doctor.bench_readiness[mbp]` |
+| `wk boot mbp` refuses to arm while the bench volume's SIP is on. The arm runs on the host install and `csrutil status` reads only the running one, so how the host reads the bench volume's SIP is owed to a measurement on the Mac | 5 | `live boot.sip_refusal[mbp]` |
 | An A/B's rounds cross the variance factors (layout, env size, path length, shared cache) and the report pairs rounds across them, on the Mac and on Linux alike; a side whose spread grows in one configuration is named; one measured run per arm runs under samply with a JIT dump; an unattended run stops at its wall-clock budget; run wall time is compared beside score | 5 | `unit bench.variance_pairing`, `live bench.linux_variance` |
 | Both arms of an A/B carry an identifier the tooling reads back from the running binary, so a linking slip or an interrupted deploy cannot pass as a measurement | 5 | `live bench.binary_identifier` |
 | The clangd flags in `container/helix/languages.toml` are measured (indexing time, peak memory) against a real checkout | 3 | `live clangd.measure` |
