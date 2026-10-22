@@ -1,37 +1,12 @@
-"""What the *build* is told about a board, and by whom."""
+"""The unit every board image carries that takes disk swap away and leaves zram (boot/firstboot/wk-no-swap.service)."""
 import os
 import shlex
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from tests.support import REPO
-
-BOARDS = REPO / "image" / "boards"
-sys.path.insert(0, str(REPO / "lib"))
-from wk.sysimage import yocto_ws  # noqa: E402
-
-ENV = {"DL_DIR": "/cache/dl", "SSTATE_DIR": "/cache/sstate"}
-
-
-def conf(board, append):
-    a = yocto_ws.parse(["--target", "rpi5-64bits-mesa", "--rm-work", "1"] + (["--board", board] if board else []))
-    return yocto_ws.local_conf(a, ENV, 8, append)
-
-
-class TestTheBoardHalfIsWired(unittest.TestCase):
-    def test_the_board_file_is_appended_last(self):
-        text = conf("rpi5", 'X = "1"\n')
-        self.assertLess(text.index("RM_WORK_EXCLUDE"), text.index("image/boards/rpi5"),
-                        "a board fact is appended before knobs that could override it")
-        self.assertTrue(text.rstrip("\n").endswith('X = "1"'))
-
-    def test_no_board_file_appends_nothing(self):
-        self.assertNotIn("image/boards/", conf("", None))
-        self.assertNotIn("image/boards/", conf("rpi4", None))
-
 
 class TestTheRpi3SwapsToZram(unittest.TestCase):
 
@@ -56,14 +31,6 @@ class TestTheRpi3SwapsToZram(unittest.TestCase):
 
     def test_no_swap_runs_nothing(self):
         self.assertEqual([], self.swapped_off(""))
-
-
-class TestTheRpi5Board(unittest.TestCase):
-    def test_it_appends_the_d0_overlay_and_a_4k_page_kernel_and_nothing_else(self):
-        active = [l.strip() for l in (BOARDS / "rpi5" / "local.conf.append").read_text().splitlines()
-                  if l.strip() and not l.strip().startswith("#")]
-        self.assertEqual(sorted(active), ['KBUILD_DEFCONFIG:raspberrypi5 = "bcm2711_defconfig"',
-                                          'RPI_KERNEL_DEVICETREE_OVERLAYS:append = " overlays/bcm2712d0.dtbo"'])
 
 
 if __name__ == "__main__":

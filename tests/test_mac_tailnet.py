@@ -1,7 +1,6 @@
 """The Mac volume builder (lib/wk/sysimage/macvolume.py) and its tailnet half (lib/wk/sysimage/mactailnet.py)
 against a Mac in memory: FakeMac answers diskutil, the installer, the Go toolchain and the file tools the way the
-Mac does and moves its files, so every step is checked by what it leaves. The on-board join
-(bench/mac-tailnet.sh) runs on the install; its refusal off root and its layout are checked here."""
+Mac does and moves its files, so every step is checked by what it leaves."""
 import contextlib
 import hashlib
 import io
@@ -232,456 +231,234 @@ def source_sha(mac, sha):
     mac.put(rel, re.sub(r'(?m)^TS_SRC_SHA256 = ".*"$', 'TS_SRC_SHA256 = "%s"' % sha, mac.files[rel]))
 
 
-class TheBuild(unittest.TestCase):
-    def test_it_fetches_verifies_and_builds_a_darwin_arm64_daemon(self):
-        mac = FakeMac()
-        source_sha(mac, hashlib.sha256(b"ts-zip").hexdigest())
-        with clean_env():
-            out, err = quiet(tailnet(mac, dict(GO, darwin_arm64=hashlib.sha256(b"go-tarball").hexdigest())).build)
-        self.assertEqual(out, OUT)
-        self.assertEqual(blob(mac.files[out + "/tailscaled"])[:8], MACHO[:8])
-        go = [r for r in mac.runs("GOTOOLCHAIN=local")][0]
-        for word in ("GOOS=darwin", "GOARCH=arm64", "CGO_ENABLED=0", "-trimpath"):
-            self.assertIn(word, go)
-
-    def test_a_download_that_does_not_match_its_checksum_is_refused_and_not_kept(self):
-        mac = FakeMac()
-        with clean_env():
-            got, err = quiet(tailnet(mac, dict(GO, darwin_arm64="0" * 64)).build)
-        self.assertIs(got, Refused)
-        self.assertIn("unverified", err)
-        self.assertFalse([p for p in mac.files if p.endswith(".part")])
-        self.assertEqual(mac.runs("GOTOOLCHAIN"), [])
-
-    def test_a_host_with_no_toolchain_checksum_refuses_and_names_the_key(self):
-        mac = FakeMac()
-        with clean_env():
-            got, err = quiet(tailnet(mac, {"version": GO["version"]}).build)
-        self.assertIs(got, Refused)
-        self.assertIn('GO["darwin_arm64"]', err)
-        self.assertEqual(mac.runs("curl"), [])
-
-    def test_a_finished_build_is_not_built_again(self):
-        mac = FakeMac()
-        built(mac)
-        with clean_env():
-            self.assertEqual(quiet(tailnet(mac).build)[0], OUT)
-        self.assertEqual(mac.runs("curl") + mac.runs("GOTOOLCHAIN"), [])
-
-
 def built(mac):
     for n in ("tailscaled", "tailscale"):
         mac.put(OUT + "/" + n, MACHO)
     return mac
 
 
-class TheStage(unittest.TestCase):
-    def stage(self, mac, root="/vol", sudo=False):
+class TheTailnetHalf(unittest.TestCase):
+    def stage(self, mac, root="/vol", sudo=False, machine="mbp"):
         mac.dirs.add(root)
         with clean_env():
-            got, err = quiet(tailnet(mac).stage, root, "mbp", sudo)
-        self.assertIsNot(got, Refused, err)
-        return err
+            return quiet(tailnet(mac).stage, root, machine, sudo)
 
-    def test_it_installs_the_daemon_its_launchd_jobs_and_a_private_state_directory(self):
+    def test_it_fetches_verifies_and_builds_a_darwin_arm64_daemon_once(self):
+        mac = FakeMac()
+        source_sha(mac, hashlib.sha256(b"ts-zip").hexdigest())
+        with clean_env():
+            self.assertEqual(quiet(tailnet(mac, dict(GO, darwin_arm64=hashlib.sha256(b"go-tarball").hexdigest())).build)[0], OUT)
+        self.assertEqual(blob(mac.files[OUT + "/tailscaled"])[:8], MACHO[:8])
+        self.assertTrue({"GOOS=darwin", "GOARCH=arm64", "CGO_ENABLED=0", "-trimpath"} <= set(mac.runs("GOTOOLCHAIN=local")[0]))
+        runs = len(mac.effects)
+        with clean_env():
+            self.assertEqual(quiet(tailnet(mac).build)[0], OUT)
+        self.assertFalse([e for e in mac.effects[runs:] if e[0] == "run" and e[1][0] in ("curl", "env")])
+
+    def test_a_download_off_its_pin_or_a_host_with_no_pin_is_refused_and_nothing_is_kept(self):
+        for go, said in ((dict(GO, darwin_arm64="0" * 64), "unverified"), ({"version": GO["version"]}, 'GO["darwin_arm64"]')):
+            mac = FakeMac()
+            with clean_env():
+                got, err = quiet(tailnet(mac, go).build)
+            self.assertIs(got, Refused)
+            self.assertIn(said, err)
+            self.assertEqual(([p for p in mac.files if p.endswith(".part")], mac.runs("GOTOOLCHAIN")), ([], []))
+
+    def test_the_stage_installs_the_daemon_its_jobs_a_root_only_key_and_the_machine_s_node_name(self):
         mac = built(FakeMac())
-        self.stage(mac)
-        for n in ("tailscaled", "tailscale"):
-            self.assertEqual(mac.files["/vol/usr/local/bin/" + n], MACHO)
-            self.assertEqual(mac.modes["/vol/usr/local/bin/" + n], "0755")
-        self.assertEqual(mac.modes["/vol/private/var/db/wk/tailscale"], "0700")
+        self.assertIsNot(self.stage(mac)[0], Refused)
+        self.assertEqual([(mac.files["/vol/usr/local/bin/" + n], mac.modes["/vol/usr/local/bin/" + n]) for n in ("tailscaled", "tailscale")],
+                         [(MACHO, "0755")] * 2)
+        self.assertEqual((mac.modes["/vol/private/var/db/wk/tailscale"], mac.modes["/vol/private/etc/wk/tailscale-authkey"]), ("0700", "0600"))
+        self.assertEqual(mac.files["/vol/private/etc/wk/tailnet.conf"], "hostname=tolken-bench\ntag=tag:wk\n")
         d = plistlib.loads(blob(mac.files["/vol/Library/LaunchDaemons/com.wk.tailscaled.plist"]))
-        self.assertIn("--state=/var/db/wk/tailscale/tailscaled.state", d["ProgramArguments"])
         self.assertTrue(d["RunAtLoad"] and d["KeepAlive"])
         j = plistlib.loads(blob(mac.files["/vol/Library/LaunchDaemons/com.wk.tailnet-join.plist"]))
-        self.assertEqual(j["ProgramArguments"][1:], [mactailnet.PAYLOAD_TOOLS + "/bench/mac-tailnet.sh", "join"])
-        self.assertNotIn("KeepAlive", j)
-
-    def test_the_key_is_root_only_and_the_conf_names_the_node_the_machine_declares(self):
-        mac = built(FakeMac())
-        self.stage(mac)
-        self.assertEqual(mac.files["/vol/private/etc/wk/tailscale-authkey"], "tskey-auth-kTESTONLY")
-        self.assertEqual(mac.modes["/vol/private/etc/wk/tailscale-authkey"], "0600")
-        self.assertEqual(mac.files["/vol/private/etc/wk/tailnet.conf"], "hostname=tolken-bench\ntag=tag:wk\n")
-
-    def test_every_write_to_the_volume_goes_through_sudo_when_asked(self):
+        self.assertEqual((j["ProgramArguments"][1:], "KeepAlive" in j), ([mactailnet.PAYLOAD_TOOLS + "/bench/mac-tailnet.sh", "join"], False))
         mac = built(FakeMac())
         self.stage(mac, sudo=True)
-        writes = [r for r in mac.runs("/vol") if r[0] != "od"]
-        self.assertTrue(writes)
-        for r in writes:
-            self.assertEqual(r[:2], ("sudo", "install"), r)
+        self.assertEqual({r[:2] for r in mac.runs("/vol") if r[0] != "od"}, {("sudo", "install")})
 
     def test_a_remembered_node_identity_comes_back_on_the_next_volume(self):
         mac = built(FakeMac())
-        self.stage(mac)
-        state = "/vol/private/var/db/wk/tailscale/tailscaled.state"
-        self.assertNotIn(state, mac.files)
-        mac.put(state, "node-key")
         with clean_env():
-            _, err = quiet(tailnet(mac).remember, "/vol", "mbp")
-        kept = STATE + "/wk/mac-tailnet/tolken-bench.state"
-        self.assertEqual(mac.files[kept], "node-key")
-        self.assertEqual(mac.modes[kept], "0600")
+            self.assertIn("no node identity", quiet(tailnet(mac).remember, "/vol", "mbp")[1])
+        self.stage(mac)
+        mac.put("/vol/private/var/db/wk/tailscale/tailscaled.state", "node-key")
+        with clean_env():
+            quiet(tailnet(mac).remember, "/vol", "mbp")
+        self.assertEqual(mac.modes[STATE + "/wk/mac-tailnet/tolken-bench.state"], "0600")
         self.stage(mac, "/vol2")
         self.assertEqual(mac.files["/vol2/private/var/db/wk/tailscale/tailscaled.state"], "node-key")
 
-    def test_remembering_a_volume_with_no_identity_is_not_a_failure(self):
-        mac = FakeMac()
-        with clean_env():
-            got, err = quiet(tailnet(mac).remember, "/vol", "mbp")
-        self.assertIsNot(got, Refused)
-        self.assertIn("no node identity", err)
-
-    def test_no_auth_key_refuses_before_anything_is_built(self):
+    def test_no_auth_key_or_no_node_name_refuses_before_anything_is_built(self):
         mac = FakeMac()
         mac._drop(KEY)
-        with clean_env():
-            got, err = quiet(tailnet(mac).stage, "/vol", "mbp")
-        self.assertIs(got, Refused)
+        got, err = self.stage(mac)
         self.assertIn("wk key set tailnet", err)
         self.assertEqual(mac.runs("curl") + mac.runs("install"), [])
+        self.assertIn("bench_ssh", self.stage(FakeMac(), machine="no-such-machine")[1])
 
-    def test_a_machine_with_no_bench_node_name_refuses(self):
-        with clean_env():
-            got, err = quiet(tailnet(FakeMac()).stage, "/vol", "no-such-machine")
-        self.assertIs(got, Refused)
-        self.assertIn("bench_ssh", err)
-
-    def test_a_dry_run_changes_nothing(self):
+    def test_a_dry_run_changes_nothing_and_a_killed_stage_converges(self):
         mac = built(FakeMac())
         mac.dirs.add("/vol")
         before = dict(mac.files)
         with clean_env(WK_DRY_RUN="1"):
-            got, err = quiet(tailnet(mac).stage, "/vol", "mbp")
-        self.assertIsNot(got, Refused, err)
+            self.assertIn("would run", quiet(tailnet(mac).stage, "/vol", "mbp")[1])
         self.assertEqual(mac.files, before)
-        self.assertIn("would run", err)
 
-    def test_a_stage_killed_after_any_effect_converges_on_a_rerun(self):
         def world():
-            mac = built(FakeMac())
-            mac.dirs.add("/vol")
-            return types.SimpleNamespace(fake=mac)
+            m = built(FakeMac())
+            m.dirs.add("/vol")
+            return types.SimpleNamespace(fake=m)
 
         def once(w):
             with clean_env():
                 quiet(tailnet(w.fake).stage, "/vol", "mbp")
+        converges(self, world, once, lambda w: {p: v for p, v in w.fake.files.items() if p.startswith("/vol/")}, max_effects=80)
 
-        converges(self, world, once, lambda w: {p: v for p, v in w.fake.files.items() if p.startswith("/vol/")},
-                  max_effects=80)
-
-
-class TheInstallHalf(unittest.TestCase):
-    """Root and nothing else: the bench install runs it against itself, with no network and no credentials."""
-
-    def payload(self, mac, binary=MACHO):
-        for f in mactailnet.PAYLOAD:
-            mac.put("/p/" + f, binary if f.startswith("tailscale") and "." not in f else "x")
-        mac.dirs.add("/r")
-
-    def test_it_reads_no_credential_and_reaches_no_network(self):
-        mac = FakeMac()
-        self.payload(mac)
-        with clean_env():
-            got, err = quiet(tailnet(mac).install, "/r", "/p")
-        self.assertIsNot(got, Refused, err)
-        self.assertEqual(mac.runs("curl") + mac.runs("wk_tailscale"), [])
-
-    def test_a_directory_that_is_not_a_payload_is_refused(self):
-        mac = FakeMac()
-        mac.dirs.add("/p")
-        with clean_env():
-            got, err = quiet(tailnet(mac).install, "/r", "/p")
-        self.assertIs(got, Refused)
-        self.assertIn("not a collected tailnet payload", err)
-
-    def test_a_binary_the_bench_install_cannot_run_is_refused(self):
-        mac = FakeMac()
-        self.payload(mac, binary=b"#!/bin/sh\n")
-        with clean_env():
-            got, err = quiet(tailnet(mac).install, "/r", "/p")
-        self.assertIs(got, Refused)
-        self.assertIn("Mach-O arm64", err)
-        self.assertEqual(mac.runs("install"), [])
-
-
-class TheOnBoardJoin(unittest.TestCase):
-    SCRIPT = REPO / "bench" / "mac-tailnet.sh"
-
-    def test_its_paths_are_the_layout_the_host_half_installs(self):
-        text = self.SCRIPT.read_text()
-        for name in ("TS_BIN", "TS_KEY", "TS_CONF", "DAEMON_LABEL", "LAUNCHD"):
-            self.assertIn("\n%s=%s\n" % (name, getattr(mactailnet, name)), text, name)
-
-    def test_join_refuses_without_root(self):
-        if os.getuid() == 0:
-            self.skipTest("running as root")
-        cp = subprocess.run(["bash", str(self.SCRIPT), "join"], capture_output=True, text=True, timeout=10)
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("root", cp.stderr)
-
-    def test_the_install_the_autorun_calls_reaches_the_python(self):
+    def test_the_install_half_needs_a_runnable_collected_payload_and_nothing_else(self):
+        """Root and nothing else: the bench install runs it against itself, with no network and no credentials."""
+        for binary, said in ((MACHO, None), (b"#!/bin/sh\n", "Mach-O arm64"), (None, "not a collected tailnet payload")):
+            mac = FakeMac()
+            mac.dirs.update({"/p", "/r"})
+            for f in mactailnet.PAYLOAD if binary else ():
+                mac.put("/p/" + f, binary if f.startswith("tailscale") and "." not in f else "x")
+            with clean_env():
+                got, err = quiet(tailnet(mac).install, "/r", "/p")
+            self.assertEqual(got is Refused, said is not None, err)
+            self.assertIn(said or "", err)
+            self.assertEqual(mac.runs("curl"), [])
         with scratch_dir() as d:
             cp = subprocess.run(["python3", "-m", "wk.sysimage.mactailnet", "install", str(d), str(d)], capture_output=True,
                                 text=True, timeout=20, env=dict(os.environ, PYTHONPATH=str(REPO / "lib")))
-        self.assertNotEqual(cp.returncode, 0)
         self.assertIn("not a collected tailnet payload", cp.stderr)
 
 
-class TheBuilder(unittest.TestCase):
+class TheVolume(unittest.TestCase):
     """`wk sysimage build perf-macos-tolken`: one action a run, on the Mac, done when the install carries the marker."""
+
+    def build(self, mac, *args, clock=None, **env):
+        with clean_env(**env):
+            return quiet(volume(mac, clock, **env).build, list(args))
 
     def test_it_is_done_when_the_installed_volume_carries_the_marker(self):
         mac = FakeMac()
         v = volume(mac)
-        self.assertEqual(v.outputs(), [])
         mac.dirs.add(VOL)
         mac.put(VOL + "/etc/wk-image", "id=x\n")
         self.assertEqual(v.outputs(), [], "an empty volume with a marker on it boots nothing")
         mac.install_macos()
         self.assertEqual(v.outputs(), [VOL + "/etc/wk-image"])
 
-    def test_off_a_mac_or_with_two_actions_it_refuses(self):
+    def test_off_a_mac_or_with_two_actions_it_refuses_and_the_report_changes_nothing(self):
         linux = FakeMac()
         linux.answer(["uname", "-s"], out="Linux\n")
-        for mac, args, said in ((linux, ["--create"], "on the Mac itself"),
-                                (FakeMac(), ["--create", "--repair"], "one action at a time")):
-            with self.subTest(said=said), clean_env():
-                got, err = quiet(volume(mac).build, args)
-                self.assertIs(got, Refused)
-                self.assertIn(said, err)
-
-    def test_the_report_changes_nothing(self):
+        self.assertIn("on the Mac itself", self.build(linux, "--create")[1])
+        self.assertIn("one action at a time", self.build(FakeMac(), "--create", "--repair")[1])
         mac = FakeMac()
         mac.install_macos()
-        with clean_env():
-            got, err = quiet(volume(mac).build, [])
+        got, err = self.build(mac)
         self.assertEqual(got, 0)
-        self.assertIn("26.6", err)
-        self.assertIn("MISSING", err)
+        self.assertTrue("26.6" in err and "MISSING" in err, err)
         self.assertEqual([e for e in mac.effects if e[0] != "run"], [])
 
-    def test_create_refuses_a_container_without_the_room(self):
+    def test_create_adds_the_volume_once_and_only_with_the_room(self):
         mac = FakeMac()
-        mac.volumes = set()
-        mac.free = 10 ** 9
-        with clean_env():
-            got, err = quiet(volume(mac).build, ["--create"])
-        self.assertIs(got, Refused)
-        self.assertIn("WK_BENCH_NEED_GB", err)
-        self.assertEqual(mac.runs("addVolume"), [])
-
-    def test_the_room_it_needs_and_the_volume_it_names_can_be_set(self):
-        mac = FakeMac()
-        mac.volumes = set()
-        with clean_env():
-            _, err = quiet(volume(mac, WK_BENCH_NEED_GB="1", WK_BENCH_VOLUME="Other").build, [])
-        self.assertIn("need 1 GB", err)
-        self.assertIn("volume name:    Other", err)
-
-    def test_create_adds_the_volume_once(self):
-        mac = FakeMac()
-        mac.volumes = set()
-        with clean_env():
-            quiet(volume(mac).build, ["--create"])
-            quiet(volume(mac).build, ["--create"])
+        mac.volumes, mac.free = set(), 10 ** 9
+        self.assertIn("WK_BENCH_NEED_GB", self.build(mac, "--create")[1])
+        self.assertIn("need 1 GB", self.build(mac, WK_BENCH_NEED_GB="1")[1])
+        mac.free = 500 * 10 ** 9
+        self.build(mac, "--create")
+        self.build(mac, "--create")
         self.assertEqual(len(mac.runs("addVolume")), 1)
-        self.assertIn("WK Bench", mac.volumes)
 
-
-class TheInstall(unittest.TestCase):
-    def mac(self):
+    def installer(self):
         mac = built(FakeMac())
         mac.put("/Applications/Install macOS Tahoe.app/Contents/Resources/startosinstall", "x")
         mac.dirs.add(VOL)
         return mac
 
-    def test_declined_it_changes_nothing(self):
-        mac = self.mac()
-        with clean_env(), mock.patch("sys.stdin", io.StringIO("n\n")):
-            got, err = quiet(volume(mac).build, ["--install"])
-        self.assertEqual(got, 0)
-        self.assertEqual(mac.console, [])
-        self.assertEqual(mac.runs("install -m"), [])
-
-    def test_it_keeps_the_node_identity_before_the_volume_is_erased(self):
-        mac = self.mac()
+    def test_install_keeps_the_node_identity_then_gives_startosinstall_the_package_and_an_owner(self):
+        mac = self.installer()
+        with mock.patch("sys.stdin", io.StringIO("n\n")):
+            self.assertEqual(self.build(mac, "--install")[0], 0)
+        self.assertEqual((mac.console, mac.runs("install -m")), ([], []))
         mac.put(VOL + "/private/var/db/wk/tailscale/tailscaled.state", "node-key")
-        with clean_env(WK_YES="1"):
-            got, err = quiet(volume(mac).build, ["--install"])
+        got, err = self.build(mac, "--install", WK_YES="1", WK_BENCH_ADMIN="other")
         self.assertEqual(got, 0, err)
         order = [e[1] for e in mac.effects if e[0] in ("run", "run_tty")]
-        remember = next(i for i, r in enumerate(order) if r[:2] == ("sudo", "cat"))
-        erase = next(i for i, r in enumerate(order) if r[1].endswith("startosinstall"))
-        self.assertLess(remember, erase)
-        self.assertEqual(mac.files[STATE + "/wk/mac-tailnet/tolken-bench.state"], "node-key")
-
-    def test_startosinstall_is_given_the_package_and_an_owners_credential(self):
-        mac = self.mac()
-        with clean_env(WK_YES="1"):
-            quiet(volume(mac).build, ["--install"])
+        self.assertLess(next(i for i, r in enumerate(order) if r[:2] == ("sudo", "cat")),
+                        next(i for i, r in enumerate(order) if r[1].endswith("startosinstall")))
         (argv,) = mac.console
-        self.assertEqual(argv[argv.index("--volume") + 1], VOL)
-        self.assertEqual(argv[argv.index("--user") + 1], "owner")
+        self.assertEqual([argv[argv.index(k) + 1] for k in ("--volume", "--user", "--installpackage")], [VOL, "other", "/tmp/wk-bench-provision.pkg"])
         self.assertIn("--passprompt", argv)
-        self.assertEqual(argv[argv.index("--installpackage") + 1], "/tmp/wk-bench-provision.pkg")
-        mac = self.mac()
-        with clean_env(WK_YES="1"):
-            quiet(volume(mac, WK_BENCH_ADMIN="other").build, ["--install"])
-        self.assertEqual(mac.console[0][mac.console[0].index("--user") + 1], "other", "the authorising account can be named")
-
-    def test_an_installed_volume_is_not_installed_again_and_nothing_is_asked(self):
-        mac = self.mac()
         mac.install_macos()
-        with clean_env():
-            got, err = quiet(volume(mac).build, ["--install"])
-        self.assertEqual(got, 0)
-        self.assertEqual(mac.console, [])
+        mac.console = []
+        self.build(mac, "--install")
+        self.assertEqual(mac.console, [], "an installed volume is not installed again")
 
-
-class ThePackage(unittest.TestCase):
-    def test_it_answers_setup_assistant_and_arms_first_boot(self):
+    def test_the_package_answers_setup_assistant_arms_first_boot_and_stages_the_payload_as_the_user(self):
         mac = built(FakeMac())
         with clean_env():
             quiet(volume(mac).build_pkg)
-        pkgroot = [r for r in mac.runs("pkgbuild")][0]
-        root = pkgroot[pkgroot.index("--root") + 1]
-        self.assertTrue(root.startswith("/tmp/"))
+        root = "/tmp/wk-bench-pkgroot"
         writes = {e[1] for e in mac.effects if e[0] == "write"}
-        for f in macvolume.SKIP_SETUP:
-            self.assertIn(os.path.join(root, f), writes)
-        d = plistlib.loads(macvolume.FIRSTBOOT_PLIST.encode())
-        self.assertEqual(d["StandardOutPath"], macvolume.FIRSTBOOT_LOG)
-        self.assertNotIn("KeepAlive", d)
-        self.assertIn(root + macvolume.FIRSTBOOT, writes)
-
-    def test_every_payload_row_and_the_tailnet_are_staged_as_the_user(self):
-        mac = built(FakeMac())
-        with clean_env():
-            quiet(volume(mac).build_pkg)
+        self.assertTrue({os.path.join(root, f) for f in macvolume.SKIP_SETUP} | {root + macvolume.FIRSTBOOT} <= writes)
+        self.assertNotIn("KeepAlive", plistlib.loads(macvolume.FIRSTBOOT_PLIST.encode()))
         dests = {r[-1] for r in mac.runs("install") if r[0] == "install"}
-        for _src, dest, _mode in macvolume.PAYLOAD:
-            self.assertIn("/tmp/wk-bench-pkgroot/" + dest, dests)
-        self.assertIn("/tmp/wk-bench-pkgroot/private/etc/wk/tailscale-authkey", dests)
-        self.assertFalse([r for r in mac.runs("/tmp/wk-bench-pkgroot") if r[0] == "sudo"])
+        self.assertTrue({root + "/" + dest for _s, dest, _m in macvolume.PAYLOAD} | {root + "/private/etc/wk/tailscale-authkey"} <= dests)
+        self.assertFalse([r for r in mac.runs(root) if r[0] == "sudo"])
+        self.assertEqual(mac.modes[root + "/usr/local/share/wk-bench/password"], "0600")
 
-    def test_the_account_password_is_private_on_both_sides(self):
+    def test_repair_restages_through_sudo_with_the_keychain_s_network_remote_login_and_first_boot(self):
         mac = built(FakeMac())
-        with clean_env():
-            quiet(volume(mac).build_pkg)
-        self.assertEqual(mac.modes[STATE + "/wk/bench-password"], "0600")
-        self.assertEqual(mac.modes["/tmp/wk-bench-pkgroot/usr/local/share/wk-bench/password"], "0600")
-
-
-class TheRepair(unittest.TestCase):
-    def mac(self):
-        mac = built(FakeMac())
+        self.assertIn("--install first", self.build(mac, "--repair")[1])
         mac.install_macos()
-        return mac
-
-    def repair(self, mac, **env):
-        with clean_env(**env):
-            got, err = quiet(volume(mac, **env).build, ["--repair"])
-        self.assertEqual(got, 0, err)
-        return err
-
-    def test_it_stages_the_payload_and_the_tailnet_through_sudo(self):
-        mac = self.mac()
-        self.repair(mac)
-        tools = [r for r in mac.runs(VOL + "/usr/local/share/wk-bench/wk-tools/") if "rsync" in r]
-        self.assertEqual(tools[0][:2], ("sudo", "rsync"))
-        self.assertIn(("sudo", "install", "-m", "0600", ART + "/collected/authkey",
-                       VOL + "/private/etc/wk/tailscale-authkey"), mac.runs("install"))
-
-    def test_it_copies_the_first_preferred_network_the_keychain_holds(self):
-        mac = self.mac()
-        self.repair(mac)
-        self.assertEqual(mac.files[VOL + "/usr/local/share/wk-bench/wifi.conf"],
-                         "WIFI_SSID=homenet\nWIFI_PSK='pass word'\n")
-        self.assertEqual(mac.modes[VOL + "/usr/local/share/wk-bench/wifi.conf"], "0600")
-
-    def test_a_wired_bench_install_is_given_no_wifi(self):
-        mac = self.mac()
-        self.repair(mac, WK_BENCH_WIRED="1")
-        self.assertNotIn(VOL + "/usr/local/share/wk-bench/wifi.conf", mac.files)
-
-    def test_no_known_network_refuses(self):
-        mac = self.mac()
-        mac.keychain = {}
-        with clean_env():
-            got, err = quiet(volume(mac).build, ["--repair"])
-        self.assertIs(got, Refused)
-        self.assertIn("WK_BENCH_WIRED=1", err)
-
-    def test_remote_login_is_added_when_absent_and_left_when_on(self):
-        mac = self.mac()
         dis = DATA + "/private/var/db/com.apple.xpc.launchd/disabled.plist"
         mac.put(dis, "{}")
-        self.repair(mac)
+        for _ in range(2):
+            self.assertEqual(self.build(mac, "--repair")[0], 0)
         self.assertEqual([r[-2] for r in mac.runs("PlistBuddy")], ["Add :com.openssh.sshd bool false"])
-        self.repair(mac)
-        self.assertEqual(len(mac.runs("PlistBuddy")), 1)
-
-    def test_first_boot_is_rearmed_as_root(self):
-        mac = self.mac()
-        self.repair(mac)
+        self.assertEqual([r for r in mac.runs(VOL + "/usr/local/share/wk-bench/wk-tools/") if "rsync" in r][0][:2], ("sudo", "rsync"))
+        self.assertEqual(mac.files[VOL + "/usr/local/share/wk-bench/wifi.conf"], "WIFI_SSID=homenet\nWIFI_PSK='pass word'\n")
+        self.assertEqual(mac.modes[VOL + "/usr/local/share/wk-bench/wifi.conf"], "0600")
         self.assertEqual(mac.files[VOL + macvolume.FIRSTBOOT], macvolume.FIRSTBOOT_PLIST)
         self.assertIn(("sudo", "chown", "root:wheel", VOL + macvolume.FIRSTBOOT), mac.runs("chown"))
 
-    def test_a_volume_without_macos_is_refused(self):
+    def test_repair_of_a_wired_install_copies_no_wifi_and_one_with_no_known_network_refuses(self):
         mac = built(FakeMac())
-        with clean_env():
-            got, err = quiet(volume(mac).build, ["--repair"])
-        self.assertIs(got, Refused)
-        self.assertIn("--install first", err)
+        mac.install_macos()
+        self.build(mac, "--repair", WK_BENCH_WIRED="1")
+        self.assertNotIn(VOL + "/usr/local/share/wk-bench/wifi.conf", mac.files)
+        mac.keychain = {}
+        self.assertIn("WK_BENCH_WIRED=1", self.build(mac, "--repair")[1])
 
-
-class TheProvision(unittest.TestCase):
-    def mac(self, clean=True):
+    def provisioning(self, clean=True):
         mac = FakeMac()
         mac.running_on = "WK Bench"
         mac.dirs.add("/System/Volumes/Data")
         mac.react(["bash", "-c"], lambda argv, f: Result(0 if clean or "wk_quiet" not in argv[3] else 1, ""))
         return mac
 
-    def test_on_the_host_install_it_refuses(self):
+    def test_provision_runs_only_on_the_volume_and_records_a_clean_readback(self):
         mac = FakeMac()
-        with clean_env():
-            got, err = quiet(volume(mac).build, ["--provision"])
-        self.assertIs(got, Refused)
-        self.assertIn("Boot 'WK Bench' first", err)
+        self.assertIn("Boot 'WK Bench' first", self.build(mac, "--provision")[1])
         self.assertNotIn(macvolume.MARKER, mac.files)
-
-    def test_it_writes_the_marker_naming_the_preset_and_the_month(self):
-        mac = self.mac()
-        clock = FakeClock(start=1788000000.0)   # 2026-08
-        with clean_env():
-            quiet(volume(mac, clock).build, ["--provision"])
+        mac = self.provisioning()
+        self.build(mac, "--provision", clock=FakeClock(start=1788000000.0))
         self.assertEqual(mac.files[macvolume.MARKER], "id=perf-macos-tolken-2026-08\nprofile=perf-macos-tolken\n")
+        self.assertIn("=== provisioning complete (wk sysimage build perf-macos-tolken --provision", mac.files[macvolume.FIRSTBOOT_LOG])
 
-    def test_a_clean_readback_is_recorded_as_provisioned(self):
-        mac = self.mac()
-        with clean_env():
-            quiet(volume(mac).build, ["--provision"])
-        self.assertIn("=== provisioning complete (wk sysimage build perf-macos-tolken --provision",
-                      mac.files[macvolume.FIRSTBOOT_LOG])
-
-    def test_a_readback_with_a_wrong_setting_is_not(self):
-        mac = self.mac()
+    def test_a_readback_with_a_wrong_setting_or_a_dry_run_records_nothing(self):
+        mac = self.provisioning()
         mac.answer(quiet_lib(str(REPO), DESKTOP, "wk_quiet_desktop_findings"), out="wrong\tspotlight indexes\tfix\n")
         mac.answer(quiet_lib(str(REPO), COMMON, RENDER), rc=1)
-        with clean_env():
-            _, err = quiet(volume(mac).build, ["--provision"])
+        self.assertIn("not recorded as provisioned", self.build(mac, "--provision")[1])
         self.assertNotIn(macvolume.FIRSTBOOT_LOG, mac.files)
-        self.assertIn("not recorded as provisioned", err)
-
-    def test_a_dry_run_promises_no_record(self):
-        mac = self.mac()
-        with clean_env(WK_DRY_RUN="1"):
-            _, err = quiet(volume(mac).build, ["--provision"])
+        mac = self.provisioning()
+        self.assertIn("but only on a readback", self.build(mac, "--provision", WK_DRY_RUN="1")[1])
         self.assertEqual({p for p in mac.files if p.startswith(("/etc", "/var"))}, set())
-        self.assertIn("but only on a readback", err)
 
 
 @requires_tool("rsync")

@@ -20,25 +20,12 @@ class Unknown(Exception):
     """A builder's outputs could not be read: neither an image nor its absence."""
 
 
-class Builder:
-    def __init__(self, kind, pattern):
-        self.kind, self.pattern = kind, pattern
-
-    def owns(self, ws):
-        return ws.startswith(self.kind + "-")
-
-    def outputs(self, machine, ws_dir):
-        return sorted(_glob(machine, ws_dir, self.pattern.split("/")))
+# Where each workspace builder leaves its images, under ws/<name>/build (lib/wk/places.py's Container bind-mounts it).
+OUTPUTS = {"yocto": "build/CrossToolChains/*/build/image/*.wic.xz", "buildroot": "build/buildroot/*/output/images/*.img"}
 
 
-# Under ws/<name>/build, which lib/wk/places.py's Container bind-mounts as the checkout's build tree.
-BUILDERS = (Builder("yocto", "build/CrossToolChains/*/build/image/*.wic.xz"),
-            Builder("buildroot", "build/buildroot/*/output/images/*.img"))
-
-
-def slot_doc(path):
-    with open(path) as f:
-        return json.load(f)
+def found(machine, ws_dir, kind):
+    return sorted(_glob(machine, ws_dir, OUTPUTS[kind].split("/")))
 
 
 def _glob(machine, base, parts):
@@ -55,6 +42,11 @@ def _glob(machine, base, parts):
             for p in _glob(machine, os.path.join(base, n), rest)]
 
 
+def slot_doc(path):
+    with open(path) as f:
+        return json.load(f)
+
+
 def scan(machine, store):
     """Every image in this store's workspaces; an image workspace that holds none gets a placeholder."""
     root = os.path.join(store.store_dir(), "ws")
@@ -67,16 +59,16 @@ def scan(machine, store):
         d = os.path.join(root, ws)
         if not machine.isdir(d):
             continue
-        for b in BUILDERS:
-            found = b.outputs(machine, d)
-            out += [Image(b.kind, ws, p) for p in found]
-            if not found and b.owns(ws):
-                out.append(Image(b.kind, ws, None))
+        for kind in OUTPUTS:
+            paths = found(machine, d, kind)
+            out += [Image(kind, ws, p) for p in paths]
+            if not paths and ws.startswith(kind + "-"):
+                out.append(Image(kind, ws, None))
     return out
 
 
 def outputs(machine, store, ws):
-    return [p for b in BUILDERS for p in b.outputs(machine, store.ws_dir(ws))]
+    return [p for kind in OUTPUTS for p in found(machine, store.ws_dir(ws), kind)]
 
 
 def host_presets(env):

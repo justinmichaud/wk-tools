@@ -265,14 +265,13 @@ class MacVolume:
         return 0
 
     def password(self, root, sudo):
-        state = Store(self.env).state_dir()
-        pwfile = os.path.join(state, "bench-password")
-        self.m.mkdir(state)
-        self.m.write(pwfile, BENCH_PASSWORD)
-        self.act(["chmod", "0600", pwfile], "could not keep %s private" % pwfile)
         dest = "%s/%s/password" % (root.rstrip("/"), PAYLOAD_DIR)
-        self.act((["sudo"] if sudo else []) + ["install", "-m", "0600", pwfile, dest], "could not stage %s" % dest)
-        log("  bench account password: '%s' (constant; also at %s)" % (BENCH_PASSWORD, pwfile))
+        if sudo:
+            self.sudo_write(dest, BENCH_PASSWORD, "0600")
+        else:
+            self.m.write(dest, BENCH_PASSWORD)
+            self.act(["chmod", "0600", dest], "could not keep %s private" % dest)
+        log("  bench account password: '%s' (constant)" % BENCH_PASSWORD)
 
     def build_pkg(self):
         """`startosinstall --installpackage` takes a productbuild package, laid down before the first boot."""

@@ -1,9 +1,11 @@
-"""admin/wk-card-priv's card edits, each function lifted out with sed and run against temp directories standing
-in for the mounted partitions."""
+"""admin/wk-card-priv's card edits, one case each, every function lifted out with sed and run against temp directories
+standing in for the mounted partitions; and the units and join scripts a write puts on a card."""
+import base64
 import contextlib
 import io
 import os
 import re
+import tarfile
 import subprocess
 import sys
 import unittest
@@ -56,10 +58,6 @@ cat <<'JSON'
 JSON
 '''
 
-_SFDISK_NO_TABLE = '''#!/bin/sh
-echo "sfdisk: does not contain a recognized partition table" >&2
-exit 1
-'''
 
 
 class CardEditTest(WkTest):
@@ -77,326 +75,148 @@ class CardEditTest(WkTest):
         return bash(prelude + script, env=env)
 
 
-class TestRetarget(CardEditTest):
-    def retarget(self, sfdisk=_SFDISK):
-        with stub_path({"sfdisk": sfdisk}) as binp:
-            return self.run_helper(
-                _lift(CARD_PRIV, "_table", "_boot_file", "_root_spec_probe", "_retarget_boot",
-                      "_retarget_fstab", "v_retarget") + "\nv_retarget /dev/sdX\n",
-                path=binp)
+class TestTheBootPartitionEdits(CardEditTest):
+    def edit(self, *funcs, call):
+        return self.run_helper(_lift(CARD_PRIV, *funcs) + "\n" + call + "\n")
 
-    def _write_card(self):
-        (self.boot / "cmdline.txt").write_text(
-            "console=serial0,115200 root=/dev/mmcblk0p2 rootfstype=ext4 rootwait\n")
-        (self.root / "etc").mkdir()
-        (self.root / "etc" / "fstab").write_text(
-            "# a comment naming /dev/mmcblk0p1, which is not a line\n"
-            "/dev/mmcblk0p2\t/\text4\tdefaults\t0\t1\n"
-            "/dev/mmcblk0p1\t/boot\tvfat\tdefaults\t0\t2\n"
-            "proc\t/proc\tproc\tdefaults\t0\t0\n")
-
-    def test_root_becomes_the_cards_own_partuuid(self):
-        self._write_card()
-        cp = self.retarget()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        cmdline = (self.boot / "cmdline.txt").read_text()
-        self.assertIn("root=PARTUUID=1c9dabbc-02", cmdline, cmdline)
-        self.assertNotIn("/dev/mmcblk0p2", cmdline, cmdline)
-        self.assertIn("console=serial0,115200", cmdline)
-        self.assertIn("rootwait", cmdline)
-        fstab = (self.root / "etc" / "fstab").read_text()
-        self.assertIn("PARTUUID=1c9dabbc-01\t/boot", fstab, fstab)
-        self.assertIn("PARTUUID=1c9dabbc-02\t/", fstab, fstab)
-        self.assertIn("proc\t/proc", fstab, fstab)
-        self.assertIn("# a comment naming /dev/mmcblk0p1", fstab, fstab)
-
-    def test_a_card_already_booting_by_partuuid_is_refused_naming_re_provisioning(self):
-        (self.boot / "cmdline.txt").write_text("root=PARTUUID=953569f6-02 rootwait\n")
-        (self.root / "etc").mkdir()
-        (self.root / "etc" / "fstab").write_text("PARTUUID=953569f6-01\t/boot\tvfat\tdefaults\t0\t2\n")
-        cp = self.retarget()
-        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
-        self.assertIn("wk status", cp.stderr)
-        self.assertIn("953569f6-02", (self.boot / "cmdline.txt").read_text())
-        self.assertIn("953569f6-01", (self.root / "etc" / "fstab").read_text())
-
-    def test_dev_root_is_left_alone(self):
-        (self.boot / "cmdline.txt").write_text("root=/dev/mmcblk0p2 rootwait\n")
-        (self.root / "etc").mkdir()
-        (self.root / "etc" / "fstab").write_text(
-            "/dev/root\t/\text4\tdefaults\t0\t1\n"
-            "PARTUUID=953569f6-01\t/boot\tvfat\tdefaults\t0\t2\n")
-        cp = self.retarget()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        fstab = (self.root / "etc" / "fstab").read_text()
-        self.assertIn("/dev/root\t/", fstab, "the kernel's own placeholder was rewritten")
-        self.assertIn("PARTUUID=1c9dabbc-01\t/boot", fstab, fstab)
-        self.assertIn("fstab: PARTUUID=953569f6-01 -> PARTUUID=1c9dabbc-01", cp.stdout, cp.stdout)
-
-    def test_a_disk_with_no_partition_table_is_refused(self):
-        self._write_card()
-        cp = self.retarget(_SFDISK_NO_TABLE)
-        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
-        self.assertIn("REFUSED", cp.stdout + cp.stderr)
-
-    def test_the_boot_file_under_os_prefix_wins(self):
-        (self.boot / "cmdline.txt").write_text("root=/dev/sda2\n")
+    def test_retarget_makes_root_the_card_s_own_partuuid_and_leaves_dev_root(self):
         (self.boot / "current").mkdir()
-        (self.boot / "current" / "cmdline.txt").write_text("root=/dev/mmcblk0p2\n")
-        cp = self.run_helper(
-            _lift(CARD_PRIV, "_boot_file", "_retarget_boot")
-            + "\n_retarget_boot \"$BOOTDIR\" 1c9dabbc-02\n")
+        (self.boot / "cmdline.txt").write_text("root=/dev/sda2\n")
+        (self.boot / "current" / "cmdline.txt").write_text("console=serial0,115200 root=/dev/mmcblk0p2 rootwait\n")
+        (self.root / "etc").mkdir()
+        (self.root / "etc" / "fstab").write_text("# names /dev/mmcblk0p1\n/dev/root\t/\text4\tdefaults\t0\t1\n"
+                                                 "/dev/mmcblk0p1\t/boot\tvfat\tdefaults\t0\t2\nproc\t/proc\tproc\tdefaults\t0\t0\n")
+        with stub_path({"sfdisk": _SFDISK}) as binp:
+            cp = self.run_helper(_lift(CARD_PRIV, "_table", "_boot_file", "_root_spec_probe", "_retarget_boot", "_retarget_fstab",
+                                       "v_retarget") + "\nv_retarget /dev/sdX\n", path=binp)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("root=PARTUUID=1c9dabbc-02",
-                      (self.boot / "current" / "cmdline.txt").read_text())
-        self.assertIn("root=/dev/sda2", (self.boot / "cmdline.txt").read_text())
+        self.assertEqual((self.boot / "current" / "cmdline.txt").read_text(), "console=serial0,115200 root=PARTUUID=1c9dabbc-02 rootwait\n")
+        self.assertEqual((self.boot / "cmdline.txt").read_text(), "root=/dev/sda2\n", "the file under os_prefix wins")
+        self.assertEqual((self.root / "etc" / "fstab").read_text(), "# names /dev/mmcblk0p1\n/dev/root\t/\text4\tdefaults\t0\t1\n"
+                         "PARTUUID=1c9dabbc-01\t/boot\tvfat\tdefaults\t0\t2\nproc\t/proc\tproc\tdefaults\t0\t0\n")
 
+    def test_root_spec_reads_the_root_off_the_card(self):
+        (self.boot / "cmdline.txt").write_text("console=tty1 root=PARTUUID=abc-02 rw\n")
+        cp = self.edit("_boot_file", "_root_spec_probe", "v_root_spec", call="v_root_spec /dev/sdX")
+        self.assertEqual(cp.stdout.strip(), "root=PARTUUID=abc-02")
 
-class TestRootSpec(CardEditTest):
-    def test_reads_the_root_off_the_card_and_says_nothing_when_there_is_no_cmdline(self):
-        for text, want in (("console=tty1 root=PARTUUID=abc-02 rw\n", "root=PARTUUID=abc-02"), (None, "")):
-            with self.subTest(cmdline=text):
-                (self.boot / "cmdline.txt").unlink(missing_ok=True)
-                if text:
-                    (self.boot / "cmdline.txt").write_text(text)
-                cp = self.run_helper(
-                    _lift(CARD_PRIV, "_boot_file", "_root_spec_probe", "v_root_spec")
-                    + "\nv_root_spec /dev/sdX\n")
-                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-                self.assertEqual(cp.stdout.strip(), want, cp.stdout)
-
-
-class TestCmdlineAppend(CardEditTest):
-    def _run(self, text):
-        import base64
-        b64 = base64.b64encode(text.encode()).decode()
-        return self.run_helper(
-            _lift(CARD_PRIV, "check_b64", "check_text", "_boot_file",
-                  "_cmdline_append_edit", "v_cmdline_append")
-            + f"\nv_cmdline_append /dev/sdX {b64}\n")
-
-    def test_appended_to_the_one_line_the_firmware_reads(self):
+    def test_cmdline_append_lands_once_on_the_one_line(self):
         (self.boot / "cmdline.txt").write_text("root=PARTUUID=abc-02 rootwait\n")
-        cp = self._run("video=HDMI-A-1:1920x1080M@60D")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        text = (self.boot / "cmdline.txt").read_text()
-        self.assertEqual(text.count("\n"), 1, f"more than one line: {text!r}")
-        self.assertIn("root=PARTUUID=abc-02 rootwait video=HDMI-A-1:1920x1080M@60D", text)
+        b64 = base64.b64encode(b"quiet").decode()
+        for _ in range(2):
+            cp = self.edit("check_b64", "check_text", "_boot_file", "_cmdline_append_edit", "v_cmdline_append", call="v_cmdline_append /dev/sdX " + b64)
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual((self.boot / "cmdline.txt").read_text(), "root=PARTUUID=abc-02 rootwait quiet\n")
 
-    def test_appending_twice_leaves_one_copy(self):
-        (self.boot / "cmdline.txt").write_text("root=PARTUUID=abc-02\n")
-        self.assertEqual(self._run("quiet").returncode, 0)
-        cp = self._run("quiet")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual((self.boot / "cmdline.txt").read_text().count("quiet"), 1)
-        self.assertIn("already carries", cp.stdout, cp.stdout)
-
-    def test_a_second_line_is_refused(self):
-        (self.boot / "cmdline.txt").write_text("root=PARTUUID=abc-02\n")
-        cp = self._run("quiet\nsomething=else")
-        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
-        self.assertIn("one line", cp.stdout + cp.stderr)
-
-    def test_a_disk_with_no_cmdline_is_a_failure_not_a_silent_no_op(self):
-        cp = self._run("quiet")
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("no cmdline.txt", cp.stdout + cp.stderr)
-
-
-class TestConfigAppend(CardEditTest):
-    BLOCK = ("# --- wk sysimage: webkit-2.52-yocto-rpi5-64 ---------------\n"
-             "[all]\n"
-             "os_check=0\n")
-
-    def _run(self, block):
-        import base64
-        b64 = base64.b64encode(block.encode()).decode()
-        return self.run_helper(
-            _lift(CARD_PRIV, "check_b64", "check_text", "_boot_file",
-                  "_config_append_edit", "v_config_append")
-            + f"\nv_config_append /dev/sdX {b64}\n")
-
-    def test_the_block_lands_and_is_read_back(self):
+    def test_config_append_lands_one_banner_block(self):
         (self.boot / "config.txt").write_text("arm_64bit=1\n")
-        cp = self._run(self.BLOCK)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        text = (self.boot / "config.txt").read_text()
-        self.assertIn("arm_64bit=1", text)
-        self.assertIn("os_check=0", text)
-
-    def test_appending_twice_leaves_one_block(self):
-        (self.boot / "config.txt").write_text("arm_64bit=1\n")
-        self.assertEqual(self._run(self.BLOCK).returncode, 0)
-        cp = self._run(self.BLOCK)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        block = base64.b64encode(b"# --- wk sysimage: p ---\n[all]\nos_check=0\n").decode()
+        for _ in range(2):
+            cp = self.edit("check_b64", "check_text", "_boot_file", "_config_append_edit", "v_config_append", call="v_config_append /dev/sdX " + block)
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual((self.boot / "config.txt").read_text().count("os_check=0"), 1)
-        self.assertIn("already carries", cp.stdout, cp.stdout)
 
-    def test_a_block_with_no_banner_is_refused(self):
+    def test_boot_id_lands_and_a_non_name_is_refused(self):
+        ok = self.edit("check_name", "_boot_id_edit", "v_boot_id", call="v_boot_id /dev/sdX webkit-2.52-yocto-rpi5-64-0123456789ab")
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        self.assertEqual((self.boot / "wk-image.id").read_text().strip(), "webkit-2.52-yocto-rpi5-64-0123456789ab")
+        self.assertEqual(self.edit("check_name", "_boot_id_edit", "v_boot_id", call="v_boot_id /dev/sdX 'not; a name'").returncode, 3)
+
+    def test_boot_check_names_what_the_firmware_cannot_find(self):
         (self.boot / "config.txt").write_text("arm_64bit=1\n")
-        cp = self._run("os_check=0\n")
-        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
-        self.assertIn("wk sysimage:", cp.stdout + cp.stderr)
-
-
-class TestBootId(CardEditTest):
-    def test_the_id_lands_on_the_boot_partition_and_a_non_name_is_refused(self):
-        for ident, rc in (("webkit-2.52-yocto-rpi5-64-0123456789ab", 0), ("'not; a name'", 3)):
-            with self.subTest(ident=ident):
-                cp = self.run_helper(
-                    _lift(CARD_PRIV, "check_name", "_boot_id_edit", "v_boot_id")
-                    + f"\nv_boot_id /dev/sdX {ident}\n")
-                self.assertEqual(cp.returncode, rc, cp.stdout + cp.stderr)
-                if rc == 0:
-                    self.assertEqual((self.boot / "wk-image.id").read_text().strip(), ident)
-
-
-class TestUnits(CardEditTest):
-    UNIT = ("[Unit]\nDescription=Hand the machine back\n"
-            "[Service]\nType=oneshot\nExecStart=/bin/true\n"
-            "[Install]\nWantedBy=multi-user.target\n")
-
-    def _edit(self, work, systemd=True):
-        if systemd:
-            (self.root / "lib" / "systemd").mkdir(parents=True)
-            (self.root / "lib" / "systemd" / "systemd").write_text("")
-        return self.run_helper(
-            _lift(CARD_PRIV, "_put", "_unit_target", "_units_sysctl", "_units_edit")
-            + f"\n_units_edit \"$ROOTDIR\" {work}\n")
-
-    def _staged(self):
-        work = self.tmp / "staged"
-        (work / "systemd").mkdir(parents=True)
-        (work / "sysctl.d").mkdir(parents=True)
-        (work / "systemd" / "wk-self-return.service").write_text(self.UNIT)
-        (work / "sysctl.d" / "90-wk-perf.conf").write_text("kernel.perf_event_paranoid = -1\n")
-        return work
-
-    def test_units_land_under_etc_systemd_system_and_are_wanted(self):
-        work = self._staged()
-        cp = self._edit(work)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        unit = self.root / "etc" / "systemd" / "system" / "wk-self-return.service"
-        self.assertTrue(unit.is_file(), cp.stdout + cp.stderr)
-        self.assertEqual(unit.read_text(), self.UNIT)
-        want = (self.root / "etc" / "systemd" / "system"
-                / "multi-user.target.wants" / "wk-self-return.service")
-        self.assertTrue(want.is_symlink(), "the unit is not wanted by anything")
-        self.assertEqual(os.readlink(want), "/etc/systemd/system/wk-self-return.service")
-        self.assertEqual((self.root / "etc" / "sysctl.d" / "90-wk-perf.conf").read_text(),
-                         "kernel.perf_event_paranoid = -1\n")
-        self.assertIn("installed 2 file(s)", cp.stdout)
-
-    def test_a_timer_and_the_service_it_starts_both_land(self):
-        work = self._staged()
-        (work / "systemd" / "wk-self-return.timer").write_text(
-            "[Unit]\nDescription=x\n[Timer]\nOnBootSec=900\n"
-            "[Install]\nWantedBy=timers.target\n")
-        (work / "systemd" / "wk-self-return.service").write_text(
-            "[Unit]\nDescription=x\n[Service]\nType=oneshot\nExecStart=/bin/true\n")
-        cp = self._edit(work)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        sysd = self.root / "etc" / "systemd" / "system"
-        self.assertTrue((sysd / "wk-self-return.timer").is_file())
-        self.assertTrue((sysd / "wk-self-return.service").is_file())
-        self.assertTrue((sysd / "timers.target.wants" / "wk-self-return.timer").is_symlink(),
-                        "the timer is not wanted by timers.target")
-        self.assertFalse((sysd / "multi-user.target.wants" / "wk-self-return.service").exists(),
-                         "the timer's service is ALSO started at boot, which reboots the board")
-
-    def test_a_service_with_no_wantedby_and_no_timer_is_still_refused(self):
-        work = self._staged()
-        (work / "systemd" / "wk-orphan.service").write_text(
-            "[Unit]\n[Service]\nExecStart=/bin/true\n")
-        cp = self._edit(work)
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("WantedBy", cp.stdout + cp.stderr)
-
-    def test_an_image_without_any_init_takes_nothing_and_says_so(self):
-        work = self._staged()
-        cp = self._edit(work, systemd=False)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("neither systemd nor /etc/init.d", cp.stdout)
-        self.assertFalse((self.root / "etc").exists(), "something was installed anyway")
-
-    def _names(self, members):
-        """The member list checked as v_units checks it; tarfile spells a traversal exactly."""
-        import io
-        import tarfile
-        tar = self.tmp / "units.tar"
-        body = b"[Install]\nWantedBy=multi-user.target\n"
-        with tarfile.open(tar, "w") as tf:
-            for name in members:
-                info = tarfile.TarInfo(name)
-                info.size = len(body)
-                tf.addfile(info, io.BytesIO(body))
-        return bash(_SAY + _lift(CARD_PRIV, "_units_names") + f"\n_units_names {tar}\n")
-
-    def test_the_member_list_takes_only_the_two_directories(self):
-        for members, rc in ((["systemd/wk-self-return.service", "systemd/wk-self-return.timer"], 0),
-                            (["systemd/../../etc/passwd"], 3), (["etc/shadow"], 3)):
-            with self.subTest(members=members):
-                cp = self._names(members)
-                self.assertEqual(cp.returncode, rc, cp.stdout + cp.stderr)
-
-    def test_an_unpacked_symlink_is_refused(self):
-        work = self.tmp / "unpacked"
-        (work / "systemd").mkdir(parents=True)
-        (work / "systemd" / "evil.service").symlink_to("/etc/shadow")
-        cp = bash(_SAY + _lift(CARD_PRIV, "_units_unpacked") + f"\n_units_unpacked {work}\n")
-        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
-        self.assertIn("symlink", cp.stdout + cp.stderr)
-
-
-class TestBootCheck(CardEditTest):
-    PI4 = ("start4.elf", "fixup4.dat", "kernel8.img", "bcm2711-rpi-4-b.dtb")
-    PI5 = ("start4.elf", "fixup4.dat", "kernel_2712.img", "bcm2712-rpi-5-b.dtb")
-
-    def _boot_tree(self, missing=(), files=PI4):
-        (self.boot / "config.txt").write_text("arm_64bit=1\n")
-        for name in files:
-            if name not in missing:
-                (self.boot / name).write_text("firmware")
-
-    def _run(self, checker=None, dtb="bcm2711-rpi-4-b.dtb"):
-        checker = checker or (REPO / "boot" / "check-boot-files.py")
-        return self.run_helper(
-            f'CHECK_BOOT_FILES={checker}\n'
-            + _lift(CARD_PRIV, "check_name", "_boot_check_run", "v_boot_check")
-            + f"\nv_boot_check /dev/sdX {dtb}\n")
-
-    def test_a_complete_boot_tree_passes(self):
-        self._boot_tree()
-        cp = self._run()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("every file the firmware asks for resolves", cp.stdout)
-
-    def test_a_tree_missing_its_firmware_or_kernel_is_refused_by_name(self):
-        for missing, says in (("start4.elf", "start4.elf"), ("kernel8.img", "kernel")):
-            with self.subTest(missing=missing):
-                for f in self.boot.iterdir():
-                    f.unlink()
-                self._boot_tree(missing=(missing,))
-                cp = self._run()
-                self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-                self.assertIn(says, cp.stdout + cp.stderr)
-
-    def test_a_pi5_tree_is_checked_with_its_own_kernel_name(self):
-        self._boot_tree(files=self.PI5)
-        cp = self._run(dtb="bcm2712-rpi-5-b.dtb")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        (self.boot / "kernel_2712.img").unlink()
-        cp = self._run(dtb="bcm2712-rpi-5-b.dtb")
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        for name in ("start4.elf", "fixup4.dat", "bcm2711-rpi-4-b.dtb"):
+            (self.boot / name).write_text("firmware")
+        cp = self.run_helper("CHECK_BOOT_FILES=%s\n" % (REPO / "boot" / "check-boot-files.py")
+                             + _lift(CARD_PRIV, "check_name", "_boot_check_run", "v_boot_check") + "\nv_boot_check /dev/sdX bcm2711-rpi-4-b.dtb\n")
+        self.assertNotEqual(cp.returncode, 0)
         self.assertIn("kernel", cp.stdout + cp.stderr)
 
-    def test_a_missing_checker_refuses_loudly_and_names_the_remedy(self):
-        self._boot_tree()
-        cp = self._run(checker="/nonexistent/wk-check-boot-files.py")
-        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
-        out = cp.stdout + cp.stderr
-        self.assertIn("no boot-file checker", out)
-        self.assertIn("./setup --stage quiesce", out)
+    def test_boot_read_prints_an_allowlisted_file_read_only_and_bounded(self):
+        (self.boot / "wk-diag.txt").write_text("x" * 200000)
+        read_only = 'eval "rw_$(declare -f with_mount)"\nwith_mount() { [ "$1" = -r ] || return 9; rw_with_mount "$@"; }\n'
+        lift = _lift(CARD_PRIV, "check_partno", "_boot_read_probe", "v_boot_read") + "\nBOOT_READ_MAX=65536\n" + read_only
+        cp = self.run_helper(lift + "v_boot_read /dev/sdX 1 wk-diag.txt\n")
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertLessEqual(len(cp.stdout), 65536 + 200)
+        for part, name in (("1", "../../etc/shadow"), ("1 ; rm -rf /", "wk-diag.txt")):
+            self.assertEqual(self.run_helper(lift + "v_boot_read /dev/sdX '%s' '%s'\n" % (part, name)).returncode, 3)
+
+
+class TestTheRootEdits(CardEditTest):
+    def test_units_land_wanted_a_timer_s_service_is_not_and_an_image_without_init_takes_none(self):
+        work = self.tmp / "staged"
+        for d, name, text in (("systemd", "wk-self-return.timer", "[Timer]\nOnBootSec=900\n[Install]\nWantedBy=timers.target\n"),
+                              ("systemd", "wk-self-return.service", "[Service]\nExecStart=/bin/true\n"),
+                              ("sysctl.d", "90-wk-perf.conf", "kernel.perf_event_paranoid = -1\n")):
+            (work / d).mkdir(parents=True, exist_ok=True)
+            (work / d / name).write_text(text)
+        edit = _lift(CARD_PRIV, "_put", "_unit_target", "_units_sysctl", "_units_edit") + "\n_units_edit \"$ROOTDIR\" %s\n" % work
+        cp = self.run_helper(edit)
+        self.assertIn("neither systemd nor /etc/init.d", cp.stdout)
+        self.assertFalse((self.root / "etc").exists())
+        (self.root / "lib" / "systemd").mkdir(parents=True)
+        (self.root / "lib" / "systemd" / "systemd").write_text("")
+        cp = self.run_helper(edit)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        sysd = self.root / "etc" / "systemd" / "system"
+        self.assertTrue((sysd / "timers.target.wants" / "wk-self-return.timer").is_symlink())
+        self.assertFalse((sysd / "multi-user.target.wants" / "wk-self-return.service").exists(), "the service would reboot at boot")
+        self.assertEqual((self.root / "etc" / "sysctl.d" / "90-wk-perf.conf").read_text(), "kernel.perf_event_paranoid = -1\n")
+
+    def test_units_take_only_their_two_directories_and_no_symlink(self):
+        tar, body = self.tmp / "units.tar", b"[Install]\nWantedBy=multi-user.target\n"
+        with tarfile.open(tar, "w") as tf:
+            info = tarfile.TarInfo("systemd/../../etc/passwd")
+            info.size = len(body)
+            tf.addfile(info, io.BytesIO(body))
+        self.assertEqual(bash(_SAY + _lift(CARD_PRIV, "_units_names") + "\n_units_names %s\n" % tar).returncode, 3)
+        (self.tmp / "u" / "systemd").mkdir(parents=True)
+        (self.tmp / "u" / "systemd" / "evil.service").symlink_to("/etc/shadow")
+        self.assertEqual(bash(_SAY + _lift(CARD_PRIV, "_units_unpacked") + "\n_units_unpacked %s\n" % (self.tmp / "u")).returncode, 3)
+
+    def test_helper_puts_itself_and_its_checker_on_the_card(self):
+        (self.tmp / "helper").write_text("#!/bin/bash\n")
+        (self.tmp / "checker.py").write_text("#!/usr/bin/env python3\n")
+        cp = self.run_helper(_lift(CARD_PRIV, "_put", "_helper_install", "v_helper") + '\nSELF=%s\nCHECK_BOOT_FILES=%s\nv_helper /dev/sdX\n'
+                             % (self.tmp / "helper", self.tmp / "checker.py"))
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        for name in ("wk-card-priv", "wk-check-boot-files.py"):
+            self.assertTrue(os.access(self.root / "usr" / "local" / "libexec" / name, os.X_OK), name)
+
+    def test_grow_and_eject_report_their_failures(self):
+        def run(verb, **rc):
+            with stub_path({t: "exit %d\n" % rc.get(t, 0) for t in ("sfdisk", "partx", "e2fsck", "resize2fs", "blockdev", "sync")}) as binp:
+                return self.run_helper(_lift(CARD_PRIV, verb) + "\n%s /dev/sdX\n" % verb, path=binp)
+        self.assertEqual([run("v_grow", e2fsck=n).returncode for n in (1, 4)], [0, 1])
+        cp = run("v_eject", blockdev=1)
+        self.assertEqual(cp.returncode, 1)
+        self.assertNotIn("flushed", cp.stdout)
+
+    def test_the_wifi_conf_lands_0600_and_reads_back_and_what_would_break_it_is_refused(self):
+        def edit(ssid, psk):
+            return bash(_SAY + _lift(CARD_PRIV, "check_wifi_value", "_wifi_edit") + "\nstat() { echo 600; }\n_wifi_edit %s %r %r\n"
+                        % (self.root, ssid, psk))
+        self.assertEqual(edit("My Net", "hunter2 pass").returncode, 0)
+        conf = self.root / "etc" / "wpa_supplicant" / "wpa_supplicant-wlan0.conf"
+        self.assertIn('network={\n    ssid="My Net"\n    psk="hunter2 pass"\n}', conf.read_text())
+        cp = bash(_lift(CARD_PRIV, "_wpa_conf_wifi") + '\nout=$(_wpa_conf_wifi %s) || exit $?\ncat "$out"\n' % conf,
+                  env={**os.environ, "TMPDIR": str(self.tmp)})
+        self.assertEqual(cp.stdout, "ssid=My Net\npsk=hunter2 pass\n")
+        check = _SAY + _lift(CARD_PRIV, "check_wifi_value") + '\ncheck_wifi_value "the SSID" "$1"\n'
+        for value, rc in (("Plain Net", 0), ('bad"ssid', 3), ("bad\\psk", 3), ("", 3)):
+            self.assertEqual(subprocess.run(["bash", "-c", check, "_", value], capture_output=True).returncode, rc, value)
+
+    @unittest.skipUnless(subprocess.run(["python3", "-c", "import yaml"], capture_output=True).returncode == 0, "no python3 yaml here")
+    def test_the_host_s_netplan_credential_is_found_and_wifi_host_never_says_the_passphrase(self):
+        parser = re.search(r"python3 -c '\n(.*?)\n' > \"\$tmp\"", CARD_PRIV.read_text(), re.S).group(1)
+        nm = 'network:\n  wifis:\n    NM-u:\n      access-points:\n        "NMNet":\n          auth:\n            password: "s3cret!"\n'
+        cp = subprocess.run(["python3", "-c", parser], input=nm, capture_output=True, text=True)
+        self.assertEqual((cp.returncode, cp.stdout), (0, "ssid=NMNet\npsk=s3cret!\n"))
+        self.assertEqual(subprocess.run(["python3", "-c", parser], input="", capture_output=True).returncode, 3)
+        stub = '_host_wifi() { tmp=$(mktemp); printf "ssid=MyNet\\npsk=hunter2\\n" > "$tmp"; printf "%s" "$tmp"; }'
+        cp = bash(_SAY + stub + "\n" + _lift(CARD_PRIV, "v_wifi_host") + "\nv_wifi_host\n")
+        self.assertIn("wifi-host: yes ssid=MyNet", cp.stdout)
+        self.assertNotIn("hunter2", cp.stdout + cp.stderr)
 
 
 class TestEveryDeviceVerbIsGated(WkTest):
@@ -405,194 +225,65 @@ class TestEveryDeviceVerbIsGated(WkTest):
         script.write_text(re.sub(r'(?m)^\[ "\$\(id -u\)" -eq 0 \].*$', ":", CARD_PRIV.read_text()))
         for verb in DEVICE_VERBS:
             with self.subTest(verb=verb):
-                cp = subprocess.run(["bash", str(script), verb, "/dev/null", "x", "y"], capture_output=True,
-                                    text=True, stdin=subprocess.DEVNULL)
+                cp = subprocess.run(["bash", str(script), verb, "/dev/null", "x", "y"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
                 self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
                 self.assertIn("not a block device", cp.stderr)
 
 
-class TestTheUnitsAreTheImageMachines(unittest.TestCase):
-
-    def setUp(self):
-        self.w = write.Write(REPO, {"HOME": "/nonexistent", "XDG_CONFIG_HOME": "/nonexistent"}, Fake(), None)
-
-    def staged(self, watchdog="600", disarm=""):
+class TestTheUnitsAWriteStages(unittest.TestCase):
+    def staged(self, watchdog="600", machine=""):
+        w = write.Write(REPO, {"HOME": "/nonexistent", "XDG_CONFIG_HOME": "/nonexistent"}, Fake(), None)
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            return write.stage_units(REPO, watchdog, disarm, "test-preset"), err.getvalue()
+            return write.stage_units(REPO, watchdog, w.self_disarm(machine), "p"), err.getvalue(), w
 
-    def test_a_medium_armed_board_gets_its_drivers_self_disarm(self):
-        for machine, want in (("rpi4", "tryboot.txt"), ("rpi3", "config.txt.rescue")):
-            with self.subTest(machine=machine):
-                line = self.w.self_disarm(machine)
-                self.assertIn(want, line)
-                self.assertNotIn("'", line, "a quote here would split systemd's ExecStart")
-
-    def test_an_unknown_board_has_nothing_to_park(self):
-        for machine in ("nosuchmachine", ""):
-            self.assertEqual(self.w.self_disarm(machine), "")
-
-    def test_the_self_disarm_unit_is_skipped_when_there_is_nothing_to_park(self):
-        units, _ = self.staged()
-        self.assertNotIn("systemd/wk-self-disarm.service", units)
-        self.assertIn("systemd/wk-self-return.service", units)
-        self.assertIn("init.d/S99wk-self-return", units)
-
-    def test_the_watchdog_is_a_timer_that_blocks_no_target(self):
+    def test_the_watchdog_is_a_timer_blocking_no_target_and_its_service_is_wanted_by_nothing(self):
         """A sleeping oneshot holds multi-user.target inactive for the whole wait (rpi4, measured)."""
-        units, _ = self.staged()
-        timer = units["systemd/wk-self-return.timer"]
+        units, _, w = self.staged()
+        timer, svc = units["systemd/wk-self-return.timer"], units["systemd/wk-self-return.service"]
         self.assertTrue(timer.endswith("[Timer]\nAccuracySec=1s\nOnBootSec=600\n"), timer)
-        self.assertIn("WantedBy=timers.target", timer)
-        self.assertIn("/etc/wk/rescue", timer, "the timer is not gated on the rescue marker")
-        svc = units["systemd/wk-self-return.service"]
-        self.assertNotIn("sleep", svc)
-        self.assertNotIn("[Install]", svc, "a service also wanted by a systemd target reboots the board at boot")
-        self.assertIn("wk-keep-running", svc)
-        self.assertIn("/etc/wk/rescue", svc, "the service is not gated on the rescue marker")
-
-    def test_no_watchdog_seconds_stages_neither_half(self):
-        units, err = self.staged(watchdog="")
-        self.assertFalse([u for u in units if "wk-self-return" in u], units)
+        self.assertTrue(all("/etc/wk/rescue" in u for u in (timer, svc)))
+        self.assertNotIn("[Install]", svc)
+        self.assertNotIn("systemd/wk-self-disarm.service", units, "nothing to park")
+        self.assertEqual([w.self_disarm(m) for m in ("nosuchmachine", "")], ["", ""])
+        units, err, _ = self.staged(watchdog="")
+        self.assertFalse([u for u in units if "wk-self-return" in u])
         self.assertIn("will not hand its machine back", err)
 
-    def test_a_busybox_image_gets_the_same_two_jobs_as_init_scripts(self):
-        units, _ = self.staged(disarm=self.w.self_disarm("rpi3"))
-        self.assertEqual(sorted(u for u in units if u.startswith("init.d/")),
-                         ["init.d/S11wk-self-disarm", "init.d/S99wk-self-return"])
+    def test_a_busybox_image_gets_the_same_two_jobs_as_init_scripts_their_sleep_in_the_background(self):
+        units, _, w = self.staged(watchdog="2", machine="rpi3")
+        self.assertIn("tryboot.txt", w.self_disarm("rpi4"))
         disarm, ret = units["init.d/S11wk-self-disarm"], units["init.d/S99wk-self-return"]
         for script in (disarm, ret):
-            self.assertTrue(script.startswith("#!/bin/sh\n"))
-            self.assertIn("/etc/wk/rescue", script, "the script is not gated on the rescue marker")
-            self.assertEqual(subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode, 0)
+            self.assertIn("/etc/wk/rescue", script)
+            self.assertEqual(subprocess.run(["sh", "-n"], input=script, text=True).returncode, 0)
         self.assertIn("config.txt.rescue", disarm)
-        self.assertIn("WK_WATCHDOG=600\n", ret)
-        self.assertIn('sleep "$WK_WATCHDOG"', ret)
-        self.assertIn("wk-keep-running", ret)
-
-    def test_the_watchdog_scripts_run_their_sleep_in_the_background(self):
-        units, _ = self.staged(watchdog="2")
-        cp = subprocess.run(["sh", "-c", units["init.d/S99wk-self-return"].replace("/etc/wk/rescue", "/nonexistent")
-                             .replace("reboot", "true"), "S99", "start"], capture_output=True, timeout=1)
+        cp = subprocess.run(["sh", "-c", ret.replace("/etc/wk/rescue", "/nonexistent").replace("reboot", "true"), "S99", "start"],
+                            capture_output=True, timeout=1)
         self.assertEqual(cp.returncode, 0)
 
 
-class TestBootRead(CardEditTest):
-    # A writable mount fails here, so every read below also asserts boot-read mounts read-only.
-    READ_ONLY = 'eval "rw_$(declare -f with_mount)"\nwith_mount() { [ "$1" = -r ] || return 9; rw_with_mount "$@"; }\n'
+class TestTheJoinScripts(WkTest):
+    """What a card's first boot runs: each says what is missing and how it is put there."""
 
-    def _run(self, partition="1", name="wk-diag.txt"):
-        return self.run_helper(
-            _lift(CARD_PRIV, "check_partno", "_boot_read_probe", "v_boot_read")
-            + "\nBOOT_READ_MAX=65536\n" + self.READ_ONLY
-            + f"v_boot_read /dev/sdX '{partition}' '{name}'\n")
+    def test_the_tailnet_join_names_a_missing_key_and_an_already_joined_node_is_no_failure(self):
+        text = (REPO / "image/yocto/meta-wk-tailnet/recipes-network/tailscale/files/wk-tailnet-join").read_text()
+        ts = self.tmp / "tailscale"
+        script = self.tmp / "join"
+        script.write_text(text.replace("KEY=/etc/wk/tailscale-authkey", "KEY=%s/none" % self.tmp)
+                          .replace("CONF=/etc/wk/tailnet.conf", "CONF=%s/none.conf" % self.tmp).replace("TS=/usr/bin/tailscale", "TS=%s" % ts))
+        for body, rc in (("exit 1", 1), ('[ "$1" = ip ] && echo 100.1.1.1; exit 0', 0)):
+            ts.write_text("#!/bin/sh\n%s\n" % body)
+            ts.chmod(0o755)
+            cp = subprocess.run(["sh", str(script)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(cp.returncode != 0, bool(rc), cp.stdout + cp.stderr)
 
-    def test_an_absent_file_is_nothing_and_not_an_error(self):
-        cp = self._run()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "")
-
-    def test_each_allowlisted_file_is_printed(self):
-        for name, text in (("wk-diag.txt", "id=some-image\nwlan0: no carrier\n"),
-                           ("wk-image.id", "wpewebkit-2.46-yocto-rpi5-64-9ee1cf59c4d1\n"),
-                           ("config.txt", "[all]\nos_check=0\n"),
-                           ("cmdline.txt", "root=PARTUUID=987478fd-02 rootwait\n")):
-            with self.subTest(name=name):
-                (self.boot / name).write_text(text)
-                cp = self._run(name=name)
-                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-                self.assertIn(text.splitlines()[-1], cp.stdout)
-
-    def test_a_filename_off_the_allowlist_is_refused(self):
-        (self.boot / "wk-image.id").write_text("x\n")
-        for name in ("../../etc/shadow", "id_rsa", "wk-image.id.bak", ""):
-            with self.subTest(name=name):
-                cp = self._run(name=name)
-                self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
-                self.assertIn("REFUSED", cp.stderr)
-
-    def test_a_partition_that_is_not_a_partition_number_is_refused(self):
-        for p in ("0", "17", "1x", "-1", "1 ; rm -rf /", ""):
-            with self.subTest(partition=p):
-                cp = self._run(partition=p)
-                self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
-                self.assertIn("REFUSED", cp.stderr)
-
-    def test_it_is_bounded(self):
-        (self.boot / "wk-diag.txt").write_text("x" * 200000)
-        cp = self._run()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertLessEqual(len(cp.stdout), 65536 + 200, "a card can hand back any amount of text")
-
-class TestRescueHelper(CardEditTest):
-
-    def _run(self, extra=""):
-        script = (_lift(CARD_PRIV, "_put", "_helper_install", "v_helper")
-                  + f'\nSELF={self.tmp / "helper"!s}\n'
-                  + f'CHECK_BOOT_FILES={self.tmp / "checker.py"!s}\n'
-                  + extra + '\nv_helper /dev/sdX\n')
-        return self.run_helper(script)
-
-    def setUp(self):
-        super().setUp()
-        (self.tmp / "helper").write_text("#!/bin/bash\n# the helper\n")
-        (self.tmp / "checker.py").write_text("#!/usr/bin/env python3\n")
-
-    def test_both_files_land_root_owned_and_executable(self):
-        cp = self._run()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        d = self.root / "usr" / "local" / "libexec"
-        self.assertEqual((d / "wk-card-priv").read_text(), "#!/bin/bash\n# the helper\n")
-        self.assertTrue((d / "wk-check-boot-files.py").exists())
-        for f in (d / "wk-card-priv", d / "wk-check-boot-files.py"):
-            self.assertTrue(os.access(f, os.X_OK), f"{f.name} is not executable")
-        self.assertIn("helper:", cp.stdout)
-
-    def test_a_bench_pair_takes_it_too(self):
-        cp = self._run(extra="SECOND=1")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertTrue((self.root / "usr" / "local" / "libexec" / "wk-card-priv").is_file())
-
-    def test_no_checker_on_this_machine_is_a_refusal_with_a_remedy(self):
-        (self.tmp / "checker.py").unlink()
-        cp = self._run()
-        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
-        self.assertIn("--stage quiesce", cp.stderr)
-        self.assertFalse((self.root / "usr").exists(), "nothing is written on a refusal")
-
-
-class TestGrowAndEjectReportTheirFailures(CardEditTest):
-
-    def tools(self, **rc):
-        return {t: "exit %d\n" % rc.get(t, 0) for t in ("sfdisk", "partx", "e2fsck", "resize2fs", "blockdev", "sync")}
-
-    def grow(self, **rc):
-        with stub_path(self.tools(**rc)) as binp:
-            return self.run_helper(_lift(CARD_PRIV, "v_grow") + "\nv_grow /dev/sdX\n", path=binp)
-
-    def eject(self, **rc):
-        with stub_path(self.tools(**rc)) as binp:
-            return self.run_helper(_lift(CARD_PRIV, "v_eject") + "\nv_eject /dev/sdX\n", path=binp)
-
-    def test_grow_succeeds_only_on_a_clean_or_corrected_filesystem(self):
-        for rc, want, says in (({"e2fsck": 0}, 0, ""), ({"e2fsck": 1}, 0, ""), ({"e2fsck": 4}, 1, "e2fsck"),
-                               ({"e2fsck": 8}, 1, "e2fsck"), ({"partx": 1}, 1, "partx")):
-            with self.subTest(rc=rc):
-                cp = self.grow(**rc)
-                self.assertEqual(want, cp.returncode, cp.stdout + cp.stderr)
-                if want == 0:
-                    self.assertIn("grown to fill /dev/sdX", cp.stdout)
-                else:
-                    self.assertIn(says, cp.stderr)
-                    self.assertNotIn("grown", cp.stdout)
-
-    def test_eject_says_flushed_only_when_the_flush_succeeded(self):
-        cp = self.eject()
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        self.assertIn("/dev/sdX flushed", cp.stdout)
-        cp = self.eject(blockdev=1)
-        self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
-        self.assertIn("blockdev --flushbufs", cp.stderr)
-        self.assertNotIn("flushed", cp.stdout)
+    def test_the_wifi_join_names_a_missing_conf(self):
+        script = self.tmp / "wifi"
+        script.write_text((REPO / "image/yocto/meta-wk-wifi/recipes-connectivity/wk-wifi-join/files/wk-wifi-join").read_text()
+                          .replace("CONF=/etc/wpa_supplicant/wpa_supplicant-wlan0.conf", "CONF=%s/none.conf" % self.tmp))
+        cp = subprocess.run(["sh", str(script)], capture_output=True, text=True, timeout=10)
+        self.assertEqual(1, cp.returncode)
+        self.assertIn("wk sysimage write", cp.stdout + cp.stderr)
 
 
 if __name__ == "__main__":

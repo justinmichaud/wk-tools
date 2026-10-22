@@ -1,5 +1,6 @@
-"""The buildroot builder's driving half; buildroot_ws.py runs from the workspace's own copy of this tree, so the halves cannot skew.
-The tree is a fork whose release-pinned `cog` defconfigs exist nowhere else, not even at its 2020.02 tag: BR_TREE_COMMIT is a commit.
+"""The buildroot builder's host half: its data and its two stages (the image, a WebKit slot) over task.ContainerBuilder's
+lifecycle, around buildroot_ws.py in the workspace. The tree is a fork whose release-pinned `cog` defconfigs exist
+nowhere else, not even at its 2020.02 tag: BR_TREE_COMMIT is a commit.
 TODO: whether the rpi3 defconfig compiles wpa_supplicant at all is unverified."""
 
 import os
@@ -10,14 +11,9 @@ from wk.sysimage import task
 from wk.sysimage.ls import slot_doc
 from wk.sysimage.write import wants_wifi
 
-BASE_IMAGE = "docker.io/library/ubuntu:22.04"   # the host the wiki recipe was driven on (container/buildroot/Containerfile)
-SPEC = os.path.join("container", "buildroot", "Containerfile")
 IMAGE_JOBS = 16    # 2009-era tarballs are where broken parallel rules live
 WEBKIT_JOBS = 64   # WebKit links large; capped where the link steps stop gaining
-PATTERN = "*buildroot_ws.py*"
 DL_IN_WS = "/cache/buildroot/dl"
-BUILD_USAGE = "usage: wk sysimage build %s [--dry-run|--workspace <name>|--detach|--stop]"
-WEBKIT_USAGE = "usage: wk sysimage webkit <image-preset> --commit <sha> --slot <name> [--detach] [--dry-run]"
 ZIMAGE_MAGIC = "016f2818"
 PIN_TOOLS = ("dpkg-deb", "xz", "depmod", "tar")
 
@@ -73,140 +69,132 @@ def kernel_pin(m, deb, release, out):
 
 
 class Buildroot(task.ContainerBuilder):
-    KIND, TITLE, SPEC, BASE_IMAGE, BASE_VAR, PATTERN = "buildroot", "buildroot", SPEC, BASE_IMAGE, "WK_BUILDROOT_BASE", PATTERN
+    KIND, TITLE, BASE_VAR, PATTERN = "buildroot", "buildroot", "WK_BUILDROOT_BASE", "*buildroot_ws.py*"
+    BASE_IMAGE = "docker.io/library/ubuntu:22.04"   # the host the wiki recipe was driven on (container/buildroot/Containerfile)
+    SPEC = os.path.join("container", "buildroot", "Containerfile")
     NEEDS = "a buildroot image builds in a container workspace"
     NOT_HERE = "Build it on a machine whose container place holds it:  wk sysimage build %(spec)s@<machine>"
     IMAGE_NOTE = "  22.04 is the host the wiki recipe was driven on; a 2020 buildroot\n  does not survive a much newer one (%(spec)s)."
     SURVIVES = "the buildroot downloads are in the store and survive"
-
-    def kill_cmd(self, ws, stage):
-        return "wk sysimage build %s%s --stop" % (self.spec, self.ws_flag(ws))
-
-    def kernel(self):
-        """Fetched and prepared here, where the network and depmod are; its path in the download cache both sides share."""
-        fetched = task.fetch_base(self.here, self.p["BR_KERNEL_DEB_URL"], self.p["BR_KERNEL_DEB_SHA256"], self.env)
-        return DL_IN_WS + "/" + os.path.basename(kernel_pin(self.here, fetched, self.p["BR_KERNEL_RELEASE"], self.cache("dl")))
-
-    def kernel_dts(self):
-        m = self.p["IMG_MACHINE"]
-        dtb = (fleet.Fleet(images.root(self.env), self.env).load(m) or {}).get("dtb", "")
-        if not dtb:
-            die("%s pins a kernel but machines/%s.conf names no dtb=" % (self.name, m))
-        return os.path.splitext(dtb)[0]
-
-    def image_argv(self, tools, jobs, wifi, kernel_tar, kernel_dts=""):
-        p, opt = self.p, task.opt
-        return (["python3", tools + "/lib/wk/sysimage/buildroot_ws.py", "image", "--name", self.name, "--tree-url", p["BR_TREE_URL"]]
-                + opt("--tree-branch", p["BR_TREE_BRANCH"]) + opt("--tree-commit", p["BR_TREE_COMMIT"])
-                + ["--defconfig", p["BR_DEFCONFIG"], "--external", p["BR_EXTERNAL"] or "0"] + opt("--image", p["BR_IMAGE"])
-                + ["--jobs", str(jobs)] + opt("--overlay-arch", p["BR_OVERLAY_TAILSCALE"]) + opt("--overlay-wifi", "1" if wifi else "")
-                + opt("--kernel-tar", kernel_tar) + opt("--kernel-release", p["BR_KERNEL_RELEASE"]) + opt("--kernel-dts", kernel_dts))
-
-    def build(self, rest):
-        o = task.options(rest, ("--detach", "--stop"), ("--workspace",), BUILD_USAGE % self.name)
-        p = self.p
-        if not p["BR_DEFCONFIG"]:
-            die("'%s' names no defconfig, so there is nothing to\n    build. Its image preset is %s." % (self.name, images.conf_path(self.name, self.env)))
-        if p["BR_KERNEL_DEB_URL"] and not (p["BR_KERNEL_DEB_SHA256"] and p["BR_KERNEL_RELEASE"]):
-            die("%s pins a kernel but not its sha256 and release\n    (BR_KERNEL_DEB_SHA256, BR_KERNEL_RELEASE): a kernel by URL alone is not pinned." % self.name)
-        driver = self.driver()
-        ws = self.ws_of(o)
-        st = self.stage(driver, ws, "image")
-        if o.get("--stop"):
-            return st.stop()
-        wifi = wants_wifi(fleet.Fleet(images.root(self.env), self.env), p["IMG_MACHINE"])
-        base, tag = self.host_image()
-        if act.dry_run():
-            return self.build_report(driver, ws, base, wifi)
-        st.refuse_busy()
-        if o.get("--detach"):
-            return self.detach(st, "build", rest, "build of %s" % self.name)
-        budget, running, jobs = st.size(IMAGE_JOBS)
-        kernel = {"tar": "", "dts": ""}
-        pin = [lambda: kernel.update(tar=self.kernel(), dts=self.kernel_dts())] if p["BR_KERNEL_DEB_URL"] else []
-        plan = (["prepare the pinned kernel %s" % p["BR_KERNEL_RELEASE"]] if pin else []) + [
-            "the workspace '%s' on %s" % (ws, tag), "sync wk-tools into '%s'" % ws, "build %s with -j%d" % (self.name, jobs)]
-        self.staged(st, (budget, running, jobs), plan, pin + [lambda: self.ensure_ws(driver, ws, base, tag), lambda: self.sync(driver, ws)],
-                    "building %s in '%s' (hours; --detach returns instead)" % (self.name, ws),
-                    lambda: self.image_argv(driver.tools(ws), jobs, wifi, kernel["tar"], kernel["dts"]))
-        info("built %s in '%s'" % (self.name, ws))
-        return 0
-
-    def build_report(self, driver, ws, base, wifi):
-        p = self.p
-        _, _, jobs = self.stage(driver, ws, "image").size(IMAGE_JOBS)
-        kernel = ("%s, pinned (%s)" % (p["BR_KERNEL_RELEASE"], os.path.basename(p["BR_KERNEL_DEB_URL"]))
-                  if p["BR_KERNEL_DEB_URL"] else "built from the tree by buildroot")
-        machine = p["IMG_MACHINE"] or "this board"
-        dl, cc = self.cache("dl"), self.cache("ccache")
-        log("would build image %s (builder: buildroot)" % self.name)
-        log("  for machine  %s (%s)" % (p["IMG_MACHINE"] or "none", p["IMG_ARCH"] or "?"))
-        log("  tree         %s @ %s" % (p["BR_TREE_URL"], p["BR_TREE_COMMIT"] or p["BR_TREE_BRANCH"] or "HEAD"))
-        log("  defconfig    %s%s" % (p["BR_DEFCONFIG"], " (plus this repo's BR2_EXTERNAL)" if p["BR_EXTERNAL"] == "1" else ""))
-        log("  workspace    %s (%s)" % (ws, driver.info(ws)))
-        log("  host image   %s + %s" % (base, SPEC))
-        log("  jobs         -j%d (memory-sized at %d MB/job)" % (jobs, task.MB_PER_JOB))
-        log("  overlay      %s" % (p["BR_OVERLAY_TAILSCALE"] or "none -- this image would join no tailnet"))
-        log("  wifi overlay %s" % ("wk-wifi-join (lib/wk/sysimage/buildroot_ws.py); the card carries the credential" if wifi
-                                  else "none -- %s has a cable" % machine))
-        log("  kernel       %s" % kernel)
-        log("  DL_DIR       %s (%s) -- BR2_DL_DIR in the container" % (dl, self.du(dl)))
-        log("  CCACHE_DIR   %s (%s) -- BR2_CCACHE_DIR in the container" % (cc, self.du(cc)))
-        log("  output       in the workspace, under output/images (there is no store)")
-        log("dry run -- nothing was built.")
-        return 0
+    USAGE = "usage: wk sysimage build %s [--workspace <name>|--detach|--stop]"
+    WEBKIT_USAGE = "usage: wk sysimage webkit %s --commit <sha> --slot <name> [--workspace <name>|--detach]"
 
     def webkit(self, rest):
-        """One commit built with the image's own wpewebkit package, so `wk bench run --ab` alternates two with no reflash."""
-        o = task.options(rest, ("--detach",), ("--workspace", "--commit", "--slot"), WEBKIT_USAGE)
-        commit, name = o.get("--commit") or "", o.get("--slot") or ""
-        if not commit or not name:
-            die(WEBKIT_USAGE + "; see wk sysimage -h")
-        images.check_slot_name(name)
-        task.check_commit(commit)
-        driver = self.driver()
-        ws = self.ws_of(o)
-        image = os.path.join(driver.store.ws_dir(ws), "build", "buildroot", self.name, "output", "images", self.p["BR_IMAGE"] or "sdcard.img")
-        slotdir = images.slot_dir(ws, name, self.env)
-        st = self.stage(driver, ws, "webkit-" + name)
-        if act.dry_run():
-            return self.webkit_report(driver, st, ws, commit, name, image, slotdir)
-        if driver.info(ws) == "absent":
-            die("no workspace '%s', so there is no image to build against.\n    Build the image first:  wk sysimage build %s" % (ws, self.spec))
-        if not self.here.exists(image):
-            die("'%s' has no finished image (%s) for a slot to build against:  wk sysimage build %s" % (ws, image, self.spec))
+        self.verb = "webkit"
+        return self.build(rest)
+
+    def parse(self, rest):
+        p = self.p
+        if self.verb == "build":
+            if not p["BR_DEFCONFIG"]:
+                die("'%s' names no defconfig, so there is nothing to\n    build. Its image preset is %s."
+                    % (self.name, images.conf_path(self.name, self.env)))
+            if p["BR_KERNEL_DEB_URL"] and not (p["BR_KERNEL_DEB_SHA256"] and p["BR_KERNEL_RELEASE"]):
+                die("%s pins a kernel but not its sha256 and release\n    (BR_KERNEL_DEB_SHA256, BR_KERNEL_RELEASE): a kernel by URL alone is not pinned." % self.name)
+            return super().parse(rest)
+        o = task.options(rest, ("--detach",), ("--workspace", "--commit", "--slot"), self.WEBKIT_USAGE % self.name)
+        if not o.get("--commit") or not o.get("--slot"):
+            die(self.WEBKIT_USAGE % self.name + "; see wk sysimage -h")
+        images.check_slot_name(o["--slot"])
+        task.check_commit(o["--commit"])
+        return dict(o, stage="webkit-" + o["--slot"])
+
+    def image(self, driver, ws):
+        return os.path.join(driver.store.ws_dir(ws), "build", "buildroot", self.name, "output", "images", self.p["BR_IMAGE"] or "sdcard.img")
+
+    def refuse(self, driver, st, ws, o):
+        if self.verb == "webkit":
+            if driver.info(ws) == "absent":
+                die("no workspace '%s', so there is no image to build against.\n    Build the image first:  wk sysimage build %s" % (ws, self.spec))
+            if not self.here.exists(self.image(driver, ws)):
+                die("'%s' has no finished image (%s) for a slot to build against:  wk sysimage build %s" % (ws, self.image(driver, ws), self.spec))
         st.refuse_busy()
-        if o.get("--detach"):
-            return self.detach(st, "webkit", rest, "slot build of %s" % self.name)
-        budget, running, jobs = st.size(WEBKIT_JOBS)
-        self.staged(st, (budget, running, jobs), ["sync wk-tools into '%s'" % ws, "build WebKit %s into slot '%s' with -j%d" % (commit[:12], name, jobs)],
-                    [lambda: self.sync(driver, ws)],
-                    "building WebKit %s into slot '%s' of %s in '%s' (tens of minutes; --detach returns instead)" % (commit[:12], name, self.name, ws),
-                    lambda: ["python3", driver.tools(ws) + "/lib/wk/sysimage/buildroot_ws.py", "webkit", "--name", self.name, "--commit", commit,
-                             "--slot", name, "--jobs", str(jobs)])
+
+    def what(self, o):
+        return "%s of %s" % ("build" if self.verb == "build" else "slot build", self.name)
+
+    def wifi(self):
+        return wants_wifi(fleet.Fleet(images.root(self.env), self.env), self.p["IMG_MACHINE"])
+
+    def kernel(self, into):
+        """Fetched and prepared here, where the network and depmod are; its path in the download cache both sides share."""
+        p = self.p
+        dtb = (fleet.Fleet(images.root(self.env), self.env).load(p["IMG_MACHINE"]) or {}).get("dtb", "")
+        if not dtb:
+            die("%s pins a kernel but machines/%s.conf names no dtb=" % (self.name, p["IMG_MACHINE"]))
+        cache = task.cache_dir(self.env)
+        deb = os.path.join(cache, os.path.basename(p["BR_KERNEL_DEB_URL"]))
+        self.here.mkdir(cache)
+        why = task.fetch_pinned(self.here, p["BR_KERNEL_DEB_URL"], deb, p["BR_KERNEL_DEB_SHA256"])
+        if why:
+            die(why)
+        tar = kernel_pin(self.here, deb, p["BR_KERNEL_RELEASE"], self.cache("dl"))
+        into += ["--kernel-tar", DL_IN_WS + "/" + os.path.basename(tar), "--kernel-dts", os.path.splitext(dtb)[0]]
+
+    def plan(self, driver, st, ws, o):
+        tools = driver.tools(ws)
+        if self.verb == "webkit":
+            budget, running, jobs = st.size(WEBKIT_JOBS)
+            commit, name = o["--commit"], o["--slot"]
+            return dict(sized=(budget, running, jobs), steps=[lambda: self.sync(driver, ws)],
+                        plan=["sync wk-tools into '%s'" % ws, "build WebKit %s into slot '%s' with -j%d" % (commit[:12], name, jobs)],
+                        say="building WebKit %s into slot '%s' of %s in '%s' (tens of minutes; --detach returns instead)"
+                            % (commit[:12], name, self.name, ws),
+                        argv=lambda: ["python3", tools + "/lib/wk/sysimage/buildroot_ws.py", "webkit", self.name, "--commit", commit,
+                                      "--slot", name, "--jobs", str(jobs)])
+        budget, running, jobs = st.size(IMAGE_JOBS)
+        argv = ["python3", tools + "/lib/wk/sysimage/buildroot_ws.py", "image", self.name, "--jobs", str(jobs)] \
+            + (["--wifi"] if self.wifi() else [])
+        pin = [lambda: self.kernel(argv)] if self.p["BR_KERNEL_DEB_URL"] else []
+        return dict(sized=(budget, running, jobs), steps=pin + [lambda: self.ensure_ws(driver, ws), lambda: self.sync(driver, ws)],
+                    plan=(["prepare the pinned kernel %s" % self.p["BR_KERNEL_RELEASE"]] if pin else [])
+                    + ["the workspace '%s' on %s" % (ws, self.host_image()[1]), "sync wk-tools into '%s'" % ws,
+                       "build %s with -j%d" % (self.name, jobs)],
+                    say="building %s in '%s' (hours; --detach returns instead)" % (self.name, ws), argv=lambda: argv)
+
+    def sync(self, driver, ws):
+        if not driver.sync_tools(ws):
+            die("pushing wk-tools into '%s' failed -- the reason is above" % ws)
+
+    def done(self, driver, ws, o):
+        if self.verb == "build":
+            info("built %s in '%s'" % (self.name, ws))
+            return 0
+        slotdir = images.slot_dir(ws, o["--slot"], self.env)
         if not self.here.exists(os.path.join(slotdir, "slot.json")):
             die("the build reported done but left no %s/slot.json" % slotdir)
-        info("slot '%s' of %s holds %s" % (name, self.name, commit[:12]))
-        log("  %s" % slotdir)
-        log("  next:  wk bench deploy %s <board> --slot %s" % (ws, name))
+        info("slot '%s' of %s holds %s" % (o["--slot"], self.name, o["--commit"][:12]))
+        log("  %s\n  next:  wk bench deploy %s <board> --slot %s" % (slotdir, ws, o["--slot"]))
         return 0
 
-    def webkit_report(self, driver, st, ws, commit, name, image, slotdir):
-        _, _, jobs = st.size(WEBKIT_JOBS)
-        sj = os.path.join(slotdir, "slot.json")
-        try:
-            held = "slot '%s' holds %s -- rebuilt incrementally in the same build directory" % (name, slot_doc(sj).get("commit", "")[:12])
-        except (OSError, ValueError):
-            held = "none"
-        log("would build a WebKit slot for image %s (builder: buildroot)" % self.name)
-        log("  commit       %s" % commit)
-        log("  slot         %s -> %s" % (name, slotdir))
-        log("  workspace    %s (%s)" % (ws, driver.info(ws)))
-        log("  image        %s" % (image if self.here.exists(image) else
-                                    "NOT BUILT -- the real run refuses here (wk sysimage build %s)" % self.spec))
-        log("  toolchain    the image's own (output/host/share/buildroot/toolchainfile.cmake),")
-        log("               options from the tree's WPEWEBKIT_CONF_OPTS, plus --build-id per slot")
-        log("  jobs         -j%d (memory-sized at %d MB/job)" % (jobs, task.MB_PER_JOB))
-        log("  existing     %s" % held)
-        log("dry run -- nothing was built.")
-        return 0
+    def report(self, driver, st, ws, o):
+        p = self.p
+        rows = [("workspace", "%s (%s)" % (ws, driver.info(ws)))]
+        if self.verb == "webkit":
+            _, _, jobs = st.size(WEBKIT_JOBS)
+            slotdir, image = images.slot_dir(ws, o["--slot"], self.env), self.image(driver, ws)
+            try:
+                held = "slot '%s' holds %s -- rebuilt incrementally in the same build directory" % (
+                    o["--slot"], slot_doc(os.path.join(slotdir, "slot.json")).get("commit", "")[:12])
+            except (OSError, ValueError):
+                held = "none"
+            return ("build a WebKit slot for image %s (builder: buildroot)" % self.name, rows + [
+                ("commit", o["--commit"]), ("slot", "%s -> %s" % (o["--slot"], slotdir)),
+                ("image", image if self.here.exists(image) else "NOT BUILT -- the real run refuses here (wk sysimage build %s)" % self.spec),
+                ("toolchain", "the image's own, options from the tree's WPEWEBKIT_CONF_OPTS, plus --build-id per slot"),
+                ("jobs", "-j%d (memory-sized at %d MB/job)" % (jobs, task.MB_PER_JOB)), ("existing", held)])
+        _, _, jobs = st.size(IMAGE_JOBS)
+        dl, cc = self.cache("dl"), self.cache("ccache")
+        return ("build image %s (builder: buildroot)" % self.name, rows + [
+            ("for machine", "%s (%s)" % (p["IMG_MACHINE"] or "none", p["IMG_ARCH"] or "?")),
+            ("tree", "%s @ %s" % (p["BR_TREE_URL"], p["BR_TREE_COMMIT"] or p["BR_TREE_BRANCH"] or "HEAD")),
+            ("defconfig", p["BR_DEFCONFIG"] + (" (plus this repo's BR2_EXTERNAL)" if p["BR_EXTERNAL"] == "1" else "")),
+            ("host image", "%s + %s" % (self.host_image()[0], self.SPEC)),
+            ("jobs", "-j%d (memory-sized at %d MB/job)" % (jobs, task.MB_PER_JOB)),
+            ("overlay", p["BR_OVERLAY_TAILSCALE"] or "none -- this image would join no tailnet"),
+            ("wifi", "wk-wifi-join; the card carries the credential" if self.wifi() else "none -- %s has a cable" % (p["IMG_MACHINE"] or "this board")),
+            ("kernel", "%s, pinned (%s)" % (p["BR_KERNEL_RELEASE"], os.path.basename(p["BR_KERNEL_DEB_URL"]))
+             if p["BR_KERNEL_DEB_URL"] else "built from the tree by buildroot"),
+            ("DL_DIR", "%s (%s) -- BR2_DL_DIR in the container" % (dl, self.du(dl))),
+            ("CCACHE_DIR", "%s (%s) -- BR2_CCACHE_DIR in the container" % (cc, self.du(cc))),
+            ("output", "in the workspace, under output/images")])

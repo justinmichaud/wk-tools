@@ -13,13 +13,12 @@ from wk.boot.driver import Channel, disk_of, part
 from wk.kv import ConfError, kv
 from wk.machine import HAVE, is_macos
 from wk.store import Store
-from wk.sysimage import disk
+from wk.sysimage import disk, task
 from wk.sysimage import ls as lsmod
 
 CARD_PRIV = disk.CARD_PRIV
 FILTERS = ((".xz", "xz -dc"), (".zst", "zstd -dc"), (".gz", "gzip -dc"))
 ROOT_WORDS = {"mmc": "an SD card (/dev/mmcblk*)", "usb": "a USB or SCSI disk (/dev/sd*)", "nvme": "an NVMe disk"}
-UPDATE = "Remedy, from a terminal on %s: update its wk-tools checkout, then  ./setup --stage quiesce"
 REPORT = ("stream_bytes", "stream_sha", "boot_bytes", "boot_sha", "root_bytes", "root_sha")
 
 # stdin to stdout unchanged; the count and sha256 go to fd 3 in one write, so they cannot interleave with the helper's.
@@ -131,7 +130,6 @@ def tailnet_name(fl, name, role):
 
 
 def unit(root, name, **lines):
-    """boot/firstboot/<name> verbatim; its parameters are KEY=value lines in the file's last section."""
     with open(os.path.join(str(root), "boot", "firstboot", name)) as f:
         return f.read() + "".join("%s=%s\n" % kv for kv in lines.items())
 
@@ -194,11 +192,9 @@ class Write:
         self.root, self.env, self.machine, self.store = str(root), env, machine, store
         self.fleet = fleet.Fleet(self.root, env)
         self.rand = rand or (lambda: os.urandom(4).hex())
-        self.plan = []
         self.conf = self.ch = self.drv = self.disks = None
 
     def step(self, sentence):
-        self.plan.append(sentence)
         if act.dry_run():
             act.log("  would " + sentence)
             return True
@@ -329,10 +325,6 @@ class Write:
         """tailscaled's state, kept aside by the helper and put back after: the new system comes up as the old node."""
         if self.step("keep %s's bench tailnet identity aside, if it holds one" % dev):
             return False
-        if "tailnet-keep=yes" not in self.card("status", mutates=False).out:
-            act.warn("%s's card helper cannot keep a node's tailnet identity across a rewrite, so the new system\n"
-                     "  joins fresh. A rebuilt rescue has the current helper." % self.c("name"))
-            return False
         r = self.card("tailnet-save", dev)
         out = said(r)
         if not r.ok:
@@ -389,12 +381,8 @@ class Write:
         if self.step(sentence):
             return
         r = self.card(*verb, mutates=mutates)
-        if r.ok:
-            return
-        if "usage: wk-card-priv" in r.out + r.err:
-            act.die("%s's card helper is older than this checkout: it has no '%s' verb.\n    %s"
-                    % (self.c("name"), verb[0], UPDATE % self.c("name")))
-        act.die("%s\n%s" % (why, indent(said(r))))
+        if not r.ok:
+            act.die("%s\n%s" % (why, indent(said(r))))
 
     def retarget(self, dev):
         if self.step("retarget %s's root= to a PARTUUID of %s, so it boots from any device" % (dev, dev)):
@@ -447,9 +435,6 @@ class Write:
         if not r.ok:
             act.die("could not install the fleet units on %s:\n%s\n    A run that wedges the board would not hand it back."
                     % (dev, indent(out)))
-        if "no systemd on this disk; nothing installed" in out:
-            act.die("%s's card helper predates BusyBox init scripts, so this card has no self-return or self-disarm.\n"
-                    "    %s (on a rescue, rebuild the rescue image), and write again." % (self.c("name"), UPDATE % self.c("name")))
         if "neither systemd nor /etc/init.d" in out:
             act.warn("this image has neither systemd nor a BusyBox init, so the self-return watchdog and the self-disarm\n"
                      "  were NOT installed: a run that wedges the board will not hand it back.")
@@ -459,16 +444,9 @@ class Write:
         if self.step("check that every file a %s's firmware asks for resolves on %s" % (machine, dev)):
             return
         r = self.card("boot-check", dev, dtb, mutates=False)
-        if r.ok:
-            return
-        out = said(r)
-        if "no boot-file checker" in out:
-            act.warn("%s's boot files were NOT checked: %s's card helper has no boot-file checker beside it\n"
-                     "  (./setup --stage quiesce installs it; a rebuilt rescue carries it)." % (dev, self.c("name")))
-            return
-        act.die("%s is missing files a %s needs to reach its kernel:\n\n%s\n\n    Firmware that cannot find a kernel halts "
-                "and does not come back. Rebuild the image, or check its\n    config.txt against its boot partition."
-                % (dev, machine, indent(out, "      ")))
+        if not r.ok:
+            act.die("%s's boot files could not be shown to reach a %s's kernel:\n\n%s\n\n    Firmware that cannot find a kernel "
+                    "halts and does not come back." % (dev, machine, indent(said(r), "      ")))
 
     def joins(self, dev, verb, what, yes, no):
         """Whether the image carries a first-boot joiner: a guess either way strands a card or a credential."""
@@ -646,13 +624,12 @@ class Write:
         else:
             wifi = "NO -- %s is not on WiFi; the real write refuses here (no --force)" % disk_machine
         key = tailnet.Fleet(self.root, self.env, self.machine).key_present()
-        act.log("would write\n  image     %s\n  onto      %s attached to %s\n  identity  %s\n  as        %s\n  tailnet   %s\n"
-                "  wifi      %s" % (
-                    src, dev, disk_machine, image_id(name, ""),
-                    "a fleet system: identity marker, driving key, units, retargeted root" if fleet_edit else
-                    "as built (%s); identity marker and driving key only" % (p.get("IMG_BUILDER") or "unknown image preset"),
-                    "auth key present" if key else "NO auth key -- the real write refuses here (wk key set tailnet)", wifi))
-        act.log("then, in order:")
+        task.show("write, in order:", [
+            ("image", src), ("onto", "%s attached to %s" % (dev, disk_machine)), ("identity", image_id(name, "")),
+            ("as", "a fleet system: identity marker, driving key, units, retargeted root" if fleet_edit else
+             "as built (%s); identity marker and driving key only" % (p.get("IMG_BUILDER") or "unknown image preset")),
+            ("tailnet", "auth key present" if key else "NO auth key -- the real write refuses here (wk key set tailnet)"),
+            ("wifi", wifi)], did="")
 
     def after(self, dev, disk_machine):
         if base(dev) == self.c("device"):
