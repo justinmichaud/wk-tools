@@ -999,10 +999,12 @@ exist.
      (`admin/wk-boot-priv` from the host, `autorun.leave` from the bench account's NOPASSWD sudo). The
      bash version's own notes say a bare `bless --setBoot` exited 0 having done nothing on this Mac, and
      name the credentialed form `--user <owner> --stdinpass`; `machines/mbp.conf` says the selection is
-     signed with a volume owner's credential, and the helper says root alone suffices. Neither has been
-     measured. One `wk boot mbp` on the host answers the arm; one `leave` answers the return. If root
-     alone does not take, the owner's password is a secret of the keyring (`wk key set mac-owner`),
-     spent only inside the helper's `boot-volume`/`boot-host` verbs and the bench install's `leave`.
+     signed with a volume owner's credential. Measured 2026-10-22 07:07 MST (`wk boot mbp` on tolken): root's
+     `bless --mount "/Volumes/WK Bench" --setBoot` printed `Password for justinmichaud:` with no credential to
+     give, exited 0, and the readback named 'WK Bench'; the reboot at 07:09 came up in the host install with
+     the firmware naming it. Root alone does not take on Apple Silicon: the owner's password is a secret of
+     the keyring (`wk key set mac-owner`), spent only inside the helper's `boot-volume`/`boot-host` verbs and
+     the bench install's `leave`, and the arm's readback must be the firmware's answer, not bless's.
    - After the return the host install stops at its login window. Zero-touch needs the host reachable
      over the tailnet there, which depends on FileVault being off on the host volume and on tailscale
      running as a daemon rather than the logged-in user's app; `wk doctor mbp` must read both
@@ -1338,7 +1340,8 @@ decides is a row; one still open is listed under "Decisions for the user".
 
 Decisions are asked as questions, and their answers are recorded under "Decisions taken".
 
-- Zero-touch Mac nights: the arm and the return bless are measured at the end of 2026-10-21's night; if
-  the host install cannot be reached at its login window, the return stays the morning's `wk boot mbp
+- Zero-touch Mac nights: the arm is measured (above): root's bless does not take, so the owner's credential
+  goes into the keyring as `mac-owner` and the helper spends it -- is storing it there acceptable? If the host
+  install cannot be reached at its login window after a return, the return stays the morning's `wk boot mbp
   --back`. Detection under 0.1% and the 8-hour budget stay rows (`live ab.resolution[mbp]`,
   `unit bench.variance_pairing`).
