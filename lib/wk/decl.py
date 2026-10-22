@@ -42,6 +42,7 @@ class Command:
     lifecycle: bool = False
     here: bool = False
     forward: bool = True
+    session: bool = False
     outside: bool = False
     broker: bool = False
     needs: tuple = ()

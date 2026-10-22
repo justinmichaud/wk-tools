@@ -288,7 +288,8 @@ class PlaceSteps:
         self.assertIsNotNone(found, "the probe in '%s' printed no %s line (exit %d):\n%s" % (self.ws, tag, r.rc, tail(r.out)))
         return found
 
-    def agent_pids(self, ws):
+    @staticmethod
+    def agent_pids(ws):
         return [p for p in wk("enter", ws, "--", "sh", "-c", AGENT_SCAN, timeout=120).out.split() if p.isdigit()]
 
     def need_push_place(self):
@@ -306,6 +307,9 @@ class PlaceSteps:
                 p.wait(timeout=60)
             except subprocess.TimeoutExpired:
                 p.kill()
+            deadline = time.monotonic() + 120   # the far wk ends its agents after job.kill's grace, once ssh hangs up
+            while time.monotonic() < deadline and cls.agent_pids(cls.ws):
+                time.sleep(3)
 
     def start_background_claude(self):
         """A claude session that outlives the calls made about it, the way a person's does. Not `sleep`: Claude Code

@@ -34,7 +34,7 @@ from wk.places import Registry
 from wk.workspace import require_name
 
 ROOT = images.root()
-COMMAND = Command(name="required", ready=True, tail="all", group="workspaces", subs={"claude": {}, "pi": {}})
+COMMAND = Command(name="required", ready=True, tail="all", session=True, group="workspaces", subs={"claude": {}, "pi": {}})
 GH_LOGIN = 'test -e "$HOME/.config/gh/hosts.yml" || { command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; }'
 
 

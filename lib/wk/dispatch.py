@@ -269,9 +269,9 @@ def vm_argv(inv, argv):
             raise Exit(0)
         start_podman_machine(Local(), inv.cmd, tty())
     line = registry().load("container").wk_cmd([inv.cmd, *argv], os.environ)
-    if tty():
+    if tty() or inv.command.session:   # a session's far end needs a pty: the client's death is then its SIGHUP
         opts, dest = places.podman_vm_route(rec)
-        return ["ssh", "-t", *opts, dest, line]
+        return ["ssh", "-tt" if inv.command.session else "-t", *opts, dest, line]
     return Ssh.podman(MACHINE).argv(line)
 
 
@@ -300,8 +300,8 @@ def delegate_driver(place):
     return t if t.delegates() else None
 
 
-def delegate_run(driver, cmd, args, readonly=False):
-    exec_flushed(driver.hand_over(cmd, args, tty=tty(), readonly=readonly))
+def delegate_run(driver, cmd, args, readonly=False, session=False):
+    exec_flushed(driver.hand_over(cmd, args, tty="force" if session else tty(), readonly=readonly))
 
 
 def check_needs(cmd, t, machine=None):
@@ -453,7 +453,7 @@ def main(argv):
         inv.place = resolve_place(a, name, place if derived else "")
         far = t.name != "none" and not in_vm() and not t.here and not t.lifecycle and delegate_driver(inv.place)
         if far:
-            delegate_run(far, cmd, inv.argv, readonly=t.readonly)
+            delegate_run(far, cmd, inv.argv, readonly=t.readonly, session=t.session)
         if inv.vm_side() and t.forward and not t.here:
             exec_flushed(vm_argv(inv, inv.argv))
     check_needs(cmd, t)
