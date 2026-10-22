@@ -1155,7 +1155,7 @@ exist.
    through `Machine.read_tree`, which refuses a link, and builds the zip here, recording where it
    went in the task (`unit test_bench_results`, `killpoints[bench export]`).
    `wk rm` refuses a workspace holding a task no readable export holds as it
-   is now, and `--force` crosses it (`unit test_rm_results`); `wk doctor`
+   is now, and `--force` crosses it (`unit test_rm_final_state`); `wk doctor`
    names each workspace's `bench/` as backed-up beside the store's.
 7. **The cut.** The architecture above, landed package by package. Each
    sub-step ports one package to its contract, deletes what it replaces,
@@ -1163,10 +1163,10 @@ exist.
    leaves lint and unit green; lint holds the package's budget from the
    sub-step that lands it. ∥ marks what runs concurrently on disjoint files.
 
-   7.1 **Fakes and the test tables.** `tests/fakes.py` (the one World, from
-     `machine.Fake`, `FakeClock`, `Exited`, `Killed`), `tests/killpoints.py`
-     as the table-driven kill-point/dry-run/final-state module, one
-     conformance mixin per contract. Everything after depends on it.
+   7.1 **Fakes and the test tables.** *Landed 2026-10-22* (`tests/fakes.py`: the one `World` and `FlowTest`;
+     `tests/test_killpoints.py` over `tests/killpoints.py`, one row per mutating command, each row a kill-after-any-
+     effect test and a dry-run-equals-wet-run test; one conformance mixin per contract: Machine, Driver, bench
+     System, boot Channel, image Builder, daemons renderer).
    7.2 ∥ **The command table and the dispatcher.** *Landed 2026-10-22* (`decl.Command`/`Opt`; every `cmd/<name>`
      is a docstring, a table and `main(args, inv)`; one importlib load per command, in process; help, completion
      and the refusals come from the table; a child forward relays signals). Rows: dispatcher 769 of 800, cmd
@@ -1199,11 +1199,14 @@ exist.
      service, injector and broker on the host, in the podman machine and in a guest; `guest.py` is start, boot,
      forwards and admission; `machine_cmd` is a kind table). Row guest: 2,387 of 900. Owed: the in-guest
      LaunchDaemons of `vm/provision-base.sh` as rows (needs a base rebuild to test).
-   7.11 **Tests by cluster.** After each package lands: the push service,
-     credential, dispatcher, status, A/B, bench-run, boot and lifecycle
-     clusters each to one module; `test_owed_live` generated.
-   7.12 **Budgets in lint.** The per-package table above as a lint rule,
-     failing on the first package over.
+   7.11 **Tests by cluster.** *Landed 2026-10-22* (every cluster to its subsystem's module; `tests/test_lint.py`
+     is the one rule table, `-k <rule>` selecting a row; `tests/test_owed_live.py` is generated at import from this
+     file's Owed table, one stub per `live`/`unit` name no test holds). The tests rows sum to 40.2k against 15k:
+     what remains is distinct behaviour at about twelve lines a test; the budget is met by shorter tests over
+     shared answer tables, or by scope the user names.
+   7.12 **Budgets in lint.** *Landed 2026-10-21* (`tests/test_lint_budgets.py`: one owed test per row of the
+     table above and one for the sums, failing loudly once a row is under budget; `python3 -m
+     tests.test_lint_budgets` prints the rows).
 8. Delete this file.
 
 ## Owed
@@ -1297,7 +1300,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | `wk machine setup <board>` takes a board from a blank card to an answering tailnet name in `pi-hosts` and back, `wk machine probe` finds it when on, and a workspace reaches only that address, on port 22 | 5 | `live pi.setup[<board>]` |
 | `wk machine setup <box>` leaves a build box in one shape (zsh, or a named warning), and a cleanup accepted at the prompt is removed | 5 | `live machine_cmd.setup[<box>]` |
 | `wk machine setup <box>` installs the pinned node into the box user's `~/.local` without sudo, and `wk new --on <box>` then installs pi there | 5 | `live machine_cmd.node[buildbox4]` |
-| A board is reached by tailnet name alone: no MAC, `.local`, address stanza, `HostKeyAlias` or ProxyJump remains once both boards join by image, and the bench install is reached at its own name | 5 | `lint.no_addresses` (tests/test_lint_no_addresses.py; the tree check is owed: the board and bridge confs' MACs, the bridges' `HostKeyAlias`) |
+| A board is reached by tailnet name alone: no MAC, `.local`, address stanza, `HostKeyAlias` or ProxyJump remains once both boards join by image, and the bench install is reached at its own name | 5 | `lint.no_addresses` (tests/test_lint.py; the tree check is owed: the board and bridge confs' MACs, the bridges' `HostKeyAlias`) |
 | An image build runs from a Tart guest and the image reaches the host for writing | 5 | `live sysimage.build[vm]` |
 | A task's results live in its workspace, `wk bench ls` names them wherever they are, the task restarts from where it stopped on any machine, and `wk doctor` names the results backed-up | 6 | `unit test_bench_results`, `killpoints[bench export]` (tests/test_bench_results.py) |
 | On a macOS host a board A/B's run-benchmark and page server run in the podman VM and reach the boards | 5 | `live bench.vm_reaches_boards` |
