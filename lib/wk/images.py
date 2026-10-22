@@ -10,8 +10,7 @@ from wk.store import Store
 FIELDS = {
     "IMG_BUILDER": "", "IMG_MACHINE": "", "IMG_ARCH": "", "IMG_HOSTNAME": "",
     "IMG_WATCHDOG": "300",
-    "YOC_BRANCH": "", "YOC_TARGET": "", "YOC_IMAGE": "", "YOC_RM_WORK": "",
-    "YOC_CHROMIUM": "1", "YOC_REMOTE": "origin", "YOC_LOCAL_LAYER": "1",
+    "YOC_BRANCH": "", "YOC_TARGET": "", "YOC_IMAGE": "", "YOC_REMOTE": "origin",
     "YOC_PORT_TARGET_FROM": "", "YOC_MACHINE": "", "YOC_MULTILIB": "", "YOC_MULTILIB_TUNE": "",
     "CFG_PROJECT": "", "CFG_RELEASE": "", "CFG_BRANCH": "", "CFG_REMOTE": "", "CFG_NEEDS": "",
     "BR_TREE_URL": "", "BR_TREE_BRANCH": "", "BR_TREE_COMMIT": "", "BR_DEFCONFIG": "",
